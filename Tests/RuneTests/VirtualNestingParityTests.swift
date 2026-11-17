@@ -223,6 +223,32 @@ struct VirtualNestingParityTests {
         }
     }
 
+    @Test("a single row/mark jump mounts an offscreen row and lands on its scoped descendant")
+    func scrollKeyToLandsScopedDescendant() {
+        let rt = Runtime<S>(state: S(), viewport: Vec2(240, 300), pixelScale: 1.0) { _, _ in
+            col().key("scroll").size(240, 300).scrollY().child(
+                col().key("list").w(240).virtualRows(
+                    count: 1000, estimatedRowHeight: 30, key: { _, i in "r\(i)" },
+                    build: { _, _ in
+                        col().w(240).child(el().size(240, 10)).child(
+                            col().key("inner").child(el().key("mark").size(240, 20))
+                        )
+                    }
+                )
+            )
+        }
+        _ = rt.frame(at: 0)
+        #expect(rt.element(byKey: "r600") == nil)
+        rt.update(at: 0.02) { _, tx in tx.scrollKeyTo("r600/mark", at: 12) }
+        _ = rt.frame(at: 0.03)
+        let row = rt.element(byKey: "r600")
+        #expect(row != nil)
+        if let row {
+            let vp = rt.element(byKey: "scroll")!.target
+            #expect(abs(row.target[1] + 10 - vp[1] - 12) < 0.5)
+        }
+    }
+
     @Test("scrollKeyTo for a key no list holds leaves the viewport where it was")
     func scrollKeyToUnknownKey() {
         let rt = transcript(stick: false)

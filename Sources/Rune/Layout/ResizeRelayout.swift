@@ -249,7 +249,7 @@ extension Runtime {
             let est = max(1, el.virtualEstimate ?? 40)
             let count = vState.lastKeys.count
             let mounted = vState.lastMountedRange
-            let (prefix, total) = vState.computeOffsets(keys: vState.lastKeys, estimated: est)
+            let (prefix, total) = vState.computeOffsets(estimated: est)
             let lo = max(0, min(count, mounted.lowerBound))
             let hi = max(lo, min(count, mounted.upperBound))
             let newTopH = lo > 0 ? prefix[lo] : 0
@@ -298,7 +298,7 @@ extension Runtime {
             let vpH = max(1, scrollViewportSizes[scrollPath]?.y ?? viewport.y)
             let stickyPin = nodeByPath[scrollPath].map { flatNodes[$0].el.layout.stickBottom } == true
                 && wasPinnedToBottom.contains(scrollPath)
-            let (prefix, total) = vState.computeOffsets(keys: vState.lastKeys, estimated: est)
+            let (prefix, total) = vState.computeOffsets(estimated: est)
             let scrollY = stickyPin && !vState.nested ? max(0, total - vpH) : (scrollOffsets[scrollPath]?.y ?? 0)
             let (offsetY, pinned) = vState.at(scrollY, pinned: stickyPin, total: total)
             if vState.needsWindow(offset: offsetY, viewport: vpH, prefix: prefix, count: vState.lastKeys.count, pinned: pinned) {
@@ -328,7 +328,7 @@ extension Runtime {
             let vpH = scrollIdx.map { max(1, pass.nodes[$0].targetRect.height) } ?? max(1, viewport.y)
             let stickyPin = scrollIdx.map { pass.nodes[$0].el.layout.stickBottom } == true
                 && wasPinnedToBottom.contains(scrollPath)
-            let (prefixBefore, totalBefore) = vBefore.computeOffsets(keys: vBefore.lastKeys, estimated: est)
+            let (prefixBefore, totalBefore) = vBefore.computeOffsets(estimated: est)
             let oldOffsetY = scrollOffsets[scrollPath]?.y ?? 0
             // `anchor_virtuals`: the list's own offset; one pinned, or nested and wholly above the
             // viewport's top, anchors nothing (`VirtualList::locate`).
@@ -357,7 +357,7 @@ extension Runtime {
                 Self.measureVirtualPlacement(&vState, listIdx: lIdx, scrollIdx: sIdx, nodes: pass.nodes)
                 tempLists[listPath] = vState
             }
-            let (prefix, total) = vState.computeOffsets(keys: vState.lastKeys, estimated: est)
+            let (prefix, total) = vState.computeOffsets(estimated: est)
             let scrollY: Float
             if info.stickyPin {
                 scrollY = vState.nested ? info.oldOffsetY : max(0, total - info.vpH)

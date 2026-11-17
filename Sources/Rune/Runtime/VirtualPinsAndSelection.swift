@@ -107,11 +107,6 @@ public struct VirtualListBookkeeping: Sendable {
     public static let indexedEdge: Float = 1.75
     public static let indexedBudget: Float = 0.5
 
-    private struct Row: Sendable {
-        var index: Int
-        var height: Float?
-    }
-
     public struct Anchor: Sendable, Equatable {
         public var key: String
         public var top: Float
@@ -122,8 +117,8 @@ public struct VirtualListBookkeeping: Sendable {
         }
     }
 
-    public private(set) var keys: [String] = []
-    private var rows: [String: Row] = [:]
+    public var keys: [String] { measurements.places.keys }
+    private var measurements = VirtualRowMeasurements()
     private var born: [UInt64] = []
     private var keysFresh: Bool = false
     private var held: Bool = false
@@ -153,15 +148,15 @@ public struct VirtualListBookkeeping: Sendable {
     public init() {}
 
     public func height(forKey key: String) -> Float {
-        rows[key]?.height ?? estimate
+        measurements[key] ?? estimate
     }
 
     public func has(_ key: String) -> Bool {
-        rows[key] != nil
+        indexOf(key) != nil
     }
 
     public func indexOf(_ key: String) -> Int? {
-        rows[key]?.index
+        measurements.places.index(of: key)
     }
 
     public mutating func mountsQuietly(index i: Int, commit: UInt64) -> Bool {
@@ -190,60 +185,37 @@ public struct VirtualListBookkeeping: Sendable {
         commit: UInt64,
         offset: Float?
     ) -> Anchor? {
-        var newRows: [String: Row] = [:]
-        newRows.reserveCapacity(newKeys.count)
-        var newBorn: [UInt64] = []
-        newBorn.reserveCapacity(newKeys.count)
-        var newHeights: [Float] = []
-        newHeights.reserveCapacity(newKeys.count)
-
-        var resolvedKeys: [String] = []
-        resolvedKeys.reserveCapacity(newKeys.count)
-        var counts: [String: Int] = [:]
-        for (index, rawKey) in newKeys.enumerated() {
-            var key = rawKey
-            if newRows[key] != nil {
-                var suffix = counts[rawKey, default: 1]
-                var candidate = "\(rawKey)#dup\(suffix)"
-                while newRows[candidate] != nil {
-                    suffix += 1
-                    candidate = "\(rawKey)#dup\(suffix)"
-                }
-                counts[rawKey] = suffix + 1
-                key = candidate
-            } else {
-                counts[rawKey] = 1
-            }
-            resolvedKeys.append(key)
-            let old = rows[key]
-            let h = old?.height
-            newBorn.append(old.map { born[$0.index] } ?? commit)
-            newHeights.append(h ?? estimate)
-            newRows[key] = Row(index: index, height: h)
+        var places = VirtualRowPlaces(newKeys)
+        if places.hasDuplicates {
+            var repaired = newKeys
+            KeyDiagnostics.renameDuplicates(&repaired)
+            places = VirtualRowPlaces(repaired)
+        }
+        let newBorn = places.keys.map { key in
+            indexOf(key).map { born[$0] } ?? commit
         }
 
         let computedAnchor: Anchor?
         if let off = offset,
-           let candidate = firstVisible(offset: off, keep: { newRows[$0] != nil }),
+           let candidate = firstVisible(offset: off, keep: { places.index(of: $0) != nil }),
            candidate.top < off + viewport {
             computedAnchor = candidate
         } else {
             computedAnchor = nil
         }
 
-        if resolvedKeys != keys {
+        if places.keys != keys {
             keysFresh = true
             if offset != nil {
                 held = computedAnchor != nil
             } else {
-                held = keys.contains { newRows[$0] != nil }
+                held = keys.contains { places.index(of: $0) != nil }
             }
         }
 
-        rows = newRows
+        measurements.replacePlaces(places)
         born = newBorn
-        keys = resolvedKeys
-        rowHeights = newHeights
+        rowHeights = measurements.heights.map { $0 ?? estimate }
         rebuildSums()
         reportedVisible = nil
         return computedAnchor
@@ -252,7 +224,7 @@ public struct VirtualListBookkeeping: Sendable {
     public mutating func setEstimate(_ newEstimate: Float) {
         if newEstimate != estimate {
             estimate = newEstimate
-            rowHeights = keys.map { rows[$0]?.height ?? newEstimate }
+            rowHeights = measurements.heights.map { $0 ?? newEstimate }
             rebuildSums()
         }
     }
@@ -265,10 +237,8 @@ public struct VirtualListBookkeeping: Sendable {
     }
 
     public mutating func setHeight(key: String, height newHeight: Float) {
-        guard var row = rows[key] else { return }
-        row.height = newHeight
-        rows[key] = row
-        let i = row.index
+        guard let i = indexOf(key) else { return }
+        measurements[key] = newHeight
         if rowHeights[i] != newHeight {
             rowHeights[i] = newHeight
             rebuildSums()
@@ -403,7 +373,7 @@ public struct VirtualListBookkeeping: Sendable {
     private func anchorAt(offset: Float) -> Anchor? {
         let vis = visibleRange(offset: offset, pinned: false)
         for i in vis {
-            if rows[keys[i]]?.height != nil {
+            if measurements.heights[i] != nil {
                 return Anchor(key: keys[i], top: padTop + sumsCache[i])
             }
         }

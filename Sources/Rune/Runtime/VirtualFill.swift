@@ -127,7 +127,6 @@ internal struct RuntimeVirtualListState: Sendable {
     static let indexedBudgetMultiplier: Float = 0.5
     static let nonIndexedEdgeMultiplier: Float = 0.5
     static let pinnedRows: Int = 32
-    static let maxCachedKeys: Int = 250_000
 
     struct VirtualMountedSnapshot: Equatable, Sendable {
         var mountedKeys: [String]
@@ -138,8 +137,21 @@ internal struct RuntimeVirtualListState: Sendable {
         var padBottom: Float
     }
 
-    var measuredByKey: [String: Float] = [:]
-    var lastKeys: [String] = []
+    var measuredByKey = VirtualRowMeasurements()
+    private(set) var rowPlaces = VirtualRowPlaces<String>([])
+
+    var lastKeys: [String] {
+        get { rowPlaces.keys }
+        set { replaceRowPlaces(VirtualRowPlaces(newValue)) }
+    }
+
+    mutating func replaceRowPlaces(_ places: VirtualRowPlaces<String>) {
+        rowPlaces = places
+        // On a layout retry the prior window is restored along with the new measurements.
+        if places.keys != measuredByKey.places.keys {
+            measuredByKey.replacePlaces(places)
+        }
+    }
     var lastKeysVersion: UInt64? = nil
     var lastMountedRange: Range<Int> = 0..<0
     var lastVisibleRange: Range<Int>? = nil
@@ -201,24 +213,22 @@ internal struct RuntimeVirtualListState: Sendable {
 
     /// The rows above row `end`, at their measured or estimated heights (`VirtualList::prefix`).
     func prefix(_ end: Int, estimated: Float) -> Float {
-        var y: Float = 0
-        for key in lastKeys.prefix(max(0, end)) {
-            y += rowHeight(forKey: key, estimated: estimated)
-        }
-        return y
+        let count = min(lastKeys.count, max(0, end))
+        return measuredByKey.heights.prefix(count).reduce(0) { $0 + ($1 ?? max(1, estimated)) }
     }
 
     func rowHeight(forKey key: String, estimated: Float) -> Float {
         measuredByKey[key] ?? max(1, estimated)
     }
 
-    func computeOffsets(keys: [String], estimated: Float) -> (prefix: [Float], total: Float) {
+    func computeOffsets(estimated: Float) -> (prefix: [Float], total: Float) {
         var prefix: [Float] = []
-        prefix.reserveCapacity(keys.count + 1)
+        prefix.reserveCapacity(lastKeys.count + 1)
         var y: Float = 0
         prefix.append(0)
-        for k in keys {
-            y += rowHeight(forKey: k, estimated: estimated)
+        let fallback = max(1, estimated)
+        for height in measuredByKey.heights {
+            y += height ?? fallback
             prefix.append(y)
         }
         return (prefix, y)
@@ -441,8 +451,5 @@ internal struct RuntimeVirtualListState: Sendable {
         return (need.wantedMore, need.wantedMore ? need.missing : 0)
     }
 
-    mutating func pruneMeasurements(keeping activeKeys: Set<String>) {
-        guard measuredByKey.count > activeKeys.count * 2 + 256 else { return }
-        measuredByKey = measuredByKey.filter { activeKeys.contains($0.key) }
-    }
+
 }
