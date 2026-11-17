@@ -1,0 +1,82 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune browser clocks and native diagnostics boundaries</title>
+<style>#host { width:96px; height:48px } canvas { width:100%; height:100% }</style>
+<div id="host"><canvas></canvas></div>
+<pre id="result">Starting…</pre>
+<script type="module">
+import { instantiateRuneBrowser, mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+import { WASI, ConsoleStdout, OpenFile, File, PreopenDirectory } from '/__rune/shim/index.js';
+
+const lines = [];
+const wasi = new WASI(['diagnostics-probe'], ['RUNE_RELAUNCH_AFTER=42', 'RUNE_HEADLESS_WAIT=10'], [new OpenFile(new File([])),
+    ConsoleStdout.lineBuffered(line => lines.push(line)), ConsoleStdout.lineBuffered(console.error), new PreopenDirectory("/presets", [])]);
+const wallNs = 1_700_000_000_123_000_000n;
+let instance, app, restoreSubmission;
+const originalPerformance = Object.getOwnPropertyDescriptor(window, 'performance');
+const result = document.querySelector('#result');
+function check(condition, message) { if (!condition) throw Error(message); }
+
+try {
+    const imports = { ...wasi.wasiImport, clock_time_get(id, precision, address) {
+        if (id !== 0) return wasi.wasiImport.clock_time_get(id, precision, address);
+        new DataView(instance.exports.memory.buffer).setBigUint64(address, wallNs, true);
+        return 0;
+    } };
+    ({ instance } = await instantiateRuneBrowser(fetch('/__rune/diagnostics.wasm'),
+        { wasi_snapshot_preview1: imports }, { fontDirectory: null }));
+    wasi.initialize(instance);
+    const api = instance.exports;
+    const host = document.querySelector('#host');
+    const canvas = host.querySelector('canvas');
+    const context = new OffscreenCanvas(1, 1).getContext('2d');
+    let pixel;
+    const submit = GPUQueue.prototype.submit;
+    GPUQueue.prototype.submit = function (...args) {
+        const result = submit.apply(this, args);
+        context.drawImage(canvas, 0, 0, 1, 1, 0, 0, 1, 1);
+        pixel = Array.from(context.getImageData(0, 0, 1, 1).data);
+        return result;
+    };
+    restoreSubmission = () => { GPUQueue.prototype.submit = submit; };
+    app = mountRuneBrowser(canvas, instance, { backend: 'webgpu', resizeTo: host });
+    await app.ready;
+    await new Promise(requestAnimationFrame);
+    const renderer = app.renderer;
+    check(pixel?.every((v, i) => Math.abs(v - [10, 80, 142, 255][i]) <= 1), 'GPU pixel: ' + pixel);
+
+    const start = performance.now();
+    api.rune_probe_diagnostics();
+    const diagnosticsMs = performance.now() - start;
+    check(diagnosticsMs < 5000, 'Native attach delay blocked the browser for ' + diagnosticsMs + ' ms');
+    check(lines.includes('diagnostics passed'), 'Swift diagnostic checks: ' + lines.join('\n'));
+
+    // Rust seeds a UInt64 xorshift with the epoch nanoseconds. Its top 24 bits fit in Float exactly.
+    let seed = wallNs | 1n;
+    const samples = [];
+    for (let i = 0; i < 4; i++) {
+        seed = BigInt.asUintN(64, seed ^ (seed << 13n));
+        seed ^= seed >> 7n;
+        seed = BigInt.asUintN(64, seed ^ (seed << 17n));
+        samples.push(Number(seed >> 40n));
+    }
+    api.rune_probe_knob_sequence();
+    check(lines.includes('knobs ' + samples.join(',')), 'Seeded knob sequence: ' + lines.join('\n'));
+
+    let tick = performance.now() + 100;
+    Object.defineProperty(window, 'performance', { value: { now: () => (tick += 0.25) }, configurable: true });
+    const elapsed = api.rune_probe_frame_ms();
+    check(Math.abs(elapsed - 0.25) < 0.00001, 'Monotonic frame measurement: ' + elapsed);
+    tick = 2 ** 64;
+    const saturated = api.rune_probe_frame_ms();
+    check(saturated === 0, 'Saturated clock tick: ' + saturated);
+    result.textContent = 'PASS ' + JSON.stringify({ renderer, pixel, samples, elapsed, saturated, diagnosticsMs, userAgent: navigator.userAgent });
+} catch (error) {
+    result.textContent = 'FAIL ' + error.message;
+    throw error;
+} finally {
+    if (originalPerformance) Object.defineProperty(window, 'performance', originalPerformance);
+    restoreSubmission?.();
+    app?.dispose();
+}
+</script>

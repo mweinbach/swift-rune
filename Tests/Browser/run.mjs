@@ -12,7 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const { values: args } = parseArgs({ options: {
     chrome: { type: 'string' }, wasm: { type: 'string' }, 'image-wasm': { type: 'string' }, 'image-page-wasm': { type: 'string' },
-    'wake-wasm': { type: 'string' }, 'spell-wasm': { type: 'string' }, 'sketch-wasm': { type: 'string' }, 'wasi-shim': { type: 'string' },
+    'wake-wasm': { type: 'string' }, 'diagnostics-wasm': { type: 'string' }, 'spell-wasm': { type: 'string' }, 'sketch-wasm': { type: 'string' }, 'wasi-shim': { type: 'string' },
     angle: { type: 'string' }, 'device-scale': { type: 'string' }, fixture: { type: 'string' },
     webgpu: { type: 'boolean' }, 'www-wasm': { type: 'string' }, 'table-wasm': { type: 'string' },
     'tree-wasm': { type: 'string' }, 'compare-accessibility': { type: 'boolean' }
@@ -22,7 +22,7 @@ const resources = resolve(fixtures, '../../Sources/Rune/Resources');
 const shaderTypes = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
     '.wasm': 'application/wasm', '.ttf': 'font/ttf' };
 const largeViews = ['table', 'tree'].filter(name => args[name + '-wasm']);
-const reactors = [args.wasm, args['wake-wasm'], args['www-wasm'], ...largeViews.map(name => args[name + '-wasm']), args['image-page-wasm'], args['image-wasm'], args['sketch-wasm'], args['spell-wasm']].filter(Boolean);
+const reactors = [args.wasm, args['wake-wasm'], args['diagnostics-wasm'], args['www-wasm'], ...largeViews.map(name => args[name + '-wasm']), args['image-page-wasm'], args['image-wasm'], args['sketch-wasm'], args['spell-wasm']].filter(Boolean);
 if (Boolean(reactors.length) !== Boolean(args['wasi-shim'])) throw Error('Supply --wasi-shim with a compiled WASI fixture');
 if (reactors.length) await Promise.all([...reactors, join(args['wasi-shim'], 'index.js')].map(path => access(path)));
 const files = await readdir(fixtures);
@@ -36,6 +36,7 @@ if (!args.fixture) {
 }
 const pages = files.filter(name => name.endsWith('.html') && (!['hello-wasi.html', 'cpu-damage-wasi.html'].includes(name) || args.wasm)
         && (name !== 'document-wasi.html' || args['www-wasm']) && (name !== 'large-view-wasi.html' || largeViews.length)
+        && (name !== 'diagnostics-wasi.html' || args['diagnostics-wasm'])
         && (name !== 'wake-wasi.html' || args['wake-wasm']) && (name !== 'spell-wasi.html' || args['spell-wasm'])
         && (name !== 'image-pages-wasi.html' || args['image-page-wasm']) && (name !== 'image-wasi.html' || args['image-wasm']) && (name !== 'sketch-wasi.html' || args['sketch-wasm']))
     .filter(name => !name.startsWith('webgpu-') || args.webgpu || args.fixture)
@@ -58,6 +59,7 @@ async function chromium() {
 function asset(path) {
     if (path === '/__rune/app.wasm') return args.wasm;
     if (path === '/__rune/wake.wasm') return args['wake-wasm'];
+    if (path === '/__rune/diagnostics.wasm') return args['diagnostics-wasm'];
     if (path === '/__rune/image-pages.wasm') return args['image-page-wasm'];
     if (path === '/__rune/image.wasm') return args['image-wasm'];
     if (path === '/__rune/spell.wasm') return args['spell-wasm'];

@@ -308,6 +308,13 @@ node Tests/Browser/run.mjs --fixture image-pages-wasi --webgpu --image-page-wasm
 node Tests/Browser/run.mjs --fixture spell-wasi --spell-wasm /path/to/rune-spell-probe.wasm --wasi-shim /path/to/node_modules/@bjorn3/browser_wasi_shim/dist
 ```
 
+To check browser clocks, seeded knobs, preferences and diagnostics in a real WebGPU window, run the diagnostics reactor with the same WASI shim.
+
+```sh
+./scripts/build-web.sh swift-6.4.2-RELEASE_wasm diagnostics-probe --package-path Tests/Browser/DiagnosticsApp
+node Tests/Browser/run.mjs --fixture diagnostics-wasi --webgpu --diagnostics-wasm /path/to/diagnostics-probe.wasm --wasi-shim /path/to/node_modules/@bjorn3/browser_wasi_shim/dist
+```
+
 ### Tracing a desktop window
 
 Run `swift run -c release rune-hello --native --trace frames.jsonl --frames 120` to capture 120 submissions and close the window. Omit `--frames` to capture an interactive session until the window closes. For a multi-window app, add `--window KEY` to select the window to trace.
