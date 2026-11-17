@@ -255,7 +255,9 @@ struct ElInc2ParityTests {
                 }
         }
         _ = rt.frame(at: 0)
-        #expect(rt.isAnimating == true)
+        // Upstream `loop_sleep.rs::cycles_share_deadlines_and_sleep_when_hidden_by_hover_groups`: an opacity
+        // cycle steps at its own fps from a wake deadline instead of requesting continuous frames.
+        #expect(rt.isAnimating == false)
         #expect(rt.nextWakeDeadline(after: 0) != nil)
 
         // Physical KeyA is consumed by onPhysicalInput -> fallback logical keyDown does NOT fire

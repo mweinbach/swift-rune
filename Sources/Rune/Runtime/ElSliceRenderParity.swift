@@ -15,6 +15,38 @@ internal enum ElSliceRenderConstants {
     static let loopJitter: Double = 1.0 / 30.0
 }
 
+internal struct ElNodeCacheEntry {
+    var signature: UInt64
+    var rasterScale: Float
+    var scale: Float
+    var since: Double
+    var envScale: Float
+    var isLivePhase: Bool
+    var relBounds: SIMD4<Float>
+    var commitGen: UInt64
+    var paintHash: UInt64
+
+    @inline(__always)
+    static func stepScaleSettle(
+        seenScale: inout Float,
+        since: inout Double,
+        to newScale: Float,
+        now: Double,
+        reset: Bool,
+        poll: Bool
+    ) -> Bool {
+        let changed = !reset && abs(newScale - seenScale) > 1e-4
+        if reset {
+            seenScale = newScale
+            since = -.infinity
+        } else if changed {
+            seenScale = newScale
+            since = now
+        }
+        return poll && (now - since < ElSliceRenderConstants.staticScaleSettle)
+    }
+}
+
 internal struct ElScaleSettle {
     var stillScale: Float
     var scale: Float
@@ -95,6 +127,8 @@ internal struct ElLoopCatchUpClock {
 internal struct ElSliceRenderState {
     var groupFadeIds: Set<NodeId> = []
     var scaleSettles: [NodeId: ElScaleSettle] = [:]
+    var nodeCaches: [NodeId: ElNodeCacheEntry] = [:]
+    var cacheScaleFramePending: Bool = false
     var pressRestingHitByPath: [String: (rect: MotionRect, clip: MotionRect, turn: Float)] = [:]
     var loopCatchUp = ElLoopCatchUpClock()
     var loopOffsetSyncedIds: Set<NodeId> = []
@@ -276,8 +310,9 @@ internal extension Runtime {
                 entry.scale = clampedScale
                 entry.since = animNow
             } else if abs(clampedScale - entry.stillScale) > 1e-4 {
-                if entry.wasAnimated && abs(clampedScale - entry.scale) <= 1e-4 {
+                if entry.wasAnimated {
                     entry.stillScale = clampedScale
+                    entry.scale = clampedScale
                     entry.moving = false
                     entry.wasAnimated = false
                 } else if abs(clampedScale - entry.scale) > 1e-4 {
@@ -317,14 +352,20 @@ internal extension Runtime {
     }
 
     func pruneScaleSettles() {
-        guard !elSliceRenderState.scaleSettles.isEmpty else { return }
-        elSliceRenderState.scaleSettles = elSliceRenderState.scaleSettles.filter {
-            scene.contains($0.key) || nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil
+        if !elSliceRenderState.scaleSettles.isEmpty {
+            elSliceRenderState.scaleSettles = elSliceRenderState.scaleSettles.filter {
+                scene.contains($0.key) || nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil
+            }
+        }
+        if !elSliceRenderState.nodeCaches.isEmpty {
+            elSliceRenderState.nodeCaches = elSliceRenderState.nodeCaches.filter {
+                scene.contains($0.key) || nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil
+            }
         }
     }
 
     var hasMovingScaleSettle: Bool {
-        elSliceRenderState.scaleSettles.values.contains(where: \.moving)
+        elSliceRenderState.scaleSettles.values.contains(where: \.moving) || elSliceRenderState.cacheScaleFramePending
     }
 
     func recordPressRestingHit(path: String, rect: MotionRect, clip: MotionRect, turn: Float) {
@@ -369,6 +410,7 @@ internal extension Runtime {
             scene.setTime(now)
         }
         let reduce = reducedMotion || cxSettings.hostReducedMotion
+        syncPressColorTracks(at: now, cut: cut)
         for node in flatNodes {
             let nid = node.nodeId
             guard scene.contains(nid) else { continue }
@@ -378,8 +420,7 @@ internal extension Runtime {
                 }
                 continue
             }
-            let captureInside = pressRestingContains(path: node.path, at: pointerPosition)
-            let isDown = !cut && !reduce && !node.effectiveInert && pressedPath == node.path && captureInside
+            let isDown = !cut && !reduce && isNodePressedVisually(node, restingContains: pressRestingContains(path: node.path, at: pointerPosition))
             let target: Float = isDown ? k : 1.0
             if cut || reduce {
                 if scene.store.has(nid, Props.PRESS_SCALE) {
@@ -404,6 +445,8 @@ internal extension Runtime {
 
     func cancelPressedOnScrollIfNeeded(scrollNodeIndex: Int, at now: Double) {
         guard let pp = pressedPath, let pIdx = nodeByPath[pp], flatNodes.indices.contains(pIdx) else { return }
+        // Upstream `scroll_cancels_press`: a drag keeps its capture.
+        guard flatNodes[pIdx].el.handlers.onDrag == nil else { return }
         var cur: Int? = pIdx
         var insideScroll = false
         while let i = cur, flatNodes.indices.contains(i) {

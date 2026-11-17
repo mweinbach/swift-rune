@@ -1121,63 +1121,16 @@ internal final class TerminalGridRowCacheBox: @unchecked Sendable {
     }
 }
 
-/// Cached row layout and emitted instances for `PaintGrid`.
-internal final class TerminalGridRowCache: @unchecked Sendable {
-    struct Drawn {
-        var key: UInt64
-        var instances: [RenderInstance]
-        var glyphFixups: [(offset: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16)]
-        var glyphCount: Int
-    }
-
-    private let lock = NSLock()
-    private var laid: (scaleBits: UInt32, widthBits: UInt32, line: ShapedText, cells: [ShapedText])?
-    private var drawn: Drawn?
-
-    func invalidate() {
-        lock.lock()
-        laid = nil
-        drawn = nil
-        lock.unlock()
-    }
-
-    func getLaid(scaleBits: UInt32, widthBits: UInt32) -> (line: ShapedText, cells: [ShapedText])? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let laid, laid.scaleBits == scaleBits, laid.widthBits == widthBits else { return nil }
-        return (laid.line, laid.cells)
-    }
-
-    func setLaid(scaleBits: UInt32, widthBits: UInt32, line: ShapedText, cells: [ShapedText]) {
-        lock.lock()
-        laid = (scaleBits, widthBits, line, cells)
-        lock.unlock()
-    }
-
-    func getDrawn(key: UInt64) -> Drawn? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let drawn, drawn.key == key else { return nil }
-        return drawn
-    }
-
-    func setDrawn(_ value: Drawn) {
-        lock.lock()
-        drawn = value
-        lock.unlock()
-    }
-}
-
 /// One row of a monospace terminal `TerminalGrid` (`rune::GridRow`).
 public struct TerminalGridRow: Sendable {
-    public var text: String { didSet { cache = TerminalGridRowCacheBox(); _cache = TerminalGridRowCache() } }
-    public var spans: [TextSpan] { didSet { cache = TerminalGridRowCacheBox(); _cache = TerminalGridRowCache() } }
-    public var style: TextStyle { didSet { cache = TerminalGridRowCacheBox(); _cache = TerminalGridRowCache() } }
-    public var cells: [TerminalGridCell] = [] { didSet { cache = TerminalGridRowCacheBox(); _cache = TerminalGridRowCache() } }
-    public var fills: [TerminalGridFill] = [] { didSet { cache = TerminalGridRowCacheBox(); _cache = TerminalGridRowCache() } }
-    public var overlayShape: Shape? = nil { didSet { cache = TerminalGridRowCacheBox(); _cache = TerminalGridRowCache() } }
+    public var text: String { didSet { cache = TerminalGridRowCacheBox() } }
+    public var spans: [TextSpan] { didSet { cache = TerminalGridRowCacheBox() } }
+    public var style: TextStyle { didSet { cache = TerminalGridRowCacheBox() } }
+    public var cells: [TerminalGridCell] = [] { didSet { cache = TerminalGridRowCacheBox() } }
+    public var fills: [TerminalGridFill] = [] { didSet { cache = TerminalGridRowCacheBox() } }
+    public var overlayShape: Shape? = nil { didSet { cache = TerminalGridRowCacheBox() } }
+    public var wraps: Bool = false
     internal var cache = TerminalGridRowCacheBox()
-    internal var _cache = TerminalGridRowCache()
 
     public init(text: String, spans: [TextSpan] = [], style: TextStyle = TextStyle()) {
         self.text = text
@@ -1187,7 +1140,6 @@ public struct TerminalGridRow: Sendable {
 
     public func cell(column: Int, width: Int = 1, text: String, style: TextStyle, color: Color) -> Self {
         var copy = self
-        copy._cache = TerminalGridRowCache()
         copy.cells.append(TerminalGridCell(column: column, width: width, text: text, style: style, color: color))
         return copy
     }
@@ -1195,16 +1147,26 @@ public struct TerminalGridRow: Sendable {
     public func fill(start: Int, end: Int, color: Color) -> Self {
         guard end > start else { return self }
         var copy = self
-        copy._cache = TerminalGridRowCache()
         copy.fills.append(TerminalGridFill(startColumn: start, endColumn: end, color: color))
         return copy
     }
 
     public func shape(_ shape: Shape) -> Self {
         var copy = self
-        copy._cache = TerminalGridRowCache()
         copy.overlayShape = shape.path.commands.isEmpty ? nil : shape
         return copy
+    }
+
+    /// Marks whether this row wraps cleanly into the next row without an intervening line break (`GridRow::wraps`).
+    public func wraps(_ wraps: Bool = true) -> Self {
+        var copy = self
+        copy.wraps = wraps
+        return copy
+    }
+
+    /// Character index in `readingText` for cell `column`, clamping wide cells to their start or past text to `end` (`GridRow::char_at`).
+    internal static func charAt(columnPlaces: [(column: Int, width: Int)], column: Int) -> Int {
+        columnPlaces.firstIndex { $0.column + max($0.width, 1) > column } ?? columnPlaces.count
     }
 
     /// Fingerprint of all row content and overlays so mutated or copied rows never alias stale cache entries.
@@ -1310,10 +1272,19 @@ public struct TerminalGrid: Sendable {
     public var columns: Int
     public var cellSize: Vec2
     public var rows: [TerminalGridRow]
+    /// Cursor cell `(column, row)` published as the grid's accessibility caret (`El::grid_caret`).
+    public var caret: (column: Int, row: Int)?
 
-    public init(columns: Int, cellWidth: Float, cellHeight: Float, rows: [TerminalGridRow]) {
+    public init(
+        columns: Int,
+        cellWidth: Float,
+        cellHeight: Float,
+        rows: [TerminalGridRow],
+        caret: (column: Int, row: Int)? = nil
+    ) {
         self.columns = max(1, columns)
         self.cellSize = Vec2(cellWidth, cellHeight)
         self.rows = rows
+        self.caret = caret
     }
 }

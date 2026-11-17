@@ -2,6 +2,7 @@ import Foundation
 import RuneMotion
 
 private let runeHoverProp = Prop<Float>.custom(0x484F, .opacity, name: "hover")
+private let runePressProp = Prop<Float>.custom(0x5052, .opacity, name: "press")
 
 extension Runtime {
     // MARK: - Clipboard & Paste Delivery (`Runtime::use_clipboard`, `Tx::request_paste`, `El::on_paste`)
@@ -20,83 +21,25 @@ extension Runtime {
         }
     }
 
-    internal func flushPendingPasteRequests(at now: Double) {
-        guard pendingPasteRequests > 0 else { return }
-        let count = pendingPasteRequests
-        pendingPasteRequests = 0
-        for _ in 0..<count {
-            let content: ClipboardContent
-            if let board = boundClipboard {
-                content = board.readRich(sanitizeUntrustedHTML: true).content
-            } else if !richClipboard.content.text.isEmpty || richClipboard.content.html != nil || richClipboard.content.rtf != nil {
-                content = richClipboard.content
-            } else {
-                content = clipboard
-            }
-            deliverPaste(content, at: now)
-        }
-    }
-
-    @discardableResult
-    internal func deliverPaste(_ content: ClipboardContent, at now: Double) -> Bool {
-        clipboard = content
-        richClipboard = RichClipboardPayload(content: content)
-
-        if let fPath = focusedPath,
-           let fEl = focusedInputElement(at: fPath) {
-            if let editLens = fEl.handlers.editLens {
-                var consumed = false
-                if let onInputPaste = fEl.handlers.onInputPaste {
-                    var tx = makeTx(at: now)
-                    consumed = onInputPaste(&state, content, &tx)
-                    applyTx(tx, at: now)
-                }
-                let hasHTML = content.html.map { !$0.isEmpty } ?? false
-                if !consumed && (!content.text.isEmpty || hasHTML) {
-                    let prevEdit = editLens.get(state)
-                    var edit = prevEdit
-                    if fEl.isSecure {
-                        edit.isSecure = true
-                    }
-                    if edit.isRichEnabled && !edit.isSecure, let html = content.html, !html.isEmpty {
-                        edit.pasteHTML(html, plain: content.text)
-                    } else if !content.text.isEmpty {
-                        edit.paste(content.text)
-                    }
-                    deliverInputEdit(el: fEl, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: now)
-                }
-                return true
-            }
-        }
-
-        // Dispatch to active modal's or root's `onPasteContent` / `onPaste` handler when no editor is focused.
-        let rootIdx: Int? = activeModalPath.flatMap { nodeByPath[$0] } ?? (flatNodes.isEmpty ? nil : 0)
-        if let rIdx = rootIdx {
-            let targetEl = flatNodes[rIdx].el
-            if let onRich = targetEl.handlers.onPasteContent {
-                var tx = makeTx(at: now)
-                onRich(&state, content, &tx)
-                applyTx(tx, at: now)
-                return true
-            }
-            if !content.text.isEmpty, let onText = targetEl.handlers.onPaste {
-                var tx = makeTx(at: now)
-                onText(&state, content.text, &tx)
-                applyTx(tx, at: now)
-                return true
-            }
-        }
-        return false
-    }
-
     // MARK: - Key Release & Step Controls (`El::on_key_up`, `El::on_step`, `El::on_step_limit`)
 
     /// Dispatches logical key release to press-time/current focused element + ancestors,
     /// or deepest-first within the active scope when unfocused/at-rest (`Runtime::route_key_up`).
     @discardableResult
     public func keyUp(_ ev: KeyEvent, at now: Double = 0) -> Bool {
-        let pressedFocus = pressedKeyFocusPath
-        pressedKeyFocusPath = nil
+        keyUp(ev, fromPhysicalRelease: false, at: now)
+    }
+
+    @discardableResult
+    internal func keyUp(_ ev: KeyEvent, fromPhysicalRelease: Bool, at now: Double = 0) -> Bool {
+        if !fromPhysicalRelease && inputMachines.keyReleases.eat(composing: isAnyImeComposing) {
+            return false
+        }
+        let routedPressFocus = inputMachines.keyReleases.route()
+        let pressedFocus = routedPressFocus ?? pressedKeyFocusPath
+        if inputMachines.keyReleases.held == nil {
+            pressedKeyFocusPath = nil
+        }
 
         let activeModalIdx = activeModalPath.flatMap { nodeByPath[$0] }
         let allowedNode: (Int) -> Bool = { i in
@@ -136,14 +79,25 @@ extension Runtime {
             chain.sort { (sharedRank[$0] ?? 0) < (sharedRank[$1] ?? 0) }
         }
 
+        let physKey = inputMachines.activePhysicalKey
         for idx in chain {
             guard idx < flatNodes.count, let onUp = flatNodes[idx].el.handlers.onKeyUp else { continue }
-            var tx = makeTx(at: now)
+            var tx = makeTx(at: now, physicalKey: physKey)
             let taken = onUp(&state, ev, &tx)
             _ = Tx.took(taken, &tx)
             applyTx(tx, at: now, markDirtyIfNotLiveOnly: taken)
-            if taken { return true }
+            if taken {
+                let sec = hasSecureFocus || chain.contains(where: {
+                    flatNodes[$0].el.isSecure || (flatNodes[$0].el.handlers.editLens?.get(state).isSecure == true)
+                })
+                recordEvent(sec ? "key-up [redacted]" : "key-up \(ev.key)")
+                return true
+            }
         }
+        let sec = hasSecureFocus || chain.contains(where: {
+            flatNodes[$0].el.isSecure || (flatNodes[$0].el.handlers.editLens?.get(state).isSecure == true)
+        })
+        recordEvent(sec ? "key-up [redacted]" : "key-up \(ev.key)")
         return false
     }
 
@@ -371,6 +325,50 @@ extension Runtime {
         NodeId.hash("hover:\(nid.rawValue)")
     }
 
+    internal static var pressProp: Prop<Float> { runePressProp }
+
+    internal static func pressTrackId(_ nid: NodeId) -> NodeId {
+        NodeId.hash("press:\(nid.rawValue)")
+    }
+
+    internal func syncPressColorTracks(at now: Double, cut: Bool) {
+        let snapImmediately = cut || cxSettings.hostReducedMotion
+        for node in flatNodes {
+            let el = node.el
+            guard el.pressColor != nil else { continue }
+            let nid = node.nodeId
+            let trackId = Self.pressTrackId(nid)
+            let isDown = isNodePressedVisually(
+                node,
+                restingContains: pressRestingContains(path: node.path, at: pointerPosition)
+            )
+            let target: Float = isDown ? 1.0 : 0.0
+            let prevTarget = lastPressTargetById[nid]
+            let anim = el.styleSpring.map { Anim<Float>(curve: .spring($0)) } ?? .instant
+            if snapImmediately || (el.styleSpring == nil) {
+                liveStore.snap(trackId, Self.pressProp, to: target)
+                lastPressTargetById[nid] = target
+                continue
+            }
+            if prevTarget == nil {
+                liveStore.snap(trackId, Self.pressProp, to: 0.0)
+                if target > 0.5 {
+                    liveStore.set(trackId, Self.pressProp, to: 1.0, anim: anim, at: now)
+                    lastPressTargetById[nid] = 1.0
+                } else {
+                    lastPressTargetById[nid] = 0.0
+                }
+            } else if prevTarget != target {
+                if liveStore.get(trackId, Self.pressProp) == nil {
+                    liveStore.snap(trackId, Self.pressProp, to: prevTarget!)
+                }
+                liveStore.set(trackId, Self.pressProp, to: target, anim: anim, at: now)
+                lastPressTargetById[nid] = target
+            }
+        }
+        lastPressTargetById = lastPressTargetById.filter { nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil }
+    }
+
     internal func makeGroupHoverPredicate(
         presentedRectById: [NodeId: MotionRect] = [:]
     ) -> GroupHoverContext {
@@ -464,9 +462,10 @@ extension Runtime {
 
     internal static func hoverHitPredicate(_ node: FlatNode) -> Bool {
         let h = node.el.handlers
-        return node.el.hoverBg != nil || node.el.pressBg != nil ||
+        return node.el.hoverBg != nil || node.el.pressBg != nil || node.el.pressColor != nil ||
                node.el.isHoverGroup || node.el.isHoverAlone ||
                (!node.el.hasKitHoverDelays && h.onHover != nil) || h.onClick != nil || h.onClickPress != nil ||
+               h.onMiddlePress != nil ||
                h.onDrag != nil || h.editLens != nil || node.el.a11yHelp != nil ||
                (!node.el.textLinks.isEmpty && !node.el.isSecure && h.editLens == nil)
     }
@@ -496,6 +495,8 @@ extension Runtime {
                launchedFlightIds.contains(nid) ||
                growthRows["growth:\(n.path)"]?.track.moving == true ||
                growthRows["fold:\(n.path)"]?.track.moving == true ||
+               ((n.el.growthSpec != nil || n.el.foldGlideSpec != nil) &&
+                growthRows.contains(where: { ($0.key.hasPrefix("growth:\(n.path)/") || $0.key.hasPrefix("fold:\(n.path)/")) && $0.value.track.moving })) ||
                scrollGlidingPaths.contains(n.path) {
                 return true
             }
@@ -576,7 +577,19 @@ extension Runtime {
         return false
     }
 
-    internal func refreshHoverAndSyncTracks(at now: Double, wallNow: Double? = nil, cut: Bool) {
+    internal enum HoverDispatchPolicy {
+        case always
+        case onHoldRelease
+        case never
+    }
+
+    internal func refreshHoverAndSyncTracks(
+        at now: Double,
+        wallNow: Double? = nil,
+        cut: Bool,
+        dispatchPolicy: HoverDispatchPolicy = .always
+    ) {
+        let wasHeld = (hoverHoldState == .held)
         if cut {
             hoverHoldState = .free
             hoverWithinPaths.removeAll()
@@ -623,17 +636,20 @@ extension Runtime {
             applyHoverWithin(within.inside, held: shouldHold, at: wallNow ?? currentTime)
         }
 
+        let dispatchHover: Bool = switch dispatchPolicy {
+        case .always: true
+        case .onHoldRelease: wasHeld
+        case .never: false
+        }
+
         if shouldHold {
             hoveredLink = nil
             if let cur = hoveredPath, hoverLive(cur) == nil {
                 hoveredPath = nil
                 hoveredKey = nil
-                if let oldIdx = nodeByPath[cur], !flatNodes[oldIdx].el.hasKitHoverDelays,
-                   let cb = flatNodes[oldIdx].el.handlers.onHover {
+                if dispatchHover {
                     isDispatchingHover = true
-                    var tx = makeTx(at: currentTime)
-                    cb(&state, false, &tx)
-                    applyTx(tx, at: currentTime)
+                    dispatchHoverCallbacks(to: nil, at: currentTime)
                     isDispatchingHover = false
                 }
             }
@@ -650,25 +666,13 @@ extension Runtime {
                 hoveredLink = newHoveredLink
             }
             if candidatePath != hoveredPath {
-                let oldPath = hoveredPath
                 hoveredPath = candidatePath
                 hoveredKey = candidateHit?.node.key
-                isDispatchingHover = true
-                if let old = oldPath, let oldIdx = nodeByPath[old],
-                   !flatNodes[oldIdx].el.hasKitHoverDelays,
-                   let cb = flatNodes[oldIdx].el.handlers.onHover {
-                    var tx = makeTx(at: currentTime)
-                    cb(&state, false, &tx)
-                    applyTx(tx, at: currentTime)
+                if dispatchHover {
+                    isDispatchingHover = true
+                    dispatchHoverCallbacks(to: candidatePath, at: currentTime)
+                    isDispatchingHover = false
                 }
-                if let np = candidatePath, let newIdx = nodeByPath[np],
-                   !flatNodes[newIdx].el.hasKitHoverDelays,
-                   let cb = flatNodes[newIdx].el.handlers.onHover {
-                    var tx = makeTx(at: currentTime)
-                    cb(&state, true, &tx)
-                    applyTx(tx, at: currentTime)
-                }
-                isDispatchingHover = false
             }
         }
 

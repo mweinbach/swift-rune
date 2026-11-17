@@ -1,416 +1,779 @@
+import Dispatch
 import Foundation
 import Testing
 @testable import Rune
 import RuneMotion
+import RuneRef
 
-@Suite("Rune Reveal Phase, Chain & Insert Parity Tests (reveal_phase.rs, reveal_chain.rs, reveal_insert.rs)")
+@Suite("Reveal Phase Parity Tests")
 struct RevealPhaseParityTests {
-    private struct Doc {
-        var paras: [String]
+    private static let length: Int = 5
+    /// The ignored deep run's depth: the same walk, one letter further.
+    private static let deep: Int = 6
+    /// Upstream `#[ignore = "the deep run"]`: opt in with `RUNE_REVEAL_DEEP=1`.
+    private static let deepRunEnabled: Bool = ProcessInfo.processInfo.environment["RUNE_REVEAL_DEEP"] != nil
+    private static let fade: Float = 0.05
+    private static let chunk: Int = 6
+
+    private struct Facts: Equatable {
+        var reveal: Bool
+        var fade: Float
+        var reducedMotion: Bool
+        var timeScaled: Bool
     }
 
-    private static func words(_ n: Int) -> String {
-        (0..<n).map { "word\($0)" }.joined(separator: " ")
+    private static let steady = Facts(
+        reveal: true,
+        fade: fade,
+        reducedMotion: false,
+        timeScaled: false
+    )
+
+    private struct Doc: Equatable {
+        var words: Int = 0
+        var replaced: Bool = false
+        var mounts: UInt32 = 0
+        var parent: Bool = false
+
+        func content() -> String {
+            if replaced { return "a b" }
+            guard words > 0 else { return "" }
+            return Array(repeating: "w", count: words).joined(separator: " ")
+        }
+
+        func key() -> String { "t\(mounts)" }
     }
 
-    private static func chainRuntime() -> Runtime<Doc> {
-        let rt = Runtime<Doc>(
-            state: Doc(paras: [""]),
-            viewport: Vec2(600, 800),
-            pixelScale: 2.0,
-            systemDark: true
-        ) { s, _ in
-            col().wFull().children(
-                s.paras.enumerated().map { i, p in
-                    text(p).wrapText().wFull().reveal(0.3).key("p\(i)")
+    private enum Letter: CaseIterable, CustomStringConvertible {
+        case chunk
+        case tick
+        case fade
+        case midChunk
+        case replace
+        case end
+        case remount
+        case returnParent
+
+        var description: String {
+            switch self {
+            case .chunk: return "Chunk"
+            case .tick: return "Tick"
+            case .fade: return "Fade"
+            case .midChunk: return "MidChunk"
+            case .replace: return "Replace"
+            case .end: return "End"
+            case .remount: return "Remount"
+            case .returnParent: return "Return"
+            }
+        }
+    }
+
+    private struct DevReveal: Equatable {
+        var len: Int
+        var words: [(UInt32, Double)]
+        var fade: Float
+
+        static func == (lhs: DevReveal, rhs: DevReveal) -> Bool {
+            lhs.len == rhs.len && lhs.fade == rhs.fade && lhs.words.count == rhs.words.count &&
+                zip(lhs.words, rhs.words).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 }
+        }
+    }
+
+    private struct Dev {
+        var state: DevReveal? = nil
+        var chain: Double = 0.0
+
+        mutating func commit(content: String, wasPresent: Bool, instant: Bool, now: Double, facts: Facts) {
+            if !facts.reveal { return }
+            let fade = facts.fade
+            let mountedLate = !wasPresent && !instant
+            var st = state ?? DevReveal(
+                len: mountedLate ? 0 : content.utf8.count,
+                words: [],
+                fade: fade
+            )
+            st.fade = fade
+            let utf8Count = content.utf8.count
+            let isBoundary: Bool = {
+                guard st.len <= utf8Count else { return false }
+                let idx = content.utf8.index(content.utf8.startIndex, offsetBy: st.len)
+                return idx.samePosition(in: content) != nil
+            }()
+            if instant || utf8Count < st.len || !isBoundary {
+                st.len = utf8Count
+                st.words.removeAll()
+            } else if utf8Count > st.len && fade > 0.0 {
+                let starts = wordStarts(in: content, from: st.len)
+                let own = st.words.last.map { max($0.1, now) } ?? now
+                let chained = !facts.timeScaled && (chain - now) <= Double(fade)
+                let chainAt = chained ? max(chain, now) : now
+                let queued = Int(max(0.0, chainAt - now) / 0.0055)
+                let pending = st.words.filter { $0.1 > now }.count + starts.count + queued
+                let stagger: Double = {
+                    if facts.reducedMotion { return 0.0 }
+                    let k = min(max(Float(pending) / 24.0, 0.0), 1.0)
+                    return Double(0.020 + (0.0055 - 0.020) * k)
+                }()
+                var tn = chainAt > own ? chainAt + stagger : own
+                for b in starts {
+                    st.words.append((b, tn))
+                    tn += stagger
                 }
+                if !facts.timeScaled, let last = st.words.last {
+                    chain = max(chain, last.1)
+                }
+                st.len = utf8Count
+            } else {
+                st.len = utf8Count
+            }
+            state = st
+        }
+
+        mutating func tick(now: Double) {
+            guard var st = state else { return }
+            let fade = Double(st.fade)
+            var done = 0
+            for w in st.words {
+                if now - w.1 >= fade {
+                    done += 1
+                } else {
+                    break
+                }
+            }
+            if done > 0 && done == st.words.count {
+                st.words.removeAll()
+            }
+            state = st
+        }
+
+        mutating func shift(_ delta: Double) {
+            guard var st = state else { return }
+            for i in st.words.indices {
+                st.words[i].1 += delta
+            }
+            state = st
+        }
+
+        mutating func left() {
+            state = nil
+        }
+
+        func alpha(byte: UInt32, now: Double) -> Float {
+            guard let st = state else { return 1.0 }
+            var lo = 0
+            var hi = st.words.count
+            while lo < hi {
+                let mid = (lo + hi) >> 1
+                if st.words[mid].0 <= byte {
+                    lo = mid + 1
+                } else {
+                    hi = mid
+                }
+            }
+            guard lo > 0 else { return 1.0 }
+            let t0 = st.words[lo - 1].1
+            if st.fade <= 0.0 {
+                return now >= t0 ? 1.0 : 0.0
+            }
+            let x = Float((now - t0) / Double(st.fade))
+            let clamped = min(max(x, 0.0), 1.0)
+            let inv = 1.0 - clamped
+            return 1.0 - inv * inv * inv
+        }
+    }
+
+    private static func wordStarts(in s: String, from: Int) -> [UInt32] {
+        var out: [UInt32] = []
+        var prevSpace = true
+        var idx = s.utf8.index(s.utf8.startIndex, offsetBy: from)
+        while idx < s.endIndex {
+            let c = s[idx]
+            let space = c.isWhitespace
+            if !space && prevSpace {
+                let offset = s.utf8.distance(from: s.utf8.startIndex, to: idx)
+                out.append(UInt32(offset))
+            }
+            prevSpace = space
+            idx = s.index(after: idx)
+        }
+        return out
+    }
+
+    private final class Walk {
+        var rt: Runtime<Doc>
+        var t: Double = 0.0
+        var doc = Doc()
+        var dev = Dev()
+        var present: Bool = true
+        var id: NodeId? = nil
+
+        init() {
+            let runtime = Runtime(
+                state: Doc(),
+                viewport: Vec2(200, 200),
+                pixelScale: 1.0,
+                textSystem: TextSystem()
+            ) { d, _ in
+                let tEl: El<Doc> = text(d.content())
+                    .key(d.key())
+                    .wFull()
+                    .wrapText()
+                    .size(14)
+                    .weight(400)
+                    .reveal(wordFade: RevealPhaseParityTests.fade)
+                let kids: [El<Doc>] = d.parent ? [col().key("p").child(tEl)] : []
+                return col().key("root").w(200).children(kids)
+            }
+            self.rt = runtime
+            _ = rt.frame(at: t)
+            _ = rt.frame(at: t)
+            precondition(!rt.reducedMotion && !rt.systemReducedMotion(), "walk requires non-reduced-motion")
+            precondition(!rt.motionNeedsCause, "walk requires motionNeedsCause == false")
+            precondition(rt.cxSettings.viewTimeScale == 1.0, "walk requires 1x clock")
+            reset()
+        }
+
+        func reset() {
+            doc = Doc(words: 0, replaced: false, mounts: doc.mounts + 1, parent: true)
+            rt.wordRevealStore.reset()
+            dev = Dev()
+            present = false
+            id = nil
+            if let err = commit(instant: true) {
+                fatalError("reset must succeed: \(err)")
+            }
+            t += 1.0
+            _ = rt.frame(at: t)
+            precondition(rt.wordRevealStore.phases.count == 1, "only live text keeps reveal state, got \(rt.wordRevealStore.phases.count)")
+        }
+
+        func commit(instant: Bool) -> String? {
+            frameCommit(instant: instant, inTree: true)
+        }
+
+        func commitAbsent(instant: Bool) -> String? {
+            frameCommit(instant: instant, inTree: false)
+        }
+
+        private func frameCommit(instant: Bool, inTree: Bool) -> String? {
+            let now = t
+            let docSnap = doc
+            let content = docSnap.content()
+            let wasPresent = present
+            let commits = rt.commitCount
+            rt.update(at: now) { s, tx in
+                s = docSnap
+                if instant {
+                    tx.instant()
+                }
+            }
+            _ = rt.frame(at: now)
+            if rt.commitCount != commits + 1 {
+                return "an edit committed \(rt.commitCount - commits) times"
+            }
+            if inTree {
+                dev.commit(content: content, wasPresent: wasPresent, instant: instant, now: now, facts: RevealPhaseParityTests.steady)
+                present = true
+            }
+            dev.tick(now: now)
+            return compare()
+        }
+
+        func tick(dt: Double) -> String? {
+            let commits = rt.commitCount
+            t += dt
+            _ = rt.frame(at: t)
+            if rt.commitCount != commits {
+                return "a frame with no edit committed \(rt.commitCount - commits) times"
+            }
+            dev.tick(now: t)
+            return compare()
+        }
+
+        func play(_ letter: Letter) -> String? {
+            switch letter {
+            case .chunk:
+                doc.words += RevealPhaseParityTests.chunk
+                return commit(instant: false)
+            case .tick:
+                return tick(dt: 1.0 / 60.0)
+            case .fade:
+                return tick(dt: Double(RevealPhaseParityTests.fade))
+            case .midChunk:
+                if let err = tick(dt: Double(RevealPhaseParityTests.fade) / 2.0) { return err }
+                doc.words += 1
+                return commit(instant: false)
+            case .replace:
+                doc.replaced.toggle()
+                return commit(instant: false)
+            case .end:
+                return commit(instant: false)
+            case .remount:
+                doc.mounts += 1
+                present = false
+                dev.left()
+                return commit(instant: false)
+            case .returnParent:
+                doc.parent = false
+                if let err = commitAbsent(instant: true) { return err }
+                present = false
+                doc.parent = true
+                return commit(instant: false)
+            }
+        }
+
+        func compare() -> String? {
+            let targetKey = doc.key()
+            let node = rt.flatNodes.first { $0.key == targetKey }?.nodeId
+            if let nid = node {
+                id = nid
+            }
+            guard let id else {
+                return "no text for key \(targetKey), and none before it"
+            }
+            if node == nil && doc.parent {
+                return "no text for key \(targetKey)"
+            }
+            let ours = rt.wordRevealStore.phases[id]
+            let theirs = dev.state
+            switch (ours, theirs) {
+            case (nil, nil):
+                break
+            case let (.some(phase), .some(st)):
+                if phase.shownBytes != st.len {
+                    return "shown \(phase.shownBytes), dev \(st.len)"
+                }
+                let words = phase.fade?.words ?? []
+                let wordsEqual = words.count == st.words.count &&
+                    zip(words, st.words).allSatisfy { $0.startByte == $1.0 && $0.startTime == $1.1 }
+                if !wordsEqual {
+                    return "words \(words), dev \(st.words)"
+                }
+                if case let .fading(_, _, fade) = phase, fade != st.fade {
+                    return "fade \(fade), dev \(st.fade)"
+                }
+            default:
+                return "reveal \(String(describing: ours)), dev \(String(describing: theirs))"
+            }
+            if rt.wordRevealStore.chain.until != dev.chain {
+                return "chain \(rt.wordRevealStore.chain.until), dev \(dev.chain)"
+            }
+            if node == nil {
+                return nil
+            }
+            let nodeNow = rt.scene.store.nodeTime(id)
+            let byteCount = UInt32(doc.content().utf8.count)
+            for byte in 0...byteCount {
+                let ourAlpha = ours?.fade?.alpha(atUTF8Byte: byte, now: nodeNow) ?? 1.0
+                let theirAlpha = dev.alpha(byte: byte, now: nodeNow)
+                if ourAlpha != theirAlpha {
+                    return "alpha at byte \(byte): \(ourAlpha), dev \(theirAlpha)"
+                }
+            }
+            return nil
+        }
+    }
+
+    private struct StreamState: Equatable {
+        var content: String
+        var reveal: Float
+        var paused: Bool
+        var reduced: Bool
+
+        init(content: String = "", reveal: Float = RevealPhaseParityTests.fade, paused: Bool = false, reduced: Bool = false) {
+            self.content = content
+            self.reveal = reveal
+            self.paused = paused
+            self.reduced = reduced
+        }
+
+        func facts() -> Facts {
+            Facts(
+                reveal: reveal >= 0.0,
+                fade: reduced ? 0.15 : reveal,
+                reducedMotion: reduced,
+                timeScaled: paused
+            )
+        }
+
+        static func streamed(_ content: String) -> StreamState {
+            StreamState(content: content, reveal: RevealPhaseParityTests.fade)
+        }
+    }
+
+    private final class Driven {
+        var rt: Runtime<StreamState>
+        var t: Double = 0.0
+        var state: StreamState
+        var dev = Dev()
+        var present: Bool = true
+
+        init(_ initial: StreamState) {
+            self.state = initial
+            self.rt = Runtime(
+                state: initial,
+                viewport: Vec2(300, 200),
+                pixelScale: 1.0,
+                textSystem: TextSystem()
+            ) { s, cx in
+                cx.reducedMotion(s.reduced)
+                var el: El<StreamState> = text(s.content).key("t").wFull().wrapText()
+                if s.reveal >= 0.0 {
+                    el = el.reveal(wordFade: s.reveal)
+                }
+                if s.paused {
+                    el = el.timeScale(0.0)
+                }
+                return col().key("root").w(300).child(el)
+            }
+            _ = rt.frame(at: 0.0)
+            dev.commit(content: initial.content, wasPresent: false, instant: true, now: 0.0, facts: initial.facts())
+        }
+
+        func id() -> NodeId? {
+            rt.flatNodes.first { $0.key == "t" }?.nodeId
+        }
+
+        func now() -> Double {
+            id().map { rt.scene.store.nodeTime($0) } ?? t
+        }
+
+        func set(_ mutate: (inout StreamState) -> Void) -> String? {
+            mutate(&state)
+            return commit(instant: false)
+        }
+
+        func commit(instant: Bool) -> String? {
+            let before = now()
+            let nextState = state
+            let wasPresent = present
+            rt.update(at: t) { s, tx in
+                s = nextState
+                if instant { tx.instant() }
+            }
+            _ = rt.frame(at: t)
+            let after = now()
+            if after != before {
+                dev.shift(after - before)
+            }
+            dev.commit(content: nextState.content, wasPresent: wasPresent, instant: instant, now: after, facts: nextState.facts())
+            dev.tick(now: after)
+            present = true
+            return check()
+        }
+
+        func tick(dt: Double) -> String? {
+            t += dt
+            _ = rt.frame(at: t)
+            dev.tick(now: now())
+            return check()
+        }
+
+        func check() -> String? {
+            guard let nid = id() else { return "no text" }
+            let ours = rt.wordRevealStore.phases[nid]
+            let theirs = dev.state
+            switch (ours, theirs) {
+            case (nil, nil):
+                break
+            case let (.some(phase), .some(st)):
+                if phase.shownBytes != st.len {
+                    return "shown \(phase.shownBytes), dev \(st.len)"
+                }
+                let words = phase.fade?.words ?? []
+                let wordsEqual = words.count == st.words.count &&
+                    zip(words, st.words).allSatisfy { $0.startByte == $1.0 && $0.startTime == $1.1 }
+                if !wordsEqual {
+                    return "words \(words), dev \(st.words)"
+                }
+                if phase.isFading != !st.words.isEmpty {
+                    return "fading \(phase.isFading), dev words \(st.words)"
+                }
+                if case let .fading(_, _, fade) = phase, fade != st.fade {
+                    return "fade \(fade), dev \(st.fade)"
+                }
+            default:
+                return "reveal \(String(describing: ours)), dev \(String(describing: theirs))"
+            }
+            if rt.wordRevealStore.chain.until != dev.chain {
+                return "chain \(rt.wordRevealStore.chain.until), dev \(dev.chain)"
+            }
+            let cur = now()
+            let len = UInt32(state.content.utf8.count)
+            for byte in 0...len {
+                let ourAlpha = ours?.fade?.alpha(atUTF8Byte: byte, now: cur) ?? 1.0
+                let theirAlpha = dev.alpha(byte: byte, now: cur)
+                if ourAlpha != theirAlpha {
+                    return "alpha at byte \(byte): \(ourAlpha), dev \(theirAlpha)"
+                }
+            }
+            let fading = theirs.map { !$0.words.isEmpty } ?? false
+            let wakes = fading && !state.paused
+            let source = (rt.animSources & AnimSource.reveal) != 0
+            if source != wakes {
+                return "REVEAL source \(source), dev fading \(fading), paused \(state.paused)"
+            }
+            return nil
+        }
+    }
+
+    private static func visit(
+        walk: Walk,
+        alphabet: [Letter],
+        depth: Int,
+        sequence: inout [Letter],
+        ran: inout Int,
+        failure: inout String?
+    ) {
+        if failure != nil { return }
+        ran += 1
+        walk.reset()
+        for letter in sequence {
+            if let why = walk.play(letter) {
+                failure = "\(sequence): \(why)"
+                return
+            }
+        }
+        if sequence.count == depth { return }
+        for letter in alphabet {
+            sequence.append(letter)
+            visit(walk: walk, alphabet: alphabet, depth: depth, sequence: &sequence, ran: &ran, failure: &failure)
+            sequence.removeLast()
+        }
+    }
+
+    private final class WalkResults: @unchecked Sendable {
+        let lock = NSLock()
+        var total = 0
+        var failures: [String] = []
+    }
+
+    private static func walkAll(alphabet: [Letter], depth: Int) {
+        let results = WalkResults()
+        DispatchQueue.concurrentPerform(iterations: alphabet.count) { idx in
+            let walk = Walk()
+            var ran = 0
+            var failure: String? = nil
+            var seq = [alphabet[idx]]
+            visit(walk: walk, alphabet: alphabet, depth: depth, sequence: &seq, ran: &ran, failure: &failure)
+            results.lock.lock()
+            results.total += ran
+            if let f = failure {
+                results.failures.append(f)
+            }
+            results.lock.unlock()
+        }
+        #expect(results.failures.isEmpty, "sequences differ from dev: \(results.failures)")
+        var expected = 0
+        var power = 1
+        for _ in 1...depth {
+            power *= alphabet.count
+            expected += power
+        }
+        #expect(results.total == expected, "every sequence ran (\(results.total) vs \(expected))")
+    }
+
+    @Test("every short sequence of streaming events leaves what dev left")
+    func everyShortSequenceOfStreamingEventsLeavesWhatDevLeft() {
+        Self.walkAll(alphabet: Letter.allCases, depth: Self.length)
+    }
+
+    // The deep run: `RUNE_REVEAL_DEEP=1 xcrun swift test --no-parallel --filter everyDeeperSequence`.
+    @Test(
+        "every deeper sequence of streaming events leaves what dev left",
+        .enabled(if: RevealPhaseParityTests.deepRunEnabled, "the deep run (set RUNE_REVEAL_DEEP=1)")
+    )
+    func everyDeeperSequenceOfStreamingEventsLeavesWhatDevLeft() {
+        Self.walkAll(alphabet: Letter.allCases, depth: Self.deep)
+    }
+
+    @Test("a chunk fades its words and the chain follows")
+    func aChunkFadesItsWordsAndTheChainFollows() throws {
+        let walk = Walk()
+        #expect(walk.play(.chunk) == nil)
+        let id = try #require(walk.rt.flatNodes.first { $0.key == walk.doc.key() }?.nodeId)
+        let phase = try #require(walk.rt.wordRevealStore.phases[id])
+        guard case let .fading(_, words, _) = phase else {
+            Issue.record("a chunk's words fade, got \(phase)")
+            return
+        }
+        #expect(words.count == Self.chunk, "every word of the chunk fades")
+        let lastTime = try #require(words.last?.startTime)
+        #expect(walk.rt.wordRevealStore.chain.until >= lastTime, "the chain holds the newest word")
+        let nodeNow = walk.rt.scene.store.nodeTime(id)
+        #expect(walk.rt.wordRevealStore.chain.until - nodeNow > Double(Self.fade), "a chunk's run outlasts a fade")
+    }
+
+    @Test("a remount starts its words from none")
+    func aRemountStartsItsWordsFromNone() throws {
+        let walk = Walk()
+        #expect(walk.play(.chunk) == nil)
+        #expect(walk.play(.remount) == nil)
+        let id = try #require(walk.rt.flatNodes.first { $0.key == walk.doc.key() }?.nodeId)
+        let phase = try #require(walk.rt.wordRevealStore.phases[id])
+        guard case let .fading(_, words, _) = phase else {
+            Issue.record("a remount fades its words in, got \(phase)")
+            return
+        }
+        #expect(words.first?.startByte == 0, "it starts at its first word")
+    }
+
+    @Test("a returning child keeps its words after an instant parent unmount")
+    func aReturningChildKeepsItsWordsAfterAnInstantParentUnmount() throws {
+        struct S { var parent: Bool = false }
+        let rt = Runtime(state: S(), viewport: Vec2(300, 200), pixelScale: 1.0) { s, _ in
+            let kids: [El<S>] = s.parent ? [
+                col().key("p").child(
+                    text("a b c").key("t").wFull().wrapText().reveal(wordFade: RevealPhaseParityTests.fade)
+                )
+            ] : []
+            return col().key("root").w(300).children(kids)
+        }
+        _ = rt.frame(at: 0.0)
+        rt.update(at: 0.0) { s, _ in s.parent = true }
+        _ = rt.frame(at: 0.0)
+        _ = rt.frame(at: 0.1)
+        let id = try #require(rt.flatNodes.first { $0.key == "t" }?.nodeId)
+        #expect(rt.wordRevealStore.phases[id]?.caughtUp(endBytes: 5) == true, "the first words have shown")
+
+        rt.update(at: 0.1) { s, tx in
+            s.parent = false
+            tx.instant()
+        }
+        _ = rt.frame(at: 0.1)
+        #expect(rt.wordRevealStore.phases[id] != nil, "the unmounted child keeps its reveal state")
+
+        rt.update(at: 0.1) { s, _ in s.parent = true }
+        _ = rt.frame(at: 0.1)
+        let back = try #require(rt.flatNodes.first { $0.key == "t" }?.nodeId)
+        #expect(back == id, "the same key returns under the same id")
+        let phase = try #require(rt.wordRevealStore.phases[id])
+        #expect(phase.caughtUp(endBytes: 5), "it comes back showing its words, not replaying them: \(phase)")
+    }
+
+    @Test("an instant commit clears a fade")
+    func anInstantCommitClearsAFade() throws {
+        struct S { var longer: Bool = false }
+        let rt = Runtime(state: S(), viewport: Vec2(300, 200), pixelScale: 1.0) { s, _ in
+            let content = s.longer ? "a b c" : "a"
+            return col().key("root").w(300).child(
+                text(content).key("t").wFull().wrapText().reveal(wordFade: RevealPhaseParityTests.fade)
             )
         }
         _ = rt.frame(at: 0.0)
-        _ = rt.frame(at: 1.0 / 60.0)
-        return rt
+        rt.update(at: 0.0) { s, _ in s.longer = true }
+        _ = rt.frame(at: 0.0)
+        let id = try #require(rt.flatNodes.first { $0.key == "t" }?.nodeId)
+        #expect(rt.wordRevealStore.phases[id]?.isFading == true, "the new words fade")
+
+        rt.update(at: 0.0) { _, tx in tx.instant() }
+        _ = rt.frame(at: 0.0)
+        #expect(rt.wordRevealStore.phases[id]?.caughtUp(endBytes: 5) == true, "the instant commit shows them at once")
     }
 
-    private static func wordTimes(_ rt: Runtime<Doc>, key: String) -> (Double, Double)? {
-        guard let node = rt.flatNodes.first(where: { $0.key == key }),
-              let phase = rt.reveals[node.nodeId],
-              let first = phase.words.first?.start,
-              let last = phase.words.last?.start else {
-            return nil
+    @Test("an unprompted commit lands a new text whole")
+    func anUnpromptedCommitLandsANewTextWhole() throws {
+        struct S { var shown: Bool = false }
+        let rt = Runtime(state: S(), viewport: Vec2(200, 200), pixelScale: 1.0) { s, _ in
+            let kids: [El<S>] = s.shown ? [
+                text("a b c d").key("t").wFull().wrapText().reveal(wordFade: RevealPhaseParityTests.fade)
+            ] : []
+            return col().key("root").w(200).children(kids)
         }
-        return (first, last)
+        rt.motionNeedsCause = true
+        _ = rt.frame(at: 0.0)
+        rt.update(at: 0.0) { s, _ in s.shown = true }
+        _ = rt.frame(at: 0.0)
+        let id = try #require(rt.flatNodes.first { $0.key == "t" }?.nodeId)
+        #expect(rt.wordRevealStore.phases[id]?.caughtUp(endBytes: 7) == true, "no input caused it, so it shows whole")
     }
 
-    @Test("reveal_chain::one_chunk_over_three_paragraphs_fades_them_in_order")
-    func oneChunkOverThreeParagraphsFadesInOrder() throws {
-        let rt = Self.chainRuntime()
-        rt.update(at: 1.0 / 60.0) { s, _ in
-            s.paras = [Self.words(12), Self.words(12), Self.words(12)]
-        }
-        _ = rt.frame(at: 2.0 / 60.0)
-        let a = try #require(Self.wordTimes(rt, key: "p0"))
-        let b = try #require(Self.wordTimes(rt, key: "p1"))
-        let c = try #require(Self.wordTimes(rt, key: "p2"))
-        #expect(b.0 > a.1 && c.0 > b.1, "each paragraph starts after the one above ends: \(a) \(b) \(c)")
-    }
-
-    @Test("reveal_chain::a_new_paragraph_waits_for_the_last_ones_tail")
-    func newParagraphWaitsForLastOnesTail() throws {
-        let rt = Self.chainRuntime()
-        rt.update(at: 1.0 / 60.0) { s, _ in
-            s.paras = [Self.words(30)]
-        }
-        _ = rt.frame(at: 2.0 / 60.0)
-        let a = try #require(Self.wordTimes(rt, key: "p0"))
-        rt.update(at: 2.0 / 60.0) { s, _ in
-            s.paras.append(Self.words(4))
-        }
-        _ = rt.frame(at: 3.0 / 60.0)
-        let b = try #require(Self.wordTimes(rt, key: "p1"))
-        #expect(b.0 > a.1, "next paragraph starts after last word above: \(a) then \(b)")
-    }
-
-    @Test("reveal_chain::once_everything_has_shown_a_new_paragraph_starts_at_once")
-    func onceShownNewParagraphStartsAtOnce() throws {
-        let rt = Self.chainRuntime()
-        var t = 1.0 / 60.0
-        rt.update(at: t) { s, _ in
-            s.paras = [Self.words(8)]
-        }
-        for _ in 0..<120 {
-            t += 1.0 / 60.0
-            _ = rt.frame(at: t)
-        }
-        rt.update(at: t) { s, _ in
-            s.paras.append(Self.words(4))
-        }
-        t += 1.0 / 60.0
-        _ = rt.frame(at: t)
-        let (first, _) = try #require(Self.wordTimes(rt, key: "p1"))
-        #expect(abs(first - t) < 0.02, "no wait once nothing is fading: starts \(first), now \(t)")
-    }
-
-    @Test("reveal_chain::texts_behind_a_long_run_fade_together")
-    func textsBehindLongRunFadeTogether() throws {
-        let rt = Self.chainRuntime()
-        rt.update(at: 1.0 / 60.0) { s, _ in
-            s.paras = [Self.words(120), Self.words(120), Self.words(120)]
-        }
-        _ = rt.frame(at: 2.0 / 60.0)
-        let a = try #require(Self.wordTimes(rt, key: "p0"))
-        let b = try #require(Self.wordTimes(rt, key: "p1"))
-        let c = try #require(Self.wordTimes(rt, key: "p2"))
-        #expect(a.1 - a.0 > 0.3, "first paragraph run outlasts a fade: \(a)")
-        #expect(b.0 < a.1 && c.0 < a.1, "the rest don't wait for it: \(a) \(b) \(c)")
-    }
-
-    @Test("reveal_phase: appended words fade monotonically from 0 -> 1 and go idle")
-    func revealPhaseWordFadeAndIdle() throws {
-        struct StreamDoc { var content = "" }
-        let rt = Runtime<StreamDoc>(
-            state: StreamDoc(content: ""),
-            viewport: Vec2(240, 200),
-            pixelScale: 1.0,
-            systemDark: true
-        ) { s, _ in
-            col().wFull().child(text(s.content).key("msg").wFull().wrapText().reveal(0.2))
-        }
-        var t = 0.0
-        _ = rt.frame(at: t)
-        rt.update(at: t) { s, _ in s.content = "alpha beta gamma" }
-        t += 1.0 / 60.0
-        _ = rt.frame(at: t)
-        #expect(rt.isAnimating)
-        let node = try #require(rt.flatNodes.first { $0.key == "msg" })
-        let rev = try #require(rt.reveals[node.nodeId])
-        #expect(rev.isFading)
-        let firstWordAlpha = rev.alpha(at: 0, now: t)
-        let lastWordByte = UInt32("alpha beta ".utf8.count)
-        let lastWordAlpha = rev.alpha(at: lastWordByte, now: t)
-        #expect(firstWordAlpha >= lastWordAlpha)
-        #expect(rt.flatNodes.count >= 2)
-
-        for _ in 0..<60 {
-            t += 1.0 / 60.0
-            _ = rt.frame(at: t)
-        }
-        let settledRev = try #require(rt.reveals[node.nodeId])
-        #expect(!settledRev.isFading)
-        #expect(settledRev.alpha(at: lastWordByte, now: t) == 1.0)
-    }
-
-    @Test("reveal_insert: entering revealed text fades all initial words unless cut")
-    func revealInsertEnteringVsCut() throws {
-        struct InsertDoc { var show = false }
-        let rt = Runtime<InsertDoc>(
-            state: InsertDoc(show: false),
-            viewport: Vec2(240, 200),
-            pixelScale: 1.0,
-            systemDark: true
-        ) { s, _ in
-            col().key("root").wFull().children(
-                s.show ? [text("one two three four").key("late").wFull().wrapText().reveal(0.25)] : []
+    @Test("a cut through a character shows whole")
+    func aCutThroughACharacterShowsWhole() throws {
+        struct S { var content: String = "" }
+        let rt = Runtime(state: S(), viewport: Vec2(200, 200), pixelScale: 1.0) { s, _ in
+            col().key("root").w(200).child(
+                text(s.content).key("t").wFull().wrapText().reveal(wordFade: RevealPhaseParityTests.fade)
             )
         }
-        var t = 0.0
-        _ = rt.frame(at: t)
-        t += 1.0 / 60.0
-        rt.update(at: t) { s, _ in s.show = true }
-        _ = rt.frame(at: t)
-        let node = try #require(rt.flatNodes.first { $0.key == "late" })
-        let rev = try #require(rt.reveals[node.nodeId])
-        #expect(rev.isFading, "late-mounted revealed text fades in its initial words")
-        let lastWordByte = UInt32("one two three ".utf8.count)
-        #expect(rev.alpha(at: lastWordByte, now: t) < 0.5)
+        _ = rt.frame(at: 0.0)
+        rt.update(at: 0.0) { s, _ in s.content = "aaa bbbb" }
+        _ = rt.frame(at: 0.0)
+        let id = try #require(rt.flatNodes.first { $0.key == "t" }?.nodeId)
+        #expect(rt.wordRevealStore.phases[id]?.isFading == true, "the first chunk fades")
 
-        for _ in 0..<60 {
-            t += 1.0 / 60.0
-            _ = rt.frame(at: t)
-        }
-        #expect(rt.reveals[node.nodeId]?.isFading == false)
+        // Byte 8 is inside "é" (bytes 7 and 8) now, so the old end still fading cannot be kept.
+        let accented = "aaaaaaaé"
+        rt.update(at: 0.0) { s, _ in s.content = accented }
+        _ = rt.frame(at: 0.0)
+        #expect(rt.wordRevealStore.phases[id]?.caughtUp(endBytes: accented.utf8.count) == true, "a moved boundary shows whole")
     }
 
-    @Test("reveal_phase: remount, instant commit, unprompted commit, char cut, toggle off, reveal(0), reducedMotion, and paused clock shift")
-    func revealPhaseStateMachineAndRuntimeEdgeCases() throws {
-        // 1. State-machine checks matching reveal_phase.rs unit cases
-        var chain: RevealChain? = RevealChain()
-        var phase = RevealPhase.idle(shown: 0, fade: 0.3)
-
-        // Remount (entering) starts all words from 0
-        _ = phase.step(.commit(content: "alpha beta gamma", fade: 0.3, arrival: .entering, now: 1.0, reducedMotion: false), chain: &chain)
-        #expect(phase.isFading)
-        #expect(phase.alpha(at: 0, now: 1.0) < 0.01)
-
-        // Cut through a character (shrink or non-boundary) shows whole (replaced)
-        _ = phase.step(.commit(content: "ab", fade: 0.3, arrival: .kept, now: 1.05, reducedMotion: false), chain: &chain)
-        #expect(!phase.isFading)
-        #expect(phase.shownBytes == "ab".utf8.count)
-
-        // Reveal(0) shows future words whole
-        _ = phase.step(.commit(content: "ab cd ef", fade: 0.0, arrival: .kept, now: 1.1, reducedMotion: false), chain: &chain)
-        #expect(!phase.isFading)
-        #expect(phase.alpha(at: UInt32("ab ".utf8.count), now: 1.1) == 1.0)
-
-        // Reduced motion gives stagger == 0 so every appended word starts together
-        var rmPhase = RevealPhase.idle(shown: 0, fade: 0.15)
-        var noChain: RevealChain? = nil
-        _ = rmPhase.step(.commit(content: "one two three four", fade: 0.15, arrival: .entering, now: 2.0, reducedMotion: true), chain: &noChain)
-        #expect(rmPhase.words.count == 4)
-        let allEqualStart = Set(rmPhase.words.map(\.start)).count == 1
-        #expect(allEqualStart)
-
-        // Paused clock shift moves all remaining word start timestamps by delta
-        let beforeShift = rmPhase.words.first?.start ?? 0
-        _ = rmPhase.step(.shift(delta: 0.75), chain: &noChain)
-        #expect(abs((rmPhase.words.first?.start ?? 0) - (beforeShift + 0.75)) < 1e-6)
-
-        // Instant / replaced commit clears active fade
-        _ = rmPhase.step(.commit(content: "one two three four", fade: 0.15, arrival: .replaced, now: 2.8, reducedMotion: false), chain: &noChain)
-        #expect(!rmPhase.isFading)
-
-        // 2. Runtime tests: instant commit clears fade, toggle reveal off mid-fade keeps later text for when re-enabled
-        struct ToggleState: Sendable {
-            var text: String = "hello"
-            var revealOn: Bool = true
-            var instantParentShown: Bool = true
+    @Test("a reveal turned off mid fade keeps what arrives for later")
+    func aRevealTurnedOffMidFadeKeepsWhatArrivesForLater() {
+        let w = Driven(.streamed("a b"))
+        #expect(w.set { $0.content = "a b c d" } == nil)
+        #expect(w.set { $0.reveal = -1.0 } == nil)
+        #expect(w.set { $0.content = "a b c d  " } == nil)
+        #expect(w.tick(dt: 1.0) == nil)
+        #expect(w.set { $0.content = "a b c d  ef" } == nil)
+        #expect(w.set { $0.reveal = Self.fade } == nil)
+        let keptNewWords = w.rt.wordRevealStore.phases.values.contains { phase in
+            (phase.fade?.words ?? []).contains { $0.startByte >= 8 }
         }
-        let rt = Runtime<ToggleState>(state: ToggleState()) { s, _ in
-            let rowNode: El<ToggleState> = el().child(
-                s.revealOn
-                    ? text(s.text).key("msg").wFull().wrapText().reveal(0.3)
-                    : text(s.text).key("msg").wFull().wrapText()
-            )
-            return col().w(300).children(s.instantParentShown ? [rowNode] : [])
-        }
-        var t = 0.0
-        _ = rt.frame(at: t)
-        t += 1.0 / 60.0
-        rt.update(at: t) { s, _ in s.text = "hello world again" }
-        _ = rt.frame(at: t)
-        let msgNode = try #require(rt.flatNodes.first { $0.key == "msg" })
-        #expect(rt.reveals[msgNode.nodeId]?.isFading == true)
-
-        // Instant commit clears active fade immediately
-        t += 1.0 / 60.0
-        rt.update(at: t) { s, tx in
-            s.text = "hello world again now"
-            tx.instant()
-        }
-        _ = rt.frame(at: t)
-        #expect(rt.reveals[msgNode.nodeId]?.isFading == false)
-
-        // Returning child keeps words after an instant parent unmount/remount
-        t += 1.0 / 60.0
-        rt.update(at: t) { s, tx in
-            s.instantParentShown = false
-            tx.instant()
-        }
-        _ = rt.frame(at: t)
-        t += 1.0 / 60.0
-        rt.update(at: t) { s, tx in
-            s.instantParentShown = true
-            tx.instant()
-        }
-        _ = rt.frame(at: t)
-        let returnedNode = try #require(rt.flatNodes.first { $0.key == "msg" })
-        #expect(rt.reveals[returnedNode.nodeId]?.isFading == false)
-
-        // Turning reveal off mid-fade holds what arrives later until reveal turns back on
-        t += 1.0 / 60.0
-        rt.update(at: t) { s, _ in
-            s.text = "hello world again now streaming"
-        }
-        _ = rt.frame(at: t)
-        #expect(rt.reveals[returnedNode.nodeId]?.isFading == true)
-        t += 0.5
-        _ = rt.frame(at: t) // finish previous fade
-        rt.update(at: t) { s, _ in
-            s.revealOn = false
-            s.text = "hello world again now streaming later"
-        }
-        _ = rt.frame(at: t)
-        t += 1.0 / 60.0
-        rt.update(at: t) { s, _ in s.revealOn = true }
-        _ = rt.frame(at: t)
-        #expect(rt.reveals[returnedNode.nodeId]?.isFading == true)
-
-        // Reduced motion on Runtime renders appended words together
-        let rtRM = Runtime<String>(state: "start") { s, _ in
-            col().w(300).child(text(s).key("rm").wFull().wrapText().reveal(0.3))
-        }
-        rtRM.setSystemReducedMotion(true)
-        _ = rtRM.frame(at: 0)
-        rtRM.update(at: 0.1) { s, _ in s = "start alpha beta gamma" }
-        _ = rtRM.frame(at: 0.1)
-        let rmNode = try #require(rtRM.flatNodes.first { $0.key == "rm" })
-        let rmPhaseRT = try #require(rtRM.reveals[rmNode.nodeId])
-        #expect(Set(rmPhaseRT.words.map(\.start)).count <= 1)
-
-        // Unprompted commits land newly-mounted reveal text whole without fading
-        struct UnpromptedState { var shown = false }
-        let rtUnprompted = Runtime<UnpromptedState>(state: UnpromptedState()) { s, _ in
-            let kids: [El<UnpromptedState>] = s.shown
-                ? [text("one two three").key("unp").wFull().wrapText().reveal(0.3)]
-                : []
-            return col().w(300).children(kids)
-        }
-        _ = rtUnprompted.frame(at: 0)
-        rtUnprompted.update(at: 0.1) { s, tx in
-            s.shown = true
-            tx.setUnprompted()
-        }
-        _ = rtUnprompted.frame(at: 0.1)
-        let unpNode = try #require(rtUnprompted.flatNodes.first { $0.key == "unp" })
-        #expect(rtUnprompted.reveals[unpNode.nodeId]?.isFading != true)
+        #expect(keptNewWords, "the bytes that arrived while off fade in")
+        #expect(w.set { $0.content = "a b c d  efg" } == nil)
+        #expect(w.tick(dt: 0.3) == nil)
     }
 
-    @Test("reveal_insert: rows inserted above top and revealed in the same commit stay visible in view")
-    func rowsInsertedAboveTopAndRevealedLandInView() throws {
-        struct InsertState: Sendable {
-            var items: [UInt32] = (0..<1000).map { UInt32($0) }
+    @Test("a reveal of zero shows future words whole")
+    func aRevealOfZeroShowsFutureWordsWhole() {
+        let w = Driven(.streamed("a b"))
+        #expect(w.set { $0.reveal = 0.0 } == nil)
+        #expect(w.set { $0.content = "a b c d" } == nil)
+        #expect(w.set { $0.content = "a b c d e" } == nil)
+        #expect(w.tick(dt: 0.1) == nil)
+    }
+
+    @Test("reduced motion fades every word together")
+    func reducedMotionFadesEveryWordTogether() {
+        let w = Driven(.streamed("a b"))
+        #expect(w.set { $0.reduced = true } == nil)
+        #expect(w.set { $0.content = "a b c d e f" } == nil)
+        let times = w.rt.wordRevealStore.phases.values.flatMap { ($0.fade?.words ?? []).map(\.startTime) }
+        #expect(times.count > 1, "the chunk's words fade: \(times)")
+        #expect(zip(times, times.dropFirst()).allSatisfy { $0 == $1 }, "no stagger, so they start together: \(times)")
+        #expect(w.tick(dt: 0.2) == nil)
+        #expect(w.set { $0.reduced = false } == nil)
+        #expect(w.set { $0.content = "a b c d e f g" } == nil)
+        #expect(w.tick(dt: 0.2) == nil)
+    }
+
+    @Test("a paused clock freezes the fade and its resume shifts the words")
+    func aPausedClockFreezesTheFadeAndItsResumeShiftsTheWords() {
+        let w = Driven(.streamed("a b"))
+        #expect(w.set { $0.content = "a b c d" } == nil)
+        let before = w.rt.wordRevealStore.phases.values.flatMap { ($0.fade?.words ?? []).map(\.startTime) }
+        let chain = w.rt.wordRevealStore.chain.until
+        #expect(w.set { $0.paused = true } == nil)
+        #expect(w.tick(dt: 0.2) == nil)
+        let whileFrozen = w.rt.wordRevealStore.phases.values.flatMap { ($0.fade?.words ?? []).map(\.startTime) }
+        #expect(before == whileFrozen, "a frozen clock doesn't fade")
+        #expect(w.set { $0.content = "a b c d e" } == nil)
+        let frozen = w.now()
+        #expect(w.set { $0.content = "a b c d e f" } == nil)
+        let added = w.rt.wordRevealStore.phases.values.flatMap {
+            ($0.fade?.words ?? []).filter { $0.startByte >= 9 }.map(\.startTime)
         }
-        struct RowMemoDeps: Equatable {
-            let id: UInt32
-            let isFirst: Bool
-        }
-
-        func scrolledAwayAndBack() -> (rt: Runtime<InsertState>, t: Double) {
-            let rt = Runtime<InsertState>(
-                state: InsertState(),
-                viewport: Vec2(400, 300),
-                pixelScale: 1.0,
-                systemDark: true
-            ) { (s: InsertState, _) -> El<InsertState> in
-                let rows: El<InsertState> = col()
-                    .key("rows")
-                    .wFull()
-                    .px(8)
-                    .py(6)
-                    .growth(GrowthSpec.default)
-                    .virtualRows(
-                        s.items.count,
-                        Float(44.0),
-                        key: { (st: InsertState, i: Int) in "item\(st.items[i])" },
-                        build: { (st: InsertState, i: Int) -> El<InsertState> in
-                            let id = st.items[i]
-                            return memo("item\(id)", RowMemoDeps(id: id, isFirst: i == 0)) {
-                                var row: El<InsertState> = col().wFull()
-                                if i == 0 {
-                                    row = row.child(el().key("section").wFull().h(30))
-                                }
-                                return row.child(
-                                    el().key("item\(id)").wFull().h(44).child(text("Row \(id)"))
-                                )
-                            }
-                        }
-                    )
-                return col().wFull().hFull().child(
-                    col()
-                        .key("list")
-                        .wFull()
-                        .h(300)
-                        .scroll(stickBottom: false)
-                        .scrollMargin(6)
-                        .child(rows)
-                )
-            }
-
-            var t = 0.0
-            for _ in 0..<10 {
-                t += 1.0 / 120.0
-                _ = rt.frame(at: t)
-            }
-            rt.settleAll()
-
-            for row in [40, 0] {
-                rt.update(at: t) { _, tx in
-                    tx.scrollIntoView("item\(row)")
-                }
-                for _ in 0..<3 {
-                    t += 1.0 / 120.0
-                    _ = rt.frame(at: t)
-                }
-            }
-            return (rt, t)
-        }
-
-        for inserted in UInt32(1)...2 {
-            var (rt, t) = scrolledAwayAndBack()
-            rt.update(at: t) { s, tx in
-                for n in 0..<inserted {
-                    s.items.insert(1001 + n, at: 0)
-                }
-                tx.scrollIntoView("item\(s.items[0])")
-            }
-
-            let first = "item\(1000 + inserted)"
-            t += 1.0 / 120.0
-            _ = rt.frame(at: t)
-            let el1 = rt.element(byKey: first)
-            let firstAfter1 = try #require(el1)
-            #expect(firstAfter1.visible[3] > 43.5, "after 1 frame visible=\(firstAfter1.visible.description)")
-
-            for _ in 0..<3 {
-                t += 1.0 / 120.0
-                _ = rt.frame(at: t)
-            }
-            let el4 = rt.element(byKey: first)
-            let firstAfter4 = try #require(el4)
-            #expect(firstAfter4.visible[3] > 43.5, "after 4 frames visible=\(firstAfter4.visible.description)")
-
-            rt.settleAll()
-            t += 1.0 / 120.0
-            _ = rt.frame(at: t)
-            let elS = rt.element(byKey: first)
-            let firstAfterSettle = try #require(elS)
-            #expect(firstAfterSettle.visible[3] > 43.5, "after settle visible=\(firstAfterSettle.visible.description)")
-
-            let secEl = rt.elements().first { $0.key == "section" && !$0.exiting }
-            let section = try #require(secEl)
-            #expect(
-                section.visible[3] > 29.5 && section.rect[1] >= -0.05,
-                "section hidden/clipped rect=\(section.rect.description) visible=\(section.visible.description)"
-            )
-        }
+        #expect(added.allSatisfy { $0 >= frozen }, "a chunk on a scaled clock starts at its own time: \(added) from \(frozen)")
+        #expect(chain == w.rt.wordRevealStore.chain.until, "a scaled clock never joins the chain")
+        #expect(w.set { $0.paused = false } == nil)
+        let resumed = w.now()
+        #expect(resumed > frozen, "the clock jumped on resume: \(resumed) from \(frozen)")
+        let shifted = w.rt.wordRevealStore.phases.values.flatMap { ($0.fade?.words ?? []).map(\.startTime) }
+        #expect(zip(shifted, before).allSatisfy { a, b in a - b >= resumed - frozen - 1e-9 }, "every word moved with the clock")
+        #expect(w.tick(dt: 0.2) == nil)
+        #expect(w.set { $0.content = "a b c d e f g" } == nil)
+        #expect(w.tick(dt: 0.2) == nil)
     }
 }

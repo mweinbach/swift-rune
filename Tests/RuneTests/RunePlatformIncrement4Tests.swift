@@ -624,4 +624,93 @@ struct RunePlatformIncrement4Tests {
         rt.dropFiles([png], at: Vec2(20, 20), at: 0.3)
         #expect(rt.state.dropped == [png])
     }
+
+    @Test("popup_menu/tests.rs:64,73,88 - placement without selection, point anchor with selection, and secondary-click context menu")
+    func popupMenuPlacementAndContextMenuParity() throws {
+        func makeMenuRT() -> Runtime<PopupTestState> {
+            let rt = Runtime<PopupTestState>(
+                state: PopupTestState(),
+                viewport: Vec2(200, 150),
+                view: { state, _ in
+                    let themeEl = el()
+                        .key("theme")
+                        .absolute(x: 40, y: 20)
+                        .size(80, 30)
+                        .onClick { (s: inout PopupTestState, tx: inout Tx) in
+                            let anchor = s.anchorOverride ?? .key("theme")
+                            let menu = PopupMenu.picker(
+                                [("system", "System"), ("light", "Light"), ("dark", "Dark")],
+                                selected: s.theme
+                            )
+                            tx.popupMenu(menu, at: anchor) { (st: inout PopupTestState, picked, _) in
+                                st.picks.append(picked)
+                                if let picked { st.theme = picked }
+                            }
+                        }
+                    let ctxMenu = PopupMenu()
+                        .item("copy", "Copy")
+                        .item("paste", "Paste", enabled: false)
+                        .submenu("More", PopupMenu().item("share", "Share"))
+                    return el()
+                        .size(200, 150)
+                        .onSecondaryClick { (_: inout PopupTestState, press: PointerPress, tx: inout Tx) in
+                            tx.popupMenu(ctxMenu, at: Vec2(press.window.x, press.window.y)) { (st: inout PopupTestState, picked, _) in
+                                st.picks.append(picked)
+                            }
+                        }
+                        .child(themeEl)
+                }
+            )
+            _ = rt.frame(at: 0.0)
+            return rt
+        }
+
+        // :64 a_menu_without_a_selection_drops_down_below_its_element
+        let rtDrop = makeMenuRT()
+        rtDrop.update { _, tx in
+            tx.popupMenu(PopupMenu().item("a", "A"), at: .key("theme")) { (st: inout PopupTestState, picked, _) in
+                st.picks.append(picked)
+            }
+        }
+        _ = rtDrop.frame(at: 0.01)
+        let dropShow = try #require(rtDrop.takePopup()).get()
+        #expect(dropShow.placement().at == Vec2(40, 50))
+        #expect(dropShow.placement().positionedId == nil)
+        #expect(dropShow.placement().minWidth == 80)
+
+        // :88 a_point_anchor_with_a_selection_puts_that_item_under_the_point
+        let rtPoint = makeMenuRT()
+        rtPoint.update { s, _ in s.anchorOverride = .point(5, 6) }
+        _ = rtPoint.frame(at: 0.01)
+        rtPoint.pointerDown(at: Vec2(60, 30), at: 0.02)
+        rtPoint.pointerUp(at: Vec2(60, 30), at: 0.03)
+        _ = rtPoint.frame(at: 0.04)
+        let pointShow = try #require(rtPoint.takePopup()).get()
+        #expect(pointShow.placement().at == Vec2(5, 6))
+        #expect(pointShow.placement().positionedId == "system")
+        #expect(pointShow.placement().minWidth == 0)
+
+        // :73 a_context_menu_opens_at_the_press
+        let rtCtx = makeMenuRT()
+        rtCtx.pointerDown(at: Vec2(30, 70), button: .secondary, at: 0.01)
+        rtCtx.pointerUp(at: Vec2(30, 70), button: .secondary, at: 0.02)
+        _ = rtCtx.frame(at: 0.03)
+        let ctxShow = try #require(rtCtx.takePopup()).get()
+        #expect(ctxShow.placement().at == Vec2(30, 70))
+        #expect(ctxShow.placement().positionedId == nil)
+        #expect(ctxShow.placement().minWidth == 0)
+
+        #expect(throws: PopupMenuError.disabled("paste")) {
+            try rtCtx.resolvePopup("paste")
+        }
+        #expect(throws: PopupMenuError.unknownItem("nope")) {
+            try rtCtx.resolvePopup("nope")
+        }
+        #expect(rtCtx.popupMenu != nil)
+        try rtCtx.resolvePopup("share")
+        #expect(rtCtx.state.picks == ["share"])
+        #expect(throws: PopupMenuError.notOpen) {
+            try rtCtx.resolvePopup(nil)
+        }
+    }
 }

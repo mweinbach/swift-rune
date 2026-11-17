@@ -35,6 +35,10 @@ extension Runtime {
         if !needsCommit {
             flushHiddenDropSteps(at: now)
         }
+        // 0b. Cancel any untaken drag-out starts on the next frame (`pointer_drag.rs:308`).
+        flushUntakenDragOuts(at: now)
+        // 0c. Drain any host-completed outbound OS drag outcomes queued via DragEndSink.
+        flushQueuedDragEnds(at: now)
 
         // 1. Deliver queued file dialog results on frame (`file_dialog.rs`)
         if !pendingFileDialogAnswers.isEmpty {
@@ -470,6 +474,11 @@ extension Runtime {
             popupQueue = rest.isEmpty ? .closed : .queued(rest)
         }
 
+        if popped.isFieldMenu, let fmId = popped.fieldMenuId {
+            applyFieldMenuPick(menuId: fmId, pickedId: pickedId, at: currentTime)
+            return
+        }
+
         withErasedState({ anyState, tx in
             popped.onPick(&anyState, pickedId, &tx)
         }, at: currentTime)
@@ -581,12 +590,21 @@ extension Runtime {
     // MARK: - Outbound Drag-Out (`runtime/input/pointer.rs`)
 
     public var isDraggingOut: Bool {
-        activeDragOut != nil
+        activeDragOut != nil || !inputMachines.activeDragOuts.isEmpty
     }
 
+    /// A drag-out the pointer move just delivered asked for, its rects and press in window
+    /// points (the view's times its zoom). The shell must start the OS session before
+    /// returning from that move event (`Runtime::take_drag_out`).
     public func takeDragOutStart() -> DragOutStart? {
+        if let idx = inputMachines.untakenDragOuts.firstIndex(where: { !$0.cancelledByHost }) {
+            let entry = inputMachines.untakenDragOuts.remove(at: idx)
+            inputMachines.activeDragOuts.append((id: entry.id, path: entry.path, key: entry.key, onEnd: entry.onEnd))
+            pendingDragOutStart = nil
+            return entry.start.zoomed(zoom())
+        }
         defer { pendingDragOutStart = nil }
-        return pendingDragOutStart
+        return pendingDragOutStart?.zoomed(zoom())
     }
 
     internal func checkArmedDragOutMove(to pos: Vec2, at now: Double) -> Bool {
@@ -595,9 +613,11 @@ extension Runtime {
             return false
         }
         armedDragOut = nil
-        return startDragOut(path: armed.path, at: pos, fallbackBounds: armed.bounds, fallbackKey: armed.key, now: now)
+        return startDragOut(path: armed.path, at: armed.startWindow, fallbackBounds: armed.bounds, fallbackKey: armed.key, now: now)
     }
 
+    /// Starts a drag-out from the element at `path`; `pos` is where the pointer went down
+    /// (`start_drag_out`'s `press`, `held.at`), in view points.
     @discardableResult
     internal func startDragOut(
         path: String,
@@ -606,17 +626,29 @@ extension Runtime {
         fallbackKey: String? = nil,
         now: Double
     ) -> Bool {
-        guard activeDragOut == nil else { return false }
         guard let nodeInfo = dragSourceNode(byPath: path) else { return false }
         let item = nodeInfo.dragOut?(state) ?? nodeInfo.attachedItem
         guard let item, !item.isEmpty else { return false }
 
         let bounds = nodeInfo.rect ?? fallbackBounds ?? .zero
         let key = nodeInfo.key ?? fallbackKey
+        let erasedEnd: ((inout Any, DragOutcome, inout Tx) -> Void)? = nodeInfo.onEnd.map { fn in
+            { anyState, outcome, tx in
+                guard var typed = anyState as? State else { return }
+                fn(&typed, outcome, &tx)
+                anyState = typed
+            }
+        }
+        let rect = Self.dragOutVisibleRect(bounds: bounds, clip: dragOutParentClip(path: path))
+        let start = DragOutStart(item: item, rect: rect, bounds: bounds, press: pos, key: key)
+        let id = inputMachines.nextDragOutId
+        inputMachines.nextDragOutId &+= 1
         activeDragOut = (path: path, key: key, onEnd: nodeInfo.onEnd)
-        pendingDragOutStart = DragOutStart(item: item, bounds: bounds, press: pos, key: key)
+        pendingDragOutStart = start
+        inputMachines.untakenDragOuts.append((id: id, path: path, key: key, start: start, cancelledByHost: false, sawFrame: false, onEnd: erasedEnd))
         fileDropState.recordOutboundDrag(item)
         releasePointerForDragOut(at: now)
+        logInputEvent("drag-out \(path)")
         if let onStart = nodeInfo.onStart {
             var tx = Tx()
             onStart(&state, &tx)
@@ -626,17 +658,113 @@ extension Runtime {
         return true
     }
 
+    internal func flushUntakenDragOuts(at now: Double) {
+        guard !inputMachines.untakenDragOuts.isEmpty else { return }
+        var flushed: [(id: UInt64, path: String, key: String?, start: DragOutStart, cancelledByHost: Bool, sawFrame: Bool, onEnd: ((inout Any, DragOutcome, inout Tx) -> Void)?)] = []
+        var kept: [(id: UInt64, path: String, key: String?, start: DragOutStart, cancelledByHost: Bool, sawFrame: Bool, onEnd: ((inout Any, DragOutcome, inout Tx) -> Void)?)] = []
+        for var entry in inputMachines.untakenDragOuts {
+            if entry.cancelledByHost || entry.sawFrame {
+                flushed.append(entry)
+            } else {
+                entry.sawFrame = true
+                kept.append(entry)
+            }
+        }
+        inputMachines.untakenDragOuts = kept
+        if kept.isEmpty {
+            pendingDragOutStart = nil
+        }
+        for entry in flushed {
+            if activeDragOut?.path == entry.path, inputMachines.activeDragOuts.isEmpty {
+                activeDragOut = nil
+            }
+            emitDragOutEnd(path: entry.path, fallbackOnEnd: entry.onEnd, outcome: .cancelled, at: now)
+        }
+    }
+
+    internal func flushQueuedDragEnds(at now: Double) {
+        let pending = inputMachines.dragEndSink.drain()
+        guard !pending.isEmpty else { return }
+        for item in pending {
+            if let targetPath = item.path,
+               let idx = inputMachines.activeDragOuts.firstIndex(where: { $0.path == targetPath })
+            {
+                let entry = inputMachines.activeDragOuts.remove(at: idx)
+                if inputMachines.activeDragOuts.isEmpty && inputMachines.untakenDragOuts.isEmpty {
+                    activeDragOut = nil
+                } else if let last = inputMachines.activeDragOuts.last {
+                    activeDragOut = (path: last.path, key: last.key, onEnd: dragOutEndHandler(byPath: last.path))
+                } else {
+                    activeDragOut = nil
+                }
+                emitDragOutEnd(path: entry.path, fallbackOnEnd: entry.onEnd, outcome: item.outcome, at: now)
+            } else {
+                finishDragOut(item.outcome, at: now)
+            }
+        }
+    }
+
     /// Completes an active outbound drag session and guarantees 1:1 `onDragOutEnd` pairing.
     public func finishDragOut(_ outcome: DragOutcome, at now: Double = 0.0) {
         currentTime = now
+        if !inputMachines.activeDragOuts.isEmpty {
+            let entry = inputMachines.activeDragOuts.removeFirst()
+            if inputMachines.activeDragOuts.isEmpty && inputMachines.untakenDragOuts.isEmpty {
+                activeDragOut = nil
+            } else if let last = inputMachines.activeDragOuts.last {
+                activeDragOut = (path: last.path, key: last.key, onEnd: dragOutEndHandler(byPath: last.path))
+            } else {
+                activeDragOut = nil
+            }
+            emitDragOutEnd(path: entry.path, fallbackOnEnd: entry.onEnd, outcome: outcome, at: now)
+            return
+        }
         guard let active = activeDragOut else { return }
         activeDragOut = nil
         let handler = dragOutEndHandler(byPath: active.path) ?? active.onEnd
         guard let handler else { return }
+        logInputEvent("drag-end \(outcome) \(active.path)")
         var tx = Tx()
         handler(&state, outcome, &tx)
         applyTx(tx, at: now)
         if !tx.liveOnlyRequested { dirtyCommit(at: now) }
+    }
+
+    /// Finishes an outbound drag session matching `path` (supports stale session completion).
+    public func finishDragOut(path: String, outcome: DragOutcome, at now: Double = 0.0) {
+        currentTime = now
+        if let idx = inputMachines.activeDragOuts.firstIndex(where: { $0.path == path }) {
+            let entry = inputMachines.activeDragOuts.remove(at: idx)
+            if inputMachines.activeDragOuts.isEmpty && inputMachines.untakenDragOuts.isEmpty {
+                activeDragOut = nil
+            } else if let last = inputMachines.activeDragOuts.last {
+                activeDragOut = (path: last.path, key: last.key, onEnd: dragOutEndHandler(byPath: last.path))
+            } else {
+                activeDragOut = nil
+            }
+            emitDragOutEnd(path: entry.path, fallbackOnEnd: entry.onEnd, outcome: outcome, at: now)
+            return
+        }
+        finishDragOut(outcome, at: now)
+    }
+
+    private func emitDragOutEnd(
+        path: String,
+        fallbackOnEnd: ((inout Any, DragOutcome, inout Tx) -> Void)?,
+        outcome: DragOutcome,
+        at now: Double
+    ) {
+        logInputEvent("drag-end \(outcome) \(path)")
+        if let liveHandler = dragOutEndHandler(byPath: path) {
+            var tx = Tx()
+            liveHandler(&state, outcome, &tx)
+            applyTx(tx, at: now)
+            if !tx.liveOnlyRequested { dirtyCommit(at: now) }
+        } else if let fallbackOnEnd {
+            withErasedState({ anyState, tx in
+                fallbackOnEnd(&anyState, outcome, &tx)
+            }, at: now)
+        }
     }
 
     // MARK: - Private Helpers

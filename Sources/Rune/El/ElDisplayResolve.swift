@@ -35,6 +35,7 @@ internal struct ElResolvedText {
     var isSecure: Bool
     var truncateFade: Bool
     var truncateFadeEm: Float
+    var pretty: Bool = false
 
     func measure(using textSystem: TextSystem, maxWidth: Float?, pixelScale: Float) -> Vec2 {
         if let (run, offset) = advanceRun {
@@ -68,7 +69,9 @@ internal struct ElResolvedText {
                 style: style,
                 maxWidth: shapeMaxW,
                 pixelScale: pixelScale,
-                emitGlyphs: false
+                emitGlyphs: false,
+                bypassCache: isSecure,
+                pretty: pretty
             ).size
         }
         return textSystem.measure(
@@ -76,7 +79,9 @@ internal struct ElResolvedText {
             style: style,
             maxWidth: shapeMaxW,
             pixelScale: pixelScale,
-            pills: pills
+            pills: pills,
+            bypassCache: isSecure,
+            pretty: pretty
         )
     }
 
@@ -85,7 +90,8 @@ internal struct ElResolvedText {
         maxWidth: Float?,
         pixelScale: Float,
         emitGlyphs: Bool,
-        glidePx: Vec2 = .zero
+        glidePx: Vec2 = .zero,
+        bypassCache: Bool? = nil
     ) -> ShapedText {
         if let (run, offset) = advanceRun {
             if let sliced = textSystem.shapeRunSlice(run, at: offset, style: style, pixelScale: pixelScale, emitGlyphs: emitGlyphs) {
@@ -94,12 +100,15 @@ internal struct ElResolvedText {
         }
         var effectiveStyle = style
         var shapeMaxW = maxWidth
+        var effectivePretty = pretty
         if truncateFade {
             effectiveStyle.wrap = .noWrap
             effectiveStyle.maxLines = 0
             shapeMaxW = nil
+            effectivePretty = false
         } else if effectiveStyle.wrap == .noWrap && effectiveStyle.maxLines == 0 {
             shapeMaxW = nil
+            effectivePretty = false
         }
         return textSystem.shape(
             text: displayedText,
@@ -109,7 +118,9 @@ internal struct ElResolvedText {
             maxWidth: shapeMaxW,
             pixelScale: pixelScale,
             emitGlyphs: emitGlyphs,
-            glidePx: glidePx
+            glidePx: glidePx,
+            bypassCache: bypassCache ?? isSecure,
+            pretty: effectivePretty
         )
     }
 }
@@ -124,10 +135,78 @@ internal enum ElDisplayResolver {
         return String(str[startIdx..<endIdx])
     }
 
+    private static func buildInputPills<State>(
+        el: El<State>,
+        specPills: [(Range<Int>, String)],
+        defaultPillBg: Color,
+        defaultPillFg: Color?
+    ) -> [PillChip] {
+        var pills: [PillChip] = []
+        pills.reserveCapacity(specPills.count)
+        for (pRange, pillId) in specPills {
+            let customStyle = el.pillStyleLookup?(pillId)
+            let resolvedBg: Color?
+            if let st = customStyle {
+                resolvedBg = (st.background == PillStyle.default.background) ? defaultPillBg : st.background
+            } else {
+                resolvedBg = defaultPillBg
+            }
+            let resolvedFg = customStyle?.color ?? defaultPillFg
+            let resolvedIcon = customStyle?.icon ?? el.pillIconLookup?(pillId).map { BareIcon($0, size: 12.0) }
+            let pillStyle = PillStyle(
+                background: resolvedBg,
+                ring: customStyle?.ring,
+                color: resolvedFg,
+                pad: customStyle?.pad ?? 4.0,
+                gap: customStyle?.gap ?? 4.0,
+                bold: customStyle?.bold ?? false,
+                italic: customStyle?.italic ?? false,
+                mono: customStyle?.mono ?? false,
+                icon: resolvedIcon
+            )
+            pills.append(PillChip(pRange, style: pillStyle, icon: resolvedIcon))
+        }
+        return pills
+    }
+
+    static func preResolveInputPills<State>(el: inout El<State>, edit inputEdit: TextEdit) {
+        var edit = inputEdit
+        if el.isSecure {
+            edit.isSecure = true
+            if el.isRevealed { edit.isRevealed = true }
+        }
+        let isSecureHidden = edit.isSecure && !edit.isRevealed
+        guard !isSecureHidden, edit.isRichEnabled else { return }
+        let richStyle = el.richStyleSpec ?? RichStyle()
+        var inputStyle = el.textStyle
+        inputStyle.maxLines = 0
+        let specs = edit.richDisplaySpecs(baseStyle: inputStyle, style: richStyle)
+        let specRanges = specs.pills.map(\.0)
+        if el.runtimeExtras["resolvedPillInputPills"] is [PillChip],
+           let cachedRanges = el.runtimeExtras["resolvedPillInputRanges"] as? [Range<Int>],
+           let cachedText = el.runtimeExtras["resolvedPillInputText"] as? String,
+           cachedText == specs.displayText && cachedRanges == specRanges {
+            return
+        }
+        let defaultPillBg = el.pillColorsSpec?.bg ?? richStyle.link.alpha(0.2)
+        let defaultPillFg = el.pillColorsSpec?.fg
+        let pills = buildInputPills(
+            el: el,
+            specPills: specs.pills,
+            defaultPillBg: defaultPillBg,
+            defaultPillFg: defaultPillFg
+        )
+        el.runtimeExtras["pillChips"] = pills
+        el.runtimeExtras["resolvedPillInputPills"] = pills
+        el.runtimeExtras["resolvedPillInputRanges"] = specRanges
+        el.runtimeExtras["resolvedPillInputText"] = specs.displayText
+    }
+
     static func resolveInput<State>(
         el: El<State>,
         edit inputEdit: TextEdit,
         innerWidth: Float? = nil,
+        pxScale: Float? = nil,
         fallbackDirection: TextFlow? = nil
     ) -> ElResolvedInput {
         var edit = inputEdit
@@ -144,8 +223,12 @@ internal enum ElDisplayResolver {
         }
         if isSingle {
             inputStyle.wrap = .noWrap
+            inputStyle.wrapAnywhere = false
         } else if edit.multiline {
             inputStyle.wrap = .wrap
+            if edit.isSecure {
+                inputStyle.wrapAnywhere = true
+            }
         }
         if let fDir = edit.forcedDir {
             inputStyle.direction = fDir
@@ -153,23 +236,37 @@ internal enum ElDisplayResolver {
             inputStyle.direction = fallbackDirection
         }
 
-        let shapeMaxW: Float? = (inputStyle.direction == .rtl || (!isSingle && inputStyle.wrap != .noWrap)) ? innerWidth : nil
+        // A wrapping field wraps at `w * scale + FIT_SLACK` device px, as every text lays out (#948).
+        let wrapsAt: Float? = pxScale.flatMap { TextBoxGeometry.wrapWidth(innerWidth, scale: $0) } ?? innerWidth
+        let shapeMaxW: Float? = (!isSingle && inputStyle.wrap != .noWrap) ? wrapsAt : (inputStyle.direction == .rtl ? innerWidth : nil)
         let isSecureHidden = edit.isSecure && !edit.isRevealed
+        if isSecureHidden {
+            inputStyle.wrap = .noWrap
+            inputStyle.wrapAnywhere = false
+        }
         let rawDisplay = edit.displayString
         let showingPlaceholder = rawDisplay.isEmpty && (edit.preedit?.text.isEmpty ?? true)
         if showingPlaceholder {
+            var placeholderStyle = el.placeholderFont ?? inputStyle
+            placeholderStyle.maxLines = 0
+            placeholderStyle.wrap = inputStyle.wrap
+            if let fDir = edit.forcedDir {
+                placeholderStyle.direction = fDir
+            } else if placeholderStyle.direction == nil, let fallbackDirection {
+                placeholderStyle.direction = fallbackDirection
+            }
             return ElResolvedInput(
                 displayString: rawDisplay,
                 renderedString: el.placeholder ?? "",
                 showingPlaceholder: true,
                 spans: nil,
                 pills: [],
-                style: inputStyle,
+                style: placeholderStyle,
                 isSingleLine: isSingle,
                 isRich: false,
                 isSecure: edit.isSecure,
                 richStyle: richStyle,
-                maxWidthForShape: shapeMaxW
+                maxWidthForShape: (!isSingle && placeholderStyle.wrap != .noWrap) ? wrapsAt : (placeholderStyle.direction == .rtl ? innerWidth : nil)
             )
         }
 
@@ -202,37 +299,28 @@ internal enum ElDisplayResolver {
                 combinedSpans.append(shifted)
             }
         }
-        var pills: [PillChip] = []
-        pills.reserveCapacity(specs.pills.count)
-
-        for (pRange, pillId) in specs.pills {
-            let customStyle = el.pillStyleLookup?(pillId)
-            let resolvedBg: Color?
-            if let st = customStyle {
-                resolvedBg = (st.background == PillStyle.default.background) ? defaultPillBg : st.background
-            } else {
-                resolvedBg = defaultPillBg
-            }
-            let resolvedFg = customStyle?.color ?? defaultPillFg
-            let resolvedIcon = customStyle?.icon ?? el.pillIconLookup?(pillId).map { BareIcon($0, size: 12.0) }
-            let pillStyle = PillStyle(
-                background: resolvedBg,
-                ring: customStyle?.ring,
-                color: resolvedFg,
-                pad: customStyle?.pad ?? 4.0,
-                gap: customStyle?.gap ?? 4.0,
-                bold: customStyle?.bold ?? false,
-                italic: customStyle?.italic ?? false,
-                mono: customStyle?.mono ?? false,
-                icon: resolvedIcon
+        let pills: [PillChip]
+        if let cachedPills = el.runtimeExtras["resolvedPillInputPills"] as? [PillChip],
+           let cachedRanges = el.runtimeExtras["resolvedPillInputRanges"] as? [Range<Int>],
+           let cachedText = el.runtimeExtras["resolvedPillInputText"] as? String,
+           cachedText == specs.displayText && cachedRanges == specs.pills.map(\.0) {
+            pills = cachedPills
+        } else {
+            pills = buildInputPills(
+                el: el,
+                specPills: specs.pills,
+                defaultPillBg: defaultPillBg,
+                defaultPillFg: defaultPillFg
             )
-            pills.append(PillChip(pRange, style: pillStyle, icon: resolvedIcon))
-            if resolvedFg != nil || pillStyle.bold || pillStyle.italic || pillStyle.mono {
-                var sp = RichSpan(pRange)
+        }
+        for pill in pills {
+            let resolvedFg = pill.style.color
+            if resolvedFg != nil || pill.style.bold || pill.style.italic || pill.style.mono {
+                var sp = RichSpan(pill.range)
                 if let fg = resolvedFg { sp = sp.color(fg) }
-                if pillStyle.bold { sp = sp.weight(700) }
-                if pillStyle.italic { sp = sp.italic(true) }
-                if pillStyle.mono { sp = sp.mono(true) }
+                if pill.style.bold { sp = sp.weight(700) }
+                if pill.style.italic { sp = sp.italic(true) }
+                if pill.style.mono { sp = sp.mono(true) }
                 combinedSpans.append(sp)
             }
         }
@@ -342,6 +430,14 @@ internal enum ElDisplayResolver {
             return (r, entry.color, entry.width)
         }
 
+        let isPretty = TextSystem.prettyWrap &&
+            !el.isWrapGreedy &&
+            !isHiddenSecure &&
+            style.align != .justified &&
+            style.maxLines == 0 &&
+            style.wrap == .wrap &&
+            !el.isTruncateFadeEnabled
+
         return ElResolvedText(
             authoredText: authored,
             displayedText: displayedText,
@@ -353,7 +449,8 @@ internal enum ElDisplayResolver {
             advanceRun: isHiddenSecure ? nil : el.advanceInRun,
             isSecure: isSecure,
             truncateFade: el.isTruncateFadeEnabled,
-            truncateFadeEm: el.truncateFadeEm
+            truncateFadeEm: el.truncateFadeEm,
+            pretty: isPretty
         )
     }
 
@@ -402,6 +499,8 @@ internal enum ElDisplayResolver {
         shaped: ShapedText,
         innerW: Float,
         innerH: Float,
+        exactInnerWPx: Float? = nil,
+        layoutInnerW: Float? = nil,
         scaleVec: Vec2,
         pxScale: Float,
         textOriginX: Float,
@@ -415,28 +514,42 @@ internal enum ElDisplayResolver {
         refFadeOrigin: SIMD2<Float>,
         isTruncated: Bool
     ) {
-        let wrapWidth = innerW / max(1e-4, scaleVec.x)
-        let overflows = shaped.size.x > wrapWidth + 0.5 / pxScale
+        let sc = max(1e-4, scaleVec.x)
+        let laidWidth = layoutInnerW ?? (innerW / sc)
+        let fullWidthPx = shaped.size.x * pxScale
+        let laidOutPx = max(0, laidWidth) * pxScale
         let boxX = textOriginX * pxScale
         let boxY = textOriginY * pxScale
         let boxW = max(0, innerW) * pxScale
         let boxH = max(0, max(innerH, shaped.size.y * scaleVec.y)) * pxScale
-        let boxBoundsPx = SIMD4<Float>(boxX, boxY, boxX + boxW, boxY + boxH)
-        let x0 = max(baseClipPx.x, boxX)
-        let y0 = max(baseClipPx.y, boxY)
-        let x1 = min(baseClipPx.x + baseClipPx.z, boxBoundsPx.z)
-        let y1 = min(baseClipPx.y + baseClipPx.w, boxBoundsPx.w)
-        let clipped = SIMD4<Float>(x0, y0, max(0, x1 - x0), max(0, y1 - y0))
-        guard overflows else {
-            return (baseClipPx, .zero, boxBoundsPx, .zero, .zero, false)
-        }
-        let fadeW = min(el.textStyle.size * el.truncateFadeEm * scaleVec.x * pxScale, max(0, x1 - x0))
+        let exactW = max(0, exactInnerWPx ?? boxW)
+        let overflows = fullWidthPx > laidOutPx + 0.5 && fullWidthPx * sc > max(boxW, exactW) + 0.5 * sc
         let isRtl: Bool
         if let dir = shaped.forcedDirection ?? el.textStyle.direction {
             isRtl = (dir == .rtl)
         } else {
             isRtl = shaped.primaryIsRTL
         }
+        var boxLeftPx = boxX
+        var boxRightPx = boxX + boxW
+        if !overflows {
+            let needed = max(exactW, fullWidthPx * sc)
+            if isRtl {
+                boxLeftPx = min(boxLeftPx, boxRightPx - needed)
+            } else {
+                boxRightPx = max(boxRightPx, boxLeftPx + needed)
+            }
+        }
+        let boxBoundsPx = SIMD4<Float>(boxLeftPx, boxY, boxRightPx, boxY + boxH)
+        let x0 = max(baseClipPx.x, boxBoundsPx.x)
+        let y0 = max(baseClipPx.y, boxBoundsPx.y)
+        let x1 = min(baseClipPx.x + baseClipPx.z, boxBoundsPx.z)
+        let y1 = min(baseClipPx.y + baseClipPx.w, boxBoundsPx.w)
+        let clipped = SIMD4<Float>(x0, y0, max(0, x1 - x0), max(0, y1 - y0))
+        guard overflows else {
+            return (clipped, .zero, boxBoundsPx, .zero, .zero, false)
+        }
+        let fadeW = min(el.textStyle.size * el.truncateFadeEm * scaleVec.x * pxScale, max(0, x1 - x0))
         let fadeLeft = (el.textStyle.align == .trailing) != isRtl
         let fadeLTRB = fadeLeft ? SIMD4<Float>(fadeW, 0, 0, 0) : SIMD4<Float>(0, 0, fadeW, 0)
         let refFade: SIMD4<Float>

@@ -111,7 +111,6 @@ extension El {
     public func holdLandingWidth(_ on: Bool = true) -> Self {
         var c = self
         c.holdLandingWidthEnabled = on
-        c.holdLandingWidthFlag = on
         return c
     }
 
@@ -205,8 +204,6 @@ extension El {
         c.textStyle.wrap = .ellipsis
         c.textStyle.elide = elide
         c.textStyle.maxLines = 0
-        c.textStyle.graphemeElide = true
-        c.textStyle.truncateFade = false
         c.isTruncateFadeEnabled = false
         return c.shrink(1).minW(0)
     }
@@ -227,7 +224,6 @@ extension El {
         var c = self
         c.textStyle.wrap = .wrap
         c.textStyle.maxLines = max(0, lines)
-        c.textStyle.truncateFade = false
         c.isTruncateFadeEnabled = false
         return c
     }
@@ -239,15 +235,11 @@ extension El {
 
     /// One line clipped with a trailing fade `em` ems wide when overflowing (`El::truncate_fade_width`).
     public func truncateFadeWidth(_ em: Float) -> Self {
-        if handlers.editLens != nil { return self }
         var c = self
         c.textStyle.wrap = .noWrap
         c.textStyle.maxLines = 0
-        let w = max(0, em)
-        c.textStyle.truncateFade = true
-        c.textStyle.truncateFadeEm = w
         c.isTruncateFadeEnabled = true
-        c.truncateFadeEm = w
+        c.truncateFadeEm = max(0, em)
         return c.shrink(1).minW(0)
     }
 

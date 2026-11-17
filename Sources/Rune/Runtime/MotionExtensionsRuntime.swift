@@ -48,7 +48,6 @@ internal extension Runtime {
         }
     }
 
-    /// Synchronizes periodic / finite `LoopSpec`s with `LoopClock` so frame advances and
     /// Syncs `el.looping` specs after `scene.commit` using `LoopClock`'s per-node animation lead time.
     /// `cut` (`settleAll`) only finishes finite sequences; periodic loops preserve phase across commits and settles.
     func syncMotionLoops(specs: [(id: NodeId, spec: LoopSpec)], at _: Double, cut: Bool) {
@@ -63,7 +62,6 @@ internal extension Runtime {
 
     /// Catches running periodic loop tracks up to wall-clock time when animation frames stall or sleep (`loop_clock.rs`).
     func syncMotionLoopClock(to appNow: Double, animNow: Double) {
-        guard isWindowVisibleForLoops else { return }
         elSliceRenderState.loopCatchUp.catchLoopsUp(
             hostNow: appNow,
             animNow: animNow,
@@ -73,8 +71,11 @@ internal extension Runtime {
         )
     }
 
-    /// Samples a node's active loop track (periodic tracks sample `scene.store.nodeTime(id)`; `Cycle` uses
-    /// unscaled wall-clock time so it retains its cadence even when animation time is paused).
+    /// Samples a node's active loop track (periodic/sequence tracks use `at`; `Cycle` uses unscaled
+    /// wall-clock `wallNow` so it retains its cadence even when animation time is paused).
+    func sampleLoopPresentation(id: NodeId, nodeSize: Vec2, at now: Double, wallNow: Double) -> LoopSampleResult? {
+        loopRuntime.sample(id: id, nodeSize: nodeSize, at: now, wall: wallNow, reducedMotion: reducedMotion)
+    }
     func sampleLoopPresentation(id: NodeId, nodeSize: Vec2, wallNow: Double) -> LoopSampleResult? {
         loopRuntime.sample(
             id: id,
@@ -85,78 +86,25 @@ internal extension Runtime {
         )
     }
 
-    /// Drops exit transitions on removed subtrees that draw nothing (`springs.rs:409`).
-    func skipNonPaintingExits(
-        prevNodes: [FlatNode],
-        newById: [NodeId: FlatNode],
-        matchedStarts: [NodeId: MatchedFlightStart],
-        to scene: inout Scene
-    ) {
-        guard !prevNodes.isEmpty else { return }
-        var effectiveAlpha = [Float](repeating: 1.0, count: prevNodes.count)
-        for i in prevNodes.indices {
-            let parentAlpha: Float = prevNodes[i].parentIndex.flatMap { $0 < i ? effectiveAlpha[$0] : nil } ?? 1.0
-            let nodeAlpha = scene.get(prevNodes[i].nodeId, Props.OPACITY) ?? prevNodes[i].el.opacity
-            effectiveAlpha[i] = parentAlpha * max(0.0, nodeAlpha)
-        }
-        let matchedRemoved = Set(matchedStarts.values.compactMap(\.fromId))
-        for (i, node) in prevNodes.enumerated() where effectiveAlpha[i] <= 0.001 {
-            guard newById[node.nodeId] == nil, !matchedRemoved.contains(node.nodeId) else { continue }
-            scene.setTransition(node.nodeId, .none)
-        }
-    }
-
-    /// Marks loops on hidden, offscreen-clipped, unpresented, or exiting nodes as sleeping so
-    /// neither `isAnimating` nor `nextWakeDeadline` keeps ticking on them (`loop_sleep.rs`).
-    func updateSleepingLoopIds(from motionElements: [MotionElement]) {
-        var visibleLiveIds = Set<NodeId>()
-        for me in motionElements {
-            guard me.is(MotionElement.LOOP) || loopRuntime.tracks[me.id] != nil else { continue }
-            let visibleOk = me.visible.count >= 4 && me.visible[2] > 0.01 && me.visible[3] > 0.01
-            let alphaOk = me.opacity > (0.5 / 255.0)
-            let notExiting = !me.is(MotionElement.EXITING)
-            if visibleOk && alphaOk && notExiting {
-                visibleLiveIds.insert(me.id)
-            }
-        }
-        var sleeping = Set<NodeId>()
-        for id in loopRuntime.tracks.keys where !visibleLiveIds.contains(id) {
-            sleeping.insert(id)
-        }
-        FxSliceMotionSideTable.shared.slot(for: self).sleepingLoopIds = sleeping
-    }
-
     /// True when any non-sleeping loop needs frame advances (`isAnimating`).
     func hasActiveMotionLoops(at appNow: Double) -> Bool {
-        guard isWindowVisibleForLoops else { return false }
-        let sleeping = FxSliceMotionSideTable.shared.slot(for: self).sleepingLoopIds
-        return loopRuntime.hasActiveLoops(
-            nodeTime: { scene.store.nodeTime($0) },
-            wall: appNow,
-            reducedMotion: reducedMotion,
-            excluding: sleeping
-        )
+        _ = appNow
+        if reducedMotion || !liveVisible {
+            return false
+        }
+        return activePaintedLoopsAnimating
     }
 
-    /// Earliest wall-clock deadline needed by any active `Cycle` frame interval OR delayed `LoopTrack`.
+    /// Earliest wall-clock deadline needed by any active painted `Cycle` frame interval OR delayed `LoopTrack`.
     func nextLoopWakeDeadline(after now: Double) -> Double? {
-        guard isWindowVisibleForLoops else { return nil }
-        let sleeping = FxSliceMotionSideTable.shared.slot(for: self).sleepingLoopIds
-        var best: Double? = nil
-        if let loopInterval = loopRuntime.nextFrameInterval(reducedMotion: reducedMotion, excluding: sleeping) {
-            best = now + loopInterval
+        if reducedMotion || !liveVisible {
+            return nil
         }
-        let viewScale = Double(max(0.0, cxSettings.viewTimeScale.isFinite ? cxSettings.viewTimeScale : 1.0))
-        if !reducedMotion, viewScale > 0.0 {
-            for (id, track) in loopRuntime.tracks where !sleeping.contains(id) {
-                let nt = scene.store.nodeTime(id)
-                let ns = Double(max(0.0, scene.store.nodeTimeScale(id)))
-                let effectiveScale = viewScale * ns
-                guard effectiveScale > 0.0, let startAt = track.pendingStart(at: nt) else { continue }
-                let wakeAt = now + max(0.0, (startAt - nt) / effectiveScale)
-                best = best.map { min($0, wakeAt) } ?? wakeAt
-            }
-        }
-        return best
+        // The painted loop wake (`loop_wake`) is set by the last build; one at or before `now` is
+        // already due and is renewed by the next paint, so it is not a future deadline. Returning it
+        // would let `frameSplitImpl`'s catch-up loop spin at `now` without advancing (upstream
+        // `timer_step` always steps forward).
+        guard let wake = activePaintedLoopWake, wake > now else { return nil }
+        return wake
     }
 }

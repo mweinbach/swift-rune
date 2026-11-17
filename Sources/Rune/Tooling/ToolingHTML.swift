@@ -290,6 +290,8 @@ public enum ToolingHTML {
             onKey: spec.onKey,
             view: spec.view
         )
+        // The capture presets (`RUNE_CONTRAST`, `RUNE_INCREASE_CONTRAST`) as `tooling::runtime_for` applies them (#981).
+        runtime.applyCapturePresets()
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         if document { runtime.setPageMode(true) }
         _ = fitHeight // preserved for API parity with WebAppConfig.fitContentHeight
@@ -1064,7 +1066,7 @@ public extension Runtime {
         func takesPointer(_ el: El<State>, role: String) -> Bool {
             let h = el.handlers
             if h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil
-                || h.onSecondaryClick != nil || h.onPointerDown != nil || h.onDrag != nil
+                || h.onSecondaryClick != nil || h.onMiddlePress != nil || h.onPointerDown != nil || h.onDrag != nil
                 || h.editLens != nil || el.a11yHref != nil {
                 return true
             }

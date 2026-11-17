@@ -350,7 +350,8 @@ struct LayoutRowsParityTests {
             pixelScale: 2.0,
             systemDark: true
         ) { s, _ in
-            let txt: El<StreamState> = text(s.text).wrapText().wFull().reveal(wordFade: 0.18)
+            var txt: El<StreamState> = text(s.text).wrapText().wFull()
+            txt.runtimeExtras["shell.revealWordFade"] = Float(0.18)
             return col().wFull().growth(GrowthSpec.default).child(
                 col().key("row").wFull().streaming(s.streaming).child(txt)
             )

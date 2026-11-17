@@ -182,7 +182,16 @@ struct MarkdownCloseoutParityTests {
             pureRT.update(at: 0.14) { s, _ in s.accent = newInk }
             _ = pureRT.frame(at: 0.15)
             #expect(renders.take() == 3)
-            #expect(pureRT.elements().contains(where: { $0.key == "b0" && $0.textColor == newInk }))
+            _ = pureRT.frame(at: 2.0)
+            #expect(pureRT.elements().contains(where: {
+                $0.key == "b0"
+                    && ($0.textColor.map {
+                        abs($0.r - newInk.r) < 1e-3
+                            && abs($0.g - newInk.g) < 1e-3
+                            && abs($0.b - newInk.b) < 1e-3
+                            && abs($0.a - newInk.a) < 1e-3
+                    } ?? false)
+            }))
         }
 
         // #14: multiple links each keep their own independent help tooltip
@@ -517,6 +526,20 @@ struct MarkdownCloseoutParityTests {
         #expect(c1111 != nil && c0000 != nil)
         if let w1 = c1111?.rect[2], let w0 = c0000?.rect[2] {
             #expect(abs(w1 - w0) < 0.01)
+        }
+
+        // Tabular figures (on by default) give every digit one width and leave other text alone
+        // (`tests/markdown.rs:367-375`).
+        for family in [FontFamily.systemUI, FontFamily.named("System Font")] {
+            let plain = TextStyle(size: 14, weight: 400).family(family)
+            let tnum = plain.features("'tnum' 1")
+            let w = { (t: String, f: TextStyle) -> Float in TextMeasure.measure(t, style: f).x }
+            #expect(w("1111", tnum) == w("0000", tnum), "\(family)")
+            #expect(w("1111", plain) != w("0000", plain), "\(family)'s default figures are proportional")
+            // Words only: Inter's tabular set also covers the space and the comma, as Chromium
+            // measures it ("draft cursor, updatedAt" at 14 px: 153.0625 plain, 153.296875 with 'tnum'),
+            // which widths rounded up to whole points hid until #934.
+            #expect(w("draftCursorUpdatedAt", tnum) == w("draftCursorUpdatedAt", plain), "\(family)")
         }
 
         // #77, #82, #96: narrow container stops columns; scrollWide keeps narrow table compact & lets fullWidth scroll wide

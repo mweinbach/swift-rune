@@ -963,4 +963,75 @@ struct ScrollBarRuntimeParityTests {
         #expect(try rect(rt, "scroll-bar")[3] == 105.0 - 2.0 * ScrollBarMetrics.inset)
         #expect(paneRuns == runs)
     }
+
+    // 22. P2-16 (14eb362e / #871): ScrollView & MenuScroll only take drags on thumb; empty track passes presses through.
+    @Test("ScrollView & MenuScroll thumbOnly leaves empty track to viewport while dragging thumb scrolls accurately (#871)")
+    func thumbOnlyLeavesEmptyTrackToViewportAndDragsThumb() throws {
+        struct App {
+            var clicks: [Int] = []
+        }
+        let kit = Kit.neutral(dark: true)
+        #expect(KitScrollBarStyle.scrollView(kit).thumbOnly == true)
+        #expect(KitScrollBarStyle.menuScroll(kit).thumbOnly == true)
+        #expect(KitScrollBarStyle.fromKit(kit).thumbOnly == false)
+        #expect(KitScrollBarStyle.native(kit).thumbOnly == false)
+
+        let style = KitScrollBarStyle.scrollView(kit).alwaysVisible(true)
+        let rt = Runtime(state: App(), viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { _, _ in
+            col().size(200.0, 100.0).child(
+                col()
+                    .key("scroll")
+                    .wFull()
+                    .h(100.0)
+                    .scroll(stickBottom: false)
+                    .child(col().children((0..<25).map { i in
+                        el().key("row\(i)")
+                            .wFull()
+                            .h(20.0)
+                            .onClick { st, _ in st.clicks.append(i) }
+                    }))
+                    .scrollBarStyled(style)
+            )
+        }
+        rt.setSystemScrollBars(.always)
+        var now = 0.0
+        _ = rt.frame(at: now)
+        frames(rt, 2, now: &now)
+
+        let slotRect = try rect(rt, "thumb-slot")
+        let thumbRect = try rect(rt, "thumb")
+        #expect(slotRect[2] == style.resolvedStripWidth)
+        #expect(thumbRect[2] == 4.0)
+
+        // Pressing empty track well below the thumb hits the row behind it and does not page/jump.
+        let emptyTrackPt = Vec2(194.0, 90.0) // row4 (y = 80..100)
+        #expect(emptyTrackPt.y > slotRect[1] + slotRect[3] + 2.0)
+        rt.pointerMove(to: emptyTrackPt, at: now)
+        rt.pointerDown(at: emptyTrackPt, at: now)
+        rt.pointerUp(at: emptyTrackPt, at: now)
+        frames(rt, 2, now: &now)
+        #expect(rt.state.clicks == [4])
+        #expect(try top(rt) == 0.0)
+
+        // Pressing thumb-slot does not fire row click and does not jump on down; dragging scrolls smoothly.
+        let grabPt = Vec2(slotRect[0] + 2.0, slotRect[1] + 6.0) // 12pt wide strip beside the 4pt pill
+        rt.pointerMove(to: grabPt, at: now)
+        rt.pointerDown(at: grabPt, at: now)
+        frames(rt, 1, now: &now)
+        #expect(rt.state.clicks == [4])
+        #expect(try top(rt) == 0.0)
+
+        let trackLen: Float = 100.0 - style.trackStartInset - style.trackEndInset // 84
+        let travel = trackLen - slotRect[3] // 84 - 32 = 52
+        rt.pointerMove(to: Vec2(grabPt.x, grabPt.y + travel * 0.5), at: now)
+        frames(rt, 1, now: &now)
+        let midTop = try top(rt)
+        #expect(abs(midTop - (-200.0)) < 1.0)
+
+        rt.pointerMove(to: Vec2(grabPt.x, grabPt.y + travel), at: now)
+        rt.pointerUp(at: Vec2(grabPt.x, grabPt.y + travel), at: now)
+        frames(rt, 2, now: &now)
+        #expect(try top(rt) == -400.0)
+        #expect(rt.state.clicks == [4])
+    }
 }

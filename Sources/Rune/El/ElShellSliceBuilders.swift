@@ -11,6 +11,7 @@ private enum ShellElExtrasKey {
     static let spanRadius = "shell.spanRadius"
     static let strikes = "shell.strikes"
     static let wrapAnywhere = "shell.wrapAnywhere"
+    static let revealWordFade = "shell.revealWordFade"
     static let outline = "shell.elOutline"
     static let paintAlpha = "shell.paintAlpha"
     static let layerOpacity = "shell.layerOpacity"
@@ -78,6 +79,7 @@ extension El {
         if enabled {
             copy.textStyle.wrap = .wrap
         }
+        copy.textStyle.wrapAnywhere = enabled
         copy.runtimeExtras["htmlWrapAnywhere"] = enabled
         copy.runtimeExtras[ShellElExtrasKey.wrapAnywhere] = enabled
         return copy
@@ -89,10 +91,12 @@ extension El {
     }
 
     /// Enables streaming word-by-word reveal over `wordFade` seconds per word (`El::reveal`).
+    /// Negative values disable word reveal, matching upstream `El::reveal(-1.0)`.
     public func reveal(wordFade: Float) -> Self {
         guard isTextElement else { return self }
+        let value = wordFade.isFinite ? wordFade : 0
         var copy = self
-        copy.revealDuration = wordFade.isFinite ? max(0, wordFade) : 0
+        copy.runtimeExtras[ShellElExtrasKey.revealWordFade] = value
         return copy
     }
 
@@ -187,7 +191,7 @@ extension El {
     }
 
     internal var elRevealWordFade: Float? {
-        revealDuration >= 0 ? revealDuration : nil
+        runtimeExtras[ShellElExtrasKey.revealWordFade] as? Float
     }
 
     internal var elOutline: Outline? {

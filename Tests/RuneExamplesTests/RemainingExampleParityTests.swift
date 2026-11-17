@@ -81,7 +81,7 @@ struct RemainingExampleParityTests {
         #expect(rt.state.field.text == "Hi")
         let last = try #require(rt.state.last)
         #expect(last.0 == "Pasted")
-        #expect(last.1.html == "<b>Hi</b><img src=x>")
+        #expect(last.1.html == #"<b>Hi</b><img src="x">"#)
 
         let copyRect = try #require(rt.element(byKey: "copy")?.rect)
         let copyCenter = Vec2(copyRect[0] + copyRect[2] * 0.5, copyRect[1] + copyRect[3] * 0.5)
@@ -217,9 +217,9 @@ struct RemainingExampleParityTests {
         let png = URL(fileURLWithPath: "/tmp/sunset.png")
         let txt = URL(fileURLWithPath: "/tmp/notes.txt")
 
-        rt.dragFiles([png], at: picCenter, at: 0.01)
+        rt.dragFiles([png, txt], at: picCenter, at: 0.01)
         #expect(rt.state.over == "pictures")
-        #expect(rt.dropFiles([png], at: picCenter, at: 0.02))
+        #expect(rt.dropFiles([png, txt], at: picCenter, at: 0.02))
         rt.frame(at: 0.03)
         #expect(rt.state.over == nil)
         #expect(rt.state.last?.0 == "pictures")

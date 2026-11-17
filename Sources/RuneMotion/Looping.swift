@@ -33,7 +33,7 @@ public enum LoopMode: Sendable, Hashable {
 /// What a `LoopTrack` drives (`looping.rs`).
 public enum LoopKind: Sendable, Equatable {
     case opacity(low: Float, high: Float)
-    /// Piecewise-linear, wall-clock opacity with a bounded frame rate.
+    /// Piecewise-linear, wall-clock opacity sampled at display rate or a fixed cadence.
     case opacityCycle(Cycle)
     /// Finite opacity/scale choreography; holds its last pose at rest.
     case sequence(MotionSequence)
@@ -103,6 +103,8 @@ public struct LoopSpec: Sendable, Equatable {
 public struct LoopTrack: Sendable {
     private enum PhaseState: Sendable, Equatable {
         case playing(since: Double)
+        /// A finite sequence that played out: it holds its last pose, and enabling it again leaves
+        /// it there. It does not replay.
         case done
     }
 
@@ -161,14 +163,9 @@ public struct LoopTrack: Sendable {
     }
 
     /// Cools to rest without stopping or resetting phase. Reversal inherits envelope velocity.
+    /// A finite sequence that cooled mid-play carries on from where its phase had reached; one
+    /// that played out stays `.done` and does not replay.
     public mutating func setEnabled(_ enabled: Bool, at now: Double) {
-        if isFiniteSequence {
-            if enabled && amplitude.target == 0.0 {
-                phaseState = .playing(since: now + spec.delay)
-            } else if !enabled {
-                phaseState = .done
-            }
-        }
         amplitude.animateTo(enabled ? 1.0 : 0.0, anim: Anim(curve: .spring(Spring(duration: 0.18, bounce: 0.0))), at: now)
     }
 
@@ -200,7 +197,7 @@ public struct LoopTrack: Sendable {
         case .done:
             return false
         case .playing(let since) where isFiniteSequence:
-            return now >= since && now < since + spec.period
+            return amplitude.target > 0.0 && now >= since && now < since + spec.period
         case .playing(let since):
             if case let .count(n) = spec.mode, now >= since + Double(n) * spec.period {
                 return !amplitude.isSettled(at: now)
@@ -217,10 +214,10 @@ public struct LoopTrack: Sendable {
         return nil
     }
 
-    /// Wall-clock cycles retain their cadence even when animation time is paused.
+    /// A stepped cycle's timer interval. Continuous tracks use the host's frame request.
     public func frameInterval() -> Double? {
         if case let .opacityCycle(c) = spec.kind {
-            return 1.0 / Double(max(c.fps, 1.0))
+            return c.frameInterval()
         }
         return nil
     }

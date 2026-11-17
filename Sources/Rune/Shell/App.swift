@@ -2,6 +2,27 @@ import Foundation
 
 // MARK: - App Window / Activation Request Coalescing (app.rs)
 
+private final class WindowRequestOrderCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nextValue: UInt64 = 1
+
+    func next() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        let value = nextValue
+        nextValue &+= 1
+        return value
+    }
+}
+
+private let windowRequestOrderCounter = WindowRequestOrderCounter()
+
+/// Monotonic modification-order tag used to compare UI-thread `Tx.minimize()` calls
+/// against mutex-published `AppHandle` restore/cancel calls (`app::requests::window_request_order`).
+internal func windowRequestOrder() -> UInt64 {
+    windowRequestOrderCounter.next()
+}
+
 /// Window visibility / lifecycle command queued via `AppHandle` (`rune::app::WindowRequest`).
 public enum AppWindowRequest: Equatable, Sendable {
     case none
@@ -21,7 +42,9 @@ public enum AppActivation: Equatable, Sendable {
 
 /// Result of draining coalesced requests from `AppShared`.
 public struct AppDrainedRequests<State> {
+    internal var lastCancelOrder: UInt64 = 0
     public var window: AppWindowRequest = .none
+    public var openToken: String? = nil
     public var position: Vec2? = nil
     public var place: PlaceRequest? = nil
     public var activation: AppActivation = .none
@@ -30,6 +53,15 @@ public struct AppDrainedRequests<State> {
     public var dockIcon: AppIcon? = nil
     public var updates: [(_ state: inout State, _ tx: inout Tx) -> Void] = []
     public var updateIfs: [(_ state: inout State, _ tx: inout Tx) -> Bool] = []
+    internal var orderedUpdates: [(_ state: inout State, _ tx: inout Tx) -> Bool] = []
+
+    /// Records the cancel order and strips a pending `.minimize` (`Requests::cancel_minimize`).
+    internal mutating func cancelMinimize() {
+        lastCancelOrder = windowRequestOrder()
+        if activation == .minimize {
+            activation = .none
+        }
+    }
 
     public var isEmpty: Bool {
         window == .none
@@ -51,6 +83,7 @@ public final class AppShared<State>: @unchecked Sendable {
     private var visibleFlag: Bool
     private var errorMessage: String?
     private var pending = AppDrainedRequests<State>()
+    public let shortcuts = ShortcutHub<State>()
 
     public init(waker: Waker = Waker(), isVisible: Bool = false) {
         self.waker = waker
@@ -109,9 +142,7 @@ public final class AppShared<State>: @unchecked Sendable {
     public func requestOpen() {
         mutateAndWake { req in
             req.window = .open
-            if req.activation == .minimize {
-                req.activation = .none
-            }
+            req.cancelMinimize()
         }
     }
 
@@ -126,14 +157,13 @@ public final class AppShared<State>: @unchecked Sendable {
     public func requestHide() {
         mutateAndWake { req in
             req.window = .hide
-            if req.activation == .minimize {
-                req.activation = .none
-            }
+            req.cancelMinimize()
         }
     }
 
     public func requestFocus() {
         mutateAndWake { req in
+            req.cancelMinimize()
             switch req.activation {
             case .none, .minimize:
                 req.activation = .focus
@@ -143,8 +173,13 @@ public final class AppShared<State>: @unchecked Sendable {
         }
     }
 
-    public func requestActivate() {
+    public func requestActivate(_ token: String? = nil) {
         mutateAndWake { req in
+            req.cancelMinimize()
+            if let token, !token.isEmpty {
+                req.window = .open
+                req.openToken = token
+            }
             req.activation = .activate
         }
     }
@@ -166,9 +201,7 @@ public final class AppShared<State>: @unchecked Sendable {
     public func requestClose() {
         mutateAndWake { req in
             req.window = .close
-            if req.activation == .minimize {
-                req.activation = .none
-            }
+            req.cancelMinimize()
         }
     }
 
@@ -200,13 +233,37 @@ public final class AppShared<State>: @unchecked Sendable {
     public func enqueueUpdate(_ update: @escaping (_ state: inout State, _ tx: inout Tx) -> Void) {
         mutateAndWake { req in
             req.updates.append(update)
+            req.orderedUpdates.append { s, tx in
+                update(&s, &tx)
+                return true
+            }
         }
     }
 
     public func enqueueUpdateIf(_ updateIf: @escaping (_ state: inout State, _ tx: inout Tx) -> Bool) {
         mutateAndWake { req in
             req.updateIfs.append(updateIf)
+            req.orderedUpdates.append(updateIf)
         }
+    }
+
+    /// Queues an `update` without waking the loop (`Shared::queue_update`).
+    internal func queueUpdateWithoutWake(_ update: @escaping (_ state: inout State, _ tx: inout Tx) -> Void) {
+        lock.lock()
+        pending.updates.append(update)
+        pending.orderedUpdates.append { s, tx in
+            update(&s, &tx)
+            return true
+        }
+        lock.unlock()
+    }
+
+    /// Queues a conditional `updateIf` without waking the loop (`Shared::queue_update`).
+    internal func queueUpdateIfWithoutWake(_ updateIf: @escaping (_ state: inout State, _ tx: inout Tx) -> Bool) {
+        lock.lock()
+        pending.updateIfs.append(updateIf)
+        pending.orderedUpdates.append(updateIf)
+        lock.unlock()
     }
 
     /// Takes all coalesced requests atomically without holding the lock across user callbacks (`Shared::take`).
@@ -234,28 +291,39 @@ public final class AppShared<State>: @unchecked Sendable {
 
     /// Executes queued state updates FIRST without holding the lock, then drains the coalesced
     /// window/activation/quit requests so any `open()`/`close()`/`quit()` issued inside an
-    /// `update` returns in the very same drain (`Shared::drain` in `app.rs:910-915`).
+    /// `update` returns in the very same drain (`Shared::drain` + `Shared::drain_window` in `app/requests.rs`).
     @discardableResult
-    public func applyStateUpdates(to runtime: Runtime<State>, at now: Double) -> AppDrainedRequests<State> {
+    public func applyStateUpdates(
+        to runtime: Runtime<State>,
+        at now: Double,
+        afterUpdate: ((Bool) -> Void)? = nil
+    ) -> AppDrainedRequests<State> {
         lock.lock()
         let updates = pending.updates
         let updateIfs = pending.updateIfs
+        let orderedUpdates = pending.orderedUpdates
         pending.updates.removeAll(keepingCapacity: true)
         pending.updateIfs.removeAll(keepingCapacity: true)
+        pending.orderedUpdates.removeAll(keepingCapacity: true)
         lock.unlock()
 
-        for fn in updates {
-            runtime.update(at: now, fn)
-        }
-        for fn in updateIfs {
-            runtime.updateIf(at: now, fn)
+        var batchMinimizeOrder: UInt64 = 0
+        for fn in orderedUpdates {
+            let (changed, minOrder) = runtime.updateIfOrdered(at: now, fn)
+            if let minOrder, minOrder > batchMinimizeOrder {
+                batchMinimizeOrder = minOrder
+            }
+            afterUpdate?(changed)
         }
 
         lock.lock()
         var out = pending
         out.updates = updates
         out.updateIfs = updateIfs
+        out.orderedUpdates = orderedUpdates
+        pending.lastCancelOrder = 0
         pending.window = .none
+        pending.openToken = nil
         pending.position = nil
         pending.place = nil
         pending.activation = .none
@@ -263,6 +331,11 @@ public final class AppShared<State>: @unchecked Sendable {
         pending.relaunch = false
         pending.dockIcon = nil
         lock.unlock()
+
+        if batchMinimizeOrder > out.lastCancelOrder {
+            runtime.minimizeRequested = true
+            _ = runtime.minimizeStep(.asked)
+        }
         return out
     }
 
@@ -294,6 +367,7 @@ public final class AppHandle<State>: @unchecked Sendable {
         shared.requestPlace(PlaceRequest(display: display, placement: placement))
     }
     public func activate() { shared.requestActivate() }
+    public func activate(_ token: String) { shared.requestActivate(token) }
     public func close() { shared.requestClose() }
     public func minimize() { shared.requestMinimize() }
     public func quit() { shared.requestQuit() }
@@ -309,6 +383,31 @@ public final class AppHandle<State>: @unchecked Sendable {
 
     public func updateIf(_ body: @escaping (_ state: inout State, _ tx: inout Tx) -> Bool) {
         shared.enqueueUpdateIf(body)
+    }
+
+    /// Registers a global shortcut while the app is running (`AppHandle::register_shortcut`).
+    @discardableResult
+    public func registerShortcut(
+        _ shortcut: ParsedShortcut,
+        _ handler: @escaping @Sendable (_ state: inout State, _ tx: inout Tx) -> Void
+    ) -> Result<UInt32, ShortcutError> {
+        shared.shortcuts.register(shortcut, handler: handler)
+    }
+
+    /// Unregisters a previously registered global shortcut (`AppHandle::unregister_shortcut`).
+    @discardableResult
+    public func unregisterShortcut(_ id: UInt32) -> Result<Void, ShortcutError> {
+        shared.shortcuts.unregister(id)
+    }
+
+    /// Returns the name of the owner holding `shortcut` in this process or OS (`AppHandle::shortcut_owner`).
+    public func shortcutOwner(_ shortcut: ParsedShortcut) -> String? {
+        shared.shortcuts.owner(of: shortcut)
+    }
+
+    /// Takes errors recorded while registering startup `App.globalShortcut` declarations (`AppHandle::take_shortcut_errors`).
+    public func takeShortcutErrors() -> [ShortcutError] {
+        shared.shortcuts.takeErrors()
     }
 }
 
@@ -685,6 +784,7 @@ public struct App<State> {
     public var onFocusHook: ((inout State, Bool, inout Tx) -> Void)? = nil
     public var onModifiersHook: ((inout State, Mods, inout Tx) -> Void)? = nil
     public var onVisibilityHook: ((inout State, Bool, inout Tx) -> Void)? = nil
+    public var onRestHook: ((inout State, inout Tx) -> Bool)? = nil
     public var onImeHook: ((inout State, Ime, inout Tx) -> Bool)? = nil
     public var onCloseHook: ((inout State, inout Tx) -> Bool)? = nil
     public var onQuitHook: ((inout State, inout Tx) -> Void)? = nil
@@ -720,6 +820,7 @@ public struct App<State> {
         self.makeState = state
         self.view = view
         self.sharedHandle = AppHandle<State>()
+        self.sharedHandle.shared.shortcuts.named(title)
         if let minSize {
             self.windowOptionsValue.minSize = minSize
         }
@@ -738,6 +839,7 @@ public struct App<State> {
         self.makeState = makeState
         self.view = view
         self.sharedHandle = AppHandle<State>()
+        self.sharedHandle.shared.shortcuts.named(title)
     }
 
     public func handle() -> AppHandle<State> {
@@ -984,6 +1086,13 @@ public struct App<State> {
         return copy
     }
 
+    /// Runs when a window rests after drawing stops or it becomes hidden/minimized/occluded (`App::on_rest`).
+    public func onRest(_ hook: @escaping (inout State, inout Tx) -> Bool) -> App<State> {
+        var copy = self
+        copy.onRestHook = hook
+        return copy
+    }
+
     public func onIme(_ hook: @escaping (inout State, Ime, inout Tx) -> Bool) -> App<State> {
         var copy = self
         copy.onImeHook = hook
@@ -1174,6 +1283,7 @@ public struct App<State> {
         runtime.onFocus = onFocusHook
         runtime.onModifiers = onModifiersHook
         runtime.onVisibility = onVisibilityHook
+        runtime.onRest = onRestHook
         runtime.onIme = onImeHook
         runtime.onClose = onCloseHook
         runtime.onQuit = onQuitHook
@@ -1187,6 +1297,7 @@ public struct App<State> {
             allowUnmodified: allowUnmodifiedShortcutsEnabled,
             sharedHandle: sharedHandle
         )
+        runtime.setModifierKeys(sendsModifierKeys)
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         sharedHandle.shared.setWaker(waker)
         withSceneClock(SceneClock(now: 0.0, dt: 0.0)) {
@@ -1197,9 +1308,12 @@ public struct App<State> {
 
     /// Creates a headless `Runtime<State>` matching upstream `App::headless_runtime`,
     /// attaching `playgroundHost` if enabled without reading command-line flags.
+    /// `processEnvironment`: where the capture presets are read (`RUNE_CONTRAST`,
+    /// `RUNE_INCREASE_CONTRAST`), the process's own by default.
     public func headlessRuntime(
         size viewportSize: Vec2? = nil,
-        env: Env = Env()
+        env: Env = Env(),
+        processEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Runtime<State> {
         HeadlessRunner.registerFonts(fontData)
         let runtime = makeRuntime(
@@ -1209,6 +1323,9 @@ public struct App<State> {
             reducedMotion: false,
             waker: Waker()
         )
+        // `tooling::runtime_for` (which `App::headless_runtime` builds through): the capture
+        // presets, never the machine's own settings, so runs stay reproducible (#981).
+        runtime.applyCapturePresets(processEnvironment)
         let resolvedChrome = customTitlebar?.macChrome(chromeStyle) ?? chromeStyle
         if resolvedChrome.fullSizeContent && !(windowOptionsValue.borderless || chromeStyle.borderless) {
             runtime.cxSettings.titlebarInset = resolvedChrome.titlebarInset()
@@ -1239,6 +1356,14 @@ public struct App<State> {
     public func tryRun(arguments: [String]? = nil) throws {
         try run(arguments: arguments)
     }
+
+    /// Runs until the app quits, printing startup errors to stderr and exiting `1` on native targets (`App::run` / `tooling::started`).
+    @MainActor
+    public func runOrExit(arguments: [String]? = nil) {
+        RuneStartup.started {
+            try tryRun(arguments: arguments)
+        }
+    }
 }
 
 // MARK: - Tx Shell Extensions (el/tx.rs)
@@ -1251,7 +1376,7 @@ public extension Tx {
 
     /// Requests minimizing the active window (`Tx::minimize`).
     mutating func minimize() {
-        runtimeActions["minimizeWindow"] = true
+        minimizeOrder = windowRequestOrder()
     }
 
     /// Requests quitting and relaunching the app (`Tx::relaunch`).
@@ -1295,7 +1420,7 @@ public extension Tx {
     }
 
     internal var isMinimizeRequested: Bool {
-        (runtimeActions["minimizeWindow"] as? Bool) == true
+        minimizeOrder != nil
     }
 
     internal var isRelaunchRequested: Bool {

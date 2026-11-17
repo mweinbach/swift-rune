@@ -84,15 +84,9 @@ public struct GrowTrack: Sendable, Equatable {
 
     enum Lift: Sendable, Equatable {
         case none
+        /// Only `GrowTrack.hideAbove` cuts a fold to `.riding`; a computed slope is `.easing` however it lands.
         case riding(pinned: Float)
         case easing(a: Float, b: Float)
-
-        static func slope(_ a: Float, _ b: Float) -> Lift {
-            if b == -1.0 {
-                return .riding(pinned: a)
-            }
-            return .easing(a: a, b: b)
-        }
     }
 
     public var h: Float
@@ -180,7 +174,7 @@ public struct GrowTrack: Sendable, Equatable {
         }
         let d = target - h
         if prevLift > 1.0 / 64.0 && abs(d) > 1.0 / 64.0 {
-            lift = .slope(prevLift * target / d, -prevLift / d)
+            lift = .easing(a: prevLift * target / d, b: -prevLift / d)
         } else {
             lift = .none
         }
@@ -213,7 +207,7 @@ public struct GrowTrack: Sendable, Equatable {
         let d = stageAt - curH
         let end = target - stageAt
         let b: Float = d > 1.0 / 64.0 ? (end - from) / d : 0.0
-        lift = .slope(d > 1.0 / 64.0 ? (from - b * curH) : end, b)
+        lift = .easing(a: d > 1.0 / 64.0 ? (from - b * curH) : end, b: b)
         stage = .stopAt(stageAt)
         span = d
     }
@@ -226,6 +220,15 @@ public struct GrowTrack: Sendable, Equatable {
     public var isShut: Bool {
         if case .fold(_, _, _, let shut) = motion { return shut }
         return false
+    }
+
+    var isRiding: Bool {
+        if case .riding = lift { return true }
+        return false
+    }
+
+    var isLiftedAtAll: Bool {
+        lift != .none
     }
 
     public var isPaced: Bool {

@@ -240,16 +240,21 @@ public final class SelectionCoordinator {
         let far: SelectionFar? = (first.path == last.path)
             ? nil
             : SelectionFar(path: last.path, content: last.text)
+        let firstNodesIdx = nodes.firstIndex(of: first) ?? 0
+        let lastNodesIdx = nodes.firstIndex(of: last) ?? firstNodesIdx
+        let betweenHash = far == nil
+            ? 0
+            : SelectionMath.computeBetweenHash(in: nodes, anchorIdx: firstNodesIdx, farIdx: lastNodesIdx)
         phase.place(ActiveSelection(
             path: first.path,
             content: first.text,
             anchor: 0,
             focus: last.text.utf8.count,
             origin: (0, last.text.utf8.count),
-            far: far
+            far: far,
+            betweenHash: betweenHash
         ))
-        if let firstIdx = nodes.firstIndex(of: first),
-           let group = SelectAllResolver.groupPath(forNodeAt: firstIdx, in: nodes) {
+        if let group = SelectAllResolver.groupPath(forNodeAt: firstNodesIdx, in: nodes) {
             pick.noteClick(groupPath: group)
         }
         let ranges = selectedNodes.map { ($0, 0..<$0.text.utf8.count) }
@@ -266,18 +271,24 @@ public final class SelectionCoordinator {
         if case .selectGroup(_, let paths, _) = outcome,
            let firstPath = paths.first,
            let lastPath = paths.last,
-           let first = nodes.first(where: { $0.path == firstPath }),
-           let last = nodes.first(where: { $0.path == lastPath }) {
+           let firstIdx = nodes.firstIndex(where: { $0.path == firstPath }),
+           let lastIdx = nodes.firstIndex(where: { $0.path == lastPath }) {
+            let first = nodes[firstIdx]
+            let last = nodes[lastIdx]
             let far: SelectionFar? = (first.path == last.path)
                 ? nil
                 : SelectionFar(path: last.path, content: last.text)
+            let betweenHash = far == nil
+                ? 0
+                : SelectionMath.computeBetweenHash(in: nodes, anchorIdx: firstIdx, farIdx: lastIdx)
             phase.place(ActiveSelection(
                 path: first.path,
                 content: first.text,
                 anchor: 0,
                 focus: last.text.utf8.count,
                 origin: (0, last.text.utf8.count),
-                far: far
+                far: far,
+                betweenHash: betweenHash
             ))
         }
         return outcome
@@ -319,6 +330,32 @@ public final class SelectionCoordinator {
         return buildSelection(ranges: [(nodes[anchorIdx], a..<b)], backward: sel.focus < sel.anchor)
     }
 
+    private static func sameSemanticSelection(_ a: TextSelection?, _ b: TextSelection?) -> Bool {
+        switch (a, b) {
+        case (nil, nil):
+            return true
+        case let (lhs?, rhs?):
+            guard lhs.backward == rhs.backward,
+                  lhs.text == rhs.text,
+                  lhs.texts.count == rhs.texts.count else {
+                return false
+            }
+            for (x, y) in zip(lhs.texts, rhs.texts) {
+                guard x.range == y.range, x.text == y.text, x.whole == y.whole else {
+                    return false
+                }
+                if let kx = x.key, let ky = y.key {
+                    if kx != ky { return false }
+                } else if x.path != y.path && !SelectionMath.sameKeyedPath(x.path, y.path) {
+                    return false
+                }
+            }
+            return true
+        default:
+            return false
+        }
+    }
+
     /// Evaluates which `onSelectionChange` watcher paths should fire for the current selection.
     public func collectSelectionChanges<State>(
         elements: [(path: String, el: El<State>)],
@@ -328,17 +365,28 @@ public final class SelectionCoordinator {
         let selectedPaths = Set(active?.texts.map(\.path) ?? [])
         var nextHeard: [String: TextSelection] = [:]
         var out: [(path: String, change: SelectionChange)] = []
+        var remaining = heardByPath
+        var resolved: [(path: String, nowSel: TextSelection?, prevSel: TextSelection?)] = []
 
         for (path, el) in elements where el.hasSelectionChangeHandler {
             let hitsSubtree = selectedPaths.contains(where: { $0 == path || $0.hasPrefix(path + "/") })
             let nowSel = hitsSubtree ? active : nil
-            let prevSel = heardByPath.removeValue(forKey: path) ?? {
-                if let oldKey = heardByPath.keys.first(where: { SelectionMath.sameKeyedPath($0, path) }) {
-                    return heardByPath.removeValue(forKey: oldKey)
+            let exactOrKeyed = remaining.removeValue(forKey: path) ?? {
+                if let oldKey = remaining.keys.first(where: { SelectionMath.sameKeyedPath($0, path) }) {
+                    return remaining.removeValue(forKey: oldKey)
                 }
                 return nil
             }()
-            if prevSel != nowSel {
+            resolved.append((path, nowSel, exactOrKeyed))
+        }
+
+        for (path, nowSel, directPrev) in resolved {
+            var prevSel = directPrev
+            if prevSel == nil, let nowSel,
+               let fallbackKey = remaining.keys.first(where: { Self.sameSemanticSelection(remaining[$0], nowSel) }) {
+                prevSel = remaining.removeValue(forKey: fallbackKey)
+            }
+            if !Self.sameSemanticSelection(prevSel, nowSel) {
                 out.append((
                     path,
                     SelectionChange(selection: nowSel, was: prevSel != nil, isDragging: phase.isDragging)

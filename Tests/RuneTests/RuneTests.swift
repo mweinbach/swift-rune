@@ -167,6 +167,7 @@ struct RuneTests {
         struct TestState: Equatable {
             var toggled: Bool = false
             var sliderVal: Float = 0.2
+            var sliderBeforeDrag: Float = 0.2
             var modalOpen: Bool = false
             var outsideClicks: Int = 0
             var modalClicks: Int = 0
@@ -203,7 +204,14 @@ struct RuneTests {
                         .key("slider")
                         .size(200, 24)
                         .onDrag { st, drag, _ in
-                            st.sliderVal = (drag.local.x / max(1, drag.size.x)).clamped(to: 0...1)
+                            if drag.phase == .down {
+                                st.sliderBeforeDrag = st.sliderVal
+                            }
+                            if drag.isCancelled {
+                                st.sliderVal = st.sliderBeforeDrag
+                            } else {
+                                st.sliderVal = (drag.local.x / max(1, drag.size.x)).clamped(to: 0...1)
+                            }
                         }
                 )
                 .child(

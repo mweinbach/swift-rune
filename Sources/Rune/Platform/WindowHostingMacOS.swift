@@ -584,6 +584,7 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
     var restTimer: Timer?
     var fullScreenWatch: FullScreenWatch?
     var trafficLightSpot: RuneTrafficLights.Spot?
+    var shortcutGuard: ShortcutGuard?
     var shortcutBridge: MacOSHostShortcutBridge?
     var isHiddenOrClosed = false
     var isTornDown = false
@@ -609,11 +610,16 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        // `WindowEvent::Focused`: reduced motion, the contrast theme and Increase Contrast are
+        // read again (`window/events.rs`).
+        view.rereadSystemAccessibilitySettings()
         entry.setFocused(runtimeObj: runtime, focused: true)
         view.requestRender()
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        // `WindowEvent::Focused(false)` re-reads them too.
+        view.rereadSystemAccessibilitySettings()
         entry.setFocused(runtimeObj: runtime, focused: false)
         view.requestRender()
     }
@@ -622,6 +628,8 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
         if !window.occlusionState.contains(.visible) {
             stepRest(.unseen)
         } else {
+            // Uncovered: re-sync the chrome as `window/sight.rs` does.
+            entry.syncWindowChrome(runtimeObj: runtime, window: window)
             view.requestRender()
         }
     }
@@ -648,6 +656,8 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
         restTimer?.invalidate()
         restTimer = nil
         isTornDown = true
+        shortcutGuard?.close()
+        shortcutGuard = nil
         shortcutBridge?.clear()
         shortcutBridge = nil
         entry.markMenusRunning(false)
@@ -661,8 +671,10 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
             switch effect {
             case .giveBackUnused:
                 entry.trimIdleCaches(runtimeObj: runtime, all: false)
+                view.giveBackRenderer(all: false)
             case .giveBackAll:
                 entry.trimIdleCaches(runtimeObj: runtime, all: true)
+                view.giveBackRenderer(all: true)
             }
         }
         scheduleRestTimerIfNeeded()
@@ -704,12 +716,18 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     private let accessibilityHost = MacOSAccessibilityHost()
     private lazy var textInputBridge = MacOSTextInputBridge { [weak self] imeEvent in
         guard let self else { return }
-        if self.entry.dispatchImeEvent(runtimeObj: self.runtime, event: imeEvent, at: self.nowSeconds()) {
+        var dispatched = false
+        self.arrived(.keyPress, nil) { dispatched = self.entry.dispatchImeEvent(runtimeObj: self.runtime, event: imeEvent, at: self.nowSeconds()) }
+        if dispatched {
             self.requestRender()
         }
     }
     private var lastAppliedCursor: Cursor = .default
     private var didInitialA11ySync = false
+    /// The accessibility tree must go out again although no commit changed it (#980).
+    private var a11yFollowUp = false
+    /// The launch's `--reduced-motion`: the system's setting can't turn it off.
+    private var forceReducedMotion = false
     private let toolTipOwner = MacOSToolTipOwner()
     private let windowFrameDriver = MacOSWindowFrameDriver()
     private var appliedMenuRevision: UInt64 = 0
@@ -806,7 +824,28 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         } else {
             entry.applyViewport(runtimeObj: runtime, viewport: newVP, pixelScale: Float(scale))
         }
+        // Resized / ScaleFactorChanged re-sync the chrome (`window/events.rs`).
+        if let w = window {
+            entry.syncWindowChrome(runtimeObj: runtime, window: w)
+        }
         requestRender()
+    }
+
+    /// The window's accessibility adapter watches the workspace's display options and reads
+    /// reduced motion, the contrast theme and Increase Contrast again when they change (#980).
+    func watchSystemDisplayOptions(forceReducedMotion: Bool) {
+        self.forceReducedMotion = forceReducedMotion
+        accessibilityHost.watchDisplayOptions { [weak self] in
+            guard let self else { return }
+            self.rereadSystemAccessibilitySettings()
+            self.requestRender()
+        }
+    }
+
+    /// Reduced motion (kept on under the launch's `--reduced-motion`), the contrast theme and
+    /// Increase Contrast, read again from the system.
+    func rereadSystemAccessibilitySettings() {
+        entry.readSystemAccessibilitySettings(runtimeObj: runtime, forceReducedMotion: forceReducedMotion)
     }
 
     func requestRender() {
@@ -821,7 +860,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         }
         isWindowResting = !(inLiveResize || windowFrameDriver.isMoving)
         entry.setWindowResting(runtimeObj: runtime, resting: isWindowResting)
-        entry.applyAppStateUpdates(runtimeObj: runtime, at: t)
+        entry.applyAppStateUpdates(runtimeObj: runtime, at: t, shortcutGuard: slot?.shortcutGuard)
         entry.syncNativeMenus(
             runtimeObj: runtime,
             appliedRevision: &appliedMenuRevision,
@@ -830,6 +869,12 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         )
         let commitsBefore = entry.viewCommitCount(runtimeObj: runtime)
         let refScene = entry.frame(runtimeObj: runtime, at: t)
+        // A new `Cx::set_titlebar` / `Cx::titlebar_height` moves the traffic lights and the band
+        // (`window/lifecycle.rs` `take_titlebar_changed`); changed insets re-run the view next.
+        if entry.takeTitlebarChanged(runtimeObj: runtime), let w = window {
+            entry.syncWindowChrome(runtimeObj: runtime, window: w)
+            DispatchQueue.main.async { [weak self] in self?.requestRender() }
+        }
         if let title = entry.windowTitle(runtimeObj: runtime), let w = window, w.title != title {
             w.title = title
         }
@@ -871,7 +916,13 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
                 self.entry.stepViewport(runtimeObj: self.runtime, viewport: vp, pixelScale: sc)
             }
         }
-        syncPlatformBridges(treeCommitted: !didInitialA11ySync || entry.viewCommitCount(runtimeObj: runtime) != commitsBefore)
+        // The accessibility stamp: a commit, held words or an attaching reader, or words said since
+        // the last update (`announced`), which a live-only `Tx::announce` brings without a commit.
+        syncPlatformBridges(
+            treeCommitted: !didInitialA11ySync || a11yFollowUp
+                || entry.viewCommitCount(runtimeObj: runtime) != commitsBefore
+                || accessibilityHost.announcementChanged(entry.accessibilityAnnouncement(runtimeObj: runtime))
+        )
 
         if entry.isAnimating(runtimeObj: runtime) || windowFrameDriver.isMoving {
             if displayLinkDriver == nil {
@@ -887,7 +938,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
 
     private func syncPlatformBridges(treeCommitted: Bool) {
         let focused = window?.isKeyWindow ?? true
-        let imeAllowed = entry.hasFocusedTextInput(runtimeObj: runtime) && !entry.hasSecureFocus(runtimeObj: runtime) && focused
+        let imeAllowed = entry.hasImeTarget(runtimeObj: runtime) && !entry.hasSecureFocus(runtimeObj: runtime) && focused
         let cancelIme = entry.consumeImeReset(runtimeObj: runtime)
         let caretRect = MacOSHostViewHelper.caretScreenRect(
             caret: entry.focusedCaretRect(runtimeObj: runtime),
@@ -908,9 +959,17 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
 
         if treeCommitted {
             didInitialA11ySync = true
+            a11yFollowUp = false
+            if accessibilityHost.onActivate == nil {
+                accessibilityHost.onActivate = { [weak self] in self?.scheduleAccessibilityFollowUp() }
+            }
             toolTipOwner.sync(regions: entry.helpRegionsList(runtimeObj: runtime), on: self)
             let snapshot = entry.accessibilitySnapshot(runtimeObj: runtime)
-            accessibilityHost.update(tree: snapshot, parentView: self) { [weak self] id, action in
+            let held = accessibilityHost.update(
+                tree: snapshot,
+                announcement: entry.accessibilityAnnouncement(runtimeObj: runtime),
+                parentView: self
+            ) { [weak self] id, action in
                 MacOSHostViewHelper.dispatchAccessibilityAction(id, action: action) { id, action in
                     guard let self else { return }
                     if self.entry.performAccessibilityAction(
@@ -923,7 +982,16 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
                     }
                 }
             }
+            if held { scheduleAccessibilityFollowUp() }
         }
+    }
+
+    /// Held announcer words or a client that just attached: the runtime stays dirty and the tree
+    /// goes out again on the next frame (`a11y_update`'s `self.dirty = true`).
+    private func scheduleAccessibilityFollowUp() {
+        a11yFollowUp = true
+        entry.markAccessibilityDirty(runtimeObj: runtime)
+        DispatchQueue.main.async { [weak self] in self?.requestRender() }
     }
 
     private func localPoint(for event: NSEvent) -> Vec2 {
@@ -935,18 +1003,24 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         MacOSKeyMapper.mods(for: event)
     }
 
+    /// Dispatches `body` as the platform input `event` of `kind` (else AppKit's current event
+    /// when it is that kind), inside the scope holding when it arrived (`input::time::arrived`).
+    private func arrived(_ kind: HostInputKind, _ event: NSEvent?, _ body: () -> Void) {
+        entry.hostInput(runtimeObj: runtime, kind: kind, eventTimestamp: MacOSInputEvents.timestamp(kind, event), body)
+    }
+
     override func mouseMoved(with event: NSEvent) {
-        entry.pointerMove(runtimeObj: runtime, to: localPoint(for: event), mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerMove(runtimeObj: runtime, to: localPoint(for: event), mods: mods(for: event), at: nowSeconds()) }
         requestRender()
     }
 
     override func mouseExited(with event: NSEvent) {
-        entry.pointerExit(runtimeObj: runtime, at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerExit(runtimeObj: runtime, at: nowSeconds()) }
         requestRender()
     }
 
     override func mouseDragged(with event: NSEvent) {
-        entry.pointerMove(runtimeObj: runtime, to: localPoint(for: event), mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerMove(runtimeObj: runtime, to: localPoint(for: event), mods: mods(for: event), at: nowSeconds()) }
         requestRender()
     }
 
@@ -960,47 +1034,52 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             win.performDrag(with: event)
             return
         }
-        entry.pointerDown(runtimeObj: runtime, at: pt, button: .primary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerDown(runtimeObj: runtime, at: pt, button: .primary, mods: mods(for: event), at: nowSeconds()) }
         requestRender()
     }
 
     override func mouseUp(with event: NSEvent) {
-        entry.pointerUp(runtimeObj: runtime, at: localPoint(for: event), button: .primary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerUp(runtimeObj: runtime, at: localPoint(for: event), button: .primary, mods: mods(for: event), at: nowSeconds()) }
         requestRender()
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        entry.pointerDown(runtimeObj: runtime, at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerDown(runtimeObj: runtime, at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds()) }
         requestRender()
     }
 
     override func rightMouseUp(with event: NSEvent) {
-        entry.pointerUp(runtimeObj: runtime, at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerUp(runtimeObj: runtime, at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds()) }
         requestRender()
     }
 
     override func scrollWheel(with event: NSEvent) {
-        let mult: Float = event.hasPreciseScrollingDeltas ? 1.0 : 12.0
+        // `window/events.rs`: native wheel distances matched to Chromium (#856).
+        let (dx, dy) = WheelDistance.points(for: event)
         let wev = WheelEvent(
-            dx: Float(event.scrollingDeltaX) * mult,
-            dy: Float(event.scrollingDeltaY) * mult,
+            dx: dx,
+            dy: dy,
             precise: event.hasPreciseScrollingDeltas,
             mods: mods(for: event)
         )
-        entry.wheel(runtimeObj: runtime, event: wev, at: localPoint(for: event), now: nowSeconds())
+        arrived(.wheel, event) { entry.wheel(runtimeObj: runtime, event: wev, at: localPoint(for: event), now: nowSeconds()) }
         requestRender()
     }
 
     override func keyDown(with event: NSEvent) {
-        if entry.hasFocusedTextInput(runtimeObj: runtime) && !entry.hasSecureFocus(runtimeObj: runtime) {
-            let imeResult = textInputBridge.processKeyDown(event, in: self)
+        let focused = window?.isKeyWindow ?? true
+        let imeAllowed = entry.hasImeTarget(runtimeObj: runtime) && !entry.hasSecureFocus(runtimeObj: runtime) && focused
+        let optionAsAlt = imeAllowed && entry.imeOptionAsAlt(runtimeObj: runtime)
+        if imeAllowed {
+            var imeResult: MacOSKeyInterceptResult = .forwardKeyDown
+            arrived(.keyPress, event) { imeResult = textInputBridge.processKeyDown(event, in: self, optionAsAlt: optionAsAlt) }
             if imeResult == .handledByIME {
                 requestRender()
                 return
             }
         }
-        guard let kev = MacOSKeyMapper.makeKeyEvent(from: event) else { return }
-        _ = entry.keyDownWithClipboardSync(runtimeObj: runtime, event: kev, at: nowSeconds())
+        guard let kev = MacOSKeyMapper.makeKeyEvent(from: event, optionAsAlt: optionAsAlt) else { return }
+        arrived(.keyPress, event) { _ = entry.keyDownWithClipboardSync(runtimeObj: runtime, event: kev, at: nowSeconds()) }
         requestRender()
     }
 
@@ -1014,6 +1093,11 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     }
 
     override func flagsChanged(with event: NSEvent) {
+        arrived(.keyRelease, event) { dispatchFlagsChanged(event) }
+        requestRender()
+    }
+
+    private func dispatchFlagsChanged(_ event: NSEvent) {
         let now = nowSeconds()
         let fnTransitions = fnKeyMonitor.take()
         if !fnTransitions.isEmpty {
@@ -1031,7 +1115,6 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         } else {
             entry.dispatchModifiers(runtimeObj: runtime, mods: mods(for: event), at: now)
         }
-        requestRender()
     }
 
     // MARK: - NSTextInputClient
@@ -1112,6 +1195,10 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         fileDialogPresenter.cancel()
         entry.cancelPopups(runtimeObj: runtime)
         entry.cancelFileDialogs(runtimeObj: runtime, at: nowSeconds())
+    }
+
+    func giveBackRenderer(all: Bool) {
+        renderer.giveBack(all: all, residentCaches: all)
     }
 
     private func pumpPlatformActions() {
@@ -1228,7 +1315,9 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             try host.openEntry(spec.makeHostEntry())
         }
 
-        if !options.accessory {
+        // `RUNE_OPEN_INACTIVE` (a tool's launch): the app doesn't take activation at launch
+        // either; the activation policy stays the app's own (#962).
+        if OpenInactiveLaunch.activatesAtLaunch(accessory: options.accessory) {
             app.activate(ignoringOtherApps: true)
         }
         defer {
@@ -1293,6 +1382,7 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         )
         slot.host = self
         view.slot = slot
+        view.watchSystemDisplayOptions(forceReducedMotion: parsed.reducedMotion)
         window.delegate = slot
         window.contentView = view
 
@@ -1304,21 +1394,19 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         )
         RuneDragRegions.ownWindowDragging(window: window, chrome: specEntry.chrome)
         slot.trafficLightSpot = RuneTrafficLights.Spot(window: window)
-        let shortcutBridge = MacOSHostShortcutBridge()
-        shortcutBridge.sync(registry: specEntry.shortcutRegistry(runtimeObj: rt))
-        slot.shortcutBridge = shortcutBridge
-        _ = RuneMacWindowConfig.syncChrome(
-            window: window,
-            chrome: specEntry.chrome,
-            titlebar: specEntry.titlebar
-        )
-        slot.fullScreenWatch = FullScreenWatch(window: window) { [weak window, weak specEntry, weak view] in
-            guard let window, let specEntry else { return }
-            _ = RuneMacWindowConfig.syncChrome(
-                window: window,
-                chrome: specEntry.chrome,
-                titlebar: specEntry.titlebar
-            )
+        let skipHostShortcutBridge = specEntry.hasAppGlobalShortcuts
+        slot.shortcutGuard = specEntry.attachShortcuts(wake: waker, headless: false)
+        if !skipHostShortcutBridge {
+            let shortcutBridge = MacOSHostShortcutBridge()
+            shortcutBridge.sync(registry: specEntry.shortcutRegistry(runtimeObj: rt))
+            slot.shortcutBridge = shortcutBridge
+        }
+        // `window/chrome.rs::sync_chrome`: place the traffic lights, then tell the runtime what
+        // the window's controls take of the titlebar (`set_titlebar_inset`, `set_chrome_insets`).
+        specEntry.syncWindowChrome(runtimeObj: rt, window: window)
+        slot.fullScreenWatch = FullScreenWatch(window: window) { [weak window, weak specEntry, weak view, weak rt] in
+            guard let window, let specEntry, let rt else { return }
+            specEntry.syncWindowChrome(runtimeObj: rt, window: window)
             view?.requestRender()
         }
 
@@ -1362,7 +1450,10 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             if specEntry.options.position == nil {
                 window.center()
             }
-            if specEntry.inactive || specEntry.macosWindow.nonactivatingPanel {
+            // `Host::new` reads `RUNE_OPEN_INACTIVE` for every window, those opened later too:
+            // a tool's launch never takes the user's keyboard (#962).
+            let inactive = OpenInactiveLaunch.openInactive(app: specEntry.inactive)
+            if inactive || specEntry.macosWindow.nonactivatingPanel {
                 window.orderFrontRegardless()
             } else {
                 window.makeKeyAndOrderFront(nil)

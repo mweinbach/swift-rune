@@ -700,10 +700,10 @@ public final class MacOSDragOutCoordinator {
         if let pbItem = makeNonFilePasteboardItem(item) {
             let dragging = NSDraggingItem(pasteboardWriter: pbItem)
             let rect = NSRect(
-                x: CGFloat(start.bounds.left),
-                y: CGFloat(start.bounds.top),
-                width: CGFloat(max(16, start.bounds.width)),
-                height: CGFloat(max(16, start.bounds.height))
+                x: CGFloat(start.rect.left),
+                y: CGFloat(start.rect.top),
+                width: CGFloat(max(16, start.rect.width)),
+                height: CGFloat(max(16, start.rect.height))
             )
             dragging.setDraggingFrame(rect, contents: fallbackBoxImage(size: rect.size))
             out.append(dragging)

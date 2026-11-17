@@ -198,7 +198,7 @@ struct ShellPartialCloseoutTests {
         sbRt.setSystemScrollerOverlay(false)
         _ = sbRt.frame(at: 0.02)
         #expect(memoBuilds > b1)
-        #expect(sbRt.element(byKey: "sb-text")?.text == "overlay:false")
+        #expect(sbRt.element(byKey: "sb-memo")?.text == "overlay:false")
 
         // 2. a_focused_field_in_an_offscreen_memo_row_keeps_focus_and_typing
         struct ListState {

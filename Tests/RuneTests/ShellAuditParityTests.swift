@@ -511,7 +511,7 @@ struct ShellAuditParityTests {
         probeRt.update(at: 0.04) { s, _ in s.width = 150 }
         _ = probeRt.frame(at: 0.04)
         #expect(layoutWithBuilds > lwStable)
-        #expect(probeRt.element(byKey: "lw-label")?.text == "lw:150.0")
+        #expect(probeRt.element(byKey: "lw")?.text == "lw:150.0")
 
         // 3. Duplicate memo & region on the same pass both build
         let dupCache = MemoCache()
@@ -522,7 +522,7 @@ struct ShellAuditParityTests {
             let m2: El<Int> = memo("dup", 0, cache: dupCache) { dupMemoBuilds += 1; return el().key("m2") }
             let r1: El<Int> = region("dupR", cache: dupCache) { dupRegionBuilds += 1; return el().key("r1") }
             let r2: El<Int> = region("dupR", cache: dupCache) { dupRegionBuilds += 1; return el().key("r2") }
-            #expect(m1.keyId == "m1" && m2.keyId == "m2")
+            #expect(m1.keyId == "dup" && m2.keyId == "dup")
             #expect(r1.keyId == "r1" && r2.keyId == "r2")
         }
         #expect(dupMemoBuilds == 2)

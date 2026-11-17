@@ -16,6 +16,10 @@ struct Slice3ElCoreParityTests {
             el().key("root").size(200, 100)
         }
         _ = rt.frame(at: 0.0)
+        // Font families are process-global (`FontFamiliesRegistry`): restore them so later suites
+        // (e.g. TextUnblockAllTests' pill wrap widths) measure with the default faces.
+        let originalFamilies = FontFamiliesRegistry.currentFamilies()
+        defer { _ = FontFamiliesRegistry.setFamilies(sans: originalFamilies.sans, mono: originalFamilies.mono) }
         rt.setFontFamilies("Inter", "JetBrains Mono")
         #expect(rt.fontFamilies == ("Inter", "JetBrains Mono"))
 

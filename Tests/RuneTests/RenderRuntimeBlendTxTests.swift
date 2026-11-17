@@ -316,7 +316,7 @@ struct RenderRuntimeBlendTxTests {
         let rt = Runtime<S>(state: S(), viewport: Vec2(80, 40), pixelScale: 1.0) { _, _ in
             col().size(80, 40).bg(.black)
                 .child(
-                    col().size(80, 40).clipRounded(6)
+                    col().size(80, 40).clipRounded(6).opacity(0.95)
                         .children([
                             text("Hi").font(TextStyle(size: 16)).color(.white),
                             el().size(8, 8).bg(.white),

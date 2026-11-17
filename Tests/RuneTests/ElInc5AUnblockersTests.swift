@@ -411,7 +411,7 @@ struct ElInc5AUnblockersTests {
         rt.pointerMove(to: Vec2(41, 50), at: 0.21)
         rt.pointerUp(at: Vec2(41, 50), button: PointerButton.middle, mods: .none, at: 0.22)
         #expect(rt.state.downBtns == [PointerButton.middle])
-        #expect(rt.state.dragBtns == [PointerButton.middle, PointerButton.middle])
+        #expect(rt.state.dragBtns == [PointerButton.middle, PointerButton.middle, PointerButton.middle])
         #expect(rt.state.clickBtns == [PointerButton.middle])
     }
 

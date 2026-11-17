@@ -33,6 +33,7 @@ public struct KitScrollBarStyle: Sendable, Equatable {
     public var gutter: Bool = false
     public var areaReveals: Bool = false
     public var scrollOnly: Bool = false
+    public var thumbOnly: Bool = false
     public var border: Float = 0.0
     public var hoverTarget: String? = nil
     public var trackStartInset: Float = ScrollBarMetrics.inset
@@ -106,6 +107,7 @@ public struct KitScrollBarStyle: Sendable, Equatable {
         s.overlay = true
         s.inside = true
         s.areaReveals = true
+        s.thumbOnly = true
         s.holdDuration = 0.8
         s.enterSpring = Spring(duration: 0.2, bounce: 0.0)
         s.leaveSpring = Spring(duration: 0.2, bounce: 0.0)
@@ -153,6 +155,7 @@ public struct KitScrollBarStyle: Sendable, Equatable {
         s.inside = true
         s.areaReveals = true
         s.scrollOnly = true
+        s.thumbOnly = true
         s.holdDuration = 0.8
         s.enterSpring = Spring(duration: 0.2, bounce: 0.0)
         s.leaveSpring = Spring(duration: 0.2, bounce: 0.0)
@@ -252,6 +255,10 @@ public struct KitScrollBarStyle: Sendable, Equatable {
 
     public func alwaysVisible(_ enabled: Bool = true) -> Self {
         var copy = self; copy.alwaysVisible = enabled; return copy
+    }
+
+    public func thumbOnly(_ enabled: Bool = true) -> Self {
+        var copy = self; copy.thumbOnly = enabled; return copy
     }
 
     /// Total interactive press strip width (always wide enough to contain the widest thumb + inset).
@@ -393,8 +400,12 @@ public enum ScrollBarPress: Sendable, Equatable {
         thumbLength: Float,
         altPressed: Bool,
         jumpPreference: Bool,
-        horizontal: Bool
+        horizontal: Bool,
+        thumbOnly: Bool = false
     ) -> ScrollBarPress {
+        if thumbOnly {
+            return .thumb(grab: 0.0)
+        }
         let onThumb = pointerAlongTrack >= thumbStart && pointerAlongTrack <= (thumbStart + thumbLength)
         if !onThumb && (jumpPreference == altPressed) && !horizontal {
             return .pages(toward: pointerAlongTrack < thumbStart ? -1 : 1)
@@ -814,6 +825,8 @@ public final class ScrollBarLiveSlot: @unchecked Sendable {
     private var overBar: Bool = false
     private var targetHovered: Bool = false
     private var lastNow: Double = 0.0
+    private var thumbDragOriginStart: Float? = nil
+    private var thumbDragOriginWindow: Vec2? = nil
 
     public init(style: KitScrollBarStyle) {
         self.lastStyle = style
@@ -897,15 +910,19 @@ public final class ScrollBarLiveSlot: @unchecked Sendable {
     private func slotRect(top: Float, h: Float, trackLen: Float, style: KitScrollBarStyle) -> MotionRect {
         let stripW = style.resolvedStripWidth
         let widest = max(style.width, style.hoverWidth)
+        let start = style.thumbOnly ? Float(0.0) : (stripW - style.edgeInset - widest)
+        let width = style.thumbOnly ? stripW : widest
         let within = style.horizontal ? max(0, trackLen) : stripW
-        return flowedRect(turnedRect(style, across: stripW - style.edgeInset - widest, along: top, thick: widest, long: h), within: within)
+        return flowedRect(turnedRect(style, across: start, along: top, thick: width, long: h), within: within)
     }
 
     private func thumbRect(h: Float, style: KitScrollBarStyle) -> MotionRect {
         let widest = max(style.width, style.hoverWidth)
         let w = wideLocked ? style.hoverWidth : style.width
-        let within = style.horizontal ? h : widest
-        return flowedRect(turnedRect(style, across: widest - w, along: 0, thick: w, long: h), within: within)
+        let slotSpan = style.thumbOnly ? style.resolvedStripWidth : widest
+        let end = style.thumbOnly ? style.edgeInset : Float(0.0)
+        let within = style.horizontal ? h : slotSpan
+        return flowedRect(turnedRect(style, across: slotSpan - end - w, along: 0, thick: w, long: h), within: within)
     }
 
     private func currentThumbLenLocked(style: KitScrollBarStyle) -> Float {
@@ -1163,16 +1180,24 @@ public final class ScrollBarLiveSlot: @unchecked Sendable {
             devicePixels: style.devicePixels,
             scale: style.scale
         )
-        let onThumb = along >= rawStart && along <= (rawStart + rawLen)
+        let onThumb = style.thumbOnly || (along >= rawStart && along <= (rawStart + rawLen))
         let action = ScrollBarPress.begin(
-            pointerAlongTrack: along,
+            pointerAlongTrack: style.thumbOnly ? rawStart : along,
             thumbStart: rawStart,
             thumbLength: rawLen,
             altPressed: altPressed,
             jumpPreference: jumpPreference,
-            horizontal: style.horizontal
+            horizontal: style.horizontal,
+            thumbOnly: style.thumbOnly
         )
         pressTracker.pointerDown(action, at: windowPoint)
+        if style.thumbOnly {
+            thumbDragOriginStart = rawStart
+            thumbDragOriginWindow = windowPoint
+        } else {
+            thumbDragOriginStart = nil
+            thumbDragOriginWindow = nil
+        }
         holdLocked(style: style)
         widenLocked(style: style)
         syncCompatibilityVisibility(overlay: style.overlay, shows: info.shows, now: lastNow)
@@ -1248,10 +1273,23 @@ public final class ScrollBarLiveSlot: @unchecked Sendable {
         if case .pages = pressTracker.activePress {
             return nil
         }
+        var effectiveAlong = along
+        if style.thumbOnly {
+            guard let originStart = thumbDragOriginStart, let originW = thumbDragOriginWindow else {
+                return nil
+            }
+            let rawDelta = style.horizontal
+                ? (isRTLLocked ? (originW.x - windowPoint.x) : (windowPoint.x - originW.x))
+                : (windowPoint.y - originW.y)
+            if abs(rawDelta) < 1e-6 {
+                return nil
+            }
+            effectiveAlong = originStart + rawDelta
+        }
         let resolvedSize = (trackSize.x > 0 && trackSize.y > 0)
             ? trackSize
             : Vec2(liveTrack.get().width, liveTrack.get().height)
-        return applyThumbDragLocked(along: along, trackSize: resolvedSize, style: style)
+        return applyThumbDragLocked(along: effectiveAlong, trackSize: resolvedSize, style: style)
     }
 
     private func applyThumbDragLocked(along: Float, trackSize: Vec2, style: KitScrollBarStyle) -> Float {
@@ -1292,6 +1330,8 @@ public final class ScrollBarLiveSlot: @unchecked Sendable {
         defer { lock.unlock() }
         lastNow = max(lastNow, now)
         _ = pressTracker.pointerUp()
+        thumbDragOriginStart = nil
+        thumbDragOriginWindow = nil
         widenLocked(style: style)
         letGoLocked(style: style, now: lastNow)
         syncCompatibilityVisibility(overlay: style.overlay, shows: visibility.shows, now: lastNow)
@@ -1602,91 +1642,101 @@ extension El {
             .liveRect(slot.liveSlot.smooth(effectiveStyle.tintSpring))
             .child(thumb)
 
-        var track: El<State> = el()
+        func attachDragHandlers(_ target: El<State>) -> El<State> {
+            target
+                .onPointerDown { _, press, tx in
+                    let trackDims = (effectiveStyle.thumbOnly || press.elementSize.x <= 0 || press.elementSize.y <= 0)
+                        ? slot.liveTrackSize()
+                        : press.elementSize
+                    let along = effectiveStyle.horizontal ? press.local.x : press.local.y
+                    let trackSpan = max(
+                        effectiveStyle.minThumb,
+                        effectiveStyle.horizontal ? trackDims.x : trackDims.y
+                    )
+                    let result = slot.pointerDownWithResult(
+                        along: along,
+                        windowPoint: press.window,
+                        trackLength: trackSpan,
+                        trackSize: trackDims,
+                        altPressed: press.mods.alt,
+                        jumpPreference: jumpPreference,
+                        style: effectiveStyle,
+                        now: tx.clock
+                    )
+                    switch result {
+                    case .page(let toward):
+                        let step = max(1.0, slot.lastMetrics.viewport * 0.9)
+                        let targetOffset = (slot.lastMetrics.offset + Float(toward) * step).clamped(to: 0...slot.lastMetrics.maxScroll)
+                        if let pageOffset = slot.pageTargetOffset(along: along, trackLength: trackSpan, style: effectiveStyle) {
+                            tx.scrollTo(
+                                resolvedKey,
+                                offset: effectiveStyle.horizontal ? Vec2(pageOffset, 0) : Vec2(0, pageOffset),
+                                animated: true
+                            )
+                        } else if abs(targetOffset - slot.lastMetrics.offset) >= 1e-4 {
+                            tx.scrollTo(
+                                resolvedKey,
+                                offset: effectiveStyle.horizontal ? Vec2(targetOffset, 0) : Vec2(0, targetOffset),
+                                animated: true
+                            )
+                        }
+                        tx.dragRepeatAfter(0.30)
+                        tx.liveOnly()
+                    case .jump(let nextOffset):
+                        tx.scrollTo(
+                            resolvedKey,
+                            offset: effectiveStyle.horizontal ? Vec2(nextOffset, 0) : Vec2(0, nextOffset),
+                            animated: false
+                        )
+                        tx.liveOnly()
+                    case .grabThumb:
+                        tx.liveOnly()
+                    }
+                }
+                .onDrag { _, d, tx in
+                    let trackDims = (effectiveStyle.thumbOnly || d.size.x <= 0 || d.size.y <= 0)
+                        ? slot.liveTrackSize()
+                        : d.size
+                    let along = effectiveStyle.horizontal ? d.local.x : d.local.y
+                    if tx.isDragRepeat {
+                        let trackSpan = max(
+                            effectiveStyle.minThumb,
+                            effectiveStyle.horizontal ? trackDims.x : trackDims.y
+                        )
+                        if let nextPage = slot.pageTargetOffset(along: along, trackLength: trackSpan, style: effectiveStyle) {
+                            tx.scrollTo(
+                                resolvedKey,
+                                offset: effectiveStyle.horizontal ? Vec2(nextPage, 0) : Vec2(0, nextPage),
+                                animated: true
+                            )
+                            tx.dragRepeatAfter(0.05)
+                        }
+                    } else if let nextOffset = slot.dragIfThumb(along: along, windowPoint: d.window, trackSize: trackDims, style: effectiveStyle) {
+                        tx.scrollTo(
+                            resolvedKey,
+                            offset: effectiveStyle.horizontal ? Vec2(nextOffset, 0) : Vec2(0, nextOffset),
+                            animated: false
+                        )
+                    }
+                    tx.liveOnly()
+                }
+                .onDragEnd { _, _, tx in
+                    slot.release(style: effectiveStyle, now: tx.clock)
+                    tx.liveOnly()
+                }
+        }
+
+        let wiredThumbSlot = effectiveStyle.thumbOnly ? attachDragHandlers(thumbSlot) : thumbSlot
+
+        let baseTrack: El<State> = el()
             .key(effectiveStyle.key)
             .rounded(effectiveStyle.trackRadius)
             .absolute(x: 0, y: 0)
             .liveRect(slot.liveTrack.binding)
             .liveOpacity(slot.liveOpacity.smooth(effectiveStyle.enterSpring).rest(effectiveStyle.leaveSpring))
-            .onPointerDown { _, press, tx in
-                let trackDims = (press.elementSize.x > 0 && press.elementSize.y > 0)
-                    ? press.elementSize
-                    : slot.liveTrackSize()
-                let along = effectiveStyle.horizontal ? press.local.x : press.local.y
-                let trackSpan = max(
-                    effectiveStyle.minThumb,
-                    effectiveStyle.horizontal ? trackDims.x : trackDims.y
-                )
-                let result = slot.pointerDownWithResult(
-                    along: along,
-                    windowPoint: press.window,
-                    trackLength: trackSpan,
-                    trackSize: trackDims,
-                    altPressed: press.mods.alt,
-                    jumpPreference: jumpPreference,
-                    style: effectiveStyle,
-                    now: tx.clock
-                )
-                switch result {
-                case .page(let toward):
-                    let step = max(1.0, slot.lastMetrics.viewport * 0.9)
-                    let targetOffset = (slot.lastMetrics.offset + Float(toward) * step).clamped(to: 0...slot.lastMetrics.maxScroll)
-                    if let pageOffset = slot.pageTargetOffset(along: along, trackLength: trackSpan, style: effectiveStyle) {
-                        tx.scrollTo(
-                            resolvedKey,
-                            offset: effectiveStyle.horizontal ? Vec2(pageOffset, 0) : Vec2(0, pageOffset),
-                            animated: true
-                        )
-                    } else if abs(targetOffset - slot.lastMetrics.offset) >= 1e-4 {
-                        tx.scrollTo(
-                            resolvedKey,
-                            offset: effectiveStyle.horizontal ? Vec2(targetOffset, 0) : Vec2(0, targetOffset),
-                            animated: true
-                        )
-                    }
-                    tx.dragRepeatAfter(0.30)
-                    tx.liveOnly()
-                case .jump(let nextOffset):
-                    tx.scrollTo(
-                        resolvedKey,
-                        offset: effectiveStyle.horizontal ? Vec2(nextOffset, 0) : Vec2(0, nextOffset),
-                        animated: false
-                    )
-                    tx.liveOnly()
-                case .grabThumb:
-                    tx.liveOnly()
-                }
-            }
-            .onDrag { _, d, tx in
-                let trackDims = (d.size.x > 0 && d.size.y > 0) ? d.size : slot.liveTrackSize()
-                let along = effectiveStyle.horizontal ? d.local.x : d.local.y
-                if tx.isDragRepeat {
-                    let trackSpan = max(
-                        effectiveStyle.minThumb,
-                        effectiveStyle.horizontal ? trackDims.x : trackDims.y
-                    )
-                    if let nextPage = slot.pageTargetOffset(along: along, trackLength: trackSpan, style: effectiveStyle) {
-                        tx.scrollTo(
-                            resolvedKey,
-                            offset: effectiveStyle.horizontal ? Vec2(nextPage, 0) : Vec2(0, nextPage),
-                            animated: true
-                        )
-                        tx.dragRepeatAfter(0.05)
-                    }
-                } else if let nextOffset = slot.dragIfThumb(along: along, windowPoint: d.window, trackSize: trackDims, style: effectiveStyle) {
-                    tx.scrollTo(
-                        resolvedKey,
-                        offset: effectiveStyle.horizontal ? Vec2(nextOffset, 0) : Vec2(0, nextOffset),
-                        animated: false
-                    )
-                }
-                tx.liveOnly()
-            }
-            .onDragEnd { _, _, tx in
-                slot.release(style: effectiveStyle, now: tx.clock)
-                tx.liveOnly()
-            }
-            .child(thumbSlot)
+
+        var track: El<State> = (effectiveStyle.thumbOnly ? baseTrack : attachDragHandlers(baseTrack))
+            .child(wiredThumbSlot)
 
         if let trackColor = effectiveStyle.trackColor {
             track = track.bg(trackColor)

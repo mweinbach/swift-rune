@@ -75,8 +75,17 @@ public struct MotionSequence: Sendable, Equatable {
     }
 }
 
-/// A looping opacity curve sampled from wall clock time: `stops` are `(fraction 0...1, opacity)` pairs.
+/// A looping opacity curve sampled from wall clock time: `stops` are `(fraction 0...1, opacity)` pairs
+/// interpolated linearly; this element is at `frac(t / period - phase)`. Every cycle with the same
+/// period stays in phase. Reduced motion holds `still`. Use `Cycle.DISPLAY_RATE` for a continuous
+/// sweep, or a positive `fps` for an intentionally stepped indicator (`cycle.rs`, #965).
 public struct Cycle: Sendable, Equatable {
+    /// Sample on the host's display frames, without arming an independent timer (`Cycle::DISPLAY_RATE`).
+    public static let DISPLAY_RATE: Float = 0.0
+    /// Swift-style alias of `DISPLAY_RATE`.
+    public static var displayRate: Float { DISPLAY_RATE }
+
+
     public var period: Float
     public var phase: Float
     public var stops: [(fraction: Float, opacity: Float)]
@@ -104,6 +113,13 @@ public struct Cycle: Sendable, Equatable {
             lhs.fps == rhs.fps &&
             lhs.stops.count == rhs.stops.count &&
             zip(lhs.stops, rhs.stops).allSatisfy { $0.fraction == $1.fraction && $0.opacity == $1.opacity }
+    }
+
+    /// A stepped cycle's timer interval (`Cycle::frame_interval`): `nil` at `DISPLAY_RATE`, so the
+    /// cycle follows host frames, else `1 / max(fps, 1)` computed in `Float` as upstream does.
+    public func frameInterval() -> Double? {
+        guard fps != Self.DISPLAY_RATE else { return nil }
+        return Double(Float(1.0) / max(fps, 1.0))
     }
 
     public func sample(at t: Double) -> Float {

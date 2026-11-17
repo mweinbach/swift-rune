@@ -6,7 +6,7 @@ import simd
 
 // MARK: - El Motion-Gate Modifiers & Runtime Telemetry Bridge
 
-internal enum MotionGateExtraKey {
+private enum MotionGateExtraKey {
     static let instantChanges = "motionGate.instantChanges"
     static let motionIntent = "motionGate.motionIntent"
     static let ownMotionNone = "motionGate.ownMotionNone"
@@ -371,7 +371,8 @@ private enum MotionGateSampleHelper {
             var carriedX: Float = 0
             var carriedY: Float = 0
             var curParentIdx = e.parentIndex
-            while let pIdx = curParentIdx, pIdx >= 0, pIdx < els.count {
+            var hops = 0
+            while let pIdx = curParentIdx, pIdx >= 0, pIdx < els.count, pIdx != i, hops <= els.count {
                 let pPath = els[pIdx].path
                 if let pEl = elByPath[pPath], !pEl.layout.scrollAxes.isEmpty {
                     let sc = els[pIdx].scrolled
@@ -382,6 +383,7 @@ private enum MotionGateSampleHelper {
                     }
                 }
                 curParentIdx = els[pIdx].parentIndex
+                hops += 1
             }
 
             let meta = ElementMotionMeta(

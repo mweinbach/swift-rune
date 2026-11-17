@@ -229,7 +229,7 @@ struct PixelSnapParityTests {
 
     @Test("text_keeps_its_place_against_its_fill")
     func textKeepsItsPlaceAgainstItsFill() {
-        func offset(y: Float) -> (Float, Float) {
+        func place(y: Float) -> (Float, Float) {
             let rt = Runtime(state: y, viewport: Vec2(80, 40), pixelScale: 2.0) { y, _ in
                 let label: El<Float> = text("Hg")
                 return El<Float>().size(80, 40).child(
@@ -243,14 +243,21 @@ struct PixelSnapParityTests {
                 .filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }
                 .map { $0.rect.y }
                 .min() ?? .greatestFiniteMagnitude
-            #expect(glyphTop < .greatestFiniteMagnitude)
-            return (glyphTop - fill.y, fill.y)
+            #expect(glyphTop < .greatestFiniteMagnitude, "draws glyphs")
+            return (glyphTop, fill.y)
         }
-        let (want, _) = offset(y: 10.0)
-        for k in 1..<10 {
-            let (got, top) = offset(y: 10.0 + Float(k) * 0.05)
-            #expect(whole(top))
-            #expect(abs(got - want) < 1e-3)
+        // The fill snaps to whole pixels. The text lays out from its box's exact place and rounds
+        // once, as Blink paints a text fragment (#935), so it keeps its place against where its box
+        // is rather than its snapped fill: half a point (a device pixel) further down, it draws one
+        // pixel lower, at every phase; and between, it steps at most a pixel, never back.
+        for k in 0..<10 {
+            let y = 10.0 + Float(k) * 0.05
+            let (glyph, top) = place(y: y)
+            let (next, _) = place(y: y + 0.05)
+            let (lower, _) = place(y: y + 0.5)
+            #expect(whole(top), "\(top)")
+            #expect(lower == glyph + 1.0, "y \(y): a device pixel lower draws a pixel lower")
+            #expect(next == glyph || next == glyph + 1.0, "y \(y): \(glyph) then \(next)")
         }
     }
 
@@ -1162,5 +1169,138 @@ struct PixelSnapParityTests {
         let added = rt.textSystem.glyphAtlas.cachedEntryCount - masks0
         #expect(spread <= 0.30, "48 ppem heading x-glide spread \(spread) px > 0.30 px")
         #expect(added <= glyphs * Int(GlyphAtlas.glidePhases), "\(added) masks for \(glyphs) glyphs")
+    }
+
+    @Test("paintContained (#885): box, icon, and shape snap relative to containment rounded origin at 1.875x")
+    func paintContainedSnapsBoxIconAndShapeRelativeToContainOrigin() {
+        // Commit #885 example: at 1.875x, a box at 44 pt (82.5 px) rounds to 83,
+        // and a child 17 pt into it (31.875 px) rounds to 32 -> 83 + 32 = 115
+        // (whereas uncontained 61 * 1.875 = 114.375 rounds to 114).
+        let scale: Float = 1.875
+        let red = Color(r: 1, g: 0, b: 0, a: 1)
+        let triShape = Shape.new().fill([Vec2(0, 0), Vec2(10, 0), Vec2(5, 10)], color: .white)
+
+        func buildScene(contained: Bool) -> RefScene {
+            let panel: El<Bool> = el()
+                .absolute(x: 0, y: 44)
+                .size(100, 100)
+                .children([
+                    el().absolute(x: 0, y: 17).size(16, 16).bg(red),
+                    icon(Self.oneSnapDiscIcon, size: 16).absolute(x: 24, y: 17).color(.white),
+                    canvas(triShape).absolute(x: 48, y: 17).size(16, 16),
+                ])
+            let finalPanel = contained ? panel.paintContained(0, 44) : panel
+            let rt = Runtime(
+                state: false,
+                viewport: Vec2(200, 200),
+                pixelScale: scale
+            ) { _, _ in
+                el().size(200, 200).child(finalPanel)
+            }
+            return rt.frame(at: 0.0)
+        }
+
+        let uncontained = buildScene(contained: false)
+        let contained = buildScene(contained: true)
+
+        let boxUncontained = fills(uncontained).first!
+        let boxContained = fills(contained).first!
+        #expect(boxUncontained.y == 114.0)
+        #expect(boxContained.y == 115.0)
+
+        let glyphKind = Float(PrimitiveKind.glyph.rawValue)
+        let iconUncontained = uncontained.primitives.first { $0.params.y == glyphKind }!
+        let iconContained = contained.primitives.first { $0.params.y == glyphKind }!
+        #expect(iconUncontained.rect.y == 114.0)
+        #expect(iconContained.rect.y == 115.0)
+
+        let triKind = Float(PrimitiveKind.triangle.rawValue)
+        let triUncontainedTop = uncontained.primitives.filter { $0.params.y == triKind }.map(\.rect.y).min()!
+        let triContainedTop = contained.primitives.filter { $0.params.y == triKind }.map(\.rect.y).min()!
+        // `Shape.triangulate` adds a 1 px AA fringe around the vertex bounding box (`origin.y - 1`).
+        #expect(triUncontainedTop == 113.0)
+        #expect(triContainedTop == 114.0)
+    }
+
+    @Test("paintContained (#885): nested containment replaces outer containment origin")
+    func paintContainedNestedReplacesOuterOrigin() {
+        let scale: Float = 1.875
+        let green = Color(r: 0, g: 1, b: 0, a: 1)
+        // Outer containment at y = 44.0 (82.5 px -> 83); inner containment at y = 45.0 (84.375 px -> 84).
+        // Child at y = 61.0: relative to 44 -> roundHalfUp(31.875) + 83 = 115;
+        // relative to 45 -> roundHalfUp(30.0) + 84 = 114.
+        let rt = Runtime(
+            state: false,
+            viewport: Vec2(200, 200),
+            pixelScale: scale
+        ) { _, _ in
+            el().size(200, 200).paintContained(0, 44).child(
+                el().size(200, 200).paintContained(Vec2(0, 45)).child(
+                    el().absolute(x: 0, y: 61).size(16, 16).bg(green)
+                )
+            )
+        }
+        let scene = rt.frame(at: 0.0)
+        let box = fills(scene).first!
+        #expect(box.y == 114.0)
+    }
+
+    @Test("motionSnaps (#892): moving box and subtree snap every frame instead of gliding")
+    func motionSnapsMovesOnWholeDevicePixelsEveryFrame() {
+        struct MovingBox {
+            var x: Float = 0.0
+        }
+        let blue = Color(r: 0, g: 0, b: 1, a: 1)
+
+        func runFrames(motionSnaps: Bool) -> [[Float]] {
+            let rt = Runtime<MovingBox>(
+                state: MovingBox(),
+                viewport: Vec2(200, 120),
+                pixelScale: 2.0
+            ) { s, _ in
+                let child: El<MovingBox> = el()
+                    .key("child")
+                    .m(4)
+                    .size(16, 16)
+                    .bg(.white)
+                let box: El<MovingBox> = el()
+                    .key("mover")
+                    .absolute(x: 10, y: 20)
+                    .offset(s.x, 0)
+                    .size(40, 24)
+                    .bg(blue)
+                    .animate(Spring(duration: 0.4, bounce: 0.0))
+                    .child(child)
+                return el().size(200, 120).child(motionSnaps ? box.motionSnaps() : box)
+            }
+            _ = rt.frame(at: 0.0)
+            rt.update(at: 1.0 / 60.0) { s, _ in s.x = 20.0 }
+            var sampledEdges: [[Float]] = []
+            for k in 2...15 {
+                let scene = rt.frame(at: Double(k) / 60.0)
+                let rectEdges = edges(fills(scene))
+                #expect(rectEdges.count == 8)
+                sampledEdges.append(rectEdges)
+            }
+            return sampledEdges
+        }
+
+        let glidingFrames = runFrames(motionSnaps: false)
+        let snappingFrames = runFrames(motionSnaps: true)
+
+        // Default moving box glides at sub-pixel positions.
+        let hasFractionalWhileGliding = glidingFrames.flatMap { $0 }.contains { !whole($0) }
+        #expect(hasFractionalWhileGliding, "expected un-stepped moving box to glide at sub-pixel coordinates")
+
+        // With `motionSnaps()`, both the moving box and its child snap to whole device pixels on every frame
+        // while still animating forward across frames.
+        for (idx, frameEdges) in snappingFrames.enumerated() {
+            for edge in frameEdges {
+                #expect(whole(edge), "frame \(idx): expected whole device pixel edge, got \(edge)")
+            }
+        }
+        let firstX = snappingFrames.first![0]
+        let lastX = snappingFrames.last![0]
+        #expect(lastX > firstX, "expected motionSnaps box to advance while stepping whole pixels: \(firstX) -> \(lastX)")
     }
 }

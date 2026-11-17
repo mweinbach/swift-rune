@@ -141,4 +141,75 @@ internal enum ShellSliceRenderHelpers {
         if hasText { count += 1 }
         return count
     }
+
+    /// Propagates cumulative `El.timeScale` down pre-order `FlatNode`s and exiting subtrees into `scene`,
+    /// shifting active word reveals and loop tracks onto each node's new clock domain (`loop_clock.rs:63`).
+    static func propagateTimeScales<State>(
+        nodes: [Runtime<State>.FlatNode],
+        exitingSnapshots: [NodeId: Runtime<State>.FlatNode],
+        scene: inout Scene,
+        trackedIds: inout Set<NodeId>,
+        wordRevealStore: inout WordRevealStore,
+        loopTracks: inout [NodeId: LoopTrack]
+    ) -> [Float] {
+        var scales = [Float](repeating: 1.0, count: nodes.count)
+        var scaleById: [NodeId: Float] = Dictionary(minimumCapacity: nodes.count + exitingSnapshots.count)
+        var nextTracked: Set<NodeId> = []
+
+        func applyScale(_ k: Float, to id: NodeId) {
+            if k != 1.0 || trackedIds.contains(id) {
+                let before = scene.store.nodeTime(id)
+                scene.setTimeScale(id, k)
+                let shift = scene.store.nodeTime(id) - before
+                if shift != 0 {
+                    wordRevealStore.phases[id]?.step(.shift(shift))
+                    loopTracks[id]?.shift(by: shift)
+                }
+            }
+            if k != 1.0 {
+                nextTracked.insert(id)
+            }
+        }
+
+        for i in nodes.indices {
+            let node = nodes[i]
+            let parentScale = node.parentIndex.map { scales[$0] } ?? 1.0
+            let k = parentScale * node.el.elTimeScale
+            scales[i] = k
+            scaleById[node.nodeId] = k
+            applyScale(k, to: node.nodeId)
+        }
+
+        // Exiting nodes drop their own `timeScale` (`own = 1.0`) while continuing to follow
+        // present ancestors' scales (`loop_clock.rs:65`).
+        if !exitingSnapshots.isEmpty {
+            var visiting: Set<NodeId> = []
+            func resolveParentScale(for id: NodeId) -> Float {
+                if let cached = scaleById[id] { return cached }
+                guard !visiting.contains(id), let snap = exitingSnapshots[id] else { return 1.0 }
+                visiting.insert(id)
+                defer { visiting.remove(id) }
+                let parentK: Float
+                if let pidx = snap.parentIndex {
+                    if nodes.indices.contains(pidx) {
+                        parentK = scales[pidx]
+                    } else if let pSnap = exitingSnapshots.values.first(where: { $0.index == pidx }) {
+                        parentK = resolveParentScale(for: pSnap.nodeId)
+                    } else {
+                        parentK = 1.0
+                    }
+                } else {
+                    parentK = 1.0
+                }
+                scaleById[id] = parentK
+                return parentK
+            }
+            for id in exitingSnapshots.keys where scene.contains(id) && scaleById[id] == nil {
+                let k = resolveParentScale(for: id)
+                applyScale(k, to: id)
+            }
+        }
+        trackedIds = nextTracked
+        return scales
+    }
 }

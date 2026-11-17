@@ -326,6 +326,37 @@ struct RenderClipBackdropDashTests {
         #expect(abs(Double(g9) - 255.0 * (9.5 / 20.0)) < 4.0)
         #expect(abs(Double(g15) - 255.0 * (15.5 / 20.0)) < 4.0)
         #expect(g30 == 255)
+
+        // 3. Exact `clip.rs:204` bottom-edge linear vs smoothstep comparison (alpha(eased) < alpha(lin) - 20)
+        let rtLin = Runtime<Bool>(state: true, viewport: Vec2(100, 100), pixelScale: 1.0) { isLin, _ in
+            let box: El<Bool> = col().size(100, 100)
+            let clipped = isLin ? box.clipFadeLinear(bottom: 40) : box.clipFade(bottom: 40)
+            return clipped.child(el().size(100, 100).bg(.white))
+        }
+        let rtSmooth = Runtime<Bool>(state: false, viewport: Vec2(100, 100), pixelScale: 1.0) { isLin, _ in
+            let box: El<Bool> = col().size(100, 100)
+            let clipped = isLin ? box.clipFadeLinear(bottom: 40) : box.clipFade(bottom: 40)
+            return clipped.child(el().size(100, 100).bg(.white))
+        }
+        rtLin.clearColor = Color(r: 0, g: 0, b: 0, a: 0)
+        rtSmooth.clearColor = Color(r: 0, g: 0, b: 0, a: 0)
+        let rfLin = rtLin.renderFrame(at: 0.0)
+        let rfSmooth = rtSmooth.renderFrame(at: 0.0)
+        let bottomLin = rfLin.instances.compactMap { let w = unpackFade($0.fade).width.w; return w != 0 ? w : nil }.first
+        let bottomSmooth = rfSmooth.instances.compactMap { let w = unpackFade($0.fade).width.w; return w != 0 ? w : nil }.first
+        #expect(bottomLin == -40.0)
+        #expect(bottomSmooth == 40.0)
+
+        let pxLin = try renderer.renderOffscreen(rfLin)
+        let pxSmooth = try renderer.renderOffscreen(rfSmooth)
+        for (y, frac) in [(89, 0.2625), (79, 0.5125), (69, 0.7625)] {
+            let a = sampleRGBA(pxLin, x: 50, y: y).a
+            #expect(abs(Double(a) - frac * 255.0) <= 2.0)
+        }
+        let lin89 = Int(sampleRGBA(pxLin, x: 50, y: 89).a)
+        let smooth89 = Int(sampleRGBA(pxSmooth, x: 50, y: 89).a)
+        #expect(smooth89 < lin89 - 20)
+        #expect(sampleRGBA(pxLin, x: 50, y: 50).a == 255)
     }
 
     // MARK: - Group 2: tests/backdrop_blur.rs (4) + backdrop_tests.rs:7 + surface_alpha.rs:14 (6 tests)

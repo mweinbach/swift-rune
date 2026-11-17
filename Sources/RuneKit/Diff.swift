@@ -3038,6 +3038,9 @@ public struct DiffView<State>: Sendable {
 
     // MARK: Gutter & Line Selection Helpers
 
+    // `numberCell` is split into `@inline(never)` pieces so the long `El` builder chains don't
+    // all share one debug-build frame on top of `renderContainer`/`buildUnifiedRow` (their
+    // combined frames overflowed the 512 KB Swift Testing thread stack). No behavior change.
     private func numberCell(
         cellKey: String,
         number: Int?,
@@ -3055,70 +3058,92 @@ public struct DiffView<State>: Sendable {
             String(repeating: " ", count: digits)
         }
         guard let n = number else {
-            return text(labelStr)
-                .font(kit.ty.mono)
-                .color(kit.c.textFaint)
-                .key(cellKey)
-                .w(width)
-                .h(lineH)
-                .px(6)
-                .itemsCenter()
-                .justifyEnd()
-                .bg(lineBg)
-                .shrink(0)
+            return numberLabelCell(labelStr: labelStr, cellKey: cellKey, width: width, lineH: lineH, lineBg: lineBg)
         }
         let point = DiffLineRef(side: side, line: UInt32(n))
-        let mode = forcedMode
-
-        var cell: El<State>
+        let cell: El<State>
         if let onCommentHandler {
-            let plusBtn = El<State>(direction: .row)
-                .key("\(cellKey)-plus")
-                .w(14)
-                .h(14)
-                .itemsCenter()
-                .justifyCenter()
-                .rounded(kit.radius.sm)
-                .hover(kit.c.surfaceHover)
-                .role(.button)
-                .label("Add comment on line \(n)")
-                .child(icon(KitIcons.plus, size: 10).color(kit.c.textAccent))
-                .onClick { [get, onCommentHandler] (s: inout State, tx: inout Tx) in
-                    let d = get(s)
-                    let range: DiffLineRange = if let sel = d.selectedRange, sel.contains(point) {
-                        sel
-                    } else {
-                        DiffLineRange(start: point, end: point)
-                    }
-                    onCommentHandler(&s, range, &tx)
-                }
-            cell = El<State>(direction: .row)
-                .key(cellKey)
-                .w(width)
-                .h(lineH)
-                .px(6)
-                .gap(4)
-                .itemsCenter()
-                .justifyEnd()
-                .bg(lineBg)
-                .shrink(0)
-                .child(plusBtn)
-                .child(text(labelStr).font(kit.ty.mono).color(kit.c.textFaint))
+            cell = numberCommentCell(
+                labelStr: labelStr, n: n, point: point, cellKey: cellKey, width: width, lineH: lineH, lineBg: lineBg,
+                onCommentHandler: onCommentHandler
+            )
         } else {
-            cell = text(labelStr)
-                .font(kit.ty.mono)
-                .color(kit.c.textFaint)
-                .key(cellKey)
-                .w(width)
-                .h(lineH)
-                .px(6)
-                .itemsCenter()
-                .justifyEnd()
-                .bg(lineBg)
-                .shrink(0)
+            cell = numberLabelCell(labelStr: labelStr, cellKey: cellKey, width: width, lineH: lineH, lineBg: lineBg)
         }
+        return attachNumberCellHandlers(cell, point: point, rowIdx: rowIdx, rows: rows, side: side, lineH: lineH)
+    }
 
-        cell = cell
+    @inline(never)
+    private func numberLabelCell(labelStr: String, cellKey: String, width: Float, lineH: Float, lineBg: Color) -> El<State> {
+        text(labelStr)
+            .font(kit.ty.mono)
+            .color(kit.c.textFaint)
+            .key(cellKey)
+            .w(width)
+            .h(lineH)
+            .px(6)
+            .itemsCenter()
+            .justifyEnd()
+            .bg(lineBg)
+            .shrink(0)
+    }
+
+    @inline(never)
+    private func numberCommentCell(
+        labelStr: String,
+        n: Int,
+        point: DiffLineRef,
+        cellKey: String,
+        width: Float,
+        lineH: Float,
+        lineBg: Color,
+        onCommentHandler: @escaping @Sendable (inout State, DiffLineRange, inout Tx) -> Void
+    ) -> El<State> {
+        let plusBtn = El<State>(direction: .row)
+            .key("\(cellKey)-plus")
+            .w(14)
+            .h(14)
+            .itemsCenter()
+            .justifyCenter()
+            .rounded(kit.radius.sm)
+            .hover(kit.c.surfaceHover)
+            .role(.button)
+            .label("Add comment on line \(n)")
+            .child(icon(KitIcons.plus, size: 10).color(kit.c.textAccent))
+            .onClick { [get, onCommentHandler] (s: inout State, tx: inout Tx) in
+                let d = get(s)
+                let range: DiffLineRange = if let sel = d.selectedRange, sel.contains(point) {
+                    sel
+                } else {
+                    DiffLineRange(start: point, end: point)
+                }
+                onCommentHandler(&s, range, &tx)
+            }
+        return El<State>(direction: .row)
+            .key(cellKey)
+            .w(width)
+            .h(lineH)
+            .px(6)
+            .gap(4)
+            .itemsCenter()
+            .justifyEnd()
+            .bg(lineBg)
+            .shrink(0)
+            .child(plusBtn)
+            .child(text(labelStr).font(kit.ty.mono).color(kit.c.textFaint))
+    }
+
+    @inline(never)
+    private func attachNumberCellHandlers(
+        _ cell: El<State>,
+        point: DiffLineRef,
+        rowIdx: Int,
+        rows: [DiffRow],
+        side: DiffSide,
+        lineH: Float
+    ) -> El<State> {
+        let mode = forcedMode
+        return cell
             .onPointerDown { [get, set, onLineClickHandler] (s: inout State, press: PointerPress, tx: inout Tx) in
                 var d = get(s)
                 if let mode { d.mode = mode }
@@ -3159,7 +3184,6 @@ public struct DiffView<State>: Sendable {
                     onSelectHandler?(&s, DiffLineRange(from: range), &tx)
                 }
             }
-        return cell
     }
 
     // MARK: Unified & Split Rows

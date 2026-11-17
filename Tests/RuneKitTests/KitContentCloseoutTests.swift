@@ -325,6 +325,17 @@ struct KitContentCloseoutTests {
                         if misplaced {
                             failures.append("icon[\(idx)] at \(pt)pt @\(scale)x: hairline mismatch")
                         }
+                    } else if px == 20 && (idx == 9 || idx == 12) {
+                        // Upstream glyphs.rs (commit 6171ae78a): at 20px these two Ganesh masks
+                        // (search=9, eye=12) differ from area coverage; pin every alpha byte via
+                        // FNV-1a rather than increasing the 0.12 tolerance.
+                        let hash = ours.reduce(UInt64(0xcbf2_9ce4_8422_2325)) { h, a in
+                            (h ^ UInt64(a)) &* 0x100_0000_01b3
+                        }
+                        let expected: UInt64 = idx == 9 ? 0x2d95_190e_92a6_ace5 : 0x493e_5596_a7d7_b305
+                        if hash != expected {
+                            failures.append("icon[\(idx)] at \(pt)pt @\(scale)x: FNV-1a 0x\(String(hash, radix: 16)) != 0x\(String(expected, radix: 16))")
+                        }
                     } else {
                         var sumDiff: Float = 0
                         var maxUnion: Float = 0

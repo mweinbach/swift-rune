@@ -4,13 +4,14 @@ import RuneMotion
 /// Sampled presentation values from an active `LoopTrack`.
 struct LoopSampleResult {
     var opacity: Float = 1.0
+    var scale: Float = 1.0
     var rotation: Float = 0.0
     var offset: Vec2 = .zero
 }
 
 /// Tracks active `LoopSpec` / `Cycle` / `MotionSequence` presentation tracks for mounted nodes.
 struct LoopRuntime {
-    private var entries: [NodeId: LoopSpec] = [:]
+    internal var entries: [NodeId: LoopSpec] = [:]
     var tracks: [NodeId: LoopTrack] = [:]
 
     mutating func sync(
@@ -74,8 +75,11 @@ struct LoopRuntime {
         switch spec.kind {
         case .rotation:
             res.rotation = val
-        case .opacity, .opacityCycle, .sequence:
+        case .opacity, .opacityCycle:
             res.opacity = val
+        case .sequence:
+            res.opacity = val
+            res.scale = track.pose(at: now, reduced: reducedMotion)?.scale ?? 1.0
         case .slide, .slideEased:
             if let frac = track.offset(at: now, reduced: reducedMotion) {
                 res.offset = Vec2(frac.x * nodeSize.x, frac.y * nodeSize.y)
@@ -84,29 +88,13 @@ struct LoopRuntime {
         return res
     }
 
-    func phaseValue(id: NodeId, at now: Double, reducedMotion: Bool) -> Float? {
-        guard let spec = entries[id], let track = tracks[id] else { return nil }
-        if reducedMotion {
-            if case .sequence = spec.kind {
-                return Float(track.phase(at: now))
-            }
-            return 0.0
-        }
-        return Float(track.phase(at: now))
-    }
-
-    func hasActiveLoops(
-        nodeTime: (NodeId) -> Double,
-        wall: Double,
-        reducedMotion: Bool,
-        excluding sleepingIds: Set<NodeId> = []
-    ) -> Bool {
+    func hasActiveLoops(nodeTime: (NodeId) -> Double, wall: Double, reducedMotion: Bool) -> Bool {
         if reducedMotion {
             return false
         }
-        for (id, track) in tracks where !sleepingIds.contains(id) {
+        for (id, track) in tracks {
             if case .opacityCycle = entries[id]?.kind {
-                return true
+                continue
             }
             if track.isActive(at: nodeTime(id)) {
                 return true
@@ -126,12 +114,9 @@ struct LoopRuntime {
         }
     }
 
-    func nextFrameInterval(
-        reducedMotion: Bool,
-        excluding sleepingIds: Set<NodeId> = []
-    ) -> Double? {
+    func nextFrameInterval(reducedMotion: Bool) -> Double? {
         var best: Double? = nil
-        for (id, track) in tracks where !sleepingIds.contains(id) {
+        for (id, track) in tracks {
             if reducedMotion { continue }
             if let interval = track.frameInterval() {
                 best = best.map { min($0, interval) } ?? interval

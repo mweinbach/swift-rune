@@ -576,7 +576,7 @@ internal struct SceneRest: Sendable {
 /// The render thread's animated retained-mode scene tree, with a declarative `commit` adapter.
 public struct Scene: Sendable {
     internal static let noneIdx: UInt32 = UInt32.max
-    internal static let maxTrackSlots: Int = 32
+    internal static let maxTrackSlots: Int = 21
 
     internal struct Node: Sendable {
         var id: NodeId
@@ -1819,15 +1819,11 @@ public struct Scene: Sendable {
                 }
 
                 // Update visual properties smoothly or immediately
-                let prevHasFill = nodes[existingIdx].hasFill
-                let prevHasBorder = nodes[existingIdx].hasBorder
                 nodes[existingIdx].hasFill = (spec.fill != nil)
                 nodes[existingIdx].hasBorder = (spec.border != nil)
-                var propDirty = (prevHasFill != nodes[existingIdx].hasFill) || (prevHasBorder != nodes[existingIdx].hasBorder)
                 let matchedExiting = wasExiting && !cut && matchedStarts[spec.id] != nil && !store.reducedMotion
-                let instantOpacity = spec.opacityAnim.map { $0.curve == .instant && $0.delay <= 0 } ?? false
                 if !matchedExiting {
-                    if !cut, let opAnim = spec.opacityAnim, !instantOpacity {
+                    if !cut, let opAnim = spec.opacityAnim {
                         let rest = store.target(spec.id, Props.OPACITY) ?? get(spec.id, Props.OPACITY)
                         if rest != spec.opacity {
                             animate(spec.id, Props.OPACITY, to: spec.opacity, anim: opAnim)
@@ -1912,38 +1908,26 @@ public struct Scene: Sendable {
                     if let border = spec.border {
                         set(spec.id, Props.BORDER, border)
                     }
-                    propDirty = true
                 }
-                nodes[existingIdx].opacity = spec.opacity
                 if !matchedExiting {
                     let fillSpring = !cut ? (spec.paintSpring ?? spec.colorSpring ?? spec.styleSpring) : nil
                     let borderSpring = !cut ? (spec.paintSpring ?? spec.colorSpring ?? spec.styleSpring) : nil
                     if let fill = spec.fill {
                         if let psp = fillSpring {
                             animate(spec.id, Props.FILL, to: fill, anim: Anim<MotionColor>(curve: Curve.from(psp)))
-                        } else if hasTrack(existingIdx, Props.FILL) {
+                        } else {
                             set(spec.id, Props.FILL, fill)
-                            nodes[existingIdx].fill = fill
-                        } else if nodes[existingIdx].fill != fill {
-                            nodes[existingIdx].fill = fill
-                            propDirty = true
                         }
                     }
                     if let border = spec.border {
                         if let bsp = borderSpring {
                             animate(spec.id, Props.BORDER, to: border, anim: Anim<MotionColor>(curve: Curve.from(bsp)))
-                        } else if hasTrack(existingIdx, Props.BORDER) {
+                        } else {
                             set(spec.id, Props.BORDER, border)
-                            nodes[existingIdx].border = border
-                        } else if nodes[existingIdx].border != border {
-                            nodes[existingIdx].border = border
-                            propDirty = true
                         }
                     }
                 }
-                if propDirty || nodes[existingIdx].dirty || spec.styleSpring != nil || spec.paintSpring != nil || spec.colorSpring != nil {
-                    nodes[existingIdx].dirty = true
-                }
+                nodes[existingIdx].dirty = true
             } else if !cut, let m = matchedStarts[spec.id] {
                 insert(spec.id, localSpec, .initial)
                 if let i = slot(spec.id) {
@@ -1990,7 +1974,7 @@ public struct Scene: Sendable {
             let nid = NodeId(rawId)
             if seen.contains(nid) { continue }
             guard let i = slot(nid), nodes[i].alive else { continue }
-            if cut || landWaitingNodes || matchedRemovedIds.contains(nid) || effectiveCumulativeOpacity(of: i) <= 0.0005 {
+            if cut || landWaitingNodes || matchedRemovedIds.contains(nid) {
                 unmount(nid)
                 continue
             }
@@ -2037,32 +2021,6 @@ public struct Scene: Sendable {
                 remove(nid)
             }
         }
-        // If any still-exiting node now sits under a zero-opacity ancestor, unmount it at once (`springs.rs:435`).
-        for rawId in Array(index.keys) {
-            let nid = NodeId(rawId)
-            guard let i = slot(nid), nodes[i].alive, nodes[i].presence.isExiting else { continue }
-            if effectiveCumulativeOpacity(of: i) <= 0.0005 {
-                unmount(nid)
-            }
-        }
-    }
-
-    private func effectiveCumulativeOpacity(of slotIndex: Int) -> Float {
-        var op: Float = 1.0
-        var cur = slotIndex
-        var guardCount = 0
-        while cur >= 0 && cur < nodes.count && nodes[cur].alive && guardCount < 1024 {
-            let nid = nodes[cur].id
-            let nodeOp = store.get(nid, Props.OPACITY) ?? nodes[cur].opacity
-            let restOp = store.get(nid, Props.GROUP_REST) ?? 1.0
-            op *= nodeOp * restOp
-            if op <= 0.0005 { return 0.0 }
-            let p = nodes[cur].parent
-            if p == Self.noneIdx { break }
-            cur = Int(p)
-            guardCount += 1
-        }
-        return op
     }
 
     /// Evaluates the scene at `now` and populates `nodes`/`byId` snapshots alongside incremental output.

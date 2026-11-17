@@ -15,6 +15,9 @@ internal struct UnseenPresenceState: Sendable {
     var seenAncestorIds: Set<NodeId> = []
     var currentPaintSeenIds: Set<NodeId> = []
     var currentPaintUnseenIds: Set<NodeId> = []
+    /// Nodes painted outside the window/clip on the last frame (geometry only, ignoring opacity).
+    var currentPaintOffscreenIds: Set<NodeId> = []
+    var currentPaintOnscreenIds: Set<NodeId> = []
     var prevMountedIds: Set<NodeId> = []
     var prevNodesById: [NodeId: PrevNodeSnapshot] = [:]
     var prevChildrenByParent: [NodeId: [NodeId]] = [:]
@@ -22,14 +25,22 @@ internal struct UnseenPresenceState: Sendable {
     mutating func beginPaint() {
         currentPaintSeenIds.removeAll(keepingCapacity: true)
         currentPaintUnseenIds.removeAll(keepingCapacity: true)
+        currentPaintOffscreenIds.removeAll(keepingCapacity: true)
+        currentPaintOnscreenIds.removeAll(keepingCapacity: true)
     }
 
-    mutating func recordPaintedNode(id: NodeId, inView: Bool) {
+    mutating func recordPaintedNode(id: NodeId, inView: Bool, geometricallyInView: Bool? = nil) {
         if inView {
             currentPaintSeenIds.insert(id)
             currentPaintUnseenIds.remove(id)
         } else if !currentPaintSeenIds.contains(id) {
             currentPaintUnseenIds.insert(id)
+        }
+        if geometricallyInView ?? inView {
+            currentPaintOnscreenIds.insert(id)
+            currentPaintOffscreenIds.remove(id)
+        } else if !currentPaintOnscreenIds.contains(id) {
+            currentPaintOffscreenIds.insert(id)
         }
     }
 }
@@ -368,7 +379,6 @@ extension Runtime {
     internal func applyUnseenPresenceAfterCommit(
         specs: [NodeSpec],
         cut: Bool,
-        matchedStartIds: Set<NodeId> = [],
         to scene: inout Scene
     ) -> Bool {
         guard specs.count == flatNodes.count else { return false }
@@ -443,8 +453,7 @@ extension Runtime {
 
             let clip = intersectRects(node.clipRect, spec.rect.offsetBy(mySticky))
             let winClip = intersectRects(clip, winRect)
-            let visibleOpacity = spec.opacity >= 1.0 / 512.0 || !node.el.liveBindings.filter({ $0.target == .opacity }).isEmpty || loopRuntime.tracks[id] != nil
-            let inViewNow = node.el.isolatedLayer || (visibleOpacity && winClip.width > 0.001 && winClip.height > 0.001)
+            let inViewNow = node.el.isolatedLayer || (winClip.width > 0.001 && winClip.height > 0.001)
 
             if !inViewNow {
                 // 2. `enters_unseen`: newly mounted nodes clipped out of view land immediately at rest.
@@ -456,32 +465,25 @@ extension Runtime {
                     scene.enterNow(id)
                 }
 
-                // 3. `unseen_before_and_after`: nodes staying unseen land layout & style props immediately
-                // so offscreen reflow and color/blur/transform changes do not animate invisibly
-                // (`apply.rs:432,515-615`, `unseen_entrances.rs`).
-                if unseenPresence.unseenIds.contains(id), !matchedStartIds.contains(id) {
-                    if let fill = spec.fill {
-                        scene.set(id, Props.FILL, fill)
-                    }
-                    if let border = spec.border {
-                        scene.set(id, Props.BORDER, border)
-                    }
-                    scene.set(id, Props.BLUR, Blur(spec.blur))
+                // 3. `unseen_before_and_after`: rows staying unseen snap their layout frame and visuals
+                // so offscreen reflow/colour changes do not animate invisibly (`unseen_presence.rs`).
+                if unseenPresence.unseenIds.contains(id) {
+                    let parentOrigin = spec.parent.flatMap { specById[$0]?.rect.origin } ?? .zero
+                    let localFrame = MotionRect(
+                        left: spec.rect.left - parentOrigin.x,
+                        top: spec.rect.top - parentOrigin.y,
+                        right: spec.rect.right - parentOrigin.x,
+                        bottom: spec.rect.bottom - parentOrigin.y
+                    )
+                    scene.landFrame(id, localFrame)
+                    if let fill = spec.fill { scene.set(id, Props.FILL, fill) }
+                    if let border = spec.border { scene.set(id, Props.BORDER, border) }
                     scene.set(id, Props.OPACITY, spec.opacity)
+                    scene.set(id, Props.BLUR, Blur(spec.blur))
+                    scene.set(id, Props.CORNERS, spec.corners)
+                    scene.set(id, Props.OFFSET, spec.offset)
                     scene.set(id, Props.SCALE, spec.scale)
                     scene.set(id, Props.ROTATE, spec.rotate)
-                    scene.set(id, Props.OFFSET, spec.offset)
-                    scene.set(id, Props.CORNERS, spec.corners)
-                    if spec.layoutAnim != nil {
-                        let parentOrigin = spec.parent.flatMap { specById[$0]?.rect.origin } ?? .zero
-                        let localFrame = MotionRect(
-                            left: spec.rect.left - parentOrigin.x,
-                            top: spec.rect.top - parentOrigin.y,
-                            right: spec.rect.right - parentOrigin.x,
-                            bottom: spec.rect.bottom - parentOrigin.y
-                        )
-                        scene.landFrame(id, localFrame)
-                    }
                 }
             } else if !reducedMotion,
                       spec.transition != nil,
@@ -524,8 +526,10 @@ extension Runtime {
         }
         unseenPresence.seenAncestorIds = ancestors
 
+        // Entrances land only when they draw out of view (`land_unseen_entrances` checks geometry):
+        // an entrance still transparent at its start, or held by `enterDelay`, keeps animating.
         for p in frameNodes where !p.isExiting {
-            if unseenPresence.unseenIds.contains(p.id), scene.phase(p.id) == .entering {
+            if unseenPresence.currentPaintOffscreenIds.contains(p.id), scene.phase(p.id) == .entering {
                 scene.enterNow(p.id)
             }
         }
@@ -621,6 +625,21 @@ extension Runtime {
 
     func unmountOmittedUnseenNodes(_ ids: [NodeId], on scene: inout Scene) {
         for id in ids {
+            scene.unmount(id)
+        }
+    }
+
+    /// Immediately unmounts any exiting node that drew nothing on the just-finished frame
+    /// (`unseen_presence.rs:end_unseen_exits`), skipping active matched flights.
+    internal func endUnseenExits(on scene: inout Scene) {
+        for id in unseenPresence.currentPaintUnseenIds {
+            guard case .exiting = scene.phase(id),
+                  !unseenPresence.seenAncestorIds.contains(id),
+                  !activeFlightIds.contains(id),
+                  !launchedFlightIds.contains(id),
+                  !unclippedMatchedFlightIds.contains(id) else {
+                continue
+            }
             scene.unmount(id)
         }
     }

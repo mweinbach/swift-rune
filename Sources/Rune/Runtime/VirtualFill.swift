@@ -126,7 +126,17 @@ internal struct RuntimeVirtualListState: Sendable {
     static let indexedEdgeMultiplier: Float = 1.75
     static let indexedBudgetMultiplier: Float = 0.5
     static let nonIndexedEdgeMultiplier: Float = 0.5
+    static let pinnedRows: Int = 32
     static let maxCachedKeys: Int = 250_000
+
+    struct VirtualMountedSnapshot: Equatable, Sendable {
+        var mountedKeys: [String]
+        var range: Range<Int>
+        var topSpacerH: Float
+        var botSpacerH: Float
+        var padTop: Float
+        var padBottom: Float
+    }
 
     var measuredByKey: [String: Float] = [:]
     var lastKeys: [String] = []
@@ -137,9 +147,65 @@ internal struct RuntimeVirtualListState: Sendable {
     var lastAnchorKey: String? = nil
     var lastAnchorLocalY: Float = 0
     var rowKeyBySegment: [String: String] = [:]
+    var lastCommittedOffsetY: Float? = nil
     var wantsMoreFrames: Bool = false
     var missingOverscanRows: Int = 0
     var isIndexed: Bool = false
+    var lastMountedSnapshot: VirtualMountedSnapshot? = nil
+    /// The path of the scroll viewport the list windows against (`VirtualList::scroll_path`).
+    var scrollPath: String = ""
+    /// That viewport's height, as last laid out (`VirtualList::viewport`).
+    var viewport: Float = 0
+    /// Where the list starts in its viewport's content, as last laid out (`VirtualList::top`).
+    var top: Float = 0
+    /// The list lies in a row of another virtual list with the same scroll viewport (an open
+    /// section of a long list, itself long): it windows against that viewport where the row
+    /// places it (`top`), and only that viewport, not this list, is pinned to its end
+    /// (`locate`) (`VirtualList::nested`).
+    var nested: Bool = false
+    /// How far the viewport's content runs on under a nested list, as last laid out: where its
+    /// window stands while the viewport is pinned to its end (`VirtualList::tail`).
+    var tail: Float = 0
+    /// A nested list wholly above the viewport's top holds no reader, so it anchors nothing:
+    /// its rows changing height move the rows under it, which the list around it anchors
+    /// (`VirtualList::passed`).
+    private(set) var passed: Bool = false
+    /// The list's own top and bottom padding (`VirtualList::pad_top` / `pad_bottom`).
+    var padTop: Float = 0
+    var padBottom: Float = 0
+
+    /// The rows' extent, their padding included, for rows totalling `total` (`VirtualList::extent`).
+    func extent(total: Float) -> Float {
+        padTop + total + padBottom
+    }
+
+    /// The list's own scroll offset, and whether its window is pinned to its end, for its
+    /// viewport scrolled to `scroll` (`pinned`: the viewport holds its end). A nested list
+    /// is never pinned itself: it stands where the viewport's end leaves it (`VirtualList::at`).
+    func at(_ scroll: Float, pinned: Bool, total: Float) -> (offset: Float, pinned: Bool) {
+        if !nested {
+            return (max(0, scroll - top), pinned)
+        }
+        let offset = pinned ? extent(total: total) + tail - viewport : scroll - top
+        return (max(0, offset), false)
+    }
+
+    /// `at`, noting whether a nested list lies wholly above the viewport's top and so anchors
+    /// nothing (`select`, `hold` and the commits that anchor the reader) (`VirtualList::locate`).
+    mutating func locate(_ scroll: Float, pinned: Bool, total: Float) -> (offset: Float, pinned: Bool) {
+        let at = self.at(scroll, pinned: pinned, total: total)
+        passed = nested && at.offset >= extent(total: total)
+        return at
+    }
+
+    /// The rows above row `end`, at their measured or estimated heights (`VirtualList::prefix`).
+    func prefix(_ end: Int, estimated: Float) -> Float {
+        var y: Float = 0
+        for key in lastKeys.prefix(max(0, end)) {
+            y += rowHeight(forKey: key, estimated: estimated)
+        }
+        return y
+    }
 
     func rowHeight(forKey key: String, estimated: Float) -> Float {
         measuredByKey[key] ?? max(1, estimated)
@@ -180,11 +246,14 @@ internal struct RuntimeVirtualListState: Sendable {
         prefix: [Float],
         count: Int,
         indexed: Bool,
-        pinnedIndices: Set<Int>
+        pinnedIndices: Set<Int>,
+        pinned: Bool = false
     ) -> (mounted: Range<Int>, wantedMore: Bool, missing: Int) {
         guard count > 0, viewport > 0 else { return (0..<0, false, 0) }
-        let lo = max(0, offset - viewport * Self.overscanMultiplier)
-        let hi = offset + viewport * (1.0 + Self.overscanMultiplier)
+        let maxOff = max(0, (prefix.last ?? 0) - viewport)
+        let effOffset = pinned ? maxOff : min(max(0, offset), maxOff)
+        let lo = max(0, effOffset - viewport * Self.overscanMultiplier)
+        let hi = effOffset + viewport * (1.0 + Self.overscanMultiplier)
 
         var targetLo = count
         var targetHi = 0
@@ -199,6 +268,10 @@ internal struct RuntimeVirtualListState: Sendable {
         if targetLo >= targetHi {
             targetLo = 0
             targetHi = min(count, 1)
+        }
+        if pinned {
+            targetLo = min(targetLo, max(0, targetHi - Self.pinnedRows))
+            targetHi = max(targetHi, targetLo)
         }
 
         // Preserve pinned indices near edges within overscan.
@@ -255,28 +328,36 @@ internal struct RuntimeVirtualListState: Sendable {
             chosenHi = max(hiIdx, visHi)
         }
 
-        let missing = max(0, chosenLo - targetLo) + max(0, targetHi - chosenHi)
-        // Only ask for more frames while edge rows beyond `1.75 * viewport` still aren't mounted.
-        let edgeLo = max(0, offset - viewport * Self.indexedEdgeMultiplier)
-        let edgeHi = offset + viewport * (1.0 + Self.indexedEdgeMultiplier)
-        let edgeWanted = (chosenLo > 0 && prefix[chosenLo] > edgeLo) || (chosenHi < count && prefix[chosenHi] < edgeHi)
+        // Only count overscan rows that aren't already mounted (overlapping range only; r368).
+        let overlap = max(0, min(chosenHi, targetHi) - max(chosenLo, targetLo))
+        let missing = max(0, targetHi - targetLo) - overlap
+        // Only ask for more frames while edge rows beyond `1.75 * viewport` still aren't mounted (or end-pinned lacks rows).
+        let edgeLo = max(0, effOffset - viewport * Self.indexedEdgeMultiplier)
+        let edgeHi = effOffset + viewport * (1.0 + Self.indexedEdgeMultiplier)
+        let edgeWanted = pinned
+            ? (chosenHi < count || (missing > 0 && chosenLo > targetLo))
+            : ((chosenLo > 0 && prefix[chosenLo] > edgeLo) || (chosenHi < count && prefix[chosenHi] < edgeHi))
         return (chosenLo..<chosenHi, missing > 0 && edgeWanted, missing)
     }
 
-    /// Re-evaluates overscan fill demand against post-commit measured row heights (`window.rs:52-87`).
-    func fillDemand(offset: Float, viewport: Float, prefix: [Float], count: Int) -> (wanted: Bool, missing: Int) {
+    /// Re-evaluates overscan fill demand against post-commit measured row heights (`window.rs:52-87`, `r368`, `r380`).
+    func fillDemand(
+        offset: Float,
+        viewport: Float,
+        prefix: [Float],
+        count: Int,
+        pinned: Bool = false
+    ) -> (wanted: Bool, missing: Int) {
         guard count > 0, viewport > 0 else { return (false, 0) }
         let lo = max(0, lastMountedRange.lowerBound)
         let hi = min(count, lastMountedRange.upperBound)
         guard lo <= hi, hi < prefix.count else { return (false, 0) }
 
-        let edgeLo = max(0, offset - viewport * Self.indexedEdgeMultiplier)
-        let edgeHi = offset + viewport * (1.0 + Self.indexedEdgeMultiplier)
-        let edgeWanted = (lo > 0 && prefix[lo] > edgeLo) || (hi < count && prefix[hi] < edgeHi)
-        guard edgeWanted else { return (false, 0) }
+        let maxOff = max(0, (prefix.last ?? 0) - viewport)
+        let effOffset = pinned ? maxOff : min(max(0, offset), maxOff)
 
-        let osLo = max(0, offset - viewport * Self.overscanMultiplier)
-        let osHi = offset + viewport * (1.0 + Self.overscanMultiplier)
+        let osLo = max(0, effOffset - viewport * Self.overscanMultiplier)
+        let osHi = effOffset + viewport * (1.0 + Self.overscanMultiplier)
         var targetLo = count
         var targetHi = 0
         for i in 0..<count {
@@ -291,7 +372,20 @@ internal struct RuntimeVirtualListState: Sendable {
             targetLo = 0
             targetHi = min(count, 1)
         }
-        let missing = max(0, lo - targetLo) + max(0, targetHi - hi)
+        if pinned {
+            targetLo = min(targetLo, max(0, targetHi - Self.pinnedRows))
+            targetHi = max(targetHi, targetLo)
+        }
+
+        let mounted = max(0, min(hi, targetHi) - max(lo, targetLo))
+        let missing = max(0, targetHi - targetLo) - mounted
+
+        let edgeLo = max(0, effOffset - viewport * Self.indexedEdgeMultiplier)
+        let edgeHi = effOffset + viewport * (1.0 + Self.indexedEdgeMultiplier)
+        let edgeWanted = pinned
+            ? (hi < count || (missing > 0 && lo > targetLo))
+            : ((lo > 0 && prefix[lo] > edgeLo) || (hi < count && prefix[hi] < edgeHi))
+        guard edgeWanted else { return (false, 0) }
         return (missing > 0, missing)
     }
 

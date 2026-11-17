@@ -609,6 +609,9 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
         if !props.rawGet("onPress").isNil {
             env.warnOnce("ui.virtualList takes no onPress")
         }
+        if !props.rawGet("onMiddlePress").isNil {
+            env.warnOnce("ui.virtualList takes no onMiddlePress")
+        }
         let gapVal = props.rawGet("gap")
         let gap: Float
         switch gapVal {
@@ -706,7 +709,7 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
 
         let skipKeys: Set<String> = [
             "count", "estimatedRowHeight", "renderRow", "rowKey", "rowError",
-            "version", "rowVersions", "onVisibleRows", "onPress", "scrollY",
+            "version", "rowVersions", "onVisibleRows", "onPress", "onMiddlePress", "scrollY",
         ]
         container = try LuauUIBridge.applyProps([props], to: container, isText: false, env: env, skipKeys: skipKeys)
         container = container.key(containerKey)
@@ -1220,6 +1223,7 @@ internal enum LuauUIBridge {
         var scrollY = false
         var stickBottom = false
         var onPressVal: LuauValue? = nil
+        var onMiddlePressVal: LuauValue? = nil
         var onHoverVal: LuauValue? = nil
         var isDisabled = false
         var isSelectable = false
@@ -1511,6 +1515,7 @@ internal enum LuauUIBridge {
             case let other: throw LuauRuntimeError(value: .string("helpSide must be top, right, bottom or left, got \(other)"))
             }
         case "onPress": state.onPressVal = v
+        case "onMiddlePress": state.onMiddlePressVal = v
         case "onHover": state.onHoverVal = v
         case "role":
             let s = try propStr(v, k)
@@ -1583,6 +1588,26 @@ internal enum LuauUIBridge {
                 script.aroundWrite(state: &st, tx: &tx) { innerTx in
                     script.enter(tx: &innerTx) {
                         try script.callHandlerIfCurrent(vmID: vmID, fn: onPressVal, arg: .table(ev))
+                    }
+                }
+            }
+        }
+        if let onMiddlePressVal = state.onMiddlePressVal, !state.isDisabled {
+            let capturedKey = state.keyStr
+            let scriptRef = env.script
+            let vmID = env.vmID
+            el = el.onMiddlePress { st, tx in
+                guard let script = scriptRef else { return }
+                let m = script.pressEventMods(tx.mods)
+                let ev = LuauTable()
+                ev.rawSet("kind", value: .string("middle-press"))
+                if let capturedKey { ev.rawSet("key", value: .string(capturedKey)) }
+                ev.rawSet("shift", value: .bool(m.shift))
+                ev.rawSet("alt", value: .bool(m.alt))
+                ev.rawSet("mod", value: .bool(m.mod))
+                script.aroundWrite(state: &st, tx: &tx) { innerTx in
+                    script.enter(tx: &innerTx) {
+                        try script.callHandlerIfCurrent(vmID: vmID, fn: onMiddlePressVal, arg: .table(ev))
                     }
                 }
             }

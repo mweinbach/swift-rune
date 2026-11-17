@@ -147,13 +147,6 @@ public enum Props {
     public static let TRANSFORM = Prop<Transform2D>(id: PropId(20), propClass: .spatial, name: "transform")
     public static let BORDER_BOTTOM = Prop<MotionColor>(id: PropId(21), propClass: .color, name: "borderBottom")
     public static let ICON_TURN = Prop<Float>(id: PropId(22), propClass: .rotation, name: "iconTurn")
-    public static let SHADOW_COLOR = Prop<MotionColor>(id: PropId(23), propClass: .color, name: "shadowColor")
-    public static let GRADIENT_TOP = Prop<MotionColor>(id: PropId(24), propClass: .color, name: "gradientTop")
-    public static let GRADIENT_BOTTOM = Prop<MotionColor>(id: PropId(25), propClass: .color, name: "gradientBottom")
-    public static let OUTLINE_COLOR = Prop<MotionColor>(id: PropId(26), propClass: .color, name: "outlineColor")
-    public static let SHADOW_GEO = Prop<Sides>(id: PropId(27), propClass: .shape, name: "shadowGeo")
-    public static let HOVER_COLOR = Prop<MotionColor>(id: PropId(28), propClass: .color, name: "hoverColor")
-    public static let PRESS_COLOR = Prop<MotionColor>(id: PropId(29), propClass: .color, name: "pressColor")
     public static let GROUP_REST = Prop<Float>(id: PropId(94), propClass: .opacity, name: "groupRest")
     public static let PRESS_SCALE = Prop<Float>(id: PropId(96), propClass: .scale, name: "pressScale")
 }

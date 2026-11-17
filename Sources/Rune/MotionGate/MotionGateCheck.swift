@@ -443,7 +443,8 @@ public func motionGateCheck(_ rec: MotionGateRecording) -> [MotionGateFinding] {
 
     func transitioning(_ tIdx: Int, _ a: Int, _ b: Int) -> Bool {
         var p = tr[tIdx].parent
-        while let i = p {
+        var hops = 0
+        while let i = p, i >= 0, i < tr.count, hops < tr.count {
             let s = (max(0, a - 1)...b).compactMap { tr[i].at($0) }
             for idx in 1..<s.count {
                 if abs(s[idx - 1].op - s[idx].op) > 0.005 || abs(s[idx - 1].scale - s[idx].scale) > 0.001 {
@@ -454,6 +455,7 @@ public func motionGateCheck(_ rec: MotionGateRecording) -> [MotionGateFinding] {
                 return true
             }
             p = tr[i].parent
+            hops += 1
         }
         return false
     }
@@ -484,9 +486,11 @@ public func motionGateCheck(_ rec: MotionGateRecording) -> [MotionGateFinding] {
         let set = Set(ids)
         return ids.filter { i in
             var p = tr[i].parent
-            while let j = p {
+            var hops = 0
+            while let j = p, j >= 0, j < tr.count, hops < tr.count {
                 if set.contains(j) { return false }
                 p = tr[j].parent
+                hops += 1
             }
             return true
         }
@@ -859,7 +863,8 @@ public func motionGateCheck(_ rec: MotionGateRecording) -> [MotionGateFinding] {
     for (i, f) in geo {
         var p = tr[i].parent
         var dup = false
-        while let j = p {
+        var hops = 0
+        while let j = p, j >= 0, j < tr.count, hops < tr.count {
             if parentDupKinds.contains(f.kind) && (0...2).contains(where: { o in
                 reported.contains(RepKey(i: j, kind: f.kind, frame: max(0, f.frame - o))) ||
                 reported.contains(RepKey(i: j, kind: f.kind, frame: f.frame + o))
@@ -868,6 +873,7 @@ public func motionGateCheck(_ rec: MotionGateRecording) -> [MotionGateFinding] {
                 break
             }
             p = tr[j].parent
+            hops += 1
         }
         if !dup { out.append(f) }
     }
@@ -940,9 +946,11 @@ public func motionGateCheck(_ rec: MotionGateRecording) -> [MotionGateFinding] {
     let remountWindow = Int(motionGateRule("remount"))
     func leaving(_ i: Int, _ k: Int) -> Bool {
         var p: Int? = i
-        while let j = p {
+        var hops = 0
+        while let j = p, j >= 0, j < tr.count, hops < tr.count {
             if let s = tr[j].at(k), (s.flags & MotionGateSnapFlags.exiting) != 0 { return true }
             p = tr[j].parent
+            hops += 1
         }
         return false
     }
@@ -1297,9 +1305,11 @@ private enum MotionGateKicks {
         func family(_ i: Int) -> [Int] {
             var up = [i]
             var p = tr[i].parent
-            while let j = p {
+            var hops = 0
+            while let j = p, j >= 0, j < tr.count, hops < tr.count {
                 up.append(j)
                 p = tr[j].parent
+                hops += 1
             }
             return up
         }

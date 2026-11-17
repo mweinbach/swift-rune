@@ -578,7 +578,7 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         float2 halfSize = i.rect.zw * 0.5;
         float2 center = i.rect.xy + halfSize;
         float4 col = float4(0.0);
-        float2 clip_p = i.p;
+        float2 clip_p = i.pos.xy + g.projection.xy;
 
         if (kind < 0.5) {
             float d = sd_rounded(i.p - center, halfSize, i.radii);
@@ -680,9 +680,8 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
                 }
             }
         } else {
-            float2 screen = i.pos.xy + g.projection.xy;
+            float2 screen = clip_p;
             bool rotated = i.params.x != 0.0;
-            if (rotated) { clip_p = screen; }
             int2 atlasDims = int2(atlas.get_width(), atlas.get_height());
             int2 maxCoord = max(atlasDims - int2(1), int2(0));
             float cov;

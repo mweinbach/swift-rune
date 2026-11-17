@@ -711,7 +711,7 @@ struct WidgetA11yParityTests {
             .build(0, kit: k)
 
         assertNoEcho(elTree)
-        let track = findEl(elTree, key: "tabs-track")
+        let track = findEl(elTree, key: "tabs-list")
         #expect(track?.role == .tabList)
         #expect(track?.a11yLabel == "Tabs")
 
@@ -724,6 +724,45 @@ struct WidgetA11yParityTests {
 
         let tabC = findEl(elTree, key: "tabs-tab-c")
         #expect(tabC?.a11yDisabled == true)
+    }
+
+    // MARK: - TextInput description (`text_input.rs`, upstream 270222a2 / #1015)
+
+    @Test("TextInput.description is the inner editor's accessible description, separate from its name")
+    func textInputDescriptionOnEditor() {
+        struct S {
+            var name = TextEdit("")
+            var plain = TextEdit("")
+        }
+        let k = Kit.neutral(dark: false)
+        let described: El<S> = TextInput<S>(key: "name", \.name)
+            .label("Name")
+            .description("Letters and spaces only")
+            .build(k)
+        let editor = findEl(described, key: "name-input")
+        #expect(editor?.a11yLabel == "Name")
+        #expect(editor?.a11yDescription == "Letters and spaces only")
+        // Without one `name_field` still sets `description.unwrap_or_default()`: an empty
+        // description, which also keeps any help-derived one off the editor. An empty label
+        // falls back to the placeholder (`label.filter(|l| !l.is_empty())`).
+        let bare: El<S> = TextInput<S>(key: "plain", \.plain).label("").placeholder("Search").build(k)
+        #expect(findEl(bare, key: "plain-input")?.a11yLabel == "Search")
+        #expect(findEl(bare, key: "plain-input")?.a11yDescription == "")
+
+        let rt = Runtime(state: S(), viewport: Vec2(400, 120), systemDark: false) { _, _ in
+            col().child(
+                TextInput<S>(key: "name", \.name)
+                    .label("Name")
+                    .description("Letters and spaces only")
+                    .invalid(true)
+                    .build(k)
+            )
+        }
+        rt.frame(at: 0.0)
+        let node = info(rt, "name-input")
+        #expect(node?.role == .textInput)
+        #expect(node?.label == "Name")
+        #expect(node?.a11yDescription == "Letters and spaces only")
     }
 
     // MARK: - FileTree (`tests/a11y/disclosure.rs`)

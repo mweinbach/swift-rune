@@ -243,45 +243,99 @@ public final class ImageCache: @unchecked Sendable {
         )
     }
 
-    /// Wraps raw straight-alpha RGBA8 bytes immediately without assigning a `sourceURLString` (`ImageCache::rgba`).
+    /// Straight-alpha sRGB RGBA8, without a `sourceURLString` (`ImageCache::rgba`). Validation,
+    /// premultiplication and mips happen on the decoder threads, except for an image of at most
+    /// `INLINE_RGBA_PIXELS`, which is ready (and wakes the app once) before this returns.
     public func rgba(width: UInt32, height: UInt32, data: [UInt8]) -> CachedImage {
         let raw = Data(data)
         let id = ImageId.contentHash(raw)
-        let hexId = id.bytes.map { String(format: "%02x", $0) }.joined()
-        let key = CacheKey(url: "rgba:\(width)x\(height):\(hexId)", pixelSize: max(width, height), srcset: nil)
-        let handle: CachedImage
-        var needResolve = false
+        let key = CacheKey(url: "rgba:\(width)x\(height):\(Self.hex(id))", pixelSize: max(width, height), srcset: nil)
+        return requestDecode(key: key, id: id, input: .rgba(width, height, raw))
+    }
+
+    /// Encoded image bytes (PNG, JPEG, GIF, WebP, HEIC, AVIF, ... or SVG content, rasterized at
+    /// twice its own size), decoded on the decoder threads (`ImageCache::load`).
+    public func load(_ bytes: Data) -> CachedImage {
+        var payload = Data("rune-encoded\0".utf8)
+        payload.append(bytes)
+        let id = ImageId.contentHash(payload)
+        return requestDecode(key: CacheKey(url: "encoded:\(Self.hex(id))", pixelSize: 0, srcset: nil), id: id, input: .encoded(bytes))
+    }
+
+    /// `ImageCache::request` with an explicit id, for tests that queue a test-only input
+    /// (`Input::Panic`, `Input::Gated`).
+    internal func request(id: ImageId, input: ImageDecodeInput) -> CachedImage {
+        requestDecode(key: CacheKey(url: "id:\(Self.hex(id))", pixelSize: 0, srcset: nil), id: id, input: input)
+    }
+
+    /// `ImageCache::request_set` for decoded inputs: a cache hit hands back the live entry and
+    /// does not wake; a small straight RGBA image finishes inline and wakes once before
+    /// returning; anything else queues on the process's decoder threads, which wake on finish.
+    private func requestDecode(key: CacheKey, id: ImageId, input: ImageDecodeInput) -> CachedImage {
         lock.lock()
         entries = entries.filter { $0.value.state != nil }
         if let existing = entries[key] {
             if let liveHandle = existing.handle {
-                handle = liveHandle
-            } else if let state = existing.state, let pixels = existing.pixels {
-                handle = CachedImage(id: state.id, pixels: pixels, state: state)
-                entries[key] = WeakEntry(handle: handle, state: state, pixels: pixels)
-            } else {
-                let pixels = Pixels()
-                handle = CachedImage(id: id, pixels: pixels)
-                entries[key] = WeakEntry(handle: handle, state: handle.state, pixels: pixels)
-                needResolve = true
+                lock.unlock()
+                return liveHandle
             }
-        } else {
-            let pixels = Pixels()
-            handle = CachedImage(id: id, pixels: pixels)
-            entries[key] = WeakEntry(handle: handle, state: handle.state, pixels: pixels)
-            needResolve = true
+            if let state = existing.state, let pixels = existing.pixels {
+                let reused = CachedImage(id: state.id, pixels: pixels, state: state)
+                entries[key] = WeakEntry(handle: reused, state: state, pixels: pixels)
+                lock.unlock()
+                return reused
+            }
+        }
+        let pixels = Pixels()
+        let handle = CachedImage(id: id, pixels: pixels)
+        entries[key] = WeakEntry(handle: handle, state: handle.state, pixels: pixels)
+        // A small straight RGBA image (a 16 pt tile at 2x) is ready at once: its mips take
+        // microseconds, less than handing it to a decoder, and the view that asked for it draws it
+        // in the same frame rather than a placeholder first. It still wakes the app once, as a
+        // decoded one does: a caller outside a view's build (an overlay's state, a poll) is
+        // redrawn by that wake alone.
+        if let count = input.rgbaPixelCount, count <= INLINE_RGBA_PIXELS {
+            handle.resolve(with: input.decodeCaught())
+            lock.unlock()
+            wake()
+            return handle
         }
         lock.unlock()
-        if needResolve {
-            switch Self.land(url: "rgba", fetched: .rgba(width: width, height: height, data: raw), pixelSize: max(width, height)) {
-            case .success(let decoded):
-                handle.resolve(with: .success(decoded))
-            case .failure(let err):
-                handle.resolve(with: .failure(err))
-            }
-            wake()
-        }
+        ImageDecoderPool.shared.submit(.init(image: handle, input: input, wake: wake))
         return handle
+    }
+
+    private static func hex(_ id: ImageId) -> String {
+        id.bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Decodes `ImageCache.load` bytes: SVG content rasterizes at twice its own size, anything
+    /// else through the platform codecs (`image.rs` `decode`).
+    static func decodeEncoded(_ bytes: Data) -> Result<DecodedImage, ImageLoadError> {
+        do {
+            if isSVGContent(bytes) {
+                let (w, h, rgba) = try rasterizeSVG(bytes, targetMaxSide: 0)
+                return try .success(buildMipDecoded(id: "image", width: w, height: h, data: rgba))
+            }
+            let decoded = try DecodedImage.decode(data: bytes, id: "image", maxDimension: Int(IMAGE_MAX_SIDE))
+            guard decoded.width <= IMAGE_MAX_SIDE, decoded.height <= IMAGE_MAX_SIDE else {
+                return .failure(ImageLoadError("image dimensions exceed \(IMAGE_MAX_SIDE)"))
+            }
+            return .success(decoded)
+        } catch let err as ImageLoadError {
+            return .failure(err)
+        } catch {
+            return .failure(ImageLoadError(String(describing: error)))
+        }
+    }
+
+    /// Gzip (SVGZ), or markup after an optional BOM and whitespace (`image.rs` `is_svg`).
+    static func isSVGContent(_ bytes: Data) -> Bool {
+        if bytes.starts(with: [0x1f, 0x8b]) { return true }
+        var body = bytes[...]
+        if body.starts(with: [0xef, 0xbb, 0xbf]) { body = body.dropFirst(3) }
+        let whitespace: Set<UInt8> = [0x20, 0x09, 0x0a, 0x0c, 0x0d]
+        return body.first(where: { !whitespace.contains($0) }) == UInt8(ascii: "<")
     }
 
     /// Feeds already-fetched bytes manually for `url` (`ImageCache::load`).
@@ -477,7 +531,9 @@ public final class ImageCache: @unchecked Sendable {
         let vb = parseViewBox(in: svgTag)
         let srcW = max(1.0, attrW ?? vb?.2 ?? 16.0)
         let srcH = max(1.0, attrH ?? vb?.3 ?? 16.0)
-        let scale = Float(max(1, targetMaxSide)) / max(srcW, srcH)
+        // `svg_rgba(bytes, 0)`: twice the drawing's own size, at most 4096.
+        let side = targetMaxSide == 0 ? UInt32(min(max((max(srcW, srcH) * 2).rounded(.up), 1), 4096)) : targetMaxSide
+        let scale = Float(side) / max(srcW, srcH)
         let outW = max(1, UInt32((srcW * scale).rounded()))
         let outH = max(1, UInt32((srcH * scale).rounded()))
         guard outW <= IMAGE_MAX_SIDE, outH <= IMAGE_MAX_SIDE else {
