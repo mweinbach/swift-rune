@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-import Rune
+@testable import Rune
 import RuneFX
 @testable import RuneLight
 #if canImport(Metal)
@@ -77,19 +77,21 @@ struct RuneLightMetallibTests {
     func everyBuiltinPipelineIsPrecompiled() throws {
         #if canImport(Metal)
         guard let device = MTLCreateSystemDefaultDevice() else { return }
-        ShaderLibraryCache.invalidateForTesting(device: device)
-        PrecompiledMetallib.resetLoadCountForTesting()
+        let actual = try ShaderLibraryCache.loadsForTesting {
+            let fx = try FxRenderer(device: device, pixelFormat: .bgra8Unorm_srgb)
+            fx.addFormat(.rgba16Float)
+            try fx.buildEveryPipeline()
+            fx.setFireSim(true)
+            _ = try LightRenderer(device: device, width: 64, height: 64, outputFormat: .bgra8Unorm_srgb)
+            _ = try GlassRenderer(device: device, width: 64, height: 64, pixelFormat: .bgra8Unorm_srgb)
+        }
 
-        let fx = try FxRenderer(device: device, pixelFormat: .bgra8Unorm_srgb)
-        fx.addFormat(.rgba16Float)
-        try fx.buildEveryPipeline()
-        fx.setFireSim(true)
-
-        _ = try LightRenderer(device: device, width: 64, height: 64, outputFormat: .bgra8Unorm_srgb)
-        _ = try GlassRenderer(device: device, width: 64, height: 64, pixelFormat: .bgra8Unorm_srgb)
-
-        let expectedLibraries = RuneFXShaders.precompileEntries.count + RuneLightShaders.precompileEntries.count
-        #expect(PrecompiledMetallib.precompiledLoadCount == expectedLibraries)
+        let catalogs = [(RuneFXShaders.resourceBundle, RuneFXShaders.precompileEntries),
+                        (RuneLightShaders.resourceBundle, RuneLightShaders.precompileEntries)]
+        let expected = Set(catalogs.flatMap { bundle, entries in
+            entries.map { ShaderLibraryCache.Load(bundleURL: bundle.bundleURL, name: $0.name, usedPrecompiled: true) }
+        })
+        #expect(actual == expected)
         #endif
     }
 }

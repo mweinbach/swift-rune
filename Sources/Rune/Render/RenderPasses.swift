@@ -1325,9 +1325,16 @@ public final class LayersPool {
 
 /// Loads precompiled `.metallib` libraries when bundled, otherwise compiles and caches MSL source per `MTLDevice`.
 public enum ShaderLibraryCache {
+    struct Load: Hashable {
+        let bundleURL: URL
+        let name: String
+        let usedPrecompiled: Bool
+    }
+
     private final class Box: @unchecked Sendable {
         let lock = NSLock()
         var libs: [Key: MTLLibrary] = [:]
+        var observedLoads: Set<Load>?
     }
 
     private struct Key: Hashable {
@@ -1335,7 +1342,16 @@ public enum ShaderLibraryCache {
         let name: String
     }
 
-    private static let box = Box()
+    private static let sharedCache = Box()
+    @TaskLocal private static var testCache: Box?
+
+    /// Exercises the regular loader against a fresh cache and reports the libraries resolved in this scope.
+    static func loadsForTesting(_ body: () throws -> Void) rethrows -> Set<Load> {
+        let cache = Box()
+        cache.observedLoads = []
+        try $testCache.withValue(cache, operation: body)
+        return cache.lock.withLock { cache.observedLoads ?? [] }
+    }
 
     public static func load(
         named name: String,
@@ -1344,6 +1360,7 @@ public enum ShaderLibraryCache {
         bundle: Bundle? = nil,
         on device: MTLDevice
     ) throws -> MTLLibrary {
+        let box = testCache ?? sharedCache
         let key = Key(deviceId: UInt(bitPattern: ObjectIdentifier(device)), name: name)
         box.lock.lock()
         if let cached = box.libs[key] {
@@ -1352,26 +1369,23 @@ public enum ShaderLibraryCache {
         }
         box.lock.unlock()
 
-        let resolved: MTLLibrary
-        if let precompiled = PrecompiledMetallib.load(
+        let resolved = try PrecompiledMetallib.loadLibraryWithOrigin(
             named: name,
             source: source,
             requiredFunction: requiredFunction,
             bundle: bundle,
             on: device
-        ) {
-            resolved = precompiled
-        } else {
-            resolved = try device.makeLibrary(source: source, options: nil)
-        }
+        )
 
         box.lock.lock()
-        box.libs[key] = resolved
+        box.libs[key] = resolved.library
+        box.observedLoads?.insert(Load(bundleURL: (bundle ?? .module).bundleURL, name: name, usedPrecompiled: resolved.usedPrecompiled))
         box.lock.unlock()
-        return resolved
+        return resolved.library
     }
 
     public static func invalidateForTesting(device: MTLDevice? = nil, named: String? = nil) {
+        let box = testCache ?? sharedCache
         box.lock.lock()
         defer { box.lock.unlock() }
         if let device, let named {
