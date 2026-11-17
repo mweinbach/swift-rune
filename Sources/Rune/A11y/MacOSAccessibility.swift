@@ -25,9 +25,14 @@ public extension AccessibilityTreeBuilder {
             }
         }
 
+        func words(_ index: Int) -> String? {
+            AccessibilityNameSource.words(of: index, source: { AccessibilityNameSource(elements[$0], securePaths: securePaths) },
+                                           children: { childrenByParent[$0] ?? [] })
+        }
+
         func build(_ idx: Int) -> AccessibilityNode {
             let info = elements[idx]
-            let isSecure = securePaths.contains(info.path) || (info.role == .textInput && info.text == nil)
+            let isSecure = info.secure || securePaths.contains(info.path) || (info.role == .textInput && info.text == nil)
             // As the live tree's `a11yNodeActions` (`a11y/node.rs:222-240`, under `actionable`).
             let input = info.a11yInput
             let enabled = !info.disabled && !info.inert
@@ -59,19 +64,29 @@ public extension AccessibilityTreeBuilder {
                 : .zero
 
             let projectedValue: String? = isSecure ? nil : info.text
-            let projectedLabel: String? = isSecure ? (info.label ?? "Password") : (info.label ?? info.key)
+            let relatedName = input?.labelledBy.flatMap { key in
+                AccessibilityNameSource.relatedIndex(key, from: idx, parent: { elements[$0].parentIndex },
+                                                     children: { childrenByParent[$0] ?? [] }, keyAt: { elements[$0].key })
+            }.flatMap(words)
+            let givenName = AccessibilityNameSource.nonblank(info.label) ?? relatedName
+            let controlName = givenName ?? (input?.isDefaultButton == true && !isSecure ? words(idx) : nil)
+            // Element keys identify targets. A keyed, unnamed part inside a button does
+            // not contribute words; older flat records carry only their fallback key.
+            let fallback = input == nil ? info.key : (info.role == .text ? info.text : nil)
+            let projectedLabel = controlName ?? (isSecure ? "Password" : fallback)
+            let role: ElementRole = input?.isDefaultButton == true ? .button : info.role
             let nodeId = info.key ?? info.path
 
             var projected = AccessibilityNode(
                 id: nodeId,
                 role: info.role == .textInput && (isSecure || input?.multiline == true)
                     ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: input?.multiline == true)
-                    : info.role,
+                    : role,
                 label: projectedLabel,
                 value: projectedValue,
                 help: info.help,
                 frame: rect,
-                isFocused: info.focused || info.path == focusedPath,
+                isFocused: focusedPath.map { info.path == $0 } ?? info.focused,
                 isFocusable: !info.disabled && !info.inert && info.focusable,
                 isSelected: info.itemSelected,
                 isExpanded: info.expanded,
@@ -80,8 +95,9 @@ public extension AccessibilityTreeBuilder {
                 isModal: info.role == .dialog,
                 isSecure: isSecure,
                 actions: actions,
-                children: controlChildren((childrenByParent[idx] ?? []).map(build), role: info.role, name: isSecure ? nil : info.label)
+                children: controlChildren((childrenByParent[idx] ?? []).map(build), role: role, name: isSecure ? nil : controlName)
             )
+            projected.runtimePath = info.path
             projected.keepsControlContent = input?.keepsControlContent == true
             return projected
         }
@@ -178,64 +194,16 @@ public extension Runtime {
             }
         }
 
-        func isInside(ancestor: Int, candidate: Int) -> Bool {
-            var cur = flatNodes[candidate].parentIndex
-            while let p = cur {
-                if p == ancestor { return true }
-                cur = flatNodes[p].parentIndex
-            }
-            return false
-        }
-
         func a11yKeyed(from idx: Int, key: String) -> Int? {
-            var scope = flatNodes[idx].parentIndex
-            while let s = scope {
-                for j in (s + 1)..<flatNodes.count {
-                    guard isInside(ancestor: s, candidate: j) else { break }
-                    if j != idx, flatNodes[j].key == key {
-                        return flatNodes[j].effectiveInert ? nil : j
-                    }
-                }
-                scope = flatNodes[s].parentIndex
-            }
-            return nil
-        }
-
-        func a11yContentWords(_ idx: Int) -> String {
-            var parts: [String] = []
-            func visit(_ cur: Int) {
-                for c in (allChildrenByParent[cur] ?? []) {
-                    let cn = flatNodes[c]
-                    if cn.el.isA11yHidden || cn.el.opacity <= 0.01 || cn.el.isSecure { continue }
-                    if let lbl = cn.el.a11yLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !lbl.isEmpty {
-                        parts.append(lbl)
-                        continue
-                    }
-                    if cn.el.handlers.editLens == nil,
-                       let txt = (cn.el.plainText ?? cn.el.richSpans?.map(\.text).joined())?.trimmingCharacters(in: .whitespacesAndNewlines),
-                       !txt.isEmpty {
-                        parts.append(txt)
-                    }
-                    visit(c)
-                }
-            }
-            visit(idx)
-            return parts.joined(separator: " ")
+            let match = AccessibilityNameSource.relatedIndex(key, from: idx, parent: { flatNodes[$0].parentIndex },
+                                                             children: { allChildrenByParent[$0] ?? [] }, keyAt: { flatNodes[$0].key })
+            return match.flatMap { flatNodes[$0].effectiveInert ? nil : $0 }
         }
 
         func a11yWords(_ idx: Int) -> String? {
-            let n = flatNodes[idx]
-            if n.el.isSecure { return nil }
-            if let lbl = n.el.a11yLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !lbl.isEmpty {
-                return lbl
-            }
-            if n.el.handlers.editLens == nil,
-               let txt = (n.el.plainText ?? n.el.richSpans?.map(\.text).joined())?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !txt.isEmpty {
-                return txt
-            }
-            let content = a11yContentWords(idx)
-            return content.isEmpty ? nil : content
+            AccessibilityNameSource.words(of: idx, source: { index in
+                AccessibilityNameSource(flatNodes[index].el, securePath: securePaths.contains(flatNodes[index].path))
+            }, children: { allChildrenByParent[$0] ?? [] })
         }
 
         let selectableRoles: Set<ElementRole> = [.listItem, .option, .tab, .treeItem, .gridCell, .row]
@@ -273,9 +241,6 @@ public extension Runtime {
             let resolvedValue = isSecure ? nil : value
             let labelledByText = el.a11yLabelledBy.flatMap { a11yKeyed(from: idx, key: $0) }.flatMap(a11yWords)
             let describedByText = el.a11yDescribedBy.flatMap { a11yKeyed(from: idx, key: $0) }.flatMap(a11yWords)
-            let resolvedLabel: String? = isSecure
-                ? (el.a11yLabel ?? labelledByText ?? "Password")
-                : (el.a11yLabel ?? labelledByText ?? (el.role == .textInput ? nil : richPlain))
             let resolvedHelp: String? = el.a11yDescription ?? describedByText ?? el.a11yHelp
             let selectedState: Bool? = (selectableRoles.contains(el.role) || el.itemSelected) ? el.itemSelected : nil
 
@@ -286,6 +251,9 @@ public extension Runtime {
             let resolvedRole: ElementRole = el.role == .textInput && (isSecure || editMultiline)
                 ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: editMultiline)
                 : AccessibilityRoleRules.role(for: el, focusable: nodeTakesFocus(el) && !node.effectiveInert)
+            let givenName = AccessibilityNameSource.nonblank(el.a11yLabel) ?? labelledByText
+            let controlName = givenName ?? (el.isDefaultButton && resolvedRole == .button && !isSecure ? a11yWords(idx) : nil)
+            let resolvedLabel = controlName ?? (isSecure ? "Password" : (el.role == .textInput ? nil : richPlain))
             let hasLinks = hasActiveTextLinks(el)
             var builtChildren = (childrenByParent[idx] ?? []).map(build)
             if let grid = el.terminalGridPayload {
@@ -306,7 +274,7 @@ public extension Runtime {
                         linkActions.append(.focus)
                     }
                     let linkLabel = box.link.label ?? (isSecure ? nil : box.sliceText)
-                    builtChildren.append(AccessibilityNode(
+                    var link = AccessibilityNode(
                         id: box.link.id,
                         role: box.link.role,
                         label: linkLabel,
@@ -316,7 +284,9 @@ public extension Runtime {
                         isFocusable: linkFocusable,
                         url: box.link.id,
                         actions: linkActions
-                    ))
+                    )
+                    link.runtimePath = "\(node.path)#link-\(box.linkIndex)"
+                    builtChildren.append(link)
                 }
             }
 
@@ -350,7 +320,7 @@ public extension Runtime {
                 placeholder: el.placeholder,
                 range: el.a11yRange,
                 frame: rect,
-                isFocused: !hasLinks && ((node.path == focusedPath) || (focusedKey != nil && node.key == focusedKey)),
+                isFocused: !hasLinks && node.path == focusedPath,
                 isFocusable: !hasLinks && enabled && el.focusable,
                 isSelected: el.itemSelected,
                 selectedState: selectedState,
@@ -377,8 +347,20 @@ public extension Runtime {
                 isModal: el.isModal || el.role == .dialog,
                 isSecure: isSecure,
                 actions: actions,
-                children: AccessibilityTreeBuilder.controlChildren(builtChildren, role: resolvedRole, name: isSecure ? nil : el.a11yLabel ?? labelledByText)
+                children: AccessibilityTreeBuilder.controlChildren(builtChildren, role: resolvedRole, name: isSecure ? nil : controlName)
             )
+            #if os(macOS) && canImport(AppKit)
+            if !isSecure, el.handlers.editLens != nil, let value = resolvedValue,
+               let box = nodeTextLayouts[node.nodeId]?.box {
+                let scale = presentedScaleByPath[node.path] ?? Vec2(1, 1)
+                let scroll = inputScroll[node.path] ?? 0
+                let origin = Vec2(rect.x + (el.layout.padding.left - scroll) * scale.x,
+                                  rect.y + el.layout.padding.top * scale.y)
+                projected.fieldLayout = A11yFieldLayout(text: value, box: box, system: textSystem,
+                                                        origin: origin, scale: scale)
+            }
+            #endif
+            projected.runtimePath = node.path
             projected.keepsControlContent = el.keepsControlContent
             return projected
         }
@@ -426,7 +408,9 @@ public extension Runtime {
         // `a11y_action`: only an allowed node that can do what is asked (`actions.rs:38-81`);
         // a disabled control advertises nothing and takes no action.
         let all = elements()
-        if let flatIdx = a11yTargetIndex(id) {
+        let flatIdx = a11yTargetIndex(id)
+        let target = all.first(where: { $0.path == id }) ?? all.first(where: { $0.key == id })
+        if let flatIdx {
             let flat = flatNodes[flatIdx]
             guard a11yAllowed(flatIdx), a11yTakes(action, on: flat) else {
                 return false
@@ -440,14 +424,11 @@ public extension Runtime {
         } else {
             // An inline text link is a sub-node of its text, not an element of its own:
             // `(Click, Some(link))` presses it whatever its text offers (`actions.rs:49`).
-            guard action == .press || action == .focus,
-                  let link = all.first(where: { ($0.key ?? $0.path) == id || $0.path == id }),
-                  link.role == .link, !link.inert else {
+            guard action == .press || action == .focus, target?.role == .link else {
                 return false
             }
         }
-        guard let target = all.first(where: { ($0.key ?? $0.path) == id || $0.path == id }),
-              !target.inert,
+        guard let target, !target.inert,
               target.rect.count >= 4 else {
             return false
         }
@@ -463,9 +444,7 @@ public extension Runtime {
         case .setValue:
             return false
         case .increment, .decrement:
-            guard let flatTarget = flatNodes.first(where: { ($0.key ?? $0.path) == id || $0.path == id }),
-                  !flatTarget.effectiveInert,
-                  let onStep = flatTarget.el.handlers.onStep else {
+            guard let flatIdx, let onStep = flatNodes[flatIdx].el.handlers.onStep else {
                 return false
             }
             let delta = (action == .increment) ? 1 : -1
@@ -484,9 +463,14 @@ public extension Runtime {
 @MainActor
 public final class MacOSAccessibilityHost {
     private var previousTree: AccessibilityNode?
-    private var lastFocusedId: String?
+    private enum ElementIdentity: Hashable {
+        case runtime(String)
+        indirect case scoped(parent: ElementIdentity?, id: String, occurrence: Int)
+    }
+
+    private var lastFocusedId: ElementIdentity?
     private var rootElements: [RuneNSAccessibilityElement] = []
-    private var elementById: [String: RuneNSAccessibilityElement] = [:]
+    private var elementById: [ElementIdentity: RuneNSAccessibilityElement] = [:]
     /// The workspace's display options observer (`a11y/macos.rs` `Adapter(_, DisplayOptions)`),
     /// removed with the adapter.
     private var displayOptions: MacOSDisplayOptionsWatcher?
@@ -559,10 +543,27 @@ public final class MacOSAccessibilityHost {
         }
         lastSpoken = spoken
 
-        var map: [String: RuneNSAccessibilityElement] = [:]
+        var map: [ElementIdentity: RuneNSAccessibilityElement] = [:]
+        var focusedNodeId: ElementIdentity?
         var changedSelections: [RuneAXTextField] = []
-        func convertNode(_ node: AccessibilityNode, parent: AnyObject) -> RuneNSAccessibilityElement {
-            let old = elementById[node.id] as? RuneAXTextField
+        lazy var viewToScreen = RuneAXTextField.viewToScreen(parentView)
+        func convertChildren(_ children: [AccessibilityNode], parent: AnyObject, scope: ElementIdentity?) -> [RuneNSAccessibilityElement] {
+            var occurrences: [String: Int] = [:]
+            return children.map { node in
+                let id: ElementIdentity
+                if let path = node.runtimePath {
+                    id = .runtime(path)
+                } else {
+                    let occurrence = occurrences[node.id, default: 0]
+                    occurrences[node.id] = occurrence + 1
+                    id = .scoped(parent: scope, id: node.id, occurrence: occurrence)
+                }
+                return convertNode(node, parent: parent, id: id)
+            }
+        }
+        func convertNode(_ node: AccessibilityNode, parent: AnyObject, id: ElementIdentity) -> RuneNSAccessibilityElement {
+            if node.isFocused && focusedNodeId == nil { focusedNodeId = id }
+            let old = elementById[id] as? RuneAXTextField
             let oldAnchor = old?.anchor
             let oldFocus = old?.focus
             let elem = AppKitAccessibilityMapper.makeElement(node, parent: parent, onAction: onAction,
@@ -571,6 +572,7 @@ public final class MacOSAccessibilityHost {
                 changedSelections.append(field)
             }
 
+            if let field = elem as? RuneAXTextField { field.viewToScreen = viewToScreen }
             let viewRect = NSRect(
                 x: CGFloat(node.frame.left),
                 y: CGFloat(node.frame.top),
@@ -585,19 +587,15 @@ public final class MacOSAccessibilityHost {
                 elem.setAccessibilityFrame(viewRect)
             }
 
-            let builtChildren = node.children.map { convertNode($0, parent: elem) }
-            elem.setAccessibilityChildren(builtChildren)
-            map[node.id] = elem
+            elem.setAccessibilityChildren(convertChildren(node.children, parent: elem, scope: id))
+            map[id] = elem
             return elem
         }
 
-        if tree.id == "root" && tree.role == .group && tree.label == nil {
-            rootElements = tree.children.map { convertNode($0, parent: parentView) }
-        } else {
-            rootElements = [convertNode(tree, parent: parentView)]
-        }
+        let roots = tree.id == "root" && tree.role == .group && tree.label == nil ? tree.children : [tree]
+        rootElements = convertChildren(roots, parent: parentView, scope: nil)
         // The window's own live region, which draws nothing: the root's last child.
-        announcerElement = announcer.map { convertNode($0, parent: parentView) }
+        announcerElement = announcer.map { convertNode($0, parent: parentView, id: .scoped(parent: nil, id: $0.id, occurrence: 0)) }
         if let announcerElement { rootElements.append(announcerElement) }
         for (id, element) in elementById where map[id] !== element {
             (element as? RuneAXTextField)?.invalidate()
@@ -607,7 +605,6 @@ public final class MacOSAccessibilityHost {
             NSAccessibility.post(element: field, notification: .selectedTextChanged)
         }
 
-        let focusedNodeId = Self.findFocusedId(in: tree)
         if focusedNodeId != lastFocusedId {
             lastFocusedId = focusedNodeId
             if let fid = focusedNodeId, let focusedElem = map[fid] {
@@ -672,16 +669,6 @@ public final class MacOSAccessibilityHost {
         for root in rootElements.reversed() {
             if let hit = hitTestNode(root) {
                 return hit
-            }
-        }
-        return nil
-    }
-
-    private static func findFocusedId(in node: AccessibilityNode) -> String? {
-        if node.isFocused { return node.id }
-        for child in node.children {
-            if let found = findFocusedId(in: child) {
-                return found
             }
         }
         return nil
