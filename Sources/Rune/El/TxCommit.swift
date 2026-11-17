@@ -5,6 +5,8 @@ import RuneMotion
 public enum TxCommit: String, Sendable, Equatable {
     /// Animate this change; motion an earlier change set going keeps running.
     case animate
+    /// Layout lands because no input prompted the commit. A requested live tail can still grow.
+    case unprompted
     /// Apply this change at once; motion an earlier change set going keeps running.
     case instant
     /// Apply this change at once and land every running track.
@@ -23,7 +25,7 @@ public enum TxCommit: String, Sendable, Equatable {
 
     /// True when this change's own layout applies at once instead of moving on its spring.
     public var snaps: Bool {
-        self == .instant || self == .settle
+        self == .unprompted || self == .instant || self == .settle
     }
 
     /// True when this change lands every running track (growth, reveals, follow-the-end).
@@ -34,6 +36,8 @@ public enum TxCommit: String, Sendable, Equatable {
     public func snap(_ snaps: Bool) -> TxCommit {
         TxCommit(snaps: snaps, lands: lands)
     }
+
+    internal func withoutInput() -> TxCommit { self == .animate ? .unprompted : instant() }
 
     public func instant() -> TxCommit {
         snap(true)

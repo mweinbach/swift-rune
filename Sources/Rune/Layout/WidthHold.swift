@@ -154,6 +154,7 @@ internal struct RuntimeGrowthStackState: Sendable {
     var edge: StreamEdge = .feather
     /// Fold rows opening or shutting together as one block.
     var runs: [RuntimeGrowthRun] = []
+    var tailHandoff: TailHandoff?
 
     init(
         width: Float,

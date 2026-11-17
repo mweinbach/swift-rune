@@ -236,6 +236,7 @@ public struct NodeSpec: Sendable, Equatable {
     public var styleSpring: Spring?
     public var colorSpring: Spring?
     public var animateOffset: Bool
+    public var cornerSpring: Spring? = nil
     public var paintSpring: Spring?
     public var offsetAnim: Anim<Vec2>?
     public var opacityAnim: Anim<Float>?
@@ -1739,6 +1740,7 @@ public struct Scene: Sendable {
         snapOmittedNonExiting: Bool = false,
         matchedStarts: [NodeId: MatchedFlightStart] = [:],
         unmountNewOmissions: Bool = false,
+        animatedExitParents: Set<NodeId> = [],
         landWaitingNodes: Bool = false,
         snapNewMounts: Bool = false
     ) {
@@ -1882,11 +1884,14 @@ public struct Scene: Sendable {
                         set(spec.id, Props.OFFSET, spec.offset)
                     }
 
-                    if !cut, let sp = spec.styleSpring {
+                    if !cut, let sp = spec.cornerSpring ?? spec.styleSpring {
                         animate(spec.id, Props.CORNERS, to: spec.corners, anim: Anim(curve: Curve.from(sp)))
-                        animate(spec.id, Props.BLUR, to: Blur(spec.blur), anim: Anim(curve: Curve.from(sp)))
                     } else {
                         set(spec.id, Props.CORNERS, spec.corners)
+                    }
+                    if !cut, let sp = spec.styleSpring {
+                        animate(spec.id, Props.BLUR, to: Blur(spec.blur), anim: Anim(curve: Curve.from(sp)))
+                    } else {
                         set(spec.id, Props.BLUR, Blur(spec.blur))
                     }
                     if spec.iconTurn != 0 || store.has(spec.id, Props.ICON_TURN) {
@@ -1991,7 +1996,8 @@ public struct Scene: Sendable {
             let pIdx = nodes[i].parent
             let parentRemainedPresent = (pIdx == Self.noneIdx) || seen.contains(nodes[Int(pIdx)].id)
             guard parentRemainedPresent else { continue }
-            if !nodes[i].compatHadTransition || ((snapOmittedNonExiting || unmountNewOmissions) && !nodes[i].presence.isExiting) {
+            let ridesParent = pIdx != Self.noneIdx && animatedExitParents.contains(nodes[Int(pIdx)].id)
+            if !nodes[i].compatHadTransition || ((snapOmittedNonExiting || unmountNewOmissions) && !ridesParent && !nodes[i].presence.isExiting) {
                 if !nodes[i].compatHadTransition && !snapOmittedNonExiting && !unmountNewOmissions {
                     // Detach any active transitioning flights under an un-transitioned parent so they fade out rather than popping.
                     var queue: [UInt32] = []

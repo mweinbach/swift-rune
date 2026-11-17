@@ -1273,8 +1273,9 @@ extension Runtime {
                 return (boundsClipPx, SIMD4<Float>(resolveCorner(rawR.x), resolveCorner(rawR.y), resolveCorner(rawR.z), resolveCorner(rawR.w)))
             }
             let gKey = el.foldGlideSpec != nil ? "fold:\(node.path)" : "growth:\(node.path)"
+            let skipsGrowthReveal = slice2State.joinedRowsWithoutRevealMask.contains(nid)
             let growthMaskPt: Float? = {
-                guard let gEntry = growthRows[gKey] else { return nil }
+                guard !skipsGrowthReveal, let gEntry = growthRows[gKey] else { return nil }
                 let t = gEntry.track
                 let overflows = gEntry.edge.overflow && (t.streaming || t.isPaced)
                 guard gEntry.edge.clip && !overflows else { return nil }
@@ -1292,11 +1293,11 @@ extension Runtime {
                     return nil
                 }
                 let clamped = min(featherH, max(1, t.h))
-                return clamped > 0.01 ? clamped : nil
+                return clamped > 0.01 ? (t.linearEdge ? -clamped : clamped) : nil
             }()
             let clipFadeLTRB: SIMD4<Float>? = clipSpec?.fadeLTRB
                 ?? growthMaskPt.map { SIMD4<Float>(0, 0, 0, $0) }
-                ?? el.clipFade
+                ?? (skipsGrowthReveal && el.growthReveal != nil ? el.growthReveal?.authoredFade : el.clipFade)
             let ownFadePx: SIMD4<Float>
             if let ltrb = clipFadeLTRB {
                 ownFadePx = SIMD4<Float>(ltrb.x * scale, ltrb.y * scale, ltrb.z * scale, ltrb.w * scale)

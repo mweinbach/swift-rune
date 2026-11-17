@@ -7,7 +7,7 @@ extension Runtime {
             return -1.0
         }
         let gKey = node.el.foldGlideSpec != nil ? "fold:\(node.path)" : "growth:\(node.path)"
-        guard let entry = growthRows[gKey] else {
+        guard !slice2State.joinedRowsWithoutRevealMask.contains(node.nodeId), let entry = growthRows[gKey] else {
             return -1.0
         }
         let t = entry.track

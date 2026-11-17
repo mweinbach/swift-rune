@@ -74,6 +74,7 @@ extension El {
         if let growthSpec { out.growthSpec = growthSpec }
         if isStreaming { out.isStreaming = true }
         if isArrivesWhole { out.isArrivesWhole = true }
+        if let joinedRowFaceKey { out.joinedRowFaceKey = joinedRowFaceKey }
         if let explicitDir { out.explicitDir = explicitDir }
         if isUnmirrored { out.isUnmirrored = true }
         if mirrorInRtl { out.mirrorInRtl = true }

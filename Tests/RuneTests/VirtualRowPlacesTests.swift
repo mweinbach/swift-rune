@@ -29,6 +29,37 @@ struct VirtualRowPlacesTests {
         #expect(rows.indexOf("row#dup1") == 2)
     }
 
+    @Test func runtimeRetainsUnmountedMeasurementsAcrossReorder() throws {
+        let runtime = Runtime<[Int]>(state: Array(0..<512), viewport: Vec2(160, 80)) { rows, _ in
+            col().size(160, 80).scrollY(stickBottom: false).child(
+                col().key("rows").wFull().virtualRows(
+                    count: rows.count, estimatedRowHeight: 20,
+                    key: { ids, index in "row-\(ids[index])" },
+                    build: { ids, index in el().wFull().h(ids[index] == 1 ? 37 : 20) }
+                )
+            )
+        }
+        _ = runtime.frame(at: 0)
+        let initial = try #require(runtime.virtualLists.values.first)
+        #expect(initial.measuredByKey["row-1"] == 37)
+
+        runtime.update(at: 0.01) { rows, _ in rows.swapAt(1, 300) }
+        _ = runtime.frame(at: 0.02)
+        let reordered = try #require(runtime.virtualLists.values.first)
+        #expect(!reordered.lastMountedRange.contains(300))
+        #expect(reordered.rowPlaces.index(of: "row-1") == 300)
+        #expect(reordered.measuredByKey["row-1"] == 37)
+        #expect(reordered.measuredByKey["row-300"] == 20)
+
+        runtime.update(at: 0.03) { rows, _ in rows[300] = 512 }
+        _ = runtime.frame(at: 0.04)
+        runtime.update(at: 0.05) { rows, _ in rows[300] = 1 }
+        _ = runtime.frame(at: 0.06)
+        let restored = try #require(runtime.virtualLists.values.first)
+        #expect(restored.rowPlaces.index(of: "row-1") == 300)
+        #expect(restored.measuredByKey["row-1"] == nil)
+    }
+
     @Test func largeReplacementPreservesMeasurementsAndBirthsByIdentity() {
         let count = 100_000
         let middle = count / 2

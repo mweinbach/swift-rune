@@ -236,6 +236,7 @@ public struct Tx {
     public internal(set) var motionSource: MotionSource? = nil
     public internal(set) var followEdgeRequested: Bool = false
     public internal(set) var askedMotion: Bool = false
+    internal var liveTail = LiveTailRequests()
     public internal(set) var unprompted: Bool = false
     public internal(set) var colorMotionSpring: Spring? = nil
     public internal(set) var clock: Double = 0.0
@@ -621,6 +622,7 @@ public struct Tx {
         }
         commitKind = commitKind.merge(one.commitKind)
         followEdgeRequested = followEdgeRequested || one.followEdgeRequested
+        liveTail.merge(one.liveTail)
         askedMotion = askedMotion || one.askedMotion
         if let m = one.motionSource { motionSource = m }
         if let cm = one.colorMotionSpring { colorMotionSpring = cm }
@@ -1053,6 +1055,8 @@ final class ElColdData<State> {
     var growthSpec: GrowthSpec? = nil
     var isStreaming: Bool = false
     var isArrivesWhole: Bool = false
+    var joinedRowFaceKey: String?
+    var growthReveal: GrowthReveal?
     var textReveal: Float = -1.0
     var foldGlideSpec: FoldGlide? = nil
     var virtualEstimate: Float? = nil
@@ -1218,6 +1222,8 @@ final class ElColdData<State> {
         c.growthSpec = growthSpec
         c.isStreaming = isStreaming
         c.isArrivesWhole = isArrivesWhole
+        c.joinedRowFaceKey = joinedRowFaceKey
+        c.growthReveal = growthReveal
         c.foldGlideSpec = foldGlideSpec
         c.virtualEstimate = virtualEstimate
         c.virtualRowsSource = virtualRowsSource
@@ -1470,6 +1476,8 @@ public struct El<State> {
     internal var stickyConfig: StickyConfig? { get { _cold?.data.stickyConfig } set { ensureCold().data.stickyConfig = newValue } }
     public var growthSpec: GrowthSpec? { get { _cold?.data.growthSpec } set { ensureCold().data.growthSpec = newValue } }
     public var isStreaming: Bool { get { _cold?.data.isStreaming ?? false } set { ensureCold().data.isStreaming = newValue } }
+    internal var joinedRowFaceKey: String? { get { _cold?.data.joinedRowFaceKey } set { ensureCold().data.joinedRowFaceKey = newValue } }
+    internal var growthReveal: GrowthReveal? { get { _cold?.data.growthReveal } set { ensureCold().data.growthReveal = newValue } }
     public var isArrivesWhole: Bool { get { _cold?.data.isArrivesWhole ?? false } set { ensureCold().data.isArrivesWhole = newValue } }
     public var explicitDir: Direction? { get { _cold?.data.explicitDir } set { ensureCold().data.explicitDir = newValue } }
     public var isUnmirrored: Bool { get { _cold?.data.isUnmirrored ?? false } set { ensureCold().data.isUnmirrored = newValue } }
