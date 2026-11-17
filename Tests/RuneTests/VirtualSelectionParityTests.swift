@@ -426,6 +426,25 @@ struct VirtualSelectionParityTests {
         }
     }
 
+    @Test("stored virtual rows expose their resolved key to offscreen selection")
+    func selectDuplicateStoredRowByResolvedKey() {
+        let h = Harness(Timeline(count: Self.rows)) { state, _ in
+            col().wFull().hFull().scroll(stickBottom: false).child(
+                col().key("timeline").wFull().virtualize(Self.rowH).children(
+                    (0..<state.count).map { i in
+                        text("row \(i)").key(i == 44 || i == 45 ? "repeated" : "r\(i)")
+                            .wFull().h(Self.rowH).selectable()
+                    }
+                )
+            )
+        }
+        #expect(!h.range.contains(45))
+        h.rt.update(at: h.t) { _, tx in tx.selectText("repeated#dup1", range: 0..<6) }
+        h.tick()
+        #expect(h.rt.selectedText() == "row 45")
+        #expect(h.rt.selectionState.coordinator.phase.selection?.anchorEnd?.rowKey == "repeated#dup1")
+    }
+
     // MARK: - virtual_selection_tests.rs:338
 
     @Test("offscreen_collection_is_bounded_in_rows_and_bytes")

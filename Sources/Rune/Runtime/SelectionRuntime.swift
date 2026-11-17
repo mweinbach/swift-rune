@@ -362,11 +362,7 @@ internal extension Runtime {
             return built
         }
         guard rowIndex < src.storedChildren.count else { return nil }
-        var row = src.storedChildren[rowIndex]
-        if row.keyId == nil {
-            row = row.key(rowKey)
-        }
-        return row
+        return src.storedChildren[rowIndex].key(rowKey)
     }
 
     func collectOffscreenRowSnapshots(
