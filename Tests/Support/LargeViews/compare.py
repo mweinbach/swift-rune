@@ -28,6 +28,41 @@ def pixels(lhs, rhs, dimensions):
     return {"samples": count, "exact": exact, "within8": within8, "maxChannelDifference": max_delta}
 
 
+CHECKPOINTS = (0, 1, 24, 60, 300, 600)
+
+
+def compare_windows(directory, rust_path, case):
+    rust = json.loads(rust_path.read_text())
+    if rust["events"] != 600 or [c["wheel"] for c in rust["checkpoints"]] != list(CHECKPOINTS):
+        raise ValueError("Incomplete Rust native window capture")
+    matched = True
+    records = []
+    for entry in rust["checkpoints"]:
+        frame = entry["wheel"]
+        swift = json.loads((directory / f"{case}-{frame}.json").read_text())
+        pinned = swift.get("stickyHeaderBottom", 0)
+        rows = sorted((r for r in swift["rows"] if r["key"] != "header"
+                       and r["visible"][2] > 0 and r["visible"][3] > 0
+                       and r["visible"][1] + r["visible"][3] > pinned),
+                      key=lambda r: r["visible"][1])
+        observed = [(r["key"], r["visible"]) for r in rows]
+        expected = [(key, bounds) for key, bounds in entry["visible"]]
+        lhs, rhs = dict(observed), dict(expected)
+        changed = sorted(k for k in lhs.keys() | rhs.keys() if lhs.get(k) != rhs.get(k))
+        same_keys = [k for k, _ in observed] == [k for k, _ in expected]
+        record = {"frame": frame, "visibleRows": len(rows), "rowOrderMatches": same_keys,
+                  "visibleGeometryMismatches": changed, "swiftMounted": swift["count"],
+                  "rustMounted": entry["mounted"]}
+        matched &= bool(rows) and same_keys and not changed and len(lhs) == len(observed)
+        if case == "diff":
+            record["swiftScrollY"] = swift["scrollOffsetY"]
+            record["rustScrollY"] = entry["scrollY"]
+            matched &= swift["scrollOffsetY"] == entry["scrollY"] == frame * 400
+        records.append(record)
+    print(json.dumps({case: records}, indent=2))
+    return int(not matched)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("swift", type=Path)
@@ -36,7 +71,13 @@ def main():
                         help="compare checkpoint dimensions and row geometry without pixel captures")
     parser.add_argument("--pixel-tolerance", type=int, metavar="0..255",
                         help="also fail if any painted channel exceeds this difference")
+    parser.add_argument("--native-window", choices=("table", "tree", "diff"), metavar="CASE",
+                        help="compare Swift window captures with the Rust window JSON for this workload")
     args = parser.parse_args()
+    if args.native_window:
+        if args.pixel_tolerance is not None:
+            parser.error("Native window checkpoints contain geometry only")
+        return compare_windows(args.swift, args.rust, args.native_window)
     if args.pixel_tolerance is not None and not 0 <= args.pixel_tolerance <= 255:
         parser.error("--pixel-tolerance must be between 0 and 255")
     if args.geometry_only and args.pixel_tolerance is not None:
@@ -45,7 +86,7 @@ def main():
     result = {}
     for case in ("table", "tree"):
         records = []
-        for frame in (0, 1, 24, 60, 300, 600):
+        for frame in CHECKPOINTS:
             stem = f"{case}-{frame}"
             swift, rust = [json.loads((directory / f"{stem}.json").read_text()) for directory in (args.swift, args.rust)]
             lhs, rhs = visible(swift), visible(rust)
