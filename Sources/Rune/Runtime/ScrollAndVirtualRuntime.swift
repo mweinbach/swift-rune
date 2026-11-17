@@ -2783,6 +2783,8 @@ extension Runtime {
             let itemH: Double
             let itemTop: Double
 
+            // A virtual row estimate can stand in for an unmounted descendant. Once mounted,
+            // the requested element or highlight supplies its own bounds (`reveal_row_once`).
             if let tIdx = flatNodes.indices.first(where: {
                 let node = flatNodes[$0]
                 return selectsElementSelector(req.key, path: node.path, key: node.key)
@@ -2797,14 +2799,6 @@ extension Runtime {
                 vpH = Double(vpRect.height)
                 itemH = Double(tRect.height)
                 itemTop = contentTop(node: tIdx, rect: tRect, viewport: vIdx, offset: cur.y)
-            } else if let vHit = resolveVirtualRowBounds(forKey: req.key, scope: req.scope),
-                      flatNodes[vHit.vIdx].el.layout.scrollAxes.contains(.vertical) {
-                vIdx = vHit.vIdx
-                vPath = flatNodes[vIdx].path
-                cur = vHit.cur
-                vpH = Double(flatNodes[vIdx].targetRect.height)
-                itemH = vHit.itemH
-                itemTop = vHit.itemTop
             } else if let hlHit = resolveTextHighlightRevealTarget(scope: req.scope, key: req.key),
                       let foundVIdx = findScrollViewportIndex(forNode: hlHit.nodeIndex, verticalOnly: true) {
                 vIdx = foundVIdx
@@ -2814,6 +2808,14 @@ extension Runtime {
                 vpH = Double(vpRect.height)
                 itemH = Double(hlHit.rect.height)
                 itemTop = contentTop(node: hlHit.nodeIndex, rect: hlHit.rect, viewport: vIdx, offset: cur.y)
+            } else if let vHit = resolveVirtualRowBounds(forKey: req.key, scope: req.scope),
+                      flatNodes[vHit.vIdx].el.layout.scrollAxes.contains(.vertical) {
+                vIdx = vHit.vIdx
+                vPath = flatNodes[vIdx].path
+                cur = vHit.cur
+                vpH = Double(flatNodes[vIdx].targetRect.height)
+                itemH = vHit.itemH
+                itemTop = vHit.itemTop
             } else {
                 if let (hxPath, nextX) = revealRowX(scope: req.scope, key: req.key) {
                     let curXScroll = scrollOffsets[hxPath] ?? .zero
@@ -2861,7 +2863,7 @@ extension Runtime {
 
             let destY: Double
             if req.center {
-                destY = max(0.0, min(Double(scrollMaxExtents[vPath]?.y ?? 0), itemTop + itemH * 0.5 - vpH * 0.5))
+                destY = max(0.0, min(Double(scrollMaxExtents[vPath]?.y ?? 0), itemTop - max(0, vpH - itemH) * 0.5))
             } else {
                 destY = ScrollEdgeMath.reveal(
                     offset: Double(cur.y),

@@ -4271,7 +4271,6 @@ public final class Runtime<State> {
         flatNodes = pass.nodes
         nodeByPath = pass.byPath
         nodeById = pass.byId
-        lastCommittedSpecs = specs
         layoutCommitGen &+= 1
         layoutKeyIndex.invalidate()
 
@@ -4901,6 +4900,8 @@ public final class Runtime<State> {
                 }
             }
         }
+        // Retained scroll placement starts from the geometry actually submitted to the scene.
+        lastCommittedSpecs = specs
         measureFramePhase(.apply) {
             scene.commit(
                 specs,
