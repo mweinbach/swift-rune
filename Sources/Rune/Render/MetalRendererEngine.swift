@@ -269,6 +269,10 @@ internal final class RenderFrameEngine {
         let cacheNodeId: UInt64?
         let cacheSignature: UInt64?
         let scopeIndex: Int?
+
+        var projection: SIMD4<Float> {
+            isLayer ? SIMD4(origin.x, origin.y, Float(texture.width), Float(texture.height)) : .zero
+        }
     }
 
     @discardableResult
@@ -377,7 +381,8 @@ internal final class RenderFrameEngine {
         surfaceRenderer: SurfaceRenderer?,
         hook: EffectHook?,
         backdropHook: EffectBackdropHook?,
-        range: Range<Int>? = nil
+        range: Range<Int>? = nil,
+        defaultUI: Bool = false
     ) {
         let targetW = max(1, target.width)
         let targetH = max(1, target.height)
@@ -425,11 +430,12 @@ internal final class RenderFrameEngine {
             springsActive = false
         }
 
+        let byteSource = defaultUI && frame.srgbBlend &&
+            (target.pixelFormat == .bgra8Unorm || target.pixelFormat == .rgba8Unorm)
         let globals = RenderGlobals(
             viewport: viewport,
             pad: springsActive ? splitSpringTime(springTimeSeconds) : .zero,
-            flags: SIMD4<Float>(frame.srgbBlend ? 1.0 : 0.0, 0, 0, 0),
-            projection: SIMD4<Float>(0, 0, Float(targetW), Float(targetH))
+            flags: SIMD4<Float>(frame.srgbBlend ? 1 : 0, byteSource ? 1 : 0, 0, 0)
         )
         guard let rootGlobalsBuffer = uploader.ensureGlobalsBuffer(device: device, globals: globals) else {
             return
@@ -510,7 +516,7 @@ internal final class RenderFrameEngine {
             enc.setRenderPipelineState(pipe)
 
             var g = globals
-            g.projection = SIMD4<Float>(scope.origin.x, scope.origin.y, Float(scope.texture.width), Float(scope.texture.height))
+            g.projection = scope.projection
             enc.setVertexBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
             enc.setFragmentBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
             if let gt = glyphTex { enc.setFragmentTexture(gt, index: 0) }
@@ -626,7 +632,7 @@ internal final class RenderFrameEngine {
                 let compPipe = pipelineFor(format: parent.format, additive: parent.additive, springs: false)
                 enc.setRenderPipelineState(compPipe)
                 var g = globals
-                g.projection = SIMD4<Float>(parent.origin.x, parent.origin.y, Float(parent.texture.width), Float(parent.texture.height))
+                g.projection = parent.projection
                 enc.setVertexBytes(&compositeInst, length: MemoryLayout<RenderInstance>.stride, index: 0)
                 enc.setVertexBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
                 enc.setFragmentBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
@@ -974,7 +980,7 @@ internal final class RenderFrameEngine {
                     backdropBlurCount += 1
                     let cur = stack[stack.count - 1]
                     var layerGlobals = globals
-                    layerGlobals.projection = SIMD4<Float>(cur.origin.x, cur.origin.y, Float(cur.texture.width), Float(cur.texture.height))
+                    layerGlobals.projection = cur.projection
                     if let gBuf = uploader.ensureGlobalsBuffer(device: device, globals: layerGlobals) ?? .some(rootGlobalsBuffer) {
                         backdropBlur.encode(
                             device: device,
@@ -1034,7 +1040,8 @@ internal final class RenderFrameEngine {
             commandBuffer: cmdBuf,
             surfaceRenderer: surfaceRenderer,
             hook: hook,
-            backdropHook: backdropHook
+            backdropHook: backdropHook,
+            defaultUI: true
         )
         gpuLoss.attach(to: cmdBuf)
         cmdBuf.commit()
@@ -1084,15 +1091,7 @@ extension MetalRenderer {
         synchronized: Bool = false
     ) {
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
-        let sr = acquireSurfaceRenderer(pixelFormat: drawable.texture.pixelFormat)
-        renderEngine.draw(
-            frame: frame,
-            into: drawable.texture,
-            commandBuffer: cmdBuf,
-            surfaceRenderer: sr,
-            hook: hook,
-            backdropHook: backdropHook
-        )
+        encodeUI(frame: frame, into: drawable.texture, commandBuffer: cmdBuf, hook: hook, backdropHook: backdropHook)
         renderEngine.gpuLoss.attach(to: cmdBuf)
         if synchronized {
             cmdBuf.commit()
@@ -1103,6 +1102,21 @@ extension MetalRenderer {
             cmdBuf.commit()
         }
         GpuEvents.presented()
+    }
+
+    /// Draws the default UI into its known root target, including a compositor's drawUI callback.
+    internal func encodeUI(
+        frame: RenderFrame,
+        into target: MTLTexture,
+        commandBuffer: MTLCommandBuffer,
+        hook: EffectHook? = nil,
+        backdropHook: EffectBackdropHook? = nil
+    ) {
+        renderEngine.draw(
+            frame: frame, into: target, commandBuffer: commandBuffer,
+            surfaceRenderer: acquireSurfaceRenderer(pixelFormat: target.pixelFormat),
+            hook: hook, backdropHook: backdropHook, defaultUI: true
+        )
     }
 
     /// Encodes a `RenderFrame` into `target` without committing (matches `render::Renderer::draw_range`).
