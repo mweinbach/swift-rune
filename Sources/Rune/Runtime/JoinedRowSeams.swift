@@ -170,9 +170,17 @@ extension Runtime {
         applyRowShifts(offsets, in: &frame)
     }
 
+    /// The node's own growth translation, from layout projection and this frame's slide/seam adjustments.
+    func growthSnapOffsetY(for node: FlatNode) -> Float {
+        node.cold.growthRowProjectionY + node.cold.growthContentShiftY + (slice2State.frameGrowthSnapOffsetsY[node.nodeId] ?? 0)
+    }
+
     /// Offsets are local to a row; the scene publishes world coordinates for every descendant.
     func applyRowShifts(_ rowOffsets: [NodeId: Float], in frame: inout FrameOutput) {
         guard !rowOffsets.isEmpty else { return }
+        for (id, dy) in rowOffsets {
+            slice2State.frameGrowthSnapOffsetsY[id, default: 0] += dy
+        }
         var offsets = rowOffsets
         var changedIDs = Set(frame.changed.map(\.id))
         for i in frame.nodes.indices {

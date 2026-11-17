@@ -261,6 +261,61 @@ struct PixelSnapParityTests {
         }
     }
 
+    @Test("Two text lines follow a gliding growth row in whole pixels (#1072)",
+          arguments: [Float(1), 1.875], [false, true])
+    func glidingGrowthRowKeepsBothLinesOnItsBox(scale: Float, native: Bool) throws {
+        let rt = Runtime(state: true, viewport: Vec2(220, 240), pixelScale: scale) { open, _ in
+            let line: El<Bool> = text("H").font(TextStyle(size: 13, weight: 400)).h(17.5).pt(3.3).color(.white)
+            return col().size(220, 240).child(
+                col().key("stack").wFull().growth(GrowthSpec())
+                    .child(el().key("fold").wFull().h(open ? 72 : 24).foldGlide(Spring(duration: 0.3)))
+                    .child(col().key("row").wFull().h(62).bg(.black).children([line, line]))
+            )
+        }
+
+        func sample(at t: Double) throws -> (box: Float, offsets: SIMD2<Float>) {
+            let box: Float?
+            let glyphs: [Float]
+            if native {
+                let instances = rt.renderFrame(at: t).instances
+                box = instances.first { $0.params.y == KIND_RECT && $0.fill.w > 0.99 }?.rect.y
+                glyphs = instances.filter { $0.params.y == KIND_GLYPH }.map { $0.rect.y }
+            } else {
+                let primitives = rt.frame(at: t).primitives
+                box = primitives.first { $0.kind == .roundedRect && $0.fill.w > 0.99 }?.rect.y
+                glyphs = primitives.filter { $0.kind == .glyph }.map { $0.rect.y }
+            }
+            let top = try #require(box)
+            try #require(glyphs.count == 2)
+            return (top, SIMD2(glyphs[0] - top, glyphs[1] - top))
+        }
+
+        let initial = try sample(at: 0)
+        rt.update(at: 0) { open, _ in open = false }
+        var fractionalPositions = 0
+        var worstOffsetDrift: Float = 0
+        var worstSpacingDrift: Float = 0
+        var worstPixelError: Float = 0
+        let initialSpacing = initial.offsets.y - initial.offsets.x
+        for frame in 1...85 {
+            let drawn = try sample(at: Double(frame) / 120)
+            let row = try #require(rt.element(byKey: "row"))
+            let y = row.rect[1] * scale
+            if abs(y - y.rounded()) > 0.1 { fractionalPositions += 1 }
+            worstPixelError = max(worstPixelError, abs(drawn.box - drawn.box.rounded()))
+            worstOffsetDrift = max(worstOffsetDrift, abs(drawn.offsets.x - initial.offsets.x),
+                                   abs(drawn.offsets.y - initial.offsets.y))
+            worstSpacingDrift = max(worstSpacingDrift, abs(drawn.offsets.y - drawn.offsets.x - initialSpacing))
+        }
+        #expect(fractionalPositions > 8)
+        #expect(worstPixelError < 0.001)
+        #expect(worstOffsetDrift < 0.001)
+        #expect(worstSpacingDrift < 0.001)
+        let settled = try sample(at: 1)
+        #expect(initial.box - settled.box == 48 * scale)
+        #expect(settled.offsets == initial.offsets)
+    }
+
     @Test("scrolled_rows_stay_crisp_and_keep_their_spacing")
     func scrolledRowsStayCrispAndKeepSpacing() {
         let rt = Runtime(state: (), viewport: Vec2(40, 60), pixelScale: 2.0) { _, _ in

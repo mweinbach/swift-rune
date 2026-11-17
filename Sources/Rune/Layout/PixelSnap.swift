@@ -48,6 +48,8 @@ public enum PixelSnap {
         public var off: Bool = false
         /// Translation in points from scrolls, sticky shifts, and growth rows above, which snaps as a whole.
         public var rigid: SIMD2<Float> = .zero
+        /// Translation for exact text layout, excluding row offsets that glide back to zero.
+        public var steady: SIMD2<Float> = .zero
         /// Origin in points of the paint containment above (`El.paintContained`), which is part of `rigid`.
         public var contain: SIMD2<Float> = .zero
         /// `El.motionSnaps` here or above: a moving box snaps where it is each frame.
@@ -62,6 +64,32 @@ public enum PixelSnap {
         public var parent: Parent? = nil
 
         public init() {}
+
+        mutating func shift(_ axis: Int, by distance: Float) {
+            rigid[axis] += distance
+            steady[axis] += distance
+        }
+
+        mutating func grow(_ dy: Float, stack: Bool) {
+            if stack {
+                // The stack carries its virtual window like a scroll.
+                shift(1, by: dy)
+            } else {
+                rigid.y += dy
+            }
+        }
+
+        mutating func containAt(_ origin: SIMD2<Float>) {
+            rigid = rigid - contain + origin
+            steady = steady - contain + origin
+            contain = origin
+        }
+
+        mutating func placeAtAnchor() {
+            rigid = .zero
+            steady = .zero
+            layer = 0
+        }
     }
 
     struct Glide: Sendable, Equatable {

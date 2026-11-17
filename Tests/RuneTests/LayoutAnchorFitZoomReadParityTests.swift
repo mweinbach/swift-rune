@@ -207,6 +207,45 @@ struct LayoutAnchorFitZoomReadParityTests {
 
     // MARK: - crates/rune/src/el/anchor.rs (`Anchor`, `above`, `anchored_unscaled`, `anchored_round`)
 
+    @Test("Page scroll moves both the document and its anchored text overlay by the snapped band offset")
+    func fractionalPageScrollCarriesAnchoredGlyphs() throws {
+        let scale: Float = 2
+        let top: Float = 40.1875
+        let rt = Runtime<Void>(state: (), viewport: Vec2(200, 100), pixelScale: scale) { _, _ in
+            col().size(200, 300).children([
+                text("A").key("trigger").size(50, 18).absolute(x: 20, y: top).bg(.white),
+                text("B").key("tip").size(50, 18).above("trigger", gutter: 4).bg(.white),
+            ])
+        }
+        rt.pageMode()
+
+        func quads(at time: Double) -> (reference: [SIMD4<Float>], native: [SIMD4<Float>]) {
+            let reference = rt.frame(at: time).primitives
+            let native = rt.renderFrame(at: time).instances
+            let kinds = [KIND_RECT, KIND_GLYPH, KIND_RECT, KIND_GLYPH]
+            #expect(reference.map(\.params.y) == kinds)
+            #expect(native.map(\.params.y) == kinds)
+            return (reference.map(\.rect), native.map(\.rect))
+        }
+
+        let rest = quads(at: 0)
+        for (step, y) in [Float(3.3125), 3.25, 3.1875, 0].enumerated() {
+            let time = Double(step + 1) / 120
+            rt.setPageScroll(y, at: time)
+            let scrolled = quads(at: time)
+            // web/page.rs snaps the positive band offset before root_inh gives it a minus sign.
+            // At 2×, 3.3125 pt and 3.25 pt both move the page up 7 px, and 3.1875 moves it 6.
+            let pixels = (y * scale).rounded()
+            let shift = SIMD4<Float>(0, pixels, 0, 0)
+            #expect(scrolled.reference == rest.reference.map { $0 - shift })
+            #expect(scrolled.native == rest.native.map { $0 - shift })
+            let trigger = try #require(rt.element(byKey: "trigger"))
+            let tip = try #require(rt.element(byKey: "tip"))
+            #expect(trigger.rect[1] == top - pixels / scale)
+            #expect(tip.rect[1] + tip.rect[3] == trigger.rect[1] - 4)
+        }
+    }
+
     @Test("Anchor struct, El.above, anchoredUnscaled, and anchoredRound parity")
     func anchorModifiersParity() {
         let manual = Anchor(key: "trg", side: .top, align: .center, gap: 4, fit: false, unscaled: false, round: true)

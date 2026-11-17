@@ -7,6 +7,9 @@ internal final class FlatNodeCold<State> {
     var el: El<State>
     var unscrolledRect: MotionRect
     let committedLayoutTarget: MotionRect
+    let growthRowProjectionY: Float
+    let growthContentShiftY: Float
+    let virtualWindowSnapOriginY: Float
     var zoomedTargetRect: MotionRect
     var staticRect: [Float]
     var contentSize: Vec2
@@ -30,6 +33,9 @@ internal final class FlatNodeCold<State> {
         el: El<State>,
         unscrolledRect: MotionRect,
         committedLayoutTarget: MotionRect,
+        growthRowProjectionY: Float,
+        growthContentShiftY: Float,
+        virtualWindowSnapOriginY: Float,
         zoomedTargetRect: MotionRect,
         staticRect: [Float],
         contentSize: Vec2,
@@ -52,6 +58,9 @@ internal final class FlatNodeCold<State> {
         self.el = el
         self.unscrolledRect = unscrolledRect
         self.committedLayoutTarget = committedLayoutTarget
+        self.growthRowProjectionY = growthRowProjectionY
+        self.growthContentShiftY = growthContentShiftY
+        self.virtualWindowSnapOriginY = virtualWindowSnapOriginY
         self.zoomedTargetRect = zoomedTargetRect
         self.staticRect = staticRect
         self.contentSize = contentSize
@@ -77,6 +86,9 @@ internal final class FlatNodeCold<State> {
             el: el,
             unscrolledRect: unscrolledRect,
             committedLayoutTarget: committedLayoutTarget,
+            growthRowProjectionY: growthRowProjectionY,
+            growthContentShiftY: growthContentShiftY,
+            virtualWindowSnapOriginY: virtualWindowSnapOriginY,
             zoomedTargetRect: zoomedTargetRect,
             staticRect: staticRect,
             contentSize: contentSize,

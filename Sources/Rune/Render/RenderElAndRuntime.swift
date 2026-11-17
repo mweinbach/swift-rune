@@ -1078,9 +1078,12 @@ extension Runtime {
 
             let baseRect = liveRect ?? rectMap[nid] ?? node.targetRect
             let pinh: PresentedTransform
+            var inheritedSnap = parentById[nid].flatMap { childSnapByNode[$0] } ?? rootPixelSnap
+            inheritedSnap.grow(growthSnapOffsetY(for: node), stack: el.growthSpec != nil)
             var anchorScaleMotion: PaintScaleMotion = .still
             if let a = el.anchor,
                let anchorNode = renderNodes.first(where: { $0.key == a.key }) ?? flatNodes.first(where: { $0.key == a.key }) {
+                inheritedSnap.placeAtAnchor()
                 let anchorRect = newPresentedRects[anchorNode.path]
                     ?? presentedRectByPath[anchorNode.path]
                     ?? anchorNode.zoomedTargetRect
@@ -1369,11 +1372,13 @@ extension Runtime {
                 return (false, subtreeDynamic, effOpacity, effBlur, effRect, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil)
             }
 
-            let inheritedSnap = parentById[nid].flatMap { childSnapByNode[$0] } ?? PixelSnap.Inherit()
             let exactEdgesPx = PixelSnap.edgesPx(effRect, scale: scale)
             let rawEdgesPx = PixelSnap.edgesPx(shifted, scale: scale)
-            let rigid = inheritedSnap.rigid + SIMD2<Float>(stickyShift.x - parentShift.x, stickyShift.y - parentShift.y)
-            let rigidPx = rigid * scale
+            if el.anchor == nil || node.isSticky {
+                inheritedSnap.shift(0, by: stickyShift.x - parentShift.x)
+                inheritedSnap.shift(1, by: stickyShift.y - parentShift.y)
+            }
+            let rigidPx = inheritedSnap.rigid * scale
             let canSnap = !inheritedSnap.off && el.isPixelSnapEnabled && abs(el.rotate) < 1e-6
             let unscaled = abs(sc.x - 1) <= 1e-5 && abs(sc.y - 1) <= 1e-5 && anchor == anchorTo
             let opensLayer = hasOwnScale || (el.anchor != nil && !unscaled)
@@ -1398,17 +1403,16 @@ extension Runtime {
                 )
             }
             var childSnap = inheritedSnap
-            childSnap.rigid = rigid
             childSnap.off = !canSnap
             childSnap.steps = steps
             childSnap.layer = snapLayer
             childSnap.shifted = childSnap.shifted || el.offset != .zero
             if let origin = el.paintContain {
-                let contain = SIMD2<Float>(origin.x, origin.y)
-                childSnap.rigid += contain - inheritedSnap.contain
-                childSnap.contain = contain
+                childSnap.containAt(SIMD2<Float>(origin.x, origin.y))
             }
-            childSnap.rigid -= SIMD2<Float>(node.scrollShift.x, node.scrollShift.y)
+            childSnap.shift(1, by: node.virtualWindowSnapOriginY)
+            childSnap.shift(0, by: -node.scrollShift.x)
+            childSnap.shift(1, by: -(node.scrollShift.y + extraScrollY))
             childSnap.parent = childSnap.rigid == inheritedSnap.rigid && PixelSnap.frames(el, effectiveFill: effBg, effectiveBorder: borderMap[nid])
                 ? snapParent : nil
             childSnapByNode[nid] = childSnap
@@ -1490,6 +1494,14 @@ extension Runtime {
                 && !hasDynamicInSubtree(node)
             let effScale = sc.x * scale
             var nodePaintHash: UInt64 = 0xCBF2_9CE4_8422_2325
+            if cacheEligible {
+                fnvMixFloat(&nodePaintHash, inheritedSnap.rigid.x)
+                fnvMixFloat(&nodePaintHash, inheritedSnap.rigid.y)
+                fnvMixFloat(&nodePaintHash, inheritedSnap.steady.x)
+                fnvMixFloat(&nodePaintHash, inheritedSnap.steady.y)
+                fnvMixFloat(&nodePaintHash, inheritedSnap.contain.x)
+                fnvMixFloat(&nodePaintHash, inheritedSnap.contain.y)
+            }
             fnvMixFloat(&nodePaintHash, effBlur)
             fnvMixFloat(&nodePaintHash, effOpacity)
             fnvMixFloat(&nodePaintHash, scale)
@@ -2613,7 +2625,7 @@ extension Runtime {
                     scale: SIMD2<Float>(sc.x, sc.y)
                 )
                 let exactOffset = restsExact ? TextBoxGeometry.leafExactOff(
-                    rest: snapParent, rigid: rigidPx, containPx: inheritedSnap.contain * scale, shifted: childSnap.shifted
+                    rest: snapParent, rigid: inheritedSnap.steady * scale, containPx: inheritedSnap.contain * scale, shifted: childSnap.shifted
                 ) : .zero
                 let textLeft = (paintedEdges.x + exactOffset.x) / scale + el.layout.padding.left * sc.x
                 let textTop = (paintedEdges.y + exactOffset.y) / scale + el.layout.padding.top * sc.y

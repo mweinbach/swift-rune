@@ -17,10 +17,29 @@ struct VirtualAndGrowthSlice2ParityTests {
         return t
     }
 
+    @Test("The mounted virtual window shares its spacer's snap origin at fractional scale")
+    func virtualWindowSnapOrigin() throws {
+        let rt = Runtime(state: (), viewport: Vec2(160, 150), pixelScale: 1.875) { _, _ in
+            col().key("scroll").size(160, 150).scrollY(stickBottom: true).child(
+                col().key("list").wFull().growth().virtualRows(count: 100, estimatedRowHeight: 30.3,
+                    key: { _, i in "row-\(i)" }, build: { _, _ in el().wFull().h(30.3) })
+            )
+        }
+        _ = rt.frame(at: 0)
+        let list = try #require(rt.flatNodes.first { $0.key == "list" })
+        let spacer = try #require(rt.flatNodes.first { $0.parentIndex == list.index && $0.key == "__v_top_spacer" })
+        let row = try #require(rt.flatNodes.first { $0.parentIndex == list.index && $0.key?.hasPrefix("row-") == true })
+        #expect(spacer.localRect.height > 0)
+        #expect(abs(list.virtualWindowSnapOriginY - spacer.localRect.height) < 1 / 64)
+        #expect(abs(row.localRect.y - list.virtualWindowSnapOriginY) < 1 / 64)
+        #expect(rt.growthSnapOffsetY(for: list) == 0)
+        #expect(rt.growthSnapOffsetY(for: row) == 0)
+    }
+
     // MARK: - 1. src/runtime/row_reorder_tests.rs
 
     @Test("row_reorder_tests.rs: reorder slides when unpinned, at bottom, snaps on instant, focus follows reordered row")
-    func rowReorderBehavior() {
+    func rowReorderBehavior() throws {
         struct State {
             var order: [Int] = Array(0..<30)
             var instantReorder: Bool = false
@@ -78,6 +97,8 @@ struct VirtualAndGrowthSlice2ParityTests {
         _ = rt.frame(at: t)
         let r8Mid = rt.element(byKey: "row-8")!
         #expect(r8Mid.focused == true, "focus should follow reordered row by key")
+        let slidingRow = try #require(rt.flatNodes.first { $0.key == "row-8" })
+        #expect(rt.growthSnapOffsetY(for: slidingRow) == 0)
         #expect(abs(r8Mid.rect[1] - (r8Before + 60)) > 1.0, "unpinned reorder should slide rather than snap instantaneously")
 
         t = settle(rt, start: t)

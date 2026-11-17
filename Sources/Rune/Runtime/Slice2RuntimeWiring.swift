@@ -53,6 +53,7 @@ internal final class Slice2RuntimeState {
     var joinedRowSeams: [NodeId: [JoinedRowSeam]] = [:]
     var joinedRowsWithoutRevealMask: Set<NodeId> = []
     var liveContentSlides = ContentSlides()
+    var frameGrowthSnapOffsetsY: [NodeId: Float] = [:]
     var liveTailExitParents: Set<NodeId> = []
     var pendingLiveTail = LiveTailRequests()
     var activeLiveTail = LiveTailRequests()

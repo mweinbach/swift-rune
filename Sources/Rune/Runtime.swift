@@ -266,6 +266,7 @@ public final class Runtime<State> {
             set { ensureUniqueCold(); cold.elided = newValue }
         }
         var isSticky: Bool { cold.el.stickyConfig?.edge != nil }
+        var virtualWindowSnapOriginY: Float { cold.virtualWindowSnapOriginY }
 
         init(
             index: Int,
@@ -278,6 +279,9 @@ public final class Runtime<State> {
             unscrolledRect: MotionRect,
             targetRect: MotionRect,
             committedLayoutTarget: MotionRect? = nil,
+            growthRowProjectionY: Float = 0,
+            growthContentShiftY: Float = 0,
+            virtualWindowSnapOriginY: Float = 0,
             zoomedTargetRect: MotionRect,
             staticRect: [Float],
             contentSize: Vec2,
@@ -310,6 +314,9 @@ public final class Runtime<State> {
                 el: el,
                 unscrolledRect: unscrolledRect,
                 committedLayoutTarget: committedLayoutTarget ?? targetRect,
+                growthRowProjectionY: growthRowProjectionY,
+                growthContentShiftY: growthContentShiftY,
+                virtualWindowSnapOriginY: virtualWindowSnapOriginY,
                 zoomedTargetRect: zoomedTargetRect,
                 staticRect: staticRect,
                 contentSize: contentSize,
@@ -368,7 +375,7 @@ public final class Runtime<State> {
         var parentDirected: Bool = false
         var foldHeaderPath: String? = nil
         var foldHeaderLift: Float = 0
-        var growthClosingShiftY: Float = 0
+        var growthPlacementShiftY: Float = 0
         var naturalLayout: LayoutEngine.ResultNode? = nil
     }
 
@@ -408,6 +415,8 @@ public final class Runtime<State> {
         var nearestGroupHoverFrac: Float
         var nearestPressColor: Color? = nil
         var nearestPressFrac: Float = 0.0
+        var parentStickyShift: Vec2
+        var parentStickyMag: Float
     }
 
     internal enum PaintScaleMotion: Int, Comparable {
@@ -1403,11 +1412,21 @@ public final class Runtime<State> {
         }
     }
 
+    /// The page translation is already included in the root's world rect.
+    internal var rootPixelSnap: PixelSnap.Inherit {
+        var snap = PixelSnap.Inherit()
+        if pageModeEnabled { snap.shift(1, by: -pageScrollOffsetY) }
+        return snap
+    }
+
     /// Updates page scroll offset in points without triggering a view rebuild.
     public func setPageScroll(_ y: Float, at now: Double? = nil) {
         let contentH = max(flatNodes.first?.contentSize.y ?? 0, flatNodes.first?.targetRect.height ?? 0)
         let maxY = max(0, contentH - viewport.y)
-        let clamped = max(0, min(y, maxY))
+        let scale = max(0.5, pixelScale)
+        let requestedPixel = y.isFinite ? (y * scale).rounded() : 0
+        let lastPixel = (maxY * scale).rounded(.down)
+        let clamped = min(max(0, requestedPixel), lastPixel) / scale
         guard clamped != pageScrollOffsetY else { return }
         pageScrollOffsetY = clamped
         scrollMovedSinceLastFrame = true
@@ -2166,6 +2185,7 @@ public final class Runtime<State> {
         placeTailHandoffFrames()
         var frameOut = scene.frame(at: animNow)
         presentLaunchedRowHeights(in: &frameOut)
+        slice2State.frameGrowthSnapOffsetsY.removeAll(keepingCapacity: true)
         if !slice2State.liveContentSlides.slides.isEmpty {
             applyRowShifts(Dictionary(uniqueKeysWithValues: slice2State.liveContentSlides.shifts), in: &frameOut)
         }
@@ -3104,14 +3124,21 @@ public final class Runtime<State> {
                 ? MotionRect.fromXYWH(rawLocalRect.x, rawLocalRect.y, rawLocalRect.width, rawLocalRect.height + closingStackExtraH)
                 : rawLocalRect
             let hdrRestore: Float = (item.foldHeaderPath == path) ? item.foldHeaderLift : 0
+            // The layout solver bakes a stack's current row heights into the next row's top.
+            // Paint inherits the ancestors' displacements separately.
+            let rowProjectionY = item.parentHasGrowth ? localRect.y - naturalLocalRect.y : 0
+            let growthContentShiftY = item.growthPlacementShiftY + hdrRestore
+            // A top spacer inside the stack supplies the mounted children's stationary snap origin.
+            let virtualWindowSnapOriginY = el.growthSpec != nil && el.virtualEstimate != nil
+                ? Snap.grid(virtualLists[path]?.lastMountedSnapshot?.topSpacerH ?? 0, scale: pixelScale) : 0
             let nextFoldHeaderPath: String? = (item.foldHeaderPath == path) ? nil : item.foldHeaderPath
             let nextFoldHeaderLift: Float = (item.foldHeaderPath == path) ? 0 : item.foldHeaderLift
             let unscrolledX = parentUnscrolledOrigin.x + localRect.x
-            let unscrolledY = parentUnscrolledOrigin.y + localRect.y + hdrRestore + item.growthClosingShiftY
+            let unscrolledY = parentUnscrolledOrigin.y + localRect.y + growthContentShiftY
             let unscrolledRect = MotionRect.fromXYWH(unscrolledX, unscrolledY, localRect.width, localRect.height)
 
             var worldX = parentOrigin.x + localRect.x - parentScroll.x
-            var worldY = parentOrigin.y + localRect.y - parentScroll.y + hdrRestore + item.growthClosingShiftY
+            var worldY = parentOrigin.y + localRect.y - parentScroll.y + growthContentShiftY
             var anchorScaleFactor: Float = 1.0
             var anchorAttachNorm: Vec2? = nil
 
@@ -3324,6 +3351,9 @@ public final class Runtime<State> {
                 unscrolledRect: unscrolledRect,
                 targetRect: targetRect,
                 committedLayoutTarget: committedLayoutTarget,
+                growthRowProjectionY: rowProjectionY,
+                growthContentShiftY: growthContentShiftY,
+                virtualWindowSnapOriginY: virtualWindowSnapOriginY,
                 zoomedTargetRect: zoomedTargetRect,
                 staticRect: staticBounds,
                 contentSize: solved.layout.contentSize,
@@ -3590,8 +3620,8 @@ public final class Runtime<State> {
                     resolvedKey: childResolvedKeys[cIdx],
                     path: childPaths[cIdx],
                     parentIdx: myIndex,
-                    parentOrigin: Vec2(worldX, worldY + growthSlideY - foldChildLift),
-                    parentUnscrolledOrigin: Vec2(unscrolledX, unscrolledY + growthSlideY - foldChildLift),
+                    parentOrigin: Vec2(worldX, worldY),
+                    parentUnscrolledOrigin: Vec2(unscrolledX, unscrolledY),
                     parentScroll: ownScroll,
                     parentScale: nodeInheritedScale,
                     scaleChain: childScaleChain,
@@ -3613,7 +3643,7 @@ public final class Runtime<State> {
                     parentDirected: nodeDirected,
                     foldHeaderPath: childFoldHeaderPath,
                     foldHeaderLift: childFoldHeaderLift,
-                    growthClosingShiftY: closingChildShiftsY[cIdx],
+                    growthPlacementShiftY: growthSlideY - foldChildLift + closingChildShiftsY[cIdx],
                     naturalLayout: item.naturalLayout?.children[cIdx]
                 ))
             }
@@ -5321,7 +5351,7 @@ public final class Runtime<State> {
 
             let lr = flatNodes[i].localRect
             var worldX = parentOrigin.x + lr.x - parentScroll.x
-            var worldY = parentOrigin.y + lr.y - parentScroll.y
+            var worldY = parentOrigin.y + lr.y - parentScroll.y + flatNodes[i].cold.growthContentShiftY
             if let a = flatNodes[i].el.anchor,
                let anchorFlat = flatNodes.first(where: { $0.key == a.key }) {
                 let aSticky = anchorFlat.index < shifts.count ? shifts[anchorFlat.index].sticky : .zero
@@ -6911,7 +6941,8 @@ public final class Runtime<State> {
             guard let snap = nodeById[p.id] ?? exitingSnapshots[p.id] else { return ([], emptyExit) }
             let el = presentedGrowthElement(snap)
             let inh: PaintInh
-            if let a = el.anchor, let anchorNode = anchorByKey[a.key] {
+            let resolvedAnchor = el.anchor.flatMap { anchorByKey[$0.key] }
+            if let a = el.anchor, let anchorNode = resolvedAnchor {
                 let anchorRect = newRectByPath[anchorNode.path]
                     ?? presentedRectById[anchorNode.nodeId]
                     ?? presentedRectByPath[anchorNode.path]
@@ -6949,6 +6980,8 @@ public final class Runtime<State> {
                 modified.scale = pinh.scale
                 modified.anchor = SIMD2<Float>(pinh.anchor.x, pinh.anchor.y)
                 modified.anchorTo = SIMD2<Float>(pinh.anchorTo.x, pinh.anchorTo.y)
+                modified.snap = input.inh.snap
+                modified.snap.placeAtAnchor()
                 modified.offsetDelta = Vec2(pinh.dx, pinh.dy)
                 modified.fullDelta = Vec2(pinh.dx, pinh.dy)
                 modified.scaleMotion = effScaleMotion
@@ -6975,7 +7008,9 @@ public final class Runtime<State> {
                     nearestGroupHovered: nearestGroupHovered,
                     nearestGroupHoverFrac: nearestGroupHoverFrac,
                     nearestPressColor: input.nearestPressColor,
-                    nearestPressFrac: input.nearestPressFrac
+                    nearestPressFrac: input.nearestPressFrac,
+                    parentStickyShift: input.parentStickyShift,
+                    parentStickyMag: input.parentStickyMag
                 ))
                 return ([], emptyExit)
             }
@@ -7344,8 +7379,14 @@ public final class Runtime<State> {
             let ownStickyDelta = (el.anchor != nil && !snap.isSticky)
                 ? SIMD2<Float>.zero
                 : SIMD2<Float>(stickyShift.x - input.parentStickyShift.x, stickyShift.y - input.parentStickyShift.y)
-            let rigidPt = SIMD2<Float>(inh.snap.rigid.x + ownStickyDelta.x, inh.snap.rigid.y + ownStickyDelta.y)
-            let rigidPx = rigidPt * pxScale
+            var boxSnap = inh.snap
+            // A detached anchor has already established a new translation for its subtree.
+            if resolvedAnchor == nil {
+                boxSnap.grow(growthSnapOffsetY(for: snap), stack: el.growthSpec != nil)
+            }
+            boxSnap.shift(0, by: ownStickyDelta.x)
+            boxSnap.shift(1, by: ownStickyDelta.y)
+            let rigidPx = boxSnap.rigid * pxScale
             let canSnap = !inh.snap.off && el.isPixelSnapEnabled && abs(p.rotate) < 1e-6
             let filterMargin = (input.ancestorBlur + blurPt * scaleVec.x) * pxScale * 3.0 + 2.0
             let snaps = canSnap && (el.isolatedLayer || (
@@ -7390,7 +7431,16 @@ public final class Runtime<State> {
                 ? pixelSnapGlides.layer(id: p.id, r: rExact, unscaled: rawEdgesPx, rigid: rigidPx, cached: el.isolatedLayer)
                 : inh.snap.layer
             let steps = inh.snap.steps || el.motionSnapsEnabled
-            let restForMotion: MotionRect? = (snaps && nodeMoving && !steps) ? rawRestRect : nil
+            let restForMotion: MotionRect?
+            if !snaps || !nodeMoving || steps {
+                restForMotion = nil
+            } else if boxSnap.rigid.y != boxSnap.steady.y {
+                // A growth row's fractional projection already travels in rigid. Only a real
+                // scene track contributes a further glide to the box it carries.
+                restForMotion = scene.rest(p.id)
+            } else {
+                restForMotion = rawRestRect
+            }
             let gliding = snaps && (restForMotion != nil || !unscaled)
             let (snappedEdgesPx, snapRest): (SIMD4<Float>, PixelSnap.Parent?)
             if !snaps {
@@ -7416,7 +7466,7 @@ public final class Runtime<State> {
             let snapShifted = inh.snap.shifted || el.offset.x != 0 || el.offset.y != 0
             // Its exact resting place against its snapped one, inside its containment's own rounding
             // (`LeafBox::exact_off`, #935).
-            let textExactOffPx = TextBoxGeometry.leafExactOff(rest: snapRest, rigid: rigidPx, containPx: inh.snap.contain * pxScale, shifted: snapShifted)
+            let textExactOffPx = TextBoxGeometry.leafExactOff(rest: snapRest, rigid: boxSnap.steady * pxScale, containPx: boxSnap.contain * pxScale, shifted: snapShifted)
 
             var caretOut: [Float]? = nil
             var textTruncated = false
@@ -9223,24 +9273,20 @@ public final class Runtime<State> {
                 }()
                 let firstTreeChildId = children.first?.id
                 let extraScrollY: Float = el.layout.scrollAxes.contains(.vertical) ? (slice2State.scrollExtraYByPath[snap.path] ?? 0) : 0
-                var childRigid = rigidPt
-                var childContain = inh.snap.contain
+                var childSnap = boxSnap
                 if let o = el.paintContain {
-                    childRigid.x = childRigid.x - childContain.x + o.x
-                    childRigid.y = childRigid.y - childContain.y + o.y
-                    childContain = SIMD2<Float>(o.x, o.y)
+                    childSnap.containAt(SIMD2<Float>(o.x, o.y))
                 }
-                childRigid.x -= snap.scrollShift.x
-                childRigid.y -= (snap.scrollShift.y + extraScrollY)
-                var childSnap = PixelSnap.Inherit()
-                childSnap.off = inh.snap.off || !el.isPixelSnapEnabled || abs(p.rotate) >= 1e-6
-                childSnap.rigid = childRigid
-                childSnap.contain = childContain
+                childSnap.shift(1, by: snap.virtualWindowSnapOriginY)
+                childSnap.shift(0, by: -snap.scrollShift.x)
+                childSnap.shift(1, by: -(snap.scrollShift.y + extraScrollY))
+                childSnap.off = boxSnap.off || !el.isPixelSnapEnabled || abs(p.rotate) >= 1e-6
                 childSnap.steps = steps
                 childSnap.shifted = snapShifted
-                childSnap.layer = snapLayer
+                let opensFlightCover = flightCover == nil && childFlightCover != nil
+                childSnap.layer = opensFlightCover ? 0 : snapLayer
                 let paintsFrame = PixelSnap.frames(el, effectiveFill: fillColor, effectiveBorder: borderColor)
-                childSnap.parent = (childRigid == inh.snap.rigid && paintsFrame) ? snapRest : nil
+                childSnap.parent = (!opensFlightCover && childSnap.rigid == boxSnap.rigid && paintsFrame) ? snapRest : nil
 
                 let childClip: MotionRect?
                 if el.layout.clipOverflow || el.clipRadius != nil || el.clipCorners != nil || el.clipFade != nil {
@@ -9309,7 +9355,7 @@ public final class Runtime<State> {
                         flightCover: childFlightCover,
                         flightClipOverride: childFlightClip,
                         emitLiftedNow: emitLiftedNow,
-                        parentStickyShift: Vec2(stickyShift.x, stickyShift.y - extraScrollY),
+                        parentStickyShift: stickyShift,
                         parentStickyMag: stickyMag,
                         kidsFadeOpacity: (child.id == firstTreeChildId) ? firstChildFade : 1.0
                     ))
@@ -9343,6 +9389,8 @@ public final class Runtime<State> {
             nearestGroupHoverFrac: Float,
             nearestPressColor: Color? = nil,
             nearestPressFrac: Float = 0.0,
+            parentStickyShift: Vec2 = .zero,
+            parentStickyMag: Float = 0,
             flightCover: FlightCoverTransform? = nil,
             flightClipOverride: MotionRect? = nil,
             emitLiftedNow: Bool = false
@@ -9366,8 +9414,8 @@ public final class Runtime<State> {
                     flightCover: flightCover,
                     flightClipOverride: flightClipOverride,
                     emitLiftedNow: emitLiftedNow,
-                    parentStickyShift: .zero,
-                    parentStickyMag: 0,
+                    parentStickyShift: parentStickyShift,
+                    parentStickyMag: parentStickyMag,
                     kidsFadeOpacity: 1.0
                 ))
             ]
@@ -9392,7 +9440,7 @@ public final class Runtime<State> {
         for root in sortByZOrder(rootNodes) {
             emitSubtree(
                 root,
-                inh: PaintInh(),
+                inh: PaintInh(snap: rootPixelSnap),
                 ancestorOpacity: 1.0,
                 logicalOpacity: 1.0,
                 ancestorBlur: 0.0,
@@ -9436,6 +9484,8 @@ public final class Runtime<State> {
                 nearestGroupHoverFrac: lifted.nearestGroupHoverFrac,
                 nearestPressColor: lifted.nearestPressColor,
                 nearestPressFrac: lifted.nearestPressFrac,
+                parentStickyShift: lifted.parentStickyShift,
+                parentStickyMag: lifted.parentStickyMag,
                 flightCover: nil,
                 flightClipOverride: isUnclippedFlight ? windowRect : nil,
                 emitLiftedNow: true
