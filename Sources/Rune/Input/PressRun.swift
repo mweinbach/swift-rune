@@ -106,6 +106,8 @@ internal struct RuntimeInputMachines {
     var untakenDragOuts: [(id: UInt64, path: String, key: String?, start: DragOutStart, cancelledByHost: Bool, sawFrame: Bool, onEnd: ((inout Any, DragOutcome, inout Tx) -> Void)?)] = []
     var activeDragOuts: [(id: UInt64, path: String, key: String?, onEnd: ((inout Any, DragOutcome, inout Tx) -> Void)?)] = []
     var nextDragOutId: UInt64 = 1
+    /// Delayed `onHoverChange` reports the hover-delay machine has delivered (`Effect::Report`).
+    var hoverDelayReports: UInt64 = 0
     var dragEndSink = DragEndSink()
 }
 

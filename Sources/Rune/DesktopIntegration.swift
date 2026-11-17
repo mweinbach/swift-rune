@@ -3242,10 +3242,13 @@ public final class OverlayHandle<State>: @unchecked Sendable {
                 return self.evaluateLockedFrame(at: now, forceSettle: settle)
             }
             view.onPointerMove = { [weak self] pt, mods, now in
-                self?.withLockedRuntime { rt in
-                    rt.pointerMove(to: pt, mods: mods, at: now)
+                // Idle pointer moves present nothing (`overlay/input.rs` `observe_pointer`).
+                let dirty = self?.withLockedRuntime { rt in
+                    rt.overlayObservePointer(at: pt, mods: mods, at: now)
+                } ?? false
+                if dirty {
+                    view.renderFrame(settle: false, visible: true, drawing: true)
                 }
-                view.renderFrame(settle: false, visible: true, drawing: true)
             }
             view.onPointerExit = { [weak self] now in
                 self?.withLockedRuntime { rt in rt.pointerExit(at: now) }

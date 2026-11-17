@@ -860,7 +860,7 @@ extension Runtime {
         return (inside, entering)
     }
 
-    private func effectiveHoverDelay(for el: El<State>) -> (enter: Float, leave: Float) {
+    internal func effectiveHoverDelay(for el: El<State>) -> (enter: Float, leave: Float) {
         if let spec = el.kitHoverDelaysSpec {
             return (Float(spec.enter), Float(spec.leave))
         }
@@ -911,6 +911,7 @@ extension Runtime {
         for effect in effects {
             switch effect {
             case let .report(inside):
+                inputMachines.hoverDelayReports &+= 1
                 if let idx = nodeByPath[path], flatNodes.indices.contains(idx),
                    let cb = flatNodes[idx].el.handlers.onHoverChange {
                     dispatchHoverChange(path: path, inside: inside, handler: cb, at: now)
