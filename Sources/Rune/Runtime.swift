@@ -2418,13 +2418,6 @@ public final class Runtime<State> {
         return nil
     }
 
-    internal func hasScrollCallbacks() -> Bool {
-        flatNodes.contains {
-            $0.el.handlers.atBottomReport != nil
-                || $0.el.handlers.farFromBottomReport != nil
-        }
-    }
-
     internal var scrollRequiresCommit: Bool {
         virtualListsNeedWindowUpdate() || lastViewReadScroll
     }
