@@ -103,7 +103,7 @@ public struct ElementA11yInput: Sendable, Equatable {
             isInput: el.handlers.editLens != nil,
             editable: el.hasEditAccess,
             multiline: edit?.multiline ?? el.isMultilineField,
-            pressable: el.handlers.onClick != nil || el.handlers.onClickPress != nil,
+            pressable: el.handlers.onClick != nil || el.handlers.onClickPress != nil || el.handlers.onBackgroundPress != nil,
             steps: el.handlers.onStep != nil,
             range: el.a11yRange
         )
@@ -250,7 +250,7 @@ public extension Runtime {
     internal func a11yPressable(_ el: El<State>) -> Bool {
         guard el.hasAuthoredHandlers else { return false }
         let handlers = el.handlers
-        return handlers.onClick != nil || handlers.onClickPress != nil
+        return handlers.onClick != nil || handlers.onClickPress != nil || handlers.onBackgroundPress != nil
     }
 
     /// What a pointer or keyboard user can do to node `node`, as the tree advertises it
@@ -262,12 +262,16 @@ public extension Runtime {
         let steps = el.hasAuthoredHandlers && el.handlers.onStep != nil
         var actions: [AccessibilityAction] = []
         // `on_press.is_some() || input.is_some()`; Swift also reads its press roles as pressable.
-        if a11yPressable(el) || el.hasEditLens ||
+        let pressable = a11yPressable(el)
+        if pressable || el.hasEditLens ||
            [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox, .menuItemRadio].contains(el.role) {
             actions.append(.press)
         }
         if el.focusable {
             actions.append(.focus)
+        }
+        if let disclosure = AccessibilityAction.disclosure(expanded: el.a11yExpanded, pressable: pressable) {
+            actions.append(disclosure)
         }
         if el.role == .slider || steps {
             actions.append(.increment)
@@ -291,6 +295,8 @@ public extension Runtime {
         switch action {
         // `(Click, None) if pressable` / `(Click, None) if input` (focus).
         case .press: return a11yPressable(el) || el.handlers.editLens != nil
+        case .expand, .collapse:
+            return action == AccessibilityAction.disclosure(expanded: el.a11yExpanded, pressable: a11yPressable(el))
         // `(Focus, None) if focusable`: `can_focus` — takes focus, or a field with edit access.
         case .focus: return el.focusable || el.hasEditAccess
         // `(Increment | Decrement, None) if steps`.

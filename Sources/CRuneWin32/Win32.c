@@ -108,6 +108,9 @@ struct RuneWinWindow {
     int click_through, overlay;
     LONG_PTR added_input_styles;
     int context_failed, running, tracking_mouse, buttons, visible, composing, translated_key;
+    BOOL touching;
+    UINT32 touch_id;
+    POINT touch_point;
     int ime_enabled;
     HCURSOR cursor, custom_cursor;
 };
@@ -182,6 +185,7 @@ static int emit(RuneWinWindow *w, RuneWinEvent event) {
     if (w->defer_startup_hooks && w->lifecycle.presented && w->visible && w->running) {
         switch (event.kind) {
         case RUNE_WIN_MOVE: case RUNE_WIN_DOWN: case RUNE_WIN_UP: case RUNE_WIN_WHEEL:
+        case RUNE_WIN_TOUCH_DOWN: case RUNE_WIN_TOUCH_MOVE: case RUNE_WIN_TOUCH_UP: case RUNE_WIN_TOUCH_CANCEL:
         case RUNE_WIN_KEY_DOWN: case RUNE_WIN_KEY_UP: case RUNE_WIN_CHAR:
         case RUNE_WIN_IME_PREEDIT: case RUNE_WIN_IME_COMMIT:
             ++w->input_generation;
@@ -202,6 +206,49 @@ static int emit(RuneWinWindow *w, RuneWinEvent event) {
 static UINT dpi_for(HWND hwnd) {
     UINT dpi = GetDpiForWindow(hwnd);
     return dpi ? dpi : USER_DEFAULT_SCREEN_DPI;
+}
+
+static void touch_event(RuneWinWindow *w, RuneWinEventKind kind) {
+    if (kind == RUNE_WIN_TOUCH_UP || kind == RUNE_WIN_TOUCH_CANCEL) w->touching = FALSE;
+    emit(w, (RuneWinEvent){.kind = kind, .value = w->touch_id, .x = w->touch_point.x, .y = w->touch_point.y});
+    ask_redraw(w);
+}
+
+static BOOL contact_message(RuneWinWindow *w, UINT msg, WPARAM wp, LPARAM lp) {
+    UINT32 id = GET_POINTERID_WPARAM(wp);
+    BOOL held = w->touching && w->touch_id == id;
+    if (msg == WM_POINTERCAPTURECHANGED && held) {
+        touch_event(w, RUNE_WIN_TOUCH_CANCEL);
+        return TRUE;
+    }
+    POINTER_INPUT_TYPE type;
+    if (!held && (!GetPointerType(id, &type) || (type != PT_TOUCH && type != PT_PEN))) return FALSE;
+    if (IS_POINTER_CANCELED_WPARAM(wp)) {
+        if (held) touch_event(w, RUNE_WIN_TOUCH_CANCEL);
+        return TRUE;
+    }
+    if (msg != WM_POINTERDOWN && msg != WM_POINTERUPDATE && msg != WM_POINTERUP) return TRUE;
+    if (msg == WM_POINTERDOWN ? w->touching : !held) return TRUE;
+    POINT point = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    if (!ScreenToClient(w->hwnd, &point)) {
+        if (held) touch_event(w, RUNE_WIN_TOUCH_CANCEL);
+        return TRUE;
+    }
+    w->touch_point = point;
+    if (msg == WM_POINTERDOWN) {
+        w->touching = TRUE;
+        w->touch_id = id;
+        touch_event(w, RUNE_WIN_TOUCH_DOWN);
+    } else {
+        touch_event(w, msg == WM_POINTERUP ? RUNE_WIN_TOUCH_UP : RUNE_WIN_TOUCH_MOVE);
+    }
+    return TRUE;
+}
+
+static BOOL suppress_contact_mouse(const RuneWinWindow *w) {
+    // Windows tags pen/touch compatibility mouse messages with MI_WP_SIGNATURE,
+    // including the button-up which can arrive after the contact has ended.
+    return !w->overlay && (w->touching || (((uint32_t)GetMessageExtraInfo() & 0xffffff00u) == 0xff515700u));
 }
 
 static LONG client_pixels(double points, UINT dpi, LONG borders) {
@@ -499,10 +546,16 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_SETFOCUS:
     case WM_KILLFOCUS:
+        if (msg == WM_KILLFOCUS && w->touching) touch_event(w, RUNE_WIN_TOUCH_CANCEL);
         emit(w, (RuneWinEvent){.kind = RUNE_WIN_FOCUS, .value = msg == WM_SETFOCUS});
         ask_redraw(w);
         break;
+    case WM_POINTERENTER: case WM_POINTERDOWN: case WM_POINTERUPDATE: case WM_POINTERUP:
+    case WM_POINTERLEAVE: case WM_POINTERCAPTURECHANGED:
+        if (!w->overlay && contact_message(w, msg, wp, lp)) return 0;
+        break;
     case WM_MOUSEMOVE: {
+        if (suppress_contact_mouse(w)) return 0;
         if (!w->tracking_mouse) {
             TRACKMOUSEEVENT track = {sizeof(track), TME_LEAVE, hwnd, 0};
             w->tracking_mouse = TrackMouseEvent(&track);
@@ -513,6 +566,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSELEAVE:
         w->tracking_mouse = 0;
+        if (suppress_contact_mouse(w)) return 0;
         emit(w, (RuneWinEvent){.kind = RUNE_WIN_LEAVE});
         ask_redraw(w);
         return 0;
@@ -520,6 +574,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
     case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
     case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK: {
+        if (suppress_contact_mouse(w)) return msg >= WM_XBUTTONDOWN ? TRUE : 0;
         int down = msg != WM_LBUTTONUP && msg != WM_RBUTTONUP && msg != WM_MBUTTONUP && msg != WM_XBUTTONUP;
         int extra = msg >= WM_XBUTTONDOWN;
         uint32_t button;
@@ -542,6 +597,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return extra ? TRUE : 0;
     }
     case WM_CAPTURECHANGED: case WM_CANCELMODE:
+        if (msg == WM_CANCELMODE && w->touching) touch_event(w, RUNE_WIN_TOUCH_CANCEL);
         if (w->buttons) {
             w->buttons = 0;
             emit(w, (RuneWinEvent){.kind = RUNE_WIN_CAPTURE_LOST});

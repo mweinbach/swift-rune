@@ -8,6 +8,38 @@ import AppKit
 @Suite("Screen reader field ranges and control names")
 @MainActor
 struct A11yReaderParityTests {
+    @Test func disclosureRequestsPressOnlyWhenTheRequestedStateDiffers() throws {
+        struct State {
+            var open = false
+            var touchTaps: [Bool] = []
+            var buttons: [PointerButton] = []
+        }
+        let rt = Runtime(state: State(), viewport: Vec2(120, 80), systemDark: false) { state, _ in
+            el().key("more").size(100, 60).role(.button).expanded(state.open)
+                .onClickPress { state, press, tx in
+                    state.open.toggle()
+                    state.touchTaps.append(tx.touchTap())
+                    state.buttons.append(press.button)
+                }
+        }
+        rt.frame(at: 0)
+        let path = try #require(rt.accessibilitySnapshot().runtimePath)
+        let point = Vec2(20, 20)
+        rt.touch(id: 1, phase: .started, at: point, time: 0.1)
+        #expect(!rt.accessibilityAction(path, .collapse, at: 0.2))
+        #expect(rt.accessibilityAction(path, .expand, at: 0.3))
+        rt.frame(at: 0.3)
+        #expect(rt.state.open)
+        #expect(!rt.accessibilityAction(path, .expand, at: 0.4))
+        #expect(rt.accessibilityAction(path, .collapse, at: 0.5))
+        rt.frame(at: 0.5)
+        #expect(!rt.accessibilityAction(path, .collapse, at: 0.6))
+        rt.touch(id: 1, phase: .cancelled, at: point, time: 0.7)
+        #expect(!rt.state.open)
+        #expect(rt.state.buttons == [.primary, .primary])
+        #expect(rt.state.touchTaps == [false, false])
+    }
+
     @Test func readerActivatesAnOffscreenButtonByIdentity() throws {
         struct State { var events: [String] = [] }
         let rt = Runtime(state: State(), viewport: Vec2(200, 80), systemDark: false) { _, _ in

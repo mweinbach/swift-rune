@@ -781,6 +781,7 @@ public final class Runtime<State> {
     internal var hoveredCallbackPaths: [String] = []
     public internal(set) var pressedPath: String? = nil
     private var activatedOnPointerDown = false
+    private var pressedByTouch = false
     public internal(set) var pressedKey: String? = nil
     /// Button of the held press (`capture::Held::button`). Single store shared with the Slice 4
     /// input machines (`inputMachines.pressedButton`) so both pointer paths agree.
@@ -10598,22 +10599,31 @@ public final class Runtime<State> {
 
     /// Dispatches both supported click callback signatures with the original pointer event.
     /// Returns whether all invoked callbacks requested a live-only update.
-    internal func dispatchPointerClick(_ node: FlatNode, press: PointerPress, at now: Double) -> Bool? {
+    internal func dispatchPointerClick(_ node: FlatNode, press: PointerPress, at now: Double, touchTap: Bool = false) -> Bool? {
         let handlers = node.el.handlers
-        guard handlers.onClick != nil || handlers.onClickPress != nil else { return nil }
+        guard handlers.onClick != nil || handlers.onClickPress != nil || handlers.onBackgroundPress != nil else { return nil }
         logInputEvent("press \(node.path)")
         dropOwedFocus(keepingSplit: true)
         let mods = press.mods == .none ? nil : press.mods
         var liveOnly = true
         if let callback = handlers.onClick {
             var tx = makeTx(at: now, button: press.button, mods: mods)
+            tx.pressWasTouchTap = touchTap
             callback(&state, &tx)
             liveOnly = tx.liveOnlyRequested
             applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
         }
         if let callback = handlers.onClickPress {
             var tx = makeTx(at: now, button: press.button, mods: mods)
+            tx.pressWasTouchTap = touchTap
             callback(&state, press, &tx)
+            liveOnly = liveOnly && tx.liveOnlyRequested
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+        }
+        if let background = handlers.onBackgroundPress {
+            var tx = makeTx(at: now, button: press.button, mods: mods)
+            tx.pressWasTouchTap = touchTap
+            background(&state, press, &tx)
             liveOnly = liveOnly && tx.liveOnlyRequested
             applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
         }
@@ -10835,6 +10845,7 @@ public final class Runtime<State> {
         }
         pressedPath = node.path
         activatedOnPointerDown = false
+        pressedByTouch = !mouse
         pressedKey = node.key
         pressedButton = button
         pressedPointerInside = true
@@ -11123,7 +11134,9 @@ public final class Runtime<State> {
         }
         let releasedPath = pressedPath
         let alreadyActivated = releasedPath != nil && activatedOnPointerDown
+        let touchTap = releasedPath != nil && pressedByTouch
         activatedOnPointerDown = false
+        pressedByTouch = false
         let notePath = releasedPath
         let startedNs = InteractionGate.isOn ? RuneExecutionContext.uptimeNanoseconds : 0
         let wasPressedInside = pressedPointerInside
@@ -11280,7 +11293,7 @@ public final class Runtime<State> {
 
         // Fire click / double-click only if pointer released inside the pressed element (or didn't move when element moved out from under it) and not dragged!
         if inside && allowsButton && !suppressedClickFromSelDrag {
-            if !alreadyActivated, let liveOnly = dispatchPointerClick(node, press: press, at: now) {
+            if !alreadyActivated, let liveOnly = dispatchPointerClick(node, press: press, at: now, touchTap: touchTap) {
                 releaseQueuedPress = true
                 upRanHandler = true
                 upAllLiveOnly = upAllLiveOnly && liveOnly
@@ -11294,13 +11307,6 @@ public final class Runtime<State> {
                 upRanHandler = true
                 upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
                 applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
-            } else if let onBg = node.el.handlers.onBackgroundPress {
-                if node.el.handlers.onClick == nil && node.el.handlers.onClickPress == nil {
-                    logInputEvent("press \(rPath)")
-                }
-                var tx = makeTx(at: now, button: button, mods: effMods)
-                onBg(&state, press, &tx)
-                applyTx(tx, at: now)
             }
             if InteractionGate.isOn {
                 let action = (button == .primary && (pairInfo?.isSecond == true) && !movedOutsideSlop && clickInTime && node.el.handlers.onDoubleClick != nil)

@@ -439,6 +439,7 @@ final class LinuxWindowSession<State> {
     private let popup: LinuxContextMenu<State>
     private var menuConsumedKeys: Set<Int32> = []
     private var menuPointer: Vec2?
+    private var touchContact: (device: Int64, finger: Int64)?
     let handle: WindowHandle
     let waker: Waker
     private let primaryReplies = LinuxPrimaryReplies()
@@ -613,7 +614,7 @@ final class LinuxWindowSession<State> {
         popup.cancelAll(at: now())
         AppMenuBridge.markRunning(app.sharedHandle.shared, running: false, headless: false)
         shortcuts.close()
-        DesktopServices.disconnectLinuxHost()
+        DesktopServices.disconnectLinuxHost(windowID: rune_linux_id(window))
         waker.setCallback {}
         app.sharedHandle.shared.setVisible(false)
         handle.unbind()
@@ -899,7 +900,21 @@ final class LinuxWindowSession<State> {
             let text = String(cString: utf8)
             let cursor = LinuxDesktopKey.preeditSelection(in: text, start: event.start, length: event.length)
             _ = runtime.dispatchImeEvent(.preedit(text, cursorUTF8: cursor, clauses: []), at: now)
+        case RuneLinuxTouchDown:
+            guard touchContact == nil, !runtime.touching() else { return }
+            touchContact = (event.touchDevice, event.fingerID)
+            runtime.touch(id: UInt64(bitPattern: event.fingerID), phase: .started, at: point, time: now)
+        case RuneLinuxTouchMove, RuneLinuxTouchUp:
+            guard let touchContact, touchContact.device == event.touchDevice,
+                  touchContact.finger == event.fingerID else { return }
+            let ended = event.kind == RuneLinuxTouchUp
+            if ended { self.touchContact = nil }
+            runtime.touch(id: UInt64(bitPattern: event.fingerID), phase: ended ? .ended : .moved,
+                          at: point, time: now)
+        case RuneLinuxTouchCancel:
+            cancelTouch(at: now)
         case RuneLinuxMotion:
+            guard !runtime.touching() else { return }
             if menuPointer != point {
                 menuPointer = point
                 menu.pointerMoved()
@@ -907,10 +922,12 @@ final class LinuxWindowSession<State> {
             }
             runtime.pointerMove(to: point, mods: mods, at: now)
         case RuneLinuxLeave:
+            guard !runtime.touching() else { return }
             menuPointer = nil
             appliedCursor = nil
             runtime.pointerExit(at: now)
         case RuneLinuxButton:
+            guard !runtime.touching() else { return }
             let buttons: [PointerButton] = [.primary, .middle, .secondary, .back, .forward]
             guard event.code > 0 && event.code <= buttons.count else { return }
             let button = buttons[Int(event.code - 1)]
@@ -928,6 +945,7 @@ final class LinuxWindowSession<State> {
                                                    shift: mods.shift, linePoints: WheelDistance.linePoints)
             runtime.desktopWheel(dx: dx, dy: dy, at: point, mods: mods, now: now, precise: hasPoints)
         case RuneLinuxFocus:
+            if !event.active { cancelTouch(at: now) }
             runtime.dispatchFocus(event.active, at: now)
             if !event.active {
                 lastMods = .none
@@ -937,6 +955,7 @@ final class LinuxWindowSession<State> {
                 popup.cancelAll(at: now)
             }
         case RuneLinuxVisibility:
+            if !event.active { cancelTouch(at: now) }
             if !event.active { surfaceMeter.setPacing(.idle) }
             if !event.active { popup.cancelAll(at: now) }
             app.sharedHandle.shared.setVisible(event.active)
@@ -962,6 +981,13 @@ final class LinuxWindowSession<State> {
             acceptsSDLDrop = true
         default: break
         }
+    }
+
+    private func cancelTouch(at now: Double) {
+        guard let touchContact else { return }
+        self.touchContact = nil
+        runtime.touch(id: UInt64(bitPattern: touchContact.finger), phase: .cancelled,
+                      at: runtime.pointerPosition, time: now)
     }
 
     func key(_ event: RuneLinuxEvent, mods: Mods, at now: Double) {

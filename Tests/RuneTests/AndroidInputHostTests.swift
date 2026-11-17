@@ -25,6 +25,40 @@ struct AndroidInputHostTests {
         #expect(runtime.state == 1)
     }
 
+    @Test("A held finger keeps its press when the mouse moves, clicks, or cancels")
+    func mouseDuringTouch() {
+        struct State {
+            var taps: [Bool] = []
+            var wheels = 0
+        }
+        let runtime = Runtime(state: State(), viewport: Vec2(80, 80), pixelScale: 1) { _, _ in
+            el().size(80, 80).pressOnDown()
+                .onClick { state, tx in state.taps.append(tx.touchTap()) }
+                .onWheel { state, _, _ in state.wheels += 1; return true }
+        }
+        _ = runtime.frame(at: 0)
+        var time = 0.0
+        func send(_ action: AndroidMotionAction, mouse: Bool) {
+            time += 0.01
+            let point: Float = mouse ? 60 : 20
+            AndroidMotionTranslator.dispatch(.init(action: action, pointerId: mouse ? 9 : 4, isMouse: mouse,
+                                                   xPx: point, yPx: point, vScroll: 1),
+                                             to: runtime, density: 1, at: time)
+        }
+        send(.down, mouse: false)
+        for action in [AndroidMotionAction.hoverEnter, .hoverMove, .down, .move, .up, .cancel, .hoverExit, .scroll] {
+            send(action, mouse: true)
+        }
+        #expect(runtime.state.taps.isEmpty)
+        #expect(runtime.state.wheels == 1)
+        #expect(runtime.pointer() == Vec2(20, 20))
+        send(.up, mouse: false)
+        #expect(runtime.state.taps == [true])
+        send(.down, mouse: true)
+        send(.up, mouse: true)
+        #expect(runtime.state.taps == [true, false])
+    }
+
     @Test("Hardware dead keys compose once and keep a matching release")
     func deadKey() {
         var keyboard = AndroidHardwareKeyboard()

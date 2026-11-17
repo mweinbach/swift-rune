@@ -243,6 +243,7 @@ public struct Tx {
     public internal(set) var colorMotionSpring: Spring? = nil
     public internal(set) var clock: Double = 0.0
     public internal(set) var button: PointerButton = .primary
+    internal var pressWasTouchTap = false
     public internal(set) var mods: Mods = .none
     public internal(set) var physicalKeyCode: PhysicalKeyCode? = nil
     public internal(set) var isKeyRepeat: Bool = false
@@ -254,6 +255,11 @@ public struct Tx {
 
     /// True while a held key auto-repeats (`Tx::key_repeat`).
     public func keyRepeat() -> Bool { isKeyRepeat || keyRepeatValue }
+
+    /// Whether a touch tap activated this press handler (`Tx::touch_tap`).
+    /// Mouse, keyboard, and accessibility activations return false. The native Windows host
+    /// handles pen contact as touch, while browsers deliver pen input as a pointer.
+    public func touchTap() -> Bool { pressWasTouchTap }
 
     /// The currently focused element's key (or `"#<index>"` if unkeyed), if any (`Tx::focused`).
     public func focused() -> String? { focusedElementKey }

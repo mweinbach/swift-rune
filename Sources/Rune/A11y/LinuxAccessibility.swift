@@ -241,6 +241,7 @@ final class LinuxAccessibilityHost {
             case .decrement: actions |= RUNE_AX_DECREMENT
             case .setValue: actions |= node.range == nil ? RUNE_AX_SET_TEXT : RUNE_AX_SET_NUMBER
             case .scrollIntoView: actions |= RUNE_AX_SCROLL_INTO_VIEW
+            case .expand, .collapse: break // AT-SPI activates disclosures through their primary action.
             }
         }
         var properties = RuneA11yProperties()

@@ -39,6 +39,23 @@ struct A11yPresentationTests {
         return col().key("root").children([wrapper, text("After").key("after")])
     }
 
+    @Test func disclosureActionsRequireAnEnabledPressHandlerAndExpansionState() throws {
+        let view: El<Int> = col().key("root").children([
+            el().key("closed").expanded(false).onClick { $0 += 1 },
+            el().key("open").expanded(true).onBackgroundPressTx { state, _ in state += 1 },
+            el().key("passive").role(.button).expanded(false),
+            el().key("plain").onClick { $0 += 1 },
+            el().key("disabled").expanded(false).onClick { $0 += 1 }.disabled(true)
+        ])
+        for root in try projections(view, state: 0) {
+            for node in root.children {
+                #expect(node.actions.contains(.expand) == (node.id == "closed"))
+                #expect(node.actions.contains(.collapse) == (node.id == "open"))
+            }
+            #expect(root.children.map(\.id) == ["closed", "open", "passive", "plain", "disabled"])
+        }
+    }
+
     @Test func presentationPromotesChildrenInOrderAndHiddenSubtreesStayHidden() throws {
         for root in try projections(wrapperView(), state: 0) {
             try #require(root.children.map(\.id) == ["first", "second", "inert", "after"])

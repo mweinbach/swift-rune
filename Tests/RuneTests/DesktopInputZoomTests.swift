@@ -4,6 +4,33 @@ import Testing
 @MainActor
 @Suite("Desktop input in a zoomed window")
 struct DesktopInputZoomTests {
+    @Test func windowsContactRetainsItsOriginAndIdentityThroughRelease() {
+        let runtime = Runtime(state: [Bool](), viewport: Vec2(300, 200), pixelScale: 1.5) { _, cx in
+            cx.zoom(2)
+            return el().size(60, 50).onClick { taps, tx in taps.append(tx.touchTap()) }
+        }
+        _ = runtime.frame(at: 0)
+        var dpi: UInt32 = 144
+        func contact(_ id: UInt32, _ phase: TouchPhase, _ now: Double) {
+            _ = Win32MessageTranslator.dispatch(.touch(id: id, phase: phase, x: 120, y: 90),
+                                                to: runtime, dpi: &dpi, at: now)
+        }
+        contact(7, .started, 0.1)
+        #expect(runtime.pointerPosition == Vec2(40, 30))
+        contact(8, .started, 0.11)
+        contact(8, .ended, 0.12)
+        #expect(runtime.touching() && runtime.state.isEmpty)
+        contact(7, .ended, 0.13)
+        #expect(runtime.state == [true])
+        contact(7, .started, 0.2)
+        contact(7, .cancelled, 0.21)
+        contact(7, .ended, 0.22)
+        #expect(!runtime.touching() && runtime.state == [true])
+        _ = Win32MessageTranslator.dispatch(.mouseDown(button: .primary, x: 120, y: 90), to: runtime, dpi: &dpi, at: 1)
+        _ = Win32MessageTranslator.dispatch(.mouseUp(button: .primary, x: 120, y: 90), to: runtime, dpi: &dpi, at: 1.1)
+        #expect(runtime.state == [true, false])
+    }
+
     private struct Events {
         var clicks = 0
         var wheel: WheelEvent?

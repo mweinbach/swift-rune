@@ -17,12 +17,14 @@ typedef enum {
     RuneLinuxIgnored, RuneLinuxWake, RuneLinuxClose, RuneLinuxQuit,
     RuneLinuxExposed, RuneLinuxResized, RuneLinuxMoved, RuneLinuxFocus, RuneLinuxVisibility,
     RuneLinuxMotion, RuneLinuxButton, RuneLinuxLeave, RuneLinuxWheel, RuneLinuxKey,
-    RuneLinuxText, RuneLinuxPreedit, RuneLinuxDropBegin, RuneLinuxDropFile, RuneLinuxDropEnd
+    RuneLinuxText, RuneLinuxPreedit, RuneLinuxDropBegin, RuneLinuxDropFile, RuneLinuxDropEnd,
+    RuneLinuxTouchDown, RuneLinuxTouchMove, RuneLinuxTouchUp, RuneLinuxTouchCancel
 } RuneLinuxEventKind;
 
 typedef struct {
     RuneLinuxEventKind kind;
     uint32_t windowID;
+    int64_t touchDevice, fingerID;
     float x, y, dx, dy;
     int code, scan, start, length;
     unsigned modifiers;
@@ -48,6 +50,7 @@ int32_t rune_linux_refresh_hz(RuneLinuxWindow *host);
 uint32_t rune_linux_id(RuneLinuxWindow *host);
 uint32_t rune_linux_wake_type(RuneLinuxWindow *host);
 void rune_linux_wake(uint32_t id, uint32_t type);
+void rune_linux_touch_cancel(uint32_t window_id);
 void rune_linux_size(RuneLinuxWindow *host, int *w, int *h, int *pixelW, int *pixelH);
 typedef struct {
     int32_t x, y, content_x, content_y, maximized, minimized, fullscreen, display_x, display_y;

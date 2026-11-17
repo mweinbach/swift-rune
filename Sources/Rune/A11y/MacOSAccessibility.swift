@@ -110,6 +110,9 @@ public extension AccessibilityTreeBuilder {
                 if info.focusable {
                     actions.append(.focus)
                 }
+                if let disclosure = AccessibilityAction.disclosure(expanded: info.expanded, pressable: input?.pressable == true) {
+                    actions.append(disclosure)
+                }
                 if info.role == .slider || input?.steps == true {
                     actions.append(.increment)
                     actions.append(.decrement)
@@ -499,7 +502,7 @@ public extension Runtime {
                 dirtyCommit(at: now)
                 return true
             }
-            if action == .press {
+            if action == .press || action == .expand || action == .collapse {
                 // Assistive clients address the node directly, including when it is clipped or covered.
                 let rect = presentedRectByPath[flat.path] ?? flat.targetRect
                 let center = Vec2(rect.width * 0.5, rect.height * 0.5)
@@ -535,7 +538,7 @@ public extension Runtime {
             return true
         }
         switch action {
-        case .focus, .press, .setValue, .scrollIntoView:
+        case .focus, .press, .expand, .collapse, .setValue, .scrollIntoView:
             return false
         case .increment, .decrement:
             guard let flatIdx, let onStep = flatNodes[flatIdx].el.handlers.onStep else {

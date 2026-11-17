@@ -1,5 +1,6 @@
 #if defined(__linux__) && !defined(__ANDROID__)
 #include "wayland_clipboard.h"
+#include "wayland_touch_cancel.h"
 #include "wayland_drag.h"
 #include "GtkAccessibility.h"
 #include <gtk/gtk.h>
@@ -103,6 +104,7 @@ static void initialize(void) {
 
 struct Call { GCond cond; int done; void (*work)(void *); void *argument; };
 void rune_desktop_linux_connect(uint32_t window_id) {
+    rune_wayland_watch_touch_window(window_id);
     if (window_id && !wayland) wayland = rune_wayland_board_open(window_id);
     g_mutex_lock(&service_lock);
     if (!hosts) owner_thread = g_thread_self();
@@ -247,6 +249,7 @@ void rune_desktop_linux_disconnect(void) {
             gdk_x11_display_ungrab(display);
             gdk_display_flush(display);
         }
+        rune_wayland_close_touch_windows();
         rune_wayland_board_close(wayland);
         wayland = NULL;
         if (board && owned) {

@@ -12,11 +12,19 @@ import UIKit
 public enum AccessibilityAction: String, Sendable, Hashable, Codable {
     case press
     case focus
+    case expand
+    case collapse
     case increment
     case decrement
     /// Sets a new value: an editable text field's text, or a stepped range's number (`Action::SetValue`).
     case setValue = "set-value"
     case scrollIntoView = "scroll-into-view"
+
+    /// The disclosure action a primary press can perform in the element's current state.
+    internal static func disclosure(expanded: Bool?, pressable: Bool) -> Self? {
+        guard let expanded, pressable else { return nil }
+        return expanded ? .collapse : .expand
+    }
 }
 
 /// Live-region announcement politeness (`rune::LiveRegion`).
@@ -346,11 +354,16 @@ public enum AccessibilityTreeBuilder {
 
         var actions: [AccessibilityAction] = []
         if enabled {
-            if element.handlers.onClick != nil || element.handlers.onClickPress != nil {
+            let handlers = element.handlers
+            let pressable = handlers.onClick != nil || handlers.onClickPress != nil || handlers.onBackgroundPress != nil
+            if pressable {
                 actions.append(.press)
             }
             if element.focusable {
                 actions.append(.focus)
+            }
+            if let disclosure = AccessibilityAction.disclosure(expanded: element.a11yExpanded, pressable: pressable) {
+                actions.append(disclosure)
             }
             if element.role == .slider {
                 actions.append(.increment)

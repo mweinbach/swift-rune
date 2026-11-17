@@ -69,6 +69,15 @@ public enum AndroidMotionTranslator {
         density: Float,
         at now: Double
     ) {
+        let touching = runtime.touching()
+        if touching {
+            switch event.action {
+            case .hoverMove, .hoverEnter, .hoverExit, .outside: return
+            case .down, .move, .up, .cancel:
+                if event.isMouse { return }
+            case .scroll: break
+            }
+        }
         let scale = max(0.5, density)
         let pt = Vec2(event.xPx / scale, event.yPx / scale)
         let id = UInt64(UInt32(bitPattern: event.pointerId))
@@ -97,8 +106,9 @@ public enum AndroidMotionTranslator {
             case .outside, .hoverExit:
                 runtime.pointerExit(at: now)
             case .scroll:
-                runtime.pointerMove(to: pt, mods: event.mods, at: now)
-                runtime.wheel(.line(x: event.hScroll, y: event.vScroll), at: pt, shift: event.mods.shift, now: now)
+                if !touching { runtime.pointerMove(to: pt, mods: event.mods, at: now) }
+                runtime.wheel(.line(x: event.hScroll, y: event.vScroll), at: touching ? (runtime.pointer() ?? pt) : pt,
+                              shift: event.mods.shift, now: now)
             }
         }
     }

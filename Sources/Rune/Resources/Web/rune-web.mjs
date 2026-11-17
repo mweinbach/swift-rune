@@ -585,7 +585,6 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
         const buttons = ['primary', 'middle', 'secondary', 'back', 'forward'];
         for (const kind of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
             canvas.addEventListener(kind, event => {
-                if (!event.isPrimary) return;
                 const point = localPoint(event);
                 if (!point) return;
                 const secondary = event.button === 2 && popup && event.pointerType === 'mouse';
@@ -593,7 +592,7 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
                     canvas.focus({ preventScroll: true });
                     canvas.setPointerCapture(event.pointerId);
                 }
-                send({ kind, ...point, button: buttons[event.button], pointerType: event.pointerType,
+                send({ kind, ...point, button: buttons[event.button], pointerType: event.pointerType, pointerId: event.pointerId,
                     shift: event.shiftKey, ctrl: event.ctrlKey, alt: event.altKey, cmd: event.metaKey });
                 if (kind === 'pointerdown' && secondary) {
                     const claim = popupJSON(wasm.rune_web_secondary_claim) ?? {kind:''};

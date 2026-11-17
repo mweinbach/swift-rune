@@ -9,6 +9,7 @@ final class WebBrowserSession {
         var id, token: String?
         var clipboard: WebClipboardContent?
         var key, code, pointerType, text, expected: String?
+        var pointerId: Int32?
         var button: PointerButton?
         var base, anchor, focus: Int?
         var x, y, dx, dy, scale: Float?
@@ -149,16 +150,18 @@ final class WebBrowserSession {
             case "focuslost":
                 _ = host.runtime.physicalInput(.focusLost, at: now)
                 return true
-            case "pointerdown", "pointerup", "pointermove":
+            case "pointerdown", "pointerup", "pointermove", "pointercancel":
                 guard let x = event.x, let y = event.y else { return false }
-                let phase: WebAppHost<State>.PointerPhase
+                let phase: TouchPhase
                 switch event.kind {
-                case "pointerdown": phase = .down
-                case "pointerup": phase = .up
-                default: phase = .move
+                case "pointerdown": phase = .started
+                case "pointerup": phase = .ended
+                case "pointercancel": phase = .cancelled
+                default: phase = .moved
                 }
                 host.handlePointer(phase, x: x, y: y, button: event.button ?? .primary,
                                    pointerType: event.pointerType ?? "mouse",
+                                   pointerID: UInt64(bitPattern: Int64(event.pointerId ?? 1)),
                                    mods: Mods(shift: event.shift == true, ctrl: event.ctrl == true, alt: event.alt == true,
                                               cmd: event.cmd == true, logo: event.cmd == true), at: now)
                 return true
@@ -213,9 +216,6 @@ final class WebBrowserSession {
                     host.runtime.wheel(WheelEvent(dx: -delta.x, dy: -delta.y, precise: mode == .pixel, mods: mods),
                                        at: Vec2(x, y), now: now)
                 }
-                return true
-            case "pointercancel":
-                host.runtime.cancelPointerForTouchHold(at: now)
                 return true
             case "insert":
                 guard let text = event.text else { return false }

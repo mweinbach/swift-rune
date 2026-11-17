@@ -31,11 +31,15 @@ enum DesktopServices {
 
     static func connectLinuxHost(windowID: UInt32 = 0) {
         rune_desktop_linux_set_wheel_scope(rune_linux_collecting_native_input)
+        rune_desktop_linux_set_touch_cancel_sink(rune_linux_touch_cancel)
         rune_desktop_linux_connect(windowID)
         rune_linux_set_altgr_resolver(rune_desktop_linux_right_alt_is_altgr)
     }
     static func pumpLinuxHost() { rune_desktop_linux_pump() }
-    static func disconnectLinuxHost() { rune_desktop_linux_disconnect() }
+    static func disconnectLinuxHost(windowID: UInt32) {
+        rune_desktop_linux_forget_touch_window(windowID)
+        rune_desktop_linux_disconnect()
+    }
 
     static func writePrimarySelection(_ text: String) {
         var value = text

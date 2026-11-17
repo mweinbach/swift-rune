@@ -59,11 +59,8 @@ internal final class WindowsAccessibilityHost {
                 guard let text else { continue }
                 action = .setValue; value = .text(String(cString: text))
             case Int32(RUNE_UIA_SET_NUMBER.rawValue): action = .setValue; value = .number(number)
-            case Int32(RUNE_UIA_EXPAND.rawValue), Int32(RUNE_UIA_COLLAPSE.rawValue):
-                guard let index = runtime.a11yTargetIndex(target),
-                      let expanded = runtime.flatNodes[index].el.a11yExpanded,
-                      expanded != (kind == Int32(RUNE_UIA_EXPAND.rawValue)) else { continue }
-                action = .press; value = nil
+            case Int32(RUNE_UIA_EXPAND.rawValue): action = .expand; value = nil
+            case Int32(RUNE_UIA_COLLAPSE.rawValue): action = .collapse; value = nil
             case Int32(RUNE_UIA_SELECT.rawValue):
                 guard let index = runtime.a11yTargetIndex(target) else { continue }
                 let item = runtime.flatNodes[index].el

@@ -135,6 +135,7 @@ public enum Win32Message: Sendable, Equatable {
     case mouseUp(button: PointerButton, x: Float, y: Float)
     case mouseLeave
     case captureLost
+    case touch(id: UInt32, phase: TouchPhase, x: Float, y: Float)
     case keyDown(vk: UInt32, mods: Mods)
     case char(scalar: UnicodeScalar)
     case close
@@ -177,6 +178,11 @@ public enum Win32MessageTranslator {
             return true
         case .captureLost:
             return runtime.cancelPointerForFocusLoss(at: now)
+        case .touch(let id, let phase, let x, let y):
+            let scale = Win32DpiScale.scaleFactor(forDPI: dpi)
+            let point = runtime.inputPoint(fromWindow: Vec2(x / scale, y / scale))
+            runtime.touch(id: UInt64(id), phase: phase, at: point, time: now)
+            return true
         case .keyDown(let vk, let mods):
             if let key = Win32KeyMap.translate(virtualKey: vk, shift: mods.shift) {
                 return runtime.keyDown(KeyEvent(key: key, mods: mods), at: now)
@@ -920,7 +926,8 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
         let altGr = mods.ctrl && event.mods & 16 != 0
 
         switch event.kind {
-        case RUNE_WIN_MOVE, RUNE_WIN_DOWN, RUNE_WIN_UP, RUNE_WIN_WHEEL:
+        case RUNE_WIN_MOVE, RUNE_WIN_DOWN, RUNE_WIN_UP, RUNE_WIN_WHEEL,
+             RUNE_WIN_TOUCH_DOWN, RUNE_WIN_TOUCH_MOVE, RUNE_WIN_TOUCH_UP:
             if visible { foundWindow(seen: true, at: now, wall: RuneExecutionContext.hostUptime) }
         case RUNE_WIN_POSITION, RUNE_WIN_SIZE, RUNE_WIN_VISIBILITY:
             look = .due
@@ -1014,6 +1021,16 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
             if let menu = runtime.takeWindowMenu() {
                 _ = rune_win_caption_menu(window, menu == .keyboard ? 1 : 0, event.x, event.y)
             }
+        case RUNE_WIN_TOUCH_DOWN, RUNE_WIN_TOUCH_MOVE, RUNE_WIN_TOUCH_UP, RUNE_WIN_TOUCH_CANCEL:
+            let phase: TouchPhase
+            switch event.kind {
+            case RUNE_WIN_TOUCH_DOWN: phase = .started
+            case RUNE_WIN_TOUCH_MOVE: phase = .moved
+            case RUNE_WIN_TOUCH_UP: phase = .ended
+            default: phase = .cancelled
+            }
+            _ = Win32MessageTranslator.dispatch(.touch(id: event.value, phase: phase, x: physical.x, y: physical.y),
+                                                to: runtime, dpi: &dpi, at: now)
         case RUNE_WIN_WHEEL:
             let horizontal = event.horizontal != 0 || mods.shift
             let points = runtime.windowsWheelLinePoints(count: event.count, ticks: event.ticks,

@@ -85,12 +85,59 @@ struct WebFieldEventsTests {
         }
 
         try verify("key", ["code": "Escape", "key": "Escape"], tracksArrival: true)
-        for device in ["mouse", "pen", "touch"] {
+        for device in ["mouse", "pen"] {
             for phase in ["pointerdown", "pointermove", "pointerup"] {
                 try verify(phase, ["pointerType": device, "x": phase == "pointerdown" ? 18 : 20, "y": 20],
-                           tracksArrival: device != "touch")
+                           tracksArrival: true)
             }
         }
+        try verify("pointerdown", ["pointerType": "touch", "x": 18, "y": 20], tracksArrival: false)
+        // Small finger motion stays pending until the runtime resolves a tap or drag.
+        host.runtime.state.samples.removeAll()
+        #expect(try send(["kind": "pointermove", "pointerType": "touch", "x": 20, "y": 20], to: browser, at: time))
+        #expect(host.runtime.state.samples["pointermove"] == nil)
+        #expect(InputTime.lastInput() == 1)
+        try verify("pointerup", ["pointerType": "touch", "x": 20, "y": 20], tracksArrival: false)
+    }
+
+    @Test func browserContactIdentityControlsTapCancellationAndPenProvenance() throws {
+        let app = AppSpec<[Bool]>(title: "Pointer sources", size: Vec2(60, 50), state: []) { _, _ in
+            el().size(60, 50).onClick { taps, tx in taps.append(tx.touchTap()) }
+        }
+        let host = WebAppHost(spec: app)
+        let browser = WebBrowserSession(host)
+        _ = try browser.frame(at: 0)
+        var time = 0.01
+        func pointer(_ kind: String, _ device: String, _ id: Int) throws {
+            #expect(try send(["kind": kind, "pointerType": device, "pointerId": id, "x": 18, "y": 20],
+                             to: browser, at: time))
+            time += 0.01
+        }
+
+        try pointer("pointerdown", "touch", 17)
+        try pointer("pointerdown", "touch", 23)
+        try pointer("pointercancel", "touch", 23)
+        try pointer("pointerup", "mouse", 1)
+        #expect(host.runtime.touching())
+        #expect(host.runtime.state.isEmpty)
+        try pointer("pointerup", "touch", 17)
+        #expect(host.runtime.state == [true])
+
+        try pointer("pointerdown", "touch", 31)
+        try pointer("pointercancel", "touch", 31)
+        try pointer("pointerup", "touch", 31)
+        #expect(!host.runtime.touching())
+        #expect(host.runtime.state == [true])
+        for device in ["pen", "mouse"] {
+            try pointer("pointerdown", device, 7)
+            try pointer("pointerup", device, 7)
+        }
+        #expect(host.runtime.state == [true, false, false])
+
+        _ = host.handlePrimaryPointer(hover: false, coarse: true)
+        host.handlePointerDown(x: 18, y: 20, pointerType: "pen", at: time)
+        host.handlePointerUp(x: 18, y: 20, at: time + 0.01)
+        #expect(host.runtime.state == [true, false, false, false])
     }
 
     @Test func nativeEditSelectionAndKeysUpdateLastInputWithoutQueuedArrivals() throws {

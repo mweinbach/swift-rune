@@ -23,6 +23,7 @@ struct RuneLinuxWindow {
 };
 
 static uint32_t group_wake_type;
+enum { touch_cancel_code = 0x5254434c };
 static unsigned keymap_generation;
 static unsigned display_generation = 1;
 static int (*resolve_altgr)(uint32_t window_id);
@@ -207,6 +208,17 @@ void rune_linux_wake(uint32_t id, uint32_t type) {
     event.user.windowID = id;
     SDL_PushEvent(&event);
 }
+
+void rune_linux_touch_cancel(uint32_t window_id) {
+    SDL_Window *sdl = SDL_GetWindowFromID(window_id);
+    RuneLinuxWindow *host = sdl ? SDL_GetWindowData(sdl, "RuneLinuxWindow") : NULL;
+    if (!host) return;
+    SDL_Event event = {0};
+    event.type = host->wake;
+    event.user.windowID = window_id;
+    event.user.code = touch_cancel_code;
+    SDL_PushEvent(&event);
+}
 void rune_linux_size(RuneLinuxWindow *host, int *w, int *h, int *pixelW, int *pixelH) {
     SDL_GetWindowSize(host->window, w, h);
     SDL_GL_GetDrawableSize(host->window, pixelW, pixelH);
@@ -317,6 +329,7 @@ static RuneLinuxEventKind translate(const SDL_Event *e, RuneLinuxEvent *out) {
         SDL_Window *window = SDL_GetWindowFromID(out->windowID);
         RuneLinuxWindow *host = window ? SDL_GetWindowData(window, "RuneLinuxWindow") : NULL;
         if (!host || e->type != host->wake) return RuneLinuxIgnored;
+        if (e->user.code == touch_cancel_code) return RuneLinuxTouchCancel;
         char *token;
         if (rune_notify_linux_take_activation(out->windowID, &token)) {
             rune_linux_activate(host, token);
@@ -359,12 +372,33 @@ static RuneLinuxEventKind translate(const SDL_Event *e, RuneLinuxEvent *out) {
         out->text = e->editExt.text; out->start = e->editExt.start; out->length = e->editExt.length;
         return RuneLinuxPreedit;
 #endif
+    case SDL_FINGERDOWN:
+    case SDL_FINGERMOTION:
+    case SDL_FINGERUP: {
+        if (e->tfinger.touchId == SDL_MOUSE_TOUCHID) return RuneLinuxIgnored;
+        SDL_Window *window = SDL_GetWindowFromID(e->tfinger.windowID);
+        if (!window) return RuneLinuxIgnored;
+        int width, height;
+        SDL_GetWindowSize(window, &width, &height);
+        // SDL2 normalizes XI2 positions to the last pixel and Wayland positions to the window size.
+        const char *driver = SDL_GetCurrentVideoDriver();
+        if (driver && !SDL_strcmp(driver, "x11")) { --width; --height; }
+        out->windowID = e->tfinger.windowID;
+        out->touchDevice = e->tfinger.touchId;
+        out->fingerID = e->tfinger.fingerId;
+        out->x = e->tfinger.x * width;
+        out->y = e->tfinger.y * height;
+        if (e->type == SDL_FINGERDOWN) return RuneLinuxTouchDown;
+        return e->type == SDL_FINGERUP ? RuneLinuxTouchUp : RuneLinuxTouchMove;
+    }
     case SDL_MOUSEMOTION:
+        if (e->motion.which == SDL_TOUCH_MOUSEID) return RuneLinuxIgnored;
         out->windowID = e->motion.windowID;
         out->x = e->motion.x; out->y = e->motion.y;
         return RuneLinuxMotion;
     case SDL_MOUSEBUTTONDOWN:
     case SDL_MOUSEBUTTONUP:
+        if (e->button.which == SDL_TOUCH_MOUSEID) return RuneLinuxIgnored;
         out->windowID = e->button.windowID;
         out->x = e->button.x; out->y = e->button.y; out->code = e->button.button;
         out->active = e->type == SDL_MOUSEBUTTONDOWN;

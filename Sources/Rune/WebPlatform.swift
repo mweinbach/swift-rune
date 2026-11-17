@@ -502,44 +502,46 @@ public final class WebAppHost<State> {
         return runtime.hostInput(pressed ? .keyPress : .keyRelease, dispatch)
     }
 
-    enum PointerPhase { case down, move, up }
-
-    func handlePointer(_ phase: PointerPhase, x: Float, y: Float, button: PointerButton,
-                       pointerType: String, mods: Mods = .none, at now: Double) {
+    func handlePointer(_ phase: TouchPhase, x: Float, y: Float, button: PointerButton,
+                       pointerType: String, pointerID: UInt64 = 1, mods: Mods = .none, at now: Double) {
         let point = Vec2(x, y)
-        func dispatch() {
+        if pointerType == "touch" {
+            runtime.touch(id: pointerID, phase: phase, at: point, time: now)
+            if phase == .ended { finishActivation(at: now) }
+            return
+        }
+        guard !runtime.touching(), phase != .cancelled else { return }
+        runtime.hostInput(.pointer) {
             switch phase {
-            case .down where button == .secondary: runtime.secondaryDown(at: point, at: now)
-            case .up where button == .secondary: runtime.secondaryUp(at: point, mods: mods, at: now)
-            case .down: runtime.pressDown(at: point, button: button, mods: mods, at: now, mouse: pointerType == "mouse")
-            case .move: runtime.pointerMove(to: point, mods: mods, at: now)
-            case .up: runtime.pointerUp(at: point, button: button, mods: mods, at: now)
+            case .started where button == .secondary: runtime.secondaryDown(at: point, at: now)
+            case .ended where button == .secondary: runtime.secondaryUp(at: point, mods: mods, at: now)
+            case .started: runtime.pressDown(at: point, button: button, mods: mods, at: now, mouse: true)
+            case .moved: runtime.pointerMove(to: point, mods: mods, at: now)
+            case .ended: runtime.pointerUp(at: point, button: button, mods: mods, at: now)
+            case .cancelled: break
             }
         }
-        // winit delivers touch separately. Its arrival-time filter covers mouse and pen events.
-        if pointerType == "touch" { dispatch() }
-        else { runtime.hostInput(.pointer, dispatch) }
-        if phase != .move { finishActivation(at: now) }
+        if phase != .moved { finishActivation(at: now) }
     }
 
     public func handlePointerMove(x: Float, y: Float, at now: Double) {
-        handlePointer(.move, x: x, y: y, button: .primary,
-                      pointerType: runtime.touchControls() ? "touch" : "mouse", at: now)
+        handlePointer(.moved, x: x, y: y, button: .primary,
+                      pointerType: runtime.touching() ? "touch" : "mouse", at: now)
     }
 
     public func handlePointerDown(x: Float, y: Float, button: PointerButton = .primary, at now: Double) {
-        handlePointer(.down, x: x, y: y, button: button,
-                      pointerType: runtime.touchControls() ? "touch" : "mouse", at: now)
+        handlePointer(.started, x: x, y: y, button: button,
+                      pointerType: runtime.touchControls() && button == .primary ? "touch" : "mouse", at: now)
     }
 
     /// The event's DOM pointerType distinguishes the active device on hybrid mouse/touch systems.
     public func handlePointerDown(x: Float, y: Float, button: PointerButton = .primary, pointerType: String, at now: Double) {
-        handlePointer(.down, x: x, y: y, button: button, pointerType: pointerType, at: now)
+        handlePointer(.started, x: x, y: y, button: button, pointerType: pointerType, at: now)
     }
 
     public func handlePointerUp(x: Float, y: Float, button: PointerButton = .primary, at now: Double) {
-        handlePointer(.up, x: x, y: y, button: button,
-                      pointerType: runtime.touchControls() ? "touch" : "mouse", at: now)
+        handlePointer(.ended, x: x, y: y, button: button,
+                      pointerType: runtime.touching() ? "touch" : "mouse", at: now)
     }
 
     func updatePreferences(dark: Bool, reducedMotion: Bool, increasedContrast: Bool, hover: Bool, coarse: Bool) {
