@@ -4,10 +4,10 @@ import AppKit
 /// A field's complete model value answers range queries even when only visible lines have
 /// been shaped. AccessKit uses the same fallback for long fields (upstream #1058).
 internal final class RuneAXTextField: RuneNSAccessibilityElement {
-    private let text: String
-    let anchor: Int
-    let focus: Int
-    private let select: (@Sendable (String, Range<Int>) -> Void)?
+    private var text: String
+    private(set) var anchor: Int
+    private(set) var focus: Int
+    private var select: (@Sendable (String, Range<Int>) -> Void)?
 
     init(node: AccessibilityNode, parent: AnyObject?, text: String, anchor: Int, focus: Int,
          onAction: (@Sendable (String, AccessibilityAction) -> Void)?,
@@ -18,6 +18,23 @@ internal final class RuneAXTextField: RuneNSAccessibilityElement {
         self.focus = focus
         self.select = node.actions.contains(.setValue) ? onSelectText : nil
         super.init(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
+    }
+
+    func updateText(_ value: String, anchor: Int, focus: Int,
+                    onSelectText: (@Sendable (String, Range<Int>) -> Void)?) {
+        text = value
+        self.anchor = anchor
+        self.focus = focus
+        select = onSelectText
+    }
+
+    /// Readers may retain the old element when its field is removed or becomes a password.
+    func invalidate() {
+        updateText("", anchor: 0, focus: 0, onSelectText: nil)
+        update(node: AccessibilityNode(id: nodeId, role: .textInput), parent: nil,
+               onAction: nil, onSetValue: nil)
+        setAccessibilityChildren([])
+        setAccessibilityElement(false)
     }
 
     private func byteOffset(_ units: Int) -> Int {

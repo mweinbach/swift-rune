@@ -267,7 +267,10 @@ public extension Runtime {
             let enabled = !el.a11yDisabled && !node.effectiveInert
             let actions = a11yNodeActions(node)
 
-            let resolvedValue: String? = isSecure ? nil : (el.a11yValue ?? el.a11ySelected ?? editText)
+            // Field selection indices refer to the editor's model, including when the element
+            // also has a general-purpose value override.
+            let value = el.handlers.editLens != nil ? editText : (el.a11yValue ?? el.a11ySelected ?? editText)
+            let resolvedValue = isSecure ? nil : value
             let labelledByText = el.a11yLabelledBy.flatMap { a11yKeyed(from: idx, key: $0) }.flatMap(a11yWords)
             let describedByText = el.a11yDescribedBy.flatMap { a11yKeyed(from: idx, key: $0) }.flatMap(a11yWords)
             let resolvedLabel: String? = isSecure
@@ -557,8 +560,16 @@ public final class MacOSAccessibilityHost {
         lastSpoken = spoken
 
         var map: [String: RuneNSAccessibilityElement] = [:]
+        var changedSelections: [RuneAXTextField] = []
         func convertNode(_ node: AccessibilityNode, parent: AnyObject) -> RuneNSAccessibilityElement {
-            let elem = AppKitAccessibilityMapper.makeElement(node, parent: parent, onAction: onAction, onSelectText: onSelectText, onSetValue: onSetValue)
+            let old = elementById[node.id] as? RuneAXTextField
+            let oldAnchor = old?.anchor
+            let oldFocus = old?.focus
+            let elem = AppKitAccessibilityMapper.makeElement(node, parent: parent, onAction: onAction,
+                                                            onSelectText: onSelectText, onSetValue: onSetValue, reusing: old)
+            if let field = old, elem === field, oldAnchor != field.anchor || oldFocus != field.focus {
+                changedSelections.append(field)
+            }
 
             let viewRect = NSRect(
                 x: CGFloat(node.frame.left),
@@ -588,12 +599,11 @@ public final class MacOSAccessibilityHost {
         // The window's own live region, which draws nothing: the root's last child.
         announcerElement = announcer.map { convertNode($0, parent: parentView) }
         if let announcerElement { rootElements.append(announcerElement) }
-        let previousElements = elementById
+        for (id, element) in elementById where map[id] !== element {
+            (element as? RuneAXTextField)?.invalidate()
+        }
         elementById = map
-        for (id, element) in map {
-            guard let field = element as? RuneAXTextField,
-                  let old = previousElements[id] as? RuneAXTextField,
-                  old.anchor != field.anchor || old.focus != field.focus else { continue }
+        for field in changedSelections {
             NSAccessibility.post(element: field, notification: .selectedTextChanged)
         }
 

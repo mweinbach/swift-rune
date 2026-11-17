@@ -32,9 +32,10 @@ struct A11yReaderParityTests {
     @Test func selectionReachesTheEditorWithoutChangingText() {
         struct Form { var draft = TextEdit("a🦀e\u{301}"); var changes = 0 }
         let rt = Runtime(state: Form(), viewport: Vec2(180, 60), systemDark: true) { _, _ in
-            col().child(textInput(key: "draft", \Form.draft).onChange { state, _, _ in state.changes += 1 })
+            col().child(textInput(key: "draft", \Form.draft).a11yValue("override").onChange { state, _, _ in state.changes += 1 })
         }
         rt.frame(at: 0)
+        #expect(rt.accessibilitySnapshot().children.first?.value == rt.state.draft.text)
         #expect(rt.accessibilitySelectText("draft", range: 1..<5, at: 0.1))
         #expect(rt.focusedKey == "draft")
         #expect(rt.state.draft.anchor == 1 && rt.state.draft.cursor == 5)
@@ -94,6 +95,32 @@ struct A11yReaderParityTests {
             MacOSHostViewHelper.superclassAccessibilityChildren(of: view.value)?.count
         }.value
         #expect(observed == expected)
+    }
+
+    @Test func retainedNativeFieldReflectsChangesAndSecureTransition() throws {
+        let host = MacOSAccessibilityHost()
+        let view = NSView()
+        var node = AccessibilityNode(id: "draft", role: .textInput, label: "Draft", value: "before",
+                                     isFocused: true, textSelection: [0, 0, 0, 0], actions: [.setValue])
+        host.update(tree: node, parentView: view, onSelectText: { _, _ in }, onAction: { _, _ in })
+        let held = try #require(host.accessibilityFocusedUIElement() as? RuneAXTextField)
+        node.value = "after 🦀"
+        node.textSelection = [0, 6, 0, 10]
+        node.actions = []
+        node.label = nil
+        host.update(tree: node, parentView: view, onAction: { _, _ in })
+        #expect(host.accessibilityFocusedUIElement() as? RuneAXTextField === held)
+        #expect(held.accessibilitySelectedText() == "🦀")
+        #expect(held.accessibilityValue() as? String == "after 🦀")
+        #expect(held.accessibilityLabel() == nil)
+        #expect(!held.isAccessibilitySelectorAllowed(#selector(NSAccessibilityElement.setAccessibilitySelectedTextRange(_:))))
+
+        node.isSecure = true
+        node.value = "secret"
+        host.update(tree: node, parentView: view, onAction: { _, _ in })
+        #expect(!(host.accessibilityFocusedUIElement() is RuneAXTextField))
+        #expect(held.accessibilityNumberOfCharacters() == 0)
+        #expect(held.accessibilitySelectedText() == "")
     }
 
     @Test func longFieldAnswersNativeRangeQueriesAndSetsSelection() async throws {

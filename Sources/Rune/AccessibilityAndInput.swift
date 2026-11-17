@@ -550,11 +550,18 @@ public enum AppKitAccessibilityMapper {
         parent: AnyObject?,
         onAction: (@Sendable (String, AccessibilityAction) -> Void)?,
         onSelectText: (@Sendable (String, Range<Int>) -> Void)?,
-        onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)?
+        onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)?,
+        reusing existingField: RuneAXTextField? = nil
     ) -> RuneNSAccessibilityElement {
         if !node.isSecure, node.role == .textInput || node.role == .multilineTextInput,
            let text = node.value, let selection = node.textSelection,
            selection.count == 4, selection[0] == 0, selection[2] == 0 {
+            if let field = existingField {
+                field.updateText(text, anchor: selection[1], focus: selection[3],
+                                 onSelectText: node.actions.contains(.setValue) ? onSelectText : nil)
+                field.update(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
+                return field
+            }
             return RuneAXTextField(node: node, parent: parent, text: text,
                                    anchor: selection[1], focus: selection[3], onAction: onAction,
                                    onSelectText: onSelectText, onSetValue: onSetValue)
@@ -566,9 +573,9 @@ public enum AppKitAccessibilityMapper {
 /// Concrete `NSAccessibilityElement` backing a projected `AccessibilityNode` on macOS.
 public class RuneNSAccessibilityElement: NSAccessibilityElement {
     public let nodeId: String
-    public let supportedActions: [AccessibilityAction]
-    private let actionHandler: (@Sendable (String, AccessibilityAction) -> Void)?
-    private let setValueHandler: (@Sendable (String, AccessibilityActionValue) -> Void)?
+    public private(set) var supportedActions: [AccessibilityAction] = []
+    private var actionHandler: (@Sendable (String, AccessibilityAction) -> Void)?
+    private var setValueHandler: (@Sendable (String, AccessibilityActionValue) -> Void)?
 
     public init(
         node: AccessibilityNode,
@@ -577,22 +584,26 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
         onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)? = nil
     ) {
         self.nodeId = node.id
+        super.init()
+        update(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
+    }
+
+    internal func update(
+        node: AccessibilityNode, parent: AnyObject?,
+        onAction: (@Sendable (String, AccessibilityAction) -> Void)?,
+        onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)?
+    ) {
         self.supportedActions = node.actions
         self.actionHandler = onAction
         self.setValueHandler = onSetValue
-        super.init()
 
         setAccessibilityRole(AppKitAccessibilityMapper.nsRole(for: node.role))
         if node.isSecure {
             setAccessibilitySubrole(.secureTextField)
         }
-        if let parent {
-            setAccessibilityParent(parent)
-        }
+        setAccessibilityParent(parent)
         setAccessibilityIdentifier(node.id)
-        if let label = node.label {
-            setAccessibilityLabel(label)
-        }
+        setAccessibilityLabel(node.label)
         if node.role == .heading {
             // A heading's value is its level, as WebKit and Chromium give VoiceOver
             // (`vendor/accesskit_macos.patch`, #975), checked before the text value.
@@ -600,9 +611,7 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
         } else if !node.isSecure, !(self is RuneAXTextField), let value = node.value {
             super.setAccessibilityValue(value)
         }
-        if let help = node.help {
-            setAccessibilityHelp(help)
-        }
+        setAccessibilityHelp(node.help)
         setAccessibilityFrame(CGRect(
             x: CGFloat(node.frame.x),
             y: CGFloat(node.frame.y),
@@ -611,8 +620,8 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
         ))
         setAccessibilityFocused(node.isFocused)
         setAccessibilitySelected(node.isSelected)
-        if let expanded = node.isExpanded {
-            setAccessibilityExpanded(expanded)
+        if node.isExpanded != nil || isAccessibilityExpanded() {
+            setAccessibilityExpanded(node.isExpanded ?? false)
         }
     }
 
