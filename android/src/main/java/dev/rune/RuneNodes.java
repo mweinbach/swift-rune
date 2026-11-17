@@ -28,12 +28,22 @@ final class RuneNodes extends AccessibilityNodeProvider {
         final JSONObject data;
         final int id, parent;
         final Rect rect;
+        Rect bounds;
         final List<Integer> children = new ArrayList<>();
         Node(JSONObject data) throws JSONException {
             this.data = data;
             id = data.getInt("id"); parent = data.getInt("parent");
             JSONArray r = data.getJSONArray("rect");
             rect = new Rect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3));
+            if (rect.isEmpty()) rect.setEmpty();
+            bounds = rect;
+        }
+        void includeVisibleChild(Node child) {
+            // The native projection already clips every rect to the viewport and its clipping ancestors.
+            // A scrolled list can have an empty frame while its overflowing rows are still on screen.
+            if (!rect.isEmpty() || child.bounds.isEmpty()) return;
+            if (bounds == rect) bounds = new Rect(child.bounds);
+            else bounds.union(child.bounds);
         }
         boolean action(String name) {
             JSONArray list = data.optJSONArray("actions");
@@ -51,12 +61,19 @@ final class RuneNodes extends AccessibilityNodeProvider {
         inputFocus = 0;
         nodes.clear();
         roots.clear();
+        Node[] ordered = new Node[source.length()];
         for (int i = 0; i < source.length(); i++) {
             Node n = new Node(source.getJSONObject(i));
+            ordered[i] = n;
             nodes.put(n.id, n);
             Node parent = nodes.get(n.parent);
             if (parent == null) roots.add(n.id); else parent.children.add(n.id);
             if (n.data.optBoolean("focused")) inputFocus = n.id;
+        }
+        for (int i = ordered.length - 1; i >= 0; i--) {
+            Node child = ordered[i];
+            Node parent = nodes.get(child.parent);
+            if (parent != null) parent.includeVisibleChild(child);
         }
         if (!nodes.containsKey(a11yFocus)) a11yFocus = 0;
         if (!nodes.containsKey(hover)) hover = 0;
@@ -161,14 +178,14 @@ final class RuneNodes extends AccessibilityNodeProvider {
             if (!info.isPassword()) info.addAction(AccessibilityNodeInfo.ACTION_SET_SELECTION);
         }
         Node parent = nodes.get(n.parent);
-        Rect relative = new Rect(n.rect);
-        if (parent != null) relative.offset(-parent.rect.left, -parent.rect.top);
+        Rect relative = new Rect(n.bounds);
+        if (parent != null) relative.offset(-parent.bounds.left, -parent.bounds.top);
         info.setBoundsInParent(relative);
         int[] origin = new int[2]; view.getLocationOnScreen(origin);
-        Rect screen = new Rect(n.rect); screen.offset(origin[0], origin[1]);
+        Rect screen = new Rect(n.bounds); screen.offset(origin[0], origin[1]);
         info.setBoundsInScreen(screen);
         Rect visible = new Rect();
-        info.setVisibleToUser(view.isShown() && view.getLocalVisibleRect(visible) && Rect.intersects(visible, n.rect));
+        info.setVisibleToUser(!n.bounds.isEmpty() && view.isShown() && view.getLocalVisibleRect(visible) && Rect.intersects(visible, n.bounds));
         return info;
     }
 

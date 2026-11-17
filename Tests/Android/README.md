@@ -6,6 +6,7 @@ Install the debug-signed Rune Hello APK and use the same debug keystore to sign 
 python3 Tests/Android/build-probe.py org.swift.rune.hello --keystore "$KEYSTORE" --out /tmp/rune-hello-probe.apk
 adb install -r /tmp/rune-hello-probe.apk
 adb shell am instrument -w -e mode hello dev.rune.probe/dev.rune.probe.RuneHostProbe
+adb shell am instrument -w -e mode virtual-bounds dev.rune.probe/dev.rune.probe.RuneHostProbe
 adb shell am instrument -w -e mode text dev.rune.probe/dev.rune.probe.RuneHostProbe
 adb shell am instrument -w -e mode outlines dev.rune.probe/dev.rune.probe.RuneHostProbe
 adb shell am instrument -w -e mode images dev.rune.probe/dev.rune.probe.RuneHostProbe
@@ -14,6 +15,8 @@ adb shell am instrument -w -e mode images dev.rune.probe/dev.rune.probe.RuneHost
 The Hello check finds the virtual switch through Android's accessibility service, activates it, and reads the changed label and checked state. It also captures the displayed switch before and after activation and checks its pixels changed. The text check exercises Android font fallback and glyph masks.
 
 On API 31 and newer the outline check compares vector paths from the positioned glyphs against Android's full-line text raster. It covers accents, ligatures, contextual punctuation, and color emoji fallback.
+
+The virtual-bounds check projects a deep-scrolled list into the Android node provider and verifies screen bounds, parent-relative bounds and visibility throughout the visible rows’ ancestor chain.
 
 The image check exercises the Android 7-compatible decoder on the device. It checks indexed PNG and GIF pixels and the first frame of an offset animated WebP at full size and thumbnail size.
 

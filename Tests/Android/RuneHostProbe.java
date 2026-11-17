@@ -41,6 +41,7 @@ public final class RuneHostProbe extends Instrumentation {
             else if (outlines) result.putString("outlines", RuneOutlineProbe.run(getTargetContext()));
             else if ("images".equals(args.getString("mode")))
                 Class.forName("dev.rune.probe.RuneImageProbe").getDeclaredMethod("run", ClassLoader.class).invoke(null, host.getClassLoader());
+            else if ("virtual-bounds".equals(args.getString("mode"))) RuneVirtualBoundsProbe.run(this, host);
             else if ("editor".equals(args.getString("mode"))) testEditor(host);
             else testToggle(result);
             result.putString("stream", "PASS " + args.getString("mode", "hello") + "\n");
