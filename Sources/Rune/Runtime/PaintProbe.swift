@@ -50,7 +50,11 @@ extension Runtime {
                 paint.colors[MotionGatePaint.cBorder] = (live(.borderColor) ?? color(Props.BORDER, border?.top ?? el.borderColor)).scaleAlpha(alpha)
             }
             paint.pointer = SIMD2(e.hover, e.press)
-            if var ink = live(.textColor) ?? e.textColor.map({ color(Props.TEXT_COLOR, $0) }) {
+            let paintsInk = el.plainText != nil || el.richSpans != nil || el.advanceInRun != nil
+                || el.handlers.editLens != nil || el.iconPayload != nil
+            if paintsInk {
+                let fallback = e.textColor ?? cxSettings.viewDefaults.foreground ?? (systemDark ? .white : .black)
+                var ink = live(.textColor) ?? color(Props.TEXT_COLOR, fallback)
                 if let groupInk = el.groupColor, let group = parent?.group, group > 0 {
                     ink = ink.mix(with: groupInk, t: group)
                     paint.pointer.x = max(paint.pointer.x, group)
