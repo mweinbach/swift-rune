@@ -4,8 +4,25 @@ import RuneMotion
 // MARK: - Increment 4 Runtime Support (TxCommit, ScrollRequests, Sticky, VirtualRows/VirtualFill, Growth)
 
 extension Runtime {
+    /// A reveal's scope identifies an ancestor of the target, including the virtual list that
+    /// owns an unmounted row (commit/flatten.rs::in_scope). Swift also accepts a full or keyed path.
+    internal static func inScrollRevealScope(_ scope: String?, path: String) -> Bool {
+        guard let scope else { return true }
+        if !scope.contains("/") {
+            let segment = "@\(scope)"
+            return path.split(separator: "/").contains { $0 == segment }
+        }
+        var ancestor = path[...]
+        while !ancestor.isEmpty {
+            if selectsElementSelector(scope, path: String(ancestor), key: nil) { return true }
+            guard let slash = ancestor.lastIndex(of: "/") else { break }
+            ancestor = ancestor[..<slash]
+        }
+        return false
+    }
+
     /// A virtual row selector can name the row, a scoped row, or a descendant of the row.
-    private static func virtualRevealRow(_ key: String, in places: VirtualRowPlaces<String>, path: String) -> Int? {
+    internal static func virtualRevealRow(_ key: String, in places: VirtualRowPlaces<String>, path: String) -> Int? {
         if let index = places.index(of: key) { return index }
         for slash in key.indices.reversed() where key[slash] == "/" {
             let row = String(key[key.index(after: slash)...])
@@ -22,12 +39,11 @@ extension Runtime {
 
     /// During layout, measure a distant destination in its own window before the viewport moves.
     private func pendingVirtualReveal(
-        places: VirtualRowPlaces<String>, list: String, viewport: String
+        places: VirtualRowPlaces<String>, list: String
     ) -> Int? {
         guard !pendingScrollReveals.isEmpty else { return nil }
-        let viewportKey = viewport.split(separator: "/").last.flatMap { $0.hasPrefix("@") ? String($0.dropFirst()) : nil }
         return pendingScrollReveals.lazy.filter { request in
-            request.scope.map { $0 == list || selectsElementSelector($0, path: viewport, key: viewportKey) } ?? true
+            Self.inScrollRevealScope(request.scope, path: list)
         }.compactMap { Self.virtualRevealRow($0.key, in: places, path: list) }.last
     }
 
@@ -427,10 +443,8 @@ extension Runtime {
         let isFirstMount = (scrollOffsets[vpPath] == nil && !wasPinnedToBottom.contains(vpPath))
         let stickyPin = nextStickBottom && (isFirstMount || wasPinnedToBottom.contains(vpPath))
 
-        let vpScrollKey = vpPath.split(separator: "/").last.flatMap { $0.hasPrefix("@") ? String($0.dropFirst()) : nil }
         let hasPendingRevealForViewport = pendingScrollReveals.contains { req in
-            req.scope == nil || req.scope == vpPath || req.scope == path
-                || req.scope.map { selectsElementSelector($0, path: vpPath, key: vpScrollKey) } == true
+            Self.inScrollRevealScope(req.scope, path: path)
         }
         let isReorder = isReorderPermitted && !prevKeys.isEmpty && keys.count == prevKeys.count && keys != prevKeys
             && prevKeys.allSatisfy { vState.rowPlaces.index(of: $0) != nil }
@@ -478,7 +492,7 @@ extension Runtime {
         if let fk = focusedKey, let fi = vState.rowPlaces.index(of: fk) {
             pinned.insert(fi)
         }
-        let destination = pendingVirtualReveal(places: vState.rowPlaces, list: path, viewport: vpPath)
+        let destination = pendingVirtualReveal(places: vState.rowPlaces, list: path)
         var windowOffsetY = Self.revealWindowOffset(row: destination, prefix: prefix, viewport: vpH, from: listOffsetY)
         if let destination { pinned.insert(destination) }
         for rev in scrollRequestsState.reveals where rev.viewport == vpPath {
@@ -1182,12 +1196,9 @@ extension Runtime {
                     accum.result.needsClampedRelayout = true
                 }
             } else {
-                let revealedInCommit = enclosingScrollPath.map { sp in
-                    let sKey = sp.split(separator: "/").last.flatMap { $0.hasPrefix("@") ? String($0.dropFirst()) : nil }
-                    return pendingScrollReveals.contains { req in
-                        req.scope == nil || req.scope == sp || req.scope.map { selectsElementSelector($0, path: sp, key: sKey) } == true
-                    }
-                } ?? false
+                let revealedInCommit = enclosingScrollPath != nil && pendingScrollReveals.contains {
+                    Self.inScrollRevealScope($0.scope, path: path)
+                }
                 let stackExisted = (inGrowthSpec != nil) ? !(kitHooks.growthStacks[parentStackPath ?? ""]?.isNewStack ?? true) : (viewCommitCount > 1)
                 let startsFromZero = !instantGrowth
                     && !revealedInCommit
@@ -1915,7 +1926,7 @@ extension Runtime {
             let (prefix, total) = vState.computeOffsets(estimated: meta.estimate)
             let topOffset = max(0, (listWorldY[meta.listPath] ?? sInfo.y) - sInfo.y)
             let pinned = (lands && meta.stickBottom) || wasPinnedToBottom.contains(meta.scrollPath)
-            let destination = pendingVirtualReveal(places: vState.rowPlaces, list: meta.listPath, viewport: meta.scrollPath)
+            let destination = pendingVirtualReveal(places: vState.rowPlaces, list: meta.listPath)
             var rawOff = scrollOffsets[meta.scrollPath]?.y ?? 0
             if destination == nil, !pinned,
                let anchorKey = vState.lastAnchorKey,
@@ -2085,10 +2096,8 @@ extension Runtime {
                 !pass.nodes[$0].el.layout.scrollAxes.isEmpty ? $0 : pass.nodes[$0].enclosingVScrollIndex
             }
             let scrollPath = scrollIdx.map { pass.nodes[$0].path } ?? listPath
-            let scrollKey = scrollIdx.flatMap { pass.nodes[$0].key }
             let hasPendingReveal = pendingScrollReveals.contains { req in
-                req.scope == nil || req.scope == scrollPath || req.scope == listPath
-                    || req.scope.map { selectsElementSelector($0, path: scrollPath, key: scrollKey) } == true
+                Self.inScrollRevealScope(req.scope, path: listPath)
             }
             if scrollRequestsState.owns(scrollPath) || directScrolledPaths.contains(scrollPath) || hasPendingReveal {
                 continue
@@ -2675,28 +2684,12 @@ extension Runtime {
     }
 
     internal func processScrollRequestsAndCallbacks(at now: Double, cut: Bool, followEdge: Bool, snaps: Bool = false) {
-        func nodeMatchesScope(_ idx: Int, scopeKey: String?) -> Bool {
-            guard let scopeKey else { return true }
-            var walk: Int? = idx
-            while let wi = walk {
-                if selectsElementSelector(scopeKey, path: flatNodes[wi].path, key: flatNodes[wi].key) {
-                    return true
-                }
-                walk = flatNodes[wi].parentIndex
-            }
-            return false
-        }
-
-        func findScrollViewportIndex(forNode idx: Int, scopeKey: String?, verticalOnly: Bool = false) -> Int? {
+        func findScrollViewportIndex(forNode idx: Int, verticalOnly: Bool = false) -> Int? {
             var cur = flatNodes[idx].parentIndex
             while let ci = cur {
                 let axes = flatNodes[ci].el.layout.scrollAxes
                 let matchesAxis = verticalOnly ? axes.contains(.vertical) : !axes.isEmpty
-                if matchesAxis {
-                    if nodeMatchesScope(ci, scopeKey: scopeKey) {
-                        return ci
-                    }
-                }
+                if matchesAxis { return ci }
                 cur = flatNodes[ci].parentIndex
             }
             return nil
@@ -2730,7 +2723,7 @@ extension Runtime {
             if let targetIdx = flatNodes.firstIndex(where: {
                 selectsElementSelector(selector, path: $0.path, key: $0.key)
             }) {
-                return findScrollViewportIndex(forNode: targetIdx, scopeKey: nil)
+                return findScrollViewportIndex(forNode: targetIdx)
             }
             return nil
         }
@@ -2784,10 +2777,11 @@ extension Runtime {
             let itemTop: Double
 
             if let tIdx = flatNodes.indices.first(where: {
-                nodeMatchesScope($0, scopeKey: req.scope)
-                    && selectsElementSelector(req.key, path: flatNodes[$0].path, key: flatNodes[$0].key)
+                let node = flatNodes[$0]
+                return selectsElementSelector(req.key, path: node.path, key: node.key)
+                    && (node.parentIndex.map { Self.inScrollRevealScope(req.scope, path: flatNodes[$0].path) } ?? true)
             }),
-               let foundVIdx = findScrollViewportIndex(forNode: tIdx, scopeKey: req.scope, verticalOnly: true) {
+               let foundVIdx = findScrollViewportIndex(forNode: tIdx, verticalOnly: true) {
                 vIdx = foundVIdx
                 vPath = flatNodes[vIdx].path
                 let vpRect = flatNodes[vIdx].targetRect
@@ -2805,7 +2799,7 @@ extension Runtime {
                 itemH = vHit.itemH
                 itemTop = vHit.itemTop
             } else if let hlHit = resolveTextHighlightRevealTarget(scope: req.scope, key: req.key),
-                      let foundVIdx = findScrollViewportIndex(forNode: hlHit.nodeIndex, scopeKey: req.scope, verticalOnly: true) {
+                      let foundVIdx = findScrollViewportIndex(forNode: hlHit.nodeIndex, verticalOnly: true) {
                 vIdx = foundVIdx
                 vPath = flatNodes[vIdx].path
                 let vpRect = flatNodes[vIdx].targetRect

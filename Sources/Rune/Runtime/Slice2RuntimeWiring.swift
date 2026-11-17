@@ -520,42 +520,17 @@ extension Runtime {
     }
 
     internal func resolveVirtualRowBounds(forKey key: String, scope: String?) -> (vIdx: Int, itemTop: Double, itemH: Double, itemLeft: Double, itemW: Double, cur: Vec2)? {
-        for (listIdx, node) in flatNodes.enumerated() {
+        for node in flatNodes {
             guard let vState = virtualLists[node.path],
-                  let rowIdx = vState.lastKeys.firstIndex(where: {
-                      $0 == key || selectsElementSelector(key, path: "\(node.path)/\($0)", key: $0)
-                  }) else { continue }
-            let candidateVIdx: Int?
-            if !node.el.layout.scrollAxes.isEmpty && (scope == nil || selectsElementSelector(scope!, path: node.path, key: node.key)) {
-                candidateVIdx = listIdx
-            } else {
-                var curP = flatNodes[listIdx].parentIndex
-                var found: Int? = nil
-                while let pi = curP {
-                    if !flatNodes[pi].el.layout.scrollAxes.isEmpty {
-                        if let scope {
-                            if selectsElementSelector(scope, path: flatNodes[pi].path, key: flatNodes[pi].key) {
-                                found = pi
-                                break
-                            }
-                        } else {
-                            found = pi
-                            break
-                        }
-                    }
-                    curP = flatNodes[pi].parentIndex
-                }
-                candidateVIdx = found
-            }
-            guard let foundVIdx = candidateVIdx else { continue }
+                  Self.inScrollRevealScope(scope, path: node.path),
+                  let rowIdx = Self.virtualRevealRow(key, in: vState.rowPlaces, path: node.path),
+                  let foundVIdx = nodeByPath[vState.scrollPath],
+                  !flatNodes[foundVIdx].el.layout.scrollAxes.isEmpty else { continue }
             let est = Float(node.el.virtualEstimate ?? 40)
-            let prefixY: Float = (0..<rowIdx).reduce(0) { sum, idx in
-                sum + vState.rowHeight(forKey: vState.lastKeys[idx], estimated: est)
-            }
             let rowH = vState.rowHeight(forKey: vState.lastKeys[rowIdx], estimated: est)
             let vpNode = flatNodes[foundVIdx]
             let c = scrollOffsets[vpNode.path] ?? .zero
-            let top = Double(node.targetRect.top + prefixY - vpNode.targetRect.y) + Double(c.y)
+            let top = Double(vState.top + vState.padTop + vState.prefix(rowIdx, estimated: est))
             let left = Double(node.targetRect.left - vpNode.targetRect.x) + Double(c.x)
             return (foundVIdx, top, Double(rowH), left, Double(node.targetRect.width), c)
         }
@@ -568,7 +543,7 @@ extension Runtime {
         let target: (idx: Int, x: Float, w: Float)?
         if let tIdx = flatNodes.firstIndex(where: {
             selectsElementSelector(key, path: $0.path, key: $0.key)
-                && ($0.parentIndex.map { scope == nil || selectsElementSelector(scope!, path: flatNodes[$0].path, key: flatNodes[$0].key) || flatNodes[$0].path.contains("/@\(scope!)") } ?? true)
+                && ($0.parentIndex.map { Self.inScrollRevealScope(scope, path: flatNodes[$0].path) } ?? true)
         }) {
             target = (tIdx, flatNodes[tIdx].targetRect.x, flatNodes[tIdx].targetRect.width)
         } else if let hl = resolveTextHighlightRevealTarget(scope: scope, key: key) {

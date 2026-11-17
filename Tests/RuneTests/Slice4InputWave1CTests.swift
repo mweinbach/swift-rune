@@ -597,7 +597,12 @@ struct Slice4InputWave1CTests {
             _ = scopeRt.frame(at: 0.01 + Double(step) / 60.0)
         }
         #expect(scopeRt.scrollOffset(forKey: "a_vp").y == 0)
-        #expect(scopeRt.scrollOffset(forKey: "b_vp").y > 100)
+        let bOffset = scopeRt.scrollOffset(forKey: "b_vp").y
+        #expect(bOffset > 800)
+        scopeRt.update(at: 0.52) { _, tx in tx.scrollIntoViewIn("a", "row90") }
+        _ = scopeRt.frame(at: 0.52)
+        #expect(scopeRt.scrollOffset(forKey: "a_vp").y > 1_600)
+        #expect(scopeRt.scrollOffset(forKey: "b_vp").y == bOffset)
     }
 
     // MARK: - DragOut + FileDialog + Drop Inspection (`file_dialog.rs`, `drop.rs`)
