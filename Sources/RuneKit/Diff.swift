@@ -2589,17 +2589,63 @@ public struct DiffState: Sendable, Equatable {
     }
 }
 
-// MARK: - OKLab Color Tinting Helper
+private struct DiffRowPalette {
+    struct Row {
+        var line: Color
+        var gutter: Color
+        var number: Color
+        var word: Color
+    }
 
-private func diffTintColor(_ base: Color, hue: Color, t: Float) -> Color {
-    let clampedT = min(1, max(0, t))
-    // Linear RGB interpolation preserving base alpha (safe and fast; OKLab deltas for muted tints match visually)
-    return Color(
-        r: base.r + (hue.r - base.r) * clampedT,
-        g: base.g + (hue.g - base.g) * clampedT,
-        b: base.b + (hue.b - base.b) * clampedT,
-        a: base.a
-    )
+    let context: Row
+    let addition: Row
+    let deletion: Row
+    let selectedLine: Color
+    let selectedGutter: Color
+    let selectedNumber: Color
+    let gap: Color
+    let separator: Color
+    let empty: Color
+
+    init(_ kit: Kit, overrides: DiffTints) {
+        let c = kit.c
+        let dark = kit.dark
+        func tint(_ base: Color, _ hue: Color, _ t: Float) -> Color {
+            let a = base.toOKLab()
+            let b = hue.toOKLab()
+            return .fromOKLab([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t,
+                               a[2] + (b[2] - a[2]) * t, base.a])
+        }
+        func change(_ hue: Color, line: Color?, word: Color?) -> Row {
+            Row(line: line ?? tint(c.bgBase, hue, dark ? 0.13 : 0.10),
+                gutter: line ?? tint(c.bgBase, hue, dark ? 0.20 : 0.17),
+                number: tint(c.textMuted, hue, 0.7),
+                word: word ?? tint(c.bgBase, hue, dark ? 0.32 : 0.27))
+        }
+        context = Row(line: c.bgBase, gutter: c.bgBase, number: c.textFaint, word: .transparent)
+        addition = change(c.success.icon, line: overrides.addition, word: overrides.additionWord)
+        deletion = change(c.danger.icon, line: overrides.deletion, word: overrides.deletionWord)
+        selectedLine = tint(c.bgBase, c.info.icon, dark ? 0.20 : 0.14)
+        selectedGutter = tint(c.bgBase, c.info.icon, dark ? 0.32 : 0.26)
+        selectedNumber = c.textBase
+        gap = tint(c.bgBase, c.info.icon, dark ? 0.10 : 0.06)
+        separator = tint(c.bgBase, dark ? c.white : .black, dark ? 0.05 : 0.02)
+        empty = tint(c.bgBase, c.textBase, dark ? 0.03 : 0.025)
+    }
+
+    func row(_ kind: DiffLineKind, selected: Bool) -> Row {
+        var colors = switch kind {
+        case .context: context
+        case .addition: addition
+        case .deletion: deletion
+        }
+        if selected {
+            colors.line = selectedLine
+            colors.gutter = selectedGutter
+            colors.number = selectedNumber
+        }
+        return colors
+    }
 }
 
 // MARK: - DiffView Component (`rune_kit::diff::view`)
@@ -2759,17 +2805,13 @@ public struct DiffView<State>: Sendable {
 
         let addColor = k.c.success.fg
         let delColor = k.c.danger.fg
-        let addLineBg = look.tints.addition ?? diffTintColor(k.c.surfaceBase, hue: addColor, t: 0.14)
-        let delLineBg = look.tints.deletion ?? diffTintColor(k.c.surfaceBase, hue: delColor, t: 0.14)
-        let addWordBg = look.tints.additionWord ?? diffTintColor(k.c.surfaceBase, hue: addColor, t: 0.28)
-        let delWordBg = look.tints.deletionWord ?? diffTintColor(k.c.surfaceBase, hue: delColor, t: 0.28)
-        let selBg = k.selection()
+        let palette = DiffRowPalette(k, overrides: look.tints)
 
         var container = El<State>(direction: .column)
             .key(key)
             .dir(.ltr)
             .wFull()
-            .bg(k.c.surfaceBase)
+            .bg(k.c.bgBase)
             .border(1, k.c.borderMuted)
             .rounded(k.radius.md)
             .clip()
@@ -2838,8 +2880,7 @@ public struct DiffView<State>: Sendable {
                                            prefix: prefix, rowIdx: local, rows: section.rows, st: st,
                                            syntaxTheme: syntaxTheme, gutterDigits: section.digits,
                                            gutterWidth: gutterWidth, lineH: lineH,
-                                           addLineBg: addLineBg, delLineBg: delLineBg, addWordBg: addWordBg,
-                                           delWordBg: delWordBg, selBg: selBg,
+                                           palette: palette,
                                            annotationFixedWidth: !st.wraps && width > 0 ? width : nil,
                                            annotationStickyLeft: !st.wraps)
                 // The gutter sets the intrinsic height of an ordinary unwrapped code line.
@@ -2917,18 +2958,15 @@ public struct DiffView<State>: Sendable {
         gutterDigits: Int,
         gutterWidth: Float,
         lineH: Float,
-        addLineBg: Color,
-        delLineBg: Color,
-        addWordBg: Color,
-        delWordBg: Color,
-        selBg: Color,
+        palette: DiffRowPalette,
         annotationFixedWidth: Float? = nil,
         annotationStickyLeft: Bool = false
     ) -> El<State> {
         switch rows[rowIdx] {
         case .gap(let gap):
             let totalGutterW = 3 + (st.mode == .unified ? 2 * gutterWidth : gutterWidth)
-            return buildGapRow(fileIndex: fileIndex, prefix: prefix, gap: gap, height: DiffLayout.gapHeight, gutterWidth: totalGutterW)
+            return buildGapRow(fileIndex: fileIndex, prefix: prefix, gap: gap, height: DiffLayout.gapHeight, gutterWidth: totalGutterW,
+                               expandable: st.files[fileIndex].expandable, fill: look.foldRow == .lineInfo ? palette.separator : palette.gap)
         case .annotation(let ann):
             var note = buildAnnotation(hostState: hostState, prefix: prefix, ann: ann)
             if annotationStickyLeft { note = note.stickyLeft(0) }
@@ -2948,11 +2986,7 @@ public struct DiffView<State>: Sendable {
                 gutterDigits: gutterDigits,
                 gutterWidth: gutterWidth,
                 lineH: lineH,
-                addLineBg: addLineBg,
-                delLineBg: delLineBg,
-                addWordBg: addWordBg,
-                delWordBg: delWordBg,
-                selBg: selBg
+                palette: palette
             )
         case let .splitPair(oldLine, newLine, oldChanged, newChanged):
             return buildSplitPairRow(
@@ -2968,11 +3002,7 @@ public struct DiffView<State>: Sendable {
                 gutterDigits: gutterDigits,
                 gutterWidth: gutterWidth,
                 lineH: lineH,
-                addLineBg: addLineBg,
-                delLineBg: delLineBg,
-                addWordBg: addWordBg,
-                delWordBg: delWordBg,
-                selBg: selBg
+                palette: palette
             )
         case .splitOnly(let line):
             return buildSplitOnlyRow(
@@ -2985,9 +3015,7 @@ public struct DiffView<State>: Sendable {
                 gutterDigits: gutterDigits,
                 gutterWidth: gutterWidth,
                 lineH: lineH,
-                addLineBg: addLineBg,
-                delLineBg: delLineBg,
-                selBg: selBg
+                palette: palette
             )
         }
     }
@@ -3135,8 +3163,8 @@ public struct DiffView<State>: Sendable {
             .px(12)
             .itemsCenter()
             .justifyBetween()
-            .bg(k.c.surfaceRaised)
-            .borderSides(bottom: 1, color: k.c.borderMuted)
+            .bg(k.c.layer01)
+            .borderSides(bottom: 1, color: k.c.borderWeak)
             .child(
                 El<State>(direction: .row)
                     .gap(8)
@@ -3151,11 +3179,16 @@ public struct DiffView<State>: Sendable {
 
     // MARK: Gap & Annotation Rows
 
-    private func buildGapRow(fileIndex: Int, prefix: String, gap: DiffGap, height: Float, gutterWidth: Float) -> El<State> {
+    private func buildGapRow(fileIndex: Int, prefix: String, gap: DiffGap, height: Float, gutterWidth: Float, expandable: Bool, fill: Color) -> El<State> {
         let k = kit
         if look.foldRow == .lineInfo {
-            let hidden = gap.count
+            let hidden = expandable ? gap.count : 0
             let labelStr = (hidden == 1) ? "1 unmodified line" : "\(hidden) unmodified lines"
+            let bar = El<State>(direction: .row).key("\(prefix)-gap-\(gap.index)")
+                .wFull().h(height).itemsCenter().bg(fill).role(.group).label(labelStr)
+            guard hidden > 0 else {
+                return bar.px(DiffLayout.columnAdvance).child(text(labelStr).font(k.ty.ui).color(k.c.textFaint))
+            }
             let w = max(24, gutterWidth - 2)
             let steps: [(DiffExpand, String, String)] = if gap.atStart {
                 [(.up, "\(prefix)-gap-\(gap.index)-up", "Show \(min(hidden, DiffLayout.expandStep)) more lines above")]
@@ -3170,7 +3203,7 @@ public struct DiffView<State>: Sendable {
                 ]
             }
             let btnH: Float = steps.count == 2 ? (height - 2) / 2 : height
-            var btnCol = El<State>(direction: .column).key("\(prefix)-gap-\(gap.index)-btns").w(w + 2).h(height).gap(2).bg(k.c.surfaceBase)
+            var btnCol = El<State>(direction: .column).key("\(prefix)-gap-\(gap.index)-btns").w(w + 2).h(height).gap(2).bg(k.c.bgBase)
             for (how, btnKey, a11yLabel) in steps {
                 let glyph = (how == .up) ? KitIcons.chevronUp : KitIcons.chevronDown
                 btnCol = btnCol.child(
@@ -3178,14 +3211,14 @@ public struct DiffView<State>: Sendable {
                         .key(btnKey)
                         .w(w).h(btnH)
                         .itemsCenter().justifyCenter()
-                        .bg(k.c.layer01)
+                        .bg(fill)
                         .hover(k.c.surfaceHover)
                         .role(.button)
                         .label(a11yLabel)
                         .child(icon(glyph, size: 12).color(k.c.textMuted))
-                        .onClick { [get, set] (s: inout State, _: inout Tx) in
+                        .onClick { [get, set] (s: inout State, tx: inout Tx) in
                             var d = get(s)
-                            d.expand(file: fileIndex, gapIndex: gap.index, direction: how)
+                            d.expand(file: fileIndex, gapIndex: gap.index, direction: tx.mods.shift ? .all : how)
                             set(&s, d)
                         }
                 )
@@ -3211,15 +3244,7 @@ public struct DiffView<State>: Sendable {
                 }
                 .child(text(labelStr).font(k.ty.caption()).color(k.c.textFaint))
 
-            return El<State>(direction: .row)
-                .key("\(prefix)-gap-\(gap.index)")
-                .wFull()
-                .h(height)
-                .itemsCenter()
-                .bg(k.c.layer01)
-                .borderSides(top: 1, bottom: 1, color: k.c.borderMuted)
-                .child(btnCol)
-                .child(wordsBtn)
+            return bar.child(btnCol).child(wordsBtn)
         }
 
         var bar = El<State>(direction: .row)
@@ -3228,7 +3253,7 @@ public struct DiffView<State>: Sendable {
             .px(12)
             .gap(8)
             .itemsCenter()
-            .bg(k.c.surfaceRaised)
+            .bg(fill)
             .borderSides(top: 1, bottom: 1, color: k.c.borderMuted)
 
         if gap.canStep && !gap.atStart {
@@ -3321,7 +3346,7 @@ public struct DiffView<State>: Sendable {
         file: Int,
         side: DiffSide,
         lineH: Float,
-        lineBg: Color,
+        colors: DiffRowPalette.Row,
         unifiedLine: DiffLine? = nil
     ) -> El<State> {
         let labelStr = number.map(String.init) ?? ""
@@ -3331,21 +3356,23 @@ public struct DiffView<State>: Sendable {
         let cell: El<State>
         if unifiedLine == nil, let point, let onCommentHandler {
             cell = numberCommentCell(
-                labelStr: labelStr, point: point, file: file, cellKey: cellKey, width: width, lineH: lineH, lineBg: lineBg,
+                labelStr: labelStr, point: point, file: file, cellKey: cellKey, width: width, lineH: lineH, ink: colors.number,
                 onCommentHandler: onCommentHandler
             )
         } else {
-            cell = numberLabelCell(labelStr: labelStr, cellKey: cellKey, width: width, lineH: lineH, lineBg: lineBg)
+            cell = numberLabelCell(labelStr: labelStr, cellKey: cellKey, width: width, lineH: lineH, ink: colors.number)
         }
-        guard let point else { return cell }
-        return attachNumberCellHandlers(cell, point: point, rowIdx: rowIdx, file: file, side: side, lineH: lineH)
+        // In unified mode the enclosing sticky gutter already paints this fill.
+        let painted = unifiedLine == nil ? cell.bg(colors.gutter) : cell
+        guard let point else { return painted }
+        return attachNumberCellHandlers(painted, point: point, rowIdx: rowIdx, file: file, side: side, lineH: lineH)
     }
 
     @inline(never)
-    private func numberLabelCell(labelStr: String, cellKey: String, width: Float, lineH: Float, lineBg: Color) -> El<State> {
+    private func numberLabelCell(labelStr: String, cellKey: String, width: Float, lineH: Float, ink: Color) -> El<State> {
         text(labelStr)
             .font(kit.ty.mono)
-            .color(kit.c.textFaint)
+            .color(ink)
             .key(cellKey)
             .w(width)
             .h(lineH)
@@ -3353,7 +3380,6 @@ public struct DiffView<State>: Sendable {
             .textAlign(.trailing)
             .itemsCenter()
             .justifyEnd()
-            .bg(lineBg)
             .shrink(0)
     }
 
@@ -3365,7 +3391,7 @@ public struct DiffView<State>: Sendable {
         cellKey: String,
         width: Float,
         lineH: Float,
-        lineBg: Color,
+        ink: Color,
         onCommentHandler: @escaping @Sendable (inout State, DiffLineRange, inout Tx) -> Void
     ) -> El<State> {
         El<State>(direction: .row)
@@ -3376,10 +3402,9 @@ public struct DiffView<State>: Sendable {
             .gap(4)
             .itemsCenter()
             .justifyEnd()
-            .bg(lineBg)
             .shrink(0)
             .child(commentButton(key: "\(cellKey)-plus", file: file, point: point, onComment: onCommentHandler))
-            .child(text(labelStr).font(kit.ty.mono).color(kit.c.textFaint))
+            .child(text(labelStr).font(kit.ty.mono).color(ink))
     }
 
     @inline(never)
@@ -3489,8 +3514,8 @@ public struct DiffView<State>: Sendable {
 
     private func gutterBar(_ kind: DiffLineKind?, height: Float) -> El<State> {
         let color: Color = switch kind {
-        case .addition: kit.c.success.fg
-        case .deletion: kit.c.danger.fg
+        case .addition: kit.c.success.icon
+        case .deletion: kit.c.danger.icon
         case .context, nil: .transparent
         }
         return El<State>(direction: .row).w(DiffLayout.barWidth).h(height).shrink(0).bg(color)
@@ -3598,23 +3623,11 @@ public struct DiffView<State>: Sendable {
         gutterDigits: Int,
         gutterWidth: Float,
         lineH: Float,
-        addLineBg: Color,
-        delLineBg: Color,
-        addWordBg: Color,
-        delWordBg: Color,
-        selBg: Color
+        palette: DiffRowPalette
     ) -> El<State> {
-        let baseBg: Color = switch line.kind {
-        case .addition: addLineBg
-        case .deletion: delLineBg
-        case .context: kit.c.surfaceBase
-        }
-        let side: DiffSide = (line.kind == .deletion) ? .old : .new
-        let selected = st.rowSelected(rowIdx, file: file, side: nil)
-        let rowBg = selected ? diffTintColor(baseBg, hue: selBg, t: 0.45) : baseBg
-
-        let changed = (line.kind == .deletion) ? intraOld : intraNew
-        let wordBg = (line.kind == .deletion) ? delWordBg : addWordBg
+        let side: DiffSide = line.kind == .deletion ? .old : .new
+        let colors = palette.row(line.kind, selected: st.rowSelected(rowIdx, file: file, side: nil))
+        let changed = line.kind == .deletion ? intraOld : intraNew
         let codeEl = codeBlock(
             cellKey: "\(prefix)-code-\(rowIdx)",
             state: st,
@@ -3622,7 +3635,7 @@ public struct DiffView<State>: Sendable {
             side: side,
             line: line,
             changed: changed,
-            wordBg: wordBg,
+            wordBg: colors.word,
             syntaxTheme: syntaxTheme,
             wrap: st.wraps
         )
@@ -3631,12 +3644,12 @@ public struct DiffView<State>: Sendable {
             .key("\(prefix)-gutter-\(rowIdx)")
             .minH(lineH)
             .selfStretch()
-            .bg(rowBg)
+            .bg(colors.gutter)
             .itemsStart()
             .shrink(0)
             .child(gutterBar(line.kind, height: lineH))
-            .child(numberCell(cellKey: "\(prefix)-o-\(rowIdx)", number: line.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, lineBg: rowBg, unifiedLine: line))
-            .child(numberCell(cellKey: "\(prefix)-n-\(rowIdx)", number: line.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, lineBg: rowBg, unifiedLine: line))
+            .child(numberCell(cellKey: "\(prefix)-o-\(rowIdx)", number: line.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, colors: colors, unifiedLine: line))
+            .child(numberCell(cellKey: "\(prefix)-n-\(rowIdx)", number: line.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, colors: colors, unifiedLine: line))
         let commentPoint = line.newLine.map { DiffLineRef(side: .new, line: $0) }
             ?? line.oldLine.map { DiffLineRef(side: .old, line: $0) }
         if let onCommentHandler, let point = commentPoint {
@@ -3655,7 +3668,7 @@ public struct DiffView<State>: Sendable {
             .label(DiffViewHelpers.rowLabel(line))
             .wFull()
             .minH(lineH)
-            .bg(rowBg)
+            .bg(colors.line)
             .itemsStart()
             .hover(kit.alpha(kit.c.textBase, kit.dark ? 0.06 : 0.035))
             .hoverGroup()
@@ -3676,35 +3689,31 @@ public struct DiffView<State>: Sendable {
         gutterDigits: Int,
         gutterWidth: Float,
         lineH: Float,
-        addLineBg: Color,
-        delLineBg: Color,
-        addWordBg: Color,
-        delWordBg: Color,
-        selBg: Color
+        palette: DiffRowPalette
     ) -> El<State> {
-        let oldBg = st.rowSelected(rowIdx, file: file, side: .old) ? diffTintColor(delLineBg, hue: selBg, t: 0.45) : delLineBg
-        let newBg = st.rowSelected(rowIdx, file: file, side: .new) ? diffTintColor(addLineBg, hue: selBg, t: 0.45) : addLineBg
+        let oldColors = palette.row(.deletion, selected: st.rowSelected(rowIdx, file: file, side: .old))
+        let newColors = palette.row(.addition, selected: st.rowSelected(rowIdx, file: file, side: .new))
 
-        let oldCode = codeBlock(cellKey: "\(prefix)-scode-o-\(rowIdx)", state: st, file: file, side: .old, line: oldLine, changed: oldChanged, wordBg: delWordBg, syntaxTheme: syntaxTheme, wrap: st.wraps)
-        let newCode = codeBlock(cellKey: "\(prefix)-scode-n-\(rowIdx)", state: st, file: file, side: .new, line: newLine, changed: newChanged, wordBg: addWordBg, syntaxTheme: syntaxTheme, wrap: st.wraps)
+        let oldCode = codeBlock(cellKey: "\(prefix)-scode-o-\(rowIdx)", state: st, file: file, side: .old, line: oldLine, changed: oldChanged, wordBg: oldColors.word, syntaxTheme: syntaxTheme, wrap: st.wraps)
+        let newCode = codeBlock(cellKey: "\(prefix)-scode-n-\(rowIdx)", state: st, file: file, side: .new, line: newLine, changed: newChanged, wordBg: newColors.word, syntaxTheme: syntaxTheme, wrap: st.wraps)
 
         let leftPane = El<State>(direction: .row)
             .wFrac(0.5).minW(0)
             .minH(lineH)
-            .bg(oldBg)
+            .bg(oldColors.line)
             .itemsStart()
-            .borderSides(right: 1, color: kit.c.borderMuted)
+            .borderSides(right: 1, color: kit.c.borderWeak)
             .child(gutterBar(.deletion, height: lineH))
-            .child(numberCell(cellKey: "\(prefix)-so-\(rowIdx)", number: oldLine.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, lineBg: oldBg))
+            .child(numberCell(cellKey: "\(prefix)-so-\(rowIdx)", number: oldLine.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, colors: oldColors))
             .child(oldCode)
 
         let rightPane = El<State>(direction: .row)
             .wFrac(0.5).minW(0)
             .minH(lineH)
-            .bg(newBg)
+            .bg(newColors.line)
             .itemsStart()
             .child(gutterBar(.addition, height: lineH))
-            .child(numberCell(cellKey: "\(prefix)-sn-\(rowIdx)", number: newLine.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, lineBg: newBg))
+            .child(numberCell(cellKey: "\(prefix)-sn-\(rowIdx)", number: newLine.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, colors: newColors))
             .child(newCode)
 
         return El<State>(direction: .row)
@@ -3724,9 +3733,7 @@ public struct DiffView<State>: Sendable {
         gutterDigits: Int,
         gutterWidth: Float,
         lineH: Float,
-        addLineBg: Color,
-        delLineBg: Color,
-        selBg: Color
+        palette: DiffRowPalette
     ) -> El<State> {
         let emptySide = { (sideKey: String, bg: Color) -> El<State> in
             El<State>(direction: .row)
@@ -3738,49 +3745,49 @@ public struct DiffView<State>: Sendable {
 
         switch line.kind {
         case .context:
-            let lBg = st.rowSelected(rowIdx, file: file, side: .old) ? diffTintColor(kit.c.surfaceBase, hue: selBg, t: 0.45) : kit.c.surfaceBase
-            let rBg = st.rowSelected(rowIdx, file: file, side: .new) ? diffTintColor(kit.c.surfaceBase, hue: selBg, t: 0.45) : kit.c.surfaceBase
+            let oldColors = palette.row(.context, selected: st.rowSelected(rowIdx, file: file, side: .old))
+            let newColors = palette.row(.context, selected: st.rowSelected(rowIdx, file: file, side: .new))
             let leftCode = codeBlock(cellKey: "\(prefix)-ccode-o-\(rowIdx)", state: st, file: file, side: .old, line: line, changed: [], wordBg: .transparent, syntaxTheme: syntaxTheme, wrap: st.wraps)
             let rightCode = codeBlock(cellKey: "\(prefix)-ccode-n-\(rowIdx)", state: st, file: file, side: .new, line: line, changed: [], wordBg: .transparent, syntaxTheme: syntaxTheme, wrap: st.wraps)
             let leftPane = El<State>(direction: .row)
-                .wFrac(0.5).minW(0).minH(lineH).bg(lBg).itemsStart().borderSides(right: 1, color: kit.c.borderMuted)
+                .wFrac(0.5).minW(0).minH(lineH).bg(oldColors.line).itemsStart().borderSides(right: 1, color: kit.c.borderWeak)
                 .child(gutterBar(.context, height: lineH))
-                .child(numberCell(cellKey: "\(prefix)-co-\(rowIdx)", number: line.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, lineBg: lBg))
+                .child(numberCell(cellKey: "\(prefix)-co-\(rowIdx)", number: line.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, colors: oldColors))
                 .child(leftCode)
             let rightPane = El<State>(direction: .row)
-                .wFrac(0.5).minW(0).minH(lineH).bg(rBg).itemsStart()
+                .wFrac(0.5).minW(0).minH(lineH).bg(newColors.line).itemsStart()
                 .child(gutterBar(.context, height: lineH))
-                .child(numberCell(cellKey: "\(prefix)-cn-\(rowIdx)", number: line.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, lineBg: rBg))
+                .child(numberCell(cellKey: "\(prefix)-cn-\(rowIdx)", number: line.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, colors: newColors))
                 .child(rightCode)
             return El<State>(direction: .row).key("\(prefix)-crow-\(rowIdx)").wFull()
                 .child(leftPane.label(DiffViewHelpers.rowLabel(line, side: .old)))
                 .child(rightPane.label(DiffViewHelpers.rowLabel(line, side: .new)))
 
         case .deletion:
-            let bg = st.rowSelected(rowIdx, file: file, side: .old) ? diffTintColor(delLineBg, hue: selBg, t: 0.45) : delLineBg
+            let colors = palette.row(line.kind, selected: st.rowSelected(rowIdx, file: file, side: .old))
             let code = codeBlock(cellKey: "\(prefix)-dcode-\(rowIdx)", state: st, file: file, side: .old, line: line, changed: [], wordBg: .transparent, syntaxTheme: syntaxTheme, wrap: st.wraps)
             let leftPane = El<State>(direction: .row)
-                .wFrac(0.5).minW(0).minH(lineH).bg(bg).itemsStart().borderSides(right: 1, color: kit.c.borderMuted)
+                .wFrac(0.5).minW(0).minH(lineH).bg(colors.line).itemsStart().borderSides(right: 1, color: kit.c.borderWeak)
                 .child(gutterBar(.deletion, height: lineH))
-                .child(numberCell(cellKey: "\(prefix)-do-\(rowIdx)", number: line.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, lineBg: bg))
+                .child(numberCell(cellKey: "\(prefix)-do-\(rowIdx)", number: line.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, colors: colors))
                 .child(code)
             let row = El<State>(direction: .row).key("\(prefix)-drow-\(rowIdx)").wFull()
             let content = leftPane.label(DiffViewHelpers.rowLabel(line, side: .old))
             if st.singleColumn(file: file) == .old { return row.child(content.wFull()) }
-            return row.child(content).child(emptySide("\(prefix)-dempty-\(rowIdx)", kit.c.surfaceRaised))
+            return row.child(content).child(emptySide("\(prefix)-dempty-\(rowIdx)", palette.empty))
 
         case .addition:
-            let bg = st.rowSelected(rowIdx, file: file, side: .new) ? diffTintColor(addLineBg, hue: selBg, t: 0.45) : addLineBg
+            let colors = palette.row(line.kind, selected: st.rowSelected(rowIdx, file: file, side: .new))
             let code = codeBlock(cellKey: "\(prefix)-acode-\(rowIdx)", state: st, file: file, side: .new, line: line, changed: [], wordBg: .transparent, syntaxTheme: syntaxTheme, wrap: st.wraps)
             let rightPane = El<State>(direction: .row)
-                .wFrac(0.5).minW(0).minH(lineH).bg(bg).itemsStart()
+                .wFrac(0.5).minW(0).minH(lineH).bg(colors.line).itemsStart()
                 .child(gutterBar(.addition, height: lineH))
-                .child(numberCell(cellKey: "\(prefix)-an-\(rowIdx)", number: line.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, lineBg: bg))
+                .child(numberCell(cellKey: "\(prefix)-an-\(rowIdx)", number: line.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, colors: colors))
                 .child(code)
             let row = El<State>(direction: .row).key("\(prefix)-arow-\(rowIdx)").wFull()
             let content = rightPane.label(DiffViewHelpers.rowLabel(line, side: .new))
             if st.singleColumn(file: file) == .new { return row.child(content.wFull()) }
-            return row.child(emptySide("\(prefix)-aempty-\(rowIdx)", kit.c.surfaceRaised).borderSides(right: 1, color: kit.c.borderMuted))
+            return row.child(emptySide("\(prefix)-aempty-\(rowIdx)", palette.empty).borderSides(right: 1, color: kit.c.borderWeak))
                 .child(content)
         }
     }

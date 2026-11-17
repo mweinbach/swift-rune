@@ -697,6 +697,41 @@ struct DiffParityTests {
         #expect(rt.element(byKey: "bin") != nil)
     }
 
+    @Test("Line-info fold buttons expand one step or the whole gap with Shift")
+    func lineInfoFoldModifiers() throws {
+        let old = (1...90).map { "line \($0)" }
+        var new = old
+        new[64] = "edited"
+        let file = FileDiff.between(old: old.joined(separator: "\n"), new: new.joined(separator: "\n"),
+                                    path: "fold.txt", context: 1)
+        for shift in [false, true] {
+            let rt = Runtime(state: DiffState(diff: file), viewport: Vec2(640, 400)) { s, cx in
+                DiffView<DiffState>(key: "fold", kit: .neutral(dark: true), get: { $0 }, set: { $0 = $1 })
+                    .foldRow(.lineInfo).build(state: s, cx: cx)
+            }
+            rt.frame(at: 0)
+            let hidden = try #require(rt.state.hidden(gap: 0))
+            #expect(hidden > DiffLayout.expandStep)
+            let button = try #require(rt.element(byKey: "fold-gap-0-up"))
+            let point = Vec2(button.rect[0] + button.rect[2] / 2, button.rect[1] + button.rect[3] / 2)
+            let mods = Mods(shift: shift)
+            rt.pointerDown(at: point, mods: mods, at: 0.05)
+            rt.pointerUp(at: point, mods: mods, at: 0.10)
+            rt.frame(at: 0.11)
+            #expect(rt.state.hidden(gap: 0) == (shift ? 0 : hidden - DiffLayout.expandStep))
+        }
+
+        let patch = "diff --git a/fold.txt b/fold.txt\n--- a/fold.txt\n+++ b/fold.txt\n@@ -50 +50 @@\n-old\n+new\n"
+        let parsed = try #require(FileDiff.parse(patch).first)
+        let rt = Runtime(state: DiffState(diff: parsed), viewport: Vec2(640, 400)) { s, cx in
+            DiffView<DiffState>(key: "patch", kit: .neutral(dark: true), get: { $0 }, set: { $0 = $1 })
+                .foldRow(.lineInfo).build(state: s, cx: cx)
+        }
+        rt.frame(at: 0)
+        #expect(rt.element(byKey: "patch-gap-0")?.label == "0 unmodified lines")
+        #expect(rt.element(byKey: "patch-gap-0-up") == nil)
+    }
+
     // MARK: - Golden Tests Ported from `crates/rune-kit/tests/diff.rs`
 
     @Test("a_patch_parses_renames_modes_binaries_and_missing_newlines (tests/diff.rs)")
