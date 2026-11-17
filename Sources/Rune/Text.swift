@@ -5700,7 +5700,12 @@ public final class TextSystem: @unchecked Sendable {
             }
         }
 
-        let maxLineWidthPx = visualLines.reduce(Float(0)) { max($0, $1.insetsPx.x + $1.widthPx) }
+        var maxLineWidthPx: Float = 0
+        var measuredWidthPx: Float = 0
+        for line in visualLines {
+            maxLineWidthPx = max(maxLineWidthPx, line.insetsPx.x + line.widthPx)
+            measuredWidthPx = max(measuredWidthPx, line.insetsPx.x + (line.fittingWidthPx ?? line.widthPx))
+        }
         let containerWidthPx = maxWidth.map { max(maxLineWidthPx, $0 * scale) } ?? maxLineWidthPx
         let ascentPx = Float(baseAscentPx)
         let descentPx = Float(baseDescentPx)
@@ -6064,7 +6069,6 @@ public final class TextSystem: @unchecked Sendable {
         let backgroundsOut = Self.mergeContiguousBackgrounds(rawBackgroundsOut)
         let totalHeightPt = Self.specLineHeight(lineCount: max(1, visualLines.count), lineHeightPt: lhPt, scale: scale, exact: style.exactLines, extraPt: grownExtraPx * invS)
         // A text box is as wide as its widest line to a 64th of a device pixel (`text_width`, #934).
-        let measuredWidthPx = visualLines.reduce(Float(0)) { max($0, $1.insetsPx.x + ($1.fittingWidthPx ?? $1.widthPx)) }
         let totalWidthPt = TextBoxGeometry.textWidth(measuredWidthPx) / scale
         var shapedOut = ShapedText(
             size: Vec2(totalWidthPt, totalHeightPt),
