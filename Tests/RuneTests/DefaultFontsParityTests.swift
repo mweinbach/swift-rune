@@ -36,8 +36,15 @@ struct DefaultFontsParityTests {
         _ = try #require(first)
         let before = try #require(host.runtime.textSystem.layoutKeys().first { $0.authText == content })
         let commits = host.runtime.viewCommitCount
+        let otherHost = WebAppHost(spec: AppSpec(title: "Another document", size: Vec2(300, 100), state: 0) { _, _ in
+            text(content)
+        })
+        _ = try WebBrowserSession(otherHost).renderFrame(at: 0)
+        let otherEpoch = otherHost.runtime.textSystem.currentFontEpoch
         browser.fontsChanged()
         #expect(host.runtime.hasPendingCommit)
+        #expect(otherHost.runtime.textSystem.currentFontEpoch == otherEpoch)
+        #expect(!otherHost.runtime.hasPendingCommit)
         let next = try browser.renderFrame(at: 1)
         _ = try #require(next)
         let after = try #require(host.runtime.textSystem.layoutKeys().first { $0.authText == content })

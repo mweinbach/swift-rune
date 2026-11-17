@@ -89,7 +89,7 @@ final class WebBrowserSession {
         cancelPreparedText = { host.runtime.cancelPreparedText() }
         spellingChanged = { host.runtime.markNeedsCommit() }
         fontsChanged = {
-            FontFamiliesRegistry.bumpEpoch()
+            host.runtime.textSystem.invalidateWindowFontFaces()
             host.runtime.invalidateFontFamilyLayout(at: host.runtime.currentTime)
         }
         let popup = WebPopupSession(host)

@@ -3820,6 +3820,14 @@ public final class TextSystem: @unchecked Sendable {
         _ = followWindowFontFamilies()
     }
 
+    /// A document loaded new faces for its current family slots.
+    internal func invalidateWindowFontFaces() {
+        lock.lock()
+        ownFamilies = FontFamiliesRegistry.makeState(sans: ownFamilies.sans, mono: ownFamilies.mono)
+        lock.unlock()
+        syncGlobalFamiliesIfNeeded()
+    }
+
     internal func chooseWindowFontFamilies(sans: String, mono: String) -> Bool {
         FontFamiliesRegistry.chooseWindowFamilies(sans: sans, mono: mono)
         return followWindowFontFamilies()
