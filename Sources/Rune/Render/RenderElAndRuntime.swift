@@ -1302,6 +1302,14 @@ extension Runtime {
                 )
                 hitScopes.append(scope)
             }
+            let carried = carriedScroll(for: node, scales: newPresentedScales) { newHitGeometries[$0]?.turn }
+            let reportedScroll: Vec2
+            if el.layout.scrollAxes.isEmpty {
+                reportedScroll = carried
+            } else {
+                let offset = scrollOffsets[node.path] ?? .zero
+                reportedScroll = Vec2(offset.x, offset.y + (slice2State.scrollExtraYByPath[node.path] ?? 0))
+            }
             newElements.append(ElementInfo(
                 path: node.path,
                 key: node.key,
@@ -1331,7 +1339,8 @@ extension Runtime {
                 exiting: isExiting,
                 hover: isExiting ? 0 : (hoverFrac > 0 ? hoverFrac : (hovered ? 1 : 0)),
                 press: pressed ? 1 : 0,
-                scrolled: [scrollOffsets[node.path]?.x ?? 0, scrollOffsets[node.path]?.y ?? 0],
+                scrolled: [reportedScroll.x, reportedScroll.y],
+                carriedScrolled: [carried.x, carried.y],
                 caret: nil,
                 stuck: abs(stickyShift.y) >= abs(stickyShift.x) ? stickyShift.y : stickyShift.x
             ))

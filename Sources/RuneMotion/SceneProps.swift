@@ -48,7 +48,7 @@ extension Scene {
     }
 
     /// Moves the scene's coordinates with its scrolling viewport, retaining progress and velocity.
-    package mutating func translateFrame(_ id: NodeId, by localDelta: Vec2, screenDelta: Vec2) {
+    package mutating func translateFrame(_ id: NodeId, by localDelta: Vec2, screenDelta: Vec2, carryTakeoff: Bool = true) {
         guard localDelta != .zero || screenDelta != .zero, let i = slot(id) else { return }
         if localDelta != .zero {
             nodes[i].frame = nodes[i].frame.translated(localDelta)
@@ -59,7 +59,7 @@ extension Scene {
             nodes[i].dirty = true
         }
         if var path = nodes[i].path {
-            path.start = path.start.translated(screenDelta)
+            if carryTakeoff { path.start = path.start.translated(screenDelta) }
             path.endLocal = path.endLocal.translated(localDelta)
             path.origin = Vec2(path.origin.x + screenDelta.x - localDelta.x, path.origin.y + screenDelta.y - localDelta.y)
             nodes[i].path = path

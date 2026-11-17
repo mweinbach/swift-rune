@@ -968,6 +968,7 @@ public final class Runtime<State> {
     private var committedMatchedByFlightId: [String: MatchedSeenSnapshot] = [:]
     internal var activeFlightIds: Set<NodeId> = []
     internal var launchedFlightIds: Set<NodeId> = []
+    internal var launchScrollById: [NodeId: LaunchScroll] = [:]
     internal var unclippedMatchedFlightIds: Set<NodeId> = []
     private struct PendingFlightRequest {
         var source: String
@@ -2146,6 +2147,7 @@ public final class Runtime<State> {
         endUnseenExits(on: &scene, activeFlightIds: activeFlightIds)
         placeTailHandoffFrames()
         var frameOut = scene.frame(at: animNow)
+        presentLaunchedRowHeights(in: &frameOut)
         if !slice2State.liveContentSlides.slides.isEmpty {
             applyRowShifts(Dictionary(uniqueKeysWithValues: slice2State.liveContentSlides.shifts), in: &frameOut)
         }
@@ -2238,6 +2240,9 @@ public final class Runtime<State> {
         }
         launchedFlightIds = launchedFlightIds.filter {
             activeIds.contains($0) && (scene.isEdgeAnimating($0) || scene.hasEnteringAncestor($0))
+        }
+        if !launchScrollById.isEmpty {
+            launchScrollById = launchScrollById.filter { launchedFlightIds.contains($0.key) }
         }
         unclippedMatchedFlightIds = unclippedMatchedFlightIds.filter {
             activeIds.contains($0) && (scene.isEdgeAnimating($0) || scene.hasEnteringAncestor($0))
@@ -2369,6 +2374,7 @@ public final class Runtime<State> {
             if commitCut {
                 activeFlightIds.removeAll()
                 launchedFlightIds.removeAll()
+                launchScrollById.removeAll()
                 unclippedMatchedFlightIds.removeAll()
             }
             let sincePass = memo.nextPass()
@@ -2441,6 +2447,7 @@ public final class Runtime<State> {
         var measuredGrowthRows: [String: RuntimeGrowthEntry]?
         var measuredGrowthStacks: [String: RuntimeGrowthStackState]?
         var naturalJoinedRowTargets: [NodeId: MotionRect] = [:]
+        var naturalLaunchTargets: [NodeId: MotionRect] = [:]
         var foldOpens: [PendingFoldOpen] = []
         var scrollCuts: [(viewport: String, cut: Float)] = []
         var foldHeaderUpdates: [(foldKey: String, headerPath: String)] = []
@@ -2942,6 +2949,8 @@ public final class Runtime<State> {
         var loopSpecs: [(id: NodeId, spec: LoopSpec)] = []
         var ancestorInstants: [Bool] = []
         var warnings: [String] = []
+        var naturalLaunchTargets: [NodeId: MotionRect] = [:]
+        let measureLaunches = !launchedFlightIds.isEmpty || !pendingLaunches.isEmpty
         let fullWindowClip = MotionRect.fromXYWH(0, 0, viewport.x, viewport.y)
 
         let rootResolvedKey: String? = layoutRoot.keyId
@@ -3062,6 +3071,11 @@ public final class Runtime<State> {
             }()
 
             let rawLocalRect = solved.layout.localRect
+            // A launch re-aims when layout moves its destination or a containing row.
+            // Intermediate growth clamps and scrolling change only its projected endpoint.
+            if measureLaunches {
+                naturalLaunchTargets[nid] = item.naturalLayout?.layout.localRect ?? rawLocalRect
+            }
             let localRect = closingStackExtraH > 0
                 ? MotionRect.fromXYWH(rawLocalRect.x, rawLocalRect.y, rawLocalRect.width, rawLocalRect.height + closingStackExtraH)
                 : rawLocalRect
@@ -3369,6 +3383,8 @@ public final class Runtime<State> {
             let rowGrowthKey = el.foldGlideSpec != nil ? "fold:\(path)" : "growth:\(path)"
             let hasGrowthSlide = growthRows[rowGrowthKey]?.contentSlide != nil
             let isRunningFlight = !hasGrowthSlide && (activeFlightIds.contains(nid) || launchedFlightIds.contains(nid))
+            // A launch chooses its travel after checking whether it can land this commit.
+            let needsFlightLayout = isRunningFlight && !launchedFlightIds.contains(nid)
             let followsWindow = pendingResizeRelayout && !isRunningFlight && !scene.store.isAnimating(nid, Props.FRAME)
             var layoutAnimSpec: LayoutAnim?
             let isStackContainer = (el.growthSpec != nil) || (el.virtualEstimate != nil)
@@ -3397,7 +3413,7 @@ public final class Runtime<State> {
                 layoutAnimSpec = (el.layoutAnim != nil || selfInRow == .horizontal) ? resolved : nil
             } else if selfInRow == .snaps {
                 layoutAnimSpec = el.layoutAnim != nil ? .instant : nil
-            } else if el.layoutAnim == nil, commitMotion == nil, !isRunningFlight, el.virtualEstimate == nil {
+            } else if el.layoutAnim == nil, commitMotion == nil, !needsFlightLayout, el.virtualEstimate == nil {
                 // Ordinary layout changes spring on the inherited element motion.
                 // Virtual containers, explicit transactions and flights own their placement.
                 layoutAnimSpec = LayoutAnim(spring: nodeStyleSpring ?? MotionTokens.DEFAULT)
@@ -3428,7 +3444,7 @@ public final class Runtime<State> {
             if item.parentHasGrowth && !commitKind.lands && offsetAnim == nil {
                 offsetAnim = .spring(styleSp ?? MotionTokens.SETTLE)
             }
-            if layoutAnimSpec == nil && !selfInstantLayoutOrStyle && !commitCut && !reducedMotion && !commitKind.lands && isRunningFlight {
+            if layoutAnimSpec == nil && !selfInstantLayoutOrStyle && !commitCut && !reducedMotion && !commitKind.lands && needsFlightLayout {
                 layoutAnimSpec = LayoutAnim(spring: el.flightSpring ?? el.styleSpring ?? MotionTokens.SETTLE, travel: .screen)
             }
             if el.isWidthLeads && !selfInstantLayoutOrStyle && !followsWindow {
@@ -3591,6 +3607,7 @@ public final class Runtime<State> {
             textLayouts: textLayoutCollector.map
         )
         pass.naturalJoinedRowTargets = naturalJoinedRowTargets
+        pass.naturalLaunchTargets = naturalLaunchTargets
         return pass
     }
 
@@ -3733,6 +3750,7 @@ public final class Runtime<State> {
                 hover: 0,
                 press: 0,
                 scrolled: owner.scrolled,
+                carriedScrolled: owner.carriedScrolled,
                 caret: nil,
                 secure: owner.secure,
                 disabled: node.el.a11yDisabled,
@@ -4444,6 +4462,7 @@ public final class Runtime<State> {
             pendingUnclippedFlights = false
             activeTextFlights.removeAll()
             launchedFlightIds.removeAll()
+            launchScrollById.removeAll()
             unclippedMatchedFlightIds.removeAll()
         } else if reducedMotion || forceInitialSettle {
             pendingLaunches.removeAll()
@@ -4466,11 +4485,27 @@ public final class Runtime<State> {
                     }
                     guard isFreshOrExiting(dstNode.nodeId) else { continue }
                     let firstTextOff = firstTextDescendantOffset(under: dstNode, in: pass.nodes)
+                    // A launch captures the source in window coordinates. Its scene path
+                    // is evaluated before the destination parent's still paint transform.
+                    var source = Vec2(srcTextOriginRect.x, srcTextOriginRect.y)
+                    var parent = dstNode.parentIndex
+                    while let index = parent {
+                        let ancestor = pass.nodes[index]
+                        if presentedScaleMotionById[ancestor.nodeId] == .still,
+                           let drawn = presentedRectByPath[ancestor.path],
+                           let scale = presentedScaleByPath[ancestor.path], scale.x > 0, scale.y > 0,
+                           let sceneRect = lastFrameOutput?.byId[ancestor.nodeId]?.rect {
+                            source = Vec2(sceneRect.x + (source.x - drawn.x) / scale.x,
+                                          sceneRect.y + (source.y - drawn.y) / scale.y)
+                            break
+                        }
+                        parent = ancestor.parentIndex
+                    }
                     let startRect = MotionRect.fromXYWH(
-                        srcTextOriginRect.x - firstTextOff.x,
-                        srcTextOriginRect.y - firstTextOff.y,
+                        source.x - firstTextOff.x,
+                        source.y - firstTextOff.y,
                         dstNode.targetRect.width,
-                        dstNode.targetRect.height
+                        pass.naturalLaunchTargets[dstNode.nodeId]?.height ?? dstNode.targetRect.height
                     )
                     if let supersededId = matchedStarts[dstNode.nodeId]?.fromId,
                        supersededId != req.sourceNodeId,
@@ -4491,6 +4526,7 @@ public final class Runtime<State> {
                     }
                     activeFlightIds.insert(dstNode.nodeId)
                     launchedFlightIds.insert(dstNode.nodeId)
+                    launchScrollById[dstNode.nodeId] = LaunchScroll(launchTakeoffScroll(for: dstNode, in: pass.nodes))
                 }
                 if !deferredLaunches.isEmpty {
                     pendingLaunches.append(contentsOf: deferredLaunches)
@@ -4623,6 +4659,7 @@ public final class Runtime<State> {
             }
             activeFlightIds.subtract(extraSet)
             launchedFlightIds.subtract(extraSet)
+            for id in extraSet { launchScrollById.removeValue(forKey: id) }
             unclippedMatchedFlightIds.subtract(extraSet)
         } else {
             applyChildExitHooks(childExitOverrides, matchedStarts: matchedStarts, to: &scene)
@@ -4789,6 +4826,65 @@ public final class Runtime<State> {
                 if !node.el.layout.scrollAxes.isEmpty {
                     let cur = scrollOffsets[node.path] ?? .zero
                     scrollStore.snap(NodeId.hash("scroll:" + node.path), Props.SCROLL, to: cur)
+                }
+            }
+        }
+        if !launchScrollById.isEmpty {
+            // Decide against the previous layout before this commit moves the destination.
+            let near = 0.25 / max(pixelScale, 1)
+            let readyToLand = launchedFlightIds.filter { id in
+                guard let lead = scene.pathLead(id) else { return false }
+                let position = lead[0], speed = lead[1]
+                return max(abs(position.x), abs(position.y)) <= near
+                    && max(abs(speed.x), abs(speed.y)) / 60 <= near
+            }
+            scene.setTime(scaledCommitNow)
+            let slidingRows = Set(reorderedSlides.map(\.id))
+            for id in launchedFlightIds {
+                guard let node = pass.byId[id], let target = pass.naturalLaunchTargets[id],
+                      var launch = launchScrollById[id] else { continue }
+                let i = node.index
+                let was = launch.layoutTarget
+                var ancestorSlid = false
+                var parent = node.parentIndex
+                while let p = parent {
+                    let ancestor = pass.nodes[p]
+                    if let origin = pass.naturalLaunchTargets[ancestor.nodeId]?.origin {
+                        if let old = launch.ancestorOrigins[ancestor.nodeId], let anim = specs[p].layoutAnim,
+                           (anim.x != .instant && origin.x != old.x) || (anim.y != .instant && origin.y != old.y) {
+                            ancestorSlid = true
+                        }
+                        launch.ancestorOrigins[ancestor.nodeId] = origin
+                    }
+                    if slidingRows.contains(ancestor.nodeId) { ancestorSlid = true }
+                    parent = ancestor.parentIndex
+                }
+                launch.layoutTarget = target
+                launchScrollById[id] = launch
+                let instantLayout = commitKind.snaps || node.el.hasInstantChanges || pass.ancestorInstants[i]
+                let retainsFlight = !instantLayout || (keepsFlights && was == target && !node.el.hasInstantChanges)
+                if !commitCut && !commitKind.lands && !reducedMotion && !concealSnapIndices.contains(i) &&
+                    (matchedStarts[id] != nil || retainsFlight) {
+                    let reaim = was != nil && matchedStarts[id] == nil && (was != target || ancestorSlid)
+                    if reaim && readyToLand.contains(id) {
+                        scene.landPath(id)
+                        activeFlightIds.remove(id)
+                        launchedFlightIds.remove(id)
+                        launchScrollById.removeValue(forKey: id)
+                        continue
+                    }
+                    // Growth reveals the natural box at paint time. Its mask must not resize the spring.
+                    specs[i].rect.bottom = specs[i].rect.top + target.height
+                    if reaim {
+                        foldLaunchScroll(id)
+                        let spring = node.el.styleSpring ?? specs[i].styleSpring ?? MotionTokens.DEFAULT
+                        let layout = specs[i].layoutAnim ?? LayoutAnim(spring: spring)
+                        specs[i].layoutAnim = layout.x == .instant || layout.y == .instant
+                            ? LayoutAnim(spring: spring, travel: .screen) : layout.screen()
+                        specs[i].launchLayout = .reaim
+                    } else {
+                        specs[i].launchLayout = .projectEndpoint
+                    }
                 }
             }
         }
@@ -5275,7 +5371,7 @@ public final class Runtime<State> {
             let nid = flatNodes[i].nodeId
             let parentDelta = parentIdx.map { shifts[$0].world } ?? .zero
             let localDelta = Vec2(worldDelta.x - parentDelta.x, worldDelta.y - parentDelta.y)
-            scene.translateFrame(nid, by: localDelta, screenDelta: worldDelta)
+            scene.translateFrame(nid, by: localDelta, screenDelta: worldDelta, carryTakeoff: !launchedFlightIds.contains(nid))
             nodeById[nid] = flatNodes[i]
             exitingSnapshots[nid] = flatNodes[i]
             if i < lastCommittedSpecs.count {
@@ -7179,30 +7275,7 @@ public final class Runtime<State> {
             if !flatFocusWithin, !(isPressed && el.pressBg != nil), let hBg = el.hoverBg, hoverFrac > 0.0005 {
                 fillColor = blendColorOver(bottom: fillColor, top: hBg.scaleAlpha(hoverFrac), srgb: srgbBlend)
             }
-            let carriedScrolled: Vec2 = {
-                var sum = Vec2.zero
-                var cur = snap.parentIndex
-                while let pIdx = cur, flatNodes.indices.contains(pIdx) {
-                    let pNode = flatNodes[pIdx]
-                    if let off = scrollOffsets[pNode.path] {
-                        // Transform scroll offsets from the scroll viewport's content space
-                        // into window space using ancestor scales and turns (`elements.rs:195-202,273-276`).
-                        let s = newScaleByPath[pNode.path] ?? Vec2(1, 1)
-                        var dx = off.x * s.x
-                        var dy = (off.y + (slice2State.scrollExtraYByPath[pNode.path] ?? 0)) * s.y
-                        if let t = newTurnByPath[pNode.path] {
-                            let rx = t.a * dx + t.b * dy
-                            let ry = t.c * dx + t.d * dy
-                            dx = rx
-                            dy = ry
-                        }
-                        sum.x += dx
-                        sum.y += dy
-                    }
-                    cur = pNode.parentIndex
-                }
-                return sum
-            }()
+            let carriedScrolled = carriedScroll(for: snap, scales: newScaleByPath) { newTurnByPath[$0] }
             let scrolled: Vec2 = {
                 if !el.layout.scrollAxes.isEmpty {
                     let offset = scrollOffsets[snap.path] ?? .zero

@@ -233,6 +233,7 @@ public struct NodeSpec: Sendable, Equatable {
     public var fill: MotionColor?
     public var border: MotionColor?
     public var layoutAnim: LayoutAnim?
+    package var launchLayout: LaunchLayoutUpdate?
     public var styleSpring: Spring?
     public var colorSpring: Spring?
     public var animateOffset: Bool
@@ -552,10 +553,35 @@ public struct FrameOutput: Sendable {
     }
 }
 
+package enum LaunchLayoutUpdate: Equatable, Sendable {
+    case projectEndpoint
+    case reaim
+}
+
 internal struct ScreenPath: Sendable {
     var start: MotionRect
     var endLocal: MotionRect
     var origin: Vec2
+}
+
+/// The rate of the projected endpoint between frames. A launch retarget inherits
+/// this part of its drawn velocity in addition to the rate of its travel spring.
+internal struct LaunchEndpoint: Sendable {
+    var at: Double
+    var edges: SIMD4<Float>
+    var velocity = SIMD4<Float>.zero
+
+    init(at: Double, rect: MotionRect) {
+        self.at = at
+        edges = SIMD4(rect.left, rect.top, rect.right, rect.bottom)
+    }
+
+    mutating func sample(at now: Double, rect: MotionRect) {
+        let next = SIMD4(rect.left, rect.top, rect.right, rect.bottom)
+        if now > at { velocity = (next - edges) / Float(now - at) }
+        at = now
+        edges = next
+    }
 }
 
 internal struct SceneDual: Sendable {
@@ -631,6 +657,7 @@ public struct Scene: Sendable {
     internal var exitedCarry = Carry<NodeId>()
     internal var toRemove: [UInt32] = []
     internal var travelling: [UInt32] = []
+    internal var launchEndpoints: [NodeId: LaunchEndpoint] = [:]
     internal var trace: MotionTrace? = nil
     internal var intents: [(NodeId, UInt32, Float)] = []
     internal var keep: Bool = false
@@ -812,7 +839,8 @@ public struct Scene: Sendable {
         _ frame: MotionRect,
         _ anim: LayoutAnim,
         drawnOffset: Vec2,
-        drawnVelocity: Vec2
+        drawnVelocity: Vec2,
+        forceScreenRetarget: Bool = false
     ) {
         guard let i = slot(id) else { return }
         let old = nodes[i].frame
@@ -841,7 +869,7 @@ public struct Scene: Sendable {
 
         if anim.travel == .screen && !store.reducedMotion {
             let destOrigin = parentTargetOrigin(i)
-            if let path = nodes[i].path,
+            if !forceScreenRetarget, let path = nodes[i].path,
                nodes[i].frame == frame,
                path.endLocal == frame,
                abs(path.origin.x - destOrigin.x) < 1e-4,
@@ -853,7 +881,12 @@ public struct Scene: Sendable {
             if let path = nodes[i].path {
                 let e = pathDual(i, path: path, origin: path.origin)
                 curPos = (e.0.x, e.1.x, e.2.x, e.3.x)
-                curVel = (e.0.v, e.1.v, e.2.v, e.3.v)
+                if forceScreenRetarget, let motion = launchEndpoints[id], let travel = get(id, Props.TRAVEL) {
+                    curVel = (e.0.v + travel.x * motion.velocity[0], e.1.v + travel.y * motion.velocity[1],
+                              e.2.v + travel.x * motion.velocity[2], e.3.v + travel.y * motion.velocity[3])
+                } else {
+                    curVel = (e.0.v, e.1.v, e.2.v, e.3.v)
+                }
             } else {
                 (curPos, curVel) = exactWorld(i)
             }
@@ -1121,6 +1154,9 @@ public struct Scene: Sendable {
             }
             let po = parentTargetOrigin(i)
             nodes[i].path?.origin = po
+            if !launchEndpoints.isEmpty, let path = nodes[i].path {
+                launchEndpoints[nodes[i].id]?.sample(at: store.now, rect: path.endLocal.translated(po))
+            }
             k += 1
         }
 
@@ -1678,6 +1714,7 @@ public struct Scene: Sendable {
         let id = nodes[i].id
         unlinkNodeSlot(i)
         travelling.removeAll { Int($0) == i }
+        launchEndpoints.removeValue(forKey: id)
         store.removeNode(id)
         index.removeValue(forKey: id.rawValue)
         nodes[i].alive = false
@@ -1823,10 +1860,17 @@ public struct Scene: Sendable {
                             velocity: curVel,
                             anim: la
                         )
+                    } else if !cut, spec.launchLayout == .projectEndpoint, var path = nodes[existingIdx].path {
+                        // Scroll and growth can move the destination while the takeoff stays in window space.
+                        nodes[existingIdx].frame = localFrame
+                        path.endLocal = localFrame
+                        path.origin = parentTargetOrigin(existingIdx)
+                        nodes[existingIdx].path = path
                     } else if cut || spec.layoutAnim == nil {
                         landFrame(spec.id, localFrame)
                     } else if let la = spec.layoutAnim {
-                        setFrame(spec.id, localFrame, la)
+                        setFrameDrawn(spec.id, localFrame, la, drawnOffset: .zero, drawnVelocity: .zero,
+                                      forceScreenRetarget: spec.launchLayout == .reaim)
                     }
                 }
 
@@ -1969,6 +2013,10 @@ public struct Scene: Sendable {
                 }
             }
             if let committedSlot = slot(spec.id) {
+                if spec.launchLayout != nil, let path = nodes[committedSlot].path,
+                   spec.launchLayout == .reaim || launchEndpoints[spec.id] == nil {
+                    launchEndpoints[spec.id] = LaunchEndpoint(at: now, rect: path.endLocal.translated(path.origin))
+                }
                 let pIdx = nodes[committedSlot].parent
                 if orderedByParent[pIdx] == nil {
                     parentKeysOrder.append(pIdx)
@@ -2079,6 +2127,7 @@ public struct Scene: Sendable {
         order.removeAll(keepingCapacity: true)
         orderDirty = false
         travelling.removeAll(keepingCapacity: true)
+        launchEndpoints.removeAll(keepingCapacity: true)
         store.clear()
         hasCommittedOnce = false
         commit(liveSpecs, at: now, initialCut: true)
