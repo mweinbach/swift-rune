@@ -279,15 +279,19 @@ public final class MetalRenderer {
 
     private func validate(_ scene: RefScene) throws {
         try MetalTextureLimits.validate(width: scene.width, height: scene.height, resource: "render target", on: device)
-        try scene.validate()
         for page in 0..<max(1, scene.glyphPages.count) {
-            let atlas = scene.glyphAtlas(forPage: page)
-            try MetalTextureLimits.validate(width: atlas.width, height: atlas.height, resource: "glyph atlas page \(page)", on: device)
+            let single = scene.glyphPages.isEmpty
+            let atlas = single ? scene.glyphs : scene.glyphPages[page]
+            try MetalTextureLimits.validate(width: atlas.width, height: atlas.height,
+                                            resource: single ? "glyph atlas" : "glyph atlas page \(page)", on: device)
         }
         for page in 0..<max(1, scene.imagePages.count) {
-            let atlas = scene.imageAtlas(forPage: page)
-            try MetalTextureLimits.validate(width: atlas.width, height: atlas.height, resource: "image atlas page \(page)", on: device)
+            let single = scene.imagePages.isEmpty
+            let atlas = single ? scene.images : scene.imagePages[page]
+            try MetalTextureLimits.validate(width: atlas.width, height: atlas.height,
+                                            resource: single ? "image atlas" : "image atlas page \(page)", on: device)
         }
+        try scene.validate()
     }
 
     /// A frame may be encoded before an earlier submission completes. Never overwrite a texture

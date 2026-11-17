@@ -49,6 +49,20 @@ struct MetalReferenceLimitsTests {
         }
     }
 
+    @Test func validatesSparsePageDimensionsBeforeChoosingFallbackTextures() throws {
+        let renderer = try MetalRenderer()
+        let maximum = MetalTextureLimits.max2D(on: renderer.device)
+        let width = maximum + 1
+        let glyphs = [R8Atlas(), R8Atlas(width: width, height: 1, texels: [])]
+        #expect(throws: MetalTextureSizeError.dimensions(resource: "glyph atlas page 1", width: width, height: 1, maximum: maximum)) {
+            try renderer.renderOffscreen(RefScene(width: 1, height: 1, glyphPages: glyphs))
+        }
+        let images = [RGBA8Atlas(), RGBA8Atlas(width: width, height: 1, texels: [])]
+        #expect(throws: MetalTextureSizeError.dimensions(resource: "image atlas page 1", width: width, height: 1, maximum: maximum)) {
+            try renderer.renderOffscreen(RefScene(width: 1, height: 1, imagePages: images))
+        }
+    }
+
     @Test func aSurfacePlaneOverTheDeviceLimitReturnsAnErrorAndPreservesLaterDraws() throws {
         let renderer = try MetalRenderer()
         let maximum = MetalTextureLimits.max2D(on: renderer.device)
