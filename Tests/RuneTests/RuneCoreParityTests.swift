@@ -280,10 +280,19 @@ struct RuneCoreParityTests {
         #expect(escOutcome == .modified)
         #expect(marked.preedit == nil)
 
-        // The primary modifier with Delete removes the rest of the line.
+        // Native word deletion uses Option on Apple hosts and Control elsewhere.
         var lineEd = TextEdit("first line\nsecond line", multiline: true)
+        var wordEd = lineEd
+        wordEd.setCursor(utf8Offset: 0)
+        let apple = KeyPlatform.current == .mac
+        let wordMods = apple ? Mods(alt: true) : RuneTestKey.primaryMods()
+        let wordOutcome = wordEd.handleKey(KeyEvent(key: .delete, mods: wordMods))
+        #expect(wordOutcome == .modified)
+        #expect(wordEd.text == (apple ? " line\nsecond line" : "line\nsecond line"))
+
+        // An explicit Command event deletes through the line end, preserving the newline.
         lineEd.setCursor(utf8Offset: 5)
-        let delOutcome = lineEd.handleKey(KeyEvent(key: .delete, mods: RuneTestKey.primaryMods()))
+        let delOutcome = lineEd.handleKey(KeyEvent(key: .delete, mods: Mods(cmd: true)))
         #expect(delOutcome == .modified)
         #expect(lineEd.text == "first\nsecond line")
 
