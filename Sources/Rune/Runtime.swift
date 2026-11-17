@@ -3404,8 +3404,10 @@ public final class Runtime<State> {
                        previous.localRect.left == localRect.left, previous.localRect.width == localRect.width {
                         layoutAnimSpec?.x = .instant
                     }
+                    // The rows of a growth stack already interpolate its changing height.
                     if previousParent.scrollShift.y != parentScroll.y,
-                       previous.localRect.top == localRect.top, previous.localRect.height == localRect.height {
+                       previous.localRect.top == localRect.top,
+                       previous.localRect.height == localRect.height || el.growthSpec != nil {
                         layoutAnimSpec?.y = .instant
                     }
                 }
