@@ -1678,6 +1678,14 @@ public struct Scene: Sendable {
     /// Re-links `parentIdx`'s children so active seen slots follow `orderedSlots` (preserving any exiting tail).
     private mutating func syncSiblingOrder(parent parentIdx: UInt32, orderedSlots: [Int]) {
         guard !orderedSlots.isEmpty else { return }
+        let firstChild = (parentIdx == Self.noneIdx) ? rootHead : nodes[Int(parentIdx)].firstChild
+        var next = firstChild
+        var matched = 0
+        while matched < orderedSlots.count, next == UInt32(orderedSlots[matched]) {
+            next = nodes[orderedSlots[matched]].nextSibling
+            matched += 1
+        }
+        if matched == orderedSlots.count { return }
         let seenSet = Set(orderedSlots)
         var mismatch = false
         var idx = 0
@@ -1801,6 +1809,59 @@ public struct Scene: Sendable {
         landWaitingNodes: Bool = false,
         snapNewMounts: Bool = false
     ) {
+        commit(specs, at: now, initialCut: initialCut, snapMounts: snapMounts,
+               snapOmittedNonExiting: snapOmittedNonExiting, matchedStarts: matchedStarts,
+               unmountNewOmissions: unmountNewOmissions, animatedExitParents: animatedExitParents,
+               landWaitingNodes: landWaitingNodes, snapNewMounts: snapNewMounts, retainingUnchanged: false)
+    }
+
+    /// A virtual remount may retain a fully settled slot. Compare the live scene so that
+    /// imperative property tracks, reparenting, and in-flight transitions are honored.
+    private func matchesRestingSpec(_ index: Int, _ spec: NodeSpec, localFrame: MotionRect) -> Bool {
+        let node = nodes[index]
+        guard node.presence.isPresent, node.path == nil, spec.launchLayout == nil,
+              node.frame == localFrame, !store.hasTracks(node.id),
+              node.tracks.allSatisfy({ $0 == nil }),
+              node.opacity == spec.opacity, node.baseScale2D == spec.scale,
+              node.baseOffset == spec.offset, node.baseBlur == spec.blur, node.baseRotate == spec.rotate,
+              node.radius == spec.corners, spec.iconTurn == 0,
+              node.hasFill == (spec.fill != nil), node.hasBorder == (spec.border != nil),
+              spec.fill.map({ $0 == node.fill }) ?? true, spec.border.map({ $0 == node.border }) ?? true,
+              node.compatHadTransition == (spec.transition != nil),
+              node.transition == (spec.transition ?? .none) else { return false }
+        let parent = node.parent == Self.noneIdx ? nil : nodes[Int(node.parent)].id
+        return parent == spec.parent
+    }
+
+    /// An offscreen node is landed after commit. Ordinary settled nodes already hold
+    /// these values. An authored animation or a sleeping imperative track still needs
+    /// the normal property reconciliation.
+    package mutating func landUnseen(_ spec: NodeSpec, localFrame: MotionRect) {
+        guard let index = slot(spec.id), !matchesRestingSpec(index, spec, localFrame: localFrame) else { return }
+        landFrame(spec.id, localFrame)
+        if let fill = spec.fill { set(spec.id, Props.FILL, fill) }
+        if let border = spec.border { set(spec.id, Props.BORDER, border) }
+        set(spec.id, Props.OPACITY, spec.opacity)
+        set(spec.id, Props.BLUR, Blur(spec.blur))
+        set(spec.id, Props.CORNERS, spec.corners)
+        set(spec.id, Props.OFFSET, spec.offset)
+        set(spec.id, Props.SCALE, spec.scale)
+        set(spec.id, Props.ROTATE, spec.rotate)
+    }
+
+    package mutating func commit(
+        _ specs: [NodeSpec],
+        at now: Double,
+        initialCut: Bool = false,
+        snapMounts: Bool = false,
+        snapOmittedNonExiting: Bool = false,
+        matchedStarts: [NodeId: MatchedFlightStart] = [:],
+        unmountNewOmissions: Bool = false,
+        animatedExitParents: Set<NodeId> = [],
+        landWaitingNodes: Bool = false,
+        snapNewMounts: Bool = false,
+        retainingUnchanged: Bool
+    ) {
         setTime(now)
         let cut = initialCut || !hasCommittedOnce
         hasCommittedOnce = true
@@ -1826,11 +1887,15 @@ public struct Scene: Sendable {
             worldOrigins[s.id] = s.rect.origin
         }
 
-        var seen = Set<NodeId>(minimumCapacity: specs.count)
+        let canRetain = retainingUnchanged && !cut && trace == nil
         var orderedByParent: [UInt32: [Int]] = [:]
         var parentKeysOrder: [UInt32] = []
+        func collectSibling(_ slot: Int) {
+            let parent = nodes[slot].parent
+            if orderedByParent[parent] == nil { parentKeysOrder.append(parent) }
+            orderedByParent[parent, default: []].append(slot)
+        }
         for spec in specs {
-            seen.insert(spec.id)
             let parentOrigin = spec.parent.flatMap { worldOrigins[$0] } ?? .zero
             let localFrame = MotionRect.fromEdges(
                 spec.rect.left - parentOrigin.x,
@@ -1841,7 +1906,14 @@ public struct Scene: Sendable {
             var localSpec = spec
             localSpec.rect = localFrame
 
-            if let existingIdx = slot(spec.id) {
+            let existing = slot(spec.id)
+            if let existing, canRetain, matchedStarts[spec.id] == nil,
+               matchesRestingSpec(existing, spec, localFrame: localFrame) {
+                // A moving parent still propagates its dirty flag through this child.
+                collectSibling(existing)
+                continue
+            }
+            if let existingIdx = existing {
                 let wasExiting = nodes[existingIdx].presence.isExiting
                 let wasScreenChange = spec.layoutAnim?.travel == .screen
                     && (nodes[existingIdx].parent != (spec.parent.flatMap { slot($0) }.map(UInt32.init) ?? Self.noneIdx))
@@ -2038,11 +2110,7 @@ public struct Scene: Sendable {
                    spec.launchLayout == .reaim || launchEndpoints[spec.id] == nil {
                     launchEndpoints[spec.id] = LaunchEndpoint(at: now, rect: path.endLocal.translated(path.origin))
                 }
-                let pIdx = nodes[committedSlot].parent
-                if orderedByParent[pIdx] == nil {
-                    parentKeysOrder.append(pIdx)
-                }
-                orderedByParent[pIdx, default: []].append(committedSlot)
+                collectSibling(committedSlot)
             }
         }
 
@@ -2056,7 +2124,7 @@ public struct Scene: Sendable {
         let currentNodes = Array(index.keys)
         for rawId in currentNodes {
             let nid = NodeId(rawId)
-            if seen.contains(nid) { continue }
+            if worldOrigins[nid] != nil { continue }
             guard let i = slot(nid), nodes[i].alive else { continue }
             if cut || landWaitingNodes || matchedRemovedIds.contains(nid) {
                 unmount(nid)
@@ -2064,7 +2132,7 @@ public struct Scene: Sendable {
             }
             // Keep descendants of an omitted/exiting ancestor mounted in place while the ancestor fades out (upstream apply.rs:748).
             let pIdx = nodes[i].parent
-            let parentRemainedPresent = (pIdx == Self.noneIdx) || seen.contains(nodes[Int(pIdx)].id)
+            let parentRemainedPresent = (pIdx == Self.noneIdx) || worldOrigins[nodes[Int(pIdx)].id] != nil
             guard parentRemainedPresent else { continue }
             let ridesParent = pIdx != Self.noneIdx && animatedExitParents.contains(nodes[Int(pIdx)].id)
             if !nodes[i].compatHadTransition || ((snapOmittedNonExiting || unmountNewOmissions) && !ridesParent && !nodes[i].presence.isExiting) {
@@ -2081,7 +2149,7 @@ public struct Scene: Sendable {
                         let di = Int(queue[qIdx])
                         qIdx += 1
                         guard nodes[di].alive else { continue }
-                        if !seen.contains(nodes[di].id) && !matchedRemovedIds.contains(nodes[di].id),
+                        if worldOrigins[nodes[di].id] == nil && !matchedRemovedIds.contains(nodes[di].id),
                            nodes[di].path != nil && nodes[di].compatHadTransition {
                             let pw = parentTargetOrigin(di)
                             if var sp = nodes[di].path {

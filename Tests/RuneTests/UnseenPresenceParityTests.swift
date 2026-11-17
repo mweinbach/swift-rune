@@ -126,4 +126,18 @@ struct UnseenPresenceParityTests {
         #expect(exitingVisible?.exiting == true)
         #expect(omittedUnseen == nil)
     }
+
+    @Test("Clearing a list keeps visible exits and retires clipped rows", arguments: [false, true])
+    func clearingListWithoutAnyRemainingTransitions(native: Bool) {
+        let rt = makeListRuntime(rows: ["visible", "also-visible", "clipped", "farther"])
+        func draw(_ time: Double) {
+            if native { _ = rt.renderFrame(at: time) } else { _ = rt.frame(at: time) }
+        }
+        for frame in 0...45 { draw(Double(frame) / 60) }
+        rt.update(at: 0.75) { state, _ in state.rows.removeAll() }
+        draw(0.75 + 1.0 / 120)
+        let mounted = rt.elements()
+        #expect(mounted.first { $0.key == "visible" }?.exiting == true)
+        #expect(!mounted.contains { $0.key == "farther" })
+    }
 }

@@ -164,6 +164,7 @@ internal struct KitUnseenPresenceState {
     /// swept path lands in sight (inside window + ancestor clips, non-transparent) in this layout.
     func unseenBeforeAndAfter<S>(
         prevNodes: [Runtime<S>.FlatNode],
+        previousIndexById: [NodeId: Int],
         newNodes: [Runtime<S>.FlatNode],
         scrolls: [String: Vec2],
         scrollMax: [String: Vec2],
@@ -173,15 +174,9 @@ internal struct KitUnseenPresenceState {
         let nothing = drewNothing(nodes: prevNodes)
         guard !nothing.isEmpty else { return ([], []) }
 
-        var oldIndexById: [NodeId: Int] = [:]
-        oldIndexById.reserveCapacity(prevNodes.count)
         var unseenPrevIds: Set<NodeId> = []
-        for i in prevNodes.indices {
-            let nid = prevNodes[i].nodeId
-            oldIndexById[nid] = i
-            if nothing[i] {
-                unseenPrevIds.insert(nid)
-            }
+        for i in prevNodes.indices where nothing[i] {
+            unseenPrevIds.insert(prevNodes[i].nodeId)
         }
 
         let mounts = newNodes.count > prevNodes.count
@@ -243,7 +238,7 @@ internal struct KitUnseenPresenceState {
                 bottom: t.bottom - stickyMin.y
             )
             let swept: MotionRect
-            if let oldIdx = oldIndexById[n.nodeId],
+            if let oldIdx = previousIndexById[n.nodeId],
                prevNodes[oldIdx].targetRect.width > 0 || prevNodes[oldIdx].targetRect.height > 0,
                let drawn = previousPaint?.drawn {
                 swept = MotionRect(
@@ -308,7 +303,7 @@ internal struct KitUnseenPresenceState {
         markAncestors(newNodes, &after)
 
         let unseenNew: [Bool] = newNodes.indices.map { i in
-            !after[i] && (oldIndexById[newNodes[i].nodeId].map { nothing[$0] } ?? true)
+            !after[i] && (previousIndexById[newNodes[i].nodeId].map { nothing[$0] } ?? true)
         }
         return (unseenNew, unseenPrevIds)
     }
@@ -467,15 +462,7 @@ extension Runtime {
                         right: spec.rect.right - parentOrigin.x,
                         bottom: spec.rect.bottom - parentOrigin.y
                     )
-                    scene.landFrame(id, localFrame)
-                    if let fill = spec.fill { scene.set(id, Props.FILL, fill) }
-                    if let border = spec.border { scene.set(id, Props.BORDER, border) }
-                    scene.set(id, Props.OPACITY, spec.opacity)
-                    scene.set(id, Props.BLUR, Blur(spec.blur))
-                    scene.set(id, Props.CORNERS, spec.corners)
-                    scene.set(id, Props.OFFSET, spec.offset)
-                    scene.set(id, Props.SCALE, spec.scale)
-                    scene.set(id, Props.ROTATE, spec.rotate)
+                    scene.landUnseen(spec, localFrame: localFrame)
                 }
             } else if !reducedMotion,
                       spec.transition != nil,
@@ -526,6 +513,7 @@ extension Runtime {
     /// - returns newly-omitted nodes that drew nothing last frame so they can be unmounted cleanly after commit.
     func applyUnseenPresenceBeforeCommit(
         prevNodes: [FlatNode],
+        previousIndexById: [NodeId: Int],
         specs: inout [NodeSpec],
         cut: Bool,
         on scene: inout Scene,
@@ -536,15 +524,29 @@ extension Runtime {
               !prevNodes.isEmpty else {
             return []
         }
+        let replacedContainers = kitHooks.unseenPresence.updateFilterReplacedContainers(newNodes: flatNodes)
+        // The swept-visibility pass can only suppress these motion fields or re-enter a
+        // replacement. An instant scroll remount with none of them needs only to retire
+        // previously invisible omissions. A flight remains independently owned.
+        if replacedContainers.isEmpty && !specs.contains(where: {
+            $0.transition != nil || $0.layoutAnim != nil || $0.styleSpring != nil
+        }) {
+            guard !cut else { return [] }
+            let hidden = kitHooks.unseenPresence.drewNothing(nodes: prevNodes)
+            return prevNodes.indices.compactMap { i in
+                let id = prevNodes[i].nodeId
+                return hidden[i] && nodeIndexById[id] == nil && !activeFlightIds.contains(id) ? id : nil
+            }
+        }
         let (unseenNew, unseenPrevIds) = kitHooks.unseenPresence.unseenBeforeAndAfter(
             prevNodes: prevNodes,
+            previousIndexById: previousIndexById,
             newNodes: flatNodes,
             scrolls: scrollOffsets,
             scrollMax: scrollMaxExtents,
             wasPinnedToBottom: wasPinnedToBottom,
             viewport: viewport
         )
-        let replacedContainers = kitHooks.unseenPresence.updateFilterReplacedContainers(newNodes: flatNodes)
 
         if unseenNew.count == flatNodes.count {
             for i in flatNodes.indices {

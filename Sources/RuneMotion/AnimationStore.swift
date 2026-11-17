@@ -460,6 +460,11 @@ public struct AnimationStore: Sendable {
     /// Compatibility alias for `running`.
     public var isAnimating: Bool { running }
 
+    /// Settled tracks still own their property's value until explicitly removed.
+    func hasTracks(_ node: NodeId) -> Bool {
+        nodeHead[node.rawValue] != nil
+    }
+
     public var trackLen: Int {
         index.count
     }

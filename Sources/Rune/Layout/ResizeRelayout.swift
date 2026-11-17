@@ -607,6 +607,7 @@ extension Runtime {
         cached.virtualExpansion = pass.virtualExpansion
         cached.virtualRowCache = pass.virtualExpansion.builtVirtualRows
         pass.reads = cached.reads
+        pass.isVirtualRemount = true
         return pass
     }
 }

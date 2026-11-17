@@ -2565,6 +2565,7 @@ public final class Runtime<State> {
         var effectiveReducedMotion: Bool?
         var measuredGrowthRows: [String: RuntimeGrowthEntry]?
         var measuredGrowthStacks: [String: RuntimeGrowthStackState]?
+        var isVirtualRemount = false
         var naturalJoinedRowTargets: [NodeId: MotionRect] = [:]
         var naturalLaunchTargets: [NodeId: MotionRect] = [:]
         var foldOpens: [PendingFoldOpen] = []
@@ -4543,6 +4544,7 @@ public final class Runtime<State> {
         var prevFlatNodesSnapshot: [FlatNode] = []
         swap(&prevFlatNodesSnapshot, &flatNodes)
         flatNodes = pass.nodes
+        let previousIndexById = nodeIndexById
         nodeIndexById = pass.indexById
         indexHoverParticipants()
         nativePaintTopology = nil
@@ -4591,6 +4593,7 @@ public final class Runtime<State> {
             prevFocusedKey: prevFocusedKey,
             prevFocusVisible: prevFocusVisible,
             prevFlatNodesSnapshot: &prevFlatNodesSnapshot,
+            previousIndexById: previousIndexById,
             childExitOverrides: childExitOverrides,
             at: now,
             cut: cut,
@@ -4614,6 +4617,7 @@ public final class Runtime<State> {
         prevFocusedKey: String?,
         prevFocusVisible: Bool,
         prevFlatNodesSnapshot: inout [FlatNode],
+        previousIndexById: [NodeId: Int],
         childExitOverrides: [(childId: NodeId, parentEl: El<State>)],
         at now: Double,
         cut: Bool,
@@ -4913,6 +4917,7 @@ public final class Runtime<State> {
         scene.keepFlights(keepsFlights)
         let unseenOmittedToUnmount = applyUnseenPresenceBeforeCommit(
             prevNodes: prevFlatNodesSnapshot,
+            previousIndexById: previousIndexById,
             specs: &specs,
             cut: commitCut,
             on: &scene,
@@ -4952,39 +4957,33 @@ public final class Runtime<State> {
         pendingTextColors.reserveCapacity(8)
         var pendingShadowColors: [(id: NodeId, index: Int, seed: MotionColor?, target: MotionColor, spring: Spring?)] = []
         pendingShadowColors.reserveCapacity(8)
-        var prevElById: [NodeId: El<State>] = [:]
-        prevElById.reserveCapacity(prevFlatNodesSnapshot.count)
-        for prev in prevFlatNodesSnapshot {
-            prevElById[prev.nodeId] = prev.el
-        }
         let commitDefaultViewFg = cxSettings.viewDefaults.textForeground
         for (i, node) in pass.nodes.enumerated() where i < specs.count {
             let nid = node.nodeId
             let wasPresent = scene.contains(nid)
             let csp = !commitCut && !reducedMotion && wasPresent ? specs[i].colorSpring : nil
-            let prevEl = prevElById[nid]
-            let prevHadTextOrIcon = prevEl.map {
-                $0.textColor != nil
-                    || $0.richSpans != nil
-                    || $0.plainText != nil
-                    || $0.liveText != nil
-                    || $0.handlers.editLens != nil
-                    || $0.iconPayload != nil
-            } ?? false
+            let prevIndex = previousIndexById[nid]
             let hasTextOrIcon = node.el.textColor != nil
                 || node.el.richSpans != nil
                 || node.el.plainText != nil
                 || node.el.liveText != nil
-                || node.el.handlers.editLens != nil
+                || node.el.hasEditLens
                 || node.el.iconPayload != nil
             if hasTextOrIcon {
                 let targetTextCol = (node.el.textColor ?? commitDefaultViewFg).motionColor
                 let hadTextTrack = scene.store.has(nid, Props.TEXT_COLOR)
-                if let prevEl, prevHadTextOrIcon {
-                    let prevTextCol = (prevEl.textColor ?? commitDefaultViewFg).motionColor
-                    if hadTextTrack || (csp != nil && targetTextCol != prevTextCol) {
-                        let seed: MotionColor? = (!hadTextTrack && wasPresent) ? prevTextCol : nil
-                        pendingTextColors.append((id: nid, seed: seed, target: targetTextCol, spring: csp))
+                if (hadTextTrack || csp != nil), let prevIndex {
+                    let prevEl = prevFlatNodesSnapshot[prevIndex].el
+                    let hadText = prevEl.textColor != nil || prevEl.richSpans != nil || prevEl.plainText != nil
+                        || prevEl.liveText != nil || prevEl.hasEditLens || prevEl.iconPayload != nil
+                    if hadText {
+                        let prevTextCol = (prevEl.textColor ?? commitDefaultViewFg).motionColor
+                        if hadTextTrack || targetTextCol != prevTextCol {
+                            let seed: MotionColor? = (!hadTextTrack && wasPresent) ? prevTextCol : nil
+                            pendingTextColors.append((id: nid, seed: seed, target: targetTextCol, spring: csp))
+                        }
+                    } else if hadTextTrack {
+                        pendingTextColors.append((id: nid, seed: nil, target: targetTextCol, spring: csp))
                     }
                 } else if hadTextTrack {
                     pendingTextColors.append((id: nid, seed: nil, target: targetTextCol, spring: csp))
@@ -4993,9 +4992,10 @@ public final class Runtime<State> {
             for (si, sh) in node.el.shadows.prefix(shadowColorProps.count).enumerated() {
                 let prop = shadowColorProps[si]
                 let hadShTrack = scene.store.has(nid, prop)
-                let prevShCol: MotionColor? = (prevEl != nil && si < prevEl!.shadows.count)
-                    ? prevEl!.shadows[si].color.motionColor
-                    : nil
+                let prevShCol: MotionColor? = prevIndex.flatMap { index in
+                    let previous = prevFlatNodesSnapshot[index].el.shadows
+                    return si < previous.count ? previous[si].color.motionColor : nil
+                }
                 let targetShCol = sh.color.motionColor
                 if hadShTrack || (csp != nil && prevShCol != nil && targetShCol != prevShCol!) {
                     let seed: MotionColor? = (!hadShTrack && wasPresent) ? prevShCol : nil
@@ -5013,7 +5013,7 @@ public final class Runtime<State> {
             let hadBottom = scene.store.has(nid, Props.BORDER_BOTTOM)
             guard bGrad != nil || hadBottom else { continue }
             let seed: MotionColor? = (bGrad != nil && !hadBottom && wasPresent)
-                ? (scene.get(nid, Props.BORDER) ?? prevFlatNodesSnapshot.first(where: { $0.nodeId == nid })?.el.borderColor.motionColor ?? node.el.borderColor.motionColor)
+                ? (scene.get(nid, Props.BORDER) ?? prevIndex.map { prevFlatNodesSnapshot[$0].el.borderColor.motionColor } ?? node.el.borderColor.motionColor)
                 : nil
             let target = (bGrad?.bottom ?? node.el.borderColor).motionColor
             pendingBorderBottoms.append((id: nid, seed: seed, target: target, spring: csp))
@@ -5174,7 +5174,8 @@ public final class Runtime<State> {
                 unmountNewOmissions: activeExplicitSnap || commitCut,
                 animatedExitParents: slice2State.liveTailExitParents,
                 landWaitingNodes: commitKind.lands,
-                snapNewMounts: commitKind.snaps || commitCut
+                snapNewMounts: commitKind.snaps || commitCut,
+                retainingUnchanged: pass.isVirtualRemount
             )
         }
         syncMotionLoops(specs: pass.loopSpecs, at: now, cut: activeSettleLoops)
