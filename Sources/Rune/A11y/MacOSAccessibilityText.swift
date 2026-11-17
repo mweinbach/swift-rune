@@ -4,6 +4,20 @@ import AppKit
 /// A field's complete model value answers range queries even when only visible lines have
 /// been shaped. AccessKit uses the same fallback for long fields (upstream #1058).
 internal final class RuneAXTextField: RuneNSAccessibilityElement {
+    private var layout: A11yFieldLayout?
+    /// Captured by the host so off-main AX queries can transform points without calling NSView.
+    var viewToScreen = CGAffineTransform.identity
+
+    @MainActor
+    static func viewToScreen(_ view: NSView) -> CGAffineTransform {
+        guard let window = view.window else { return .identity }
+        func screen(_ point: NSPoint) -> NSPoint { window.convertPoint(toScreen: view.convert(point, to: nil)) }
+        let origin = screen(.zero)
+        let x = screen(NSPoint(x: 1, y: 0))
+        let y = screen(NSPoint(x: 0, y: 1))
+        return CGAffineTransform(a: x.x - origin.x, b: x.y - origin.y,
+                                 c: y.x - origin.x, d: y.y - origin.y, tx: origin.x, ty: origin.y)
+    }
     private var text: String
     private(set) var anchor: Int
     private(set) var focus: Int
@@ -18,6 +32,13 @@ internal final class RuneAXTextField: RuneNSAccessibilityElement {
         self.focus = focus
         self.select = node.actions.contains(.setValue) ? onSelectText : nil
         super.init(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
+    }
+
+    override func update(node: AccessibilityNode, parent: AnyObject?,
+                         onAction: (@Sendable (String, AccessibilityAction) -> Void)?,
+                         onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)?) {
+        layout = node.fieldLayout
+        super.update(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
     }
 
     func updateText(_ value: String, anchor: Int, focus: Int,
@@ -58,7 +79,10 @@ internal final class RuneAXTextField: RuneNSAccessibilityElement {
 
     override func accessibilityValue() -> Any? { text }
 
-    override func accessibilityFrame(for range: NSRange) -> NSRect { .zero }
+    override func accessibilityFrame(for range: NSRange) -> NSRect {
+        guard let layout, let offsets = bytes(range) else { return .zero }
+        return layout.frame(forBytes: offsets).applying(viewToScreen)
+    }
 
     override func accessibilityNumberOfCharacters() -> Int { text.utf16.count }
 
@@ -83,14 +107,16 @@ internal final class RuneAXTextField: RuneNSAccessibilityElement {
     }
 
     override func accessibilityInsertionPointLineNumber() -> Int {
-        text.utf8.prefix(max(0, focus)).count { $0 == 10 }
+        layout?.line(atByte: focus) ?? text.utf8.prefix(max(0, focus)).count { $0 == 10 }
     }
 
     override func accessibilityLine(for index: Int) -> Int {
-        text.utf8.prefix(byteOffset(index)).count { $0 == 10 }
+        let offset = byteOffset(index)
+        return layout?.line(atByte: offset) ?? text.utf8.prefix(offset).count { $0 == 10 }
     }
 
     override func accessibilityRange(forLine line: Int) -> NSRange {
+        if let layout { return layout.range(ofLine: line) }
         guard line >= 0 else { return NSRange(location: 0, length: 0) }
         var current = 0
         var start = 0
@@ -107,6 +133,9 @@ internal final class RuneAXTextField: RuneNSAccessibilityElement {
     }
 
     override func accessibilityRange(for index: Int) -> NSRange {
+        if layout != nil, index >= 0, index < text.utf16.count {
+            return (text as NSString).rangeOfComposedCharacterSequence(at: index)
+        }
         let bytes = text.utf8
         let start = bytes.index(bytes.startIndex, offsetBy: byteOffset(index))
         let location = text.utf16.distance(from: text.startIndex, to: start)
@@ -116,7 +145,13 @@ internal final class RuneAXTextField: RuneNSAccessibilityElement {
     }
 
     override func accessibilityRange(for point: NSPoint) -> NSRange {
-        accessibilityRange(for: ImeUTF16Bridge.utf16Offset(in: text, fromUTF8Offset: focus))
+        let offset: Int
+        if let layout {
+            offset = layout.byte(at: point.applying(viewToScreen.inverted()))
+        } else {
+            offset = focus
+        }
+        return accessibilityRange(for: ImeUTF16Bridge.utf16Offset(in: text, fromUTF8Offset: offset))
     }
 
     override func accessibilityStyleRange(for index: Int) -> NSRange {
@@ -132,7 +167,7 @@ internal final class RuneAXTextField: RuneNSAccessibilityElement {
 
     override func setAccessibilitySelectedTextRange(_ range: NSRange) {
         guard let select, let offsets = bytes(range) else { return }
-        select(nodeId, offsets)
+        select(actionTarget, offsets)
     }
 }
 #endif

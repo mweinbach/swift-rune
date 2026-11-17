@@ -73,6 +73,8 @@ public struct AccessibilityAnnouncement: Sendable, Equatable {
 /// Platform-independent semantic accessibility node projected from a laid-out `El<State>`.
 public struct AccessibilityNode: Sendable, Equatable {
     public var id: String
+    /// Canonical target for host events. Author keys can repeat in different subtrees.
+    internal var runtimePath: String?
     public var role: ElementRole
     public var label: String?
     public var value: String?
@@ -113,6 +115,9 @@ public struct AccessibilityNode: Sendable, Equatable {
     public var actions: [AccessibilityAction]
     public var children: [AccessibilityNode]
     internal var keepsControlContent = false
+    #if os(macOS) && canImport(AppKit)
+    internal var fieldLayout: A11yFieldLayout?
+    #endif
 
     public init(
         id: String,
@@ -229,20 +234,8 @@ public enum AccessibilityTreeBuilder {
         return kept
     }
 
-    private static func collectA11yWords<State>(in node: El<State>, out: inout [String]) {
-        guard !node.isSecure else { return }
-        if let lbl = node.a11yLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !lbl.isEmpty {
-            out.append(lbl)
-            return
-        }
-        if node.handlers.editLens == nil,
-           let txt = (node.plainText ?? node.richSpans?.map(\.text).joined())?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !txt.isEmpty {
-            out.append(txt)
-        }
-        for child in node.children where !child.isA11yHidden && child.opacity > 0.01 && !child.isSecure {
-            collectA11yWords(in: child, out: &out)
-        }
+    private static func words<State>(of element: El<State>) -> String? {
+        AccessibilityNameSource.words(of: element, source: { AccessibilityNameSource($0) }, children: { $0.children })
     }
 
     private static func relatedWords<State>(key: String?, ancestors: [El<State>], selfKey: String?) -> String? {
@@ -261,10 +254,7 @@ public enum AccessibilityTreeBuilder {
         }
         for scope in ancestors.reversed() {
             if let target = findFirst(in: scope, isDirectTarget: true) {
-                var parts: [String] = []
-                collectA11yWords(in: target, out: &parts)
-                let joined = parts.joined(separator: " ")
-                if !joined.isEmpty { return joined }
+                if let name = words(of: target) { return name }
             }
         }
         return nil
@@ -351,9 +341,9 @@ public enum AccessibilityTreeBuilder {
             : AccessibilityRoleRules.role(for: element, focusable: enabled && element.focusable)
         let labelledByText = relatedWords(key: element.a11yLabelledBy, ancestors: ancestors, selfKey: element.keyId)
         let describedByText = relatedWords(key: element.a11yDescribedBy, ancestors: ancestors, selfKey: element.keyId)
-        let label = isSecure
-            ? (element.a11yLabel ?? labelledByText ?? "Password")
-            : (element.a11yLabel ?? labelledByText ?? element.plainText)
+        let givenName = AccessibilityNameSource.nonblank(element.a11yLabel) ?? labelledByText
+        let controlName = givenName ?? (element.isDefaultButton && resolvedRole == .button && !isSecure ? words(of: element) : nil)
+        let label = controlName ?? (isSecure ? "Password" : element.plainText)
         let resolvedHelp = element.a11yDescription ?? describedByText ?? element.a11yHelp
         let isFocused = (focusedKey != nil && element.keyId == focusedKey)
         let selectableRole = [.listItem, .option, .tab, .treeItem, .gridCell, .row].contains(resolvedRole)
@@ -416,7 +406,7 @@ public enum AccessibilityTreeBuilder {
             isModal: element.isModal,
             isSecure: isSecure,
             actions: actions,
-            children: controlChildren(projectedChildren, role: resolvedRole, name: isSecure ? nil : element.a11yLabel ?? labelledByText)
+            children: controlChildren(projectedChildren, role: resolvedRole, name: isSecure ? nil : controlName)
         )
         node.keepsControlContent = element.keepsControlContent
         return node
@@ -573,6 +563,7 @@ public enum AppKitAccessibilityMapper {
 /// Concrete `NSAccessibilityElement` backing a projected `AccessibilityNode` on macOS.
 public class RuneNSAccessibilityElement: NSAccessibilityElement {
     public let nodeId: String
+    internal let actionTarget: String
     public private(set) var supportedActions: [AccessibilityAction] = []
     private var actionHandler: (@Sendable (String, AccessibilityAction) -> Void)?
     private var setValueHandler: (@Sendable (String, AccessibilityActionValue) -> Void)?
@@ -584,6 +575,7 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
         onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)? = nil
     ) {
         self.nodeId = node.id
+        self.actionTarget = node.runtimePath ?? node.id
         super.init()
         update(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
     }
@@ -627,19 +619,19 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
 
     public override func accessibilityPerformPress() -> Bool {
         guard supportedActions.contains(.press) else { return false }
-        actionHandler?(nodeId, .press)
+        actionHandler?(actionTarget, .press)
         return true
     }
 
     public override func accessibilityPerformIncrement() -> Bool {
         guard supportedActions.contains(.increment) else { return false }
-        actionHandler?(nodeId, .increment)
+        actionHandler?(actionTarget, .increment)
         return true
     }
 
     public override func accessibilityPerformDecrement() -> Bool {
         guard supportedActions.contains(.decrement) else { return false }
-        actionHandler?(nodeId, .decrement)
+        actionHandler?(actionTarget, .decrement)
         return true
     }
 
@@ -660,11 +652,11 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
         }
         switch accessibilityValue {
         case let text as String:
-            setValueHandler(nodeId, .text(text))
+            setValueHandler(actionTarget, .text(text))
         case let attributed as NSAttributedString:
-            setValueHandler(nodeId, .text(attributed.string))
+            setValueHandler(actionTarget, .text(attributed.string))
         case let number as NSNumber:
-            setValueHandler(nodeId, .number(number.doubleValue))
+            setValueHandler(actionTarget, .number(number.doubleValue))
         default:
             break
         }

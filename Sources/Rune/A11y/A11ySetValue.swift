@@ -72,6 +72,8 @@ public struct ElementA11yInput: Sendable, Equatable {
     /// It steps (`focus.step.is_some()`).
     public var steps: Bool
     internal var keepsControlContent = false
+    internal var isDefaultButton = false
+    internal var labelledBy: String?
     public var range: A11yRange?
 
     public init(isInput: Bool, editable: Bool, multiline: Bool, pressable: Bool, steps: Bool, range: A11yRange?) {
@@ -93,6 +95,8 @@ public struct ElementA11yInput: Sendable, Equatable {
             range: el.a11yRange
         )
         keepsControlContent = el.keepsControlContent
+        isDefaultButton = el.isDefaultButton && AccessibilityRoleRules.role(for: el, focusable: el.focusable && !el.a11yDisabled) == .button
+        labelledBy = el.a11yLabelledBy
     }
 }
 
@@ -181,9 +185,9 @@ public extension Runtime {
         return false
     }
 
-    /// The live node an action request names: by key, else by path.
+    /// Native adapters send the full path. An author key remains available to direct callers.
     internal func a11yTargetIndex(_ id: String) -> Int? {
-        flatNodes.firstIndex(where: { ($0.key ?? $0.path) == id || $0.path == id })
+        nodeByPath[id] ?? flatNodes.firstIndex(where: { $0.key == id })
     }
 
     /// Whether an assistive action may reach node `idx` (`a11y_action`: `allowed(i)` — outside any
