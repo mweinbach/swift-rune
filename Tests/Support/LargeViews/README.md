@@ -31,3 +31,10 @@ swift run --package-path Tests/Support/LargeViews -c release ScrollBench tree wi
 python3 Tests/Support/LargeViews/presentations.py .build/scroll/swift-tree.csv
 python3 Tests/Support/LargeViews/rust-native.py /path/to/rust-rune .build/scroll/rust-mac
 ```
+
+The 50,000-line code diff has a separate benchmark. It changes every seventh line and measures elapsed frame-construction time for ordinary scrolls, 400-point flings, and jumps between distant hunks. Run the Swift command from this checkout and the Cargo command from the pinned Rust checkout. The reported times exclude GPU submission and physical presentation.
+
+```sh
+RUNE_DIFF_BENCH=1 swift test -c release --filter diff50kTimings
+cargo test -p rune-kit --profile perf --test diff diff_50k_time -- --ignored --nocapture
+```
