@@ -1,9 +1,9 @@
 {
   "swiftExecutables" : 99,
   "swiftTargets" : 19,
-  "syncedAt" : "2026-11-17T20:08:07Z",
-  "syncedCommit" : "935b2ff9a05064e2eb8d595860ab640b05bc98fe",
-  "syncedCommitDate" : "2026-11-17T14:58:30-05:00",
-  "syncedCommitSubject" : "ship the opencode icon catalog and its aliases (#1142)",
+  "syncedAt" : "2026-11-17T20:44:16Z",
+  "syncedCommit" : "0d00d3f2d59df5b764d8d6b2585164fd43c16f48",
+  "syncedCommitDate" : "2026-11-17T15:15:48-05:00",
+  "syncedCommitSubject" : "tell a press handler when a finger tapped it (#1143)",
   "upstreamRepo" : "https:\/\/github.com\/anomalyco\/rune"
 }
