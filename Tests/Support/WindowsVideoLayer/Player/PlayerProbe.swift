@@ -3,7 +3,11 @@ import Foundation
 import Rune
 import WinSDK
 
-private func log(_ line: String) { FileHandle.standardError.write(Data((line + "\n").utf8)) }
+private let started = GetTickCount64()
+private func log(_ line: String) {
+    let start = started
+    FileHandle.standardError.write(Data(("[\(GetTickCount64() - start) ms] " + line + "\n").utf8))
+}
 
 private struct ViewState {
     var obscured = false
@@ -36,6 +40,34 @@ private final class Frames: @unchecked Sendable {
     struct Failure: Error, CustomStringConvertible { let description: String }
     private static let title = "Rune independent video"
 
+    private static func placeVisibleWindow() -> Bool {
+        guard let window = title.withCString(encodedAs: UTF16.self, { FindWindowW(nil, $0) }) else { return false }
+        var pid: DWORD = 0
+        GetWindowThreadProcessId(window, &pid)
+        guard pid == GetCurrentProcessId() else { return false }
+        var monitor = MONITORINFO(), bounds = RECT()
+        monitor.cbSize = DWORD(MemoryLayout<MONITORINFO>.size)
+        guard GetMonitorInfoW(MonitorFromWindow(window, DWORD(MONITOR_DEFAULTTONEAREST)), &monitor),
+              GetWindowRect(window, &bounds) else { return false }
+        let work = monitor.rcWork, w = bounds.right - bounds.left, h = bounds.bottom - bounds.top
+        let left = work.left + 16, right = max(left, work.right - w - 16)
+        let top = work.top + 16, bottom = max(top, work.bottom - h - 16)
+        for (x, y) in [(left, top), (right, top), (left, bottom), (right, bottom)] {
+            guard SetWindowPos(window, nil, x, y, 0, 0, UINT(SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS)) else { continue }
+            var client = RECT()
+            guard GetClientRect(window, &client) else { continue }
+            let points = [POINT(x: 20, y: 22), POINT(x: client.right / 2, y: client.bottom / 2)]
+            for _ in 0 ..< 12 {
+                if points.allSatisfy({ location in
+                    var point = location
+                    return ClientToScreen(window, &point) && GetAncestor(WindowFromPoint(point), UINT(GA_ROOT)) == window
+                }) { return true }
+                Thread.sleep(forTimeInterval: 0.04)
+            }
+        }
+        return false
+    }
+
     /// Wait for a nonwhite picture and check that only the control covers its center.
     private static func showsControl(_ expected: Bool, _ frames: Frames) -> Bool {
         guard let window = title.withCString(encodedAs: UTF16.self, { FindWindowW(nil, $0) }),
@@ -62,6 +94,8 @@ private final class Frames: @unchecked Sendable {
 
     private static func check(_ player: Player, _ app: AppHandle<ViewState>, _ frames: Frames) {
         defer { app.quit() }
+        guard placeVisibleWindow() else { frames.fail("The probe window has no visible corner on this desktop."); return }
+        log("sampling visible player")
         func sample(_ duration: TimeInterval) -> (draws: Int, pictures: UInt64) {
             let draws = frames.drawn
             let first = player.surface.currentFrame()?.id ?? 0
@@ -70,7 +104,7 @@ private final class Frames: @unchecked Sendable {
         }
 
         func waitForLayer(_ phase: String) -> Bool {
-            let deadline = ProcessInfo.processInfo.systemUptime + 12
+            let deadline = ProcessInfo.processInfo.systemUptime + 24
             repeat {
                 let result = sample(0.75)
                 if result.pictures >= 2 && result.draws <= Int(result.pictures / 6) {
@@ -151,12 +185,13 @@ private final class Frames: @unchecked Sendable {
             }
             return col().sizeFull().bg(.black).child(stage)
                 .child(el().pin(top: 4, left: 148).w(8).h(8).bg(state.flash ? .white : .black))
-        }.onFrameDrawn { runtime in frames.didDraw(runtime.element(byKey: "picture")?.rect) }
+        }.windowOptions(WindowOptions(minSize: Vec2(128, 72), position: (16, 16)))
+            .onFrameDrawn { runtime in frames.didDraw(runtime.element(byKey: "picture")?.rect) }
         let handle = spec.handle()
         log("opening window")
         try spec.onReady { _ in
             log("window ready")
-            DispatchQueue.global(qos: .utility).async { check(player, handle, frames) }
+            DispatchQueue.global(qos: .utility).async { @Sendable in check(player, handle, frames) }
         }.run(arguments: [])
         if let reason = frames.reason {
             FileHandle.standardError.write(Data("FAIL \(reason)\n".utf8))

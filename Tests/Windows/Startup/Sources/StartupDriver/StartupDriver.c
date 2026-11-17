@@ -32,9 +32,10 @@ int startup_post_key(void) {
 }
 
 // Run the public app with its own desktop. No foreground or global input state is changed.
-int startup_launch_child(const wchar_t *mode) {
+int startup_launch_child(const wchar_t *executable, const wchar_t *mode) {
     wchar_t exe[MAX_PATH], command[2 * MAX_PATH], name[64];
-    DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+    DWORD n = executable ? GetFullPathNameW(executable, MAX_PATH, exe, NULL) :
+                           GetModuleFileNameW(NULL, exe, MAX_PATH);
     if (!n || n >= MAX_PATH) return 1;
     swprintf_s(command, ARRAYSIZE(command), L"\"%ls\" %ls", exe, mode);
     swprintf_s(name, ARRAYSIZE(name), L"RuneStartup-%lu", GetCurrentProcessId());

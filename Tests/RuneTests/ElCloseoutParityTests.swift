@@ -69,8 +69,8 @@ struct ElCloseoutParityTests {
         #expect(glyphPrims.count >= "@alice".count + "hello".count + 1, "text + leading pill icon glyphs should render")
     }
 
-    @Test("singleLine keeps overflowing input on one line and scrolls caret into view")
-    func singleLineInputKeepsHeightAndScrollsCaret() {
+    @Test("singleLine keeps overflowing input on one line and scrolls caret into view", arguments: [false, true])
+    func singleLineInputKeepsHeightAndScrollsCaret(native: Bool) throws {
         struct S {
             var edit = TextEdit(String(repeating: "abcdefghij", count: 8))
         }
@@ -81,26 +81,29 @@ struct ElCloseoutParityTests {
                 )
             )
         }
-        let f0 = rt.frame(at: 0)
-        let singleRect = rt.element(byKey: "single")?.rect ?? [0, 0, 0, 0]
-        #expect(singleRect[3] < 36, "singleLine should keep 1-line height even with 80 chars in 100pt width")
+        func paint(_ time: Double) {
+            if native { _ = rt.renderFrame(at: time) } else { _ = rt.frame(at: time) }
+        }
+        paint(0)
+        let field = try #require(rt.element(byKey: "single"))
+        let x = field.rect[0], right = x + field.rect[2]
+        #expect(field.rect[3] < 36, "singleLine should keep 1-line height even with 80 chars in 100pt width")
 
-        rt.pointerDown(at: Vec2(singleRect[0] + 10, singleRect[1] + 8), at: 0.05)
-        rt.pointerUp(at: Vec2(singleRect[0] + 10, singleRect[1] + 8), at: 0.06)
+        rt.pointerDown(at: Vec2(x + 10, field.rect[1] + 8), at: 0.05)
+        rt.pointerUp(at: Vec2(x + 10, field.rect[1] + 8), at: 0.06)
         _ = rt.keyDown(KeyEvent(key: .end), at: 0.07)
-        let fEnd = rt.frame(at: 0.08)
-        let firstGlyphXEnd = fEnd.primitives
-            .filter { Int($0.params.y) == PrimitiveKind.glyph.rawValue }
-            .map { $0.rect.x }
-            .min() ?? 999
+        paint(0.08)
+        let endCaret = try #require(rt.element(byKey: "single")?.caret)
+        #expect(rt.state.edit.selectedUTF8Range == 80..<80)
+        #expect((rt.inputScroll[field.path] ?? 0) > 50)
+        #expect(endCaret[0] >= x && endCaret[0] <= right)
+
         _ = rt.keyDown(KeyEvent(key: .home), at: 0.09)
-        let fStart = rt.frame(at: 0.10)
-        let firstGlyphXStart = fStart.primitives
-            .filter { Int($0.params.y) == PrimitiveKind.glyph.rawValue }
-            .map { $0.rect.x }
-            .min() ?? -999
-        #expect(firstGlyphXEnd < firstGlyphXStart - 50, "moving caret to end should horizontally scroll text left")
-        _ = f0
+        paint(0.10)
+        let startCaret = try #require(rt.element(byKey: "single")?.caret)
+        #expect(rt.state.edit.selectedUTF8Range == 0..<0)
+        #expect((rt.inputScroll[field.path] ?? 0) == 0)
+        #expect(startCaret[0] >= x && startCaret[0] < endCaret[0])
     }
 
     @Test("animateEditLayout opts textInput edits into animated layout instead of instant snap")

@@ -30,6 +30,8 @@ int rune_media_picture(struct RuneMedia *media, double seconds, double retaining
 /* A non-null texture is an immutable subresource-zero ID3D11Texture2D. Software
    decoder output additionally exposes packed Y followed by UV via rune_media_picture_bytes. */
 void *rune_media_picture_texture(const RuneMediaPicture *picture);
+/* Colorimetry for this sample, including media type updates made after decoding begins. */
+RunePictureInfo rune_media_picture_info(const RuneMediaPicture *picture);
 /* True if MF delivered an IMFDXGIBuffer and the decoder picture was copied entirely on its D3D device. */
 int rune_media_picture_dxgi_source(const RuneMediaPicture *picture);
 const uint8_t *rune_media_picture_bytes(const RuneMediaPicture *picture);

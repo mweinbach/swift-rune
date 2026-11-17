@@ -112,11 +112,13 @@ struct PaintGridAndBandsParityTests {
         rt.setFontSmoothing(.off)
         #expect(rt.textSystem.smoothing == .off)
         _ = rt.renderFrame(at: 0)
-        let misses = rt.textSystem.shapeMissCount
+        let revision = rt.textSystem.rasterRevision
+        let existingLayouts = rt.textSystem.layoutKeys()
         let report = rt.checkRestingRaster(at: 0)
         #expect(report.isClean)
         #expect(report.freshGlyphCount > 0)
-        #expect(rt.textSystem.shapeMissCount > misses)
+        #expect(rt.textSystem.rasterRevision > revision)
+        #expect(rt.textSystem.layoutKeys() == existingLayouts)
         #expect(!RasterCheck.isEnabled(environment: ["RUNE_RASTER_CHECK": "0"]))
         #if DEBUG
         #expect(RasterCheck.isEnabled(environment: ["RUNE_RASTER_CHECK": "1"]))
@@ -129,5 +131,42 @@ struct PaintGridAndBandsParityTests {
         #expect(RasterCheck.magnifies(stretched))
         rt.setFontSmoothing(.systemDefault)
         #expect(rt.textSystem.smoothing == .platformDefault)
+    }
+
+    @Test("A fresh raster rebuilds placed glyphs in a full label and a clipped document")
+    func freshPlacedGlyphs() throws {
+        let system = TextSystem()
+        system.smoothing = .off
+        let style = TextStyle(size: 13)
+        let lines = Array(repeating: "Probe", count: 36).joined(separator: "\n")
+        let clipped = TextRasterWindow(lowerY: 96, upperY: 144)
+        for (content, window) in [("Probe", nil as TextRasterWindow?), (lines, clipped)] {
+            func layout(_ draw: Bool) -> TextLayoutBox {
+                system.layoutKeyed(text: content, style: style, maxWidth: 80, pixelScale: 1,
+                                   emitGlyphs: draw, rasterWindow: draw ? window : nil)
+            }
+            let previous = layout(true)
+            let original = try #require(previous.shaped.glyphs.first).rect
+            let shaped = system.shapedCount
+            let prepared = system.cachedShapeCount
+            let atlas = system.glyphAtlas.resets
+            previous.shaped.glyphs[0].rect.x += 71
+            #expect(layout(true) === previous)
+
+            system.forgetRasterState()
+            let measured = layout(false)
+            #expect(!measured.hasGlyphs && measured.shaped.glyphs.isEmpty)
+            #expect(measured.shaped.lineBaselinesPx == previous.shaped.lineBaselinesPx)
+            let fresh = layout(true)
+            #expect(fresh.shaped.glyphs.first?.rect == original)
+            #expect(previous.shaped.glyphs[0].rect.x == original.x + 71)
+            #expect(system.shapedCount == shaped && system.cachedShapeCount == prepared)
+            #expect(system.glyphAtlas.resets == atlas)
+        }
+        system.beginOutlineFrame()
+        #expect(system.outlinePaths.step(node: 1, frame: .moving).0 == .moving)
+        system.forgetRasterState()
+        system.beginOutlineFrame()
+        #expect(system.outlinePaths.step(node: 1, frame: .resting).0 == .still)
     }
 }

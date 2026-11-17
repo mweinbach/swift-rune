@@ -136,6 +136,25 @@ struct MacOSHostFrameTests {
                 lastTarget: previousTarget, now: 1.025, period: period) == nil)
     }
 
+    @Test func earlyFramePreparationKeepsMinimumSpacingWhenWorkloadChanges() {
+        var frame = MacOSFramePreparation()
+        let period = 1.0 / 60
+        let submitted = 1.012
+        let arrived = 1 + period
+        let earliest = submitted + period / 2
+        #expect(!frame.canStart(at: arrived, submissionAfter: earliest))
+        frame.begin(at: 1, earliestSubmission: nil)
+        #expect(frame.finished(at: submitted) == nil)
+        #expect(frame.canStart(at: arrived, submissionAfter: earliest))
+        frame.begin(at: arrived, earliestSubmission: earliest)
+        #expect(frame.finished(at: arrived + 0.0003) == earliest)
+        #expect(!frame.canStart(at: arrived, submissionAfter: earliest))
+        frame.begin(at: arrived, earliestSubmission: earliest)
+        #expect(frame.finished(at: earliest) == nil)
+        frame.begin(at: arrived, earliestSubmission: earliest)
+        #expect(frame.finished(at: arrived + 0.012) == nil)
+    }
+
     @MainActor
     @Test func startupTimerBecomesADisplayLinkWhenTheViewAttaches() {
         let view = NSView(frame: CGRect(x: 0, y: 0, width: 20, height: 20))

@@ -77,6 +77,22 @@ struct DefaultFontsParityTests {
     }
     #endif
 
+    #if os(Linux) && canImport(CRuneDesktopText)
+    @Test("Linux static faces follow CSS directional matching between bundled Inter cuts")
+    func linuxStaticWeightsMatchRust() {
+        let text = TextSystem()
+        func width(_ weight: Float) -> Float {
+            text.measure("Rust", style: TextStyle(size: 18, weight: weight, family: .named("Rune Missing Font, Inter")),
+                         maxWidth: nil, pixelScale: 1).x
+        }
+        let regular = width(400), medium = width(500), semibold = width(600)
+        #expect(regular < medium && medium < semibold)
+        #expect(width(350) == regular)
+        #expect(width(401) == medium && width(440) == medium)
+        #expect(width(501) == semibold && width(550) == semibold && width(900) == semibold)
+    }
+    #endif
+
     @Test("named font stacks prefer available faces and fall back to the active sans family")
     func namedFontsFallBackToTheActiveSansFamily() {
         withFontFamilies(sans: DefaultFonts.monoFamily, mono: DefaultFonts.monoFamily) {

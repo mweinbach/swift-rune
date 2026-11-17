@@ -97,6 +97,10 @@ std::shared_ptr<Device> openDevice(const int64_t *luid) {
 
 HRESULT Ring::capture(IMFSample *sample, UINT32 width, UINT32 height, Crop crop, RuneMediaPicture **out) {
     try {
+        // Some drivers align individual NV12 chroma rows to four bytes even on
+        // update with an explicit tighter pitch. Give the texture that same
+        // storage width, while exposing only the true picture rectangle.
+        const UINT storageWidth = (crop.width + 3u) & ~3u;
         auto result = std::make_unique<RuneMediaPicture>();
         if (gpu) {
             const HRESULT status = gpu->device->GetDeviceRemovedReason();
@@ -106,13 +110,14 @@ HRESULT Ring::capture(IMFSample *sample, UINT32 width, UINT32 height, Crop crop,
         if (gpu) {
             for (auto &slot : slots) if (!slot || slot.use_count() == 1) { free = &slot; break; }
             if (!free) return S_FALSE;
-            if (!*free) {
+            if (!*free || (*free)->width != storageWidth || (*free)->height != crop.height) {
                 D3D11_TEXTURE2D_DESC desc{};
-                desc.Width = crop.width; desc.Height = crop.height;
+                desc.Width = storageWidth; desc.Height = crop.height;
                 desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
                 desc.Format = DXGI_FORMAT_NV12;
                 desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
                 auto slot = std::make_shared<Slot>();
+                slot->width = storageWidth; slot->height = crop.height;
                 if (FAILED(gpu->device->CreateTexture2D(&desc, nullptr, &slot->texture))) {
                     desc.BindFlags = 0;
                     if (FAILED(gpu->device->CreateTexture2D(&desc, nullptr, &slot->texture))) gpu.reset();
@@ -128,25 +133,38 @@ HRESULT Ring::capture(IMFSample *sample, UINT32 width, UINT32 height, Crop crop,
             SUCCEEDED(dxgi->GetResource(IID_PPV_ARGS(&texture))) && SUCCEEDED(dxgi->GetSubresourceIndex(&index))) {
             D3D11_TEXTURE2D_DESC desc{}; texture->GetDesc(&desc);
             ComPtr<ID3D11Device> owner; texture->GetDevice(&owner);
-            if (owner.Get() != gpu->device.Get() || desc.Format != DXGI_FORMAT_NV12 ||
+            if (desc.Format != DXGI_FORMAT_NV12 ||
                 index >= desc.MipLevels * desc.ArraySize || desc.Width < crop.x + crop.width || desc.Height < crop.y + crop.height)
                 return MF_E_INVALIDMEDIATYPE;
-            result->dxgiSource = true;
-            D3D11_BOX box{crop.x, crop.y, 0, crop.x + crop.width, crop.y + crop.height, 1};
-            gpu->context->CopySubresourceRegion((*free)->texture.Get(), 0, 0, 0, 0, texture.Get(), index, &box);
-        } else {
+            if (owner.Get() == gpu->device.Get()) {
+                result->dxgiSource = true;
+                D3D11_BOX box{crop.x, crop.y, 0, crop.x + crop.width, crop.y + crop.height, 1};
+                gpu->context->CopySubresourceRegion((*free)->texture.Get(), 0, 0, 0, 0, texture.Get(), index, &box);
+            }
+        }
+        if (!result->dxgiSource) {
             HRESULT hr = softwarePicture(sample, width, height, crop, result->bytes);
             if (FAILED(hr)) return hr;
             if (gpu) {
-                gpu->context->UpdateSubresource((*free)->texture.Get(), 0, nullptr, result->bytes.data(), crop.width, 0);
-                // Keep a software decoder’s original planes for GL drivers without texture interop.
+                const uint8_t *upload = result->bytes.data();
+                if (storageWidth != crop.width) {
+                    const UINT rows = crop.height + crop.height / 2;
+                    uploadRows.resize(size_t(storageWidth) * rows);
+                    for (UINT row = 0; row < rows; ++row) {
+                        auto *destination = uploadRows.data() + size_t(row) * storageWidth;
+                        std::memcpy(destination, upload + size_t(row) * crop.width, crop.width);
+                        // Extend the final luma texel or interleaved chroma pair into the padding.
+                        destination[crop.width] = destination[crop.width - (row < crop.height ? 1 : 2)];
+                        destination[crop.width + 1] = destination[crop.width - 1];
+                    }
+                    upload = uploadRows.data();
+                }
+                gpu->context->UpdateSubresource((*free)->texture.Get(), 0, nullptr, upload, storageWidth, 0);
             }
         }
-        if (gpu) {
-            result->slot = *free;
-            // All reads of this texture are submitted on its producing immediate context.
-            gpu->context->Flush();
-        }
+        // The compositor, GL import and readback all submit on this immediate
+        // context. Their commands follow the copy without a per-picture flush.
+        if (gpu) result->slot = *free;
         *out = result.release();
         return S_OK;
     } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
@@ -154,6 +172,7 @@ HRESULT Ring::capture(IMFSample *sample, UINT32 width, UINT32 height, Crop crop,
 }
 
 void *rune_media_picture_texture(const RuneMediaPicture *p) { return p && p->slot ? p->slot->texture.Get() : nullptr; }
+RunePictureInfo rune_media_picture_info(const RuneMediaPicture *p) { return p ? p->info : RunePictureInfo{}; }
 const uint8_t *rune_media_picture_bytes(const RuneMediaPicture *p) { return p && !p->bytes.empty() ? p->bytes.data() : nullptr; }
 int rune_media_picture_dxgi_source(const RuneMediaPicture *p) { return p && p->dxgiSource; }
 void rune_media_picture_release(RuneMediaPicture *p) { delete p; }

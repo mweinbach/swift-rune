@@ -52,7 +52,7 @@ internal final class DesktopMediaDecoder: @unchecked Sendable {
     private let nv12: RunePictureInfo
     #endif
 
-    init(source: DesktopMediaSource, kind: MediaKind, headless: Bool, packedRGB: Bool = false) throws {
+    init(source: DesktopMediaSource, kind: MediaKind, headless: Bool, packedRGB: Bool = false, inferAudio: Bool = false) throws {
         var info = RuneMediaInfo()
         var error = [CChar](repeating: 0, count: 512)
         #if os(Windows)
@@ -78,6 +78,10 @@ internal final class DesktopMediaDecoder: @unchecked Sendable {
                                    &info, diagnostic.baseAddress, diagnostic.count)
         }
         guard let handle else { throw Self.failure(error) }
+        if kind == .video && info.width == 0 && !inferAudio {
+            rune_media_close(handle)
+            throw NativeSurfaceError.importFailed("Media has no playable video track")
+        }
         guard info.width <= 16_384, info.height <= 16_384, (info.width == 0) == (info.height == 0) else {
             rune_media_close(handle)
             throw NativeSurfaceError.dimensionsOutOfRange(width: info.width, height: info.height)
@@ -168,18 +172,19 @@ internal final class DesktopMediaDecoder: @unchecked Sendable {
                 }
                 guard result >= 0 else { throw Self.failure(error) }
                 guard let picture else { return nil }
-                let format: SurfacePixelFormat = nv12.full_range == 0 ? .nv12Video : .nv12Full
-                let color: SurfaceColorInfo = nv12.bt709 == 0 ? .bt601 : .bt709
+                let info = rune_media_picture_info(picture)
+                let format: SurfacePixelFormat = info.full_range == 0 ? .nv12Video : .nv12Full
+                let color: SurfaceColorInfo = info.bt709 == 0 ? .bt601 : .bt709
                 if rune_media_picture_texture(picture) != nil {
-                    return .texture(WindowsDecodedPicture(handle: picture, width: width, height: height, format: format,
+                    return .texture(WindowsDecodedPicture(handle: picture, width: info.width, height: info.height, format: format,
                                                          color: color, orient: orient))
                 }
                 let owner = WindowsSoftwarePicture(picture)
                 guard let packed = rune_media_picture_bytes(picture) else {
                     throw NativeSurfaceError.importFailed("Media Foundation returned an empty NV12 picture")
                 }
-                let count = Int(width) * Int(height)
-                return .bytes(try ByteFrame(width: width, height: height, format: format, color: color,
+                let count = Int(info.width) * Int(info.height)
+                return .bytes(try ByteFrame(width: info.width, height: info.height, format: format, color: color,
                                             planes: [owner.plane(packed, count: count),
                                                      owner.plane(packed + count, count: count / 2)]))
             }

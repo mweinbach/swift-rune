@@ -14,7 +14,7 @@ try {
     $pixelResult | Write-Output
     if ($LASTEXITCODE) { throw "Video layer fixture failed (exit $LASTEXITCODE)" }
     if ($pixelResult -match '^PASS NV12') {
-        & swift run --package-path $PSScriptRoot PlayerProbe $clip
+        & swift run -c release --package-path $PSScriptRoot PlayerProbe $clip
         if ($LASTEXITCODE) { throw "Public Player fixture failed (exit $LASTEXITCODE)" }
     }
 } finally {

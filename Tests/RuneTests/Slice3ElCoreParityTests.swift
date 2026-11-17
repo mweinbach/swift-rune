@@ -29,7 +29,7 @@ struct Slice3ElCoreParityTests {
 
     @Test("A sibling window adopts the chosen families on its next draw and a new window starts in them")
     func siblingWindowsFollowFontFamilies() {
-        withFontFamilies(sans: "", mono: "") {
+        withFontFamilies(sans: "Inter", mono: "IBM Plex Mono") {
             func window() -> Runtime<Int> {
                 Runtime(state: 0, viewport: Vec2(240, 80)) { _, _ in
                     row().child(text("iiiiiiii").mono().key("label"))
@@ -41,7 +41,7 @@ struct Slice3ElCoreParityTests {
             first.setFontFamilies("Inter", "Inter")
             let chosen = first.frame(at: 0).primitives.filter { $0.kind == .glyph }.map(\.rect)
 
-            #expect(sibling.fontFamilies == ("", ""))
+            #expect(sibling.fontFamilies == ("Inter", "IBM Plex Mono"))
             #expect(sibling.hasPendingCommit && sibling.isStale)
             #expect(window().fontFamilies == ("Inter", "Inter"))
             let next = sibling.frame(at: 1).primitives.filter { $0.kind == .glyph }.map(\.rect)
@@ -66,7 +66,7 @@ struct Slice3ElCoreParityTests {
         }
         var original: [SIMD4<Float>] = []
         withFontFamilies(sans: "", mono: "") {
-            reader.setFontFamilies("Inter", "Inter")
+            reader.setFontFamilies("Inter", "IBM Plex Mono")
             original = reader.frame(at: 0).primitives.filter { $0.kind == .glyph }.map(\.rect)
         }
         let originalAdvance = advance
@@ -85,11 +85,13 @@ struct Slice3ElCoreParityTests {
         finished.wait()
         reader.update(at: 1) { state, _ in state += 1 }
         let next = reader.frame(at: 1).primitives.filter { $0.kind == .glyph }.map(\.rect)
-        #expect(reader.fontFamilies == ("Inter", "Inter"))
+        #expect(reader.fontFamilies == ("Inter", "IBM Plex Mono"))
         #expect(original.count == sample.count && next == original)
         #expect(originalAdvance > 0 && advance == originalAdvance)
         #expect(originalInk != nil && viewInk == originalInk)
-        #expect(TextMeasure.advance(sample, style: style) > advance)
+        withFontFamilies(sans: "Inter", mono: "Inter") {
+            #expect(TextMeasure.advance(sample, style: style) < advance)
+        }
     }
 
     @Test("runtime/event_log & event_markers: recording gating, input markers, secure key redaction, and 512/256 ring cap")

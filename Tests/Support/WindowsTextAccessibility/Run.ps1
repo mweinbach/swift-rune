@@ -30,8 +30,10 @@ try {
     Write-Output ("Rune text fixture SHA256 " + (Get-FileHash -LiteralPath $start.FileName -Algorithm SHA256).Hash)
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
+    $start.RedirectStandardError = $true
     $start.EnvironmentVariables['RUNE_OPEN_INACTIVE'] = '1'
     $app = [System.Diagnostics.Process]::Start($start)
+    $appErrors = $app.StandardError.ReadToEndAsync()
 
     $clientStart = New-Object System.Diagnostics.ProcessStartInfo
     $clientStart.FileName = (Resolve-Path $Client).Path
@@ -48,18 +50,23 @@ try {
         if ($app.HasExited) { throw "Rune exited with code $($app.ExitCode) while the UI Automation client was running." }
         if ([DateTime]::UtcNow -ge $deadline) { throw 'UI Automation probe timed out.' }
     }
-    if ($probe.ExitCode -ne 0) { throw "UI Automation probe failed with exit code $($probe.ExitCode). $($errors.Result)" }
+    if ($probe.ExitCode -ne 0) { throw "UI Automation probe failed with exit code $($probe.ExitCode)." }
     Write-Output $output.Result.Trim()
 } finally {
     if ($probe) {
         if (-not $probe.HasExited) { $probe.Kill(); $probe.WaitForExit() }
+        if ($errors -and $errors.Result) { Write-Output $errors.Result.Trim() }
         $probe.Dispose()
     }
     if ($app) {
         if (-not $app.HasExited) {
             $null = $app.CloseMainWindow()
-            if (-not $app.WaitForExit(1500)) { $app.Kill(); $app.WaitForExit() }
+            if (-not $app.WaitForExit(1500)) {
+                try { $app.Kill() } catch [System.InvalidOperationException] { if (-not $app.HasExited) { throw } }
+                $app.WaitForExit()
+            }
         }
+        if ($appErrors -and $appErrors.Result) { Write-Output $appErrors.Result.Trim() }
         $app.Dispose()
     }
     if ($clientBuild) { Remove-Item -Recurse -Force $clientBuild }

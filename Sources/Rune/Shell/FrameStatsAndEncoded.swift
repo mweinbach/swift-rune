@@ -115,7 +115,7 @@ public final class FrameReports<State> {
 
     /// Captures a timestamp only when an `onFrameEncoded` hook is present (`FrameReports::stamp`).
     public func stamp() -> Double? {
-        onFrameEncoded != nil ? ProcessInfo.processInfo.systemUptime : nil
+        onFrameEncoded != nil ? RuneExecutionContext.hostUptime : nil
     }
 
     /// Sets the display refresh carried on subsequent reports until changed (`FrameReports::set_refresh`).
@@ -151,7 +151,7 @@ public final class FrameReports<State> {
         record(
             FrameEncoded(
                 outcome: .unchanged,
-                at: ProcessInfo.processInfo.systemUptime,
+                at: RuneExecutionContext.hostUptime,
                 window: windowKey,
                 seq: reportCount,
                 presentsAt: presentsAt,
@@ -166,7 +166,7 @@ public final class FrameReports<State> {
         record(
             FrameEncoded(
                 outcome: .skipped,
-                at: ProcessInfo.processInfo.systemUptime,
+                at: RuneExecutionContext.hostUptime,
                 window: windowKey,
                 seq: reportCount,
                 refreshHz: refreshHz

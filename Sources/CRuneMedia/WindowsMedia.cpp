@@ -32,6 +32,9 @@ struct FrameSample {
     ComPtr<IMFSample> sample;
     LONGLONG time = 0;
     LONG stride = 0;
+    RunePictureInfo picture{};
+    UINT32 codedWidth = 0, codedHeight = 0;
+    rune_video::Crop crop{};
 };
 
 } // namespace
@@ -53,6 +56,9 @@ struct RuneMedia {
     bool nv12 = false;
     rune_video::Ring ring;
     RunePictureInfo picture{};
+    UINT32 nativeMatrix = 0;
+    UINT32 nativeRange = 0;
+    bool firstVideoSample = true;
     rune_video::Crop crop{};
     LONG stride = 0;
     UINT32 decodedWidth = 0;
@@ -100,10 +106,50 @@ HRESULT selectFormat(IMFSourceReader *reader, DWORD stream, REFGUID major, REFGU
     return hr;
 }
 
+void updateColor(RuneMedia &m, IMFMediaType *decoded) {
+    UINT32 matrix = MFGetAttributeUINT32(decoded, MF_MT_YUV_MATRIX, 0);
+    UINT32 range = MFGetAttributeUINT32(decoded, MF_MT_VIDEO_NOMINAL_RANGE, 0);
+    if (!matrix) matrix = m.nativeMatrix;
+    if (!range) range = m.nativeRange;
+    m.picture.bt709 = matrix == MFVideoTransferMatrix_BT709 ||
+        (matrix != MFVideoTransferMatrix_BT601 && m.picture.height >= 720);
+    m.picture.full_range = range == MFNominalRange_0_255;
+}
+
+HRESULT updateNV12Type(RuneMedia &m, IMFMediaType *decoded, UINT32 width, UINT32 height) {
+    if (width < 2 || height < 2 || width > 16384 || height > 16384) return MF_E_INVALIDMEDIATYPE;
+    rune_video::Crop crop{0, 0, width & ~1u, height & ~1u};
+    MFVideoArea area{};
+    UINT32 length = 0;
+    if (SUCCEEDED(decoded->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE, reinterpret_cast<UINT8 *>(&area), sizeof(area), &length)) &&
+        length == sizeof(area) && area.Area.cx > 0 && area.Area.cy > 0) {
+        crop.x = static_cast<UINT32>(std::max<int>(0, area.OffsetX.value)) & ~1u;
+        crop.y = static_cast<UINT32>(std::max<int>(0, area.OffsetY.value)) & ~1u;
+        if (crop.x >= width || crop.y >= height) return MF_E_INVALIDMEDIATYPE;
+        crop.width = std::min<UINT32>(area.Area.cx, width - crop.x) & ~1u;
+        crop.height = std::min<UINT32>(area.Area.cy, height - crop.y) & ~1u;
+    } else if (m.firstVideoSample && m.crop.width && m.crop.height &&
+               m.crop.x + m.crop.width <= width && m.crop.y + m.crop.height <= height) {
+        // A decoder may first report the visible size and then switch to
+        // macroblock-aligned storage without repeating the original aperture.
+        crop = m.crop;
+    }
+    if (!crop.width || !crop.height) return MF_E_INVALIDMEDIATYPE;
+    m.decodedWidth = width; m.decodedHeight = height;
+    m.crop = crop;
+    m.picture.width = crop.width; m.picture.height = crop.height;
+    m.picture.natural_width = crop.width;
+    UINT32 numerator, denominator;
+    if (SUCCEEDED(MFGetAttributeRatio(decoded, MF_MT_PIXEL_ASPECT_RATIO, &numerator, &denominator)) && numerator && denominator)
+        m.picture.natural_width = static_cast<UINT32>(std::min(double(UINT32_MAX), std::max(1.0, std::round(double(crop.width) * numerator / denominator))));
+    updateColor(m, decoded);
+    return S_OK;
+}
+
 HRESULT prepareReader(RuneMedia &m, bool audioOnly) {
     ComPtr<IMFAttributes> options;
     HRESULT hr = api().attributes(&options, 2);
-    if (SUCCEEDED(hr) && !m.nv12) hr = options->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
+    if (SUCCEEDED(hr)) hr = options->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
     if (SUCCEEDED(hr) && m.nv12) hr = options->SetUINT32(MF_SOURCE_READER_DISABLE_DXVA, !m.ring.gpu);
     if (SUCCEEDED(hr) && m.ring.gpu) hr = options->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, m.ring.gpu->manager.Get());
     if (SUCCEEDED(hr)) hr = options->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, !m.nv12 || m.ring.gpu != nullptr);
@@ -126,9 +172,10 @@ HRESULT prepareReader(RuneMedia &m, bool audioOnly) {
     if (!audioOnly) m.reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &video);
     m.reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, &audio);
     m.info.has_audio = audio != nullptr;
-    if (!video && !audio) return MF_E_INVALIDMEDIATYPE;
-    if (!video)
+    if (!video) {
+        if (!audio) return MF_E_INVALIDSTREAMNUMBER;
         return selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_AUDIO_STREAM, MFMediaType_Audio, MFAudioFormat_PCM);
+    }
 
     UINT32 numerator = 0, denominator = 0;
     if (SUCCEEDED(MFGetAttributeRatio(video.Get(), MF_MT_FRAME_RATE, &numerator, &denominator))
@@ -143,7 +190,9 @@ HRESULT prepareReader(RuneMedia &m, bool audioOnly) {
     if (SUCCEEDED(hr)) hr = m.reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
     if (FAILED(hr)) return hr;
     if (m.nv12) {
-        hr = selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_VIDEO_STREAM, MFMediaType_Video, MFVideoFormat_NV12);
+        hr = selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_VIDEO_STREAM, MFMediaType_Video, MFVideoFormat_NV12, sourceRotation);
+        if (FAILED(hr) && sourceRotation)
+            hr = selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_VIDEO_STREAM, MFMediaType_Video, MFVideoFormat_NV12);
     } else {
         hr = selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_VIDEO_STREAM, MFMediaType_Video, MFVideoFormat_RGB32, sourceRotation);
         if (FAILED(hr) && sourceRotation)
@@ -155,36 +204,13 @@ HRESULT prepareReader(RuneMedia &m, bool audioOnly) {
     if (SUCCEEDED(hr)) hr = MFGetAttributeSize(decoded.Get(), MF_MT_FRAME_SIZE, &m.decodedWidth, &m.decodedHeight);
     if (FAILED(hr)) return hr;
     if (m.nv12) {
-        if (m.decodedWidth < 2 || m.decodedHeight < 2 || m.decodedWidth > 16384 || m.decodedHeight > 16384)
-            return MF_E_INVALIDMEDIATYPE;
-        auto &c = m.crop;
-        c = {0, 0, m.decodedWidth & ~1u, m.decodedHeight & ~1u};
-        MFVideoArea area{};
-        UINT32 blobSize = 0;
-        if (SUCCEEDED(decoded->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE, reinterpret_cast<UINT8 *>(&area), sizeof(area), &blobSize)) &&
-            blobSize == sizeof(area) && area.Area.cx > 0 && area.Area.cy > 0) {
-            c.x = static_cast<UINT32>(std::max<int>(0, area.OffsetX.value)) & ~1u;
-            c.y = static_cast<UINT32>(std::max<int>(0, area.OffsetY.value)) & ~1u;
-            if (c.x >= m.decodedWidth || c.y >= m.decodedHeight) return MF_E_INVALIDMEDIATYPE;
-            c.width = std::min<UINT32>(area.Area.cx, m.decodedWidth - c.x) & ~1u;
-            c.height = std::min<UINT32>(area.Area.cy, m.decodedHeight - c.y) & ~1u;
-            if (!c.width || !c.height) return MF_E_INVALIDMEDIATYPE;
-        }
-        // Some source readers omit container colorimetry on the negotiated NV12
-        // type. It still describes the original YCbCr samples.
-        auto attribute = [&](REFGUID key) {
-            UINT32 value = MFGetAttributeUINT32(decoded.Get(), key, 0);
-            return value ? value : MFGetAttributeUINT32(video.Get(), key, 0);
-        };
-        UINT32 matrix = attribute(MF_MT_YUV_MATRIX);
-        auto &p = m.picture;
-        p.width = c.width; p.height = c.height; p.natural_width = c.width;
-        p.bt709 = matrix == MFVideoTransferMatrix_BT709 || (matrix != MFVideoTransferMatrix_BT601 && c.height >= 720);
-        p.full_range = attribute(MF_MT_VIDEO_NOMINAL_RANGE) == MFNominalRange_0_255;
-        if (SUCCEEDED(MFGetAttributeRatio(decoded.Get(), MF_MT_PIXEL_ASPECT_RATIO, &numerator, &denominator)) && numerator && denominator) {
-            p.natural_width = static_cast<UINT32>(std::min(double(UINT32_MAX), std::max(1.0, std::round(double(c.width) * numerator / denominator))));
-        }
-        m.info.width = c.width; m.info.height = c.height;
+        m.nativeMatrix = MFGetAttributeUINT32(video.Get(), MF_MT_YUV_MATRIX, 0);
+        m.nativeRange = MFGetAttributeUINT32(video.Get(), MF_MT_VIDEO_NOMINAL_RANGE, 0);
+        m.firstVideoSample = true;
+        m.crop = {};
+        hr = updateNV12Type(m, decoded.Get(), m.decodedWidth, m.decodedHeight);
+        if (FAILED(hr)) return hr;
+        m.info.width = m.crop.width; m.info.height = m.crop.height;
         m.info.rotation_clockwise = static_cast<int>(MFGetAttributeUINT32(decoded.Get(), MF_MT_VIDEO_ROTATION, sourceRotation));
         return S_OK;
     }
@@ -212,15 +238,19 @@ HRESULT readNext(RuneMedia &m, FrameSample &result) {
                                            &flags, &result.time, &result.sample);
         if (FAILED(hr)) return hr;
         if (flags & MF_SOURCE_READERF_ERROR) return E_FAIL;
-        if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
+        if ((flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) || (m.nv12 && m.firstVideoSample && result.sample)) {
             ComPtr<IMFMediaType> type;
             UINT32 w = 0, h = 0;
             GUID subtype{};
             if (FAILED(m.reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &type))
                 || FAILED(MFGetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, &w, &h))
                 || FAILED(type->GetGUID(MF_MT_SUBTYPE, &subtype))
-                || w != m.decodedWidth || h != m.decodedHeight || subtype != (m.nv12 ? MFVideoFormat_NV12 : MFVideoFormat_RGB32))
+                || subtype != (m.nv12 ? MFVideoFormat_NV12 : MFVideoFormat_RGB32))
                 return MF_E_INVALIDMEDIATYPE;
+            if (m.nv12) {
+                hr = updateNV12Type(m, type.Get(), w, h);
+                if (FAILED(hr)) return hr;
+            } else if (w != m.decodedWidth || h != m.decodedHeight) return MF_E_INVALIDMEDIATYPE;
             UINT32 stride = 0;
             if (SUCCEEDED(type->GetUINT32(MF_MT_DEFAULT_STRIDE, &stride)))
                 m.stride = static_cast<LONG>(stride);
@@ -228,6 +258,10 @@ HRESULT readNext(RuneMedia &m, FrameSample &result) {
         m.reachedEOF = (flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0;
         if (result.sample) {
             result.stride = m.stride;
+            result.picture = m.picture;
+            result.crop = m.crop;
+            result.codedWidth = m.decodedWidth; result.codedHeight = m.decodedHeight;
+            m.firstVideoSample = false;
             return S_OK;
         }
     }
@@ -258,9 +292,7 @@ HRESULT atTime(RuneMedia &m, LONGLONG target) {
             if (FAILED(hr)) return hr;
         }
         if (!m.next.sample || m.next.time > target) return S_OK;
-        m.current.sample.Attach(m.next.sample.Detach());
-        m.current.time = m.next.time;
-        m.current.stride = m.next.stride;
+        m.current = std::move(m.next);
     }
 }
 
@@ -368,18 +400,23 @@ static RuneMedia *openMedia(const char *uri, int audio_only, int headless, const
             catch (const std::bad_alloc &) { failure(error, capacity, "video device allocation", E_OUTOFMEMORY); return nullptr; }
         }
         hr = prepareReader(*m, audio_only != 0);
-        if (FAILED(hr) && m->ring.gpu) {
+        if (FAILED(hr) && hr != MF_E_INVALIDSTREAMNUMBER && m->ring.gpu) {
             m->reader.Reset();
             m->ring.gpu.reset();
             hr = prepareReader(*m, audio_only != 0);
         }
-        if (FAILED(hr) && m->nv12) {
+        if (FAILED(hr) && hr != MF_E_INVALIDSTREAMNUMBER && m->nv12) {
             m->reader.Reset();
             m->nv12 = false;
             hr = prepareReader(*m, audio_only != 0);
         }
     }
-    if (FAILED(hr)) { failure(error, capacity, "opening stream", hr); return nullptr; }
+    if (FAILED(hr)) {
+        if (hr == MF_E_INVALIDSTREAMNUMBER && error && capacity)
+            std::snprintf(error, capacity, "Media has no playable %s track", audio_only ? "audio" : "video");
+        else failure(error, capacity, "opening stream", hr);
+        return nullptr;
+    }
     *info = m->info;
     if (picture) *picture = m->nv12 ? m->picture : RunePictureInfo{};
     return m.release();
@@ -440,7 +477,8 @@ int rune_media_picture(RuneMedia *m, double seconds, double retainingTime, RuneM
         HRESULT hr = selectFrame(m, seconds);
         if (hr != S_OK) return hr;
         if (retainingTime >= 0 && retainingTime == double(m->current.time) / ticksPerSecond) return S_FALSE;
-        return m->ring.capture(m->current.sample.Get(), m->decodedWidth, m->decodedHeight, m->crop, picture);
+        auto &sample = m->current;
+        return m->ring.capture(sample.sample.Get(), sample.codedWidth, sample.codedHeight, sample.crop, picture);
     };
     HRESULT hr = apartment.ready() ? capture() : apartment.status;
     if (FAILED(hr) && apartment.ready() && m->ring.gpu &&
@@ -453,12 +491,13 @@ int rune_media_picture(RuneMedia *m, double seconds, double retainingTime, RuneM
         m->reachedEOF = false;
         m->lastDelivered = -1;
         hr = prepareReader(*m, false);
-        if (SUCCEEDED(hr) && (m->picture.width != expected.width || m->picture.height != expected.height ||
-            m->picture.full_range != expected.full_range || m->picture.bt709 != expected.bt709)) hr = MF_E_INVALIDMEDIATYPE;
+        if (SUCCEEDED(hr) && (m->picture.width != expected.width || m->picture.height != expected.height))
+            hr = MF_E_INVALIDMEDIATYPE;
         if (SUCCEEDED(hr)) hr = capture();
     }
     if (hr == S_FALSE) return 0;
     if (FAILED(hr)) { failure(error, capacity, "NV12 video picture", hr); return -1; }
+    (*picture)->info = m->current.picture;
     m->lastDelivered = m->current.time;
     return 1;
 }

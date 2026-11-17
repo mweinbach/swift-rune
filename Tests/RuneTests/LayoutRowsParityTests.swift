@@ -191,8 +191,7 @@ struct LayoutRowsParityTests {
         #expect(rt.growthRows[rowGKey]!.track.h == 40.0)
         #expect(!rt.reducedMotion && !rt.scene.reducedMotion)
 
-        var didRunView = true
-        rt.applyMeasurePass(
+        let result = rt.applyMeasurePass(
             measured,
             at: 0.0,
             cut: false,
@@ -202,9 +201,9 @@ struct LayoutRowsParityTests {
             commitColorSpring: nil,
             commitFollowEdge: false,
             commitCut: false,
-            prevMountedIds: Set(rt.nodeIndexById.keys),
-            didRunView: &didRunView
+            prevMountedIds: Set(rt.nodeIndexById.keys)
         )
+        #expect(result == .applied)
         #expect(rt.reducedMotion && rt.scene.reducedMotion)
         #expect(rt.growthRows[rowGKey]!.track.h == 160.0)
     }

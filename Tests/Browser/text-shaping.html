@@ -31,6 +31,34 @@ try {
         }
     }
     await runeTextFontsReady(memory);
+    // A metrics-only line should be usable without forcing DOM layout. Range coordinates must
+    // stay relative to the span when a later configuration changes its position.
+    const boundsDescriptor = Object.getOwnPropertyDescriptor(HTMLSpanElement.prototype, 'getBoundingClientRect');
+    const spanBounds = HTMLSpanElement.prototype.getBoundingClientRect;
+    let reads = 0, measuredSpan, probe;
+    HTMLSpanElement.prototype.getBoundingClientRect = function () {
+        reads++;
+        measuredSpan = this;
+        return spanBounds.call(this);
+    };
+    try {
+        bytes.set(utf8.encode('Inter'), 256);
+        bytes.set(utf8.encode('abc'), 512);
+        probe = host.create(512, 3, 256, 5, 16, 400, 0, 0, 1, 0, 40);
+        host.configure(probe, 0, 0, 0, 0, 0, 0, 0, 40);
+        check(reads === 0, 'Measuring forced a span layout');
+        const first = host.caret(probe, 1);
+        host.caret(probe, 2);
+        check(first > 0 && reads === 1, 'Caret queries did not share the span origin');
+        measuredSpan.style.transform = 'translateX(31px)';
+        host.configure(probe, 0, 0, 0, 0, 0, 0, 0, 40);
+        check(reads === 1 && Math.abs(host.caret(probe, 1) - first) < 0.01 && reads === 2,
+            'The reconfigured line reused a stale span origin');
+    } finally {
+        if (probe) host.release(probe);
+        if (boundsDescriptor) Object.defineProperty(HTMLSpanElement.prototype, 'getBoundingClientRect', boundsDescriptor);
+        else delete HTMLSpanElement.prototype.getBoundingClientRect;
+    }
     function shape(text, direction = 0, features = '', stack = 'Inter') {
         const input = utf8.encode(text);
         const stackBytes = utf8.encode(stack);
@@ -109,6 +137,6 @@ try {
         combiningInk: combining.ink, arabicInk: arabic.ink, hebrewVisualPositions: hebrew.map(c => c.x),
         colorEmojiPixels: emoji.colorPixels, kernedAdvance: kern });
 } catch (error) {
-    document.querySelector('#result').textContent = String(error.stack || error);
+    document.querySelector('#result').textContent = 'FAIL ' + error.message + '\n' + (error.stack ?? '');
 }
 </script>

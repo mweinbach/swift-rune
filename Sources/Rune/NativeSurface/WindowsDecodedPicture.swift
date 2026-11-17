@@ -3,7 +3,7 @@ import CRuneMedia
 import CRuneWin32
 import Foundation
 
-/// One immutable NV12 decoder-ring slot. Its encoded planes stay in D3D memory until requested by a CPU reader.
+/// Holds an immutable NV12 decoder-ring slot and any packed planes supplied by a software decoder.
 public final class WindowsDecodedPicture: @unchecked Sendable {
     private let handle: OpaquePointer
     internal let width: UInt32

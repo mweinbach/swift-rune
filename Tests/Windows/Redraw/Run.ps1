@@ -5,7 +5,7 @@ $scratch = Join-Path ([IO.Path]::GetTempPath()) ('RuneRedraw-' + [guid]::NewGuid
 [void][IO.Directory]::CreateDirectory($scratch)
 Push-Location $scratch
 try {
-    $sources = @('Win32.c', 'CpuDib.c', 'WGLWorker.c', 'LazyGL.c', 'CustomFrame.c', 'WindowLifecycle.c', 'GroupWake.c', 'Occlusion.c', 'OverlayPointer.c') |
+    $sources = @('Win32.c', 'LazyGL.c', 'CpuDib.c', 'WGLWorker.c', 'LazyGL.c', 'CustomFrame.c', 'WindowLifecycle.c', 'GroupWake.c', 'Occlusion.c', 'OverlayPointer.c') |
         ForEach-Object { Join-Path $bridge $_ }
     $gpu = @('WGLHandover.cpp', 'PresentDXGI.cpp', 'PresentQueue.cpp', 'PresentInterop.cpp', 'SharedTexture.cpp') |
         ForEach-Object { Join-Path $bridge $_ }

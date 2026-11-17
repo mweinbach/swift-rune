@@ -1456,6 +1456,7 @@ public final class InteractionTracker {
         testSlowReports.removeAll()
         testSlowFrameReports.removeAll()
         testRollups.removeAll()
+        FrameProfiling.observe(FrameProfiling.interaction, false)
         RuneExecutionContext.locals.removeObject(forKey: phaseDictKey)
     }
 

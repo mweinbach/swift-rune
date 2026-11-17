@@ -53,7 +53,7 @@ extension El {
     public func singleLine(_ on: Bool = true) -> Self {
         var c = self
         c.isSingleLineInput = on
-        if c.handlers.editLens != nil {
+        if c.hasEditLens {
             c.textStyle.wrap = on ? .noWrap : .wrap
         }
         return c
@@ -200,7 +200,7 @@ extension El {
     }
 
     private func setOneLineElide(_ elide: TextElide) -> Self {
-        if handlers.editLens != nil { return self }
+        if hasEditLens { return self }
         var c = self
         c.textStyle.wrap = .ellipsis
         c.textStyle.elide = elide
@@ -226,7 +226,7 @@ extension El {
 
     /// Clamps wrapped text after `lines` lines with `"…"` ending the last (`El::max_lines`).
     public func maxLines(_ lines: Int) -> Self {
-        if handlers.editLens != nil { return self }
+        if hasEditLens { return self }
         var c = self
         c.textStyle.wrap = .wrap
         c.textStyle.maxLines = max(0, lines)
@@ -273,7 +273,7 @@ extension El {
 
     /// Marks UTF-8 byte `range` of static text as a UAX #9 directional isolate (`El::isolate`).
     public func isolate(_ range: Range<Int>, _ dir: Direction) -> Self {
-        guard handlers.editLens == nil else { return self }
+        guard !hasEditLens else { return self }
         guard plainText != nil || richSpans != nil else { return self }
         let content = plainText ?? richSpans?.map(\.text).joined() ?? ""
         let len = content.utf8.count
@@ -299,7 +299,7 @@ extension El {
     internal func applyingIsolates() -> Self {
         let isolates = isolatesSpec
         guard !isolates.isEmpty,
-              handlers.editLens == nil,
+              !hasEditLens,
               advanceInRun == nil,
               !(isSecure && !isRevealed) else {
             return self

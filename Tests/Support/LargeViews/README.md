@@ -21,3 +21,9 @@ python3 Tests/Support/LargeViews/compare.py .build/scroll/swift .build/scroll/ru
 ```
 
 Use the same machine and quiet system conditions when comparing timings. The comparator checks dimensions, data row keys and visible geometry and reports pixel differences. Pass `--pixel-tolerance N` to enforce a maximum difference across every painted channel, or `--geometry-only` to compare production checkpoints and report native instance counts without reading pixel files. A `header` row counts toward total mounted table rows but sits outside the data row range. The final visible keys are `f1028` through `f1059` in the table and `pkg11/file88.rs` through `pkg12/file24.rs` in the tree.
+
+On a Mac with a visible Metal display, the native Rust fixture runs the original table and tree in normal Rune windows. AppKit sends one precise wheel directly to the app’s Winit view after each draw. The report checks the final row sequence and records the presentation time reported by each Metal drawable. It reports an FPS value when all 600 wheel events have distinct delivered timestamps.
+
+```sh
+python3 Tests/Support/LargeViews/rust-native.py /path/to/rust-rune .build/scroll/rust-mac
+```

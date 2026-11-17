@@ -27,6 +27,14 @@ struct WindowsTextParityTests {
         let renderer = try PortableGLRenderer(resolve: OffscreenGLContext.resolve, isGLES: OffscreenGLContext.isGLES)
         defer { renderer.close() }
         let support = renderer.prepareOutlineText(lcd: true)
+        func coverage(_ rgba: [UInt8]) -> (ink: Int, colored: Int) {
+            var ink = 0, colored = 0
+            for i in stride(from: 0, to: rgba.count, by: 4) {
+                if rgba[i] > 100 { ink += 1 }
+                if abs(Int(rgba[i]) - Int(rgba[i + 2])) > 3 { colored += 1 }
+            }
+            return (ink, colored)
+        }
         for smoothing: FontSmoothing in [.directWrite, .clearType] {
             let runtime = Runtime<Int>(state: 0, viewport: Vec2(180, 68), pixelScale: 1) { _, _ in
                 text("DirectWrite").font(TextStyle(size: 21).smoothing(smoothing)).color(.white)
@@ -38,24 +46,22 @@ struct WindowsTextParityTests {
             #expect(frame.instances.contains { $0.params.y == KIND_GLYPH && $0.radii.x == (lcd ? 1 : 0) })
             #expect((frame.outlines?.requestsLCD ?? false) == lcd)
             let rendered = try context.withFramebuffer(width: frame.width, height: frame.height) { try renderer.draw(frame) }
-            var ink = 0, colored = 0
-            for i in stride(from: 0, to: rendered.rgba.count, by: 4) {
-                if rendered.rgba[i] > 100 { ink += 1 }
-                if abs(Int(rendered.rgba[i]) - Int(rendered.rgba[i + 2])) > 3 { colored += 1 }
-            }
-            #expect(ink > 20)
-            #expect((colored > 0) == lcd)
+            let gpu = coverage(rendered.rgba)
+            #expect(gpu.ink > 20)
+            #expect((gpu.colored > 0) == lcd)
+            var cpuFrame = frame
             if smoothing == .clearType && !support.lcd {
-                // Exercise per-channel placement and the CPU painter on Windows GPUs
-                // which correctly negotiated the grayscale fallback above.
+                // CpuBoot can paint each coverage channel on every Windows adapter.
                 runtime.textSystem.outlineRendererSupport = { _ in (true, true) }
-                let rgb = runtime.renderFrame(at: 0.1)
-                #expect(rgb.outlines?.requestsLCD == true)
-                var target = CpuBootTarget(width: rgb.width, height: rgb.height)
-                _ = try CpuBoot.paint(CpuBootScene(frame: rgb, lcd: true), into: &target, threads: 1)
-                let pixels = target.toRGBA8Tight()
-                #expect(stride(from: 0, to: pixels.count, by: 4).contains { abs(Int(pixels[$0]) - Int(pixels[$0 + 2])) > 3 })
+                cpuFrame = runtime.renderFrame(at: 0.1)
             }
+            let cpuLCD = smoothing == .clearType
+            #expect((cpuFrame.outlines?.requestsLCD ?? false) == cpuLCD)
+            var target = CpuBootTarget(width: cpuFrame.width, height: cpuFrame.height)
+            _ = try CpuBoot.paint(CpuBootScene(frame: cpuFrame, lcd: cpuLCD), into: &target, threads: 1)
+            let cpu = coverage(target.toRGBA8Tight())
+            #expect(cpu.ink > 20)
+            #expect((cpu.colored > 0) == cpuLCD)
         }
     }
 

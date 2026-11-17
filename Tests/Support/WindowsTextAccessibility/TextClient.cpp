@@ -46,7 +46,13 @@ static BOOL CALLBACK findWindow(HWND hwnd, LPARAM data) {
     return FALSE;
 }
 
-static ComPtr<IUIAutomationElement> field(IUIAutomation *uia, IUIAutomationElement *window, const wchar_t *id) {
+static bool waitingForProvider(HRESULT hr) {
+    return hr == E_UNEXPECTED || hr == UIA_E_ELEMENTNOTAVAILABLE ||
+           hr == UIA_E_TIMEOUT || hr == HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+}
+
+static ComPtr<IUIAutomationElement> field(IUIAutomation *uia, IUIAutomationElement *window,
+                                          const wchar_t *id, bool publishing = false) {
     VARIANT value{};
     value.vt = VT_BSTR;
     value.bstrVal = SysAllocString(id);
@@ -56,7 +62,18 @@ static ComPtr<IUIAutomationElement> field(IUIAutomation *uia, IUIAutomationEleme
     VariantClear(&value);
     check(hr, "CreatePropertyCondition");
     ComPtr<IUIAutomationElement> result;
-    check(window->FindFirst(TreeScope_Descendants, condition.Get(), &result), "Finding field");
+    hr = window->FindFirst(TreeScope_Descendants, condition.Get(), &result);
+    if (publishing && waitingForProvider(hr)) {
+        static ULONGLONG previousReport = 0;
+        const auto now = GetTickCount64();
+        if (now - previousReport >= 1000) {
+            std::fprintf(stderr, "Awaiting AutomationId=%ls (HRESULT 0x%08lx)\n", id, static_cast<unsigned long>(hr));
+            previousReport = now;
+        }
+        return {};
+    }
+    if (FAILED(hr)) std::fprintf(stderr, "FindFirst AutomationId=%ls\n", id);
+    check(hr, "Finding field");
     return result;
 }
 
@@ -445,11 +462,14 @@ static void checkDialogPatterns(IUIAutomation *uia, IUIAutomationElement *window
     require(invoke.Get() != nullptr, "Confirmation button cannot be invoked");
     check(invoke->Invoke(), "Open modal dialog");
     ComPtr<IUIAutomationElement> modal;
-    waitFor([&] { modal = field(uia, window, L"modal-dialog"); return modal.Get() != nullptr; }, "Missing modal dialog");
+    waitFor([&] { modal = field(uia, window, L"modal-dialog", true); return modal.Get() != nullptr; }, "Missing modal dialog");
     checkDialog(modal.Get(), L"dialog", TRUE);
 }
 
 static void run(DWORD pid) {
+    auto report = [](const char *stage) {
+        if (std::getenv("RUNE_UIA_TEST_TRACE")) std::fprintf(stderr, "UIA passed: %s\n", stage);
+    };
     ComPtr<IUIAutomation> uia;
     check(CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&uia)),
           "Create UI Automation client");
@@ -459,22 +479,24 @@ static void run(DWORD pid) {
         if (!target.hwnd) EnumWindows(findWindow, reinterpret_cast<LPARAM>(&target));
         if (!target.hwnd) return false;
         HRESULT hr = uia->ElementFromHandle(target.hwnd, &window);
-        if (hr == UIA_E_TIMEOUT || hr == HRESULT_FROM_WIN32(ERROR_TIMEOUT) || hr == UIA_E_ELEMENTNOTAVAILABLE)
-            return false;
+        if (waitingForProvider(hr)) return false;
         check(hr, "Resolving Rune window");
         if (!window.Get()) return false;
-        editor = field(uia.Get(), window.Get(), L"editor");
-        password = field(uia.Get(), window.Get(), L"password");
-        document = field(uia.Get(), window.Get(), L"document");
+        editor = field(uia.Get(), window.Get(), L"editor", true);
+        password = field(uia.Get(), window.Get(), L"password", true);
+        document = field(uia.Get(), window.Get(), L"document", true);
         return editor.Get() && password.Get() && document.Get();
     }, "The Swift fixture did not publish its text fields", 120000);
     checkEditor(editor.Get());
     checkPassword(password.Get());
+    report("Unicode editing, caret, glyph geometry and password protection");
     checkLargeDocument(document.Get(), editor.Get());
     checkDocumentStructure(uia.Get(), window.Get());
+    report("long text, scrolling, headings and landmarks");
     auto revision = field(uia.Get(), window.Get(), L"revision");
     require(revision.Get() != nullptr, "Revision editor missing");
     checkRetainedRange(revision.Get());
+    report("retained ranges and shaped Unicode word navigation");
     checkDialogPatterns(uia.Get(), window.Get());
     std::puts("Rune UIA verified Unicode text, visible ranges, graphemes, selection, caret attributes, "
               "password redaction, long-document hit testing, ScrollItem and TextRange scrolling, headings, "

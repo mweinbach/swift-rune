@@ -31,7 +31,7 @@
 
 static UINT taskbar_created;
 static _Thread_local RuneWinWindow *painting_window;
-static _Thread_local BOOL input_since_paint;
+static _Thread_local unsigned input_windows_awaiting_frame;
 static _Thread_local int waiting_for_messages, dispatch_depth;
 
 BOOL rune_win_idle_for_session(void) { return waiting_for_messages && !dispatch_depth; }
@@ -95,6 +95,8 @@ struct RuneWinWindow {
     LARGE_INTEGER first_ask;
     LONGLONG starve_ticks;
     int defer_startup_hooks;
+    uint64_t input_generation, painting_input_generation;
+    BOOL input_frame_pending;
     RuneDXGIPresenter *dxgi;
     int checked_dxgi, vsync;
     int32_t refresh_hz;
@@ -146,7 +148,15 @@ void rune_win_enable_redraw_turns(RuneWinWindow *w) {
     }
 }
 
+static void clear_input_frame(RuneWinWindow *w) {
+    if (w->input_frame_pending) {
+        w->input_frame_pending = FALSE;
+        --input_windows_awaiting_frame;
+    }
+}
+
 int32_t rune_win_end_redraw_turn(RuneWinWindow *w, int32_t uncovered) {
+    if (!uncovered || !w->running) clear_input_frame(w);
     if (!w->running) return 0;
     if (w->redraw == redraw_wants) {
         ask_redraw(w);
@@ -169,6 +179,20 @@ int32_t rune_win_end_redraw_turn(RuneWinWindow *w, int32_t uncovered) {
 
 static int emit(RuneWinWindow *w, RuneWinEvent event) {
     if (!w->dispatch) return 0;
+    if (w->defer_startup_hooks && w->lifecycle.presented && w->visible && w->running) {
+        switch (event.kind) {
+        case RUNE_WIN_MOVE: case RUNE_WIN_DOWN: case RUNE_WIN_UP: case RUNE_WIN_WHEEL:
+        case RUNE_WIN_KEY_DOWN: case RUNE_WIN_KEY_UP: case RUNE_WIN_CHAR:
+        case RUNE_WIN_IME_PREEDIT: case RUNE_WIN_IME_COMMIT:
+            ++w->input_generation;
+            if (!w->input_frame_pending) {
+                w->input_frame_pending = TRUE;
+                ++input_windows_awaiting_frame;
+            }
+            break;
+        default: break;
+        }
+    }
     ++dispatch_depth;
     int result = w->dispatch(w->context, &event);
     --dispatch_depth;
@@ -270,8 +294,6 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)w);
     }
     if (!w) return DefWindowProcW(hwnd, msg, wp, lp);
-    if ((msg >= WM_KEYFIRST && msg <= WM_KEYLAST) || (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST))
-        input_since_paint = TRUE;
 
     if (taskbar_created && msg == taskbar_created) {
         emit(w, (RuneWinEvent){.kind = RUNE_WIN_TASKBAR_CREATED});
@@ -288,6 +310,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == 7 && w->lifecycle.registered) emit(w, (RuneWinEvent){.kind = RUNE_WIN_SESSION_LOCK});
         break;
     case WM_NCDESTROY:
+        clear_input_frame(w);
         if (w->worker) {
             rune_wgl_worker_close(w->worker);
             w->worker = NULL;
@@ -376,7 +399,6 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (w->cpu_first && !w->handed && rune_win_dib_paint(&w->dib, (HDC)wp, NULL)) return 0;
         break;
     case WM_PAINT: {
-        input_since_paint = FALSE;
         PAINTSTRUCT paint;
         HDC paint_dc = BeginPaint(hwnd, &paint);
         if (w->cpu_first && !w->handed && !IsRectEmpty(&paint.rcPaint))
@@ -405,7 +427,10 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (w->cpu_first) w->gpu_failed = 1;
                 else w->context_failed = 1;
             }
+            uint64_t outer_input = w->painting_input_generation;
+            w->painting_input_generation = w->input_generation;
             int next = w->context_failed ? -2 : emit(w, (RuneWinEvent){.kind = RUNE_WIN_FRAME});
+            w->painting_input_generation = outer_input;
             painting_window = outer;
             if (restore_gl && (rune_lazy_wglGetCurrentContext() != previous_gl || rune_lazy_wglGetCurrentDC() != previous_dc) &&
                 !rune_lazy_wglMakeCurrent(previous_dc, previous_gl)) {
@@ -858,11 +883,13 @@ int32_t rune_win_input_waiting(void) {
 }
 
 int32_t rune_win_startup_may_run(int32_t dispatched_paint) {
-    if (rune_win_input_waiting()) return 0;
+    // An internal GDI paint or a frame waiting for a GPU slot need not have
+    // a WM_PAINT available to peek. Wait for the window that took the input.
+    if (input_windows_awaiting_frame || rune_win_input_waiting()) return 0;
     MSG msg;
     // A turn-end paint can precede the pump. Input dispatched after that paint
     // still gets its next requested frame before startup work.
-    return (dispatched_paint && !input_since_paint) ||
+    return dispatched_paint ||
            !PeekMessageW(&msg, NULL, WM_PAINT, WM_PAINT, PM_NOREMOVE | PM_QS_PAINT | PM_QS_POSTMESSAGE);
 }
 
@@ -964,6 +991,7 @@ int32_t rune_win_present_paced(RuneWinWindow *w) {
 }
 
 static void first_presentation(RuneWinWindow *w) {
+    if (w->painting_input_generation == w->input_generation) clear_input_frame(w);
     if (w->lifecycle.presented) return;
     if (w->defer_startup_hooks) KillTimer(w->hwnd, ready_timer);
     rune_lifecycle_presented(w->hwnd, &w->lifecycle);
@@ -1406,6 +1434,7 @@ void rune_win_gpu_abandon(RuneWinWindow *w) {
 
 void rune_win_destroy(RuneWinWindow *w) {
     if (!w) return;
+    clear_input_frame(w);
     w->dispatch = NULL;
     release_gpu(w);
     rune_win_dib_dispose(&w->dib);

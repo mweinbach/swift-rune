@@ -12,6 +12,9 @@ const result = document.querySelector('#result');
 const host = document.querySelector('#host'), canvas = host.querySelector('canvas');
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 function check(value, message) { if (!value) throw Error(message); }
+let frameRequests = 0;
+const nativeRAF = window.requestAnimationFrame;
+window.requestAnimationFrame = callback => { frameRequests++; return nativeRAF.call(window, callback); };
 let app;
 try {
     const wasi = new WASI(['wake-probe'], [], [new OpenFile(new File([])),
@@ -45,8 +48,10 @@ try {
     async function rest() {
         await wait(120);
         const count = calls;
+        const requested = frameRequests;
         await wait(120);
         check(count === calls, 'Idle polling entered WASI ' + (calls - count) + ' times');
+        check(requested === frameRequests, 'A resting app requested another animation frame');
     }
     function key(k) { canvas.dispatchEvent(new KeyboardEvent('keydown', {key:k, code:'Key'+k.toUpperCase()})); }
     await until(() => color && color[0] === 8, 'Initial frame');
@@ -76,9 +81,10 @@ try {
     const start = painted;
     key('a');
     await until(() => painted >= start + 4, 'Continuous animation');
-    result.textContent = 'PASS ' + JSON.stringify({renderer:app.renderer.api, idleCalls:0, waits, resizedWidth:width, animationFrames:painted-start});
+    result.textContent = 'PASS ' + JSON.stringify({renderer:app.renderer.api, idleCalls:0, idleFrameRequests:0,
+        waits, resizedWidth:width, animationFrames:painted-start});
 } catch (error) {
     result.textContent = 'FAIL ' + error.message;
     throw error;
-} finally { app?.dispose(); }
+} finally { app?.dispose(); window.requestAnimationFrame = nativeRAF; }
 </script>

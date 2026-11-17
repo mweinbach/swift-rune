@@ -670,7 +670,7 @@ extension Runtime {
     private func freshRasterCheck(_ settled: RenderFrame, frameOut: FrameOutput, at time: Double)
         -> (frame: RenderFrame, report: RasterCheckReport) {
         textSystem.forgetRasterState()
-        let fresh = buildRenderFrame(frameOut: frameOut, now: time)
+        let fresh = buildRenderFrame(frameOut: frameOut, now: time, freshRaster: true)
         return (fresh, RasterCheck.compare(settled, fresh, at: time))
     }
 
@@ -716,7 +716,8 @@ extension Runtime {
         }
     }
 
-    internal func buildRenderFrame(frameOut: FrameOutput, now: Double, publishHitGeometry: Bool = false) -> RenderFrame {
+    internal func buildRenderFrame(frameOut: FrameOutput, now: Double, publishHitGeometry: Bool = false,
+                                   freshRaster: Bool = false) -> RenderFrame {
         cyclePaint.begin()
         if publishHitGeometry { kitHooks.unseenPresence.beginFrame() }
         activePaintedLoopWake = nil
@@ -724,7 +725,7 @@ extension Runtime {
         beginPixelPaint()
         defer { finishPixelPaint() }
         beginPaintGlyphFrame(pinnedMask: 0)
-        textSystem.outlinePaths.beginFrame()
+        textSystem.beginOutlineFrame()
         let defaultForeground = cxSettings.viewDefaults.textForeground
         var outlineGeneration: UInt64?
         var usedOutlines = false
@@ -767,12 +768,12 @@ extension Runtime {
 
         elSliceRenderState.cacheScaleFramePending = false
         let commitGen = UInt64(viewCommitCount)
-        if labelDrawCommit != viewCommitCount {
+        if !freshRaster && labelDrawCommit != viewCommitCount {
             labelDraws.removeAll(keepingCapacity: true)
             labelDrawCommit = viewCommitCount
         }
         var nextLabelDraws: [NodeId: RetainedLabelDraws] = [:]
-        nextLabelDraws.reserveCapacity(labelDraws.count)
+        if !freshRaster { nextLabelDraws.reserveCapacity(labelDraws.count) }
 
         let scale = max(pixelScale, 0.5)
         let widthPx = max(1, Int((viewport.x * scale).rounded()))
@@ -869,13 +870,9 @@ extension Runtime {
         var loopSamples: [NodeId: LoopSampleResult] = [:]
         var nodeHoverFracById: [NodeId: Float] = [:]
         var nodePressById: [NodeId: (color: Color?, frac: Float)] = [:]
-        func collectHoverAndOwnOpacity(
-            _ n: FlatNode,
-            inheritedInert: Bool,
-            inheritedGroupFrac: Float,
-            inheritedPress: (color: Color?, frac: Float)
-        ) {
-            let effInert = inheritedInert || n.el.isInert
+        typealias InteractionScope = (inert: Bool, group: Float, press: (color: Color?, frac: Float))
+        func collectHoverAndOwnOpacity(_ n: FlatNode, scope: InteractionScope) -> InteractionScope {
+            let effInert = scope.inert || n.el.isInert
             let nid = n.nodeId
             if let parent = presentedById[nid]?.parent, exitingIds.contains(parent) { exitingIds.insert(nid) }
             let el = n.el
@@ -894,7 +891,7 @@ extension Runtime {
                 nodeId: nid,
                 el: el,
                 nodePath: n.path,
-                inheritedGroupFrac: inheritedGroupFrac
+                inheritedGroupFrac: scope.group
             )
             let ownOp = ((liveOp ?? presentedById[nid]?.opacity ?? el.opacity) * groupFactor * loopOp).clamped(to: 0...1)
             let ownHoverFrac = resolveNodeHoverFrac(n, inert: effInert)
@@ -904,28 +901,24 @@ extension Runtime {
                     let frac = (liveStore.get(Runtime.pressTrackId(nid), Runtime.pressProp) ?? (isPressedNode ? 1.0 : 0.0)).clamped(to: 0...1)
                     return (pc, frac)
                 }
-                return inheritedPress
+                return scope.press
             }()
             if ownOp != 1 || el.opacity != 1 { nodeOwnOpacityById[nid] = ownOp }
             if ownHoverFrac != 0 { nodeHoverFracById[nid] = ownHoverFrac }
             if ownPress.color != nil && ownPress.frac != 0 { nodePressById[nid] = ownPress }
 
             let isGroupScope = el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil
-            let nextGroupFrac = isGroupScope ? ownHoverFrac : inheritedGroupFrac
-            for child in topology.children(of: n) {
-                collectHoverAndOwnOpacity(
-                    renderNode(child),
-                    inheritedInert: effInert,
-                    inheritedGroupFrac: nextGroupFrac,
-                    inheritedPress: ownPress
-                )
-            }
+            return (effInert, isGroupScope ? ownHoverFrac : scope.group, ownPress)
         }
         let needsInteractionPrepass = topology.hasGroupOpacity || topology.hasPressColor || !topology.dissolveIndices.isEmpty
             || !loopRuntime.tracks.isEmpty || !exitingIds.isEmpty || !elSliceRenderState.groupFadeIds.isEmpty
         if needsInteractionPrepass {
-            for root in topology.roots {
-                collectHoverAndOwnOpacity(renderNode(root), inheritedInert: false, inheritedGroupFrac: 0, inheritedPress: (nil, 0))
+            var pending: [(slot: Int, scope: InteractionScope)] = []
+            for root in topology.roots.reversed() { pending.append((root, (false, 0, (nil, 0)))) }
+            while let (slot, parent) = pending.popLast() {
+                let node = renderNode(slot)
+                let scope = collectHoverAndOwnOpacity(node, scope: parent)
+                for child in topology.children(of: node).reversed() { pending.append((child, scope)) }
             }
         }
 
@@ -961,9 +954,21 @@ extension Runtime {
         var collectedRaisedNodes: [(node: FlatNode, offset: Int)] = []
         var raisedRanges: [(offset: Int, indices: Range<Int>)] = []
 
+        func subtreeContains(_ node: FlatNode, where predicate: (FlatNode) -> Bool) -> Bool {
+            if predicate(node) { return true }
+            var pending = Array(topology.children(of: node).reversed())
+            while let slot = pending.popLast() {
+                let child = renderNode(slot)
+                if predicate(child) { return true }
+                pending.append(contentsOf: topology.children(of: child).reversed())
+            }
+            return false
+        }
+
         @inline(never)
-        func hasDynamicInSubtree(_ n: FlatNode) -> Bool {
-            if presentedById[n.nodeId]?.isMoving == true
+        func hasDynamicInSubtree(_ node: FlatNode) -> Bool {
+            subtreeContains(node) { n in
+                presentedById[n.nodeId]?.isMoving == true
                 || loopSamples[n.nodeId] != nil
                 || exitingIds.contains(n.nodeId)
                 || activeTextFlights.contains(where: {
@@ -979,20 +984,13 @@ extension Runtime {
                 || n.el.runtimeExtras[RenderExtrasKey.effectSpec] != nil
                 || n.el.runtimeExtras["systemMaterial"] != nil
                 || n.el.backdropBlur > 0
-            {
-                return true
             }
-            for child in topology.children(of: n) {
-                if hasDynamicInSubtree(renderNode(child)) { return true }
-            }
-            return false
         }
 
         func hasLiveTextInSubtree(_ node: FlatNode) -> Bool {
-            node.el.liveText != nil || topology.children(of: node).contains { hasLiveTextInSubtree(renderNode($0)) }
+            subtreeContains(node) { $0.el.liveText != nil }
         }
 
-        @inline(never)
         func emitTextBackdropsAndPills(
             shaped: ShapedText,
             textLeft: Float,
@@ -1211,6 +1209,8 @@ extension Runtime {
             nodePaintHash: UInt64,
             elideCache: (sig: UInt64, relBounds: SIMD4<Float>, k: Float)?
         )
+
+        var pendingTextPaint: (() -> Void)?
 
         @inline(never)
         func paintNodeHeader(
@@ -2870,7 +2870,7 @@ extension Runtime {
                 )
                 let defaultTextColor = liveTextColor ?? el.textColor ?? defaultForeground
                 let textCol = resolvedInput.showingPlaceholder
-                    ? (el.placeholderColor ?? defaultTextColor.alpha(0.45))
+                    ? (el.placeholderColor ?? defaultForeground.alpha(0.4))
                     : defaultTextColor
                 let inputClipEdges = intersectClipRects(activeClip, boundsClipPx)
                 let inputWindow = rasterWindow(clip: inputClipEdges, originY: textTop * scale)
@@ -2925,6 +2925,19 @@ extension Runtime {
                     fade: activeFade,
                     rotated: parentIsRotated || abs(el.rotate) > 1e-4
                 )
+                if focused && edit.hasSelection && edit.preedit == nil && !resolvedInput.showingPlaceholder {
+                    let displayRange = resolvedInput.selectionRange(for: edit)
+                    let color = el.fieldSelectionColor(foreground: defaultForeground, active: windowFocused)
+                    let fill = premulSIMD4(color, opacity: localOpacity, srgb: srgbBlend)
+                    for box in textSystem.selectionRects(in: shaped, utf8Range: displayRange, pixelScale: inputBox.pixelScale) {
+                        let rect = TextBoxGeometry.pixelRect(origin: SIMD2(textLeft, textTop),
+                            box: SIMD4(box.x, box.y, max(2, box.z), box.w), k: SIMD2(sc.x, sc.y), pxScale: scale)
+                        instances.append(RenderInstance(rect: rect, radii: SIMD4(repeating: 2 * scale),
+                            fill: fill, border: .zero, params: SIMD4(0, KIND_RECT, 0, 1),
+                            uv: .zero, clip: inputClipEdges, fade: activeFade))
+                        marks.append(0)
+                    }
+                }
                 let departing = (el.spellcheck || resolvedInput.showingPlaceholder) && activeTextFlights.contains {
                     FlightSelector.selects($0.state.sourceKey, path: node.path, key: node.key)
                         && $0.state.alphas(target: $0.state.destination, now: now, reducedMotion: reducedMotion).source > 0
@@ -2991,7 +3004,7 @@ extension Runtime {
                     let height = caret.w * sc.y
                     newElements[myElementIndex].caret = [x, y, width, height]
                     if windowFocused {
-                        let color = el.caretColor ?? Tok.accent(0, dark: systemDark)
+                        let color = el.caretColor ?? defaultForeground
                         instances.append(RenderInstance(
                             rect: SIMD4(x * scale, y * scale, max(2, width * scale), height * scale),
                             radii: SIMD4(repeating: scale), fill: premulSIMD4(color, opacity: localOpacity, srgb: srgbBlend),
@@ -3001,9 +3014,8 @@ extension Runtime {
                     }
                 }
             }
-            if let editLens = el.handlers.editLens {
-                paintField(editLens.get(state))
-            } else if (el.plainText?.isEmpty == false) || (el.richSpans?.isEmpty == false) || el.advanceInRun != nil {
+            @inline(never)
+            func paintLabel() {
                 let resolvedText = ElDisplayResolver.resolveText(
                     el: el,
                     rawText: el.plainText,
@@ -3262,7 +3274,7 @@ extension Runtime {
                     ? wordRevealStore.mask(for: nid, text: resolvedText.displayedText, shaped: shaped, textSystem: textSystem, pixelScale: scale, now: revealClock)
                     : nil
                 let labelGlyphs = isTextFlightTarget ? [] : shaped.glyphs
-                let canRetain = restsExact && !forceScaled && !isRotatedScope && !inCacheScope
+                let canRetain = !freshRaster && restsExact && !forceScaled && !isRotatedScope && !inCacheScope
                     && glide == .zero && raster == nil && outlineMode == nil && !lcdMask
                     && inkMode == textSystem.smoothing && motionRasterGlyphs == nil
                     && el.plainText != nil && el.richSpans == nil && el.liveText == nil
@@ -3284,9 +3296,9 @@ extension Runtime {
                     let firstFixup = glyphFixups.count
                     var runBounds = SIMD4<Float>(.infinity, .infinity, -.infinity, -.infinity)
                     let baselines = restsExact ? TextBoxGeometry.roundedBaselines(originYPx: restOrigin.y, shaped: shaped) : []
-                let placements = TextBoxGeometry.GlyphPlacementBatch(shaped: shaped, atlas: textSystem.glyphAtlas,
-                                                                     exact: restsExact || raster != nil)
-                defer { placements?.finish() }
+                    let placements = TextBoxGeometry.GlyphPlacementBatch(shaped: shaped, atlas: textSystem.glyphAtlas,
+                                                                         exact: !freshRaster && (restsExact || raster != nil))
+                    defer { placements?.finish() }
                     var baselineLine = 0
                     for (index, glyph) in labelGlyphs.enumerated() {
                         let wordAlpha = wordFadeMask?.alpha(for: glyph) ?? 1.0
@@ -3294,8 +3306,8 @@ extension Runtime {
                         if gAlpha <= 0.0005 { continue }
                         let (gq, placement) = TextBoxGeometry.paintGlyph(
                             glyph, index: index, shaped: shaped, origin: restOrigin, scale: SIMD2<Float>(sc.x, sc.y), pixelScale: scale,
-                        restsExact: restsExact, baselines: baselines, line: &baselineLine, atlas: textSystem.glyphAtlas,
-                        raster: raster, placements: placements
+                            restsExact: restsExact, baselines: baselines, line: &baselineLine, atlas: textSystem.glyphAtlas,
+                            raster: raster, placements: placements
                         )
                         if !isRotatedScope && (placement.y + placement.w < shownY0 || placement.y > shownY1 ||
                                                placement.x + placement.z < glyphClipEdges.x || placement.x > glyphClipEdges.z) { continue }
@@ -3337,45 +3349,64 @@ extension Runtime {
                     }
                 }
             }
-            let focusOverlay = !hasActiveTextLinks(el) ? resolvedFocusRingOverlay(
-                el: el,
-                snapIndex: node.index,
-                snapPath: node.path,
-                isExiting: isExiting,
-                effectiveInert: effInert,
-                isFocused: focusedPath == node.path && !isExiting,
-                forceFocusRings: cxSettings.viewDefaults.forceFocusRings,
-                defaultRingOutline: cxSettings.viewDefaults.focusRing ?? Outline(width: 2.0, offset: el.focusRingOffset, color: Tok.accent(0, dark: systemDark)),
-                devRect: rectPx,
-                devRadii: radiiPx,
-                pxScale: scale
-            ) : nil
-            if focusOverlay == nil, let ol = el.elOutline, localOpacity > 0.0005 {
-                let avgScale = effRect.width > 0.001 ? (rectPx.z / (effRect.width * scale)) : 1.0
-                if let og = ShellSliceRenderHelpers.resolvedOutlineGeometry(
-                    outline: ol,
+            func finishPaint() {
+                let focusOverlay = !hasActiveTextLinks(el) ? resolvedFocusRingOverlay(
+                    el: el,
+                    snapIndex: node.index,
+                    snapPath: node.path,
+                    isExiting: isExiting,
+                    effectiveInert: effInert,
+                    isFocused: focusedPath == node.path && !isExiting,
+                    forceFocusRings: cxSettings.viewDefaults.forceFocusRings,
+                    defaultRingOutline: cxSettings.viewDefaults.focusRing ?? Outline(width: 2.0, offset: el.focusRingOffset, color: Tok.accent(0, dark: systemDark)),
                     devRect: rectPx,
                     devRadii: radiiPx,
-                    pxScale: scale,
-                    avgScale: avgScale
-                ) {
-                    instances.append(RenderInstance(
-                        rect: og.rect,
-                        radii: og.radii,
-                        fill: .zero,
-                        border: premulSIMD4(ol.color, opacity: localOpacity, srgb: srgbBlend),
-                        params: SIMD4<Float>(og.widthPx, KIND_RECT, 0, 1.0),
-                        uv: .zero,
-                        clip: activeClip,
-                        fade: activeFade
-                    ))
-                    marks.append(0)
+                    pxScale: scale
+                ) : nil
+                if focusOverlay == nil, let ol = el.elOutline, localOpacity > 0.0005 {
+                    let avgScale = effRect.width > 0.001 ? (rectPx.z / (effRect.width * scale)) : 1.0
+                    if let og = ShellSliceRenderHelpers.resolvedOutlineGeometry(
+                        outline: ol,
+                        devRect: rectPx,
+                        devRadii: radiiPx,
+                        pxScale: scale,
+                        avgScale: avgScale
+                    ) {
+                        instances.append(RenderInstance(
+                            rect: og.rect,
+                            radii: og.radii,
+                            fill: .zero,
+                            border: premulSIMD4(ol.color, opacity: localOpacity, srgb: srgbBlend),
+                            params: SIMD4<Float>(og.widthPx, KIND_RECT, 0, 1.0),
+                            uv: .zero,
+                            clip: activeClip,
+                            fade: activeFade
+                        ))
+                        marks.append(0)
+                    }
+                }
+                if currentInheritedMark != 0, markStartIdx < marks.count {
+                    for mIdx in markStartIdx..<marks.count where marks[mIdx] == 0 {
+                        marks[mIdx] = currentInheritedMark
+                    }
                 }
             }
-            if currentInheritedMark != 0, markStartIdx < marks.count {
-                for mIdx in markStartIdx..<marks.count where marks[mIdx] == 0 {
-                    marks[mIdx] = currentInheritedMark
+
+            // Enter the shaper and rasterizer after the geometry preparation frame has
+            // unwound. Native callbacks and Swift task workers can run on small stacks.
+            if let editLens = el.handlers.editLens {
+                let value = editLens.get(state)
+                pendingTextPaint = {
+                    paintField(value)
+                    finishPaint()
                 }
+            } else if (el.plainText?.isEmpty == false) || (el.richSpans?.isEmpty == false) || el.advanceInRun != nil {
+                pendingTextPaint = {
+                    paintLabel()
+                    finishPaint()
+                }
+            } else {
+                finishPaint()
             }
 
             return (true, subtreeDynamic, paintEffOpacity, effBlur, effRect, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, outerLayerStarts, cacheEligible, myElementIndex, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx, nodeScaleMotion, activeClip, activeFade, effScale, nodePaintHash, elideCache)
@@ -3608,6 +3639,10 @@ extension Runtime {
                         parentIsDissolve: context.dissolve, parentScaleMotion: context.scaleMotion,
                         parentElementIndex: context.element, parentInCache: context.inCache, parentIsRotated: context.rotated
                     )
+                    if let paint = pendingTextPaint {
+                        pendingTextPaint = nil
+                        paint()
+                    }
                     let children = topology.children(of: node)
                     if (h.continueSubtree || publishHitGeometry), let first = children.first {
                         let turn = (presentedById[node.nodeId]?.rotate ?? node.el.rotate) + (loopSamples[node.nodeId]?.rotation ?? 0)
@@ -3837,7 +3872,7 @@ extension Runtime {
         output.rawGlyphPagePatches = glyphAtlas.rawPatches
         output.elidedLayers = elidedLayers
         imagePacker.publish(into: &output)
-        labelDraws = nextLabelDraws
+        if !freshRaster { labelDraws = nextLabelDraws }
         return output
     }
 }

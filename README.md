@@ -4,6 +4,8 @@ A Swift 6.4 port of [anomalyco/rune](https://github.com/anomalyco/rune), a GPU-r
 
 Every `RuneApp` supports headless execution (`--snap`, `--tree`, `--script`, `--frames`, `--strip`) so UIs and automated tests can render PNGs, inspect the element tree, and drive scripted input without a window.
 
+To measure scrolling on your machine, run `swift run --package-path Tests/Support/LargeViews -c release ScrollBench table window`. Use `tree` for the 50,000-file tree. Both workloads replay 600 wheel events and verify the visible rows. The benchmark also supports CPU frame timings, pixel captures and comparison with the pinned Rust examples. [Large-view benchmark](Tests/Support/LargeViews/README.md)
+
 ## Architecture & Upstream Mapping
 
 `swift-rune` is organized as a SwiftPM workspace mirroring the crates of upstream `anomalyco/rune`:
@@ -178,7 +180,7 @@ xcrun swift run rune-ref check
 
 The same Swift view and runtime drive the Hello switch on desktop, Android, and the web. On the desktop, Rune draws its own controls in a native window and exposes their roles, values, and actions to the operating system’s accessibility service. The GPU draws instanced primitives and samples glyph and image atlases. Windows and Linux use OpenGL 3.3 core, Android uses OpenGL ES 3, browsers use WebGPU or WebGL 2, and Apple windows use Metal.
 
-Applications can supply packed pixel surfaces and custom GPU effects. Direct3D texture sharing and native Vulkan integration require additional desktop backends. The upstream map tracks remaining implementation differences at module level. [Upstream module map](.agents/skills/upstream-rune-sync/references/upstream-map.json)
+Applications can supply packed pixel surfaces and custom GPU effects. On Windows, `NativeSurface.pushShared(_:frameId:)` accepts named BGRA8 Direct3D textures on Rune’s adapter. The renderer uses WGL interop when the driver supports it and a staging copy otherwise. Native Vulkan rendering remains an upstream parity gap. [Windows shared-texture example](Tests/Support/WindowsSharedTexture) · [Upstream module map](.agents/skills/upstream-rune-sync/references/upstream-map.json)
 
 On macOS, Windows, and X11, `WindowHandle.placement()` reports the window's position and content bounds in physical pixels. Wayland gives the compositor control of global placement, so this call returns `nil` there. For a click-through overlay on Wayland, use a borderless window so the input region covers the whole visible surface.
 

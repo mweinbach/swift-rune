@@ -3265,6 +3265,7 @@ public final class TextSystem: @unchecked Sendable {
     /// Installed while constructing a frame for a renderer that can bind quadratic glyph records.
     internal var outlineRendererSupport: ((Bool) -> (outlines: Bool, lcd: Bool))?
     internal var outlinePaths = OutlinePaths()
+    private var outlinePathsRevision: UInt64 = 0
     public let glyphCache = GlyphReplayCache()
     public let colorIcons = ColorIconRasterizer()
     private var languageTagOverride: String?
@@ -3365,14 +3366,44 @@ public final class TextSystem: @unchecked Sendable {
         return _rasterRevision
     }
 
-    /// Forget glyph runs and their subpixel placement without discarding the atlas.
+    /// Forget placed glyph runs while retaining line breaks, native shapes and the atlas.
     public func forgetRasterState() {
         lock.lock()
-        shapeCache.removeAll(keepingCapacity: true)
-        elisionCache.removeAll(keepingCapacity: true)
+        shapeCache = shapeCache.filter { !$0.key.emitGlyphs }
+        layoutCache = layoutCache.mapValues { box in
+            guard box.hasGlyphs || box.windowPaint != nil else { return box }
+            // A previous frame or an active flight can still own the placed box.
+            // Clone its measurements and leave that snapshot untouched.
+            let measured = box.clone()
+            measured.lastUsedCommit = box.lastUsedCommit
+            measured.hasGlyphs = false
+            measured.shaped.glyphs = []
+            measured.shaped.lineGlyphRanges = []
+            measured.rasterWindow = nil
+            measured.desktopAtlasResets = nil
+            measured.desktopPages = []
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            measured.shaped.glyphPens = []
+            measured.shaped.glyphPlacements = nil
+            #elseif canImport(CRuneDesktopText)
+            measured.shaped.desktopRestingText = nil
+            measured.desktopRasterLayout = box.desktopRasterLayout
+            #endif
+            return measured
+        }
         _rasterRevision &+= 1
         lock.unlock()
         glyphCache.clear()
+    }
+
+    /// A fresh raster starts each outline path at rest, even just after a moving frame.
+    internal func beginOutlineFrame() {
+        let revision = rasterRevision
+        if outlinePathsRevision != revision {
+            outlinePaths = OutlinePaths()
+            outlinePathsRevision = revision
+        }
+        outlinePaths.beginFrame()
     }
 
     /// Drops cached layouts and typesetters while keeping rasterized glyph and icon atlases intact.

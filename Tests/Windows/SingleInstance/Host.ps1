@@ -1,7 +1,8 @@
 param([Parameter(Mandatory)][string]$Executable)
 $ErrorActionPreference = 'Stop'
 $exe = (Resolve-Path $Executable).Path
-$folder = Join-Path ([IO.Path]::GetTempPath()) ('rune-host-' + [guid]::NewGuid().ToString('N'))
+$parent = if ($env:RUNE_TEST_DIR) { $env:RUNE_TEST_DIR } else { [IO.Path]::GetTempPath() }
+$folder = Join-Path $parent ('rune-host-' + [guid]::NewGuid().ToString('N'))
 $id = 'org.rune.' + [guid]::NewGuid().ToString('N')
 $env:RUNE_HANDOFF_TEST_ID = $id
 $env:RUNE_HANDOFF_TEST_DIR = $folder
@@ -18,6 +19,14 @@ public static class RuneHandoffWindow {
     public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")]
     public static extern bool IsIconic(IntPtr window);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll")]
+    public static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    [DllImport("kernel32.dll")]
+    public static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+    [DllImport("kernel32.dll")]
+    public static extern bool CloseHandle(IntPtr handle);
 }
 '@
 function Wait-Until([scriptblock]$test, [string]$what) {
@@ -39,9 +48,24 @@ function Launch([string[]]$launchArgs) {
     & $exe send @launchArgs
     if ($LASTEXITCODE -ne 0) { throw "Second process exited $LASTEXITCODE" }
 }
+function Hold-Owner([int]$processId) {
+    # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, retained across process exit.
+    $handle = [RuneHandoffWindow]::OpenProcess(0x101000, $false, $processId)
+    if ($handle -eq [IntPtr]::Zero) { throw "Could not open PID $processId" }
+    return $handle
+}
+function Wait-ForCleanExit([IntPtr]$handle) {
+    if ([RuneHandoffWindow]::WaitForSingleObject($handle, 25000) -ne 0) { throw 'Owner did not exit in time' }
+    [uint32]$code = 0
+    if (-not [RuneHandoffWindow]::GetExitCodeProcess($handle, [ref]$code) -or $code -ne 0) {
+        throw "Owner exit code $code"
+    }
+}
 $owner = $null
+$processHandle = [IntPtr]::Zero
 try {
     $owner = Start-Process -FilePath $exe -ArgumentList @('owner','rune-check://cold1','rune-check://cold2') -PassThru -RedirectStandardError $stderr -RedirectStandardOutput $stdout
+    $processHandle = Hold-Owner $owner.Id
     Wait-Until { Has-Event 'claimed' } 'claim'
     Launch @('rune-check://before-window')
     New-Item -ItemType File (Join-Path $folder 'host.start') | Out-Null
@@ -57,21 +81,29 @@ try {
     Launch @()
     Wait-Until { (Has-Event 'reopen false') -and [RuneHandoffWindow]::IsWindowVisible($window) } 'reopened hidden HWND'
     Launch @('rune-check://quit')
-    if (-not $owner.WaitForExit(20000) -or $owner.ExitCode -ne 0) { throw 'Owner failed to finish' }
+    Wait-ForCleanExit $processHandle
     $expected = @('claimed','rune-check://cold1','rune-check://cold2','rune-check://before-window',
                   'rune-check://forwarded','reopen true','rune-check://hide','reopen false','rune-check://quit','ended')
     $actual = @((Read-Events) | Where-Object { $_ -ne 'ready' -and $_ -ne 'created' })
     if (($actual -join '|') -ne ($expected -join '|')) { throw "Unexpected owner events: $actual" }
     Write-Host "Owner HWND $window served: $actual"
     foreach ($mode in @('relaunch-tx', 'relaunch-handle')) {
-        $owner = Start-Process -FilePath $exe -ArgumentList $mode -PassThru -RedirectStandardError $stderr -RedirectStandardOutput $stdout
-        if (-not $owner.WaitForExit(25000) -or $owner.ExitCode -ne 0) { throw "$mode failed to exit" }
+        [void][RuneHandoffWindow]::CloseHandle($processHandle)
+        $processHandle = [IntPtr]::Zero
+        $owner.Dispose()
+        $owner = Start-Process -FilePath $exe -ArgumentList $mode -PassThru
+        $processHandle = Hold-Owner $owner.Id
+        Wait-ForCleanExit $processHandle
         $file = Join-Path $folder "$mode.successor"
         $deadline = [DateTime]::UtcNow.AddSeconds(25)
         while (-not (Test-Path $file) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 25 }
         $proof = (Get-Content -Raw $file) -split ' '
         if ($proof.Count -ne 3 -or [int]$proof[0] -eq $owner.Id -or [int]$proof[1] -ne $owner.Id -or $proof[2] -ne 'false') {
             throw "$mode successor did not open after its predecessor exited: $proof"
+        }
+        $successor = [RuneHandoffWindow]::OpenProcess(0x101000, $false, [uint32]$proof[0])
+        if ($successor -ne [IntPtr]::Zero) {
+            try { Wait-ForCleanExit $successor } finally { [void][RuneHandoffWindow]::CloseHandle($successor) }
         }
         Write-Host "$mode opened a successor: $proof"
     }
@@ -88,7 +120,15 @@ try {
     }
     throw
 } finally {
+    if ($processHandle -ne [IntPtr]::Zero) { [void][RuneHandoffWindow]::CloseHandle($processHandle) }
     if ($owner -and -not $owner.HasExited) { $owner.Kill(); $owner.WaitForExit() }
+    if ($owner) { $owner.Dispose() }
     Remove-Item Env:RUNE_HANDOFF_TEST_ID,Env:RUNE_HANDOFF_TEST_DIR
-    Remove-Item $folder -Recurse -Force
+    # Process redirection can keep its file open briefly after the kernel signals exit.
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        try { Remove-Item $folder -Recurse -Force; break } catch {
+            if ($attempt -eq 39) { throw }
+            Start-Sleep -Milliseconds 100
+        }
+    }
 }

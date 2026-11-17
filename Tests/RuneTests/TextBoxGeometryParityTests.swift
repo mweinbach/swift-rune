@@ -353,6 +353,7 @@ struct TextBoxGeometryParityTests {
                     if let foreground { cx.foreground(foreground) }
                     return text("Rune")
                 }
+                rt.srgbBlend = false
                 let expected = foreground ?? .white
                 let ink = SIMD4(expected.r, expected.g, expected.b, expected.a)
                 let reference = rt.frame(at: 0).primitives.filter { $0.params.y == glyphKind }
@@ -362,6 +363,42 @@ struct TextBoxGeometryParityTests {
                 #expect(native.allSatisfy { $0.fill == ink })
                 #expect(reference.map(\.rect) == native.map(\.rect))
             }
+        }
+    }
+
+    @Test("a field inherits its placeholder, caret and selection from the view foreground")
+    func fieldInkMatchesRustDefaults() {
+        struct State { var edit = TextEdit("") }
+        let glyph = Float(PrimitiveKind.glyph.rawValue)
+        let box = Float(PrimitiveKind.roundedRect.rawValue)
+        for foreground: Color? in [nil, Color(r: 0, g: 1, b: 0)] {
+            let runtime = Runtime(state: State(), viewport: Vec2(160, 40), pixelScale: 1, systemDark: false) { _, cx in
+                if let foreground { cx.foreground(foreground) }
+                return textInput(key: "field", \State.edit, spec: InputSpec(placeholder: "Rune"))
+                    .size(140, 34).color(.black)
+            }
+            runtime.srgbBlend = false
+            _ = runtime.frame(at: 0)
+            runtime.update { _, tx in tx.focus("field") }
+            let base = foreground ?? .white
+            let rgb = SIMD4(base.r, base.g, base.b, 1)
+            let placeholder = SIMD4(base.r, base.g, base.b, 0.4)
+            let reference = runtime.frame(at: 0.02).primitives
+            let native = runtime.renderFrame(at: 0.02).instances
+            #expect(reference.contains { $0.params.y == glyph && $0.fill == placeholder })
+            #expect(native.contains { $0.params.y == glyph && $0.fill == rgb * 0.4 })
+            #expect(reference.contains { $0.params.y == box && $0.fill == rgb })
+            #expect(native.contains { $0.params.y == box && $0.fill == rgb })
+
+            runtime.update { state, _ in
+                state.edit = TextEdit("Rune")
+                state.edit.selectAll()
+            }
+            let selection = SIMD4(base.r, base.g, base.b, 0.2)
+            let referenceRects = runtime.frame(at: 0.04).primitives.filter { $0.params.y == box && $0.fill == selection }
+            let nativeRects = runtime.renderFrame(at: 0.04).instances.filter { $0.params.y == box && $0.fill == rgb * 0.2 }
+            #expect(referenceRects.count == 1)
+            #expect(referenceRects.map(\.rect) == nativeRects.map(\.rect))
         }
     }
 

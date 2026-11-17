@@ -456,7 +456,7 @@ struct Slice4InputWave1CTests {
         _ = rt.frame(at: 0.06)
         #expect(rt.state.presses == 1)
 
-        // 2. osDragSupported = false falls back to normal onDrag.
+        // With OS drag disabled, releasing the ordinary drag inside also delivers its press.
         rt.state.offer = true
         rt.setOsDrag(false)
         rt.pointerMove(to: Vec2(20, 20), at: 0.07)
@@ -466,6 +466,7 @@ struct Slice4InputWave1CTests {
         _ = rt.frame(at: 0.11)
         #expect(rt.takeDragOutStart() == nil)
         #expect(rt.state.drags > 0)
+        #expect(rt.state.presses == 2)
 
         // 3. Untaken drag-out auto-cancels in order on next frame.
         rt.setOsDrag(true)
@@ -501,7 +502,7 @@ struct Slice4InputWave1CTests {
         rt.pointerDown(at: Vec2(20, 60), at: 0.28)
         rt.pointerUp(at: Vec2(20, 60), at: 0.29)
         _ = rt.frame(at: 0.30)
-        #expect(rt.state.presses == 1)
+        #expect(rt.state.presses == 2)
 
         // 6. Cursor swaps from exiting sibling `a` (.crosshair) to mounted sibling `b` (.hidden).
         rt.pointerMove(to: Vec2(20, 100), at: 0.31)

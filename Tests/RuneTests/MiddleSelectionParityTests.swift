@@ -43,6 +43,34 @@ struct MiddleSelectionParityTests {
         #expect(rt.slice2State.autoscroll.active == nil)
     }
 
+    @Test func latchedScrollKeepsSubpixelProgressAndItsOverdueFrame() throws {
+        let runtime = Runtime<Void>(state: (), viewport: Vec2(200, 120), pixelScale: 1) { _, _ in
+            col().key("view").size(200, 120).scroll(stickBottom: false)
+                .child(col().wFull().h(1_500_000).shrink(0))
+        }
+        _ = runtime.frame(at: 0)
+        runtime.update { _, tx in tx.scrollToInstant("view", x: 0, y: 1_000_000) }
+        _ = runtime.frame(at: 0.1)
+        let start = runtime.scrollOffset(forKey: "view").y
+        #expect(start == 1_000_000)
+        let origin = Vec2(60, 20)
+        #if os(Windows) || os(Linux)
+        runtime.pointerDown(at: origin, button: .middle, at: 0.2)
+        #else
+        runtime.startMiddleAutoscroll(at: origin, now: 0.2)
+        #endif
+        runtime.pointerUp(at: origin, button: .middle, at: 0.21)
+        runtime.pointerMove(to: Vec2(60, 36), at: 0.22)
+        runtime.fireMiddleAutoscroll(at: 0.220001)
+        #expect(runtime.scrollOffset(forKey: "view").y == start)
+        #expect(runtime.slice2State.autoscroll.wantsFrame)
+        #expect(runtime.nextWakeDeadline(after: 0.221) == 0.221)
+        for tick in 1...8 {
+            runtime.fireMiddleAutoscroll(at: 0.220001 + Double(tick) / 1_000)
+        }
+        #expect(runtime.scrollOffset(forKey: "view").y == 1_000_000.125)
+    }
+
     @Test func middleScrollReleaseSwallowsOnlyItsDismissalAndWheelKeepsPointer() {
         var scroller = MiddleAutoscroll()
         scroller.start(horizontal: "inner", vertical: "outer", origin: Vec2(0, 0), now: 1)
@@ -50,7 +78,7 @@ struct MiddleSelectionParityTests {
         #expect((scroller.active?.velocity.x ?? 0) < 0)
         #expect((scroller.active?.velocity.y ?? 0) > 0)
         let step = scroller.step(at: 4)
-        #expect(abs((step?.1.y ?? 0) - Float(0.04 * pow(80.0, 2.2) * 0.05)) < 0.01)
+        #expect(abs((step?.1.y ?? 0) - (0.04 * pow(80.0, 2.2) * 0.05)) < 0.01)
         let tookMiddle = scroller.release(.middle)
         #expect(tookMiddle)
         #expect(scroller.active == nil)

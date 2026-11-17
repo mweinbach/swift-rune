@@ -350,7 +350,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
     private let popups: WindowsPopup<State>
     private let taskbar: WindowsTaskbar
     let shared: AppShared<State>
-    let startedAt = ProcessInfo.processInfo.systemUptime
+    let startedAt = RuneExecutionContext.hostUptime
     private let followAppearance: Bool
     private let forceReducedMotion: Bool
     private let timeScale: Double
@@ -360,7 +360,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
     #if canImport(CRuneMedia)
     private lazy var videoLayers = WindowsVideoLayers(hwnd: rune_win_hwnd(window), wake: wake)
     #endif
-    private var elapsed: Double { (ProcessInfo.processInfo.systemUptime - startedAt) * timeScale }
+    private var elapsed: Double { (RuneExecutionContext.hostUptime - startedAt) * timeScale }
     private let app: App<State>
     private let reports: FrameReports<State>?
     private let nativeTrace: NativeWindowTrace?
@@ -374,7 +374,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
     var running: Bool { rune_win_running(window) > 0 }
     private var dpi = Win32DpiScale.baseDPI
     private var keyboard = Win32Keyboard()
-    private var first = WindowFirstFrame.opened(at: ProcessInfo.processInfo.systemUptime)
+    private var first = WindowFirstFrame.opened(at: RuneExecutionContext.hostUptime)
     var firstFrame: Bool { !first.notified }
     fileprivate var bootPhase = -1.0
     private var files: [DroppedFile] = []
@@ -477,7 +477,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
     var startupWorkOwed: Bool {
         // A queue full of app wakes can postpone WM_TIMER. Its deadline still
         // starts a hidden window on a busy thread, and the native timer wakes an idle one.
-        if let deadline = first.readyDeadline, deadline <= ProcessInfo.processInfo.systemUptime {
+        if let deadline = first.readyDeadline, deadline <= RuneExecutionContext.hostUptime {
             queueStartupWork()
         }
         return startupWork != .done
@@ -644,7 +644,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
         case .keep: break
         case .cancel: rune_win_rest_timer(window, -1)
         case .arm(let due):
-            let delay = max(1, ceil((due - ProcessInfo.processInfo.systemUptime) * 1000))
+            let delay = max(1, ceil((due - RuneExecutionContext.hostUptime) * 1000))
             rune_win_rest_timer(window, Int32(delay))
         }
         guard let effect else { return }
@@ -752,13 +752,15 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
         }
         do {
             if firstFrame { bootPhase = rune_win_boot_end("first_paint_dispatch", bootPhase) }
-            processRequests(at: now)
+            // UI Automation presses can request a window action while the app is idle.
+            // Deliver them before consuming requests so this paint can carry it out.
             _ = accessibility?.drainActions(runtime, at: now)
+            processRequests(at: now)
             // The first swap also reveals a DWM-cloaked window; looking before it would
             // classify its own startup cloak as cover and postpone the first presentation.
             var drawingCovered = false
             if !firstFrame && visible {
-                let wall = ProcessInfo.processInfo.systemUptime
+                let wall = RuneExecutionContext.hostUptime
                 if look.shouldLook(at: wall) {
                     foundWindow(seen: rune_win_is_covered(window) == 0, at: now, wall: wall)
                 }
@@ -790,19 +792,19 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
                 }
             }
             if drawingCovered {
-                _ = coveredDraw.takeDue(at: ProcessInfo.processInfo.systemUptime)
+                _ = coveredDraw.takeDue(at: RuneExecutionContext.hostUptime)
                 runtime.settleAll()
             }
             let paced = renderer != nil && rune_win_present_paced(window) != 0
             if visible { surfaceMeter.redraw(paced: paced) }
-            let began = ProcessInfo.processInfo.systemUptime
+            let began = RuneExecutionContext.hostUptime
             let commits = runtime.viewCommitCount
             nativeTrace?.begin(runtime, now: began, refreshHz: Double(rune_win_refresh_hz(window)))
             syncCaption()
             let frame = renderer?.frame(runtime, at: now) ?? runtime.renderFrame(at: now)
             if runtime.takeTitlebarChanged() { syncCaption() }
             if firstFrame { bootPhase = rune_win_boot_end("first_layout_text_encode", bootPhase) }
-            let encodedAt = ProcessInfo.processInfo.systemUptime
+            let encodedAt = RuneExecutionContext.hostUptime
             let updateMs = (encodedAt - began) * 1000
             if !dragSource.pending, let start = runtime.takeDragOutStart() {
                 let scale = Win32DpiScale.scaleFactor(forDPI: dpi)
@@ -822,7 +824,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
             let presentedFrame = frame
             #endif
             guard let draws = try present(presentedFrame, at: now, updateMilliseconds: updateMs) else { return -1 }
-            let submitted = ProcessInfo.processInfo.systemUptime
+            let submitted = RuneExecutionContext.hostUptime
             if firstFrame { bootPhase = rune_win_boot_end(renderer == nil ? "first_cpu_draw_total" : "first_gpu_draw_total", bootPhase) }
             runtime.interactionSubmitted(at: submitted)
             nativeTrace?.submitted(runtime, at: submitted, started: began,
@@ -891,7 +893,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
             }
             if requestedApplicationQuit { return -2 }
             if let frame = runtime.takeWindowFrameRequest() { windowFrame.apply(frame, to: window) }
-            if !cover.canDraw { return coveredDelay(at: now, wall: ProcessInfo.processInfo.systemUptime) }
+            if !cover.canDraw { return coveredDelay(at: now, wall: RuneExecutionContext.hostUptime) }
             if visible { popups.pump() }
             if runtime.isAnimating || app.compositorValue?.isAnimating == true || runtime.hasPendingCommit || runtime.livePending || nativeTrace?.keepsDrawing == true {
                 return RUNE_WIN_CONTINUE_MOTION
@@ -919,7 +921,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
 
         switch event.kind {
         case RUNE_WIN_MOVE, RUNE_WIN_DOWN, RUNE_WIN_UP, RUNE_WIN_WHEEL:
-            if visible { foundWindow(seen: true, at: now, wall: ProcessInfo.processInfo.systemUptime) }
+            if visible { foundWindow(seen: true, at: now, wall: RuneExecutionContext.hostUptime) }
         case RUNE_WIN_POSITION, RUNE_WIN_SIZE, RUNE_WIN_VISIBILITY:
             look = .due
         case RUNE_WIN_FOCUS where event.value != 0:
@@ -931,12 +933,12 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
         case RUNE_WIN_FRAME:
             return draw(at: now)
         case RUNE_WIN_READY_WITHOUT_FRAME:
-            first.skipped(at: ProcessInfo.processInfo.systemUptime)
+            first.skipped(at: RuneExecutionContext.hostUptime)
             queueStartupWork()
         case RUNE_WIN_SESSION_LOCK:
             Clipboard.shared.clearCurrentSecret()
         case RUNE_WIN_REST_TIMER:
-            stepRest(.woke(now: ProcessInfo.processInfo.systemUptime))
+            stepRest(.woke(now: RuneExecutionContext.hostUptime))
         case RUNE_WIN_TRIM_GPU:
             renderer?.giveBackForWindowRest(all: event.value != 0)
         case RUNE_WIN_TASKBAR_CREATED:
@@ -945,7 +947,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
             if !visible { processRequests(at: now, pollHidden: true) }
             else if !cover.canDraw {
                 processRequests(at: now)
-                coveredDraw.asked(at: ProcessInfo.processInfo.systemUptime)
+                coveredDraw.asked(at: RuneExecutionContext.hostUptime)
             }
         case RUNE_WIN_SIZE:
             dpi = event.dpi

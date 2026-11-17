@@ -9,7 +9,7 @@ extension Runtime {
 
     /// Host wall time elapsed since `wallStart` (`Runtime::wall_clock`), or `nil` headless.
     internal func wallClock() -> Double? {
-        wallStart.map { ProcessInfo.processInfo.systemUptime - $0 }
+        wallStart.map { RuneExecutionContext.hostUptime - $0 }
     }
 
     /// Current logical clock in seconds: real elapsed wall clock when driven by `wallStart`,

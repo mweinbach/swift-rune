@@ -66,6 +66,13 @@ public struct SelectionStyle: Hashable, Sendable {
     }
 }
 
+extension El {
+    internal func fieldSelectionColor(foreground: Color, active: Bool) -> Color {
+        resolvedSelectionStyle?.pick(active: active).highlight ?? selectionColor
+            ?? (caretColor == nil ? foreground : .white).alpha(0.2)
+    }
+}
+
 private final class SelectionChangeBox<State> {
     let handler: (inout State, SelectionChange, inout Tx) -> Void
     init(_ handler: @escaping (inout State, SelectionChange, inout Tx) -> Void) {

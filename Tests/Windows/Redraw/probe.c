@@ -24,8 +24,8 @@ static double now_ms(void) {
 }
 
 static void ask(View *view) {
-    // Pointer input takes the same request-redraw path as ordinary app input.
-    SendMessageW(view->hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(12, 16));
+    // Unlike mouse movement, wheel input does not arm an independent WM_MOUSELEAVE.
+    SendMessageW(view->hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA), MAKELPARAM(12, 16));
 }
 
 static int32_t receive(void *context, const RuneWinEvent *event) {
@@ -75,6 +75,7 @@ static int crowd(View *front, View *back) {
     for (int i = 0; i < 8; ++i) CHECK(PostMessageW(front->hwnd, WM_NULL, 0, 0));
     int turns = 0;
     double maximum_ms = 0;
+    double minimum_ms = 500;
     for (int round = 0; round < 6; ++round) {
         const int before = back->frames;
         double first_ask = now_ms();
@@ -93,16 +94,19 @@ static int crowd(View *front, View *back) {
         if (back->frames == before) fprintf(stderr, "rear window still starved at %.2f ms after %d turns\n", delay, turns);
         CHECK(back->frames == before + 1 && delay >= 16 && delay < 500);
         CHECK(!GetUpdateRect(back->hwnd, NULL, FALSE));
+        MSG pending;
+        CHECK(!PeekMessageW(&pending, back->hwnd, WM_PAINT, WM_PAINT, PM_NOREMOVE | PM_QS_PAINT));
         if (delay > maximum_ms) maximum_ms = delay;
+        if (delay < minimum_ms) minimum_ms = delay;
     }
     front->animate = 0;
     CHECK(front->frames - front_start >= 3);
     CHECK(!front->saw_early_invalidation);
     rune_win_end_redraw_turn(front->window, 1);
-    CHECK(!drain_idle());
     CHECK(back->frames == back_start + 6);
-    printf("Six rear repaints across %d posted-message turns, maximum %.2f ms, %d front frames\n",
-           turns, maximum_ms, front->frames - front_start);
+    printf("Six rear repaints across %d posted-message turns, %.2f to %.2f ms, %d front frames\n",
+           turns, minimum_ms, maximum_ms, front->frames - front_start);
+    CHECK(!drain_idle());
     return 0;
 }
 

@@ -13,6 +13,7 @@ try {
     const memory = new WebAssembly.Memory({initial: 1});
     let index = 0, timeToDraw = true, stage = 0, strips = 0;
     const frames = [
+        {width:320, height:180, rects:[], deferred:true},
         {width:320, height:180, rects:[[0,0,320,180]], color:[27,41,255,255]},
         {width:320, height:180, rects:[[0,0,64,32]], color:[77,255,26,255]},
         {width:384, height:196, rects:[], deferred:true},
@@ -38,7 +39,7 @@ try {
             ++stage;
             const edgesEnd = 32 + rects.length*16;
             // Exercise the first descriptor revision and the trailing mask-fill timing.
-            if (index === 0) return edgesEnd;
+            if (index <= 1) return edgesEnd;
             new DataView(memory.buffer).setFloat64(edgesEnd, 11.5, true);
             return edgesEnd + 8;
         },
@@ -51,6 +52,8 @@ try {
             return bytes.length;
         },
     };
+    let presented = 0;
+    canvas.addEventListener('runepresent', () => ++presented);
     app = mountRuneBrowser(canvas, {exports}, {resizeTo:null});
     await app.ready;
     const underlay = canvas.previousElementSibling, ctx = underlay.getContext('2d');
@@ -61,7 +64,9 @@ try {
         for (let i=0;i<100 && before===stage;++i) await new Promise(requestAnimationFrame);
         check(stage === before+1, 'CPU reactor did not respond to mounted input');
     };
-    check(pixel(150,150) === '27,41,255,255', 'Full frame');
+    check(presented === 0, 'A deferred first frame announced blank pixels');
+    await step();
+    check(presented === 1 && pixel(150,150) === '27,41,255,255', 'Full frame');
     await step();
     check(pixel(5,5) === '77,255,26,255' && pixel(150,150) === '27,41,255,255', 'Partial damage');
     await step();

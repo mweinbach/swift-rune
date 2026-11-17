@@ -170,8 +170,7 @@ RuneMedia *rune_media_open(const char *uri, int audio_only, int headless,
             goto failed;
         }
     } else if (!media->info.has_audio) {
-        fail(error, capacity, audio_only ? "Media has no playable audio track"
-                                       : "Media has neither playable audio nor video");
+        fail(error, capacity, audio_only ? "Media has no playable audio track" : "Media has no playable video track");
         goto failed;
     }
     gint64 duration = GST_CLOCK_TIME_NONE;

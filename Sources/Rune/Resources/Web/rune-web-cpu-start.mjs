@@ -40,6 +40,7 @@ export function mountCPUUnderlay(canvas) {
 
 // Store pixels on the page. Browsers can upload page-owned ImageData without retaining or
 // copying an entire WebAssembly memory buffer; only the current strip crosses that boundary.
+// The returned function reports whether it presented any pixels.
 export function makeCPUFrameTransfer(wasm) {
     let staged = new Uint8ClampedArray(0);
     const rects = new Uint32Array(8 * 4);
@@ -51,7 +52,7 @@ export function makeCPUFrameTransfer(wasm) {
         if (width < 1 || height < 1 || count > 8 || (length !== edgesEnd && length !== edgesEnd + 8)) throw Error('Invalid Rune CPU damage frame');
         const paintUs = info.getFloat64(16, true), rasterUs = info.getFloat64(24, true);
         const fillUs = length === edgesEnd ? 0 : info.getFloat64(edgesEnd, true);
-        if (deferred) return; // A native surface or GPU-only effect keeps the last good frame displayed.
+        if (deferred) return false; // A native surface or GPU-only effect keeps the last good frame displayed.
         // Changing a Canvas 2D backing size clears every pixel, including on a deferred resize.
         if (context.canvas.width !== width) context.canvas.width = width;
         if (context.canvas.height !== height) context.canvas.height = height;
@@ -59,7 +60,7 @@ export function makeCPUFrameTransfer(wasm) {
         const timed = Array.isArray(stats);
         if (count === 0) {
             if (timed) stats.push([fillUs, paintUs, rasterUs, 0, 0, 0]);
-            return;
+            return false;
         }
         // The strip export uses the same scratch buffer as this header and can grow WASM memory.
         rects.set(new Uint32Array(wasm.memory.buffer, address + 32, count * 4));
@@ -85,5 +86,6 @@ export function makeCPUFrameTransfer(wasm) {
             pixels += w * h;
         }
         if (timed) stats.push([fillUs, paintUs, rasterUs, (performance.now() - started) * 1000, swizzleUs, pixels]);
+        return true;
     };
 }

@@ -6,6 +6,16 @@ import CRuneDesktopText
 /// Execution-local state and monotonic time used by the input and frame pipelines.
 @usableFromInline
 internal enum RuneExecutionContext {
+    /// The Windows Foundation uptime advances with the system timer tick; use the
+    /// same high-resolution monotonic clock as input events and frame diagnostics.
+    @usableFromInline static var hostUptime: Double {
+        #if os(Windows)
+        Double(uptimeNanoseconds) / 1_000_000_000
+        #else
+        ProcessInfo.processInfo.systemUptime
+        #endif
+    }
+
     #if os(WASI)
     // The Preview 1 reactor receives all events on one WebAssembly instance thread.
     nonisolated(unsafe) static let locals = NSMutableDictionary()

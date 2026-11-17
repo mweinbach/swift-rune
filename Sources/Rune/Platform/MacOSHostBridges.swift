@@ -238,6 +238,9 @@ public final class MacOSDisplayLinkDriver: NSObject {
 
     var deadlineWoke: (() -> Void)?
     private var tickRetry: DispatchWorkItem?
+    private var deferredSubmission: DispatchWorkItem?
+    private var earlyTickDeadline: Double?
+    private var preparation = MacOSFramePreparation()
 
     public init(onTick: @escaping @MainActor () -> Void) {
         self.onTick = onTick
@@ -264,13 +267,55 @@ public final class MacOSDisplayLinkDriver: NSObject {
             updateRate(for: screen)
         }
         if fallbackTimer != nil, view.window != nil { start(in: view) }
-        let opportunity = paced ? pacer.nextFrame(now: CACurrentMediaTime()) : .now
+        let now = CACurrentMediaTime()
+        let deadline = earlyTickDeadline
+        earlyTickDeadline = nil
+        // An early tick has already passed the target checks. Claim this target once,
+        // then enforce the actual submission deadline after preparing its pixels.
+        let opportunity = paced ? pacer.nextFrame(now: max(now, deadline ?? now)) : .now
         guard opportunity != .wait else {
             start(in: view)
             return .wait
         }
         rendering = true
+        preparation.begin(at: now, earliestSubmission: paced ? deadline : nil)
         return opportunity
+    }
+
+    /// Acquire and submit the drawable once ready. A shorter-than-predicted update
+    /// leaves the main thread available to receive input until submission is permitted.
+    func finishPreparation(_ submit: @escaping @MainActor () -> Void) {
+        let now = CACurrentMediaTime()
+        guard let deadline = preparation.finished(at: now) else {
+            submit()
+            return
+        }
+        scheduleSubmission(submit, at: deadline, now: now)
+    }
+
+    private func scheduleSubmission(_ submit: @escaping @MainActor () -> Void, at deadline: Double, now: Double) {
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let now = CACurrentMediaTime()
+            if now < deadline {
+                self.scheduleSubmission(submit, at: deadline, now: now)
+                return
+            }
+            self.deferredSubmission = nil
+            defer { self.endFrame() }
+            submit()
+        }
+        deferredSubmission = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + (deadline - now), execute: work)
+    }
+
+    /// A drawable has not yet been acquired. Resizing or closing may discard this prepared frame.
+    func cancelPreparedFrame() {
+        guard let deferredSubmission else { return }
+        deferredSubmission.cancel()
+        self.deferredSubmission = nil
+        rendering = false
+        requestedDuringFrame = false
     }
 
     func submitted(at timestamp: CFTimeInterval = CACurrentMediaTime()) {
@@ -278,6 +323,7 @@ public final class MacOSDisplayLinkDriver: NSObject {
     }
 
     func endFrame() {
+        guard deferredSubmission == nil else { return }
         rendering = false
         if requestedDuringFrame {
             requestedDuringFrame = false
@@ -325,6 +371,9 @@ public final class MacOSDisplayLinkDriver: NSObject {
     }
 
     private func screenChanged(_ window: NSWindow?) {
+        tickRetry?.cancel()
+        tickRetry = nil
+        cancelPreparedFrame()
         if let displayLink { configure(link: displayLink, screen: window?.screen) }
     }
 
@@ -347,6 +396,7 @@ public final class MacOSDisplayLinkDriver: NSObject {
     }
 
     public func stop() {
+        cancelPreparedFrame()
         tickRetry?.cancel()
         tickRetry = nil
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
@@ -392,6 +442,13 @@ public final class MacOSDisplayLinkDriver: NSObject {
         let now = CACurrentMediaTime()
         if let retryAt = Self.retryTime(for: target, lastPresent: pacer.lastPresent, lastTarget: pacer.lastTarget,
                                         now: now, period: pacer.framePeriod) {
+            if preparation.canStart(at: now, submissionAfter: retryAt) {
+                earlyTickDeadline = retryAt
+                defer { earlyTickDeadline = nil }
+                pacer.enqueueTick(target: target)
+                onTick()
+                return
+            }
             // A frame can finish inside its budget yet submit too recently for this callback.
             // The same target is still usable once the minimum spacing has elapsed.
             let retry = DispatchWorkItem { [weak self, weak sender] in
@@ -415,6 +472,29 @@ public final class MacOSDisplayLinkDriver: NSObject {
         guard earliest > now, DisplayLinkPacer.permits(lastPresent: lastPresent, lastTarget: lastTarget,
             target: target, now: earliest, period: period) else { return nil }
         return earliest
+    }
+}
+
+/// Preparation may run ahead of the submit guard when recent work is expected to fill
+/// the interval. Finishing early still observes the original minimum spacing.
+struct MacOSFramePreparation {
+    private var began = 0.0
+    private var lastDuration = 0.0
+    private var earliestSubmission: Double?
+
+    func canStart(at now: Double, submissionAfter deadline: Double) -> Bool {
+        now + lastDuration >= deadline
+    }
+
+    mutating func begin(at time: Double, earliestSubmission: Double?) {
+        began = time
+        self.earliestSubmission = earliestSubmission
+    }
+
+    mutating func finished(at time: Double) -> Double? {
+        lastDuration = max(0, time - began)
+        guard let earliestSubmission, time < earliestSubmission else { return nil }
+        return earliestSubmission
     }
 }
 

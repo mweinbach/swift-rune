@@ -86,7 +86,8 @@ static bool exercise(HDESK desktop, PROCESS_INFORMATION proc) {
         Sleep(70);
     }
     if (!IsZoomed(target.hwnd) || !named(maxi.Get(), L"Restore")) {
-        std::fprintf(stderr, "Missing native maximize and updated Swift restore label\n"); return false;
+        std::fprintf(stderr, "Native maximized=%d, Swift Restore label=%d\n",
+                     IsZoomed(target.hwnd) != 0, named(maxi.Get(), L"Restore")); return false;
     }
     close = caption_button(uia.Get(), root.Get(), L"rune-caption-close");
     if (!invoke(close.Get()) || WaitForSingleObject(proc.hProcess, 6000) != WAIT_OBJECT_0) return false;

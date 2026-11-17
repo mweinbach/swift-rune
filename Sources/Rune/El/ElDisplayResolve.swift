@@ -16,6 +16,17 @@ internal struct ElResolvedInput {
     var maxWidthForShape: Float?
     var blocks: [Block] = []
 
+    func selectionRange(for edit: TextEdit) -> Range<Int> {
+        let selected = edit.selectedUTF8Range
+        guard isSecure, !edit.isRevealed else { return selected }
+        if edit.multiline { return 0..<renderedString.utf8.count }
+        func bulletOffset(_ byte: Int) -> Int {
+            let index = edit.text.utf8.index(edit.text.utf8.startIndex, offsetBy: min(byte, edit.text.utf8.count))
+            return edit.text[..<index].unicodeScalars.count * "•".utf8.count
+        }
+        return bulletOffset(selected.lowerBound)..<bulletOffset(selected.upperBound)
+    }
+
     func measureWidth(_ availMaxWidth: Float?) -> Float? {
         if isSingleLine { return nil }
         return style.wrap == .noWrap ? nil : availMaxWidth

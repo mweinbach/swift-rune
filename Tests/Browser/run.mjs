@@ -196,13 +196,19 @@ try {
                 ...(args.webgpu ? [{ backend: 'webgpu' }] : [])]
             : (page === 'hello-wasi.html' || page === 'document-wasi.html') && args.webgpu
                 ? [{ backend: 'webgl2' }, { backend: 'webgpu' }] : [undefined];
-        const fullTrees = new Map();
+        const fullSnapshots = new Map();
         for (const options of cases) {
             try {
                 const measured = await fixture('http://127.0.0.1:' + port, page, options);
-                if (measured?.accessibility === 'full') fullTrees.set(measured.view, measured.accessibilityHash);
-                if (measured?.accessibility === 'incremental' && fullTrees.get(measured.view) !== measured.accessibilityHash) {
-                    throw Error('Final accessible tree differs between full and incremental scrolls');
+                if (measured?.accessibility === 'full') fullSnapshots.set(measured.view, measured);
+                if (measured?.accessibility === 'incremental') {
+                    const full = fullSnapshots.get(measured.view);
+                    if (full?.accessibilityHash !== measured.accessibilityHash) {
+                        throw Error('Final accessible tree differs between full and incremental scrolls');
+                    }
+                    if (full.initialPixelHash !== measured.initialPixelHash || full.finalPixelHash !== measured.finalPixelHash) {
+                        throw Error('Canvas pixels differ between full and incremental scrolls');
+                    }
                 }
             }
             catch (error) { console.error(page, options ?? '', error.message); process.exitCode = 1; }

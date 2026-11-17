@@ -39,6 +39,9 @@ struct MemoFlatSpan<State> {
     let context: FlatMemoContext
     let children: [LayoutEngine.ResultNode]
     let rootIndex: Int
+    let worldOrigin: Vec2
+    let unscrolledOrigin: Vec2
+    let committedOrigin: Vec2
     let nodes: [Node]
     let specs: [NodeSpec]
     let instants: [Bool]
@@ -70,18 +73,23 @@ struct MemoFlatSpan<State> {
         self.context = capture.context
         self.children = capture.children
         rootIndex = capture.root
+        let parent = flat[capture.root]
+        worldOrigin = parent.targetRect.origin
+        unscrolledOrigin = parent.unscrolledRect.origin
+        committedOrigin = parent.committedLayoutTarget.origin
         self.nodes = Array(flat[start..<end])
         self.specs = Array(specs[start..<end])
         self.instants = Array(instants[start..<end])
         clipsChildren = clips
     }
 
-    static func equalLayouts(_ lhs: [LayoutEngine.ResultNode], _ rhs: [LayoutEngine.ResultNode]) -> Bool {
-        func sameBuffer(_ a: [LayoutEngine.ResultNode], _ b: [LayoutEngine.ResultNode]) -> Bool {
-            a.count == b.count && a.withUnsafeBufferPointer { x in
-                b.withUnsafeBufferPointer { x.baseAddress == $0.baseAddress }
-            }
+    private static func sameBuffer<T>(_ a: [T], _ b: [T]) -> Bool {
+        a.count == b.count && a.withUnsafeBufferPointer { x in
+            b.withUnsafeBufferPointer { x.baseAddress == $0.baseAddress }
         }
+    }
+
+    static func equalLayouts(_ lhs: [LayoutEngine.ResultNode], _ rhs: [LayoutEngine.ResultNode]) -> Bool {
         if sameBuffer(lhs, rhs) { return true }
         var pending = [(lhs, rhs)]
         while let (a, b) = pending.popLast() {
@@ -100,6 +108,23 @@ struct MemoFlatSpan<State> {
                 enclosing: Int?, vertical: Int?, horizontal: Int?) {
         let shift = root - rootIndex
         let sticky = stickyShifts[root]
+        let parent = flat[root]
+        let first = nodes[0]
+        if shift == 0, parent.targetRect.origin == worldOrigin,
+           parent.unscrolledRect.origin == unscrolledOrigin, parent.committedLayoutTarget.origin == committedOrigin,
+           first.clipRect == clip, Self.sameBuffer(fades, first.activeClipFades),
+           first.enclosingScrollIndex == enclosing, first.enclosingVScrollIndex == vertical,
+           first.enclosingHScrollIndex == horizontal {
+            flat.append(contentsOf: nodes)
+            currentSpecs.append(contentsOf: specs)
+            currentInstants.append(contentsOf: instants)
+            stickyShifts.append(contentsOf: repeatElement(sticky, count: nodes.count))
+            for node in nodes {
+                byPath[node.path] = node.index
+                byId[node.nodeId] = node.index
+            }
+            return
+        }
         for i in nodes.indices {
             var node = nodes[i]
             let parentIndex = node.parentIndex! + shift

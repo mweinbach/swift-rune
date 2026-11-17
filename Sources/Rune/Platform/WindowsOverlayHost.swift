@@ -305,6 +305,7 @@ final class RuneWindowsOverlayHost<State>: Win32Callback, DesktopOverlayHost {
             if observe(last, at: now, handle: handle) { rune_win_wake(window) }
         case RUNE_WIN_SIZE, RUNE_WIN_POSITION: refreshGeometry()
         case RUNE_WIN_SETTINGS: configure()
+        case RUNE_WIN_SESSION_LOCK: Clipboard.shared.clearCurrentSecret()
         case RUNE_WIN_MOVE:
             guard acceptsInput else { return 0 }
             last = point

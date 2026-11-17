@@ -396,8 +396,9 @@ struct TextCloseoutRemainingTests {
         #expect(second == first && atlas.copies == 1)
         atlas.endFrame()
         #expect(atlas.pages.count == 1)
+        #expect(atlas.pages[0].height == 128)
         atlas.invalidate()
-        #expect(atlas.pages[0].dirty == 0..<IMAGE_ATLAS_SIZE)
+        #expect(atlas.pages[0].dirty == 0..<atlas.pages[0].height)
 
         let sel = ImageURLSet.select(
             sources: [.init(url: "1x.png", widthPixels: 100), .init(url: "2x.png", widthPixels: 200)],

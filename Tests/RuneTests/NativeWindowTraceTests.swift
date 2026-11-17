@@ -5,6 +5,20 @@ import Testing
 
 @Suite("Native window trace")
 struct NativeWindowTraceTests {
+    #if os(Windows)
+    @Test func frameClockResolvesIntervalsWithinAWindowsTimerTick() {
+        let deadline = ContinuousClock.now + .milliseconds(100)
+        var previous = RuneExecutionContext.hostUptime
+        var shortest = Double.infinity
+        repeat {
+            let current = RuneExecutionContext.hostUptime
+            if current > previous { shortest = min(shortest, current - previous) }
+            previous = current
+        } while shortest >= 0.001 && ContinuousClock.now < deadline
+        #expect(shortest < 0.001)
+    }
+    #endif
+
     @Test func resumingAnIdleWindowDoesNotCountTheIdleGapAsADisplayInterval() throws {
         let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: path) }

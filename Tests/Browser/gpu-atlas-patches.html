@@ -120,6 +120,8 @@ try {
     // Discard invalidated handles when the context was lost.
     if (!lifecycle) renderer.dispose();
     renderer = new RuneWebGL(canvas, sources);
+    // The driver allocates its transparent fallback when it starts, before it sees a packet.
+    expectTransfers(transfers, [['texImage2D', 'RGBA', 0, 0, 1, 1, 4]], 'Fresh driver fallback');
     expectRejected(scene(31, 32, glyph, image), 'Fresh context accepted only patches');
     draw(reset);
     verifyPixels(gl, 'Fresh context');

@@ -17,7 +17,26 @@ private final class WakeCount: @unchecked Sendable {
 
 @main
 struct VideoConsumption {
-    static func main() throws {
+    private static func report(_ message: String) {
+        var bytes = Array((message + "\n").utf8)
+        let size = DWORD(bytes.count)
+        var written: DWORD = 0
+        bytes.withUnsafeMutableBytes {
+            _ = WriteFile(GetStdHandle(STD_ERROR_HANDLE), $0.baseAddress, size, &written, nil)
+        }
+    }
+
+    static func main() {
+        report("Starting public Windows Player")
+        do {
+            try verify()
+        } catch {
+            report("FAIL \(error)")
+            ExitProcess(1)
+        }
+    }
+
+    private static func verify() throws {
         guard CommandLine.arguments.count == 3 else { throw Failure("Pass the silent-video and video-with-audio fixture paths") }
         let original = URL(fileURLWithPath: CommandLine.arguments[1])
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("Rune-\(UUID().uuidString).mp4")
@@ -51,8 +70,10 @@ struct VideoConsumption {
 
         Thread.sleep(forTimeInterval: 0.35)
         guard exclusiveRead(), player.surface.currentFrame() == nil else { throw Failure("Unseen clip opened a reader") }
+        report("Unused clip kept its file closed")
         try awaitTime("first visible green sample", { $0 >= 0.25 && $0 < 0.5 })
         guard !exclusiveRead(), let visible = player.surface.currentFrame() else { throw Failure("Missing live reader") }
+        report("Player displayed its first timed picture")
         let time = player.time
         let calls = wakes.value
         Thread.sleep(forTimeInterval: 1.1)
@@ -62,6 +83,7 @@ struct VideoConsumption {
         pull()
         guard player.time == time && player.surface.currentFrame()?.id == visible.id else { throw Failure("Resume skipped the last drawn sample") }
         try awaitTime("resumed blue sample", { $0 >= 0.5 && $0 < 0.75 })
+        report("Resumed clip reached the next sample")
         guard let retained = player.surface.currentFrame() else { throw Failure("Missing held blue sample") }
         let parkedTime = player.time
         let timeout = Date().addingTimeInterval(6)
@@ -69,11 +91,13 @@ struct VideoConsumption {
         guard exclusiveRead(), player.surface.currentFrame()?.id == retained.id, player.time == parkedTime else {
             throw Failure("Unseen reader remained open or discarded its displayed frame")
         }
+        report("Unseen clip released the file and retained its picture")
         // A seek after parking must reopen against the new request, even without another timed draw.
         player.pause()
         player.seek(to: 0.75)
         try awaitTime("explicit paused seek after parking", { $0 >= 0.75 && player.surface.currentFrame()?.id != retained.id })
         guard player.state == .ready else { throw Failure("Parked seek restarted playback") }
+        report("Parked seek displayed its requested sample")
         player.setLooping(false)
         player.play()
         Thread.sleep(forTimeInterval: 0.9)
@@ -86,6 +110,7 @@ struct VideoConsumption {
             Thread.sleep(forTimeInterval: 0.01)
         }
         guard player.state == .ended else { throw Failure("Visible clip never delivered EOS") }
+        report("Visible clip delivered EOS")
         let sounding = Player.file(CommandLine.arguments[2], playing: true, muted: false)
         let sndWakes = WakeCount()
         let sndDeadline = Date().addingTimeInterval(8)

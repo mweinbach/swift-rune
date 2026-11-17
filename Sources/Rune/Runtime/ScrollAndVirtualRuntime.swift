@@ -2343,7 +2343,6 @@ extension Runtime {
             if deltasByScrollPath[flatNodes[i].path] != nil {
                 flatNodes[i].ownScrollFade = computeScrollFadeSpec(for: flatNodes[i])
             }
-
         }
     }
 

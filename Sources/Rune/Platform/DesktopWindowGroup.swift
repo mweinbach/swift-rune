@@ -92,9 +92,9 @@ extension DesktopWindowSession {
         let shared = self.shared
         nonisolated(unsafe) let callback = hook
         let enqueue: IncomingURLInbox.ListenerSink = { url in
-            shared.enqueueUpdate { state, tx in
+            shared.enqueueUpdate { [weak shared] state, tx in
                 callback(&state, url, &tx)
-                if InstanceLaunches.shared.launchesWaiting && shared.isVisible { InstanceLaunches.shared.served() }
+                if InstanceLaunches.shared.launchesWaiting && shared?.isVisible == true { InstanceLaunches.shared.served() }
             }
         }
         return IncomingURLInbox.shared.listen(glue: DesktopURLGlue(), sink: enqueue)

@@ -19,6 +19,11 @@ function distribution(samples) {
     return values.length ? { n: values.length, p50: at(.5), p95: at(.95), p99: at(.99) } : null;
 }
 
+async function checksum(bytes) {
+    const hash = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
 let app, restoreSubmit;
 try {
     if (view !== 'table' && view !== 'tree') throw Error('Choose the table or tree product');
@@ -136,11 +141,12 @@ try {
             ...[box.x, box.y, box.width, box.height].map(Math.round)];
     });
     if (!nodes.length) throw Error('The scrolled view did not expose any accessibility targets');
-    const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(nodes)));
-    const accessibilityHash = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('');
+    const [accessibilityHash, initialPixelHash, finalPixelHash] = await Promise.all([
+        checksum(new TextEncoder().encode(JSON.stringify(nodes))), ...snapshots.map(checksum)
+    ]);
     const metric = name => distribution(frames.map(frame => frame[name]));
     result.textContent = 'PASS ' + JSON.stringify({ view, accessibility, renderer: app.renderer, viewport: [canvas.width, canvas.height],
-        wheelTurns, warmup, changedPixels, inputMs: distribution(inputs), sceneMs: metric('scene'),
+        wheelTurns, warmup, changedPixels, initialPixelHash, finalPixelHash, inputMs: distribution(inputs), sceneMs: metric('scene'),
         throughSubmitMs: metric('throughSubmit'), accessibilityMs: metric('accessibility'),
         accessibilityBytes: metric('accessibilityBytes'),
         measuredAccessibilityBytes: frames.reduce((sum, frame) => sum + (frame.accessibilityBytes ?? 0), 0),

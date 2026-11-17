@@ -14,6 +14,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
     private final class Inner: @unchecked Sendable, SurfaceVideoAttachment, HeadlessVideoDriver {
         let lock = NSLock()
         let key: UInt64
+        let inferAudio: Bool
         weak var surface: NativeSurface?
         var request: MediaRequest
         var meta: VideoMeta
@@ -68,8 +69,9 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
 
         var videoKey: UInt64 { key }
 
-        init(key: UInt64, request: MediaRequest) {
+        init(key: UInt64, request: MediaRequest, inferAudio: Bool) {
             self.key = key
+            self.inferAudio = inferAudio
             self.request = request
             self.meta = VideoMeta(kind: request.kind, duration: nil, size: nil, hasSound: false)
             self.machine = VideoPhases.Machine(
@@ -186,9 +188,13 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         }
     }
 
-    public init(_ request: MediaRequest) {
+    public convenience init(_ request: MediaRequest) {
+        self.init(request, inferAudio: false)
+    }
+
+    private init(_ request: MediaRequest, inferAudio: Bool) {
         let key = UInt64.random(in: 1...UInt64.max)
-        self.inner = Inner(key: key, request: request)
+        self.inner = Inner(key: key, request: request, inferAudio: inferAudio)
         self.surface = NativeSurface(id: key)
         self.inner.surface = self.surface
         #if canImport(AVFoundation) && !os(watchOS)
@@ -233,7 +239,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
             muted: muted,
             volume: volume,
             rate: rate
-        ))
+        ), inferAudio: true)
     }
 
     public static func file(
@@ -244,14 +250,14 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         volume: Float = 1.0,
         rate: Float = 1.0
     ) -> Player {
-        Player(
+        Player(MediaRequest(
             source: .file(URL(fileURLWithPath: path)),
             playing: playing,
             looping: looping,
             muted: muted,
             volume: volume,
             rate: rate
-        )
+        ))
     }
 
     public static func url(
@@ -263,14 +269,14 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         rate: Float = 1.0
     ) -> Player {
         let url = URL(string: urlString) ?? URL(fileURLWithPath: urlString)
-        return Player(
+        return Player(MediaRequest(
             source: .url(url),
             playing: playing,
             looping: looping,
             muted: muted,
             volume: volume,
             rate: rate
-        )
+        ))
     }
 
     /// Audio-only player starting unmuted (`Player::audio`).
@@ -864,6 +870,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
 
     #if canImport(AVFoundation) && !os(watchOS)
     private func loadAssetMetadataSynchronously(_ asset: AVURLAsset, requestedKind: MediaKind) throws {
+        let inferAudio = inner.inferAudio
         // Local metadata must be available synchronously for first-frame layout.
         final class Box: @unchecked Sendable {
             var error: Error?
@@ -891,12 +898,13 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
                 if requestedKind == .audio && aTracks.isEmpty {
                     throw NativeSurfaceError.importFailed("media has no playable audio track")
                 }
+                if requestedKind == .video && vTracks.isEmpty && (!inferAudio || aTracks.isEmpty) {
+                    throw NativeSurfaceError.importFailed("media has no playable video track")
+                }
                 if let vt = vTracks.first {
                     box.videoTrack = vt
                     box.naturalSize = try await vt.load(.naturalSize)
                     box.preferredTransform = try await vt.load(.preferredTransform)
-                } else if aTracks.isEmpty {
-                    throw NativeSurfaceError.importFailed("media has neither video nor audio tracks")
                 }
             } catch {
                 box.error = error
@@ -1778,7 +1786,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
             guard !failed, existing == nil || (live && existing?.headless == true) else { return }
             do {
                 let source = try existing?.source ?? DesktopMediaSource(request: request)
-                let decoder = try DesktopMediaDecoder(source: source, kind: request.kind, headless: !live)
+                let decoder = try DesktopMediaDecoder(source: source, kind: request.kind, headless: !live, inferAudio: inner.inferAudio)
                 let (time, wantsPoster) = commitLoadedMetadata(inner, meta: decoder.meta, orient: decoder.orient) {
                     inner.decoder = decoder
                 }

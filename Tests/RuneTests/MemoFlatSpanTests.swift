@@ -61,4 +61,27 @@ struct MemoFlatSpanTests {
         #expect(replayed == 30)
         #expect(retained.state.taps == 3)
     }
+
+    @Test("Changing a memo root to screen travel reparents its descendants in the motion scene")
+    func changedRootSceneIdentity() {
+        func runtime(_ cached: Bool) -> Runtime<Int> {
+            Runtime(state: 0, viewport: Vec2(160, 80), pixelScale: 1, systemDark: true) { tick, _ in
+                func body() -> El<Int> { row().key("panel").child(el().key("child").size(12, 9)) }
+                var panel = cached ? memo("panel", deps: 0) { body() } : body()
+                if tick >= 4 { panel = panel.animateLayout(LayoutAnim(spring: MotionTokens.DEFAULT, travel: .screen)) }
+                return row().child(el().w(19)).child(panel)
+            }
+        }
+        let retained = runtime(true), fresh = runtime(false)
+        for step in 0..<7 {
+            let t = Double(step + 1) / 60
+            for rt in [retained, fresh] {
+                rt.update(at: t) { s, _ in s = step }
+                _ = rt.frame(at: t)
+            }
+            #expect(retained.elements() == fresh.elements())
+            if step == 3 { #expect(retained.replayedFlatMemoNodes == 1) }
+            if step == 4 { #expect(retained.replayedFlatMemoNodes == 0) }
+        }
+    }
 }

@@ -14,7 +14,8 @@
 
 using Microsoft::WRL::ComPtr;
 static_assert(sizeof(uint8_t) == 1);
-constexpr UINT codedW = 30, codedH = 18, w = 26, h = 14;
+// Match the decoder ring's DWORD-aligned backing width, including a non-aligned visible picture.
+constexpr UINT codedW = 32, codedH = 18;
 constexpr GLenum red = 0x1903, rg = 0x8227, r8 = 0x8229, rg8 = 0x822B;
 
 static void require(bool value, const char *what) {
@@ -27,6 +28,8 @@ extern "C" void *rune_win_gl_proc(const char *name) {
     return reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"opengl32.dll"), name));
 }
 
+#include "Compositor.h"
+
 struct GLContext {
     HWND window = CreateWindowExW(0, L"STATIC", L"Rune NV12 fixture", WS_POPUP, 0, 0, 32, 32, nullptr, nullptr, nullptr, nullptr);
     HDC dc = GetDC(window);
@@ -37,9 +40,15 @@ struct GLContext {
         desc.iPixelType = PFD_TYPE_RGBA; desc.cColorBits = 32;
         int fmt = ChoosePixelFormat(dc, &desc);
         require(fmt && SetPixelFormat(dc, fmt, &desc), "set GL pixel format");
-        gl = wglCreateContext(dc);
-        require(gl && wglMakeCurrent(dc,gl), "activate GL");
-        std::printf("GL=%s, WGL_NV_DX_interop2=%d\n", glGetString(GL_RENDERER), rune_win_shared_gl_available());
+        HGLRC bootstrap = wglCreateContext(dc);
+        require(bootstrap && wglMakeCurrent(dc,bootstrap), "activate bootstrap GL context");
+        using CreateCore = HGLRC (WINAPI *)(HDC,HGLRC,const int *);
+        auto create = reinterpret_cast<CreateCore>(rune_win_gl_proc("wglCreateContextAttribsARB"));
+        const int attributes[] = {0x2091,3,0x2092,3,0x9126,1,0};
+        gl = create ? create(dc,nullptr,attributes) : nullptr;
+        require(gl && wglMakeCurrent(dc,gl), "activate desktop OpenGL 3.3 core context");
+        wglDeleteContext(bootstrap);
+        std::printf("GL=%s %s, WGL_NV_DX_interop2=%d\n", glGetString(GL_RENDERER), glGetString(GL_VERSION), rune_win_shared_gl_available());
     }
     ~GLContext() { wglMakeCurrent(nullptr,nullptr); wglDeleteContext(gl); ReleaseDC(window,dc); DestroyWindow(window); }
 };
@@ -51,7 +60,7 @@ static std::vector<uint8_t> expected(UINT plane, UINT generation, UINT width, UI
     return bytes;
 }
 
-static bool exercise(D3D_DRIVER_TYPE driver, bool &exact) {
+static bool exercise(Compositor &compositor, D3D_DRIVER_TYPE driver, UINT w, UINT h, bool &exact) {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> ctx;
     HRESULT hr = D3D11CreateDevice(nullptr, driver, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &ctx);
@@ -118,6 +127,7 @@ static bool exercise(D3D_DRIVER_TYPE driver, bool &exact) {
                 exact = false;
             }
         }
+        compositor.compare(copy,luma,chroma,generation);
         hr = split.run(input);
         if (FAILED(hr)) continue; // The staging path above is required even on drivers without shader-readable NV12.
         for (UINT i=0;i<2;i++) {
@@ -140,18 +150,23 @@ static bool exercise(D3D_DRIVER_TYPE driver, bool &exact) {
         }
         verifiedSplit = true;
     }
-    std::printf("driver=%d, checked raw+GL for 3 NV12 updates, direct-WGL=%u/3, D3D11 shader split=%s (0x%08lx)\n",driver,directTransfers,
+    std::printf("driver=%d, %ux%u visible in %ux%u, 3 NV12 updates / full RGBA draws, direct-WGL=%u/3, D3D11 shader split=%s (0x%08lx)\n",driver,w,h,codedW,codedH,directTransfers,
                 verifiedSplit?"passed":"unsupported",(unsigned long)hr);
     rune_win_plane_uploader_destroy(uploader);
     glDeleteTextures(2,textures);
     return true;
 }
-int main() {
+int main(int argc, char **argv) {
+    require(argc==2,"provide Rune's GL shader directory");
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     GLContext context;
+    Compositor compositor(argv[1]);
     bool exact = true;
-    bool hardware = exercise(D3D_DRIVER_TYPE_HARDWARE, exact);
-    bool warp = exercise(D3D_DRIVER_TYPE_WARP, exact);
+    for (auto width : {30u, 26u}) {
+        UINT height = width == 30 ? 18u : 14u;
+        bool hardware = exercise(compositor, D3D_DRIVER_TYPE_HARDWARE, width, height, exact);
+        bool warp = exercise(compositor, D3D_DRIVER_TYPE_WARP, width, height, exact);
+        require(hardware || warp, "NV12 on one D3D11 adapter");
+    }
     require(exact, "cropped samples on every available driver");
-    require(hardware || warp,"NV12 on one D3D11 adapter");
 }

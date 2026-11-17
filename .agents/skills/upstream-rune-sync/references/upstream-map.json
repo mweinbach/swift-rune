@@ -168,10 +168,13 @@
             "Sources/Rune/Resources/Web/rune-web.mjs",
             "Sources/Rune/Resources/Web/rune-web-page.mjs",
             "Tests/Browser/window-environment.html",
-            "Tests/Browser/document.html"
+            "Tests/Browser/document.html",
+            "Tests/RuneTests/WebWindowEnvironmentTests.swift",
+            "Tests/Browser/font-subsets.html",
+            "Tests/Browser/document-wasi.html"
           ],
-          "status": "partial",
-          "note": "Named canvases, deferred fonts, document mode, full-window CSS, safe-area insets, viewport zoom and live/restored titles have mounted browser coverage. The browser host still does not apply Tx.resizeWindow/window_frame height to canvas CSS for an inline natural-fit window."
+          "status": "ported",
+          "note": "The five pinned app builders select a named canvas, full viewport or document mode, and support both early and deferred font URLs. Stock Swift WASI exercised initial layout and resizing at CSS width, dynamic titles and restored ownership, including 320×80→320×117 on real WebGPU and Canvas2D."
         },
         {
           "upstream": "src/backdrop_blur.wgsl",
@@ -973,9 +976,14 @@
         {
           "upstream": "src/frame/host_clock.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Shell/FrameStatsAndEncoded.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Tests/RuneTests/CxEnvAndSystemParityTests.swift",
+            "Sources/CRuneWin32/FrameClock.c",
+            "Tests/RuneTests/WindowsFrameCPUClockTests.swift"
           ],
-          "status": "partial"
+          "status": "ported",
+          "note": "The public thread clock excludes sleep and captures fine native work. Windows ARM64 and x64 emulation resolved 22/22 and 21/21 eligible short slices where GetThreadTimes returned zero. Longer samples agreed with an independent scheduler clock. macOS/Linux thread clocks and Android ARM64 use native clocks; physical Intel TSC timing is outside the Windows run."
         },
         {
           "upstream": "src/frame/live_log.rs",
@@ -1044,7 +1052,7 @@
             "Sources/Rune/IOSApp.swift"
           ],
           "status": "partial",
-          "note": "WindowHandle and Runtime share the actual surface meter. Real AppKit, Catalyst UIKit, X11 and native Wayland submitted-frame counts agreed with the same runtime totals with devStats disabled. Windows public-process readback has its own host acceptance."
+          "note": "WindowHandle and Runtime share the actual surface meter. Without devStats, real AppKit single and grouped, Catalyst UIKit, Windows ARM64 WGL, X11 and Wayland handles matched the runtime totals. Physical Windows DXGI and high-refresh iOS have separate verification paths."
         },
         {
           "upstream": "src/frame/surface_stats_walk_tests.rs",
@@ -1240,7 +1248,7 @@
             "Sources/CRuneWin32/SharedTexture.cpp"
           ],
           "status": "partial",
-          "note": "Normal macOS windows, overlays, embeds and MetalRenderer choose a display-compatible GPU. Native M3 Ultra presentation and named Mesa EGL device selection produced verified pixels. SDL GLX/EGL device choice remains driver-controlled and WGL interop has adapter affinity. Physical multi-GPU verification remains open."
+          "note": "Normal Mac windows and overlays pick a display-compatible Metal device; Mesa EGL selects a named offscreen renderer. On Windows ARM64 and emulated x64, the D3D11 device matched accepted LUID, WGL monitor, power and name policies and rejected a nonexistent LUID. SDL GLX/EGL device choice remains driver-controlled. Physical multi-GPU verification remains open."
         },
         {
           "upstream": "src/gpu/pick_tests.rs",
@@ -1255,7 +1263,7 @@
             "Tests/Support/GPUSelection/run.sh"
           ],
           "status": "ported",
-          "note": "All eight original Rust test groups and eight translated policy groups passed, including compositor affinity, presentability, software ordering, primary output and PCI parsing. Real Metal and Mesa readbacks cover native choices with one connected Metal GPU. Windows probes compiled for ARM64 and x64."
+          "note": "All eight original Rust and translated policy groups passed, including compositor affinity, presentability, PCI and power ordering. Metal and Mesa produced checked pixels. Native Windows ARM64 and emulated x64 verified actual D3D device identity, monitor, high/low-power, exact-name and strict-LUID paths with one adapter."
         },
         {
           "upstream": "src/gpu/springs.rs",
@@ -2039,7 +2047,7 @@
             "Sources/CRuneWin32/SingleInstance.cpp"
           ],
           "status": "partial",
-          "note": "Independent Linux ARM64 processes interoperated with original Rust in both directions, including stale takeover and owner release after successor publication. An ordinary App.run window received prelaunch, live and idle links, hid/reopened, and delivered each link once. Other native OS handoffs have separate checks."
+          "note": "Independent Linux and Windows processes interoperated in both Rust→Swift and Swift→Rust directions. Native acceptance covers modern/v1, slow/unfinished clients, stale takeover, ordinary release and handoff. Stock Linux single/group windows delivered pending/live links and reopened. Ordinary Windows foreground restoration after handoff has separate coverage."
         },
         {
           "upstream": "src/outline.wgsl",
@@ -2522,10 +2530,11 @@
             "Tests/Browser/webgpu-layers.html",
             "Sources/Rune/WebCPUCanvas.swift",
             "Tests/Browser/cpu-damage.html",
-            "Tests/Browser/window-environment.html"
+            "Tests/Browser/window-environment.html",
+            "Tests/Browser/document-wasi.html"
           ],
           "status": "partial",
-          "note": "The shipping WASI host supports WebGPU, WebGL2, bounded damaged CPU startup strips and a retained document canvas. Across Chromium, WebKit and Firefox, idle windows requested zero WASI callbacks and each sleeping timer, task and app handle woke once. Inline natural-fit resize and filtered layer damage retain separate gaps."
+          "note": "The native browser reactor supports WebGPU, WebGL2, bounded damaged-strip CPU startup, retained document overscan and inline natural sizing. The scheduler requested zero idle callbacks. Eight supported backend/engine combinations exercised public wakes. Rich accessibility projections and some filtered layer damage retain separate gaps."
         },
         {
           "upstream": "src/platform/web/bridge.js",
@@ -2734,14 +2743,16 @@
         {
           "upstream": "src/platform/win32/dark_mode.rs",
           "swift": [
-            "Sources/Rune/Win32Platform.swift",
             "Sources/CRuneWin32/Win32.c",
             "Sources/Rune/Platform/WindowsPreferences.swift",
-            "Sources/CRuneWin32/Preferences.c",
-            "Tests/RuneTests/Win32HostTests.swift"
+            "Sources/CRuneWin32/Popup.c",
+            "Sources/CRuneWin32/Menus.c",
+            "Sources/CRuneWin32/MenuTheme.c",
+            "Sources/Rune/Platform/WindowsPopup.swift",
+            "Tests/Windows/Startup/menu_theme.c"
           ],
-          "status": "partial",
-          "note": "The Win32 host applies the DWM dark-window attribute and responds to theme and preferences changes."
+          "status": "ported",
+          "note": "The native process menu theme follows focused window light/dark policy or the system. Repeated requests are deduplicated. Windows 11 ARM64 and emulated x64 verified follow-system→dark→dark→light→follow against real uxtheme state. Pre-1903 compatibility is source-guarded."
         },
         {
           "upstream": "src/platform/win32/dcomp_handover.rs",
@@ -2752,7 +2763,7 @@
             "Sources/Rune/Win32Platform.swift"
           ],
           "status": "partial",
-          "note": "The composed presenter retains CPU content until its first completed GPU frame and commits a DirectComposition visual for the GPU child. Windows ARM64 and x64 SDK builds linked the actual handover path. A compatible guest or physical GPU is needed to verify a seamless ordinary-window transition."
+          "note": "Windows ARM64/x64 verified 108 actual DWM frames across four sources, dirty updates, resize and rollback. Four stock Swift windows then verified seamless CPU→GPU pixels, CPU-only operation, direct GPU and interactive CPU fallback after three real failed GPU retries. Physical direct WGL_NV_DX_interop2 and exact backend timing are separate."
         },
         {
           "upstream": "src/platform/win32/dib.rs",
@@ -2838,17 +2849,18 @@
             "Tests/Windows/Overlay/probe.c"
           ],
           "status": "partial",
-          "note": "The dedicated low-level mouse hook forwards moves to an atomic last-position mailbox consumed by follow-pointer and hover-exit overlays. The Windows ARM64 public app and native driver linked. The HWND target/hit probe does not exercise physical movement outside Rune windows."
+          "note": "A dedicated WH_MOUSE_LL hook observes movement and publishes the last position for follow-pointer and hover-exit overlays. The real Windows ARM64 public app verified the layered HWND hit map, normal click delivery and transparent GPU pixels. The driver posts HWND events, so physical global movement outside Rune remains unverified."
         },
         {
           "upstream": "src/platform/win32/press_point.rs",
           "swift": [
             "Sources/CRuneWin32/Win32.c",
             "Sources/Rune/Win32Platform.swift",
-            "Tests/RuneTests/RunePlatformParityTests.swift"
+            "Tests/RuneTests/RunePlatformParityTests.swift",
+            "Tests/Windows/Lifecycle/probe.c"
           ],
           "status": "ported",
-          "note": "Rust subclasses winit to recover signed coordinates from the current button message. Swift native WndProc directly emits GET_X_LPARAM/GET_Y_LPARAM on down/up; callback dispatch uses those coordinates with window DPI conversion. Windows Hello external posted click tests changed the expected rendered switch."
+          "note": "Button events use the signed pixel coordinates from each message after pointer leave. A real HWND verified all 20 down/up/double-click cases spanning left, right, middle, X1 and X2."
         },
         {
           "upstream": "src/platform/win32/session_lock.rs",
@@ -3492,7 +3504,7 @@
             "Tests/RuneTests/PortableGLOutlineTests.swift"
           ],
           "status": "partial",
-          "note": "The native renderer fills retained page-local R8 attachments at rest. On M3 Ultra all 147,456 texels tested matched CPU, including split pages, static replay, batches, interleaved uploads and abandoned submissions. GL/GLES have native fill proofs. Browser vectors and resource scheduling have separate scope."
+          "note": "The native renderer fills retained page-local R8 attachments at rest, including grouped overlapping glyphs. M3 Ultra matched 147,456 exact texels. Stock Mesa GLES and Android-emulator labels matched CPU at rest and returned to zero new jobs when warm. Browser vectors and native Windows multiglyph LCD coverage remain separate."
         },
         {
           "upstream": "src/render/first_use.rs",
@@ -3892,9 +3904,11 @@
           "upstream": "src/runtime/commit/flatten.rs",
           "swift": [
             "Sources/Rune/Runtime.swift",
-            "Sources/Rune/Layout/RuntimeLayout.swift"
+            "Sources/Rune/Layout/RuntimeLayout.swift",
+            "Tests/RuneTests/FlatNodeStorageTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Sparse flat nodes borrow immutable element payloads reused by siblings and allocate cold storage only when needed. A 1,092-node release fixture eliminated 1,092 mandatory cold allocations while preserving every ordered ID, geometry and primitive digest over 46 frames. Full flattened subtree spans are not yet retained as a unit."
         },
         {
           "upstream": "src/runtime/commit/layout_diagnostics.rs",
@@ -4293,9 +4307,14 @@
         {
           "upstream": "src/runtime/input/titlebar.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/CRuneWin32/CustomFrame.c",
+            "Sources/Rune/Runtime/WindowsCaption.swift",
+            "Tests/Windows/CustomFrame/probe.c",
+            "Tests/Windows/CustomFrame/app.cpp"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "The standard Windows ARM64 app exposes actionable caption controls through UI Automation; an actual maximize hit returned HTMAXBUTTON and Invoke maximized/restored/closed the window. Native ARM64 and x64 tests cover non-client capture, resizing and disabled controls. The Win11 shell flyout and Win10 border remain untested."
         },
         {
           "upstream": "src/runtime/input/touch.rs",
@@ -6104,7 +6123,7 @@
             "Sources/Rune/Text/TextLanguage.swift"
           ],
           "status": "ported",
-          "note": "Native filename ordering, locale fallback and numeric runs matched the original Rust in 8,712 file comparisons on macOS and Linux ARM64. Windows NLS has a separate native verification path."
+          "note": "Native filename ordering, locale fallback and numeric runs matched all 8,712 original-Rust comparisons on macOS, Linux and real Windows NLS. The 16 Windows file-tree model combinations also matched every visible row ID."
         },
         {
           "upstream": "src/text/color_icon.rs",
@@ -6311,7 +6330,7 @@
             "Sources/Rune/Text/Collation.swift"
           ],
           "status": "ported",
-          "note": "Canonical public language labels matched 19,165 pinned Rust tag comparisons on macOS and Linux. This comparison covers valid, malformed and normalized tags. Native font selection and registration have separate backend-specific validation."
+          "note": "All 19,165 public language-tag comparisons matched the pinned Rust output on macOS, Linux and Windows, including normalization and malformed tags. This tests selected language identities; native font registration is a separate backend operation."
         },
         {
           "upstream": "src/text/layout_cache.rs",
@@ -7309,10 +7328,12 @@
             "Sources/Rune/Video/DesktopMediaSource.swift",
             "Sources/CRuneMedia/WindowsMedia.cpp",
             "Sources/CRuneMedia/WindowsMediaFoundation.h",
-            "Tests/RuneTests/DesktopVideoFrameTests.swift"
+            "Tests/RuneTests/DesktopVideoFrameTests.swift",
+            "Sources/CRuneMedia/WindowsVideoGPU.cpp",
+            "Tests/Support/WindowsDecodedVideo/Picture.cpp"
           ],
           "status": "partial",
-          "note": "Media Foundation supplies decoded RGB32 frames and timed samples for still and playback, which Rune uploads to the GPU as image data."
+          "note": "The native decoder delivered H.264 surfaces, retained PTS and picture IDs, resumed without skips and released an unused source reader. The ordinary Windows ARM64 Player kept the last frame until visible end-of-stream and allowed paused seek/reopen. Sixty-three Swift video tests passed. Direct backend fencing is covered separately."
         },
         {
           "upstream": "src/video/windows/gpu.rs",
@@ -7325,7 +7346,7 @@
             "Tests/Support/WindowsDecodedVideo/Picture.cpp"
           ],
           "status": "partial",
-          "note": "Windows D3D11 NV12 textures reached the independent video presenter. SDK and Swift builds exercise decoder/renderer integration. The ring retains texture references on one D3D11 context. Direct D3D12 scene sampling and its separate ready/release fence semantics remain distinct from the pinned backend."
+          "note": "Windows ARM64 decoded six real H.264 DXGI samples with 64×48 storage, 64×36 display and BT.709 metadata. Six retained slots preserved textures through decoder destruction; exhaustion recovered, and a rejected adapter fell back. Twenty-four NV12 rendered frames matched the encoded-byte oracle. Rust D3D12 double fences, direct WGL sharing and full native player promotion remain distinct."
         },
         {
           "upstream": "src/video/windows/layer.rs",
@@ -7355,10 +7376,12 @@
             "Sources/Rune/Video/DesktopMediaSource.swift",
             "Sources/CRuneMedia/WindowsMedia.cpp",
             "Sources/CRuneMedia/WindowsMediaFoundation.h",
-            "Tests/RuneTests/DesktopVideoFrameTests.swift"
+            "Tests/RuneTests/DesktopVideoFrameTests.swift",
+            "Sources/CRuneMedia/WindowsVideoGPU.cpp",
+            "Tests/Support/WindowsDecodedVideo/Picture.cpp"
           ],
           "status": "partial",
-          "note": "Media Foundation supplies decoded RGB32 frames and timed samples for still and playback, which Rune uploads to the GPU as image data."
+          "note": "The production Media Foundation source reader supplied six actual H.264 DXGI samples, reporting cropped display bounds and BT.709 from its negotiated media type. Native Windows-N/Media Feature Pack absence and DLL loading on such a host are outside this acceptance."
         },
         {
           "upstream": "src/video/windows/mod.rs",
@@ -7368,10 +7391,12 @@
             "Sources/Rune/Video/DesktopMediaSource.swift",
             "Sources/CRuneMedia/WindowsMedia.cpp",
             "Sources/CRuneMedia/WindowsMediaFoundation.h",
-            "Tests/RuneTests/DesktopVideoFrameTests.swift"
+            "Tests/RuneTests/DesktopVideoFrameTests.swift",
+            "Sources/CRuneMedia/WindowsVideoGPU.cpp",
+            "Tests/Support/WindowsDecodedVideo/Picture.cpp"
           ],
           "status": "partial",
-          "note": "Media Foundation supplies decoded RGB32 frames and timed samples for still and playback, which Rune uploads to the GPU as image data."
+          "note": "The standard Windows Player exercises native Media Foundation, variable frame timing, retention, seeking and fallback. 63 tests passed on Windows ARM64, including four known media timestamps at half and double speed. DirectComposition promotion remains dependent on placement and driver support."
         },
         {
           "upstream": "src/video/windows/still.rs",
@@ -7381,10 +7406,12 @@
             "Sources/Rune/Video/DesktopMediaSource.swift",
             "Sources/CRuneMedia/WindowsMedia.cpp",
             "Sources/CRuneMedia/WindowsMediaFoundation.h",
-            "Tests/RuneTests/DesktopVideoFrameTests.swift"
+            "Tests/RuneTests/DesktopVideoFrameTests.swift",
+            "Sources/CRuneMedia/WindowsVideoGPU.cpp",
+            "Tests/Support/WindowsDecodedVideo/Picture.cpp"
           ],
           "status": "partial",
-          "note": "Media Foundation supplies decoded RGB32 frames and timed samples for still and playback, which Rune uploads to the GPU as image data."
+          "note": "Public headless/seek and selected media frame tests passed in the native Windows ARM64 suite. The synchronous still-image path is tested independently of DWM and native video presentation. Exhaustive format/time reproduction against Rust snapshots remains open."
         },
         {
           "upstream": "src/video/windows/vsync.rs",
@@ -7452,9 +7479,14 @@
         {
           "upstream": "src/window/chrome.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/CRuneWin32/CustomFrame.c",
+            "Sources/Rune/Runtime/WindowsCaption.swift",
+            "Tests/Windows/CustomFrame/probe.c",
+            "Tests/Windows/CustomFrame/app.cpp"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "The standard Windows ARM64 app exposes actionable caption controls through UI Automation; an actual maximize hit returned HTMAXBUTTON and Invoke maximized/restored/closed the window. Native ARM64 and x64 tests cover non-client capture, resizing and disabled controls. The Win11 shell flyout and Win10 border remain untested."
         },
         {
           "upstream": "src/window/configure.rs",
@@ -7482,9 +7514,14 @@
         {
           "upstream": "src/window/cpu_frame.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Platform/WindowsCPUWindow.swift",
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/CRuneWin32/CpuDib.c",
+            "Sources/CRuneWin32/WGLHandover.cpp"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Ordinary Windows ARM64 App.run proved CPU-only drawing without OpenGL, matched first CPU and GPU colors during handoff, direct GPU, and interactive fallback after genuine shader failures through all three 30-second retries. Rust uses distinct delayed-handoff timing and in-place prefaulted DIB writes. Direct WGL sharing still requires suitable hardware."
         },
         {
           "upstream": "src/window/create.rs",
@@ -7540,9 +7577,13 @@
         {
           "upstream": "src/window/first_frame.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Tests/Windows/Startup/Sources/StartupProbe/main.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Real Windows ARM64 stock single and grouped apps waited for the incoming F6 change to appear on screen before onReady. A hidden stock window called onReady exactly once after the grace timeout while isReady was false; showing it presented a GPU frame and flipped isReady without a second callback. Other hosts have separate startup paths."
         },
         {
           "upstream": "src/window/float_on_open.rs",
@@ -7720,9 +7761,14 @@
         {
           "upstream": "src/window/redraw.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Sources/Rune/Win32Platform.swift",
+            "Tests/Windows/Redraw/probe.c",
+            "Tests/Windows/Redraw/Run.ps1"
           ],
-          "status": "partial"
+          "status": "ported",
+          "note": "The scheduler re-arms paint after input and prevents one active window from starving another. Original Rust matched 344,400 transitions. On Windows ARM64 and x64, the rear window painted six times under input flood at about 16–17 ms intervals; the same control previously saw no paint in 500 ms. Hidden/covered/in-paint gates and ordinary WGL passed."
         },
         {
           "upstream": "src/window/rest.rs",
@@ -7760,9 +7806,14 @@
         {
           "upstream": "src/window/shell_requests.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Tests/Windows/Startup/Sources/StartupProbe/ShellProbe.swift",
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/Rune/Platform/WindowHostingMacOS.swift"
           ],
-          "status": "partial"
+          "status": "ported",
+          "note": "Stock native windows update hidden/minimized titles and minimize only eligible windows. Ten macOS single/group scenarios, six X11 cases with actual WM_STATE and eighteen requests, and four Windows ARM64 HWNDs verified the eligible and ignored paths. Public Swift convenience queues have separate ordering coverage."
         },
         {
           "upstream": "src/window/sight.rs",
@@ -7781,9 +7832,14 @@
         {
           "upstream": "src/window/stepping.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Platform/DesktopWindowFrame.swift",
+            "Sources/Rune/Platform/WindowHostingMacOS.swift",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/Rune/Win32Platform.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Real stock windows on macOS, Windows ARM64, X11 and Wayland exercised frame requests, min/max bounds and stepping. Two ordinary Win11 processes checked 16 cases each, including fractional pixels, instant dimensions, decorated centering and painting during WM_SIZE. The physical window manager and multi-display variations remain independently testable."
         },
         {
           "upstream": "src/window/tests.rs",
@@ -7797,9 +7853,14 @@
         {
           "upstream": "src/window/titlebar.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/CRuneWin32/CustomFrame.c",
+            "Sources/Rune/Runtime/WindowsCaption.swift",
+            "Tests/Windows/CustomFrame/probe.c",
+            "Tests/Windows/CustomFrame/app.cpp"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "The standard Windows ARM64 app exposes actionable caption controls through UI Automation; an actual maximize hit returned HTMAXBUTTON and Invoke maximized/restored/closed the window. Native ARM64 and x64 tests cover non-client capture, resizing and disabled controls. The Win11 shell flyout and Win10 border remain untested."
         },
         {
           "upstream": "src/window/titlebar/caption.rs",
@@ -7807,10 +7868,13 @@
             "Sources/Rune/Runtime/WindowsCaption.swift",
             "Sources/Rune/Runtime.swift",
             "Sources/Rune/Runtime/Slice4InputAndTitlebar.swift",
-            "Tests/RuneTests/WindowsCaptionTests.swift"
+            "Tests/RuneTests/WindowsCaptionTests.swift",
+            "Sources/CRuneWin32/CustomFrame.c",
+            "Tests/Windows/CustomFrame/probe.c",
+            "Tests/Windows/CustomFrame/app.cpp"
           ],
           "status": "ported",
-          "note": "Geometry, painting and actions cover both layout directions, DPI and app zoom, enabled, pressed and fullscreen controls. Across 28 scenes, all 1,263,360 Swift CPU and native Metal pixel comparisons were within one byte per channel of pinned Rust."
+          "note": "At 100–200% scale and app zoom, all 1,263,360 tested CPU/Metal caption pixels were within one byte of Rust. In a normal Windows ARM64 app, external UI Automation located and clicked maximize and Close, the actual hit returned HTMAXBUTTON and the window maximized and reported Restore. The physical shell Snap popup and Windows 10 border remain untested."
         },
         {
           "upstream": "src/window/video_layer.rs",
@@ -8177,13 +8241,14 @@
           "upstream": "src/window/post_frame.rs",
           "swift": [
             "Sources/Rune/Win32Platform.swift",
-            "Tests/RuneTests/Win32HostTests.swift",
             "Sources/Rune/Platform/DesktopWindowGroup.swift",
             "Sources/CRuneWin32/Win32.c",
-            "Tests/RuneTests/PrepareTextTests.swift"
+            "Sources/CRuneWin32/WindowLifecycle.c",
+            "Tests/Windows/Lifecycle/probe.c",
+            "Tests/Windows/Startup/Sources/StartupProbe/main.swift"
           ],
-          "status": "partial",
-          "note": "The first SwapBuffers signals readiness, attaches the drop target and runs onReady. The Windows loop then schedules text preparation in an idle turn after pending messages and frames. The separate queue for the remaining upstream startup chores remains open."
+          "status": "ported",
+          "note": "The normal Win32 host performs one startup task per input-free turn, after the pending input has actually presented. Visible single/group apps displayed the F6 change before onReady outside WM_PAINT. The hidden app reached the grace callback before presentation, then presented on show without a duplicate callback. OLE, WTS and UIA have independent native checks."
         },
         {
           "upstream": "src/window/slot.rs",
@@ -8351,7 +8416,7 @@
             "Tests/RuneKitTests/DiffParityTests.swift"
           ],
           "status": "partial",
-          "note": "The view uses measured virtual rows with semantic row keys, grouped navigation and a retained structural index. Native cases cover a 50k-line comparison, sticky rows, selection and unified comment placement. Split comment buttons and sigils still use different geometry and appearance."
+          "note": "Measured virtual rows, 128-line syntax chunks and directed selection match pinned fixtures. The original-length 50k benchmark measured Swift/Rust p50 of 39.14/0.83 ms for small wheel, 118.94/3.66 ms for fling and 50.05/6.15 ms for jumps. Sticky positions matched. Split comment buttons and sigils still differ."
         },
         {
           "upstream": "src/diff/view/line_info.rs",
@@ -8962,7 +9027,7 @@
             "Tests/RuneKitTests/WidgetA11yParityTests.swift"
           ],
           "status": "partial",
-          "note": "Measured virtual rows and byte-exact keys run through the standard table. In a 100k-row native fixture, 60 wheel inputs preserved visible identities with 0 root builds and 312 cell builds, compared to 60 and 4,434 before the port. Full cross-backend pixel and display-cadence comparisons have separate receipts."
+          "note": "Measured virtual rows and byte-exact keys run through the standard table. In a 100k-row native fixture, 60 wheel inputs preserved visible identities with 0 root builds and 312 cell builds, compared to 60 and 4,434 before the port. On physical Chrome/WebGPU, the stock Swift and pinned Rust workloads measured 31.60 and 60.01 FPS respectively."
         },
         {
           "upstream": "src/text_input.rs",
@@ -9022,7 +9087,7 @@
             "Tests/RuneKitTests/TreeAndSearchTests.swift"
           ],
           "status": "partial",
-          "note": "The normal file tree uses standard measured virtual rows with a versioned visible-order model. On a 50k-row native fixture, 60 wheel events preserved visible identities with 0 root builds and 120 row builds, down from 60 and 1664. Full presentation timing has separate coverage."
+          "note": "The normal file tree uses standard measured virtual rows with a versioned visible-order model. On a 50k-row native fixture, 60 wheel events preserved visible identities with 0 root builds and 120 row builds, down from 60 and 1664. On physical Chrome/WebGPU, the stock Swift and pinned Rust workloads measured 22.70 and 60.06 FPS respectively."
         }
       ],
       "note": "Widgets/markdown/shell ported with missing keyboard/drag/a11y behaviors and unported tests",
@@ -10916,21 +10981,29 @@
             "Tests/RuneLuauTests/RuneLuauParityTests.swift"
           ],
           "status": "partial",
-          "note": "All 77 names match the pinned Rust property table in declaration order. Runtime tests exercise layered states, typed geometry, theme colors, text flags, presentation roles and cached styles. The Swift versionHash accepts additional nonprimitive values."
+          "note": "All 77 names match the original property table in order. The mounted suite covers layered states, typed geometry, theme and text flags, presentational roles and invalid-UTF8 memo fallback. The Swift versionHash also accepts some nonprimitive values that the pinned property reader does not."
         },
         {
           "upstream": "src/ui/rows.rs",
           "swift": [
-            "Sources/RuneLuau/UI.swift"
+            "Sources/RuneLuau/UI.swift",
+            "Sources/RuneLuau/RuneLuau.swift",
+            "Tests/RuneLuauTests/FrozenStyleTemplateTests.swift",
+            "Tests/RuneLuauTests/RuneLuauParityTests.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "Mounted deferred rows use standard virtual rows and receive a separate VM execution budget on each deferred invocation. A native test exercises distinct row handlers under input after scrolling. The Swift API also exposes optional rowError and detached rendering."
         },
         {
           "upstream": "src/ui/view.rs",
           "swift": [
-            "Sources/RuneLuau/UI.swift"
+            "Sources/RuneLuau/UI.swift",
+            "Sources/RuneLuau/RuneLuau.swift",
+            "Tests/RuneLuauTests/FrozenStyleTemplateTests.swift",
+            "Tests/RuneLuauTests/RuneLuauParityTests.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "view:Handler returns the original closure or value. Mounted rows retain their own action handlers and the normal Rune input path invokes the correct one. All 53 native Luau tests passed with the ordinary runtime."
         },
         {
           "upstream": "src/vm.rs",

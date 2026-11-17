@@ -71,7 +71,7 @@ extension El {
 
     /// Wraps text at the element's width, breaking inside unbroken tokens when needed (`El::wrap_anywhere`).
     internal func applyWrapAnywhere(_ enabled: Bool = true) -> Self {
-        if handlers.editLens != nil && textStyle.wrap == .noWrap {
+        if hasEditLens && textStyle.wrap == .noWrap {
             return self
         }
         guard isTextElement else { return self }
@@ -176,7 +176,7 @@ extension El {
     // MARK: - Internal Accessors
 
     private var isTextElement: Bool {
-        plainText != nil || richSpans != nil || liveText != nil || handlers.editLens != nil
+        plainText != nil || richSpans != nil || liveText != nil || hasEditLens
     }
 
     internal var elSpanRadius: Float {

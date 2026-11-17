@@ -481,9 +481,7 @@ public extension Runtime {
         }
         // `a11y_action`: only an allowed node that can do what is asked (`actions.rs:38-81`);
         // a disabled control advertises nothing and takes no action.
-        let all = elements()
         let flatIdx = a11yTargetIndex(id)
-        let target = all.first(where: { $0.path == id }) ?? all.first(where: { matchesAuthoredKey($0.key, id) })
         if let flatIdx {
             let flat = flatNodes[flatIdx]
             guard a11yAllowed(flatIdx), a11yTakes(action, on: flat) else {
@@ -497,8 +495,18 @@ public extension Runtime {
                 dirtyCommit(at: now)
                 return true
             }
+            if action == .press {
+                // Assistive clients address the node directly, including when it is clipped or covered.
+                let rect = presentedRectByPath[flat.path] ?? flat.targetRect
+                let center = Vec2(rect.width * 0.5, rect.height * 0.5)
+                let press = PointerPress(window: Vec2(rect.x + center.x, rect.y + center.y), local: center,
+                                         elementSize: Vec2(rect.width, rect.height), button: .primary, mods: .none, clicks: 1)
+                return dispatchPointerClick(flat, press: press, at: now) != nil
+            }
         } else {
             // Inline links share their text owner's focus path but receive actions by link index.
+            let all = elements()
+            let target = all.first(where: { $0.path == id }) ?? all.first(where: { matchesAuthoredKey($0.key, id) })
             guard let target, !target.inert, let parent = target.parentIndex, all.indices.contains(parent),
                   let owner = a11yTargetIndex(all[parent].path), a11yAllowed(owner), !flatNodes[owner].el.a11yDisabled,
                   let box = linkBoxesByPath[all[parent].path]?.first(where: {
@@ -522,17 +530,8 @@ public extension Runtime {
             }
             return true
         }
-        guard let target, !target.inert, target.rect.count >= 4 else { return false }
-        let center = Vec2(target.rect[0] + target.rect[2] * 0.5, target.rect[1] + target.rect[3] * 0.5)
-
         switch action {
-        case .focus:
-            return false
-        case .press:
-            pressDown(at: center, at: now, mouse: false)
-            pointerUp(at: center, button: .primary, mods: Mods(), at: now)
-            return true
-        case .setValue, .scrollIntoView:
+        case .focus, .press, .setValue, .scrollIntoView:
             return false
         case .increment, .decrement:
             guard let flatIdx, let onStep = flatNodes[flatIdx].el.handlers.onStep else {

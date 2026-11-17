@@ -1727,6 +1727,14 @@ struct VideoRuntimeExtendedParityTests {
         let wavDur = try #require(wav.duration)
         #expect(abs(wavDur - 0.5) < 0.01)
 
+        let audioOnly = Player.file(mediaFixtureURL("silence.wav").path)
+        _ = audioOnly.size
+        if case .failed(let msg) = audioOnly.state {
+            #expect(msg.contains("no playable video track"))
+        } else {
+            Issue.record("expected video playback of silence.wav to fail, got \(audioOnly.state)")
+        }
+
         let video = Player.audio(mediaFixtureURL("rgbw.mp4").path)
         if case .failed(let msg) = video.state {
             #expect(msg.contains("no playable audio track"))

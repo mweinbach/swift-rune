@@ -97,6 +97,14 @@ private final class MovingContent: Compositor {
     func render(frame: CompositorFrame<Int>) { frame.drawUI() }
 }
 
+@MainActor private final class ProbeLanding: UIViewController {
+    var appeared = false
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        appeared = true
+    }
+}
+
 @MainActor private func verifyDisplayLink(_ window: UIWindow) async throws {
     let motion = MovingContent()
     var frames: [FrameEncoded] = []
@@ -106,7 +114,7 @@ private final class MovingContent: Compositor {
     let traceFile = FileManager.default.temporaryDirectory.appending(path: "rune-uikit-\(UUID()).jsonl")
     defer { try? FileManager.default.removeItem(at: traceFile) }
     let frameLimit = 12
-    let app = App(title: "Rune cadence", size: Vec2(40, 40), state: 0) { _, cx in
+    let app = App(title: "Rune cadence", size: Vec2(160, 120), state: 0) { _, cx in
         reportedInsets = cx.safeArea()
         return text("Rune")
     }
@@ -119,16 +127,21 @@ private final class MovingContent: Compositor {
     let args = ToolingArgs.parse(["--native", "--trace", traceFile.path, "--frames", String(frameLimit)])
     let controller = try IOSApp.makeViewController(app, parsed: args)
     if let limits = window.windowScene?.sizeRestrictions {
-        limits.minimumSize = CGSize(width: 40, height: 40)
-        limits.maximumSize = CGSize(width: 40, height: 40)
+        limits.minimumSize = CGSize(width: 160, height: 120)
+        limits.maximumSize = CGSize(width: 160, height: 120)
     }
-    window.rootViewController = controller
+    let landing = ProbeLanding()
+    window.rootViewController = landing
+    window.windowLevel = .alert
     window.isUserInteractionEnabled = false
     window.makeKeyAndVisible()
     defer { window.isHidden = true }
 
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: .seconds(10))
+    while !landing.appeared && clock.now < deadline { try await Task.sleep(for: .milliseconds(15)) }
+    guard landing.appeared else { throw ProbeError("The UIKit window never appeared") }
+    window.rootViewController = controller
     while frames.filter({ $0.presentsAt != nil }).count < 5 && clock.now < deadline {
         try await Task.sleep(for: .milliseconds(15))
     }
@@ -177,6 +190,10 @@ private final class MovingContent: Compositor {
     let safe = controller.runeView.safeAreaInsets
     guard safe.bottom >= 6, reportedInsets == [safe.top, safe.right, safe.bottom, safe.left].map(Float.init) else {
         throw ProbeError("UIKit safe area failed to reach the view: \(safe), \(reportedInsets)")
+    }
+    let totals = ready.surfaceStats.totals
+    guard totals.presents == UInt64(frames.count), totals == controller.runeView.runtime.surfaceStats()?.totals else {
+        throw ProbeError("The final UIKit window counters diverged from its frame reports")
     }
     print("UIKit submitted \(frames.count) frames. \(paced.count) had increasing display targets at \(String(format: "%.2f", hz)) Hz. The public window and runtime counted the same submissions.")
 }

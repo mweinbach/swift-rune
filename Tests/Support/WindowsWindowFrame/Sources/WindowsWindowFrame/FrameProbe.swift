@@ -164,12 +164,15 @@ enum FrameProbe {
             runOnTestDesktop()
             return
         }
-        log("Creating Rune window on private desktop")
+        let checkScreenLayout = !CommandLine.arguments.contains("--geometry-only")
+        log("Creating Rune window. Screen layout readback \(checkScreenLayout ? "enabled" : "disabled").")
         let title = "Rune frame fixture \(GetCurrentProcessId())"
         let options = WindowOptions(minSize: Vec2(240, 140), maxSize: Vec2(440, 320))
         let layout = LayoutReadback()
         let app = App(title: title, size: Vec2(300, 200), state: 0) { _, _ in
-            text("Window frame").onLayout { _, rect in layout.localChanged(rect) }
+            let content: El<Int> = el().wFull().hFull().bg(.white)
+            guard checkScreenLayout else { return content }
+            return content.onLayout { _, rect in layout.localChanged(rect) }
                 .onScreenLayout { _, rect in layout.screenChanged(rect) }
         }.windowOptions(options).openInactive().onWindow { _ in log("Rune window bound") }
         let updates = app.sharedHandle
@@ -188,7 +191,9 @@ enum FrameProbe {
                     if let previousDPI { _ = SetThreadDpiAwarenessContext(previousDPI) }
                 }
                 waitFor(hwnd, "initial content") { $0.hasContent(300, 200) }
-                waitFor(hwnd, "initial screen layout matches ClientToScreen") { layout.matches($0) }
+                if checkScreenLayout {
+                    waitFor(hwnd, "initial screen layout matches ClientToScreen") { layout.matches($0) }
+                }
 
                 updates.update { state, tx in
                     state += 1
@@ -210,7 +215,9 @@ enum FrameProbe {
                 waitFor(hwnd, "handle instant resize") { $0.hasContent(340, 260) }
                 window.center()
                 waitFor(hwnd, "handle center preserves content size") { $0.hasContent(340, 260) && $0.centered }
-                waitFor(hwnd, "moved screen layout matches ClientToScreen") { layout.matches($0) }
+                if checkScreenLayout {
+                    waitFor(hwnd, "moved screen layout matches ClientToScreen") { layout.matches($0) }
+                }
                 checkModalResize(of: hwnd)
                 window.close()
             }

@@ -251,6 +251,10 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         return id;
     }
 
+    function lineOrigin(line) {
+        return line.origin ??= line.element.getBoundingClientRect().left;
+    }
+
     function measure(line, ptr, size) {
         applyFont(context, line);
         const m = context.measureText(line.text);
@@ -278,7 +282,8 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         line.svgText = null;
         line.probe?.element.remove();
         line.probe = undefined;
-        line.origin = line.element.getBoundingClientRect().left;
+        // Only range, caret and ink queries need a DOM position. Canvas supplies the metrics above.
+        line.origin = undefined;
         line.carets.clear();
         line.tile = null;
     }
@@ -432,7 +437,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             const a = unitBounds(run, index - 1, index), b = unitBounds(run, index, index + 1);
             const [first, second] = a.left <= b.left ? [a, b] : [b, a];
             if (Math.abs(first.right - second.left) > 2) return NaN;
-            return (first.right + second.left) / 2 - run.origin;
+            return (first.right + second.left) / 2 - lineOrigin(run);
         }
         // WebKit rounds the Range edges outwards in CSS pixels. A whole
         // advance shifts a glyph boundary by exactly an integral number of ems.
@@ -452,7 +457,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         const expanded = unitBounds(probe, owner, end);
         const gap = line.size * probeGapEm;
         if (Math.abs(expanded.width - rect.width - gap) > 2) return null;
-        const pen = rect.left - line.origin;
+        const pen = rect.left - lineOrigin(line);
         const dx = expanded.left - probe.origin - pen;
         const shift = Math.round(dx / gap) * gap;
         if (Math.abs(shift - dx) > 2) return null;
@@ -533,7 +538,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         // marks. Only use the isolated draw when its coverage matches the
         // original native line, including the space around the entire cell.
         const rect = unitBounds(line, owner, end);
-        const pen = rect.left - line.origin;
+        const pen = rect.left - lineOrigin(line);
         const text = line.text.slice(owner, end);
         applyFont(context, line);
         const m = context.measureText(text);
@@ -555,7 +560,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
     }
     function caret(line, byte) {
         if (line.carets.has(byte)) return line.carets.get(byte);
-        const x = bounds(line, byte, byte).left - line.origin;
+        const x = bounds(line, byte, byte).left - lineOrigin(line);
         line.carets.set(byte, x);
         return x;
     }
@@ -723,7 +728,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         cell(id, start, end, left, width) {
             const line = runs.get(id);
             const rect = bounds(line, start, end);
-            const x = rect.left - line.origin;
+            const x = rect.left - lineOrigin(line);
             const out = view();
             out.setFloat32(left, x, true);
             out.setFloat32(width, rect.width, true);

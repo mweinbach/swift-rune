@@ -1130,7 +1130,7 @@ final class MemoLayoutChildren<State> {
         while let child = stack.popLast() {
             if child.virtualEstimate != nil || child.virtualRowsSource != nil { traits.insert(.virtual) }
             if child.growthSpec != nil || child.foldGlideSpec != nil { traits.insert(.growth) }
-            if child.handlers.editLens != nil {
+            if child.hasEditLens {
                 traits.insert(.mutableLayout)
                 if child.pillStyleLookup != nil || child.pillIconLookup != nil || child.pillColorsSpec != nil {
                     traits.insert(.inputPills)
@@ -1799,6 +1799,7 @@ public struct El<State> {
             }
         }
     }
+    internal var hasEditLens: Bool { _cold?.data.handlersBox?.value.editLens != nil }
     internal var hasAuthoredHandlers: Bool { _cold?.data.handlersBox != nil }
     internal var runtimeExtras: [String: Any] {
         get { _cold?.data.runtimeExtras ?? [:] }
@@ -2677,7 +2678,7 @@ public struct El<State> {
         copy.textDirByParagraph = true
         guard !copy.isSecure,
               copy.liveText == nil,
-              copy.handlers.editLens == nil,
+              !copy.hasEditLens,
               copy.textStyle.wrap != .ellipsis else {
             return copy
         }
@@ -3194,7 +3195,7 @@ public struct El<State> {
         var copy = self
         copy.isSecure = enabled
         if enabled {
-            if !copy.textLinks.isEmpty && copy.handlers.editLens == nil && copy.role == .text {
+            if !copy.textLinks.isEmpty && !copy.hasEditLens && copy.role == .text {
                 copy.focusable = false
             }
             copy.textLinks = []
@@ -3512,7 +3513,7 @@ public struct El<State> {
     /// Only the range's shaped glyph boxes take the pointer; each link is a Tab stop that Return or Space presses.
     public func link(_ link: TextLink) -> Self {
         var copy = self
-        guard copy.handlers.editLens == nil, !copy.isSecure else { return copy }
+        guard !copy.hasEditLens, !copy.isSecure else { return copy }
         guard copy.plainText != nil || copy.richSpans != nil || copy.liveText != nil || copy.role == .text else {
             return copy
         }
@@ -3526,7 +3527,7 @@ public struct El<State> {
     /// Registers an activation handler invoked with the pressed/focused `TextLink.id` (`crates/rune/src/el/text.rs:409`).
     public func onLink(_ handler: @escaping (inout State, String, inout Tx) -> Void) -> Self {
         var copy = self
-        guard copy.handlers.editLens == nil, !copy.isSecure else { return copy }
+        guard !copy.hasEditLens, !copy.isSecure else { return copy }
         guard copy.plainText != nil || copy.richSpans != nil || copy.liveText != nil || copy.role == .text else {
             return copy
         }
@@ -3542,7 +3543,7 @@ public struct El<State> {
     /// Registers a secondary-click handler invoked with the `TextLink.id` and press coordinates (`crates/rune/src/el/text.rs:419`).
     public func onLinkSecondary(_ handler: @escaping (inout State, String, PointerPress, inout Tx) -> Void) -> Self {
         var copy = self
-        guard copy.handlers.editLens == nil, !copy.isSecure else { return copy }
+        guard !copy.hasEditLens, !copy.isSecure else { return copy }
         guard copy.plainText != nil || copy.richSpans != nil || copy.liveText != nil || copy.role == .text else {
             return copy
         }
@@ -4285,29 +4286,41 @@ extension El {
 public struct InputSpec: Sendable, Equatable {
     public var animateLayout: Bool
     public var placeholder: String
-    public var placeholderColor: Color
+    fileprivate var authoredPlaceholder: Color?
+    public var placeholderColor: Color {
+        get { authoredPlaceholder ?? .white.alpha(0.4) }
+        set { authoredPlaceholder = newValue }
+    }
     public var placeholderStyle: TextStyle?
-    public var caret: Color
-    public var selection: Color
+    fileprivate var authoredCaret: Color?
+    public var caret: Color {
+        get { authoredCaret ?? .white }
+        set { authoredCaret = newValue }
+    }
+    fileprivate var authoredSelection: Color?
+    public var selection: Color {
+        get { authoredSelection ?? .white.alpha(0.2) }
+        set { authoredSelection = newValue }
+    }
     public var singleLine: Bool
     public var spellcheck: Bool
 
     public init(
         animateLayout: Bool = false,
         placeholder: String = "",
-        placeholderColor: Color = Color.white.scaleAlpha(0.4),
+        placeholderColor: Color? = nil,
         placeholderStyle: TextStyle? = nil,
-        caret: Color = .white,
-        selection: Color = Color.srgb(0.2, 0.48, 0.96, 0.35),
+        caret: Color? = nil,
+        selection: Color? = nil,
         singleLine: Bool = false,
         spellcheck: Bool = false
     ) {
         self.animateLayout = animateLayout
         self.placeholder = placeholder
-        self.placeholderColor = placeholderColor
+        self.authoredPlaceholder = placeholderColor
         self.placeholderStyle = placeholderStyle
-        self.caret = caret
-        self.selection = selection
+        self.authoredCaret = caret
+        self.authoredSelection = selection
         self.singleLine = singleLine
         self.spellcheck = spellcheck
     }
@@ -4356,12 +4369,13 @@ public func textInput<State>(
     node.handlers.editLens = (get: access.get, set: access.set)
     if let spec {
         if !spec.placeholder.isEmpty {
-            node = node.placeholder(spec.placeholder, color: spec.placeholderColor)
+            node = node.placeholder(spec.placeholder, color: spec.authoredPlaceholder)
         }
         if let placeholderStyle = spec.placeholderStyle {
             node = node.placeholderFont(placeholderStyle)
         }
-        node = node.caret(spec.caret, selection: spec.selection)
+        node.caretColor = spec.authoredCaret
+        node.selectionColor = spec.authoredSelection
         if spec.singleLine { node = node.singleLine(true) }
         if spec.spellcheck { node = node.spellcheck(true) }
         if spec.animateLayout { node = node.animateEditLayout(true) }

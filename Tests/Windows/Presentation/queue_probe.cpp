@@ -3,6 +3,8 @@
 #include <dwmapi.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <cwchar>
 #include <vector>
 
 namespace {
@@ -23,6 +25,40 @@ bool take() {
     }
     return true;
 }
+bool placeProbe(HWND window, const RECT &work) {
+    // The CPU, damage and resize checks sample these client positions. A launcher may
+    // already have a foreground dialog on this desktop, including over the screen center.
+    constexpr POINT samples[] = {{30, 30}, {100, 70}, {150, 120}};
+    constexpr int width = 180, height = 140, margin = 16;
+    LONG availableX = work.right - work.left - width - 2 * margin;
+    LONG availableY = work.bottom - work.top - height - 2 * margin;
+    if (availableX < 0 || availableY < 0) return false;
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            LONG x = work.left + margin + col * availableX / 2;
+            LONG y = work.top + margin + row * availableY / 2;
+            bool clear = true;
+            for (const POINT &p : samples) {
+                HWND hit = GetAncestor(WindowFromPoint({x + p.x, y + p.y}), GA_ROOT);
+                wchar_t name[64]{};
+                GetClassNameW(hit, name, 64);
+                if (std::wcscmp(name, L"#32770") == 0) clear = false;
+            }
+            if (!clear) continue;
+            // SWP_SHOWWINDOW works when the launcher supplied STARTF_USESHOWWINDOW / SW_HIDE.
+            if (!SetWindowPos(window, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW))
+                continue;
+            if (!IsWindowVisible(window) || FAILED(DwmFlush())) continue;
+            for (const POINT &p : samples)
+                if (GetAncestor(WindowFromPoint({x + p.x, y + p.y}), GA_ROOT) != window) clear = false;
+            if (clear) {
+                std::printf("unobscured probe HWND at screen (%ld,%ld)\n", x, y);
+                return true;
+            }
+        }
+    }
+    return false;
+}
 bool displayed(HWND parent, LONG x, LONG y, COLORREF expected, int attempts = 15) {
     POINT at{x, y};
     ClientToScreen(parent, &at);
@@ -36,6 +72,12 @@ bool displayed(HWND parent, LONG x, LONG y, COLORREF expected, int attempts = 15
         Sleep(15);
     }
     std::printf("expected visible pixel %06lx, got %06lx at window (%ld, %ld)\n", expected, got, x, y);
+    HWND hit = WindowFromPoint(at);
+    char name[64]{};
+    GetClassNameA(hit, name, sizeof(name));
+    std::printf("screen (%ld,%ld) visible=%d iconic=%d hitOwnWindow=%d hit=%p class=%s\n",
+                at.x, at.y, IsWindowVisible(parent), IsIconic(parent), GetAncestor(hit, GA_ROOT) == parent,
+                static_cast<void *>(hit), name);
     return false;
 }
 void demand(bool condition, const char *stage) {
@@ -65,7 +107,11 @@ DWORD WINAPI watchHandoff(void *argument) {
 }
 }
 
-int main() {
+int main(int argc, char **argv) {
+    if (argc > 2 || (argc == 2 && std::strcmp(argv[1], "composition") && std::strcmp(argv[1], "child"))) {
+        std::fprintf(stderr, "usage: Probe.exe [composition|child]\n");
+        return 2;
+    }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     constexpr COLORREF cpuColor = RGB(178, 23, 191);
     WNDCLASSW cls{};
@@ -78,13 +124,14 @@ int main() {
                                   WS_POPUP, (work.right + work.left) / 2, (work.bottom + work.top) / 2, 160, 100,
                                   nullptr, nullptr, cls.hInstance, nullptr);
     demand(window != nullptr, "parent HWND");
-    ShowWindow(window, SW_SHOWNOACTIVATE);
+    demand(placeProbe(window, work), "unobscured probe window at all sampled points");
     using Microsoft::WRL::ComPtr;
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> dc;
     demand(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                                        nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &dc)), "hardware D3D11 device");
     for (bool composition : {false, true}) {
+        if (argc == 2 && std::strcmp(argv[1], composition ? "composition" : "child")) continue;
         SetWindowPos(window, nullptr, 0, 0, 160, 100, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         RedrawWindow(window, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_UPDATENOW);
         if (composition) demand(displayed(window, 100, 70, cpuColor), "GDI before creating GPU target");

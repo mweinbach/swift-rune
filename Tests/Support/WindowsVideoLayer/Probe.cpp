@@ -94,6 +94,21 @@ int main() {
         if (!rune_win_video_attach(host, yuvLayer) || !pixel(window, 29, 30, RGB(255,255,255)) || !pixel(window, 64, 30, RGB(0,0,0))) return 9;
         rune_win_video_hide(host, yuvLayer);
         std::printf("PASS NV12 limited white to odd-sized 47x57 visual\n");
+        // The interchange ring is shader-readable; some adapters require the
+        // processor to use its own decoder-bindable copy of this texture.
+        nv12.Reset();
+        d.Width = 64; d.Height = 36;
+        d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        BYTE ring[64 * 36 * 3 / 2];
+        for (size_t i = 0; i < sizeof(ring); ++i) ring[i] = i < 64 * 36 ? 235 : 128;
+        D3D11_SUBRESOURCE_DATA picture{ring, 64, 0};
+        if (SUCCEEDED(dev->CreateTexture2D(&d, &picture, &nv12))) {
+            yuvLayer = rune_win_video_prepare(host, nv12.Get(), 0, 64, 36, 0, 0, 128, 72, 0, 0, 128, 72, 0, 1);
+            if (!yuvLayer || !pixel(window, 29, 30, RGB(0,0,0)) || !rune_win_video_attach(host, yuvLayer) ||
+                !pixel(window, 29, 30, RGB(255,255,255))) return 11;
+            rune_win_video_hide(host, yuvLayer);
+            std::printf("PASS shader-readable decoder-ring texture on video visual\n");
+        }
     } else {
         if (!pixel(window, 29, 30, RGB(0,0,0))) return 10;
         std::printf("NV12 video processor unavailable (texture HRESULT %08lx), UI pixel preserved\n", hr);

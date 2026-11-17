@@ -1535,6 +1535,7 @@ public final class Runtime<State> {
         var best: Double?
         if includePaint {
             best = nextVideoWake.map { max($0, now) }
+            if slice2State.autoscroll.wantsFrame { best = min(best ?? now, now) }
             if let spellingWake = fieldSpelling.watch?.wakeAt {
                 best = min(best ?? .infinity, max(now, spellingWake))
             }
@@ -2491,17 +2492,22 @@ public final class Runtime<State> {
             defer { checkingLiveOnly = false }
             var didRunView = false
             MemoSnapshot.enter {
-                commitTreePass(
-                    at: now,
-                    cut: cut,
-                    settlePass: 0,
-                    commitKind: commitKind,
-                    commitMotion: commitMotion,
-                    commitColorSpring: commitColorSpring,
-                    commitFollowEdge: commitFollowEdge,
-                    commitCut: commitCut,
-                    didRunView: &didRunView
-                )
+                // A zoom or memo geometry change can request one fresh measurement. Finish the
+                // previous pass before retrying so its layout and apply frames leave the stack.
+                for settlePass in 0...1 {
+                    let result = commitTreePass(
+                        at: now,
+                        cut: cut,
+                        settlePass: settlePass,
+                        commitKind: commitKind,
+                        commitMotion: commitMotion,
+                        commitColorSpring: commitColorSpring,
+                        commitFollowEdge: commitFollowEdge,
+                        commitCut: commitCut,
+                        didRunView: &didRunView
+                    )
+                    if result == .applied { break }
+                }
             }
             if didRunView {
                 memo.keepSince(sincePass)
@@ -3757,7 +3763,7 @@ public final class Runtime<State> {
                 let context = FlatMemoContext(frame: flatFrame, flow: nodeFlow, directed: nodeDirected,
                     inert: effectiveInert, z: ownZ, instant: childInstant, row: childInRow,
                     underFold: item.parentUnderFold, styleSpring: nodeStyleSpring)
-                if let span = memoPaths.span, span.context == context,
+                if let span = memoPaths.span, span.context == context, span.specs.first?.parent == nid,
                    MemoFlatSpan<State>.equalLayouts(span.children, childLayouts),
                    span.nodes.allSatisfy({ stableForFlatReplay($0.nodeId) }) {
                     span.append(to: &newFlat, byPath: &newByPath, byId: &newIndices, specs: &specs,
@@ -4160,6 +4166,8 @@ public final class Runtime<State> {
         return false
     }
 
+    internal enum CommitPassResult { case applied, needsSettle }
+
     private func commitTreePass(
         at now: Double,
         cut: Bool,
@@ -4170,7 +4178,7 @@ public final class Runtime<State> {
         commitFollowEdge: Bool,
         commitCut: Bool,
         didRunView: inout Bool
-    ) {
+    ) -> CommitPassResult {
         viewCommitCount += 1
         if settlePass == 0 {
             CommitGenerationStore.increment()
@@ -4198,7 +4206,7 @@ public final class Runtime<State> {
                commitCut: commitCut,
                prevMountedIds: prevMountedIds
            ) {
-            applyMeasurePass(
+            return applyMeasurePass(
                 remountPass,
                 at: now,
                 cut: cut,
@@ -4208,10 +4216,8 @@ public final class Runtime<State> {
                 commitColorSpring: commitColorSpring,
                 commitFollowEdge: commitFollowEdge,
                 commitCut: commitCut,
-                prevMountedIds: prevMountedIds,
-                didRunView: &didRunView
+                prevMountedIds: prevMountedIds
             )
-            return
         }
 
         if plannedKind == .relayout,
@@ -4227,7 +4233,7 @@ public final class Runtime<State> {
             pendingResizeRelayout = false
             pendingGrowthRelayout = false
             resizeReadMovedFlag = false
-            applyMeasurePass(
+            return applyMeasurePass(
                 relayoutPass,
                 at: now,
                 cut: cut,
@@ -4237,10 +4243,8 @@ public final class Runtime<State> {
                 commitColorSpring: commitColorSpring,
                 commitFollowEdge: commitFollowEdge,
                 commitCut: commitCut,
-                prevMountedIds: prevMountedIds,
-                didRunView: &didRunView
+                prevMountedIds: prevMountedIds
             )
-            return
         }
 
         didRunView = true
@@ -4256,18 +4260,7 @@ public final class Runtime<State> {
             allowZoomSettle: settlePass == 0,
             allowRebuildRegionRowReuse: settlePass == 0
         ) else {
-            commitTreePass(
-                at: now,
-                cut: cut,
-                settlePass: 1,
-                commitKind: commitKind,
-                commitMotion: commitMotion,
-                commitColorSpring: commitColorSpring,
-                commitFollowEdge: commitFollowEdge,
-                commitCut: commitCut,
-                didRunView: &didRunView
-            )
-            return
+            return .needsSettle
         }
         var retryCaret = focusedCaret
         let initialCaretMoved = cxSettings.caretReadByView && caretMoved(from: retryCaret, in: pass.nodes)
@@ -4327,7 +4320,7 @@ public final class Runtime<State> {
         pendingGrowthRelayout = false
         resizeReadMovedFlag = false
 
-        applyMeasurePass(
+        return applyMeasurePass(
             pass,
             at: now,
             cut: cut,
@@ -4337,8 +4330,7 @@ public final class Runtime<State> {
             commitColorSpring: commitColorSpring,
             commitFollowEdge: commitFollowEdge,
             commitCut: commitCut,
-            prevMountedIds: prevMountedIds,
-            didRunView: &didRunView
+            prevMountedIds: prevMountedIds
         )
     }
 
@@ -4353,9 +4345,8 @@ public final class Runtime<State> {
         commitColorSpring: Spring?,
         commitFollowEdge: Bool,
         commitCut: Bool,
-        prevMountedIds: Set<NodeId>,
-        didRunView: inout Bool
-    ) {
+        prevMountedIds: Set<NodeId>
+    ) -> CommitPassResult {
         if let measuredGrowth = pass.measuredGrowthRows {
             growthRows = measuredGrowth
         }
@@ -4581,18 +4572,7 @@ public final class Runtime<State> {
             spareFlatNodes = []
             swap(&spareFlatNodes, &prevFlatNodesSnapshot)
             spareFlatNodes.removeAll(keepingCapacity: true)
-            commitTreePass(
-                at: now,
-                cut: cut,
-                settlePass: 1,
-                commitKind: commitKind,
-                commitMotion: commitMotion,
-                commitColorSpring: commitColorSpring,
-                commitFollowEdge: commitFollowEdge,
-                commitCut: commitCut,
-                didRunView: &didRunView
-            )
-            return
+            return .needsSettle
         }
 
         finishApplyMeasurePass(
@@ -4614,6 +4594,7 @@ public final class Runtime<State> {
             nowRevealedSecureIds: nowRevealedSecureIds,
             concealedSecureIndices: concealedSecureIndices
         )
+        return .applied
     }
 
     @inline(never)
@@ -4639,7 +4620,6 @@ public final class Runtime<State> {
         for i in layoutObservers.inputPills {
             if let editLens = flatNodes[i].el.handlers.editLens {
                 ElDisplayResolver.preResolveInputPills(el: &flatNodes[i].el, edit: editLens.get(state))
-
             }
         }
 
@@ -6392,7 +6372,6 @@ public final class Runtime<State> {
                     accessibilityLiveRevision &+= 1
                     node.el.plainText = text
                     flatNodes[index] = node
-
                 }
             }
             for b in node.el.liveBindings {
@@ -8571,7 +8550,7 @@ public final class Runtime<State> {
                         let showingPlaceholder = resolvedInput.showingPlaceholder
                         let renderedStr = resolvedInput.renderedString
                         let textCol = showingPlaceholder
-                            ? (el.placeholderColor ?? defaultTextColor.alpha(0.45))
+                            ? (el.placeholderColor ?? defaultViewFg.alpha(0.4))
                             : defaultTextColor
 
                         let inputClip = intersectRects(visClip, rect)
@@ -8641,28 +8620,9 @@ public final class Runtime<State> {
                         }
 
                         // Selection highlight
-                        if isFocused && edit.hasSelection && !showingPlaceholder {
-                            let rawRange = edit.selectedUTF8Range
-                            let displayRange: Range<Int>
-                            if resolvedInput.isSecure && !edit.isRevealed {
-                                if edit.multiline {
-                                    displayRange = 0..<renderedStr.utf8.count
-                                } else {
-                                    let utf8Count = edit.text.utf8.count
-                                    let lo = max(0, min(rawRange.lowerBound, utf8Count))
-                                    let hi = max(lo, min(rawRange.upperBound, utf8Count))
-                                    let loIdx = edit.text.utf8.index(edit.text.utf8.startIndex, offsetBy: lo)
-                                    let hiIdx = edit.text.utf8.index(edit.text.utf8.startIndex, offsetBy: hi)
-                                    let loScalars = edit.text[..<loIdx].unicodeScalars.count
-                                    let hiScalars = edit.text[..<hiIdx].unicodeScalars.count
-                                    let bulletBytes = "•".utf8.count
-                                    displayRange = (loScalars * bulletBytes)..<(hiScalars * bulletBytes)
-                                }
-                            } else {
-                                displayRange = rawRange
-                            }
-                            let baseSelCol = el.resolvedSelectionStyle?.pick(active: windowFocused).highlight
-                                ?? (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28))
+                        if isFocused && edit.hasSelection && edit.preedit == nil && !showingPlaceholder {
+                            let displayRange = resolvedInput.selectionRange(for: edit)
+                            let baseSelCol = el.fieldSelectionColor(foreground: defaultViewFg, active: windowFocused)
                             let selCol = baseSelCol.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                             let lineRects = textSystem.selectionRects(
                                 in: shaped,
@@ -8846,7 +8806,7 @@ public final class Runtime<State> {
                             let worldCaret = [caretXPt, textOriginY + cRect.y, cRect.z, cRect.w]
                             caretOut = worldCaret
                             if windowFocused {
-                                let cc = (el.caretColor ?? Tok.accent(0, dark: systemDark))
+                                let cc = (el.caretColor ?? defaultViewFg)
                                     .scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                                 primitives.append(.roundedRect(
                                     rect: SIMD4<Float>(
@@ -10641,7 +10601,7 @@ public final class Runtime<State> {
 
     /// Dispatches both supported click callback signatures with the original pointer event.
     /// Returns whether all invoked callbacks requested a live-only update.
-    private func dispatchPointerClick(_ node: FlatNode, press: PointerPress, at now: Double) -> Bool? {
+    internal func dispatchPointerClick(_ node: FlatNode, press: PointerPress, at now: Double) -> Bool? {
         let handlers = node.el.handlers
         guard handlers.onClick != nil || handlers.onClickPress != nil else { return nil }
         logInputEvent("press \(node.path)")

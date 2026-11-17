@@ -20,6 +20,45 @@ struct ElSlice1And3CloseoutTests {
 
     // MARK: - 1. src/el/a11y.rs Props on El (L59, L142, L147-149, L151-152, L158, L160-163, L168)
 
+    @Test("Integer scrolling reuses retained mask draws and reproduces the fresh command stream")
+    func retainedTranslatedLabelDraws() throws {
+        func app() -> Runtime<Int> {
+            let rt = Runtime<Int>(state: 0, viewport: Vec2(360, 220), pixelScale: 1) { version, _ in
+                let rows: [El<Int>] = (0..<20).map { i in
+                    text("row \(i) value \(version)").key("r\(i)").size(280, 24)
+                }
+                return col().key("scroll").size(360, 220).scroll(ScrollSpec(stickBottom: false)).children(rows)
+            }
+            rt.textSystem.smoothing = .off
+            return rt
+        }
+        let retained = app(), fresh = app()
+        var reused = false
+        for step in 0..<9 {
+            let t = Double(step) / 60
+            if step == 5 {
+                for rt in [retained, fresh] { rt.update(at: t) { value, tx in value = 1; tx.instant() } }
+            }
+            if step > 0 {
+                for rt in [retained, fresh] { rt.wheel(WheelEvent(dy: -4), at: Vec2(10, 40), now: t) }
+            }
+            let previous = retained.labelDraws
+            let before = retained.element(byKey: "r4")?.rect
+            fresh.labelDraws.removeAll()
+            let a = retained.renderFrame(at: t), b = fresh.renderFrame(at: t)
+            #expect(a.instances == b.instances)
+            #expect(a.marks == b.marks)
+            #expect(retained.element(byKey: "r4")?.rect == fresh.element(byKey: "r4")?.rect)
+            if let before, let after = retained.element(byKey: "r4")?.rect, before[1] != after[1],
+               let id = retained.flatNodes.first(where: { $0.key == "r4" })?.nodeId,
+               let prior = previous[id], let current = retained.labelDraws[id],
+               prior.draws.withUnsafeBufferPointer({ old in
+                   current.draws.withUnsafeBufferPointer { $0.baseAddress == old.baseAddress }
+               }) { reused = true }
+        }
+        #expect(reused)
+    }
+
     @Test("Deep native paint traversal shapes visible text on a Swift task stack")
     func deepNativePaintTraversal() {
         let rt = Runtime(state: (), viewport: Vec2(100, 100), pixelScale: 1) { _, _ -> El<Void> in

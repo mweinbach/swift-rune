@@ -4,6 +4,12 @@
 bool testTrayMenu();
 
 namespace {
+bool samePath(const wchar_t *left, const wchar_t *right) {
+    // The shell may expand 8.3 directory names even when the executable was launched by its short path.
+    wchar_t lhs[MAX_PATH] = {}, rhs[MAX_PATH] = {};
+    return GetLongPathNameW(left, lhs, MAX_PATH) && GetLongPathNameW(right, rhs, MAX_PATH) && !_wcsicmp(lhs, rhs);
+}
+
 bool testLinks() {
     const auto u = [](const wchar_t *s) { return reinterpret_cast<const uint16_t *>(s); };
     RuneWinJumpDraft draft;
@@ -31,8 +37,8 @@ bool testLinks() {
     wchar_t expandedIcon[MAX_PATH] = {};
     ExpandEnvironmentStringsW(icon, expandedIcon, MAX_PATH);
     bool titleOK = title.vt == VT_LPWSTR && !wcscmp(title.pwszVal, L"Example");
-    bool fields = titleOK && !wcscmp(desc, L"Item description") && !_wcsicmp(target, path) &&
-                  !_wcsicmp(expandedIcon, path) && iconIndex == 0;
+    bool fields = titleOK && !wcscmp(desc, L"Item description") && samePath(target, path) &&
+                  samePath(expandedIcon, path) && iconIndex == 0;
     if (!fields) {
         std::printf("title type=%u matches=%d description=%ls target=%ls icon=%ls index=%d expected=%ls\n",
                     title.vt, titleOK, desc, target, expandedIcon, iconIndex, path);

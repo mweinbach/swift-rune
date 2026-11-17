@@ -1,6 +1,7 @@
 import Foundation
 import Rune
 import StartupDriver
+import WinSDK
 
 @MainActor
 func exerciseStartup(grouped: Bool) throws {
@@ -92,8 +93,13 @@ if let mode = CommandLine.arguments.dropFirst().first {
     else if mode == "shell" { try exerciseShellRequests() }
     else { try exerciseStartup(grouped: mode == "group") }
 } else {
+    var failures: [String] = []
     for mode in ["single", "group", "hidden", "shell"] {
-        let result = (Array(mode.utf16) + [0]).withUnsafeBufferPointer { startup_launch_child($0.baseAddress) }
-        precondition(result == 0, "\(mode) startup probe exited \(result)")
+        let result = (Array(mode.utf16) + [0]).withUnsafeBufferPointer { startup_launch_child(nil, $0.baseAddress) }
+        if result != 0 { failures.append("\(mode)=\(result)") }
+    }
+    if !failures.isEmpty {
+        FileHandle.standardError.write(Data("Failed startup scenarios: \(failures.joined(separator: ", "))\n".utf8))
+        ExitProcess(1)
     }
 }

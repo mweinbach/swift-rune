@@ -767,16 +767,18 @@ struct CxEnvAndSystemParityTests {
 
     #if !os(WASI)
     @Test func framePhaseSnapshotsAreIsolatedBetweenThreads() {
-        _ = takeFramePhases()
-        recordFramePhase(.view, wallMs: 5, cpuMs: 2)
-        let finished = DispatchSemaphore(value: 0)
-        Thread.detachNewThread {
-            recordFramePhase(.layout, wallMs: 7, cpuMs: 3)
-            #expect(takeFramePhases() == [0, 0, 7, 0, 0, 0, 0, 0, 3, 0, 0, 0])
-            finished.signal()
+        FrameProfiling.withRecording {
+            _ = takeFramePhases()
+            recordFramePhase(.view, wallMs: 5, cpuMs: 2)
+            let finished = DispatchSemaphore(value: 0)
+            Thread.detachNewThread {
+                recordFramePhase(.layout, wallMs: 7, cpuMs: 3)
+                #expect(takeFramePhases() == [0, 0, 7, 0, 0, 0, 0, 0, 3, 0, 0, 0])
+                finished.signal()
+            }
+            finished.wait()
+            #expect(takeFramePhases() == [5, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0])
         }
-        finished.wait()
-        #expect(takeFramePhases() == [5, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0])
     }
     #endif
 

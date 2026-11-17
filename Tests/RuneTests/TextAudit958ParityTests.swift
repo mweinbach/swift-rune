@@ -767,13 +767,15 @@ struct TextAudit958ParityTests {
 
         let roleRt = Runtime(state: 0, viewport: Vec2(240, 120), pixelScale: 1) { (_: Int, _) -> El<Int> in
             col()
-                .child(text("OK").role(.button).defaultButton(true))
-                .child(text("Hidden").inert(true))
+                .child(text("OK").key("ok").role(.button).defaultButton(true))
+                .child(text("Inert").key("inert").inert(true))
+                .child(text("Hidden").key("hidden").a11yHidden())
         }
         _ = roleRt.frame(at: 0)
         let roleSnap = roleRt.accessibilitySnapshot()
-        #expect(roleSnap.children.count == 1)
-        #expect(roleSnap.children[0].role == ElementRole.button)
+        #expect(roleSnap.children.map(\.id) == ["ok", "inert"])
+        #expect(roleSnap.children.first?.role == ElementRole.button)
+        #expect(roleSnap.children.last?.isDisabled == true)
 
         let vRt = Runtime(state: 0, viewport: Vec2(200, 120), pixelScale: 1) { (_: Int, _) -> El<Int> in
             let list: El<Int> = col()

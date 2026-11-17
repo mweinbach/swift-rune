@@ -406,6 +406,7 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
         }
         let sized = false;
         if (length > 0) {
+            let painted = true;
             const pointer = wasm.rune_web_buffer(0);
             const memory = wasm.memory.buffer;
             if (gpu) {
@@ -442,7 +443,7 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
                     underlay.place();
                 }
                 if (transferCPU) {
-                    transferCPU(cpu, pointer, length);
+                    painted = transferCPU(cpu, pointer, length);
                 } else {
                     const pixels = new Uint8ClampedArray(memory, pointer + 8, length - 8);
                     cpu.putImageData(new ImageData(pixels, width, height), 0, 0);
@@ -458,12 +459,12 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
                 const bytes = new Uint8Array(wasm.memory.buffer, wasm.rune_web_buffer(0), cursorSize);
                 cursor.update(JSON.parse(decoder.decode(bytes)));
             }
-            if (!presented) {
+            if (!presented && painted) {
+                presented = true;
                 fonts?.presented();
                 canvas.dispatchEvent(new CustomEvent('runepresent', {bubbles:true}));
                 page?.presented();
             }
-            presented = true;
         }
         syncWindowTitle();
         applyWindowHeight();

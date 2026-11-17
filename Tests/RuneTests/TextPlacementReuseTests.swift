@@ -57,5 +57,27 @@ struct TextPlacementReuseTests {
         #expect(first.1 == .zero && same.1 != .zero && different.1 == .zero)
         #expect(first.0 == same.0 && first.0 != different.0)
     }
+
+    @Test("A fresh paint independently resolves a retained pen against the resident atlas")
+    func freshRaster() throws {
+        let label: El<Int> = text("Ag").noWrap().selectable().size(120, 40).color(.white)
+        let runtime = Runtime<Int>(state: 0, viewport: Vec2(160, 80), pixelScale: 1) { _, _ in label }
+        runtime.setFontSmoothing(.off)
+        let original = RasterCheck.glyphs(in: runtime.renderFrame(at: 0).instances)
+        let frame = try #require(runtime.lastFrameOutput)
+        let layout = runtime.textSystem.layoutKeyed(text: "Ag", style: label.textStyle, maxWidth: nil,
+                                                     pixelScale: 1, emitGlyphs: true)
+        #expect(original.count == 2)
+        try #require(layout.shaped.glyphPens.count == 2)
+        // The fresh path must resolve the bearing from the mask even when the shelf is still valid.
+        layout.shaped.glyphPens[0].bearingX += 3
+        let atlas = runtime.textSystem.glyphAtlas
+        let placed = atlas.rasterized
+        let settled = RasterCheck.glyphs(in: runtime.buildRenderFrame(frameOut: frame, now: 0).instances)
+        let fresh = RasterCheck.glyphs(in: runtime.buildRenderFrame(frameOut: frame, now: 0, freshRaster: true).instances)
+        #expect(settled.first?.rect.x == original.first.map { $0.rect.x + 3 })
+        #expect(fresh == original)
+        #expect(atlas.rasterized == placed)
+    }
 }
 #endif

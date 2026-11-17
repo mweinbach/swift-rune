@@ -5,6 +5,18 @@ import Testing
 
 @Suite("Desktop video frame extraction")
 struct DesktopVideoFrameTests {
+    @Test("Opening a file as video requires a video track")
+    func audioFileHasNoVideoTrack() throws {
+        let request = MediaRequest(source: .file(mediaFixtureURL("silence.wav")))
+        let source = try DesktopMediaSource(request: request)
+        do {
+            _ = try DesktopMediaDecoder(source: source, kind: .video, headless: true)
+            Issue.record("A video player accepted an audio-only WAV file")
+        } catch {
+            #expect(String(describing: error).contains("no playable video track"))
+        }
+    }
+
     @Test("A rotated H.264 frame exposes upright dimensions and RGBA quadrants")
     func uprightQuadrants() throws {
         let player = VideoPlayer(source: .file(mediaFixtureURL("quadrants-rot90.mp4")))
