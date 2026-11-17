@@ -499,13 +499,9 @@ struct ShellPartialCloseoutTests {
             var zoom: Float = 1.0
         }
 
-        func makeLaunchRt(zoom: Float = 1.0, intoBody: Bool = false, earlierCount: Int = 0) -> Runtime<LaunchState> {
-            var st = LaunchState(intoBody: intoBody, zoom: zoom)
-            for k in (0..<earlierCount).reversed() {
-                st.sent.insert("earlier \(k)", at: 0)
-            }
+        func makeLaunchRt(zoom: Float = 1.0) -> Runtime<LaunchState> {
             let rt = Runtime<LaunchState>(
-                state: st,
+                state: LaunchState(zoom: zoom),
                 viewport: Vec2(400, 300),
                 pixelScale: 2.0,
                 systemDark: true
@@ -529,6 +525,7 @@ struct ShellPartialCloseoutTests {
                     .child(col().key("scroll").wFull().grow(1).shrink().scroll(ScrollSpec(stickBottom: true)).child(rows))
                     .child(
                         textInput(key: "composer", \LaunchState.draft)
+                            .font(TextStyle(size: 14, weight: 400))
                             .wFull()
                             .h(60)
                             .onSubmit { st, _, tx in
@@ -542,13 +539,29 @@ struct ShellPartialCloseoutTests {
                 return col().wFull().hFull().center()
                     .child(col().w(400.0 / s.zoom).h(300.0 / s.zoom).scale(s.zoom).child(page))
             }
-            _ = rt.frame(at: 0.0)
-            if let comp = rt.element(byKey: "composer") {
-                let p = Vec2(comp.rect[0] + 10, comp.rect[1] + 10)
-                rt.pointerDown(at: p, at: 0.001)
-                rt.pointerUp(at: p, at: 0.002)
-                _ = rt.frame(at: 0.003)
+            rt.frame(at: 0)
+            rt.update { _, tx in tx.focus("composer") }
+            rt.frame(at: 0)
+            return rt
+        }
+
+        // An input or update happens at the last presented time. Each following frame advances 1/120s.
+        func advance(_ rt: Runtime<LaunchState>) {
+            rt.frame(at: rt.currentTime + 1.0 / 120.0)
+        }
+
+        func send(_ rt: Runtime<LaunchState>) {
+            _ = rt.keyDown(KeyEvent(key: .enter), at: rt.currentTime)
+        }
+
+        func sendFromPinnedEnd(intoBody: Bool = false) -> Runtime<LaunchState> {
+            let rt = makeLaunchRt()
+            rt.update { s, _ in
+                s.intoBody = intoBody
+                for k in 0..<12 { s.sent.insert("earlier \(k)", at: 0) }
             }
+            for _ in 0..<60 { advance(rt) }
+            send(rt)
             return rt
         }
 
@@ -561,10 +574,10 @@ struct ShellPartialCloseoutTests {
             let zoom: Float = 1.6
             let rt = makeLaunchRt(zoom: zoom)
             let composer = rt.element(byKey: "composer")!.rect
-            rt.update(at: 0.004) { s, _ in s.ticks += 1 }
-            _ = rt.keyDown(KeyEvent(key: .enter), at: 1.0 / 120.0)
-            let frames = (1...120).map { f -> [Float] in
-                _ = rt.frame(at: Double(f) / 120.0)
+            rt.update { s, _ in s.ticks += 1 }
+            send(rt)
+            let frames = (0..<120).map { _ in
+                advance(rt)
                 return bodyInfo(rt).rect
             }
             let first = frames[0]
@@ -575,95 +588,87 @@ struct ShellPartialCloseoutTests {
                 let total = at.last! - at.first!
                 let dir: Float = total >= 0 ? 1 : -1
                 for k in 1..<at.count {
-                    #expect((at[k] - at[k - 1]) * dir >= -0.05)
+                    #expect((at[k] - at[k - 1]) * dir >= -0.01)
                 }
             }
         }
 
         // 2. a_launch_whose_row_reorders_mid_flight_slides_and_lands_without_a_lurch
         for intoBody in [false, true] {
-            let rt = makeLaunchRt(intoBody: intoBody)
-            let t0 = 1.0 / 120.0
-            _ = rt.keyDown(KeyEvent(key: .enter), at: t0)
-            _ = rt.frame(at: t0)
-            let frames = (1...180).map { f -> ([Float], [Float]) in
-                let t = t0 + Double(f) / 120.0
-                if f == 16 {
-                    rt.update(at: t) { s, _ in s.swap = true }
-                }
-                _ = rt.frame(at: t)
-                let b = bodyInfo(rt)
-                return (b.rect, b.target)
+            let rt = makeLaunchRt()
+            rt.update { s, _ in s.intoBody = intoBody }
+            rt.frame(at: rt.currentTime)
+            send(rt)
+            let frames = (0..<180).map { f in
+                if f == 16 { rt.update { s, _ in s.swap = true } }
+                advance(rt)
+                return (body: bodyInfo(rt), passed: rt.element(byKey: "msg-1")!.rect)
             }
-            #expect(abs(frames.last!.0[0] - frames.last!.1[0]) < 0.05)
-            #expect(abs(frames.last!.0[1] - frames.last!.1[1]) < 0.05)
-            for axis in 0..<2 {
-                let at = frames.map { $0.0[axis] }
-                let steps = zip(at, at.dropFirst()).map { $1 - $0 }
-                for k in 1..<steps.count {
-                    #expect(abs(steps[k] - steps[k - 1]) <= 4.0)
+            #expect(frames.last!.body.rect == frames.last!.body.target)
+            let paths = [(frames.map { $0.body.rect }, 0..<2), (frames.map(\.passed), 1..<2)]
+            for (path, axes) in paths {
+                for axis in axes {
+                    let steps = zip(path, path.dropFirst()).map { $1[axis] - $0[axis] }
+                    #expect(zip(steps, steps.dropFirst()).allSatisfy { abs($1 - $0) <= 4.0 })
                 }
             }
         }
 
         // 3. a_launch_reaimed_while_the_scroll_view_corrects_under_it_keeps_its_speed
-        for (atFrame, intoBody) in [(6, false), (12, false), (8, true)] {
-            let rt = makeLaunchRt(intoBody: intoBody, earlierCount: 12)
-            for f in 1...60 { _ = rt.frame(at: Double(f) / 120.0) }
-            _ = rt.keyDown(KeyEvent(key: .enter), at: 61.0 / 120.0)
-            let bodyRects = (0..<40).map { f -> [Float] in
-                let t = Double(62 + f) / 120.0
-                if f == 1 { rt.update(at: t) { s, _ in s.tail = true } }
-                if f == atFrame { rt.update(at: t) { s, _ in s.swap = true } }
-                _ = rt.frame(at: t)
+        for (atFrame, intoBody) in [(6, false), (8, false), (12, false), (16, false), (8, true)] {
+            let rt = sendFromPinnedEnd(intoBody: intoBody)
+            let bodyRects = (0..<40).map { f in
+                if f == 1 { rt.update { s, _ in s.tail = true } }
+                if f == atFrame { rt.update { s, _ in s.swap = true } }
+                advance(rt)
                 return bodyInfo(rt).rect
             }
             for axis in 0..<2 {
                 let steps = zip(bodyRects, bodyRects.dropFirst()).map { $1[axis] - $0[axis] }
                 let change = zip(steps, steps.dropFirst()).map { $1 - $0 }
                 let (before, reaim, after) = (change[atFrame - 3], change[atFrame - 2], change[atFrame - 1])
-                #expect(reaim >= min(before, after) - 0.15 && reaim <= max(before, after) + 0.15)
+                #expect(reaim >= min(before, after) - 0.1 && reaim <= max(before, after) + 0.1,
+                        "frame \(atFrame), intoBody \(intoBody), axis \(axis): \(before), \(reaim), \(after)")
             }
         }
 
         // 4. a_landed_launch_whose_row_grows_a_gap_over_it_at_a_pinned_end_holds_still
-        for (atFrame, intoBody) in [(80, false), (160, true)] {
-            let rt = makeLaunchRt(intoBody: intoBody, earlierCount: 12)
-            for f in 1...60 { _ = rt.frame(at: Double(f) / 120.0) }
-            _ = rt.keyDown(KeyEvent(key: .enter), at: 61.0 / 120.0)
-            for f in 1...atFrame { _ = rt.frame(at: Double(61 + f) / 120.0) }
-            let y0 = bodyInfo(rt).rect[1]
-            let row0 = rt.element(byKey: "msg-14")!.rect[1]
-            let tGap = Double(62 + atFrame) / 120.0
-            rt.update(at: tGap) { s, _ in s.gap = true }
-            let ys = (1...120).map { f -> Float in
-                _ = rt.frame(at: tGap + Double(f) / 120.0)
-                return bodyInfo(rt).rect[1]
+        for atFrame in [80, 100, 160] {
+            for intoBody in [false, true] {
+                let rt = sendFromPinnedEnd(intoBody: intoBody)
+                for _ in 0..<atFrame { advance(rt) }
+                let y0 = bodyInfo(rt).rect[1]
+                let earlierY = rt.element(byKey: "msg-2")!.rect[1]
+                let launchedY = rt.element(byKey: "msg-14")!.rect[1]
+                rt.update { s, _ in s.gap = true }
+                let ys = (0..<120).map { _ in
+                    advance(rt)
+                    return bodyInfo(rt).rect[1]
+                }
+                #expect(ys.allSatisfy { abs($0 - y0) <= 1.0 / 64.0 })
+                #expect(abs(rt.element(byKey: "msg-2")!.rect[1] - (earlierY - 12.0)) < 0.01)
+                #expect(abs(rt.element(byKey: "msg-14")!.rect[1] - (launchedY - 12.0)) < 0.05)
             }
-            #expect(ys.allSatisfy { abs($0 - y0) <= 0.1 })
-            #expect(abs(rt.element(byKey: "msg-14")!.rect[1] - (row0 - 12.0)) < 0.05)
         }
 
         // 5. a_launch_is_judged_against_the_scroll_it_rides
         for reaim in [nil, 8] as [Int?] {
-            let rt = makeLaunchRt(earlierCount: 12)
-            for f in 1...60 { _ = rt.frame(at: Double(f) / 120.0) }
-            _ = rt.keyDown(KeyEvent(key: .enter), at: 61.0 / 120.0)
-            let ys = (0..<120).map { f -> Float in
-                let t = Double(62 + f) / 120.0
-                if f == 1 { rt.update(at: t) { s, _ in s.tail = true } }
-                if reaim == f { rt.update(at: t) { s, _ in s.swap = true } }
-                _ = rt.frame(at: t)
+            let rt = sendFromPinnedEnd()
+            let ys = (0..<120).map { f in
+                if f == 1 { rt.update { s, _ in s.tail = true } }
+                if reaim == f { rt.update { s, _ in s.swap = true } }
+                advance(rt)
                 let b = bodyInfo(rt)
-                let sy = b.scrolled.count >= 2 ? b.scrolled[1] : 0
-                return b.rect[1] + sy
+                return b.rect[1] + b.scrolled[1]
             }
+            let scroll = rt.element(byKey: "scroll")!
+            #expect(scroll.rect[1] + 1.0 < ys.first!)
             let steps = zip(ys, ys.dropFirst()).map { $1 - $0 }
-            #expect(steps.allSatisfy { $0 <= 0.05 })
+            #expect(steps.allSatisfy { $0 <= 0.01 })
             #expect(zip(steps, steps.dropFirst()).allSatisfy { abs($1 - $0) < 3.0 })
             #expect(ys.first! - ys.last! > 4.0)
             let landed = bodyInfo(rt)
-            #expect((landed.scrolled.count >= 2 ? landed.scrolled[1] : 0) > 0.0)
+            #expect(landed.scrolled[1] > 0.0)
         }
     }
 

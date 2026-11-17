@@ -1143,6 +1143,25 @@ struct MotionGateIntegrationParityTests {
         #expect(wobbleTurns.contains { $0.contains("row12") }, "Expected row12 turn, got: \(wobbleTurns)")
     }
 
+    @Test("The motion recording measures the scroll carried through a turned viewport in window coordinates")
+    func recordsCarriedScrollThroughTurnedViewport() throws {
+        let rt = Runtime(state: (), viewport: Vec2(400, 400), pixelScale: 1) { _, _ in
+            col().rotate(0.3).child(
+                col().key("viewport").size(200, 200).scroll(stickBottom: false)
+                    .child(el().key("content").size(200, 600))
+            )
+        }
+        let run = MotionGateRun(rt)
+        run.actUpdate("scroll") { _, tx in
+            tx.scrollTo("viewport", offset: Vec2(0, 40), animated: false)
+        }
+        let content = try #require(rt.element(byKey: "content"))
+        let track = try #require(run.rec.tracks.first { $0.path == content.path })
+        let snap = try #require(track.frames.last?.1)
+        #expect(abs(content.scrolled[0]) > 1)
+        #expect(snap.scrolled == content.scrolled)
+    }
+
     @Test("a_scroll_that_teleports_a_row_into_view_with_no_input_jumps")
     func aScrollThatTeleportsARowIntoViewWithNoInputJumps() {
         let jumpKinds: Set<String> = ["jump", "offset-jump", "jerk", "appear-then-jump"]

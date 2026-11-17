@@ -2276,7 +2276,8 @@ extension Runtime {
                 let inv = Vec2(cumulative[pIdx].x + localDelta.x, cumulative[pIdx].y + localDelta.y)
                 cumulative[i] = inv
                 // Carry the existing frame and its motion with the viewport before committing the new rect.
-                scene.translateFrame(flatNodes[i].nodeId, by: localDelta, screenDelta: inv)
+                let id = flatNodes[i].nodeId
+                scene.translateFrame(id, by: localDelta, screenDelta: inv, carryTakeoff: !launchedFlightIds.contains(id))
                 if inv != .zero {
                     flatNodes[i].targetRect = flatNodes[i].targetRect.offsetBy(inv)
                     specs[i].rect = specs[i].rect.offsetBy(inv)
@@ -2605,6 +2606,12 @@ extension Runtime {
             if lastCommittedSpecs.count == flatNodes.count {
                 shiftFlatAndSpecsForScrollDeltas(deltas, specs: &lastCommittedSpecs)
                 scene.keepFlights(false)
+                for id in launchedFlightIds {
+                    if let i = nodeById[id]?.index, let target = launchScrollById[id]?.layoutTarget {
+                        lastCommittedSpecs[i].launchLayout = .projectEndpoint
+                        lastCommittedSpecs[i].rect.bottom = lastCommittedSpecs[i].rect.top + target.height
+                    }
+                }
                 scene.commit(lastCommittedSpecs, at: now, initialCut: false)
             }
             return true

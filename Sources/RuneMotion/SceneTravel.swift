@@ -107,10 +107,14 @@ extension Scene {
         if abs(wOn - wLaid) > q || abs(hOn - hLaid) > q {
             return nil
         }
-        return [
-            Vec2(on.0.x - laid.0.x, on.1.x - laid.1.x),
-            Vec2(on.0.v - laid.0.v, on.1.v - laid.1.v),
-        ]
+        var relativeVelocity = Vec2(on.0.v - laid.0.v, on.1.v - laid.1.v)
+        if let endpoint = launchEndpoints[id], let travel = get(id, Props.TRAVEL) {
+            // The launch moves with its endpoint by its travel fraction. The layout
+            // it would land on moves with the whole endpoint.
+            relativeVelocity.x -= (1 - travel.x) * endpoint.velocity.x
+            relativeVelocity.y -= (1 - travel.y) * endpoint.velocity.y
+        }
+        return [Vec2(on.0.x - laid.0.x, on.1.x - laid.1.x), relativeVelocity]
     }
 
     /// Ends node `id`'s screen travel at its layout: it then shows under its parent's presented origin.
@@ -175,6 +179,7 @@ extension Scene {
     internal mutating func endPath(_ i: Int) {
         guard nodes[i].path != nil else { return }
         nodes[i].path = nil
+        launchEndpoints.removeValue(forKey: nodes[i].id)
         if let tid = nodes[i].tracks[Int(Props.TRAVEL.id.rawValue)] {
             store.remove(nodes[i].id, Props.TRAVEL)
             nodes[i].tracks[Int(Props.TRAVEL.id.rawValue)] = nil

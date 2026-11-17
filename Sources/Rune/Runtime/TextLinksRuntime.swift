@@ -357,6 +357,7 @@ internal extension Runtime {
                     hover: isLinkHovered ? 1.0 : 0.0,
                     press: isLinkPressed ? 1.0 : 0.0,
                     scrolled: parent.scrolled,
+                    carriedScrolled: parent.carriedScrolled,
                     caret: nil,
                     secure: parent.secure,
                     disabled: parent.disabled,

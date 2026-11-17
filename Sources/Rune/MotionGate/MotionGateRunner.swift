@@ -300,8 +300,7 @@ private enum MotionGateSampleHelper {
             elByPath[n.path] = n.el
         }
 
-        // Track ancestor scrolling state onto descendants without mutating per-node `els[i].scrolled`
-        // (so `carriedScrolled` below can single-count nested scroll containers cleanly).
+        // A moving viewport marks all its descendants as scrolling.
         var ancScrolling = Array(repeating: false, count: els.count)
         for i in 0..<els.count {
             var scrolling = false
@@ -354,24 +353,6 @@ private enum MotionGateSampleHelper {
                 }
             }
 
-            var carriedX: Float = 0
-            var carriedY: Float = 0
-            var curParentIdx = e.parentIndex
-            var hops = 0
-            while let pIdx = curParentIdx, pIdx >= 0, pIdx < els.count, pIdx != i, hops <= els.count {
-                let pPath = els[pIdx].path
-                if let pEl = elByPath[pPath], !pEl.layout.scrollAxes.isEmpty {
-                    let sc = els[pIdx].scrolled
-                    if sc.count >= 2 {
-                        let scale = nodeByPath[pPath]?.inheritedScale ?? 1.0
-                        carriedX += sc[0] * scale
-                        carriedY += sc[1] * scale
-                    }
-                }
-                curParentIdx = els[pIdx].parentIndex
-                hops += 1
-            }
-
             let meta = ElementMotionMeta(
                 scrolling: ancScrolling[i],
                 inGrowingRow: (el?.runtimeExtras[MotionGateExtraKey.growingRow] as? Bool) ?? false,
@@ -379,7 +360,7 @@ private enum MotionGateSampleHelper {
                 liveIntent: totalIntent,
                 virtualExtent: false,
                 loopPhase: phase,
-                carriedScrolled: [carriedX, carriedY]
+                carriedScrolled: e.carriedScrolled
             )
             metas.append(meta)
 
