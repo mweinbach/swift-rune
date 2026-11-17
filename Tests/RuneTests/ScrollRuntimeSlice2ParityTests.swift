@@ -223,15 +223,15 @@ struct ScrollRuntimeSlice2ParityTests {
 
         // Momentum gap once
         rt.wheelBegan(at: 0.46)
-        #expect(rt.slice2State.wheelLock.momentum())
+        #expect(rt.inputMachines.wheelLock.momentum)
         rt.wheelEnded(at: 0.48)
         rt.wheelBegan(at: 0.49)
-        #expect(!rt.slice2State.wheelLock.momentum())
+        #expect(!rt.inputMachines.wheelLock.momentum)
         rt.wheelEnded(at: 0.50)
 
         // wheelLost clears gesture
         rt.wheelLost()
-        #expect(rt.slice2State.wheelLock.owner == .unpicked)
+        #expect(rt.inputMachines.wheelLock.owner == .unpicked)
 
         // Horizontal gesture outside hstrip falls back to vertical scroll if no horizontal viewport
         rt.wheelXY(100, 150, dx: -20, dy: -15, at: 1.0)

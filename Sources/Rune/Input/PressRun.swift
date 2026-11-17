@@ -101,7 +101,6 @@ internal struct RuntimeInputMachines {
     var fieldMenus: [UInt64: FieldMenuContext] = [:]
     var nextFieldMenuId: UInt64 = 1
     var wheelLock = WheelLock()
-    var touchState = TouchInputState()
     var inputScroll: [String: Float] = [:]
     var untakenDragOuts: [(id: UInt64, path: String, key: String?, start: DragOutStart, cancelledByHost: Bool, sawFrame: Bool, onEnd: ((inout Any, DragOutcome, inout Tx) -> Void)?)] = []
     var activeDragOuts: [(id: UInt64, path: String, key: String?, onEnd: ((inout Any, DragOutcome, inout Tx) -> Void)?)] = []

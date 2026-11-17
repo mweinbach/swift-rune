@@ -835,49 +835,49 @@ struct ScrollStateMachinesParityTests {
     @Test("wheel: the_phase_carries_when_the_gesture_last_moved_and_when_it_ended")
     func wheelThePhaseCarriesWhenTheGestureLastMovedAndWhenItEnded() {
         var lock = WheelLock()
-        lock.delta(now: 1.0, dx: 0.0, dy: -10.0, queued: false)
+        lock.delta(at: 1.0, dx: 0.0, dy: -10.0, pending: nil)
         #expect(lock.phase == .unphased(at: 1.0), "a delta starts it, timed")
-        lock.delta(now: 1.05, dx: 0.0, dy: -10.0, queued: false)
+        lock.delta(at: 1.05, dx: 0.0, dy: -10.0, pending: nil)
         #expect(lock.phase == .unphased(at: 1.05), "a pause under the idle keeps the gesture")
         let gesture = lock.gesture
-        lock.delta(now: 1.05 + WheelLock.wheelIdle + 0.01, dx: 0.0, dy: -10.0, queued: false)
+        lock.delta(at: 1.05 + WheelLock.wheelIdle + 0.01, dx: 0.0, dy: -10.0, pending: nil)
         #expect(lock.gesture != gesture, "a longer pause starts another")
         #expect(lock.phase == .unphased(at: 1.05 + WheelLock.wheelIdle + 0.01), "timed from the new delta")
-        lock.owner = .vertical
-        lock.endedAt(2.0)
+        lock.setOwner(lock.gesture, .vertical)
+        lock.ended(at: 2.0)
         #expect(lock.phase == .ended(at: 2.0, from: .unphased), "an unphased end keeps its phase")
         let ended = lock.gesture
-        lock.delta(now: 2.001, dx: 0.0, dy: -10.0, queued: false)
+        lock.delta(at: 2.001, dx: 0.0, dy: -10.0, pending: nil)
         #expect(lock.gesture != ended, "a delta after the end starts another gesture at once")
-        lock.lost(queued: false)
+        lock.lost(pending: nil)
         #expect(lock.phase == .unphased(at: nil), "the loss forgets when it last moved")
     }
 
     @Test("wheel: an_ended_gestures_momentum_has_the_gap_its_end_time_measures")
     func wheelAnEndedGesturesMomentumHasTheGapItsEndTimeMeasures() {
         var lock = WheelLock()
-        lock.delta(now: 0.0, dx: 0.0, dy: -10.0, queued: false)
-        lock.owner = .vertical
-        lock.endedAt(1.0)
+        lock.delta(at: 0.0, dx: 0.0, dy: -10.0, pending: nil)
+        lock.setOwner(lock.gesture, .vertical)
+        lock.ended(at: 1.0)
         let gesture = lock.gesture
         let soon = 1.0 + WheelLock.momentumGap * 0.5
-        lock.began(now: soon, active: true, queued: false, anyQueued: false)
+        lock.began(at: soon, active: true, queued: false, pending: nil)
         #expect(lock.phase == .momentum(at: soon), "within the gap: its momentum")
         #expect(lock.gesture == gesture, "keeping the gesture")
-        #expect(lock.momentum())
-        lock.endedAt(2.0)
+        #expect(lock.momentum)
+        lock.ended(at: 2.0)
         #expect(lock.phase == .ended(at: 2.0, from: .momentum))
-        lock.began(now: 2.0 + WheelLock.momentumGap * 0.5, active: true, queued: false, anyQueued: false)
+        lock.began(at: 2.0 + WheelLock.momentumGap * 0.5, active: true, queued: false, pending: nil)
         let isPhased: Bool = if case .phased = lock.phase { true } else { false }
         #expect(isPhased, "one that ended as momentum is a new touch")
-        #expect(!lock.momentum())
+        #expect(!lock.momentum)
 
         var lock2 = WheelLock()
-        lock2.delta(now: 0.0, dx: 0.0, dy: -10.0, queued: false)
-        lock2.owner = .vertical
-        lock2.endedAt(1.0)
+        lock2.delta(at: 0.0, dx: 0.0, dy: -10.0, pending: nil)
+        lock2.setOwner(lock2.gesture, .vertical)
+        lock2.ended(at: 1.0)
         let gesture2 = lock2.gesture
-        lock2.began(now: 1.0 + WheelLock.momentumGap + 0.01, active: true, queued: false, anyQueued: false)
+        lock2.began(at: 1.0 + WheelLock.momentumGap + 0.01, active: true, queued: false, pending: nil)
         #expect(lock2.gesture != gesture2, "after the gap it is its own gesture")
     }
 
@@ -910,23 +910,24 @@ struct ScrollStateMachinesParityTests {
                 switch act {
                 case .delta(let dx, let dy, let gap, let queued):
                     now += gap
-                    lock.delta(now: now, dx: dx, dy: dy, queued: queued)
+                    lock.delta(at: now, dx: dx, dy: dy, pending: queued ? WheelOwnerHandoffParityTests.running(lock) : nil)
                     dev.delta(now: now, dx: dx, dy: dy, queued: queued)
                 case .began(let gap, let queued):
                     now += gap
-                    let active = lock.runGesture == lock.gesture && lock.owner != .unpicked
-                    lock.began(now: now, active: active, queued: queued, anyQueued: queued)
+                    let active = lock.owner != .unpicked
+                    lock.began(at: now, active: active, queued: queued, pending: queued ? WheelOwnerHandoffParityTests.running(lock) : nil)
                     let devActive = dev.runGesture == dev.gesture && dev.owner != .unpicked
                     dev.began(now: now, active: devActive, queued: queued, anyQueued: queued)
                 case .ended(let gap):
                     now += gap
-                    lock.endedAt(now)
+                    lock.ended(at: now)
                     dev.ended = now
                 case .lost(let queued):
-                    lock.lost(queued: queued)
+                    lock.lost(pending: queued ? WheelOwnerHandoffParityTests.running(lock) : nil)
                     dev.lost(queued: queued)
                 case .scroll(let dx, let dy, let across):
-                    let h = lock.keepsAxis(dx: dx, dy: dy) ?? lock.repick(across: across ? NodeId(1) : nil)
+                    let gesture = WheelOwnerHandoffParityTests.running(lock)
+                    let h = lock.keepsAxis(gesture, dx: dx, dy: dy, phased: lock.phased) ?? lock.repick(gesture, acrossPath: across ? "1" : nil)
                     let expectedH = dev.scroll(dx: dx, dy: dy, across: across)
                     if h != expectedH {
                         #expect(h == expectedH, "\(seq), event \(i): axis")
@@ -935,12 +936,12 @@ struct ScrollStateMachinesParityTests {
                 }
                 let gestureChanged = (lock.gesture != before) == (dev.gesture != devBefore)
                 let atMatches = dev.ended != nil || lock.phase.at == dev.at
-                let ownerMatches = Self.wheelOwnerKind(lock.owner) == dev.owner
+                let ownerMatches = Self.wheelOwnerKind(WheelOwnerHandoffParityTests.runningOwner(lock)) == dev.owner
                 if !gestureChanged
                     || lock.phase.isPhased != dev.phased
                     || lock.phase.isMomentum != dev.momentum
                     || !atMatches
-                    || lock.phase.ended != dev.ended
+                    || lock.phase.endedAt != dev.ended
                     || !ownerMatches {
                     #expect((lock.gesture != before) == (dev.gesture != devBefore), "gesture: \(seq), event \(i)")
                     #expect(lock.phase.isPhased == dev.phased, "phased: \(seq), event \(i)")
@@ -948,8 +949,8 @@ struct ScrollStateMachinesParityTests {
                     if dev.ended == nil {
                         #expect(lock.phase.at == dev.at, "at: \(seq), event \(i)")
                     }
-                    #expect(lock.phase.ended == dev.ended, "ended: \(seq), event \(i)")
-                    #expect(Self.wheelOwnerKind(lock.owner) == dev.owner, "owner: \(seq), event \(i)")
+                    #expect(lock.phase.endedAt == dev.ended, "ended: \(seq), event \(i)")
+                    #expect(Self.wheelOwnerKind(WheelOwnerHandoffParityTests.runningOwner(lock)) == dev.owner, "owner: \(seq), event \(i)")
                     return
                 }
             }
@@ -981,9 +982,9 @@ struct ScrollStateMachinesParityTests {
         let trackpad = MouseScrollDelta.pixelDelta(x: -8.0, y: 20.0)
         #expect(wheelDelta(trackpad, scale: 2.0, shift: true) == (-4.0, 10.0), "a delta with a horizontal part stays as it is")
         #if os(macOS)
-        #expect(!WheelLock.shiftTurnsWheel)
+        #expect(!WheelDistance.shiftTurnsWheel)
         #else
-        #expect(WheelLock.shiftTurnsWheel)
+        #expect(WheelDistance.shiftTurnsWheel)
         #endif
     }
 
