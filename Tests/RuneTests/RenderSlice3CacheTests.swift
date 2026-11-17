@@ -540,8 +540,8 @@ struct RenderSlice3CacheTests {
 
         for i in 0..<400 {
             rt.state.fontSize = 18.0 + Float(i) * 0.45
+            rt.invalidate()
             now += 1.0 / 60.0
-            rt.invalidate(at: now)
             _ = rt.renderFrame(at: now)
         }
         let resets = rt.textSystem.glyphAtlas.resets
@@ -550,12 +550,15 @@ struct RenderSlice3CacheTests {
         rt.state.fontSize = 18.0
         rt.state.banner = "Sphinx of black quartz, judge my vow!"
         rt.state.cardText = "CACHED SUBTREE OMEGA"
+        rt.invalidate()
         now += 1.0
-        rt.invalidate(at: now)
         rf = rt.renderFrame(at: now)
         renderer.prepare(frame: rf, viewport: (360, 120))
         let out = try drawRaw(renderer: renderer, frame: rf)
 
+        let card = try #require(rt.elements().first { $0.text == rt.state.cardText })
+        #expect(card.rect[1] >= 0 && card.rect[1] + card.rect[3] <= rt.viewport.y,
+                "cached text must be back onscreen after the one-second frame step")
         let glyphs = rf.instances.filter { $0.params.y == KIND_GLYPH }
         let expected = rt.state.banner.filter { !$0.isWhitespace }.count
             + rt.state.cardText.filter { !$0.isWhitespace }.count
