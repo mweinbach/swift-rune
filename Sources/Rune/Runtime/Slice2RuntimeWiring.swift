@@ -224,16 +224,16 @@ extension Runtime {
         }
         pointerMove(to: pos, at: time)
         pointerDown(at: pos, at: time)
+        let dragImmediately = pressDragsAtOnce()
+        if !dragImmediately {
+            applyTouchEffects(TouchScrollMachine.step(&slice2State.touchScroll, .down(across: across, vertical: vertical)), at: time)
+        }
         slice2State.touchFinger = Slice2RuntimeState.TouchFinger(
             id: id,
             origin: pos,
             last: 0,
             at: time,
             velocity: 0,
-        let dragImmediately = pressDragsAtOnce()
-        if !dragImmediately {
-            applyTouchEffects(TouchScrollMachine.step(&slice2State.touchScroll, .down(across: across, vertical: vertical)), at: time)
-        }
             mode: dragImmediately ? .drag : .pending(scroll: vNode?.nodeId)
         )
     }

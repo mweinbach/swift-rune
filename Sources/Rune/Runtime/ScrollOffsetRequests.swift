@@ -94,7 +94,7 @@ extension Runtime {
                 let start = min(max(was, end - reach), end + reach)
                 let v0 = gliding && laneMoving(a) ? comp(velocity, a) : 0
                 land[a] = start
-                glides[a] = (end, ScrollAxisHelper.retargetV(spring: offset: Double(start), v: v0, to: Double(end)), to)
+                glides[a] = (end, ScrollAxisHelper.retargetV(spring: spring, offset: Double(start), v: v0, to: Double(end)), to)
             } else {
                 land[a] = end
                 // `apply_jumps`: a jump that moved its axis more than 1e-3 arms the hold.
