@@ -1341,6 +1341,14 @@ public enum HeadlessRunner {
         if let requestedWindow = args.windowName, !availableWindows.contains(requestedWindow) {
             throw ToolingError.unknownWindow(name: requestedWindow, available: availableWindows)
         }
+        #if !os(WASI)
+        // Allow a sampling profiler to attach before the configured run starts.
+        if args.htmlPath == nil,
+           let setting = ProcessInfo.processInfo.environment["RUNE_HEADLESS_WAIT"],
+           let seconds = Double(setting), seconds.isFinite, seconds > 0 {
+            Thread.sleep(forTimeInterval: seconds)
+        }
+        #endif
         if args.listScenes {
             for name in spec.scenes.keys.sorted() {
                 print(name)
