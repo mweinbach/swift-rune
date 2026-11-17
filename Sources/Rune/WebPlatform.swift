@@ -150,10 +150,89 @@ public struct WebAppConfig: Sendable, Equatable {
     }
 }
 
+/// Browser text selection offsets are UTF-16 units relative to this slice. The base is
+/// a UTF-8 byte offset in Rune's model. Secure fields never export model text.
+public struct WebFieldMirror: Sendable, Equatable {
+    public let key: String
+    public let text: String
+    public let base: Int
+    public let anchor: Int
+    public let focus: Int
+    public let secure: Bool
+    /// The one-pixel browser input must expose hard lines to a screen reader.
+    public let wrap = "off"
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.key == rhs.key && lhs.base == rhs.base && lhs.anchor == rhs.anchor
+            && lhs.focus == rhs.focus && lhs.secure == rhs.secure && lhs.text.utf8.elementsEqual(rhs.text.utf8)
+    }
+
+    internal init(key: String, edit: TextEdit, secure: Bool) {
+        self.key = key
+        self.secure = secure
+        if secure {
+            text = ""
+            base = 0
+            anchor = 0
+            focus = 0
+            return
+        }
+        let value = edit.text
+        let utf8 = value.utf8
+        let scalars = value.unicodeScalars
+        let a = utf8.index(utf8.startIndex, offsetBy: edit.anchor)
+        let f = utf8.index(utf8.startIndex, offsetBy: edit.cursor)
+
+        // The selection itself and at most 512 units on either side are always available.
+        var head = min(a, f)
+        var tail = max(a, f)
+        var units = 0
+        while head > scalars.startIndex {
+            let prev = scalars.index(before: head)
+            units += scalars[prev].utf16.count
+            if units > 512 { break }
+            head = prev
+        }
+        units = 0
+        while tail < scalars.endIndex {
+            units += scalars[tail].utf16.count
+            if units > 512 { break }
+            scalars.formIndex(after: &tail)
+        }
+        // Grow cut lines by up to 2048 additional units to a newline or document edge.
+        var cursor = head
+        units = 0
+        while cursor > scalars.startIndex {
+            let prev = scalars.index(before: cursor)
+            if scalars[prev] == "\n" { break }
+            units += scalars[prev].utf16.count
+            if units > 2048 { break }
+            cursor = prev
+        }
+        if units <= 2048 { head = cursor }
+        cursor = tail
+        units = 0
+        while cursor < scalars.endIndex, scalars[cursor] != "\n" {
+            units += scalars[cursor].utf16.count
+            if units > 2048 { break }
+            scalars.formIndex(after: &cursor)
+        }
+        if units <= 2048 { tail = cursor }
+        text = String(decoding: utf8[head..<tail], as: UTF8.self)
+        base = utf8.distance(from: utf8.startIndex, to: head)
+        anchor = value.utf16.distance(from: head, to: a)
+        focus = value.utf16.distance(from: head, to: f)
+    }
+}
+
 /// Cross-platform WebAssembly/WASI event & frame driver (`rune::platform::web`).
 @MainActor
 public final class WebAppHost<State> {
     public let runtime: Runtime<State>
+    /// Receives field changes for the page's textarea or password input. An activating
+    /// input event requests browser focus even if the mirrored value stayed the same.
+    public var onFieldChange: ((WebFieldMirror?, _ activate: Bool) -> Void)?
+    public private(set) var fieldMirror: WebFieldMirror?
     public let config: WebAppConfig
     public private(set) var surfaceSize: (UInt32, UInt32)
     public private(set) var devicePixelRatio: Float
@@ -221,13 +300,27 @@ public final class WebAppHost<State> {
         return shouldReconfig
     }
 
+    private func syncField(activate: Bool) {
+        let next = runtime.focusedPath.flatMap { path -> WebFieldMirror? in
+            guard let el = runtime.focusedInputElement(at: path), let lens = el.handlers.editLens else { return nil }
+            let edit = lens.get(runtime.state)
+            return WebFieldMirror(key: path, edit: edit, secure: el.isSecure || edit.isSecure)
+        }
+        if next != fieldMirror || (activate && next != nil) {
+            fieldMirror = next
+            onFieldChange?(next, activate)
+        }
+    }
+
     public func renderFrame(at now: Double) throws -> Frame {
         _ = MainQueueDispatcher.shared.drain()
         let scene = runtime.frame(at: now)
+        syncField(activate: false)
         return try RuneRef.render(scene)
     }
 
     public func handleKeyDown(code: String, key: String, mods: Mods = .none, at now: Double) -> Bool {
+        defer { syncField(activate: true) }
         guard let mapped = WebKeyMap.translate(code: code, key: key) else { return false }
         return runtime.keyDown(KeyEvent(key: mapped, mods: mods), at: now)
     }
@@ -238,10 +331,12 @@ public final class WebAppHost<State> {
 
     public func handlePointerDown(x: Float, y: Float, button: PointerButton = .primary, at now: Double) {
         runtime.pointerDown(at: Vec2(x, y), button: button, mods: .none, at: now)
+        syncField(activate: true)
     }
 
     public func handlePointerUp(x: Float, y: Float, button: PointerButton = .primary, at now: Double) {
         runtime.pointerUp(at: Vec2(x, y), button: button, mods: .none, at: now)
+        syncField(activate: true)
     }
 
     @discardableResult

@@ -965,7 +965,12 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             }
             toolTipOwner.sync(regions: entry.helpRegionsList(runtimeObj: runtime), on: self)
             let snapshot = entry.accessibilitySnapshot(runtimeObj: runtime)
-            let held = accessibilityHost.update(tree: snapshot, announcement: entry.accessibilityAnnouncement(runtimeObj: runtime), parentView: self, onSetValue: { [weak self] id, value in
+            let held = accessibilityHost.update(tree: snapshot, announcement: entry.accessibilityAnnouncement(runtimeObj: runtime), parentView: self, onSelectText: { [weak self] id, range in
+                MacOSHostViewHelper.dispatchAccessibilityRequest { [weak self] in
+                    guard let self else { return }
+                    if self.entry.selectAccessibilityText(runtimeObj: self.runtime, id: id, range: range, at: self.nowSeconds()) { self.requestRender() }
+                }
+            }, onSetValue: { [weak self] id, value in
                 MacOSHostViewHelper.dispatchAccessibilitySetValue(id, value: value) { id, value in
                     guard let self else { return }
                     if self.entry.performAccessibilitySetValue(
@@ -1178,14 +1183,14 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     }
 
     nonisolated override func accessibilityChildren() -> [Any]? {
-        guard Thread.isMainThread else { return nil }
+        guard Thread.isMainThread else { return MacOSHostViewHelper.superclassAccessibilityChildren(of: self) }
         return MainActor.assumeIsolated {
             MacOSUnsafeSendableBox(accessibilityHost.accessibilityChildren())
         }.value
     }
 
     nonisolated override var accessibilityFocusedUIElement: Any? {
-        guard Thread.isMainThread else { return nil }
+        guard Thread.isMainThread else { return super.accessibilityFocusedUIElement }
         return MainActor.assumeIsolated {
             MacOSUnsafeSendableBox(accessibilityHost.accessibilityFocusedUIElement())
         }.value

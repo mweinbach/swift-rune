@@ -62,7 +62,7 @@ public extension AccessibilityTreeBuilder {
             let projectedLabel: String? = isSecure ? (info.label ?? "Password") : (info.label ?? info.key)
             let nodeId = info.key ?? info.path
 
-            return AccessibilityNode(
+            var projected = AccessibilityNode(
                 id: nodeId,
                 role: info.role == .textInput && (isSecure || input?.multiline == true)
                     ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: input?.multiline == true)
@@ -80,8 +80,10 @@ public extension AccessibilityTreeBuilder {
                 isModal: info.role == .dialog,
                 isSecure: isSecure,
                 actions: actions,
-                children: (childrenByParent[idx] ?? []).map(build)
+                children: controlChildren((childrenByParent[idx] ?? []).map(build), role: info.role, name: isSecure ? nil : info.label)
             )
+            projected.keepsControlContent = input?.keepsControlContent == true
+            return projected
         }
 
         let builtRoots = roots.map(build)
@@ -253,9 +255,7 @@ public extension Runtime {
                 if !editIsSecure {
                     editText = edit.text
                     editChars = edit.text.count
-                    let lo = min(edit.anchor, edit.cursor)
-                    let hi = max(edit.anchor, edit.cursor)
-                    editSel = [0, lo, 0, hi]
+                    editSel = [0, edit.anchor, 0, edit.cursor]
                 } else {
                     editText = nil
                 }
@@ -338,7 +338,7 @@ public extension Runtime {
                 return nil
             }()
 
-            return AccessibilityNode(
+            var projected = AccessibilityNode(
                 id: nodeId,
                 role: resolvedRole,
                 label: resolvedLabel,
@@ -369,13 +369,15 @@ public extension Runtime {
                 scrollX: sOff?.x,
                 scrollY: sOff?.y,
                 scrollYMax: sMax?.y,
-                textSelection: editSel,
-                characterCount: editChars,
+                textSelection: isSecure ? nil : editSel,
+                characterCount: isSecure ? nil : editChars,
                 isModal: el.isModal || el.role == .dialog,
                 isSecure: isSecure,
                 actions: actions,
-                children: builtChildren
+                children: AccessibilityTreeBuilder.controlChildren(builtChildren, role: resolvedRole, name: isSecure ? nil : el.a11yLabel ?? labelledByText)
             )
+            projected.keepsControlContent = el.keepsControlContent
+            return projected
         }
 
         let builtRoots = roots.map(build)
@@ -532,6 +534,7 @@ public final class MacOSAccessibilityHost {
         announcement: AccessibilityAnnouncement? = nil,
         now: Double = AccessibilityAnnouncement.clock(),
         parentView: NSView,
+        onSelectText: (@Sendable (String, Range<Int>) -> Void)? = nil,
         onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)? = nil,
         onAction: @escaping @Sendable (String, AccessibilityAction) -> Void
     ) -> Bool {
@@ -555,8 +558,7 @@ public final class MacOSAccessibilityHost {
 
         var map: [String: RuneNSAccessibilityElement] = [:]
         func convertNode(_ node: AccessibilityNode, parent: AnyObject) -> RuneNSAccessibilityElement {
-            let elem = AppKitAccessibilityMapper.buildElement(from: node, onAction: onAction, onSetValue: onSetValue)
-            elem.setAccessibilityParent(parent)
+            let elem = AppKitAccessibilityMapper.makeElement(node, parent: parent, onAction: onAction, onSelectText: onSelectText, onSetValue: onSetValue)
 
             let viewRect = NSRect(
                 x: CGFloat(node.frame.left),
@@ -586,7 +588,14 @@ public final class MacOSAccessibilityHost {
         // The window's own live region, which draws nothing: the root's last child.
         announcerElement = announcer.map { convertNode($0, parent: parentView) }
         if let announcerElement { rootElements.append(announcerElement) }
+        let previousElements = elementById
         elementById = map
+        for (id, element) in map {
+            guard let field = element as? RuneAXTextField,
+                  let old = previousElements[id] as? RuneAXTextField,
+                  old.anchor != field.anchor || old.focus != field.focus else { continue }
+            NSAccessibility.post(element: field, notification: .selectedTextChanged)
+        }
 
         let focusedNodeId = Self.findFocusedId(in: tree)
         if focusedNodeId != lastFocusedId {

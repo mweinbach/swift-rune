@@ -896,7 +896,12 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             }
             toolTipOwner.sync(regions: runtime.helpRegionsList(), on: self)
             let snapshot = runtime.accessibilitySnapshot()
-            let held = accessibilityHost.update(tree: snapshot, announcement: runtime.a11yAnnouncement, parentView: self, onSetValue: { [weak self] id, value in
+            let held = accessibilityHost.update(tree: snapshot, announcement: runtime.a11yAnnouncement, parentView: self, onSelectText: { [weak self] id, range in
+                MacOSHostViewHelper.dispatchAccessibilityRequest { [weak self] in
+                    guard let self else { return }
+                    if self.runtime.accessibilitySelectText(id, range: range, at: self.nowSeconds()) { self.requestRender() }
+                }
+            }, onSetValue: { [weak self] id, value in
                 MacOSHostViewHelper.dispatchAccessibilitySetValue(id, value: value) { id, value in
                     guard let self else { return }
                     if self.runtime.accessibilityAction(id, .setValue, value: value, at: self.nowSeconds()) {
@@ -1282,14 +1287,14 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     }
 
     nonisolated override func accessibilityChildren() -> [Any]? {
-        guard Thread.isMainThread else { return nil }
+        guard Thread.isMainThread else { return MacOSHostViewHelper.superclassAccessibilityChildren(of: self) }
         return MainActor.assumeIsolated {
             MacOSUnsafeSendableBox(accessibilityHost.accessibilityChildren())
         }.value
     }
 
     nonisolated override var accessibilityFocusedUIElement: Any? {
-        guard Thread.isMainThread else { return nil }
+        guard Thread.isMainThread else { return super.accessibilityFocusedUIElement }
         return MainActor.assumeIsolated {
             MacOSUnsafeSendableBox(accessibilityHost.accessibilityFocusedUIElement())
         }.value

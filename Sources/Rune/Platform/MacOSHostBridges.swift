@@ -344,23 +344,32 @@ public enum MacOSHostViewHelper {
         }
     }
 
+    /// AppKit makes this superclass query on its own AX thread (#1040). Swift imports
+    /// NSView's children as MainActor-isolated, so call that specific ObjC getter directly
+    /// without entering a Rune override or synchronously dispatching to a busy main thread.
+    nonisolated static func superclassAccessibilityChildren(of view: NSView) -> [Any]? {
+        let selector = #selector(NSAccessibilityElement.accessibilityChildren)
+        guard let method = class_getInstanceMethod(NSView.self, selector) else { return nil }
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Unmanaged<NSArray>?
+        let get = unsafeBitCast(method_getImplementation(method), to: Getter.self)
+        return get(view, selector)?.takeUnretainedValue() as? [Any]
+    }
+
+    nonisolated static func dispatchAccessibilityRequest(_ perform: @MainActor @escaping @Sendable () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { perform() }
+        } else {
+            DispatchQueue.main.async { perform() }
+        }
+    }
+
     /// Runs an assistive `SetValue` request on the main actor, as `dispatchAccessibilityAction` does.
     public nonisolated static func dispatchAccessibilitySetValue(
         _ id: String,
         value: AccessibilityActionValue,
         perform: @MainActor @escaping @Sendable (String, AccessibilityActionValue) -> Void
     ) {
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                perform(id, value)
-            }
-        } else {
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    perform(id, value)
-                }
-            }
-        }
+        dispatchAccessibilityRequest { perform(id, value) }
     }
 
     public nonisolated static func dispatchAccessibilityAction(
@@ -368,17 +377,7 @@ public enum MacOSHostViewHelper {
         action: AccessibilityAction,
         perform: @MainActor @escaping @Sendable (String, AccessibilityAction) -> Void
     ) {
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                perform(id, action)
-            }
-        } else {
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    perform(id, action)
-                }
-            }
-        }
+        dispatchAccessibilityRequest { perform(id, action) }
     }
 }
 

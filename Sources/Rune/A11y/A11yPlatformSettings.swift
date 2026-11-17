@@ -60,10 +60,17 @@ public extension El {
 
     /// `RoleCtx::pressable` of `a11y_role`.
     var a11yPressable: Bool {
+        AccessibilityRoleRules.pressable(hasPrimary: a11yHasPrimaryHandler, ownsKeys: a11yOwnsKeys)
+    }
+
+    internal var a11yHasPrimaryHandler: Bool {
         let h = handlers
-        let hasPrimary = h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil
+        return h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil
             || h.onHover != nil || h.onDrag != nil || h.dragOut != nil
-        return AccessibilityRoleRules.pressable(hasPrimary: hasPrimary, ownsKeys: a11yOwnsKeys)
+    }
+
+    internal var keepsControlContent: Bool {
+        a11yHasPrimaryHandler || terminalGridPayload != nil || !textLinks.isEmpty
     }
 }
 
