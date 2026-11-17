@@ -19,6 +19,17 @@ struct RuneRefTests {
     }
 
     #if canImport(Metal) || canImport(CRuneOffscreenGL)
+    @Test("A glyph at a half-pixel origin includes its top row and excludes its bottom edge")
+    func halfPixelGlyphBounds() throws {
+        let renderer = try OffscreenGPURenderer()
+        let glyph = RenderInstance(rect: SIMD4<Float>(0, 1.5, 2, 2), fill: SIMD4<Float>(1, 1, 1, 1),
+                                   params: SIMD4<Float>(0, KIND_GLYPH, 0, 1))
+        let frame = RenderFrame(width: 2, height: 5, glyphs: R8Atlas(width: 2, height: 2, texels: [255, 255, 255, 255]),
+                                instances: [glyph])
+        let rendered = try renderer.renderOffscreen(frame)
+        #expect((0..<5).map { rendered.pixel(x: 0, y: $0).x } == [0, 255, 255, 0, 0])
+    }
+
     @Test("Dashed rings agree on pixels inside the rounded perimeter")
     func dashedCornerPixels() throws {
         let renderer = try OffscreenGPURenderer()

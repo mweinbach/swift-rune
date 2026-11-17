@@ -55,6 +55,27 @@ public static class RunePopupSmoke {
     [DllImport("user32")] static extern uint MapVirtualKey(uint key, uint type);
     [DllImport("user32", SetLastError = true)] static extern bool PostMessage(IntPtr window, uint msg, IntPtr wp, IntPtr lp);
 
+    [ComImport, Guid("618736E0-3C3D-11CF-810C-00AA00389B71"), InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
+    interface AccessibleMenu {
+        [DispId(-5003)] string this[[MarshalAs(UnmanagedType.Struct)] object child] { [return: MarshalAs(UnmanagedType.BStr)] get; }
+        [DispId(-5018)] void DoDefaultAction([MarshalAs(UnmanagedType.Struct)] object child);
+    }
+    [DllImport("oleacc")] static extern int AccessibleObjectFromWindow(IntPtr window, uint obj, ref Guid iid,
+                                                                       [MarshalAs(UnmanagedType.Interface)] out object accessible);
+    public static void InvokeAccessible(IntPtr window, int index, string label) {
+        Guid iid = typeof(AccessibleMenu).GUID;
+        object accessible;
+        Marshal.ThrowExceptionForHR(AccessibleObjectFromWindow(window, unchecked((uint)-4), ref iid, out accessible));
+        try {
+            var menu = (AccessibleMenu)accessible;
+            object child = index + 1;
+            string name = menu[child];
+            if (name == null || name.Split('\t')[0] != label)
+                throw new InvalidOperationException("Microsoft Active Accessibility row " + index + " is '" + name + "', expected '" + label + "'");
+            menu.DoDefaultAction(child);
+        } finally { Marshal.ReleaseComObject(accessible); }
+    }
+
     public static IntPtr Find(uint process, string className, string firstMenuLabel) {
         return FindWindowOrMenu(process, className, firstMenuLabel, false);
     }
@@ -203,21 +224,40 @@ function Activate-Row([IntPtr]$menu, [string]$title, [switch]$Expand) {
     $menuRoot = [Windows.Automation.AutomationElement]::FromHandle($target)
     $name = New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty, $title)
     $item = $menuRoot.FindFirst([Windows.Automation.TreeScope]::Descendants, $name)
-    if (!$item) {
-        $labels = ($menuRoot.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name }) -join ', '
-        throw "Native popup UIA item '$title' missing. Descendants: $labels"
-    }
     $pattern = $null
-    if ($Expand -and $item.TryGetCurrentPattern([Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$pattern)) {
+    if ($item -and $Expand -and $item.TryGetCurrentPattern([Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$pattern)) {
         $pattern.Expand()
-        Write-Output "Expanded native '$title' with UIA."
-    } elseif ($item.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+        Write-Output "Expanded native '$title' with UI Automation."
+        return
+    }
+    if ($item -and $item.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
         $pattern.Invoke()
-        Write-Output "Invoked native '$title' with UIA."
-    } else {
-        $legacy = $item.GetCurrentPattern([Windows.Automation.LegacyIAccessiblePattern]::Pattern)
-        $legacy.DoDefaultAction()
-        Write-Output "Performed the native default action on '$title' with UIA."
+        Write-Output "Invoked native '$title' with UI Automation."
+        return
+    }
+    # User32 also exposes native menu rows as 1-based MSAA children, even if UIA has no descendants.
+    $count = [RunePopupSmoke]::GetMenuItemCount($menu)
+    for ($index = 0; $index -lt $count; $index++) {
+        if ([RunePopupSmoke]::Label($menu, $index) -ceq $title) { break }
+    }
+    if ($index -eq $count) { throw "Native menu row '$title' missing" }
+    try {
+        [RunePopupSmoke]::InvokeAccessible($target, $index, $title)
+        Write-Output "Invoked native '$title' through Microsoft Active Accessibility."
+    } catch {
+        Write-Output "MSAA action unavailable for '$title': $($_.Exception.Message)"
+        [RunePopupSmoke]::Key($target, 0x24)
+        for ($step=0; $step -le $count; $step++) {
+            Start-Sleep -Milliseconds 100
+            if (([RunePopupSmoke]::State($menu, $index) -band 0x80) -ne 0) {
+                $key = if ($Expand) { 0x27 } else { 0x0d }
+                [RunePopupSmoke]::Key($target, $key)
+                Write-Output "Activated highlighted native '$title' through its popup HWND."
+                return
+            }
+            [RunePopupSmoke]::Key($target, 0x28)
+        }
+        throw "Native popup did not highlight '$title'"
     }
 }
 
@@ -277,11 +317,6 @@ if ($Executable) {
         Wait-Status 'messages'
         Write-Output 'Nested command selected through its native menu.'
 
-        [RunePopupSmoke]::Click($window, $x, $y, $true)
-        $context = Wait-Menu 'Copy'
-        [RunePopupSmoke]::ControlC((Popup-Window $context), $context)
-        Wait-Status 'copy'
-
         # Focus the authored canvas through normal pointer handling before sending VK_APPS to its window.
         [RunePopupSmoke]::Click($window, $x, $y, $false)
         [RunePopupSmoke]::Key($window, 0x5d) # The Windows application/context-menu key.
@@ -303,6 +338,12 @@ if ($Executable) {
         $picker = Wait-Menu 'System'
         Assert-True (([RunePopupSmoke]::State($picker, 2) -band 8) -ne 0 -and ([RunePopupSmoke]::State($picker, 0) -band 8) -eq 0) 'Dark should be checked after selection'
         [RunePopupSmoke]::Key((Popup-Window $picker), 0x1b)
+        $null = Await-Result 'picker dismissal' { [RunePopupSmoke]::Find($app.Id, '#32768', 'System') -eq [IntPtr]::Zero }
+        [RunePopupSmoke]::Click($window, $x, $y, $true)
+        $context = Wait-Menu 'Copy'
+        [RunePopupSmoke]::ControlC((Popup-Window $context), $context)
+        Wait-Status 'copy'
+
         Write-Output 'PASS Windows popup menus: pointer and keyboard anchors, Ctrl+C, disabled Paste, separator, Share > Messages, Escape dismissal, and persistent picker selection.'
     } catch {
         Write-Output $_.Exception.Message

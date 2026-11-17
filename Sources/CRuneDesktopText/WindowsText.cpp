@@ -304,7 +304,7 @@ struct UnitEdges {
 // DirectWrite exposes the visual origin and embedding level of each text range
 // and the advance of each cluster. Cache per-unit boundaries for repeated caret
 // and selection queries. Unusual layouts can still use native point hit testing.
-std::unique_ptr<UnitEdges[]> buildHitCache(IDWriteTextLayout *layout, UINT32 length) {
+std::unique_ptr<UnitEdges[]> buildHitCache(IDWriteTextLayout *layout, UINT32 length, float &visualWidth) {
     if (length < 2) return nullptr;
     UINT32 clusterCount = 0, rangeCount = 0;
     layout->GetClusterMetrics(nullptr, 0, &clusterCount);
@@ -320,12 +320,15 @@ std::unique_ptr<UnitEdges[]> buildHitCache(IDWriteTextLayout *layout, UINT32 len
         return a.textPosition < b.textPosition;
     });
     UINT32 unit = 0, cluster = 0;
+    float right = 0;
     for (UINT32 i = 0; i < rangeCount; ++i) {
         const auto &range = ranges[i];
         if (range.textPosition != unit || range.length > length - unit) return nullptr;
         const UINT32 end = unit + range.length;
         const bool rtl = (range.bidiLevel & 1) != 0;
-        const float origin = rtl ? range.left + range.width : range.left;
+        const float rangeRight = range.left + range.width;
+        right = std::max(right, rangeRight);
+        const float origin = rtl ? rangeRight : range.left;
         // DirectWrite sums cluster advances in FLOAT relative to the start of
         // each run, then adds or subtracts that offset from its visual origin.
         float pen = 0;
@@ -349,6 +352,10 @@ std::unique_ptr<UnitEdges[]> buildHitCache(IDWriteTextLayout *layout, UINT32 len
         }
     }
     if (unit != length || cluster != clusterCount) return nullptr;
+    // GetMetrics accumulates the whole paragraph in logical order. On very
+    // long mixed-direction lines its width can differ from the actual right
+    // edge by several pixels. Use the visual edge for Rune's width and caret.
+    visualWidth = right;
     return edges;
 }
 } // namespace
@@ -382,7 +389,7 @@ struct RuneDesktopLine {
             updated->fontAscent > 0 ? updated->fontAscent : row.baseline,
             updated->fontAscent > 0 ? updated->fontDescent : row.height - row.baseline,
             updated->capHeight};
-        hits = buildHitCache(target, position(byteCount));
+        hits = buildHitCache(target, position(byteCount), metrics.advance);
         collector = std::move(updated);
         return true;
     }

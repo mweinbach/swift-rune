@@ -48,6 +48,9 @@ struct RuneMedia {
     Clock::time_point anchorTick = Clock::now();
     double rate = 1;
     LONG stride = 0;
+    UINT32 decodedWidth = 0;
+    UINT32 decodedHeight = 0;
+    UINT32 appliedRotation = 0;
     LONGLONG lastDelivered = -1;
     ComPtr<IMFSourceReader> reader;
     FrameSample current;
@@ -72,11 +75,13 @@ struct RuneMedia {
 
 namespace {
 
-HRESULT selectFormat(IMFSourceReader *reader, DWORD stream, REFGUID major, REFGUID subtype) {
+HRESULT selectFormat(IMFSourceReader *reader, DWORD stream, REFGUID major, REFGUID subtype,
+                     UINT32 rotation = 0) {
     ComPtr<IMFMediaType> out;
     HRESULT hr = api().mediaType(&out);
     if (SUCCEEDED(hr)) hr = out->SetGUID(MF_MT_MAJOR_TYPE, major);
     if (SUCCEEDED(hr)) hr = out->SetGUID(MF_MT_SUBTYPE, subtype);
+    if (SUCCEEDED(hr) && rotation) hr = out->SetUINT32(MF_MT_VIDEO_ROTATION, rotation);
     if (SUCCEEDED(hr)) hr = reader->SetCurrentMediaType(stream, nullptr, out.Get());
     return hr;
 }
@@ -113,25 +118,34 @@ HRESULT prepareReader(RuneMedia &m, bool audioOnly) {
     if (SUCCEEDED(MFGetAttributeRatio(video.Get(), MF_MT_FRAME_RATE, &numerator, &denominator))
         && numerator && denominator)
         m.info.frame_duration = static_cast<double>(denominator) / numerator;
+    // Preserve the track's storage orientation during color conversion. Rune exposes
+    // the original pixels and applies their display transform when drawing the frame.
+    const UINT32 sourceRotation = MFGetAttributeUINT32(video.Get(), MF_MT_VIDEO_ROTATION, 0);
     hr = m.reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
     if (SUCCEEDED(hr)) hr = m.reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
-    if (SUCCEEDED(hr)) hr = selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                                         MFMediaType_Video, MFVideoFormat_RGB32);
+    if (FAILED(hr)) return hr;
+    hr = selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                      MFMediaType_Video, MFVideoFormat_RGB32, sourceRotation);
+    if (FAILED(hr) && sourceRotation)
+        hr = selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_VIDEO_STREAM, MFMediaType_Video, MFVideoFormat_RGB32);
     if (FAILED(hr)) return hr;
     ComPtr<IMFMediaType> decoded;
     hr = m.reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &decoded);
-    if (SUCCEEDED(hr)) hr = MFGetAttributeSize(decoded.Get(), MF_MT_FRAME_SIZE, &m.info.width, &m.info.height);
+    if (SUCCEEDED(hr)) hr = MFGetAttributeSize(decoded.Get(), MF_MT_FRAME_SIZE, &m.decodedWidth, &m.decodedHeight);
     if (FAILED(hr)) return hr;
-    // The video processor can rotate the pixels while converting them to RGB32.
-    // Apply only the correction that still belongs to its negotiated output.
-    const UINT32 rotation = MFGetAttributeUINT32(decoded.Get(), MF_MT_VIDEO_ROTATION, 0);
-    if (rotation < 360 && rotation % 90 == 0) m.info.rotation_clockwise = static_cast<int>(rotation);
+    const UINT32 remaining = MFGetAttributeUINT32(decoded.Get(), MF_MT_VIDEO_ROTATION, 0);
+    if (remaining >= 360 || remaining % 90 || sourceRotation >= 360 || sourceRotation % 90) return MF_E_INVALIDMEDIATYPE;
+    m.appliedRotation = (sourceRotation + 360 - remaining) % 360;
+    m.info.rotation_clockwise = static_cast<int>(sourceRotation);
+    const bool swapped = m.appliedRotation == 90 || m.appliedRotation == 270;
+    m.info.width = swapped ? m.decodedHeight : m.decodedWidth;
+    m.info.height = swapped ? m.decodedWidth : m.decodedHeight;
     if (!m.info.width || !m.info.height || m.info.width > 16384 || m.info.height > 16384) return MF_E_INVALIDMEDIATYPE;
     UINT32 rawStride = 0;
     if (SUCCEEDED(decoded->GetUINT32(MF_MT_DEFAULT_STRIDE, &rawStride)))
         m.stride = static_cast<LONG>(rawStride);
     else
-        hr = api().stride(MFVideoFormat_RGB32.Data1, m.info.width, &m.stride);
+        hr = api().stride(MFVideoFormat_RGB32.Data1, m.decodedWidth, &m.stride);
     return hr;
 }
 
@@ -150,7 +164,7 @@ HRESULT readNext(RuneMedia &m, FrameSample &result) {
             if (FAILED(m.reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &type))
                 || FAILED(MFGetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, &w, &h))
                 || FAILED(type->GetGUID(MF_MT_SUBTYPE, &subtype))
-                || w != m.info.width || h != m.info.height || subtype != MFVideoFormat_RGB32)
+                || w != m.decodedWidth || h != m.decodedHeight || subtype != MFVideoFormat_RGB32)
                 return MF_E_INVALIDMEDIATYPE;
             UINT32 stride = 0;
             if (SUCCEEDED(type->GetUINT32(MF_MT_DEFAULT_STRIDE, &stride)))
@@ -204,28 +218,47 @@ HRESULT copyBGRA(const RuneMedia &m, uint8_t *dst) {
     BYTE *base = nullptr, *top = nullptr;
     DWORD length = 0;
     LONG pitch = m.current.stride;
-    const size_t row = static_cast<size_t>(m.info.width) * 4;
+    const size_t row = static_cast<size_t>(m.decodedWidth) * 4;
     if (image) {
         hr = image->Lock2DSize(MF2DBuffer_LockFlags_Read, &top, &pitch, &base, &length);
     } else {
         hr = buffer->Lock(&base, nullptr, &length);
         if (SUCCEEDED(hr)) {
-            const uint64_t offset = pitch < 0 ? static_cast<uint64_t>(-static_cast<int64_t>(pitch)) * (m.info.height - 1) : 0;
+            const uint64_t offset = pitch < 0 ? static_cast<uint64_t>(-static_cast<int64_t>(pitch)) * (m.decodedHeight - 1) : 0;
             if (offset < length) top = base + offset;
         }
     }
     if (FAILED(hr)) return hr;
     const int64_t topOffset = top && base ? static_cast<int64_t>(reinterpret_cast<uintptr_t>(top))
                                          - static_cast<int64_t>(reinterpret_cast<uintptr_t>(base)) : -1;
-    const int64_t last = topOffset + static_cast<int64_t>(pitch) * (m.info.height - 1);
+    const int64_t last = topOffset + static_cast<int64_t>(pitch) * (m.decodedHeight - 1);
     if (topOffset < 0 || last < 0 || topOffset + row > length || last + row > length) {
         hr = MF_E_BUFFERTOOSMALL;
-    } else {
+    } else if (!m.appliedRotation) {
         for (uint32_t y = 0; y < m.info.height; ++y) {
             uint8_t *out = dst + row * y;
             std::memcpy(out, top + static_cast<int64_t>(pitch) * y, row);
             // MFVideoFormat_RGB32 reserves the fourth byte in each BGRX pixel.
             for (size_t x = 3; x < row; x += 4) out[x] = 255;
+        }
+    } else {
+        // Some transforms deliver rotated RGB despite requesting the track's orientation.
+        // Map each stored scanline onto those decoded pixels while packing the BGRA output.
+        const int64_t right = static_cast<int64_t>(m.decodedWidth - 1) * 4;
+        const int64_t bottom = static_cast<int64_t>(m.decodedHeight - 1) * pitch;
+        int64_t origin, stepX, stepY;
+        switch (m.appliedRotation) {
+        case 90:  origin = right;          stepX = pitch;  stepY = -4;     break;
+        case 180: origin = bottom + right; stepX = -4;     stepY = -int64_t(pitch); break;
+        default:  origin = bottom;         stepX = -int64_t(pitch); stepY = 4; break;
+        }
+        for (uint32_t y = 0; y < m.info.height; ++y) {
+            const uint8_t *scanline = top + (origin + y * stepY);
+            for (uint32_t x = 0; x < m.info.width; ++x) {
+                std::memcpy(dst, scanline + x * stepX, 3);
+                dst[3] = 255;
+                dst += 4;
+            }
         }
     }
     if (image) image->Unlock2D();

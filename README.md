@@ -219,6 +219,8 @@ swift run rune-hello
 
 Click the switch and resize the window. The label changes from **Lights off** to **Lights on** and the switch stays centered. With `RUNE_GPU_INFO=1`, the host prints the API and device reported by the active context. Mesa's `llvmpipe` identifies a software driver.
 
+To distribute a Windows build, keep SwiftPM's resource directories beside the executable. For Hello, `swift-rune_Rune.resources` contains the shaders and fonts. The executable also needs Swift runtime DLLs and the Microsoft Visual C++ v14 runtime for its architecture. Packaging the matching Swift DLLs and their notices beside the executable lets a user run it with the Visual C++ redistributable installed.
+
 Windows notifications require an app identity. Call `RuneNotify.registerWithResult(.init(id: "com.example.app", name: "My App"))` during startup, or use `adoptWithResult` for an identity registered by the installer. Linux uses the desktop session’s notification service. Inline text replies depend on the service’s advertised capabilities. [Windows notification smoke test](Tests/Windows/Notifications/run.ps1) · [Private Linux notification test](scripts/test-linux-notifications.py)
 
 To exercise lighting in an interactive app, run `swift run rune-light-live --scene chat`. To render one effects frame to a file, run `swift run rune-fx-gallery --still glow --snap glow.png`. On Windows, the UI Automation smoke test clicks the Hello switch, resizes the window and checks its accessible state. [Windows switch test](scripts/windows-uia-smoke.ps1) · [Windows text accessibility test](Tests/Support/WindowsTextAccessibility/Run.ps1)
