@@ -227,14 +227,14 @@ struct ElInc4ParityTests {
                 .child(el().key("marker").size(atEnd ? 100 : 10, 10))
         }
         _ = rt.frame(at: 0)
-        #expect(rt.element(byKey: "marker")?.rect.width == 10)
+        #expect(rt.element(byKey: "marker")?.rect[2] == 10)
         rt.update(at: 0.1) { _, tx in
             tx.scrollToInstant("list", x: 0, y: 200)
             tx.liveOnly()
         }
         rt.setViewport(Vec2(220, 120))
         _ = rt.frame(at: 0.2)
-        #expect(rt.state && rt.element(byKey: "marker")?.rect.width == 100)
+        #expect(rt.state && rt.element(byKey: "marker")?.rect[2] == 100)
     }
 
     @Test("scroll-end reports start again after the same viewport remounts")
