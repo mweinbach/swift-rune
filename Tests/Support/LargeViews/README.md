@@ -39,7 +39,7 @@ python3 Tests/Support/LargeViews/rust-native.py /path/to/rust-rune .build/scroll
 To compare the native windows, capture one Swift run and use the Rust window JSON from the same workload. The comparator checks the order and clipped bounds of every visible row at all six checkpoints. For the diff it also verifies the scroll offsets. Mounted counts can vary with the number of display frames available for overscan.
 
 ```sh
-xcrun swift run --package-path Tests/Support/LargeViews -c release ScrollBench diff window --capture .build/scroll/swift-diff-window
+xcrun swift run --package-path Tests/Support/LargeViews -c release ScrollBench diff window --capture .build/scroll/swift-diff-window --metal-presents .build/scroll/swift-diff-window/run.csv
 python3 Tests/Support/LargeViews/compare.py .build/scroll/swift-diff-window .build/scroll/rust-mac/diff.json --native-window diff
 ```
 
