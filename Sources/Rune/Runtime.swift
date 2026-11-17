@@ -956,7 +956,7 @@ public final class Runtime<State> {
     internal var queuedInputArrivals = QueuedInputArrivals()
     /// How many handler transactions have been applied, so `hostInput` can tell input that ran a handler.
     internal var inputHandlerRuns: UInt64 = 0
-    private struct MatchedSeenSnapshot {
+    internal struct MatchedSeenSnapshot {
         var id: NodeId
         var path: String
         var rect: MotionRect
@@ -964,7 +964,7 @@ public final class Runtime<State> {
         var fill: MotionColor?
         var opacity: Float
     }
-    private var seenMatchedByFlightId: [String: MatchedSeenSnapshot] = [:]
+    internal var seenMatchedByFlightId: [String: MatchedSeenSnapshot] = [:]
     private var committedMatchedByFlightId: [String: MatchedSeenSnapshot] = [:]
     internal var activeFlightIds: Set<NodeId> = []
     internal var launchedFlightIds: Set<NodeId> = []
@@ -4403,11 +4403,12 @@ public final class Runtime<State> {
                let prev = seenMatchedByFlightId[fid] ?? committedMatchedByFlightId[fid],
                prev.id != nid {
                 let matchedSpring: Spring = {
+                    if let commitMotion { return commitMotion.spring }
                     if let f = node.el.flightSpring { return f }
                     if case .spring(let sp) = node.el.layoutAnim?.x.curve { return sp }
-                    return node.el.styleSpring ?? MotionTokens.SETTLE
+                    return node.el.styleSpring ?? MotionTokens.REFLOW
                 }()
-                matchedStarts[nid] = MatchedFlightStart(
+                var start = MatchedFlightStart(
                     fromId: prev.id,
                     startRect: prev.rect,
                     startCorners: prev.corners,
@@ -4415,6 +4416,8 @@ public final class Runtime<State> {
                     startOpacity: prev.opacity,
                     spring: matchedSpring
                 )
+                start.startVelocity = scene.frameVelocity(prev.id)
+                matchedStarts[nid] = start
                 matchedRootPaths.append(node.path)
                 activeFlightIds.insert(nid)
                 if pendingUnclippedFlights {

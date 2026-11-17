@@ -733,6 +733,7 @@ extension Runtime {
         var beforeSticky: [NodeId: MotionRect] = [:]
         stuckShiftsByPath.removeAll(keepingCapacity: true)
         var newElements: [ElementInfo] = []
+        var newSeenMatched: [String: MatchedSeenSnapshot] = [:]
         var newHitGeometries: [String: HitGeometry] = [:]
         var hitScopes: [RenderHitScope] = []
         var newPresentedRects: [String: MotionRect] = [:]
@@ -1274,6 +1275,14 @@ extension Runtime {
             }
             if highlightActive, let activeFocusFill = el.focusFillColor ?? el.focusHighlightColor {
                 effBg = activeFocusFill
+            }
+
+            if publishHitGeometry, !isExiting, let fid = el.flightId {
+                newSeenMatched[fid] = MatchedSeenSnapshot(
+                    id: nid, path: node.path, rect: effRect,
+                    corners: animR ?? el.corners, fill: effBg.motionColor, opacity: effOpacity
+                )
+                matchedFlightRegistry.recordPrevious(flightId: fid, rect: effRect)
             }
 
             let myElementIndex = newElements.count
@@ -3201,6 +3210,7 @@ extension Runtime {
 
         self.lastElements = newElements
         if publishHitGeometry {
+            self.seenMatchedByFlightId = newSeenMatched
             self.hitGeometryByPath = newHitGeometries
             self.paintOrderPaths = newElements.map(\.path)
         }

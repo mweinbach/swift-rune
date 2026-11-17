@@ -497,6 +497,7 @@ public struct Presented: Sendable, Equatable {
 public struct MatchedFlightStart: Sendable {
     public var fromId: NodeId?
     public var startRect: MotionRect
+    package var startVelocity: (Float, Float, Float, Float) = (0, 0, 0, 0)
     public var startCorners: Corners?
     public var startFill: MotionColor?
     public var startOpacity: Float?
@@ -508,7 +509,7 @@ public struct MatchedFlightStart: Sendable {
         startCorners: Corners? = nil,
         startFill: MotionColor? = nil,
         startOpacity: Float? = nil,
-        spring: Spring = MotionTokens.SETTLE
+        spring: Spring = MotionTokens.REFLOW
     ) {
         self.fromId = fromId
         self.startRect = startRect
@@ -772,6 +773,12 @@ public struct Scene: Sendable {
         guard let i = slot(id), nodes[i].alive else { return nil }
         let (w, _) = exactWorld(i)
         return MotionRect.fromEdges(w.0, w.1, w.2, w.3)
+    }
+
+    /// Screen-space velocities of the four edges before a matched node transfers to its successor.
+    package func frameVelocity(_ id: NodeId) -> (Float, Float, Float, Float) {
+        guard let i = slot(id) else { return (0, 0, 0, 0) }
+        return exactWorld(i).1
     }
 
     public func isEdgeAnimating(_ id: NodeId) -> Bool {
@@ -1716,7 +1723,7 @@ public struct Scene: Sendable {
             applyPhaseActs(i, acts)
             return
         }
-        startPath(i, start: m.startRect, velocity: (0, 0, 0, 0), anim: LayoutAnim(spring: m.spring, travel: .screen))
+        startPath(i, start: m.startRect, velocity: m.startVelocity, anim: LayoutAnim(spring: m.spring, travel: .screen))
         if let sc = m.startCorners {
             trackSet(i, Props.CORNERS, sc)
             trackAnimate(i, Props.CORNERS, spec.corners, Anim<Corners>(curve: Curve.from(m.spring)))
