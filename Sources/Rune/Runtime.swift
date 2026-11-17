@@ -4722,8 +4722,8 @@ public final class Runtime<State> {
         var childClips = [MotionRect](repeating: fullWindowClip, count: flatNodes.count)
         var staticInhs = [StaticInh](repeating: StaticInh(), count: flatNodes.count)
         var childClipFades = [[EdgeFadeSpec]](repeating: [], count: flatNodes.count)
-        var scrollStickyShifts: [Vec2] = []
-        scrollStickyShifts.reserveCapacity(flatNodes.count)
+        var shifts: [(sticky: Vec2, world: Vec2)] = []
+        shifts.reserveCapacity(flatNodes.count)
 
         for i in flatNodes.indices {
             let parentIdx = flatNodes[i].parentIndex
@@ -4751,7 +4751,7 @@ public final class Runtime<State> {
             var worldY = parentOrigin.y + lr.y - parentScroll.y
             if let a = flatNodes[i].el.anchor,
                let anchorFlat = flatNodes.first(where: { $0.key == a.key }) {
-                let aSticky = anchorFlat.index < scrollStickyShifts.count ? scrollStickyShifts[anchorFlat.index] : .zero
+                let aSticky = anchorFlat.index < shifts.count ? shifts[anchorFlat.index].sticky : .zero
                 let aParentScale = anchorFlat.parentIndex.map { flatNodes[$0].inheritedScale } ?? 1.0
                 let triggerZoomed = (aSticky == .zero)
                     ? anchorFlat.zoomedTargetRect
@@ -4774,20 +4774,21 @@ public final class Runtime<State> {
             let newTarget = MotionRect.fromXYWH(worldX, worldY, flatNodes[i].localSize.x, flatNodes[i].localSize.y)
             flatNodes[i].targetRect = newTarget
             let parentScale = parentIdx.map { flatNodes[$0].inheritedScale } ?? 1.0
-            let zoomedDelta = Vec2((newTarget.x - oldTarget.x) * parentScale, (newTarget.y - oldTarget.y) * parentScale)
+            let worldDelta = Vec2(newTarget.x - oldTarget.x, newTarget.y - oldTarget.y)
+            let zoomedDelta = Vec2(worldDelta.x * parentScale, worldDelta.y * parentScale)
             if zoomedDelta != .zero {
                 flatNodes[i].zoomedTargetRect = flatNodes[i].zoomedTargetRect.offsetBy(zoomedDelta)
             }
             let parentScrollSticky: Vec2 = (flatNodes[i].el.anchor != nil && !flatNodes[i].isSticky)
                 ? .zero
-                : (parentIdx.map { scrollStickyShifts[$0] } ?? .zero)
+                : (parentIdx.map { shifts[$0].sticky } ?? .zero)
             let myScrollSticky = computeStickyShift(
                 nodeIndex: i,
                 parentStickyShift: parentScrollSticky,
                 nodes: flatNodes,
                 rectOf: \.targetRect
             ).shift
-            scrollStickyShifts.append(myScrollSticky)
+            shifts.append((sticky: myScrollSticky, world: worldDelta))
             flatNodes[i].clipRect = inheritedClip
             flatNodes[i].activeClipFades = inheritedClipFades
             var scrollFadeInfo: EdgeFadeSpec? = nil
@@ -4834,13 +4835,15 @@ public final class Runtime<State> {
             flatNodes[i].staticRect = sb
             staticInhs[i] = cInh
             let nid = flatNodes[i].nodeId
+            let parentDelta = parentIdx.map { shifts[$0].world } ?? .zero
+            let localDelta = Vec2(worldDelta.x - parentDelta.x, worldDelta.y - parentDelta.y)
+            scene.translateFrame(nid, by: localDelta, screenDelta: worldDelta)
             nodeById[nid] = flatNodes[i]
             exitingSnapshots[nid] = flatNodes[i]
             if i < lastCommittedSpecs.count {
                 lastCommittedSpecs[i].rect = newTarget
             }
         }
-        scene.commit(lastCommittedSpecs, at: now, initialCut: false)
         dispatchScrollCallbacks(at: now)
     }
 

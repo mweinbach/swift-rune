@@ -47,6 +47,26 @@ extension Scene {
         nodes[i].dirty = true
     }
 
+    /// Moves the scene's coordinates with its scrolling viewport, retaining progress and velocity.
+    package mutating func translateFrame(_ id: NodeId, by localDelta: Vec2, screenDelta: Vec2) {
+        guard localDelta != .zero || screenDelta != .zero, let i = slot(id) else { return }
+        if localDelta != .zero {
+            nodes[i].frame = nodes[i].frame.translated(localDelta)
+            if let track = nodes[i].tracks[Int(Props.FRAME.id.rawValue)] {
+                let edges = MotionLanes(localDelta.x, localDelta.y, localDelta.x, localDelta.y)
+                store.translateTrack(track, delta: edges, count: 4)
+            }
+            nodes[i].dirty = true
+        }
+        if var path = nodes[i].path {
+            path.start = path.start.translated(screenDelta)
+            path.endLocal = path.endLocal.translated(localDelta)
+            path.origin = Vec2(path.origin.x + screenDelta.x - localDelta.x, path.origin.y + screenDelta.y - localDelta.y)
+            nodes[i].path = path
+            nodes[i].dirty = true
+        }
+    }
+
     /// Sets a property immediately (direct manipulation).
     public mutating func set<T: Animatable>(_ id: NodeId, _ prop: Prop<T>, _ value: T) {
         if inFlightTo(id, prop, value) {
