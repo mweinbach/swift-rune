@@ -1930,6 +1930,59 @@ struct DiffParityTests {
         #expect(mounted > 0 && mounted < 160)
     }
 
+    @Test("Wrapped diff rows grow, shrink after a resize, and fit split panes")
+    @MainActor
+    func wrapFitsCodeToViewport() throws {
+        let long = String(repeating: "word ", count: 40)
+        let patch = [
+            "--- a/test.rs", "+++ b/test.rs", "@@ -1,4 +1,4 @@",
+            " head", " \(long)", "-old \(long)", "+new \(long)", " tail",
+        ].joined(separator: "\n")
+        let file = try #require(FileDiff.parseUnified(patch).first)
+        let rt = Runtime(state: DiffState(diff: file), viewport: Vec2(640, 400), pixelScale: 2) { state, cx in
+            DiffView<DiffState>(key: "wrap", kit: .neutral(dark: false), get: { $0 }, set: { $0 = $1 })
+                .build(state: state, cx: cx)
+        }
+        var t = 0.0
+        func settle() {
+            for _ in 0..<5 { t += 1.0 / 120; _ = rt.renderFrame(at: t) }
+        }
+        func rect(_ key: String) throws -> [Float] {
+            try #require(rt.element(byKey: "wrap-\(key)")).rect
+        }
+        settle()
+        let unwrapped = try rect("df0.c2")[3]
+        rt.setViewport(Vec2(275, 400), pixelScale: 2)
+        rt.update(at: t) { state, _ in state.wrap = true }
+        settle()
+        #expect(rt.elements().filter { !$0.exiting && $0.key == "wrap-code-1" }.count == 1)
+        #expect(try abs(rect("code-1-text")[2] - 156) < 0.1)
+        let narrow = try rect("df0.c2")
+        #expect(narrow[3] > unwrapped)
+        #expect(try abs(rect("df0.o3")[1] - (narrow[1] + narrow[3])) < 0.1)
+
+        rt.setViewport(Vec2(960, 400), pixelScale: 2)
+        settle()
+        #expect(try rect("df0.c2")[3] < narrow[3])
+        rt.setViewport(Vec2(275, 400), pixelScale: 2)
+        rt.update(at: t) { state, _ in
+            state.wrap = false
+            state.setMode(.split)
+        }
+        settle()
+        let old = try rect("scode-o-2")
+        let new = try rect("scode-n-2")
+        #expect(try rect("df0.c2")[3] > narrow[3])
+        #expect(try abs(rect("scode-o-2-text")[2] - 58.5) < 0.1)
+        #expect(old[0] + old[2] <= rt.viewport.x / 2 + 1)
+        #expect(new[0] >= rt.viewport.x / 2)
+        #expect(new[0] + new[2] <= rt.viewport.x + 1)
+
+        rt.update(at: t) { state, _ in state.setMode(.unified) }
+        settle()
+        #expect(try rect("df0.c2")[3] == unwrapped)
+    }
+
     @Test("Large multi-file diffs mount the viewport and jump by stable document keys")
     @MainActor
     func multiFileVirtualization() throws {
