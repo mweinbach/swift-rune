@@ -1183,7 +1183,7 @@ public struct TabStrip<State> {
         let fg: Color = item.isDisabled ? k.c.textFaint : (isSelected ? k.c.textBase : k.c.textMuted)
         let iconOnly = item.isPinned || (dens == .iconOnly)
         let closable = item.isClosable && !item.isPinned && (!iconOnly || isSelected) && !item.isDisabled && !isEditing && onCloseFn != nil
-        let touch = hoverNoneValue && closable
+        let touch = hoverNoneValue && closable && !iconOnly
 
         if let leading = buildTabLeadingAccessory(item: item, tabH: tabH, isSelected: isSelected, kit: k) {
             tab = tab.child(leading)

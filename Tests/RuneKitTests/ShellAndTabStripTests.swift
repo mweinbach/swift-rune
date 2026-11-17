@@ -2023,7 +2023,8 @@ struct ShellAndTabStripTests {
         #expect(busySpin.rect[0] + busySpin.rect[2] <= busyClose.rect[0] + 0.5)
 
         let iconOnlyTouch = makeRt(hoverNone: true, density: .iconOnly)
-        #expect(iconOnlyTouch.element(byKey: "ht-close-plain") == nil)
+        #expect(try #require(iconOnlyTouch.element(byKey: "ht-close-plain")).opacity == 0)
+        #expect(iconOnlyTouch.element(byKey: "ht-close-busy") == nil)
         #expect(iconOnlyTouch.element(byKey: "ht-title-plain") == nil)
     }
 }
