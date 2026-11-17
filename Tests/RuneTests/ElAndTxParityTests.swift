@@ -40,6 +40,7 @@ struct ElAndTxParityTests {
         ) { s, _ in
             col().size(160, 80).itemsStart().child(
                 terminalGrid(columns: 10, cellWidth: 8, cellHeight: 18, rows: s.rows)
+                    .size(80, Float(s.rows.count) * 18)
                     .key("term")
                     .color(.white)
             )
@@ -63,9 +64,17 @@ struct ElAndTxParityTests {
             s.rows = [row0]
         }
         let scene1 = rt.frame(at: 0.1)
-        let elem1 = rt.elements().first(where: { $0.key == "term" })
-        #expect(elem1?.rect[3] == 18)
+        let changed = rt.element(byKey: "term")
+        #expect(changed?.target[3] == 18)
+        #expect(changed?.rect[3] == 36 && changed?.moving == true)
         #expect(!scene1.primitives.isEmpty)
+
+        _ = rt.frame(at: 0.1 + 1.0 / 120)
+        let sliding = rt.element(byKey: "term")?.rect[3] ?? 0
+        #expect(abs(sliding - 35.757813) < 1e-4)
+        _ = rt.frame(at: 1.0)
+        let settled = rt.element(byKey: "term")
+        #expect(settled?.rect[3] == 18 && settled?.moving == false)
     }
 
     // MARK: - Live Colors & FocusFill
