@@ -83,18 +83,20 @@ public enum RuneWindowResizeApp {
         let env = ProcessInfo.processInfo.environment
         let fit = env["RUNE_RESIZE_FIT"] != nil
         let app = makeApp(fit: fit)
-        let isHeadless = ToolingArgs.parse(Array(CommandLine.arguments.dropFirst())).isHeadlessRequested
-        if env["RUNE_RESIZE_AUTO"] != nil && !isHeadless {
+        var autoResize: Task<Void, Never>?
+        if env["RUNE_RESIZE_AUTO"] != nil {
             let handle = app.handle()
-            DispatchQueue.global(qos: .utility).async {
-                while true {
-                    Thread.sleep(forTimeInterval: 1.5)
+            autoResize = Task.detached {
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .milliseconds(1500)) }
+                    catch { return }
                     handle.update { state, tx in
                         toggleWindowResize(&state, &tx, fit: fit)
                     }
                 }
             }
         }
+        defer { autoResize?.cancel() }
         try app.run()
     }
 }

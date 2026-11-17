@@ -12,6 +12,7 @@ public struct StickyGroup: Sendable {
 
 public struct StickyState: Sendable {
     public var collapsed: [Bool] = [false, false, false, false]
+    public internal(set) var stuckPositions: [Float] = [0, 0, 0, 0]
 
     public init() {}
 }
@@ -88,6 +89,7 @@ public enum RuneStickyApp {
                 .stickyTop(0)
                 .stuckShadow(divider)
                 .stuckShadow(drop)
+                .onDrawnLayout { state, rect in state.stuckPositions[i] = rect[1] }
                 .onClick { s, tx in
                     if i < s.collapsed.count {
                         s.collapsed[i].toggle()
@@ -142,13 +144,69 @@ public enum RuneStickyApp {
     }
 
     public static func makeApp() -> App<StickyState> {
-        App(title: "Sticky headers", size: Vec2(440, 380), state: StickyState(), view: view)
+        App(title: "Sticky headers", size: Vec2(560, 420), state: StickyState(), view: view)
+    }
+}
+
+private func benchmarkView(_ sticky: Bool, _: inout Cx<Bool>) -> El<Bool> {
+    let divider = Shadow(x: 0, y: 1, blur: 0, spread: 0, color: Color.white.alpha(0.11))
+    let sections = (0..<50).map { section in
+        let title = String(format: "Tool group %02d · 6 steps", section)
+        var header: El<Bool> = row().key("hdr-\(section)").wFull().h(32).px(12)
+            .itemsCenter().bg(oklch(0.23, 0.018, 265))
+            .child(text(title).font(TextStyle(size: 13, weight: 600)))
+        if sticky { header = header.stickyTop(0).stuckShadow(divider) }
+        let rows: [El<Bool>] = (0..<6).map { step in
+            row().key("row-\(section)-\(step)").wFull().h(28).px(12).itemsCenter()
+                .child(text("step \(step): crates/rune/src/runtime.rs").font(TextStyle(size: 12, weight: 400)))
+        }
+        return col().key("sec-\(section)").wFull().pb(8).child(header).children(rows)
+    }
+    let list: El<Bool> = col().key("list").wFull().children(sections)
+    return col().wFull().hFull()
+        .child(col().key("scroll").wFull().hFull().scroll(stickBottom: false).child(list))
+}
+
+private func runBenchmark() {
+    let clock = ContinuousClock()
+    let center = Vec2(320, 240)
+    let dt = 1.0 / 120.0
+    for (label, sticky) in [("plain_50_sections", false), ("sticky_50_sections", true)] {
+        let runtime = Rune.Runtime(state: sticky, viewport: Vec2(640, 480), pixelScale: 2,
+                                   systemDark: true, view: benchmarkView)
+        runtime.frameStep(dt: 0)
+        for _ in 0..<60 {
+            runtime.wheel(WheelEvent(dy: -40), at: center, now: runtime.nowClock())
+            runtime.frameStep(dt: dt)
+        }
+        runtime.update { _, tx in tx.scrollToY("scroll", 0) }
+        runtime.frameStep(dt: dt)
+
+        var samples: [Double] = []
+        samples.reserveCapacity(240)
+        for step in 0..<240 {
+            let dy: Float = step < 120 ? -35 : 35
+            let start = clock.now
+            runtime.wheel(WheelEvent(dy: dy), at: center, now: runtime.nowClock())
+            runtime.frameStep(dt: dt)
+            let elapsed = start.duration(to: clock.now).components
+            samples.append(Double(elapsed.seconds) * 1e6 + Double(elapsed.attoseconds) / 1e12)
+        }
+        samples.sort()
+        let median = samples[samples.count / 2]
+        let p95 = samples[samples.count * 95 / 100]
+        let timings = String(format: "median_us=%.1f p95_us=%.1f", locale: Locale(identifier: "en_US_POSIX"), median, p95)
+        print("BENCH case=\(label) frames=\(samples.count) \(timings)")
     }
 }
 
 @main
 enum RuneStickyMain {
     static func main() throws {
+        if CommandLine.arguments.contains("--bench") {
+            runBenchmark()
+            return
+        }
         try RuneStickyApp.makeApp().run()
     }
 }

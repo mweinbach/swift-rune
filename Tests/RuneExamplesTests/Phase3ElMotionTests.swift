@@ -116,22 +116,30 @@ struct Phase3ElMotionTests {
         #expect(rtSteer.state.rows[deliveredIdx].height == 77.0)
     }
 
-    @Test("sticky: headers attach stuckShadow and collapse via keepOnScreen")
+    @Test("sticky: headers report their drawn position while scrolling and collapse via keepOnScreen")
     func stickyHeadersUseStuckShadowAndKeepOnScreen() throws {
+        let app = RuneStickyApp.makeApp()
+        #expect(app.size == Vec2(560, 420))
         let rt = Runtime<StickyState>(
-            state: StickyState(),
-            viewport: Vec2(440, 380),
+            state: app.makeState(),
+            viewport: app.size,
             pixelScale: 2.0,
             systemDark: true,
-            view: RuneStickyApp.view
+            view: app.view
         )
         rt.frame(at: 0.0)
+        let initialHeader = try #require(rt.element(byKey: "hdr-0"))
+        let initialY = try #require(rt.state.stuckPositions.first)
+        #expect(abs(initialY - initialHeader.rect[1]) < 0.5)
         let scrollEl = try #require(rt.element(byKey: "scroll"))
         let center = Vec2(scrollEl.rect[0] + 100, scrollEl.rect[1] + 100)
         rt.wheel(WheelEvent(dy: -120), at: center, now: 0.02)
         rt.frame(at: 0.03)
         let hdr0 = try #require(rt.element(byKey: "hdr-0"))
         #expect(abs(hdr0.rect[1] - scrollEl.rect[1]) < 1.0)
+        let stuckY = try #require(rt.state.stuckPositions.first)
+        #expect(abs(stuckY - hdr0.rect[1]) < 0.5)
+        #expect(initialY > stuckY + 1)
         let clickPt = Vec2(hdr0.rect[0] + 40, hdr0.rect[1] + hdr0.rect[3] * 0.5)
         rt.pointerMove(to: clickPt, at: 0.04)
         rt.pointerDown(at: clickPt, at: 0.05)

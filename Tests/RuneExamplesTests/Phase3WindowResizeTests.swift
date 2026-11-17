@@ -5,6 +5,41 @@ import Testing
 
 @Suite("Phase 3 WindowResize Example", .serialized)
 struct Phase3WindowResizeTests {
+    #if os(macOS) || os(Linux) || os(Windows)
+    private final class TestBundleMarker: NSObject {}
+
+    @Test("window_resize: realtime headless frames grow and shrink automatically")
+    func autoResizeHeadless() async throws {
+        let frames = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: frames) }
+        let bundle = Bundle(for: TestBundleMarker.self).bundleURL
+        let products = bundle.pathExtension == "xctest" ? bundle.deletingLastPathComponent() : bundle
+        #if os(Windows)
+        let binary = "rune-window-resize.exe"
+        #else
+        let binary = "rune-window-resize"
+        #endif
+        let process = Process()
+        process.executableURL = products.appendingPathComponent(binary)
+        process.arguments = ["--realtime", "--duration", "4", "--fps", "6", "--scale", "0.5", "--frames", frames.path]
+        var environment = ProcessInfo.processInfo.environment
+        environment["RUNE_RESIZE_AUTO"] = "1"
+        environment.removeValue(forKey: "RUNE_RESIZE_FIT")
+        process.environment = environment
+        let status: Int32 = try await withCheckedThrowingContinuation { continuation in
+            process.terminationHandler = { continuation.resume(returning: $0.terminationStatus) }
+            do { try process.run() }
+            catch { continuation.resume(throwing: error) }
+        }
+        try #require(status == 0)
+        let images = try FileManager.default.contentsOfDirectory(at: frames, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "png" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let heights = try images.map { try Frame.fromPNG(data: Data(contentsOf: $0)).height }
+        let tall = try #require(heights.firstIndex(of: 300))
+        #expect(heights[tall...].contains(200))
+    }
+    #endif
+
     @Test("window_resize: Tx.resizeWindow toggles height between 400 and 600")
     func resizeWindowTogglesHeight() throws {
         let app = RuneWindowResizeApp.makeApp(fit: false)
