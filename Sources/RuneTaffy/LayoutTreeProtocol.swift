@@ -49,6 +49,7 @@ internal protocol LayoutTree: AnyObject {
     func unroundedLayout(_ node: NodeId) -> Layout
     func setUnroundedLayout(_ node: NodeId, _ layout: Layout)
     func setFinalLayout(_ node: NodeId, _ layout: Layout)
+    func cacheClear(_ node: NodeId)
     func cacheGet(_ node: NodeId, _ input: LayoutInput) -> LayoutOutput?
     func cacheStore(_ node: NodeId, _ input: LayoutInput, _ output: LayoutOutput)
     func measureLeafNode(_ node: NodeId, _ input: LayoutInput) -> LayoutOutput
@@ -58,6 +59,19 @@ internal protocol LayoutTree: AnyObject {
 
 internal struct BlockContext {
     var margin: CollapsibleMarginSet = .zero
+}
+
+extension LayoutTree {
+    /// Visit parents before their children, carrying the parent's result down each branch.
+    func visitSubtree<Context>(_ root: NodeId, inheriting initial: Context, _ visit: (NodeId, Context) -> Context) {
+        var pending = [(root, initial)]
+        while let (node, inherited) = pending.popLast() {
+            let context = visit(node, inherited)
+            for index in (0..<childCount(node)).reversed() {
+                pending.append((childId(node, at: index), context))
+            }
+        }
+    }
 }
 
 // MARK: - Core Layout Dispatch
@@ -123,11 +137,9 @@ internal func computeRootLayout(
 }
 
 internal func computeHiddenLayout(tree: any LayoutTree, node: NodeId) -> LayoutOutput {
-    tree.setUnroundedLayout(node, .zero)
-    let count = tree.childCount(node)
-    for i in 0..<count {
-        let child = tree.childId(node, at: i)
-        _ = computeHiddenLayout(tree: tree, node: child)
+    tree.visitSubtree(node, inheriting: ()) { child, _ in
+        tree.cacheClear(child)
+        tree.setUnroundedLayout(child, .zero)
     }
     return .hidden
 }
@@ -152,7 +164,9 @@ internal func computeNodeLayout(
     var output: LayoutOutput
     switch (style.display, hasChildren) {
     case (.none, _):
-        output = computeHiddenLayout(tree: tree, node: node)
+        let hidden = computeHiddenLayout(tree: tree, node: node)
+        tree.cacheStore(node, input, hidden)
+        return hidden
     case (.block, true):
         output = computeBlockLayout(tree: tree, node: node, input: input, blockContext: blockContext)
     case (.flowRoot, true):
@@ -165,7 +179,7 @@ internal func computeNodeLayout(
         output = computeLeafLayout(tree: tree, node: node, input: input)
     }
 
-    if input.runMode == .performLayout {
+    if hasChildren && input.runMode == .performLayout {
         computeOutOfFlowLayout(tree: tree, node: node, containerOutput: &output)
     }
 

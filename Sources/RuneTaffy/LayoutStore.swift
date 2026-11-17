@@ -463,10 +463,8 @@ public struct LayoutStore: Sendable {
     }
 
     private func clearRounding(adapter: LayoutStoreAdapter, node: NodeId) {
-        adapter.roundedLayouts.removeValue(forKey: UInt32(node.index))
-        let count = adapter.childCount(node)
-        for i in 0..<count {
-            clearRounding(adapter: adapter, node: adapter.childId(node, at: i))
+        adapter.visitSubtree(node, inheriting: ()) { child, _ in
+            adapter.roundedLayouts.removeValue(forKey: UInt32(child.index))
         }
     }
 
@@ -546,6 +544,10 @@ private final class LayoutStoreAdapter: LayoutTree {
 
     func setFinalLayout(_ node: NodeId, _ layout: Layout) {
         roundedLayouts[UInt32(node.index)] = layout
+    }
+
+    func cacheClear(_ node: NodeId) {
+        slots[node.index].cache.clear()
     }
 
     func cacheGet(_ node: NodeId, _ input: LayoutInput) -> LayoutOutput? {

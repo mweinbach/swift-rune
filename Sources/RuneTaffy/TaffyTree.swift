@@ -353,13 +353,11 @@ public struct TaffyTree: Sendable {
     }
 
     private func clearRounding(adapter: TaffyTreeAdapter, node: NodeId) {
-        if adapter.nodes[node.index].roundedLayout != nil {
-            adapter.nodes[node.index].roundedLayout = nil
-            adapter.roundedCount -= 1
-        }
-        let count = adapter.childCount(node)
-        for i in 0..<count {
-            clearRounding(adapter: adapter, node: adapter.childId(node, at: i))
+        adapter.visitSubtree(node, inheriting: ()) { child, _ in
+            if adapter.nodes[child.index].roundedLayout != nil {
+                adapter.nodes[child.index].roundedLayout = nil
+                adapter.roundedCount -= 1
+            }
         }
     }
 
@@ -424,6 +422,10 @@ private final class TaffyTreeAdapter: LayoutTree {
     func setFinalLayout(_ node: NodeId, _ layout: Layout) {
         if nodes[node.index].roundedLayout == nil { roundedCount += 1 }
         nodes[node.index].roundedLayout = layout
+    }
+
+    func cacheClear(_ node: NodeId) {
+        nodes[node.index].cache.clear()
     }
 
     func cacheGet(_ node: NodeId, _ input: LayoutInput) -> LayoutOutput? {

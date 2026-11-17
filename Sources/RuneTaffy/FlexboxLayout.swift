@@ -72,14 +72,75 @@ private struct FlexContainerContext {
     var earlyReturn: LayoutOutput?
 }
 
+private struct FlexBox {
+    var ctx: FlexContainerContext
+    var items: [FlexItem]
+    var lines: [FlexLine]
+    var finalParentSize: Size<Float?>
+    var outerWidth: Float
+    var outerHeight: Float
+
+    func finish(tree: any LayoutTree, input: LayoutInput) -> LayoutOutput {
+        flexFinalizeChildrenAndOutput(tree: tree, ctx: ctx, items: items, lines: lines,
+                                      input: input, finalParentSize: finalParentSize,
+                                      outerWidth: outerWidth, outerHeight: outerHeight)
+    }
+}
+
+private enum FlexPreparation {
+    case done(LayoutOutput)
+    case box(FlexBox)
+}
+
 internal func computeFlexboxLayout(
     tree: any LayoutTree,
     node: NodeId,
     input: LayoutInput
 ) -> LayoutOutput {
+    var parents: [(NodeId, LayoutInput, FlexBox)] = []
+    var currentNode = node
+    var currentInput = input
+    var output: LayoutOutput
+    descend: while true {
+        switch prepareFlexbox(tree: tree, node: currentNode, input: currentInput) {
+        case .done(let early):
+            output = early
+            break descend
+        case .box(let box):
+            // A chain of single-item flex containers can commit its final layouts from the
+            // innermost box out. No parent needs to keep a solver call frame while its child
+            // measures text, and each layout remains on its original thread.
+            if currentInput.runMode == .performLayout, box.items.count == 1,
+               tree.childCount(currentNode) == 1 {
+                let item = box.items[0]
+                let child = item.node
+                let childInput = flexFinalChildInput(target: item.targetSize, parent: box.finalParentSize)
+                if tree.childCount(child) == 1, tree.style(child).display == .flex,
+                   tree.cacheGet(child, childInput) == nil {
+                    parents.append((currentNode, currentInput, box))
+                    currentNode = child
+                    currentInput = childInput
+                    continue descend
+                }
+            }
+            output = box.finish(tree: tree, input: currentInput)
+            break descend
+        }
+    }
+    while let (parent, parentInput, box) = parents.popLast() {
+        computeOutOfFlowLayout(tree: tree, node: currentNode, containerOutput: &output)
+        tree.cacheStore(currentNode, currentInput, output)
+        currentNode = parent
+        currentInput = parentInput
+        output = box.finish(tree: tree, input: parentInput)
+    }
+    return output
+}
+
+private func prepareFlexbox(tree: any LayoutTree, node: NodeId, input: LayoutInput) -> FlexPreparation {
     let ctx = flexComputeContainerContext(tree: tree, node: node, input: input)
     if let early = ctx.earlyReturn {
-        return early
+        return .done(early)
     }
 
     var items = flexCollectItems(tree: tree, node: node, ctx: ctx)
@@ -99,16 +160,8 @@ internal func computeFlexboxLayout(
         resolvedInnerCross: resolvedInnerCross
     )
 
-    return flexFinalizeChildrenAndOutput(
-        tree: tree,
-        ctx: ctx,
-        items: items,
-        lines: lines,
-        input: input,
-        finalParentSize: finalParentSize,
-        outerWidth: outerWidth,
-        outerHeight: outerHeight
-    )
+    return .box(FlexBox(ctx: ctx, items: items, lines: lines, finalParentSize: finalParentSize,
+                        outerWidth: outerWidth, outerHeight: outerHeight))
 }
 
 private func flexComputeContainerContext(
@@ -280,15 +333,17 @@ private func flexDetermineBaseSizes(
     ctx: FlexContainerContext,
     items: inout [FlexItem]
 ) {
+    let singleItem = items.count == 1
     for idx in items.indices {
-        flexDetermineSingleItemBaseSize(tree: tree, ctx: ctx, item: &items[idx])
+        flexDetermineSingleItemBaseSize(tree: tree, ctx: ctx, item: &items[idx], singleItem: singleItem)
     }
 }
 
 private func flexDetermineSingleItemBaseSize(
     tree: any LayoutTree,
     ctx: FlexContainerContext,
-    item: inout FlexItem
+    item: inout FlexItem,
+    singleItem: Bool
 ) {
     let dir = ctx.dir
     let isRow = ctx.isRow
@@ -340,6 +395,12 @@ private func flexDetermineSingleItemBaseSize(
     let resolvedMinMain: Float
     if let explicitMin = item.minSize.main(direction: dir) {
         resolvedMinMain = explicitMin
+    } else if singleItem, let available = childMainParent,
+              let preferred = item.size.main(direction: dir), basis >= preferred,
+              basis + (item.margin.mainStart(direction: dir) ?? 0) + (item.margin.mainEnd(direction: dir) ?? 0) <= available {
+        // The automatic minimum is capped by the preferred size. A sole item whose basis
+        // already fits cannot shrink to that minimum, even when its contents overflow.
+        resolvedMinMain = 0
     } else if item.overflowMain == .visible {
         var knownDims = Size<Float?>(width: nil, height: nil)
         knownDims.setCross(item.size.cross(direction: dir), direction: dir)
@@ -1086,6 +1147,13 @@ private func flexFinalizeChildrenAndOutput(
     )
 }
 
+private func flexFinalChildInput(target: Size<Float>, parent: Size<Float?>) -> LayoutInput {
+    LayoutInput(runMode: .performLayout, sizingMode: .inherentSize, axis: .both,
+                knownDimensions: Size(width: target.width, height: target.height), parentSize: parent,
+                availableSpace: Size(width: .definite(target.width), height: .definite(target.height)),
+                verticalMarginsAreCollapsible: .false)
+}
+
 private func flexLayoutSingleChild(
     tree: any LayoutTree,
     ctx: FlexContainerContext,
@@ -1098,19 +1166,8 @@ private func flexLayoutSingleChild(
     let targetW = item.targetSize.width
     let targetH = item.targetSize.height
 
-    let childOut = computeNodeLayout(
-        tree: tree,
-        node: item.node,
-        input: LayoutInput(
-            runMode: .performLayout,
-            sizingMode: .inherentSize,
-            axis: .both,
-            knownDimensions: Size(width: targetW, height: targetH),
-            parentSize: finalParentSize,
-            availableSpace: Size(width: .definite(targetW), height: .definite(targetH)),
-            verticalMarginsAreCollapsible: .false
-        )
-    )
+    let childOut = computeNodeLayout(tree: tree, node: item.node,
+                                     input: flexFinalChildInput(target: item.targetSize, parent: finalParentSize))
 
     var x = ctx.contentBoxInset.left + (ctx.isRow ? item.offsetMain : item.offsetCross)
     var y = ctx.contentBoxInset.top + (ctx.isRow ? item.offsetCross : item.offsetMain)
