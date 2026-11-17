@@ -116,7 +116,7 @@ public extension El {
         AccessibilityRoleRules.ownsKeys(
             role: role,
             hasKeyHandler: handlers.onKey != nil,
-            hasPress: handlers.onClick != nil || handlers.onClickPress != nil,
+            hasPress: handlers.hasPress,
             hasDoublePress: handlers.onDoubleClick != nil
         )
     }
@@ -128,7 +128,7 @@ public extension El {
 
     internal var a11yHasPrimaryHandler: Bool {
         let h = handlers
-        return h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil
+        return h.hasPress || h.onDoubleClick != nil
             || h.onHover != nil || h.onDrag != nil || h.dragOut != nil
     }
 

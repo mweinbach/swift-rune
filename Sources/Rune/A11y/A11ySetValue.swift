@@ -103,7 +103,7 @@ public struct ElementA11yInput: Sendable, Equatable {
             isInput: el.handlers.editLens != nil,
             editable: el.hasEditAccess,
             multiline: edit?.multiline ?? el.isMultilineField,
-            pressable: el.handlers.onClick != nil || el.handlers.onClickPress != nil || el.handlers.onBackgroundPress != nil,
+            pressable: el.handlers.hasPress,
             steps: el.handlers.onStep != nil,
             range: el.a11yRange
         )
@@ -250,7 +250,7 @@ public extension Runtime {
     internal func a11yPressable(_ el: El<State>) -> Bool {
         guard el.hasAuthoredHandlers else { return false }
         let handlers = el.handlers
-        return handlers.onClick != nil || handlers.onClickPress != nil || handlers.onBackgroundPress != nil
+        return handlers.hasPress
     }
 
     /// What a pointer or keyboard user can do to node `node`, as the tree advertises it

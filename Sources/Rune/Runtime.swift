@@ -10601,7 +10601,7 @@ public final class Runtime<State> {
     /// Returns whether all invoked callbacks requested a live-only update.
     internal func dispatchPointerClick(_ node: FlatNode, press: PointerPress, at now: Double, touchTap: Bool = false) -> Bool? {
         let handlers = node.el.handlers
-        guard handlers.onClick != nil || handlers.onClickPress != nil || handlers.onBackgroundPress != nil else { return nil }
+        guard handlers.hasPress else { return nil }
         logInputEvent("press \(node.path)")
         dropOwedFocus(keepingSplit: true)
         let mods = press.mods == .none ? nil : press.mods
@@ -11819,8 +11819,7 @@ public final class Runtime<State> {
 
             // Space/Enter/ContextMenu activates focused text links first, then buttons/rows (`takesReturn`).
             let isSpaceKey = (ev.key == .space || ev.key == .text(" "))
-            let pressesOnSpace = isSpaceKey && (fNode.el.handlers.onClick != nil ||
-                fNode.el.handlers.onClickPress != nil || !isPageableScroller(fIdx))
+            let pressesOnSpace = isSpaceKey && (fNode.el.handlers.hasPress || !isPageableScroller(fIdx))
             if ev.mods == .none && (pressesOnSpace || ev.key == .enter) && !isRepeat {
                 if activateFocusedLink(at: now) {
                     return true
@@ -11866,27 +11865,7 @@ public final class Runtime<State> {
             if fNode.el.handlers.editLens == nil && ev.mods == .none &&
                (pressesOnSpace || (ev.key == .enter && (takesReturn || defaultButtonNode() == nil))) {
                 if isRepeat { return true }
-                if let onClick = fNode.el.handlers.onClick {
-                    var tx = makeTx(at: now)
-                    onClick(&state, &tx)
-                    applyTx(tx, at: now)
-                    return true
-                }
-                if let onClickPress = fNode.el.handlers.onClickPress {
-                    let r = presentedRectByPath[fNode.path] ?? fNode.targetRect
-                    let press = PointerPress(
-                        window: Vec2(r.x + r.width * 0.5, r.y + r.height * 0.5),
-                        local: Vec2(r.width * 0.5, r.height * 0.5),
-                        elementSize: Vec2(r.width, r.height),
-                        button: .primary,
-                        mods: .none,
-                        clicks: 1
-                    )
-                    var tx = makeTx(at: now)
-                    onClickPress(&state, press, &tx)
-                    applyTx(tx, at: now)
-                    return true
-                }
+                if invokeKeyboardPress(fNode, at: now) { return true }
             }
         } else if handleUnfocusedMenuNavigation(ev, isRepeat: isRepeat, at: now) {
             return true
@@ -13749,17 +13728,18 @@ public final class Runtime<State> {
     }
 
     private func defaultButtonNode() -> FlatNode? {
-        flatNodes.indices.compactMap { idx -> FlatNode? in
+        for idx in flatNodes.indices.reversed() {
             let node = flatNodes[idx]
-            guard node.el.isDefaultButton && !node.effectiveInert && !node.el.a11yDisabled else { return nil }
-            guard node.targetRect.width > 0 && node.targetRect.height > 0 else { return nil }
-            var walk: Int? = idx
-            while let cur = walk {
-                if flatNodes[cur].el.opacity <= 0.001 || flatNodes[cur].el.isInert { return nil }
-                walk = flatNodes[cur].parentIndex
+            guard node.el.isDefaultButton, node.el.hasAuthoredHandlers, node.el.handlers.hasPress,
+                  !node.effectiveInert, !node.el.a11yDisabled, !subtreeExiting(idx),
+                  node.targetRect.width > 0, node.targetRect.height > 0 else { continue }
+            var ancestor: Int? = idx
+            while let i = ancestor, flatNodes[i].el.opacity > 0 {
+                ancestor = flatNodes[i].parentIndex
             }
-            return node
-        }.first
+            if ancestor == nil { return node }
+        }
+        return nil
     }
 
     private func playgroundIsTyping() -> Bool {
@@ -13769,28 +13749,7 @@ public final class Runtime<State> {
     private func tryDefaultButtonReturn(at now: Double, isRepeat: Bool) -> Bool {
         guard let defNode = defaultButtonNode() else { return false }
         if isRepeat { return true }
-        if let onClick = defNode.el.handlers.onClick {
-            var tx = makeTx(at: now)
-            onClick(&state, &tx)
-            applyTx(tx, at: now)
-            return true
-        }
-        if let onClickPress = defNode.el.handlers.onClickPress {
-            let r = presentedRectByPath[defNode.path] ?? defNode.targetRect
-            let press = PointerPress(
-                window: Vec2(r.x + r.width * 0.5, r.y + r.height * 0.5),
-                local: Vec2(r.width * 0.5, r.height * 0.5),
-                elementSize: Vec2(r.width, r.height),
-                button: .primary,
-                mods: .none,
-                clicks: 1
-            )
-            var tx = makeTx(at: now)
-            onClickPress(&state, press, &tx)
-            applyTx(tx, at: now)
-            return true
-        }
-        return false
+        return invokeKeyboardPress(defNode, at: now)
     }
 
     internal func findFocusGroupAncestor(of idx: Int) -> Int? {
@@ -13835,24 +13794,7 @@ public final class Runtime<State> {
 
         let follows = nextNode.el.role == .radio || nextNode.el.role == .tab || flatNodes[groupIndex].el.isFocusFollowsSelection
         if follows && members[targetPos] != members[curIdx] {
-            if let onClick = nextNode.el.handlers.onClick {
-                var tx = makeTx(at: now)
-                onClick(&state, &tx)
-                applyTx(tx, at: now)
-            } else if let onClickPress = nextNode.el.handlers.onClickPress {
-                let r = presentedRectByPath[nextNode.path] ?? nextNode.targetRect
-                let press = PointerPress(
-                    window: Vec2(r.x + r.width * 0.5, r.y + r.height * 0.5),
-                    local: Vec2(r.width * 0.5, r.height * 0.5),
-                    elementSize: Vec2(r.width, r.height),
-                    button: .primary,
-                    mods: .none,
-                    clicks: 1
-                )
-                var tx = makeTx(at: now)
-                onClickPress(&state, press, &tx)
-                applyTx(tx, at: now)
-            }
+            _ = invokeKeyboardPress(nextNode, at: now)
         }
     }
 

@@ -53,4 +53,31 @@ struct TouchTapParityTests {
         #expect(rt.accessibilityAction("pane", .press, at: 2))
         #expect(rt.state == [false, true, false])
     }
+
+    @Test func backgroundPressAcceptsKeyboardWhenTheAuthorOptsIntoFocus() throws {
+        struct State {
+            var targets: [String] = []
+            var touchTaps: [Bool] = []
+        }
+        let rt = Runtime(state: State(), viewport: Vec2(100, 100), pixelScale: 1) { _, _ in
+            col().sizeFull().children([
+                el().key("earlier").size(60, 15).defaultButton().onClick { state, _ in state.targets.append("earlier") },
+                el().key("pane").size(60, 15).onBackgroundPressTx { state, tx in
+                    state.targets.append("pane")
+                    state.touchTaps.append(tx.touchTap())
+                }.focusable().defaultButton(),
+                el().key("passive").size(60, 15).focusable().defaultButton()
+            ])
+        }
+        _ = rt.frame(at: 0)
+        let pane = try #require(rt.accessibilitySnapshot().children.first(where: { $0.id == "pane" }))
+        #expect(pane.role == .button)
+        #expect(pane.actions.contains(.focus) && pane.actions.contains(.press))
+        #expect(rt.accessibilityAction("pane", .focus, at: 0.1))
+        #expect(rt.keyDown(KeyEvent(key: .space), at: 0.2))
+        #expect(rt.accessibilityAction("passive", .focus, at: 0.3))
+        #expect(rt.keyDown(KeyEvent(key: .enter), at: 0.4))
+        #expect(rt.state.targets == ["pane", "pane"])
+        #expect(rt.state.touchTaps == [false, false])
+    }
 }

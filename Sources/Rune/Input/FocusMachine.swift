@@ -246,14 +246,14 @@ extension Runtime {
         return nil
     }
 
-    internal func invokeMenuElementClick(_ node: FlatNode, at now: Double) -> Bool {
+    internal func invokeKeyboardPress(_ node: FlatNode, at now: Double) -> Bool {
         if let onClick = node.el.handlers.onClick {
             var tx = makeTx(at: now)
             onClick(&state, &tx)
             applyTx(tx, at: now)
             return true
         }
-        if let onClickPress = node.el.handlers.onClickPress {
+        if let onClickPress = node.el.handlers.onClickPress ?? node.el.handlers.onBackgroundPress {
             let r = presentedRectByPath[node.path] ?? node.targetRect
             let press = PointerPress(
                 window: Vec2(r.x + r.width * 0.5, r.y + r.height * 0.5),
@@ -313,7 +313,7 @@ extension Runtime {
                 }
                 if ev.mods == .none && ev.key == .enter && !isRepeat && !fm.highlightHidden,
                    let hp = fm.highlightedPath, let hIdx = nodeByPath[hp],
-                   invokeMenuElementClick(flatNodes[hIdx], at: now) {
+                   invokeKeyboardPress(flatNodes[hIdx], at: now) {
                     return true
                 }
             }
@@ -338,7 +338,7 @@ extension Runtime {
            ev.mods == .none,
            (ev.key == .arrowDown || ev.key == .arrowUp) {
             if isRepeat { return true }
-            if invokeMenuElementClick(fNode, at: now) {
+            if invokeKeyboardPress(fNode, at: now) {
                 inputMachines.focusMachine.lastPressedWasPointer = false
                 inputMachines.focusMachine.highlightHidden = false
                 focusVisible = true
@@ -380,7 +380,7 @@ extension Runtime {
            ev.mods == .none,
            (ev.key == .enter || ev.key == .space),
            !isRepeat,
-           invokeMenuElementClick(flatNodes[hIdx], at: now) {
+           invokeKeyboardPress(flatNodes[hIdx], at: now) {
             return true
         }
         return navigateGroupContainer(groupIdx, focusedNode: nil, ev: ev, isRepeat: isRepeat, at: now)
@@ -518,7 +518,7 @@ extension Runtime {
         if let g = findFocusGroupAncestor(of: memberIdx),
            (nextNode.el.role == .radio || nextNode.el.role == .tab || flatNodes[g].el.isFocusFollowsSelection),
            moved {
-            _ = invokeMenuElementClick(nextNode, at: now)
+            _ = invokeKeyboardPress(nextNode, at: now)
         }
         return true
     }

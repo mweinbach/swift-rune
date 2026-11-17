@@ -1105,6 +1105,7 @@ public struct ElementHandlers<State> {
     public var onScreenLayout: ((inout State, [Float], inout Tx) -> Void)?
     public var drawnRectUpdate: ((MotionRect) -> Bool)?
     public var onBackgroundPress: ((inout State, PointerPress, inout Tx) -> Void)?
+    internal var hasPress: Bool { onClick != nil || onClickPress != nil || onBackgroundPress != nil }
     public var onInputChange: ((inout State, String, inout Tx) -> Bool)?
     public var onSpellcheckEnabled: Bool? = nil
     public var onSpellcheck: ((inout State, Bool, inout Tx) -> Void)?

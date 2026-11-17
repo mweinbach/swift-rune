@@ -355,7 +355,7 @@ public enum AccessibilityTreeBuilder {
         var actions: [AccessibilityAction] = []
         if enabled {
             let handlers = element.handlers
-            let pressable = handlers.onClick != nil || handlers.onClickPress != nil || handlers.onBackgroundPress != nil
+            let pressable = handlers.hasPress
             if pressable {
                 actions.append(.press)
             }
