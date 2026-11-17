@@ -235,7 +235,7 @@ internal extension Runtime {
     /// in the row built on demand (`Runtime::resolve_virtual_end`).
     func resolveVirtualEnd(_ end: VirtualEnd) -> SelectionEndRef? {
         guard let src = virtualSelectionSources[end.listPath], let listIdx = virtualListAllowed(end.listPath),
-              let r = src.keys.firstIndex(of: end.rowKey) else { return nil }
+              let r = src.places.index(of: end.rowKey) else { return nil }
         let seg = "@\(end.rowKey)"
         if src.mounted.contains(r) {
             return liveNode(end.fullPath()).flatMap(mountedSelectionEnd)

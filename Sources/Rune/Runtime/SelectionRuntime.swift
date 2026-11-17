@@ -474,7 +474,7 @@ internal extension Runtime {
             // Expansion already resolved duplicate keys. A row key can also contain slashes.
             var key = rest.dropFirst()
             while true {
-                if let idx = src.keys.firstIndex(of: String(key)) { return (idx, "@\(key)") }
+                if let idx = src.places.index(of: String(key)) { return (idx, "@\(key)") }
                 guard let slash = key.lastIndex(of: "/") else { return nil }
                 key = key[..<slash]
             }
@@ -588,7 +588,7 @@ internal extension Runtime {
         // The rows the selection's ends are in, by their row identity when pinned
         // (`sync_selection_pins` -> `PinsEvent::Select { anchor, focus }`), else by path.
         func pinnedRow(path: String, end: VirtualEnd?) -> Int? {
-            if let end, end.listPath == listPath { return keys.firstIndex(of: end.rowKey) }
+            if let end, end.listPath == listPath { return places.index(of: end.rowKey) }
             return virtualRowIndex(forPath: path, in: src)?.rowIndex
         }
         if let r = pinnedRow(path: activeSel.path, end: activeSel.anchorEnd), !mounted.contains(r) {
