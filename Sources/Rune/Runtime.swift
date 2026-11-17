@@ -8508,7 +8508,7 @@ public final class Runtime<State> {
                         // Caret bar when focused & window focused
                         if isFocused {
                             let byteOff = displayCaretByteOffset(for: edit, showingPlaceholder: showingPlaceholder)
-                            let cRect = textSystem.caretRect(in: shaped, utf8Offset: byteOff, pixelScale: pxScale)
+                            let cRect = textSystem.caretRect(in: shaped, utf8Offset: byteOff, upstream: edit.caretAffinity == .upstream, pixelScale: pxScale)
                             let caretXPt: Float
                             if isGliding {
                                 let cxPx = (inputTextOriginX + cRect.x) * pxScale
@@ -11415,7 +11415,11 @@ public final class Runtime<State> {
                     }()
                     : nil
                 var editLayout: ShapedText? = nil
-                if !edit.isSecure && (ev.key == .arrowLeft || ev.key == .arrowRight) {
+                let vertical = edit.multiline && (
+                    ((ev.key == .arrowUp || ev.key == .arrowDown) && !ev.mods.primaryCommand) ||
+                    ev.controlBinding == "p" || ev.controlBinding == "n"
+                )
+                if !edit.isSecure && (ev.key == .arrowLeft || ev.key == .arrowRight || vertical) {
                     let pad = fNode.el.layout.padding
                     let innerW = max(0, fNode.targetRect.width - pad.left - pad.right)
                     let resolvedInput = ElDisplayResolver.resolveInput(el: fNode.el, edit: edit, innerWidth: innerW, pxScale: pixelScale)
@@ -11443,7 +11447,7 @@ public final class Runtime<State> {
                     }
                 }
                 let prevEdit = edit
-                let outcome = edit.handleKey(ev, layout: editLayout)
+                let outcome = edit.handleKey(ev, layout: editLayout, textSystem: textSystem, pixelScale: pixelScale)
                 edit.isRevealed = stateRevealed
                 switch outcome {
                 case .ignored:
@@ -12776,7 +12780,7 @@ public final class Runtime<State> {
                 return html.isEmpty ? nil : html
             }()
             : nil
-        let outcome = edit.handleKey(ev, layout: layout)
+        let outcome = edit.handleKey(ev, layout: layout, textSystem: textSystem, pixelScale: pixelScale)
         edit.isRevealed = stateRevealed
         switch outcome {
         case .ignored:

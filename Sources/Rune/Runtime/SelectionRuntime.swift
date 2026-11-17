@@ -1663,7 +1663,7 @@ internal extension Runtime {
             emitGlyphs: false
         )
         let byteOff = displayCaretByteOffset(for: edit, showingPlaceholder: false)
-        let cRect = textSystem.caretRect(in: shaped, utf8Offset: byteOff, pixelScale: pixelScale)
+        let cRect = textSystem.caretRect(in: shaped, utf8Offset: byteOff, upstream: edit.caretAffinity == .upstream, pixelScale: pixelScale)
         let lineH = cRect.w > 0 ? cRect.w : (style.lineHeight ?? style.size * 1.25)
         let singleX: Float = edit.multiline
             ? 0

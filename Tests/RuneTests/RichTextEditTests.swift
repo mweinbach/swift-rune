@@ -4,6 +4,52 @@ import Testing
 @Suite("Rich TextEdit Marks, Blocks, Pills, HTML & Soft-Wrap Caret Motion Tests")
 struct RichTextEditTests {
 
+    @MainActor
+    @Test("field navigation and both paint paths use the same side of a soft wrap")
+    func wrappedFieldKeyboardCaret() throws {
+        struct State {
+            var edit = TextEdit("one two three four five six seven eight nine ten eleven twelve\nend", multiline: true)
+        }
+        var initial = State()
+        initial.edit.setCursor(utf8Offset: 0)
+        let color = Color.srgb(0, 1, 0)
+        for metal in [false, true] {
+            let rt = Runtime(state: initial, viewport: Vec2(90, 180), pixelScale: 2) { _, _ in
+                textInput(key: "field", \State.edit).font(TextStyle(size: 15).lh(22))
+                    .size(90, 180).focused(true).caret(color)
+            }
+            rt.srgbBlend = false
+            func draw(_ time: Double) throws -> [Float] {
+                let ink = color.simd4(srgb: rt.srgbBlend)
+                let painted: SIMD4<Float>?
+                if metal {
+                    painted = rt.renderFrame(at: time).instances.first(where: { $0.fill == ink })?.rect
+                } else {
+                    painted = rt.frame(at: time).primitives.first(where: { $0.fill == ink })?.rect
+                }
+                let rect = try #require(painted)
+                let caret = try #require(rt.element(byKey: "field")?.caret)
+                #expect(rect.y == caret[1] * rt.pixelScale)
+                #expect(rect.w == caret[3] * rt.pixelScale)
+                return caret
+            }
+
+            let first = try draw(0)
+            #expect(rt.keyDown(KeyEvent(key: .arrowDown), at: 0.01))
+            let second = try draw(0.02)
+            let middleByte = rt.state.edit.cursor
+            #expect(second[0] == first[0] && second[1] == first[1] + 22)
+            #expect(rt.keyDown(KeyEvent(key: .arrowDown, mods: Mods(shift: true)), at: 0.03))
+            let third = try draw(0.04)
+            #expect(third[1] == second[1] + 22)
+            #expect(rt.state.edit.selectedUTF8Range.lowerBound == middleByte)
+            #expect(rt.keyDown(KeyEvent(key: .arrowUp), at: 0.05))
+            let back = try draw(0.06)
+            #expect(rt.state.edit.cursor == middleByte)
+            #expect(back == second)
+        }
+    }
+
     @Test("TypingStyle armed at caret only applies at that selection and disarms cleanly")
     func typingStyleArmingAndMarks() {
         var edit = TextEdit("ab", multiline: true).rich()
