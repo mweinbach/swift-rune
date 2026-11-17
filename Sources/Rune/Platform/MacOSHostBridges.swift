@@ -239,6 +239,7 @@ public final class MacOSDisplayLinkDriver: NSObject {
     var deadlineWoke: (() -> Void)?
     private var tickRetry: DispatchWorkItem?
     private var deferredSubmission: DispatchWorkItem?
+    private var cancelSubmission: (@MainActor () -> Void)?
     private var earlyTickDeadline: Double?
     private var preparation = MacOSFramePreparation()
 
@@ -284,12 +285,13 @@ public final class MacOSDisplayLinkDriver: NSObject {
 
     /// Acquire and submit the drawable once ready. A shorter-than-predicted update
     /// leaves the main thread available to receive input until submission is permitted.
-    func finishPreparation(_ submit: @escaping @MainActor () -> Void) {
+    func finishPreparation(onCancel: (@MainActor () -> Void)? = nil, _ submit: @escaping @MainActor () -> Void) {
         let now = CACurrentMediaTime()
         guard let deadline = preparation.finished(at: now) else {
             submit()
             return
         }
+        cancelSubmission = onCancel
         scheduleSubmission(submit, at: deadline, now: now)
     }
 
@@ -302,6 +304,7 @@ public final class MacOSDisplayLinkDriver: NSObject {
                 return
             }
             self.deferredSubmission = nil
+            self.cancelSubmission = nil
             defer { self.endFrame() }
             submit()
         }
@@ -316,6 +319,9 @@ public final class MacOSDisplayLinkDriver: NSObject {
         self.deferredSubmission = nil
         rendering = false
         requestedDuringFrame = false
+        let cleanup = cancelSubmission
+        cancelSubmission = nil
+        cleanup?()
     }
 
     func submitted(at timestamp: CFTimeInterval = CACurrentMediaTime()) {

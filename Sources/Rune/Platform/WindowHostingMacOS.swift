@@ -1030,7 +1030,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         settledFrame = nil
         let committed = entry.viewCommitCount(runtimeObj: runtime) != commitsBefore
         finishingAfterPreparation = true
-        displayLinkDriver.finishPreparation { [self] in
+        displayLinkDriver.finishPreparation(onCancel: finishWindowMotion) { [self] in
             defer { finishWindowMotion() }
             guard slot?.isTornDown != true, !paced || (window?.isVisible == true && coverDriver.canDraw) else { return }
             var sequence: UInt64?

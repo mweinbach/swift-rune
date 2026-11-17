@@ -899,7 +899,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
         let committed = runtime.viewCommitCount != commitsBefore
         finishingAfterPreparation = true
-        displayLinkDriver.finishPreparation { [self] in
+        displayLinkDriver.finishPreparation(onCancel: finishWindowMotion) { [self] in
             defer { finishWindowMotion() }
             guard !paced || (window?.isVisible == true && coverDriver.canDraw) else { return }
             var tracedDrawable: UInt64?
