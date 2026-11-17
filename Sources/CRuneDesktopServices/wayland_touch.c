@@ -1,5 +1,5 @@
 #if defined(__linux__) && !defined(__ANDROID__)
-#include "wayland_touch_cancel.h"
+#include "wayland_touch.h"
 #include "RuneDesktopServices.h"
 #include <SDL.h>
 #include <SDL_syswm.h>
@@ -7,26 +7,41 @@
 #include <wayland-client.h>
 #include <string.h>
 
-/* SDL2 forwards wl_touch.down/motion/up and drops wl_touch.cancel. Observe
-   cancellations on the same display and default event queue as SDL, so a
-   subsequent down reusing a Wayland contact ID follows its cancellation. */
+/* SDL2 drops wl_touch.cancel and may share touch state across seats. Use
+   each native seat's contact stream on SDL's default queue to preserve order
+   with the rest of its window events. */
+enum TouchPhase { TouchDown, TouchMotion, TouchUp, TouchCancel };
+struct Contact {
+    uint32_t window;
+    wl_fixed_t x, y;
+};
 struct TouchSeat {
     uint32_t name;
     struct wl_seat *seat;
     struct wl_touch *touch;
-    GHashTable *contacts; /* protocol ID -> SDL window ID */
+    GHashTable *contacts; /* protocol ID -> struct Contact */
 };
 
 static struct wl_registry *registry;
+static gboolean ready;
 static GList *seats;
 static GHashTable *windows; /* connected SDL window IDs */
-static void (*cancel_window)(uint32_t);
+static RuneWaylandTouchSink deliver;
 
-void rune_desktop_linux_set_touch_cancel_sink(void (*sink)(uint32_t)) { cancel_window = sink; }
+void rune_desktop_linux_set_touch_sink(RuneWaylandTouchSink sink) { deliver = sink; }
+
+int rune_desktop_linux_has_native_touch(uint32_t window_id) {
+    return ready && deliver && g_hash_table_contains(windows, GUINT_TO_POINTER(window_id));
+}
+
+static void emit(struct TouchSeat *seat, int32_t id, enum TouchPhase phase, const struct Contact *c) {
+    if (deliver && g_hash_table_contains(windows, GUINT_TO_POINTER(c->window)))
+        deliver(c->window, seat->name, id, phase, wl_fixed_to_double(c->x), wl_fixed_to_double(c->y));
+}
 
 static void down(void *data, struct wl_touch *touch, uint32_t serial, uint32_t time,
                  struct wl_surface *surface, int32_t id, wl_fixed_t x, wl_fixed_t y) {
-    (void)touch; (void)serial; (void)time; (void)x; (void)y;
+    (void)touch; (void)serial; (void)time;
     struct TouchSeat *seat = data;
     /* SDL may recreate its wl_surface when creating or replacing a renderer. */
     GHashTableIter it;
@@ -38,32 +53,44 @@ static void down(void *data, struct wl_touch *touch, uint32_t serial, uint32_t t
         SDL_VERSION(&info.version);
         if (window && SDL_GetWindowWMInfo(window, &info) && info.subsystem == SDL_SYSWM_WAYLAND &&
             info.info.wl.surface == surface) {
-            g_hash_table_insert(seat->contacts, GINT_TO_POINTER(id), window_id);
+            struct Contact *c = g_new(struct Contact, 1);
+            *c = (struct Contact){ .window = GPOINTER_TO_UINT(window_id), .x = x, .y = y };
+            g_hash_table_replace(seat->contacts, GINT_TO_POINTER(id), c);
+            emit(seat, id, TouchDown, c);
             break;
         }
     }
 }
 static void up(void *data, struct wl_touch *touch, uint32_t serial, uint32_t time, int32_t id) {
     (void)touch; (void)serial; (void)time;
-    g_hash_table_remove(((struct TouchSeat *)data)->contacts, GINT_TO_POINTER(id));
+    struct TouchSeat *seat = data;
+    struct Contact *c = g_hash_table_lookup(seat->contacts, GINT_TO_POINTER(id));
+    if (!c) return;
+    emit(seat, id, TouchUp, c);
+    g_hash_table_remove(seat->contacts, GINT_TO_POINTER(id));
 }
 static void motion(void *data, struct wl_touch *touch, uint32_t time, int32_t id, wl_fixed_t x, wl_fixed_t y) {
-    (void)data; (void)touch; (void)time; (void)id; (void)x; (void)y;
+    (void)touch; (void)time;
+    struct TouchSeat *seat = data;
+    struct Contact *c = g_hash_table_lookup(seat->contacts, GINT_TO_POINTER(id));
+    if (!c) return;
+    c->x = x; c->y = y;
+    emit(seat, id, TouchMotion, c);
 }
 static void frame(void *data, struct wl_touch *touch) { (void)data; (void)touch; }
 static gboolean same_window(gpointer key, gpointer value, gpointer window) {
     (void)key;
-    return value == window;
+    return ((struct Contact *)value)->window == GPOINTER_TO_UINT(window);
 }
 static void cancel(void *data, struct wl_touch *touch) {
     (void)touch;
     struct TouchSeat *seat = data;
     GHashTableIter it;
-    gpointer window;
-    g_hash_table_iter_init(&it, windows);
-    while (g_hash_table_iter_next(&it, NULL, &window)) {
-        if (g_hash_table_foreach_remove(seat->contacts, same_window, window) && cancel_window)
-            cancel_window(GPOINTER_TO_UINT(window));
+    gpointer id, contact;
+    g_hash_table_iter_init(&it, seat->contacts);
+    while (g_hash_table_iter_next(&it, &id, &contact)) {
+        emit(seat, GPOINTER_TO_INT(id), TouchCancel, contact);
+        g_hash_table_iter_remove(&it);
     }
 }
 static const struct wl_touch_listener touch_events = {
@@ -92,7 +119,7 @@ static void add_global(void *data, struct wl_registry *r, uint32_t name, const c
     seat->seat = wl_registry_bind(r, name, &wl_seat_interface, MIN(version, 5u));
     if (!seat->seat) { g_free(seat); return; }
     seat->name = name;
-    seat->contacts = g_hash_table_new(NULL, NULL);
+    seat->contacts = g_hash_table_new_full(NULL, NULL, NULL, g_free);
     seats = g_list_prepend(seats, seat);
     wl_seat_add_listener(seat->seat, &seat_events, seat);
 }
@@ -118,7 +145,7 @@ static void remove_global(void *data, struct wl_registry *r, uint32_t name) {
 static const struct wl_registry_listener registry_events = {.global = add_global, .global_remove = remove_global};
 
 void rune_wayland_watch_touch_window(uint32_t id) {
-    if (!cancel_window || !id) return;
+    if (!deliver || !id) return;
     SDL_Window *window = SDL_GetWindowFromID(id);
     SDL_SysWMinfo info;
     SDL_VERSION(&info.version);
@@ -131,7 +158,12 @@ void rune_wayland_watch_touch_window(uint32_t id) {
     if (!registry) return;
     wl_registry_add_listener(registry, &registry_events, NULL);
     /* Discover seats, then their capabilities, before showing the first window. */
-    if (wl_display_roundtrip(display) >= 0 && wl_display_roundtrip(display) >= 0) wl_display_flush(display);
+    if (wl_display_roundtrip(display) < 0 || wl_display_roundtrip(display) < 0) {
+        rune_wayland_close_touch_windows();
+        return;
+    }
+    wl_display_flush(display);
+    ready = TRUE;
 }
 void rune_desktop_linux_forget_touch_window(uint32_t id) {
     if (!windows) return;
@@ -142,6 +174,7 @@ void rune_desktop_linux_forget_touch_window(uint32_t id) {
 }
 void rune_wayland_close_touch_windows(void) {
     if (!windows) return;
+    ready = FALSE;
     g_hash_table_remove_all(windows);
     g_list_free_full(seats, free_seat);
     seats = NULL;

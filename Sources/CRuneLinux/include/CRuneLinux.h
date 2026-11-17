@@ -28,7 +28,7 @@ typedef struct {
     float x, y, dx, dy;
     int code, scan, start, length;
     unsigned modifiers;
-    bool active, repeated;
+    bool active, repeated, nativeTouch;
     char *text;
 } RuneLinuxEvent;
 
@@ -50,7 +50,8 @@ int32_t rune_linux_refresh_hz(RuneLinuxWindow *host);
 uint32_t rune_linux_id(RuneLinuxWindow *host);
 uint32_t rune_linux_wake_type(RuneLinuxWindow *host);
 void rune_linux_wake(uint32_t id, uint32_t type);
-void rune_linux_touch_cancel(uint32_t window_id);
+void rune_linux_native_touch(uint32_t window_id, uint32_t seat, int32_t finger, int32_t phase, double x, double y);
+void rune_linux_set_native_touch_resolver(int (*resolve)(uint32_t window_id));
 void rune_linux_size(RuneLinuxWindow *host, int *w, int *h, int *pixelW, int *pixelH);
 typedef struct {
     int32_t x, y, content_x, content_y, maximized, minimized, fullscreen, display_x, display_y;

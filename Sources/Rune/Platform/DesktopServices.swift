@@ -31,7 +31,8 @@ enum DesktopServices {
 
     static func connectLinuxHost(windowID: UInt32 = 0) {
         rune_desktop_linux_set_wheel_scope(rune_linux_collecting_native_input)
-        rune_desktop_linux_set_touch_cancel_sink(rune_linux_touch_cancel)
+        rune_linux_set_native_touch_resolver(rune_desktop_linux_has_native_touch)
+        rune_desktop_linux_set_touch_sink(rune_linux_native_touch)
         rune_desktop_linux_connect(windowID)
         rune_linux_set_altgr_resolver(rune_desktop_linux_right_alt_is_altgr)
     }

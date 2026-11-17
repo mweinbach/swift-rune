@@ -1,6 +1,6 @@
 #if defined(__linux__) && !defined(__ANDROID__)
 #include "wayland_clipboard.h"
-#include "wayland_touch_cancel.h"
+#include "wayland_touch.h"
 #include "wayland_drag.h"
 #include "GtkAccessibility.h"
 #include <gtk/gtk.h>

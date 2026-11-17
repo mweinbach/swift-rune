@@ -33,8 +33,12 @@ void rune_desktop_linux_connect(uint32_t window_id);
 int rune_desktop_linux_right_alt_is_altgr(uint32_t window_id);
 /* Register the host thread's SDL pump check before connecting its first window. */
 void rune_desktop_linux_set_wheel_scope(int (*is_collecting)(void));
-/* Forward a native Wayland cancellation for each affected Rune window. */
-void rune_desktop_linux_set_touch_cancel_sink(void (*sink)(uint32_t window_id));
+/* Native Wayland contacts use logical wl_surface coordinates and a seat-local finger ID.
+   Phases are down (0), motion (1), up (2), and cancel (3). */
+typedef void (*RuneWaylandTouchSink)(uint32_t window_id, uint32_t seat_id, int32_t finger_id,
+                                    int32_t phase, double surface_x, double surface_y);
+void rune_desktop_linux_set_touch_sink(RuneWaylandTouchSink sink);
+int rune_desktop_linux_has_native_touch(uint32_t window_id);
 void rune_desktop_linux_forget_touch_window(uint32_t window_id);
 /* A matched physical Wayland wheel-axis frame carries logical surface points.
    SDL lines are signed in Rune's directions. Other inputs keep SDL's units. */

@@ -23,11 +23,23 @@ struct RuneLinuxWindow {
 };
 
 static uint32_t group_wake_type;
-enum { touch_cancel_code = 0x5254434c };
+enum { touch_code = 0x52544340 };
+// SDL owns the entire event payload even if an embedding host flushes the queue.
+struct NativeTouchEvent {
+    Uint32 type, timestamp, window_id;
+    Sint32 code;
+    Uint32 seat;
+    Sint32 finger;
+    float x, y;
+};
+SDL_COMPILE_TIME_ASSERT(touch_event_size, sizeof(struct NativeTouchEvent) <= sizeof(SDL_Event));
+SDL_COMPILE_TIME_ASSERT(touch_event_code, offsetof(struct NativeTouchEvent, code) == offsetof(SDL_UserEvent, code));
 static unsigned keymap_generation;
 static unsigned display_generation = 1;
 static int (*resolve_altgr)(uint32_t window_id);
+static int (*has_native_touch)(uint32_t window_id);
 static unsigned wayland_windows;
+static _Thread_local bool wayland_video_thread;
 static _Thread_local bool collecting_input;
 int rune_linux_collecting_native_input(void) { return collecting_input; }
 /* SDL2's queued event union has trailing storage beyond SDL_MouseWheelEvent.
@@ -35,7 +47,22 @@ int rune_linux_collecting_native_input(void) { return collecting_input; }
    pump. An application-pushed wheel must never consume a compositor frame. */
 static const Uint32 native_wheel_tag = 0x5257484c;
 SDL_COMPILE_TIME_ASSERT(wheel_queue_marker, sizeof(SDL_MouseWheelEvent) + sizeof(Uint32) <= sizeof(SDL_Event));
-static int SDLCALL mark_native_wheel(void *unused, SDL_Event *event) {
+static const Uint32 native_finger_tag = 0x52544647;
+SDL_COMPILE_TIME_ASSERT(finger_queue_marker, sizeof(SDL_TouchFingerEvent) + sizeof(Uint32) <= sizeof(SDL_Event));
+
+static bool sdl_tracks_finger(SDL_TouchID device, SDL_FingerID id) {
+    for (int i = 0; i < SDL_GetNumTouchDevices(); ++i) {
+        if (SDL_GetTouchDevice(i) != device) continue;
+        for (int j = 0; j < SDL_GetNumTouchFingers(device); ++j) {
+            const SDL_Finger *finger = SDL_GetTouchFinger(device, j);
+            if (finger && finger->id == id) return true;
+        }
+        break;
+    }
+    return false;
+}
+
+static int SDLCALL mark_native_input(void *unused, SDL_Event *event) {
     (void)unused;
     if (event->type == SDL_MOUSEWHEEL) {
         Uint8 *slot = event->padding + sizeof(SDL_Event) - sizeof(native_wheel_tag);
@@ -45,8 +72,19 @@ static int SDLCALL mark_native_wheel(void *unused, SDL_Event *event) {
             SDL_Window *sdl = SDL_GetWindowFromID(event->wheel.windowID);
             if (sdl && SDL_GetWindowData(sdl, "RuneLinuxWindow")) SDL_memcpy(slot, &native_wheel_tag, sizeof(native_wheel_tag));
         }
+    } else if (event->type == SDL_FINGERDOWN || event->type == SDL_FINGERMOTION || event->type == SDL_FINGERUP) {
+        Uint8 *slot = event->padding + sizeof(SDL_Event) - sizeof(native_finger_tag);
+        SDL_memset(slot, 0, sizeof(native_finger_tag));
+        // SDL inserts a hardware finger before posting DOWN and removes it after posting UP.
+        // Application-pushed contacts do not populate the device's finger list.
+        if (wayland_video_thread && sdl_tracks_finger(event->tfinger.touchId, event->tfinger.fingerId))
+            SDL_memcpy(slot, &native_finger_tag, sizeof(native_finger_tag));
     }
     return 1;
+}
+
+void rune_linux_set_native_touch_resolver(int (*resolve)(uint32_t)) {
+    has_native_touch = resolve;
 }
 
 void rune_linux_set_altgr_resolver(int (*resolve)(uint32_t window_id)) {
@@ -147,8 +185,10 @@ RuneLinuxWindow *rune_linux_open(const char *title, RuneLinuxWindowOptions optio
 #endif
     SDL_StartTextInput();
     host->observes_wayland_input = SDL_strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0;
-    if (host->observes_wayland_input && wayland_windows++ == 0)
-        SDL_AddEventWatch(mark_native_wheel, NULL);
+    if (host->observes_wayland_input && wayland_windows++ == 0) {
+        wayland_video_thread = true;
+        SDL_AddEventWatch(mark_native_input, NULL);
+    }
     rune_notify_linux_window_opened(host->id, host->wake, rune_linux_wake);
     if (options.visible) rune_linux_show(host);
     return host;
@@ -156,7 +196,10 @@ RuneLinuxWindow *rune_linux_open(const char *title, RuneLinuxWindowOptions optio
 
 const char *rune_linux_error(void) { return SDL_GetError(); }
 void rune_linux_close(RuneLinuxWindow *host) {
-    if (host->observes_wayland_input && !--wayland_windows) SDL_DelEventWatch(mark_native_wheel, NULL);
+    if (host->observes_wayland_input && !--wayland_windows) {
+        SDL_DelEventWatch(mark_native_input, NULL);
+        wayland_video_thread = false;
+    }
     rune_notify_linux_window_closed(host->id);
     rune_linux_refresh_frame_input(host->window, true);
     if (!group_wake_type) rune_linux_release_input_region();
@@ -209,14 +252,16 @@ void rune_linux_wake(uint32_t id, uint32_t type) {
     SDL_PushEvent(&event);
 }
 
-void rune_linux_touch_cancel(uint32_t window_id) {
+void rune_linux_native_touch(uint32_t window_id, uint32_t seat, int32_t finger, int32_t phase, double x, double y) {
     SDL_Window *sdl = SDL_GetWindowFromID(window_id);
     RuneLinuxWindow *host = sdl ? SDL_GetWindowData(sdl, "RuneLinuxWindow") : NULL;
-    if (!host) return;
+    if (!host || phase < 0 || phase > 3) return;
     SDL_Event event = {0};
-    event.type = host->wake;
-    event.user.windowID = window_id;
-    event.user.code = touch_cancel_code;
+    const struct NativeTouchEvent contact = {
+        .type = host->wake, .window_id = window_id, .code = touch_code + phase,
+        .seat = seat, .finger = finger, .x = (float)x, .y = (float)y
+    };
+    SDL_memcpy(event.padding, &contact, sizeof contact);
     SDL_PushEvent(&event);
 }
 void rune_linux_size(RuneLinuxWindow *host, int *w, int *h, int *pixelW, int *pixelH) {
@@ -329,7 +374,15 @@ static RuneLinuxEventKind translate(const SDL_Event *e, RuneLinuxEvent *out) {
         SDL_Window *window = SDL_GetWindowFromID(out->windowID);
         RuneLinuxWindow *host = window ? SDL_GetWindowData(window, "RuneLinuxWindow") : NULL;
         if (!host || e->type != host->wake) return RuneLinuxIgnored;
-        if (e->user.code == touch_cancel_code) return RuneLinuxTouchCancel;
+        if (e->user.code >= touch_code && e->user.code <= touch_code + 3) {
+            struct NativeTouchEvent contact;
+            SDL_memcpy(&contact, e->padding, sizeof contact);
+            out->touchDevice = contact.seat;
+            out->fingerID = contact.finger;
+            out->nativeTouch = true;
+            out->x = contact.x; out->y = contact.y;
+            return (RuneLinuxEventKind)(RuneLinuxTouchDown + (contact.code - touch_code));
+        }
         char *token;
         if (rune_notify_linux_take_activation(out->windowID, &token)) {
             rune_linux_activate(host, token);
@@ -376,6 +429,9 @@ static RuneLinuxEventKind translate(const SDL_Event *e, RuneLinuxEvent *out) {
     case SDL_FINGERMOTION:
     case SDL_FINGERUP: {
         if (e->tfinger.touchId == SDL_MOUSE_TOUCHID) return RuneLinuxIgnored;
+        if (has_native_touch && !SDL_memcmp(e->padding + sizeof(SDL_Event) - sizeof(native_finger_tag),
+                                           &native_finger_tag, sizeof(native_finger_tag)) &&
+            has_native_touch(e->tfinger.windowID)) return RuneLinuxIgnored;
         SDL_Window *window = SDL_GetWindowFromID(e->tfinger.windowID);
         if (!window) return RuneLinuxIgnored;
         int width, height;

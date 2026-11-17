@@ -439,7 +439,7 @@ final class LinuxWindowSession<State> {
     private let popup: LinuxContextMenu<State>
     private var menuConsumedKeys: Set<Int32> = []
     private var menuPointer: Vec2?
-    private var touchContact: (device: Int64, finger: Int64)?
+    private var touchContact: (device: Int64, finger: Int64, native: Bool)?
     let handle: WindowHandle
     let waker: Waker
     private let primaryReplies = LinuxPrimaryReplies()
@@ -902,17 +902,16 @@ final class LinuxWindowSession<State> {
             _ = runtime.dispatchImeEvent(.preedit(text, cursorUTF8: cursor, clauses: []), at: now)
         case RuneLinuxTouchDown:
             guard touchContact == nil, !runtime.touching() else { return }
-            touchContact = (event.touchDevice, event.fingerID)
+            touchContact = (event.touchDevice, event.fingerID, event.nativeTouch)
             runtime.touch(id: UInt64(bitPattern: event.fingerID), phase: .started, at: point, time: now)
-        case RuneLinuxTouchMove, RuneLinuxTouchUp:
-            guard let touchContact, touchContact.device == event.touchDevice,
-                  touchContact.finger == event.fingerID else { return }
+        case RuneLinuxTouchMove, RuneLinuxTouchUp, RuneLinuxTouchCancel:
+            guard let touchContact, touchContact.device == event.touchDevice, touchContact.finger == event.fingerID,
+                  touchContact.native == event.nativeTouch else { return }
+            if event.kind == RuneLinuxTouchCancel { cancelTouch(at: now); return }
             let ended = event.kind == RuneLinuxTouchUp
             if ended { self.touchContact = nil }
             runtime.touch(id: UInt64(bitPattern: event.fingerID), phase: ended ? .ended : .moved,
                           at: point, time: now)
-        case RuneLinuxTouchCancel:
-            cancelTouch(at: now)
         case RuneLinuxMotion:
             guard !runtime.touching() else { return }
             if menuPointer != point {
