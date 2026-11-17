@@ -866,6 +866,11 @@ final class DesktopTextLine {
         fileprivate let run: DesktopTextRun
         fileprivate let nativeBytes: Range<Int32>
         fileprivate let localLeft, localRight: Float
+        #if os(Linux) || os(Windows)
+        var qualityGlyphSource: (handle: OpaquePointer, bytes: Range<Int32>, ascent: Float) {
+            (run.native, nativeBytes, run.metrics.ascent)
+        }
+        #endif
     }
 
     let cells: [Int: Cell]
@@ -1382,6 +1387,9 @@ final class DesktopRestingText {
     }
 
     private var lines: [Int: Line] = [:]
+    #if os(Linux) || os(Windows)
+    func qualityLine(at index: Int) -> Line? { lines[index] }
+    #endif
     private var hasFractionalRun = false
     private var minRunX = Float.infinity, maxRunX = -Float.infinity
     private let glide: Vec2

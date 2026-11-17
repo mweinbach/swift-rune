@@ -70,6 +70,19 @@ void rune_desktop_line_configure(RuneDesktopLine *line, const char *language,
     const char *features, const char *variations);
 void rune_desktop_line_destroy(RuneDesktopLine *line);
 RuneDesktopLineMetrics rune_desktop_line_metrics(const RuneDesktopLine *line);
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+// Glyph origins, advances and UTF-8 cluster owners from the retained native layout.
+// Includes glyphs without ink, such as ordinary spaces.
+typedef void (*RuneQualityGlyphFn)(void *context, uint32_t glyph, int32_t utf8_owner,
+    float x, float y, float advance);
+int32_t rune_desktop_line_quality_glyphs(const RuneDesktopLine *line, void *context, RuneQualityGlyphFn emit);
+// Independent text_quality raster experiment. Positions are absolute device pixels,
+// and the top row of each A8 bitmap is borrowed only for the callback.
+typedef void (*RuneQualityMaskFn)(void *context, int32_t x, int32_t y, int32_t width,
+    int32_t height, int32_t stride, const uint8_t *pixels);
+int32_t rune_desktop_line_quality_masks(const RuneDesktopLine *line, int32_t start, int32_t end,
+    float origin_x, float baseline_y, int32_t hint, float embolden, void *context, RuneQualityMaskFn emit);
+#endif
 // Raster-only view of glyphs whose shaping cluster starts in the given UTF-8 range.
 // Coordinates and baseline are those of the source line. A continuation returns a
 // valid view with empty ink. Release the view with rune_desktop_line_destroy.

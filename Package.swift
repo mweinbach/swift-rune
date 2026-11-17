@@ -101,6 +101,7 @@ let package = Package(
         .executable(name: "rune-gpu-springs", targets: ["RuneGpuSprings"]),
         .executable(name: "rune-zoom-sweep", targets: ["RuneZoomSweep"]),
         .executable(name: "rune-text-gpu", targets: ["RuneTextGpu"]),
+        .executable(name: "rune-text-quality", targets: ["RuneTextQuality"]),
         .executable(name: "rune-tree-swap", targets: ["RuneTreeSwap"]),
         .executable(name: "rune-long-note", targets: ["RuneLongNote"]),
         .executable(name: "rune-scroll-commits", targets: ["RuneScrollCommits"]),
@@ -787,6 +788,11 @@ let package = Package(
             name: "RuneTextGpu",
             dependencies: ["Rune"],
             path: "Sources/Examples/RuneTextGpu"
+        ),
+        .executableTarget(
+            name: "RuneTextQuality",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneTextQuality"
         ),
         .executableTarget(
             name: "RuneTreeSwap",

@@ -525,6 +525,31 @@ static gint visual_order(gconstpointer a, gconstpointer b) {
     return ((const InkCluster *)a)->visual - ((const InkCluster *)b)->visual;
 }
 
+int32_t rune_desktop_line_quality_glyphs(const RuneDesktopLine *source, void *context, RuneQualityGlyphFn emit) {
+    if (!source || !source->layout || !emit) return 0;
+    RuneDesktopLine *line = (RuneDesktopLine *)source;
+    g_mutex_lock(&line->index_lock);
+    if (!line->owned_clusters && !line->cluster_index) line->cluster_index = index_clusters(line);
+    const GArray *clusters = line->owned_clusters ? line->owned_clusters : line->cluster_index;
+    for (guint i = 0; i < clusters->len; ++i) {
+        const InkCluster *c = &g_array_index(clusters, InkCluster, i);
+        int pen = c->x;
+        for (int j = c->first; j < c->first + c->count; ++j) {
+            const PangoGlyphInfo *g = &c->glyphs->glyphs[j];
+            if (g->glyph != PANGO_GLYPH_EMPTY) {
+                // Pango encodes a missing Unicode scalar in a pseudo-GID. Its font GID is .notdef.
+                const uint32_t id = (g->glyph & PANGO_GLYPH_UNKNOWN_FLAG) ? 0 : g->glyph;
+                emit(context, id, c->owner, (pen + g->geometry.x_offset) / (float)PANGO_SCALE,
+                    (c->baseline + g->geometry.y_offset) / (float)PANGO_SCALE,
+                    g->geometry.width / (float)PANGO_SCALE);
+            }
+            pen += g->geometry.width;
+        }
+    }
+    g_mutex_unlock(&line->index_lock);
+    return 1;
+}
+
 static PangoGlyphString cluster_glyphs(const InkCluster *c) {
     PangoGlyphString slice = *c->glyphs;
     slice.glyphs += c->first;
@@ -789,6 +814,66 @@ static FittedFace *fitted_face(PangoFont *font) {
     }
     G_UNLOCK(outline_fonts);
     return f->face ? f : NULL;
+}
+
+// The quality tool rerasterizes the glyph ID from the shaped run. Loading a
+// fresh slot per glyph keeps translations and emboldening out of later draws.
+static gboolean quality_glyph_mask(FT_Face face, PangoGlyph glyph, float x, float y,
+        gboolean hint, float embolden, void *context, RuneQualityMaskFn emit) {
+    if (glyph == PANGO_GLYPH_EMPTY || !FT_IS_SCALABLE(face)) return TRUE;
+    if (glyph & PANGO_GLYPH_UNKNOWN_FLAG) glyph = 0;
+    const FT_Int32 flags = FT_LOAD_NO_BITMAP | (hint ? FT_LOAD_DEFAULT : FT_LOAD_NO_HINTING);
+    if (FT_Load_Glyph(face, glyph, flags)) return FALSE;
+    FT_GlyphSlot slot = face->glyph;
+    if (slot->format != FT_GLYPH_FORMAT_OUTLINE || !slot->outline.n_points) return TRUE;
+
+    // Swash grows each contour by the strength on both sides. FreeType
+    // specifies the total change in width and height, in 26.6 device pixels.
+    FT_Pos strength = lroundf(embolden * 128.f);
+    if (strength && FT_Outline_EmboldenXY(&slot->outline, strength, strength)) return FALSE;
+    x = roundf(x * 4.f) / 4.f;
+    FT_Outline_Translate(&slot->outline, lroundf((x - truncf(x) - embolden) * 64.f),
+            -lroundf(embolden * 64.f));
+    if (FT_Render_Glyph(slot, FT_RENDER_MODE_NORMAL)) return FALSE;
+    const FT_Bitmap *bitmap = &slot->bitmap;
+    if (!bitmap->width || !bitmap->rows) return TRUE;
+    if (bitmap->pixel_mode != FT_PIXEL_MODE_GRAY || bitmap->num_grays != 256 ||
+            bitmap->width > INT32_MAX || bitmap->rows > INT32_MAX ||
+            bitmap->pitch < (int)bitmap->width) return FALSE;
+    const double left = floor((double)x) + slot->bitmap_left;
+    const double top = round((double)y) - slot->bitmap_top;
+    if (left < INT32_MIN || left > INT32_MAX || top < INT32_MIN || top > INT32_MAX) return FALSE;
+    emit(context, (int32_t)left, (int32_t)top, (int32_t)bitmap->width, (int32_t)bitmap->rows,
+            bitmap->pitch, bitmap->buffer);
+    return TRUE;
+}
+
+int32_t rune_desktop_line_quality_masks(const RuneDesktopLine *source, int32_t start, int32_t end,
+        float origin_x, float baseline_y, int32_t hint, float embolden, void *context, RuneQualityMaskFn emit) {
+    if (!source || !emit || !isfinite(origin_x) || fabs((double)origin_x) > INT32_MAX ||
+            !isfinite(baseline_y) || fabs((double)baseline_y) > INT32_MAX ||
+            !isfinite(embolden) || fabs((double)embolden) * 128 > INT32_MAX) return 0;
+    RuneDesktopLine *ink = rune_desktop_line_extract_ink(source, start, end);
+    if (!ink) return 0;
+    gboolean ok = TRUE;
+    for (guint i = 0; ok && i < ink->owned_clusters->len; ++i) {
+        const InkCluster *c = &g_array_index(ink->owned_clusters, InkCluster, i);
+        FittedFace *f = fitted_face(c->font);
+        if (!f) { ok = FALSE; break; }
+        g_mutex_lock(&f->lock);
+        int pen = c->x;
+        for (int g = c->first; ok && g < c->first + c->count; ++g) {
+            const PangoGlyphInfo *info = &c->glyphs->glyphs[g];
+            const float x = origin_x + (pen + info->geometry.x_offset) / (float)PANGO_SCALE;
+            const float offset_y = (c->baseline + info->geometry.y_offset) / (float)PANGO_SCALE - ink->metrics.ascent;
+            ok = quality_glyph_mask(f->face, info->glyph, x, roundf(baseline_y) + offset_y,
+                    hint, embolden, context, emit);
+            pen += info->geometry.width;
+        }
+        g_mutex_unlock(&f->lock);
+    }
+    rune_desktop_line_destroy(ink);
+    return ok;
 }
 
 typedef struct {

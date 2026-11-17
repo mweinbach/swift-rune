@@ -18,8 +18,10 @@ import Foundation
 /// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 /// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 enum AppleClassicCoverage {
-    static func mask(_ contours: [[SIMD2<Double>]], shiftY: Float, maximumSide: Int) -> AppleClassicGlyph.Bitmap? {
-        var xmin = Float.infinity, ymin = Float.infinity, xmax = -Float.infinity, ymax = -Float.infinity
+    static func mask(_ contours: [[SIMD2<Double>]], shiftY: Float, maximumSide: Int,
+                     bounds: (min: SIMD2<Float>, max: SIMD2<Float>)? = nil) -> AppleClassicGlyph.Bitmap? {
+        var xmin = bounds?.min.x ?? .infinity, ymin = bounds?.min.y ?? .infinity
+        var xmax = bounds?.max.x ?? -.infinity, ymax = bounds?.max.y ?? -.infinity
         func point(_ p: SIMD2<Double>) -> SIMD2<Float> { SIMD2(Float(p.x), Float(p.y - Double(shiftY))) }
         for contour in contours {
             for p in contour {

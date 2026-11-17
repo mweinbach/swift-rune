@@ -235,24 +235,32 @@ struct ShapedRun {
     std::unique_ptr<DWRITE_GLYPH_OFFSET[]> offsets;
     std::unique_ptr<ClusterSpan[]> spans;
     ShapedRun *next = nullptr;
-    mutable std::once_flag outlinePlacement;
-    mutable std::unique_ptr<D2D1_POINT_2F[]> outlinePens;
+    mutable std::once_flag originPlacement, outlinePlacement;
+    mutable std::unique_ptr<D2D1_POINT_2F[]> glyphPens;
     mutable uint64_t outlineFont = 0;
     mutable bool outlineCjk = false;
 
-    const D2D1_POINT_2F *pens() const {
-        std::call_once(outlinePlacement, [&] {
+    const D2D1_POINT_2F *glyphOrigins() const {
+        std::call_once(originPlacement, [&] {
             static const ComPtr<IDWriteFactory4> factory = [] {
                 ComPtr<IDWriteFactory4> result;
                 textFactory()->QueryInterface(IID_PPV_ARGS(result.GetAddressOf()));
                 return result;
             }();
-            if (!factory || glyphs.isSideways || face->GetType() == DWRITE_FONT_FACE_TYPE_BITMAP ||
+            std::unique_ptr<D2D1_POINT_2F[]> points(new (std::nothrow) D2D1_POINT_2F[glyphs.glyphCount]);
+            if (factory && points && SUCCEEDED(factory->ComputeGlyphOrigins(&glyphs, mode, {spans[0].x, y}, nullptr, points.get())))
+                glyphPens = std::move(points);
+        });
+        return glyphPens.get();
+    }
+
+    const D2D1_POINT_2F *pens() const {
+        std::call_once(outlinePlacement, [&] {
+            if (glyphs.isSideways || face->GetType() == DWRITE_FONT_FACE_TYPE_BITMAP ||
                 face->GetSimulations() != DWRITE_FONT_SIMULATIONS_NONE) return;
             ComPtr<IDWriteFontFace2> colorFace;
             if (SUCCEEDED(face.As(&colorFace)) && colorFace->IsColorFont()) return;
-            std::unique_ptr<D2D1_POINT_2F[]> points(new (std::nothrow) D2D1_POINT_2F[glyphs.glyphCount]);
-            if (!points || FAILED(factory->ComputeGlyphOrigins(&glyphs, mode, {spans[0].x, y}, nullptr, points.get()))) return;
+            if (!glyphOrigins()) return;
 
             // A run holds its ID after eviction. Store IDs never name a different
             // face, size or direction, including after a private font is replaced.
@@ -288,9 +296,8 @@ struct ShapedRun {
                 }
                 faces[(outlineFont - 1) % faces.size()] = {face, glyphs.fontEmSize, mode, rtl, outlineFont, outlineCjk};
             }
-            outlinePens = std::move(points);
         });
-        return outlinePens.get();
+        return outlineFont ? glyphPens.get() : nullptr;
     }
 };
 
@@ -309,6 +316,7 @@ struct InkIndex {
     const UINT32 length;
     std::unique_ptr<ClusterSpan *[]> owners;
     ShapedRun *runs = nullptr;
+    ShapedRun **tail = &runs;
     uint64_t nextPaintOrder = 0;
 
     explicit InkIndex(UINT32 length) : length(length), owners(new (std::nothrow) ClusterSpan *[length]{}) {}
@@ -380,8 +388,8 @@ struct InkIndex {
             owner = &run->spans[first];
             first = end;
         }
-        run->next = runs;
-        runs = run.release();
+        *tail = run.release();
+        tail = &(*tail)->next;
         return S_OK;
     }
 };
@@ -740,6 +748,78 @@ struct RuneDesktopLine {
     }
 };
 
+extern "C" int32_t rune_desktop_line_quality_glyphs(const RuneDesktopLine *line, void *context, RuneQualityGlyphFn emit) {
+    if (!line || !line->layout || !emit) return 0;
+    if (!line->byteCount) return 1;
+    const auto index = line->shapedIndex(line->layout.Get(), line->position(line->byteCount));
+    if (!index) return 0;
+    const auto bytes = line->byteToUnit.get();
+    for (const ShapedRun *run = index->runs; run; run = run->next) {
+        const auto points = run->glyphOrigins();
+        if (!points) return 0;
+        for (UINT32 first = 0; first < run->glyphs.glyphCount;) {
+            const auto &span = run->spans[first];
+            const auto owner = std::lower_bound(bytes, bytes + line->byteCount, span.ownerUnit);
+            const int32_t cluster = static_cast<int32_t>(owner - bytes);
+            for (UINT32 i = first; i < first + span.count; ++i)
+                emit(context, run->ids[i], cluster, points[i].x, points[i].y, run->advances[i]);
+            first += span.count;
+        }
+    }
+    return 1;
+}
+
+// Render each shaped glyph at its experimental pen without touching the line's
+// production coverage, glyph advances, or fallback font collection.
+extern "C" int32_t rune_desktop_line_quality_masks(const RuneDesktopLine *line, int32_t start, int32_t end,
+        float origin_x, float baseline_y, int32_t hint, float embolden, void *context, RuneQualityMaskFn emit) {
+    if (!line || !line->layout || !emit || start < 0 || end < start || end > line->byteCount ||
+            !std::isfinite(origin_x) || !std::isfinite(baseline_y) || embolden != 0) return 0;
+    const UINT32 first = line->firstUnitAtOrAfter(start), last = line->firstUnitAtOrAfter(end);
+    if (first == last) return 1;
+    const auto index = line->shapedIndex(line->layout.Get(), line->position(line->byteCount));
+    if (!index) return 0;
+    const auto grid = hint ? DWRITE_GRID_FIT_MODE_ENABLED : DWRITE_GRID_FIT_MODE_DISABLED;
+    return visitOwnedClusters(*index.Get(), first, last, [&](const ClusterSpan &span, const DWRITE_GLYPH_RUN &glyphs) {
+        const auto points = span.run->glyphOrigins();
+        if (!points || glyphs.isSideways) return false;
+        ComPtr<IDWriteFontFace4> face;
+        if (FAILED(span.run->face.As(&face))) return false;
+        const UINT32 ppem = UINT32(std::max(1.0f, std::min(65535.0f, std::round(glyphs.fontEmSize))));
+        DWRITE_GLYPH_RUN glyph = glyphs;
+        // ComputeGlyphOrigins already accounts for RTL advances and glyph offsets.
+        glyph.bidiLevel = 0;
+        glyph.glyphOffsets = nullptr;
+        glyph.glyphAdvances = nullptr;
+        glyph.glyphCount = 1;
+        for (UINT32 i = 0; i < glyphs.glyphCount; ++i) {
+            glyph.glyphIndices = glyphs.glyphIndices + i;
+            // The Rust experiment asks Swash for Source::Outline, including on color fonts.
+            DWRITE_GLYPH_IMAGE_FORMATS formats;
+            if (FAILED(face->GetGlyphImageFormats(*glyph.glyphIndices, ppem, ppem, &formats))) return false;
+            if (!(formats & (DWRITE_GLYPH_IMAGE_FORMATS_TRUETYPE | DWRITE_GLYPH_IMAGE_FORMATS_CFF))) continue;
+            const auto p = points[span.first + i];
+            const float pen = std::round((origin_x + p.x) * 4) / 4;
+            // Swash's fract() uses the signed fraction, and its final bitmap uses floor().
+            const float x = std::floor(pen) + std::fmod(pen, 1.0f);
+            const float y = std::round(std::round(baseline_y) + (p.y - line->metrics.ascent));
+            ComPtr<IDWriteGlyphRunAnalysis> analysis;
+            if (FAILED(textFactory()->CreateGlyphRunAnalysis(&glyph, nullptr, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
+                    span.run->mode, grid, DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, x, y, analysis.GetAddressOf()))) return false;
+            RECT rect{};
+            if (FAILED(analysis->GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1, &rect))) return false;
+            const int64_t width = int64_t(rect.right) - rect.left, height = int64_t(rect.bottom) - rect.top;
+            if (width <= 0 || height <= 0) continue;
+            if (width > INT32_MAX || height > INT32_MAX || width * height > UINT32_MAX) return false;
+            const UINT32 size = UINT32(width * height);
+            std::unique_ptr<BYTE[]> data(new (std::nothrow) BYTE[size]);
+            if (!data || FAILED(analysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &rect, data.get(), size))) return false;
+            emit(context, rect.left, rect.top, int32_t(width), int32_t(height), int32_t(width), data.get());
+        }
+        return true;
+    });
+}
+
 extern "C" RuneDesktopLine *rune_desktop_line_extract_ink(const RuneDesktopLine *line, int32_t start, int32_t end) {
     if (!line || !line->layout) return nullptr;
     std::unique_ptr<RuneDesktopLine> owned(new (std::nothrow) RuneDesktopLine);
@@ -946,8 +1026,8 @@ extern "C" int32_t rune_desktop_line_outline_single(const RuneDesktopLine *line,
     if (!span) return 0;
     *font_id = span->run->outlineFont;
     *glyph = span->run->ids[span->first];
-    *pen_x = span->run->outlinePens[span->first].x;
-    *pen_y = span->run->outlinePens[span->first].y;
+    *pen_x = span->run->glyphPens[span->first].x;
+    *pen_y = span->run->glyphPens[span->first].y;
     return span->run->outlineCjk ? 3 : 1;
 }
 
