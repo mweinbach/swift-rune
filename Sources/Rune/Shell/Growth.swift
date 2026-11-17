@@ -93,6 +93,7 @@ public struct GrowTrack: Sendable, Equatable {
     public var v: Float
     public var target: Float
     public var age: Float
+    internal var linearEdge = false
     public var mask: Float
     public var streaming: Bool
     public var whole: Bool

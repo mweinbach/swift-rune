@@ -355,14 +355,4 @@ extension Runtime {
         }
     }
 
-    internal func cancelPressForTouchPan() {
-        pressedPath = nil
-        pressedKey = nil
-        inputMachines.pressedButton = .primary
-        activeDrag = nil
-        armedDragOut = nil
-        inputMachines.pressedWindowPoint = nil
-        inputMachines.pressedStillInside = false
-        inputMachines.pressedLeft = false
-    }
 }

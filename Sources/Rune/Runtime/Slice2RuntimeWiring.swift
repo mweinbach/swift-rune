@@ -14,15 +14,16 @@ internal final class Slice2RuntimeState {
         var mode: Mode
 
         enum Mode: Equatable {
-            case pending(scroll: NodeId?)
+            case pending(scroll: NodeId?, holdDue: Double)
             case drag
+            case menu
             case pan(scroll: NodeId, horizontal: Bool)
 
             var scroll: NodeId? {
                 switch self {
-                case .pending(let id): return id
+                case .pending(let id, _): return id
                 case .pan(let id, _): return id
-                case .drag: return nil
+                case .drag, .menu: return nil
                 }
             }
 
@@ -49,14 +50,19 @@ internal final class Slice2RuntimeState {
     var pixelHolds: [String: PixelHold] = [:]
     var scrollHorizontalVelocities: [String: Float] = [:]
     var growthStackOrders: [NodeId: [NodeId]] = [:]
+    var joinedRowSeams: [NodeId: [JoinedRowSeam]] = [:]
+    var joinedRowsWithoutRevealMask: Set<NodeId> = []
+    var liveContentSlides = ContentSlides()
+    var liveTailExitParents: Set<NodeId> = []
+    var pendingLiveTail = LiveTailRequests()
+    var activeLiveTail = LiveTailRequests()
+    var liveTailWindows: [String: LiveTailWindow] = [:]
     var growthRowReorder: [NodeId: VirtualRowReorder] = [:]
     var virtualSelectionHosts: [String: VirtualListSelectionHost] = [:]
     var virtualSelectionAnchorState = VirtualSelectionAnchorState()
     var unclampedBottomByPath: [String: Float] = [:]
-    var foldHeaderByGrowthKey: [String: String] = [:]
     var growthScrollByKey: [String: String] = [:]
     var growthRowPathByKey: [String: String] = [:]
-    var virtualFillWantsDraw: Bool = false
 
     var tracingEnabled: Bool = false
     var traceEvents: [String] = []
@@ -106,6 +112,7 @@ internal func slice2DefaultKeyBase(for code: PhysicalKeyCode, fallbackKey: KeyEv
 }
 
 private enum Slice2ScrollConstants {
+    static let touchLongPress: Double = 0.5
     static let touchSlop: Float = 8.0
     static let touchFlingHold: Double = 0.1
     static let scrollDecay: Float = 2.002
@@ -248,11 +255,17 @@ extension Runtime {
         let vertical: (NodeId, Double)? = vNode.map { n in
             (n.nodeId, Double((scrollOffsets[n.path]?.y ?? 0)))
         }
+        applyTouchEffects(TouchScrollMachine.step(&slice2State.touchScroll, .down(across: across, vertical: vertical)), at: time)
         pointerMove(to: pos, at: time)
         pointerDown(at: pos, at: time)
-        let dragImmediately = pressDragsAtOnce()
-        if !dragImmediately {
-            applyTouchEffects(TouchScrollMachine.step(&slice2State.touchScroll, .down(across: across, vertical: vertical)), at: time)
+        let mode: Slice2RuntimeState.TouchFinger.Mode
+        if pressDragsAtOnce() {
+            applyTouchEffects(TouchScrollMachine.step(&slice2State.touchScroll, .up(id: vNode?.nodeId, velocity: 0)), at: time)
+            mode = .drag
+        } else {
+            let due = nowClock() + Slice2ScrollConstants.touchLongPress
+            wakeAt(due)
+            mode = .pending(scroll: vNode?.nodeId, holdDue: due)
         }
         slice2State.touchFinger = Slice2RuntimeState.TouchFinger(
             id: id,
@@ -260,7 +273,7 @@ extension Runtime {
             last: 0,
             at: time,
             velocity: 0,
-            mode: dragImmediately ? .drag : .pending(scroll: vNode?.nodeId)
+            mode: mode
         )
     }
 
@@ -269,7 +282,7 @@ extension Runtime {
         guard var finger = slice2State.touchFinger, finger.id == id else { return }
         let dx = pos.x - finger.origin.x
         let dy = pos.y - finger.origin.y
-        if case .pending(let pendingScroll) = finger.mode, hypot(dx, dy) > Slice2ScrollConstants.touchSlop {
+        if case .pending(let pendingScroll, _) = finger.mode, hypot(dx, dy) > Slice2ScrollConstants.touchSlop {
             let origin = finger.origin
             let horizontal = abs(dx) > abs(dy)
             if pressDragsElement() {
@@ -308,7 +321,7 @@ extension Runtime {
             applyTouchEffects(TouchScrollMachine.step(&slice2State.touchScroll, .move(id: scrollId, d: along)), at: time)
         case .drag:
             pointerMove(to: pos, at: time)
-        case .pending:
+        case .pending, .menu:
             break
         }
     }
@@ -322,6 +335,10 @@ extension Runtime {
         let velocity: Float = (isPan && !cancelled && (time - finger.at) < Slice2ScrollConstants.touchFlingHold) ? finger.velocity : 0
         applyTouchEffects(TouchScrollMachine.step(&slice2State.touchScroll, .up(id: finger.mode.scroll, velocity: velocity)), at: time)
 
+        if finger.mode == .menu {
+            pointerLeave(at: time)
+            return
+        }
         if cancelled {
             cancelPointer(at: time)
             return
@@ -333,6 +350,16 @@ extension Runtime {
         pointerUp(at: releasePos, at: time)
         // Upstream leaves no hover under a lifted finger.
         pointerLeave(at: time)
+    }
+
+    internal func fireTouchHold(at now: Double) {
+        guard let finger = slice2State.touchFinger,
+              case .pending(let scroll, let due) = finger.mode, now >= due else { return }
+        slice2State.touchFinger?.mode = .menu
+        applyTouchEffects(TouchScrollMachine.step(&slice2State.touchScroll, .up(id: scroll, velocity: 0)), at: now)
+        cancelPointerForTouchHold(at: now)
+        secondaryDown(at: finger.origin, at: now)
+        secondaryUp(at: finger.origin, at: now)
     }
 
     /// Convenience alias for touch cancellation (`Runtime::touch_up(..., cancelled: true)`).
@@ -414,7 +441,7 @@ extension Runtime {
                 directScrolledPaths.insert(path)
                 scrollRequestsState.stepCancel()
                 scrollMovedSinceLastFrame = true
-                cancelPressForTouchPan()
+                cancelPressedOnScrollIfNeeded(scrollNodeIndex: idx, at: now)
                 markScrollMovedByHand(path: path)
                 updateScrollPositionsWithoutClampingTouch(at: now)
             case .hold(let id, _, _):
@@ -745,8 +772,9 @@ extension Runtime {
         relayout: Bool,
         commitCut: Bool
     ) -> [ReorderedRowSlide] {
+        slice2State.liveTailExitParents.removeAll(keepingCapacity: true)
         guard specs.count == nodes.count else { return [] }
-        let animates = !instant && !lands && !relayout && !commitCut && !reducedMotion
+        let canMove = !lands && !relayout && !commitCut && !reducedMotion
         var seenStacks: Set<NodeId> = []
         var slides: [ReorderedRowSlide] = []
         let rowHeight: (FlatNode) -> Float? = { node in
@@ -780,6 +808,8 @@ extension Runtime {
             let oldOrder = slice2State.growthStackOrders[stackId]
             slice2State.growthStackOrders[stackId] = newOrder
 
+            let window = slice2State.liveTailWindows[stackNode.path]
+            let animates = canMove && (!instant || window != nil)
             var reorder = slice2State.growthRowReorder[stackId] ?? VirtualRowReorder()
             var nodeByChildId: [NodeId: FlatNode] = [:]
             for cIdx in childIndices {
@@ -798,7 +828,12 @@ extension Runtime {
                 }
             )
             slice2State.growthRowReorder[stackId] = reorder
+            updateJoinedRowSeams(stack: stackNode, nodes: nodes, rows: childIndices, oldOrder: oldOrder ?? [],
+                                 reorder: reorder, reset: lands || commitCut || reducedMotion || relayout || stackNode.el.hasInstantChanges)
             guard animates else { continue }
+            if let window, let oldOrder, oldOrder != newOrder {
+                slides += carryLiveTailInk(window: window, rows: childIndices, reorder: reorder, nodes: nodes, specs: &specs)
+            }
 
             let (vpTop, vpBottom): (Float, Float) = {
                 if let encIdx = !stackNode.el.layout.scrollAxes.isEmpty ? sIdx : stackNode.enclosingVScrollIndex {
@@ -811,6 +846,7 @@ extension Runtime {
             for cIdx in childIndices {
                 let node = nodes[cIdx]
                 let cid = node.nodeId
+                if let window, let key = node.key, !window.visibleKeys.contains(key) || !window.drawnKeys.contains(key) { continue }
                 let rawJump = reorder.jump(for: cid)
                 guard abs(rawJump) > 1.0 / 64.0 else { continue }
                 if activeFlightIds.contains(cid) || launchedFlightIds.contains(cid) { continue }
@@ -858,6 +894,13 @@ extension Runtime {
 
         slice2State.growthStackOrders = slice2State.growthStackOrders.filter { seenStacks.contains($0.key) }
         slice2State.growthRowReorder = slice2State.growthRowReorder.filter { seenStacks.contains($0.key) }
+        if !slice2State.liveContentSlides.slides.isEmpty {
+            if lands || commitCut || reducedMotion {
+                slice2State.liveContentSlides = ContentSlides()
+            } else {
+                slice2State.liveContentSlides.keep(rows: slice2State.growthStackOrders.values.flatMap { $0 })
+            }
+        }
         return slides
     }
 

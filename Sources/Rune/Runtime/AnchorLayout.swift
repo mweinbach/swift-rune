@@ -13,6 +13,8 @@ struct EdgeFadeSpec {
     /// Enclosing scroll path if emitted by `.scrollFade` (used to interact with `sticky*` / `belowSticky`).
     var scrollPath: String? = nil
     var belowSticky: Bool = false
+    var growthRow: NodeId? = nil
+    var authoredFade: SIMD4<Float>? = nil
 }
 
 /// Re-solves `LayoutEngine` once when any `.anchoredFit(...)` overlay fits on neither side
