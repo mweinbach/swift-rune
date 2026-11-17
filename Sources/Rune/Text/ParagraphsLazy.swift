@@ -224,8 +224,9 @@ extension TextSystem {
         let st = paragraphState
         st.lock.lock()
         defer { st.lock.unlock() }
-        let start = DispatchTime.now().uptimeNanoseconds
-        func elapsed() -> Double { Double(DispatchTime.now().uptimeNanoseconds &- start) / 1e9 }
+        let clock = ContinuousClock()
+        let start = clock.now
+        let limit = budget.isFinite ? Duration.seconds(max(0, budget)) : nil
         func distance(_ p: Paragraph) -> Float {
             (p.y + p.height >= rows.0 && p.y <= rows.1) ? 0 : max(rows.0 - p.y - p.height, p.y - rows.1)
         }
@@ -233,7 +234,7 @@ extension TextSystem {
         var moved = false
         var shapedAny = false
         while true {
-            if shapedAny && elapsed() >= budget { break }
+            if shapedAny, let limit, start.duration(to: clock.now) >= limit { break }
             // The nearest waiting record: out from where the rows start, both ways.
             let mid = partitionPoint(paragraphs) { $0.y + $0.height < rows.0 }
             let up = paragraphs[mid...].firstIndex { !$0.shaped }
