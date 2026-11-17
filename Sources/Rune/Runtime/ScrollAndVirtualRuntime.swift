@@ -3403,7 +3403,11 @@ extension Runtime {
             let curOff = scrollOffsets[path]?.y ?? 0
             let maxY = scrollMaxExtents[path]?.y ?? 0
             let cNode = flatNodes[cIdx]
-            let lag = (cRect.top - cNode.targetRect.top) - (viewRect.bottom - vNode.targetRect.bottom)
+            // Scene reports presented edges on its subpixel grid. Compare both ends on that
+            // grid so a settled row and viewport cannot generate scroll slack from rounding.
+            let contentTarget = snapRect(cNode.targetRect, pixelScale: scene.store.pixelScale)
+            let viewTarget = snapRect(vNode.targetRect, pixelScale: scene.store.pixelScale)
+            let lag = (cRect.top - contentTarget.top) - (viewRect.bottom - viewTarget.bottom)
             let padBottom = cNode.el.layout.padding.bottom
             let contentBottom = (cNode.targetRect.bottom + curOff) - padBottom
             let short = vNode.targetRect.bottom - contentBottom
