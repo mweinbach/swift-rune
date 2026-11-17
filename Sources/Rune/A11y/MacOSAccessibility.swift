@@ -564,15 +564,17 @@ public final class MacOSAccessibilityHost {
         func convertNode(_ node: AccessibilityNode, parent: AnyObject, id: ElementIdentity) -> RuneNSAccessibilityElement {
             if node.isFocused && focusedNodeId == nil { focusedNodeId = id }
             let old = elementById[id] as? RuneAXTextField
-            let oldAnchor = old?.anchor
-            let oldFocus = old?.focus
+            let previous = old?.snapshot
             let elem = AppKitAccessibilityMapper.makeElement(node, parent: parent, onAction: onAction,
-                                                            onSelectText: onSelectText, onSetValue: onSetValue, reusing: old)
-            if let field = old, elem === field, oldAnchor != field.anchor || oldFocus != field.focus {
-                changedSelections.append(field)
+                                                            onSelectText: onSelectText, onSetValue: onSetValue,
+                                                            reusing: old, viewToScreen: viewToScreen)
+            if let previous, let field = old, elem === field {
+                let current = field.snapshot
+                if previous.anchor != current.anchor || previous.focus != current.focus {
+                    changedSelections.append(field)
+                }
             }
 
-            if let field = elem as? RuneAXTextField { field.viewToScreen = viewToScreen }
             let viewRect = NSRect(
                 x: CGFloat(node.frame.left),
                 y: CGFloat(node.frame.top),
