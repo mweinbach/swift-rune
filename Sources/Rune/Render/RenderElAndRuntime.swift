@@ -2345,6 +2345,28 @@ extension Runtime {
                 let forceScaled = nodeScaleMotion != .still
                     || abs(sc.x - rasterScale) > 1e-4
                     || abs(sc.y - rasterScale) > 1e-4
+                if resolvedInput.style.hasBlockInsets {
+                    RichTextFieldRender.emitBlockDecorations(
+                        blocks: resolvedInput.blocks, softBreaks: edit.softBreaks,
+                        richStyle: resolvedInput.richStyle, displayText: resolvedInput.showingPlaceholder ? "" : resolvedInput.renderedString, shaped: shaped,
+                        textSystem: textSystem, font: resolvedInput.showingPlaceholder ? el.textStyle : resolvedInput.style, textColor: defaultTextColor,
+                        innerW: innerW * sc.x, textOriginX: textLeft, textOriginY: textTop,
+                        scaleVec: sc, pxScale: scale, shapingScale: rasterScale * scale,
+                        rect: { rect, radius, color in
+                            instances.append(RenderInstance(rect: rect, radii: SIMD4(repeating: radius),
+                                fill: premulSIMD4(color, opacity: localOpacity, srgb: srgbBlend), border: .zero,
+                                params: SIMD4(0, KIND_RECT, 0, 1), uv: .zero, clip: inputClipEdges, fade: activeFade))
+                            marks.append(0)
+                        },
+                        glyph: { rect, uv, page, color in
+                            glyphFixups.append((instances.count, uv, rect.z, rect.w, page, forceScaled))
+                            instances.append(RenderInstance(rect: rect, radii: .zero,
+                                fill: premulSIMD4(color, opacity: localOpacity, srgb: srgbBlend), border: .zero,
+                                params: SIMD4(0, KIND_GLYPH, 0, 1), uv: uv, clip: inputClipEdges, fade: activeFade))
+                            marks.append(0)
+                        }
+                    )
+                }
                 emitTextBackdropsAndPills(
                     shaped: shaped,
                     textLeft: textLeft,

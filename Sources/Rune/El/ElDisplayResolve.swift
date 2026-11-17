@@ -256,6 +256,8 @@ internal enum ElDisplayResolver {
             placeholderStyle.wrap = inputStyle.wrap
             // A placeholder is laid out in its own direction, as one text.
             placeholderStyle.byParagraphStart = nil
+            let blocks = edit.isRichEnabled && !edit.isSecure ? edit.blocks : []
+            placeholderStyle.placeholderIndent = blocks.first?.indentPt(fontSize: inputStyle.size) ?? 0
             if let fDir = edit.forcedDir {
                 placeholderStyle.direction = fDir
             } else if placeholderStyle.direction == nil, let fallbackDirection {
@@ -272,7 +274,8 @@ internal enum ElDisplayResolver {
                 isRich: false,
                 isSecure: edit.isSecure,
                 richStyle: richStyle,
-                maxWidthForShape: (!isSingle && placeholderStyle.wrap != .noWrap) ? wrapsAt : (placeholderStyle.direction == .rtl ? innerWidth : nil)
+                maxWidthForShape: (!isSingle && placeholderStyle.wrap != .noWrap) ? wrapsAt : (placeholderStyle.direction == .rtl ? innerWidth : nil),
+                blocks: blocks
             )
         }
 
@@ -296,6 +299,9 @@ internal enum ElDisplayResolver {
         }
 
         let specs = edit.richDisplaySpecs(baseStyle: inputStyle, style: richStyle)
+        if specs.blocks.contains(where: { $0 != .paragraph }) {
+            inputStyle.paragraphBlocks = specs.blocks
+        }
         let defaultPillBg = el.pillColorsSpec?.bg ?? richStyle.link.alpha(0.2)
         let defaultPillFg = el.pillColorsSpec?.fg
         var combinedSpans = specs.spans
