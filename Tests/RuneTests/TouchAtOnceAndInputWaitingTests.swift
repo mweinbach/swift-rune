@@ -76,6 +76,55 @@ struct TouchAtOnceAndInputWaitingTests {
         #expect(rt.scrollOffset(forKey: "list") == .zero, "the list never panned or flung")
     }
 
+    @Test("a finger grabbing an immediate drag stops a viewport fling")
+    func immediateDragCatchesAMovingViewport() {
+        let rt = rig(atOnce: true)
+        let point = Vec2(100, 100)
+        rt.fling(vy: -600, at: point, now: 0.0)
+        #expect(rt.scrollStore.isAnimating)
+        rt.touch(id: 1, phase: .started, at: point, time: 0.01)
+        #expect(rt.pressDragsAtOnce())
+        let caught = rt.scrollOffset(forKey: "list")
+        _ = rt.frame(at: 0.6)
+        #expect(rt.scrollOffset(forKey: "list") == caught)
+        rt.touch(id: 1, phase: .moved, at: Vec2(100, 97), time: 0.61)
+        #expect(rt.state.drags == [-3])
+        rt.touch(id: 1, phase: .ended, at: Vec2(100, 97), time: 0.62)
+    }
+
+    @Test("a long press cancels the primary drag and clicks secondary once at the touch origin")
+    func longPressOpensMenuWithoutClickingOnLift() {
+        struct MenuState {
+            var primary = 0
+            var cancelledDrags = 0
+            var secondary: [Vec2] = []
+        }
+        let rt = Runtime(state: MenuState(), viewport: Vec2(100, 100), pixelScale: 1) { _, _ in
+            el().size(100, 100)
+                .onClick { state in state.primary += 1 }
+                .onDrag { state, drag, _ in
+                    if drag.phase == .up && drag.isCancelled { state.cancelledDrags += 1 }
+                }
+                .onSecondaryClick { state, press, _ in state.secondary.append(press.window) }
+        }
+        _ = rt.frame(at: 1)
+        let origin = Vec2(20, 25)
+        rt.touch(id: 1, phase: .started, at: origin, time: 100)
+        rt.touch(id: 1, phase: .moved, at: Vec2(22, 26), time: 100.01)
+        #expect(rt.wakeDeadlines.contains(1.5))
+        _ = rt.frame(at: 1.49)
+        #expect(rt.state.secondary.isEmpty)
+        _ = rt.frame(at: 1.5)
+        #expect(rt.state.cancelledDrags == 1)
+        #expect(rt.state.secondary == [origin])
+        rt.touch(id: 1, phase: .moved, at: Vec2(85, 85), time: 100.6)
+        rt.touch(id: 1, phase: .ended, at: Vec2(85, 85), time: 100.65)
+        _ = rt.frame(at: 1.7)
+        #expect(rt.state.primary == 0)
+        #expect(rt.state.secondary == [origin])
+        #expect(!rt.touching())
+    }
+
     @Test("touch_drags_at_once needs on_drag: without it a touch is still a tap")
     func withoutOnDragATouchIsStillATap() {
         let rt = rig(atOnce: true)
