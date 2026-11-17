@@ -217,7 +217,47 @@ struct CpuBootParityTests {
         #expect(incrementalTarget.pixels == refScroll.pixels)
     }
 
+    @Test("A gamma-space flat fill retains authored saturated channels at half opacity")
+    func saturatedFlatFillEndpoint() throws {
+        let runtime = Runtime<Void>(state: (), viewport: Vec2(8, 8), pixelScale: 1) { _, _ in
+            el().size(8, 8).bg(Color(r: 1, g: 0.25, b: 1, a: 0.5))
+        }
+        runtime.setSrgbBlend(true)
+        let frame = runtime.renderFrame(at: 0)
+        let fill = try #require(frame.instances.first { $0.params.y == KIND_RECT }?.fill)
+        #expect(fill.w == 0.5)
+        #expect(fill.x == fill.w)
+        #expect(fill.z == fill.w)
+        #expect(fill.y < fill.w)
+    }
+
     #if canImport(Metal)
+    @Test("Byte UI targets round the covered flat fill and grayscale ink before source-over")
+    func byteSourcePrecision() throws {
+        let ink: Float = 46 / 255
+        let background: Float = 22 / 255
+        let brush = SIMD4<Float>(ink, ink, ink, 1)
+        let frame = RenderFrame(
+            width: 16, height: 8, srgbBlend: true,
+            clearColor: SIMD4(background, background, background, 1),
+            glyphs: R8Atlas(width: 8, height: 8, texels: Array(repeating: 153, count: 64)),
+            instances: [
+                rect(SIMD4(0, 0, 8, 8), fill: brush * 0.6),
+                RenderInstance(rect: SIMD4(8, 0, 8, 8), fill: brush,
+                               params: SIMD4(0, KIND_GLYPH, 0, 1), uv: .zero, clip: NO_CLIP),
+            ]
+        )
+        var cpu = CpuBootTarget(width: 16, height: 8)
+        _ = try CpuBoot.paint(CpuBootScene(frame: frame), into: &cpu, threads: 1)
+        let gpu = try MetalRenderer().renderOffscreen(frame)
+        for x in [4, 12] {
+            let pixel = (4 * 16 + x) * 4
+            // round(46 × .6) + 22 × (1 - 153/255) = 36.8, stored as 37.
+            #expect(Array(cpu.pixels[pixel..<(pixel + 4)]) == [37, 37, 37, 255])
+            #expect(Array(gpu.rgba[pixel..<(pixel + 4)]) == [37, 37, 37, 255])
+        }
+    }
+
     @Test("CpuBoot matches Metal GPU Bgra8Unorm rendering across primitives, layers, and backdrop blur")
     func cpuBootMatchesMetalGpu() throws {
         let renderer = try MetalRenderer()

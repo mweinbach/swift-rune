@@ -2418,13 +2418,13 @@ public final class Runtime<State> {
 
     internal func hasScrollCallbacks() -> Bool {
         flatNodes.contains {
-            $0.el.handlers.onAtBottom != nil
-                || $0.el.handlers.onFarFromBottom != nil
+            $0.el.handlers.atBottomReport != nil
+                || $0.el.handlers.farFromBottomReport != nil
         }
     }
 
     internal var scrollRequiresCommit: Bool {
-        virtualListsNeedWindowUpdate() || lastViewReadScroll || hasScrollCallbacks()
+        virtualListsNeedWindowUpdate() || lastViewReadScroll
     }
 
     internal struct PendingFoldOpen {

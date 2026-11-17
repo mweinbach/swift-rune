@@ -366,7 +366,8 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
             float clamped = clamp(along, 0.0, len);
             return weight * clamp(0.5 - (length(q - u * clamped) - eff_hw), 0.0, 1.0);
         } else {
-            float d = max(perp - eff_hw, max(-along, along - len));
+            float2 edge = float2(abs(along - len * 0.5) - len * 0.5, perp - eff_hw);
+            float d = min(max(edge.x, edge.y), 0.0) + length(max(edge, float2(0.0)));
             return weight * clamp(0.5 - d, 0.0, 1.0);
         }
     }
@@ -706,7 +707,15 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
                 col = i.fill * pow(cov, i.params.w);
             }
         }
-        return col * clip_alpha(clip_p, i.clip, i.fade);
+        float4 source = col * clip_alpha(clip_p, i.clip, i.fade);
+        bool flatFill = kind == 0.0 && i.params.x == 0.0 && i.fill.a > 0.0 && i.fill.a < 1.0;
+        bool grayMask = kind == 2.0 && i.radii.w == 0.0 && i.radii.x == 0.0
+            && i.params.x == 0.0 && i.uv.z == 0.0 && i.params.w >= 0.0;
+        if (g.flags.y > 0.5 && g.projection.z == 0.0 && (flatFill || grayMask)) {
+            // Match the CPU byte blender after the fragment's coverage and clip are known.
+            return rint(saturate(source) * 255.0) / 255.0;
+        }
+        return source;
     }
     """
 

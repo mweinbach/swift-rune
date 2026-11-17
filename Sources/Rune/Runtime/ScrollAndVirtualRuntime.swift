@@ -462,8 +462,9 @@ extension Runtime {
             if let ri = keys.firstIndex(where: { Self.virtualRowMatchesSelector(rowKey: $0, virtualPath: path, selector: req.key) }) {
                 pinned.insert(ri)
                 // Measure a distant reveal's row and its nested target before placing it.
-                if !vState.lastMountedRange.contains(ri) {
-                    windowOffsetY = max(0, prefix[ri] - (vpH - (prefix[ri + 1] - prefix[ri])) * 0.5)
+                if prefix[ri] > listOffsetY + vpH || prefix[ri + 1] < listOffsetY {
+                    let height = prefix[ri + 1] - prefix[ri]
+                    windowOffsetY = max(0, prefix[ri] - max(0, vpH - height) * 0.5)
                 }
             }
         }
@@ -2969,47 +2970,50 @@ extension Runtime {
             let vp = scrollViewportSizes[path] ?? Vec2(node.targetRect.width, node.targetRect.height)
             let distFromBottom = max(0, maxExt.y - cur.y)
 
-            if let onAtBottom = node.el.handlers.onAtBottom {
+            if let onAtBottom = node.el.handlers.atBottomReport {
                 let isAtBottom = distFromBottom <= 1.0
                 if atBottomStates[path] != isAtBottom {
                     atBottomStates[path] = isAtBottom
-                    if let scope = turnScope {
-                        scope(&state) { s in onAtBottom(&s, isAtBottom) }
-                    } else {
-                        onAtBottom(&state, isAtBottom)
-                    }
-                    needsCommit = true
-                    // scroll/bottom.rs:309 queues `Action::AtBottom` from the frame (`frame_step`'s
-                    // `input::time::scope(None)`), and `ActionQueue::push` (action.rs:87-90) keeps
-                    // it `input: false`: its handler's change commits for `DIRTY`.
-                    commitWhyPending |= CommitWhy.dirty
+                    dispatchScrollEndReport(onAtBottom, value: isAtBottom)
                 }
             }
 
-            if let farSpec = node.el.handlers.onFarFromBottom {
-                let farDist: Float
-                if let frameKey = farSpec.frameKey,
-                   let fIdx = flatNodes.firstIndex(where: { selectsElementSelector(frameKey, path: $0.path, key: $0.key) }) {
-                    let frameRect = flatNodes[fIdx].targetRect
-                    farDist = max(0, maxExt.y - cur.y - (vp.y - frameRect.height))
-                } else {
-                    farDist = distFromBottom
+            if let farSpec = node.el.handlers.farFromBottomReport {
+                var thresholdHeight = vp.y
+                if let frameKey = farSpec.frameKey {
+                    var ancestor = node.parentIndex
+                    while let index = ancestor {
+                        let parent = flatNodes[index]
+                        if parent.key == frameKey {
+                            thresholdHeight = parent.targetRect.height
+                            break
+                        }
+                        ancestor = parent.parentIndex
+                    }
                 }
-                let isFar = farDist >= farSpec.min
+                let isFar = distFromBottom > max(farSpec.min, thresholdHeight)
                 if farFromBottomStates[path] != isFar {
                     farFromBottomStates[path] = isFar
-                    if let scope = turnScope {
-                        scope(&state) { s in farSpec.handler(&s, isFar) }
-                    } else {
-                        farSpec.handler(&state, isFar)
-                    }
-                    needsCommit = true
-                    // `Action::FarFromBottom` likewise (scroll/bottom.rs, action.rs:88): `DIRTY`.
-                    commitWhyPending |= CommitWhy.dirty
+                    dispatchScrollEndReport(farSpec.handler, value: isFar)
                 }
             }
 
             dispatchScrollOffsetObserverIfChanged(for: node, at: cxSettings.scaledTime(at: now), instant: currentCommitInstant || cut)
+        }
+    }
+
+    private func dispatchScrollEndReport(_ report: (inout State, Bool) -> Bool, value: Bool) {
+        let changed: Bool
+        if let scope = turnScope {
+            var scopedResult = false
+            scope(&state) { scopedResult = report(&$0, value) }
+            changed = scopedResult
+        } else {
+            changed = report(&state, value)
+        }
+        if changed {
+            needsCommit = true
+            commitWhyPending |= CommitWhy.dirty
         }
     }
 

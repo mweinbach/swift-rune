@@ -29,59 +29,30 @@ public enum CpuBootBlend {
         public let invA: Float
         public let opaque: (UInt8, UInt8, UInt8, UInt8)?
 
+        @inline(__always)
         public init(_ c: SIMD4<Float>) {
-            let clamped = SIMD4<Float>(
-                min(max(c.x, 0.0), 1.0),
-                min(max(c.y, 0.0), 1.0),
-                min(max(c.z, 0.0), 1.0),
-                min(max(c.w, 0.0), 1.0)
-            )
-            self.c255 = SIMD4<Float>(clamped.z, clamped.y, clamped.x, clamped.w) * 255.0
-            self.invA = 1.0 - clamped.w
-            if clamped.w >= 1.0 {
-                self.opaque = (
-                    CpuBootBlend.quantize(self.c255.x),
-                    CpuBootBlend.quantize(self.c255.y),
-                    CpuBootBlend.quantize(self.c255.z),
-                    255
-                )
-            } else {
-                self.opaque = nil
-            }
+            let bgra = CpuBootBlend.quantizeColor(c)
+            self.c255 = SIMD4<Float>(Float(bgra.0), Float(bgra.1), Float(bgra.2), Float(bgra.3))
+            self.invA = 1 - c255.w / 255
+            self.opaque = bgra.3 == 255 ? bgra : nil
         }
     }
 
     @inline(__always)
     public static func overRGBA(_ pixels: UnsafeMutablePointer<UInt8>, at offset: Int, c: SIMD4<Float>) {
-        if c.w <= 0 && c.x <= 0 && c.y <= 0 && c.z <= 0 { return }
-        if c.w >= 1.0 {
-            pixels[offset + 0] = quantize(min(max(c.z, 0), 1) * 255.0)
-            pixels[offset + 1] = quantize(min(max(c.y, 0), 1) * 255.0)
-            pixels[offset + 2] = quantize(min(max(c.x, 0), 1) * 255.0)
-            pixels[offset + 3] = 255
-            return
-        }
-        let inv = 1.0 - min(max(c.w, 0), 1)
-        let b = c.z * 255.0 + Float(pixels[offset + 0]) * inv
-        let g = c.y * 255.0 + Float(pixels[offset + 1]) * inv
-        let r = c.x * 255.0 + Float(pixels[offset + 2]) * inv
-        let a = c.w * 255.0 + Float(pixels[offset + 3]) * inv
-        pixels[offset + 0] = quantize(b)
-        pixels[offset + 1] = quantize(g)
-        pixels[offset + 2] = quantize(r)
-        pixels[offset + 3] = quantize(a)
+        overRow(pixels, offset: offset, count: 1, src: PreSrc(c))
     }
 
     @inline(__always)
     public static func overLCD(_ pixels: UnsafeMutablePointer<UInt8>, at offset: Int, c: SIMD4<Float>, k: SIMD3<Float>) {
-        let r = c.x * 255.0 + Float(pixels[offset + 2]) * (1.0 - k.x)
-        let g = c.y * 255.0 + Float(pixels[offset + 1]) * (1.0 - k.y)
-        let b = c.z * 255.0 + Float(pixels[offset + 0]) * (1.0 - k.z)
-        let a = c.w * 255.0 + Float(pixels[offset + 3]) * (1.0 - c.w)
-        pixels[offset + 0] = quantize(b)
-        pixels[offset + 1] = quantize(g)
-        pixels[offset + 2] = quantize(r)
-        pixels[offset + 3] = quantize(a)
+        let src = PreSrc(c)
+        let keepR = 1 - Float(quantize(k.x * 255)) / 255
+        let keepG = 1 - Float(quantize(k.y * 255)) / 255
+        let keepB = 1 - Float(quantize(k.z * 255)) / 255
+        pixels[offset] = quantize(src.c255.x + Float(pixels[offset]) * keepB)
+        pixels[offset + 1] = quantize(src.c255.y + Float(pixels[offset + 1]) * keepG)
+        pixels[offset + 2] = quantize(src.c255.z + Float(pixels[offset + 2]) * keepR)
+        pixels[offset + 3] = quantize(src.c255.w + Float(pixels[offset + 3]) * src.invA)
     }
 
     @inline(__always)
@@ -104,6 +75,7 @@ public enum CpuBootBlend {
             fillRow(pixels, offset: offset, count: count, bgra: op)
             return
         }
+        if src.c255 == .zero { return }
         let inv = src.invA
         let s0 = src.c255.x
         let s1 = src.c255.y
