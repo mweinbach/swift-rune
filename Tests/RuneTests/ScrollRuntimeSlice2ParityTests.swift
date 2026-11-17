@@ -542,31 +542,50 @@ struct ScrollRuntimeSlice2ParityTests {
             )
         }
         _ = rt.frame(at: 0.0)
-        // Start long glide then retarget nearer mid-flight -> doesn't overshoot target
-        rt.update(at: 0.01) { _, tx in tx.scrollTo("scroll", x: 0, y: 1200) }
-        var t = 0.02
-        for _ in 0..<6 {
-            t += 1.0 / 120.0
+        let dt = 1.0 / 60.0
+        var t = dt
+        rt.update(at: 0) { _, tx in tx.scrollToInstant("scroll", x: 0, y: 1000) }
+        _ = rt.frame(at: t)
+        rt.update(at: t) { _, tx in tx.scrollTo("scroll", x: 0, y: 0) }
+        for _ in 0..<5 {
+            t += dt
             _ = rt.frame(at: t)
         }
         let mid = rt.scrollOffset(forKey: "scroll").y
-        #expect(mid > 50 && mid < 500)
-        rt.update(at: t) { _, tx in tx.scrollTo("scroll", x: 0, y: 500) }
-        for _ in 0..<180 {
+        #expect(mid < 900)
+        let target = mid - 40
+        rt.update(at: t) { _, tx in tx.scrollTo("scroll", x: 0, y: target) }
+        var previous = mid
+        for _ in 0..<240 {
+            t += dt
+            _ = rt.frame(at: t)
+            let position = rt.scrollOffset(forKey: "scroll").y
+            #expect(target - position < 0.05)
+            #expect(position <= previous + 1e-6)
+            previous = position
+            if !rt.scrollStore.isAnimating { break }
+        }
+        #expect(previous == target)
+
+        func firstStep(spring: Spring?) -> Float {
+            rt.update(at: t) { _, tx in tx.scrollToInstant("scroll", x: 0, y: 0) }
+            t += dt
+            _ = rt.frame(at: t)
+            rt.update(at: t) { _, tx in
+                if let spring {
+                    tx.scrollToWith("scroll", x: 0, y: 400, spring: spring)
+                } else {
+                    tx.scrollTo("scroll", x: 0, y: 400)
+                }
+            }
             t += 1.0 / 120.0
             _ = rt.frame(at: t)
-            #expect(rt.scrollOffset(forKey: "scroll").y <= 505)
+            return rt.scrollOffset(forKey: "scroll").y
         }
-        #expect(abs(rt.scrollOffset(forKey: "scroll").y - 500) < 0.5)
-
-        // Custom quicker spring covers more on first frame
-        rt.update(at: t) { _, tx in tx.scrollToInstant("scroll", x: 0, y: 0) }
-        t += 0.02
-        _ = rt.frame(at: t)
-        rt.update(at: t) { _, tx in tx.scrollToWith("scroll", x: 0, y: 400, spring: Spring(duration: 0.12, bounce: 0.0)) }
-        _ = rt.frame(at: t + 1.0 / 60.0)
-        let fastFirstStep = rt.scrollOffset(forKey: "scroll").y
-        #expect(fastFirstStep > 30)
+        let standard = firstStep(spring: nil)
+        let quick = firstStep(spring: Spring(duration: 0.18, bounce: 0))
+        #expect(standard > 0)
+        #expect(quick > standard * 2.5)
     }
 
     @Test("runtime/tests/scroll_carried.rs: ElementInfo.scrolled measures window-space distance across zoom")
