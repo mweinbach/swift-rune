@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """Replay Rune's own large-view benchmarks with the same logical clock and native-window color mode."""
 import argparse
+import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 
-REVISION = "842c28c2ca5dd1506c1e4a67052db61800aed721"
+def resolve_revision(checkout, requested):
+    if requested is None:
+        sync = Path(__file__).resolve().parents[3] / ".upstream-sync.json"
+        requested = json.loads(sync.read_text())["syncedCommit"]
+    return subprocess.check_output(
+        ["git", "-C", checkout, "rev-parse", "--verify", "--end-of-options", requested + "^{commit}"],
+        text=True,
+    ).strip()
 
 
 def replace_once(source, original, replacement):
     if source.count(original) != 1:
-        raise ValueError(f"Unexpected benchmark at {REVISION}: {original!r}")
+        raise ValueError(f"Expected one occurrence in the upstream benchmark: {original!r}")
     return source.replace(original, replacement)
 
 
@@ -34,18 +42,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("rust_checkout", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--revision", help="Rust revision to compare (defaults to .upstream-sync.json)")
     parser.add_argument("--jobs", type=int, default=4)
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    revision = resolve_revision(args.rust_checkout, args.revision)
     with tempfile.TemporaryDirectory(prefix="rune-scroll-") as temp:
         checkout = Path(temp) / "rust"
         checkout.mkdir()
         archive = Path(temp) / "source.tar"
-        subprocess.run(["git", "-C", args.rust_checkout, "archive", "-o", archive, REVISION], check=True)
+        subprocess.run(["git", "-C", args.rust_checkout, "archive", "-o", archive, revision], check=True)
         subprocess.run(["tar", "-xf", archive, "-C", checkout], check=True)
         for name, width in [("table", 1800), ("tree", 720)]:
             prepare(checkout, name, width)
+        (output / "rust-revision.txt").write_text(revision + "\n")
         env = {k: v for k, v in os.environ.items() if k != "RUNE_SCROLL_CAPTURE"}
         if "CARGO_TARGET_DIR" not in env:
             env["CARGO_TARGET_DIR"] = str(output / "cargo-target")

@@ -11,7 +11,7 @@ import tempfile
 from presentations import summarize_presentations
 
 HERE = Path(__file__).resolve().parent
-REVISION = runpy.run_path(str(HERE / "rust-oracle.py"))["REVISION"]
+resolve_revision = runpy.run_path(str(HERE / "rust-oracle.py"))["resolve_revision"]
 
 
 def definition(source, name):
@@ -69,12 +69,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("rust_checkout", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--revision", help="Rust revision to compare (defaults to .upstream-sync.json)")
     parser.add_argument("--jobs", type=int, default=4)
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("This native presentation fixture requires macOS and a visible Metal display")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    revision = resolve_revision(args.rust_checkout, args.revision)
     env = dict(os.environ, RUNE_PLAYGROUND="0", RUNE_OPEN_INACTIVE="1")
     target_dir = Path(env.get("CARGO_TARGET_DIR", output / "cargo-target")).resolve()
     env["CARGO_TARGET_DIR"] = str(target_dir)
@@ -83,7 +85,7 @@ def main():
         checkout = tmp / "rust"
         checkout.mkdir()
         archive = tmp / "source.tar"
-        subprocess.run(["git", "-C", args.rust_checkout, "archive", "-o", archive, REVISION], check=True)
+        subprocess.run(["git", "-C", args.rust_checkout, "archive", "-o", archive, revision], check=True)
         subprocess.run(["tar", "-xf", archive, "-C", checkout], check=True)
         wheel = tmp / "wheel.o"
         subprocess.run(["xcrun", "clang", "-fobjc-arc", "-O2", "-c", HERE / "macOS/NativeWheel.m", "-o", wheel], check=True)
@@ -98,6 +100,7 @@ def main():
             subprocess.run([target_dir / f"perf/examples/{target}"], cwd=checkout,
                            env={**env, "RUNE_SCROLL_OUTPUT": str(path)}, check=True, timeout=300)
             result = summarize(path, case)
+            result["rustRevision"] = revision
             (output / f"{case}-summary.json").write_text(json.dumps(result, indent=2) + "\n")
             print(case, json.dumps(result))
 
