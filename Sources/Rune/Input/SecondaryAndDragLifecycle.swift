@@ -109,7 +109,8 @@ extension Runtime {
         pressedKey = nil
         pressedLink = nil
         inputMachines.pressClicks.clear()
-        selectionState.clearClicks()
+        // The run of presses on selectable text stays: `cancel_pointer` leaves
+        // `selectable.presses` as it is (`pointer.rs::cancel_pointer`).
         inputMachines.firstDoubleClick = nil
         inputMachines.currentDoubleClickPair = nil
         inputMachines.secondaryCapture = .up

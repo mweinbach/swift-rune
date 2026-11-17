@@ -8326,7 +8326,7 @@ public final class Runtime<State> {
                 text: elementTextValue,
                 label: el.a11yLabel,
                 help: resolvedRawHelp.map(runeHelpWords),
-                selected: nodeIsSecure ? nil : el.a11ySelected,
+                selected: nodeIsSecure ? nil : (selectableSelectedSlice(snap, range: activeSelectionRanges[snap.path]) ?? el.a11ySelected),
                 expanded: el.a11yExpanded,
                 level: el.a11yLevel,
                 itemSelected: el.itemSelected,

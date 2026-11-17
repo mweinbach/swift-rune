@@ -72,51 +72,107 @@ public enum CopyJoin {
         join(pieces.filter { !$0.text.isEmpty }.map { Entry(rect: $0.rect, pieceText: $0.text) })
     }
 
-    /// Joins `Entry` pieces in tree order honoring `beside` tabs, `copyBreaks`, and `copyPrefix`
-    /// (`crates/rune/src/runtime/selection/copy_join.rs:13-73`).
-    public static func join(_ entries: [Entry]) -> String {
-        var out = ""
-        var prev: (rect: MotionRect, copyBreakAfter: UInt8)? = nil
-        var pieces = 0
-        var firstPrefixCount = 0
-
+    /// Joins `Entry` pieces in tree order honoring `beside` tabs, `copyBreaks`, and `copyPrefix`,
+    /// stopping once `cap` UTF-8 bytes are taken: a piece's lead that would pass it goes, and the
+    /// piece that passes it is cut on a character boundary
+    /// (`crates/rune/src/runtime/selection/copy_join.rs` `CopyJoin::push` / `finish`).
+    public static func join(_ entries: [Entry], cap: Int = .max) -> String {
+        var out = Builder()
+        var prev: MotionRect? = nil
         for entry in entries {
-            if let prev {
-                if beside(prev.rect, entry.rect) {
-                    out.append("\t")
+            let isBeside = prev.map { beside($0, entry.rect) } ?? false
+            prev = entry.rect
+            let capped = out.push(
+                entry.pieceText,
+                fromStart: entry.fromStart,
+                copyBreakBefore: entry.copyBreakBefore,
+                copyBreakAfter: entry.copyBreakAfter,
+                copyPrefix: entry.copyPrefix,
+                beside: isBeside,
+                cap: cap
+            )
+            if capped { break }
+        }
+        return out.finish()
+    }
+
+    /// `range` takes a text from its first copied byte (`copy_join.rs` `from_start`).
+    public static func fromStart(range: Range<Int>, len: Int, uncopied: [Range<Int>]) -> Bool {
+        let first = uncopied.isEmpty ? 0 : SelectionMath.trimUncopied(uncopied, range: (0, len)).0
+        return !range.isEmpty && range.lowerBound <= first
+    }
+
+    /// Copied text, built a selected piece at a time (`copy_join.rs` `CopyJoin`).
+    public struct Builder: Sendable {
+        /// The text so far (`CopyJoin::text`).
+        public private(set) var text = ""
+        /// `text`'s length in UTF-8 bytes.
+        public private(set) var byteCount = 0
+        /// The newlines the last piece wants after it.
+        private var after: UInt8 = 0
+        private var pieces = 0
+        /// The first piece's prefix, in bytes: a copy of one text alone goes without it.
+        private var firstPrefix = 0
+
+        public init() {}
+
+        /// Adds `piece`, what the selected bytes of a text copy as (`CopyJoin::push`). `beside`: it
+        /// sits beside the last piece, as a table row's next cell does; else as many newlines as
+        /// the last piece's `copyBreakAfter` and this one's `copyBreakBefore` ask for (at least
+        /// one, counting those already at the end). `fromStart`: the piece takes the text from its
+        /// first copied byte, so its `copyPrefix` goes before it. `true` when `cap` bytes cut it
+        /// short: a lead that would pass `cap` goes, and the piece that passes it is cut on a
+        /// character boundary.
+        @discardableResult
+        public mutating func push(
+            _ piece: String,
+            fromStart: Bool,
+            copyBreakBefore: UInt8,
+            copyBreakAfter: UInt8,
+            copyPrefix: String?,
+            beside: Bool,
+            cap: Int
+        ) -> Bool {
+            var lead = ""
+            if pieces > 0 {
+                if beside {
+                    lead.append("\t")
                 } else {
-                    let want = max(Int(prev.copyBreakAfter), Int(entry.copyBreakBefore), 1)
-                    var trailing = 0
-                    for b in out.utf8.reversed() {
-                        if b == UInt8(ascii: "\n") {
-                            trailing += 1
-                        } else {
-                            break
-                        }
+                    let want = Int(max(after, copyBreakBefore, 1))
+                    var have = 0
+                    for b in text.utf8.reversed() {
+                        guard b == UInt8(ascii: "\n") else { break }
+                        have += 1
                     }
-                    if want > trailing {
-                        out.append(String(repeating: "\n", count: want - trailing))
-                    }
+                    if want > have { lead.append(String(repeating: "\n", count: want - have)) }
                 }
             }
-            if entry.fromStart, let prefix = entry.copyPrefix {
-                if pieces == 0 {
-                    firstPrefixCount = prefix.utf8.count
-                }
-                out.append(prefix)
-            }
-            out.append(entry.pieceText)
-            prev = (entry.rect, entry.copyBreakAfter)
+            let prefix = fromStart ? (copyPrefix ?? "") : ""
+            if pieces == 0 { firstPrefix = prefix.utf8.count }
+            lead.append(prefix)
             pieces += 1
+            after = copyBreakAfter
+            let leadBytes = lead.utf8.count
+            if byteCount + leadBytes > cap { return true }
+            text.append(lead)
+            byteCount += leadBytes
+            let pieceBytes = piece.utf8.count
+            if byteCount + pieceBytes <= cap {
+                text.append(piece)
+                byteCount += pieceBytes
+                return false
+            }
+            let take = SelectionMath.floorCharBoundary(in: piece, offset: max(0, cap - byteCount))
+            text.append(String(decoding: piece.utf8.prefix(take), as: UTF8.self))
+            byteCount += take
+            return true
         }
 
-        if pieces == 1 && firstPrefixCount > 0 {
-            let bytes = Array(out.utf8)
-            if bytes.count >= firstPrefixCount {
-                return String(decoding: bytes[firstPrefixCount...], as: UTF8.self)
-            }
+        /// The copied text: a single text goes without its prefix (`CopyJoin::finish`).
+        public func finish() -> String {
+            guard pieces == 1, firstPrefix > 0, byteCount >= firstPrefix else { return text }
+            return String(decoding: text.utf8.dropFirst(firstPrefix), as: UTF8.self)
         }
-        return out
     }
 }
 
@@ -126,7 +182,15 @@ public enum CopyJoin {
 public final class SelectionCoordinator {
     public internal(set) var phase: SelectionPhase = .empty
     public internal(set) var pick = SelectAllPick()
-    private var heardByPath: [String: TextSelection] = [:]
+    internal private(set) var heardByPath: [String: TextSelection] = [:]
+
+    /// Moves what the watcher at `old` heard to `new` (`sel_heard.by_path` re-keyed when the
+    /// selection's text is rebound to a moved keyed path).
+    internal func moveHeard(from old: String, to new: String) {
+        if let v = heardByPath.removeValue(forKey: old) {
+            heardByPath[new] = v
+        }
+    }
 
     public init() {}
 
@@ -310,11 +374,12 @@ public final class SelectionCoordinator {
             let (firstIdx, aOff, lastIdx, bOff) = forward
                 ? (anchorIdx, sel.anchor, focusIdx, sel.focus)
                 : (focusIdx, sel.focus, anchorIdx, sel.anchor)
-            let gPath = SelectAllResolver.groupPath(forNodeAt: anchorIdx, in: nodes)
+            let groups = SelectAllResolver.groupPaths(in: nodes)
+            let gPath = groups[anchorIdx]
             var ranges: [(SelectableNodeSnapshot, Range<Int>)] = []
             for idx in firstIdx...lastIdx {
                 let n = nodes[idx]
-                guard n.isSelectable, SelectAllResolver.groupPath(forNodeAt: idx, in: nodes) == gPath else { continue }
+                guard n.isSelectable, groups[idx] == gPath else { continue }
                 let len = n.text.utf8.count
                 let lo = (idx == firstIdx) ? SelectionMath.floorCharBoundary(in: n.text, offset: aOff) : 0
                 let hi = (idx == lastIdx) ? SelectionMath.floorCharBoundary(in: n.text, offset: bOff) : len

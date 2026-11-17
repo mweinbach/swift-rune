@@ -59,6 +59,10 @@ internal struct RuntimeSelectionState {
     var edgeScroll: SelectionEdgeScrollState = .idle
     var lastCommittedMarkedTexts: [SelectionMark] = []
     var pendingFollowCaret: Bool = false
+    /// Hashes of mounted rows strictly between the selection's anchor and focus in a virtual
+    /// list (`phase.rs::TextSel::mounted_between`). A new selection clears it in place and keeps
+    /// its buckets; with nothing selected it's empty.
+    var mountedBetween: [String: UInt64] = [:]
 
     mutating func clearClicks() {
         lastClickPath = nil
@@ -110,8 +114,11 @@ private struct SelectableBand {
 
 public extension Runtime {
     /// Current `TextSelection` snapshot across mounted `El.selectable` elements (`Runtime::selection`).
+    /// A selection reaching virtual rows that aren't mounted is collected across them, building
+    /// those rows on demand within `VirtualCopyLimits` (`collect_virtual_selection`).
     func currentTextSelection() -> TextSelection? {
         guard selectionState.coordinator.phase.selection != nil else { return nil }
+        if selectionSpansUnmounted() { return collectVirtualSelection(base: nil) }
         return selectionState.coordinator.currentSelection(in: selectableSnapshotsWithVirtuals())
     }
 
@@ -125,6 +132,7 @@ public extension Runtime {
     /// Clipboard string produced by copying the active `El.selectable` selection, honoring the
     /// nearest `El.selectionCopy` handler spanning the selection (`Runtime::copy_text`).
     func copySelectionText() -> String? {
+        if selectionSpansUnmounted() { return copyVirtualText() }
         let snaps = selectableSnapshotsWithVirtuals()
         guard let sel = selectionState.coordinator.currentSelection(in: snaps),
               let firstSel = sel.texts.first,
@@ -222,6 +230,8 @@ public extension Runtime {
     /// Semantic `text/html` representation of the active `El.selectable` selection
     /// (`Runtime::copy_html` / `copy_html.rs`). Returns `nil` when empty or spanning unmounted rows.
     func copySelectionHTML() -> String? {
+        // A selection reaching rows that aren't built has no HTML (`copy_html.rs`).
+        if selectionSpansUnmounted() { return nil }
         let snaps = selectableSnapshots()
         guard let sel = selectionState.coordinator.currentSelection(in: snaps),
               !sel.texts.isEmpty else {
@@ -328,11 +338,16 @@ internal extension Runtime {
         return out
     }
 
-    private func offscreenRowElement(source src: VirtualSelectionSource, at rowIndex: Int) -> El<State>? {
+    func offscreenRowElement(source src: VirtualSelectionSource, at rowIndex: Int) -> El<State>? {
         guard rowIndex >= 0 && rowIndex < src.keys.count else { return nil }
         let rowKey = src.keys[rowIndex]
         if src.isIndexed {
             guard let rowSource = src.source else { return nil }
+            // A pinned row is built once a commit and kept (`Pins`); other rows are built each
+            // time selection needs them (`build_unmounted_row`).
+            let pinned = virtualSelectionPinnedRows(src.listPath).contains(rowKey)
+            let cacheKey = "\(rowIndex)/\(rowKey)"
+            if pinned, let kept = src.pinnedRows.rows[cacheKey] { return kept }
             let scratch = MemoCache()
             var built = MemoScope.enterVirtualRow(
                 cache: scratch,
@@ -343,6 +358,7 @@ internal extension Runtime {
                 rowSource.build(state, rowIndex)
             }
             built = built.key(rowKey)
+            if pinned { src.pinnedRows.rows[cacheKey] = built }
             return built
         }
         guard rowIndex < src.storedChildren.count else { return nil }
@@ -353,7 +369,7 @@ internal extension Runtime {
         return row
     }
 
-    private func collectOffscreenRowSnapshots(
+    func collectOffscreenRowSnapshots(
         source src: VirtualSelectionSource,
         rowIndex: Int,
         rowSegment: String,
@@ -455,7 +471,7 @@ internal extension Runtime {
         }
     }
 
-    private func virtualRowIndex(forPath targetPath: String, in src: VirtualSelectionSource) -> (rowIndex: Int, rowSegment: String)? {
+    func virtualRowIndex(forPath targetPath: String, in src: VirtualSelectionSource) -> (rowIndex: Int, rowSegment: String)? {
         guard targetPath.hasPrefix(src.listPath + "/") else { return nil }
         let rest = targetPath.dropFirst(src.listPath.count + 1)
         let firstSeg = String(rest.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
@@ -485,7 +501,7 @@ internal extension Runtime {
         return nil
     }
 
-    private struct VirtualTreeOrder: Comparable, Equatable {
+    struct VirtualTreeOrder: Comparable, Equatable {
         let slot: Int
         let row: Int
         let sub: Int
@@ -497,7 +513,7 @@ internal extension Runtime {
         }
     }
 
-    private struct ResolvedVirtualEndpointInfo {
+    struct ResolvedVirtualEndpointInfo {
         let snapshot: SelectableNodeSnapshot
         let listIdx: Int
         let rowIndex: Int
@@ -505,7 +521,7 @@ internal extension Runtime {
         let rowGroupPath: String?
     }
 
-    private func resolveVirtualEndpointInfo(forPath targetPath: String) -> ResolvedVirtualEndpointInfo? {
+    func resolveVirtualEndpointInfo(forPath targetPath: String) -> ResolvedVirtualEndpointInfo? {
         for (listPath, src) in virtualSelectionSources {
             guard let listIdx = nodeByPath[listPath],
                   listIdx < flatNodes.count,
@@ -551,7 +567,7 @@ internal extension Runtime {
         resolveVirtualEndpointInfo(forPath: targetPath)?.snapshot
     }
 
-    private func selectionTreeOrder(mountedIdx: Int) -> VirtualTreeOrder {
+    func selectionTreeOrder(mountedIdx: Int) -> VirtualTreeOrder {
         var cur = mountedIdx
         while cur < flatNodes.count, let p = flatNodes[cur].parentIndex {
             let pPath = flatNodes[p].path
@@ -586,26 +602,33 @@ internal extension Runtime {
             storedChildren: [],
             scrollAxes: []
         )
-        if let r = virtualRowIndex(forPath: activeSel.path, in: src), !mounted.contains(r.rowIndex) {
+        // The rows the selection's ends are in, by their row identity when pinned
+        // (`sync_selection_pins` -> `PinsEvent::Select { anchor, focus }`), else by path.
+        func pinnedRow(path: String, end: VirtualEnd?) -> Int? {
+            if let end, end.listPath == listPath { return keys.firstIndex(of: end.rowKey) }
+            return virtualRowIndex(forPath: path, in: src)?.rowIndex
+        }
+        if let r = pinnedRow(path: activeSel.path, end: activeSel.anchorEnd), !mounted.contains(r) {
             return true
         }
-        if let far = activeSel.far,
-           let r = virtualRowIndex(forPath: far.path, in: src),
-           !mounted.contains(r.rowIndex) {
+        if let far = activeSel.far, let r = pinnedRow(path: far.path, end: far.end), !mounted.contains(r) {
             return true
         }
         return false
     }
 
-    func selectableSnapshotsWithVirtuals() -> [SelectableNodeSnapshot] {
+    /// `endsOnly` builds only the unmounted rows holding the selection's ends, not those between
+    /// them: enough to place the selection's ranges in mounted texts (painting), without
+    /// building every row a long selection spans each frame.
+    func selectableSnapshotsWithVirtuals(endsOnly: Bool = false) -> [SelectableNodeSnapshot] {
         let base = selectableSnapshots()
         guard let activeSel = selectionState.coordinator.phase.selection,
               !virtualSelectionSources.isEmpty else {
             return base
         }
 
-        let maxOffscreenRows = 10_000
-        let maxOffscreenBytes = 4 * 1024 * 1024
+        let maxOffscreenRows = VirtualCopyLimits.maxRows
+        let maxOffscreenBytes = VirtualCopyLimits.maxBytes
         var totalRows = 0
         var totalBytes = 0
         var injections: [VirtualSelectionInjection] = []
@@ -672,7 +695,7 @@ internal extension Runtime {
             }
 
             var beforeSnaps: [SelectableNodeSnapshot] = []
-            for r in beforeRange {
+            for r in beforeRange where !endsOnly || r == p0 || r == p1 {
                 guard totalRows < maxOffscreenRows && totalBytes < maxOffscreenBytes else { break }
                 let rowSeg = "@\(src.keys[r])"
                 let baseY = mountedMinTop - Float(mountedLo - r) * 100.0 - 10_000.0
@@ -690,7 +713,7 @@ internal extension Runtime {
             }
 
             var afterSnaps: [SelectableNodeSnapshot] = []
-            for r in afterRange {
+            for r in afterRange where !endsOnly || r == p0 || r == p1 {
                 guard totalRows < maxOffscreenRows && totalBytes < maxOffscreenBytes else { break }
                 let rowSeg = "@\(src.keys[r])"
                 let baseY = mountedMaxBottom + Float(r - mountedHi + 1) * 100.0 + 10_000.0
@@ -808,6 +831,7 @@ internal extension Runtime {
             selectionState.edgeScroll.stop()
             if selectionState.coordinator.phase.selection != nil {
                 selectionState.coordinator.phase.clear()
+                syncSelectionPins()
                 selectionState.isDraggingSelection = false
                 if cxSettings.selectionRectsReadByView {
                     dirtyCommit(at: now, external: false, why: CommitWhy.input)
@@ -827,6 +851,7 @@ internal extension Runtime {
             selectionState.edgeScroll.stop()
             if selectionState.coordinator.phase.selection != nil {
                 selectionState.coordinator.phase.clear()
+                syncSelectionPins()
                 selectionState.isDraggingSelection = false
                 selectionState.suppressedClickOnRelease = false
                 if cxSettings.selectionRectsReadByView {
@@ -848,63 +873,36 @@ internal extension Runtime {
             return h.onDrag != nil || h.dragOut != nil || hitInteractiveNode?.el.attachedDragOutItem != nil
         }()
 
-        if mods.shift, clicks == 1, let existing = selectionState.coordinator.phase.selection {
-            let anchorSnapIdx = snaps.firstIndex(where: { $0.path == existing.path })
-            let anchorGroup = anchorSnapIdx.flatMap { SelectAllResolver.groupPath(forNodeAt: $0, in: snaps) }
-            if existing.path == sNode.path {
-                let updated = ActiveSelection(
-                    path: existing.path,
-                    content: content,
-                    anchor: existing.anchor,
-                    focus: offset,
-                    origin: (existing.anchor, existing.anchor),
-                    far: nil
-                )
-                if interactiveTakesDrag {
-                    selectionState.coordinator.phase.place(updated)
-                    selectionState.isDraggingSelection = false
-                } else {
-                    selectionState.coordinator.phase.startDrag(selection: updated, unit: .character)
-                    selectionState.isDraggingSelection = true
-                    selectionState.dragStartPos = pos
-                }
-                selectionState.suppressedClickOnRelease = false
-                if cxSettings.selectionRectsReadByView {
-                    dirtyCommit(at: now, external: false, why: CommitWhy.input)
-                }
-                dispatchSelectionChanges(at: now)
-                return
-            } else if let sGroup, let anchorGroup, sGroup == anchorGroup, let anchorSnapIdx {
-                let sSnapIdx = snaps.firstIndex(where: { $0.path == sNode.path }) ?? anchorSnapIdx
-                let betweenHash = SelectionMath.computeBetweenHash(
-                    in: snaps,
-                    anchorIdx: anchorSnapIdx,
-                    farIdx: sSnapIdx
-                )
-                let updated = ActiveSelection(
-                    path: existing.path,
-                    content: existing.content,
-                    anchor: existing.anchor,
-                    focus: offset,
-                    origin: existing.origin,
-                    far: SelectionFar(path: sNode.path, content: content),
-                    betweenHash: betweenHash
-                )
-                if interactiveTakesDrag {
-                    selectionState.coordinator.phase.place(updated)
-                    selectionState.isDraggingSelection = false
-                } else {
-                    selectionState.coordinator.phase.startDrag(selection: updated, unit: .character)
-                    selectionState.isDraggingSelection = true
-                    selectionState.dragStartPos = pos
-                }
-                selectionState.suppressedClickOnRelease = false
-                if cxSettings.selectionRectsReadByView {
-                    dirtyCommit(at: now, external: false, why: CommitWhy.input)
-                }
-                dispatchSelectionChanges(at: now)
-                return
+        // `selection_down`: Shift extends the selection whose holder is this text or shares its
+        // group, the holder found by its row identity (so an anchor row scrolled out still counts).
+        // Shift as the pointer reports it, or as the keyboard last left it
+        // (`physical.rs`: `PhysicalInput::Modifiers` -> `selectable.shift`).
+        if mods.shift || inputMachines.currentMods.shift, clicks == 1,
+           let sIdx = nodeByPath[sNode.path], let iEnd = mountedSelectionEnd(sIdx),
+           let h = selectionHolderEnd(),
+           h.mountedIdx == sIdx || (h.groupPath != nil && h.groupPath == iEnd.groupPath),
+           var updated = selectionState.coordinator.phase.selection {
+            // `phase::step` `Event::Extend`: the anchor and what its text read stay; the origin
+            // collapses onto the anchor and the focus moves here, in this text or (`far`) another.
+            updated.originStart = updated.anchor
+            updated.originEnd = updated.anchor
+            updated.focus = offset
+            updated.far = h.mountedIdx == sIdx ? nil : SelectionFar(path: sNode.path, content: content)
+            if interactiveTakesDrag {
+                selectionState.coordinator.phase.place(updated)
+                selectionState.isDraggingSelection = false
+            } else {
+                selectionState.coordinator.phase.startDrag(selection: updated, unit: .character)
+                selectionState.isDraggingSelection = true
+                selectionState.dragStartPos = pos
             }
+            sealBetween()
+            selectionState.suppressedClickOnRelease = false
+            if cxSettings.selectionRectsReadByView {
+                dirtyCommit(at: now, external: false, why: CommitWhy.input)
+            }
+            dispatchSelectionChanges(at: now)
+            return
         }
 
         let unit = SelectionUnit.forClickCount(clicks)
@@ -925,6 +923,7 @@ internal extension Runtime {
             selectionState.isDraggingSelection = true
             selectionState.dragStartPos = pos
         }
+        sealBetween()
         selectionState.suppressedClickOnRelease = false
         if cxSettings.selectionRectsReadByView {
             dirtyCommit(at: now, external: false, why: CommitWhy.input)
@@ -954,6 +953,7 @@ internal extension Runtime {
                 focus: word.1,
                 origin: word
             ))
+            sealBetween()
             let snaps = selectableSnapshots()
             if let sIdx = snaps.firstIndex(where: { $0.path == sNode.path }) {
                 let sUnit = SelectAllResolver.groupPath(forNodeAt: sIdx, in: snaps) ?? sNode.path
@@ -997,38 +997,21 @@ internal extension Runtime {
             selectionState.edgeScroll.stop()
             return false
         }
-        let snaps = selectableSnapshots()
-        let anchorMountedIdx: Int?
-        let edgeScrollIdx: Int
-        let anchorGroup: String?
-        let anchorOrder: VirtualTreeOrder
-        if let idx = resolvedNodeIndex(forPath: sel.path) {
-            anchorMountedIdx = idx
-            edgeScrollIdx = idx
-            sel.path = flatNodes[idx].path
-            anchorGroup = SelectAllResolver.groupPath(forNodeAt: idx, in: snaps)
-            anchorOrder = selectionTreeOrder(mountedIdx: idx)
-        } else if let info = resolveVirtualEndpointInfo(forPath: sel.path) {
-            anchorMountedIdx = nil
-            edgeScrollIdx = info.listIdx
-            sel.path = info.snapshot.path
-            if let rg = info.rowGroupPath {
-                anchorGroup = rg
-            } else if info.listIdx < snaps.count, snaps[info.listIdx].isSelectionGroup {
-                anchorGroup = snaps[info.listIdx].path
-            } else {
-                anchorGroup = SelectAllResolver.groupPath(forNodeAt: info.listIdx, in: snaps)
-            }
-            anchorOrder = VirtualTreeOrder(slot: info.listIdx * 2 + 1, row: info.rowIndex, sub: info.orderInRow)
-        } else {
+        // `selection_drag`: the selection's own text, resolved by its row identity first.
+        guard let h = selectionHolderEnd() else {
             selectionState.isDraggingSelection = false
             selectionState.edgeScroll.stop()
-            selectionState.coordinator.phase.clear()
+            clearTextSelectionPhase()
             if cxSettings.selectionRectsReadByView {
                 dirtyCommit(at: now, external: false, why: CommitWhy.input)
             }
             return false
         }
+        let snaps = selectableSnapshots()
+        let anchorMountedIdx = h.mountedIdx
+        let edgeScrollIdx = h.mountedIdx ?? h.listIdx ?? 0
+        let anchorGroup = h.groupPath.flatMap { nodeByPath[$0] != nil ? $0 : nil }
+        let anchorOrder = selectionTreeOrder(of: h)
         updateSelectableEdgeScrollOnMove(pos: pos, anchorIdx: edgeScrollIdx, at: now)
 
         let resolvedTarget: (idx: Int, offset: Int)?
@@ -1056,43 +1039,34 @@ internal extension Runtime {
             unit: unit,
             uncopied: flatNodes[targetIdx].el.uncopiedRanges
         )
-        if let anchorIdx = anchorMountedIdx, targetIdx == anchorIdx {
-            let ext = SelectionMath.extendSelection(origin: sel.origin, at: targetUnit)
-            sel.anchor = ext.anchor
-            sel.focus = ext.focus
-            sel.far = nil
-            sel.betweenHash = 0
+        let reachesAnchor = anchorMountedIdx == targetIdx
+        let ends: (anchor: Int, focus: Int)
+        if reachesAnchor {
+            ends = SelectionMath.extendSelection(origin: sel.origin, at: targetUnit)
+        } else if selectionTreeOrder(mountedIdx: targetIdx) > anchorOrder {
+            ends = (sel.originStart, targetUnit.1)
         } else {
-            if selectionTreeOrder(mountedIdx: targetIdx) > anchorOrder {
-                sel.anchor = sel.originStart
-                sel.focus = targetUnit.1
-            } else {
-                sel.anchor = sel.originEnd
-                sel.focus = targetUnit.0
+            ends = (sel.originEnd, targetUnit.0)
+        }
+        // `phase::step` `Event::Drag`: nothing moved, nothing changes; the same far text keeps
+        // what it read and re-pins; another seals the texts between.
+        let targetPath = flatNodes[targetIdx].path
+        let sameFar = reachesAnchor ? sel.far == nil : sel.far?.path == targetPath
+        if (sel.anchor, sel.focus) != (ends.anchor, ends.focus) || !sameFar {
+            sel.anchor = ends.anchor
+            sel.focus = ends.focus
+            if reachesAnchor {
+                sel.far = nil
+            } else if !sameFar {
+                sel.far = SelectionFar(path: targetPath, content: targetContent)
             }
-            sel.far = SelectionFar(path: flatNodes[targetIdx].path, content: targetContent)
-            if let anchorIdx = anchorMountedIdx {
-                sel.betweenHash = SelectionMath.computeBetweenHash(
-                    in: snaps,
-                    anchorIdx: anchorIdx,
-                    farIdx: targetIdx
-                )
+            selectionState.coordinator.phase.startDrag(selection: sel, unit: unit)
+            if sameFar {
+                syncSelectionPins()
             } else {
-                selectionState.coordinator.phase.startDrag(selection: sel, unit: unit)
-                let allSnaps = selectableSnapshotsWithVirtuals()
-                if let aIdx = allSnaps.firstIndex(where: { $0.path == sel.path }),
-                   let fIdx = allSnaps.firstIndex(where: { $0.path == flatNodes[targetIdx].path }) {
-                    sel.betweenHash = SelectionMath.computeBetweenHash(
-                        in: allSnaps,
-                        anchorIdx: aIdx,
-                        farIdx: fIdx
-                    )
-                } else {
-                    sel.betweenHash = 0
-                }
+                sealBetween()
             }
         }
-        selectionState.coordinator.phase.startDrag(selection: sel, unit: unit)
         if hypot(pos.x - selectionState.dragStartPos.x, pos.y - selectionState.dragStartPos.y) > 4.0,
            selectedText() != nil {
             selectionState.suppressedClickOnRelease = true
@@ -1105,11 +1079,15 @@ internal extension Runtime {
     }
 
     func handleSelectablePointerUp(at pos: Vec2, button: PointerButton, at now: Double) -> Bool {
-        _ = pos
         selectionState.edgeScroll.stop()
         guard button == .primary, selectionState.isDraggingSelection else {
             return false
         }
+        // A release moves the pointer where it lets go first, extending the selection there
+        // (`pointer.rs::release` -> `move_pointer` -> `selection_drag`).
+        _ = handleSelectablePointerMove(to: pos, mods: .none, at: now)
+        selectionState.edgeScroll.stop()
+        guard selectionState.isDraggingSelection else { return false }
         selectionState.isDraggingSelection = false
         let suppressClick = selectionState.suppressedClickOnRelease && selectedText() != nil
         selectionState.suppressedClickOnRelease = false
@@ -1130,22 +1108,21 @@ internal extension Runtime {
 
         let isC = ev.key == .command("c") || ev.key == .text("c") || ev.key == .text("C")
         let isA = ev.key == .command("a") || ev.key == .text("a") || ev.key == .text("A")
+        // A selection whose text went away goes before either key (`selection_key`).
+        if selectionState.coordinator.phase.selection != nil, selectionHolderEnd() == nil {
+            clearTextSelectionPhase()
+            if isC { return false }
+        }
         if isC {
-            guard let copied = copySelectionText() else { return false }
+            guard selectionState.coordinator.phase.selection != nil, let copied = copySelectionText() else { return false }
             recordCopy(ClipboardContent(copied, html: copySelectionHTML()))
             return true
         }
         if isA {
-            let outcome = selectionState.coordinator.handleSelectAll(
-                in: selectableSnapshots(),
-                appHandledCmdA: false
-            )
-            if case .selectGroup = outcome {
-                dirtyCommit(at: now, external: false, why: CommitWhy.input)
-                dispatchSelectionChanges(at: now)
-                return true
-            }
-            return false
+            guard selectAllKey() else { return false }
+            dirtyCommit(at: now, external: false, why: CommitWhy.input)
+            dispatchSelectionChanges(at: now)
+            return true
         }
         return false
     }
@@ -1155,39 +1132,44 @@ internal extension Runtime {
             selectionState.pendingSelectTextRequest = nil
             selectionState.pendingSelectAllKey = nil
             selectionState.coordinator.phase.clear()
+            syncSelectionPins()
             dirtyCommit(at: now)
             return
         }
         if let key = tx.pendingSelectAllTextKey {
             selectionState.pendingSelectTextRequest = nil
-            let snaps = selectableSnapshots()
-            if snaps.isEmpty || selectionState.coordinator.selectAllText(key: key, in: snaps) == nil {
-                selectionState.pendingSelectAllKey = key
-            } else {
+            if applySelectAllRequest(key, snaps: { selectableSnapshots() }, unmounted: false) {
                 selectionState.pendingSelectAllKey = nil
+            } else {
+                selectionState.pendingSelectAllKey = key
             }
             dirtyCommit(at: now)
         } else if let req = tx.pendingSelectTextRequest {
             selectionState.pendingSelectAllKey = nil
-            let snaps = selectableSnapshots()
-            if snaps.isEmpty || selectionState.coordinator.selectText(key: req.key, range: req.range, in: snaps) == nil {
-                selectionState.pendingSelectTextRequest = req
-            } else {
+            if applySelectTextRequest(req.key, range: req.range, snaps: { selectableSnapshots() }, unmounted: false) {
                 selectionState.pendingSelectTextRequest = nil
+            } else {
+                selectionState.pendingSelectTextRequest = req
             }
             dirtyCommit(at: now)
         }
     }
 
     func finalizeSelectionAfterCommit(at now: Double) {
-        let snaps = selectableSnapshotsWithVirtuals()
+        lazy var snaps = selectableSnapshotsWithVirtuals()
         let keepPending = needsCommit || !scrollGlidingPaths.isEmpty || !scrollRequestsState.isEmpty
+        // After the commit, a request naming no mounted element looks in the rows of virtual
+        // lists that aren't mounted (`frame.rs` -> `apply_select_request` -> `select_request`).
         if let pendingAll = selectionState.pendingSelectAllKey {
-            if selectionState.coordinator.selectAllText(key: pendingAll, in: snaps) != nil || !keepPending {
+            if applySelectAllRequest(pendingAll, snaps: { snaps }, unmounted: true) {
+                selectionState.pendingSelectAllKey = nil
+            } else if !keepPending {
                 selectionState.pendingSelectAllKey = nil
             }
         } else if let pendingReq = selectionState.pendingSelectTextRequest {
-            if selectionState.coordinator.selectText(key: pendingReq.key, range: pendingReq.range, in: snaps) != nil || !keepPending {
+            if applySelectTextRequest(pendingReq.key, range: pendingReq.range, snaps: { snaps }, unmounted: true) {
+                selectionState.pendingSelectTextRequest = nil
+            } else if !keepPending {
                 selectionState.pendingSelectTextRequest = nil
             }
         }
@@ -1196,7 +1178,10 @@ internal extension Runtime {
     }
 
     func computeActiveSelectionRangesByPath() -> [String: Range<Int>] {
-        guard let sel = currentTextSelection() else { return [:] }
+        guard selectionState.coordinator.phase.selection != nil,
+              let sel = selectionState.coordinator.currentSelection(in: selectableSnapshotsWithVirtuals(endsOnly: true)) else {
+            return [:]
+        }
         var map: [String: Range<Int>] = [:]
         map.reserveCapacity(sel.texts.count)
         for item in sel.texts where !item.range.isEmpty {
@@ -1380,85 +1365,25 @@ internal extension Runtime {
         return boxes
     }
 
-    private func resolvedNodeIndex(forPath path: String) -> Int? {
+    func resolvedNodeIndex(forPath path: String) -> Int? {
         if let idx = nodeByPath[path], idx < flatNodes.count, selectableNodeText(flatNodes[idx]) != nil {
             return idx
         }
+        // Paths with the same keyed identity end in the same segment (the same unkeyed tail, or
+        // the same last key), so only those need the full comparison.
+        let last = path.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? path
+        func endsInLast(_ p: String) -> Bool {
+            guard p.hasSuffix(last) else { return false }
+            let head = p.utf8.dropLast(last.utf8.count)
+            return head.isEmpty || head.last == UInt8(ascii: "/")
+        }
         return flatNodes.firstIndex {
-            selectableNodeText($0) != nil && SelectionMath.sameKeyedPath($0.path, path)
+            endsInLast($0.path) && selectableNodeText($0) != nil && SelectionMath.sameKeyedPath($0.path, path)
         }
     }
 
     private func reconcileSelectionPhaseAgainstTree() {
-        guard let sel = selectionState.coordinator.phase.selection else { return }
-        let anchorTextNow: String
-        let anchorResolvedPath: String
-        if let anchorIdx = resolvedNodeIndex(forPath: sel.path),
-           let nowText = selectableNodeText(flatNodes[anchorIdx]) {
-            anchorTextNow = nowText
-            anchorResolvedPath = flatNodes[anchorIdx].path
-        } else if let vSnap = resolveVirtualEndpoint(forPath: sel.path) {
-            anchorTextNow = vSnap.text
-            anchorResolvedPath = vSnap.path
-        } else {
-            selectionState.coordinator.phase.clear()
-            selectionState.isDraggingSelection = false
-            return
-        }
-        let anchorUpto = sel.far == nil ? min(sel.anchor, sel.focus) : min(sel.anchor, anchorTextNow.utf8.count)
-        guard SelectionMath.kept(then: sel.content, now: anchorTextNow, upto: anchorUpto) else {
-            selectionState.coordinator.phase.clear()
-            selectionState.isDraggingSelection = false
-            return
-        }
-        var updated = sel
-        updated.path = anchorResolvedPath
-        if var far = sel.far {
-            let farTextNow: String?
-            let farResolvedPath: String?
-            if let farIdx = resolvedNodeIndex(forPath: far.path),
-               let nowText = selectableNodeText(flatNodes[farIdx]) {
-                farTextNow = nowText
-                farResolvedPath = flatNodes[farIdx].path
-            } else if let vFar = resolveVirtualEndpoint(forPath: far.path) {
-                farTextNow = vFar.text
-                farResolvedPath = vFar.path
-            } else {
-                farTextNow = nil
-                farResolvedPath = nil
-            }
-            if let farNow = farTextNow,
-               let farPath = farResolvedPath,
-               SelectionMath.kept(then: far.content, now: farNow, upto: min(sel.focus, farNow.utf8.count)) {
-                let allSnaps = selectableSnapshotsWithVirtuals()
-                if let aIdx = allSnaps.firstIndex(where: { $0.path == anchorResolvedPath }),
-                   let fIdx = allSnaps.firstIndex(where: { $0.path == farPath }) {
-                    let nowBetween = SelectionMath.computeBetweenHash(
-                        in: allSnaps,
-                        anchorIdx: aIdx,
-                        farIdx: fIdx
-                    )
-                    guard nowBetween == sel.betweenHash else {
-                        selectionState.coordinator.phase.clear()
-                        selectionState.isDraggingSelection = false
-                        return
-                    }
-                }
-                far.path = farPath
-                updated.far = far
-            } else {
-                selectionState.coordinator.phase.clear()
-                selectionState.isDraggingSelection = false
-                return
-            }
-        }
-        if updated != sel {
-            if case .dragging(_, let unit) = selectionState.coordinator.phase {
-                selectionState.coordinator.phase.startDrag(selection: updated, unit: unit)
-            } else {
-                selectionState.coordinator.phase.place(updated)
-            }
-        }
+        pruneTextSelection()
     }
 
     func dispatchSelectionChanges(at now: Double) {
@@ -1466,7 +1391,6 @@ internal extension Runtime {
         selectionState.isDispatchingSelectionChanges = true
         defer { selectionState.isDispatchingSelectionChanges = false }
 
-        let snaps = selectableSnapshotsWithVirtuals()
         let watchers: [(path: String, el: El<State>)] = flatNodes.compactMap { n in
             guard !n.effectiveInert, n.el.hasSelectionChangeHandler else { return nil }
             return (n.path, n.el)
@@ -1474,6 +1398,9 @@ internal extension Runtime {
         let wasDragging = selectionState.lastDispatchedDragging
         let isDragging = selectionState.coordinator.phase.isDragging
         selectionState.lastDispatchedDragging = isDragging
+        // Nobody listens and nobody heard a selection: nothing to tell.
+        if watchers.isEmpty && selectionState.coordinator.heardByPath.isEmpty { return }
+        let snaps = selectableSnapshotsWithVirtuals()
 
         var changes = selectionState.coordinator.collectSelectionChanges(elements: watchers, nodes: snaps)
         if wasDragging && !isDragging, let active = selectionState.coordinator.currentSelection(in: snaps) {
