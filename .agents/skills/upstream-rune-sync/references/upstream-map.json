@@ -17,9 +17,12 @@
             "Tests/RuneTests/A11ySetValueParityTests.swift",
             "Tests/RuneKitTests/WidgetA11yParityTests.swift",
             "Tests/RuneTests/A11yReaderParityTests.swift",
-            "Tests/RuneTests/A11yFieldIdentityTests.swift"
+            "Tests/RuneTests/A11yFieldIdentityTests.swift",
+            "Sources/Rune/A11y/MacOSAccessibility.swift",
+            "Tests/RuneTests/A11yPresentationTests.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "Assistive primary activation supplies a non-touch press. Expand and collapse do the same when the enabled target exposes the requested transition."
         },
         {
           "upstream": "src/a11y/dump.rs",
@@ -815,9 +818,11 @@
             "Sources/Rune/El/TxCommit.swift",
             "Sources/Rune/Runtime/LiveTail.swift",
             "Sources/Rune/Runtime/PrepareText.swift",
-            "Tests/RuneTests/PrepareTextTests.swift"
+            "Tests/RuneTests/PrepareTextTests.swift",
+            "Tests/RuneTests/TouchTapParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "The press transaction starts with touchTap() false. A captured finger release sets it for that activation."
         },
         {
           "upstream": "src/el/tx/keys.rs",
@@ -834,10 +839,11 @@
             "Sources/Rune/El.swift",
             "Sources/Rune/El/TxSlice2Extensions.swift",
             "Sources/Rune/Runtime/KitWidgetElHooks.swift",
-            "Tests/RuneTests/TxSlice2ParityTests.swift"
+            "Tests/RuneTests/TxSlice2ParityTests.swift",
+            "Tests/RuneTests/TouchTapParityTests.swift"
           ],
           "status": "ported",
-          "note": "Held drag handlers schedule a repeat in seconds or Duration and distinguish repeated from physical moves. Runtime tests check a held gesture, rescheduling and release."
+          "note": "Held drag handlers schedule a repeat in seconds or Duration and distinguish repeated from physical moves. Runtime tests check a held gesture, rescheduling and release. touchTap() distinguishes a captured finger tap from mouse, keyboard and accessibility activation."
         },
         {
           "upstream": "src/el/tx/scroll.rs",
@@ -4081,9 +4087,11 @@
         {
           "upstream": "src/runtime/input/action.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Tests/RuneTests/TouchTapParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Press dispatch passes the captured touch origin to the click and background press handlers. Direct accessibility activation uses the default non-touch origin."
         },
         {
           "upstream": "src/runtime/input/app_ime.rs",
@@ -4095,9 +4103,12 @@
         {
           "upstream": "src/runtime/input/capture.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Input/CanvasGestureAndTouch.swift",
+            "Tests/RuneTests/TouchTapParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Capture retains the finger origin until the matching release. A different contact cannot finish the press and cancellation discards the pending tap."
         },
         {
           "upstream": "src/runtime/input/drop.rs",
@@ -4250,9 +4261,12 @@
             "Sources/Rune/Input/PointerHitParity.swift",
             "Tests/RuneTests/PointerHitParityTests.swift",
             "Sources/Rune/Input/WheelLock.swift",
-            "Tests/RuneTests/WheelOwnerHandoffParityTests.swift"
+            "Tests/RuneTests/WheelOwnerHandoffParityTests.swift",
+            "Sources/Rune/Input/CanvasGestureAndTouch.swift",
+            "Tests/RuneTests/TouchTapParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "A mouse pressOnDown runs immediately with touchTap() false. A finger waits for release inside the target."
         },
         {
           "upstream": "src/runtime/input/popup.rs",
@@ -4337,9 +4351,11 @@
         {
           "upstream": "src/runtime/interaction.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Tests/RuneTests/InteractionPerfParityWaveETests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Interaction reporting keeps the on_press action at rank 3 independently of the touch origin."
         },
         {
           "upstream": "src/runtime/key_index.rs",
@@ -5172,10 +5188,11 @@
         {
           "upstream": "src/runtime/tests/input_clipboard.rs",
           "swift": [
-            "Tests/RuneTests/Slice4EdgeParityWave3BTests.swift"
+            "Tests/RuneTests/Slice4EdgeParityWave3BTests.swift",
+            "Tests/RuneTests/Slice4LibsParityTests.swift"
           ],
           "status": "partial",
-          "note": "Covers focused scroller arrow/space and page-key routing, virtualized inputs and image/file clipboard routing."
+          "note": "Covers focused scroller arrow/space and page-key routing, virtualized inputs and image/file clipboard routing. The clipboard ordering fixture uses an ordinary mouse press in both handler orders and checks that each request is consumed once."
         },
         {
           "upstream": "src/runtime/tests/layout_hover.rs",
@@ -5269,10 +5286,11 @@
         {
           "upstream": "src/runtime/tests/pointer_hit.rs",
           "swift": [
-            "Tests/RuneTests/PointerHitParityTests.swift"
+            "Tests/RuneTests/PointerHitParityTests.swift",
+            "Tests/RuneTests/Slice4EdgeParityWave3BTests.swift"
           ],
           "status": "partial",
-          "note": "Exercises pointer observation, hit-testing, secondary press routing and double press."
+          "note": "Exercises pointer observation, hit-testing, secondary press routing and double press. The focused-row deletion fixture uses a mouse press and checks that removing the field never reuses its stale edit accessor."
         },
         {
           "upstream": "src/runtime/tests/press_moving.rs",
@@ -5686,10 +5704,13 @@
             "Sources/Rune/A11y/WebAccessibilityDocument.swift",
             "Sources/Rune/Resources/Web/rune-web-accessibility.mjs",
             "Tests/RuneTests/WebAccessibilityDeltaTests.swift",
-            "Tests/Browser/document-nodes.html"
+            "Tests/Browser/document-nodes.html",
+            "Sources/Rune/WebBrowserSession.swift",
+            "Sources/Rune/A11y/MacOSAccessibility.swift",
+            "Tests/RuneTests/TouchTapParityTests.swift"
           ],
           "status": "partial",
-          "note": "Stable paths and relative bounds enable incremental DOM projection. On a 100k-table and 50k-tree browser workload the final accessible trees (1,005 and 2,010 nodes) and scene pixels agreed with full snapshots, with over 97% less transfer. Native scroll, focus, idle and disposal have three-browser coverage. Rich runs and focus proxies retain separate differences."
+          "note": "Stable paths and relative bounds enable incremental DOM projection. On a 100k-table and 50k-tree browser workload the final accessible trees (1,005 and 2,010 nodes) and scene pixels agreed with full snapshots, with over 97% less transfer. Native scroll, focus, idle and disposal have three-browser coverage. Rich runs and focus proxies retain separate differences. A browser accessibility activation routes the addressed action to the runtime with a non-touch press origin."
         },
         {
           "upstream": "src/runtime/web/a11y_tests.rs",
