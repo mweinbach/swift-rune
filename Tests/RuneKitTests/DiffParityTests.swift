@@ -1998,6 +1998,47 @@ struct DiffParityTests {
         #expect(rt.element(byKey: "review-df31.c70") == nil)
     }
 
+    @Test("Unified diff rows preserve intrinsic code height across wrap and size changes")
+    @MainActor
+    func unifiedIntrinsicRowHeight() throws {
+        struct Host: Sendable {
+            var diff: DiffState
+            var lineHeight: Float = 18
+        }
+        let values = ["plain", "first\nsecond\nthird", "last", String(repeating: "word ", count: 40)]
+        let lines = values.enumerated().map { i, value in
+            DiffLine(kind: .context, oldNumber: i + 1, newNumber: i + 1, text: value, noNewline: i == 2)
+        }
+        let hunk = DiffHunk(oldStart: 1, oldCount: 4, newStart: 1, newCount: 4, lines: lines)
+        let file = FileDiff(oldPath: "test", newPath: "test", hunks: [hunk])
+        let rt = Runtime(state: Host(diff: DiffState(diff: file)), viewport: Vec2(640, 400), pixelScale: 2) { s, cx in
+            var kit = Kit.neutral(dark: false)
+            kit.ty.mono = TextStyle(size: 12).mono().lh(s.lineHeight)
+            return DiffView<Host>(key: "diff", kit: kit, get: { $0.diff }, set: { $0.diff = $1 }).build(state: s, cx: cx)
+        }
+        func height(_ line: Int) throws -> Float {
+            try #require(rt.element(byKey: "diff-df0.c\(line)")).rect[3]
+        }
+        _ = rt.frame(at: 0)
+        #expect(try height(1) == DiffLayout.lineHeight)
+        #expect(try height(2) == 54)
+        #expect(try height(3) > DiffLayout.lineHeight)
+        #expect(try height(4) == DiffLayout.lineHeight)
+
+        rt.setViewport(Vec2(275, 400), pixelScale: 2)
+        rt.update(at: 0.1) { state, _ in state.diff.wrap = true }
+        _ = rt.frame(at: 0.1)
+        #expect(try height(2) == 54)
+        rt.update(at: 0.2) { state, _ in
+            state.diff.wrap = false
+            state.lineHeight = 41.125
+        }
+        _ = rt.frame(at: 0.2)
+        #expect(try height(1) == 41.125)
+        #expect(try height(2) == 123.375)
+        #expect(try height(4) == 41.125)
+    }
+
     // Compare with rune-kit/tests/diff.rs::diff_50k_time in the Rust perf profile.
     @Test("Release diff timings for commits, scrolling, flings and jumps",
           .enabled(if: ProcessInfo.processInfo.environment["RUNE_DIFF_BENCH"] == "1"))

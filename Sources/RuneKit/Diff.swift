@@ -2769,6 +2769,12 @@ public struct DiffView<State>: Sendable {
         }
         if entries.isEmpty { return container }
 
+        let font = k.ty.mono
+        // A single line can round up by one device pixel. Leave that headroom at any scale.
+        let gutterFitsCode = !st.wrap && font.family == .monospace && font.maxLines == 0
+            && font.resolvedLineHeight + 1 <= lineH
+            && syntaxTheme.weights.allSatisfy { $0 == nil || $0 == font.weight }
+
         var list = El<State>(direction: .column).key("\(key)-rows").wFull().shrink(0).role(.list).label("Diff")
         if !st.wrap { list = list.minW(contentWidth) }
         // The runtime gives each virtual row its model key. The inner element preserves the
@@ -2781,6 +2787,7 @@ public struct DiffView<State>: Sendable {
             let diff = st.files[file]
             let section = index.sections[file]
             let prefix = filePrefix(file)
+            let shell = El<State>(direction: .column).wFull().shrink(0)
             let row: El<State>
             switch entry.kind {
             case .header:
@@ -2805,8 +2812,14 @@ public struct DiffView<State>: Sendable {
                                            delWordBg: delWordBg, selBg: selBg,
                                            annotationFixedWidth: !st.wrap && width > 0 ? width : nil,
                                            annotationStickyLeft: !st.wrap)
+                // The gutter sets the intrinsic height of an ordinary unwrapped code line.
+                // Give layout this height directly so remounts can skip measuring its subtree.
+                if gutterFitsCode, case .unified(let line, _, _) = section.rows[local], !line.noNewline,
+                   line.text.utf8.allSatisfy({ $0 == 9 || (32...126).contains($0) }) {
+                    return shell.h(lineH).child(row.h(lineH))
+                }
             }
-            return El<State>(direction: .column).wFull().shrink(0).child(row)
+            return shell.child(row)
         }).virtualRowsVersion(index.version)
         if hostState != nil {
             list = list.onVisibleRows { [get, set, onVisibleFileHandler] host, visible in
