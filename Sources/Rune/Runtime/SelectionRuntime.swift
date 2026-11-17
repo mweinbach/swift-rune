@@ -496,60 +496,6 @@ internal extension Runtime {
         }
     }
 
-    struct ResolvedVirtualEndpointInfo {
-        let snapshot: SelectableNodeSnapshot
-        let listIdx: Int
-        let rowIndex: Int
-        let orderInRow: Int
-        let rowGroupPath: String?
-    }
-
-    func resolveVirtualEndpointInfo(forPath targetPath: String) -> ResolvedVirtualEndpointInfo? {
-        for (listPath, src) in virtualSelectionSources {
-            guard let listIdx = nodeByPath[listPath],
-                  listIdx < flatNodes.count,
-                  !flatNodes[listIdx].effectiveInert,
-                  let (rowIdx, rowSeg) = virtualRowIndex(forPath: targetPath, in: src) else {
-                continue
-            }
-            var rowSnaps: [SelectableNodeSnapshot] = []
-            collectOffscreenRowSnapshots(
-                source: src,
-                rowIndex: rowIdx,
-                rowSegment: rowSeg,
-                parentInert: flatNodes[listIdx].effectiveInert,
-                baseY: 0,
-                into: &rowSnaps
-            )
-            if let hitOffset = rowSnaps.firstIndex(where: {
-                $0.isSelectable && !($0.text.isEmpty) && ($0.path == targetPath || SelectionMath.sameKeyedPath($0.path, targetPath))
-            }) {
-                let hit = rowSnaps[hitOffset]
-                var rowGroupPath: String?
-                var pPath = hit.parentPath
-                while let p = pPath, let parentSnap = rowSnaps.first(where: { $0.path == p }) {
-                    if parentSnap.isSelectionGroup {
-                        rowGroupPath = parentSnap.path
-                        break
-                    }
-                    pPath = parentSnap.parentPath
-                }
-                return ResolvedVirtualEndpointInfo(
-                    snapshot: hit,
-                    listIdx: listIdx,
-                    rowIndex: rowIdx,
-                    orderInRow: hitOffset,
-                    rowGroupPath: rowGroupPath
-                )
-            }
-        }
-        return nil
-    }
-
-    private func resolveVirtualEndpoint(forPath targetPath: String) -> SelectableNodeSnapshot? {
-        resolveVirtualEndpointInfo(forPath: targetPath)?.snapshot
-    }
-
     func selectionTreeOrder(mountedIdx: Int) -> VirtualTreeOrder {
         var cur = mountedIdx
         while cur < flatNodes.count, let p = flatNodes[cur].parentIndex {
@@ -561,13 +507,6 @@ internal extension Runtime {
             cur = p
         }
         return VirtualTreeOrder(slot: mountedIdx * 2, row: 0, sub: 0)
-    }
-
-    private func resolvedSelectionScrollAnchorIdx(forPath path: String) -> Int? {
-        if let idx = resolvedNodeIndex(forPath: path) {
-            return idx
-        }
-        return resolveVirtualEndpointInfo(forPath: path)?.listIdx
     }
 
     func hasUnmountedVirtualSelectionPin(
@@ -991,10 +930,9 @@ internal extension Runtime {
         }
         let snaps = selectableSnapshots()
         let anchorMountedIdx = h.mountedIdx
-        let edgeScrollIdx = h.mountedIdx ?? h.listIdx ?? 0
         let anchorGroup = h.groupPath.flatMap { nodeByPath[$0] != nil ? $0 : nil }
         let anchorOrder = selectionTreeOrder(of: h)
-        updateSelectableEdgeScrollOnMove(pos: pos, anchorIdx: edgeScrollIdx, at: now)
+        updateSelectableEdgeScrollOnMove(pos: pos, holder: h, at: now)
 
         let resolvedTarget: (idx: Int, offset: Int)?
         if let gPath = anchorGroup {
@@ -1526,8 +1464,9 @@ internal extension Runtime {
         }
     }
 
-    private func selectableEdgeAt(windowY: Float, anchorIdx: Int) -> SelectionEdgeInfo? {
-        guard selectionState.isDraggingSelection, selectionState.coordinator.phase.isDragging else {
+    private func selectableEdgeAt(windowY: Float, holder: SelectionEndRef? = nil) -> SelectionEdgeInfo? {
+        guard selectionState.isDraggingSelection, selectionState.coordinator.phase.isDragging,
+              let anchorIdx = selectionHolderNode(holder) else {
             return nil
         }
         var cur: Int? = anchorIdx
@@ -1567,8 +1506,8 @@ internal extension Runtime {
         return SelectionEdgeInfo(scrollPath: sPath, speed: speedValue, room: room, offset: offset, max: maxY)
     }
 
-    private func updateSelectableEdgeScrollOnMove(pos: Vec2, anchorIdx: Int, at now: Double) {
-        let edge = selectableEdgeAt(windowY: pos.y, anchorIdx: anchorIdx)
+    private func updateSelectableEdgeScrollOnMove(pos: Vec2, holder: SelectionEndRef, at now: Double) {
+        let edge = selectableEdgeAt(windowY: pos.y, holder: holder)
         guard let e = edge, e.moves else {
             selectionState.edgeScroll = Self.restEdgeScroll(edge, scroll: nil)
             return
@@ -1587,19 +1526,9 @@ internal extension Runtime {
               now >= due else {
             return false
         }
-        guard case .dragging(let sel, _) = selectionState.coordinator.phase,
-              let anchorIdx = resolvedSelectionScrollAnchorIdx(forPath: sel.path),
-              let edge = selectableEdgeAt(windowY: pointerPosition.y, anchorIdx: anchorIdx),
-              edge.moves,
-              edge.scrollPath == scrollPath else {
-            let fallback: SelectionEdgeInfo? = {
-                if case .dragging(let sel, _) = selectionState.coordinator.phase,
-                   let anchorIdx = resolvedSelectionScrollAnchorIdx(forPath: sel.path) {
-                    return selectableEdgeAt(windowY: pointerPosition.y, anchorIdx: anchorIdx)
-                }
-                return nil
-            }()
-            selectionState.edgeScroll = Self.restEdgeScroll(fallback, scroll: scrollPath)
+        let edge = selectableEdgeAt(windowY: pointerPosition.y)
+        guard let edge, edge.moves, edge.scrollPath == scrollPath else {
+            selectionState.edgeScroll = Self.restEdgeScroll(edge, scroll: scrollPath)
             return false
         }
         if let prevOffset = fromOffset, abs(edge.offset - prevOffset) <= 1e-9 {
@@ -1686,12 +1615,7 @@ internal extension Runtime {
         if curMax == max {
             return false
         }
-        guard case .dragging(let sel, _) = selectionState.coordinator.phase,
-              let anchorIdx = resolvedSelectionScrollAnchorIdx(forPath: sel.path) else {
-            selectionState.edgeScroll = .idle
-            return false
-        }
-        let edge = selectableEdgeAt(windowY: pointerPosition.y, anchorIdx: anchorIdx)
+        let edge = selectableEdgeAt(windowY: pointerPosition.y)
         // Shrunk under a resting drag: end the wait so later arrivals move nothing (`7cca3272`).
         if let e = edge, e.scrollPath == scrollPath, e.max < max {
             selectionState.edgeScroll = .idle
