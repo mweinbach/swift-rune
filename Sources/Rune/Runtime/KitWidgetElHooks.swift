@@ -359,6 +359,17 @@ extension Runtime {
                 clicks: drag.clicks,
                 mods: rep.mods
             )
+            let prevRepeat = slice2State.dragRepeatFiringNow
+            let prevMods = slice2State.currentMods
+            let prevTime = slice2State.currentInputTime
+            slice2State.dragRepeatFiringNow = true
+            slice2State.currentMods = rep.mods
+            slice2State.currentInputTime = now
+            defer {
+                slice2State.dragRepeatFiringNow = prevRepeat
+                slice2State.currentMods = prevMods
+                slice2State.currentInputTime = prevTime
+            }
             var tx = makeTx(at: now, button: drag.button)
             tx.runtimeActions["dragRepeat"] = true
             onDrag(&state, d, &tx)

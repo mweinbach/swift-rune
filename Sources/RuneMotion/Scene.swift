@@ -1182,6 +1182,15 @@ public struct Scene: Sendable {
         )
     }
 
+    /// Returns the world-space rect for `id` prior to its own `Props.OFFSET` and presence transition offset.
+    public func unoffsetWorldRect(for id: NodeId) -> MotionRect? {
+        guard let ui = index[id.rawValue] else { return nil }
+        let i = Int(ui)
+        guard i < nodes.count, nodes[i].alive else { return nil }
+        let w = worldDual(i)
+        return MotionRect(left: w.0.x, top: w.1.x, right: w.2.x, bottom: w.3.x)
+    }
+
     private mutating func presentDirty() {
         let scale = store.pixelScale
         let reduced = store.reducedMotion

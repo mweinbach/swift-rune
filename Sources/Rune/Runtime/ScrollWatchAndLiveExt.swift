@@ -19,7 +19,7 @@ public struct ScrollWatchState: Sendable, Equatable {
     }
 }
 
-private enum ScrollWatchTLS {
+internal enum ScrollWatchTLS {
     @TaskLocal static var current = ScrollWatchState()
 }
 
