@@ -433,15 +433,13 @@ struct DiffParityTests {
 
     @Test("DiffView toggles fold/mode/wrap, expands gaps, and copies text through Runtime")
     @MainActor
-    func diffViewInteractiveControls() {
+    func diffViewInteractiveControls() throws {
         let oldLines = (1...50).map { "line \($0)" }
         var newLines = oldLines
         newLines[45] = "line 46 modified"
-        let diff = FileDiff.between(
-            old: oldLines.joined(separator: "\n"),
-            new: newLines.joined(separator: "\n"),
-            path: "Demo.swift"
-        )
+        let old = oldLines.joined(separator: "\n")
+        let new = newLines.joined(separator: "\n")
+        let diff = FileDiff.between(old: old, new: new, path: "Demo.swift")
         let kit = Kit.neutral(dark: true)
         let rt = Runtime(
             state: HostState(diff: DiffState(diff: diff)),
@@ -456,29 +454,44 @@ struct DiffParityTests {
 
         // Toggle mode Unified -> Split
         #expect(clickElement(rt, key: "d-mode", at: 0.1))
-        rt.frame(at: 0.1)
+        rt.frame(at: 0.12)
         #expect(rt.state.diff.mode == .split)
 
         // Toggle wrap
         #expect(clickElement(rt, key: "d-wrap", at: 0.2))
-        rt.frame(at: 0.2)
+        rt.frame(at: 0.22)
         #expect(rt.state.diff.wrap)
 
         // Expand gap
         let gapsBefore = rt.state.diff.computeGaps().count
+        let expand = try #require(rt.element(byKey: "d-gap-0-all"))
+        let pointer = Vec2(expand.rect[0] + expand.rect[2] / 2, expand.rect[1] + expand.rect[3] / 2)
         #expect(clickElement(rt, key: "d-gap-0-all", at: 0.3))
-        rt.frame(at: 0.3)
+        rt.frame(at: 0.32)
         #expect(rt.state.diff.computeGaps().count < gapsBefore)
 
-        // Copy button
+        // Expanding the gap puts the old pane under the stationary pointer.
+        let left = try #require(rt.element(byKey: "d-ccode-o-0"))
+        #expect(rt.hitTestElement(at: pointer)?.path.hasPrefix(left.path) == true)
+        #expect(rt.state.diff.copySide == .old)
         #expect(clickElement(rt, key: "d-copy", at: 0.4))
-        rt.frame(at: 0.4)
+        rt.frame(at: 0.42)
         #expect(rt.state.diff.copiedToastVisible)
-        #expect(rt.state.copied?.contains("line 46 modified") == true)
+        #expect(rt.state.copied == old)
+        #expect(rt.clipboard.text == old)
+
+        let right = try #require(rt.element(byKey: "d-ccode-n-0"))
+        rt.pointerMove(to: Vec2(right.rect[0] + right.rect[2] / 2, right.rect[1] + right.rect[3] / 2), at: 0.43)
+        rt.frame(at: 0.44)
+        #expect(rt.state.diff.copySide == .new)
+        #expect(clickElement(rt, key: "d-copy", at: 0.45))
+        rt.frame(at: 0.47)
+        #expect(rt.state.copied == new)
+        #expect(rt.clipboard.text == new)
 
         // Fold toggle hides body
         #expect(clickElement(rt, key: "d-fold", at: 0.5))
-        rt.frame(at: 0.5)
+        rt.frame(at: 0.52)
         #expect(!rt.state.diff.expanded)
         #expect(rt.element(byKey: "d-body") == nil)
     }
