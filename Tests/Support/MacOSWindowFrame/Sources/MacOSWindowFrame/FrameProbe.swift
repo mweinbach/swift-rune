@@ -14,8 +14,10 @@ enum FrameProbe {
 
     static func main() throws {
         let arguments = CommandLine.arguments
-        if arguments.count == 3, arguments[1] == "wheel" {
-            try WheelPhaseProbe.run(host: arguments[2])
+        if (3...4).contains(arguments.count), arguments[1] == "wheel" {
+            let zoom = arguments.count == 4 ? Float(arguments[3]) : 1
+            guard let zoom, (0.1...10).contains(zoom) else { fail("Expected page zoom in 0.1...10") }
+            try WheelPhaseProbe.run(host: arguments[2], zoom: zoom)
             return
         }
         if arguments.count == 4, arguments[1] == "shell" {

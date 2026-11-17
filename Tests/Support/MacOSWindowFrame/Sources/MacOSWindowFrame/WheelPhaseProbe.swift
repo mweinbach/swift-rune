@@ -1,7 +1,7 @@
 import AppKit
 import Rune
 
-/// Run with `swift run --package-path Tests/Support/MacOSWindowFrame MacOSWindowFrame wheel single|grouped|overlay`.
+/// Run with `swift run --package-path Tests/Support/MacOSWindowFrame MacOSWindowFrame wheel single|grouped|overlay [zoom]`.
 @MainActor
 final class WheelPhaseProbe {
     private var observed: [WheelEvent] = []
@@ -11,37 +11,38 @@ final class WheelPhaseProbe {
         exit(1)
     }
 
-    static func run(host: String) throws {
+    static func run(host: String, zoom: Float) throws {
         let probe = WheelPhaseProbe()
         let title = "Rune wheel phases \(getpid())"
-        let view: (Int, inout Cx<Int>) -> El<Int> = { _, _ in
-            el().sizeFull().onWheel { _, event, tx in
+        let view: (Int, inout Cx<Int>) -> El<Int> = { _, cx in
+            cx.zoom(zoom)
+            return el().sizeFull().onWheel { _, event, tx in
                 probe.observed.append(event)
                 tx.liveOnly()
                 return true
-            }
+            }.onMagnify { _, _, _ in fail("macOS Ctrl+wheel dispatched magnify") }
         }
         DispatchQueue.global().asyncAfter(deadline: .now() + 15) { fail("wheel probe timed out") }
         if host == "overlay" {
             let app = NSApplication.shared
             app.setActivationPolicy(.accessory)
             let options = OverlayOptions(interactive: true)
-            let handle = OverlaySpec(name: title, size: Vec2(160, 120), interactive: true, options: options,
+            let handle = OverlaySpec(name: title, size: Vec2(600, 400), interactive: true, options: options,
                                      makeState: { 0 }, view: view).configured(options).makeHandle()
             handle.show()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 guard let number = handle.windowNumber, let window = app.window(withWindowNumber: Int(number))
                 else { fail("missing native overlay") }
-                probe.exercise(host: host, window: window)
+                probe.exercise(host: host, window: window, zoom: zoom)
             }
             app.run()
             return
         }
-        let app = App(title: title, size: Vec2(160, 120), state: 0, view: view)
+        let app = App(title: title, size: Vec2(600, 400), state: 0, view: view)
             .openInactive().accessory().keepRunning().onReady { _ in
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     guard let window = NSApp.windows.first(where: { $0.title == title }) else { fail("missing native window") }
-                    probe.exercise(host: host, window: window)
+                    probe.exercise(host: host, window: window, zoom: zoom)
                 }
             }
         switch host {
@@ -51,7 +52,7 @@ final class WheelPhaseProbe {
         }
     }
 
-    private func exercise(host: String, window: NSWindow) {
+    private func exercise(host: String, window: NSWindow, zoom: Float) {
         let sequence: [(touch: CGScrollPhase?, coast: CGMomentumScrollPhase, phase: GesturePhase, momentum: Bool)] = [
             (.began, .none, .began, false), (.changed, .none, .changed, false), (.ended, .none, .ended, false),
             (nil, .begin, .began, true), (nil, .continuous, .changed, true), (nil, .end, .ended, true),
@@ -64,8 +65,9 @@ final class WheelPhaseProbe {
         var delivered: [NSEvent] = []
         for (i, step) in sequence.enumerated() {
             let dy: Int32 = step.phase == .ended ? 0 : 3
-            guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: dy, wheel2: 0, wheel3: 0)
+            guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: -dy * 2, wheel3: 0)
             else { Self.fail("cannot construct native scroll") }
+            cg.flags = i == 1 ? .maskControl : []
             cg.location = CGPoint(x: point.x, y: CGDisplayBounds(CGMainDisplayID()).height - point.y)
             cg.setIntegerValueField(.eventSourceUserData, value: Int64(i + 100))
             cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(step.touch?.rawValue ?? 0))
@@ -78,13 +80,17 @@ final class WheelPhaseProbe {
         }
         for event in delivered { target.scrollWheel(with: event) }
         guard observed.count == sequence.count else { Self.fail("\(host) \(target) handled \(observed.count) of \(sequence.count) events") }
+        let local = target.convert(point, from: nil)
         for (i, event) in observed.enumerated() {
             guard event.phase == sequence[i].phase, event.momentum == sequence[i].momentum, event.precise,
-                  event.dy == Float(delivered[i].scrollingDeltaY)
+                  event.mods.ctrl == (i == 1),
+                  abs(event.x - Float(local.x) / zoom) < 0.001, abs(event.y - Float(local.y) / zoom) < 0.001,
+                  event.dx == Float(delivered[i].scrollingDeltaX) / zoom,
+                  event.dy == Float(delivered[i].scrollingDeltaY) / zoom
             else { Self.fail("\(host) event \(i) yielded \(event)") }
         }
         let phases = observed.map { $0.phase.rawValue + ($0.momentum ? "(momentum)" : "") }
-        print("PASS \(host) \(type(of: target)) delivered \(phases.joined(separator: ", "))")
+        print("PASS \(host) \(type(of: target)) at zoom \(zoom), Ctrl+wheel \(observed[1].dx), \(observed[1].dy) at \(observed[1].x), \(observed[1].y) delivered \(phases.joined(separator: ", "))")
         exit(0)
     }
 }

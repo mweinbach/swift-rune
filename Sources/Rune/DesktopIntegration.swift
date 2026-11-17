@@ -3551,7 +3551,7 @@ public final class OverlayHandle<State>: @unchecked Sendable {
                 self?.macHost?.requestFrame()
             }
             view.onWheel = { [weak self] wev, pt, now in
-                self?.withLockedRuntime { rt in rt.wheel(wev, at: rt.inputPoint(fromWindow: pt), now: now) }
+                self?.withLockedRuntime { rt in rt.wheelFromWindow(wev, at: rt.inputPoint(fromWindow: pt), now: now) }
                 self?.macHost?.requestFrame()
             }
             view.onKeyDown = { [weak self] kev, now in

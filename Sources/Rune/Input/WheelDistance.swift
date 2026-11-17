@@ -20,8 +20,16 @@ extension Runtime {
     /// its native distance, and ordinary wheel handlers receive view points.
     internal func desktopWheel(dx: Float, dy: Float, at point: Vec2, mods: Mods, now: Double, precise: Bool = false) {
         if mods.ctrl && pinchWheel(dy: dy, at: point, now: now) { return }
+        wheelFromWindow(WheelEvent(dx: dx, dy: dy, precise: precise, mods: mods), at: point, now: now)
+    }
+
+    /// Native deltas arrive in window points. The host has already converted the hit point to view coordinates.
+    internal func wheelFromWindow(_ event: WheelEvent, at point: Vec2, now: Double) {
         let zoom = zoom()
-        wheel(WheelEvent(dx: dx / zoom, dy: dy / zoom, precise: precise, mods: mods), at: point, now: now)
+        var viewEvent = event
+        viewEvent.dx /= zoom
+        viewEvent.dy /= zoom
+        wheel(viewEvent, at: point, now: now)
     }
 
     /// Resolves Windows' per-device line/page setting in window points before page zoom.

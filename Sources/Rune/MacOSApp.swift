@@ -1240,7 +1240,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     override func scrollWheel(with event: NSEvent) {
         let wev = WheelDistance.appKitEvent(event)
-        arrived(.wheel, event) { runtime.wheel(wev, at: localPoint(for: event), now: nowSeconds()) }
+        arrived(.wheel, event) { runtime.wheelFromWindow(wev, at: localPoint(for: event), now: nowSeconds()) }
         renderTick()
     }
 

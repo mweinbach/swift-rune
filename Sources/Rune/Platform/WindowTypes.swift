@@ -798,7 +798,7 @@ final class TypedHostedWindowEntry<State>: NativeHostedWindowEntry {
     }
 
     func wheel(runtimeObj: AnyObject, event: WheelEvent, at: Vec2, now: Double) {
-        rt(runtimeObj).wheel(event, at: at, now: now)
+        rt(runtimeObj).wheelFromWindow(event, at: at, now: now)
     }
 
     func keyDown(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool {
