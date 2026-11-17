@@ -3,7 +3,20 @@
 #include "WGLWorker.h"
 #include "LazyGL.h"
 #include "include/CRuneWin32.h"
+#include <stdio.h>
 #include <stdlib.h>
+
+static void report_failure(const char *phase, DWORD error, HDC dc, int format) {
+    wchar_t enabled[2];
+    if (!(GetEnvironmentVariableW(L"RUNE_GPU_INFO", enabled, 2) == 1 && enabled[0] == L'1') &&
+        !(GetEnvironmentVariableW(L"RUNE_BOOT_PROFILE", enabled, 2) == 1 && enabled[0] == L'1')) return;
+    PIXELFORMATDESCRIPTOR pfd = {0};
+    if (dc && !format) format = GetPixelFormat(dc);
+    if (format && dc) DescribePixelFormat(dc, format, sizeof(pfd), &pfd);
+    fprintf(stderr, "[rune.gpu] wgl_failed=%s win32_error=%lu pixel_format=%d flags=0x%lx color_bits=%u alpha_bits=%u\n",
+            phase, error, format, pfd.dwFlags, (unsigned)pfd.cColorBits, (unsigned)pfd.cAlphaBits);
+    fflush(stderr);
+}
 
 int rune_wgl_vsync(void) {
     typedef BOOL (WINAPI *SwapInterval)(int);
@@ -14,11 +27,15 @@ int rune_wgl_vsync(void) {
 const char *rune_wgl_configure(HDC dc, HGLRC *out, int *vsync) {
     double start = rune_win_boot_clock();
     *out = NULL;
+    // GDI selects from the installed OpenGL provider's pixel formats. Load it
+    // on the GPU path before choosing a format on a previously GDI-only process.
+    if (!rune_win_system_gl_export("wglCreateContext")) return "load opengl32!wglCreateContext";
     PIXELFORMATDESCRIPTOR format = {.nSize = sizeof(format), .nVersion = 1,
         .dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
         .iPixelType = PFD_TYPE_RGBA, .cColorBits = 32, .cAlphaBits = 8, .iLayerType = PFD_MAIN_PLANE};
     int pixel = dc ? ChoosePixelFormat(dc, &format) : 0;
-    if (!pixel || !SetPixelFormat(dc, pixel, &format)) return "SetPixelFormat";
+    if (!pixel) return "ChoosePixelFormat";
+    if (!SetPixelFormat(dc, pixel, &format)) return "SetPixelFormat";
     start = rune_win_boot_end("wgl_pixel_format", start);
 
     HGLRC legacy = rune_lazy_wglCreateContext(dc);
@@ -58,6 +75,7 @@ struct RuneWGLWorker {
     SRWLOCK lock;
     LONG references;
     HWND notify;
+    DWORD owner_thread;
     UINT message;
     uint32_t token;
     POINT position;
@@ -114,20 +132,39 @@ static DWORD WINAPI build_renderer(void *arg) {
     AcquireSRWLockExclusive(&worker->lock);
     if (!worker->urgent) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     BOOL active = worker->notify != NULL;
+    // New threads normally connect to the process's initial desktop. A host
+    // can put its window thread on a different desktop before opening Rune.
+    HDESK desktop = active ? GetThreadDesktop(worker->owner_thread) : NULL;
+    BOOL connected = desktop && SetThreadDesktop(desktop);
+    DWORD error = GetLastError();
     ReleaseSRWLockExclusive(&worker->lock);
     SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    HWND window = active ? worker_window(worker->position) : NULL;
+    HWND window = connected ? worker_window(worker->position) : NULL;
+    if (connected && !window) error = GetLastError();
     HDC dc = window ? GetDC(window) : NULL;
+    if (window && !dc) error = GetLastError();
     HGLRC gl = NULL;
-    BOOL ready = dc && !rune_wgl_configure(dc, &gl, NULL);
-    if (ready) {
+    const char *failed = !connected ? "SetThreadDesktop" : !window ? "bootstrap window" : "bootstrap GetDC";
+    if (dc) {
+        failed = rune_wgl_configure(dc, &gl, NULL);
+        error = GetLastError();
+    }
+    if (!failed) {
         AcquireSRWLockShared(&worker->lock);
         active = worker->notify != NULL;
         ReleaseSRWLockShared(&worker->lock);
-        ready = active && (!worker->prepare || worker->prepare(worker->ctx));
+        if (active && worker->prepare && !worker->prepare(worker->ctx)) {
+            failed = "prepare renderer";
+            error = GetLastError();
+        }
     }
-    int format = ready ? GetPixelFormat(dc) : 0;
-    ready = format && rune_lazy_wglMakeCurrent(NULL, NULL);
+    int format = dc ? GetPixelFormat(dc) : 0;
+    if (!failed && active && (!format || !rune_lazy_wglMakeCurrent(NULL, NULL))) {
+        failed = format ? "release worker context" : "GetPixelFormat";
+        error = GetLastError();
+    }
+    if (active && failed) report_failure(failed, error, dc, format);
+    BOOL ready = active && !failed;
     AcquireSRWLockExclusive(&worker->lock);
     worker->state = ready ? 1 : -1;
     worker->prepared = ready ? gl : NULL;
@@ -163,6 +200,7 @@ RuneWGLWorker *rune_wgl_worker_start(HWND notify, UINT message, int urgent, void
     if (notify && worker && (worker->decision = CreateEventW(NULL, TRUE, FALSE, NULL))) {
         worker->references = 2;
         worker->notify = notify;
+        worker->owner_thread = GetWindowThreadProcessId(notify, NULL);
         worker->message = message;
         worker->token = (uint32_t)InterlockedIncrement(&next_token);
         worker->urgent = urgent;
@@ -229,6 +267,8 @@ int rune_wgl_worker_adopt(RuneWGLWorker *worker, HDC drawable, HGLRC *out) {
     BOOL matches = selected ? selected == format :
         DescribePixelFormat(drawable, format, sizeof(pfd), &pfd) && SetPixelFormat(drawable, format, &pfd);
     BOOL current = matches && rune_lazy_wglMakeCurrent(drawable, gl);
+    if (!current) report_failure(matches ? "adopt wglMakeCurrent" : "adopt pixel format",
+                                 GetLastError(), drawable, selected ? selected : format);
     AcquireSRWLockExclusive(&worker->lock);
     BOOL adopted = current && worker->notify;
     void (*release)(void *) = NULL;

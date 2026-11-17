@@ -33,6 +33,16 @@ private final class WindowsGPUPreparation: @unchecked Sendable {
     deinit { renderer?.abandon() }
 }
 
+// Both callbacks run on the native WGL thread, including the release after a rejected context.
+private func prepareWindowsGPU(_ pointer: UnsafeMutableRawPointer?) -> Int32 {
+    guard let pointer else { return 0 }
+    return Unmanaged<WindowsGPUPreparation>.fromOpaque(pointer).takeUnretainedValue().build()
+}
+
+private func releaseWindowsGPU(_ pointer: UnsafeMutableRawPointer?) {
+    if let pointer { Unmanaged<WindowsGPUPreparation>.fromOpaque(pointer).release() }
+}
+
 @MainActor
 final class WindowsCPUWindow {
     private let painter = CpuPainter(threads: min(6, max(1, ProcessInfo.processInfo.activeProcessorCount)))
@@ -66,12 +76,8 @@ final class WindowsCPUWindow {
         let build = WindowsGPUPreparation()
         job = build
         GpuEvents.starting()
-        rune_win_gpu_start(window, requiresGPU ? 1 : 0, Unmanaged.passRetained(build).toOpaque(), { pointer in
-            guard let pointer else { return 0 }
-            return Unmanaged<WindowsGPUPreparation>.fromOpaque(pointer).takeUnretainedValue().build()
-        }, { pointer in
-            if let pointer { Unmanaged<WindowsGPUPreparation>.fromOpaque(pointer).release() }
-        })
+        rune_win_gpu_start(window, requiresGPU ? 1 : 0, Unmanaged.passRetained(build).toOpaque(),
+                           prepareWindowsGPU, releaseWindowsGPU)
     }
 
     func takeGPU(_ window: OpaquePointer) -> PortableGLRenderer? {
