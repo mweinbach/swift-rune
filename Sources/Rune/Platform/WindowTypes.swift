@@ -390,6 +390,7 @@ public protocol HostedWindowEntry: AnyObject {
     /// Keeps the runtime dirty while the accessibility adapter holds words back (#980).
     func markAccessibilityDirty(runtimeObj: AnyObject)
     @discardableResult func performAccessibilityAction(runtimeObj: AnyObject, id: String, action: AccessibilityAction, at: Double) -> Bool
+    @discardableResult func selectAccessibilityText(runtimeObj: AnyObject, id: String, range: Range<Int>, at: Double) -> Bool
     @discardableResult func performAccessibilitySetValue(runtimeObj: AnyObject, id: String, value: AccessibilityActionValue, at: Double) -> Bool
     func shortcutRegistry(runtimeObj: AnyObject) -> ShortcutRegistry?
     var hasAppGlobalShortcuts: Bool { get }
@@ -743,6 +744,11 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     @discardableResult
     func performAccessibilityAction(runtimeObj: AnyObject, id: String, action: AccessibilityAction, at time: Double) -> Bool {
         rt(runtimeObj).performAccessibilityAction(id, action: action, at: time)
+    }
+
+    @discardableResult
+    func selectAccessibilityText(runtimeObj: AnyObject, id: String, range: Range<Int>, at time: Double) -> Bool {
+        rt(runtimeObj).accessibilitySelectText(id, range: range, at: time)
     }
 
     @discardableResult

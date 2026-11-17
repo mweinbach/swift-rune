@@ -112,6 +112,7 @@ public struct AccessibilityNode: Sendable, Equatable {
     public var isSecure: Bool
     public var actions: [AccessibilityAction]
     public var children: [AccessibilityNode]
+    internal var keepsControlContent = false
 
     public init(
         id: String,
@@ -200,6 +201,34 @@ public struct AccessibilityNode: Sendable, Equatable {
 
 /// Projects a laid-out `El<State>` tree into a semantic `AccessibilityNode` tree.
 public enum AccessibilityTreeBuilder {
+    /// A labelled button or link already speaks its own words. Skip redundant parts but
+    /// keep their meaningful descendants, including nested links and focus targets.
+    internal static func controlChildren(
+        _ children: [AccessibilityNode], role: ElementRole, name: String?
+    ) -> [AccessibilityNode] {
+        guard role == .button || role == .link,
+              let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return children }
+        func append(_ child: AccessibilityNode, to kept: inout [AccessibilityNode]) {
+            guard !child.keepsControlContent, !child.isFocusable, child.actions.isEmpty, !child.isSecure,
+                  child.role != .textInput, child.role != .multilineTextInput,
+                  child.role != .passwordInput, child.role != .link, child.role != .button, child.role != .grid,
+                  child.characterLengths == nil else {
+                kept.append(child)
+                return
+            }
+            let words = (child.value ?? child.label ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let repeated = child.role == .text ? !words.isEmpty && name.contains(words) : words.isEmpty || name.contains(words)
+            if repeated {
+                for part in child.children { append(part, to: &kept) }
+            } else {
+                kept.append(child)
+            }
+        }
+        var kept: [AccessibilityNode] = []
+        for child in children { append(child, to: &kept) }
+        return kept
+    }
+
     private static func collectA11yWords<State>(in node: El<State>, out: inout [String]) {
         guard !node.isSecure else { return }
         if let lbl = node.a11yLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !lbl.isEmpty {
@@ -306,6 +335,7 @@ public enum AccessibilityTreeBuilder {
         }
 
         var value: String? = element.a11yValue ?? element.a11ySelected
+        var fieldSelection: [Int]?
         var isSecure = element.isSecure
         // `RoleCtx::multiline` (`a11y/node.rs:31`): a field that is not single-line.
         let multiline = element.isMultilineField
@@ -313,6 +343,7 @@ public enum AccessibilityTreeBuilder {
             let edit = editLens.get(state)
             isSecure = isSecure || edit.isSecure
             value = isSecure ? nil : edit.text
+            fieldSelection = isSecure ? nil : [0, edit.anchor, 0, edit.cursor]
         }
 
         let resolvedRole: ElementRole = element.role == .textInput && (isSecure || multiline)
@@ -346,14 +377,14 @@ public enum AccessibilityTreeBuilder {
                 projectedChildren.append(childNode)
             }
         }
-        var projectedSelection: [Int]? = nil
+        var projectedSelection = fieldSelection
         if let grid = element.terminalGridPayload {
             let projected = Self.projectTerminalGrid(grid, nodeId: nodeId, bounds: absRect)
             projectedChildren.append(contentsOf: projected.children)
             projectedSelection = projected.selection
         }
 
-        return AccessibilityNode(
+        var node = AccessibilityNode(
             id: nodeId,
             role: resolvedRole,
             label: label,
@@ -385,8 +416,10 @@ public enum AccessibilityTreeBuilder {
             isModal: element.isModal,
             isSecure: isSecure,
             actions: actions,
-            children: projectedChildren
+            children: controlChildren(projectedChildren, role: resolvedRole, name: isSecure ? nil : element.a11yLabel ?? labelledByText)
         )
+        node.keepsControlContent = element.keepsControlContent
+        return node
     }
 
     internal static func projectTerminalGrid(
@@ -501,19 +534,37 @@ public enum AppKitAccessibilityMapper {
         from node: AccessibilityNode,
         parent: AnyObject? = nil,
         onAction: (@Sendable (String, AccessibilityAction) -> Void)? = nil,
+        onSelectText: (@Sendable (String, Range<Int>) -> Void)? = nil,
         onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)? = nil
     ) -> RuneNSAccessibilityElement {
-        let el = RuneNSAccessibilityElement(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
-        let childEls = node.children.map {
-            buildElement(from: $0, parent: el, onAction: onAction, onSetValue: onSetValue)
-        }
-        el.setAccessibilityChildren(childEls)
+        let el = makeElement(node, parent: parent, onAction: onAction, onSelectText: onSelectText, onSetValue: onSetValue)
+        el.setAccessibilityChildren(node.children.map {
+            buildElement(from: $0, parent: el, onAction: onAction, onSelectText: onSelectText, onSetValue: onSetValue)
+        })
         return el
+    }
+
+    @MainActor
+    internal static func makeElement(
+        _ node: AccessibilityNode,
+        parent: AnyObject?,
+        onAction: (@Sendable (String, AccessibilityAction) -> Void)?,
+        onSelectText: (@Sendable (String, Range<Int>) -> Void)?,
+        onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)?
+    ) -> RuneNSAccessibilityElement {
+        if !node.isSecure, node.role == .textInput || node.role == .multilineTextInput,
+           let text = node.value, let selection = node.textSelection,
+           selection.count == 4, selection[0] == 0, selection[2] == 0 {
+            return RuneAXTextField(node: node, parent: parent, text: text,
+                                   anchor: selection[1], focus: selection[3], onAction: onAction,
+                                   onSelectText: onSelectText, onSetValue: onSetValue)
+        }
+        return RuneNSAccessibilityElement(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
     }
 }
 
 /// Concrete `NSAccessibilityElement` backing a projected `AccessibilityNode` on macOS.
-public final class RuneNSAccessibilityElement: NSAccessibilityElement {
+public class RuneNSAccessibilityElement: NSAccessibilityElement {
     public let nodeId: String
     public let supportedActions: [AccessibilityAction]
     private let actionHandler: (@Sendable (String, AccessibilityAction) -> Void)?
@@ -546,7 +597,7 @@ public final class RuneNSAccessibilityElement: NSAccessibilityElement {
             // A heading's value is its level, as WebKit and Chromium give VoiceOver
             // (`vendor/accesskit_macos.patch`, #975), checked before the text value.
             super.setAccessibilityValue(NSNumber(value: AccessibilityHeading.macLevelValue(level: node.level)))
-        } else if !node.isSecure, let value = node.value {
+        } else if !node.isSecure, !(self is RuneAXTextField), let value = node.value {
             super.setAccessibilityValue(value)
         }
         if let help = node.help {

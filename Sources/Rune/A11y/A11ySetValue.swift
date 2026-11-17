@@ -71,6 +71,7 @@ public struct ElementA11yInput: Sendable, Equatable {
     public var pressable: Bool
     /// It steps (`focus.step.is_some()`).
     public var steps: Bool
+    internal var keepsControlContent = false
     public var range: A11yRange?
 
     public init(isInput: Bool, editable: Bool, multiline: Bool, pressable: Bool, steps: Bool, range: A11yRange?) {
@@ -91,6 +92,7 @@ public struct ElementA11yInput: Sendable, Equatable {
             steps: el.handlers.onStep != nil,
             range: el.a11yRange
         )
+        keepsControlContent = el.keepsControlContent
     }
 }
 
@@ -126,6 +128,24 @@ public extension Runtime {
             return performAccessibilitySetValue(id, value: value, at: now)
         }
         return performAccessibilityAction(id, action: action, at: now)
+    }
+
+    /// Applies a reader's selection expressed in UTF-8 bytes of the field's value.
+    @discardableResult
+    func accessibilitySelectText(_ id: String, range: Range<Int>, at now: Double = 0) -> Bool {
+        guard let i = a11yTargetIndex(id), a11yAllowed(i) else { return false }
+        let el = flatNodes[i].el
+        guard el.hasEditAccess, !el.isSecure, let lens = el.handlers.editLens,
+              !lens.get(state).isSecure else { return false }
+        return a11yEdit(index: i, at: now) { edit in
+            let anchor = edit.clampScalarBoundary(range.lowerBound)
+            let focus = edit.clampScalarBoundary(range.upperBound)
+            edit.setSelectionRaw(anchor: anchor, cursor: focus)
+            edit.snapToPills()
+            edit.typingStyle = .inherited
+            edit.caretColumn = .free
+            edit.caretAffinity = .downstream
+        }
     }
 
     /// Runs `SetValue` (`a11y/actions.rs:67-82`, `:147-151`): a field with edit access focuses (as
