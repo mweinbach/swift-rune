@@ -1310,7 +1310,7 @@ extension Runtime {
             let newIds = accum.stackNewIds[sp] ?? []
             let newSet = Set(newIds)
             let existed = accum.existedStackPaths.contains(sp) && viewCommitCount > 1
-            let isVirtual = (virtualLists[sp] != nil)
+            let virtualList = virtualLists[sp]
             var order: [String] = []
             order.reserveCapacity(newIds.count + 4)
             var shut: [String] = []
@@ -1329,15 +1329,19 @@ extension Runtime {
                     ni += 1
                 } else {
                     let oldPath = old.hasPrefix("fold:") ? String(old.dropFirst(5)) : (old.hasPrefix("growth:") ? String(old.dropFirst(7)) : old)
-                    // Upstream `apply.rs`: `is_virtual && unseen_ids.contains(old)` — a virtual row that drew
-                    // nothing on the last paint (scrolled past, overscan) leaves at once instead of holding its height.
-                    let virtualUnseen = isVirtual && (presentedRectByPath[oldPath] == nil
-                        || nodeByPath[oldPath].map { unseenPresence.currentPaintUnseenIds.contains(flatNodes[$0].nodeId) } ?? true)
+                    // An evicted virtual row still occupies its measured height in the spacer.
+                    // Only a removed row that was actually drawn can hold a closing slot.
+                    let holdsPlace = virtualList.map { list in
+                        guard let previous = nodeByPath[oldPath].map({ flatNodes[$0] }),
+                              let key = previous.key, list.rowPlaces.index(of: key) == nil,
+                              presentedRectByPath[oldPath] != nil else { return false }
+                        return !unseenPresence.currentPaintUnseenIds.contains(previous.nodeId)
+                    } ?? true
                     if let entry = growthRows[old],
                        entry.track.h > 0.01,
                        existed,
                        !settleAll,
-                       !virtualUnseen {
+                       holdsPlace {
                         let hold: Double = (entry.track.glide != nil) ? 0.0 : 0.15
                         if entry.track.glide != nil && stack.closing[old] == nil {
                             shut.append(old)
