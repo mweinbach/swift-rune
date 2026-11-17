@@ -5,8 +5,8 @@
 #import <stdatomic.h>
 #include "include/ScrollBenchMetal.h"
 
-// Exercise the app's own Winit NSView without moving the user's pointer or posting system events.
-@interface ScrollFixtureEvent : NSObject
+// Exercise the app's own NSView without moving the user's pointer or posting system events.
+@interface ScrollFixtureEvent : NSEvent
 @property NSPoint point;
 @property CGFloat wheelDelta;
 @end
@@ -30,9 +30,7 @@ static _Atomic unsigned submitted;
 static id (*previousNextDrawable)(id, SEL);
 static FILE *presentations;
 
-unsigned rust_wheels_submitted(void) { return submitted; }
-
-void scroll_bench_mark_wheel(unsigned step) { submitted = step; }
+unsigned scroll_bench_wheels_submitted(void) { return submitted; }
 
 static id nextDrawable(id layer, SEL selector) {
     id<CAMetalDrawable> drawable = previousNextDrawable(layer, selector);
@@ -58,32 +56,35 @@ bool scroll_bench_observe_presentations(const char *path) {
     return true;
 }
 
-static NSView *winitView(NSView *view) {
-    if ([NSStringFromClass(view.class) containsString:@"WinitView"]) return view;
+static NSView *scrollView(NSView *view, const char *className) {
+    if (strstr(class_getName(view.class), className)) return view;
     for (NSView *child in view.subviews) {
-        NSView *found = winitView(child);
+        NSView *found = scrollView(child, className);
         if (found) return found;
     }
     return nil;
 }
 
-void rust_wheel(double delta) {
+void scroll_bench_wheel(double delta) {
     // Let the first window appear before measuring its first wheel.
     int delay = submitted ? 1 : 200;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
         NSView *target = nil;
         for (NSWindow *window in NSApp.windows) {
-            if (window.visible && [window.title hasPrefix:@"Rune Rust Large "]) {
-                target = winitView(window.contentView);
-                break;
-            }
+            if (!window.visible || !window.contentView) continue;
+            if ([window.title hasPrefix:@"Rune Rust Large "])
+                target = scrollView(window.contentView, "WinitView");
+            else if ([window.title isEqualToString:@"Rune large views"])
+                target = scrollView(window.contentView, "RuneMetalHostView");
+            if (target) break;
         }
-        if (!target) { fputs("Could not find the benchmark's Winit view\n", stderr); exit(1); }
+        if (!target) { fputs("Could not find the benchmark's scroll view\n", stderr); exit(1); }
         ScrollFixtureEvent *event = [ScrollFixtureEvent new];
         event.wheelDelta = delta;
         event.point = [target convertPoint:NSMakePoint(NSMidX(target.bounds), NSMidY(target.bounds)) toView:nil];
-        [target scrollWheel:(NSEvent *)event];
+        // The Swift host may synchronously render before scrollWheel: returns.
         submitted++;
+        [target scrollWheel:event];
     });
 }
 

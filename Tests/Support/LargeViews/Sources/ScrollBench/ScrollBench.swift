@@ -249,6 +249,9 @@ private struct Probe {
         var handled = 0
         let instrumented = app.onFrameEncoded { frame in
             guard frame.outcome == .drawn, drawn.count <= steps else { return }
+            #if canImport(ScrollBenchMetal)
+            if presentationOutput != nil, Int(scroll_bench_wheels_submitted()) != drawn.count { return }
+            #endif
             let now = ContinuousClock.now
             if let previous { intervals.append(elapsedMS(previous, now)) }
             previous = now
@@ -271,7 +274,10 @@ private struct Probe {
                     }
                 } else {
                     #if canImport(ScrollBenchMetal)
-                    if presentationOutput != nil { scroll_bench_mark_wheel(UInt32(index + 1)) }
+                    if presentationOutput != nil {
+                        scroll_bench_wheel(Double(workload.wheelDelta))
+                        return
+                    }
                     #endif
                     scroll(rt, at: rt.currentTime)
                     let waker = rt.waker

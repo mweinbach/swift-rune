@@ -3,8 +3,8 @@ use std::{cell::RefCell, ffi::{CString, c_char, c_void}, rc::Rc, time::Instant};
 
 unsafe extern "C" {
     fn scroll_bench_observe_presentations(path: *const c_char) -> bool;
-    fn rust_wheel(delta: f64);
-    fn rust_wheels_submitted() -> u32;
+    fn scroll_bench_wheel(delta: f64);
+    fn scroll_bench_wheels_submitted() -> u32;
     fn rust_finish(callback: unsafe extern "C" fn(*mut c_void), context: *mut c_void);
 }
 
@@ -29,12 +29,12 @@ fn main() {
     let mut checkpoints = Vec::new();
     app.on_frame_encoded(move |frame| {
         encoded.borrow_mut().push(serde_json::json!({
-            "wheel": unsafe { rust_wheels_submitted() }, "outcome": format!("{:?}", frame.outcome()),
+            "wheel": unsafe { scroll_bench_wheels_submitted() }, "outcome": format!("{:?}", frame.outcome()),
             "at": frame.at().duration_since(start).as_secs_f64(),
             "updateMS": frame.update_ms(), "encodeMS": frame.encode_ms(),
         }));
     }).on_frame_drawn(move |rt| {
-        let step = unsafe { rust_wheels_submitted() };
+        let step = unsafe { scroll_bench_wheels_submitted() };
         if finished || step < requested { return; }
         if [0, 1, 24, 60, 300, 600].contains(&step) {
             let elements = rt.elements();
@@ -64,7 +64,7 @@ fn main() {
             unsafe { rust_finish(quit, Box::into_raw(Box::new(handle.clone())).cast()); }
         } else {
             requested += 1;
-            unsafe { rust_wheel(WHEEL_DY); }
+            unsafe { scroll_bench_wheel(WHEEL_DY); }
         }
     }).run();
 }
