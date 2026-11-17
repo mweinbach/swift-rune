@@ -23,6 +23,23 @@ struct MemoLayoutSpanTests {
             a.children.count == b.children.count && zip(a.children, b.children).allSatisfy(sameGeometry)
     }
 
+    @Test("Screen travel changes only its own identity under a keyed root")
+    func descendantsKeepAuthoredPathHashes() {
+        let layout = RetainedLayoutCoordinator()
+        let texts = RetainedLayoutCoordinator.TextLayoutCollector()
+        let panel: El<State> = col().key("panel")
+            .animateLayout(LayoutAnim(spring: MotionTokens.DEFAULT, travel: .screen))
+            .child(text("first").key("same/key")).child(text("second").key("same/key"))
+            .child(text("index"))
+        let root: El<State> = col().key("café/root").child(panel)
+        _ = layout.compute(root: root, state: State(), viewport: Vec2(180, 90),
+                           pixelScale: 1, textSystem: TextSystem(), textLayouts: texts)
+        let prefix = "/@café/root/@panel"
+        let labels = Set(["@same/key", "@same/key#dup1", "2"].map { NodeId.hash("\(prefix)/\($0)") })
+        #expect(Set(texts.map.keys) == labels)
+        #expect(texts.liveIds == labels.union([NodeId.hash("/@café/root"), NodeId.hash("screen:@panel")]))
+    }
+
     @Test("Unchanged descendants transfer their slots across resize and reparent, and keep current text layouts")
     func transferAcrossLayoutPasses() {
         let cache = MemoCache()

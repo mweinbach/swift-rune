@@ -12,6 +12,8 @@ import CoreText
 fileprivate struct SyncPrepared {
     var myIndex: Int
     var path: String
+    var storePathId: RuneMotion.NodeId
+    var runtimePathId: RuneMotion.NodeId
     var keyHash: UInt64
     var areas: [String: RuneTaffy.GridTemplateArea]?
     var childSX: TaffyBridge.ScrollXChild?
@@ -20,7 +22,7 @@ fileprivate struct SyncPrepared {
     var isRow: Bool
     var measureHash: UInt64?
     var isRedacted: Bool
-    var hasRatio: Bool
+    var aspectFit: Int?
 }
 
 /// Reconciles Rune elements with the per-runtime Taffy store, retaining node styles,
@@ -40,12 +42,10 @@ final class RetainedLayoutCoordinator {
         var index: Int
         var nodeId: RuneMotion.NodeId
         var shapeKey: TextShapeKey
-        var text: String
-        var spans: [TextSpan]?
-        var pills: [PillChip]
-        var style: TextStyle
+        var text: String {
+            !isInput && shapeKey.spans?.isEmpty == false ? "" : shapeKey.authText
+        }
         var isInput: Bool
-        var pretty: Bool = false
         /// A by-paragraph field's request (`layout_text`), for a leaf no measure laid out.
         var paragraphs: ParagraphRequest? = nil
     }
@@ -131,8 +131,6 @@ final class RetainedLayoutCoordinator {
         var parentOffset: Int?
         var slot: SlotId = SlotId()
         var taffyStyle: RuneTaffy.TaffyStyle
-        var rawTaffyStyle: RuneTaffy.TaffyStyle
-        var aspectFitRatio: Float?
         var measure: MeasureBox?
         var childOffsets: [Int] = []
         var flow: Flow = .ltr
@@ -189,7 +187,8 @@ final class RetainedLayoutCoordinator {
     ) -> LayoutEngine.ResultNode {
         var flat: [PreparedNode] = []
         flat.reserveCapacity(max(32, store.liveCount))
-        var aspectFitIndices: [Int] = []
+        var aspectFits: [(ratio: Float, raw: RuneTaffy.TaffyStyle)] = []
+        var aspectFitOrder: [(index: Int, fit: Int)] = []
         var hasAnchoredFit = false
         var nonSecretLeaves: [TextLeafFallback] = []
         var overflowLeaves: [OverflowLeaf] = []
@@ -197,6 +196,9 @@ final class RetainedLayoutCoordinator {
         let langTag = textSystem.language
         let storeRootPath = "/0"
         let keyedRootPath = rootEl.storageKeyId.map { "/@\($0)" }
+
+        let storeRootId = RuneMotion.NodeId.hash(storeRootPath)
+        let runtimeRootId = keyedRootPath.map(RuneMotion.NodeId.hash) ?? storeRootId
 
         if lastViewport != viewport || lastFitHeight != fitHeight {
             lastMemoLayout = nil
@@ -223,15 +225,6 @@ final class RetainedLayoutCoordinator {
         reusedMemoGeometry = false
         var geometryChanged = false
         var hasMirroredFlow = false
-
-        func fnv1a64(_ s: String) -> UInt64 {
-            var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-            for b in s.utf8 {
-                hash ^= UInt64(b)
-                hash &*= 0x0100_0000_01b3
-            }
-            return hash
-        }
 
         func makeMeasure(el: El<State>, nodeId: RuneMotion.NodeId, flatIndex: Int, forcedTextFlow: TextFlow?) -> (fn: Measure?, hash: UInt64?, redacted: Bool) {
             guard el.children.isEmpty else { return (nil, nil, false) }
@@ -275,10 +268,6 @@ final class RetainedLayoutCoordinator {
                         index: flatIndex,
                         nodeId: nodeId,
                         shapeKey: sKey,
-                        text: measureStr,
-                        spans: resolved.spans,
-                        pills: resolved.pills,
-                        style: resolved.style,
                         isInput: true,
                         paragraphs: paragraphs
                     ))
@@ -343,7 +332,6 @@ final class RetainedLayoutCoordinator {
                     overflowLeaves.append((flatIndex, nodeId, resolved))
                 }
                 if !resolved.isSecure, !resolved.displayedText.isEmpty, !resolved.truncateFade, resolved.advanceRun == nil, !isClampedOrEllipsis, textLayouts != nil {
-                    let hasSpans = (resolved.spans?.isEmpty == false)
                     let sKey = TextShapeKey(
                         authText: resolved.displayedText,
                         spans: resolved.spans,
@@ -360,12 +348,7 @@ final class RetainedLayoutCoordinator {
                         index: flatIndex,
                         nodeId: nodeId,
                         shapeKey: sKey,
-                        text: hasSpans ? "" : resolved.displayedText,
-                        spans: resolved.spans,
-                        pills: resolved.pills,
-                        style: resolved.style,
-                        isInput: false,
-                        pretty: resolved.pretty
+                        isInput: false
                     ))
                 }
                 let fn: Measure = { maxW, isRealLayout, textLayouts, nodeId in
@@ -427,22 +410,15 @@ final class RetainedLayoutCoordinator {
         @inline(never)
         func syncPrepare(
             _ el: El<State>,
-            isRoot: Bool,
-            parentIndex: Int?,
-            parentPath: String,
+            parent: SyncPrepared?,
             siblingIndex: Int,
-            siblingKeysSeen: inout [String: Int],
-            parentRow: Bool,
-            parentAreas: [String: RuneTaffy.GridTemplateArea]?,
-            scrollXChild: TaffyBridge.ScrollXChild?,
-            parentFlow: Flow,
-            parentDirected: Bool
+            siblingKeysSeen: inout [String: Int]
         ) -> SyncPrepared {
             let pin: DirPin = (el.isUnmirrored || el.anchor != nil) ? .physical : .flowing
-            let effectiveParentFlow: Flow = el.isUnmirrored ? .ltr : parentFlow
+            let effectiveParentFlow: Flow = el.isUnmirrored ? .ltr : (parent?.nodeFlow ?? .ltr)
             let (nodeFlow, _) = stepDirection(parent: effectiveParentFlow, el: el, state: state)
             if nodeFlow == .rtl { hasMirroredFlow = true }
-            let nodeDirected = (el.explicitDir != nil) || el.isUnmirrored || parentDirected
+            let nodeDirected = (el.explicitDir != nil) || el.isUnmirrored || (parent?.nodeDirected == true)
             let forcedTextFlow: TextFlow? = (nodeDirected && !el.textDirByParagraph) ? nodeFlow.textFlow : nil
             let segment: String
             let resolvedKey: String?
@@ -461,31 +437,21 @@ final class RetainedLayoutCoordinator {
                 resolvedKey = nil
                 segment = "\(siblingIndex)"
             }
-            let path = parentPath.isEmpty ? storeRootPath : "\(parentPath)/\(segment)"
-            let identityKey: String
-            if el.layoutAnim?.travel == .screen, let rk = resolvedKey {
-                identityKey = "screen:@\(rk)"
-            } else {
-                identityKey = path
-            }
-            let keyHash = fnv1a64(identityKey)
-            let runtimeIdentityKey: String
-            if el.layoutAnim?.travel == .screen, let rk = resolvedKey {
-                runtimeIdentityKey = "screen:@\(rk)"
-            } else if let keyedRootPath {
-                // Taffy's root slot is stable across root keys. The runtime anchors text
-                // layouts for the whole subtree under the authored root identity instead.
-                runtimeIdentityKey = keyedRootPath + path.dropFirst(storeRootPath.count)
-            } else {
-                runtimeIdentityKey = path
-            }
-            let runtimeNodeId = RuneMotion.NodeId.hash(runtimeIdentityKey)
+            let path = parent.map { "\($0.path)/\(segment)" } ?? storeRootPath
+            let storePathId = parent?.storePathId.child(segment) ?? storeRootId
+            let runtimePathId = keyedRootPath == nil ? storePathId : (parent?.runtimePathId.child(segment) ?? runtimeRootId)
+            // Screen travel overrides this node's identity only. Children still derive
+            // their stable IDs from the authored parent path.
+            let screenId = el.layoutAnim?.travel == .screen
+                ? resolvedKey.map { RuneMotion.NodeId.hash("screen:@\($0)") } : nil
+            let keyHash = (screenId ?? storePathId).rawValue
+            let runtimeNodeId = screenId ?? runtimePathId
             if let collector = textLayouts {
                 collector.liveIds.insert(runtimeNodeId)
             }
 
             var style = el.layout
-            if isRoot {
+            if parent == nil {
                 if style.width == .auto {
                     style.width = .points(viewport.x)
                 }
@@ -552,14 +518,14 @@ final class RetainedLayoutCoordinator {
 
             let rawTaffy = TaffyBridge.toTaffyStyle(
                 style,
-                parentAreas: parentAreas,
+                parentAreas: parent?.areas,
                 borderOverride: borderOverride,
-                scrollXChild: scrollXChild,
+                scrollXChild: parent?.childSX,
                 forceScrollXRow: forceRow
             )
             let ratio = style.aspectFit.flatMap { ($0.isFinite && $0 > 0) ? $0 : nil }
             let effectiveTaffy = ratio != nil
-                ? TaffyBridge.fitRoomStyle(raw: rawTaffy, parentRow: parentRow)
+                ? TaffyBridge.fitRoomStyle(raw: rawTaffy, parentRow: parent?.isRow == true)
                 : rawTaffy
 
             let myIndex = flat.count
@@ -567,15 +533,18 @@ final class RetainedLayoutCoordinator {
                 path: path,
                 storeKey: keyHash,
                 runtimeId: runtimeNodeId,
-                screenIdentity: el.layoutAnim?.travel == .screen && resolvedKey != nil,
-                parentOffset: parentIndex.map { $0 - myIndex },
+                screenIdentity: screenId != nil,
+                parentOffset: parent.map { $0.myIndex - myIndex },
                 taffyStyle: effectiveTaffy,
-                rawTaffyStyle: rawTaffy,
-                aspectFitRatio: ratio,
                 measure: nil,
                 flow: nodeFlow,
                 pin: pin
             ))
+
+            let fit = ratio.map { ratio in
+                aspectFits.append((ratio, rawTaffy))
+                return aspectFits.count - 1
+            }
 
             var measured = el
             if nodeDirected && el.textDirByParagraph && el.handlers.editLens != nil {
@@ -588,6 +557,8 @@ final class RetainedLayoutCoordinator {
             return SyncPrepared(
                 myIndex: myIndex,
                 path: path,
+                storePathId: storePathId,
+                runtimePathId: runtimePathId,
                 keyHash: keyHash,
                 areas: areas,
                 childSX: childSX,
@@ -596,7 +567,7 @@ final class RetainedLayoutCoordinator {
                 isRow: effectiveTaffy.flexDirection.isRow,
                 measureHash: measureHash ?? pictureRatioToMeasure.map { 0x7069_6300_0000_0000 | UInt64($0.bitPattern) },
                 isRedacted: isRedacted,
-                hasRatio: ratio != nil
+                aspectFit: fit
             )
         }
 
@@ -613,9 +584,7 @@ final class RetainedLayoutCoordinator {
             )
             if dirty { geometryChanged = true }
             flat[p.myIndex].slot = slot
-            if p.hasRatio {
-                aspectFitIndices.append(p.myIndex)
-            }
+            if let fit = p.aspectFit { aspectFitOrder.append((p.myIndex, fit)) }
             return (slot, dirty)
         }
 
@@ -639,7 +608,7 @@ final class RetainedLayoutCoordinator {
                 for (offset, node) in span.nodes.enumerated() {
                     let key: UInt64
                     if offset == 0 { key = p.keyHash }
-                    else { key = node.screenIdentity ? node.storeKey : fnv1a64(newPath(node)) }
+                    else { key = node.screenIdentity ? node.storeKey : RuneMotion.NodeId.hash(newPath(node)).rawValue }
                     guard !store.isUsedThisCommit(key: key) else { return false }
                     slots.append((node.storeKey, key, node.slot, UInt32(p.myIndex + offset)))
                 }
@@ -660,7 +629,7 @@ final class RetainedLayoutCoordinator {
                     if !moved { store.reuseSlot(node.slot, nodeIndex: UInt32(index)) }
                     if moved {
                         node.path = newPath(node)
-                        if !node.screenIdentity { node.storeKey = fnv1a64(node.path) }
+                        if !node.screenIdentity { node.storeKey = RuneMotion.NodeId.hash(node.path).rawValue }
                     }
                     if changedIds && !node.screenIdentity {
                         let runtimePath = keyedRootPath.map { $0 + node.path.dropFirst(storeRootPath.count) } ?? node.path
@@ -733,30 +702,11 @@ final class RetainedLayoutCoordinator {
         @inline(never)
         func beginVisit(
             _ el: El<State>,
-            isRoot: Bool,
-            parentIndex: Int?,
-            parentPath: String,
+            parent: SyncPrepared?,
             siblingIndex: Int,
-            siblingKeysSeen: inout [String: Int],
-            parentRow: Bool,
-            parentAreas: [String: RuneTaffy.GridTemplateArea]?,
-            scrollXChild: TaffyBridge.ScrollXChild?,
-            parentFlow: Flow,
-            parentDirected: Bool
+            siblingKeysSeen: inout [String: Int]
         ) -> SyncStep<State> {
-            let p = syncPrepare(
-                el,
-                isRoot: isRoot,
-                parentIndex: parentIndex,
-                parentPath: parentPath,
-                siblingIndex: siblingIndex,
-                siblingKeysSeen: &siblingKeysSeen,
-                parentRow: parentRow,
-                parentAreas: parentAreas,
-                scrollXChild: scrollXChild,
-                parentFlow: parentFlow,
-                parentDirected: parentDirected
-            )
+            let p = syncPrepare(el, parent: parent, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
             let myIndex = p.myIndex
             let childMark = store.beginChildren()
             if el.anchor?.fit == true { hasAnchoredFit = true }
@@ -825,9 +775,7 @@ final class RetainedLayoutCoordinator {
         // parent frames on the heap and preserve Taffy's postorder child-list synchronization.
         func syncTree() -> SyncResult {
             var rootKeys: [String: Int] = [:]
-            var next = beginVisit(rootEl, isRoot: true, parentIndex: nil, parentPath: "", siblingIndex: 0,
-                siblingKeysSeen: &rootKeys, parentRow: false, parentAreas: nil, scrollXChild: nil,
-                parentFlow: .ltr, parentDirected: false)
+            var next = beginVisit(rootEl, parent: nil, siblingIndex: 0, siblingKeysSeen: &rootKeys)
             var stack: [SyncVisit<State>] = []
             while true {
                 switch next {
@@ -848,10 +796,7 @@ final class RetainedLayoutCoordinator {
                 } else {
                     let prepared = stack[parent].prepared
                     let child = stack[parent].children[index]
-                    next = beginVisit(child, isRoot: false, parentIndex: prepared.myIndex,
-                        parentPath: prepared.path, siblingIndex: index, siblingKeysSeen: &stack[parent].childKeys,
-                        parentRow: prepared.isRow, parentAreas: prepared.areas, scrollXChild: prepared.childSX,
-                        parentFlow: prepared.nodeFlow, parentDirected: prepared.nodeDirected)
+                    next = beginVisit(child, parent: prepared, siblingIndex: index, siblingKeysSeen: &stack[parent].childKeys)
                 }
             }
         }
@@ -934,13 +879,13 @@ final class RetainedLayoutCoordinator {
             return ancestors
         }
 
-        if !aspectFitIndices.isEmpty {
-            for idx in aspectFitIndices {
-                guard let ratio = flat[idx].aspectFitRatio else { continue }
+        if !aspectFits.isEmpty {
+            for (idx, fit) in aspectFitOrder {
+                let (ratio, raw) = aspectFits[fit]
                 let roomLayout = store.boxLayout(flat[idx].slot)
                 let fitted = TaffyBridge.fittedStyle(
                     ratio: ratio,
-                    raw: flat[idx].rawTaffyStyle,
+                    raw: raw,
                     room: RuneTaffy.Size(width: roomLayout.size.width, height: roomLayout.size.height)
                 )
                 flat[idx].taffyStyle = fitted
@@ -1025,13 +970,13 @@ final class RetainedLayoutCoordinator {
             for leaf in nonSecretLeaves where collector.map[leaf.nodeId] == nil {
                 let bounds = store.layout(flat[leaf.index].slot)
                 let contentWidth = max(0, bounds.contentBoxSize().width - bounds.scrollbarSize.width)
-                let wrapWidth = leaf.style.wrap == .noWrap ? nil : TextBoxGeometry.wrapWidth(contentWidth, scale: scale)
+                let wrapWidth = leaf.shapeKey.style.wrap == .noWrap ? nil : TextBoxGeometry.wrapWidth(contentWidth, scale: scale)
                 if let request = leaf.paragraphs {
                     let box = textSystem.layoutInput(
                         text: leaf.text,
-                        spans: leaf.spans,
-                        pills: leaf.pills,
-                        style: leaf.style,
+                        spans: leaf.shapeKey.spans,
+                        pills: leaf.shapeKey.pills,
+                        style: leaf.shapeKey.style,
                         maxWidth: wrapWidth,
                         pixelScale: scale,
                         emitGlyphs: false,
@@ -1043,15 +988,15 @@ final class RetainedLayoutCoordinator {
                 } else {
                     let box = textSystem.layoutKeyed(
                         text: leaf.text,
-                        spans: leaf.spans,
-                        pills: leaf.pills,
-                        style: leaf.style,
+                        spans: leaf.shapeKey.spans,
+                        pills: leaf.shapeKey.pills,
+                        style: leaf.shapeKey.style,
                         maxWidth: wrapWidth,
                         pixelScale: scale,
                         emitGlyphs: false,
                         keep: .cached,
                         countAsRebreak: true,
-                        pretty: leaf.pretty
+                        pretty: leaf.shapeKey.pretty
                     )
                     collector.map[leaf.nodeId] = TextLayoutRecord(box: box, isInput: leaf.isInput)
                 }
@@ -1061,7 +1006,7 @@ final class RetainedLayoutCoordinator {
         // Taffy did not change any node, child list, or measurement. The prior solved
         // tree is a value snapshot. Text and live node records above still belong to this
         // pass. RTL mirroring and post-solve fitting can alter geometry outside Taffy.
-        let canRetainGeometry = !memoSpans.isEmpty && !hasMirroredFlow && !hasAnchoredFit && aspectFitIndices.isEmpty
+        let canRetainGeometry = !memoSpans.isEmpty && !hasMirroredFlow && !hasAnchoredFit && aspectFits.isEmpty
         if canRetainGeometry, !geometryChanged, let previous = lastMemoLayout {
             reusedMemoGeometry = true
             return previous
