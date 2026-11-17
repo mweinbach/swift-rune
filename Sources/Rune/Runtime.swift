@@ -1071,7 +1071,11 @@ public final class Runtime<State> {
         var id: NodeId { NodeId.hash("live:\(path):\(target)") }
     }
     private var liveSeenSeq: [LiveKey: (sourceId: UInt64, sequence: UInt64)] = [:]
-    private var liveTweenStart: [UInt64: Double] = [:]
+    private struct LiveTweenStart {
+        weak var source: LiveSource?
+        let time: Double
+    }
+    private var liveTweenStarts: [UInt64: LiveTweenStart] = [:]
     private var livePulseRelease: [LiveKey: (releaseAt: Double, rest: MotionLanes, spring: Spring)] = [:]
     internal var liveColorTargets: [NodeId: Color] = [:]
     private var customLiveWaker: Waker? = nil
@@ -5924,14 +5928,23 @@ public final class Runtime<State> {
     // MARK: - Live Property Evaluation
 
     /// Free the tracks of removed bindings after their last painted exit disappears.
-    internal func pruneLiveBindingTracks(keeping keys: Set<LiveKey>, tweens: Set<UInt64>) {
+    internal func pruneLiveBindingTracks(keeping keys: Set<LiveKey>) {
         for key in liveSeenSeq.keys where !keys.contains(key) {
             liveStore.removeNode(key.id)
             liveColorTargets.removeValue(forKey: key.id)
             livePulseRelease.removeValue(forKey: key)
             liveSeenSeq.removeValue(forKey: key)
         }
-        liveTweenStart = liveTweenStart.filter { tweens.contains($0.key) }
+        // A tween may return with another element or key. Its first attachment survives
+        // while the handle lives, independently for each runtime using that handle.
+        liveTweenStarts = liveTweenStarts.filter { $0.value.source != nil }
+    }
+
+    @discardableResult
+    internal func attachLiveTween(_ source: LiveSource) -> Double {
+        if let start = liveTweenStarts[source.id] { return start.time }
+        liveTweenStarts[source.id] = LiveTweenStart(source: source, time: currentTime)
+        return currentTime
     }
 
     private func updateLiveBindings(at now: Double, launchAt: Double) -> Bool {
@@ -5954,14 +5967,11 @@ public final class Runtime<State> {
                 // Linear render-time Tween
                 if let lin = b.source.linearSpec {
                     let objId = b.source.id
-                    let tStart = liveTweenStart[objId] ?? {
-                        liveTweenStart[objId] = now
-                        return now
-                    }()
+                    let tStart = attachLiveTween(b.source)
                     let snap = b.source.readSnapshot()
                     liveSeenSeq[lk] = (objId, snap.seq)
                     let dur = lin.duration
-                    let u = dur <= 0 ? 1.0 : ((now - tStart) / dur).clamped(to: 0...1)
+                    let u = dur <= 0 ? 1.0 : ((currentTime - tStart) / dur).clamped(to: 0...1)
                     if u < 1.0 { anyTweenOrPulsePending = true }
                     var out = MotionLanes()
                     for lane in 0..<4 {
@@ -6241,10 +6251,10 @@ public final class Runtime<State> {
         return parents
     }
 
-    internal func isLinearTweenActive(_ source: LiveSource, at now: Double) -> Bool {
+    internal func isLinearTweenActive(_ source: LiveSource) -> Bool {
         guard let lin = source.linearSpec, lin.duration > 0 else { return false }
-        guard let tStart = liveTweenStart[source.id] else { return true }
-        return (now - tStart) < lin.duration
+        guard let start = liveTweenStarts[source.id] else { return true }
+        return currentTime - start.time < lin.duration
     }
 
     private func resolvePaintTextLayout(
@@ -6469,7 +6479,7 @@ public final class Runtime<State> {
                     if let v = liveStore.get(lnid, Props.SCALE) {
                         ownSc = Vec2(p.scale.x * max(0, v.x), p.scale.y * max(0, v.y))
                         hasLiveTransform = true
-                        if liveStore.isMoving(lnid, Props.SCALE) || isLinearTweenActive(b.source, at: now) {
+                        if liveStore.isMoving(lnid, Props.SCALE) || isLinearTweenActive(b.source) {
                             hasLiveSpatialSpring = true
                         }
                     }
@@ -6478,7 +6488,7 @@ public final class Runtime<State> {
                         ownDelta.x += v.x
                         ownDelta.y += v.y
                         hasLiveTransform = true
-                        if liveStore.isMoving(lnid, Props.OFFSET) || isLinearTweenActive(b.source, at: now) {
+                        if liveStore.isMoving(lnid, Props.OFFSET) || isLinearTweenActive(b.source) {
                             hasLiveSpatialSpring = true
                         }
                     }
@@ -6487,7 +6497,7 @@ public final class Runtime<State> {
                         baseRect = v
                         hasLiveTransform = true
                         hasLiveRect = true
-                        if liveStore.isMoving(lnid, Props.RECT) || isLinearTweenActive(b.source, at: now) {
+                        if liveStore.isMoving(lnid, Props.RECT) || isLinearTweenActive(b.source) {
                             hasLiveSpatialSpring = true
                         }
                     }
@@ -7183,7 +7193,7 @@ public final class Runtime<State> {
             )
             let ownLiveScaleMoving = el.liveBindings.contains(where: { b in
                 b.target == .scale
-                    && (liveStore.isMoving(NodeId.hash("live:\(snap.path):\(b.target)"), Props.SCALE) || isLinearTweenActive(b.source, at: now))
+                    && (liveStore.isMoving(NodeId.hash("live:\(snap.path):\(b.target)"), Props.SCALE) || isLinearTweenActive(b.source))
             })
             let ownSequenceScaleMoving: Bool = {
                 guard let entry = loopRuntime.entries[p.id],
