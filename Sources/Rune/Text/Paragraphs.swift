@@ -11,14 +11,11 @@ import CoreText
 // one. A long paste's plain ASCII lines away from its ends wait in runs at their exact heights
 // and are shaped a few a frame (`ParagraphsLazy.swift`, `Runtime/TextFill.swift`).
 //
-// Swift scope (partial port): CoreText fields whose text has no spans or pills and whose
-// blocks are all paragraphs (upstream's `plain` fields, the ones `Keyed` and the lazy paste
-// serve; a rich field with no marks is one). A field with spans, pills or other blocks keeps one
-// layout. Not ported: pill isolates (`ISOLATE`, `Piece::shaped`/`content`, `spans_in`/`pills_in`,
-// `with_isolates`), spans and pills in a paragraph's key, block indentation in the break key and
-// per-paragraph block layouts, and the `newline` selection width / `range_boxes` newline
-// highlight (the stacked lines keep Swift's selection sliver). Positions here are the field's
-// content UTF-8 bytes and device px, as upstream's.
+// Plain fields reuse individual layouts and can defer offscreen ASCII lines. Fields with spans,
+// pills or non-paragraph blocks use one layout; CoreText supplies each paragraph's direction
+// and isolates pills while preserving authored byte indices. Selection includes a newline's
+// width, and find marks on packed lines prepare the intersecting paragraphs before layout reads
+// or paint. Positions here are content UTF-8 bytes and device pixels.
 
 /// What a by-paragraph field asks of `TextSystem.layoutInput`: the field it is (whose last
 /// layout an edit starts from, upstream's node slot), the direction every paragraph takes
@@ -28,6 +25,7 @@ internal struct ParagraphRequest: Sendable, Hashable {
     var field: UInt64
     var forced: TextFlow?
     var startFlow: TextFlow
+    var highlights: [TextHighlight] = []
 }
 
 internal enum ParagraphConstants {
@@ -171,6 +169,19 @@ internal final class ParagraphLayout: @unchecked Sendable {
             k += 1
         }
         return out
+    }
+
+    /// Glyphs in the field's coordinate and byte space, limited to the visible device rows.
+    func glyphs(top: Float, bottom: Float, using system: TextSystem) -> [PositionedGlyph] {
+        var result: [PositionedGlyph] = []
+        for piece in pieces(top: top, bottom: bottom) {
+            for var glyph in glyphs(at: piece.index, using: system) {
+                glyph.rect.y += piece.y / scale
+                glyph.utf8Offset += piece.start
+                result.append(glyph)
+            }
+        }
+        return result
     }
 
     /// The piece holding content byte `at`: a paragraph owns the bytes from its start to its end,
@@ -584,7 +595,8 @@ extension TextSystem {
         #if canImport(CoreText) && canImport(CoreGraphics)
         if let request, keep != .secret, spans?.isEmpty ?? true, pills.isEmpty, style.wrap == .wrap, style.maxLines == 0, text.utf8.contains(0x0a) {
             let laid = layoutParagraphs(text: text, style: style, maxWidth: maxWidth, pixelScale: pixelScale, request: request)
-            return paragraphBox(laid, text: text, style: style, pixelScale: pixelScale)
+            let prepared = prepareHighlights(request.highlights, in: laid, field: request.field)
+            return paragraphBox(prepared, text: text, style: style, pixelScale: pixelScale)
         }
         #endif
         return layoutKeyed(text: text, spans: spans, pills: pills, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs, keep: keep, countAsRebreak: countAsRebreak)

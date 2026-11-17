@@ -351,6 +351,8 @@ public struct PositionedGlyph: Sendable, Equatable {
     public var color: Color?
     /// Non-nil index into `GlyphAtlas.colorGlyph(_:)` for RGBA color/emoji glyphs (`#807`).
     public var colorGlyphIndex: UInt32?
+    /// UTF-8 byte of the glyph cluster in the text this layout shaped.
+    public var utf8Offset: Int
     /// Alpha atlas page index (`GlyphAtlas.pageData(_:)`, `atlas.rs:168`).
     public var atlasPage: UInt16
 
@@ -359,13 +361,15 @@ public struct PositionedGlyph: Sendable, Equatable {
         uv: SIMD4<Float>,
         color: Color? = nil,
         colorGlyphIndex: UInt32? = nil,
-        atlasPage: UInt16 = 0
+        atlasPage: UInt16 = 0,
+        utf8Offset: Int = 0
     ) {
         self.rect = rect
         self.uv = uv
         self.color = color
         self.colorGlyphIndex = colorGlyphIndex
         self.atlasPage = atlasPage
+        self.utf8Offset = utf8Offset
     }
 }
 
@@ -4575,6 +4579,19 @@ public final class TextSystem: @unchecked Sendable {
             }
         }
 
+        // CoreText clusters use UTF-16 indices in the string containing pill markers.
+        // Carry authored bytes to paint so bidi runs and ligatures take their mark's ink.
+        var byteAtUTF16: [Int] = []
+        if emitGlyphs, authText.utf8.count != authText.utf16.count {
+            var byte = 0
+            byteAtUTF16.reserveCapacity(authText.utf16.count + 1)
+            for scalar in authText.unicodeScalars {
+                byteAtUTF16.append(byte)
+                if scalar.utf16.count == 2 { byteAtUTF16.append(byte) }
+                byte += scalar.utf8.count
+            }
+            byteAtUTF16.append(byte)
+        }
         var glyphsOut: [PositionedGlyph] = []
         var underlinesOut: [SIMD4<Float>] = []
         var underlineLineEnds: [Float] = []
@@ -4917,10 +4934,14 @@ public final class TextSystem: @unchecked Sendable {
 
                 var glyphs = Array<CGGlyph>(repeating: 0, count: glyphCount)
                 var positions = Array<CGPoint>(repeating: .zero, count: glyphCount)
+                var indices = Array<CFIndex>(repeating: 0, count: glyphCount)
+                CTRunGetStringIndices(run, CFRangeMake(0, glyphCount), &indices)
                 CTRunGetGlyphs(run, CFRangeMake(0, glyphCount), &glyphs)
                 CTRunGetPositions(run, CFRangeMake(0, glyphCount), &positions)
 
                 for i in 0..<glyphCount {
+                    let authoredIndex = max(0, markerMap.authU16(forShapedU16: indices[i]))
+                    let byte = byteAtUTF16.isEmpty ? authoredIndex : byteAtUTF16[min(authoredIndex, byteAtUTF16.count - 1)]
                     let gxPx = alignOffsetPx + Float(positions[i].x)
                     let gyPx = baselineYPx - Float(positions[i].y)
                     let floorX = floorf(gxPx)
@@ -4942,7 +4963,8 @@ public final class TextSystem: @unchecked Sendable {
                             ),
                             uv: .zero,
                             color: runColor,
-                            colorGlyphIndex: colorEntry.index
+                            colorGlyphIndex: colorEntry.index,
+                            utf8Offset: byte
                         ))
                         continue
                     }
@@ -4996,7 +5018,8 @@ public final class TextSystem: @unchecked Sendable {
                         ),
                         uv: entry.uv,
                         color: runColor,
-                        atlasPage: entry.page
+                        atlasPage: entry.page,
+                        utf8Offset: byte
                     ))
                 }
             }
@@ -5914,7 +5937,8 @@ public final class TextSystem: @unchecked Sendable {
                             rect: SIMD4<Float>(gx, gy, gw, gh),
                             uv: entry.uv,
                             color: spanColor,
-                            atlasPage: entry.page
+                            atlasPage: entry.page,
+                            utf8Offset: chStart
                         ))
                     }
                 }

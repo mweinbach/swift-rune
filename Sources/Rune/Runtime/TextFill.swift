@@ -71,6 +71,6 @@ extension Runtime {
               // A rich field shows a block per line, `.paragraph` when it has none: plain while
               // every block is a paragraph (`paragraphs.rs` `plain`).
               resolved.blocks.allSatisfy({ $0 == .paragraph }) else { return nil }
-        return ParagraphRequest(field: field.rawValue, forced: resolved.style.direction, startFlow: start)
+        return ParagraphRequest(field: field.rawValue, forced: resolved.style.direction, startFlow: start, highlights: el.textHighlights ?? [])
     }
 }

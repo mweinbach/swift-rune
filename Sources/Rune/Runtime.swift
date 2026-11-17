@@ -3575,21 +3575,29 @@ public final class Runtime<State> {
     ) -> [(highlightIndex: Int, rect: MotionRect)] {
         let el = node.el
         guard let hls = el.textHighlights, !hls.isEmpty else { return [] }
-        let content = el.liveText?.get() ?? el.plainText ?? el.richSpans?.map(\.text).joined() ?? ""
-        guard !content.isEmpty else { return [] }
+        guard !el.isSecure else { return [] }
         let padL = el.layout.padding.left * scale.x
         let padT = el.layout.padding.top * scale.y
         let padR = el.layout.padding.right * scale.x
         let innerW = max(0, boxRect.width - padL - padR)
-        let wrapWidth = (innerW / max(1e-4, scale.x)) + 0.5
-        let shaped = textSystem.shape(
-            text: content,
-            spans: el.richSpans,
-            style: el.textStyle,
-            maxWidth: wrapWidth,
-            pixelScale: pixelScale,
-            emitGlyphs: false
-        )
+        let content: String
+        let shaped: ShapedText
+        if let edit = el.handlers.editLens?.get(state) {
+            guard !edit.isSecure else { return [] }
+            let resolved = ElDisplayResolver.resolveInput(el: el, edit: edit, innerWidth: innerW / max(1e-4, scale.x), pxScale: pixelScale)
+            guard !resolved.showingPlaceholder else { return [] }
+            content = resolved.renderedString
+            shaped = textSystem.layoutInput(
+                text: content, spans: resolved.spans, pills: resolved.pills, style: resolved.style,
+                maxWidth: resolved.maxWidthForShape, pixelScale: pixelScale, emitGlyphs: false,
+                countAsRebreak: false, request: Self.paragraphRequest(field: node.nodeId, el: el, edit: edit, resolved: resolved)
+            ).shaped
+        } else {
+            content = el.liveText?.get() ?? el.plainText ?? el.richSpans?.map(\.text).joined() ?? ""
+            guard !content.isEmpty else { return [] }
+            let wrapWidth = (innerW / max(1e-4, scale.x)) + 0.5
+            shaped = textSystem.shape(text: content, spans: el.richSpans, style: el.textStyle, maxWidth: wrapWidth, pixelScale: pixelScale, emitGlyphs: false)
+        }
         let ox = boxRect.x + padL
         let oy = boxRect.y + padT
         let utf8Len = content.utf8.count
@@ -6141,6 +6149,16 @@ public final class Runtime<State> {
                 return abs(mw - ww) <= 0.75
             }()
             if matchesText && matchesWidth {
+                #if canImport(CoreText) && canImport(CoreGraphics)
+                if let laid = live.paragraphs, laid.waiting, let request = paragraphs, !request.highlights.isEmpty {
+                    let prepared = textSystem.prepareHighlights(request.highlights, in: laid, field: request.field)
+                    if prepared !== laid {
+                        let box = textSystem.paragraphBox(prepared, text: text, style: style, pixelScale: pxScale)
+                        nodeTextLayouts[snapId] = RetainedLayoutCoordinator.TextLayoutRecord(box: box, isInput: true)
+                        return box
+                    }
+                }
+                #endif
                 if live.hasGlyphs {
                     return live
                 }
@@ -8075,6 +8093,18 @@ public final class Runtime<State> {
                             )
                         }
 
+                        let fieldMarks = showingPlaceholder || resolvedInput.isSecure ? [] : el.textHighlights ?? []
+                        for quad in TextHighlightPainter.fieldQuads(
+                            marks: fieldMarks, box: inputBox, system: textSystem,
+                            origin: Vec2(inputRestOriginX, restOriginY), transform: scaleVec, pixelScale: pxScale
+                        ) {
+                            primitives.append(attachFade(.roundedRect(
+                                rect: quad.rect, radii: SIMD4(repeating: quad.cornerRadius),
+                                fill: quad.bg.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                                borderColor: quad.ring?.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend) ?? .zero,
+                                borderWidth: quad.ring?.width ?? 0, clip: devInputClip, turn: useLayer ? 0 : effRotate
+                            )))
+                        }
                         // Text glyphs
                         let inputInCache = inh.inCache || ((el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false)
                         let inputRotated = nodeTurn != nil
@@ -8108,15 +8138,7 @@ public final class Runtime<State> {
                                 )
                                 : (-Float.infinity, Float.infinity)
                             if pl.waiting { textRows[snap.nodeId] = rows }
-                            var pieceGlyphs: [PositionedGlyph] = []
-                            for piece in pl.pieces(top: rows.0, bottom: rows.1) {
-                                let dy = piece.y / ls
-                                for var g in pl.glyphs(at: piece.index, using: textSystem) {
-                                    g.rect.y += dy
-                                    pieceGlyphs.append(g)
-                                }
-                            }
-                            visibleInputGlyphs = pieceGlyphs[...]
+                            visibleInputGlyphs = pl.glyphs(top: rows.0, bottom: rows.1, using: textSystem)[...]
                         } else {
                             visibleInputGlyphs = textSystem.glyphCache.glyphsInBandCached(
                                 key: GlyphReplayKey(shapeKey: inputBox.shapeKey, maxWidth: inputBox.maxWidth, glidePx: glidePx),
@@ -8132,7 +8154,8 @@ public final class Runtime<State> {
                             let gh = g.rect.w * scaleVec.y * pxScale
                             if !inputRotated && (gy + gh < inputVisMinY || gy > inputVisMaxY) { continue }
                             let baseGlyphColor = g.color.map { applyPressColor(effPressColor, to: $0, frac: effPressFrac) } ?? textCol
-                            let gc = baseGlyphColor.scaleAlpha(localAlpha * textFlightGlyphAlpha).simd4(srgb: srgbBlend)
+                            let ink = fieldMarks.last { $0.fg != nil && $0.byteRange.contains(g.utf8Offset) }?.fg ?? baseGlyphColor
+                            let gc = ink.scaleAlpha(localAlpha * textFlightGlyphAlpha).simd4(srgb: srgbBlend)
                             let primIdx = primitives.count
                             primitives.append(.glyph(
                                 rect: SIMD4<Float>(
