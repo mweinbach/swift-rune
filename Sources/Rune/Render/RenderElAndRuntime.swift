@@ -1581,7 +1581,7 @@ extension Runtime {
                 if let parentScreenClip { presenceScreenClip = intersectRects(parentScreenClip, initialClipPt) }
                 scope.exiting = infoExiting
                 newHitGeometries[node.path] = HitGeometry(
-                    path: node.path, parentPath: parentElementIndex.map { newElements[$0].path },
+                    path: node.path, paintOrder: myElementIndex, parentPath: parentElementIndex.map { newElements[$0].path },
                     rect: effRect, clipRect: scope.localClip ?? effRect,
                     outerClip: scope.outerClip.map { intersectRects($0, initialClipPt) } ?? initialClipPt,
                     turn: scope.turn, opacity: scope.opacity, isExiting: scope.exiting,

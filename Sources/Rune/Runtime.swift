@@ -1065,7 +1065,7 @@ public final class Runtime<State> {
     internal var hoverOrderMatchesPaint = false
     internal var hoverTrackIndices: [Int] = []
     internal var hoverGroupIndices: [Int] = []
-    internal var hasHoverChangeHandlers = false
+    internal var hoverChangeIndices: [Int] = []
     internal var hasAuthoredHoverCurves = false
     internal var hoverWithinPaths: [String] = []
     internal var hoverDelays = HoverDelays()
@@ -9278,6 +9278,7 @@ public final class Runtime<State> {
 
             newHitGeometries[snap.path] = HitGeometry(
                 path: snap.path,
+                paintOrder: newPaintOrder.count - 1,
                 parentPath: parentPath,
                 rect: rect,
                 clipRect: effectiveHitClip,

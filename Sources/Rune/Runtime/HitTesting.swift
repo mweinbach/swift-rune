@@ -50,6 +50,7 @@ extension El {
 /// Cached per-frame presented hit-testing geometry for a node in `Runtime`.
 struct HitGeometry: Sendable {
     var path: String
+    var paintOrder: Int = 0
     var parentPath: String?
     var rect: MotionRect
     var clipRect: MotionRect

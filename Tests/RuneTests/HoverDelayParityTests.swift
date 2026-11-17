@@ -121,6 +121,30 @@ struct HoverDelayParityTests {
         #expect(list.isEmpty && !list.waiting)
     }
 
+    @Test("Overlapping hover observers enter and leave in paint order", arguments: [false, true])
+    @MainActor
+    func overlappingObservers(renderFrame: Bool) {
+        let rt = Runtime<[String]>(state: [], viewport: Vec2(100, 100)) { _, _ in
+            func observer(_ name: String) -> El<[String]> {
+                el().key(name).size(40, 40).pin(top: 0, left: 0).bg(.white)
+                    .onHoverChange { state, inside, tx in
+                        state.append(name + (inside ? " in" : " out"))
+                        tx.liveOnly()
+                    }
+            }
+            return col().size(100, 100).child(observer("raised").raise()).child(observer("back"))
+        }
+        func frame(_ t: Double) {
+            if renderFrame { _ = rt.renderFrame(at: t) } else { _ = rt.frame(at: t) }
+        }
+        frame(0)
+        rt.pointerMove(to: Vec2(10, 10), at: 0.01)
+        frame(0.02)
+        rt.pointerMove(to: Vec2(80, 80), at: 0.03)
+        frame(0.04)
+        #expect(rt.state == ["back in", "raised in", "back out", "raised out"])
+    }
+
     @Test("Runtime: onHoverChange descendants, chainHoverChangeAny, delayed hover wakes, pruning & blur")
     func runtimeOnHoverChangeAndDelays() {
         struct S {

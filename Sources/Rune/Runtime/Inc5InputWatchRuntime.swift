@@ -395,13 +395,13 @@ extension Runtime {
     internal func indexHoverParticipants() {
         hoverTrackIndices.removeAll(keepingCapacity: true)
         hoverGroupIndices.removeAll(keepingCapacity: true)
-        hasHoverChangeHandlers = false
+        hoverChangeIndices.removeAll(keepingCapacity: true)
         hasAuthoredHoverCurves = false
         for (i, node) in flatNodes.enumerated() {
             let el = node.el
             if (el.hoverBg?.a ?? 0) > 0 || el.isHoverGroup || el.hoverGroupShare != nil { hoverTrackIndices.append(i) }
             if el.isHoverAlone || el.hoverGroupShare != nil { hoverGroupIndices.append(i) }
-            if !hasHoverChangeHandlers, el.hasAuthoredHandlers, el.handlers.onHoverChange != nil { hasHoverChangeHandlers = true }
+            if el.hasAuthoredHandlers, el.handlers.onHoverChange != nil { hoverChangeIndices.append(i) }
             if el.hoverWithinSpec != nil || el.hoverMotionSpec != nil { hasAuthoredHoverCurves = true }
         }
         hoverOrderMatchesPaint = flatNodes.count == builtHoverIds.count
@@ -834,21 +834,30 @@ extension Runtime {
     }
 
     internal func computeHoverWithin() -> (inside: [String], entering: [Int])? {
-        let hasAny = !hoverWithinPaths.isEmpty || !hoverDelays.isEmpty || hasHoverChangeHandlers
+        let hasAny = !hoverWithinPaths.isEmpty || !hoverDelays.isEmpty || !hoverChangeIndices.isEmpty
         guard hasAny else { return nil }
 
         var inside: [String] = []
         var entering: [Int] = []
         if pointerPosition.x > -9000 && pointerPosition.y > -9000 {
-            let hits = hitTestAll(at: pointerPosition) { $0.el.handlers.onHoverChange != nil }
-            for h in hits {
-                let path = h.node.path
-                if !inside.contains(path) {
-                    if !hoverWithinPaths.contains(path) {
-                        entering.append(h.node.index)
+            // Hover-change observers follow their own drawn bounds, including overlapping siblings.
+            var hits: [(index: Int, order: Int)] = []
+            for index in hoverChangeIndices where hoverAllowed(index) {
+                let node = flatNodes[index]
+                if let geometry = hitGeometryByPath[node.path] {
+                    if !geometry.isExiting, geometry.opacity > 0.001, geometry.contains(pointerPosition) {
+                        hits.append((index, geometry.paintOrder))
                     }
-                    inside.append(path)
+                } else if paintOrderPaths.isEmpty, node.el.opacity > 0.001, !hoverIsExiting(index),
+                          hoverNodeContains(index) {
+                    hits.append((index, index))
                 }
+            }
+            if hits.count > 1 { hits.sort { $0.order < $1.order } }
+            for hit in hits {
+                let path = flatNodes[hit.index].path
+                if !hoverWithinPaths.contains(path) { entering.append(hit.index) }
+                inside.append(path)
             }
         }
         // A held press stays inside what holds it until it releases (`hover.rs:132-140`).

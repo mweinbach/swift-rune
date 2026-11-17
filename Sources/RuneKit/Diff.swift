@@ -3569,7 +3569,7 @@ public struct DiffView<State>: Sendable {
             if line.noNewline { content = content.child(noNewlineNote()) }
         }
         return content.key(cellKey).grow(1).minW(0).minH(DiffLayout.lineHeight)
-            .pl(DiffLayout.codeLeading).pr(DiffLayout.codeTrailing).onHover(hoverHandler)
+            .pl(DiffLayout.codeLeading).pr(DiffLayout.codeTrailing).onHoverChange(hoverHandler)
     }
 
     private func buildUnifiedRow(

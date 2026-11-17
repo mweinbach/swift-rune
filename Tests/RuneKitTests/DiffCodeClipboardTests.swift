@@ -60,4 +60,67 @@ struct DiffCodeClipboardTests {
             }
         }
     }
+
+    @Test("A pruned split cell releases its copy side when the pointer stays over the scrolling view")
+    @MainActor
+    func copyAfterHoveringAnUnmountedCell() throws {
+        let old = (1...4_000).map { "let line_\($0) = old_\($0)\n" }.joined()
+        let new = (1...4_000).map { i in
+            i.isMultiple(of: 3) ? "let line_\(i) = new_\(i)\n" : "let line_\(i) = old_\(i)\n"
+        }.joined()
+        let file = FileDiff.fromTexts(path: "a.rs", old: old, new: new, context: 4_000)
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime(state: DiffState(diff: file, mode: .split), viewport: Vec2(800, 650)) { state, cx in
+            DiffView<DiffState>(key: "dv", kit: kit, get: { $0 }, set: { $0 = $1 })
+                .viewportHeight(600).build(state: state, cx: cx)
+        }
+        var t = 0.0
+        func advance(_ frames: Int = 1) {
+            for _ in 0..<frames {
+                t += 1.0 / 120
+                _ = rt.frame(at: t)
+            }
+        }
+        func visibleCell(_ prefix: String) throws -> ElementInfo {
+            try #require(rt.elements().first {
+                guard let key = $0.key, !$0.exiting else { return false }
+                return key.hasPrefix(prefix) && !key.hasSuffix("-text") && (150..<300).contains($0.rect[1])
+            })
+        }
+
+        advance(3)
+        let oldCell = try visibleCell("dv-ccode-o-")
+        let oldKey = try #require(oldCell.key)
+        let pointer = Vec2(oldCell.rect[0] + 22, oldCell.rect[1] + 8)
+        rt.pointerMove(to: pointer, at: t)
+        advance(3)
+        #expect(rt.state.copySide == .old)
+        rt.wheel(WheelEvent(dx: 0, dy: -50_000), at: pointer, now: t)
+        advance(35)
+        #expect(rt.element(byKey: oldKey) == nil)
+
+        let newCell = try visibleCell("dv-scode-n-")
+        let newKey = try #require(newCell.key)
+        let expected = try #require(rt.element(byKey: newKey + "-text")?.text)
+        #expect(expected.contains(" = new_"))
+        let start = Vec2(newCell.rect[0] + 12.5, newCell.rect[1] + 8)
+        let end = Vec2(newCell.rect[0] + newCell.rect[2] - 4, start.y)
+        rt.pointerMove(to: start, at: t)
+        advance(2)
+        let copySide = rt.state.copySide
+        #expect(copySide == .new)
+        rt.pointerDown(at: start, at: t)
+        advance()
+        rt.pointerMove(to: end, at: t)
+        advance()
+        rt.pointerUp(at: end, at: t)
+        advance()
+        let selected = rt.selectedText()
+        #expect(selected == expected)
+        let copy = try Chord.parse("mod+c")
+        let handled = rt.keyDown(KeyEvent(key: copy.key, mods: copy.mods), at: t)
+        #expect(handled)
+        let copied = rt.clipboard.text
+        #expect(copied == expected)
+    }
 }
