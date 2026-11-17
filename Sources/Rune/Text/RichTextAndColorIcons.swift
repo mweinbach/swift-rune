@@ -6,127 +6,130 @@ import CoreGraphics
 
 // MARK: - 1. Font Epoch & Family Slot Registry (rune::text::measure + families)
 
-/// Monotonically increasing epoch bumped whenever font families or loaded fonts change (`rune::text::font_epoch`).
+/// Cache epoch for the current font families. Ending a scoped override restores the enclosing epoch.
 public func fontEpoch() -> UInt64 {
     FontFamiliesRegistry.currentEpoch()
 }
 
-/// Temporarily overrides `sans` and `mono` family slots for `body`, bumping `fontEpoch()` on entry and exit.
+/// Temporarily overrides the font families used by this thread, including changes made inside the closure.
 public func withFontFamilies(sans: String, mono: String, _ body: () throws -> Void) rethrows {
     try FontFamiliesRegistry.withFamilies(sans: sans, mono: mono, body)
 }
 
-/// Process-wide font epoch & thread-scoped slot registry (`rune::text::families`).
 public enum FontFamiliesRegistry {
-    private final class Storage: @unchecked Sendable {
-        let lock = NSLock()
-        var epoch: UInt64 = 1
-        var sans: String = ""
-        var mono: String = ""
-    }
-
-    private struct ThreadFrame {
+    internal struct State {
         var sans: String
         var mono: String
         var epoch: UInt64
     }
 
+    private final class Storage: @unchecked Sendable {
+        let lock = NSLock()
+        var defaults = State(sans: "", mono: "", epoch: 1)
+        var nextEpoch: UInt64 = 1
+        var settingsEpoch: UInt64 = 1
+
+        func allocateEpoch() -> UInt64 {
+            nextEpoch &+= 1
+            return nextEpoch
+        }
+    }
+
     private static let storage = Storage()
-    private static let threadStackKey = "rune.fontFamilies.threadStack"
+    private static let overrideKey = "rune.fontFamilies.override"
 
-    private static func currentThreadStack() -> [ThreadFrame]? {
-        Thread.current.threadDictionary[threadStackKey] as? [ThreadFrame]
-    }
-
-    private static func setThreadStack(_ stack: [ThreadFrame]) {
-        if stack.isEmpty {
-            Thread.current.threadDictionary.removeObject(forKey: threadStackKey)
-        } else {
-            Thread.current.threadDictionary[threadStackKey] = stack
+    internal static var threadOverride: State? {
+        get { Thread.current.threadDictionary[overrideKey] as? State }
+        set {
+            if let newValue {
+                Thread.current.threadDictionary[overrideKey] = newValue
+            } else {
+                Thread.current.threadDictionary.removeObject(forKey: overrideKey)
+            }
         }
     }
 
-    /// Returns active thread-local override families if running inside `withFontFamilies`, else `nil`.
-    internal static func threadOverrideFamilies() -> (sans: String, mono: String)? {
-        guard let top = currentThreadStack()?.last else { return nil }
-        return (top.sans, top.mono)
+    private static let windowKey = "rune.fontFamilies.windows"
+    internal static var windowChoice: State? {
+        Thread.current.threadDictionary[windowKey] as? State
     }
 
-    public static func currentEpoch() -> UInt64 {
-        if let top = currentThreadStack()?.last {
-            return top.epoch
-        }
+    internal static var settingsEpoch: UInt64 {
         storage.lock.lock()
         defer { storage.lock.unlock() }
-        return storage.epoch
+        return storage.settingsEpoch
     }
 
+    internal static func makeState(sans: String, mono: String) -> State {
+        storage.lock.lock()
+        defer { storage.lock.unlock() }
+        return State(sans: sans, mono: mono, epoch: storage.allocateEpoch())
+    }
+
+    internal static func chooseWindowFamilies(sans: String, mono: String) {
+        if let choice = windowChoice, choice.sans == sans && choice.mono == mono { return }
+        Thread.current.threadDictionary[windowKey] = makeState(sans: sans, mono: mono)
+    }
+
+    internal static func snapshot() -> State {
+        if let threadOverride { return threadOverride }
+        storage.lock.lock()
+        defer { storage.lock.unlock() }
+        return storage.defaults
+    }
+
+    public static func currentEpoch() -> UInt64 { snapshot().epoch }
+
+    /// Invalidates font-dependent caches when process-wide settings or registered faces change.
     @discardableResult
     public static func bumpEpoch() -> UInt64 {
         storage.lock.lock()
-        storage.epoch &+= 1
-        let val = storage.epoch
-        storage.lock.unlock()
-        if var stack = currentThreadStack(), !stack.isEmpty {
-            stack[stack.count - 1].epoch = val
-            setThreadStack(stack)
+        defer { storage.lock.unlock() }
+        storage.settingsEpoch = storage.allocateEpoch()
+        storage.defaults.epoch = storage.settingsEpoch
+        if var state = threadOverride {
+            state.epoch = storage.allocateEpoch()
+            threadOverride = state
+            return state.epoch
         }
-        return val
+        return storage.defaults.epoch
     }
 
     public static func currentFamilies() -> (sans: String, mono: String) {
-        if let top = currentThreadStack()?.last {
-            return (top.sans, top.mono)
-        }
-        storage.lock.lock()
-        defer { storage.lock.unlock() }
-        return (storage.sans, storage.mono)
+        let state = snapshot()
+        return (state.sans, state.mono)
     }
 
     @discardableResult
     public static func setFamilies(sans: String, mono: String) -> Bool {
-        if var stack = currentThreadStack(), let top = stack.last {
-            if top.sans == sans && top.mono == mono {
-                return false
-            }
-            storage.lock.lock()
-            storage.epoch &+= 1
-            let newEpoch = storage.epoch
-            storage.lock.unlock()
-            stack[stack.count - 1] = ThreadFrame(sans: sans, mono: mono, epoch: newEpoch)
-            setThreadStack(stack)
-            return true
-        }
+        let scoped = threadOverride
         storage.lock.lock()
-        if storage.sans == sans && storage.mono == mono {
-            storage.lock.unlock()
-            return false
+        defer { storage.lock.unlock() }
+        let previous = scoped ?? storage.defaults
+        guard previous.sans != sans || previous.mono != mono else { return false }
+        let state = State(sans: sans, mono: mono, epoch: storage.allocateEpoch())
+        if scoped != nil {
+            threadOverride = state
+        } else {
+            storage.defaults = state
         }
-        storage.sans = sans
-        storage.mono = mono
-        storage.epoch &+= 1
-        storage.lock.unlock()
         return true
     }
 
     public static func withFamilies(sans: String, mono: String, _ body: () throws -> Void) rethrows {
+        let previous = threadOverride
+        let previousWindowChoice = windowChoice
         storage.lock.lock()
-        storage.epoch &+= 1
-        let entryEpoch = storage.epoch
+        let epoch = storage.allocateEpoch()
         storage.lock.unlock()
-
-        var stack = currentThreadStack() ?? []
-        stack.append(ThreadFrame(sans: sans, mono: mono, epoch: entryEpoch))
-        setThreadStack(stack)
+        threadOverride = State(sans: sans, mono: mono, epoch: epoch)
         defer {
-            var updated = currentThreadStack() ?? []
-            if !updated.isEmpty {
-                updated.removeLast()
+            threadOverride = previous
+            if let previousWindowChoice {
+                Thread.current.threadDictionary[windowKey] = previousWindowChoice
+            } else {
+                Thread.current.threadDictionary.removeObject(forKey: windowKey)
             }
-            setThreadStack(updated)
-            storage.lock.lock()
-            storage.epoch &+= 1
-            storage.lock.unlock()
         }
         try body()
     }

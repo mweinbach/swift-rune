@@ -12,21 +12,84 @@ struct Slice3ElCoreParityTests {
     @Test("runtime/font_families: Runtime.setFontFamilies, fontFamilies, and Tx.setFontFamilies")
     func runtimeAndTxFontFamilies() {
         struct S {}
-        let rt = Runtime<S>(state: S(), viewport: Vec2(200, 100), pixelScale: 1.0) { _, _ in
-            el().key("root").size(200, 100)
-        }
-        _ = rt.frame(at: 0.0)
-        // Font families are process-global (`FontFamiliesRegistry`): restore them so later suites
-        // (e.g. TextUnblockAllTests' pill wrap widths) measure with the default faces.
-        let originalFamilies = FontFamiliesRegistry.currentFamilies()
-        defer { _ = FontFamiliesRegistry.setFamilies(sans: originalFamilies.sans, mono: originalFamilies.mono) }
-        rt.setFontFamilies("Inter", "JetBrains Mono")
-        #expect(rt.fontFamilies == ("Inter", "JetBrains Mono"))
+        withFontFamilies(sans: "", mono: "") {
+            let rt = Runtime<S>(state: S(), viewport: Vec2(200, 100), pixelScale: 1.0) { _, _ in
+                el().key("root").size(200, 100)
+            }
+            _ = rt.frame(at: 0.0)
+            rt.setFontFamilies("Inter", "JetBrains Mono")
+            #expect(rt.fontFamilies == ("Inter", "JetBrains Mono"))
 
-        rt.update(at: 0.01) { _, tx in
-            tx.setFontFamilies("Helvetica Neue", "Menlo")
+            rt.update(at: 0.01) { _, tx in
+                tx.setFontFamilies("Helvetica Neue", "Menlo")
+            }
+            #expect(rt.fontFamilies == ("Helvetica Neue", "Menlo"))
         }
-        #expect(rt.fontFamilies == ("Helvetica Neue", "Menlo"))
+    }
+
+    @Test("A sibling window adopts the chosen families on its next draw and a new window starts in them")
+    func siblingWindowsFollowFontFamilies() {
+        withFontFamilies(sans: "", mono: "") {
+            func window() -> Runtime<Int> {
+                Runtime(state: 0, viewport: Vec2(240, 80)) { _, _ in
+                    row().child(text("iiiiiiii").mono().key("label"))
+                }
+            }
+            let first = window()
+            let sibling = window()
+            let original = sibling.frame(at: 0).primitives.filter { $0.kind == .glyph }.map(\.rect)
+            first.setFontFamilies("Inter", "Inter")
+            let chosen = first.frame(at: 0).primitives.filter { $0.kind == .glyph }.map(\.rect)
+
+            #expect(sibling.fontFamilies == ("", ""))
+            #expect(sibling.hasPendingCommit && sibling.isStale)
+            #expect(window().fontFamilies == ("Inter", "Inter"))
+            let next = sibling.frame(at: 1).primitives.filter { $0.kind == .glyph }.map(\.rect)
+            #expect(!original.isEmpty && original != chosen)
+            #expect(next == chosen)
+            #expect(sibling.fontFamilies == first.fontFamilies)
+            #expect(!sibling.hasPendingCommit)
+        }
+    }
+
+    @Test("Another thread's window cannot change this window's view measurements or painted glyphs")
+    func independentWindowFontFamilies() {
+        let defaults = FontFamiliesRegistry.currentFamilies()
+        let style = TextStyle.body.mono()
+        let sample = "iiiiiiii"
+        var advance: Float = 0
+        var viewInk: TextInk?
+        let reader = Runtime<Int>(state: 0, viewport: Vec2(240, 80)) { _, _ in
+            advance = TextMeasure.advance(sample, style: style)
+            viewInk = ink(sample, style: style)
+            return row().child(text(sample).mono())
+        }
+        var original: [SIMD4<Float>] = []
+        withFontFamilies(sans: "", mono: "") {
+            reader.setFontFamilies("Inter", "Inter")
+            original = reader.frame(at: 0).primitives.filter { $0.kind == .glyph }.map(\.rect)
+        }
+        let originalAdvance = advance
+        let originalInk = viewInk
+
+        // Change a second window on its own OS thread. Switching it back to the existing
+        // free-measurement defaults keeps concurrent callers of the global API undisturbed.
+        let finished = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            let writer = Runtime<Int>(state: 0, viewport: Vec2(240, 80)) { _, _ in text(sample).mono() }
+            withFontFamilies(sans: "", mono: "") { writer.setFontFamilies("Inter", "Inter") }
+            writer.setFontFamilies(defaults.sans, defaults.mono)
+            _ = writer.frame(at: 0)
+            finished.signal()
+        }
+        finished.wait()
+        reader.update(at: 1) { state, _ in state += 1 }
+        let next = reader.frame(at: 1).primitives.filter { $0.kind == .glyph }.map(\.rect)
+        #expect(reader.fontFamilies == ("Inter", "Inter"))
+        #expect(original.count == sample.count && next == original)
+        #expect(originalAdvance > 0 && advance == originalAdvance)
+        #expect(originalInk != nil && viewInk == originalInk)
+        #expect(TextMeasure.advance(sample, style: style) > advance)
     }
 
     @Test("runtime/event_log & event_markers: recording gating, input markers, secure key redaction, and 512/256 ring cap")

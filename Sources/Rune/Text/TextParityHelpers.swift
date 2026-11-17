@@ -512,9 +512,47 @@ public struct RichLayoutOptions: Equatable, Sendable {
     }
 }
 
+/// Each thread measures with its own shaper and bounded ink cache (`text/measure.rs`).
+internal final class ThreadTextMeasurer {
+    static var current: ThreadTextMeasurer {
+        let dictionary = Thread.current.threadDictionary
+        let key = "rune.text.measurer"
+        if let current = dictionary[key] as? ThreadTextMeasurer { return current }
+        let current = ThreadTextMeasurer()
+        dictionary[key] = current
+        return current
+    }
+
+    private lazy var fallback = TextSystem(forMeasurement: ())
+    var lent: TextSystem?
+    var inkCache = TextInkCache()
+
+    func withSystem<T>(_ body: (TextSystem) throws -> T) rethrows -> T {
+        if let window = lent, FontFamiliesRegistry.threadOverride == nil {
+            lent = nil
+            defer { lent = window }
+            return try body(window)
+        }
+        fallback.followMeasurementFontFamilies()
+        return try body(fallback)
+    }
+}
+
 /// Shared measurement entry points mirroring `rune::text::{measure, measure_with, content_widths, advance}`.
 public enum TextMeasure {
-    private static let shared = TextSystem()
+    /// Free measures made while building the view use the same system as the window's layout.
+    internal static func withLentSystem<T>(_ system: TextSystem, _ body: () throws -> T) rethrows -> T {
+        let measurer = ThreadTextMeasurer.current
+        let previous = measurer.lent
+        measurer.lent = system
+        defer { measurer.lent = previous }
+        return try body()
+    }
+
+    /// The metrics a cache in a view will use, including a lent window's own family slots.
+    package static var currentFontEpoch: UInt64 {
+        ThreadTextMeasurer.current.withSystem { $0.currentFontEpoch }
+    }
 
     public static func measure(
         _ text: String,
@@ -534,28 +572,43 @@ public enum TextMeasure {
     ) -> Vec2 {
         var effectiveStyle = style
         effectiveStyle.align = options.align
-        let shaped = shared.shape(
-            text: text,
-            spans: spans.isEmpty ? nil : spans,
-            style: effectiveStyle,
-            maxWidth: maxWidth,
-            pixelScale: 1.0,
-            emitGlyphs: false
-        )
-        // Widths round up to a 64th of a point, as Chromium keeps a text run's width (`text_width`, #934).
-        return Vec2(TextBoxGeometry.textWidth(shaped.size.x), shaped.size.y)
+        if maxWidth != nil && effectiveStyle.wrap == .noWrap { effectiveStyle.wrap = .wrap }
+        if options.wrapAnywhere { effectiveStyle.wrapAnywhere = true }
+        switch options.direction {
+        case .ltr: effectiveStyle.direction = .ltr
+        case .rtl: effectiveStyle.direction = .rtl
+        case .auto: break
+        }
+        return ThreadTextMeasurer.current.withSystem { system in
+            let shaped = system.shape(
+                text: text,
+                spans: spans.isEmpty ? nil : spans,
+                style: effectiveStyle,
+                maxWidth: maxWidth,
+                pixelScale: 1.0,
+                emitGlyphs: false
+            )
+            // Chromium keeps a text run's width to a 64th of a point (`text_width`, #934).
+            return Vec2(TextBoxGeometry.textWidth(shaped.size.x), shaped.size.y)
+        }
     }
 
     public static func contentWidths(_ text: String, spans: [TextSpan] = [], style: TextStyle) -> (min: Float, max: Float) {
-        let minS = shared.shape(text: text, spans: spans.isEmpty ? nil : spans, style: style, maxWidth: 0, pixelScale: 1.0, emitGlyphs: false)
-        let maxS = shared.shape(text: text, spans: spans.isEmpty ? nil : spans, style: style, maxWidth: nil, pixelScale: 1.0, emitGlyphs: false)
-        return (minS.size.x, maxS.size.x)
+        var wrapping = style
+        if wrapping.wrap == .noWrap { wrapping.wrap = .wrap }
+        return ThreadTextMeasurer.current.withSystem { system in
+            let minS = system.shape(text: text, spans: spans.isEmpty ? nil : spans, style: wrapping, maxWidth: 0, pixelScale: 1, emitGlyphs: false)
+            let maxS = system.shape(text: text, spans: spans.isEmpty ? nil : spans, style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: false)
+            return (minS.size.x, maxS.size.x)
+        }
     }
 
     public static func advance(_ text: String, style: TextStyle) -> Float {
         var single = style
         single.wrap = .noWrap
-        return shared.shape(text: text, spans: nil, style: single, maxWidth: nil, pixelScale: 1.0, emitGlyphs: false).size.x
+        return ThreadTextMeasurer.current.withSystem { system in
+            system.shape(text: text, spans: nil, style: single, maxWidth: nil, pixelScale: 1, emitGlyphs: false).size.x
+        }
     }
 }
 

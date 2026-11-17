@@ -5676,11 +5676,7 @@ private final class MarkdownRenderer<State> {
 
         let outsideMarkerSpace: Float
         if start != nil && s.listOutside {
-            outsideMarkerSpace = MarkdownRendererShared.measureLock.withLock {
-                let system = MarkdownRendererShared.measureSystem
-                return system.measure("x x", style: s.body, maxWidth: nil, pixelScale: 1).x
-                    - system.measure("xx", style: s.body, maxWidth: nil, pixelScale: 1).x
-            }
+            outsideMarkerSpace = TextMeasure.measure("x x", style: s.body).x - TextMeasure.measure("xx", style: s.body).x
         } else {
             outsideMarkerSpace = 0
         }
@@ -5922,10 +5918,7 @@ private final class MarkdownRenderer<State> {
                     // Unrounded, as a browser's table layout sums them; a hair over, so a cell at
                     // its column's natural width never wraps its last word (`table.rs` widths,
                     // `rune::text::content_widths`: min-content and max-content of the cell).
-                    MarkdownRendererShared.measureLock.lock()
-                    let minW = MarkdownRendererShared.measureSystem.shape(text: inl.text, spans: spans, style: font, maxWidth: 0, pixelScale: 1, emitGlyphs: false).size.x
-                    let maxW = MarkdownRendererShared.measureSystem.shape(text: inl.text, spans: spans, style: font, maxWidth: nil, pixelScale: 1, emitGlyphs: false).size.x
-                    MarkdownRendererShared.measureLock.unlock()
+                    let (minW, maxW) = TextMeasure.contentWidths(inl.text, spans: spans, style: font)
                     let hits = MarkdownTableCodePad.hits(inl)
                     let pad: (Bool) -> Float = { $0 ? self.s.inlineCodePad : 0 }
                     natural[j] = max(natural[j], maxW + pad(hits.last) + 0.01)
@@ -6090,8 +6083,6 @@ private extension String {
 }
 
 private enum MarkdownRendererShared {
-    static let measureSystem = TextSystem()
-    static let measureLock = NSLock()
     static let shells: Set<String> = ["bash", "sh", "shell", "zsh", "fish", "console", "terminal"]
     static let plainLangs: Set<String> = ["text", "txt", "plain", "plaintext"]
 }

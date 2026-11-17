@@ -8,10 +8,8 @@ enum CanvasConstants {
 }
 
 enum MermaidTextMeasurer {
-    private static let textSystem = TextSystem()
-
     static func measure(_ s: String, font: TextStyle, maxWidth: Float? = nil) -> Vec2 {
-        textSystem.measure(s, style: font, maxWidth: maxWidth, pixelScale: 1.0)
+        TextMeasure.measure(s, style: font, maxWidth: maxWidth)
     }
 }
 

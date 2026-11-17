@@ -7,6 +7,7 @@ import CoreGraphics
 private final class RunCellLayoutCache: @unchecked Sendable {
     struct Key: Hashable {
         var runHash: UInt64
+        var fontEpoch: UInt64
         var text: String
         var style: TextStyle
         var scale100: Int
@@ -39,6 +40,7 @@ private final class RunCellLayoutCache: @unchecked Sendable {
         }()
         let key = Key(
             runHash: run.hash,
+            fontEpoch: textSystem.currentFontEpoch,
             text: run.text,
             style: singleStyle,
             scale100: Int((scale * 100.0).rounded()),

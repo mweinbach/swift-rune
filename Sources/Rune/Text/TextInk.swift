@@ -132,42 +132,23 @@ internal struct TextInkCache: Sendable {
     }
 }
 
-private final class GlobalTextInkState: @unchecked Sendable {
-    let lock = NSLock()
-    var cache = TextInkCache()
-    let textSystem = TextSystem()
-}
-
-private let globalInkState = GlobalTextInkState()
-
 /// Where `text` set in `style` puts its ink, or `nil` when it draws nothing (spaces, empty).
-/// Cached by `(text, style)` and invalidated automatically whenever `fontEpoch()` changes.
+/// Cached by text and style for the thread and the families it measured with.
 public func ink(_ text: String, style: TextStyle) -> TextInk? {
-    let key = TextInkCache.key(text: text, style: style)
-    let epoch = fontEpoch()
-
-    globalInkState.lock.lock()
-    if globalInkState.cache.epoch != epoch {
-        globalInkState.cache = TextInkCache()
-        globalInkState.cache.epoch = epoch
+    let measurer = ThreadTextMeasurer.current
+    return measurer.withSystem { system in
+        let key = TextInkCache.key(text: text, style: style)
+        let epoch = system.currentFontEpoch
+        if measurer.inkCache.epoch != epoch {
+            measurer.inkCache = TextInkCache(epoch: epoch)
+        }
+        if let hit = measurer.inkCache.get(key: key, text: text, style: style) {
+            return hit
+        }
+        let found = system.computeInk(text, style: style)
+        measurer.inkCache.insert(key: key, text: text, style: style, ink: found)
+        return found
     }
-    if let hit = globalInkState.cache.get(key: key, text: text, style: style) {
-        globalInkState.lock.unlock()
-        return hit
-    }
-    globalInkState.lock.unlock()
-
-    let found = globalInkState.textSystem.computeInk(text, style: style)
-
-    globalInkState.lock.lock()
-    if globalInkState.cache.epoch != fontEpoch() {
-        globalInkState.cache = TextInkCache()
-        globalInkState.cache.epoch = fontEpoch()
-    }
-    globalInkState.cache.insert(key: key, text: text, style: style, ink: found)
-    globalInkState.lock.unlock()
-
-    return found
 }
 
 extension TextSystem {
