@@ -657,6 +657,35 @@ static void retire_node(RuneAccessible *node) {
     while (node->children->len) orphan(node->children->pdata[node->children->len - 1]);
 }
 
+void rune_ax_remove(RuneA11yWindow *w, const char *key) {
+    RuneAccessible *node = w && key ? g_hash_table_lookup(w->nodes, key) : NULL;
+    if (!node) return;
+    retire_node(node);
+    g_hash_table_remove(w->nodes, key);
+}
+
+static void notify_bounds(RuneAccessible *node) {
+    AtkRectangle rect;
+    extents(ATK_COMPONENT(node), &rect.x, &rect.y, &rect.width, &rect.height, ATK_XY_SCREEN);
+    g_signal_emit_by_name(node, "bounds-changed", &rect);
+}
+
+void rune_ax_geometry(RuneA11yWindow *w, const char *key, int x, int y, int width, int height, int offscreen) {
+    RuneAccessible *node = w && key ? g_hash_table_lookup(w->nodes, key) : NULL;
+    if (!node) return;
+    node->generation = w->generation;
+    RuneA11yProperties *p = &node->properties;
+    gboolean moved = p->x != x || p->y != y || p->width != width || p->height != height;
+    p->x = x; p->y = y; p->width = width; p->height = height;
+    if (((p->state & RUNE_AX_OFFSCREEN) != 0) != (offscreen != 0)) {
+        if (offscreen) p->state |= RUNE_AX_OFFSCREEN;
+        else p->state &= ~RUNE_AX_OFFSCREEN;
+        const guint64 showing = STATE_BIT(ATK_STATE_SHOWING);
+        set_states(node, offscreen ? node->states & ~showing : node->states | showing);
+    }
+    if (moved) notify_bounds(node);
+}
+
 void rune_ax_node(RuneA11yWindow *w, const char *key, const char *parent_key, int index,
                   const char *target, const char *role_name, const char *name, const char *help,
                   const char *text, const char *shortcut, RuneA11yProperties properties) {
@@ -687,10 +716,8 @@ void rune_ax_node(RuneA11yWindow *w, const char *key, const char *parent_key, in
     RuneA11yProperties old = node->properties;
     node->properties = properties;
     set_states(node, states_for(properties, role));
-    if (old.x != properties.x || old.y != properties.y || old.width != properties.width || old.height != properties.height) {
-        AtkRectangle r = {w->x + properties.x, w->y + properties.y, properties.width, properties.height};
-        g_signal_emit_by_name(node, "bounds-changed", &r);
-    }
+    if (old.x != properties.x || old.y != properties.y || old.width != properties.width || old.height != properties.height)
+        notify_bounds(node);
     if (ATK_IS_TEXT(node) && (old.anchor != properties.anchor || old.caret != properties.caret)) {
         if (old.caret != properties.caret && properties.caret >= 0) g_signal_emit_by_name(node, "text-caret-moved", properties.caret);
         if (old.anchor != old.caret || properties.anchor != properties.caret) g_signal_emit_by_name(node, "text-selection-changed");
@@ -718,15 +745,17 @@ void rune_ax_text_geometry(RuneA11yWindow *w, const char *key, const RuneA11yTex
     g_array_sort(node->text_cells, compare_cell_offsets);
 }
 
-void rune_ax_end(RuneA11yWindow *w) {
-    if (!w) return;
+static void retire_nodes(RuneA11yWindow *w, gboolean all) {
     GHashTableIter it;
     gpointer value;
     g_hash_table_iter_init(&it, w->nodes);
     while (g_hash_table_iter_next(&it, NULL, &value)) {
         RuneAccessible *node = value;
-        if (node->generation != w->generation) { retire_node(node); g_hash_table_iter_remove(&it); }
+        if (all || node->generation != w->generation) { retire_node(node); g_hash_table_iter_remove(&it); }
     }
+}
+void rune_ax_end(RuneA11yWindow *w) {
+    if (w) retire_nodes(w, FALSE);
 }
 void rune_ax_announce(RuneA11yWindow *w, const char *text, int assertive) {
     if (!w || !text || !*text) return;
@@ -741,8 +770,7 @@ void rune_ax_announce(RuneA11yWindow *w, const char *text, int assertive) {
 void rune_ax_close(RuneA11yWindow *w) {
     if (!w) return;
     if (w->watch) rune_glib_watch_free(w->watch);
-    ++w->generation;
-    rune_ax_end(w);
+    retire_nodes(w, TRUE);
     rune_ax_visible(w, FALSE);
     retire_node(w->frame);
     g_object_unref(w->frame);

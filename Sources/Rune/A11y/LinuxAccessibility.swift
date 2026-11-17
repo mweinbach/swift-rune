@@ -13,6 +13,27 @@ final class LinuxAccessibilityHost {
     private var lastTitle = ""
     private var lastWindowFocused = false
     private var lastWindowRect: [Int32] = []
+    // Keep the properties exported to ATK separate from their moving window bounds.
+    // Most virtual rows retain the same semantic node while the viewport scrolls.
+    private struct Semantics: Equatable {
+        let role: ElementRole
+        let name: TextUTF8Key
+        let help, value, shortcut: TextUTF8Key?
+        let state, actions: UInt32
+        let selection: SIMD2<Int32>
+        let range: A11yRange?
+    }
+    private struct Published {
+        let parent: TextUTF8Key?
+        let index: Int
+        let semantics: Semantics
+        let box: SIMD4<Int32>
+        let offscreen: Bool
+        let children: [AccessibilityNode]
+    }
+    private var published: [TextUTF8Key: Published] = [:]
+    private var nextPublished: [TextUTF8Key: Published] = [:]
+    private var hasAnnouncements = false
     private struct Field {
         let key, target: String
         let clip: MotionRect
@@ -27,7 +48,8 @@ final class LinuxAccessibilityHost {
         let commit: UInt64
     }
 
-    private var fields: [Field] = []
+    private var fields: [TextUTF8Key: Field] = [:]
+    private var nextFields: [TextUTF8Key: Field] = [:]
 
     private enum Request {
         case action(String, AccessibilityAction, AccessibilityActionValue?)
@@ -125,32 +147,37 @@ final class LinuxAccessibilityHost {
         if runtime.a11yAnnouncement.count != 0 {
             root.children.append(AccessibilityTreeState.announcerNode(runtime.a11yAnnouncement, holdWords: false))
         }
-        // Horizontal input scrolling and paint transforms can move glyphs inside an
-        // unchanged semantic frame. Refresh the retained fields after every drawn frame.
-        defer { refreshTextGeometry(runtime: runtime, window: window) }
-        guard lastRoot != root || lastTitle != title || lastWindowRect != windowRect || lastWindowFocused != runtime.windowFocused else { return }
-        let announcements = AccessibilityTreeBuilder.liveAnnouncements(previous: lastRoot, current: root)
-        lastRoot = root
+        if lastTitle != title || lastWindowRect != windowRect || lastWindowFocused != runtime.windowFocused {
+            rune_ax_begin(window, title, windowX, windowY, width, height, runtime.windowFocused ? 1 : 0)
+        }
         lastTitle = title
         lastWindowRect = windowRect
         lastWindowFocused = runtime.windowFocused
-        fields.removeAll(keepingCapacity: true)
-        rune_ax_begin(window, title, windowX, windowY, width, height, runtime.windowFocused ? 1 : 0)
-        publish(root, parent: nil, index: 0, clip: .fromXYWH(0, 0, runtime.viewport.x, runtime.viewport.y))
-        rune_ax_end(window)
-        for announcement in announcements {
-            rune_ax_announce(window, announcement.text, announcement.politeness == .assertive ? 1 : 0)
+        hasAnnouncements = false
+        publish(root, parent: nil, index: 0, clip: .fromXYWH(0, 0, runtime.viewport.x, runtime.viewport.y), place: false)
+        for key in published.keys where nextPublished[key] == nil { rune_ax_remove(window, key.source) }
+        swap(&published, &nextPublished)
+        nextPublished.removeAll(keepingCapacity: true)
+        swap(&fields, &nextFields)
+        nextFields.removeAll(keepingCapacity: true)
+        if hasAnnouncements {
+            for announcement in AccessibilityTreeBuilder.liveAnnouncements(previous: lastRoot, current: root) {
+                rune_ax_announce(window, announcement.text, announcement.politeness == .assertive ? 1 : 0)
+            }
         }
+        lastRoot = root
+        // The caret or horizontal input offset can change while the semantic frame stays still.
+        refreshTextGeometry(runtime: runtime, window: window)
     }
 
-    private func publish(_ node: AccessibilityNode, parent: String?, index: Int, clip: MotionRect) {
+    private func publish(_ node: AccessibilityNode, parent: TextUTF8Key?, index: Int, clip: MotionRect, place: Bool) {
         // Runtime paths distinguish namesakes, including links with the same label. Synthetic
         // children without a path keep their authored id scoped to their projected parent.
-        let key = node.runtimePath.map { "runtime:" + $0 } ?? "\(parent ?? "")/node:\(index):\(node.id)"
+        let key = TextUTF8Key(node.runtimePath.map { "runtime:" + $0 } ?? "\(parent?.source ?? "")/node:\(index):\(node.id)")
         let target = node.runtimePath ?? node.id
         let visible = intersectRects(node.frame, clip)
+        let offscreen = visible.width <= 0 || visible.height <= 0
         var state = 0
-        if visible.width <= 0 || visible.height <= 0 { state |= RUNE_AX_OFFSCREEN }
         if node.isDisabled { state |= RUNE_AX_DISABLED }
         if node.isFocusable { state |= RUNE_AX_FOCUSABLE }
         if node.isFocused && lastWindowFocused { state |= RUNE_AX_FOCUSED }
@@ -187,7 +214,7 @@ final class LinuxAccessibilityHost {
         properties.y = pixel(node.frame.top.rounded(.down))
         properties.width = pixel(max(0, node.frame.right.rounded(.up) - node.frame.left.rounded(.down)))
         properties.height = pixel(max(0, node.frame.bottom.rounded(.up) - node.frame.top.rounded(.down)))
-        properties.state = UInt32(state)
+        properties.state = UInt32(state | (offscreen ? RUNE_AX_OFFSCREEN : 0))
         properties.anchor = -1
         properties.caret = -1
         if !node.isSecure, actions & RUNE_AX_SET_TEXT != 0, let selection = node.textSelection,
@@ -208,27 +235,56 @@ final class LinuxAccessibilityHost {
         case .text, .heading, .mark, .code: text = node.value ?? node.label
         default: text = node.value
         }
-        rune_ax_node(window, key, parent, Int32(clamping: index), target, node.role.rawValue,
-                     AccessibilityDump.resolvedName(for: node) ?? "", node.help ?? "", node.isSecure ? nil : text, node.keyboardShortcut, properties)
-        if !node.isSecure, node.role == .textInput || node.role == .multilineTextInput, let path = node.runtimePath {
-            fields.append(Field(key: key, target: path, clip: visible))
+        let semantics = Semantics(role: node.role, name: TextUTF8Key(AccessibilityDump.resolvedName(for: node) ?? ""),
+                                  help: node.help.map(TextUTF8Key.init), value: node.isSecure ? nil : text.map(TextUTF8Key.init),
+                                  shortcut: node.keyboardShortcut.map(TextUTF8Key.init), state: UInt32(state), actions: UInt32(actions),
+                                  selection: SIMD2(properties.anchor, properties.caret), range: node.range)
+        let box = SIMD4(properties.x, properties.y, properties.width, properties.height)
+        let old = published[key]
+        if place || old?.semantics != semantics || old?.parent != parent || old?.index != index {
+            rune_ax_node(window, key.source, parent?.source, Int32(clamping: index), target, node.role.rawValue,
+                         semantics.name.source, node.help ?? "", semantics.value?.source, node.keyboardShortcut, properties)
+        } else if old?.box != box || old?.offscreen != offscreen {
+            rune_ax_geometry(window, key.source, box.x, box.y, box.z, box.w, offscreen ? 1 : 0)
         }
+        nextPublished[key] = Published(parent: parent, index: index, semantics: semantics, box: box,
+                                       offscreen: offscreen, children: node.children)
+        if !node.isSecure && (node.liveRegion != nil || node.isModal || node.role == .dialog || node.role == .alertDialog) {
+            hasAnnouncements = true
+        }
+        let mayReplace = old?.semantics.role != semantics.role || old?.semantics.actions != semantics.actions
+        if !node.isSecure, node.role == .textInput || node.role == .multilineTextInput, let path = node.runtimePath {
+            nextFields[key] = Field(key: key.source, target: path, clip: visible, geometry: mayReplace ? nil : fields[key]?.geometry)
+        }
+        // A changed ATK interface can recreate the parent. Insertions and removals can
+        // also displace a sibling whose own index happens to match its previous index.
+        let placeChildren = mayReplace || !Self.sameChildren(old?.children ?? [], node.children)
         let childClip = node.clipsChildren ? visible : clip
         for (i, child) in node.children.enumerated() {
-            publish(child, parent: key, index: i, clip: childClip)
+            publish(child, parent: key, index: i, clip: childClip, place: placeChildren)
+        }
+    }
+
+    private static func sameChildren(_ previous: [AccessibilityNode], _ current: [AccessibilityNode]) -> Bool {
+        guard previous.count == current.count else { return false }
+        return zip(previous, current).allSatisfy { old, new in
+            switch (old.runtimePath, new.runtimePath) {
+            case let (a?, b?): return TextUTF8Key.equalBytes(a, b)
+            case (nil, nil): return TextUTF8Key.equalBytes(old.id, new.id)
+            default: return false
+            }
         }
     }
 
     private func refreshTextGeometry<State>(runtime: Runtime<State>, window: OpaquePointer) {
-        for index in fields.indices {
-            let field = fields[index]
+        for (key, field) in fields {
             let layout = runtime.accessibilityTextLayout(target: field.target, clip: field.clip)
             let source = layout.map {
                 GeometrySource(box: ObjectIdentifier($0.box), width: $0.box.maxWidth, origin: $0.origin,
                                scale: $0.scale, clip: $0.clip, commit: runtime.commitCount)
             }
             if let source, field.geometry == source { continue }
-            fields[index].geometry = source
+            fields[key]?.geometry = source
             // On Linux SDL and AT-SPI expose the same window logical coordinates, even
             // when the GPU drawable has a higher pixel density than the window.
             guard let cells = layout?.cells(unit: .unicodeScalars, pixelScale: 1) else {

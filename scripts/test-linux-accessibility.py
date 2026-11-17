@@ -228,6 +228,13 @@ def test_scroll_to_field(binary):
                 word = editor.get_string_at_offset(end - 1, Atspi.TextGranularity.WORD)
                 assert (word.start_offset, word.end_offset, word.content) == (start, end, text[start:end])
         print("AT-SPI Rune: shaped contractions, decimals, spaces and punctuation survive edits")
+        button = named("Confirm")
+        assert not showing(button)
+        assert button.do_action(0)
+        dialog = named("Confirm choices")
+        assert dialog.get_role() == Atspi.Role.DIALOG
+        assert dialog.get_state_set().contains(Atspi.StateType.MODAL)
+        print("AT-SPI Rune: offscreen button activation opened the modal dialog")
 
 
 if __name__ == "__main__":

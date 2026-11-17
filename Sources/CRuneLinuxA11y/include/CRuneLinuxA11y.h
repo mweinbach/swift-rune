@@ -52,6 +52,9 @@ void rune_ax_begin(RuneA11yWindow *, const char *title, int x, int y, int width,
 void rune_ax_node(RuneA11yWindow *, const char *key, const char *parent_key, int index,
                   const char *target, const char *role, const char *name, const char *help,
                   const char *value_text, const char *shortcut, RuneA11yProperties properties);
+/* Window-relative extents and visibility for an existing node. Both sparse calls ignore missing keys. */
+void rune_ax_geometry(RuneA11yWindow *, const char *key, int x, int y, int width, int height, int offscreen);
+void rune_ax_remove(RuneA11yWindow *, const char *key);
 void rune_ax_text_geometry(RuneA11yWindow *, const char *key, const RuneA11yTextCell *cells, int count);
 void rune_ax_end(RuneA11yWindow *);
 void rune_ax_announce(RuneA11yWindow *, const char *text, int assertive);

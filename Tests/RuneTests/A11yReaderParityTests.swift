@@ -8,6 +8,27 @@ import AppKit
 @Suite("Screen reader field ranges and control names")
 @MainActor
 struct A11yReaderParityTests {
+    @Test func readerActivatesAnOffscreenButtonByIdentity() throws {
+        struct State { var events: [String] = [] }
+        let rt = Runtime(state: State(), viewport: Vec2(200, 80), systemDark: false) { _, _ in
+            col().sizeFull().scrollY().children([
+                row().h(200).shrink(0),
+                el().key("action").h(30).shrink(0)
+                    .onPointerDown { state, _, _ in state.events.append("pointer down") }
+                    .onClick { $0.events.append("activate") }
+                    .onClickPress { state, press, _ in
+                        if press.button == .primary { state.events.append("primary") }
+                    }
+            ])
+        }
+        rt.frame(at: 0)
+        let button = try #require(rt.flatNodes.first { $0.key == "action" })
+        #expect(button.targetRect.y >= 80)
+        #expect(rt.accessibilityAction(button.path, .press, at: 0.1))
+        #expect(rt.state.events == ["activate", "primary"])
+        #expect((rt.accessibilitySnapshot().scrollY ?? 0) == 0)
+    }
+
     @Test func keyedRootDescendantsRetainTextUnderTheirRuntimeIdentity() throws {
         struct Form { var draft = TextEdit("A🦀e\u{301}") }
         let rt = Runtime(state: Form(), viewport: Vec2(300, 120), systemDark: false) { _, _ in
