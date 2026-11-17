@@ -36,7 +36,7 @@ struct RuneDesktopLine {
     PangoLayout *layout;
     RuneDesktopLineMetrics metrics;
     int32_t length;
-    gboolean has_color;
+    guint8 mono, has_color;
 };
 
 // The default PangoCairo font map is thread-local. Invalidate each map lazily when
@@ -312,13 +312,63 @@ static PangoWeight match_css_weight(PangoFontMap *map, const char *stack, int ta
     return (PangoWeight)best_weight;
 }
 
-static void set_shaping_options(PangoLayout *layout, PangoFontDescription *font,
+// The blocks that load Parley's mono script fallback (text/fallback.rs).
+static gboolean uses_mono_script_fallback(gunichar ch) {
+    return (ch >= 0x0590 && ch <= 0x06ff) || (ch >= 0x0750 && ch <= 0x077f) ||
+           (ch >= 0x0870 && ch <= 0x08ff) || (ch >= 0xfb1d && ch <= 0xfdff) ||
+           (ch >= 0xfe70 && ch <= 0xfeff);
+}
+
+static PangoAttrList *mono_script_attributes(const char *text, int length, const char *family,
+    PangoLanguage *language) {
+    if (g_str_is_ascii(text)) return NULL;
+    const char *end = text + length, *p = text;
+    for (; p < end; p = g_utf8_next_char(p)) {
+        if ((guchar)*p >= 0x80 && uses_mono_script_fallback(g_utf8_get_char(p))) break;
+    }
+    if (p == end) return NULL;
+
+    const int count = (int)g_utf8_strlen(text, length);
+    PangoLogAttr *breaks = g_new0(PangoLogAttr, count + 1);
+    pango_get_log_attrs(text, length, -1, language, breaks, count + 1);
+    char *stack = g_strconcat(family, ", DejaVu Sans Mono", NULL);
+    PangoAttrList *attrs = pango_attr_list_new();
+    // Pango can assign the fallback face to neutral spaces around a script run.
+    // Apply the extra family only to its graphemes, keeping marks with their base
+    // and normal font fallback available for glyphs missing from the whole stack.
+    const char *run = NULL;
+    int scalar = 0;
+    for (p = text; p < end;) {
+        const char *cluster = p;
+        gboolean script = FALSE;
+        do {
+            if (uses_mono_script_fallback(g_utf8_get_char(p))) script = TRUE;
+            p = g_utf8_next_char(p);
+            ++scalar;
+        } while (p < end && !breaks[scalar].is_cursor_position);
+        if (script && !run) run = cluster;
+        if (run && (!script || p == end)) {
+            PangoAttribute *attr = pango_attr_family_new(stack);
+            attr->start_index = (guint)(run - text);
+            attr->end_index = (guint)((script ? p : cluster) - text);
+            pango_attr_list_insert(attrs, attr);
+            run = NULL;
+        }
+    }
+    g_free(stack);
+    g_free(breaks);
+    return attrs;
+}
+
+static void set_shaping_options(RuneDesktopLine *line, PangoFontDescription *font,
     const char *language, const char *features, const char *variations) {
-    PangoAttrList *attrs = NULL;
+    PangoLayout *layout = line->layout;
+    PangoLanguage *lang = language && *language ? pango_language_from_string(language) : NULL;
+    PangoAttrList *attrs = line->mono ? mono_script_attributes(pango_layout_get_text(layout),
+        line->length, pango_font_description_get_family(font), lang) : NULL;
     if ((language && *language) || (features && *features)) {
-        attrs = pango_attr_list_new();
-        if (language && *language)
-            pango_attr_list_insert(attrs, pango_attr_language_new(pango_language_from_string(language)));
+        if (!attrs) attrs = pango_attr_list_new();
+        if (lang) pango_attr_list_insert(attrs, pango_attr_language_new(lang));
         if (features && *features)
             pango_attr_list_insert(attrs, pango_attr_font_features_new(features));
     }
@@ -354,13 +404,6 @@ RuneDesktopLine *rune_linux_line_create_configured(const char *utf8, int32_t len
     g_object_unref(context);
     pango_layout_set_auto_dir(layout, direction == 0);
     pango_layout_set_single_paragraph_mode(layout, TRUE);
-    PangoFontDescription *font = pango_font_description_new();
-    pango_font_description_set_family(font, family && *family ? family : (mono ? "monospace" : "sans-serif"));
-    pango_font_description_set_absolute_size(font, size_px * PANGO_SCALE);
-    pango_font_description_set_weight(font, match_css_weight(map, family, weight, italic));
-    pango_font_description_set_style(font, italic ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL);
-    set_shaping_options(layout, font, language, features, variations);
-    pango_font_description_free(font);
     // Pango stops at an embedded NUL even with an explicit byte count. Preserve the
     // remainder and its UTF-8 indices, including for caret and fallback queries.
     char *sanitized = NULL;
@@ -382,6 +425,14 @@ RuneDesktopLine *rune_linux_line_create_configured(const char *utf8, int32_t len
     g_mutex_init(&result->index_lock);
     result->layout = layout;
     result->length = length;
+    result->mono = mono != 0;
+    PangoFontDescription *font = pango_font_description_new();
+    pango_font_description_set_family(font, family && *family ? family : (mono ? "monospace" : "sans-serif"));
+    pango_font_description_set_absolute_size(font, size_px * PANGO_SCALE);
+    pango_font_description_set_weight(font, match_css_weight(map, family, weight, italic));
+    pango_font_description_set_style(font, italic ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL);
+    set_shaping_options(result, font, language, features, variations);
+    pango_font_description_free(font);
     measure_line(result);
     return result;
 }
@@ -397,7 +448,7 @@ void rune_desktop_line_configure(RuneDesktopLine *line, const char *language,
     if (!line || !line->layout) return;
     g_mutex_lock(&line->index_lock);
     PangoFontDescription *font = pango_font_description_copy(pango_layout_get_font_description(line->layout));
-    set_shaping_options(line->layout, font, language, features, variations);
+    set_shaping_options(line, font, language, features, variations);
     pango_font_description_free(font);
     measure_line(line);
     g_mutex_unlock(&line->index_lock);

@@ -8,6 +8,32 @@ import Testing
 #if canImport(CoreText) || os(Linux) || os(Windows)
 @Suite("Text run cluster ink")
 struct TextRunClusterInkTests {
+    #if os(Linux)
+    @Test func monoScriptFallbackKeepsArabicMarksAndPreservesThePrimarySpace() throws {
+        _ = DefaultFonts.registerIfNeeded()
+        func width(_ text: String, family: String, mono: Bool, configured: Bool) throws -> Float {
+            let line = try #require(rune_desktop_line_create(text, Int32(text.utf8.count),
+                family, 13, 400, 0, mono ? 1 : 0, 2))
+            defer { rune_desktop_line_destroy(line) }
+            if configured { rune_desktop_line_configure(line, "ar", "liga=0", nil) }
+            return rune_desktop_line_metrics(line).advance
+        }
+        // Inter needs a fallback for these scripts. A requested face that covers
+        // the word takes precedence over the extra monospace family.
+        for primary in ["Inter", "DejaVu Sans"] {
+            for configured in [false, true] {
+                let spaces = try width("  ", family: primary, mono: false, configured: configured)
+                for word in ["مرحبا", "مَّرحبا", "שָׁלוֹם"] {
+                    let letters = try width(word, family: primary + ", DejaVu Sans Mono",
+                                            mono: false, configured: configured)
+                    let code = try width(word + "  ", family: primary, mono: true, configured: configured)
+                    #expect(abs(code - letters - spaces) < 1.0 / 64.0)
+                }
+            }
+        }
+    }
+    #endif
+
     @Test func authoredOffsetsSurviveShapingAndSliceOffsetsAreLocal() throws {
         let system = TextSystem()
         let run = TextRun("Aאֱe\u{301}Z")
