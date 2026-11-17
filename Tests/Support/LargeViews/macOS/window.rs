@@ -2,7 +2,7 @@
 use std::{cell::RefCell, ffi::{CString, c_char, c_void}, rc::Rc, time::Instant};
 
 unsafe extern "C" {
-    fn rust_observe_presentations(path: *const c_char);
+    fn scroll_bench_observe_presentations(path: *const c_char) -> bool;
     fn rust_wheel();
     fn rust_wheels_submitted() -> u32;
     fn rust_finish(callback: unsafe extern "C" fn(*mut c_void), context: *mut c_void);
@@ -16,7 +16,7 @@ unsafe extern "C" fn quit(context: *mut c_void) {
 fn main() {
     let output = std::path::PathBuf::from(std::env::var_os("RUNE_SCROLL_OUTPUT").unwrap());
     let csv = CString::new(output.with_extension("csv").as_os_str().as_encoded_bytes()).unwrap();
-    unsafe { rust_observe_presentations(csv.as_ptr()); }
+    assert!(unsafe { scroll_bench_observe_presentations(csv.as_ptr()) }, "Could not open presentation CSV");
     let mut spec = rune::AppSpec::new(TITLE, SIZE, initial, authored_view);
     spec.min_size = Some(SIZE);
     let app = rune::App::new(spec);

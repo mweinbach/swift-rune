@@ -6,11 +6,13 @@ let package = Package(
     platforms: [.macOS(.v14)],
     dependencies: [.package(name: "Port", path: "../../..")],
     targets: [
+        .target(name: "ScrollBenchMetal", path: "macOS", exclude: ["window.rs"]),
         .target(name: "LargeViewFixtures", dependencies: [
             .product(name: "Rune", package: "Port"), .product(name: "RuneKit", package: "Port")
         ]),
         .executableTarget(name: "ScrollBench", dependencies: [
-            "LargeViewFixtures", .product(name: "Rune", package: "Port"), .product(name: "RuneRef", package: "Port")
+            "LargeViewFixtures", .product(name: "Rune", package: "Port"), .product(name: "RuneRef", package: "Port"),
+            .target(name: "ScrollBenchMetal", condition: .when(platforms: [.macOS]))
         ])
     ]
 )

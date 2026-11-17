@@ -3385,7 +3385,7 @@ public final class TextSystem: @unchecked Sendable {
             #if canImport(CoreText) && canImport(CoreGraphics)
             measured.shaped.glyphPens = []
             measured.shaped.glyphPlacements = nil
-            #elseif canImport(CRuneDesktopText)
+            #elseif canImport(CRuneDesktopText) && !canImport(CoreText)
             measured.shaped.desktopRestingText = nil
             measured.desktopRasterLayout = box.desktopRasterLayout
             #endif

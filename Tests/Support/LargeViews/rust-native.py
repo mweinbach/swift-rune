@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Run the pinned upstream table and tree in normal macOS Rune windows."""
 import argparse
-import csv
 import json
 import os
 from pathlib import Path
@@ -9,6 +8,7 @@ import runpy
 import subprocess
 import sys
 import tempfile
+from presentations import summarize_presentations
 
 HERE = Path(__file__).resolve().parent
 REVISION = runpy.run_path(str(HERE / "rust-oracle.py"))["REVISION"]
@@ -60,17 +60,8 @@ def summarize(path, case):
     visible = data["checkpoints"][-1]["visible"]
     if data["events"] != 600 or [row[0] for row in visible] != expected:
         raise ValueError(f"{case} did not finish at the expected visible rows")
-    with path.with_suffix(".csv").open() as stream:
-        times = {}
-        for row in csv.DictReader(stream):
-            step, when = int(row["wheel"]), float(row["presented_seconds"])
-            if 1 <= step <= 600 and when > 0:
-                times.setdefault(step, when)
-    values = sorted(set(times.values()))
-    result = {"wheels": 600, "presentedWheels": len(times), "distinctPresentationTimes": len(values),
-              "firstVisible": expected[0], "lastVisible": expected[-1]}
-    if len(values) == 600:
-        result["displayedFPS"] = 599 / (values[-1] - values[0])
+    result = summarize_presentations(path.with_suffix(".csv"))
+    result.update(firstVisible=expected[0], lastVisible=expected[-1])
     return result
 
 

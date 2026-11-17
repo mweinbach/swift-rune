@@ -3,6 +3,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <objc/runtime.h>
 #import <stdatomic.h>
+#include "include/ScrollBenchMetal.h"
 
 // Exercise the app's own Winit NSView without moving the user's pointer or posting system events.
 @interface ScrollFixtureEvent : NSObject
@@ -30,6 +31,8 @@ static FILE *presentations;
 
 unsigned rust_wheels_submitted(void) { return submitted; }
 
+void scroll_bench_mark_wheel(unsigned step) { submitted = step; }
+
 static id nextDrawable(id layer, SEL selector) {
     id<CAMetalDrawable> drawable = previousNextDrawable(layer, selector);
     if (drawable) {
@@ -44,13 +47,14 @@ static id nextDrawable(id layer, SEL selector) {
     return drawable;
 }
 
-void rust_observe_presentations(const char *path) {
+bool scroll_bench_observe_presentations(const char *path) {
     presentations = fopen(path, "w");
-    if (!presentations) { perror(path); exit(1); }
+    if (!presentations) return false;
     setvbuf(presentations, NULL, _IOLBF, 0);
     fputs("wheel,width_px,height_px,presented_seconds\n", presentations);
     Method method = class_getInstanceMethod(CAMetalLayer.class, @selector(nextDrawable));
     previousNextDrawable = (void *)method_setImplementation(method, (IMP)nextDrawable);
+    return true;
 }
 
 static NSView *winitView(NSView *view) {

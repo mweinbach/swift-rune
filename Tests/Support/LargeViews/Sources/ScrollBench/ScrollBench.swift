@@ -2,6 +2,9 @@ import Foundation
 import LargeViewFixtures
 import Rune
 import RuneRef
+#if canImport(ScrollBenchMetal)
+import ScrollBenchMetal
+#endif
 
 private enum Workload: String {
     case table, tree
@@ -88,18 +91,32 @@ private struct Probe {
     let workload: Workload
     let mode: Mode
     let output: URL?
+    let presentationOutput: URL?
     let steps = 600
     let checkpoints = [0, 1, 24, 60, 300, 600]
 
     init(_ args: [String]) throws {
-        guard args.count == 2 || args.count == 4,
-              let workload = Workload(rawValue: args[0]), let mode = Mode(rawValue: args[1]),
-              args.count == 2 || args[2] == "--capture" else {
-            throw Failure("Usage: ScrollBench table|tree reference|production|window [--capture directory]")
+        let usage = Failure("Usage: ScrollBench table|tree reference|production|window [--capture directory] [--metal-presents file.csv]")
+        guard args.count >= 2, args.count.isMultiple(of: 2),
+              let workload = Workload(rawValue: args[0]), let mode = Mode(rawValue: args[1]) else {
+            throw usage
         }
         self.workload = workload
         self.mode = mode
-        output = args.count == 4 ? URL(fileURLWithPath: args[3], isDirectory: true) : nil
+        var capture: URL?, presentations: URL?
+        for index in stride(from: 2, to: args.count, by: 2) {
+            switch args[index] {
+            case "--capture" where capture == nil:
+                capture = URL(fileURLWithPath: args[index + 1], isDirectory: true)
+            #if canImport(ScrollBenchMetal)
+            case "--metal-presents" where mode == .window && presentations == nil:
+                presentations = URL(fileURLWithPath: args[index + 1])
+            #endif
+            default: throw usage
+            }
+        }
+        output = capture
+        presentationOutput = presentations
         if let output { try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true) }
     }
 
@@ -133,16 +150,16 @@ private struct Probe {
         let rows = frame.rows.filter { $0.key != "header" }
         let visible = rows.filter { $0.visible[2] > 0 && $0.visible[3] > 0 }.sorted { $0.visible[1] < $1.visible[1] }
         let begin = visible.first?.key, end = visible.last?.key
+        guard rt.viewport == workload.viewport, visible.compactMap(\.key) == workload.finalKeys else {
+            throw Failure("Unexpected viewport or scroll position after \(work.count) wheel steps")
+        }
         let result = Result(workload: workload.rawValue, mode: mode.rawValue, steps: work.count, dimensions: frame.scene,
                             commits: commits, mountedDataRows: rows.count, visibleDataRows: visible.count, firstVisible: begin, lastVisible: end,
                             frameWork: Timing(work), hostReportIntervals: arrivals.isEmpty ? nil : Timing(arrivals))
         let bytes = try JSONEncoder().encode(result)
-        print(String(decoding: bytes, as: UTF8.self))
+        FileHandle.standardOutput.write(bytes + Data([0x0a]))
         if let output {
             try bytes.write(to: output.appendingPathComponent("\(workload.rawValue)-\(mode.rawValue)-timing.json"))
-        }
-        guard rt.viewport == workload.viewport, visible.compactMap(\.key) == workload.finalKeys else {
-            throw Failure("Unexpected viewport or scroll position after \(work.count) wheel steps")
         }
     }
 
@@ -182,6 +199,14 @@ private struct Probe {
     }
 
     @MainActor private func window<S>(_ example: Runtime<S>) throws {
+        #if canImport(ScrollBenchMetal)
+        if let presentationOutput {
+            try FileManager.default.createDirectory(at: presentationOutput.deletingLastPathComponent(), withIntermediateDirectories: true)
+            guard scroll_bench_observe_presentations(presentationOutput.path) else {
+                throw Failure("Could not open presentation CSV at \(presentationOutput.path)")
+            }
+        }
+        #endif
         let size = workload.viewport
         let app = App(title: "Rune large views", size: size, state: example.state, view: example.view)
             .minSize(size.x, size.y)
@@ -190,7 +215,6 @@ private struct Probe {
         var intervals: [Double] = []
         var previous: ContinuousClock.Instant?
         var handled = 0
-        var failure: Error?
         let instrumented = app.onFrameEncoded { frame in
             guard frame.outcome == .drawn, drawn.count <= steps else { return }
             let now = ContinuousClock.now
@@ -207,29 +231,44 @@ private struct Probe {
                     let measured = drawn.dropFirst()
                     try report(rt, commits: UInt64(measured.filter(\.committed).count),
                                work: measured.map(\.frameMs), arrivals: intervals)
-                    handle.quit()
+                    if presentationOutput != nil {
+                        // Keep the final drawable visible while Metal delivers its timestamp.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(200)) { handle.quit() }
+                    } else {
+                        handle.quit()
+                    }
                 } else {
+                    #if canImport(ScrollBenchMetal)
+                    if presentationOutput != nil { scroll_bench_mark_wheel(UInt32(index + 1)) }
+                    #endif
                     scroll(rt, at: rt.currentTime)
                     let waker = rt.waker
                     DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(1)) { waker.wake() }
                 }
             } catch {
-                failure = error
-                handle.quit()
+                ScrollBench.fail(error)
             }
         }
         try instrumented.run(arguments: [])
-        if let failure { throw failure }
         if drawn.count != steps + 1 { throw Failure("Window closed before all \(steps) steps were drawn") }
     }
 }
 
 @main private struct ScrollBench {
-    @MainActor static func main() throws {
-        let probe = try Probe(Array(CommandLine.arguments.dropFirst()))
-        switch probe.workload {
-        case .table: try probe.run(LargeViewFixtures.table(LargeTableState()))
-        case .tree: try probe.run(LargeViewFixtures.tree(LargeViewFixtures.treeModel()))
+    static func fail(_ error: Error) -> Never {
+        FileHandle.standardError.write(Data("ScrollBench: \(error)\n".utf8))
+        exit(1)
+    }
+
+    @MainActor static func main() {
+        do {
+            let probe = try Probe(Array(CommandLine.arguments.dropFirst()))
+            switch probe.workload {
+            case .table: try probe.run(LargeViewFixtures.table(LargeTableState()))
+            case .tree: try probe.run(LargeViewFixtures.tree(LargeViewFixtures.treeModel()))
+            }
+        } catch {
+            fail(error)
         }
     }
 }

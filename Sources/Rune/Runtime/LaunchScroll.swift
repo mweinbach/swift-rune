@@ -87,10 +87,10 @@ extension Runtime {
 
     internal func makeCarriedScrollCache() -> [Vec2?] {
         guard !scrollOffsets.isEmpty, launchScrollById.isEmpty, !hasActiveExitingNodes else { return [] }
-        // A stale offset can outlive the element which introduced its scrolling axes.
-        // Preserve its ancestry semantics until the next commit clears it.
+        // If a mounted viewport lost its scroll axes, its retained offset still affects
+        // descendants. Offsets for unmounted paths cannot occur in a live ancestor chain.
         for path in scrollOffsets.keys {
-            guard let i = nodeByPath[path], !flatNodes[i].el.layout.scrollAxes.isEmpty else { return [] }
+            if let i = nodeByPath[path], flatNodes[i].el.layout.scrollAxes.isEmpty { return [] }
         }
         return Array(repeating: nil, count: flatNodes.count)
     }
@@ -99,7 +99,8 @@ extension Runtime {
                                 turn: (String) -> Turn?) -> Vec2 {
         // Descendants of the same nearest scroll viewport have the same inner-to-outer sum,
         // including the presentation scale and turn of every enclosing viewport.
-        if !cache.isEmpty, flatNodes.indices.contains(node.index), flatNodes[node.index].nodeId == node.nodeId {
+        if !cache.isEmpty, node.index >= 0, node.index < flatNodes.count,
+           flatNodes[node.index].nodeId == node.nodeId {
             guard let viewport = node.enclosingScrollIndex else { return .zero }
             if let value = cache[viewport] { return value }
             let value = uncachedCarriedScroll(for: node, scales: scales, turn: turn)

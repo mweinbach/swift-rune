@@ -110,6 +110,8 @@ struct ScrollAndStickySlice2ParityTests {
         var fresh: [Vec2?] = []
         #expect(ready == rt.carriedScroll(for: first, scales: scales, cache: &fresh) { turns[$0] })
 
+        rt.scrollOffsets["/unmounted"] = Vec2(2, 5)
+        #expect(!rt.makeCarriedScrollCache().isEmpty)
         rt.scrollOffsets[leaf] = Vec2(4, 12)
         #expect(rt.makeCarriedScrollCache().isEmpty)
         compare(rt.flatNodes)

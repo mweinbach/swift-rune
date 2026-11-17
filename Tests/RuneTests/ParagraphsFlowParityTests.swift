@@ -114,6 +114,16 @@ struct ParagraphsFlowParityTests {
         #expect(drawn.contains { $0.rect.z > 0 && $0.rect.w > 0 && $0.uv.z > $0.uv.x })
         let own = layout.glyphs(at: 1, using: ts)
         #expect(drawn.map(\.rect.y) == own.map { $0.rect.y + paragraph.y / 2 })
+
+        let previous = layout.paragraphs[1].layout
+        let hidden = layout.paragraphs[0].layout
+        previous.shaped.glyphs[0].rect.y += 5
+        ts.forgetRasterState()
+        let fresh = layout.glyphs(top: center, bottom: center, using: ts)
+        #expect(fresh == drawn)
+        #expect(previous.shaped.glyphs[0].rect.y == own[0].rect.y + 5)
+        #expect(layout.paragraphs[0].layout === hidden)
+        #expect(!hidden.hasGlyphs)
     }
 
     @Test("by-paragraph keys: a paragraph with no strong character reads as the one before it, the first the start flow")

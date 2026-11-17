@@ -59,6 +59,8 @@ internal struct Paragraph {
     /// What its layout depends on but the width: its words and direction, in the field's style.
     var key: UInt64
     var layout: TextLayoutBox
+    /// The text system's raster revision when this paragraph acquired its placed glyphs.
+    var glyphRevision: UInt64 = 0
     /// False while it waits for a fill: `layout` is an empty stand-in, its height exact.
     var shaped: Bool
     /// How many lines of the text it holds: more than one for a run of waiting lines.
@@ -181,8 +183,9 @@ internal final class ParagraphLayout: @unchecked Sendable {
     /// Glyphs in the field's coordinate and byte space, limited to the visible device rows.
     func glyphs(top: Float, bottom: Float, using system: TextSystem) -> [PositionedGlyph] {
         var result: [PositionedGlyph] = []
+        let revision = system.rasterRevision
         for piece in pieces(top: top, bottom: bottom) {
-            for var glyph in glyphs(at: piece.index, using: system) {
+            for var glyph in glyphs(at: piece.index, using: system, revision: revision) {
                 glyph.rect.y += piece.y / scale
                 glyph.utf8Offset += piece.start
                 result.append(glyph)
@@ -208,10 +211,11 @@ internal final class ParagraphLayout: @unchecked Sendable {
 
     /// Paragraph `k`'s glyph quads (points, from its own top-left), shaped with glyphs the
     /// first time it is drawn: a measure lays a field out without them.
-    func glyphs(at k: Int, using textSystem: TextSystem) -> [PositionedGlyph] {
+    func glyphs(at k: Int, using textSystem: TextSystem, revision: UInt64? = nil) -> [PositionedGlyph] {
+        let revision = revision ?? textSystem.rasterRevision
         let p = lock.withLock { records[k] }
         guard p.shaped, !p.layout.authText.isEmpty else { return [] }
-        if p.layout.hasGlyphs {
+        if p.layout.hasGlyphs && p.glyphRevision == revision {
             #if canImport(CoreText) && canImport(CoreGraphics)
             return p.layout.shaped.glyphs
             #else
@@ -221,7 +225,10 @@ internal final class ParagraphLayout: @unchecked Sendable {
             #endif
         }
         let filled = textSystem.breakParagraph(p.layout, maxWidth: p.layout.maxWidth, emitGlyphs: true)
-        lock.withLock { records[k].layout = filled }
+        lock.withLock {
+            records[k].layout = filled
+            records[k].glyphRevision = revision
+        }
         return filled.shaped.glyphs
     }
 
