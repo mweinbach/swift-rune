@@ -11,6 +11,11 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
     public static let posterMaxDimension: CGFloat = 1920.0
     public static let audioTickSeconds: Double = 0.05
 
+    #if !os(WASI)
+    // A known file error must reach a sleeping window even when the global worker pool is busy.
+    private static let fileProbeQueue = DispatchQueue(label: "Rune.media.fileProbe", qos: .userInitiated)
+    #endif
+
     private final class Inner: @unchecked Sendable, SurfaceVideoAttachment, HeadlessVideoDriver {
         let lock = NSLock()
         let key: UInt64
@@ -31,6 +36,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         var turnState: VideoTurnState = VideoTurnState()
         var lastTurnSeekGen: UInt64 = 0
         var hasLoadedMeta: Bool = false
+        var missingFileError: String?
         var didAttemptHeadlessAudioProbe: Bool = false
         var lastNotifiedState: PlayerState? = .loading
         var placeholderPushed: Bool = false
@@ -105,6 +111,22 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
             #elseif canImport(CRuneMedia)
             mediaTimer?.cancel()
             #endif
+        }
+
+        func failWhileLocked(_ message: String) {
+            guard machine.failed == nil else { return }
+            state = .failed(message)
+            request.playing = false
+            machine.failed = message
+            generation &+= 1
+        }
+
+        func finishMissingFileProbeWhileLocked() -> Bool {
+            guard let message = missingFileError else { return false }
+            missingFileError = nil
+            guard !hasLoadedMeta, machine.failed == nil else { return false }
+            failWhileLocked(message)
+            return true
         }
 
         func snapshot() -> VideoSnapshot {
@@ -479,13 +501,13 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
 
     /// Registers a state-change waker (`Player::set_waker`). Fires immediately once if already loaded or failed.
     public func setWaker(_ callback: (@Sendable () -> Void)?) {
-        if callback != nil {
-            inner.lock.lock()
-            inner.lastNotifiedState = .loading
-            inner.lock.unlock()
+        let (previous, notify) = inner.lock.withLock {
+            let previous = inner.waker.replace(with: callback)
+            inner.lastNotifiedState = inner.state
+            return (previous, inner.state != .loading)
         }
-        inner.waker.set(callback)
-        settleStateWaker()
+        withExtendedLifetime(previous) {}
+        if notify { callback?() }
     }
 
     internal func settleStateWaker() {
@@ -493,16 +515,12 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
     }
 
     private static func settleStateWakerInner(_ inner: Inner) {
-        inner.lock.lock()
-        let cur = inner.state
-        let changed = (cur != inner.lastNotifiedState)
-        if changed {
-            inner.lastNotifiedState = cur
+        let callback: (@Sendable () -> Void)? = inner.lock.withLock {
+            guard inner.state != inner.lastNotifiedState else { return nil }
+            inner.lastNotifiedState = inner.state
+            return inner.waker.current
         }
-        inner.lock.unlock()
-        if changed {
-            inner.waker.wake()
-        }
+        callback?()
     }
 
     public func setVolume(_ volume: Float) {
@@ -808,20 +826,15 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         }
 
         if source.isFile && url.isFileURL && !FileManager.default.fileExists(atPath: url.path) {
-            let failIfStillLoading: @Sendable () -> Void = { [weak self] in
-                guard let self else { return }
-                // Avoid overwriting if already opened/failed via test hooks
-                self.inner.lock.lock()
-                let stillLoading = !self.inner.hasLoadedMeta && self.inner.machine.failed == nil
-                self.inner.lock.unlock()
-                if stillLoading {
-                    self.markFailed("media file not found: \(url.path)")
-                }
+            inner.lock.withLock { inner.missingFileError = "media file not found: \(url.path)" }
+            let finishProbe: @Sendable () -> Void = { [weak inner] in
+                guard let inner, inner.lock.withLock({ inner.finishMissingFileProbeWhileLocked() }) else { return }
+                Self.settleStateWakerInner(inner)
             }
             #if os(WASI)
-            WASIEventLoop.schedule(after: 0.02, failIfStillLoading)
+            WASIEventLoop.schedule(after: 0.02, finishProbe)
             #else
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.02, execute: failIfStillLoading)
+            Self.fileProbeQueue.asyncAfter(deadline: .now() + 0.02, execute: finishProbe)
             #endif
             return
         }
@@ -1140,6 +1153,12 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         if pendingRemote { openDesktop(inner) }
         #endif
         inner.lock.lock()
+        // Headless playback opens the clip synchronously on its first pull.
+        if inner.finishMissingFileProbeWhileLocked() {
+            inner.lock.unlock()
+            settleStateWakerInner(inner)
+            return
+        }
         if case .failed = inner.state {
             inner.lock.unlock()
             return
@@ -2160,12 +2179,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
     #endif
 
     private func markFailed(_ message: String) {
-        inner.lock.lock()
-        inner.state = .failed(message)
-        inner.request.playing = false
-        inner.machine.failed = message
-        inner.generation &+= 1
-        inner.lock.unlock()
+        inner.lock.withLock { inner.failWhileLocked(message) }
         settleStateWaker()
     }
 

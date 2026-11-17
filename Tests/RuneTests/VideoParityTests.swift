@@ -17,6 +17,13 @@ func mediaFixtureURL(_ name: String) -> URL {
 
 @Suite("Video Parity Tests")
 struct VideoParityTests {
+    private final class WakeCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func inc() { lock.withLock { count += 1 } }
+        func get() -> Int { lock.withLock { count } }
+    }
+
     @Test("A mounted video view retains its player until the last placement is released")
     func retainedMountedPlayer() throws {
         func mount() -> (El<Void>, () -> Player?) {
@@ -66,6 +73,28 @@ struct VideoParityTests {
 
         let webmOpus = Player(source: .file(mediaFixtureURL("sine-opus.webm")))
         #expect(webmOpus.snapshot().state.isFailed)
+    }
+
+    @Test("the first headless pull settles a missing file once and preserves an earlier probe result")
+    func firstHeadlessMissingFileProbe() {
+        let missing = Player.file("/nonexistent/path/rune-first-pull.mp4")
+        let calls = WakeCounter()
+        missing.setWaker { calls.inc() }
+        missing.advanceHeadless(to: 0)
+        #expect(missing.state.isFailed)
+        missing.advanceHeadless(to: 1)
+        #expect(calls.get() == 1)
+
+        let opened = Player.file("/nonexistent/path/rune-injected-metadata.mp4")
+        opened.openMetadataForTest(VideoMeta(kind: .video, duration: 2, size: (64, 36), hasSound: false))
+        opened.advanceHeadless(to: 0)
+        #expect(opened.state == .ready)
+
+        let failed = Player.file("/nonexistent/path/rune-earlier-error.mp4")
+        failed.failForTest("first error")
+        failed.advanceHeadless(to: 0)
+        failed.failForTest("later error")
+        #expect(failed.state == .failed("first error"))
     }
 
     @Test("audio fixtures silence.m4a and silence.wav probe as audio and respect duration", .enabled(if: nativeMediaAvailableForTests))
@@ -266,14 +295,8 @@ struct VideoParityTests {
 
     @Test("the_waker_hears_each_state_change_once")
     func wakerHearsEachStateChangeOnce() {
-        final class Counter: @unchecked Sendable {
-            let lock = NSLock()
-            var count = 0
-            func inc() { lock.lock(); count += 1; lock.unlock() }
-            func get() -> Int { lock.lock(); defer { lock.unlock() }; return count }
-        }
         let p = Player.audio("missing-waker.m4a")
-        let calls = Counter()
+        let calls = WakeCounter()
         p.setWaker { calls.inc() }
         #expect(calls.get() == 0)
 

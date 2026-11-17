@@ -184,21 +184,24 @@ public final class WakerSlot: @unchecked Sendable {
     public init() {}
 
     public func set(_ callback: (@Sendable () -> Void)?) {
-        var old: (@Sendable () -> Void)?
-        lock.lock()
-        old = waker
-        waker = callback
-        lock.unlock()
-        withExtendedLifetime(old) {}
-        old = nil
+        // A replaced callback may touch the player in its deinitializer.
+        withExtendedLifetime(replace(with: callback)) {}
+    }
+
+    internal func replace(with callback: (@Sendable () -> Void)?) -> (@Sendable () -> Void)? {
+        lock.withLock {
+            let previous = waker
+            waker = callback
+            return previous
+        }
+    }
+
+    internal var current: (@Sendable () -> Void)? {
+        lock.withLock { waker }
     }
 
     public func wake() {
-        let cb: (@Sendable () -> Void)?
-        lock.lock()
-        cb = waker
-        lock.unlock()
-        cb?()
+        current?()
     }
 
     internal var isLockFreeForTest: Bool {
