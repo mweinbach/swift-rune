@@ -57,7 +57,7 @@ struct MemoFlatSpan<State> {
             let el = node.el
             // These elements have independent mutable state, side effects, or their own
             // coordinate system. Re-evaluate them through the ordinary flatten path.
-            guard el.anchor == nil, !node.isSticky, el.layout.scrollAxes.isEmpty,
+            guard el.anchor == nil, el.layout.scrollAxes.isEmpty,
                   el.scale == Vec2(1, 1), el.offset == .zero, el.rotate == 0,
                   el.loopingSpec == nil, el.clipFade == nil, el.pressBg == nil,
                   el.flightId == nil, el.layoutAnim?.travel != .screen,
@@ -104,10 +104,9 @@ struct MemoFlatSpan<State> {
 
     func append(to flat: inout [Node], byPath: inout [String: Int], byId: inout [NodeId: Int],
                 specs currentSpecs: inout [NodeSpec], instants currentInstants: inout [Bool],
-                stickyShifts: inout [Vec2], root: Int, clip: MotionRect, fades: [EdgeFadeSpec],
+                root: Int, clip: MotionRect, fades: [EdgeFadeSpec],
                 enclosing: Int?, vertical: Int?, horizontal: Int?) {
         let shift = root - rootIndex
-        let sticky = stickyShifts[root]
         let parent = flat[root]
         let first = nodes[0]
         if shift == 0, parent.targetRect.origin == worldOrigin,
@@ -118,7 +117,6 @@ struct MemoFlatSpan<State> {
             flat.append(contentsOf: nodes)
             currentSpecs.append(contentsOf: specs)
             currentInstants.append(contentsOf: instants)
-            stickyShifts.append(contentsOf: repeatElement(sticky, count: nodes.count))
             for node in nodes {
                 byPath[node.path] = node.index
                 byId[node.nodeId] = node.index
@@ -154,7 +152,6 @@ struct MemoFlatSpan<State> {
             var spec = specs[i]
             spec.rect = target
             currentSpecs.append(spec)
-            stickyShifts.append(sticky)
         }
         currentInstants.append(contentsOf: instants)
     }

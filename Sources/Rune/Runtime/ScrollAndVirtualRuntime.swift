@@ -3186,6 +3186,30 @@ extension Runtime {
         )
     }
 
+    /// Flattening stores the normal layout of a sticky element. Only an anchored
+    /// overlay needs its trigger's sticky position during the commit, before paint.
+    internal func stickyShiftForAnchor(_ index: Int, in nodes: [FlatNode], cache: inout [Int: Vec2]) -> Vec2 {
+        if let known = cache[index] { return known }
+        var chain: [Int] = []
+        var shift = Vec2.zero
+        var next: Int? = index
+        while let i = next {
+            if let known = cache[i] {
+                shift = known
+                break
+            }
+            chain.append(i)
+            let node = nodes[i]
+            if node.el.anchor != nil && !node.isSticky { break }
+            next = node.parentIndex
+        }
+        for i in chain.reversed() {
+            shift = computeStickyShift(nodeIndex: i, parentStickyShift: shift, nodes: nodes, rectOf: { $0.targetRect }).shift
+            cache[i] = shift
+        }
+        return shift
+    }
+
     internal func computeStickyShift(
         nodeIndex idx: Int,
         parentStickyShift: Vec2,

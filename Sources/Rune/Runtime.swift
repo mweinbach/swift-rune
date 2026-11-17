@@ -3105,7 +3105,7 @@ public final class Runtime<State> {
         var newFlat: [FlatNode] = []
         swap(&newFlat, &spareFlatNodes)
         newFlat.removeAll(keepingCapacity: true)
-        var commitStickyShifts: [Vec2] = []
+        var anchorStickyShifts: [Int: Vec2] = [:]
         var newByPath: [String: Int] = [:]
         var newIndices: [NodeId: Int] = [:]
         var specs: [NodeSpec] = []
@@ -3273,7 +3273,7 @@ public final class Runtime<State> {
 
             if let a = el.anchor {
                 if let anchorFlat = newFlat.first(where: { $0.key == a.key }) {
-                    let aSticky = anchorFlat.index < commitStickyShifts.count ? commitStickyShifts[anchorFlat.index] : .zero
+                    let aSticky = stickyShiftForAnchor(anchorFlat.index, in: newFlat, cache: &anchorStickyShifts)
                     // The anchor is placed against its scrolled, sticky trigger in unscaled layout coordinates.
                     var trigger = anchorFlat.committedLayoutTarget.translated(aSticky)
                     var ancestor = anchorFlat.parentIndex
@@ -3504,16 +3504,6 @@ public final class Runtime<State> {
                 elided: nodeElided
             )
             newFlat.append(flat)
-            let parentCommitSticky: Vec2 = (el.anchor != nil && !flat.isSticky)
-                ? .zero
-                : (parentIdx.map { commitStickyShifts[$0] } ?? .zero)
-            let myCommitSticky = computeStickyShift(
-                nodeIndex: myIndex,
-                parentStickyShift: parentCommitSticky,
-                nodes: newFlat,
-                rectOf: { $0.targetRect }
-            ).shift
-            commitStickyShifts.append(myCommitSticky)
             newByPath[path] = myIndex
             newIndices[nid] = myIndex
 
@@ -3755,7 +3745,7 @@ public final class Runtime<State> {
                    MemoFlatSpan<State>.equalLayouts(span.children, childLayouts),
                    span.nodes.allSatisfy({ stableForFlatReplay($0.nodeId) }) {
                     span.append(to: &newFlat, byPath: &newByPath, byId: &newIndices, specs: &specs,
-                        instants: &ancestorInstants, stickyShifts: &commitStickyShifts, root: myIndex,
+                        instants: &ancestorInstants, root: myIndex,
                         clip: childClip, fades: childClipFades, enclosing: item.enclosingScrollIndex,
                         vertical: item.enclosingVScrollIndex, horizontal: item.enclosingHScrollIndex)
                     memoPaths.replayedNodes = span.nodes.count

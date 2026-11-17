@@ -84,4 +84,40 @@ struct MemoFlatSpanTests {
             if step == 4 { #expect(retained.replayedFlatMemoNodes == 0) }
         }
     }
+
+    @Test("A replayed sticky gutter places overlays against its child after scrolling")
+    func stickyDescendantAnchor() throws {
+        func runtime(retained: Bool) -> Runtime<Int> {
+            Runtime(state: 0, viewport: Vec2(240, 120), pixelScale: 1, systemDark: true) { _, _ in
+                func content() -> El<Int> {
+                    row().key("content").size(800, 40).shrink(0)
+                        .child(row().key("gutter").size(90, 40).stickyLeft(8)
+                            .child(el().key("trigger").size(30, 18)))
+                }
+                let contentRow = retained ? memo("content", deps: 0) { content() } : content()
+                return col().size(240, 120)
+                    .child(col().key("scroll").size(240, 60).scrollX().child(contentRow))
+                    .child(el().key("popup").size(40, 20).anchored("trigger", side: .bottom, align: .start, gap: 2))
+            }
+        }
+        let retained = runtime(retained: true), fresh = runtime(retained: false)
+        for (step, offset) in [0, 0, 80, 80, 210, 210].enumerated() {
+            let now = Double(step + 1) / 30
+            for rt in [retained, fresh] {
+                rt.update(at: now) { state, tx in
+                    state += 1
+                    tx.scrollToInstant("scroll", x: Float(offset), y: 0)
+                }
+                _ = rt.renderFrame(at: now)
+            }
+            #expect(retained.elements() == fresh.elements())
+            if step == 3 || step == 5 {
+                #expect(retained.replayedFlatMemoNodes == 2)
+                let gutter = try #require(retained.element(byKey: "gutter"))
+                let popup = try #require(retained.element(byKey: "popup")?.committedLayoutTarget)
+                #expect(gutter.stuck == Float(offset) + 8)
+                #expect(popup.x == 8)
+            }
+        }
+    }
 }
