@@ -8,13 +8,14 @@ import QuartzCore
 
 @Suite("System material rendering")
 struct SystemMaterialIntegrationTests {
-    @Test func glassCurvesAndFallbackMatchOnBothFramePaths() throws {
+    @Test @MainActor func glassCurvesAndFallbackMatchOnBothFramePaths() throws {
         let rt = Runtime<Void>(state: (), viewport: Vec2(160, 50), pixelScale: 2) { _, _ in
             el().size(160, 50)
                 .child(el().absolute(x: 5, y: 5).size(40, 40).rounded(10).systemMaterial(.glass))
                 .child(el().absolute(x: 55, y: 5).size(40, 40).rounded(10).systemMaterial(.popover))
                 .child(el().absolute(x: 105, y: 5).size(40, 40).rounded(10).continuousCorners().systemMaterial(.popover))
         }
+        rt.clearColor = .transparent
         let fallback = rt.renderFrame(at: 0)
         #expect(fallback.materials.map(\.continuous) == [true, false, true])
         #expect(fallback.materials.map(\.radius) == [20, 20, 20])
@@ -24,6 +25,17 @@ struct SystemMaterialIntegrationTests {
         let reference = rt.frame(at: 0).primitives.filter { $0.kind == .roundedRect && $0.rect.z == 80 }
         #expect(reference.map(\.radii.x) == [-20, 20, -20])
         #expect(reference.allSatisfy { abs($0.fill.w - 0.94) < 0.001 })
+        #if (os(macOS) || os(Linux) || os(Windows)) && canImport(CRuneOffscreenGL)
+        try withTestGLTarget { renderer, capture in
+            let pixels = try capture(fallback.width, fallback.height) { try renderer.draw(fallback) }
+            #expect(pixels.pixel(x: 0, y: 0).w == 0)
+            for middleX in [50, 150, 250] {
+                let middle = pixels.pixel(x: middleX, y: 50)
+                #expect(abs(Int(middle.w) - 240) <= 1)
+                #expect(middle.x > 0 && middle.y > 0 && middle.z > 0)
+            }
+        }
+        #endif
     }
 
     @Test func dimmedMaterialsDoNotConsumeTheNativeLimit() throws {

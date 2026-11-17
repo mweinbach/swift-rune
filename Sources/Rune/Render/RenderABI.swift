@@ -791,6 +791,8 @@ public struct RenderFrame: Sendable {
     }
     public var marks: [UInt32]
     public var surfaces: [SurfaceDraw]
+    /// Material geometry for the host. Frames without native materials still report these draws
+    /// and include their fallback fills in `instances`.
     public var materials: [MaterialDraw]
     public var residentTracker: ResidentLayerTracker?
 

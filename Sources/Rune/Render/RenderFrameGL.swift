@@ -27,9 +27,6 @@ extension RenderFrame {
             throw RefSceneError.invalidDimensions(width: width, height: height)
         }
         guard Self.finite(clearColor) else { throw RefSceneError.nonFiniteClearColor }
-        guard materials.isEmpty else {
-            throw RenderFrameInputError("Native window materials require a platform material host")
-        }
         if baseGlyphPages.isEmpty {
             try Self.validateAtlas(width: baseGlyphAtlas.width, height: baseGlyphAtlas.height, channels: 1, bytes: baseGlyphAtlas.texels.count)
         }
