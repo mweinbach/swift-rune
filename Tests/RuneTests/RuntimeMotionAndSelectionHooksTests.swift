@@ -27,7 +27,7 @@ struct RuntimeMotionAndSelectionHooksTests {
         }
         let moving = try #require(control.presented("marker")?.rect)
         #expect(moving[2] > 100 && moving[2] < 180)
-        scrolled.wheelXY(100, 100, dx: 0, dy: -40, at: 0.1)
+        scrolled.wheel(WheelEvent(dy: -40), at: Vec2(100, 100), now: 0.1)
         for t in [0.1, 0.115, 0.15, 0.21, 0.4] {
             _ = scrolled.frame(at: t)
             _ = control.frame(at: t)
