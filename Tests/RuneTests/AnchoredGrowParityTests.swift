@@ -194,8 +194,8 @@ struct AnchoredGrowParityTests {
         }
     }
 
-    @Test("an_anchored_box_inside_a_moving_or_offset_parent_holds_its_anchor_gap")
-    func anchoredBoxInsideMovingOrOffsetParentHoldsGap() {
+    @Test("an_anchored_box_inside_a_moving_or_offset_parent_holds_its_anchor_gap", arguments: [false, true])
+    func anchoredBoxInsideMovingOrOffsetParentHoldsGap(native: Bool) {
         struct Dock {
             var composerH: Float
             var capW: Float
@@ -225,23 +225,30 @@ struct AnchoredGrowParityTests {
                 .child(el().wFull().grow(1.0))
                 .child(wrap)
         }
+        func present(at t: Double) {
+            if native {
+                _ = rt.renderFrame(at: t)
+            } else {
+                _ = rt.frame(at: t)
+            }
+        }
         var t = 0.0
-        _ = rt.frame(at: t)
+        present(at: t)
         for _ in 0..<240 {
             t += 1.0 / 120.0
-            _ = rt.frame(at: t)
+            present(at: t)
         }
 
         rt.update(at: t) { s, _ in s.open = true }
         t += 1.0 / 120.0
-        _ = rt.frame(at: t)
+        present(at: t)
         let comp0 = rt.element(byKey: "composer")!.rect
         let pill0 = rt.element(byKey: "pill")!.rect
         #expect(pill0[2] < 98.0 && pill0[2] > 75.0, "entering pill scales from 0.8: \(pill0)")
         #expect(pill0[1] + pill0[3] > comp0[1] - 10.0 - 4.0 + 2.0, "entering pill starts shifted down by transition offset: \(pill0)")
         for _ in 0..<240 {
             t += 1.0 / 120.0
-            _ = rt.frame(at: t)
+            present(at: t)
         }
         let comp = rt.element(byKey: "composer")!.rect
         let pill = rt.element(byKey: "pill")!.rect
@@ -255,7 +262,7 @@ struct AnchoredGrowParityTests {
         rt.update(at: t) { s, _ in s.composerH = 100.0 }
         for frame in 0..<240 {
             t += 1.0 / 120.0
-            _ = rt.frame(at: t)
+            present(at: t)
             let c = rt.element(byKey: "composer")!.rect
             let p = rt.element(byKey: "pill")!.rect
             let info = rt.elements().first { $0.key == "pill" }!

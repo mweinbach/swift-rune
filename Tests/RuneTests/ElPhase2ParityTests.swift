@@ -716,14 +716,16 @@ struct ElPhase2ParityTests {
     }
 
     private func holdBelowEdgeList(_ rt: Runtime<EdgeListState>, atStart startTime: inout Double) {
+        for _ in 0..<60 {
+            startTime += 1.0 / 60.0
+            _ = rt.frame(at: startTime)
+            if !rt.needsCommit && !rt.isAnimating { break }
+        }
+        // Press inside the viewport even when its first mounted row is clipped by sticky scrolling.
+        rt.pointerDown(at: Vec2(2, 20), at: startTime)
+        startTime += 1.0 / 60.0
         _ = rt.frame(at: startTime)
-        let row = rt.element(byKey: "r0")
-            ?? rt.elements().first(where: { $0.role == .text && $0.visible[3] > 2.0 })!
-        let start = Vec2(row.rect[0] + 4, row.rect[1] + 10)
-        rt.pointerMove(to: start, at: startTime + 0.01)
-        rt.pointerDown(at: start, at: startTime + 0.02)
-        rt.pointerMove(to: Vec2(150, 520), at: startTime + 0.03)
-        startTime += 0.04
+        rt.pointerMove(to: Vec2(150, 520), at: startTime)
         for _ in 0..<600 {
             if !rt.hasActiveSelectableEdgeScroll { break }
             startTime += 1.0 / 60.0
@@ -844,6 +846,11 @@ struct ElPhase2ParityTests {
             holdBelowEdgeList(rt, atStart: &t)
             let scrollPath = try #require(rt.element(byKey: "scroll")).path
             #expect(rt.wasPinnedToBottom.contains(scrollPath))
+            let before = try #require(rt.selectionState.coordinator.phase.selection)
+            #expect(before.far?.path.hasSuffix("/@r29") == true)
+            #expect(rt.selectionState.isDraggingSelection)
+            let oldEnd = try #require(rt.scrollMaxExtents[scrollPath]?.y)
+            #expect(rt.selectionState.edgeScroll == .atEnd(scrollPath: scrollPath, max: Double(oldEnd)))
 
             rt.update(at: t) { s, _ in s.rows += 15 }
             for _ in 0..<60 {
@@ -854,7 +861,11 @@ struct ElPhase2ParityTests {
             let offAfter = rt.scrollOffsets[scrollPath]?.y ?? 0
             #expect(abs(offAfter - maxAfter) < 0.5)
             #expect(rt.selectedText()?.contains("row 44") == true)
+            let after = try #require(rt.selectionState.coordinator.phase.selection)
+            #expect(after.path == before.path && after.anchor == before.anchor)
+            #expect(after.far?.path.hasSuffix("/@r44") == true && after.focus == "row 44".utf8.count)
             #expect(rt.selectionState.isDraggingSelection)
+            #expect(rt.nextSelectableEdgeScrollWakeDeadline(after: t) == nil)
         }
     }
 }
