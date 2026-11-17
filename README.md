@@ -38,6 +38,7 @@ To measure scrolling on your machine, run `swift run --package-path Tests/Suppor
 | `rune-todo` | `RuneTodo` | `examples/todo` | Scrollable animated task list with `TextEdit` input, progress bar, filter pills, and enter/exit transitions. |
 | `rune-settings` | `RuneSettings` | `examples/settings` | Appearance, accent color, font scale, motion, and editor settings panel built with `RuneKit`. |
 | `rune-ref` | `RuneRefCLI` | `crates/rune-ref` (`main.rs`) | CLI tool to list/generate CPU reference PNGs and run `check` GPU-vs-CPU differential parity checks. |
+| `rune-text-quality` | `RuneTextQuality` | `crates/rune/examples/text_quality.rs` | Run `swift run -c release rune-text-quality ./text-quality` to export 1× and 2× glyph images, subpixel phase sweeps and shaping measurements. |
 | `rune-parity` | `RuneParityCLI` | — | Upstream Rust-vs-Swift differential & sync parity CLI (`status`, `diff-commits`, `compare-renders`, `record-sync`). |
 | `rune-shapes` | `RuneShapes` | `examples/shapes` | Vector `Shape` / `VectorPath` ear-clipped polygons, Bézier flattening, and strokes. |
 | `rune-glass-card` | `RuneGlassCard` | `examples/glass-card` | Frosted backdrop-blur glass card showcase. |
@@ -286,7 +287,7 @@ node Tests/Browser/run.mjs --webgpu --wasm /path/to/rune-hello.wasm --wasi-shim 
 
 For the font asset checks, run `python3 Tests/Browser/font-assets.py` with fontTools installed and HarfBuzz’s `hb-shape` on the path. The checks compare character maps, advances, unhinted outlines and contextual shaping across the native, first-cut and full web Inter files.
 
-To measure scrolling in the 100,000-row table and 50,000-node tree, build the release WASI products `rune-kit-table` and `rune-kit-tree`. The fixture measures frame intervals and Swift scene, accessibility and GPU submission times through the normal browser mount.
+To measure scrolling in the 100,000-row table and the 50,000-file tree with 500 expanded folders, build the release WASI products `rune-kit-table` and `rune-kit-tree`. The fixture measures frame intervals and Swift scene, accessibility and GPU submission times through the normal browser mount.
 
 ```sh
 node Tests/Browser/run.mjs --fixture large-view-wasi --webgpu --compare-accessibility --device-scale 1 \
