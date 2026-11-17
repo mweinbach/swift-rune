@@ -2623,29 +2623,6 @@ public final class Runtime<State> {
     }
 
     @inline(__always)
-    internal static func rotatedDrawnRect(_ rect: MotionRect, turn: Float) -> MotionRect {
-        let v = rotatedBounds(rect, turn: turn)
-        return .fromXYWH(v.x, v.y, v.z, v.w)
-    }
-
-    @inline(__always)
-    private static func rotatedBounds(_ rect: MotionRect, turn: Float) -> SIMD4<Float> {
-        guard abs(turn) >= 1e-6 else {
-            return SIMD4(rect.left, rect.top, rect.width, rect.height)
-        }
-        let rad = turn * 2.0 * Float.pi
-        let c = cosf(rad)
-        let s = sinf(rad)
-        let cx = rect.left + rect.width * 0.5
-        let cy = rect.top + rect.height * 0.5
-        let hw = rect.width * 0.5
-        let hh = rect.height * 0.5
-        let rx = abs(hw * c) + abs(hh * s)
-        let ry = abs(hw * s) + abs(hh * c)
-        return SIMD4(cx - rx, cy - ry, rx * 2.0, ry * 2.0)
-    }
-
-    @inline(__always)
     private static func computeStaticTransform(
         baseRect: MotionRect,
         el: El<State>,
@@ -2677,7 +2654,7 @@ public final class Runtime<State> {
             scaledRect = rawRect
         }
         let childInh = StaticInh(scale: scaleVec, anchor: anchor, anchorTo: anchorTo, offset: off)
-        return (rotatedBounds(scaledRect, turn: el.rotate), childInh)
+        return (SIMD4(scaledRect.left, scaledRect.top, scaledRect.width, scaledRect.height), childInh)
     }
 
     @inline(never)
@@ -5810,12 +5787,23 @@ public final class Runtime<State> {
                 continue
             }
             let drawn = LayoutReadConstants.rectArray(drawnRect)
-            let laid = node.staticRect
             let old = last[nid]
-            guard LayoutReadConstants.rectsMoved(old?.drawn, drawn) else {
-                next[nid] = old ?? (drawn, laid)
+            if let old, !LayoutReadConstants.rectsMoved(old.drawn, drawn) {
+                next[nid] = old
                 continue
             }
+            // Rust's static_layout fingerprints authored rotation and pivot changes along
+            // the ancestry to distinguish layout feedback from a live or scrolled move.
+            var laid = node.staticRect
+            var turn: Float = 0
+            var ancestor: Int? = index
+            while let i = ancestor {
+                let element = flatNodes[i].el
+                turn += element.rotate + (element.origin.x - 0.5) + (element.origin.y - 0.5)
+                ancestor = flatNodes[i].parentIndex
+            }
+            laid[0] += turn
+            laid[1] += turn
             let external = old.map { !LayoutReadConstants.rectsMoved($0.laid, laid) } ?? false
             if quiet && !external {
                 next[nid] = (drawn, laid)
@@ -7474,7 +7462,7 @@ public final class Runtime<State> {
                 liveSpatialSpringingById.contains(p.id) ||
                 (!el.layout.scrollAxes.isEmpty && scrollStore.isMoving(NodeId.hash("scroll:" + snap.path), Props.SCROLL))
             let nodeRectSpringing = inh.rectSpringing || ownSpatialMoving
-            let drawnRect = Self.rotatedDrawnRect(rect, turn: effRotate)
+            let drawnRect = nodeTurn?.bbox(rect) ?? rect
             if !p.isExiting {
                 newDrawnRectByPath[snap.path] = drawnRect
                 newRectSpringingById[p.id] = nodeRectSpringing
@@ -9303,14 +9291,13 @@ public final class Runtime<State> {
             if let parentPath {
                 parentPathForInfo[PaintElementKey(path: snap.path, exiting: nodeExiting)] = parentPath
             }
-            let infoRect = nodeTurn?.bbox(rect) ?? rect
-            let infoVisible = (nodeTurn != nil) ? intersectRects(infoRect, effectiveOuterClip) : visibleRect
+            let infoVisible = (nodeTurn != nil) ? intersectRects(drawnRect, effectiveOuterClip) : visibleRect
             infos.append(ElementInfo(
                 path: snap.path,
                 key: snap.key,
                 parentIndex: snap.parentIndex,
                 role: el.role,
-                rect: infoRect.xywh,
+                rect: drawnRect.xywh,
                 target: snap.targetRect.xywh,
                 committedLayoutTarget: snap.committedLayoutTarget,
                 visible: infoVisible.xywh,

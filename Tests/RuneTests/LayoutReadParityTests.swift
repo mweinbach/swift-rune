@@ -27,6 +27,67 @@ struct LayoutReadParityTests {
         return zip(a, b).allSatisfy { abs($0 - $1) <= tol }
     }
 
+    enum PaintPath: CaseIterable { case reference, native, freshRaster }
+
+    @Test(arguments: PaintPath.allCases, [false, true])
+    func drawnLayoutUsesComposedPaintRotation(paintPath: PaintPath, raisedChild: Bool) {
+        struct Sample {
+            var row: [Float] = []
+            var child: [Float] = []
+        }
+        let quarter = Float.pi / 2
+        let cases: [(origin: Float, childTurn: Float, row: [Float], child: [Float])] = [
+            (0.5, 0, [80, -80, 40, 200], [80, -80, 40, 200]),
+            (0.5, quarter, [80, -80, 40, 200], [0, 0, 200, 40]),
+            (0, 0, [-40, 0, 40, 200], [-40, 0, 40, 200]),
+        ]
+        for sample in cases {
+            let runtime = Runtime(state: Sample(), viewport: Vec2(400, 400), pixelScale: 1) { _, _ in
+                col().wFull().hFull().itemsStart().child(
+                    col().size(200, 40).origin(sample.origin, sample.origin).rotate(quarter)
+                        .onDrawnLayout { state, bounds in state.row = bounds }
+                        .child(el().size(200, 40).raise(raisedChild).rotate(sample.childTurn)
+                            .onDrawnLayout { state, bounds in state.child = bounds })
+                )
+            }
+            for index in 0..<4 {
+                let time = Double(index) / 60
+                switch paintPath {
+                case .reference: _ = runtime.frame(at: time)
+                case .native: _ = runtime.renderFrame(at: time)
+                case .freshRaster: _ = runtime.checkRestingRaster(at: time)
+                }
+            }
+            #expect(near4(runtime.state.row, sample.row))
+            #expect(near4(runtime.state.child, sample.child))
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func drawnLayoutChangingItsParentsRotationSettles(gpuFrame: Bool) {
+        struct Model {
+            var turned = false
+            var reports = 0
+        }
+        let runtime = Runtime(state: Model(), viewport: Vec2(400, 400), pixelScale: 1) { state, _ in
+            col().wFull().hFull().itemsStart().child(
+                col().size(200, 40).rotate(state.turned ? .pi / 2 : 0)
+                    .child(el().size(200, 40).onDrawnLayout { state, _ in
+                        state.turned.toggle()
+                        state.reports += 1
+                    })
+            )
+        }
+        runtime.reducedMotion = true
+        for index in 0..<45 {
+            let time = Double(index) / 60
+            if gpuFrame { _ = runtime.renderFrame(at: time) }
+            else { _ = runtime.frame(at: time) }
+        }
+        #expect(runtime.state.reports == 4)
+        #expect(!runtime.hasPendingActions && !runtime.hasPendingCommit)
+    }
+
     // MARK: - Unit tests from crates/rune/src/runtime/layout_read.rs:633-702
 
     @Test("reads_of_one_key_count_once_per_function_and_once_for_the_whole_rect")

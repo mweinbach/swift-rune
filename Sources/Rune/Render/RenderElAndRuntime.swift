@@ -874,6 +874,8 @@ extension Runtime {
         var newPresentedScales = Dictionary<String, Vec2>(minimumCapacity: frameOut.nodes.count)
         var newPresentedScaleMotionById = Dictionary<NodeId, PaintScaleMotion>(minimumCapacity: frameOut.nodes.count)
         var drawnOverrides: [String: MotionRect] = [:]
+        // Raster-only walks omit hit scopes but still need rotated ancestors for drawn bounds.
+        var rasterTurns: [Int: Turn] = [:]
         var newRectSpringingById: [NodeId: Bool] = [:]
         let selectableRanges = computeActiveSelectionRangesByPath()
         let markedPaths = Set(selectionState.lastCommittedMarkedTexts.map(\.path))
@@ -1480,10 +1482,6 @@ extension Runtime {
                 paintMotion.spatial.contains(nid) ||
                 (!el.layout.scrollAxes.isEmpty && scrollStore.isMoving(NodeId.hash("scroll:" + node.path), Props.SCROLL))
             if !isExiting {
-                let drawn = Self.rotatedDrawnRect(effRect, turn: el.rotate)
-                if !exitingIds.isEmpty || drawn != effRect {
-                    drawnOverrides[node.path] = drawn
-                }
                 if parentSpringing || ownSpatialMoving { newRectSpringingById[nid] = true }
             }
             let hoverFrac = needsInteractionPrepass ? (nodeHoverFracById[nid] ?? 0) : resolveNodeHoverFrac(node, inert: effInert)
@@ -1520,7 +1518,21 @@ extension Runtime {
             }
 
             let myElementIndex = newElements.count
-            var infoRect = effRect
+            let parentScope = publishHitGeometry ? parentElementIndex.map { hitScopes[$0] } : nil
+            var turn = parentScope?.turn
+            if !publishHitGeometry, !rasterTurns.isEmpty, let parentElementIndex {
+                turn = rasterTurns[parentElementIndex]
+            }
+            let hasOwnTurn = abs(el.rotate) > 1e-4
+            if hasOwnTurn {
+                let pivot = Vec2(effRect.x + effRect.width * el.origin.x, effRect.y + effRect.height * el.origin.y)
+                let localTurn = Turn.about(pivot, radians: el.rotate)
+                turn = turn.map { $0.after(localTurn) } ?? localTurn
+            }
+            let infoRect = turn?.bbox(effRect) ?? effRect
+            if !isExiting && (!exitingIds.isEmpty || infoRect != effRect) {
+                drawnOverrides[node.path] = infoRect
+            }
             var infoVisible = visibleClipPt
             var presenceScreenClip = initialClipPt
             var infoOpacity = effOpacity
@@ -1528,14 +1540,7 @@ extension Runtime {
             if liveVisible, !reducedMotion, !isExiting, let track = loopRuntime.tracks[nid] {
                 let home = effRect.offsetBy(Vec2(-loopOffset.x * pinh.scale.x, -loopOffset.y * pinh.scale.y))
                 let margin = 2 / scale + 3 * effBlur
-                let parentScope = publishHitGeometry ? parentElementIndex.map { hitScopes[$0] } : nil
                 let localClip = parentScope?.localClip ?? parentClip.rectPt
-                var turn = parentScope?.turn
-                if abs(el.rotate) > 1e-4 {
-                    let pivot = Vec2(effRect.x + effRect.width * el.origin.x, effRect.y + effRect.height * el.origin.y)
-                    let ownTurn = Turn.about(pivot, radians: el.rotate)
-                    turn = turn.map { $0.after(ownTurn) } ?? ownTurn
-                }
                 let world = turn?.bbox(home) ?? home
                 let screen = intersectRects(parentScope?.outerClip ?? initialClipPt, initialClipPt)
                 let baseOpacity = (parentScope?.opacity ?? parentOpacity) * (liveOpacity ?? presented?.opacity ?? el.opacity)
@@ -1547,15 +1552,13 @@ extension Runtime {
                 if loopVisible { schedulePaintedLoop(track, id: nid) }
             }
             if publishHitGeometry {
-                var scope = parentElementIndex.map { hitScopes[$0] } ?? RenderHitScope()
+                var scope = parentScope ?? RenderHitScope()
                 let parentScreenClip = Self.screenClipOfParent(
                     inheritedClip: scope.localClip, ancestorTurn: scope.turn,
                     outerTurnClip: scope.outerClip, localTurnClip: scope.localClip
                 )
-                if abs(el.rotate) > 1e-4 {
-                    let pivot = Vec2(effRect.x + effRect.width * el.origin.x, effRect.y + effRect.height * el.origin.y)
-                    let localTurn = Turn.about(pivot, radians: el.rotate)
-                    scope.turn = scope.turn.map { $0.after(localTurn) } ?? localTurn
+                if hasOwnTurn {
+                    scope.turn = turn
                     scope.outerClip = parentScreenClip
                     scope.localClip = nil
                 }
@@ -1572,12 +1575,11 @@ extension Runtime {
                     isInteractiveBlocker: el.blocksInteractiveHits,
                     parentScreenClip: parentScreenClip
                 )
-                if let turn = scope.turn {
-                    infoRect = turn.bbox(effRect)
-                }
                 infoVisible = intersectRects(infoRect, parentScreenClip ?? initialClipPt)
                 infoOpacity = scope.opacity
                 hitScopes.append(scope)
+            } else if let turn {
+                rasterTurns[myElementIndex] = turn
             }
             let carried = carriedScroll(for: node, scales: newPresentedScales, cache: &carriedScrollCache) { newHitGeometries[$0]?.turn }
             let reportedScroll: Vec2
