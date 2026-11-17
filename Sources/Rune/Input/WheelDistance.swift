@@ -79,17 +79,30 @@ public enum WheelDistance {
     }
 
     #if canImport(AppKit) && os(macOS)
-    /// An AppKit scroll event's delta in window points, as winit reads it (`PixelDelta` when the
-    /// device has precise deltas, else `LineDelta` of `scrollingDeltaX/Y`) and the window host
-    /// converts it (`window/events.rs`): `LINE_POINTS` per line, Shift left to AppKit.
+    /// winit gives momentum boundaries precedence over touch boundaries. A plain mouse wheel
+    /// and a trackpad's intermediate phases both supply changed deltas.
+    static func appKitPhase(touch: NSEvent.Phase, momentum: NSEvent.Phase) -> GesturePhase {
+        func boundary(_ phase: NSEvent.Phase) -> GesturePhase? {
+            switch phase {
+            case .mayBegin, .began: .began
+            case .ended, .cancelled: .ended
+            default: nil
+            }
+        }
+        return boundary(momentum) ?? boundary(touch) ?? .changed
+    }
+
     @MainActor
-    static func points(for event: NSEvent) -> (Float, Float) {
+    static func appKitEvent(_ event: NSEvent) -> WheelEvent {
         let x = Float(event.scrollingDeltaX)
         let y = Float(event.scrollingDeltaY)
-        // AppKit reports precise deltas in points already, so the scale is 1.
-        let delta: MouseScrollDelta = event.hasPreciseScrollingDeltas ? .pixel(x: x, y: y) : .line(x: x, y: y)
-        let shift = shiftTurnsWheel && event.modifierFlags.contains(.shift)
-        return wheelDelta(delta, scale: 1, shift: shift, linePoints: linePoints)
+        let precise = event.hasPreciseScrollingDeltas
+        // AppKit reports precise deltas in points and already applies Shift.
+        let delta: MouseScrollDelta = precise ? .pixel(x: x, y: y) : .line(x: x, y: y)
+        let (dx, dy) = wheelDelta(delta, scale: 1, shift: false, linePoints: linePoints)
+        return WheelEvent(dx: dx, dy: dy, precise: precise,
+                          phase: appKitPhase(touch: event.phase, momentum: event.momentumPhase),
+                          mods: MacOSKeyMapper.mods(for: event))
     }
     #endif
 }

@@ -14,6 +14,10 @@ enum FrameProbe {
 
     static func main() throws {
         let arguments = CommandLine.arguments
+        if arguments.count == 3, arguments[1] == "wheel" {
+            try WheelPhaseProbe.run(host: arguments[2])
+            return
+        }
         if arguments.count == 4, arguments[1] == "shell" {
             try ShellProbe.run(host: arguments[2], kind: arguments[3])
             return

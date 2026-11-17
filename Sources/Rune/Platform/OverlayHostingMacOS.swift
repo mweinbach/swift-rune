@@ -464,14 +464,7 @@ public final class RuneOverlayMetalView<State>: NSView {
     }
 
     override public func scrollWheel(with event: NSEvent) {
-        // `window/events.rs`: native wheel distances matched to Chromium (#856).
-        let (dx, dy) = WheelDistance.points(for: event)
-        let wev = WheelEvent(
-            dx: dx,
-            dy: dy,
-            precise: event.hasPreciseScrollingDeltas,
-            mods: RuneNSEventBridge.mods(for: event)
-        )
+        let wev = WheelDistance.appKitEvent(event)
         onWheel?(wev, RuneNSEventBridge.localPoint(in: self, from: event), nowSeconds())
     }
 
