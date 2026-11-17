@@ -1,5 +1,8 @@
 import Foundation
 import Rune
+#if os(Windows)
+import WinSDK
+#endif
 
 @main
 enum HandoffHost {
@@ -10,6 +13,7 @@ enum HandoffHost {
             throw CocoaError(.fileNoSuchFile)
         }
         let args = Array(CommandLine.arguments.dropFirst())
+        let claimStarted = ProcessInfo.processInfo.systemUptime
         guard SingleInstance.claim(id: id) else { return }
         defer { SingleInstance.release() }
 
@@ -18,7 +22,19 @@ enum HandoffHost {
             try runRelaunch(mode, folder: folder)
             return
         }
-        guard args.first == "owner" else { throw CocoaError(.fileReadUnknown) }
+        guard args.first == "owner" else {
+            let duration = (ProcessInfo.processInfo.systemUptime - claimStarted) * 1000
+            let message = "Unexpected owner: \(id) pid=\(ProcessInfo.processInfo.processIdentifier) claim_ms=\(duration)\n"
+            FileHandle.standardError.write(Data(message.utf8))
+            #if os(Windows)
+            let matching = pipeNames(for: id).joined(separator: ", ")
+            FileHandle.standardError.write(Data("Matching pipes: \(matching)\n".utf8))
+            SingleInstance.release()
+            ExitProcess(42)
+            #else
+            throw CocoaError(.fileReadUnknown)
+            #endif
+        }
         var eventCount = 0
         func record(_ event: String) {
             eventCount += 1
@@ -51,6 +67,24 @@ enum HandoffHost {
         try app.run()
         record("ended")
     }
+
+    #if os(Windows)
+    private static func pipeNames(for id: String) -> [String] {
+        var data = WIN32_FIND_DATAW()
+        let search = Array("\\\\.\\pipe\\*".utf16) + [0]
+        let handle = search.withUnsafeBufferPointer { FindFirstFileW($0.baseAddress, &data) }
+        guard let handle, handle != INVALID_HANDLE_VALUE else { return [] }
+        defer { FindClose(handle) }
+        var matches: [String] = []
+        repeat {
+            let name = withUnsafeBytes(of: &data.cFileName) {
+                String(decodingCString: $0.bindMemory(to: UInt16.self).baseAddress!, as: UTF16.self)
+            }
+            if name.contains(id) { matches.append(name) }
+        } while FindNextFileW(handle, &data)
+        return matches
+    }
+    #endif
 
     @MainActor
     private static func runRelaunch(_ mode: String, folder: URL) throws {

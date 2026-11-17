@@ -155,6 +155,20 @@ struct MacOSHostFrameTests {
         #expect(frame.finished(at: arrived + 0.012) == nil)
     }
 
+    @Test func scrollAfterSubmissionKeepsTheWindowAwakeUntilItsNewPixelsAreDrawn() {
+        let runtime = Runtime(state: 0, viewport: Vec2(100, 100)) { _, _ in
+            col().key("viewport").size(100, 100).scrollY().child(el().size(100, 1_000).shrink(0))
+        }
+        _ = runtime.frame(at: 0)
+        let commits = runtime.viewCommitCount
+        #expect(!runtime.windowHasFrameWork)
+        runtime.wheel(WheelEvent(dx: 0, dy: -48), at: Vec2(50, 50), now: 0.01)
+        #expect(runtime.windowHasFrameWork)
+        _ = runtime.frame(at: 0.02)
+        #expect(runtime.viewCommitCount == commits)
+        #expect(!runtime.windowHasFrameWork)
+    }
+
     @MainActor
     @Test func startupTimerBecomesADisplayLinkWhenTheViewAttaches() {
         let view = NSView(frame: CGRect(x: 0, y: 0, width: 20, height: 20))

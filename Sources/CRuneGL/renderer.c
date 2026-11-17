@@ -324,22 +324,25 @@ int rune_gl_outline_eligible(const RuneGL *r) {
 }
 
 static int supports_dual_source(const RuneGL *r) {
-    if (r->es) {
-        GLint count = 0;
-        r->gl.GetIntegerv(GL_NUM_EXTENSIONS, &count);
-        int found = 0;
-        for (GLint i = 0; i < count; ++i) {
-            const char *name = (const char *)r->gl.GetStringi(GL_EXTENSIONS, (GLuint)i);
-            if (name && strcmp(name, "GL_EXT_blend_func_extended") == 0) {
-                found = 1;
-                break;
-            }
+#ifdef _WIN32
+    // This WGL release accepts dual-output programs, then drops draws that use source 1.
+    const char *vendor = rune_gl_vendor(r), *version = rune_gl_version(r);
+    if (vendor && version && strcmp(vendor, "Parallels and Apple") == 0 &&
+        strcmp(version, "3.3 - Build 27.0.3") == 0) return 0;
+#endif
+    // wgpu's GL adapter requires the blend extension on both desktop GL and ES.
+    GLint count = 0;
+    r->gl.GetIntegerv(GL_NUM_EXTENSIONS, &count);
+    for (GLint i = 0; i < count; ++i) {
+        const char *name = (const char *)r->gl.GetStringi(GL_EXTENSIONS, (GLuint)i);
+        if (name && (strcmp(name, "GL_EXT_blend_func_extended") == 0 ||
+                     (!r->es && strcmp(name, "GL_ARB_blend_func_extended") == 0))) {
+            GLint buffers = 0;
+            r->gl.GetIntegerv(GL_MAX_DUAL_SOURCE_DRAW_BUFFERS, &buffers);
+            return buffers > 0;
         }
-        if (!found) return 0;
     }
-    GLint buffers = 0;
-    r->gl.GetIntegerv(GL_MAX_DUAL_SOURCE_DRAW_BUFFERS, &buffers);
-    return buffers > 0;
+    return 0;
 }
 
 int rune_gl_configure_outline(RuneGL *r, const char *vertex, const char *fragment, int lcd,

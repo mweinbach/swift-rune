@@ -170,7 +170,11 @@ enum FrameProbe {
         let options = WindowOptions(minSize: Vec2(240, 140), maxSize: Vec2(440, 320))
         let layout = LayoutReadback()
         let app = App(title: title, size: Vec2(300, 200), state: 0) { _, _ in
-            let content: El<Int> = el().wFull().hFull().bg(.white)
+            let content: El<Int>
+            if CommandLine.arguments.contains("--text-root") { content = text("Window frame") }
+            else if CommandLine.arguments.contains("--text-child") {
+                content = col().wFull().hFull().bg(.white).child(text("Window frame"))
+            } else { content = el().wFull().hFull().bg(.white) }
             guard checkScreenLayout else { return content }
             return content.onLayout { _, rect in layout.localChanged(rect) }
                 .onScreenLayout { _, rect in layout.screenChanged(rect) }

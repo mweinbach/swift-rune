@@ -105,6 +105,7 @@ def launches(stack, program, env):
     current.expect("reopen")
 
     path = socket_path(env)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert exchange(path, frame(b"ru://valid")) == b"A"
     current.expect("url ru://valid")
     for packet in (frame(b"\xff"), frame(b"", (1 << 20) + 1), frame(b"short", 100), b"bad"):

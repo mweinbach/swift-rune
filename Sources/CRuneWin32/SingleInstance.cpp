@@ -4,6 +4,7 @@
 #include <windows.h>
 #include "RuneSingleInstance.h"
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -68,9 +69,11 @@ HANDLE createPipe(const std::wstring &name) {
                             PIPE_UNLIMITED_INSTANCES, 16, 65536, 0, nullptr);
 }
 
-DWORD timeLeft(ULONGLONG deadline) {
-    ULONGLONG now = GetTickCount64();
-    return now < deadline ? static_cast<DWORD>(deadline - now) : 0;
+using Clock = std::chrono::steady_clock;
+
+DWORD timeLeft(Clock::time_point deadline) {
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+    return remaining > 0 ? static_cast<DWORD>(remaining) : 0;
 }
 
 // A stack OVERLAPPED must remain alive until even a cancelled kernel operation has finished.
@@ -187,7 +190,7 @@ enum class Sent { delivered, quitting, gone, nobody };
 Sent send(const std::wstring &name, const std::vector<unsigned char> &sid, DWORD session,
           const uint8_t *message, DWORD length, ULONG &pid) {
     if (!length) return Sent::nobody;
-    ULONGLONG deadline = GetTickCount64() + answerWithin;
+    const auto deadline = Clock::now() + std::chrono::milliseconds(answerWithin);
     Handle pipe;
     for (;;) {
         pipe.value = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
@@ -232,10 +235,10 @@ extern "C" int32_t rune_win_instance_claim(const uint16_t *id, size_t idLength, 
     std::vector<unsigned char> sid;
     if ((!id && idLength) || (!message && length) || !quitting || !receive || !ProcessIdToSessionId(GetCurrentProcessId(), &session) ||
         !userSID(GetCurrentProcess(), sid)) return 1;
-    ULONGLONG waitHanded = GetTickCount64() + handedWait;
+    auto waitHanded = Clock::now() + std::chrono::milliseconds(handedWait);
     for (int generation = 0; generation < 8; ++generation) {
         std::wstring name = pipeName(id, idLength, session, sid, generation);
-        ULONGLONG deadline = GetTickCount64() + reachFor;
+        const auto deadline = Clock::now() + std::chrono::milliseconds(reachFor);
         for (;;) {
             HANDLE pipe = createPipe(name);
             if (pipe != INVALID_HANDLE_VALUE) {
@@ -243,7 +246,7 @@ extern "C" int32_t rune_win_instance_claim(const uint16_t *id, size_t idLength, 
                 return 1;
             }
             if (GetLastError() != ERROR_ACCESS_DENIED) return 1;
-            if (handedPid && timeLeft(waitHanded) && rune_win_instance_process_alive(handedPid)) {
+            if (handedPid && Clock::now() < waitHanded && rune_win_instance_process_alive(handedPid)) {
                 Sleep(1);
                 continue;
             }
@@ -252,10 +255,10 @@ extern "C" int32_t rune_win_instance_claim(const uint16_t *id, size_t idLength, 
             if (result == Sent::delivered) return 0;
             if (result == Sent::quitting) {
                 handedPid = server;
-                waitHanded = GetTickCount64() + handedWait;
+                waitHanded = Clock::now() + std::chrono::milliseconds(handedWait);
                 continue;
             }
-            if (result == Sent::gone && timeLeft(deadline)) continue;
+            if (result == Sent::gone && Clock::now() < deadline) continue;
             if (result == Sent::gone) return 1;
             break;
         }

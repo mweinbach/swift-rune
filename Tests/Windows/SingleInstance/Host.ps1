@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$Executable)
+param([Parameter(Mandatory)][string]$Executable, [switch]$CheckForeground)
 $ErrorActionPreference = 'Stop'
 $exe = (Resolve-Path $Executable).Path
 $parent = if ($env:RUNE_TEST_DIR) { $env:RUNE_TEST_DIR } else { [IO.Path]::GetTempPath() }
@@ -17,6 +17,8 @@ public static class RuneHandoffWindow {
     public static extern IntPtr FindWindow(IntPtr name, string title);
     [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")]
     public static extern bool IsIconic(IntPtr window);
     [DllImport("kernel32.dll")]
@@ -67,6 +69,7 @@ try {
     $owner = Start-Process -FilePath $exe -ArgumentList @('owner','rune-check://cold1','rune-check://cold2') -PassThru -RedirectStandardError $stderr -RedirectStandardOutput $stdout
     $processHandle = Hold-Owner $owner.Id
     Wait-Until { Has-Event 'claimed' } 'claim'
+    Write-Host "Claimed $id by PID $($owner.Id)"
     Launch @('rune-check://before-window')
     New-Item -ItemType File (Join-Path $folder 'host.start') | Out-Null
     Wait-Until { (Has-Event 'ready') -and (Has-Event 'rune-check://before-window') } 'cold links and first frame'
@@ -78,8 +81,14 @@ try {
     Wait-Until { Has-Event 'reopen true' } 'visible reopen hook'
     Launch @('rune-check://hide')
     Wait-Until { -not [RuneHandoffWindow]::IsWindowVisible($window) } 'hidden window'
+    $before = [RuneHandoffWindow]::GetForegroundWindow()
     Launch @()
     Wait-Until { (Has-Event 'reopen false') -and [RuneHandoffWindow]::IsWindowVisible($window) } 'reopened hidden HWND'
+    if ($CheckForeground) {
+        if ($before -eq $window) { throw 'The hidden window still held the foreground' }
+        Wait-Until { [RuneHandoffWindow]::GetForegroundWindow() -eq $window } 'restored foreground HWND'
+    }
+    Write-Host "Foreground HWND before reopening $before; after reopening $([RuneHandoffWindow]::GetForegroundWindow()); owner $window"
     Launch @('rune-check://quit')
     Wait-ForCleanExit $processHandle
     $expected = @('claimed','rune-check://cold1','rune-check://cold2','rune-check://before-window',

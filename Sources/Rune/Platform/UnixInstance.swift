@@ -122,7 +122,10 @@ final class UnixInstance: @unchecked Sendable {
                 let fd = socketFD()
                 guard fd >= 0 else { return .owner }
                 if endpoint.withAddress({ bind(fd, $0, $1) }) == 0 {
-                    guard listen(fd, 16) == 0, let identity = Identity(at: endpoint.path),
+                    // A caller's explicit directory can be searchable by other users.
+                    // Restrict the socket itself before listening, independent of process umask.
+                    guard chmod(endpoint.path, 0o600) == 0, listen(fd, 16) == 0,
+                          let identity = Identity(at: endpoint.path),
                           let owner = UnixInstance(endpoint: endpoint, identity: identity, fd: fd) else {
                         _ = close(fd)
                         _ = unlink(endpoint.path)

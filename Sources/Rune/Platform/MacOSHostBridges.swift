@@ -438,6 +438,7 @@ public final class MacOSDisplayLinkDriver: NSObject {
     }
 
     @objc private func handleDisplayLink(_ sender: CADisplayLink) {
+        guard sender === displayLink else { return }
         let period = sender.targetTimestamp - sender.timestamp
         if period.isFinite && period > 0 {
             pacer.framePeriod = lowPowerCap ? max(period, 1.0 / 60) : period

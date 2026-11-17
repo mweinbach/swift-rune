@@ -96,7 +96,7 @@ try {
                 cells.push({ x: data.getFloat32(64, true), width: data.getFloat32(68, true), dir });
                 offset = end;
             }
-            return { advance, cells, ink, mask, colorPixels };
+            return { advance, cells, ink, mask, colorPixels, x, y, width, height, ascent: data.getFloat32(4, true) };
         } finally { host.release(id); }
     }
     const han = shape('漢'), day = shape('日');
@@ -111,7 +111,24 @@ try {
     check(shape('A\0日').cells.at(-1).width > 10, 'An internal NUL truncated the line');
     const kern = shape('AV').advance;
     check(kern < shape('A').advance + shape('V').advance, 'Kerning lost');
-    check(shape('AV', 0, 'kern=0.0').advance > kern, 'Authored OpenType settings were lost');
+    const canvasCount = document.querySelectorAll('canvas').length;
+    const unkerned = shape('AV', 0, 'kern=0.0');
+    check(unkerned.advance > kern, 'Authored OpenType settings were lost');
+    // Two separate glyph draws provide the native no-pair-adjustment reference.
+    const context = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+    context.canvas.width = unkerned.width;
+    context.canvas.height = unkerned.height;
+    context.font = '400 36px Inter';
+    context.fillStyle = 'white';
+    const left = -unkerned.x, baseline = unkerned.ascent - unkerned.y;
+    context.fillText('A', left, baseline);
+    context.fillText('V', left + context.measureText('A').width, baseline);
+    const reference = context.getImageData(0, 0, unkerned.width, unkerned.height).data;
+    check(unkerned.mask.every((alpha, i) => alpha === reference[4 * i + 3]), 'Unkerned ink does not match separate glyphs');
+    const withSystem = shape('AV', 0, 'kern=0.0', 'serif');
+    const systemPair = shape('A', 0, '', 'serif').advance + shape('V', 0, '', 'serif').advance;
+    check(Math.abs(withSystem.advance - systemPair) < 0.02, 'Installed face lost the unkerned pair');
+    check(document.querySelectorAll('canvas').length === canvasCount, 'A released text run left a raster canvas attached');
     // A generic or installed family before an authored font must stay first even
     // when OpenType settings cause us to create a private alias for that font.
     const stacked = (stack, features = '') => shape('0AV', 0, features, stack).mask.join();

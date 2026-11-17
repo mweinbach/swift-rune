@@ -144,7 +144,7 @@ function closestFace(faces, line) {
 function applyFont(context, line) {
     context.font = line.font;
     context.direction = line.direction;
-    context.fontKerning = line.kerning;
+    if ('fontKerning' in context) context.fontKerning = line.kerning;
     context.textAlign = 'left';
     context.textBaseline = 'alphabetic';
     if ('lang' in context) context.lang = line.element.lang || 'inherit';
@@ -195,7 +195,7 @@ function advanceProbe(source) {
 export function createRuneTextImports(getMemory, doc = globalThis.document, spellDictionaries = []) {
     const runs = new Map();
     const aliases = new Map();
-    let next = 1, root, canvas, context, svgClusterOwners;
+    let next = 1, root, defaultContext, unkernedContext, svgClusterOwners;
     const memory = () => getMemory().buffer;
     const view = () => new DataView(memory());
     const string = (ptr, n) => utf8.decode(new Uint8Array(memory(), ptr >>> 0, n));
@@ -255,7 +255,21 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         return line.origin ??= line.element.getBoundingClientRect().left;
     }
 
+    function contextFor(line) {
+        if (line.kerning !== 'none' || 'fontKerning' in defaultContext) return defaultContext;
+        // WebKit takes kerning from an attached canvas's CSS when its 2D context
+        // lacks fontKerning. A separate canvas keeps regular lines using native kerning.
+        if (!unkernedContext) {
+            const canvas = doc.createElement('canvas');
+            canvas.style.cssText = 'position:absolute;left:0;top:0;font-kerning:none';
+            unkernedContext = canvas.getContext('2d', { willReadFrequently: true });
+            if (unkernedContext) root.append(canvas);
+        }
+        return unkernedContext ?? defaultContext;
+    }
+
     function measure(line, ptr, size) {
+        const context = contextFor(line);
         applyFont(context, line);
         const m = context.measureText(line.text);
         const ascent = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent;
@@ -291,6 +305,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
     function coverage(line, x, y, width, height) {
         const last = line.tile;
         if (last && last.x === x && last.y === y && last.width === width && last.height === height) return last;
+        const context = contextFor(line), canvas = context.canvas;
         if (canvas.width !== width) canvas.width = width;
         if (canvas.height !== height) canvas.height = height;
         applyFont(context, line);
@@ -483,6 +498,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
     }
 
     function extractedInk(line, from, to) {
+        const context = contextFor(line);
         const none = { text: '', box: [0, 0, 0, 0] };
         if (from >= to) return none;
         if (!line.shaping) {
@@ -596,10 +612,9 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
                 root.setAttribute('aria-hidden', 'true');
                 root.inert = true;
                 root.style.cssText = 'all:initial;position:fixed;left:0;top:0;visibility:hidden;pointer-events:none;contain:layout style;';
-                canvas = doc.createElement('canvas');
-                context = canvas.getContext('2d', { willReadFrequently: true });
+                defaultContext = doc.createElement('canvas').getContext('2d', { willReadFrequently: true });
             }
-            if (!context) return 0;
+            if (!defaultContext) return 0;
             if (!root.isConnected) doc.documentElement.append(root);
             const element = doc.createElement('span');
             const text = string(ptr, count);

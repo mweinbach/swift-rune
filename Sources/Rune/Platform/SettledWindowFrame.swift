@@ -55,5 +55,5 @@ struct SettledWindowFrame: Equatable {
 
 extension Runtime {
     /// Input, layout, live updates and a moved window all require another frame.
-    var windowHasFrameWork: Bool { isStale || hasPendingInput || livePending || hasPendingWindowFrame }
+    var windowHasFrameWork: Bool { isStale || scrollMovedSinceLastFrame || hasPendingInput || livePending || hasPendingWindowFrame }
 }
