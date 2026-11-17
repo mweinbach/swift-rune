@@ -8907,9 +8907,14 @@ public final class Runtime<State> {
                         labelBox = box
                         shaped = box.shaped
                     }
+                    let offsetX = TextBoxGeometry.inlineOffset(align: el.textStyle.align,
+                        wrap: resolvedText.truncateFade ? .noWrap : resolvedText.style.wrap, shaped: shaped,
+                        innerWidth: innerW, textScale: scaleVec.x, pixelScale: pxScale)
+                    let labelX = textOriginX + offsetX
+                    let labelRestX = restOriginX + offsetX
                     #if canImport(CRuneDesktopText) && !canImport(CoreText)
                     let placedNativeGlyphs = textRestsExact && (shaped.desktopRestingText?.place(
-                        &shaped, at: restOriginX * pxScale, atlas: textSystem.glyphAtlas
+                        &shaped, at: labelRestX * pxScale, atlas: textSystem.glyphAtlas
                     ) ?? false)
                     #else
                     let placedNativeGlyphs = false
@@ -8946,7 +8951,7 @@ public final class Runtime<State> {
                     }
                     let selPaintInk = emitSelectableHighlightIfNeeded(
                         snap: snap, el: el, isExiting: p.isExiting, activeSelectionRanges: activeSelectionRanges,
-                        textOriginX: restOriginX, textOriginY: restOriginY, scaleVec: scaleVec, pxScale: pxScale,
+                        textOriginX: labelRestX, textOriginY: restOriginY, scaleVec: scaleVec, pxScale: pxScale,
                         localAlpha: localAlpha, shaped: shaped,
                         emitMark: { rect, fill in
                             primitives.append(.roundedRect(rect: rect, radii: .zero, fill: fill, clip: devClip,
@@ -8965,7 +8970,7 @@ public final class Runtime<State> {
                         caseMap: resolvedText.caseMap,
                         shaped: shaped,
                         elided: elided,
-                        textOriginX: textOriginX,
+                        textOriginX: labelX,
                         textOriginY: textOriginY,
                         scaleVec: scaleVec,
                         pxScale: pxScale,
@@ -9002,7 +9007,7 @@ public final class Runtime<State> {
                         : []
                     textSystem.emitTextDecorationsAndPills(
                         shaped: shaped,
-                        textOriginX: textOriginX,
+                        textOriginX: labelX,
                         textOriginY: textOriginY,
                         scaleVec: scaleVec,
                         pxScale: pxScale,
@@ -9026,7 +9031,7 @@ public final class Runtime<State> {
                             textSystem: textSystem,
                             styleSize: el.textStyle.size,
                             defaultTextColor: defaultTextColor,
-                            textOriginX: textOriginX,
+                            textOriginX: labelX,
                             textOriginY: textOriginY,
                             scaleVec: scaleVec,
                             pxScale: pxScale,
@@ -9078,7 +9083,7 @@ public final class Runtime<State> {
                         )
                         for q in quads {
                             let hlRect = SIMD4<Float>(
-                                restOriginX * pxScale + q.rect.x * scaleVec.x,
+                                labelRestX * pxScale + q.rect.x * scaleVec.x,
                                 restOriginY * pxScale + q.rect.y * scaleVec.y,
                                 q.rect.z * scaleVec.x,
                                 q.rect.w * scaleVec.y
@@ -9165,7 +9170,7 @@ public final class Runtime<State> {
                         for gi in glyphsToEmit.indices {
                             let inkGlyph = glyphsToEmit[gi]
                             let (g, placement) = TextBoxGeometry.paintGlyph(
-                                inkGlyph, index: gi, shaped: shaped, origin: SIMD2<Float>(restOriginX, restOriginY) * pxScale,
+                                inkGlyph, index: gi, shaped: shaped, origin: SIMD2<Float>(labelRestX, restOriginY) * pxScale,
                                 scale: SIMD2<Float>(scaleVec.x, scaleVec.y), pixelScale: pxScale,
                                 restsExact: textRestsExact, baselines: roundedBaselines, line: &baselineLine, atlas: textSystem.glyphAtlas,
                                 raster: raster, placements: placements

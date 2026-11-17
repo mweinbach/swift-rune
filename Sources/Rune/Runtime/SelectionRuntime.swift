@@ -688,7 +688,11 @@ internal extension Runtime {
             bypassCache: node.el.isSecure
         )
         let unturned = hitGeometryByPath[node.path]?.turn?.unturn(windowPos) ?? windowPos
-        let localX = (unturned.x - (rect.x + node.el.layout.padding.left * sc.x)) / max(1e-4, sc.x)
+        let drawnInnerW = max(0, rect.width - (node.el.layout.padding.left + node.el.layout.padding.right) * sc.x)
+        let offsetX = TextBoxGeometry.inlineOffset(align: node.el.textStyle.align,
+            wrap: resolvedText.truncateFade ? .noWrap : resolvedText.style.wrap, shaped: shaped,
+            innerWidth: drawnInnerW, textScale: sc.x, pixelScale: pixelScale)
+        let localX = (unturned.x - (rect.x + node.el.layout.padding.left * sc.x + offsetX)) / max(1e-4, sc.x)
         let localY = (unturned.y - (rect.y + node.el.layout.padding.top * sc.y)) / max(1e-4, sc.y)
         let drawnRaw = textSystem.hitTestUTF8Offset(in: shaped, localX: localX, localY: localY, pixelScale: pixelScale)
         let raw = shaped.elided?.contentOffset(forDrawn: drawnRaw) ?? drawnRaw
@@ -1235,7 +1239,9 @@ internal extension Runtime {
             let shaped = resolved.shape(using: textSystem, maxWidth: TextBoxGeometry.wrapWidth(innerW, scale: pixelScale),
                                         pixelScale: pixelScale, emitGlyphs: false)
             let drawn = shaped.elided?.selectionRange(lo..<hi) ?? (lo..<hi)
-            let originX = rect.left + pad.left
+            let originX = rect.left + pad.left + TextBoxGeometry.inlineOffset(align: el.textStyle.align,
+                wrap: resolved.truncateFade ? .noWrap : resolved.style.wrap, shaped: shaped,
+                innerWidth: innerW, pixelScale: pixelScale)
             let originY = rect.top + pad.top
             for r in textSystem.selectionRects(in: shaped, utf8Range: drawn, pixelScale: pixelScale) {
                 boxes.append([originX + r.x, originY + r.y, r.z, r.w])

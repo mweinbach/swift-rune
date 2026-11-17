@@ -29,6 +29,20 @@ public enum TextBoxGeometry {
         return textWidth(maxLineWidthPt * s) / s
     }
 
+    /// Unwrapped lines keep their intrinsic layout. Place that layout between the padded
+    /// edges, including when it overflows the box (upstream `text_layout::text_x`).
+    static func inlineOffset(align: TextAlign, wrap: TextWrap, shaped: ShapedText, innerWidth: Float,
+                             textScale: Float = 1, pixelScale: Float) -> Float {
+        guard wrap == .noWrap else { return 0 }
+        let rtl = shaped.forcedDirection.map { $0 == .rtl } ?? shaped.primaryIsRTL
+        switch (align, rtl) {
+        case (.leading, false), (.justified, false), (.trailing, true): return 0
+        default: break
+        }
+        let space = innerWidth - boxWidth(maxLineWidthPt: shaped.size.x * textScale, scale: pixelScale)
+        return align == .center ? space * 0.5 : space
+    }
+
     /// Device px a text may run past the width it wraps at and still fit: `textWidth` can round
     /// a box up to 1e-3 px under its text, and points to device px and back loses a little more,
     /// so a text laid out again in its own shrink-to-fit box would otherwise wrap its last word.

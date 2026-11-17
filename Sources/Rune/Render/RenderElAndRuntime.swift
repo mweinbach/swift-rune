@@ -3127,7 +3127,7 @@ extension Runtime {
                 let exactOffset = restsExact ? TextBoxGeometry.leafExactOff(
                     rest: snapParent, rigid: inheritedSnap.steady * scale, containPx: inheritedSnap.contain * scale, shifted: childSnap.shifted
                 ) : .zero
-                let textLeft = (paintedEdges.x + exactOffset.x) / scale + el.layout.padding.left * sc.x
+                let boxLeft = (paintedEdges.x + exactOffset.x) / scale + el.layout.padding.left * sc.x
                 let textTop = (paintedEdges.y + exactOffset.y) / scale + el.layout.padding.top * sc.y
                 let drawnInnerW = max(0, rectPx.z / scale - (el.layout.padding.left + el.layout.padding.right) * sc.x)
                 let drawnInnerH = max(0, rectPx.w / scale - (el.layout.padding.top + el.layout.padding.bottom) * sc.y)
@@ -3135,7 +3135,7 @@ extension Runtime {
                 let glidingText = boxGliding && unscaled && nodeScaleMotion == .still
                 let glide = glidingText ? Vec2(PixelSnap.textGlide(paintedEdges.x), PixelSnap.textGlide(paintedEdges.y)) : .zero
                 let glideOffset = glidingText ? SIMD2<Float>(paintedEdges.x - paintedEdges.x.rounded(), paintedEdges.y - paintedEdges.y.rounded()) : .zero
-                let restOrigin = SIMD2<Float>(textLeft, textTop) * scale - glideOffset
+                let restY = textTop * scale - glideOffset.y
                 let defaultTextColor = applyPressColor(pressTint.color, to: liveTextColor ?? scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? defaultForeground, frac: pressTint.frac)
                 let inkMode = resolvedText.style.fontSmoothing == .systemDefault ? textSystem.smoothing : resolvedText.style.fontSmoothing
                 var shaped = GlyphAtlas.withBaseInk(defaultTextColor, mode: inkMode) {
@@ -3145,9 +3145,13 @@ extension Runtime {
                         pixelScale: shapeScale,
                         emitGlyphs: true,
                         glidePx: glide,
-                        rasterWindow: rasterWindow(clip: activeClip, originY: restOrigin.y)
+                        rasterWindow: rasterWindow(clip: activeClip, originY: restY)
                     )
                 }
+                let textLeft = boxLeft + TextBoxGeometry.inlineOffset(align: el.textStyle.align,
+                    wrap: resolvedText.truncateFade ? .noWrap : resolvedText.style.wrap, shaped: shaped,
+                    innerWidth: drawnInnerW, textScale: sc.x, pixelScale: scale)
+                let restOrigin = SIMD2<Float>(textLeft * scale - glideOffset.x, restY)
                 #if canImport(CRuneDesktopText) && !canImport(CoreText)
                 if restsExact, let native = shaped.desktopRestingText {
                     _ = native.place(&shaped, at: restOrigin.x, atlas: textSystem.glyphAtlas)
@@ -3169,7 +3173,7 @@ extension Runtime {
                         layoutInnerW: layoutInnerW,
                         scaleVec: sc,
                         pxScale: scale,
-                        textOriginX: textLeft,
+                        textOriginX: boxLeft,
                         textOriginY: textTop,
                         baseClipPx: baseClipRect
                     )

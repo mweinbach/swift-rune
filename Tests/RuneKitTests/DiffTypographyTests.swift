@@ -66,4 +66,35 @@ struct DiffTypographyTests {
             #expect(smaller.singleHeight == 20 && smaller.multiHeight == 54)
         }
     }
+
+    @Test("Both padded edges of a line number select its line")
+    @MainActor
+    func paddedNumberHitArea() throws {
+        struct State {
+            var diff = DiffState(diff: FileDiff.fromTexts(path: "test", old: "a\nb\n", new: "a\nc\n"))
+            var selections: [DiffLineRange] = []
+        }
+        for (scale, trailing): (Float, Bool) in [(1, false), (1, true), (1.25, false), (1.25, true), (2, false), (2, true)] {
+            let rt = Runtime(state: State(), viewport: Vec2(480, 240), pixelScale: scale) { state, cx in
+                DiffView(key: "f", kit: .neutral(dark: true), state: \State.diff)
+                    .onSelect { state, range, _ in
+                        if let range { state.selections.append(range) }
+                    }.build(state: state, cx: cx)
+            }
+            _ = rt.renderFrame(at: 0)
+            let number = try #require(rt.element(byKey: "f-n-0"))
+            // A single label suffices on an integral pixel grid. At fractional DPI the
+            // intrinsic flex child preserves the subpixel origin of the upstream gutter.
+            let children = rt.elements().filter { $0.path.hasPrefix(number.path + "/") }
+            #expect(children.count == (scale == scale.rounded() ? 0 : 1))
+            let rect = number.rect
+            let x = rect[0] + (trailing ? rect[2] - 0.25 : 0.25)
+            let p = Vec2(x, rect[1] + rect[3] * 0.5)
+            rt.pointerDown(at: p, at: 0.1)
+            rt.pointerUp(at: p, at: 0.15)
+            _ = rt.renderFrame(at: 0.2)
+            let expected = DiffLineRef(side: .new, line: 1)
+            #expect(rt.state.selections == [.line(expected)], "trailing \(trailing), x \(x), rect \(rect)")
+        }
+    }
 }

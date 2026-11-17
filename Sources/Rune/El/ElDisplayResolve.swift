@@ -426,6 +426,12 @@ internal enum ElDisplayResolver {
             style.direction = fallbackDirection
         }
 
+        // Unwrapped labels align the whole layout within their box during painting. Their
+        // individual lines start at their paragraph's leading edge.
+        if style.wrap == .noWrap || el.isTruncateFadeEnabled {
+            style.align = .leading
+        }
+
         let authoredFromSpans = el.richSpans?.map(\.text).joined()
         let authored = rawText ?? authoredFromSpans ?? ""
         let isHiddenSecure = isSecure && !el.isRevealed && !authored.isEmpty
