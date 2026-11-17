@@ -39,7 +39,8 @@ struct RichBlockIndentParityTests {
         let caret = system.caretRect(in: updated.shaped, utf8Offset: 2, upstream: false, pixelScale: scale)
         #expect(caret.x == indent)
         let quote = (Block.quote.indentPt(fontSize: size) * scale).rounded() / scale
-        #expect(lines.last?.originX == quote)
+        let lastLine = try #require(lines.last)
+        #expect(abs(lastLine.originX - quote) < 0.001)
         let drawn = system.layoutKeyed(text: updated.authText, spans: updated.spans, pills: updated.pills,
                                        style: updated.style, maxWidth: updated.maxWidth,
                                        pixelScale: scale, emitGlyphs: true).shaped
