@@ -212,58 +212,55 @@ internal protocol HeadlessVideoDriver: AnyObject {
     func resetHeadlessClock()
 }
 
-/// Virtual clock + frame hook shared by headless video tests (`video::headless_reset` / `headless_frame`).
+/// A headless runtime on this thread drives the audio clips created here. Video is
+/// advanced separately when its surface is drawn, as in upstream `video::headless_frame`.
 public enum VideoHeadless {
-    private static let lock = NSLock()
-    private nonisolated(unsafe) static var clock: Double = 0.0
-    private nonisolated(unsafe) static var registered: [ObjectIdentifier: WeakBox] = [:]
+    private static let playbackKey = "rune.video.headlessPlayback"
 
-    private final class WeakBox {
+    private final class WeakDriver {
         weak var driver: HeadlessVideoDriver?
         init(_ driver: HeadlessVideoDriver) { self.driver = driver }
     }
 
-    public static var virtualClock: Double {
-        lock.lock()
-        defer { lock.unlock() }
-        return clock
+    private final class Playback {
+        var clock: Double = 0
+        var clips: [WeakDriver] = []
+
+        func liveDrivers() -> [HeadlessVideoDriver] {
+            clips.removeAll { $0.driver == nil }
+            return clips.compactMap(\.driver)
+        }
     }
 
-    internal static func register(_ driver: HeadlessVideoDriver) {
-        lock.lock()
-        registered[ObjectIdentifier(driver)] = WeakBox(driver)
-        lock.unlock()
+    private static var playback: Playback {
+        let storage = Thread.current.threadDictionary
+        if let existing = storage[playbackKey] as? Playback { return existing }
+        let playback = Playback()
+        storage[playbackKey] = playback
+        return playback
     }
 
-    internal static func unregister(_ driver: HeadlessVideoDriver) {
-        lock.lock()
-        registered.removeValue(forKey: ObjectIdentifier(driver))
-        lock.unlock()
+    public static var virtualClock: Double { playback.clock }
+
+    internal static func registerAudio(_ driver: HeadlessVideoDriver) {
+        let playback = Self.playback
+        playback.clips.removeAll { $0.driver == nil }
+        playback.clips.append(WeakDriver(driver))
     }
 
     public static func reset() {
-        let drivers: [HeadlessVideoDriver]
-        lock.lock()
-        clock = 0.0
-        registered = registered.filter { $0.value.driver != nil }
-        drivers = registered.values.compactMap { $0.driver }
-        lock.unlock()
-
-        for d in drivers {
-            d.resetHeadlessClock()
+        let playback = Self.playback
+        playback.clock = 0
+        for driver in playback.liveDrivers() {
+            driver.resetHeadlessClock()
         }
     }
 
     public static func frame(at now: Double) {
-        let drivers: [HeadlessVideoDriver]
-        lock.lock()
-        clock = now
-        registered = registered.filter { $0.value.driver != nil }
-        drivers = registered.values.compactMap { $0.driver }
-        lock.unlock()
-
-        for d in drivers {
-            d.advanceHeadless(to: now)
+        let playback = Self.playback
+        playback.clock = now
+        for driver in playback.liveDrivers() {
+            driver.advanceHeadless(to: now)
         }
     }
 }
