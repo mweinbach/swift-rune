@@ -34,6 +34,7 @@ enum { RuneLinuxShift = 1, RuneLinuxControl = 2, RuneLinuxAlt = 4, RuneLinuxSupe
 
 RuneLinuxWindow *rune_linux_open(const char *title, RuneLinuxWindowOptions options);
 void rune_linux_set_altgr_resolver(int (*resolve)(uint32_t window_id));
+int rune_linux_collecting_native_input(void);
 uint32_t rune_linux_group_begin(void);
 void rune_linux_group_end(void);
 const char *rune_linux_error(void);

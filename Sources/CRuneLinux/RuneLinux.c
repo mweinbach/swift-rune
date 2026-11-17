@@ -28,6 +28,7 @@ static unsigned display_generation = 1;
 static int (*resolve_altgr)(uint32_t window_id);
 static unsigned wayland_windows;
 static _Thread_local bool collecting_input;
+int rune_linux_collecting_native_input(void) { return collecting_input; }
 /* SDL2's queued event union has trailing storage beyond SDL_MouseWheelEvent.
    Keep its public fields intact while marking events produced by our native
    pump. An application-pushed wheel must never consume a compositor frame. */
