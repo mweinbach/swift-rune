@@ -9,6 +9,48 @@ import Testing
 @Suite("Text run cluster ink")
 struct TextRunClusterInkTests {
     #if os(Linux)
+    @Test func missingCJKUsesTheSelectedFacesNotdefAdvanceForMetricsAndCarets() async {
+        await #expect(processExitsWith: .success) { try Self.checkMissingCJKMetricsAndCarets() }
+    }
+
+    private static func checkMissingCJKMetricsAndCarets() throws {
+        // Isolate Fontconfig so locale-specific fallback cannot choose a system
+        // face for the same missing scalar.
+        let config = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try "<fontconfig/>".write(to: config, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: config) }
+        try #require(setenv("FONTCONFIG_FILE", config.path, 1) == 0)
+        try #require(DefaultFonts.registerIfNeeded())
+        let sample = "漢字、かな。 漢字"
+        let style = TextStyle(size: 13, lineHeight: 20, family: .monospace, wrap: .wrap)
+        let shaped = TextSystem().shape(text: sample, style: style, maxWidth: 72, pixelScale: 1)
+        #expect(shaped.lineCount == 1)
+        #expect(shaped.size.x == 71.90625)
+
+        // Inter's glyph zero advances 1344 design units at 2048 units per em.
+        // Four-byte Han scalars exercise both the native and indexed caret paths.
+        let pair = "\u{20000}\u{20001}"
+        for repeats in [1, 20] {
+            let text = String(repeating: pair, count: repeats)
+            let length = Int32(text.utf8.count)
+            for size: Float in [13, 26] {
+                let line = try #require(rune_desktop_line_create(text, length, "Inter", size, 400, 0, 0, 1))
+                defer { rune_desktop_line_destroy(line) }
+                let expected = size * 1344 / 2048
+                for configured in [false, true] {
+                    if configured { rune_desktop_line_configure(line, "ja", "liga=0", nil) }
+                    #expect(rune_desktop_line_metrics(line).advance == Float(repeats * 2) * expected)
+                    for byte in stride(from: Int32(0), to: length, by: 4) {
+                        var left: Float = 0, advance: Float = 0
+                        #expect(rune_desktop_line_cell(line, byte, byte + 4, &left, &advance) == 1)
+                        #expect(left == Float(byte / 4) * expected && advance == expected)
+                        #expect(rune_desktop_line_caret(line, byte + 4) == left + advance)
+                    }
+                }
+            }
+        }
+    }
+
     @Test func monoScriptFallbackKeepsArabicMarksAndPreservesThePrimarySpace() throws {
         _ = DefaultFonts.registerIfNeeded()
         func width(_ text: String, family: String, mono: Bool, configured: Bool) throws -> Float {

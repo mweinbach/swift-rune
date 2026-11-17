@@ -167,9 +167,49 @@ static void measure_face(PangoFont *font, RuneDesktopLineMetrics *metrics) {
         metrics->cap_height = fmaxf(metrics->cap_height, position / (float)PANGO_SCALE);
 }
 
+// These are the same Han, kana, Hangul and full-width blocks that trigger
+// Rune's CJK font search in text/system_fonts.rs.
+static gboolean missing_cjk_glyph(PangoGlyph glyph) {
+    if (!(glyph & PANGO_GLYPH_UNKNOWN_FLAG)) return FALSE;
+    const guint32 ch = glyph & ~PANGO_GLYPH_UNKNOWN_FLAG;
+    return (ch >= 0x1100 && ch <= 0x11ff) || (ch >= 0x2e80 && ch <= 0x2fdf) ||
+           (ch >= 0x2ff0 && ch <= 0x4dbf) || (ch >= 0x4e00 && ch <= 0x9fff) ||
+           (ch >= 0xa960 && ch <= 0xa97f) || (ch >= 0xac00 && ch <= 0xd7ff) ||
+           (ch >= 0xf900 && ch <= 0xfaff) || (ch >= 0xfe30 && ch <= 0xfe4f) ||
+           (ch >= 0xff00 && ch <= 0xffef) || (ch >= 0x20000 && ch <= 0x3ffff);
+}
+
+static void apply_missing_cjk_glyphs(PangoLayout *layout) {
+    if (g_str_is_ascii(pango_layout_get_text(layout))) return;
+    PangoLayoutLine *line = pango_layout_get_line_readonly(layout, 0);
+    gboolean writable = FALSE;
+    for (GSList *entry = line ? line->runs : NULL; entry; entry = entry->next) {
+        PangoLayoutRun *run = entry->data;
+        PangoFont *font = run->item->analysis.font;
+        if (!font) continue;
+        hb_position_t advance = -1;
+        for (int i = 0; i < run->glyphs->num_glyphs; ++i) {
+            PangoGlyphInfo *glyph = &run->glyphs->glyphs[i];
+            if (!missing_cjk_glyph(glyph->glyph)) continue;
+            // Mutable access invalidates Pango's cached extents. Leave layouts
+            // with real fallback glyphs on the faster read-only path.
+            if (!writable) {
+                pango_layout_get_line(layout, 0);
+                writable = TRUE;
+            }
+            // Pango synthesizes a box containing the hex codepoint. Parley
+            // shapes the face's .notdef when all fallback faces lack the glyph.
+            if (advance < 0) advance = hb_font_get_glyph_h_advance(pango_font_get_hb_font(font), 0);
+            glyph->glyph = 0;
+            glyph->geometry.width = advance;
+        }
+    }
+}
+
 static void measure_line(RuneDesktopLine *result) {
     g_clear_pointer(&result->cluster_index, g_array_unref);
     g_clear_pointer(&result->indexed_runs, g_ptr_array_unref);
+    apply_missing_cjk_glyphs(result->layout);
     index_grapheme_edges(result);
     PangoRectangle ink, logical;
     pango_layout_get_pixel_extents(result->layout, &ink, NULL);
