@@ -281,7 +281,7 @@ extension Runtime {
                 case .paste(let content, let target):
                     // `Action::Paste` is routed input: the poll's change splits from it, and what
                     // it changes is INPUT.
-                    let inputMark = beginInputDispatch(at: now)
+                    let inputMark = beginInputDispatch(at: now, routed: true)
                     runPasteReply(content, target: target, at: now)
                     endInputDispatch(inputMark, queuedAction: true)
                 case .read(let id, let content):

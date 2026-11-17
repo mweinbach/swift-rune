@@ -149,15 +149,15 @@ extension Runtime {
     /// A host input event arrives (presses, keys, IME): it marks the frame as not quiet for the
     /// idle meter, and starts an input entry point (`beginInputDispatch`). Returns the enclosing
     /// dispatch's state, for `endInputDispatch`.
-    internal func noteInput(at now: Double) -> Bool {
+    internal func noteInput(at now: Double, routed: Bool = false) -> Bool {
         frameHadInputSinceLastFrame = true
-        return beginInputDispatch(at: now)
+        return beginInputDispatch(at: now, routed: routed)
     }
 
     /// An input entry point starts: a poll's change waiting to commit commits first (`split` on
     /// `input || routed`). Returns the enclosing dispatch's change flag, for `endInputDispatch`.
-    internal func beginInputDispatch(at now: Double) -> Bool {
-        commitPolledChangeApart(at: now)
+    internal func beginInputDispatch(at now: Double, routed: Bool = false) -> Bool {
+        commitPolledChangeApart(at: now, routed: routed)
         let outer = inputDispatchChanged
         inputDispatchChanged = false
         inputDispatchDepth += 1
@@ -207,13 +207,13 @@ extension Runtime {
     /// (`finish_scroll_requests(tx, false)`: the caret follow waits for the handler's commit),
     /// and its motion policy spent (`commitTree` takes it), so the handler's own change keeps its
     /// animation (`frame.rs` `split`).
-    internal func commitPolledChangeApart(at now: Double) {
+    internal func commitPolledChangeApart(at now: Double, routed: Bool) {
         guard motionNeedsCause, polledChange, needsCommit else { return }
         if !pendingAskedMotion { pendingUnprompted = true }
         let follow = pendingCaretFollow
         pendingCaretFollow = false
         let asked = pendingFocusWhenShown != nil
-        flushPendingCommitIfNeeded(at: now)
+        flushPendingCommitIfNeeded(at: now, routed: routed)
         polledChange = false
         if asked && focusOwed != nil { focusOwedFromSplit = true }
         pendingCaretFollow = pendingCaretFollow || follow
@@ -224,7 +224,7 @@ extension Runtime {
     /// its motion, and the poll's change can commit on its own after it.
     internal func commitInputApartFromFramePoll(at now: Double, polls: Bool) {
         guard polls, motionNeedsCause, frameCommittedFromInput, needsCommit else { return }
-        flushPendingCommitIfNeeded(at: now)
+        flushPendingCommitIfNeeded(at: now, routed: false)
     }
 
     /// The frame's poll changed the model (`why |= CommitWhy::POLL`). Input already handled has

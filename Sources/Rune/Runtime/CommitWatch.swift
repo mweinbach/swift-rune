@@ -60,8 +60,9 @@ extension Runtime {
     /// what poll, handlers and state changes left pending, a pending `Tx::settle`, layout
     /// handlers that asked for it and layout reads that moved. A virtual window's shift only
     /// counts when nothing else (dirty state, a relayout, a settle) would commit anyway.
-    internal func frameCommitWhy(settle: Bool, layout: Bool, read: Bool) -> UInt16 {
+    internal func takeFrameCommitWhy(settle: Bool, layout: Bool, read: Bool) -> UInt16 {
         var why = commitWhyPending
+        commitWhyPending = 0
         if settle { why |= CommitWhy.settle }
         if layout { why |= CommitWhy.layout }
         if read { why |= CommitWhy.read }

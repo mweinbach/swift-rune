@@ -1921,7 +1921,7 @@ public final class Runtime<State> {
             kitHooks.frameGrowthStepDt = 0
             pendingGrowthStepNow = now
             defer { pendingGrowthStepNow = nil }
-            let why = frameCommitWhy(settle: explicitSettleRequested, layout: ranLayoutFeedback, read: false)
+            let why = takeFrameCommitWhy(settle: explicitSettleRequested, layout: ranLayoutFeedback, read: false)
             commitFor(why: why, at: commitAt, cut: shouldCut, resizeSnap: resizeSnap)
             kitHooks.frameGrowthStepDt = 0
             reconcileDropHoverAfterCommit(at: now)
@@ -2223,7 +2223,7 @@ public final class Runtime<State> {
         return out
     }
 
-    internal func flushPendingCommitIfNeeded(at now: Double) {
+    internal func flushPendingCommitIfNeeded(at now: Double, routed: Bool = true) {
         // frame.rs:563: only when a handler or poll ran, or the state is dirty (`ran || dirty`).
         if needsCommit, commitWhyPending & (CommitWhy.input | CommitWhy.poll | CommitWhy.dirty) != 0 {
             // A routed event (key, physical key, IME, paste) sees the state an earlier handler
@@ -2234,7 +2234,7 @@ public final class Runtime<State> {
             // at the release would take out of it. File steps don't either: upstream holds a
             // stale one to the next frame (`hold_files`) rather than committing before it.
             needsCommit = false
-            commitFor(why: CommitWhy.route, at: now, cut: forceInitialSettle)
+            commitFor(why: routed ? CommitWhy.route : 0, at: now, cut: forceInitialSettle)
             forceInitialSettle = false
         }
     }
@@ -10540,7 +10540,7 @@ public final class Runtime<State> {
     @discardableResult
     public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, baseChar: Character? = nil, at now: Double) -> Bool {
         if case .key(_, _, true, _) = event { dropOwedFocus() }
-        let inputMark = noteInput(at: now)
+        let inputMark = noteInput(at: now, routed: true)
         defer { endInputDispatch(inputMark, queuedAction: true) }
         let prevCode = currentPhysicalKey
         let prevBase = currentKeyBase
@@ -10561,7 +10561,7 @@ public final class Runtime<State> {
     internal func dispatchPhysicalInputOnly(_ event: PhysicalInput, at now: Double) -> Bool {
         currentTime = now
         if case .key(_, _, true, _) = event { dropOwedFocus() }
-        commitPolledChangeApart(at: now)
+        commitPolledChangeApart(at: now, routed: true)
         flushPendingCommitIfNeeded(at: now)
         if case .focusLost = event {
             dirChord = .idle
@@ -10640,7 +10640,7 @@ public final class Runtime<State> {
         // step's press for the stage (`Action::Key { stage: true }`) doesn't. As upstream
         // (frame.rs:565), before this key's commit boundary resolves an ask not yet committed.
         if playgroundLive?.pressing != true { dropOwedFocus() }
-        let inputMark = noteInput(at: now)
+        let inputMark = noteInput(at: now, routed: true)
         defer { endInputDispatch(inputMark, queuedAction: true) }
         // A caret key or a shortcut reads the field's layout where it lands: a long paste's
         // paragraphs still waiting there are shaped first. Typing at the caret needs none.
@@ -11136,7 +11136,7 @@ public final class Runtime<State> {
     }
 
     public func paste(_ content: ClipboardContent, at now: Double) {
-        let inputMark = beginInputDispatch(at: now)
+        let inputMark = beginInputDispatch(at: now, routed: true)
         defer { endInputDispatch(inputMark, queuedAction: true) }
         flushPendingCommitIfNeeded(at: now)
         deliverPaste(content, at: now)
@@ -12384,7 +12384,7 @@ public final class Runtime<State> {
 
     @discardableResult
     internal func dispatchImeEvent(_ event: ImeEvent, recordReleaseGuard: Bool, at now: Double? = nil) -> Bool {
-        let inputMark = noteInput(at: now ?? currentTime)
+        let inputMark = noteInput(at: now ?? currentTime, routed: true)
         defer { endInputDispatch(inputMark, queuedAction: true) }
         let imeStartNs = InteractionGate.isOn ? DispatchTime.now().uptimeNanoseconds : 0
         let t = now ?? currentTime
