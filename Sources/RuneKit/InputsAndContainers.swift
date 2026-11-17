@@ -965,6 +965,7 @@ public struct TextInput<State> {
 
         let inputKey = resolvedInputKey(explicit: key.map { "\($0)-input" }, editKeyPath: editKeyPath)
         var field: El<State> = Rune.textInput(key: inputKey, editKeyPath)
+            .singleLine()
             .grow(1.0)
             .shrink(1.0)
             .minW(0)
@@ -996,7 +997,8 @@ public struct TextInput<State> {
             field = field.animateLayout(k.motion.control).animateEditLayout()
         }
         if disabled {
-            field = field.disabled(true)
+            // `Edits::apply` (`text_input.rs:102-110`): a disabled field gets none of its edit handlers.
+            field = field.disabled(true).withoutEditAccess()
         } else {
             if let onChangeHandler { field = field.onChange(onChangeHandler) }
             if let onSubmitHandler { field = field.onSubmit(onSubmitHandler) }
@@ -1277,7 +1279,8 @@ public struct TextArea<State> {
             field = field.animateLayout(k.motion.control).animateEditLayout()
         }
         if disabled {
-            field = field.disabled(true)
+            // `Edits::apply` (`text_input.rs:102-110`): a disabled field gets none of its edit handlers.
+            field = field.disabled(true).withoutEditAccess()
         } else {
             if let onChangeHandler { field = field.onChange(onChangeHandler) }
             if let onSubmitHandler { field = field.onSubmit(onSubmitHandler) }
@@ -1470,7 +1473,8 @@ public struct TextField<State> {
         field = richModifiers.apply(to: field, kit: k)
 
         if !isMultiline {
-            field = field.noWrap()
+            // `text_input.rs:641`: a one-line TextField is `single_line()`.
+            field = field.singleLine().noWrap()
         } else {
             field = field.wrapText()
         }
@@ -1478,7 +1482,8 @@ public struct TextField<State> {
             field = field.description(errorText)
         }
         if disabled {
-            field = field.disabled(true)
+            // `Edits::apply` (`text_input.rs:102-110`): a disabled field gets none of its edit handlers.
+            field = field.disabled(true).withoutEditAccess()
         } else {
             if let onChangeHandler { field = field.onChange(onChangeHandler) }
             if let onSubmitHandler { field = field.onSubmit(onSubmitHandler) }
@@ -1590,6 +1595,7 @@ extension Kit {
         let ringCol = invalid ? c.danger.fg : c.borderFocus
 
         var inputEl = Rune.textInput(key: key, editKeyPath)
+            .singleLine()
             .grow(1)
             .py(6)
             .px(leadingIcon == nil ? 10 : 4)

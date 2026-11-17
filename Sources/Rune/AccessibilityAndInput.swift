@@ -14,6 +14,8 @@ public enum AccessibilityAction: String, Sendable, Hashable, Codable {
     case focus
     case increment
     case decrement
+    /// Sets a new value: an editable text field's text, or a stepped range's number (`Action::SetValue`).
+    case setValue = "set-value"
 }
 
 /// Live-region announcement politeness (`rune::LiveRegion`).
@@ -293,17 +295,28 @@ public enum AccessibilityTreeBuilder {
                 actions.append(.decrement)
             }
         }
+        // `a11y/node.rs:231-240`: SetValue rides on `onStep` with a stated step, or on edit access.
+        if AccessibilityTreeBuilder.offersSetValue(
+            enabled: enabled,
+            editable: element.hasEditAccess,
+            steps: element.handlers.onStep != nil,
+            range: element.a11yRange
+        ) {
+            appendAction(.setValue, to: &actions)
+        }
 
         var value: String? = element.a11yValue ?? element.a11ySelected
         var isSecure = element.isSecure
+        // `RoleCtx::multiline` (`a11y/node.rs:31`): a field that is not single-line.
+        let multiline = element.isMultilineField
         if let state, let editLens = element.handlers.editLens {
             let edit = editLens.get(state)
             isSecure = isSecure || edit.isSecure
             value = isSecure ? nil : edit.text
         }
 
-        let resolvedRole: ElementRole = (isSecure && element.role == .textInput)
-            ? .passwordInput
+        let resolvedRole: ElementRole = element.role == .textInput && (isSecure || multiline)
+            ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: multiline)
             : AccessibilityRoleRules.role(for: element, focusable: enabled && element.focusable)
         let labelledByText = relatedWords(key: element.a11yLabelledBy, ancestors: ancestors, selfKey: element.keyId)
         let describedByText = relatedWords(key: element.a11yDescribedBy, ancestors: ancestors, selfKey: element.keyId)
@@ -450,6 +463,7 @@ public enum AppKitAccessibilityMapper {
         case .radio: return .radioButton
         case .tab: return .radioButton
         case .textInput, .passwordInput: return .textField
+        case .multilineTextInput: return .textArea
         case .slider: return .slider
         case .progress: return .progressIndicator
         case .listItem: return .row
@@ -486,11 +500,12 @@ public enum AppKitAccessibilityMapper {
     public static func buildElement(
         from node: AccessibilityNode,
         parent: AnyObject? = nil,
-        onAction: (@Sendable (String, AccessibilityAction) -> Void)? = nil
+        onAction: (@Sendable (String, AccessibilityAction) -> Void)? = nil,
+        onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)? = nil
     ) -> RuneNSAccessibilityElement {
-        let el = RuneNSAccessibilityElement(node: node, parent: parent, onAction: onAction)
+        let el = RuneNSAccessibilityElement(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
         let childEls = node.children.map {
-            buildElement(from: $0, parent: el, onAction: onAction)
+            buildElement(from: $0, parent: el, onAction: onAction, onSetValue: onSetValue)
         }
         el.setAccessibilityChildren(childEls)
         return el
@@ -502,15 +517,18 @@ public final class RuneNSAccessibilityElement: NSAccessibilityElement {
     public let nodeId: String
     public let supportedActions: [AccessibilityAction]
     private let actionHandler: (@Sendable (String, AccessibilityAction) -> Void)?
+    private let setValueHandler: (@Sendable (String, AccessibilityActionValue) -> Void)?
 
     public init(
         node: AccessibilityNode,
         parent: AnyObject?,
-        onAction: (@Sendable (String, AccessibilityAction) -> Void)?
+        onAction: (@Sendable (String, AccessibilityAction) -> Void)?,
+        onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)? = nil
     ) {
         self.nodeId = node.id
         self.supportedActions = node.actions
         self.actionHandler = onAction
+        self.setValueHandler = onSetValue
         super.init()
 
         setAccessibilityRole(AppKitAccessibilityMapper.nsRole(for: node.role))
@@ -527,9 +545,9 @@ public final class RuneNSAccessibilityElement: NSAccessibilityElement {
         if node.role == .heading {
             // A heading's value is its level, as WebKit and Chromium give VoiceOver
             // (`vendor/accesskit_macos.patch`, #975), checked before the text value.
-            setAccessibilityValue(NSNumber(value: AccessibilityHeading.macLevelValue(level: node.level)))
+            super.setAccessibilityValue(NSNumber(value: AccessibilityHeading.macLevelValue(level: node.level)))
         } else if !node.isSecure, let value = node.value {
-            setAccessibilityValue(value)
+            super.setAccessibilityValue(value)
         }
         if let help = node.help {
             setAccessibilityHelp(help)
@@ -564,6 +582,33 @@ public final class RuneNSAccessibilityElement: NSAccessibilityElement {
         actionHandler?(nodeId, .decrement)
         return true
     }
+
+    /// VoiceOver may set the value only where the node offers `SetValue`.
+    public override func isAccessibilitySelectorAllowed(_ selector: Selector) -> Bool {
+        if selector == #selector(NSAccessibilityElement.setAccessibilityValue(_:)) {
+            return supportedActions.contains(.setValue) && setValueHandler != nil
+        }
+        return super.isAccessibilitySelectorAllowed(selector)
+    }
+
+    /// An assistive client setting the value: AccessKit's macOS adapter turns this into
+    /// `ActionRequest { action: SetValue, data: Value(..) / NumericValue(..) }`.
+    public override func setAccessibilityValue(_ accessibilityValue: Any?) {
+        guard supportedActions.contains(.setValue), let setValueHandler else {
+            super.setAccessibilityValue(accessibilityValue)
+            return
+        }
+        switch accessibilityValue {
+        case let text as String:
+            setValueHandler(nodeId, .text(text))
+        case let attributed as NSAttributedString:
+            setValueHandler(nodeId, .text(attributed.string))
+        case let number as NSNumber:
+            setValueHandler(nodeId, .number(number.doubleValue))
+        default:
+            break
+        }
+    }
 }
 #elseif canImport(UIKit) && !os(watchOS)
 /// Builds a UIKit `UIAccessibilityElement` hierarchy from a projected `AccessibilityNode`.
@@ -572,7 +617,7 @@ public enum UIKitAccessibilityMapper {
         switch role {
         case .button, .menuItem, .menuItemCheckbox: return .button
         case .text, .listItem, .group, .dialog, .menu, .separator: return .staticText
-        case .toolbar, .list, .textInput, .passwordInput: return .none
+        case .toolbar, .list, .textInput, .passwordInput, .multilineTextInput: return .none
         case .splitter, .slider: return .adjustable
         case .status, .progress: return [.staticText, .updatesFrequently]
         case .heading: return .header

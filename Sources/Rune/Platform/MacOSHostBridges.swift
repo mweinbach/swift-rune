@@ -344,6 +344,25 @@ public enum MacOSHostViewHelper {
         }
     }
 
+    /// Runs an assistive `SetValue` request on the main actor, as `dispatchAccessibilityAction` does.
+    public nonisolated static func dispatchAccessibilitySetValue(
+        _ id: String,
+        value: AccessibilityActionValue,
+        perform: @MainActor @escaping @Sendable (String, AccessibilityActionValue) -> Void
+    ) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                perform(id, value)
+            }
+        } else {
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    perform(id, value)
+                }
+            }
+        }
+    }
+
     public nonisolated static func dispatchAccessibilityAction(
         _ id: String,
         action: AccessibilityAction,

@@ -288,6 +288,7 @@ extension Kit {
         onClear: ((inout State) -> Void)? = nil
     ) -> El<State> {
         var inputEl = Rune.textInput(key: key, editKeyPath)
+            .singleLine()
             .grow(1)
             .py(6)
             .px(4)

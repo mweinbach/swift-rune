@@ -28,17 +28,30 @@ public extension AccessibilityTreeBuilder {
         func build(_ idx: Int) -> AccessibilityNode {
             let info = elements[idx]
             let isSecure = securePaths.contains(info.path) || (info.role == .textInput && info.text == nil)
+            // As the live tree's `a11yNodeActions` (`a11y/node.rs:222-240`, under `actionable`).
+            let input = info.a11yInput
+            let enabled = !info.disabled && !info.inert
             var actions: [AccessibilityAction] = []
-            if info.role == .button || info.role == .checkbox || info.role == .switchControl ||
-                info.role == .radio || info.role == .tab || info.role == .menuItem {
-                actions.append(.press)
+            if enabled {
+                if [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox].contains(info.role) ||
+                    input?.pressable == true || input?.isInput == true {
+                    actions.append(.press)
+                }
+                if info.focusable {
+                    actions.append(.focus)
+                }
+                if info.role == .slider || input?.steps == true {
+                    actions.append(.increment)
+                    actions.append(.decrement)
+                }
             }
-            if info.focusable {
-                actions.append(.focus)
-            }
-            if info.role == .slider {
-                actions.append(.increment)
-                actions.append(.decrement)
+            if AccessibilityTreeBuilder.offersSetValue(
+                enabled: enabled,
+                editable: input?.editable ?? false,
+                steps: input?.steps ?? false,
+                range: input?.range
+            ) {
+                AccessibilityTreeBuilder.appendAction(.setValue, to: &actions)
             }
 
             let rect = info.rect.count >= 4
@@ -51,7 +64,9 @@ public extension AccessibilityTreeBuilder {
 
             return AccessibilityNode(
                 id: nodeId,
-                role: (isSecure && info.role == .textInput) ? .passwordInput : info.role,
+                role: info.role == .textInput && (isSecure || input?.multiline == true)
+                    ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: input?.multiline == true)
+                    : info.role,
                 label: projectedLabel,
                 value: projectedValue,
                 help: info.help,
@@ -230,6 +245,8 @@ public extension Runtime {
             var editText: String? = editIsSecure ? nil : richPlain
             var editChars: Int? = nil
             var editSel: [Int]? = nil
+            // `RoleCtx::multiline`: a field that is not single-line (`a11y/node.rs:31`).
+            let editMultiline = el.isMultilineField
             if let editLens = el.handlers.editLens {
                 let edit = editLens.get(state)
                 editIsSecure = editIsSecure || edit.isSecure
@@ -248,20 +265,7 @@ public extension Runtime {
             let nodeId = node.key ?? node.path
 
             let enabled = !el.a11yDisabled && !node.effectiveInert
-            var actions: [AccessibilityAction] = []
-            if enabled {
-                if el.handlers.onClick != nil || el.handlers.onClickPress != nil ||
-                   [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox].contains(el.role) {
-                    actions.append(.press)
-                }
-                if el.focusable {
-                    actions.append(.focus)
-                }
-                if el.role == .slider || el.handlers.onStep != nil {
-                    actions.append(.increment)
-                    actions.append(.decrement)
-                }
-            }
+            let actions = a11yNodeActions(node)
 
             let resolvedValue: String? = isSecure ? nil : (el.a11yValue ?? el.a11ySelected ?? editText)
             let labelledByText = el.a11yLabelledBy.flatMap { a11yKeyed(from: idx, key: $0) }.flatMap(a11yWords)
@@ -276,8 +280,8 @@ public extension Runtime {
             let sOff = hasScroll ? (scrollOffsets[node.path] ?? .zero) : nil
             let sMax = hasScroll ? scrollMaxExtents[node.path] : nil
 
-            let resolvedRole: ElementRole = (isSecure && el.role == .textInput)
-                ? .passwordInput
+            let resolvedRole: ElementRole = el.role == .textInput && (isSecure || editMultiline)
+                ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: editMultiline)
                 : AccessibilityRoleRules.role(for: el, focusable: nodeTakesFocus(el) && !node.effectiveInert)
             let hasLinks = hasActiveTextLinks(el)
             var builtChildren = (childrenByParent[idx] ?? []).map(build)
@@ -410,7 +414,33 @@ public extension Runtime {
         action: AccessibilityAction,
         at now: Double
     ) -> Bool {
+        if action == .setValue {
+            // A new value needs the request's data (`ActionData::Value` / `NumericValue`).
+            return performAccessibilitySetValue(id, value: nil, at: now)
+        }
+        // `a11y_action`: only an allowed node that can do what is asked (`actions.rs:38-81`);
+        // a disabled control advertises nothing and takes no action.
         let all = elements()
+        if let flatIdx = a11yTargetIndex(id) {
+            let flat = flatNodes[flatIdx]
+            guard a11yAllowed(flatIdx), a11yTakes(action, on: flat) else {
+                return false
+            }
+            // `(Click, None) if input => A11yAct::Focus(None)` → `set_focus(path, true)`.
+            if action == .press && !a11yPressable(flat.el) && flat.el.handlers.editLens != nil {
+                setFocus(path: flat.path, keyboard: true, at: now)
+                dirtyCommit(at: now)
+                return true
+            }
+        } else {
+            // An inline text link is a sub-node of its text, not an element of its own:
+            // `(Click, Some(link))` presses it whatever its text offers (`actions.rs:49`).
+            guard action == .press || action == .focus,
+                  let link = all.first(where: { ($0.key ?? $0.path) == id || $0.path == id }),
+                  link.role == .link, !link.inert else {
+                return false
+            }
+        }
         guard let target = all.first(where: { ($0.key ?? $0.path) == id || $0.path == id }),
               !target.inert,
               target.rect.count >= 4 else {
@@ -425,6 +455,8 @@ public extension Runtime {
             pointerDown(at: center, button: .primary, mods: Mods(), at: now)
             pointerUp(at: center, button: .primary, mods: Mods(), at: now)
             return true
+        case .setValue:
+            return false
         case .increment, .decrement:
             guard let flatTarget = flatNodes.first(where: { ($0.key ?? $0.path) == id || $0.path == id }),
                   !flatTarget.effectiveInert,
@@ -500,6 +532,7 @@ public final class MacOSAccessibilityHost {
         announcement: AccessibilityAnnouncement? = nil,
         now: Double = AccessibilityAnnouncement.clock(),
         parentView: NSView,
+        onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)? = nil,
         onAction: @escaping @Sendable (String, AccessibilityAction) -> Void
     ) -> Bool {
         var spoken: [(text: String, politeness: LiveRegionPoliteness)] = AccessibilityTreeBuilder
@@ -522,7 +555,7 @@ public final class MacOSAccessibilityHost {
 
         var map: [String: RuneNSAccessibilityElement] = [:]
         func convertNode(_ node: AccessibilityNode, parent: AnyObject) -> RuneNSAccessibilityElement {
-            let elem = AppKitAccessibilityMapper.buildElement(from: node, onAction: onAction)
+            let elem = AppKitAccessibilityMapper.buildElement(from: node, onAction: onAction, onSetValue: onSetValue)
             elem.setAccessibilityParent(parent)
 
             let viewRect = NSRect(
