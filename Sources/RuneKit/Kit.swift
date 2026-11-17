@@ -255,7 +255,17 @@ public struct KitTypography: Sendable, Equatable, Hashable {
     public var textSmallMedium: TextStyle = TextStyle(size: 13.0, weight: 500.0).lh(19.5)
     public var textXsmall: TextStyle = TextStyle(size: 12.0, weight: 400.0).lh(18.0)
     public var textXsmallMedium: TextStyle = TextStyle(size: 12.0, weight: 500.0).lh(18.0)
-    public var mono: TextStyle
+    private static let defaultMono = TextStyle(size: 12).mono().lh(18)
+    private static let defaultDiffCode = TextStyle(size: 13).mono().lh(20)
+    internal var customMono: TextStyle?
+
+    public var mono: TextStyle {
+        get { customMono ?? Self.defaultMono }
+        set { customMono = newValue }
+    }
+
+    /// An explicit monospace style applies to both the code and the line numbers.
+    internal var diffCodeFont: TextStyle { customMono ?? Self.defaultDiffCode }
 
     /// Secondary text under a control or row (`small` on a 16pt line).
     public func caption() -> TextStyle {
@@ -431,8 +441,7 @@ public struct Kit: Sendable, Equatable {
                 small: TextStyle(size: 11.0, weight: 400.0).lh(12.0),
                 smallMedium: TextStyle(size: 11.0, weight: 500.0).lh(12.0),
                 body: TextStyle(size: 14.0, weight: 400.0).lh(21.0),
-                bodyMedium: TextStyle(size: 14.0, weight: 500.0).lh(21.0),
-                mono: TextStyle(size: 12.0, weight: 400.0).mono().lh(18.0)
+                bodyMedium: TextStyle(size: 14.0, weight: 500.0).lh(21.0)
             ),
             radius: KitRadius(xs: 2.0, sm: 4.0, md: 6.0, lg: 8.0, xl: 10.0),
             motion: KitMotion(

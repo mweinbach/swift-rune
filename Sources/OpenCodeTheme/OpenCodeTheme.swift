@@ -444,7 +444,6 @@ public enum OpenCodeTheme {
         k.ty.textSmallMedium = inter(13.0, 500.0, 19.5, 0.0)
         k.ty.textXsmall = inter(12.0, 400.0, 18.0, 0.0)
         k.ty.textXsmallMedium = inter(12.0, 500.0, 18.0, 0.0)
-        k.ty.mono = TextStyle(size: 12.0, weight: 400.0).mono().lh(18.0)
 
         k.radius.xs = spacingTokens.radiusXS
         k.radius.sm = spacingTokens.radiusSM

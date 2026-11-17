@@ -2840,10 +2840,12 @@ public struct DiffView<State>: Sendable {
         }
         if entries.isEmpty { return container }
 
-        let font = k.ty.mono
-        // A single line can round up by one device pixel. Leave that headroom at any scale.
+        let font = k.ty.diffCodeFont
+        // Allow for whole-pixel rounding when the font does not request exact line heights.
+        let scale = max(1, cx.pixelScale)
+        let upperLineHeight = ceil(font.resolvedLineHeight * scale) / scale
         let gutterFitsCode = !st.wraps && font.family == .monospace && font.maxLines == 0
-            && font.resolvedLineHeight + 1 <= lineH
+            && upperLineHeight <= lineH
             && syntaxTheme.weights.allSatisfy { $0 == nil || $0 == font.weight }
 
         var list = El<State>(direction: .column).key("\(key)-rows").wFull().shrink(0).role(.list).label("Diff")
@@ -3370,17 +3372,10 @@ public struct DiffView<State>: Sendable {
 
     @inline(never)
     private func numberLabelCell(labelStr: String, cellKey: String, width: Float, lineH: Float, ink: Color) -> El<State> {
-        text(labelStr)
-            .font(kit.ty.mono)
-            .color(ink)
-            .key(cellKey)
-            .w(width)
-            .h(lineH)
-            .px(8)
-            .textAlign(.trailing)
-            .itemsCenter()
-            .justifyEnd()
-            .shrink(0)
+        let cell = El<State>(direction: .row).key(cellKey).w(width).minH(lineH)
+            .selfStretch().px(8).justifyEnd().itemsStart().shrink(0).color(ink)
+        guard !labelStr.isEmpty else { return cell }
+        return cell.child(text(labelStr).font(kit.ty.diffCodeFont).color(ink).noWrap().shrink(0))
     }
 
     @inline(never)
@@ -3394,17 +3389,9 @@ public struct DiffView<State>: Sendable {
         ink: Color,
         onCommentHandler: @escaping @Sendable (inout State, DiffLineRange, inout Tx) -> Void
     ) -> El<State> {
-        El<State>(direction: .row)
-            .key(cellKey)
-            .w(width)
-            .h(lineH)
-            .px(6)
-            .gap(4)
-            .itemsCenter()
-            .justifyEnd()
-            .shrink(0)
-            .child(commentButton(key: "\(cellKey)-plus", file: file, point: point, onComment: onCommentHandler))
-            .child(text(labelStr).font(kit.ty.mono).color(ink))
+        numberLabelCell(labelStr: labelStr, cellKey: cellKey, width: width, lineH: lineH, ink: ink)
+            .child(commentButton(key: "\(cellKey)-plus", file: file, point: point, onComment: onCommentHandler)
+                .absolute(x: width - 10, y: 2))
     }
 
     @inline(never)
@@ -3581,13 +3568,13 @@ public struct DiffView<State>: Sendable {
         let sourceSide: DiffSide = line.oldNumber != nil && (line.kind == .deletion || line.newNumber == nil) ? .old : .new
         let source = DiffLineRef(side: sourceSide, line: line.lineNumber(for: sourceSide) ?? 1)
         let appearance = CodeAppearance(changes: changed, document: state.highlightVersion,
-                                        source: source, highlighter: Data(resolved.id.utf8), theme: syntaxTheme, font: kit.ty.mono,
+                                        source: source, highlighter: Data(resolved.id.utf8), theme: syntaxTheme, font: kit.ty.diffCodeFont,
                                         textColor: kit.c.textBase, wordColor: wordBg, tabSize: look.tabSize, wrap: wrap)
         let codeEl: El<State> = memo(cellKey, deps: appearance) {
             let highlights = state.highlights(file: file, side: source.side, line: source.line, using: resolved)
             let spans = buildCodeSpans(text: line.text, highlights: highlights, syntaxTheme: syntaxTheme,
                                        changedRanges: changed, wordBg: wordBg, wrap: wrap)
-            let code: El<State> = rich(spans).font(kit.ty.mono)
+            let code: El<State> = rich(spans).font(kit.ty.diffCodeFont)
             return wrap ? code.wrapText().wFull() : code.noWrap()
         }
         let hoverHandler: (inout State, Bool, inout Tx) -> Void = { [get, set] s, inside, tx in
