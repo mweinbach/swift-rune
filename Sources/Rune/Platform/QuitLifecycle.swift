@@ -230,6 +230,7 @@ public enum RelaunchController {
     public static let handedEnvVar = "RUNE_INSTANCE_HANDED"
     public static let maxWaitSeconds: Double = 10.0
 
+    #if !os(WASI)
     private static let waitedForPrevious: Void = {
         guard
             let raw = ProcessInfo.processInfo.environment[afterEnvVar],
@@ -239,10 +240,13 @@ public enum RelaunchController {
         else { return }
         wait(pid: pid)
     }()
+    #endif
 
     /// Blocks up to 10s if launched with `RUNE_RELAUNCH_AFTER=<pid>`.
     public static func waitForPrevious() {
+        #if !os(WASI)
         _ = waitedForPrevious
+        #endif
     }
 
     public static func spawn(arguments: [String] = Array(CommandLine.arguments.dropFirst())) {
@@ -255,11 +259,13 @@ public enum RelaunchController {
         #endif
     }
 
+    #if os(macOS) || os(Linux) || os(Windows)
     internal static var handedFrom: UInt32? {
         guard let raw = ProcessInfo.processInfo.environment[handedEnvVar], let pid = UInt32(raw), pid > 0,
               pid != UInt32(bitPattern: ProcessInfo.processInfo.processIdentifier) else { return nil }
         return pid
     }
+    #endif
 
     internal static func spawnHanded(arguments: [String]) {
         #if os(Windows) || os(Linux)
@@ -282,6 +288,7 @@ public enum RelaunchController {
         #endif
     }
 
+    #if !os(WASI)
     private static func wait(pid: UInt32) {
         #if os(Windows)
         guard let process = OpenProcess(DWORD(SYNCHRONIZE), false, pid) else { return }
@@ -294,6 +301,7 @@ public enum RelaunchController {
         }
         #endif
     }
+    #endif
 
     #if os(macOS)
     public static func bundleURL(forExecutable executableURL: URL) -> URL? {

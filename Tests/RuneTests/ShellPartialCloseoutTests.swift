@@ -294,6 +294,9 @@ struct ShellPartialCloseoutTests {
         let rootedPrefs = Prefs.open(appId: "rooted-app", environment: rootedEnv)
         #expect(rootedPrefs.isPersistent)
         #expect(rootedPrefs.path?.path == tmpRoot.appendingPathComponent("rooted/config/rooted-app/prefs.json").path)
+        try rootedPrefs.remove("unset")
+        let rootedPath = try #require(rootedPrefs.path)
+        #expect(!fm.fileExists(atPath: rootedPath.path))
         try rootedPrefs.set("theme", value: "dark")
         #expect(Prefs.open(appId: "rooted-app", environment: rootedEnv).get("theme", as: String.self) == "dark")
 

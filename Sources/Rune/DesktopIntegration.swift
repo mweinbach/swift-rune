@@ -2479,7 +2479,10 @@ public final class Prefs: @unchecked Sendable {
 
     public func remove(_ key: String) throws {
         lock.lock()
-        values.removeValue(forKey: key)
+        guard values.removeValue(forKey: key) != nil else {
+            lock.unlock()
+            return
+        }
         let snapshot = values
         lock.unlock()
         try persist(snapshot)
@@ -2498,6 +2501,9 @@ public final class Prefs: @unchecked Sendable {
     }
 
     private func persist(_ snapshot: [String: Data]) throws {
+        #if os(WASI)
+        guard path == nil else { throw PrefsError.io("prefs files are unsupported on web") }
+        #else
         guard let path else { return }
         let dir = path.deletingLastPathComponent()
         do {
@@ -2517,6 +2523,7 @@ public final class Prefs: @unchecked Sendable {
         } catch {
             throw PrefsError.io(error.localizedDescription)
         }
+        #endif
     }
 }
 
