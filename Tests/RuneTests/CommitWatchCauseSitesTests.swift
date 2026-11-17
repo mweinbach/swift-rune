@@ -115,9 +115,13 @@ struct CommitWatchCauseSitesTests {
         struct Field {
             var edit = TextEdit("")
             var observed: String?
+            var sawOpenCompositionOnBlur = false
         }
         let rt = Runtime<Field>(state: Field(), viewport: Vec2(100, 80), pixelScale: 1) { _, _ in
             textInput(key: "field", \Field.edit).size(100, 80)
+                .onWindowFocus { state, focused, _ in
+                    if !focused { state.sawOpenCompositionOnBlur = state.edit.preedit != nil }
+                }
                 .onPhysicalInput { state, event, _ in
                     guard event == .focusLost else { return false }
                     state.observed = state.edit.preedit == nil ? state.edit.text : nil
@@ -130,8 +134,14 @@ struct CommitWatchCauseSitesTests {
         _ = rt.ime(.preedit(ImePreedit(text: "x", cursorUTF8: 0..<1)), at: 0.03)
         _ = rt.frame(at: 0.04)
         #expect(rt.state.edit.preedit != nil)
-        rt.windowFocus(false, at: 0.05)
+        let got = causes {
+            rt.windowFocus(false, at: 0.05)
+            _ = rt.frame(at: 0.06)
+        }
+        #expect(rt.state.sawOpenCompositionOnBlur)
         #expect(rt.state.observed == "x")
+        #expect(got.contains { $0 & CommitWhy.dirty != 0 })
+        #expect(got.allSatisfy { $0 & CommitWhy.input == 0 })
     }
 
     @Test("focus.rs:247-255 - a composition a commit's focus move finishes commits for `dirty`, not `input`")

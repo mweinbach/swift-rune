@@ -31,7 +31,7 @@ internal struct KitRuntimeHooksState {
     var hoverHoldAfterActionUntilMove: Bool = false
     var windowFocused: Bool = true
     var windowFocusReportedState: Bool? = nil
-    var pendingWindowFocusTransitions: [(focused: Bool, at: Double)] = []
+    var pendingWindowFocusTransitions: [(focused: Bool, at: Double, arrival: Double?)] = []
     var frameGrowthStepDt: Double = 0
     var typeSelectBuffer: String = ""
     var typeSelectLastTime: Double = -10.0
@@ -145,11 +145,7 @@ extension Runtime {
             return
         }
         guard transitionChanged else { return }
-        if flatNodes.isEmpty {
-            kitHooks.pendingWindowFocusTransitions.append((focused, t))
-        } else {
-            _ = dispatchKitWindowFocusHandlers(focused, at: t)
-        }
+        _ = deliverWindowFocusTransition(focused, at: t)
     }
 
     internal func flushPendingKitWindowFocus(at now: Double) {
@@ -157,17 +153,34 @@ extension Runtime {
         let queued = kitHooks.pendingWindowFocusTransitions
         kitHooks.pendingWindowFocusTransitions.removeAll()
         for entry in queued {
-            _ = dispatchKitWindowFocusHandlers(entry.focused, at: entry.at)
+            InputTime.withArrival(entry.arrival) {
+                _ = deliverWindowFocusTransition(entry.focused, at: entry.at)
+            }
         }
     }
 
-    internal func dispatchKitWindowFocusHandlers(_ focused: Bool, at now: Double) -> (ran: Bool, allLiveOnly: Bool) {
+    /// After a blur cancels the pointer, frame.rs queues WindowFocus, FinishIme and Physical(FocusLost) in order.
+    internal func deliverWindowFocusTransition(_ focused: Bool, at now: Double) -> Bool {
         if flatNodes.isEmpty {
-            kitHooks.pendingWindowFocusTransitions.append((focused, now))
-            return (false, true)
+            kitHooks.pendingWindowFocusTransitions.append((focused, now, InputTime.arrival()))
+            return false
         }
+        let ran: Bool
+        if InputTime.arrival() == nil {
+            ran = asInputObserver { dispatchKitWindowFocusHandlers(focused, at: now, why: CommitWhy.dirty) }
+        } else {
+            let mark = beginInputDispatch(at: now)
+            ran = dispatchKitWindowFocusHandlers(focused, at: now, why: CommitWhy.input)
+            endInputDispatch(mark, queuedAction: true)
+        }
+        guard !focused else { return ran }
+        let finished = finishComposition(at: now)
+        let keysLost = physicalWithFallback(.focusLost, fallbackKey: nil, at: now)
+        return ran || finished || keysLost
+    }
+
+    private func dispatchKitWindowFocusHandlers(_ focused: Bool, at now: Double, why: UInt16) -> Bool {
         var ranHandler = false
-        var allLiveOnly = true
         for node in flatNodes where !node.effectiveInert {
             let handlers = node.el.kitWindowFocusHandlers
             guard !handlers.isEmpty else { continue }
@@ -179,11 +192,10 @@ extension Runtime {
                     state = typed
                 }
                 ranHandler = true
-                allLiveOnly = allLiveOnly && tx.liveOnlyRequested
-                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, why: why)
             }
         }
-        return (ranHandler, allLiveOnly)
+        return ranHandler
     }
 
     internal func cancelKitHoverAndRepeatOnPress() {
