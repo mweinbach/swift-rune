@@ -527,6 +527,7 @@ public struct Tx {
     /// Instant; any momentum or glide stops. A virtual row that isn't mounted lands too: the jump
     /// goes where its list's estimates put it, which mounts it, and is placed again from its layout
     /// before the frame draws, the rows it mounts there showing at once.
+    /// Pass `"row/mark"` to land a descendant element or text highlight, including one in an unmounted virtual row.
     public mutating func scrollKeyTo(_ key: String, at: Float) {
         scrollOffsetRequests.append(ScrollOffsetRequest(key: key, x: nil, y: at, glide: nil, anchor: true))
     }
