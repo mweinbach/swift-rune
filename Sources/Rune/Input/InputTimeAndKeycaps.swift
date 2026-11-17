@@ -7,35 +7,39 @@ import Carbon
 
 /// Event time tracking for input responsiveness measurements (`rune::input::time`).
 public enum InputTime {
-    private final class State: @unchecked Sendable {
-        let lock = NSLock()
+    private final class State {
         var currentScopeTime: Double?
         var lastTimestamp: Double = 0
     }
 
-    private static let state = State()
+    #if os(WASI)
+    // The single-threaded WASI event loop has one input thread. Foundation.Thread is unavailable.
+    nonisolated(unsafe) private static let state = State()
+    #else
+    private static let threadKey = "rune.input.time"
+    private static var state: State {
+        let dictionary = Thread.current.threadDictionary
+        if let existing = dictionary[threadKey] as? State { return existing }
+        let created = State()
+        dictionary[threadKey] = created
+        return created
+    }
+    #endif
 
-    /// Most recent user input timestamp (`last_input`).
+    /// Most recent user input timestamp on this thread (`last_input`).
     public static func lastInput() -> Double {
-        state.lock.lock()
-        defer { state.lock.unlock() }
-        return state.lastTimestamp
+        state.lastTimestamp
     }
 
     /// Time of the input event currently being dispatched (`input::time::current`).
     public static func current() -> Double {
-        state.lock.lock()
-        let scoped = state.currentScopeTime
-        state.lock.unlock()
-        return scoped ?? ProcessInfo.processInfo.systemUptime
+        arrival() ?? ProcessInfo.processInfo.systemUptime
     }
 
     /// The arrival time of the input being dispatched now, `nil` outside every `scope`: work no
     /// input caused (`input::time::current`, which returns `None` there).
     internal static func arrival() -> Double? {
-        state.lock.lock()
-        defer { state.lock.unlock() }
-        return state.currentScopeTime
+        state.currentScopeTime
     }
 
     /// Makes `at` the arrival time of what runs now, `nil` for work no input caused, and returns
@@ -43,19 +47,18 @@ public enum InputTime {
     /// unlike `scope(at:)` does not count as the last input).
     @discardableResult
     internal static func swapArrival(_ at: Double?) -> Double? {
-        state.lock.lock()
-        defer { state.lock.unlock() }
-        let prev = state.currentScopeTime
+        let state = Self.state
+        let previous = state.currentScopeTime
         state.currentScopeTime = at
-        return prev
+        return previous
     }
 
     /// Runs `body` with `at` as its arrival time (`None` for work no input caused), as a frame
     /// runs each queued action under its own stamp (`frame.rs`: `input::time::scope(at)`).
     @discardableResult
     internal static func withArrival<T>(_ at: Double?, _ body: () throws -> T) rethrows -> T {
-        let prev = swapArrival(at)
-        defer { swapArrival(prev) }
+        let previous = swapArrival(at)
+        defer { swapArrival(previous) }
         return try body()
     }
 
@@ -72,25 +75,13 @@ public enum InputTime {
     /// dispatched, not its arrival stamp, so input dispatched after a frame is always later than
     /// that frame (`input::time::arrived` setting `LAST` to `Instant::now()`).
     internal static func noteDispatched() {
-        let now = ProcessInfo.processInfo.systemUptime
-        state.lock.lock()
-        state.lastTimestamp = now
-        state.lock.unlock()
+        state.lastTimestamp = ProcessInfo.processInfo.systemUptime
     }
 
     /// Runs `body` with the current event timestamp bound to `timestamp` (`input::time::scope`).
     public static func scope<T>(at timestamp: Double, _ body: () throws -> T) rethrows -> T {
-        state.lock.lock()
-        let prev = state.currentScopeTime
-        state.currentScopeTime = timestamp
         state.lastTimestamp = timestamp
-        state.lock.unlock()
-        defer {
-            state.lock.lock()
-            state.currentScopeTime = prev
-            state.lock.unlock()
-        }
-        return try body()
+        return try withArrival(timestamp, body)
     }
 
     /// Converts an OS event timestamp (`timestamp`) into the system-uptime clock relative to `now` (`since_boot`).
