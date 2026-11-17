@@ -2027,18 +2027,6 @@ public final class Runtime<State> {
         } else if !needsCommit && !directScrolledPaths.isEmpty && !scrollStore.isAnimating {
             directScrolledPaths.removeAll(keepingCapacity: true)
         }
-        scrollRequestsState.stepFinish(
-            gliding: { scrollGlidingPaths.contains($0) },
-            animating: { _ in
-                scrollStore.isAnimating
-                    || growthRows.values.contains { $0.track.moving }
-                    || growthStacks.values.contains { !$0.pendingHeights.isEmpty || !$0.closing.isEmpty || !$0.runs.isEmpty }
-            },
-            mounted: { target in
-                flatNodes.contains { selectsElementSelector(target.key, path: $0.path, key: $0.key) }
-            }
-        )
-
         let isScrolling = isInitiallyScrolling || scrollMovedSinceLastFrame || touchMoved || scrollStore.isAnimating
         if isScrolling {
             frameHadScrollSinceLastFrame = true
