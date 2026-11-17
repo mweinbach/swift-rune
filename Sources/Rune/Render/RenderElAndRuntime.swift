@@ -1101,9 +1101,10 @@ extension Runtime {
             let hasOwnScale = hasOwnScaleNoPress || abs(ownSc.x - 1.0) > 1e-5 || abs(ownSc.y - 1.0) > 1e-5
             let (anchor, anchorTo) = hasOwnScale ? (centre, centreTo) : (pinh.anchor, pinh.anchorTo)
             let (anchorRest, anchorRestTo) = hasOwnScaleNoPress ? (centre, centreTo) : (pinh.anchor, pinh.anchorTo)
+            let extraScrollY = el.layout.scrollAxes.contains(.vertical) ? slice2State.scrollExtraYByPath[node.path] ?? 0 : 0
             let nextChildTransform = PresentedTransform(
                 dx: ownDx,
-                dy: ownDy,
+                dy: ownDy - extraScrollY,
                 anchor: anchor,
                 anchorTo: anchorTo,
                 scale: sc

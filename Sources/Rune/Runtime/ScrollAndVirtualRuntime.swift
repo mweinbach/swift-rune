@@ -2571,6 +2571,32 @@ extension Runtime {
             }
         }
 
+        // A centred row or text mark can move again when neighbouring virtual rows measure.
+        for reveal in scrollRequestsState.reveals where reveal.center {
+            let viewportPath = reveal.viewport
+            let prefix = viewportPath + "/"
+            guard let view = presentedRectByPath[viewportPath],
+                  let target = lastElements.first(where: {
+                      !$0.exiting && $0.path.hasPrefix(prefix)
+                          && selectsElementSelector(reveal.key, path: $0.path, key: $0.key)
+                  }),
+                  let offset = scrollOffsets[viewportPath] else { continue }
+            let scale = presentedScaleByPath[viewportPath]?.y ?? 1
+            guard scale > 1e-4 else { continue }
+            let top = (target.rect[1] - view.top) / scale
+            let to = min(scrollMaxExtents[viewportPath]?.y ?? 0,
+                         max(0, offset.y + top - max(0, view.height - target.rect[3]) / (2 * scale)))
+            let gliding = scrollGlidingPaths.contains(viewportPath)
+            let nid = NodeId.hash("scroll:" + viewportPath)
+            let aim = gliding ? scrollStore.target(nid, Props.SCROLL)?.y ?? offset.y : offset.y
+            guard abs(aim - to) >= 1.0 / 64.0 else { continue }
+            applyScrollOffsetRequest(path: viewportPath, x: nil, y: to,
+                                     glide: gliding ? MotionTokens.GLIDE : nil, cut: false, animNow: now)
+            if let next = scrollOffsets[viewportPath], abs(next.y - offset.y) > 1e-5 {
+                deltas[viewportPath, default: .zero].y += next.y - offset.y
+            }
+        }
+
         if !deltas.isEmpty {
             var deltaByViewportId: [NodeId: Vec2] = [:]
             for (vpPath, dv) in deltas {
@@ -2635,7 +2661,8 @@ extension Runtime {
                     if scrollGlidingPaths.contains(vPath) || scrollStore.isAnimating {
                         return true
                     }
-                    if slice2State.scrollSlacks[vPath]?.moving == true {
+                    if slice2State.scrollSlacks[vPath]?.moving == true
+                        || (needsCommit && virtualLists.values.contains { $0.scrollPath == vPath && $0.wantsMoreFrames }) {
                         return true
                     }
                     let prefix = vPath + "/"

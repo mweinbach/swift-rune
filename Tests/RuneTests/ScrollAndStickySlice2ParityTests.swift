@@ -70,8 +70,8 @@ struct ScrollAndStickySlice2ParityTests {
 
     // MARK: - stick_fit.rs
 
-    @Test("stick_fit: rows_stay_put_across_the_fit_overflow_boundary")
-    func rowsStayPutAcrossFitOverflowBoundary() throws {
+    @Test("stick_fit: rows_stay_put_across_the_fit_overflow_boundary", arguments: [false, true])
+    func rowsStayPutAcrossFitOverflowBoundary(nativeRenderer: Bool) throws {
         struct S {
             var banner: Bool
             var rows: Int
@@ -98,11 +98,18 @@ struct ScrollAndStickySlice2ParityTests {
                         col().key("scroll").wFull().grow(1).shrink().minH(0).scroll(stickBottom: true).child(stack)
                     )
             }
+            func draw(at t: Double) {
+                if nativeRenderer {
+                    _ = rt.renderFrame(at: t)
+                } else {
+                    _ = rt.frame(at: t)
+                }
+            }
             var t = 0.0
-            _ = rt.frame(at: t)
+            draw(at: t)
             for _ in 0..<60 {
                 t += 1.0 / 120.0
-                _ = rt.frame(at: t)
+                draw(at: t)
             }
             func sample() throws -> (Float, Float) {
                 let first = try reqEl(rt, "r0")
@@ -113,7 +120,7 @@ struct ScrollAndStickySlice2ParityTests {
             rt.update(at: t) { s, _ in change(&s) }
             for _ in 0..<120 {
                 t += 1.0 / 120.0
-                _ = rt.frame(at: t)
+                draw(at: t)
                 out.append(try sample())
             }
             return out
@@ -418,64 +425,74 @@ struct ScrollAndStickySlice2ParityTests {
 
     // MARK: - tests/scroll_growth.rs
 
+    private func shrinkingList() -> (Runtime<Int>, Double) {
+        let rt = Runtime<Int>(state: 20, viewport: Vec2(200, 300), pixelScale: 2) { count, _ in
+            let rows = (0..<count).map { el().key("r\($0)").h(100).wFull() as El<Int> }
+            let stack = col().key("stack").wFull().growth(.default).children(rows)
+            return col().key("root").child(col().key("scroll").h(300).wFull().scroll(stickBottom: true).child(stack))
+        }
+        var now = 1.0 / 120.0
+        rt.frame(at: 0)
+        rt.frame(at: now)
+        rt.wheel(WheelEvent(dy: 200), at: Vec2(100, 100), now: now)
+        advance(rt, frames: 30, at: &now)
+        #expect(abs(rt.scrollOffset(forKey: "scroll").y - 1500) < 0.05)
+        return (rt, now)
+    }
+
+    private func advance<S>(_ rt: Runtime<S>, frames: Int, at now: inout Double) {
+        for _ in 0..<frames {
+            now += 1.0 / 120.0
+            rt.frame(at: now)
+        }
+    }
+
     @Test("scroll_growth: a_shrink_glide_follows_the_end_as_it_moves")
     func shrinkGlideFollowsEndAsItMoves() throws {
-        let rt1 = Runtime<Int>(state: 20, viewport: Vec2(200, 300), pixelScale: 2.0, systemDark: true) { n, _ in
-            var stack: El<Int> = col().key("stack").wFull().growth(.default)
-            for i in 0..<n { stack = stack.child(el().key("r\(i)").h(100).wFull()) }
-            return col().key("root").child(col().key("scroll").h(300).wFull().scroll(stickBottom: true).child(stack))
+        let (rt, start) = shrinkingList()
+        var now = start
+        let path = try #require(scrollPath(in: rt, forKey: "scroll"))
+        let id = NodeId.hash("scroll:" + path)
+        rt.update(at: now) { count, _ in count = 15 }
+        advance(rt, frames: 8, at: &now)
+        let before = try #require(rt.scrollStore.velocity(id, Props.SCROLL)?.y)
+        #expect(abs(before) > 1)
+
+        rt.update(at: now) { count, _ in count = 10 }
+        advance(rt, frames: 1, at: &now)
+        let after = try #require(rt.scrollStore.velocity(id, Props.SCROLL)?.y)
+        #expect(rt.scrollStore.target(id, Props.SCROLL)?.y == 700)
+        #expect(abs(after) >= abs(before) * 0.5, "the glide keeps its speed when retargeted")
+        advance(rt, frames: 120, at: &now)
+        #expect(abs(rt.scrollOffset(forKey: "scroll").y - 700) < 0.01)
+
+        let (regrowing, regrowthStart) = shrinkingList()
+        var time = regrowthStart
+        regrowing.update(at: time) { count, _ in count = 15 }
+        advance(regrowing, frames: 8, at: &time)
+        regrowing.update(at: time) { count, _ in count = 20 }
+        advance(regrowing, frames: 1, at: &time)
+        let regrowthPath = try #require(scrollPath(in: regrowing, forKey: "scroll"))
+        #expect(!regrowing.scrollGlidingPaths.contains(regrowthPath))
+        let stopped = regrowing.scrollOffset(forKey: "scroll").y
+        advance(regrowing, frames: 60, at: &time)
+        #expect(regrowing.scrollOffset(forKey: "scroll").y == stopped)
+    }
+
+    @Test("scroll_growth: a_hand_scroll_mid_shrink_keeps_the_viewport")
+    func handScrollMidShrinkKeepsTheViewport() throws {
+        let (rt, start) = shrinkingList()
+        var now = start
+        let path = try #require(scrollPath(in: rt, forKey: "scroll"))
+        rt.update(at: now) { count, _ in count = 15 }
+        advance(rt, frames: 6, at: &now)
+        try #require(rt.scrollGlidingPaths.contains(path))
+
+        rt.wheel(WheelEvent(dy: 10), at: Vec2(100, 100), now: now)
+        for _ in 0..<120 {
+            advance(rt, frames: 1, at: &now)
+            try #require(!rt.scrollGlidingPaths.contains(path), "the hand keeps the viewport as rows settle")
         }
-        var t = 0.0
-        _ = rt1.frame(at: t)
-        t += 1.0 / 120.0
-        _ = rt1.frame(at: t)
-        rt1.wheel(WheelEvent(dx: 0, dy: 200), at: Vec2(100, 100), now: t)
-        for _ in 0..<30 { t += 1.0 / 120.0; _ = rt1.frame(at: t) }
-        #expect(abs(rt1.scrollOffset(forKey: "scroll").y - 1500.0) < 0.05)
-
-        let sPath1 = try #require(scrollPath(in: rt1, forKey: "scroll"))
-        let nid1 = NodeId.hash("scroll:" + sPath1)
-
-        rt1.update(at: t) { n, _ in n = 15 }
-        for _ in 0..<8 { t += 1.0 / 120.0; _ = rt1.frame(at: t) }
-        let vel = (rt1.scrollStore.velocity(nid1, Props.SCROLL) as Vec2?)?.y ?? 0
-        #expect(abs(vel) > 1.0, "gliding at \(vel)")
-        let prev = rt1.scrollOffset(forKey: "scroll").y
-        t += 1.0 / 120.0
-        _ = rt1.frame(at: t)
-        let speed1 = abs((rt1.scrollOffset(forKey: "scroll").y - prev) * 120.0)
-
-        rt1.update(at: t) { n, _ in n = 10 }
-        let beforeRetarget = rt1.scrollOffset(forKey: "scroll").y
-        t += 1.0 / 120.0
-        _ = rt1.frame(at: t)
-        let afterRetarget = rt1.scrollOffset(forKey: "scroll").y
-        #expect(rt1.scrollStore.target(nid1, Props.SCROLL)?.y == 700.0)
-        let speed2 = abs((afterRetarget - beforeRetarget) * 120.0)
-        #expect(speed2 >= speed1 * 0.5, "keeps speed on retarget: \(speed2) vs \(speed1)")
-        for _ in 0..<120 { t += 1.0 / 120.0; _ = rt1.frame(at: t) }
-        #expect(abs(rt1.scrollOffset(forKey: "scroll").y - 700.0) < 0.01)
-
-        let rt2 = Runtime<Int>(state: 20, viewport: Vec2(200, 300), pixelScale: 2.0, systemDark: true) { n, _ in
-            var stack: El<Int> = col().key("stack").wFull().growth(.default)
-            for i in 0..<n { stack = stack.child(el().key("r\(i)").h(100).wFull()) }
-            return col().key("root").child(col().key("scroll").h(300).wFull().scroll(stickBottom: true).child(stack))
-        }
-        var t2 = 0.0
-        _ = rt2.frame(at: t2)
-        t2 += 1.0 / 120.0; _ = rt2.frame(at: t2)
-        rt2.wheel(WheelEvent(dx: 0, dy: 200), at: Vec2(100, 100), now: t2)
-        for _ in 0..<30 { t2 += 1.0 / 120.0; _ = rt2.frame(at: t2) }
-        rt2.update(at: t2) { n, _ in n = 15 }
-        for _ in 0..<8 { t2 += 1.0 / 120.0; _ = rt2.frame(at: t2) }
-        rt2.update(at: t2) { n, _ in n = 20 }
-        t2 += 1.0 / 120.0
-        _ = rt2.frame(at: t2)
-        let sPath2 = try #require(scrollPath(in: rt2, forKey: "scroll"))
-        #expect(!rt2.scrollGlidingPaths.contains(sPath2))
-        let at = rt2.scrollOffset(forKey: "scroll").y
-        for _ in 0..<60 { t2 += 1.0 / 120.0; _ = rt2.frame(at: t2) }
-        #expect(rt2.scrollOffset(forKey: "scroll").y == at)
     }
 
     @Test("scroll_growth: rows_regrowing_under_a_shrink_glide_stay_near")
