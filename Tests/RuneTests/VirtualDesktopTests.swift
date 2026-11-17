@@ -339,6 +339,50 @@ struct VirtualDesktopTests {
         #expect(desk.pointer == .over(0))
     }
 
+    #if canImport(CoreGraphics) && canImport(ImageIO)
+    @Test("desktop --tree exports the selected runtime while --snap keeps the whole desktop")
+    @MainActor
+    func desktopTreeUsesSelectedWindow() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let backdrop = dir.appendingPathComponent("backdrop.png")
+        let tree = dir.appendingPathComponent("tree.json")
+        let snap = dir.appendingPathComponent("snap.png")
+        try Frame(width: 64, height: 48, rgba: Array(repeating: 255, count: 64 * 48 * 4)).writePNG(to: backdrop)
+
+        let args = ["--desktop", backdrop.path, "--tree", tree.path, "--snap", snap.path, "--scale", "1"]
+        func capture(_ extra: [String]) throws -> HeadlessRunner.Output {
+            let windows = ["editor", "inspector"].map { key in
+                let app = App(title: key, size: Vec2(20, 12), state: 0) { _, _ in
+                    el().key("\(key)-content").wFull().hFull()
+                }
+                return AppWindowSpec.fromApp(key, app).boxed()
+            }
+            return try RuneMultiWindow.runHeadless(windows, args: ToolingArgs.parse(args + extra))
+        }
+
+        var firstSnapshot: Data?
+        for (selector, expectedKey) in [([], "editor"), (["--window", "inspector"], "inspector")] {
+            let output = try capture(selector)
+            let serialized = try Data(contentsOf: tree)
+            #expect(serialized == output.treeJSON)
+            let json = try #require(JSONSerialization.jsonObject(with: serialized) as? [String: Any])
+            let elements = try #require(json["elements"] as? [[String: Any]])
+            #expect(elements.compactMap { $0["key"] as? String } == ["\(expectedKey)-content"])
+            let windows = try #require(json["windows"] as? [[String: Any]])
+            #expect(windows.compactMap { $0["key"] as? String } == ["editor", "inspector"])
+            #expect(output.finalFrame.width == 64 && output.finalFrame.height == 48)
+            let snapshot = try Data(contentsOf: snap)
+            if let firstSnapshot { #expect(snapshot == firstSnapshot) }
+            firstSnapshot = snapshot
+        }
+        #expect(throws: MultiWindowError.unknownWindow(key: "missing", available: ["editor", "inspector"])) {
+            _ = try capture(["--window", "missing"])
+        }
+    }
+    #endif
+
     @Test("virtual_desktop/tests.rs: each window takes its tab opt-in and titlebar inset")
     func eachWindowTabOptInAndTitlebarInset() {
         func runWindow(tabVisitsControls: Bool, borderless: Bool) -> (String?, Float) {
