@@ -6,6 +6,38 @@ import RuneMotion
 @Suite("Runtime Motion Extensions & Selectable Text Hook-Ins (#434)")
 struct RuntimeMotionAndSelectionHooksTests {
 
+    @Test("A wheel moves content on the input frame without interrupting layout motion", arguments: [false, true])
+    func scrollingCarriesAnAnimatingFrame(screenTravel: Bool) throws {
+        func runtime() -> Runtime<Bool> {
+            Runtime(state: false, viewport: Vec2(200, 200), pixelScale: 1) { large, _ in
+                let layout = LayoutAnim(spring: MotionTokens.SETTLE)
+                let marker: El<Bool> = el().key("marker").size(large ? 180 : 100, 40)
+                    .animateLayout(screenTravel ? layout.screen() : layout)
+                return col().key("scroll").size(200, 200).scroll(ScrollSpec(stickBottom: false))
+                    .child(col().wFull().child(marker).child(el().size(200, 600)))
+            }
+        }
+        let scrolled = runtime()
+        let control = runtime()
+        for rt in [scrolled, control] {
+            _ = rt.frame(at: 0)
+            rt.update(at: 0) { large, _ in large = true }
+            _ = rt.frame(at: 0)
+            _ = rt.frame(at: 0.095)
+        }
+        let moving = try #require(control.presented("marker")?.rect)
+        #expect(moving[2] > 100 && moving[2] < 180)
+        scrolled.wheelXY(100, 100, dx: 0, dy: -40, at: 0.1)
+        for t in [0.1, 0.115, 0.15, 0.21, 0.4] {
+            _ = scrolled.frame(at: t)
+            _ = control.frame(at: t)
+            let actual = try #require(scrolled.presented("marker")?.rect)
+            let unscrolled = try #require(control.presented("marker")?.rect)
+            #expect(abs(actual[1] - (unscrolled[1] - 40)) < 0.02)
+            #expect(abs(actual[2] - unscrolled[2]) < 0.02)
+        }
+    }
+
     @Test("Runtime drag, double/triple click, multi-line group drag, and table CopyJoin")
     func runtimeDragMultiClickAndGroupSelection() {
         struct S {
