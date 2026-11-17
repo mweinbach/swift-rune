@@ -92,6 +92,35 @@ struct ElSlice1And3CloseoutTests {
         #expect(on.instances.contains { $0.params.y == KIND_GLYPH })
     }
 
+    @Test("Overscan culls guide and icon draws while retaining geometry, overflowing children, and input")
+    func overscanBoxAndIconPaint() throws {
+        struct State { var moved = false; var taps = 0 }
+        let svg = SVGIcon(viewBox: 10, paths: ["M0 0 H10 V10 H0 Z"])
+        let rt = Runtime(state: State(), viewport: Vec2(120, 100), pixelScale: 2) { state, _ -> El<State> in
+            let rowY: Float = state.moved ? 15 : 140
+            let guide: El<State> = el().key("guide").pin(top: 0, left: 0).size(1, 20).bg(.white).mark(2)
+            let glyph: El<State> = icon(svg, size: 16).key("icon").pin(top: 2, left: 4).mark(3)
+            let protruding: El<State> = el().key("overhang").pin(top: -100, left: 1).size(12, 12).bg(.white).mark(4)
+            let row: El<State> = el().key("row").pin(top: rowY, left: 0).size(100, 24)
+                .bg(.black).mark(1).onClick { (state: inout State) in state.taps += 1 }.children([guide, glyph, protruding])
+            let oversize: El<State> = icon(svg, size: 64).key("oversize").pin(top: 107, left: 54).size(8, 8).mark(5)
+            return el().size(120, 100).clip(true).children([row, oversize])
+        }
+        let off = rt.renderFrame(at: 0)
+        #expect(rt.element(byKey: "guide")?.rect == [0, 140, 1, 20])
+        #expect(rt.element(byKey: "icon")?.visible[3] == 0)
+        #expect(!off.marks.contains(1) && !off.marks.contains(2) && !off.marks.contains(3))
+        #expect(off.marks.contains(4) && off.marks.contains(5))
+        rt.update(at: 0.1) { state, tx in state.moved = true; tx.instant() }
+        let on = rt.renderFrame(at: 0.1)
+        #expect(on.marks.contains(1) && on.marks.contains(2) && on.marks.contains(3))
+        #expect(!on.marks.contains(4) && on.marks.contains(5))
+        #expect(rt.element(byKey: "icon")?.visible[3] == 16)
+        rt.pointerDown(at: Vec2(45, 25), at: 0.2)
+        rt.pointerUp(at: Vec2(45, 25), at: 0.21)
+        #expect(rt.state.taps == 1)
+    }
+
     @Test("Offscreen clipped cells keep element geometry without submitting invisible draws")
     func clippedCellsKeepGeometry() {
         let rt = Runtime(state: false, viewport: Vec2(100, 100), pixelScale: 1) { move, _ -> El<Bool> in

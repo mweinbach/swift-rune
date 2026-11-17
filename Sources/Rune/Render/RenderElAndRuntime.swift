@@ -1210,7 +1210,20 @@ extension Runtime {
             elideCache: (sig: UInt64, relBounds: SIMD4<Float>, k: Float)?
         )
 
+        #if DEBUG
         var pendingTextPaint: (() -> Void)?
+        #endif
+
+        @inline(__always)
+        func emitTextPaint(_ paint: @escaping () -> Void) {
+            #if DEBUG
+            // Unoptimized geometry preparation reserves a large stack frame. Release
+            // that frame before entering the font rasterizer on a Swift worker.
+            pendingTextPaint = paint
+            #else
+            paint()
+            #endif
+        }
 
         @inline(never)
         func paintNodeHeader(
@@ -1656,6 +1669,23 @@ extension Runtime {
             let clipMisses = clip.z < clip.x - 1 || clip.w < clip.y - 1
                 || (parentClip.viewportApplies && (clip.z < -1 || clip.w < -1
                     || clip.x > Float(widthPx) + 1 || clip.y > Float(heightPx) + 1))
+            let canCullToViewport = parentClip.viewportApplies && !parentInCache && !parentIsRotated
+                && el.rotate == 0 && effBlur == 0 && !el.isolatedLayer && effectSpec == nil
+            // Leaves with ordinary box ink or an icon can reject distant overscan before
+            // snapping, resolving materials, or touching an atlas. Keep geometry above.
+            var clippedBox = false
+            if canCullToViewport, topology.children(of: node).isEmpty,
+               effRect.bottom * scale < max(0, clip.y) - 2 || effRect.top * scale > min(Float(heightPx), clip.w) + 2 {
+                let iconHeight = el.iconPayload.map { max(1, ($0.1 * scale).rounded()) } ?? 0
+                let overhang = max(0, (iconHeight - effRect.height * scale) * 0.5)
+                clippedBox = (effRect.bottom * scale < max(0, clip.y) - overhang - 2
+                    || effRect.top * scale > min(Float(heightPx), clip.w) + overhang + 2)
+                    && el.plainText == nil && el.richSpans == nil && el.advanceInRun == nil
+                    && el.terminalGridPayload == nil && el.shapes.isEmpty && shadows.isEmpty
+                    && (el.runtimeExtras.isEmpty || (el.runtimeExtras.count == 1 && el.elMark != nil))
+                    && el.backdropBlur == 0 && el.elOutline == nil
+                    && !focused && !el.focusable && el.focusWithinRing == nil && el.anchor == nil
+            }
             let clippedSingleLine: Bool
             if !clipMisses, parentClip.viewportApplies, !parentInCache, !parentIsRotated, sc.y > 0,
                effRect.bottom * scale < max(0, clip.y) || effRect.top * scale > min(Float(heightPx), clip.w),
@@ -1677,7 +1707,7 @@ extension Runtime {
             } else {
                 clippedSingleLine = false
             }
-            if clipMisses || clippedSingleLine, topology.children(of: node).isEmpty, !parentInCache, !parentIsRotated,
+            if clipMisses || clippedSingleLine || clippedBox, topology.children(of: node).isEmpty, !parentInCache, !parentIsRotated,
                el.surfacePayload == nil, el.pixelsPayload == nil, el.role != .textInput,
                el.handlers.editLens == nil, !hasActiveTextLinks(el), !el.isSecure,
                el.runtimeExtras[RenderExtrasKey.cacheEnabled] == nil, activeTextFlights.isEmpty {
@@ -2302,10 +2332,17 @@ extension Runtime {
             // 4. Background fill, multi-stop gradients, and borders
             let bwPx = borderGradSpec.map { snapBorderWidthPx($0.width, scale: scale) }
                 ?? snapBorderWidthPx(el.borderWidth, scale: scale)
-            let hasSolidBg = paintBg.a > 0.001
             // The fragment shader supplies the half-pixel antialiasing floor. Encoding
             // that floor here enlarges the vertex quad and invalidates neighboring tiles.
             let softEdge = max(0, (clipSpec?.soft ?? 0) * scale)
+            // A container's children may legitimately extend outside its own box. Cull
+            // only its fill here and retain all child transforms, layers, hit and clip state.
+            let hasSolidBg = paintBg.a > 0.001 && (!canCullToViewport || needsLayer
+                || !outerLayerStarts.isEmpty || cacheEligible
+                || (boundsClipPx.w >= max(0, activeClip.y) - 2 - 3 * softEdge
+                    && boundsClipPx.y <= min(Float(heightPx), activeClip.w) + 2 + 3 * softEdge
+                    && boundsClipPx.z >= max(0, activeClip.x) - 2 - 3 * softEdge
+                    && boundsClipPx.x <= min(Float(widthPx), activeClip.z) + 2 + 3 * softEdge))
             // Dimmed, an opaque fill and its linear gradient draw as one opaque gradient (`paint/build.rs:926`).
             let flatDimLinearGradient: Bool = {
                 guard hasSolidBg && paintBg.a >= 0.999 && localOpacity < 0.999 else { return false }
@@ -3392,16 +3429,14 @@ extension Runtime {
                 }
             }
 
-            // Enter the shaper and rasterizer after the geometry preparation frame has
-            // unwound. Native callbacks and Swift task workers can run on small stacks.
             if let editLens = el.handlers.editLens {
                 let value = editLens.get(state)
-                pendingTextPaint = {
+                emitTextPaint {
                     paintField(value)
                     finishPaint()
                 }
             } else if (el.plainText?.isEmpty == false) || (el.richSpans?.isEmpty == false) || el.advanceInRun != nil {
-                pendingTextPaint = {
+                emitTextPaint {
                     paintLabel()
                     finishPaint()
                 }
@@ -3639,10 +3674,12 @@ extension Runtime {
                         parentIsDissolve: context.dissolve, parentScaleMotion: context.scaleMotion,
                         parentElementIndex: context.element, parentInCache: context.inCache, parentIsRotated: context.rotated
                     )
+                    #if DEBUG
                     if let paint = pendingTextPaint {
                         pendingTextPaint = nil
                         paint()
                     }
+                    #endif
                     let children = topology.children(of: node)
                     if (h.continueSubtree || publishHitGeometry), let first = children.first {
                         let turn = (presentedById[node.nodeId]?.rotate ?? node.el.rotate) + (loopSamples[node.nodeId]?.rotation ?? 0)

@@ -632,6 +632,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     override func viewWillStartLiveResize() {
         super.viewWillStartLiveResize()
+        displayLinkDriver.cancelPreparedFrame()
         windowFrameDriver.userStartedResizing()
         materialHost?.setLiveResizing(true, mode: MaterialMode.launchMode)
         RuneMaterialHost.syncWindowFrame(moving: false, live: true, host: materialHost, layer: metalLayer)
@@ -645,8 +646,12 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     private func syncGeometryAndRender() {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        if metalLayer.contentsScale != scale || metalLayer.drawableSize != size {
+            displayLinkDriver.cancelPreparedFrame()
+        }
         metalLayer.contentsScale = scale
-        metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        metalLayer.drawableSize = size
         let newVP = Vec2(Float(max(1, bounds.width)), Float(max(1, bounds.height)))
         if windowFrameDriver.isMoving || windowFrameDriver.takeJumpIfMatching(viewport: newVP) {
             runtime.stepViewport(newVP, pixelScale: Float(scale))
@@ -800,11 +805,13 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         if movingFrame {
             RuneMaterialHost.syncWindowFrame(moving: true, live: inLiveResize, host: materialHost, layer: metalLayer)
         }
-        defer {
+        var finishingAfterPreparation = false
+        func finishWindowMotion() {
             if movingFrame && !windowFrameDriver.isMoving {
                 RuneMaterialHost.syncWindowFrame(moving: false, live: inLiveResize, host: materialHost, layer: metalLayer)
             }
         }
+        defer { if !finishingAfterPreparation { finishWindowMotion() } }
         if let w = window {
             let scale = Float(w.backingScaleFactor)
             _ = windowFrameDriver.step(window: w, now: t, scale: scale, resting: runtime.windowResting) { [weak self] vp, sc in
@@ -890,64 +897,70 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         }
         settledFrame = nil
 
-        var tracedDrawable: UInt64?
-        let acquiredDrawable = metalLayer.nextDrawable()
-        let drawCount = acquiredDrawable.flatMap { drawable in
-            tracedDrawable = nativeTrace?.track(drawable)
-            return RuneMaterialHost.present(host: &materialHost, draws: renderFrame.materials, in: self, layer: metalLayer,
-                                     scale: metalLayer.contentsScale, mode: materialMode) { synced in
-                renderer.present(frame: renderFrame, drawable: drawable, compositor: compositor,
-                                 runtime: runtime, dt: dt, updateMilliseconds: updateMs, synchronized: synced)
-            }
-        }
-        if let drawCount {
-            let submitted = CACurrentMediaTime()
-            runtime.interactionSubmitted(at: submitted, target: targetTimestamp)
-            settledFrame = restingFrame
-            nativeTrace?.submitted(runtime, at: submitted, started: updateStart, target: targetTimestamp,
-                                   sequence: tracedDrawable, continuous: continuous)
-            displayLinkDriver.submitted(at: submitted)
-            launchDrawables.submitted(to: metalLayer, visible: window?.isVisible == true, idle: !continuous, at: submitted)
-            windowRest.step(.drew(now: ProcessInfo.processInfo.systemUptime, lowMemory: false))
-            _ = surfaceMeter?.presented()
-            if textIdleObserver == nil { textIdleObserver = AppleTextIdleObserver(runtime: runtime) }
-            if !didFireReady {
-                didFireReady = true
-                ReadySignal.ready()
-                runOnReadyOnce()
-            }
-            reports?.presented(renderFrame, at: t, started: updateStart, updateMs: updateMs, drawCount: drawCount,
-                               committed: runtime.viewCommitCount != commitsBefore, runtime: runtime, compositor: compositor,
-                               target: targetTimestamp, refreshHz: displayLinkDriver.refreshHz, submitted: submitted)
-            if nativeTrace?.reachedLimit == true {
-                stopTimer()
-                // Leave the view on screen until Metal has reported its final drawables.
-                DispatchQueue.main.async {
-                    RuneStartup.started { try self.nativeTrace?.finish() }
-                    NSApplication.shared.terminate(nil)
+        let committed = runtime.viewCommitCount != commitsBefore
+        finishingAfterPreparation = true
+        displayLinkDriver.finishPreparation { [self] in
+            defer { finishWindowMotion() }
+            guard !paced || (window?.isVisible == true && coverDriver.canDraw) else { return }
+            var tracedDrawable: UInt64?
+            let acquiredDrawable = metalLayer.nextDrawable()
+            let drawCount = acquiredDrawable.flatMap { drawable in
+                tracedDrawable = nativeTrace?.track(drawable)
+                return RuneMaterialHost.present(host: &materialHost, draws: renderFrame.materials, in: self, layer: metalLayer,
+                                         scale: metalLayer.contentsScale, mode: materialMode) { synced in
+                    renderer.present(frame: renderFrame, drawable: drawable, compositor: compositor,
+                                     runtime: runtime, dt: dt, updateMilliseconds: updateMs, synchronized: synced)
                 }
-                return
             }
-        } else {
-            if acquiredDrawable == nil { surfaceMeter?.failed(.timeout) }
-            reports?.skipped()
-        }
-        pumpPlatformActions()
-        // The accessibility stamp: a commit, held words or an attaching reader, or words said since
-        // the last update (`announced`), which a live-only `Tx::announce` brings without a commit.
-        syncPlatformBridges(
-            treeCommitted: !didInitialA11ySync || a11yFollowUp || runtime.viewCommitCount != commitsBefore
-                || accessibilityHost.announcementChanged(runtime.a11yAnnouncement)
-        )
+            if let drawCount {
+                let submitted = CACurrentMediaTime()
+                runtime.interactionSubmitted(at: submitted, target: targetTimestamp)
+                settledFrame = restingFrame
+                nativeTrace?.submitted(runtime, at: submitted, started: updateStart, target: targetTimestamp,
+                                       sequence: tracedDrawable, continuous: continuous)
+                displayLinkDriver.submitted(at: submitted)
+                launchDrawables.submitted(to: metalLayer, visible: window?.isVisible == true, idle: !continuous, at: submitted)
+                windowRest.step(.drew(now: ProcessInfo.processInfo.systemUptime, lowMemory: false))
+                _ = surfaceMeter?.presented()
+                if textIdleObserver == nil { textIdleObserver = AppleTextIdleObserver(runtime: runtime) }
+                if !didFireReady {
+                    didFireReady = true
+                    ReadySignal.ready()
+                    runOnReadyOnce()
+                }
+                reports?.presented(renderFrame, at: t, started: updateStart, updateMs: updateMs, drawCount: drawCount,
+                                   committed: committed, runtime: runtime, compositor: compositor,
+                                   target: targetTimestamp, refreshHz: displayLinkDriver.refreshHz, submitted: submitted)
+                if nativeTrace?.reachedLimit == true {
+                    stopTimer()
+                    // Leave the view on screen until Metal has reported its final drawables.
+                    DispatchQueue.main.async {
+                        RuneStartup.started { try self.nativeTrace?.finish() }
+                        NSApplication.shared.terminate(nil)
+                    }
+                    return
+                }
+            } else {
+                if acquiredDrawable == nil { surfaceMeter?.failed(.timeout) }
+                reports?.skipped()
+            }
+            pumpPlatformActions()
+            // The accessibility stamp: a commit, held words or an attaching reader, or words said since
+            // the last update (`announced`), which a live-only `Tx::announce` brings without a commit.
+            syncPlatformBridges(
+                treeCommitted: !didInitialA11ySync || a11yFollowUp || runtime.viewCommitCount != commitsBefore
+                    || accessibilityHost.announcementChanged(runtime.a11yAnnouncement)
+            )
 
-        // Frame observers and platform callbacks can change the runtime after the draw.
-        if continuous || needsFrame() {
-            displayLinkDriver.start(in: self)
-        } else {
-            sleepUntilRuntimeWake()
+            // Frame observers and platform callbacks can change the runtime after the draw.
+            if continuous || needsFrame() {
+                displayLinkDriver.start(in: self)
+            } else {
+                sleepUntilRuntimeWake()
+            }
+            surfaceMeter?.setPacing(displayLinkDriver.pacing)
+            if let devStatsReceiver, let surfaceMeter { devStatsReceiver(surfaceMeter.currentStats()) }
         }
-        surfaceMeter?.setPacing(displayLinkDriver.pacing)
-        if let devStatsReceiver, let surfaceMeter { devStatsReceiver(surfaceMeter.currentStats()) }
     }
 
     internal func syncPlatformBridges(treeCommitted: Bool) {
@@ -1099,7 +1112,9 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     /// when it is that kind), inside the scope holding when it arrived (`input::time::arrived`).
     @discardableResult
     private func arrived<R>(_ kind: HostInputKind, _ event: NSEvent?, _ body: () -> R) -> R {
-        runtime.hostInput(kind, eventTimestamp: MacOSInputEvents.timestamp(kind, event), body)
+        // A synchronous input handler can change the scene or its interaction report before submission.
+        displayLinkDriver.cancelPreparedFrame()
+        return runtime.hostInput(kind, eventTimestamp: MacOSInputEvents.timestamp(kind, event), body)
     }
 
     override func mouseMoved(with event: NSEvent) {

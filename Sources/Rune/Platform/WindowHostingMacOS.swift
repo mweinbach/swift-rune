@@ -876,6 +876,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
 
     override func viewWillStartLiveResize() {
         super.viewWillStartLiveResize()
+        displayLinkDriver.cancelPreparedFrame()
         windowFrameDriver.userStartedResizing()
         materialHost?.setLiveResizing(true, mode: MaterialMode.launchMode)
         RuneMaterialHost.syncWindowFrame(moving: false, live: true, host: materialHost, layer: metalLayer)
@@ -893,8 +894,12 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
 
     func syncGeometryAndRender() {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        if metalLayer.contentsScale != scale || metalLayer.drawableSize != size {
+            displayLinkDriver.cancelPreparedFrame()
+        }
         metalLayer.contentsScale = scale
-        metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        metalLayer.drawableSize = size
         let newVP = Vec2(Float(max(1, bounds.width)), Float(max(1, bounds.height)))
         if windowFrameDriver.isMoving || windowFrameDriver.takeJumpIfMatching(viewport: newVP) {
             entry.stepViewport(runtimeObj: runtime, viewport: newVP, pixelScale: Float(scale))
@@ -946,11 +951,13 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         if movingFrame {
             RuneMaterialHost.syncWindowFrame(moving: true, live: inLiveResize, host: materialHost, layer: metalLayer)
         }
-        defer {
+        var finishingAfterPreparation = false
+        func finishWindowMotion() {
             if movingFrame && !windowFrameDriver.isMoving {
                 RuneMaterialHost.syncWindowFrame(moving: false, live: inLiveResize, host: materialHost, layer: metalLayer)
             }
         }
+        defer { if !finishingAfterPreparation { finishWindowMotion() } }
         if let w = window {
             let scale = Float(w.backingScaleFactor)
             _ = windowFrameDriver.step(window: w, now: t, scale: scale, resting: isWindowResting) { [weak self] vp, sc in
@@ -1021,69 +1028,75 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             return
         }
         settledFrame = nil
-        var sequence: UInt64?
-        let acquiredDrawable = metalLayer.nextDrawable()
-        let submitted = acquiredDrawable.flatMap { drawable in
-            sequence = nativeTrace?.track(drawable)
-            return RuneMaterialHost.present(host: &materialHost, draws: renderFrame.materials, in: self, layer: metalLayer,
-                                     scale: metalLayer.contentsScale, mode: materialMode) { synced in
-                entry.present(renderFrame, drawable: drawable, renderer: renderer, runtimeObj: runtime,
-                              dt: dt, started: started, updateMs: updateMs, synchronized: synced,
-                              committed: entry.viewCommitCount(runtimeObj: runtime) != commitsBefore,
-                              target: targetTimestamp, refreshHz: displayLinkDriver.refreshHz)
-            }
-        }
-        if let submitted {
-            settledFrame = restingFrame
-            if let tracedRuntime {
-                nativeTrace?.submitted(tracedRuntime, at: submitted, started: started, target: targetTimestamp,
-                                       sequence: sequence, continuous: isAnimating)
-            }
-            surfaceMeter.presented()
-            displayLinkDriver.submitted(at: submitted)
-            launchDrawables.submitted(to: metalLayer, visible: window?.isVisible == true, idle: !isAnimating, at: submitted)
-            drawableCounter &+= 1
-            if textIdleObserver == nil { textIdleObserver = entry.makeTextIdleObserver(runtimeObj: runtime) }
-            shadowResample.presented(drawableCounter)
-            slot?.stepRest(.drew(now: ProcessInfo.processInfo.systemUptime, lowMemory: false))
-            if shadowResample.turn(onScreen: drawableCounter), entry.options.transparent, let win = window, win.hasShadow {
-                win.invalidateShadow()
-            }
-            if !didSignalReady {
-                didSignalReady = true
-                ReadySignal.ready()
-                entry.handle.setReady(true)
-                runOnReadyOnce()
-            }
-            if nativeTrace?.reachedLimit == true {
-                stopTimer()
-                DispatchQueue.main.async {
-                    RuneStartup.started { try self.finishTrace() }
-                    NSApplication.shared.terminate(nil)
+        let committed = entry.viewCommitCount(runtimeObj: runtime) != commitsBefore
+        finishingAfterPreparation = true
+        displayLinkDriver.finishPreparation { [self] in
+            defer { finishWindowMotion() }
+            guard slot?.isTornDown != true, !paced || (window?.isVisible == true && coverDriver.canDraw) else { return }
+            var sequence: UInt64?
+            let acquiredDrawable = metalLayer.nextDrawable()
+            let submitted = acquiredDrawable.flatMap { drawable in
+                sequence = nativeTrace?.track(drawable)
+                return RuneMaterialHost.present(host: &materialHost, draws: renderFrame.materials, in: self, layer: metalLayer,
+                                         scale: metalLayer.contentsScale, mode: materialMode) { synced in
+                    entry.present(renderFrame, drawable: drawable, renderer: renderer, runtimeObj: runtime,
+                                  dt: dt, started: started, updateMs: updateMs, synchronized: synced,
+                                  committed: committed,
+                                  target: targetTimestamp, refreshHz: displayLinkDriver.refreshHz)
                 }
-                return
             }
-        } else if acquiredDrawable == nil {
-            surfaceMeter.failed(.timeout)
-        }
-        slot?.host?.drainOpenedWindows()
-        pumpPlatformActions()
-        // The accessibility stamp: a commit, held words or an attaching reader, or words said since
-        // the last update (`announced`), which a live-only `Tx::announce` brings without a commit.
-        syncPlatformBridges(
-            treeCommitted: !didInitialA11ySync || a11yFollowUp
-                || entry.viewCommitCount(runtimeObj: runtime) != commitsBefore
-                || accessibilityHost.announcementChanged(entry.accessibilityAnnouncement(runtimeObj: runtime))
-        )
+            if let submitted {
+                settledFrame = restingFrame
+                if let tracedRuntime {
+                    nativeTrace?.submitted(tracedRuntime, at: submitted, started: started, target: targetTimestamp,
+                                           sequence: sequence, continuous: isAnimating)
+                }
+                surfaceMeter.presented()
+                displayLinkDriver.submitted(at: submitted)
+                launchDrawables.submitted(to: metalLayer, visible: window?.isVisible == true, idle: !isAnimating, at: submitted)
+                drawableCounter &+= 1
+                if textIdleObserver == nil { textIdleObserver = entry.makeTextIdleObserver(runtimeObj: runtime) }
+                shadowResample.presented(drawableCounter)
+                slot?.stepRest(.drew(now: ProcessInfo.processInfo.systemUptime, lowMemory: false))
+                if shadowResample.turn(onScreen: drawableCounter), entry.options.transparent, let win = window, win.hasShadow {
+                    win.invalidateShadow()
+                }
+                if !didSignalReady {
+                    didSignalReady = true
+                    ReadySignal.ready()
+                    entry.handle.setReady(true)
+                    runOnReadyOnce()
+                }
+                if nativeTrace?.reachedLimit == true {
+                    stopTimer()
+                    DispatchQueue.main.async {
+                        RuneStartup.started { try self.finishTrace() }
+                        NSApplication.shared.terminate(nil)
+                    }
+                    return
+                }
+            } else if acquiredDrawable == nil {
+                surfaceMeter.failed(.timeout)
+            }
+            slot?.host?.drainOpenedWindows()
+            pumpPlatformActions()
+            // The accessibility stamp: a commit, held words or an attaching reader, or words said since
+            // the last update (`announced`), which a live-only `Tx::announce` brings without a commit.
+            syncPlatformBridges(
+                treeCommitted: !didInitialA11ySync || a11yFollowUp
+                    || entry.viewCommitCount(runtimeObj: runtime) != commitsBefore
+                    || accessibilityHost.announcementChanged(entry.accessibilityAnnouncement(runtimeObj: runtime))
+            )
 
 
-        if isAnimating || needsFrame() {
-            displayLinkDriver.start(in: self)
-        } else {
-            sleepUntilRuntimeWake()
+            if isAnimating || needsFrame() {
+                displayLinkDriver.start(in: self)
+            } else {
+                sleepUntilRuntimeWake()
+            }
+            surfaceMeter.setPacing(displayLinkDriver.pacing)
+            entry.surfaceStatsReceiver?(surfaceMeter.currentStats())
         }
-        surfaceMeter.setPacing(displayLinkDriver.pacing)
-        entry.surfaceStatsReceiver?(surfaceMeter.currentStats())
     }
 
     /// The window was covered, uncovered, minimised or restored (`Host::set_cover`). Returns what
@@ -1248,6 +1261,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     /// Dispatches `body` as the platform input `event` of `kind` (else AppKit's current event
     /// when it is that kind), inside the scope holding when it arrived (`input::time::arrived`).
     private func arrived(_ kind: HostInputKind, _ event: NSEvent?, _ body: () -> Void) {
+        displayLinkDriver.cancelPreparedFrame()
         entry.hostInput(runtimeObj: runtime, kind: kind, eventTimestamp: MacOSInputEvents.timestamp(kind, event), body)
     }
 

@@ -206,7 +206,9 @@ extension El {
         c.textStyle.elide = elide
         c.textStyle.maxLines = 0
         c.isTruncateFadeEnabled = false
-        return c.shrink(1).minW(0)
+        c.layout.flexShrink = 1
+        c.layout.minWidth = .points(0)
+        return c
     }
 
     /// Truncates an overflowing line with an ellipsis at its end (`El::truncate`).
@@ -246,7 +248,9 @@ extension El {
         c.textStyle.maxLines = 0
         c.isTruncateFadeEnabled = true
         c.truncateFadeEm = max(0, em)
-        return c.shrink(1).minW(0)
+        c.layout.flexShrink = 1
+        c.layout.minWidth = .points(0)
+        return c
     }
 
     /// Shapes this text cell as the grapheme slice at UTF-8 byte `at` within `run`, keeping run kerning (`El::advance_in`).

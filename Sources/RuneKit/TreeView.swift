@@ -228,10 +228,17 @@ public struct TreeRowItem<State> {
 
     /// Builds the row element without interaction handlers (reusable by `SidebarRow` etc.).
     public func build(kit k: Kit, row r: TreeRow, style: TreeStyle) -> El<State> {
-        let c = k.c
-        let pad = style.padding
-        let chevronW: Float = 16.0
+        let chevronW: Float = 16
+        var element = baseRow(kit: k, row: r, style: style)
+        appendGuides(to: &element, row: r, style: style, chevronW: chevronW)
+        appendIcons(to: &element, kit: k, row: r, style: style, chevronW: chevronW)
+        element.children.append(rowLabel(kit: k, row: r, style: style))
+        appendAccessories(to: &element, kit: k)
+        element.children.append(contentsOf: trailingElements)
+        return element
+    }
 
+    private func baseRow(kit k: Kit, row r: TreeRow, style: TreeStyle) -> El<State> {
         var e: El<State> = row()
             .role(.treeItem)
             .label(labelText)
@@ -240,8 +247,8 @@ public struct TreeRowItem<State> {
             .wFull()
             .h(style.rowHeight)
             .shrink(0.0)
-            .pl(pad + Float(r.depth) * style.indent)
-            .pr(pad)
+            .pl(style.padding + Float(r.depth) * style.indent)
+            .pr(style.padding)
             .gap(style.gap)
             .itemsCenter()
             .rounded(style.radius)
@@ -264,12 +271,16 @@ public struct TreeRowItem<State> {
 
         e = r.selected ? e.bg(style.selected) : e.hover(style.hover)
         if r.cursor && r.multi {
-            e = e.outline(width: 1.0, offset: -1.0, color: c.borderFocus)
+            e = e.outline(width: 1.0, offset: -1.0, color: k.c.borderFocus)
         }
 
+        return e
+    }
+
+    private func appendGuides(to e: inout El<State>, row r: TreeRow, style: TreeStyle, chevronW: Float) {
         if style.guides {
             for level in 0..<r.depth {
-                let x = pad + Float(level) * style.indent + chevronW * 0.5 - 0.5
+                let x = style.padding + Float(level) * style.indent + chevronW * 0.5 - 0.5
                 var guide: El<State> = el()
                     .key("guide\(level)")
                     .pin(top: 0.0, bottom: 0.0, left: x)
@@ -277,10 +288,12 @@ public struct TreeRowItem<State> {
                     .bg(style.guide)
                     .a11yHidden()
                 if let opacity = style.guidesHover { guide = guide.groupOpacity(0, opacity) }
-                e = e.child(guide)
+                e.children.append(guide)
             }
         }
+    }
 
+    private func appendIcons(to e: inout El<State>, kit k: Kit, row r: TreeRow, style: TreeStyle, chevronW: Float) {
         let isFolder = r.expanded != nil
         let iconInLane = style.chevronOnly && !isFolder && iconSVG != nil
         let chevronBox: El<State> = el().key("chevron").size(chevronW, chevronW).itemsCenter().justifyCenter().a11yHidden()
@@ -293,20 +306,23 @@ public struct TreeRowItem<State> {
                 .mirrorInRtl()
                 .animate(k.motion.control)
                 .offset(0.0, style.chevronNudge)
-            e = e.child(chevronBox.child(chevronGlyph))
+            e.children.append(chevronBox.child(chevronGlyph))
         } else if !iconInLane {
-            e = e.child(chevronBox)
+            e.children.append(chevronBox)
         }
 
         if let svg = iconSVG, !(style.chevronOnly && isFolder) {
-            e = e.child(
+            e.children.append(
                 Rune.icon(svg, size: 16.0)
                     .key("icon")
-                    .color(iconColorValue ?? c.iconMuted)
+                    .color(iconColorValue ?? k.c.iconMuted)
                     .a11yHidden()
             )
         }
+    }
 
+    private func rowLabel(kit k: Kit, row r: TreeRow, style: TreeStyle) -> El<State> {
+        let c = k.c
         let labelColor = labelColorValue ?? (r.selected ? style.labelSelected : style.labelRest)
         let labelFont = style.labelFont
         let labelEl: El<State>
@@ -345,8 +361,11 @@ public struct TreeRowItem<State> {
         } else {
             label = label.truncate()
         }
-        e = e.child(label.helpWhenTruncated(labelText).a11yHidden())
+        return label.helpWhenTruncated(labelText).a11yHidden()
+    }
 
+    private func appendAccessories(to e: inout El<State>, kit k: Kit) {
+        let c = k.c
         if let (add, del) = changesPair {
             var counts: El<State> = row().key("changes").gap(4.0).itemsCenter().a11yHidden()
             let f = k.ty.textXsmall.features("'tnum' 1")
@@ -356,19 +375,15 @@ public struct TreeRowItem<State> {
             if del > 0 {
                 counts = counts.child(text("\u{2212}\(del)").key("removed").font(f).color(c.danger.icon))
             }
-            e = e.child(counts)
+            e.children.append(counts)
         }
 
         if let b = badgeText {
-            e = e.child(text(b).key("badge").font(k.ty.textXsmallMedium).color(c.textMuted).a11yHidden())
+            e.children.append(text(b).key("badge").font(k.ty.textXsmallMedium).color(c.textMuted).a11yHidden())
         }
         if let d = dotColor {
-            e = e.child(el().key("dot").size(6.0, 6.0).rounded(3.0).bg(d).ml(5.0).mr(5.0).a11yHidden())
+            e.children.append(el().key("dot").size(6.0, 6.0).rounded(3.0).bg(d).ml(5.0).mr(5.0).a11yHidden())
         }
-        for t in trailingElements {
-            e = e.child(t)
-        }
-        return e
     }
 
     private static func findCI(_ s: String, _ q: String) -> Range<String.Index>? {

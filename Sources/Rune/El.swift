@@ -1494,6 +1494,7 @@ final class ElColdData<State> {
 
 final class ElHandlersBox<State> {
     var value: ElementHandlers<State>
+    var hasEditLens: Bool { value.editLens != nil }
     init(_ value: ElementHandlers<State>) {
         self.value = value
     }
@@ -1799,7 +1800,7 @@ public struct El<State> {
             }
         }
     }
-    internal var hasEditLens: Bool { _cold?.data.handlersBox?.value.editLens != nil }
+    internal var hasEditLens: Bool { _cold?.data.handlersBox?.hasEditLens ?? false }
     internal var hasAuthoredHandlers: Bool { _cold?.data.handlersBox != nil }
     internal var runtimeExtras: [String: Any] {
         get { _cold?.data.runtimeExtras ?? [:] }
