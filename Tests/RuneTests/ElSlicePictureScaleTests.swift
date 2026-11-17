@@ -502,6 +502,10 @@ struct ElSlicePictureScaleTests {
             _ = rt.frame(at: Double(step) / 120.0)
         }
         #expect(rt.commitCount == commits, "unchanged image costs no commits")
+        // A stream can publish a different resolution at the same aspect.
+        px.set(width: 4, height: 8, rgba: [UInt8](repeating: 255, count: 4 * 4 * 8))
+        _ = rt.frame(at: 7.0 / 120.0)
+        #expect(rt.commitCount == commits)
 
         // Decode landing alongside explicit invalidate on same frame lands snapped at its new size.
         let px2 = Pixels()
@@ -513,6 +517,8 @@ struct ElSlicePictureScaleTests {
         let wEl = rt2.elements().first(where: { $0.key == "w" })!
         #expect(wEl.rect[3] == 60.0 && wEl.target[3] == 60.0)
         #expect(!wEl.moving)
+        let box = rt2.elements().first(where: { $0.key == "box" })!
+        #expect(box.moving && box.rect[1] < box.target[1])
     }
 
     @Test("Picture set mid-frame keeps livePending armed and wakes another frame to size it")

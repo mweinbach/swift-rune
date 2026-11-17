@@ -198,8 +198,8 @@ struct ElKitcSecureTextParityTests {
         rtLong.update { s, _ in s.secret.isRevealed = true }
         _ = rtLong.frame(at: 2.0 / 60.0)
         let elRev = rtLong.elements().first(where: { $0.key == "secret" })!
-        #expect(elRev.rect[3] > elShort.rect[3] * 10, "revealed long lines must wrap anywhere across many lines")
-        #expect(elRev.rect[2] <= 180.5)
+        #expect(elRev.target[3] > elShort.target[3] * 10, "revealed long lines must wrap anywhere across many lines")
+        #expect(elRev.target[2] <= 180.5)
 
         // Exiting while revealed conceals back to the fixed mask on the first exit frame.
         rtLong.update { s, _ in s.open = false }
