@@ -1259,14 +1259,9 @@ public struct TabStrip<State> {
                     tx.liveOnly()
                     return
                 }
-                if dragKeyPath == nil && selectEarly && isSelected {
-                    tx.liveOnly()
-                    return
-                }
                 onSelectFn(&s, idCopy, &tx)
                 tx.scrollIntoViewIn(scroll, key)
             }
-            if dragKeyPath == nil && selectEarly { tab = tab.pressOnDown() }
         }
         if let onDoubleClickFn {
             tab = tab.onDoubleClick { s, tx in
