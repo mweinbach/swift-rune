@@ -70,7 +70,7 @@ public struct Press: @unchecked Sendable, Equatable {
         lhs.key == rhs.key && lhs.shift == rhs.shift && lhs.alt == rhs.alt && lhs.mod == rhs.mod
     }
 
-    /// Attaches click and pointer-up handlers delivering `kind = "press"`, modifiers, and extra `fields`.
+    /// Delivers a press event with modifiers and extra fields. Mouse menu triggers fire on button down.
     public func attach<State>(_ el: El<State>, fields: [(String, LuauData)] = [], menuTrigger: Bool = false) -> El<State> {
         guard let handler else { return el }
         let vmID = handler.vmID
@@ -214,7 +214,7 @@ public final class NodeArgs: @unchecked Sendable {
         onPressWith(type, handler: handler, key: rawKey())
     }
 
-    /// Attaches a named press handler prop to `el` if present, without marking `"key"` as read.
+    /// Attaches the named callback and honors the host node’s `menuTrigger` prop.
     public func onPress<State>(_ el: El<State>, _ name: String) -> El<State> {
         guard let h = handler(name) else { return el }
         return Press(handler: h, key: rawKey()).attach(el, menuTrigger: flag("menuTrigger"))

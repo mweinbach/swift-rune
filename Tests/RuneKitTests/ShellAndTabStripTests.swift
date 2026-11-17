@@ -474,6 +474,8 @@ struct ShellAndTabStripTests {
             }
             let tab = try #require(rt.element(byKey: "tabs-tab-b")).rect
             let p = Vec2(tab[0] + 2, tab[1] + 2)
+            rt.pointerMove(to: p, at: 0.06)
+            _ = rt.frame(at: 0.06)
             rt.pointerDown(at: p, at: 0.1)
             #expect(rt.state.selected == "b")
             #expect(rt.state.calls == ["b"])
@@ -482,7 +484,7 @@ struct ShellAndTabStripTests {
             rt.pointerUp(at: p, at: 0.2)
             _ = rt.frame(at: 0.2)
             #expect(rt.state.calls == ["b"])
-            #expect(rt.commitCount == beforeRelease)
+            #expect(rt.commitCount == beforeRelease, "\(orientation)")
         }
     }
 

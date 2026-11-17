@@ -5717,7 +5717,7 @@ private final class MarkdownRenderer<State> {
                     marker = el().w(indent).h(s.body.linePx()).child(el().outsideListDisc(s.body).bg(s.muted))
                 } else {
                     let label = start.map { "\($0 + UInt64(k))." } ?? "•"
-                    let words: El<State> = text(label).font(s.body).color(s.muted).w(indent)
+                    let words: El<State> = text(label).font(s.body).color(s.muted).exactLines().w(indent)
                     marker = s.listOutside ? words.textAlign(.trailing).pr(outsideMarkerSpace) : words.textAlign(.center)
                 }
                 rowEl = row()
