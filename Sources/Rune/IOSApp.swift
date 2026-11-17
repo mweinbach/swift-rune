@@ -74,11 +74,7 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
     private let timeScale: Double
     private let respectSystemAppearance: Bool
     private let startTime: TimeInterval
-    private var activeTouch: UITouch?
-    private var touchOrigin: Vec2 = .zero
-    private var touchMovedBeyondSlop = false
-    private var touchFiredLongPress = false
-    private var touchHoldWorkItem: DispatchWorkItem?
+    private var activeContact: (id: UInt64, button: PointerButton?)?
     private var didSignalReady = false
 
     #if canImport(Metal)
@@ -123,8 +119,11 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
         addGestureRecognizer(hover)
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        #if !os(tvOS)
+        // Direct and Pencil contacts belong to Runtime.touch, including when another finger lands.
+        pan.allowedTouchTypes = []
         pan.allowedScrollTypesMask = .all
-        pan.minimumNumberOfTouches = 2
+        #endif
         addGestureRecognizer(pan)
 
         if #available(iOS 17.0, *) {
@@ -245,89 +244,85 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
     }
 
     public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard activeTouch == nil, let touch = touches.first else { return }
-        activeTouch = touch
-        let p = point(for: touch)
-        touchOrigin = p
-        touchMovedBeyondSlop = false
-        touchFiredLongPress = false
-        touchHoldWorkItem?.cancel()
-        let now = nowSeconds()
-        runtime.hostInput(.pointer, eventTimestamp: touch.timestamp) {
-            runtime.pointerMove(to: p, mods: .none, at: now)
-            runtime.pointerDown(at: p, button: .primary, mods: .none, at: now)
-        }
-        // `El.touchDragsAtOnce`: the finger drags from where it lands, and no long press cuts it.
-        if runtime.pressDragsAtOnce() {
-            touchHoldWorkItem = nil
-            renderTick()
-            return
-        }
-        let work = DispatchWorkItem { [weak self, weak touch] in
-            guard let self, let touch, self.activeTouch === touch,
-                  !self.touchMovedBeyondSlop, !self.touchFiredLongPress else { return }
-            self.touchFiredLongPress = true
-            let holdNow = self.nowSeconds()
-            self.runtime.cancelPointerForTouchHold(at: holdNow)
-            self.runtime.pointerDown(at: self.touchOrigin, button: .secondary, mods: .none, at: holdNow)
-            self.runtime.pointerUp(at: self.touchOrigin, button: .secondary, mods: .none, at: holdNow)
-            self.renderTick()
-        }
-        touchHoldWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5 / max(1e-4, timeScale), execute: work)
-        renderTick()
+        guard activeContact == nil, let touch = touches.min(by: { $0.timestamp < $1.timestamp }) else { return }
+        deliver(touch, phase: .started, event: event)
     }
 
     public override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let active = activeTouch, touches.contains(active) else { return }
-        let p = point(for: active)
-        if !touchMovedBeyondSlop && hypotf(p.x - touchOrigin.x, p.y - touchOrigin.y) > 8.0 {
-            touchMovedBeyondSlop = true
-            touchHoldWorkItem?.cancel()
-            touchHoldWorkItem = nil
-        }
-        if touchFiredLongPress { return }
-        runtime.hostInput(.pointer, eventTimestamp: active.timestamp) { runtime.pointerMove(to: p, mods: .none, at: nowSeconds()) }
-        renderTick()
+        deliverActive(touches, phase: .moved, event: event)
     }
 
     public override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let active = activeTouch, touches.contains(active) else { return }
-        touchHoldWorkItem?.cancel()
-        touchHoldWorkItem = nil
-        let p = point(for: active)
-        let firedMenu = touchFiredLongPress
-        activeTouch = nil
-        touchFiredLongPress = false
-        let now = nowSeconds()
-        runtime.hostInput(.pointer, eventTimestamp: active.timestamp) {
-            if firedMenu {
-                runtime.pointerExit(at: now)
-            } else {
-                runtime.pointerUp(at: p, button: .primary, mods: .none, at: now)
-            }
-        }
-        renderTick()
+        deliverActive(touches, phase: .ended, event: event)
     }
 
     public override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let active = activeTouch, touches.contains(active) else { return }
-        touchHoldWorkItem?.cancel()
-        touchHoldWorkItem = nil
-        let firedMenu = touchFiredLongPress
-        activeTouch = nil
-        touchFiredLongPress = false
-        let now = nowSeconds()
-        runtime.hostInput(.pointer, eventTimestamp: active.timestamp) {
-            if !firedMenu {
-                runtime.cancelPointerForTouchHold(at: now)
+        deliverActive(touches, phase: .cancelled, event: event)
+    }
+
+    public override func willMove(toWindow newWindow: UIWindow?) {
+        if newWindow == nil { cancelActiveContact() }
+        super.willMove(toWindow: newWindow)
+    }
+
+    private func deliverActive(_ touches: Set<UITouch>, phase: TouchPhase, event: UIEvent?) {
+        guard let activeContact, let touch = touches.first(where: { Self.contactID($0) == activeContact.id }) else { return }
+        deliver(touch, phase: phase, event: event)
+    }
+
+    private static func contactID(_ touch: UITouch) -> UInt64 {
+        UInt64(UInt(bitPattern: ObjectIdentifier(touch)))
+    }
+
+    private func deliver(_ touch: UITouch, phase: TouchPhase, event: UIEvent?) {
+        var button: PointerButton?
+        if touch.type == .indirectPointer {
+            button = .primary
+            #if !os(tvOS)
+            if let mask = event?.buttonMask {
+                if mask.contains(.secondary) { button = .secondary }
+                else if mask.contains(.button(3)) { button = .middle }
             }
-            runtime.pointerExit(at: now)
+            #endif
         }
+        let eventTime = (touch.timestamp - startTime) * timeScale
+        deliverContact(id: Self.contactID(touch), phase: phase, at: point(for: touch), button: button,
+                       eventTimestamp: touch.timestamp, time: eventTime)
         renderTick()
     }
 
+    /// Delivers the first contact until its matching release. Indirect pointer buttons use mouse capture.
+    internal func deliverContact(id: UInt64, phase: TouchPhase, at point: Vec2, button: PointerButton? = nil,
+                                 eventTimestamp: Double?, time: Double) {
+        if phase == .started {
+            guard activeContact == nil else { return }
+            activeContact = (id, button)
+        }
+        guard let contact = activeContact, contact.id == id else { return }
+        if phase == .ended || phase == .cancelled { activeContact = nil }
+        runtime.hostInput(.pointer, eventTimestamp: eventTimestamp) {
+            if let button = contact.button {
+                switch phase {
+                case .started:
+                    runtime.pointerMove(to: point, at: time)
+                    runtime.buttonDown(at: point, button: button, at: time)
+                case .moved: runtime.pointerMove(to: point, at: time)
+                case .ended: runtime.buttonUp(at: point, button: button, at: time)
+                case .cancelled: runtime.cancelPointer(at: time)
+                }
+            } else {
+                runtime.touch(id: id, phase: phase, at: point, time: time)
+            }
+        }
+    }
+
+    fileprivate func cancelActiveContact() {
+        guard let contact = activeContact else { return }
+        deliverContact(id: contact.id, phase: .cancelled, at: .zero, eventTimestamp: nil, time: nowSeconds())
+    }
+
     @objc private func handleHover(_ recognizer: UIHoverGestureRecognizer) {
+        guard !runtime.touching() else { return }
         let p = recognizer.location(in: self)
         let pos = Vec2(Float(p.x), Float(p.y))
         runtime.hostInput(.pointer) {
@@ -344,12 +339,21 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
     }
 
     @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
+        let phase: GesturePhase
+        switch recognizer.state {
+        case .began: phase = .began
+        case .changed: phase = .changed
+        case .ended: phase = .ended
+        case .cancelled: phase = .cancelled
+        default: return
+        }
         let delta = recognizer.translation(in: self)
         recognizer.setTranslation(.zero, in: self)
         let p = recognizer.location(in: self)
-        let pos = Vec2(Float(p.x), Float(p.y))
-        runtime.hostInput(.pointer) { runtime.pointerMove(to: pos, mods: .none, at: nowSeconds()) }
-        _ = delta
+        runtime.hostInput(.wheel) {
+            runtime.wheelEvent(WheelEvent(dx: Float(delta.x), dy: Float(delta.y), phase: phase,
+                                          x: Float(p.x), y: Float(p.y)), now: nowSeconds())
+        }
         renderTick()
     }
 
@@ -440,6 +444,7 @@ public final class RuneIOSViewController<State>: UIViewController {
 
     public override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        runeView.cancelActiveContact()
         displayLink?.invalidate()
         displayLink = nil
     }
