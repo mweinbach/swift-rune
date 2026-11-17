@@ -1326,6 +1326,7 @@ extension Runtime {
                 role: el.role,
                 rect: [effRect.x, effRect.y, effRect.width, effRect.height],
                 target: [node.targetRect.x, node.targetRect.y, node.targetRect.width, node.targetRect.height],
+                committedLayoutTarget: node.cold.committedLayoutTarget,
                 visible: [visibleClipPt.x, visibleClipPt.y, visibleClipPt.width, visibleClipPt.height],
                 opacity: effOpacity,
                 scale: sc.x,

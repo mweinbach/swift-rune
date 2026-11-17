@@ -6,6 +6,7 @@ import RuneMotion
 internal final class FlatNodeCold<State> {
     var el: El<State>
     var unscrolledRect: MotionRect
+    let committedLayoutTarget: MotionRect
     var zoomedTargetRect: MotionRect
     var staticRect: [Float]
     var contentSize: Vec2
@@ -28,6 +29,7 @@ internal final class FlatNodeCold<State> {
     init(
         el: El<State>,
         unscrolledRect: MotionRect,
+        committedLayoutTarget: MotionRect,
         zoomedTargetRect: MotionRect,
         staticRect: [Float],
         contentSize: Vec2,
@@ -49,6 +51,7 @@ internal final class FlatNodeCold<State> {
     ) {
         self.el = el
         self.unscrolledRect = unscrolledRect
+        self.committedLayoutTarget = committedLayoutTarget
         self.zoomedTargetRect = zoomedTargetRect
         self.staticRect = staticRect
         self.contentSize = contentSize
@@ -73,6 +76,7 @@ internal final class FlatNodeCold<State> {
         FlatNodeCold(
             el: el,
             unscrolledRect: unscrolledRect,
+            committedLayoutTarget: committedLayoutTarget,
             zoomedTargetRect: zoomedTargetRect,
             staticRect: staticRect,
             contentSize: contentSize,
