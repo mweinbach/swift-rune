@@ -250,4 +250,52 @@ struct PollInputSplitParityTests {
         let clicked = Self.width(rt, "clicked")
         #expect(clicked > 40 && clicked < 180, "the click's change animates: \(clicked)")
     }
+
+    struct G {
+        var gone = false
+        var entered = false
+        var leftWide = false
+    }
+
+    /// A hovered element that unmounts hears its leave (`hover_gone`); the leave widens a sprung bar.
+    static func prunedHoverRuntime() throws -> Runtime<G> {
+        let rt = Runtime<G>(state: G(), viewport: Vec2(400, 300), pixelScale: 1.0) { s, _ in
+            var root: El<G> = col().size(400, 300).gap(8)
+                .child(el().key("bar").size(s.leftWide ? 180 : 40, 20).motion(Spring(duration: 0.4, bounce: 0.0)))
+            if !s.gone {
+                root = root.child(el().key("hovered").size(120, 40).onHoverChange { s, on, _ in
+                    if on { s.entered = true } else { s.leftWide = true }
+                })
+            }
+            return root
+        }
+        rt.motionNeedsCause = true
+        _ = rt.frame(at: 0.0)
+        _ = rt.frame(at: 1.0)
+        let e = try #require(rt.elements().first { $0.key == "hovered" })
+        rt.pointerMove(to: Vec2(e.rect[0] + e.rect[2] / 2, e.rect[1] + e.rect[3] / 2), at: 1.001)
+        _ = rt.frame(at: 1.01)
+        _ = rt.frame(at: 1.02)
+        #expect(rt.state.entered, "the pointer entered it")
+        #expect(!rt.state.leftWide)
+        return rt
+    }
+
+    @Test("a pruned hovered element's leave is no input (`hover.rs`: `observe_since`): it lands at once, even when a key flushes the commit that prunes it")
+    func prunedHoverLeaveIsNotInput() throws {
+        for key in [false, true] {
+            let rt = try Self.prunedHoverRuntime()
+            rt.update(at: 1.03) { s, _ in s.gone = true }
+            if key {
+                // An unhandled key: its entry point flushes the pending commit, which prunes the
+                // hovered element and runs its leave inside the key's dispatch.
+                let keyed = rt.keyDown(KeyEvent(key: .text("q"), mods: .none), at: 1.031)
+                #expect(!keyed, "nothing takes the key")
+            }
+            for i in 1...4 { _ = rt.frame(at: 1.03 + Double(i) / 60.0) }
+            #expect(rt.state.leftWide, "key \(key): the leave was heard")
+            let bar = rt.presented("bar")?.rect[2] ?? -1
+            #expect(abs(bar - 180) < 0.5, "key \(key): no input caused it, so it shows at once: \(bar)")
+        }
+    }
 }

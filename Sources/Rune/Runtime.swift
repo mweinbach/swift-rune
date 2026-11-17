@@ -2052,7 +2052,9 @@ public final class Runtime<State> {
             scene.setTime(animNow)
         }
         syncLoopOffsetsToScene(animNow: animNow)
-        refreshHoverAndSyncTracks(at: animNow, wallNow: now, cut: false)
+        // A stationary pointer re-hit after layout: no pointer event asked for that hover
+        // (`paint/build.rs`: `observe_since`), so what it changes is never input (#970).
+        asInputObserver { refreshHoverAndSyncTracks(at: animNow, wallNow: now, cut: false) }
         endUnseenExits(on: &scene, activeFlightIds: activeFlightIds)
         let frameOut = scene.frame(at: animNow)
         landGroupFadesAfterFrame()
@@ -2190,8 +2192,11 @@ public final class Runtime<State> {
 
     internal func flushPendingCommitIfNeeded(at now: Double) {
         if needsCommit {
-            commitTree(at: now, cut: forceInitialSettle)
+            // Cleared before the commit, as the frame's commit does: a change the commit's own
+            // callbacks ask for (a pruned hovered element's leave, `hover_gone`) stays pending for
+            // the next frame, as upstream's queued `HoverChange` commits there.
             needsCommit = false
+            commitTree(at: now, cut: forceInitialSettle)
             forceInitialSettle = false
         }
     }
@@ -8913,12 +8918,15 @@ public final class Runtime<State> {
                pointerPosition.y < viewport.y {
                 let prevHoverPath = hoveredPath
                 let prevHoverLink = hoveredLink
-                refreshHoverAndSyncTracks(
-                    at: cxSettings.scaledTime(at: currentTime),
-                    wallNow: currentTime,
-                    cut: false,
-                    dispatchPolicy: .onHoldRelease
-                )
+                // The re-hit after layout is an observer (`paint/build.rs`: `observe_since`, #970).
+                asInputObserver {
+                    refreshHoverAndSyncTracks(
+                        at: cxSettings.scaledTime(at: currentTime),
+                        wallNow: currentTime,
+                        cut: false,
+                        dispatchPolicy: .onHoldRelease
+                    )
+                }
                 if hoverHoldState != .held && pressedPath == nil {
                     let newPath = hoveredPath
                     let linkChanged = (hoveredLink != prevHoverLink)

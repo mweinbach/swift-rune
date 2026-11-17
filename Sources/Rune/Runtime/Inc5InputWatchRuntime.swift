@@ -984,7 +984,11 @@ extension Runtime {
             let d = effectiveHoverDelay(for: old.el)
             let heard = (d.enter == 0 && d.leave == 0) ? inside : shown
             if heard, let cb = old.el.handlers.onHoverChange {
-                dispatchHoverChange(path: old.path, inside: false, handler: cb, at: now)
+                // No pointer event asked for this leave (`hover.rs`: `observe_since`): its change is
+                // DIRTY even when a commit flushed inside an input entry point prunes it (#970).
+                asInputObserver {
+                    dispatchHoverChange(path: old.path, inside: false, handler: cb, at: now)
+                }
             }
         }
     }
