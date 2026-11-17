@@ -413,7 +413,7 @@ public final class ImageCache: @unchecked Sendable {
         #if os(WASI)
         load()
         #else
-        DispatchQueue.global(qos: .userInitiated).async(execute: load)
+        ImageDecoderPool.shared.enqueue(load)
         #endif
         return handle
     }

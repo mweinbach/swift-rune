@@ -48,6 +48,26 @@ struct ImageCacheDecoderTests {
         #expect(ImageDecoderPool.shared.threadCount == min(4, max(1, ProcessInfo.processInfo.activeProcessorCount)))
     }
 
+    #if !os(WASI)
+    @Test func fileURLAndSourceSetWakeFromRuneImageWorkers() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID()).svg")
+        try Data(#"<svg width="2" height="1"><rect width="2" height="1"/></svg>"#.utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let wakes = ImageWakeChannel<String>()
+        let cache = ImageCache(wake: { wakes.send(Thread.current.name ?? "") })
+        let direct = cache.url(url.absoluteString, sizePt: 6, scale: 1)
+        let selected = cache.urlSet([(url.absoluteString, 12)], sizePt: 6, scale: 1)
+        #expect(cache.url(url.absoluteString, sizePt: 6, scale: 1) === direct)
+        var threads: [String] = []
+        try #require(try await imageUpdateArrived {
+            while let name = wakes.tryRecv() { threads.append(name) }
+            return threads.count >= 2
+        })
+        #expect(threads == ["rune-images", "rune-images"])
+        #expect(direct.size?.width == 6 && selected.size?.width == 12)
+    }
+    #endif
+
     // image.rs a_small_image_queued_behind_a_large_one_decodes_without_waiting_for_it
     @Test("a_small_image_queued_behind_a_large_one_decodes_without_waiting_for_it")
     func aSmallImageQueuedBehindALargeOneDecodesWithoutWaitingForIt() {

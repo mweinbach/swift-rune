@@ -120,7 +120,7 @@ final class ImageDecoderPool: @unchecked Sendable {
     }
     #else
     private let condition = NSCondition()
-    private var jobs: [Job] = []
+    private var jobs = QueueDeque<@Sendable () -> Void>()
     private var started = false
     /// `DECODERS.min(available_parallelism)`.
     let threadCount: Int
@@ -131,8 +131,15 @@ final class ImageDecoderPool: @unchecked Sendable {
 
     /// `decoders().send(Job { .. })`.
     func submit(_ job: Job) {
+        enqueue {
+            job.image.resolve(with: job.input.decodeCaught())
+            job.wake()
+        }
+    }
+
+    func enqueue(_ work: @escaping @Sendable () -> Void) {
         condition.lock()
-        jobs.append(job)
+        jobs.pushBack(work)
         let start = !started
         started = true
         condition.signal()
@@ -148,9 +155,10 @@ final class ImageDecoderPool: @unchecked Sendable {
     }
 
     private func spawn(_ body: @escaping @Sendable () -> Void) {
-        let thread = Thread(block: body)
-        thread.name = "rune-images"
-        thread.start()
+        Thread {
+            Thread.current.name = "rune-images"
+            body()
+        }.start()
     }
 
     /// `decode_jobs`: finish each job's image, then wake its cache's app.
@@ -158,10 +166,9 @@ final class ImageDecoderPool: @unchecked Sendable {
         while true {
             condition.lock()
             while jobs.isEmpty { condition.wait() }
-            let job = jobs.removeFirst()
+            let work = jobs.popFront()
             condition.unlock()
-            job.image.resolve(with: job.input.decodeCaught())
-            job.wake()
+            work?()
         }
     }
     #endif
