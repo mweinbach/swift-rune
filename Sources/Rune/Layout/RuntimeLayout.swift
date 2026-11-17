@@ -370,7 +370,7 @@ final class RetainedLayoutCoordinator {
                 }
             }
 
-            if let font = style.outsideListDiscFont {
+            if let font = el.outsideListDiscFont {
                 #if canImport(CoreText) && canImport(CoreGraphics)
                 let primary = textSystem.resolveCTFont(style: font, pixelScale: 1)
                 let ascent = Float(CTFontGetAscent(primary))

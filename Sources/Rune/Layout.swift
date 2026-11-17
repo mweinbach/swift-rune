@@ -90,7 +90,6 @@ public struct LayoutStyle: Sendable, Hashable {
 
     public var aspectRatio: Float? = nil
     public var aspectFit: Float? = nil
-    internal var outsideListDiscFont: TextStyle?
 
     public var padding: Sides = .all(0)
     public var border: Sides = .all(0)

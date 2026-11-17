@@ -5,7 +5,7 @@ extension El {
     /// An unordered-list marker sized and positioned in device pixels from the primary font.
     public func outsideListDisc(_ font: TextStyle) -> Self {
         var copy = rounded(999).a11yHidden()
-        copy.layout.outsideListDiscFont = font
+        copy.outsideListDiscFont = font
         return copy
     }
 
