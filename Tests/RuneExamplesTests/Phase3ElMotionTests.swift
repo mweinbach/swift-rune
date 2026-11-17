@@ -48,12 +48,16 @@ struct Phase3ElMotionTests {
         let msg8Before = try #require(rtAnchored.element(byKey: "msg-8")?.rect[1])
 
         #expect(rtAnchored.keyDown(KeyEvent(key: .enter), at: 0.04))
+        var offsets: [Float] = []
         for step in 1...40 {
             rtAnchored.frame(at: 0.04 + Double(step) * 0.016)
+            offsets.append(rtAnchored.scrollOffset(forKey: "feed").y)
         }
         #expect(rtAnchored.state.earlier == 3)
         let scrollAfter = rtAnchored.scrollOffset(forKey: "feed").y
-        #expect(scrollAfter > scrollBefore + 150)
+        let addedHeight: Float = 3 * (64 + 8)
+        #expect(abs(scrollAfter - scrollBefore - addedHeight) < 2)
+        #expect(offsets.allSatisfy { $0 >= scrollBefore - 2 && $0 <= scrollAfter + 2 })
         let msg8After = try #require(rtAnchored.element(byKey: "msg-8")?.rect[1])
         #expect(abs(msg8After - msg8Before) < 2.0)
 

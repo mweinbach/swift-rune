@@ -1907,8 +1907,9 @@ extension Runtime {
             let (prefix, total) = vState.computeOffsets(estimated: meta.estimate)
             let topOffset = max(0, (listWorldY[meta.listPath] ?? sInfo.y) - sInfo.y)
             let pinned = (lands && meta.stickBottom) || wasPinnedToBottom.contains(meta.scrollPath)
+            let destination = pendingVirtualReveal(places: vState.rowPlaces, list: meta.listPath, viewport: meta.scrollPath)
             var rawOff = scrollOffsets[meta.scrollPath]?.y ?? 0
-            if !pinned,
+            if destination == nil, !pinned,
                let anchorKey = vState.lastAnchorKey,
                !scrollRequestsState.owns(meta.scrollPath),
                !directScrolledPaths.contains(meta.scrollPath),
@@ -1925,7 +1926,6 @@ extension Runtime {
             }
             let maxOff = max(0, total + topOffset - vpH)
             let actualOffset = max(0, min(max(0, total - vpH), max(0, min(rawOff, maxOff) - topOffset)))
-            let destination = pendingVirtualReveal(places: vState.rowPlaces, list: meta.listPath, viewport: meta.scrollPath)
             let offset = Self.revealWindowOffset(row: destination, prefix: prefix, viewport: vpH, from: actualOffset)
             let before = prefix[mounted.lowerBound]
             let end = prefix[mounted.upperBound]
@@ -2255,8 +2255,11 @@ extension Runtime {
                 let pEl = p.el
                 let ownDelta = deltasByScrollPath[p.path] ?? .zero
                 let signedOwnX = (p.flow == .rtl) ? ownDelta.x : -ownDelta.x
-                let inv = Vec2(cumulative[pIdx].x + signedOwnX, cumulative[pIdx].y - ownDelta.y)
+                let localDelta = Vec2(signedOwnX, -ownDelta.y)
+                let inv = Vec2(cumulative[pIdx].x + localDelta.x, cumulative[pIdx].y + localDelta.y)
                 cumulative[i] = inv
+                // Carry the existing frame and its motion with the viewport before committing the new rect.
+                scene.translateFrame(flatNodes[i].nodeId, by: localDelta, screenDelta: inv)
                 if inv != .zero {
                     flatNodes[i].targetRect = flatNodes[i].targetRect.offsetBy(inv)
                     specs[i].rect = specs[i].rect.offsetBy(inv)
@@ -2691,6 +2694,25 @@ extension Runtime {
             return nil
         }
 
+        // A mounted virtual row can temporarily be laid out among closing rows from the previous
+        // window. Its position in the scroll content comes from the measured virtual prefix.
+        func contentTop(node index: Int, rect: MotionRect, viewport vIdx: Int, offset: Float) -> Double {
+            var row = index
+            let viewport = flatNodes[vIdx]
+            while let parent = flatNodes[row].parentIndex {
+                let stack = flatNodes[parent]
+                if let list = virtualLists[stack.path], list.scrollPath == viewport.path,
+                   let key = flatNodes[row].key, let item = list.rowPlaces.index(of: key) {
+                    let estimate = max(1, stack.el.virtualEstimate ?? 40)
+                    let top = list.top + list.padTop + list.prefix(item, estimated: estimate)
+                    return Double(top + rect.top - flatNodes[row].targetRect.top)
+                }
+                if parent == vIdx { break }
+                row = parent
+            }
+            return Double(rect.top - viewport.targetRect.top + offset)
+        }
+
         func findScrollNode(bySelector selector: String) -> Int? {
             if let idx = flatNodes.firstIndex(where: {
                 !$0.el.layout.scrollAxes.isEmpty && selectsElementSelector(selector, path: $0.path, key: $0.key)
@@ -2765,7 +2787,7 @@ extension Runtime {
                 cur = scrollOffsets[vPath] ?? .zero
                 vpH = Double(vpRect.height)
                 itemH = Double(tRect.height)
-                itemTop = Double(tRect.y - vpRect.y) + Double(cur.y)
+                itemTop = contentTop(node: tIdx, rect: tRect, viewport: vIdx, offset: cur.y)
             } else if let vHit = resolveVirtualRowBounds(forKey: req.key, scope: req.scope),
                       flatNodes[vHit.vIdx].el.layout.scrollAxes.contains(.vertical) {
                 vIdx = vHit.vIdx
@@ -2782,7 +2804,7 @@ extension Runtime {
                 cur = scrollOffsets[vPath] ?? .zero
                 vpH = Double(vpRect.height)
                 itemH = Double(hlHit.rect.height)
-                itemTop = Double(hlHit.rect.y - vpRect.y) + Double(cur.y)
+                itemTop = contentTop(node: hlHit.nodeIndex, rect: hlHit.rect, viewport: vIdx, offset: cur.y)
             } else {
                 if let (hxPath, nextX) = revealRowX(scope: req.scope, key: req.key) {
                     let curXScroll = scrollOffsets[hxPath] ?? .zero
