@@ -33,7 +33,7 @@ struct Phase3CustomTitlebarTests {
 
         #expect(rt.state.zoom == 1)
         let titlebar1 = try #require(rt.element(byKey: "titlebar"))
-        #expect(abs(titlebar1.rect[3] - 55.0) < 0.5)
+        #expect(abs(titlebar1.rect[3] - 44.210938) < 0.01)
 
         // Click Theme -> switches dark true -> false, presses == 1
         let themeRect = try #require(rt.element(byKey: "theme")?.rect)
@@ -69,5 +69,9 @@ struct Phase3CustomTitlebarTests {
 
         #expect(rt.state.dialog == false)
         #expect(rt.element(byKey: "scrim") == nil)
+
+        rt.frame(at: 0.54)
+        let settledTitlebar = try #require(rt.element(byKey: "titlebar"))
+        #expect(abs(settledTitlebar.rect[3] - 55.0) < 0.5)
     }
 }
