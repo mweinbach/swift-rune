@@ -4,13 +4,18 @@ import Testing
 
 @Suite("Unwrapped diff viewport")
 struct DiffViewportWidthTests {
-    @Test("Scrolled rows fill the measured view, keep the gutter width and preserve horizontal overflow")
-    @MainActor
-    func rowWidthAndFarEdgeHover() throws {
-        let old = (1...300).map { "let value_\($0) = compute(\($0));" }
+    private func sourceLines(count: Int) -> (old: [String], new: [String]) {
+        let old = (1...count).map { "let value_\($0) = compute(\($0));" }
         let new = old.enumerated().map { i, line in
             (i + 1).isMultiple(of: 7) ? String(line.dropLast()) + " + 1;" : line
         }
+        return (old, new)
+    }
+
+    @Test("Scrolled rows fill the measured view, keep the gutter width and preserve horizontal overflow")
+    @MainActor
+    func rowWidthAndFarEdgeHover() throws {
+        let (old, new) = sourceLines(count: 300)
         let longestLine = new.map(\.utf8.count).max() ?? 0
         let file = FileDiff.fromTexts(path: "big.rs", old: old.joined(separator: "\n"), new: new.joined(separator: "\n"))
         let rt = Runtime(state: DiffState(diff: file), viewport: Vec2(1200, 480), pixelScale: 2) { state, cx in
@@ -71,5 +76,66 @@ struct DiffViewportWidthTests {
                 settle()
             }
         }
+    }
+
+    @Test("A deep jump paints the row under a stationary pointer before the window sleeps")
+    @MainActor
+    func stationaryPointerAfterDeepJumps() throws {
+        let (old, new) = sourceLines(count: 900)
+        let file = FileDiff.fromTexts(path: "big.rs", old: old.joined(separator: "\n"), new: new.joined(separator: "\n"))
+        let rt = Runtime(state: DiffState(diff: file), viewport: Vec2(900, 620), pixelScale: 1) { state, cx in
+            DiffView<DiffState>(key: "dv", kit: .neutral(dark: true), get: { $0 }, set: { $0 = $1 })
+                .onSelect { _, _, _ in }.onComment { _, _, _ in }.build(state: state, cx: cx)
+        }
+        let pointer = Vec2(420, 315)
+        var time = 0.0
+        func rowUnderPointer() throws -> ElementInfo {
+            try #require(rt.elements().first {
+                $0.key?.hasPrefix("dv-row-") == true && $0.rect[1] <= pointer.y && pointer.y < $0.rect[1] + $0.rect[3]
+            })
+        }
+        func drawUntilIdle(afterFirstFrame: () throws -> Void = {}) throws {
+            for frame in 0..<30 {
+                _ = rt.renderFrame(at: time)
+                if frame == 0 { try afterFirstFrame() }
+                let wake = rt.nextWakeDeadline(after: time)
+                guard rt.isAnimating || rt.isStale || wake != nil else { return }
+                // A slow remount can finish after the scroll's hover hold has expired.
+                if rt.isAnimating || rt.isStale {
+                    time += 0.25
+                } else if let wake {
+                    time = max(wake, time + 0.25)
+                }
+            }
+            Issue.record("The window kept requesting frames after the diff settled")
+        }
+
+        try drawUntilIdle()
+        time += 0.5
+        rt.pointerMove(to: pointer, at: time)
+        try drawUntilIdle()
+        time += 0.5
+        rt.wheel(WheelEvent(dx: 0, dy: -600), at: pointer, now: time)
+        try drawUntilIdle()
+
+        var visited: [String] = []
+        for line: UInt32 in [705, 211, 705] {
+            time += 0.5
+            rt.update(at: time) { state, tx in
+                state.scrollToLine(0, at: DiffLineRef(side: .new, line: line), keyPrefix: "dv", tx: &tx)
+            }
+            try drawUntilIdle {
+                let heldRow = try rowUnderPointer()
+                #expect(heldRow.hover < 0.01, "A remounted row starts unlit while the jump holds hover")
+            }
+            let target = try #require(rt.presented("dv-df0.c\(line)"))
+            #expect(target.rect[1] == 60)
+            let row = try rowUnderPointer()
+            #expect(rt.elementAt(pointer.x, pointer.y)?.path.hasPrefix(row.path + "/") == true)
+            #expect(row.hover > 0.99, "The row under the pointer should be lit after jumping to line \(line)")
+            visited.append(row.path)
+        }
+        #expect(visited[0] != visited[1])
+        #expect(visited[0] == visited[2])
     }
 }

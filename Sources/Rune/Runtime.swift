@@ -2258,7 +2258,7 @@ public final class Runtime<State> {
         syncLoopOffsetsToScene(animNow: animNow)
         // A stationary pointer re-hit after layout: no pointer event asked for that hover
         // (`paint/build.rs`: `observe_since`), so what it changes is never input (#970).
-        asInputObserver { refreshHoverAndSyncTracks(at: animNow, wallNow: now, cut: false) }
+        _ = asInputObserver { refreshHoverAndSyncTracks(at: animNow, wallNow: now, cut: false) }
         endUnseenExits(on: &scene)
         placeTailHandoffFrames()
         var frameOut = scene.frame(at: animNow)
@@ -9907,7 +9907,7 @@ public final class Runtime<State> {
               pointerPosition.x < viewport.x, pointerPosition.y < viewport.y else { return }
         let previous = hoveredPath
         let link = hoveredLink
-        asInputObserver {
+        let retargeted = asInputObserver {
             refreshHoverAndSyncTracks(at: cxSettings.scaledTime(at: currentTime), wallNow: currentTime,
                                      cut: false, dispatchPolicy: .onHoldRelease)
         }
@@ -9920,7 +9920,9 @@ public final class Runtime<State> {
                 animSources |= AnimSource.live
             }
         }
-        if hoveredLink != link || helpTargetChanges(at: pointerPosition) {
+        // A hover group can change independently of the primary hit. Its new track is
+        // sampled on the next paint, even when it retargeted instantly at rest.
+        if retargeted || hoveredLink != link || helpTargetChanges(at: pointerPosition) {
             animSources |= AnimSource.live
         }
         settleKitHoverDelays(at: pointerPosition, now: currentTime)

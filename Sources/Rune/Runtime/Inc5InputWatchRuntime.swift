@@ -577,19 +577,19 @@ extension Runtime {
         case never
     }
 
+    @discardableResult
     internal func refreshHoverAndSyncTracks(
         at now: Double,
         wallNow: Double? = nil,
         cut: Bool,
         dispatchPolicy: HoverDispatchPolicy = .always
-    ) {
+    ) -> Bool {
         let wasHeld = hoverHold.held
         if cut {
             hoverHold = HoverHold()
             hoverWithinPaths.removeAll()
             hoverDelays.clear()
-            syncHoverTracks(at: now, cut: true, held: false)
-            return
+            return syncHoverTracks(at: now, cut: true, held: false)
         }
         if hoverHold.released && !layoutMoving() {
             hoverHold.settled()
@@ -666,7 +666,7 @@ extension Runtime {
             }
         }
 
-        syncHoverTracks(at: now, cut: false, held: shouldHold)
+        return syncHoverTracks(at: now, cut: false, held: shouldHold)
     }
 
     /// Retargets the hover tracks (the hover half of `hover.rs::update_interaction`). `held` is
@@ -676,17 +676,19 @@ extension Runtime {
     /// its change rather than fading where nobody sees. A target that doesn't change moves only
     /// under explicit curves (`hoverMotion` / `hoverMotionWithin`), which may carry a velocity or
     /// token; the default curves keep the trajectory the store already has and dirty nothing.
+    @discardableResult
     internal func syncHoverTracks(
         at now: Double,
         cut: Bool,
         held: Bool = false
-    ) {
+    ) -> Bool {
         // Hit tests read the last build's drawn rects by node. When a commit moved the nodes
         // (or nothing has been built yet), they belong to other elements until the build
         // re-evaluates from fresh geometry (`update_interaction`'s `built_ids` check).
-        if !cut && !hoverOrderMatchesPaint { return }
+        if !cut && !hoverOrderMatchesPaint { return false }
         let ctx = hoverFlipContext()
         var unseen: [Bool]? = nil
+        var retargeted = false
         for i in hoverTrackIndices where !hoverIsExiting(i) {
             let node = flatNodes[i]
             let nid = node.nodeId
@@ -701,6 +703,7 @@ extension Runtime {
             if cut {
                 if readyHoverFromRest(nid, to: target) {
                     liveStore.snap(trackId, Self.hoverProp, to: target)
+                    retargeted = retargeted || changed
                 }
                 lastHoverTargetById[nid] = target
                 continue
@@ -733,6 +736,7 @@ extension Runtime {
             let anim: Anim<Float> = curves.map { isLit ? $0.enter : $0.exit }
                 ?? (isLit ? .instant : Anim<Float>(curve: .tween(duration: 0.1, easing: .easeOut)))
             if readyHoverFromRest(nid, to: target) {
+                retargeted = true
                 let drewNothing = unseen ?? kitHooks.unseenPresence.drewNothing(nodes: flatNodes)
                 unseen = drewNothing
                 if drewNothing.indices.contains(i) && drewNothing[i] {
@@ -743,8 +747,14 @@ extension Runtime {
             }
             lastHoverTargetById[nid] = target
         }
-        lastHoverTargetById = lastHoverTargetById.filter { nodeIndexById[$0.key] != nil || exitingSnapshots[$0.key] != nil }
+        // Hover tracks live in a separate store from the scene. Retire them with their
+        // owner so a returning virtual row starts at rest, including during a scroll hold.
+        for nid in lastHoverTargetById.keys where nodeIndexById[nid] == nil && exitingSnapshots[nid] == nil {
+            liveStore.remove(Self.hoverTrackId(nid), Self.hoverProp)
+            lastHoverTargetById.removeValue(forKey: nid)
+        }
         syncPressScale(at: now, cut: cut)
+        return retargeted
     }
 
     internal struct GroupHoverContext {
