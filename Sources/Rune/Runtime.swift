@@ -4663,7 +4663,10 @@ public final class Runtime<State> {
         if !commitCut && !commitKind.snaps && !commitKind.lands && !reducedMotion {
             seedVirtualRowLayoutOffsets(nodes: pass.nodes, specs: &specs)
         }
-        let scaledCommitNow = cxSettings.scaledTime(at: now)
+        // An opted-in poll is delivered before this frame ticks its scene, just as
+        // the growth track already steps from the prior drawn frame to this one.
+        let eventTime = cxSettings.scaledTime(at: now)
+        let scaledCommitNow = slice2State.liveTailWindows.isEmpty ? eventTime : min(lastScaledAnimNow, eventTime)
         prevRevealedSecureIds = nowRevealedSecureIds
         var concealSnapIndices: Set<Int> = []
         if !concealedSecureIndices.isEmpty {
