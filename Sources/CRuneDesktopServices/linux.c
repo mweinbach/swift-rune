@@ -21,6 +21,9 @@ static GtkClipboard *board;
 static GtkClipboard *primary;
 static GBytes *primary_owned;
 static struct RuneWaylandBoard *wayland;
+int rune_desktop_linux_wheel_points(uint32_t window_id, float x, float y, float *px, float *py) {
+    return rune_wayland_board_wheel_points(wayland, window_id, x, y, px, py);
+}
 int rune_desktop_linux_right_alt_is_altgr(uint32_t window_id) {
     if (wayland) return rune_wayland_board_altgr(wayland);
     SDL_Window *window = SDL_GetWindowFromID(window_id);

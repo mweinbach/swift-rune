@@ -31,6 +31,9 @@ int rune_desktop_open_url(const char *url);
 int rune_desktop_linux_call(void (*work)(void *), void *context);
 void rune_desktop_linux_connect(uint32_t window_id);
 int rune_desktop_linux_right_alt_is_altgr(uint32_t window_id);
+/* A matched physical Wayland wheel-axis frame carries logical surface points.
+   SDL lines are signed in Rune's directions. Other inputs keep SDL's units. */
+int rune_desktop_linux_wheel_points(uint32_t window_id, float x, float y, float *px, float *py);
 void rune_desktop_linux_pump(void);
 void rune_desktop_linux_disconnect(void);
 /* Host-thread operations on X11 PRIMARY or the Wayland seat's primary selection.

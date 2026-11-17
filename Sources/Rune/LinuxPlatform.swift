@@ -4,6 +4,7 @@ import RuneRef
 
 #if os(Linux)
 import CRuneLinux
+import CRuneDesktopServices
 #endif
 
 // MARK: - 1. Wayland wlr-layer-shell Configuration (platform/layer_shell.rs)
@@ -920,9 +921,12 @@ final class LinuxWindowSession<State> {
                 runtime.pointerDown(at: point, button: button, mods: mods, at: now)
             } else { runtime.pointerUp(at: point, button: button, mods: mods, at: now) }
         case RuneLinuxWheel:
-            let (dx, dy) = WheelDistance.wheelDelta(.line(x: event.dx, y: event.dy), scale: 1,
+            var x: Float = 0, y: Float = 0
+            let hasPoints = event.active && rune_desktop_linux_wheel_points(event.windowID, event.dx, event.dy, &x, &y) != 0
+            let delta: MouseScrollDelta = hasPoints ? .pixel(x: x, y: y) : .line(x: event.dx, y: event.dy)
+            let (dx, dy) = WheelDistance.wheelDelta(delta, scale: 1,
                                                    shift: mods.shift, linePoints: WheelDistance.linePoints)
-            runtime.desktopWheel(dx: dx, dy: dy, at: point, mods: mods, now: now)
+            runtime.desktopWheel(dx: dx, dy: dy, at: point, mods: mods, now: now, precise: hasPoints)
         case RuneLinuxFocus:
             runtime.dispatchFocus(event.active, at: now)
             if !event.active {

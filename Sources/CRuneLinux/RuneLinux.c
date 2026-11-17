@@ -15,6 +15,7 @@ struct RuneLinuxWindow {
     unsigned keymap_generation;
     bool release_float_on_present;
     bool swap_paced;
+    bool observes_wayland_input;
     uint32_t refresh_checked;
     int32_t refresh_hz;
     unsigned refresh_generation;
@@ -25,6 +26,26 @@ static uint32_t group_wake_type;
 static unsigned keymap_generation;
 static unsigned display_generation = 1;
 static int (*resolve_altgr)(uint32_t window_id);
+static unsigned wayland_windows;
+static _Thread_local bool collecting_input;
+/* SDL2's queued event union has trailing storage beyond SDL_MouseWheelEvent.
+   Keep its public fields intact while marking events produced by our native
+   pump. An application-pushed wheel must never consume a compositor frame. */
+static const Uint32 native_wheel_tag = 0x5257484c;
+SDL_COMPILE_TIME_ASSERT(wheel_queue_marker, sizeof(SDL_MouseWheelEvent) + sizeof(Uint32) <= sizeof(SDL_Event));
+static int SDLCALL mark_native_wheel(void *unused, SDL_Event *event) {
+    (void)unused;
+    if (event->type == SDL_MOUSEWHEEL) {
+        Uint8 *slot = event->padding + sizeof(SDL_Event) - sizeof(native_wheel_tag);
+        /* A caller can push a copy of a previously delivered wheel. */
+        SDL_memset(slot, 0, sizeof(native_wheel_tag));
+        if (collecting_input && event->wheel.which == 0 && event->wheel.direction == SDL_MOUSEWHEEL_NORMAL) {
+            SDL_Window *sdl = SDL_GetWindowFromID(event->wheel.windowID);
+            if (sdl && SDL_GetWindowData(sdl, "RuneLinuxWindow")) SDL_memcpy(slot, &native_wheel_tag, sizeof(native_wheel_tag));
+        }
+    }
+    return 1;
+}
 
 void rune_linux_set_altgr_resolver(int (*resolve)(uint32_t window_id)) {
     resolve_altgr = resolve;
@@ -123,6 +144,9 @@ RuneLinuxWindow *rune_linux_open(const char *title, RuneLinuxWindowOptions optio
     SDL_SetHint(SDL_HINT_IME_SUPPORT_EXTENDED_TEXT, "1");
 #endif
     SDL_StartTextInput();
+    host->observes_wayland_input = SDL_strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0;
+    if (host->observes_wayland_input && wayland_windows++ == 0)
+        SDL_AddEventWatch(mark_native_wheel, NULL);
     rune_notify_linux_window_opened(host->id, host->wake, rune_linux_wake);
     if (options.visible) rune_linux_show(host);
     return host;
@@ -130,6 +154,7 @@ RuneLinuxWindow *rune_linux_open(const char *title, RuneLinuxWindowOptions optio
 
 const char *rune_linux_error(void) { return SDL_GetError(); }
 void rune_linux_close(RuneLinuxWindow *host) {
+    if (host->observes_wayland_input && !--wayland_windows) SDL_DelEventWatch(mark_native_wheel, NULL);
     rune_notify_linux_window_closed(host->id);
     rune_linux_refresh_frame_input(host->window, true);
     if (!group_wake_type) rune_linux_release_input_region();
@@ -345,6 +370,8 @@ static RuneLinuxEventKind translate(const SDL_Event *e, RuneLinuxEvent *out) {
         return RuneLinuxButton;
     case SDL_MOUSEWHEEL: {
         out->windowID = e->wheel.windowID;
+        out->active = wayland_windows && !SDL_memcmp(e->padding + sizeof(SDL_Event) - sizeof(native_wheel_tag),
+                                                    &native_wheel_tag, sizeof(native_wheel_tag));
         // Like winit's X11/Wayland backends, positive deltas move content right/down.
         float sign = e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1.f : 1.f;
         out->dx = -sign * e->wheel.preciseX; out->dy = sign * e->wheel.preciseY;
@@ -371,13 +398,17 @@ static RuneLinuxEventKind translate(const SDL_Event *e, RuneLinuxEvent *out) {
 int rune_linux_next_event(int timeoutMs, RuneLinuxEvent *out) {
     SDL_Event event;
     *out = (RuneLinuxEvent){0};
+    collecting_input = true;
     int got = timeoutMs < 0 ? SDL_WaitEvent(&event) :
               timeoutMs == 0 ? SDL_PollEvent(&event) : SDL_WaitEventTimeout(&event, timeoutMs);
+    collecting_input = false;
     if (got == 0 && timeoutMs < 0) return -1;
     while (got) {
         out->kind = translate(&event, out);
         if (out->kind != RuneLinuxIgnored) return 1;
+        collecting_input = true;
         got = SDL_PollEvent(&event);
+        collecting_input = false;
     }
     return 0;
 }

@@ -31,6 +31,17 @@ struct Offer {
     GPtrArray *formats;
     uint32_t action;
 };
+struct WheelAxes {
+    float raw[2], discrete[2];
+    unsigned kinds[2], source;
+    gboolean has_source;
+};
+struct WheelReceipt {
+    struct wl_surface *surface;
+    float lines[2], points[2];
+    gboolean has_points;
+    gint64 received;
+};
 struct RuneWaylandBoard {
     struct wl_display *display; /* borrowed from SDL */
     struct wl_event_queue *queue;
@@ -43,6 +54,8 @@ struct RuneWaylandBoard {
     uint32_t keymap_size, layout_group;
     struct xkb_state *key_state;
     struct wl_pointer *pointer;
+    struct WheelAxes wheel;
+    GQueue wheels;
     struct wl_touch *touch;
     struct wl_data_device_manager *manager;
     struct wl_data_device *device;
@@ -246,8 +259,12 @@ static void modifiers(void *d, struct wl_keyboard *k, uint32_t s, uint32_t a, ui
     (void)k; (void)s; (void)a; (void)b; (void)c;
     ((struct RuneWaylandBoard *)d)->layout_group = g;
 }
+static void repeat_info(void *data, struct wl_keyboard *keyboard, int32_t rate, int32_t delay) {
+    (void)data; (void)keyboard; (void)rate; (void)delay;
+}
 static const struct wl_keyboard_listener key_events = {
-    .keymap = keymap, .enter = key_enter, .leave = key_leave, .key = key_press, .modifiers = modifiers
+    .keymap = keymap, .enter = key_enter, .leave = key_leave, .key = key_press, .modifiers = modifiers,
+    .repeat_info = repeat_info
 };
 static int SDLCALL count_presses(void *data, SDL_Event *event) {
     if (event->type == SDL_MOUSEBUTTONDOWN && event->button.button == SDL_BUTTON_LEFT &&
@@ -299,10 +316,87 @@ static void pointer_button(void *d, struct wl_pointer *p, uint32_t s, uint32_t t
     }
 }
 static void pointer_axis(void *d, struct wl_pointer *p, uint32_t t, uint32_t a, wl_fixed_t v) {
-    (void)d; (void)p; (void)t; (void)a; (void)v;
+    (void)p; (void)t;
+    if (a <= WL_POINTER_AXIS_HORIZONTAL_SCROLL)
+        ((struct RuneWaylandBoard *)d)->wheel.raw[a] = -(float)wl_fixed_to_double(v);
+}
+static void axis_source(void *d, struct wl_pointer *p, uint32_t source) {
+    (void)p;
+    struct WheelAxes *axes = &((struct RuneWaylandBoard *)d)->wheel;
+    axes->source = source; axes->has_source = TRUE;
+}
+static void axis_discrete(void *d, struct wl_pointer *p, uint32_t a, int32_t value) {
+    (void)p;
+    struct WheelAxes *axes = &((struct RuneWaylandBoard *)d)->wheel;
+    if (a <= WL_POINTER_AXIS_HORIZONTAL_SCROLL && !axes->kinds[a]) {
+        axes->kinds[a] = 1; axes->discrete[a] = -(float)value;
+    }
+}
+#ifdef WL_POINTER_AXIS_VALUE120_SINCE_VERSION
+static void axis_value120(void *d, struct wl_pointer *p, uint32_t a, int32_t value) {
+    (void)p;
+    if (a > WL_POINTER_AXIS_HORIZONTAL_SCROLL) return;
+    struct WheelAxes *axes = &((struct RuneWaylandBoard *)d)->wheel;
+    if (axes->kinds[a] != 2) axes->discrete[a] = 0;
+    axes->kinds[a] = 2; axes->discrete[a] -= (float)value / 120.f;
+}
+#endif
+static void axis_stop(void *d, struct wl_pointer *p, uint32_t time, uint32_t axis) {
+    (void)d; (void)p; (void)time; (void)axis;
+}
+static void expire_wheels(struct RuneWaylandBoard *b, gint64 now) {
+    while (b->wheels.head && ((struct WheelReceipt *)b->wheels.head->data)->received < now - G_USEC_PER_SEC)
+        g_free(g_queue_pop_head(&b->wheels));
+}
+static void pointer_frame(void *d, struct wl_pointer *p) {
+    (void)p;
+    struct RuneWaylandBoard *b = d;
+    struct WheelAxes axes = b->wheel;
+    b->wheel = (struct WheelAxes){0};
+    if (!(axes.raw[0] || axes.raw[1] || axes.discrete[0] || axes.discrete[1])) return;
+    if (!b->pointer_focus) return;
+    struct WheelReceipt *r = g_new0(struct WheelReceipt, 1);
+    r->surface = b->pointer_focus; r->received = g_get_monotonic_time();
+    gboolean continuous = axes.source == WL_POINTER_AXIS_SOURCE_FINGER || axes.source == WL_POINTER_AXIS_SOURCE_CONTINUOUS;
+    gboolean wheel = axes.source == WL_POINTER_AXIS_SOURCE_WHEEL || axes.source == WL_POINTER_AXIS_SOURCE_WHEEL_TILT;
+    r->has_points = axes.has_source && (continuous || wheel) && !axes.kinds[0] && !axes.kinds[1];
+    for (int a = 0; a < 2; ++a) {
+        r->lines[a] = axes.kinds[a] ? axes.discrete[a] : axes.raw[a] / 10.f;
+        /* Winit's finger/continuous gain is 120 points per ten surface units.
+           A wheel can send pixel-valued frames between discrete detents. */
+        r->points[a] = continuous ? axes.raw[a] * 12.f : axes.raw[a];
+    }
+    /* A caller can discard SDL events, for example after closing a window. */
+    expire_wheels(b, r->received);
+    g_queue_push_tail(&b->wheels, r);
+}
+int rune_wayland_board_wheel_points(struct RuneWaylandBoard *b, uint32_t window, float x, float y, float *px, float *py) {
+    if (!b || !px || !py || !b->pointer || wl_pointer_get_version(b->pointer) < WL_POINTER_FRAME_SINCE_VERSION) return 0;
+    /* SDL read this batch from the shared display. Dispatch only bytes already
+       queued for our seat, and leave subsequent socket input to the host. */
+    wl_display_dispatch_queue_pending(b->display, b->queue);
+    if (g_queue_is_empty(&b->wheels)) return 0;
+    SDL_Window *sdl = SDL_GetWindowFromID(window);
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!sdl || !SDL_GetWindowWMInfo(sdl, &info) || info.subsystem != SDL_SYSWM_WAYLAND) return 0;
+    for (GList *it = b->wheels.head; it; it = it->next) {
+        struct WheelReceipt *r = it->data;
+        if (r->surface != info.info.wl.surface || r->lines[1] != x || r->lines[0] != y) continue;
+        gboolean matched = r->has_points;
+        if (matched) { *px = r->points[1]; *py = r->points[0]; }
+        g_queue_delete_link(&b->wheels, it);
+        g_free(r);
+        return matched;
+    }
+    return 0;
 }
 static const struct wl_pointer_listener pointer_events = {
-    .enter = pointer_enter, .leave = pointer_leave, .motion = pointer_motion, .button = pointer_button, .axis = pointer_axis
+    .enter = pointer_enter, .leave = pointer_leave, .motion = pointer_motion, .button = pointer_button, .axis = pointer_axis,
+    .frame = pointer_frame, .axis_source = axis_source, .axis_stop = axis_stop, .axis_discrete = axis_discrete,
+#ifdef WL_POINTER_AXIS_VALUE120_SINCE_VERSION
+    .axis_value120 = axis_value120
+#endif
 };
 static void touch_down(void *d, struct wl_touch *p, uint32_t s, uint32_t t, struct wl_surface *w, int32_t id, wl_fixed_t x, wl_fixed_t y) {
     (void)p; (void)t; (void)x; (void)y;
@@ -323,7 +417,14 @@ static void touch_motion(void *d, struct wl_touch *p, uint32_t t, int32_t id, wl
 }
 static void touch_noop(void *d, struct wl_touch *p) { (void)d; (void)p; }
 static void touch_cancel(void *d, struct wl_touch *p) { (void)p; ((struct RuneWaylandBoard *)d)->touch_serial = 0; }
-static const struct wl_touch_listener touch_events = {.down=touch_down, .up=touch_up, .motion=touch_motion, .frame=touch_noop, .cancel=touch_cancel};
+static void touch_shape(void *d, struct wl_touch *p, int32_t id, wl_fixed_t major, wl_fixed_t minor) {
+    (void)d; (void)p; (void)id; (void)major; (void)minor;
+}
+static void touch_orientation(void *d, struct wl_touch *p, int32_t id, wl_fixed_t angle) {
+    (void)d; (void)p; (void)id; (void)angle;
+}
+static const struct wl_touch_listener touch_events = {.down=touch_down, .up=touch_up, .motion=touch_motion, .frame=touch_noop,
+    .cancel=touch_cancel, .shape=touch_shape, .orientation=touch_orientation};
 static void capabilities(void *data, struct wl_seat *seat, uint32_t flags) {
     struct RuneWaylandBoard *b = data;
     if ((flags & WL_SEAT_CAPABILITY_KEYBOARD) && !b->keyboard) {
@@ -332,6 +433,7 @@ static void capabilities(void *data, struct wl_seat *seat, uint32_t flags) {
     if ((flags & WL_SEAT_CAPABILITY_POINTER) && !b->pointer) {
         b->pointer = wl_seat_get_pointer(seat); wl_pointer_add_listener(b->pointer, &pointer_events, b);
     } else if (!(flags & WL_SEAT_CAPABILITY_POINTER) && b->pointer) {
+        b->wheel = (struct WheelAxes){0};
         wl_pointer_release(b->pointer); b->pointer = NULL; b->pointer_focus = NULL; b->pointer_serial = 0;
     }
     if ((flags & WL_SEAT_CAPABILITY_TOUCH) && !b->touch) {
@@ -346,7 +448,12 @@ static void global(void *data, struct wl_registry *registry, uint32_t name, cons
     struct RuneWaylandBoard *b = data;
     rune_wayland_primary_global(&b->primary_globals, name, type, version);
     if (!strcmp(type, "wl_seat") && !b->seat && version >= 3) {
-        b->seat = wl_registry_bind(registry, name, &wl_seat_interface, 3);
+#ifdef WL_POINTER_AXIS_VALUE120_SINCE_VERSION
+        const unsigned supported = WL_POINTER_AXIS_VALUE120_SINCE_VERSION;
+#else
+        const unsigned supported = WL_POINTER_FRAME_SINCE_VERSION;
+#endif
+        b->seat = wl_registry_bind(registry, name, &wl_seat_interface, MIN(version, supported));
         wl_seat_add_listener(b->seat, &seat_events, b);
     } else if (!strcmp(type, "wl_data_device_manager") && !b->manager && version >= 2) {
         b->manager = wl_registry_bind(registry, name, &wl_data_device_manager_interface, MIN(version, 3u));
@@ -388,6 +495,7 @@ failed:
 }
 void rune_wayland_board_close(struct RuneWaylandBoard *b) {
     if (!b) return;
+    g_queue_clear_full(&b->wheels, g_free);
     SDL_DelEventWatch(count_presses, b);
     if (b->keymap_fd >= 0) close(b->keymap_fd);
     xkb_state_unref(b->key_state);
@@ -408,6 +516,7 @@ void rune_wayland_board_close(struct RuneWaylandBoard *b) {
 }
 void rune_wayland_board_pump(struct RuneWaylandBoard *b) {
     if (!b) return;
+    if (!g_queue_is_empty(&b->wheels)) expire_wheels(b, g_get_monotonic_time());
     wl_display_dispatch_queue_pending(b->display, b->queue);
     /* Poll the shared fd before SDL's next frame. Reading delivers events
        to their respective queues and leaves SDL's callbacks to SDL. */

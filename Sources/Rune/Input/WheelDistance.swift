@@ -18,10 +18,10 @@ public enum MouseScrollDelta: Sendable, Equatable {
 extension Runtime {
     /// Delivers a desktop wheel in window points. Ctrl+wheel magnification uses
     /// its native distance, and ordinary wheel handlers receive view points.
-    internal func desktopWheel(dx: Float, dy: Float, at point: Vec2, mods: Mods, now: Double) {
+    internal func desktopWheel(dx: Float, dy: Float, at point: Vec2, mods: Mods, now: Double, precise: Bool = false) {
         if mods.ctrl && pinchWheel(dy: dy, at: point, now: now) { return }
         let zoom = zoom()
-        wheel(WheelEvent(dx: dx / zoom, dy: dy / zoom, precise: false, mods: mods), at: point, now: now)
+        wheel(WheelEvent(dx: dx / zoom, dy: dy / zoom, precise: precise, mods: mods), at: point, now: now)
     }
 
     /// Resolves Windows' per-device line/page setting in window points before page zoom.
