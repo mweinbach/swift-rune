@@ -73,14 +73,22 @@ struct RuneKitTests {
         #expect(scene.primitives.count > 20)
     }
 
-    @Test("FileDiff LCS computation, unified git patch parser, and unified/split diffView")
+    @Test("FileDiff line changes, unified git patch parser, and unified/split diffView")
     @MainActor
     func diffComputationAndRendering() {
         let oldSrc = "line 1\nline 2\nline 3"
         let newSrc = "line 1\nline two\nline 3\nline 4"
         let computed = FileDiff.between(old: oldSrc, new: newSrc, path: "main.swift")
-        #expect(computed.additionsCount == 2)
-        #expect(computed.deletionsCount == 1)
+        #expect(computed.additionsCount == 3)
+        #expect(computed.deletionsCount == 2)
+        // The old final line gains a newline when the new fourth line follows it.
+        let thirdLines = computed.hunks.flatMap(\.lines).filter { $0.text == "line 3" }
+        #expect(thirdLines.map(\.kind) == [.deletion, .addition])
+        #expect(thirdLines.map(\.noNewline) == [true, false])
+
+        let terminated = FileDiff.between(old: oldSrc + "\n", new: newSrc + "\n", path: "main.swift")
+        #expect(terminated.additionsCount == 2)
+        #expect(terminated.deletionsCount == 1)
 
         let patch = """
         diff --git a/Sources/App.swift b/Sources/App.swift

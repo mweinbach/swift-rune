@@ -669,12 +669,17 @@ public struct FileDiff: Sendable, Equatable {
         Syntax.langForPath(path)
     }
 
-    /// Single-side file indicator if the file was added or deleted.
+    /// The only side that has content for an added, deleted, or one-sided text diff.
     public var soleSide: DiffSide? {
         switch status {
-        case .added: .new
-        case .deleted: .old
-        case .modified, .renamed, .copied: nil
+        case .added: return .new
+        case .deleted: return .old
+        case .modified:
+            guard let source else { return nil }
+            if source.oldLines.isEmpty && !source.newLines.isEmpty { return .new }
+            if source.newLines.isEmpty && !source.oldLines.isEmpty { return .old }
+            return nil
+        case .renamed, .copied: return nil
         }
     }
 
@@ -817,15 +822,29 @@ public struct FileDiff: Sendable, Equatable {
         path: String = "file",
         context: Int = 3
     ) -> FileDiff {
+        var diff = fromTexts(path: path, old: old, new: new, context: context)
+        if old.isEmpty && !new.isEmpty {
+            diff.status = .added
+            diff.oldPath = "/dev/null"
+        } else if new.isEmpty && !old.isEmpty {
+            diff.status = .deleted
+            diff.newPath = "/dev/null"
+        }
+        return diff
+    }
+
+    /// Computes a diff for two versions of the same path (`FileDiff::from_texts`).
+    public static func fromTexts(
+        path: String,
+        old: String,
+        new: String,
+        context: Int = 3
+    ) -> FileDiff {
+        if old.utf8.contains(0) || new.utf8.contains(0) {
+            return FileDiff(oldPath: path, newPath: path, hunks: [], isBinary: true)
+        }
         let oldLines = DiffSource.splitLines(old)
         let newLines = DiffSource.splitLines(new)
-        let status: FileStatus = if oldLines.isEmpty && !newLines.isEmpty {
-            .added
-        } else if !oldLines.isEmpty && newLines.isEmpty {
-            .deleted
-        } else {
-            .modified
-        }
 
         let missingOldBreak = !old.isEmpty && old.utf8.last != 10
         let missingNewBreak = !new.isEmpty && new.utf8.last != 10
@@ -836,23 +855,12 @@ public struct FileDiff: Sendable, Equatable {
         DiffPairs.pairLines(&hunks)
 
         return FileDiff(
-            oldPath: status == .added ? "/dev/null" : path,
-            newPath: status == .deleted ? "/dev/null" : path,
-            status: status,
+            oldPath: path,
+            newPath: path,
             hunks: hunks,
             isBinary: false,
             source: DiffSource(oldLines: oldLines, newLines: newLines)
         )
-    }
-
-    /// Upstream convenience alias matching `FileDiff::from_texts(path, old, new, context)`.
-    public static func fromTexts(
-        path: String,
-        old: String,
-        new: String,
-        context: Int = 3
-    ) -> FileDiff {
-        between(old: old, new: new, path: path, context: context)
     }
 
     /// Builds a `FileDiff` when either `old` or `new` may be nil (`FileDiff::patch`).
@@ -863,7 +871,7 @@ public struct FileDiff: Sendable, Equatable {
         oldPath: String? = nil,
         context: Int = 3
     ) -> FileDiff {
-        var diff = between(old: old ?? "", new: new ?? "", path: path, context: context)
+        var diff = fromTexts(path: path, old: old ?? "", new: new ?? "", context: context)
         if old == nil && new != nil {
             diff.status = .added
             diff.oldPath = "/dev/null"

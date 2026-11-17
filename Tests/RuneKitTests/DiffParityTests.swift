@@ -970,6 +970,50 @@ struct DiffParityTests {
         #expect(nn[0].hunks[0].lines[2].noNewline == true)
     }
 
+    @Test("An existing empty file keeps its path and reports which side has text")
+    func emptyVersionKeepsPath() {
+        for (old, new, side) in [("", "x", DiffSide.new), ("x", "", .old)] {
+            let file = FileDiff.fromTexts(path: "a.txt", old: old, new: new)
+            #expect(file.status == .modified)
+            #expect(file.oldPath == "a.txt" && file.newPath == "a.txt")
+            #expect(file.soleSide == side)
+            #expect(FileDiff.patch(old: old, new: new, path: "a.txt") == file)
+
+            let renamed = FileDiff.patch(old: old, new: new, path: "b.txt", oldPath: "a.txt")
+            #expect(renamed.status == .renamed(from: "a.txt"))
+            #expect(renamed.oldPath == "a.txt" && renamed.newPath == "b.txt")
+            #expect(renamed.soleSide == nil)
+        }
+        #expect(FileDiff.fromTexts(path: "a.txt", old: "", new: "").soleSide == nil)
+        #expect(FileDiff.between(old: "", new: "x", path: "a.txt").status == .added)
+        #expect(FileDiff.between(old: "x", new: "", path: "a.txt").status == .deleted)
+    }
+
+    @Test("A NUL on either side produces a binary diff and preserves file metadata")
+    func binaryContentFromTexts() {
+        let binary = "a\0b"
+        for (old, new) in [(binary, ""), ("", binary), (binary, "c\0d")] {
+            let file = FileDiff.fromTexts(path: "img.bin", old: old, new: new)
+            #expect(file.isBinary)
+            #expect(file.hunks.isEmpty)
+            #expect(file.source == nil)
+            #expect(file.soleSide == nil)
+            #expect(file.status == .modified)
+            #expect(file.oldPath == "img.bin")
+            #expect(file.newPath == "img.bin")
+        }
+
+        let added = FileDiff.patch(old: nil, new: binary, path: "img.bin")
+        #expect(added.isBinary && added.status == .added)
+        #expect(added.oldPath == "/dev/null" && added.newPath == "img.bin")
+        let deleted = FileDiff.patch(old: binary, new: nil, path: "img.bin")
+        #expect(deleted.isBinary && deleted.status == .deleted)
+        #expect(deleted.oldPath == "img.bin" && deleted.newPath == "/dev/null")
+        let renamed = FileDiff.patch(old: binary, new: "plain", path: "new.bin", oldPath: "old.bin")
+        #expect(renamed.isBinary && renamed.status == .renamed(from: "old.bin"))
+        #expect(renamed.oldPath == "old.bin" && renamed.newPath == "new.bin")
+    }
+
     @Test("diff/myers.rs: random_inputs_match_dp_lcs_length (1200 rounds), huge_inputs_with_scattered_edits (30k), repeated_blocks_pair_cleanly")
     func diffMyersLcsHugeAndRepeatedBlocks() {
         func dpLcsLength(_ a: [Int], _ b: [Int]) -> Int {

@@ -10,29 +10,42 @@ struct Phase3DiffTests {
 
     @Test("rune-kit-diff: renders 5 PR files, annotation thread, and switches to split mode")
     func multiFilePRAndSplitToggle() throws {
-        let rt = Runtime<ReviewState>(
-            state: initialReviewState(),
-            viewport: Vec2(900, 620),
-            pixelScale: 2.0,
-            systemDark: true,
-            view: reviewView
-        )
-        rt.frame(at: 0.0)
+        let rt = makeApp().makeRuntime(systemDark: true)
+        var time = 0.0
+        rt.frame(at: time)
         let treeData = try JSONSerialization.data(withJSONObject: rt.treeJSON())
         let tree0 = String(decoding: treeData, as: UTF8.self)
         #expect(tree0.contains("Add jitter to retry backoff"))
         #expect(tree0.contains("5 files"))
-        #expect(tree0.contains("backoff.rs"))
-        #expect(tree0.contains("retry-curve.png"))
         #expect(tree0.contains("Jitter keeps a crowd"))
         #expect(rt.state.diff.mode == .unified)
 
+        let paths = ["src/net/backoff.rs", "web/fetch.ts", "config/retry.toml",
+                     "src/net/backoff_policy.rs", "assets/retry-curve.png"]
+        for (file, path) in paths.enumerated() {
+            if file > 0 {
+                time += 1.0 / 60
+                #expect(rt.keyDown(KeyEvent(key: .text("]")), at: time))
+                for _ in 0..<6 {
+                    time += 1.0 / 60
+                    rt.frame(at: time)
+                }
+            }
+            let key = file == 0 ? "diff-header" : "diff-f\(file)-header"
+            let header = try #require(rt.element(byKey: key))
+            #expect(header.label?.hasPrefix("\(path),") == true)
+            #expect(header.visible[3] > 0)
+        }
+        #expect(rt.elements().contains {
+            $0.text == "Binary file changed — diff preview unavailable" && $0.visible[3] > 0
+        })
+
         let splitRect = try #require(rt.element(byKey: "modes-1")?.rect)
         let center = Vec2(splitRect[0] + splitRect[2] * 0.5, splitRect[1] + splitRect[3] * 0.5)
-        rt.pointerMove(to: center, at: 0.01)
-        rt.pointerDown(at: center, at: 0.02)
-        rt.pointerUp(at: center, at: 0.03)
-        rt.frame(at: 0.04)
+        rt.pointerMove(to: center, at: time + 0.01)
+        rt.pointerDown(at: center, at: time + 0.02)
+        rt.pointerUp(at: center, at: time + 0.03)
+        rt.frame(at: time + 0.04)
 
         #expect(rt.state.diff.mode == .split)
     }
