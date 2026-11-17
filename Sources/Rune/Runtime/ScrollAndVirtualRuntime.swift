@@ -2574,21 +2574,18 @@ extension Runtime {
         // A centred row or text mark can move again when neighbouring virtual rows measure.
         for reveal in scrollRequestsState.reveals where reveal.center {
             let viewportPath = reveal.viewport
-            let prefix = viewportPath + "/"
-            guard let view = presentedRectByPath[viewportPath],
-                  let index = lastElements.indices.first(where: { index in
-                      let element = lastElements[index]
-                      return !element.exiting && element.path.hasPrefix(prefix)
-                          && LayoutKeyIndex.selects(selector: reveal.key, nodeIndex: index, nodes: lastElements,
-                                                    keyOf: { $0.key }, parentOf: { $0.parentIndex })
-                  }),
+            guard let target = mountedRevealTarget(reveal),
+                  let view = presentedRectByPath[viewportPath],
                   let offset = scrollOffsets[viewportPath] else { continue }
-            let target = lastElements[index]
+            let node = flatNodes[target.nodeIndex]
+            guard let drawn = presentedRectByPath[node.path] else { continue }
             let scale = presentedScaleByPath[viewportPath]?.y ?? 1
             guard scale > 1e-4 else { continue }
-            let top = (target.rect[1] - view.top) / scale
+            let nodeScale = presentedScaleByPath[node.path]?.y ?? 1
+            let top = (drawn.top + (target.rect.top - node.targetRect.top) * nodeScale - view.top) / scale
+            let height = target.rect.height * nodeScale
             let to = min(scrollMaxExtents[viewportPath]?.y ?? 0,
-                         max(0, offset.y + top - max(0, view.height - target.rect[3]) / (2 * scale)))
+                         max(0, offset.y + top - max(0, view.height - height) / (2 * scale)))
             let gliding = scrollGlidingPaths.contains(viewportPath)
             let nid = NodeId.hash("scroll:" + viewportPath)
             let aim = gliding ? scrollStore.target(nid, Props.SCROLL)?.y ?? offset.y : offset.y
@@ -2635,6 +2632,29 @@ extension Runtime {
         return false
     }
 
+    private func mountedRevealTarget(_ reveal: ScrollRevealTarget) -> (nodeIndex: Int, rect: MotionRect)? {
+        guard let viewport = nodeByPath[reveal.viewport] else { return nil }
+        func accepts(_ index: Int) -> Bool {
+            let node = flatNodes[index]
+            guard node.enclosingVScrollIndex == viewport, !subtreeExiting(index) else { return false }
+            guard let scope = reveal.scope else { return true }
+            var parent = node.parentIndex
+            while let i = parent {
+                let owner = flatNodes[i]
+                if selectsElementSelector(scope, path: owner.path, key: owner.key) { return true }
+                parent = owner.parentIndex
+            }
+            return false
+        }
+        if let i = flatNodes.indices.first(where: { i in
+            let node = flatNodes[i]
+            return selectsElementSelector(reveal.key, path: node.path, key: node.key) && accepts(i)
+        }) {
+            return (i, flatNodes[i].targetRect)
+        }
+        return highlightTargetWithNode(selector: reveal.key, including: accepts)
+    }
+
     internal func finishKeeps(cut: Bool) {
         guard !scrollRequestsState.isEmpty else { return }
         scrollRequestsState.stepEndClamps { k in
@@ -2648,8 +2668,7 @@ extension Runtime {
         }
 
         let isRevealTargetMounted: (ScrollRevealTarget) -> Bool = { target in
-            self.flatNodes.contains { selectsElementSelector(target.key, path: $0.path, key: $0.key) }
-                || self.highlightTargetWithNode(selector: target.key, scrolled: true) != nil
+            self.mountedRevealTarget(target) != nil
         }
         if cut {
             scrollRequestsState.stepFinish(

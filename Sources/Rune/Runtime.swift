@@ -3408,6 +3408,19 @@ public final class Runtime<State> {
                 // Ordinary layout changes spring on the inherited element motion.
                 // Virtual containers, explicit transactions and flights own their placement.
                 layoutAnimSpec = LayoutAnim(spring: nodeStyleSpring ?? MotionTokens.DEFAULT)
+                // Scrolling changes a direct child's scene coordinates without changing its
+                // layout in the viewport. Let the viewport own that movement.
+                if let parentNid, let previousParent = nodeById[parentNid],
+                   previousParent.scrollShift != parentScroll, let previous = nodeById[nid] {
+                    if previousParent.scrollShift.x != parentScroll.x,
+                       previous.localRect.left == localRect.left, previous.localRect.width == localRect.width {
+                        layoutAnimSpec?.x = .instant
+                    }
+                    if previousParent.scrollShift.y != parentScroll.y,
+                       previous.localRect.top == localRect.top, previous.localRect.height == localRect.height {
+                        layoutAnimSpec?.y = .instant
+                    }
+                }
             } else {
                 layoutAnimSpec = el.layoutAnim
             }
