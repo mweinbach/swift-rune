@@ -302,6 +302,8 @@ struct BreakerAndWarmTests {
     @Test("WarmGpuCoordinator warms synchronously, surfaces alive handle within TTL, and sweeps expired handles")
     func warmGpuCoordinatorLifecycleAndPrewarmSlot() async throws {
         func warmHandle(
+            _ phase: String,
+            sourceLocation: SourceLocation = #_sourceLocation,
             _ start: (@escaping @Sendable (WarmedGpuHandle?) -> Void) -> Void
         ) async throws -> WarmedGpuHandle {
             let (handles, completion) = AsyncStream<WarmedGpuHandle>.makeStream()
@@ -315,7 +317,7 @@ struct BreakerAndWarmTests {
                 completion.finish()
             }
             var iterator = handles.makeAsyncIterator()
-            return try #require(await iterator.next(), "Metal warm-up must return a handle")
+            return try #require(await iterator.next(), "Missing handle from \(phase)", sourceLocation: sourceLocation)
         }
 
         #expect(GpuWarmPolicy.lingerDuration == 30.0)
@@ -333,8 +335,8 @@ struct BreakerAndWarmTests {
             coord.resetForTesting()
         }
 
-        let handle = try await warmHandle { finish in
-            DispatchQueue.global(qos: .userInitiated).async {
+        let handle = try await warmHandle("synchronous warm-up") { finish in
+            Thread.detachNewThread {
                 finish(WarmGpuCoordinator.warmSynchronously(pixelFormat: .bgra8Unorm_srgb))
             }
         }
@@ -356,8 +358,8 @@ struct BreakerAndWarmTests {
         #expect(slot.state == .idle)
 
         // A caller that takes a running slot waits for its original warm-up.
-        _ = try await warmHandle { finish in
-            DispatchQueue.global(qos: .userInitiated).async {
+        _ = try await warmHandle("taking a running prewarm slot") { finish in
+            Thread.detachNewThread {
                 slot.start(pixelFormat: .bgra8Unorm_srgb)
                 finish(slot.take())
             }
@@ -369,7 +371,7 @@ struct BreakerAndWarmTests {
         #expect(slot.state == .idle)
 
         // WarmGpuCoordinator.warmGpuWith enforces lingerDuration (30s) rather than parkedDuration (300s)
-        _ = try await warmHandle { finish in
+        _ = try await warmHandle("coordinator completion") { finish in
             coord.warmGpuWith(pixelFormat: .bgra8Unorm_srgb, emitEvents: false, at: base, completion: finish)
         }
         // Expired after lingerDuration (30s) even though < parkedDuration (300s)

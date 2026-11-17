@@ -48,6 +48,13 @@ public final class WarmedGpuHandle: @unchecked Sendable {
     }
 }
 
+private func startGpuWarmThread(named name: String, _ work: @escaping @Sendable () -> Void) {
+    let thread = Thread(block: work)
+    thread.name = name
+    thread.qualityOfService = .userInitiated
+    thread.start()
+}
+
 /// Asynchronous prewarm slot matching `render/prewarm.rs`'s `Slot` (`Idle` / `Running` / `Done`).
 public final class PrewarmSlot: @unchecked Sendable {
     private let cond = NSCondition()
@@ -80,7 +87,7 @@ public final class PrewarmSlot: @unchecked Sendable {
         result = nil
         cond.unlock()
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        startGpuWarmThread(named: "rune-gpu-prewarm") { [weak self] in
             let warmed = WarmGpuCoordinator.warmSynchronously(
                 device: device,
                 pixelFormat: pixelFormat,
@@ -243,7 +250,7 @@ public final class WarmGpuCoordinator: @unchecked Sendable {
         )
     }
 
-    /// Warms a GPU on a background queue and parks it for `GpuWarmPolicy.lingerDuration` (30s) for `surfaceGpu()`.
+    /// Warms a GPU on a background thread and parks it for `GpuWarmPolicy.lingerDuration` (30s) for `surfaceGpu()`.
     public func warmGpu(
         device: MTLDevice? = nil,
         pixelFormat: MTLPixelFormat = .bgra8Unorm,
@@ -252,7 +259,7 @@ public final class WarmGpuCoordinator: @unchecked Sendable {
         warmGpuWith(device: device, pixelFormat: pixelFormat, emitEvents: emitEvents, completion: nil)
     }
 
-    /// Warms a GPU on a background queue, parks it for `lingerDuration` if alive (extending TTL if already warm/making), and invokes `completion`.
+    /// Warms a GPU on a background thread, parks it for `lingerDuration` if alive (extending TTL if already warm/making), and invokes `completion`.
     public func warmGpuWith(
         device: MTLDevice? = nil,
         pixelFormat: MTLPixelFormat = .bgra8Unorm,
@@ -291,7 +298,7 @@ public final class WarmGpuCoordinator: @unchecked Sendable {
         }
         cond.unlock()
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        startGpuWarmThread(named: "rune-gpu-warm") { [weak self] in
             let handle = Self.warmSynchronously(
                 device: device,
                 pixelFormat: pixelFormat,
