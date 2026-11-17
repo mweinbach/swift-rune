@@ -1010,6 +1010,8 @@ public final class Runtime<State> {
     internal var hoverHold = HoverHold()
     /// Per scroll viewport path: the hover hold an app's instant scroll armed (`ScrollState::nudge`).
     internal var scrollNudges: [String: ScrollNudge] = [:]
+    /// Per scroll viewport path: where an offset request's glides were sent (`ScrollOffsetRequests.swift`).
+    internal var scrollOffsetAims: [String: ScrollOffsetAims] = [:]
     /// The node ids the last build drew, in order (`Runtime::built_ids`): hover tracks retarget
     /// only against geometry built for these nodes.
     internal var builtHoverIds: [NodeId] = []
@@ -1918,6 +1920,7 @@ public final class Runtime<State> {
         syncMotionLoopClock(to: now, animNow: animNow)
 
         // Sample inertial scroll decay tracks and re-position scrolled rects without running views
+        followScrollOffsetAims(animNow: animNow)
         scrollStore.sample(at: animNow)
         if scrollStore.isAnimating {
             var anyScrollMoved = false
@@ -1925,17 +1928,15 @@ public final class Runtime<State> {
                 let nid = NodeId.hash("scroll:" + path)
                 if var cur = scrollStore.get(nid, Props.SCROLL) {
                     var wasGliding = false
-                    if scrollGlidingPaths.contains(path),
-                       scrollStore.isMoving(nid, Props.SCROLL),
-                       let target = scrollStore.target(nid, Props.SCROLL),
-                       let vel = scrollStore.velocity(nid, Props.SCROLL),
-                       abs(target.x - cur.x) < 0.1 && abs(vel.x) < 4.0,
-                       abs(target.y - cur.y) < 0.1 && abs(vel.y) < 4.0 {
-                        // Upstream offset.rs:183 (`LAND = 0.1`, `|v| < 40 * LAND`) lands scroll glides at exact target.
-                        cur = target
-                        scrollStore.snap(nid, Props.SCROLL, to: target)
-                        scrollGlidingPaths.remove(path)
-                        wasGliding = true
+                    if scrollGlidingPaths.contains(path), let landed = landScrollGlideLanes(path: path) {
+                        // Upstream `offset.rs::glide_axis` (`LAND = 0.1`, `|v| < 40 * LAND`) lands
+                        // each axis of a glide at its exact end on its own.
+                        cur = landed.value
+                        if landed.over {
+                            scrollGlidingPaths.remove(path)
+                            scrollOffsetAims.removeValue(forKey: path)
+                            wasGliding = true
+                        }
                     }
                     let clamped = Vec2(
                         cur.x.clamped(to: 0...maxExt.x),

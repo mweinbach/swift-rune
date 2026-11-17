@@ -336,9 +336,10 @@ extension Runtime {
     /// its element holds a press with the pointer inside (or a middle/secondary button's tint
     /// over it) and is allowed (not inert, not behind a modal), else to 0. The track is readied
     /// from rest (`paint/tracks.rs::ready_from_rest`), goes down on `INSTANT` and comes back up
-    /// on `SNAPPY`; a cut or Reduce Motion lands it.
+    /// on `SNAPPY`; a cut lands it. Under Reduce Motion the store fades this opacity track on
+    /// `REDUCED_FADE` instead of springing it (upstream `store.rs::animate_raw`).
     internal func syncPressColorTracks(at now: Double, cut: Bool) {
-        let snapImmediately = cut || cxSettings.hostReducedMotion
+        let snapImmediately = cut
         for node in flatNodes {
             let el = node.el
             guard el.pressColor != nil || (el.pressBg?.a ?? 0) > 0 else { continue }
@@ -702,9 +703,10 @@ extension Runtime {
                 lastHoverTargetById[nid] = target
                 continue
             }
-            // Reduce Motion lands each change instead of animating it, but the hold still
-            // applies: upstream skips a held flip whatever the motion setting (`hover.rs:384-385`).
-            let reduce = cxSettings.hostReducedMotion
+            // Under Reduce Motion the store turns any curve but an instant one on this opacity
+            // track into `REDUCED_FADE` (`AnimationStore.reducedMotion`, upstream
+            // `store.rs::animate_raw` + `PropClass::reduce`), so nothing here snaps for it; and
+            // the hold applies whatever the motion setting (`hover.rs:384-385`).
             let curves = hoverCurvesById[nid]
             if !changed {
                 // Default hover animations inherit velocity and have no completion token. An
@@ -715,11 +717,7 @@ extension Runtime {
                     if !liveStore.has(trackId, Self.hoverProp) {
                         liveStore.snap(trackId, Self.hoverProp, to: 0.0)
                     }
-                    if reduce {
-                        liveStore.snap(trackId, Self.hoverProp, to: target)
-                    } else {
-                        liveStore.set(trackId, Self.hoverProp, to: target, anim: isLit ? curves.enter : curves.exit, at: now)
-                    }
+                    liveStore.set(trackId, Self.hoverProp, to: target, anim: isLit ? curves.enter : curves.exit, at: now)
                 }
                 lastHoverTargetById[nid] = current
                 continue
@@ -735,7 +733,7 @@ extension Runtime {
             if readyHoverFromRest(nid, to: target) {
                 let drewNothing = unseen ?? kitHooks.unseenPresence.drewNothing(nodes: flatNodes)
                 unseen = drewNothing
-                if reduce || (drewNothing.indices.contains(i) && drewNothing[i]) {
+                if drewNothing.indices.contains(i) && drewNothing[i] {
                     liveStore.snap(trackId, Self.hoverProp, to: target)
                 } else {
                     liveStore.set(trackId, Self.hoverProp, to: target, anim: anim, at: now)
