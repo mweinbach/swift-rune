@@ -1043,7 +1043,10 @@
         {
           "upstream": "src/frame/profile.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Shell/FrameProfiling.swift",
+            "Sources/Rune/Platform/PortableExecution.swift",
+            "Tests/Browser/DiagnosticsApp/Sources/DiagnosticsProbe/main.swift"
           ],
           "status": "partial",
           "note": "Normal release frames enable profiling on demand. Scoped and explicit controls reuse phase measurements independently of budget and interaction clocks. A 100k-table and 50k-tree fixture checked the same mounted work in both modes. Complete original file-log and per-backend counters have separate coverage."
@@ -1814,7 +1817,8 @@
             "Sources/Rune/MotionGate/MotionGateGateAndEvidence.swift",
             "Sources/Rune/MotionGate/MotionGateRunner.swift",
             "Tests/RuneTests/MotionGateExtendedParityTests.swift",
-            "Tests/RuneTests/MotionGateParityTests.swift"
+            "Tests/RuneTests/MotionGateParityTests.swift",
+            "Tests/Browser/DiagnosticsApp/Sources/DiagnosticsProbe/main.swift"
           ],
           "status": "ported",
           "note": "Filtered gate execution, stable report order, allow counts and unused allowances are exercised by the Swift runner. Reports and allowance text were compared against the pinned Rust gate."
@@ -3195,7 +3199,9 @@
         {
           "upstream": "src/prefs.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/DesktopIntegration.swift",
+            "Tests/RuneTests/ShellPartialCloseoutTests.swift",
+            "Tests/Browser/DiagnosticsApp/Sources/DiagnosticsProbe/main.swift"
           ],
           "status": "partial"
         },
@@ -3224,7 +3230,8 @@
             "Sources/Rune/DesktopIntegration.swift",
             "Sources/Rune/Platform/QuitLifecycle.swift",
             "Sources/Rune/Platform/SingleInstance.swift",
-            "Sources/CRuneWin32/SingleInstance.cpp"
+            "Sources/CRuneWin32/SingleInstance.cpp",
+            "Tests/Browser/DiagnosticsApp/Sources/DiagnosticsProbe/main.swift"
           ],
           "status": "partial",
           "note": "Real Linux and Windows ordinary apps exercised both Tx.relaunch and AppHandle.relaunch. Each successor entered onReady only after the previous process exited. Both-way Rust/Swift takeover, stale ownership and actual Windows foreground activation also passed. Other native platform launch environments have separate verification."
@@ -6872,7 +6879,10 @@
         {
           "upstream": "src/tooling/interaction.rs",
           "swift": [
-            "Sources/Rune/Tooling.swift"
+            "Sources/Rune/Tooling.swift",
+            "Sources/Rune/Tooling/InteractionTiming.swift",
+            "Tests/RuneTests/InteractionPerfParityWaveETests.swift",
+            "Tests/Browser/DiagnosticsApp/Sources/DiagnosticsProbe/main.swift"
           ],
           "status": "partial"
         },
@@ -6995,7 +7005,8 @@
         {
           "upstream": "src/tooling/perf_warn.rs",
           "swift": [
-            "Sources/Rune/Tooling.swift"
+            "Sources/Rune/Tooling.swift",
+            "Sources/Rune/Tooling/PerfWarn.swift"
           ],
           "status": "partial"
         },
@@ -10277,7 +10288,9 @@
           "upstream": "src/lib.rs",
           "swift": [
             "Sources/RuneKnobs/Knobs.swift",
-            "Sources/RuneKnobs/KnobDescriptor.swift"
+            "Sources/RuneKnobs/KnobDescriptor.swift",
+            "Sources/Rune/Platform/PortableExecution.swift",
+            "Tests/Browser/DiagnosticsApp/Sources/DiagnosticsProbe/main.swift"
           ],
           "status": "ported"
         },
@@ -10578,7 +10591,8 @@
           "upstream": "src/lib.rs",
           "swift": [
             "Sources/RuneMac/RuneMac.swift",
-            "Sources/RuneMac/WindowFramePersistence.swift"
+            "Sources/RuneMac/WindowFramePersistence.swift",
+            "Sources/RuneMac/AppLifecycleHelpers.swift"
           ],
           "status": "ported"
         },
@@ -10630,7 +10644,8 @@
           "upstream": "src/recorder.rs",
           "swift": [
             "Sources/RunePerf/PerfRecorder.swift",
-            "Sources/RunePerf/PerfFileRecorder.swift"
+            "Sources/RunePerf/PerfFileRecorder.swift",
+            "Tests/Browser/DiagnosticsApp/Sources/DiagnosticsProbe/main.swift"
           ],
           "status": "ported"
         },
@@ -10717,7 +10732,8 @@
           "upstream": "src/lib.rs",
           "swift": [
             "Sources/RunePerf/ProcessTelemetry.swift",
-            "Sources/RunePerf/ProcessWatcher.swift"
+            "Sources/RunePerf/ProcessWatcher.swift",
+            "Tests/Browser/DiagnosticsApp/Sources/DiagnosticsProbe/main.swift"
           ],
           "status": "ported"
         }

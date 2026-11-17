@@ -1,9 +1,9 @@
 {
   "swiftExecutables" : 99,
   "swiftTargets" : 19,
-  "syncedAt" : "2026-11-17T22:29:14Z",
-  "syncedCommit" : "10a39584cc1ff739477be52e333a742a024ac956",
-  "syncedCommitDate" : "2026-11-17T16:14:15-06:00",
-  "syncedCommitSubject" : "Scroll: a wheel passes only to a region around the one under it, as Chromium chains a scroll (#1137)",
+  "syncedAt" : "2026-11-17T23:42:02Z",
+  "syncedCommit" : "47eaa86eba751687597d0aaf6ee325baeecd4666",
+  "syncedCommitDate" : "2026-11-17T17:22:20-06:00",
+  "syncedCommitSubject" : "web: use rune::time in rune-knobs and frame-profile and exclude native-only process\/diagnostic paths on wasm32 (#1119)",
   "upstreamRepo" : "https:\/\/github.com\/anomalyco\/rune"
 }
