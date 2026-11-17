@@ -952,9 +952,7 @@ struct ToolingPartialClosureTests {
         #expect((editorEl["selection"] as? [Int])?.count == 2)
         let tip = try #require(tree["tooltip"] as? [String: Any])
         #expect(tip["text"] as? String == "Type query")
-        #if os(macOS) && canImport(AppKit)
         #expect(tree["accessibility"] != nil)
-        #endif
     }
 
     @Test("trace.rs:225 - trace writer takes and resets Scene.store retarget audit across frames")

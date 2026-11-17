@@ -12251,9 +12251,7 @@ public final class Runtime<State> {
                 "rect": [r2(tip.rect.x), r2(tip.rect.y), r2(tip.rect.z), r2(tip.rect.w)],
             ]
         }
-        #if os(macOS) && canImport(AppKit)
         out["accessibility"] = AccessibilityDump.dictionary(from: accessibilitySnapshot(), isRoot: true)
-        #endif
         return out
     }
 
