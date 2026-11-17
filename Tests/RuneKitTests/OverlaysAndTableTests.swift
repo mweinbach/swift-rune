@@ -755,23 +755,23 @@ struct OverlaysAndTableTests {
         }
 
         _ = rt.keyDown(KeyEvent(key: .text("0")), at: t)
-        t += 1.0 / 120.0; rt.frame(at: t)
+        rt.frame(at: t)
         let first = try #require(rowInfo("item-0"))
-        #expect(abs(first.top) < 0.5 && first.opacity < 0.15)
+        #expect(abs(first.top) < 0.5 && first.opacity < 0.05)
         for _ in 0..<4 { t += 1.0 / 120.0; rt.frame(at: t) }
         let below = try #require(rowInfo("item-7"))
         #expect(below.top > 190.0)
 
         let stood = try #require(rowInfo("item-2")).top
         _ = rt.keyDown(KeyEvent(key: .text("9")), at: t)
-        t += 1.0 / 120.0; rt.frame(at: t)
+        rt.frame(at: t)
         let dropped = try #require(rowInfo("item-2"))
         #expect(dropped.exiting && abs(dropped.top - stood) < 0.5)
         let nextFirst = try #require(rowInfo("item-90"))
-        #expect(abs(nextFirst.top) < 0.5 && nextFirst.opacity < 0.15)
+        #expect(abs(nextFirst.top) < 0.5 && nextFirst.opacity < 0.05)
         for _ in 0..<4 { t += 1.0 / 120.0; rt.frame(at: t) }
         _ = rt.keyDown(KeyEvent(key: .text("9")), at: t)
-        t += 1.0 / 120.0; rt.frame(at: t)
+        rt.frame(at: t)
         let movedUp = try #require(rowInfo("item-99"))
         #expect(abs(movedUp.top) < 0.5)
     }
@@ -795,17 +795,17 @@ struct OverlaysAndTableTests {
             return (e.rect[1] - vp[1], e.opacity, e.exiting)
         }
         _ = rt.keyDown(KeyEvent(key: .text("0")), at: t)
-        t += 1.0 / 120.0; rt.frame(at: t)
+        rt.frame(at: t)
         for _ in 0..<4 { t += 1.0 / 120.0; rt.frame(at: t) }
         let below = try #require(rowInfo("item-7"))
         #expect(below.top > 190.0 && below.opacity == 1.0)
         _ = rt.keyDown(KeyEvent(key: .text("9")), at: t)
-        t += 1.0 / 120.0; rt.frame(at: t)
+        rt.frame(at: t)
         for _ in 0..<4 { t += 1.0 / 120.0; rt.frame(at: t) }
         _ = rt.keyDown(KeyEvent(key: .text("9")), at: t)
-        t += 1.0 / 120.0; rt.frame(at: t)
+        rt.frame(at: t)
         let movedUp = try #require(rowInfo("item-99"))
-        #expect(abs(movedUp.top) < 0.5 && movedUp.opacity < 0.15)
+        #expect(abs(movedUp.top) < 0.5 && movedUp.opacity < 0.05)
     }
 
     @Test("Combobox keystroke filter shrinks empty state, restores on backspace, and fits custom trigger inside viewport (tests/combobox.rs)")

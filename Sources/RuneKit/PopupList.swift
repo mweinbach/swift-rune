@@ -393,6 +393,10 @@ public struct PopupList<State> {
         let afterH = Float(max(0, itemList.count - end)) * rh
 
         var rows: El<State> = col().key("\(key)-rows").wFull().shrink(0.0).kitFilterKeys(itemList.map(\.id))
+        if shouldAnimateFiltering {
+            // The viewport springs to its new height while matches crossfade in their new row slots.
+            rows = rows.animateLayout(.instant)
+        }
         let extraActiveBefore = validActive.flatMap { $0 < safeStart ? $0 : nil }
         let extraActiveAfter = validActive.flatMap { $0 >= end ? $0 : nil }
 
@@ -419,7 +423,7 @@ public struct PopupList<State> {
                 .transition(Transition.opacity)
                 .bg(isActive ? k.c.hover : .transparent)
             if shouldAnimateFiltering {
-                itemRow = itemRow.animate(k.motion.overlay)
+                itemRow = itemRow.animate(k.motion.overlay).animateLayout(.instant)
             }
 
             if let desc = option.descriptionText {
