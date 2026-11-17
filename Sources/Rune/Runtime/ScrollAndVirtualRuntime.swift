@@ -1538,7 +1538,6 @@ extension Runtime {
                             out.layout.height = .points(max(0, t.h))
                             out.layout.maxHeight = .points(max(0, t.h))
                             if entry.edge.clip && !overflows {
-                                out.growthReveal = GrowthReveal(authoredClip: el.layout.clipOverflow, authoredFade: el.clipFade)
                                 out.layout.clipOverflow = true
                             }
                         }
@@ -1555,9 +1554,11 @@ extension Runtime {
                             }
                             if featherH > 0.5 {
                                 let width = min(featherH, max(1, t.h))
-                                out.growthReveal = GrowthReveal(authoredClip: el.layout.clipOverflow, authoredFade: el.clipFade)
                                 out.clipFade = SIMD4(0, 0, 0, t.linearEdge ? -width : width)
                             }
+                        }
+                        if el.joinedRowFaceKey != nil && (el.layout.clipOverflow != out.layout.clipOverflow || el.clipFade != out.clipFade) {
+                            out.growthReveal = GrowthReveal(authoredClip: el.layout.clipOverflow, authoredFade: el.clipFade)
                         }
                     }
                 }
@@ -1629,7 +1630,7 @@ extension Runtime {
             }
             let hasPending = growthStacks.values.contains { !$0.pendingHeights.isEmpty || !$0.closing.isEmpty || !$0.runs.isEmpty }
             let closingMoving = kitHooks.growthStacks.values.contains { $0.closing.values.contains { $0.track.moving } }
-            return hasPending || growthRows.values.contains { $0.track.moving } || closingMoving
+            return hasPending || growthRows.values.contains { $0.track.moving } || closingMoving || !slice2State.liveContentSlides.slides.isEmpty
         }
 
         let stepSize = GrowthCaps.fixedSubstep

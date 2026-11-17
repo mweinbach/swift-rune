@@ -49,6 +49,7 @@ internal final class Slice2RuntimeState {
     var pixelHolds: [String: PixelHold] = [:]
     var scrollHorizontalVelocities: [String: Float] = [:]
     var growthStackOrders: [NodeId: [NodeId]] = [:]
+    var growthReorderViewport: Vec2?
     var joinedRowSeams: [NodeId: [JoinedRowSeam]] = [:]
     var joinedRowsWithoutRevealMask: Set<NodeId> = []
     var liveContentSlides = ContentSlides()
@@ -696,15 +697,21 @@ extension Runtime {
 
     internal func prepareGrowthRowReorderSlides(
         specs: inout [NodeSpec],
+        colorSpring: Spring?,
         nodes: [FlatNode],
         instant: Bool,
         lands: Bool,
         relayout: Bool,
-        commitCut: Bool
+        commitCut: Bool,
+        concealing: Bool,
+        ancestorInstants: [Bool],
+        naturalTargets: [NodeId: MotionRect]
     ) -> [ReorderedRowSlide] {
         slice2State.liveTailExitParents.removeAll(keepingCapacity: true)
         guard specs.count == nodes.count else { return [] }
-        let canMove = !lands && !relayout && !commitCut && !reducedMotion
+        let resized = slice2State.growthReorderViewport.map { $0 != viewport } ?? false
+        slice2State.growthReorderViewport = viewport
+        let canMove = !lands && !relayout && !commitCut && !reducedMotion && !concealing
         var seenStacks: Set<NodeId> = []
         var slides: [ReorderedRowSlide] = []
         let rowHeight: (FlatNode) -> Float? = { node in
@@ -758,11 +765,17 @@ extension Runtime {
                 }
             )
             slice2State.growthRowReorder[stackId] = reorder
+            let reader = virtualLists[stackNode.path] != nil && stackNode.enclosingVScrollIndex.map { index in
+                let path = nodes[index].path
+                return !wasPinnedToBottom.contains(path) && !scrollRequestsState.keeps.contains { $0.viewport == path }
+            } == true
+            let instantStack = stackNode.el.hasInstantChanges || ancestorInstants[sIdx]
             updateJoinedRowSeams(stack: stackNode, nodes: nodes, rows: childIndices, oldOrder: oldOrder ?? [],
-                                 reorder: reorder, reset: lands || commitCut || reducedMotion || relayout || stackNode.el.hasInstantChanges)
+                                 reorder: reorder, naturalTargets: naturalTargets,
+                                 reset: !canMove || resized || reader || instantStack)
             guard animates else { continue }
             if let window, let oldOrder, oldOrder != newOrder {
-                slides += carryLiveTailInk(window: window, rows: childIndices, reorder: reorder, nodes: nodes, specs: &specs)
+                slides += carryLiveTailInk(window: window, colorSpring: colorSpring, rows: childIndices, reorder: reorder, nodes: nodes, specs: &specs)
             }
 
             let (vpTop, vpBottom): (Float, Float) = {

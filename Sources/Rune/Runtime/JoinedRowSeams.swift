@@ -10,7 +10,7 @@ extension El {
     }
 }
 
-/// Remembers an authored edge fade beneath a temporary growth reveal.
+/// Preserves the authored clip while row growth imposes its own reveal.
 struct GrowthReveal: Sendable {
     var authoredClip: Bool
     var authoredFade: SIMD4<Float>?
@@ -26,6 +26,14 @@ struct JoinedRowSeam {
     enum Boundary {
         case joined(rawFrom: Float)
         case opening(between: NodeId)
+
+        func targetDistance(top: Face, bottom: Face, in targets: [NodeId: MotionRect]) -> Float? {
+            guard let edge = targets[top.ink]?.bottom else { return nil }
+            switch self {
+            case .joined: return targets[bottom.ink].map { $0.top - edge }
+            case let .opening(between): return targets[between].map { $0.bottom - edge }
+            }
+        }
     }
 
     var top: Face
@@ -33,6 +41,7 @@ struct JoinedRowSeam {
     var from: Float
     var raw: Float
     var boundary: Boundary
+    var targetDistance: Float
 }
 
 extension Runtime {
@@ -47,12 +56,23 @@ extension Runtime {
 
     func updateJoinedRowSeams(
         stack: FlatNode, nodes: [FlatNode], rows: [Int], oldOrder: [NodeId],
-        reorder: VirtualRowReorder, reset: Bool
+        reorder: VirtualRowReorder, naturalTargets: [NodeId: MotionRect], reset: Bool
     ) {
         if reset {
             slice2State.joinedRowSeams.removeValue(forKey: stack.nodeId)
         }
-        guard oldOrder != rows.map({ nodes[$0].nodeId }) else { return }
+        guard oldOrder != rows.map({ nodes[$0].nodeId }) else {
+            if !naturalTargets.isEmpty, var held = slice2State.joinedRowSeams[stack.nodeId] {
+                for i in held.indices {
+                    let seam = held[i]
+                    if let distance = seam.boundary.targetDistance(top: seam.top, bottom: seam.bottom, in: naturalTargets) {
+                        held[i].targetDistance = distance
+                    }
+                }
+                slice2State.joinedRowSeams[stack.nodeId] = held
+            }
+            return
+        }
         let oldSeams = slice2State.joinedRowSeams.removeValue(forKey: stack.nodeId) ?? []
         guard !reset, let window = slice2State.liveTailWindows[stack.path],
               !reorder.jumps.isEmpty || !oldSeams.isEmpty else { return }
@@ -87,7 +107,8 @@ extension Runtime {
             let raw = retained?.raw ?? from
             let boundary: JoinedRowSeam.Boundary = joined
                 ? .joined(rawFrom: raw) : .opening(between: nodes[rows[previous.offset + 1]].nodeId)
-            seams.append(JoinedRowSeam(top: top, bottom: face, from: from, raw: raw, boundary: boundary))
+            guard let distance = boundary.targetDistance(top: top, bottom: face, in: naturalTargets) else { continue }
+            seams.append(JoinedRowSeam(top: top, bottom: face, from: from, raw: raw, boundary: boundary, targetDistance: distance))
         }
         if !seams.isEmpty { slice2State.joinedRowSeams[stack.nodeId] = seams }
     }
@@ -103,7 +124,11 @@ extension Runtime {
                 slice2State.joinedRowSeams.removeValue(forKey: stackID)
                 continue
             }
-            var moving = false
+            let stackGrowth = growthStacks[stack.path]
+            let rows = slice2State.growthStackOrders[stackID] ?? []
+            var moving = stackGrowth?.order.contains { growthRows[$0]?.track.moving == true } == true
+                || stackGrowth?.pendingHeights.isEmpty == false || stackGrowth?.runs.isEmpty == false
+                || slice2State.liveContentSlides.slides.contains { rows.contains($0.row) }
             for index in seams.indices.reversed() {
                 let seam = seams[index]
                 guard let a = nodeById[seam.top.ink], let b = nodeById[seam.bottom.ink],
@@ -111,30 +136,31 @@ extension Runtime {
                       let upper = frame.byId[a.nodeId]?.rect, let lower = frame.byId[b.nodeId]?.rect else { continue }
                 let end = upper.top + (offsets[seam.top.row] ?? 0) + a.localRect.height
                 let raw = lower.top + (offsets[seam.bottom.row] ?? 0) - end
-                let goal = b.targetRect.top - a.targetRect.bottom
                 let want: Float
                 switch seam.boundary {
                 case let .joined(rawFrom):
+                    let goal = seam.targetDistance
                     let left = abs(rawFrom - goal) < 0.01 ? 0 : min(1, max(0, (raw - goal) / (rawFrom - goal)))
                     want = goal + (seam.from - goal) * left
                 case let .opening(between):
                     guard let k = nodeById[between], let rect = frame.byId[between]?.rect else { continue }
-                    let depth = k.targetRect.bottom - a.targetRect.bottom
-                    let t = min(1, max(0, (rect.bottom + (offsets[between] ?? 0) - end) / max(1, depth)))
+                    let growthKey = (k.el.foldGlideSpec == nil ? "growth:" : "fold:") + k.path
+                    let height = growthRows[growthKey]?.track.h ?? rect.height
+                    let t = min(1, max(0, (rect.top + (offsets[between] ?? 0) + height - end) / max(1, seam.targetDistance)))
                     want = seam.from + (raw - seam.from) * t * t * (3 - 2 * t)
                 }
                 seams[index].raw = raw
                 offsets[seam.top.row, default: 0] += raw - want
                 for id in [seam.top.row, seam.bottom.row] {
                     guard let row = nodeById[id] else { continue }
-                    let track = growthRows["growth:\(row.path)"]?.track
+                    let track = growthRows[(row.el.foldGlideSpec == nil ? "growth:" : "fold:") + row.path]?.track
                     if track?.whole == true && track?.linearEdge == true {
                         slice2State.joinedRowsWithoutRevealMask.insert(id)
                     }
-                    moving = moving || scene.store.isAnimating(id, Props.OFFSET) || track?.moving == true
+                    moving = moving || scene.store.isAnimating(id, Props.OFFSET)
                 }
             }
-            if moving || growthStacks[stack.path]?.runs.isEmpty == false {
+            if moving {
                 slice2State.joinedRowSeams[stackID] = seams
             } else {
                 slice2State.joinedRowSeams.removeValue(forKey: stackID)

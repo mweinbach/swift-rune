@@ -31,6 +31,19 @@ public struct Pick: Sendable, Equatable {
     }
 }
 
+extension El {
+    func blocksHits(fill: Color, border: Color) -> Bool {
+        fill.a > 0.001 || gradient != nil || (borderWidth > 0 && border.a > 0.001)
+            || imagePayload != nil || pixelsPayload != nil || backdropBlur >= 0.5 || !shapes.isEmpty
+    }
+
+    var blocksInteractiveHits: Bool {
+        handlers.onClick != nil || handlers.onClickPress != nil || handlers.onDoubleClick != nil
+            || handlers.onPointerDown != nil || handlers.onDrag != nil || handlers.onHover != nil
+            || handlers.editLens != nil || isModal || explicitHit
+    }
+}
+
 /// Cached per-frame presented hit-testing geometry for a node in `Runtime`.
 struct HitGeometry: Sendable {
     var path: String

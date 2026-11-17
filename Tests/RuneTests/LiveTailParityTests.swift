@@ -18,6 +18,7 @@ struct LiveTailParityTests {
             let delivered = phase == .delivered
             let narrow = (delivery == .narrower || delivery == .rewrapping) && phase != .waiting
             let label: El<Phase> = el().key("label").size(40, 10).bg(delivered ? .white : .black)
+                .groupOpacity(delivered ? 0.75 : 1, 1)
             var content: El<Phase> = col().key("content").wFull().pt(delivered ? 12 : 4)
                 .child(label).childExit(.opacity)
             if delivery == .instantChild { content = content.instantChanges() }
@@ -76,6 +77,8 @@ struct LiveTailParityTests {
             let badge = try #require(previousBadge)
             let labelTop = try #require(runtime.element(byKey: "label")).rect[1]
             let groupTop = try #require(runtime.element(byKey: "content")).rect[1]
+            let animatesRestOpacity = runtime.scene.store.isAnimating(label.nodeId, Props.GROUP_REST)
+            #expect(animatesRestOpacity == (delivery == .ink))
             if delivery == .ink {
                 #expect(runtime.scene.isExiting(badge))
                 #expect(runtime.scene.store.isAnimating(label.nodeId, Props.FILL))

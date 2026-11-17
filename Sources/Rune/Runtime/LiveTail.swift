@@ -39,6 +39,7 @@ internal struct LiveTailWindow {
 internal struct LiveTailLayoutNode<State> {
     let el: El<State>
     let path: String
+    let key: String?
     let parentIndex: Int?
     let localRect: MotionRect
     let targetRect: MotionRect
@@ -51,11 +52,20 @@ extension Runtime {
     /// before growth clamps it; the last frame still supplies the actual on-screen row faces.
     internal func prepareLiveTails(
         root: El<State>, solved: LayoutEngine.ResultNode, expansion: VirtualExpansionContext,
-        previousLists: [String: RuntimeVirtualListState], now: Double
-    ) {
+        previousLists: [String: RuntimeVirtualListState], now: Double, acceptsRequests: Bool
+    ) -> [NodeId: MotionRect] {
         slice2State.liveTailWindows.removeAll(keepingCapacity: true)
         let requests = slice2State.activeLiveTail
-        guard !previousLists.isEmpty, !expansion.listMeta.isEmpty else { return }
+        guard !previousLists.isEmpty, !expansion.listMeta.isEmpty else { return [:] }
+        var targets: [NodeId: MotionRect] = [:]
+        var held: Set<NodeId> = []
+        for seams in slice2State.joinedRowSeams.values {
+            for seam in seams {
+                held.insert(seam.top.ink)
+                held.insert(seam.bottom.ink)
+                if case let .opening(between) = seam.boundary { held.insert(between) }
+            }
+        }
         var nodes: [LiveTailLayoutNode<State>] = []
         var byPath: [String: Int] = [:]
         typealias Item = (el: El<State>, result: LayoutEngine.ResultNode, path: String, parent: Int?, key: String?)
@@ -65,9 +75,11 @@ extension Runtime {
             let parent = item.parent.map { nodes[$0] }
             let local = item.result.layout.localRect
             let rect = local.translated(Vec2(parent?.targetRect.x ?? 0, parent?.targetRect.y ?? 0))
-            let id = item.el.layoutAnim?.travel == .screen ? item.key.map { NodeId.hash("screen:@" + $0) } : nil
-            nodes.append(.init(el: item.el, path: item.path, parentIndex: item.parent, localRect: local,
-                               targetRect: rect, nodeId: id ?? NodeId.hash(item.path),
+            let screenID = item.el.layoutAnim?.travel == .screen ? item.key.map { NodeId.hash("screen:@" + $0) } : nil
+            let id = screenID ?? NodeId.hash(item.path)
+            if held.contains(id) { targets[id] = rect }
+            nodes.append(.init(el: item.el, path: item.path, key: item.key, parentIndex: item.parent, localRect: local,
+                               targetRect: rect, nodeId: id,
                                instant: item.el.hasInstantChanges || (parent?.instant == true && !item.el.hasAnimatedChanges)))
             byPath[item.path] = index
             var siblings: [String: Int] = [:]
@@ -79,6 +91,8 @@ extension Runtime {
             }
             pending.append(contentsOf: children.reversed())
         }
+
+        guard acceptsRequests else { return targets }
 
         for meta in expansion.listMeta {
             guard let i = byPath[meta.listPath], let p = byPath[meta.scrollPath], nodes[i].parentIndex == p,
@@ -130,14 +144,29 @@ extension Runtime {
                 quietMounts: visible.filter { prior.rowPlaces.index(of: $0) != nil && !mounted.contains($0) },
                 ink: selectors.contains { requests.inkByStack[$0] == true }
             )
+            // The next row after a named face can become the row that opens its seam.
+            var selector: String?
+            var followsFace = false
+            for node in nodes[(i + 1)...].prefix(while: { ($0.parentIndex ?? -1) >= i }) {
+                if node.parentIndex == i {
+                    if followsFace { targets[node.nodeId] = node.targetRect }
+                    selector = node.el.joinedRowFaceKey
+                    followsFace = selector != nil
+                }
+                if let key = selector, selectsElementSelector(key, path: node.path, key: node.key) {
+                    targets[node.nodeId] = node.targetRect
+                    selector = nil
+                }
+            }
         }
+        return targets
     }
 }
 
 extension Runtime {
     /// Carry changes only inside previously drawn rows that cross, resize, or touch a crossing.
     func carryLiveTailInk(
-        window: LiveTailWindow, rows: [Int], reorder: VirtualRowReorder,
+        window: LiveTailWindow, colorSpring: Spring?, rows: [Int], reorder: VirtualRowReorder,
         nodes: [FlatNode], specs: inout [NodeSpec]
     ) -> [ReorderedRowSlide] {
         var springs: [ReorderedRowSlide] = []
@@ -168,8 +197,8 @@ extension Runtime {
                 let rides = window.ink && crosses
                 if rides {
                     specs[j].styleSpring = spring
-                    specs[j].colorSpring = spring
-                    specs[j].paintSpring = spring
+                    specs[j].colorSpring = colorSpring ?? spring
+                    specs[j].paintSpring = colorSpring ?? spring
                     specs[j].opacityAnim = el.opacityMotionAnim ?? el.kitOpacityAnim
                     specs[j].offsetAnim = el.offsetMotionAnim
                     specs[j].rotateAnim = el.rotateMotionAnim
