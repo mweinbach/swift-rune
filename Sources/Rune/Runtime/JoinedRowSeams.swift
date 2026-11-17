@@ -12,6 +12,7 @@ extension El {
 
 /// Remembers an authored edge fade beneath a temporary growth reveal.
 struct GrowthReveal: Sendable {
+    var authoredClip: Bool
     var authoredFade: SIMD4<Float>?
 }
 
