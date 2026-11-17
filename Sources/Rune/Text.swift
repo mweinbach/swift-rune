@@ -75,6 +75,12 @@ public struct TextStyle: Sendable, Hashable, Codable {
     public var features: String
     public var opticalSize: OpticalSize
     public var direction: TextFlow?
+    /// A by-paragraph field's text (`TextSpec::by_paragraph`, `text/paragraphs.rs`): set, its
+    /// pills' labels are shaped between U+2068 FSI and U+2069 PDI, and with `direction` nil each
+    /// paragraph reads the way its first strong character outside them does, else the way the
+    /// one before it does, the first this flow (`plaintext_flow`). On a field's element it holds
+    /// the element's resolved flow for `El.dirByParagraph` (`TextDir::Plaintext`). Not encoded.
+    internal var byParagraphStart: TextFlow? = nil
 
     public static let body = TextStyle(size: 13.0, weight: 400.0)
 
@@ -499,7 +505,15 @@ public struct ShapedText: @unchecked Sendable {
     #endif
     fileprivate var portableLines: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
     internal var markerMap: MarkerMap = MarkerMap()
+    /// A by-paragraph field's paragraphs over its stacked lines (`ParagraphLayout`), so a selection
+    /// boxes each paragraph's bytes and shows a selected line break (`TextFlow::range_boxes`);
+    /// empty for one layout.
+    internal var paragraphSpans: [ParagraphLineSpan] = []
+    /// The width (points) a selected line break between paragraphs highlights (`ParagraphLayout::newline`).
+    internal var paragraphNewlinePt: Float = 0
     internal var forcedDirection: TextFlow? = nil
+    /// Per line, whether its paragraph lays out right to left (its layout's base direction).
+    internal var lineIsRTL: [Bool] = []
     internal var primaryIsRTL: Bool = false
     public var wasTruncated: Bool = false
     internal var lastLineAdvancePx: Float = 0
@@ -2151,6 +2165,24 @@ public final class TextSystem: @unchecked Sendable {
         return UInt64(bitPattern: Int64(hasher.finalize()))
     }
 
+    /// Whether paragraph `text` (shaped text, its pills' labels between FSI and PDI when
+    /// isolated) lays out right to left, nil when it takes CoreText's natural direction: `style`'s
+    /// direction when it has one; under a by-paragraph field's `dirByParagraph`
+    /// (`TextStyle.byParagraphStart`) its first strong character outside its isolates, else the
+    /// direction of the paragraph before it (`previous`), the first the start flow (`flow_of` /
+    /// `key_paragraphs`); else right to left when it reads so.
+    internal static func paragraphIsRTL(_ text: String, style: TextStyle, previous: inout Bool?) -> Bool? {
+        switch style.direction {
+        case .rtl: return true
+        case .ltr: return false
+        case nil:
+            guard let start = style.byParagraphStart else { return isRTLParagraph(text) ? true : nil }
+            let rtl = firstStrongDirection(in: text, acrossParagraphs: false).map { $0 == .rtl } ?? previous ?? (start == .rtl)
+            previous = rtl
+            return rtl
+        }
+    }
+
     internal static func isRTLParagraph(_ text: String) -> Bool {
         for scalar in text.unicodeScalars {
             let v = scalar.value
@@ -2232,7 +2264,8 @@ public final class TextSystem: @unchecked Sendable {
     private static func preparePills(
         _ pills: [PillChip],
         in authText: String,
-        fontSize: Float
+        fontSize: Float,
+        isolate: Bool = false
     ) -> (shapedText: String, map: ShapedText.MarkerMap, prepared: [PreparedPill]) {
         guard !pills.isEmpty, !authText.isEmpty else {
             return (authText, ShapedText.MarkerMap(entries: [], authText: authText, lines: []), [])
@@ -2282,6 +2315,14 @@ public final class TextSystem: @unchecked Sendable {
             entries.append(.init(shapedU16: leadU16, authU16: authU16Lo, isTrail: false))
             shaped.append("\u{FFFC}")
             shapedU16 += 1
+            // A by-paragraph field shapes the label between FSI and PDI, as a `dir="auto"` span
+            // with `unicode-bidi: isolate` (`paragraphs.rs` `with_isolates`): it keeps its own
+            // direction, and its paragraph's direction skips it.
+            if isolate {
+                entries.append(.init(shapedU16: shapedU16, authU16: authU16Lo, isTrail: false))
+                shaped.append("\u{2068}")
+                shapedU16 += 1
+            }
 
             let labelStr = authText[loIdx..<hiIdx]
             let labelU16 = labelStr.utf16.count
@@ -2290,6 +2331,11 @@ public final class TextSystem: @unchecked Sendable {
             shapedU16 += labelU16
             let labelEndU16 = shapedU16
             let authU16Hi = authU16Lo + labelU16
+            if isolate {
+                entries.append(.init(shapedU16: shapedU16, authU16: authU16Hi, isTrail: true))
+                shaped.append("\u{2069}")
+                shapedU16 += 1
+            }
 
             var trailU16: Int? = nil
             var trailW: Float = 0
@@ -2395,6 +2441,9 @@ public final class TextSystem: @unchecked Sendable {
     internal private(set) var shapeMissCount: Int = 0
     internal private(set) var shapedBuildCount: Int = 0
     private var shapeCallCounter: UInt64 = 0
+    /// By-paragraph field layouts, printable ASCII's measures and the lazy paste's scratch
+    /// (`text/paragraphs.rs`, `text/paragraphs/lazy.rs`).
+    internal let paragraphState = ParagraphState()
 
     /// Drops cached layouts and typesetters while keeping rasterized glyph and icon atlases intact.
     public func clearLayoutCaches() {
@@ -2447,6 +2496,7 @@ public final class TextSystem: @unchecked Sendable {
         for k in evictedKeys {
             glyphCache.forget(shapeKey: k)
         }
+        paragraphState.rest()
         glyphAtlas.dropOrphans()
     }
 
@@ -2574,6 +2624,7 @@ public final class TextSystem: @unchecked Sendable {
             }
         }
         lock.unlock()
+        paragraphState.endCommit()
 
         for k in evictedKeys {
             glyphCache.forget(shapeKey: k)
@@ -3365,6 +3416,28 @@ public final class TextSystem: @unchecked Sendable {
         }
     }
 
+    /// `box` broken again at `maxWidth` from the shape it holds, without shaping
+    /// (`line_break::rebreak` of a kept paragraph, `paragraphs.rs`); nil when it holds none.
+    internal func rebreakOwned(_ box: TextLayoutBox, maxWidth: Float?, emitGlyphs: Bool) -> TextLayoutBox? {
+        guard let prepared = box.prepared else { return nil }
+        let shaped = measureFramePhase(.text) {
+            breakLines(prepared: prepared, maxWidth: maxWidth, emitGlyphs: emitGlyphs, glidePx: .zero, pretty: box.shapeKey.pretty)
+        }
+        lock.withLock { _rebrokenCount += 1 }
+        return TextLayoutBox(
+            shapeKey: box.shapeKey,
+            authText: box.authText,
+            spans: box.spans,
+            pills: box.pills,
+            style: box.style,
+            pixelScale: box.pixelScale,
+            maxWidth: maxWidth,
+            shaped: shaped,
+            hasGlyphs: emitGlyphs,
+            prepared: prepared
+        )
+    }
+
     /// Shapes plain or rich text into lines, optional pill/inline-icon quads, and optional `GlyphAtlas` quads.
     public func shape(
         text: String,
@@ -3957,7 +4030,7 @@ public final class TextSystem: @unchecked Sendable {
     ) -> TextPreparedShape {
         let lhPt = style.resolvedLineHeight
         let lhPx = lhPt * scale
-        let (shapedText, markerMap, preparedPills) = Self.preparePills(pills, in: authText, fontSize: style.size)
+        let (shapedText, markerMap, preparedPills) = Self.preparePills(pills, in: authText, fontSize: style.size, isolate: style.byParagraphStart != nil)
 
         let baseFont = resolveCTFont(style: style, pixelScale: scale)
         let baseAscentPx = CTFontGetAscent(baseFont)
@@ -3978,6 +4051,7 @@ public final class TextSystem: @unchecked Sendable {
         // Apply per-paragraph base writing direction natively; tab stops use per-'\t' CTRunDelegate widths below.
         let shapedNS = shapedText as NSString
         var paraScanStart = 0
+        var previousParaRTL: Bool? = nil
         while paraScanStart < fullLen {
             var paraScanEnd = fullLen
             for i in paraScanStart..<fullLen where shapedNS.character(at: i) == 0x0A {
@@ -3985,13 +4059,8 @@ public final class TextSystem: @unchecked Sendable {
                 break
             }
             let paraSub = shapedNS.substring(with: NSRange(location: paraScanStart, length: max(0, paraScanEnd - paraScanStart)))
-            let resolvedDir: CTWritingDirection? = {
-                switch style.direction {
-                case .rtl: return .rightToLeft
-                case .ltr: return .leftToRight
-                case nil: return Self.isRTLParagraph(paraSub) ? .rightToLeft : nil
-                }
-            }()
+            let resolvedDir: CTWritingDirection? = Self.paragraphIsRTL(paraSub, style: style, previous: &previousParaRTL)
+                .map { $0 ? .rightToLeft : .leftToRight }
             if var dirVal = resolvedDir {
                 let pStyle = withUnsafeMutableBytes(of: &dirVal) { dirPtr -> CTParagraphStyle in
                     let setting = CTParagraphStyleSetting(
@@ -4239,6 +4308,7 @@ public final class TextSystem: @unchecked Sendable {
         var u16Start = 0
         var authUTF8Cursor = 0
         let authNS = authText as NSString
+        var previousLineParaRTL: Bool? = nil
 
         func authoredSlice(fromAuthU16 a0: Int, toAuthU16 a1: Int) -> String {
             guard a1 > a0, a1 <= authNS.length else { return "" }
@@ -4252,13 +4322,7 @@ public final class TextSystem: @unchecked Sendable {
                 break
             }
             let paraShapedSub = shapedNS.substring(with: NSRange(location: u16Start, length: max(0, hardEnd - u16Start)))
-            let paraIsRTL: Bool = {
-                switch style.direction {
-                case .rtl: return true
-                case .ltr: return false
-                case nil: return Self.isRTLParagraph(paraShapedSub)
-                }
-            }()
+            let paraIsRTL: Bool = Self.paragraphIsRTL(paraShapedSub, style: style, previous: &previousLineParaRTL) ?? false
 
             let segStart = u16Start
             if segStart == hardEnd {
@@ -4971,6 +5035,7 @@ public final class TextSystem: @unchecked Sendable {
         shapedOut.grownLineTopsPt = grownBoxes.map { $0.topPx * invS }
         shapedOut.grownLineHeightsPt = grownBoxes.map { ($0.bottomPx - $0.topPx) * invS }
         shapedOut.grownLineMetricHeightsPt = grownLineHeightsPx.map { $0 * invS }
+        shapedOut.lineIsRTL = visualLines.map(\.isRTL)
         shapedOut.lineBaselinesPx = lineBaselines
         shapedOut.underlineLineEndsPt = underlineLineEnds
         shapedOut.glyphPens = glyphPensOut.count == glyphsOut.count ? glyphPensOut : []
@@ -5070,10 +5135,21 @@ public final class TextSystem: @unchecked Sendable {
     /// Computes per-line selection rectangles `[x, y, width, height]` in logical points for `utf8Range`.
     public func selectionRects(in shaped: ShapedText, utf8Range: Range<Int>, pixelScale: Float) -> [SIMD4<Float>] {
         guard !utf8Range.isEmpty, !shaped.lineStrings.isEmpty else { return [] }
+        // A by-paragraph field's paragraphs each box their own bytes (`TextFlow::range_boxes`).
+        if !shaped.paragraphSpans.isEmpty {
+            return paragraphSelectionRects(in: shaped, utf8Range: utf8Range, pixelScale: pixelScale)
+        }
+        return selectionRects(in: shaped, lines: 0..<shaped.lineStrings.count, utf8Range: utf8Range, pixelScale: pixelScale)
+    }
+
+    /// `selectionRects` over lines `lines` of `shaped` only (one paragraph of a by-paragraph field).
+    internal func selectionRects(in shaped: ShapedText, lines: Range<Int>, utf8Range: Range<Int>, pixelScale: Float) -> [SIMD4<Float>] {
+        guard !utf8Range.isEmpty, !shaped.lineStrings.isEmpty else { return [] }
         let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
         let invS = 1.0 / scale
         var rects: [SIMD4<Float>] = []
-        for (lineIdx, rec) in shaped.lineStrings.enumerated() {
+        for lineIdx in lines {
+            let rec = shaped.lineStrings[lineIdx]
             let lineStart = rec.utf8Start
             let lineEnd = lineStart + rec.text.utf8.count
             let lo = max(lineStart, utf8Range.lowerBound)

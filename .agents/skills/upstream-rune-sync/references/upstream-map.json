@@ -5041,10 +5041,11 @@
         {
           "upstream": "src/text/paragraphs.rs",
           "swift": [
+            "Sources/Rune/Text/Paragraphs.swift",
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial",
-          "note": "Paragraph layout ported; lazy long-paste runs (165f87a4 #957, 2371240d #990) open in up-edit-1"
+          "status": "ported",
+          "note": "Ported (3aea1e4a #865, 165f87a4 #957, 2371240d #990, as of 615f06a4). Plain fields (no spans or pills, every block a paragraph): ParagraphLayout/Paragraph, key_paragraphs (forced/start_flow, runs <= 512, LineScan), reuse_keys, common_start/common_end, count_newlines, flow_of, pieces_in/piece_at/piece_at_y, the layout cache (Entry cost, evict/STALE_BYTES, last_paragraphs per commit), TextFlow::range_boxes with the newline-wide selected line break (ParagraphLineSpan, paragraphSelectionRects), text_width/spec_height; the stacked lines feed caret/selection/hit/motion (lineIsRTL per paragraph) and paint draws pieces_in. TextSpec::by_paragraph/paragraphs_flow/plaintext_flow: ElDisplayResolver.applyByParagraph (TextStyle.byParagraphStart, the element's flow for dirByParagraph). Fields with spans, pills or other blocks keep one CoreText layout whose paragraphs resolve as key_paragraphs does (TextSystem.paragraphIsRTL: forced, or first strong outside isolates, else the paragraph before, the first start_flow) and whose pill labels are shaped between FSI and PDI (preparePills isolate, with_isolates/ISOLATE); per-paragraph reshaping of those is internal perf. Tests: ParagraphsLazyParityTests, ParagraphsFlowParityTests"
         },
         {
           "upstream": "src/text/pill_chips.rs",
@@ -6240,15 +6241,19 @@
         },
         {
           "upstream": "src/text/paragraphs/lazy.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Lazy long-paste paragraphs (165f87a4 #957, 2371240d #990) - up-edit-1 open; not on main"
+          "swift": [
+            "Sources/Rune/Text/ParagraphsLazy.swift"
+          ],
+          "status": "ported",
+          "note": "Lazy long paste: AsciiLine, LAZY_MIN/EAGER_END/EAGER_START, runs <=512 lines, split_run, fill_paragraphs (165f87a4 #957, 2371240d #990); Tests/RuneTests/ParagraphsLazyParityTests.swift"
         },
         {
           "upstream": "src/runtime/text_fill.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Text fill a few paragraphs a frame, AnimSource::TEXT_FILL (165f87a4 #957) - up-edit-1 open; not on main"
+          "swift": [
+            "Sources/Rune/Runtime/TextFill.swift"
+          ],
+          "status": "ported",
+          "note": "1.5 ms fill budget a frame, text_rows from paint, fill_text_near before caret keys/press/drag (reads_text_layout), AnimSource.textFill = 1024 \"text-fill\" (165f87a4 #957)"
         },
         {
           "upstream": "src/task/pool.rs",

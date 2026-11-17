@@ -42,6 +42,8 @@ final class RetainedLayoutCoordinator {
         var style: TextStyle
         var isInput: Bool
         var pretty: Bool = false
+        /// A by-paragraph field's request (`layout_text`), for a leaf no measure laid out.
+        var paragraphs: ParagraphRequest? = nil
     }
 
     private struct MeasureBox: @unchecked Sendable {
@@ -116,6 +118,8 @@ final class RetainedLayoutCoordinator {
                     fallbackDirection: forcedTextFlow
                 )
                 let measureStr = resolved.renderedString.isEmpty ? " " : resolved.renderedString
+                // A wrapped field of more than one paragraph lays out by paragraph (`layout_text`).
+                let paragraphs = Runtime<State>.paragraphRequest(field: nodeId, el: el, edit: rawEdit, resolved: resolved)
                 var hasher = Hasher()
                 hasher.combine(1)
                 if !resolved.isSecure {
@@ -148,13 +152,14 @@ final class RetainedLayoutCoordinator {
                         spans: resolved.spans,
                         pills: resolved.pills,
                         style: resolved.style,
-                        isInput: true
+                        isInput: true,
+                        paragraphs: paragraphs
                     ))
                 }
                 let fn: (Float?, Bool) -> Vec2 = { maxW, isRealLayout in
                     // Wraps at `w * scale + FIT_SLACK` device px, as every text node lays out (#948).
                     let shapeW = TextBoxGeometry.wrapWidth(resolved.measureWidth(maxW), scale: scale)
-                    let box = textSystem.layoutKeyed(
+                    let box = textSystem.layoutInput(
                         text: measureStr,
                         spans: resolved.spans,
                         pills: resolved.pills,
@@ -163,7 +168,8 @@ final class RetainedLayoutCoordinator {
                         pixelScale: scale,
                         emitGlyphs: false,
                         keep: keep,
-                        countAsRebreak: (textLayouts != nil) && isRealLayout
+                        countAsRebreak: (textLayouts != nil) && isRealLayout,
+                        request: paragraphs
                     )
                     if !resolved.isSecure, isRealLayout, let collector = textLayouts {
                         collector.map[nodeId] = TextLayoutRecord(box: box, isInput: true)
@@ -406,7 +412,12 @@ final class RetainedLayoutCoordinator {
                 pin: pin
             ))
 
-            let (measureFn, measureHash, isRedacted) = makeMeasure(el: el, nodeId: runtimeNodeId, flatIndex: myIndex, forcedTextFlow: forcedTextFlow)
+            var measured = el
+            if nodeDirected && el.textDirByParagraph && el.handlers.editLens != nil {
+                // A `dirByParagraph` field's paragraphs start from the element's flow (`TextDir::Plaintext`).
+                measured.textStyle.byParagraphStart = nodeFlow.textFlow
+            }
+            let (measureFn, measureHash, isRedacted) = makeMeasure(el: measured, nodeId: runtimeNodeId, flatIndex: myIndex, forcedTextFlow: forcedTextFlow)
             flat[myIndex].measureFn = measureFn
 
             return SyncPrepared(
@@ -671,7 +682,20 @@ final class RetainedLayoutCoordinator {
 
         if let collector = textLayouts {
             for leaf in nonSecretLeaves where collector.map[leaf.nodeId] == nil {
-                if let existing = textSystem.cachedLayoutBox(for: leaf.shapeKey) {
+                if let request = leaf.paragraphs {
+                    let w: Float? = max(0, store.layout(flat[leaf.index].slot).size.width)
+                    let box = textSystem.layoutInput(
+                        text: leaf.text,
+                        spans: leaf.spans,
+                        pills: leaf.pills,
+                        style: leaf.style,
+                        maxWidth: w,
+                        pixelScale: scale,
+                        emitGlyphs: false,
+                        request: request
+                    )
+                    collector.map[leaf.nodeId] = TextLayoutRecord(box: box, isInput: leaf.isInput)
+                } else if let existing = textSystem.cachedLayoutBox(for: leaf.shapeKey) {
                     collector.map[leaf.nodeId] = TextLayoutRecord(box: existing, isInput: leaf.isInput)
                 } else {
                     let w: Float? = leaf.style.wrap == .noWrap ? nil : max(0, store.layout(flat[leaf.index].slot).size.width)

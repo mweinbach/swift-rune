@@ -535,28 +535,6 @@ public struct TextEdit: Sendable, Equatable {
         var richMarks: [RichMarkRange]
         var blocks: [Block]
         var softBreaks: [Int]
-
-        func sameDocument(as other: Snapshot) -> Bool {
-            text == other.text &&
-            marks == other.marks &&
-            richMarks == other.richMarks &&
-            blocks == other.blocks &&
-            softBreaks == other.softBreaks
-        }
-
-        var byteCost: Int {
-            text.utf8.count
-                + marks.count * MemoryLayout<TextMark>.stride
-                + richMarks.count * MemoryLayout<RichMarkRange>.stride
-                + blocks.count * MemoryLayout<Block>.stride
-                + softBreaks.count * MemoryLayout<Int>.stride
-        }
-    }
-
-    private struct UndoChange: Sendable {
-        var before: Snapshot
-        var after: Snapshot
-        var byteCost: Int { before.byteCost + after.byteCost }
     }
 
     public static let maxHistorySteps = 128
@@ -635,8 +613,8 @@ public struct TextEdit: Sendable, Equatable {
     /// True when this is a masked multi-line secure field (`isSecure && multiline && !isRevealed`).
     public var isHiddenMultiline: Bool { isSecure && multiline && !isRevealed }
 
-    private var undoStack: [UndoChange] = []
-    private var redoStack: [UndoChange] = []
+    private var undoStack: [HistoryChange] = []
+    private var redoStack: [HistoryChange] = []
     private var historyBytes: Int = 0
     private var historyRun: HistoryRun = .closed
     private var undoGroupState: UndoGroupState = .closed
@@ -1075,13 +1053,14 @@ public struct TextEdit: Sendable, Equatable {
         }
         guard let change = undoStack.popLast() else { return false }
         historyBytes = max(0, historyBytes - change.byteCost)
-        if text != change.after.text {
+        // Public model text may have been replaced by the app. Never restore stale history.
+        if !change.leadsTo(text, after: true) {
             undoStack.removeAll()
             redoStack.removeAll()
             historyBytes = 0
             return false
         }
-        restoreSnapshot(change.before)
+        restoreChange((change.at, change.inserted.utf8.count, change.removed), change.before)
         redoStack.append(change)
         historyBytes += change.byteCost
         return true
@@ -1097,26 +1076,27 @@ public struct TextEdit: Sendable, Equatable {
         }
         guard let change = redoStack.popLast() else { return false }
         historyBytes = max(0, historyBytes - change.byteCost)
-        if text != change.before.text {
+        if !change.leadsTo(text, after: false) {
             undoStack.removeAll()
             redoStack.removeAll()
             historyBytes = 0
             return false
         }
-        restoreSnapshot(change.after)
+        restoreChange((change.at, change.removed.utf8.count, change.inserted), change.after)
         undoStack.append(change)
         historyBytes += change.byteCost
         return true
     }
 
-    private mutating func restoreSnapshot(_ snap: Snapshot) {
-        text = snap.text
-        cursor = snap.cursor
-        anchor = snap.anchor
-        marks = snap.marks
-        richMarks = snap.richMarks
-        blocks = snap.blocks
-        softBreaks = snap.softBreaks
+    /// Text bytes `at..<at + len` become `with`, and the rest of the document `meta` (`history::restore`).
+    private mutating func restoreChange(_ edit: (at: Int, len: Int, with: String), _ meta: HistoryMeta) {
+        HistoryText.replace(&text, edit.at, edit.len, with: edit.with)
+        cursor = meta.cursor
+        anchor = meta.anchor
+        marks = meta.marks
+        richMarks = meta.richMarks
+        blocks = meta.blocks
+        softBreaks = meta.softBreaks
         typingStyle = .inherited
         caretColumn = .free
         caretAffinity = .downstream
@@ -1166,11 +1146,28 @@ public struct TextEdit: Sendable, Equatable {
 
     internal mutating func recordUndoChange(before: Snapshot?, kind: EditKind = .other) {
         guard let before, isRecordingHistory else { return }
-        let after = makeSnapshot()
-        guard !before.sameDocument(as: after) else { return }
+        // What the edit left, read in place: copying a long document to compare it costs more
+        // than the edit.
+        let after = HistoryMeta(anchor: anchor, cursor: cursor, marks: marks, richMarks: richMarks, blocks: blocks, softBreaks: softBreaks)
+        // Bytes, as upstream compares (`before.text.as_str() == self.text`): Swift's `==` takes
+        // canonically equivalent texts (NFC é and NFD e + U+0301) as one.
+        if HistoryText.sameBytes(before.text, text) && before.marks == after.marks && before.richMarks == after.richMarks
+            && before.blocks == after.blocks && before.softBreaks == after.softBreaks {
+            return
+        }
+        let change = HistoryChange.toText(before, text, after: after)
 
-        let expectedText = redoStack.last?.before.text ?? undoStack.last?.after.text
-        if let expectedText, expectedText != before.text {
+        // Public model text may have been replaced by the app: a history that doesn't lead to
+        // the document this edit started from is dropped.
+        let leads: Bool
+        if let c = redoStack.last {
+            leads = c.leadsTo(before.text, after: false)
+        } else if let c = undoStack.last {
+            leads = c.leadsTo(before.text, after: true)
+        } else {
+            leads = true
+        }
+        if !leads {
             undoStack.removeAll()
             redoStack.removeAll()
             historyBytes = 0
@@ -1191,19 +1188,19 @@ public struct TextEdit: Sendable, Equatable {
         if rec == .join,
            before.anchor == before.cursor,
            let last = undoStack.last,
-           last.after == before {
+           last.after == change.before,
+           last.leadsTo(before.text, after: true) {
             let idx = undoStack.count - 1
             historyBytes = max(0, historyBytes - last.byteCost)
-            undoStack[idx].after = after
+            undoStack[idx].join(mid: before.text, next: change)
             historyBytes += undoStack[idx].byteCost
         } else {
-            let change = UndoChange(before: before, after: after)
             historyBytes += change.byteCost
             undoStack.append(change)
         }
 
-        while undoStack.count > Self.maxHistorySteps || historyBytes > Self.maxHistoryBytes {
-            guard !undoStack.isEmpty else { break }
+        // The newest step stays, however large: it's the way back from what was just done.
+        while undoStack.count > 1 && (undoStack.count > Self.maxHistorySteps || historyBytes > Self.maxHistoryBytes) {
             let dropped = undoStack.removeFirst()
             historyBytes = max(0, historyBytes - dropped.byteCost)
         }
@@ -1213,44 +1210,51 @@ public struct TextEdit: Sendable, Equatable {
         recordUndoChange(before: before, kind: kind)
     }
 
-    // MARK: - Persistent Undo/Redo JSON History (crates/rune/src/edit/history.rs, #880)
+    // MARK: - Persistent Undo/Redo JSON History (crates/rune/src/edit/history.rs, #880, #990)
 
-    private static let historyFormatVersion = 1
+    /// What a stored history looks like (`TextEdit::history_json`): version 2, each step a change;
+    /// version 1 stored the document before and after each step, and still reads (`#990`).
+    internal static let historyFormatVersion = 2
 
     /// Number of recorded undo and redo steps (`edit.history_len()`, `#880`).
     public func historyLen() -> (undo: Int, redo: Int) {
         (undoStack.count, redoStack.count)
     }
 
-    /// Serializes the newest undo and redo steps as versioned JSON bounded by `maxSteps` and `maxBytes`.
-    /// Returns `nil` for secure fields (which record nothing) and empty histories.
+    /// The undo and redo history as JSON, for an app to keep past a restart and give back with
+    /// `restoreHistoryJson`: the document's text as it is, and the newest steps, at most `maxSteps`
+    /// of them and about `maxBytes` of changes between them (each step the text it replaced and the
+    /// selection, marks and blocks either side). The newest undo step is always there, however
+    /// large. `nil` for a secure field, which records nothing, and for an empty history.
     public func historyJson(maxSteps: Int, maxBytes: Int) -> Data? {
         guard !isSecure, (!undoStack.isEmpty || !redoStack.isEmpty) else {
             return nil
         }
         var steps = 0
         var bytes = 0
-        func fits(_ c: UndoChange) -> Bool {
+        func fits(_ c: HistoryChange) -> Bool {
             steps += 1
             bytes += c.byteCost
             return steps <= maxSteps && bytes <= maxBytes
         }
-
-        // Redo first: the steps closest to the current document state.
+        // The newest undo step first: it's the way back from what was done last.
+        let newest: [String: Any]? = undoStack.last.map { c in _ = fits(c); return Self.historyChangeJSON(c) }
         var redoReversed: [Any] = []
         for c in redoStack.reversed() {
             guard fits(c) else { break }
-            redoReversed.append(Self.changeJSONObject(c))
+            redoReversed.append(Self.historyChangeJSON(c))
         }
         var undoReversed: [Any] = []
-        for c in undoStack.reversed() {
+        for c in undoStack.dropLast().reversed() {
             guard fits(c) else { break }
-            undoReversed.append(Self.changeJSONObject(c))
+            undoReversed.append(Self.historyChangeJSON(c))
         }
-
+        var undo: [Any] = Array(undoReversed.reversed())
+        if let newest { undo.append(newest) }
         let payload: [String: Any] = [
             "v": Self.historyFormatVersion,
-            "undo": Array(undoReversed.reversed()),
+            "d": text,
+            "undo": undo,
             "redo": Array(redoReversed.reversed()),
         ]
         return try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
@@ -1262,54 +1266,56 @@ public struct TextEdit: Sendable, Equatable {
         return String(data: data, encoding: .utf8)
     }
 
-    /// Restores undo/redo history JSON previously produced by `historyJson` when it leads to this document.
-    /// Rejects secure fields, open undo groups, mismatched versions, invalid UTF-8 boundaries, or unrelated drafts.
+    /// Takes back a history `historyJson` wrote, when it leads to this document. A history stored
+    /// a few keystrokes before the document was (an app stores it less often than the text) gets
+    /// one more step, from the document it was stored with to this one, so the first undo goes back
+    /// to where the stored history stood. Anything that doesn't fit (a step whose text or offsets
+    /// aren't in its document) is left out and the field keeps no history. Reads version 1 too.
+    /// Returns whether it was taken.
     @discardableResult
     public mutating func restoreHistoryJson(_ data: Data) -> Bool {
         guard !isSecure, !undoGroupState.isOpen else { return false }
         guard let obj = try? JSONSerialization.jsonObject(with: data, options: []),
-              let dict = obj as? [String: Any],
-              let version = Self.exactInt(dict["v"]),
-              version == Self.historyFormatVersion,
-              let undoArr = dict["undo"] as? [Any],
-              let redoArr = dict["redo"] as? [Any] else {
+              let dict = obj as? [String: Any] else {
             return false
         }
-        var parsedUndo: [UndoChange] = []
-        parsedUndo.reserveCapacity(undoArr.count)
-        for item in undoArr {
-            guard let c = Self.parseChangeJSON(item) else { return false }
-            parsedUndo.append(c)
+        let read: (String, [HistoryChange], [HistoryChange])?
+        switch Self.historyInt(dict["v"]) {
+        case 2: read = Self.historyReadV2(dict)
+        case 1: read = Self.historyReadV1(dict)
+        default: read = nil
         }
-        var parsedRedo: [UndoChange] = []
-        parsedRedo.reserveCapacity(redoArr.count)
-        for item in redoArr {
-            guard let c = Self.parseChangeJSON(item) else { return false }
-            parsedRedo.append(c)
-        }
+        guard let (doc, readUndo, readRedo) = read else { return false }
+        var undo = readUndo
+        var redo = readRedo
+        guard Self.historyChainHolds(doc, undo: undo, redo: redo) else { return false }
 
         syncRichInvariants()
         let now = makeSnapshot()
-        let endpoint = parsedUndo.last?.after ?? parsedRedo.last?.before
-        let leadsHere = endpoint?.sameDocument(as: now) ?? false
+        func same(_ m: HistoryMeta) -> Bool {
+            HistoryText.sameBytes(doc, now.text) && m.marks == now.marks && m.richMarks == now.richMarks
+                && m.blocks == now.blocks && m.softBreaks == now.softBreaks
+        }
+        let leadsHere = (undo.last?.after ?? redo.last?.before).map(same) ?? false
         if !leadsHere {
-            guard let last = parsedUndo.last?.after else { return false }
-            if last.text == now.text {
+            guard let last = undo.last?.after else { return false }
+            if HistoryText.sameBytes(doc, now.text) {
                 return false
             }
-            parsedRedo.removeAll()
-            parsedUndo.append(UndoChange(before: last, after: now))
+            redo.removeAll()
+            let stored = Snapshot(text: doc, cursor: last.cursor, anchor: last.anchor, marks: last.marks, richMarks: last.richMarks, blocks: last.blocks, softBreaks: last.softBreaks)
+            undo.append(HistoryChange.between(stored, now))
         }
 
-        var totalBytes = parsedUndo.reduce(0) { $0 + $1.byteCost } + parsedRedo.reduce(0) { $0 + $1.byteCost }
-        while parsedUndo.count > Self.maxHistorySteps || totalBytes > Self.maxHistoryBytes {
-            guard !parsedUndo.isEmpty else { break }
-            let dropped = parsedUndo.removeFirst()
+        var totalBytes = undo.reduce(0) { $0 + $1.byteCost } + redo.reduce(0) { $0 + $1.byteCost }
+        // The newest step stays, however large.
+        while undo.count > 1 && (undo.count > Self.maxHistorySteps || totalBytes > Self.maxHistoryBytes) {
+            let dropped = undo.removeFirst()
             totalBytes = max(0, totalBytes - dropped.byteCost)
         }
 
-        undoStack = parsedUndo
-        redoStack = parsedRedo
+        undoStack = undo
+        redoStack = redo
         historyBytes = totalBytes
         historyRun = .closed
         return true
@@ -1320,167 +1326,6 @@ public struct TextEdit: Sendable, Equatable {
     public mutating func restoreHistoryJson(_ json: String) -> Bool {
         guard let data = json.data(using: .utf8) else { return false }
         return restoreHistoryJson(data)
-    }
-
-    private static func exactInt(_ value: Any?) -> Int? {
-        guard let num = value as? NSNumber else { return nil }
-        if CFGetTypeID(num) == CFBooleanGetTypeID() { return nil }
-        let d = num.doubleValue
-        guard d >= 0, d.rounded(.towardZero) == d, d <= Double(Int.max) else { return nil }
-        return Int(d)
-    }
-
-    private static func isUTF8CharBoundary(_ offset: Int, in utf8Bytes: [UInt8]) -> Bool {
-        guard offset >= 0 && offset <= utf8Bytes.count else { return false }
-        if offset == utf8Bytes.count { return true }
-        return (utf8Bytes[offset] & 0xC0) != 0x80
-    }
-
-    private static func changeJSONObject(_ c: UndoChange) -> [String: Any] {
-        [
-            "b": snapshotJSONObject(c.before),
-            "a": snapshotJSONObject(c.after),
-        ]
-    }
-
-    private static func snapshotJSONObject(_ s: Snapshot) -> [String: Any] {
-        let marksJSON: [Any] = s.richMarks.map { m in
-            let kind: Any
-            switch m.mark {
-            case .bold: kind = "b"
-            case .italic: kind = "i"
-            case .underline: kind = "u"
-            case .strike: kind = "s"
-            case .code: kind = "c"
-            case .link(let url): kind = ["l", url]
-            case .pill(let id): kind = ["p", id]
-            }
-            return [m.start, m.end, kind]
-        }
-        let blocksJSON: [Any] = s.blocks.map { b in
-            switch b {
-            case .paragraph: return "p"
-            case .quote: return "q"
-            case .code: return "c"
-            case .bullet(let l): return ["b", Int(l)]
-            case .numbered(let l): return ["n", Int(l)]
-            }
-        }
-        return [
-            "t": s.text,
-            "a": s.anchor,
-            "f": s.cursor,
-            "m": marksJSON,
-            "k": blocksJSON,
-            "s": s.softBreaks,
-        ]
-    }
-
-    private static func parseChangeJSON(_ obj: Any) -> UndoChange? {
-        guard let dict = obj as? [String: Any],
-              let before = parseSnapshotJSON(dict["b"]),
-              let after = parseSnapshotJSON(dict["a"]) else {
-            return nil
-        }
-        return UndoChange(before: before, after: after)
-    }
-
-    private static func parseSnapshotJSON(_ obj: Any?) -> Snapshot? {
-        guard let dict = obj as? [String: Any],
-              let text = dict["t"] as? String,
-              let anchor = exactInt(dict["a"]),
-              let focus = exactInt(dict["f"]),
-              let rawMarks = dict["m"] as? [Any],
-              let rawBlocks = dict["k"] as? [Any],
-              let rawSoft = dict["s"] as? [Any] else {
-            return nil
-        }
-        let utf8Bytes = Array(text.utf8)
-        guard isUTF8CharBoundary(anchor, in: utf8Bytes),
-              isUTF8CharBoundary(focus, in: utf8Bytes) else {
-            return nil
-        }
-
-        var richMarks: [RichMarkRange] = []
-        richMarks.reserveCapacity(rawMarks.count)
-        for item in rawMarks {
-            guard let arr = item as? [Any], arr.count >= 3,
-                  let start = exactInt(arr[0]),
-                  let end = exactInt(arr[1]),
-                  isUTF8CharBoundary(start, in: utf8Bytes),
-                  isUTF8CharBoundary(end, in: utf8Bytes) else {
-                return nil
-            }
-            let mark: RichMark
-            if let k = arr[2] as? String {
-                switch k {
-                case "b": mark = .bold
-                case "i": mark = .italic
-                case "u": mark = .underline
-                case "s": mark = .strike
-                case "c": mark = .code
-                default: return nil
-                }
-            } else if let pair = arr[2] as? [Any], pair.count >= 2,
-                      let tag = pair[0] as? String, let payload = pair[1] as? String {
-                switch tag {
-                case "l": mark = .link(payload)
-                case "p": mark = .pill(payload)
-                default: return nil
-                }
-            } else {
-                return nil
-            }
-            if start < end {
-                richMarks.append(RichMarkRange(start: start, end: end, mark: mark))
-            }
-        }
-
-        let lineCount = text.split(separator: "\n", omittingEmptySubsequences: false).count
-        var blocks: [Block] = []
-        blocks.reserveCapacity(rawBlocks.count)
-        for item in rawBlocks {
-            if let b = item as? String {
-                switch b {
-                case "p": blocks.append(.paragraph)
-                case "q": blocks.append(.quote)
-                case "c": blocks.append(.code)
-                default: return nil
-                }
-            } else if let pair = item as? [Any], pair.count >= 2,
-                      let tag = pair[0] as? String, let lvl = exactInt(pair[1]) {
-                let clamped = UInt8(min(lvl, Int(Block.maxListLevel)))
-                switch tag {
-                case "b": blocks.append(.bullet(clamped))
-                case "n": blocks.append(.numbered(clamped))
-                default: return nil
-                }
-            } else {
-                return nil
-            }
-        }
-        guard blocks.isEmpty || blocks.count == lineCount else {
-            return nil
-        }
-
-        var softBreaks: [Int] = []
-        softBreaks.reserveCapacity(rawSoft.count)
-        for item in rawSoft {
-            guard let idx = exactInt(item), idx > 0, idx < lineCount else {
-                return nil
-            }
-            softBreaks.append(idx)
-        }
-
-        return Snapshot(
-            text: text,
-            cursor: focus,
-            anchor: anchor,
-            marks: [],
-            richMarks: richMarks,
-            blocks: blocks,
-            softBreaks: softBreaks
-        )
     }
 
     // MARK: - IME Preedit
@@ -2038,16 +1883,40 @@ public struct TextEdit: Sendable, Equatable {
         c.isLetter || c.isNumber || c == "_"
     }
 
+    /// Text typed, pasted or committed into this field (`edit.rs::sanitize`). Single-line fields
+    /// drop control characters, line breaks included (stripped, as `<input type=text>` does);
+    /// multi-line fields fold CRLF to LF (and multi-line secure fields also drop control
+    /// characters other than `\n` and `\t`, a lone CR becoming LF).
     private func sanitizeInput(_ s: String) -> String {
-        if multiline {
-            return s.replacingOccurrences(of: "\r\n", with: "\n")
-                .replacingOccurrences(of: "\r", with: "\n")
+        let isControl: (Unicode.Scalar) -> Bool = { $0.properties.generalCategory == .control }
+        let isLineSeparator: (Unicode.Scalar) -> Bool = { $0 == "\u{2028}" || $0 == "\u{2029}" }
+        if !multiline {
+            var out = String.UnicodeScalarView()
+            for c in s.unicodeScalars where !isControl(c) && !isLineSeparator(c) { out.append(c) }
+            return String(out)
         }
-        return s.replacingOccurrences(of: "\r\n", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
-            .replacingOccurrences(of: "\t", with: " ")
-            .replacingOccurrences(of: "\u{2028}", with: " ")
+        if isSecure {
+            var out = String.UnicodeScalarView()
+            let scalars = Array(s.unicodeScalars)
+            for (i, c) in scalars.enumerated() {
+                if c == "\r" {
+                    if i + 1 >= scalars.count || scalars[i + 1] != "\n" { out.append("\n") }
+                    continue
+                }
+                if (!isControl(c) || c == "\n" || c == "\t") && !isLineSeparator(c) { out.append(c) }
+            }
+            return String(out)
+        }
+        // Most pastes: copied whole, not a character at a time (#990). Checked by byte:
+        // `"\r\n"` is one `Character`, so `contains("\r")` would miss it.
+        guard s.utf8.contains(0x0D) else { return s }
+        var out = String.UnicodeScalarView()
+        let scalars = Array(s.unicodeScalars)
+        for (i, c) in scalars.enumerated() {
+            if c == "\r" && i + 1 < scalars.count && scalars[i + 1] == "\n" { continue }
+            out.append(c)
+        }
+        return String(out)
     }
 
     private func prevBackspaceBoundary(from offset: Int) -> Int {

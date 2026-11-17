@@ -43,10 +43,12 @@ public enum AnimSource {
     public static let textFlight: UInt32 = 1 << 7
     public static let live: UInt32 = 1 << 8
     public static let virtualFill: UInt32 = 1 << 9
+    /// A long paste's waiting paragraphs being shaped a few a frame (`TEXT_FILL`, `text_fill.rs`).
+    public static let textFill: UInt32 = 1 << 10
 
     private static let allNames: [String] = [
         "tracks", "growth", "scroll", "reveal", "loop",
-        "scale-settle", "video", "text-flight", "live", "virtual-fill",
+        "scale-settle", "video", "text-flight", "live", "virtual-fill", "text-fill",
     ]
 
     public static func names(_ bits: UInt32) -> [String] {
@@ -879,6 +881,8 @@ public final class Runtime<State> {
     private var lastHoverScrollOffsets: [String: Vec2] = [:]
     internal typealias RuntimeGrowthEntry = Rune.RuntimeGrowthEntry
     internal var nodeTextLayouts: [NodeId: RetainedLayoutCoordinator.TextLayoutRecord] = [:]
+    /// The device rows of each field with waiting paragraphs its last paint showed (`text_fill`).
+    internal var textRows: [NodeId: (Float, Float)] = [:]
     internal var prevNodeTextLayoutsForCommit: [NodeId: (shapeKey: TextShapeKey, isInput: Bool)]? = nil
     internal var exitingTextLayouts: [NodeId: RetainedLayoutCoordinator.TextLayoutRecord] = [:]
     internal var growthRows: [String: RuntimeGrowthEntry] = [:]
@@ -1634,6 +1638,7 @@ public final class Runtime<State> {
         } else {
             animSources &= ~AnimSource.scaleSettle
         }
+        if fillText() { animSources |= AnimSource.textFill }
         isAnimating = animSources != 0 || ((pixelSnapGlides.isEasing || wroteDrawn || scaleSettleMoving) && cxSettings.viewTimeScale > 0.0)
         if !isAnimating {
             animSources = 0
@@ -2827,6 +2832,9 @@ public final class Runtime<State> {
             }
             if nodeDirected && !el.textDirByParagraph {
                 el.textStyle.direction = nodeFlow.textFlow
+            } else if nodeDirected && el.handlers.editLens != nil {
+                // A `dirByParagraph` field's paragraphs start from the element's flow (`TextDir::Plaintext`).
+                el.textStyle.byParagraphStart = nodeFlow.textFlow
             }
             if !el.isolatesSpec.isEmpty {
                 el = el.applyingIsolates()
@@ -5844,7 +5852,8 @@ public final class Runtime<State> {
         pxScale: Float,
         glidePx: Vec2,
         isSecure: Bool,
-        pretty: Bool = false
+        pretty: Bool = false,
+        paragraphs: ParagraphRequest? = nil
     ) -> TextLayoutBox {
         let keep: TextKeep = isSecure ? .secret : (glidePx == .zero ? .cached : .owned)
         if isSecure {
@@ -5889,7 +5898,7 @@ public final class Runtime<State> {
         if !isExiting, glidePx == .zero, let live = nodeTextLayouts[snapId]?.box {
             // A layout measured greedy is not reused for pretty paint (or vice versa, `#882`).
             let matchesPretty = live.shapeKey.pretty == TextShapeKey.layoutPretty(pretty, style: style)
-            let matchesText = (live.authText == targetAuth && live.spans == spans && live.pills == pills && live.style == style && abs(live.pixelScale - targetScale) < 0.01 && matchesPretty)
+            let matchesText = (HistoryText.sameBytes(live.authText, targetAuth) && live.spans == spans && live.pills == pills && live.style == style && abs(live.pixelScale - targetScale) < 0.01 && matchesPretty)
             let matchesWidth: Bool = {
                 guard let ww = wrapWidth else {
                     return live.maxWidth == nil
@@ -5920,20 +5929,33 @@ public final class Runtime<State> {
                 return filled
             }
         }
-        let box = textSystem.layoutKeyed(
-            text: text,
-            spans: spans,
-            pills: pills,
-            style: style,
-            maxWidth: wrapWidth,
-            pixelScale: pxScale,
-            emitGlyphs: true,
-            glidePx: glidePx,
-            keep: keep,
-            countAsRebreak: false,
-            pretty: pretty
-        )
-        if !isExiting && glidePx == .zero {
+        let box = paragraphs != nil
+            ? textSystem.layoutInput(
+                text: text,
+                spans: spans,
+                pills: pills,
+                style: style,
+                maxWidth: wrapWidth,
+                pixelScale: pxScale,
+                emitGlyphs: true,
+                keep: keep,
+                countAsRebreak: false,
+                request: paragraphs
+            )
+            : textSystem.layoutKeyed(
+                text: text,
+                spans: spans,
+                pills: pills,
+                style: style,
+                maxWidth: wrapWidth,
+                pixelScale: pxScale,
+                emitGlyphs: true,
+                glidePx: glidePx,
+                keep: keep,
+                countAsRebreak: false,
+                pretty: pretty
+            )
+        if !isExiting && (glidePx == .zero || box.paragraphs != nil) {
             nodeTextLayouts[snapId] = RetainedLayoutCoordinator.TextLayoutRecord(box: box, isInput: isInput)
         }
         return box
@@ -7581,7 +7603,8 @@ public final class Runtime<State> {
                             wrapWidth: resolvedInput.maxWidthForShape,
                             pxScale: pxScale,
                             glidePx: glidePx,
-                            isSecure: resolvedInput.isSecure
+                            isSecure: resolvedInput.isSecure,
+                            paragraphs: Self.paragraphRequest(field: snap.nodeId, el: el, edit: edit, resolved: resolvedInput)
                         )
                         let shaped = inputBox.shaped
                         if !nodeIsSecure {
@@ -7749,13 +7772,38 @@ public final class Runtime<State> {
                                 ((devInputClip.y + devInputClip.w) / pxScale - restOriginY) / scaleVec.y + 2.0
                             )
                             : (-Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
-                        let visibleInputGlyphs = textSystem.glyphCache.glyphsInBandCached(
-                            key: GlyphReplayKey(shapeKey: inputBox.shapeKey, maxWidth: inputBox.maxWidth, glidePx: glidePx),
-                            keep: resolvedInput.isSecure ? .secret : (glidePx == .zero ? .cached : .owned),
-                            bandTopPt: inBandTop,
-                            bandBottomPt: inBandBot
-                        ) {
-                            (shaped.glyphs, shaped.lineGlyphRanges, shaped.bandLineHeight)
+                        let visibleInputGlyphs: ArraySlice<PositionedGlyph>
+                        if let pl = inputBox.paragraphs {
+                            // A by-paragraph field draws the paragraphs that meet the rows it shows
+                            // (`flow.pieces_in`), in its layout's device px; a field with paragraphs
+                            // still waiting notes those rows for the fill (`text_rows`).
+                            let ls = pl.scale
+                            let rowPad = 2.0 * inputEmPt * ls + 2.0 / max(1e-4, pxScale)
+                            let rows: (Float, Float) = (!inputRotated && abs(scaleVec.y) > 1e-4)
+                                ? (
+                                    ((devInputClip.y / pxScale - restOriginY) / scaleVec.y) * ls - rowPad,
+                                    (((devInputClip.y + devInputClip.w) / pxScale - restOriginY) / scaleVec.y) * ls + rowPad
+                                )
+                                : (-Float.infinity, Float.infinity)
+                            if pl.waiting { textRows[snap.nodeId] = rows }
+                            var pieceGlyphs: [PositionedGlyph] = []
+                            for piece in pl.pieces(top: rows.0, bottom: rows.1) {
+                                let dy = piece.y / ls
+                                for var g in pl.glyphs(at: piece.index, using: textSystem) {
+                                    g.rect.y += dy
+                                    pieceGlyphs.append(g)
+                                }
+                            }
+                            visibleInputGlyphs = pieceGlyphs[...]
+                        } else {
+                            visibleInputGlyphs = textSystem.glyphCache.glyphsInBandCached(
+                                key: GlyphReplayKey(shapeKey: inputBox.shapeKey, maxWidth: inputBox.maxWidth, glidePx: glidePx),
+                                keep: resolvedInput.isSecure ? .secret : (glidePx == .zero ? .cached : .owned),
+                                bandTopPt: inBandTop,
+                                bandBottomPt: inBandBot
+                            ) {
+                                (shaped.glyphs, shaped.lineGlyphRanges, shaped.bandLineHeight)
+                            }
                         }
                         for g in visibleInputGlyphs {
                             let gy = (restOriginY + g.rect.y * scaleVec.y) * pxScale
@@ -9414,6 +9462,8 @@ public final class Runtime<State> {
 
     public func pointerMove(to pos: Vec2, mods: Mods = .none, at now: Double) {
         let moved = pos != pointerPosition
+        // A drag reads the field's layout where it goes (`reads_text_layout`).
+        if moved && primaryPointerHeld && !textRows.isEmpty { fillTextNear() }
         if moved {
             hoverPaused = false
             releaseHoverHold()
@@ -9677,6 +9727,7 @@ public final class Runtime<State> {
 
     public func pointerDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
         frameHadInputSinceLastFrame = true
+        if !textRows.isEmpty { fillTextNear() }
         releaseHoverHold()
         if button != .secondary {
             primaryPointerHeld = true
@@ -10506,6 +10557,9 @@ public final class Runtime<State> {
     @discardableResult
     public func keyDown(_ ev: KeyEvent, isRepeat: Bool = false, at now: Double) -> Bool {
         frameHadInputSinceLastFrame = true
+        // A caret key or a shortcut reads the field's layout where it lands: a long paste's
+        // paragraphs still waiting there are shaped first. Typing at the caret needs none.
+        if !textRows.isEmpty && Self.readsTextLayout(ev) { fillTextNear() }
         recordEvent(hasSecureFocus ? "key-down [redacted]" : "key-down \(ev.key)")
         currentTime = now
         flushPendingCommitIfNeeded(at: now)
@@ -10652,15 +10706,28 @@ public final class Runtime<State> {
                     let pad = fNode.el.layout.padding
                     let innerW = max(0, fNode.targetRect.width - pad.left - pad.right)
                     let resolvedInput = ElDisplayResolver.resolveInput(el: fNode.el, edit: edit, innerWidth: innerW, pxScale: pixelScale)
-                    editLayout = textSystem.shape(
-                        text: resolvedInput.renderedString,
-                        spans: resolvedInput.spans,
-                        pills: resolvedInput.pills,
-                        style: resolvedInput.style,
-                        maxWidth: resolvedInput.maxWidthForShape,
-                        pixelScale: pixelScale,
-                        emitGlyphs: false
-                    )
+                    if let request = Self.paragraphRequest(field: fNode.nodeId, el: fNode.el, edit: edit, resolved: resolvedInput) {
+                        editLayout = textSystem.layoutInput(
+                            text: resolvedInput.renderedString,
+                            spans: resolvedInput.spans,
+                            pills: resolvedInput.pills,
+                            style: resolvedInput.style,
+                            maxWidth: resolvedInput.maxWidthForShape,
+                            pixelScale: pixelScale,
+                            emitGlyphs: false,
+                            request: request
+                        ).shaped
+                    } else {
+                        editLayout = textSystem.shape(
+                            text: resolvedInput.renderedString,
+                            spans: resolvedInput.spans,
+                            pills: resolvedInput.pills,
+                            style: resolvedInput.style,
+                            maxWidth: resolvedInput.maxWidthForShape,
+                            pixelScale: pixelScale,
+                            emitGlyphs: false
+                        )
+                    }
                 }
                 let prevEdit = edit
                 let outcome = edit.handleKey(ev, layout: editLayout)
@@ -12860,15 +12927,29 @@ public final class Runtime<State> {
             innerWidth: innerW / max(0.01, sc.x),
             pxScale: pixelScale
         )
-        let shaped = textSystem.shape(
-            text: resolvedInput.renderedString,
-            spans: resolvedInput.spans,
-            pills: resolvedInput.pills,
-            style: resolvedInput.style,
-            maxWidth: resolvedInput.maxWidthForShape,
-            pixelScale: pixelScale,
-            emitGlyphs: false
-        )
+        let shaped: ShapedText
+        if let request = Self.paragraphRequest(field: node.nodeId, el: node.el, edit: resolvedEdit, resolved: resolvedInput) {
+            shaped = textSystem.layoutInput(
+                text: resolvedInput.renderedString,
+                spans: resolvedInput.spans,
+                pills: resolvedInput.pills,
+                style: resolvedInput.style,
+                maxWidth: resolvedInput.maxWidthForShape,
+                pixelScale: pixelScale,
+                emitGlyphs: false,
+                request: request
+            ).shaped
+        } else {
+            shaped = textSystem.shape(
+                text: resolvedInput.renderedString,
+                spans: resolvedInput.spans,
+                pills: resolvedInput.pills,
+                style: resolvedInput.style,
+                maxWidth: resolvedInput.maxWidthForShape,
+                pixelScale: pixelScale,
+                emitGlyphs: false
+            )
+        }
         let hScroll = resolvedEdit.multiline ? 0 : (inputMachines.inputScroll[node.path] ?? 0)
         let localX = (windowPos.x - (rect.x + node.el.layout.padding.left * sc.x)) / max(0.01, sc.x) + hScroll
         let localY = (windowPos.y - (rect.y + node.el.layout.padding.top * sc.y)) / max(0.01, sc.y)

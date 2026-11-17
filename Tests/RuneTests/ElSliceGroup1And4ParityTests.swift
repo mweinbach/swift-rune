@@ -19,11 +19,13 @@ struct ElSliceGroup1And4ParityTests {
         #expect(AnimSource.textFlight == 1 << 7)
         #expect(AnimSource.live == 1 << 8)
         #expect(AnimSource.virtualFill == 1 << 9)
+        #expect(AnimSource.textFill == 1 << 10)
         #expect(AnimSource.NAMES == [
             "tracks", "growth", "scroll", "reveal", "loop",
-            "scale-settle", "video", "text-flight", "live", "virtual-fill",
+            "scale-settle", "video", "text-flight", "live", "virtual-fill", "text-fill",
         ])
         #expect(AnimSource.names(AnimSource.tracks | AnimSource.virtualFill) == ["tracks", "virtual-fill"])
+        #expect(AnimSource.names(AnimSource.virtualFill | AnimSource.textFill) == ["virtual-fill", "text-fill"])
         #expect(AnimSource.names(0).isEmpty)
 
         let empty = FrameStats()
