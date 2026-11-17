@@ -159,16 +159,18 @@ public struct WebFieldMirror: Sendable, Equatable, Encodable {
     public let anchor: Int
     public let focus: Int
     public let secure: Bool
+    public let label: String?
     /// The one-pixel browser input must expose hard lines to a screen reader.
     public let wrap = "off"
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.key == rhs.key && lhs.base == rhs.base && lhs.anchor == rhs.anchor
+        lhs.key == rhs.key && lhs.label == rhs.label && lhs.base == rhs.base && lhs.anchor == rhs.anchor
             && lhs.focus == rhs.focus && lhs.secure == rhs.secure && lhs.text.utf8.elementsEqual(rhs.text.utf8)
     }
 
-    internal init(key: String, edit: TextEdit, secure: Bool) {
+    internal init(key: String, edit: TextEdit, secure: Bool, label: String? = nil) {
         self.key = key
+        self.label = label
         self.secure = secure
         if secure {
             text = ""
@@ -305,7 +307,8 @@ public final class WebAppHost<State> {
             guard let el = runtime.focusedInputElement(at: path), el.hasEditAccess,
                   let lens = el.handlers.editLens else { return nil }
             let edit = lens.get(runtime.state)
-            return WebFieldMirror(key: path, edit: edit, secure: el.isSecure || edit.isSecure)
+            return WebFieldMirror(key: path, edit: edit, secure: el.isSecure || edit.isSecure,
+                                  label: el.a11yLabel ?? el.placeholder)
         }
         if next != fieldMirror || (activate && next != nil) {
             fieldMirror = next
@@ -320,8 +323,15 @@ public final class WebAppHost<State> {
         return try RuneRef.render(scene)
     }
 
+    /// A shortcut can mount a field and request focus in one transaction. Apply that frame
+    /// while the browser still grants keyboard/IME activation for the originating event.
+    private func finishActivation(at now: Double) {
+        _ = runtime.frame(at: now)
+        syncField(activate: true)
+    }
+
     public func handleKeyDown(code: String, key: String, mods: Mods = .none, at now: Double) -> Bool {
-        defer { syncField(activate: true) }
+        defer { finishActivation(at: now) }
         var mapped = WebKeyMap.translate(code: code, key: key)
         if mods.ctrl || mods.cmd, case .text(let value) = mapped, let letter = value.lowercased().first {
             mapped = .command(letter)
@@ -336,18 +346,18 @@ public final class WebAppHost<State> {
 
     public func handlePointerDown(x: Float, y: Float, button: PointerButton = .primary, at now: Double) {
         runtime.pressDown(at: Vec2(x, y), button: button, at: now, mouse: !runtime.touchControls())
-        syncField(activate: true)
+        finishActivation(at: now)
     }
 
     /// The event's DOM pointerType distinguishes the active device on hybrid mouse/touch systems.
     public func handlePointerDown(x: Float, y: Float, button: PointerButton = .primary, pointerType: String, at now: Double) {
         runtime.pressDown(at: Vec2(x, y), button: button, at: now, mouse: pointerType == "mouse")
-        syncField(activate: true)
+        finishActivation(at: now)
     }
 
     public func handlePointerUp(x: Float, y: Float, button: PointerButton = .primary, at now: Double) {
         runtime.pointerUp(at: Vec2(x, y), button: button, mods: .none, at: now)
-        syncField(activate: true)
+        finishActivation(at: now)
     }
 
     @discardableResult

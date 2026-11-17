@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Rune
 
@@ -22,6 +23,33 @@ struct WebFieldEventsTests {
         _ = host.runtime.accessibilityAction("draft", .press, at: 0.1)
         host.syncField(activate: true)
         return host
+    }
+
+    @Test func keyboardShortcutMountsAndActivatesTheFieldDuringTheDOMEvent() throws {
+        struct State {
+            var open = false
+            var draft = TextEdit("prompt")
+        }
+        var app = AppSpec<State>(title: "Prompt", size: Vec2(200, 50), state: State()) { state, _ in
+            state.open ? textInput(key: "prompt", \.draft).label("Search messages").size(180, 40) : el()
+        }
+        app.onKey = { state, event, tx in
+            guard event.key == .command("k") else { return false }
+            state.open = true
+            tx.focusWhenShown("prompt", ring: true)
+            return true
+        }
+        let host = WebAppHost(spec: app)
+        let browser = WebBrowserSession(host)
+        _ = try browser.frame(at: 0)
+        let shortcut = Data(#"{"kind":"key","key":"k","code":"KeyK","cmd":true}"#.utf8)
+        #expect(browser.send(shortcut, at: 0.1))
+        let data = try #require(browser.takeField())
+        let update = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let field = try #require(update["field"] as? [String: Any])
+        #expect(update["activate"] as? Bool == true)
+        #expect(field["text"] as? String == "prompt")
+        #expect(field["label"] as? String == "Search messages")
     }
 
     @Test func changedScalarsGoThroughUndoAndChangeCallbacks() throws {
