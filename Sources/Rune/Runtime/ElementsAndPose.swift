@@ -152,7 +152,6 @@ extension Runtime {
         specs: [NodeSpec],
         at scaledNow: Double,
         cut: Bool,
-        snapMounts: Bool,
         lands: Bool,
         prevMountedIds: Set<NodeId>
     ) {
@@ -190,7 +189,7 @@ extension Runtime {
                 let insetFlipped = (prevShadows != nil && k < prevShadows!.count)
                     ? (prevShadows![k].inset != sh.inset)
                     : false
-                let shouldSnap = cut || snapMounts || lands || isFresh || paintSp == nil || !liveStore.has(nid, geomProp) || insetFlipped
+                let shouldSnap = cut || lands || isFresh || paintSp == nil || !liveStore.has(nid, geomProp) || insetFlipped
                 if shouldSnap {
                     liveStore.snap(nid, geomProp, to: geom)
                     liveStore.snap(nid, colProp, to: col)

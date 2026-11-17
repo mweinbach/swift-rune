@@ -592,6 +592,16 @@ private struct RenderClipState {
     var roundedMask: (rect: SIMD4<Float>, radii: SIMD4<Float>)? = nil
 }
 
+/// A composited layer can reset the renderer's clip and opacity for its inner draws.
+/// Pointer geometry keeps the logical clip, turn, and opacity through that layer.
+private struct RenderHitScope {
+    var localClip: MotionRect?
+    var outerClip: MotionRect?
+    var turn: Turn?
+    var opacity: Float = 1
+    var exiting = false
+}
+
 private struct SavedRaisedNodeState {
     var elementIndex: Int
     var visibleClipPt: MotionRect
@@ -620,7 +630,7 @@ extension Runtime {
         RuntimeIdScope.$current.withValue(runtimeId) {
             Theme.withBlend(srgbBlend) {
                 let (frameOut, animNow) = stepToFrameOutputScaled(at: now)
-                let rf = buildRenderFrame(frameOut: frameOut, now: animNow)
+                let rf = buildRenderFrame(frameOut: frameOut, now: animNow, publishHitGeometry: true)
                 if hasMovingScaleSettle && cxSettings.viewTimeScale > 0.0 {
                     isAnimating = true
                     animSources |= AnimSource.scaleSettle
@@ -636,7 +646,7 @@ extension Runtime {
         }
     }
 
-    internal func buildRenderFrame(frameOut: FrameOutput, now: Double) -> RenderFrame {
+    internal func buildRenderFrame(frameOut: FrameOutput, now: Double, publishHitGeometry: Bool = false) -> RenderFrame {
         textSystem.glyphAtlas.beginFrame(pinnedMask: 0)
         elSliceRenderState.cacheScaleFramePending = false
         let commitGen = UInt64(viewCommitCount)
@@ -722,6 +732,8 @@ extension Runtime {
         for (i, rn) in renderNodes.enumerated() { pathToPos[rn.path] = i }
 
         var newElements: [ElementInfo] = []
+        var newHitGeometries: [String: HitGeometry] = [:]
+        var hitScopes: [RenderHitScope] = []
         var newPresentedRects: [String: MotionRect] = [:]
         var newPresentedScales: [String: Vec2] = [:]
         var newPresentedScaleMotionById: [NodeId: PaintScaleMotion] = [:]
@@ -995,7 +1007,7 @@ extension Runtime {
             elideCache: (sig: UInt64, relBounds: SIMD4<Float>, k: Float)?
         ) {
             let nid = node.nodeId
-            let el = node.el
+            let el = presentedGrowthElement(node)
             let subtreeDynamic = !el.liveBindings.isEmpty
                 || el.surfacePayload != nil
                 || el.runtimeExtras[RenderExtrasKey.effectSpec] != nil
@@ -1207,6 +1219,31 @@ extension Runtime {
             }
 
             let myElementIndex = newElements.count
+            if publishHitGeometry {
+                var scope = parentElementIndex.map { hitScopes[$0] } ?? RenderHitScope()
+                let parentScreenClip = Self.screenClipOfParent(
+                    inheritedClip: scope.localClip, ancestorTurn: scope.turn,
+                    outerTurnClip: scope.outerClip, localTurnClip: scope.localClip
+                )
+                if abs(el.rotate) > 1e-4 {
+                    let localTurn = Turn.about(effRect.center, radians: el.rotate)
+                    scope.turn = scope.turn.map { $0.after(localTurn) } ?? localTurn
+                    scope.outerClip = parentScreenClip
+                    scope.localClip = nil
+                }
+                scope.opacity *= ownOpacity
+                scope.exiting = scope.exiting || isExiting
+                newHitGeometries[node.path] = HitGeometry(
+                    path: node.path, parentPath: parentElementIndex.map { newElements[$0].path },
+                    rect: effRect, clipRect: scope.localClip ?? effRect,
+                    outerClip: scope.outerClip.map { intersectRects($0, initialClipPt) } ?? initialClipPt,
+                    turn: scope.turn, opacity: scope.opacity, isExiting: scope.exiting,
+                    hasVisualBlocker: el.blocksHits(fill: effBg, border: borderMap[nid] ?? el.borderColor),
+                    isInteractiveBlocker: el.blocksInteractiveHits,
+                    parentScreenClip: parentScreenClip
+                )
+                hitScopes.append(scope)
+            }
             newElements.append(ElementInfo(
                 path: node.path,
                 key: node.key,
@@ -1295,7 +1332,7 @@ extension Runtime {
             }()
             let clipFadeLTRB: SIMD4<Float>? = clipSpec?.fadeLTRB
                 ?? growthMaskPt.map { SIMD4<Float>(0, 0, 0, $0) }
-                ?? (skipsGrowthReveal && el.growthReveal != nil ? el.growthReveal?.authoredFade : el.clipFade)
+                ?? el.clipFade
             let ownFadePx: SIMD4<Float>
             if let ltrb = clipFadeLTRB {
                 ownFadePx = SIMD4<Float>(ltrb.x * scale, ltrb.y * scale, ltrb.z * scale, ltrb.w * scale)
@@ -1384,6 +1421,11 @@ extension Runtime {
             var mergedFadeWidth = parentClip.fadeWidth
             var mergedFadeOrigin = parentClip.fadeOrigin
             let hasClipScope = el.layout.clipOverflow || (clipSpec?.clipRect ?? false) || ownRound != nil || clipFadeLTRB != nil || clipSpec?.fadeLinear != nil
+            if publishHitGeometry && hasClipScope {
+                hitScopes[myElementIndex].localClip = hitScopes[myElementIndex].localClip.map {
+                    intersectRects($0, effRect)
+                } ?? effRect
+            }
             if hasClipScope && ownFadePx != .zero {
                 inheritFade(width: &mergedFadeWidth, origin: &mergedFadeOrigin, rect: boundsClipPx, own: ownFadePx)
             }
@@ -3055,6 +3097,10 @@ extension Runtime {
         }
 
         self.lastElements = newElements
+        if publishHitGeometry {
+            self.hitGeometryByPath = newHitGeometries
+            self.paintOrderPaths = newElements.map(\.path)
+        }
         self.presentedRectByPath = newPresentedRects
         self.presentedScaleByPath = newPresentedScales
         self.presentedScaleMotionById = newPresentedScaleMotionById
