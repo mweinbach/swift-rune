@@ -206,8 +206,8 @@ public enum Win32App {
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
 
         let hInstance = GetModuleHandleW(nil)
-        let className = "RuneWin32WindowClass".withCString(encodedAs: UTF16.self) { Array($0) }
-        let titleUTF16 = spec.title.withCString(encodedAs: UTF16.self) { Array($0) }
+        let className = Array("RuneWin32WindowClass".utf16) + [0]
+        let titleUTF16 = Array(spec.title.utf16) + [0]
 
         var wc = WNDCLASSEXW()
         wc.cbSize = UINT(MemoryLayout<WNDCLASSEXW>.size)
