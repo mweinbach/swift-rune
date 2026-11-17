@@ -6,74 +6,63 @@ import RuneRef
 @Suite("El & Runtime Increment 3 Parity Tests")
 struct ElInc3ParityTests {
 
-    @Test("matched: flight after earlier commit in same frame starts where element was last seen")
-    func matchedFlightAfterEarlierCommitStartsWhereSeen() {
-        struct S {
-            var expanded = false
-            var yShift: Float = 0
+    // Upstream: runtime/tests/matched_scroll.rs
+    @Test("matched: flight after earlier commit in same frame starts where element was last seen",
+          arguments: [false, true], [false, true])
+    func matchedFlightAfterEarlierCommitStartsWhereSeen(native: Bool, customSpring: Bool) throws {
+        struct Viewer {
+            var open = false
+            var glide = 0
         }
-        let rt = Runtime<S>(
-            state: S(),
-            viewport: Vec2(400, 300),
-            pixelScale: 2.0,
-            systemDark: true
-        ) { (s: S, _) -> El<S> in
-            if !s.expanded {
-                return col()
-                    .size(400, 300)
-                    .pt(s.yShift).pl(20)
-                    .child(
-                        el()
-                            .key("tile")
-                            .matched("shared-card")
-                            .size(80, 80)
-                            .bg(Color(r: 0.2, g: 0.5, b: 0.9, a: 1))
-                    )
-            } else {
-                return col()
-                    .size(400, 300)
-                    .pt(10).pl(40)
-                    .child(
-                        el()
-                            .key("hero")
-                            .matched("shared-card")
-                            .size(300, 200)
-                            .bg(Color(r: 0.2, g: 0.5, b: 0.9, a: 1))
-                    )
+
+        let rt = Runtime<Viewer>(state: Viewer(), viewport: Vec2(300, 200), pixelScale: 1, systemDark: true) { s, _ in
+            func tile(_ size: Float) -> El<Viewer> {
+                el().key("tile").matched("tile").size(size, size).bg(.white)
             }
+            let slot = s.open ? el().key("held").size(40, 40) : tile(40)
+            let rows = col().key("rows").wFull().child(el().wFull().h(200)).child(slot).child(el().wFull().h(400))
+            let list = col().key("list").size(300, 200).scroll(ScrollSpec(stickBottom: false)).child(rows)
+            let root = col().size(300, 200).child(list)
+            return s.open ? root.child(tile(160).absolute(x: 100, y: 0)) : root
         }
-
-        // Initial frame sees tile at top = 0.
-        rt.frame(at: 0.0)
-        // Scroll / shift and render so tile is seen at y = 120.
-        rt.update(at: 0.1) { s, _ in s.yShift = 120 }
-        rt.frame(at: 0.1)
-        let seenRect = rt.element(byKey: "tile")!.rect
-        #expect(abs(seenRect[1] - 120.0) < 1.0)
-
-        // Commit 1 at t = 0.2 shifts layout in Scene WITHOUT rendering a frame yet.
-        rt.update(at: 0.2) { s, _ in s.yShift = 20 }
-        // Force commitTree before swapping by running keyDown on no-op key.
-        _ = rt.keyDown(KeyEvent(key: .text("x")), at: 0.2)
-        // Commit 2 in the same frame swaps to "hero" (`expanded = true`).
-        rt.update(at: 0.2) { s, _ in s.expanded = true }
-        rt.frame(at: 0.2 + 1.0 / 120.0)
-        let flightStart = rt.element(byKey: "hero")!.rect
-        #expect(abs(flightStart[1] - seenRect[1]) < 15.0, "expected start near seenRect \(seenRect), got \(flightStart)")
-
-        // Advance halfway through flight so hero widens well past 100px before reversing.
-        var midHero = flightStart
-        for step in 1...10 {
-            rt.frame(at: 0.2 + Double(step) * 0.01)
-            midHero = rt.element(byKey: "hero")!.rect
+        rt.globalOnKey = { state, _, tx in
+            if customSpring { tx.motion(Spring(duration: 0.8, bounce: 0)) }
+            state.open = false
+            return true
         }
-        #expect(midHero[2] > 120.0, "expected hero to expand mid-flight, got \(midHero)")
+        var now = 0.0
+        func step(_ dt: Double = 1.0 / 60) {
+            now += dt
+            if native { _ = rt.renderFrame(at: now) } else { _ = rt.frame(at: now) }
+        }
+        step(0)
+        rt.wheel(WheelEvent(dx: 0, dy: -150), at: Vec2(150, 100), now: now)
+        for _ in 0..<30 { step() }
+        let inList = try #require(rt.element(byKey: "tile"))
+        #expect(inList.rect == [0, 50, 40, 40])
 
-        // Reverse home mid-flight: detail -> tile starts near mid-flight hero rect.
-        rt.update(at: 0.35) { s, _ in s.expanded = false }
-        rt.frame(at: 0.35 + 1.0 / 120.0)
-        let reverseStart = rt.element(byKey: "tile")!.rect
-        #expect(reverseStart[2] > 120.0, "reverse flight should start near midHero width \(midHero), got \(reverseStart)")
+        rt.update(at: now) { state, _ in state.open = true }
+        for _ in 0..<120 { step() }
+        let open = try #require(rt.element(byKey: "tile"))
+        #expect(open.rect == [100, 0, 160, 160])
+
+        // The dirty view commits before the key closes it in the same frame.
+        rt.update(at: now) { state, _ in state.glide += 1 }
+        #expect(rt.keyDown(KeyEvent(key: .escape), at: now))
+        step(1.0 / 120)
+        let first = try #require(rt.element(byKey: "tile"))
+        #expect(first.rect[0] > 90 && abs(first.rect[1]) < 10)
+
+        // Reversing a return flight starts from its current size.
+        for _ in 0..<5 { step() }
+        let midway = try #require(rt.element(byKey: "tile"))
+        let expectedMidway: Float = customSpring ? 140.46875 : 109.375
+        #expect(abs(midway.rect[2] - expectedMidway) < 0.03, "upstream return-flight width after five frames")
+        rt.update(at: now) { state, _ in state.open = true }
+        step(1.0 / 120)
+        let reversed = try #require(rt.element(byKey: "tile"))
+        let expectedReversed: Float = customSpring ? 138.203125 : 105.0625
+        #expect(abs(reversed.rect[2] - expectedReversed) < 0.03, "the first reverse frame carries the return velocity")
     }
 
     @Test("matched: cover vs matchedCrop child scaling and lifted paint order")
