@@ -12,6 +12,19 @@ struct RuneParityTests {
         return dir
     }
 
+    #if os(macOS) || os(Linux)
+    @Test("A verbose build can emit diagnostics before its first stdout line")
+    func largeDiagnosticsDoNotBlockTheChild() throws {
+        let output = try ProcessRunner.run(
+            executable: "/bin/sh",
+            arguments: ["-c", "head -c 262144 /dev/zero >&2 && printf done"]
+        )
+        #expect(output.exitCode == 0)
+        #expect(output.stdout == "done")
+        #expect(output.stderr.utf8.count == 262_144)
+    }
+    #endif
+
     @Test("RustScanner extracts pub struct, enum, trait, fn and skips comments and pub(crate)")
     func rustSymbolScanning() {
         let source = """

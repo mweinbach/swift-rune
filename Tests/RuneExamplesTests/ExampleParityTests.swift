@@ -50,6 +50,24 @@ struct ExampleParityTests {
         #expect(abs((on - off) - 16.0) < 0.01, "and lands 16 points over")
     }
 
+    @Test("hello: a scripted tap springs and settles on the virtual clock",
+          arguments: [("0.25", 152.91, true), ("1", 159.0, false)])
+    func helloHeadlessTapAtCaptureTime(time: String, knobX: Double, moving: Bool) throws {
+        let args = ToolingArgs.parse([
+            "--script", #"[{"t":0.1,"type":"tap","key":"switch"}]"#,
+            "--at", time, "--scale", "2",
+        ])
+        let output = try HeadlessRunner.run(RuneHelloApp.makeSpec(), args: args)
+        let tree = try #require(JSONSerialization.jsonObject(with: output.treeJSON) as? [String: Any])
+        let elements = try #require(tree["elements"] as? [[String: Any]])
+        let knob = try #require(elements.first { $0["key"] as? String == "knob" })
+        let rect = try #require(knob["rect"] as? [Double])
+        #expect(elements.contains { $0["text"] as? String == "Lights on" })
+        let x = try #require(rect.first)
+        #expect(abs(x - knobX) <= 0.01)
+        #expect(tree["animating"] as? Bool == moving)
+    }
+
     // Upstream: examples/frosted-bar/src/main.rs:85 the_bar_blurs_and_a_tab_takes_a_tap
     @Test("frosted-bar: the bar blurs and a tab takes a tap")
     func frostedBarBlursAndTabTakesTap() {
