@@ -590,12 +590,6 @@ public struct Tx {
         }
         for (k, v) in one.runtimeActions where k != "wakeAfter" && k != "wakeAfterList" {
             switch k {
-            case Tx.pickReadsKey:
-                var existing = (runtimeActions[k] as? [ErasedPickRead]) ?? []
-                if let added = v as? [ErasedPickRead] {
-                    existing.append(contentsOf: added)
-                }
-                runtimeActions[k] = existing
             case Tx.sentKeysKey:
                 var existing = (runtimeActions[k] as? [KeyEvent]) ?? []
                 if let added = v as? [KeyEvent] {
