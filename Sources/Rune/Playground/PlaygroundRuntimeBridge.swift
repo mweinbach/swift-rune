@@ -545,7 +545,7 @@ extension Runtime {
         if changed { framePollChanged() }
 
         let keys = live.takePressed()
-        if !keys.isEmpty { commitPolledChangeApart(at: now) }
+        if !keys.isEmpty { commitPolledChangeApart(at: now, routed: true) }
         for ev in keys {
             _ = routePlaygroundStageKey(ev, at: now)
             live.played += 1

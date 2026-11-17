@@ -293,6 +293,17 @@ struct CommitWatchCauseSitesTests {
 
     // MARK: - Virtual windows (frame.rs:672 `virtual_window_changed` -> `VIRTUAL`)
 
+    @Test("a pending virtual window shift does not add a cause to an already dirty frame")
+    func dirtyFrameConsumesPendingVirtualCause() {
+        let rt = plainApp()
+        _ = rt.frame(at: 0)
+        rt.update(at: 0.01) { state, _ in state.n += 1 }
+        rt.commitWhyPending |= CommitWhy.virtual
+        let got = causes { _ = rt.frame(at: 0.02) }
+        #expect(got.first == CommitWhy.dirty)
+        #expect(rt.commitWhyPending == 0)
+    }
+
     private struct V {}
 
     @Test("frame.rs:672,696 - a scrollKeyTo landing and a nested list placed anew commit for `virtual`")

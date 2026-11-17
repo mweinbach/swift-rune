@@ -105,9 +105,10 @@ extension Runtime {
         // start. A lane the request leaves out repeats its target with no velocity of its own
         // (NaN), so the store leaves its motion alone.
         let nan = Float.nan
+        let landed = Vec2(land[0] ?? finals.x, land[1] ?? finals.y)
         scrollStore.animateWithVelocity(
             nid, Props.SCROLL,
-            to: Vec2(land[0] ?? comp(finals, 0), land[1] ?? comp(finals, 1)),
+            to: landed,
             velocity: Vec2(land[0] == nil ? nan : 0, land[1] == nil ? nan : 0),
             anim: .instant
         )
@@ -117,7 +118,7 @@ extension Runtime {
             func carried(_ a: Int) -> Bool { want[a] == nil && gliding && laneMoving(a) }
             scrollStore.animateWithVelocity(
                 nid, Props.SCROLL,
-                to: Vec2(glides[0]?.end ?? comp(finals, 0), glides[1]?.end ?? comp(finals, 1)),
+                to: Vec2(glides[0]?.end ?? landed.x, glides[1]?.end ?? landed.y),
                 velocity: Vec2(
                     glides[0]?.v ?? (carried(0) ? comp(velocity, 0) : nan),
                     glides[1]?.v ?? (carried(1) ? comp(velocity, 1) : nan)
