@@ -43,11 +43,17 @@ struct Phase3ElMotionTests {
         let center = Vec2(feed.rect[0] + feed.rect[2] * 0.5, feed.rect[1] + feed.rect[3] * 0.5)
         rtAnchored.wheel(WheelEvent(dy: -240), at: center, now: 0.02)
         rtAnchored.frame(at: 0.03)
+        let scrollBefore = rtAnchored.scrollOffset(forKey: "feed").y
+        #expect(scrollBefore > 100)
         let msg8Before = try #require(rtAnchored.element(byKey: "msg-8")?.rect[1])
 
         #expect(rtAnchored.keyDown(KeyEvent(key: .enter), at: 0.04))
-        rtAnchored.frame(at: 0.05)
+        for step in 1...40 {
+            rtAnchored.frame(at: 0.04 + Double(step) * 0.016)
+        }
         #expect(rtAnchored.state.earlier == 3)
+        let scrollAfter = rtAnchored.scrollOffset(forKey: "feed").y
+        #expect(scrollAfter > scrollBefore + 150)
         let msg8After = try #require(rtAnchored.element(byKey: "msg-8")?.rect[1])
         #expect(abs(msg8After - msg8Before) < 2.0)
 

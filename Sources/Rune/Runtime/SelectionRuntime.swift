@@ -749,7 +749,6 @@ internal extension Runtime {
         guard !displayText.isEmpty else { return 0 }
         let rect = preferLayoutRects ? node.targetRect : (presentedRectByPath[node.path] ?? node.targetRect)
         let sc = preferLayoutRects ? Vec2(1, 1) : (presentedScaleByPath[node.path] ?? Vec2(1, 1))
-        let innerW = max(0, rect.width - (node.el.layout.padding.left + node.el.layout.padding.right) * sc.x)
         let resolvedText = ElDisplayResolver.resolveText(el: node.el, rawText: displayText, isSecure: false)
         // A text wraps at its layout width, `w * scale + FIT_SLACK` device px, as it laid out and
         // paints (`relayout::lay_out_text`, #948).
