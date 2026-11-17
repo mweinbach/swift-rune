@@ -54,15 +54,17 @@ struct ScrollAndStickySlice2ParityTests {
                 tx.scrollTo("scroll", x: 0, y: 300)
             }
             var carried: Float = 0
+            var maximumDrift: Float = 0
             for _ in 0..<90 {
                 t += 1.0 / 120.0
                 _ = rt.frame(at: t)
                 let e = try reqEl(rt, "row3")
                 let x = e.rect[0] + e.carriedScrolled[0]
                 let y = e.rect[1] + e.carriedScrolled[1]
-                #expect(abs(x - startX) <= 1.0 && abs(y - startY) <= 1.0, "\(z): row rides scroll alone \(startX),\(startY) -> \(x),\(y)")
+                maximumDrift = max(maximumDrift, abs(x - startX), abs(y - startY))
                 carried = max(carried, hypotf(e.carriedScrolled[0], e.carriedScrolled[1]))
             }
+            #expect(maximumDrift <= 1.0, "\(z): row moved independently of the scroll by \(maximumDrift)pt")
             let expected: Float = (z == .within) ? 300.0 : 480.0
             #expect(abs(carried - expected) < 1.0, "\(z): 300pt scroll should carry \(expected)pt on screen, got \(carried)")
         }
