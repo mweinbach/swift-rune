@@ -22,14 +22,22 @@ public enum ProcessRunner {
         }
 
         let outPipe = Pipe()
-        let errPipe = Pipe()
+        // Cargo and SwiftPM can fill stderr before producing any stdout. Spool
+        // diagnostics so the child can always write while we drain stdout.
+        let diagnosticsURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rune-parity-\(UUID().uuidString).log")
+        try Data().write(to: diagnosticsURL, options: .withoutOverwriting)
+        defer { try? FileManager.default.removeItem(at: diagnosticsURL) }
+        let diagnostics = try FileHandle(forUpdating: diagnosticsURL)
+        defer { try? diagnostics.close() }
         proc.standardOutput = outPipe
-        proc.standardError = errPipe
+        proc.standardError = diagnostics
 
         try proc.run()
         let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
+        try diagnostics.seek(toOffset: 0)
+        let errData = try diagnostics.readToEnd() ?? Data()
 
         return Output(
             exitCode: proc.terminationStatus,

@@ -58,32 +58,38 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+[[ -z "$RUST_TREE" || "$RUST_TREE" == /* ]] || RUST_TREE="$PWD/$RUST_TREE"
+[[ -z "$SWIFT_TREE" || "$SWIFT_TREE" == /* ]] || SWIFT_TREE="$PWD/$SWIFT_TREE"
 
 SWIFT_PRODUCT=""
 if [[ -n "$EXAMPLE" ]]; then
-  SWIFT_PRODUCT="$(python3 -c '
+  read -r SWIFT_PRODUCT CARGO_PACKAGE <<< "$(python3 -c '
 import json, sys
 umap = json.load(open(sys.argv[1]))
 ex = sys.argv[2]
 for e in umap.get("examples", []):
     if e["upstreamName"] == ex:
-        print(e["swiftProduct"])
+        print(e["swiftProduct"], e.get("cargoPackage") or ex)
         sys.exit(0)
-print(f"rune-{ex}")
+print(f"rune-{ex}", ex)
 ' "$MAP_FILE" "$EXAMPLE")"
 fi
 
-EXTRA_FLAGS=()
-[[ -n "$SCENE" ]] && EXTRA_FLAGS+=(--scene "$SCENE")
-[[ -n "$SIZE" ]] && EXTRA_FLAGS+=(--size "$SIZE")
+capture() {
+  local args=(--snap "$1" --tree "$2")
+  shift 2
+  [[ -z "$SCENE" ]] || args+=(--scene "$SCENE")
+  [[ -z "$SIZE" ]] || args+=(--size "$SIZE")
+  "$@" "${args[@]}"
+}
 
 if [[ -z "$RUST_PNG" && -n "$EXAMPLE" ]]; then
   RUST_PNG="$OUT_DIR/${EXAMPLE}-rust.png"
   RUST_TREE="${RUST_TREE:-$OUT_DIR/${EXAMPLE}-rust-tree.json}"
   if [[ -n "$UPSTREAM_DIR" ]] && command -v cargo >/dev/null 2>&1; then
     echo "Running upstream Rust example '$EXAMPLE'..."
-    cargo run --manifest-path "$UPSTREAM_DIR/Cargo.toml" --example "$EXAMPLE" -- \
-      --snap "$RUST_PNG" --tree "$RUST_TREE" "${EXTRA_FLAGS[@]}"
+    (cd "$UPSTREAM_DIR" && capture "$RUST_PNG" "$RUST_TREE" cargo run --package "$CARGO_PACKAGE" --bin "$EXAMPLE" --)
   else
     echo "Note: cargo or --upstream not available; expecting pre-captured --rust-png at $RUST_PNG"
   fi
@@ -93,7 +99,7 @@ if [[ -z "$SWIFT_PNG" && -n "$SWIFT_PRODUCT" ]]; then
   SWIFT_PNG="$OUT_DIR/${EXAMPLE}-swift.png"
   SWIFT_TREE="${SWIFT_TREE:-$OUT_DIR/${EXAMPLE}-swift-tree.json}"
   echo "Running Swift product '$SWIFT_PRODUCT'..."
-  (cd "$REPO_ROOT" && xcrun swift run "$SWIFT_PRODUCT" --snap "$SWIFT_PNG" --tree "$SWIFT_TREE" "${EXTRA_FLAGS[@]}")
+  (cd "$REPO_ROOT" && capture "$SWIFT_PNG" "$SWIFT_TREE" xcrun swift run "$SWIFT_PRODUCT")
 fi
 
 DIFF_PNG="$OUT_DIR/${EXAMPLE:-render}-diff.png"

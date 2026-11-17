@@ -485,7 +485,7 @@ public enum RenderComparator {
         let cargoTarget = mapping.cargoPackage ?? mapping.upstreamName
         var cargoArgs = [
             "run", "--manifest-path", manifest,
-            "--example", cargoTarget, "--",
+            "--package", cargoTarget, "--bin", mapping.upstreamName, "--",
             "--snap", rustPNG.path,
             "--tree", rustTree.path,
         ]
