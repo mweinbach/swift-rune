@@ -285,6 +285,44 @@ struct RuneTests {
         #expect(rt.focusedKey == "modal-ok")
     }
 
+    @Test("Tree JSON keeps the committed layout target while a row scrolls", arguments: [false, true])
+    func treeExportsCommittedTargetAfterScroll(native: Bool) throws {
+        let rt = Runtime(state: Float(90), viewport: Vec2(120, 80), pixelScale: 1) { width, _ in
+            col().size(120, 80).scroll(stickBottom: false).child(
+                col().size(120, 200).shrink(0)
+                    .child(el().size(120, 60))
+                    .child(el().key("row").size(width, 20))
+            )
+        }
+        func draw(_ time: Double) {
+            if native { _ = rt.renderFrame(at: time) } else { _ = rt.frame(at: time) }
+        }
+        func rowInTree() throws -> [String: Any] {
+            let elements = try #require(rt.treeJSON()["elements"] as? [[String: Any]])
+            return try #require(elements.first { $0["key"] as? String == "row" })
+        }
+
+        draw(0)
+        let resting = try rowInTree()
+        #expect(resting["rect"] as? [Double] == [0, 60, 90, 20])
+        #expect(resting["target"] == nil)
+
+        rt.wheel(WheelEvent(dy: -40), at: Vec2(15, 30), now: 0.01)
+        draw(0.02)
+        let scrolled = try rowInTree()
+        #expect(scrolled["rect"] as? [Double] == [0, 20, 90, 20])
+        #expect(scrolled["target"] as? [Double] == [0, 60, 90, 20])
+        let row = try #require(rt.element(byKey: "row"))
+        #expect(row.rect == [0, 20, 90, 20])
+        #expect(row.target == row.rect)
+
+        rt.update(at: 0.03) { width, tx in width = 70; tx.instant() }
+        draw(0.04)
+        let resized = try rowInTree()
+        #expect(resized["rect"] as? [Double] == [0, 20, 70, 20])
+        #expect(resized["target"] as? [Double] == [0, 60, 70, 20])
+    }
+
     @Test("HeadlessRunner executes --script JSON and emits valid PNG and tree JSON")
     func headlessScriptReplay() throws {
         struct CounterState {

@@ -70,6 +70,8 @@ public struct ElementInfo: Sendable, Equatable {
     public var rect: [Float]
     /// Unsnapped layout target `[x, y, width, height]` in logical window points.
     public var target: [Float]
+    /// The committed layout box before scrolling or growth reveal, as reported by the headless tree.
+    internal var committedLayoutTarget: MotionRect? = nil
     /// Visible clipped `[x, y, width, height]` in logical window points.
     public var visible: [Float]
     public var opacity: Float
@@ -117,6 +119,12 @@ public struct ElementInfo: Sendable, Equatable {
     public var elision: TextElision? = nil
     /// What the assistive tree reads of the element's editor and stepper (`a11y/node.rs:31,231-240`).
     public var a11yInput: ElementA11yInput? = nil
+
+    /// Synthetic text ranges share their owner's layout coordinate system.
+    internal func committedTextTarget(_ box: MotionRect) -> MotionRect {
+        guard let committedLayoutTarget else { return box }
+        return box.translated(Vec2(committedLayoutTarget.x - target[0], committedLayoutTarget.y - target[1]))
+    }
 
     public static func stub(_ key: String) -> ElementInfo {
         ElementInfo(
@@ -269,6 +277,7 @@ public final class Runtime<State> {
             localRect: MotionRect,
             unscrolledRect: MotionRect,
             targetRect: MotionRect,
+            committedLayoutTarget: MotionRect? = nil,
             zoomedTargetRect: MotionRect,
             staticRect: [Float],
             contentSize: Vec2,
@@ -300,6 +309,7 @@ public final class Runtime<State> {
             self.cold = FlatNodeCold(
                 el: el,
                 unscrolledRect: unscrolledRect,
+                committedLayoutTarget: committedLayoutTarget ?? targetRect,
                 zoomedTargetRect: zoomedTargetRect,
                 staticRect: staticRect,
                 contentSize: contentSize,
@@ -3083,9 +3093,13 @@ public final class Runtime<State> {
             let rawLocalRect = solved.layout.localRect
             // A launch re-aims when layout moves its destination or a containing row.
             // Intermediate growth clamps and scrolling change only its projected endpoint.
+            let naturalLocalRect = item.naturalLayout?.layout.localRect ?? rawLocalRect
             if measureLaunches {
-                naturalLaunchTargets[nid] = item.naturalLayout?.layout.localRect ?? rawLocalRect
+                naturalLaunchTargets[nid] = naturalLocalRect
             }
+            // The committed tree uses natural layout, before the viewport and growth tracks project it.
+            let parentLayoutOrigin = parentIdx.map { newFlat[$0].cold.committedLayoutTarget.origin } ?? .zero
+            var committedLayoutTarget = naturalLocalRect.translated(parentLayoutOrigin)
             let localRect = closingStackExtraH > 0
                 ? MotionRect.fromXYWH(rawLocalRect.x, rawLocalRect.y, rawLocalRect.width, rawLocalRect.height + closingStackExtraH)
                 : rawLocalRect
@@ -3106,6 +3120,17 @@ public final class Runtime<State> {
                 el.anchor = a
                 if let anchorFlat = newFlat.first(where: { $0.key == a.key }) {
                     let aSticky = anchorFlat.index < commitStickyShifts.count ? commitStickyShifts[anchorFlat.index] : .zero
+                    // The anchor is placed against its scrolled, sticky trigger in unscaled layout coordinates.
+                    var trigger = anchorFlat.cold.committedLayoutTarget.translated(aSticky)
+                    var ancestor = anchorFlat.parentIndex
+                    while let i = ancestor {
+                        let offset = newFlat[i].scrollShift
+                        trigger = trigger.translated(Vec2(-offset.x, -offset.y))
+                        ancestor = newFlat[i].parentIndex
+                    }
+                    let (x, y) = anchorPosition(a, trigger: [trigger.left, trigger.top, trigger.right, trigger.bottom],
+                                                size: (naturalLocalRect.width, naturalLocalRect.height), viewport: (viewport.x, viewport.y))
+                    committedLayoutTarget = .fromXYWH(x, y, naturalLocalRect.width, naturalLocalRect.height)
                     let aParentScale = anchorFlat.parentIndex.map { newFlat[$0].inheritedScale } ?? 1.0
                     let triggerZoomed = (aSticky == .zero)
                         ? anchorFlat.zoomedTargetRect
@@ -3298,6 +3323,7 @@ public final class Runtime<State> {
                 localRect: localRect,
                 unscrolledRect: unscrolledRect,
                 targetRect: targetRect,
+                committedLayoutTarget: committedLayoutTarget,
                 zoomedTargetRect: zoomedTargetRect,
                 staticRect: staticBounds,
                 contentSize: solved.layout.contentSize,
@@ -3738,6 +3764,7 @@ public final class Runtime<State> {
                 role: .mark,
                 rect: r.xywh,
                 target: t.xywh,
+                committedLayoutTarget: owner.committedTextTarget(t),
                 visible: vis.xywh,
                 opacity: owner.opacity,
                 scale: scaleVec.x,
@@ -9032,6 +9059,7 @@ public final class Runtime<State> {
                 role: el.role,
                 rect: infoRect.xywh,
                 target: snap.targetRect.xywh,
+                committedLayoutTarget: snap.cold.committedLayoutTarget,
                 visible: infoVisible.xywh,
                 opacity: logicalAlpha,
                 scale: scaleVec.x,
@@ -11822,8 +11850,9 @@ public final class Runtime<State> {
             if let av = e.a11yValue { obj["a11yValue"] = av }
             if let ad = e.a11yDescription { obj["description"] = ad }
             if e.a11yHidden { obj["a11yHidden"] = true }
-            if zip(e.rect, e.target).contains(where: { abs($0 - $1) > 0.01 }) {
-                obj["target"] = e.target.map(r2)
+            let target = e.committedLayoutTarget?.xywh ?? e.target
+            if zip(e.rect, target).contains(where: { abs($0 - $1) > 0.01 }) {
+                obj["target"] = target.map(r2)
             }
             if e.moving { obj["moving"] = true }
             if e.exiting { obj["exiting"] = true }

@@ -334,6 +334,7 @@ internal extension Runtime {
                     role: box.link.role,
                     rect: [box.windowUnion.x, box.windowUnion.y, box.windowUnion.z, box.windowUnion.w],
                     target: [box.targetUnion.x, box.targetUnion.y, box.targetUnion.z, box.targetUnion.w],
+                    committedLayoutTarget: parent.committedTextTarget(.fromXYWH(box.targetUnion.x, box.targetUnion.y, box.targetUnion.z, box.targetUnion.w)),
                     visible: [box.visibleUnion.x, box.visibleUnion.y, box.visibleUnion.z, box.visibleUnion.w],
                     opacity: parent.opacity,
                     scale: parent.scale,
