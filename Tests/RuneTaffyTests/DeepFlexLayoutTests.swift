@@ -1,6 +1,37 @@
 import Testing
 @testable import RuneTaffy
 
+@Test func fixedFlexSiblingsSkipRedundantIntrinsicMeasurements() throws {
+    final class Measurements: @unchecked Sendable {
+        var minimums = 0
+    }
+    let measurements = Measurements()
+    var tree = TaffyTree()
+    let style = TaffyStyle(size: Size(width: .length(80), height: .length(20)), flexShrink: 0)
+    let first = tree.newLeafWithSimpleMeasure(style) { available in
+        if available.width == .minContent { measurements.minimums += 1 }
+        return Size(width: 65, height: 20)
+    }
+    let second = tree.newLeaf(style)
+    let root = try tree.newWithChildren(
+        TaffyStyle(size: Size(width: .length(110), height: .length(20))),
+        children: [first, second]
+    )
+    try tree.computeLayout(root, availableSpace: .maxContent)
+    #expect(measurements.minimums == 0)
+    #expect(try tree.layout(first).size.width == 80)
+    #expect(try tree.layout(second).location.x == 80)
+
+    // A smaller flex basis still needs the intrinsic floor, even for an inflexible item.
+    var smaller = style
+    smaller.flexBasis = .length(40)
+    try tree.setStyle(first, smaller)
+    try tree.computeLayout(root, availableSpace: .maxContent)
+    #expect(measurements.minimums > 0)
+    #expect(try tree.layout(first).size.width == 65)
+    #expect(try tree.layout(second).location.x == 65)
+}
+
 @Test func deepFixedFlexContainersRetainLeafGeometryAfterHideAndShow() throws {
     var tree = TaffyTree()
     let container = TaffyStyle(size: Size(width: .length(100), height: .length(100)))

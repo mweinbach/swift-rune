@@ -392,14 +392,18 @@ private func flexDetermineSingleItemBaseSize(
         basis = out.size.main(direction: dir)
     }
 
+    func basisCoversAutomaticMinimum() -> Bool {
+        // Content can raise the automatic minimum only as far as the preferred size.
+        guard let preferred = item.size.main(direction: dir), basis >= preferred else { return false }
+        if item.flexShrink == 0 { return true }
+        guard singleItem, let available = childMainParent else { return false }
+        return basis + (item.margin.mainStart(direction: dir) ?? 0) + (item.margin.mainEnd(direction: dir) ?? 0) <= available
+    }
+
     let resolvedMinMain: Float
     if let explicitMin = item.minSize.main(direction: dir) {
         resolvedMinMain = explicitMin
-    } else if singleItem, let available = childMainParent,
-              let preferred = item.size.main(direction: dir), basis >= preferred,
-              basis + (item.margin.mainStart(direction: dir) ?? 0) + (item.margin.mainEnd(direction: dir) ?? 0) <= available {
-        // The automatic minimum is capped by the preferred size. A sole item whose basis
-        // already fits cannot shrink to that minimum, even when its contents overflow.
+    } else if basisCoversAutomaticMinimum() {
         resolvedMinMain = 0
     } else if item.overflowMain == .visible {
         var knownDims = Size<Float?>(width: nil, height: nil)
