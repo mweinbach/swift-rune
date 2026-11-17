@@ -178,6 +178,29 @@ xcrun swift run rune-ref check
 | **Android** (NDK / `ANativeWindow` / `Choreographer`) | `AndroidPlatform.swift` (`Android` NDK, `android`, `log`) | `swift build --swift-sdk <android-sdk>` |
 | **WebAssembly** (`wasm32-unknown-wasip1`) | `WebPlatform.swift` (`WASILibc`, DOM / CPU canvas bridge, `web_math`) | `swift build --swift-sdk <wasip1-sdk>` |
 
+`mountRuneFields(canvas, send)` in `Sources/Rune/Resources/Web/rune-web.mjs` mounts a native textarea and password field beside an existing canvas. Pass Rune’s `WebAppHost.onFieldChange` updates to its `sync(field, activate)` method and route its edit, selection and secure insert events to the corresponding `WebAppHost` handlers. Call `dispose()` when the canvas unmounts.
+
+The standalone WASI browser entry uses a Preview 1 reactor. Building the full package for WASI currently requires resolving existing portability issues in RuneRef and Rune, including Apple-only imports. The build command for a toolchain with a matching Swift SDK is:
+
+```bash
+./scripts/build-web.sh <wasip1-sdk> rune-web-hello
+```
+
+Serve the resulting `.wasm` file and the module in `Sources/Rune/Resources/Web/rune-web.mjs`. Instantiate the reactor with the page’s WASI Preview 1 implementation and initialize it once before mounting it on a canvas. For example, with a WASI host that exposes `wasiImport` and `initialize`:
+
+```js
+import { mountRuneBrowser } from './rune-web.mjs';
+
+const { instance } = await WebAssembly.instantiateStreaming(fetch('./rune-web-hello.wasm'), {
+    wasi_snapshot_preview1: wasi.wasiImport
+});
+wasi.initialize(instance);
+const app = mountRuneBrowser(document.querySelector('canvas'), instance);
+// Call app.dispose() when the page removes the canvas.
+```
+
+The browser adapter draws CPU frames into the canvas and gives the focused Rune editor a native textarea or password input for keyboard and assistive input.
+
 ### Headless Rendering & Inspection
 
 Any `RuneApp` executable accepts headless tooling flags (parsed by `ToolingArgs`):

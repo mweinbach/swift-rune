@@ -152,7 +152,7 @@ public struct WebAppConfig: Sendable, Equatable {
 
 /// Browser text selection offsets are UTF-16 units relative to this slice. The base is
 /// a UTF-8 byte offset in Rune's model. Secure fields never export model text.
-public struct WebFieldMirror: Sendable, Equatable {
+public struct WebFieldMirror: Sendable, Equatable, Encodable {
     public let key: String
     public let text: String
     public let base: Int
@@ -300,9 +300,10 @@ public final class WebAppHost<State> {
         return shouldReconfig
     }
 
-    private func syncField(activate: Bool) {
+    func syncField(activate: Bool) {
         let next = runtime.focusedPath.flatMap { path -> WebFieldMirror? in
-            guard let el = runtime.focusedInputElement(at: path), let lens = el.handlers.editLens else { return nil }
+            guard let el = runtime.focusedInputElement(at: path), el.hasEditAccess,
+                  let lens = el.handlers.editLens else { return nil }
             let edit = lens.get(runtime.state)
             return WebFieldMirror(key: path, edit: edit, secure: el.isSecure || edit.isSecure)
         }
@@ -321,7 +322,11 @@ public final class WebAppHost<State> {
 
     public func handleKeyDown(code: String, key: String, mods: Mods = .none, at now: Double) -> Bool {
         defer { syncField(activate: true) }
-        guard let mapped = WebKeyMap.translate(code: code, key: key) else { return false }
+        var mapped = WebKeyMap.translate(code: code, key: key)
+        if mods.ctrl || mods.cmd, case .text(let value) = mapped, let letter = value.lowercased().first {
+            mapped = .command(letter)
+        }
+        guard let mapped else { return false }
         return runtime.keyDown(KeyEvent(key: mapped, mods: mods), at: now)
     }
 
@@ -363,7 +368,11 @@ public enum WebApp {
             devicePixelRatio: 1.0,
             dark: parsed.darkOverride ?? spec.dark
         )
-        _ = try host.renderFrame(at: 0.0)
+        if RuneWebReactor.enabled {
+            RuneWebReactor.session = WebBrowserSession(host)
+        } else {
+            _ = try host.renderFrame(at: 0.0)
+        }
         ReadySignal.ready()
     }
 }

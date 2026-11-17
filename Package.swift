@@ -152,6 +152,7 @@ let package = Package(
             resources: [
                 .copy("Resources/Metal"),
                 .copy("Resources/Fonts"),
+                .copy("Resources/Web"),
             ],
             linkerSettings: [
                 .linkedLibrary("user32", .when(platforms: [.windows])),
