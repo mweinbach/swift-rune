@@ -6,7 +6,7 @@ import simd
 
 // MARK: - El Motion-Gate Modifiers & Runtime Telemetry Bridge
 
-private enum MotionGateExtraKey {
+internal enum MotionGateExtraKey {
     static let instantChanges = "motionGate.instantChanges"
     static let motionIntent = "motionGate.motionIntent"
     static let ownMotionNone = "motionGate.ownMotionNone"
@@ -324,27 +324,13 @@ private enum MotionGateSampleHelper {
         tel.seqStarts = tel.seqStarts.filter { activePaths.contains($0.key) }
 
         var metas: [ElementMotionMeta] = []
-        var paints: [MotionGateRecording.PaintKey: MotionGatePaint] = [:]
+        let paints = rt.paints()
         metas.reserveCapacity(els.count)
 
-        var rankCounter: UInt32 = 1
-        var inheritedIntent = Array(repeating: UInt16(0), count: els.count)
-        var inheritedInstant = Array(repeating: false, count: els.count)
-
         for (i, e) in els.enumerated() {
-            let pIntent = e.parentIndex.flatMap { p in (p >= 0 && p < i) ? inheritedIntent[p] : nil } ?? 0
-            let pInstant = e.parentIndex.flatMap { p in (p >= 0 && p < i) ? inheritedInstant[p] : nil } ?? false
-            let node = nodeByPath[e.path]
             let el = elByPath[e.path]
-
-            let ownIntent = (el?.runtimeExtras[MotionGateExtraKey.motionIntent] as? UInt16) ?? 0
-            let totalIntent = pIntent | ownIntent
-            inheritedIntent[i] = totalIntent
-
-            let ownInstant = (el?.hasInstantChanges ?? false)
-                || ((el?.runtimeExtras[MotionGateExtraKey.instantChanges] as? Bool) ?? false)
-            let totalInstant = pInstant || ownInstant
-            inheritedInstant[i] = totalInstant
+            let key = MotionGateRecording.PaintKey(path: e.path, exiting: e.exiting)
+            let totalIntent = paints[key]?.intent ?? 0
 
             var phase: Double? = nil
             if let loopSpec = el?.loopingSpec {
@@ -397,46 +383,6 @@ private enum MotionGateSampleHelper {
             )
             metas.append(meta)
 
-            let ownMotionNone = (el?.runtimeExtras[MotionGateExtraKey.ownMotionNone] as? Bool) ?? false
-            let ownBlurNone = el?.runtimeExtras[MotionGateExtraKey.ownBlurNone] as? Bool
-            let atOnce = MotionGatePaintUtils.atOnceBits(motion: ownMotionNone, blur: ownBlurNone)
-
-            var colors = Array(repeating: Color.transparent, count: MotionGatePaint.colorCount)
-            colors[MotionGatePaint.cFill] = e.fill
-            colors[MotionGatePaint.cBorder] = node.flatMap { rt.scene.get($0.nodeId, Props.BORDER).map(Color.init) }
-                ?? el?.borderColor
-                ?? .transparent
-            colors[MotionGatePaint.cText] = e.textColor ?? .transparent
-            colors[MotionGatePaint.cShadow] = el?.shadows.first?.color ?? .transparent
-            if let lg = el?.runtimeExtras[RenderExtrasKey.linearGradient] as? RenderLinearGradientSpec {
-                colors[MotionGatePaint.cGradient] = lg.stops.first?.color ?? .transparent
-            }
-            colors[MotionGatePaint.cOutline] = el?.focusRingColor ?? .transparent
-
-            var sizes = Array(repeating: Float(0), count: MotionGatePaint.sizeCount)
-            sizes[MotionGatePaint.sRadius] = e.radius
-            sizes[MotionGatePaint.sBorder] = el?.borderWidth ?? 0
-            sizes[MotionGatePaint.sBlur] = e.blur
-            sizes[MotionGatePaint.sBackdrop] = el?.backdropBlur ?? 0
-            sizes[MotionGatePaint.sShadow] = el?.shadows.first?.blur ?? 0
-
-            let gradEnd = (el?.runtimeExtras[RenderExtrasKey.linearGradient] as? RenderLinearGradientSpec)?.stops.last?.color ?? .transparent
-            let effData = (el?.runtimeExtras[RenderExtrasKey.effectSpec] as? RenderEffectSpec)?.data
-
-            rankCounter &+= 1
-            let paint = MotionGatePaint(
-                colors: colors,
-                sizes: sizes,
-                gradientEnd: gradEnd,
-                effect: effData,
-                image: nil,
-                rank: rankCounter,
-                intent: totalIntent,
-                instant: totalInstant,
-                atOnce: atOnce,
-                pointer: SIMD2<Float>(e.hover, e.press)
-            )
-            paints[MotionGateRecording.PaintKey(path: e.path, exiting: e.exiting)] = paint
         }
 
         rec.sampleWith(els, meta: metas, paints: paints)

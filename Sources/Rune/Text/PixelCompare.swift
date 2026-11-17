@@ -513,16 +513,10 @@ public final class PixelCompareHarness {
                 pixelScale: scale,
                 emitGlyphs: false
             )
-            let lhPt = style.resolvedLineHeight
-            let baseFont = textSystem.resolveCTFont(style: style, pixelScale: scale)
-            let ascentPx = Float(CTFontGetAscent(baseFont))
-            let descentPx = Float(CTFontGetDescent(baseFont))
-            let halfLeadingPx = (lhPt * scale - (ascentPx + descentPx)) * 0.5
-
-            for (idx, rec) in shaped.lineStrings.enumerated() {
+            // Upstream's reference sheet draws CoreGraphics glyphs at the exported layout pens.
+            let baselines = TextBoxGeometry.roundedBaselines(originYPx: c.origin.y * scale, shaped: shaped)
+            for (rec, baselineDownPx) in zip(shaped.lineStrings, baselines) {
                 guard let ctLine = rec.ctLine else { continue }
-                let lineTopPx = c.origin.y * scale + Float(idx) * lhPt * scale
-                let baselineDownPx = (lineTopPx + halfLeadingPx + ascentPx).rounded()
                 let cgY = CGFloat(h) - CGFloat(baselineDownPx)
                 let cgX = CGFloat(c.origin.x * scale + rec.originX * scale)
                 ctx.saveGState()

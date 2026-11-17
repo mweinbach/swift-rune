@@ -493,7 +493,7 @@ public struct ShapedText: @unchecked Sendable {
     public var inlineIcons: [InlineIconQuad] = []
     #if canImport(CoreText) && canImport(CoreGraphics)
     internal var lineStrings: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)] = []
-    /// Per glyph in `glyphs`, its face and exact pen, so paint can choose its quarter-pixel phase
+    /// Per glyph in `glyphs`, its face and exact pen, so paint can choose its subpixel phase
     /// again where a text laid out from a fractional origin lands (`glyph_emit.rs`, #935).
     internal var glyphPens: [GlyphPen] = []
     #endif
@@ -553,11 +553,8 @@ public struct ShapedText: @unchecked Sendable {
     internal var bandLineHeight: Float {
         grownLineTopsPt.isEmpty ? lineHeight : 0
     }
-    /// Per line, its baseline (shaping px from the layout's top, rounded) and how far the exact
-    /// baseline sits from it (`exact - rounded`), so paint can round it once at its absolute
-    /// place (`TextBoxGeometry.roundedBaselines`, #935).
+    /// Parley's per-line baseline in device pixels from the layout's top.
     internal var lineBaselinesPx: [Float] = []
-    internal var lineBaselineFracsPx: [Float] = []
     /// Per underline in `underlines`, where its line's glyph runs end (points, alignment in), so
     /// paint can end a run that ends its line where it ends (`underline::underline_edges`).
     internal var underlineLineEndsPt: [Float] = []
@@ -887,6 +884,13 @@ public final class GlyphAtlas: @unchecked Sendable {
         if page == 0 { return page0Dirty }
         guard page >= 1 && page <= overflowPages.count else { return nil }
         return overflowPages[page - 1].dirty
+    }
+
+    /// Changes when a page is added or recycled, invalidating cached placements.
+    internal var placementClock: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return clock
     }
 
     /// Number of shelf page resets since creation (`atlas.rs:258`).
@@ -1263,19 +1267,18 @@ public final class GlyphAtlas: @unchecked Sendable {
         font: CTFont,
         glyph: CGGlyph,
         fontSizePx: Float,
-        subpixelX: Float = 0,
+        phaseX: UInt8 = 0,
         subpixelYBin: UInt8 = 0,
         smoothing: FontSmoothing = .systemDefault
     ) -> Entry? {
-        let bin = UInt8(((subpixelX - floorf(subpixelX)) * 4.0).rounded()) & 3
         let binY = subpixelYBin & 3
-        let subShift = Float(bin) * 0.25
+        let subShift = Float(phaseX) / TextCoreTextMatch.phases
         let shiftY = Float(binY) * 0.25
         let key = GlyphKey(
             fontHash: CFHash(font),
             glyphID: glyph,
             sizePx10: Int((fontSizePx * 10.0).rounded()),
-            subpixelBin: bin,
+            subpixelBin: phaseX,
             subpixelYBin: binY,
             smoothing: smoothing
         )
@@ -1314,76 +1317,53 @@ public final class GlyphAtlas: @unchecked Sendable {
 
         var baseBitmap = Array<UInt8>(repeating: 0, count: baseBw * baseBh)
         let graySpace = CGColorSpaceCreateDeviceGray()
-        guard let ctx = CGContext(
-            data: &baseBitmap,
-            width: baseBw,
-            height: baseBh,
-            bitsPerComponent: 8,
-            bytesPerRow: baseBw,
-            space: graySpace,
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else {
-            return nil
+        let drawn = baseBitmap.withUnsafeMutableBytes { raw -> Bool in
+            guard let ctx = CGContext(
+                data: raw.baseAddress,
+                width: baseBw,
+                height: baseBh,
+                bitsPerComponent: 8,
+                bytesPerRow: baseBw,
+                space: graySpace,
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+
+            // `.on` respects the user's AppleFontSmoothing setting (#954).
+            let allowFontSmoothing = smoothing.pipeline.dilate
+            ctx.setAllowsAntialiasing(true)
+            ctx.setShouldAntialias(true)
+            ctx.setAllowsFontSmoothing(allowFontSmoothing)
+            ctx.setShouldSmoothFonts(allowFontSmoothing)
+            ctx.setAllowsFontSubpixelPositioning(true)
+            ctx.setShouldSubpixelPositionFonts(true)
+            ctx.setAllowsFontSubpixelQuantization(false)
+            ctx.setShouldSubpixelQuantizeFonts(false)
+            ctx.setFillColor(gray: 1.0, alpha: 1.0)
+
+            // Draw the outline at its actual X phase. Translating a mask drawn at phase zero
+            // filters its edges twice and lightens narrow stems.
+            var pos = CGPoint(x: CGFloat(-minX) + CGFloat(subShift), y: CGFloat(-minY))
+            CTFontDrawGlyphs(font, &g, &pos, 1, ctx)
+            return true
         }
-
-        // `FontSmoothing::pipeline`: `.on` follows `AppleFontSmoothing` 0 on macOS (`#954`).
-        let allowFontSmoothing = smoothing.pipeline.dilate
-        ctx.setAllowsAntialiasing(true)
-        ctx.setShouldAntialias(true)
-        ctx.setAllowsFontSmoothing(allowFontSmoothing)
-        ctx.setShouldSmoothFonts(allowFontSmoothing)
-        ctx.setAllowsFontSubpixelPositioning(true)
-        ctx.setShouldSubpixelPositionFonts(true)
-        ctx.setFillColor(gray: 1.0, alpha: 1.0)
-
-        var pos = CGPoint(x: CGFloat(-minX), y: CGFloat(-minY))
-        CTFontDrawGlyphs(font, &g, &pos, 1, ctx)
-
-        // CoreGraphics snaps `pos.y` to integer device rows and applies hinting shifts to
-        // small `pos.x` offsets, so shift non-zero quarter-pixel X/Y phases analytically in
-        // bitmap space (`bilinear` / separable box-filter weights `subShift`, `shiftY`) so all
-        // 4 glide phases per axis align to 1/4 px cleanly while resting (`bin == 0`) stays exact.
-        let bw = bin == 0 ? baseBw : baseBw + 1
+        guard drawn else { return nil }
+        let bw = baseBw
         let bh = binY == 0 ? baseBh : baseBh + 1
         let bitmap: [UInt8]
-        if bin == 0 && binY == 0 {
+        if binY == 0 {
             bitmap = baseBitmap
         } else {
-            var xShifted: [Float]
-            if bin == 0 {
-                xShifted = baseBitmap.map(Float.init)
-            } else {
-                xShifted = Array<Float>(repeating: 0, count: bw * baseBh)
-                let wx0 = 1.0 - subShift
-                let wx1 = subShift
-                for y in 0..<baseBh {
-                    let srcRow = y * baseBw
-                    let dstRow = y * bw
-                    for x in 0..<bw {
-                        let a = x < baseBw ? Float(baseBitmap[srcRow + x]) : 0.0
-                        let b = (x > 0 && x - 1 < baseBw) ? Float(baseBitmap[srcRow + x - 1]) : 0.0
-                        xShifted[dstRow + x] = a * wx0 + b * wx1
-                    }
+            // CoreGraphics pins a baseline to a whole row. Retain vertical glide phases
+            // between those rows.
+            var shifted = Array<UInt8>(repeating: 0, count: bw * bh)
+            for y in 0..<bh {
+                for x in 0..<bw {
+                    let above = y == 0 ? 0 : Float(baseBitmap[(y - 1) * bw + x])
+                    let current = y == baseBh ? 0 : Float(baseBitmap[y * bw + x])
+                    shifted[y * bw + x] = UInt8((current * (1 - shiftY) + above * shiftY).rounded())
                 }
             }
-            if binY == 0 {
-                bitmap = xShifted.map { UInt8($0.rounded().clamped(to: 0.0...255.0)) }
-            } else {
-                var out = Array<UInt8>(repeating: 0, count: bw * bh)
-                let wy0 = 1.0 - shiftY
-                let wy1 = shiftY
-                for y in 0..<bh {
-                    let rCur = y < baseBh ? y * bw : -1
-                    let rPrev = (y > 0 && y - 1 < baseBh) ? (y - 1) * bw : -1
-                    let dstRow = y * bw
-                    for x in 0..<bw {
-                        let a = rCur >= 0 ? xShifted[rCur + x] : 0.0
-                        let b = rPrev >= 0 ? xShifted[rPrev + x] : 0.0
-                        out[dstRow + x] = UInt8((a * wy0 + b * wy1).rounded().clamped(to: 0.0...255.0))
-                    }
-                }
-                bitmap = out
-            }
+            bitmap = shifted
         }
 
         lock.lock()
@@ -1395,7 +1375,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         let entry = Entry(
             uv: placed.uv,
             pixelSize: SIMD2<Int>(bw, bh),
-            bearingPx: SIMD2<Float>(Float(minX) - subShift, Float(-maxY)),
+            bearingPx: SIMD2<Float>(Float(minX), Float(-maxY)),
             page: placed.page,
             pixelOrigin: placed.origin
         )
@@ -2395,6 +2375,23 @@ public final class TextSystem: @unchecked Sendable {
     internal private(set) var shapeMissCount: Int = 0
     internal private(set) var shapedBuildCount: Int = 0
     private var shapeCallCounter: UInt64 = 0
+
+    private var _rasterRevision: UInt64 = 0
+    internal var rasterRevision: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return _rasterRevision
+    }
+
+    /// Forget glyph runs and their subpixel placement without discarding the atlas.
+    public func forgetRasterState() {
+        lock.lock()
+        shapeCache.removeAll(keepingCapacity: true)
+        elisionCache.removeAll(keepingCapacity: true)
+        _rasterRevision &+= 1
+        lock.unlock()
+        glyphCache.clear()
+    }
 
     /// Drops cached layouts and typesetters while keeping rasterized glyph and icon atlases intact.
     public func clearLayoutCaches() {
@@ -4477,7 +4474,6 @@ public final class TextSystem: @unchecked Sendable {
         let containerWidthPx = maxWidth.map { max(maxLineWidthPx, $0 * scale) } ?? maxLineWidthPx
         let ascentPx = Float(baseAscentPx)
         let descentPx = Float(baseDescentPx)
-        let halfLeadingPx = (lhPx - (ascentPx + descentPx)) * 0.5
 
         // Inline code grows its line as Blink's does (`#983`, `inline_fit.rs`): each line's code
         // boxes past the strut's push its baseline down and the next lines with it.
@@ -4532,24 +4528,14 @@ public final class TextSystem: @unchecked Sendable {
         let pm = PillMetrics(size: style.size)
 
         var lineBaselines: [Float] = []
-        var lineBaselineFracs: [Float] = []
         lineBaselines.reserveCapacity(visualLines.count)
-        lineBaselineFracs.reserveCapacity(visualLines.count)
         for (lineIdx, item) in visualLines.enumerated() {
             let lineStartGlyphIdx = glyphsOut.count
             let lineTopPx = lineIdx < grownBoxes.count ? grownBoxes[lineIdx].topPx : Float(lineIdx) * lhPx
             let growOverPx = lineIdx < lineGrowthPx.count ? lineGrowthPx[lineIdx].over : 0
-            let exactStrutBaselinePx = lineTopPx + halfLeadingPx + ascentPx
-            let strutBaselinePx = exactStrutBaselinePx.rounded()
-            // A line a box grew above the strut sits its baseline at that box's reach (Parley's
-            // `top + over`), never above the strut's own baseline.
-            let grownBaselinePx = lineTopPx + strutParleyOverPx + growOverPx
-            let grownWins = growOverPx > 0 && grownBaselinePx > strutBaselinePx
-            let baselineYPx = grownWins ? grownBaselinePx : strutBaselinePx
-            // Its baseline and how far its exact one sits from it, so paint can round it once where
-            // a text laid out from its exact place lands (`content.rs`, #935).
+            // Parley rounds the running line top before adding its quantized span-box ascent.
+            let baselineYPx = lineTopPx.rounded() + strutParleyOverPx + growOverPx
             lineBaselines.append(baselineYPx)
-            lineBaselineFracs.append(grownWins ? 0 : exactStrutBaselinePx - baselineYPx)
             let alignOffsetPx: Float
             switch style.align {
             case .leading:
@@ -4859,8 +4845,6 @@ public final class TextSystem: @unchecked Sendable {
                 for i in 0..<glyphCount {
                     let gxPx = alignOffsetPx + Float(positions[i].x)
                     let gyPx = baselineYPx - Float(positions[i].y)
-                    let floorX = floorf(gxPx)
-                    let subX = gxPx - floorX
                     if runIsColor, let colorEntry = glyphAtlas.rasterizeColorGlyph(
                         font: runFont,
                         glyph: glyphs[i],
@@ -4868,7 +4852,7 @@ public final class TextSystem: @unchecked Sendable {
                     ), colorEntry.pixelSize.x > 0 && colorEntry.pixelSize.y > 0 {
                         let quadXPx = roundf(gxPx) + colorEntry.bearingPx.x
                         let quadYPx = roundf(gyPx) + colorEntry.bearingPx.y
-                        glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx, binY: 0, smoothing: style.fontSmoothing, isColor: true))
+                        glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx, glideX: 0, binY: 0, smoothing: style.fontSmoothing, isColor: true))
                         glyphsOut.append(PositionedGlyph(
                             rect: SIMD4<Float>(
                                 quadXPx * invS,
@@ -4883,46 +4867,25 @@ public final class TextSystem: @unchecked Sendable {
                         continue
                     }
 
-                    let quadXPx: Float
-                    let quadYPx: Float
-                    let subXArg: Float
-                    let binYArg: UInt8
-                    let posXPx: Float
-                    if glidePx != .zero {
-                        let phases = Float(GlyphAtlas.glidePhases)
-                        let totalX = gxPx + (glidePx.x * phases).rounded() / phases
-                        let qx = (totalX * phases).rounded()
-                        let fx = floorf(qx / phases)
-                        let binX = UInt8(Int(qx - fx * phases)) & 3
-                        let subShiftX = Float(binX) * 0.25
-                        let totalY = gyPx + (glidePx.y * phases).rounded() / phases
-                        let qy = (totalY * phases).rounded()
-                        let fy = floorf(qy / phases)
-                        binYArg = UInt8(Int(qy - fy * phases)) & 3
-                        subXArg = subShiftX
-                        posXPx = totalX
-                        quadYPx = totalY - Float(binYArg) * 0.25
-                    } else {
-                        subXArg = subX
-                        binYArg = 0
-                        posXPx = floorX + subX
-                        quadYPx = gyPx
-                    }
-
+                    let pen = TextBoxGeometry.glyphPen(at: gxPx, ppem: runFontSizePx, glide: glidePx.x, smoothing: style.fontSmoothing)
+                    let phases = Float(GlyphAtlas.glidePhases)
+                    let y = gyPx.rounded() * phases + (glidePx.y * phases).rounded()
+                    let quadYPx = floorf(y / phases)
+                    let binYArg = UInt8(y - quadYPx * phases)
                     guard let entry = glyphAtlas.rasterizeGlyph(
                         font: runFont,
                         glyph: glyphs[i],
                         fontSizePx: runFontSizePx,
-                        subpixelX: subXArg,
+                        phaseX: pen.phase,
                         subpixelYBin: binYArg,
                         smoothing: style.fontSmoothing
                     ), entry.pixelSize.x > 0 && entry.pixelSize.y > 0 else {
                         continue
                     }
 
-                    quadXPx = posXPx + entry.bearingPx.x
+                    let quadXPx = pen.pixel + entry.bearingPx.x
                     let finalQuadYPx = quadYPx + entry.bearingPx.y
-                    glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: posXPx, binY: binYArg, smoothing: style.fontSmoothing, isColor: false))
+                    glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx, glideX: glidePx.x, binY: binYArg, smoothing: style.fontSmoothing, isColor: false))
                     glyphsOut.append(PositionedGlyph(
                         rect: SIMD4<Float>(
                             quadXPx * invS,
@@ -4974,7 +4937,6 @@ public final class TextSystem: @unchecked Sendable {
         shapedOut.lineBaselinesPx = lineBaselines
         shapedOut.underlineLineEndsPt = underlineLineEnds
         shapedOut.glyphPens = glyphPensOut.count == glyphsOut.count ? glyphPensOut : []
-        shapedOut.lineBaselineFracsPx = lineBaselineFracs
         return shapedOut
     }
 
@@ -5114,19 +5076,12 @@ public final class TextSystem: @unchecked Sendable {
         guard !text.isEmpty else { return nil }
         let k = TextInkAccumulator.oversample
         let shaped = shape(text: text, spans: nil, style: style, maxWidth: nil, pixelScale: k, emitGlyphs: false)
-        let baseFont = resolveCTFont(style: style, pixelScale: k)
-        let lhPx = style.resolvedLineHeight * k
-        let ascentPx = Float(CTFontGetAscent(baseFont))
-        let descentPx = Float(CTFontGetDescent(baseFont))
-        let halfLeadingPx = (lhPx - (ascentPx + descentPx)) * 0.5
         let graySpace = CGColorSpaceCreateDeviceGray()
         let rgbSpace = CGColorSpaceCreateDeviceRGB()
 
         var acc = TextInkAccumulator()
-        for (lineIdx, rec) in shaped.lineStrings.enumerated() {
+        for (rec, baselineYPx) in zip(shaped.lineStrings, shaped.lineBaselinesPx) {
             guard let ctLine = rec.ctLine else { continue }
-            let lineTopPx = Float(lineIdx) * lhPx
-            let baselineYPx = (lineTopPx + halfLeadingPx + ascentPx).rounded()
             let alignOffsetPx = rec.originX * k
             let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] ?? []
             for run in runs {
@@ -5150,9 +5105,9 @@ public final class TextSystem: @unchecked Sendable {
                     }
 
                     let gxPx = alignOffsetPx + Float(positions[i].x)
-                    let gyPx = baselineYPx - Float(positions[i].y)
                     let floorX = floorf(gxPx)
                     let subX = gxPx - floorX
+                    let gyPx = baselineYPx - Float(positions[i].y)
 
                     let minX = Int(floor(bbox.minX)) - 1
                     let maxX = Int(ceil(bbox.maxX + CGFloat(subX))) + 1

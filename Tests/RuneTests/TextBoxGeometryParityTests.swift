@@ -224,15 +224,14 @@ struct TextBoxGeometryParityTests {
     func baselinesRoundWhereTheyLand() throws {
         let ts = TextSystem()
         let shaped = ts.shape(text: "Hg\nHg", style: TextStyle(size: 13, weight: 400), maxWidth: nil, pixelScale: 2.0, emitGlyphs: true)
-        #expect(shaped.lineBaselinesPx.count == 2 && shaped.lineBaselineFracsPx.count == 2)
-        for (b, f) in zip(shaped.lineBaselinesPx, shaped.lineBaselineFracsPx) {
-            #expect(whole(b) && f >= -0.5 && f <= 0.5)
-        }
+        // Inter at 26 device px has a quantized ascent of 25 px. Parley rounds the second
+        // line's 32.5 px top to 33 before adding that ascent.
+        try #require(shaped.lineBaselinesPx == [25, 58])
         for k in 0..<64 {
             let o = 20.0 + Float(k) / 64.0
             let at = TextBoxGeometry.roundedBaselines(originYPx: o, shaped: shaped)
             for i in 0..<2 {
-                let exact = o + shaped.lineBaselinesPx[i] + shaped.lineBaselineFracsPx[i]
+                let exact = o + shaped.lineBaselinesPx[i]
                 #expect(at[i] == (exact + 0.5).rounded(.down))
             }
         }
@@ -264,6 +263,20 @@ struct TextBoxGeometryParityTests {
         }
     }
 
+    #if canImport(CoreGraphics) && canImport(CoreText)
+    @Test("CoreGraphics pens quantize by size before a glide moves them")
+    func glyphPlacementUsesNativePhases() {
+        let edge = TextBoxGeometry.glyphPen(at: 8.49, ppem: 26, glide: 0, smoothing: .on)
+        #expect(edge.pixel == 8 && edge.phase == 0)
+        let small = TextBoxGeometry.glyphPen(at: 8.74, ppem: 13, glide: 0, smoothing: .off)
+        #expect(small.pixel == 8 && small.phase == 40)
+        let glide = TextBoxGeometry.glyphPen(at: 8.74, ppem: 13, glide: 0.5, smoothing: .off)
+        #expect(glide.pixel == 9 && glide.phase == 10)
+        let skia = TextBoxGeometry.glyphPen(at: 8.49, ppem: 26, glide: 0, smoothing: .windfoil)
+        #expect(skia.pixel == 8 && skia.phase == 30)
+    }
+    #endif
+
     @Test("quarterPen rounds a pen to a quarter pixel: its whole pixel and its phase (glyph_emit.rs)")
     func quarterPenRoundsToAQuarter() {
         #expect(TextBoxGeometry.quarterPen(6.59375) == (6.0, 2))
@@ -288,6 +301,8 @@ struct TextBoxGeometryParityTests {
                 }
                 let quads = rt.frame(at: 0.0).primitives.filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }
                 #expect(quads.count >= 10, "scale \(scale): draws glyphs")
+                let gpuQuads = rt.renderFrame(at: 0).instances.filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }
+                #expect(gpuQuads.map(\.rect) == quads.map(\.rect))
                 for q in quads {
                     #expect(abs(q.rect.x - q.rect.x.rounded()) < 1e-3, "scale \(scale) at \(x): glyph quad x \(q.rect.x)")
                     #expect(abs(q.rect.y - q.rect.y.rounded()) < 1e-3, "scale \(scale) at \(y): glyph quad y \(q.rect.y)")

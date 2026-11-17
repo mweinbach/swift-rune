@@ -355,7 +355,7 @@ struct UpText2ParityTests {
         let lhPx = style.resolvedLineHeight * 2.0
         let asc = Float(CTFontGetAscent(sans))
         let desc = Float(CTFontGetDescent(sans))
-        let base = ((lhPx - (asc + desc)) * 0.5 + asc).rounded()
+        let base = asc.rounded() + floor((lhPx - asc.rounded() - desc.rounded()) * 0.5)
         #expect(m.y * 2.0 == (base - cap * 1.35).rounded())
         #expect((m.y + m.w) * 2.0 == (base + cap * 0.55).rounded())
     }

@@ -2537,9 +2537,9 @@ extension Runtime {
 
             if let onAtBottom = node.el.handlers.atBottomReport {
                 let isAtBottom = distFromBottom <= 1.0
-                if atBottomStates[path] != isAtBottom {
-                    atBottomStates[path] = isAtBottom
-                    dispatchScrollEndReport(onAtBottom, value: isAtBottom)
+                if atBottomStates[node.nodeId] != isAtBottom {
+                    atBottomStates[node.nodeId] = isAtBottom
+                    dispatchScrollEndReport(onAtBottom, value: isAtBottom, at: now)
                 }
             }
 
@@ -2557,9 +2557,9 @@ extension Runtime {
                     }
                 }
                 let isFar = distFromBottom > max(farSpec.min, thresholdHeight)
-                if farFromBottomStates[path] != isFar {
-                    farFromBottomStates[path] = isFar
-                    dispatchScrollEndReport(farSpec.handler, value: isFar)
+                if farFromBottomStates[node.nodeId] != isFar {
+                    farFromBottomStates[node.nodeId] = isFar
+                    dispatchScrollEndReport(farSpec.handler, value: isFar, at: now)
                 }
             }
 
@@ -2567,7 +2567,7 @@ extension Runtime {
         }
     }
 
-    private func dispatchScrollEndReport(_ report: (inout State, Bool) -> Bool, value: Bool) {
+    private func dispatchScrollEndReport(_ report: (inout State, Bool) -> Bool, value: Bool, at now: Double) {
         let changed: Bool
         if let scope = turnScope {
             var scopedResult = false
@@ -2576,7 +2576,7 @@ extension Runtime {
         } else {
             changed = report(&state, value)
         }
-        if changed { needsCommit = true }
+        if changed { dirtyCommit(at: now) }
     }
 
     internal func dispatchScrollOffsetObserverIfChanged(
