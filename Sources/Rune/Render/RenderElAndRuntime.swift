@@ -658,8 +658,13 @@ extension Runtime {
     private func withRenderFrame<T>(at now: Double, finish: (RenderFrame, FrameOutput, Double) -> T) -> T {
         RuntimeIdScope.$current.withValue(runtimeId) {
             Theme.withBlend(srgbBlend) {
-                let (frameOut, animNow) = stepToFrameOutputScaled(at: now)
-                let rf = buildRenderFrame(frameOut: frameOut, now: animNow, publishHitGeometry: true)
+                var (frameOut, animNow) = stepToFrameOutputScaled(at: now)
+                var rf = buildRenderFrame(frameOut: frameOut, now: animNow, publishHitGeometry: true)
+                for _ in 0..<3 {
+                    if !followKeeps(frameOut: &frameOut, at: animNow) { break }
+                    rf = buildRenderFrame(frameOut: frameOut, now: animNow, publishHitGeometry: true)
+                }
+                finishKeeps(cut: false)
                 if (hasMovingScaleSettle || pixelSnapGlides.isEasing) && cxSettings.viewTimeScale > 0.0 {
                     isAnimating = true
                     animSources |= AnimSource.scaleSettle
