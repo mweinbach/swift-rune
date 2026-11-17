@@ -87,6 +87,7 @@ internal final class Slice2RuntimeState {
     var pendingTxFocusVisible: Bool? = nil
     var lastPressedPhysicalKey: PhysicalKeyCode? = nil
     var lastPressedKeyBase: Character? = nil
+    var activeReorderSlides: Set<NodeId> = []
 }
 
 internal func slice2DefaultKeyBase(for code: PhysicalKeyCode, fallbackKey: KeyEvent? = nil) -> Character? {
@@ -782,6 +783,21 @@ extension Runtime {
         let resized = slice2State.growthReorderViewport.map { $0 != viewport } ?? false
         slice2State.growthReorderViewport = viewport
         let canMove = !lands && !relayout && !commitCut && !reducedMotion && !concealing
+        if !slice2State.activeReorderSlides.isEmpty {
+            var retained: Set<NodeId> = []
+            if canMove && !resized {
+                for i in nodes.indices where slice2State.activeReorderSlides.contains(nodes[i].nodeId) {
+                    let id = nodes[i].nodeId
+                    guard !ancestorInstants[i], !nodes[i].el.hasInstantChanges, scene.store.isAnimating(id, Props.OFFSET),
+                          scene.store.target(id, Props.OFFSET) == specs[i].offset else { continue }
+                    // The row is still sliding to this same authored offset. Preserve its
+                    // driver and velocity through an unrelated view commit, such as a press.
+                    if specs[i].offsetAnim == nil { specs[i].offsetAnim = .instant }
+                    retained.insert(id)
+                }
+            }
+            slice2State.activeReorderSlides = retained
+        }
         var seenStacks: Set<NodeId> = []
         var slides: [ReorderedRowSlide] = []
         let rowHeight: (FlatNode) -> Float? = { node in
@@ -920,6 +936,7 @@ extension Runtime {
     internal func commitGrowthRowReorderSlides(_ slides: [ReorderedRowSlide], at scaledNow: Double) {
         guard !slides.isEmpty else { return }
         for s in slides {
+            slice2State.activeReorderSlides.insert(s.id)
             scene.set(s.id, Props.OFFSET, Vec2(s.prevOff.x, s.prevOff.y + s.jump))
             let anim = Anim<Vec2>(curve: Curve.from(s.spring))
             if let v = s.prevVel, (abs(v.x) > 1e-4 || abs(v.y) > 1e-4) {
