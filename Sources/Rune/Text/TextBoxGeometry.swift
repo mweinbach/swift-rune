@@ -133,10 +133,87 @@ internal struct GlyphPen {
     let smoothing: FontSmoothing
     let isColor: Bool
     var yOffsetPx: Float = 0
+    var phase: UInt8 = 0
+    var bearingX: Float = 0
+    var maskTexels: UInt32 = 0
 }
 #endif
 
 extension TextBoxGeometry {
+    /// A layout retains its initial phase per glyph and at most one alternative phase per
+    /// index. The atlas pins the relevant shelves once per draw before UVs are reused.
+    final class GlyphPlacements: @unchecked Sendable {
+        fileprivate struct Alternate {
+            let phase: UInt8
+            let ppem: Float
+            let entry: GlyphAtlas.Entry
+        }
+        fileprivate struct Alternates {
+            var values: [Int: Alternate] = [:]
+            var pages: UInt8 = 0
+            var generation: UInt64 = 0
+        }
+        fileprivate let sourcePages: UInt8
+        fileprivate let sourceGeneration: UInt64
+        fileprivate let lock = NSLock()
+        fileprivate var alternates = Alternates()
+
+        init(glyphs: [PositionedGlyph], since generation: UInt64) {
+            sourcePages = glyphs.reduce(into: UInt8(0)) { mask, glyph in mask |= 1 << glyph.atlasPage }
+            sourceGeneration = generation
+        }
+    }
+
+    final class GlyphPlacementBatch {
+        fileprivate let source: GlyphPlacements
+        fileprivate let atlas: GlyphAtlas
+        fileprivate var alternates: GlyphPlacements.Alternates
+        fileprivate var changed = false
+        private(set) var reusedTexels = SIMD8<UInt32>.zero
+        fileprivate let generation: UInt64
+
+        init?(shaped: ShapedText, atlas: GlyphAtlas, exact: Bool) {
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            guard exact, let source = shaped.glyphPlacements,
+                  atlas.retainGlyphPlacements(source.sourcePages, since: source.sourceGeneration) else { return nil }
+            self.source = source
+            self.atlas = atlas
+            self.generation = atlas.resets
+            let previous = source.lock.withLock { source.alternates }
+            self.alternates = previous.pages != 0 && atlas.retainGlyphPlacements(previous.pages, since: previous.generation)
+                ? previous : .init()
+            #else
+            return nil
+            #endif
+        }
+
+        func finish() {
+            if reusedTexels != .zero { atlas.touchGlyphPlacements(reusedTexels) }
+            if changed {
+                alternates.generation = generation
+                source.lock.withLock { source.alternates = alternates }
+            }
+        }
+
+        fileprivate func touch(_ page: UInt16, _ area: UInt32) {
+            let slot = Int(page)
+            if slot < 8 { reusedTexels[slot] += min(UInt32.max - reusedTexels[slot], area) }
+        }
+
+        fileprivate func cached(index: Int, phase: UInt8, ppem: Float) -> GlyphAtlas.Entry? {
+            guard let hit = alternates.values[index], hit.phase == phase, hit.ppem == ppem else { return nil }
+            let entry = hit.entry
+            touch(entry.page, UInt32(entry.pixelSize.x * entry.pixelSize.y))
+            return entry
+        }
+
+        fileprivate func keep(_ entry: GlyphAtlas.Entry, index: Int, phase: UInt8, ppem: Float) {
+            alternates.values[index] = .init(phase: phase, ppem: ppem, entry: entry)
+            alternates.pages |= 1 << entry.page
+            changed = true
+        }
+    }
+
     /// Snap the resting pen as CoreGraphics or Skia does, then apply movement in quarters.
     /// Keep the phase in sixtieths, which represents all of CoreGraphics' quantisation steps.
     static func glyphPen(at x: Float, ppem: Float, glide: Float, smoothing: FontSmoothing) -> (pixel: Float, phase: UInt8) {
@@ -162,7 +239,9 @@ extension TextBoxGeometry {
         pen: GlyphPen,
         originXPx: Float,
         shapeScale s: Float,
-        atlas: GlyphAtlas
+        atlas: GlyphAtlas,
+        placements: GlyphPlacementBatch? = nil,
+        index: Int = 0
     ) -> (xPx: Float, glyph: PositionedGlyph) {
         let at = originXPx + pen.xPx
         if pen.isColor {
@@ -170,16 +249,20 @@ extension TextBoxGeometry {
             return (at.rounded() + bearing, g)
         }
         let (fx, phase) = glyphPen(at: at, ppem: pen.sizePx, glide: pen.glideX, smoothing: pen.smoothing)
-        guard let entry = atlas.rasterizeGlyph(
-            font: pen.font,
-            glyph: pen.glyph,
-            fontSizePx: pen.sizePx,
-            phaseX: phase,
-            subpixelYBin: pen.binY,
-            smoothing: pen.smoothing,
-            inkBucket: g.classicInk?.source.bucket ?? g.outlineGroup?.inkVariant?.bucket ?? 0
-        ), entry.pixelSize.x > 0, entry.pixelSize.y > 0 else {
-            return (originXPx + g.rect.x * s, g)
+        if let placements, phase == pen.phase {
+            placements.touch(g.atlasPage, pen.maskTexels)
+            return (fx + pen.bearingX, g)
+        }
+        let entry: GlyphAtlas.Entry
+        if let previous = placements?.cached(index: index, phase: phase, ppem: pen.sizePx) {
+            entry = previous
+        } else {
+            guard let placed = atlas.rasterizeGlyph(font: pen.font, glyph: pen.glyph, fontSizePx: pen.sizePx,
+                phaseX: phase, subpixelYBin: pen.binY, smoothing: pen.smoothing,
+                inkBucket: g.classicInk?.source.bucket ?? g.outlineGroup?.inkVariant?.bucket ?? 0),
+                placed.pixelSize.x > 0, placed.pixelSize.y > 0 else { return (originXPx + g.rect.x * s, g) }
+            entry = placed
+            placements?.keep(placed, index: index, phase: phase, ppem: pen.sizePx)
         }
         var out = g
         out.uv = entry.uv
@@ -227,14 +310,14 @@ extension TextBoxGeometry {
 
         #if canImport(CoreText) && canImport(CoreGraphics)
         func place(_ source: PositionedGlyph, pen: GlyphPen, baseline: Float, origin: SIMD2<Float>,
-                   screenScale: SIMD2<Float>, pixelScale: Float, atlas: GlyphAtlas)
+                   screenScale: SIMD2<Float>, pixelScale: Float, atlas: GlyphAtlas,
+                   index: Int, placements: GlyphPlacementBatch?)
             -> (glyph: PositionedGlyph, rect: SIMD4<Float>)? {
-            let font: CTFont
-            if let known = fonts[pen.font] {
-                font = known
-            } else {
-                font = CTFontCreateCopyWithAttributes(pen.font, CGFloat(pen.sizePx * factor), nil, nil)
+            func resizedFont() -> CTFont {
+                if let known = fonts[pen.font] { return known }
+                let font = CTFontCreateCopyWithAttributes(pen.font, CGFloat(pen.sizePx * factor), nil, nil)
                 fonts[pen.font] = font
+                return font
             }
             let rOrigin = still ? origin : .zero
             let x = rOrigin.x + pen.xPx * factor
@@ -243,16 +326,23 @@ extension TextBoxGeometry {
             let at: SIMD2<Float>, size: SIMD2<Float>
             var glyph: PositionedGlyph
             if pen.isColor {
-                guard let entry = atlas.rasterizeColorGlyph(font: font, glyph: pen.glyph, fontSizePx: ppem) else { return nil }
+                guard let entry = atlas.rasterizeColorGlyph(font: resizedFont(), glyph: pen.glyph, fontSizePx: ppem) else { return nil }
                 at = SIMD2(x.rounded(), y) + entry.bearingPx
                 size = SIMD2(Float(entry.pixelSize.x), Float(entry.pixelSize.y))
                 glyph = PositionedGlyph(rect: .zero, colorGlyph: entry, color: source.color, utf8Offset: source.utf8Offset)
             } else {
                 let placed = glyphPen(at: x, ppem: ppem, glide: 0, smoothing: pen.smoothing)
-                guard let entry = atlas.rasterizeGlyph(font: font, glyph: pen.glyph, fontSizePx: ppem,
-                                                      phaseX: placed.phase, smoothing: pen.smoothing,
-                                                      inkBucket: source.classicInk?.source.bucket ?? source.outlineGroup?.inkVariant?.bucket ?? 0),
-                      entry.pixelSize.x > 0, entry.pixelSize.y > 0 else { return nil }
+                let entry: GlyphAtlas.Entry
+                if let previous = placements?.cached(index: index, phase: placed.phase, ppem: ppem) {
+                    entry = previous
+                } else {
+                    guard let mask = atlas.rasterizeGlyph(font: resizedFont(), glyph: pen.glyph, fontSizePx: ppem,
+                        phaseX: placed.phase, smoothing: pen.smoothing,
+                        inkBucket: source.classicInk?.source.bucket ?? source.outlineGroup?.inkVariant?.bucket ?? 0),
+                        mask.pixelSize.x > 0, mask.pixelSize.y > 0 else { return nil }
+                    entry = mask
+                    placements?.keep(mask, index: index, phase: placed.phase, ppem: ppem)
+                }
                 at = SIMD2(placed.pixel, y) + entry.bearingPx
                 size = SIMD2(Float(entry.pixelSize.x), Float(entry.pixelSize.y))
                 glyph = source
@@ -274,14 +364,16 @@ extension TextBoxGeometry {
     static func paintGlyph(
         _ source: PositionedGlyph, index: Int, shaped: ShapedText,
         origin: SIMD2<Float>, scale: SIMD2<Float>, pixelScale: Float,
-        restsExact: Bool, baselines: [Float], line: inout Int, atlas: GlyphAtlas, raster: ScaledGlyphRaster? = nil
+        restsExact: Bool, baselines: [Float], line: inout Int, atlas: GlyphAtlas, raster: ScaledGlyphRaster? = nil,
+        placements: GlyphPlacementBatch? = nil
     ) -> (glyph: PositionedGlyph, rect: SIMD4<Float>) {
         #if canImport(CoreText) && canImport(CoreGraphics)
         if let raster, shaped.glyphPens.count == shaped.glyphs.count, shaped.glyphPens.indices.contains(index) {
             while line + 1 < shaped.lineGlyphRanges.count && index >= shaped.lineGlyphRanges[line].upperBound { line += 1 }
             if shaped.lineBaselinesPx.indices.contains(line),
                let placed = raster.place(source, pen: shaped.glyphPens[index], baseline: shaped.lineBaselinesPx[line],
-                                         origin: origin, screenScale: scale, pixelScale: pixelScale, atlas: atlas) {
+                                         origin: origin, screenScale: scale, pixelScale: pixelScale, atlas: atlas,
+                                         index: index, placements: placements) {
                 return placed
             }
         }
@@ -289,7 +381,8 @@ extension TextBoxGeometry {
         var glyph = source
         var x = origin.x + glyph.rect.x * scale.x * pixelScale
         if restsExact {
-            (x, glyph) = restingGlyph(glyph, index: index, shaped: shaped, originXPx: origin.x, pxScale: pixelScale, atlas: atlas)
+            (x, glyph) = restingGlyph(glyph, index: index, shaped: shaped, originXPx: origin.x, pxScale: pixelScale,
+                                      atlas: atlas, placements: placements)
         }
         var y = origin.y + glyph.rect.y * scale.y * pixelScale
         if !baselines.isEmpty {
@@ -312,11 +405,13 @@ extension TextBoxGeometry {
         shaped: ShapedText,
         originXPx: Float,
         pxScale: Float,
-        atlas: GlyphAtlas
+        atlas: GlyphAtlas,
+        placements: GlyphPlacementBatch? = nil
     ) -> (xPx: Float, glyph: PositionedGlyph) {
         #if canImport(CoreText) && canImport(CoreGraphics)
         if shaped.glyphPens.count == shaped.glyphs.count, index >= 0, index < shaped.glyphPens.count {
-            return placedGlyph(g, pen: shaped.glyphPens[index], originXPx: originXPx, shapeScale: pxScale, atlas: atlas)
+            return placedGlyph(g, pen: shaped.glyphPens[index], originXPx: originXPx, shapeScale: pxScale,
+                               atlas: atlas, placements: placements, index: index)
         }
         #endif
         return (originXPx + g.rect.x * pxScale, g)

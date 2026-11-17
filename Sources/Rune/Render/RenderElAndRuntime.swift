@@ -725,6 +725,7 @@ extension Runtime {
         defer { finishPixelPaint() }
         beginPaintGlyphFrame(pinnedMask: 0)
         textSystem.outlinePaths.beginFrame()
+        let defaultForeground = cxSettings.viewDefaults.textForeground
         var outlineGeneration: UInt64?
         var usedOutlines = false
         var usedLCD = false
@@ -766,6 +767,13 @@ extension Runtime {
 
         elSliceRenderState.cacheScaleFramePending = false
         let commitGen = UInt64(viewCommitCount)
+        if labelDrawCommit != viewCommitCount {
+            labelDraws.removeAll(keepingCapacity: true)
+            labelDrawCommit = viewCommitCount
+        }
+        var nextLabelDraws: [NodeId: RetainedLabelDraws] = [:]
+        nextLabelDraws.reserveCapacity(labelDraws.count)
+
         let scale = max(pixelScale, 0.5)
         let widthPx = max(1, Int((viewport.x * scale).rounded()))
         let heightPx = max(1, Int((viewport.y * scale).rounded()))
@@ -824,7 +832,7 @@ extension Runtime {
         var backdropBlurCount = 0
 
         // Publish normalized glyph pages and image texel edges in the renderer's origin/size ABI.
-        var glyphFixups: [(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16, forceScaled: Bool)] = []
+        var glyphFixups: [GlyphUVFixup] = []
         // Zero denotes a padded icon. Positive values are the vertical phase of a native text mask.
         var motionGlyphMasks: [SIMD3<Float>: Float] = [:]
         var imageFixups: [(index: Int, texelEdges: SIMD4<Float>, imgW: Float, imgH: Float)] = []
@@ -1283,7 +1291,7 @@ extension Runtime {
                     ?? anchorNode.zoomedTargetRect
                 let anchorParentId = presentedById[anchorNode.nodeId]?.parent
                     ?? anchorNode.parentIndex.flatMap { flatNodes.indices.contains($0) ? flatNodes[$0].nodeId : nil }
-                let anchorParentPath: String? = anchorParentId.flatMap { (nodeById[$0] ?? exitingSnapshots[$0])?.path }
+                let anchorParentPath: String? = anchorParentId.flatMap { (mountedNode($0) ?? exitingSnapshots[$0])?.path }
                 let anchorZoom: Float = anchorParentPath.flatMap {
                     newPresentedScales[$0]?.x
                         ?? presentedScaleByPath[$0]?.x
@@ -1369,14 +1377,14 @@ extension Runtime {
                 effRect = shifted
             }
             let parentShift = presented?.parent.flatMap { id in
-                (nodeById[id] ?? exitingSnapshots[id]).flatMap { stuckShiftsByPath[$0.path] }
+                (mountedNode(id) ?? exitingSnapshots[id]).flatMap { stuckShiftsByPath[$0.path] }
             } ?? .zero
             var stickyShift = parentShift
             if hasSticky {
                 beforeSticky[nid] = effRect
                 if el.anchor != nil && !node.isSticky {
                     stickyShift = .zero
-                } else if (node.isSticky || hasHolds) && nodeById[nid] != nil {
+                } else if (node.isSticky || hasHolds) && nodeIndexById[nid] != nil {
                     let offset: Vec2 = scene.store.get(nid, Props.OFFSET) ?? .zero
                     let ownOffset = Vec2(-(offset.x + lo.x) * pinh.scale.x, -(offset.y + lo.y) * pinh.scale.y)
                     let stickyBounds = effRect.offsetBy(ownOffset)
@@ -2683,8 +2691,8 @@ extension Runtime {
             }
 
             // 9. Vector shapes (`Shape` with `trimmed`/`drawn`, `strokeWidth`, `LineCap`)
-            let drawFrac = (presentedById[nid]?.draw ?? 1.0).clamped(to: 0...1)
-            for shape in el.shapes {
+            @inline(never)
+            func paintShape(_ shape: Shape, drawFrac: Float) {
                 let effective: Shape
                 if let t = shapeTrim {
                     effective = shape.trimmed(start: t.x, end: t.x + (t.y - t.x) * drawFrac)
@@ -2774,10 +2782,15 @@ extension Runtime {
                 }
             }
 
+            if !el.shapes.isEmpty {
+                let drawFrac = (presentedById[nid]?.draw ?? 1.0).clamped(to: 0...1)
+                for shape in el.shapes { paintShape(shape, drawFrac: drawFrac) }
+            }
+
             // 10. Icon (`SVGIcon`)
             if let (svg, iconSizePt) = el.iconPayload {
                 let iconPx = max(1, Int((iconSizePt * scale).rounded()))
-                let iconColor = applyPressColor(pressTint.color, to: liveTextColor ?? scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? (systemDark ? Color.white : Color.black), frac: pressTint.frac)
+                let iconColor = applyPressColor(pressTint.color, to: liveTextColor ?? scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? defaultForeground, frac: pressTint.frac)
                 if let colorDecoded = textSystem.colorIcons.rasterize(
                     svg,
                     pixelSize: iconPx,
@@ -2822,7 +2835,7 @@ extension Runtime {
             }
 
             if let grid = el.terminalGridPayload {
-                let ink = liveTextColor ?? scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? Tok.theme(dark: systemDark).text
+                let ink = liveTextColor ?? scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? defaultForeground
                 let padding = SIMD4<Float>(el.layout.padding.left * sc.x * scale, el.layout.padding.top * sc.y * scale, 0, 0)
                 paintTerminalGridInstances(grid, snappedRect: paintedEdges + padding, exactRect: exactEdgesPx + padding,
                                            clip: activeClip, fade: activeFade,
@@ -2840,8 +2853,9 @@ extension Runtime {
                                               transformed: parentIsRotated || abs(el.rotate) > 1e-4 ||
                                                 parentInCache || cacheEligible || isTextFlightTarget)
             }
-            if let editLens = el.handlers.editLens {
-                var edit = editLens.get(state)
+            @inline(never)
+            func paintField(_ value: TextEdit) {
+                var edit = value
                 if el.isSecure {
                     edit.isSecure = true
                     if let revealed = el.revealedOverride { edit.isRevealed = revealed }
@@ -2854,7 +2868,7 @@ extension Runtime {
                     innerWidth: innerW,
                     pxScale: rasterScale * scale
                 )
-                let defaultTextColor = liveTextColor ?? el.textColor ?? (systemDark ? Color.white : Color.black)
+                let defaultTextColor = liveTextColor ?? el.textColor ?? defaultForeground
                 let textCol = resolvedInput.showingPlaceholder
                     ? (el.placeholderColor ?? defaultTextColor.alpha(0.45))
                     : defaultTextColor
@@ -2986,6 +3000,9 @@ extension Runtime {
                         marks.append(0)
                     }
                 }
+            }
+            if let editLens = el.handlers.editLens {
+                paintField(editLens.get(state))
             } else if (el.plainText?.isEmpty == false) || (el.richSpans?.isEmpty == false) || el.advanceInRun != nil {
                 let resolvedText = ElDisplayResolver.resolveText(
                     el: el,
@@ -3011,7 +3028,7 @@ extension Runtime {
                 let glide = glidingText ? Vec2(PixelSnap.textGlide(paintedEdges.x), PixelSnap.textGlide(paintedEdges.y)) : .zero
                 let glideOffset = glidingText ? SIMD2<Float>(paintedEdges.x - paintedEdges.x.rounded(), paintedEdges.y - paintedEdges.y.rounded()) : .zero
                 let restOrigin = SIMD2<Float>(textLeft, textTop) * scale - glideOffset
-                let defaultTextColor = applyPressColor(pressTint.color, to: liveTextColor ?? scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? (systemDark ? Color.white : Color.black), frac: pressTint.frac)
+                let defaultTextColor = applyPressColor(pressTint.color, to: liveTextColor ?? scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? defaultForeground, frac: pressTint.frac)
                 let inkMode = resolvedText.style.fontSmoothing == .systemDefault ? textSystem.smoothing : resolvedText.style.fontSmoothing
                 var shaped = GlyphAtlas.withBaseInk(defaultTextColor, mode: inkMode) {
                     resolvedText.shape(
@@ -3244,32 +3261,80 @@ extension Runtime {
                 let wordFadeMask = ((el.elRevealWordFade ?? -1) >= 0)
                     ? wordRevealStore.mask(for: nid, text: resolvedText.displayedText, shaped: shaped, textSystem: textSystem, pixelScale: scale, now: revealClock)
                     : nil
-                let baselines = restsExact ? TextBoxGeometry.roundedBaselines(originYPx: restOrigin.y, shaped: shaped) : []
-                var baselineLine = 0
                 let labelGlyphs = isTextFlightTarget ? [] : shaped.glyphs
-                for (index, glyph) in labelGlyphs.enumerated() {
-                    let wordAlpha = wordFadeMask?.alpha(for: glyph) ?? 1.0
-                    let gAlpha = localOpacity * wordAlpha
-                    if gAlpha <= 0.0005 { continue }
-                    let (gq, placement) = TextBoxGeometry.paintGlyph(
-                        glyph, index: index, shaped: shaped, origin: restOrigin, scale: SIMD2<Float>(sc.x, sc.y), pixelScale: scale,
-                        restsExact: restsExact, baselines: baselines, line: &baselineLine, atlas: textSystem.glyphAtlas, raster: raster
-                    )
-                    if !isRotatedScope && (placement.y + placement.w < shownY0 || placement.y > shownY1 ||
-                                           placement.x + placement.z < glyphClipEdges.x || placement.x > glyphClipEdges.z) { continue }
-                    let glyphBaseColor = selectionInk?.color(for: glyph) ?? linkInkColor(for: glyph, ranges: linkInks) ?? gq.color.map { applyPressColor(pressTint.color, to: $0, frac: pressTint.frac) } ?? defaultTextColor
-                    let gcol = premulSIMD4(glyphBaseColor, opacity: gAlpha, srgb: srgbBlend)
-                    var desktopOutline: TextOutlineGroup?
-                    #if os(Linux) || os(Windows) || os(Android)
-                    if outlineMode != nil, let native = shaped.desktopRestingText {
-                        while baselineLine + 1 < shaped.lineGlyphRanges.count && index >= shaped.lineGlyphRanges[baselineLine].upperBound {
-                            baselineLine += 1
+                let canRetain = restsExact && !forceScaled && !isRotatedScope && !inCacheScope
+                    && glide == .zero && raster == nil && outlineMode == nil && !lcdMask
+                    && inkMode == textSystem.smoothing && motionRasterGlyphs == nil
+                    && el.plainText != nil && el.richSpans == nil && el.liveText == nil
+                    && el.advanceInRun == nil && !el.isSecure && el.textHighlights == nil
+                    && !el.isSelectable && wordFadeMask == nil && linkInks.isEmpty && !labelGlyphs.isEmpty
+                    && shaped.lineGlyphRanges.count == 1
+                let runInk = premulSIMD4(defaultTextColor, opacity: localOpacity, srgb: srgbBlend)
+                let visible = SIMD4<Float>(glyphClipEdges.x, shownY0, glyphClipEdges.z, shownY1)
+                let retained = canRetain ? labelDraws[nid] : nil
+                let reused = retained?.replay(
+                    glyphs: labelGlyphs, at: restOrigin, clip: glyphClipEdges, fade: glyphFade, visible: visible,
+                    ink: runInk, baseline: shaped.lineBaselinesPx.first, scale: scale, smoothing: inkMode, srgb: srgbBlend, atlas: textSystem.glyphAtlas,
+                    into: &instances, marks: &marks, fixups: &glyphFixups
+                ) == true
+                if reused {
+                    nextLabelDraws[nid] = retained
+                } else {
+                    let firstDraw = instances.count
+                    let firstFixup = glyphFixups.count
+                    var runBounds = SIMD4<Float>(.infinity, .infinity, -.infinity, -.infinity)
+                    let baselines = restsExact ? TextBoxGeometry.roundedBaselines(originYPx: restOrigin.y, shaped: shaped) : []
+                let placements = TextBoxGeometry.GlyphPlacementBatch(shaped: shaped, atlas: textSystem.glyphAtlas,
+                                                                     exact: restsExact || raster != nil)
+                defer { placements?.finish() }
+                    var baselineLine = 0
+                    for (index, glyph) in labelGlyphs.enumerated() {
+                        let wordAlpha = wordFadeMask?.alpha(for: glyph) ?? 1.0
+                        let gAlpha = localOpacity * wordAlpha
+                        if gAlpha <= 0.0005 { continue }
+                        let (gq, placement) = TextBoxGeometry.paintGlyph(
+                            glyph, index: index, shaped: shaped, origin: restOrigin, scale: SIMD2<Float>(sc.x, sc.y), pixelScale: scale,
+                        restsExact: restsExact, baselines: baselines, line: &baselineLine, atlas: textSystem.glyphAtlas,
+                        raster: raster, placements: placements
+                        )
+                        if !isRotatedScope && (placement.y + placement.w < shownY0 || placement.y > shownY1 ||
+                                               placement.x + placement.z < glyphClipEdges.x || placement.x > glyphClipEdges.z) { continue }
+                        if canRetain {
+                            runBounds.x = min(runBounds.x, placement.x)
+                            runBounds.y = min(runBounds.y, placement.y)
+                            runBounds.z = max(runBounds.z, placement.x + placement.z)
+                            runBounds.w = max(runBounds.w, placement.y + placement.w)
                         }
-                        desktopOutline = native.outlineGroup(for: gq, line: baselineLine, shaped: shaped, atlas: textSystem.glyphAtlas)
+                        let glyphBaseColor = selectionInk?.color(for: glyph) ?? linkInkColor(for: glyph, ranges: linkInks) ?? gq.color.map { applyPressColor(pressTint.color, to: $0, frac: pressTint.frac) } ?? defaultTextColor
+                        let gcol = premulSIMD4(glyphBaseColor, opacity: gAlpha, srgb: srgbBlend)
+                        var desktopOutline: TextOutlineGroup?
+                        #if os(Linux) || os(Windows) || os(Android)
+                        if outlineMode != nil, let native = shaped.desktopRestingText {
+                            while baselineLine + 1 < shaped.lineGlyphRanges.count && index >= shaped.lineGlyphRanges[baselineLine].upperBound {
+                                baselineLine += 1
+                            }
+                            desktopOutline = native.outlineGroup(for: gq, line: baselineLine, shaped: shaped, atlas: textSystem.glyphAtlas)
+                        }
+                        #endif
+                        appendTextGlyph(gq, rect: placement, ink: gcol, clip: glyphClipEdges, fade: glyphFade,
+                                        forceScaled: forceScaled, outlineMode: outlineMode, desktopOutline: desktopOutline, lcdMask: lcdMask)
                     }
-                    #endif
-                    appendTextGlyph(gq, rect: placement, ink: gcol, clip: glyphClipEdges, fade: glyphFade,
-                                    forceScaled: forceScaled, outlineMode: outlineMode, desktopOutline: desktopOutline, lcdMask: lcdMask)
+                    if canRetain, instances.count - firstDraw == labelGlyphs.count,
+                       glyphFixups.count - firstFixup == labelGlyphs.count,
+                       labelGlyphs.allSatisfy({ $0.color == nil && !$0.hasLCDMask }),
+                       instances[firstDraw...].allSatisfy({ $0.params.y == KIND_GLYPH && $0.fill == runInk }) {
+                        var draws: [RetainedLabelDraws.Draw] = []
+                        var pages: Set<UInt16> = []
+                        draws.reserveCapacity(labelGlyphs.count)
+                        for fixup in glyphFixups[firstFixup...] {
+                            draws.append(.init(instance: instances[fixup.index], page: fixup.page))
+                            pages.insert(fixup.page)
+                        }
+                        nextLabelDraws[nid] = RetainedLabelDraws(
+                            source: labelGlyphs, origin: restOrigin, bounds: runBounds, ink: runInk, baseline: shaped.lineBaselinesPx.first, scale: scale,
+                            smoothing: inkMode, srgb: srgbBlend, pages: pages, resets: textSystem.glyphAtlas.resets, draws: draws
+                        )
+                    }
                 }
             }
             let focusOverlay = !hasActiveTextLinks(el) ? resolvedFocusRingOverlay(
@@ -3772,6 +3837,7 @@ extension Runtime {
         output.rawGlyphPagePatches = glyphAtlas.rawPatches
         output.elidedLayers = elidedLayers
         imagePacker.publish(into: &output)
+        labelDraws = nextLabelDraws
         return output
     }
 }

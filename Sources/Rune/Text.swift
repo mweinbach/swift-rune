@@ -700,6 +700,7 @@ public struct ShapedText: @unchecked Sendable {
     /// Per glyph in `glyphs`, its face and exact pen, so paint can choose its subpixel phase
     /// again where a text laid out from a fractional origin lands (`glyph_emit.rs`, #935).
     internal var glyphPens: [GlyphPen] = []
+    internal var glyphPlacements: TextBoxGeometry.GlyphPlacements?
     #endif
     internal var portableLines: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
     /// Native bidi lines in visual order. A logical insertion point can have two different x positions.
@@ -1404,6 +1405,26 @@ public final class GlyphAtlas: @unchecked Sendable {
             guard resets == resetsCount else { return false }
             for page in pages { touchLocked(page: page, texels: 0) }
             return true
+        }
+    }
+
+    /// Pin cached phase variants only if every shelf they reference predates the receipt.
+    internal func retainGlyphPlacements(_ pages: UInt8, since generation: UInt64) -> Bool {
+        lock.withLock {
+            guard outlineResetEpoch <= generation else { return false }
+            for page in 0..<Self.maxOverflowPages where pages & (1 << page) != 0 {
+                guard maskEpochLocked(page: page) <= generation, page <= overflowPages.count else { return false }
+                touchLocked(page: UInt16(page), texels: 0)
+            }
+            return true
+        }
+    }
+
+    internal func touchGlyphPlacements(_ texels: SIMD8<UInt32>) {
+        lock.withLock {
+            for page in 0..<Self.maxOverflowPages where texels[page] != 0 && page <= overflowPages.count {
+                touchLocked(page: UInt16(page), texels: texels[page])
+            }
         }
     }
 
@@ -5652,6 +5673,7 @@ public final class TextSystem: @unchecked Sendable {
         var glyphsOut: [PositionedGlyph] = []
         var underlinesOut: [SIMD4<Float>] = []
         var underlineLineEnds: [Float] = []
+        let placementEpoch = emitGlyphs ? glyphAtlas.resets : 0
         var glyphPensOut: [GlyphPen] = []
         var strikethroughsOut: [SIMD4<Float>] = []
         var rawBackgroundsOut: [(SIMD4<Float>, Color)] = []
@@ -6003,6 +6025,9 @@ public final class TextSystem: @unchecked Sendable {
         shapedOut.lineBaselinesPx = lineBaselines
         shapedOut.underlineLineEndsPt = underlineLineEnds
         shapedOut.glyphPens = glyphPensOut.count == glyphsOut.count ? glyphPensOut : []
+        if !shapedOut.glyphPens.isEmpty {
+            shapedOut.glyphPlacements = TextBoxGeometry.GlyphPlacements(glyphs: glyphsOut, since: placementEpoch)
+        }
         return shapedOut
     }
 
@@ -6107,7 +6132,10 @@ public final class TextSystem: @unchecked Sendable {
 
                 let quadXPx = pen.pixel + entry.bearingPx.x
                 let finalQuadYPx = quadYPx + entry.bearingPx.y
-                glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx, glideX: glidePx.x, binY: binYArg, smoothing: style.fontSmoothing, isColor: false, yOffsetPx: -Float(positions[i].y)))
+                glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx,
+                                             glideX: glidePx.x, binY: binYArg, smoothing: style.fontSmoothing, isColor: false,
+                                             yOffsetPx: -Float(positions[i].y), phase: pen.phase, bearingX: entry.bearingPx.x,
+                                             maskTexels: UInt32(entry.pixelSize.x * entry.pixelSize.y)))
                 var positioned = PositionedGlyph(
                     rect: SIMD4<Float>(
                         quadXPx * invS,
@@ -6176,6 +6204,7 @@ public final class TextSystem: @unchecked Sendable {
         }
         box.shaped.glyphs = glyphs
         box.shaped.glyphPens = pens
+        box.shaped.glyphPlacements = pens.isEmpty ? nil : TextBoxGeometry.GlyphPlacements(glyphs: glyphs, since: resets)
         box.shaped.lineGlyphRanges = ranges
         box.hasGlyphs = true
         box.rasterWindow = window

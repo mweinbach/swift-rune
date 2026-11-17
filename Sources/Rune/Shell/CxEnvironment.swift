@@ -68,6 +68,8 @@ public struct Outline: Sendable, Equatable {
 /// Default styles and interaction modes declared by a view via `Cx` (`rune::runtime::ViewDefaults`).
 public struct ViewDefaults: Sendable, Equatable {
     public var foreground: Color?
+    // An unstyled Rust TextSpec starts white until the view supplies a foreground.
+    internal var textForeground: Color { foreground ?? .white }
     public var focusRing: Outline?
     public var help: HelpLook?
     public var webFocus: Bool = false

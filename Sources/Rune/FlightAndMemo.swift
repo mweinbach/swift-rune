@@ -1433,7 +1433,7 @@ extension Runtime {
         }
 
         for entry in activeTextFlights {
-            guard let target = nodeById[entry.targetNodeId] else { continue }
+            guard let target = mountedNode(entry.targetNodeId) else { continue }
             let flight = entry.state
             let alpha = flight.alphas(target: flight.destination, now: now, reducedMotion: reducedMotion)
             let sourceClip = intersectRects(entry.sourceClip, window)

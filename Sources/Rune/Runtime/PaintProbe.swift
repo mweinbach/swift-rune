@@ -53,7 +53,7 @@ extension Runtime {
             let paintsInk = el.plainText != nil || el.richSpans != nil || el.advanceInRun != nil
                 || el.handlers.editLens != nil || el.iconPayload != nil
             if paintsInk {
-                let fallback = e.textColor ?? cxSettings.viewDefaults.foreground ?? (systemDark ? .white : .black)
+                let fallback = e.textColor ?? cxSettings.viewDefaults.textForeground
                 var ink = live(.textColor) ?? color(Props.TEXT_COLOR, fallback)
                 if let groupInk = el.groupColor, let group = parent?.group, group > 0 {
                     ink = ink.mix(with: groupInk, t: group)

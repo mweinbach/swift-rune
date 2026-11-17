@@ -119,4 +119,41 @@ struct FlatNodeStorageTests {
         #expect(Set(children.map(\.nodeId)).count == 3)
         #expect(rt.lastKeyDiagnostics.contains { $0.key == "a" && $0.count == 2 })
     }
+
+    @Test func mountedLookupTracksScrollLiveTextRemovalAndReinsertion() throws {
+        let label = LiveText("first")
+        let rt = Runtime(state: 0, viewport: Vec2(160, 80), pixelScale: 1) { stage, _ -> El<Int> in
+            var root: El<Int> = col().key("scroll").size(160, 80).scrollY()
+            let live: El<Int> = liveText(label).key("live").size(120, 32)
+            let transient: El<Int> = el().key("transient").size(120, 32).transition(.opacity)
+            if stage != 1 { root = root.child(transient) }
+            return root.child(live).child(el().key("tail").size(120, 360))
+        }
+        _ = rt.frame(at: 0)
+        let live = try #require(rt.flatNodes.first { $0.key == "live" })
+        let transient = try #require(rt.flatNodes.first { $0.key == "transient" })
+        let scroll = rt.flatNodes[0]
+        rt.scrollOffsets[scroll.path] = Vec2(0, 20)
+        rt.updateScrollPositions(at: 0.01)
+        #expect(rt.mountedNode(live.nodeId)?.targetRect.y == live.targetRect.y - 20)
+        var specs = rt.lastCommittedSpecs
+        rt.shiftFlatAndSpecsForScrollDeltas([scroll.path: Vec2(0, 3)], specs: &specs)
+        #expect(rt.mountedNode(live.nodeId)?.targetRect.y == live.targetRect.y - 23)
+        label.set("second")
+        _ = rt.frame(at: 0.02)
+        #expect(rt.mountedNode(live.nodeId)?.el.plainText == "second")
+        #expect(live.el.plainText == "first")
+
+        rt.update(at: 0.03) { state, _ in state = 1 }
+        _ = rt.frame(at: 0.03)
+        #expect(rt.mountedNode(transient.nodeId) == nil)
+        #expect(rt.exitingSnapshots[transient.nodeId]?.key == "transient")
+        #expect(rt.mountedNode(live.nodeId)?.index == live.index - 1)
+
+        rt.update(at: 0.04) { state, _ in state = 2 }
+        _ = rt.frame(at: 0.04)
+        #expect(rt.mountedNode(transient.nodeId)?.index == transient.index)
+        #expect(rt.mountedNode(live.nodeId)?.index == live.index)
+        #expect(rt.nodeIndexById.count == rt.flatNodes.count)
+    }
 }

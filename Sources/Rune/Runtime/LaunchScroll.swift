@@ -38,7 +38,7 @@ extension Runtime {
         guard !launchScrollById.isEmpty else { return }
         var heights: [NodeId: Float] = [:]
         for id in launchScrollById.keys {
-            guard let node = nodeById[id] else { continue }
+            guard let node = mountedNode(id) else { continue }
             let key = node.el.foldGlideSpec != nil ? "fold:\(node.path)" : "growth:\(node.path)"
             if let entry = growthRows[key] { heights[id] = max(0, entry.track.h) }
         }

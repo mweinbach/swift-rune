@@ -114,16 +114,16 @@ internal extension Runtime {
     /// Captures exiting direct-child `ChildExit` overrides before `flatNodes` is replaced by a commit.
     func collectChildExitOverrides(
         prevNodes: [FlatNode],
-        newById: [NodeId: FlatNode],
+        newPass: MeasurePassResult,
         cut: Bool
     ) -> [(childId: NodeId, parentEl: El<State>)] {
         guard !cut else { return [] }
         var out: [(childId: NodeId, parentEl: El<State>)] = []
         for prevNode in prevNodes {
-            guard newById[prevNode.nodeId] == nil else { continue }
+            guard newPass.indexById[prevNode.nodeId] == nil else { continue }
             guard let prevParentIdx = prevNode.parentIndex, prevParentIdx < prevNodes.count else { continue }
             let parentId = prevNodes[prevParentIdx].nodeId
-            guard let liveParent = newById[parentId],
+            guard let liveParent = newPass.node(parentId),
                   !liveParent.el.hasInstantChanges,
                   liveParent.el.childExitTransition != nil else {
                 continue

@@ -120,7 +120,7 @@ extension Runtime {
         guard !slice2State.joinedRowSeams.isEmpty else { return }
         var offsets: [NodeId: Float] = [:]
         for (stackID, var seams) in slice2State.joinedRowSeams {
-            guard let stack = nodeById[stackID] else {
+            guard let stack = mountedNode(stackID) else {
                 slice2State.joinedRowSeams.removeValue(forKey: stackID)
                 continue
             }
@@ -131,7 +131,7 @@ extension Runtime {
                 || slice2State.liveContentSlides.slides.contains { rows.contains($0.row) }
             for index in seams.indices.reversed() {
                 let seam = seams[index]
-                guard let a = nodeById[seam.top.ink], let b = nodeById[seam.bottom.ink],
+                guard let a = mountedNode(seam.top.ink), let b = mountedNode(seam.bottom.ink),
                       a.localRect.height == seam.top.height, b.localRect.height == seam.bottom.height,
                       let upper = frame.byId[a.nodeId]?.rect, let lower = frame.byId[b.nodeId]?.rect else { continue }
                 let end = upper.top + (offsets[seam.top.row] ?? 0) + a.localRect.height
@@ -143,7 +143,7 @@ extension Runtime {
                     let left = abs(rawFrom - goal) < 0.01 ? 0 : min(1, max(0, (raw - goal) / (rawFrom - goal)))
                     want = goal + (seam.from - goal) * left
                 case let .opening(between):
-                    guard let k = nodeById[between], let rect = frame.byId[between]?.rect else { continue }
+                    guard let k = mountedNode(between), let rect = frame.byId[between]?.rect else { continue }
                     let growthKey = (k.el.foldGlideSpec == nil ? "growth:" : "fold:") + k.path
                     let height = growthRows[growthKey]?.track.h ?? rect.height
                     let t = min(1, max(0, (rect.top + (offsets[between] ?? 0) + height - end) / max(1, seam.targetDistance)))
@@ -152,7 +152,7 @@ extension Runtime {
                 seams[index].raw = raw
                 offsets[seam.top.row, default: 0] += raw - want
                 for id in [seam.top.row, seam.bottom.row] {
-                    guard let row = nodeById[id] else { continue }
+                    guard let row = mountedNode(id) else { continue }
                     let track = growthRows[(row.el.foldGlideSpec == nil ? "growth:" : "fold:") + row.path]?.track
                     if track?.whole == true && track?.linearEdge == true {
                         slice2State.joinedRowsWithoutRevealMask.insert(id)

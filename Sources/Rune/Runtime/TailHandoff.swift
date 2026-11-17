@@ -36,8 +36,8 @@ extension Runtime {
         }) else { return false }
         let panelNode = nodes[panelIndex]
         let view = nodes[viewport]
-        guard let oldView = nodeById[view.nodeId]?.targetRect,
-              let oldPanel = nodeById[panelNode.nodeId]?.targetRect else { return false }
+        guard let oldView = mountedNode(view.nodeId)?.targetRect,
+              let oldPanel = mountedNode(panelNode.nodeId)?.targetRect else { return false }
         let panelTarget = panelNode.targetRect
         let viewTarget = view.targetRect
         func close(_ a: Float, _ b: Float) -> Bool { abs(a - b) < 1.0 / 64.0 }
@@ -65,7 +65,7 @@ extension Runtime {
         var frames: [TailHandoff.Frame] = []
         var rows: [TailHandoff.Row] = []
         for (index, node) in nodes.enumerated() {
-            let fixedSibling = node.parentIndex == panelNode.parentIndex && nodeById[node.nodeId]?.targetRect == node.targetRect
+            let fixedSibling = node.parentIndex == panelNode.parentIndex && mountedNode(node.nodeId)?.targetRect == node.targetRect
             if ancestors.contains(index) || (panelIndex..<panelEnd).contains(index) || fixedSibling,
                let old = scene.get(node.nodeId, Props.FRAME) {
                 let dy = old.y - node.localRect.y
@@ -106,7 +106,7 @@ extension Runtime {
             guard let handoff = stack.tailHandoff else { continue }
             let left = handoff.progress(in: growthRows).left
             for frame in handoff.frames {
-                guard let current = nodeById[frame.id]?.localRect,
+                guard let current = mountedNode(frame.id)?.localRect,
                       current.y == frame.target.y, current.height == frame.target.height else { continue }
                 scene.set(frame.id, Props.FRAME, MotionRect.fromXYWH(
                     current.x, current.y + frame.dy * left, current.width, current.height + frame.dh * left

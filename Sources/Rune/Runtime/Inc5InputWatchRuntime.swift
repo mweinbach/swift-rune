@@ -373,7 +373,7 @@ extension Runtime {
                 liveStore.set(trackId, Self.pressProp, to: target, anim: Anim<Float>(curve: .spring(spring)), at: now)
             }
         }
-        lastPressTargetById = lastPressTargetById.filter { nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil }
+        lastPressTargetById = lastPressTargetById.filter { nodeIndexById[$0.key] != nil || exitingSnapshots[$0.key] != nil }
     }
 
     internal func makeGroupHoverPredicate(
@@ -773,7 +773,7 @@ extension Runtime {
             }
             lastHoverTargetById[nid] = target
         }
-        lastHoverTargetById = lastHoverTargetById.filter { nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil }
+        lastHoverTargetById = lastHoverTargetById.filter { nodeIndexById[$0.key] != nil || exitingSnapshots[$0.key] != nil }
         syncPressScale(at: now, cut: cut)
     }
 

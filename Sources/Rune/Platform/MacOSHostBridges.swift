@@ -237,6 +237,7 @@ public final class MacOSDisplayLinkDriver: NSObject {
     private let onTick: @MainActor () -> Void
 
     var deadlineWoke: (() -> Void)?
+    private var tickRetry: DispatchWorkItem?
 
     public init(onTick: @escaping @MainActor () -> Void) {
         self.onTick = onTick
@@ -346,6 +347,8 @@ public final class MacOSDisplayLinkDriver: NSObject {
     }
 
     public func stop() {
+        tickRetry?.cancel()
+        tickRetry = nil
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
         if let powerObserver { NotificationCenter.default.removeObserver(powerObserver) }
         screenObserver = nil
@@ -383,8 +386,35 @@ public final class MacOSDisplayLinkDriver: NSObject {
         if period.isFinite && period > 0 {
             pacer.framePeriod = lowPowerCap ? max(period, 1.0 / 60) : period
         }
-        pacer.enqueueTick(target: sender.targetTimestamp)
+        tickRetry?.cancel()
+        tickRetry = nil
+        let target = sender.targetTimestamp
+        let now = CACurrentMediaTime()
+        if let retryAt = Self.retryTime(for: target, lastPresent: pacer.lastPresent, lastTarget: pacer.lastTarget,
+                                        now: now, period: pacer.framePeriod) {
+            // A frame can finish inside its budget yet submit too recently for this callback.
+            // The same target is still usable once the minimum spacing has elapsed.
+            let retry = DispatchWorkItem { [weak self, weak sender] in
+                guard let self, let sender, self.displayLink === sender else { return }
+                self.tickRetry = nil
+                self.pacer.enqueueTick(target: target)
+                self.onTick()
+            }
+            tickRetry = retry
+            DispatchQueue.main.asyncAfter(deadline: .now() + (retryAt - now), execute: retry)
+            return
+        }
+        pacer.enqueueTick(target: target)
         onTick()
+    }
+
+    static func retryTime(for target: Double, lastPresent: Double?, lastTarget: Double?,
+                          now: Double, period: Double) -> Double? {
+        guard let lastPresent else { return nil }
+        let earliest = (lastPresent + period / 2).nextUp
+        guard earliest > now, DisplayLinkPacer.permits(lastPresent: lastPresent, lastTarget: lastTarget,
+            target: target, now: earliest, period: period) else { return nil }
+        return earliest
     }
 }
 

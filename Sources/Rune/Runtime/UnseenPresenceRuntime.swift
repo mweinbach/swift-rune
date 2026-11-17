@@ -622,7 +622,7 @@ extension Runtime {
         var omittedUnseen: [NodeId] = []
         for prev in prevNodes {
             let nid = prev.nodeId
-            if nodeById[nid] == nil,
+            if nodeIndexById[nid] == nil,
                unseenPrevIds.contains(nid),
                !activeFlightIds.contains(nid) {
                 omittedUnseen.append(nid)

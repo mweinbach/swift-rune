@@ -53,7 +53,7 @@ extension Runtime {
         for p in frame.nodes {
             let node: FlatNode
             let slot: Int
-            if let mounted = nodeById[p.id] {
+            if let mounted = mountedNode(p.id) {
                 node = mounted
                 slot = mounted.index
             } else if let exiting = exitingSnapshots[p.id] {
@@ -89,7 +89,7 @@ extension Runtime {
             if slot >= 0, let expected = flatNodes[slot].parentIndex, flatNodes[expected].nodeId == parent {
                 owner = expected
             } else {
-                owner = nodeById[parent]?.index ?? tree.exitingSlot[parent]
+                owner = nodeIndexById[parent] ?? tree.exitingSlot[parent]
             }
             if let owner {
                 parents[index] = owner

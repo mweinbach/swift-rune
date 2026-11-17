@@ -342,6 +342,29 @@ struct TextBoxGeometryParityTests {
         }
     }
 
+    @Test("implicit text stays white in both themes and takes an authored view foreground")
+    func implicitInkMatchesRustInBothThemes() {
+        let green = Color(r: 0, g: 1, b: 0)
+        let foregrounds: [Color?] = [nil, green]
+        let glyphKind = Float(PrimitiveKind.glyph.rawValue)
+        for dark in [false, true] {
+            for foreground in foregrounds {
+                let rt = Runtime(state: 0, viewport: Vec2(120, 40), pixelScale: 1, systemDark: dark) { _, cx in
+                    if let foreground { cx.foreground(foreground) }
+                    return text("Rune")
+                }
+                let expected = foreground ?? .white
+                let ink = SIMD4(expected.r, expected.g, expected.b, expected.a)
+                let reference = rt.frame(at: 0).primitives.filter { $0.params.y == glyphKind }
+                let native = rt.renderFrame(at: 0).instances.filter { $0.params.y == glyphKind }
+                #expect(reference.count == 4 && native.count == 4)
+                #expect(reference.allSatisfy { $0.fill == ink })
+                #expect(native.allSatisfy { $0.fill == ink })
+                #expect(reference.map(\.rect) == native.map(\.rect))
+            }
+        }
+    }
+
     @Test("a text's ink moves a device pixel per device pixel of travel, never back (X, #935)")
     func exactPlaceInkTracksItsBoxAcross() {
         func left(_ x: Float) -> Float {

@@ -119,6 +119,24 @@ struct MacOSHostFrameTests {
     }
 
     @MainActor
+    @Test func aFreshTickCanStillDrawAfterMinimumSubmissionSpacing() {
+        let period = 1.0 / 60
+        let previousTarget = 1 + period
+        let target = previousTarget + period
+        let lastSubmit = 1.012
+        let early = previousTarget + 0.0001
+        let retry = MacOSDisplayLinkDriver.retryTime(for: target, lastPresent: lastSubmit,
+                                                      lastTarget: previousTarget, now: early, period: period)
+        #expect(retry == (lastSubmit + period / 2).nextUp)
+        #expect(MacOSDisplayLinkDriver.retryTime(for: target, lastPresent: lastSubmit,
+                lastTarget: target, now: early, period: period) == nil)
+        #expect(MacOSDisplayLinkDriver.retryTime(for: target, lastPresent: target - 0.001,
+                lastTarget: previousTarget, now: target, period: period) == nil)
+        #expect(MacOSDisplayLinkDriver.retryTime(for: target, lastPresent: lastSubmit,
+                lastTarget: previousTarget, now: 1.025, period: period) == nil)
+    }
+
+    @MainActor
     @Test func startupTimerBecomesADisplayLinkWhenTheViewAttaches() {
         let view = NSView(frame: CGRect(x: 0, y: 0, width: 20, height: 20))
         let driver = MacOSDisplayLinkDriver {}

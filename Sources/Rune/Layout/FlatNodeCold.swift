@@ -31,6 +31,8 @@ internal struct FlatChildPaths {
     var duplicates: [(index: Int, warning: String)] = []
     var firstChildSlot = 0
 
+    init() {}
+
     init<State>(_ children: [El<State>], count: Int, parent: String) {
         guard count > 0 else { return }
         addresses.reserveCapacity(count)
@@ -58,6 +60,9 @@ internal struct FlatChildPaths {
 /// iteratively during the real tree walk, including arbitrarily deep memo trees.
 internal final class FlatMemoPaths<State> {
     let owner: MemoLayoutChildren<State>
+    var span: MemoFlatSpan<State>?
+    var allowsSpan = true
+    var replayedNodes = 0
     private var slots: [FlatChildPaths?] = [nil]
 
     init(_ owner: MemoLayoutChildren<State>) { self.owner = owner }

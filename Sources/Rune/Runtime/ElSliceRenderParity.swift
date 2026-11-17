@@ -148,7 +148,7 @@ internal extension Runtime {
         var indices = layoutObservers.groupOpacity
         // An element that dropped groupOpacity may need to animate its old track back to one.
         for id in elSliceRenderState.groupRestIds {
-            if let node = nodeById[id], node.el.groupOpacity == nil { indices.append(node.index) }
+            if let node = mountedNode(id), node.el.groupOpacity == nil { indices.append(node.index) }
         }
         var presentIds = Set<NodeId>(minimumCapacity: indices.count)
         var exitingIds = Set<NodeId>()
@@ -225,7 +225,7 @@ internal extension Runtime {
             }
         }
         elSliceRenderState.groupFadeIds = elSliceRenderState.groupFadeIds.filter {
-            scene.contains($0) && (nodeById[$0] != nil || exitingSnapshots[$0] != nil)
+            scene.contains($0) && (nodeIndexById[$0] != nil || exitingSnapshots[$0] != nil)
         }
     }
 
@@ -333,12 +333,12 @@ internal extension Runtime {
     func pruneScaleSettles() {
         if !elSliceRenderState.scaleSettles.isEmpty {
             elSliceRenderState.scaleSettles = elSliceRenderState.scaleSettles.filter {
-                scene.contains($0.key) || nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil
+                scene.contains($0.key) || nodeIndexById[$0.key] != nil || exitingSnapshots[$0.key] != nil
             }
         }
         if !elSliceRenderState.nodeCaches.isEmpty {
             elSliceRenderState.nodeCaches = elSliceRenderState.nodeCaches.filter {
-                scene.contains($0.key) || nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil
+                scene.contains($0.key) || nodeIndexById[$0.key] != nil || exitingSnapshots[$0.key] != nil
             }
         }
     }
@@ -481,7 +481,7 @@ internal extension Runtime {
         for index in layoutObservers.liveSources {
             subscribeNode(flatNodes[index], exiting: false)
         }
-        for (nid, snap) in exitingSnapshots where nodeById[nid] == nil && scene.contains(nid) {
+        for (nid, snap) in exitingSnapshots where nodeIndexById[nid] == nil && scene.contains(nid) {
             subscribeNode(snap, exiting: true)
         }
         let retained = Set(newSubscriptions.map(ObjectIdentifier.init))
@@ -498,7 +498,7 @@ internal extension Runtime {
         for (id, track) in loopRuntime.tracks {
             let nodeTime = scene.store.nodeTime(id)
             if let frac = track.offset(at: nodeTime, reduced: reducedMotion) {
-                let node = nodeById[id] ?? exitingSnapshots[id]
+                let node = mountedNode(id) ?? exitingSnapshots[id]
                 let size = node?.targetRect.size ?? .zero
                 let baseOffset = node?.el.offset ?? .zero
                 let off = Vec2(baseOffset.x + frac.x * size.x, baseOffset.y + frac.y * size.y)
@@ -506,7 +506,7 @@ internal extension Runtime {
                 elSliceRenderState.loopOffsetSyncedIds.insert(id)
             } else if elSliceRenderState.loopOffsetSyncedIds.remove(id) != nil {
                 if scene.contains(id) {
-                    let baseOffset = (nodeById[id] ?? exitingSnapshots[id])?.el.offset ?? .zero
+                    let baseOffset = (mountedNode(id) ?? exitingSnapshots[id])?.el.offset ?? .zero
                     scene.set(id, Props.OFFSET, baseOffset)
                 }
             }
@@ -514,7 +514,7 @@ internal extension Runtime {
         for id in Array(elSliceRenderState.loopOffsetSyncedIds) where loopRuntime.tracks[id] == nil {
             elSliceRenderState.loopOffsetSyncedIds.remove(id)
             if scene.contains(id) {
-                let baseOffset = (nodeById[id] ?? exitingSnapshots[id])?.el.offset ?? .zero
+                let baseOffset = (mountedNode(id) ?? exitingSnapshots[id])?.el.offset ?? .zero
                 scene.set(id, Props.OFFSET, baseOffset)
             }
         }

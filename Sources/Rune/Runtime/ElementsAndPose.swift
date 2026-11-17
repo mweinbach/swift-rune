@@ -654,7 +654,7 @@ extension Runtime {
 
     /// Returns `(path, key)` for the element with `id`, as `ElementInfo.path` and `ElementInfo.key` (`motion_elements.rs:156`).
     public func elementPath(_ id: NodeId) -> (path: String, key: String?)? {
-        if let n = nodeById[id] {
+        if let n = mountedNode(id) {
             return (n.path, n.key)
         }
         if let n = exitingSnapshots[id] {

@@ -1766,7 +1766,7 @@ extension Runtime {
             if !slice2State.liveContentSlides.slides.isEmpty {
                 let rows = Set(slice2State.liveContentSlides.slides.map(\.row))
                 for row in rows {
-                    guard let node = nodeById[row] else {
+                    guard let node = mountedNode(row) else {
                         slice2State.liveContentSlides.land(row: row)
                         continue
                     }
@@ -2343,7 +2343,7 @@ extension Runtime {
             if deltasByScrollPath[flatNodes[i].path] != nil {
                 flatNodes[i].ownScrollFade = computeScrollFadeSpec(for: flatNodes[i])
             }
-            nodeById[flatNodes[i].nodeId] = flatNodes[i]
+
         }
     }
 
@@ -2641,7 +2641,7 @@ extension Runtime {
                 shiftFlatAndSpecsForScrollDeltas(deltas, specs: &lastCommittedSpecs)
                 scene.keepFlights(false)
                 for id in launchedFlightIds {
-                    if let i = nodeById[id]?.index, let target = launchScrollById[id]?.layoutTarget {
+                    if let i = nodeIndexById[id], let target = launchScrollById[id]?.layoutTarget {
                         lastCommittedSpecs[i].launchLayout = .projectEndpoint
                         lastCommittedSpecs[i].rect.bottom = lastCommittedSpecs[i].rect.top + target.height
                     }
