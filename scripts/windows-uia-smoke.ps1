@@ -16,6 +16,8 @@ using System.Text;
 public static class RuneUiaWindow {
     delegate bool Visitor(IntPtr hwnd, IntPtr param);
     [DllImport("user32.dll")] static extern bool EnumThreadWindows(uint tid, Visitor cb, IntPtr data);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, uint attribute, out uint value, uint size);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr hwnd, StringBuilder name, int size);
     [DllImport("user32.dll")] static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
     [StructLayout(LayoutKind.Sequential)] struct Pt { public int x, y; }
@@ -48,6 +50,21 @@ public static class RuneUiaWindow {
     }
 
     public static void Close(IntPtr hwnd) { PostMessage(hwnd, 0x0010, IntPtr.Zero, IntPtr.Zero); }
+    public static void CheckPickerWindows(Process process, IntPtr expected) {
+        var windows = new System.Collections.Generic.List<IntPtr>();
+        foreach (ProcessThread thread in process.Threads) {
+            EnumThreadWindows((uint)thread.Id, delegate(IntPtr hwnd, IntPtr unused) {
+                uint cloak;
+                if (IsWindowVisible(hwnd) &&
+                    (DwmGetWindowAttribute(hwnd, 14, out cloak, sizeof(uint)) < 0 || cloak == 0)) // DWMWA_CLOAKED
+                    windows.Add(hwnd);
+                return true;
+            }, IntPtr.Zero);
+        }
+        if (windows.Count != 1 || windows[0] != expected)
+            throw new Exception("Unexpected visible, uncloaked top-level windows: " + string.Join(", ", windows));
+    }
+
     public static IntPtr Find(Process process) {
         IntPtr found = IntPtr.Zero;
         foreach (ProcessThread thread in process.Threads) {
@@ -89,6 +106,22 @@ try {
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($null -eq $switch) { throw 'Timed out waiting for the switch in the native UI Automation tree.' }
+    function Assert-DesktopWindows {
+        $processCondition = [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $app.Id)
+        $root = [System.Windows.Automation.AutomationElement]::RootElement
+        foreach ($view in @([System.Windows.Automation.Automation]::ControlViewCondition,
+                            [System.Windows.Automation.Automation]::ContentViewCondition)) {
+            $condition = [System.Windows.Automation.AndCondition]::new($processCondition, $view)
+            $matches = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $condition)
+            if ($matches.Count -ne 1 -or $matches[0].Current.NativeWindowHandle -ne $hwnd.ToInt32()) {
+                throw "Unexpected top-level windows in the UI Automation desktop view. Count=$($matches.Count), expected HWND=$hwnd."
+            }
+        }
+        $app.Refresh()
+        [RuneUiaWindow]::CheckPickerWindows($app, $hwnd)
+    }
+    Assert-DesktopWindows
     $info = $switch.Current
     if ($info.Name -ne 'Lights' -or $info.FrameworkId -ne 'Rune' -or
         $info.ControlType -ne [System.Windows.Automation.ControlType]::Button -or
@@ -124,6 +157,8 @@ try {
     Wait-Toggle $toggle 'On'
     $toggle.Toggle()
     Wait-Toggle $toggle 'Off'
+    Assert-DesktopWindows
+    Write-Output 'Only the Rune window appeared in the UI Automation control and content views and the visible, uncloaked window list before and after resize.'
     Write-Output "Lights responded to native clicks and UI Automation Toggle before and after resize ($before -> $after)."
 } finally {
     if (-not $app.HasExited) {

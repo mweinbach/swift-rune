@@ -1,9 +1,9 @@
 {
   "swiftExecutables" : 99,
   "swiftTargets" : 19,
-  "syncedAt" : "2026-11-17T20:44:16Z",
-  "syncedCommit" : "0d00d3f2d59df5b764d8d6b2585164fd43c16f48",
-  "syncedCommitDate" : "2026-11-17T15:15:48-05:00",
-  "syncedCommitSubject" : "tell a press handler when a finger tapped it (#1143)",
+  "syncedAt" : "2026-11-17T22:13:51Z",
+  "syncedCommit" : "c7bb7eb7fe36d7e0d215dac9a089cf6362dd9da7",
+  "syncedCommitDate" : "2026-11-17T16:06:17-06:00",
+  "syncedCommitSubject" : "fix(winit): cloak winit's helper window so screen readers and window pickers don't meet it (#1131)",
   "upstreamRepo" : "https:\/\/github.com\/anomalyco\/rune"
 }

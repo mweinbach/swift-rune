@@ -2736,7 +2736,7 @@
             "scripts/windows-uia-smoke.ps1"
           ],
           "status": "partial",
-          "note": "Win32 dispatches native input, IME, DPI, window lifecycle, UI Automation and file drops. WGL presents Rune GPU frames."
+          "note": "Win32 dispatches native input, IME, DPI, window lifecycle, UI Automation and file drops. WGL presents Rune GPU frames. The real window services live-resize paints. Windows 11 ARM64 exposed only that window in the UI Automation desktop control and content views and the visible, uncloaked window list before and after resize (#1131)."
         },
         {
           "upstream": "src/platform/win32/cloak.rs",
