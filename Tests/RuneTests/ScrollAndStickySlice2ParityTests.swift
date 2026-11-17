@@ -495,6 +495,24 @@ struct ScrollAndStickySlice2ParityTests {
         }
     }
 
+    @Test("scroll_growth: a_kept_row_holds_its_viewport_through_a_shrink")
+    func keptRowHoldsItsViewportThroughShrink() throws {
+        let (rt, start) = shrinkingList()
+        var now = start
+        let path = try #require(scrollPath(in: rt, forKey: "scroll"))
+        let top = try reqEl(rt, "r15").rect[1]
+        rt.update(at: now) { count, tx in
+            count = 17
+            tx.keepOnScreen("r15")
+        }
+        for _ in 0..<20 {
+            advance(rt, frames: 1, at: &now)
+            try #require(!rt.scrollGlidingPaths.contains(path))
+            let position = try reqEl(rt, "r15").rect[1]
+            #expect(abs(position - top) < 0.5)
+        }
+    }
+
     @Test("scroll_growth: rows_regrowing_under_a_shrink_glide_stay_near")
     func rowsRegrowingUnderShrinkGlideStayNear() throws {
         struct S { var count: Int = 20; var farEvents: [Bool] = [] }
@@ -635,8 +653,8 @@ struct ScrollAndStickySlice2ParityTests {
 
     // MARK: - tests/scroll_to.rs
 
-    @Test("scroll_to: scroll_center_mounts_virtual_rows_and_centres_elements_and_text_highlights")
-    func scrollCenterMountsVirtualRowsAndCentresElementsAndTextHighlights() throws {
+    @Test("scroll_to: scroll_center_mounts_virtual_rows_and_centres_elements_and_text_highlights", arguments: [false, true])
+    func scrollCenterMountsVirtualRowsAndCentresElementsAndTextHighlights(nativeFrame: Bool) throws {
         struct FindS { var hitRow = 40 }
         let rt = Runtime<FindS>(state: FindS(), viewport: Vec2(300, 300), pixelScale: 1.0, systemDark: true) { (_: FindS, _) -> El<FindS> in
             let rows: El<FindS> = col().key("rows").wFull().growth(.default).virtualRows(
@@ -656,17 +674,24 @@ struct ScrollAndStickySlice2ParityTests {
             )
         }
         var t = 0.0
-        _ = rt.frame(at: t)
+        func draw() {
+            if nativeFrame {
+                _ = rt.renderFrame(at: t)
+            } else {
+                _ = rt.frame(at: t)
+            }
+        }
+        draw()
 
         rt.update(at: t) { _, tx in
             tx.scrollCenterIn("list", "r40/active-hit")
         }
         t += 1.0 / 60.0
-        _ = rt.frame(at: t)
+        draw()
         var frames = 0
         while rt.isAnimating && frames < 600 {
             t += 1.0 / 60.0
-            _ = rt.frame(at: t)
+            draw()
             frames += 1
         }
         #expect(!rt.isAnimating, "glide settled")
@@ -680,16 +705,20 @@ struct ScrollAndStickySlice2ParityTests {
             tx.scrollCenterInInstant("list", "r15/active-hit")
         }
         t += 1.0 / 60.0
-        _ = rt.frame(at: t)
+        draw()
         let mark2 = try reqEl(rt, "active-hit")
         let mid2 = mark2.rect[1] + mark2.rect[3] * 0.5
         #expect(abs(mid2 - 100.0) < 2.0, "instant centre in one frame: \(mark2.rect)")
+        t += 1.0 / 60.0
+        draw()
+        let refined = try reqEl(rt, "active-hit")
+        #expect(abs(refined.rect[1] + refined.rect[3] * 0.5 - 100) < 2.0)
 
         rt.update(at: t) { _, tx in
             tx.scrollKeyTo("active-hit", at: 24)
         }
         t += 1.0 / 60.0
-        _ = rt.frame(at: t)
+        draw()
         let mark3 = try reqEl(rt, "active-hit")
         #expect(abs(mark3.rect[1] - 24.0) < 2.0, "scrollKeyTo placed TextHighlight at 24pt: \(mark3.rect)")
     }

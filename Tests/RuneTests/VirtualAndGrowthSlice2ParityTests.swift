@@ -447,7 +447,7 @@ struct VirtualAndGrowthSlice2ParityTests {
         #expect(abs(rowAfterClose - (rowBefore + 40)) < 0.5, "row-99 must move down 40pt after slack closes: \(rowBefore) -> \(rowAfterClose)")
         #expect(rt.scrollAtBottom(forKey: "scroll") == true)
 
-        // followEdge cancels slack immediately and docks directly with composer changes
+        // With followEdge the final row stays on the moving dock throughout its resize.
         rt.update(at: t) { s, tx in
             s.composerH = 80
         }
@@ -457,9 +457,16 @@ struct VirtualAndGrowthSlice2ParityTests {
             s.composerH = 40
             tx.followEdge()
         }
-        t += 1.0 / 120.0
-        _ = rt.frame(at: t)
-        #expect(abs(rt.element(byKey: "row-99")!.rect[1] - (rowDocked80 + 40)) < 0.5, "tx.followEdge() must track composer dock change immediately")
+        var largestGap: Float = 0
+        for _ in 0..<90 {
+            t += 1.0 / 120.0
+            _ = rt.frame(at: t)
+            let row = rt.element(byKey: "row-99")!.rect
+            let dock = rt.element(byKey: "composer")!.rect
+            largestGap = max(largestGap, abs(row[1] + row[3] - dock[1]))
+        }
+        #expect(largestGap < 0.5, "the last row stays on the presented dock each frame")
+        #expect(abs(rt.element(byKey: "row-99")!.rect[1] - (rowDocked80 + 40)) < 0.5)
 
         // Scrolling wheel UP while slack active clears slack without a downward jump
         rt.update(at: t) { s, _ in s.composerH = 80 }

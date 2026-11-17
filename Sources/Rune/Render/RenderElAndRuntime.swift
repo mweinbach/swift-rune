@@ -1333,6 +1333,15 @@ extension Runtime {
                 stuck: abs(stickyShift.y) >= abs(stickyShift.x) ? stickyShift.y : stickyShift.x
             ))
 
+            if el.textHighlights != nil {
+                let marks = highlightElementInfos(node: node, owner: newElements[myElementIndex], ownerIndex: myElementIndex,
+                                                 rect: effRect, scaleVec: sc, visibleRect: visibleClipPt)
+                newElements.append(contentsOf: marks)
+                if publishHitGeometry && !marks.isEmpty {
+                    hitScopes.append(contentsOf: repeatElement(hitScopes[myElementIndex], count: marks.count))
+                }
+            }
+
             let isDissolveScope = dissolveParentIds.contains(nid)
             if effOpacity <= 0.001 && !isExiting {
                 return (false, subtreeDynamic, effOpacity, effBlur, effRect, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil)

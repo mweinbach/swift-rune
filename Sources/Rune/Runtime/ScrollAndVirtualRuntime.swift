@@ -2684,6 +2684,7 @@ extension Runtime {
                         return true
                     }
                     if slice2State.scrollSlacks[vPath]?.moving == true
+                        || slice2State.scrollModes[vPath]?.hand.laid != nil
                         || (needsCommit && virtualLists.values.contains { $0.scrollPath == vPath }) {
                         return true
                     }

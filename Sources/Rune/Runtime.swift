@@ -3659,6 +3659,83 @@ public final class Runtime<State> {
         return out
     }
 
+    /// Text marks use the same glyph rectangles in the reference scene and the native frame.
+    internal func highlightElementInfos(
+        node: FlatNode, owner: ElementInfo, ownerIndex: Int, rect: MotionRect,
+        scaleVec: Vec2, visibleRect: MotionRect
+    ) -> [ElementInfo] {
+        guard let hls = node.el.textHighlights, !hls.isEmpty, !owner.secure else { return [] }
+        let edit = node.el.handlers.editLens?.get(state)
+        guard !node.el.isSecure, edit?.isSecure != true,
+              let text = edit?.text ?? node.el.liveText?.get() ?? node.el.plainText ?? node.el.richSpans?.map(\.text).joined(),
+              !text.isEmpty else { return [] }
+        var marks: [ElementInfo] = []
+        let drawnBoxes = highlightBoxes(node: node, boxRect: rect, scale: scaleVec)
+        let targetBoxes = highlightBoxes(node: node, boxRect: node.targetRect)
+        var drawnUnions = [MotionRect?](repeating: nil, count: hls.count)
+        var targetUnions = [MotionRect?](repeating: nil, count: hls.count)
+        for (k, r) in drawnBoxes {
+            drawnUnions[k] = drawnUnions[k].map {
+                MotionRect(left: min($0.left, r.left), top: min($0.top, r.top), right: max($0.right, r.right), bottom: max($0.bottom, r.bottom))
+            } ?? r
+        }
+        for (k, r) in targetBoxes {
+            targetUnions[k] = targetUnions[k].map {
+                MotionRect(left: min($0.left, r.left), top: min($0.top, r.top), right: max($0.right, r.right), bottom: max($0.bottom, r.bottom))
+            } ?? r
+        }
+        let txtUtf8 = Array(text.utf8)
+        for (k, hl) in hls.enumerated() {
+            guard let r = drawnUnions[k] else { continue }
+            let t = targetUnions[k] ?? r
+            let vis = intersectRects(r, visibleRect)
+            let a = max(0, min(hl.byteRange.lowerBound, txtUtf8.count))
+            let b = max(a, min(hl.byteRange.upperBound, txtUtf8.count))
+            let words = (a < b) ? String(decoding: txtUtf8[a..<b], as: UTF8.self) : nil
+            let markPath = "\(owner.path)#mark-\(k)"
+            marks.append(ElementInfo(
+                path: markPath,
+                key: hl.key,
+                parentIndex: ownerIndex,
+                role: .mark,
+                rect: r.xywh,
+                target: t.xywh,
+                visible: vis.xywh,
+                opacity: owner.opacity,
+                scale: scaleVec.x,
+                blur: owner.blur,
+                radius: 4.0,
+                fill: hl.bg,
+                textColor: node.el.textColor ?? cxSettings.viewDefaults.foreground,
+                text: words,
+                label: words,
+                help: owner.help,
+                selected: nil,
+                expanded: nil,
+                level: nil,
+                itemSelected: false,
+                focusable: false,
+                focused: false,
+                focusVisible: false,
+                inert: owner.inert,
+                moving: owner.moving,
+                exiting: owner.exiting,
+                hover: 0,
+                press: 0,
+                scrolled: owner.scrolled,
+                caret: nil,
+                secure: owner.secure,
+                disabled: node.el.a11yDisabled,
+                checked: node.el.a11yChecked,
+                a11yValue: node.el.a11yValue,
+                a11yDescription: node.el.a11yDescription,
+                a11yHidden: node.el.isA11yHidden,
+                stuck: 0
+            ))
+        }
+        return marks
+    }
+
     internal func highlightTargetWithNode(
         selector: String,
         scrolled: Bool = true,
@@ -8873,74 +8950,14 @@ public final class Runtime<State> {
                     nextNoWindowDragRects.append(visibleRect)
                 }
             }
-            if let hls = el.textHighlights, !hls.isEmpty,
-               let txt = elementTextValue, !txt.isEmpty,
-               snap.index < flatNodes.count {
-                let hlNode = flatNodes[snap.index]
-                let drawnBoxes = highlightBoxes(node: hlNode, boxRect: rect, scale: scaleVec)
-                let targetBoxes = highlightBoxes(node: hlNode, boxRect: snap.targetRect)
-                var drawnUnions = [MotionRect?](repeating: nil, count: hls.count)
-                var targetUnions = [MotionRect?](repeating: nil, count: hls.count)
-                for (k, r) in drawnBoxes {
-                    drawnUnions[k] = drawnUnions[k].map {
-                        MotionRect(left: min($0.left, r.left), top: min($0.top, r.top), right: max($0.right, r.right), bottom: max($0.bottom, r.bottom))
-                    } ?? r
+            if el.textHighlights != nil, snap.index < flatNodes.count {
+                let ownerIndex = infos.count - 1
+                let marks = highlightElementInfos(node: flatNodes[snap.index], owner: infos[ownerIndex], ownerIndex: ownerIndex,
+                                                 rect: rect, scaleVec: scaleVec, visibleRect: visibleRect)
+                for mark in marks {
+                    parentPathForInfo["\(mark.path)#\(mark.exiting ? 1 : 0)"] = snap.path
                 }
-                for (k, r) in targetBoxes {
-                    targetUnions[k] = targetUnions[k].map {
-                        MotionRect(left: min($0.left, r.left), top: min($0.top, r.top), right: max($0.right, r.right), bottom: max($0.bottom, r.bottom))
-                    } ?? r
-                }
-                let txtUtf8 = Array(txt.utf8)
-                for (k, hl) in hls.enumerated() {
-                    guard let r = drawnUnions[k] else { continue }
-                    let t = targetUnions[k] ?? r
-                    let vis = intersectRects(r, visibleRect)
-                    let a = max(0, min(hl.byteRange.lowerBound, txtUtf8.count))
-                    let b = max(a, min(hl.byteRange.upperBound, txtUtf8.count))
-                    let words = (a < b) ? String(decoding: txtUtf8[a..<b], as: UTF8.self) : nil
-                    let markPath = "\(snap.path)#mark-\(k)"
-                    parentPathForInfo["\(markPath)#\(p.isExiting ? 1 : 0)"] = snap.path
-                    infos.append(ElementInfo(
-                        path: markPath,
-                        key: hl.key,
-                        parentIndex: snap.index,
-                        role: .mark,
-                        rect: r.xywh,
-                        target: t.xywh,
-                        visible: vis.xywh,
-                        opacity: logicalAlpha,
-                        scale: scaleVec.x,
-                        blur: effBlur,
-                        radius: 4.0,
-                        fill: hl.bg,
-                        textColor: el.textColor ?? cxSettings.viewDefaults.foreground,
-                        text: words,
-                        label: words,
-                        help: resolvedRawHelp.map(runeHelpWords),
-                        selected: nil,
-                        expanded: nil,
-                        level: nil,
-                        itemSelected: false,
-                        focusable: false,
-                        focused: false,
-                        focusVisible: false,
-                        inert: snap.effectiveInert,
-                        moving: p.isMoving || enclosingVScrollMoving,
-                        exiting: p.isExiting,
-                        hover: 0,
-                        press: 0,
-                        scrolled: [scrolled.x, scrolled.y],
-                        caret: nil,
-                        secure: nodeIsSecure,
-                        disabled: el.a11yDisabled,
-                        checked: el.a11yChecked,
-                        a11yValue: el.a11yValue,
-                        a11yDescription: el.a11yDescription,
-                        a11yHidden: el.isA11yHidden,
-                        stuck: 0
-                    ))
-                }
+                infos.append(contentsOf: marks)
             }
 
             let ownClipCorners: Corners? = el.clipCorners
