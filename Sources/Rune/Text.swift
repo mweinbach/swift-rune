@@ -81,6 +81,22 @@ public struct TextStyle: Sendable, Hashable, Codable {
     /// one before it does, the first this flow (`plaintext_flow`). On a field's element it holds
     /// the element's resolved flow for `El.dirByParagraph` (`TextDir::Plaintext`). Not encoded.
     internal var byParagraphStart: TextFlow? = nil
+    /// Resolved editing blocks that indent visual lines. An unformatted field shares the plain-text layout.
+    internal var paragraphBlocks: [Block] = []
+    /// A placeholder starts inside its field's first block using the field font size.
+    internal var placeholderIndent: Float = 0
+    internal var hasBlockInsets: Bool { !paragraphBlocks.isEmpty || placeholderIndent > 0 }
+
+    fileprivate func blockInsetsPx(at paragraph: Int, scale: Float, rtl: Bool) -> SIMD2<Float> {
+        if placeholderIndent > 0 {
+            let indent = (placeholderIndent * scale).rounded()
+            return rtl ? SIMD2(0, indent) : SIMD2(indent, 0)
+        }
+        guard paragraph < paragraphBlocks.count else { return .zero }
+        let block = paragraphBlocks[paragraph]
+        let left = (block.indentPt(fontSize: size) * scale).rounded()
+        return SIMD2(left, block == .code ? left : 0)
+    }
 
     public static let body = TextStyle(size: 13.0, weight: 400.0)
 
@@ -2403,6 +2419,8 @@ public final class TextSystem: @unchecked Sendable {
             normalized.align = .leading
             normalized.wrap = .wrap
             normalized.wrapAnywhere = false
+            normalized.paragraphBlocks = []
+            normalized.placeholderIndent = 0
             normalized.elide = .end
             normalized.maxLines = 0
             normalized.exactLines = false
@@ -3955,9 +3973,10 @@ public final class TextSystem: @unchecked Sendable {
 
         if authText.isEmpty {
             let emptyH = Self.specLineHeight(lineCount: 1, lineHeightPt: lhPt, scale: scale, exact: style.exactLines)
-            let emptyOriginX: Float = (style.direction == .rtl ? (maxWidth ?? 0) : 0)
+            let insets = style.blockInsetsPx(at: 0, scale: scale, rtl: style.direction == .rtl) / scale
+            let emptyOriginX = style.direction == .rtl ? max(insets.x, (maxWidth ?? 0) - insets.y) : insets.x
             return ShapedText(
-                size: Vec2(0, emptyH),
+                size: Vec2(insets.x, emptyH),
                 lineCount: 1,
                 lineHeight: lhPt,
                 glyphs: [],
@@ -4295,6 +4314,7 @@ public final class TextSystem: @unchecked Sendable {
             var trailingWsPx: Float
             var isRTL: Bool
             var isParaLast: Bool
+            var insetsPx: SIMD2<Float>
             var strIndexBase: Int = 0
         }
         var visualLines: [VisualLine] = []
@@ -4305,10 +4325,7 @@ public final class TextSystem: @unchecked Sendable {
             pillBoxU16.insert(vp.leadShapedU16)
             if let t = vp.trailShapedU16 { pillBoxU16.insert(t) }
         }
-        let effectiveWrapWidthPx: CGFloat? = (style.wrap == .wrap && maxWidth != nil)
-            ? CGFloat(max(1.0, maxWidth! * scale))
-            : nil
-
+        var paragraph = 0
         var u16Start = 0
         var authUTF8Cursor = 0
         let authNS = authText as NSString
@@ -4327,6 +4344,9 @@ public final class TextSystem: @unchecked Sendable {
             }
             let paraShapedSub = shapedNS.substring(with: NSRange(location: u16Start, length: max(0, hardEnd - u16Start)))
             let paraIsRTL: Bool = Self.paragraphIsRTL(paraShapedSub, style: style, previous: &previousLineParaRTL) ?? false
+            let insets = style.blockInsetsPx(at: paragraph, scale: scale, rtl: paraIsRTL)
+            let availableWidthPx = maxWidth.map { max(1, $0 * scale - insets.x - insets.y) }
+            let effectiveWrapWidthPx = style.wrap == .wrap ? availableWidthPx.map { CGFloat($0) } : nil
 
             let segStart = u16Start
             if segStart == hardEnd {
@@ -4344,7 +4364,8 @@ public final class TextSystem: @unchecked Sendable {
                     widthPx: 0,
                     trailingWsPx: 0,
                     isRTL: paraIsRTL,
-                    isParaLast: true
+                    isParaLast: true,
+                    insetsPx: insets
                 ))
             } else {
                 // kitc's break loop (wrapAnywhere via `CTTypesetterSuggestLineBreak` + surrogate-pair fix;
@@ -4406,8 +4427,8 @@ public final class TextSystem: @unchecked Sendable {
                         let isParaLast = (cursor + count >= hardEnd)
                         let cfRange = CFRangeMake(cursor, count)
                         var ctLine = CTTypesetterCreateLine(typesetter, cfRange)
-                        if style.wrap == .ellipsis, let maxW = maxWidth {
-                            let maxWPx = Double(maxW * scale)
+                        if style.wrap == .ellipsis, let availableWidthPx {
+                            let maxWPx = Double(availableWidthPx)
                             let rawW = CTLineGetTypographicBounds(ctLine, nil, nil, nil)
                             if rawW > maxWPx + 0.5 {
                                 let ellipAttr = CFAttributedStringCreate(
@@ -4428,7 +4449,7 @@ public final class TextSystem: @unchecked Sendable {
                                 }
                                 anyTruncated = true
                             }
-                        } else if style.align == .justified && !isParaLast && style.wrap == .wrap, let maxW = maxWidth {
+                        } else if style.align == .justified && !isParaLast && style.wrap == .wrap, let availableWidthPx {
                             var trimmed = count
                             while trimmed > 1 {
                                 let ch = shapedNS.character(at: cursor + trimmed - 1)
@@ -4439,7 +4460,7 @@ public final class TextSystem: @unchecked Sendable {
                                 }
                             }
                             let baseLine = trimmed < count ? CTTypesetterCreateLine(typesetter, CFRangeMake(cursor, trimmed)) : ctLine
-                            let targetWPx = Double(max(1.0, maxW * scale))
+                            let targetWPx = Double(availableWidthPx)
                             if let jLine = CTLineCreateJustifiedLine(baseLine, 1.0, targetWPx) {
                                 ctLine = jLine
                             }
@@ -4457,7 +4478,7 @@ public final class TextSystem: @unchecked Sendable {
                 // `#933`: pills and `wrapAnywhere` text wrap prettily too (`line_break::break_new`
                 // breaks once with the pills' adjustments, scores, then breaks again with the caps
                 // first and the pills' adjustments after them).
-                if pretty,
+                if pretty, style.paragraphBlocks.isEmpty,
                    let wrapW = effectiveWrapWidthPx,
                    style.wrap == .wrap,
                    style.align != .justified,
@@ -4510,12 +4531,14 @@ public final class TextSystem: @unchecked Sendable {
                         widthPx: entry.wPx,
                         trailingWsPx: entry.twPx,
                         isRTL: paraIsRTL,
-                        isParaLast: entry.isParaLast
+                        isParaLast: entry.isParaLast,
+                        insetsPx: insets
                     ))
                     authUTF8Cursor += sub.utf8.count
                 }
             }
             if hardEnd < fullLen && shapedNS.character(at: hardEnd) == 0x0A {
+                paragraph += 1
                 authUTF8Cursor += 1
                 u16Start = hardEnd + 1
                 if u16Start == fullLen {
@@ -4533,7 +4556,8 @@ public final class TextSystem: @unchecked Sendable {
                         widthPx: 0,
                         trailingWsPx: 0,
                         isRTL: style.direction == .rtl,
-                        isParaLast: true
+                        isParaLast: true,
+                        insetsPx: style.blockInsetsPx(at: paragraph, scale: scale, rtl: style.direction == .rtl)
                     ))
                 }
             } else {
@@ -4541,7 +4565,7 @@ public final class TextSystem: @unchecked Sendable {
             }
         }
 
-        let maxLineWidthPx = visualLines.reduce(Float(0)) { max($0, $1.widthPx) }
+        let maxLineWidthPx = visualLines.reduce(Float(0)) { max($0, $1.insetsPx.x + $1.widthPx) }
         let containerWidthPx = maxWidth.map { max(maxLineWidthPx, $0 * scale) } ?? maxLineWidthPx
         let ascentPx = Float(baseAscentPx)
         let descentPx = Float(baseDescentPx)
@@ -4631,32 +4655,35 @@ public final class TextSystem: @unchecked Sendable {
             // a text laid out from its exact place lands (`content.rs`, #935).
             lineBaselines.append(baselineYPx)
             lineBaselineFracs.append(grownWins ? 0 : exactStrutBaselinePx - baselineYPx)
-            let alignOffsetPx: Float
+            let insetRight = maxWidth == nil ? 0 : item.insetsPx.y
+            let alignmentWidthPx = !style.hasBlockInsets ? containerWidthPx : (maxWidth.map { $0 * scale } ?? maxLineWidthPx)
+            let lineWidthPx = CGFloat(max(0, alignmentWidthPx - item.insetsPx.x - insetRight))
+            let flushOffsetPx: Float
             switch style.align {
             case .leading:
                 if item.isRTL {
-                    alignOffsetPx = max(0, Float(CTLineGetPenOffsetForFlush(item.ctLine, 1.0, CGFloat(containerWidthPx))))
+                    flushOffsetPx = max(0, Float(CTLineGetPenOffsetForFlush(item.ctLine, 1.0, lineWidthPx)))
                 } else {
-                    alignOffsetPx = 0
+                    flushOffsetPx = 0
                 }
             case .center:
-                alignOffsetPx = max(0, Float(CTLineGetPenOffsetForFlush(item.ctLine, 0.5, CGFloat(containerWidthPx))))
+                flushOffsetPx = max(0, Float(CTLineGetPenOffsetForFlush(item.ctLine, 0.5, lineWidthPx)))
             case .trailing:
                 if item.isRTL {
-                    alignOffsetPx = 0
+                    flushOffsetPx = 0
                 } else {
-                    alignOffsetPx = max(0, Float(CTLineGetPenOffsetForFlush(item.ctLine, 1.0, CGFloat(containerWidthPx))))
+                    flushOffsetPx = max(0, Float(CTLineGetPenOffsetForFlush(item.ctLine, 1.0, lineWidthPx)))
                 }
             case .justified:
                 if !item.isParaLast && style.wrap == .wrap && maxWidth != nil {
-                    alignOffsetPx = 0
+                    flushOffsetPx = 0
                 } else if item.isRTL {
-                    alignOffsetPx = max(0, Float(CTLineGetPenOffsetForFlush(item.ctLine, 1.0, CGFloat(containerWidthPx))))
+                    flushOffsetPx = max(0, Float(CTLineGetPenOffsetForFlush(item.ctLine, 1.0, lineWidthPx)))
                 } else {
-                    alignOffsetPx = 0
+                    flushOffsetPx = 0
                 }
             }
-
+            let alignOffsetPx = item.insetsPx.x + flushOffsetPx
             let originXPt = alignOffsetPx * invS
             let originYPt = lineTopPx * invS
             lineRecords.append((
@@ -5587,15 +5614,17 @@ public final class TextSystem: @unchecked Sendable {
 
         if fullText.isEmpty {
             let emptyH = Self.specLineHeight(lineCount: 1, lineHeightPt: lineH, scale: scale, exact: style.exactLines)
+            let insets = style.blockInsetsPx(at: 0, scale: scale, rtl: style.direction == .rtl) * invS
+            let originX = style.direction == .rtl ? max(insets.x, (maxWidth ?? 0) - insets.y) : insets.x
             return ShapedText(
-                size: Vec2(0, emptyH),
+                size: Vec2(insets.x, emptyH),
                 lineCount: 1,
                 lineHeight: lineH,
                 glyphs: [],
                 underlines: [],
                 strikethroughs: [],
                 backgrounds: [],
-                portableLines: [(0, "", 0, 0, [0])]
+                portableLines: [(0, "", 0, originX, [0])]
             )
         }
         recordShapeCall()
@@ -5661,15 +5690,17 @@ public final class TextSystem: @unchecked Sendable {
         }
 
         // Split into raw lines on '\n' and wrap/ellipsis if requested.
-        var lines: [(utf8Start: Int, text: String, width: Float, isRTL: Bool, isParaLast: Bool)] = []
+        var lines: [(utf8Start: Int, text: String, width: Float, isRTL: Bool, isParaLast: Bool, insets: SIMD2<Float>)] = []
         var portableTruncated = false
         var cursorUTF8 = 0
         let rawParagraphs = fullText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         for (pIdx, para) in rawParagraphs.enumerated() {
             let isRTL = Self.isRTLParagraph(para)
+            let insets = style.blockInsetsPx(at: pIdx, scale: scale, rtl: isRTL) * invS
+            let availableWidth = maxWidth.map { max(invS, $0 - insets.x - insets.y) }
             if para.isEmpty {
-                lines.append((cursorUTF8, "", 0, isRTL, true))
-            } else if style.wrap == .wrap, let maxW = maxWidth {
+                lines.append((cursorUTF8, "", 0, isRTL, true, insets))
+            } else if style.wrap == .wrap, let maxW = availableWidth {
                 var current = ""
                 var curW: Float = 0
                 var lineStart = cursorUTF8
@@ -5678,7 +5709,7 @@ public final class TextSystem: @unchecked Sendable {
                     let chBytes = String(ch).utf8.count
                     let chW = leadExtra(atUTF8: charUTF8) + charAdvance(ch, atUTF8: charUTF8) + trailExtra(endingAtUTF8: charUTF8 + chBytes)
                     if !current.isEmpty && curW + chW > maxW {
-                        lines.append((lineStart, current, curW, isRTL, false))
+                        lines.append((lineStart, current, curW, isRTL, false, insets))
                         lineStart += current.utf8.count
                         current = String(ch)
                         curW = chW
@@ -5689,9 +5720,9 @@ public final class TextSystem: @unchecked Sendable {
                     charUTF8 += chBytes
                 }
                 if !current.isEmpty {
-                    lines.append((lineStart, current, curW, isRTL, true))
+                    lines.append((lineStart, current, curW, isRTL, true, insets))
                 }
-            } else if style.wrap == .ellipsis, let maxW = maxWidth, maxW > 0 {
+            } else if style.wrap == .ellipsis, let maxW = availableWidth, maxW > 0 {
                 let chars = Array(para)
                 var chStarts = [Int]()
                 chStarts.reserveCapacity(chars.count + 1)
@@ -5709,7 +5740,7 @@ public final class TextSystem: @unchecked Sendable {
                 }
                 chStarts.append(u)
                 if totalParaW <= maxW + 0.5 * invS {
-                    lines.append((cursorUTF8, para, totalParaW, isRTL, true))
+                    lines.append((cursorUTF8, para, totalParaW, isRTL, true, insets))
                 } else {
                     portableTruncated = true
                     let ellW = charAdvance("…", atUTF8: cursorUTF8)
@@ -5769,7 +5800,7 @@ public final class TextSystem: @unchecked Sendable {
                         outStr = String(chars[0..<bestHead]) + "…" + String(chars[bestTail..<chars.count])
                         outW = bestW
                     }
-                    lines.append((cursorUTF8, outStr, outW, isRTL, true))
+                    lines.append((cursorUTF8, outStr, outW, isRTL, true, insets))
                 }
             } else {
                 var w: Float = 0
@@ -5779,7 +5810,7 @@ public final class TextSystem: @unchecked Sendable {
                     w += leadExtra(atUTF8: charUTF8) + charAdvance(ch, atUTF8: charUTF8) + trailExtra(endingAtUTF8: charUTF8 + chBytes)
                     charUTF8 += chBytes
                 }
-                lines.append((cursorUTF8, para, w, isRTL, true))
+                lines.append((cursorUTF8, para, w, isRTL, true, insets))
             }
             cursorUTF8 += para.utf8.count
             if pIdx + 1 < rawParagraphs.count {
@@ -5787,7 +5818,7 @@ public final class TextSystem: @unchecked Sendable {
             }
         }
         if lines.isEmpty {
-            lines = [(0, "", 0, false, true)]
+            lines = [(0, "", 0, false, true, .zero)]
         }
         if style.maxLines > 0 && lines.count > style.maxLines {
             lines = Array(lines.prefix(style.maxLines))
@@ -5795,7 +5826,8 @@ public final class TextSystem: @unchecked Sendable {
             let ellW = charAdvance("…", atUTF8: last.utf8Start)
             var trimmed = last.text
             while let c = trimmed.last, c.isWhitespace { trimmed.removeLast() }
-            if let maxW = maxWidth, maxW > 0 {
+            if let maxWidth, maxWidth > 0 {
+                let maxW = max(invS, maxWidth - last.insets.x - last.insets.y)
                 var curW: Float = 0
                 var charUTF8 = last.utf8Start
                 var kept = ""
@@ -5824,7 +5856,7 @@ public final class TextSystem: @unchecked Sendable {
         }
 
         // A text box is as wide as its widest line to a 64th of a device pixel (`text_width`, #934).
-        let maxLineW = TextBoxGeometry.boxWidth(maxLineWidthPt: lines.map(\.width).max() ?? 0, scale: scale)
+        let maxLineW = TextBoxGeometry.boxWidth(maxLineWidthPt: lines.reduce(Float(0)) { max($0, $1.insets.x + $1.width) }, scale: scale)
         let totalW = maxWidth.map { style.align == .leading ? max(maxLineW, min($0, maxLineW)) : max($0, maxLineW) } ?? maxLineW
         let totalH = Self.specLineHeight(lineCount: max(1, lines.count), lineHeightPt: lineH, scale: scale, exact: style.exactLines)
 
@@ -5841,23 +5873,27 @@ public final class TextSystem: @unchecked Sendable {
         for (idx, item) in lines.enumerated() {
             let lineStartGlyphIdx = glyphs.count
             let originY = Float(idx) * lineH
-            let originX: Float
+            let insetRight = maxWidth == nil ? 0 : item.insets.y
+            let alignmentWidth = !style.hasBlockInsets ? totalW : (maxWidth ?? maxLineW)
+            let availableWidth = max(0, alignmentWidth - item.insets.x - insetRight)
+            let flushOffset: Float
             switch style.align {
-            case .leading: originX = item.isRTL ? max(0, totalW - item.width) : 0
-            case .center: originX = max(0, (totalW - item.width) * 0.5)
-            case .trailing: originX = item.isRTL ? 0 : max(0, totalW - item.width)
+            case .leading: flushOffset = item.isRTL ? max(0, availableWidth - item.width) : 0
+            case .center: flushOffset = max(0, (availableWidth - item.width) * 0.5)
+            case .trailing: flushOffset = item.isRTL ? 0 : max(0, availableWidth - item.width)
             case .justified:
                 if !item.isParaLast && style.wrap == .wrap && maxWidth != nil {
-                    originX = 0
+                    flushOffset = 0
                 } else {
-                    originX = item.isRTL ? max(0, totalW - item.width) : 0
+                    flushOffset = item.isRTL ? max(0, availableWidth - item.width) : 0
                 }
             }
+            let originX = item.insets.x + flushOffset
 
             let extraPerSpace: Float = (style.align == .justified && !item.isParaLast && style.wrap == .wrap && maxWidth != nil)
                 ? {
                     let spaces = item.text.filter { $0 == " " }.count
-                    return spaces > 0 ? max(0, totalW - item.width) / Float(spaces) : 0
+                    return spaces > 0 ? max(0, availableWidth - item.width) / Float(spaces) : 0
                 }()
                 : 0
 

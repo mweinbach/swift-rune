@@ -8023,21 +8023,29 @@ public final class Runtime<State> {
                         let inputTextOriginX = textOriginX - inputScrollX * scaleVec.x
                         let inputRestOriginX = restOriginX - inputScrollX * scaleVec.x
 
-                        if !resolvedInput.blocks.isEmpty {
+                        if resolvedInput.style.hasBlockInsets {
                             RichTextFieldRender.emitBlockDecorations(
-                                blocks: resolvedInput.blocks,
-                                richStyle: resolvedInput.richStyle,
-                                displayText: renderedStr,
-                                shaped: shaped,
-                                innerW: innerW,
-                                textOriginX: inputRestOriginX,
-                                textOriginY: restOriginY,
-                                scaleVec: scaleVec,
-                                pxScale: pxScale,
-                                localAlpha: localAlpha,
-                                srgbBlend: srgbBlend,
-                                devClip: devInputClip,
-                                into: &primitives
+                                blocks: resolvedInput.blocks, softBreaks: edit.softBreaks,
+                                richStyle: resolvedInput.richStyle, displayText: showingPlaceholder ? "" : renderedStr, shaped: shaped,
+                                textSystem: textSystem, font: showingPlaceholder ? el.textStyle : resolvedInput.style, textColor: defaultTextColor,
+                                innerW: innerW, textOriginX: inputRestOriginX, textOriginY: restOriginY,
+                                scaleVec: scaleVec, pxScale: pxScale, shapingScale: pxScale,
+                                rect: { box, radius, color in
+                                    var rect = box
+                                    rect.x += glidePx.x
+                                    rect.y += glidePx.y
+                                    primitives.append(.roundedRect(rect: rect, radii: SIMD4(repeating: radius),
+                                                                   fill: color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend), clip: devInputClip))
+                                },
+                                glyph: { box, uv, page, color in
+                                    var rect = box
+                                    rect.x += glidePx.x
+                                    rect.y += glidePx.y
+                                    glyphPageEntries.append((primitives.count, page))
+                                    usedGlyphMask |= UInt32(1) << min(UInt32(page), 31)
+                                    primitives.append(.glyph(rect: rect, uv: uv, color: color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                                                             gamma: systemDark ? 0.88 : 1.05, clip: devInputClip))
+                                }
                             )
                         }
 
