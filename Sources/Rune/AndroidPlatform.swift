@@ -25,6 +25,8 @@ public enum AndroidMotionAction: Int32, Sendable, Equatable {
 public struct AndroidMotionEvent: Sendable, Equatable {
     public var action: AndroidMotionAction
     public var pointerId: Int32
+    /// True for AMOTION_EVENT_TOOL_TYPE_MOUSE. Finger and stylus taps activate on release.
+    public var isMouse: Bool
     public var xPx: Float
     public var yPx: Float
     public var hScroll: Float
@@ -33,6 +35,7 @@ public struct AndroidMotionEvent: Sendable, Equatable {
     public init(
         action: AndroidMotionAction,
         pointerId: Int32 = 0,
+        isMouse: Bool = false,
         xPx: Float,
         yPx: Float,
         hScroll: Float = 0,
@@ -40,6 +43,7 @@ public struct AndroidMotionEvent: Sendable, Equatable {
     ) {
         self.action = action
         self.pointerId = pointerId
+        self.isMouse = isMouse
         self.xPx = xPx
         self.yPx = yPx
         self.hScroll = hScroll
@@ -61,7 +65,7 @@ public enum AndroidMotionTranslator {
         switch event.action {
         case .down:
             runtime.pointerMove(to: pt, mods: .none, at: now)
-            runtime.pointerDown(at: pt, button: .primary, mods: .none, at: now)
+            runtime.pressDown(at: pt, at: now, mouse: event.isMouse)
         case .move, .hoverMove, .hoverEnter:
             runtime.pointerMove(to: pt, mods: .none, at: now)
         case .up:

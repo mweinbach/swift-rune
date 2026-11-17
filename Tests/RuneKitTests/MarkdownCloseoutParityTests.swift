@@ -5,6 +5,28 @@ import Testing
 
 @Suite("RuneKit Content Closeout Parity Tests (All Remaining S2/S3 Cases)")
 struct MarkdownCloseoutParityTests {
+    @Test("An outside list disc uses a whole device pixel box inside the reserved marker column")
+    func outsideListDiscTracksScale() throws {
+        let style = MarkdownStyle.fromKit(Kit.neutral(dark: false)).listMarkersOutside(true)
+        let rt = Runtime(state: 0, viewport: Vec2(280, 120)) { _, _ in
+            Markdown("- words").render(style)
+        }
+        var rightInsets: [Float] = []
+        for scale: Float in [1, 2] {
+            rt.setViewport(Vec2(280, 120), pixelScale: scale)
+            _ = rt.frame(at: Double(scale))
+            let node = try #require(rt.flatNodes.first { $0.el.layout.outsideListDiscFont != nil })
+            let parent = rt.flatNodes[try #require(node.parentIndex)]
+            let r = node.targetRect
+            #expect(r.width > 0 && r.width == r.height)
+            #expect(abs(r.width * scale - (r.width * scale).rounded()) < 0.001)
+            #expect(abs(parent.targetRect.width - style.listIndent) < 0.001)
+            rightInsets.append(parent.targetRect.x + parent.targetRect.width - r.x - r.width)
+        }
+        // The extra seven device pixels of end inset occupy fewer points at Retina scale.
+        #expect(rightInsets[0] > rightInsets[1] + 2)
+    }
+
     private static func glyphCenters<S>(_ rt: Runtime<S>, in rect: [Float]) -> [Vec2] {
         guard rect.count == 4 else { return [] }
         let scene = rt.frame(at: rt.currentTime)

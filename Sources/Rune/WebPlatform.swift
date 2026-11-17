@@ -237,7 +237,12 @@ public final class WebAppHost<State> {
     }
 
     public func handlePointerDown(x: Float, y: Float, button: PointerButton = .primary, at now: Double) {
-        runtime.pointerDown(at: Vec2(x, y), button: button, mods: .none, at: now)
+        runtime.pressDown(at: Vec2(x, y), button: button, at: now, mouse: !runtime.touchControls())
+    }
+
+    /// The event's DOM pointerType distinguishes the active device on hybrid mouse/touch systems.
+    public func handlePointerDown(x: Float, y: Float, button: PointerButton = .primary, pointerType: String, at now: Double) {
+        runtime.pressDown(at: Vec2(x, y), button: button, at: now, mouse: pointerType == "mouse")
     }
 
     public func handlePointerUp(x: Float, y: Float, button: PointerButton = .primary, at now: Double) {

@@ -779,6 +779,7 @@ public final class Runtime<State> {
     public internal(set) var hoveredKey: String? = nil
     internal var hoveredCallbackPaths: [String] = []
     public internal(set) var pressedPath: String? = nil
+    private var activatedOnPointerDown = false
     public internal(set) var pressedKey: String? = nil
     /// Button of the held press (`capture::Held::button`). Single store shared with the Slice 4
     /// input machines (`inputMachines.pressedButton`) so both pointer paths agree.
@@ -9615,7 +9616,34 @@ public final class Runtime<State> {
         return false
     }
 
+    /// Dispatches both supported click callback signatures with the original pointer event.
+    /// Returns whether all invoked callbacks requested a live-only update.
+    private func dispatchPointerClick(_ node: FlatNode, press: PointerPress, at now: Double) -> Bool? {
+        let handlers = node.el.handlers
+        guard handlers.onClick != nil || handlers.onClickPress != nil else { return nil }
+        logInputEvent("press \(node.path)")
+        let mods = press.mods == .none ? nil : press.mods
+        var liveOnly = true
+        if let callback = handlers.onClick {
+            var tx = makeTx(at: now, button: press.button, mods: mods)
+            callback(&state, &tx)
+            liveOnly = tx.liveOnlyRequested
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+        }
+        if let callback = handlers.onClickPress {
+            var tx = makeTx(at: now, button: press.button, mods: mods)
+            callback(&state, press, &tx)
+            liveOnly = liveOnly && tx.liveOnlyRequested
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+        }
+        return liveOnly
+    }
+
     public func pointerDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
+        pressDown(at: pos, button: button, mods: mods, at: now, mouse: true)
+    }
+
+    internal func pressDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double, mouse: Bool) {
         frameHadInputSinceLastFrame = true
         releaseHoverHold()
         if button != .secondary {
@@ -9798,6 +9826,7 @@ public final class Runtime<State> {
             handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: node, at: now)
         }
         pressedPath = node.path
+        activatedOnPointerDown = false
         pressedKey = node.key
         pressedButton = button
         pressedPointerInside = true
@@ -10029,6 +10058,13 @@ public final class Runtime<State> {
             armKitDragRepeatIfRequested(path: node.path, windowPos: pos, mods: mods, button: button, now: now)
         }
 
+        if mouse && button == .primary && node.el.handlers.pressOnDown,
+           let liveOnly = dispatchPointerClick(node, press: press, at: now) {
+            activatedOnPointerDown = true
+            downRanHandler = true
+            downAllLiveOnly = downAllLiveOnly && liveOnly
+        }
+
         let needsPressVisual = downFocusChanged || nodeHasPressVisuals(node) || !downRanHandler || !downAllLiveOnly
         if needsPressVisual {
             dirtyCommit(at: now)
@@ -10060,6 +10096,8 @@ public final class Runtime<State> {
             return
         }
         let releasedPath = pressedPath
+        let alreadyActivated = releasedPath != nil && activatedOnPointerDown
+        activatedOnPointerDown = false
         let notePath = releasedPath
         let startedNs = InteractionGate.isOn ? DispatchTime.now().uptimeNanoseconds : 0
         let wasPressedInside = pressedPointerInside
@@ -10081,7 +10119,7 @@ public final class Runtime<State> {
         }
         let suppressedClickFromSelDrag = (button == .primary) ? handleSelectablePointerUp(at: pos, button: button, at: now) : false
         let hadPressVisual = hadTintPressVisual || (releasedPath.flatMap { nodeByPath[$0] }.map { nodeHasPressVisuals(flatNodes[$0]) } ?? false)
-        var upRanHandler = false
+        var upRanHandler = alreadyActivated
         var upAllLiveOnly = true
         if cxSettings.selectionRectsReadByView {
             dirtyCommit(at: now)
@@ -10216,22 +10254,9 @@ public final class Runtime<State> {
 
         // Fire click / double-click only if pointer released inside the pressed element (or didn't move when element moved out from under it) and not dragged!
         if inside && allowsButton && !suppressedClickFromSelDrag && !(draggedPastThreshold && node.el.handlers.onDrag != nil) {
-            if node.el.handlers.onClick != nil || node.el.handlers.onClickPress != nil {
-                logInputEvent("press \(rPath)")
-            }
-            if let onClick = node.el.handlers.onClick {
-                var tx = makeTx(at: now, button: button, mods: effMods)
-                onClick(&state, &tx)
+            if !alreadyActivated, let liveOnly = dispatchPointerClick(node, press: press, at: now) {
                 upRanHandler = true
-                upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
-                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
-            }
-            if let onClickP = node.el.handlers.onClickPress {
-                var tx = makeTx(at: now, button: button, mods: effMods)
-                onClickP(&state, press, &tx)
-                upRanHandler = true
-                upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
-                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+                upAllLiveOnly = upAllLiveOnly && liveOnly
             }
             let clickInTime = pairInfo.map { (now - $0.downAt) <= doubleClickInterval } ?? true
             if button == .primary && (pairInfo?.isSecond == true) && !movedOutsideSlop && clickInTime,

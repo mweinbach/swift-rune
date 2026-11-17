@@ -959,6 +959,7 @@ public struct ElementHandlers<State> {
     public var dragThreshold: Float?
     /// `El.touchDragsAtOnce` (`Handlers::touch_at_once`).
     public var touchAtOnce: Bool = false
+    public var pressOnDown: Bool = false
     public var onDragStart: ((inout State, inout Tx) -> Void)?
     public var onDragOutEnd: ((inout State, DragOutcome, inout Tx) -> Void)?
     public var onKey: ((inout State, KeyEvent, inout Tx) -> Bool)?
@@ -3213,6 +3214,14 @@ public struct El<State> {
     }
 
     // MARK: - Event Handlers
+
+    /// A primary mouse press activates the element on down. Touch, keyboard, and
+    /// accessibility activation retain their ordinary click timing.
+    public func pressOnDown() -> Self {
+        var copy = self
+        copy.handlers.pressOnDown = true
+        return copy
+    }
 
     public func onClick(_ handler: @escaping (inout State) -> Void) -> Self {
         onClick { state, _ in handler(&state) }

@@ -325,6 +325,50 @@ struct RuneLuauParityTests {
         #expect(collectTexts(brokenEl).joined(separator: " ").contains("ui.broken: bad config"))
     }
 
+    @Test("menuTrigger dispatches ordinary and host Lua callbacks on mouse down and touch release")
+    func menuTriggerPressTiming() throws {
+        let host = HostNode(name: "menu") { (args: NodeArgs) -> El<LuauTestState> in
+            args.onPress(el().key("host").size(100, 30), "onPress")
+        }
+        var options = ScriptOptions()
+        options.nodes = [host]
+        let script = Script(name: "menu", sources: Sources.single("""
+            local ui = require("@rune/ui")
+            local n = 0
+            local function hit(e)
+                n += e.shift and 10 or 1
+            end
+            return {
+                render = function()
+                    return ui.col({
+                        ui.box({key = "menu", w = 100, h = 30, menuTrigger = true, onPress = hit}),
+                        ui.menu({menuTrigger = true, onPress = hit}),
+                    })
+                end,
+                count = function() return n end,
+            }
+            """), options: options)
+        let rt = Runtime(state: LuauTestState(), viewport: Vec2(200, 160)) { _, cx in
+            script.view(cx)
+        }
+        _ = rt.frame(at: 0)
+        let shift = Mods(shift: true)
+        for (index, key) in ["menu", "host"].enumerated() {
+            let rect = try #require(rt.element(byKey: key)).rect
+            let p = Vec2(rect[0] + 8, rect[1] + 8)
+            let now = Double(index + 1)
+            let before = Int64(index * 11)
+            rt.pointerDown(at: p, mods: shift, at: now)
+            #expect(try script.query("count").asInt64 == before + 10)
+            rt.pointerUp(at: p, at: now + 0.01)
+            #expect(try script.query("count").asInt64 == before + 10)
+            rt.touch(id: 1, phase: .started, at: p, time: now + 0.2)
+            #expect(try script.query("count").asInt64 == before + 10)
+            rt.touch(id: 1, phase: .ended, at: p, time: now + 0.25)
+            #expect(try script.query("count").asInt64 == before + 11)
+        }
+    }
+
     @Test("P1: onPress delivers real modifier keys via onPointerUp + onClick inside around hook")
     func realPressModsAndAroundHooks() throws {
         final class HookBox: @unchecked Sendable {

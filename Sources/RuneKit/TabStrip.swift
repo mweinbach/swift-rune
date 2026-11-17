@@ -218,6 +218,7 @@ public struct TabDragState: Sendable, Equatable {
     public private(set) var hoveredId: String? = nil
     public private(set) var incomingIndex: Int? = nil
     public private(set) var handedOff: Bool = false
+    fileprivate var swallowNextClick = false
     private var pressAnchor: Vec2? = nil
     private var tabRects: [String: MotionRect] = [:]
 
@@ -290,6 +291,7 @@ public struct TabDragState: Sendable, Equatable {
     }
 
     public mutating func press(id: String, index: Int, at windowPoint: Vec2, tabWidth: Float? = nil) {
+        swallowNextClick = false
         handedOff = false
         pressAnchor = windowPoint
         if let tabWidth, tabWidth > 0 {
@@ -1177,7 +1179,7 @@ public struct TabStrip<State> {
         var tab = initialTab
         let fg: Color = item.isDisabled ? k.c.textFaint : (isSelected ? k.c.textBase : k.c.textMuted)
         let iconOnly = item.isPinned || (dens == .iconOnly)
-        let closable = item.isClosable && !iconOnly && !item.isDisabled && !isEditing && onCloseFn != nil
+        let closable = item.isClosable && !item.isPinned && (!iconOnly || isSelected) && !item.isDisabled && !isEditing && onCloseFn != nil
         let touch = hoverNoneValue && closable
 
         if let leading = buildTabLeadingAccessory(item: item, tabH: tabH, isSelected: isSelected, kit: k) {
@@ -1190,7 +1192,12 @@ public struct TabStrip<State> {
             tab = tab.child(statusMark)
         }
         if closable, let onCloseFn {
-            tab = tab.child(buildTabCloseButton(item: item, touch: touch, onCloseFn: onCloseFn, kit: k))
+            let close = buildTabCloseButton(item: item, touch: touch, onCloseFn: onCloseFn, kit: k)
+            if iconOnly {
+                tab = tab.child(el().pin(top: 0, right: 0, bottom: 0, left: 0).center().child(close))
+            } else {
+                tab = tab.child(close)
+            }
         }
         return tab
     }
@@ -1233,7 +1240,7 @@ public struct TabStrip<State> {
     ) -> El<State> {
         var tab = initialTab
         let idCopy = item.id
-        let selectEarly = selectOnDragStartOverride ?? (orientation == .horizontal)
+        let selectEarly = selectOnDragStartOverride ?? true
 
         if !isSelected {
             tab = tab.hover(k.c.surfaceHover)
@@ -1241,9 +1248,22 @@ public struct TabStrip<State> {
         tab = tab.focusable().focusRing(k.c.borderFocus)
 
         if let onSelectFn {
+            let scroll = "\(keyId)-scroll"
+            let key = "\(keyId)-tab-\(idCopy)"
             tab = tab.onClick { s, tx in
+                if let dragKeyPath, s[keyPath: dragKeyPath].swallowNextClick {
+                    s[keyPath: dragKeyPath].swallowNextClick = false
+                    tx.liveOnly()
+                    return
+                }
+                if dragKeyPath == nil && selectEarly && isSelected {
+                    tx.liveOnly()
+                    return
+                }
                 onSelectFn(&s, idCopy, &tx)
+                tx.scrollIntoViewIn(scroll, key)
             }
+            if dragKeyPath == nil && selectEarly { tab = tab.pressOnDown() }
         }
         if let onDoubleClickFn {
             tab = tab.onDoubleClick { s, tx in
@@ -1260,19 +1280,22 @@ public struct TabStrip<State> {
                 onCloseFn(&s, idCopy, &tx)
             }
         }
-        if dragKeyPath != nil || selectEarly {
+        if let dragKeyPath {
             tab = tab.onPointerDown { s, press, tx in
                 guard press.button == .primary else { return }
-                if let dragKeyPath {
-                    s[keyPath: dragKeyPath].press(
-                        id: idCopy,
-                        index: index,
-                        at: press.window,
-                        tabWidth: computedUnpinnedWidth
-                    )
-                }
-                if selectEarly {
-                    onSelectFn?(&s, idCopy, &tx)
+                s[keyPath: dragKeyPath].press(
+                    id: idCopy,
+                    index: index,
+                    at: press.window,
+                    tabWidth: computedUnpinnedWidth
+                )
+                if selectEarly, let onSelectFn {
+                    if isSelected {
+                        tx.liveOnly()
+                    } else {
+                        onSelectFn(&s, idCopy, &tx)
+                        tx.scrollIntoViewIn("\(keyId)-scroll", "\(keyId)-tab-\(idCopy)")
+                    }
                 }
             }
         }
@@ -1304,6 +1327,36 @@ public struct TabStrip<State> {
             let onTearMove = onTearMoveFn
             tab = tab
                 .onDrag { s, drag, tx in
+                    switch drag.phase {
+                    case .down:
+                        tx.liveOnly()
+                        return
+                    case .up:
+                        if drag.isCancelled {
+                            s[keyPath: dragKeyPath].cancel()
+                            tx.animated()
+                            return
+                        }
+                        let inside = drag.local.x >= 0 && drag.local.x <= drag.size.x
+                            && drag.local.y >= 0 && drag.local.y <= drag.size.y
+                        let wasClick: Bool
+                        if case .pressing = s[keyPath: dragKeyPath].phase {
+                            wasClick = true
+                            tx.liveOnly()
+                        } else {
+                            wasClick = false
+                            tx.animated()
+                        }
+                        let reorder = s[keyPath: dragKeyPath].release()
+                        s[keyPath: dragKeyPath].swallowNextClick = inside && (selectEarly || !wasClick)
+                        if let reorder { onReorder?(&s, reorder, &tx) }
+                        return
+                    case .move:
+                        guard onReorder != nil || tearSpec != nil else {
+                            tx.liveOnly()
+                            return
+                        }
+                    }
                     let outcome = s[keyPath: dragKeyPath].follow(
                         to: drag.window,
                         orientation: orientation,
@@ -1321,13 +1374,6 @@ public struct TabStrip<State> {
                         onTearMove?(&s, move, &tx)
                     case .none:
                         break
-                    }
-                }
-                .onDragEnd { s, cancelled, tx in
-                    if cancelled {
-                        s[keyPath: dragKeyPath].cancel()
-                    } else if let reorder = s[keyPath: dragKeyPath].release() {
-                        onReorder?(&s, reorder, &tx)
                     }
                 }
         }

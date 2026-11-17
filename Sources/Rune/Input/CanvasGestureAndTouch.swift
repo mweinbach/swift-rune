@@ -394,7 +394,7 @@ extension Runtime {
             scrollStore.snap(nid, Props.SCROLL, to: cur)
         }
         pointerMove(to: pos, at: time)
-        pointerDown(at: pos, at: time)
+        pressDown(at: pos, at: time, mouse: false)
         // `El.touchDragsAtOnce`: a drag from the first move, with no slop and nothing holding
         // the viewport under it (`touch.rs::touch_down`).
         if pressDragsAtOnce() {

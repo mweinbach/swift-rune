@@ -5672,6 +5672,17 @@ private final class MarkdownRenderer<State> {
             indent = s.listIndent
         }
 
+        let outsideMarkerSpace: Float
+        if start != nil && s.listOutside {
+            outsideMarkerSpace = MarkdownRendererShared.measureLock.withLock {
+                let system = MarkdownRendererShared.measureSystem
+                return system.measure("x x", style: s.body, maxWidth: nil, pixelScale: 1).x
+                    - system.measure("xx", style: s.body, maxWidth: nil, pixelScale: 1).x
+            }
+        } else {
+            outsideMarkerSpace = 0
+        }
+
         var c: El<State> = col().role(.list).wFull()
         let n = items.count
         for (k, item) in items.enumerated() {
@@ -5701,12 +5712,13 @@ private final class MarkdownRenderer<State> {
             if let task {
                 rowEl = renderTaskItem(k: k, n: n, indent: indent, item: item, itemMaps: imap, markerOffset: task.markerOffset, checked: task.checked)
             } else {
-                let markerStr = start.map { "\($0 + UInt64(k))." } ?? "•"
-                var marker: El<State> = text(markerStr).font(s.body).color(s.muted).w(indent)
-                if s.listOutside {
-                    marker = marker.textAlign(.trailing).pr(4)
+                let marker: El<State>
+                if start == nil && s.listOutside {
+                    marker = el().w(indent).h(s.body.linePx()).child(el().outsideListDisc(s.body).bg(s.muted))
                 } else {
-                    marker = marker.textAlign(.center)
+                    let label = start.map { "\($0 + UInt64(k))." } ?? "•"
+                    let words: El<State> = text(label).font(s.body).color(s.muted).w(indent)
+                    marker = s.listOutside ? words.textAlign(.trailing).pr(outsideMarkerSpace) : words.textAlign(.center)
                 }
                 rowEl = row()
                     .key("i\(k)")
