@@ -1003,7 +1003,7 @@
             "Sources/Rune/Win32Platform.swift"
           ],
           "status": "partial",
-          "note": "The native desktop CLI records actual submissions. On macOS 50 callbacks yielded 48 displayed timestamps and two explicit skips, and a two-window run isolated six frames from the selected key. Linux SDL records ordered wall-clock submissions without compositor timestamps. Windows native timing has separate host verification."
+          "note": "Real native tracing records Mac shown/skipped Metal callbacks, including six frames from just the selected heterogeneous window. Normal Windows ARM64 WGL produced six submissions with public frame time within 0.0004 ms of its CPU submission. Linux SDL records wall-clock submissions. Compositor display timestamps remain provider-specific."
         },
         {
           "upstream": "src/frame/present_time_walk_tests.rs",
@@ -1301,9 +1301,12 @@
         {
           "upstream": "src/hot.rs",
           "swift": [
-            "Sources/Rune/El.swift"
+            "Sources/Rune/El.swift",
+            "Sources/Rune/Runtime/HotState.swift",
+            "Sources/Rune/Tooling.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "The Swift runtime supports file watching and state inspection; Luau has its own VM reload. Native Swift lacks the original Rust state-preserving patch dispatch, guarded publication and --hot/--snap-on-patch host. A normal Swift app with these flags wrote the ordinary --snap only."
         },
         {
           "upstream": "src/image.rs",
@@ -2046,8 +2049,8 @@
             "Sources/Rune/Platform/InstanceLaunches.swift",
             "Sources/CRuneWin32/SingleInstance.cpp"
           ],
-          "status": "partial",
-          "note": "Independent Linux and Windows processes interoperated in both Rust→Swift and Swift→Rust directions. Native acceptance covers modern/v1, slow/unfinished clients, stale takeover, ordinary release and handoff. Stock Linux single/group windows delivered pending/live links and reopened. Ordinary Windows foreground restoration after handoff has separate coverage."
+          "status": "ported",
+          "note": "Native Linux and Windows matched original Rust handoff in both directions, including original/v1 protocol, unfinished clients, stale takeover, release and secure socket ownership. Real stock windows delivered prelaunch/live URLs, reopened and relaunched. Windows GetForegroundWindow was exactly the restored owner HWND after secondary activation."
         },
         {
           "upstream": "src/outline.wgsl",
@@ -2849,7 +2852,7 @@
             "Tests/Windows/Overlay/probe.c"
           ],
           "status": "partial",
-          "note": "A dedicated WH_MOUSE_LL hook observes movement and publishes the last position for follow-pointer and hover-exit overlays. The real Windows ARM64 public app verified the layered HWND hit map, normal click delivery and transparent GPU pixels. The driver posts HWND events, so physical global movement outside Rune remains unverified."
+          "note": "A real Windows ARM64 public regions overlay installed the dedicated WH_MOUSE_LL move hook. Native selective hits, click delivery, window/staging transparency and actual opaque pixels passed. The test driver used HWND messages; physical global mouse transit between displays remains unmeasured."
         },
         {
           "upstream": "src/platform/win32/press_point.rs",
@@ -3218,7 +3221,7 @@
             "Sources/CRuneWin32/SingleInstance.cpp"
           ],
           "status": "partial",
-          "note": "Real Linux App.run processes exercised both Tx.relaunch and AppHandle.relaunch, and the successor entered onReady after the previous PID exited. Cross-process Rust/Swift takeover semantics have a separate Linux fixture. Other native host process timing has separate checks."
+          "note": "Real Linux and Windows ordinary apps exercised both Tx.relaunch and AppHandle.relaunch. Each successor entered onReady only after the previous process exited. Both-way Rust/Swift takeover, stale ownership and actual Windows foreground activation also passed. Other native platform launch environments have separate verification."
         },
         {
           "upstream": "src/quit/win32.rs",
@@ -4700,7 +4703,8 @@
             "Sources/Rune/Runtime/RasterCheck.swift",
             "Tests/RuneTests/PaintGridAndBandsParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "The resting raster comparison now re-emits clipped document and visible field paragraphs without corrupting live atlas or prepared geometry. A real Linux +5-pixel stale glyph changed from false clean to one difference, and an unchanged frame stayed clean. Additional backend/case coverage remains separate."
         },
         {
           "upstream": "src/runtime/paint/shadow.rs",
@@ -6279,13 +6283,6 @@
           "status": "ported"
         },
         {
-          "upstream": "src/text/hairline.rs",
-          "swift": [
-            "Sources/Rune/Text.swift"
-          ],
-          "status": "ported"
-        },
-        {
           "upstream": "src/text/hash.rs",
           "swift": [
             "Sources/Rune/Text.swift"
@@ -6722,7 +6719,7 @@
             "Tests/RuneTests/WindowsTextParityTests.swift"
           ],
           "status": "ported",
-          "note": "All 2,048 entries in the eight ink-dependent lookup tables matched the pinned Rust output on Windows 11 ARM64. The DirectWrite mask path applies the table once and bypasses embedded color glyphs."
+          "note": "All 2,048 ink-dependent LUT entries and the source mask corrections matched original Rust. An ordinary Windows ARM64 CPU ClearType frame showed 840 pixels with absolute red/blue difference greater than three. When Parallels misreported native dual-source capability, WGL correctly selected a rendered monochrome fallback. Physical accelerated LCD output remains separate from the LUT."
         },
         {
           "upstream": "src/theme.rs",
@@ -7103,7 +7100,7 @@
             "Sources/Rune/Win32Platform.swift"
           ],
           "status": "partial",
-          "note": "The native desktop CLI records actual submissions. On macOS 50 callbacks yielded 48 displayed timestamps and two explicit skips, and a two-window run isolated six frames from the selected key. Linux SDL records ordered wall-clock submissions without compositor timestamps. Windows native timing has separate host verification."
+          "note": "Real native tracing records Mac shown/skipped Metal callbacks, including six frames from just the selected heterogeneous window. Normal Windows ARM64 WGL produced six submissions with public frame time within 0.0004 ms of its CPU submission. Linux SDL records wall-clock submissions. Compositor display timestamps remain provider-specific."
         },
         {
           "upstream": "src/tooling/virtual_desktop.rs",
@@ -7346,7 +7343,7 @@
             "Tests/Support/WindowsDecodedVideo/Picture.cpp"
           ],
           "status": "partial",
-          "note": "Windows ARM64 decoded six real H.264 DXGI samples with 64×48 storage, 64×36 display and BT.709 metadata. Six retained slots preserved textures through decoder destruction; exhaustion recovered, and a rejected adapter fell back. Twenty-four NV12 rendered frames matched the encoded-byte oracle. Rust D3D12 double fences, direct WGL sharing and full native player promotion remain distinct."
+          "note": "Native Windows verified six retained H.264 DXGI frames, crop/color metadata, slot exhaustion and recovery, 24 NV12-to-RGBA oracle frames and independent DComp presentation in the ordinary Player. The port uses D3D11 immediate-context ownership. Rust D3D12 double fences and extension-backed direct WGL sharing differ."
         },
         {
           "upstream": "src/video/windows/layer.rs",
@@ -7359,7 +7356,7 @@
             "Tests/RuneTests/WindowsVideoLayerGeometryTests.swift"
           ],
           "status": "partial",
-          "note": "DirectComposition presents native D3D video surfaces and enables independent decoder wakes after attaching. Windows 11 ARM64 screen pixels verified replacement, a clipped RGB surface, NV12 and demotion. The presenter promotes opaque rectangular video unobscured by other content."
+          "note": "An ordinary Windows ARM64 App+Player presented real H.264 frames through DirectComposition. Physical desktop pixels verified occlusion demotion and re-promotion. Eighteen pictures advanced in 750 ms independently of ordinary UI draws. Rounded, faded or overlapping placements use Rune composition; arbitrary underlays and physical NV12 scanout remain separate."
         },
         {
           "upstream": "src/video/windows/machine.rs",
@@ -7839,7 +7836,7 @@
             "Sources/Rune/Win32Platform.swift"
           ],
           "status": "partial",
-          "note": "Real stock windows on macOS, Windows ARM64, X11 and Wayland exercised frame requests, min/max bounds and stepping. Two ordinary Win11 processes checked 16 cases each, including fractional pixels, instant dimensions, decorated centering and painting during WM_SIZE. The physical window manager and multi-display variations remain independently testable."
+          "note": "Real macOS, X11, Wayland and Windows hosts apply frame requests, bounds and stepping. A coherent clean Windows ARM64 build ran four App.run processes with fill, text plus both layout observers, text alone, and nested text. All 32 geometry/modal/position assertions passed, including interactive painting. Physical mixed-DPI/multi-monitor transitions have separate coverage."
         },
         {
           "upstream": "src/window/tests.rs",
@@ -7887,7 +7884,7 @@
             "Tests/RuneTests/WindowsVideoLayerGeometryTests.swift"
           ],
           "status": "partial",
-          "note": "The window automatically attaches a rectangular video overlay after a primed frame and restores UI composition on demotion. Windows 11 ARM64 screen pixels verified both transitions. Rounded, faded and overlapping native video sections continue through the ordinary compositor."
+          "note": "An ordinary Windows ARM64 App+Player presented real H.264 frames through DirectComposition. Physical desktop pixels verified occlusion demotion and re-promotion. Eighteen pictures advanced in 750 ms independently of ordinary UI draws. Rounded, faded or overlapping placements use Rune composition; arbitrary underlays and physical NV12 scanout remain separate."
         },
         {
           "upstream": "src/window/wake.rs",
@@ -8144,10 +8141,11 @@
             "Sources/Rune/Runtime/ClipboardPasteRouting.swift",
             "Sources/Rune/Runtime/SelectionRuntime.swift",
             "Sources/Rune/Runtime/Inc5InputWatchRuntime.swift",
-            "Tests/RuneTests/MiddleSelectionParityTests.swift"
+            "Tests/RuneTests/MiddleSelectionParityTests.swift",
+            "Sources/Rune/Input/MiddleAutoscroll.swift"
           ],
           "status": "ported",
-          "note": "Middle click can drive held or latched autoscroll. Tests on ordinary X11 and Wayland windows exercised both modes and stopped scrolling with release or Escape."
+          "note": "Real X11, Wayland and Win11 ARM64 apps exercised held and latched middle scrolling, native cursors and cancellation. On Windows, release stopped the held change from 0 to 342.33 and Escape stopped latched travel at 502.42. Integral and fractional accumulation also matched Rust at 1,000,000.125 points."
         },
         {
           "upstream": "src/platform/web/pipelines.rs",
@@ -11141,24 +11139,22 @@
         {
           "upstream": "src/icons.rs",
           "swift": [
-            "Sources/OpenCodeTheme/OpenCodeIcons.swift"
+            "Sources/OpenCodeTheme/OpenCodeIcons.swift",
+            "Tests/OpenCodeThemeTests/OpenCodeIconsTests.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "At 935b2ff9 all 166 ordered gallery entries and 171 statically named constants matched the compiled original Rust byte-for-byte. This includes 136 canonical entries, 30 plugin aliases and the five additional bold constants. All 22 native theme tests passed."
         },
         {
           "upstream": "src/lib.rs",
           "swift": [
             "Sources/OpenCodeTheme/OpenCodeTheme.swift",
-            "Sources/OpenCodeTheme/OpenCodeThemeData.swift"
+            "Sources/OpenCodeTheme/OpenCodeThemeData.swift",
+            "Sources/OpenCodeTheme/OpenCodeIcons.swift",
+            "Tests/OpenCodeThemeTests/OpenCodeIconsTests.swift"
           ],
-          "status": "ported"
-        },
-        {
-          "upstream": "src/new_icons.rs",
-          "swift": [
-            "Sources/OpenCodeTheme/OpenCodeNewIcons.swift"
-          ],
-          "status": "ported"
+          "status": "ported",
+          "note": "The theme exports the single 935b2ff9 desktop icon catalog. The retired auxiliary module was removed and legacy names continue through the unified catalog. The actual complete compiled catalog and static named values match pinned Rust."
         },
         {
           "upstream": "src/provider_icons.rs",
@@ -11445,399 +11441,399 @@
   "crateExamples": [
     {
       "upstreamPath": "crates/rune/examples/cache_pan_zoom.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneCachePanZoom",
+      "note": "The macOS example suite passed “rune-cache-pan-zoom benchmarks uncached vs cached Live pan/zoom layers”. See ContentExamplesParityTests.swift, cachePanZoomSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/canvas_input.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneCanvasInput",
+      "note": "The macOS example suite passed “canvas_input: wheel pan, pinch zoom, space+drag, middle drag, focus + scrollTo, and onDrawnLayout”. See Phase3CanvasInputTests.swift, canvasInputFullSequence."
     },
     {
       "upstreamPath": "crates/rune/examples/coretext_compare.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneCoretextCompare",
+      "note": "The macOS example suite passed “coretext_compare: CLI parsing, live CoreText comparison table, PNG heatmap output, and export”. See Phase3PinchAndCoretextTests.swift, coretextCompareCLIAndExecution."
     },
     {
       "upstreamPath": "crates/rune/examples/custom_titlebar.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneCustomTitlebar",
+      "note": "A normal Windows ARM64 app verified genuine custom caption bounds, hit testing and UI Automation maximize, restore and close. The same example was compared across 28 original-Rust caption scenes. See Phase3CustomTitlebarTests.swift, titlebarControlsAndModal."
     },
     {
       "upstreamPath": "crates/rune/examples/dock_menu_probe.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneDockMenuProbe",
+      "note": "The macOS example suite passed “rune-dock-menu-probe configures accessory dock items, icon, and actions”. See ContentExamplesParityTests.swift, dockMenuProbeSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/embed_cost.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneEmbedCost",
+      "note": "The macOS example suite passed “rune-embed-cost exercises LayerHost frame pacing and memory reporting”. See ContentExamplesParityTests.swift, embedCostSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/expressive_press.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneExpressivePress",
+      "note": "The macOS example suite passed “rune-expressive-press handles p/u/r keys and renders still scene”. See Phase3CrateExamplesTests.swift, expressivePressScenesAndKeys."
     },
     {
       "upstreamPath": "crates/rune/examples/gpu_springs.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneGpuSprings",
+      "note": "The macOS example suite passed “rune-gpu-springs passes differential, bench, and 8-primitive pixel parity checks”. See ContentExamplesParityTests.swift, gpuSpringsSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/growth_reorder.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneGrowthReorder",
+      "note": "The macOS example suite passed “growth_reorder: default swap and steer launch + deliver reorder rows”. See Phase3ElMotionTests.swift, growthReorderSwapAndSteerDeliver."
     },
     {
       "upstreamPath": "crates/rune/examples/hud_probe",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneOverlayHudCost",
+      "note": "This upstream directory contains shared probe helpers for window_scroll_cost and overlay_hud_cost. Their Swift native apps expose sampled process, CPU and GPU metrics; platform-specific counter availability differs. See ContentExamplesParityTests.swift, overlayHudCostSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/interaction_cost.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneInteractionCost",
+      "note": "The macOS example suite passed “rune-interaction-cost reports press, wheel, and idle metrics”. See ContentExamplesParityTests.swift, interactionCostSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/keep_stuck.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneKeepStuck",
+      "note": "The macOS example suite passed “keep_stuck: clicking header toggles group and invokes Tx.keepOnScreen”. See Phase3ElMotionTests.swift, keepStuckTogglesHeaderAndKeepsOnScreen."
     },
     {
       "upstreamPath": "crates/rune/examples/live_resize_check.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneLiveResizeCheck",
+      "note": "The macOS example suite passed “rune-live-resize-check keeps edge bars aligned across viewport widths”. See ContentExamplesParityTests.swift, liveResizeCheckSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/long_note.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneLongNote",
+      "note": "The macOS example suite passed “rune-long-note runs editing, IME commit, undo/paste, scroll, and caret tracking”. See ContentExamplesParityTests.swift, longNoteSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/material_check.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneMaterialCheck",
+      "note": "The public verifier exercised native AppKit glass/popover selection, drawing and overlay prewarm. Physical older operating systems and every CLI route have separate coverage. See ContentExamplesParityTests.swift, materialCheckSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/menu_probe.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneMenuProbe",
+      "note": "The macOS example suite passed “rune-menu-probe validates NativeMenuBar items and dispatches actions”. See ContentExamplesParityTests.swift, menuProbeSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/metal_dispatch.rs",
-      "status": "missing",
+      "status": "n/a",
       "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "note": "Measures the dispatch overhead of the Rust wgpu custom backend relative to raw Metal. The Swift Metal renderer does not use that Rust backend."
     },
     {
       "upstreamPath": "crates/rune/examples/one_snap.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneOneSnap",
+      "note": "The macOS example suite passed “rune-one-snap: zooms stage from (0,0) origin and swaps Path disc <-> Icon disc on badge click”. See Phase3OneSnapTests.swift, stageZoomAndBadgeSwap."
     },
     {
       "upstreamPath": "crates/rune/examples/overlay_hud_cost.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneOverlayHudCost",
+      "note": "The macOS example suite passed “rune-overlay-hud-cost drives Compositor frame/UI draw and OverlaySpec lifecycle”. See ContentExamplesParityTests.swift, overlayHudCostSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/pacing.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RunePacing",
+      "note": "The macOS example suite passed “rune-pacing advances spring pill layout across frames cleanly”. See ContentExamplesParityTests.swift, pacingSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/pacing_overlay.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RunePacingOverlay",
+      "note": "The macOS example suite passed “rune-pacing-overlay renders looping overlay pill and fades in/out”. See ContentExamplesParityTests.swift, pacingOverlaySmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/pinch_bench.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RunePinchBench",
+      "note": "The macOS example suite passed “pinch_bench: live_only skips commits during magnify while updating camera/toolbar live values”. See Phase3PinchAndCoretextTests.swift, pinchBenchLiveOnlyVsRebuild."
     },
     {
       "upstreamPath": "crates/rune/examples/popup_menu.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RunePopupMenu",
+      "note": "The macOS example suite passed “rune-popup-menu renders picker, context menu items, and headless menu-pick script”. See ContentExamplesParityTests.swift, popupMenuRendersAndPicks."
     },
     {
       "upstreamPath": "crates/rune/examples/regen_dxbc.rs",
-      "status": "missing",
+      "status": "n/a",
       "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "note": "Regenerates the pinned wgpu DX12 uber-shader DXBC blobs. The Swift rendering backends consume Metal, OpenGL/GLES and WebGPU shaders."
     },
     {
       "upstreamPath": "crates/rune/examples/rewind_cost.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneRewindCost",
+      "note": "The macOS example suite passed “rune-rewind-cost measures rewind overhead and minute stream footprint”. See ContentExamplesParityTests.swift, rewindCostSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/scroll_anchor.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneScrollAnchor",
+      "note": "The macOS example suite passed “scroll_anchor: Enter adds earlier rows while anchor mode preserves viewport item”. See Phase3ElMotionTests.swift, scrollAnchorAddsEarlierMessagesOnEnter."
     },
     {
       "upstreamPath": "crates/rune/examples/scroll_commits.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneScrollCommits",
+      "note": "The macOS example suite passed “rune-scroll-commits measures pure scroll commits with layout reads and video”. See ContentExamplesParityTests.swift, scrollCommitsSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/scroll_keys.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneScrollKeys",
+      "note": "The macOS example suite passed “rune-scroll-keys updates selection and scrolls viewport on Up/Down”. See Phase3CrateExamplesTests.swift, scrollKeysNavigation."
     },
     {
       "upstreamPath": "crates/rune/examples/shortcut_probe.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneShortcutProbe",
+      "note": "The macOS example suite passed “rune-shortcut-probe registers, detects conflict, dispatches, and unregisters shortcuts”. See ContentExamplesParityTests.swift, shortcutProbeSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/slow_click.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneSlowClick",
+      "note": "The macOS example suite passed “rune-slow-click and rune-sticky render and handle actions”. See Phase3CrateExamplesTests.swift, slowClickAndSticky."
     },
     {
       "upstreamPath": "crates/rune/examples/spaces_probe.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneSpacesProbe",
+      "note": "The macOS example suite passed “rune-spaces-probe configures capture-excluded prewarmed overlay and resize/hide”. See ContentExamplesParityTests.swift, spacesProbeSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/sticky.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneSticky",
+      "note": "The macOS example suite passed “rune-slow-click and rune-sticky render and handle actions”. See Phase3CrateExamplesTests.swift, slowClickAndSticky."
     },
     {
       "upstreamPath": "crates/rune/examples/taffy_adapter_bench.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneTaffyAdapterBench",
+      "note": "The macOS example suite passed “rune-taffy-adapter-bench compares LayoutStore vs TaffyTree and runs KitchenSink digest”. See ContentExamplesParityTests.swift, taffyAdapterBenchSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/text_coverage.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneTextCoverage",
+      "note": "The macOS example suite passed “rune-text-glide and rune-text-coverage render scenes headlessly”. See Phase3CrateExamplesTests.swift, textGlideAndCoverage."
     },
     {
       "upstreamPath": "crates/rune/examples/text_glide.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneTextGlide",
+      "note": "The macOS example suite passed “rune-text-glide and rune-text-coverage render scenes headlessly”. See Phase3CrateExamplesTests.swift, textGlideAndCoverage."
     },
     {
       "upstreamPath": "crates/rune/examples/text_gpu.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneTextGpu",
+      "note": "Twenty-six full native frames compared to original Rust, including moving and settled glyph counts. The macOS Metal sweep matched within one channel value, and additional command-line modes have their own coverage. See ContentExamplesParityTests.swift, textGpuSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/text_quality.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneTextQuality",
+      "note": "All eight default PNGs and all six JSON documents matched the pinned Rust diagnostic exactly on M3 Ultra. Native Linux matched all 1,470 glyph IDs and baselines; four X positions differed by 0.25 px. The off/0.15 experiment differed by more than eight channel levels on 17/880,000 and 23/3,520,000 pixels at the two scales."
     },
     {
       "upstreamPath": "crates/rune/examples/tree_swap.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneTreeSwap",
+      "note": "The macOS example suite passed “rune-tree-swap benchmarks list <-> grid replacement across first, quick, recent, and stale”. See ContentExamplesParityTests.swift, treeSwapSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/upload_bench.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneUploadBench",
+      "note": "The macOS example suite passed “rune-upload-bench measures steady and scroll 2000-instance GPU upload frames”. See ContentExamplesParityTests.swift, uploadBenchSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/window-panel.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneWindowPanel",
+      "note": "The macOS example suite passed “rune-window-panel validates multi-window panel spec and Escape/blur dismissal”. See ContentExamplesParityTests.swift, windowPanelSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/window_resize.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneWindowResize",
+      "note": "The macOS example suite passed “window_resize: fitContentHeight follows toggled body height”. See Phase3WindowResizeTests.swift, fitContentHeightTogglesHeight."
     },
     {
       "upstreamPath": "crates/rune/examples/window_scroll_cost.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneWindowScrollCost",
+      "note": "The macOS example suite passed “rune-window-scroll-cost measures scrollable list CPU cost and scroll offset”. See ContentExamplesParityTests.swift, windowScrollCostSmoke."
     },
     {
       "upstreamPath": "crates/rune/examples/zoom_sweep.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneZoomSweep",
+      "note": "The macOS example suite passed “rune-zoom-sweep sweeps liveScale and fontScale while preserving settled glyphs”. See ContentExamplesParityTests.swift, zoomSweepSmoke."
     },
     {
       "upstreamPath": "crates/rune-fx/examples/first_glow.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneFxFirstGlow",
+      "note": "The macOS example suite passed “rune-fx-first-glow creates FxRenderer, renders first glow, and writes PNG snap”. See FxAndLightExamplesTests.swift, fxFirstGlowSnap."
     },
     {
       "upstreamPath": "crates/rune-fx/examples/gallery",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneFxGallery",
+      "note": "The macOS example suite passed “rune-fx-gallery lists effects and renders glow & blend snaps”. See FxAndLightExamplesTests.swift, fxGallerySnaps."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/diff.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneKitDiff",
+      "note": "The mounted pull-request scene changes files, selection and unified/split views; original Rust and Swift match directed copy and syntax-chunk fixtures. Split comment decoration and 50k-line frame times still differ. See Phase3DiffTests.swift, multiFilePRAndSplitToggle."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/glyphs.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneKitGlyphs",
+      "note": "The macOS example suite passed “rune-kit-glyphs renders all 28 KitIcons light beside dark”. See Phase3CrateExamplesTests.swift, kitGlyphsRendersAll28."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/layout_text_cost",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneKitLayoutTextCost",
+      "note": "The macOS example suite passed “rune-kit-layout-text-cost measures Markdown + Kit cold open, resize, and scroll”. See ContentExamplesParityTests.swift, kitLayoutTextCostSmoke."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/markdown_resize.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneKitMarkdownResize",
+      "note": "The macOS example suite passed “rune-kit-markdown-resize measures open, live resize, scroll, highlights, and font switch”. See ContentExamplesParityTests.swift, kitMarkdownResizeSmoke."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/rich_editor.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneKitRichEditor",
+      "note": "The macOS example suite passed “kit-rich-editor: rich marks, mention pills, syntax decorations, and toolbar script replay”. See Phase3KitUnblockedTests.swift, kitRichEditorParity."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/scroll_bench.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneKitScrollBench",
+      "note": "The macOS example suite passed “rune-kit-scroll-bench exercises list, markdown, sticky, growth, prose, and card workloads”. See ContentExamplesParityTests.swift, kitScrollBenchSmoke."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/scroll_x.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneKitScrollX",
+      "note": "The macOS example suite passed “rune-kit-scroll-x renders horizontal filmstrip and wide markdown”. See Phase3CrateExamplesTests.swift, kitScrollXRendersFilmstripAndMarkdown."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/shell.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneKitShell",
+      "note": "The macOS example suite passed “kit-shell: default, virtual (5k), page scenes and keyboard shortcuts”. See Phase3KitUnblockedTests.swift, kitShellScenesAndShortcuts."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/shortcut_recorder.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneKitShortcutRecorder",
+      "note": "The macOS example suite passed “rune-kit-shortcut-recorder detects conflict on Ctrl+Shift+Space and records valid chord”. See Phase3CrateExamplesTests.swift, kitShortcutRecorderBehavior."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/tab_strip.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneKitTabStrip",
+      "note": "The macOS example suite passed “kit-tab-strip: tabs, overflow (40), single (1) scenes and script actions”. See Phase3KitUnblockedTests.swift, kitTabStripScenesAndActions."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/table.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneKitTable",
+      "note": "The stock 100k-row artifact table and original Rust use the same WASM32 generator. At five sampled scroll positions, all 77 native row targets matched. The reference and Swift still differ in frame timing and raster ink. See Phase3KitUnblockedTests.swift, kitTable100kAndSort."
     },
     {
       "upstreamPath": "crates/rune-kit/examples/tree.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneKitTree",
+      "note": "The stock 50k-file tree uses the hierarchy, filter, change marks and selection details from the pinned app. Initial, scrolled, middle and end positions match the original visible names and row bounds. Raster text coverage and speed still differ. See Phase3CrateExamplesTests.swift, kitTreeNormalAndBig."
     },
     {
       "upstreamPath": "crates/rune-light/examples/frame_bench.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneLightFrameBench",
+      "note": "The macOS example suite passed “rune-light-frame-bench runs --fast GPU recording benchmark and writes PNG snap”. See FxAndLightExamplesTests.swift, lightFrameBenchFastSnap."
     },
     {
       "upstreamPath": "crates/rune-light/examples/light.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneLightDemos",
+      "note": "The headless light command is shipped under rune-light-demos, with native scene, verification, timed benchmark, image, strip and movie paths. The example test invokes verify and compares a rendered chat snapshot. See FxAndLightExamplesTests.swift, lightDemosVerifyAndSnap."
     },
     {
       "upstreamPath": "crates/rune-light/examples/light_demos",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneLightDemos",
+      "note": "Shared lighting scene builders are used by the headless light, live and reel examples. The Swift light-demos target has separate scene definitions and the native integration test checks verification and a rendered chat frame. See FxAndLightExamplesTests.swift, lightDemosVerifyAndSnap."
     },
     {
       "upstreamPath": "crates/rune-light/examples/live.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneLightLive",
+      "note": "The macOS example suite passed “rune-light-live renders flashlight and chat snaps headlessly”. See FxAndLightExamplesTests.swift, lightLiveSnaps."
     },
     {
       "upstreamPath": "crates/rune-light/examples/reel",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneLightReel",
+      "note": "The macOS example suite passed “rune-light-reel renders deterministic frame still at t=5.5”. See FxAndLightExamplesTests.swift, lightReelSnap."
     },
     {
       "upstreamPath": "crates/rune-light/examples/shader_first_use.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneLightShaderFirstUse",
+      "note": "The macOS example suite passed “rune-light-shader-first-use builds every Fx/Light/Glass pipeline and writes PNG snap”. See FxAndLightExamplesTests.swift, lightShaderFirstUseSnap."
     },
     {
       "upstreamPath": "crates/rune-motion/examples/bench.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneMotionBench",
+      "note": "The macOS example suite passed “rune-motion-bench reports active AnimationStore, Scene reflow, and standalone sample metrics”. See ContentExamplesParityTests.swift, motionBenchSmoke."
     },
     {
       "upstreamPath": "crates/rune-motion/examples/curves.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneMotionCurves",
+      "note": "The macOS example suite passed “rune-motion-curves emits all 5 SVG plot sheets”. See Phase3CrateExamplesTests.swift, motionCurvesGeneratesSVGs."
     },
     {
       "upstreamPath": "crates/rune-ref/examples/hashes.rs",
-      "status": "missing",
-      "swiftTarget": null,
-      "note": "Diagnostic/bench crate example not ported to Swift"
+      "status": "partial",
+      "swiftTarget": "RuneRefHashes",
+      "note": "The macOS example suite passed “rune-ref-hashes computes deterministic 16-seed BLAKE3 corpus matching upstream goldens”. See Phase3CrateExamplesTests.swift, refHashesCorpus."
     }
   ],
   "extraBins": [
@@ -11851,7 +11847,7 @@
       "upstreamPath": "tools/rune-dev-guard",
       "status": "missing",
       "swiftTarget": null,
-      "note": "Upstream Rust dev guard tool not ported"
+      "note": "The pinned Rust guard validates edited Rust source with syn before dx serve publishes a hot patch. Swift has a file watcher and separate Luau reload. The native Swift source guard, patch builder and state-preserving function dispatch remain missing."
     }
   ],
   "swiftOnlyExecutables": [
