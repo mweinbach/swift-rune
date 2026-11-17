@@ -144,4 +144,25 @@ struct LiveColorsParityTests {
         #expect(rt.paints()[key]?.image?.1 == pixels.generation)
         #expect(paint.image?.1 != pixels.generation)
     }
+
+    @Test("Only text and icons report ink, including an unstyled glyph's actual color")
+    func defaultTextInkAndContainer() throws {
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(140, 100), systemDark: true) { _, _ in
+            col().size(140, 100)
+                .child(text("probe").key("plain"))
+                .child(icon(SVGIcon(viewBox: 10, paths: ["M0 0 H10 V10 H0 Z"])).key("icon"))
+                .child(el().key("box").size(20, 20).color(.white))
+        }
+        let frame = rt.renderFrame(at: 0)
+        let glyph = try #require(frame.instances.first { $0.params.y == KIND_GLYPH })
+        let textPath = try #require(rt.element(byKey: "plain")?.path)
+        let boxPath = try #require(rt.element(byKey: "box")?.path)
+        let iconPath = try #require(rt.element(byKey: "icon")?.path)
+        let paints = rt.paints()
+        let ink = try #require(paints[.init(path: textPath, exiting: false)]?.colors[MotionGatePaint.cText])
+        #expect(ink == .white)
+        #expect(paints[.init(path: iconPath, exiting: false)]?.colors[MotionGatePaint.cText] == ink)
+        #expect(abs(glyph.fill.x - ink.r) < 0.0001 && glyph.fill.w == ink.a)
+        #expect(paints[.init(path: boxPath, exiting: false)]?.colors[MotionGatePaint.cText] == .transparent)
+    }
 }
