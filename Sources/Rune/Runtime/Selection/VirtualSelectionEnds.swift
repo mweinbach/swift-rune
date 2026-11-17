@@ -251,7 +251,7 @@ internal extension Runtime {
         if let end, let r = resolveVirtualEnd(end) { return r }
         if let idx = liveNode(path), let m = mountedSelectionEnd(idx) { return m }
         guard let (listPath, src) = nearestVirtualList(forPath: path), let listIdx = virtualListAllowed(listPath),
-              let (r, seg) = virtualRowIndex(forPath: path, in: src),
+              let (r, seg) = src.places.row(containing: path, below: listPath),
               !src.mounted.contains(r) else { return nil }
         return offscreenRowSelectables(listPath: listPath, src: src, row: r, segment: seg)
             .first { $0.path == path }
@@ -268,7 +268,7 @@ internal extension Runtime {
     /// (`Runtime::virtual_end_of`).
     func virtualEnd(forPath path: String, offset: Int) -> VirtualEnd? {
         guard let (listPath, src) = nearestVirtualList(forPath: path), virtualListAllowed(listPath) != nil,
-              let (rowIdx, rowSeg) = virtualRowIndex(forPath: path, in: src) else { return nil }
+              let (rowIdx, rowSeg) = src.places.row(containing: path, below: listPath) else { return nil }
         let rowPath = "\(listPath)/\(rowSeg)"
         let rel = path == rowPath ? "" : String(path.dropFirst(rowPath.count + 1))
         return VirtualEnd(listPath: listPath, rowKey: src.keys[rowIdx], rowIndex: rowIdx, relPath: rel, offset: offset)

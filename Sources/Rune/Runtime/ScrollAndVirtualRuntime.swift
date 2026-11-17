@@ -671,11 +671,9 @@ extension Runtime {
             collectOffscreenFocusedVirtualInputs(
                 el: el,
                 path: path,
-                keys: keys,
-                count: count,
+                places: vState.rowPlaces,
                 mounted: mounted,
                 isIndexed: isIndexed,
-                rowKeyBySegment: vState.rowKeyBySegment,
                 ctx: &ctx
             )
         }
@@ -690,42 +688,31 @@ extension Runtime {
     private func collectOffscreenFocusedVirtualInputs(
         el: El<State>,
         path: String,
-        keys: [String],
-        count: Int,
+        places: VirtualRowPlaces<String>,
         mounted: Range<Int>,
         isIndexed: Bool,
-        rowKeyBySegment: [String: String],
         ctx: inout VirtualExpansionContext
     ) {
+        let keys = places.keys
         var candidateIndices: [Int] = []
         if let fp = focusedPath, fp.hasPrefix(path + "/") {
-            let rest = fp.dropFirst(path.count + 1)
-            let rowSeg = String(rest.prefix(while: { $0 != "/" }))
-            let rowKey = rowSeg.hasPrefix("@") ? String(rowSeg.dropFirst()) : rowSeg
-            let baseRowKey = rowKey.components(separatedBy: "#dup").first ?? rowKey
-            for i in 0..<count where !mounted.contains(i) {
-                if keys[i] == rowKey || keys[i] == baseRowKey || keys[i] == rowKeyBySegment[rowSeg] {
-                    candidateIndices.append(i)
-                }
+            if let row = places.row(containing: fp, below: path), !mounted.contains(row.rowIndex) {
+                candidateIndices.append(row.rowIndex)
             }
-        } else if let fp = focusedPath, let prev = virtualInputs[fp] {
-            for i in 0..<count where !mounted.contains(i) && keys[i] == prev.rowKey {
-                candidateIndices.append(i)
-            }
+        } else if let fp = focusedPath, let prev = virtualInputs[fp],
+                  let i = places.index(of: prev.rowKey), !mounted.contains(i) {
+            candidateIndices.append(i)
         }
         if candidateIndices.isEmpty && !isIndexed {
-            for i in 0..<count where !mounted.contains(i) {
+            for i in keys.indices where !mounted.contains(i) {
                 candidateIndices.append(i)
             }
         }
         for i in candidateIndices {
-            var offEl = isIndexed ? el.virtualRowsSource!.build(state, i) : el.children[i]
-            if isIndexed || offEl.keyId == nil {
-                offEl = offEl.key(keys[i])
-            }
+            let offEl = isIndexed ? el.virtualRowsSource!.build(state, i) : el.children[i]
             var seen: [String: Int] = [:]
             collectVirtualInputs(
-                in: offEl,
+                in: offEl.key(keys[i]),
                 parentPath: path,
                 siblingIndex: i,
                 siblingKeysSeen: &seen,
@@ -2591,7 +2578,7 @@ extension Runtime {
             let aim = gliding ? scrollStore.target(nid, Props.SCROLL)?.y ?? offset.y : offset.y
             guard abs(aim - to) >= 1.0 / 64.0 else { continue }
             applyScrollOffsetRequest(path: viewportPath, x: nil, y: to,
-                                     glide: gliding ? MotionTokens.GLIDE : nil, cut: false, animNow: now)
+                                     glide: gliding ? MotionTokens.GLIDE : nil, cut: false, animNow: now, holdHover: false)
             if let next = scrollOffsets[viewportPath], abs(next.y - offset.y) > 1e-5 {
                 deltas[viewportPath, default: .zero].y += next.y - offset.y
             }
@@ -2894,7 +2881,7 @@ extension Runtime {
             if case .move(let targetY) = eff {
                 clearScrollHandGliding(path: vPath)
                 applyScrollOffsetRequest(path: vPath, x: nil, y: Float(targetY),
-                                         glide: (req.animated && !snaps) ? MotionTokens.GLIDE : nil, cut: cut, animNow: now)
+                                         glide: (req.animated && !snaps) ? MotionTokens.GLIDE : nil, cut: cut, animNow: now, holdHover: false)
             }
             if let (hxPath, nextX) = revealRowX(scope: req.scope, key: req.key) {
                 let curXScroll = scrollOffsets[hxPath] ?? .zero

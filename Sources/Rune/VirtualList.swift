@@ -283,6 +283,25 @@ internal struct VirtualRowPlaces<Key: Hashable & Sendable>: Sendable {
     }
 }
 
+internal extension VirtualRowPlaces where Key == String {
+    func row(containing targetPath: String, below listPath: String) -> (rowIndex: Int, rowSegment: String)? {
+        guard targetPath.hasPrefix(listPath + "/") else { return nil }
+        let rest = targetPath.dropFirst(listPath.count + 1)
+        if rest.first == "@" {
+            // Expansion already resolved duplicate keys. A row key can also contain slashes.
+            var key = rest.dropFirst()
+            while true {
+                if let idx = index(of: String(key)) { return (idx, "@\(key)") }
+                guard let slash = key.lastIndex(of: "/") else { return nil }
+                key = key[..<slash]
+            }
+        }
+        let firstSeg = rest.prefix { $0 != "/" }
+        guard let idx = Int(firstSeg), keys.indices.contains(idx) else { return nil }
+        return (idx, String(firstSeg))
+    }
+}
+
 /// Measurements follow surviving keys when a list reorders. A removed row releases its height.
 internal struct VirtualRowMeasurements: Sendable {
     var places = VirtualRowPlaces<String>([])

@@ -467,23 +467,6 @@ internal extension Runtime {
         }
     }
 
-    func virtualRowIndex(forPath targetPath: String, in src: VirtualSelectionSource) -> (rowIndex: Int, rowSegment: String)? {
-        guard targetPath.hasPrefix(src.listPath + "/") else { return nil }
-        let rest = targetPath.dropFirst(src.listPath.count + 1)
-        if rest.first == "@" {
-            // Expansion already resolved duplicate keys. A row key can also contain slashes.
-            var key = rest.dropFirst()
-            while true {
-                if let idx = src.places.index(of: String(key)) { return (idx, "@\(key)") }
-                guard let slash = key.lastIndex(of: "/") else { return nil }
-                key = key[..<slash]
-            }
-        }
-        let firstSeg = rest.prefix { $0 != "/" }
-        guard let idx = Int(firstSeg), src.keys.indices.contains(idx) else { return nil }
-        return (idx, String(firstSeg))
-    }
-
     struct VirtualTreeOrder: Comparable, Equatable {
         let slot: Int
         let row: Int
@@ -501,7 +484,7 @@ internal extension Runtime {
         while cur < flatNodes.count, let p = flatNodes[cur].parentIndex {
             let pPath = flatNodes[p].path
             if let src = virtualSelectionSources[pPath] {
-                let rowIdx = virtualRowIndex(forPath: flatNodes[cur].path, in: src)?.rowIndex ?? 0
+                let rowIdx = src.places.row(containing: flatNodes[cur].path, below: pPath)?.rowIndex ?? 0
                 return VirtualTreeOrder(slot: p * 2 + 1, row: rowIdx, sub: mountedIdx)
             }
             cur = p
@@ -515,20 +498,11 @@ internal extension Runtime {
         mounted: Range<Int>
     ) -> Bool {
         guard let activeSel = selectionState.coordinator.phase.selection else { return false }
-        let src = VirtualSelectionSource(
-            listPath: listPath,
-            places: places,
-            mounted: mounted,
-            isIndexed: true,
-            source: nil,
-            storedChildren: [],
-            scrollAxes: []
-        )
         // The rows the selection's ends are in, by their row identity when pinned
         // (`sync_selection_pins` -> `PinsEvent::Select { anchor, focus }`), else by path.
         func pinnedRow(path: String, end: VirtualEnd?) -> Int? {
             if let end, end.listPath == listPath { return places.index(of: end.rowKey) }
-            return virtualRowIndex(forPath: path, in: src)?.rowIndex
+            return places.row(containing: path, below: listPath)?.rowIndex
         }
         if let r = pinnedRow(path: activeSel.path, end: activeSel.anchorEnd), !mounted.contains(r) {
             return true
@@ -569,7 +543,7 @@ internal extension Runtime {
             }
 
             func endpointPos(for path: String) -> VirtualEndpointPos? {
-                if let r = virtualRowIndex(forPath: path, in: src) {
+                if let r = src.places.row(containing: path, below: listPath) {
                     return .row(r.rowIndex)
                 }
                 if let idx = resolvedNodeIndex(forPath: path) {
