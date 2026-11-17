@@ -501,8 +501,6 @@ public struct TableStyle: Sendable, Equatable {
 /// Virtualised data table with sticky header, sortable/resizable columns, row selection,
 /// and keyboard navigation (`rune_kit::table::Table`).
 public struct TableView<State> {
-    private static var sharedTextSystem: TextSystem { _sharedTableTextSystem }
-
     private let get: (State) -> TableState
     private let update: (inout State, (inout TableState) -> Void) -> Void
     private let len: (State) -> Int
@@ -838,7 +836,7 @@ public struct TableView<State> {
                 .minW(0.0)
                 .a11yHidden()
             let availW = max(0, resolvedWidth - style.cellPad * 2.0)
-            let measured = Self.sharedTextSystem.measure(t, style: font, maxWidth: nil, pixelScale: 1.0)
+            let measured = TextMeasure.measure(t, style: font)
             if measured.x > availW + 0.5 {
                 tEl = tEl.help(t)
             }
@@ -1025,5 +1023,3 @@ public struct TableView<State> {
             .child(line)
     }
 }
-
-private let _sharedTableTextSystem = TextSystem()

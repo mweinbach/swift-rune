@@ -383,13 +383,9 @@ public final class RollingTextStore: @unchecked Sendable {
     }
 }
 
-private let rollingTextShaper = TextSystem()
-
 /// Fluent animated rolling text builder (`rune_kit::rolling_text::RollingText`).
 public struct RollingText<State> {
     public static var defaultSpring: Spring { Spring(duration: 0.36, bounce: 0.12) }
-
-    private static var shaper: TextSystem { rollingTextShaper }
 
     public var key: String
     public var value: String
@@ -483,42 +479,9 @@ public struct RollingText<State> {
             ? container.rideTrailing().animateLayout(spring)
             : container.animateLayout(LayoutAnim.widthLeads(spring))
 
-        let advances: [Float] = {
-            guard !slots.isEmpty else { return [] }
-            let shaped = Self.shaper.shape(
-                text: value,
-                style: resolvedStyle,
-                maxWidth: nil,
-                pixelScale: 2.0,
-                emitGlyphs: false
-            )
-            var out: [Float] = []
-            out.reserveCapacity(slots.count)
-            var idx = value.startIndex
-            var utf8Cursor = 0
-            for slotIdx in slots.indices {
-                guard idx < value.endIndex else {
-                    out.append(0)
-                    continue
-                }
-                let next = value.index(after: idx)
-                let segBytes = value[idx..<next].utf8.count
-                let endUTF8 = utf8Cursor + segBytes
-                let x0 = Self.shaper.caretRect(in: shaped, utf8Offset: utf8Cursor, pixelScale: 2.0).x
-                let x1: Float
-                if slotIdx == slots.count - 1 {
-                    x1 = max(x0, shaped.size.x)
-                } else {
-                    x1 = Self.shaper.caretRect(in: shaped, utf8Offset: endUTF8, pixelScale: 2.0).x
-                }
-                out.append(max(0, x1 - x0))
-                idx = next
-                utf8Cursor = endUTF8
-            }
-            return out
-        }()
-
-        for (slotIdx, slot) in slots.enumerated() {
+        let run = TextRun(value)
+        var byteOffset = 0
+        for slot in slots {
             let enterSpring = slot.retained
                 ? spring
                 : Spring(duration: spring.duration + Float(slot.enterDelay), bounce: spring.bounce)
@@ -529,15 +492,14 @@ public struct RollingText<State> {
             var glyphEl: El<State> = text(slot.glyph)
                 .key(slot.key)
                 .noWrap()
+                .advanceIn(run, at: byteOffset)
                 .a11yHidden()
                 .animate(enterSpring)
                 .transition(slotTransition)
             glyphEl = trailing
                 ? glyphEl.rideTrailing()
                 : glyphEl.animateLayout(LayoutAnim.widthLeads(enterSpring))
-            if slotIdx < advances.count, advances[slotIdx] > 0 {
-                glyphEl = glyphEl.w(advances[slotIdx])
-            }
+            byteOffset += slot.glyph.utf8.count
             if let font {
                 glyphEl = glyphEl.font(font)
             }
