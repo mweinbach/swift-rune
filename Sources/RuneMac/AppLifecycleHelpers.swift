@@ -190,11 +190,20 @@ public enum AppLifecycleHelpers {
         #endif
     }
 
+    @usableFromInline
+    static var busyMarkerProcessID: Int32 {
+        #if os(macOS)
+        return ProcessInfo.processInfo.processIdentifier
+        #else
+        return 0
+        #endif
+    }
+
     /// Marks this process as busy in `~/Library/Caches/mac-app/busy/<pid>` so external
     /// relaunch scripts wait before swapping the app.
     public static func setBusy(
         _ on: Bool,
-        pid: Int32 = ProcessInfo.processInfo.processIdentifier,
+        pid: Int32 = AppLifecycleHelpers.busyMarkerProcessID,
         homeDirectory: URL? = nil
     ) {
         #if os(macOS)
@@ -213,7 +222,7 @@ public enum AppLifecycleHelpers {
 
     /// Returns whether a busy marker currently exists for `pid`.
     public static func isBusy(
-        pid: Int32 = ProcessInfo.processInfo.processIdentifier,
+        pid: Int32 = AppLifecycleHelpers.busyMarkerProcessID,
         homeDirectory: URL? = nil
     ) -> Bool {
         #if os(macOS)

@@ -25,7 +25,7 @@ public enum RuneMac {
 
     public static func setBusy(
         _ on: Bool,
-        pid: Int32 = ProcessInfo.processInfo.processIdentifier,
+        pid: Int32 = AppLifecycleHelpers.busyMarkerProcessID,
         homeDirectory: URL? = nil
     ) {
         AppLifecycleHelpers.setBusy(on, pid: pid, homeDirectory: homeDirectory)
