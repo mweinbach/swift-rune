@@ -623,7 +623,7 @@ public final class Runtime<State> {
     public internal(set) var scene: Scene
     internal var scrollStore: AnimationStore
     internal var liveStore: AnimationStore
-    private var pixelSnapGlides = PixelSnap.Glides()
+    internal var pixelSnapGlides = PixelSnap.Glides()
 
     public internal(set) var currentTime: Double = 0.0
     public internal(set) var isAnimating: Bool = false
@@ -644,7 +644,17 @@ public final class Runtime<State> {
     internal var frameHadScrollSinceLastFrame: Bool = false
     public var windowTitle: String? = nil
     public private(set) var quitRequested: Bool = false
-    public var fontSmoothing: FontSmoothing = .systemDefault
+    public var fontSmoothing: FontSmoothing = .systemDefault {
+        didSet {
+            guard fontSmoothing != oldValue else { return }
+            textSystem.smoothing = fontSmoothing == .systemDefault ? .platformDefault : fontSmoothing
+            dirtyCommit(at: currentTime)
+        }
+    }
+
+    public func setFontSmoothing(_ smoothing: FontSmoothing) {
+        fontSmoothing = smoothing
+    }
     public var tabVisitsControls: Bool = false
     public var poll: ((inout State, Double, inout Tx) -> Bool)? = nil
     public var onFocus: ((inout State, Bool, inout Tx) -> Void)? = nil
@@ -745,7 +755,7 @@ public final class Runtime<State> {
     }
 
     public private(set) var commitCount: UInt64 = 0
-    public private(set) var liveVisible: Bool = true
+    public var liveVisible: Bool { liveLane.visible }
     public internal(set) var minimizeState: WindowMinimize = .none
     internal var pendingDropHoverChanged: Bool = false
     internal var pendingHiddenDrops: [PendingHiddenDropStep] = []
@@ -897,8 +907,8 @@ public final class Runtime<State> {
     internal var growthSubstepAccumulator: Double = 0
     internal var lastGrowthStepTime: Double? = nil
     internal var pendingGrowthStepNow: Double? = nil
-    internal var atBottomStates: [String: Bool] = [:]
-    internal var farFromBottomStates: [String: Bool] = [:]
+    internal var atBottomStates: [NodeId: Bool] = [:]
+    internal var farFromBottomStates: [NodeId: Bool] = [:]
     internal var lastScrollOffsetReports: [String: ScrollPos] = [:]
     internal var stuckShiftsByPath: [String: Vec2] = [:]
     internal var isDispatchingHover: Bool = false
@@ -1055,19 +1065,18 @@ public final class Runtime<State> {
     private var lastScrollTickTime: Double? = nil
 
     // Live property tracking `(path, target) -> lastSeenSequence`
-    private struct LiveKey: Hashable {
+    internal struct LiveKey: Hashable {
         var path: String
         var target: BoundLiveProperty.Target
+        var id: NodeId { NodeId.hash("live:\(path):\(target)") }
     }
-    private var liveSeenSeq: [LiveKey: UInt64] = [:]
-    private var liveTweenStart: [ObjectIdentifier: Double] = [:]
+    private var liveSeenSeq: [LiveKey: (sourceId: UInt64, sequence: UInt64)] = [:]
+    private var liveTweenStart: [UInt64: Double] = [:]
     private var livePulseRelease: [LiveKey: (releaseAt: Double, rest: MotionLanes, spring: Spring)] = [:]
-    internal var liveTextSeenSeq: [String: UInt64] = [:]
-    internal var liveFillTargets: [NodeId: Color] = [:]
+    internal var liveColorTargets: [NodeId: Color] = [:]
     private var customLiveWaker: Waker? = nil
-    internal var liveWake: LiveWake
+    internal let liveLane: LiveLane
     internal var liveSubscriptions: [LiveSubscription] = []
-    internal var livePendingDirty: Bool = false
 
     internal struct VirtualInputEntry {
         var path: String
@@ -1218,7 +1227,7 @@ public final class Runtime<State> {
         self.textSystem = textSystem
         self.waker = waker
         let defaultWaker = waker
-        self.liveWake = LiveWake { [weak defaultWaker] in defaultWaker?.wake() }
+        self.liveLane = LiveLane(waker: LiveWake { [weak defaultWaker] in defaultWaker?.wake() })
         self.scene = Scene(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.scrollStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.liveStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
@@ -1866,21 +1875,6 @@ public final class Runtime<State> {
         insideFramePollOrInput = false
         promotePendingWakes(at: now)
 
-        if liveVisible {
-            _ = liveWake.takeVisible()
-        }
-
-        // Check if any `LiveText` changed; if a fixed-box LiveText changed we refresh its text without full commit if possible
-        for (_, idx) in nodeByPath {
-            if idx < flatNodes.count, let lt = flatNodes[idx].el.liveText {
-                let seq = lt.sequence
-                if liveTextSeenSeq[flatNodes[idx].path] != seq {
-                    liveTextSeenSeq[flatNodes[idx].path] = seq
-                    flatNodes[idx].el.plainText = lt.get()
-                }
-            }
-        }
-
         // Check if any async `Pixels` buffer size changed (`aspectRatio == nil`, single auto axis -> snap layout without animation)
         for node in flatNodes {
             guard let px = node.el.pixelsPayload else { continue }
@@ -2132,6 +2126,9 @@ public final class Runtime<State> {
         splitStep: (catchUpAnimNow: Double, dt: Double)? = nil,
         skipFramePoll: Bool = false
     ) -> (frameOut: FrameOutput, animNow: Double) {
+        // Clear the wake before poll, input, or layout can sample a published value.
+        // Any subsequent publication remains pending for the next frame.
+        let liveWoke = liveLane.take()
         let (animNow, prevAnimNow, growthMoving) = prepareAndCommitFrame(
             at: now,
             splitStep: splitStep,
@@ -2161,9 +2158,9 @@ public final class Runtime<State> {
         tellScrollOffsetsAfterSceneFrame(at: animNow, instant: currentFrameCommitInstant)
         currentFrameCommitInstant = false
         let liveActive: Bool
-        if liveVisible {
+        if liveLane.latchBegin(can: liveWoke || liveLane.pending(), hasSubs: !liveSubscriptions.isEmpty) {
             liveActive = updateLiveBindings(at: animNow, launchAt: prevAnimNow)
-            livePendingDirty = liveActive
+            liveLane.latchEnd(active: liveActive)
         } else {
             liveActive = false
         }
@@ -2235,9 +2232,15 @@ public final class Runtime<State> {
         let prevExitingCount = exitingSnapshots.count
         let finishedExitedIds = exitingSnapshots.keys.filter { !activeIds.contains($0) }
         wordRevealStore.prune(exitedIds: finishedExitedIds)
+        for id in finishedExitedIds {
+            atBottomStates.removeValue(forKey: id)
+            farFromBottomStates.removeValue(forKey: id)
+        }
         exitingSnapshots = exitingSnapshots.filter { activeIds.contains($0.key) }
         if exitingSnapshots.count != prevExitingCount {
+            let keep = liveLane.dirty
             rebuildLiveSubscriptionsIncludingExiting()
+            liveLane.pruned(keep)
         }
         exitingTextLayouts = exitingTextLayouts.filter { activeIds.contains($0.key) }
         pruneScaleSettles()
@@ -4129,10 +4132,6 @@ public final class Runtime<State> {
 
         let childExitOverrides = collectChildExitOverrides(prevNodes: flatNodes, newById: pass.byId, cut: cut)
 
-        for s in liveSubscriptions {
-            s.isActive = false
-        }
-        liveSubscriptions.removeAll(keepingCapacity: true)
         redactExitingSecureSnapshots(liveIds: Set(pass.byId.keys))
         var nowRevealedSecureIds: Set<NodeId> = []
         var concealedSecureIndices: [Int] = []
@@ -5845,21 +5844,43 @@ public final class Runtime<State> {
 
     // MARK: - Live Property Evaluation
 
+    /// Free the tracks of removed bindings after their last painted exit disappears.
+    internal func pruneLiveBindingTracks(keeping keys: Set<LiveKey>, tweens: Set<UInt64>) {
+        for key in liveSeenSeq.keys where !keys.contains(key) {
+            liveStore.removeNode(key.id)
+            liveColorTargets.removeValue(forKey: key.id)
+            livePulseRelease.removeValue(forKey: key)
+            liveSeenSeq.removeValue(forKey: key)
+        }
+        liveTweenStart = liveTweenStart.filter { tweens.contains($0.key) }
+    }
+
     private func updateLiveBindings(at now: Double, launchAt: Double) -> Bool {
         var anyTweenOrPulsePending = false
-        for node in flatNodes where !node.el.liveBindings.isEmpty {
+        for index in flatNodes.indices {
+            var node = flatNodes[index]
+            if let source = node.el.liveText {
+                let text = source.get()
+                if text != node.el.plainText {
+                    node.el.plainText = text
+                    flatNodes[index] = node
+                    nodeById[node.nodeId] = node
+                    exitingSnapshots[node.nodeId] = node
+                }
+            }
             for b in node.el.liveBindings {
                 let lk = LiveKey(path: node.path, target: b.target)
-                let nid = NodeId.hash("live:\(node.path):\(b.target)")
+                let nid = lk.id
 
                 // Linear render-time Tween
                 if let lin = b.source.linearSpec {
-                    let objId = ObjectIdentifier(b.source)
+                    let objId = b.source.id
                     let tStart = liveTweenStart[objId] ?? {
                         liveTweenStart[objId] = now
                         return now
                     }()
                     let snap = b.source.readSnapshot()
+                    liveSeenSeq[lk] = (objId, snap.seq)
                     let dur = lin.duration
                     let u = dur <= 0 ? 1.0 : ((now - tStart) / dur).clamped(to: 0...1)
                     if u < 1.0 { anyTweenOrPulsePending = true }
@@ -5868,6 +5889,14 @@ public final class Runtime<State> {
                         out[lane] = lin.from[lane] + (snap.lanes[lane] - lin.from[lane]) * Float(u)
                     }
                     snapLiveTrack(nid: nid, target: b.target, lanes: out)
+                    continue
+                }
+
+                let snap = b.source.readSnapshot()
+                if liveSeenSeq[lk]?.sourceId != b.source.id {
+                    liveSeenSeq[lk] = (b.source.id, snap.seq)
+                    livePulseRelease.removeValue(forKey: lk)
+                    snapLiveTrack(nid: nid, target: b.target, lanes: snap.lanes)
                     continue
                 }
 
@@ -5880,14 +5909,8 @@ public final class Runtime<State> {
                     anyTweenOrPulsePending = true
                 }
 
-                let snap = b.source.readSnapshot()
-                if liveSeenSeq[lk] == nil {
-                    liveSeenSeq[lk] = snap.seq
-                    snapLiveTrack(nid: nid, target: b.target, lanes: snap.lanes)
-                    continue
-                }
-                guard liveSeenSeq[lk] != snap.seq else { continue }
-                liveSeenSeq[lk] = snap.seq
+                guard liveSeenSeq[lk]?.sequence != snap.seq else { continue }
+                liveSeenSeq[lk] = (b.source.id, snap.seq)
 
                 switch snap.op {
                 case .snap(let lanes):
@@ -5896,8 +5919,15 @@ public final class Runtime<State> {
 
                 case .set(let lanes):
                     livePulseRelease.removeValue(forKey: lk)
-                    if let sp = b.spring {
-                        animateLiveTrack(nid: nid, target: b.target, lanes: lanes, spring: sp, at: launchAt)
+                    if let enter = b.spring {
+                        let current: Float? = switch b.target {
+                        case .opacity: liveStore.get(nid, Props.OPACITY)
+                        case .scale: liveStore.get(nid, Props.SCALE)?.x
+                        case .blur: liveStore.get(nid, Props.BLUR)?.radius
+                        default: nil
+                        }
+                        let spring = current.map { lanes.l0 < $0 } == true ? (b.restSpring ?? enter) : enter
+                        animateLiveTrack(nid: nid, target: b.target, lanes: lanes, spring: spring, at: launchAt)
                     } else if b.target == .opacity, let anim = node.el.opacityMotionAnim {
                         liveStore.set(nid, Props.OPACITY, to: lanes.l0, anim: reducedMotion ? .instant : anim, at: launchAt)
                     } else {
@@ -5916,7 +5946,22 @@ public final class Runtime<State> {
                 }
             }
         }
+        for (id, var node) in exitingSnapshots where nodeById[id] == nil {
+            if let source = node.el.liveText {
+                let text = source.get()
+                if text != node.el.plainText {
+                    node.el.plainText = text
+                    exitingSnapshots[id] = node
+                }
+            }
+        }
         return anyTweenOrPulsePending
+    }
+
+    /// A settled channel retains the authored color, including its original sRGB components.
+    internal func presentedLiveColor(_ id: NodeId) -> Color? {
+        if !liveStore.isMoving(id, Props.FILL), let target = liveColorTargets[id] { return target }
+        return liveStore.get(id, Props.FILL).map(Color.init)
     }
 
     private func snapLiveTrack(nid: NodeId, target: BoundLiveProperty.Target, lanes: MotionLanes) {
@@ -5925,12 +5970,10 @@ public final class Runtime<State> {
         case .scale: liveStore.snap(nid, Props.SCALE, to: Vec2(lanes.l0, lanes.l0))
         case .blur: liveStore.snap(nid, Props.BLUR, to: Blur(lanes.l0))
         case .offset, .trim: liveStore.snap(nid, Props.OFFSET, to: Vec2(lanes.l0, lanes.l1))
-        case .fill:
+        case .fill, .textColor, .borderColor, .shadowColor, .gradientTop, .gradientBottom:
             let c = Color.decodeLiveLanes(lanes)
-            liveFillTargets[nid] = c
+            liveColorTargets[nid] = c
             liveStore.snap(nid, Props.FILL, to: c.motionColor)
-        case .textColor, .borderColor, .shadowColor, .gradientTop, .gradientBottom:
-            liveStore.snap(nid, Props.FILL, to: Color.decodeLiveLanes(lanes).motionColor)
         case .rect: liveStore.snap(nid, Props.RECT, to: MotionRect.fromLanes(lanes))
         }
     }
@@ -5941,12 +5984,10 @@ public final class Runtime<State> {
         case .scale: liveStore.set(nid, Props.SCALE, to: Vec2(lanes.l0, lanes.l0), anim: .spring(spring), at: now)
         case .blur: liveStore.set(nid, Props.BLUR, to: Blur(lanes.l0), anim: .spring(spring), at: now)
         case .offset, .trim: liveStore.set(nid, Props.OFFSET, to: Vec2(lanes.l0, lanes.l1), anim: .spring(spring), at: now)
-        case .fill:
+        case .fill, .textColor, .borderColor, .shadowColor, .gradientTop, .gradientBottom:
             let c = Color.decodeLiveLanes(lanes)
-            liveFillTargets[nid] = c
+            liveColorTargets[nid] = c
             liveStore.set(nid, Props.FILL, to: c.motionColor, anim: .spring(spring), at: now)
-        case .textColor, .borderColor, .shadowColor, .gradientTop, .gradientBottom:
-            liveStore.set(nid, Props.FILL, to: Color.decodeLiveLanes(lanes).motionColor, anim: .spring(spring), at: now)
         case .rect: liveStore.set(nid, Props.RECT, to: MotionRect.fromLanes(lanes), anim: .spring(spring), at: now)
         }
     }
@@ -6123,7 +6164,7 @@ public final class Runtime<State> {
 
     internal func isLinearTweenActive(_ source: LiveSource, at now: Double) -> Bool {
         guard let lin = source.linearSpec, lin.duration > 0 else { return false }
-        guard let tStart = liveTweenStart[ObjectIdentifier(source)] else { return true }
+        guard let tStart = liveTweenStart[source.id] else { return true }
         return (now - tStart) < lin.duration
     }
 
@@ -6894,21 +6935,17 @@ public final class Runtime<State> {
             for b in el.liveBindings {
                 let lnid = NodeId.hash("live:\(snap.path):\(b.target)")
                 if b.target == .fill {
-                    if !liveStore.isMoving(lnid, Props.FILL), let exact = liveFillTargets[lnid] {
-                        fillColor = exact
-                    } else if let mc = liveStore.get(lnid, Props.FILL) {
-                        fillColor = Color(mc)
-                    }
-                } else if b.target == .textColor, let mc = liveStore.get(lnid, Props.FILL) {
-                    liveTextColor = Color(mc)
-                } else if b.target == .borderColor, let mc = liveStore.get(lnid, Props.FILL) {
-                    borderColor = Color(mc)
-                } else if b.target == .shadowColor, let mc = liveStore.get(lnid, Props.FILL) {
-                    liveShadowColor = Color(mc)
-                } else if b.target == .gradientTop, let mc = liveStore.get(lnid, Props.FILL) {
-                    liveGradientTop = Color(mc)
-                } else if b.target == .gradientBottom, let mc = liveStore.get(lnid, Props.FILL) {
-                    liveGradientBottom = Color(mc)
+                    fillColor = presentedLiveColor(lnid) ?? fillColor
+                } else if b.target == .textColor {
+                    liveTextColor = presentedLiveColor(lnid)
+                } else if b.target == .borderColor {
+                    borderColor = presentedLiveColor(lnid) ?? borderColor
+                } else if b.target == .shadowColor {
+                    liveShadowColor = presentedLiveColor(lnid)
+                } else if b.target == .gradientTop {
+                    liveGradientTop = presentedLiveColor(lnid)
+                } else if b.target == .gradientBottom {
+                    liveGradientBottom = presentedLiveColor(lnid)
                 } else if b.target == .blur, let bl = liveStore.get(lnid, Props.BLUR) {
                     blurPt = bl.radius
                 } else if b.target == .trim, let tr = liveStore.get(lnid, Props.OFFSET) {
@@ -7132,13 +7169,13 @@ public final class Runtime<State> {
                 return e
             }
             let nodeIsSecure = el.isSecure || (editValue?.isSecure ?? false)
-            let rawTextValue: String? = editValue?.text ?? el.liveText?.get() ?? el.plainText
+            let rawTextValue: String? = editValue?.text ?? el.plainText
             // Never expose secure plaintext (hidden or revealed) in ElementInfo / --tree snapshots.
             let elementTextValue: String? = nodeIsSecure ? nil : rawTextValue
             var elementDrawnText: String? = nil
             var elementElision: TextElision? = nil
             let paintedLabelValue: String? = {
-                guard let raw = el.liveText?.get() ?? el.plainText else { return nil }
+                guard let raw = el.plainText else { return nil }
                 if nodeIsSecure && !el.isRevealed && !raw.isEmpty && !(p.isExiting && el.role == .textInput) {
                     return "••••••••••••"
                 }
@@ -7357,7 +7394,7 @@ public final class Runtime<State> {
                                 && abs(sc.a - sh.color.a) < 1e-3
                             return (settled || sc == sh.color.motionColor) ? sh.color : Color(sc)
                         } : nil
-                        let shColor = liveShadowColor ?? sceneShColor ?? sh.color
+                        let shColor = (sIdx == 0 ? liveShadowColor : nil) ?? sceneShColor ?? sh.color
                         guard shColor.a > 0.001 else { continue }
                         let sc = shColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                         primitives.append(.dropShadow(
@@ -7539,7 +7576,7 @@ public final class Runtime<State> {
                                 && abs(sc.a - sh.color.a) < 1e-3
                             return (settled || sc == sh.color.motionColor) ? sh.color : Color(sc)
                         } : nil
-                        let shColor = liveShadowColor ?? sceneShColor ?? sh.color
+                        let shColor = (sIdx == 0 ? liveShadowColor : nil) ?? sceneShColor ?? sh.color
                         guard shColor.a > 0.001 else { continue }
                         primitives.append(.insetShadow(
                             rect: devRect,
@@ -8546,22 +8583,13 @@ public final class Runtime<State> {
                         }
                         var baselineLine = 0
                         for gi in glyphsToEmit.indices {
-                            var g = glyphsToEmit[gi]
-                            let inkGlyph = g
-                            var gx = (restOriginX + g.rect.x * scaleVec.x) * pxScale
-                            if textRestsExact {
-                                // Its pen rounds to a quarter pixel where it lands (`glyph_emit.rs`, #935).
-                                (gx, g) = TextBoxGeometry.restingGlyph(g, index: gi, shaped: shaped, originXPx: restOriginX * pxScale, pxScale: pxScale, atlas: textSystem.glyphAtlas)
-                            }
-                            var gy = (restOriginY + g.rect.y * scaleVec.y) * pxScale
-                            if !roundedBaselines.isEmpty {
-                                let ranges = shaped.lineGlyphRanges
-                                while baselineLine + 1 < ranges.count && gi >= ranges[baselineLine].upperBound { baselineLine += 1 }
-                                if baselineLine < roundedBaselines.count {
-                                    gy = TextBoxGeometry.glyphTop(localTopPx: g.rect.y * pxScale, line: baselineLine, roundedBaselines: roundedBaselines, shaped: shaped)
-                                }
-                            }
-                            let gh = g.rect.w * scaleVec.y * pxScale
+                            let inkGlyph = glyphsToEmit[gi]
+                            let (g, placement) = TextBoxGeometry.paintGlyph(
+                                inkGlyph, index: gi, shaped: shaped, origin: SIMD2<Float>(restOriginX, restOriginY) * pxScale,
+                                scale: SIMD2<Float>(scaleVec.x, scaleVec.y), pixelScale: pxScale,
+                                restsExact: textRestsExact, baselines: roundedBaselines, line: &baselineLine, atlas: textSystem.glyphAtlas
+                            )
+                            let gx = placement.x, gy = placement.y, gh = placement.w
                             if !textRotated && (gy + gh < textVisMinY || gy > textVisMaxY) { continue }
                             let wordAlpha = wordFadeMask?.alpha(for: inkGlyph) ?? 1.0
                             let effGlyphAlpha = glyphAlpha * wordAlpha
@@ -12257,7 +12285,7 @@ public final class Runtime<State> {
         let latchedFocusWhenShown = tx.requestedFocusKey != nil && tx.focusAskedWhenShown
         let hasCommitRequests = nonOffsetCommitRequests || (!canFastApplyOffsets && !tx.scrollOffsetRequests.isEmpty) || blurDroppedFocus || latchedFocusWhenShown
         if tx.liveOnlyRequested {
-            livePendingDirty = true
+            liveLane.set()
             if recordLiveOnlySkip(handler: liveOnlyLabel, at: now) {
                 dirtyCommit(at: now, external: external, clearLiveCheck: false, why: why)
             }
@@ -12527,20 +12555,8 @@ public final class Runtime<State> {
 
     /// Connects or replaces the waker notified when bound `Live`, `LiveText`, or `Pixels` sources publish (`Runtime::set_live_waker`).
     public func setLiveWaker(_ waker: Waker) {
-        let prevVisible = liveVisible
-        let hadPending = livePendingDirty || liveWake.isVisiblePending
-        for sub in liveSubscriptions {
-            sub.isActive = false
-        }
-        liveSubscriptions.removeAll(keepingCapacity: true)
         customLiveWaker = waker
-        let nextWake = LiveWake { [weak waker] in waker?.wake() }
-        nextWake.visible(prevVisible)
-        if hadPending {
-            nextWake.notify()
-        }
-        liveWake = nextWake
-        rebuildLiveSubscriptionsIncludingExiting(preserveLiveTextSeq: true)
+        liveLane.waker.replaceCallback(dirty: liveLane.dirty) { [weak waker] in waker?.wake() }
     }
 
     /// Connects or replaces a closure wake callback for coalesced `Live` updates (`Runtime::set_live_waker`).
@@ -12551,17 +12567,17 @@ public final class Runtime<State> {
     /// Clears any pending visible latch on the installed `LiveWake`.
     @discardableResult
     internal func takeParityLivePending() -> Bool {
-        let took = liveWake.takeVisible()
-        let had = livePendingDirty
-        livePendingDirty = false
+        guard liveLane.visible else { return false }
+        let took = liveLane.take()
+        let had = liveLane.dirty
+        liveLane.subscribed(false)
         return took || had
     }
 
     /// True when the window is visible and a subscribed `Live` / `LiveText` / `Pixels` source
     /// has pending work for the next frame (`Runtime::live_pending`).
     public var livePending: Bool {
-        guard liveVisible else { return false }
-        return livePendingDirty || liveWake.isVisiblePending
+        liveLane.pending()
     }
     internal var hasPendingHiddenWork: Bool {
         needsCommit
@@ -13007,9 +13023,8 @@ public final class Runtime<State> {
     public func setLiveVisible(_ visible: Bool, at now: Double? = nil) {
         let wasVisible = liveVisible
         let changed = (visible != wasVisible)
-        liveVisible = visible
-        let wokeFromLiveWake = liveWake.visibleReturningWoke(visible)
-        if !wokeFromLiveWake && visible && !wasVisible && livePendingDirty {
+        let wokeFromLiveWake = liveLane.setVisible(visible)
+        if !wokeFromLiveWake && visible && !wasVisible && liveLane.dirty {
             (customLiveWaker ?? waker).wake()
         }
         if changed && commitCount > 0 {

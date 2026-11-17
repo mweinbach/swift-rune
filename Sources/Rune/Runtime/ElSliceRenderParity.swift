@@ -469,47 +469,52 @@ internal extension Runtime {
         scene.get(id, Props.PRESS_SCALE) ?? 1.0
     }
 
-    func rebuildLiveSubscriptionsIncludingExiting(preserveLiveTextSeq: Bool = false) {
-        for s in liveSubscriptions {
-            s.isActive = false
-        }
-        liveSubscriptions.removeAll(keepingCapacity: true)
+    func rebuildLiveSubscriptionsIncludingExiting() {
+        // Sources return their existing active subscription for this wake. Keep it installed
+        // until replacements are present, so a concurrent publication can always notify.
+        var newSubscriptions: [LiveSubscription] = []
         var seenTokens = Set<ObjectIdentifier>()
+        var bindings = Set<LiveKey>()
+        var tweens = Set<UInt64>()
+        var sampled = false
 
-        func subscribeNode(_ node: FlatNode) {
+        func subscribeNode(_ node: FlatNode, exiting: Bool) {
+            if node.el.liveText != nil || (!exiting && !node.el.liveBindings.isEmpty) { sampled = true }
             if let lt = node.el.liveText {
                 let oid = ObjectIdentifier(lt)
                 if seenTokens.insert(oid).inserted {
-                    liveSubscriptions.append(lt.subscribe(liveWake))
-                }
-                if !preserveLiveTextSeq || liveTextSeenSeq[node.path] == nil {
-                    liveTextSeenSeq[node.path] = lt.sequence
+                    newSubscriptions.append(lt.subscribe(liveLane.waker))
                 }
             }
             for b in node.el.liveBindings {
+                bindings.insert(LiveKey(path: node.path, target: b.target))
+                if b.source.linearSpec != nil { tweens.insert(b.source.id) }
+                if exiting { continue }
                 let oid = ObjectIdentifier(b.source)
                 if seenTokens.insert(oid).inserted {
-                    liveSubscriptions.append(b.source.subscribe(liveWake))
+                    newSubscriptions.append(b.source.subscribe(liveLane.waker))
                 }
             }
             if let px = node.el.pixelsPayload {
                 let oid = ObjectIdentifier(px)
                 if seenTokens.insert(oid).inserted {
-                    liveSubscriptions.append(px.subscribe(liveWake))
+                    newSubscriptions.append(px.subscribe(liveLane.waker))
                 }
             }
         }
 
         for node in flatNodes {
-            subscribeNode(node)
+            subscribeNode(node, exiting: false)
         }
         for (nid, snap) in exitingSnapshots where nodeById[nid] == nil && scene.contains(nid) {
-            subscribeNode(snap)
+            subscribeNode(snap, exiting: true)
         }
-        if liveSubscriptions.isEmpty {
-            _ = liveWake.takeVisible()
-            livePendingDirty = false
-        }
+        let retained = Set(newSubscriptions.map(ObjectIdentifier.init))
+        for old in liveSubscriptions where !retained.contains(ObjectIdentifier(old)) { old.isActive = false }
+        liveSubscriptions = newSubscriptions
+        pruneLiveBindingTracks(keeping: bindings, tweens: tweens)
+        liveLane.subscribed(sampled)
+        if liveSubscriptions.isEmpty { _ = liveLane.take() }
     }
 
     // MARK: - Shimmer / LoopClock / `frameSplit` / `wakeDeadline` (`shimmer.rs`)

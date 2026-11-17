@@ -213,6 +213,57 @@ struct ElInc4ParityTests {
         #expect(rt.commitCount == commits)
     }
 
+    @Test("a changed scroll-end report rebuilds its view through a simultaneous resize")
+    func changedScrollEndReportInvalidatesView() {
+        let rt = Runtime<Bool>(state: false, viewport: Vec2(200, 120)) { atEnd, _ in
+            col().size(200, 120)
+                .child(col().size(200, 100).key("list").scrollY(stickBottom: false)
+                    .onAtBottomIf { state, at in
+                        guard state != at else { return false }
+                        state = at
+                        return true
+                    }
+                    .child(el().size(200, 300).shrink(0)))
+                .child(el().key("marker").size(atEnd ? 100 : 10, 10))
+        }
+        _ = rt.frame(at: 0)
+        #expect(rt.element(byKey: "marker")?.rect.width == 10)
+        rt.update(at: 0.1) { _, tx in
+            tx.scrollToInstant("list", x: 0, y: 200)
+            tx.liveOnly()
+        }
+        rt.setViewport(Vec2(220, 120))
+        _ = rt.frame(at: 0.2)
+        #expect(rt.state && rt.element(byKey: "marker")?.rect.width == 100)
+    }
+
+    @Test("scroll-end reports start again after the same viewport remounts")
+    func scrollEndReportsResetAfterExit() {
+        struct Observation {
+            var visible = true
+            var bottom: [Bool] = []
+            var far: [Bool] = []
+        }
+        let rt = Runtime<Observation>(state: .init(), viewport: Vec2(100, 100)) { state, _ in
+            var root = El<Observation>().size(100, 100)
+            if state.visible {
+                root = root.child(col().size(100, 100).key("list").scrollY(stickBottom: false)
+                    .onAtBottomIf { $0.bottom.append($1); return false }
+                    .onFarFromBottomIf(20) { $0.far.append($1); return false }
+                    .child(el().size(100, 250).shrink(0))
+                    .transition(.opacity))
+            }
+            return root
+        }
+        _ = rt.frame(at: 0)
+        rt.update(at: 0.1) { state, _ in state.visible = false }
+        for step in 0...120 { _ = rt.frame(at: 0.1 + Double(step) / 60) }
+        #expect(rt.state.bottom == [false] && rt.state.far == [true])
+        rt.update(at: 3) { state, _ in state.visible = true }
+        _ = rt.frame(at: 3)
+        #expect(rt.state.bottom == [false, false] && rt.state.far == [true, true])
+    }
+
     @Test("scroll: scrollIntoView, scrollCenter, scrollToBottomInstant, followEdge, and wheel cancellation")
     func runtimeScrollRequestsAndCallbacks() {
         struct S {

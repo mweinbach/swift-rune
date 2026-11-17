@@ -144,6 +144,23 @@ struct ShapeParityTests {
 
     // MARK: - shape_fade.rs + viewBox
 
+    @Test("view-boxed Metal shapes stretch coordinates, retain authored stroke width, and follow their snapped box")
+    func viewBoxShapeUsesPaintGeometry() throws {
+        let shape = Shape().line([0, 0], [10, 0], width: 0.25, cap: .butt, color: .white).viewBox(10, 10)
+        for snap in [true, false] {
+            let rt = Runtime(state: 0, viewport: Vec2(60, 60), pixelScale: 2) { _, _ in
+                El<Int>(direction: .column).sizeFull().pixelSnap(snap)
+                    .child(canvas(shape).key("shape").size(40, 20).absolute(x: 0, y: 5.25))
+            }
+            let frame = rt.renderFrame(at: 0)
+            let segment = try #require(frame.instances.first { $0.params.y == KIND_SEGMENT })
+            let y: Float = snap ? 11 : 10.5
+            #expect(segment.radii == SIMD4<Float>(0, y, 80, y))
+            #expect(segment.params.x == 0.25)
+            #expect(rt.element(byKey: "shape")?.rect[1] == 5.25)
+        }
+    }
+
     private static func frameScene(shape: Shape, opacity: Float) -> RefScene {
         struct S {}
         let rt = Runtime(

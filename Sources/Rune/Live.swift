@@ -67,7 +67,7 @@ public final class LiveWake: @unchecked Sendable {
     private static let hiddenFlag: UInt8 = 2
     private let lock = NSLock()
     private var flags: UInt8 = 0
-    private let callback: @Sendable () -> Void
+    private var callback: @Sendable () -> Void
 
     public init(_ callback: @escaping @Sendable () -> Void) {
         self.callback = callback
@@ -86,32 +86,39 @@ public final class LiveWake: @unchecked Sendable {
         } else {
             flags |= Self.hiddenFlag
         }
-        let shouldWake = visible && old == (Self.hiddenFlag | Self.pendingFlag)
+        let wake = visible && old == (Self.hiddenFlag | Self.pendingFlag) ? callback : nil
         lock.unlock()
-        if shouldWake {
-            callback()
-        }
-        return shouldWake
+        wake?()
+        return wake != nil
     }
 
     public func notify() {
         lock.lock()
         let old = flags
         flags |= Self.pendingFlag
-        let isHidden = (flags & Self.hiddenFlag) != 0
+        let wake = old == 0 ? callback : nil
         lock.unlock()
-        if old == 0 && !isHidden {
-            callback()
-        }
+        wake?()
     }
 
     @discardableResult
     public func takeVisible() -> Bool {
         lock.lock()
         let had = (flags & Self.pendingFlag) != 0 && (flags & Self.hiddenFlag) == 0
-        flags &= ~Self.pendingFlag
+        if had { flags &= ~Self.pendingFlag }
         lock.unlock()
         return had
+    }
+
+    /// Keep the subscribed handle installed while the host replaces its callback. A publisher
+    /// that already captured this handle still reaches the current window.
+    internal func replaceCallback(dirty: Bool, _ callback: @escaping @Sendable () -> Void) {
+        lock.lock()
+        self.callback = callback
+        if dirty { flags |= Self.pendingFlag }
+        let pending = flags == Self.pendingFlag
+        lock.unlock()
+        if pending { callback() }
     }
 
     public var isVisiblePending: Bool {
@@ -369,7 +376,6 @@ public final class LiveText: @unchecked Sendable {
     private let id: UInt64 = LiveSourceIdCounter.next()
     private let lock = NSLock()
     private var value: String
-    private(set) var sequence: UInt64 = 0
     private var wakers: [LiveSource.WeakWaker] = []
     private var subscriptions: [LiveSubscription] = []
 
@@ -393,7 +399,6 @@ public final class LiveText: @unchecked Sendable {
             return false
         }
         value = newText
-        sequence &+= 1
         wakers.removeAll { $0.ref == nil }
         toWake = wakers.compactMap(\.ref)
         subscriptions.removeAll { $0.wake == nil }

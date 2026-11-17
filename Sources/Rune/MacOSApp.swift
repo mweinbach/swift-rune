@@ -872,7 +872,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
                     renderer: renderer,
                     drawUI: { [renderer, renderFrame] in
                         drawCount += 1
-                        renderer.drawRange(frame: renderFrame, into: drawable.texture, commandBuffer: cmdBuf)
+                        renderer.encodeUI(frame: renderFrame, into: drawable.texture, commandBuffer: cmdBuf)
                     }
                 )
                 comp.render(frame: compFrame)

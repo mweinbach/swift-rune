@@ -36,94 +36,54 @@ private func waveformEl(_ t: Float, w: Float, h: Float) -> El<ShapesState> {
         topPts.append(Vec2(px, py))
     }
 
-    var envPath = VectorPath()
-    if let first = topPts.first {
-        envPath.moveTo(first.x, first.y)
-        for p in topPts.dropFirst() {
-            envPath.lineTo(p.x, p.y)
-        }
-        for p in topPts.reversed() {
-            envPath.lineTo(p.x, 2.0 * mid - p.y)
-        }
-        envPath.close()
+    let envelope = topPts + topPts.reversed().map { Vec2($0.x, 2 * mid - $0.y) }
+    let line: [Vec2] = (0..<n).map { i in
+        Vec2(Float(i) * w / Float(n - 1), mid + sinf(Float(i) * 0.21 + t * 3) * mid * 0.8)
     }
-
-    var wavePath = VectorPath()
-    for i in 0..<n {
-        let px = Float(i) * w / Float(n - 1)
-        let py = mid + sinf(Float(i) * 0.21 + t * 3.0) * mid * 0.8
-        if i == 0 {
-            wavePath.moveTo(px, py)
-        } else {
-            wavePath.lineTo(px, py)
-        }
-    }
-
-    var hairline = VectorPath()
-    hairline.moveTo(0, mid)
-    hairline.lineTo(w, mid)
-
-    return canvas(Shape.fill(envPath, color: soft).viewBox(w, h))
-        .shape(Shape.stroke(wavePath, color: accent, width: 1.5).viewBox(w, h))
-        .shape(Shape.stroke(hairline, color: ink, width: 0.5, roundCap: false).viewBox(w, h))
+    let waveform = Shape()
+        .fill(envelope, color: soft)
+        .stroke(line, width: 1.5, color: accent)
+        .line([0, mid], [w, mid], width: 0.5, cap: .butt, color: ink)
+        .viewBox(w, h)
+    return canvas(waveform)
 }
 
 private func metersEl(_ t: Float) -> El<ShapesState> {
-    var node: El<ShapesState> = el().key("meters").size(244, 68)
+    var meters = Shape()
     for i in 0..<24 {
         let x = 4.0 + Float(i) * 10.0
         let v = level(t, i * 7) * 56.0 + 4.0
-        var bar = VectorPath()
-        bar.moveTo(x, 64.0)
-        bar.lineTo(x, 64.0 - v)
-        let col = v > 48.0 ? warm : accent
-        node = node.shape(Shape.stroke(bar, color: col, width: 6.0, roundCap: true))
+        meters = meters.line([x, 64], [x, 64 - v], width: 6, cap: .round, color: v > 48 ? warm : accent)
     }
-    return node
+    return canvas(meters).key("meters").size(244, 68)
 }
 
 private func curvesEl() -> El<ShapesState> {
-    var wave = VectorPath()
-    wave.moveTo(4.0, 50.0)
-    wave.cubicTo(c1x: 40.0, c1y: -20.0, c2x: 80.0, c2y: 120.0, x: 116.0, y: 50.0)
-    wave.quadTo(cx: 150.0, cy: 0.0, x: 186.0, y: 50.0)
+    let wave = Path()
+        .moveTo([4, 50])
+        .cubicTo([40, -20], [80, 120], [116, 50])
+        .quadTo([150, 0], [186, 50])
+    let blob = Path()
+        .moveTo([210, 30])
+        .cubicTo([230, 0], [270, 0], [280, 30])
+        .lineTo([260, 80])
+        .lineTo([220, 80])
+        .close()
 
-    var blob = VectorPath()
-    blob.moveTo(210.0, 30.0)
-    blob.cubicTo(c1x: 230.0, c1y: 0.0, c2x: 270.0, c2y: 0.0, x: 280.0, y: 30.0)
-    blob.lineTo(260.0, 80.0)
-    blob.lineTo(220.0, 80.0)
-    blob.close()
-
-    var star = VectorPath()
-    for i in 0..<10 {
-        let a = Float(i) * .pi / 5.0 - .pi * 0.5
-        let r: Float = (i % 2 == 0) ? 40.0 : 16.0
-        let px = 340.0 + cosf(a) * r
-        let py = 46.0 + sinf(a) * r
-        if i == 0 {
-            star.moveTo(px, py)
-        } else {
-            star.lineTo(px, py)
-        }
+    let star: [Vec2] = (0..<10).map { i in
+        let a = Float(i) * .pi / 5 - .pi * 0.5
+        let radius: Float = i.isMultiple(of: 2) ? 40 : 16
+        return Vec2(340 + cosf(a) * radius, 46 + sinf(a) * radius)
     }
-    star.close()
-
-    func diag(_ x0: Float, _ y0: Float, _ x1: Float, _ y1: Float) -> VectorPath {
-        var p = VectorPath()
-        p.moveTo(x0, y0)
-        p.lineTo(x1, y1)
-        return p
-    }
-
-    return canvas(Shape.stroke(wave, color: warm, width: 3.0, roundCap: true))
-        .shape(Shape.fill(blob, color: accent))
-        .shape(Shape.stroke(blob, color: ink, width: 1.0, roundCap: true))
-        .shape(Shape.fill(star, color: ink))
-        .shape(Shape.stroke(diag(400.0, 10.0, 460.0, 86.0), color: ink, width: 0.5, roundCap: false))
-        .shape(Shape.stroke(diag(410.0, 10.0, 470.0, 86.0), color: ink, width: 1.0, roundCap: false))
-        .shape(Shape.stroke(diag(420.0, 10.0, 480.0, 86.0), color: ink, width: 2.0, roundCap: false))
-        .size(490, 96)
+    let curves = Shape()
+        .strokePath(wave, width: 3, cap: .round, color: warm)
+        .fillPath(blob, color: accent)
+        .strokePath(blob, width: 1, cap: .round, color: ink)
+        .fill(star, color: ink)
+        .line([400, 10], [460, 86], width: 0.5, cap: .butt, color: ink)
+        .line([410, 10], [470, 86], width: 1, cap: .butt, color: ink)
+        .line([420, 10], [480, 86], width: 2, cap: .butt, color: ink)
+    return canvas(curves).size(490, 96)
 }
 
 public func shapesView(_ s: ShapesState, _ cx: inout Cx<ShapesState>) -> El<ShapesState> {
