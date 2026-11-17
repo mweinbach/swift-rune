@@ -2879,6 +2879,7 @@ public final class Runtime<State> {
             growthStacks = savedGrowthStacks
             result = buildMeasureResult(
                 rootEl: viewPass.rootEl,
+                retryingVirtualWindow: true,
                 passHelpLook: viewPass.helpLook,
                 collector: collector,
                 at: now,
@@ -2920,6 +2921,7 @@ public final class Runtime<State> {
     @inline(never)
     internal func buildMeasureResult(
         rootEl authoredRoot: El<State>,
+        retryingVirtualWindow: Bool = false,
         expandedContextOverride: VirtualExpansionContext? = nil,
         remountRowCache: [String: [String: CachedVirtualRow]]? = nil,
         rowReuseMode: VirtualRowReuseMode = .none,
@@ -2949,7 +2951,7 @@ public final class Runtime<State> {
         let savedVirtualLists = virtualLists
         let savedScrollOffsets = scrollOffsets
         let savedPinnedBottom = wasPinnedToBottom
-        var virtualPass = 0
+        var virtualPass = retryingVirtualWindow ? 1 : 0
         var expandedRoot: El<State>
         var layoutRoot: El<State>
         var virtualExpansion: VirtualExpansionContext
@@ -5660,6 +5662,7 @@ public final class Runtime<State> {
             case .visibleRows:
                 if let cb = handlers.onVisibleRows {
                     dispatchScoped(&tx) { s, _ in dispatched = cb(&s, action.rows) }
+                    if dispatched { stateUnchangedSinceBuild = false }
                 }
             case .visible:
                 if let cb = handlers.onVisible {

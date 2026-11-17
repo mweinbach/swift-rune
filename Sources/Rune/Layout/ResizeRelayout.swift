@@ -562,6 +562,7 @@ extension Runtime {
             let remeasureCache = pass.virtualExpansion.builtVirtualRows
             guard let remeasure = try? buildMeasureResult(
                 rootEl: cached.viewRootEl,
+                retryingVirtualWindow: true,
                 remountRowCache: remeasureCache,
                 rowReuseMode: .remount,
                 memoGeometryOverride: preGeom,
