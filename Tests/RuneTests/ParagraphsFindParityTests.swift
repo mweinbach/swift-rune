@@ -18,7 +18,8 @@ struct ParagraphsFindParityTests {
                                pixelScale: 2, emitGlyphs: false, request: request)
         }
         let waiting = try #require(layout().paragraphs)
-        let firstRun = try #require(waiting.paragraphs.first(where: \.run))
+        let packed = waiting.paragraphs.first(where: { $0.run })
+        let firstRun = try #require(packed)
         let mark = TextHighlight((firstRun.end - 1)..<(firstRun.end + 3), bg: .white)
         request.highlights = [mark]
         let box = layout()
