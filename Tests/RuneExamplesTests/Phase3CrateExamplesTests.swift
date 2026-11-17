@@ -74,7 +74,9 @@ struct Phase3CrateExamplesTests {
         #expect(big.files.visibleID(at: 1) == "pkg000/src/module0.rs")
         #expect(big.files.visibleID(at: 25_250) == "pkg250/src")
         #expect(big.files.visibleID(at: 50_499) == "pkg499/src/module99.rs")
-        #expect(big.files.get("pkg499/src/module99.rs")?.data?.removed == 49_999 % 11)
+        let lastChange = try #require(big.files.get("pkg499/src/module99.rs")?.data)
+        let lastIndex: UInt32 = 49_999
+        #expect(lastChange == RuneKitTreeApp.Change(added: lastIndex % 37, removed: lastIndex % 11, status: .modified))
     }
 
     @Test("rune-scroll-keys updates selection and scrolls viewport on Up/Down")
