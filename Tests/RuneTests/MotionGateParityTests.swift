@@ -86,7 +86,10 @@ struct MotionGateParityTests {
         )
         let runJump = MotionGateRun(rtJump)
         runJump.stepN(6)
-        runJump.actUpdate("teleport") { s, _ in s.shifted = true }
+        runJump.actUpdate("teleport") { s, tx in
+            s.shifted = true
+            tx.instant()
+        }
         let jumpFindings = runJump.playAndCheck(0.4)
         #expect(jumpFindings.contains { $0.kind == "jump" && $0.element.contains("teleporter") })
 
@@ -110,7 +113,10 @@ struct MotionGateParityTests {
         )
         let runIntent = MotionGateRun(rtIntent)
         runIntent.stepN(6)
-        runIntent.actUpdate("teleport") { s, _ in s.shifted = true }
+        runIntent.actUpdate("teleport") { s, tx in
+            s.shifted = true
+            tx.instant()
+        }
         let intentFindings = runIntent.playAndCheck(0.4)
         #expect(!intentFindings.contains { $0.kind == "jump" })
 
@@ -252,7 +258,10 @@ struct MotionGateParityTests {
                 )
                 let r = MotionGateRun(rt)
                 r.stepN(6)
-                r.actUpdate("move") { s, _ in s.x = true }
+                r.actUpdate("move") { s, tx in
+                    s.x = true
+                    tx.instant()
+                }
                 r.play(0.3)
                 return r.rec
             }),
