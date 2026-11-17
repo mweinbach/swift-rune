@@ -607,8 +607,8 @@ struct ScrollRuntimeSlice2ParityTests {
 
     // MARK: - tests/scroll_anchor.rs & src/runtime/tests/scroll_children.rs
 
-    @Test("tests/scroll_anchor.rs: rows inserted or grown above anchor top row; off-top/without-anchor/stick_bottom follow")
-    func scrollAnchorInsertionAndGrowth() {
+    @Test("tests/scroll_anchor.rs: rows inserted or grown above anchor top row; off-top/without-anchor/stick_bottom follow", arguments: [false, true])
+    func scrollAnchorInsertionAndGrowth(native: Bool) {
         struct Feed {
             var above: Int = 0
             var firstH: Float = 40
@@ -627,17 +627,28 @@ struct ScrollRuntimeSlice2ParityTests {
                 let vp: El<Feed> = col().key("scroll").size(300, 200).scrollY(stickBottom: s.stickBottom).child(list)
                 return s.anchor ? vp.scrollAnchor() : vp
             }
-            _ = rt.frame(at: 0.0)
+            func draw(_ time: Double) {
+                if native { _ = rt.renderFrame(at: time) } else { _ = rt.frame(at: time) }
+            }
+            func rowTop() -> Float {
+                let rowPath = rt.flatNodes.first { $0.key == "r5" }!.path
+                return rt.presentedRectByPath[rowPath]!.top
+            }
+            draw(0)
             rt.update(at: 0.01) { _, tx in tx.scrollToInstant("scroll", x: 0, y: at) }
             var t = 0.01
             for _ in 0..<4 {
                 t += 1.0 / 120.0
-                _ = rt.frame(at: t)
+                draw(t)
             }
-            let before = rt.element(byKey: "r5")!.rect[1]
+            let before = rowTop()
             rt.update(at: t) { s, _ in change(&s) }
-            t = settle(rt, start: t)
-            let after = rt.element(byKey: "r5")!.rect[1]
+            for _ in 0..<360 {
+                t += 1 / 60
+                draw(t)
+                if !rt.isAnimating && !rt.scrollStore.isAnimating { break }
+            }
+            let after = rowTop()
             return (before, after)
         }
 
