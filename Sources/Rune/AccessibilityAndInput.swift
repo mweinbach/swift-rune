@@ -27,17 +27,38 @@ public struct AccessibilityAnnouncement: Sendable, Equatable {
     public var text: String
     public var politeness: LiveRegionPoliteness
     public private(set) var count: UInt32 = 0
+    /// When it was last said (monotonic seconds, `a11y/mod.rs` `Announcement::at`, #980).
+    public private(set) var at: Double? = nil
+
+    /// How long words stay "recent" for a reader that attached as they were said (1500 ms).
+    public static let recentWindow: Double = 1.5
 
     public init(text: String = "", politeness: LiveRegionPoliteness = .polite) {
         self.text = text
         self.politeness = politeness
     }
 
-    public mutating func say(_ text: String, politeness: LiveRegionPoliteness = .polite) {
+    public mutating func say(_ text: String, politeness: LiveRegionPoliteness = .polite, at now: Double = AccessibilityAnnouncement.clock()) {
         self.text = text
         self.politeness = politeness
         self.count &+= 1
+        self.at = now
     }
+
+    /// Said in the last moments: a reader that attached as it was said should still hear it
+    /// (`Announcement::recent`, < 1.5 s).
+    public func recent(now: Double = AccessibilityAnnouncement.clock()) -> Bool {
+        guard let at else { return false }
+        return now - at < Self.recentWindow
+    }
+
+    /// The live region's name and politeness, if anything was said (`Announcement::words`).
+    public var words: (text: String, politeness: LiveRegionPoliteness)? {
+        spokenText.map { ($0, politeness) }
+    }
+
+    /// The monotonic clock `say` and `recent` read by default.
+    public static func clock() -> Double { ProcessInfo.processInfo.systemUptime }
 
     /// Alternating zero-width space suffix ensures screen readers speak repeated identical messages.
     public var spokenText: String? {
@@ -281,7 +302,9 @@ public enum AccessibilityTreeBuilder {
             value = isSecure ? nil : edit.text
         }
 
-        let resolvedRole: ElementRole = (isSecure && element.role == .textInput) ? .passwordInput : element.role
+        let resolvedRole: ElementRole = (isSecure && element.role == .textInput)
+            ? .passwordInput
+            : AccessibilityRoleRules.role(for: element, focusable: enabled && element.focusable)
         let labelledByText = relatedWords(key: element.a11yLabelledBy, ancestors: ancestors, selfKey: element.keyId)
         let describedByText = relatedWords(key: element.a11yDescribedBy, ancestors: ancestors, selfKey: element.keyId)
         let label = isSecure
@@ -310,36 +333,11 @@ public enum AccessibilityTreeBuilder {
                 projectedChildren.append(childNode)
             }
         }
+        var projectedSelection: [Int]? = nil
         if let grid = element.terminalGridPayload {
-            let cw = grid.cellSize.x
-            let ch = grid.cellSize.y
-            for (k, row) in grid.rows.enumerated() {
-                let y = absRect.y + Float(k) * ch
-                if y >= absRect.y + absRect.height { break }
-                let (rowText, places) = row.readingText()
-                let chars = Array(rowText)
-                let lengths: [UInt8] = chars.map { UInt8(clamping: String($0).utf8.count) }
-                let positions: [Float] = places.map { Float($0.column) * cw }
-                let widths: [Float] = places.map { Float($0.width) * cw }
-                var starts: [UInt8] = []
-                for idx in 0..<chars.count {
-                    let curWs = chars[idx].isWhitespace
-                    let prevWs = (idx == 0) || chars[idx - 1].isWhitespace
-                    if !curWs && prevWs {
-                        starts.append(UInt8(min(idx, 255)))
-                    }
-                }
-                projectedChildren.append(AccessibilityNode(
-                    id: "\(nodeId)/line:\(k)",
-                    role: .text,
-                    value: rowText,
-                    frame: MotionRect.fromXYWH(absRect.x, y, Float(grid.columns) * cw, ch),
-                    characterLengths: lengths,
-                    characterPositions: positions,
-                    characterWidths: widths,
-                    wordStarts: starts
-                ))
-            }
+            let projected = Self.projectTerminalGrid(grid, nodeId: nodeId, bounds: absRect)
+            projectedChildren.append(contentsOf: projected.children)
+            projectedSelection = projected.selection
         }
 
         return AccessibilityNode(
@@ -370,11 +368,72 @@ public enum AccessibilityTreeBuilder {
             toggled: element.a11yChecked,
             liveRegion: element.a11yLive,
             clipsChildren: element.layout.clipOverflow,
+            textSelection: projectedSelection,
             isModal: element.isModal,
             isSecure: isSecure,
             actions: actions,
             children: projectedChildren
         )
+    }
+
+    internal static func projectTerminalGrid(
+        _ grid: TerminalGrid,
+        nodeId: String,
+        bounds: MotionRect
+    ) -> (children: [AccessibilityNode], selection: [Int]?) {
+        let cw = grid.cellSize.x
+        let ch = grid.cellSize.y
+        let shown = min(grid.rows.count, max(0, Int(ceil(Double(bounds.height / max(ch, 1.0))))))
+        var children: [AccessibilityNode] = []
+        children.reserveCapacity(shown)
+        var selection: [Int]? = nil
+        for k in 0..<shown {
+            let row = grid.rows[k]
+            let y = bounds.y + Float(k) * ch
+            var (rowText, places) = row.readingText()
+            let readCount = places.count
+            let end = places.last.map { $0.column + max($0.width, 1) } ?? 0
+            if !row.wraps && k + 1 < shown {
+                rowText.append("\n")
+                places.append((column: end, width: 0))
+            }
+            if row.wraps && end < grid.columns {
+                rowText.append(String(repeating: " ", count: grid.columns - end))
+                for col in end..<grid.columns {
+                    places.append((column: col, width: 1))
+                }
+            }
+            if let caret = grid.caret, caret.row == k {
+                let charIdx = TerminalGridRow.charAt(
+                    columnPlaces: Array(places.prefix(readCount)),
+                    column: caret.column
+                )
+                selection = [k, charIdx, k, charIdx]
+            }
+            let chars = Array(rowText)
+            let lengths: [UInt8] = chars.map { UInt8(clamping: String($0).utf8.count) }
+            let positions: [Float] = places.map { Float($0.column) * cw }
+            let widths: [Float] = places.map { Float($0.width) * cw }
+            var starts: [UInt8] = []
+            for idx in 0..<chars.count {
+                let curWs = chars[idx].isWhitespace
+                let prevWs = (idx == 0) || chars[idx - 1].isWhitespace
+                if !curWs && prevWs {
+                    starts.append(UInt8(min(idx, 255)))
+                }
+            }
+            children.append(AccessibilityNode(
+                id: "\(nodeId)/line:\(k)",
+                role: .text,
+                value: rowText,
+                frame: MotionRect.fromXYWH(bounds.x, y, Float(grid.columns) * cw, ch),
+                characterLengths: lengths,
+                characterPositions: positions,
+                characterWidths: widths,
+                wordStarts: starts
+            ))
+        }
+        return (children, selection)
     }
 }
 
@@ -394,7 +453,7 @@ public enum AppKitAccessibilityMapper {
         case .slider: return .slider
         case .progress: return .progressIndicator
         case .listItem: return .row
-        case .heading: return .staticText
+        case .heading: return NSAccessibility.Role(rawValue: AccessibilityHeading.macRoleName)
         case .dialog: return .sheet
         case .menu: return .menu
         case .menuItem: return .menuItem
@@ -465,7 +524,11 @@ public final class RuneNSAccessibilityElement: NSAccessibilityElement {
         if let label = node.label {
             setAccessibilityLabel(label)
         }
-        if !node.isSecure, let value = node.value {
+        if node.role == .heading {
+            // A heading's value is its level, as WebKit and Chromium give VoiceOver
+            // (`vendor/accesskit_macos.patch`, #975), checked before the text value.
+            setAccessibilityValue(NSNumber(value: AccessibilityHeading.macLevelValue(level: node.level)))
+        } else if !node.isSecure, let value = node.value {
             setAccessibilityValue(value)
         }
         if let help = node.help {
@@ -1096,6 +1159,9 @@ public enum ShortcutError: Error, Sendable, Equatable {
     case unmodifiedDisallowed
     case alreadyInUse(owner: String?)
     case rejectedByOS(String)
+    case unsupported
+    case permissionDenied
+    case notRunning
 }
 
 /// Outcome of dispatching a `KeyEvent` through `ShortcutRegistry`.
@@ -1700,6 +1766,13 @@ public final class ShortcutProcessClaims: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return claims.count
+    }
+
+    /// The registration ids on record for `shortcut` (the process claim list, filtered by chord).
+    internal func claimedIDs(for shortcut: ParsedShortcut) -> [UInt32] {
+        lock.lock()
+        defer { lock.unlock() }
+        return claims[shortcut].map { [$0.regID] } ?? []
     }
 }
 

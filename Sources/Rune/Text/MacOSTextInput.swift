@@ -203,6 +203,7 @@ public final class MacOSTextInputBridge {
 
     public var isComposing: Bool { !markedString.isEmpty }
     public var currentMarkedText: String { markedString }
+    public var isTrackingKeyEvent: Bool { trackingKeyEvent }
 
     /// Publishes focused field context & screen-space caret rect to AppKit IME (`rune::platform::ime::sync`).
     public func sync(
@@ -229,10 +230,10 @@ public final class MacOSTextInputBridge {
     }
 
     /// Routes an `NSEvent` keyDown through `NSTextInputContext` when appropriate.
-    public func processKeyDown(_ event: NSEvent, in view: NSView) -> MacOSKeyInterceptResult {
+    public func processKeyDown(_ event: NSEvent, in view: NSView, optionAsAlt: Bool = false) -> MacOSKeyInterceptResult {
         let flags = event.modifierFlags
-        // Command or Control chords (except Ctrl+Space/Ctrl+Cmd+Space handled by AppKit when needed) bypass plain typing.
-        if (flags.contains(.command) || flags.contains(.control)) && !isComposing {
+        // Command or Control chords (plus Option chords when `El::ime_option_as_alt` is active) bypass IME composition.
+        if (flags.contains(.command) || flags.contains(.control) || (optionAsAlt && flags.contains(.option))) && !isComposing {
             return .forwardKeyDown
         }
 

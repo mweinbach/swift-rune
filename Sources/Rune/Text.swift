@@ -213,6 +213,12 @@ public struct TextStyle: Sendable, Hashable, Codable {
         return copy
     }
 
+    public func wrapAnywhere(_ enabled: Bool = true) -> TextStyle {
+        var copy = self
+        copy.wrapAnywhere = enabled
+        return copy
+    }
+
     public func aligned(_ a: TextAlign) -> TextStyle {
         var copy = self
         copy.align = a
@@ -272,6 +278,8 @@ public struct TextSpan: Sendable, Hashable {
     public var underline: Bool
     public var strikethrough: Bool
     public var size: Float?
+    /// Room (points) its background takes past the text on each side (`Span::bg_pad`).
+    public var pad: Float
 
     public init(
         _ text: String,
@@ -282,8 +290,10 @@ public struct TextSpan: Sendable, Hashable {
         monospace: Bool = false,
         underline: Bool = false,
         strikethrough: Bool = false,
-        size: Float? = nil
+        size: Float? = nil,
+        pad: Float = 0
     ) {
+        self.pad = max(0, pad)
         self.text = text
         self.color = color
         self.background = background
@@ -483,6 +493,9 @@ public struct ShapedText: @unchecked Sendable {
     public var inlineIcons: [InlineIconQuad] = []
     #if canImport(CoreText) && canImport(CoreGraphics)
     internal var lineStrings: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)] = []
+    /// Per glyph in `glyphs`, its face and exact pen, so paint can choose its quarter-pixel phase
+    /// again where a text laid out from a fractional origin lands (`glyph_emit.rs`, #935).
+    internal var glyphPens: [GlyphPen] = []
     #endif
     fileprivate var portableLines: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
     internal var markerMap: MarkerMap = MarkerMap()
@@ -491,9 +504,63 @@ public struct ShapedText: @unchecked Sendable {
     public var wasTruncated: Bool = false
     internal var lastLineAdvancePx: Float = 0
     internal var hangingAdvancePx: Float = 0
+    internal var lastLineWidthPx: Float = 0
+    internal var lastLineTrailingWsPx: Float = 0
     public var elided: TextElision? = nil
-    internal var drawnText: String = ""
+    public var drawnText: String = ""
     internal var lineAdvancesPx: [(widthPx: Float, trailingWsPx: Float)] = []
+    internal var lineGlyphRanges: [Range<Int>] = []
+    /// Each line's top (points) when inline code grew some lines (`#983`); empty while every
+    /// line is `lineHeight` tall.
+    internal var grownLineTopsPt: [Float] = []
+    /// Each grown layout line's box height in points (`block_max_coord - block_min_coord`).
+    internal var grownLineHeightsPt: [Float] = []
+
+    /// Each grown layout line's `line_height` in points (unrounded `over + under`).
+    internal var grownLineMetricHeightsPt: [Float] = []
+
+    /// Line `i`'s `line.metrics().line_height` in points: its grown height when inline code grew
+    /// lines (`#983`), else `lineHeight` (`line_metrics::stream_height_lag` reads the last line's).
+    internal func lineMetricHeightPt(_ i: Int) -> Float {
+        (i >= 0 && i < grownLineMetricHeightsPt.count) ? grownLineMetricHeightsPt[i] : lineHeight
+    }
+
+    /// Line `i`'s box height in points, for carets and selections: its grown box's when inline
+    /// code grew lines (`#983`), else `lineHeight`.
+    internal func lineBoxHeightPt(_ i: Int) -> Float {
+        (i >= 0 && i < grownLineHeightsPt.count) ? grownLineHeightsPt[i] : lineHeight
+    }
+
+    /// The line at `localY` (points): by `grownLineTopsPt` when lines grew, else by `lineHeight`.
+    internal func lineIndex(atLocalY localY: Float, lineCount n: Int) -> Int {
+        guard n > 0 else { return 0 }
+        if grownLineTopsPt.count == n {
+            var idx = 0
+            for (i, top) in grownLineTopsPt.enumerated() where localY >= top {
+                idx = i
+            }
+            return idx
+        }
+        return Int(floorf(max(0, localY) / max(1, lineHeight))).clamped(to: 0...(n - 1))
+    }
+
+    /// Line `i`'s top in points (`grownLineTopsPt` when inline code grew lines).
+    internal func lineTopPt(_ i: Int) -> Float {
+        (i >= 0 && i < grownLineTopsPt.count) ? grownLineTopsPt[i] : Float(i) * lineHeight
+    }
+
+    /// The line height glyph-band culling may assume: `0` (no culling) once lines grew.
+    internal var bandLineHeight: Float {
+        grownLineTopsPt.isEmpty ? lineHeight : 0
+    }
+    /// Per line, its baseline (shaping px from the layout's top, rounded) and how far the exact
+    /// baseline sits from it (`exact - rounded`), so paint can round it once at its absolute
+    /// place (`TextBoxGeometry.roundedBaselines`, #935).
+    internal var lineBaselinesPx: [Float] = []
+    internal var lineBaselineFracsPx: [Float] = []
+    /// Per underline in `underlines`, where its line's glyph runs end (points, alignment in), so
+    /// paint can end a run that ends its line where it ends (`underline::underline_edges`).
+    internal var underlineLineEndsPt: [Float] = []
 
     internal func lineAdvancePx(at index: Int) -> Float {
         guard index >= 0, index < lineAdvancesPx.count else { return 0 }
@@ -724,14 +791,15 @@ public final class GlyphAtlas: @unchecked Sendable {
     private var rasterizedCount: UInt64 = 0
     private var accessCounter: UInt64 = 0
     #if canImport(CoreText) && canImport(CoreGraphics)
-    private var glyphCache: [GlyphKey: (entry: Entry, lastUsed: UInt64)] = [:]
-    private var colorGlyphCache: [ColorGlyphKey: (entry: ColorGlyphEntry, lastUsed: UInt64)] = [:]
+    private var glyphCache: [GlyphKey: (entry: Entry, lastUsed: UInt64, lastFrame: UInt64)] = [:]
+    private var colorGlyphCache: [ColorGlyphKey: (entry: ColorGlyphEntry, lastUsed: UInt64, lastFrame: UInt64)] = [:]
     private var colorGlyphByIndex: [UInt32: ColorGlyphEntry] = [:]
     private var colorGlyphBytes: Int = 0
     private var nextColorGlyphIndex: UInt32 = 1
     #endif
-    private var portableGlyphCache: [PortableGlyphKey: (entry: Entry, lastUsed: UInt64)] = [:]
-    private var iconCache: [IconKey: (entry: Entry, lastUsed: UInt64)] = [:]
+    private var portableGlyphCache: [PortableGlyphKey: (entry: Entry, lastUsed: UInt64, lastFrame: UInt64)] = [:]
+    private var iconCache: [IconKey: (entry: Entry, lastUsed: UInt64, lastFrame: UInt64)] = [:]
+    private var frameSequence: UInt64 = 0
 
     /// Initializes the atlas with lazy CPU pixel backing (`#830`: keeps a 1-byte 1x1 stub until the first mask is placed).
     public convenience init(width: Int = GlyphAtlas.atlasSize, height: Int = GlyphAtlas.atlasSize, maxCachedEntries: Int = 4096) {
@@ -864,6 +932,7 @@ public final class GlyphAtlas: @unchecked Sendable {
     public func beginFrame(pinnedMask: UInt32 = 0) {
         lock.lock()
         defer { lock.unlock() }
+        frameSequence &+= 1
         let total = 1 + overflowPages.count
         var totalLive: UInt64 = 0
         for p in 0..<total {
@@ -903,6 +972,27 @@ public final class GlyphAtlas: @unchecked Sendable {
                 touchLocked(page: UInt16(p), texels: 0)
             }
         }
+    }
+
+    /// Drops glyph and icon cache entries older than 1 frame (`GlyphCache::drop_orphans`, `#905`).
+    public func dropOrphans() {
+        lock.lock()
+        defer { lock.unlock() }
+        let f = frameSequence
+        portableGlyphCache = portableGlyphCache.filter { (f &- $0.value.lastFrame) <= 1 }
+        iconCache = iconCache.filter { (f &- $0.value.lastFrame) <= 1 }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        glyphCache = glyphCache.filter { (f &- $0.value.lastFrame) <= 1 }
+        colorGlyphCache = colorGlyphCache.filter { (f &- $0.value.lastFrame) <= 1 }
+        var liveIndices = Set<UInt32>()
+        var totalBytes = 0
+        for v in colorGlyphCache.values {
+            liveIndices.insert(v.entry.index)
+            totalBytes += v.entry.rgba.count
+        }
+        colorGlyphByIndex = colorGlyphByIndex.filter { liveIndices.contains($0.key) }
+        colorGlyphBytes = totalBytes
+        #endif
     }
 
     /// Current CPU bytes held by cached RGBA color glyphs (`#807`).
@@ -1047,6 +1137,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         if var cached = portableGlyphCache[key] {
             accessCounter &+= 1
             cached.lastUsed = accessCounter
+            cached.lastFrame = frameSequence
             portableGlyphCache[key] = cached
             touchLocked(page: cached.entry.page, texels: UInt32(cached.entry.pixelSize.x * cached.entry.pixelSize.y))
             lock.unlock()
@@ -1073,7 +1164,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             pixelOrigin: placed.origin
         )
         accessCounter &+= 1
-        portableGlyphCache[key] = (entry, accessCounter)
+        portableGlyphCache[key] = (entry, accessCounter, frameSequence)
         evictLRUIfNeededLocked()
         lock.unlock()
         return entry
@@ -1102,6 +1193,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         if var cached = colorGlyphCache[key] {
             accessCounter &+= 1
             cached.lastUsed = accessCounter
+            cached.lastFrame = frameSequence
             colorGlyphCache[key] = cached
             lock.unlock()
             return cached.entry
@@ -1158,7 +1250,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             rgba: rgba
         )
         accessCounter &+= 1
-        colorGlyphCache[key] = (entry, accessCounter)
+        colorGlyphCache[key] = (entry, accessCounter, frameSequence)
         colorGlyphByIndex[idx] = entry
         colorGlyphBytes += rgba.count
         evictColorGlyphBudgetLocked(preserving: key)
@@ -1191,6 +1283,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         if var cached = glyphCache[key] {
             accessCounter &+= 1
             cached.lastUsed = accessCounter
+            cached.lastFrame = frameSequence
             glyphCache[key] = cached
             touchLocked(page: cached.entry.page, texels: UInt32(cached.entry.pixelSize.x * cached.entry.pixelSize.y))
             lock.unlock()
@@ -1205,7 +1298,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             let empty = Entry(uv: .zero, pixelSize: .zero, bearingPx: .zero)
             lock.lock()
             accessCounter &+= 1
-            glyphCache[key] = (empty, accessCounter)
+            glyphCache[key] = (empty, accessCounter, frameSequence)
             evictLRUIfNeededLocked()
             lock.unlock()
             return empty
@@ -1233,7 +1326,8 @@ public final class GlyphAtlas: @unchecked Sendable {
             return nil
         }
 
-        let allowFontSmoothing = smoothing.isEnabled
+        // `FontSmoothing::pipeline`: `.on` follows `AppleFontSmoothing` 0 on macOS (`#954`).
+        let allowFontSmoothing = smoothing.pipeline.dilate
         ctx.setAllowsAntialiasing(true)
         ctx.setShouldAntialias(true)
         ctx.setAllowsFontSmoothing(allowFontSmoothing)
@@ -1306,7 +1400,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             pixelOrigin: placed.origin
         )
         accessCounter &+= 1
-        glyphCache[key] = (entry, accessCounter)
+        glyphCache[key] = (entry, accessCounter, frameSequence)
         evictLRUIfNeededLocked()
         lock.unlock()
         return entry
@@ -1315,58 +1409,7 @@ public final class GlyphAtlas: @unchecked Sendable {
 
     public static func rasterizeIconBitmap(_ icon: SVGIcon, pixelSize: Int, drawnSize: Float? = nil) -> [UInt8] {
         let px = max(1, pixelSize)
-        let drawn = min(Float(px), max(1e-4, drawnSize ?? Float(px)))
-        #if canImport(CoreGraphics)
-        var bitmap = Array<UInt8>(repeating: 0, count: px * px)
-        let graySpace = CGColorSpaceCreateDeviceGray()
-        if let ctx = CGContext(
-            data: &bitmap,
-            width: px,
-            height: px,
-            bitsPerComponent: 8,
-            bytesPerRow: px,
-            space: graySpace,
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) {
-            ctx.setAllowsAntialiasing(true)
-            ctx.setShouldAntialias(true)
-            // Flip Y so SVG top-left (0,0) maps to top of bitmap!
-            ctx.translateBy(x: 0, y: CGFloat(px))
-            let scale = CGFloat(drawn) / CGFloat(icon.viewBox)
-            ctx.scaleBy(x: scale, y: -scale)
-
-            for d in icon.paths {
-                let cgPath = Self.parseSVGPath(d)
-                ctx.addPath(cgPath)
-                if let sw = icon.strokeWidth, sw > 0 {
-                    ctx.setStrokeColor(gray: 1.0, alpha: 1.0)
-                    ctx.setLineWidth(CGFloat(sw))
-                    ctx.setLineCap(.round)
-                    ctx.setLineJoin(.round)
-                    ctx.strokePath()
-                } else {
-                    ctx.setFillColor(gray: 1.0, alpha: 1.0)
-                    ctx.fillPath()
-                }
-            }
-            if icon.paths.isEmpty, let body = icon.body {
-                SVGIconRenderer.drawMonochromeBody(body, in: ctx)
-            }
-        }
-        return bitmap
-        #else
-        let resolvedIcon: SVGIcon
-        if icon.paths.isEmpty, let body = icon.body {
-            resolvedIcon = SVGIcon(
-                viewBox: icon.viewBox,
-                paths: SVGIconRenderer.extractPathStrings(fromBody: body),
-                strokeWidth: icon.strokeWidth
-            )
-        } else {
-            resolvedIcon = icon
-        }
-        return PortableSVGRasterizer.rasterize(resolvedIcon, pixelSize: px, drawnSize: drawn)
-        #endif
+        return GaneshIcon.coverageAt(icon, pixelSize: px, drawnSize: drawnSize, origin: .zero)
     }
 
     public func rasterizeIconIfPlaced(_ icon: SVGIcon, pixelSize: Int, drawnSize: Float? = nil, mirrored: Bool = false) -> Entry? {
@@ -1386,6 +1429,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         if var cached = iconCache[key] {
             accessCounter &+= 1
             cached.lastUsed = accessCounter
+            cached.lastFrame = frameSequence
             iconCache[key] = cached
             touchLocked(page: cached.entry.page, texels: UInt32(cached.entry.pixelSize.x * cached.entry.pixelSize.y))
             lock.unlock()
@@ -1421,7 +1465,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             pixelOrigin: placed.origin
         )
         accessCounter &+= 1
-        iconCache[key] = (entry, accessCounter)
+        iconCache[key] = (entry, accessCounter, frameSequence)
         evictLRUIfNeededLocked()
         lock.unlock()
         return entry
@@ -2019,6 +2063,30 @@ public final class TextSystem: @unchecked Sendable {
         var features: String
     }
 
+    internal struct DecoratedRange {
+        var u16Range: Range<Int>
+        var underline: Bool
+        var strikethrough: Bool
+        var background: Color?
+        /// Inline code (`Span::mono`): its background is its font's content area (`#983`).
+        var monospace: Bool = false
+        /// `Span::bg_pad` in points.
+        var pad: Float = 0
+    }
+
+    /// A span set in a font of its own (inline code, a run of another size) whose quantized box may
+    /// grow the lines it sits on, as Parley lays every run's box out (`#983`, `inline_fit.rs`): its
+    /// shaped range and its font's ascent and descent in device px. Weight and italic alone keep
+    /// the family's metrics (Parley synthesizes them from the same face), so they make no box.
+    internal struct InlineSpanBox {
+        var u16Range: Range<Int>
+        var ascentPx: Float
+        var descentPx: Float
+        /// The box's own line height (device px): the paragraph's, or for a span with its own
+        /// size `LineHeight::FontSizeRelative(line / style.size)` at that size (`text.rs`).
+        var lineHeightPx: Float
+    }
+
     private struct MeasureKey: Hashable {
         var text: String
         var style: TextStyle
@@ -2026,6 +2094,7 @@ public final class TextSystem: @unchecked Sendable {
         var scale100: Int
         var pillsHash: UInt64 = 0
         var fontEpoch: UInt64 = 1
+        var pretty: Bool = false
     }
 
     private struct ShapeKey: Hashable {
@@ -2038,6 +2107,7 @@ public final class TextSystem: @unchecked Sendable {
         var fontEpoch: UInt64
         var langEpoch: UInt64
         var emitGlyphs: Bool
+        var pretty: Bool = false
     }
 
     private struct ElisionKey: Hashable {
@@ -2055,9 +2125,11 @@ public final class TextSystem: @unchecked Sendable {
         var elision: TextElision
         var withoutGlyphs: ShapedText?
         var withGlyphs: ShapedText?
+        /// Elision commit epoch it was last used in (`elisionEpoch`; also `rest()`'s staleness clock).
+        var epoch: UInt64 = 0
     }
 
-    private struct PreparedPill {
+    internal struct PreparedPill {
         var pillIndex: Int
         var pill: PillChip
         var authU16Lo: Int
@@ -2251,6 +2323,7 @@ public final class TextSystem: @unchecked Sendable {
 
     private let lock = NSLock()
     public let glyphAtlas: GlyphAtlas
+    public let glyphCache = GlyphReplayCache()
     public let colorIcons = ColorIconRasterizer()
     private var sansFamilyOverride: String = ""
     private var monoFamilyOverride: String = ""
@@ -2260,13 +2333,8 @@ public final class TextSystem: @unchecked Sendable {
     #if canImport(CoreText) && canImport(CoreGraphics)
     private var fontCache: [FontKey: CTFont] = [:]
     #endif
-    private var measureCache: [MeasureKey: Vec2] = [:]
-    private struct DecoratedRange {
-        var u16Range: Range<Int>
-        var underline: Bool
-        var strikethrough: Bool
-        var background: Color?
-    }
+    /// Measured sizes stamped with the layout commit (`layoutCommitSeq`) they were last used in (`#905` rest eviction).
+    private var measureCache: [MeasureKey: (size: Vec2, usedGeneration: UInt64)] = [:]
 
     private struct TypesetterKey: Hashable {
         var text: String
@@ -2295,18 +2363,6 @@ public final class TextSystem: @unchecked Sendable {
         }
     }
 
-    private struct CachedTypesetter {
-        var typesetter: CTTypesetter
-        var shapedText: String
-        var markerMap: ShapedText.MarkerMap
-        var preparedPills: [PreparedPill]
-        var spanPalette: [Color]
-        var decoratedRanges: [DecoratedRange]
-        var baseFont: CTFont
-        var baseAscentPx: CGFloat
-        var baseDescentPx: CGFloat
-    }
-
     public var smoothing: FontSmoothing = .platformDefault {
         didSet {
             if smoothing != oldValue {
@@ -2315,6 +2371,8 @@ public final class TextSystem: @unchecked Sendable {
                 shapeCache.removeAll(keepingCapacity: true)
                 elisionCache.removeAll(keepingCapacity: true)
                 typesetterCache.removeAll(keepingCapacity: true)
+                preparedShapeCache.removeAll(keepingCapacity: true)
+                layoutCache.removeAll(keepingCapacity: true)
                 lock.unlock()
             }
         }
@@ -2322,13 +2380,20 @@ public final class TextSystem: @unchecked Sendable {
 
     public var applePipeline: ApplePipeline { smoothing.pipeline }
 
-    private var shapeCache: [ShapeKey: ShapedText] = [:]
+    private var shapeCache: [ShapeKey: (shaped: ShapedText, usedGeneration: UInt64)] = [:]
     private var elisionCache: [ElisionKey: CachedElision] = [:]
-    private var typesetterCache: [TypesetterKey: CachedTypesetter] = [:]
+    private var typesetterCache: [TypesetterKey: TextPreparedShape] = [:]
+    private var preparedShapeCache: [TextShapeKey: TextPreparedShape] = [:]
+    private var layoutCache: [TextShapeKey: TextLayoutBox] = [:]
+    private var layoutCommitSeq: UInt64 = 0
+    private var _shapedCount: Int = 0
+    private var _rebrokenCount: Int = 0
+    private var _typesetterRebrokenCount: Int = 0
+    private var elisionEpoch: UInt64 = 0
+    private var _shapeCount: UInt64 = 0
     internal private(set) var measureMissCount: Int = 0
     internal private(set) var shapeMissCount: Int = 0
     internal private(set) var shapedBuildCount: Int = 0
-    internal private(set) var rebrokenCount: Int = 0
     private var shapeCallCounter: UInt64 = 0
 
     /// Drops cached layouts and typesetters while keeping rasterized glyph and icon atlases intact.
@@ -2338,7 +2403,71 @@ public final class TextSystem: @unchecked Sendable {
         shapeCache.removeAll(keepingCapacity: true)
         elisionCache.removeAll(keepingCapacity: true)
         typesetterCache.removeAll(keepingCapacity: true)
+        preparedShapeCache.removeAll(keepingCapacity: true)
+        layoutCache.removeAll(keepingCapacity: true)
         lock.unlock()
+    }
+
+    /// Advances the layout commit generation after a committed frame (`#905`) without any
+    /// still-shown keys to refresh; the same clock and budget sweep as `endCommit(activeKeys:)`.
+    public func endCommit() {
+        endCommit(activeKeys: [])
+    }
+
+    /// Whether an entry last used in commit `used` is two or more commits behind commit `g`.
+    /// Entries a sweep stamped with the commit just begun (`used > g`) count as fresh.
+    private static func isStale(used: UInt64, lastCommit g: UInt64) -> Bool {
+        used <= g && g - used >= 2
+    }
+
+    /// Window at rest (`TextSystem::rest`, `#905`): evicts layout/shape/measure/elision/typesetter
+    /// entries the last two commits didn't use, forgets their glyph runs, and drops orphan glyph
+    /// cache entries.
+    public func rest() {
+        var evictedKeys: [TextShapeKey] = []
+        lock.lock()
+        if layoutCommitSeq > 0 {
+            // `endCommit` moved the generation on after the last commit.
+            let g = layoutCommitSeq &- 1
+            measureCache = measureCache.filter { !Self.isStale(used: $0.value.usedGeneration, lastCommit: g) }
+            shapeCache = shapeCache.filter { !Self.isStale(used: $0.value.usedGeneration, lastCommit: g) }
+            typesetterCache = typesetterCache.filter { !Self.isStale(used: $0.value.lastUsedCommit, lastCommit: g) }
+            for (k, b) in layoutCache where Self.isStale(used: b.lastUsedCommit, lastCommit: g) {
+                evictedKeys.append(k)
+            }
+            for k in evictedKeys {
+                layoutCache.removeValue(forKey: k)
+                preparedShapeCache.removeValue(forKey: k)
+            }
+        }
+        // Elisions run on their own per-commit epoch (`beginElisionCommit`), bumped as each commit begins.
+        let e = elisionEpoch
+        elisionCache = elisionCache.filter { !Self.isStale(used: $0.value.epoch, lastCommit: e) }
+        lock.unlock()
+        for k in evictedKeys {
+            glyphCache.forget(shapeKey: k)
+        }
+        glyphAtlas.dropOrphans()
+    }
+
+    internal var cachedMeasureCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return measureCache.count
+    }
+
+    /// Entries in the `shape(...)`/`measure(...)` `ShapedText` cache (`shapeCache`); distinct from
+    /// `cachedShapeCount`, which counts `layoutKeyed` prepared shapes (`cached_shape_count`).
+    internal var cachedShapedTextCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return shapeCache.count
+    }
+
+    internal var cachedTypesetterCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return typesetterCache.count
     }
 
     /// Rasterizes a standalone `SVGIcon` into the glyph atlas and returns a `PositionedGlyph` quad (`text/mod.rs` `icon_quad`).
@@ -2357,7 +2486,13 @@ public final class TextSystem: @unchecked Sendable {
         )
     }
 
-    internal var cachedElisionCount: Int {
+    public var shapeCount: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return _shapeCount
+    }
+
+    public var cachedElisionCount: Int {
         lock.lock()
         defer { lock.unlock() }
         return elisionCache.count
@@ -2372,6 +2507,89 @@ public final class TextSystem: @unchecked Sendable {
     internal func recordShapeCall() {
         lock.lock()
         shapeCallCounter &+= 1
+        lock.unlock()
+    }
+
+    /// Total number of full text shaping runs (`TextSystem::shaped_count`).
+    public var shapedCount: Int {
+        lock.withLock { _shapedCount }
+    }
+
+    /// Total number of width re-break passes that reused cached shaping (`TextSystem::rebroken_count`).
+    public var rebrokenCount: Int {
+        lock.withLock { _rebrokenCount + _typesetterRebrokenCount }
+    }
+
+    /// Current number of cached laid-out boxes (`TextSystem::cached_layout_count`).
+    public var cachedLayoutCount: Int {
+        lock.withLock { layoutCache.count }
+    }
+
+    /// Current number of cached prepared shapes (`TextSystem::cached_shape_count`).
+    public var cachedShapeCount: Int {
+        lock.withLock { preparedShapeCache.count }
+    }
+
+    internal func cachedLayoutBox(for shapeKey: TextShapeKey) -> TextLayoutBox? {
+        lock.withLock { layoutCache[shapeKey] }
+    }
+
+    /// Evicts a superseded layout/shape/glyph entry immediately (`text_layout::supersede`).
+    public func supersede(_ key: TextShapeKey) {
+        lock.lock()
+        layoutCache.removeValue(forKey: key)
+        preparedShapeCache.removeValue(forKey: key)
+        lock.unlock()
+        glyphCache.forget(shapeKey: key)
+    }
+
+    /// Advances commit counter and sweeps stale cached layouts beyond 60 commits and 3 MiB (`end_commit`).
+    public func endCommit(activeKeys: Set<TextShapeKey>) {
+        let staleCommits: UInt64 = 60
+        let staleBytes = 3 * 1024 * 1024
+        var evictedKeys: [TextShapeKey] = []
+
+        lock.lock()
+        layoutCommitSeq &+= 1
+        let nowSeq = layoutCommitSeq
+        for k in activeKeys {
+            if let b = layoutCache[k] {
+                b.lastUsedCommit = nowSeq
+            }
+        }
+        var totalBytes = 0
+        for (_, b) in layoutCache {
+            totalBytes += b.estimatedBytes
+        }
+        if totalBytes > staleBytes {
+            let candidates = layoutCache
+                .filter { !activeKeys.contains($0.key) && nowSeq &- $0.value.lastUsedCommit >= staleCommits }
+                .sorted { $0.value.lastUsedCommit < $1.value.lastUsedCommit }
+            for (k, b) in candidates {
+                if totalBytes <= staleBytes { break }
+                layoutCache.removeValue(forKey: k)
+                preparedShapeCache.removeValue(forKey: k)
+                totalBytes = max(0, totalBytes - b.estimatedBytes)
+                evictedKeys.append(k)
+            }
+        }
+        lock.unlock()
+
+        for k in evictedKeys {
+            glyphCache.forget(shapeKey: k)
+        }
+    }
+
+    public func beginElisionCommit() {
+        lock.lock()
+        elisionEpoch &+= 1
+        lock.unlock()
+    }
+
+    public func pruneUnusedElisions() {
+        lock.lock()
+        let cur = elisionEpoch
+        elisionCache = elisionCache.filter { $0.value.epoch == cur }
         lock.unlock()
     }
 
@@ -2404,8 +2622,8 @@ public final class TextSystem: @unchecked Sendable {
             normalized = nil
         }
         lock.lock()
-        defer { lock.unlock() }
         if languageTagOverride == normalized {
+            lock.unlock()
             return false
         }
         languageTagOverride = normalized
@@ -2413,6 +2631,10 @@ public final class TextSystem: @unchecked Sendable {
         shapeCache.removeAll(keepingCapacity: true)
         elisionCache.removeAll(keepingCapacity: true)
         typesetterCache.removeAll(keepingCapacity: true)
+        preparedShapeCache.removeAll(keepingCapacity: true)
+        layoutCache.removeAll(keepingCapacity: true)
+        lock.unlock()
+        glyphCache.clear()
         return true
     }
 
@@ -2422,6 +2644,44 @@ public final class TextSystem: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return lastObservedFontEpoch
+    }
+
+    private final class PrettyWrapStorage: @unchecked Sendable {
+        let lock = NSLock()
+        var enabled: Bool = false
+    }
+    private static let prettyStorage = PrettyWrapStorage()
+
+    /// Opts wrapped proportional text into Chromium's `text-wrap-style: pretty` (`ScoreLineBreaker`, `#882`).
+    /// A paragraph that would end on a lone short word takes a word or more down with it, pills and
+    /// inline boxes included (`#933`). Text in a monospace family, justified, cut to a number of lines
+    /// or opted out with `El.wrapGreedy` keeps greedy lines, as does, as in Chromium, a paragraph whose
+    /// last line holds an isolated run (inline code) and one with a word broken inside to fit (`wrapAnywhere`).
+    public static func setPrettyWrap(_ on: Bool) {
+        prettyStorage.lock.lock()
+        let changed = (prettyStorage.enabled != on)
+        prettyStorage.enabled = on
+        prettyStorage.lock.unlock()
+        if changed {
+            _ = FontFamiliesRegistry.bumpEpoch()
+        }
+    }
+
+    public static var prettyWrap: Bool {
+        prettyStorage.lock.lock()
+        let v = prettyStorage.enabled
+        prettyStorage.lock.unlock()
+        return v
+    }
+
+    /// Declares CSS `@font-face` weight ranges for app-registered families (`set_face_weights`, `#853`).
+    public static func setFaceWeights(_ faces: [FaceWeights]) {
+        FaceWeightsRegistry.set(faces)
+        _ = FontFamiliesRegistry.bumpEpoch()
+    }
+
+    public static var faceWeights: [FaceWeights] {
+        FaceWeightsRegistry.snapshot()
     }
 
     /// Looks up a cached RGBA color glyph bitmap emitted during `shape(...)` (`#807`).
@@ -2458,7 +2718,10 @@ public final class TextSystem: @unchecked Sendable {
         shapeCache.removeAll(keepingCapacity: true)
         elisionCache.removeAll(keepingCapacity: true)
         typesetterCache.removeAll(keepingCapacity: true)
+        preparedShapeCache.removeAll(keepingCapacity: true)
+        layoutCache.removeAll(keepingCapacity: true)
         lock.unlock()
+        glyphCache.clear()
 
         FontFamiliesRegistry.setFamilies(sans: sans, mono: mono)
         let newEpoch = fontEpoch()
@@ -2472,6 +2735,7 @@ public final class TextSystem: @unchecked Sendable {
         let langEpoch = TextLanguageRegistry.currentEpoch()
         let inThreadScope = (FontFamiliesRegistry.threadOverrideFamilies() != nil)
         let globalEpoch = inThreadScope ? 0 : fontEpoch()
+        var clearGlyphs = false
         lock.lock()
         if !inThreadScope && lastObservedFontEpoch != globalEpoch {
             let (sans, mono) = FontFamiliesRegistry.currentFamilies()
@@ -2484,7 +2748,10 @@ public final class TextSystem: @unchecked Sendable {
             shapeCache.removeAll(keepingCapacity: true)
             elisionCache.removeAll(keepingCapacity: true)
             typesetterCache.removeAll(keepingCapacity: true)
+            preparedShapeCache.removeAll(keepingCapacity: true)
+            layoutCache.removeAll(keepingCapacity: true)
             lastObservedFontEpoch = globalEpoch
+            clearGlyphs = true
         }
         if lastObservedLanguageEpoch != langEpoch {
             let globalTag = TextLanguageRegistry.currentLanguageTag()
@@ -2494,10 +2761,16 @@ public final class TextSystem: @unchecked Sendable {
                 shapeCache.removeAll(keepingCapacity: true)
                 elisionCache.removeAll(keepingCapacity: true)
                 typesetterCache.removeAll(keepingCapacity: true)
+                preparedShapeCache.removeAll(keepingCapacity: true)
+                layoutCache.removeAll(keepingCapacity: true)
+                clearGlyphs = true
             }
             lastObservedLanguageEpoch = langEpoch
         }
         lock.unlock()
+        if clearGlyphs {
+            glyphCache.clear()
+        }
     }
 
     #if canImport(CoreText) && canImport(CoreGraphics)
@@ -2635,34 +2908,60 @@ public final class TextSystem: @unchecked Sendable {
         let familyName = CTFontCopyFamilyName(baseFont) as String
         let featureSettings = Self.parseOpenTypeFeatures(style.features)
         let variationSettings = Self.parseFontVariations(style.variations)
-        var attrs: [CFString: Any] = [
-            kCTFontFamilyNameAttribute: familyName,
-            kCTFontTraitsAttribute: traits,
-        ]
-        if !featureSettings.isEmpty {
-            attrs[kCTFontFeatureSettingsAttribute] = featureSettings as CFArray
-        }
-        if !variationSettings.isEmpty {
-            attrs[kCTFontVariationAttribute] = variationSettings as CFDictionary
-        }
-        let weightDesc = CTFontDescriptorCreateWithAttributes(attrs as CFDictionary)
-        let matched = CTFontCreateWithFontDescriptor(weightDesc, CGFloat(sizePx), nil)
+        let declaredFaces = FaceWeightsRegistry.snapshot()
         let weighted: CTFont
-        if (CTFontCopyFamilyName(matched) as String).caseInsensitiveCompare(familyName) == .orderedSame {
-            weighted = matched
+        if let declared = FaceWeightsRegistry.declaredFace(in: declaredFaces, family: familyName, requestedWeight: style.weight),
+           let faceMatch = FaceWeightsRegistry.matchingFace(
+               inFamily: familyName,
+               targetCSSWeight: declared.weight,
+               italic: style.italic,
+               sizePx: CGFloat(sizePx)
+           ) {
+            if !featureSettings.isEmpty || !variationSettings.isEmpty {
+                var extraAttrs: [CFString: Any] = [:]
+                if !featureSettings.isEmpty {
+                    extraAttrs[kCTFontFeatureSettingsAttribute] = featureSettings as CFArray
+                }
+                if !variationSettings.isEmpty {
+                    extraAttrs[kCTFontVariationAttribute] = variationSettings as CFDictionary
+                }
+                let desc = CTFontDescriptorCreateCopyWithAttributes(
+                    CTFontCopyFontDescriptor(faceMatch),
+                    extraAttrs as CFDictionary
+                )
+                weighted = CTFontCreateCopyWithAttributes(faceMatch, CGFloat(sizePx), nil, desc)
+            } else {
+                weighted = faceMatch
+            }
         } else {
-            var copyAttrs: [CFString: Any] = [kCTFontTraitsAttribute: traits]
+            var attrs: [CFString: Any] = [
+                kCTFontFamilyNameAttribute: familyName,
+                kCTFontTraitsAttribute: traits,
+            ]
             if !featureSettings.isEmpty {
-                copyAttrs[kCTFontFeatureSettingsAttribute] = featureSettings as CFArray
+                attrs[kCTFontFeatureSettingsAttribute] = featureSettings as CFArray
             }
             if !variationSettings.isEmpty {
-                copyAttrs[kCTFontVariationAttribute] = variationSettings as CFDictionary
+                attrs[kCTFontVariationAttribute] = variationSettings as CFDictionary
             }
-            let desc = CTFontDescriptorCreateCopyWithAttributes(
-                CTFontCopyFontDescriptor(baseFont),
-                copyAttrs as CFDictionary
-            )
-            weighted = CTFontCreateCopyWithAttributes(baseFont, CGFloat(sizePx), nil, desc)
+            let weightDesc = CTFontDescriptorCreateWithAttributes(attrs as CFDictionary)
+            let matched = CTFontCreateWithFontDescriptor(weightDesc, CGFloat(sizePx), nil)
+            if (CTFontCopyFamilyName(matched) as String).caseInsensitiveCompare(familyName) == .orderedSame {
+                weighted = matched
+            } else {
+                var copyAttrs: [CFString: Any] = [kCTFontTraitsAttribute: traits]
+                if !featureSettings.isEmpty {
+                    copyAttrs[kCTFontFeatureSettingsAttribute] = featureSettings as CFArray
+                }
+                if !variationSettings.isEmpty {
+                    copyAttrs[kCTFontVariationAttribute] = variationSettings as CFDictionary
+                }
+                let desc = CTFontDescriptorCreateCopyWithAttributes(
+                    CTFontCopyFontDescriptor(baseFont),
+                    copyAttrs as CFDictionary
+                )
+                weighted = CTFontCreateCopyWithAttributes(baseFont, CGFloat(sizePx), nil, desc)
+            }
         }
         lock.lock()
         fontCache[key] = weighted
@@ -2714,9 +3013,10 @@ public final class TextSystem: @unchecked Sendable {
         return max(0, rawW + CGFloat(letterSpacingPx))
     }
 
-    internal static func specLineHeight(lineCount: Int, lineHeightPt: Float, scale: Float, exact: Bool) -> Float {
+    /// `extraPt` is what inline code grows the lines by (`#983`).
+    internal static func specLineHeight(lineCount: Int, lineHeightPt: Float, scale: Float, exact: Bool, extraPt: Float = 0) -> Float {
         let s = max(1.0, scale)
-        let rawPx = Float(max(1, lineCount)) * lineHeightPt * s
+        let rawPx = (Float(max(1, lineCount)) * lineHeightPt + extraPt) * s
         let snappedPx = exact ? ((rawPx * 64.0).rounded() / 64.0) : ceilf(rawPx)
         return snappedPx / s
     }
@@ -2728,8 +3028,14 @@ public final class TextSystem: @unchecked Sendable {
         style: TextStyle,
         maxWidth: Float?,
         pixelScale: Float,
-        pills: [PillChip] = []
+        pills: [PillChip] = [],
+        keep requestedKeep: TextKeep = .cached,
+        bypassCache requestedBypass: Bool = false,
+        pretty: Bool = false
     ) -> Vec2 {
+        // `bypassCache` (Slice 3) and `keep: .secret` (kitc) both keep secure text out of every cache.
+        let keep: TextKeep = requestedBypass ? .secret : requestedKeep
+        let bypassCache = keep == .secret
         if text.isEmpty {
             return Vec2(0, Self.specLineHeight(lineCount: 1, lineHeightPt: style.resolvedLineHeight, scale: pixelScale, exact: style.exactLines))
         }
@@ -2740,6 +3046,22 @@ public final class TextSystem: @unchecked Sendable {
         if maxWidth != nil && effectiveStyle.wrap == .noWrap {
             effectiveStyle.wrap = .wrap
         }
+        let effectivePretty = pretty
+            && maxWidth != nil
+            && effectiveStyle.wrap == .wrap
+            && effectiveStyle.align != .justified
+            && effectiveStyle.maxLines == 0
+        if keep == .secret {
+            return shapeForMeasure(
+                text: text,
+                spans: nil,
+                pills: pills,
+                style: effectiveStyle,
+                maxWidth: maxWidth,
+                pixelScale: pixelScale,
+                pretty: effectivePretty
+            ).size
+        }
         let maxWKey = maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1
         let pHash = Self.hashPills(pills)
         let key = MeasureKey(
@@ -2748,23 +3070,299 @@ public final class TextSystem: @unchecked Sendable {
             maxWidthHalfPt: maxWKey,
             scale100: Int((pixelScale * 100).rounded()),
             pillsHash: pHash,
-            fontEpoch: fontEpoch()
+            fontEpoch: fontEpoch(),
+            pretty: effectivePretty
         )
-        lock.lock()
-        if let cached = measureCache[key] {
+        if !bypassCache {
+            lock.lock()
+            if let cached = measureCache[key] {
+                measureCache[key] = (cached.size, layoutCommitSeq)
+                if effectiveStyle.wrap == .ellipsis || effectiveStyle.maxLines > 0, maxWidth != nil {
+                    let eKey = ElisionKey(
+                        text: text,
+                        spans: nil,
+                        style: effectiveStyle,
+                        maxWidthHalfPt: maxWKey,
+                        scale100: key.scale100,
+                        pillsHash: pHash,
+                        fontEpoch: key.fontEpoch,
+                        langEpoch: TextLanguageRegistry.currentEpoch()
+                    )
+                    if var entry = elisionCache[eKey] {
+                        entry.epoch = elisionEpoch
+                        elisionCache[eKey] = entry
+                    }
+                }
+                lock.unlock()
+                return cached.size
+            }
             lock.unlock()
-            return cached
         }
-        lock.unlock()
-        let shaped = shape(text: text, spans: nil, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
+        let shaped = shapeForMeasure(text: text, spans: nil, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, pretty: effectivePretty)
         lock.lock()
         measureMissCount += 1
-        if measureCache.count > 4096 {
-            measureCache.removeAll(keepingCapacity: true)
+        if !bypassCache {
+            if measureCache.count > 4096 {
+                measureCache.removeAll(keepingCapacity: true)
+            }
+            measureCache[key] = (shaped.size, layoutCommitSeq)
         }
-        measureCache[key] = shaped.size
         lock.unlock()
         return shaped.size
+    }
+
+    private func shapeForMeasure(
+        text: String,
+        spans: [TextSpan]?,
+        pills: [PillChip],
+        style: TextStyle,
+        maxWidth: Float?,
+        pixelScale: Float,
+        pretty: Bool = false
+    ) -> ShapedText {
+        var effectiveStyle = style
+        if effectiveStyle.fontSmoothing == .systemDefault {
+            effectiveStyle.fontSmoothing = smoothing
+        }
+        return measureFramePhase(.text) {
+            shapeImpl(
+                text: text,
+                spans: spans,
+                pills: pills,
+                style: effectiveStyle,
+                maxWidth: maxWidth,
+                pixelScale: pixelScale,
+                emitGlyphs: false,
+                glidePx: .zero,
+                countRebreak: false,
+                pretty: pretty
+            )
+        }
+    }
+
+    private static func widthsMatch(_ a: Float?, _ b: Float?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (x?, y?): return abs(x - y) <= 0.1
+        default: return false
+        }
+    }
+
+    /// Retains and re-breaks laid-out text across commits (`text_rebreak` / `TextLayoutBox`).
+    public func layoutKeyed(
+        text: String,
+        spans: [TextSpan]? = nil,
+        pills: [PillChip] = [],
+        style: TextStyle,
+        maxWidth: Float?,
+        pixelScale: Float,
+        emitGlyphs: Bool,
+        glidePx: Vec2 = .zero,
+        keep: TextKeep = .cached,
+        countAsRebreak: Bool = true,
+        pretty: Bool = false
+    ) -> TextLayoutBox {
+        measureFramePhase(.text) {
+            let scale = max(pixelScale, 1.0)
+            let authText = spans.map { $0.map(\.text).joined() } ?? text
+            let effectiveMaxW = maxWidth
+            let fEpoch = currentFontEpoch
+            let langTag = language
+            let shapeKey = TextShapeKey(
+                authText: authText,
+                spans: spans,
+                pills: pills,
+                style: style,
+                pixelScale: scale,
+                fontEpoch: fEpoch,
+                languageTag: langTag,
+                maxWidth: effectiveMaxW,
+                pretty: pretty
+            )
+            // Gated by style in `TextShapeKey.layoutPretty`; every break of this layout (first
+            // shape, glyph fill, width re-break) uses the key's setting so its cache entry stays coherent.
+            let effectivePretty = shapeKey.pretty
+
+            if authText.isEmpty || keep == .secret {
+                let shaped = shapeImpl(
+                    text: text,
+                    spans: spans,
+                    pills: pills,
+                    style: style,
+                    maxWidth: effectiveMaxW,
+                    pixelScale: scale,
+                    emitGlyphs: emitGlyphs,
+                    glidePx: glidePx,
+                    // Secure text never enters the shared shape cache (upstream `Keep::Secret`).
+                    bypassCache: keep == .secret,
+                    pretty: effectivePretty
+                )
+                return TextLayoutBox(
+                    shapeKey: shapeKey,
+                    authText: authText,
+                    spans: spans,
+                    pills: pills,
+                    style: style,
+                    pixelScale: scale,
+                    maxWidth: effectiveMaxW,
+                    shaped: shaped,
+                    hasGlyphs: emitGlyphs,
+                    prepared: nil
+                )
+            }
+
+            if keep == .cached && glidePx == .zero {
+                lock.lock()
+                if var cachedBox = layoutCache[shapeKey] {
+                    cachedBox.lastUsedCommit = layoutCommitSeq
+                    if Self.widthsMatch(cachedBox.maxWidth, effectiveMaxW) {
+                        if !emitGlyphs || cachedBox.hasGlyphs {
+                            lock.unlock()
+                            return cachedBox
+                        }
+                        if let prepared = cachedBox.prepared {
+                            _ = layoutCache.removeValue(forKey: shapeKey)
+                            let unique = isKnownUniquelyReferenced(&cachedBox)
+                            lock.unlock()
+                            let withGlyphs = breakLines(
+                                prepared: prepared,
+                                maxWidth: effectiveMaxW,
+                                emitGlyphs: true,
+                                glidePx: .zero,
+                                pretty: effectivePretty
+                            )
+                            let outBox = unique ? cachedBox : cachedBox.clone()
+                            outBox.shaped = withGlyphs
+                            outBox.hasGlyphs = true
+                            outBox.lastUsedCommit = lock.withLock { layoutCommitSeq }
+                            lock.lock()
+                            layoutCache[shapeKey] = outBox
+                            lock.unlock()
+                            return outBox
+                        }
+                        lock.unlock()
+                    } else if let prepared = cachedBox.prepared {
+                        if countAsRebreak {
+                            _ = layoutCache.removeValue(forKey: shapeKey)
+                            let unique = isKnownUniquelyReferenced(&cachedBox)
+                            lock.unlock()
+                            let reShaped = breakLines(
+                                prepared: prepared,
+                                maxWidth: effectiveMaxW,
+                                emitGlyphs: emitGlyphs,
+                                glidePx: .zero,
+                                pretty: effectivePretty
+                            )
+                            let outBox = unique ? cachedBox : cachedBox.clone()
+                            outBox.maxWidth = effectiveMaxW
+                            outBox.shaped = reShaped
+                            outBox.hasGlyphs = emitGlyphs
+                            lock.lock()
+                            _rebrokenCount += 1
+                            outBox.lastUsedCommit = layoutCommitSeq
+                            layoutCache[shapeKey] = outBox
+                            lock.unlock()
+                            return outBox
+                        } else {
+                            lock.unlock()
+                            let probed = breakLines(
+                                prepared: prepared,
+                                maxWidth: effectiveMaxW,
+                                emitGlyphs: emitGlyphs,
+                                glidePx: .zero,
+                                pretty: effectivePretty
+                            )
+                            return TextLayoutBox(
+                                shapeKey: shapeKey,
+                                authText: authText,
+                                spans: spans,
+                                pills: pills,
+                                style: style,
+                                pixelScale: scale,
+                                maxWidth: effectiveMaxW,
+                                shaped: probed,
+                                hasGlyphs: emitGlyphs,
+                                prepared: prepared
+                            )
+                        }
+                    } else {
+                        lock.unlock()
+                    }
+                } else {
+                    lock.unlock()
+                }
+            }
+
+            let cachedPrepared = lock.withLock { preparedShapeCache[shapeKey] }
+            if let prepared = cachedPrepared {
+                let shaped = breakLines(
+                    prepared: prepared,
+                    maxWidth: effectiveMaxW,
+                    emitGlyphs: emitGlyphs,
+                    glidePx: glidePx,
+                    pretty: effectivePretty
+                )
+                let box = TextLayoutBox(
+                    shapeKey: shapeKey,
+                    authText: authText,
+                    spans: spans,
+                    pills: pills,
+                    style: style,
+                    pixelScale: scale,
+                    maxWidth: effectiveMaxW,
+                    shaped: shaped,
+                    hasGlyphs: emitGlyphs,
+                    prepared: prepared
+                )
+                if keep == .cached && glidePx == .zero && countAsRebreak {
+                    lock.lock()
+                    box.lastUsedCommit = layoutCommitSeq
+                    layoutCache[shapeKey] = box
+                    lock.unlock()
+                }
+                return box
+            }
+
+            let prepared = prepareShape(
+                authText: authText,
+                spans: spans,
+                pills: pills,
+                style: style,
+                scale: scale,
+                languageTag: langTag
+            )
+            let shaped = breakLines(
+                prepared: prepared,
+                maxWidth: effectiveMaxW,
+                emitGlyphs: emitGlyphs,
+                glidePx: glidePx,
+                pretty: effectivePretty
+            )
+            let box = TextLayoutBox(
+                shapeKey: shapeKey,
+                authText: authText,
+                spans: spans,
+                pills: pills,
+                style: style,
+                pixelScale: scale,
+                maxWidth: effectiveMaxW,
+                shaped: shaped,
+                hasGlyphs: emitGlyphs,
+                prepared: prepared
+            )
+            lock.lock()
+            _shapedCount += 1
+            shapeCallCounter &+= 1
+            if keep == .cached {
+                preparedShapeCache[shapeKey] = prepared
+                if glidePx == .zero && countAsRebreak {
+                    box.lastUsedCommit = layoutCommitSeq
+                    layoutCache[shapeKey] = box
+                }
+            }
+            lock.unlock()
+            return box
+        }
     }
 
     /// Shapes plain or rich text into lines, optional pill/inline-icon quads, and optional `GlyphAtlas` quads.
@@ -2776,7 +3374,9 @@ public final class TextSystem: @unchecked Sendable {
         maxWidth: Float?,
         pixelScale: Float,
         emitGlyphs: Bool = true,
-        glidePx: Vec2 = .zero
+        glidePx: Vec2 = .zero,
+        bypassCache: Bool = false,
+        pretty: Bool = false
     ) -> ShapedText {
         var effectiveStyle = style
         if effectiveStyle.fontSmoothing == .systemDefault {
@@ -2791,7 +3391,9 @@ public final class TextSystem: @unchecked Sendable {
                 maxWidth: maxWidth,
                 pixelScale: pixelScale,
                 emitGlyphs: emitGlyphs,
-                glidePx: glidePx
+                glidePx: glidePx,
+                bypassCache: bypassCache,
+                pretty: pretty
             )
         }
     }
@@ -2804,7 +3406,10 @@ public final class TextSystem: @unchecked Sendable {
         maxWidth: Float?,
         pixelScale: Float,
         emitGlyphs: Bool = true,
-        glidePx: Vec2 = .zero
+        glidePx: Vec2 = .zero,
+        countRebreak: Bool = true,
+        bypassCache: Bool = false,
+        pretty: Bool = false
     ) -> ShapedText {
         let authText = spans.map { $0.map(\.text).joined() } ?? text
         let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
@@ -2817,7 +3422,9 @@ public final class TextSystem: @unchecked Sendable {
                 maxWidth: maxWidth,
                 pixelScale: scale,
                 emitGlyphs: emitGlyphs,
-                glidePx: glidePx
+                glidePx: glidePx,
+                countRebreak: countRebreak,
+                pretty: false
             )
         }
         syncGlobalFamiliesIfNeeded()
@@ -2827,8 +3434,14 @@ public final class TextSystem: @unchecked Sendable {
         let maxWKey = maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1
         let scaleKey = Int((scale * 100.0).rounded())
         let needsElide = (style.maxLines > 0) || (style.wrap == .ellipsis && maxWidth != nil && maxWidth! > 0)
+        let canCacheShape = glidePx == .zero && !bypassCache
+        let effectivePretty = pretty
+            && !needsElide
+            && maxWidth != nil
+            && (maxWidth ?? 0) > 0
+            && style.wrap == .wrap
+            && style.align != .justified
 
-        if glidePx == .zero {
             let sKey = ShapeKey(
                 text: authText,
                 spans: spans,
@@ -2838,14 +3451,35 @@ public final class TextSystem: @unchecked Sendable {
                 pillsHash: pHash,
                 fontEpoch: fEpoch,
                 langEpoch: lEpoch,
-                emitGlyphs: emitGlyphs
+                emitGlyphs: emitGlyphs,
+                pretty: effectivePretty
             )
-            lock.lock()
-            if let cached = shapeCache[sKey] {
+
+            if canCacheShape {
+                lock.lock()
+                if let cached = shapeCache[sKey] {
+                    shapeCache[sKey] = (cached.shaped, layoutCommitSeq)
+                    if cached.shaped.elided != nil {
+                        let eKey = ElisionKey(
+                            text: authText,
+                            spans: spans,
+                            style: style,
+                            maxWidthHalfPt: maxWKey,
+                            scale100: scaleKey,
+                            pillsHash: pHash,
+                            fontEpoch: fEpoch,
+                            langEpoch: lEpoch
+                        )
+                        if var entry = elisionCache[eKey] {
+                            entry.epoch = elisionEpoch
+                            elisionCache[eKey] = entry
+                        }
+                    }
+                    lock.unlock()
+                    return cached.shaped
+                }
                 lock.unlock()
-                return cached
             }
-            lock.unlock()
 
             let res: ShapedText
             if needsElide {
@@ -2861,7 +3495,8 @@ public final class TextSystem: @unchecked Sendable {
                     maxWidthHalfPt: maxWKey,
                     scale100: scaleKey,
                     fontEpoch: fEpoch,
-                    langEpoch: lEpoch
+                    langEpoch: lEpoch,
+                    bypassCache: bypassCache
                 )
             } else {
                 res = shapeCoreImpl(
@@ -2872,47 +3507,25 @@ public final class TextSystem: @unchecked Sendable {
                     maxWidth: maxWidth,
                     pixelScale: scale,
                     emitGlyphs: emitGlyphs,
-                    glidePx: glidePx
+                    glidePx: glidePx,
+                    countRebreak: countRebreak,
+                    pretty: effectivePretty
                 )
                 lock.lock()
                 shapeMissCount += 1
                 lock.unlock()
             }
+
             lock.lock()
-            if shapeCache.count > 2048 {
-                shapeCache.removeAll(keepingCapacity: true)
+            _shapeCount &+= 1
+            if canCacheShape {
+                if shapeCache.count > 2048 {
+                    shapeCache.removeAll(keepingCapacity: true)
+                }
+                shapeCache[sKey] = (res, layoutCommitSeq)
             }
-            shapeCache[sKey] = res
             lock.unlock()
             return res
-        }
-
-        if needsElide {
-            return resolveElidedShape(
-                authText: authText,
-                spans: spans,
-                pills: pills,
-                style: style,
-                maxWidth: maxWidth,
-                scale: scale,
-                emitGlyphs: emitGlyphs,
-                pillsHash: pHash,
-                maxWidthHalfPt: maxWKey,
-                scale100: scaleKey,
-                fontEpoch: fEpoch,
-                langEpoch: lEpoch
-            )
-        }
-        return shapeCoreImpl(
-            text: authText,
-            spans: spans,
-            pills: pills,
-            style: style,
-            maxWidth: maxWidth,
-            pixelScale: scale,
-            emitGlyphs: emitGlyphs,
-            glidePx: glidePx
-        )
     }
 
     private func resolveElidedShape(
@@ -2927,9 +3540,10 @@ public final class TextSystem: @unchecked Sendable {
         maxWidthHalfPt: Int,
         scale100: Int,
         fontEpoch: UInt64,
-        langEpoch: UInt64
+        langEpoch: UInt64,
+        bypassCache: Bool = false
     ) -> ShapedText {
-        let eKey: ElisionKey? = maxWidth != nil
+        let eKey: ElisionKey? = (maxWidth != nil && !bypassCache)
             ? ElisionKey(
                 text: authText,
                 spans: spans,
@@ -2944,7 +3558,12 @@ public final class TextSystem: @unchecked Sendable {
 
         if let eKey {
             lock.lock()
-            let cached = elisionCache[eKey]
+            var cached = elisionCache[eKey]
+            if var entry = cached {
+                entry.epoch = elisionEpoch
+                elisionCache[eKey] = entry
+                cached = entry
+            }
             lock.unlock()
             if let cached {
                 if emitGlyphs {
@@ -2964,6 +3583,7 @@ public final class TextSystem: @unchecked Sendable {
                     lock.lock()
                     if var existing = elisionCache[eKey] {
                         existing.withGlyphs = rebuilt
+                        existing.epoch = elisionEpoch
                         elisionCache[eKey] = existing
                     }
                     lock.unlock()
@@ -3028,7 +3648,8 @@ public final class TextSystem: @unchecked Sendable {
                 elisionCache[eKey] = CachedElision(
                     elision: elision,
                     withoutGlyphs: candNoGlyphs,
-                    withGlyphs: emitGlyphs ? finalRes : nil
+                    withGlyphs: emitGlyphs ? finalRes : nil,
+                    epoch: elisionEpoch
                 )
             }
             lock.unlock()
@@ -3065,7 +3686,8 @@ public final class TextSystem: @unchecked Sendable {
                 elisionCache[eKey] = CachedElision(
                     elision: elision,
                     withoutGlyphs: candNoGlyphs,
-                    withGlyphs: emitGlyphs ? finalRes : nil
+                    withGlyphs: emitGlyphs ? finalRes : nil,
+                    epoch: elisionEpoch
                 )
             }
             lock.unlock()
@@ -3246,11 +3868,12 @@ public final class TextSystem: @unchecked Sendable {
         maxWidth: Float?,
         pixelScale: Float,
         emitGlyphs: Bool = true,
-        glidePx: Vec2 = .zero
+        glidePx: Vec2 = .zero,
+        countRebreak: Bool = false,
+        pretty: Bool = false
     ) -> ShapedText {
         let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
         let lhPt = style.resolvedLineHeight
-        let lhPx = lhPt * scale
         let authText = spans.map { $0.map(\.text).joined() } ?? text
 
         if authText.isEmpty {
@@ -3264,7 +3887,9 @@ public final class TextSystem: @unchecked Sendable {
                 underlines: [],
                 backgrounds: [],
                 lineStrings: [(0, "", 0, emptyOriginX, nil)],
-                forcedDirection: style.direction
+                forcedDirection: style.direction,
+                drawnText: "",
+                lineGlyphRanges: [0..<0]
             )
         }
         recordShapeCall()
@@ -3279,226 +3904,312 @@ public final class TextSystem: @unchecked Sendable {
             languageTag: effectiveLang,
             fontEpoch: fontEpoch()
         )
-        let builtTypesetter: CachedTypesetter
+        let builtPrepared: TextPreparedShape
         lock.lock()
         let hitTS = typesetterCache[tsKey]
-        if hitTS != nil {
-            rebrokenCount += 1
+        if let hitTS {
+            hitTS.lastUsedCommit = layoutCommitSeq
+            if countRebreak {
+                _typesetterRebrokenCount += 1
+            }
         }
         lock.unlock()
 
         if let hitTS {
-            builtTypesetter = hitTS
+            builtPrepared = hitTS
         } else {
-            let (shapedText, initialMarkerMap, preparedPills) = Self.preparePills(pills, in: authText, fontSize: style.size)
-
-            let baseFont = resolveCTFont(style: style, pixelScale: scale)
-            let baseAscentPx = CTFontGetAscent(baseFont)
-            let baseDescentPx = CTFontGetDescent(baseFont)
-
-            let attrStr = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0)!
-            CFAttributedStringReplaceString(attrStr, CFRangeMake(0, 0), shapedText as CFString)
-            let fullLen = CFAttributedStringGetLength(attrStr)
-            CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTFontAttributeName, baseFont)
-            if let langTag = effectiveLang {
-                CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTLanguageAttributeName, langTag as CFString)
-            }
-            if style.letterSpacing != 0 {
-                let kern = CGFloat(style.letterSpacing * scale) as CFNumber
-                CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTKernAttributeName, kern)
-            }
-
-            // Apply per-paragraph base writing direction natively; tab stops use per-'\t' CTRunDelegate widths below.
-            let shapedNS = shapedText as NSString
-            var paraScanStart = 0
-            while paraScanStart < fullLen {
-                var paraScanEnd = fullLen
-                for i in paraScanStart..<fullLen where shapedNS.character(at: i) == 0x0A {
-                    paraScanEnd = i
-                    break
-                }
-                let paraSub = shapedNS.substring(with: NSRange(location: paraScanStart, length: max(0, paraScanEnd - paraScanStart)))
-                let resolvedDir: CTWritingDirection? = {
-                    switch style.direction {
-                    case .rtl: return .rightToLeft
-                    case .ltr: return .leftToRight
-                    case nil: return Self.isRTLParagraph(paraSub) ? .rightToLeft : nil
-                    }
-                }()
-                if var dirVal = resolvedDir {
-                    let pStyle = withUnsafeMutableBytes(of: &dirVal) { dirPtr -> CTParagraphStyle in
-                        let setting = CTParagraphStyleSetting(
-                            spec: .baseWritingDirection,
-                            valueSize: MemoryLayout<CTWritingDirection>.size,
-                            value: dirPtr.baseAddress!
-                        )
-                        return withUnsafePointer(to: setting) { ptr in
-                            CTParagraphStyleCreate(ptr, 1)
-                        }
-                    }
-                    let pRangeLen = min(fullLen - paraScanStart, (paraScanEnd - paraScanStart) + (paraScanEnd < fullLen ? 1 : 0))
-                    if pRangeLen > 0 {
-                        CFAttributedStringSetAttribute(attrStr, CFRangeMake(paraScanStart, pRangeLen), kCTParagraphStyleAttributeName, pStyle)
-                    }
-                }
-                paraScanStart = (paraScanEnd < fullLen) ? (paraScanEnd + 1) : fullLen
-            }
-
-            // Apply per-span font/color/size overrides in shaped UTF-16 coordinates.
-            let spanColorKey = "RuneColorIndex" as CFString
-            let pillMarkerKey = "RunePillMarker" as CFString
-            var spanPalette: [Color] = []
-            var decoratedRanges: [DecoratedRange] = []
-            var spanTabInfo: [(u16Range: Range<Int>, spacePx: CGFloat, isMonospace: Bool)] = []
-            if let spans {
-                var authU16Cursor = 0
-                for span in spans {
-                    let u16Count = span.text.utf16.count
-                    guard u16Count > 0 else { continue }
-                    let sLo = initialMarkerMap.shapedU16ForSpanBoundary(authU16Cursor, isEnd: false)
-                    let sHi = initialMarkerMap.shapedU16ForSpanBoundary(authU16Cursor + u16Count, isEnd: true)
-                    let sLen = max(0, sHi - sLo)
-                    if sLen > 0 {
-                        let range = CFRangeMake(sLo, sLen)
-                        if span.weight != nil || span.italic || span.monospace || span.size != nil {
-                            var subStyle = style
-                            if let w = span.weight { subStyle.weight = w }
-                            if span.italic { subStyle.italic = true }
-                            if span.monospace { subStyle.family = .monospace }
-                            if let sz = span.size { subStyle.size = sz }
-                            let subFont = resolveCTFont(style: subStyle, pixelScale: scale)
-                            CFAttributedStringSetAttribute(attrStr, range, kCTFontAttributeName, subFont)
-                            spanTabInfo.append((
-                                u16Range: sLo..<sHi,
-                                spacePx: Self.spaceAdvancePx(font: subFont, letterSpacingPx: style.letterSpacing * scale),
-                                isMonospace: span.monospace
-                            ))
-                        }
-                        if let col = span.color {
-                            let idx = spanPalette.count
-                            spanPalette.append(col)
-                            CFAttributedStringSetAttribute(attrStr, range, spanColorKey, idx as CFNumber)
-                        }
-                        if span.underline || span.strikethrough || span.background != nil {
-                            decoratedRanges.append(DecoratedRange(
-                                u16Range: sLo..<sHi,
-                                underline: span.underline,
-                                strikethrough: span.strikethrough,
-                                background: span.background
-                            ))
-                        }
-                    }
-                    authU16Cursor += u16Count
-                }
-            }
-
-            // Install CTRunDelegate width reservations on pill/icon placeholder scalars.
-            var pillMarkerU16 = Set<Int>()
-            for (pIdx, vp) in preparedPills.enumerated() {
-                pillMarkerU16.insert(vp.leadShapedU16)
-                let leadDelegate = Self.makeWidthDelegate(
-                    widthPx: CGFloat(vp.leadWidthPt * scale),
-                    ascentPx: baseAscentPx,
-                    descentPx: baseDescentPx
-                )
-                let leadRange = CFRangeMake(vp.leadShapedU16, 1)
-                CFAttributedStringSetAttribute(attrStr, leadRange, kCTFontAttributeName, baseFont)
-                CFAttributedStringSetAttribute(attrStr, leadRange, kCTRunDelegateAttributeName, leadDelegate)
-                CFAttributedStringSetAttribute(attrStr, leadRange, pillMarkerKey, (pIdx << 1) as CFNumber)
-                if let trailU16 = vp.trailShapedU16 {
-                    pillMarkerU16.insert(trailU16)
-                    let trailDelegate = Self.makeWidthDelegate(
-                        widthPx: CGFloat(vp.trailWidthPt * scale),
-                        ascentPx: baseAscentPx,
-                        descentPx: baseDescentPx
-                    )
-                    let trailRange = CFRangeMake(trailU16, 1)
-                    CFAttributedStringSetAttribute(attrStr, trailRange, kCTFontAttributeName, baseFont)
-                    CFAttributedStringSetAttribute(attrStr, trailRange, kCTRunDelegateAttributeName, trailDelegate)
-                    CFAttributedStringSetAttribute(attrStr, trailRange, pillMarkerKey, ((pIdx << 1) | 1) as CFNumber)
-                }
-            }
-
-            // Install CTRunDelegate tab width reservations preserving 1:1 string indices (`text/tests.rs:89`).
-            if shapedText.contains("\t") {
-                let baseSpacePx = Self.spaceAdvancePx(font: baseFont, letterSpacingPx: style.letterSpacing * scale)
-                var u16Pos = 0
-                var monoCol = 0
-                var inMonoSpan = false
-                for scalar in shapedText.unicodeScalars {
-                    let activeSpan = spanTabInfo.first(where: { $0.u16Range.contains(u16Pos) })
-                    let isMono = (style.family == .monospace) || (activeSpan?.isMonospace == true)
-                    if style.family != .monospace {
-                        if !isMono {
-                            inMonoSpan = false
-                            monoCol = 0
-                        } else if !inMonoSpan {
-                            inMonoSpan = true
-                            monoCol = 0
-                        }
-                    }
-                    if scalar.value == 0x0A {
-                        monoCol = 0
-                    } else if scalar.value == 0x09 {
-                        let spacePx = activeSpan?.spacePx ?? baseSpacePx
-                        let tabWidthPx: CGFloat
-                        if isMono {
-                            let cols = 4 - (monoCol % 4)
-                            tabWidthPx = CGFloat(cols) * spacePx
-                            monoCol += cols
-                        } else {
-                            tabWidthPx = spacePx
-                        }
-                        let tabDelegate = Self.makeWidthDelegate(
-                            widthPx: tabWidthPx,
-                            ascentPx: baseAscentPx,
-                            descentPx: baseDescentPx
-                        )
-                        let tabRange = CFRangeMake(u16Pos, 1)
-                        CFAttributedStringReplaceString(attrStr, tabRange, "\u{FFFC}" as CFString)
-                        CFAttributedStringSetAttribute(attrStr, tabRange, kCTRunDelegateAttributeName, tabDelegate)
-                    } else if isMono && !pillMarkerU16.contains(u16Pos) {
-                        monoCol += 1
-                    }
-                    u16Pos += scalar.utf16.count
-                }
-            }
-
-            let created = CachedTypesetter(
-                typesetter: CTTypesetterCreateWithAttributedString(attrStr),
-                shapedText: shapedText,
-                markerMap: initialMarkerMap,
-                preparedPills: preparedPills,
-                spanPalette: spanPalette,
-                decoratedRanges: decoratedRanges,
-                baseFont: baseFont,
-                baseAscentPx: baseAscentPx,
-                baseDescentPx: baseDescentPx
+            let created = prepareShape(
+                authText: authText,
+                spans: spans,
+                pills: pills,
+                style: style,
+                scale: scale,
+                languageTag: language
             )
             lock.lock()
             if typesetterCache.count > 1024 {
                 typesetterCache.removeAll(keepingCapacity: true)
             }
+            created.lastUsedCommit = layoutCommitSeq
             typesetterCache[tsKey] = created
             shapedBuildCount += 1
             lock.unlock()
-            builtTypesetter = created
+            builtPrepared = created
         }
 
-        let shapedText = builtTypesetter.shapedText
-        var markerMap = builtTypesetter.markerMap
-        let preparedPills = builtTypesetter.preparedPills
-        let spanPalette = builtTypesetter.spanPalette
-        let decoratedRanges = builtTypesetter.decoratedRanges
-        let baseFont = builtTypesetter.baseFont
-        let baseAscentPx = builtTypesetter.baseAscentPx
-        let baseDescentPx = builtTypesetter.baseDescentPx
-        let fullLen = shapedText.utf16.count
+        return breakLines(
+            prepared: builtPrepared,
+            maxWidth: maxWidth,
+            emitGlyphs: emitGlyphs,
+            glidePx: glidePx,
+            styleOverride: style,
+            pretty: pretty
+        )
+    }
+
+    private func prepareShape(
+        authText: String,
+        spans: [TextSpan]?,
+        pills: [PillChip],
+        style: TextStyle,
+        scale: Float,
+        languageTag: String?
+    ) -> TextPreparedShape {
+        let lhPt = style.resolvedLineHeight
+        let lhPx = lhPt * scale
+        let (shapedText, markerMap, preparedPills) = Self.preparePills(pills, in: authText, fontSize: style.size)
+
+        let baseFont = resolveCTFont(style: style, pixelScale: scale)
+        let baseAscentPx = CTFontGetAscent(baseFont)
+        let baseDescentPx = CTFontGetDescent(baseFont)
+
+        let attrStr = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0)!
+        CFAttributedStringReplaceString(attrStr, CFRangeMake(0, 0), shapedText as CFString)
+        let fullLen = CFAttributedStringGetLength(attrStr)
+        CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTFontAttributeName, baseFont)
+        if let langTag = TextLanguageRegistry.effectiveLanguageTag(for: authText, chosen: languageTag) {
+            CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTLanguageAttributeName, langTag as CFString)
+        }
+        if style.letterSpacing != 0 {
+            let kern = CGFloat(style.letterSpacing * scale) as CFNumber
+            CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTKernAttributeName, kern)
+        }
+
+        // Apply per-paragraph base writing direction natively; tab stops use per-'\t' CTRunDelegate widths below.
         let shapedNS = shapedText as NSString
+        var paraScanStart = 0
+        while paraScanStart < fullLen {
+            var paraScanEnd = fullLen
+            for i in paraScanStart..<fullLen where shapedNS.character(at: i) == 0x0A {
+                paraScanEnd = i
+                break
+            }
+            let paraSub = shapedNS.substring(with: NSRange(location: paraScanStart, length: max(0, paraScanEnd - paraScanStart)))
+            let resolvedDir: CTWritingDirection? = {
+                switch style.direction {
+                case .rtl: return .rightToLeft
+                case .ltr: return .leftToRight
+                case nil: return Self.isRTLParagraph(paraSub) ? .rightToLeft : nil
+                }
+            }()
+            if var dirVal = resolvedDir {
+                let pStyle = withUnsafeMutableBytes(of: &dirVal) { dirPtr -> CTParagraphStyle in
+                    let setting = CTParagraphStyleSetting(
+                        spec: .baseWritingDirection,
+                        valueSize: MemoryLayout<CTWritingDirection>.size,
+                        value: dirPtr.baseAddress!
+                    )
+                    return withUnsafePointer(to: setting) { ptr in
+                        CTParagraphStyleCreate(ptr, 1)
+                    }
+                }
+                let pRangeLen = min(fullLen - paraScanStart, (paraScanEnd - paraScanStart) + (paraScanEnd < fullLen ? 1 : 0))
+                if pRangeLen > 0 {
+                    CFAttributedStringSetAttribute(attrStr, CFRangeMake(paraScanStart, pRangeLen), kCTParagraphStyleAttributeName, pStyle)
+                }
+            }
+            paraScanStart = (paraScanEnd < fullLen) ? (paraScanEnd + 1) : fullLen
+        }
+
+        // Apply per-span font/color/size overrides in shaped UTF-16 coordinates.
         let spanColorKey = "RuneColorIndex" as CFString
         let pillMarkerKey = "RunePillMarker" as CFString
+        var spanPalette: [Color] = []
+        var decoratedRanges: [DecoratedRange] = []
+        var spanBoxes: [InlineSpanBox] = []
+        // `inline_fit::mono_fits`: the smaller spaces that stand for inline code's CSS padding have
+        // no box in a browser, so theirs is cut to fit the strut (never growing the line); only for
+        // proportional text holding code (`mono_style` turns the strut cut off).
+        let cutsCodePadding = style.family != .monospace && (spans?.contains(where: { $0.monospace }) ?? false)
+        var spanTabInfo: [(u16Range: Range<Int>, spacePx: CGFloat, isMonospace: Bool)] = []
+        if let spans {
+            var authU16Cursor = 0
+            for span in spans {
+                let u16Count = span.text.utf16.count
+                guard u16Count > 0 else { continue }
+                let sLo = markerMap.shapedU16ForSpanBoundary(authU16Cursor, isEnd: false)
+                let sHi = markerMap.shapedU16ForSpanBoundary(authU16Cursor + u16Count, isEnd: true)
+                let sLen = max(0, sHi - sLo)
+                if sLen > 0 {
+                    let range = CFRangeMake(sLo, sLen)
+                    if span.weight != nil || span.italic || span.monospace || span.size != nil {
+                        var subStyle = style
+                        if let w = span.weight { subStyle.weight = w }
+                        if span.italic { subStyle.italic = true }
+                        if span.monospace { subStyle.family = .monospace }
+                        if let sz = span.size { subStyle.size = sz }
+                        let subFont = resolveCTFont(style: subStyle, pixelScale: scale)
+                        CFAttributedStringSetAttribute(attrStr, range, kCTFontAttributeName, subFont)
+                        let isCodePadding = cutsCodePadding
+                            && !span.monospace
+                            && (span.size.map { $0 < style.size } ?? false)
+                            && !span.text.isEmpty
+                            && span.text.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
+                        if (span.monospace || span.size != nil) && !isCodePadding {
+                            spanBoxes.append(InlineSpanBox(
+                                u16Range: sLo..<sHi,
+                                ascentPx: Float(CTFontGetAscent(subFont)),
+                                descentPx: Float(CTFontGetDescent(subFont)),
+                                lineHeightPx: span.size.map { lhPx / style.size * $0 } ?? lhPx
+                            ))
+                        }
+                        spanTabInfo.append((
+                            u16Range: sLo..<sHi,
+                            spacePx: Self.spaceAdvancePx(font: subFont, letterSpacingPx: style.letterSpacing * scale),
+                            isMonospace: span.monospace
+                        ))
+                    }
+                    if let col = span.color {
+                        let idx = spanPalette.count
+                        spanPalette.append(col)
+                        CFAttributedStringSetAttribute(attrStr, range, spanColorKey, idx as CFNumber)
+                    }
+                    if span.underline || span.strikethrough || span.background != nil {
+                        decoratedRanges.append(DecoratedRange(
+                            u16Range: sLo..<sHi,
+                            underline: span.underline,
+                            strikethrough: span.strikethrough,
+                            background: span.background,
+                            monospace: span.monospace,
+                            pad: span.pad
+                        ))
+                    }
+                }
+                authU16Cursor += u16Count
+            }
+        }
+
+        // Install CTRunDelegate width reservations on pill/icon placeholder scalars.
+        var pillMarkerU16 = Set<Int>()
+        for (pIdx, vp) in preparedPills.enumerated() {
+            pillMarkerU16.insert(vp.leadShapedU16)
+            let leadDelegate = Self.makeWidthDelegate(
+                widthPx: CGFloat(vp.leadWidthPt * scale),
+                ascentPx: baseAscentPx,
+                descentPx: baseDescentPx
+            )
+            let leadRange = CFRangeMake(vp.leadShapedU16, 1)
+            CFAttributedStringSetAttribute(attrStr, leadRange, kCTFontAttributeName, baseFont)
+            CFAttributedStringSetAttribute(attrStr, leadRange, kCTRunDelegateAttributeName, leadDelegate)
+            CFAttributedStringSetAttribute(attrStr, leadRange, pillMarkerKey, (pIdx << 1) as CFNumber)
+            if let trailU16 = vp.trailShapedU16 {
+                pillMarkerU16.insert(trailU16)
+                let trailDelegate = Self.makeWidthDelegate(
+                    widthPx: CGFloat(vp.trailWidthPt * scale),
+                    ascentPx: baseAscentPx,
+                    descentPx: baseDescentPx
+                )
+                let trailRange = CFRangeMake(trailU16, 1)
+                CFAttributedStringSetAttribute(attrStr, trailRange, kCTFontAttributeName, baseFont)
+                CFAttributedStringSetAttribute(attrStr, trailRange, kCTRunDelegateAttributeName, trailDelegate)
+                CFAttributedStringSetAttribute(attrStr, trailRange, pillMarkerKey, ((pIdx << 1) | 1) as CFNumber)
+            }
+        }
+
+        // Install CTRunDelegate tab width reservations preserving 1:1 string indices (`text/tests.rs:89`).
+        if shapedText.contains("\t") {
+            let baseSpacePx = Self.spaceAdvancePx(font: baseFont, letterSpacingPx: style.letterSpacing * scale)
+            var u16Pos = 0
+            var monoCol = 0
+            var inMonoSpan = false
+            for scalar in shapedText.unicodeScalars {
+                let activeSpan = spanTabInfo.first(where: { $0.u16Range.contains(u16Pos) })
+                let isMono = (style.family == .monospace) || (activeSpan?.isMonospace == true)
+                if style.family != .monospace {
+                    if !isMono {
+                        inMonoSpan = false
+                        monoCol = 0
+                    } else if !inMonoSpan {
+                        inMonoSpan = true
+                        monoCol = 0
+                    }
+                }
+                if scalar.value == 0x0A {
+                    monoCol = 0
+                } else if scalar.value == 0x09 {
+                    let spacePx = activeSpan?.spacePx ?? baseSpacePx
+                    let tabWidthPx: CGFloat
+                    if isMono {
+                        let cols = 4 - (monoCol % 4)
+                        tabWidthPx = CGFloat(cols) * spacePx
+                        monoCol += cols
+                    } else {
+                        tabWidthPx = spacePx
+                    }
+                    let tabDelegate = Self.makeWidthDelegate(
+                        widthPx: tabWidthPx,
+                        ascentPx: baseAscentPx,
+                        descentPx: baseDescentPx
+                    )
+                    let tabRange = CFRangeMake(u16Pos, 1)
+                    CFAttributedStringReplaceString(attrStr, tabRange, "\u{FFFC}" as CFString)
+                    CFAttributedStringSetAttribute(attrStr, tabRange, kCTRunDelegateAttributeName, tabDelegate)
+                } else if isMono && !pillMarkerU16.contains(u16Pos) {
+                    monoCol += 1
+                }
+                u16Pos += scalar.utf16.count
+            }
+        }
 
         // Break into visual lines using CTTypesetter while keeping pill labels & bare icons atomic when they fit.
+        let typesetter = CTTypesetterCreateWithAttributedString(attrStr)
+        return TextPreparedShape(
+            authText: authText,
+            shapedText: shapedText,
+            style: style,
+            scale: scale,
+            lhPt: lhPt,
+            lhPx: lhPx,
+            markerMap: markerMap,
+            preparedPills: preparedPills,
+            spanPalette: spanPalette,
+            decoratedRanges: decoratedRanges,
+            baseFont: baseFont,
+            baseAscentPx: baseAscentPx,
+            baseDescentPx: baseDescentPx,
+            attrStr: attrStr,
+            typesetter: typesetter,
+            spanBoxes: spanBoxes
+        )
+    }
+
+    private static func isBreakOpportunity(_ u16: unichar) -> Bool {
+        u16 == 0x20 || u16 == 0x09 || u16 == 0x00AD
+            || (u16 >= 0x2000 && u16 <= 0x200B)
+            || u16 == 0x2028 || u16 == 0x2029 || u16 == 0x3000
+            || (u16 >= 0x4E00 && u16 <= 0x9FFF)
+            || (u16 >= 0x3040 && u16 <= 0x30FF)
+            || (u16 >= 0xAC00 && u16 <= 0xD7AF)
+    }
+
+    private func breakLines(
+        prepared: TextPreparedShape,
+        maxWidth: Float?,
+        emitGlyphs: Bool,
+        glidePx: Vec2,
+        styleOverride: TextStyle? = nil,
+        pretty: Bool = false
+    ) -> ShapedText {
+        let authText = prepared.authText
+        let shapedText = prepared.shapedText
+        let style = styleOverride ?? prepared.style
+        let scale = prepared.scale
+        let lhPt = style.resolvedLineHeight
+        let lhPx = lhPt * scale
+        var markerMap = prepared.markerMap
+        let preparedPills = prepared.preparedPills
+        let spanPalette = prepared.spanPalette
+        let decoratedRanges = prepared.decoratedRanges
+        let baseFont = prepared.baseFont
+        let baseAscentPx = prepared.baseAscentPx
+        let baseDescentPx = prepared.baseDescentPx
+        let attrStr = prepared.attrStr
+        let typesetter = prepared.typesetter
+        let spanColorKey = "RuneColorIndex" as CFString
+        let pillMarkerKey = "RunePillMarker" as CFString
+        let shapedNS = shapedText as NSString
+        let fullLen = CFAttributedStringGetLength(attrStr)
+
         struct VisualLine {
             var ctLine: CTLine
             var authUTF8Start: Int
@@ -3515,7 +4226,12 @@ public final class TextSystem: @unchecked Sendable {
         }
         var visualLines: [VisualLine] = []
         var anyTruncated = false
-        let typesetter = builtTypesetter.typesetter
+        // Inline boxes (pill chips' lead/trail placeholders, bare icons) for pretty wrapping (`#933`).
+        var pillBoxU16: Set<Int> = []
+        for vp in preparedPills {
+            pillBoxU16.insert(vp.leadShapedU16)
+            if let t = vp.trailShapedU16 { pillBoxU16.insert(t) }
+        }
         let effectiveWrapWidthPx: CGFloat? = (style.wrap == .wrap && maxWidth != nil)
             ? CGFloat(max(1.0, maxWidth! * scale))
             : nil
@@ -3544,7 +4260,7 @@ public final class TextSystem: @unchecked Sendable {
                 }
             }()
 
-            var segStart = u16Start
+            let segStart = u16Start
             if segStart == hardEnd {
                 let emptyAttr = CFAttributedStringCreate(kCFAllocatorDefault, "" as CFString, [kCTFontAttributeName: baseFont] as CFDictionary)!
                 let ctLine = CTLineCreateWithAttributedString(emptyAttr)
@@ -3563,92 +4279,172 @@ public final class TextSystem: @unchecked Sendable {
                     isParaLast: true
                 ))
             } else {
-                while segStart < hardEnd {
-                    var count: CFIndex
-                    if let wrapW = effectiveWrapWidthPx {
-                        let suggested: CFIndex
-                        if style.wrapAnywhere {
-                            suggested = CTTypesetterSuggestClusterBreak(typesetter, segStart, Double(wrapW))
+                // kitc's break loop (wrapAnywhere via `CTTypesetterSuggestLineBreak` + surrogate-pair fix;
+                // a break landing mid-word extends to the next break opportunity) run per line at
+                // `lineCaps[line]` when the pretty pass (`#882`) narrows a line, else at the wrap width.
+                func breakParagraph(lineCaps: [Int: CGFloat]?) -> [(ctLine: CTLine, segStart: Int, count: Int, isParaLast: Bool, wPx: Float, twPx: Float, emergency: Bool)] {
+                    var cursor = u16Start
+                    var out: [(ctLine: CTLine, segStart: Int, count: Int, isParaLast: Bool, wPx: Float, twPx: Float, emergency: Bool)] = []
+                    var lineIdxInPara = 0
+                    while cursor < hardEnd {
+                        var count: CFIndex
+                        var emergency = false
+                        if let wrapW = effectiveWrapWidthPx {
+                            let targetW = lineCaps?[lineIdxInPara] ?? wrapW
+                            let suggested: CFIndex
+                            if style.wrapAnywhere {
+                                suggested = CTTypesetterSuggestLineBreak(typesetter, cursor, Double(targetW))
+                            } else {
+                                let raw = CTTypesetterSuggestLineBreak(typesetter, cursor, Double(targetW))
+                                suggested = Self.keepUnbrokenWordIntact(raw, segStart: cursor, hardEnd: hardEnd, in: shapedNS)
+                            }
+                            count = min(max(1, suggested), hardEnd - cursor)
+                            if style.wrapAnywhere {
+                                let endIdx = cursor + count
+                                if endIdx < hardEnd && CFStringIsSurrogateHighCharacter(shapedNS.character(at: endIdx - 1)) {
+                                    count += 1
+                                }
+                                // A word broken inside to fit: Parley's `BreakReason::Emergency` (`#933`).
+                                emergency = cursor + count < hardEnd
+                                    && !Self.isLineBreakOpportunity(at: cursor + count, in: shapedNS, start: cursor, end: hardEnd)
+                            } else if cursor + count < hardEnd {
+                                let b = cursor + count
+                                if !Self.isBreakOpportunity(shapedNS.character(at: b - 1))
+                                    && !Self.isBreakOpportunity(shapedNS.character(at: b)) {
+                                    var end = b
+                                    while end < hardEnd && !Self.isBreakOpportunity(shapedNS.character(at: end)) {
+                                        end += 1
+                                    }
+                                    while end < hardEnd && (shapedNS.character(at: end) == 0x20 || shapedNS.character(at: end) == 0x09) {
+                                        end += 1
+                                    }
+                                    count = max(1, end - cursor)
+                                }
+                            }
+                            // Keep pill chips and bare inline icons attached to their label/word when they fit on a line.
+                            let tentativeEnd = cursor + count
+                            for vp in preparedPills {
+                                let fullLo = vp.leadShapedU16
+                                let fullHi = (vp.trailShapedU16 ?? max(vp.labelShapedU16Hi - 1, vp.leadShapedU16)) + 1
+                                if tentativeEnd > fullLo && tentativeEnd < fullHi && fullLo > cursor {
+                                    count = fullLo - cursor
+                                    break
+                                }
+                            }
+                            count = max(1, count)
                         } else {
-                            let raw = CTTypesetterSuggestLineBreak(typesetter, segStart, Double(wrapW))
-                            suggested = Self.keepUnbrokenWordIntact(raw, segStart: segStart, hardEnd: hardEnd, in: shapedNS)
+                            count = hardEnd - cursor
                         }
-                        count = min(max(1, suggested), hardEnd - segStart)
-                        // Keep pill chips and bare inline icons attached to their label/word when they fit on a line.
-                        let tentativeEnd = segStart + count
-                        for vp in preparedPills {
-                            let fullLo = vp.leadShapedU16
-                            let fullHi = (vp.trailShapedU16 ?? max(vp.labelShapedU16Hi - 1, vp.leadShapedU16)) + 1
-                            if tentativeEnd > fullLo && tentativeEnd < fullHi && fullLo > segStart {
-                                count = fullLo - segStart
-                                break
+                        let isParaLast = (cursor + count >= hardEnd)
+                        let cfRange = CFRangeMake(cursor, count)
+                        var ctLine = CTTypesetterCreateLine(typesetter, cfRange)
+                        if style.wrap == .ellipsis, let maxW = maxWidth {
+                            let maxWPx = Double(maxW * scale)
+                            let rawW = CTLineGetTypographicBounds(ctLine, nil, nil, nil)
+                            if rawW > maxWPx + 0.5 {
+                                let ellipAttr = CFAttributedStringCreate(
+                                    kCFAllocatorDefault,
+                                    "…" as CFString,
+                                    [kCTFontAttributeName: baseFont] as CFDictionary
+                                )!
+                                let token = CTLineCreateWithAttributedString(ellipAttr)
+                                let truncType: CTLineTruncationType = switch style.elide {
+                                case .end: .end
+                                case .middle: .middle
+                                case .head: .start
+                                }
+                                if let truncated = CTLineCreateTruncatedLine(ctLine, maxWPx, truncType, token) {
+                                    ctLine = truncated
+                                } else {
+                                    ctLine = token
+                                }
+                                anyTruncated = true
+                            }
+                        } else if style.align == .justified && !isParaLast && style.wrap == .wrap, let maxW = maxWidth {
+                            var trimmed = count
+                            while trimmed > 1 {
+                                let ch = shapedNS.character(at: cursor + trimmed - 1)
+                                if ch == 0x20 || ch == 0x09 {
+                                    trimmed -= 1
+                                } else {
+                                    break
+                                }
+                            }
+                            let baseLine = trimmed < count ? CTTypesetterCreateLine(typesetter, CFRangeMake(cursor, trimmed)) : ctLine
+                            let targetWPx = Double(max(1.0, maxW * scale))
+                            if let jLine = CTLineCreateJustifiedLine(baseLine, 1.0, targetWPx) {
+                                ctLine = jLine
                             }
                         }
-                        count = max(1, count)
-                    } else {
-                        count = hardEnd - segStart
+                        let wPx = Float(CTLineGetTypographicBounds(ctLine, nil, nil, nil))
+                        let twPx = Float(CTLineGetTrailingWhitespaceWidth(ctLine))
+                        out.append((ctLine, cursor, count, isParaLast, wPx, twPx, emergency))
+                        cursor += count
+                        lineIdxInPara += 1
                     }
-                    let isParaLast = (segStart + count >= hardEnd)
-                    let cfRange = CFRangeMake(segStart, count)
-                    var ctLine = CTTypesetterCreateLine(typesetter, cfRange)
-                    if style.wrap == .ellipsis, let maxW = maxWidth {
-                        let maxWPx = Double(maxW * scale)
-                        let rawW = CTLineGetTypographicBounds(ctLine, nil, nil, nil)
-                        if rawW > maxWPx + 0.5 {
-                            let ellipAttr = CFAttributedStringCreate(
-                                kCFAllocatorDefault,
-                                "…" as CFString,
-                                [kCTFontAttributeName: baseFont] as CFDictionary
-                            )!
-                            let token = CTLineCreateWithAttributedString(ellipAttr)
-                            let truncType: CTLineTruncationType = switch style.elide {
-                            case .end: .end
-                            case .middle: .middle
-                            case .head: .start
-                            }
-                            if let truncated = CTLineCreateTruncatedLine(ctLine, maxWPx, truncType, token) {
-                                ctLine = truncated
-                            } else {
-                                ctLine = token
-                            }
-                            anyTruncated = true
-                        }
-                    } else if style.align == .justified && !isParaLast && style.wrap == .wrap, let maxW = maxWidth {
-                        var trimmed = count
-                        while trimmed > 1 {
-                            let ch = shapedNS.character(at: segStart + trimmed - 1)
-                            if ch == 0x20 || ch == 0x09 {
-                                trimmed -= 1
-                            } else {
-                                break
-                            }
-                        }
-                        let baseLine = trimmed < count ? CTTypesetterCreateLine(typesetter, CFRangeMake(segStart, trimmed)) : ctLine
-                        let targetWPx = Double(max(1.0, maxW * scale))
-                        if let jLine = CTLineCreateJustifiedLine(baseLine, 1.0, targetWPx) {
-                            ctLine = jLine
+                    return out
+                }
+
+                var paraLines = breakParagraph(lineCaps: nil)
+                // `#933`: pills and `wrapAnywhere` text wrap prettily too (`line_break::break_new`
+                // breaks once with the pills' adjustments, scores, then breaks again with the caps
+                // first and the pills' adjustments after them).
+                if pretty,
+                   let wrapW = effectiveWrapWidthPx,
+                   style.wrap == .wrap,
+                   style.align != .justified,
+                   style.maxLines == 0,
+                   style.elide == .end,
+                   style.family != .monospace,
+                   !paraIsRTL,
+                   paraLines.count >= 2 {
+                    let greedyInfos: [PrettyLineBreaker.GreedyLineInfo] = paraLines.map { entry in
+                        let runs = CTLineGetGlyphRuns(entry.ctLine) as? [CTRun] ?? []
+                        let hasRTL = runs.contains { CTRunGetStatus($0).contains(.rightToLeft) }
+                        return PrettyLineBreaker.GreedyLineInfo(
+                            u16Start: entry.segStart,
+                            u16End: entry.segStart + entry.count,
+                            widthPx: entry.wPx,
+                            trailingWsPx: entry.twPx,
+                            hasRTLRun: hasRTL,
+                            ctLine: entry.ctLine,
+                            strIndexBase: 0,
+                            isEmergency: entry.emergency
+                        )
+                    }
+                    if let caps = PrettyLineBreaker.prettyLineCaps(
+                        lines: greedyInfos,
+                        in: shapedNS,
+                        fontSizePt: style.size,
+                        scale: scale,
+                        maxWidthPx: Float(wrapW),
+                        boxU16: pillBoxU16
+                    ) {
+                        let rebroken = breakParagraph(lineCaps: caps)
+                        if rebroken.count == paraLines.count {
+                            paraLines = rebroken
                         }
                     }
-                    let a0 = markerMap.authU16(forShapedU16: segStart)
-                    let a1 = markerMap.authU16(forShapedU16: segStart + count)
+                }
+
+                for entry in paraLines {
+                    let a0 = markerMap.authU16(forShapedU16: entry.segStart)
+                    let a1 = markerMap.authU16(forShapedU16: entry.segStart + entry.count)
                     let sub = authoredSlice(fromAuthU16: a0, toAuthU16: a1)
-                    let wPx = Float(CTLineGetTypographicBounds(ctLine, nil, nil, nil))
-                    let twPx = Float(CTLineGetTrailingWhitespaceWidth(ctLine))
                     visualLines.append(VisualLine(
-                        ctLine: ctLine,
+                        ctLine: entry.ctLine,
                         authUTF8Start: authUTF8Cursor,
                         authU16Start: a0,
                         authU16End: a1,
-                        u16Start: segStart,
-                        u16End: segStart + count,
+                        u16Start: entry.segStart,
+                        u16End: entry.segStart + entry.count,
                         authSubstr: sub,
-                        widthPx: wPx,
-                        trailingWsPx: twPx,
+                        widthPx: entry.wPx,
+                        trailingWsPx: entry.twPx,
                         isRTL: paraIsRTL,
-                        isParaLast: isParaLast
+                        isParaLast: entry.isParaLast
                     ))
                     authUTF8Cursor += sub.utf8.count
-                    segStart += count
                 }
             }
             if hardEnd < fullLen && shapedNS.character(at: hardEnd) == 0x0A {
@@ -3683,25 +4479,77 @@ public final class TextSystem: @unchecked Sendable {
         let descentPx = Float(baseDescentPx)
         let halfLeadingPx = (lhPx - (ascentPx + descentPx)) * 0.5
 
+        // Inline code grows its line as Blink's does (`#983`, `inline_fit.rs`): each line's code
+        // boxes past the strut's push its baseline down and the next lines with it.
+        let spanBoxes = prepared.spanBoxes
+        var lineGrowthPx: [(over: Float, under: Float)] = []
+        var grownBoxes: [InlineCodeBox.LineBox] = []
+        var grownLineHeightsPx: [Float] = []
+        var grownExtraPx: Float = 0
+        let strutParleyOverPx = InlineCodeBox.quantizedBox(ascentPx: ascentPx, descentPx: descentPx, lineHeightPx: lhPx).over
+        if !spanBoxes.isEmpty {
+            var anyGrown = false
+            lineGrowthPx.reserveCapacity(visualLines.count)
+            for item in visualLines {
+                let code = spanBoxes.compactMap { b -> (ascentPx: Float, descentPx: Float, lineHeightPx: Float)? in
+                    (b.u16Range.lowerBound < item.u16End && item.u16Start < b.u16Range.upperBound)
+                        ? (b.ascentPx, b.descentPx, b.lineHeightPx) : nil
+                }
+                let g = InlineCodeBox.lineGrowth(strut: (ascentPx, descentPx), code: code, lineHeightPx: lhPx)
+                if g.over > 0 || g.under > 0 { anyGrown = true }
+                lineGrowthPx.append(g)
+            }
+            if anyGrown {
+                // Parley's quantized line boxes: tops at the running `line_y` rounded, bottoms
+                // `(baseline + under).round()`, the layout as tall as the unrounded line heights.
+                let boxes = InlineCodeBox.lineBoxes(growth: lineGrowthPx, lineHeightPx: lhPx)
+                grownBoxes = boxes.lines
+                grownExtraPx = boxes.heightPx - Float(visualLines.count) * lhPx
+                grownLineHeightsPx = boxes.lines.map(\.heightPx)
+            } else {
+                lineGrowthPx = []
+            }
+        }
+
         var glyphsOut: [PositionedGlyph] = []
         var underlinesOut: [SIMD4<Float>] = []
+        var underlineLineEnds: [Float] = []
+        var glyphPensOut: [GlyphPen] = []
         var strikethroughsOut: [SIMD4<Float>] = []
         var rawBackgroundsOut: [(SIMD4<Float>, Color)] = []
         var pillChipsOut: [ShapedText.PillChipQuad] = []
         var inlineIconsOut: [ShapedText.InlineIconQuad] = []
         var lineRecords: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)] = []
         var lineMarkerRanges: [ShapedText.MarkerMap.LineRange] = []
+        var lineGlyphRanges: [Range<Int>] = []
         lineRecords.reserveCapacity(visualLines.count)
         lineMarkerRanges.reserveCapacity(visualLines.count)
+        lineGlyphRanges.reserveCapacity(visualLines.count)
 
         let invS = 1.0 / scale
         let ascentPt = ascentPx * invS
         let strokeThicknessPt = max(1.0, style.size * 0.07)
         let pm = PillMetrics(size: style.size)
 
+        var lineBaselines: [Float] = []
+        var lineBaselineFracs: [Float] = []
+        lineBaselines.reserveCapacity(visualLines.count)
+        lineBaselineFracs.reserveCapacity(visualLines.count)
         for (lineIdx, item) in visualLines.enumerated() {
-            let lineTopPx = Float(lineIdx) * lhPx
-            let baselineYPx = (lineTopPx + halfLeadingPx + ascentPx).rounded()
+            let lineStartGlyphIdx = glyphsOut.count
+            let lineTopPx = lineIdx < grownBoxes.count ? grownBoxes[lineIdx].topPx : Float(lineIdx) * lhPx
+            let growOverPx = lineIdx < lineGrowthPx.count ? lineGrowthPx[lineIdx].over : 0
+            let exactStrutBaselinePx = lineTopPx + halfLeadingPx + ascentPx
+            let strutBaselinePx = exactStrutBaselinePx.rounded()
+            // A line a box grew above the strut sits its baseline at that box's reach (Parley's
+            // `top + over`), never above the strut's own baseline.
+            let grownBaselinePx = lineTopPx + strutParleyOverPx + growOverPx
+            let grownWins = growOverPx > 0 && grownBaselinePx > strutBaselinePx
+            let baselineYPx = grownWins ? grownBaselinePx : strutBaselinePx
+            // Its baseline and how far its exact one sits from it, so paint can round it once where
+            // a text laid out from its exact place lands (`content.rs`, #935).
+            lineBaselines.append(baselineYPx)
+            lineBaselineFracs.append(grownWins ? 0 : exactStrutBaselinePx - baselineYPx)
             let alignOffsetPx: Float
             switch style.align {
             case .leading:
@@ -3746,7 +4594,60 @@ public final class TextSystem: @unchecked Sendable {
             ))
 
             if emitGlyphs && !decoratedRanges.isEmpty && item.u16End > item.u16Start {
-                for dec in decoratedRanges {
+                // Span backgrounds per glyph run (`decorations.rs`, `#983`): inline code's box is its
+                // font's content area, other spans balance on the cap height, whole device px;
+                // touching runs with one background merge into a rect as tall as the widest run.
+                if decoratedRanges.contains(where: { $0.background != nil }) {
+                    var pieces: [(x0: Float, padPx: Float, run: InlineCodeBox.RunBackground)] = []
+                    let lineRuns = CTLineGetGlyphRuns(item.ctLine) as? [CTRun] ?? []
+                    for dec in decoratedRanges {
+                        guard let bg = dec.background else { continue }
+                        let lo = max(item.u16Start, dec.u16Range.lowerBound)
+                        let hi = min(item.u16End, dec.u16Range.upperBound)
+                        guard hi > lo else { continue }
+                        for run in lineRuns {
+                            let r = CTRunGetStringRange(run)
+                            let rLo = max(lo, r.location + item.strIndexBase)
+                            let rHi = min(hi, r.location + r.length + item.strIndexBase)
+                            guard rHi > rLo else { continue }
+                            let attrs = CTRunGetAttributes(run) as NSDictionary
+                            guard let rf = attrs[kCTFontAttributeName] else { continue }
+                            let runFont = rf as! CTFont
+                            let a = Float(CTLineGetOffsetForStringIndex(item.ctLine, rLo - item.strIndexBase, nil))
+                            let b = Float(CTLineGetOffsetForStringIndex(item.ctLine, rHi - item.strIndexBase, nil))
+                            let x0 = alignOffsetPx + min(a, b)
+                            let w = abs(b - a)
+                            guard w * invS > 0.01 else { continue }
+                            let capPx = Float(CTFontGetCapHeight(runFont))
+                            let v = InlineCodeBox.backgroundVertical(
+                                baselinePx: baselineYPx,
+                                mono: dec.monospace,
+                                ascentPx: Float(CTFontGetAscent(runFont)),
+                                descentPx: Float(CTFontGetDescent(runFont)),
+                                capHeightPx: capPx > 0 ? capPx : nil,
+                                fontSizePx: Float(CTFontGetSize(runFont))
+                            )
+                            let padPx = dec.pad * scale
+                            let l = (x0 - padPx).rounded()
+                            let rr = (x0 + w + padPx).rounded()
+                            pieces.append((x0, padPx, InlineCodeBox.RunBackground(
+                                rect: SIMD4<Float>(l, v.top, rr - l, v.bottom - v.top),
+                                color: bg
+                            )))
+                        }
+                    }
+                    pieces.sort { $0.x0 < $1.x0 }
+                    var merged: [InlineCodeBox.RunBackground] = []
+                    var lastBg: Int? = nil
+                    for p in pieces {
+                        InlineCodeBox.appendMerging(p.run, pad: p.padPx, into: &merged, last: &lastBg)
+                    }
+                    for m in merged {
+                        rawBackgroundsOut.append((m.rect * invS, m.color))
+                    }
+                }
+                var lineGlyphEndPx: Float? = nil
+                for dec in decoratedRanges where dec.underline || dec.strikethrough {
                     let lo = max(item.u16Start, dec.u16Range.lowerBound)
                     let hi = min(item.u16End, dec.u16Range.upperBound)
                     guard hi > lo else { continue }
@@ -3755,12 +4656,13 @@ public final class TextSystem: @unchecked Sendable {
                     let xPt = originXPt + min(x0Px, x1Px) * invS
                     let wPt = abs(x1Px - x0Px) * invS
                     guard wPt > 0.01 else { continue }
-                    if let bg = dec.background {
-                        rawBackgroundsOut.append((SIMD4<Float>(xPt, originYPt, wPt, lhPt), bg))
-                    }
                     if dec.underline {
                         let uy = baselineYPx * invS + max(1.0, style.size * 0.12)
                         underlinesOut.append(SIMD4<Float>(xPt, uy, wPt, strokeThicknessPt))
+                        // Where its line's glyph runs end (points, alignment in), for `underline_edges`:
+                        // inline boxes (pills, inline icons) don't count (`underline.rs:12-15`).
+                        if lineGlyphEndPx == nil { lineGlyphEndPx = Self.glyphRunsEndPx(item.ctLine) }
+                        underlineLineEnds.append((alignOffsetPx + (lineGlyphEndPx ?? item.widthPx)) * invS)
                     }
                     if dec.strikethrough {
                         let sy = baselineYPx * invS - ascentPt * 0.35
@@ -3934,7 +4836,7 @@ public final class TextSystem: @unchecked Sendable {
                 }
             }
 
-            guard emitGlyphs else { continue }
+            if emitGlyphs {
             for run in runs {
                 let attrs = CTRunGetAttributes(run) as NSDictionary
                 if attrs[kCTRunDelegateAttributeName] != nil || attrs[pillMarkerKey] != nil {
@@ -3966,6 +4868,7 @@ public final class TextSystem: @unchecked Sendable {
                     ), colorEntry.pixelSize.x > 0 && colorEntry.pixelSize.y > 0 {
                         let quadXPx = roundf(gxPx) + colorEntry.bearingPx.x
                         let quadYPx = roundf(gyPx) + colorEntry.bearingPx.y
+                        glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx, binY: 0, smoothing: style.fontSmoothing, isColor: true))
                         glyphsOut.append(PositionedGlyph(
                             rect: SIMD4<Float>(
                                 quadXPx * invS,
@@ -4019,6 +4922,7 @@ public final class TextSystem: @unchecked Sendable {
 
                     quadXPx = posXPx + entry.bearingPx.x
                     let finalQuadYPx = quadYPx + entry.bearingPx.y
+                    glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: posXPx, binY: binYArg, smoothing: style.fontSmoothing, isColor: false))
                     glyphsOut.append(PositionedGlyph(
                         rect: SIMD4<Float>(
                             quadXPx * invS,
@@ -4032,13 +4936,16 @@ public final class TextSystem: @unchecked Sendable {
                     ))
                 }
             }
+            }
+            lineGlyphRanges.append(lineStartGlyphIdx..<glyphsOut.count)
         }
 
         markerMap.lines = lineMarkerRanges
         let backgroundsOut = Self.mergeContiguousBackgrounds(rawBackgroundsOut)
-        let totalHeightPt = Self.specLineHeight(lineCount: max(1, visualLines.count), lineHeightPt: lhPt, scale: scale, exact: style.exactLines)
-        let totalWidthPt = ceilf(maxLineWidthPx / scale * 2.0) * 0.5
-        return ShapedText(
+        let totalHeightPt = Self.specLineHeight(lineCount: max(1, visualLines.count), lineHeightPt: lhPt, scale: scale, exact: style.exactLines, extraPt: grownExtraPx * invS)
+        // A text box is as wide as its widest line to a 64th of a device pixel (`text_width`, #934).
+        let totalWidthPt = TextBoxGeometry.textWidth(maxLineWidthPx) / scale
+        var shapedOut = ShapedText(
             size: Vec2(totalWidthPt, totalHeightPt),
             lineCount: max(1, visualLines.count),
             lineHeight: lhPt,
@@ -4055,9 +4962,38 @@ public final class TextSystem: @unchecked Sendable {
             wasTruncated: anyTruncated,
             lastLineAdvancePx: visualLines.last?.widthPx ?? 0,
             hangingAdvancePx: visualLines.last?.trailingWsPx ?? 0,
+            lastLineWidthPx: visualLines.last?.widthPx ?? 0,
+            lastLineTrailingWsPx: visualLines.last?.trailingWsPx ?? 0,
             drawnText: authText,
-            lineAdvancesPx: visualLines.map { ($0.widthPx, $0.trailingWsPx) }
+            lineAdvancesPx: visualLines.map { ($0.widthPx, $0.trailingWsPx) },
+            lineGlyphRanges: lineGlyphRanges
         )
+        shapedOut.grownLineTopsPt = grownBoxes.map { $0.topPx * invS }
+        shapedOut.grownLineHeightsPt = grownBoxes.map { ($0.bottomPx - $0.topPx) * invS }
+        shapedOut.grownLineMetricHeightsPt = grownLineHeightsPx.map { $0 * invS }
+        shapedOut.lineBaselinesPx = lineBaselines
+        shapedOut.underlineLineEndsPt = underlineLineEnds
+        shapedOut.glyphPens = glyphPensOut.count == glyphsOut.count ? glyphPensOut : []
+        shapedOut.lineBaselineFracsPx = lineBaselineFracs
+        return shapedOut
+    }
+
+    /// Where a line's glyph runs end (line px): the furthest right edge of a run that draws glyphs,
+    /// run delegates (pills, inline icons) left out, as `underline_edges` takes `GlyphRun`s only.
+    private static func glyphRunsEndPx(_ line: CTLine) -> Float {
+        let runs = CTLineGetGlyphRuns(line) as? [CTRun] ?? []
+        var end: Float = 0
+        for run in runs {
+            let attrs = CTRunGetAttributes(run) as NSDictionary
+            if attrs[kCTRunDelegateAttributeName] != nil || attrs["RunePillMarker" as CFString] != nil { continue }
+            let n = CTRunGetGlyphCount(run)
+            guard n > 0 else { continue }
+            var pos = CGPoint.zero
+            CTRunGetPositions(run, CFRangeMake(0, 1), &pos)
+            let w = Float(CTRunGetTypographicBounds(run, CFRangeMake(0, n), nil, nil, nil))
+            end = max(end, Float(pos.x) + w)
+        }
+        return end
     }
 
     private static func globalShapedU16Index(in shaped: ShapedText, lineIdx: Int, authUTF8: Int, ctLine: CTLine) -> Int {
@@ -4096,15 +5032,14 @@ public final class TextSystem: @unchecked Sendable {
             let offsetPx = CTLineGetOffsetForStringIndex(ctLine, globalU16, nil)
             xPt += Float(offsetPx) / scale
         }
-        return SIMD4<Float>(xPt, rec.originY, 1.5, shaped.lineHeight)
+        return SIMD4<Float>(xPt, rec.originY, 1.5, shaped.lineBoxHeightPt(chosenIdx))
     }
 
     /// Hit-tests `(localX, localY)` in element-local logical points to a UTF-8 byte offset.
     public func hitTestUTF8Offset(in shaped: ShapedText, localX: Float, localY: Float, pixelScale: Float) -> Int {
         guard !shaped.lineStrings.isEmpty else { return 0 }
         let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
-        let lineIdx = Int(floorf(max(0, localY) / max(1, shaped.lineHeight)))
-            .clamped(to: 0...(shaped.lineStrings.count - 1))
+        let lineIdx = shaped.lineIndex(atLocalY: localY, lineCount: shaped.lineStrings.count)
         let rec = shaped.lineStrings[lineIdx]
         guard let ctLine = rec.ctLine, !rec.text.isEmpty else {
             return rec.utf8Start
@@ -4153,7 +5088,7 @@ public final class TextSystem: @unchecked Sendable {
                 } else {
                     endX = rec.originX
                 }
-                rects.append(SIMD4<Float>(endX, rec.originY, 4.0, shaped.lineHeight))
+                rects.append(SIMD4<Float>(endX, rec.originY, 4.0, shaped.lineBoxHeightPt(lineIdx)))
                 continue
             }
             guard hi > lo else { continue }
@@ -4170,7 +5105,7 @@ public final class TextSystem: @unchecked Sendable {
             }
             let minX = min(x0, x1)
             let w = max(2.0, abs(x1 - x0))
-            rects.append(SIMD4<Float>(minX, rec.originY, w, shaped.lineHeight))
+            rects.append(SIMD4<Float>(minX, rec.originY, w, shaped.lineBoxHeightPt(lineIdx)))
         }
         return rects
     }
@@ -4297,10 +5232,83 @@ public final class TextSystem: @unchecked Sendable {
         style: TextStyle,
         maxWidth: Float?,
         pixelScale: Float,
-        pills: [PillChip] = []
+        pills: [PillChip] = [],
+        keep requestedKeep: TextKeep = .cached,
+        bypassCache requestedBypass: Bool = false,
+        pretty: Bool = false
     ) -> Vec2 {
+        // `bypassCache` (Slice 3) and `keep: .secret` (kitc) both keep secure text out of every cache.
+        let keep: TextKeep = requestedBypass ? .secret : requestedKeep
+        let bypassCache = keep == .secret
+        // Pretty wrapping (`#882`) is Core Text only; the portable line breaker stays greedy.
+        _ = pretty
+        return measureFramePhase(.text) {
+            if keep == .secret {
+                var effectiveStyle = style
+                if maxWidth != nil && effectiveStyle.wrap == .noWrap { effectiveStyle.wrap = .wrap }
+                return shapePortable(text: text, spans: nil, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false).size
+            }
+            return measurePortable(text, style: style, maxWidth: maxWidth, pixelScale: pixelScale, pills: pills, bypassCache: bypassCache)
+        }
+    }
+
+    public func layoutKeyed(
+        text: String,
+        spans: [TextSpan]? = nil,
+        pills: [PillChip] = [],
+        style: TextStyle,
+        maxWidth: Float?,
+        pixelScale: Float,
+        emitGlyphs: Bool,
+        glidePx: Vec2 = .zero,
+        keep: TextKeep = .cached,
+        countAsRebreak: Bool = true,
+        pretty: Bool = false
+    ) -> TextLayoutBox {
         measureFramePhase(.text) {
-            measurePortable(text, style: style, maxWidth: maxWidth, pixelScale: pixelScale, pills: pills)
+            let scale = max(pixelScale, 1.0)
+            let authText = spans.map { $0.map(\.text).joined() } ?? text
+            let effectiveMaxW = maxWidth
+            let shapeKey = TextShapeKey(
+                authText: authText,
+                spans: spans,
+                pills: pills,
+                style: style,
+                pixelScale: scale,
+                fontEpoch: currentFontEpoch,
+                languageTag: language,
+                maxWidth: effectiveMaxW,
+                pretty: pretty
+            )
+            let shaped = shapePortable(
+                text: text,
+                spans: spans,
+                pills: pills,
+                style: style,
+                maxWidth: effectiveMaxW,
+                pixelScale: scale,
+                emitGlyphs: emitGlyphs
+            )
+            let box = TextLayoutBox(
+                shapeKey: shapeKey,
+                authText: authText,
+                spans: spans,
+                pills: pills,
+                style: style,
+                pixelScale: scale,
+                maxWidth: effectiveMaxW,
+                shaped: shaped,
+                hasGlyphs: emitGlyphs,
+                prepared: nil
+            )
+            if keep == .cached && !authText.isEmpty && countAsRebreak {
+                lock.lock()
+                if layoutCache[shapeKey] == nil { _shapedCount += 1 }
+                box.lastUsedCommit = layoutCommitSeq
+                layoutCache[shapeKey] = box
+                lock.unlock()
+            }
+            return box
         }
     }
 
@@ -4311,14 +5319,19 @@ public final class TextSystem: @unchecked Sendable {
         style: TextStyle,
         maxWidth: Float?,
         pixelScale: Float,
-        emitGlyphs: Bool = true
+        emitGlyphs: Bool = true,
+        glidePx: Vec2 = .zero,
+        bypassCache: Bool = false,
+        pretty: Bool = false
     ) -> ShapedText {
+        _ = glidePx
+        _ = pretty
         var effectiveStyle = style
         if effectiveStyle.fontSmoothing == .systemDefault {
             effectiveStyle.fontSmoothing = smoothing
         }
         return measureFramePhase(.text) {
-            shapePortable(text: text, spans: spans, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs)
+            shapePortable(text: text, spans: spans, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs, bypassCache: bypassCache)
         }
     }
 
@@ -4393,7 +5406,7 @@ public final class TextSystem: @unchecked Sendable {
                 let globalU16 = Self.globalShapedU16Index(in: shaped, lineIdx: lineIdx, authUTF8: utf8Offset, ctLine: ctLine)
                 xPt += Float(CTLineGetOffsetForStringIndex(ctLine, globalU16, nil)) / scale
             }
-            return SIMD4<Float>(xPt, ctRec.originY, 1.5, shaped.lineHeight)
+            return SIMD4<Float>(xPt, ctRec.originY, 1.5, shaped.lineBoxHeightPt(lineIdx))
         }
         #endif
         if lineIdx < shaped.portableLines.count {
@@ -4413,7 +5426,8 @@ public final class TextSystem: @unchecked Sendable {
         style: TextStyle,
         maxWidth: Float?,
         pixelScale: Float,
-        pills: [PillChip] = []
+        pills: [PillChip] = [],
+        bypassCache: Bool = false
     ) -> Vec2 {
         if text.isEmpty {
             return Vec2(0, Self.specLineHeight(lineCount: 1, lineHeightPt: style.resolvedLineHeight, scale: pixelScale, exact: style.exactLines))
@@ -4433,21 +5447,26 @@ public final class TextSystem: @unchecked Sendable {
             pillsHash: Self.hashPills(pills),
             fontEpoch: fontEpoch()
         )
-        lock.lock()
-        if let cached = measureCache[key] {
+        if !bypassCache {
+            lock.lock()
+            if let cached = measureCache[key] {
+                measureCache[key] = (cached.size, layoutCommitSeq)
+                lock.unlock()
+                return cached.size
+            }
             lock.unlock()
-            return cached
         }
-        lock.unlock()
 
-        let shaped = shapePortable(text: text, spans: nil, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
-        lock.lock()
-        measureMissCount += 1
-        if measureCache.count > 4096 {
-            measureCache.removeAll(keepingCapacity: true)
+        let shaped = shapePortable(text: text, spans: nil, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false, bypassCache: bypassCache)
+        if !bypassCache {
+            lock.lock()
+            measureMissCount += 1
+            if measureCache.count > 4096 {
+                measureCache.removeAll(keepingCapacity: true)
+            }
+            measureCache[key] = (shaped.size, layoutCommitSeq)
+            lock.unlock()
         }
-        measureCache[key] = shaped.size
-        lock.unlock()
         return shaped.size
     }
 
@@ -4458,8 +5477,10 @@ public final class TextSystem: @unchecked Sendable {
         style: TextStyle,
         maxWidth: Float?,
         pixelScale: Float,
-        emitGlyphs: Bool = true
+        emitGlyphs: Bool = true,
+        bypassCache: Bool = false
     ) -> ShapedText {
+        let _ = bypassCache
         let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
         let invS = 1.0 / scale
         let lineH = style.resolvedLineHeight
@@ -4549,7 +5570,7 @@ public final class TextSystem: @unchecked Sendable {
             let isRTL = Self.isRTLParagraph(para)
             if para.isEmpty {
                 lines.append((cursorUTF8, "", 0, isRTL, true))
-            } else if style.wrap == .wrap, let maxW = maxWidth, maxW > 0 {
+            } else if style.wrap == .wrap, let maxW = maxWidth {
                 var current = ""
                 var curW: Float = 0
                 var lineStart = cursorUTF8
@@ -4703,7 +5724,8 @@ public final class TextSystem: @unchecked Sendable {
             portableTruncated = true
         }
 
-        let maxLineW = lines.map(\.width).max() ?? 0
+        // A text box is as wide as its widest line to a 64th of a device pixel (`text_width`, #934).
+        let maxLineW = TextBoxGeometry.boxWidth(maxLineWidthPt: lines.map(\.width).max() ?? 0, scale: scale)
         let totalW = maxWidth.map { style.align == .leading ? max(maxLineW, min($0, maxLineW)) : max($0, maxLineW) } ?? maxLineW
         let totalH = Self.specLineHeight(lineCount: max(1, lines.count), lineHeightPt: lineH, scale: scale, exact: style.exactLines)
 
@@ -4714,9 +5736,11 @@ public final class TextSystem: @unchecked Sendable {
         var pillChipsOut: [ShapedText.PillChipQuad] = []
         var inlineIconsOut: [ShapedText.InlineIconQuad] = []
         var lineRecords: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
+        var lineGlyphRanges: [Range<Int>] = []
 
         let baselineOffset = lineH * 0.78
         for (idx, item) in lines.enumerated() {
+            let lineStartGlyphIdx = glyphs.count
             let originY = Float(idx) * lineH
             let originX: Float
             switch style.align {
@@ -4855,9 +5879,26 @@ public final class TextSystem: @unchecked Sendable {
                 ))
             }
             lineRecords.append((item.utf8Start, item.text, originY, originX, charOffsets))
+            lineGlyphRanges.append(lineStartGlyphIdx..<glyphs.count)
         }
 
         let backgrounds = Self.mergeContiguousBackgrounds(rawBackgrounds)
+        let lastLineWidthPx = (lines.last?.width ?? 0) * scale
+        let lastLineTrailingWsPt: Float = {
+            guard let last = lines.last, !last.text.isEmpty else { return 0 }
+            var w: Float = 0
+            var byteEnd = last.text.utf8.count
+            for ch in last.text.reversed() {
+                if ch == " " || ch == "\t" {
+                    let bytes = ch.utf8.count
+                    byteEnd -= bytes
+                    w += charAdvance(ch, atUTF8: last.utf8Start + byteEnd)
+                } else {
+                    break
+                }
+            }
+            return w
+        }()
         return ShapedText(
             size: Vec2(totalW, totalH),
             lineCount: lines.count,
@@ -4871,7 +5912,10 @@ public final class TextSystem: @unchecked Sendable {
             portableLines: lineRecords,
             forcedDirection: style.direction,
             primaryIsRTL: (style.direction == .rtl) || (style.direction == nil && (lines.first?.isRTL ?? false)),
-            wasTruncated: portableTruncated
+            wasTruncated: portableTruncated,
+            lastLineWidthPx: lastLineWidthPx,
+            lastLineTrailingWsPx: lastLineTrailingWsPt * scale,
+            lineGlyphRanges: lineGlyphRanges
         )
     }
 

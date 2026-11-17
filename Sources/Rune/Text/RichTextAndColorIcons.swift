@@ -357,10 +357,11 @@ public enum RichSpanFlattener {
             var monospace = (base.family == .monospace)
             var underline = false
             var strikethrough = false
+            var pad: Float = 0
 
             for sp in snappedSpans where sp.byteRange.lowerBound <= a && b <= sp.byteRange.upperBound {
                 if let c = sp.color { color = c }
-                if let bCol = sp.background { bg = bCol }
+                if let bCol = sp.background { bg = bCol; pad = sp.pad }
                 if let w = sp.weight { weight = w }
                 if let sz = sp.size { size = sz }
                 if let it = sp.italic { italic = it }
@@ -378,7 +379,8 @@ public enum RichSpanFlattener {
                 monospace: monospace,
                 underline: underline,
                 strikethrough: strikethrough,
-                size: size
+                size: size,
+                pad: pad
             )
 
             if var prev = merged.last,
@@ -389,7 +391,8 @@ public enum RichSpanFlattener {
                prev.italic == span.italic,
                prev.monospace == span.monospace,
                prev.underline == span.underline,
-               prev.strikethrough == span.strikethrough {
+               prev.strikethrough == span.strikethrough,
+               prev.pad == span.pad {
                 prev.text.append(span.text)
                 merged[merged.count - 1] = prev
             } else {
@@ -566,12 +569,12 @@ public enum TextHighlightPainter {
         var out: [HighlightQuad] = []
 
         for h in highlights {
-            let a = min(h.byteRange.lowerBound, len)
-            let b = min(h.byteRange.upperBound, len)
-            guard a < b, h.bg.a > 0 || h.ring != nil else { continue }
+            let rawA = min(h.byteRange.lowerBound, len)
+            let rawB = min(h.byteRange.upperBound, len)
+            guard rawA < rawB, h.bg.a > 0 || h.ring != nil else { continue }
             let pad = h.pad * pixelScale
             let ring = h.ring.map { TextRing(color: $0.color, width: $0.width * pixelScale) }
-            let boxes = textSystem.selectionRects(in: shaped, utf8Range: a..<b, pixelScale: pixelScale)
+            let boxes = textSystem.selectionRects(in: shaped, utf8Range: rawA..<rawB, pixelScale: pixelScale)
             for r in boxes where r.z > 0 {
                 let x = origin.x * pixelScale + r.x * pixelScale - pad
                 let y = origin.y * pixelScale + r.y * pixelScale

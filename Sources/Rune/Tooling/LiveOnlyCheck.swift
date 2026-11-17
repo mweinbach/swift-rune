@@ -88,6 +88,14 @@ private extension LiveOnlyNodePrint {
         "[" + xs.map { String(format: "%.1f", $0) }.joined(separator: ", ") + "]"
     }
 
+    static func formatTextSnippet(_ s: String?) -> String {
+        guard let s else { return "no text" }
+        if s.count <= 40 {
+            return "\"\(s)\""
+        }
+        return "\"\(String(s.prefix(40)))…\""
+    }
+
     func difference(against now: LiveOnlyNodePrint) -> LiveOnlyDifference? {
         let aRect = [targetRect.x, targetRect.y, targetRect.width, targetRect.height]
         let bRect = [now.targetRect.x, now.targetRect.y, now.targetRect.width, now.targetRect.height]
@@ -137,7 +145,7 @@ private extension LiveOnlyNodePrint {
             return LiveOnlyDifference(
                 path: path,
                 what: "text",
-                values: (text ?? "<none>", now.text ?? "<none>")
+                values: (Self.formatTextSnippet(text), Self.formatTextSnippet(now.text))
             )
         }
         return nil
@@ -161,6 +169,8 @@ extension Runtime {
             if case .exiting = scene.phase(node.nodeId) { return nil }
             let el = node.el
             let hasLiveFill = el.liveBindings.contains { $0.target == .fill }
+            let hasLiveBorder = el.liveBindings.contains { $0.target == .borderColor }
+            let hasLiveTextColor = el.liveText != nil || el.liveBindings.contains { $0.target == .textColor }
             let textVal: String?
             if el.liveText != nil {
                 textVal = "(live)"
@@ -173,12 +183,12 @@ extension Runtime {
                 path: node.path,
                 targetRect: node.targetRect,
                 fill: hasLiveFill ? nil : el.background,
-                borderColor: el.borderColor,
+                borderColor: hasLiveBorder ? .transparent : el.borderColor,
                 borderWidth: el.borderWidth,
                 opacity: el.opacity,
                 corners: el.corners,
                 text: textVal,
-                textColor: el.liveText != nil ? nil : el.textColor
+                textColor: hasLiveTextColor ? nil : el.textColor
             )
         }
         return LiveOnlyViewPrint(nodes: entries)

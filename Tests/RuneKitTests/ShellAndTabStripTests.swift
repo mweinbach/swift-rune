@@ -506,6 +506,14 @@ struct ShellAndTabStripTests {
 
         // Middle-clicking tab 'b' closes it
         let tabB = try #require(rt.element(byKey: "ts-tab-b")).rect
+        // Moving pointer outside before middle release does NOT close tab 'a' (.onMiddlePress semantics)
+        let tabA = try #require(rt.element(byKey: "ts-tab-a")).rect
+        rt.pointerDown(at: Vec2(tabA[0] + 12, tabA[1] + 12), button: .middle, at: 0.08)
+        rt.pointerMove(to: Vec2(460, 110), at: 0.085)
+        rt.pointerUp(at: Vec2(460, 110), button: .middle, at: 0.09)
+        rt.frame(at: 0.095)
+        #expect(rt.state.closed.isEmpty)
+
         rt.pointerDown(at: Vec2(tabB[0] + 12, tabB[1] + 12), button: .middle, at: 0.10)
         rt.pointerUp(at: Vec2(tabB[0] + 12, tabB[1] + 12), button: .middle, at: 0.11)
         rt.frame(at: 0.12)
@@ -616,7 +624,7 @@ struct ShellAndTabStripTests {
         rt.keyDown(KeyEvent(key: .tab), at: 0.07)
         rt.frame(at: 0.08)
         #expect(rt.focusedKey == "after-tabs")
-        let trackEl = try #require(rt.element(byKey: "fg-strip-track"))
+        let trackEl = try #require(rt.element(byKey: "fg-strip-list"))
         #expect(trackEl.role == .tabList)
         #expect(trackEl.label == "Workspace tabs")
     }
@@ -1403,7 +1411,10 @@ struct ShellAndTabStripTests {
         #expect(rt.state.picked == 0)
         press(.text("c"))
         #expect(rt.state.picked == 2)
-        rt.update { s, _ in s.picked = 0 }
+        // Upstream `tests/shell.rs:210` sets `rt.state.picked = 0` without a commit: a routed key
+        // commits pending state first (`frame.rs` "Resolve the new tree before routing"), so an
+        // `update` here would move the selection (and focus) before Return.
+        rt.state.picked = 0
         press(.enter)
         #expect(rt.state.picked == 2)
 
@@ -1836,5 +1847,124 @@ struct ShellAndTabStripTests {
         rt.pointerUp(at: Vec2(x3, y3 + 30), at: t + 0.02)
         step()
         #expect(rt.state.dropped.count == 1 && rt.state.dropped[0] == (2, 3))
+    }
+
+    // MARK: - Phase 2 TabStrip Parity (`P2-17` #883, `P2-18` #922, `P2-19` #925)
+
+    @Test("TabStrip draws titles with zero tracking and maps TabWords to close label & status descriptions (#883, #922)")
+    func tabStripZeroTrackingAndWordsParity() throws {
+        struct App {}
+        var kit = Kit.neutral(dark: false)
+        kit.ty.uiCompact.letterSpacing = -0.04
+
+        func findEl(_ node: El<App>, key: String) -> El<App>? {
+            if node.keyId == key { return node }
+            for child in node.children {
+                if let hit = findEl(child, key: key) { return hit }
+            }
+            return nil
+        }
+
+        let defaults = TabWords.default
+        #expect(defaults.close == "Close tab")
+        #expect(defaults.busy == "Working")
+        #expect(defaults.attention == "Needs attention")
+        #expect(defaults.unread == "Unread")
+        #expect(defaults.failed == "Failed")
+
+        let customWords = TabWords(
+            close: "Schliessen",
+            busy: "Arbeitet",
+            attention: "Achtung",
+            unread: "Ungelesen",
+            failed: "Fehlgeschlagen"
+        )
+        let built = TabStrip<App>(
+            key: "ts",
+            tabs: [
+                StripTabItem(id: "a", title: "Alpha").status(.spinner),
+                StripTabItem(id: "b", title: "Beta").status(.dirty),
+                StripTabItem(id: "c", title: "Gamma").status(.dot(kit.c.textAccent)),
+                StripTabItem(id: "d", title: "Delta").status(.badge("ERR", tone: .danger)),
+            ],
+            selected: "a"
+        )
+        .words(customWords)
+        .onClose { _, _, _ in }
+        .build(App(), kit: kit)
+
+        let titleA = try #require(findEl(built, key: "ts-title-a"))
+        #expect(titleA.textStyle.letterSpacing == 0.0)
+        #expect(titleA.textStyle.weight == kit.ty.uiMedium.weight)
+
+        let closeA = try #require(findEl(built, key: "ts-close-a"))
+        #expect(closeA.a11yLabel == "Schliessen")
+
+        #expect(findEl(built, key: "ts-tab-a")?.a11yDescription == "Arbeitet")
+        #expect(findEl(built, key: "ts-tab-b")?.a11yDescription == "Achtung")
+        #expect(findEl(built, key: "ts-tab-c")?.a11yDescription == "Ungelesen")
+        #expect(findEl(built, key: "ts-tab-d")?.a11yDescription == "Fehlgeschlagen")
+    }
+
+    @Test("TabStrip.hoverNone shows every closable non-icon-only tab's close button at rest beside status marks (#925)")
+    func tabStripHoverNoneParity() throws {
+        struct App {
+            var hoverNone: Bool
+            var density: TabDensity = .full
+            var closed: [String] = []
+        }
+        let kit = Kit.neutral(dark: false)
+
+        func makeRt(hoverNone: Bool, density: TabDensity = .full) -> Runtime<App> {
+            let rt = Runtime(state: App(hoverNone: hoverNone, density: density), viewport: Vec2(560, 100), systemDark: false) { s, _ in
+                TabStrip<App>(
+                    key: "ht",
+                    tabs: [
+                        StripTabItem(id: "pin", title: "Pin").pinned(true),
+                        StripTabItem(id: "plain", title: "Plain tab"),
+                        StripTabItem(id: "busy", title: "Busy tab").status(.spinner),
+                        StripTabItem(id: "fixed", title: "Locked").closable(false),
+                    ],
+                    selected: "plain"
+                )
+                .density(s.density)
+                .availableWidth(540)
+                .hoverNone(s.hoverNone)
+                .onClose { st, id, _ in st.closed.append(id) }
+                .build(s, kit: kit)
+            }
+            rt.frame(at: 0.0)
+            rt.frame(at: 0.2)
+            return rt
+        }
+
+        // Hover-capable strip: close button stays hidden at rest and appears when the tab is hovered.
+        let desktop = makeRt(hoverNone: false)
+        let desktopClose = try #require(desktop.element(byKey: "ht-close-plain"))
+        #expect(desktopClose.opacity == 0.0)
+        let plainRect = try #require(desktop.element(byKey: "ht-tab-plain")).rect
+        desktop.pointerMove(to: Vec2(plainRect[0] + 20, plainRect[1] + 12), at: 0.25)
+        desktop.frame(at: 0.3)
+        desktop.frame(at: 0.6)
+        #expect(try #require(desktop.element(byKey: "ht-close-plain")).opacity > 0.99)
+
+        // Touch / hoverNone strip: every closable non-icon-only tab shows its close button at rest,
+        // beside any status mark without overlap; pinned / non-closable / iconOnly tabs do not.
+        let touch = makeRt(hoverNone: true)
+        #expect(touch.element(byKey: "ht-close-pin") == nil)
+        #expect(touch.element(byKey: "ht-close-fixed") == nil)
+        let plainClose = try #require(touch.element(byKey: "ht-close-plain"))
+        let busyClose = try #require(touch.element(byKey: "ht-close-busy"))
+        let busySpin = try #require(touch.element(byKey: "ht-spin-busy"))
+        let busyTitle = try #require(touch.element(byKey: "ht-title-busy"))
+        #expect(plainClose.opacity == 1.0)
+        #expect(busyClose.opacity == 1.0)
+        #expect(busySpin.opacity == 1.0)
+        #expect(busyTitle.rect[0] + busyTitle.rect[2] <= busySpin.rect[0] + 0.5)
+        #expect(busySpin.rect[0] + busySpin.rect[2] <= busyClose.rect[0] + 0.5)
+
+        let iconOnlyTouch = makeRt(hoverNone: true, density: .iconOnly)
+        #expect(iconOnlyTouch.element(byKey: "ht-close-plain") == nil)
+        #expect(iconOnlyTouch.element(byKey: "ht-title-plain") == nil)
     }
 }

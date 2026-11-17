@@ -30,6 +30,21 @@ public func cornerExtent(_ radius: Float) -> Float {
     radius < 0 ? -radius * CONTINUOUS_K : radius
 }
 
+/// Monotonic high-32-bit revision seed so multiple `Runtime` instances sharing one
+/// `MetalRenderer` cannot collide on `(width, height, revision)` in `ImageAtlas`.
+internal enum ImageAtlasRevisionSeed {
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var nextSeed: UInt64 = 1
+
+    static func allocate() -> UInt64 {
+        lock.lock()
+        let seed = nextSeed
+        nextSeed &+= 1
+        lock.unlock()
+        return (seed << 32) | 1
+    }
+}
+
 /// Layer composite blend mode (`render::Blend`).
 public enum RenderBlend: UInt8, Sendable, Equatable {
     case sourceOver = 0
@@ -253,11 +268,25 @@ public final class ResidentLayerTracker: @unchecked Sendable {
         entries.removeValue(forKey: nodeId)
     }
 
+    public func replaceAll(with active: [UInt64: UInt64]) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries = active
+    }
+
     public func clear() {
         lock.lock()
         defer { lock.unlock() }
         entries.removeAll()
     }
+
+    public var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.count
+    }
+
+    public var isEmpty: Bool { count == 0 }
 }
 
 // MARK: - IEEE-754 f16 + Fade & Clip Radii Packing
@@ -620,6 +649,7 @@ public struct RenderFrame: Sendable {
     public var glyphs: R8Atlas
     public var glyphGeneration: UInt64
     public var images: RGBA8Atlas
+    public var imagePages: [RGBA8Atlas]
     public var imageRevision: UInt64
     public var instances: [RenderInstance]
     public var marks: [UInt32]
@@ -635,6 +665,7 @@ public struct RenderFrame: Sendable {
         glyphs: R8Atlas = R8Atlas(),
         glyphGeneration: UInt64 = 1,
         images: RGBA8Atlas = RGBA8Atlas(),
+        imagePages: [RGBA8Atlas] = [],
         imageRevision: UInt64 = 1,
         instances: [RenderInstance] = [],
         marks: [UInt32] = [],
@@ -649,6 +680,7 @@ public struct RenderFrame: Sendable {
         self.glyphs = glyphs
         self.glyphGeneration = glyphGeneration
         self.images = images
+        self.imagePages = imagePages
         self.imageRevision = imageRevision
         self.instances = instances
         self.marks = marks

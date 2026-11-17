@@ -370,4 +370,49 @@ struct ThemeColorTokParityTests {
         #expect(opaqueMid.g < 0.12)
         #expect(opaqueMid != opaqueLinearMid)
     }
+
+    @Test("Theme.fromValue matches Theme.fromJSON and Theme.authored ignores blend mode")
+    func themeFromValueAndAuthored() throws {
+        let json = """
+        {
+          "name": "single-parse",
+          "blend": { "mode": "srgb", "over": "bg" },
+          "numbers": { "radius": 6 },
+          "dark": {
+            "bg": "#111111ff",
+            "hover": "#ffffff20"
+          },
+          "light": {
+            "bg": "#f8f8f8ff",
+            "hover": "#00000014"
+          }
+        }
+        """
+        let doc = try JSONSerialization.jsonObject(with: Data(json.utf8), options: [])
+        for dark in [false, true] {
+            let fromVal = try Theme.fromValue(doc, dark: dark)
+            let fromJson = try Theme.fromJSON(json, dark: dark)
+            #expect(fromVal == fromJson)
+            #expect(fromVal.authored("missing") == nil)
+
+            let expectedHover = Color.css(dark ? "#ffffff20" : "#00000014")
+            let bg = try #require(Color.css(dark ? "#111111ff" : "#f8f8f8ff"))
+            #expect(fromVal.authored("hover") == expectedHover)
+
+            Theme.withBlend(false) {
+                #expect(fromVal.authored("hover") == expectedHover)
+                #expect(fromVal.tryColor("hover") == expectedHover?.srgbEquivalent(over: bg))
+            }
+            let explicitLinear = fromVal.withBlendOverride(false)
+            #expect(explicitLinear.authored("hover") == expectedHover)
+            #expect(explicitLinear.tryColor("hover") == expectedHover?.srgbEquivalent(over: bg))
+        }
+
+        do {
+            _ = try Theme.fromValue(["not-an-object"], dark: true)
+            Issue.record("Expected ThemeError.invalidRoot")
+        } catch let err as ThemeError {
+            #expect(err == .invalidRoot)
+        }
+    }
 }

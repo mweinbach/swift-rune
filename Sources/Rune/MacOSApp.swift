@@ -52,6 +52,9 @@ public enum MacOSApp {
         }
 
         let vp = parsed.viewportOverride ?? appBuilder.size
+        // `RUNE_OPEN_INACTIVE`: a tool's launch (an accessibility probe, a capture) leaves the
+        // user's focus and keyboard where they are, as `App::open_inactive` does (#962).
+        let openInactive = OpenInactiveLaunch.openInactive(app: appBuilder.isOpenInactive)
         let app = NSApplication.shared
         app.setActivationPolicy(appBuilder.isAccessory ? .accessory : .regular)
         if !appBuilder.isAccessory {
@@ -98,7 +101,7 @@ public enum MacOSApp {
         runtime.tabVisitsControls = appBuilder.tabVisitsControlsEnabled
         runtime.nativeHelp = true
         runtime.fitHeight = appBuilder.isFitContentHeight
-        runtime.setSystemContrast(SystemPreferences.current().contrast)
+        runtime.readSystemContrastSettings()
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         if let pg = appBuilder.playgroundHost {
             runtime.playgroundHost = pg
@@ -210,6 +213,9 @@ public enum MacOSApp {
             }
         }
 
+        let shortcutGuard = ShortcutGuard.attach(shared: appShared, wake: waker, headless: false)
+        defer { shortcutGuard.close() }
+
         let hostView = RuneMetalHostView(
             frame: NSRect(x: 0, y: 0, width: CGFloat(vp.x), height: CGFloat(vp.y)),
             runtime: runtime,
@@ -218,13 +224,16 @@ public enum MacOSApp {
             respectSystemAppearance: respectSystemAppearance,
             compositor: appBuilder.compositorValue,
             appShared: appShared,
+            shortcutGuard: shortcutGuard,
             reports: reports,
             surfaceMeter: meter,
             devStatsReceiver: appBuilder.devStatsReceiver,
             windowHandle: windowHandle,
             minWindowSize: (minSz.x, minSz.y),
             maxWindowSize: opts.maxSize.map { ($0.x, $0.y) },
-            onReady: appBuilder.onReadyHook
+            onReady: appBuilder.onReadyHook,
+            chrome: appBuilder.chromeStyle,
+            titlebar: (appBuilder.chromeStyle.borderless || opts.borderless) ? nil : appBuilder.customTitlebar
         )
 
         let windowlessDriver = MacOSWindowlessDriver<State>(
@@ -233,10 +242,13 @@ public enum MacOSApp {
             timeScale: parsed.timeScale,
             shared: appBuilder.sharedHandle.shared,
             runtime: runtime,
+            shortcutGuard: shortcutGuard,
             onShowWindow: { [weak window, weak hostView] in
                 guard let window, let hostView else { return }
-                if appBuilder.isOpenInactive {
-                    window.orderFront(nil)
+                if openInactive {
+                    // Unfocused (`App::open_inactive`, `RUNE_OPEN_INACTIVE`): ordered front without
+                    // becoming key or activating the app (`platform/macos.rs` `show_without_focus`).
+                    window.orderFrontRegardless()
                 } else {
                     window.makeKeyAndOrderFront(nil)
                     window.makeFirstResponder(hostView)
@@ -253,10 +265,15 @@ public enum MacOSApp {
         )
 
         let shortcutBridge = MacOSHostShortcutBridge()
-        shortcutBridge.sync(registry: runtime.shortcutRegistry)
+        if appBuilder.globalShortcuts.isEmpty {
+            shortcutBridge.sync(registry: runtime.shortcutRegistry)
+        }
         let systemObserver = MacOSSystemObserver { [weak runtime, weak hostView] in
             guard let runtime else { return }
-            runtime.setSystemContrast(SystemPreferences.current().contrast)
+            // Scroller style, system colours, or the workspace's accessibility display options
+            // (`NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification`): reduced motion,
+            // the contrast theme and Increase Contrast are read again at once (#980).
+            runtime.readSystemAccessibilitySettings(forceReducedMotion: parsed.reducedMotion)
             runtime.markNeedsCommit()
             hostView?.requestRender()
         }
@@ -264,9 +281,9 @@ public enum MacOSApp {
         let delegate = RuneAppDelegate(
             keepRunning: appBuilder.keepsRunning || appBuilder.isWindowless,
             onFocusChange: { [weak hostView] focused in
-                if focused {
-                    runtime.setSystemContrast(SystemPreferences.current().contrast)
-                }
+                // `WindowEvent::Focused(focused)`, gained or lost: reduced motion, the contrast
+                // theme and Increase Contrast are read again (`window/events.rs`).
+                runtime.readSystemAccessibilitySettings(forceReducedMotion: parsed.reducedMotion)
                 runtime.dispatchFocus(focused, at: hostView?.currentElapsedTime() ?? 0.0)
                 if focused {
                     RuneStandardMenuRouter.setActiveKeyDispatcher {
@@ -291,6 +308,7 @@ public enum MacOSApp {
             },
             onTerminate: {
                 _ = systemObserver
+                shortcutGuard.close()
                 shortcutBridge.clear()
                 windowlessDriver.stop()
                 hostView.stopTimer()
@@ -314,6 +332,7 @@ public enum MacOSApp {
         window.delegate = delegate
         window.contentView = hostView
         window.center()
+        hostView.attachChromeSync()
 
         appBuilder.sharedHandle.shared.setWaker(waker)
         appBuilder.sharedHandle.shared.setVisible(windowlessDriver.isWindowShown)
@@ -342,12 +361,14 @@ public enum MacOSApp {
             ReadySignal.ready()
             windowlessDriver.start()
         } else {
-            if appBuilder.isOpenInactive {
-                window.orderFront(nil)
+            if openInactive {
+                // Unfocused (`App::open_inactive`, `RUNE_OPEN_INACTIVE`): ordered front without
+                // becoming key or activating the app (`platform/macos.rs` `show_without_focus`).
+                window.orderFrontRegardless()
             } else {
                 window.makeKeyAndOrderFront(nil)
                 window.makeFirstResponder(hostView)
-                if !appBuilder.isAccessory {
+                if OpenInactiveLaunch.activatesAtLaunch(accessory: appBuilder.isAccessory) {
                     app.activate(ignoringOtherApps: true)
                 }
             }
@@ -445,12 +466,16 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private let respectSystemAppearance: Bool
     private let compositor: AnyCompositor<State>?
     private let appShared: AppShared<State>?
+    private let shortcutGuard: ShortcutGuard?
     private let reports: FrameReports<State>?
     private let surfaceMeter: SurfaceMeter?
     private let devStatsReceiver: ((SurfaceStats) -> Void)?
     private let windowHandle: WindowHandle?
     private let onReady: ((WindowHandle) -> Void)?
     private var didFireReady: Bool = false
+    private let chromeStyle: Chrome
+    private let customTitlebar: Titlebar?
+    private var chromeWatch: WindowChromeWatch?
     private var lastFrameTime: Double = 0.0
     private var displayLinkDriver: MacOSDisplayLinkDriver?
     private var trackingAreaRef: NSTrackingArea?
@@ -461,14 +486,20 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private var materialHost: RuneMaterialHost?
     private var restingGiveBackDone: Bool = false
     private let accessibilityHost = MacOSAccessibilityHost()
-    private lazy var textInputBridge = MacOSTextInputBridge { [weak self] imeEvent in
+    private lazy var textInputBridge: MacOSTextInputBridge = MacOSTextInputBridge { [weak self] imeEvent in
         guard let self else { return }
-        if self.runtime.dispatchImeEvent(imeEvent, at: self.nowSeconds()) {
+        let dispatched = self.arrived(.keyPress, nil) {
+            self.runtime.dispatchImeEvent(imeEvent, recordReleaseGuard: self.textInputBridge.isTrackingKeyEvent, at: self.nowSeconds())
+        }
+        if dispatched {
             self.requestRender()
         }
     }
     private var lastAppliedCursor: Cursor = .default
     private var didInitialA11ySync = false
+    /// The accessibility tree must go out again although no commit changed it: held announcer
+    /// words, or a client that just attached (`A11yTree::held` / `full`, #980).
+    private var a11yFollowUp = false
     private let toolTipOwner = MacOSToolTipOwner()
     private let windowFrameDriver = MacOSWindowFrameDriver()
     private let minWindowSize: (Float, Float)
@@ -486,20 +517,26 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         respectSystemAppearance: Bool,
         compositor: AnyCompositor<State>? = nil,
         appShared: AppShared<State>? = nil,
+        shortcutGuard: ShortcutGuard? = nil,
         reports: FrameReports<State>? = nil,
         surfaceMeter: SurfaceMeter? = nil,
         devStatsReceiver: ((SurfaceStats) -> Void)? = nil,
         windowHandle: WindowHandle? = nil,
         minWindowSize: (Float, Float) = (WindowOptions.defaultMinSize.x, WindowOptions.defaultMinSize.y),
         maxWindowSize: (Float, Float)? = nil,
-        onReady: ((WindowHandle) -> Void)? = nil
+        onReady: ((WindowHandle) -> Void)? = nil,
+        chrome: Chrome = .standard,
+        titlebar: Titlebar? = nil
     ) {
+        self.chromeStyle = chrome
+        self.customTitlebar = titlebar
         self.runtime = runtime
         self.renderer = renderer
         self.timeScale = timeScale
         self.respectSystemAppearance = respectSystemAppearance
         self.compositor = compositor
         self.appShared = appShared
+        self.shortcutGuard = shortcutGuard
         self.reports = reports
         self.surfaceMeter = surfaceMeter
         if let surfaceMeter {
@@ -572,7 +609,25 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         } else {
             runtime.setViewport(newVP, pixelScale: Float(scale))
         }
+        // Resized / ScaleFactorChanged re-sync the chrome (`window/events.rs`).
+        syncWindowChrome()
         renderTick()
+    }
+
+    /// `window/chrome.rs::sync_chrome` for this window's `App::chrome` and `App::titlebar`.
+    fileprivate func syncWindowChrome() {
+        guard let w = window else { return }
+        runtime.syncWindowChrome(window: w, chrome: chromeStyle, titlebar: customTitlebar)
+    }
+
+    /// Syncs the chrome now and again on full screen and uncovering (`window/sight.rs`).
+    fileprivate func attachChromeSync() {
+        guard let w = window else { return }
+        syncWindowChrome()
+        chromeWatch = WindowChromeWatch(window: w) { [weak self] in
+            self?.syncWindowChrome()
+            self?.requestRender()
+        }
     }
 
     func stopTimer() {
@@ -617,7 +672,19 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         }
         runtime.windowResting = !(inLiveResize || windowFrameDriver.isMoving)
 
-        if let drained = appShared?.applyStateUpdates(to: runtime, at: t) {
+        shortcutGuard?.drain()
+        let drained: AppDrainedRequests<State>? = if let appShared {
+            if let shortcutGuard {
+                shortcutGuard.withReceiving {
+                    appShared.applyStateUpdates(to: runtime, at: t)
+                }
+            } else {
+                appShared.applyStateUpdates(to: runtime, at: t)
+            }
+        } else {
+            nil
+        }
+        if let drained {
             applyDrainedRequests(drained)
         }
         syncNativeMenus()
@@ -638,6 +705,12 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         let updateStart = CACurrentMediaTime()
         let renderFrame = runtime.renderFrame(at: t)
         let updateMs = (CACurrentMediaTime() - updateStart) * 1000.0
+        // A new `Cx::set_titlebar` / `Cx::titlebar_height` moves the traffic lights and the band
+        // (`window/lifecycle.rs` `take_titlebar_changed`); changed insets re-run the view next.
+        if runtime.takeTitlebarChanged(), window != nil {
+            syncWindowChrome()
+            DispatchQueue.main.async { [weak self] in self?.requestRender() }
+        }
 
         if let w = window {
             if !w.isOpaque && materialMode != .fallback && !renderFrame.materials.isEmpty {
@@ -695,7 +768,8 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         } else if !restingGiveBackDone {
             restingGiveBackDone = true
             let hidden = window?.occlusionState.contains(.visible) == false
-            renderer.giveBack(all: hidden, residentCaches: false)
+            runtime.rest(at: t)
+            renderer.giveBack(all: hidden, residentCaches: hidden)
         }
         surfaceMeter?.setPacing(isAnim ? .paced : .idle)
         _ = surfaceMeter?.redraw(paced: displayLinkDriver?.isRunning ?? false)
@@ -778,7 +852,12 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             devStatsReceiver?(stats)
         }
         pumpPlatformActions()
-        syncPlatformBridges(treeCommitted: !didInitialA11ySync || runtime.viewCommitCount != commitsBefore)
+        // The accessibility stamp: a commit, held words or an attaching reader, or words said since
+        // the last update (`announced`), which a live-only `Tx::announce` brings without a commit.
+        syncPlatformBridges(
+            treeCommitted: !didInitialA11ySync || a11yFollowUp || runtime.viewCommitCount != commitsBefore
+                || accessibilityHost.announcementChanged(runtime.a11yAnnouncement)
+        )
 
         if isAnim {
             if displayLinkDriver == nil {
@@ -795,7 +874,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     internal func syncPlatformBridges(treeCommitted: Bool) {
         let focused = window?.isKeyWindow ?? true
-        let imeAllowed = runtime.hasFocusedTextInput && !runtime.hasSecureFocus && focused
+        let imeAllowed = runtime.hasImeTarget && !runtime.hasSecureFocus && focused
         let cancelIme = runtime.consumeImeReset()
         let caretRect = MacOSHostViewHelper.caretScreenRect(caret: runtime.focusedCaretRect(), in: self)
         textInputBridge.sync(
@@ -811,9 +890,13 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
         if treeCommitted {
             didInitialA11ySync = true
+            a11yFollowUp = false
+            if accessibilityHost.onActivate == nil {
+                accessibilityHost.onActivate = { [weak self] in self?.scheduleAccessibilityFollowUp() }
+            }
             toolTipOwner.sync(regions: runtime.helpRegionsList(), on: self)
             let snapshot = runtime.accessibilitySnapshot()
-            accessibilityHost.update(tree: snapshot, parentView: self) { [weak self] id, action in
+            let held = accessibilityHost.update(tree: snapshot, announcement: runtime.a11yAnnouncement, parentView: self) { [weak self] id, action in
                 MacOSHostViewHelper.dispatchAccessibilityAction(id, action: action) { id, action in
                     guard let self else { return }
                     if self.runtime.performAccessibilityAction(id, action: action, at: self.nowSeconds()) {
@@ -821,7 +904,16 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
                     }
                 }
             }
+            if held { scheduleAccessibilityFollowUp() }
         }
+    }
+
+    /// Held announcer words or a client that just attached: the runtime stays dirty and the tree
+    /// goes out again on the next frame (`a11y_update`'s `self.dirty = true`).
+    private func scheduleAccessibilityFollowUp() {
+        a11yFollowUp = true
+        runtime.markNeedsCommit()
+        DispatchQueue.main.async { [weak self] in self?.requestRender() }
     }
 
     private func syncNativeMenus() {
@@ -915,68 +1007,79 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         MacOSKeyMapper.mods(for: event)
     }
 
+    /// Dispatches `body` as the platform input `event` of `kind` (else AppKit's current event
+    /// when it is that kind), inside the scope holding when it arrived (`input::time::arrived`).
+    @discardableResult
+    private func arrived<R>(_ kind: HostInputKind, _ event: NSEvent?, _ body: () -> R) -> R {
+        runtime.hostInput(kind, eventTimestamp: MacOSInputEvents.timestamp(kind, event), body)
+    }
+
     override func mouseMoved(with event: NSEvent) {
-        runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func mouseExited(with event: NSEvent) {
-        runtime.pointerExit(at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerExit(at: nowSeconds()) }
         renderTick()
     }
 
     override func mouseDragged(with event: NSEvent) {
-        runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func rightMouseDragged(with event: NSEvent) {
-        runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func otherMouseDragged(with event: NSEvent) {
-        runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func mouseDown(with event: NSEvent) {
-        runtime.pointerDown(at: localPoint(for: event), button: .primary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerDown(at: localPoint(for: event), button: .primary, mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func mouseUp(with event: NSEvent) {
-        runtime.pointerUp(at: localPoint(for: event), button: .primary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerUp(at: localPoint(for: event), button: .primary, mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        runtime.pointerDown(at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerDown(at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func rightMouseUp(with event: NSEvent) {
-        runtime.pointerUp(at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerUp(at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func otherMouseDown(with event: NSEvent) {
-        runtime.pointerDown(
-            at: localPoint(for: event),
-            button: PointerButton.fromAppKit(buttonNumber: event.buttonNumber),
-            mods: mods(for: event),
-            at: nowSeconds()
-        )
+        arrived(.pointer, event) {
+            runtime.pointerDown(
+                at: localPoint(for: event),
+                button: PointerButton.fromAppKit(buttonNumber: event.buttonNumber),
+                mods: mods(for: event),
+                at: nowSeconds()
+            )
+        }
         renderTick()
     }
 
     override func otherMouseUp(with event: NSEvent) {
-        runtime.pointerUp(
-            at: localPoint(for: event),
-            button: PointerButton.fromAppKit(buttonNumber: event.buttonNumber),
-            mods: mods(for: event),
-            at: nowSeconds()
-        )
+        arrived(.pointer, event) {
+            runtime.pointerUp(
+                at: localPoint(for: event),
+                button: PointerButton.fromAppKit(buttonNumber: event.buttonNumber),
+                mods: mods(for: event),
+                at: nowSeconds()
+            )
+        }
         renderTick()
     }
 
@@ -989,21 +1092,21 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     @discardableResult
     internal func dispatchMagnify(delta: Float, at pt: Vec2, phase: GesturePhase) -> Bool {
-        let handled = runtime.magnify(MagnifyEvent(delta: delta, x: pt.x, y: pt.y, phase: phase), at: pt, now: nowSeconds())
+        let handled = arrived(.magnify, nil) { runtime.magnify(MagnifyEvent(delta: delta, x: pt.x, y: pt.y, phase: phase), at: pt, now: nowSeconds()) }
         renderTick()
         return handled
     }
 
     @discardableResult
     internal func dispatchRotate(degrees: Float, at pt: Vec2, phase: GesturePhase) -> Bool {
-        let handled = runtime.rotate(RotateEvent(degrees: degrees, x: pt.x, y: pt.y, phase: phase), at: pt, now: nowSeconds())
+        let handled = arrived(.rotate, nil) { runtime.rotate(RotateEvent(degrees: degrees, x: pt.x, y: pt.y, phase: phase), at: pt, now: nowSeconds()) }
         renderTick()
         return handled
     }
 
     @discardableResult
     internal func dispatchSmartMagnify(at pt: Vec2) -> Bool {
-        let handled = runtime.smartMagnify(at: pt, now: nowSeconds())
+        let handled = arrived(.smartMagnify, nil) { runtime.smartMagnify(at: pt, now: nowSeconds()) }
         renderTick()
         return handled
     }
@@ -1030,24 +1133,27 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     }
 
     override func scrollWheel(with event: NSEvent) {
-        let mult: Float = event.hasPreciseScrollingDeltas ? 1.0 : 12.0
+        // `window/events.rs`: native wheel distances matched to Chromium (#856).
+        let (dx, dy) = WheelDistance.points(for: event)
         let wev = WheelEvent(
-            dx: Float(event.scrollingDeltaX) * mult,
-            dy: Float(event.scrollingDeltaY) * mult,
+            dx: dx,
+            dy: dy,
             precise: event.hasPreciseScrollingDeltas,
             mods: mods(for: event)
         )
-        runtime.wheel(wev, at: localPoint(for: event), now: nowSeconds())
+        arrived(.wheel, event) { runtime.wheel(wev, at: localPoint(for: event), now: nowSeconds()) }
         renderTick()
     }
 
     private func makeKeyEvent(from event: NSEvent) -> KeyEvent? {
-        MacOSKeyMapper.makeKeyEvent(from: event)
+        let focused = window?.isKeyWindow ?? true
+        let optionAsAlt = runtime.hasImeTarget && focused && runtime.effectiveImeOptionAsAlt
+        return MacOSKeyMapper.makeKeyEvent(from: event, optionAsAlt: optionAsAlt)
     }
 
     @discardableResult
-    func dispatchKeyEvent(_ ev: KeyEvent, isRepeat: Bool = false) -> Bool {
-        let handled = MacOSClipboardSync.dispatchKeyWithSync(ev, runtime: runtime, at: nowSeconds())
+    func dispatchKeyEvent(_ ev: KeyEvent, isRepeat: Bool = false, from nsEvent: NSEvent? = nil) -> Bool {
+        let handled = arrived(.keyPress, nsEvent) { MacOSClipboardSync.dispatchKeyWithSync(ev, runtime: runtime, at: nowSeconds()) }
         _ = isRepeat
         renderTick()
         return handled
@@ -1056,12 +1162,15 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     @discardableResult
     func dispatchNativeKeyEvent(_ event: NSEvent) -> Bool {
         guard let kev = makeKeyEvent(from: event) else { return false }
-        return dispatchKeyEvent(kev, isRepeat: event.isARepeat)
+        return dispatchKeyEvent(kev, isRepeat: event.isARepeat, from: event)
     }
 
     override func keyDown(with event: NSEvent) {
-        if runtime.hasFocusedTextInput && !runtime.hasSecureFocus {
-            let imeResult = textInputBridge.processKeyDown(event, in: self)
+        let focused = window?.isKeyWindow ?? true
+        let imeAllowed = runtime.hasImeTarget && !runtime.hasSecureFocus && focused
+        let optionAsAlt = imeAllowed && runtime.effectiveImeOptionAsAlt
+        if imeAllowed {
+            let imeResult = arrived(.keyPress, event) { textInputBridge.processKeyDown(event, in: self, optionAsAlt: optionAsAlt) }
             if imeResult == .handledByIME {
                 renderTick()
                 return
@@ -1071,11 +1180,11 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     }
 
     override func keyUp(with event: NSEvent) {
-        if runtime.hasFocusedTextInput && !runtime.hasSecureFocus && textInputBridge.hasMarkedText() {
+        if runtime.hasImeTarget && !runtime.hasSecureFocus && textInputBridge.hasMarkedText() {
             return
         }
         guard let kev = makeKeyEvent(from: event) else { return }
-        _ = runtime.keyUp(kev, at: nowSeconds())
+        _ = arrived(.keyRelease, event) { runtime.keyUp(kev, at: nowSeconds()) }
         renderTick()
     }
 
@@ -1089,6 +1198,11 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     }
 
     override func flagsChanged(with event: NSEvent) {
+        arrived(.keyRelease, event) { dispatchFlagsChanged(event) }
+        renderTick()
+    }
+
+    private func dispatchFlagsChanged(_ event: NSEvent) {
         let now = nowSeconds()
         let fnTransitions = fnKeyMonitor.take()
         if !fnTransitions.isEmpty {
@@ -1106,7 +1220,6 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         } else {
             runtime.dispatchModifiers(mods(for: event), at: now)
         }
-        renderTick()
     }
 
     // MARK: - NSTextInputClient
@@ -1297,6 +1410,7 @@ private final class MacOSWindowlessDriver<State> {
     private let timeScale: Double
     private let shared: AppShared<State>
     private let runtime: Runtime<State>
+    private let shortcutGuard: ShortcutGuard?
     private let onShowWindow: @MainActor () -> Void
     private var timer: Timer?
 
@@ -1306,6 +1420,7 @@ private final class MacOSWindowlessDriver<State> {
         timeScale: Double,
         shared: AppShared<State>,
         runtime: Runtime<State>,
+        shortcutGuard: ShortcutGuard? = nil,
         onShowWindow: @escaping @MainActor () -> Void
     ) {
         self.isWindowShown = !isWindowless
@@ -1313,6 +1428,7 @@ private final class MacOSWindowlessDriver<State> {
         self.timeScale = timeScale
         self.shared = shared
         self.runtime = runtime
+        self.shortcutGuard = shortcutGuard
         self.onShowWindow = onShowWindow
     }
 
@@ -1336,7 +1452,14 @@ private final class MacOSWindowlessDriver<State> {
         guard !isWindowShown else { return }
         _ = MainQueueDispatcher.shared.drain()
         let now = (CACurrentMediaTime() - startAt) * timeScale
-        let req = shared.applyStateUpdates(to: runtime, at: now)
+        shortcutGuard?.drain()
+        let req = if let shortcutGuard {
+            shortcutGuard.withReceiving {
+                shared.applyStateUpdates(to: runtime, at: now)
+            }
+        } else {
+            shared.applyStateUpdates(to: runtime, at: now)
+        }
         if req.quit {
             NSApplication.shared.terminate(nil)
             return

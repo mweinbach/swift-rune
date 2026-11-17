@@ -408,6 +408,31 @@ public struct ImageAtlas: Sendable {
         }
     }
 
+    /// Window at rest (`ImageAtlas::rest`): forgets images not shown in the last frame (including page 0)
+    /// and releases the CPU buffer of every empty page.
+    public mutating func rest() {
+        let currentPages = pages
+        slots = slots.filter { _, slot in
+            slot.page < currentPages.count && currentPages[slot.page].shown
+        }
+        let activePixelsIDs = Set(slots.keys.map(\.pixelsID))
+        starts = starts.filter { activePixelsIDs.contains($0.key) }
+        for i in pages.indices {
+            let hasSlot = slots.values.contains { $0.page == i }
+            if !hasSlot {
+                pages[i].shelfX = 0
+                pages[i].shelfY = 0
+                pages[i].shelfH = 0
+                pages[i].dirty = nil
+                pages[i].data = []
+            }
+        }
+        let keepCount = (slots.values.map { $0.page + 1 }.max()) ?? 0
+        if keepCount < pages.count {
+            pages.removeSubrange(keepCount..<pages.count)
+        }
+    }
+
     public mutating func invalidate() {
         for i in pages.indices {
             pages[i].dirty = 0..<pages[i].height

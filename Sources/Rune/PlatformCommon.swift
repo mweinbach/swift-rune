@@ -24,6 +24,47 @@ import UIKit
 
 // MARK: - Unified Cross-Platform RuneApp Entry Point
 
+/// Reports startup errors by printing to stderr and exiting `1` on native targets (`tooling::started`).
+public enum RuneStartup {
+    @discardableResult
+    internal static func handleResult(
+        _ result: Result<Void, any Error>,
+        writeStderr: (String) -> Void = { message in
+            if let data = "\(message)\n".data(using: .utf8) {
+                FileHandle.standardError.write(data)
+            }
+        },
+        exitProcess: (Int32) -> Void = { code in
+            #if os(WASI)
+            fatalError("startup failed with exit code \(code)")
+            #elseif canImport(WinSDK)
+            WinSDK.ExitProcess(UInt32(code))
+            #else
+            exit(code)
+            #endif
+        }
+    ) -> Bool {
+        if case .failure(let error) = result {
+            #if os(WASI)
+            fatalError("\(error)")
+            #else
+            writeStderr("\(error)")
+            exitProcess(1)
+            return false
+            #endif
+        }
+        return true
+    }
+
+    public static func started(_ result: Result<Void, any Error>) {
+        handleResult(result)
+    }
+
+    public static func started(_ body: () throws -> Void) {
+        handleResult(Result { try body() })
+    }
+}
+
 /// Cross-platform entry point for running a `Rune` application (`RuneApp.run(spec)`).
 ///
 /// Checks CLI headless flags (`--snap`, `--tree`, `--script`, `--frames`, `--strip`) first on
@@ -83,7 +124,7 @@ public enum RuneApp {
         #elseif canImport(UIKit) && !os(watchOS)
         try IOSApp.run(app.intoSpec(), parsed: parsed)
         #elseif os(Windows)
-        try Win32App.run(app.intoSpec(), parsed: parsed)
+        try Win32App.run(app.intoSpec(), parsed: parsed, openInactive: app.isOpenInactive)
         #elseif os(Linux)
         try LinuxApp.run(app.intoSpec(), parsed: parsed)
         #elseif os(Android)
@@ -93,6 +134,22 @@ public enum RuneApp {
         #else
         _ = try HeadlessRunner.run(app, args: parsed)
         #endif
+    }
+
+    /// Runs `spec`, printing startup errors to stderr and exiting `1` on native targets (`tooling::started`).
+    @MainActor
+    public static func runOrExit<State>(_ spec: AppSpec<State>, arguments: [String]? = nil) {
+        RuneStartup.started {
+            try run(spec, arguments: arguments)
+        }
+    }
+
+    /// Runs `app`, printing startup errors to stderr and exiting `1` on native targets (`tooling::started`).
+    @MainActor
+    public static func runOrExit<State>(_ app: App<State>, arguments: [String]? = nil) {
+        RuneStartup.started {
+            try run(app, arguments: arguments)
+        }
     }
 }
 

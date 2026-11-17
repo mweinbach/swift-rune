@@ -4541,16 +4541,19 @@
         {
           "upstream": "src/shortcuts/service/machine_tests.rs",
           "swift": [
-            "Tests/RuneTests/TextEditInputParityTests.swift"
+            "Tests/RuneTests/TextEditInputParityTests.swift",
+            "Tests/RuneTests/ShortcutOverlapWalkTests.swift"
           ],
           "status": "ported"
         },
         {
           "upstream": "src/shortcuts/service/routing_tests.rs",
           "swift": [
-            "Tests/RuneTests/TextEditInputParityTests.swift"
+            "Tests/RuneTests/TextEditInputParityTests.swift",
+            "Tests/RuneTests/ShortcutRoutingWalkTests.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "Routing tests ported; r410 host-generation close/drain walks (cbc94615, b55879bb) in ShortcutRoutingWalkTests (up-input-1)"
         },
         {
           "upstream": "src/shortcuts/service/teardown_tests.rs",
@@ -4649,9 +4652,12 @@
         {
           "upstream": "src/task.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Task/TaskQueue.swift",
+            "Sources/Rune/DesktopIntegration.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "task::queue ported (4529c6c1 #1026); thread pool (#904) not required"
         },
         {
           "upstream": "src/task/web.rs",
@@ -5037,7 +5043,8 @@
           "swift": [
             "Sources/Rune/Text.swift"
           ],
-          "status": "ported"
+          "status": "partial",
+          "note": "Paragraph layout ported; lazy long-paste runs (165f87a4 #957, 2371240d #990) open in up-edit-1"
         },
         {
           "upstream": "src/text/pill_chips.rs",
@@ -6092,6 +6099,260 @@
             "Sources/Rune/MacOSApp.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/task/queue.rs",
+          "swift": [
+            "Sources/Rune/Task/TaskQueue.swift"
+          ],
+          "status": "ported",
+          "note": "task::queue / Queue serial service queue - 4529c6c1 #1026 (up-task-1); tests TaskQueueTests"
+        },
+        {
+          "upstream": "src/text/pretty.rs",
+          "swift": [
+            "Sources/Rune/Text/PrettyLineBreaker.swift"
+          ],
+          "status": "ported",
+          "note": "text-wrap-style: pretty (#882/#919), pills/wrap_anywhere/emergency (c2476f2d #933, up-text-2), box-only line guard (31bc675b #1023, up-text-3)"
+        },
+        {
+          "upstream": "src/text/face_weights.rs",
+          "swift": [
+            "Sources/Rune/Text/FaceWeights.swift"
+          ],
+          "status": "ported",
+          "note": "FaceWeights (8627f32d #853, gap2/text)"
+        },
+        {
+          "upstream": "src/text/aaa.rs",
+          "swift": [
+            "Sources/Rune/Text/GaneshAAA.swift"
+          ],
+          "status": "ported",
+          "note": "Skia analytic AA scan converter for Ganesh icon fills (27c31fc2 #828, gap2/render)"
+        },
+        {
+          "upstream": "src/text/aaa/blit.rs",
+          "swift": [
+            "Sources/Rune/Text/GaneshAAA.swift"
+          ],
+          "status": "ported",
+          "note": "Skia analytic AA scan converter for Ganesh icon fills (27c31fc2 #828, gap2/render)"
+        },
+        {
+          "upstream": "src/text/aaa/edge.rs",
+          "swift": [
+            "Sources/Rune/Text/GaneshAAA.swift"
+          ],
+          "status": "ported",
+          "note": "Skia analytic AA scan converter for Ganesh icon fills (27c31fc2 #828, gap2/render)"
+        },
+        {
+          "upstream": "src/text/area.rs",
+          "swift": [
+            "Sources/Rune/Text/GaneshIcon.swift",
+            "Sources/Rune/Text/GaneshPath.swift"
+          ],
+          "status": "ported",
+          "note": "Ganesh icon op dispatch (27c31fc2 #828, gap2/render)"
+        },
+        {
+          "upstream": "src/text/convex.rs",
+          "swift": [
+            "Sources/Rune/Text/GaneshConvex.swift"
+          ],
+          "status": "ported",
+          "note": "Ganesh convex strokes/fills/hairlines (27c31fc2 #828, gap2/render)"
+        },
+        {
+          "upstream": "src/text/convex/fill.rs",
+          "swift": [
+            "Sources/Rune/Text/GaneshConvex.swift"
+          ],
+          "status": "ported",
+          "note": "Ganesh convex strokes/fills/hairlines (27c31fc2 #828, gap2/render)"
+        },
+        {
+          "upstream": "src/text/convex/geom.rs",
+          "swift": [
+            "Sources/Rune/Text/GaneshConvex.swift"
+          ],
+          "status": "ported",
+          "note": "Ganesh convex strokes/fills/hairlines (27c31fc2 #828, gap2/render)"
+        },
+        {
+          "upstream": "src/text/convex/hair.rs",
+          "swift": [
+            "Sources/Rune/Text/GaneshConvex.swift"
+          ],
+          "status": "ported",
+          "note": "Ganesh convex strokes/fills/hairlines (27c31fc2 #828, gap2/render)"
+        },
+        {
+          "upstream": "src/text/convex/raster.rs",
+          "swift": [
+            "Sources/Rune/Text/GaneshConvex.swift"
+          ],
+          "status": "ported",
+          "note": "Ganesh convex strokes/fills/hairlines (27c31fc2 #828, gap2/render)"
+        },
+        {
+          "upstream": "src/text/convex/tess.rs",
+          "swift": [
+            "Sources/Rune/Text/GaneshConvex.swift"
+          ],
+          "status": "ported",
+          "note": "Ganesh convex strokes/fills/hairlines (27c31fc2 #828, gap2/render)"
+        },
+        {
+          "upstream": "src/app/requests.rs",
+          "swift": [
+            "Sources/Rune/Shell/App.swift"
+          ],
+          "status": "ported",
+          "note": "App request queue + drain ordering (r309, gap2/shell P2-11)"
+        },
+        {
+          "upstream": "src/app/drain_tests.rs",
+          "swift": [
+            "Tests/RuneTests/Phase2ShellParityTests.swift"
+          ],
+          "status": "ported",
+          "note": "drain_tests.rs:6/:53/:69 ported (gap2/shell)"
+        },
+        {
+          "upstream": "src/shortcuts/service/closed_wake_tests.rs",
+          "swift": [
+            "Tests/RuneTests/Phase2ShellParityTests.swift"
+          ],
+          "status": "ported",
+          "note": "r352 closed host wake tests (gap2/shell)"
+        },
+        {
+          "upstream": "src/shortcuts/service/generation_tests.rs",
+          "swift": [
+            "Tests/RuneTests/Phase2ShellParityTests.swift",
+            "Tests/RuneTests/ShortcutOverlapWalkTests.swift"
+          ],
+          "status": "ported",
+          "note": "r155/r216 generation tests ported (gap2/shell); r410 host-generation walks (cbc94615, b55879bb: STALE_CLOSE_KEEPS, Stage::newest, closes_own) in ShortcutOverlapWalkTests/ShortcutRoutingWalkTests (up-input-1)"
+        },
+        {
+          "upstream": "src/text/paragraphs/lazy.rs",
+          "swift": [],
+          "status": "missing",
+          "note": "Lazy long-paste paragraphs (165f87a4 #957, 2371240d #990) - up-edit-1 open; not on main"
+        },
+        {
+          "upstream": "src/runtime/text_fill.rs",
+          "swift": [],
+          "status": "missing",
+          "note": "Text fill a few paragraphs a frame, AnimSource::TEXT_FILL (165f87a4 #957) - up-edit-1 open; not on main"
+        },
+        {
+          "upstream": "src/task/pool.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "NOT REQUIRED: internal task thread pool (5777c857 #904, delta-2 Optional internal/perf)"
+        },
+        {
+          "upstream": "src/text/layout_id.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "NOT REQUIRED: internal text-quad cache key (r416, delta-2 Optional internal/perf)"
+        },
+        {
+          "upstream": "src/text/layout_id_tests.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "NOT REQUIRED: tests for internal text-quad cache key (r416)"
+        },
+        {
+          "upstream": "src/runtime/tests/text_quads.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "NOT REQUIRED: tests for internal text-quad cache (r416)"
+        },
+        {
+          "upstream": "src/runtime/paint/keep.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "NOT REQUIRED: paint subtree copy cache, byte-identical output (f3461ea8 #952, 8fc71fbf #984, 214d22d7 r441)"
+        },
+        {
+          "upstream": "src/clipboard/primary.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "Linux primary selection only (05d1ddf0 #890)"
+        },
+        {
+          "upstream": "src/runtime/input/primary_selection.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "Linux primary selection only (05d1ddf0 #890)"
+        },
+        {
+          "upstream": "src/runtime/input/autoscroll.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "Windows/Linux middle-click autoscroll only (740ecbc9 #874; macOS has none)"
+        },
+        {
+          "upstream": "src/platform/web/pipelines.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "Web only (7608d836 #977)"
+        },
+        {
+          "upstream": "src/platform/win32/segmenter.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "Windows ICU segmenter (078f71f2 #861)"
+        },
+        {
+          "upstream": "src/render/damaged.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "Windows-only (delta-2/3 NOT REQUIRED); macOS/iOS use the Metal path (e1d5cd48 #852 partial frames)"
+        },
+        {
+          "upstream": "src/render/uber/pass_dxbc_hash.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "Windows-only (delta-2/3 NOT REQUIRED); macOS/iOS use the Metal path (0fc6f315 #897 DXBC)"
+        },
+        {
+          "upstream": "src/surface_alpha.wgsl",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ],
+          "status": "partial",
+          "note": "Straight-alpha shader extracted for DX12 DXBC (0fc6f315 #897); Metal straight-alpha pass tracked with src/render/surface_alpha.rs"
+        },
+        {
+          "upstream": "src/window/damage.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "Windows-only (delta-2/3 NOT REQUIRED); macOS/iOS use the Metal path (e1d5cd48 #852)"
+        },
+        {
+          "upstream": "src/window/look.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "Windows-only (delta-2/3 NOT REQUIRED); macOS/iOS use the Metal path (b459621c #844 occlusion)"
+        },
+        {
+          "upstream": "src/window/post_frame.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "Windows-only (delta-2/3 NOT REQUIRED); macOS/iOS use the Metal path (0188f2c8 #946)"
+        },
+        {
+          "upstream": "src/window/slot.rs",
+          "swift": [],
+          "status": "n/a",
+          "note": "Windows-only (delta-2/3 NOT REQUIRED); macOS/iOS use the Metal path (b459621c #844 frame slot)"
         }
       ],
       "note": "Core engine (~50% symbol parity); missing motion_gate (17), gpu/metal (n/a Metal.framework), win32/linux/android/web stubs",
@@ -6495,7 +6756,8 @@
           "swift": [
             "Sources/RuneKit/KitMermaid.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "mermaid::prepare + DrawingModel re-export (8c1be052 #1025, up-mermaid-1); tests KitMermaidPrepareTests"
         },
         {
           "upstream": "src/neutral.rs",
@@ -6654,9 +6916,12 @@
         {
           "upstream": "src/shell/tab_strip.rs",
           "swift": [
-            "Sources/RuneKit/Shell.swift"
+            "Sources/RuneKit/Shell.swift",
+            "Sources/RuneKit/TabStrip.swift",
+            "Sources/RuneKit/TabStripLazy.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "TabSlot/BAND_PAST/lazy_tabs band (80022c59 #1020, up-kit-2) ported; tests TabStripLazyTests"
         },
         {
           "upstream": "src/shell/tab_strip/auto_scroll.rs",
@@ -6740,7 +7005,8 @@
           "swift": [
             "Sources/RuneKit/InputsAndContainers.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "TextInput::description on the inner editor (270222a2 #1015, up-kit-2); tests WidgetA11yParityTests:732"
         },
         {
           "upstream": "src/toast.rs",
@@ -7755,6 +8021,15 @@
             "Tests/RuneMermaidTests/ExtendedDiagramsTests.swift"
           ],
           "status": "ported"
+        },
+        {
+          "upstream": "src/drawing.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidDrawingModel.swift",
+            "Sources/RuneMermaid/MermaidCanvas.swift"
+          ],
+          "status": "ported",
+          "note": "DrawingModel/prepareDrawing (labels, sameLayout, draw(marks)) - 8c1be052 #1025 (up-mermaid-1); tests MermaidDrawingModelTests"
         }
       ],
       "note": "All 18 diagram families, streaming steady layout, hover groups, SVG/draw animations, front-matter titles, and 149/149 test parity behaviors ported",

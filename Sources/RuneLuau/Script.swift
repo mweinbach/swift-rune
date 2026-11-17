@@ -217,6 +217,13 @@ public final class Script: @unchecked Sendable {
     public func memoPrefix() -> String { prefix }
     public func memory() -> Int { vm?.estimatedMemoryBytes() ?? 0 }
 
+    /// Runs a full garbage-collection pass when the host window rests (`Script::collect_garbage`).
+    public func collectGarbage() {
+        warnedMessages.removeAll(keepingCapacity: false)
+        rowKeyCaches.removeAll(keepingCapacity: false)
+        vm?.collectGarbage()
+    }
+
     /// Runs due tasks, timers, host async completions, and folder-watch reloads.
     @discardableResult
     public func poll(now: Double, tx: inout Tx) -> Bool {

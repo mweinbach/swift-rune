@@ -619,7 +619,21 @@ struct RuneMotionTests {
             #expect(cycTrack.sampleAt(now: 4.0, wall: wall, reduced: false) == cyc.sample(at: wall))
             #expect(cycTrack.sampleAt(now: 4.0, wall: wall, reduced: true) == cyc.still)
         }
-        #expect(cycTrack.frameInterval() == 1.0 / Double(Float(30.0)))
+        // looping.rs:324 — `Some(f64::from(1.0 / 30.0_f32))`: the interval is divided in `f32`.
+        #expect(cycTrack.frameInterval() == Double(Float(1.0) / Float(30.0)))
+
+        // #965 (cycle.rs:17-22): a display-rate cycle arms no timer and follows host frames;
+        // a positive rate keeps its stepped cadence, clamped to at least 1 fps.
+        #expect(Cycle.DISPLAY_RATE == 0.0)
+        var displayCyc = cyc
+        displayCyc.fps = Cycle.DISPLAY_RATE
+        #expect(displayCyc.frameInterval() == nil)
+        #expect(LoopTrack(spec: .cycle(displayCyc), now: 4.0).frameInterval() == nil)
+        #expect(LoopTrack(spec: .cycle(displayCyc), now: 4.0).sampleAt(now: 4.0, wall: 0.5, reduced: true) == cyc.still)
+        var slowCyc = cyc
+        slowCyc.fps = 0.25
+        #expect(slowCyc.frameInterval() == 1.0)
+        #expect(LoopTrack(spec: .opacity(period: 1.0, low: 0.0, high: 1.0), now: 0.0).frameInterval() == nil)
 
         // Ping-pong & count modes
         let pp = LoopSpec.opacity(period: 1.0, low: 0.0, high: 1.0).mode(.pingPong)

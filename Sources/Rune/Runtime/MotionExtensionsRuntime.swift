@@ -48,7 +48,6 @@ internal extension Runtime {
         }
     }
 
-    /// Synchronizes periodic / finite `LoopSpec`s with `LoopClock` so frame advances and
     /// Syncs `el.looping` specs after `scene.commit` using `LoopClock`'s per-node animation lead time.
     /// `cut` (`settleAll`) only finishes finite sequences; periodic loops preserve phase across commits and settles.
     func syncMotionLoops(specs: [(id: NodeId, spec: LoopSpec)], at _: Double, cut: Bool) {
@@ -72,8 +71,11 @@ internal extension Runtime {
         )
     }
 
-    /// Samples a node's active loop track (periodic tracks sample `scene.store.nodeTime(id)`; `Cycle` uses
-    /// unscaled wall-clock time so it retains its cadence even when animation time is paused).
+    /// Samples a node's active loop track (periodic/sequence tracks use `at`; `Cycle` uses unscaled
+    /// wall-clock `wallNow` so it retains its cadence even when animation time is paused).
+    func sampleLoopPresentation(id: NodeId, nodeSize: Vec2, at now: Double, wallNow: Double) -> LoopSampleResult? {
+        loopRuntime.sample(id: id, nodeSize: nodeSize, at: now, wall: wallNow, reducedMotion: reducedMotion)
+    }
     func sampleLoopPresentation(id: NodeId, nodeSize: Vec2, wallNow: Double) -> LoopSampleResult? {
         loopRuntime.sample(
             id: id,
@@ -86,30 +88,23 @@ internal extension Runtime {
 
     /// True when any non-sleeping loop needs frame advances (`isAnimating`).
     func hasActiveMotionLoops(at appNow: Double) -> Bool {
-        loopRuntime.hasActiveLoops(
-            nodeTime: { scene.store.nodeTime($0) },
-            wall: appNow,
-            reducedMotion: reducedMotion
-        )
+        _ = appNow
+        if reducedMotion || !liveVisible {
+            return false
+        }
+        return activePaintedLoopsAnimating
     }
 
-    /// Earliest wall-clock deadline needed by any active `Cycle` frame interval OR delayed `LoopTrack`.
+    /// Earliest wall-clock deadline needed by any active painted `Cycle` frame interval OR delayed `LoopTrack`.
     func nextLoopWakeDeadline(after now: Double) -> Double? {
-        var best: Double? = nil
-        if let loopInterval = loopRuntime.nextFrameInterval(reducedMotion: reducedMotion) {
-            best = now + loopInterval
+        if reducedMotion || !liveVisible {
+            return nil
         }
-        let viewScale = Double(max(0.0, cxSettings.viewTimeScale.isFinite ? cxSettings.viewTimeScale : 1.0))
-        if !reducedMotion, viewScale > 0.0 {
-            for (id, track) in loopRuntime.tracks {
-                let nt = scene.store.nodeTime(id)
-                let ns = Double(max(0.0, scene.store.nodeTimeScale(id)))
-                let effectiveScale = viewScale * ns
-                guard effectiveScale > 0.0, let startAt = track.pendingStart(at: nt) else { continue }
-                let wakeAt = now + max(0.0, (startAt - nt) / effectiveScale)
-                best = best.map { min($0, wakeAt) } ?? wakeAt
-            }
-        }
-        return best
+        // The painted loop wake (`loop_wake`) is set by the last build; one at or before `now` is
+        // already due and is renewed by the next paint, so it is not a future deadline. Returning it
+        // would let `frameSplitImpl`'s catch-up loop spin at `now` without advancing (upstream
+        // `timer_step` always steps forward).
+        guard let wake = activePaintedLoopWake, wake > now else { return nil }
+        return wake
     }
 }

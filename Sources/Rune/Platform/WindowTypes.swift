@@ -326,6 +326,7 @@ public protocol HostedWindowEntry: AnyObject {
     func runtimeViewport(runtimeObj: AnyObject) -> Vec2
     func setWindowResting(runtimeObj: AnyObject, resting: Bool)
     func applyAppStateUpdates(runtimeObj: AnyObject, at now: Double)
+    func applyAppStateUpdates(runtimeObj: AnyObject, at now: Double, shortcutGuard: ShortcutGuard?)
     func markMenusRunning(_ running: Bool)
     @MainActor func syncNativeMenus(
         runtimeObj: AnyObject,
@@ -335,12 +336,16 @@ public protocol HostedWindowEntry: AnyObject {
     )
     func helpRegionsList(runtimeObj: AnyObject) -> [(MotionRect, String)]
     func setFocused(runtimeObj: AnyObject, focused: Bool)
+    /// The system's accessibility display options changed: re-read reduced motion, contrast and Increase Contrast.
+    func readSystemAccessibilitySettings(runtimeObj: AnyObject, forceReducedMotion: Bool)
     func setSystemDark(runtimeObj: AnyObject, dark: Bool)
     func windowTitle(runtimeObj: AnyObject) -> String?
     func quitRequested(runtimeObj: AnyObject) -> Bool
     func relaunchRequested(runtimeObj: AnyObject) -> Bool
     func isAnimating(runtimeObj: AnyObject) -> Bool
     func pointerMove(runtimeObj: AnyObject, to: Vec2, mods: Mods, at: Double)
+    /// Dispatches platform input `body` in the scope holding when it arrived (`Runtime.hostInput`).
+    func hostInput(runtimeObj: AnyObject, kind: HostInputKind, eventTimestamp: Double?, _ body: () -> Void)
     func pointerExit(runtimeObj: AnyObject, at: Double)
     func pointerDown(runtimeObj: AnyObject, at: Vec2, button: PointerButton, mods: Mods, at: Double)
     func pointerUp(runtimeObj: AnyObject, at: Vec2, button: PointerButton, mods: Mods, at: Double)
@@ -356,6 +361,8 @@ public protocol HostedWindowEntry: AnyObject {
     func answerFileDialog(runtimeObj: AnyObject, id: UInt64, result: FileDialogResult)
     func cancelFileDialogs(runtimeObj: AnyObject, at: Double)
     func takeDragOutStart(runtimeObj: AnyObject) -> DragOutStart?
+    @MainActor func syncWindowChrome(runtimeObj: AnyObject, window: AnyObject)
+    func takeTitlebarChanged(runtimeObj: AnyObject) -> Bool
     func finishDragOut(runtimeObj: AnyObject, outcome: DragOutcome, at: Double)
     func copyTitlebarDragHits(runtimeObj: AnyObject, point: Vec2) -> Bool
     func runQuitHook(runtimeObj: AnyObject)
@@ -367,6 +374,8 @@ public protocol HostedWindowEntry: AnyObject {
     func viewCommitCount(runtimeObj: AnyObject) -> Int
     func dispatchModifiers(runtimeObj: AnyObject, mods: Mods, at: Double)
     func hasFocusedTextInput(runtimeObj: AnyObject) -> Bool
+    func hasImeTarget(runtimeObj: AnyObject) -> Bool
+    func imeOptionAsAlt(runtimeObj: AnyObject) -> Bool
     func hasSecureFocus(runtimeObj: AnyObject) -> Bool
     func consumeImeReset(runtimeObj: AnyObject) -> Bool
     func focusedImeSnapshot(runtimeObj: AnyObject) -> ImeText?
@@ -374,9 +383,16 @@ public protocol HostedWindowEntry: AnyObject {
     @discardableResult func dispatchImeEvent(runtimeObj: AnyObject, event: ImeEvent, at: Double) -> Bool
     func currentCursor(runtimeObj: AnyObject) -> Cursor
     func accessibilitySnapshot(runtimeObj: AnyObject) -> AccessibilityNode
+    /// `Tx::announce`'s window live region (`Runtime.a11yAnnouncement`).
+    func accessibilityAnnouncement(runtimeObj: AnyObject) -> AccessibilityAnnouncement
+    /// Keeps the runtime dirty while the accessibility adapter holds words back (#980).
+    func markAccessibilityDirty(runtimeObj: AnyObject)
     @discardableResult func performAccessibilityAction(runtimeObj: AnyObject, id: String, action: AccessibilityAction, at: Double) -> Bool
     func shortcutRegistry(runtimeObj: AnyObject) -> ShortcutRegistry?
+    var hasAppGlobalShortcuts: Bool { get }
+    func attachShortcuts(wake: Waker, headless: Bool) -> ShortcutGuard?
     func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output
+    func makeDesktopMember(scale: Float, dark: Bool, isMain: Bool) -> any DesktopMember
 }
 
 final class TypedHostedWindowEntry<State>: HostedWindowEntry {
@@ -424,7 +440,7 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         rt.onFileDrop = spec.appSpec.onFileDropPhase
         rt.nativeHelp = true
         rt.fitHeight = spec.fitContentHeight
-        rt.setSystemContrast(SystemPreferences.current().contrast)
+        rt.readSystemContrastSettings()
         spec.configureRuntime?(rt)
         spec.appShared?.setWaker(waker)
         if rt.fitHeight {
@@ -479,7 +495,19 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     }
 
     func applyAppStateUpdates(runtimeObj: AnyObject, at now: Double) {
-        guard let req = spec.appShared?.applyStateUpdates(to: rt(runtimeObj), at: now) else { return }
+        applyAppStateUpdates(runtimeObj: runtimeObj, at: now, shortcutGuard: nil)
+    }
+
+    func applyAppStateUpdates(runtimeObj: AnyObject, at now: Double, shortcutGuard: ShortcutGuard?) {
+        guard let appShared = spec.appShared else { return }
+        shortcutGuard?.drain()
+        let req = if let shortcutGuard {
+            shortcutGuard.withReceiving {
+                appShared.applyStateUpdates(to: rt(runtimeObj), at: now)
+            }
+        } else {
+            appShared.applyStateUpdates(to: rt(runtimeObj), at: now)
+        }
         if let pos = req.position {
             handle.setPosition((Int32(pos.x.rounded()), Int32(pos.y.rounded())))
         }
@@ -557,9 +585,10 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     func setFocused(runtimeObj: AnyObject, focused: Bool) {
         let r = rt(runtimeObj)
         r.dispatchFocus(focused)
-        if focused {
-            r.setSystemContrast(SystemPreferences.current().contrast)
-        }
+    }
+
+    func readSystemAccessibilitySettings(runtimeObj: AnyObject, forceReducedMotion: Bool) {
+        rt(runtimeObj).readSystemAccessibilitySettings(forceReducedMotion: forceReducedMotion)
     }
 
     func setSystemDark(runtimeObj: AnyObject, dark: Bool) {
@@ -584,6 +613,10 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
 
     func pointerMove(runtimeObj: AnyObject, to: Vec2, mods: Mods, at: Double) {
         rt(runtimeObj).pointerMove(to: to, mods: mods, at: at)
+    }
+
+    func hostInput(runtimeObj: AnyObject, kind: HostInputKind, eventTimestamp: Double?, _ body: () -> Void) {
+        rt(runtimeObj).hostInput(kind, eventTimestamp: eventTimestamp, body)
     }
 
     func pointerExit(runtimeObj: AnyObject, at: Double) {
@@ -655,6 +688,14 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         rt(runtimeObj).hasFocusedTextInput
     }
 
+    func hasImeTarget(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).hasImeTarget
+    }
+
+    func imeOptionAsAlt(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).effectiveImeOptionAsAlt
+    }
+
     func hasSecureFocus(runtimeObj: AnyObject) -> Bool {
         rt(runtimeObj).hasSecureFocus
     }
@@ -684,6 +725,14 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         rt(runtimeObj).accessibilitySnapshot()
     }
 
+    func accessibilityAnnouncement(runtimeObj: AnyObject) -> AccessibilityAnnouncement {
+        rt(runtimeObj).a11yAnnouncement
+    }
+
+    func markAccessibilityDirty(runtimeObj: AnyObject) {
+        rt(runtimeObj).markNeedsCommit()
+    }
+
     @discardableResult
     func performAccessibilityAction(runtimeObj: AnyObject, id: String, action: AccessibilityAction, at time: Double) -> Bool {
         rt(runtimeObj).performAccessibilityAction(id, action: action, at: time)
@@ -695,6 +744,22 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
 
     func takeDragOutStart(runtimeObj: AnyObject) -> DragOutStart? {
         rt(runtimeObj).takeDragOutStart()
+    }
+
+    /// `window/chrome.rs::sync_chrome` for this window's `chrome` and `titlebar` (an `NSWindow`
+    /// on macOS; nothing elsewhere).
+    @MainActor func syncWindowChrome(runtimeObj: AnyObject, window: AnyObject) {
+        #if os(macOS)
+        // A borderless window has no titlebar (`window.rs`: `app.titlebar.filter(|_| !borderless)`).
+        let titlebar = spec.options.borderless ? nil : spec.titlebar
+        rt(runtimeObj).syncWindowChrome(windowObject: window, chrome: spec.chrome, titlebar: titlebar)
+        #else
+        let _ = (runtimeObj, window)
+        #endif
+    }
+
+    func takeTitlebarChanged(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).takeTitlebarChanged()
     }
 
     func finishDragOut(runtimeObj: AnyObject, outcome: DragOutcome, at: Double) {
@@ -750,12 +815,31 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     }
 
     func trimIdleCaches(runtimeObj: AnyObject, all: Bool) {
-        let _ = (runtimeObj, all)
-        // Renderer-level GPU memory trim hooks run on the host window controller.
+        _ = all
+        rt(runtimeObj).rest(at: ProcessInfo.processInfo.systemUptime)
     }
 
     func shortcutRegistry(runtimeObj: AnyObject) -> ShortcutRegistry? {
         rt(runtimeObj).shortcutRegistry
+    }
+
+    func makeDesktopMember(scale: Float, dark: Bool, isMain: Bool) -> any DesktopMember {
+        DesktopWindow(
+            key: spec.key,
+            spec: spec,
+            scale: scale,
+            dark: spec.appSpec.dark ?? dark,
+            isMain: isMain
+        )
+    }
+
+    var hasAppGlobalShortcuts: Bool {
+        spec.appShared?.shortcuts.hasAppShortcuts ?? false
+    }
+
+    func attachShortcuts(wake: Waker, headless: Bool) -> ShortcutGuard? {
+        guard let appShared = spec.appShared else { return nil }
+        return ShortcutGuard.attach(shared: appShared, wake: wake, headless: headless)
     }
 
     func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output {
@@ -860,7 +944,8 @@ public enum RuneMultiWindow {
     @discardableResult
     public static func runHeadless(
         _ windows: [AnyWindowSpec],
-        args: ToolingArgs
+        args: ToolingArgs,
+        options: RunOptions = RunOptions()
     ) throws -> HeadlessRunner.Output {
         let flat = flatten(windows)
         try validate(flat)
@@ -873,6 +958,26 @@ public enum RuneMultiWindow {
                 finalFrame: Frame(width: 1, height: 1, rgba: [0, 0, 0, 255]),
                 treeJSON: Data("{}".utf8),
                 windowKeys: keys
+            )
+        }
+        if let desktopPath = args.desktopPath {
+            let loaded = try DesktopComposite.loadBackdrop(imagePath: desktopPath, scale: args.pixelScale)
+            let dark = args.darkOverride ?? true
+            let members: [any DesktopMember] = flat.enumerated().map { idx, spec in
+                spec.makeHostEntry().makeDesktopMember(
+                    scale: args.pixelScale,
+                    dark: dark,
+                    isMain: idx == 0
+                )
+            }
+            return try VirtualDesk.runHeadlessDesktop(
+                members: members,
+                args: args,
+                options: options,
+                desktop: loaded.desktop,
+                backdropRGBA: loaded.rgba,
+                width: loaded.pixelWidth,
+                height: loaded.pixelHeight
             )
         }
         let target: AnyWindowSpec
@@ -907,13 +1012,13 @@ public enum RuneMultiWindow {
         try validate(flat)
         let parsed = arguments.map { ToolingArgs.parse($0) } ?? ToolingArgs.parse()
         if parsed.isHeadlessRequested {
-            _ = try runHeadless(flat, args: parsed)
+            _ = try runHeadless(flat, args: parsed, options: options)
             return
         }
         #if os(macOS)
         try RuneMultiWindowHost.run(flat, options: options, parsed: parsed)
         #else
-        _ = try runHeadless(flat, args: parsed)
+        _ = try runHeadless(flat, args: parsed, options: options)
         #endif
     }
 
@@ -928,6 +1033,26 @@ public enum RuneMultiWindow {
         let windows = factory(parsed)
         try runWindows(windows, options: options, arguments: arguments)
     }
+
+    /// Display-aware overload of `runWindowsWithArgs` mirroring `rune::run_windows_with_args(|displays| ...)`.
+    @MainActor
+    @_disfavoredOverload
+    public static func runWindowsWithArgs(
+        options: RunOptions = RunOptions(),
+        arguments: [String],
+        _ factory: ([DisplayInfo]) -> [AnyWindowSpec]
+    ) throws {
+        let parsed = ToolingArgs.parse(arguments)
+        let displays: [DisplayInfo]
+        if let desktopPath = parsed.desktopPath,
+           let loaded = try? DesktopComposite.loadBackdrop(imagePath: desktopPath, scale: parsed.pixelScale) {
+            displays = loaded.desktop.displayInfos()
+        } else {
+            displays = VirtualDesktop.single(scale: Double(max(0.5, parsed.pixelScale))).displayInfos()
+        }
+        let windows = factory(displays)
+        try runWindows(windows, options: options, arguments: arguments)
+    }
 }
 
 /// Top-level helper mirroring `rune::run_windows_with_args`.
@@ -938,4 +1063,37 @@ public func runWindowsWithArgs(
     _ factory: (ToolingArgs) -> [AnyWindowSpec]
 ) throws {
     try RuneMultiWindow.runWindowsWithArgs(options: options, arguments: arguments, factory)
+}
+
+/// Top-level display-aware helper mirroring `rune::run_windows_with_args(|displays| ...)`.
+@MainActor
+@_disfavoredOverload
+public func runWindowsWithArgs(
+    options: RunOptions = RunOptions(),
+    arguments: [String],
+    _ factory: ([DisplayInfo]) -> [AnyWindowSpec]
+) throws {
+    try RuneMultiWindow.runWindowsWithArgs(options: options, arguments: arguments, factory)
+}
+
+/// Top-level throwing alias mirroring `rune::try_run_windows_with_args`.
+@MainActor
+public func tryRunWindowsWithArgs(
+    options: RunOptions = RunOptions(),
+    arguments: [String],
+    _ factory: (ToolingArgs) -> [AnyWindowSpec]
+) throws {
+    try RuneMultiWindow.runWindowsWithArgs(options: options, arguments: arguments, factory)
+}
+
+/// Non-throwing multi-window helper printing startup errors to stderr and exiting `1` on native targets (`rune::run_windows_with_args`).
+@MainActor
+public func runWindowsWithArgsOrExit(
+    options: RunOptions = RunOptions(),
+    arguments: [String],
+    _ factory: (ToolingArgs) -> [AnyWindowSpec]
+) {
+    RuneStartup.started {
+        try RuneMultiWindow.runWindowsWithArgs(options: options, arguments: arguments, factory)
+    }
 }

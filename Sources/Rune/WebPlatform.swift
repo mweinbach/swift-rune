@@ -194,7 +194,8 @@ public final class WebAppHost<State> {
         self.runtime.poll = spec.poll
         self.runtime.onAppFileDrop = spec.onFileDrop
         self.runtime.onFileDrop = spec.onFileDropPhase
-        self.runtime.setSystemContrast(SystemPreferences.current().contrast)
+        // The capture presets as `tooling::runtime_for` applies them (#981); a browser has no machine settings to read here.
+        self.runtime.applyCapturePresets()
     }
 
     @discardableResult
@@ -241,6 +242,11 @@ public final class WebAppHost<State> {
 
     public func handlePointerUp(x: Float, y: Float, button: PointerButton = .primary, at now: Double) {
         runtime.pointerUp(at: Vec2(x, y), button: button, mods: .none, at: now)
+    }
+
+    @discardableResult
+    public func handlePrimaryPointer(hover: Bool, coarse: Bool) -> Bool {
+        runtime.setWebPointerCapability(hover: hover, coarse: coarse)
     }
 }
 

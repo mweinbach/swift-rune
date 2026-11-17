@@ -128,13 +128,34 @@ public struct ZoomState: Sendable, Equatable {
 
 final class CxReadsLog: @unchecked Sendable {
     var caretRead: Bool = false
+    var selectionRectsRead: Bool = false
     var layoutReads: [MemoRead] = []
 
     init() {}
 
     init(copying other: CxReadsLog) {
         self.caretRead = other.caretRead
+        self.selectionRectsRead = other.selectionRectsRead
         self.layoutReads = other.layoutReads
+    }
+}
+
+/// Primary pointer capability reported by browser `(hover: none)` / `(pointer: coarse)` (`platform/web.rs::PrimaryPointer`).
+/// Natively `.hover` so `hoverNone` and `touchControls` both return `false`.
+public enum PrimaryPointer: Sendable, Equatable, Hashable {
+    case hover
+    case noHover
+    case touch
+
+    public var hoverNone: Bool { self != .hover }
+    public var touchControls: Bool { self == .touch }
+
+    public static func from(hover: Bool, coarse: Bool) -> PrimaryPointer {
+        switch (hover, coarse) {
+        case (false, true): return .touch
+        case (false, _): return .noHover
+        default: return .hover
+        }
     }
 }
 
@@ -146,12 +167,16 @@ struct CxEnvironmentState {
     var titlebar: TitlebarSet = TitlebarSet()
     var systemAccent: SystemAccent = .default
     var systemContrast: SystemContrast? = nil
+    var systemIncreasedContrast: Bool = false
     var systemScrollBars: SystemScrollBars = .default
     var systemReducedMotion: Bool = false
+    var primaryPointer: PrimaryPointer = .hover
     var reducedMotionOverride: Bool? = nil
     var timeScale: Float = 1.0
     var zoom: Float = 1.0
     var caret: (keyPath: String, rect: [Float])? = nil
+    var selectionRects: [[Float]] = []
+    var markedTexts: [SelectionMark] = []
     var reads = CxReadsLog()
 }
 
@@ -168,14 +193,25 @@ struct RuntimeShellSettings {
     var viewDefaults: ViewDefaults = ViewDefaults()
     var captionColor: Color? = nil
     var titlebarInset: Float = 0.0
+    /// What the native window's controls take of the titlebar, in window points, as the host
+    /// last set it (`Runtime::set_chrome_insets`); `nil` until a host sets it, when the
+    /// headless derivation from `App::titlebar` stands in (`Runtime::headless_chrome`).
+    var hostChromeInsets: ChromeInsets? = nil
+    /// A commit's `Cx::set_titlebar` / `Cx::titlebar_height` differed from the last
+    /// (`titlebar.set_changed`), for the shell to re-sync its chrome (`take_titlebar_changed`).
+    var titlebarSetChanged: Bool = false
     var baseTitlebar: Titlebar? = nil
     var titlebarOverride: TitlebarSet = TitlebarSet()
     var systemAccent: SystemAccent = .default
     var systemContrast: SystemContrast? = nil
+    var systemIncreasedContrast: Bool = false
     var scrollBarsState: SystemScrollBars = .default
+    var primaryPointer: PrimaryPointer = .hover
     var fullKeyboardAccess: Bool = true
     var caretReadByView: Bool = false
     var lastCommittedCaret: (keyPath: String, rect: [Float])? = nil
+    var selectionRectsReadByView: Bool = false
+    var lastCommittedSelectionRects: [[Float]] = []
 
     init(viewport: Vec2 = .zero, pixelScale: Float = 2.0, reducedMotion: Bool = false) {
         self.zoomState = ZoomState(k: 1.0, window: viewport, windowScale: max(pixelScale, 0.5))
@@ -242,6 +278,7 @@ extension Cx {
             layoutCollector: layoutCollector
         )
         out.envState = envState
+        out.envState.markedTexts = []
         out.envState.reads = CxReadsLog(copying: envState.reads)
         return out
     }
@@ -258,6 +295,12 @@ extension Cx {
         self.envState.defaults = other.envState.defaults
         if other.envState.reads.caretRead {
             self.envState.reads.caretRead = true
+        }
+        if other.envState.reads.selectionRectsRead {
+            self.envState.reads.selectionRectsRead = true
+        }
+        if !other.envState.markedTexts.isEmpty {
+            self.envState.markedTexts.append(contentsOf: other.envState.markedTexts)
         }
         for read in other.envState.reads.layoutReads {
             if let idx = self.envState.reads.layoutReads.firstIndex(where: { $0.sameTarget(as: read) }) {
@@ -354,9 +397,29 @@ extension Cx {
         [0.0, 0.0, 0.0, 0.0]
     }
 
+    /// The primary pointer can't hover: a browser's `(hover: none)`, a phone's or tablet's touch
+    /// screen. What a mouse would reveal on hover (a code block's Copy, a row's actions) should
+    /// show without it. False natively. A change re-runs the view (`Cx::hover_none`).
+    public func hoverNone() -> Bool {
+        envState.primaryPointer.hoverNone
+    }
+
+    /// A page's primary pointer is coarse and can't hover. Use this for a phone or tablet's
+    /// controls rather than the viewport width: a narrow window can still have a mouse.
+    /// False natively. A change re-runs the view (`Cx::touch_controls`).
+    public func touchControls() -> Bool {
+        envState.primaryPointer.touchControls
+    }
+
     /// System high-contrast forced-colors theme, if active (`Cx::system_contrast`).
     public func systemContrast() -> SystemContrast? {
         envState.systemContrast
+    }
+    /// Whether the system asks for more contrast: macOS's Increase Contrast, or a Windows contrast
+    /// theme (when `systemContrast()` is also there). A view can draw its stronger edges for it
+    /// while keeping its own colours. A change re-runs the view (`Cx::system_increased_contrast`).
+    public func systemIncreasedContrast() -> Bool {
+        envState.systemIncreasedContrast
     }
 
     /// Host OS reduced-motion preference independent of per-commit override (`Cx::system_reduced_motion`).
@@ -432,13 +495,10 @@ extension Runtime {
         return ov.over(cxSettings.baseTitlebar ?? Titlebar())
     }
 
-    /// Computed chrome insets in current zoomed view points (`Cx::chrome_insets`).
+    /// Chrome insets in current zoomed view points, as the view reads them (`Cx::chrome_insets`):
+    /// `windowChromeInsets()` over the zoom (`Measurement::chrome`, `insets.zoomed(zoom)`).
     public func chromeInsets() -> ChromeInsets {
-        let base = effectiveTitlebar()
-        let rawH = base?.height ?? 0.0
-        let rawLeading = cxSettings.titlebarInset > 0 ? cxSettings.titlebarInset : (base?.insetLeading ?? 0.0)
-        let rawTrailing = base?.insetTrailing ?? 0.0
-        return ChromeInsets(leading: rawLeading, trailing: rawTrailing, top: rawH).zoomed(cxSettings.zoomState.k)
+        windowChromeInsets().zoomed(cxSettings.zoomState.k)
     }
 
     /// Sets the system accent palette (`Runtime::set_system_accent`).
@@ -461,6 +521,18 @@ extension Runtime {
 
     public func systemContrast() -> SystemContrast? { cxSettings.systemContrast }
 
+    /// What `Cx.systemIncreasedContrast()` reports (`Runtime::set_system_increased_contrast`).
+    /// Native windows set it from the system as they open, gain focus, and when its display
+    /// options change; headless runs keep false unless `RUNE_INCREASE_CONTRAST=1` (#980/#981).
+    public func setSystemIncreasedContrast(_ on: Bool) {
+        if on != cxSettings.systemIncreasedContrast {
+            cxSettings.systemIncreasedContrast = on
+            markNeedsCommit()
+        }
+    }
+
+    public func systemIncreasedContrast() -> Bool { cxSettings.systemIncreasedContrast }
+
     /// Sets the host OS reduced-motion preference (`Runtime::set_system_reduced_motion`).
     public func setSystemReducedMotion(_ reduced: Bool) {
         if cxSettings.hostReducedMotion != reduced {
@@ -473,6 +545,31 @@ extension Runtime {
     /// Host accessibility reduced-motion preference (`Runtime::system_reduced_motion`).
     public func systemReducedMotion() -> Bool {
         cxSettings.hostReducedMotion
+    }
+
+    /// Updates the host's primary pointer capability (re-runs the view when changed).
+    @discardableResult
+    public func setPrimaryPointer(_ pointer: PrimaryPointer) -> Bool {
+        guard cxSettings.primaryPointer != pointer else { return false }
+        cxSettings.primaryPointer = pointer
+        markNeedsCommit()
+        return true
+    }
+
+    /// Applies browser `(hover, coarse)` pointer capability flags and invalidates on change.
+    @discardableResult
+    public func setWebPointerCapability(hover: Bool, coarse: Bool) -> Bool {
+        setPrimaryPointer(.from(hover: hover, coarse: coarse))
+    }
+
+    /// Primary pointer cannot hover (`Cx::hover_none` runtime value, `false` natively).
+    public func hoverNone() -> Bool {
+        cxSettings.primaryPointer.hoverNone
+    }
+
+    /// Primary pointer is coarse and cannot hover (`Cx::touch_controls` runtime value, `false` natively).
+    public func touchControls() -> Bool {
+        cxSettings.primaryPointer.touchControls
     }
 
     /// Tab visits every control when on (`Runtime::set_full_keyboard_access`).

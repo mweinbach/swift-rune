@@ -6,9 +6,46 @@ import RuneTaffy
 /// Caches node styles, child lists, and Taffy 0.15 `LayoutCache` slots across view commits,
 /// compacting sparse arenas in `endCommit`, and supporting `aspect_fit` two-pass refits,
 /// `scroll_x` unwrapped widths, and `border_layout` snapped border insets.
+/// Per-node data `syncPrepare` hands back to the recursive `syncSubtree` (see there).
+fileprivate struct SyncPrepared {
+    var myIndex: Int
+    var path: String
+    var keyHash: UInt64
+    var areas: [String: RuneTaffy.GridTemplateArea]?
+    var childSX: TaffyBridge.ScrollXChild?
+    var nodeFlow: Flow
+    var nodeDirected: Bool
+    var isRow: Bool
+    var measureHash: UInt64?
+    var isRedacted: Bool
+    var hasRatio: Bool
+}
+
 final class RetainedLayoutCoordinator {
+    struct TextLayoutRecord {
+        var box: TextLayoutBox
+        var isInput: Bool
+    }
+
+    final class TextLayoutCollector: @unchecked Sendable {
+        var map: [RuneMotion.NodeId: TextLayoutRecord] = [:]
+        var liveIds: Set<RuneMotion.NodeId> = []
+    }
+
+    private struct TextLeafFallback {
+        var index: Int
+        var nodeId: RuneMotion.NodeId
+        var shapeKey: TextShapeKey
+        var text: String
+        var spans: [TextSpan]?
+        var pills: [PillChip]
+        var style: TextStyle
+        var isInput: Bool
+        var pretty: Bool = false
+    }
+
     private struct MeasureBox: @unchecked Sendable {
-        let fn: (Float?) -> Vec2
+        let fn: (Float?, Bool) -> Vec2
     }
 
     private struct PreparedNode {
@@ -18,7 +55,7 @@ final class RetainedLayoutCoordinator {
         var taffyStyle: RuneTaffy.TaffyStyle
         var rawTaffyStyle: RuneTaffy.TaffyStyle
         var aspectFitRatio: Float?
-        var measureFn: ((Float?) -> Vec2)?
+        var measureFn: ((Float?, Bool) -> Vec2)?
         var childIndices: [Int] = []
         var flow: Flow = .ltr
         var pin: DirPin = .flowing
@@ -38,12 +75,17 @@ final class RetainedLayoutCoordinator {
         viewport: Vec2,
         pixelScale: Float,
         textSystem: TextSystem,
-        fitHeight: Bool = false
+        fitHeight: Bool = false,
+        textLayouts: TextLayoutCollector? = nil,
+        onLiveIdsReady: ((Set<RuneMotion.NodeId>) -> Void)? = nil
     ) -> LayoutEngine.ResultNode {
         var flat: [PreparedNode] = []
         flat.reserveCapacity(32)
         var aspectFitIndices: [Int] = []
         var hasAnchoredFit = false
+        var nonSecretLeaves: [TextLeafFallback] = []
+        let fEpoch = textSystem.currentFontEpoch
+        let langTag = textSystem.language
 
         if lastViewport != viewport || lastFitHeight != fitHeight {
             lastViewport = viewport
@@ -64,7 +106,7 @@ final class RetainedLayoutCoordinator {
             return hash
         }
 
-        func makeMeasure(el: El<State>, forcedTextFlow: TextFlow?) -> (fn: ((Float?) -> Vec2)?, hash: UInt64?, redacted: Bool) {
+        func makeMeasure(el: El<State>, nodeId: RuneMotion.NodeId, flatIndex: Int, forcedTextFlow: TextFlow?) -> (fn: ((Float?, Bool) -> Vec2)?, hash: UInt64?, redacted: Bool) {
             guard el.children.isEmpty else { return (nil, nil, false) }
             if let editLens = el.handlers.editLens {
                 let rawEdit = editLens.get(state)
@@ -86,21 +128,45 @@ final class RetainedLayoutCoordinator {
                 hasher.combine(scale)
                 hasher.combine(resolved.style)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
-                let fn: (Float?) -> Vec2 = { maxW in
-                    let shapeW = resolved.measureWidth(maxW)
-                    let m: Vec2
-                    if resolved.spans != nil || !resolved.pills.isEmpty {
-                        m = textSystem.shape(
-                            text: measureStr,
-                            spans: resolved.spans,
-                            pills: resolved.pills,
-                            style: resolved.style,
-                            maxWidth: shapeW,
-                            pixelScale: scale,
-                            emitGlyphs: false
-                        ).size
-                    } else {
-                        m = textSystem.measure(measureStr, style: resolved.style, maxWidth: shapeW, pixelScale: scale)
+                let keep: TextKeep = resolved.isSecure ? .secret : .cached
+                if !resolved.isSecure, !measureStr.isEmpty, textLayouts != nil {
+                    let sKey = TextShapeKey(
+                        authText: measureStr,
+                        spans: resolved.spans,
+                        pills: resolved.pills,
+                        style: resolved.style,
+                        pixelScale: max(scale, 1.0),
+                        fontEpoch: fEpoch,
+                        languageTag: langTag,
+                        maxWidth: nil
+                    )
+                    nonSecretLeaves.append(TextLeafFallback(
+                        index: flatIndex,
+                        nodeId: nodeId,
+                        shapeKey: sKey,
+                        text: measureStr,
+                        spans: resolved.spans,
+                        pills: resolved.pills,
+                        style: resolved.style,
+                        isInput: true
+                    ))
+                }
+                let fn: (Float?, Bool) -> Vec2 = { maxW, isRealLayout in
+                    // Wraps at `w * scale + FIT_SLACK` device px, as every text node lays out (#948).
+                    let shapeW = TextBoxGeometry.wrapWidth(resolved.measureWidth(maxW), scale: scale)
+                    let box = textSystem.layoutKeyed(
+                        text: measureStr,
+                        spans: resolved.spans,
+                        pills: resolved.pills,
+                        style: resolved.style,
+                        maxWidth: shapeW,
+                        pixelScale: scale,
+                        emitGlyphs: false,
+                        keep: keep,
+                        countAsRebreak: (textLayouts != nil) && isRealLayout
+                    )
+                    if !resolved.isSecure, isRealLayout, let collector = textLayouts {
+                        collector.map[nodeId] = TextLayoutRecord(box: box, isInput: true)
                     }
                     let lineH = TextSystem.specLineHeight(
                         lineCount: 1,
@@ -108,7 +174,7 @@ final class RetainedLayoutCoordinator {
                         scale: scale,
                         exact: resolved.style.exactLines
                     )
-                    return Vec2(max(m.x + 2, 4), max(m.y, lineH))
+                    return Vec2(max(box.shaped.size.x + 2, 4), max(box.shaped.size.y, lineH))
                 }
                 return (fn, resolved.isSecure ? 0 : h, resolved.isSecure)
             } else if el.richSpans != nil || el.liveText != nil || el.plainText != nil || el.advanceInRun != nil {
@@ -132,11 +198,67 @@ final class RetainedLayoutCoordinator {
                 }
                 hasher.combine(el.isRevealed)
                 hasher.combine(resolved.truncateFade)
+                hasher.combine(resolved.pretty)
                 hasher.combine(scale)
                 hasher.combine(resolved.style)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
-                let fn: (Float?) -> Vec2 = { maxW in
-                    resolved.measure(using: textSystem, maxWidth: maxW, pixelScale: scale)
+                let keep: TextKeep = resolved.isSecure ? .secret : .cached
+                let isClampedOrEllipsis = resolved.style.maxLines > 0 || resolved.style.wrap == .ellipsis
+                if !resolved.isSecure, !resolved.displayedText.isEmpty, !resolved.truncateFade, resolved.advanceRun == nil, !isClampedOrEllipsis, textLayouts != nil {
+                    let hasSpans = (resolved.spans?.isEmpty == false)
+                    let sKey = TextShapeKey(
+                        authText: resolved.displayedText,
+                        spans: resolved.spans,
+                        pills: resolved.pills,
+                        style: resolved.style,
+                        pixelScale: max(scale, 1.0),
+                        fontEpoch: fEpoch,
+                        languageTag: langTag,
+                        maxWidth: nil,
+                        pretty: resolved.pretty
+                    )
+                    nonSecretLeaves.append(TextLeafFallback(
+                        index: flatIndex,
+                        nodeId: nodeId,
+                        shapeKey: sKey,
+                        text: hasSpans ? "" : resolved.displayedText,
+                        spans: resolved.spans,
+                        pills: resolved.pills,
+                        style: resolved.style,
+                        isInput: false,
+                        pretty: resolved.pretty
+                    ))
+                }
+                let fn: (Float?, Bool) -> Vec2 = { maxW, isRealLayout in
+                    if resolved.truncateFade || resolved.advanceRun != nil || isClampedOrEllipsis {
+                        // Every text wraps at `w * scale + FIT_SLACK` device px; a truncated or clamped
+                        // one is no wider than its room (`compute_layout`: `lw.min(a)`, #948).
+                        var sz = resolved.measure(using: textSystem, maxWidth: TextBoxGeometry.wrapWidth(maxW, scale: scale), pixelScale: scale)
+                        if resolved.advanceRun == nil, let mw = maxW, mw.isFinite {
+                            sz.x = min(sz.x, max(0, mw))
+                        }
+                        return sz
+                    }
+                    // A text laid out again in its own box fits: it wraps at `w * scale + FIT_SLACK`
+                    // device px (`compute_layout` / `relayout::lay_out_text`, #948).
+                    let shapeMaxW: Float? = (resolved.style.wrap == .noWrap && resolved.style.maxLines == 0) ? nil : TextBoxGeometry.wrapWidth(maxW, scale: scale)
+                    let hasSpans = (resolved.spans?.isEmpty == false)
+                    let box = textSystem.layoutKeyed(
+                        text: hasSpans ? "" : resolved.displayedText,
+                        spans: resolved.spans,
+                        pills: resolved.pills,
+                        style: resolved.style,
+                        maxWidth: shapeMaxW,
+                        pixelScale: scale,
+                        emitGlyphs: false,
+                        keep: keep,
+                        countAsRebreak: (textLayouts != nil) && isRealLayout,
+                        pretty: resolved.pretty
+                    )
+                    if !resolved.isSecure, isRealLayout, let collector = textLayouts {
+                        collector.map[nodeId] = TextLayoutRecord(box: box, isInput: false)
+                    }
+                    return box.shaped.size
                 }
                 return (fn, resolved.isSecure ? 0 : h, resolved.isSecure)
             } else if let (_, iconSize) = el.iconPayload {
@@ -144,7 +266,7 @@ final class RetainedLayoutCoordinator {
                 hasher.combine(4)
                 hasher.combine(iconSize)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
-                return ({ _ in Vec2(iconSize, iconSize) }, h, false)
+                return ({ _, _ in Vec2(iconSize, iconSize) }, h, false)
             } else if let grid = el.terminalGridPayload {
                 var hasher = Hasher()
                 hasher.combine(5)
@@ -155,12 +277,18 @@ final class RetainedLayoutCoordinator {
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
                 let w = Float(grid.columns) * grid.cellSize.x
                 let rowH = Float(grid.rows.count) * grid.cellSize.y
-                return ({ _ in Vec2(w, rowH) }, h, false)
+                return ({ _, _ in Vec2(w, rowH) }, h, false)
             }
             return (nil, nil, false)
         }
 
-        func syncSubtree(
+        /// Per-node half of `syncSubtree`, kept out of the recursive frame (`@inline(never)`): its
+        /// style temporaries (`TaffyStyle` copies, `PreparedNode`, `makeMeasure`) would otherwise
+        /// stay live across every child's recursion and overflow the 512 KB test-thread stack on
+        /// deep trees in debug builds.
+
+        @inline(never)
+        func syncPrepare(
             _ el: El<State>,
             isRoot: Bool,
             parentIndex: Int?,
@@ -172,7 +300,7 @@ final class RetainedLayoutCoordinator {
             scrollXChild: TaffyBridge.ScrollXChild?,
             parentFlow: Flow,
             parentDirected: Bool
-        ) -> (idx: Int, slot: SlotId, dirty: Bool) {
+        ) -> SyncPrepared {
             let pin: DirPin = (el.isUnmirrored || el.anchor != nil) ? .physical : .flowing
             let effectiveParentFlow: Flow = el.isUnmirrored ? .ltr : parentFlow
             let (nodeFlow, _) = stepDirection(parent: effectiveParentFlow, event: DirEvent.of(el, state: state), state: state)
@@ -203,6 +331,17 @@ final class RetainedLayoutCoordinator {
                 identityKey = path
             }
             let keyHash = fnv1a64(identityKey)
+            let runtimePath = isRoot ? (resolvedKey.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(segment)"
+            let runtimeIdentityKey: String
+            if el.layoutAnim?.travel == .screen, let rk = resolvedKey {
+                runtimeIdentityKey = "screen:@\(rk)"
+            } else {
+                runtimeIdentityKey = runtimePath
+            }
+            let runtimeNodeId = RuneMotion.NodeId.hash(runtimeIdentityKey)
+            if let collector = textLayouts {
+                collector.liveIds.insert(runtimeNodeId)
+            }
 
             var style = el.layout
             if isRoot {
@@ -267,10 +406,69 @@ final class RetainedLayoutCoordinator {
                 pin: pin
             ))
 
-            let (measureFn, measureHash, isRedacted) = makeMeasure(el: el, forcedTextFlow: forcedTextFlow)
+            let (measureFn, measureHash, isRedacted) = makeMeasure(el: el, nodeId: runtimeNodeId, flatIndex: myIndex, forcedTextFlow: forcedTextFlow)
             flat[myIndex].measureFn = measureFn
 
-            let isRow = effectiveTaffy.flexDirection.isRow
+            return SyncPrepared(
+                myIndex: myIndex,
+                path: path,
+                keyHash: keyHash,
+                areas: areas,
+                childSX: childSX,
+                nodeFlow: nodeFlow,
+                nodeDirected: nodeDirected,
+                isRow: effectiveTaffy.flexDirection.isRow,
+                measureHash: measureHash,
+                isRedacted: isRedacted,
+                hasRatio: ratio != nil
+            )
+        }
+
+        @inline(never)
+        func syncFinish(_ p: SyncPrepared, childMark: Int, childrenDirty: Bool) -> (slot: SlotId, dirty: Bool) {
+            let (slot, dirty) = store.syncNode(
+                key: p.keyHash,
+                nodeIndex: UInt32(p.myIndex),
+                style: flat[p.myIndex].taffyStyle,
+                measure: p.measureHash,
+                forceMeasureDirty: p.isRedacted,
+                childMark: childMark,
+                childrenDirty: childrenDirty
+            )
+            flat[p.myIndex].slot = slot
+            if p.hasRatio {
+                aspectFitIndices.append(p.myIndex)
+            }
+            return (slot, dirty)
+        }
+
+        func syncSubtree(
+            _ el: El<State>,
+            isRoot: Bool,
+            parentIndex: Int?,
+            parentPath: String,
+            siblingIndex: Int,
+            siblingKeysSeen: inout [String: Int],
+            parentRow: Bool,
+            parentAreas: [String: RuneTaffy.GridTemplateArea]?,
+            scrollXChild: TaffyBridge.ScrollXChild?,
+            parentFlow: Flow,
+            parentDirected: Bool
+        ) -> (idx: Int, slot: SlotId, dirty: Bool) {
+            let p = syncPrepare(
+                el,
+                isRoot: isRoot,
+                parentIndex: parentIndex,
+                parentPath: parentPath,
+                siblingIndex: siblingIndex,
+                siblingKeysSeen: &siblingKeysSeen,
+                parentRow: parentRow,
+                parentAreas: parentAreas,
+                scrollXChild: scrollXChild,
+                parentFlow: parentFlow,
+                parentDirected: parentDirected
+            )
+            let myIndex = p.myIndex
             let childMark = store.beginChildren()
             var childrenDirty = false
             var childKeys: [String: Int] = [:]
@@ -282,14 +480,14 @@ final class RetainedLayoutCoordinator {
                     childEl,
                     isRoot: false,
                     parentIndex: myIndex,
-                    parentPath: path,
+                    parentPath: p.path,
                     siblingIndex: cIdx,
                     siblingKeysSeen: &childKeys,
-                    parentRow: isRow,
-                    parentAreas: areas,
-                    scrollXChild: childSX,
-                    parentFlow: nodeFlow,
-                    parentDirected: nodeDirected
+                    parentRow: p.isRow,
+                    parentAreas: p.areas,
+                    scrollXChild: p.childSX,
+                    parentFlow: p.nodeFlow,
+                    parentDirected: p.nodeDirected
                 )
                 childIndices.append(childRes.idx)
                 store.pushChild(childRes.slot)
@@ -297,19 +495,7 @@ final class RetainedLayoutCoordinator {
             }
             flat[myIndex].childIndices = childIndices
 
-            let (slot, dirty) = store.syncNode(
-                key: keyHash,
-                nodeIndex: UInt32(myIndex),
-                style: effectiveTaffy,
-                measure: measureHash,
-                forceMeasureDirty: isRedacted,
-                childMark: childMark,
-                childrenDirty: childrenDirty
-            )
-            flat[myIndex].slot = slot
-            if ratio != nil {
-                aspectFitIndices.append(myIndex)
-            }
+            let (slot, dirty) = syncFinish(p, childMark: childMark, childrenDirty: childrenDirty)
             if el.anchor?.fit == true {
                 hasAnchoredFit = true
             }
@@ -340,6 +526,10 @@ final class RetainedLayoutCoordinator {
         }
         rootRes.slot = rootSlot
 
+        if let collector = textLayouts {
+            onLiveIdsReady?(collector.liveIds)
+        }
+
         let available = RuneTaffy.Size<RuneTaffy.AvailableSpace>(
             width: .definite(viewport.x),
             height: fitHeight ? .maxContent : .definite(viewport.y)
@@ -353,12 +543,20 @@ final class RetainedLayoutCoordinator {
                 return RuneTaffy.LayoutOutput.fromOuterSize(.zero)
             }
             let maxW: Float?
+            let isRealLayout: Bool
             switch input.availableSpace.width {
-            case .definite(let w): maxW = max(0, w)
-            case .minContent: maxW = 0
-            case .maxContent: maxW = nil
+            case .definite(let w):
+                maxW = max(0, w)
+                isRealLayout = true
+            case .minContent:
+                maxW = 0
+                isRealLayout = (input.knownDimensions.width != nil)
+            case .maxContent:
+                maxW = nil
+                isRealLayout = (input.knownDimensions.width != nil)
             }
-            let measured = box.fn(maxW)
+            let effectiveMaxW = input.knownDimensions.width.map { max(0, $0) } ?? maxW
+            let measured = box.fn(effectiveMaxW, isRealLayout)
             return RuneTaffy.LayoutOutput.fromOuterSize(RuneTaffy.Size(
                 width: input.knownDimensions.width ?? measured.x,
                 height: input.knownDimensions.height ?? measured.y
@@ -468,6 +666,29 @@ final class RetainedLayoutCoordinator {
                     store.setStyleAndMarkAncestors(flat[idx].slot, style: flat[idx].taffyStyle, ancestors: ancestors)
                 }
                 store.computeLayout(root: rootSlot, availableSpace: available, rounding: false, measureLeaf: measureClosure)
+            }
+        }
+
+        if let collector = textLayouts {
+            for leaf in nonSecretLeaves where collector.map[leaf.nodeId] == nil {
+                if let existing = textSystem.cachedLayoutBox(for: leaf.shapeKey) {
+                    collector.map[leaf.nodeId] = TextLayoutRecord(box: existing, isInput: leaf.isInput)
+                } else {
+                    let w: Float? = leaf.style.wrap == .noWrap ? nil : max(0, store.layout(flat[leaf.index].slot).size.width)
+                    let box = textSystem.layoutKeyed(
+                        text: leaf.text,
+                        spans: leaf.spans,
+                        pills: leaf.pills,
+                        style: leaf.style,
+                        maxWidth: w,
+                        pixelScale: scale,
+                        emitGlyphs: false,
+                        keep: .cached,
+                        countAsRebreak: true,
+                        pretty: leaf.pretty
+                    )
+                    collector.map[leaf.nodeId] = TextLayoutRecord(box: box, isInput: leaf.isInput)
+                }
             }
         }
 

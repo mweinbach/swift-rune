@@ -49,6 +49,8 @@ extension El {
         if let liveText { out.liveText = liveText }
         if let placeholder { out.placeholder = placeholder }
         if let placeholderColor { out.placeholderColor = placeholderColor }
+        if let placeholderFont { out.placeholderFont = placeholderFont }
+        if isWrapGreedy { out.isWrapGreedy = true }
         if let caretColor { out.caretColor = caretColor }
         if let selectionColor { out.selectionColor = selectionColor }
         if let iconPayload { out.iconPayload = iconPayload }
@@ -59,6 +61,8 @@ extension El {
         if let borderSides { out.borderSides = borderSides }
         if let dashedBorder { out.dashedBorder = dashedBorder }
         if !pixelSnapEnabled { out.pixelSnapEnabled = pixelSnapEnabled }
+        if let paintContain { out.paintContain = paintContain }
+        if motionSnapsEnabled { out.motionSnapsEnabled = true }
         if let clipRadius { out.clipRadius = clipRadius }
         if let clipCorners { out.clipCorners = clipCorners }
         if let clipFade { out.clipFade = clipFade }
@@ -94,6 +98,7 @@ extension El {
         if isRevealSelected { out.isRevealSelected = true }
         if let hoverBg { out.hoverBg = hoverBg }
         if let pressBg { out.pressBg = pressBg }
+        if let pressColor { out.pressColor = pressColor }
         if let pressScaleFactor { out.pressScaleFactor = pressScaleFactor }
         if isHoverGroup { out.isHoverGroup = true }
         if let hoverGroupShare { out.hoverGroupShare = hoverGroupShare }
@@ -156,6 +161,7 @@ extension El {
         if pressFocusesBelow { out.pressFocusesBelow = true }
         if noWindowDrag { out.noWindowDrag = true }
         if isImeCursor { out.isImeCursor = true }
+        if isImeOptionAsAlt { out.isImeOptionAsAlt = true }
         if let traceNameValue { out.traceNameValue = traceNameValue }
         if let traceNamespaceValue { out.traceNamespaceValue = traceNamespaceValue }
         if isSpellcheck { out.isSpellcheck = true }
@@ -225,6 +231,7 @@ extension El {
         lifted.onClickPress = wrap1(h.onClickPress)
         lifted.onDoubleClick = wrap(h.onDoubleClick)
         lifted.onSecondaryClick = wrap1(h.onSecondaryClick)
+        lifted.onMiddlePress = wrap(h.onMiddlePress)
         lifted.onPointerDown = wrap1(h.onPointerDown)
         lifted.onPointerUp = wrap1(h.onPointerUp)
         lifted.onPointerMove = wrap1(h.onPointerMove)
@@ -255,6 +262,7 @@ extension El {
             hasHandler = true
             lifted.dragThreshold = thresh
         }
+        lifted.touchAtOnce = h.touchAtOnce
         lifted.onDragStart = wrap(h.onDragStart)
         lifted.onDragOutEnd = wrap1(h.onDragOutEnd)
         lifted.onKey = wrapBool1(h.onKey)

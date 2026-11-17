@@ -479,7 +479,8 @@ struct OverlaysAndTableTests {
             state: s,
             viewport: Vec2(400, 400),
             systemDark: true,
-            onKey: { state, _, _ in
+            onKey: { state, ev, _ in
+                if ev.key == .tab { return false }
                 state.appKeys += 1
                 return true
             }

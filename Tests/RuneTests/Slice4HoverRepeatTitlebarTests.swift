@@ -24,12 +24,36 @@ struct Slice4HoverRepeatTitlebarTests {
         stepKitHoverDelayState(&state, .due(now: now))
     }
 
-    private func makeHoverDelayRuntime() -> Runtime<[Bool]> {
+    /// Which hover API the `tests/hover_delays.rs` fixture drives. Upstream uses
+    /// `on_hover_change(..).hover_delays(..)`, ported as `.onHoverChange { }.hoverDelays(enter:leave:)`
+    /// (the `HoverDelays` machine in `Inc5InputWatchRuntime`); the Swift-only `.onHover { }` path runs
+    /// the Kit copy of the machine. Every integration case runs under both so neither path can drift.
+    enum HoverAPI: String, CaseIterable, CustomTestStringConvertible, Sendable {
+        case onHoverChange
+        case onHover
+
+        var testDescription: String { rawValue }
+
+        /// `el().key("zone").w(16.0).h(100.0).on_hover_change(..).hover_delays(40ms, 100ms)`.
+        func zone<S>(_ record: @escaping (inout S, Bool) -> Void) -> El<S> {
+            let base: El<S> = el().key("zone").size(16, 100)
+            switch self {
+            case .onHoverChange:
+                return base
+                    .onHoverChange { s, inside, _ in record(&s, inside) }
+                    .hoverDelays(enter: 0.04, leave: 0.1)
+            case .onHover:
+                return base
+                    .onHover { s, inside, _ in record(&s, inside) }
+                    .hoverDelays(0.04, 0.1)
+            }
+        }
+    }
+
+    private func makeHoverDelayRuntime(_ api: HoverAPI) -> Runtime<[Bool]> {
         let rt = Runtime(state: [Bool](), viewport: Vec2(200, 200), pixelScale: 1.0, systemDark: true) { _, _ in
             col().wFull().hFull().child(
-                el().key("zone").size(16, 100)
-                    .onHover { s, inside, _ in s.append(inside) }
-                    .hoverDelays(0.04, 0.1)
+                api.zone { (s: inout [Bool], inside) in s.append(inside) }
             )
         }
         _ = rt.frame(at: 0.0)
@@ -43,14 +67,12 @@ struct Slice4HoverRepeatTitlebarTests {
         var heard: [Bool] = []
     }
 
-    private func runLeaving(rest: Double, instant: Bool) -> [Bool] {
+    private func runLeaving(_ api: HoverAPI, rest: Double, instant: Bool) -> [Bool] {
         let rt = Runtime(state: LeavingState(), viewport: Vec2(200, 200), pixelScale: 1.0, systemDark: true) { s, _ in
             let root: El<LeavingState> = col().wFull().hFull()
             if s.gone == nil {
                 return root.child(
-                    el().key("zone").size(16, 100)
-                        .onHover { st, inside, _ in st.heard.append(inside) }
-                        .hoverDelays(0.04, 0.1)
+                    api.zone { (st: inout LeavingState, inside) in st.heard.append(inside) }
                 )
             }
             return root
@@ -188,9 +210,9 @@ struct Slice4HoverRepeatTitlebarTests {
 
     // MARK: - Group B: tests/hover_delays.rs (9 tests)
 
-    @Test("hover_delays: an enter waits for the pointer to rest")
-    func anEnterWaitsForThePointerToRest() {
-        let rt = makeHoverDelayRuntime()
+    @Test("hover_delays: an enter waits for the pointer to rest", arguments: HoverAPI.allCases)
+    func anEnterWaitsForThePointerToRest(_ api: HoverAPI) {
+        let rt = makeHoverDelayRuntime(api)
         var t = 0.0
         rt.pointerMove(to: Vec2(8, 50), at: t)
         t += 0.03
@@ -207,9 +229,9 @@ struct Slice4HoverRepeatTitlebarTests {
         #expect(rt.state == [true])
     }
 
-    @Test("hover_delays: a pass shorter than the delay reports nothing")
-    func aPassShorterThanTheDelayReportsNothing() {
-        let rt = makeHoverDelayRuntime()
+    @Test("hover_delays: a pass shorter than the delay reports nothing", arguments: HoverAPI.allCases)
+    func aPassShorterThanTheDelayReportsNothing(_ api: HoverAPI) {
+        let rt = makeHoverDelayRuntime(api)
         var t = 0.0
         rt.pointerMove(to: Vec2(8, 50), at: t)
         t += 0.02
@@ -220,9 +242,9 @@ struct Slice4HoverRepeatTitlebarTests {
         #expect(rt.state.isEmpty)
     }
 
-    @Test("hover_delays: a leave waits out its grace and a return keeps it")
-    func aLeaveWaitsOutItsGraceAndAReturnKeepsIt() {
-        let rt = makeHoverDelayRuntime()
+    @Test("hover_delays: a leave waits out its grace and a return keeps it", arguments: HoverAPI.allCases)
+    func aLeaveWaitsOutItsGraceAndAReturnKeepsIt(_ api: HoverAPI) {
+        let rt = makeHoverDelayRuntime(api)
         var t = 0.0
         rt.pointerMove(to: Vec2(8, 50), at: t)
         t += 0.05
@@ -244,9 +266,9 @@ struct Slice4HoverRepeatTitlebarTests {
         #expect(rt.state == [true, false])
     }
 
-    @Test("hover_delays: a press cancels the wait and the next move starts it again")
-    func aPressCancelsTheWaitAndTheNextMoveStartsItAgain() {
-        let rt = makeHoverDelayRuntime()
+    @Test("hover_delays: a press cancels the wait and the next move starts it again", arguments: HoverAPI.allCases)
+    func aPressCancelsTheWaitAndTheNextMoveStartsItAgain(_ api: HoverAPI) {
+        let rt = makeHoverDelayRuntime(api)
         var t = 0.0
         rt.pointerMove(to: Vec2(8, 50), at: t)
         t += 0.02
@@ -265,9 +287,9 @@ struct Slice4HoverRepeatTitlebarTests {
         #expect(rt.state == [true])
     }
 
-    @Test("hover_delays: blur cancels pending enters and ends shown hover without a grace")
-    func blurCancelsPendingEntersAndEndsShownHoverWithoutAGrace() {
-        let rt = makeHoverDelayRuntime()
+    @Test("hover_delays: blur cancels pending enters and ends shown hover without a grace", arguments: HoverAPI.allCases)
+    func blurCancelsPendingEntersAndEndsShownHoverWithoutAGrace(_ api: HoverAPI) {
+        let rt = makeHoverDelayRuntime(api)
         var t = 0.0
         rt.windowFocus(true, at: t)
         rt.pointerMove(to: Vec2(8, 50), at: t)
@@ -287,9 +309,9 @@ struct Slice4HoverRepeatTitlebarTests {
         #expect(rt.state == [true, false], "blur ends even a hover with exit grace")
     }
 
-    @Test("hover_delays: a move over a window that isnt key starts the wait")
-    func aMoveOverAWindowThatIsntKeyStartsTheWait() {
-        let rt = makeHoverDelayRuntime()
+    @Test("hover_delays: a move over a window that isnt key starts the wait", arguments: HoverAPI.allCases)
+    func aMoveOverAWindowThatIsntKeyStartsTheWait(_ api: HoverAPI) {
+        let rt = makeHoverDelayRuntime(api)
         var t = 0.0
         rt.windowFocus(true, at: t)
         rt.windowFocus(false, at: t)
@@ -313,9 +335,9 @@ struct Slice4HoverRepeatTitlebarTests {
         #expect(rt.state == [true, false, true], "the next move does")
     }
 
-    @Test("hover_delays: leaving the window cancels a pending enter")
-    func leavingTheWindowCancelsAPendingEnter() {
-        let rt = makeHoverDelayRuntime()
+    @Test("hover_delays: leaving the window cancels a pending enter", arguments: HoverAPI.allCases)
+    func leavingTheWindowCancelsAPendingEnter(_ api: HoverAPI) {
+        let rt = makeHoverDelayRuntime(api)
         var t = 0.0
         rt.pointerMove(to: Vec2(8, 50), at: t)
         t += 0.02
@@ -326,16 +348,16 @@ struct Slice4HoverRepeatTitlebarTests {
         #expect(rt.state.isEmpty)
     }
 
-    @Test("hover_delays: a zone leaving before its enter reports nothing")
-    func aZoneLeavingBeforeItsEnterReportsNothing() {
-        #expect(runLeaving(rest: 0.02, instant: false).isEmpty, "through its exit")
-        #expect(runLeaving(rest: 0.02, instant: true).isEmpty, "at once")
+    @Test("hover_delays: a zone leaving before its enter reports nothing", arguments: HoverAPI.allCases)
+    func aZoneLeavingBeforeItsEnterReportsNothing(_ api: HoverAPI) {
+        #expect(runLeaving(api, rest: 0.02, instant: false).isEmpty, "through its exit")
+        #expect(runLeaving(api, rest: 0.02, instant: true).isEmpty, "at once")
     }
 
-    @Test("hover_delays: a shown zone leaving hears its leave")
-    func aShownZoneLeavingHearsItsLeave() {
-        #expect(runLeaving(rest: 0.05, instant: false) == [true, false], "through its exit")
-        #expect(runLeaving(rest: 0.05, instant: true) == [true, false], "at once")
+    @Test("hover_delays: a shown zone leaving hears its leave", arguments: HoverAPI.allCases)
+    func aShownZoneLeavingHearsItsLeave(_ api: HoverAPI) {
+        #expect(runLeaving(api, rest: 0.05, instant: false) == [true, false], "through its exit")
+        #expect(runLeaving(api, rest: 0.05, instant: true) == [true, false], "at once")
     }
 
     // MARK: - Group C: press_repeat_tests.rs (5 tests)

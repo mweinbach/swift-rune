@@ -1385,6 +1385,52 @@ struct OverlayLifecycleParityTests {
         rt.setLiveVisible(false)
         rt.finishDragOut(.copied, at: 0.2)
         #expect(rt.state.ended == [.copied])
+
+        // more_tests.rs:39 - overlay_input_switch_waits_for_owned_drag_release
+        let dragOverlay = OverlayHandle(
+            spec: OverlaySpec<[String]>(
+                name: "drag-input-switch",
+                size: Vec2(120, 60),
+                options: OverlayOptions(input: .all),
+                makeState: { [] },
+                view: { _, _ in
+                    el().key("drag").size(120, 60)
+                        .onDrag { s, _, _ in s.append("drag") }
+                        .onDragEnd { s, _, _ in s.append("up") }
+                }
+            )
+        )
+        _ = dragOverlay.runtime.frame(at: 0.0)
+        dragOverlay.runtime.pointerDown(at: Vec2(20, 20), button: .primary, mods: .none, at: 0.01)
+        #expect(dragOverlay.runtime.pointerCaptured)
+        dragOverlay.setInput(.none)
+        #expect(dragOverlay.options.input == .all)
+        #expect(dragOverlay.pendingInput == OverlayInput.none)
+        #expect(!dragOverlay.applyInput())
+        dragOverlay.runtime.pointerUp(at: Vec2(40, 20), button: .primary, mods: .none, at: 0.02)
+        #expect(!dragOverlay.runtime.pointerCaptured)
+        #expect(dragOverlay.applyInput())
+        #expect(dragOverlay.options.input == .none)
+        #expect(dragOverlay.pendingInput == nil)
+
+        // Escape drag-cancel & focus-loss cancellation clear pointerCaptured (`pointer.rs:107-153`).
+        dragOverlay.setInput(.all)
+        _ = dragOverlay.applyInput()
+        dragOverlay.runtime.pointerDown(at: Vec2(20, 20), button: .primary, mods: .none, at: 0.03)
+        dragOverlay.runtime.pointerMove(to: Vec2(40, 20), at: 0.035)
+        #expect(dragOverlay.runtime.pointerCaptured)
+        #expect(dragOverlay.runtime.keyDown(KeyEvent(key: .escape, mods: .none), at: 0.04))
+        #expect(!dragOverlay.runtime.pointerCaptured)
+
+        dragOverlay.runtime.pointerDown(at: Vec2(20, 20), button: .primary, mods: .none, at: 0.05)
+        #expect(dragOverlay.runtime.pointerCaptured)
+        _ = dragOverlay.runtime.cancelPointerForFocusLoss(at: 0.055)
+        #expect(!dragOverlay.runtime.pointerCaptured)
+
+        dragOverlay.runtime.pointerDown(at: Vec2(20, 20), button: .secondary, mods: .none, at: 0.06)
+        #expect(dragOverlay.runtime.pointerCaptured)
+        _ = dragOverlay.runtime.cancelPointerForFocusLoss(at: 0.065)
+        #expect(!dragOverlay.runtime.pointerCaptured)
     }
 
     @Test("overlay/more_tests.rs:792,953 - animated reveal enters from offset and Windows fade alpha steps linearly")
@@ -1434,20 +1480,50 @@ struct OverlayLifecycleParityTests {
 
     @Test("overlay/tests.rs:633 & more_tests.rs:1 - Pixels update visibility gating and PerfWarn quiet/rest tracking")
     func overlayPixelsAndPerfWarnQuietTracking() {
+        final class WakeCounter: @unchecked Sendable {
+            private let lock = NSLock()
+            var count = 0
+            func inc() { lock.lock(); count += 1; lock.unlock() }
+        }
         let pixels = Pixels()
         pixels.set(width: 1, height: 1, rgba: [255, 255, 255, 255])
-        let rt = Runtime(
-            state: pixels,
-            viewport: Vec2(20, 20),
-            view: { px, _ in el().size(4, 4).pixels(px) }
+        let handle = OverlayHandle(
+            spec: OverlaySpec<Pixels>(
+                name: "pixels-wake",
+                size: Vec2(20, 20),
+                makeState: { pixels },
+                view: { px, _ in el().size(4, 4).pixels(px) }
+            )
         )
-        _ = rt.frame(at: 0.0)
-        rt.setLiveVisible(false)
+        _ = handle.runtime.frame(at: 0.0)
+        handle.fadeIn(0.0)
+        _ = handle.present(at: 0.0)
+        handle.hide()
+        let wakes = WakeCounter()
+        handle.runtime.setLiveWaker { wakes.inc() }
+
+        // Hidden overlay: Pixels.set wakes 0 times and reports !livePending until shown.
         pixels.set(width: 1, height: 1, rgba: [1, 2, 3, 255])
-        #expect(pixels.size == (1, 1))
-        rt.setLiveVisible(true)
-        _ = rt.frame(at: 0.016)
-        #expect(!rt.elements().isEmpty)
+        #expect(wakes.count == 0)
+        #expect(!handle.runtime.livePending)
+
+        // resumeLive() catches up and wakes once on show.
+        handle.resumeLive()
+        #expect(wakes.count == 1)
+        #expect(handle.runtime.livePending)
+        #expect(handle.isDirty)
+
+        // Shown: subsequent Pixels.set wakes immediately.
+        _ = handle.runtime.frame(at: 0.016)
+        let beforeShownSet = wakes.count
+        pixels.set(width: 1, height: 1, rgba: [4, 5, 6, 255])
+        #expect(wakes.count == beforeShownSet + 1)
+
+        // hide() stops live wakes again.
+        handle.hide()
+        let beforeHiddenSet = wakes.count
+        pixels.set(width: 1, height: 1, rgba: [7, 8, 9, 255])
+        #expect(wakes.count == beforeHiddenSet)
 
         // Quiet timer skipping: identical drawn output with `OverlayQuiet`
         var quiet = OverlayQuiet<UInt64>()

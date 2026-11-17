@@ -48,6 +48,14 @@ public enum PixelSnap {
         public var off: Bool = false
         /// Translation in points from scrolls, sticky shifts, and growth rows above, which snaps as a whole.
         public var rigid: SIMD2<Float> = .zero
+        /// Origin in points of the paint containment above (`El.paintContained`), which is part of `rigid`.
+        public var contain: SIMD2<Float> = .zero
+        /// `El.motionSnaps` here or above: a moving box snaps where it is each frame.
+        public var steps: Bool = false
+        /// An `El.offset` here or above comes to rest away from zero: a translation, as a CSS
+        /// transform is, which moves a text with its box rather than laying it out again from its
+        /// exact place (`TextBoxGeometry.leafExactOff` is zero under it, `Inherit::shifted`, #963).
+        public var shifted: Bool = false
         /// Nearest scaled layer above or here (1-based index into current frame's layers, `0` = none).
         public var layer: UInt32 = 0
         /// Parent's edges for centring. `nil` when parent paints nothing or doesn't share rigid translation / plain grid.
@@ -131,6 +139,11 @@ public enum PixelSnap {
         public init() {}
 
         public var isEasing: Bool { easing }
+
+        public mutating func remove(id: NodeId) {
+            glides.removeValue(forKey: id)
+            layers.removeValue(forKey: id)
+        }
 
         public mutating func beginFrame(t: Double, size: SIMD2<Float>) {
             frame = frame &+ 1
@@ -406,6 +419,12 @@ public enum PixelSnap {
     @inline(__always)
     public static func roundHalfUp(_ v: Float) -> Float {
         (v + 0.5).rounded(.down)
+    }
+
+    /// `v` (device px) on the device grid inside a paint containment at `c` (`on_grid` in `content.rs`).
+    @inline(__always)
+    public static func onGrid(_ v: Float, contain c: Float) -> Float {
+        roundHalfUp(v - c) + roundHalfUp(c)
     }
 
     /// How far a gliding box's top/left (device px) sits from its nearest whole pixel.

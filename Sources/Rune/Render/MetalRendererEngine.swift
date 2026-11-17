@@ -30,6 +30,13 @@ internal final class RenderFrameEngine {
     var pipelineSpringsAddSRGB: MTLRenderPipelineState?
     var pipelineSpringsAddGamma: MTLRenderPipelineState?
     var pipelineSpringsAddFloat: MTLRenderPipelineState?
+    private struct ExtraPipelineKey: Hashable {
+        let formatRawValue: UInt
+        let additive: Bool
+        let springs: Bool
+    }
+    private var extraPipelines: [ExtraPipelineKey: MTLRenderPipelineState] = [:]
+    private var layersPreparedState: (count: Int, width: Int, height: Int)? = nil
 
     var layerBlur: LayerBlurPipeline?
     let backdropBlur: BackdropBlurPass
@@ -205,22 +212,46 @@ internal final class RenderFrameEngine {
         }
     }
 
+    private func extraPipeline(format: MTLPixelFormat, additive: Bool, springs: Bool) -> MTLRenderPipelineState? {
+        let key = ExtraPipelineKey(formatRawValue: format.rawValue, additive: additive, springs: springs)
+        if let cached = extraPipelines[key] {
+            return cached
+        }
+        let vert = springs ? uberVertSprings : uberVert
+        if let built = try? Self.makePipeline(device: device, vert: vert, frag: uberFrag, format: format, additive: additive) {
+            extraPipelines[key] = built
+            return built
+        }
+        return nil
+    }
+
     private func pipelineFor(format: MTLPixelFormat, additive: Bool, springs: Bool) -> MTLRenderPipelineState {
         switch (springs, additive, format) {
         case (false, false, .rgba16Float):
+            if pipelineFloat == nil { _ = try? ensureIsolationPipelines() }
             return pipelineFloat ?? ((try? Self.makePipeline(device: device, vert: uberVert, frag: uberFrag, format: .rgba16Float, additive: false)) ?? pipelineSRGB)
         case (false, false, .bgra8Unorm): return pipelineGamma
-        case (false, false, _): return pipelineSRGB
+        case (false, false, .bgra8Unorm_srgb): return pipelineSRGB
+        case (false, false, _): return extraPipeline(format: format, additive: false, springs: false) ?? pipelineSRGB
         case (false, true, .rgba16Float): return pipelineAddFloat ?? pipelineFloat ?? pipelineSRGB
         case (false, true, .bgra8Unorm): return pipelineAddGamma ?? pipelineGamma
-        case (false, true, _): return pipelineAddSRGB ?? pipelineSRGB
+        case (false, true, .bgra8Unorm_srgb): return pipelineAddSRGB ?? pipelineSRGB
+        case (false, true, _):
+            return extraPipeline(format: format, additive: true, springs: false)
+                ?? extraPipeline(format: format, additive: false, springs: false)
+                ?? pipelineAddSRGB ?? pipelineSRGB
         case (true, false, .rgba16Float):
             return pipelineSpringsFloat ?? ((try? Self.makePipeline(device: device, vert: uberVertSprings, frag: uberFrag, format: .rgba16Float, additive: false)) ?? pipelineSpringsSRGB)
         case (true, false, .bgra8Unorm): return pipelineSpringsGamma
-        case (true, false, _): return pipelineSpringsSRGB
+        case (true, false, .bgra8Unorm_srgb): return pipelineSpringsSRGB
+        case (true, false, _): return extraPipeline(format: format, additive: false, springs: true) ?? pipelineSpringsSRGB
         case (true, true, .rgba16Float): return pipelineSpringsAddFloat ?? pipelineSpringsFloat ?? pipelineSpringsSRGB
         case (true, true, .bgra8Unorm): return pipelineSpringsAddGamma ?? pipelineSpringsGamma
-        case (true, true, _): return pipelineSpringsAddSRGB ?? pipelineSpringsSRGB
+        case (true, true, .bgra8Unorm_srgb): return pipelineSpringsAddSRGB ?? pipelineSpringsSRGB
+        case (true, true, _):
+            return extraPipeline(format: format, additive: true, springs: true)
+                ?? extraPipeline(format: format, additive: false, springs: true)
+                ?? pipelineSpringsAddSRGB ?? pipelineSpringsSRGB
         }
     }
 
@@ -228,6 +259,7 @@ internal final class RenderFrameEngine {
         let texture: MTLTexture
         let format: MTLPixelFormat
         let origin: SIMD2<Float>
+        let contentSize: SIMD2<Float>
         let clearColor: MTLClearColor
         var cleared: Bool
         let scopeInstance: RenderInstance?
@@ -236,6 +268,7 @@ internal final class RenderFrameEngine {
         let isLayer: Bool
         let cacheNodeId: UInt64?
         let cacheSignature: UInt64?
+        let scopeIndex: Int?
     }
 
     @discardableResult
@@ -264,6 +297,25 @@ internal final class RenderFrameEngine {
         return tex
     }
 
+    private func prepareLayersForFrame(frame: RenderFrame, viewport: (Int, Int)) {
+        let vw = max(1, viewport.0)
+        let vh = max(1, viewport.1)
+        let hasNonHiddenLayer = frame.instances.contains {
+            Float(Int($0.params.y.rounded())) == KIND_LAYER && $0.fill.w > 0
+        }
+        let allowIsolation = hasNonHiddenLayer
+            ? (breakers.checkingGpu(.isolation) { try ensureIsolationPipelines() } ?? false)
+            : false
+        layersPool.prepareLayers(
+            device: device,
+            instances: frame.instances,
+            viewport: SIMD2<Float>(Float(vw), Float(vh)),
+            isolate: allowIsolation,
+            tracker: frame.residentTracker
+        )
+        layersPreparedState = (count: frame.instances.count, width: vw, height: vh)
+    }
+
     func prepare(frame: RenderFrame, viewport: (Int, Int)) {
         let vw = max(1, viewport.0)
         let vh = max(1, viewport.1)
@@ -272,9 +324,16 @@ internal final class RenderFrameEngine {
             currentFormat = frame.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
         }
         _ = uploader.syncGlyphAtlas(device: device, atlas: frame.glyphs, generation: frame.glyphGeneration)
-        _ = uploader.syncImageAtlas(device: device, atlas: frame.images, revision: frame.imageRevision)
+        let preparedPages = uploader.syncImagePages(
+            device: device,
+            pages: frame.imagePages,
+            fallback: frame.images,
+            revision: frame.imageRevision
+        )
         _ = uploader.ensureInstanceBuffer(device: device, instances: frame.instances)
-        uploader.prepareBatches(instances: frame.instances)
+        uploader.prepareBatches(instances: frame.instances, glyphPageCount: 1, imagePageCount: max(1, preparedPages.count))
+
+        prepareLayersForFrame(frame: frame, viewport: (vw, vh))
 
         var needsBackdrop = false
         var hasLayers = false
@@ -320,23 +379,36 @@ internal final class RenderFrameEngine {
         backdropHook: EffectBackdropHook?,
         range: Range<Int>? = nil
     ) {
-        layersPool.beginFrame()
-        layersPool.registerTracker(frame.residentTracker)
-        defer { layersPool.endFrame() }
-
         let targetW = max(1, target.width)
         let targetH = max(1, target.height)
         lastViewportSize = (targetW, targetH)
         let viewport = SIMD2<Float>(Float(targetW), Float(targetH))
-        layersPool.preparePlan(instances: frame.instances, viewport: viewport)
+        let alreadyPrepared = layersPreparedState.map {
+            $0.count == frame.instances.count && $0.width == targetW && $0.height == targetH
+        } ?? false
+        if !alreadyPrepared {
+            prepareLayersForFrame(frame: frame, viewport: (targetW, targetH))
+        }
+        defer {
+            layersPool.endFrame()
+            if range == nil || (range?.upperBound ?? 0) >= frame.instances.count {
+                layersPreparedState = nil
+            }
+        }
 
         let glyphTex = uploader.syncGlyphAtlas(device: device, atlas: frame.glyphs, generation: frame.glyphGeneration)
-        let imageTex = uploader.syncImageAtlas(device: device, atlas: frame.images, revision: frame.imageRevision)
+        let imagePages = uploader.syncImagePages(
+            device: device,
+            pages: frame.imagePages,
+            fallback: frame.images,
+            revision: frame.imageRevision
+        )
+        let imageTex = imagePages.first ?? uploader.imageTexture
         let instances = frame.instances
         guard let instanceBuffer = uploader.ensureInstanceBuffer(device: device, instances: instances) else {
             return
         }
-        uploader.prepareBatches(instances: instances)
+        uploader.prepareBatches(instances: instances, glyphPageCount: 1, imagePageCount: max(1, imagePages.count))
 
         if let r = range {
             let clamped = r.clamped(to: 0..<instances.count)
@@ -381,14 +453,16 @@ internal final class RenderFrameEngine {
                 texture: target,
                 format: target.pixelFormat,
                 origin: .zero,
+                contentSize: SIMD2<Float>(Float(targetW), Float(targetH)),
                 clearColor: clear,
-                cleared: false,
+                cleared: sliceRange.lowerBound > 0,
                 scopeInstance: nil,
                 blurSigma: 0,
                 additive: false,
                 isLayer: false,
                 cacheNodeId: nil,
-                cacheSignature: nil
+                cacheSignature: nil,
+                scopeIndex: nil
             )
         ]
 
@@ -399,7 +473,12 @@ internal final class RenderFrameEngine {
         while surfaceCursor < frame.surfaces.count && Int(frame.surfaces[surfaceCursor].beforeInstance) < sliceRange.lowerBound {
             surfaceCursor += 1
         }
-        var layerIsolatedStack: [Bool] = []
+        enum LayerScopeKind {
+            case isolated
+            case inline(pushedScissor: Bool)
+        }
+        var layerScopeStack: [LayerScopeKind] = []
+        var scissorStack: [MTLScissorRect?] = [nil]
 
         func encodeBatch(start: Int, end: Int, scope: inout TargetScope) {
             let count = end - start
@@ -424,23 +503,48 @@ internal final class RenderFrameEngine {
             scope.cleared = true
 
             guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) else { return }
-            let pipe = pipelineFor(format: scope.format, additive: false, springs: springsActive)
+            if let sc = scissorStack.last ?? nil {
+                enc.setScissorRect(sc)
+            }
+            let pipe = pipelineFor(format: scope.format, additive: scope.additive, springs: springsActive)
             enc.setRenderPipelineState(pipe)
 
             var g = globals
             g.projection = SIMD4<Float>(scope.origin.x, scope.origin.y, Float(scope.texture.width), Float(scope.texture.height))
-            let instanceOffset = start * MemoryLayout<RenderInstance>.stride
-            enc.setVertexBuffer(instanceBuffer, offset: instanceOffset, index: 0)
             enc.setVertexBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
-            if springsActive, let bindings = springBindings {
-                enc.setVertexBuffer(bindings.nodesBuffer, offset: 0, index: 2)
-                enc.setVertexBuffer(bindings.idsBuffer, offset: start * MemoryLayout<UInt32>.stride, index: 3)
-            }
             enc.setFragmentBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
             if let gt = glyphTex { enc.setFragmentTexture(gt, index: 0) }
-            if let it = imageTex { enc.setFragmentTexture(it, index: 1) }
+            if imagePages.count > 1 && !uploader.imageBatches.isEmpty {
+                for (batchRange, bind) in uploader.imageBatches {
+                    let lo = max(start, batchRange.lowerBound)
+                    let hi = min(end, batchRange.upperBound)
+                    if lo >= hi { continue }
+                    let boundTex: MTLTexture?
+                    switch bind {
+                    case .image(let p):
+                        boundTex = p < imagePages.count ? imagePages[p] : imageTex
+                    case .glyph:
+                        boundTex = imageTex
+                    }
+                    if let bt = boundTex { enc.setFragmentTexture(bt, index: 1) }
+                    enc.setVertexBuffer(instanceBuffer, offset: lo * MemoryLayout<RenderInstance>.stride, index: 0)
+                    if springsActive, let bindings = springBindings {
+                        enc.setVertexBuffer(bindings.nodesBuffer, offset: 0, index: 2)
+                        enc.setVertexBuffer(bindings.idsBuffer, offset: lo * MemoryLayout<UInt32>.stride, index: 3)
+                    }
+                    enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: hi - lo)
+                }
+            } else {
+                let instanceOffset = start * MemoryLayout<RenderInstance>.stride
+                enc.setVertexBuffer(instanceBuffer, offset: instanceOffset, index: 0)
+                if springsActive, let bindings = springBindings {
+                    enc.setVertexBuffer(bindings.nodesBuffer, offset: 0, index: 2)
+                    enc.setVertexBuffer(bindings.idsBuffer, offset: start * MemoryLayout<UInt32>.stride, index: 3)
+                }
+                if let it = imageTex { enc.setFragmentTexture(it, index: 1) }
 
-            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
+                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: count)
+            }
             enc.endEncoding()
         }
 
@@ -453,9 +557,10 @@ internal final class RenderFrameEngine {
         }
 
         func flushSurfacesBefore(_ instanceIndex: Int) {
+            let safeIndex = min(instanceIndex, sliceRange.upperBound)
             while surfaceCursor < frame.surfaces.count && Int(frame.surfaces[surfaceCursor].beforeInstance) <= instanceIndex {
-                flushPendingUpTo(instanceIndex)
-                batchStart = instanceIndex
+                flushPendingUpTo(safeIndex)
+                batchStart = safeIndex
                 let top = stack[stack.count - 1]
                 let rpd = MTLRenderPassDescriptor()
                 rpd.colorAttachments[0].texture = top.texture
@@ -464,11 +569,14 @@ internal final class RenderFrameEngine {
                 rpd.colorAttachments[0].storeAction = .store
                 stack[stack.count - 1].cleared = true
                 if let sr = surfaceRenderer, let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) {
+                    if let sc = scissorStack.last ?? nil {
+                        enc.setScissorRect(sc)
+                    }
                     sr.draw(
                         encoder: enc,
                         index: surfaceCursor,
                         pixelFormat: top.format,
-                        blend: .sourceOver,
+                        blend: top.additive ? .plusLighter : .sourceOver,
                         targetViewport: SIMD4<Float>(
                             Float(top.texture.width),
                             Float(top.texture.height),
@@ -484,9 +592,10 @@ internal final class RenderFrameEngine {
 
         func compositeLayer(
             source: MTLTexture,
-            origin: SIMD2<Float>,
+            destRect: SIMD4<Float>,
+            contentSize: SIMD2<Float>,
             scopeInst: RenderInstance,
-            additive: Bool,
+            clampSource: Bool,
             radiiOverride: SIMD4<Float>? = nil,
             clearIndex: Int
         ) {
@@ -494,18 +603,15 @@ internal final class RenderFrameEngine {
                 encodeBatch(start: clearIndex, end: clearIndex, scope: &stack[stack.count - 1])
             }
             let parent = stack[stack.count - 1]
+            let sizeMismatch = abs(contentSize.x - destRect.z) > 0.5 || abs(contentSize.y - destRect.w) > 0.5
+            let uvRect = sizeMismatch ? SIMD4<Float>(0, 0, contentSize.x, contentSize.y) : .zero
             var compositeInst = RenderInstance(
-                rect: SIMD4<Float>(
-                    origin.x,
-                    origin.y,
-                    Float(source.width),
-                    Float(source.height)
-                ),
+                rect: destRect,
                 radii: radiiOverride ?? scopeInst.radii,
                 fill: SIMD4<Float>(1, 1, 1, scopeInst.fill.w),
                 border: scopeInst.border,
-                params: SIMD4<Float>(additive ? 1.0 : 0.0, Float(KIND_LAYER), 0, 0),
-                uv: .zero,
+                params: SIMD4<Float>(clampSource ? 1.0 : 0.0, Float(KIND_LAYER), 0, 0),
+                uv: uvRect,
                 clip: scopeInst.clip,
                 fade: scopeInst.fade
             )
@@ -514,7 +620,10 @@ internal final class RenderFrameEngine {
             rpd.colorAttachments[0].loadAction = .load
             rpd.colorAttachments[0].storeAction = .store
             if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) {
-                let compPipe = pipelineFor(format: parent.format, additive: additive, springs: false)
+                if let sc = scissorStack.last ?? nil {
+                    enc.setScissorRect(sc)
+                }
+                let compPipe = pipelineFor(format: parent.format, additive: parent.additive, springs: false)
                 enc.setRenderPipelineState(compPipe)
                 var g = globals
                 g.projection = SIMD4<Float>(parent.origin.x, parent.origin.y, Float(parent.texture.width), Float(parent.texture.height))
@@ -528,6 +637,22 @@ internal final class RenderFrameEngine {
             }
         }
 
+        func findMatchingLayerEnd(from beginIndex: Int) -> Int {
+            var depth = 1
+            var matchEnd = beginIndex + 1
+            while matchEnd < instances.count {
+                let k = Float(Int(instances[matchEnd].params.y.rounded()))
+                if k == KIND_LAYER {
+                    depth += 1
+                } else if k == KIND_LAYER_END {
+                    depth -= 1
+                    if depth == 0 { break }
+                }
+                matchEnd += 1
+            }
+            return matchEnd
+        }
+
         var i = sliceRange.lowerBound
         while i < sliceRange.upperBound {
             flushSurfacesBefore(i)
@@ -539,144 +664,192 @@ internal final class RenderFrameEngine {
                 flushPendingUpTo(i)
                 batchStart = i + 1
 
-                let allowIsolation = breakers.checkingGpu(.isolation) {
-                    try ensureIsolationPipelines()
-                } ?? false
-                guard allowIsolation else {
-                    layerIsolatedStack.append(false)
-                    i += 1
-                    continue
+                let scopeIdx = layersPool.scopeIndex(forBeginInstance: i)
+                let disp: LayerDisposition? = scopeIdx.flatMap {
+                    $0 < layersPool.planner.dispositions.count ? layersPool.planner.dispositions[$0] : nil
                 }
 
-                let sigma = min(max(inst.params.z, 0.0), LayerBlurConstants.maxSigma)
-                let pad: Float = sigma > 0 ? ceilf(min(sigma * 3.0, 96.0)) : 0
-                let ox = floorf(inst.rect.x - pad)
-                let oy = floorf(inst.rect.y - pad)
-                let lw = max(1, Int(ceilf(inst.rect.x + inst.rect.z + pad) - ox))
-                let lh = max(1, Int(ceilf(inst.rect.y + inst.rect.w + pad) - oy))
-                let additive = inst.params.x >= 0.5
-                let isCached = inst.params.w >= 0.5
-                let cacheNid: UInt64? = isCached ? unpackFloat4ToU64(inst.radii) : nil
-                let cacheSig: UInt64? = isCached ? unpackFloat4ToU64(inst.uv) : nil
-
-                if let nid = cacheNid,
-                   let sig = cacheSig,
-                   let cachedTex = layersPool.lookupRetained(key: nid, signature: sig, width: lw, height: lh)
-                {
-                    var depth = 1
-                    var matchEnd = i + 1
-                    while matchEnd < instances.count {
-                        let k = Float(Int(instances[matchEnd].params.y.rounded()))
-                        if k == KIND_LAYER {
-                            depth += 1
-                        } else if k == KIND_LAYER_END {
-                            depth -= 1
-                            if depth == 0 { break }
-                        }
-                        matchEnd += 1
-                    }
-                    let useAdditive = additive && (breakers.checkingGpu(.plusLighter) {
-                        try ensurePlusLighterPipelines()
-                    } ?? false)
-                    compositeLayer(
-                        source: cachedTex,
-                        origin: SIMD2<Float>(ox, oy),
-                        scopeInst: inst,
-                        additive: useAdditive,
-                        radiiOverride: .zero,
-                        clearIndex: i
-                    )
+                switch disp {
+                case .none, .some(.skip):
+                    let matchEnd = findMatchingLayerEnd(from: i)
                     while surfaceCursor < frame.surfaces.count && Int(frame.surfaces[surfaceCursor].beforeInstance) <= matchEnd {
                         surfaceCursor += 1
                     }
                     batchStart = min(instances.count, matchEnd + 1)
                     i = matchEnd + 1
                     continue
-                }
 
-                let acquired: MTLTexture? = isCached
-                    ? layersPool.acquireRetainedTarget(device: device, width: lw, height: lh, format: .rgba16Float)
-                    : layersPool.acquireTarget(device: device, width: lw, height: lh, format: .rgba16Float)
+                case .some(.inline):
+                    if inst.clip != NO_CLIP {
+                        let top = stack[stack.count - 1]
+                        let tw = top.texture.width
+                        let th = top.texture.height
+                        var x0 = min(max(Int(floorf(inst.clip.x) - top.origin.x), 0), tw)
+                        var y0 = min(max(Int(floorf(inst.clip.y) - top.origin.y), 0), th)
+                        var x1 = min(max(Int(ceilf(inst.clip.z) - top.origin.x), 0), tw)
+                        var y1 = min(max(Int(ceilf(inst.clip.w) - top.origin.y), 0), th)
+                        if let outer = scissorStack.last ?? nil {
+                            x0 = max(x0, outer.x)
+                            y0 = max(y0, outer.y)
+                            x1 = min(x1, outer.x + outer.width)
+                            y1 = min(y1, outer.y + outer.height)
+                        }
+                        if x1 <= x0 || y1 <= y0 {
+                            let matchEnd = findMatchingLayerEnd(from: i)
+                            while surfaceCursor < frame.surfaces.count && Int(frame.surfaces[surfaceCursor].beforeInstance) <= matchEnd {
+                                surfaceCursor += 1
+                            }
+                            batchStart = min(instances.count, matchEnd + 1)
+                            i = matchEnd + 1
+                            continue
+                        }
+                        scissorStack.append(MTLScissorRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0))
+                        layerScopeStack.append(.inline(pushedScissor: true))
+                    } else {
+                        layerScopeStack.append(.inline(pushedScissor: false))
+                    }
+                    i += 1
+                    continue
 
-                if let layerTex = acquired {
-                    stack.append(
-                        TargetScope(
-                            texture: layerTex,
-                            format: .rgba16Float,
-                            origin: SIMD2<Float>(ox, oy),
-                            clearColor: MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0),
-                            cleared: false,
-                            scopeInstance: inst,
-                            blurSigma: sigma,
-                            additive: additive,
-                            isLayer: true,
-                            cacheNodeId: cacheNid,
-                            cacheSignature: cacheSig
+                case .some(.cached(let rect, let cache)):
+                    let additive = inst.params.x >= 0.5
+                    let cachedHit: (texture: MTLTexture, contentSize: SIMD2<Float>)?
+                    if let sIdx = scopeIdx, let entry = layersPool.targetEntry(at: sIdx) {
+                        cachedHit = (entry.slot.texture, entry.contentSize)
+                    } else {
+                        let cacheNid = unpackFloat4ToU64(inst.radii)
+                        let cacheSig = unpackFloat4ToU64(inst.uv)
+                        cachedHit = layersPool.claimRetained(key: cacheNid, signature: cacheSig)
+                    }
+                    if let hit = cachedHit {
+                        let matchEnd = findMatchingLayerEnd(from: i)
+                        compositeLayer(
+                            source: hit.texture,
+                            destRect: rect,
+                            contentSize: hit.contentSize,
+                            scopeInst: inst,
+                            clampSource: additive,
+                            radiiOverride: .zero,
+                            clearIndex: i
                         )
-                    )
-                    layerIsolatedStack.append(true)
-                } else {
-                    layerIsolatedStack.append(false)
+                        while surfaceCursor < frame.surfaces.count && Int(frame.surfaces[surfaceCursor].beforeInstance) <= matchEnd {
+                            surfaceCursor += 1
+                        }
+                        batchStart = min(instances.count, matchEnd + 1)
+                        i = matchEnd + 1
+                        continue
+                    }
+                    // Defensive fallback if target vanished mid-frame
+                    fallthrough
+
+                case .some(.render(let rect, let cache)):
+                    let sigma = min(max(inst.params.z, 0.0), LayerBlurConstants.maxSigma)
+                    let targetRect = rect
+                    let additive = inst.params.x >= 0.5
+                    let scopeAdditive = additive && (breakers.checkingGpu(.plusLighter) {
+                        try ensurePlusLighterPipelines()
+                    } ?? false)
+                    let committedTex = scopeIdx.flatMap { layersPool.targetEntry(at: $0)?.slot.texture }
+                    if let layerTex = committedTex {
+                        stack.append(
+                            TargetScope(
+                                texture: layerTex,
+                                format: .rgba16Float,
+                                origin: SIMD2<Float>(targetRect.x, targetRect.y),
+                                contentSize: SIMD2<Float>(targetRect.z, targetRect.w),
+                                clearColor: MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0),
+                                cleared: false,
+                                scopeInstance: inst,
+                                blurSigma: sigma,
+                                additive: scopeAdditive,
+                                isLayer: true,
+                                cacheNodeId: cache?.0,
+                                cacheSignature: cache?.1,
+                                scopeIndex: scopeIdx
+                            )
+                        )
+                        scissorStack.append(nil)
+                        layerScopeStack.append(.isolated)
+                    } else {
+                        layerScopeStack.append(.inline(pushedScissor: false))
+                    }
+                    i += 1
+                    continue
                 }
-                i += 1
-                continue
             }
 
             if kind == KIND_LAYER_END {
                 flushPendingUpTo(i)
                 batchStart = i + 1
-                let wasIsolated = layerIsolatedStack.popLast() ?? false
-                guard wasIsolated, stack.count > 1 else {
+                guard let scopeKind = layerScopeStack.popLast() else {
                     i += 1
                     continue
                 }
-                let finished = stack.removeLast()
-                guard let scopeInst = finished.scopeInstance else {
+                switch scopeKind {
+                case .inline(let pushedScissor):
+                    if pushedScissor {
+                        _ = scissorStack.popLast()
+                    }
+                    i += 1
+                    continue
+                case .isolated:
+                    _ = scissorStack.popLast()
+                    guard stack.count > 1 else {
+                        i += 1
+                        continue
+                    }
+                    let finished = stack.removeLast()
+                    guard let scopeInst = finished.scopeInstance else {
+                        i += 1
+                        continue
+                    }
+
+                    layersPool.recordExtraPass(1)
+                    var compositedSource = finished.texture
+                    if finished.blurSigma > 0.05,
+                       let blurPipeline = breakers.checkingGpu(.layerBlur, { try ensureLayerBlurPipeline() }) {
+                        if let blurred = blurPipeline.encode(
+                            device: device,
+                            commandBuffer: commandBuffer,
+                            pool: layersPool,
+                            source: finished.texture,
+                            sigma: finished.blurSigma,
+                            additive: finished.additive
+                        ) {
+                            compositedSource = blurred
+                        }
+                    }
+
+                    if let nid = finished.cacheNodeId, let sig = finished.cacheSignature {
+                        if compositedSource !== finished.texture, let sIdx = finished.scopeIndex {
+                            layersPool.detachInUse(compositedSource)
+                            layersPool.updateTargetTexture(at: sIdx, texture: compositedSource)
+                            layersPool.recycleTarget(finished.texture)
+                        }
+                        frame.residentTracker?.markResident(nodeId: nid, signature: sig)
+                    }
+
+                    let destRect = SIMD4<Float>(
+                        finished.origin.x,
+                        finished.origin.y,
+                        finished.contentSize.x,
+                        finished.contentSize.y
+                    )
+                    compositeLayer(
+                        source: compositedSource,
+                        destRect: destRect,
+                        contentSize: finished.contentSize,
+                        scopeInst: scopeInst,
+                        clampSource: scopeInst.params.x >= 0.5,
+                        radiiOverride: (finished.cacheNodeId != nil || scopeInst.params.w >= 0.5) ? .zero : scopeInst.radii,
+                        clearIndex: i
+                    )
+                    if finished.cacheNodeId == nil, compositedSource !== finished.texture {
+                        layersPool.recycleTarget(compositedSource)
+                    }
                     i += 1
                     continue
                 }
-
-                layersPool.recordExtraPass(1)
-                var compositedSource = finished.texture
-                if finished.blurSigma > 0.05,
-                   let blurPipeline = breakers.checkingGpu(.layerBlur, { try ensureLayerBlurPipeline() }) {
-                    if let blurred = blurPipeline.encode(
-                        device: device,
-                        commandBuffer: commandBuffer,
-                        pool: layersPool,
-                        source: finished.texture,
-                        sigma: finished.blurSigma,
-                        additive: finished.additive
-                    ) {
-                        compositedSource = blurred
-                    }
-                }
-
-                if let nid = finished.cacheNodeId, let sig = finished.cacheSignature {
-                    if compositedSource !== finished.texture {
-                        layersPool.detachInUse(compositedSource)
-                        layersPool.recycleTarget(finished.texture)
-                    }
-                    layersPool.storeRetained(key: nid, signature: sig, texture: compositedSource)
-                    frame.residentTracker?.markResident(nodeId: nid, signature: sig)
-                }
-
-                let useAdditive = finished.additive && (breakers.checkingGpu(.plusLighter) {
-                    try ensurePlusLighterPipelines()
-                } ?? false)
-                compositeLayer(
-                    source: compositedSource,
-                    origin: finished.origin,
-                    scopeInst: scopeInst,
-                    additive: useAdditive,
-                    radiiOverride: finished.cacheNodeId != nil ? .zero : scopeInst.radii,
-                    clearIndex: i
-                )
-                if finished.cacheNodeId == nil, compositedSource !== finished.texture {
-                    layersPool.recycleTarget(compositedSource)
-                }
-                i += 1
-                continue
             }
 
             if kind == KIND_EFFECT {
@@ -826,7 +999,7 @@ internal final class RenderFrameEngine {
 
         // Flush remaining batch & trailing surfaces on the root target
         flushPendingUpTo(sliceRange.upperBound)
-        flushSurfacesBefore(sliceRange.upperBound + 1)
+        flushSurfacesBefore(sliceRange.upperBound)
         if !frame.surfaces.isEmpty {
             surfaceRenderer?.trackSubmission(commandBuffer: commandBuffer)
         }

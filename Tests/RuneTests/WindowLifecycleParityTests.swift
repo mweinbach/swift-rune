@@ -8,41 +8,59 @@ struct WindowLifecycleParityTests {
 
     // MARK: - window/covered_tests.rs (3 tests)
 
-    @Test("window/covered_tests.rs:1 - covered window builds nothing until it uncovers")
+    @Test("window/covered_tests.rs:23 - covered window builds nothing across 100 updates and timers until it uncovers")
     func coveredWindowBuildsNothingUntilUncovered() {
         struct State: Equatable {
-            var count = 0
+            var messages = 0
+            var read = 0
             var polls = 0
         }
         final class Builds: @unchecked Sendable { var count = 0 }
         let builds = Builds()
         let rt = Runtime(
             state: State(),
-            viewport: Vec2(200, 100),
+            viewport: Vec2(200, 50),
             view: { s, _ in
                 builds.count += 1
-                return El<State>().size(200, 100).child(text("\(s.count)"))
+                return El<State>().size(200, 50).child(text("\(s.messages) \(s.read)").key("n"))
             }
         )
         rt.poll = { s, _, _ in
             s.polls += 1
-            s.count += 1
-            return true
+            let unread = s.read < s.messages
+            s.read = s.messages
+            return unread
         }
 
-        _ = rt.frame(at: 0.0)
-        #expect(builds.count == 1)
+        var t = 0.0
+        _ = rt.frame(at: t)
+        #expect(rt.elements().first(where: { $0.key == "n" })?.text == "0 0")
 
         rt.setLiveVisible(false)
-        rt.update(at: 0.01) { s, _ in s.count += 1 }
-        let invalidated = rt.hiddenWake(at: 0.02)
-        #expect(invalidated == true)
-        #expect(builds.count == 1)
-        #expect(rt.state.polls >= 1)
+        let buildsBefore = builds.count
+        let commitsBefore = rt.viewCommitCount
+        let pollsBefore = rt.state.polls
+        for _ in 1...100 {
+            rt.update(at: t) { s, tx in
+                s.messages += 1
+                tx.wakeAfter(0.010)
+            }
+            _ = rt.hiddenWake(at: t)
+            t += 0.020
+            _ = rt.hiddenWake(at: t)
+        }
+        #expect(rt.state.messages == 100 && rt.state.read == 100)
+        #expect(rt.state.polls - pollsBefore == 200)
+        #expect(rt.nextWakeDeadline == nil)
+        #expect(builds.count - buildsBefore == 0)
+        #expect(rt.viewCommitCount - commitsBefore == 0)
+        #expect(rt.isStale)
 
         rt.setLiveVisible(true)
-        _ = rt.frame(at: 0.03)
-        #expect(builds.count == 2)
+        rt.settleAll()
+        _ = rt.frame(at: t + 1.0 / 120.0)
+        #expect(builds.count - buildsBefore == 1)
+        #expect(rt.elements().first(where: { $0.key == "n" })?.text == "100 100")
     }
 
     @Test("window/covered_tests.rs:38 - covered window still hears queued input on hiddenWake")
@@ -351,5 +369,381 @@ struct WindowLifecycleParityTests {
         #expect(tf.takeQuiet() == false)
         tf.drawn()
         #expect(tf.wait(due: 0.5, now: 1.0) == 0.5)
+    }
+
+    // MARK: - window/native_tests.rs (L28)
+
+    @Test("window/native_tests.rs:3 - a new window presumes itself shown for two frames or until stopped")
+    func aNewWindowPresumesItselfShownForTwoFramesOrUntilStopped() {
+        var prime = WindowPrime.launching()
+        #expect(prime.presumes)
+        prime.spend()
+        #expect(prime.presumes)
+        prime.spend()
+        #expect(prime == .steady)
+        prime.spend()
+        #expect(prime == .steady)
+
+        var stopped = WindowPrime.launching()
+        stopped.stop()
+        #expect(!stopped.presumes)
+    }
+
+    // MARK: - window/win.rs WindowFirstFrame (L30)
+
+    @Test("window/win.rs:134 - launcher first frame holds reveal and hide cancels late completion")
+    func launcherFirstFrameHoldsRevealAndHideCancelsLateCompletion() {
+        let now = 10.0
+        var frame = WindowFirstFrame()
+        frame.prepare(now: now)
+        let r1 = frame.requestReveal(stale: false, visible: false, now: now)
+        #expect(!r1)
+        #expect(!frame.ready)
+        let c1 = frame.complete()
+        #expect(c1)
+        #expect(frame.ready && frame.deadline == nil)
+        let c2 = frame.complete()
+        #expect(!c2)
+
+        var canceled = WindowFirstFrame()
+        canceled.prepare(now: now)
+        let cr1 = canceled.requestReveal(stale: false, visible: false, now: now)
+        #expect(!cr1)
+        canceled.hide()
+        let cc1 = canceled.complete()
+        #expect(!cc1)
+        #expect(canceled.ready)
+        let cr2 = canceled.requestReveal(stale: false, visible: false, now: now)
+        #expect(cr2)
+        #expect(canceled.deadline == nil)
+    }
+
+    @Test("window/win.rs:154 - launcher stale reveal waits for an unsettled hidden frame")
+    func launcherStaleRevealWaitsForUnsettledHiddenFrame() {
+        let now = 10.0
+        var frame = WindowFirstFrame.drawnNotified()
+        let c0 = frame.complete()
+        #expect(!c0)
+        let r1 = frame.requestReveal(stale: false, visible: false, now: now)
+        #expect(r1)
+        #expect(!frame.pending && frame.settles)
+        let r2 = frame.requestReveal(stale: true, visible: false, now: now)
+        #expect(!r2)
+        #expect(frame.deadline != nil && !frame.settles)
+        frame.gpuDone()
+        let pendingBefore = frame.pending
+        let c1 = frame.complete()
+        #expect(pendingBefore && c1)
+        #expect(!frame.pending && frame.settles)
+        let r3 = frame.requestReveal(stale: true, visible: false, now: now)
+        #expect(!r3)
+        frame.hide()
+        #expect(frame.settles)
+        #expect(frame.ready && frame.deadline == nil)
+        let c2 = frame.complete()
+        #expect(!frame.pending && !c2)
+
+        let r4 = frame.requestReveal(stale: true, visible: false, now: now)
+        #expect(!r4)
+        let e1 = frame.expire()
+        #expect(e1)
+        #expect(frame.ready && !frame.pending && frame.deadline == nil)
+
+        var first = WindowFirstFrame()
+        first.prepare(now: now)
+        let fr1 = first.requestReveal(stale: true, visible: false, now: now)
+        #expect(!fr1)
+        let fe1 = first.expire()
+        #expect(!fe1 && !first.ready)
+        first.gpuDone()
+        let fp = first.pending
+        let fc1 = first.complete()
+        #expect(fp && fc1)
+    }
+
+    @Test("window/win.rs:183 - launcher refresh with no drawable retries and never reveals stale pixels")
+    func launcherRefreshWithNoDrawableRetriesAndNeverRevealsStalePixels() {
+        let now = 10.0
+        var frame = WindowFirstFrame.drawnNotified()
+        var backoff = WindowBackoff()
+        func missed(_ frame: inout WindowFirstFrame, _ backoff: inout WindowBackoff) -> Double? {
+            frame.missed()
+            _ = backoff.step(.hiddenMissed(preparing: frame.deadline != nil, now: now))
+            return backoff.deadline
+        }
+        #expect(missed(&frame, &backoff) == now + WindowPacingConstants.timeoutRetry)
+        #expect(!frame.ready)
+        #expect(missed(&frame, &backoff) == now + WindowPacingConstants.timeoutRetry * 2.0)
+        for _ in 0..<10 {
+            _ = missed(&frame, &backoff)
+        }
+        #expect(backoff.deadline == now + WindowPacingConstants.occludedMax)
+        let r1 = frame.requestReveal(stale: false, visible: false, now: now)
+        #expect(!r1)
+        #expect(frame.deadline != nil)
+        #expect(missed(&frame, &backoff) == nil)
+
+        var shown = WindowFirstFrame.drawnNotified()
+        let sr1 = shown.requestReveal(stale: true, visible: true, now: now)
+        #expect(sr1)
+        #expect(shown.deadline == nil && shown.ready)
+    }
+
+    @Test("window/win.rs:349 - on_ready runs for a window launched occluded or hidden")
+    func onReadyRunsForWindowLaunchedOccludedOrHidden() {
+        let now = 10.0
+        var shown = WindowFirstFrame.opened(at: now)
+        #expect(!shown.readyDue(at: now + 0.016))
+        shown.gpuDone()
+        let sp = shown.pending
+        let sc = shown.complete()
+        #expect(sp && !sc)
+        let st1 = shown.takeReady()
+        #expect(st1)
+        let st2 = shown.takeReady()
+        #expect(!st2 && shown.readyDeadline == nil)
+
+        var covered = WindowFirstFrame.opened(at: now)
+        covered.skipped(at: now + 0.030)
+        let cdue = covered.readyDue(at: now + 0.030)
+        let ct1 = covered.takeReady()
+        #expect(cdue && ct1)
+        #expect(!covered.ready && !covered.pending)
+        covered.skipped(at: now + 0.060)
+        #expect(covered.readyDeadline == nil)
+        covered.gpuDone()
+        let cp = covered.pending
+        let cc = covered.complete()
+        let ct2 = covered.takeReady()
+        #expect(cp && !cc && !ct2)
+
+        var hidden = WindowFirstFrame.opened(at: now)
+        #expect(hidden.readyDeadline == now + WindowPacingConstants.readyFallback)
+        #expect(!hidden.readyDue(at: now + WindowPacingConstants.readyFallback - 0.001))
+        let hdue = hidden.readyDue(at: now + WindowPacingConstants.readyFallback)
+        let ht = hidden.takeReady()
+        #expect(hdue && ht)
+    }
+
+    // MARK: - window/wake_tests.rs:131 + window/backoff_tests.rs:254 (L29)
+
+    @Test("window/wake_tests.rs:131 - a shell minimizes once exactly where dev did for every sequence")
+    func aShellMinimizesOnceExactlyWhereDevDidForEverySequence() {
+        enum Op: CaseIterable {
+            case asked, pollEnter, taken, pollReturn, lost
+        }
+        struct DevMinimize {
+            var latch = false
+            var saved: Bool? = nil
+
+            mutating func apply(_ op: Op) -> Bool {
+                switch op {
+                case .asked:
+                    latch = true
+                    return false
+                case .pollEnter:
+                    saved = latch
+                    latch = false
+                    return false
+                case .taken:
+                    let v = latch
+                    latch = false
+                    return v
+                case .pollReturn:
+                    let s = saved ?? false
+                    saved = nil
+                    latch = latch || s
+                    return false
+                case .lost:
+                    latch = false
+                    return false
+                }
+            }
+
+            var latched: Bool { latch || (saved ?? false) }
+            var field: Bool { latch }
+        }
+
+        func applyMinimize(_ state: inout WindowMinimize, _ op: Op) -> Bool {
+            let event: MinimizeEvent = switch op {
+            case .asked: .asked
+            case .pollEnter: .heldForShow
+            case .taken: .taken
+            case .pollReturn: .returned
+            case .lost: .lost
+            }
+            return WindowMinimize.step(&state, event: event).contains(.minimize)
+        }
+
+        func walk(seq: inout [Op], max: Int, cases: inout Int) {
+            cases += 1
+            var dev = DevMinimize()
+            var state = WindowMinimize.none
+            for op in seq {
+                let actual = applyMinimize(&state, op)
+                let expected = dev.apply(op)
+                #expect(actual == expected)
+                #expect(state.latched == dev.latched)
+                #expect(state.field == dev.field)
+            }
+            guard seq.count < max else { return }
+            for op in Op.allCases {
+                let ok: Bool = switch op {
+                case .pollEnter: dev.saved == nil
+                case .pollReturn: dev.saved != nil
+                default: true
+                }
+                if ok {
+                    seq.append(op)
+                    walk(seq: &seq, max: max, cases: &cases)
+                    seq.removeLast()
+                }
+            }
+        }
+
+        var seq: [Op] = []
+        var cases = 0
+        walk(seq: &seq, max: 6, cases: &cases)
+        #expect(cases == 5461)
+    }
+
+    @Test("window/backoff_tests.rs:254 - every order of events leaves the same deadline and waits")
+    func everyOrderOfEventsLeavesSameDeadlineAndWaits() {
+        enum Step {
+            case occluded, timeout, pacedTimeout, outdated, unconfigured
+            case hidden, hiddenPreparing, at, lapsed, uncovered, present
+            case timerAsk, timerStallAgain, timerDrawn, quietCleared, takeQuiet
+        }
+
+        func refRetry(_ missed: WindowMissed, paced: Bool, now: Double, occludedWait: inout Double) -> Double? {
+            switch missed {
+            case .occluded:
+                let clamped = min(max(occludedWait, WindowPacingConstants.occludedRetry), WindowPacingConstants.occludedMax)
+                let at = now + clamped
+                occludedWait = min(occludedWait * 2.0, WindowPacingConstants.occludedMax)
+                return at
+            case .timeout where paced:
+                return nil
+            case .timeout:
+                return now + WindowPacingConstants.timeoutRetry
+            case .outdated, .unconfigured:
+                return now + WindowPacingConstants.occludedRetry
+            }
+        }
+
+        struct Apart {
+            var retry: Double? = nil
+            var occluded: Double = WindowPacingConstants.occludedRetry
+            var hidden: Double = WindowPacingConstants.timeoutRetry
+            var quiet: Bool = false
+            var owed: Double? = nil
+
+            mutating func step(_ s: Step, now: Double) {
+                switch s {
+                case .occluded: retry = refRetry(.occluded, paced: false, now: now, occludedWait: &occluded)
+                case .timeout: retry = refRetry(.timeout, paced: false, now: now, occludedWait: &occluded)
+                case .pacedTimeout: retry = refRetry(.timeout, paced: true, now: now, occludedWait: &occluded)
+                case .outdated: retry = refRetry(.outdated, paced: false, now: now, occludedWait: &occluded)
+                case .unconfigured: retry = refRetry(.unconfigured, paced: false, now: now, occludedWait: &occluded)
+                case .hidden:
+                    retry = now + hidden
+                    hidden = min(hidden * 2.0, WindowPacingConstants.occludedMax)
+                case .hiddenPreparing:
+                    retry = nil
+                case .at:
+                    retry = now + WindowPacingConstants.timerFrame
+                case .lapsed:
+                    retry = nil
+                case .uncovered:
+                    retry = nil
+                    occluded = WindowPacingConstants.occludedRetry
+                case .present:
+                    retry = nil
+                    occluded = WindowPacingConstants.occludedRetry
+                    hidden = WindowPacingConstants.timeoutRetry
+                case .timerAsk:
+                    if owed == nil { owed = now }
+                    quiet = true
+                case .timerStallAgain:
+                    owed = now
+                case .timerDrawn:
+                    owed = nil
+                case .quietCleared, .takeQuiet:
+                    quiet = false
+                }
+            }
+        }
+
+        func holdsUp(_ seq: [Step]) {
+            let t0 = 100.0
+            var backoff = WindowBackoff()
+            var frame = WindowTimerFrame()
+            var apart = Apart()
+            for (k, s) in seq.enumerated() {
+                let now = t0 + 0.011 * Double(k)
+                switch s {
+                case .occluded: _ = backoff.step(.missed(.occluded, paced: false, now: now))
+                case .timeout: _ = backoff.step(.missed(.timeout, paced: false, now: now))
+                case .pacedTimeout: _ = backoff.step(.missed(.timeout, paced: true, now: now))
+                case .outdated: _ = backoff.step(.missed(.outdated, paced: false, now: now))
+                case .unconfigured: _ = backoff.step(.missed(.unconfigured, paced: false, now: now))
+                case .hidden: _ = backoff.step(.hiddenMissed(preparing: false, now: now))
+                case .hiddenPreparing: _ = backoff.step(.hiddenMissed(preparing: true, now: now))
+                case .at: _ = backoff.step(.at(now + WindowPacingConstants.timerFrame))
+                case .lapsed: _ = backoff.step(.lapsed)
+                case .uncovered: _ = backoff.step(.uncovered)
+                case .present:
+                    _ = backoff.step(.lapsed)
+                    _ = backoff.step(.presented)
+                case .timerAsk: frame.askedQuiet(now: now)
+                case .timerStallAgain: frame.stalledAgain(now: now)
+                case .timerDrawn: frame.drawn()
+                case .quietCleared: frame.noLongerQuiet()
+                case .takeQuiet: _ = frame.takeQuiet()
+                }
+                apart.step(s, now: now)
+                #expect(backoff.deadline == apart.retry)
+                #expect(backoff.waiting(now: now) == (apart.retry.map { $0 > now } ?? false))
+
+                var missed = backoff
+                _ = missed.step(.missed(.occluded, paced: false, now: now))
+                var wait = apart.occluded
+                #expect(missed.deadline == refRetry(.occluded, paced: false, now: now, occludedWait: &wait))
+
+                var hidden = backoff
+                _ = hidden.step(.hiddenMissed(preparing: false, now: now))
+                #expect(hidden.deadline == now + apart.hidden)
+
+                #expect(frame.isQuiet == apart.quiet)
+                #expect(frame.stalled(now: now) == (apart.owed.map { now >= $0 + WindowPacingConstants.timerFrameStall } ?? false))
+                #expect(frame.wait(due: now, now: now) == (apart.owed.map { $0 + WindowPacingConstants.timerFrameStall } ?? now))
+            }
+        }
+
+        func everySequence(_ alphabet: [Step], max: Int) {
+            var seq: [Step] = []
+            func walk() {
+                holdsUp(seq)
+                guard seq.count < max else { return }
+                for s in alphabet {
+                    seq.append(s)
+                    walk()
+                    seq.removeLast()
+                }
+            }
+            walk()
+        }
+
+        let all: [Step] = [
+            .occluded, .timeout, .pacedTimeout, .outdated, .unconfigured,
+            .hidden, .hiddenPreparing, .at, .lapsed, .uncovered, .present,
+            .timerAsk, .timerStallAgain, .timerDrawn, .quietCleared, .takeQuiet,
+        ]
+        everySequence(all, max: 3)
+        let common: [Step] = [
+            .occluded, .unconfigured, .hidden, .present, .uncovered,
+            .timerAsk, .timerStallAgain, .quietCleared, .takeQuiet,
+        ]
+        everySequence(common, max: 6)
     }
 }

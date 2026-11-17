@@ -129,6 +129,28 @@ public enum SelectionMath {
         return tBytes.prefix(upto).elementsEqual(nBytes.prefix(upto))
     }
 
+    /// Deterministic 64-bit fingerprint of selectable nodes strictly between `anchorIdx` and `farIdx`.
+    public static func computeBetweenHash(
+        in nodes: [SelectableNodeSnapshot],
+        anchorIdx: Int,
+        farIdx: Int
+    ) -> UInt64 {
+        let lo = min(anchorIdx, farIdx)
+        let hi = max(anchorIdx, farIdx)
+        guard hi - lo > 1 else { return 0 }
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        let prime: UInt64 = 1_099_511_628_211
+        for i in (lo + 1)..<hi where nodes[i].isSelectable {
+            hash ^= 0xFF
+            hash &*= prime
+            for byte in nodes[i].text.utf8 {
+                hash ^= UInt64(byte)
+                hash &*= prime
+            }
+        }
+        return hash == 0 ? 1 : hash
+    }
+
     /// True when paths `a` and `b` share the same keyed ancestry and unkeyed tail (`selectable.rs:211-220`),
     /// allowing keyed text to preserve its selection when an unkeyed sibling shifts index.
     public static func sameKeyedPath(_ a: String, _ b: String) -> Bool {

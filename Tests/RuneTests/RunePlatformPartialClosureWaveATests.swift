@@ -18,10 +18,11 @@ struct RunePlatformPartialClosureWaveATests {
 
     // MARK: - window/keys_tests.rs (2/2 Dvorak physical_with_fallback integration)
 
-    @Test("window/keys_tests.rs: Dvorak logical fallback key fires shortcut while physical handler sees physical code")
+    @Test("window/keys_tests.rs:13 - Dvorak logical fallback key fires shortcut over focused TextEdit without typing")
     @MainActor
     func dvorakLogicalFallbackFiresShortcut() throws {
         struct State: Equatable {
+            var field = TextEdit("")
             var physicalSeen: [PhysicalKeyCode] = []
         }
         final class Hit: @unchecked Sendable { var opened = false }
@@ -32,20 +33,26 @@ struct RunePlatformPartialClosureWaveATests {
         }
         let rt = Runtime(
             state: State(),
-            viewport: Vec2(200, 100),
-            view: { _, _ in
-                El<State>().size(200, 100)
-                    .focusable()
+            viewport: Vec2(240, 100),
+            view: { s, _ in
+                El<State>().size(240, 100)
                     .onPhysicalInput { s, ev, _ in
                         if case .key(let code, _, true, false) = ev {
                             s.physicalSeen.append(code)
                         }
                         return false
                     }
+                    .child(
+                        textInput(key: "field", \State.field)
+                            .size(200, 40)
+                            .child(text(s.field.text))
+                    )
             }
         )
         rt.shortcutRegistry = registry
         _ = rt.frame(at: 0.0)
+        rt.pointerDown(at: Vec2(20, 20), at: 0.005)
+        rt.pointerUp(at: Vec2(20, 20), at: 0.006)
         // On Dvorak, physical QWERTY key `S` produces logical `O` (Cmd+Shift+O).
         let handled = rt.physicalInput(
             PhysicalInput.key(key: .keyS, mods: Mods(shift: true, cmd: true, logo: true), pressed: true, repeat: false),
@@ -55,6 +62,7 @@ struct RunePlatformPartialClosureWaveATests {
         #expect(handled)
         #expect(rt.state.physicalSeen == [.keyS])
         #expect(hit.opened == true)
+        #expect(rt.state.field.text.isEmpty)
     }
 
     @Test("window/keys_tests.rs: Dvorak Cmd-V on physical Period pastes into focused field")

@@ -445,11 +445,23 @@ public struct LayerDrawPlan: Sendable, Equatable {
     public var drawIndices: [Int]
 }
 
+private extension Array {
+    mutating func swapRemove(_ index: Int) -> Element {
+        let lastIndex = count - 1
+        if index != lastIndex {
+            swapAt(index, lastIndex)
+        }
+        return removeLast()
+    }
+}
+
 /// Manages bounded `rgba16Float` layer render targets, 64 MiB LRU layer caching, and `#819` GPU give-back on rest.
 public final class LayersPool {
-    private struct RetainedEntry {
-        var signature: UInt64
-        var slot: LayerTextureSlot
+    public struct TargetEntry {
+        public var slot: LayerTextureSlot
+        public var contentSize: SIMD2<Float>
+        public var cache: (UInt64, UInt64)?
+        public var blurPasses: Int = 0
     }
 
     private struct WeakTracker {
@@ -462,16 +474,23 @@ public final class LayersPool {
     public var planner = LayerPlanner()
 
     public var spareCount: Int { spare.count }
-    public var retainedCount: Int { retained.count }
-    public var inUseCount: Int { inUse.count }
+    public var retainedCount: Int { retainedList.count }
+    public var inUseCount: Int {
+        managedByPlanner
+            ? targetSlots.reduce(0) { $0 + ($1 != nil ? 1 : 0) } + inUse.count
+            : inUse.count
+    }
 
-    private var retained: [UInt64: RetainedEntry] = [:]
+    private var targetSlots: [TargetEntry?] = []
+    private var retainedList: [TargetEntry] = []
     private var spare: [LayerTextureSlot] = []
     private var inUse: [LayerTextureSlot] = []
+    private var managedByPlanner: Bool = false
     private var extraInUseBytes: Int = 0
     private var trackers: [WeakTracker] = []
     private var planSlotHeld: [LayerHeld?] = []
     private var lastLayerCount: Int = 0
+    private var beginInstanceToScopeIndex: [Int: Int] = [:]
 
     private var retainedHits: UInt64 = 0
     private var retainedMisses: UInt64 = 0
@@ -495,15 +514,38 @@ public final class LayersPool {
         lastFrameExtraPasses += max(0, count)
     }
 
+    public func recordCacheMiss() {
+        retainedMisses &+= 1
+    }
+
     public func setCacheBudget(_ bytes: Int) {
         cacheBudgetBytes = max(0, bytes)
+        let targetCachedBytes = targetSlots.reduce(0) { $0 + (($1?.cache != nil) ? ($1?.slot.byteSize ?? 0) : 0) }
+        let retainedBytes = retainedList.reduce(0) { $0 + $1.slot.byteSize }
+        if targetCachedBytes + retainedBytes > cacheBudgetBytes {
+            for sIdx in targetSlots.indices {
+                if let entry = targetSlots[sIdx], entry.cache != nil {
+                    retainedList.append(entry)
+                    targetSlots[sIdx] = nil
+                }
+            }
+        }
         evictRetainedToBudget()
     }
 
-    private func updatePeakBytes() {
+    private func currentHeldBytes() -> Int {
+        let targetsTotal = targetSlots.reduce(0) { $0 + ($1?.slot.byteSize ?? 0) }
+        let retainedTotal = retainedList.reduce(0) { $0 + $1.slot.byteSize }
+        let spareTotal = spare.reduce(0) { $0 + $1.byteSize }
         let inUseTotal = inUse.reduce(0) { $0 + $1.byteSize }
-        let retainedTotal = retained.values.reduce(0) { $0 + $1.slot.byteSize }
-        let total = UInt64(max(0, inUseTotal + retainedTotal + extraInUseBytes))
+        if managedByPlanner {
+            return targetsTotal + retainedTotal + spareTotal + inUseTotal + extraInUseBytes
+        }
+        return inUseTotal + retainedTotal + extraInUseBytes
+    }
+
+    private func updatePeakBytes() {
+        let total = UInt64(max(0, currentHeldBytes()))
         if total > peakBytes {
             peakBytes = total
         }
@@ -513,119 +555,475 @@ public final class LayersPool {
         frameNumber &+= 1
         lastFrameExtraPasses = 0
         releaseInUse()
-        let retainedTotal = retained.values.reduce(0) { $0 + $1.slot.byteSize }
-        peakBytes = UInt64(max(0, retainedTotal))
+        if managedByPlanner {
+            peakBytes = 0
+            updatePeakBytes()
+        } else {
+            let retainedTotal = retainedList.reduce(0) { $0 + $1.slot.byteSize }
+            peakBytes = UInt64(max(0, retainedTotal))
+        }
     }
 
     public func endFrame() {
         releaseInUse()
     }
 
-    public func preparePlan(instances: [RenderInstance], viewport: SIMD2<Float>) {
-        // Parse KIND_LAYER..KIND_LAYER_END tree from instance stream to drive LayerPlanner state.
+    public func scopeIndex(forBeginInstance index: Int) -> Int? {
+        beginInstanceToScopeIndex[index]
+    }
+
+    public func targetEntry(at scopeIndex: Int) -> TargetEntry? {
+        guard scopeIndex >= 0 && scopeIndex < targetSlots.count else { return nil }
+        return targetSlots[scopeIndex]
+    }
+
+    public func updateTargetTexture(at scopeIndex: Int, texture: MTLTexture) {
+        guard scopeIndex >= 0 && scopeIndex < targetSlots.count, var entry = targetSlots[scopeIndex] else { return }
+        entry.slot = LayerTextureSlot(texture: texture, lastUsedFrame: frameNumber)
+        targetSlots[scopeIndex] = entry
+        updatePeakBytes()
+    }
+
+    public func syncResidentCaches(into tracker: ResidentLayerTracker?) {
+        guard let tracker else { return }
+        registerTracker(tracker)
+        var resident: [UInt64: UInt64] = [:]
+        for entry in targetSlots.compactMap({ $0 }) {
+            if let (node, sig) = entry.cache {
+                resident[node] = sig
+            }
+        }
+        for entry in retainedList {
+            if let (node, sig) = entry.cache {
+                resident[node] = sig
+            }
+        }
+        tracker.replaceAll(with: resident)
+    }
+
+    private static func turnedBounds(_ r: SIMD4<Float>, angle: Float, pivot: SIMD2<Float>) -> SIMD4<Float> {
+        let sn = sinf(angle)
+        let c = cosf(angle)
+        var out = SIMD4<Float>(.infinity, .infinity, -.infinity, -.infinity)
+        let corners: [(Float, Float)] = [(r.x, r.y), (r.z, r.y), (r.x, r.w), (r.z, r.w)]
+        for (x, y) in corners {
+            let dx = x - pivot.x
+            let dy = y - pivot.y
+            let qx = pivot.x + c * dx - sn * dy
+            let qy = pivot.y + sn * dx + c * dy
+            out.x = min(out.x, qx)
+            out.y = min(out.y, qy)
+            out.z = max(out.z, qx)
+            out.w = max(out.w, qy)
+        }
+        return out
+    }
+
+    private static func unionEdges(_ a: inout SIMD4<Float>, _ b: SIMD4<Float>) {
+        if b.z <= b.x || b.w <= b.y { return }
+        if a.z <= a.x || a.w <= a.y {
+            a = b
+            return
+        }
+        a.x = min(a.x, b.x)
+        a.y = min(a.y, b.y)
+        a.z = max(a.z, b.z)
+        a.w = max(a.w, b.w)
+    }
+
+    public func preparePlan(instances: [RenderInstance], viewport: SIMD2<Float>, isolate: Bool = true) {
+        prepareLayers(device: nil, instances: instances, viewport: viewport, isolate: isolate, tracker: nil)
+    }
+
+    public func prepareLayers(
+        device: MTLDevice?,
+        instances: [RenderInstance],
+        viewport: SIMD2<Float>,
+        isolate: Bool = true,
+        tracker: ResidentLayerTracker? = nil
+    ) {
+        // Mirrors `Renderer::prepare_layers` + `commit` + `paint_layers` (`layers.rs:336-634`).
+        managedByPlanner = true
+        registerTracker(tracker)
+        releaseInUse()
+        frameNumber &+= 1
+        lastFrameExtraPasses = 0
+        peakBytes = 0
+        updatePeakBytes()
+
+        for sIdx in targetSlots.indices {
+            if let entry = targetSlots[sIdx], entry.cache != nil {
+                retainedList.append(entry)
+                targetSlots[sIdx] = nil
+            }
+        }
+
+        beginInstanceToScopeIndex.removeAll(keepingCapacity: true)
         var scopes: [LayerPlanScope] = []
         var stack: [Int] = []
-        let win = SIMD4<Float>(0, 0, viewport.x, viewport.y)
         for (idx, inst) in instances.enumerated() {
             let kind = Float(Int(inst.params.y.rounded()))
             if kind == KIND_LAYER {
-                let sigma = min(max(inst.params.z, 0.0), LayerBlurConstants.maxSigma)
-                let pad: Float = sigma > 0 ? ceilf(min(sigma * 3.0, 96.0)) : 0
-                let ox = floorf(inst.rect.x - pad)
-                let oy = floorf(inst.rect.y - pad)
-                let x1 = ceilf(inst.rect.x + inst.rect.z + pad)
-                let y1 = ceilf(inst.rect.y + inst.rect.w + pad)
+                let parent = stack.last
+                let parentCachedHit: Bool = parent.map { pIdx in
+                    if let key = scopes[pIdx].cache {
+                        return retainedList.contains { entry in
+                            entry.cache?.0 == key.0 && entry.cache?.1 == key.1
+                        }
+                    }
+                    return false
+                } ?? false
+                let opacity = min(max(inst.fill.w, 0.0), 1.0)
+                let planned: LayerPlanPlanned
+                if opacity <= 0.0 {
+                    planned = .hidden
+                } else if let pIdx = parent {
+                    switch scopes[pIdx].planned {
+                    case .hidden: planned = .hidden
+                    case .covered: planned = .covered
+                    case .inline: planned = parentCachedHit ? .covered : .inline
+                    }
+                } else {
+                    planned = .inline
+                }
+
+                let parentFree = parent.map { scopes[$0].free } ?? false
+                let rawLimit: SIMD4<Float> = parent.map { pIdx in
+                    let p = scopes[pIdx]
+                    let grow = ceilf(3.0 * p.blur)
+                    return SIMD4<Float>(
+                        max(p.clip.x, p.limit.x) - grow,
+                        max(p.clip.y, p.limit.y) - grow,
+                        min(p.clip.z, p.limit.z) + grow,
+                        min(p.clip.w, p.limit.w) + grow
+                    )
+                } ?? NO_CLIP
+                let rawSigma = min(max(inst.params.z, 0.0), LayerBlurConstants.maxSigma)
+                let sigma: Float = rawSigma >= 0.05 ? rawSigma : 0.0
                 let isCached = inst.params.w >= 0.5
                 let cacheKey: (UInt64, UInt64)? = isCached
                     ? (unpackFloat4ToU64(inst.radii), unpackFloat4ToU64(inst.uv))
                     : nil
+                let turn: (Float, SIMD2<Float>)? = inst.border.y != 0.0
+                    ? (inst.border.y, SIMD2<Float>(inst.border.z, inst.border.w))
+                    : nil
+                let free = (turn != nil) || parentFree
+                let frame: SIMD4<Float>
+                if free {
+                    let outer: SIMD4<Float>
+                    if let pIdx = parent, parentFree {
+                        outer = scopes[pIdx].frame
+                    } else {
+                        let support = parent.map { scopes[$0].support } ?? 0.0
+                        outer = SIMD4<Float>(-support, -support, viewport.x + support, viewport.y + support)
+                    }
+                    let shown = SIMD4<Float>(
+                        max(outer.x, inst.clip.x),
+                        max(outer.y, inst.clip.y),
+                        min(outer.z, inst.clip.z),
+                        min(outer.w, inst.clip.w)
+                    )
+                    if let (angle, pivot) = turn, shown.z > shown.x, shown.w > shown.y {
+                        frame = Self.turnedBounds(shown, angle: -angle, pivot: pivot)
+                    } else {
+                        frame = shown
+                    }
+                } else {
+                    frame = .zero
+                }
+                let limit = parentFree ? NO_CLIP : rawLimit
+                let parentSupport = parent.map { scopes[$0].support } ?? 0.0
                 let additive = inst.params.x >= 0.5
                 let scope = LayerPlanScope(
                     begin: UInt32(idx),
                     end: UInt32(idx + 1),
-                    parent: stack.last,
-                    edges: SIMD4<Float>(ox, oy, x1, y1),
-                    vis: win,
+                    parent: parent,
+                    edges: SIMD4<Float>(inst.rect.x, inst.rect.y, inst.rect.x + inst.rect.z, inst.rect.y + inst.rect.w),
+                    vis: .zero,
                     clip: inst.clip,
-                    fade: .zero,
-                    opacity: inst.fill.w,
+                    limit: limit,
+                    fade: inst.fade,
+                    opacity: opacity,
                     blend: additive ? .plusLighter : .sourceOver,
                     blur: sigma,
+                    support: parentSupport + ceilf(3.0 * sigma),
                     cache: cacheKey,
-                    planned: inst.fill.w <= 0 ? .hidden : .inline
+                    planned: planned,
+                    turn: turn,
+                    free: free,
+                    frame: frame,
+                    hole: isCached ? .zero : inst.radii
                 )
                 let sIdx = scopes.count
+                beginInstanceToScopeIndex[idx] = sIdx
                 scopes.append(scope)
                 stack.append(sIdx)
             } else if kind == KIND_LAYER_END, let openIdx = stack.popLast() {
                 scopes[openIdx].end = UInt32(idx)
+                let grow = ceilf(3.0 * scopes[openIdx].blur)
+                let e = scopes[openIdx].edges
+                let vis: SIMD4<Float>
+                if scopes[openIdx].free {
+                    let fr = scopes[openIdx].frame
+                    vis = SIMD4<Float>(
+                        floorf(max(e.x - grow, fr.x - grow)),
+                        floorf(max(e.y - grow, fr.y - grow)),
+                        ceilf(min(e.z + grow, fr.z + grow)),
+                        ceilf(min(e.w + grow, fr.w + grow))
+                    )
+                } else {
+                    let l = scopes[openIdx]
+                    vis = SIMD4<Float>(
+                        floorf(max(max(e.x - grow, max(l.clip.x, l.limit.x) - grow), -l.support)),
+                        floorf(max(max(e.y - grow, max(l.clip.y, l.limit.y) - grow), -l.support)),
+                        ceilf(min(min(e.z + grow, min(l.clip.z, l.limit.z) + grow), viewport.x + l.support)),
+                        ceilf(min(min(e.w + grow, min(l.clip.w, l.limit.w) + grow), viewport.y + l.support))
+                    )
+                }
+                scopes[openIdx].vis = vis
+                if scopes[openIdx].cache != nil {
+                    if vis.z <= vis.x || vis.w <= vis.y {
+                        scopes[openIdx].planned = .hidden
+                    }
+                    scopes[openIdx].edges = SIMD4<Float>(floorf(e.x), floorf(e.y), ceilf(e.z), ceilf(e.w))
+                } else {
+                    scopes[openIdx].edges = vis
+                }
+                let edges: SIMD4<Float>
+                if let (angle, pivot) = scopes[openIdx].turn,
+                   scopes[openIdx].edges.z > scopes[openIdx].edges.x,
+                   scopes[openIdx].edges.w > scopes[openIdx].edges.y
+                {
+                    edges = Self.turnedBounds(scopes[openIdx].edges, angle: angle, pivot: pivot)
+                } else {
+                    edges = scopes[openIdx].edges
+                }
+                if let pIdx = scopes[openIdx].parent, scopes[pIdx].cache == nil {
+                    Self.unionEdges(&scopes[pIdx].edges, edges)
+                }
+            } else if let at = stack.last, scopes[at].cache == nil {
+                var rect = inst.rect
+                if kind == KIND_GLYPH && inst.params.x != 0.0 {
+                    let s = sinf(inst.params.x)
+                    let c = cosf(inst.params.x)
+                    let width = abs(c) * rect.z + abs(s) * rect.w
+                    let height = abs(s) * rect.z + abs(c) * rect.w
+                    rect = SIMD4<Float>(rect.x + (rect.z - width) * 0.5, rect.y + (rect.w - height) * 0.5, width, height)
+                }
+                let grow: Float
+                if kind == KIND_GLYPH {
+                    grow = 0.0
+                } else if kind == KIND_SHADOW {
+                    grow = inst.params.z * 3.0 + 1.0
+                } else if kind == KIND_EFFECT {
+                    grow = inst.params.z + 1.0
+                } else if kind == KIND_RECT || kind == KIND_GRADIENT || kind == KIND_DASHED || kind == KIND_RADIAL {
+                    grow = 1.0 + inst.params.z * 2.0
+                } else {
+                    grow = 1.0
+                }
+                Self.unionEdges(&scopes[at].edges, SIMD4<Float>(
+                    max(rect.x - grow, inst.clip.x),
+                    max(rect.y - grow, inst.clip.y),
+                    min(rect.x + rect.z + grow, inst.clip.z),
+                    min(rect.y + rect.w + grow, inst.clip.w)
+                ))
             }
+        }
+
+        while targetSlots.count > scopes.count {
+            if let entry = targetSlots.popLast() ?? nil {
+                var parked = entry.slot
+                parked.lastUsedFrame = entry.slot.lastUsedFrame
+                spare.append(parked)
+                trimSpare(budget: LayerPoolLimits.spareBudgetBytes)
+            }
+        }
+        while targetSlots.count < scopes.count {
+            targetSlots.append(nil)
         }
 
         if scopes.isEmpty {
+            trimRetained(activeBytes: 0)
             if lastLayerCount > 0 {
-                planner.settle(len: 0, retained: retained.count, spare: spare.count)
+                planner.settle(len: 0, retained: retainedList.count, spare: spare.count)
             }
             planSlotHeld.removeAll(keepingCapacity: true)
             lastLayerCount = 0
+            updatePeakBytes()
+            syncResidentCaches(into: tracker)
             return
         }
 
-        // Sync slot model & snapshot retained/spare metadata without allocating textures.
-        for sIdx in planSlotHeld.indices {
-            if planSlotHeld[sIdx]?.cache != nil {
+        if device != nil {
+            let slotHeld: [LayerHeld?] = targetSlots.map { entry in
+                guard let entry else { return nil }
+                return LayerHeld(
+                    size: SIMD2<UInt32>(UInt32(entry.slot.width), UInt32(entry.slot.height)),
+                    bytes: UInt64(entry.slot.byteSize),
+                    cache: entry.cache,
+                    lastUsed: entry.slot.lastUsedFrame
+                )
+            }
+            let retainedHeld: [LayerHeld] = retainedList.map { entry in
+                LayerHeld(
+                    size: SIMD2<UInt32>(UInt32(entry.slot.width), UInt32(entry.slot.height)),
+                    bytes: UInt64(entry.slot.byteSize),
+                    cache: entry.cache,
+                    lastUsed: entry.slot.lastUsedFrame
+                )
+            }
+            let spareHeld: [LayerHeld] = spare.map { slot in
+                LayerHeld(
+                    size: SIMD2<UInt32>(UInt32(slot.width), UInt32(slot.height)),
+                    bytes: UInt64(slot.byteSize),
+                    cache: nil,
+                    lastUsed: slot.lastUsedFrame
+                )
+            }
+            let snap = LayerPoolSnapshot(slots: slotHeld, retained: retainedHeld, spare: spareHeld)
+            planner.decide(
+                plan: scopes,
+                pools: snap,
+                budget: UInt64(cacheBudgetBytes),
+                isolate: isolate,
+                maxDim: UInt32(LayerPoolLimits.maxDimension)
+            )
+            for move in planner.moves {
+                switch move {
+                case .park(let slot):
+                    if slot < targetSlots.count, var entry = targetSlots[slot] {
+                        targetSlots[slot] = nil
+                        entry.cache = nil
+                        spare.append(entry.slot)
+                    }
+                case .set(let slot, let from):
+                    if slot < targetSlots.count {
+                        switch from {
+                        case .retained(let at):
+                            if at < retainedList.count {
+                                targetSlots[slot] = retainedList.swapRemove(at)
+                            }
+                        case .spare(let at):
+                            if at < spare.count {
+                                let reused = spare.swapRemove(at)
+                                targetSlots[slot] = TargetEntry(
+                                    slot: reused,
+                                    contentSize: SIMD2<Float>(Float(reused.width), Float(reused.height)),
+                                    cache: nil
+                                )
+                            }
+                        }
+                    }
+                case .create(let slot, let size):
+                    if slot < targetSlots.count, let dev = device {
+                        let w = min(max(Int(size.x), 1), LayerPoolLimits.maxDimension)
+                        let h = min(max(Int(size.y), 1), LayerPoolLimits.maxDimension)
+                        let desc = MTLTextureDescriptor.texture2DDescriptor(
+                            pixelFormat: .rgba16Float,
+                            width: w,
+                            height: h,
+                            mipmapped: false
+                        )
+                        desc.usage = [.renderTarget, .shaderRead]
+                        desc.storageMode = .private
+                        if let tex = dev.makeTexture(descriptor: desc) {
+                            tex.label = "rune.layer.target"
+                            allocations &+= 1
+                            targetSlots[slot] = TargetEntry(
+                                slot: LayerTextureSlot(texture: tex, lastUsedFrame: frameNumber),
+                                contentSize: SIMD2<Float>(Float(w), Float(h)),
+                                cache: nil
+                            )
+                        }
+                    }
+                case .unblur(let slot):
+                    if slot < targetSlots.count {
+                        targetSlots[slot]?.blurPasses = 0
+                    }
+                case .drop(let kept):
+                    switch kept {
+                    case .retained(let at):
+                        if at < retainedList.count {
+                            let dropped = retainedList.swapRemove(at)
+                            evictions &+= 1
+                            if let (nid, _) = dropped.cache {
+                                notifyEvicted(nid)
+                            }
+                        }
+                    case .spare(let at):
+                        if at < spare.count {
+                            _ = spare.swapRemove(at)
+                        }
+                    }
+                }
+                updatePeakBytes()
+            }
+            for (i, disp) in planner.dispositions.enumerated() where i < targetSlots.count {
+                switch disp {
+                case .cached(_, let cache):
+                    targetSlots[i]?.cache = cache
+                    if cache != nil {
+                        targetSlots[i]?.slot.lastUsedFrame = frameNumber
+                        retainedHits &+= 1
+                    }
+                case .render(let rect, let cache):
+                    targetSlots[i]?.cache = cache
+                    targetSlots[i]?.slot.lastUsedFrame = frameNumber
+                    targetSlots[i]?.contentSize = SIMD2<Float>(rect.z, rect.w)
+                    if cache != nil {
+                        retainedMisses &+= 1
+                    }
+                case .inline, .skip:
+                    break
+                }
+                updatePeakBytes()
+            }
+        } else {
+            for sIdx in planSlotHeld.indices where planSlotHeld[sIdx]?.cache != nil {
                 planSlotHeld[sIdx] = nil
             }
-        }
-        while planSlotHeld.count > scopes.count {
-            planSlotHeld.removeLast()
-        }
-        while planSlotHeld.count < scopes.count {
-            planSlotHeld.append(nil)
-        }
-
-        let retainedHeld: [LayerHeld] = retained.map { entry in
-            let w = UInt32(entry.value.slot.width)
-            let h = UInt32(entry.value.slot.height)
-            return LayerHeld(
-                size: SIMD2<UInt32>(w, h),
-                bytes: UInt64(entry.value.slot.byteSize),
-                cache: (entry.key, entry.value.signature),
-                lastUsed: entry.value.slot.lastUsedFrame
+            while planSlotHeld.count > scopes.count { planSlotHeld.removeLast() }
+            while planSlotHeld.count < scopes.count { planSlotHeld.append(nil) }
+            let retainedHeld = retainedList.map {
+                LayerHeld(
+                    size: SIMD2<UInt32>(UInt32($0.slot.width), UInt32($0.slot.height)),
+                    bytes: UInt64($0.slot.byteSize),
+                    cache: $0.cache,
+                    lastUsed: $0.slot.lastUsedFrame
+                )
+            }
+            let spareHeld = spare.map {
+                LayerHeld(
+                    size: SIMD2<UInt32>(UInt32($0.width), UInt32($0.height)),
+                    bytes: UInt64($0.byteSize),
+                    cache: nil,
+                    lastUsed: $0.lastUsedFrame
+                )
+            }
+            planner.decide(
+                plan: scopes,
+                pools: LayerPoolSnapshot(slots: planSlotHeld, retained: retainedHeld, spare: spareHeld),
+                budget: UInt64(cacheBudgetBytes),
+                isolate: isolate,
+                maxDim: UInt32(LayerPoolLimits.maxDimension)
             )
-        }
-        let spareHeld: [LayerHeld] = spare.map { slot in
-            LayerHeld(
-                size: SIMD2<UInt32>(UInt32(slot.width), UInt32(slot.height)),
-                bytes: UInt64(slot.byteSize),
-                cache: nil,
-                lastUsed: slot.lastUsedFrame
-            )
-        }
-        let snap = LayerPoolSnapshot(slots: planSlotHeld, retained: retainedHeld, spare: spareHeld)
-        planner.decide(
-            plan: scopes,
-            pools: snap,
-            budget: UInt64(cacheBudgetBytes),
-            isolate: true,
-            maxDim: UInt32(LayerPoolLimits.maxDimension)
-        )
-        for (i, disp) in planner.dispositions.enumerated() {
-            switch disp {
-            case .render(let r, let c):
-                let b = LayerPlannerConstants.bucketOf(r).bucket
-                planSlotHeld[i] = LayerHeld(size: b, cache: c, lastUsed: frameNumber)
-            case .cached(let r, let c):
-                let b = LayerPlannerConstants.bucketOf(r).bucket
-                planSlotHeld[i] = LayerHeld(size: b, cache: c, lastUsed: frameNumber)
-            case .inline, .skip:
-                planSlotHeld[i] = nil
+            for (i, disp) in planner.dispositions.enumerated() {
+                switch disp {
+                case .render(let r, let c), .cached(let r, let c):
+                    planSlotHeld[i] = LayerHeld(size: LayerPlannerConstants.bucketOf(r).bucket, cache: c, lastUsed: frameNumber)
+                case .inline, .skip:
+                    planSlotHeld[i] = nil
+                }
             }
         }
+
         if scopes.count < lastLayerCount {
-            planner.settle(len: scopes.count, retained: retained.count, spare: spare.count)
+            planner.settle(len: scopes.count, retained: retainedList.count, spare: spare.count)
         }
         lastLayerCount = scopes.count
+        updatePeakBytes()
+        syncResidentCaches(into: tracker)
     }
 
     public func releaseInUse() {
@@ -644,11 +1042,27 @@ public final class LayersPool {
         width: Int,
         height: Int,
         format: MTLPixelFormat = .rgba16Float,
-        label: String = "rune.layer.target"
+        label: String = "rune.layer.target",
+        bucketed: Bool = true
     ) -> MTLTexture? {
-        let w = min(max(width, 1), LayerPoolLimits.maxDimension)
-        let h = min(max(height, 1), LayerPoolLimits.maxDimension)
-        if let idx = spare.firstIndex(where: { $0.width == w && $0.height == h && $0.texture.pixelFormat == format }) {
+        let rawW = min(max(width, 1), LayerPoolLimits.maxDimension)
+        let rawH = min(max(height, 1), LayerPoolLimits.maxDimension)
+        let w = bucketed ? min(((rawW + 63) / 64) * 64, LayerPoolLimits.maxDimension) : rawW
+        let h = bucketed ? min(((rawH + 63) / 64) * 64, LayerPoolLimits.maxDimension) : rawH
+        let spareMatch: (LayerTextureSlot) -> Bool
+        if bucketed {
+            let maxArea = 2 * max(rawW, 64) * max(rawH, 64)
+            spareMatch = { slot in
+                slot.texture.pixelFormat == format &&
+                slot.width >= rawW && slot.height >= rawH &&
+                slot.width * slot.height <= maxArea
+            }
+        } else {
+            spareMatch = { slot in
+                slot.width == w && slot.height == h && slot.texture.pixelFormat == format
+            }
+        }
+        if let idx = spare.firstIndex(where: spareMatch) {
             var slot = spare.remove(at: idx)
             slot.lastUsedFrame = frameNumber
             inUse.append(slot)
@@ -677,16 +1091,32 @@ public final class LayersPool {
         device: MTLDevice,
         width: Int,
         height: Int,
-        format: MTLPixelFormat = .rgba16Float
+        format: MTLPixelFormat = .rgba16Float,
+        bucketed: Bool = true
     ) -> MTLTexture? {
-        let w = min(max(width, 1), LayerPoolLimits.maxDimension)
-        let h = min(max(height, 1), LayerPoolLimits.maxDimension)
-        if let idx = spare.firstIndex(where: { $0.width == w && $0.height == h && $0.texture.pixelFormat == format }) {
-            let tex = spare.remove(at: idx).texture
-            extraInUseBytes += w * h * 8
+        let rawW = min(max(width, 1), LayerPoolLimits.maxDimension)
+        let rawH = min(max(height, 1), LayerPoolLimits.maxDimension)
+        let w = bucketed ? min(((rawW + 63) / 64) * 64, LayerPoolLimits.maxDimension) : rawW
+        let h = bucketed ? min(((rawH + 63) / 64) * 64, LayerPoolLimits.maxDimension) : rawH
+        let spareMatch: (LayerTextureSlot) -> Bool
+        if bucketed {
+            let maxArea = 2 * max(rawW, 64) * max(rawH, 64)
+            spareMatch = { slot in
+                slot.texture.pixelFormat == format &&
+                slot.width >= rawW && slot.height >= rawH &&
+                slot.width * slot.height <= maxArea
+            }
+        } else {
+            spareMatch = { slot in
+                slot.width == w && slot.height == h && slot.texture.pixelFormat == format
+            }
+        }
+        if let idx = spare.firstIndex(where: spareMatch) {
+            let slot = spare.remove(at: idx)
+            extraInUseBytes += slot.byteSize
             updatePeakBytes()
-            extraInUseBytes -= w * h * 8
-            return tex
+            extraInUseBytes -= slot.byteSize
+            return slot.texture
         }
         let desc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: format,
@@ -720,27 +1150,49 @@ public final class LayersPool {
     }
 
     public func lookupRetained(key: UInt64, signature: UInt64? = nil, width: Int, height: Int) -> MTLTexture? {
-        guard var entry = retained[key] else {
+        guard let idx = retainedList.firstIndex(where: { $0.cache?.0 == key }) else {
             retainedMisses &+= 1
             return nil
         }
         let w = min(max(width, 1), LayerPoolLimits.maxDimension)
         let h = min(max(height, 1), LayerPoolLimits.maxDimension)
-        if let sig = signature, entry.signature != sig {
+        if let sig = signature, retainedList[idx].cache?.1 != sig {
             retainedMisses &+= 1
             return nil
         }
-        guard entry.slot.width == w && entry.slot.height == h else {
+        guard retainedList[idx].slot.width >= w && retainedList[idx].slot.height >= h else {
             retainedMisses &+= 1
             return nil
         }
-        entry.slot.lastUsedFrame = frameNumber
-        retained[key] = entry
+        retainedList[idx].slot.lastUsedFrame = frameNumber
         retainedHits &+= 1
-        return entry.slot.texture
+        return retainedList[idx].slot.texture
     }
 
-    public func storeRetained(key: UInt64, signature: UInt64 = 0, texture: MTLTexture) {
+    public func claimRetained(key: UInt64, signature: UInt64) -> (texture: MTLTexture, contentSize: SIMD2<Float>)? {
+        if let idx = targetSlots.firstIndex(where: { $0?.cache?.0 == key && $0?.cache?.1 == signature }),
+           var entry = targetSlots[idx] {
+            entry.slot.lastUsedFrame = frameNumber
+            targetSlots[idx] = entry
+            retainedHits &+= 1
+            return (entry.slot.texture, entry.contentSize)
+        }
+        guard let idx = retainedList.firstIndex(where: { $0.cache?.0 == key && $0.cache?.1 == signature }) else {
+            retainedMisses &+= 1
+            return nil
+        }
+        retainedList[idx].slot.lastUsedFrame = frameNumber
+        retainedHits &+= 1
+        return (retainedList[idx].slot.texture, retainedList[idx].contentSize)
+    }
+
+    public func storeRetained(
+        key: UInt64,
+        signature: UInt64 = 0,
+        texture: MTLTexture,
+        contentWidth: Int? = nil,
+        contentHeight: Int? = nil
+    ) {
         let slot = LayerTextureSlot(texture: texture, lastUsedFrame: frameNumber)
         if slot.byteSize > cacheBudgetBytes {
             spare.append(slot)
@@ -748,10 +1200,19 @@ public final class LayersPool {
             notifyEvicted(key)
             return
         }
-        if let previous = retained.removeValue(forKey: key) {
+        if let prevIdx = retainedList.firstIndex(where: { $0.cache?.0 == key }) {
+            let previous = retainedList.swapRemove(prevIdx)
             spare.append(previous.slot)
         }
-        retained[key] = RetainedEntry(signature: signature, slot: slot)
+        let cw = Float(contentWidth ?? texture.width)
+        let ch = Float(contentHeight ?? texture.height)
+        retainedList.append(
+            TargetEntry(
+                slot: slot,
+                contentSize: SIMD2<Float>(cw, ch),
+                cache: (key, signature)
+            )
+        )
         evictRetainedToBudget()
     }
 
@@ -763,27 +1224,52 @@ public final class LayersPool {
         releaseInUse()
         if all {
             spare.removeAll()
-            retained.removeAll()
+            retainedList.removeAll()
+            targetSlots.removeAll()
             notifyCleared()
             return
         }
         trimSpare(budget: LayerPoolLimits.restingSpareBudgetBytes)
         if !residentCaches {
-            retained.removeAll()
+            for entry in retainedList {
+                if let (nid, _) = entry.cache {
+                    notifyEvicted(nid)
+                }
+            }
+            retainedList.removeAll()
             notifyCleared()
         }
     }
 
     public func stats() -> LayerStats {
-        let cached = retained.values.reduce(0) { $0 + $1.slot.byteSize }
+        if managedByPlanner {
+            let activeCount = targetSlots.reduce(0) { $0 + ($1 != nil ? 1 : 0) }
+            let activeBytes = targetSlots.reduce(0) { $0 + ($1?.slot.byteSize ?? 0) }
+            let retainedBytes = retainedList.reduce(0) { $0 + $1.slot.byteSize }
+            let inUseBytes = inUse.reduce(0) { $0 + $1.byteSize }
+            let liveCachedCount = targetSlots.reduce(0) { $0 + (($1?.cache != nil) ? 1 : 0) }
+            let liveCachedBytes = targetSlots.reduce(0) { $0 + (($1?.cache != nil) ? ($1?.slot.byteSize ?? 0) : 0) }
+            return LayerStats(
+                targets: activeCount + retainedList.count + inUse.count,
+                bytes: UInt64(max(0, activeBytes + retainedBytes + inUseBytes)),
+                extraPasses: lastFrameExtraPasses,
+                allocations: allocations,
+                cachedLayers: liveCachedCount + retainedList.count,
+                cachedBytes: UInt64(max(0, liveCachedBytes + retainedBytes)),
+                hits: retainedHits,
+                misses: retainedMisses,
+                evictions: evictions
+            )
+        }
+        let cached = retainedList.reduce(0) { $0 + $1.slot.byteSize }
         let spareBytes = spare.reduce(0) { $0 + $1.byteSize }
         let live = inUse.reduce(0) { $0 + $1.byteSize } + spareBytes
         return LayerStats(
-            targets: inUse.count + spare.count + retained.count,
+            targets: inUse.count + spare.count + retainedList.count,
             bytes: UInt64(max(0, live + cached)),
             extraPasses: lastFrameExtraPasses,
             allocations: allocations,
-            cachedLayers: retained.count,
+            cachedLayers: retainedList.count,
             cachedBytes: UInt64(max(0, cached)),
             hits: retainedHits,
             misses: retainedMisses,
@@ -791,21 +1277,26 @@ public final class LayersPool {
         )
     }
 
-    private func evictRetainedToBudget() {
-        var total = retained.values.reduce(0) { $0 + $1.slot.byteSize }
-        while total > cacheBudgetBytes,
-              let oldest = retained.min(by: { $0.value.slot.lastUsedFrame < $1.value.slot.lastUsedFrame })
-        {
-            if let removed = retained.removeValue(forKey: oldest.key) {
-                total -= removed.slot.byteSize
-                spare.append(removed.slot)
-                evictions &+= 1
-                notifyEvicted(oldest.key)
-            } else {
-                break
+    private func trimRetained(activeBytes: Int) {
+        let available = max(0, cacheBudgetBytes - max(0, activeBytes))
+        var total = retainedList.reduce(0) { $0 + $1.slot.byteSize }
+        while total > available, !retainedList.isEmpty {
+            let oldestIdx = retainedList.indices.min {
+                retainedList[$0].slot.lastUsedFrame < retainedList[$1].slot.lastUsedFrame
+            }!
+            let removed = retainedList.swapRemove(oldestIdx)
+            total -= removed.slot.byteSize
+            spare.append(removed.slot)
+            evictions &+= 1
+            if let (nid, _) = removed.cache {
+                notifyEvicted(nid)
             }
         }
         trimSpare(budget: LayerPoolLimits.spareBudgetBytes)
+    }
+
+    private func evictRetainedToBudget() {
+        trimRetained(activeBytes: 0)
     }
 
     private func notifyEvicted(_ key: UInt64) {
@@ -821,7 +1312,10 @@ public final class LayersPool {
     private func trimSpare(budget: Int) {
         var total = spare.reduce(0) { $0 + $1.byteSize }
         while total > budget && !spare.isEmpty {
-            let victim = spare.removeFirst()
+            let oldestIdx = spare.indices.min {
+                spare[$0].lastUsedFrame < spare[$1].lastUsedFrame
+            }!
+            let victim = spare.swapRemove(oldestIdx)
             total -= victim.byteSize
         }
     }
@@ -975,7 +1469,7 @@ public final class LayerBlurPipeline {
         var reducedTex: MTLTexture?
         var hInput: MTLTexture = source
         if isReduced {
-            guard let reduced = pool.acquireTarget(device: device, width: rw, height: rh, format: source.pixelFormat, label: "rune.lblur.prefilter") else {
+            guard let reduced = pool.acquireTarget(device: device, width: rw, height: rh, format: source.pixelFormat, label: "rune.lblur.prefilter", bucketed: false) else {
                 return nil
             }
             uniforms[0] = SIMD4<Float>(Float(w), Float(h), 2, 0)
@@ -991,7 +1485,7 @@ public final class LayerBlurPipeline {
             hInput = reduced
         }
 
-        guard let ping = pool.acquireTarget(device: device, width: rw, height: rh, format: source.pixelFormat, label: "rune.lblur.ping") else {
+        guard let ping = pool.acquireTarget(device: device, width: rw, height: rh, format: source.pixelFormat, label: "rune.lblur.ping", bucketed: false) else {
             if let r = reducedTex { pool.recycleTarget(r) }
             return nil
         }
@@ -1014,7 +1508,7 @@ public final class LayerBlurPipeline {
         } else if canWriteSource {
             pong = source
         } else {
-            guard let allocPong = pool.acquireTarget(device: device, width: rw, height: rh, format: source.pixelFormat, label: "rune.lblur.pong") else {
+            guard let allocPong = pool.acquireTarget(device: device, width: rw, height: rh, format: source.pixelFormat, label: "rune.lblur.pong", bucketed: false) else {
                 pool.recycleTarget(ping)
                 return nil
             }
@@ -1038,7 +1532,7 @@ public final class LayerBlurPipeline {
         if canWriteSource {
             finalTex = source
         } else {
-            guard let allocFinal = pool.acquireTarget(device: device, width: w, height: h, format: source.pixelFormat, label: "rune.lblur.final") else {
+            guard let allocFinal = pool.acquireTarget(device: device, width: w, height: h, format: source.pixelFormat, label: "rune.lblur.final", bucketed: false) else {
                 pool.recycleTarget(pong)
                 return nil
             }
@@ -1428,8 +1922,11 @@ public final class AtlasUploader {
     public private(set) var glyphSize: SIMD2<Int> = .zero
 
     public private(set) var imageTexture: MTLTexture?
+    public private(set) var imageTextures: [MTLTexture] = []
     public private(set) var imageRevision: UInt64 = 0
     public private(set) var imageSize: SIMD2<Int> = .zero
+    private var imagePageSizes: [SIMD2<Int>] = []
+    private var imagePageRevisions: [UInt64] = []
 
     public private(set) var imageBatches: [(Range<Int>, RenderBatchBind)] = []
     public private(set) var effects: [(Int, RenderInstance)] = []
@@ -1565,6 +2062,96 @@ public final class AtlasUploader {
             imageRevision = revision
         }
         return tex
+    }
+
+    public func syncImagePages(
+        device: MTLDevice,
+        pages: [RGBA8Atlas],
+        fallback: RGBA8Atlas,
+        revision: UInt64 = 1
+    ) -> [MTLTexture] {
+        guard !pages.isEmpty else {
+            if let tex = syncImageAtlas(device: device, atlas: fallback, revision: revision) {
+                imageTextures = [tex]
+                return [tex]
+            }
+            imageTextures.removeAll(keepingCapacity: true)
+            return []
+        }
+        var out: [MTLTexture] = []
+        out.reserveCapacity(pages.count)
+        if imagePageSizes.count != pages.count {
+            imagePageSizes = Array(repeating: .zero, count: pages.count)
+            imagePageRevisions = Array(repeating: 0, count: pages.count)
+        }
+        var rebuiltTextures = imageTextures
+        if rebuiltTextures.count > pages.count {
+            rebuiltTextures.removeSubrange(pages.count..<rebuiltTextures.count)
+        }
+        for (idx, page) in pages.enumerated() {
+            if idx == 0 {
+                if let tex = syncImageAtlas(device: device, atlas: page, revision: revision) {
+                    if rebuiltTextures.isEmpty {
+                        rebuiltTextures.append(tex)
+                    } else {
+                        rebuiltTextures[0] = tex
+                    }
+                    imagePageSizes[0] = SIMD2<Int>(page.width, page.height)
+                    imagePageRevisions[0] = revision
+                    out.append(tex)
+                }
+                continue
+            }
+            let existing: MTLTexture? = idx < rebuiltTextures.count ? rebuiltTextures[idx] : nil
+            let needsCreate = existing == nil || imagePageSizes[idx].x != page.width || imagePageSizes[idx].y != page.height
+            let tex: MTLTexture?
+            if needsCreate {
+                let desc = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: .rgba8Unorm_srgb,
+                    width: max(1, page.width),
+                    height: max(1, page.height),
+                    mipmapped: false
+                )
+                desc.usage = [.shaderRead]
+                #if os(macOS)
+                desc.storageMode = .managed
+                #else
+                desc.storageMode = .shared
+                #endif
+                let created = device.makeTexture(descriptor: desc)
+                created?.label = "rune.atlas.images.\(idx)"
+                tex = created
+                if let created {
+                    if idx < rebuiltTextures.count {
+                        rebuiltTextures[idx] = created
+                    } else {
+                        rebuiltTextures.append(created)
+                    }
+                }
+                imagePageSizes[idx] = SIMD2<Int>(page.width, page.height)
+                imagePageRevisions[idx] = 0
+            } else {
+                tex = existing
+            }
+            if let tex {
+                if imagePageRevisions[idx] != revision && !page.texels.isEmpty {
+                    page.texels.withUnsafeBytes { raw in
+                        if let base = raw.baseAddress {
+                            tex.replace(
+                                region: MTLRegionMake2D(0, 0, page.width, page.height),
+                                mipmapLevel: 0,
+                                withBytes: base,
+                                bytesPerRow: page.width * 4
+                            )
+                        }
+                    }
+                    imagePageRevisions[idx] = revision
+                }
+                out.append(tex)
+            }
+        }
+        imageTextures = out
+        return out
     }
 
     /// Shrinks oversized staging buffers back down (`#819` GPU give-back).

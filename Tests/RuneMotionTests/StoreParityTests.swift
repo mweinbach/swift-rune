@@ -942,9 +942,10 @@ struct StoreParityTests {
         seqTrack.setEnabled(false, at: 1.0)
         #expect(!seqTrack.isActive(at: 10.0))
         seqTrack.setEnabled(true, at: 2.0)
-        #expect(seqTrack.pendingStart(at: 2.0) == 2.2)
+        #expect(seqTrack.pendingStart(at: 2.0) == nil)
         #expect(!seqTrack.isActive(at: 2.1))
-        #expect(seqTrack.pose(at: 2.1, reduced: false)?.opacity == 0.0)
+        #expect(seqTrack.pose(at: 2.1, reduced: false)?.opacity == 1.0)
+        #expect(seqTrack.pose(at: 0.3, reduced: false)?.opacity == 1.0)
 
         // delay_has_one_wake_and_no_active_frames (looping.rs:260-268)
         let wakeTrack = LoopTrack(spec: LoopSpec.opacity(period: 1.0, delay: 2.0, low: 0.0, high: 1.0), now: 3.0)
@@ -1089,5 +1090,69 @@ struct StoreParityTests {
         var reducedStore = AnimationStore()
         let held = pulse(&reducedStore, reduced: true)
         #expect(held.allSatisfy { $0 == 0 })
+    }
+
+    @Test("Cooled finite sequence resumes from phase instead of restarting (r63)")
+    func cooledFiniteSequenceResumesAndLoopingKeepsPhase() {
+        let beats = [Beat(at: 0.0, opacity: 0.0), Beat(at: 0.5, opacity: 1.0)]
+        let seqSpec = LoopSpec.sequence(MotionSequence(frames: beats, delay: 0.2))
+
+        // a_sequence_that_ran_out_while_cooled_rests_instead_of_replaying
+        var ranOut = LoopTrack(spec: seqSpec, now: 0.0)
+        #expect(ranOut.isActive(at: 0.5))
+        ranOut.setEnabled(false, at: 0.5)
+        #expect(!ranOut.isActive(at: 0.5))
+        ranOut.setEnabled(true, at: 2.0)
+        #expect(ranOut.pendingStart(at: 2.0) == nil)
+        #expect(!ranOut.isActive(at: 2.1))
+        #expect(ranOut.pose(at: 2.1, reduced: false)?.opacity == 1.0)
+
+        // enabling_a_cooled_sequence_carries_on_from_its_presented_phase
+        let linearBeats = [
+            Beat(at: 0.0, opacity: 0.0, easing: .linear),
+            Beat(at: 1.0, opacity: 1.0, easing: .linear),
+        ]
+        var mid = LoopTrack(spec: LoopSpec.sequence(MotionSequence(frames: linearBeats, delay: 0.2)), now: 0.0)
+        let cooled = mid.phase(at: 0.7)
+        #expect(abs(cooled - 0.5) < 1e-9)
+        mid.setEnabled(false, at: 0.7)
+        #expect(!mid.isActive(at: 0.7))
+        mid.setEnabled(true, at: 0.9)
+        #expect(mid.isActive(at: 0.9))
+        #expect(mid.pendingStart(at: 0.9) == nil)
+        #expect(abs(mid.phase(at: 0.9) - 0.7) < 1e-9)
+        let poseOpacity = mid.pose(at: 0.9, reduced: false)?.opacity ?? -1.0
+        #expect(abs(poseOpacity - 0.7) < 1e-5)
+        #expect(!mid.isActive(at: 1.3))
+        #expect(mid.pose(at: 1.3, reduced: false)?.opacity == 1.0)
+
+        // enabling_leaves_a_looping_tracks_phase_alone
+        let specs: [LoopSpec] = [
+            .opacity(period: 1.0, delay: 0.0, low: 0.2, high: 0.8),
+            .rotation(period: 0.9),
+            .slide(period: 2.0, from: Vec2(-1.0, 0.0), to: Vec2(3.0, 0.0)),
+        ]
+        for spec in specs {
+            var cooledTrack = LoopTrack(spec: spec, now: 0.0)
+            let plainTrack = LoopTrack(spec: spec, now: 0.0)
+            cooledTrack.setEnabled(false, at: 0.4)
+            #expect(cooledTrack.isActive(at: 0.41))
+            cooledTrack.setEnabled(true, at: 1.1)
+            for i in 0..<50 {
+                let now = 1.1 + Double(i) * 0.037
+                #expect(cooledTrack.phase(at: now) == plainTrack.phase(at: now))
+                #expect(cooledTrack.isActive(at: now) == plainTrack.isActive(at: now))
+                #expect(cooledTrack.pendingStart(at: now) == plainTrack.pendingStart(at: now))
+            }
+            #expect(abs(cooledTrack.sample(at: 5.0, reduced: false) - plainTrack.sample(at: 5.0, reduced: false)) < 1e-6)
+            switch (cooledTrack.offset(at: 5.0, reduced: false), plainTrack.offset(at: 5.0, reduced: false)) {
+            case let (warmed?, never?):
+                #expect(abs(warmed.x - never.x) < 1e-6)
+            case (nil, nil):
+                break
+            default:
+                Issue.record("the same spec asks for the same offsets")
+            }
+        }
     }
 }

@@ -521,9 +521,49 @@ struct RuneLuauParityTests {
 
     @Test("propNames, view:Memo key/version validation & rekey, syntax path prefix, and math/bit32/utf8 additions")
     func propNamesViewMemoAndStdlibAdditions() throws {
-        #expect(propNames().count == 75)
+        #expect(propNames().count == 76)
         #expect(propNames().contains("fadeOut"))
         #expect(propNames().contains("onVisibleRows"))
+        #expect(propNames().contains("onMiddlePress"))
+
+        // onMiddlePress dispatches middle-press event with mods without firing onPress
+        let midScript = Script(
+            name: "mid_press_runtime",
+            sources: Sources.single("""
+                local ui = require("@rune/ui")
+                local events = {}
+                return {
+                    render = function()
+                        return ui.col({ w = 200, h = 100 }, {
+                            ui.box({
+                                key = "mid-box",
+                                w = 120,
+                                h = 40,
+                                onPress = function(ev) table.insert(events, ev) end,
+                                onMiddlePress = function(ev) table.insert(events, ev) end,
+                            })
+                        })
+                    end,
+                    events = function() return events end,
+                }
+                """)
+        )
+        let midRt = Runtime<LuauTestState>(state: LuauTestState(), viewport: Vec2(200, 100)) { _, cx in
+            midScript.view(cx)
+        }
+        _ = midRt.frame(at: 0.0)
+        let boxRect = try #require(midRt.element(byKey: "mid-box")).rect
+        let boxPt = Vec2(boxRect[0] + 20, boxRect[1] + 20)
+        midRt.pointerDown(at: boxPt, button: .middle, mods: Mods(shift: true, alt: true), at: 0.02)
+        midRt.pointerUp(at: boxPt, button: .middle, mods: Mods(shift: true, alt: true), at: 0.03)
+        _ = midRt.frame(at: 0.04)
+        let midEvents = dataList(try midScript.query("events"))
+        #expect(midEvents.count == 1)
+        #expect(midEvents[0].get("kind").asString == "middle-press")
+        #expect(midEvents[0].get("key").asString == "mid-box")
+        #expect(midEvents[0].get("shift").asBool == true)
+        #expect(midEvents[0].get("alt").asBool == true)
+        #expect(midEvents[0].get("mod").asBool == false)
 
         // Sources syntax errors include the module path prefix
         let badSources = Sources().with("views/broken.luau", "local x = (")

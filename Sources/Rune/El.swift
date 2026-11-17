@@ -72,6 +72,13 @@ public struct PointerEvent: Sendable, Equatable {
     }
 }
 
+/// Phase of a pointer drag gesture (`crates/rune/src/el/mod.rs` `Phase`).
+public enum DragPhase: String, Sendable, Equatable, Hashable {
+    case down
+    case move
+    case up
+}
+
 /// Drag event payload delivered to `onDrag` (`rune::Drag`).
 public struct Drag: Sendable, Equatable {
     /// Current pointer position in window points.
@@ -87,6 +94,8 @@ public struct Drag: Sendable, Equatable {
     /// Click count on press (`1` = normal drag, `2` = double-click-and-drag word selection).
     public var clicks: Int
     public var mods: Mods
+    /// Phase of this drag callback (`.down`, `.move`, `.up`).
+    public var phase: DragPhase
     /// Whether the gesture ended cancelled (Escape / focus loss / taken away, `Drag::cancelled`).
     public var isCancelled: Bool
     /// Pointer in desktop pixels when hosted in a native window (`Drag::screen_point`).
@@ -100,6 +109,7 @@ public struct Drag: Sendable, Equatable {
         size: Vec2,
         clicks: Int = 1,
         mods: Mods = .none,
+        phase: DragPhase = .move,
         isCancelled: Bool = false,
         screen: (Int32, Int32)? = nil
     ) {
@@ -110,6 +120,7 @@ public struct Drag: Sendable, Equatable {
         self.size = size
         self.clicks = clicks
         self.mods = mods
+        self.phase = phase
         self.isCancelled = isCancelled
         self.screen = screen
     }
@@ -122,6 +133,7 @@ public struct Drag: Sendable, Equatable {
             && lhs.size == rhs.size
             && lhs.clicks == rhs.clicks
             && lhs.mods == rhs.mods
+            && lhs.phase == rhs.phase
             && lhs.isCancelled == rhs.isCancelled
             && lhs.screen?.0 == rhs.screen?.0
             && lhs.screen?.1 == rhs.screen?.1
@@ -150,19 +162,28 @@ public struct WheelEvent: Sendable, Equatable {
     public var precise: Bool
     public var phase: GesturePhase
     public var mods: Mods
+    public var momentum: Bool
+    public var x: Float
+    public var y: Float
 
     public init(
         dx: Float = 0,
         dy: Float = 0,
         precise: Bool = true,
         phase: GesturePhase = .changed,
-        mods: Mods = .none
+        mods: Mods = .none,
+        momentum: Bool = false,
+        x: Float = 0,
+        y: Float = 0
     ) {
         self.dx = dx
         self.dy = dy
         self.precise = precise
         self.phase = phase
         self.mods = mods
+        self.momentum = momentum
+        self.x = x
+        self.y = y
     }
 }
 
@@ -200,6 +221,14 @@ public struct RotateEvent: Sendable, Equatable {
     }
 }
 
+internal struct TxPickRead {
+    let within: String?
+    let x: Float
+    let y: Float
+    let pick: Pick
+    let invoke: (_ stateBox: inout Any, _ picked: Picked?, _ tx: inout Tx) -> Bool
+}
+
 /// Transaction handle passed into every event handler (`rune::Tx`).
 public struct Tx {
     public internal(set) var liveOnlyRequested: Bool = false
@@ -211,7 +240,20 @@ public struct Tx {
     public internal(set) var colorMotionSpring: Spring? = nil
     public internal(set) var clock: Double = 0.0
     public internal(set) var button: PointerButton = .primary
+    public internal(set) var mods: Mods = .none
+    public internal(set) var physicalKeyCode: PhysicalKeyCode? = nil
+    public internal(set) var isKeyRepeat: Bool = false
+    public internal(set) var focusedElementKey: String? = nil
     public internal(set) var pasteRequested: Bool = false
+
+    /// Physical key that produced this key event, if any (`Tx::physical_key`).
+    public func physicalKey() -> PhysicalKeyCode? { physicalKeyCode ?? physicalKeyValue }
+
+    /// True while a held key auto-repeats (`Tx::key_repeat`).
+    public func keyRepeat() -> Bool { isKeyRepeat || keyRepeatValue }
+
+    /// The currently focused element's key (or `"#<index>"` if unkeyed), if any (`Tx::focused`).
+    public func focused() -> String? { focusedElementKey }
 
     public internal(set) var settleRequested: Bool {
         get { commitKind.snaps }
@@ -244,10 +286,17 @@ public struct Tx {
     public internal(set) var byKeysAtEvent: Bool = false
     public internal(set) var assistiveTechnologyActive: Bool = false
     public internal(set) var eventInputTime: Double? = nil
+    /// `Tx.inputWaiting` (`Tx::input_waiting`): set only on the poll transaction.
+    internal var isInputWaiting: Bool = false
     public internal(set) var sentKeys: [KeyEvent] = []
     public internal(set) var toggleMaximizedRequested: Bool = false
     public internal(set) var toggleFullScreenRequested: Bool = false
     public internal(set) var announcement: (text: String, politeness: LiveRegionPoliteness)? = nil
+    public internal(set) var shortcutActivationToken: String? = nil
+    internal var minimizeOrder: UInt64? = nil
+    internal var pickReads: [TxPickRead] = []
+    /// `Tx.readClipboard` callbacks (`Tx::clipboard_reads`).
+    internal var clipboardReads: [TxClipboardRead] = []
     internal var runtimeActions: [String: Any] = [:]
 
     public init() {}
@@ -331,14 +380,8 @@ public struct Tx {
     internal var traceEvents: [String] = []
     internal var traceChannels: [(name: String, kind: TraceChannels.Kind, value: Float)] = []
 
-    /// Physical key position for the current key/key-up handler (`Tx::physical_key`).
-    public func physicalKey() -> PhysicalKeyCode? { physicalKeyValue }
-
     /// Unmodified base character for the current key/key-up handler (`Tx::key_base`).
     public func keyBase() -> Character? { keyBaseValue }
-
-    /// Whether the current key event is an auto-repeat (`Tx::key_repeat`).
-    public func keyRepeat() -> Bool { keyRepeatValue }
 
     /// Whether this runtime has an attached motion or tooling trace (`Tx::tracing`).
     public var tracing: Bool { tracingEnabled }
@@ -393,6 +436,7 @@ public struct Tx {
     /// Copies text to the system / headless clipboard.
     public mutating func copyText(_ text: String) {
         clipboardWrite = ClipboardContent(text)
+        runtimeActions[txSecretCopyKey] = nil
     }
 
     /// Requests a paste delivery into the focused editor or `onPaste`/`onPasteContent` handler (`Tx::request_paste`).
@@ -479,6 +523,9 @@ public struct Tx {
     }
 
     /// Moves the vertical scroll viewport around `key` so its top sits `at` points below the viewport top.
+    /// Instant; any momentum or glide stops. A virtual row that isn't mounted lands too: the jump
+    /// goes where its list's estimates put it, which mounts it, and is placed again from its layout
+    /// before the frame draws, the rows it mounts there showing at once.
     public mutating func scrollKeyTo(_ key: String, at: Float) {
         scrollOffsetRequests.append(ScrollOffsetRequest(key: key, x: nil, y: at, glide: nil, anchor: true))
     }
@@ -499,7 +546,14 @@ public struct Tx {
         textFlights.append(contentsOf: one.textFlights)
         launches.append(contentsOf: one.launches)
         unclippedFlightsRequested = unclippedFlightsRequested || one.unclippedFlightsRequested
-        if let cb = one.clipboardWrite { clipboardWrite = cb }
+        if let cb = one.clipboardWrite {
+            clipboardWrite = cb
+            runtimeActions[txSecretCopyKey] = nil
+        }
+        if one.runtimeActions[txSecretCopyKey] != nil {
+            clipboardWrite = nil
+            runtimeActions["richClipboardWrite"] = nil
+        }
         pasteRequested = pasteRequested || one.pasteRequested
         if let title = one.windowTitle { windowTitle = title }
         quitRequested = quitRequested || one.quitRequested
@@ -514,6 +568,11 @@ public struct Tx {
         sentKeys.append(contentsOf: one.sentKeys)
         toggleMaximizedRequested = toggleMaximizedRequested || one.toggleMaximizedRequested
         toggleFullScreenRequested = toggleFullScreenRequested || one.toggleFullScreenRequested
+        if let otherMinimizeOrder = one.minimizeOrder {
+            minimizeOrder = max(minimizeOrder ?? 0, otherMinimizeOrder)
+        }
+        pickReads.append(contentsOf: one.pickReads)
+        clipboardReads.append(contentsOf: one.clipboardReads)
         traceEvents.append(contentsOf: one.traceEvents)
         traceChannels.append(contentsOf: one.traceChannels)
         if let ann = one.announcement { announcement = ann }
@@ -638,6 +697,66 @@ public struct Tx {
     /// Requests opening `url` in the same web tab (`Tx::open_url_same_tab` Swift-case alias).
     public mutating func openURLSameTab(_ url: String) throws {
         try openUrlSameTab(url)
+    }
+
+    /// Activation token provided by the desktop portal (e.g. Wayland) during a global shortcut callback (`Tx::activation_token`).
+    public func activationToken() -> String? {
+        shortcutActivationToken
+    }
+
+    /// Reads the topmost element at window point `(x, y)` after this handler completes (`Tx::element_at`).
+    public mutating func elementAt<S>(
+        _ x: Float,
+        _ y: Float,
+        _ body: @escaping (_ state: inout S, _ picked: Picked?, _ tx: inout Tx) -> Void
+    ) {
+        elementAtWith(x, y, pick: .default, body)
+    }
+
+    /// Reads the topmost element at `(x, y)` with `Pick` options (`Tx::element_at_with`).
+    public mutating func elementAtWith<S>(
+        _ x: Float,
+        _ y: Float,
+        pick: Pick,
+        _ body: @escaping (_ state: inout S, _ picked: Picked?, _ tx: inout Tx) -> Void
+    ) {
+        enqueuePickRead(within: nil, x: x, y: y, pick: pick, body)
+    }
+
+    /// Reads the topmost element at `(x, y)` restricted to `within` (`Tx::element_at_in`).
+    public mutating func elementAtIn<S>(
+        _ within: String,
+        x: Float,
+        y: Float,
+        _ body: @escaping (_ state: inout S, _ picked: Picked?, _ tx: inout Tx) -> Void
+    ) {
+        elementAtInWith(within, x: x, y: y, pick: .default, body)
+    }
+
+    /// Reads the topmost element at `(x, y)` restricted to `within` with `Pick` options (`Tx::element_at_in_with`).
+    public mutating func elementAtInWith<S>(
+        _ within: String,
+        x: Float,
+        y: Float,
+        pick: Pick,
+        _ body: @escaping (_ state: inout S, _ picked: Picked?, _ tx: inout Tx) -> Void
+    ) {
+        enqueuePickRead(within: within, x: x, y: y, pick: pick, body)
+    }
+
+    private mutating func enqueuePickRead<S>(
+        within: String?,
+        x: Float,
+        y: Float,
+        pick: Pick,
+        _ body: @escaping (_ state: inout S, _ picked: Picked?, _ tx: inout Tx) -> Void
+    ) {
+        pickReads.append(TxPickRead(within: within, x: x, y: y, pick: pick) { stateBox, picked, tx in
+            guard var typed = stateBox as? S else { return false }
+            body(&typed, picked, &tx)
+            stateBox = typed
+            return true
+        })
     }
 }
 
@@ -860,6 +979,7 @@ public struct ElementHandlers<State> {
     public var onClickPress: ((inout State, PointerPress, inout Tx) -> Void)?
     public var onDoubleClick: ((inout State, inout Tx) -> Void)?
     public var onSecondaryClick: ((inout State, PointerPress, inout Tx) -> Void)?
+    public var onMiddlePress: ((inout State, inout Tx) -> Void)?
     public var onPointerDown: ((inout State, PointerPress, inout Tx) -> Void)?
     public var onPointerUp: ((inout State, PointerPress, inout Tx) -> Void)?
     public var onPointerMove: ((inout State, PointerPress, inout Tx) -> Void)?
@@ -871,6 +991,8 @@ public struct ElementHandlers<State> {
     public var drop: DropSpec<State>?
     public var dragOut: ((State) -> DragItem?)?
     public var dragThreshold: Float?
+    /// `El.touchDragsAtOnce` (`Handlers::touch_at_once`).
+    public var touchAtOnce: Bool = false
     public var onDragStart: ((inout State, inout Tx) -> Void)?
     public var onDragOutEnd: ((inout State, DragOutcome, inout Tx) -> Void)?
     public var onKey: ((inout State, KeyEvent, inout Tx) -> Bool)?
@@ -929,6 +1051,7 @@ final class ElColdData<State> {
     var growthSpec: GrowthSpec? = nil
     var isStreaming: Bool = false
     var isArrivesWhole: Bool = false
+    var textReveal: Float = -1.0
     var foldGlideSpec: FoldGlide? = nil
     var virtualEstimate: Float? = nil
     var virtualRowsSource: VirtualRowSource<State>? = nil
@@ -938,6 +1061,7 @@ final class ElColdData<State> {
 
     var hoverBg: Color? = nil
     var pressBg: Color? = nil
+    var pressColor: Color? = nil
     var pressScaleFactor: Float? = nil
     var isHoverGroup: Bool = false
     var hoverGroupShare: String? = nil
@@ -962,7 +1086,7 @@ final class ElColdData<State> {
     var focusWithinFlat: Bool = false
     var focusFollows: Bool = false
 
-    var a11yLabel: String? = nil
+    var a11yLabelStorage: CowText? = nil
     var a11yHelp: String? = nil
     var helpWhenTruncated: Bool = false
     var helpSide: Side? = nil
@@ -970,15 +1094,15 @@ final class ElColdData<State> {
     var a11yExpanded: Bool? = nil
     var a11yLevel: Int? = nil
     var itemSelected: Bool = false
-    var a11yDescription: String? = nil
+    var a11yDescriptionStorage: CowText? = nil
     var a11yValue: String? = nil
     var a11yRange: A11yRange? = nil
     var a11yChecked: A11yChecked? = nil
     var a11yDisabled: Bool = false
     var isA11yHidden: Bool = false
     var a11yActiveDescendant: String? = nil
-    var a11yLabelledBy: String? = nil
-    var a11yDescribedBy: String? = nil
+    var a11yLabelledByStorage: CowText? = nil
+    var a11yDescribedByStorage: CowText? = nil
     var a11yBusy: Bool = false
     var a11yInvalid: Bool = false
     var a11yReadOnly: Bool = false
@@ -994,6 +1118,8 @@ final class ElColdData<State> {
     var liveText: LiveText? = nil
     var placeholder: String? = nil
     var placeholderColor: Color? = nil
+    var placeholderFontBox: AnyObject? = nil
+    var wrapGreedy: Bool = false
     var caretColor: Color? = nil
     var selectionColor: Color? = nil
     var iconPayload: (SVGIcon, Float)? = nil
@@ -1026,6 +1152,7 @@ final class ElColdData<State> {
     var pressFocusesBelow: Bool = false
     var noWindowDrag: Bool = false
     var isImeCursor: Bool = false
+    var optionAsAlt: Bool = false
     var spellcheck: Bool = false
     var richStyle: RichStyle? = nil
     var pillColors: (bg: Color, fg: Color?)? = nil
@@ -1037,6 +1164,8 @@ final class ElColdData<State> {
     var iconRotation: Float = 0.0
     var isWidthLeads: Bool = false
     var holdLandingWidthEnabled: Bool = false
+    var paintContain: Vec2? = nil
+    var motionSnapsEnabled: Bool = false
     var isRaised: Bool = false
     var offsetMotionAnim: Anim<Vec2>? = nil
     var opacityMotionAnim: Anim<Float>? = nil
@@ -1065,6 +1194,15 @@ final class ElColdData<State> {
 
     func clone() -> ElColdData<State> {
         let c = ElColdData<State>()
+        copyPaintAndMotionFields(to: c)
+        copyFocusAndA11yFields(to: c)
+        copyTextAndMediaFields(to: c)
+        copyStyleAndHandlerFields(to: c)
+        return c
+    }
+
+    @inline(never)
+    private func copyPaintAndMotionFields(to c: ElColdData<State>) {
         c.pixelSnapEnabled = pixelSnapEnabled
         c.clipRadius = clipRadius
         c.clipCorners = clipCorners
@@ -1085,6 +1223,7 @@ final class ElColdData<State> {
         c.revealSelected = revealSelected
         c.hoverBg = hoverBg
         c.pressBg = pressBg
+        c.pressColor = pressColor
         c.pressScaleFactor = pressScaleFactor
         c.isHoverGroup = isHoverGroup
         c.hoverGroupShare = hoverGroupShare
@@ -1095,6 +1234,10 @@ final class ElColdData<State> {
         c.groupColor = groupColor
         c.isDissolve = isDissolve
         c.drawnRectLive = drawnRectLive
+    }
+
+    @inline(never)
+    private func copyFocusAndA11yFields(to c: ElColdData<State>) {
         c.focusRingColor = focusRingColor
         c.focusRingWidth = focusRingWidth
         c.focusRingOffset = focusRingOffset
@@ -1108,7 +1251,7 @@ final class ElColdData<State> {
         c.focusWithinRing = focusWithinRing
         c.focusWithinFlat = focusWithinFlat
         c.focusFollows = focusFollows
-        c.a11yLabel = a11yLabel
+        c.a11yLabelStorage = a11yLabelStorage
         c.a11yHelp = a11yHelp
         c.helpWhenTruncated = helpWhenTruncated
         c.helpSide = helpSide
@@ -1116,15 +1259,15 @@ final class ElColdData<State> {
         c.a11yExpanded = a11yExpanded
         c.a11yLevel = a11yLevel
         c.itemSelected = itemSelected
-        c.a11yDescription = a11yDescription
+        c.a11yDescriptionStorage = a11yDescriptionStorage
         c.a11yValue = a11yValue
         c.a11yRange = a11yRange
         c.a11yChecked = a11yChecked
         c.a11yDisabled = a11yDisabled
         c.isA11yHidden = isA11yHidden
         c.a11yActiveDescendant = a11yActiveDescendant
-        c.a11yLabelledBy = a11yLabelledBy
-        c.a11yDescribedBy = a11yDescribedBy
+        c.a11yLabelledByStorage = a11yLabelledByStorage
+        c.a11yDescribedByStorage = a11yDescribedByStorage
         c.a11yBusy = a11yBusy
         c.a11yInvalid = a11yInvalid
         c.a11yReadOnly = a11yReadOnly
@@ -1133,12 +1276,18 @@ final class ElColdData<State> {
         c.a11yPosInSet = a11yPosInSet
         c.a11yShortcutHint = a11yShortcutHint
         c.a11yHref = a11yHref
+    }
+
+    @inline(never)
+    private func copyTextAndMediaFields(to c: ElColdData<State>) {
         c.richSpans = richSpans
         c.textHighlights = textHighlights
         c.textLinks = textLinks
         c.liveText = liveText
         c.placeholder = placeholder
         c.placeholderColor = placeholderColor
+        c.placeholderFontBox = placeholderFontBox
+        c.wrapGreedy = wrapGreedy
         c.caretColor = caretColor
         c.selectionColor = selectionColor
         c.iconPayload = iconPayload
@@ -1166,10 +1315,15 @@ final class ElColdData<State> {
         c.isUnmirrored = isUnmirrored
         c.mirrorInRtl = mirrorInRtl
         c.textDirByParagraph = textDirByParagraph
+    }
+
+    @inline(never)
+    private func copyStyleAndHandlerFields(to c: ElColdData<State>) {
         c.focusFillColor = focusFillColor
         c.pressFocusesBelow = pressFocusesBelow
         c.noWindowDrag = noWindowDrag
         c.isImeCursor = isImeCursor
+        c.optionAsAlt = optionAsAlt
         c.spellcheck = spellcheck
         c.richStyle = richStyle
         c.pillColors = pillColors
@@ -1181,6 +1335,8 @@ final class ElColdData<State> {
         c.iconRotation = iconRotation
         c.isWidthLeads = isWidthLeads
         c.holdLandingWidthEnabled = holdLandingWidthEnabled
+        c.paintContain = paintContain
+        c.motionSnapsEnabled = motionSnapsEnabled
         c.isRaised = isRaised
         c.offsetMotionAnim = offsetMotionAnim
         c.opacityMotionAnim = opacityMotionAnim
@@ -1196,7 +1352,6 @@ final class ElColdData<State> {
         c.handlersBox = handlersBox.map { ElHandlersBox($0.value) }
         c._runtimeExtras = _runtimeExtras
         c.keyLocation = keyLocation
-        return c
     }
 }
 
@@ -1231,6 +1386,8 @@ public struct El<State> {
 
     public var keyId: String? = nil
     public var role: ElementRole = .group
+    internal var memoRegionReused: Bool = false
+    internal var memoRegionEnvHash: UInt64 = 0
     public var layout: LayoutStyle
     public var children: [El<State>] = []
 
@@ -1278,6 +1435,15 @@ public struct El<State> {
     public var liveText: LiveText? { get { _cold?.data.liveText } set { ensureCold().data.liveText = newValue } }
     public var placeholder: String? { get { _cold?.data.placeholder } set { ensureCold().data.placeholder = newValue } }
     public var placeholderColor: Color? { get { _cold?.data.placeholderColor } set { ensureCold().data.placeholderColor = newValue } }
+    private final class PlaceholderFontBox: @unchecked Sendable {
+        let style: TextStyle
+        init(_ style: TextStyle) { self.style = style }
+    }
+    public var placeholderFont: TextStyle? {
+        get { (_cold?.data.placeholderFontBox as? PlaceholderFontBox)?.style }
+        set { ensureCold().data.placeholderFontBox = newValue.map(PlaceholderFontBox.init) }
+    }
+    public var isWrapGreedy: Bool { get { _cold?.data.wrapGreedy ?? false } set { ensureCold().data.wrapGreedy = newValue } }
     public var caretColor: Color? { get { _cold?.data.caretColor } set { ensureCold().data.caretColor = newValue } }
     public var selectionColor: Color? { get { _cold?.data.selectionColor } set { ensureCold().data.selectionColor = newValue } }
     public var iconPayload: (SVGIcon, Float)? { get { _cold?.data.iconPayload } set { ensureCold().data.iconPayload = newValue } }
@@ -1309,7 +1475,9 @@ public struct El<State> {
     public var pressFocusesBelow: Bool { get { _cold?.data.pressFocusesBelow ?? false } set { ensureCold().data.pressFocusesBelow = newValue } }
     public var noWindowDrag: Bool { get { _cold?.data.noWindowDrag ?? false } set { ensureCold().data.noWindowDrag = newValue } }
     public var isImeCursor: Bool { get { _cold?.data.isImeCursor ?? false } set { ensureCold().data.isImeCursor = newValue } }
+    public var isImeOptionAsAlt: Bool { get { _cold?.data.optionAsAlt ?? false } set { ensureCold().data.optionAsAlt = newValue } }
     public var isSpellcheck: Bool { get { _cold?.data.spellcheck ?? false } set { ensureCold().data.spellcheck = newValue } }
+    public var textReveal: Float { get { _cold?.data.textReveal ?? -1.0 } set { ensureCold().data.textReveal = newValue } }
     public var foldGlideSpec: FoldGlide? { get { _cold?.data.foldGlideSpec } set { ensureCold().data.foldGlideSpec = newValue } }
     public var virtualEstimate: Float? { get { _cold?.data.virtualEstimate } set { ensureCold().data.virtualEstimate = newValue } }
     internal var virtualizeSite: String? {
@@ -1330,6 +1498,7 @@ public struct El<State> {
     public var isRevealSelected: Bool { get { _cold?.data.revealSelected ?? false } set { ensureCold().data.revealSelected = newValue } }
     public var hoverBg: Color? { get { _cold?.data.hoverBg } set { ensureCold().data.hoverBg = newValue } }
     public var pressBg: Color? { get { _cold?.data.pressBg } set { ensureCold().data.pressBg = newValue } }
+    public var pressColor: Color? { get { _cold?.data.pressColor } set { ensureCold().data.pressColor = newValue } }
     public var pressScaleFactor: Float? { get { _cold?.data.pressScaleFactor } set { ensureCold().data.pressScaleFactor = newValue } }
     public var isHoverGroup: Bool { get { _cold?.data.isHoverGroup ?? false } set { ensureCold().data.isHoverGroup = newValue } }
     public var hoverGroupShare: String? { get { _cold?.data.hoverGroupShare } set { ensureCold().data.hoverGroupShare = newValue } }
@@ -1357,7 +1526,14 @@ public struct El<State> {
     public var focusWithinFlat: Bool { get { _cold?.data.focusWithinFlat ?? false } set { ensureCold().data.focusWithinFlat = newValue } }
     public var isFocusFollowsSelection: Bool { get { _cold?.data.focusFollows ?? false } set { ensureCold().data.focusFollows = newValue } }
 
-    public var a11yLabel: String? { get { _cold?.data.a11yLabel } set { ensureCold().data.a11yLabel = newValue } }
+    public var a11yLabel: String? {
+        get { _cold?.data.a11yLabelStorage?.stringValue }
+        set { ensureCold().data.a11yLabelStorage = newValue.map(CowText.owned) }
+    }
+    internal var a11yLabelCow: CowText? {
+        get { _cold?.data.a11yLabelStorage }
+        set { ensureCold().data.a11yLabelStorage = newValue }
+    }
     public var a11yHelp: String? { get { _cold?.data.a11yHelp } set { ensureCold().data.a11yHelp = newValue } }
     public var isHelpWhenTruncated: Bool { get { _cold?.data.helpWhenTruncated ?? false } set { ensureCold().data.helpWhenTruncated = newValue } }
     public var helpSide: Side? { get { _cold?.data.helpSide } set { ensureCold().data.helpSide = newValue } }
@@ -1365,15 +1541,28 @@ public struct El<State> {
     public var a11yExpanded: Bool? { get { _cold?.data.a11yExpanded } set { ensureCold().data.a11yExpanded = newValue } }
     public var a11yLevel: Int? { get { _cold?.data.a11yLevel } set { ensureCold().data.a11yLevel = newValue } }
     public var itemSelected: Bool { get { _cold?.data.itemSelected ?? false } set { ensureCold().data.itemSelected = newValue } }
-    public var a11yDescription: String? { get { _cold?.data.a11yDescription } set { ensureCold().data.a11yDescription = newValue } }
+    public var a11yDescription: String? {
+        get { _cold?.data.a11yDescriptionStorage?.stringValue }
+        set { ensureCold().data.a11yDescriptionStorage = newValue.map(CowText.owned) }
+    }
+    internal var a11yDescriptionCow: CowText? {
+        get { _cold?.data.a11yDescriptionStorage }
+        set { ensureCold().data.a11yDescriptionStorage = newValue }
+    }
     public var a11yValue: String? { get { _cold?.data.a11yValue } set { ensureCold().data.a11yValue = newValue } }
     public var a11yRange: A11yRange? { get { _cold?.data.a11yRange } set { ensureCold().data.a11yRange = newValue } }
     public var a11yChecked: A11yChecked? { get { _cold?.data.a11yChecked } set { ensureCold().data.a11yChecked = newValue } }
     public var a11yDisabled: Bool { get { _cold?.data.a11yDisabled ?? false } set { ensureCold().data.a11yDisabled = newValue } }
     public var isA11yHidden: Bool { get { _cold?.data.isA11yHidden ?? false } set { ensureCold().data.isA11yHidden = newValue } }
     public var a11yActiveDescendant: String? { get { _cold?.data.a11yActiveDescendant } set { ensureCold().data.a11yActiveDescendant = newValue } }
-    public var a11yLabelledBy: String? { get { _cold?.data.a11yLabelledBy } set { ensureCold().data.a11yLabelledBy = newValue } }
-    public var a11yDescribedBy: String? { get { _cold?.data.a11yDescribedBy } set { ensureCold().data.a11yDescribedBy = newValue } }
+    public var a11yLabelledBy: String? {
+        get { _cold?.data.a11yLabelledByStorage?.stringValue }
+        set { ensureCold().data.a11yLabelledByStorage = newValue.map(CowText.owned) }
+    }
+    public var a11yDescribedBy: String? {
+        get { _cold?.data.a11yDescribedByStorage?.stringValue }
+        set { ensureCold().data.a11yDescribedByStorage = newValue.map(CowText.owned) }
+    }
     public var a11yBusy: Bool { get { _cold?.data.a11yBusy ?? false } set { ensureCold().data.a11yBusy = newValue } }
     public var a11yInvalid: Bool { get { _cold?.data.a11yInvalid ?? false } set { ensureCold().data.a11yInvalid = newValue } }
     public var a11yReadOnly: Bool { get { _cold?.data.a11yReadOnly ?? false } set { ensureCold().data.a11yReadOnly = newValue } }
@@ -1406,6 +1595,8 @@ public struct El<State> {
     public var iconRotation: Float { get { _cold?.data.iconRotation ?? 0.0 } set { ensureCold().data.iconRotation = newValue } }
     public var isWidthLeads: Bool { get { _cold?.data.isWidthLeads ?? false } set { ensureCold().data.isWidthLeads = newValue } }
     public var holdLandingWidthEnabled: Bool { get { _cold?.data.holdLandingWidthEnabled ?? false } set { ensureCold().data.holdLandingWidthEnabled = newValue } }
+    public var paintContain: Vec2? { get { _cold?.data.paintContain } set { ensureCold().data.paintContain = newValue } }
+    public var motionSnapsEnabled: Bool { get { _cold?.data.motionSnapsEnabled ?? false } set { ensureCold().data.motionSnapsEnabled = newValue } }
     public var isRaised: Bool { get { _cold?.data.isRaised ?? false } set { ensureCold().data.isRaised = newValue } }
     public var offsetMotionAnim: Anim<Vec2>? { get { _cold?.data.offsetMotionAnim } set { ensureCold().data.offsetMotionAnim = newValue } }
     public var opacityMotionAnim: Anim<Float>? { get { _cold?.data.opacityMotionAnim } set { ensureCold().data.opacityMotionAnim = newValue } }
@@ -2034,6 +2225,27 @@ public struct El<State> {
         return copy
     }
 
+    /// Snaps this element's children as Blink does inside a box with paint containment
+    /// (`contain: paint`, `content` or `strict`) whose top-left is `origin`, in window points.
+    public func paintContained(_ origin: Vec2) -> Self {
+        var copy = self
+        copy.paintContain = origin
+        return copy
+    }
+
+    /// Convenience overload of ``paintContained(_:)`` taking separate `x` and `y` window points.
+    public func paintContained(_ x: Float, _ y: Float) -> Self {
+        paintContained(Vec2(x, y))
+    }
+
+    /// While it moves, this element and everything in its subtree snap to whole device pixels
+    /// every frame (`El::motion_snaps`), stepping a pixel at a time instead of gliding.
+    public func motionSnaps(_ on: Bool = true) -> Self {
+        var copy = self
+        copy.motionSnapsEnabled = on
+        return copy
+    }
+
     public func clipRounded(_ radius: Float) -> Self {
         var copy = self
         copy.applyParityClip { target in
@@ -2142,6 +2354,9 @@ public struct El<State> {
         looping(.cycle(c))
     }
 
+    /// A finite opacity/scale sequence on the shared render clock. The final pose holds;
+    /// reduced motion and explicit settle land it immediately. A new key replays it; dropping
+    /// the loop and putting it back carries on from where it was.
     public func sequence(_ frames: MotionSequence) -> Self {
         looping(.sequence(frames))
     }
@@ -2325,6 +2540,20 @@ public struct El<State> {
         return copy
     }
 
+    /// Lays this field's placeholder out in `style` rather than the field's own (`El::placeholder_font`, `#896`).
+    public func placeholderFont(_ style: TextStyle) -> Self {
+        var copy = self
+        copy.placeholderFont = style
+        return copy
+    }
+
+    /// Breaks this text's lines greedily even when `TextSystem.setPrettyWrap(true)` is active (`El::wrap_greedy`, `#882`).
+    public func wrapGreedy(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.isWrapGreedy = enabled
+        return copy
+    }
+
     public func caret(_ color: Color, selection: Color? = nil) -> Self {
         var copy = self
         copy.caretColor = color
@@ -2494,6 +2723,13 @@ public struct El<State> {
         return copy
     }
 
+    /// Colors text, icons, and vector shapes in this element's subtree while pressed (`El::press_color`).
+    public func pressColor(_ color: Color) -> Self {
+        var copy = self
+        copy.pressColor = color
+        return copy
+    }
+
     public func pressScale(_ factor: Float = 0.97) -> Self {
         var copy = self
         copy.pressScaleFactor = factor
@@ -2623,6 +2859,12 @@ public struct El<State> {
         return copy
     }
 
+    public func reveal(_ wordFade: Float) -> Self {
+        var copy = self
+        copy.textReveal = max(0, wordFade)
+        return copy
+    }
+
     public func arrivesWhole() -> Self {
         var copy = self
         copy.isArrivesWhole = true
@@ -2739,6 +2981,15 @@ public struct El<State> {
     public func secure(_ enabled: Bool = true) -> Self {
         var copy = self
         copy.isSecure = enabled
+        if enabled {
+            if !copy.textLinks.isEmpty && copy.handlers.editLens == nil && copy.role == .text {
+                copy.focusable = false
+            }
+            copy.textLinks = []
+            copy.handlers.onLink = nil
+            copy.handlers.onLinkSecondary = nil
+            copy.runtimeExtras[Self.selectableExtraKey] = false
+        }
         return copy
     }
 
@@ -2750,6 +3001,8 @@ public struct El<State> {
 
     public func role(_ r: ElementRole) -> Self { var c = self; c.role = r; return c }
     public func label(_ l: String) -> Self { var c = self; c.a11yLabel = l; return c }
+    /// Zero-copy `label` from a compile-time `StaticString` literal (`El::label_static`).
+    public func labelStatic(_ label: StaticString) -> Self { var c = self; c.a11yLabelCow = .staticString(label); return c }
     public func help(_ h: String) -> Self {
         var c = self
         if !h.isEmpty || c._cold != nil {
@@ -2802,6 +3055,8 @@ public struct El<State> {
     public func focusReturn(_ trigger: String) -> Self { var c = self; c.focusReturnKey = trigger; return c }
 
     public func description(_ text: String) -> Self { var c = self; c.a11yDescription = text; return c }
+    /// Zero-copy `description` from a compile-time `StaticString` literal (`El::description_static`).
+    public func descriptionStatic(_ text: StaticString) -> Self { var c = self; c.a11yDescriptionCow = .staticString(text); return c }
     public func activeDescendant(_ key: String) -> Self { var c = self; c.a11yActiveDescendant = key; return c }
     public func a11yValue(_ text: String) -> Self { var c = self; c.a11yValue = text; return c }
 
@@ -2930,6 +3185,15 @@ public struct El<State> {
         return copy
     }
 
+    /// With `imeCursor`: on macOS, while this caret holds the input method, Option is treated as Alt (`El::ime_option_as_alt`).
+    public func imeOptionAsAlt(_ on: Bool = true) -> Self {
+        var copy = self
+        if on || copy._cold != nil {
+            copy.isImeOptionAsAlt = on
+        }
+        return copy
+    }
+
     /// Fires when pressing empty non-interactive background inside this element (`El::on_background_press`).
     public func onBackgroundPress(_ handler: @escaping (inout State) -> Void) -> Self {
         onBackgroundPress { state, _, _ in handler(&state) }
@@ -3016,6 +3280,14 @@ public struct El<State> {
         return copy
     }
 
+    /// Handles a middle-button click (`El::on_middle_press`): fires on middle release inside when
+    /// not handled by `pointerButtons` opt-in or a link, without changing focus or starting drags.
+    public func onMiddlePress(_ handler: @escaping (inout State, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onMiddlePress = handler
+        return copy
+    }
+
     /// Makes `link.byteRange` of this text pressable (`crates/rune/src/el/text.rs:397`).
     /// Only the range's shaped glyph boxes take the pointer; each link is a Tab stop that Return or Space presses.
     public func link(_ link: TextLink) -> Self {
@@ -3028,9 +3300,6 @@ public struct El<State> {
         links.append(link)
         copy.textLinks = links
         copy.focusable = true
-        if copy.attachedCursor == nil {
-            copy.runtimeExtras["cursor"] = Cursor.pointer
-        }
         return copy
     }
 
@@ -3628,6 +3897,59 @@ public func terminalGrid<State>(
     return node
 }
 
+extension El {
+    /// Sets the terminal grid cursor cell (`column`, `row`) exposed as the grid's accessibility caret (`El::grid_caret`).
+    public func gridCaret(_ column: Int, _ row: Int) -> Self {
+        var copy = self
+        guard var grid = copy.terminalGridPayload else { return copy }
+        grid.caret = (column: column, row: row)
+        copy.terminalGridPayload = grid
+        return copy
+    }
+}
+
+/// Zero-copy accessibility text storage distinguishing compile-time literals from owned `String` values (`#860`).
+internal enum CowText: @unchecked Sendable, Equatable {
+    case staticString(StaticString)
+    case owned(String)
+
+    var stringValue: String {
+        switch self {
+        case .staticString(let s):
+            if s.hasPointerRepresentation {
+                return s.withUTF8Buffer { String(decoding: $0, as: UTF8.self) }
+            }
+            return String(s.unicodeScalar)
+        case .owned(let s):
+            return s
+        }
+    }
+
+    var isEmpty: Bool {
+        switch self {
+        case .staticString(let s):
+            return s.hasPointerRepresentation ? (s.utf8CodeUnitCount == 0) : false
+        case .owned(let s):
+            return s.isEmpty
+        }
+    }
+
+    static func == (lhs: CowText, rhs: CowText) -> Bool {
+        switch (lhs, rhs) {
+        case (.staticString(let a), .staticString(let b)):
+            if a.hasPointerRepresentation && b.hasPointerRepresentation &&
+                a.utf8Start == b.utf8Start && a.utf8CodeUnitCount == b.utf8CodeUnitCount {
+                return true
+            }
+            return lhs.stringValue == rhs.stringValue
+        case (.owned(let a), .owned(let b)):
+            return a == b
+        default:
+            return lhs.stringValue == rhs.stringValue
+        }
+    }
+}
+
 @inlinable
 public func spacer<State>() -> El<State> {
     El<State>(direction: .row).grow(1.0)
@@ -3744,6 +4066,7 @@ public struct InputSpec: Sendable, Equatable {
     public var animateLayout: Bool
     public var placeholder: String
     public var placeholderColor: Color
+    public var placeholderStyle: TextStyle?
     public var caret: Color
     public var selection: Color
     public var singleLine: Bool
@@ -3753,6 +4076,7 @@ public struct InputSpec: Sendable, Equatable {
         animateLayout: Bool = false,
         placeholder: String = "",
         placeholderColor: Color = Color.white.scaleAlpha(0.4),
+        placeholderStyle: TextStyle? = nil,
         caret: Color = .white,
         selection: Color = Color.srgb(0.2, 0.48, 0.96, 0.35),
         singleLine: Bool = false,
@@ -3761,6 +4085,7 @@ public struct InputSpec: Sendable, Equatable {
         self.animateLayout = animateLayout
         self.placeholder = placeholder
         self.placeholderColor = placeholderColor
+        self.placeholderStyle = placeholderStyle
         self.caret = caret
         self.selection = selection
         self.singleLine = singleLine
@@ -3812,6 +4137,9 @@ public func textInput<State>(
     if let spec {
         if !spec.placeholder.isEmpty {
             node = node.placeholder(spec.placeholder, color: spec.placeholderColor)
+        }
+        if let placeholderStyle = spec.placeholderStyle {
+            node = node.placeholderFont(placeholderStyle)
         }
         node = node.caret(spec.caret, selection: spec.selection)
         if spec.singleLine { node = node.singleLine(true) }

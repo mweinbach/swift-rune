@@ -147,24 +147,47 @@ public enum OpenCodeTheme {
 
     /// Spacing and layout numbers from `theme.json`.
     public static let spacingTokens = OpenCodeSpacingTokens(
-        unit: OpenCodeThemeData.numbers["spacing"] ?? 4.0,
-        radiusXS: OpenCodeThemeData.numbers["radius-xs"] ?? 2.0,
-        radiusSM: OpenCodeThemeData.numbers["radius-sm"] ?? 4.0,
-        radiusMD: OpenCodeThemeData.numbers["radius-md"] ?? 6.0,
-        radiusLG: OpenCodeThemeData.numbers["radius-lg"] ?? 8.0,
-        radiusXL: OpenCodeThemeData.numbers["radius-xl"] ?? 10.0,
-        containerSession: OpenCodeThemeData.numbers["container-session"] ?? 744.0,
-        breakpointSM: OpenCodeThemeData.numbers["breakpoint-sm"] ?? 640.0,
-        breakpointMD: OpenCodeThemeData.numbers["breakpoint-md"] ?? 768.0,
-        breakpointLG: OpenCodeThemeData.numbers["breakpoint-lg"] ?? 1024.0,
-        breakpointXL: OpenCodeThemeData.numbers["breakpoint-xl"] ?? 1280.0,
-        breakpoint2XL: OpenCodeThemeData.numbers["breakpoint-2xl"] ?? 1536.0
+        unit: number("spacing") ?? 4.0,
+        radiusXS: number("radius-xs") ?? 2.0,
+        radiusSM: number("radius-sm") ?? 4.0,
+        radiusMD: number("radius-md") ?? 6.0,
+        radiusLG: number("radius-lg") ?? 8.0,
+        radiusXL: number("radius-xl") ?? 10.0,
+        containerSession: number("container-session") ?? 744.0,
+        breakpointSM: number("breakpoint-sm") ?? 640.0,
+        breakpointMD: number("breakpoint-md") ?? 768.0,
+        breakpointLG: number("breakpoint-lg") ?? 1024.0,
+        breakpointXL: number("breakpoint-xl") ?? 1280.0,
+        breakpoint2XL: number("breakpoint-2xl") ?? 1536.0
     )
 
-    private static let rawDarkTheme = buildJsonTheme(dark: true, srgbBlend: true)
-    private static let rawLightTheme = buildJsonTheme(dark: false, srgbBlend: true)
-    private static let linearDarkTheme = buildJsonTheme(dark: true, srgbBlend: false)
-    private static let linearLightTheme = buildJsonTheme(dark: false, srgbBlend: false)
+    private struct ParsedThemeBundle: Sendable {
+        let darkTheme: JsonTheme
+        let lightTheme: JsonTheme
+        let darkShadows: [String: String]
+        let lightShadows: [String: String]
+    }
+
+    /// Parses `theme.json` once for both appearances, numbers, and shadows (`#848`).
+    private static let bundle: ParsedThemeBundle = {
+        do {
+            let raw = try JSONSerialization.jsonObject(with: Data(OpenCodeAssets.themeJSON.utf8), options: [])
+            let darkTheme = try Theme.fromValue(raw, dark: true)
+            let lightTheme = try Theme.fromValue(raw, dark: false)
+            let root = raw as? [String: Any]
+            let shadowsRoot = root?["shadows"] as? [String: Any]
+            let darkShadows = (shadowsRoot?["dark"] as? [String: String]) ?? [:]
+            let lightShadows = (shadowsRoot?["light"] as? [String: String]) ?? [:]
+            return ParsedThemeBundle(
+                darkTheme: darkTheme,
+                lightTheme: lightTheme,
+                darkShadows: darkShadows,
+                lightShadows: lightShadows
+            )
+        } catch {
+            preconditionFailure("OpenCode theme.json failed to parse: \(error)")
+        }
+    }()
 
     private static let srgbDarkKit = buildKit(dark: true, srgbBlend: true)
     private static let srgbLightKit = buildKit(dark: false, srgbBlend: true)
@@ -172,20 +195,17 @@ public enum OpenCodeTheme {
     private static let linearLightKit = buildKit(dark: false, srgbBlend: false)
 
     /// Returns the resolved `JsonTheme` for `dark` or light appearance.
-    /// When `srgbBlend` is `false` (or `nil` while `Theme.blendsSrgb()` is `false`),
-    /// translucent tokens are adapted for linear-light blending over `v2-background-bg-base`.
+    ///
+    /// When `srgbBlend` is `nil` (the default), translucent tokens adapt dynamically via `Theme.blendsSrgb()`.
+    /// Pass `true` or `false` to override blend resolution explicitly.
     public static func theme(dark: Bool, srgbBlend: Bool? = nil) -> JsonTheme {
-        let resolvedSrgb = srgbBlend ?? Theme.blendsSrgb()
-        if resolvedSrgb {
-            return dark ? rawDarkTheme : rawLightTheme
-        } else {
-            return dark ? linearDarkTheme : linearLightTheme
-        }
+        let base = dark ? bundle.darkTheme : bundle.lightTheme
+        return srgbBlend.map { base.withBlendOverride($0) } ?? base
     }
 
-    /// Returns the raw `JsonTheme` preserving authored alpha values.
-    public static func rawTheme(dark: Bool) -> JsonTheme {
-        dark ? rawDarkTheme : rawLightTheme
+    /// Token `name` as `theme.json` authors it, without sRGB re-solving: translucent tokens keep their authored alpha.
+    public static func authored(_ name: String, dark: Bool) -> Color? {
+        theme(dark: dark).authored(name)
     }
 
     /// Returns a `RuneKit.Kit` configured with OpenCode's palette, elevation, typography, radius, and motion,
@@ -206,7 +226,7 @@ public enum OpenCodeTheme {
 
     /// Looks up a numeric token from `theme.json`.
     public static func number(_ name: String) -> Float? {
-        OpenCodeThemeData.numbers[name]
+        bundle.darkTheme.num(name)
     }
 
     /// Returns `spacing * multiplier` (base unit is 4pt).
@@ -270,9 +290,9 @@ public enum OpenCodeTheme {
     /// Parses a named CSS shadow token from `theme.json`, adapted for `srgbBlend ?? Theme.blendsSrgb()`.
     public static func shadows(_ name: String, dark: Bool, srgbBlend: Bool? = nil) -> [Shadow] {
         let resolvedSrgb = srgbBlend ?? Theme.blendsSrgb()
-        let map = dark ? OpenCodeThemeData.darkShadows : OpenCodeThemeData.lightShadows
+        let map = dark ? bundle.darkShadows : bundle.lightShadows
         guard let raw = map[name] else { return [] }
-        let bg = rawTheme(dark: dark)["v2-background-bg-base"] ?? (dark ? .black : .white)
+        let bg = authored("v2-background-bg-base", dark: dark) ?? (dark ? .black : .white)
         return parseBoxShadows(raw) { color in
             Tok.forBlend(color, over: bg, srgbBlend: resolvedSrgb)
         }
@@ -349,31 +369,12 @@ public enum OpenCodeTheme {
 
     // MARK: - Private Builders
 
-    private static func buildJsonTheme(dark: Bool, srgbBlend: Bool) -> JsonTheme {
-        let rawMap = dark ? OpenCodeThemeData.darkColors : OpenCodeThemeData.lightColors
-        var rawColors: [String: Color] = [:]
-        rawColors.reserveCapacity(rawMap.count)
-        for (k, hex) in rawMap {
-            if let c = Color.hex(hex) {
-                rawColors[k] = c
-            }
-        }
-        let blendBase = rawColors["v2-background-bg-base"] ?? (dark ? .black : .white)
-        if !srgbBlend {
-            for (k, c) in rawColors where c.a < 0.999 && k != "v2-background-bg-base" {
-                rawColors[k] = c.srgbEquivalent(over: blendBase)
-            }
-        }
-        return JsonTheme(name: "OpenCode", colors: rawColors, numbers: OpenCodeThemeData.numbers)
-    }
-
     private static func buildKit(dark: Bool, srgbBlend: Bool) -> Kit {
         let t = theme(dark: dark, srgbBlend: srgbBlend)
-        let raw = rawTheme(dark: dark)
 
         func c(_ n: String) -> Color { t[n] ?? .transparent }
         func v(_ n: String) -> Color { t["v2-\(n)"] ?? .transparent }
-        func rawV(_ n: String) -> Color { raw["v2-\(n)"] ?? .transparent }
+        func rawV(_ n: String) -> Color { authored("v2-\(n)", dark: dark) ?? .transparent }
         func orColor(_ n: String, _ fallback: Color) -> Color { t[n] ?? fallback }
         func state(_ n: String, icon: Color) -> StateColors {
             StateColors(
@@ -389,7 +390,7 @@ public enum OpenCodeTheme {
             Tok.forBlend(x, over: blend, srgbBlend: srgbBlend)
         }
 
-        let shadowMap = dark ? OpenCodeThemeData.darkShadows : OpenCodeThemeData.lightShadows
+        let shadowMap = dark ? bundle.darkShadows : bundle.lightShadows
         func sh(_ n: String) -> [Shadow] {
             guard let src = shadowMap[n] else { return [] }
             return parseBoxShadows(src, solve: solve)
