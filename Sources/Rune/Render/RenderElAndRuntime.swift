@@ -873,6 +873,9 @@ extension Runtime {
         func hasDynamicInSubtree(_ n: FlatNode) -> Bool {
             if movingSet.contains(n.nodeId)
                 || exitingIds.contains(n.nodeId)
+                || activeTextFlights.contains(where: {
+                    $0.targetNodeId == n.nodeId || FlightSelector.selects($0.state.sourceKey, path: n.path, key: n.key)
+                })
                 || n.el.isSecure
                 || (n.el.handlers.editLens?.get(state).isSecure == true)
                 || !n.el.liveBindings.isEmpty
@@ -1090,7 +1093,7 @@ extension Runtime {
                 } ?? 1.0
                 pinh = AnchorLayoutHelper.anchoredPaintTransform(
                     anchor: a,
-                    baseRect: baseRect,
+                    baseRect: liveRect ?? scene.world(nid) ?? baseRect,
                     ownElScale: el.scale,
                     hasScaleTrack: anchoredOverlayHasScaleTrack(el, nodeId: nid),
                     anchorDrawnRect: anchorRect,
@@ -2439,6 +2442,7 @@ extension Runtime {
             }
 
             // 11. Text (`editLens` textInput / `plainText` / `richSpans` / `advanceIn`)
+            let isTextFlightTarget = activeTextFlights.contains { $0.targetNodeId == nid }
             if let editLens = el.handlers.editLens {
                 let edit = editLens.get(state)
                 let textLeft = effRect.x + el.layout.padding.left * sc.x
@@ -2516,7 +2520,13 @@ extension Runtime {
                     marks.append(0)
                 }
                 let inputGlyphs: [PositionedGlyph]
-                if let paragraphs = inputBox.paragraphs {
+                let hidesDepartingPlaceholder = resolvedInput.showingPlaceholder && activeTextFlights.contains {
+                    FlightSelector.selects($0.state.sourceKey, path: node.path, key: node.key)
+                        && $0.state.alphas(target: $0.state.destination, now: now, reducedMotion: reducedMotion).source > 0
+                }
+                if isTextFlightTarget || hidesDepartingPlaceholder {
+                    inputGlyphs = []
+                } else if let paragraphs = inputBox.paragraphs {
                     let top = (inputClipEdges.y / scale - textTop) * paragraphs.scale / max(sc.y, 1e-4)
                     let bottom = (inputClipEdges.w / scale - textTop) * paragraphs.scale / max(sc.y, 1e-4)
                     let allRows = parentIsRotated || abs(el.rotate) > 1e-4
@@ -2752,7 +2762,8 @@ extension Runtime {
                     : nil
                 let baselines = restsExact ? TextBoxGeometry.roundedBaselines(originYPx: restOrigin.y, shaped: shaped) : []
                 var baselineLine = 0
-                for (index, glyph) in shaped.glyphs.enumerated() {
+                let labelGlyphs = isTextFlightTarget ? [] : shaped.glyphs
+                for (index, glyph) in labelGlyphs.enumerated() {
                     let wordAlpha = wordFadeMask?.alpha(for: glyph) ?? 1.0
                     let gAlpha = localOpacity * wordAlpha
                     if gAlpha <= 0.0005 { continue }
@@ -3146,6 +3157,19 @@ extension Runtime {
                     surfaceStart: sfIdx
                 )
             }
+        }
+
+        measureTextFlightDestinations(in: newDrawnRectByPath, at: now)
+
+        forEachTextFlightGlyph(at: now) { glyph, rect, ink, clip in
+            glyphFixups.append((instances.count, glyph.uv, rect.z, rect.w, glyph.atlasPage, true))
+            let clipEdges = SIMD4(clip.x, clip.y, clip.x + clip.z, clip.y + clip.w)
+            instances.append(RenderInstance(
+                rect: rect, radii: .zero,
+                fill: SIMD4(ink.x * ink.w, ink.y * ink.w, ink.z * ink.w, ink.w), border: .zero,
+                params: SIMD4(0, KIND_GLYPH, 0, 1), uv: glyph.uv, clip: clipEdges, fade: .zero
+            ))
+            marks.append(0)
         }
 
         // Convert normalized glyph & image UVs to exact pixel texel origins using final grown atlas sizes.

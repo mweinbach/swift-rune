@@ -261,17 +261,24 @@ struct LayoutRowsParityTests {
         _ = rt.frame(at: t)
 
         #expect(rt.activeTextFlights.count == 1)
+        let captured = rt.activeTextFlights[0].state.source
+        let draftText = rt.textSystem.shape(
+            text: "héllo flight", style: TextStyle(size: 14.0, weight: 400.0),
+            maxWidth: nil, pixelScale: 2.0, emitGlyphs: false
+        )
+        #expect(abs(captured.width - draftText.size.x) < 1, "the flight starts at the text width inside the 400-point composer")
         var previousTarget = rt.activeTextFlights[0].state.destination
         var retargets = 0
         for _ in 0..<240 {
             t += 1.0 / 120.0
             let rf = rt.frame(at: t)
             if let f = rt.activeTextFlights.first {
+                #expect(f.state.presented == Snap.rect(f.state.presented, scale: rt.pixelScale))
                 let glyphKind = Float(PrimitiveKind.glyph.rawValue)
                 let hasVisibleGlyph = rf.primitives.contains { (q: Primitive) -> Bool in
                     guard q.params.y == glyphKind, q.uv.z > 0.0, q.fill.w > 0.1 else { return false }
-                    let visW = min(q.rect.x + q.rect.z, q.clip.z) - max(q.rect.x, q.clip.x)
-                    let visH = min(q.rect.y + q.rect.w, q.clip.w) - max(q.rect.y, q.clip.y)
+                    let visW = min(q.rect.x + q.rect.z, q.clip.x + q.clip.z) - max(q.rect.x, q.clip.x)
+                    let visH = min(q.rect.y + q.rect.w, q.clip.y + q.clip.w) - max(q.rect.y, q.clip.y)
                     return visW > 1.0 && visH > 1.0
                 }
                 #expect(hasVisibleGlyph, "the source/destination handoff never loses every visible glyph")
@@ -287,6 +294,61 @@ struct LayoutRowsParityTests {
         #expect(rt.activeTextFlights.isEmpty, "flight lands and releases the captured glyphs")
         let isStillAnim = rt.isAnimating
         #expect(!isStillAnim)
+    }
+
+    @Test("destination ink travels above the clip until the handoff", arguments: [false, true])
+    func destinationInkTravelsAboveTheClip(native: Bool) {
+        let rt = Runtime<Bool>(state: false, viewport: Vec2(240, 240), pixelScale: 1) { sent, _ in
+            let source: El<Bool> = text(sent ? "" : "flight").key("source").color(.srgb(1, 0, 0))
+            let destination: El<Bool> = text("flight").key("destination").color(.srgb(0, 0, 1))
+            return el().size(240, 240)
+                .child(col().absolute(x: 12, y: 20).size(100, 32).clip().child(source))
+                .child(col().absolute(x: 12, y: 184).size(100, 32).clip().child(destination))
+        }
+
+        func visibleGlyphs(at time: Double) -> [(top: Float, blue: Bool)] {
+            typealias Glyph = (rect: SIMD4<Float>, ink: SIMD4<Float>, clip: SIMD4<Float>)
+            let glyphs: [Glyph]
+            if native {
+                glyphs = rt.renderFrame(at: time).instances.filter { $0.params.y == KIND_GLYPH }
+                    .map { ($0.rect, $0.fill, $0.clip) }
+            } else {
+                glyphs = rt.frame(at: time).primitives.filter { $0.kind == .glyph }.map {
+                    let c = $0.clip
+                    return ($0.rect, $0.fill, SIMD4(c.x, c.y, c.x + c.z, c.y + c.w))
+                }
+            }
+            return glyphs.compactMap { g in
+                let width = min(g.rect.x + g.rect.z, g.clip.z) - max(g.rect.x, g.clip.x)
+                let height = min(g.rect.y + g.rect.w, g.clip.w) - max(g.rect.y, g.clip.y)
+                guard width > 1, height > 1, g.ink.w > 0.1 else { return nil }
+                return (g.rect.y, g.ink.z > g.ink.x)
+            }
+        }
+
+        _ = visibleGlyphs(at: 0)
+        rt.update(at: 0) { sent, tx in
+            sent = true
+            tx.flyText("source", to: "destination")
+        }
+        var crossedGap = false
+        for frame in 1...120 {
+            let glyphs = visibleGlyphs(at: Double(frame) / 120)
+            guard let flight = rt.activeTextFlights.first else { break }
+            #expect(!glyphs.isEmpty)
+            let top = flight.state.presented.y
+            if (60...138).contains(top) {
+                crossedGap = true
+                let destinationInk = glyphs.filter(\.blue)
+                #expect(!destinationInk.isEmpty)
+                #expect(destinationInk.allSatisfy { abs($0.top - top) < 24 })
+            }
+        }
+        #expect(crossedGap)
+        #expect(rt.activeTextFlights.isEmpty)
+        let landed = visibleGlyphs(at: 1.1).filter(\.blue)
+        #expect(!landed.isEmpty)
+        #expect(landed.allSatisfy { (184...216).contains($0.top) })
     }
 
     @Test("reduced_motion_rows_land_immediately_but_keep_the_presence_fade")

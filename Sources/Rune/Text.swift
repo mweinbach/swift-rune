@@ -593,6 +593,23 @@ public struct ShapedText: @unchecked Sendable {
     /// paint can end a run that ends its line where it ends (`underline::underline_edges`).
     internal var underlineLineEndsPt: [Float] = []
 
+    /// Horizontal extent of the laid-out lines, including their alignment offsets, in points.
+    internal func lineExtent(scale: Float) -> ClosedRange<Float> {
+        var left = Float.infinity
+        var right = -Float.infinity
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        for (index, line) in lineStrings.enumerated() {
+            left = min(left, line.originX)
+            right = max(right, line.originX + lineAdvancePx(at: index) / scale)
+        }
+        #endif
+        for line in portableLines {
+            left = min(left, line.originX)
+            right = max(right, line.originX + (line.charOffsets.max() ?? 0))
+        }
+        return left <= right ? left...right : 0...max(0, size.x)
+    }
+
     internal func lineAdvancePx(at index: Int) -> Float {
         guard index >= 0, index < lineAdvancesPx.count else { return 0 }
         let rec = lineAdvancesPx[index]

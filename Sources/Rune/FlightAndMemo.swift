@@ -82,6 +82,10 @@ public struct TextFlightState: Sendable, Equatable {
         return min(1.0, max(0.0, progressAnim.sample(at: now)))
     }
 
+    internal func isSettled(at now: Double, reducedMotion: Bool) -> Bool {
+        reducedMotion ? progress(at: now, reducedMotion: true) >= 1.0 : progressAnim.isSettled(at: now)
+    }
+
     /// Updates `destination` and interpolates `presented`; returns `true` when settled.
     @discardableResult
     public mutating func measure(target: MotionRect, now: Double, reducedMotion: Bool) -> Bool {
@@ -94,10 +98,7 @@ public struct TextFlightState: Sendable, Equatable {
             from.width + (target.width - from.width) * p,
             from.height + (target.height - from.height) * p
         )
-        if reducedMotion {
-            return progress(at: now, reducedMotion: true) >= 1.0
-        }
-        return progressAnim.isSettled(at: now)
+        return isSettled(at: now, reducedMotion: reducedMotion)
     }
 
     public func alphas(target: MotionRect, now: Double, reducedMotion: Bool) -> (source: Float, target: Float) {
@@ -1328,4 +1329,66 @@ public extension RuneCompositor {
     var isAnimating: Bool { false }
     var drawsOwnContent: Bool { true }
     func summary() -> String? { nil }
+}
+
+extension Runtime {
+    /// Draws both glyph runs in viewport coordinates while a text flight crosses its ancestors' clips.
+    internal func forEachTextFlightGlyph(
+        at now: Double,
+        _ emit: (PositionedGlyph, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>) -> Void
+    ) {
+        guard !activeTextFlights.isEmpty else { return }
+        let scale = max(pixelScale, 0.5)
+        let window = MotionRect.fromXYWH(0, 0, viewport.x, viewport.y)
+        let defaultInk = cxSettings.viewDefaults.foreground ?? Tok.theme(dark: systemDark).text
+
+        func draw(text: String, spans: [TextSpan]?, style: TextStyle, color: Color, alpha: Float,
+                  extent: MotionRect, at current: MotionRect, clip: MotionRect, captured: TextLayoutBox? = nil) {
+            guard alpha > 0.0005, extent.width > 0, !text.isEmpty || spans?.isEmpty == false else { return }
+            let shaped: ShapedText
+            if let captured, captured.hasGlyphs {
+                shaped = captured.shaped
+            } else {
+                shaped = textSystem.shape(text: text, spans: spans, style: style, maxWidth: captured?.maxWidth ?? extent.width + 0.5,
+                                          pixelScale: scale, emitGlyphs: true)
+            }
+            let lineOrigin = captured == nil ? 0 : shaped.lineExtent(scale: captured?.pixelScale ?? scale).lowerBound
+            let zoom = current.width / extent.width
+            let deviceClip = SIMD4<Float>(clip.x, clip.y, clip.width, clip.height) * scale
+            for glyph in shaped.glyphs {
+                let rect = SIMD4<Float>(
+                    current.x + (glyph.rect.x - lineOrigin) * zoom, current.y + glyph.rect.y * zoom,
+                    glyph.rect.z * zoom, glyph.rect.w * zoom
+                ) * scale
+                emit(glyph, rect, (glyph.color ?? color).scaleAlpha(alpha).simd4(srgb: srgbBlend), deviceClip)
+            }
+        }
+
+        for entry in activeTextFlights {
+            guard let target = nodeById[entry.targetNodeId] else { continue }
+            let flight = entry.state
+            let alpha = flight.alphas(target: flight.destination, now: now, reducedMotion: reducedMotion)
+            let sourceClip = intersectRects(entry.sourceClip, window)
+            let current = flight.presented
+            let zoom = flight.source.width > 0 ? current.width / flight.source.width : 1
+            let p = flight.progress(at: now, reducedMotion: reducedMotion)
+            let cropped = MotionRect.fromXYWH(
+                current.x + (sourceClip.x - flight.source.x) * zoom,
+                current.y + (sourceClip.y - flight.source.y) * zoom,
+                sourceClip.width * zoom, sourceClip.height * zoom
+            )
+            let clip = MotionRect.fromEdges(
+                cropped.left * (1 - p), cropped.top * (1 - p),
+                cropped.right * (1 - p) + window.right * p, cropped.bottom * (1 - p) + window.bottom * p
+            )
+            let color = target.el.textColor ?? defaultInk
+            draw(text: entry.sourceLayout?.authText ?? entry.sourceText ?? target.el.plainText ?? "", spans: entry.sourceSpans,
+                 style: entry.sourceTextStyle, color: entry.sourceTextColor ?? color, alpha: alpha.source,
+                 extent: flight.source, at: reducedMotion ? flight.source : current, clip: reducedMotion ? sourceClip : clip,
+                 captured: entry.sourceLayout)
+            draw(text: target.el.plainText ?? "", spans: target.el.richSpans, style: target.el.textStyle,
+                 color: color, alpha: alpha.target, extent: flight.destination, at: current,
+                 clip: reducedMotion ? intersectRects(target.clipRect, window) : clip)
+        }
+    }
 }

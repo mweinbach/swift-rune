@@ -975,6 +975,8 @@ public final class Runtime<State> {
         var sourceNodeId: NodeId?
         var sourceRect: MotionRect?
         var sourceTextRect: MotionRect?
+        var sourceLayout: TextLayoutBox?
+        var sourceClip: MotionRect?
         var sourceCorners: Corners?
         var sourceFill: MotionColor?
         var sourceText: String?
@@ -987,6 +989,8 @@ public final class Runtime<State> {
     internal struct ActiveTextFlight {
         var targetNodeId: NodeId
         var state: TextFlightState
+        var sourceLayout: TextLayoutBox?
+        var sourceClip: MotionRect
         var sourceText: String?
         var sourceSpans: [TextSpan]?
         var sourceTextStyle: TextStyle
@@ -2155,19 +2159,9 @@ public final class Runtime<State> {
         let slackMoving = stepScrollSlacks(frameOut: frameOut, at: now)
         liveStore.sample(at: animNow)
 
-        if !activeTextFlights.isEmpty {
-            var kept: [ActiveTextFlight] = []
-            kept.reserveCapacity(activeTextFlights.count)
-            for var entry in activeTextFlights {
-                if let p = frameOut.nodes.first(where: { $0.id == entry.targetNodeId && !$0.isExiting }) {
-                    let targetExtent = nodeById[p.id].map { laidOutTextExtent(for: $0, rect: p.rect) } ?? p.rect
-                    let settled = entry.state.measure(target: targetExtent, now: animNow, reducedMotion: reducedMotion)
-                    if !settled {
-                        kept.append(entry)
-                    }
-                }
-            }
-            activeTextFlights = kept
+        activeTextFlights.removeAll { flight in
+            flight.state.isSettled(at: animNow, reducedMotion: reducedMotion)
+                || !frameOut.nodes.contains { $0.id == flight.targetNodeId && !$0.isExiting }
         }
 
         let activeWordReveals = wordRevealStore.hasActiveFades { scene.store.nodeTimeScale($0) }
@@ -4493,7 +4487,11 @@ public final class Runtime<State> {
                 pendingTextFlights.removeAll()
                 var deferredFlights: [PendingFlightRequest] = []
                 for var req in flights {
-                    guard let srcRect = req.sourceTextRect ?? req.sourceRect else { continue }
+                    let sourceText = req.sourceLayout?.authText ?? req.sourceText ?? ""
+                    guard !sourceText.isEmpty || req.sourceSpans?.contains(where: { !$0.text.isEmpty }) == true else { continue }
+                    guard let srcRect = req.sourceTextRect ?? req.sourceRect,
+                          srcRect.width > 0, srcRect.height > 0,
+                          let srcClip = req.sourceClip, srcClip.width > 0, srcClip.height > 0 else { continue }
                     guard let dstNode = findNodeForFlightSelector(req.destination, in: pass.nodes) else {
                         if req.remainingAttempts > 1 {
                             req.remainingAttempts -= 1
@@ -4523,6 +4521,8 @@ public final class Runtime<State> {
                     activeTextFlights.append(ActiveTextFlight(
                         targetNodeId: dstNode.nodeId,
                         state: tf,
+                        sourceLayout: req.sourceLayout,
+                        sourceClip: srcClip,
                         sourceText: req.sourceText,
                         sourceSpans: req.sourceSpans,
                         sourceTextStyle: req.sourceTextStyle ?? dstNode.el.textStyle,
@@ -5008,6 +5008,29 @@ public final class Runtime<State> {
         return .zero
     }
 
+    /// A flight lands on the text as painted after this frame's scrolling and growth.
+    internal func measureTextFlightDestinations(in drawnRects: [String: MotionRect], at now: Double) {
+        for index in activeTextFlights.indices {
+            guard let node = nodeById[activeTextFlights[index].targetNodeId],
+                  let rect = drawnRects[node.path] else { continue }
+            let target = laidOutTextExtent(for: node, rect: rect)
+            var flight = activeTextFlights[index].state
+            flight.measure(target: target, now: now, reducedMotion: reducedMotion)
+            // Land residual sizes before snapping both edges so translation cannot change a settled size.
+            let scale = max(pixelScale, 0.5)
+            let quantum = 1 / (64 * scale)
+            var presented = flight.presented
+            if abs(presented.width - target.width) < quantum {
+                presented.right = presented.left + target.width
+            }
+            if abs(presented.height - target.height) < quantum {
+                presented.bottom = presented.top + target.height
+            }
+            flight.presented = Snap.rect(presented, scale: scale)
+            activeTextFlights[index].state = flight
+        }
+    }
+
     private func laidOutTextExtent(for node: FlatNode, rect: MotionRect, in nodes: [FlatNode]? = nil) -> MotionRect {
         let searchNodes = nodes ?? flatNodes
         let textNode: FlatNode
@@ -5056,12 +5079,27 @@ public final class Runtime<State> {
     private func makePendingFlightRequest(source: String, destination: String, motionSpring: Spring? = nil) -> PendingFlightRequest {
         let srcNode = findNodeForFlightSelector(source, in: flatNodes)
         let srcLastEl = lastElements.first(where: { !$0.exiting && FlightSelector.selects(source, path: $0.path, key: $0.key) })
-        let srcRect = srcNode.map { scene.currentRect($0.nodeId) ?? $0.targetRect }
-            ?? srcLastEl.flatMap {
-                $0.rect.count >= 4 ? MotionRect.fromXYWH($0.rect[0], $0.rect[1], $0.rect[2], $0.rect[3]) : nil
-            }
+        let srcRect = srcLastEl.map { MotionRect.fromXYWH($0.rect) }
+            ?? srcNode.map { scene.currentRect($0.nodeId) ?? $0.targetRect }
+        let sourceLayout = srcNode.flatMap { node -> TextLayoutBox? in
+            guard !node.el.isSecure, srcLastEl?.secure != true,
+                  node.el.handlers.editLens != nil else { return nil }
+            return nodeTextLayouts[node.nodeId]?.box
+        }
         let srcTextRect: MotionRect? = {
             if let srcNode, let srcRect {
+                if let sourceLayout {
+                    let pad = srcNode.el.layout.padding
+                    let innerWidth = max(0, srcRect.width - pad.left - pad.right)
+                    let innerHeight = max(0, srcRect.height - pad.top - pad.bottom)
+                    let bounds = sourceLayout.shaped.lineExtent(scale: sourceLayout.pixelScale)
+                    let scroll = inputScroll[srcNode.path] ?? 0
+                    return MotionRect.fromXYWH(
+                        srcRect.x + pad.left + bounds.lowerBound - scroll, srcRect.y + pad.top,
+                        max(0, min(innerWidth - bounds.lowerBound, bounds.upperBound - bounds.lowerBound)),
+                        min(innerHeight, sourceLayout.shaped.size.y)
+                    )
+                }
                 return laidOutTextExtent(for: srcNode, rect: srcRect, in: flatNodes)
             }
             return srcRect
@@ -5072,6 +5110,11 @@ public final class Runtime<State> {
             sourceNodeId: srcNode?.nodeId,
             sourceRect: srcRect,
             sourceTextRect: srcTextRect,
+            sourceLayout: sourceLayout,
+            sourceClip: srcTextRect.map { extent in
+                let clip = srcLastEl.map { MotionRect.fromXYWH($0.visible) } ?? srcNode?.clipRect ?? extent
+                return intersectRects(intersectRects(extent, clip), MotionRect.fromXYWH(0, 0, viewport.x, viewport.y))
+            },
             sourceCorners: srcNode?.el.corners,
             sourceFill: srcNode?.el.background.motionColor,
             sourceText: srcNode?.el.plainText ?? srcLastEl?.text,
@@ -6512,7 +6555,7 @@ public final class Runtime<State> {
                 let anchorZoom: Float = anchorParentId.flatMap { presentedScaleById[$0]?.x }
                     ?? anchorNode.parentIndex.flatMap { flatNodes.indices.contains($0) ? flatNodes[$0].inheritedScale : nil }
                     ?? 1.0
-                let anchorBase = hasLiveRect ? baseRect : (scene.unoffsetWorldRect(for: p.id) ?? baseRect)
+                let anchorBase = hasLiveRect ? baseRect : (scene.world(p.id) ?? baseRect)
                 anchorBaseRectById[p.id] = anchorBase
                 pinh = AnchorLayoutHelper.anchoredPaintTransform(
                     anchor: a,
@@ -6835,15 +6878,9 @@ public final class Runtime<State> {
                 nodePath: snap.path,
                 inheritedGroupFrac: nearestGroupHoverFrac
             )
-            let textFlightGlyphAlpha: Float = {
-                if let tf = textFlightTarget {
-                    return tf.state.alphas(target: tf.state.destination, now: now, reducedMotion: reducedMotion).target
-                }
-                if let sf = textFlightSource {
-                    return sf.state.alphas(target: sf.state.destination, now: now, reducedMotion: reducedMotion).source
-                }
-                return 1.0
-            }()
+            let departingText = textFlightSource.map {
+                $0.state.alphas(target: $0.state.destination, now: now, reducedMotion: reducedMotion).source > 0
+            } ?? false
             let revealFactor: Float = {
                 guard let span = el.stickyConfig?.reveal else { return 1.0 }
                 return StickyMath.stuckRevealFactor(parentShift: input.parentStickyMag, span: span)
@@ -8333,7 +8370,8 @@ public final class Runtime<State> {
                             if !inputRotated && (gy + gh < inputVisMinY || gy > inputVisMaxY) { continue }
                             let baseGlyphColor = g.color.map { applyPressColor(effPressColor, to: $0, frac: effPressFrac) } ?? textCol
                             let ink = fieldMarks.last { $0.fg != nil && $0.byteRange.contains(g.utf8Offset) }?.fg ?? baseGlyphColor
-                            let gc = ink.scaleAlpha(localAlpha * textFlightGlyphAlpha).simd4(srgb: srgbBlend)
+                            guard textFlightTarget == nil, !showingPlaceholder || !departingText else { continue }
+                            let gc = ink.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                             let primIdx = primitives.count
                             primitives.append(.glyph(
                                 rect: SIMD4<Float>(
@@ -8607,7 +8645,7 @@ public final class Runtime<State> {
                             }
                         }
                     }
-                    let glyphAlpha = localAlpha * textFlightGlyphAlpha
+                    let glyphAlpha: Float = textFlightTarget == nil ? localAlpha : 0
                     let glyphClip = fadeRes?.glyphClip ?? devClip
                     if glyphAlpha > 0.0005 {
                         let wrapTruncateLayer = (fadeRes?.isTruncated == true && fadeRes?.refFade != .zero && !activeFadeEdges.isEmpty)
@@ -9284,9 +9322,15 @@ public final class Runtime<State> {
         }
         seenMatchedByFlightId = newSeenMatched
         finalizeElementTreeSnapshots(infos: &infos, rawPoseByPath: rawPoseByPath)
+        measureTextFlightDestinations(in: newDrawnRectByPath, at: now)
 
         if !activeTextFlights.isEmpty {
-            let unclippedDevClip = SIMD4<Float>(0, 0, Float(devW), Float(devH))
+            forEachTextFlightGlyph(at: now) { glyph, deviceRect, ink, clip in
+                let index = primitives.count
+                primitives.append(.glyph(rect: deviceRect, uv: glyph.uv, color: ink, gamma: systemDark ? 0.88 : 1.05, clip: clip))
+                glyphPageEntries.append((index, glyph.atlasPage))
+                usedGlyphMask |= UInt32(1) << min(UInt32(glyph.atlasPage), 31)
+            }
             for entry in activeTextFlights {
                 let (srcAlpha, _) = entry.state.alphas(
                     target: entry.state.destination,
@@ -9301,42 +9345,10 @@ public final class Runtime<State> {
                     .map(String.init)
                     ?? entry.state.targetKey
                 let flightText = entry.sourceText ?? targetSnap?.el.plainText ?? ""
-                let flightStyle = entry.sourceTextStyle
                 let flightColor = entry.sourceTextColor
                     ?? targetSnap?.el.textColor
                     ?? defaultViewFg
                     ?? Tok.theme(dark: systemDark).text
-                if srcAlpha > 0.0005 && (!flightText.isEmpty || entry.sourceSpans != nil) {
-                    let srcExtent = entry.state.source
-                    let shaped = textSystem.shape(
-                        text: flightText,
-                        spans: entry.sourceSpans,
-                        style: flightStyle,
-                        maxWidth: srcExtent.width + 0.5,
-                        pixelScale: pxScale,
-                        emitGlyphs: true
-                    )
-                    let sx = srcExtent.width > 0.5 ? presentedRect.width / srcExtent.width : 1.0
-                    let sy = srcExtent.height > 0.5 ? presentedRect.height / srcExtent.height : 1.0
-                    for g in shaped.glyphs {
-                        let gc = (g.color ?? flightColor).scaleAlpha(srcAlpha).simd4(srgb: srgbBlend)
-                        let primIdx = primitives.count
-                        primitives.append(.glyph(
-                            rect: SIMD4<Float>(
-                                (presentedRect.x + g.rect.x * sx) * pxScale,
-                                (presentedRect.y + g.rect.y * sy) * pxScale,
-                                g.rect.z * sx * pxScale,
-                                g.rect.w * sy * pxScale
-                            ),
-                            uv: g.uv,
-                            color: gc,
-                            gamma: systemDark ? 0.88 : 1.05,
-                            clip: unclippedDevClip
-                        ))
-                        glyphPageEntries.append((primIdx, g.atlasPage))
-                        usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
-                    }
-                }
                 infos.append(ElementInfo(
                     path: "flight-source/\(targetLeaf)",
                     key: nil,
