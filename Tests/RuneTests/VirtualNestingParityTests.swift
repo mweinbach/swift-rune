@@ -249,6 +249,30 @@ struct VirtualNestingParityTests {
         }
     }
 
+    @Test("a single virtual row/mark jump lands the matching text highlight below a keyed child")
+    func scrollKeyToLandsScopedTextHighlight() throws {
+        let rt = Runtime<S>(state: S(), viewport: Vec2(240, 300), pixelScale: 1) { _, _ in
+            col().key("scroll").size(240, 300).scrollY().child(
+                col().key("list").w(240).virtualRows(
+                    count: 1000, estimatedRowHeight: 40, key: { _, index in "r\(index)" },
+                    build: { _, _ in
+                        col().w(240).h(40).shrink(0).child(el().size(240, 10)).child(
+                            text("word").key("text").lineHeight(20)
+                                .textHighlight(TextHighlight(0..<4, bg: .white).key("ink"))
+                        )
+                    }
+                )
+            )
+        }
+        _ = rt.frame(at: 0)
+        #expect(rt.element(byKey: "r600") == nil)
+        rt.update(at: 0.02) { _, tx in tx.scrollKeyTo("r600/ink", at: 12) }
+        _ = rt.frame(at: 0.03)
+        let mark = try #require(rt.elements().first { $0.key == "ink" && $0.path.contains("/@r600/") })
+        let viewport = try #require(rt.element(byKey: "scroll"))
+        #expect(abs(mark.rect[1] - viewport.rect[1] - 12) < 0.5)
+    }
+
     @Test("scrollKeyTo for a key no list holds leaves the viewport where it was")
     func scrollKeyToUnknownKey() {
         let rt = transcript(stick: false)

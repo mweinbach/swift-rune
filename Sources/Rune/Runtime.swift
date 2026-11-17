@@ -2484,6 +2484,7 @@ public final class Runtime<State> {
 
     @inline(never)
     private func makeViewCx(
+        memoNodes: [FlatNode]?,
         focusedCaret: (keyPath: String, rect: [Float])?,
         collector: LayoutReadCollector
     ) -> (cx: Cx<State>, envHash: UInt64) {
@@ -2571,7 +2572,7 @@ public final class Runtime<State> {
     ) -> (rootEl: El<State>, helpLook: HelpLook?, effectiveReducedMotion: Bool)? {
         viewCallCount += 1
         lastViewReadScroll = false
-        var (cx, envHash) = makeViewCx(focusedCaret: focusedCaret, collector: collector)
+        var (cx, envHash) = makeViewCx(memoNodes: memoNodes, focusedCaret: focusedCaret, collector: collector)
         lastViewMemoEnvHash = envHash
         let viewTouchedBox = MemoScope.TouchedIdsBox()
         let rootEl = SystemScrollBarsScope.$current.withValue(cxSettings.scrollBarsState) {
@@ -6396,7 +6397,7 @@ public final class Runtime<State> {
             let emitLiftedNow = input.emitLiftedNow
             let emptyExit = EmitNodeExit(layerEndCount: 0, devClip: .zero)
             guard let snap = nodeById[p.id] ?? exitingSnapshots[p.id] else { return ([], emptyExit) }
-            let el = snap.el
+            let el = presentedGrowthElement(snap)
             let inh: PaintInh
             if let a = el.anchor, let anchorNode = anchorByKey[a.key] {
                 let anchorRect = newRectByPath[anchorNode.path]

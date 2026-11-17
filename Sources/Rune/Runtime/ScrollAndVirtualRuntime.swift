@@ -1057,10 +1057,11 @@ extension Runtime {
         var found: (el: El<State>, res: LayoutEngine.ResultNode)? = nil
         var stack: [(el: El<State>, res: LayoutEngine.ResultNode)] = [(rootEl, rootRes)]
         while let cur = stack.popLast() {
-            if cur.el.plainText != nil || cur.el.richSpans != nil || cur.el.liveText != nil {
-                if let wf = cur.el.runtimeExtras["shell.revealWordFade"] as? Float, wf >= 0 {
-                    found = cur
-                }
+            let wordFade = cur.el.runtimeExtras["shell.revealWordFade"] as? Float
+            if (cur.el.textReveal >= 0 || (wordFade ?? -1) >= 0),
+               (cur.el.plainText != nil || cur.el.richSpans != nil || cur.el.liveText != nil),
+               cur.el.textStyle.wrap != .noWrap {
+                found = cur
             }
             let count = min(cur.el.children.count, cur.res.children.count)
             for i in (0..<count).reversed() {
@@ -1162,7 +1163,7 @@ extension Runtime {
                         )
                         let lag = TextLineMetrics.streamHeightLag(
                             lineCount: shaped.lineCount,
-                            lineHeightPx: shaped.lineHeight * scale,
+                            lineHeightPx: shaped.lineMetricHeightPt(shaped.lineCount - 1) * scale,
                             lineAdvancePx: shaped.lastLineAdvancePx,
                             hangingAdvancePx: shaped.hangingAdvancePx,
                             widthPx: innerW * scale,
@@ -1595,25 +1596,6 @@ extension Runtime {
     }
 
     internal func applyGrowthConstraints(in rootEl: El<State>) -> El<State> {
-        func findLastRevealingWrappedText(
-            el: El<State>,
-            res: LayoutEngine.ResultNode
-        ) -> (El<State>, LayoutEngine.ResultNode)? {
-            if !el.children.isEmpty && el.children.count == res.children.count {
-                for i in el.children.indices.reversed() {
-                    if let match = findLastRevealingWrappedText(el: el.children[i], res: res.children[i]) {
-                        return match
-                    }
-                }
-            }
-            if el.textStyle.wrap != .noWrap,
-               el.textReveal >= 0.0,
-               (el.liveText != nil || el.plainText != nil || el.richSpans != nil) {
-                return (el, res)
-            }
-            return nil
-        }
-
         func walk(_ el: El<State>, parentPath: String, siblingIndex: Int, siblingKeysSeen: inout [String: Int], inGrowthSpec: GrowthSpec?) -> El<State> {
             let (seg, _) = layoutPathSegment(keyId: el.keyId, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
             let path = parentPath.isEmpty ? (el.keyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
@@ -1634,6 +1616,7 @@ extension Runtime {
                             out.layout.height = .points(max(0, t.h))
                             out.layout.maxHeight = .points(max(0, t.h))
                             if entry.edge.clip && !overflows {
+                                out.growthReveal = GrowthReveal(authoredClip: el.layout.clipOverflow, authoredFade: el.clipFade)
                                 out.layout.clipOverflow = true
                             }
                         }
@@ -1649,8 +1632,9 @@ extension Runtime {
                                 featherH = 0
                             }
                             if featherH > 0.5 {
-                                out = out.clipFadeLinear(bottom: min(featherH, max(1, t.h)))
-                                out.growthReveal = GrowthReveal(authoredFade: el.clipFade)
+                                let width = min(featherH, max(1, t.h))
+                                out.growthReveal = GrowthReveal(authoredClip: el.layout.clipOverflow, authoredFade: el.clipFade)
+                                out.clipFade = SIMD4(0, 0, 0, t.linearEdge ? -width : width)
                             }
                         }
                     }

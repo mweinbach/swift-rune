@@ -68,7 +68,7 @@ extension Runtime {
             let id = item.el.layoutAnim?.travel == .screen ? item.key.map { NodeId.hash("screen:@" + $0) } : nil
             nodes.append(.init(el: item.el, path: item.path, parentIndex: item.parent, localRect: local,
                                targetRect: rect, nodeId: id ?? NodeId.hash(item.path),
-                               instant: item.el.hasInstantChanges || parent?.instant == true))
+                               instant: item.el.hasInstantChanges || (parent?.instant == true && !item.el.hasAnimatedChanges)))
             byPath[item.path] = index
             var siblings: [String: Int] = [:]
             var children: [Item] = []
