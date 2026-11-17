@@ -359,6 +359,15 @@ public struct LightScene: @unchecked Sendable {
         self.settings = settings
         self.emission = emission
     }
+    #elseif canImport(CRuneGL)
+    /// Full-resolution linear GL emission texture in the renderer's current context.
+    public var emission: UInt32?
+    public init(prims: [Prim], lights: [Light], settings: LightSettings = LightSettings(), emission: UInt32? = nil) {
+        self.prims = prims
+        self.lights = lights
+        self.settings = settings
+        self.emission = emission
+    }
     #else
     public init(prims: [Prim], lights: [Light], settings: LightSettings = LightSettings()) {
         self.prims = prims
@@ -392,6 +401,45 @@ public struct LightFrameUniforms: Sendable, Equatable {
     public var ext: SIMD4<Float> = .zero
 
     public init() {}
+}
+
+extension LightFrameUniforms {
+    static func make(
+        scene: LightScene, width: UInt32, height: UInt32,
+        fieldSize: (UInt32, UInt32), giSize: (UInt32, UInt32),
+        encode: Bool, extraEmission: Bool
+    ) -> Self {
+        let s = scene.settings
+        let nl = min(scene.lights.count, maxLights)
+        let zmax = scene.prims
+            .filter { ($0.flags & flagOccluder) != 0 }
+            .reduce(Float(0.0)) { max($0, $1.z.y) }
+        let shafts = scene.lights.prefix(nl).contains { $0.extra.x > 0.0 }
+        let anyEmit = scene.prims.contains { ($0.flags & flagEmissive) != 0 } || extraEmission
+        let giActive: GIParams? = s.gi.flatMap { g in
+            (anyEmit || (g.bounce > 0.0 && nl > 0)) ? g : nil
+        }
+        let extra = giActive != nil && extraEmission
+        let flags: UInt32 =
+            (giActive != nil ? 1 : 0) |
+            (shafts ? 2 : 0) |
+            (encode ? 4 : 0) |
+            (s.contactAO > 0.0 ? 8 : 0) |
+            (extra ? 16 : 0)
+        let g = giActive ?? GIParams(strength: 0, air: 0, bounce: 0, absorption: 0, emission: 0)
+
+        var u = LightFrameUniforms()
+        u.sf = SIMD4<Float>(Float(width), Float(height), Float(fieldSize.0), Float(fieldSize.1))
+        u.gs = SIMD4<Float>(Float(giSize.0), Float(giSize.1), 0.5, giScale)
+        u.ambient = SIMD4<Float>(s.ambient.x, s.ambient.y, s.ambient.z, s.exposure)
+        u.counts = SIMD4<UInt32>(UInt32(scene.prims.count), UInt32(nl), lightCascades, flags)
+        u.misc = SIMD4<Float>(zmax, s.time, s.seed, s.shaftsOver)
+        u.text = SIMD4<Float>(s.text.floor, s.text.ceiling, s.text.lit, s.text.specular)
+        u.gi = SIMD4<Float>(g.strength, g.air, g.bounce, g.absorption)
+        u.bg = SIMD4<Float>(s.backgroundGloss, s.backgroundRoughness, s.contactAO, s.rim)
+        u.ext = SIMD4<Float>(s.albedoFloor, g.emission, 0.0, 0.0)
+        return u
+    }
 }
 
 public struct CascadeUniforms: Sendable, Equatable {

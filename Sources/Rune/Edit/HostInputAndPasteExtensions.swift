@@ -1,5 +1,5 @@
 import Foundation
-#if canImport(AppKit)
+#if os(macOS) && canImport(AppKit)
 import AppKit
 #endif
 
@@ -69,7 +69,7 @@ extension Runtime {
         politeness: LiveRegionPoliteness = .polite,
         in view: AnyObject?
     ) {
-        #if canImport(AppKit)
+        #if os(macOS) && canImport(AppKit)
         guard !message.isEmpty, let nsView = view as? NSView else { return }
         let priority: NSAccessibilityPriorityLevel = politeness == .assertive ? .high : .medium
         NSAccessibility.post(

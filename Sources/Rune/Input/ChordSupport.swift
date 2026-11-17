@@ -8,9 +8,9 @@ public enum KeyPlatform: String, Sendable, Hashable, Codable {
 
     /// The platform this build runs on.
     public static var current: KeyPlatform {
-        #if os(macOS) || os(iOS)
+        #if os(macOS) || os(iOS) || os(tvOS) || os(visionOS)
         return .mac
-        #elseif os(windows)
+        #elseif os(Windows)
         return .windows
         #else
         return .linux
@@ -120,27 +120,9 @@ internal enum ChordBits {
     /// Resolves `Mods` to chord modifier bits on `platform`, accepting both real macOS events
     /// (`Mods(cmd: true, logo: true)`) and bare script/test events (`Mods(cmd: true)`).
     static func held(_ m: Mods, platform: KeyPlatform) -> UInt8 {
-        let bare = m.cmd && !m.ctrl && !m.logo
-        let ctrl: Bool
-        let logo: Bool
-        if bare {
-            ctrl = m.ctrl
-            logo = m.logo
-        } else {
-            #if os(macOS)
-            ctrl = m.ctrl
-            logo = m.logo || m.cmd
-            #else
-            ctrl = m.ctrl || m.cmd
-            logo = m.logo
-            #endif
-        }
-        let ctrlBit = platform.isMac ? Self.ctrl : Self.primary
-        let logoBit = platform.isMac ? Self.primary : Self.super
-        var bits: UInt8 = 0
-        if bare { bits |= Self.primary }
-        if ctrl { bits |= ctrlBit }
-        if logo { bits |= logoBit }
+        var bits: UInt8 = m.cmd ? Self.primary : 0
+        if m.ctrl { bits |= platform.isMac ? Self.ctrl : Self.primary }
+        if m.logo { bits |= platform.isMac ? Self.primary : Self.super }
         if m.alt { bits |= Self.alt }
         if m.shift { bits |= Self.shift }
         return bits
@@ -174,7 +156,7 @@ internal enum ChordBits {
         if m.cmd && !m.ctrl && !m.logo {
             bits |= Self.primary
         } else if m.cmd {
-            #if os(macOS) || os(iOS)
+            #if os(macOS) || os(iOS) || os(tvOS) || os(visionOS)
             bits |= Self.primary
             #else
             bits |= Self.ctrl
@@ -366,7 +348,7 @@ extension KeyEvent {
     /// True when the event is a primary-command shortcut or macOS Control binding (`KeyEvent::is_command`).
     public var isCommandChord: Bool {
         if mods.primaryCommand { return true }
-        #if os(macOS) || os(iOS)
+        #if os(macOS) || os(iOS) || os(tvOS) || os(visionOS)
         return mods.ctrl && !mods.alt && !mods.cmd && !mods.logo && controlBinding != nil
         #else
         return false
@@ -375,7 +357,7 @@ extension KeyEvent {
 
     /// ASCII Emacs/macOS Control binding letter (`Ctrl-A`, `Ctrl-E`, `Ctrl-B`, `Ctrl-F`, `Ctrl-P`, `Ctrl-N`, `Ctrl-D`, `Ctrl-H`, `Ctrl-K`), or `nil`.
     public var controlBinding: Character? {
-        #if os(macOS) || os(iOS)
+        #if os(macOS) || os(iOS) || os(tvOS) || os(visionOS)
         guard mods.ctrl && !mods.alt && !mods.cmd && !mods.logo else { return nil }
         let letter: Character?
         switch key {

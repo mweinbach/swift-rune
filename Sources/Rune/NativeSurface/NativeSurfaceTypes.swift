@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
 import RuneRef
 
@@ -234,12 +237,17 @@ public struct ByteFrame: Sendable, Equatable {
         guard width > 0 && height > 0 else {
             throw NativeSurfaceError.zeroDimensions
         }
+        let pixels = UInt64(width) * UInt64(height)
+        let channels: UInt64 = format == .rgba || format == .bgra ? 4 : 1
+        guard pixels <= UInt64(Int.max) / channels else {
+            throw NativeSurfaceError.dimensionsOutOfRange(width: width, height: height)
+        }
         switch format {
         case .bgra, .rgba:
             guard planes.count == 1 else {
                 throw NativeSurfaceError.wrongPlaneCount(expected: 1, got: planes.count)
             }
-            let expected = Int(width) * Int(height) * 4
+            let expected = Int(pixels * 4)
             guard planes[0].count == expected else {
                 throw NativeSurfaceError.wrongPlaneByteCount(plane: 0, expected: expected, got: planes[0].count)
             }
@@ -250,8 +258,8 @@ public struct ByteFrame: Sendable, Equatable {
             guard planes.count == 2 else {
                 throw NativeSurfaceError.wrongPlaneCount(expected: 2, got: planes.count)
             }
-            let yExpected = Int(width) * Int(height)
-            let uvExpected = (Int(width) / 2) * (Int(height) / 2) * 2
+            let yExpected = Int(pixels)
+            let uvExpected = yExpected / 2
             guard planes[0].count == yExpected else {
                 throw NativeSurfaceError.wrongPlaneByteCount(plane: 0, expected: yExpected, got: planes[0].count)
             }
@@ -275,17 +283,23 @@ public struct ByteFrame: Sendable, Equatable {
         matrix: SurfaceMatrix,
         transfer: SurfaceTransfer
     ) -> SIMD4<Float> {
+        nv12Sample(y: Float(y), cb: Float(cb), cr: Float(cr), fullRange: fullRange, matrix: matrix, transfer: transfer)
+    }
+
+    /// Accepts fractional byte values after filtering the luma and chroma planes.
+    internal static func nv12Sample(y: Float, cb: Float, cr: Float, fullRange: Bool,
+                                    matrix: SurfaceMatrix, transfer: SurfaceTransfer) -> SIMD4<Float> {
         let yVal: Float
         let cbVal: Float
         let crVal: Float
         if fullRange {
-            yVal = Float(y) / 255.0
-            cbVal = (Float(cb) - 128.0) / 255.0
-            crVal = (Float(cr) - 128.0) / 255.0
+            yVal = y / 255.0
+            cbVal = (cb - 128.0) / 255.0
+            crVal = (cr - 128.0) / 255.0
         } else {
-            yVal = (Float(y) - 16.0) / 219.0
-            cbVal = (Float(cb) - 128.0) / 224.0
-            crVal = (Float(cr) - 128.0) / 224.0
+            yVal = (y - 16.0) / 219.0
+            cbVal = (cb - 128.0) / 224.0
+            crVal = (cr - 128.0) / 224.0
         }
         let rN: Float
         let gN: Float
@@ -384,7 +398,7 @@ public struct ByteFrame: Sendable, Equatable {
 /// Source backing a `NativeSurfaceVideoFrame`.
 public enum FrameSource: Sendable {
     case bytes(ByteFrame)
-    #if os(macOS)
+    #if canImport(CoreVideo) && canImport(IOSurface) && canImport(Metal)
     case pixelBuffer(CoreVideoPixelBuffer)
     #endif
 }
@@ -547,6 +561,7 @@ public final class NativeSurface: @unchecked Sendable {
         let lock = NSLock()
         var current: NativeSurfaceVideoFrame?
         var generation: UInt64 = 0
+        var frameRevision: UInt64 = 0
         var mirrored: Bool = false
         var waker: (@Sendable () -> Void)?
         var observer: FrameObserver?
@@ -559,13 +574,15 @@ public final class NativeSurface: @unchecked Sendable {
     }
 
     private let state: State
+    private let retainedPlayer: Player?
     public let id: UInt64
     public let place: SurfacePlace
 
-    private init(state: State, id: UInt64, place: SurfacePlace) {
+    private init(state: State, id: UInt64, place: SurfacePlace, retaining player: Player? = nil) {
         self.state = state
         self.id = id
         self.place = place
+        self.retainedPlayer = player
     }
 
     public convenience init(id: UInt64 = UInt64.random(in: 1...UInt64.max)) {
@@ -579,7 +596,13 @@ public final class NativeSurface: @unchecked Sendable {
 
     /// Returns a view sharing the underlying frame slot with a different placement inside its element box.
     public func placed(_ place: SurfacePlace) -> NativeSurface {
-        NativeSurface(state: state, id: id, place: place)
+        NativeSurface(state: state, id: id, place: place, retaining: retainedPlayer)
+    }
+
+    /// A mounted video owns its driver through the view handle. The shared picture
+    /// slot and the original handle owned by the player remain independent.
+    internal func retaining(_ player: Player) -> NativeSurface {
+        NativeSurface(state: state, id: id, place: place, retaining: player)
     }
 
     /// Attaches a `Video` controller handle to this surface.
@@ -640,6 +663,15 @@ public final class NativeSurface: @unchecked Sendable {
         defer { state.lock.unlock() }
         guard let f = state.current else { return nil }
         return (f, state.mirrored)
+    }
+
+    /// A renderer must acquire the upload revision and its bytes in one read when
+    /// a producer may replace the frame between draws.
+    internal func renderSnapshot() -> (frame: NativeSurfaceVideoFrame, mirrored: Bool, revision: UInt64)? {
+        state.lock.withLock {
+            guard let frame = state.current else { return nil }
+            return (frame, state.mirrored, state.frameRevision)
+        }
     }
 
     public var isObserved: Bool {
@@ -719,7 +751,7 @@ public final class NativeSurface: @unchecked Sendable {
         replaceFrame(videoFrame)
     }
 
-    #if os(macOS)
+    #if canImport(CoreVideo) && canImport(IOSurface) && canImport(Metal)
     /// Pushes a CoreVideo pixel buffer using identity orientation.
     public func push(_ buffer: CoreVideoPixelBuffer, frameId: UInt64) throws {
         try pushOriented(buffer, orient: .up, frameId: frameId)
@@ -773,6 +805,7 @@ public final class NativeSurface: @unchecked Sendable {
         oldFrame = state.current
         state.current = newFrame
         state.generation &+= 1
+        state.frameRevision = state.generation
         waker = state.waker
         state.lock.unlock()
         withExtendedLifetime(oldFrame) {}
@@ -797,8 +830,8 @@ public final class NativeSurface: @unchecked Sendable {
 
     // MARK: - Legacy `NativeSurfaceFrame` Compat
 
-    public func publish(_ frame: NativeSurfaceFrame) {
-        let waker: (@Sendable () -> Void)?
+    private static func unpack(_ frame: NativeSurfaceFrame) -> ByteFrame? {
+        guard frame.width > 0, frame.width <= 16_384, frame.height > 0, frame.height <= 16_384 else { return nil }
         let fmt: SurfacePixelFormat
         switch frame.format {
         case .rgba8: fmt = .rgba
@@ -816,31 +849,24 @@ public final class NativeSurface: @unchecked Sendable {
         } else {
             planes = [frame.bytes]
         }
+        return try? ByteFrame(width: frame.width, height: frame.height, format: fmt, color: .srgb, planes: planes)
+    }
+
+    public func publish(_ frame: NativeSurfaceFrame) {
+        let waker: (@Sendable () -> Void)?
+        let bytes = Self.unpack(frame)
         var oldFrame: NativeSurfaceVideoFrame?
-        let nextId = (state.lock.withLock { () -> UInt64 in state.generation &+ 1 })
-        let videoFrame = (try? ByteFrame(
-            width: frame.width,
-            height: frame.height,
-            format: fmt,
-            color: .srgb,
-            planes: planes
-        )).map { bf in
-            NativeSurfaceVideoFrame(
-                id: nextId,
-                size: (frame.width, frame.height),
-                format: fmt,
-                color: .srgb,
-                orient: .up,
-                source: .bytes(bf)
-            )
-        }
         state.lock.lock()
         state.legacyFrame = frame
         oldFrame = state.current
-        if let vf = videoFrame {
-            state.current = vf
-        }
         state.generation &+= 1
+        if let bytes {
+            state.current = NativeSurfaceVideoFrame(
+                id: state.generation, size: (bytes.width, bytes.height), format: bytes.format,
+                color: bytes.color, orient: .up, source: .bytes(bytes)
+            )
+            state.frameRevision = state.generation
+        }
         waker = state.waker
         state.lock.unlock()
         withExtendedLifetime(oldFrame) {}

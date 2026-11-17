@@ -225,6 +225,7 @@ public final class MacOSSystemObserver {
 public final class MacOSDisplayLinkDriver: NSObject {
     private var displayLink: CADisplayLink?
     private var fallbackTimer: Timer?
+    private var deadlineTimer: Timer?
     private let onTick: @MainActor () -> Void
 
     public init(onTick: @escaping @MainActor () -> Void) {
@@ -237,6 +238,8 @@ public final class MacOSDisplayLinkDriver: NSObject {
     }
 
     public func start(in view: NSView) {
+        deadlineTimer?.invalidate()
+        deadlineTimer = nil
         guard !isRunning else { return }
         if view.window != nil {
             let link = view.displayLink(target: self, selector: #selector(handleDisplayLink(_:)))
@@ -258,6 +261,23 @@ public final class MacOSDisplayLinkDriver: NSObject {
         displayLink = nil
         fallbackTimer?.invalidate()
         fallbackTimer = nil
+        deadlineTimer?.invalidate()
+        deadlineTimer = nil
+    }
+
+    /// Sleeps between discrete frames on a host clock measured in `timeScale` seconds per real second.
+    func sleep(until deadline: Double?, now: Double, timeScale: Double) {
+        stop()
+        guard let deadline, deadline.isFinite, timeScale > 0 else { return }
+        let delay = max(0, (deadline - now) / timeScale)
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.deadlineTimer = nil
+                self?.onTick()
+            }
+        }
+        deadlineTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     @objc private func handleDisplayLink(_ sender: CADisplayLink) {

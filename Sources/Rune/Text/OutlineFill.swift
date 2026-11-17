@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 
 // MARK: - Coverage Lanes Abstraction (rune::text::outline::lanes & cover)
 
@@ -40,7 +43,7 @@ extension Float: OutlineCoverageLanes {
     public static func mul(_ a: Float, _ b: Float) -> Float { a * b }
     public static func div(_ a: Float, _ b: Float) -> Float { a / b }
     public static func neg(_ a: Float) -> Float { -a }
-    public static func sqrt(_ a: Float) -> Float { Foundation.sqrt(a) }
+    public static func sqrt(_ a: Float) -> Float { a.squareRoot() }
     public static func lt(_ a: Float, _ b: Float) -> Bool { a < b }
     public static func le(_ a: Float, _ b: Float) -> Bool { a <= b }
     public static func ge(_ a: Float, _ b: Float) -> Bool { a >= b }
@@ -75,10 +78,10 @@ public struct OutlineF4: OutlineCoverageLanes, Sendable, Equatable {
     public static func neg(_ a: OutlineF4) -> OutlineF4 { OutlineF4(-a.v) }
     public static func sqrt(_ a: OutlineF4) -> OutlineF4 {
         OutlineF4(SIMD4<Float>(
-            Foundation.sqrt(a.v[0]),
-            Foundation.sqrt(a.v[1]),
-            Foundation.sqrt(a.v[2]),
-            Foundation.sqrt(a.v[3])
+            a.v[0].squareRoot(),
+            a.v[1].squareRoot(),
+            a.v[2].squareRoot(),
+            a.v[3].squareRoot()
         ))
     }
     public static func lt(_ a: OutlineF4, _ b: OutlineF4) -> LaneMask { a.v .< b.v }

@@ -131,7 +131,13 @@ internal final class LatestInner<T: Sendable>: LatestDrive, @unchecked Sendable 
                 started = jobToRun
                 break
             }
+            #if os(WASI)
+            cond.unlock()
+            WASIEventLoop.schedule(after: job.due - now) { self.drive() }
+            return
+            #else
             _ = cond.wait(until: Date().addingTimeInterval(job.due - now))
+            #endif
         }
         cond.unlock()
 
@@ -173,6 +179,9 @@ internal final class LatestPool: @unchecked Sendable {
     }
 
     func submit(_ task: any LatestDrive) {
+        #if os(WASI)
+        WASIEventLoop.schedule { task.drive() }
+        #else
         cond.lock()
         queue.append(task)
         cond.signal()
@@ -189,6 +198,7 @@ internal final class LatestPool: @unchecked Sendable {
         }
         thread.name = "rune-latest"
         thread.start()
+        #endif
     }
 
     private func work() {

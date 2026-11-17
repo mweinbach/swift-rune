@@ -74,7 +74,8 @@ extension Runtime {
                 (presentedRectByPath[path] ?? node.targetRect).x + local.x,
                 (presentedRectByPath[path] ?? node.targetRect).y + local.y
             )
-            let caret = textHitOffset(node: node, windowPos: hitWindow, edit: edit)
+            let hit = textCaretHit(node: node, windowPos: hitWindow, edit: edit)
+            let caret = hit.utf8Offset
             let sel = edit.selectedUTF8Range
             if sel.isEmpty || caret < sel.lowerBound || caret > sel.upperBound {
                 if spellEnabled,
@@ -85,7 +86,7 @@ extension Runtime {
                     editLens.set(&state, edit)
                     dirtyCommit(at: now, why: CommitWhy.input)
                 } else {
-                    edit.setCursor(utf8Offset: caret, extendSelection: false)
+                    edit.setCursor(hit)
                     editLens.set(&state, edit)
                     dirtyCommit(at: now, why: CommitWhy.input)
                 }

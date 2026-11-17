@@ -2,10 +2,6 @@ import Foundation
 import Testing
 @testable import Rune
 
-#if canImport(Metal)
-import Metal
-#endif
-
 @Suite("CpuBoot Parity Tests")
 struct CpuBootParityTests {
     private func rect(
@@ -231,7 +227,7 @@ struct CpuBootParityTests {
         #expect(fill.y < fill.w)
     }
 
-    #if canImport(Metal)
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
     @Test("Byte UI targets round the covered flat fill and grayscale ink before source-over")
     func byteSourcePrecision() throws {
         let ink: Float = 46 / 255
@@ -249,7 +245,7 @@ struct CpuBootParityTests {
         )
         var cpu = CpuBootTarget(width: 16, height: 8)
         _ = try CpuBoot.paint(CpuBootScene(frame: frame), into: &cpu, threads: 1)
-        let gpu = try MetalRenderer().renderOffscreen(frame)
+        let gpu = try OffscreenGPURenderer().renderOffscreen(frame)
         for x in [4, 12] {
             let pixel = (4 * 16 + x) * 4
             // round(46 × .6) + 22 × (1 - 153/255) = 36.8, stored as 37.
@@ -258,9 +254,9 @@ struct CpuBootParityTests {
         }
     }
 
-    @Test("CpuBoot matches Metal GPU Bgra8Unorm rendering across primitives, layers, and backdrop blur")
-    func cpuBootMatchesMetalGpu() throws {
-        let renderer = try MetalRenderer()
+    @Test("CpuBoot matches GPU byte output across primitives, layers, and backdrop blur")
+    func cpuBootMatchesGpu() throws {
+        let renderer = try OffscreenGPURenderer()
         let w = 128
         let h = 96
 
@@ -309,18 +305,6 @@ struct CpuBootParityTests {
         #expect(report.tiles > 0)
         #expect(report.blurNs > 0)
 
-        let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: w,
-            height: h,
-            mipmapped: false
-        )
-        desc.usage = [.renderTarget, .shaderRead]
-        desc.storageMode = .shared
-        guard let tex = renderer.device.makeTexture(descriptor: desc),
-              let cmdBuf = renderer.commandQueue.makeCommandBuffer() else {
-            throw MetalRenderer.RendererError.metalUnavailable
-        }
         let frame = RenderFrame(
             width: w,
             height: h,
@@ -328,16 +312,11 @@ struct CpuBootParityTests {
             clearColor: SIMD4<Float>(0, 0, 0, 1),
             instances: instances
         )
-        renderer.drawRange(frame: frame, into: tex, commandBuffer: cmdBuf)
-        cmdBuf.commit()
-        cmdBuf.waitUntilCompleted()
-
-        var gpuBGRA = [UInt8](repeating: 0, count: w * h * 4)
-        tex.getBytes(&gpuBGRA, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+        let gpu = try renderer.renderOffscreen(frame)
 
         let drift = CpuBootDriftMeter.drift(
             .bgra(cpuTarget.pixels, width: w, height: h),
-            .bgra(gpuBGRA, width: w, height: h)
+            .rgba(gpu.rgba, width: w, height: h)
         )
         #expect(drift.pixels == w * h)
         #expect(drift.overTwo == 0, "CPU vs GPU drift exceeded 2/255: max=\(drift.max) overTwo=\(drift.overTwo)")

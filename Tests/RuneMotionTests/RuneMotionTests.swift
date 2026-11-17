@@ -685,10 +685,10 @@ struct RuneMotionTests {
 
         // Deterministic MotionMath exp & sinCos
         #expect(abs(MotionMath.exp(0) - 1.0) < 1e-6)
-        #expect(abs(MotionMath.exp(1) - Float(Darwin.exp(1.0))) < 1e-5)
+        #expect(abs(MotionMath.exp(1) - Float(Foundation.exp(1.0))) < 1e-5)
         let (s, c) = MotionMath.sinCos(.pi / 4.0)
-        #expect(abs(s - Float(Darwin.sin(Double.pi / 4.0))) < 1e-6)
-        #expect(abs(c - Float(Darwin.cos(Double.pi / 4.0))) < 1e-6)
+        #expect(abs(s - Float(Foundation.sin(Double.pi / 4.0))) < 1e-6)
+        #expect(abs(c - Float(Foundation.cos(Double.pi / 4.0))) < 1e-6)
 
         // Carry frame-to-frame retention
         var carry = Carry<Int>()

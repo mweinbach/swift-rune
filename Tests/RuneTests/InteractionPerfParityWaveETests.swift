@@ -915,10 +915,25 @@ struct InteractionPerfParityWaveETests {
     // MARK: - interaction/sampler_tests.rs & stack.rs
 
     @Test("sampler_tests.rs: InteractionDemangle strips prefixes, Rust hashes, and classifies library frames")
-    func demangleAndLibraryClassification() {
+    func demangleAndLibraryClassification() throws {
+        #if canImport(Darwin) || (os(Windows) && arch(i386))
         #expect(InteractionDemangle.demangled("_my_c_helper") == "my_c_helper")
+        #else
+        #expect(InteractionDemangle.demangled("_my_c_helper") == "_my_c_helper")
+        #endif
+        #if canImport(Darwin) || os(Linux) || os(Windows)
+        #expect(InteractionDemangle.demangled("$s4Rune8drawTestyyF").contains("Rune.drawTest("))
+        #endif
+        #expect(InteractionDemangle.demangled("my_c_helper") == "my_c_helper")
         #expect(InteractionDemangle.demangled("__Z3foov") == "__Z3foov")
         #expect(InteractionDemangle.demangled("myapp::render::h0123456789abcdef") == "myapp::render")
+
+        #if os(macOS)
+        let pc = try #require(dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_NSGetEnviron"))
+        let stack = InteractionRawStack(pcs: [UInt(bitPattern: pc)], waiting: false, cpuUs: 0)
+        let frames = InteractionThreadSamplerTarget.resolveFrames(for: stack, cache: InteractionSymbolCache())
+        #expect(frames.first?.name == "_NSGetEnviron")
+        #endif
 
         #expect(InteractionDemangle.isLibrary("Rune.Runtime.frame(at: Double)"))
         #expect(InteractionDemangle.isLibrary("rune::runtime::commit"))

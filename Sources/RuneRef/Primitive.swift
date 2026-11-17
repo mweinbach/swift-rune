@@ -26,7 +26,7 @@ public struct Primitive: Sendable, Equatable {
     public var radii: SIMD4<Float>
     /// Primary color `[r, g, b, a]` (straight alpha).
     public var fill: SIMD4<Float>
-    /// Secondary / border / end-stop color `[r, g, b, a]` (straight alpha).
+    /// Secondary color, or the full source texel bounds for a cropped image.
     public var border: SIMD4<Float>
     /// `[param0, kind, param1, param2]`.
     public var params: SIMD4<Float>
@@ -161,10 +161,24 @@ public struct Primitive: Sendable, Equatable {
         clip: SIMD4<Float>,
         turn: Float = 0
     ) -> Primitive {
+        glyph(rect: rect, uv: uv, color: color, gamma: gamma, clip: clip, turn: turn, nativeSize: false)
+    }
+
+    /// A native-size mask reads one atlas texel per device pixel. Rotation and ordinary
+    /// scaled glyphs interpolate the normalized UV rectangle.
+    public static func glyph(
+        rect: SIMD4<Float>,
+        uv: SIMD4<Float>,
+        color: SIMD4<Float>,
+        gamma: Float = 1.0,
+        clip: SIMD4<Float>,
+        turn: Float = 0,
+        nativeSize: Bool
+    ) -> Primitive {
         Primitive(
             rect: rect,
             fill: color,
-            params: SIMD4<Float>(0, Float(PrimitiveKind.glyph.rawValue), 0, gamma),
+            params: SIMD4<Float>(0, Float(PrimitiveKind.glyph.rawValue), nativeSize ? 1 : 0, gamma),
             uv: uv,
             clip: clip,
             turn: turn
@@ -177,12 +191,14 @@ public struct Primitive: Sendable, Equatable {
         uv: SIMD4<Float>,
         tint: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1),
         clip: SIMD4<Float>,
-        turn: Float = 0
+        turn: Float = 0,
+        sourceTexelBounds: SIMD4<Float> = .zero
     ) -> Primitive {
         Primitive(
             rect: rect,
             radii: radii,
             fill: tint,
+            border: sourceTexelBounds,
             params: SIMD4<Float>(0, Float(PrimitiveKind.image.rawValue), 0, 0),
             uv: uv,
             clip: clip,
@@ -367,6 +383,7 @@ public struct RGBA8Atlas: Sendable, Equatable {
 public enum RefSceneError: Error, Sendable, Equatable, CustomStringConvertible {
     case invalidDimensions(width: Int, height: Int)
     case nonFiniteClearColor
+    case invalidAtlasDimensions(width: Int, height: Int)
     case invalidGlyphAtlasSize(expected: Int, actual: Int)
     case invalidImageAtlasSize(expected: Int, actual: Int)
     case nonFinitePrimitive(index: Int)
@@ -380,6 +397,8 @@ public enum RefSceneError: Error, Sendable, Equatable, CustomStringConvertible {
             return "Invalid scene dimensions \(w)x\(h)"
         case .nonFiniteClearColor:
             return "Scene clearColor contains NaN or infinite float values"
+        case let .invalidAtlasDimensions(w, h):
+            return "Invalid atlas dimensions \(w)x\(h)"
         case let .invalidGlyphAtlasSize(exp, act):
             return "Glyph atlas byte count mismatch (expected \(exp), got \(act))"
         case let .invalidImageAtlasSize(exp, act):
@@ -434,6 +453,11 @@ public struct RefScene: Sendable, Equatable {
         }
         guard Self.isFinite(clearColor) else {
             throw .nonFiniteClearColor
+        }
+        for (w, h) in [(glyphs.width, glyphs.height), (images.width, images.height)] {
+            guard (1...16_384).contains(w), (1...16_384).contains(h) else {
+                throw .invalidAtlasDimensions(width: w, height: h)
+            }
         }
         let expectedGlyphs = glyphs.width * glyphs.height
         if glyphs.texels.count != expectedGlyphs {

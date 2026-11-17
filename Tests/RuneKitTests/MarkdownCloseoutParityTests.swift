@@ -588,12 +588,12 @@ struct MarkdownCloseoutParityTests {
         let copyRT = runTable(tableDoc, style: cardStyle)
         copyRT.update(at: 0.01) { _, tx in tx.selectAllText("b1") }
         _ = copyRT.frame(at: 0.02)
-        _ = copyRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.02)
+        _ = copyRT.keyDown(KeyEvent(key: .command("c"), mods: RuneKitTestKey.primaryMods()), at: 0.02)
         #expect(copyRT.clipboard.text == "| A | B |\n|---|---|\n| alpha | beta |")
         if let cellEl = copyRT.elements().first(where: { $0.text == "alpha" }) {
             copyRT.update(at: 0.03) { _, tx in tx.selectText(cellEl.path, range: 0..<5) }
             _ = copyRT.frame(at: 0.04)
-            _ = copyRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.04)
+            _ = copyRT.keyDown(KeyEvent(key: .command("c"), mods: RuneKitTestKey.primaryMods()), at: 0.04)
             #expect(copyRT.clipboard.text == "alpha")
         }
 
@@ -903,7 +903,7 @@ struct MarkdownCloseoutParityTests {
             _ = codePadRT.frame(at: t)
         }
         #expect(codePadRT.selectedText() == "cargo")
-        _ = codePadRT.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: t + 0.02)
+        _ = codePadRT.keyDown(KeyEvent(key: .command("a"), mods: RuneKitTestKey.primaryMods()), at: t + 0.02)
         #expect(codePadRT.selectedText() == "Run cargo test now")
 
         // #151: tabs line up on 4-column stops with space-indented pairs and copy back as `\t`
@@ -932,7 +932,7 @@ struct MarkdownCloseoutParityTests {
         }
         tabRT.update(at: 0.02) { _, tx in tx.selectAllText("b0") }
         _ = tabRT.frame(at: 0.03)
-        _ = tabRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.03)
+        _ = tabRT.keyDown(KeyEvent(key: .command("c"), mods: RuneKitTestKey.primaryMods()), at: 0.03)
         #expect(tabRT.clipboard.text == tabCode)
 
         // #152 & #157: quote with paragraphs, nested lists & code copies clean plain text; single item copies without marker; drag across items includes marker
@@ -945,7 +945,7 @@ struct MarkdownCloseoutParityTests {
         quoteRT.update(at: qt + 0.01) { _, tx in tx.selectAllText("m0") }
         qt += 0.02
         _ = quoteRT.frame(at: qt)
-        _ = quoteRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: qt)
+        _ = quoteRT.keyDown(KeyEvent(key: .command("c"), mods: RuneKitTestKey.primaryMods()), at: qt)
         #expect(quoteRT.clipboard.text == "Before.\n\nFirst para here.\n\nSecond para.\n\n- one\n- two\n  - nested\n\n1. first\n2. second\n\nlet a = 1;\nlet b = 2;\n\nAfter.")
 
         // Single list item copies without its bullet marker; drag across two items emits `\n- two`
@@ -1235,14 +1235,14 @@ struct MarkdownCloseoutParityTests {
         rtTrue.update(at: 0.01) { _, tx in tx.selectAllText("note") }
         _ = rtTrue.frame(at: 0.02)
         #expect(rtTrue.selectedText()?.hasPrefix("Title\n\nHello world") == true)
-        _ = rtTrue.keyDown(KeyEvent(key: .text("c"), mods: Mods(cmd: true)), at: 0.03)
+        _ = rtTrue.keyDown(KeyEvent(key: .text("c"), mods: RuneKitTestKey.primaryMods()), at: 0.03)
         _ = rtTrue.frame(at: 0.04)
         #expect((rtTrue.copyRequest ?? boardTrue.readRich().content.text) == src)
 
         let (rtFalse, boardFalse) = makeRT(sourceCopy: false)
         rtFalse.update(at: 0.01) { _, tx in tx.selectAllText("note") }
         _ = rtFalse.frame(at: 0.02)
-        _ = rtFalse.keyDown(KeyEvent(key: .text("c"), mods: Mods(cmd: true)), at: 0.03)
+        _ = rtFalse.keyDown(KeyEvent(key: .text("c"), mods: RuneKitTestKey.primaryMods()), at: 0.03)
         _ = rtFalse.frame(at: 0.04)
         #expect((rtFalse.copyRequest ?? boardFalse.readRich().content.text) == "Title\n\nHello world and link.\n\n- alpha\n- [x] beta\n\nfn main() {}\n\nLast line.")
 
@@ -1265,7 +1265,7 @@ struct MarkdownCloseoutParityTests {
         dragRT.pointerUp(at: Vec2(x1, y1), at: 0.10)
         _ = dragRT.frame(at: 0.11)
         #expect(dragRT.selectedText()?.contains("alpha") == true)
-        _ = dragRT.keyDown(KeyEvent(key: .text("c"), mods: Mods(cmd: true)), at: 0.12)
+        _ = dragRT.keyDown(KeyEvent(key: .text("c"), mods: RuneKitTestKey.primaryMods()), at: 0.12)
         _ = dragRT.frame(at: 0.13)
         let expectedRange = String(src.dropFirst(9)).trimmingCharacters(in: .whitespacesAndNewlines)
         #expect((dragRT.copyRequest ?? dragBoard.readRich().content.text) == expectedRange)

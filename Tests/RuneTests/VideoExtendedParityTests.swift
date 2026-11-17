@@ -1,4 +1,6 @@
-import Darwin
+#if canImport(CRuneTestSockets)
+import CRuneTestSockets
+#endif
 import Foundation
 import Testing
 @testable import Rune
@@ -1548,11 +1550,17 @@ struct VideoPhasesParityTests {
 
 @Suite("Video Runtime Extended Parity Tests", .serialized)
 struct VideoRuntimeExtendedParityTests {
-    private static func fixtureURL(_ name: String) -> URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("Fixtures")
-            .appendingPathComponent(name)
+    /// Clock tests can seed metadata even on hosts built without a decoder.
+    private static func clockPlayer(_ kind: MediaKind) -> Player {
+        if nativeMediaAvailableForTests {
+            return kind == .audio
+                ? Player.audio(mediaFixtureURL("silence.wav").path)
+                : Player(source: .file(mediaFixtureURL("rgbw.mp4")))
+        }
+        let player = kind == .audio ? Player.audio("unopened-clock.wav") : Player.file("unopened-clock.mp4")
+        player.openMetadataForTest(VideoMeta(kind: kind, duration: kind == .audio ? 0.5 : 1,
+                                             size: kind == .audio ? nil : (64, 36), hasSound: kind == .audio))
+        return player
     }
 
     private final class AtomicCounter: @unchecked Sendable {
@@ -1574,6 +1582,7 @@ struct VideoRuntimeExtendedParityTests {
         #expect(calls.get() == 1)
     }
 
+    #if canImport(AVFoundation) && !os(watchOS)
     @Test("a_clip_dropped_during_a_parking_pass_is_destroyed_outside_the_lock")
     func aClipDroppedDuringAParkingPassIsDestroyedOutsideTheLock() {
         Player.resetParkedForTest()
@@ -1620,7 +1629,7 @@ struct VideoRuntimeExtendedParityTests {
         Player.resetParkedForTest()
         defer { Player.resetParkedForTest() }
 
-        let url = Self.fixtureURL("rgbw.mp4")
+        let url = mediaFixtureURL("rgbw.mp4")
         let clips = (0..<4).map { _ in Player(source: .file(url)) }
         for _ in 0..<5 {
             for clip in clips {
@@ -1636,6 +1645,7 @@ struct VideoRuntimeExtendedParityTests {
         }
         #expect(Player.heldCapacityForTest() == warm)
     }
+    #endif
 
     @Test("playing_after_the_end_restarts_from_zero")
     func playingAfterTheEndRestartsFromZero() {
@@ -1673,6 +1683,11 @@ struct VideoRuntimeExtendedParityTests {
         #expect(m.frameIndex(at: 0.25) == 1)
         #expect(m.frameIndex(at: 1.0) == 3)
         #expect(m.frameIndex(at: -1.0) == 0)
+        #expect(m.frameIndex(at: .infinity) == 3)
+        #expect(m.frameIndex(at: .nan) == 0)
+        let longClip = VideoMeta(duration: Double.greatestFiniteMagnitude)
+        #expect(longClip.frameCount == Int64.max)
+        #expect(longClip.frameIndex(at: .greatestFiniteMagnitude) == Int64.max - 1)
         #expect(m.frameTime(for: 1) == 0.375)
         #expect(m.frameTime(for: 3) == 0.875)
     }
@@ -1693,10 +1708,10 @@ struct VideoRuntimeExtendedParityTests {
         #expect(weakShared.value == nil)
     }
 
-    @Test("headless_audio_opens_on_read_and_holds_time")
+    @Test("headless_audio_opens_on_read_and_holds_time", .enabled(if: nativeMediaAvailableForTests))
     func headlessAudioOpensOnReadAndHoldsTime() throws {
         MediaPlaybackGate.setEnabled(false)
-        let a = Player.audio(Self.fixtureURL("silence.m4a").path)
+        let a = Player.audio(mediaFixtureURL("silence.m4a").path)
         a.setMuted(true)
         #expect(a.state == .ready)
         let d = try #require(a.duration)
@@ -1708,11 +1723,11 @@ struct VideoRuntimeExtendedParityTests {
         a.seek(to: 0.4)
         #expect(a.time == 0.4)
 
-        let wav = Player.audio(Self.fixtureURL("silence.wav").path)
+        let wav = Player.audio(mediaFixtureURL("silence.wav").path)
         let wavDur = try #require(wav.duration)
         #expect(abs(wavDur - 0.5) < 0.01)
 
-        let video = Player.audio(Self.fixtureURL("rgbw.mp4").path)
+        let video = Player.audio(mediaFixtureURL("rgbw.mp4").path)
         if case .failed(let msg) = video.state {
             #expect(msg.contains("no playable audio track"))
         } else {
@@ -1728,10 +1743,10 @@ struct VideoRuntimeExtendedParityTests {
         )
     }
 
-    @Test("a_playing_clip_scrolling_across_the_clip_edge_commits_nothing")
+    @Test("a_playing_clip_scrolling_across_the_clip_edge_commits_nothing", .enabled(if: nativeMediaAvailableForTests))
     func aPlayingClipScrollingAcrossTheClipEdgeCommitsNothing() throws {
         MediaPlaybackGate.setEnabled(false)
-        let v = Player(source: .file(Self.fixtureURL("rgbw.mp4")), playing: false, looping: true)
+        let v = Player(source: .file(mediaFixtureURL("rgbw.mp4")), playing: false, looping: true)
         v.setLooping(true)
 
         let rt = Runtime<Player>(
@@ -1742,10 +1757,10 @@ struct VideoRuntimeExtendedParityTests {
         )
         v.play()
 
-        #if canImport(Metal)
-        let renderer = try MetalRenderer()
-        func centerRGB(_ scene: RefScene) throws -> (UInt8, UInt8, UInt8) {
-            let out = try renderer.renderOffscreen(scene, surfaces: rt.surfaces)
+        #if canImport(Metal) || canImport(CRuneOffscreenGL)
+        let renderer = try OffscreenGPURenderer()
+        func centerRGB(_ frame: RenderFrame) throws -> (UInt8, UInt8, UInt8) {
+            let out = try renderer.renderOffscreen(frame)
             let i = (18 * 64 + 32) * 4
             return (out.rgba[i], out.rgba[i + 1], out.rgba[i + 2])
         }
@@ -1755,21 +1770,21 @@ struct VideoRuntimeExtendedParityTests {
             abs(Int(got.2) - Int(want.2)) <= 24
         }
 
-        _ = rt.frame(at: 0.0)
-        let s1 = rt.frame(at: 0.1)
+        _ = rt.renderFrame(at: 0.0)
+        let s1 = rt.renderFrame(at: 0.1)
         #expect(near(try centerRGB(s1), (255, 0, 0)))
 
         let steadyCommits = rt.viewCommitCount
-        _ = rt.frame(at: 0.15)
+        _ = rt.renderFrame(at: 0.15)
         #expect(rt.viewCommitCount == steadyCommits)
 
         rt.wheel(WheelEvent(dx: 0, dy: -40), at: Vec2(10, 10), now: 0.15)
-        _ = rt.frame(at: 0.2)
+        _ = rt.renderFrame(at: 0.2)
         #expect(rt.surfaces.isEmpty)
 
-        _ = rt.frame(at: 0.6)
+        _ = rt.renderFrame(at: 0.6)
         rt.wheel(WheelEvent(dx: 0, dy: 40), at: Vec2(10, 10), now: 0.6)
-        let sBack = rt.frame(at: 0.6)
+        let sBack = rt.renderFrame(at: 0.6)
         #expect(rt.surfaces.count == 1)
         #expect(near(try centerRGB(sBack), (0, 0, 255)))
         #expect(v.state == .playing)
@@ -1841,49 +1856,27 @@ struct VideoRuntimeExtendedParityTests {
         #expect(!v.isAudio && v.isMuted)
     }
 
+    #if canImport(CRuneTestSockets)
     private final class AuthRangeHTTPServer: @unchecked Sendable {
-        private let listenFD: Int32
+        private let listenFD: Int
         private let body: Data
         private let contentType: String
+        private let redirects: [String: String]
         private let refusedCounter = AtomicCounter()
         private let stopLock = NSLock()
         private var stopped = false
         let baseURL: String
 
-        init(body: Data, contentType: String) throws {
+        init(body: Data, contentType: String, redirects: [String: String] = [:]) throws {
             self.body = body
             self.contentType = contentType
-            let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-            guard fd >= 0 else {
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            self.redirects = redirects
+            var port: UInt16 = 0
+            var socketError: Int32 = 0
+            let fd = rune_test_socket_listen(&port, &socketError)
+            guard fd != -1 else {
+                throw NSError(domain: "RuneTestSocket", code: Int(socketError))
             }
-            var yes: Int32 = 1
-            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
-
-            var addr = sockaddr_in()
-            addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-            addr.sin_family = sa_family_t(AF_INET)
-            addr.sin_port = 0
-            addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-
-            let bound = withUnsafePointer(to: &addr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
-            guard bound == 0, Darwin.listen(fd, 16) == 0 else {
-                Darwin.close(fd)
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-            }
-
-            var boundAddr = sockaddr_in()
-            var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-            _ = withUnsafeMutablePointer(to: &boundAddr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.getsockname(fd, $0, &len)
-                }
-            }
-            let port = UInt16(bigEndian: boundAddr.sin_port)
             self.listenFD = fd
             self.baseURL = "http://127.0.0.1:\(port)/media/clip"
 
@@ -1900,8 +1893,7 @@ struct VideoRuntimeExtendedParityTests {
             stopped = true
             stopLock.unlock()
             if !already {
-                Darwin.shutdown(listenFD, SHUT_RDWR)
-                Darwin.close(listenFD)
+                rune_test_socket_close(listenFD)
             }
         }
 
@@ -1913,83 +1905,81 @@ struct VideoRuntimeExtendedParityTests {
 
         private func acceptLoop() {
             while !isStopped() {
-                var clientAddr = sockaddr_in()
-                var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-                let client = withUnsafeMutablePointer(to: &clientAddr) {
-                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                        Darwin.accept(listenFD, $0, &addrLen)
-                    }
-                }
-                if client < 0 { break }
-                DispatchQueue.global(qos: .utility).async { [weak self] in
-                    self?.handleClient(client)
+                let client = rune_test_socket_accept(listenFD)
+                if client == -1 { break }
+                DispatchQueue.global(qos: .utility).async {
+                    self.handleClient(client)
                 }
             }
         }
 
-        private func handleClient(_ fd: Int32) {
-            defer { Darwin.close(fd) }
+        private func handleClient(_ fd: Int) {
+            defer { rune_test_socket_close(fd) }
             var buffer = Data()
             var tmp = [UInt8](repeating: 0, count: 4096)
             let separator = Data("\r\n\r\n".utf8)
 
-            while !isStopped() {
-                while buffer.range(of: separator) == nil {
-                    let n = Darwin.recv(fd, &tmp, tmp.count, 0)
-                    if n <= 0 { return }
-                    buffer.append(tmp, count: n)
+            while buffer.range(of: separator) == nil {
+                let n = tmp.withUnsafeMutableBytes { bytes in
+                    Int(rune_test_socket_read(fd, bytes.baseAddress, bytes.count))
                 }
-                guard let endRange = buffer.range(of: separator) else { return }
-                let headData = buffer.subdata(in: 0..<endRange.lowerBound)
-                buffer.removeSubrange(0..<endRange.upperBound)
-
-                let headText = String(decoding: headData, as: UTF8.self)
-                let lines = headText.components(separatedBy: "\r\n")
-                var authorized = false
-                var rangeHeader: String? = nil
-                for line in lines.dropFirst() {
-                    guard let colon = line.firstIndex(of: ":") else { continue }
-                    let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
-                    let val = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-                    if name == "authorization" {
-                        authorized = (val == "Bearer let-me-in")
-                    } else if name == "range" {
-                        rangeHeader = val
-                    }
-                }
-
-                if !authorized {
-                    refusedCounter.inc()
-                    let resp = Data("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n".utf8)
-                    if !writeAll(fd, data: resp) { return }
-                    continue
-                }
-
-                let total = body.count
-                var start = 0
-                var end = max(0, total - 1)
-                if let r = rangeHeader, r.lowercased().hasPrefix("bytes=") {
-                    let spec = String(r.dropFirst("bytes=".count))
-                    let parts = spec.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
-                    if parts.count == 2, let a = Int(parts[0]) {
-                        let b = Int(parts[1]).map { min($0, total - 1) } ?? (total - 1)
-                        start = max(0, min(a, total - 1))
-                        end = max(start, b)
-                    }
-                }
-                let sliceLen = end + 1 - start
-                let headerStr = "HTTP/1.1 206 Partial Content\r\nContent-Type: \(contentType)\r\nAccept-Ranges: bytes\r\nContent-Range: bytes \(start)-\(end)/\(total)\r\nContent-Length: \(sliceLen)\r\n\r\n"
-                if !writeAll(fd, data: Data(headerStr.utf8)) { return }
-                if !writeAll(fd, data: body.subdata(in: start..<(end + 1))) { return }
+                if n <= 0 { return }
+                buffer.append(tmp, count: n)
             }
+            guard let endOfHeaders = buffer.range(of: separator)?.lowerBound else { return }
+            let lines = String(decoding: buffer[..<endOfHeaders], as: UTF8.self).components(separatedBy: "\r\n")
+            var authorized = false
+            var requestedRange: String?
+            for line in lines.dropFirst() {
+                guard let colon = line.firstIndex(of: ":") else { continue }
+                let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+                let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                if name == "authorization" || name == "x-media-token" {
+                    authorized = authorized || value == "Bearer let-me-in"
+                } else if name == "range" {
+                    requestedRange = value
+                }
+            }
+            guard authorized else {
+                refusedCounter.inc()
+                _ = writeAll(fd, data: Data("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".utf8))
+                return
+            }
+            if let path = lines.first?.split(separator: " ").dropFirst().first,
+               let destination = redirects[String(path)] {
+                let header = "HTTP/1.1 302 Found\r\nLocation: \(destination)\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                _ = writeAll(fd, data: Data(header.utf8))
+                return
+            }
+
+            var status = "200 OK"
+            var rangeHeader = ""
+            var bytes = 0..<body.count
+            if let requestedRange {
+                let fields = requestedRange.dropFirst("bytes=".count)
+                    .split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+                guard requestedRange.lowercased().hasPrefix("bytes="), fields.count == 2,
+                      let start = Int(fields[0]), bytes.contains(start) else {
+                    _ = writeAll(fd, data: Data("HTTP/1.1 416 Range Not Satisfiable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".utf8))
+                    return
+                }
+                let end = min(Int(fields[1]) ?? (body.count - 1), body.count - 1)
+                guard end >= start else { return }
+                bytes = start..<(end + 1)
+                status = "206 Partial Content"
+                rangeHeader = "Content-Range: bytes \(start)-\(end)/\(body.count)\r\n"
+            }
+            let header = "HTTP/1.1 \(status)\r\nContent-Type: \(contentType)\r\nAccept-Ranges: bytes\r\n\(rangeHeader)Content-Length: \(bytes.count)\r\nConnection: close\r\n\r\n"
+            guard writeAll(fd, data: Data(header.utf8)), lines.first?.hasPrefix("HEAD ") != true else { return }
+            _ = writeAll(fd, data: body.subdata(in: bytes))
         }
 
-        private func writeAll(_ fd: Int32, data: Data) -> Bool {
-            data.withUnsafeBytes { raw -> Bool in
+        private func writeAll(_ fd: Int, data: Data) -> Bool {
+            return data.withUnsafeBytes { raw -> Bool in
                 guard let base = raw.baseAddress else { return true }
                 var sent = 0
                 while sent < data.count {
-                    let n = Darwin.send(fd, base.advanced(by: sent), data.count - sent, 0)
+                    let n = Int(rune_test_socket_write(fd, base.advanced(by: sent), data.count - sent))
                     if n <= 0 { return false }
                     sent += n
                 }
@@ -1998,10 +1988,10 @@ struct VideoRuntimeExtendedParityTests {
         }
     }
 
-    @Test("headless_audio_opens_with_request_headers")
+    @Test("headless_audio_opens_with_request_headers", .enabled(if: nativeMediaAvailableForTests))
     func headlessAudioOpensWithRequestHeaders() throws {
         MediaPlaybackGate.setEnabled(false)
-        let wavData = try Data(contentsOf: Self.fixtureURL("silence.wav"))
+        let wavData = try Data(contentsOf: mediaFixtureURL("silence.wav"))
         let server = try AuthRangeHTTPServer(body: wavData, contentType: "audio/wav")
         defer { server.stop() }
 
@@ -2018,11 +2008,46 @@ struct VideoRuntimeExtendedParityTests {
         #expect(server.refusedCount > 0)
     }
 
+    #if canImport(CRuneMedia)
+    @Test("authenticated media keeps headers on its origin and removes its temporary file on release")
+    func mediaDownloadRedirectsAndLifetime() throws {
+        let bytes = Data([0, 1, 2, 3])
+        let otherOrigin = try AuthRangeHTTPServer(body: bytes, contentType: "audio/wav")
+        defer { otherOrigin.stop() }
+        let server = try AuthRangeHTTPServer(body: bytes, contentType: "audio/wav", redirects: [
+            "/media/clip-same.wav": "/media/clip.wav",
+            "/media/clip-cross.wav": otherOrigin.baseURL + ".wav",
+        ])
+        defer { server.stop() }
+        func request(_ suffix: String) -> MediaRequest {
+            Player.request(server.baseURL + suffix)
+                .header("Authorization", "Bearer let-me-in")
+                .header("X-Media-Token", "Bearer let-me-in")
+        }
+        let saved: URL
+        do {
+            let media = try DesktopMediaSource(request: request("-same.wav"))
+            saved = media.url
+            let downloaded = try withExtendedLifetime(media) {
+                #expect(FileManager.default.fileExists(atPath: saved.deletingLastPathComponent().path))
+                return try Data(contentsOf: saved)
+            }
+            #expect(saved.pathExtension == "wav")
+            #expect(downloaded == bytes)
+        }
+        #expect(!FileManager.default.fileExists(atPath: saved.deletingLastPathComponent().path))
+        #expect(throws: (any Error).self) { try DesktopMediaSource(request: request("-cross.wav")) }
+        #expect(otherOrigin.refusedCount == 1)
+    }
+    #endif
+
+    #endif
+
     @Test("headless_audio_time_follows_the_virtual_clock")
     func headlessAudioTimeFollowsTheVirtualClock() {
         MediaPlaybackGate.setEnabled(false)
         struct S {}
-        let a = Player.audio(Self.fixtureURL("silence.wav").path)
+        let a = Self.clockPlayer(.audio)
         let ends = AtomicCounter()
         a.setWaker {
             if a.state == .ended {
@@ -2076,8 +2101,8 @@ struct VideoRuntimeExtendedParityTests {
 
     @Test("headless audio and drawn video follow the clock of the runtime driving them")
     func headlessMediaIgnoresFramesOnAnotherThread() {
-        let audio = Player.audio(Self.fixtureURL("silence.wav").path)
-        let video = Player(source: .file(Self.fixtureURL("rgbw.mp4")))
+        let audio = Self.clockPlayer(.audio)
+        let video = Self.clockPlayer(.video)
         let rt = Runtime(state: video, viewport: Vec2(32, 18), view: Self.scrolledVideoView)
         audio.play()
         video.play()
@@ -2145,7 +2170,7 @@ struct VideoRuntimeExtendedParityTests {
         _ = old?.frame(at: 5.0)
         old = nil
 
-        let a = Player.audio(Self.fixtureURL("silence.wav").path)
+        let a = Self.clockPlayer(.audio)
         let rt = Runtime<S>(
             state: S(),
             viewport: Vec2(10, 10),
@@ -2157,10 +2182,10 @@ struct VideoRuntimeExtendedParityTests {
         #expect(abs(a.time - 0.1) < 1e-6)
     }
 
-    @Test("preload_decodes_the_first_frame_before_anything_draws_it")
+    @Test("preload_decodes_the_first_frame_before_anything_draws_it", .enabled(if: nativeMediaAvailableForTests))
     func preloadDecodesTheFirstFrameBeforeAnythingDrawsIt() {
         MediaPlaybackGate.setEnabled(false)
-        let v = Player(source: .file(Self.fixtureURL("rgbw.mp4")))
+        let v = Player(source: .file(mediaFixtureURL("rgbw.mp4")))
         v.clearSurfaceForPreloadTest()
         #expect(v.surface.currentFrame() == nil)
 
@@ -2172,7 +2197,7 @@ struct VideoRuntimeExtendedParityTests {
         #expect(v.surface.currentFrame() != nil)
 
         v.preload()
-        let audio = Player.audio(Self.fixtureURL("silence.wav").path)
+        let audio = Player.audio(mediaFixtureURL("silence.wav").path)
         audio.preloadPosterDirectForTest()
         Thread.sleep(forTimeInterval: 0.05)
         #expect(audio.surface.currentFrame() == nil)

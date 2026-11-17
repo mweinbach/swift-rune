@@ -406,7 +406,6 @@ extension Runtime {
         let savedGrowthRows = growthRows
         let savedGrowthStacks = growthStacks
         let savedLastGrowthStepTime = lastGrowthStepTime
-        let savedGrowthSubstepAccumulator = growthSubstepAccumulator
 
         var expandedRoot = cached.expandedRootEl
         if cached.virtualExpansion.anyVirtualList {
@@ -443,7 +442,6 @@ extension Runtime {
             growthRows = savedGrowthRows
             growthStacks = savedGrowthStacks
             lastGrowthStepTime = savedLastGrowthStepTime
-            growthSubstepAccumulator = savedGrowthSubstepAccumulator
             return nil
         }
 
@@ -471,7 +469,6 @@ extension Runtime {
                 growthRows = savedGrowthRows
                 growthStacks = savedGrowthStacks
                 lastGrowthStepTime = savedLastGrowthStepTime
-                growthSubstepAccumulator = savedGrowthSubstepAccumulator
                 pass = buildMeasureResult(
                     rootEl: expandedRoot,
                     expandedContextOverride: cached.virtualExpansion,

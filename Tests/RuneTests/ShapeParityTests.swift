@@ -203,7 +203,7 @@ struct ShapeParityTests {
 
     @Test("where_faded_pieces_meet_is_no_darker_than_one")
     func whereFadedPiecesMeetIsNoDarkerThanOne() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         func px(_ bytes: [UInt8], _ x: Int, _ y: Int) -> [UInt8] {
             let i = (y * 80 + x) * 4
             return Array(bytes[i..<(i + 4)])

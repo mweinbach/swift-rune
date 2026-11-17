@@ -89,6 +89,10 @@ private enum BidiStrongClass {
     case neutral
 }
 
+internal func containsStrongRTL(_ text: String) -> Bool {
+    text.unicodeScalars.contains { bidiClass(of: $0) == .strongR }
+}
+
 private func bidiClass(of scalar: Unicode.Scalar) -> BidiStrongClass {
     let v = scalar.value
     switch v {

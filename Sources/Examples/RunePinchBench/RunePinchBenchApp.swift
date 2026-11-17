@@ -288,7 +288,7 @@ public enum RunePinchBenchApp {
         }
         let samples = flagValue("--samples", in: args).flatMap(Int.init) ?? 9
         #if DEBUG
-        fputs("pinch_bench: debug build; time a release build\n", stderr)
+        RuneStandardIO.error("pinch_bench: debug build; time a release build\n")
         #endif
         let report = try runReport(samples: samples, cards: cards)
         print(report.output)

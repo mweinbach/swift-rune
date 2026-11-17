@@ -10,6 +10,10 @@ import AppKit
 /// Native menu bar + dock menu + stdin control probe mirroring `crates/rune/examples/menu_probe.rs`.
 @main
 public enum RuneMenuProbeApp {
+    private static let quickAccelerator = "mod+alt+shift+k"
+    private static let namedQuickAccelerator = "mod+shift+p"
+    private static let settingsAccelerator = "mod+shift+y"
+
     public struct State: Sendable {
         public var fired: UInt64 = 0
         public var status: String = "idle"
@@ -26,43 +30,49 @@ public enum RuneMenuProbeApp {
     }
 
     public static func menuItems(disabled: Bool = false, checked: Bool = true) -> [NativeMenuItem<State>] {
+        makeMenuItems(disabled: disabled, checked: checked, replacement: false)
+    }
+
+    private static func makeMenuItems(disabled: Bool, checked: Bool, replacement: Bool) -> [NativeMenuItem<State>] {
         [
             NativeMenuItem<State>(
                 id: "quick",
-                title: "Open Quick Panel",
+                title: replacement ? "Replacement Panel" : "Open Quick Panel",
                 location: .app,
-                keyEquivalent: "cmd+alt+shift+k",
+                keyEquivalent: replacement ? "mod+alt+shift+r" : quickAccelerator,
                 enabled: !disabled
             ) { s, _ in
                 s.fired &+= 1
                 s.status = "triggered menu action #\(s.fired)"
-                print("FIRED \(s.fired)")
-                fflush(stdout)
+                if replacement { RuneStandardIO.output("REPLACED quick\n") }
+                RuneStandardIO.output("FIRED \(s.fired)\n")
             },
             NativeMenuItem<State>(
                 id: "named_quick",
                 title: "Named Quick Panel",
                 location: .named("Rune Tools"),
+                keyEquivalent: namedQuickAccelerator,
+                keysFirst: true,
                 enabled: !disabled
             ) { s, _ in
                 s.fired &+= 1
                 s.status = "triggered menu action #\(s.fired)"
-                print("FIRED \(s.fired)")
-                fflush(stdout)
+                RuneStandardIO.output("FIRED \(s.fired)\n")
             },
             .separator(location: .named("Rune Tools")),
             NativeMenuItem<State>(
                 id: "named_settings",
                 title: "Named Settings",
                 location: .named("Rune Tools"),
+                keyEquivalent: settingsAccelerator,
+                keysFirst: true,
                 enabled: !disabled,
                 checked: checked
             ) { s, _ in
                 s.fired &+= 1
                 s.checked.toggle()
                 s.status = "triggered menu action #\(s.fired)"
-                print("FIRED \(s.fired)")
-                fflush(stdout)
+                RuneStandardIO.output("FIRED \(s.fired)\n")
             },
             NativeMenuItem<State>(
                 id: "dock_quick",
@@ -72,8 +82,7 @@ public enum RuneMenuProbeApp {
             ) { s, _ in
                 s.fired &+= 1
                 s.status = "triggered menu action #\(s.fired)"
-                print("FIRED \(s.fired)")
-                fflush(stdout)
+                RuneStandardIO.output("FIRED \(s.fired)\n")
             },
         ]
     }
@@ -106,9 +115,25 @@ public enum RuneMenuProbeApp {
         for item in menuItems() {
             app = app.menuItem(item)
         }
+        let quick = try Chord.parse(quickAccelerator)
+        let namedQuick = try Chord.parse(namedQuickAccelerator)
+        let settings = try Chord.parse(settingsAccelerator)
+        app = app.onKey { _, event, _ in
+            if quick.matches(event) {
+                RuneStandardIO.output("KEY handled quick\n")
+                return true
+            }
+            if namedQuick.matches(event) {
+                RuneStandardIO.output("KEY handled named_quick\n")
+                return true
+            }
+            if settings.matches(event) {
+                RuneStandardIO.output("KEY declined named_settings\n")
+            }
+            return false
+        }
         app = app.onReady { _ in
-            print("READY")
-            fflush(stdout)
+            RuneStandardIO.output("READY\n")
         }
 
         let handle = app.handle()
@@ -122,20 +147,26 @@ public enum RuneMenuProbeApp {
                         do {
                             try handle.setMenu(menuItems(disabled: true))
                         } catch {
-                            print("ERR \(error)")
+                            RuneStandardIO.output("ERR \(error)\n")
                         }
                     case "enable":
                         handle.update { s, _ in s.disabled = false }
                         do {
                             try handle.setMenu(menuItems(disabled: false))
                         } catch {
-                            print("ERR \(error)")
+                            RuneStandardIO.output("ERR \(error)\n")
                         }
                     case "clear":
                         do {
                             try handle.setMenu([])
                         } catch {
-                            print("ERR \(error)")
+                            RuneStandardIO.output("ERR \(error)\n")
+                        }
+                    case "replace":
+                        do {
+                            try handle.setMenu(makeMenuItems(disabled: false, checked: true, replacement: true))
+                        } catch {
+                            RuneStandardIO.output("ERR \(error)\n")
                         }
                     case "status":
                         let errors = handle.takeMenuErrors()
@@ -143,19 +174,25 @@ public enum RuneMenuProbeApp {
                         let native = DispatchQueue.main.sync {
                             MainActor.assumeIsolated { nativeStatus() }
                         }
-                        print("STATUS \(native) errors=\(errors.count)")
+                        RuneStandardIO.output("STATUS \(native) errors=\(errors.count)\n")
+                        #elseif os(Linux) || os(Windows)
+                        let snapshot = AppMenuBridge.snapshot(for: handle.shared)
+                        let items = snapshot.items.filter { !$0.isSeparator && $0.location != .dock }
+                        let enabled = items.filter(\.enabled).count
+                        RuneStandardIO.output(
+                            "STATUS native_supported=\(AppMenuBridge.defaultNativeSupported) model_items=\(items.count)"
+                                + " model_enabled=\(enabled) revision=\(snapshot.revision) errors=\(errors.count)\n"
+                        )
                         #else
-                        print("STATUS unsupported errors=\(errors.count)")
+                        RuneStandardIO.output("STATUS unsupported errors=\(errors.count)\n")
                         #endif
-                        fflush(stdout)
                     case "quit":
                         handle.quit()
                         return
                     case "":
                         continue
                     default:
-                        print("UNKNOWN \(cmd)")
-                        fflush(stdout)
+                        RuneStandardIO.output("UNKNOWN \(cmd)\n")
                     }
                 }
                 handle.quit()

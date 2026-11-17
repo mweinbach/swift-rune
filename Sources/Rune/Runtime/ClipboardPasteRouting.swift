@@ -67,12 +67,12 @@ extension RichClipboardPayload {
     fileprivate var pasteIsRich: Bool {
         content.html != nil || content.rtf != nil || anyImage != nil || !anyFiles.isEmpty
     }
-    fileprivate var pasteIsEmpty: Bool { content.text.isEmpty && !pasteIsRich }
+    var pasteIsEmpty: Bool { content.text.isEmpty && !pasteIsRich }
 
     /// What a read for `forms` fetches (`Purpose::answer`): `.text` only when the clipboard has
     /// plain text (`Backend::text`); `.rich` the text forms (`text_forms`, `nil` when an image or
     /// files were all it had); `.all` every form.
-    fileprivate func answer(_ forms: Clipboard.Forms) -> ClipboardContent? {
+    func answer(_ forms: Clipboard.Forms) -> ClipboardContent? {
         switch forms {
         case .text:
             guard !content.text.isEmpty || !pasteIsRich else { return nil }
@@ -107,6 +107,8 @@ internal enum ClipboardReply {
 
 /// The runtime's paste and read bookkeeping (`Runtime::paste_request`, `read_requests`, `clipboard_reads`).
 internal struct ClipboardRoutingState {
+    /// Browser clipboard reads complete asynchronously, after a user activation or a paste event.
+    var hostAnswersRequests = false
     var pasteRequest: String?? = nil
     var readRequests: [UInt64] = []
     var clipboardReads: [(id: UInt64, read: TxClipboardRead.Fn)] = []
@@ -238,6 +240,7 @@ extension Runtime {
     /// Answers the latched paste and reads (`flush_memory`): a paste skips an empty clipboard;
     /// a read always hears back.
     private func answerClipboardRequests() {
+        if clipboardRouting.hostAnswersRequests { return }
         guard clipboardRouting.pasteRequest != nil || !clipboardRouting.readRequests.isEmpty else { return }
         let payload = currentClipboardPayload()
         if let target = clipboardRouting.pasteRequest {
@@ -260,6 +263,10 @@ extension Runtime {
     internal func pasteClipboardNow(at now: Double) -> Bool {
         guard acceptsPaste else { return false }
         let target = pasteTarget
+        if clipboardRouting.hostAnswersRequests {
+            clipboardRouting.pasteRequest = .some(target)
+            return true
+        }
         if let content = currentClipboardPayload()?.answer(pasteForms(target)) {
             runPasteReply(markOwnPills(content.untrusted()), target: .some(target), at: now)
         }

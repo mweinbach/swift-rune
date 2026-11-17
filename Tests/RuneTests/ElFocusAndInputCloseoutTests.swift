@@ -551,11 +551,7 @@ struct ElFocusAndInputCloseoutTests {
         SpellChecker.shared.setAvailableLanguages(["ja-JP", "en-US", "de-DE"])
         SpellChecker.shared.setLanguages(["en-US"])
         defer {
-            #if os(macOS)
-            SpellChecker.shared.setBackend(MacOSSpellChecker())
-            #else
-            SpellChecker.shared.setBackend(CustomDictionarySpellChecker())
-            #endif
+            SpellChecker.shared.setBackend(SpellChecker.platformBackend())
             SpellChecker.shared.setAvailableLanguages(prevAvail)
             SpellChecker.shared.setLanguages(prevLangs)
         }

@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
 import RuneTaffy
 #if canImport(CoreText) && canImport(CoreGraphics)
@@ -134,6 +137,7 @@ final class RetainedLayoutCoordinator {
                 hasher.combine(rawEdit.multiline)
                 hasher.combine(scale)
                 hasher.combine(resolved.style)
+                if resolved.style.fontSmoothing == .systemDefault { hasher.combine(textSystem.smoothing) }
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
                 let keep: TextKeep = resolved.isSecure ? .secret : .cached
                 if !resolved.isSecure, !measureStr.isEmpty, textLayouts != nil {
@@ -145,7 +149,8 @@ final class RetainedLayoutCoordinator {
                         pixelScale: max(scale, 1.0),
                         fontEpoch: fEpoch,
                         languageTag: langTag,
-                        maxWidth: nil
+                        maxWidth: nil,
+                        defaultSmoothing: textSystem.smoothing
                     )
                     nonSecretLeaves.append(TextLeafFallback(
                         index: flatIndex,
@@ -210,6 +215,7 @@ final class RetainedLayoutCoordinator {
                 hasher.combine(resolved.pretty)
                 hasher.combine(scale)
                 hasher.combine(resolved.style)
+                if resolved.style.fontSmoothing == .systemDefault { hasher.combine(textSystem.smoothing) }
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
                 let keep: TextKeep = resolved.isSecure ? .secret : .cached
                 let isClampedOrEllipsis = resolved.style.maxLines > 0 || resolved.style.wrap == .ellipsis
@@ -224,7 +230,8 @@ final class RetainedLayoutCoordinator {
                         fontEpoch: fEpoch,
                         languageTag: langTag,
                         maxWidth: nil,
-                        pretty: resolved.pretty
+                        pretty: resolved.pretty,
+                        defaultSmoothing: textSystem.smoothing
                     )
                     nonSecretLeaves.append(TextLeafFallback(
                         index: flatIndex,

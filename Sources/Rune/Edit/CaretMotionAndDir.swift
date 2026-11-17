@@ -2,7 +2,7 @@ import Foundation
 #if canImport(CoreText)
 import CoreText
 #endif
-#if canImport(CoreFoundation)
+#if canImport(Darwin) && canImport(CoreFoundation)
 import CoreFoundation
 #endif
 
@@ -97,7 +97,7 @@ public enum CaretMotion: Sendable, Equatable {
         if hidden { return .logical }
         if shaped.forcedDirection == .rtl { return .visual }
         // A paragraph laid out right to left (`layout.is_rtl()`).
-        if shaped.lineIsRTL.contains(true) { return .visual }
+        if shaped.lineIsRTL.contains(true) || !shaped.portableBidiCells.isEmpty { return .visual }
         #if canImport(CoreText) && canImport(CoreGraphics)
         for rec in shaped.lineStrings {
             if TextSystem.isRTLParagraph(rec.text) {
@@ -133,28 +133,94 @@ public enum CaretLanding: Sendable, Equatable {
     case edge
 }
 
+#if canImport(CoreText) && canImport(CoreGraphics)
+extension CTLine {
+    internal var hasMixedRunDirections: Bool {
+        guard let runs = CTLineGetGlyphRuns(self) as? [CTRun], let first = runs.first else { return false }
+        let rtl = CTRunGetStatus(first).contains(.rightToLeft)
+        return runs.dropFirst().contains { CTRunGetStatus($0).contains(.rightToLeft) != rtl }
+    }
+
+    /// A trailing edge's index is the last UTF-16 unit of the cluster. Consumers use insertion indices.
+    internal func enumerateInsertionOffsets(_ visit: @escaping (Int, Bool, CGFloat) -> Bool) {
+        CTLineEnumerateCaretOffsets(self) { x, index, leading, stop in
+            if visit(leading ? index : index + 1, leading, CGFloat(x)) { stop.pointee = true }
+        }
+    }
+
+    internal func insertionOffset(at utf16: Int, upstream: Bool) -> CGFloat {
+        var secondary: CGFloat = 0
+        var offset = CTLineGetOffsetForStringIndex(self, utf16, &secondary)
+        if offset != secondary {
+            enumerateInsertionOffsets { index, leading, x in
+                guard index == utf16 else { return false }
+                offset = x
+                return leading != upstream
+            }
+        }
+        return offset
+    }
+}
+
+extension ShapedText {
+    /// Visual grapheme cells in native device pixels, keyed by their authored UTF-8 ranges.
+    internal func coreTextVisualCells(on row: Int, in ctLine: CTLine) -> [PortableCaretCell] {
+        let rec = lineStrings[row]
+        var offsets: [Int: SIMD2<Float>] = [:]
+        ctLine.enumerateInsertionOffsets { index, leading, x in
+            offsets[index, default: SIMD2(repeating: .nan)][leading ? 0 : 1] = Float(x)
+            return false
+        }
+        func x(at index: Int, leading: Bool) -> Float {
+            if let pair = offsets[index] {
+                let preferred = leading ? pair.x : pair.y
+                if preferred.isFinite { return preferred }
+                let alternate = leading ? pair.y : pair.x
+                if alternate.isFinite { return alternate }
+            }
+            return Float(CTLineGetOffsetForStringIndex(ctLine, index, nil))
+        }
+        let nativeStart = CTLineGetStringRange(ctLine).location
+        let map = markerMap
+        let meta = map.lines.indices.contains(row) ? map.lines[row] : nil
+        func nativeIndex(for localU16: Int) -> Int {
+            if let meta, !map.entries.isEmpty {
+                let absolute = map.shapedU16(forAuthU16: meta.authU16Start + localU16)
+                let clamped = min(max(absolute, meta.shapedU16Start), meta.shapedU16End)
+                return nativeStart + clamped - meta.shapedU16Start
+            }
+            return nativeStart + localU16
+        }
+        var cells: [PortableCaretCell] = []
+        var utf8 = rec.utf8Start
+        var u16 = 0
+        for ch in rec.text {
+            let leading = x(at: nativeIndex(for: u16), leading: true)
+            u16 += ch.utf16.count
+            let trailing = x(at: nativeIndex(for: u16), leading: false)
+            let end = utf8 + ch.utf8.count
+            cells.append(PortableCaretCell(range: utf8..<end, left: min(leading, trailing),
+                                          width: abs(trailing - leading), rtl: leading > trailing,
+                                          space: ch == " " || ch == "\u{A0}"))
+            utf8 = end
+        }
+        cells.sort { ($0.left, $0.range.lowerBound) < ($1.left, $1.range.lowerBound) }
+        return cells
+    }
+}
+#endif
+
 public enum CaretVisualStepper: Sendable {
-    private enum Seek: Equatable {
-        case trySide(side: TextAffinity, then: TextAffinity?)
-        case found(Int, TextAffinity)
-        case edge
-    }
+    private struct VisualLine {
+        var text: String
+        var utf8Start: Int
+        var flow: TextFlow
+        var cells: [PortableCaretCell]
+        var caretX: Float
 
-    private enum Tried {
-        case moved(Int, TextAffinity)
-        case stayed
-    }
-
-    private static func stepSeek(_ state: Seek, event: Tried) -> Seek {
-        switch (state, event) {
-        case (.trySide, .moved(let j, let side)):
-            return .found(j, side)
-        case (.trySide(_, let thenSide?), .stayed):
-            return .trySide(side: thenSide, then: nil)
-        case (.trySide(_, nil), .stayed):
-            return .edge
-        default:
-            return state
+        func neighbor(right: Bool) -> Int? {
+            right ? cells.firstIndex { $0.left + $0.width > caretX + 0.001 }
+                  : cells.lastIndex { $0.left < caretX - 0.001 }
         }
     }
 
@@ -166,45 +232,27 @@ public enum CaretVisualStepper: Sendable {
         arrow: CaretArrow,
         hidden: Bool
     ) -> (CaretLanding, TextFlow)? {
-        guard CaretMotion.of(shaped, hidden: hidden) == .visual else {
-            return nil
+        guard CaretMotion.of(shaped, hidden: hidden) == .visual else { return nil }
+        guard let line = visualLine(in: shaped, at: utf8Offset, side: side) else {
+            return (.edge, shaped.forcedDirection ?? .ltr)
         }
-        #if canImport(CoreText) && canImport(CoreGraphics)
-        guard !shaped.lineStrings.isEmpty else {
-            return (.edge, .ltr)
+        let right = arrow == .right || arrow == .wordRight
+        guard var index = line.neighbor(right: right) else { return (.edge, line.flow) }
+        if arrow == .wordLeft || arrow == .wordRight {
+            let boundaries = Set(line.text.ranges(of: #/\b/#.wordBoundaryKind(.default)).map {
+                line.utf8Start + line.text.utf8.distance(from: line.text.startIndex, to: $0.lowerBound)
+            })
+            let step = right ? 1 : -1
+            while line.cells.indices.contains(index + step) {
+                let cell = line.cells[index]
+                let edge = right == cell.rtl ? cell.range.lowerBound : cell.range.upperBound
+                if boundaries.contains(edge) && !cell.space { break }
+                index += step
+            }
         }
-        let lineIdx = lineIndex(in: shaped, utf8Offset: utf8Offset, side: side)
-        let rec = shaped.lineStrings[lineIdx]
-        // The way its paragraph lays out, as shaping resolved it (a neutral `dirByParagraph`
-        // paragraph takes the one before it's); else as its words read.
-        let paraFlow: TextFlow = shaped.forcedDirection
-            ?? (lineIdx < shaped.lineIsRTL.count ? (shaped.lineIsRTL[lineIdx] ? .rtl : .ltr) : (TextSystem.isRTLParagraph(rec.text) ? .rtl : .ltr))
-        guard let ctLine = rec.ctLine else {
-            return (.edge, paraFlow)
-        }
-
-        let authText = shaped.markerMap.authText
-        let lineAuthUTF8Start = rec.utf8Start
-        let lineAuthUTF8End = lineAuthUTF8Start + rec.text.utf8.count
-        let clampedAuthUTF8 = min(max(lineAuthUTF8Start, utf8Offset), lineAuthUTF8End)
-
-        let stops = visualCaretStops(
-            in: ctLine,
-            shaped: shaped,
-            lineIdx: lineIdx,
-            authText: authText,
-            lineAuthUTF8Start: lineAuthUTF8Start,
-            lineAuthUTF8End: lineAuthUTF8End
-        )
-        guard !stops.isEmpty else {
-            return (.edge, paraFlow)
-        }
-
-        let landing = visual(stops: stops, at: clampedAuthUTF8, side: side, arrow: arrow)
-        return (landing, paraFlow)
-        #else
-        return (.edge, .ltr)
-        #endif
+        let cell = line.cells[index]
+        if right == cell.rtl { return (.at(cell.range.lowerBound, .downstream), line.flow) }
+        return (.at(cell.range.upperBound, .upstream), line.flow)
     }
 
     /// True if the cluster just right (or left) of `utf8Offset` is whitespace running that direction (`caret_motion.rs:223`).
@@ -214,175 +262,41 @@ public enum CaretVisualStepper: Sendable {
         side: TextAffinity,
         right: Bool
     ) -> Bool {
+        guard let line = visualLine(in: shaped, at: utf8Offset, side: side),
+              let index = line.neighbor(right: right) else { return false }
+        return line.cells[index].space && line.cells[index].rtl != right
+    }
+
+    private static func visualLine(in shaped: ShapedText, at byte: Int, side: TextAffinity) -> VisualLine? {
+        let row = shaped.lineIndex(forUTF8Offset: byte, affinity: side)
+        func flow(_ text: String) -> TextFlow {
+            let rtl = shaped.lineIsRTL.indices.contains(row) ? shaped.lineIsRTL[row] : TextSystem.isRTLParagraph(text)
+            return shaped.forcedDirection ?? (rtl ? .rtl : .ltr)
+        }
+        if shaped.portableLines.indices.contains(row) {
+            let rec = shaped.portableLines[row]
+            let x = shaped.portableCaret(on: row, at: byte, upstream: side == .upstream).x - rec.originX
+            return VisualLine(text: rec.text, utf8Start: rec.utf8Start, flow: flow(rec.text),
+                              cells: shaped.visualCells(on: row), caretX: x)
+        }
         #if canImport(CoreText) && canImport(CoreGraphics)
-        guard !shaped.lineStrings.isEmpty else { return false }
-        let lineIdx = lineIndex(in: shaped, utf8Offset: utf8Offset, side: side)
-        let rec = shaped.lineStrings[lineIdx]
-        guard let ctLine = rec.ctLine else { return false }
-        let authText = shaped.markerMap.authText
-        let stops = visualCaretStops(
-            in: ctLine,
-            shaped: shaped,
-            lineIdx: lineIdx,
-            authText: authText,
-            lineAuthUTF8Start: rec.utf8Start,
-            lineAuthUTF8End: rec.utf8Start + rec.text.utf8.count
-        )
-        guard let curIdx = findStopIndex(stops: stops, utf8: utf8Offset, side: side) else { return false }
-        let neighborIdx = right ? curIdx + 1 : curIdx - 1
-        guard neighborIdx >= 0 && neighborIdx < stops.count else { return false }
-        let lo = min(stops[curIdx].authUTF8, stops[neighborIdx].authUTF8)
-        let hi = max(stops[curIdx].authUTF8, stops[neighborIdx].authUTF8)
-        guard hi > lo, hi <= authText.utf8.count else { return false }
-        let sIdx = authText.utf8.index(authText.utf8.startIndex, offsetBy: lo)
-        let eIdx = authText.utf8.index(authText.utf8.startIndex, offsetBy: hi)
-        let sub = String(decoding: authText.utf8[sIdx..<eIdx], as: UTF8.self)
-        let isSpace = !sub.isEmpty && sub.unicodeScalars.allSatisfy { $0.value == 0x20 || $0.value == 0xA0 }
-        let neighborRTL = stops[curIdx].isRTL
-        return isSpace && (neighborRTL != right)
+        guard shaped.lineStrings.indices.contains(row) else { return nil }
+        let rec = shaped.lineStrings[row]
+        guard let ctLine = rec.ctLine else {
+            return VisualLine(text: rec.text, utf8Start: rec.utf8Start, flow: flow(rec.text), cells: [], caretX: 0)
+        }
+
+        let cells = shaped.coreTextVisualCells(on: row, in: ctLine)
+        let localByte = rec.text.graphemeByte(atOrBefore: max(byte, rec.utf8Start) - rec.utf8Start)
+        let insertion = rec.utf8Start + localByte
+        let leading = cells.first { $0.range.lowerBound == insertion }?.leadingX
+        let trailing = cells.first { $0.range.upperBound == insertion }?.trailingX
+        let x = side == .upstream ? trailing ?? leading : leading ?? trailing
+        return VisualLine(text: rec.text, utf8Start: rec.utf8Start, flow: flow(rec.text), cells: cells, caretX: x ?? 0)
         #else
-        return false
+        return nil
         #endif
     }
-
-    #if canImport(CoreText) && canImport(CoreGraphics)
-    private struct VisualStop {
-        var authUTF8: Int
-        var x: Float
-        var affinity: TextAffinity
-        var isRTL: Bool
-        var isWordBoundary: Bool
-    }
-
-    private static func lineIndex(in shaped: ShapedText, utf8Offset: Int, side: TextAffinity) -> Int {
-        for (i, rec) in shaped.lineStrings.enumerated() {
-            let start = rec.utf8Start
-            let end = start + rec.text.utf8.count
-            if utf8Offset < end || (utf8Offset == end && (side == .upstream || i == shaped.lineStrings.count - 1)) {
-                return i
-            }
-        }
-        return max(0, shaped.lineStrings.count - 1)
-    }
-
-    private static func authU16ToAuthUTF8(authText: String, u16Offset: Int) -> Int {
-        let target = max(0, min(u16Offset, authText.utf16.count))
-        let u16Idx = authText.utf16.index(authText.utf16.startIndex, offsetBy: target)
-        let strIdx = u16Idx.samePosition(in: authText) ?? authText.endIndex
-        return authText.utf8.distance(from: authText.utf8.startIndex, to: strIdx.samePosition(in: authText.utf8)!)
-    }
-
-    private static func visualCaretStops(
-        in ctLine: CTLine,
-        shaped: ShapedText,
-        lineIdx: Int,
-        authText: String,
-        lineAuthUTF8Start: Int,
-        lineAuthUTF8End: Int
-    ) -> [VisualStop] {
-        let baseAuthU16: Int
-        if lineIdx < shaped.markerMap.lines.count {
-            let lr = shaped.markerMap.lines[lineIdx]
-            baseAuthU16 = lr.authU16Start - lr.shapedU16Start
-        } else {
-            let startIdx = authText.utf8.index(authText.utf8.startIndex, offsetBy: min(lineAuthUTF8Start, authText.utf8.count))
-            baseAuthU16 = authText.utf16.distance(from: authText.utf16.startIndex, to: startIdx.samePosition(in: authText.utf16)!)
-        }
-
-        let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] ?? []
-        var stops: [VisualStop] = []
-
-        for run in runs {
-            let glyphCount = CTRunGetGlyphCount(run)
-            guard glyphCount > 0 else { continue }
-            let isRTL = CTRunGetStatus(run).contains(.rightToLeft)
-            var indices = Array<CFIndex>(repeating: 0, count: glyphCount)
-            CTRunGetStringIndices(run, CFRangeMake(0, glyphCount), &indices)
-            let range = CTRunGetStringRange(run)
-            let runEndU16 = range.location + range.length
-
-            var boundariesU16: [Int] = []
-            if isRTL {
-                boundariesU16.append(runEndU16)
-                for g in 0..<glyphCount {
-                    boundariesU16.append(indices[g])
-                }
-            } else {
-                for g in 0..<glyphCount {
-                    boundariesU16.append(indices[g])
-                }
-                boundariesU16.append(runEndU16)
-            }
-
-            var seenOffsets: Set<Int> = []
-            for localShapedU16 in boundariesU16 {
-                let authU16 = max(0, baseAuthU16 + localShapedU16)
-                let authUTF8 = min(max(lineAuthUTF8Start, authU16ToAuthUTF8(authText: authText, u16Offset: authU16)), lineAuthUTF8End)
-                if seenOffsets.contains(authUTF8) { continue }
-                seenOffsets.insert(authUTF8)
-                let x = Float(CTLineGetOffsetForStringIndex(ctLine, localShapedU16, nil))
-                let affinity: TextAffinity = isRTL ? .upstream : .downstream
-                stops.append(VisualStop(
-                    authUTF8: authUTF8,
-                    x: x,
-                    affinity: affinity,
-                    isRTL: isRTL,
-                    isWordBoundary: true
-                ))
-            }
-        }
-
-        stops.sort { a, b in
-            if abs(a.x - b.x) > 0.01 { return a.x < b.x }
-            return a.authUTF8 < b.authUTF8
-        }
-        return stops
-    }
-
-    private static func findStopIndex(stops: [VisualStop], utf8: Int, side: TextAffinity) -> Int? {
-        let matches = stops.enumerated().filter { $0.element.authUTF8 == utf8 }
-        if matches.isEmpty {
-            return stops.enumerated().min(by: { abs($0.element.authUTF8 - utf8) < abs($1.element.authUTF8 - utf8) })?.offset
-        }
-        if let exact = matches.first(where: { $0.element.affinity == side }) {
-            return exact.offset
-        }
-        return matches.first?.offset
-    }
-
-    private static func visual(stops: [VisualStop], at utf8: Int, side: TextAffinity, arrow: CaretArrow) -> CaretLanding {
-        let other: TextAffinity = (side == .downstream) ? .upstream : .downstream
-        var state = Seek.trySide(side: side, then: other)
-        while true {
-            switch state {
-            case .trySide(let curSide, _):
-                guard let idx = findStopIndex(stops: stops, utf8: utf8, side: curSide) else {
-                    state = .edge
-                    continue
-                }
-                let nextIdx: Int
-                switch arrow {
-                case .left, .wordLeft:
-                    nextIdx = idx - 1
-                case .right, .wordRight:
-                    nextIdx = idx + 1
-                }
-                if nextIdx >= 0 && nextIdx < stops.count {
-                    let target = stops[nextIdx]
-                    let cur = stops[idx]
-                    let moved = target.authUTF8 != utf8 || abs(target.x - cur.x) > 0.01
-                    state = stepSeek(state, event: moved ? .moved(target.authUTF8, target.affinity) : .stayed)
-                } else {
-                    state = stepSeek(state, event: .stayed)
-                }
-            case .found(let j, let s):
-                return .at(j, s)
-            case .edge:
-                return .edge
-            }
-        }
-    }
-    #endif
 }
 
 // MARK: - UAX #29 Word Segmentation + ZWNJ + Pill Stepping (caret_motion.rs:36-135)
@@ -501,7 +415,7 @@ extension TextEdit {
         let slice = String(text[lo..<hi])
         var rawSegments: [(start: Int, end: Int, isWord: Bool)] = []
 
-        #if canImport(CoreFoundation)
+        #if canImport(Darwin) && canImport(CoreFoundation)
         let cfStr = slice as CFString
         let cfLen = CFStringGetLength(cfStr)
         let tok = CFStringTokenizerCreate(

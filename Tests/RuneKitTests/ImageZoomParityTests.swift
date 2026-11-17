@@ -143,7 +143,9 @@ struct ImageZoomParityTests {
         #expect(zoom.level == 100)
 
         // Keyboard shortcuts: Cmd+=, Cmd+-, 0
-        #expect(zoom.handleKey(KeyEvent(key: .command("+"), mods: Mods(cmd: true)), tx: &tx, now: t) == false)
+        let otherModifier = KeyPlatform.current == .mac ? Mods(ctrl: true) : Mods(logo: true)
+        #expect(zoom.handleKey(KeyEvent(key: .command("+"), mods: otherModifier), tx: &tx, now: t) == nil)
+        #expect(zoom.handleKey(KeyEvent(key: .command("+"), mods: RuneKitTestKey.primaryMods()), tx: &tx, now: t) == false)
         #expect(zoom.glide.goal.scale > 1.0)
         #expect(zoom.handleKey(KeyEvent(key: .text("0")), tx: &tx, now: t) == false)
         #expect(!zoom.ownsEscape)

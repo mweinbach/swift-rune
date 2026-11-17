@@ -1,6 +1,13 @@
+import { loadRuneShaders, RuneWebGL } from './rune-webgl.mjs';
+import { mountRuneClipboard } from './rune-clipboard.mjs';
+import { mountRuneAccessibility } from './rune-web-accessibility.mjs';
+import { runeTextFontsReady } from './rune-web-text.mjs';
+import { createRuneImageDecoder } from './rune-web-images.mjs';
+export { createRuneTextImports, instantiateRuneBrowser } from './rune-web-text.mjs';
+
 // Mount alongside Rune's canvas. The page keeps its native text field for screen
 // readers, IMEs and text editing, while Rune owns the model and draws its contents.
-export function mountRuneFields(canvas, send) {
+export function mountRuneFields(canvas, send, placeEditor) {
     const doc = canvas.ownerDocument;
     const plain = doc.createElement('textarea');
     plain.wrap = 'off';
@@ -17,6 +24,11 @@ export function mountRuneFields(canvas, send) {
     let mirror = null;
     let composing = false;
     for (const field of [plain, password]) {
+        const sentKeys = new Set();
+        field.addEventListener('blur', () => sentKeys.clear(), options);
+        field.addEventListener('keyup', event => {
+            if (sentKeys.delete(event.code)) send({ ...keyEvent(event), kind: 'keyup', field: true });
+        }, options);
         field.hidden = true;
         field.tabIndex = -1;
         field.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px;pointer-events:none';
@@ -31,14 +43,18 @@ export function mountRuneFields(canvas, send) {
         }, options);
         field.addEventListener('keydown', event => {
             if (composing || event.isComposing) return;
+            if (placeEditor && event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.altKey) return;
             // Navigation and undo operate on the full model, beyond the mirrored window.
-            // A native clipboard operation uses the textarea's real selection and input event.
+            // Copy, cut and paste arrive as separate browser clipboard events.
             const chord = event.metaKey || event.ctrlKey;
             if (chord && ['c', 'v', 'x'].includes(event.key.toLowerCase())) return;
             const editing = ['Enter', 'Tab', 'Escape', 'PageUp', 'PageDown', 'Home', 'End',
                 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'];
             if (field === password) editing.push('Backspace', 'Delete');
-            if ((chord || editing.includes(event.key)) && send({ ...keyEvent(event), field: true })) event.preventDefault();
+            if (chord || editing.includes(event.key)) {
+                sentKeys.add(event.code);
+                if (send({ ...keyEvent(event), field: true })) event.preventDefault();
+            }
         }, options);
     }
 
@@ -77,6 +93,13 @@ export function mountRuneFields(canvas, send) {
     }, options);
 
     return {
+        clipboardTarget(target) {
+            if (target !== active() || !mirror) return null;
+            if (target === password && mirror.secure) return 'password';
+            if (target !== plain || composing || mirror.secure) return null;
+            selected();
+            return 'plain';
+        },
         sync(next, activate = false) {
             const ownedFocus = active() === plain || active() === password;
             if (composing && mirror && next?.key === mirror.key && next.secure === mirror.secure) return;
@@ -97,6 +120,7 @@ export function mountRuneFields(canvas, send) {
                 }
             }
             const target = next ? (next.secure ? password : plain) : canvas;
+            placeEditor?.(next ? target : null, next?.key);
             if ((ownedFocus || (next && activate)) && active() !== target) target.focus({ preventScroll: true });
         },
         dispose() {
@@ -110,23 +134,45 @@ export function mountRuneFields(canvas, send) {
 }
 
 function keyEvent(event) {
-    return { kind: 'key', code: event.code, key: event.key, shift: event.shiftKey,
+    return { kind: 'key', code: event.code, key: event.key, repeated: event.repeat, shift: event.shiftKey,
         ctrl: event.ctrlKey, alt: event.altKey, cmd: event.metaKey };
 }
 
 // The caller initializes the WASI Preview 1 reactor once, e.g. with wasi.initialize(instance).
 // Its Swift entry point creates the same WebAppHost as a standalone WASI command.
-export function mountRuneBrowser(canvas, instance) {
+export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, resizeTo, drawEffect } = {}) {
     const wasm = instance.exports;
+    const images = wasm.rune_web_image_enable && createRuneImageDecoder(() => wasm);
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
-    const context = canvas.getContext('2d');
-    if (!context) throw new Error('Rune needs a 2D canvas context');
-    const fields = mountRuneFields(canvas, send);
+    // Older reactors only export CPU frames. Explicit selection remains available for headless comparisons.
+    backend ??= wasm.rune_web_scene ? 'webgl2' : 'cpu';
+    if (!['webgl2', 'cpu'].includes(backend)) throw new Error('Unknown Rune browser backend: ' + backend);
+    if (backend === 'webgl2' && !wasm.rune_web_scene) throw new Error('The reactor does not export rune_web_scene');
+    const cpu = backend === 'cpu' ? canvas.getContext('2d') : null;
+    if (backend === 'cpu' && !cpu) throw new Error('Rune needs a 2D canvas context for CPU rendering');
+    const surfaceTiming = wasm.rune_web_surface_submission && wasm.rune_web_surface_complete ? {
+        submitted: () => wasm.rune_web_surface_submission(),
+        completed: (id, success) => wasm.rune_web_surface_complete(id, Number(success))
+    } : null;
+    let gpu, sources, observer, restoreNaturalSize, restoredBeforeFirstDraw;
+    const autoSize = backend === 'webgl2' && resizeTo === undefined && CSS.supports('contain-intrinsic-size', '1px');
+    let lost = false;
+    let force = true;
+    let scale = 1;
+    let lastSize;
+    const accessibility = wasm.rune_web_accessibility ? mountRuneAccessibility(canvas, send) : null;
+    const fields = mountRuneFields(canvas, send, accessibility?.attachEditor);
     const listeners = new AbortController();
     const options = { signal: listeners.signal };
+    const clipboard = wasm.rune_web_clipboard && mountRuneClipboard(canvas, fields, send, () => {
+        const size = wasm.rune_web_clipboard();
+        if (!size) return null;
+        const bytes = new Uint8Array(wasm.memory.buffer, wasm.rune_web_buffer(0), size);
+        return JSON.parse(decoder.decode(bytes));
+    }, listeners.signal);
     const initialTab = canvas.getAttribute('tabindex');
-    if (initialTab === null) canvas.tabIndex = 0;
+    if (initialTab === null) canvas.tabIndex = accessibility ? -1 : 0;
     const started = performance.now();
     const now = () => (performance.now() - started) / 1000;
     let request = 0;
@@ -145,65 +191,242 @@ export function mountRuneBrowser(canvas, instance) {
         new Uint8Array(wasm.memory.buffer, pointer, message.length).set(message);
         const handled = wasm.rune_web_event(message.length, now()) !== 0;
         readField();
+        clipboard?.drain();
         return handled;
     }
 
-    function tick() {
-        const length = wasm.rune_web_frame(now());
-        if (length < 0) {
-            dispose();
-            throw new Error('Rune could not render the browser frame');
+    function updateSize() {
+        if (!resizeTo) return;
+        const rect = resizeTo.getBoundingClientRect();
+        const dpr = Math.max(0.5, window.devicePixelRatio || 1);
+        const size = [rect.width, rect.height, dpr];
+        if (size[0] <= 0 || size[1] <= 0 || size.every((n, i) => lastSize?.[i] === n)) return;
+        lastSize = size;
+        scale = dpr;
+        return send({ kind: 'resize', x: size[0], y: size[1], scale });
+    }
+
+    function useAppSize(width, height) {
+        // A canvas normally derives its intrinsic CSS size from its backing pixels. Preserve its
+        // logical size across DPR changes while letting authored CSS and flex/grid control layout.
+        const naturalWidth = canvas.hasAttribute('width') ? canvas.width : width;
+        const naturalHeight = canvas.hasAttribute('height') ? canvas.height : height;
+        const previous = [canvas.style.contain, canvas.style.containIntrinsicSize];
+        const contain = getComputedStyle(canvas).contain;
+        if (contain === 'content') canvas.style.contain = 'size layout paint style';
+        else if (contain !== 'strict' && !contain.split(' ').includes('size')) {
+            const rest = contain.split(' ').filter(v => v !== 'none' && v !== 'inline-size');
+            canvas.style.contain = ['size', ...rest].join(' ');
         }
+        canvas.style.containIntrinsicSize = naturalWidth + 'px ' + naturalHeight + 'px';
+        const applied = [canvas.style.contain, canvas.style.containIntrinsicSize];
+        restoreNaturalSize = () => {
+            if (canvas.style.contain === applied[0]) canvas.style.contain = previous[0];
+            if (canvas.style.containIntrinsicSize === applied[1]) canvas.style.containIntrinsicSize = previous[1];
+        };
+        resizeTo = canvas;
+        observer = new ResizeObserver(updateSize);
+        observer.observe(canvas);
+    }
+
+    function drawFrame() {
+        updateSize();
+        if (images) {
+            let size;
+            while ((size = wasm.rune_web_image_next()) > 0) {
+                const address = wasm.rune_web_buffer(0);
+                const [id, limit, kind] = new Uint32Array(wasm.memory.buffer, address, 3);
+                images.start(id, address + 12, size - 12, limit, kind);
+            }
+        }
+        const full = force;
+        const length = gpu ? wasm.rune_web_scene(now(), full ? 1 : 0) : wasm.rune_web_frame(now());
+        force = false;
+        if (length < 0) {
+            let reason = 'Rune could not render the browser frame';
+            if (length < -1) {
+                const pointer = wasm.rune_web_buffer(0);
+                reason += ': ' + decoder.decode(new Uint8Array(wasm.memory.buffer, pointer, -length - 1));
+            }
+            throw new Error(reason);
+        }
+        let sized = false;
         if (length > 0) {
             const pointer = wasm.rune_web_buffer(0);
             const memory = wasm.memory.buffer;
-            const dimensions = new DataView(memory, pointer, 8);
-            const width = dimensions.getUint32(0, true);
-            const height = dimensions.getUint32(4, true);
-            if (canvas.width !== width) canvas.width = width;
-            if (canvas.height !== height) canvas.height = height;
-            const pixels = new Uint8ClampedArray(memory, pointer + 8, length - 8);
-            context.putImageData(new ImageData(pixels, width, height), 0, 0);
+            if (gpu) {
+                if (autoSize && !restoreNaturalSize && length >= 56) {
+                    const dimensions = new Uint32Array(memory, pointer, 3);
+                    useAppSize(dimensions[1], dimensions[2]);
+                    sized = true;
+                }
+                // A custom Swift compositor may request multiple ordered UI passes. A suppressed
+                // UI produces a clear-only packet which still has to reach the drawing buffer.
+                const passes = Math.max(1, wasm.rune_web_ui_passes?.() ?? 1);
+                for (let pass = 0; pass < passes; ++pass) gpu.draw(memory, pointer, length);
+                gpu.frameRenderer.submitSurfaceTiming?.();
+                if (wasm.rune_web_cached_layers) {
+                    const entries = gpu.frameRenderer.takeCachedLayers?.(full);
+                    if (entries) {
+                        const address = wasm.rune_web_buffer(entries.byteLength);
+                        new Uint32Array(wasm.memory.buffer, address, entries.length).set(entries);
+                        wasm.rune_web_cached_layers(entries.length / 4);
+                    }
+                }
+            } else {
+                const dimensions = new DataView(memory, pointer, 8);
+                const width = dimensions.getUint32(0, true);
+                const height = dimensions.getUint32(4, true);
+                if (canvas.width !== width) canvas.width = width;
+                if (canvas.height !== height) canvas.height = height;
+                const pixels = new Uint8ClampedArray(memory, pointer + 8, length - 8);
+                cpu.putImageData(new ImageData(pixels, width, height), 0, 0);
+            }
+            const size = wasm.rune_web_accessibility?.();
+            if (size) {
+                const bytes = new Uint8Array(wasm.memory.buffer, wasm.rune_web_buffer(0), size);
+                accessibility.sync(JSON.parse(decoder.decode(bytes)));
+            }
         }
+        accessibility?.place();
         readField();
-        request = requestAnimationFrame(tick);
+        clipboard?.drain();
+        // Resizing writes an event into the shared reactor buffer. Read the first packet before
+        // requesting its device-resolution replacement.
+        if (sized && updateSize()) {
+            force = true;
+            drawFrame();
+        }
+    }
+
+    function tick() {
+        if (disposed || lost) return;
+        try {
+            drawFrame();
+            request = requestAnimationFrame(tick);
+        } catch (error) {
+            dispose();
+            throw error;
+        }
     }
 
     let disposed = false;
     function dispose() {
         if (disposed) return;
         disposed = true;
+        restoredBeforeFirstDraw?.resolve();
+        images?.dispose();
         cancelAnimationFrame(request);
         listeners.abort();
+        observer?.disconnect();
+        restoreNaturalSize?.();
+        gpu?.dispose();
         fields.dispose();
+        accessibility?.dispose();
         if (initialTab === null) canvas.removeAttribute('tabindex');
         wasm.rune_web_dispose?.();
     }
 
     try {
         wasm.rune_web_enable();
+        if (backend === 'webgl2') wasm.rune_web_enable_atlas_patches?.();
+        wasm.rune_web_image_enable?.();
         if (wasm.__main_void() !== 0) throw new Error('Rune application failed to start');
+        const fontsReady = runeTextFontsReady(wasm.memory);
+        if (wasm.rune_web_scene) {
+            const media = {
+                dark: matchMedia('(prefers-color-scheme: dark)'),
+                reducedMotion: matchMedia('(prefers-reduced-motion: reduce)'),
+                contrast: matchMedia('(prefers-contrast: more)'),
+                hover: matchMedia('(hover: hover)'),
+                coarse: matchMedia('(pointer: coarse)')
+            };
+            const update = () => send({ kind: 'preferences',
+                ...Object.fromEntries(Object.entries(media).map(([key, query]) => [key, query.matches])) });
+            for (const query of Object.values(media)) query.addEventListener('change', update, options);
+            update();
+        }
         canvas.addEventListener('keydown', event => {
+            if (clipboard && (event.ctrlKey || event.metaKey) && !event.altKey &&
+                ['c', 'x', 'v'].includes(event.key.toLowerCase())) return;
             if (!event.isComposing && send(keyEvent(event))) event.preventDefault();
         }, options);
+        canvas.addEventListener('keyup', event => {
+            if (!event.isComposing && send({ ...keyEvent(event), kind: 'keyup' })) event.preventDefault();
+        }, options);
+        window.addEventListener('blur', () => send({ kind: 'focuslost' }), options);
+        canvas.addEventListener('contextmenu', event => event.preventDefault(), options);
+        function localPoint(event) {
+            const rect = canvas.getBoundingClientRect();
+            if (!rect.width || !rect.height) return null;
+            return { x: (event.clientX - rect.left) * canvas.width / (rect.width * scale),
+                     y: (event.clientY - rect.top) * canvas.height / (rect.height * scale) };
+        }
+        canvas.addEventListener('wheel', event => {
+            const point = localPoint(event);
+            if (point && send({ kind: 'wheel', ...point, dx: event.deltaX, dy: event.deltaY,
+                deltaMode: event.deltaMode, shift: event.shiftKey, ctrl: event.ctrlKey,
+                alt: event.altKey, cmd: event.metaKey })) event.preventDefault();
+        }, { ...options, passive: false });
         const buttons = ['primary', 'middle', 'secondary', 'back', 'forward'];
         for (const kind of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
             canvas.addEventListener(kind, event => {
                 if (!event.isPrimary) return;
-                const rect = canvas.getBoundingClientRect();
-                if (!rect.width || !rect.height) return;
+                const point = localPoint(event);
+                if (!point) return;
                 if (kind === 'pointerdown') {
                     canvas.focus({ preventScroll: true });
                     canvas.setPointerCapture(event.pointerId);
                 }
-                send({ kind, button: buttons[event.button], pointerType: event.pointerType,
-                    x: (event.clientX - rect.left) * canvas.width / rect.width,
-                    y: (event.clientY - rect.top) * canvas.height / rect.height });
+                send({ kind, ...point, button: buttons[event.button], pointerType: event.pointerType,
+                    shift: event.shiftKey, ctrl: event.ctrlKey, alt: event.altKey, cmd: event.metaKey });
                 if (kind === 'pointerdown') event.preventDefault();
             }, options);
         }
-        tick();
-        return { dispose };
+        if (resizeTo) {
+            observer = new ResizeObserver(updateSize);
+            observer.observe(resizeTo);
+        }
+        let ready;
+        if (backend === 'webgl2') {
+            canvas.addEventListener('webglcontextlost', event => {
+                event.preventDefault();
+                lost = true;
+                gpu?.frameRenderer.cancelTimings?.();
+                gpu = null; // The browser discards every object associated with the lost context.
+                cancelAnimationFrame(request);
+            }, options);
+            canvas.addEventListener('webglcontextrestored', () => {
+                if (disposed) return;
+                lost = false;
+                force = true;
+                if (!sources) return;
+                const pending = restoredBeforeFirstDraw;
+                restoredBeforeFirstDraw = null;
+                try {
+                    gpu = new RuneWebGL(canvas, sources, { drawEffect, surfaceTiming });
+                    tick();
+                    pending?.resolve();
+                } catch (error) {
+                    pending?.reject(error);
+                    dispose();
+                    if (!pending) throw error;
+                }
+            }, options);
+            ready = Promise.all([loadRuneShaders(shaderDirectory), fontsReady]).then(([loaded]) => {
+                if (disposed) return;
+                sources = loaded;
+                if (lost) return new Promise((resolve, reject) => { restoredBeforeFirstDraw = { resolve, reject }; });
+                gpu = new RuneWebGL(canvas, sources, { drawEffect, surfaceTiming });
+                tick();
+            }).catch(error => { dispose(); throw error; });
+        } else if (fontsReady) {
+            ready = fontsReady.then(tick).catch(error => { dispose(); throw error; });
+        } else {
+            tick();
+            ready = Promise.resolve();
+        }
+        return { dispose, ready, get renderer() { return gpu?.info ?? (cpu ? { api: 'Canvas 2D' } : null); } };
     } catch (error) {
         dispose();
         throw error;

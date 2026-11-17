@@ -11,10 +11,16 @@ public enum MediaPlaybackGate {
 
     public static func enable() {
         lock.withLock { _enabled = true }
+        #if canImport(AVFoundation) && !os(watchOS)
+        Player.startPreexistingApplePlayers()
+        #elseif canImport(CRuneMedia)
+        Player.startPreexistingDesktopPlayers()
+        #endif
     }
 
     public static func setEnabled(_ enabled: Bool) {
-        lock.withLock { _enabled = enabled }
+        if enabled { enable() }
+        else { lock.withLock { _enabled = false } }
     }
 }
 
@@ -23,15 +29,15 @@ public enum HeadlessClock {
     private static let dictKey = "rune.headlessClockSeconds"
 
     public static func set(_ seconds: Double) {
-        Thread.current.threadDictionary[dictKey] = seconds
+        RuneExecutionContext.locals[dictKey] = seconds
     }
 
     public static func clear() {
-        Thread.current.threadDictionary.removeObject(forKey: dictKey)
+        RuneExecutionContext.locals.removeObject(forKey: dictKey)
     }
 
     public static func current() -> Double? {
-        Thread.current.threadDictionary[dictKey] as? Double
+        RuneExecutionContext.locals[dictKey] as? Double
     }
 }
 
@@ -215,22 +221,22 @@ public struct FakeMicrophone: Sendable, Equatable {
 
     /// Recorders started on this thread while no window has run hear this microphone.
     public func install() {
-        Thread.current.threadDictionary[Self.threadLocalKey] = self
+        RuneExecutionContext.locals[Self.threadLocalKey] = self
     }
 
     /// Back to `FakeMicrophone.default` on this thread.
     public static func uninstall() {
-        Thread.current.threadDictionary.removeObject(forKey: Self.threadLocalKey)
+        RuneExecutionContext.locals.removeObject(forKey: Self.threadLocalKey)
     }
 
     internal static func installed() -> FakeMicrophone {
-        (Thread.current.threadDictionary[Self.threadLocalKey] as? FakeMicrophone) ?? .default
+        (RuneExecutionContext.locals[Self.threadLocalKey] as? FakeMicrophone) ?? .default
     }
 
     internal static func requestInstalled() -> MicPermission {
         var current = installed()
         let resolved = current.resolve()
-        Thread.current.threadDictionary[Self.threadLocalKey] = current
+        RuneExecutionContext.locals[Self.threadLocalKey] = current
         return resolved
     }
 
@@ -272,7 +278,7 @@ public struct FakeMicrophone: Sendable, Equatable {
         return Self.encodeWAVData(input: input, frames: frames) ?? Data()
     }
 
-    internal static func wavHeader(rate: UInt32, dataBytes: UInt32) -> Data {
+    internal static func wavHeader(rate: UInt32, dataBytes: UInt32, channels: UInt16 = 1) -> Data {
         var h = [UInt8](repeating: 0, count: 44)
         func put(_ at: Int, _ bytes: [UInt8]) {
             for i in 0..<bytes.count { h[at + i] = bytes[i] }
@@ -290,10 +296,10 @@ public struct FakeMicrophone: Sendable, Equatable {
         put(8, Array("WAVEfmt ".utf8))
         putU32(16, 16)
         putU16(20, 1) // PCM
-        putU16(22, 1) // mono
+        putU16(22, channels)
         putU32(24, rate)
-        putU32(28, rate &* 2)
-        putU16(32, 2)
+        putU32(28, rate &* UInt32(channels) &* 2)
+        putU16(32, channels * 2)
         putU16(34, 16)
         put(36, Array("data".utf8))
         putU32(40, dataBytes)

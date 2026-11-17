@@ -517,7 +517,7 @@ extension Runtime {
         guard let live = playgroundLive else {
             return view(state, &cx)
         }
-        return live.buildView(appState: state, appView: view, cx: &cx, viewport: viewport)
+        return live.buildView(appState: state, appView: view, cx: &cx)
     }
 
     internal func reconcilePlaygroundAfterCommit(at now: Double) {

@@ -43,6 +43,8 @@ struct FxAndLightExamplesTests {
     func fxGallerySnaps() throws {
         #if canImport(Metal)
         guard MTLCreateSystemDefaultDevice() != nil else { return }
+        #endif
+        #if canImport(Metal) || os(Linux) || os(Windows)
         try withTempDir { dir in
             try RuneFxGalleryApp.run(args: ["--list-effects"])
             let glowSnap = dir.appendingPathComponent("glow.png")

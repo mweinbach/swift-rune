@@ -378,7 +378,7 @@ struct GlyphAtlasLazyAllocationTests {
     }
 }
 
-#if canImport(Metal) && canImport(QuartzCore)
+#if canImport(Metal) || canImport(CRuneOffscreenGL)
 @Suite("GPU RenderFrame Parity Tests (Clips, Gradients, Effects, Blur, Springs, Cache)")
 struct RenderGPUAndShaderParityTests {
     private func sampleRGBA(_ frame: Frame, x: Int, y: Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8) {
@@ -388,9 +388,9 @@ struct RenderGPUAndShaderParityTests {
         return (frame.rgba[off], frame.rgba[off + 1], frame.rgba[off + 2], frame.rgba[off + 3])
     }
 
-    @Test("Rounded clip, feathered fade clip, and cutoutCircle mask pixels accurately on Metal GPU")
+    @Test("Rounded clip, feathered fade clip, and cutoutCircle mask pixels accurately on the GPU")
     func gpuRoundedFeatheredAndCutoutClips() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
 
         struct S {}
         let rt = Runtime<S>(
@@ -438,7 +438,7 @@ struct RenderGPUAndShaderParityTests {
 
     @Test("Multi-stop linear & positioned radial gradients and borderGradient render cleanly on GPU")
     func gpuGradientsAndBorderGradient() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         struct S {}
         let rt = Runtime<S>(
             state: S(),
@@ -532,7 +532,7 @@ struct RenderGPUAndShaderParityTests {
         let gbInst = ring(makeRt(.gradientThenBorder))
         #expect(gbInst.params.y == KIND_RECT && gbInst.params.x == 2.0 && gbInst.uv == .zero)
 
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let outG = try renderer.renderOffscreen({
             let rt = makeRt(.gradient)
             rt.clearColor = .transparent
@@ -556,6 +556,7 @@ struct RenderGPUAndShaderParityTests {
         #expect(maxDiff <= 1)
     }
 
+    #if canImport(Metal) && canImport(QuartzCore)
     @Test("Effect slots deliver EffectSite data, bleed bounds, inLayer, and backdrop snapshots")
     func effectSlotsAndBackdropHook() throws {
         let renderer = try MetalRenderer()
@@ -718,9 +719,11 @@ struct RenderGPUAndShaderParityTests {
         renderer.clearSprings()
     }
 
+    #endif
+
     @Test("Shape drawn/trimmed, strokeWidth, and LineCap.round render accurately via RenderFrame")
     func shapeTrimAndLineCapRenderFrame() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         struct S {}
         let lineShape = Shape().strokeWith([Vec2(10, 20), Vec2(70, 20)], closed: false, width: 6, cap: .round, color: Color(r: 1, g: 1, b: 0, a: 1))
         let rt = Runtime<S>(
@@ -740,7 +743,7 @@ struct RenderGPUAndShaderParityTests {
 
     @Test("Continuous squircle corners follow Apple's cubic curve in fills and clips and pill clamps radius")
     func continuousCornerAndCapsuleParity() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
 
         // Apple's continuous corner for r = 1: three cubics from (0, K) to (K, 0) (`continuous_corner_tests.rs:6-40`)
         let curve: [SIMD2<Float>] = [
@@ -903,7 +906,7 @@ struct RenderGPUAndShaderParityTests {
             last = got
         }
 
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         struct S {}
 
         // 1. Stripes blend to mid-grey under blur, stay crisp outside, tinted fill tints result
@@ -993,7 +996,7 @@ struct RenderGPUAndShaderParityTests {
 
     @Test("Outer shadow cuts hole under translucent fill and adjacent KIND_TRIANGLE edges have zero seam")
     func shadowHoleCutoutAndAdjacentTriangleSeam() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
 
         // 1. Shadow hole cutout under semi-transparent fill on white background
         struct S {}
@@ -1043,6 +1046,7 @@ struct RenderGPUAndShaderParityTests {
         }
     }
 
+    #if canImport(Metal) && canImport(QuartzCore)
     @Test("EffectSite bleed scissor, rounded/faded layer compositing, and sRGB blending parity")
     func effectBleedScissorAndSrgbLayerParity() throws {
         let renderer = try MetalRenderer()
@@ -1208,9 +1212,11 @@ struct RenderGPUAndShaderParityTests {
         #expect(sawDrawRangeBackdrop == true)
     }
 
+    #endif
+
     @Test("Dashed border ring_arc matches WGSL perimeter (-bw) and sharp/rounded corner projection")
     func dashedBorderSharpAndRoundedParity() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         struct S {}
 
         // 1. Sharp corners: 68x48 rect with bw=8 => centerline 60x40 => perimeter 200 = 10 periods of (10 dash + 10 gap).
@@ -1297,6 +1303,7 @@ struct RenderGPUAndShaderParityTests {
         #expect(arcLit > 0 && arcDark > 0)
     }
 
+    #if canImport(Metal) && canImport(QuartzCore)
     @Test("El.cache matches uncached output, skips re-rasterization on ancestor Live offset, invalidates on state/animation, and updates imageRevision")
     func layerCacheAndImageRevisionParity() throws {
         let renderer = try MetalRenderer()
@@ -1786,5 +1793,6 @@ struct RenderGPUAndShaderParityTests {
         let b = img.pixel(x: 30, y: 10)
         #expect(b.z > 200 && b.x < 20 && b.y < 20)
     }
+    #endif
 }
 #endif

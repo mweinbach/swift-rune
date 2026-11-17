@@ -288,7 +288,7 @@ enum SelectionPhaseVirtualWalk {
             case .top:
                 scroll(top: true)
             case .selectAll:
-                _ = rt.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: clock)
+                _ = rt.keyDown(KeyEvent(key: .command("a"), mods: RuneTestKey.primaryMods()), at: clock)
                 settle()
                 dev.selectAll()
             case .clear:

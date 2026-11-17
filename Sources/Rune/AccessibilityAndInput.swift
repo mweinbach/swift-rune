@@ -206,12 +206,11 @@ public struct AccessibilityNode: Sendable, Equatable {
 
 /// Projects a laid-out `El<State>` tree into a semantic `AccessibilityNode` tree.
 public enum AccessibilityTreeBuilder {
-    /// A labelled button or link already speaks its own words. Skip redundant parts but
-    /// keep their meaningful descendants, including nested links and focus targets.
+    /// Suppress parts repeating a control's spoken name while retaining meaningful descendants.
     internal static func controlChildren(
         _ children: [AccessibilityNode], role: ElementRole, name: String?
     ) -> [AccessibilityNode] {
-        guard role == .button || role == .link,
+        guard AccessibilityRoleRules.isLeafControl(role),
               let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return children }
         func append(_ child: AccessibilityNode, to kept: inout [AccessibilityNode]) {
             guard !child.keepsControlContent, !child.isFocusable, child.actions.isEmpty, !child.isSecure,
@@ -342,7 +341,10 @@ public enum AccessibilityTreeBuilder {
         let labelledByText = relatedWords(key: element.a11yLabelledBy, ancestors: ancestors, selfKey: element.keyId)
         let describedByText = relatedWords(key: element.a11yDescribedBy, ancestors: ancestors, selfKey: element.keyId)
         let givenName = AccessibilityNameSource.nonblank(element.a11yLabel) ?? labelledByText
-        let controlName = givenName ?? (element.isDefaultButton && resolvedRole == .button && !isSecure ? words(of: element) : nil)
+        let controlName = AccessibilityRoleRules.controlName(
+            given: givenName, role: resolvedRole, isDefaultButton: element.isDefaultButton, secure: isSecure,
+            words: words(of: element)
+        )
         let label = controlName ?? (isSecure ? "Password" : element.plainText)
         let resolvedHelp = element.a11yDescription ?? describedByText ?? element.a11yHelp
         let isFocused = (focusedKey != nil && element.keyId == focusedKey)
@@ -492,6 +494,7 @@ public enum AppKitAccessibilityMapper {
         case .listItem: return .row
         case .heading: return NSAccessibility.Role(rawValue: AccessibilityHeading.macRoleName)
         case .dialog: return .sheet
+        case .menuBar: return .menuBar
         case .menu: return .menu
         case .menuItem: return .menuItem
         case .image, .icon: return .image
@@ -513,7 +516,7 @@ public enum AppKitAccessibilityMapper {
         case .toolbar: return .toolbar
         case .splitter: return .splitter
         case .list: return .list
-        case .menuItemCheckbox: return .menuItem
+        case .menuItemCheckbox, .menuItemRadio: return .menuItem
         case .mark, .code: return .staticText
         case .table: return .table
         }
@@ -677,9 +680,9 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
 public enum UIKitAccessibilityMapper {
     public static func traits(for role: ElementRole) -> UIAccessibilityTraits {
         switch role {
-        case .button, .menuItem, .menuItemCheckbox: return .button
+        case .button, .menuItem, .menuItemCheckbox, .menuItemRadio: return .button
         case .text, .listItem, .group, .dialog, .menu, .separator: return .staticText
-        case .toolbar, .list, .textInput, .passwordInput, .multilineTextInput: return .none
+        case .menuBar, .toolbar, .list, .textInput, .passwordInput, .multilineTextInput: return .none
         case .splitter, .slider: return .adjustable
         case .status, .progress: return [.staticText, .updatesFrequently]
         case .heading: return .header
@@ -697,14 +700,33 @@ public enum UIKitAccessibilityMapper {
         container: Any,
         onAction: (@Sendable (String, AccessibilityAction) -> Void)? = nil
     ) -> [RuneUIAccessibilityElement] {
+        var cache: [AccessibilityIdentity: RuneUIAccessibilityElement] = [:]
+        return updateElements(from: node, container: container, cache: &cache, routingByPath: false, onAction: onAction)
+    }
+
+    @MainActor
+    internal static func updateElements(
+        from root: AccessibilityNode, container: Any,
+        cache: inout [AccessibilityIdentity: RuneUIAccessibilityElement],
+        routingByPath: Bool = true,
+        onAction: (@Sendable (String, AccessibilityAction) -> Void)?
+    ) -> [RuneUIAccessibilityElement] {
+        var next: [AccessibilityIdentity: RuneUIAccessibilityElement] = [:]
         var result: [RuneUIAccessibilityElement] = []
-        let el = RuneUIAccessibilityElement(node: node, container: container, onAction: onAction)
-        if node.role != .group {
-            result.append(el)
+        AccessibilityIdentity.walk(root) { node, identity in
+            guard node.role != .group else { return }
+            let element: RuneUIAccessibilityElement
+            if let existing = cache[identity] {
+                existing.update(node)
+                element = existing
+            } else {
+                element = RuneUIAccessibilityElement(node: node, container: container, onAction: onAction)
+            }
+            if routingByPath { element.actionTarget = node.runtimePath ?? node.id }
+            result.append(element)
+            next[identity] = element
         }
-        for child in node.children {
-            result.append(contentsOf: buildElements(from: child, container: container, onAction: onAction))
-        }
+        cache = next
         return result
     }
 }
@@ -712,8 +734,9 @@ public enum UIKitAccessibilityMapper {
 /// Concrete `UIAccessibilityElement` backing a projected `AccessibilityNode` on iOS/iPadOS/visionOS.
 @MainActor
 public final class RuneUIAccessibilityElement: UIAccessibilityElement {
-    public let nodeId: String
-    public let supportedActions: [AccessibilityAction]
+    public private(set) var nodeId: String = ""
+    public private(set) var supportedActions: [AccessibilityAction] = []
+    fileprivate var actionTarget = ""
     private let actionHandler: (@Sendable (String, AccessibilityAction) -> Void)?
 
     public init(
@@ -721,10 +744,15 @@ public final class RuneUIAccessibilityElement: UIAccessibilityElement {
         container: Any,
         onAction: (@Sendable (String, AccessibilityAction) -> Void)?
     ) {
-        self.nodeId = node.id
-        self.supportedActions = node.actions
         self.actionHandler = onAction
         super.init(accessibilityContainer: container)
+        update(node)
+    }
+
+    fileprivate func update(_ node: AccessibilityNode) {
+        nodeId = node.id
+        actionTarget = node.id
+        supportedActions = node.actions
         self.isAccessibilityElement = node.role != .group
         self.accessibilityIdentifier = node.id
         self.accessibilityLabel = node.label
@@ -732,6 +760,7 @@ public final class RuneUIAccessibilityElement: UIAccessibilityElement {
         self.accessibilityHint = node.help
         var traits = UIKitAccessibilityMapper.traits(for: node.role)
         if node.isSelected { traits.insert(.selected) }
+        if node.isDisabled { traits.insert(.notEnabled) }
         self.accessibilityTraits = traits
         self.accessibilityFrameInContainerSpace = CGRect(
             x: CGFloat(node.frame.x),
@@ -743,18 +772,18 @@ public final class RuneUIAccessibilityElement: UIAccessibilityElement {
 
     public override func accessibilityActivate() -> Bool {
         guard supportedActions.contains(.press) else { return false }
-        actionHandler?(nodeId, .press)
+        actionHandler?(actionTarget, .press)
         return true
     }
 
     public override func accessibilityIncrement() {
         guard supportedActions.contains(.increment) else { return }
-        actionHandler?(nodeId, .increment)
+        actionHandler?(actionTarget, .increment)
     }
 
     public override func accessibilityDecrement() {
         guard supportedActions.contains(.decrement) else { return }
-        actionHandler?(nodeId, .decrement)
+        actionHandler?(actionTarget, .decrement)
     }
 }
 #endif
@@ -767,6 +796,11 @@ public protocol SpellCheckBackend: Sendable {
     func suggestions(for word: String) -> [String]
     func learnWord(_ word: String)
     func ignoreWord(_ word: String)
+}
+
+protocol DictionarySpellCheckBackend: SpellCheckBackend {
+    var installedLanguages: [String] { get }
+    func selectLanguages(_ tags: [String])
 }
 
 /// Deterministic in-memory spellcheck backend for headless tests and cross-platform fallback.
@@ -1020,13 +1054,19 @@ public final class UIKitSpellChecker: SpellCheckBackend, @unchecked Sendable {
 
 /// Facade for spellchecking, language selection, and word learning (`rune::spell`).
 public final class SpellChecker: @unchecked Sendable {
-    #if os(macOS)
-    public static let shared = SpellChecker(backend: MacOSSpellChecker())
-    #elseif canImport(UIKit) && !os(watchOS)
-    public static let shared = SpellChecker(backend: UIKitSpellChecker())
-    #else
-    public static let shared = SpellChecker(backend: CustomDictionarySpellChecker())
-    #endif
+    public static let shared = SpellChecker(backend: platformBackend())
+
+    static func platformBackend() -> any SpellCheckBackend {
+        #if os(macOS)
+        return MacOSSpellChecker()
+        #elseif canImport(UIKit) && !os(watchOS)
+        return UIKitSpellChecker()
+        #elseif os(Windows) || os(Linux)
+        return DesktopSpellChecker()
+        #else
+        return CustomDictionarySpellChecker()
+        #endif
+    }
 
     private static let dialects: [String: String] = [
         "ar-001": "Modern Standard Arabic",
@@ -1055,21 +1095,19 @@ public final class SpellChecker: @unchecked Sendable {
     private var backend: any SpellCheckBackend
     private var chosenLanguages: [String] = []
     private var availableList: [String] = ["en-US", "en-GB", "de-DE", "fr-FR", "es-ES", "ja-JP", "zh-Hans"]
-    private var wordCache: [String: Bool] = [:]
-    private var generation: UInt64 = 0
 
     public static let maxSuggestions = 5
 
     public init(backend: any SpellCheckBackend) {
         self.backend = backend
+        adoptDictionaries()
     }
 
     public func setBackend(_ backend: any SpellCheckBackend) {
         lock.lock()
         defer { lock.unlock() }
         self.backend = backend
-        self.wordCache.removeAll(keepingCapacity: true)
-        self.generation &+= 1
+        adoptDictionaries()
     }
 
     public func setLanguages(_ tags: [String]) {
@@ -1077,8 +1115,7 @@ public final class SpellChecker: @unchecked Sendable {
         defer { lock.unlock() }
         if chosenLanguages != tags {
             chosenLanguages = tags
-            wordCache.removeAll(keepingCapacity: true)
-            generation &+= 1
+            (backend as? any DictionarySpellCheckBackend)?.selectLanguages(selectedLanguages())
         }
     }
 
@@ -1086,8 +1123,7 @@ public final class SpellChecker: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         availableList = tags
-        wordCache.removeAll(keepingCapacity: true)
-        generation &+= 1
+        (backend as? any DictionarySpellCheckBackend)?.selectLanguages(selectedLanguages())
     }
 
     /// Available system spellcheck language tags (`rune::spell::available_languages`).
@@ -1100,12 +1136,23 @@ public final class SpellChecker: @unchecked Sendable {
     /// Active spellcheck languages (`chosen ∩ available`, else locale defaults + `en-US`) (`rune::spell::languages`).
     public func languages() -> [String] {
         lock.lock()
+        defer { lock.unlock() }
+        return selectedLanguages()
+    }
+
+    private func adoptDictionaries() {
+        if let dictionaries = backend as? any DictionarySpellCheckBackend {
+            availableList = dictionaries.installedLanguages
+            dictionaries.selectLanguages(selectedLanguages())
+        }
+    }
+
+    private func selectedLanguages() -> [String] {
         let chosen = chosenLanguages
         let available = availableList
-        lock.unlock()
         if !chosen.isEmpty {
-            let intersection = chosen.filter { c in
-                available.contains { $0.caseInsensitiveCompare(c) == .orderedSame }
+            let intersection = chosen.compactMap { c in
+                available.first { $0.caseInsensitiveCompare(c) == .orderedSame }
             }
             if !intersection.isEmpty {
                 return intersection
@@ -1120,8 +1167,9 @@ public final class SpellChecker: @unchecked Sendable {
                 }
             }
         }
-        if !defaults.contains(where: { $0.lowercased().hasPrefix("en") }) {
-            defaults.append("en-US")
+        if !defaults.contains(where: { $0.lowercased().hasPrefix("en") }),
+           let english = available.first(where: { $0.caseInsensitiveCompare("en-US") == .orderedSame }) {
+            defaults.append(english)
         }
         return defaults
     }
@@ -1130,7 +1178,11 @@ public final class SpellChecker: @unchecked Sendable {
         for (k, v) in Self.dialects where k.caseInsensitiveCompare(tag) == .orderedSame {
             return v
         }
+        #if os(Windows) || os(Linux)
+        return Locale(identifier: "en").localizedString(forIdentifier: tag) ?? tag
+        #else
         return tag
+        #endif
     }
 
     public func misspelledUTF8Ranges(in text: String) -> [Range<Int>] {

@@ -1,5 +1,4 @@
 import Foundation
-import ImageIO
 import Testing
 @testable import Rune
 
@@ -129,10 +128,9 @@ struct RunePlatformIncrement6Tests {
         #expect(files == ["frame_0000.png", "frame_0001.png", "frame_0002.png", "frame_0003.png"])
 
         // 4 frames in 2x2 grid with 4px gutters: width = 20*2 + 4 = 44, height = 29*2 + 4 = 62
-        let src = try #require(CGImageSourceCreateWithURL(stripURL as CFURL, nil))
-        let cgImg = try #require(CGImageSourceCreateImageAtIndex(src, 0, nil))
-        #expect(cgImg.width == 44)
-        #expect(cgImg.height == 62)
+        let strip = try Frame.fromPNG(data: Data(contentsOf: stripURL))
+        #expect(strip.width == 44)
+        #expect(strip.height == 62)
 
         // Note: re-verify events dispatched across App hooks and AppSpec.onFileDrop via --at mark:ready+0.1
         var captured = ScriptState()
@@ -440,10 +438,7 @@ struct RunePlatformIncrement6Tests {
             )
         }
 
-        let hasFFmpeg = (ProcessInfo.processInfo.environment["PATH"] ?? "")
-            .split(separator: ":")
-            .contains { FileManager.default.isExecutableFile(atPath: URL(fileURLWithPath: String($0)).appendingPathComponent("ffmpeg").path) }
-        if hasFFmpeg {
+        if ToolingVideoEncoder.findFFmpegOnPath() != nil {
             let mp4URL = tmpRoot.appendingPathComponent("out.mp4")
             let vidOut = try HeadlessRunner.run(
                 chromeApp,

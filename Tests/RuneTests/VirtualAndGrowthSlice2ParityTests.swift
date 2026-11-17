@@ -274,7 +274,7 @@ struct VirtualAndGrowthSlice2ParityTests {
 
         // Focus pin preservation test: focusing an element on virtual list or copying includes unmounted start
         rt.clipboard = ClipboardContent("")
-        _ = rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: t + 0.04)
+        _ = rt.keyDown(KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods()), at: t + 0.04)
         let copied = rt.clipboard.text
         #expect(copied.contains("line-0"), "copied text across virtual scroll must include unmounted anchor row 0, got: \(copied)")
         #expect(copied.split(separator: "\n").count >= 10, "copied selection must span unmounted middle rows, got \(copied.split(separator: "\n").count) lines")

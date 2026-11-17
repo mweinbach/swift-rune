@@ -232,7 +232,7 @@ struct Slice4SelectionTests {
         rt.pointerDown(at: Vec2(pr[0] + 1, pr[1] + 6), at: 0.1)
         rt.pointerMove(to: Vec2(pr[0] + pr[2] - 1, pr[1] + 6), at: 0.12)
         rt.pointerUp(at: Vec2(pr[0] + pr[2] - 1, pr[1] + 6), at: 0.14)
-        #expect(rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.2))
+        #expect(rt.keyDown(KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods()), at: 0.2))
         let clipHTML = try #require(rt.clipboard.html)
         #expect(clipHTML.contains("<strong>Bold</strong>"))
         #expect(clipHTML.contains("href=\"https://rune.dev\""))
@@ -445,7 +445,7 @@ struct Slice4SelectionTests {
         let scrollOffsetAfter = rt.scrollOffset(forKey: "sc").y
         #expect(scrollOffsetAfter > 0)
 
-        #expect(rt.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: 0.6))
+        #expect(rt.keyDown(KeyEvent(key: .command("a"), mods: RuneTestKey.primaryMods()), at: 0.6))
         let scene = rt.frame(at: 0.62)
         let expectedInputSelColor = Tok.accent(0, dark: true).alpha(0.28)
         let inputSelPrims = matchingRects(in: scene, color: expectedInputSelColor)
@@ -676,7 +676,7 @@ struct Slice4SelectionTests {
         rt.pointerDown(at: Vec2(lRect[0] + 2, lRect[1] + 7), at: 1.5)
         rt.pointerMove(to: Vec2(lRect[0] + 50, lRect[1] + 7), at: 1.52)
         rt.pointerUp(at: Vec2(lRect[0] + 50, lRect[1] + 7), at: 1.54)
-        _ = rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(shift: true, cmd: true)), at: 1.6)
+        _ = rt.keyDown(KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods(shift: true)), at: 1.6)
         #expect(rt.clipboard.text == "keep-me")
 
         rt.update { st, _ in st.body = "changed text drops selection" }

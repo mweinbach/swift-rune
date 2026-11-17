@@ -30,19 +30,26 @@ extension WebAppHost {
     private func applyFieldEvent(
         key: String, base: Int, expected: String, text: String?, anchor: Int, focus: Int, at now: Double
     ) -> Bool {
-        // The DOM's edit and selection events count as typed input even if the mirror is stale.
+        defer { syncField(activate: false) }
+        let matches = fieldMirror.map { $0.key == key && $0.base == base && !$0.secure && $0.text.utf8.elementsEqual(expected.utf8) } ?? false
+        return runtime.applyNativeFieldChange(key: key, base: base, expected: expected, text: text,
+                                              anchor: anchor, focus: focus, at: now, mirrorMatches: matches)
+    }
+}
+
+extension Runtime {
+    /// Apply a UTF-16 selection or text edit from a host input connection to its
+    /// original UTF-8 model window. Reject edits to stale or secure fields.
+    @discardableResult
+    func applyNativeFieldChange(key: String, base: Int, expected: String, text: String?,
+                                anchor: Int, focus: Int, at now: Double, mirrorMatches: Bool = true) -> Bool {
         InputTime.noteDispatched()
-        let dispatch = runtime.noteInput(at: now)
-        defer {
-            runtime.endInputDispatch(dispatch)
-            syncField(activate: false)
-        }
-        guard let mirror = fieldMirror, mirror.key == key, mirror.base == base, !mirror.secure,
-              mirror.text.utf8.elementsEqual(expected.utf8), runtime.focusedPath == key,
-              let el = runtime.focusedInputElement(at: key), el.hasEditAccess, !el.isSecure,
+        let dispatch = noteInput(at: now)
+        defer { endInputDispatch(dispatch) }
+        guard mirrorMatches, focusedPath == key, let el = focusedInputElement(at: key), el.hasEditAccess, !el.isSecure,
               let lens = el.handlers.editLens else { return false }
 
-        let previous = lens.get(runtime.state)
+        let previous = lens.get(state)
         let proposed = text ?? expected
         guard !previous.isSecure, Self.containsWindow(expected, in: previous.text, at: base),
               let anchorByte = Self.byteOffset(in: proposed, utf16: anchor),
@@ -68,13 +75,13 @@ extension WebAppHost {
             edit.snapToPills()
         }
         if replacing && !edit.text.utf8.elementsEqual(previous.text.utf8) {
-            runtime.deliverInputEdit(el: el, previousEdit: previous, newEdit: edit, editLens: lens, at: now)
-            return matches && lens.get(runtime.state).text.utf8.elementsEqual(edit.text.utf8)
+            deliverInputEdit(el: el, previousEdit: previous, newEdit: edit, editLens: lens, at: now)
+            return matches && lens.get(state).text.utf8.elementsEqual(edit.text.utf8)
         }
         if edit.cursor != previous.cursor || edit.anchor != previous.anchor {
-            lens.set(&runtime.state, edit)
-            runtime.pendingCaretFollow = true
-            runtime.dirtyCommit(at: now, why: CommitWhy.input)
+            lens.set(&state, edit)
+            pendingCaretFollow = true
+            dirtyCommit(at: now, why: CommitWhy.input)
         }
         return matches
     }

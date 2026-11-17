@@ -307,39 +307,11 @@ public final class LightRenderer: @unchecked Sendable {
     }
 
     public func buildFrameUniforms(scene: LightScene) -> LightFrameUniforms {
-        let s = scene.settings
-        let nl = min(scene.lights.count, maxLights)
-        let zmax = scene.prims
-            .filter { ($0.flags & flagOccluder) != 0 }
-            .reduce(Float(0.0)) { max($0, $1.z.y) }
-        let shafts = scene.lights.prefix(nl).contains { $0.extra.x > 0.0 }
-        let anyEmit = scene.prims.contains { ($0.flags & flagEmissive) != 0 } || scene.emission != nil
-        let giActive: GIParams? = s.gi.flatMap { g in
-            (anyEmit || (g.bounce > 0.0 && nl > 0)) ? g : nil
-        }
-        let floatTarget = outputFormat == .rgba16Float || outputFormat == .rgba32Float
-        let isSrgbFormat = outputFormat == .bgra8Unorm_srgb || outputFormat == .rgba8Unorm_srgb
-        let encode = !isSrgbFormat && !floatTarget
-        let extra = giActive != nil && scene.emission != nil
-        let flags: UInt32 =
-            (giActive != nil ? 1 : 0) |
-            (shafts ? 2 : 0) |
-            (encode ? 4 : 0) |
-            (s.contactAO > 0.0 ? 8 : 0) |
-            (extra ? 16 : 0)
-        let g = giActive ?? GIParams(strength: 0, air: 0, bounce: 0, absorption: 0, emission: 0)
-
-        var u = LightFrameUniforms()
-        u.sf = SIMD4<Float>(Float(width), Float(height), Float(fieldSize.0), Float(fieldSize.1))
-        u.gs = SIMD4<Float>(Float(giSize.0), Float(giSize.1), 0.5, giScale)
-        u.ambient = SIMD4<Float>(s.ambient.x, s.ambient.y, s.ambient.z, s.exposure)
-        u.counts = SIMD4<UInt32>(UInt32(scene.prims.count), UInt32(nl), lightCascades, flags)
-        u.misc = SIMD4<Float>(zmax, s.time, s.seed, s.shaftsOver)
-        u.text = SIMD4<Float>(s.text.floor, s.text.ceiling, s.text.lit, s.text.specular)
-        u.gi = SIMD4<Float>(g.strength, g.air, g.bounce, g.absorption)
-        u.bg = SIMD4<Float>(s.backgroundGloss, s.backgroundRoughness, s.contactAO, s.rim)
-        u.ext = SIMD4<Float>(s.albedoFloor, g.emission, 0.0, 0.0)
-        return u
+        let isFloat = outputFormat == .rgba16Float || outputFormat == .rgba32Float
+        let isSRGB = outputFormat == .bgra8Unorm_srgb || outputFormat == .rgba8Unorm_srgb
+        return LightFrameUniforms.make(scene: scene, width: width, height: height,
+                                       fieldSize: fieldSize, giSize: giSize,
+                                       encode: !isFloat && !isSRGB, extraEmission: scene.emission != nil)
     }
 
     public func hasActiveLighting(_ scene: LightScene) -> Bool {
@@ -676,6 +648,8 @@ public final class LightRenderer: @unchecked Sendable {
         return t
     }
 }
+#elseif canImport(CRuneGL) && (os(Linux) || os(Windows))
+public typealias LightRenderer = LightGLRenderer
 #else
 public final class LightRenderer: @unchecked Sendable {
     public init(width: UInt32, height: UInt32) throws {

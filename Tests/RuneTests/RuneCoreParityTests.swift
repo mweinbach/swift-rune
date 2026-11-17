@@ -239,7 +239,7 @@ struct RuneCoreParityTests {
 
     // MARK: - Edit Parity
 
-    @Test("Edit: grapheme-safe editing, marks undo/redo, IME preedit, and Cmd+Delete")
+    @Test("Edit: grapheme-safe editing, marks undo/redo, IME preedit, and deletion to line end")
     func editParity() {
         var ed = TextEdit("ab\u{0301}👨‍👩‍👧‍👦", multiline: true)
         let red = Color(r: 1.0, g: 0.2, b: 0.2, a: 1.0)
@@ -280,10 +280,10 @@ struct RuneCoreParityTests {
         #expect(escOutcome == .modified)
         #expect(marked.preedit == nil)
 
-        // Cmd+Delete deletes to line end
+        // The primary modifier with Delete removes the rest of the line.
         var lineEd = TextEdit("first line\nsecond line", multiline: true)
         lineEd.setCursor(utf8Offset: 5)
-        let delOutcome = lineEd.handleKey(KeyEvent(key: .delete, mods: Mods(cmd: true)))
+        let delOutcome = lineEd.handleKey(KeyEvent(key: .delete, mods: RuneTestKey.primaryMods()))
         #expect(delOutcome == .modified)
         #expect(lineEd.text == "first\nsecond line")
 

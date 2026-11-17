@@ -2,6 +2,9 @@
 // plus `svg_path` (`blink_number` + conic `arc_to`) needed for `#828` Ganesh icon rasterization.
 
 import Foundation
+#if os(Android)
+import Android
+#endif
 
 internal enum GaneshConstants {
     static let scalarNearlyZero: Float = 1.0 / Float(1 << 12)

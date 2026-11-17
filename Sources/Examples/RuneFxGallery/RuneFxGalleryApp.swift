@@ -1,4 +1,5 @@
 import Foundation
+import Rune
 import RuneFX
 import RuneRef
 
@@ -6,8 +7,19 @@ import RuneRef
 import Metal
 #endif
 
+struct GalleryError: Error, CustomStringConvertible {
+    let description: String
+    init(_ message: String) { description = message }
+}
+
+protocol GalleryRendering: AnyObject {
+    var w: Int { get }
+    var h: Int { get }
+    func render(name: String, t: Float, reduced: Bool) throws -> [UInt8]
+}
+
 #if canImport(Metal)
-private final class GalleryCtx {
+private final class GalleryMetalContext: GalleryRendering {
     let device: MTLDevice
     let queue: MTLCommandQueue
     let ui: UiRenderer
@@ -54,6 +66,7 @@ private final class GalleryCtx {
         self.resolvePipeline = try device.makeRenderPipelineState(descriptor: pd)
         self.w = w
         self.h = h
+        DisplayGpuAdapter(backend: .metal, device: device.name).reportIfRequested()
     }
 
     private func pass(_ cmd: MTLCommandBuffer, target: MTLTexture, clear: MTLClearColor?) -> MTLRenderCommandEncoder? {
@@ -66,8 +79,10 @@ private final class GalleryCtx {
     }
 
     func render(name: String, t: Float, reduced: Bool) throws -> [UInt8] {
+        atlas.beginScene(name)
         let b = GalleryBuilder(atlas: atlas, t: t, reduced: reduced)
         buildGalleryScene(name: name, into: b)
+        try atlas.checkCapacity()
 
         var all = b.ui
         let maskRange = all.count..<(all.count + b.mask.count)
@@ -170,6 +185,8 @@ private final class GalleryCtx {
     }
 }
 
+#endif
+
 private func halfDownsample(_ px: [UInt8], w: Int, h: Int) -> [UInt8] {
     let hw = w / 2
     let hh = h / 2
@@ -212,7 +229,7 @@ private func stillTime(_ name: String) -> Float {
     }
 }
 
-private func renderEffect(ctx: GalleryCtx, dir: URL, name: String) throws {
+private func renderEffect(ctx: any GalleryRendering, dir: URL, name: String) throws {
     let (w, h) = (ctx.w, ctx.h)
     let px = try ctx.render(name: name, t: stillTime(name), reduced: false)
     try Frame(width: w, height: h, rgba: px).writePNG(to: dir.appendingPathComponent("\(name).png"))
@@ -236,10 +253,10 @@ private func renderEffect(ctx: GalleryCtx, dir: URL, name: String) throws {
     }
     try Frame(width: fw * 4, height: fh * 2, rgba: strip)
         .writePNG(to: dir.appendingPathComponent("\(name)-strip.png"))
-    fputs("wrote \(name)\n", stderr)
+    RuneStandardIO.error("wrote \(name)\n")
 }
 
-private func timingLayers() -> [(String, FxLayer)] {
+func timingLayers() -> [(String, FxLayer)] {
     let sh = FxShape.rounded(x: 60, y: 60, w: 480, h: 280, radius: 24)
     let t: Float = 1.3
     var v: [(String, FxLayer)] = [
@@ -299,12 +316,13 @@ private func timingLayers() -> [(String, FxLayer)] {
     return v.map { ($0.0, $0.1.at(t)) }
 }
 
-private let timingDraws = 10
+let timingDraws = 10
 
-private func runTimings() throws -> String {
+#if canImport(Metal)
+private func runMetalTimings() throws -> String {
     let w = Int(600 * galleryS)
     let h = Int(400 * galleryS)
-    let ctx = try GalleryCtx(w: w, h: h)
+    let ctx = try GalleryMetalContext(w: w, h: h)
     let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 808, height: 408, mipmapped: false)
     d.usage = [.renderTarget, .shaderRead]
     d.storageMode = .private
@@ -355,10 +373,40 @@ private func runTimings() throws -> String {
 }
 #endif
 
+private func galleryContext(_ backend: GpuBackend) throws -> any GalleryRendering {
+    let (w, h) = (Int(galleryW * galleryS), Int(galleryH * galleryS))
+    switch backend {
+    #if canImport(Metal)
+    case .metal: return try GalleryMetalContext(w: w, h: h)
+    #endif
+    #if canImport(CRuneGL) && (os(macOS) || os(Linux) || os(Windows))
+    case .gl: return try GalleryGLContext(w: w, h: h)
+    #endif
+    default: throw GalleryError("RuneFX gallery cannot render with backend \(backend.rawValue)")
+    }
+}
+
+private func runTimings(_ backend: GpuBackend) throws -> String {
+    switch backend {
+    #if canImport(Metal)
+    case .metal: return try runMetalTimings()
+    #endif
+    #if canImport(CRuneGL) && (os(macOS) || os(Linux) || os(Windows))
+    case .gl: return try GalleryGLContext(w: Int(600 * galleryS), h: Int(400 * galleryS)).timings()
+    #endif
+    default: throw GalleryError("RuneFX gallery timings require a supported graphics backend")
+    }
+}
+
 @main
 enum RuneFxGalleryApp {
-    static func main() throws {
-        try run(args: Array(CommandLine.arguments.dropFirst()))
+    static func main() {
+        do {
+            try run(args: Array(CommandLine.arguments.dropFirst()))
+        } catch {
+            RuneStandardIO.error("error: \(error)\n")
+            Foundation.exit(1)
+        }
     }
 
     static func run(args: [String]) throws {
@@ -380,16 +428,16 @@ enum RuneFxGalleryApp {
         let dir = URL(fileURLWithPath: arg("--out") ?? "demo/fx", isDirectory: true)
         let reduced = args.contains("--reduced")
 
-        #if canImport(Metal)
+        let backend = GpuBackendPolicy.resolve(env: ProcessInfo.processInfo.environment["RUNE_GPU_BACKEND"], chosen: nil)
         if args.contains("--timings") {
-            let t = try runTimings()
+            let t = try runTimings(backend)
             print(t)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             try t.write(to: dir.appendingPathComponent("timings.md"), atomically: true, encoding: .utf8)
             return
         }
 
-        let ctx = try GalleryCtx(w: Int(galleryW * galleryS), h: Int(galleryH * galleryS))
+        let ctx = try galleryContext(backend)
 
         if let snapPath {
             let name = effect ?? "glow"
@@ -406,7 +454,7 @@ enum RuneFxGalleryApp {
             let secs: Float = arg("--seconds").flatMap(Float.init) ?? 2.0
             let start: Float = arg("--start").flatMap(Float.init) ?? 0.0
             guard let name = effect else {
-                fputs("error: --frames requires --effect NAME\n", stderr)
+                RuneStandardIO.error("error: --frames requires --effect NAME\n")
                 Foundation.exit(1)
             }
             let outURL = URL(fileURLWithPath: framesDir, isDirectory: true)
@@ -417,7 +465,7 @@ enum RuneFxGalleryApp {
                 let filename = String(format: "%@_%04d.png", name, i)
                 try Frame(width: ctx.w, height: ctx.h, rgba: px).writePNG(to: outURL.appendingPathComponent(filename))
             }
-            fputs("wrote \(n) frames to \(framesDir)\n", stderr)
+            RuneStandardIO.error("wrote \(n) frames to \(framesDir)\n")
             return
         }
 
@@ -426,7 +474,7 @@ enum RuneFxGalleryApp {
             let name = effect ?? "blend"
             let px = try ctx.render(name: name, t: stillTime(name), reduced: reduced)
             try Frame(width: ctx.w, height: ctx.h, rgba: px).writePNG(to: dir.appendingPathComponent("\(name).png"))
-            fputs("wrote \(name).png\n", stderr)
+            RuneStandardIO.error("wrote \(name).png\n")
             return
         }
 
@@ -435,13 +483,9 @@ enum RuneFxGalleryApp {
             try renderEffect(ctx: ctx, dir: dir, name: e)
         }
         if effect == nil && !args.contains("--no-timings") {
-            let t = try runTimings()
+            let t = try runTimings(backend)
             print(t)
             try t.write(to: dir.appendingPathComponent("timings.md"), atomically: true, encoding: .utf8)
         }
-        #else
-        fputs("error: Metal unavailable on this platform\n", stderr)
-        Foundation.exit(1)
-        #endif
     }
 }

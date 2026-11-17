@@ -7,8 +7,23 @@ import RuneRef
 import Metal
 #endif
 
+struct DemoVisibility {
+    let width: Int
+    let height: Int
+    let sample: (Int, Int) -> Float
+}
+
+protocol LightDemoContext {
+    var ts: TextSystem { get }
+    func enableTimings()
+    var gpuMilliseconds: Double? { get }
+    func visibility() throws -> DemoVisibility
+    func drawUI(base: [DemoUIInst], text: [DemoUIInst], clear: Color) throws
+    func lightFrame(prims: [Prim], lights: [Light], settings: LightSettings, read: Bool) throws -> [UInt8]?
+}
+
 #if canImport(Metal)
-private final class DemoCtx {
+private final class DemoCtx: LightDemoContext {
     let device: MTLDevice
     let queue: MTLCommandQueue
     let ui: DemoUIRenderer
@@ -17,6 +32,9 @@ private final class DemoCtx {
     let baseTex: MTLTexture
     let textTex: MTLTexture
     let outTex: MTLTexture
+    private var timingEnabled = false
+    private(set) var gpuMilliseconds: Double?
+    func enableTimings() { timingEnabled = true }
 
     init() throws {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -60,18 +78,64 @@ private final class DemoCtx {
         cmd.waitUntilCompleted()
     }
 
+    func visibility() -> DemoVisibility {
+        let (fw, fh) = light.fieldSize
+        let stDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: light.visibilityTexture.pixelFormat,
+            width: Int(fw),
+            height: Int(fh),
+            mipmapped: false
+        )
+        stDesc.usage = .shaderRead
+        stDesc.storageMode = .shared
+        let visStaging = device.makeTexture(descriptor: stDesc)!
+        let blitCmd = queue.makeCommandBuffer()!
+        let blit = blitCmd.makeBlitCommandEncoder()!
+        blit.copy(
+            from: light.visibilityTexture,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: MTLSize(width: Int(fw), height: Int(fh), depth: 1),
+            to: visStaging,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        )
+        blit.endEncoding()
+        blitCmd.commit()
+        blitCmd.waitUntilCompleted()
+
+        var vis = [Float16](repeating: Float16(0), count: Int(fw * fh) * 4)
+        vis.withUnsafeMutableBytes { raw in
+            visStaging.getBytes(
+                raw.baseAddress!,
+                bytesPerRow: Int(fw) * 8,
+                from: MTLRegionMake2D(0, 0, Int(fw), Int(fh)),
+                mipmapLevel: 0
+            )
+        }
+
+        return DemoVisibility(width: Int(fw), height: Int(fh)) { x, y in
+            Float(vis[(y * Int(fw) + x) * 4])
+        }
+    }
+
     func lightFrame(prims: [Prim], lights: [Light], settings: LightSettings, read: Bool) -> [UInt8]? {
         let cmd = queue.makeCommandBuffer()!
         let scene = LightScene(prims: prims, lights: lights, settings: settings, emission: nil)
         _ = light.render(scene: scene, commandBuffer: cmd, baseTexture: baseTex, textTexture: textTex, targetTexture: outTex)
         cmd.commit()
         cmd.waitUntilCompleted()
+        if timingEnabled { gpuMilliseconds = light.readTimings(commandBuffer: cmd)?.total }
         guard read else { return nil }
         var rgba = [UInt8](repeating: 0, count: demoW * demoH * 4)
         outTex.getBytes(&rgba, bytesPerRow: demoW * 4, from: MTLRegionMake2D(0, 0, demoW, demoH), mipmapLevel: 0)
         return rgba
     }
 }
+
+#endif
 
 private func downscale(_ src: [UInt8], w: Int, h: Int, factor k: Int) -> [UInt8] {
     let ow = w / k
@@ -99,15 +163,15 @@ private func downscale(_ src: [UInt8], w: Int, h: Int, factor k: Int) -> [UInt8]
     return out
 }
 
-private func renderDemo(ctx: DemoCtx, demo: any LightDemo, out: URL, frames: Int?) throws {
+private func renderDemo(ctx: any LightDemoContext, demo: any LightDemo, out: URL, frames: Int?) throws {
     let name = demo.name
     let stillFrame = Int((demo.still * Float(demoFPS)).rounded())
     if frames == 0 {
         let t = Float(stillFrame) / Float(demoFPS)
         var f = demo.frame(ts: ctx.ts, t: t, scale: 2.0)
         f.settings.seed = 0
-        ctx.drawUI(base: f.base, text: f.text, clear: f.clear)
-        if let px = ctx.lightFrame(prims: f.prims, lights: f.lights, settings: f.settings, read: true) {
+        try ctx.drawUI(base: f.base, text: f.text, clear: f.clear)
+        if let px = try ctx.lightFrame(prims: f.prims, lights: f.lights, settings: f.settings, read: true) {
             try Frame(width: demoW, height: demoH, rgba: px).writePNG(to: out.appendingPathComponent("\(name).png"))
         }
         return
@@ -117,48 +181,30 @@ private func renderDemo(ctx: DemoCtx, demo: any LightDemo, out: URL, frames: Int
     let stripAt = (0..<5).map { ($0 * n) / 5 + n / 10 }
     var strip: [[UInt8]] = []
 
-#if os(macOS)
-    let mp4 = out.appendingPathComponent("\(name).mp4")
-    let ff = Process()
-    ff.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    ff.arguments = [
-        "ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba",
-        "-s", "\(demoW)x\(demoH)", "-framerate", "\(demoFPS)", "-i", "-",
-        "-vf", "scale=out_color_matrix=bt709:out_range=tv", "-c:v", "libx264",
-        "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
-        "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-        "-movflags", "+faststart", mp4.path,
-    ]
-    let pipe = Pipe()
-    ff.standardInput = pipe
-    let canEncodeMP4 = (try? ff.run()) != nil
-#endif
+    let movie: ToolingVideoEncoder?
+    do {
+        movie = try ToolingVideoEncoder(outputPath: out.appendingPathComponent("\(name).mp4").path,
+                                       width: demoW, height: demoH, fps: Double(demoFPS))
+    } catch ToolingError.ffmpegUnavailable {
+        movie = nil
+    }
 
     for fIdx in 0..<n {
         let t = Float(fIdx) / Float(demoFPS)
         var f = demo.frame(ts: ctx.ts, t: t, scale: 2.0)
         f.settings.seed = 0
-        ctx.drawUI(base: f.base, text: f.text, clear: f.clear)
-        if let px = ctx.lightFrame(prims: f.prims, lights: f.lights, settings: f.settings, read: true) {
+        try ctx.drawUI(base: f.base, text: f.text, clear: f.clear)
+        if let px = try ctx.lightFrame(prims: f.prims, lights: f.lights, settings: f.settings, read: true) {
             if fIdx == stillFrame {
                 try Frame(width: demoW, height: demoH, rgba: px).writePNG(to: out.appendingPathComponent("\(name).png"))
             }
             if stripAt.contains(fIdx) {
                 strip.append(downscale(px, w: demoW, h: demoH, factor: 4))
             }
-#if os(macOS)
-            if canEncodeMP4 {
-                try? pipe.fileHandleForWriting.write(contentsOf: Data(px))
-            }
-#endif
+            try movie?.writeFrame(Frame(width: demoW, height: demoH, rgba: px))
         }
     }
-#if os(macOS)
-    if canEncodeMP4 {
-        try? pipe.fileHandleForWriting.close()
-        ff.waitUntilExit()
-    }
-#endif
+    try movie?.finish()
     if !strip.isEmpty {
         let sw = demoW / 4
         let sh = demoH / 4
@@ -184,7 +230,11 @@ private func median(_ v: [Double]) -> Double {
     return s[s.count / 2]
 }
 
-private func runBench(ctx: DemoCtx, out: URL) throws {
+private func runBench(ctx: any LightDemoContext, out: URL, frames: Int?) throws {
+    let frameCount = frames ?? 90
+    guard frameCount > 0 else { throw ToolingError.invalidArgument("bench needs at least one frame") }
+    let warmup = frameCount / 3
+    ctx.enableTimings()
     let ui = DemoUIBuilder(ts: ctx.ts, clear: oklch(0.17, 0.006, 265), scale: 2.0)
     let card = oklch(0.235, 0.007, 265)
     for i in 0..<10 {
@@ -197,7 +247,7 @@ private func runBench(ctx: DemoCtx, out: URL) throws {
             ui.text(x + 12, y + 18, "Message", size: 13, weight: 400, color: oklch(0.9, 0, 0))
         }
     }
-    ctx.drawUI(base: ui.base, text: ui.text, clear: ui.clear)
+    try ctx.drawUI(base: ui.base, text: ui.text, clear: ui.clear)
 
     let cfgs: [(String, Int, Bool, Bool)] = [
         ("1 light", 1, false, false),
@@ -210,8 +260,9 @@ private func runBench(ctx: DemoCtx, out: URL) throws {
     var report = "{\n"
     let clock = ContinuousClock()
     for (ci, (label, nl, shafts, gi)) in cfgs.enumerated() {
-        var totals: [Double] = []
-        for f in 0..<90 {
+        var gpuTimes: [Double] = []
+        var wallTimes: [Double] = []
+        for f in 0..<frameCount {
             let t = Float(f) / 60.0
             let lights: [Light] = (0..<nl).map { k in
                 let a = t * 0.8 + Float(k) * 1.7
@@ -226,30 +277,28 @@ private func runBench(ctx: DemoCtx, out: URL) throws {
                 }
             }
             let s = LightSettings(gi: gi ? GIParams(bounce: nl > 0 ? 0.25 : 0.0) : nil)
-            let cmd = ctx.queue.makeCommandBuffer()!
-            _ = ctx.light.render(scene: LightScene(prims: p, lights: lights, settings: s), commandBuffer: cmd, baseTexture: ctx.baseTex, textTexture: ctx.textTex, targetTexture: ctx.outTex)
-            cmd.commit()
-            cmd.waitUntilCompleted()
-            if f >= 30, let tm = ctx.light.readTimings(commandBuffer: cmd) {
-                totals.append(tm.total)
+            let start = clock.now
+            _ = try ctx.lightFrame(prims: p, lights: lights, settings: s, read: false)
+            let elapsed = (clock.now - start).components
+            let gpuTime = ctx.gpuMilliseconds
+            if f >= warmup {
+                wallTimes.append(Double(elapsed.seconds) * 1e3 + Double(elapsed.attoseconds) * 1e-15)
+                if let gpuTime { gpuTimes.append(gpuTime) }
             }
         }
-        let t0 = clock.now
-        for _ in 0..<120 {
-            _ = ctx.lightFrame(prims: ui.prims, lights: [], settings: LightSettings(), read: false)
-        }
-        let d = clock.now - t0
-        let wall = (Double(d.components.seconds) * 1e3 + Double(d.components.attoseconds) * 1e-15) / 120.0
-        let tot = median(totals)
+        let gpuTime = gpuTimes.isEmpty ? nil : median(gpuTimes)
+        let wall = median(wallTimes)
+        let gpuReport = gpuTime.map { String(format: "%.3f ms (GPU timestamps)", $0) } ?? "GPU timestamps unavailable"
         let padLabel = String(repeating: " ", count: max(0, 24 - label.count)) + label
-        print(String(format: "%@: total %.3f ms (timestamps)   whole frame %.3f ms (wall)  (%d prims)", padLabel, tot, wall, ui.prims.count))
-        report += String(format: "  \"%@\": {\"total\": %.4f, \"frame_wall\": %.4f}%@\n", label, tot, wall, ci + 1 < cfgs.count ? "," : "")
+        print(String(format: "%@: %@   whole frame %.3f ms (wall, GPU complete)  (%d prims)", padLabel, gpuReport, wall, ui.prims.count))
+        let gpuJSON = gpuTime.map { String(format: "%.4f", $0) } ?? "null"
+        report += String(format: "  \"%@\": {\"total\": %@, \"frame_wall\": %.4f}%@\n", label, gpuJSON, wall, ci + 1 < cfgs.count ? "," : "")
     }
     report += "}\n"
     try report.write(to: out.appendingPathComponent("bench.json"), atomically: true, encoding: .utf8)
 }
 
-private func runVerify(ctx: DemoCtx) {
+private func runVerify(ctx: any LightDemoContext) throws {
     let prims: [Prim] = [
         Prim.rect(600, 500, 400, 200).radius(28).raised(14),
         Prim.rect(1200, 650, 300, 300).radius(60).raised(24),
@@ -257,49 +306,10 @@ private func runVerify(ctx: DemoCtx) {
     ]
     let light = Light.point(400, 420, 120).intensity(1.5).radius(24).range(6000)
     let ui = DemoUIBuilder(ts: ctx.ts, clear: oklch(0.2, 0, 0), scale: 2.0)
-    ctx.drawUI(base: ui.base, text: ui.text, clear: ui.clear)
-    _ = ctx.lightFrame(prims: prims, lights: [light], settings: LightSettings(), read: false)
+    try ctx.drawUI(base: ui.base, text: ui.text, clear: ui.clear)
+    _ = try ctx.lightFrame(prims: prims, lights: [light], settings: LightSettings(), read: false)
 
-    let (fw, fh) = ctx.light.fieldSize
-    let stDesc = MTLTextureDescriptor.texture2DDescriptor(
-        pixelFormat: ctx.light.visibilityTexture.pixelFormat,
-        width: Int(fw),
-        height: Int(fh),
-        mipmapped: false
-    )
-    stDesc.usage = .shaderRead
-    stDesc.storageMode = .shared
-    let visStaging = ctx.device.makeTexture(descriptor: stDesc)!
-    let blitCmd = ctx.queue.makeCommandBuffer()!
-    let blit = blitCmd.makeBlitCommandEncoder()!
-    blit.copy(
-        from: ctx.light.visibilityTexture,
-        sourceSlice: 0,
-        sourceLevel: 0,
-        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-        sourceSize: MTLSize(width: Int(fw), height: Int(fh), depth: 1),
-        to: visStaging,
-        destinationSlice: 0,
-        destinationLevel: 0,
-        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-    )
-    blit.endEncoding()
-    blitCmd.commit()
-    blitCmd.waitUntilCompleted()
-
-    var vis = [Float16](repeating: Float16(0), count: Int(fw * fh) * 4)
-    vis.withUnsafeMutableBytes { raw in
-        visStaging.getBytes(
-            raw.baseAddress!,
-            bytesPerRow: Int(fw) * 8,
-            from: MTLRegionMake2D(0, 0, Int(fw), Int(fh)),
-            mipmapLevel: 0
-        )
-    }
-
-    func gpuVis(_ x: Int, _ y: Int) -> Float {
-        Float(vis[(y * Int(fw) + x) * 4])
-    }
+    let visibility = try ctx.visibility()
     func topZ(_ p: SIMD2<Float>) -> Float {
         for pr in prims.reversed() {
             if RuneLightCPU.field(prims: [pr.raised(1).floating(bottom: pr.z.x, top: pr.z.y)], at: p).x < 0 {
@@ -320,15 +330,15 @@ private func runVerify(ctx: DemoCtx) {
 
     for gy in 0..<40 {
         for gx in 0..<64 {
-            let x = gx * Int(fw) / 64 + 3
-            let y = gy * Int(fh) / 40 + 5
+            let x = gx * visibility.width / 64 + 3
+            let y = gy * visibility.height / 40 + 5
             let pxy = SIMD2<Float>((Float(x) + 0.5) * 2.0, (Float(y) + 0.5) * 2.0)
             let z = topZ(pxy)
             if prims.contains(where: { abs(RuneLightCPU.field(prims: [$0], at: pxy).x) < 3.0 }) {
                 continue
             }
             let p = SIMD3<Float>(pxy.x, pxy.y, z + 0.35)
-            let g = gpuVis(x, y)
+            let g = visibility.sample(x, y)
             let e = RuneLightCPU.estimate(prims: prims, light: light, at: p)
             if abs(g - e) > maxEst {
                 worst = String(format: "worst texel (%d,%d) z %.1f: gpu %.3f vs cpu %.3f", x, y, z, g, e)
@@ -355,7 +365,6 @@ private func runVerify(ctx: DemoCtx) {
         nAll, maxEst, sumEst / Float(max(nAll, 1)), nPen, sumPen / Float(max(nPen, 1)), maxPen
     ))
 }
-#endif
 
 @main
 enum RuneLightDemosApp {
@@ -371,24 +380,54 @@ enum RuneLightDemosApp {
 
         let snapPath = arg("--snap")
         let out = URL(fileURLWithPath: arg("--out") ?? "demo/light", isDirectory: true)
-        let frames = arg("--frames").flatMap(Int.init)
-        let cmd = (args.first?.hasPrefix("--") == false) ? args.first! : "all"
+        let frames: Int?
+        if args.contains("--frames") {
+            guard let count = arg("--frames").flatMap(Int.init), count >= 0 else {
+                throw ToolingError.invalidArgument("--frames needs a nonnegative integer")
+            }
+            frames = count
+        } else {
+            frames = nil
+        }
+        var cmd = "all"
+        var arguments = args.makeIterator()
+        command: while let argument = arguments.next() {
+            switch argument {
+            case "--out", "--scene", "--frames", "--snap", "--t":
+                _ = arguments.next()
+            default:
+                if !argument.hasPrefix("-") {
+                    cmd = argument
+                    break command
+                }
+            }
+        }
 
-        #if canImport(Metal)
-        let ctx = try DemoCtx()
+        #if canImport(Metal) || canImport(CRuneOffscreenGL)
+        let ctx: any LightDemoContext
+        #if canImport(Metal) && canImport(CRuneOffscreenGL)
+        if args.contains("--gl") {
+            ctx = try DemoGLContext()
+        } else {
+            ctx = try DemoCtx()
+        }
+        #elseif canImport(Metal)
+        ctx = try DemoCtx()
+        #else
+        ctx = try DemoGLContext()
+        #endif
         let demos = makeAllDemos()
 
         if let snapPath {
             let sceneName = arg("--scene") ?? "chat"
             guard let demo = demos.first(where: { $0.name == sceneName }) else {
-                fputs("error: unknown scene '\(sceneName)'\n", stderr)
-                Foundation.exit(1)
+                throw LightRendererError.shaderCompileFailed("Unknown scene '\(sceneName)'")
             }
             let t = arg("--t").flatMap(Float.init) ?? demo.still
             var f = demo.frame(ts: ctx.ts, t: t, scale: 2.0)
             f.settings.seed = 0
-            ctx.drawUI(base: f.base, text: f.text, clear: f.clear)
-            if let px = ctx.lightFrame(prims: f.prims, lights: f.lights, settings: f.settings, read: true) {
+            try ctx.drawUI(base: f.base, text: f.text, clear: f.clear)
+            if let px = try ctx.lightFrame(prims: f.prims, lights: f.lights, settings: f.settings, read: true) {
                 let url = URL(fileURLWithPath: snapPath)
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try Frame(width: demoW, height: demoH, rgba: px).writePNG(to: url)
@@ -399,23 +438,21 @@ enum RuneLightDemosApp {
         try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
         switch cmd {
         case "bench":
-            try runBench(ctx: ctx, out: out)
+            try runBench(ctx: ctx, out: out, frames: frames)
         case "verify":
-            runVerify(ctx: ctx)
+            try runVerify(ctx: ctx)
         case "all":
             for d in demos {
                 try renderDemo(ctx: ctx, demo: d, out: out, frames: frames)
             }
         default:
             guard let d = demos.first(where: { $0.name == cmd }) else {
-                fputs("error: unknown demo '\(cmd)'\n", stderr)
-                Foundation.exit(1)
+                throw LightRendererError.shaderCompileFailed("Unknown demo '\(cmd)'")
             }
             try renderDemo(ctx: ctx, demo: d, out: out, frames: frames)
         }
         #else
-        fputs("error: Metal unavailable on this platform\n", stderr)
-        Foundation.exit(1)
+        throw LightRendererError.shaderCompileFailed("No desktop GL or Metal renderer for this platform")
         #endif
     }
 }

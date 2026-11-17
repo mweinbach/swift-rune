@@ -1,6 +1,7 @@
 import Foundation
-#if canImport(CoreGraphics)
-import CoreGraphics
+import RuneRef
+#if canImport(FoundationNetworking)
+import FoundationNetworking
 #endif
 
 // MARK: - Image URL Fetch, Selection, SVG Rasterization & Single-Flight Cache (`rune::image::from_url`)
@@ -25,8 +26,7 @@ public struct ImageLoadError: Error, Equatable, CustomStringConvertible, Sendabl
 /// Shared decode state retained by both `CachedImage` and its `Pixels` (`rune::image::State`).
 public final class CachedImageState: @unchecked Sendable {
     public let id: ImageId
-    private let lock = NSLock()
-    private let semaphore = DispatchSemaphore(value: 0)
+    private let lock = NSCondition()
     private var settled = false
     private var outcome: Result<(UInt32, UInt32), ImageLoadError>?
 
@@ -61,27 +61,25 @@ public final class CachedImageState: @unchecked Sendable {
             outcome = .failure(err)
         }
         settled = true
+        lock.broadcast()
         lock.unlock()
-        semaphore.signal()
     }
 
     func wait(timeout: TimeInterval) -> Result<(UInt32, UInt32), ImageLoadError> {
         lock.lock()
-        if let existing = outcome {
-            lock.unlock()
-            return existing
-        }
-        lock.unlock()
-        let waitResult = semaphore.wait(timeout: .now() + timeout)
-        lock.lock()
         defer { lock.unlock() }
-        if let existing = outcome {
-            return existing
+        #if os(WASI)
+        // A synchronous wait would prevent the reactor from delivering the image.
+        return outcome ?? .failure(ImageLoadError("image is pending on the browser event loop"))
+        #else
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if let outcome { return outcome }
+            if !lock.wait(until: deadline) {
+                return outcome ?? .failure(ImageLoadError("timed out waiting for image"))
+            }
         }
-        if waitResult == .timedOut {
-            return .failure(ImageLoadError("timed out waiting for image"))
-        }
-        return .failure(ImageLoadError("image load cancelled"))
+        #endif
     }
 }
 
@@ -113,7 +111,8 @@ public final class CachedImage: @unchecked Sendable {
         state.resolve(with: result, into: pixels)
     }
 
-    /// Blocks until the image finishes loading or `timeout` elapses (`Image::wait`).
+    /// Waits for the image or its timeout. In a browser, a pending handle returns
+    /// immediately so the event loop can deliver the result and call the cache's wake closure.
     @discardableResult
     public func wait(timeout: TimeInterval = 5.0) -> Result<(UInt32, UInt32), ImageLoadError> {
         state.wait(timeout: timeout)
@@ -139,7 +138,9 @@ public final class ImageCache: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [CacheKey: WeakEntry] = [:]
     private let wake: @Sendable () -> Void
+    #if !os(WASI)
     private let session: URLSession?
+    #endif
     private let remoteLoader: RemoteLoader?
 
     /// Number of live (handle or drawn `Pixels` still retained) entries currently tracked (`image.rs:760`).
@@ -149,6 +150,12 @@ public final class ImageCache: @unchecked Sendable {
         return entries.values.filter { $0.state != nil }.count
     }
 
+    #if os(WASI)
+    public init(wake: @escaping @Sendable () -> Void = {}, remoteLoader: RemoteLoader? = nil) {
+        self.wake = wake
+        self.remoteLoader = remoteLoader
+    }
+    #else
     /// Creates an image cache with an optional redraw `wake` closure, `URLSession` (for custom
     /// `URLProtocol` testing/HTTP), or injectable `remoteLoader`.
     public init(
@@ -160,6 +167,7 @@ public final class ImageCache: @unchecked Sendable {
         self.session = session
         self.remoteLoader = remoteLoader
     }
+    #endif
 
     /// Parses a native path or `file:` URL, rejecting `http:`/`https:`/`data:` and invalid escapes (`from_url::file_path`).
     public static func filePath(for url: String) -> Result<String, ImageLoadError> {
@@ -399,36 +407,42 @@ public final class ImageCache: @unchecked Sendable {
         entries[key] = WeakEntry(handle: handle, state: handle.state, pixels: pixels)
         lock.unlock()
 
-        let wakeFn = self.wake
-        let customLoader = self.remoteLoader
-        let urlSession = self.session
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            Self.executeLoad(
-                url: url,
-                pixelSize: pixelSize,
-                handle: handle,
-                session: urlSession,
-                remoteLoader: customLoader,
-                wake: wakeFn
-            )
+        let load: @Sendable () -> Void = { [self] in
+            executeLoad(url: url, pixelSize: pixelSize, handle: handle)
         }
+        #if os(WASI)
+        load()
+        #else
+        DispatchQueue.global(qos: .userInitiated).async(execute: load)
+        #endif
         return handle
     }
 
-    private static func executeLoad(
-        url: String,
-        pixelSize: UInt32,
-        handle: CachedImage,
-        session: URLSession?,
-        remoteLoader: RemoteLoader?,
-        wake: @escaping @Sendable () -> Void
-    ) {
-        switch filePath(for: url) {
+    private func executeLoad(url: String, pixelSize: UInt32, handle: CachedImage) {
+        #if os(WASI)
+        if BrowserImageCodec.enabled, remoteLoader == nil, !url.lowercased().hasPrefix("file:") {
+            BrowserImageCodec.submit(.url(url), name: url, limit: Int(clamping: pixelSize)) { [wake] result in
+                handle.resolve(with: result)
+                wake()
+            }
+            return
+        }
+        #endif
+        switch Self.filePath(for: url) {
         case .success(let path):
             do {
                 let data = try Data(contentsOf: URL(fileURLWithPath: path))
-                let decoded = try decodeEncodedOrSVG(url: url, data: data, pixelSize: pixelSize)
+                #if os(WASI)
+                if BrowserImageCodec.enabled {
+                    BrowserImageCodec.submit(.bytes(data), name: url,
+                        limit: Self.isSVGContent(data) ? Int(clamping: pixelSize) : nil) { [wake] result in
+                        handle.resolve(with: result)
+                        wake()
+                    }
+                    return
+                }
+                #endif
+                let decoded = try Self.decodeEncodedOrSVG(url: url, data: data, pixelSize: pixelSize)
                 handle.resolve(with: .success(decoded))
             } catch let err as ImageLoadError {
                 handle.resolve(with: .failure(err))
@@ -438,10 +452,10 @@ public final class ImageCache: @unchecked Sendable {
             wake()
         case .failure(let nativeError):
             if let remoteLoader {
-                Task {
+                Task { [wake] in
                     do {
                         let fetched = try await remoteLoader(url, pixelSize)
-                        handle.resolve(with: land(url: url, fetched: fetched, pixelSize: pixelSize))
+                        handle.resolve(with: Self.land(url: url, fetched: fetched, pixelSize: pixelSize))
                     } catch let err as ImageLoadError {
                         handle.resolve(with: .failure(err))
                     } catch {
@@ -451,15 +465,16 @@ public final class ImageCache: @unchecked Sendable {
                 }
                 return
             }
+            #if !os(WASI)
             if let session, let parsedURL = URL(string: url) {
-                let task = session.dataTask(with: parsedURL) { data, response, err in
+                let task = session.dataTask(with: parsedURL) { [wake] data, response, err in
                     if let err {
                         handle.resolve(with: .failure(ImageLoadError("\(url): \(err.localizedDescription)")))
                     } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                         handle.resolve(with: .failure(ImageLoadError("\(url): HTTP \(http.statusCode)")))
                     } else if let data {
                         do {
-                            let decoded = try decodeEncodedOrSVG(url: url, data: data, pixelSize: pixelSize)
+                            let decoded = try Self.decodeEncodedOrSVG(url: url, data: data, pixelSize: pixelSize)
                             handle.resolve(with: .success(decoded))
                         } catch let loadErr as ImageLoadError {
                             handle.resolve(with: .failure(loadErr))
@@ -474,15 +489,15 @@ public final class ImageCache: @unchecked Sendable {
                 task.resume()
                 return
             }
+            #endif
             handle.resolve(with: .failure(nativeError))
             wake()
         }
     }
 
     private static func decodeEncodedOrSVG(url: String, data: Data, pixelSize: UInt32) throws -> DecodedImage {
-        let looksSVG = url.lowercased().hasSuffix(".svg")
-            || (String(data: data.prefix(256), encoding: .utf8)?.contains("<svg") == true)
-        if looksSVG {
+        let pathExtension = (URL(string: url)?.pathExtension ?? "").lowercased()
+        if pathExtension == "svg" || pathExtension == "svgz" || isSVGContent(data) {
             switch land(url: url, fetched: .svg(data), pixelSize: pixelSize) {
             case .success(let decoded): return decoded
             case .failure(let err): throw err
@@ -517,71 +532,86 @@ public final class ImageCache: @unchecked Sendable {
         )
     }
 
-    private static func rasterizeSVG(_ data: Data, targetMaxSide: UInt32) throws -> (UInt32, UInt32, Data) {
+    private static func rasterizeSVG(_ encoded: Data, targetMaxSide: UInt32) throws -> (UInt32, UInt32, Data) {
+        let data: Data
+        if encoded.starts(with: [0x1f, 0x8b]) {
+            do {
+                data = try PortablePNG.gunzip(encoded, maximumSize: LinearMipGenerator.maxDecodedBytes)
+            } catch {
+                throw ImageLoadError("invalid SVGZ: \(error)")
+            }
+        } else {
+            data = encoded
+        }
         guard let text = String(data: data, encoding: .utf8) else {
             throw ImageLoadError("SVG is not valid UTF-8")
         }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.contains("<svg"), trimmed.contains(">"), (trimmed.contains("</svg>") || trimmed.contains("/>")) else {
+        guard let rootStart = text.range(of: "<svg"),
+              let tagEnd = text[rootStart.upperBound...].firstIndex(of: ">"),
+              text[rootStart.lowerBound...tagEnd].hasSuffix("/>") || text[tagEnd...].contains("</svg>") else {
             throw ImageLoadError("malformed SVG document")
         }
-        let svgTag = extractFirstTag(named: "svg", in: trimmed) ?? ""
-        let attrW = parseNumericAttribute("width", in: svgTag)
-        let attrH = parseNumericAttribute("height", in: svgTag)
-        let vb = parseViewBox(in: svgTag)
-        let srcW = max(1.0, attrW ?? vb?.2 ?? 16.0)
-        let srcH = max(1.0, attrH ?? vb?.3 ?? 16.0)
-        // `svg_rgba(bytes, 0)`: twice the drawing's own size, at most 4096.
-        let side = targetMaxSide == 0 ? UInt32(min(max((max(srcW, srcH) * 2).rounded(.up), 1), 4096)) : targetMaxSide
-        let scale = Float(side) / max(srcW, srcH)
-        let outW = max(1, UInt32((srcW * scale).rounded()))
-        let outH = max(1, UInt32((srcH * scale).rounded()))
-        guard outW <= IMAGE_MAX_SIDE, outH <= IMAGE_MAX_SIDE else {
-            throw ImageLoadError("SVG rasterized size exceeds \(IMAGE_MAX_SIDE)")
-        }
+        let tag = String(text[rootStart.lowerBound...tagEnd])
+        func attribute(_ key: String) -> String? { SVGIconRenderer.attribute(in: tag, named: key) }
 
-        var bytes = [UInt8](repeating: 0, count: Int(outW) * Int(outH) * 4)
-        #if canImport(CoreGraphics)
-        let cs = CGColorSpaceCreateDeviceRGB()
-        if let ctx = CGContext(
-            data: &bytes,
-            width: Int(outW),
-            height: Int(outH),
-            bitsPerComponent: 8,
-            bytesPerRow: Int(outW) * 4,
-            space: cs,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) {
-            ctx.scaleBy(x: CGFloat(outW) / CGFloat(srcW), y: CGFloat(outH) / CGFloat(srcH))
-            if trimmed.contains("<rect") {
-                for rectTag in extractAllTags(named: "rect", in: trimmed) {
-                    let rx = parseNumericAttribute("x", in: rectTag) ?? 0
-                    let ry = parseNumericAttribute("y", in: rectTag) ?? 0
-                    let rw = parseNumericAttribute("width", in: rectTag) ?? srcW
-                    let rh = parseNumericAttribute("height", in: rectTag) ?? srcH
-                    let fill = parseHexColor(parseStringAttribute("fill", in: rectTag) ?? "#000")
-                    ctx.setFillColor(red: CGFloat(fill.0), green: CGFloat(fill.1), blue: CGFloat(fill.2), alpha: CGFloat(fill.3))
-                    ctx.fill(CGRect(x: CGFloat(rx), y: CGFloat(ry), width: CGFloat(rw), height: CGFloat(rh)))
-                }
-            } else {
-                // Fallback path/shape silhouette rasterization via `SVGIcon` when SVG contains `<path>` elements.
-                let paths = extractPathData(in: trimmed)
-                if !paths.isEmpty {
-                    let icon = SVGIcon(viewBox: max(srcW, srcH), paths: paths)
-                    let cov = GlyphAtlas.rasterizeIconBitmap(icon, pixelSize: Int(max(outW, outH)))
-                    for py in 0..<Int(outH) {
-                        for px in 0..<Int(outW) {
-                            let idx = (py * Int(max(outW, outH)) + px)
-                            let a = idx < cov.count ? cov[idx] : 0
-                            let dst = (py * Int(outW) + px) * 4
-                            bytes[dst] = a; bytes[dst + 1] = a; bytes[dst + 2] = a; bytes[dst + 3] = a
-                        }
-                    }
-                }
+        var viewBox: (x: Double, y: Double, width: Double, height: Double)?
+        if let raw = attribute("viewBox") {
+            let parts = raw.split { $0.isWhitespace || $0 == "," }
+            guard parts.count == 4, let x = Double(parts[0]), let y = Double(parts[1]),
+                  let w = Double(parts[2]), let h = Double(parts[3]),
+                  x.isFinite, y.isFinite, w.isFinite, h.isFinite, w > 0, h > 0 else {
+                throw ImageLoadError("invalid SVG viewBox")
             }
+            viewBox = (x, y, w, h)
         }
-        #endif
-        return (outW, outH, Data(bytes))
+        var width = svgLength(attribute("width")), height = svgLength(attribute("height"))
+        if let viewBox {
+            let ratio = viewBox.width / viewBox.height
+            if let height, width == nil { width = height * ratio }
+            if let width, height == nil { height = width / ratio }
+        }
+        let viewportWidth = width ?? viewBox?.width ?? 16
+        let viewportHeight = height ?? viewBox?.height ?? 16
+        guard viewportWidth.isFinite, viewportHeight.isFinite, viewportWidth > 0, viewportHeight > 0 else {
+            throw ImageLoadError("invalid SVG dimensions")
+        }
+        // Decode at twice the intrinsic size unless the caller requests a particular pixel size.
+        let longest = max(viewportWidth, viewportHeight)
+        let side = targetMaxSide == 0 ? min(max((longest * 2).rounded(.up), 1), 4096) : Double(targetMaxSide)
+        guard side <= Double(IMAGE_MAX_SIDE) else { throw ImageLoadError("SVG rasterized size exceeds \(IMAGE_MAX_SIDE)") }
+        let outW = max(1, Int((viewportWidth / longest * side).rounded()))
+        let outH = max(1, Int((viewportHeight / longest * side).rounded()))
+        let box = viewBox ?? (0, 0, viewportWidth, viewportHeight)
+        let aspect = (attribute("preserveAspectRatio") ?? "").split(whereSeparator: { $0.isWhitespace })
+        let align = aspect.first ?? "xMidYMid"
+        var sx = Double(outW) / box.width, sy = Double(outH) / box.height
+        var dx = 0.0, dy = 0.0
+        if viewBox != nil, align != "none" {
+            let scale = aspect.last == "slice" ? max(sx, sy) : min(sx, sy)
+            sx = scale
+            sy = scale
+            let extraX = Double(outW) - box.width * scale
+            let extraY = Double(outH) - box.height * scale
+            dx = align.hasPrefix("xMin") ? 0 : (align.hasPrefix("xMax") ? extraX : extraX / 2)
+            dy = align.hasSuffix("YMin") ? 0 : (align.hasSuffix("YMax") ? extraY : extraY / 2)
+        }
+        let transform = GTransform(xx: Float(sx), xy: 0, yx: 0, yy: Float(sy),
+                                   tx: Float(dx - box.x * sx), ty: Float(dy - box.y * sy))
+        guard transform.xx.isFinite, transform.yy.isFinite, transform.tx.isFinite, transform.ty.isFinite else {
+            throw ImageLoadError("invalid SVG transform")
+        }
+        let drawing = SVGIconRenderer.parseBody(String(text[rootStart.lowerBound...]), defaultFill: "black")
+        let bytes = SVGIconRenderer.rasterize(drawing, width: outW, height: outH, transform: transform, currentColor: .black)
+        return (UInt32(outW), UInt32(outH), Data(bytes))
+    }
+
+    private static func svgLength(_ raw: String?) -> Double? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        for (unit, factor) in [("px", 1.0), ("pt", 96 / 72.0), ("pc", 16.0), ("in", 96.0),
+                               ("cm", 96 / 2.54), ("mm", 96 / 25.4), ("Q", 96 / 101.6)] where value.hasSuffix(unit) {
+            return Double(value.dropLast(unit.count)).map { $0 * factor }
+        }
+        return Double(value)
     }
 
     private static func iconPixels(sizePt: Float, scale: Float) -> UInt32 {
@@ -619,80 +649,5 @@ public final class ImageCache: @unchecked Sendable {
         case 0x61...0x66: return b - 0x61 + 10
         default: return nil
         }
-    }
-
-    private static func extractFirstTag(named tag: String, in xml: String) -> String? {
-        extractAllTags(named: tag, in: xml).first
-    }
-
-    private static func extractAllTags(named tag: String, in xml: String) -> [String] {
-        var out: [String] = []
-        var searchStart = xml.startIndex
-        let needle = "<\(tag)"
-        while let r = xml.range(of: needle, range: searchStart..<xml.endIndex) {
-            guard let end = xml[r.lowerBound...].firstIndex(of: ">") else { break }
-            out.append(String(xml[r.lowerBound...end]))
-            searchStart = xml.index(after: end)
-        }
-        return out
-    }
-
-    private static func parseStringAttribute(_ name: String, in tag: String) -> String? {
-        for quote in ["\"", "'"] {
-            let pattern = "\(name)=\(quote)"
-            if let r = tag.range(of: pattern) {
-                let rest = tag[r.upperBound...]
-                if let end = rest.firstIndex(of: Character(quote)) {
-                    return String(rest[..<end])
-                }
-            }
-        }
-        return nil
-    }
-
-    private static func parseNumericAttribute(_ name: String, in tag: String) -> Float? {
-        guard let raw = parseStringAttribute(name, in: tag) else { return nil }
-        let cleaned = raw.trimmingCharacters(in: CharacterSet.letters.union(.whitespaces))
-        return Float(cleaned)
-    }
-
-    private static func parseViewBox(in tag: String) -> (Float, Float, Float, Float)? {
-        guard let raw = parseStringAttribute("viewBox", in: tag) else { return nil }
-        let nums = raw.split(whereSeparator: { $0 == " " || $0 == "," }).compactMap { Float($0) }
-        guard nums.count == 4 else { return nil }
-        return (nums[0], nums[1], nums[2], nums[3])
-    }
-
-    private static func extractPathData(in xml: String) -> [String] {
-        extractAllTags(named: "path", in: xml).compactMap { parseStringAttribute("d", in: $0) }
-    }
-
-    private static func parseHexColor(_ s: String) -> (Float, Float, Float, Float) {
-        let hex = s.trimmingCharacters(in: .whitespaces).dropFirst(s.hasPrefix("#") ? 1 : 0)
-        if hex.count == 3 {
-            let chars = Array(hex)
-            let r = Float(Int(String([chars[0], chars[0]]), radix: 16) ?? 0) / 255.0
-            let g = Float(Int(String([chars[1], chars[1]]), radix: 16) ?? 0) / 255.0
-            let b = Float(Int(String([chars[2], chars[2]]), radix: 16) ?? 0) / 255.0
-            return (r, g, b, 1.0)
-        }
-        if hex.count == 6 || hex.count == 8 {
-            let val = UInt32(hex, radix: 16) ?? 0
-            if hex.count == 6 {
-                return (
-                    Float((val >> 16) & 0xFF) / 255.0,
-                    Float((val >> 8) & 0xFF) / 255.0,
-                    Float(val & 0xFF) / 255.0,
-                    1.0
-                )
-            }
-            return (
-                Float((val >> 24) & 0xFF) / 255.0,
-                Float((val >> 16) & 0xFF) / 255.0,
-                Float((val >> 8) & 0xFF) / 255.0,
-                Float(val & 0xFF) / 255.0
-            )
-        }
-        return (1, 1, 1, 1)
     }
 }

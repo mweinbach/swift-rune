@@ -1,0 +1,4 @@
+module CRuneNotify {
+    header "CRuneNotify.h"
+    export *
+}

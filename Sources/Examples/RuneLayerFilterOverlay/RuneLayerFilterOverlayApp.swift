@@ -115,7 +115,7 @@ public enum RuneLayerFilterOverlayApp {
                 .setup { _ in
                     let pill = OverlayHandle(
                         configured: makeOverlaySpec { created in
-                            fputs("filter-overlay created \(created)\n", stderr)
+                            RuneStandardIO.error("filter-overlay created \(created)\n")
                         }
                     )
                     retainer.hold(pill)

@@ -2,28 +2,28 @@ import Foundation
 #if canImport(simd)
 import simd
 #else
-@inline(__always)
-private func simd_abs(_ v: SIMD2<Float>) -> SIMD2<Float> {
+@inlinable
+internal func simd_abs(_ v: SIMD2<Float>) -> SIMD2<Float> {
     SIMD2<Float>(abs(v.x), abs(v.y))
 }
 
-@inline(__always)
-private func simd_max(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> SIMD2<Float> {
+@inlinable
+internal func simd_max(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> SIMD2<Float> {
     SIMD2<Float>(max(a.x, b.x), max(a.y, b.y))
 }
 
-@inline(__always)
-private func simd_dot(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Float {
+@inlinable
+internal func simd_dot(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Float {
     a.x * b.x + a.y * b.y
 }
 
-@inline(__always)
-private func simd_length_squared(_ v: SIMD2<Float>) -> Float {
+@inlinable
+internal func simd_length_squared(_ v: SIMD2<Float>) -> Float {
     v.x * v.x + v.y * v.y
 }
 
-@inline(__always)
-private func simd_length(_ v: SIMD2<Float>) -> Float {
+@inlinable
+internal func simd_length(_ v: SIMD2<Float>) -> Float {
     (v.x * v.x + v.y * v.y).squareRoot()
 }
 #endif
@@ -344,6 +344,12 @@ public enum RefShader {
 
     /// Clamped bilinear sample of an `RGBA8Atlas` at UV `[0, 1]`, converting texels to linear light when `!srgbBlend`.
     public static func sampleRGBA8(_ atlas: RGBA8Atlas, u: Float, v: Float, srgbBlend: Bool) -> SIMD4<Float> {
+        sampleRGBA8(atlas, u: u, v: v, srgbBlend: srgbBlend, texelBounds: nil)
+    }
+
+    private static func sampleRGBA8(
+        _ atlas: RGBA8Atlas, u: Float, v: Float, srgbBlend: Bool, texelBounds: SIMD4<Float>?
+    ) -> SIMD4<Float> {
         let fx = clamp01(u) * Float(atlas.width) - 0.5
         let fy = clamp01(v) * Float(atlas.height) - 0.5
         let x0 = Int(floorf(fx))
@@ -351,18 +357,29 @@ public enum RefShader {
         let tx = fx - Float(x0)
         let ty = fy - Float(y0)
 
+        func limits(_ first: Float, _ last: Float, count: Int) -> ClosedRange<Int> {
+            let lo = min(Float(count), max(0, min(first, last)))
+            let hi = min(Float(count), max(0, max(first, last)))
+            // Packing texel bounds into normalized UVs can shift an integer edge by one ULP.
+            let lower = min(count - 1, Int(floorf(lo + lo * Float.ulpOfOne)))
+            let upper = min(count - 1, Int(ceilf(hi - hi * Float.ulpOfOne)) - 1)
+            return lower...max(lower, upper)
+        }
+        let xs = texelBounds.map { limits($0.x, $0.z, count: atlas.width) } ?? 0...(atlas.width - 1)
+        let ys = texelBounds.map { limits($0.y, $0.w, count: atlas.height) } ?? 0...(atlas.height - 1)
         func fetch(_ x: Int, _ y: Int) -> SIMD4<Float> {
-            let cx = min(max(x, 0), atlas.width - 1)
-            let cy = min(max(y, 0), atlas.height - 1)
+            let cx = min(max(x, xs.lowerBound), xs.upperBound)
+            let cy = min(max(y, ys.lowerBound), ys.upperBound)
             let idx = (cy * atlas.width + cx) * 4
             let r = Float(atlas.texels[idx]) / 255.0
             let g = Float(atlas.texels[idx + 1]) / 255.0
             let b = Float(atlas.texels[idx + 2]) / 255.0
             let a = Float(atlas.texels[idx + 3]) / 255.0
+            let weight = texelBounds == nil ? 1 : a
             if srgbBlend {
-                return SIMD4<Float>(r, g, b, a)
+                return SIMD4<Float>(r * weight, g * weight, b * weight, a)
             } else {
-                return SIMD4<Float>(srgbToLinear(r), srgbToLinear(g), srgbToLinear(b), a)
+                return SIMD4<Float>(srgbToLinear(r) * weight, srgbToLinear(g) * weight, srgbToLinear(b) * weight, a)
             }
         }
 
@@ -479,13 +496,26 @@ public enum RefShader {
             outPremul = SIMD4<Float>(prim.fill.x * a, prim.fill.y * a, prim.fill.z * a, a)
 
         case .glyph:
-            if abs(localP.x) > halfSize.x + 0.5 || abs(localP.y) > halfSize.y + 0.5 { return .zero }
-            let uNorm = (localP.x + halfSize.x) / max(prim.rect.z, 1e-4)
-            let vNorm = (localP.y + halfSize.y) / max(prim.rect.w, 1e-4)
-            if uNorm < 0 || uNorm > 1 || vNorm < 0 || vNorm > 1 { return .zero }
-            let u = prim.uv.x + (prim.uv.z - prim.uv.x) * uNorm
-            let v = prim.uv.y + (prim.uv.w - prim.uv.y) * vNorm
-            var cov = sampleR8(glyphs, u: u, v: v)
+            var cov: Float
+            if prim.params.z == 1 && prim.turn == 0 {
+                let dx = fragCoord.x - prim.rect.x
+                let dy = fragCoord.y - prim.rect.y
+                guard dx >= 0, dx < prim.rect.z, dy >= 0, dy < prim.rect.w else { return .zero }
+                // Restore normalized texel edges, including integer origins rounded down one ULP.
+                let startX = prim.uv.x * Float(glyphs.width)
+                let startY = prim.uv.y * Float(glyphs.height)
+                let x = floorf(startX + abs(startX) * Float.ulpOfOne) + floorf(dx)
+                let y = floorf(startY + abs(startY) * Float.ulpOfOne) + floorf(dy)
+                guard x >= 0, x < Float(glyphs.width), y >= 0, y < Float(glyphs.height) else { return .zero }
+                cov = Float(glyphs.texels[Int(y) * glyphs.width + Int(x)]) / 255
+            } else {
+                let uNorm = (localP.x + halfSize.x) / max(prim.rect.z, 1e-4)
+                let vNorm = (localP.y + halfSize.y) / max(prim.rect.w, 1e-4)
+                if uNorm < 0 || uNorm > 1 || vNorm < 0 || vNorm > 1 { return .zero }
+                let u = prim.uv.x + (prim.uv.z - prim.uv.x) * uNorm
+                let v = prim.uv.y + (prim.uv.w - prim.uv.y) * vNorm
+                cov = sampleR8(glyphs, u: u, v: v)
+            }
             let gamma = prim.params.w
             if gamma > 0 && abs(gamma - 1.0) > 1e-3 {
                 cov = powf(clamp01(cov), gamma)
@@ -501,10 +531,12 @@ public enum RefShader {
             let vNorm = clamp01((localP.y + halfSize.y) / max(prim.rect.w, 1e-4))
             let u = prim.uv.x + (prim.uv.z - prim.uv.x) * uNorm
             let v = prim.uv.y + (prim.uv.w - prim.uv.y) * vNorm
-            let tex = sampleRGBA8(images, u: u, v: v, srgbBlend: srgbBlend)
-            let c = tex * prim.fill
-            let a = c.w * outerCov
-            outPremul = SIMD4<Float>(c.x * a, c.y * a, c.z * a, a)
+            let atlasSize = SIMD4<Float>(Float(images.width), Float(images.height), Float(images.width), Float(images.height))
+            let hasSourceBounds = prim.border.z > prim.border.x && prim.border.w > prim.border.y
+            let tex = sampleRGBA8(images, u: u, v: v, srgbBlend: srgbBlend,
+                                  texelBounds: hasSourceBounds ? prim.border : prim.uv * atlasSize)
+            let tint = SIMD4<Float>(prim.fill.x, prim.fill.y, prim.fill.z, 1)
+            outPremul = tex * tint * (prim.fill.w * outerCov)
 
         case .linearGradient:
             let dOuter = sdBox(localP, halfSize: halfSize, radii: prim.radii)

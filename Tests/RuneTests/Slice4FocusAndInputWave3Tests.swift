@@ -774,8 +774,8 @@ struct Slice4FocusAndInputWave3Tests {
         richRt.globalOnKey = { s, ev, _ in s.app.append(ev.key); return true }
         _ = richRt.frame(at: 0.0)
         clickKey("field", in: richRt, at: 0.01)
-        pressKey(richRt, .command("u"), mods: Mods(cmd: true), at: 0.02)
-        pressKey(richRt, .command("b"), mods: Mods(cmd: true), at: 0.03)
+        pressKey(richRt, .command("u"), mods: RuneTestKey.primaryMods(), at: 0.02)
+        pressKey(richRt, .command("b"), mods: RuneTestKey.primaryMods(), at: 0.03)
         #expect(richRt.state.app == [.command("u")])
     }
 
@@ -840,7 +840,7 @@ struct Slice4FocusAndInputWave3Tests {
         mpRt.globalOnKey = { s, ev, _ in s.app += 1; return ev.key == .command("]") }
         _ = mpRt.frame(at: 0.0)
         var ran = 0
-        let cmd = Mods(cmd: true)
+        let cmd = RuneTestKey.primaryMods()
         _ = mpRt.physicalThen(.key(key: .bracketRight, mods: cmd, pressed: true, repeat: false), fallbackKey: KeyEvent(key: .command("]"), mods: cmd), unhandled: .menu { ran += 1 }, at: 0.01)
         #expect(ran == 0)
         _ = mpRt.physicalThen(.key(key: .bracketLeft, mods: cmd, pressed: true, repeat: false), fallbackKey: KeyEvent(key: .command("["), mods: cmd), unhandled: .menu { ran += 1 }, at: 0.02)

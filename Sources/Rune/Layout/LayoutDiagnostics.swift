@@ -22,7 +22,7 @@ public enum LayoutDiagnostics {
                 warnHandler(message)
             } else {
                 #if DEBUG
-                fputs(message + "\n", stderr)
+                RuneStandardIO.error(message + "\n")
                 #endif
             }
         }

@@ -1,11 +1,13 @@
 import Foundation
+#if canImport(Metal)
 import Metal
-import simd
+#endif
 import Testing
 @testable import Rune
 
 @Suite("Render Backdrop & Layer Planner Parity Tests")
 struct RenderLayersAndBackdropTests {
+    #if canImport(Metal) && canImport(QuartzCore)
     private static func makeRenderer() throws -> MetalRenderer {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw NSError(domain: "Metal", code: -1)
@@ -269,6 +271,8 @@ struct RenderLayersAndBackdropTests {
         )
         #expect(renderer.layersPool.peakBytes <= UInt64(64 << 20))
     }
+
+    #endif
 
     // MARK: - render/layers/plan_tests.rs (5 tests)
 

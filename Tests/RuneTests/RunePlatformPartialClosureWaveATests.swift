@@ -28,7 +28,7 @@ struct RunePlatformPartialClosureWaveATests {
         final class Hit: @unchecked Sendable { var opened = false }
         let hit = Hit()
         let registry = ShortcutRegistry()
-        _ = registry.register(id: "open.file", accelerator: "cmd+shift+o", scope: .global) {
+        _ = registry.register(id: "open.file", accelerator: "mod+shift+o", scope: .global) {
             hit.opened = true
         }
         let rt = Runtime(
@@ -53,10 +53,11 @@ struct RunePlatformPartialClosureWaveATests {
         _ = rt.frame(at: 0.0)
         rt.pointerDown(at: Vec2(20, 20), at: 0.005)
         rt.pointerUp(at: Vec2(20, 20), at: 0.006)
-        // On Dvorak, physical QWERTY key `S` produces logical `O` (Cmd+Shift+O).
+        // On Dvorak, physical QWERTY key S produces logical O.
+        let mods = try Chord.parse("mod+shift+o").mods
         let handled = rt.physicalInput(
-            PhysicalInput.key(key: .keyS, mods: Mods(shift: true, cmd: true, logo: true), pressed: true, repeat: false),
-            fallbackKey: KeyEvent(key: .text("O"), mods: Mods(shift: true, cmd: true, logo: true)),
+            PhysicalInput.key(key: .keyS, mods: mods, pressed: true, repeat: false),
+            fallbackKey: KeyEvent(key: .text("O"), mods: mods),
             at: 0.01
         )
         #expect(handled)
@@ -65,8 +66,8 @@ struct RunePlatformPartialClosureWaveATests {
         #expect(rt.state.field.text.isEmpty)
     }
 
-    @Test("window/keys_tests.rs: Dvorak Cmd-V on physical Period pastes into focused field")
-    func dvorakCmdVPastesIntoFocusedField() {
+    @Test("window/keys_tests.rs: Dvorak paste shortcut on physical Period pastes into focused field")
+    func dvorakPasteShortcutPastesIntoFocusedField() throws {
         struct State: Equatable {
             var field = TextEdit("")
         }
@@ -86,10 +87,11 @@ struct RunePlatformPartialClosureWaveATests {
             tx.focus("field")
         }
         _ = rt.frame(at: 0.01)
-        // On Dvorak, physical `.period` produces logical `v` (Cmd+V).
+        // On Dvorak, physical Period produces logical V.
+        let mods = try Chord.parse("mod+v").mods
         let handled = rt.physicalInput(
-            PhysicalInput.key(key: .period, mods: Mods(cmd: true, logo: true), pressed: true, repeat: false),
-            fallbackKey: KeyEvent(key: .text("v"), mods: Mods(cmd: true, logo: true)),
+            PhysicalInput.key(key: .period, mods: mods, pressed: true, repeat: false),
+            fallbackKey: KeyEvent(key: .text("v"), mods: mods),
             at: 0.02
         )
         #expect(handled)
@@ -265,6 +267,54 @@ struct RunePlatformPartialClosureWaveATests {
         _ = handle.shared.applyStateUpdates(to: rt, at: 0.03)
         #expect(rt.state.isEmpty)
     }
+
+    @Test("Native menu selections use the displayed window, item and revision")
+    func nativeSelectionsAreLocalAndRevisionChecked() throws {
+        let left = AppShared<[String]>()
+        let right = AppShared<[String]>()
+        let first = NativeMenuItem<[String]>(id: "pick", title: "Pick") { state, _ in state.append("first") }
+        let second = NativeMenuItem<[String]>(id: "pick", title: "Pick") { state, _ in state.append("second") }
+        AppMenuBridge.attach([first], to: left, headless: true)
+        AppMenuBridge.attach([first], to: right, headless: true)
+        defer {
+            AppMenuBridge.markRunning(left, running: false)
+            AppMenuBridge.markRunning(right, running: false)
+        }
+        let initial = try #require(AppMenuBridge.desktopSnapshot(for: left, applicationTitle: "Test", after: nil))
+        #expect(AppMenuBridge.desktopSnapshot(for: left, applicationTitle: "Test", after: initial.revision) == nil)
+        #expect(AppMenuBridge.fireIfCurrent(id: "pick", revision: initial.revision, for: right))
+        #expect(AppMenuBridge.fireIfCurrent(id: "pick", revision: initial.revision, for: left))
+        try AppMenuBridge.setMenu([second], for: left)
+        #expect(!AppMenuBridge.fireIfCurrent(id: "pick", revision: initial.revision, for: left))
+        let current = try #require(AppMenuBridge.desktopSnapshot(for: left, applicationTitle: "Test", after: initial.revision))
+        #expect(AppMenuBridge.fireIfCurrent(id: "pick", revision: current.revision, for: left))
+        let rt = Runtime(state: [String](), viewport: Vec2(10, 10)) { _, _ in el() }
+        _ = left.applyStateUpdates(to: rt, at: 0.01)
+        _ = right.applyStateUpdates(to: rt, at: 0.02)
+        #expect(rt.state == ["second", "first"])
+
+        #expect(AppMenuBridge.fireIfCurrent(id: "pick", revision: current.revision, for: left))
+        AppMenuBridge.markRunning(left, running: false)
+        AppMenuBridge.attach([first], to: left, headless: true)
+        _ = left.applyStateUpdates(to: rt, at: 0.03)
+        #expect(rt.state == ["second", "first"])
+        #expect(!AppMenuBridge.fireIfCurrent(id: "pick", revision: current.revision, for: left))
+    }
+
+    #if os(Linux) || os(Windows)
+    @Test("A Dock item reports its unavailable destination while the app menubar remains usable")
+    func desktopDockLocationReportsUnavailable() throws {
+        let shared = AppShared<Int>()
+        let app = NativeMenuItem<Int>(id: "app", title: "Open") { _, _ in }
+        let dock = NativeMenuItem<Int>(id: "dock", title: "Recent", location: .dock) { _, _ in }
+        AppMenuBridge.attach([app, dock], to: shared)
+        defer { AppMenuBridge.markRunning(shared, running: false) }
+        let snapshot = try #require(AppMenuBridge.desktopSnapshot(for: shared, applicationTitle: "Test", after: nil))
+        #expect(snapshot.sections.flatMap(\.items).map(\.id) == ["app"])
+        #expect(AppMenuBridge.takeMenuErrors(for: shared) == [.backend("The Dock menu location is only available on macOS")])
+        #expect(AppMenuBridge.fireIfCurrent(id: "app", revision: snapshot.revision, for: shared))
+    }
+    #endif
 
     @Test("native_menu/mod.rs:448 - non-Sendable state and keyEquivalent/keysFirst remain builder compatible")
     func nonSendableStateAndBuilderCompatibility() {

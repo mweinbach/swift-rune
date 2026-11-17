@@ -101,7 +101,7 @@ private struct GEdge {
     }
 
     mutating func setLine(_ p0: GPoint, _ p1: GPoint) -> Bool {
-        @inline(__always) func fx(_ v: Float) -> Fixed { fdot6ToFixed(toFDot6(v, aaaAccuracy)) >> aaaAccuracy }
+        @inline(__always) func fx(_ v: Float) -> Fixed { toFDot6(v, aaaAccuracy) &<< (10 - aaaAccuracy) }
         var x0 = fx(p0.x), y0 = snapY(fx(p0.y)), x1 = fx(p1.x), y1 = snapY(fx(p1.y))
         var winding: Int32 = 1
         if y0 > y1 {
@@ -682,6 +682,84 @@ private func blitTrapezoidRow(_ mask: AAAMask, _ y: Int32, ul inUL: Fixed, ur in
 
 internal enum GaneshAAA {
     private static let noneIndex = -1
+
+    static func fillClipped(path: GPath, rule: GAAARule, width: Int, height: Int, out: inout [UInt8]) {
+        let bounds = path.bounds
+        guard width > 0, height > 0, bounds.right > 0, bounds.bottom > 0,
+              bounds.left < Float(width), bounds.top < Float(height) else {
+            for i in out.indices { out[i] = 0 }
+            return
+        }
+        if bounds.left >= 0, bounds.top >= 0, bounds.right <= Float(width), bounds.bottom <= Float(height),
+           max(bounds.right, bounds.bottom) < 2048 {
+            fill(path: path, rule: rule, width: width, height: height, out: &out)
+            return
+        }
+        // The fixed-point edge builder allocates the path's device-space bounds.
+        // Intersect outlying contours with the bitmap before passing them to it.
+        let clipped = clippedOutline(path, width: width, height: height)
+        if let clipped {
+            fill(path: clipped, rule: rule, width: width, height: height, out: &out)
+        } else {
+            for i in out.indices { out[i] = 0 }
+        }
+    }
+
+    private static func clippedOutline(_ path: GPath, width: Int, height: Int) -> GPath? {
+        var lines = VectorPath()
+        var iter = path.makeSegmentsIterator()
+        var last = GPoint.zero
+        while let segment = iter.next() {
+            switch segment {
+            case .moveTo(let p): lines.moveTo(p.x, p.y)
+            case .lineTo(let p): lines.lineTo(p.x, p.y)
+            case .quadTo(let c, let p): lines.quadTo(cx: c.x, cy: c.y, x: p.x, y: p.y)
+            case .cubicTo(let a, let b, let p): lines.cubicTo(c1x: a.x, c1y: a.y, c2x: b.x, c2y: b.y, x: p.x, y: p.y)
+            case .conicTo(let c, let p, let weight):
+                if let quads = GAutoConicToQuads.compute(last, c, p, weight: weight, tolerance: 0.125) {
+                    for i in 0..<Int(quads.len) {
+                        let a = quads.points[2 * i + 1], b = quads.points[2 * i + 2]
+                        lines.quadTo(cx: a.x, cy: a.y, x: b.x, y: b.y)
+                    }
+                } else {
+                    lines.lineTo(p.x, p.y)
+                }
+            case .close: lines.close()
+            }
+            last = iter.lastPoint
+        }
+        var builder = GPathBuilder()
+        for contour in lines.flatten(tolerance: 0.125) {
+            var polygon = contour.points.map { SIMD2(Double($0.x), Double($0.y)) }
+            for (axis, boundary, lower) in [(0, 0.0, true), (0, Double(width), false),
+                                            (1, 0.0, true), (1, Double(height), false)] {
+                guard var previous = polygon.last else { break }
+                var clipped = [SIMD2<Double>]()
+                for point in polygon {
+                    let previousInside = lower ? previous[axis] >= boundary : previous[axis] <= boundary
+                    let inside = lower ? point[axis] >= boundary : point[axis] <= boundary
+                    if inside != previousInside {
+                        // Keep the intersection calculation in Double for large SVG coordinates.
+                        let other = 1 - axis
+                        let a = previous[axis], b = point[axis]
+                        let c = previous[other], d = point[other]
+                        var hit = point
+                        hit[axis] = boundary
+                        hit[other] = ((b * c - a * d) + (d - c) * boundary) / (b - a)
+                        clipped.append(hit)
+                    }
+                    if inside { clipped.append(point) }
+                    previous = point
+                }
+                polygon = clipped
+            }
+            guard polygon.count >= 3, let first = polygon.first else { continue }
+            builder.moveTo(Float(first.x), Float(first.y))
+            for point in polygon.dropFirst() { builder.lineTo(Float(point.x), Float(point.y)) }
+            builder.close()
+        }
+        return builder.finish()
+    }
 
     static func fill(path: GPath, rule: GAAARule, width w: Int, height h: Int, out: inout [UInt8]) {
         for i in out.indices { out[i] = 0 }

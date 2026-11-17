@@ -250,6 +250,8 @@ public final class ProcessCountingAllocator: @unchecked Sendable {
         var tid: UInt64 = 0
         pthread_threadid_np(nil, &tid)
         return tid
+        #elseif os(Windows)
+        return UInt64(GetCurrentThreadId())
         #else
         return Thread.isMainThread ? 1 : UInt64(bitPattern: Int64(ObjectIdentifier(Thread.current).hashValue))
         #endif
@@ -547,7 +549,8 @@ public enum ProcessSampler {
             gauges: gauges
         )
         #elseif os(Windows)
-        let isSelf = (pid == Int32(GetCurrentProcessId()))
+        let processID = GetCurrentProcessId()
+        let isSelf = UInt32(bitPattern: pid) == processID
         let usage = isSelf ? sampleUsage() : ProcessUsage()
         let gauges = isSelf ? gaugeRegistry.allValues() : [:]
         let heap = isSelf ? allocator.heap() : nil
@@ -555,7 +558,7 @@ public enum ProcessSampler {
             pid: pid,
             timestampMs: nowMs,
             usage: usage,
-            threads: [],
+            threads: isSelf ? sampleWindowsThreads(processID: processID) : [],
             heap: heap,
             gauges: gauges
         )
@@ -645,7 +648,12 @@ public enum ProcessSampler {
         var ru = rusage()
         var userSec = 0.0
         var sysSec = 0.0
-        if getrusage(RUSAGE_SELF, &ru) == 0 {
+        #if canImport(Glibc)
+        let process = RUSAGE_SELF.rawValue
+        #else
+        let process = RUSAGE_SELF
+        #endif
+        if getrusage(process, &ru) == 0 {
             userSec = Double(ru.ru_utime.tv_sec) + Double(ru.ru_utime.tv_usec) / 1_000_000.0
             sysSec = Double(ru.ru_stime.tv_sec) + Double(ru.ru_stime.tv_usec) / 1_000_000.0
         }
@@ -663,27 +671,68 @@ public enum ProcessSampler {
     }
 
     private static func sampleLinuxThreads() -> [ProcessThreadInfo] {
-        guard let tids = try? FileManager.default.contentsOfDirectory(atPath: "/proc/self/task") else {
-            return []
+        let ticksPerSecond = sysconf(Int32(_SC_CLK_TCK))
+        guard ticksPerSecond > 0,
+              let tids = try? FileManager.default.contentsOfDirectory(atPath: "/proc/self/task") else { return [] }
+
+        return tids.compactMap { directory in
+            let url = URL(fileURLWithPath: "/proc/self/task/\(directory)/stat")
+            guard let tid = UInt64(directory), let stat = try? Data(contentsOf: url),
+                  let open = stat.firstIndex(of: UInt8(ascii: "(")),
+                  let close = stat.lastIndex(of: UInt8(ascii: ")")), open < close else { return nil }
+
+            // comm (field 2) can itself contain spaces and parentheses. The suffix starts at field 3.
+            let fields = stat[(close + 1)...].split(separator: UInt8(ascii: " "), maxSplits: 13)
+            guard fields.count >= 13,
+                  let userTicks = UInt64(String(decoding: fields[11], as: UTF8.self)),
+                  let kernelTicks = UInt64(String(decoding: fields[12], as: UTF8.self)) else { return nil }
+            let name = String(decoding: stat[(open + 1)..<close], as: UTF8.self)
+            let cpuSeconds = (Double(userTicks) + Double(kernelTicks)) / Double(ticksPerSecond)
+            return ProcessThreadInfo(id: tid, name: name, cpuSeconds: cpuSeconds)
         }
-        var result: [ProcessThreadInfo] = []
-        result.reserveCapacity(tids.count)
-        for tidStr in tids {
-            guard let tid = UInt64(tidStr) else { continue }
-            let comm = (try? String(contentsOfFile: "/proc/self/task/\(tidStr)/comm", encoding: .utf8))?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            result.append(ProcessThreadInfo(id: tid, name: comm, cpuSeconds: 0))
-        }
-        return result
     }
     #elseif os(Windows)
+    private static func seconds(_ duration: FILETIME) -> Double {
+        let ticks = UInt64(duration.dwHighDateTime) << 32 | UInt64(duration.dwLowDateTime)
+        return Double(ticks) / 10_000_000
+    }
+
+    private static func sampleWindowsThreads(processID: DWORD) -> [ProcessThreadInfo] {
+        guard let snapshot = CreateToolhelp32Snapshot(DWORD(TH32CS_SNAPTHREAD), 0),
+              snapshot != INVALID_HANDLE_VALUE else { return [] }
+        defer { CloseHandle(snapshot) }
+
+        var entry = THREADENTRY32()
+        entry.dwSize = DWORD(MemoryLayout<THREADENTRY32>.size)
+        guard Thread32First(snapshot, &entry) else { return [] }
+        var result: [ProcessThreadInfo] = []
+        repeat {
+            guard entry.th32OwnerProcessID == processID,
+                  let thread = OpenThread(DWORD(THREAD_QUERY_LIMITED_INFORMATION), false, entry.th32ThreadID) else { continue }
+            defer { CloseHandle(thread) }
+            // A thread ID may have been reused since the snapshot was taken.
+            guard GetProcessIdOfThread(thread) == processID else { continue }
+            var creation = FILETIME(), exit = FILETIME(), kernel = FILETIME(), user = FILETIME()
+            guard GetThreadTimes(thread, &creation, &exit, &kernel, &user) else { continue }
+
+            var name = ""
+            var description: PWSTR?
+            if GetThreadDescription(thread, &description) >= 0, let description {
+                name = String(decodingCString: description, as: UTF16.self)
+                LocalFree(description)
+            }
+            result.append(ProcessThreadInfo(id: UInt64(entry.th32ThreadID), name: name, cpuSeconds: seconds(kernel) + seconds(user)))
+        } while Thread32Next(snapshot, &entry)
+        return result
+    }
+
     private static func sampleWindowsUsage() -> ProcessUsage {
         let process = GetCurrentProcess()
         var pmc = PROCESS_MEMORY_COUNTERS()
         pmc.cb = DWORD(MemoryLayout<PROCESS_MEMORY_COUNTERS>.size)
         var residentBytes: UInt64 = 0
         var virtualBytes: UInt64 = 0
-        if GetProcessMemoryInfo(process, &pmc, pmc.cb) {
+        if K32GetProcessMemoryInfo(process, &pmc, pmc.cb) {
             residentBytes = UInt64(pmc.WorkingSetSize)
             virtualBytes = UInt64(pmc.PagefileUsage)
         }
@@ -694,10 +743,8 @@ public enum ProcessSampler {
         var userSec = 0.0
         var sysSec = 0.0
         if GetProcessTimes(process, &creation, &exit, &kernel, &user) {
-            let k100ns = (UInt64(kernel.dwHighDateTime) << 32) | UInt64(kernel.dwLowDateTime)
-            let u100ns = (UInt64(user.dwHighDateTime) << 32) | UInt64(user.dwLowDateTime)
-            sysSec = Double(k100ns) / 10_000_000.0
-            userSec = Double(u100ns) / 10_000_000.0
+            sysSec = seconds(kernel)
+            userSec = seconds(user)
         }
         return ProcessUsage(
             residentBytes: residentBytes,

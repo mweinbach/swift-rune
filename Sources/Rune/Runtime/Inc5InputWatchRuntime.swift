@@ -303,8 +303,8 @@ extension Runtime {
         switch fit {
         case .fit:
             let k = min(boxPtW / imageWidth, boxPtH / imageHeight)
-            let dw = (imageWidth * k).clamped(to: 1...boxPtW)
-            let dh = (imageHeight * k).clamped(to: 1...boxPtH)
+            let dw = min(boxPtW, max(1, imageWidth * k))
+            let dh = min(boxPtH, max(1, imageHeight * k))
             let drawRect = SIMD4<Float>(
                 box.x + (boxPtW - dw) * kx * scale,
                 box.y + (boxPtH - dh) * ky * scale,

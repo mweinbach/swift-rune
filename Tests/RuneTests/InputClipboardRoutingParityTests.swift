@@ -12,7 +12,7 @@ import RuneMotion
 struct InputClipboardRoutingParityTests {
 
     static let style = TextStyle(size: 16, weight: 400)
-    static let cmdV = KeyEvent(key: .command("v"), mods: Mods(cmd: true))
+    static let pasteKey = KeyEvent(key: .command("v"), mods: RuneTestKey.primaryMods())
 
     @Test("input_clipboard.rs:285 copied_images_and_files_round_trip_and_reach_only_hooks")
     func copiedImagesAndFilesRoundTripAndReachOnlyHooks() throws {
@@ -90,7 +90,7 @@ struct InputClipboardRoutingParityTests {
         _ = rt.frame(at: 0.0)
         rt.update { s, _ in s.a.selectAll() }
         _ = rt.frame(at: 0.0)
-        _ = rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.0)
+        #expect(rt.keyDown(KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods()), at: 0.0))
         _ = rt.frame(at: 0.0)
         let copied = m.readRich(sanitizeUntrustedHTML: false).content
         #expect(copied.text == "a @x-agent b")
@@ -143,7 +143,7 @@ struct InputClipboardRoutingParityTests {
         _ = rt.frame(at: 0.0)
         #expect(rt.state.field.text == "keep me" && rt.state.field.selectedText == "keep me")
         #expect(rt.events.filter { $0 == "paste field" }.count == before)
-        #expect(rt.keyDown(Self.cmdV, at: 0.0), "an empty clipboard still consumes the paste command")
+        #expect(rt.keyDown(Self.pasteKey, at: 0.0), "an empty clipboard still consumes the paste command")
         _ = rt.frame(at: 0.0)
         #expect(rt.state.field.text == "keep me" && rt.state.field.selectedText == "keep me")
         rt.update { _, tx in
@@ -162,17 +162,17 @@ struct InputClipboardRoutingParityTests {
         rt.useClipboard(m)
         _ = rt.frame(at: 0.0)
         #expect(rt.acceptsPaste)
-        #expect(rt.keyDown(Self.cmdV, at: 0.0))
+        #expect(rt.keyDown(Self.pasteKey, at: 0.0))
         #expect(rt.state.isEmpty)
         m.writeText("hello")
-        #expect(rt.keyDown(Self.cmdV, at: 0.0))
+        #expect(rt.keyDown(Self.pasteKey, at: 0.0))
         #expect(rt.state == ["hello"])
 
         let none = Runtime(state: 0, viewport: Vec2(200, 100), pixelScale: 1.0) { _, _ in col().size(200, 100) }
         none.useClipboard(m)
         _ = none.frame(at: 0.0)
         #expect(!none.acceptsPaste)
-        #expect(!none.keyDown(Self.cmdV, at: 0.0), "nothing accepts the paste: the command routes on")
+        #expect(!none.keyDown(Self.pasteKey, at: 0.0), "nothing accepts the paste: the command routes on")
     }
 
     @Test("clipboard/tx.rs:40 Tx::copy_secret writes a concealed item the hold can clear")

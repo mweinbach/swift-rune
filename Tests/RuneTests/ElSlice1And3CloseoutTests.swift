@@ -328,7 +328,7 @@ struct ElSlice1And3CloseoutTests {
 
     @Test("clip.rs:171 nested_row_text_keeps_full_alpha_in_the_middle_of_a_faded_list")
     func nestedRowTextKeepsFullAlphaInMiddleOfFadedList() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         func fadedRows(_ faded: Bool) -> El<Bool> {
             func rowEl() -> El<Bool> {
                 col().size(120, 20).clipFade(right: 8)
@@ -384,7 +384,7 @@ struct ElSlice1And3CloseoutTests {
 
     @Test("dim_browser.rs:55 a_dimmed_button_fades_as_css_opacity_does")
     func dimmedButtonFadesAsCssOpacityDoes() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let W: Float = 120
         let H: Float = 140
 
@@ -443,7 +443,7 @@ struct ElSlice1And3CloseoutTests {
 
     @Test("dim_browser.rs:81 a_shadow_paints_its_authored_alpha")
     func shadowPaintsAuthoredAlpha() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let W: Float = 120
         let H: Float = 140
 

@@ -157,7 +157,7 @@ public enum RuneSpacesProbeApp {
 
         try app.run()
         if let err = resultBox.getError() {
-            fputs("spaces_probe assertion failed: \(err)\n", stderr)
+            RuneStandardIO.error("spaces_probe assertion failed: \(err)\n")
             #if canImport(Darwin)
             Darwin.exit(1)
             #endif

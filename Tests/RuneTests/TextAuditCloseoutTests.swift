@@ -308,14 +308,14 @@ struct TextAuditCloseoutTests {
         focusField("a", at: 0.01)
         rt.update { s, _ in s.a.setSelectionRaw(anchor: 0, cursor: s.a.text.utf8.count) }
         _ = rt.frame(at: 0.02)
-        #expect(rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.03))
+        #expect(rt.keyDown(KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods()), at: 0.03))
         _ = rt.frame(at: 0.04)
         #expect(rt.clipboard.text == rt.state.a.text)
         #expect(rt.clipboard.html?.contains("<strong>bold</strong>") == true)
         #expect(rt.clipboard.html?.contains("<ul>") == true)
 
         focusField("b", at: 0.05)
-        #expect(rt.keyDown(KeyEvent(key: .command("v"), mods: Mods(cmd: true)), at: 0.06))
+        #expect(rt.keyDown(KeyEvent(key: .command("v"), mods: RuneTestKey.primaryMods()), at: 0.06))
         _ = rt.frame(at: 0.07)
         #expect(rt.state.b.text == rt.state.a.text)
         #expect(rt.state.b.richMarks == rt.state.a.richMarks)
@@ -324,20 +324,20 @@ struct TextAuditCloseoutTests {
         // Cut from "b" carries formatting it removes ("bold" at 6..<10).
         rt.update { s, _ in s.b.setSelectionRaw(anchor: 6, cursor: 10) }
         _ = rt.frame(at: 0.08)
-        #expect(rt.keyDown(KeyEvent(key: .command("x"), mods: Mods(cmd: true)), at: 0.09))
+        #expect(rt.keyDown(KeyEvent(key: .command("x"), mods: RuneTestKey.primaryMods()), at: 0.09))
         _ = rt.frame(at: 0.10)
         #expect(rt.clipboard.text == "bold")
         #expect(rt.clipboard.html?.contains("<strong>bold</strong>") == true)
 
         // Plain field pastes text only and copies no HTML.
         focusField("plain", at: 0.11)
-        #expect(rt.keyDown(KeyEvent(key: .command("v"), mods: Mods(cmd: true)), at: 0.12))
+        #expect(rt.keyDown(KeyEvent(key: .command("v"), mods: RuneTestKey.primaryMods()), at: 0.12))
         _ = rt.frame(at: 0.13)
         #expect(rt.state.plain.text == "bold")
         #expect(rt.state.plain.richMarks.isEmpty)
         rt.update { s, _ in s.plain.setSelectionRaw(anchor: 0, cursor: 4) }
         _ = rt.frame(at: 0.14)
-        #expect(rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.15))
+        #expect(rt.keyDown(KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods()), at: 0.15))
         #expect(rt.clipboard.text == "bold")
         #expect(rt.clipboard.html == nil)
     }
@@ -358,7 +358,7 @@ struct TextAuditCloseoutTests {
         #expect(undoDelete)
         #expect(e.text == "hé🙂" && e.anchor == 0 && e.cursor == 0)
         e.setSelectionRaw(anchor: 3, cursor: 1)
-        let cutRes = e.handleKey(KeyEvent(key: .command("x"), mods: Mods(cmd: true)))
+        let cutRes = e.handleKey(KeyEvent(key: .command("x"), mods: RuneTestKey.primaryMods()))
         #expect(cutRes == .copy("é"))
         let undoCut = e.undo()
         #expect(undoCut)

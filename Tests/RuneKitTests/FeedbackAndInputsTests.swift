@@ -475,7 +475,7 @@ struct FeedbackAndInputsTests {
     // MARK: - ShortcutRecorder (`shortcut_recorder.rs`, `tests/shortcut_recorder.rs`)
 
     @Test("ShortcutRecorderState swallows finishing key release, handles refusals, unregister, and non-mac formatting")
-    func shortcutRecorderSwallowingAndParity() {
+    func shortcutRecorderSwallowingAndParity() throws {
         var rec = ShortcutRecorderState()
         rec.begin()
         #expect(rec.isRecording)
@@ -490,7 +490,9 @@ struct FeedbackAndInputsTests {
         let hMod = rec.handle(.modifiersChanged([.command]))
         #expect(hMod)
         #expect(rec.error == nil)
-        #expect(rec.keycaps == ["⌘"])
+        #expect(rec.keycaps(macOS: true) == ["⌘"])
+        #expect(rec.keycaps(on: .windows) == ["Win"])
+        #expect(rec.keycaps(on: .linux) == ["Super"])
 
         // Function key F5 accepted without extra modifiers; enters swallowing until F5 keyUp
         let hF5 = rec.handle(.keyDown(key: "F5", modifiers: [], isRepeat: false))
@@ -538,6 +540,11 @@ struct FeedbackAndInputsTests {
         let nonMac = ShortcutChord(key: "k", modifiers: [.control, .shift])
         #expect(nonMac.displayString(macOS: false) == "Ctrl+Shift+K")
         #expect(ShortcutValidationError.conflict.defaultMessage(for: nonMac, macOS: false) == "Ctrl+Shift+K is already in use.")
+        #expect(try nonMac.parsedShortcut() == ParsedShortcut.parseOn("ctrl+shift+k"))
+        let space = ShortcutChord(key: " ", modifiers: [.command])
+        #expect(space.displayString(on: .windows) == "Win+Space")
+        #expect(try space.parsedShortcut() == ParsedShortcut.parseOn("super+space"))
+        #expect(try ShortcutChord(key: "+", modifiers: [.control]).parsedShortcut() == ParsedShortcut.parseOn("ctrl+equal"))
     }
 
     @Test("ShortcutRecorder interactive builder captures chords and renders custom errors in Runtime")
@@ -576,7 +583,7 @@ struct FeedbackAndInputsTests {
 
         // Cmd+Shift+K commits chord and enters swallowing phase
         _ = rt.keyDown(
-            KeyEvent(key: .text("k"), mods: Mods(shift: true, cmd: true)),
+            KeyEvent(key: .text("k"), mods: Mods(shift: true, cmd: KeyPlatform.current == .mac, logo: true)),
             at: 0.12
         )
         rt.frame(at: 0.13)
@@ -739,6 +746,12 @@ struct FeedbackAndInputsTests {
             var committed: [ShortcutChord?] = []
             var rejectNext = false
         }
+        let superMods = Mods(cmd: KeyPlatform.current == .mac, logo: true)
+        let superLabel: String = switch KeyPlatform.current {
+        case .mac: "⌘"
+        case .windows: "Win"
+        case .linux: "Super"
+        }
         let kit = Kit.neutral(dark: false)
         let rt = Runtime(state: S(), viewport: Vec2(320, 140), systemDark: false) { s, _ in
             kit.shortcutRecorder(
@@ -767,9 +780,9 @@ struct FeedbackAndInputsTests {
         #expect(rt.state.recorder.isRecording)
 
         // Modifiers update held keycaps live; Escape cancels without changing stored chord
-        _ = rt.physicalInput(.modifiers(Mods(cmd: true)), at: 0.04)
+        _ = rt.physicalInput(.modifiers(superMods), at: 0.04)
         rt.frame(at: 0.05)
-        #expect(rt.state.recorder.keycaps == ["⌘"])
+        #expect(rt.state.recorder.keycaps == [superLabel])
         _ = rt.physicalInput(.key(key: .escape, mods: Mods(), pressed: true, repeat: false), at: 0.06)
         rt.frame(at: 0.07)
         #expect(!rt.state.recorder.isRecording)
@@ -783,16 +796,16 @@ struct FeedbackAndInputsTests {
         _ = rt.physicalInput(.key(key: .keyK, mods: Mods(), pressed: false, repeat: false), at: 0.12)
         #expect(rt.state.recorder.isRecording && rt.state.recorder.error == .missingModifier)
 
-        _ = rt.physicalInput(.modifiers(Mods(cmd: true)), at: 0.13)
+        _ = rt.physicalInput(.modifiers(superMods), at: 0.13)
         #expect(rt.state.recorder.error == nil)
 
-        let handledDown = rt.physicalInput(.key(key: .keyK, mods: Mods(cmd: true), pressed: true, repeat: false), at: 0.14)
+        let handledDown = rt.physicalInput(.key(key: .keyK, mods: superMods, pressed: true, repeat: false), at: 0.14)
         #expect(handledDown)
         #expect(!rt.state.recorder.isRecording)
         #expect(rt.state.recorder.shortcut == ShortcutChord(key: "k", modifiers: [.command]))
 
         // Repeat + keyUp for finishing key 'k' remain swallowed without clearing/re-triggering
-        #expect(rt.physicalInput(.key(key: .keyK, mods: Mods(cmd: true), pressed: true, repeat: true), at: 0.15))
+        #expect(rt.physicalInput(.key(key: .keyK, mods: superMods, pressed: true, repeat: true), at: 0.15))
         #expect(rt.physicalInput(.key(key: .keyK, mods: Mods(), pressed: false, repeat: false), at: 0.16))
         #expect(rt.state.recorder.shortcut == ShortcutChord(key: "k", modifiers: [.command]))
 
@@ -809,7 +822,7 @@ struct FeedbackAndInputsTests {
         rt.pointerDown(at: pt, at: 0.22)
         rt.pointerUp(at: pt, at: 0.23)
         rt.frame(at: 0.24)
-        _ = rt.physicalInput(.key(key: .keyM, mods: Mods(cmd: true), pressed: true, repeat: false), at: 0.25)
+        _ = rt.physicalInput(.key(key: .keyM, mods: superMods, pressed: true, repeat: false), at: 0.25)
         _ = rt.physicalInput(.key(key: .keyM, mods: Mods(), pressed: false, repeat: false), at: 0.26)
         rt.frame(at: 0.27)
         let cmdM = ShortcutChord(key: "m", modifiers: [.command])
@@ -820,18 +833,19 @@ struct FeedbackAndInputsTests {
         rt.pointerDown(at: pt, at: 0.28)
         rt.pointerUp(at: pt, at: 0.29)
         rt.frame(at: 0.30)
-        _ = rt.physicalInput(.key(key: .keyP, mods: Mods(cmd: true), pressed: true, repeat: false), at: 0.31)
+        _ = rt.physicalInput(.key(key: .keyP, mods: superMods, pressed: true, repeat: false), at: 0.31)
         _ = rt.physicalInput(.key(key: .keyP, mods: Mods(), pressed: false, repeat: false), at: 0.32)
         rt.frame(at: 0.33)
         #expect(rt.state.recorder.isRecording)
         #expect(rt.state.recorder.shortcut == cmdM)
         #expect(rt.state.recorder.error == .conflict)
-        #expect(rt.state.recorder.keycaps == ["⌘", "P"])
-        #expect(rt.element(byKey: "phys-rec-error")?.text == "⌘P is already in use.")
+        #expect(rt.state.recorder.keycaps == [superLabel, "P"])
+        let expectedChord = KeyPlatform.current == .mac ? "⌘P" : "\(superLabel)+P"
+        #expect(rt.element(byKey: "phys-rec-error")?.text == "\(expectedChord) is already in use.")
 
         // Recording unchanged Cmd+M cancels without calling onChange; markUnregistered retries it cleanly
         let countBeforeSame = rt.state.committed.count
-        _ = rt.physicalInput(.key(key: .keyM, mods: Mods(cmd: true), pressed: true, repeat: false), at: 0.34)
+        _ = rt.physicalInput(.key(key: .keyM, mods: superMods, pressed: true, repeat: false), at: 0.34)
         _ = rt.physicalInput(.key(key: .keyM, mods: Mods(), pressed: false, repeat: false), at: 0.35)
         rt.frame(at: 0.36)
         #expect(!rt.state.recorder.isRecording)
@@ -841,7 +855,7 @@ struct FeedbackAndInputsTests {
         rt.pointerDown(at: pt, at: 0.37)
         rt.pointerUp(at: pt, at: 0.38)
         rt.frame(at: 0.39)
-        _ = rt.physicalInput(.key(key: .keyM, mods: Mods(cmd: true), pressed: true, repeat: false), at: 0.40)
+        _ = rt.physicalInput(.key(key: .keyM, mods: superMods, pressed: true, repeat: false), at: 0.40)
         _ = rt.physicalInput(.key(key: .keyM, mods: Mods(), pressed: false, repeat: false), at: 0.41)
         rt.frame(at: 0.42)
         #expect(!rt.state.recorder.isRecording)

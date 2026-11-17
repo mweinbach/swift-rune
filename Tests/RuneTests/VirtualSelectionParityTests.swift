@@ -1,6 +1,5 @@
 import Testing
 import Foundation
-import RuneRef
 @testable import Rune
 
 /// Port of `crates/rune/src/runtime/virtual_selection_tests.rs`: text selection across virtual
@@ -12,6 +11,7 @@ import RuneRef
 struct VirtualSelectionParityTests {
     static let rows = 55
     static let rowH: Float = 56.0
+    static let rowFont = TextStyle(size: 14, weight: 400).lh(20)
 
     /// `BUILT_ROWS`: how many times a row was built.
     final class Built {
@@ -38,10 +38,9 @@ struct VirtualSelectionParityTests {
 
     static func buildTimelineRow(_ s: Timeline, _ i: Int) -> El<Timeline> {
         s.built.count += 1
-        let style = TextStyle(size: 14.0, weight: 400.0).lh(20.0)
         let head: El<Timeline> = text(String(format: "Row %02d header", i))
             .key("head")
-            .font(style)
+            .font(rowFont)
             .wFull()
             .selectable(true)
         let body: El<Timeline>
@@ -49,17 +48,17 @@ struct VirtualSelectionParityTests {
             let filler = String(repeating: "abcd ", count: s.bigBytes / 5)
             body = text(String(format: "Row %05d ", i) + filler)
                 .key("t\(i)")
-                .font(style)
+                .font(rowFont)
                 .wFull()
                 .selectable(true)
         } else if i % 5 == 2 {
             body = row().key("cells").wFull()
-                .child(text(String(format: "left-%02d", i)).key("c0").font(style).w(160.0).selectable(true))
-                .child(text(String(format: "right-%02d", i)).key("c1").font(style).w(160.0).selectable(true))
+                .child(text(String(format: "left-%02d", i)).key("c0").font(rowFont).w(160.0).selectable(true))
+                .child(text(String(format: "right-%02d", i)).key("c1").font(rowFont).w(160.0).selectable(true))
         } else {
             body = text(String(format: "Message body for virtual row %02d with words to select.", i))
                 .key("body")
-                .font(style)
+                .font(rowFont)
                 .wFull()
                 .selectable(true)
         }
@@ -156,7 +155,7 @@ struct VirtualSelectionParityTests {
 
         /// `command`.
         func command(_ c: Character) {
-            _ = rt.keyDown(KeyEvent(key: .command(c), mods: Mods(cmd: true)), at: t)
+            _ = rt.keyDown(KeyEvent(key: .command(c), mods: RuneTestKey.primaryMods()), at: t)
             tick()
         }
 
@@ -173,19 +172,17 @@ struct VirtualSelectionParityTests {
             rt.elements().first(where: { $0.path.hasSuffix(suffix) })
         }
 
-        /// `glyphs_at`: centres (points) of the glyphs drawn inside the element at `suffix`, by x.
-        func glyphs(at suffix: String) -> [Vec2] {
-            guard let e = findPath(suffix) else { return [] }
-            let scale = rt.pixelScale
-            return rt.renderFrame(at: t).instances
-                .filter { $0.params.y == KIND_GLYPH }
-                .map { Vec2(($0.rect.x + $0.rect.z / 2.0) / scale, ($0.rect.y + $0.rect.w / 2.0) / scale) }
-                .filter { $0.x >= e.rect[0] && $0.x <= e.rect[0] + e.rect[2] && $0.y >= e.rect[1] && $0.y <= e.rect[1] + e.rect[3] }
-                .sorted { $0.x < $1.x }
+        /// Places the pointer at a text boundary using the active font's native caret geometry.
+        func caret(at suffix: String, after prefix: String = "") throws -> Vec2 {
+            let element = try #require(findPath(suffix))
+            let text = try #require(element.text)
+            try #require(text.hasPrefix(prefix))
+            let shaped = rt.textSystem.shape(text: text, style: VirtualSelectionParityTests.rowFont,
+                                             maxWidth: element.rect[2], pixelScale: rt.pixelScale, emitGlyphs: false)
+            let caret = rt.textSystem.caretRect(in: shaped, utf8Offset: prefix.utf8.count, pixelScale: rt.pixelScale)
+            return Vec2(element.rect[0] + caret.x, element.rect[1] + caret.y + caret.w / 2)
         }
     }
-
-    static func before(_ g: Vec2) -> Vec2 { Vec2(g.x - 3.0, g.y) }
 
     static func timeline(_ count: Int) -> Harness {
         let h = Harness(Timeline(count: count), view: timelineView)
@@ -245,24 +242,19 @@ struct VirtualSelectionParityTests {
         let h = Self.timeline(Self.rows)
 
         // Built-only selection (row 1 to row 2, which has side-by-side cells) stays byte-identical.
-        // Non-space glyph indices in "Message body for virtual row XX with words to select.":
-        // 0..7 = "Message", 7..11 = "body", 11..14 = "for", 14..21 = "virtual", 21..24 = "row", 24..26 = "XX", 26..30 = "with"
-        let r1 = h.glyphs(at: "/@r1/@body")
-        let r2c1 = h.glyphs(at: "/@r2/@cells/@c1")
-        try #require(r1.count > 7 && r2c1.count > 5)
-        h.rt.pointerMove(to: Self.before(r1[7]), at: h.t)
-        h.rt.pointerDown(at: Self.before(r1[7]), at: h.t)
+        let first = try h.caret(at: "/@r1/@body", after: "Message ")
+        let last = try h.caret(at: "/@r2/@cells/@c1", after: "right")
+        h.rt.pointerMove(to: first, at: h.t)
+        h.rt.pointerDown(at: first, at: h.t)
         h.tick()
-        h.rt.pointerMove(to: Self.before(r2c1[5]), at: h.t)
+        h.rt.pointerMove(to: last, at: h.t)
         h.tick()
-        h.rt.pointerUp(at: Self.before(r2c1[5]), at: h.t)
+        h.rt.pointerUp(at: last, at: h.t)
         h.tick()
         #expect(h.rt.selectedText() == "body for virtual row 01 with words to select.\nRow 02 header\nleft-02\tright")
 
         // Click inside row 3 body ("virtual row 03 with words to select.") to place the anchor.
-        let r3 = h.glyphs(at: "/@r3/@body")
-        try #require(r3.count > 14)
-        let startPt = Self.before(r3[14]) // before "virtual"
+        let startPt = try h.caret(at: "/@r3/@body", after: "Message body for ")
         h.rt.pointerMove(to: startPt, at: h.t)
         h.rt.pointerDown(at: startPt, at: h.t)
         h.rt.pointerUp(at: startPt, at: h.t)
@@ -278,10 +270,8 @@ struct VirtualSelectionParityTests {
         let range = h.range
         #expect(!range.contains(3) && range.contains(40), "r3 unmounted, r40 mounted: \(range)")
 
-        // Shift-click in row 40 body right after "40" (glyph 25).
-        let r40 = h.glyphs(at: "/@r40/@body")
-        try #require(r40.count > 25)
-        let endPt = Vec2(r40[25].x + 3.0, r40[25].y)
+        // Shift-click in row 40 body right after "40".
+        let endPt = try h.caret(at: "/@r40/@body", after: "Message body for virtual row 40")
         #expect(endPt.y > 0.0 && endPt.y < 420.0, "r40/body inside viewport: \(endPt)")
         h.modifiers(Mods(shift: true))
         h.rt.pointerMove(to: endPt, at: h.t)
@@ -307,9 +297,8 @@ struct VirtualSelectionParityTests {
     @Test("selection_scrolled_far_away_and_back_keeps_highlight")
     func selectionScrolledFarAwayAndBackKeepsHighlight() throws {
         let h = Self.timeline(Self.rows)
-        let g = h.glyphs(at: "/@r1/@body")
-        try #require(g.count > 10)
-        let (p0, p1) = (Self.before(g[0]), Vec2(g[10].x + 3.0, g[10].y))
+        let p0 = try h.caret(at: "/@r1/@body")
+        let p1 = try h.caret(at: "/@r1/@body", after: "Message body")
         h.rt.pointerMove(to: p0, at: h.t)
         h.rt.pointerDown(at: p0, at: h.t)
         h.tick()
@@ -345,9 +334,7 @@ struct VirtualSelectionParityTests {
     @Test("dragging_selection_while_scrolling_across_virtual_rows_keeps_working")
     func draggingSelectionWhileScrollingAcrossVirtualRowsKeepsWorking() throws {
         let h = Self.timeline(Self.rows)
-        let g3 = h.glyphs(at: "/@r3/@head")
-        try #require(!g3.isEmpty)
-        let p0 = Self.before(g3[0])
+        let p0 = try h.caret(at: "/@r3/@head")
         h.rt.pointerMove(to: p0, at: h.t)
         h.rt.pointerDown(at: p0, at: h.t)
         h.tick()
@@ -361,9 +348,7 @@ struct VirtualSelectionParityTests {
         h.settle()
         #expect(!h.range.contains(3), "anchor row 3 scrolled out")
 
-        let g40 = h.glyphs(at: "/@r40/@head")
-        let last = try #require(g40.last)
-        let p1 = Vec2(last.x + 4.0, last.y)
+        let p1 = try h.caret(at: "/@r40/@head", after: "Row 40 header")
         h.rt.pointerMove(to: p1, at: h.t)
         h.tick()
         h.rt.pointerUp(at: p1, at: h.t)
@@ -495,9 +480,7 @@ struct VirtualSelectionParityTests {
         #expect(h.rt.virtualLists[h.list]?.top == 84.0)
 
         // Click in row 3 body before "virtual" (y = 84 + 3 * 56 = 252..308, inside the 420px viewport).
-        let r3 = h.glyphs(at: "/@r3/@body")
-        try #require(r3.count > 14)
-        let startPt = Self.before(r3[14])
+        let startPt = try h.caret(at: "/@r3/@body", after: "Message body for ")
         h.rt.pointerMove(to: startPt, at: h.t)
         h.rt.pointerDown(at: startPt, at: h.t)
         h.rt.pointerUp(at: startPt, at: h.t)
@@ -512,9 +495,7 @@ struct VirtualSelectionParityTests {
         let range = h.range
         #expect(!range.contains(3) && range.contains(40), "r3 unmounted, r40 mounted: \(range)")
 
-        let r40 = h.glyphs(at: "/@r40/@body")
-        try #require(r40.count > 25)
-        let endPt = Vec2(r40[25].x + 3.0, r40[25].y)
+        let endPt = try h.caret(at: "/@r40/@body", after: "Message body for virtual row 40")
         #expect(endPt.y > 0.0 && endPt.y < 420.0, "r40/body inside viewport: \(endPt)")
         h.modifiers(Mods(shift: true))
         h.rt.pointerMove(to: endPt, at: h.t)

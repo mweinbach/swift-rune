@@ -854,6 +854,8 @@ public enum MacOSClipboardSync {
     }
 }
 
+#endif
+
 /// Discovered pasteboard item flavor for macOS incoming drags (`platform/macos/drop.rs::Item`).
 public enum DropPasteboardItem: Sendable, Equatable {
     case file(String)
@@ -946,6 +948,7 @@ extension DropTempNaming {
     }
 }
 
+#if os(macOS)
 extension MacOSDropReader {
     /// Operation selection matching `platform/macos/drop.rs::operation` (`Copy` (1), else `Generic` (4), else 0).
     public static func operation(forSourceMask mask: UInt) -> UInt {

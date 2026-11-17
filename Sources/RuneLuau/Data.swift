@@ -1,4 +1,7 @@
 import Foundation
+#if !os(WASI) && canImport(CoreFoundation)
+import CoreFoundation
+#endif
 
 /// Plain, owned data that crosses a VM boundary (worker threads, host signals, hot-reload state, `query`).
 public enum LuauData: Sendable, Equatable {
@@ -75,7 +78,12 @@ public enum LuauData: Sendable, Equatable {
     public static func fromJSONObject(_ obj: Any) -> LuauData {
         if obj is NSNull { return .nil }
         if let num = obj as? NSNumber {
-            if CFGetTypeID(num) == CFBooleanGetTypeID() {
+            #if !os(WASI) && canImport(CoreFoundation)
+            let isBoolean = CFGetTypeID(num) == CFBooleanGetTypeID()
+            #else
+            let isBoolean = type(of: num) == type(of: NSNumber(value: true))
+            #endif
+            if isBoolean {
                 return .bool(num.boolValue)
             }
             let d = num.doubleValue

@@ -1,5 +1,5 @@
 import Foundation
-#if os(macOS)
+#if canImport(AVFoundation) && !os(watchOS)
 @preconcurrency import AVFoundation
 import CoreMedia
 import CoreVideo
@@ -34,7 +34,8 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         var lastNotifiedState: PlayerState? = .loading
         var placeholderPushed: Bool = false
 
-        #if os(macOS)
+        #if canImport(AVFoundation) && !os(watchOS)
+        weak var player: Player?
         var asset: AVURLAsset?
         var avPlayer: AVPlayer?
         var avItem: AVPlayerItem?
@@ -45,6 +46,12 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         var heldImageGenerator: AVAssetImageGenerator?
         var isParked: Bool = false
         var lastParkedUsedAt: ContinuousClock.Instant = .now
+        #elseif canImport(CRuneMedia)
+        var decoder: DesktopMediaDecoder?
+        var mediaTimer: DispatchSourceTimer?
+        let frameWaker = WakerSlot()
+        let transportLock = NSRecursiveLock()
+        let mediaQueue = DispatchQueue(label: "Rune.media.playback", qos: .userInitiated)
         #endif
 
         var videoKey: UInt64 { key }
@@ -68,7 +75,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         }
 
         deinit {
-            #if os(macOS)
+            #if canImport(AVFoundation) && !os(watchOS)
             lock.lock()
             let timer = audioTimer
             audioTimer = nil
@@ -81,6 +88,8 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
             timer?.cancel()
             if let obs { NotificationCenter.default.removeObserver(obs) }
             avp?.pause()
+            #elseif canImport(CRuneMedia)
+            mediaTimer?.cancel()
             #endif
         }
 
@@ -100,7 +109,12 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         }
 
         func pull(clock: Double, wake: (@Sendable () -> Void)?) -> VideoPullResult {
-            Player.pullInner(self, surface: surface, clock: clock, wake: wake)
+            #if canImport(AVFoundation) && !os(watchOS)
+            if MediaPlaybackGate.isEnabled, let player {
+                return player.pull(clock: clock, wake: wake)
+            }
+            #endif
+            return Player.pullInner(self, surface: surface, clock: clock, wake: wake)
         }
 
         func advanceHeadless(to now: Double) {
@@ -165,10 +179,29 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         self.inner = Inner(key: key, request: request)
         self.surface = NativeSurface(id: key)
         self.inner.surface = self.surface
+        #if canImport(AVFoundation) && !os(watchOS)
+        self.inner.player = self
+        #endif
         self.surface.withVideo(self.inner)
+        #if canImport(CRuneMedia)
+        if !MediaPlaybackGate.isEnabled {
+            Self.pendingDesktopLock.withLock {
+                Self.pendingDesktopPlayers.removeAll { $0.inner == nil }
+                Self.pendingDesktopPlayers.append(WeakDesktopPlayer(inner))
+            }
+        }
+        #endif
         if request.kind == .audio && !MediaPlaybackGate.isEnabled {
             VideoHeadless.registerAudio(inner)
         }
+        #if canImport(AVFoundation) && !os(watchOS)
+        Self.pendingAppleLock.withLock {
+            if !MediaPlaybackGate.isEnabled {
+                Self.pendingApplePlayers.removeAll { $0.player == nil }
+                Self.pendingApplePlayers.append(WeakPlayer(self))
+            }
+        }
+        #endif
         probeAndInitialize()
     }
 
@@ -282,12 +315,10 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
             inner.request.seek = (0.0, inner.seekGen)
         }
         let playEffects = inner.machine.apply(.play, at: currentClockLocked())
+        if inner.state == .ready || inner.state == .ended {
+            inner.state = .playing
+        }
         if !MediaPlaybackGate.isEnabled {
-            if case .ready = inner.state {
-                inner.state = .playing
-            } else if case .ended = inner.state {
-                inner.state = .playing
-            }
             inner.lastHeadlessClock = VideoHeadless.virtualClock
         } else {
             needsAttach = true
@@ -297,8 +328,8 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
 
         applyMachineEffects(playEffects)
         if needsAttach {
-            scheduleOnMain { [weak self] in
-                self?.syncAVPlayer()
+            schedulePlaybackWork { [weak self] in
+                self?.synchronizePlayback()
             }
         }
         settleStateWaker()
@@ -323,8 +354,8 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
 
         applyMachineEffects(pauseEffects)
         if needsSync {
-            scheduleOnMain { [weak self] in
-                self?.syncAVPlayer()
+            schedulePlaybackWork { [weak self] in
+                self?.synchronizePlayback()
             }
         }
         settleStateWaker()
@@ -364,8 +395,13 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         if shouldDecodeHeadless {
             decodeHeadlessFrame(at: target)
         } else if MediaPlaybackGate.isEnabled {
-            scheduleOnMain { [weak self] in
-                self?.syncAVPlayer(seekTo: target)
+            schedulePlaybackWork { [weak self] in
+                #if canImport(CRuneMedia)
+                // The serial transport queue consumes the newest pending seek generation.
+                self?.synchronizePlayback()
+                #else
+                self?.synchronizePlayback(seekTo: target)
+                #endif
             }
         }
         settleStateWaker()
@@ -394,8 +430,8 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
 
         if restartNeeded {
             if MediaPlaybackGate.isEnabled {
-                scheduleOnMain { [weak self] in
-                    self?.syncAVPlayer(seekTo: 0.0)
+                schedulePlaybackWork { [weak self] in
+                    self?.synchronizePlayback(seekTo: 0.0)
                 }
             } else if inner.meta.kind == .video {
                 decodeHeadlessFrame(at: 0.0)
@@ -412,8 +448,8 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         inner.lock.unlock()
         applyMachineEffects(muteEffects)
         if MediaPlaybackGate.isEnabled {
-            scheduleOnMain { [weak self] in
-                self?.syncAVPlayer()
+            schedulePlaybackWork { [weak self] in
+                self?.synchronizePlayback()
             }
         }
     }
@@ -456,8 +492,8 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         inner.lock.unlock()
         applyMachineEffects(effects)
         if MediaPlaybackGate.isEnabled {
-            scheduleOnMain { [weak self] in
-                self?.syncAVPlayer()
+            schedulePlaybackWork { [weak self] in
+                self?.synchronizePlayback()
             }
         }
     }
@@ -471,15 +507,15 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         inner.lock.unlock()
         applyMachineEffects(effects)
         if MediaPlaybackGate.isEnabled {
-            scheduleOnMain { [weak self] in
-                self?.syncAVPlayer()
+            schedulePlaybackWork { [weak self] in
+                self?.synchronizePlayback()
             }
         }
     }
 
     /// Preloads the first frame off the main thread in windowed mode (`Player::preload`).
     public func preload() {
-        #if os(macOS)
+        #if canImport(AVFoundation) && !os(watchOS)
         guard MediaPlaybackGate.isEnabled else { return }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -490,6 +526,12 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
             if needDecode {
                 self.decodeHeadlessFrame(at: t)
             }
+        }
+        #elseif canImport(CRuneMedia)
+        guard MediaPlaybackGate.isEnabled else { return }
+        inner.mediaQueue.async { [inner] in
+            guard let surface = inner.surface, surface.currentFrame() == nil else { return }
+            Self.synchronizeDesktop(inner, seek: nil)
         }
         #endif
     }
@@ -595,11 +637,13 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
     // MARK: - `SurfaceVideoAttachment` & Pull
 
     public func pull(clock: Double, wake: (@Sendable () -> Void)?) -> VideoPullResult {
+        #if canImport(AVFoundation) && !os(watchOS)
         if MediaPlaybackGate.isEnabled {
             if let wake { inner.waker.set(wake) }
             driveLiveOnPull()
             return Self.finalizePull(inner, surface: surface)
         }
+        #endif
         return Self.pullInner(inner, surface: surface, clock: clock, wake: wake)
     }
 
@@ -611,6 +655,9 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
     ) -> VideoPullResult {
         if let wake {
             inner.waker.set(wake)
+            #if canImport(CRuneMedia)
+            if MediaPlaybackGate.isEnabled { inner.frameWaker.set(wake) }
+            #endif
         }
 
         if !MediaPlaybackGate.isEnabled {
@@ -715,7 +762,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         }
 
         if source.isFile && url.isFileURL && !FileManager.default.fileExists(atPath: url.path) {
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            let failIfStillLoading: @Sendable () -> Void = { [weak self] in
                 guard let self else { return }
                 // Avoid overwriting if already opened/failed via test hooks
                 self.inner.lock.lock()
@@ -725,10 +772,15 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
                     self.markFailed("media file not found: \(url.path)")
                 }
             }
+            #if os(WASI)
+            WASIEventLoop.schedule(after: 0.02, failIfStillLoading)
+            #else
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.02, execute: failIfStillLoading)
+            #endif
             return
         }
 
-        #if os(macOS)
+        #if canImport(AVFoundation) && !os(watchOS)
         var assetOptions: [String: Any] = [AVURLAssetPreferPreciseDurationAndTimingKey: true]
         if !headers.isEmpty {
             var headerDict: [String: String] = [:]
@@ -749,19 +801,26 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
             inner.asset = asset
             inner.lock.unlock()
             if MediaPlaybackGate.isEnabled {
-                scheduleOnMain { [weak self] in
-                    self?.syncAVPlayer()
+                schedulePlaybackWork { [weak self] in
+                    self?.synchronizePlayback()
                 }
             }
         }
+        #elseif canImport(CRuneMedia)
+        if MediaPlaybackGate.isEnabled {
+            // Native demuxer discovery may wait for a remote stream or device.
+            inner.mediaQueue.async { [inner] in Self.openDesktop(inner) }
+        } else if url.isFileURL {
+            Self.openDesktop(inner)
+        }
         #else
-        markFailed("video playback is only supported on macOS")
+        markFailed("This build has no media playback backend for this platform")
         #endif
     }
 
-    #if os(macOS)
+    #if canImport(AVFoundation) && !os(watchOS)
     private func loadAssetMetadataSynchronously(_ asset: AVURLAsset, requestedKind: MediaKind) throws {
-        // AVAsset.tracks / duration in macOS SDK: use semaphore only when not synchronously loaded yet
+        // Local metadata must be available synchronously for first-frame layout.
         final class Box: @unchecked Sendable {
             var error: Error?
             var duration: Double?
@@ -826,22 +885,24 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
             size: uprightSize,
             hasSound: box.hasAudio || kind == .audio
         )
-        let (initialTime, shouldDecodePoster) = commitLoadedMetadata(meta, orient: orient, asset: asset)
+        let (initialTime, shouldDecodePoster) = Self.commitLoadedMetadata(inner, meta: meta, orient: orient) { inner.asset = asset }
 
         if !MediaPlaybackGate.isEnabled {
             if shouldDecodePoster {
                 decodeHeadlessFrame(at: initialTime)
             }
         } else {
-            scheduleOnMain { [weak self] in
-                self?.syncAVPlayer()
+            schedulePlaybackWork { [weak self] in
+                self?.synchronizePlayback()
             }
         }
     }
 
-    private func commitLoadedMetadata(_ meta: VideoMeta, orient: Orient, asset: AVURLAsset?) -> (Double, Bool) {
+    #endif
+
+    private static func commitLoadedMetadata(_ inner: Inner, meta: VideoMeta, orient: Orient, attach: () -> Void) -> (Double, Bool) {
         inner.lock.lock()
-        inner.asset = asset
+        attach()
         inner.orient = orient
         inner.meta = meta
         inner.hasLoadedMeta = true
@@ -859,13 +920,12 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         let shouldDecodePoster = (meta.kind == .video)
         inner.generation &+= 1
         inner.lock.unlock()
-        settleStateWaker()
+        settleStateWakerInner(inner)
         return (initialTime, shouldDecodePoster)
     }
-    #endif
 
     private func openHeadlessAudioIfNeeded() {
-        #if os(macOS)
+        #if canImport(AVFoundation) && !os(watchOS)
         guard !MediaPlaybackGate.isEnabled else { return }
         inner.lock.lock()
         let shouldProbe = (inner.meta.kind == .audio)
@@ -884,6 +944,15 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         } catch {
             markFailed("\(error)")
         }
+        #elseif canImport(CRuneMedia)
+        guard !MediaPlaybackGate.isEnabled else { return }
+        let needsOpen = inner.lock.withLock {
+            guard inner.meta.kind == .audio, !inner.request.source.isFile, !inner.hasLoadedMeta, inner.machine.failed == nil,
+                  !inner.didAttemptHeadlessAudioProbe else { return false }
+            inner.didAttemptHeadlessAudioProbe = true
+            return true
+        }
+        if needsOpen { Self.openDesktop(inner) }
         #endif
     }
 
@@ -912,7 +981,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
     }
 
     internal func preloadPosterDirectForTest() {
-        #if os(macOS)
+        #if canImport(AVFoundation) && !os(watchOS) || canImport(CRuneMedia)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             self.inner.lock.lock()
@@ -936,22 +1005,22 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
 
     internal static func onKeptForTest(_ hook: (@Sendable () -> Void)?) {
         if let hook {
-            Thread.current.threadDictionary[keptHookThreadKey] = hook
+            RuneExecutionContext.locals[keptHookThreadKey] = hook
         } else {
-            Thread.current.threadDictionary.removeObject(forKey: keptHookThreadKey)
+            RuneExecutionContext.locals.removeObject(forKey: keptHookThreadKey)
         }
     }
 
     internal static func heldCapacityForTest() -> Int {
-        (Thread.current.threadDictionary[heldScratchThreadKey] as? HeldScratch)?.players.capacity ?? 0
+        (RuneExecutionContext.locals[heldScratchThreadKey] as? HeldScratch)?.players.capacity ?? 0
     }
 
     internal static func resetParkedForTest() {
         parkedLock.lock()
         parkedPlayers.removeAll()
         parkedLock.unlock()
-        Thread.current.threadDictionary.removeObject(forKey: heldScratchThreadKey)
-        Thread.current.threadDictionary.removeObject(forKey: keptHookThreadKey)
+        RuneExecutionContext.locals.removeObject(forKey: heldScratchThreadKey)
+        RuneExecutionContext.locals.removeObject(forKey: keptHookThreadKey)
     }
 
     internal func openMetadataForTest(_ meta: VideoMeta) {
@@ -980,7 +1049,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
     }
 
     internal func testFramesForTest(at timeSeconds: Double) -> (upright: ByteFrame, raw: ByteFrame, orient: Orient)? {
-        #if os(macOS)
+        #if canImport(AVFoundation) && !os(watchOS)
         inner.lock.lock()
         let asset = inner.asset
         let orient = inner.orient
@@ -997,7 +1066,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
     }
 
     internal static func parkedWithForTest(_ player: Player) -> [Player] {
-        #if os(macOS)
+        #if canImport(AVFoundation) && !os(watchOS)
         return parkPlayerReturningEvicted(player)
         #else
         return []
@@ -1012,6 +1081,12 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         var decodeAt: Double? = nil
         var shouldSettleWaker = false
 
+        #if canImport(CRuneMedia)
+        let pendingRemote = inner.lock.withLock {
+            !inner.hasLoadedMeta && !inner.request.source.isFile && !inner.state.isFailed
+        }
+        if pendingRemote { openDesktop(inner) }
+        #endif
         inner.lock.lock()
         if case .failed = inner.state {
             inner.lock.unlock()
@@ -1076,7 +1151,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
     }
 
     private static func decodeHeadlessFrameInner(_ inner: Inner, surface: NativeSurface, at timeSeconds: Double) {
-        #if os(macOS)
+        #if canImport(AVFoundation) && !os(watchOS)
         inner.lock.lock()
         guard let asset = inner.asset, inner.meta.kind == .video else {
             inner.lock.unlock()
@@ -1097,10 +1172,25 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         if let bgraFrame = generateCGImageFrame(from: asset, at: timeSeconds) {
             try? surface.pushBytesOriented(bgraFrame, orient: orient, frameId: frameId)
         }
+        #elseif canImport(CRuneMedia)
+        let (decoder, lastTime, generation) = inner.lock.withLock { (inner.decoder, inner.lastDecodedTime, inner.seekGen) }
+        guard let decoder, decoder.meta.kind == .video else { return }
+        do {
+            if let lastTime, surface.currentFrame() != nil,
+               floor(timeSeconds / decoder.meta.frameDuration) == floor(lastTime / decoder.meta.frameDuration) { return }
+            let sample = decoder.meta.duration == nil
+                ? max(0, timeSeconds)
+                : decoder.meta.frameTime(for: decoder.meta.frameIndex(at: timeSeconds))
+            if let frame = try decoder.frame(at: sample) {
+                try publishDesktopFrame(frame, decoder: decoder, inner: inner, surface: surface, time: timeSeconds, seekGen: generation)
+            }
+        } catch {
+            failDesktop(inner, error)
+        }
         #endif
     }
 
-    #if os(macOS)
+    #if canImport(AVFoundation) && !os(watchOS)
     private static func readCVPixelBuffer(from asset: AVURLAsset, at timeSeconds: Double) -> CVPixelBuffer? {
         guard let reader = try? AVAssetReader(asset: asset) else { return nil }
         // Load tracks safely via blocking helper or cached track
@@ -1153,9 +1243,15 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         gen.requestedTimeToleranceBefore = CMTime(seconds: 0.05, preferredTimescale: 600)
         gen.requestedTimeToleranceAfter = CMTime(seconds: 0.05, preferredTimescale: 600)
         let target = CMTime(seconds: max(0.0, timeSeconds), preferredTimescale: 600)
-        guard let cgImg = try? gen.copyCGImage(at: target, actualTime: nil) else {
-            return nil
+        final class ImageResult: @unchecked Sendable { var image: CGImage? }
+        let result = ImageResult()
+        let done = DispatchSemaphore(value: 0)
+        Task.detached {
+            result.image = try? await gen.image(at: target).image
+            done.signal()
         }
+        done.wait()
+        guard let cgImg = result.image else { return nil }
         let w = cgImg.width
         let h = cgImg.height
         guard w > 0 && h > 0 else { return nil }
@@ -1182,12 +1278,18 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
 
     // MARK: - Live AVPlayer Driver & VideoPhases/VideoTurn Wiring
 
-    private func scheduleOnMain(_ block: @escaping @Sendable () -> Void) {
+    private func schedulePlaybackWork(_ block: @escaping @Sendable () -> Void) {
+        #if os(WASI)
+        block()
+        #elseif canImport(CRuneMedia)
+        inner.mediaQueue.async(execute: block)
+        #else
         if Thread.isMainThread {
             block()
         } else {
             DispatchQueue.main.async(execute: block)
         }
+        #endif
     }
 
     private func applyMachineEffects(_ effects: [VideoPhases.Effect]) {
@@ -1206,15 +1308,15 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
             case .fail(let msg):
                 markFailed(msg)
             case .dropPlayer:
-                #if os(macOS)
-                scheduleOnMain { [weak self] in self?.dropAVPlayer() }
+                #if canImport(AVFoundation) && !os(watchOS)
+                schedulePlaybackWork { [weak self] in self?.dropAVPlayer() }
                 #endif
             case .park:
-                #if os(macOS)
+                #if canImport(AVFoundation) && !os(watchOS)
                 _ = Self.parkPlayerReturningEvicted(self)
                 #endif
             case .unpark:
-                #if os(macOS)
+                #if canImport(AVFoundation) && !os(watchOS)
                 Self.unparkPlayer(self)
                 #endif
             case .ensurePlayer, .setRate, .seek, .restart:
@@ -1223,7 +1325,21 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         }
     }
 
-    #if os(macOS)
+    #if canImport(AVFoundation) && !os(watchOS)
+    private static let pendingAppleLock = NSLock()
+    private nonisolated(unsafe) static var pendingApplePlayers: [WeakPlayer] = []
+
+    internal static func startPreexistingApplePlayers() {
+        let players = pendingAppleLock.withLock {
+            let players = pendingApplePlayers.compactMap(\.player)
+            pendingApplePlayers.removeAll()
+            return players
+        }
+        for player in players {
+            player.schedulePlaybackWork { [weak player] in player?.synchronizePlayback() }
+        }
+    }
+
     private struct PlayerVideoPort: VideoPort {
         weak var owner: Player?
         let player: AVPlayer
@@ -1276,7 +1392,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         }
     }
 
-    private func syncAVPlayer(seekTo: Double? = nil) {
+    private func synchronizePlayback(seekTo: Double? = nil) {
         inner.lock.lock()
         if case .failed = inner.state {
             inner.lock.unlock()
@@ -1407,7 +1523,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
 
     private func driveLiveOnPull() {
         guard Thread.isMainThread else {
-            scheduleOnMain { [weak self] in self?.driveLiveOnPull() }
+            schedulePlaybackWork { [weak self] in self?.driveLiveOnPull() }
             return
         }
         inner.lock.lock()
@@ -1445,6 +1561,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
             }
         }
 
+        inner.lock.lock()
         let item = VideoPhases.Item(
             generation: inner.generation,
             status: itemStatus,
@@ -1452,7 +1569,6 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
             playerRate: playerRate,
             frameTime: frameTime
         )
-        inner.lock.lock()
         let (_, effects) = inner.machine.step(item: item, onMain: true, at: nowClock)
         if t.isFinite && t >= 0 {
             inner.currentTime = t
@@ -1477,18 +1593,18 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
     @discardableResult
     private static func parkPlayerReturningEvicted(_ player: Player) -> [Player] {
         let heldScratch: HeldScratch
-        if let existingScratch = Thread.current.threadDictionary[heldScratchThreadKey] as? HeldScratch {
+        if let existingScratch = RuneExecutionContext.locals[heldScratchThreadKey] as? HeldScratch {
             heldScratch = existingScratch
         } else {
             let fresh = HeldScratch()
-            Thread.current.threadDictionary[heldScratchThreadKey] = fresh
+            RuneExecutionContext.locals[heldScratchThreadKey] = fresh
             heldScratch = fresh
         }
         heldScratch.players.removeAll(keepingCapacity: true)
 
-        let keptHook = Thread.current.threadDictionary[keptHookThreadKey] as? (@Sendable () -> Void)
+        let keptHook = RuneExecutionContext.locals[keptHookThreadKey] as? (@Sendable () -> Void)
         if keptHook != nil {
-            Thread.current.threadDictionary.removeObject(forKey: keptHookThreadKey)
+            RuneExecutionContext.locals.removeObject(forKey: keptHookThreadKey)
         }
 
         var evicted: [Player] = []
@@ -1568,9 +1684,173 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         if let obs { NotificationCenter.default.removeObserver(obs) }
         avp?.pause()
     }
+    #elseif canImport(CRuneMedia)
+    private final class WeakDesktopPlayer: @unchecked Sendable {
+        weak var inner: Inner?
+        init(_ inner: Inner) { self.inner = inner }
+    }
+    private static let pendingDesktopLock = NSLock()
+    private nonisolated(unsafe) static var pendingDesktopPlayers: [WeakDesktopPlayer] = []
+
+    /// An application can construct a Player in its initial state before starting the window loop.
+    internal static func startPreexistingDesktopPlayers() {
+        let pending = pendingDesktopLock.withLock {
+            let entries = pendingDesktopPlayers
+            pendingDesktopPlayers.removeAll()
+            return entries
+        }
+        for entry in pending {
+            guard let inner = entry.inner else { continue }
+            inner.mediaQueue.async { openDesktop(inner) }
+        }
+    }
+
+    private static func openDesktop(_ inner: Inner) {
+        inner.transportLock.withLock {
+            let live = MediaPlaybackGate.isEnabled
+            let (request, existing, failed) = inner.lock.withLock {
+                (inner.request, inner.decoder, inner.state.isFailed)
+            }
+            guard !failed, existing == nil || (live && existing?.headless == true) else { return }
+            do {
+                let source = try existing?.source ?? DesktopMediaSource(request: request)
+                let decoder = try DesktopMediaDecoder(source: source, kind: request.kind, headless: !live)
+                let (time, wantsPoster) = commitLoadedMetadata(inner, meta: decoder.meta, orient: decoder.orient) {
+                    inner.decoder = decoder
+                }
+                if live {
+                    synchronizeDesktop(inner, seek: time > 0 ? time : nil)
+                } else if wantsPoster, let surface = inner.surface {
+                    decodeHeadlessFrameInner(inner, surface: surface, at: time)
+                }
+            } catch {
+                failDesktop(inner, error)
+            }
+        }
+    }
+
+    private func synchronizePlayback(seekTo: Double? = nil) {
+        Self.synchronizeDesktop(inner, seek: seekTo)
+    }
+
+    private static func synchronizeDesktop(_ inner: Inner, seek requestedSeek: Double?) {
+        inner.transportLock.withLock {
+            let (decoder, request, seek, failed, generation) = inner.lock.withLock {
+                var seek = requestedSeek
+                if let pending = inner.request.seek, pending.generation != inner.lastTurnSeekGen {
+                    seek = pending.time
+                    inner.lastTurnSeekGen = pending.generation
+                }
+                return (inner.decoder, inner.request, seek, inner.state.isFailed, inner.seekGen)
+            }
+            guard !failed, let decoder, !decoder.headless else { return }
+            do {
+                try decoder.setTransport(request, seek: seek)
+                inner.lock.withLock {
+                    if request.playing {
+                        inner.state = .playing
+                    } else if inner.state != .ended || seek != nil {
+                        inner.state = .ready
+                    }
+                    if request.playing && inner.mediaTimer == nil {
+                        // Audio-only applications also need EOS/loop callbacks when no view is drawing.
+                        let timer = DispatchSource.makeTimerSource(queue: inner.mediaQueue)
+                        let interval = decoder.meta.kind == .audio ? audioTickSeconds : decoder.meta.frameDuration
+                        timer.schedule(deadline: .now(), repeating: min(0.1, max(1.0 / 120.0, interval)))
+                        timer.setEventHandler { [weak inner] in
+                            if let inner { pollDesktop(inner) }
+                        }
+                        inner.mediaTimer = timer
+                        timer.resume()
+                    } else if !request.playing {
+                        inner.mediaTimer?.cancel()
+                        inner.mediaTimer = nil
+                    }
+                }
+                if !request.playing, decoder.meta.kind == .video, let surface = inner.surface,
+                   seek != nil || surface.currentFrame() == nil,
+                   let frame = try decoder.frame(at: nil) {
+                    let time = seek ?? inner.lock.withLock { inner.currentTime }
+                    try publishDesktopFrame(frame, decoder: decoder, inner: inner, surface: surface, time: time, seekGen: generation)
+                }
+                settleStateWakerInner(inner)
+            } catch {
+                failDesktop(inner, error)
+            }
+        }
+    }
+
+    private static func pollDesktop(_ inner: Inner) {
+        inner.transportLock.withLock {
+            let (decoder, playing, previous, generation, previousTime) = inner.lock.withLock {
+                (inner.decoder, inner.request.playing && inner.state == .playing, inner.lastDecodedTime, inner.seekGen, inner.currentTime)
+            }
+            guard playing, let decoder, !decoder.headless else { return }
+            do {
+                let status = try decoder.status()
+                let next = inner.lock.withLock { () -> (restart: Bool, ended: Bool)? in
+                    guard inner.seekGen == generation, inner.request.playing else { return nil }
+                    let restart = inner.machine.observe(time: status.time, atEnd: status.ended)
+                    inner.currentTime = inner.machine.time
+                    if inner.machine.ended {
+                        inner.state = .ended
+                        inner.request.playing = false
+                        inner.mediaTimer?.cancel()
+                        inner.mediaTimer = nil
+                        inner.generation &+= 1
+                    }
+                    return (restart, inner.machine.ended)
+                }
+                if let next {
+                    if next.restart { synchronizeDesktop(inner, seek: 0) }
+                    else if next.ended { settleStateWakerInner(inner) }
+                    else if decoder.meta.kind == .audio, status.time != previousTime { inner.waker.wake() }
+                    else if let surface = inner.surface, decoder.meta.kind == .video,
+                            previous.map({ floor($0 / decoder.meta.frameDuration) }) != floor(status.time / decoder.meta.frameDuration),
+                            let frame = try decoder.frame(at: nil) {
+                        try publishDesktopFrame(frame, decoder: decoder, inner: inner, surface: surface, time: status.time, seekGen: generation)
+                    }
+                }
+            } catch {
+                failDesktop(inner, error)
+            }
+        }
+    }
+
+    private static func publishDesktopFrame(_ frame: ByteFrame, decoder: DesktopMediaDecoder,
+                                            inner: Inner, surface: NativeSurface, time: Double, seekGen: UInt64) throws {
+        try inner.transportLock.withLock {
+            let id = inner.lock.withLock { () -> UInt64? in
+                guard inner.decoder === decoder, inner.seekGen == seekGen else { return nil }
+                inner.lastDecodedTime = time
+                let id = inner.nextFrameId
+                inner.nextFrameId &+= 1
+                return id
+            }
+            guard let id else { return }
+            try surface.pushBytesOriented(frame, orient: decoder.orient, frameId: id)
+            if !decoder.headless { inner.frameWaker.wake() }
+        }
+    }
+
+    private static func failDesktop(_ inner: Inner, _ error: any Error) {
+        let message = String(describing: error)
+        let expired = inner.lock.withLock {
+            inner.mediaTimer?.cancel()
+            inner.mediaTimer = nil
+            let decoder = inner.decoder
+            inner.decoder = nil
+            inner.state = .failed(message)
+            inner.request.playing = false
+            inner.machine.failed = message
+            inner.generation &+= 1
+            return decoder
+        }
+        withExtendedLifetime(expired) {}
+        settleStateWakerInner(inner)
+    }
     #else
-    private func syncAVPlayer(seekTo: Double? = nil) {}
-    private func driveLiveOnPull() {}
+    private func synchronizePlayback(seekTo: Double? = nil) {}
     #endif
 
     private func markFailed(_ message: String) {

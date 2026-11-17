@@ -12,7 +12,7 @@ struct RuneLightReelApp {
 
     static func run(args: [String]) throws {
         #if !canImport(Metal)
-        fputs("rune-light-reel requires Metal.\n", stderr)
+        FileHandle.standardError.write(Data("rune-light-reel requires Metal.\n".utf8))
         #else
         var cmd: String?
         var outDir = URL(fileURLWithPath: "demo/reel")
@@ -83,7 +83,7 @@ struct RuneLightReelApp {
                     let url = outDir.appendingPathComponent(String(format: "still-%05.2f.png", t))
                     try writeReelPNG(url: url, width: reelW, height: reelH, rgba: rgba)
                 }
-                fputs("still \(t)\n", stderr)
+                FileHandle.standardError.write(Data("still \(t)\n".utf8))
             }
         case "render":
             try runReelRender(reel: reel, ctx: ctx, outDir: outDir, from: from, to: to)

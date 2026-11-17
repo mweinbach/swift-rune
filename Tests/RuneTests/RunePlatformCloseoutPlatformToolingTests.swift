@@ -1,6 +1,8 @@
 import Testing
 import Foundation
+#if os(macOS)
 import AppKit
+#endif
 @testable import Rune
 
 @Suite("RunePlatformCloseoutPlatformToolingTests")
@@ -65,6 +67,7 @@ struct RunePlatformCloseoutPlatformToolingTests {
 
     // MARK: - platform/macos/help.rs (1 test)
 
+    #if os(macOS)
     @Test("help: only changed regions are replaced")
     func helpOnlyChangedRegionsReplaced() {
         let toolbar: ([Float], String) = ([10, 4, 30, 24], "Copy")
@@ -80,6 +83,7 @@ struct RunePlatformCloseoutPlatformToolingTests {
 
         #expect(MacOSToolTipOwner.snap([10.3, 4.74, 30.0, 24.2], scale: 2.0) == [10.5, 4.5, 30.0, 24.0])
     }
+    #endif
 
     // MARK: - platform/accent.rs (1 test)
 
@@ -106,7 +110,9 @@ struct RunePlatformCloseoutPlatformToolingTests {
         )
         #expect(valid != nil)
         if let valid {
+            #if os(macOS)
             #expect(MacOSDockIconApplier.makeNSImage(from: valid) != nil)
+            #endif
             let shared = AppShared<Int>()
             shared.requestDockIcon(valid)
             #expect(shared.take().dockIcon == valid)
@@ -146,6 +152,7 @@ struct RunePlatformCloseoutPlatformToolingTests {
         #expect(Win32KeyMap.translate(virtualKey: 0x2C) == .printScreen)
         #expect(Win32KeyMap.translate(virtualKey: 0x2D) == .insert)
 
+        #if os(macOS)
         // macOS NSEvent function-key scalars and key codes
         func makeKey(chars: String, keyCode: UInt16) -> NSEvent? {
             NSEvent.keyEvent(
@@ -172,6 +179,7 @@ struct RunePlatformCloseoutPlatformToolingTests {
             let ev = try #require(makeKey(chars: chars, keyCode: code))
             #expect(MacOSKeyMapper.makeKeyEvent(from: ev)?.key == expected)
         }
+        #endif
     }
 
     // MARK: - tooling/window_tests.rs (1 test)
@@ -213,12 +221,46 @@ struct RunePlatformCloseoutPlatformToolingTests {
         #expect(ToolingVideoEncoder.unpad(data, width: 1, height: 2, bytesPerRow: 8) == [1, 2, 3, 4, 5, 6, 7, 8])
     }
 
+    #if os(macOS) || os(Linux) || os(Windows)
+    @Test("record: find the encoder on the native search path, including directories with spaces")
+    func findEncoderOnPath() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("rune encoder \(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        let first = root.appendingPathComponent("first")
+        let second = root.appendingPathComponent("second")
+        #if os(Windows)
+        let name = "ffmpeg.exe"
+        let system = try #require(ProcessInfo.processInfo.environment["SystemRoot"])
+        let executable = URL(fileURLWithPath: system).appendingPathComponent("System32/cmd.exe")
+        let path = "\"\(first.path)\";\"\(second.path)\""
+        #else
+        let name = "ffmpeg"
+        let executable = URL(fileURLWithPath: "/bin/sh")
+        let path = "\(first.path):\(second.path)"
+        #endif
+        try fm.createDirectory(at: first.appendingPathComponent(name), withIntermediateDirectories: true)
+        try fm.createDirectory(at: second, withIntermediateDirectories: true)
+        let target = second.appendingPathComponent(name)
+        try fm.copyItem(at: executable.resolvingSymlinksInPath(), to: target)
+        #expect(ToolingVideoEncoder.findFFmpegOnPath(path) == target.path)
+    }
+
     @Test("record: encoder errors close stdin and report the exit status")
     func recordEncoderErrorsCloseStdinAndReportExitStatus() throws {
-        func start(_ command: String) throws -> ToolingVideoEncoder {
+        func start(exitCode: Int, readInput: Bool) throws -> ToolingVideoEncoder {
             let proc = Process()
+            #if os(Windows)
+            let systemRoot = try #require(ProcessInfo.processInfo.environment["SystemRoot"])
+            proc.executableURL = URL(fileURLWithPath: systemRoot)
+                .appendingPathComponent("System32/WindowsPowerShell/v1.0/powershell.exe")
+            let read = readInput ? "[Console]::OpenStandardInput().CopyTo([IO.Stream]::Null);" : ""
+            proc.arguments = ["-NoProfile", "-NonInteractive", "-Command", "\(read)exit \(exitCode)"]
+            #else
             proc.executableURL = URL(fileURLWithPath: "/bin/sh")
-            proc.arguments = ["-c", command]
+            let read = readInput ? "cat >/dev/null; " : ""
+            proc.arguments = ["-c", "\(read)exit \(exitCode)"]
+            #endif
             let pipe = Pipe()
             proc.standardInput = pipe
             proc.standardOutput = FileHandle.nullDevice
@@ -229,7 +271,7 @@ struct RunePlatformCloseoutPlatformToolingTests {
 
         let frame = Frame(width: 64, height: 64, rgba: [UInt8](repeating: 0, count: 64 * 64 * 4))
 
-        let early = try start("exit 17")
+        let early = try start(exitCode: 17, readInput: false)
         var earlyMessage: String? = nil
         for _ in 0..<20 {
             do {
@@ -243,7 +285,7 @@ struct RunePlatformCloseoutPlatformToolingTests {
         let msg1 = try #require(earlyMessage)
         #expect(msg1.contains("17") && msg1.contains("stopped reading"))
 
-        let late = try start("cat >/dev/null; exit 23")
+        let late = try start(exitCode: 23, readInput: true)
         try late.writeFrame(frame)
         var lateMessage: String? = nil
         do {
@@ -254,8 +296,9 @@ struct RunePlatformCloseoutPlatformToolingTests {
         let msg2 = try #require(lateMessage)
         #expect(msg2.contains("23") && msg2.contains("failed writing"))
 
-        let success = try start("cat >/dev/null")
+        let success = try start(exitCode: 0, readInput: true)
         try success.writeFrame(frame)
         #expect(try success.finish() == "test.mp4")
     }
+    #endif
 }

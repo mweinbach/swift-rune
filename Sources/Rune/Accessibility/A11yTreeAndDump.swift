@@ -293,6 +293,12 @@ public final class AccessibilityTreeState {
 /// Nested JSON dump of a projected `AccessibilityNode` tree (`a11y/dump.rs`).
 public enum AccessibilityDump {
     public static func dictionary(from node: AccessibilityNode, isRoot: Bool = true) -> [String: Any] {
+        dictionary(from: node, isRoot: isRoot, forBrowser: false)
+    }
+
+    internal static func dictionary(
+        from node: AccessibilityNode, isRoot: Bool, forBrowser: Bool, syntheticPath: String? = nil
+    ) -> [String: Any] {
         let resolvedRole = (node.isSecure && node.role == .textInput) ? ElementRole.passwordInput.rawValue : node.role.rawValue
         var dict: [String: Any] = [
             "key": node.id,
@@ -306,6 +312,11 @@ public enum AccessibilityDump {
         ]
         if let name = resolvedName(for: node) {
             dict["name"] = name
+        }
+        if forBrowser {
+            dict["path"] = node.runtimePath ?? syntheticPath ?? node.id
+            if node.isBusy { dict["busy"] = true }
+            if node.isFocusable { dict["focusable"] = true }
         }
         // Static text nodes carry their content in `name` (`Role::Label`); never emit `value` for `.text` or secure fields (`dump.rs:51`).
         if node.role != .text && !node.isSecure, let val = node.value {
@@ -327,7 +338,7 @@ public enum AccessibilityDump {
         }
 
         var states: [String] = []
-        if node.isFocused && !isRoot { states.append("focused") }
+        if node.isFocused && (!isRoot || forBrowser) { states.append("focused") }
         if node.isDisabled { states.append("disabled") }
         if node.isReadOnly { states.append("read-only") }
         if node.isInvalid { states.append("invalid") }
@@ -362,12 +373,18 @@ public enum AccessibilityDump {
             dict["chars"] = chars
         }
         if !node.children.isEmpty {
-            dict["children"] = node.children.map { dictionary(from: $0, isRoot: false) }
+            dict["children"] = node.children.enumerated().map { index, child in
+                // Terminal lines and other derived children can share author IDs in separate subtrees.
+                let path = forBrowser && child.runtimePath == nil
+                    ? "\(node.runtimePath ?? syntheticPath ?? node.id)#a11y-\(index)" : nil
+                return dictionary(from: child, isRoot: false, forBrowser: forBrowser, syntheticPath: path)
+            }
         }
         return dict
     }
 
-    private static func resolvedName(for node: AccessibilityNode) -> String? {
+    /// The computed accessible name shared by native providers and the JSON tree.
+    internal static func resolvedName(for node: AccessibilityNode) -> String? {
         if let label = node.label { return label }
         if node.role == .text {
             return node.isSecure ? nil : node.value
@@ -382,7 +399,7 @@ public enum AccessibilityDump {
 
     private static func namedByContainerContent(_ role: ElementRole) -> Bool {
         switch role {
-        case .button, .checkbox, .link, .menuItem, .menuItemCheckbox, .radio, .switchControl, .tab,
+        case .button, .checkbox, .link, .menuItem, .menuItemCheckbox, .menuItemRadio, .radio, .switchControl, .tab,
              .listItem, .option, .treeItem, .row, .gridCell, .columnHeader, .heading, .alert, .status:
             return true
         default:

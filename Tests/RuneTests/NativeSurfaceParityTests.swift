@@ -51,7 +51,7 @@ struct NativeSurfaceParityTests {
         #expect(surface.currentFrame() == nil)
         #expect(wakes.withLock { $0 } == 3)
 
-        #if os(macOS)
+        #if canImport(CoreVideo) && canImport(IOSurface) && canImport(Metal)
         // Upstream `native_surface/mod.rs:455` (`latest_wins_and_releases_old_frames`):
         // concurrent producer pushes 2..<100 while caller holds frame 1; dropping `held` & `clear()` release backing buffers.
         let concSurface = NativeSurface()
@@ -151,6 +151,134 @@ struct NativeSurfaceParityTests {
         }
     }
 
+    @Test("unrepresentable plane sizes preserve the last displayable frame")
+    func oversizedNativeSurface() throws {
+        #expect(throws: NativeSurfaceError.dimensionsOutOfRange(width: .max, height: .max)) {
+            try ByteFrame(width: .max, height: .max, format: .rgba, color: .srgb, planes: [Data()])
+        }
+        let surface = NativeSurface()
+        try surface.pushBytes(ByteFrame.synthetic(width: 2, height: 2, index: 0), frameId: 44)
+        let invalid = NativeSurfaceFrame(width: .max, height: .max, format: .nv12, bytes: Data())
+        surface.publish(invalid)
+        #expect(surface.latestFrame() == invalid)
+        #expect(surface.currentFrame()?.id == 44)
+    }
+
+    @Test("Production and reference painters pull visible video and arm its next presentation deadline")
+    func scheduledVideoFrame() throws {
+        final class Scheduled: SurfaceVideoAttachment {
+            let videoKey: UInt64 = 42
+            func pull(clock: Double, wake: (@Sendable () -> Void)?) -> VideoPullResult {
+                VideoPullResult(active: true, generation: 1, due: .now.advanced(by: .seconds(2)))
+            }
+            func snapshot() -> VideoSnapshot {
+                VideoSnapshot(kind: .video, state: .playing, time: 0, duration: nil, size: (2, 2),
+                              rate: 1, looping: false, muted: true)
+            }
+        }
+        for production in [false, true] {
+            let surface = NativeSurface()
+            surface.withVideo(Scheduled())
+            let runtime = Runtime(state: false, viewport: Vec2(12, 12), pixelScale: 1) { _, _ in
+                nativeSurface(surface).size(12, 12).surfaceUnscaled().surfaceAnchor(.end, .end)
+            }
+            if production { _ = runtime.renderFrame(at: 0) } else { _ = runtime.frame(at: 0) }
+            let due = try #require(runtime.nextWakeDeadline(after: 0))
+            #expect(due > 1 && due <= 2)
+            #expect(runtime.animSources & AnimSource.video == 0)
+            let placed = try #require(runtime.surfaces.first?.surface.place)
+            #expect(placed.unscaled && placed.anchor.0 == .end && placed.anchor.1 == .end)
+        }
+    }
+
+    @Test("Captured surface bytes and mirror state survive producer updates")
+    func referenceCaptureRetainsPresentation() throws {
+        let surface = NativeSurface()
+        let rect = SIMD4<Float>(0, 0, 2, 1)
+        let scene = RefScene(width: 2, height: 1, srgbBlend: true)
+        let draw = SurfaceDraw(surface: surface, fit: .stretch, beforeInstance: .max, rect: rect, clip: rect)
+        let first = try ByteFrame(width: 2, height: 1, format: .bgra, color: .srgb,
+                                  planes: [Data([0, 0, 255, 255, 0, 255, 0, 255])])
+        try surface.pushBytes(first, frameId: 4)
+        surface.setMirrored(true)
+        let held = try NativeSurfaceReference.capture([draw], srgbBlend: scene.srgbBlend)
+
+        let next = try ByteFrame(width: 2, height: 1, format: .bgra, color: .srgb,
+                                 planes: [Data([255, 0, 0, 255, 0, 255, 255, 255])])
+        try surface.pushBytes(next, frameId: 4)
+        surface.setMirrored(false)
+        let latest = try NativeSurfaceReference.capture([draw], srgbBlend: scene.srgbBlend)
+        surface.clear()
+
+        #expect(try RuneRef.render(scene, surfaces: held).rgba == [0, 255, 0, 255, 255, 0, 0, 255])
+        #expect(try RuneRef.render(scene, surfaces: latest).rgba == [0, 0, 255, 255, 255, 255, 0, 255])
+        #expect(try NativeSurfaceReference.capture([draw], srgbBlend: scene.srgbBlend).isEmpty)
+        #expect(surface.counts() == (0, 0))
+    }
+
+    @Test("Native surfaces render inside their reference layer and behind later primitives")
+    func referenceSurfaceInLayer() throws {
+        let surface = NativeSurface()
+        let green = try ByteFrame(width: 1, height: 1, format: .rgba, color: .srgb, planes: [Data([0, 255, 0, 255])])
+        try surface.pushBytes(green, frameId: 1)
+        let rect = SIMD4<Float>(0, 0, 4, 2)
+        let draw = SurfaceDraw(surface: surface, fit: .stretch, beforeInstance: 1, rect: rect,
+                               clip: SIMD4<Float>(1, 0, 4, 2))
+        let scene = RefScene(width: 4, height: 2, srgbBlend: true, clearColor: SIMD4(0, 0, 1, 1), primitives: [
+            .layerBegin(rect: rect, opacity: 0.5, clip: rect),
+            .layerEnd(clip: rect),
+            .roundedRect(rect: SIMD4(3, 0, 1, 2), fill: SIMD4(1, 0, 0, 1), clip: rect)
+        ])
+        let capture = try NativeSurfaceReference.capture([draw], srgbBlend: scene.srgbBlend)
+        let image = try RuneRef.render(scene, surfaces: capture)
+        #expect(image.pixel(x: 0, y: 1) == SIMD4(0, 0, 255, 255))
+        #expect(image.pixel(x: 2, y: 1) == SIMD4(0, 128, 128, 255))
+        #expect(image.pixel(x: 3, y: 1) == SIMD4(255, 0, 0, 255))
+    }
+
+    @Test("Mirrored NV12 reference draws sample chroma from the matching two-pixel block")
+    func referenceMirroredNV12() throws {
+        let surface = NativeSurface()
+        let bytes = try ByteFrame(width: 4, height: 2, format: .nv12Video, color: .bt601,
+                                  planes: [Data([81, 81, 41, 41, 81, 81, 41, 41]), Data([90, 240, 240, 110])])
+        try surface.pushBytes(bytes, frameId: 1)
+        surface.setMirrored(true)
+        let rect = SIMD4<Float>(0, 0, 4, 2)
+        let draw = SurfaceDraw(surface: surface, fit: .stretch, beforeInstance: 0, rect: rect, clip: rect)
+        let scene = RefScene(width: 4, height: 2, srgbBlend: true)
+        let capture = try NativeSurfaceReference.capture([draw], srgbBlend: scene.srgbBlend)
+        let image = try RuneRef.render(scene, surfaces: capture)
+        for x in 0..<4 {
+            let pixel = image.pixel(x: x, y: 0)
+            #expect(pixel.w == 255 && pixel.y < 2)
+            if x < 2 {
+                #expect(pixel.z > 253 && pixel.x < 2)
+            } else {
+                #expect(pixel.x > 253 && pixel.z < 2)
+            }
+        }
+    }
+
+    @Test("Surface downsampling includes every source column in the selected blend space")
+    func referenceSurfaceDownsampling() throws {
+        let surface = NativeSurface()
+        let columns: [UInt8] = [255, 0, 0, 0, 0, 255, 255, 255]
+        let row: [UInt8] = columns.flatMap { [$0, $0, $0, UInt8.max] }
+        let bytes = try ByteFrame(width: 8, height: 2, format: .rgba, color: .srgb, planes: [Data(row + row)])
+        try surface.pushBytes(bytes, frameId: 1)
+        let rect = SIMD4<Float>(0, 0, 2, 1)
+        let draw = SurfaceDraw(surface: surface, fit: .stretch, beforeInstance: 0, rect: rect, clip: rect)
+        for srgbBlend in [false, true] {
+            let scene = RefScene(width: 2, height: 1, srgbBlend: srgbBlend)
+            let capture = try NativeSurfaceReference.capture([draw], srgbBlend: srgbBlend)
+            let image = try RuneRef.render(scene, surfaces: capture)
+            // The two output pixels contain 1/4 and 3/4 white in the working color space.
+            let levels: [UInt8] = srgbBlend ? [64, 191] : [137, 225]
+            let expected: [UInt8] = levels.flatMap { [$0, $0, $0, UInt8.max] }
+            #expect(image.rgba == expected)
+        }
+    }
+
     @Test("replaced waker and observer callbacks drop outside surface lock")
     func replacedCallbackDropsOutsideLock() {
         let surface = NativeSurface()
@@ -185,8 +313,11 @@ struct NativeSurfaceParityTests {
         #expect(Orient.up.upright(width: 1920, height: 1080) == (1920, 1080))
 
         // 90° clockwise rotation transform
+        let o90 = Orient.fromMatrix(a: 0, b: 1, c: -1, d: 0)
+        #if canImport(CoreGraphics)
         let rot90 = CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 1080, ty: 0)
-        let o90 = Orient.fromTransform(rot90)
+        #expect(Orient.fromTransform(rot90) == o90)
+        #endif
         #expect(o90.swaps == true)
         #expect(o90.upright(width: 1920, height: 1080) == (1080, 1920))
     }
@@ -290,6 +421,21 @@ struct NativeSurfaceParityTests {
         }
         let bf = try! ByteFrame(width: UInt32(w), height: UInt32(h), format: .bgra, color: .srgb, planes: [data])
         return (bf, expected)
+    }
+
+    @Test("Metal refreshes the surface texture when a producer reuses a frame ID")
+    func metalReadsReplacementBytesForRepeatedFrameID() throws {
+        let surface = NativeSurface()
+        let rect = SIMD4<Float>(0, 0, 1, 1)
+        let draw = SurfaceDraw(surface: surface, fit: .stretch, beforeInstance: 0, rect: rect, clip: rect)
+        let red = try ByteFrame(width: 1, height: 1, format: .bgra, color: .srgb, planes: [Data([0, 0, 255, 255])])
+        let green = try ByteFrame(width: 1, height: 1, format: .bgra, color: .srgb, planes: [Data([0, 255, 0, 255])])
+        try surface.pushBytes(red, frameId: 7)
+        let first = try renderSingleSurface(draw, size: (1, 1))
+        #expect(first.bytes == [255, 0, 0, 255])
+        try surface.pushBytes(green, frameId: 7)
+        let second = try renderSingleSurface(draw, size: (1, 1), renderer: first.renderer)
+        #expect(second.bytes == [0, 255, 0, 255])
     }
 
     @Test("GPU stale unscaled frame pins top-left and crops cleanly")
@@ -613,10 +759,7 @@ struct NativeSurfaceParityTests {
 
     @Test("rotated_clip_buffers_draw_upright_like_its_poster_on")
     func rotatedClipBuffersDrawUprightLikePoster() throws {
-        let fixture = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("Fixtures")
-            .appendingPathComponent("quadrants-rot90.mp4")
+        let fixture = mediaFixtureURL("quadrants-rot90.mp4")
         let player = Player(source: .url(fixture))
         guard let tf = player.testFramesForTest(at: 0.125) else {
             Issue.record("expected testFramesForTest for quadrants-rot90.mp4")

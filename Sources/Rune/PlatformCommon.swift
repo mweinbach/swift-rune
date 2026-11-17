@@ -78,6 +78,10 @@ public enum RuneApp {
             _ = try HeadlessRunner.run(spec, args: parsed)
             return
         }
+        try GpuBackendPolicy.checkWindowBackend()
+        #if os(Windows) || os(Linux)
+        MediaPlaybackGate.enable()
+        #endif
 
         ReadySignal.runStarts()
         defer { ReadySignal.clear() }
@@ -107,6 +111,10 @@ public enum RuneApp {
             _ = try HeadlessRunner.run(app, args: parsed)
             return
         }
+        try GpuBackendPolicy.checkWindowBackend(app.gpuBackendPreference)
+        #if os(Windows) || os(Linux)
+        MediaPlaybackGate.enable()
+        #endif
         if !app.childWindows.isEmpty {
             var rootApp = app
             rootApp.childWindows = []
@@ -122,15 +130,15 @@ public enum RuneApp {
         #if os(macOS)
         try MacOSApp.run(app, parsed: parsed)
         #elseif canImport(UIKit) && !os(watchOS)
-        try IOSApp.run(app.intoSpec(), parsed: parsed)
+        try IOSApp.run(app, parsed: parsed)
         #elseif os(Windows)
-        try Win32App.run(app.intoSpec(), parsed: parsed, openInactive: app.isOpenInactive)
+        try Win32App.run(app, parsed: parsed)
         #elseif os(Linux)
-        try LinuxApp.run(app.intoSpec(), parsed: parsed)
+        try LinuxApp.run(app, parsed: parsed)
         #elseif os(Android)
-        try AndroidApp.run(app.intoSpec(), parsed: parsed)
+        try AndroidApp.run(app, parsed: parsed)
         #elseif os(WASI)
-        try WebApp.run(app.intoSpec(), parsed: parsed)
+        try WebApp.run(app, parsed: parsed)
         #else
         _ = try HeadlessRunner.run(app, args: parsed)
         #endif
@@ -204,6 +212,8 @@ public struct SystemAccent: Sendable, Equatable {
             }
         }
         return .default
+        #elseif os(Windows)
+        return WindowsPreferences.read().accent
         #else
         return .default
         #endif
@@ -750,6 +760,8 @@ public struct SystemScrollBars: Sendable, Equatable, Hashable {
             return read
         }
         return .default
+        #elseif os(Windows)
+        return WindowsPreferences.scrollBars()
         #else
         return .default
         #endif
@@ -765,6 +777,8 @@ public struct SystemScrollBars: Sendable, Equatable, Hashable {
             return read
         }
         return cached ?? .default
+        #elseif os(Windows)
+        return WindowsPreferences.scrollBars()
         #else
         return .default
         #endif
@@ -852,6 +866,8 @@ public struct SystemPreferences: Sendable, Equatable {
             doubleClickInterval: 0.4,
             scrollBarStyle: .overlay
         )
+        #elseif os(Windows)
+        return WindowsPreferences.read(contrast: envContrast)
         #else
         return SystemPreferences(contrast: envContrast)
         #endif

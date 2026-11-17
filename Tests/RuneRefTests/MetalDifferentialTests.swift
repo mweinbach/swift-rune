@@ -451,12 +451,14 @@ struct MetalDifferentialTests {
     }
 
     #if os(macOS)
+    private final class TestBundleMarker: NSObject {}
+
     @Test("rune-ref CLI binary supports --scene JSON, --blame, --seed, --save, --diff, and text-run")
     func cliEndToEndInvocation() throws {
-        guard let binaryURL = Self.locateRuneRefBinary() else {
-            Issue.record("rune-ref CLI binary not found near test bundle or /tmp/swift-build-ref/debug/rune-ref")
-            return
-        }
+        let binaryURL = Bundle(for: TestBundleMarker.self).bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("rune-ref")
+        try #require(FileManager.default.isExecutableFile(atPath: binaryURL.path), "Missing CLI at \(binaryURL.path)")
 
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("rune-ref-cli-tests-\(UUID().uuidString)", isDirectory: true)
@@ -769,21 +771,6 @@ struct MetalDifferentialTests {
         let gpuScrolled = try gpu.renderOffscreen(scrolledRF)
         let diffScrolled = Oracle.compare(scene: scrolledOracle, cpu: cpuScrolled, gpu: gpuScrolled.rgba, tolerance: 2)
         #expect(diffScrolled.outlierPixels == 0, "scrolled multi-line text CPU vs GPU: \(diffScrolled)")
-    }
-
-    private static func locateRuneRefBinary() -> URL? {
-        var candidates: [URL] = []
-        for bundle in Bundle.allBundles where bundle.bundleURL.pathExtension == "xctest" {
-            candidates.append(bundle.bundleURL.deletingLastPathComponent().appendingPathComponent("rune-ref"))
-        }
-        let repoRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        candidates.append(repoRoot.appendingPathComponent(".build/arm64-apple-macosx/debug/rune-ref"))
-        candidates.append(repoRoot.appendingPathComponent(".build/x86_64-apple-macosx/debug/rune-ref"))
-        candidates.append(repoRoot.appendingPathComponent(".build/debug/rune-ref"))
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 
     private static func runCLI(binaryURL: URL, arguments: [String]) throws -> (status: Int32, stdout: String, stderr: String) {

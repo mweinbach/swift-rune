@@ -384,17 +384,17 @@ struct Slice4InputWave1Tests {
         // 3. a_held_modifier_then_a_letter_is_the_usual_chord
         do {
             let rt = makeRuntime(true); var t = 0.0
-            let cmd = Mods(cmd: true)
-            _ = modifier(rt, .superLeft, true, .none, t: &t)
-            #expect(rt.state.app[0].mods.cmd)
+            let primary = RuneTestKey.primaryMods()
+            _ = modifier(rt, primary.logo ? .superLeft : .controlLeft, true, .none, t: &t)
+            #expect(rt.state.app[0].mods.primaryCommand)
             #expect(rt.state.chords == 0)
             _ = rt.physicalWithFallback(
-                .key(key: .keyK, mods: cmd, pressed: true, repeat: false),
-                fallbackKey: KeyEvent(key: .command("k"), mods: cmd),
+                .key(key: .keyK, mods: primary, pressed: true, repeat: false),
+                fallbackKey: KeyEvent(key: .command("k"), mods: primary),
                 at: t + 0.01
             )
             _ = rt.frame(at: t + 0.02)
-            #expect(rt.state.app[1] == KeyEvent(key: .command("k"), mods: cmd))
+            #expect(rt.state.app[1] == KeyEvent(key: .command("k"), mods: primary))
             #expect(rt.state.chords == 1)
 
             click(rt, "field", t: &t)

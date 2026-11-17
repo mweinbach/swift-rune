@@ -165,7 +165,7 @@ struct LineClampParityTests {
         rt.pointerDown(at: p, at: 0.5)
         rt.pointerUp(at: p, at: 0.5)
         _ = rt.frame(at: 1.0)
-        _ = rt.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: 1.05)
+        _ = rt.keyDown(KeyEvent(key: .command("a"), mods: RuneTestKey.primaryMods()), at: 1.05)
         _ = rt.frame(at: 1.1)
         #expect(rt.selectedText() == Self.title)
     }

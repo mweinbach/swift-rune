@@ -1,6 +1,8 @@
 import Testing
+#if os(macOS)
 import QuartzCore
 import AppKit
+#endif
 @testable import Rune
 
 @Suite("RunePlatformCloseoutOverlayTests")
@@ -536,6 +538,7 @@ struct RunePlatformCloseoutOverlayTests {
         #expect(OverlayGpuRelease.make(afterSeconds: Self.afterDuration, isMacOS: false) == .after(Self.afterDuration))
     }
 
+    #if os(macOS)
     // MARK: - platform/macos/geometry_tests.rs (1 test)
 
     @Test("geometry: overlay appkit top row belongs to secondary display")
@@ -564,4 +567,5 @@ struct RunePlatformCloseoutOverlayTests {
             #expect(layer.colorspace?.name == CGColorSpace.sRGB)
         }
     }
+    #endif
 }

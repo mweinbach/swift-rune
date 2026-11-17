@@ -1230,59 +1230,22 @@ extension TextEdit {
         pixelScale: Float = 1.0,
         extend: Bool = false
     ) {
-        let lines = textSystem.visualLines(in: shaped)
-        guard !lines.isEmpty else {
+        guard shaped.cursorLineCount > 0 else {
             setCursor(utf8Offset: delta < 0 ? 0 : text.utf8.count, extendSelection: extend)
             return
         }
-        let curLine = textSystem.visualLineIndex(
-            in: shaped,
-            utf8Offset: cursor,
-            upstream: caretAffinity == .upstream
+        let goalX = caretColumn.goal ?? textSystem.caretRect(
+            in: shaped, utf8Offset: cursor, affinity: caretAffinity, pixelScale: pixelScale
+        ).x
+        let landing = textSystem.moveLine(
+            in: shaped, utf8Offset: cursor, delta: delta, goalX: goalX,
+            affinity: caretAffinity, pixelScale: pixelScale
         )
-        let goalX: Float
-        if let kept = caretColumn.goal {
-            goalX = kept
-        } else {
-            let rect = textSystem.caretRect(
-                in: shaped,
-                utf8Offset: cursor,
-                upstream: caretAffinity == .upstream,
-                pixelScale: pixelScale
-            )
-            goalX = rect[0]
-        }
-
-        let targetLine = curLine + delta
-        if targetLine < 0 {
-            setSelectionRaw(anchor: extend ? anchor : 0, cursor: 0)
-            snapToPills()
-            caretColumn = .kept(goalX)
-            caretAffinity = .downstream
-            typingStyle = .inherited
-            return
-        }
-        if targetLine >= lines.count {
-            let end = text.utf8.count
-            setSelectionRaw(anchor: extend ? anchor : end, cursor: end)
-            snapToPills()
-            caretColumn = .kept(goalX)
-            caretAffinity = .downstream
-            typingStyle = .inherited
-            return
-        }
-
-        let rec = lines[targetLine]
-        let sampleY = rec.originY + shaped.lineHeight * 0.5
-        let hit = textSystem.hitTestUTF8Offset(in: shaped, localX: goalX, localY: sampleY, pixelScale: pixelScale)
-        let clamped = hit.clamped(to: rec.utf8Start...rec.utf8End)
-        let nextAffinity: TextAffinity = (clamped == rec.utf8End && targetLine < lines.count - 1 && lines[targetLine + 1].utf8Start == rec.utf8End)
-            ? .upstream
-            : .downstream
-        let finalOffset = outOfPill(snapToGraphemeBoundary(clamped), forward: delta > 0)
+        let byte = landing?.utf8Offset ?? text.utf8.count
+        let finalOffset = outOfPill(snapToGraphemeBoundary(byte), forward: delta > 0)
         setSelectionRaw(anchor: extend ? anchor : finalOffset, cursor: finalOffset)
         caretColumn = .kept(goalX)
-        caretAffinity = nextAffinity
+        caretAffinity = landing?.affinity ?? .downstream
         typingStyle = .inherited
     }
 
@@ -1293,24 +1256,17 @@ extension TextEdit {
         textSystem: TextSystem = TextSystem(),
         extend: Bool = false
     ) {
-        let lines = textSystem.visualLines(in: shaped)
-        guard !lines.isEmpty else {
+        guard shaped.cursorLineCount > 0 else {
             let pos = toEnd ? text.utf8.count : 0
             setCursor(utf8Offset: pos, extendSelection: extend)
             return
         }
-        let lineIdx = textSystem.visualLineIndex(
-            in: shaped,
-            utf8Offset: cursor,
-            upstream: caretAffinity == .upstream
-        )
-        let line = lines[lineIdx]
-        let target = toEnd ? line.utf8End : line.utf8Start
-        let isSoftBoundaryEnd = toEnd && lineIdx < lines.count - 1 && lines[lineIdx + 1].utf8Start == line.utf8End
+        let landing = textSystem.lineEdge(in: shaped, utf8Offset: cursor, toEnd: toEnd, affinity: caretAffinity)
+        let target = snapToGraphemeBoundary(landing.utf8Offset)
         setSelectionRaw(anchor: extend ? anchor : target, cursor: target)
         snapToPills()
         caretColumn = .free
-        caretAffinity = isSoftBoundaryEnd ? .upstream : .downstream
+        caretAffinity = landing.affinity
         typingStyle = .inherited
     }
 }

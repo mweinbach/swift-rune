@@ -385,7 +385,7 @@ struct ElKitcSecureTextParityTests {
         rt.pointerDown(at: Vec2(singleRect[0] + 2, singleRect[1] + 4), at: 0.0)
         rt.pointerMove(to: Vec2(singleRect[0] + 60, singleRect[1] + 4), at: 0.01)
         rt.pointerUp(at: Vec2(singleRect[0] + 60, singleRect[1] + 4), at: 0.02)
-        _ = rt.keyDown(KeyEvent(key: .text("c"), mods: Mods(cmd: true)), at: 0.03)
+        _ = rt.keyDown(KeyEvent(key: .text("c"), mods: RuneTestKey.primaryMods()), at: 0.03)
         #expect(rt.selectedText() == nil)
         #expect(rt.copyRequest == nil)
 
@@ -404,7 +404,7 @@ struct ElKitcSecureTextParityTests {
         rt.pointerDown(at: Vec2(singleRect[0] + 2, singleRect[1] + 4), at: 0.05)
         rt.pointerMove(to: Vec2(singleRect[0] + 60, singleRect[1] + 4), at: 0.06)
         rt.pointerUp(at: Vec2(singleRect[0] + 60, singleRect[1] + 4), at: 0.07)
-        _ = rt.keyDown(KeyEvent(key: .text("c"), mods: Mods(cmd: true)), at: 0.08)
+        _ = rt.keyDown(KeyEvent(key: .text("c"), mods: RuneTestKey.primaryMods()), at: 0.08)
         #expect(rt.selectedText() == nil)
         #expect(rt.copyRequest == nil)
 

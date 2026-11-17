@@ -147,9 +147,7 @@ internal func asciiPrintable(_ s: [UInt8], _ a: Int, _ b: Int) -> Bool {
 internal let paragraphSplitLines = 64
 
 extension TextSystem {
-    #if canImport(CoreText) && canImport(CoreGraphics)
-    /// Printable ASCII in `style` at `scale`, measured once: nil when its characters don't all
-    /// come from one font run, whose one line is then not every ASCII line's (`ascii_line`).
+    /// Printable ASCII in `style` at `scale`, measured once in the active text backend.
     internal func asciiLine(style: TextStyle, scale: Float) -> AsciiLine? {
         let st = paragraphState
         // Reached directly too (not only through `layoutParagraphs`/`fillParagraphs`): it takes
@@ -168,14 +166,21 @@ extension TextSystem {
         let l = layoutKeyed(text: sample, style: ltr, maxWidth: nil, pixelScale: scale, emitGlyphs: false, keep: .owned, countAsRebreak: false)
         let empty = layoutKeyed(text: "", style: ltr, maxWidth: nil, pixelScale: scale, emitGlyphs: false, keep: .owned, countAsRebreak: false)
         let measured: AsciiLine? = {
+            let bytes = Array(sample.utf8)
+            #if canImport(CoreText) && canImport(CoreGraphics)
             guard l.shaped.lineStrings.count == 1, let line = l.shaped.lineStrings[0].ctLine else { return nil }
             guard let runs = CTLineGetGlyphRuns(line) as? [CTRun], runs.count == 1 else { return nil }
-            let bytes = Array(sample.utf8)
+            func offsetPx(_ index: Int) -> Float { Float(CTLineGetOffsetForStringIndex(line, index, nil)) }
+            #else
+            guard l.shaped.portableLines.count == 1, let line = l.shaped.portableLines.first,
+                  line.charOffsets.count == bytes.count + 1 else { return nil }
+            // Native and bitmap lines store caret edges in points. Unstyled portable lines
+            // keep the primary font's line box even when a glyph needs a fallback face.
+            func offsetPx(_ index: Int) -> Float { line.charOffsets[index] * scale }
+            #endif
             var advance = [Float](repeating: .nan, count: 95)
-            for i in 0..<bytes.count {
-                let x0 = Float(CTLineGetOffsetForStringIndex(line, i, nil))
-                let x1 = Float(CTLineGetOffsetForStringIndex(line, i + 1, nil))
-                advance[Int(bytes[i] - 0x20)] = x1 - x0
+            for i in bytes.indices {
+                advance[Int(bytes[i] - 0x20)] = offsetPx(i + 1) - offsetPx(i)
             }
             guard advance.allSatisfy({ $0.isFinite }) else { return nil }
             let height = (l.shaped.lineTopPt(0) + l.shaped.lineBoxHeightPt(0)) * scale
@@ -257,8 +262,9 @@ extension TextSystem {
             var pstyle = lazy.style
             pstyle.direction = p.flow
             st.shapedParagraphs += 1
-            let l = layoutKeyed(text: String(decoding: lazy.content[p.start..<p.end], as: UTF8.self), style: pstyle, maxWidth: laid.maxWidth, pixelScale: lazy.scale, emitGlyphs: false, keep: .owned, countAsRebreak: false)
-            let (h, widths) = Self.paragraphMeasures(l, scale: lazy.scale)
+            let textEnd = paragraphTextEnd(lazy.content, p.start, p.end)
+            let l = layoutKeyed(text: String(decoding: lazy.content[p.start..<textEnd], as: UTF8.self), style: pstyle, maxWidth: laid.maxWidth, pixelScale: lazy.scale, emitGlyphs: false, keep: .owned, countAsRebreak: false)
+            let (h, widths) = Self.measures(l, blank: p.start == textEnd, scale: lazy.scale, linePx: l.shaped.lineHeight * lazy.scale)
             moved = moved || h != p.height
             paragraphs[k].height = h
             paragraphs[k].widths = widths
@@ -284,19 +290,6 @@ extension TextSystem {
         return (built, moved)
     }
 
-    fileprivate static func paragraphMeasures(_ box: TextLayoutBox, scale: Float) -> (Float, SIMD2<Float>) {
-        let s = box.shaped
-        let n = s.lineStrings.count
-        let h: Float = n == 0 ? s.lineHeight * scale : (s.lineTopPt(n - 1) + s.lineBoxHeightPt(n - 1)) * scale
-        var w: Float = 0
-        var full: Float = 0
-        for a in s.lineAdvancesPx {
-            w = max(w, max(0, a.widthPx - a.trailingWsPx))
-            full = max(full, a.widthPx)
-        }
-        return (h, SIMD2(w, full))
-    }
-    #endif
 }
 
 /// Run `k` taken apart where `rows` meet it, or at its end nearest them: its lines there as
@@ -327,6 +320,7 @@ internal func splitRun(_ lazy: LazyFill, maxWidth: Float?, paragraphs: [Paragrap
         var e = at
         while e < r.end && content[e] != 0x0a { e += 1 }
         let s = at
+        let textEnd = paragraphTextEnd(content, s, e)
         at = e + 1
         // Printable ASCII, as every line of a run is: its letters are its strong characters.
         var hasLetter = false
@@ -334,7 +328,7 @@ internal func splitRun(_ lazy: LazyFill, maxWidth: Float?, paragraphs: [Paragrap
         flow = lazy.forced ?? (hasLetter ? .ltr : flow)
         if j < a || j >= b {
             let floor = run?.widest ?? 0
-            let w = lazy.ascii.oneLine(content, s, e, maxWidth: maxWidth, floor: floor, printableKnown: true).map { $0.1 } ?? floor
+            let w = lazy.ascii.oneLine(content, s, textEnd, maxWidth: maxWidth, floor: floor, printableKnown: true).map { $0.1 } ?? floor
             let (start, lines, widest) = run.map { ($0.start, $0.lines + 1, max($0.widest, w)) } ?? (s, 1, w)
             run = (start, lines, widest)
             if j + 1 == a || j + 1 == n {
@@ -358,7 +352,7 @@ internal func splitRun(_ lazy: LazyFill, maxWidth: Float?, paragraphs: [Paragrap
         hs.combine(lazy.styleKey)
         hs.combine(flow == .rtl)
         hs.combine("p")
-        let (height, w) = lazy.ascii.oneLine(content, s, e, maxWidth: maxWidth, floor: 0, printableKnown: true) ?? (h, 0)
+        let (height, w) = lazy.ascii.oneLine(content, s, textEnd, maxWidth: maxWidth, floor: 0, printableKnown: true) ?? (h, 0)
         out.append(Paragraph(start: s, end: e, y: Float(y.rounded()), height: height, widths: SIMD2(w, w), flow: flow, key: UInt64(bitPattern: Int64(hs.finalize())), layout: r.layout, shaped: false, lines: 1, run: false))
         y += Double(height)
         j += 1

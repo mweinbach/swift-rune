@@ -241,9 +241,12 @@ struct ToolingHTMLAndHeadlessTests {
         defer { ToolingProcessArgs.resetForTesting() }
 
         let split = ToolingProcessArgs.parseSplit([
-            "my-app", "--snap", "shot.png", "--custom-flag", "value", "--fps", "30", "positional",
+            "my-app", "--snap", "shot.png", "--cpu", "--gpu", "--custom-flag", "value", "--fps", "30", "positional",
         ])
         #expect(split.known.snapPath == "shot.png")
+        #expect(split.known.requireGPU && !split.known.forceCPU)
+        let cpu = ToolingArgs.parse(["my-app", "--gpu", "--cpu"])
+        #expect(cpu.forceCPU && !cpu.requireGPU)
         #expect(split.known.fps == 30.0)
         #expect(split.extra == ["my-app", "--custom-flag", "value", "positional"])
         #expect(ToolingProcessArgs.isHeadless(argv: ["my-app", "--snap", "shot.png"]))

@@ -40,7 +40,7 @@ extension Runtime {
         }
         let caretW: Float = 1.5
         let byteOff = displayCaretByteOffset(for: edit, showingPlaceholder: showingPlaceholder)
-        let cx = textSystem.caretRect(in: shaped, utf8Offset: byteOff, pixelScale: pixelScale).x
+        let cx = textSystem.caretRect(in: shaped, utf8Offset: byteOff, affinity: edit.caretAffinity, pixelScale: pixelScale).x
         let fullW = shaped.size.x
         var scroll = inputMachines.inputScroll[path] ?? 0.0
         let visible = max(0.0, innerWidthPt)

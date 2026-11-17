@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneRef
 
 /// Pure-Swift cross-platform 8x16 bitmap font, text shaper, and SVG icon rasterizer.

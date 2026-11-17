@@ -32,7 +32,7 @@ struct TextEditInputParityTests {
 
         let wrapped = ts.shapePortable(
             text: "abcdefghij",
-            style: style,
+            style: style.wrapAnywhere(),
             maxWidth: 32,
             pixelScale: 2.0,
             emitGlyphs: true
@@ -79,6 +79,14 @@ struct TextEditInputParityTests {
         #expect(modS.matches(syntheticMacEvent, on: .mac))
         #expect(superS.matches(realMacEvent, on: .mac))
         #expect(modS.sameKeys(cmdS, on: .mac))
+
+        let controlS = KeyEvent(key: .command("s"), mods: Mods(ctrl: true))
+        let superKeyS = KeyEvent(key: .text("s"), mods: Mods(logo: true))
+        for platform in [KeyPlatform.windows, .linux] {
+            #expect(modS.matches(controlS, on: platform))
+            #expect(!cmdS.matches(controlS, on: platform))
+            #expect(cmdS.matches(superKeyS, on: platform))
+        }
 
         let modB = Chord(parsing: "mod+b")!
         let ctrlB = Chord(parsing: "ctrl+b")!

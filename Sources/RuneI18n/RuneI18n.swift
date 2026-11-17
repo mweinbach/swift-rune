@@ -928,9 +928,7 @@ public struct I18n: Sendable {
     /// Formats `items` as the current locale's long conjunction list (`a, b, and c`).
     public func list(_ items: [String]) -> String {
         if items.isEmpty { return "" }
-        let formatter = ListFormatter()
-        formatter.locale = Locale(identifier: currentLocale.tag)
-        return formatter.string(from: items) ?? items.joined(separator: ", ")
+        return items.formatted(.list(type: .and).locale(Locale(identifier: currentLocale.tag)))
     }
 
     /// Formats `n` in compact notation (`1.2K`, `3.4M`, `5.6B`, `1.2T`) using the current locale's decimal separator.

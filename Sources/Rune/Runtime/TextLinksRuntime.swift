@@ -1,5 +1,4 @@
 import Foundation
-import simd
 
 /// Identifies a specific UTF-8 link range within a text element by path and index.
 internal struct TextLinkTarget: Sendable, Equatable {
@@ -25,7 +24,7 @@ internal struct TextLinkBox: Sendable {
     var sliceText: String
 }
 
-/// Optional ink color override per link byte range returned to glyph emission in `buildRefScene`.
+/// Optional ink color override per link byte range returned to glyph emission.
 internal struct TextLinkInkRange {
     var color: Color
     var rects: [SIMD4<Float>]
@@ -59,7 +58,7 @@ internal extension Runtime {
     }
 
     /// Computes per-link geometry, records help hits and hit boxes, and emits `LinkPaint`
-    /// backgrounds, underlines, and rings for a text element during `buildRefScene`.
+    /// backgrounds, underlines, and rings in the same shaped coordinates as the glyphs.
     func recordAndEmitTextLinks(
         snap: FlatNode,
         el: El<State>,
@@ -72,21 +71,16 @@ internal extension Runtime {
         textOriginY: Float,
         scaleVec: Vec2,
         pxScale: Float,
+        shapeScale: Float,
         localAlpha: Float,
         defaultTextColor: Color,
-        defaultRingOutline: Outline?,
-        forceFocusRings: Bool,
         isFocused: Bool,
         isExiting: Bool,
         shouldEmit: Bool,
         visClip: MotionRect,
-        devClip: SIMD4<Float>,
-        useLayer: Bool,
-        effRotate: Float,
-        into primitives: inout [Primitive],
         linkBoxes: inout [String: [TextLinkBox]],
-        helpHits: inout [HelpHitRecord],
-        interactiveHits: inout [HelpInteractiveHitRecord]
+        recordHit: (_ link: TextLink, _ index: Int, _ edges: SIMD4<Float>) -> Void = { _, _, _ in },
+        emitRect: (_ rect: SIMD4<Float>, _ radius: Float, _ fill: Color, _ border: Color, _ width: Float) -> Void
     ) -> [TextLinkInkRange] {
         guard hasActiveTextLinks(el), !isExiting else { return [] }
         let rawString = authoredText ?? text
@@ -96,7 +90,6 @@ internal extension Runtime {
 
         let targetOriginX = snap.targetRect.x + el.layout.padding.left
         let targetOriginY = snap.targetRect.y + el.layout.padding.top
-        let rot = useLayer ? 0 : effRotate
 
         var nodeBoxes: [TextLinkBox] = []
         var inkRanges: [TextLinkInkRange] = []
@@ -120,7 +113,7 @@ internal extension Runtime {
             let b = max(a, min(link.byteRange.upperBound, drawnLen))
             guard a < b else { continue }
             let shapeRange = (elided != nil) ? (a..<b) : (caseMap?.displayedRange(forSourceUTF8Range: a..<b) ?? (a..<b))
-            let localBoxes = textSystem.selectionRects(in: shaped, utf8Range: shapeRange, pixelScale: pxScale)
+            let localBoxes = textSystem.selectionRects(in: shaped, utf8Range: shapeRange, pixelScale: shapeScale)
             guard !localBoxes.isEmpty else { continue }
 
             var winRects: [SIMD4<Float>] = []
@@ -145,19 +138,7 @@ internal extension Runtime {
                 if vis.width > 0 && vis.height > 0 {
                     visUnion = unionXYWH(visUnion, SIMD4<Float>(vis.x, vis.y, vis.width, vis.height))
                     if !snap.effectiveInert && el.opacity > 0.001 {
-                        let hitRect4 = SIMD4<Float>(vis.x, vis.y, vis.right, vis.bottom)
-                        if let helpText = link.help, !helpText.isEmpty {
-                            helpHits.append(HelpHitRecord(
-                                path: snap.path,
-                                key: link.id,
-                                rect: hitRect4,
-                                seq: interactiveHits.count,
-                                text: runeHelpWords(helpText),
-                                side: el.helpSide,
-                                linkIndex: k
-                            ))
-                        }
-                        interactiveHits.append(HelpInteractiveHitRecord(path: snap.path, rect: hitRect4))
+                        recordHit(link, k, SIMD4(vis.x, vis.y, vis.right, vis.bottom))
                     }
                 }
             }
@@ -217,62 +198,24 @@ internal extension Runtime {
             }
 
             if let bg = paint.background {
-                let bgColor = bg.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                for r in localBoxes where r.z > 0 && r.w > 0 {
-                    primitives.append(.roundedRect(
-                        rect: SIMD4<Float>(
-                            (textOriginX + r.x * scaleVec.x) * pxScale,
-                            (textOriginY + r.y * scaleVec.y) * pxScale,
-                            r.z * scaleVec.x * pxScale,
-                            r.w * scaleVec.y * pxScale
-                        ),
-                        radii: SIMD4<Float>(repeating: 3.0 * pxScale),
-                        fill: bgColor,
-                        clip: devClip,
-                        turn: rot
-                    ))
+                for rect in winRects {
+                    emitRect(rect * pxScale, 3 * pxScale, bg, .transparent, 0)
                 }
             }
-
             if paint.underline == true {
-                let ulColor = (paint.color ?? fallbackUnderlineColor ?? defaultTextColor).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                let ulThickness = max(1.0, 1.0 * scaleVec.y * pxScale)
-                for r in localBoxes where r.z > 0 && r.w > 0 {
-                    let ulY = (textOriginY + (r.y + r.w) * scaleVec.y) * pxScale - ulThickness * 1.5
-                    primitives.append(.roundedRect(
-                        rect: SIMD4<Float>(
-                            (textOriginX + r.x * scaleVec.x) * pxScale,
-                            ulY,
-                            r.z * scaleVec.x * pxScale,
-                            ulThickness
-                        ),
-                        radii: .zero,
-                        fill: ulColor,
-                        clip: devClip,
-                        turn: rot
-                    ))
+                let color = paint.color ?? fallbackUnderlineColor ?? defaultTextColor
+                let width = max(1, scaleVec.y * pxScale)
+                for rect in winRects {
+                    let bounds = rect * pxScale
+                    let line = SIMD4(bounds.x, bounds.y + bounds.w - 1.5 * width, bounds.z, width)
+                    emitRect(line, 0, color, .transparent, 0)
                 }
             }
-
             if let ring = paint.ring {
-                let ringColor = ring.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                let ringW = max(1.0, ring.width * pxScale)
-                let padPx = 1.5 * pxScale
-                for r in localBoxes where r.z > 0 && r.w > 0 {
-                    primitives.append(.roundedRect(
-                        rect: SIMD4<Float>(
-                            (textOriginX + r.x * scaleVec.x) * pxScale - padPx,
-                            (textOriginY + r.y * scaleVec.y) * pxScale - padPx,
-                            r.z * scaleVec.x * pxScale + padPx * 2.0,
-                            r.w * scaleVec.y * pxScale + padPx * 2.0
-                        ),
-                        radii: SIMD4<Float>(repeating: 3.0 * pxScale),
-                        fill: .zero,
-                        borderColor: ringColor,
-                        borderWidth: ringW,
-                        clip: devClip,
-                        turn: rot
-                    ))
+                let pad = 1.5 * pxScale
+                for rect in winRects {
+                    let bounds = rect * pxScale + SIMD4(-pad, -pad, 2 * pad, 2 * pad)
+                    emitRect(bounds, 3 * pxScale, .transparent, ring.color, max(1, ring.width * pxScale))
                 }
             }
 
@@ -325,7 +268,7 @@ internal extension Runtime {
                     && pressedLink?.linkIndex == box.linkIndex
                     && pressedLink?.button == .primary
                     && linkIndex(atPath: parent.path, at: pointerPosition) == box.linkIndex
-                let words: String? = (parent.text != nil && !parent.secure) ? box.sliceText : nil
+                let words = parent.secure ? nil : box.sliceText
 
                 infos.append(ElementInfo(
                     path: "\(parent.path)#link-\(box.linkIndex)",

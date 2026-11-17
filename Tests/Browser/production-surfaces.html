@@ -1,0 +1,238 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune production frame surface and layer integration</title>
+<canvas></canvas>
+<pre id="result">Running…</pre>
+<script type="module">
+import { RuneWebGL, loadRuneShaders, makeProgram } from '../../Sources/Rune/Resources/Web/rune-webgl.mjs';
+
+const width = 32, height = 16, clip = [0, 0, width, height];
+function instance(kind, rect, color, crop = clip) {
+    const p = new Float32Array(32);
+    p.set(rect);
+    p.set(color, 8);
+    p[17] = kind;
+    p.set(crop, 24);
+    return p;
+}
+const layer = instance(8, [0, 0, 18, 16], [0, 0, 0, 0.5], [2, 2, 18, 13]);
+layer[16] = 1; // Additive group. Both geometry and surface draws contribute.
+layer[31] = 3; // Packed uniform clip radius, float bit pattern.
+const instances = [
+    instance(0, clip, [1, 0, 0, 1]), layer,
+    instance(0, [0, 0, 18, 16], [0, 0.5, 0, 0.5]),
+    instance(0, [8, 4, 3, 6], [1, 1, 1, 1]),
+    instance(9, clip, [0, 0, 0, 0])
+];
+function surface(before, key, revision, rect, format, primary, chroma = []) {
+    const planes = new Uint8Array(248 + primary.length + chroma.length);
+    const header = new Uint32Array(planes.buffer, 0, 10);
+    header.set([before, key, 1, revision, 0, 2, 2, format, primary.length, chroma.length]);
+    const uniforms = new Float32Array(planes.buffer, 40, 52);
+    uniforms.set([width, height, 0, 0]);
+    uniforms.set(rect, 4);
+    uniforms.set(rect, 8);
+    uniforms.set(clip, 16);
+    uniforms.set([format, 1, 2, 1], 28);
+    uniforms.set([0, 2, 2, 0], 32);
+    uniforms.set([1, 0, 0, 1], 36);
+    planes.set(primary, 248);
+    planes.set(chroma, 248 + primary.length);
+    return planes;
+}
+function packet(index) {
+    const initial = index === 0, replaced = index === 2;
+    const pixel = replaced ? [0, 255, 0, 128] : [255, 0, 0, 128];
+    const revision = replaced ? 2 : 1;
+    const surfaces = [
+        surface(3, 1, revision, [0, 0, 18, 16], 0, initial || replaced ? Array(4).fill(pixel).flat() : []),
+        surface(5, 1, revision, [19, 1, 6, 7], 0, []),
+        surface(0xffffffff, 2, 1, [24, 8, 8, 8], 2, initial ? [128, 128, 128, 128] : [], initial ? [128, 128] : [])
+    ];
+    const atlases = initial ? [0, 255, 255, 255, 255] : [];
+    const bytes = new Uint8Array(56 + instances.length * 128 + atlases.length + surfaces.reduce((s, p) => s + p.length, 0));
+    const header = new Uint32Array(bytes.buffer, 0, 14);
+    header.set([0x32475352, width, height, initial ? 7 : 1, instances.length, 1, 1, 1, 1]);
+    new Float32Array(bytes.buffer, 36, 4).set([0, 0, 0, 1]);
+    header[13] = surfaces.length;
+    let offset = 56;
+    for (const p of instances) {
+        bytes.set(new Uint8Array(p.buffer), offset);
+        offset += 128;
+    }
+    bytes.set(atlases, offset);
+    offset += atlases.length;
+    for (const s of surfaces) {
+        bytes.set(s, offset);
+        offset += s.length;
+    }
+    return bytes;
+}
+const result = document.querySelector('#result');
+let renderer;
+try {
+    const shaders = await loadRuneShaders();
+    let effect, va, vbo, rejectEffect = false;
+    function drawEffect(site) {
+        const { gl } = site;
+        if (!site.backdrop || site.index !== 0 || site.mark !== 0x1234abcd || site.data[0] !== 13
+            || gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) !== site.framebuffer) throw Error('Wrong effect site');
+        if (rejectEffect) {
+            gl.disable(gl.SCISSOR_TEST);
+            gl.clearColor(0, 1, 0, 1);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            return false;
+        }
+        effect = makeProgram(gl, shaders['fullscreen.vert'],
+            'uniform sampler2D background; out vec4 color; void main() { color = texelFetch(background, ivec2(gl_FragCoord.xy), 0).brga; }');
+        gl.useProgram(effect.program);
+        va = gl.createVertexArray();
+        gl.bindVertexArray(va);
+        vbo = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 1, 2]), gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(9);
+        gl.vertexAttribPointer(9, 1, gl.FLOAT, false, 0, 0);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, site.backdrop);
+        gl.uniform1i(effect.uniforms.background, 0);
+        gl.disable(gl.SCISSOR_TEST);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        gl.colorMask(false, false, false, false);
+    }
+    let submitted = 0;
+    const completed = [];
+    const surfaceTiming = {
+        submitted: () => ++submitted,
+        completed: (token, success) => completed.push([token, success])
+    };
+    renderer = new RuneWebGL(document.querySelector('canvas'), shaders, { drawEffect, surfaceTiming });
+    const gl = renderer.gl;
+    const expectPixel = (x, y, expected) => {
+        const actual = new Uint8Array(4);
+        gl.readPixels(x, height - 1 - y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, actual);
+        if (actual.some((v, i) => Math.abs(v - expected[i]) > 2)) {
+            throw Error(`Pixel (${x}, ${y}) = ${actual}, expected ${expected}`);
+        }
+    };
+    for (let frame = 0; frame < 3; frame++) {
+        const data = packet(frame);
+        renderer.draw(data.buffer, 0, data.length);
+        renderer.frameRenderer.submitSurfaceTiming();
+        renderer.frameRenderer.submitSurfaceTiming();
+        expectPixel(5, 6, frame === 2 ? [128, 128, 0, 255] : [128, 64, 64, 255]);
+        expectPixel(9, 6, [255, 128, 128, 255]);
+        expectPixel(1, 1, [255, 0, 0, 255]);
+        expectPixel(2, 2, [255, 0, 0, 255]);
+        expectPixel(21, 4, frame === 2 ? [127, 128, 0, 255] : [127, 0, 128, 255]);
+        expectPixel(28, 12, [128, 128, 128, 255]);
+        if (gl.getError() !== gl.NO_ERROR) throw Error('WebGL reported a draw error');
+    }
+    // A production RenderFrame already premultiplies the clear color.
+    const clearOnly = new ArrayBuffer(56);
+    new Uint32Array(clearOnly).set([0x32475352, width, height, 1, 0, 1, 1, 1, 1]);
+    new Float32Array(clearOnly, 36, 4).set([0.25, 0.125, 0.5, 0.5]);
+    renderer.draw(clearOnly, 0, clearOnly.byteLength);
+    renderer.frameRenderer.submitSurfaceTiming();
+    expectPixel(20, 4, [128, 64, 255, 128]);
+    const effectFrame = new ArrayBuffer(56 + 128 * 2);
+    new Uint32Array(effectFrame, 0, 14).set([0x32475352, width, height, 1, 2, 1, 1, 1, 1]);
+    new Float32Array(effectFrame, 36, 4).set([1, 0, 0, 1]);
+    const hook = instance(12, [3, 3, 9, 6], [0, 0, 0, 1], [4, 3, 10, 9]);
+    hook.set([0xabcd, 0x1234], 12);
+    hook.set([1, 12, 0, 1], 16);
+    hook[20] = 13;
+    new Float32Array(effectFrame, 56, 32).set(hook);
+    new Float32Array(effectFrame, 184, 32).set(instance(0, [6, 5, 2, 2], [0, 0, 1, 1]));
+    renderer.draw(effectFrame, 0, effectFrame.byteLength);
+    expectPixel(3, 4, [255, 0, 0, 255]);
+    expectPixel(5, 4, [0, 255, 0, 255]);
+    expectPixel(7, 6, [0, 0, 255, 255]);
+    if (gl.getError() !== gl.NO_ERROR) throw Error('WebGL reported an effect draw error');
+    rejectEffect = true;
+    renderer.draw(effectFrame, 0, effectFrame.byteLength);
+    expectPixel(3, 4, [255, 0, 0, 255]);
+    expectPixel(5, 4, [255, 0, 0, 255]);
+    expectPixel(7, 6, [0, 0, 255, 255]);
+    gl.deleteProgram(effect.program);
+    gl.deleteBuffer(vbo);
+    gl.deleteVertexArray(va);
+    // All source pixels begin left of the window. Rotation puts them back on screen.
+    const rotated = instance(8, [-12, 4, 6, 6], [0, 0, 0, 1]);
+    rotated.set([0, Math.PI, 0, 8], 12);
+    const sprite = surface(1, 9, 1, [-12, 4, 6, 6], 3, Array(4).fill([32, 180, 240, 255]).flat());
+    new Float32Array(sprite.buffer, 40, 52).set([-1000, -1000, 1000, 1000], 16);
+    const offscreen = new ArrayBuffer(56 + 256 + sprite.byteLength);
+    new Uint32Array(offscreen, 0, 14).set([0x32475352, width, height, 1, 2, 1, 1, 1, 1, 0, 0, 0, 0, 1]);
+    new Float32Array(offscreen, 56, 32).set(rotated);
+    new Float32Array(offscreen, 184, 32).set(instance(9, clip, [0, 0, 0, 0]));
+    new Uint8Array(offscreen, 312).set(sprite);
+    renderer.draw(offscreen, 0, offscreen.byteLength);
+    renderer.frameRenderer.submitSurfaceTiming();
+    expectPixel(8, 8, [32, 180, 240, 255]);
+    expectPixel(4, 8, [0, 0, 0, 0]);
+
+    function geometryFrame(primitives) {
+        const buffer = new ArrayBuffer(56 + primitives.length * 128);
+        new Uint32Array(buffer, 0, 14).set([0x32475352, width, height, 1, primitives.length, 1, 1, 1, 1]);
+        primitives.forEach((p, i) => new Float32Array(buffer, 56 + 128 * i, 32).set(p));
+        renderer.draw(buffer, 0, buffer.byteLength);
+    }
+    function cached(x, node, version) {
+        const p = instance(8, [x, 3.25, 6.5, 5.25], [0, 0, 0, 1]);
+        p.set([node, 0xcafe, 2, 0xabcd], 4);
+        p.set([version, 0x4567, 0x789a, 0xabcd], 20);
+        p[19] = 1;
+        return p;
+    }
+    function expectResident(node, version, full = false) {
+        const got = renderer.frameRenderer.takeCachedLayers(full);
+        const expected = [0xcafe0000 + node, 0xabcd0002, 0x45670000 + version, 0xabcd789a];
+        if (got?.length !== 4 || got.some((v, i) => v !== expected[i])) {
+            throw Error(`Wrong resident layers ${got}; expected ${expected}`);
+        }
+    }
+    const end = instance(9, clip, [0, 0, 0, 0]);
+    const original = cached(2.25, 7, 11), shifted = cached(20.25, 7, 11);
+    const green = instance(0, [2, 3, 7, 6], [0, 1, 0, 1]);
+    const red = instance(0, [2, 3, 7, 6], [1, 0, 0, 1]);
+    const fills = renderer.frameRenderer.cache;
+    // Size the budget for exactly one outward-rounded 7x6 tile.
+    fills.budget = 7 * 6 * (renderer.floatTargets ? 8 : 4);
+    geometryFrame([original, green, end]);
+    expectResident(7, 11);
+    if (renderer.frameRenderer.takeCachedLayers() !== null) throw Error('Unchanged cache republished');
+    expectPixel(4, 5, [0, 255, 0, 255]);
+    geometryFrame([shifted, end]);
+    expectPixel(22, 5, [0, 255, 0, 255]);
+    expectPixel(4, 5, [0, 0, 0, 0]);
+    if (fills.hits !== 1) throw Error('Moved layer was rerasterized');
+    expectResident(7, 11, true);
+    // The earlier new candidate may not evict a tile requested later this frame.
+    geometryFrame([cached(2.25, 3, 42), red, end, shifted, end]);
+    expectPixel(4, 5, [255, 0, 0, 255]);
+    expectPixel(22, 5, [0, 255, 0, 255]);
+    expectResident(7, 11, true);
+    // With the original absent it is evicted, and changing a signature repaints.
+    geometryFrame([cached(2.25, 3, 42), red, end]);
+    expectResident(3, 42);
+    geometryFrame([cached(2.25, 3, 43), green, end]);
+    expectResident(3, 43);
+    expectPixel(4, 5, [0, 255, 0, 255]);
+    // Production frames support nested groups beyond the reference renderer's eight.
+    const group = instance(8, [1, 1, 16, 12], [0, 0, 0, 1]);
+    geometryFrame([...Array(12).fill(group), red, ...Array(12).fill(end)]);
+    expectPixel(4, 5, [255, 0, 0, 255]);
+    if (gl.getError() !== gl.NO_ERROR) throw Error('WebGL reported a retained-layer draw error');
+    const deadline = performance.now() + 3000;
+    while (completed.length < 4 && performance.now() < deadline) await new Promise(done => setTimeout(done, 8));
+    if (submitted !== 4 || JSON.stringify(completed) !== '[[1,true],[2,true],[3,true],[4,true]]') {
+        throw Error(`Wrong surface fence reports: ${submitted} submitted, ${JSON.stringify(completed)} completed`);
+    }
+    result.textContent = 'PASS ' + JSON.stringify(renderer.info);
+} catch (error) {
+    result.textContent = 'FAIL ' + error.stack;
+} finally {
+    renderer?.dispose();
+}
+</script>

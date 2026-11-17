@@ -139,7 +139,7 @@ public func backgroundCapsuleView(_ s: BackgroundState, _ cx: inout Cx<Backgroun
                 .hover(t.hover)
                 .onClick { state, _ in
                     state.capsulePresses += 1
-                    fputs("background: capsule pressed \(state.capsulePresses)\n", stderr)
+                    RuneStandardIO.error("background: capsule pressed \(state.capsulePresses)\n")
                 }
                 .child(text("Press").font(Tok.Typography.label).color(t.text))
         )
@@ -184,11 +184,11 @@ public enum RuneBackgroundApp {
         .onKey(onBackgroundKey)
         .onClose { state, _ in
             state.closes += 1
-            fputs("background: window closed; still running\n", stderr)
+            RuneStandardIO.error("background: window closed; still running\n")
             return true
         }
         .onWindow { window in
-            fputs("background: native window \(window.title) (number: \(String(describing: window.windowNumber)))\n", stderr)
+            RuneStandardIO.error("background: native window \(window.title) (number: \(String(describing: window.windowNumber)))\n")
         }
         .scene("ticked") { state, _ in
             state.ticks = 42
@@ -278,7 +278,7 @@ public enum RuneBackgroundApp {
                     case ("close", _): commands.close()
                     case ("quit", _): commands.quit()
                     case ("status", _):
-                        fputs("background: visible \(commands.isVisible), window error \(String(describing: commands.windowError))\n", stderr)
+                        RuneStandardIO.error("background: visible \(commands.isVisible), window error \(String(describing: commands.windowError))\n")
                     case ("dock", let on?):
                         #if os(macOS)
                         let showDock = (on == "on")
@@ -295,23 +295,20 @@ public enum RuneBackgroundApp {
                     case ("hud", "top"): hud?.setEdge(.top)
                     case ("hud", "bottom"): hud?.setEdge(.bottom)
                     case ("hud", "status"):
-                        fputs(
-                            "background: hud \(String(describing: hud?.availability)), visible \(String(describing: hud?.isVisible)), windowNumber \(String(describing: hud?.windowNumber))\n",
-                            stderr
+                        RuneStandardIO.error(
+                            "background: hud \(String(describing: hud?.availability)), visible \(String(describing: hud?.isVisible)), windowNumber \(String(describing: hud?.windowNumber))\n"
                         )
                     case ("capsule", "show"): capsule?.show()
                     case ("capsule", "hide"): capsule?.hide()
                     case ("capsule", "left"): capsule?.setAlign(.start, inset: 12.0)
                     case ("capsule", "wide"): capsule?.resize(Vec2(320, 48))
                     case ("capsule", "status"):
-                        fputs(
-                            "background: capsule \(String(describing: capsule?.availability)), visible \(String(describing: capsule?.isVisible)), windowNumber \(String(describing: capsule?.windowNumber))\n",
-                            stderr
+                        RuneStandardIO.error(
+                            "background: capsule \(String(describing: capsule?.availability)), visible \(String(describing: capsule?.isVisible)), windowNumber \(String(describing: capsule?.windowNumber))\n"
                         )
                     default:
-                        fputs(
-                            "background: unknown command \(cmd) (open | show | hide | focus | position X Y | activate TOKEN | close | dock on|off | hud show|hide|top|bottom|recording|transcribing|status | capsule show|hide|left|wide|status | quit)\n",
-                            stderr
+                        RuneStandardIO.error(
+                            "background: unknown command \(cmd) (open | show | hide | focus | position X Y | activate TOKEN | close | dock on|off | hud show|hide|top|bottom|recording|transcribing|status | capsule show|hide|left|wide|status | quit)\n"
                         )
                     }
                 }

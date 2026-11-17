@@ -240,9 +240,9 @@ public struct Select<State> {
                         closeCb?(&s, &tx)
                         tx.focus(anchorKey)
                         return true
-                    case .tab where !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt:
+                    case .tab where !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt && !ev.mods.logo:
                         return closeCb != nil
-                    case .text(let ch) where !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt:
+                    case .text(let ch) where !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt && !ev.mods.logo:
                         let needle = ch.lowercased()
                         if let matchIdx = (1...opts.count).map({ (i + $0) % opts.count }).first(where: {
                             opts[$0].label.lowercased().hasPrefix(needle)

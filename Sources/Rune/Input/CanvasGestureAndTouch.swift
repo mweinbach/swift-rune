@@ -226,39 +226,52 @@ extension Runtime {
                     applyManualScroll(path: path, to: cur, at: now)
                 }
             }
-        } else {
-            guard dy != 0 else { return }
-            guard let (hitNode, _) = hitTest(at: targetPos, ignoreBlockers: true, predicate: {
-                $0.el.layout.scrollAxes.contains(.vertical) || !$0.el.layout.scrollAxes.isEmpty
-            }) else {
-                return
-            }
-            var walkIdx: Int? = hitNode.index
-            while let i = walkIdx {
-                let scrollNode = flatNodes[i]
-                // `scroll_at`: a viewport whose content fits vertically is passed over (#1021).
-                if !scrollNode.effectiveInert && scrollNode.el.layout.scrollAxes.contains(.vertical) && scrollHasRoom(scrollNode.path, axis: .vertical) {
-                    let path = scrollNode.path
-                    let maxExt = scrollMaxExtents[path] ?? .zero
-                    let prev = scrollOffsets[path] ?? .zero
-                    var cur = prev
-                    cur.y = (cur.y - dy).clamped(to: 0...maxExt.y)
-                    if maxExt.y - cur.y <= 2.0 {
-                        wasPinnedToBottom.insert(path)
-                    } else {
-                        wasPinnedToBottom.remove(path)
-                    }
-                    if cur != prev {
-                        if dy != 0 {
-                            logEvent(String(format: "wheel %.1f", dy))
-                        }
-                        applyManualScroll(path: path, to: cur, at: now)
-                        return
-                    }
-                }
-                walkIdx = flatNodes[i].parentIndex
+        } else if dy != 0 {
+            scrollVerticalWheel(dy: dy, at: targetPos, now: now)
+        }
+    }
+
+    /// A fresh wheel run starts in the innermost eligible viewport with room in its direction.
+    private func verticalWheelTarget(dy: Float, at point: Vec2) -> Int? {
+        for i in flatNodes.indices.reversed() {
+            let node = flatNodes[i]
+            guard node.el.layout.scrollAxes.contains(.vertical), hoverAllowed(i), !subtreeExiting(i),
+                  let limit = scrollMaxExtents[node.path]?.y else { continue }
+            let offset = scrollOffsets[node.path]?.y ?? 0
+            if (dy > 0 ? offset > 0 : offset < limit), nodeContainsGesturePoint(i, point) {
+                return i
             }
         }
+        return nil
+    }
+
+    private func scrollVerticalWheel(dy: Float, at point: Vec2, now: Double) {
+        let held = inputMachines.wheelLock.verticalTarget(at: now, x: point.x, y: point.y, dy: dy).flatMap { path -> Int? in
+            guard let i = nodeByPath[path], !flatNodes[i].el.layout.scrollAxes.isEmpty,
+                  hoverAllowed(i), !subtreeExiting(i) else { return nil }
+            return i
+        }
+        guard let i = held ?? verticalWheelTarget(dy: dy, at: point) else {
+            inputMachines.wheelLock.endVertical()
+            return
+        }
+        let node = flatNodes[i]
+        let path = node.path
+        guard let limit = scrollMaxExtents[path]?.y else { return }
+        let previous = scrollOffsets[path] ?? .zero
+        var current = previous
+        current.y = (current.y - dy).clamped(to: 0...limit)
+        logEvent(String(format: "wheel %.1f", dy))
+        let moved = current != previous
+        if moved {
+            applyManualScroll(path: path, to: current, at: now)
+        } else {
+            updateScrollMode(forPath: path, event: .moved)
+        }
+        let pinned = node.el.layout.stickBottom && current.y >= limit - 0.5
+        updateScrollMode(forPath: path, event: pinned ? .pin : .rest)
+        if pinned { wasPinnedToBottom.insert(path) } else { wasPinnedToBottom.remove(path) }
+        inputMachines.wheelLock.ranVertical(path: path, at: now, x: point.x, y: point.y, dy: dy, moved: moved, continued: held != nil)
     }
 
     private func applyManualScroll(path: String, to cur: Vec2, at now: Double) {

@@ -148,13 +148,16 @@ public struct VideoMeta: Sendable, Equatable {
     }
 
     public var frameCount: Int64 {
-        guard let duration else { return 1 }
-        return max(1, Int64((duration / frameDuration).rounded()))
+        guard let duration, duration > 0, frameDuration.isFinite, frameDuration > 0 else { return 1 }
+        let count = (duration / frameDuration).rounded()
+        return count < Double(Int64.max) ? max(1, Int64(count)) : .max
     }
 
     public func frameIndex(at time: Double) -> Int64 {
-        let raw = Int64((time / frameDuration + 1e-6).rounded(.down))
-        return min(max(0, raw), frameCount - 1)
+        let last = frameCount - 1
+        guard time > 0, last > 0 else { return 0 }
+        let raw = (time / frameDuration + 1e-6).rounded(.down)
+        return raw < Double(last) ? Int64(raw) : last
     }
 
     public func frameTime(for index: Int64) -> Double {
@@ -233,7 +236,7 @@ public enum VideoHeadless {
     }
 
     private static var playback: Playback {
-        let storage = Thread.current.threadDictionary
+        let storage = RuneExecutionContext.locals
         if let existing = storage[playbackKey] as? Playback { return existing }
         let playback = Playback()
         storage[playbackKey] = playback
@@ -290,5 +293,37 @@ public enum VideoSignature {
 
     public static func foldUnpulled(_ signature: UInt64, surface: NativeSurface) -> UInt64 {
         fold(signature, generation: surface.generation, surfaceKey: surface.key)
+    }
+}
+
+/// Per-paint video clock and wake schedule, shared by the production and reference painters.
+internal struct SurfaceVideoPaint {
+    var signature: UInt64 = 0
+    var snapshots: [String: VideoSnapshot] = [:]
+    var nextWake: Double?
+    var active = false
+
+    mutating func snapshot(_ surface: NativeSurface, path: String) {
+        if let snapshot = surface.videoSnapshot() { snapshots[path] = snapshot }
+    }
+
+    mutating func unpulled(_ surface: NativeSurface) {
+        signature = VideoSignature.foldUnpulled(signature, surface: surface)
+    }
+
+    mutating func pull(_ surface: NativeSurface, at clock: Double, wallTime: Double, waker: Waker) {
+        guard let result = surface.pullVideo(clock: clock, wake: { waker.wake() }) else { return }
+        signature = VideoSignature.fold(signature, generation: result.generation, surfaceKey: surface.key)
+        guard result.active else { return }
+        if let due = result.due {
+            let duration = ContinuousClock.now.duration(to: due).components
+            let seconds = Double(duration.seconds) + Double(duration.attoseconds) * 1e-18
+            if seconds > VideoSignature.wakeMinSeconds {
+                let deadline = wallTime + seconds
+                nextWake = min(nextWake ?? deadline, deadline)
+                return
+            }
+        }
+        active = true
     }
 }

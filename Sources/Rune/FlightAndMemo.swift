@@ -717,7 +717,7 @@ internal enum TrackedRecorder {
     }
 
     private static var box: Box {
-        let dict = Thread.current.threadDictionary
+        let dict = RuneExecutionContext.locals
         if let existing = dict[threadKey] as? Box {
             return existing
         }

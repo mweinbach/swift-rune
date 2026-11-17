@@ -153,6 +153,17 @@ internal enum WheelPhaseState: Equatable {
 /// The wheel or trackpad gesture in progress, and who has it. Its phase carries when its last
 /// delta came and, once the platform ended it, when that was (`scroll/x.rs` `WheelLock`).
 internal struct WheelLock {
+    /// A vertical run is independent of the shorter timeout used for axis picking.
+    private struct VerticalRun {
+        let path: String
+        let x: Float
+        let y: Float
+        let down: Bool
+        let firstDeltaMoved: Bool
+        var lastDelta: Double
+    }
+
+    private var vertical: VerticalRun?
     /// Seconds without a delta after which the next one starts a new gesture, where the platform
     /// reports no phases (a mouse wheel, most trackpads off macOS).
     static let wheelIdle: Double = 0.1
@@ -253,13 +264,36 @@ internal struct WheelLock {
         phase = phase.moving(to: now)
     }
 
+    /// Keep the original viewport within 10 points of the start and 0.5 seconds of the last delta.
+    func verticalTarget(at now: Double, x: Float, y: Float, dy: Float) -> String? {
+        guard let run = vertical, now - run.lastDelta <= 0.5,
+              hypotf(x - run.x, y - run.y) < 10,
+              run.firstDeltaMoved || (dy < 0) == run.down else { return nil }
+        return run.path
+    }
+
+    mutating func ranVertical(path: String, at now: Double, x: Float, y: Float, dy: Float, moved: Bool, continued: Bool) {
+        if continued {
+            vertical?.lastDelta = now
+        } else {
+            vertical = VerticalRun(path: path, x: x, y: y, down: dy < 0, firstDeltaMoved: moved, lastDelta: now)
+        }
+    }
+
+    mutating func endVertical() {
+        vertical = nil
+    }
+
     /// The platform began a gesture at `now`: its first delta picks the axis afresh, unless it
     /// is the momentum of one that just ended. `active`: the arriving gesture has an owner;
     /// `queued`: a delta of it still waits for `onWheel` handlers.
     mutating func began(at now: Double, active: Bool, queued: Bool, pending: AttemptToken?) {
         let isMomentum = !phase.isMomentum && (active || queued)
             && phase.endedAt.map { now - $0 <= Self.momentumGap } == true
-        if !isMomentum { restart(pending: pending) }
+        if !isMomentum {
+            restart(pending: pending)
+            endVertical()
+        }
         phase = isMomentum ? .momentum(at: now) : .phased(at: now)
     }
 
@@ -278,5 +312,6 @@ internal struct WheelLock {
     /// The window lost the pointer or focus: a gesture in progress won't report its end here.
     mutating func lost(pending: AttemptToken?) {
         restart(pending: pending)
+        endVertical()
     }
 }

@@ -121,11 +121,10 @@ public enum RuneDockMenuProbeApp {
             let hasCustom = MainActor.assumeIsolated {
                 inspectNativeMenu(order: order).contains("Open Quick Panel")
             }
-            print(hasCustom ? "ACCESSORY_CUSTOM" : "ACCESSORY_MISSING")
+            RuneStandardIO.output((hasCustom ? "ACCESSORY_CUSTOM" : "ACCESSORY_MISSING") + "\n")
             #else
-            print(order == "before" ? "ACCESSORY_CUSTOM" : "ACCESSORY_MISSING")
+            RuneStandardIO.output((order == "before" ? "ACCESSORY_CUSTOM" : "ACCESSORY_MISSING") + "\n")
             #endif
-            fflush(stdout)
         }
 
         if !ToolingArgs.parse().isHeadlessRequested {
@@ -145,22 +144,21 @@ public enum RuneDockMenuProbeApp {
                         let info = DispatchQueue.main.sync {
                             MainActor.assumeIsolated { inspectNativeMenu(order: order) }
                         }
-                        print("STATUS \(info) quit_key=\(quitKeyText) errors=\(errs.count)")
+                        RuneStandardIO.output("STATUS \(info) quit_key=\(quitKeyText) errors=\(errs.count)\n")
                         #else
-                        print("STATUS headless quit_key=\(quitKeyText) errors=\(errs.count)")
+                        RuneStandardIO.output("STATUS headless quit_key=\(quitKeyText) errors=\(errs.count)\n")
                         #endif
-                        fflush(stdout)
                     case "custom":
                         do {
                             try handle.setMenu(customMenuItems())
                         } catch {
-                            print("ERR \(error)")
+                            RuneStandardIO.output("ERR \(error)\n")
                         }
                     case "clear":
                         do {
                             try handle.setMenu([])
                         } catch {
-                            print("ERR \(error)")
+                            RuneStandardIO.output("ERR \(error)\n")
                         }
                     case "dock-off":
                         handle.update { s, _ in s.dockVisible = false }
@@ -186,8 +184,7 @@ public enum RuneDockMenuProbeApp {
                     case "":
                         continue
                     default:
-                        print("UNKNOWN \(cmd)")
-                        fflush(stdout)
+                        RuneStandardIO.output("UNKNOWN \(cmd)\n")
                     }
                 }
                 handle.quit()

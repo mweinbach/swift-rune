@@ -521,7 +521,7 @@ public enum PerfWarn {
                 return Stall(wallStartNs: nil, cpuStartMs: nil, waitStartMs: nil)
             }
             return Stall(
-                wallStartNs: DispatchTime.now().uptimeNanoseconds,
+                wallStartNs: RuneExecutionContext.uptimeNanoseconds,
                 cpuStartMs: cpu,
                 waitStartMs: PerfRunQ.waitMs()
             )
@@ -529,7 +529,7 @@ public enum PerfWarn {
 
         public func end(overloaded: Bool? = nil, _ what: () -> (site: String, name: String)) {
             guard let wallStartNs, let cpuStartMs else { return }
-            let nowNs = DispatchTime.now().uptimeNanoseconds
+            let nowNs = RuneExecutionContext.uptimeNanoseconds
             let wallMs = Double(nowNs >= wallStartNs ? nowNs - wallStartNs : 0) / 1_000_000.0
             guard wallMs > PerfRunQ.stallMs else { return }
             let cpuMs = max(0.0, (PerfWarn.threadCpuMs() ?? cpuStartMs) - cpuStartMs)

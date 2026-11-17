@@ -196,8 +196,8 @@ struct TextP0WiringTests {
         #expect(wave.last?.x == 50)
     }
 
-    @Test("ShortcutRegistry ignores bare modifier events and matches macOS cmd+logo multi-chord sequences")
-    func shortcutRegistryWithModifiersAndCmdLogo() {
+    @Test("ShortcutRegistry ignores bare modifier events and matches physical Super sequences")
+    func shortcutRegistryWithPhysicalSuperModifiers() {
         final class Box: @unchecked Sendable { var fired = 0 }
         let box = Box()
         let registry = ShortcutRegistry()
@@ -209,15 +209,16 @@ struct TextP0WiringTests {
             return
         }
 
+        let superMods = Mods(cmd: KeyPlatform.current == .mac, logo: true)
         // Bare modifier event between chords must not break or advance sequence
-        #expect(registry.dispatch(KeyEvent(key: .modifier(.superLeft, pressed: true), mods: Mods(cmd: true, logo: true))) == .unhandled)
+        #expect(registry.dispatch(KeyEvent(key: .modifier(.superLeft, pressed: true), mods: superMods)) == .unhandled)
 
-        // First chord with real macOS Mods(cmd: true, logo: true)
-        #expect(registry.dispatch(KeyEvent(key: .text("k"), mods: Mods(cmd: true, logo: true))) == .pendingChord)
-        #expect(registry.dispatch(KeyEvent(key: .modifier(.superLeft, pressed: true), mods: Mods(cmd: true, logo: true))) == .unhandled)
+        // On macOS the physical Command key is also the primary modifier.
+        #expect(registry.dispatch(KeyEvent(key: .text("k"), mods: superMods)) == .pendingChord)
+        #expect(registry.dispatch(KeyEvent(key: .modifier(.superLeft, pressed: true), mods: superMods)) == .unhandled)
 
         // Second chord completes sequence
-        #expect(registry.dispatch(KeyEvent(key: .text("b"), mods: Mods(cmd: true, logo: true))) == .handled(id: "chord.test"))
+        #expect(registry.dispatch(KeyEvent(key: .text("b"), mods: superMods)) == .handled(id: "chord.test"))
         #expect(box.fired == 1)
     }
 

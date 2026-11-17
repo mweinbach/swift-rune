@@ -95,7 +95,13 @@ public enum TextBoxGeometry {
     /// where it sits against its own baseline.
     @inline(__always)
     public static func glyphTop(localTopPx: Float, line: Int, roundedBaselines: [Float], shaped: ShapedText) -> Float {
+        #if canImport(CRuneDesktopText) && !canImport(CoreText)
+        // A native line mask starts on an integer raster row even when its font reports
+        // a fractional ascent. Preserve that row relative to the snapped absolute baseline.
+        return roundedBaselines[line] + PixelSnap.roundHalfUp(localTopPx - shaped.lineBaselinesPx[line])
+        #else
         roundedBaselines[line] + (localTopPx - shaped.lineBaselinesPx[line])
+        #endif
     }
 }
 

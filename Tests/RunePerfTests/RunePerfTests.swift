@@ -3,10 +3,77 @@ import Testing
 @testable import RunePerf
 #if canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import WinSDK
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif canImport(Android)
+import Android
 #endif
 
 @Suite("RunePerf Tests")
 struct RunePerfTests {
+    #if os(Linux) || os(Android)
+    @Test func linuxSnapshotMeasuresBusyThreadWithParenthesesInName() throws {
+        let comm = URL(fileURLWithPath: "/proc/thread-self/comm")
+        func setName(_ bytes: Data) throws {
+            let file = try FileHandle(forWritingTo: comm)
+            defer { try? file.close() }
+            try file.write(contentsOf: bytes)
+        }
+
+        let previous = try Data(contentsOf: comm).dropLast() // comm appends a newline when read.
+        let name = "rune )東京)"
+        try setName(Data(name.utf8))
+        defer { try? setName(previous) }
+        let prior = try #require(RunePerf.snapshot().threads.first { $0.name == name })
+
+        func cpuTime() -> Double {
+            var time = timespec()
+            guard clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time) == 0 else { return -1 }
+            return Double(time.tv_sec) + Double(time.tv_nsec) / 1_000_000_000
+        }
+        let ticksPerSecond = sysconf(Int32(_SC_CLK_TCK))
+        try #require(ticksPerSecond > 0)
+        let start = cpuTime()
+        try #require(start >= 0)
+        let end = start + 3 / Double(ticksPerSecond)
+        let deadline = DispatchTime.now() + .seconds(5)
+        while cpuTime() < end && DispatchTime.now() < deadline { }
+
+        let current = try #require(RunePerf.snapshot().threads.first { $0.id == prior.id })
+        #expect(current.name == name)
+        #expect(current.cpuSeconds - prior.cpuSeconds >= 1 / Double(ticksPerSecond))
+    }
+    #endif
+
+    #if os(Windows)
+    @Test func windowsSnapshotIncludesCallingThreadDescriptionAndCPUTime() throws {
+        let thread = GetCurrentThread()
+        var previousName: PWSTR?
+        try #require(GetThreadDescription(thread, &previousName) >= 0)
+        let previous = try #require(previousName)
+        defer {
+            _ = SetThreadDescription(thread, previous)
+            LocalFree(previous)
+        }
+        let name = "RunePerf-東京"
+        let status = name.withCString(encodedAs: UTF16.self) { SetThreadDescription(thread, $0) }
+        try #require(status >= 0)
+
+        var creation = FILETIME(), exit = FILETIME(), kernel = FILETIME(), user = FILETIME()
+        try #require(GetThreadTimes(thread, &creation, &exit, &kernel, &user))
+        let kernelTicks = UInt64(kernel.dwHighDateTime) << 32 | UInt64(kernel.dwLowDateTime)
+        let userTicks = UInt64(user.dwHighDateTime) << 32 | UInt64(user.dwLowDateTime)
+        let threadID = UInt64(GetCurrentThreadId())
+        let sample = try #require(RunePerf.snapshot().threads.first { $0.id == threadID })
+        #expect(sample.name == name)
+        #expect(sample.cpuSeconds >= Double(kernelTicks) / 10_000_000 + Double(userTicks) / 10_000_000)
+    }
+    #endif
+
     @Test func darwinProcessSamplerReportsNonZeroMemoryAndThreads() {
         let usage = RunePerf.sampleUsage()
         #expect(usage.residentBytes > 0)

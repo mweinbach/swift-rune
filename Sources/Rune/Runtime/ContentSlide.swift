@@ -20,9 +20,9 @@ internal enum SlidePhase: Equatable, Sendable {
         }
     }
 
-    /// The phase after row growth `g` stepped `steps` substeps.
-    func step(growth g: GrowTrack, spring: Spring, steps: Int) -> SlidePhase {
-        let dt = Float(steps) * Growth.substep
+    /// The phase after row growth has advanced through these time slices.
+    func step(growth g: GrowTrack, spring: Spring, steps: GrowthSteps) -> SlidePhase {
+        let dt = steps.duration
         var dy: Float
         var v: Float
         switch self {
@@ -41,8 +41,8 @@ internal enum SlidePhase: Equatable, Sendable {
             dy = curDy
             v = curV
         }
-        for _ in 0..<steps {
-            (dy, v) = spring.sample(from: dy, velocity: v, target: 0.0, at: Growth.substep)
+        for step in steps {
+            (dy, v) = spring.sample(from: dy, velocity: v, target: 0.0, at: step)
         }
         return .settling(dy: dy, v: v)
     }
@@ -101,7 +101,7 @@ internal struct ContentSlides: Equatable, Sendable {
     /// Steps row `row`'s slides after its growth `g` stepped `steps` substeps. Returns whether any
     /// still moves for that row.
     @discardableResult
-    mutating func step(row: NodeId, growth g: GrowTrack, spring: Spring, steps: Int) -> Bool {
+    mutating func step(row: NodeId, growth g: GrowTrack, spring: Spring, steps: GrowthSteps) -> Bool {
         for i in slides.indices where slides[i].row == row {
             slides[i].phase = slides[i].phase.step(growth: g, spring: spring, steps: steps)
         }

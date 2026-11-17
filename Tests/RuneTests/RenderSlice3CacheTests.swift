@@ -1,10 +1,13 @@
 import Foundation
+#if canImport(Metal)
 import Metal
+#endif
 import Testing
 @testable import Rune
 
 @Suite("Slice 3 Layer Cache Parity Tests (layer_cache_tests.rs)")
 struct RenderSlice3CacheTests {
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
     // MARK: - Helpers (matching layer_cache_tests.rs & layer_tests.rs)
 
     private func srgbBytes(_ linear: SIMD4<Float>) -> [UInt8] {
@@ -34,10 +37,14 @@ struct RenderSlice3CacheTests {
     }
 
     private func drawRaw(
-        renderer: MetalRenderer,
+        renderer: OffscreenGPURenderer,
         frame: RenderFrame,
-        pixelFormat: MTLPixelFormat = .bgra8Unorm_srgb
+        linearBytes: Bool = false
     ) throws -> [UInt8] {
+        #if canImport(Metal)
+        let renderer = renderer.metal
+        let pixelFormat: MTLPixelFormat = linearBytes ? .rgba8Unorm : .bgra8Unorm_srgb
+        renderer.prepare(frame: frame, viewport: (frame.width, frame.height))
         let w = max(1, frame.width)
         let h = max(1, frame.height)
         let desc = MTLTextureDescriptor.texture2DDescriptor(
@@ -80,6 +87,18 @@ struct RenderSlice3CacheTests {
             }
         }
         return raw
+        #else
+        var rgba = try renderer.renderOffscreen(frame).rgba
+        if linearBytes {
+            for pixel in stride(from: 0, to: rgba.count, by: 4) {
+                for channel in pixel..<(pixel + 3) {
+                    let value = RefShader.srgbToLinear(Float(rgba[channel]) / 255)
+                    rgba[channel] = UInt8((value * 255).rounded())
+                }
+            }
+        }
+        return rgba
+        #endif
     }
 
     private final class CachedPairState<T> {
@@ -98,8 +117,8 @@ struct RenderSlice3CacheTests {
         size: (Int, Int),
         steps: [(name: String, frames: Int, step: (Runtime<CachedPairState<T>>, Double) -> Void)]
     ) throws -> [(String, LayerStats)] {
-        let rendererU = try MetalRenderer()
-        let rendererC = try MetalRenderer()
+        let rendererU = try OffscreenGPURenderer()
+        let rendererC = try OffscreenGPURenderer()
         let viewport = Vec2(Float(size.0), Float(size.1))
         let rtU = Runtime<CachedPairState<T>>(
             state: CachedPairState(cached: false, inner: initialState()),
@@ -128,13 +147,11 @@ struct RenderSlice3CacheTests {
             step(rtC, now)
             for f in 0..<frames {
                 now += 1.0 / 60.0
-                let rfU = rtU.renderFrame(at: now)
-                rendererU.prepare(frame: rfU, viewport: size)
+                let rfU = try rendererU.frame(rtU, at: now)
                 let want = try drawRaw(renderer: rendererU, frame: rfU)
 
-                let rfC = rtC.renderFrame(at: now)
+                let rfC = try rendererC.frame(rtC, at: now)
                 lastCachedInstances = rfC.instances
-                rendererC.prepare(frame: rfC, viewport: size)
                 let got = try drawRaw(renderer: rendererC, frame: rfC)
 
                 var maxDiff = 0
@@ -156,7 +173,7 @@ struct RenderSlice3CacheTests {
     @Test("cache_draws_live_while_subtree_animates_and_recaches_when_settled")
     @MainActor
     func cacheDrawsLiveWhileSubtreeAnimatesAndRecachesWhenSettled() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<Bool>(state: false, viewport: Vec2(48, 24), pixelScale: 1.0) { moved, _ in
             let x: Float = moved ? 16.0 : 0.0
             return el().size(48, 24).child(
@@ -172,14 +189,12 @@ struct RenderSlice3CacheTests {
 
         var now = 0.0
         var rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (48, 24))
         _ = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().targets == 1)
         #expect(renderer.layerStats().extraPasses == 1)
 
         now += 1.0 / 60.0
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (48, 24))
         _ = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 0)
 
@@ -190,7 +205,6 @@ struct RenderSlice3CacheTests {
             now += 0.05
             rf = rt.renderFrame(at: now)
             #expect(rf.instances.allSatisfy { $0.params.y != KIND_LAYER }, "must draw live while animating")
-            renderer.prepare(frame: rf, viewport: (48, 24))
             _ = try drawRaw(renderer: renderer, frame: rf)
             #expect(renderer.layerStats().extraPasses == 0, "no offscreen pass thrash while animating")
         }
@@ -198,14 +212,12 @@ struct RenderSlice3CacheTests {
         now += 2.0
         rf = rt.renderFrame(at: now)
         #expect(rf.instances.contains { $0.params.y == KIND_LAYER && $0.params.w == 1.0 }, "re-cached once settled")
-        renderer.prepare(frame: rf, viewport: (48, 24))
         let out = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 1, "rasterize once on settle")
         near(out[(8 * 48 + 24) * 4..<(8 * 48 + 25) * 4], srgbBytes(SIMD4<Float>(1, 0, 0, 1)), label: "settled")
 
         now += 1.0 / 60.0
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (48, 24))
         _ = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 0, "subsequent frame hits settled cache")
     }
@@ -276,7 +288,7 @@ struct RenderSlice3CacheTests {
     func clicksLandInsideACachedCardAfterAPan() throws {
         typealias S = (count: UInt32, pan: Live<Vec2>)
         let pan = Live<Vec2>(Vec2(0, 0))
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<S>(state: (0, pan), viewport: Vec2(96, 64), pixelScale: 1.0) { s, _ in
             el().size(96, 64).child(
                 el().size(96, 64).liveOffset(s.pan.binding).child(
@@ -291,12 +303,12 @@ struct RenderSlice3CacheTests {
         for _ in 0..<2 {
             now += 1.0 / 60.0
             let rf = rt.renderFrame(at: now)
-            renderer.prepare(frame: rf, viewport: (96, 64))
+            _ = try drawRaw(renderer: renderer, frame: rf)
         }
         pan.set(Vec2(50, 30))
         now += 1.0 / 60.0
         let rfPanned = rt.renderFrame(at: now)
-        renderer.prepare(frame: rfPanned, viewport: (96, 64))
+        _ = try drawRaw(renderer: renderer, frame: rfPanned)
         #expect(rfPanned.instances.count == 2, "the panned card is elided to its cached quad")
 
         for (x, y) in [(Float(8), Float(8)), (Float(58), Float(38))] {
@@ -305,7 +317,7 @@ struct RenderSlice3CacheTests {
             rt.pointerUp(at: Vec2(x, y), at: now)
             now += 1.0 / 60.0
             let rf = rt.renderFrame(at: now)
-            renderer.prepare(frame: rf, viewport: (96, 64))
+            _ = try drawRaw(renderer: renderer, frame: rf)
         }
         #expect(rt.state.count == 1, "only the click on the button's panned position presses it")
         let b = try #require(rt.elements().first { $0.key == "button" })
@@ -317,7 +329,7 @@ struct RenderSlice3CacheTests {
     @MainActor
     func cachedCardStaysElidedDuringSixtyLiveOnlyWheelFrames() throws {
         typealias S = (count: UInt32, offset: Live<Vec2>)
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<S>(state: (0, Live<Vec2>(Vec2(0, 0))), viewport: Vec2(160, 100), pixelScale: 1.0) { s, _ in
             el().size(160, 100)
                 .onWheel { st, e, tx in
@@ -343,7 +355,6 @@ struct RenderSlice3CacheTests {
         for _ in 0..<3 {
             now += 1.0 / 60.0
             let rf = rt.renderFrame(at: now)
-            renderer.prepare(frame: rf, viewport: (160, 100))
             _ = try drawRaw(renderer: renderer, frame: rf)
         }
         let commits = rt.commitCount
@@ -353,7 +364,6 @@ struct RenderSlice3CacheTests {
             let rf = rt.renderFrame(at: now)
             #expect(rt.commitCount == commits, "frame \(frameIdx) must not rebuild the view")
             #expect(rf.instances.count == 2, "frame \(frameIdx): child emission stays elided")
-            renderer.prepare(frame: rf, viewport: (160, 100))
             let out = try drawRaw(renderer: renderer, frame: rf)
             if frameIdx == 59 {
                 let pOff = (38 * 160 + 68) * 4
@@ -377,7 +387,7 @@ struct RenderSlice3CacheTests {
     func cacheDoesNotHideARadiusChangeDuringScaleSettling() throws {
         typealias S = (rounded: Bool, scale: Live<Float>)
         let scale = Live<Float>(1.0)
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<S>(state: (false, scale), viewport: Vec2(100, 100), pixelScale: 1.0) { s, _ in
             el().size(100, 100).liveScale(s.scale.binding).child(
                 el().size(32, 32).cache().child(
@@ -388,14 +398,12 @@ struct RenderSlice3CacheTests {
         rt.clearColor = Color(r: 0, g: 0, b: 0, a: 0)
         rt.srgbBlend = false
         var rf = rt.renderFrame(at: 0.0)
-        renderer.prepare(frame: rf, viewport: (100, 100))
         _ = try drawRaw(renderer: renderer, frame: rf)
 
         scale.set(1.01)
         rt.state.rounded = true
         rt.invalidate(at: 1.0 / 60.0)
         rf = rt.renderFrame(at: 1.0 / 60.0)
-        renderer.prepare(frame: rf, viewport: (100, 100))
         let out = try drawRaw(renderer: renderer, frame: rf)
         let cornerAlpha = out[3]
         #expect(cornerAlpha < 32, "the newly rounded corner must not show the stale square (alpha=\(cornerAlpha))")
@@ -406,7 +414,7 @@ struct RenderSlice3CacheTests {
     @MainActor
     func slowPinchCompositesUntilTheScaleHoldsStill() throws {
         let scale = Live<Float>(1.0)
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<Live<Float>>(state: scale, viewport: Vec2(200, 200), pixelScale: 1.0) { sc, _ in
             el().size(200, 200).p(60).liveScale(sc.binding).child(
                 el().size(48, 48).cache().bg(Color(r: 0.2, g: 0.5, b: 0.9, a: 1))
@@ -417,7 +425,6 @@ struct RenderSlice3CacheTests {
         rt.srgbBlend = false
         var now = 0.0
         var rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (200, 200))
         _ = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 1)
 
@@ -425,13 +432,11 @@ struct RenderSlice3CacheTests {
             scale.set(1.0 + Float(step) * 0.01)
             now += 1.0 / 60.0
             rf = rt.renderFrame(at: now)
-            renderer.prepare(frame: rf, viewport: (200, 200))
             _ = try drawRaw(renderer: renderer, frame: rf)
             #expect(renderer.layerStats().extraPasses == 0, "pinch step \(step) composites the old texture")
         }
         now += 0.15
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (200, 200))
         _ = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 1, "one raster once the pinch rests")
     }
@@ -442,9 +447,9 @@ struct RenderSlice3CacheTests {
     func overBudgetCacheFallsBackToAViewportSizedTarget() throws {
         struct S {}
         var want: [UInt8]? = nil
-        for budget in [Int(DEFAULT_LAYER_CACHE_BUDGET), 64 * 64 * 8] {
-            let renderer = try MetalRenderer()
-            renderer.setLayerCacheBudget(budget)
+        for budget in [Int(DEFAULT_LAYER_CACHE_BUDGET), 64 * 64 * 8, 0] {
+            let renderer = try OffscreenGPURenderer()
+            try renderer.setLayerCacheBudget(budget)
             let rt = Runtime<S>(state: S(), viewport: Vec2(32, 32), pixelScale: 1.0) { _, _ in
                 el().size(32, 32).child(
                     el().size(300, 300).cache().clipRounded(8).bg(Color(r: 0, g: 0, b: 1, a: 1))
@@ -455,11 +460,21 @@ struct RenderSlice3CacheTests {
             rt.srgbBlend = false
             var out: [UInt8] = []
             var now = 0.0
+            var allocations: UInt64?
             for _ in 0..<3 {
                 now += 1.0 / 60.0
                 let rf = rt.renderFrame(at: now)
-                renderer.prepare(frame: rf, viewport: (32, 32))
                 out = try drawRaw(renderer: renderer, frame: rf)
+                if budget == 0 {
+                    let stats = renderer.layerStats()
+                    #expect(stats.targets > 0 && stats.bytes > 0, "visible fallback uses a temporary target")
+                    #expect(stats.cachedLayers == 0 && stats.cachedBytes == 0)
+                    if let allocations {
+                        #expect(stats.allocations == allocations, "identical frames reuse the temporary target")
+                    } else {
+                        allocations = stats.allocations
+                    }
+                }
             }
             if let expected = want {
                 #expect(renderer.layerStats().bytes <= 64 * 64 * 8, "over-budget fallback stays viewport-sized: \(renderer.layerStats())")
@@ -468,6 +483,11 @@ struct RenderSlice3CacheTests {
             } else {
                 want = out
             }
+            if budget == 0 {
+                _ = try drawRaw(renderer: renderer, frame: RenderFrame(width: 32, height: 32))
+                let stats = renderer.layerStats()
+                #expect(stats.targets == 0 && stats.bytes == 0, "clear-only frame has no active layer targets")
+            }
         }
     }
 
@@ -475,7 +495,7 @@ struct RenderSlice3CacheTests {
     @Test("scale_commits_draw_live_without_repeated_cache_passes")
     @MainActor
     func scaleCommitsDrawLiveWithoutRepeatedCachePasses() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<Float>(state: 1.0, viewport: Vec2(200, 200), pixelScale: 1.0) { sc, _ in
             el().size(200, 200).scale(sc).scaleMotion(Curve.instant).child(
                 el().size(48, 48).cache().bg(.white)
@@ -485,7 +505,6 @@ struct RenderSlice3CacheTests {
         rt.srgbBlend = false
         var now = 0.0
         var rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (200, 200))
         _ = try drawRaw(renderer: renderer, frame: rf)
 
         for step in 1...30 {
@@ -493,13 +512,11 @@ struct RenderSlice3CacheTests {
             now += 1.0 / 60.0
             rt.invalidate(at: now)
             rf = rt.renderFrame(at: now)
-            renderer.prepare(frame: rf, viewport: (200, 200))
             _ = try drawRaw(renderer: renderer, frame: rf)
             #expect(renderer.layerStats().extraPasses == 0, "scale commit \(step) must not rasterize another cache")
         }
         now += 0.15
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (200, 200))
         _ = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 1, "cache once the committed scale settles")
     }
@@ -513,7 +530,7 @@ struct RenderSlice3CacheTests {
             var banner: String
             var cardText: String
         }
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<State>(
             state: State(
                 fontSize: 16.0,
@@ -535,7 +552,6 @@ struct RenderSlice3CacheTests {
         rt.srgbBlend = false
         var now = 0.0
         var rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (360, 120))
         _ = try drawRaw(renderer: renderer, frame: rf)
 
         for i in 0..<400 {
@@ -553,40 +569,62 @@ struct RenderSlice3CacheTests {
         rt.invalidate()
         now += 1.0
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (360, 120))
         let out = try drawRaw(renderer: renderer, frame: rf)
 
         let card = try #require(rt.elements().first { $0.text == rt.state.cardText })
         #expect(card.rect[1] >= 0 && card.rect[1] + card.rect[3] <= rt.viewport.y,
                 "cached text must be back onscreen after the one-second frame step")
         let glyphs = rf.instances.filter { $0.params.y == KIND_GLYPH }
-        let expected = rt.state.banner.filter { !$0.isWhitespace }.count
-            + rt.state.cardText.filter { !$0.isWhitespace }.count
-        #expect(glyphs.count == expected, "every glyph in both fresh and cached text must be emitted")
-        for (idx, g) in glyphs.enumerated() {
+        func hasInk(_ g: RenderInstance) -> Bool {
             let x0 = min(360, max(0, Int(floorf(g.rect.x))))
             let y0 = min(120, max(0, Int(floorf(g.rect.y))))
             let x1 = min(360, max(0, Int(ceilf(g.rect.x + g.rect.z))))
             let y1 = min(120, max(0, Int(ceilf(g.rect.y + g.rect.w))))
-            var lit = 0
             if y0 < y1 && x0 < x1 {
                 for y in y0..<y1 {
                     for x in x0..<x1 {
                         let base = (y * 360 + x) * 4
                         if out[base] > 16 || out[base + 1] > 16 || out[base + 2] > 16 {
-                            lit += 1
+                            return true
                         }
                     }
                 }
             }
-            #expect(lit > 0, "glyph \(idx) at \(g.rect) (page \(g.params.z)) rendered zero ink pixels")
+            return false
         }
+        #if canImport(CoreText)
+        let expected = rt.state.banner.filter { !$0.isWhitespace }.count
+            + rt.state.cardText.filter { !$0.isWhitespace }.count
+        #expect(glyphs.count == expected, "every glyph in both fresh and cached text must be emitted")
+        for (idx, glyph) in glyphs.enumerated() {
+            #expect(hasInk(glyph), "glyph \(idx) at \(glyph.rect) rendered zero ink pixels")
+        }
+        #else
+        // Native desktop text can emit whitespace quads and split a character at a mask tile boundary.
+        var first = 0
+        for (string, style) in [(rt.state.banner, TextStyle(size: 18, weight: 400)),
+                                (rt.state.cardText, TextStyle(size: 16, weight: 500))] {
+            let line = rt.textSystem.shape(text: string, style: style, maxWidth: nil, pixelScale: 1)
+            let end = first + line.glyphs.count
+            try #require(end <= glyphs.count)
+            let visible = Set(zip(line.glyphs, glyphs[first..<end]).compactMap { shaped, drawn in
+                hasInk(drawn) ? shaped.utf8Offset : nil
+            })
+            for (offset, byte) in string.utf8.enumerated() where byte != 0x20 {
+                #expect(visible.contains(offset), "character at UTF-8 offset \(offset) in '\(string)' rendered zero ink")
+            }
+            first = end
+        }
+        #expect(first == glyphs.count)
+        #endif
     }
+
+    #endif
 
     // 12. #32 (`layer_cache_tests.rs:788`)
     @Test("live_scale_zoom_sweep_buckets_during_motion_and_settles_crisp")
     @MainActor
-    func liveScaleZoomSweepBucketsDuringMotionAndSettlesCrisp() {
+    func liveScaleZoomSweepBucketsDuringMotionAndSettlesCrisp() throws {
         let zoom = Live<Float>(1.0)
         let rt = Runtime<Live<Float>>(state: zoom, viewport: Vec2(300, 120), pixelScale: 2.0) { z, _ in
             el().size(300, 120).liveScale(z.binding).child(
@@ -595,8 +633,12 @@ struct RenderSlice3CacheTests {
         }
         var now = 0.0
         _ = rt.renderFrame(at: now)
-        let perSize = rt.textSystem.glyphAtlas.rasterized
-        #expect(perSize >= 10)
+        var priorRasterized = rt.textSystem.glyphAtlas.rasterized
+        try #require(priorRasterized > 0)
+        #if canImport(CoreText)
+        #expect(priorRasterized >= 10)
+        #endif
+        var distinctSizes = 1
 
         for frameIdx in 1...1200 {
             let u = Float(frameIdx) / 1200.0
@@ -604,12 +646,15 @@ struct RenderSlice3CacheTests {
             zoom.set(k)
             now += 1.0 / 120.0
             _ = rt.renderFrame(at: now)
+            let rasterized = rt.textSystem.glyphAtlas.rasterized
+            if rasterized > priorRasterized {
+                distinctSizes += 1
+                priorRasterized = rasterized
+            }
         }
-        let sweepRasterized = rt.textSystem.glyphAtlas.rasterized
-        let distinctSizes = sweepRasterized / perSize
         #expect(
             distinctSizes <= 18,
-            "10s zoom sweep across [0.25, 4.0] must rasterize at most 17 bucketed sizes (got \(distinctSizes), total=\(sweepRasterized))"
+            "10s zoom sweep across [0.25, 4.0] must rasterize at most 17 more bucketed sizes (got \(distinctSizes) including the initial size)"
         )
 
         zoom.set(1.13)
@@ -629,6 +674,7 @@ struct RenderSlice3CacheTests {
         #expect(!rt.isAnimating, "nothing keeps animating after live_scale settles")
     }
 
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
     // 13. #33 (`layer_cache_tests.rs:829`)
     @Test("pill_styles_follow_captured_state_through_a_cached_subtree")
     @MainActor
@@ -650,7 +696,7 @@ struct RenderSlice3CacheTests {
         edit.insert("  ")
         edit.insertPill(id: "p:2", label: "two")
 
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<State>(state: State(edit: edit, swap: false), viewport: Vec2(200, 40), pixelScale: 1.0) { s, _ in
             let swap = s.swap
             let field = textInput(key: "field", \State.edit)
@@ -680,7 +726,6 @@ struct RenderSlice3CacheTests {
         func step() throws -> ([UInt8], Int) {
             now += 1.0 / 60.0
             let rf = rt.renderFrame(at: now)
-            renderer.prepare(frame: rf, viewport: (200, 40))
             let out = try drawRaw(renderer: renderer, frame: rf)
             return (out, renderer.layerStats().extraPasses)
         }
@@ -762,20 +807,18 @@ struct RenderSlice3CacheTests {
             return el().size(64, 48).p(6).liveOffset(s.offset.binding).child(card)
         }
 
-        let renU = try MetalRenderer()
+        let renU = try OffscreenGPURenderer()
         let rtU = Runtime<State>(state: (false, Live<Vec2>(.zero)), viewport: Vec2(64, 48), pixelScale: 1.0, view: crispView)
         rtU.clearColor = Color(r: 0, g: 0, b: 0, a: 0)
         rtU.srgbBlend = false
         let rfU = rtU.renderFrame(at: 0.0)
-        renU.prepare(frame: rfU, viewport: (64, 48))
         let pxU = try drawRaw(renderer: renU, frame: rfU)
 
-        let renC = try MetalRenderer()
+        let renC = try OffscreenGPURenderer()
         let rtC = Runtime<State>(state: (true, Live<Vec2>(.zero)), viewport: Vec2(64, 48), pixelScale: 1.0, view: crispView)
         rtC.clearColor = Color(r: 0, g: 0, b: 0, a: 0)
         rtC.srgbBlend = false
         let rfC = rtC.renderFrame(at: 0.0)
-        renC.prepare(frame: rfC, viewport: (64, 48))
         let pxC = try drawRaw(renderer: renC, frame: rfC)
         #expect(pxC == pxU, "cached vs uncached must be pixel-for-pixel identical at rest")
 
@@ -783,18 +826,16 @@ struct RenderSlice3CacheTests {
         let rtUncached = Runtime<State>(state: (false, offUncached), viewport: Vec2(64, 48), pixelScale: 1.0, view: richView)
         rtUncached.clearColor = Color(r: 0, g: 0, b: 0, a: 0)
         rtUncached.srgbBlend = false
-        let renUncached = try MetalRenderer()
+        let renUncached = try OffscreenGPURenderer()
         let rfUncached0 = rtUncached.renderFrame(at: 0.0)
-        renUncached.prepare(frame: rfUncached0, viewport: (64, 48))
         let pxUncached = try drawRaw(renderer: renUncached, frame: rfUncached0)
 
         let offCached = Live<Vec2>(.zero)
         let rtCached = Runtime<State>(state: (true, offCached), viewport: Vec2(64, 48), pixelScale: 1.0, view: richView)
         rtCached.clearColor = Color(r: 0, g: 0, b: 0, a: 0)
         rtCached.srgbBlend = false
-        let renCached = try MetalRenderer()
+        let renCached = try OffscreenGPURenderer()
         let rfCached0 = rtCached.renderFrame(at: 0.0)
-        renCached.prepare(frame: rfCached0, viewport: (64, 48))
         let pxCached = try drawRaw(renderer: renCached, frame: rfCached0)
         #expect(renCached.layerStats().targets == 1)
         #expect(renCached.layerStats().extraPasses == 1, "initial frame rasterizes the cache")
@@ -807,13 +848,11 @@ struct RenderSlice3CacheTests {
             now += 1.0 / 60.0
             offUncached.set(delta)
             let rfWant = rtUncached.renderFrame(at: now)
-            renUncached.prepare(frame: rfWant, viewport: (64, 48))
             let want = try drawRaw(renderer: renUncached, frame: rfWant)
 
             offCached.set(delta)
             let rfGot = rtCached.renderFrame(at: now)
             #expect(rfGot.instances.count == 2, "cached subtree elides to [KIND_LAYER, KIND_LAYER_END]")
-            renCached.prepare(frame: rfGot, viewport: (64, 48))
             let got = try drawRaw(renderer: renCached, frame: rfGot)
             #expect(renCached.layerStats().extraPasses == 0, "ancestor live_offset must not re-rasterize")
             #expect(renCached.layerStats().allocations == 1)
@@ -829,7 +868,7 @@ struct RenderSlice3CacheTests {
     @Test("cache_invalidates_on_state_and_hover_changes")
     @MainActor
     func cacheInvalidatesOnStateAndHoverChanges() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<Bool>(state: false, viewport: Vec2(32, 32), pixelScale: 1.0) { active, _ in
             let fill = active ? Color(r: 0.1, g: 0.8, b: 0.2, a: 1) : Color(r: 0.8, g: 0.1, b: 0.2, a: 1)
             return el().size(32, 32).child(
@@ -848,38 +887,33 @@ struct RenderSlice3CacheTests {
 
         var now = 0.0
         var rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (32, 32))
-        var out = try drawRaw(renderer: renderer, frame: rf, pixelFormat: .rgba8Unorm)
+        var out = try drawRaw(renderer: renderer, frame: rf, linearBytes: true)
         #expect(renderer.layerStats().extraPasses == 1)
         near(out[pOff..<(pOff + 4)], [204, 26, 51, 255], label: "rest")
 
         now += 1.0 / 60.0
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (32, 32))
-        _ = try drawRaw(renderer: renderer, frame: rf, pixelFormat: .rgba8Unorm)
+        _ = try drawRaw(renderer: renderer, frame: rf, linearBytes: true)
         #expect(renderer.layerStats().extraPasses == 0)
 
         rt.state = true
         rt.invalidate(at: now)
         now += 1.0
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (32, 32))
-        out = try drawRaw(renderer: renderer, frame: rf, pixelFormat: .rgba8Unorm)
+        out = try drawRaw(renderer: renderer, frame: rf, linearBytes: true)
         #expect(renderer.layerStats().extraPasses == 1, "state change must invalidate cache")
         near(out[pOff..<(pOff + 4)], [26, 204, 51, 255], label: "state")
 
         now += 1.0 / 60.0
         rt.pointerMove(to: Vec2(12, 12), at: now)
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (32, 32))
-        out = try drawRaw(renderer: renderer, frame: rf, pixelFormat: .rgba8Unorm)
+        out = try drawRaw(renderer: renderer, frame: rf, linearBytes: true)
         #expect(renderer.layerStats().extraPasses == 1, "hover change must invalidate cache")
         near(out[pOff..<(pOff + 4)], [26, 51, 230, 255], label: "hover")
 
         now += 1.0 / 60.0
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (32, 32))
-        _ = try drawRaw(renderer: renderer, frame: rf, pixelFormat: .rgba8Unorm)
+        _ = try drawRaw(renderer: renderer, frame: rf, linearBytes: true)
         #expect(renderer.layerStats().extraPasses == 0, "settled hover must hit cache")
     }
 
@@ -888,7 +922,7 @@ struct RenderSlice3CacheTests {
     @MainActor
     func cacheRerasterizesAtNewResolutionAfterAncestorScaleSettles() throws {
         let scale = Live<Float>(1.0)
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<Live<Float>>(state: scale, viewport: Vec2(200, 200), pixelScale: 1.0) { sc, _ in
             el().size(200, 200).p(60).liveScale(sc.binding).child(
                 el().size(48, 48).cache().bg(Color(r: 0.2, g: 0.5, b: 0.9, a: 1))
@@ -900,30 +934,33 @@ struct RenderSlice3CacheTests {
 
         var now = 0.0
         var rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (200, 200))
         _ = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 1)
-        #expect(renderer.layerStats().bytes == 64 * 64 * 8)
+        let originalBytes = renderer.layerStats().bytes
+        #expect(originalBytes > 0)
+        #if canImport(Metal)
+        #expect(originalBytes == 64 * 64 * 8)
+        #endif
 
         scale.set(2.0)
         now += 0.016
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (200, 200))
         _ = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 0, "composite existing texture during scale gesture")
-        #expect(renderer.layerStats().bytes == 64 * 64 * 8, "still 1x texture before settle")
+        #expect(renderer.layerStats().bytes == originalBytes, "still 1x texture before settle")
 
         now += 0.15
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (200, 200))
         let out = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 1, "re-rasterize at new resolution once settled")
+        #expect(renderer.layerStats().bytes > originalBytes, "settled scale needs a higher-resolution texture")
+        #if canImport(Metal)
         #expect(renderer.layerStats().bytes == 128 * 128 * 8, "upgraded to 2x texture bucket")
+        #endif
         #expect(out[(100 * 200 + 100) * 4 + 3] == 255)
 
         now += 0.016
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (200, 200))
         _ = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 0)
     }
@@ -933,11 +970,7 @@ struct RenderSlice3CacheTests {
     @MainActor
     func cacheLruEvictionUnderSmallBudgetEvictsOldestAndRecachesCleanly() throws {
         let offset = Live<Vec2>(.zero)
-        let renderer = try MetalRenderer()
-        let oneBucket = 64 * 64 * 8
-        renderer.setLayerCacheBudget(oneBucket * 2)
-        #expect(renderer.layersPool.cacheBudgetBytes == oneBucket * 2)
-
+        let renderer = try OffscreenGPURenderer()
         func card(_ key: String, y: Float, _ color: Color) -> El<Live<Vec2>> {
             el().key(key).size(24, 24).absolute(x: 4, y: y).cache().bg(color)
                 .child(el().size(10, 10).bg(.white))
@@ -956,16 +989,20 @@ struct RenderSlice3CacheTests {
 
         var now = 0.0
         var rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (32, 32))
         var out = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 1)
-        #expect(renderer.layerStats().bytes <= oneBucket * 2)
+        let oneBucket = try #require(Int(exactly: renderer.layerStats().bytes))
+        try #require(oneBucket > 0)
+        try renderer.setLayerCacheBudget(oneBucket * 2)
+        #if canImport(Metal)
+        #expect(oneBucket == 64 * 64 * 8)
+        #expect(renderer.metal.layersPool.cacheBudgetBytes == oneBucket * 2)
+        #endif
         near(out[pOff..<(pOff + 4)], [255, 0, 0, 255], label: "card-a")
 
         offset.set(Vec2(0, -100))
         now += 0.016
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (32, 32))
         out = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 1)
         #expect(renderer.layerStats().targets == 2)
@@ -975,14 +1012,12 @@ struct RenderSlice3CacheTests {
         offset.set(.zero)
         now += 0.016
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (32, 32))
         _ = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 0, "A was retained in budget")
 
         offset.set(Vec2(0, -200))
         now += 0.016
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (32, 32))
         out = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 1, "C rasterizes and evicts LRU B")
         #expect(renderer.layerStats().targets == 2)
@@ -992,17 +1027,28 @@ struct RenderSlice3CacheTests {
         offset.set(.zero)
         now += 0.016
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (32, 32))
         _ = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 0, "MRU card A stayed resident")
 
         offset.set(Vec2(0, -100))
         now += 0.016
         rf = rt.renderFrame(at: now)
-        renderer.prepare(frame: rf, viewport: (32, 32))
         out = try drawRaw(renderer: renderer, frame: rf)
         #expect(renderer.layerStats().extraPasses == 1, "evicted card B re-caches cleanly")
         near(out[pOff..<(pOff + 4)], [0, 255, 0, 255], label: "card-b-recached")
+
+        let beforeEviction = renderer.layerStats()
+        #expect(beforeEviction.hits > 0)
+        #expect(beforeEviction.misses > 0)
+        #expect(beforeEviction.evictions > 0)
+        try renderer.setLayerCacheBudget(0)
+        #expect(rt.residentCacheTracker.isEmpty)
+        now += 0.016
+        rf = rt.renderFrame(at: now)
+        #expect(rf.instances.contains { $0.params.y == KIND_RECT }, "eviction makes the runtime emit the card again")
+        out = try drawRaw(renderer: renderer, frame: rf)
+        near(out[pOff..<(pOff + 4)], [0, 255, 0, 255], label: "card-b-without-cache")
+        #expect(renderer.layerStats().cachedBytes == 0)
     }
 
     // 18. #21 (`layer_cache_tests.rs:421`)
@@ -1048,7 +1094,7 @@ struct RenderSlice3CacheTests {
     @Test("cache_updates_same_size_image_pixels_after_the_first_raster")
     @MainActor
     func cacheUpdatesSameSizeImagePixelsAfterTheFirstRaster() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let image = Pixels()
         let rt = Runtime<Pixels>(state: image, viewport: Vec2(32, 32), pixelScale: 1.0) { img, _ in
             el().size(32, 32).child(el().size(24, 24).cache().pixels(img))
@@ -1060,7 +1106,6 @@ struct RenderSlice3CacheTests {
             image.set(width: 2, height: 2, rgba: color + color + color + color)
             now += 1.0 / 60.0
             let rf = rt.renderFrame(at: now)
-            renderer.prepare(frame: rf, viewport: (32, 32))
             let out = try drawRaw(renderer: renderer, frame: rf)
             let pOff = (12 * 32 + 12) * 4
             #expect(Array(out[pOff..<(pOff + 4)]) == color, "same-size image publication must change the output")
@@ -1071,7 +1116,7 @@ struct RenderSlice3CacheTests {
     @Test("single_frame_spanning_multiple_glyph_atlas_pages_draws_all_pages")
     @MainActor
     func singleFrameSpanningMultipleGlyphAtlasPagesDrawsAllPages() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<Void>(state: (), viewport: Vec2(512, 512), pixelScale: 1.0) { _, _ in
             var root: El<Void> = el().size(512, 512)
             for i in 0..<24 {
@@ -1094,7 +1139,6 @@ struct RenderSlice3CacheTests {
         #expect(rf.instances.contains { $0.params.y == KIND_GLYPH && $0.uv.y < pageH }, "has page 0 glyphs")
         #expect(rf.instances.contains { $0.params.y == KIND_GLYPH && $0.uv.y >= pageH }, "has page 1+ glyphs")
 
-        renderer.prepare(frame: rf, viewport: (512, 512))
         let out = try drawRaw(renderer: renderer, frame: rf)
         for page in 0..<2 {
             let pageMinY = Float(page) * pageH
@@ -1128,4 +1172,5 @@ struct RenderSlice3CacheTests {
             #expect(lit > 0, "glyph on page \(page) at \(rDesc) must render visible pixels")
         }
     }
+    #endif
 }

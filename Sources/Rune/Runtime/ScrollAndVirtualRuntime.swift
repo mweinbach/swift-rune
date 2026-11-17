@@ -1208,9 +1208,8 @@ extension Runtime {
                     track.linearEdge = live
                     track.retarget(naturalH)
                     if kitHooks.frameGrowthStepDt > 0 && el.foldGlideSpec == nil {
-                        let steps = max(1, min(240, Int(floor(kitHooks.frameGrowthStepDt / Double(Growth.substep)))))
-                        for _ in 0..<steps {
-                            track.step(spring: spring, edge: edge, carryingTail: false)
+                        for step in GrowthSteps(duration: Float(kitHooks.frameGrowthStepDt)) {
+                            track.step(by: step, spring: spring, edge: edge, carryingTail: false)
                         }
                     }
                     accum.result.needsClampedRelayout = true
@@ -1502,7 +1501,7 @@ extension Runtime {
     private static func stepGrowthRuns(
         stack: inout RuntimeGrowthStackState,
         grows: inout [String: RuntimeGrowthEntry],
-        steps: Int,
+        by dt: Float,
         spring: Spring,
         edge: StreamEdge
     ) -> Set<String> {
@@ -1510,7 +1509,7 @@ extension Runtime {
         var kept: [RuntimeGrowthRun] = []
         kept.reserveCapacity(stack.runs.count)
         for var run in stack.runs {
-            _ = run.step(steps: steps, spring: spring, edge: edge, grows: &grows)
+            _ = run.step(by: dt, spring: spring, edge: edge, grows: &grows)
             for k in run.rows {
                 movedKeys.insert(k)
             }
@@ -1595,7 +1594,7 @@ extension Runtime {
         let prevNow = lastGrowthStepTime
         let hasDeferredAtEnd = growthStacks.values.contains { !$0.pendingHeights.isEmpty || !$0.closing.isEmpty || !$0.runs.isEmpty }
         let hasClosing = kitHooks.growthStacks.values.contains { !$0.closing.isEmpty }
-        let dt = prevNow.map { max(0, min(0.1, now - $0)) } ?? (1.0 / 60.0)
+        let dt = prevNow.map { max(0, min(1, now - $0)) } ?? (1.0 / 60.0)
         lastGrowthStepTime = now
 
         func flushReleasedHolds(at checkTime: Double) {
@@ -1630,7 +1629,6 @@ extension Runtime {
         }
 
         if growthRows.isEmpty && !hasDeferredAtEnd && !hasClosing {
-            growthSubstepAccumulator = 0
             return false
         }
 
@@ -1646,27 +1644,21 @@ extension Runtime {
             return hasPending || growthRows.values.contains { $0.track.moving } || closingMoving || !slice2State.liveContentSlides.slides.isEmpty
         }
 
-        let stepSize = GrowthCaps.fixedSubstep
-        growthSubstepAccumulator += dt
-        var substeps = Int(floor((growthSubstepAccumulator + 1e-9) / stepSize))
-        growthSubstepAccumulator = max(0, growthSubstepAccumulator - Double(substeps) * stepSize)
-        substeps = min(substeps, 240)
-
-        let stepOrigin = (prevNow ?? (now - dt))
+        let substeps = GrowthSteps(duration: Float(dt))
         let startHeights = growthRows.mapValues { $0.track.h }
         var anyChanged = false
         var anyMoving = false
         var restored: [(gKey: String, r: Float)] = []
         var gave: [(gKey: String, d: Float)] = []
-        if substeps > 0 {
+        if !substeps.isEmpty {
             var working = growthRows
             var workingStacks = growthStacks
             let initialHeights: [String: Float] = working.mapValues { $0.track.h }
             let initialMasks: [String: Float] = working.mapValues { $0.track.mask }
             let initiallyMoving: [String: Bool] = working.mapValues { $0.track.moving }
             var ranInBlockKeys: Set<String> = []
-            for s in 0..<substeps {
-                let subNow = stepOrigin + Double(s + 1) * stepSize
+            var subNow = now - dt
+            for step in substeps {
                 var substepRunKeys: Set<String> = []
                 for (sp, var stack) in workingStacks {
                     if !stack.pendingHeights.isEmpty && !stack.widthHold.defers(at: subNow) {
@@ -1694,7 +1686,7 @@ extension Runtime {
                         let movedRunKeys = Self.stepGrowthRuns(
                             stack: &stack,
                             grows: &working,
-                            steps: 1,
+                            by: step,
                             spring: stack.spring,
                             edge: stack.edge
                         )
@@ -1711,7 +1703,7 @@ extension Runtime {
                     }
                     let prevH = entry.track.h
                     let prevM = entry.track.mask
-                    entry.track.step(spring: entry.spring, edge: entry.edge, carryingTail: false)
+                    entry.track.step(by: step, spring: entry.spring, edge: entry.edge, carryingTail: false)
                     if let vp = slice2State.growthScrollByKey[k] {
                         let grown = max(0, entry.track.h - prevH)
                         if grown > 0 {
@@ -1726,6 +1718,7 @@ extension Runtime {
                         anyChanged = true
                     }
                 }
+                subNow += Double(step)
             }
             if !slice2State.liveContentSlides.slides.isEmpty {
                 let rows = Set(slice2State.liveContentSlides.slides.map(\.row))
@@ -1827,8 +1820,8 @@ extension Runtime {
                 var finished: [String] = []
                 for (seg, var row) in stack.closing {
                     let prevH = row.track.h
-                    for _ in 0..<substeps {
-                        row.track.step(spring: row.spring, edge: row.edge, carryingTail: false)
+                    for step in substeps {
+                        row.track.step(by: step, spring: row.spring, edge: row.edge, carryingTail: false)
                     }
                     if abs(row.track.h - prevH) > 0.05 || !row.track.moving {
                         anyChanged = true
@@ -3325,7 +3318,7 @@ extension Runtime {
     }
 
     internal func stepScrollSlacks(frameOut: FrameOutput, at now: Double) -> Bool {
-        let dt: Float = slice2State.scrollLastSlackTickAt.map { Float(max(0, min(0.1, now - $0))) } ?? (1.0 / 60.0)
+        let dt: Float = slice2State.scrollLastSlackTickAt.map { Float(max(0, min(1, now - $0))) } ?? (1.0 / 60.0)
         slice2State.scrollLastSlackTickAt = now
         guard !flatNodes.isEmpty else {
             slice2State.scrollExtraYByPath.removeAll(keepingCapacity: true)

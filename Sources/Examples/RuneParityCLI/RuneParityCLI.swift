@@ -41,12 +41,12 @@ public struct RuneParityCLI {
             case "record-sync":
                 return try handleRecordSync(rest)
             default:
-                fputs("error: unknown subcommand '\(subcommand)'\n\n", stderr)
+                FileHandle.standardError.write(Data("error: unknown subcommand '\(subcommand)'\n\n".utf8))
                 printTopLevelHelp()
                 return 2
             }
         } catch {
-            fputs("error: \(error)\n", stderr)
+            FileHandle.standardError.write(Data("error: \(error)\n".utf8))
             return 1
         }
     }

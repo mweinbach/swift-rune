@@ -1,4 +1,5 @@
 import Foundation
+import Rune
 import RuneFX
 import RuneRef
 
@@ -23,7 +24,16 @@ enum RuneFxFirstGlowApp {
             return args[i + 1]
         }()
 
+        let backend = GpuBackendPolicy.resolve(env: ProcessInfo.processInfo.environment["RUNE_GPU_BACKEND"], chosen: nil)
+        #if os(macOS) || os(Linux) || os(Windows)
+        if backend == .gl {
+            try renderGL(snapPath: snapPath)
+            return
+        }
+        #endif
+
         #if canImport(Metal)
+        guard backend == .metal else { throw FxGlowError.unavailableBackend(backend) }
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue() else {
             fputs("error: Metal device unavailable\n", stderr)
@@ -109,18 +119,58 @@ enum RuneFxFirstGlowApp {
             try Frame(width: w, height: h, rgba: rgba).writePNG(to: url)
         }
 
-        func ms(_ d: Duration) -> Double {
-            Double(d.components.seconds) * 1e3 + Double(d.components.attoseconds) * 1e-15
-        }
-
-        let newMs = ms(tNew)
-        let addMs = ms(tAdd)
-        let totalMs = ms(tTotal)
-        let firstMs = max(0, totalMs - newMs - addMs)
-        print(String(format: "{\"new\":%.3f,\"add_format\":%.3f,\"first_frame\":%.3f,\"total\":%.3f}", newMs, addMs, firstMs, totalMs))
+        let adapter = DisplayGpuAdapter(backend: .metal, device: device.name)
+        try report(adapter: adapter, initialization: tNew, registration: tAdd, total: tTotal)
+        #elseif os(Linux) || os(Windows)
+        throw FxGlowError.unavailableBackend(backend)
         #else
-        fputs("error: Metal unavailable on this platform\n", stderr)
-        Foundation.exit(1)
+        throw FxGlowError.noOffscreenContext
         #endif
+    }
+
+    #if os(macOS) || os(Linux) || os(Windows)
+    private static func renderGL(snapPath: String?) throws {
+        let clock = ContinuousClock()
+        let start = clock.now
+        let context = try OffscreenGLContext()
+        defer { context.close() }
+        let renderer = try FxGLRenderer(resolve: OffscreenGLContext.resolve)
+        defer { renderer.close() }
+        let initialized = clock.now
+        let layer = Fx.glow(GlowParams()).on(.rounded(x: 24, y: 24, w: 48, h: 48, radius: 8))
+        let frame = try renderer.renderOffscreen(viewport: SIMD2(96, 96), layers: [layer])
+        let end = clock.now
+        guard stride(from: 3, to: frame.rgba.count, by: 4).contains(where: { frame.rgba[$0] != 0 }) else {
+            throw FxGlowError.emptyOutput
+        }
+        if let snapPath { try frame.writePNG(to: URL(fileURLWithPath: snapPath)) }
+        let adapter = DisplayGpuAdapter(backend: OffscreenGLContext.isGLES ? .openGLES : .openGL, device: renderer.adapter)
+        // GL selects its target format at allocation and needs no format registration step.
+        try report(adapter: adapter, initialization: initialized - start, registration: .zero, total: end - start)
+    }
+    #endif
+
+    private static func report(adapter: DisplayGpuAdapter, initialization: Duration,
+                               registration: Duration, total: Duration) throws {
+        func milliseconds(_ duration: Duration) -> Double {
+            Double(duration.components.seconds) * 1000 + Double(duration.components.attoseconds) * 1e-15
+        }
+        adapter.reportIfRequested()
+        let metrics: [String: Any] = [
+            "adapter": adapter.device,
+            "backend": adapter.backend.rawValue,
+            "new": milliseconds(initialization),
+            "add_format": milliseconds(registration),
+            "first_frame": milliseconds(total - initialization - registration),
+            "total": milliseconds(total)
+        ]
+        let data = try JSONSerialization.data(withJSONObject: metrics, options: [.sortedKeys])
+        print(String(decoding: data, as: UTF8.self))
+    }
+
+    enum FxGlowError: Error {
+        case emptyOutput
+        case noOffscreenContext
+        case unavailableBackend(GpuBackend)
     }
 }

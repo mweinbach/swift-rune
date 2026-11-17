@@ -1,0 +1,193 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune WebGL atlas patch transfers</title>
+<canvas></canvas>
+<pre id="result">Running…</pre>
+<script type="module">
+import { RuneWebGL, loadRuneShaders } from '../../Sources/Rune/Resources/Web/rune-webgl.mjs';
+
+const width = 8, height = 6;
+const viewWidth = 2 * width;
+const canvas = document.querySelector('canvas');
+const result = document.querySelector('#result');
+
+function quad(kind, x) {
+    const words = new Float32Array(32);
+    words.set([x, 0, width, height]);
+    words.set([1, 1, 1, 1], 8);
+    words.set([0, kind, 0, 1], 16);
+    words.set([0, 0, width, height], 20);
+    words.set([0, 0, viewWidth, height], 24);
+    return words;
+}
+
+const glyphs = new Uint8Array(width * height);
+const images = new Uint8Array(width * height * 4);
+for (let y = 0; y < height; ++y) {
+    for (let x = 0; x < width; ++x) {
+        glyphs[y * width + x] = 16 + (x + 2 * y) * 8;
+        images.set([x % 2 * 255, y % 2 * 255, 255, 255], (y * width + x) * 4);
+    }
+}
+
+function apply(pixels, channels, [x, y, w, h], patch) {
+    for (let row = 0; row < h; ++row) {
+        pixels.set(patch.subarray(row * w * channels, (row + 1) * w * channels), ((y + row) * width + x) * channels);
+    }
+}
+
+// A glyph and an image each cover exactly one half of the framebuffer. Checking every texel
+// catches flipped rows, offsets in the wrong plane, and changes just outside a patch.
+function verifyPixels(gl, frame) {
+    const bytes = new Uint8Array(viewWidth * height * 4);
+    gl.readPixels(0, 0, viewWidth, height, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+    if (gl.getError() !== gl.NO_ERROR) throw Error(frame + ' produced a WebGL error');
+    for (let y = 0; y < height; ++y) {
+        for (let x = 0; x < viewWidth; ++x) {
+            const pixel = (y * width + x % width);
+            const expected = x < width ? [glyphs[pixel], glyphs[pixel], glyphs[pixel], 255] :
+                images.subarray(pixel * 4, pixel * 4 + 4);
+            const start = ((height - 1 - y) * viewWidth + x) * 4;
+            const actual = bytes.subarray(start, start + 4);
+            if (actual.some((v, i) => Math.abs(v - expected[i]) > 1)) {
+                throw Error(frame + ' at (' + x + ',' + y + '): ' + actual + ', expected ' + expected);
+            }
+        }
+    }
+}
+
+function recordTransfers(gl) {
+    const transfers = [];
+    for (const name of ['texImage2D', 'texSubImage2D']) {
+        const call = gl[name].bind(gl);
+        gl[name] = (...args) => {
+            const [target, level, a, b, c, d, format, type, pixels] = args;
+            if (ArrayBuffer.isView(pixels) && target === gl.TEXTURE_2D && level === 0) {
+                const rect = name === 'texImage2D' ? [0, 0, b, c] : [a, b, c, d];
+                transfers.push([name, format === gl.RED ? 'R8' : 'RGBA', ...rect, pixels.byteLength]);
+            }
+            return call(...args);
+        };
+    }
+    return transfers;
+}
+
+const fullFlag = [2, 4], partialFlag = [8, 16];
+function scene(previous, next, glyph, image) {
+    const planes = [glyph, image];
+    let flags = 1 | 32;
+    let size = 56 + 2 * 128 + 8;
+    for (const [slot, plane] of planes.entries()) {
+        if (!plane) continue;
+        flags |= plane.rect ? partialFlag[slot] : fullFlag[slot];
+        size += (plane.rect ? 16 : 0) + plane.data.byteLength;
+    }
+    const bytes = new Uint8Array(size);
+    const data = new DataView(bytes.buffer);
+    let offset = 0;
+    function words(values) {
+        for (const value of values) { data.setUint32(offset, value, true); offset += 4; }
+    }
+    words([0x32475352, viewWidth, height, flags, 2, width, height, width, height]);
+    new Float32Array(bytes.buffer, offset, 4).set([0, 0, 0, 1]);
+    offset += 16;
+    words([0]); // Native surface count.
+    for (const instance of [quad(2, 0), quad(7, width)]) {
+        new Float32Array(bytes.buffer, offset, 32).set(instance);
+        offset += 128;
+    }
+    words([previous, next]);
+    for (const plane of planes) {
+        if (!plane) continue;
+        if (plane.rect) words(plane.rect);
+        bytes.set(plane.data, offset);
+        offset += plane.data.byteLength;
+    }
+    return bytes;
+}
+
+function expectTransfers(transfers, expected, label) {
+    const actual = transfers.splice(0);
+    if (JSON.stringify(expected) !== JSON.stringify(actual)) {
+        throw Error(label + ' transfers ' + JSON.stringify(actual) + ', expected ' + JSON.stringify(expected));
+    }
+}
+
+let renderer;
+try {
+    const sources = await loadRuneShaders();
+    renderer = new RuneWebGL(canvas, sources);
+    const gl = renderer.gl;
+    const transfers = recordTransfers(gl);
+    const draw = packet => renderer.draw(packet.buffer, 0, packet.byteLength);
+    const full = (previous, next) => scene(previous, next, { data: glyphs }, { data: images });
+    const initial = full(0, 1);
+    draw(initial);
+    verifyPixels(gl, 'Full atlas');
+    const fullTransfers = method => [[method, 'R8', 0, 0, width, height, glyphs.length],
+        [method, 'RGBA', 0, 0, width, height, images.length]];
+    expectTransfers(transfers, fullTransfers('texImage2D'), 'Full atlas');
+
+    // The three R8 bytes leave the next rectangle header unaligned. The RGBA rectangle has
+    // three rows with different data so its source stride cannot accidentally be the full atlas width.
+    const glyph = { rect: [2, 1, 1, 3], data: Uint8Array.of(252, 11, 193) };
+    const image = { rect: [2, 2, 5, 3], data: new Uint8Array(5 * 3 * 4) };
+    for (let i = 0; i < 15; ++i) image.data.set([96 + 7 * i, 225 - 3 * i, 8 + 5 * i, 255], i * 4);
+    const patch = scene(1, 2, glyph, image);
+    apply(glyphs, 1, glyph.rect, glyph.data);
+    apply(images, 4, image.rect, image.data);
+    draw(patch);
+    verifyPixels(gl, 'Partial atlas');
+    expectTransfers(transfers, [['texSubImage2D', 'R8', ...glyph.rect, 3],
+        ['texSubImage2D', 'RGBA', ...image.rect, 60]], 'Partial atlas');
+
+    draw(patch);
+    verifyPixels(gl, 'Repeat compositor pass');
+    expectTransfers(transfers, [], 'Repeat compositor pass');
+    draw(scene(2, 3));
+    expectTransfers(transfers, [], 'Unchanged atlas');
+
+    function expectRejected(packet, reason) {
+        let rejected = false;
+        try { draw(packet); } catch { rejected = true; }
+        if (!rejected) throw Error(reason);
+        expectTransfers(transfers, [], reason);
+    }
+    expectRejected(scene(4, 5, glyph, image), 'Patch applied to the wrong atlas base');
+    verifyPixels(gl, 'After missing revision');
+    images[0] = 235;
+    glyphs[glyphs.length - 1] = 254;
+    const reset = full(30, 31);
+    draw(reset);
+    verifyPixels(gl, 'Full recovery');
+    expectTransfers(transfers, fullTransfers('texSubImage2D'), 'Full recovery');
+
+    const lifecycle = gl.getExtension('WEBGL_lose_context');
+    if (lifecycle) {
+        const lost = new Promise(resolve => canvas.addEventListener('webglcontextlost', event => {
+            event.preventDefault();
+            resolve();
+        }, { once: true }));
+        const restored = new Promise(resolve => canvas.addEventListener('webglcontextrestored', resolve, { once: true }));
+        lifecycle.loseContext();
+        await lost;
+        await new Promise(resolve => setTimeout(resolve, 100));
+        lifecycle.restoreContext();
+        await restored;
+    }
+    // A new driver starts without resident atlas textures, including after losing a real GL context.
+    // Discard invalidated handles when the context was lost.
+    if (!lifecycle) renderer.dispose();
+    renderer = new RuneWebGL(canvas, sources);
+    expectRejected(scene(31, 32, glyph, image), 'Fresh context accepted only patches');
+    draw(reset);
+    verifyPixels(gl, 'Fresh context');
+    expectTransfers(transfers, fullTransfers('texImage2D'), 'Fresh context');
+    result.textContent = 'PASS ' + JSON.stringify({ renderer: renderer.info.renderer, glyphBytes: 3, imageBytes: 60,
+        pixelsPerFrame: viewWidth * height, contextRestored: !!lifecycle });
+} catch (error) {
+    result.textContent = 'FAIL ' + error.stack;
+} finally {
+    renderer?.dispose();
+}
+</script>

@@ -1,4 +1,5 @@
 import Foundation
+import Rune
 
 /// Helper for running subprocesses (`git`, `cargo`, `xcrun`) and capturing stdout/stderr.
 public enum ProcessRunner {
@@ -15,7 +16,13 @@ public enum ProcessRunner {
     ) throws -> Output {
         #if os(macOS) || os(Linux) || os(Windows)
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: executable)
+        if executable.contains("/") || executable.contains("\\") {
+            proc.executableURL = URL(fileURLWithPath: executable)
+        } else if let path = RuneExecutableSearch.find(executable) {
+            proc.executableURL = URL(fileURLWithPath: path)
+        } else {
+            throw ParityError.commandFailed(command: executable, exitCode: 127, stderr: "Executable missing from PATH")
+        }
         proc.arguments = arguments
         if let dir = currentDirectory {
             proc.currentDirectoryURL = dir
@@ -341,7 +348,7 @@ public enum ParityMapper {
 
         let range = "\(resolvedSince)..\(to)"
         let logOut = try ProcessRunner.runChecked(
-            executable: "/usr/bin/git",
+            executable: "git",
             arguments: ["-C", upstreamRoot.path, "log", "--oneline", range]
         )
         let commits = logOut
@@ -350,7 +357,7 @@ public enum ParityMapper {
             .filter { !$0.isEmpty }
 
         let diffOut = try ProcessRunner.runChecked(
-            executable: "/usr/bin/git",
+            executable: "git",
             arguments: ["-C", upstreamRoot.path, "diff", "--name-status", range]
         )
 
@@ -407,7 +414,7 @@ public enum ParityMapper {
     ) -> (swiftTarget: String?, swiftFiles: [String], testCommand: String?, mapped: Bool) {
         if let crate = map.crates.first(where: { filePath.hasPrefix($0.upstreamPath + "/") }) {
             let rel = String(filePath.dropFirst(crate.upstreamPath.count + 1))
-            let testCmd = crate.testTarget.map { "xcrun swift test --filter \($0)" }
+            let testCmd = crate.testTarget.map(testCommand)
             if let mod = crate.moduleMappings?.first(where: { $0.upstream == rel || $0.upstream == filePath }) {
                 return (crate.swiftTarget, mod.swift, testCmd, true)
             }
@@ -415,7 +422,7 @@ public enum ParityMapper {
         }
 
         if let theme = map.themes?.first(where: { filePath.hasPrefix($0.upstreamPath + "/") }) {
-            let testCmd = theme.testTarget.map { "xcrun swift test --filter \($0)" }
+            let testCmd = theme.testTarget.map(testCommand)
             return (theme.swiftTarget, [theme.swiftPath], testCmd, true)
         }
 
@@ -424,6 +431,14 @@ public enum ParityMapper {
         }
 
         return (nil, [], nil, false)
+    }
+
+    private static func testCommand(_ target: String) -> String {
+        #if os(macOS)
+        "xcrun swift test --filter \(target)"
+        #else
+        "swift test --filter \(target)"
+        #endif
     }
 
     private static func isTrackableFile(_ path: String) -> Bool {

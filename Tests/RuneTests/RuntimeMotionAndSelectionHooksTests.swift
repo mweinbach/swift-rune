@@ -170,12 +170,12 @@ struct RuntimeMotionAndSelectionHooksTests {
         #expect(rt.selectedText() == "first", "selection must stay alive after clicking keepsTextSelection button")
 
         // 3. Cmd+A selects the entire group & Cmd+C honors El.selectionCopy override
-        let handledA = rt.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: 0.2)
+        let handledA = rt.keyDown(KeyEvent(key: .command("a"), mods: RuneTestKey.primaryMods()), at: 0.2)
         #expect(handledA)
         _ = rt.frame(at: 0.21)
         #expect(rt.selectedText() == "first heading\nbody line")
 
-        let handledC = rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.22)
+        let handledC = rt.keyDown(KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods()), at: 0.22)
         #expect(handledC)
         #expect(rt.clipboard.text == "> first heading\n> body line")
 
@@ -429,9 +429,18 @@ struct RuntimeMotionAndSelectionHooksTests {
         _ = rt.frame(at: 1.61)
         #if os(macOS)
         #expect(rt.selectedText() == "alpha")
+        #else
+        #expect(rt.selectedText() == nil)
+        let emptyMenu = try #require(rt.takePopup()).get().menu
+        #expect(emptyMenu.findItem(id: "copy")?.enabled == false)
+        try rt.resolvePopup(nil)
+        rt.update { _, tx in tx.selectText("pa", range: 0..<5) }
+        _ = rt.frame(at: 1.65)
+        rt.pointerDown(at: copyWordPt, button: .secondary, mods: .none, at: 1.7)
+        _ = rt.frame(at: 1.71)
         #endif
-        let popup = rt.takePopup()
-        #expect(popup != nil, "secondary click on selectable text must enqueue Copy popup menu")
+        let copyMenu = try #require(rt.takePopup()).get().menu
+        #expect(copyMenu.findItem(id: "copy")?.enabled == true)
         try rt.resolvePopup("copy")
         #expect(rt.clipboard.text == "alpha")
 

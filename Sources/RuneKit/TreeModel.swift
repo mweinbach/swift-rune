@@ -474,7 +474,7 @@ public struct TreeModel<T: Sendable>: Sendable {
             selectRange(to: id)
             return false
         }
-        if multi && mods.cmd {
+        if multi && mods.primaryCommand {
             nodes[i].selected.toggle()
             cursorIndex = i
             anchorIndex = i
@@ -626,7 +626,8 @@ public struct TreeModel<T: Sendable>: Sendable {
         keyRepeat: Bool = false
     ) -> TreeKey {
         let m = ev.mods
-        if (m.ctrl && !m.cmd) || m.alt || (m.logo && !m.cmd) {
+        let selectAll = multi && m.primaryCommand && m.primaryAlone && ev.isCommand("a")
+        if !selectAll && (m.cmd || m.ctrl || m.alt || m.logo) {
             return .ignored
         }
         let vis = visibleRows()
@@ -634,21 +635,12 @@ public struct TreeModel<T: Sendable>: Sendable {
         if len == 0 {
             return .ignored
         }
-        let isCmdA: Bool = switch ev.key {
-        case .command(let ch): m.cmd && ch.lowercased() == "a"
-        case .text(let t): m.cmd && t.lowercased() == "a"
-        default: false
-        }
-        if isCmdA && multi {
+        if selectAll {
             for i in vis.rows {
                 nodes[i].selected = true
             }
             return .handled
         }
-        if m.cmd {
-            return .ignored
-        }
-
         let at: Int? = cursorIndex.flatMap { c in
             let r = vis.rowOf[c]
             return r == Int.max ? nil : r

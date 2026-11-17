@@ -2,7 +2,7 @@ import Foundation
 import Rune
 import RuneRef
 
-/// CLI for `RuneRef` deterministic scene listing, PNG generation, pixel blame, and CPU-vs-Metal differential checks.
+/// CLI for deterministic scene listing, PNG generation, pixel blame, and CPU-vs-GPU differential checks.
 enum RuneRefCLI {
     static let availableScenes: [(name: String, description: String)] = [
         ("seeded", "64x64 SplitMix64 corpus (roundedRect, dropShadow, glyph, insetShadow, linearGradient)"),
@@ -24,7 +24,7 @@ enum RuneRefCLI {
         SUBCOMMANDS:
           list                         List built-in deterministic reference scenes
           generate [options]           Render a scene (prints blake3=<hex> for oracle scenes, or fnv1a)
-          check [options]              Run CPU vs MetalRenderer differential comparison
+          check [options]              Compare GPU readback with the CPU reference renderer
 
         OPTIONS:
           --scene <name|path.json>     Built-in scene name, 'all' (for check), or OracleScene JSON path
@@ -32,7 +32,8 @@ enum RuneRefCLI {
           --count <int>                Primitive count for generated scenes (default: 8)
           --save <path.json>           Serialize generated/loaded OracleScene to JSON
           --out, -o <path>             Write rendered PNG to <path>
-          --gpu                        Use MetalRenderer instead of CPU renderer
+          --gpu                        Render the generated frame through the platform GPU driver (Metal or GL)
+          --cpu                        Render the generated frame through the CPU reference renderer (default)
           --blame <x,y>                Inspect pixel (x, y) and print topmost covering primitive
           --tolerance <int>            Per-channel tolerance for 'check' / '--diff' (default: 2)
           --max-failing <int>          Allowed failing pixels (default: 0)
@@ -263,6 +264,8 @@ enum RuneRefCLI {
         }
     }
 
+    enum Help: Error { case requested }
+
     struct Options {
         var scene: String = "seeded"
         var sceneExplicit: Bool = false
@@ -308,6 +311,8 @@ enum RuneRefCLI {
                 opts.outPath = try nextVal()
             case "--gpu":
                 opts.useGPU = true
+            case "--cpu":
+                opts.useGPU = false
             case "--blame":
                 let raw = try nextVal()
                 let parts = raw.split(separator: ",", maxSplits: 1)
@@ -326,8 +331,7 @@ enum RuneRefCLI {
             case "--diff":
                 opts.diffFlag = true
             case "--help", "-h":
-                printHelp()
-                Foundation.exit(0)
+                throw Help.requested
             default:
                 throw CLIError.invalidArgument("unexpected argument '\(arg)'")
             }
@@ -423,9 +427,10 @@ enum RuneRefCLI {
             var frame = OracleFrame(width: oracleScene.width, height: oracleScene.height, provenance: true)
             frame.render(oracleScene)
 
-            if opts.useGPU {
-                let renderer = try MetalRenderer()
-                let gpuFrame = try renderer.renderOffscreen(makeRenderFrame(from: oracleScene))
+            let gpuFrame = opts.useGPU || opts.diffFlag
+                ? try OffscreenGPURenderer(reportAdapter: true).renderOffscreen(makeRenderFrame(from: oracleScene))
+                : nil
+            if opts.useGPU, let gpuFrame {
                 print("blake3=\(Blake3.hashHex(gpuFrame.rgba))")
                 if let outPath = opts.outPath {
                     try gpuFrame.writePNG(to: URL(fileURLWithPath: outPath))
@@ -455,9 +460,7 @@ enum RuneRefCLI {
                     print("clear")
                 }
             }
-            if opts.diffFlag {
-                let renderer = try MetalRenderer()
-                let gpuFrame = try renderer.renderOffscreen(makeRenderFrame(from: oracleScene))
+            if opts.diffFlag, let gpuFrame {
                 let report = Oracle.compare(
                     scene: oracleScene,
                     cpu: frame,
@@ -478,12 +481,19 @@ enum RuneRefCLI {
 
         let scene = try buildScene(name: opts.scene, seed: opts.seed, count: opts.count)
         try scene.validate()
-        let frame: Frame
-        if opts.useGPU {
-            let renderer = try MetalRenderer()
-            frame = try renderer.renderOffscreen(scene)
-        } else {
-            frame = try RuneRef.render(scene)
+        let gpuFrame = opts.useGPU || opts.diffFlag
+            ? try OffscreenGPURenderer(reportAdapter: true).renderOffscreen(scene) : nil
+        let reference = !opts.useGPU || opts.diffFlag ? try RuneRef.render(scene) : nil
+        if opts.diffFlag, let gpuFrame, let reference {
+            let diff = RuneRef.compare(scene: scene, expected: reference, actual: gpuFrame,
+                                       channelTolerance: opts.tolerance, maxFailingPixels: opts.maxFailing)
+            print("diffPixels=\(diff.differingPixels) maxDelta=\(diff.maxChannelDelta)")
+            if !diff.passed {
+                throw CLIError.checkFailed("GPU differs from reference for \(opts.scene)")
+            }
+        }
+        guard let frame = opts.useGPU ? gpuFrame : reference else {
+            throw CLIError.checkFailed("No frame rendered for \(opts.scene)")
         }
         print("scene=\(opts.scene) size=\(frame.width)x\(frame.height) blake3=\(frame.blake3Hash()) fnv1a=\(frame.fnv1aHash())")
         if let (bx, by) = opts.blame {
@@ -511,7 +521,7 @@ enum RuneRefCLI {
             names = [opts.scene]
         }
 
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer(reportAdapter: true)
         var failures = 0
         for name in names {
             let scene = try buildScene(name: name, seed: opts.seed, count: opts.count)
@@ -564,9 +574,10 @@ enum RuneRefCLI {
                 let opts = try parseOptions(args[...])
                 try runGenerate(opts)
             }
+        } catch Help.requested {
+            printHelp()
         } catch {
-            fputs("error: \(error)\n", stderr)
-            Foundation.exit(1)
+            RuneStartup.started(.failure(error))
         }
     }
 }

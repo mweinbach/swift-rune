@@ -9,10 +9,44 @@ import Metal
 
 /// Port of `crates/rune-light/examples/frame_bench.rs`.
 ///
-/// CPU command-buffer recording benchmark for `LightRenderer`, `GlassRenderer`, and `FxRenderer` at 2560x1600.
-/// Prints median microseconds per stage; supports `--fast` (smaller sample count) and `--snap PATH`.
+/// CPU command submission benchmark for `LightRenderer`, `GlassRenderer`, and `FxRenderer` at 2560x1600.
+/// Prints median microseconds per stage. Use `--fast` for fewer samples, `--snap PATH` to capture, and `--gl` to select OpenGL on macOS.
 @main
 enum RuneLightFrameBenchApp {
+    static let lights = [
+        Light.point(400, 300, 200),
+        Light.point(1800, 900, 160),
+    ]
+    static func makePrims(_ n: Int) -> [Prim] {
+        (0..<n).map { i in
+            Prim.rect(Float(i % 20) * 120, Float(i / 20) * 60, 100, 44).radius(10).raised(6)
+        }
+    }
+    static func scene(_ prims: [Prim], gi: GIParams?) -> LightScene {
+        LightScene(prims: prims, lights: lights, settings: LightSettings(gi: gi))
+    }
+
+    static let panes = [
+        Glass.rounded(200, 200, 600, 400, radius: 40),
+        Glass.rounded(1200, 600, 500, 300, radius: 30),
+    ]
+
+    static func effects() -> [FxLayer] {
+        (0..<16).map { i in
+            let shape = FxShape.rounded(
+                x: 100 + Float(i % 4) * 300,
+                y: 100 + Float(i / 4) * 200,
+                w: 200,
+                h: 120,
+                radius: 20
+            )
+            let effect: Fx = (i % 4 == 0)
+                ? .lens(LensParams(frost: 0.6))
+                : .glow(GlowParams(radius: 12, intensity: 0.8))
+            return effect.on(shape).at(0.5)
+        }
+    }
+
     static func main() throws {
         try run(args: Array(CommandLine.arguments.dropFirst()))
     }
@@ -23,6 +57,18 @@ enum RuneLightFrameBenchApp {
             guard let i = args.firstIndex(of: "--snap"), i + 1 < args.count else { return nil }
             return args[i + 1]
         }()
+
+        #if canImport(CRuneGL) && canImport(CRuneOffscreenGL)
+        #if canImport(Metal)
+        if args.contains("--gl") {
+            try runGL(fast: fast, snapPath: snapPath)
+            return
+        }
+        #else
+        try runGL(fast: fast, snapPath: snapPath)
+        return
+        #endif
+        #endif
 
         #if canImport(Metal)
         let w: Int = 2560
@@ -46,20 +92,8 @@ enum RuneLightFrameBenchApp {
         let target = makeTex(format)
         let out = makeTex(format)
 
-        let lights = [
-            Light.point(400, 300, 200),
-            Light.point(1800, 900, 160),
-        ]
-        func makePrims(_ n: Int) -> [Prim] {
-            (0..<n).map { i in
-                Prim.rect(Float(i % 20) * 120, Float(i / 20) * 60, 100, 44).radius(10).raised(6)
-            }
-        }
         let small = makePrims(16)
         let big = makePrims(300)
-        func scene(_ prims: [Prim], gi: GIParams?) -> LightScene {
-            LightScene(prims: prims, lights: lights, settings: LightSettings(gi: gi))
-        }
         func finish(_ cmd: MTLCommandBuffer) {
             cmd.commit()
             cmd.waitUntilCompleted()
@@ -99,11 +133,6 @@ enum RuneLightFrameBenchApp {
         print(String(format: "gi off textures      %8d", light.giSize.0 > 0 ? 5 : 0))
 
         let glass = try GlassRenderer(device: device, pixelFormat: format)
-        let panes = [
-            Glass.rounded(200, 200, 600, 400, radius: 40),
-            Glass.rounded(1200, 600, 500, 300, radius: 30),
-        ]
-
         let warmup = fast ? 4 : 20
         let totalFrames = fast ? 16 : 320
         for (name, gi) in [("light steady gi off", Optional<GIParams>.none), ("light steady gi on", Optional(GIParams()))] {
@@ -138,19 +167,7 @@ enum RuneLightFrameBenchApp {
         }
 
         let fx = try FxRenderer(device: device, pixelFormat: format, options: FxOptions())
-        let layers: [FxLayer] = (0..<16).map { i in
-            let shape = FxShape.rounded(
-                x: 100 + Float(i % 4) * 300,
-                y: 100 + Float(i / 4) * 200,
-                w: 200,
-                h: 120,
-                radius: 20
-            )
-            let effect: Fx = (i % 4 == 0)
-                ? .lens(LensParams(frost: 0.6))
-                : .glow(GlowParams(radius: 12, intensity: 0.8))
-            return effect.on(shape).at(0.5)
-        }
+        let layers = effects()
 
         var fTimes: [Double] = []
         for frame in 0..<totalFrames {
@@ -192,8 +209,8 @@ enum RuneLightFrameBenchApp {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Frame(width: w, height: h, rgba: rgba).writePNG(to: url)
         }
-        #else
-        fputs("error: Metal unavailable on this platform\n", stderr)
+        #elseif !canImport(CRuneOffscreenGL) || !canImport(CRuneGL)
+        FileHandle.standardError.write(Data("error: GPU frame benchmarking unavailable on this platform\n".utf8))
         Foundation.exit(1)
         #endif
     }

@@ -79,6 +79,42 @@ struct RuneFXBlendAndPipelineTests {
         return bytes
     }
 
+    @Test func offCenterFrostDoesNotReadThePreviousBlurOutsideItsScissor() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let queue = try #require(device.makeCommandQueue())
+        let fx = try FxRenderer(device: device, pixelFormat: .rgba8Unorm_srgb)
+        let source = try makeTexture(device: device, width: 1, height: 1, format: .rgba16Float, usage: .shaderRead)
+        let output = try makeTexture(device: device, width: 1280, height: 720, format: .rgba8Unorm_srgb)
+
+        func render(_ shape: FxShape, backdrop: SIMD4<Float16>) throws {
+            withUnsafeBytes(of: backdrop) { bytes in
+                source.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0,
+                               withBytes: bytes.baseAddress!, bytesPerRow: bytes.count)
+            }
+            let layer = Fx.lens(LensParams(frost: 1)).on(shape)
+            fx.prepare(frame: FxFrame(viewport: SIMD2(1280, 720), scale: 2, layers: [layer], backdrop: source))
+            let commands = try #require(queue.makeCommandBuffer())
+            try #require(try fx.blurBackdrop(commandBuffer: commands, backdrop: source, layer: 0))
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = output
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].storeAction = .store
+            let encoder = try #require(commands.makeRenderCommandEncoder(descriptor: pass))
+            try fx.drawLayer(encoder: encoder, layer: 0)
+            encoder.endEncoding()
+            commands.commit()
+            commands.waitUntilCompleted()
+            #expect(commands.status == .completed)
+        }
+
+        // Seed every mip with NaNs so a reused texture exposes out-of-scissor reads deterministically.
+        try render(.rounded(x: 0, y: 0, w: 640, h: 360, radius: 0), backdrop: SIMD4(repeating: .nan))
+        try render(.capsule(x: 388, y: 92, w: 220, h: 66), backdrop: SIMD4(1, 0, 0, 1))
+        var pixel = SIMD4<UInt8>.zero
+        output.getBytes(&pixel, bytesPerRow: 4, from: MTLRegionMake2D(992, 240, 1, 1), mipmapLevel: 0)
+        #expect(pixel.x > 165 && pixel.y < 60 && pixel.z < 60 && pixel.w == 255)
+    }
+
     private func renderBlendCase(
         device: MTLDevice,
         queue: MTLCommandQueue,

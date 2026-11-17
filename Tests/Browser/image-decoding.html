@@ -1,0 +1,175 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune browser image decoding</title>
+<pre id="result">Running…</pre>
+<script type="module">
+import { createRuneImageDecoder } from '../../Sources/Rune/Resources/Web/rune-web-images.mjs';
+
+const bytes = base64 => Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+const check = (truth, message) => { if (!truth) throw Error(message); };
+const pixel = (frame, x, y) => Array.from(frame.rgba.slice(4 * (y * frame.w + x), 4 * (y * frame.w + x) + 4)).join(',');
+const color = (frame, x, y, expected) => {
+    const offset = 4 * (y * frame.w + x);
+    // Some engines round-trip through premultiplied color before exposing straight RGBA.
+    return expected.every((value, i) => Math.abs(frame.rgba[offset + i] - value) <= (i === 3 ? 0 : 2));
+};
+const gif = bytes('R0lGODlhBQADAIEAAAAAAP8AAAAAAAAAACH/C05FVFNDQVBFMi4wAwEDAAAh+QQFBgAAACwAAAAABQADAAAICwABCBQYYKBBgQEBACH5BA0NAAAALAMAAQABAAEAgQAAAP8AAAD/AAAAAAgEAAUEBAAh+QQFFQAAACwDAAEAAgABAIEAAAD/AAAAAP8AAAAIBQABCAgIADs=');
+const webp = bytes('UklGRpQAAABXRUJQVlA4WAoAAAASAAAABAAAAgAAQU5JTQYAAAAAAAAAAwBBTk1GNAAAAAAAAAAAAAQAAAIAAFoAAAJWUDhMHAAAAC8EgAAQD0AgQJkq3PCI7KfEPPA/7gXv+IjofwxBTk1GLAAAAAAAAAEAAAEAAAAAAKoAAABWUDhMEwAAAC8BAAAQDzDcwzBR8x/wqEBE/wMA');
+const jpeg = bytes('/9j/4QAiRXhpZgAATU0AKgAAAAgAAQESAAMAAAABAAYAAAAAAAD/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/2wBDAQMDAwQDBAgEBAgQCwkLEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBD/wAARCAAEAAgDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAABv/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAVAQEBAAAAAAAAAAAAAAAAAAAHCP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AAgPXA//2Q==');
+const text = new TextEncoder();
+const memory = new WebAssembly.Memory({ initial: 1 });
+const requests = new Map();
+let id = 0;
+const wasm = {
+    memory,
+    rune_web_buffer(size) {
+        const extra = Math.ceil((size + 4096 - memory.buffer.byteLength) / 65536);
+        if (extra > 0) memory.grow(extra);
+        return 4096;
+    },
+    rune_web_image_frame(id, w, h, duration) {
+        requests.get(id).frames.push({ w, h, ms: Math.round(duration * 1000), rgba: new Uint8Array(memory.buffer, 4096, w * h * 4).slice() });
+        return 1;
+    },
+    rune_web_image_finish(id, plays, errorLength) {
+        const { frames, resolve, reject } = requests.get(id);
+        requests.delete(id);
+        if (errorLength) reject(Error(new TextDecoder().decode(new Uint8Array(memory.buffer, 4096, errorLength))));
+        else resolve({ frames, plays });
+    }
+};
+const host = createRuneImageDecoder(() => wasm);
+function decode(input, limit = 0, mode = 0) {
+    const request = ++id;
+    const result = new Promise((resolve, reject) => requests.set(request, { resolve, reject, frames: [] }));
+    const view = new Uint8Array(memory.buffer, 64, input.length);
+    view.set(input);
+    host.start(request, 64, input.length, limit, mode);
+    view.fill(0); // Swift is free to reuse its transfer buffer immediately.
+    return result;
+}
+async function rejects(input, message) {
+    try { await decode(input); } catch (error) { check(error.message.includes(message), error.message); return; }
+    throw Error('Image unexpectedly loaded');
+}
+try {
+    const [first, second, portrait] = await Promise.all([decode(gif), decode(webp), decode(jpeg, 4)]);
+    const [a, b, c] = first.frames;
+    check(first.plays === 4 && first.frames.map(f => f.ms).join() === '60,130,210', 'GIF timing/loop');
+    check(a.w === 5 && a.h === 3 && pixel(b, 3, 1) === '0,255,0,255', 'Partial GIF frame');
+    check(pixel(c, 0, 1) === '255,0,0,255' && pixel(c, 3, 1) === '0,0,0,0' && pixel(c, 4, 1) === '0,0,255,255', 'GIF restore previous');
+    check(second.plays === 3 && second.frames.map(f => f.ms).join() === '90,170', 'WebP timing/loop');
+    check(color(second.frames[0], 2, 2, [234,33,90,128]) && pixel(second.frames[1], 1, 2) === '12,220,81,255', 'WebP straight alpha');
+    const tiff = bytes('TU0AKgAAAAgAAQESAAMAAAABAAYAAAAAAAA=');
+    function withExif(webp) {
+        const output = new Uint8Array(webp.length + 8 + tiff.length);
+        output.set(webp);
+        output[20] |= 8;
+        output.set(text.encode('EXIF'), webp.length);
+        const header = new DataView(output.buffer);
+        header.setUint32(4, output.length - 8, true);
+        header.setUint32(webp.length + 4, tiff.length, true);
+        output.set(tiff, webp.length + 8);
+        return output;
+    }
+    const oriented = (await decode(withExif(webp))).frames[1];
+    check(oriented.w === 3 && oriented.h === 5 && pixel(oriented, 0, 1) === '12,220,81,255', 'WebP orientation after composition');
+    const single = bytes('UklGRigAAABXRUJQVlA4TBwAAAAvBIAAEA9AIECZKtzwiOynxDzwP+4F7/iI6H8M');
+    const extended = new Uint8Array(single.length + 18);
+    extended.set(webp.subarray(0, 30)); extended[20] = 16; // VP8X alpha flag on the same 5×3 canvas.
+    extended.set(single.subarray(12), 30);
+    const orientedStill = (await decode(withExif(extended))).frames[0];
+    check(orientedStill.w === 3 && orientedStill.h === 5 && pixel(orientedStill, 0, 1) === '17,29,49,255', 'Static WebP orientation');
+    check(portrait.frames[0].w === 2 && portrait.frames[0].h === 4, 'JPEG rotated thumbnail');
+    const png = bytes('iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAD0lEQVR4nGNw2yKSzQAEAAm0AXpAbyA7AAAAAElFTkSuQmCC');
+    const pngFrame = (await decode(png)).frames[0];
+    check(pngFrame.w === 2 && pngFrame.h === 1 && color(pngFrame, 0, 0, [70,180,20,107]), 'PNG straight alpha');
+
+    const infinite = gif.slice();
+    const signature = new TextDecoder().decode(infinite).indexOf('NETSCAPE2.0');
+    infinite[signature + 13] = 0;
+    check((await decode(infinite)).plays === 0, 'GIF infinite loop');
+    const once = new Uint8Array([...gif.slice(0, signature - 3), ...gif.slice(signature + 16)]);
+    check((await decode(once)).plays === 1, 'GIF absent loop extension');
+
+    const [fallback, fallbackWebP, fallbackGIF] = await (async () => {
+        const prop = Object.getOwnPropertyDescriptor(globalThis, 'ImageDecoder');
+        Object.defineProperty(globalThis, 'ImageDecoder', { configurable: true, value: undefined });
+        try { return await Promise.all([decode(jpeg, 4), decode(webp), decode(gif)]); }
+        finally {
+            if (prop) Object.defineProperty(globalThis, 'ImageDecoder', prop);
+            else delete globalThis.ImageDecoder;
+        }
+    })();
+    check(fallback.frames[0].w === 2 && fallback.frames[0].h === 4, 'Fallback rotation');
+    check(fallbackWebP.plays === 3 && fallbackWebP.frames.length === 2 &&
+        color(fallbackWebP.frames[0], 2, 2, [234,33,90,128]) && pixel(fallbackWebP.frames[1], 1, 2) === '12,220,81,255', 'Fallback WebP alpha/animation');
+    check(fallbackGIF.plays === 4 && fallbackGIF.frames.length === 3 &&
+        pixel(fallbackGIF.frames[2], 3, 1) === '0,0,0,0' && pixel(fallbackGIF.frames[2], 4, 1) === '0,0,255,255', 'Fallback GIF disposal');
+    // Some browser versions advertise GIF/WebP decoding but flatten every decoded frame onto black.
+    class OpaqueDecoder {
+        static async isTypeSupported() { return true; }
+        tracks = { ready: Promise.resolve(), selectedTrack: { animated: true, repetitionCount: 3, frameCount: 2 } };
+        async decode() {
+            const image = document.createElement('canvas');
+            image.width = image.height = 1;
+            image.getContext('2d').fillRect(0, 0, 1, 1);
+            image.close = () => {};
+            return { image };
+        }
+        close() {}
+    }
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'ImageDecoder');
+    Object.defineProperty(globalThis, 'ImageDecoder', { configurable: true, value: OpaqueDecoder });
+    try {
+        const { frames } = await decode(webp);
+        check(frames.length === 2 && color(frames[1], 2, 2, [234,33,90,128]), 'Advertised codec loses alpha');
+    } finally {
+        if (original) Object.defineProperty(globalThis, 'ImageDecoder', original);
+        else delete globalThis.ImageDecoder;
+    }
+    const svg = text.encode('<svg viewBox="0 0 6 3"><circle cx="3" cy="1.5" r="1.5" fill="#ff0000"/></svg>');
+    const vector = (await decode(svg)).frames[0];
+    check(vector.w === 12 && vector.h === 6 && pixel(vector, 6, 3) === '255,0,0,255' && pixel(vector, 0, 0) === '0,0,0,0', 'ViewBox-only SVG rasterization');
+    const svgz = new Blob([svg]).stream().pipeThrough(new CompressionStream('gzip'));
+    const compressed = await decode(new Uint8Array(await new Response(svgz).arrayBuffer()), 24);
+    check(compressed.frames[0].w === 24 && compressed.frames[0].h === 12, 'SVGZ target extent');
+    const dataURL = text.encode('data:image/jpeg;base64,' + btoa(String.fromCharCode(...jpeg)));
+    const [fullURL, smallURL] = await Promise.all([decode(dataURL, 4, 1), decode(dataURL, 4, 2)]);
+    check(fullURL.frames[0].h === 8 && smallURL.frames[0].h === 4, 'URL cache intrinsic dimensions and decode pool thumbnail');
+    const apngDataURL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAMAAAABCAYAAAAb4BS0AAAACGFjVEwAAAACAAAAAPONk3AAAAAaZmNUTAAAAAAAAAADAAAAAQAAAAAAAAAAABQAZAAAxILI+QAAAA5JREFUeJxj+M/A8B+GASbmBfthLF8IAAAAGmZjVEwAAAABAAAAAwAAAAEAAAAAAAAAAAAeAGQAABVBOowAAAAQZmRBVAAAAAJ4nGNg+I+AACPpBfuyvtZLAAAAAElFTkSuQmCC';
+    const encoded = bytes(apngDataURL.split(',')[1]);
+    wasm.rune_web_image_apng = (id, count, limit) => {
+        const copy = new Uint8Array(memory.buffer, 4096, count);
+        check(count === encoded.length && copy.every((value, index) => value === encoded[index]), 'APNG handoff bytes');
+        requests.get(id).resolve(limit);
+        requests.delete(id);
+        return 1;
+    };
+    try {
+        const limits = await Promise.all([decode(text.encode(apngDataURL), 12, 1), decode(text.encode(apngDataURL), 2, 2), decode(encoded, 1)]);
+        check(limits.join() === '0,2,1', 'APNG cache / thumbnail / encoded sizing');
+    } finally { delete wasm.rune_web_image_apng; }
+
+    const large = gif.slice(); large[6] = 1; large[7] = 32;
+    await rejects(large, '8193');
+    await rejects(text.encode('not an image'), 'could not read');
+    // 100 tiny updates on a 1024² canvas exceed the retained RGBA + mip budget.
+    const firstBlock = gif.indexOf(0x21, signature + 16);
+    const nextBlock = gif.indexOf(0x21, firstBlock + 1);
+    const block = gif.slice(firstBlock, nextBlock), many = new Uint8Array(firstBlock + block.length * 100 + 1);
+    many.set(gif.subarray(0, firstBlock)); many.set([0, 4, 0, 4], 6);
+    for (let i = 0; i < 100; i++) many.set(block, firstBlock + block.length * i);
+    many[many.length - 1] = 0x3b;
+    const still = await decode(many), tiny = await decode(many, 1);
+    check(still.frames.length === 1 && still.frames[0].w === 1024 && tiny.frames.length === 100 && tiny.frames[0].w === 1, 'Bounded animation');
+    let callbacks = false;
+    const unmounted = createRuneImageDecoder(() => ({ ...wasm, rune_web_image_frame() { callbacks = true; }, rune_web_image_finish() { callbacks = true; } }));
+    new Uint8Array(memory.buffer, 64, jpeg.length).set(jpeg);
+    unmounted.start(1, 64, jpeg.length, 0, 0); unmounted.dispose();
+    await decode(gif);
+    check(!callbacks, 'Disposed decoder entered Swift');
+    document.querySelector('#result').textContent = 'PASS JPEG orientation, GIF disposal and loop count, WebP alpha and timing, SVG, URLs, memory growth, animation budget, malformed input and cancellation';
+} catch (error) { document.querySelector('#result').textContent = 'FAIL ' + error.stack; }
+finally { host.dispose(); }
+</script>

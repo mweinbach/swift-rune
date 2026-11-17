@@ -148,7 +148,7 @@ struct RuneParityTests {
         try FileManager.default.createDirectory(at: upstream.appendingPathComponent("crates/rune-motion/src"), withIntermediateDirectories: true)
 
         func git(_ args: String...) throws -> String {
-            try ProcessRunner.runChecked(executable: "/usr/bin/git", arguments: ["-C", upstream.path] + args)
+            try ProcessRunner.runChecked(executable: "git", arguments: ["-C", upstream.path] + args)
         }
 
         _ = try git("init")
@@ -204,9 +204,14 @@ struct RuneParityTests {
         #expect(report.changes.count == 1)
         #expect(report.changes[0].swiftTarget == "RuneMotion")
         #expect(report.changes[0].swiftFiles == ["Sources/RuneMotion/Spring.swift"])
-        #expect(report.changes[0].testCommand == "xcrun swift test --filter RuneMotionTests")
+        #if os(macOS)
+        let expectedCommand = "xcrun swift test --filter RuneMotionTests"
+        #else
+        let expectedCommand = "swift test --filter RuneMotionTests"
+        #endif
+        #expect(report.changes[0].testCommand == expectedCommand)
         #expect(report.affectedTargets == ["RuneMotion"])
-        #expect(report.testCommands == ["xcrun swift test --filter RuneMotionTests"])
+        #expect(report.testCommands == [expectedCommand])
     }
 
     @Test("compareTrees detects matching trees and reports node count and bbox deltas")
@@ -364,7 +369,8 @@ struct RuneParityTests {
         #expect(RuneParityCLI.run(arguments: ["status"]) == 1)
     }
 
-    @Test("fetch_upstream.sh fetches local bare git repo on dev branch without network")
+    @Test("fetch_upstream.sh fetches local bare git repo on dev branch without network",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: "/bin/bash")))
     func fetchUpstreamScriptAgainstLocalBareRepo() throws {
         let root = try makeTempDir("fetch-upstream")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -374,7 +380,7 @@ struct RuneParityTests {
         let upstreamClone = root.appendingPathComponent("upstream")
 
         func git(_ args: [String]) throws -> String {
-            try ProcessRunner.runChecked(executable: "/usr/bin/git", arguments: args)
+            try ProcessRunner.runChecked(executable: "git", arguments: args)
         }
 
         _ = try git(["init", "--bare", "-b", "dev", bareRepo.path])

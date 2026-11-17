@@ -4,13 +4,33 @@ import Testing
 import RuneMotion
 import RuneRef
 
+#if (canImport(AVFoundation) && !os(watchOS)) || canImport(CRuneMedia)
+let nativeMediaAvailableForTests = true
+#else
+let nativeMediaAvailableForTests = false
+#endif
+
+func mediaFixtureURL(_ name: String) -> URL {
+    let resources = Bundle.module.resourceURL ?? Bundle.module.bundleURL
+    return resources.appendingPathComponent("Fixtures").appendingPathComponent(name)
+}
+
 @Suite("Video Parity Tests")
 struct VideoParityTests {
-    private static func fixtureURL(_ name: String) -> URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("Fixtures")
-            .appendingPathComponent(name)
+    @Test("A mounted video view retains its player until the last placement is released")
+    func retainedMountedPlayer() throws {
+        func mount() -> (El<Void>, () -> Player?) {
+            let player = Player.file("/nonexistent/rune-video-lifetime.mp4")
+            return (video(player), { [weak player] in player })
+        }
+        var (element, player) = mount()
+        var placement = element.surfacePayload?.surface.placed(.centered)
+        #expect(player() != nil)
+        #expect(placement?.key == player()?.surface.key)
+        element = el()
+        #expect(player() != nil)
+        placement = nil
+        #expect(player() == nil)
     }
 
     @Test("missing file, .ogv, and unsupported .ogg/.webm fail cleanly without resurrection")
@@ -33,20 +53,20 @@ struct VideoParityTests {
             Issue.record("expected .ogv to fail cleanly")
         }
 
-        let oggVorbis = Player(source: .file(Self.fixtureURL("sine-vorbis.ogg")))
+        let oggVorbis = Player(source: .file(mediaFixtureURL("sine-vorbis.ogg")))
         #expect(oggVorbis.snapshot().state.isFailed)
 
-        let oggOpus = Player(source: .file(Self.fixtureURL("sine-opus.ogg")))
+        let oggOpus = Player(source: .file(mediaFixtureURL("sine-opus.ogg")))
         #expect(oggOpus.snapshot().state.isFailed)
 
-        let webmOpus = Player(source: .file(Self.fixtureURL("sine-opus.webm")))
+        let webmOpus = Player(source: .file(mediaFixtureURL("sine-opus.webm")))
         #expect(webmOpus.snapshot().state.isFailed)
     }
 
-    @Test("audio fixtures silence.m4a and silence.wav probe as audio and respect duration")
+    @Test("audio fixtures silence.m4a and silence.wav probe as audio and respect duration", .enabled(if: nativeMediaAvailableForTests))
     func audioFixturesProbeAndPlay() {
         for name in ["silence.m4a", "silence.wav"] {
-            let p = Player(source: .file(Self.fixtureURL(name)))
+            let p = Player(source: .file(mediaFixtureURL(name)))
             let snap = p.snapshot()
             #expect(snap.kind == .audio)
             #expect(snap.state == .ready)
@@ -55,10 +75,10 @@ struct VideoParityTests {
         }
     }
 
-    @Test("video fixture rgbw.mp4 decodes pixels and advances across virtual clock")
+    @Test("video fixture rgbw.mp4 decodes pixels and advances across virtual clock", .enabled(if: nativeMediaAvailableForTests))
     func rgbwFixtureProbesAndPlaysInHeadlessRuntime() throws {
         struct S {}
-        let p = Player(source: .file(Self.fixtureURL("rgbw.mp4")), playing: true, looping: false)
+        let p = Player(source: .file(mediaFixtureURL("rgbw.mp4")), playing: true, looping: false)
         #expect(p.meta.kind == .video)
         #expect(p.size != nil)
         #expect((p.duration ?? 0) > 0.1)
@@ -85,9 +105,9 @@ struct VideoParityTests {
         #expect(videoObj?["state"] as? String != nil)
     }
 
-    @Test("quadrants-rot90.mp4 detects 90-degree preferredTransform orientation and swaps upright size")
+    @Test("quadrants-rot90.mp4 detects 90-degree preferredTransform orientation and swaps upright size", .enabled(if: nativeMediaAvailableForTests))
     func rotatedVideoOrientationAndGPU() throws {
-        let p = Player(source: .file(Self.fixtureURL("quadrants-rot90.mp4")))
+        let p = Player(source: .file(mediaFixtureURL("quadrants-rot90.mp4")))
         #expect(p.meta.kind == .video)
         #expect(p.orient.swaps == true)
         let upright = p.size
@@ -98,21 +118,34 @@ struct VideoParityTests {
             #expect(f.orient.upright(width: f.size.0, height: f.size.1) == up)
         }
 
-        #if canImport(Metal)
-        let renderer = try MetalRenderer()
-        struct S {}
-        let rt = Runtime<S>(
-            state: S(),
-            viewport: Vec2(64, 64),
-            pixelScale: 1.0,
-            view: { _, _ in video(p, .fit).size(64, 64) }
-        )
-        let scene = rt.frame(at: 0)
-        let out = try renderer.renderOffscreen(scene, surfaces: rt.surfaces)
-        #expect(out.width == 64 && out.height == 64)
-        // Center pixel should be non-transparent (rendered rotated frame)
-        let mid = (32 * 64 + 32) * 4
-        #expect(out.rgba[mid + 3] == 255)
+        #if canImport(Metal) || canImport(CRuneOffscreenGL)
+        let renderer = try OffscreenGPURenderer()
+        let rt = Runtime(state: (), viewport: Vec2(32, 64), pixelScale: 1) { _, _ in
+            video(p, .fit).size(32, 64)
+        }
+        rt.srgbBlend = true
+        let out = try renderer.renderOffscreen(rt.renderFrame(at: 0))
+        try #require(out.width == 32 && out.height == 64)
+        let decoded = try #require(p.surface.currentFrame())
+        try #require(decoded.size == (64, 32))
+        let sampler = try SurfacePlaneSampler(frame: decoded, srgbBlend: true)
+
+        // The track turns the landscape buffer counterclockwise. Read the four source
+        // quadrants directly, independent of the renderer's orientation transform.
+        let quadrants = [(8, 16, 48, 8), (24, 16, 48, 24), (8, 48, 16, 8), (24, 48, 16, 24)]
+        var colours = Set<SIMD4<UInt8>>()
+        for (x, y, sourceX, sourceY) in quadrants {
+            let sample = sampler.sample(bufferPixel: SIMD2(Float(sourceX), Float(sourceY)),
+                                        displaySize: SIMD2(64, 32), exact: true)
+            let expected = SIMD4<UInt8>((sample * 255).rounded(.toNearestOrAwayFromZero))
+            let pixel = out.pixel(x: x, y: y)
+            colours.insert(expected)
+            for channel in 0..<4 {
+                #expect(abs(Int(pixel[channel]) - Int(expected[channel])) <= 2,
+                        "Rotated video at (\(x), \(y)): got \(pixel), expected \(expected)")
+            }
+        }
+        #expect(colours.count == 4)
         #endif
     }
 
@@ -258,9 +291,10 @@ struct VideoParityTests {
         #expect(v.time == 1.0)
     }
 
+    #if canImport(AVFoundation) && !os(watchOS)
     @Test("parking_never_releases_a_playing_clip")
     func parkingNeverReleasesPlayingClip() {
-        let url = Self.fixtureURL("rgbw.mp4")
+        let url = mediaFixtureURL("rgbw.mp4")
         let clips = (0..<6).map { _ in Player(source: .url(url)) }
         _ = Player.parkedWithForTest(clips[0])
         clips[0].openMetadataForTest(VideoMeta(kind: .video, duration: 1.0, size: (64, 36), hasSound: false))
@@ -273,6 +307,7 @@ struct VideoParityTests {
         #expect(evicted.count == 1)
         #expect(evicted.first === clips[1])
     }
+    #endif
 
     @Test("sources_tell_urls_from_paths")
     func sourcesTellUrlsFromPaths() {
@@ -297,8 +332,13 @@ struct VideoParityTests {
         #expect(v.isMuted == false)
         #expect(v.time == 0.0)
         v.play()
-        #expect(other.isPlaying == true)
-        #expect(v.state == .loading)
+        if nativeMediaAvailableForTests {
+            #expect(other.isPlaying)
+            #expect(v.state == .loading)
+        } else {
+            #expect(!other.isPlaying)
+            #expect(v.state.isFailed)
+        }
     }
 
     @Test("state_follows_open_play_end_and_failure")

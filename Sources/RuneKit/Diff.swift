@@ -1944,7 +1944,7 @@ public struct DiffState: Sendable, Equatable {
     /// Keyboard navigation and copy/clear handler (`DiffState::key`).
     public mutating func key(_ event: KeyEvent, keyPrefix: String = "diff", tx: inout Tx) -> Bool {
         let mods = event.mods
-        let noCmdMods = !mods.cmd && !mods.ctrl && !mods.alt
+        let noCmdMods = !mods.cmd && !mods.ctrl && !mods.alt && !mods.logo
         switch event.key {
         case .text("j") where noCmdMods:
             return nextHunk(forward: true, keyPrefix: keyPrefix, tx: &tx)
@@ -1957,13 +1957,7 @@ public struct DiffState: Sendable, Equatable {
         case .escape where selection.selected != nil:
             select(nil)
             return true
-        case .command("c"):
-            if selection.selected != nil {
-                tx.copyText(copyText())
-                return true
-            }
-            return false
-        case .text("c") where mods.primaryCommand:
+        case .command("c") where mods.primaryAlone, .text("c") where mods.primaryCommand && mods.primaryAlone:
             if selection.selected != nil {
                 tx.copyText(copyText())
                 return true

@@ -89,7 +89,7 @@ internal func stepShortcutAttachment<Job>(
 internal func currentShortcutThreadID() -> ObjectIdentifier {
     final class ThreadToken: NSObject {}
     let key = "rune.shortcut.threadToken"
-    let dict = Thread.current.threadDictionary
+    let dict = RuneExecutionContext.locals
     if let existing = dict[key] as? ThreadToken {
         return ObjectIdentifier(existing)
     }
@@ -108,7 +108,7 @@ internal enum ShortcutTestHooks {
     }
 
     static func setBeforeWake(_ hook: (() -> Void)?) {
-        let dict = Thread.current.threadDictionary
+        let dict = RuneExecutionContext.locals
         if let hook {
             dict[beforeWakeKey] = HookBox(hook)
         } else {
@@ -117,14 +117,14 @@ internal enum ShortcutTestHooks {
     }
 
     static func takeBeforeWake() -> (() -> Void)? {
-        let dict = Thread.current.threadDictionary
+        let dict = RuneExecutionContext.locals
         guard let box = dict[beforeWakeKey] as? HookBox else { return nil }
         dict.removeObject(forKey: beforeWakeKey)
         return box.fn
     }
 
     static func setBeforeDequeue(_ hook: (() -> Void)?) {
-        let dict = Thread.current.threadDictionary
+        let dict = RuneExecutionContext.locals
         if let hook {
             dict[beforeDequeueKey] = HookBox(hook)
         } else {
@@ -133,7 +133,7 @@ internal enum ShortcutTestHooks {
     }
 
     static func takeBeforeDequeue() -> (() -> Void)? {
-        let dict = Thread.current.threadDictionary
+        let dict = RuneExecutionContext.locals
         guard let box = dict[beforeDequeueKey] as? HookBox else { return nil }
         dict.removeObject(forKey: beforeDequeueKey)
         return box.fn
@@ -235,7 +235,6 @@ internal final class MacOSGlobalHotKeyDriver: ShortcutBackendDriver {
 #endif
 
 internal func defaultShortcutConnect(wayland: Bool, sink: @escaping ShortcutSink) -> Result<any ShortcutBackendDriver, ShortcutError> {
-    _ = wayland
     #if os(macOS)
     do {
         return .success(try MacOSGlobalHotKeyDriver(sink: sink))
@@ -243,6 +242,12 @@ internal func defaultShortcutConnect(wayland: Bool, sink: @escaping ShortcutSink
         return .failure(err)
     } catch {
         return .failure(.rejectedByOS("\(error)"))
+    }
+    #elseif (os(Windows) || os(Linux)) && canImport(CRuneDesktopServices)
+    do {
+        return .success(try DesktopShortcutDriver(wayland: wayland, sink: sink))
+    } catch {
+        return .failure(error)
     }
     #else
     _ = sink
@@ -390,7 +395,7 @@ internal enum ThreadLocalEngines {
     private static let key = "rune.shortcut.engines"
 
     static func table() -> ThreadLocalEnginesBox {
-        let dict = Thread.current.threadDictionary
+        let dict = RuneExecutionContext.locals
         if let existing = dict[key] as? ThreadLocalEnginesBox {
             return existing
         }
@@ -415,11 +420,11 @@ internal enum ShortcutReceiving {
     }
 
     static var current: UInt64? {
-        (Thread.current.threadDictionary[key] as? GenBox)?.generation
+        (RuneExecutionContext.locals[key] as? GenBox)?.generation
     }
 
     static func replace(with next: UInt64?) -> UInt64? {
-        let dict = Thread.current.threadDictionary
+        let dict = RuneExecutionContext.locals
         let prev = (dict[key] as? GenBox)?.generation
         if let next {
             dict[key] = GenBox(next)
@@ -547,6 +552,11 @@ internal final class ShortcutControl: @unchecked Sendable {
             return result
 
         case .wait:
+            #if os(WASI)
+            // A synchronous reply from another host thread is impossible on this reactor.
+            lock.unlock()
+            return .failure(.notRunning)
+            #else
             let box = ShortcutReplyBox<T>()
             let wakes = postShortcutJob(&attachment, box: box, body: body)
             lock.unlock()
@@ -554,6 +564,7 @@ internal final class ShortcutControl: @unchecked Sendable {
                 wake.wake()
             }
             return box.wait()
+            #endif
 
         default:
             lock.unlock()
@@ -562,6 +573,7 @@ internal final class ShortcutControl: @unchecked Sendable {
     }
 }
 
+#if !os(WASI)
 private func postShortcutJob<T: Sendable>(
     _ state: inout ShortcutAttachmentState<ShortcutEngineJob>,
     box: ShortcutReplyBox<T>,
@@ -622,6 +634,7 @@ private final class ShortcutReplyBox<T>: @unchecked Sendable {
         deliver(.failure(.notRunning))
     }
 }
+#endif
 
 internal final class ShortcutHandlersBox<State>: @unchecked Sendable {
     private let lock = NSLock()

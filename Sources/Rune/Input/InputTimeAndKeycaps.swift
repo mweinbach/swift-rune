@@ -12,19 +12,14 @@ public enum InputTime {
         var lastTimestamp: Double = 0
     }
 
-    #if os(WASI)
-    // The single-threaded WASI event loop has one input thread. Foundation.Thread is unavailable.
-    nonisolated(unsafe) private static let state = State()
-    #else
     private static let threadKey = "rune.input.time"
     private static var state: State {
-        let dictionary = Thread.current.threadDictionary
+        let dictionary = RuneExecutionContext.locals
         if let existing = dictionary[threadKey] as? State { return existing }
         let created = State()
         dictionary[threadKey] = created
         return created
     }
-    #endif
 
     /// Most recent user input timestamp on this thread (`last_input`).
     public static func lastInput() -> Double {

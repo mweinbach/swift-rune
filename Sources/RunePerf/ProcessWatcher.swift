@@ -5,6 +5,8 @@ import Darwin
 import Glibc
 #elseif canImport(Musl)
 import Musl
+#elseif os(Windows)
+import WinSDK
 #endif
 
 /// Configuration for `ProcwatchWatcher` (`crates/procwatch/src/lib.rs::Config`).
@@ -320,90 +322,172 @@ public enum Procwatch {
     /// Returns the bound port.
     @discardableResult
     public static func serve(port: UInt16 = 0) throws -> UInt16 {
-        #if os(macOS) || os(iOS) || os(tvOS) || os(visionOS) || os(Linux)
-        #if canImport(Darwin)
+        #if os(macOS) || os(iOS) || os(tvOS) || os(visionOS) || os(Linux) || os(Windows)
+        #if os(Windows)
+        var winsock = WSADATA()
+        let startup = WSAStartup(0x0202, &winsock)
+        guard startup == 0 else { throw PerfRecorderError.io("WSAStartup failed with error \(startup)") }
+        let sock = WinSDK.socket(AF_INET, SOCK_STREAM, 0)
+        #elseif canImport(Darwin)
         let sock = Darwin.socket(AF_INET, SOCK_STREAM, 0)
         #elseif canImport(Glibc)
         let sock = Glibc.socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
         #elseif canImport(Musl)
         let sock = Musl.socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
         #endif
-        guard sock >= 0 else {
+        guard sock != invalidSocket else {
+            #if os(Windows)
+            WSACleanup()
+            #endif
             throw PerfRecorderError.io("socket creation failed")
         }
 
-        var reuse: Int32 = 1
-        _ = setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+        #if os(Windows)
+        // The Windows SDK defines SO_EXCLUSIVEADDRUSE as the bitwise complement of SO_REUSEADDR.
+        let bindOption = ~Int32(SO_REUSEADDR)
+        #else
+        let bindOption = SO_REUSEADDR
+        #endif
+        let optionResult = withUnsafeBytes(of: Int32(1)) { bytes in
+            setsockopt(sock, SOL_SOCKET, bindOption, bytes.baseAddress!.assumingMemoryBound(to: CChar.self), SocketLength(bytes.count))
+        }
+        guard optionResult == 0 else {
+            closeListener(sock)
+            throw PerfRecorderError.io("setting socket bind option failed")
+        }
 
         var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_family = numericCast(AF_INET)
         addr.sin_port = port.bigEndian
-        addr.sin_addr = in_addr(s_addr: UInt32(0x7f00_0001).bigEndian)
         #if canImport(Darwin)
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         #endif
-
-        let bindRes = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
-                bind(sock, saPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
+        let addressLength = SocketLength(MemoryLayout<sockaddr_in>.size)
+        guard inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) == 1 else {
+            closeListener(sock)
+            throw PerfRecorderError.io("could not initialize loopback address")
         }
-        guard bindRes == 0 else {
-            close(sock)
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(sock, $0, addressLength) }
+        }
+        guard bindResult == 0 else {
+            closeListener(sock)
             throw PerfRecorderError.io("bind failed on 127.0.0.1:\(port)")
         }
 
         var boundAddr = sockaddr_in()
-        var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let nameRes = withUnsafeMutablePointer(to: &boundAddr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
-                getsockname(sock, saPtr, &addrLen)
-            }
+        var addrLen = addressLength
+        let nameResult = withUnsafeMutablePointer(to: &boundAddr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(sock, $0, &addrLen) }
         }
-        guard nameRes == 0, listen(sock, 16) == 0 else {
-            close(sock)
+        guard nameResult == 0, listen(sock, 16) == 0 else {
+            closeListener(sock)
             throw PerfRecorderError.io("listen failed")
         }
 
-        let boundPort = UInt16(bigEndian: boundAddr.sin_port)
         let thread = Thread {
+            defer { closeListener(sock) }
             while true {
                 var peer = sockaddr_in()
-                var peerLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+                var peerLen = addressLength
                 let client = withUnsafeMutablePointer(to: &peer) { ptr in
-                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
-                        accept(sock, saPtr, &peerLen)
-                    }
+                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { accept(sock, $0, &peerLen) }
                 }
-                if client < 0 { continue }
-
-                // Loopback only (127.x.x.x).
-                let peerIP = UInt32(bigEndian: peer.sin_addr.s_addr)
-                if (peerIP >> 24) != 127 {
-                    close(client)
+                guard client != invalidSocket else {
+                    #if os(Windows)
+                    let error = WSAGetLastError()
+                    if error == WSAENOTSOCK || error == WSAEINVAL || error == WSANOTINITIALISED { return }
+                    #else
+                    if errno == EBADF || errno == EINVAL || errno == ENOTSOCK { return }
+                    #endif
+                    // A transient resource error must leave this process-wide listener available.
+                    Thread.sleep(forTimeInterval: 0.05)
                     continue
                 }
-
-                var rcvTimeout = timeval(tv_sec: 1, tv_usec: 0)
-                _ = setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
-
-                var reqBuf = [UInt8](repeating: 0, count: 1024)
-                _ = recv(client, &reqBuf, reqBuf.count, 0)
-
-                let body = ProcessSampler.snapshot().toJSON()
-                let response = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: \(body.utf8.count)\r\nconnection: close\r\n\r\n\(body)"
-                let bytes = Array(response.utf8)
-                _ = bytes.withUnsafeBytes { raw in
-                    send(client, raw.baseAddress, raw.count, 0)
+                defer { closeSocket(client) }
+                if withUnsafeBytes(of: peer.sin_addr, { $0.first == 127 }) {
+                    sendSnapshot(to: client)
                 }
-                close(client)
             }
         }
         thread.name = "procwatch-http"
         thread.start()
-        return boundPort
+        return UInt16(bigEndian: boundAddr.sin_port)
         #else
         throw PerfRecorderError.io("procwatch HTTP server unsupported on this platform")
         #endif
     }
+
+    #if os(macOS) || os(iOS) || os(tvOS) || os(visionOS) || os(Linux) || os(Windows)
+    #if os(Windows)
+    private typealias Socket = SOCKET
+    private typealias SocketLength = Int32
+    private static let invalidSocket = INVALID_SOCKET
+    #else
+    private typealias Socket = Int32
+    private typealias SocketLength = socklen_t
+    private static let invalidSocket: Int32 = -1
+    #endif
+
+    private static func closeSocket(_ sock: Socket) {
+        #if os(Windows)
+        closesocket(sock)
+        #else
+        close(sock)
+        #endif
+    }
+
+    private static func closeListener(_ sock: Socket) {
+        closeSocket(sock)
+        #if os(Windows)
+        WSACleanup()
+        #endif
+    }
+
+    private static func sendSnapshot(to client: Socket) {
+        #if os(Windows)
+        let timeout: DWORD = 1_000
+        #else
+        let timeout = timeval(tv_sec: 1, tv_usec: 0)
+        #endif
+        withUnsafeBytes(of: timeout) { bytes in
+            let value = bytes.baseAddress!.assumingMemoryBound(to: CChar.self)
+            for option in [SO_RCVTIMEO, SO_SNDTIMEO] {
+                _ = setsockopt(client, SOL_SOCKET, option, value, SocketLength(bytes.count))
+            }
+        }
+        var request = [CChar](repeating: 0, count: 1024)
+        guard recv(client, &request, 1024, 0) > 0 else { return }
+
+        #if canImport(Darwin)
+        var enabled: Int32 = 1
+        guard setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &enabled, SocketLength(MemoryLayout<Int32>.size)) == 0 else { return }
+        #endif
+        #if os(Linux)
+        let flags = Int32(MSG_NOSIGNAL)
+        #else
+        let flags: Int32 = 0
+        #endif
+        let body = ProcessSampler.snapshot().toJSON()
+        let response = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: \(body.utf8.count)\r\nconnection: close\r\n\r\n\(body)"
+        let bytes = response.utf8CString
+        bytes.withUnsafeBufferPointer { buffer in
+            var offset = 0
+            let count = buffer.count - 1 // Exclude the C string terminator.
+            while offset < count {
+                let length = min(count - offset, Int(Int32.max))
+                let written = send(client, buffer.baseAddress!.advanced(by: offset), numericCast(length), flags)
+                if written < 0 {
+                    #if os(Windows)
+                    if WSAGetLastError() == WSAEINTR { continue }
+                    #else
+                    if errno == EINTR { continue }
+                    #endif
+                }
+                guard written > 0 else { return }
+                offset += Int(written)
+            }
+        }
+    }
+    #endif
 }

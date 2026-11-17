@@ -1,5 +1,8 @@
 import Foundation
 import RuneRef
+#if !canImport(CoreText) || !canImport(CoreGraphics)
+import Rune
+#endif
 
 #if canImport(CoreGraphics) && canImport(CoreText)
 import CoreGraphics
@@ -50,10 +53,55 @@ final class TextAtlas {
     private var x: Int = 1
     private var y: Int = 1
     private var rowH: Int = 0
+    private var sceneName: String?
+    private var overflowingLabel: String?
+    #if !canImport(CoreText) || !canImport(CoreGraphics)
+    private let textSystem = TextSystem()
+    #endif
     var dirty: Bool = true
 
     init() {
         self.data = [UInt8](repeating: 0, count: galleryAtlasSize * galleryAtlasSize)
+    }
+
+    func beginScene(_ name: String) {
+        guard sceneName != name else { return }
+        if sceneName != nil {
+            data = [UInt8](repeating: 0, count: galleryAtlasSize * galleryAtlasSize)
+            map.removeAll(keepingCapacity: true)
+            x = 1
+            y = 1
+            rowH = 0
+            overflowingLabel = nil
+            dirty = true
+        }
+        sceneName = name
+    }
+
+    func checkCapacity() throws {
+        if let overflowingLabel {
+            throw NSError(domain: "RuneFxGallery", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Gallery text atlas is full while packing '\(overflowingLabel)'"
+            ])
+        }
+    }
+
+    /// Shelf positions and UVs stay valid until the next scene, including GUI and mask passes.
+    private func place(width: Int, height: Int, label: String) -> Bool {
+        guard width <= galleryAtlasSize - 2, height <= galleryAtlasSize - 2 else {
+            overflowingLabel = label
+            return false
+        }
+        if x + width + 1 > galleryAtlasSize {
+            x = 1
+            y += rowH + 1
+            rowH = 0
+        }
+        if y + height + 1 > galleryAtlasSize {
+            overflowingLabel = label
+            return false
+        }
+        return true
     }
 
     func get(_ text: String, sizePx: Float, weight: UInt8) -> TextRegion {
@@ -91,10 +139,9 @@ final class TextAtlas {
         let w = max(1, Int(ceil(max(advance, 0))) + 4)
         let h = max(1, Int(ceil(ascentCG + descentCG)) + 4)
 
-        if x + w + 1 > galleryAtlasSize {
-            x = 1
-            y += rowH + 1
-            rowH = 0
+        let ascent = Float(ascentCG) + 2.0
+        guard place(width: w, height: h, label: text) else {
+            return TextRegion(uv: .zero, w: Float(w), h: Float(h), ascent: ascent)
         }
 
         var local = [UInt8](repeating: 0, count: w * h)
@@ -118,54 +165,77 @@ final class TextAtlas {
             CTLineDraw(line, ctx)
         }
 
-        for row in 0..<h {
-            let dy = y + row
-            guard dy < galleryAtlasSize else { break }
-            let dstBase = dy * galleryAtlasSize + x
-            let srcBase = row * w
-            for colIdx in 0..<w where x + colIdx < galleryAtlasSize {
-                data[dstBase + colIdx] = max(data[dstBase + colIdx], local[srcBase + colIdx])
+        #else
+        let style = TextStyle(
+            size: sizePx,
+            weight: weight == 0 ? 400 : (weight == 1 ? 500 : 600),
+            letterSpacing: sizePx > 40 ? -0.02 * sizePx : 0
+        )
+        textSystem.glyphAtlas.beginFrame()
+        let line = textSystem.shape(text: text, style: style, maxWidth: nil, pixelScale: 1)
+        let w = max(1, Int(ceil(line.size.x)) + 4)
+        let h = max(1, Int(ceil(line.size.y)) + 4)
+        let ascent = (TextBoxGeometry.roundedBaselines(originYPx: 0, shaped: line).first ?? 0) + 2
+        guard place(width: w, height: h, label: text) else {
+            return TextRegion(uv: .zero, w: Float(w), h: Float(h), ascent: ascent)
+        }
+        var local = [UInt8](repeating: 0, count: w * h)
+        let atlas = textSystem.glyphAtlas
+        for glyph in line.glyphs {
+            let dx = 2 + Int(glyph.rect.x.rounded())
+            let dy = 2 + Int(glyph.rect.y.rounded())
+            let glyphW = Int(glyph.rect.z.rounded())
+            let glyphH = Int(glyph.rect.w.rounded())
+            if let color = textSystem.colorGlyph(for: glyph) {
+                let stride = color.pixelSize.x * 4
+                blitMask(color.rgba, from: 3, stride: stride, step: 4,
+                         width: min(glyphW, color.pixelSize.x), height: min(glyphH, color.pixelSize.y),
+                         atX: dx, y: dy, into: &local, width: w, height: h)
+            } else if let page = atlas.pageData(Int(glyph.atlasPage)) {
+                let stride = atlas.atlas.width
+                let sx = Int((glyph.uv.x * Float(stride)).rounded())
+                let sy = Int((glyph.uv.y * Float(atlas.atlas.height)).rounded())
+                blitMask(page, from: sy * stride + sx, stride: stride, step: 1,
+                         width: glyphW, height: glyphH, atX: dx, y: dy,
+                         into: &local, width: w, height: h)
             }
         }
-
-        let r = TextRegion(
-            uv: SIMD4<Float>(
-                Float(x) / Float(galleryAtlasSize),
-                Float(y) / Float(galleryAtlasSize),
-                Float(x + w) / Float(galleryAtlasSize),
-                Float(y + h) / Float(galleryAtlasSize)
-            ),
-            w: Float(w),
-            h: Float(h),
-            ascent: Float(ascentCG) + 2.0
-        )
-        #else
-        let w = max(4, Int((Float(text.count) * sizePx * 0.55).rounded()))
-        let h = max(4, Int((sizePx * 1.2).rounded()))
-        if x + w + 1 > galleryAtlasSize {
-            x = 1
-            y += rowH + 1
-            rowH = 0
-        }
-        let r = TextRegion(
-            uv: SIMD4<Float>(
-                Float(x) / Float(galleryAtlasSize),
-                Float(y) / Float(galleryAtlasSize),
-                Float(x + w) / Float(galleryAtlasSize),
-                Float(y + h) / Float(galleryAtlasSize)
-            ),
-            w: Float(w),
-            h: Float(h),
-            ascent: sizePx * 0.8 + 2.0
-        )
         #endif
 
+        for row in 0..<h {
+            let dst = (y + row) * galleryAtlasSize + x
+            data.replaceSubrange(dst..<(dst + w), with: local[(row * w)..<((row + 1) * w)])
+        }
+        let r = TextRegion(
+            uv: SIMD4<Float>(Float(x), Float(y), Float(x + w), Float(y + h)) / Float(galleryAtlasSize),
+            w: Float(w), h: Float(h), ascent: ascent
+        )
         x += w + 1
         rowH = max(rowH, h)
         dirty = true
         map[key] = r
         return r
     }
+
+    #if !canImport(CoreText) || !canImport(CoreGraphics)
+    private func blitMask<Bytes: RandomAccessCollection>(
+        _ src: Bytes, from start: Int, stride: Int, step: Int, width: Int, height: Int,
+        atX x: Int, y: Int, into dst: inout [UInt8], width dstWidth: Int, height dstHeight: Int
+    ) where Bytes.Element == UInt8, Bytes.Index == Int {
+        let x0 = max(0, -x), x1 = min(width, dstWidth - x)
+        let y0 = max(0, -y), y1 = min(height, dstHeight - y)
+        guard x0 < x1, y0 < y1 else { return }
+        for row in y0..<y1 {
+            let srcRow = start + row * stride
+            let dstRow = (y + row) * dstWidth + x
+            for col in x0..<x1 {
+                let alpha = Int(src[srcRow + col * step])
+                let idx = dstRow + col
+                dst[idx] = UInt8(alpha + (Int(dst[idx]) * (255 - alpha) + 127) / 255)
+            }
+        }
+    }
+    #endif
 }
 
 #if canImport(Metal)

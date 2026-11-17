@@ -435,7 +435,7 @@ private func fnvMixFloat4(_ h: inout UInt64, _ v: SIMD4<Float>) {
 private func hashCachedLayerContent(
     instances: ArraySlice<RenderInstance>,
     glyphFixups: ArraySlice<(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16, forceScaled: Bool)>,
-    imageFixups: ArraySlice<(index: Int, normUV: SIMD4<Float>, imgW: Float, imgH: Float)>,
+    imageFixups: ArraySlice<(index: Int, texelEdges: SIMD4<Float>, imgW: Float, imgH: Float)>,
     surfacesCount: Int,
     origin: SIMD2<Float>,
     size: SIMD2<Float>,
@@ -500,7 +500,7 @@ private func hashCachedLayerContent(
         fnvMix(&h, fix.forceScaled ? 1 : 0)
     }
     for fix in imageFixups {
-        fnvMixFloat4(&h, fix.normUV)
+        fnvMixFloat4(&h, fix.texelEdges)
         fnvMixFloat(&h, fix.imgW)
         fnvMixFloat(&h, fix.imgH)
     }
@@ -658,7 +658,8 @@ extension Runtime {
     private func withRenderFrame<T>(at now: Double, finish: (RenderFrame, FrameOutput, Double) -> T) -> T {
         RuntimeIdScope.$current.withValue(runtimeId) {
             Theme.withBlend(srgbBlend) {
-                var (frameOut, animNow) = stepToFrameOutputScaled(at: now)
+                let timer = beginFrameTimers(at: now)
+                var (frameOut, animNow) = stepToFrameOutputScaled(at: now, skipFramePoll: timer.alreadyPolled)
                 var rf = buildRenderFrame(frameOut: frameOut, now: animNow, publishHitGeometry: true)
                 for _ in 0..<3 {
                     if !followKeeps(frameOut: &frameOut, at: animNow) { break }
@@ -682,6 +683,8 @@ extension Runtime {
     }
 
     internal func buildRenderFrame(frameOut: FrameOutput, now: Double, publishHitGeometry: Bool = false) -> RenderFrame {
+        beginPixelPaint()
+        defer { finishPixelPaint() }
         textSystem.glyphAtlas.beginFrame(pinnedMask: 0)
         elSliceRenderState.cacheScaleFramePending = false
         let commitGen = UInt64(viewCommitCount)
@@ -735,6 +738,7 @@ extension Runtime {
         var newElements: [ElementInfo] = []
         var newSeenMatched: [String: MatchedSeenSnapshot] = [:]
         var newHitGeometries: [String: HitGeometry] = [:]
+        var newLinkBoxes: [String: [TextLinkBox]] = [:]
         var hitScopes: [RenderHitScope] = []
         var newPresentedRects: [String: MotionRect] = [:]
         var newPresentedScales: [String: Vec2] = [:]
@@ -742,14 +746,16 @@ extension Runtime {
         var newDrawnRectByPath: [String: MotionRect] = [:]
         var newRectSpringingById: [NodeId: Bool] = [:]
         var instances: [RenderInstance] = []
+        var elidedLayers: [(index: Int, node: UInt64, signature: UInt64)] = []
         var marks: [UInt32] = []
         var newSurfaces: [SurfaceDraw] = []
+        var surfaceVideo = SurfaceVideoPaint()
         var currentInheritedMark: UInt32 = 0
         var materials: [MaterialDraw] = []
 
-        // Normalized-to-texel fixups applied once glyph/image atlases reach final size
+        // Publish normalized glyph pages and image texel edges in the renderer's origin/size ABI.
         var glyphFixups: [(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16, forceScaled: Bool)] = []
-        var imageFixups: [(index: Int, normUV: SIMD4<Float>, imgW: Float, imgH: Float)] = []
+        var imageFixups: [(index: Int, texelEdges: SIMD4<Float>, imgW: Float, imgH: Float)] = []
 
         var childrenByParent: [NodeId: [FlatNode]] = [:]
         var roots: [FlatNode] = []
@@ -987,6 +993,24 @@ extension Runtime {
                     glyphFixups.append((idx, entry.uv, gw, gh, entry.page, forceScaled))
                 }
             }
+        }
+
+        func appendTextGlyph(_ glyph: PositionedGlyph, rect: SIMD4<Float>, ink: SIMD4<Float>,
+                             clip: SIMD4<Float>, fade: SIMD4<UInt32>, forceScaled: Bool) {
+            let index = instances.count
+            let image = colorGlyphImage(glyph)
+            if let image {
+                imageFixups.append((index, image.uv, Float(image.pixelSize.x), Float(image.pixelSize.y)))
+            } else {
+                glyphFixups.append((index, glyph.uv, rect.z, rect.w, glyph.atlasPage, forceScaled))
+            }
+            instances.append(RenderInstance(
+                rect: rect, radii: .zero,
+                fill: image == nil ? ink : SIMD4(repeating: ink.w), border: .zero,
+                params: SIMD4(0, image == nil ? KIND_GLYPH : KIND_IMAGE, 0, image == nil ? textSystem.coverageExponent(ink) : 1),
+                uv: image?.uv ?? glyph.uv, clip: clip, fade: fade
+            ))
+            marks.append(0)
         }
 
         @inline(never)
@@ -2095,8 +2119,33 @@ extension Runtime {
 
             // Border & solid fill handling
             let fillPaintedByGrad = radialGradSpec != nil || linearGradSpec != nil || el.gradient != nil
-            if let dash = el.dashedBorder, bwPx > 0 && (effBorderColor.a > 0.001 || (borderBottomColor?.a ?? 0) > 0.001) {
+            // Video and other native pictures sit above the box fill but below its border,
+            // inset shadows, effect slots and children (runtime/paint/build.rs).
+            let hasSurface = el.surfacePayload != nil
+            if let (surface, fit) = el.surfacePayload {
                 if hasSolidBg && !fillPaintedByGrad {
+                    instances.append(RenderInstance(
+                        rect: rectPx, radii: shapeRadiiPx,
+                        fill: premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend), border: .zero,
+                        params: SIMD4<Float>(0, KIND_RECT, softEdge, 1), uv: .zero, clip: activeClip, fade: activeFade
+                    ))
+                    marks.append(0)
+                }
+                surfaceVideo.snapshot(surface, path: node.path)
+                let visible = rectPx.x < activeClip.z && rectPx.y < activeClip.w
+                    && rectPx.x + rectPx.z > activeClip.x && rectPx.y + rectPx.w > activeClip.y
+                if visible {
+                    surfaceVideo.pull(surface, at: now, wallTime: currentTime, waker: waker)
+                    newSurfaces.append(SurfaceDraw(
+                        surface: surface.placed(el.surfacePlace), fit: fit, beforeInstance: UInt32(instances.count),
+                        rect: rectPx, radii: radiiPx, clip: activeClip, clipFade: activeFade, opacity: localOpacity
+                    ))
+                } else {
+                    surfaceVideo.unpulled(surface)
+                }
+            }
+            if let dash = el.dashedBorder, bwPx > 0 && (effBorderColor.a > 0.001 || (borderBottomColor?.a ?? 0) > 0.001) {
+                if hasSolidBg && !fillPaintedByGrad && !hasSurface {
                     instances.append(RenderInstance(
                         rect: rectPx,
                         radii: shapeRadiiPx,
@@ -2121,7 +2170,7 @@ extension Runtime {
                 ))
                 marks.append(0)
             } else if let bottomPremul = borderBottomPremul, bwPx > 0 {
-                let bgPremul = fillPaintedByGrad ? .zero : premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend)
+                let bgPremul = fillPaintedByGrad || hasSurface ? .zero : premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend)
                 instances.append(RenderInstance(
                     rect: rectPx,
                     radii: shapeRadiiPx,
@@ -2133,7 +2182,7 @@ extension Runtime {
                     fade: activeFade
                 ))
                 marks.append(0)
-            } else if !fillPaintedByGrad && (hasSolidBg || (bwPx > 0 && effBorderColor.a > 0.001)) {
+            } else if !fillPaintedByGrad && ((hasSolidBg && !hasSurface) || (bwPx > 0 && effBorderColor.a > 0.001)) {
                 let sidesVec: SIMD4<Float>
                 if let s = el.borderSides {
                     sidesVec = SIMD4<Float>(
@@ -2145,7 +2194,7 @@ extension Runtime {
                 } else {
                     sidesVec = .zero
                 }
-                var fill = premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend)
+                var fill: SIMD4<Float> = hasSurface ? .zero : premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend)
                 if srgbBlend && el.borderWidth == 0 && bwPx == 0 && sidesVec == .zero
                     && el.surfacePayload == nil && fill.w < 1 {
                     // Preserve the transfer curve's exact white endpoint before byte blending.
@@ -2163,7 +2212,7 @@ extension Runtime {
                     clip: activeClip,
                     fade: activeFade
                 )
-                if !hasSolidBg && bwPx > 0 && effBorderColor.a > 0.001 && sidesVec == .zero {
+                if (!hasSolidBg || hasSurface) && bwPx > 0 && effBorderColor.a > 0.001 && sidesVec == .zero {
                     PaintBands.pushRing(into: &instances, marks: &marks, inst: rectInst)
                 } else {
                     instances.append(rectInst)
@@ -2244,25 +2293,9 @@ extension Runtime {
                 }
             }
 
-            // 7. Native surface / video
-            if let surf = el.surfacePayload {
-                newSurfaces.append(SurfaceDraw(
-                    surface: surf.surface,
-                    fit: surf.fit,
-                    beforeInstance: UInt32(instances.count),
-                    rect: rectPx,
-                    radii: radiiPx,
-                    clip: activeClip,
-                    fade: .zero,
-                    fadeOrigin: .zero,
-                    clipFade: activeFade,
-                    opacity: localOpacity
-                ))
-            }
-
             // 8. Image (`RGBA8Atlas` / `Pixels` + optional `SurfaceFit`)
             if let img = el.imagePayload, img.width > 0 && img.height > 0 {
-                let normUV = imagePacker.insert(img)
+                let imageEdges = imagePacker.insert(img)
                 let idx = instances.count
                 instances.append(RenderInstance(
                     rect: rectPx,
@@ -2270,21 +2303,19 @@ extension Runtime {
                     fill: SIMD4<Float>(localOpacity, localOpacity, localOpacity, localOpacity),
                     border: .zero,
                     params: SIMD4<Float>(0, KIND_IMAGE, 0, 1.0),
-                    uv: normUV,
+                    uv: imageEdges,
                     clip: activeClip,
                     fade: activeFade
                 ))
                 marks.append(0)
-                imageFixups.append((idx, normUV, Float(img.width), Float(img.height)))
+                imageFixups.append((idx, imageEdges, Float(img.width), Float(img.height)))
             } else if let px = el.pixelsPayload {
-                let sz = px.size
-                if sz.width > 0 && sz.height > 0 {
-                    let rgba = px.rgbaBytes()
-                    let atlas = RGBA8Atlas(width: Int(sz.width), height: Int(sz.height), texels: rgba)
-                    let normUV = imagePacker.insert(atlas)
+                let visible = paintEffOpacity * el.elPaintAlpha > 0.001 && visibleClipPt.width > 0 && visibleClipPt.height > 0
+                if let (imageEdges, sz) = placedPixels(px, at: now, visible: visible, box: rectPx,
+                                                       fit: el.pixelsFitMode, place: el.surfacePlace) {
                     let fitted = Runtime.fittedPixelsGeometry(
                         box: rectPx,
-                        uv: normUV,
+                        uv: imageEdges,
                         imageWidth: Float(sz.width),
                         imageHeight: Float(sz.height),
                         fit: el.pixelsFitMode,
@@ -2298,13 +2329,12 @@ extension Runtime {
                         ? SIMD4<Float>(min(radiiPx.x, maxR), min(radiiPx.y, maxR), min(radiiPx.z, maxR), min(radiiPx.w, maxR))
                         : radiiPx
                     let idx = instances.count
-                    let premulFlag: Float = px.isPremultiplied ? 1.0 : 0.0
                     instances.append(RenderInstance(
                         rect: drawRect,
                         radii: drawRadii,
                         fill: SIMD4<Float>(localOpacity, localOpacity, localOpacity, localOpacity),
-                        border: .zero,
-                        params: SIMD4<Float>(0, KIND_IMAGE, premulFlag, 1.0),
+                        border: drawUV == imageEdges ? .zero : imageEdges,
+                        params: SIMD4<Float>(0, KIND_IMAGE, 0, 1.0),
                         uv: drawUV,
                         clip: activeClip,
                         fade: activeFade
@@ -2418,7 +2448,7 @@ extension Runtime {
                     mirrored: node.mirroredInRtl
                 ), let baseMip = colorDecoded.mips.first {
                     let atlas = RGBA8Atlas(width: Int(baseMip.width), height: Int(baseMip.height), texels: [UInt8](baseMip.rgba))
-                    let normUV = imagePacker.insert(atlas)
+                    let imageEdges = imagePacker.insert(atlas)
                     let pw = Float(baseMip.width)
                     let ph = Float(baseMip.height)
                     let ix = rectPx.x + (rectPx.z - pw) * 0.5
@@ -2430,12 +2460,12 @@ extension Runtime {
                         fill: SIMD4<Float>(localOpacity, localOpacity, localOpacity, localOpacity),
                         border: .zero,
                         params: SIMD4<Float>(0, KIND_IMAGE, 0, 1.0),
-                        uv: normUV,
+                        uv: imageEdges,
                         clip: activeClip,
                         fade: activeFade
                     ))
                     marks.append(0)
-                    imageFixups.append((idx, normUV, pw, ph))
+                    imageFixups.append((idx, imageEdges, pw, ph))
                 } else {
                     let placed = textSystem.glyphAtlas.rasterizeIcon(
                         svg,
@@ -2523,10 +2553,11 @@ extension Runtime {
                             marks.append(0)
                         },
                         glyph: { rect, uv, page, color in
+                            let ink = premulSIMD4(color, opacity: localOpacity, srgb: srgbBlend)
                             glyphFixups.append((instances.count, uv, rect.z, rect.w, page, forceScaled))
                             instances.append(RenderInstance(rect: rect, radii: .zero,
-                                fill: premulSIMD4(color, opacity: localOpacity, srgb: srgbBlend), border: .zero,
-                                params: SIMD4(0, KIND_GLYPH, 0, 1), uv: uv, clip: inputClipEdges, fade: activeFade))
+                                fill: ink, border: .zero, params: SIMD4(0, KIND_GLYPH, 0, textSystem.coverageExponent(ink)),
+                                uv: uv, clip: inputClipEdges, fade: activeFade))
                             marks.append(0)
                         }
                     )
@@ -2582,19 +2613,8 @@ extension Runtime {
                     let gh = max(1.0, gq.rect.w * sc.y * scale)
                     let ink = fieldMarks.last { $0.fg != nil && $0.byteRange.contains(gq.utf8Offset) }?.fg ?? gq.color ?? textCol
                     let gcol = premulSIMD4(ink, opacity: localOpacity, srgb: srgbBlend)
-                    let idx = instances.count
-                    instances.append(RenderInstance(
-                        rect: SIMD4<Float>(gx, gy, gw, gh),
-                        radii: .zero,
-                        fill: gcol,
-                        border: .zero,
-                        params: SIMD4<Float>(0, KIND_GLYPH, 0, 1.0),
-                        uv: gq.uv,
-                        clip: inputClipEdges,
-                        fade: activeFade
-                    ))
-                    marks.append(0)
-                    glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage, forceScaled))
+                    appendTextGlyph(gq, rect: SIMD4(gx, gy, gw, gh), ink: gcol,
+                                    clip: inputClipEdges, fade: activeFade, forceScaled: forceScaled)
                 }
                 if focused {
                     let offset = displayCaretByteOffset(for: edit, showingPlaceholder: resolvedInput.showingPlaceholder)
@@ -2636,13 +2656,18 @@ extension Runtime {
                 let glide = glidingText ? Vec2(PixelSnap.textGlide(paintedEdges.x), PixelSnap.textGlide(paintedEdges.y)) : .zero
                 let glideOffset = glidingText ? SIMD2<Float>(paintedEdges.x - paintedEdges.x.rounded(), paintedEdges.y - paintedEdges.y.rounded()) : .zero
                 let restOrigin = SIMD2<Float>(textLeft, textTop) * scale - glideOffset
-                let shaped = resolvedText.shape(
+                var shaped = resolvedText.shape(
                     using: textSystem,
                     maxWidth: TextBoxGeometry.wrapWidth(layoutInnerW, scale: rasterScale * scale),
                     pixelScale: rasterScale * scale,
                     emitGlyphs: true,
                     glidePx: glide
                 )
+                #if canImport(CRuneDesktopText) && !canImport(CoreText)
+                if restsExact, let native = shaped.desktopRestingText {
+                    _ = native.place(&shaped, at: restOrigin.x, atlas: textSystem.glyphAtlas)
+                }
+                #endif
                 let forceScaled = nodeScaleMotion != .still
                     || abs(sc.x - rasterScale) > 1e-4
                     || abs(sc.y - rasterScale) > 1e-4
@@ -2713,6 +2738,21 @@ extension Runtime {
                 let bandPadPx = 2.0 * emPt * sc.y * scale + 2.0 / max(1e-4, rasterScale * scale)
                 let visibleMinY = shownY0 - bandPadPx
                 let visibleMaxY = shownY1 + bandPadPx
+                let linkInks = recordAndEmitTextLinks(
+                    snap: node, el: el, text: resolvedText.displayedText, authoredText: resolvedText.authoredText,
+                    caseMap: resolvedText.caseMap, shaped: shaped, elided: shaped.elided,
+                    textOriginX: textLeft, textOriginY: textTop, scaleVec: sc, pxScale: scale, shapeScale: rasterScale * scale,
+                    localAlpha: localOpacity, defaultTextColor: defaultTextColor, isFocused: focused,
+                    isExiting: isExiting, shouldEmit: !isTextFlightTarget, visClip: visibleClipPt, linkBoxes: &newLinkBoxes
+                ) { rect, radius, fill, border, width in
+                    instances.append(RenderInstance(
+                        rect: rect, radii: SIMD4(repeating: radius),
+                        fill: premulSIMD4(fill, opacity: localOpacity, srgb: srgbBlend),
+                        border: premulSIMD4(border, opacity: localOpacity, srgb: srgbBlend),
+                        params: SIMD4(width, KIND_RECT, 0, 1), uv: .zero, clip: glyphClipEdges, fade: glyphFade
+                    ))
+                    marks.append(0)
+                }
                 emitTextBackdropsAndPills(
                     shaped: shaped,
                     textLeft: textLeft,
@@ -2828,23 +2868,11 @@ extension Runtime {
                         glyph, index: index, shaped: shaped, origin: restOrigin, scale: SIMD2<Float>(sc.x, sc.y), pixelScale: scale,
                         restsExact: restsExact, baselines: baselines, line: &baselineLine, atlas: textSystem.glyphAtlas
                     )
-                    let gx = placement.x, gy = placement.y, gw = placement.z, gh = placement.w
-                    if !isRotatedScope && (gy + gh < visibleMinY || gy > visibleMaxY) { continue }
-                    let glyphBaseColor = gq.color.map { applyPressColor(pressTint.color, to: $0, frac: pressTint.frac) } ?? defaultTextColor
+                    if !isRotatedScope && (placement.y + placement.w < visibleMinY || placement.y > visibleMaxY) { continue }
+                    let glyphBaseColor = linkInkColor(for: glyph, ranges: linkInks) ?? gq.color.map { applyPressColor(pressTint.color, to: $0, frac: pressTint.frac) } ?? defaultTextColor
                     let gcol = premulSIMD4(glyphBaseColor, opacity: gAlpha, srgb: srgbBlend)
-                    let idx = instances.count
-                    instances.append(RenderInstance(
-                        rect: SIMD4<Float>(gx, gy, gw, gh),
-                        radii: .zero,
-                        fill: gcol,
-                        border: .zero,
-                        params: SIMD4<Float>(0, KIND_GLYPH, 0, 1.0),
-                        uv: gq.uv,
-                        clip: glyphClipEdges,
-                        fade: glyphFade
-                    ))
-                    marks.append(0)
-                    glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage, forceScaled))
+                    appendTextGlyph(gq, rect: placement, ink: gcol,
+                                    clip: glyphClipEdges, fade: glyphFade, forceScaled: forceScaled)
                 }
             }
             let focusOverlay = !hasActiveTextLinks(el) ? resolvedFocusRingOverlay(
@@ -2951,7 +2979,11 @@ extension Runtime {
 
             if needsLayer {
                 let innerLayerIdx = layerStartIdx + outerLayerStarts.count
-                func truncateLayerChildren() {
+                func truncateLayerChildren(signature: UInt64) {
+                    while let last = elidedLayers.last, last.index >= innerLayerIdx {
+                        elidedLayers.removeLast()
+                    }
+                    elidedLayers.append((innerLayerIdx, nid.rawValue, signature))
                     if instances.count > innerLayerIdx + 1 {
                         instances.removeSubrange((innerLayerIdx + 1)..<instances.count)
                         marks.removeSubrange((innerLayerIdx + 1)..<marks.count)
@@ -2965,7 +2997,7 @@ extension Runtime {
                 }
                 if cacheEligible && !subtreeDynamic && newSurfaces.count == surfaceStartIdx && innerLayerIdx < instances.count {
                     if let elide = elideCache {
-                        truncateLayerChildren()
+                        truncateLayerChildren(signature: elide.sig)
                         let b0 = floorf(rectPx.x + elide.relBounds.x * elide.k)
                         let b1 = floorf(rectPx.y + elide.relBounds.y * elide.k)
                         let b2 = ceilf(rectPx.x + elide.relBounds.z * elide.k)
@@ -3032,7 +3064,7 @@ extension Runtime {
                         instances[innerLayerIdx].radii = packU64ToFloat4(nid.rawValue)
                         instances[innerLayerIdx].uv = packU64ToFloat4(sig)
                         if residentCacheTracker.isResident(nodeId: nid.rawValue, signature: sig) {
-                            truncateLayerChildren()
+                            truncateLayerChildren(signature: sig)
                         }
                     }
                 }
@@ -3219,17 +3251,12 @@ extension Runtime {
         measureTextFlightDestinations(in: newDrawnRectByPath, at: now)
 
         forEachTextFlightGlyph(at: now) { glyph, rect, ink, clip in
-            glyphFixups.append((instances.count, glyph.uv, rect.z, rect.w, glyph.atlasPage, true))
             let clipEdges = SIMD4(clip.x, clip.y, clip.x + clip.z, clip.y + clip.w)
-            instances.append(RenderInstance(
-                rect: rect, radii: .zero,
-                fill: SIMD4(ink.x * ink.w, ink.y * ink.w, ink.z * ink.w, ink.w), border: .zero,
-                params: SIMD4(0, KIND_GLYPH, 0, 1), uv: glyph.uv, clip: clipEdges, fade: .zero
-            ))
-            marks.append(0)
+            appendTextGlyph(glyph, rect: rect, ink: SIMD4(ink.x * ink.w, ink.y * ink.w, ink.z * ink.w, ink.w),
+                            clip: clipEdges, fade: .zero, forceScaled: true)
         }
 
-        // Convert normalized glyph & image UVs to exact pixel texel origins using final grown atlas sizes.
+        // Glyph pages use normalized UVs, while image positions already use stable atlas texels.
         let glyphPages = textSystem.glyphAtlas.pageCount
         let compositedGlyphs = textSystem.glyphAtlas.compositedAtlas()
         let glyphW = Float(compositedGlyphs.width)
@@ -3246,31 +3273,29 @@ extension Runtime {
             instances[fix.index].uv = SIMD4<Float>(u0, v0, scaled ? uw : 0, scaled ? vh : 0)
         }
 
-        let imgAtlasW = Float(imagePacker.atlas.width)
-        let imgAtlasH = Float(imagePacker.atlas.height)
         for fix in imageFixups where fix.index < instances.count {
-            let u0 = fix.normUV.x * imgAtlasW
-            let v0 = fix.normUV.y * imgAtlasH
-            let uw = max(1.0, (fix.normUV.z - fix.normUV.x) * imgAtlasW)
-            let vh = max(1.0, (fix.normUV.w - fix.normUV.y) * imgAtlasH)
-            instances[fix.index].uv = SIMD4<Float>(u0, v0, uw, vh)
+            let edges = fix.texelEdges
+            instances[fix.index].uv = SIMD4(edges.x, edges.y, edges.z - edges.x, edges.w - edges.y)
         }
 
-        self.lastElements = newElements
         if publishHitGeometry {
             self.seenMatchedByFlightId = newSeenMatched
             self.hitGeometryByPath = newHitGeometries
             self.paintOrderPaths = newElements.map(\.path)
         }
+        linkBoxesByPath = newLinkBoxes
+        appendLinkElements(to: &newElements)
+        lastElements = newElements
         self.presentedRectByPath = newPresentedRects
         self.presentedScaleByPath = newPresentedScales
         self.presentedScaleMotionById = newPresentedScaleMotionById
         self.drawnRectByPath = newDrawnRectByPath
         self.rectSpringingById = newRectSpringingById
         self.surfaces = newSurfaces
+        finishSurfaceVideoPaint(surfaceVideo)
 
         let clear = clearColor.simd4(srgb: srgbBlend)
-        return RenderFrame(
+        var output = RenderFrame(
             width: widthPx,
             height: heightPx,
             srgbBlend: srgbBlend,
@@ -3285,5 +3310,8 @@ extension Runtime {
             materials: materials,
             residentTracker: residentCacheTracker
         )
+        output.elidedLayers = elidedLayers
+        output.imagePatch = imagePacker.publishPatch()
+        return output
     }
 }

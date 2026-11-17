@@ -741,7 +741,7 @@ func buildGalleryScene(name: String, into b: GalleryBuilder) {
         }
 
     default:
-        fputs("error: unknown effect '\(name)'\n", stderr)
+        FileHandle.standardError.write(Data("error: unknown effect '\(name)'\n".utf8))
         Foundation.exit(1)
     }
 }

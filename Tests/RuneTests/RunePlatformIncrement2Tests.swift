@@ -119,6 +119,25 @@ struct RunePlatformIncrement2Tests {
         #expect(customMin == (300, 500))
     }
 
+    #if os(macOS)
+    @MainActor @Test("AppKit constrains the initial client area before showing a window")
+    func appKitClampsInitialContentSize() {
+        _ = NSApplication.shared
+        let cases: [(WindowOptions, Vec2, NSSize)] = [
+            (.default, Vec2(180, 120), NSSize(width: 420, height: 400)),
+            (WindowOptions(maxSize: Vec2(300, 160)), Vec2(650, 500), NSSize(width: 300, height: 160)),
+            (WindowOptions(minSize: Vec2(120, 80), physicalSize: (1, 1)), Vec2(650, 500), NSSize(width: 120, height: 80)),
+        ]
+        for (options, requested, expected) in cases {
+            let window = RuneMacWindowConfig.makeWindow(title: "Constraints", size: requested, minSize: nil,
+                chrome: .standard, titlebar: nil, options: options, macos: MacWindowOptions(), openAs: .normal)
+            #expect(!window.isVisible)
+            #expect(window.contentRect(forFrameRect: window.frame).size == expected)
+            window.close()
+        }
+    }
+    #endif
+
     @Test("WindowOptions: overlay preset targets display bounds")
     func overlayPresetTargetsDisplay() {
         let display = DisplayInfo(

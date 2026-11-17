@@ -24,6 +24,32 @@ public enum AccessibilityHeading {
 
 /// The role-context rules `a11y_role` reads of an element's handlers.
 public enum AccessibilityRoleRules {
+    /// A named control speaks its own label once. Other text and interactive children stay reachable.
+    internal static func isLeafControl(_ role: ElementRole) -> Bool {
+        switch role {
+        case .button, .link, .checkbox, .radio, .switchControl, .tab, .menuItem,
+             .menuItemCheckbox, .menuItemRadio, .option:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// AccessKit names an ordinary button, link, checkbox, radio or menu item through its children.
+    /// Rune supplies the descendant-derived name for the remaining leaf controls.
+    internal static func controlName(
+        given: String?, role: ElementRole, isDefaultButton: Bool, secure: Bool, words: @autoclosure () -> String?
+    ) -> String? {
+        if let given { return given }
+        guard !secure else { return nil }
+        switch role {
+        case .button where isDefaultButton, .switchControl, .tab, .option, .menuItemCheckbox, .menuItemRadio:
+            return words()
+        default:
+            return nil
+        }
+    }
+
     /// A group that takes its own keys (`El::on_key`) and no press (a game's surface: arrows,
     /// Space) is no button even when it steers by drag: Return or Space doesn't press it. As the
     /// web mirror has it, a labelled one stays a group.

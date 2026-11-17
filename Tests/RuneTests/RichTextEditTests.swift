@@ -4,6 +4,50 @@ import Testing
 @Suite("Rich TextEdit Marks, Blocks, Pills, HTML & Soft-Wrap Caret Motion Tests")
 struct RichTextEditTests {
 
+    @Test("an interior UTF-8 offset snaps to the closest grapheme edge, with ties going to the start")
+    func nearestGraphemeEdge() {
+        let edit = TextEdit("ée\u{301}👩🏽‍💻🇯🇵\r\nב", multiline: true)
+        var start = 0
+        for grapheme in edit.text {
+            let end = start + grapheme.utf8.count
+            for byte in start...end {
+                let expected = byte - start <= end - byte ? start : end
+                #expect(edit.snapToGraphemeBoundary(byte) == expected)
+            }
+            start = end
+        }
+        #expect(edit.snapToGraphemeBoundary(.min) == 0)
+        #expect(edit.snapToGraphemeBoundary(.max) == edit.text.utf8.count)
+    }
+
+    @Test("vertical arrow keys keep the visual edge of a mixed-direction selection")
+    func verticalKeysAtBidiBoundary() {
+        let system = TextSystem()
+        var edit = TextEdit("A\nAאבB", multiline: true).rich()
+        var shaped = ShapedText(size: Vec2(40, 32), lineCount: 2, lineHeight: 16,
+                                glyphs: [], underlines: [], backgrounds: [])
+        shaped.portableLines = [(0, "A", 0, 0, [0, 10]), (2, "AאבB", 16, 0, [0, 10, 10, 20, 20, 30, 40])]
+        shaped.portableBidiCells[1] = [
+            .init(range: 2..<3, left: 0, width: 10, rtl: false, space: false),
+            .init(range: 5..<7, left: 10, width: 10, rtl: true, space: false),
+            .init(range: 3..<5, left: 20, width: 10, rtl: true, space: false),
+            .init(range: 7..<8, left: 30, width: 10, rtl: false, space: false),
+        ]
+        edit.setCursor(utf8Offset: 1)
+        _ = edit.handleKey(KeyEvent(key: .arrowDown, mods: Mods(shift: true)), layout: shaped,
+                           textSystem: system, pixelScale: 2)
+        #expect(edit.selectedUTF8Range == 1..<3)
+        #expect(edit.caretAffinity == .upstream)
+        #expect(system.caretRect(in: shaped, utf8Offset: edit.cursor, affinity: edit.caretAffinity, pixelScale: 2).x == 10)
+
+        _ = edit.handleKey(KeyEvent(key: .arrowUp), layout: shaped, textSystem: system, pixelScale: 2)
+        #expect(edit.cursor == 1 && edit.anchor == 1 && edit.caretColumn.goal == 10)
+        edit.moveLine(delta: .max, in: shaped, textSystem: system)
+        #expect(edit.cursor == edit.text.utf8.count && edit.caretColumn.goal == 10)
+        edit.moveLine(delta: .min, in: shaped, textSystem: system, extend: true)
+        #expect(edit.cursor == 0 && edit.selectedUTF8Range == 0..<edit.text.utf8.count)
+    }
+
     @MainActor
     @Test("field navigation and both paint paths use the same side of a soft wrap")
     func wrappedFieldKeyboardCaret() throws {

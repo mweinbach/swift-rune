@@ -177,9 +177,13 @@ struct RunePlatformIncrement4Tests {
         rt.onAppFileDrop = spec.onFileDrop
         _ = rt.frame(at: 0.0)
         let file = URL(fileURLWithPath: "/tmp/doc.md")
-        rt.fileDrop(.dropped([DroppedFile(url: file)], at: Vec2(50, 50)), at: 0.1)
+        let drop = FileDropPhase.dropped([DroppedFile(url: file)], at: Vec2(50, 50))
+        #expect(rt.receiveFileDrop(drop, at: 0.1))
         #expect(rt.state.appDropped == [file])
         #expect(dropped == [file])
+        rt.onAppFileDrop = nil
+        #expect(!rt.receiveFileDrop(drop, at: 0.2))
+        #expect(rt.state.appDropped == [file])
     }
 
     // MARK: - 2. Popup Menu Queue (`popup_menu/tests.rs`)
@@ -256,6 +260,7 @@ struct RunePlatformIncrement4Tests {
             .item("paste", "Paste", enabled: false)
             .separator()
             .submenu("More", PopupMenu().item("share", "Share"))
+            .submenu("Export", PopupMenu().submenu("Formats", PopupMenu().item("pdf", "PDF")), enabled: false)
         rt.update(at: 0.2) { _, tx in
             tx.popupMenu(ctxMenu, at: Vec2(3, 4)) { (s: inout PopupTestState, picked, _) in
                 s.picks.append(picked)
@@ -281,6 +286,10 @@ struct RunePlatformIncrement4Tests {
 
         #expect(throws: PopupMenuError.disabled("paste")) {
             try rt.resolvePopup("paste")
+        }
+        #expect(ctxMenu.findItem(id: "pdf")?.enabled == true)
+        #expect(throws: PopupMenuError.disabled("pdf")) {
+            try rt.resolvePopup("pdf")
         }
         #expect(throws: PopupMenuError.unknownItem("missing")) {
             try rt.resolvePopup("missing")

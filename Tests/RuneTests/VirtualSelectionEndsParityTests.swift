@@ -76,7 +76,7 @@ struct VirtualSelectionEndsParityTests {
         settle()
         let mounted: Range<Int> = rt.virtualLists[list].map { $0.lastMountedRange } ?? (0..<0)
         #expect(!mounted.contains(0), "row 0 isn't mounted: \(mounted)")
-        #expect(rt.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: t))
+        #expect(rt.keyDown(KeyEvent(key: .command("a"), mods: RuneTestKey.primaryMods()), at: t))
         let sel = try #require(rt.selectionState.coordinator.phase.selection)
         // `virtual_span_under`: the first text of the group is row 0's empty one, built on demand.
         #expect(sel.path == "\(list)/@r0/@e")

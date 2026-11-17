@@ -1,6 +1,6 @@
 import Foundation
 import Rune
-#if canImport(CoreFoundation)
+#if canImport(Darwin) && canImport(CoreFoundation)
 import CoreFoundation
 #endif
 
@@ -113,7 +113,7 @@ public struct FileTreeBuilder: Sendable {
     }
 
     private static func collate(_ a: String, _ b: String) -> ComparisonResult {
-        #if canImport(CoreFoundation)
+        #if canImport(Darwin) && canImport(CoreFoundation)
         let flags: CFStringCompareFlags = [
             .compareCaseInsensitive,
             .compareNumerically,
@@ -135,6 +135,8 @@ public struct FileTreeBuilder: Sendable {
         case .compareEqualTo: return .orderedSame
         @unknown default: return naturalASCIIFallback(a, b)
         }
+        #elseif canImport(FoundationInternationalization) || os(Windows)
+        return a.compare(b, options: [.caseInsensitive, .numeric, .widthInsensitive], range: nil, locale: .current)
         #else
         return naturalASCIIFallback(a, b)
         #endif

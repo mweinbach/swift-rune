@@ -363,7 +363,7 @@ public func shellExampleOnKey(_ s: inout ShellExampleState, ev: KeyEvent, _ tx: 
         s.sidebar.toggle()
         return true
     }
-    if ev.mods.cmd && ev.mods.alt, case .text(let t) = ev.key, t.lowercased() == "i" {
+    if ev.mods.primaryCommand && ev.mods.alt && ev.isCommand("i") {
         s.inspector.toggle()
         return true
     }

@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
 import RuneRef
 #if canImport(simd)
@@ -248,34 +251,21 @@ extension Runtime {
                         continue
                     }
                     let gc = (g.color ?? baseColor).scaleAlpha(localAlpha).simd4(srgb: srgb)
-                    if let index = g.colorGlyphIndex, let entry = textSystem.colorGlyph(index) {
-                        let atlas = RGBA8Atlas(width: entry.pixelSize.x, height: entry.pixelSize.y, texels: Array(entry.rgba))
-                        primitives.append(.image(
-                            rect: SIMD4<Float>(gx0, gy0, gw, gh), radii: .zero,
-                            uv: imagePacker.insert(atlas), tint: SIMD4<Float>(1, 1, 1, localAlpha),
-                            clip: glyphClip, turn: rot
-                        ))
+                    let absIdx = primitives.count
+                    let relIdx = absIdx - rowStartIdx
+                    let primitive = referenceTextPrimitive(g, rect: rect, ink: gc, clip: glyphClip, turn: rot)
+                    primitives.append(primitive)
+                    if primitive.kind == .image {
                         glyphCount += 1
                         cacheable = false
                         continue
-                    } else {
-                        let texels = UInt32(max(0, gw * gh))
-                        if let existingIdx = touchedPages.firstIndex(where: { $0.0 == g.atlasPage }) {
-                            touchedPages[existingIdx].1 &+= texels
-                        } else {
-                            touchedPages.append((g.atlasPage, texels))
-                        }
                     }
-                    let absIdx = primitives.count
-                    let relIdx = absIdx - rowStartIdx
-                    primitives.append(.glyph(
-                        rect: SIMD4<Float>(gx0, gy0, gw, gh),
-                        uv: g.uv,
-                        color: gc,
-                        gamma: systemDark ? 0.88 : 1.05,
-                        clip: glyphClip,
-                        turn: rot
-                    ))
+                    let texels = UInt32(max(0, gw * gh))
+                    if let existingIdx = touchedPages.firstIndex(where: { $0.0 == g.atlasPage }) {
+                        touchedPages[existingIdx].1 &+= texels
+                    } else {
+                        touchedPages.append((g.atlasPage, texels))
+                    }
                     glyphPageEntries.append((absIdx, g.atlasPage))
                     usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
                     rowGlyphOffsets.append(relIdx)
@@ -395,7 +385,7 @@ extension Runtime {
         opacity: Float, defaultColor: Color,
         into instances: inout [RenderInstance], marks: inout [UInt32],
         glyphFixups: inout [(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16, forceScaled: Bool)],
-        imageFixups: inout [(index: Int, normUV: SIMD4<Float>, imgW: Float, imgH: Float)]
+        imageFixups: inout [(index: Int, texelEdges: SIMD4<Float>, imgW: Float, imgH: Float)]
     ) {
         var primitives: [Primitive] = []
         var glyphPages: [(index: Int, page: UInt16)] = []
@@ -415,7 +405,7 @@ extension Runtime {
             case .roundedRect:
                 break
             case .glyph:
-                i.params = SIMD4<Float>(0, KIND_GLYPH, 0, 1)
+                i.params = SIMD4<Float>(0, KIND_GLYPH, 0, p.params.w)
                 glyphFixups.append((instances.count, p.uv, p.rect.z, p.rect.w, pages[index] ?? 0, false))
             case .image:
                 i.params = SIMD4<Float>(0, KIND_IMAGE, 0, 1)

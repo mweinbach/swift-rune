@@ -1,5 +1,5 @@
 import Foundation
-#if canImport(CoreFoundation)
+#if canImport(Darwin) && canImport(CoreFoundation)
 import CoreFoundation
 #endif
 
@@ -1047,7 +1047,7 @@ public enum RuneCollation: Sendable {
     }
 
     private static func collate(_ a: String, _ b: String, languageTag: String?) -> ComparisonResult {
-        #if canImport(CoreFoundation)
+        #if canImport(Darwin) && canImport(CoreFoundation)
         let cfA = a as CFString
         let cfB = b as CFString
         let flags: CFStringCompareFlags = [
@@ -1072,6 +1072,10 @@ public enum RuneCollation: Sendable {
         case .compareGreaterThan: return .orderedDescending
         default: return .orderedSame
         }
+        #elseif canImport(FoundationInternationalization) || os(Windows)
+        let tag = languageTag ?? SpellChecker.shared.languages().first
+        return a.compare(b, options: [.caseInsensitive, .numeric, .widthInsensitive],
+                         range: nil, locale: tag.map(Locale.init(identifier:)) ?? .current)
         #else
         return compareNamesNatural(a, b)
         #endif

@@ -1,0 +1,108 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune Swift image cache</title>
+<style>* { margin: 0 } #host { width: 24px; height: 8px } canvas { width: 100%; height: 100% }</style>
+<div id="host"><canvas></canvas></div>
+<pre id="result">Loading the Swift image fixture…</pre>
+<script type="module">
+import { instantiateRuneBrowser, mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+import { WASI, ConsoleStdout, OpenFile, File } from '/__rune/shim/index.js';
+
+const result = document.querySelector('#result');
+const logs = [], frames = new Map(), transfers = [], packets = new Map(), gifDelays = [];
+const times = [0, 0.065, 0.20, 0.45, 1.25, 1.65, 1.90, 2.0];
+const near = (a, b) => a?.length === b.length && b.every((n, i) => Math.abs(a[i] - n) <= 2);
+const equal = (a, b) => a?.length === b?.length && b.every((n, i) => a[i] === n);
+function check(test, message) { if (!test) throw Error(message); }
+let app, time = 0, step = 0, idle = 0, apngRequests = 0;
+try {
+    const stdout = ConsoleStdout.lineBuffered(line => logs.push(line));
+    const wasi = new WASI(['rune-image-probe'], [], [new OpenFile(new File([])), stdout, stdout]);
+    const { instance } = await instantiateRuneBrowser(fetch('/__rune/image.wasm'),
+        { wasi_snapshot_preview1: wasi.wasiImport }, { fontDirectory: null });
+    wasi.initialize(instance);
+    const api = instance.exports, canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: false, depth: false, stencil: false, antialias: false });
+    check(gl, 'WebGL 2 is unavailable');
+    function pixel(x, y) {
+        const bytes = new Uint8Array(4);
+        gl.readPixels(x, gl.drawingBufferHeight - 1 - y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+        return Array.from(bytes);
+    }
+    const draw = gl.drawArrays.bind(gl), upload = gl.texSubImage2D.bind(gl);
+    gl.drawArrays = (...args) => {
+        draw(...args);
+        if (gl.getParameter(gl.FRAMEBUFFER_BINDING) === null) {
+            frames.set(time, [pixel(4, 2), pixel(8, 1), pixel(11, 1), pixel(12, 1), pixel(17, 2), pixel(18, 2)]);
+        }
+    };
+    gl.texSubImage2D = (...args) => {
+        transfers.push({ time, rect: args.slice(2, 6), format: args[6], bytes: args[8]?.byteLength });
+        return upload(...args);
+    };
+    const expected = ['image-initial false false false shared=true', 'image-ready 0 8x4', 'image-ready 1 5x3',
+        'image-ready 2 5x3', 'image-async-encoded 4x2', 'image-async-url 2x1', 'image-async-cache 2x1 entries=2 hits=1',
+        'image-async-apng 3x1 frames=4 plays=2 rgba=true timing=true'];
+    app = mountRuneBrowser(canvas, { exports: { ...api,
+        rune_web_frame() { throw Error('Unexpected CPU draw'); },
+        rune_web_image_apng(...request) {
+            apngRequests++;
+            return api.rune_web_image_apng(...request);
+        },
+        rune_web_image_frame(id, width, height, duration) {
+            if (width === 5 && height === 3 && duration > 0) {
+                const rgba = new Uint8Array(api.memory.buffer, api.rune_web_buffer(0), width * height * 4);
+                check(rgba[3] === 0, 'GIF transparent texel became opaque');
+                gifDelays.push(Math.round(duration * 1000));
+            }
+            return api.rune_web_image_frame(id, width, height, duration);
+        },
+        rune_web_scene(_now, force) {
+            const ready = expected.slice(1, 4).every(line => logs.includes(line));
+            time = ready ? times[Math.min(step++, times.length - 1)] : 0;
+            const length = api.rune_web_scene(time, force);
+            if (length === 0 && time >= 1.90) idle++;
+            if (length > 0 && ready) {
+                const address = api.rune_web_buffer(0), memory = api.memory.buffer;
+                const header = new Uint32Array(memory, address, 14), count = header[4];
+                const instances = new Float32Array(memory, address + 56, count * 32);
+                for (let i = 0; i < instances.length; i += 32) {
+                    if (instances[i + 17] !== 7 || instances[i] !== 8) continue;
+                    const atlas = Array.from(instances.slice(i + 20, i + 24));
+                    const offset = 56 + count * 128;
+                    const patch = (header[3] & 16) ? [...new Uint32Array(memory, address + offset + 8, 4)] : null;
+                    packets.set(time, { atlas, patch, extra: length - offset });
+                }
+            }
+            return length;
+        }
+    } }, { resizeTo: null }); // Render 1:1 texels at the app's 24×8 size on every display.
+    await app.ready;
+    for (const deadline = performance.now() + 15000; performance.now() < deadline; ) {
+        if (idle >= 2 && expected.every(line => logs.includes(line))) break;
+        if (logs.some(line => line.startsWith('image-failed') || line.startsWith('image-async-error'))) break;
+        await new Promise(requestAnimationFrame);
+    }
+    check(expected.every(line => logs.includes(line)) && logs.some(line => line.startsWith('image-pending ')),
+        'Incorrect Swift cache or async result: ' + logs.join(', '));
+    check(logs.filter(line => line.startsWith('image-wake ')).length === 3 && idle >= 2, 'Cache wake or animation did not settle');
+    check(apngRequests === 1 && equal(gifDelays, [60, 130, 210]), 'APNG dispatch or GIF timing changed');
+    const black = [0, 0, 0, 255], green = [0, 255, 0, 255], blue = [0, 0, 255, 255];
+    const colors = [[black, black], [green, black], [black, blue], [black, black], [black, black], [black, blue]];
+    for (const [index, [greenPixel, bluePixel]] of colors.entries()) {
+        const rendered = frames.get(times[index]);
+        const wanted = [[224, 60, 32, 255], [255, 0, 0, 255], greenPixel, bluePixel, [17, 29, 49, 255], [117, 17, 45, 255]];
+        check(wanted.every((color, i) => near(rendered?.[i], color)), 'Incorrect GPU pixels at ' + times[index] + ': ' + JSON.stringify(rendered));
+    }
+    if (api.rune_web_enable_atlas_patches) {
+        for (const t of [0.065, 0.20, 0.45, 1.65]) {
+            const writes = transfers.filter(w => w.time === t), p = packets.get(t);
+            check(writes.length === 1 && writes[0].format === gl.RGBA && writes[0].bytes === 60 &&
+                p?.extra === 84 && equal(p.atlas, p.patch) && equal(p.atlas, writes[0].rect), 'Unexpected GIF atlas upload at ' + t);
+        }
+        check(!transfers.some(w => w.time === 1.25 || w.time >= 1.90), 'Unchanged image uploaded again');
+    }
+    result.textContent = 'PASS ' + JSON.stringify({ renderer: app.renderer, times: times.slice(0, 6), idle, logs });
+} catch (error) { result.textContent = 'FAIL ' + error.stack; }
+finally { app?.dispose(); }
+</script>

@@ -695,7 +695,7 @@ public enum ScrollWatch: Sendable {
 public enum SlackPhase: Sendable, Equatable {
     /// Held while the stack grows, and for `slackWait` after a row last grew (`grewAt`).
     case held(grewAt: Double)
-    /// Closing, with `acc` seconds of frame time not yet stepped in `Growth.substep`s.
+    /// Closing. Previously saved fractional time is consumed on the next frame.
     case closing(acc: Float)
 
     public static let `default`: SlackPhase = .held(grewAt: 0.0)
@@ -770,14 +770,12 @@ public struct ScrollSlack: Sendable, Equatable {
             track.age = 0.0
             track.v = 0.0
         }
-        if case .closing(var acc) = phase {
-            acc += dt
-            while acc >= Growth.substep {
-                track.step(spring: spec.spring, edge: spec.edge, carryingTail: false)
-                acc -= Growth.substep
+        if case .closing(let acc) = phase {
+            for step in GrowthSteps(duration: acc + dt) {
+                track.step(by: step, spring: spec.spring, edge: spec.edge, carryingTail: false)
             }
             if track.moving {
-                phase = .closing(acc: acc)
+                phase = .closing(acc: 0)
             } else {
                 track = GrowTrack()
                 phase = .waited

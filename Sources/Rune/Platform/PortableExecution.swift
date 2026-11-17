@@ -1,0 +1,80 @@
+import Foundation
+
+/// Execution-local state and monotonic time used by the input and frame pipelines.
+@usableFromInline
+internal enum RuneExecutionContext {
+    #if os(WASI)
+    // The Preview 1 reactor receives all events on one WebAssembly instance thread.
+    nonisolated(unsafe) static let locals = NSMutableDictionary()
+
+    @usableFromInline static var uptimeNanoseconds: UInt64 {
+        UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000_000)
+    }
+    #else
+    static var locals: NSMutableDictionary { Thread.current.threadDictionary }
+    @usableFromInline static var uptimeNanoseconds: UInt64 {
+        DispatchTime.now().uptimeNanoseconds
+    }
+    #endif
+}
+
+package enum RuneStandardIO {
+    package static func error(_ text: String) {
+        FileHandle.standardError.write(Data(text.utf8))
+    }
+
+    package static func output(_ text: String) {
+        FileHandle.standardOutput.write(Data(text.utf8))
+    }
+}
+
+package enum RuneExecutableSearch {
+    /// Finds a native program on PATH without starting a shell.
+    package static func find(_ program: String, searchPath: String? = nil) -> String? {
+        let env = ProcessInfo.processInfo.environment
+        #if os(Windows)
+        let path = searchPath ?? env.first { $0.key.caseInsensitiveCompare("PATH") == .orderedSame }?.value ?? ""
+        let directories = path.split(separator: ";").map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
+        let name = program.lowercased().hasSuffix(".exe") ? program : program + ".exe"
+        #else
+        let directories = (searchPath ?? env["PATH"] ?? "").split(separator: ":").map(String.init)
+        let name = program
+        #endif
+        for directory in directories {
+            let candidate = URL(fileURLWithPath: directory).appendingPathComponent(name).path
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: candidate, isDirectory: &isDirectory),
+               !isDirectory.boolValue, FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
+    }
+}
+
+#if os(WASI)
+/// Work queued for a later turn of a single-threaded browser reactor.
+internal enum WASIEventLoop {
+    private struct Scheduled {
+        let deadline: Double
+        let run: @Sendable () -> Void
+    }
+
+    nonisolated(unsafe) private static var pending: [Scheduled] = []
+
+    static func schedule(after delay: Double = 0, _ run: @escaping @Sendable () -> Void) {
+        pending.append(Scheduled(deadline: ProcessInfo.processInfo.systemUptime + delay, run: run))
+    }
+
+    static func reset() { pending.removeAll() }
+
+    static func poll() {
+        WASIBrowserExecutor.shared.run()
+        guard !pending.isEmpty else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let due = pending.filter { $0.deadline <= now }
+        pending.removeAll { $0.deadline <= now }
+        for item in due { item.run() }
+    }
+}
+#endif

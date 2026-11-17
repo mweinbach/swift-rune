@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
 import RuneRef
 
@@ -147,7 +150,7 @@ public struct RichClipboardPayload: Sendable, Equatable {
         customPayloads: [String: Data] = [:],
         isConcealed: Bool = false
     ) {
-        self.content = ClipboardContent(text, html: html, rtf: rtf, image: image)
+        self.content = ClipboardContent(text, html: html, rtf: rtf, image: image, files: files)
         self.image = image
         self.files = files
         self.customPayloads = customPayloads
@@ -161,9 +164,11 @@ public struct RichClipboardPayload: Sendable, Equatable {
         customPayloads: [String: Data] = [:],
         isConcealed: Bool = false
     ) {
-        self.content = content
-        self.image = image
+        self.image = image ?? content.image
         self.files = files.isEmpty ? content.files : files
+        self.content = content
+        self.content.image = self.image
+        self.content.files = self.files
         self.customPayloads = customPayloads
         self.isConcealed = isConcealed
     }
@@ -224,10 +229,12 @@ public final class SecretClipboardHandle: @unchecked Sendable {
 
     public var state: SecretState {
         lock.lock()
+        let current = _state
+        lock.unlock()
+        guard current == .holding, let cb = clipboard else { return current }
+        if cb.changeCount != writtenChangeCount { markReplaced() }
+        lock.lock()
         defer { lock.unlock() }
-        if _state == .holding, let cb = clipboard, cb.changeCount != writtenChangeCount {
-            _state = .replaced
-        }
         return _state
     }
 
@@ -253,18 +260,13 @@ public final class SecretClipboardHandle: @unchecked Sendable {
         lock.unlock()
         guard current == .holding else { return false }
         guard let cb = clipboard else { return false }
-        if cb.changeCount != writtenChangeCount {
-            markReplaced()
-            return false
-        }
-        cb.clear()
-        markCleared()
-        return true
+        if cb.clear(expected: writtenChangeCount) { return true }
+        if cb.changeCount != writtenChangeCount { markReplaced() }
+        return false
     }
 }
 
-/// Cross-platform clipboard supporting macOS `NSPasteboard` (including `org.nspasteboard.ConcealedType`)
-/// and an in-memory headless backend for deterministic tests.
+/// Rich clipboard backed by the host platform, with an in-memory backend for headless use.
 public final class Clipboard: @unchecked Sendable {
     public enum BackendKind: Sendable, Equatable {
         case system
@@ -278,6 +280,7 @@ public final class Clipboard: @unchecked Sendable {
 
     public let kind: BackendKind
     private let lock = NSLock()
+    private let writes = NSLock()
     private var memoryPayload = RichClipboardPayload()
     private var memoryChangeCount: Int = 0
     private var activeSecret: SecretClipboardHandle?
@@ -295,8 +298,12 @@ public final class Clipboard: @unchecked Sendable {
         case .system:
             #if os(macOS)
             return NSPasteboard.general.changeCount
-            #elseif canImport(UIKit) && !os(watchOS)
+            #elseif canImport(UIKit) && !os(watchOS) && !os(tvOS)
             return UIPasteboard.general.changeCount
+            #elseif os(Windows) || os(Linux)
+            return DesktopServices.clipboardRevision
+            #elseif os(WASI)
+            return -1 // Browser clipboard ownership cannot be observed.
             #else
             lock.lock()
             defer { lock.unlock() }
@@ -309,12 +316,28 @@ public final class Clipboard: @unchecked Sendable {
         writeRich(RichClipboardPayload(text: text))
     }
 
-    public func writeRich(_ payload: RichClipboardPayload) {
-        lock.lock()
-        activeSecret?.markReplaced()
-        activeSecret = nil
-        lock.unlock()
+    private func mutate<T>(_ body: () -> T) -> T {
+        func locked() -> T {
+            writes.lock()
+            defer { writes.unlock() }
+            return body()
+        }
+        #if os(Linux)
+        if kind == .system { return DesktopServices.onLinuxHost(locked) }
+        #endif
+        return locked()
+    }
 
+    public func writeRich(_ payload: RichClipboardPayload) {
+        mutate {
+            if replace(with: payload) != nil {
+                activeSecret?.markReplaced()
+                activeSecret = nil
+            }
+        }
+    }
+
+    private func replace(with payload: RichClipboardPayload) -> Int? {
         switch kind {
         case .memory:
             lock.lock()
@@ -361,7 +384,7 @@ public final class Clipboard: @unchecked Sendable {
             if payload.isConcealed {
                 pb.setData(Data(), forType: NSPasteboard.PasteboardType(Self.concealedPasteboardType))
             }
-            #elseif canImport(UIKit) && !os(watchOS)
+            #elseif canImport(UIKit) && !os(watchOS) && !os(tvOS)
             let pb = UIPasteboard.general
             var item: [String: Any] = [:]
             if !payload.content.text.isEmpty || !payload.isRich {
@@ -386,6 +409,10 @@ public final class Clipboard: @unchecked Sendable {
                 item[Self.concealedPasteboardType] = Data()
             }
             pb.items = item.isEmpty ? [] : [item]
+            #elseif os(Windows) || os(Linux)
+            return DesktopServices.write(payload)
+            #elseif os(WASI)
+            return WebSystemClipboard.shared.enqueue(payload)
             #else
             lock.lock()
             memoryPayload = payload
@@ -393,6 +420,7 @@ public final class Clipboard: @unchecked Sendable {
             lock.unlock()
             #endif
         }
+        return changeCount
     }
 
     /// Writes a concealed/secret text item (tagged with `org.nspasteboard.ConcealedType` on macOS)
@@ -400,15 +428,23 @@ public final class Clipboard: @unchecked Sendable {
     @discardableResult
     public func writeSecret(_ text: String, ttlSeconds: Double? = nil) -> SecretClipboardHandle {
         let payload = RichClipboardPayload(text: text, isConcealed: true)
-        writeRich(payload)
-        let handle = SecretClipboardHandle(state: .holding, clipboard: self, changeCount: changeCount)
-        lock.lock()
-        activeSecret = handle
-        lock.unlock()
+        let handle = mutate {
+            guard let revision = replace(with: payload) else {
+                return SecretClipboardHandle(state: .failed("the clipboard could not own a concealed item"), clipboard: self, changeCount: -1)
+            }
+            activeSecret?.markReplaced()
+            let handle = SecretClipboardHandle(state: .holding, clipboard: self, changeCount: revision)
+            activeSecret = handle
+            return handle
+        }
         if let ttl = ttlSeconds, ttl > 0 {
+            #if os(WASI)
+            WASIEventLoop.schedule(after: ttl) { _ = handle.clearNow() }
+            #else
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + ttl) {
                 _ = handle.clearNow()
             }
+            #endif
         }
         return handle
     }
@@ -466,7 +502,7 @@ public final class Clipboard: @unchecked Sendable {
                 customPayloads: customs,
                 isConcealed: concealed
             )
-            #elseif canImport(UIKit) && !os(watchOS)
+            #elseif canImport(UIKit) && !os(watchOS) && !os(tvOS)
             let pb = UIPasteboard.general
             let text = pb.string ?? ""
             var html: String? = nil
@@ -496,6 +532,10 @@ public final class Clipboard: @unchecked Sendable {
                 customPayloads: [:],
                 isConcealed: concealed
             )
+            #elseif os(Windows) || os(Linux)
+            return DesktopServices.read(sanitizeHTML: sanitizeUntrustedHTML)
+            #elseif os(WASI)
+            return WebSystemClipboard.shared.currentPaste
             #else
             lock.lock()
             defer { lock.unlock() }
@@ -513,8 +553,12 @@ public final class Clipboard: @unchecked Sendable {
         case .system:
             #if os(macOS)
             return NSPasteboard.general.data(forType: NSPasteboard.PasteboardType(type))
-            #elseif canImport(UIKit) && !os(watchOS)
+            #elseif canImport(UIKit) && !os(watchOS) && !os(tvOS)
             return UIPasteboard.general.data(forPasteboardType: type)
+            #elseif os(Windows) || os(Linux)
+            return DesktopServices.read(sanitizeHTML: false).customPayloads[type]
+            #elseif os(WASI)
+            return nil
             #else
             lock.lock()
             defer { lock.unlock() }
@@ -524,10 +568,15 @@ public final class Clipboard: @unchecked Sendable {
     }
 
     public func clear() {
-        lock.lock()
-        activeSecret?.markCleared()
-        activeSecret = nil
-        lock.unlock()
+        _ = clear(expected: nil)
+    }
+
+    fileprivate func clear(expected: Int?) -> Bool {
+        mutate { clearOwned(expected: expected) }
+    }
+
+    private func clearOwned(expected: Int?) -> Bool {
+        if let expected, changeCount != expected { return false }
         switch kind {
         case .memory:
             lock.lock()
@@ -537,8 +586,12 @@ public final class Clipboard: @unchecked Sendable {
         case .system:
             #if os(macOS)
             NSPasteboard.general.clearContents()
-            #elseif canImport(UIKit) && !os(watchOS)
+            #elseif canImport(UIKit) && !os(watchOS) && !os(tvOS)
             UIPasteboard.general.items = []
+            #elseif os(Windows) || os(Linux)
+            guard DesktopServices.clear(expected: expected) else { return false }
+            #elseif os(WASI)
+            guard expected == nil, WebSystemClipboard.shared.enqueue(RichClipboardPayload()) != nil else { return false }
             #else
             lock.lock()
             memoryPayload = RichClipboardPayload()
@@ -546,6 +599,9 @@ public final class Clipboard: @unchecked Sendable {
             lock.unlock()
             #endif
         }
+        activeSecret?.markCleared()
+        activeSecret = nil
+        return true
     }
 }
 
@@ -628,7 +684,7 @@ public struct DragImage: Sendable, Equatable {
     }
 
     public static func rgba(width: UInt32, height: UInt32, pixels: Data) -> DragImage? {
-        guard width > 0, height > 0, pixels.count >= Int(width) * Int(height) * 4,
+        guard Self.containsRGBA(width: width, height: height, bytes: pixels.count),
               let png = ClipboardImage.encodeRGBAAsPNG(width: Int(width), height: Int(height), rgba: pixels) else {
             return nil
         }
@@ -1008,6 +1064,8 @@ public final class FileDialog: @unchecked Sendable {
             }
             return nil
         }
+        #elseif os(Windows) || os(Linux)
+        return try DesktopServices.choose(kind: kind, options: options)
         #else
         throw FileDialogError("native file dialogs are unsupported on this platform")
         #endif
@@ -1242,6 +1300,9 @@ public final class UrlOpener: @unchecked Sendable {
             UIApplication.shared.open(nsUrl, options: [:], completionHandler: nil)
         }
         return normalized
+        #elseif os(Windows) || os(Linux)
+        try DesktopServices.openURL(normalized)
+        return normalized
         #else
         lock.lock()
         recordedRequests.append(req)
@@ -1381,12 +1442,16 @@ public struct PopupMenu: Sendable, Equatable {
     }
 
     public func findItem(id: String) -> PopupMenuItem? {
+        lookupItem(id: id, ancestorsEnabled: true)?.item
+    }
+
+    private func lookupItem(id: String, ancestorsEnabled: Bool) -> (item: PopupMenuItem, enabled: Bool)? {
         for entry in entries {
             switch entry {
             case .item(let item) where item.id == id:
-                return item
-            case .submenu(_, let sub, _):
-                if let found = sub.findItem(id: id) { return found }
+                return (item, ancestorsEnabled && item.enabled)
+            case .submenu(_, let sub, let enabled):
+                if let found = sub.lookupItem(id: id, ancestorsEnabled: ancestorsEnabled && enabled) { return found }
             default:
                 break
             }
@@ -1418,7 +1483,7 @@ public struct PopupMenu: Sendable, Equatable {
     }
 
     public func checkSelectable(id: String) throws {
-        guard let found = findItem(id: id) else {
+        guard let found = lookupItem(id: id, ancestorsEnabled: true) else {
             throw PopupMenuError.unknownItem(id)
         }
         guard found.enabled else {
@@ -1491,8 +1556,11 @@ public struct PopupMenu: Sendable, Equatable {
 }
 
 public enum NativeMenuLocation: Sendable, Equatable {
+    /// The application's menu, grouped under its title on Windows and Linux.
     case app
+    /// A top-level menu with the supplied title.
     case named(String)
+    /// The macOS Dock menu. Windows and Linux report this destination through `AppHandle.takeMenuErrors()`.
     case dock
 }
 
@@ -2176,7 +2244,7 @@ public struct AppDirs: Sendable, Equatable {
             isRooted: isRooted
         )
         #else
-        let absXdg: (String, String) -> URL = { key, fallbackRel in
+        func absXdg(_ key: String, _ fallbackRel: String) -> URL {
             if let v = lookup(key), v.hasPrefix("/") {
                 return URL(fileURLWithPath: v, isDirectory: true)
             }
@@ -2351,7 +2419,7 @@ public final class Prefs: @unchecked Sendable {
             }
             let out = try JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])
             let tmp = dir.appendingPathComponent(".prefs.\(UUID().uuidString).tmp")
-            try out.write(to: tmp, options: .atomic)
+            try out.write(to: tmp, options: .runeOutput)
             if rename(tmp.path, path.path) != 0 {
                 let err = errno
                 try? FileManager.default.removeItem(at: tmp)

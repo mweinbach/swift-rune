@@ -349,6 +349,17 @@ public final class RuneMaterialHost: NSView {
         NotificationCenter.default.removeObserver(self)
     }
 
+    internal func update(draws: [MaterialDraw], in view: NSView, layer: CAMetalLayer, scale: CGFloat, mode: MaterialMode) {
+        guard let window = view.window else { return }
+        setLiveResizing(view.inLiveResize, mode: mode)
+        guard !window.isOpaque, mode != .fallback, !draws.isEmpty else {
+            hideAll(mode: mode)
+            return
+        }
+        attach(to: window, below: view, metalLayer: layer)
+        apply(draws, scale: scale, mode: mode)
+    }
+
     public func attach(to window: NSWindow, below metalView: NSView, metalLayer: CAMetalLayer? = nil) {
         guard let contentView = window.contentView else { return }
         if superview !== contentView {

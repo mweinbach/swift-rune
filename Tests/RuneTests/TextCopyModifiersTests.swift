@@ -32,7 +32,7 @@ struct TextCopyModifiersTests {
     }
 
     @Test("copy_leaves_the_breaks_and_prefixes_texts_ask_for (selection_copy_breaks.rs parity)")
-    func copyLeavesBreaksAndPrefixesEndToEnd() {
+    func copyLeavesBreaksAndPrefixesEndToEnd() throws {
         let rt = Runtime<Int>(
             state: 0,
             viewport: Vec2(400, 260),
@@ -60,7 +60,14 @@ struct TextCopyModifiersTests {
 
         let expected = "Title\n\n- one\n- two\nAfter"
         #expect(rt.selectedText() == expected)
-        let handledCopy = rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.2)
+        var controlAndSuper = RuneTestKey.primaryMods()
+        controlAndSuper.ctrl = true
+        controlAndSuper.logo = true
+        #expect(!rt.keyDown(KeyEvent(key: .command("c"), mods: controlAndSuper), at: 0.16))
+        #expect(rt.clipboard.text != expected)
+        let parsed = try Chord.parse("mod+c")
+        #expect(rt.keyDown(KeyEvent(key: parsed.key, mods: parsed.mods), at: 0.18))
+        let handledCopy = rt.keyDown(KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods()), at: 0.2)
         #expect(handledCopy)
         #expect(rt.clipboard.text == expected)
     }
@@ -87,7 +94,7 @@ struct TextCopyModifiersTests {
         rt.update { _, tx in tx.selectAllText("one") }
         _ = rt.frame(at: 0.05)
         #expect(rt.selectedText() == "one")
-        #expect(rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.06))
+        #expect(rt.keyDown(KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods()), at: 0.06))
         #expect(rt.clipboard.text == "one")
 
         // Dragging from inside "one" across into "two" omits first item's prefix, keeps second's.
@@ -140,7 +147,7 @@ struct TextCopyModifiersTests {
         _ = rt.frame(at: 0.63)
 
         #expect(rt.selectedText() == "word")
-        #expect(rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.65))
+        #expect(rt.keyDown(KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods()), at: 0.65))
         #expect(capturedWhole == true)
         #expect(capturedPiece == "word")
 
@@ -210,7 +217,7 @@ struct TextCopyModifiersTests {
         #expect(selectAll == .selectGroup(groupPath: "@root", nodePaths: ["@root/@u", "@root/@next"], joinedText: "\n\n- item"))
     }
 
-    @Test("CopyJoin honors trailing newlines, beside tabs, and Cmd+A SelectAll")
+    @Test("CopyJoin honors trailing newlines, beside tabs, and the Select All shortcut")
     func copyJoinTrailingNewlinesBesideAndSelectAll() {
         let entries: [CopyJoin.Entry] = [
             CopyJoin.Entry(
@@ -232,7 +239,7 @@ struct TextCopyModifiersTests {
         ]
         #expect(CopyJoin.join(entries) == "head\n\n* left\t* right")
 
-        // Cmd+A in a selectionGroup honors uncopied + copyBreaks + copyPrefix
+        // Select All in a selectionGroup honors uncopied + copyBreaks + copyPrefix.
         let rt = Runtime<Int>(
             state: 0,
             viewport: Vec2(360, 200),
@@ -243,7 +250,7 @@ struct TextCopyModifiersTests {
             }
         )
         _ = rt.frame(at: 0.0)
-        #expect(rt.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: 0.1))
+        #expect(rt.keyDown(KeyEvent(key: .command("a"), mods: RuneTestKey.primaryMods()), at: 0.1))
         #expect(rt.selectedText() == "H1\n\n- item")
     }
 }

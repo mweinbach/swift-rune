@@ -123,43 +123,58 @@ struct Phase3CrateExamplesTests {
 
     @Test("rune-kit-shortcut-recorder detects conflict on Ctrl+Shift+Space and records valid chord")
     func kitShortcutRecorderBehavior() throws {
-        var s = ShortcutRecorderDemoState()
-        s.recorder.begin()
-        var tx = Tx()
-        let conflictHandled = RuneKitShortcutRecorderApp.onKey(
-            state: &s,
-            event: KeyEvent(key: .space, mods: Mods(shift: true, ctrl: true)),
-            tx: &tx
-        )
-        #expect(conflictHandled)
-        #expect(s.recorder.error == .conflict)
-        #expect(s.recorder.shortcut == nil)
-        #expect(s.registered == nil)
-        #expect(s.owner != nil)
+        let app = RuneKitShortcutRecorderApp.makeApp()
+        let shared = app.handle().shared
+        let host = ShortcutGuard.attach(shared: shared, wake: Waker {}, headless: true)
+        defer { host.close() }
+        let rt = app.makeRuntime()
+        _ = rt.frame(at: 0)
 
-        s.recorder.begin()
-        let okHandled = RuneKitShortcutRecorderApp.onKey(
-            state: &s,
-            event: KeyEvent(key: .text("k"), mods: Mods(cmd: true)),
-            tx: &tx
-        )
-        #expect(okHandled)
-        let expected = ShortcutChord(key: "k", modifiers: [.command])
-        #expect(s.recorder.shortcut == expected)
-        #expect(s.registered == expected)
-        #expect(RuneKitShortcutRecorderApp.onKey(state: &s, event: KeyEvent(key: .text("k"), mods: Mods(cmd: true)), tx: &tx))
-        #expect(s.activations == 1)
+        let bounds = try #require(rt.element(byKey: "shortcut")).rect
+        let point = Vec2(bounds[0] + 12, bounds[1] + bounds[3] / 2)
+        var time = 0.0
+        func begin() {
+            time += 0.1
+            rt.pointerDown(at: point, at: time)
+            rt.pointerUp(at: point, at: time + 0.01)
+            _ = rt.frame(at: time + 0.02)
+            #expect(rt.state.recorder.isRecording)
+        }
+        func press(_ key: PhysicalKeyCode, _ mods: Mods = .none) {
+            time += 0.1
+            #expect(rt.physicalInput(.key(key: key, mods: mods, pressed: true, repeat: false), at: time))
+            _ = rt.physicalInput(.key(key: key, mods: mods, pressed: false, repeat: false), at: time + 0.01)
+            _ = rt.frame(at: time + 0.02)
+        }
 
-        // Subsequent conflict refusal must preserve the existing recorded shortcut.
-        s.recorder.begin()
-        #expect(RuneKitShortcutRecorderApp.onKey(
-            state: &s,
-            event: KeyEvent(key: .space, mods: Mods(shift: true, ctrl: true)),
-            tx: &tx
-        ))
-        #expect(s.recorder.error == .conflict)
-        #expect(s.recorder.shortcut == expected)
-        #expect(s.registered == expected)
+        begin()
+        press(.space, Mods(shift: true, ctrl: true))
+        #expect(rt.state.recorder.error == .conflict)
+        #expect(rt.state.registered == nil)
+        #expect(rt.state.owner == "Shortcut recorder")
+
+        press(.keyK, Mods(ctrl: true))
+        let chord = ShortcutChord(key: "k", modifiers: [.control])
+        #expect(rt.state.recorder.shortcut == chord)
+        #expect(rt.state.registered == chord)
+        let shortcut = try chord.parsedShortcut()
+        try shared.shortcuts.fire(shortcut).get()
+        host.withReceiving { _ = shared.applyStateUpdates(to: rt, at: time) }
+        #expect(rt.state.activations == 1)
+
+        begin()
+        press(.space, Mods(shift: true, ctrl: true))
+        #expect(rt.state.recorder.error == .conflict)
+        #expect(rt.state.registered == chord)
+        press(.keyJ, Mods(ctrl: true))
+        #expect(rt.state.registered == ShortcutChord(key: "j", modifiers: [.control]))
+        #expect(throws: ShortcutError.unknownId(shortcut.description)) { try shared.shortcuts.fire(shortcut).get() }
+
+        begin()
+        press(.backspace)
+        #expect(rt.state.registered == nil)
+        let replacement = try ParsedShortcut.parseOn("ctrl+j")
+        #expect(throws: ShortcutError.unknownId(replacement.description)) { try shared.shortcuts.fire(replacement).get() }
 
         let out = try HeadlessRunner.run(RuneKitShortcutRecorderApp.makeApp(), args: ToolingArgs())
         #expect(String(decoding: out.treeJSON, as: UTF8.self).contains("Launcher shortcut"))

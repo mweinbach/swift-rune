@@ -27,11 +27,7 @@ public enum RunePopupMenuApp {
     }
 
     public static func popupMenuSupported() -> Bool {
-        #if os(macOS)
-        return true
-        #else
-        return false
-        #endif
+        Rune.popupMenuSupported()
     }
 
     public static func contextMenu() -> PopupMenu {
@@ -55,6 +51,8 @@ public enum RunePopupMenuApp {
                     .child(
                         row()
                             .key("theme")
+                            .role(.button)
+                            .focusable(true)
                             .p(6)
                             .rounded(6)
                             .bg(oklch(0.45, 0.02, 260.0))
@@ -72,6 +70,7 @@ public enum RunePopupMenuApp {
             .child(
                 el()
                     .key("canvas")
+                    .focusable(true)
                     .size(272, 80)
                     .rounded(8)
                     .bg(oklch(0.3, 0.02, 260.0))

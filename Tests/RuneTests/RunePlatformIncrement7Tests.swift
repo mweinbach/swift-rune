@@ -139,12 +139,12 @@ struct RunePlatformIncrement7Tests {
 
     @Test("Runtime keyDown dispatches ShortcutRegistry when unhandled and blocks under modal")
     @MainActor
-    func runtimeShortcutRegistryDispatch() {
+    func runtimeShortcutRegistryDispatch() throws {
         final class Hit: @unchecked Sendable { var count = 0 }
         struct S { var modal = false }
         let hit = Hit()
         let registry = ShortcutRegistry()
-        _ = registry.register(id: "open.palette", accelerator: "cmd+p", scope: .global) {
+        _ = registry.register(id: "open.palette", accelerator: "mod+p", scope: .global) {
             hit.count += 1
         }
         let rt = Runtime(state: S(), viewport: Vec2(200, 120)) { s, _ in
@@ -155,7 +155,9 @@ struct RunePlatformIncrement7Tests {
         rt.shortcutRegistry = registry
         _ = rt.frame(at: 0.0)
 
-        let handled = rt.keyDown(KeyEvent(key: .command("p"), mods: Mods(cmd: true, logo: true)), at: 0.1)
+        let shortcut = try Chord.parse("mod+p")
+        let keyEvent = KeyEvent(key: .command("p"), mods: shortcut.mods)
+        let handled = rt.keyDown(keyEvent, at: 0.1)
         #expect(handled == true)
         #expect(hit.count == 1)
 
@@ -163,7 +165,7 @@ struct RunePlatformIncrement7Tests {
         rt.state.modal = true
         rt.markNeedsCommit()
         _ = rt.frame(at: 0.2)
-        let underModal = rt.keyDown(KeyEvent(key: .command("p"), mods: Mods(cmd: true, logo: true)), at: 0.3)
+        let underModal = rt.keyDown(keyEvent, at: 0.3)
         #expect(underModal == false)
         #expect(hit.count == 1)
     }

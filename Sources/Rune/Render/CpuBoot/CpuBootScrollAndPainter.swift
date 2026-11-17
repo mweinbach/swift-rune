@@ -6,6 +6,11 @@ import simd
 /// Persistent worker pool (`cpu_boot/pool.rs`), scroll-row mover (`cpu_boot/scroll.rs`),
 /// incremental `CpuPainter` (`cpu_boot/painter.rs`), and top-level `CpuBoot.paint` (`cpu_boot.rs`).
 public final class CpuBootPool: @unchecked Sendable {
+    #if os(WASI)
+    public init(threads: Int) {}
+    public var threads: Int { 1 }
+    public func run(extra: Int, _ job: @Sendable () -> Void) { job() }
+    #else
     private final class SharedState: @unchecked Sendable {
         let cond = NSCondition()
         var leaving = false
@@ -102,6 +107,7 @@ public final class CpuBootPool: @unchecked Sendable {
             }
         }
     }
+    #endif
 }
 
 private struct PoolThreadsExec: CpuBootExec {
@@ -567,7 +573,7 @@ public final class CpuPainter {
 
     public func paint(_ scene: CpuBootScene, into target: inout CpuBootTarget) throws -> CpuBootPainted {
         try CpuBoot.checkTarget(scene: scene, target: target)
-        let start = DispatchTime.now().uptimeNanoseconds
+        let start = RuneExecutionContext.uptimeNanoseconds
 
         let currentFlags = sceneFlags(scene)
         if flags == currentFlags, let fast = tryRecoloured(scene, target: &target, start: start) {
@@ -579,7 +585,7 @@ public final class CpuPainter {
         flags = currentFlags
 
         let bins = CpuBootBin.Bins.build(for: scene)
-        let binned = DispatchTime.now().uptimeNanoseconds
+        let binned = RuneExecutionContext.uptimeNanoseconds
 
         each.removeAll(keepingCapacity: true)
         each.reserveCapacity(scene.instances.count)
@@ -624,7 +630,7 @@ public final class CpuPainter {
         func isChanged(_ t: Int) -> Bool { redo[t] || hashChanged(t) }
         let byHash = (0..<nextHashes.count).reduce(0) { $0 + (isChanged($1) ? 1 : 0) }
 
-        let planning = DispatchTime.now().uptimeNanoseconds
+        let planning = RuneExecutionContext.uptimeNanoseconds
         let candidateShift: CpuBootScroll.Shift?
         if all || resized || byHash < Self.minScrollTiles {
             candidateShift = nil
@@ -659,7 +665,7 @@ public final class CpuPainter {
             return count < byHash ? s : nil
         }
 
-        let moving = DispatchTime.now().uptimeNanoseconds
+        let moving = RuneExecutionContext.uptimeNanoseconds
         if let shift {
             let cleanCount = shift.clean.reduce(0) { $0 + ($1 ? 1 : 0) }
             let movers = min(cleanCount / Self.tilesPerThread, max(0, pool.threads - 1))
@@ -672,7 +678,7 @@ public final class CpuPainter {
                 dy: shift.dy
             )
         }
-        let moved = DispatchTime.now().uptimeNanoseconds
+        let moved = RuneExecutionContext.uptimeNanoseconds
 
         for t in 0..<nextHashes.count where isDirty(shift, t) {
             dirty.append(UInt32(t))
@@ -682,7 +688,7 @@ public final class CpuPainter {
         stride = target.stride
         resets = scene.atlasResets
 
-        let hashed = DispatchTime.now().uptimeNanoseconds
+        let hashed = RuneExecutionContext.uptimeNanoseconds
         let extra = min(dirty.count / Self.tilesPerThread, max(0, pool.threads - 1))
         var report = CpuBootRaster.run(
             scene: scene,
@@ -692,7 +698,7 @@ public final class CpuPainter {
             exec: PoolThreadsExec(pool: pool, extra: extra),
             wide: PoolThreadsExec(pool: pool, extra: max(0, pool.threads - 1))
         )
-        let done = DispatchTime.now().uptimeNanoseconds
+        let done = RuneExecutionContext.uptimeNanoseconds
         report.binNs = binned &- start
         report.rasterNs = done &- hashed
         report.totalNs = done &- start
@@ -743,7 +749,7 @@ public final class CpuPainter {
             }
         }
         if !hasDirtyImage && bytesEqual {
-            let elapsed = DispatchTime.now().uptimeNanoseconds &- start
+            let elapsed = RuneExecutionContext.uptimeNanoseconds &- start
             var report = CpuBootReport()
             report.totalNs = elapsed
             report.tiles = prev.bins.tileCount
@@ -816,7 +822,7 @@ public final class CpuPainter {
         for t in dirty {
             hashes[Int(t)] = CpuBootDamage.rehashTile(scene: scene, bins: bins, each: each, tile: Int(t))
         }
-        let hashed = DispatchTime.now().uptimeNanoseconds
+        let hashed = RuneExecutionContext.uptimeNanoseconds
         let extra = min(dirty.count / Self.tilesPerThread, max(0, pool.threads - 1))
         var report: CpuBootReport
         if dirty.isEmpty {
@@ -831,7 +837,7 @@ public final class CpuPainter {
                 wide: PoolThreadsExec(pool: pool, extra: max(0, pool.threads - 1))
             )
         }
-        let done = DispatchTime.now().uptimeNanoseconds
+        let done = RuneExecutionContext.uptimeNanoseconds
         report.rasterNs = done &- hashed
         report.totalNs = done &- start
         report.tiles = tiles
@@ -905,9 +911,9 @@ public enum CpuBoot {
         if let why = scene.needsGpu() {
             throw why
         }
-        let started = DispatchTime.now().uptimeNanoseconds
+        let started = RuneExecutionContext.uptimeNanoseconds
         let bins = CpuBootBin.Bins.build(for: scene)
-        let binned = DispatchTime.now().uptimeNanoseconds
+        let binned = RuneExecutionContext.uptimeNanoseconds
         let exec = CpuBootSpawnExec(threads)
         let allTiles = (0..<UInt32(bins.tileCount)).map { $0 }
         var report = CpuBootRaster.run(
@@ -918,7 +924,7 @@ public enum CpuBoot {
             exec: exec,
             wide: exec
         )
-        let done = DispatchTime.now().uptimeNanoseconds
+        let done = RuneExecutionContext.uptimeNanoseconds
         report.binNs = binned &- started
         report.rasterNs = done &- binned
         report.totalNs = done &- started

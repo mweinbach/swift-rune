@@ -1,6 +1,8 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
-import simd
 
 /// Paint-time whole-pixel snapping (`El::pixel_snap`), ported from
 /// `crates/rune/src/runtime/paint/pixel_snap.rs`.

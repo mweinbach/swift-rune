@@ -39,6 +39,8 @@ struct ParagraphsLazyParityTests {
         for (a, b) in [(0, 0), (0, 7), (3, 19), (0, text.count), (4095, 8200)] {
             #expect(countNewlines(text, a, b) == text[a..<b].filter { $0 == 0x0a }.count)
         }
+        let controlBytes: [UInt8] = [10, 11, 11, 0, 10, 11, 13, 10]
+        #expect(countNewlines(controlBytes, 0, controlBytes.count) == 3)
         var other = text
         other[9000] = 0x41
         #expect(commonStart(text, other) == 9000)
@@ -90,8 +92,8 @@ struct ParagraphsLazyParityTests {
         let whole = ts.layoutKeyed(text: text, style: style, maxWidth: 600, pixelScale: 1, emitGlyphs: false, keep: .owned)
         let a = box.shaped
         let b = whole.shaped
-        #expect(a.lineStrings.count == b.lineStrings.count)
-        for (x, y) in zip(a.lineStrings, b.lineStrings) {
+        #expect(a.textTestLines.count == b.textTestLines.count)
+        for (x, y) in zip(a.textTestLines, b.textTestLines) {
             #expect(x.utf8Start == y.utf8Start)
             #expect(x.text == y.text)
             #expect(abs(x.originY - y.originY) <= 0.5)
@@ -105,11 +107,40 @@ struct ParagraphsLazyParityTests {
         }
         // A press lands on the byte one layout gives.
         for (x, line) in [(Float(20), 1), (Float(3), 3), (Float(200), 0)] {
-            let y = b.lineStrings[line].originY + 2
+            let y = b.textTestLines[line].originY + 2
             #expect(ts.hitTestUTF8Offset(in: a, localX: x, localY: y, pixelScale: 1) == ts.hitTestUTF8Offset(in: b, localX: x, localY: y, pixelScale: 1))
         }
         // One line: one layout, as most drafts are.
         #expect(ts.layoutInput(text: "one line", spans: nil, pills: [], style: style, maxWidth: 600, pixelScale: 1, emitGlyphs: false, request: Self.request(1)).paragraphs == nil)
+    }
+
+    @Test("CRLF is one paragraph break with both original UTF-8 bytes")
+    func windowsParagraphBreaks() throws {
+        let system = TextSystem()
+        let style = Self.wrapped(Self.style)
+        let text = "é\r\n\r\nQ"
+        let box = system.layoutInput(text: text, spans: nil, pills: [], style: style, maxWidth: 250,
+                                     pixelScale: 1, emitGlyphs: false, request: Self.request(71))
+        let layout = try #require(box.paragraphs)
+        #expect(box.shaped.textTestLines.map(\.text) == ["é", "", "Q"])
+        #expect(box.shaped.textTestLines.map(\.utf8Start) == [0, 4, 6])
+        #expect(layout.piece(at: 3).end == 2)
+        #expect(layout.piece(at: 5).isBlank)
+        let width = box.shaped.paragraphNewlinePt
+        let cr = system.selectionRects(in: box.shaped, utf8Range: 2..<3, pixelScale: 1)
+        let lf = system.selectionRects(in: box.shaped, utf8Range: 3..<4, pixelScale: 1)
+        #expect(cr == lf)
+        #expect(cr.count == 1 && cr.first?.z == width)
+        let paste = Array(repeating: "word", count: 256).joined(separator: "\r\n")
+        let waiting = try #require(system.layoutInput(text: paste, spans: nil, pills: [], style: style,
+                                                      maxWidth: 250, pixelScale: 1, emitGlyphs: false,
+                                                      request: Self.request(72)).paragraphs)
+        #expect(waiting.waiting)
+        let (filled, moved) = try #require(system.fillParagraphs(waiting, budget: .infinity, rows: (0, 100),
+                                                                 reach: .infinity))
+        #expect(!moved && !filled.waiting)
+        #expect(filled.composed.textTestLines.count == 256)
+        #expect(filled.composed.textTestLines.last?.utf8Start == 255 * 6)
     }
 
     @Test("an edit shapes only the paragraph it changed; the others keep their layouts")
@@ -159,7 +190,7 @@ struct ParagraphsLazyParityTests {
         #expect(second.paragraphs[0].layout !== first.paragraphs[0].layout)
         #expect(Array(second.paragraphs[0].layout.authText.utf8) == Array("cafe\u{301}".utf8))
         #expect(second.paragraphs[1].layout === first.paragraphs[1].layout)
-        let lines = second.composed.lineStrings
+        let lines = second.composed.textTestLines
         let lineStarts: [Int] = lines.map { $0.utf8Start }
         #expect(lineStarts == [0, 7])
         #expect(Array(lines[0].text.utf8) == Array("cafe\u{301}".utf8))
@@ -239,7 +270,7 @@ struct ParagraphsLazyParityTests {
         #expect(frames > 1)
         #expect(laid.paragraphs.count == n)
         let whole = ts.layoutKeyed(text: text, style: style, maxWidth: 400, pixelScale: 2, emitGlyphs: false, keep: .owned).shaped
-        #expect(whole.lineStrings.count == n)
+        #expect(whole.textTestLines.count == n)
         #expect(laid.height == Float(n) * whole.lineHeight * 2)
         for (k, p) in laid.paragraphs.enumerated() {
             #expect(p.y == (whole.lineTopPt(k) * 2).rounded())
@@ -377,7 +408,7 @@ struct ParagraphsLazyParityTests {
     func caretKeyAndPressFillNearRows() throws {
         #expect(Runtime<S>.readsTextLayout(KeyEvent(key: .arrowUp)))
         #expect(Runtime<S>.readsTextLayout(KeyEvent(key: .home)))
-        #expect(Runtime<S>.readsTextLayout(KeyEvent(key: .text("a"), mods: Mods(cmd: true))))
+        #expect(Runtime<S>.readsTextLayout(KeyEvent(key: .text("a"), mods: RuneTestKey.primaryMods())))
         #expect(!Runtime<S>.readsTextLayout(KeyEvent(key: .text("a"))))
         #expect(!Runtime<S>.readsTextLayout(KeyEvent(key: .backspace)))
         #expect(!Runtime<S>.readsTextLayout(KeyEvent(key: .delete)))

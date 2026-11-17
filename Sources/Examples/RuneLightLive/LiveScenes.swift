@@ -113,15 +113,7 @@ struct LiveTrack {
     }
 }
 
-struct LiveUIInst {
-    var rect: SIMD4<Float>
-    var radii: SIMD4<Float>
-    var fill: SIMD4<Float>
-    var border: SIMD4<Float>
-    var params: SIMD4<Float>
-    var uv: SIMD4<Float>
-    var vp: SIMD4<Float>
-}
+typealias LiveUIInst = LightUIInstance
 
 private func premul(_ c: Color) -> SIMD4<Float> {
     SIMD4<Float>(c.r * c.a, c.g * c.a, c.b * c.a, c.a)
@@ -822,8 +814,6 @@ final class LiveGfx {
     var textTex: MTLTexture
     var atlasTex: MTLTexture
     var atlasGen: UInt64 = 0
-    var instBuf: MTLBuffer
-    var instCap: Int = 1024
     var size: (Int, Int)
     let outputFormat: MTLPixelFormat
 
@@ -859,7 +849,6 @@ final class LiveGfx {
         ad.storageMode = .shared
         self.atlasTex = device.makeTexture(descriptor: ad)!
 
-        self.instBuf = device.makeBuffer(length: self.instCap * MemoryLayout<LiveUIInst>.stride, options: .storageModeShared)!
         self.light = try LightRenderer(device: device, width: UInt32(self.size.0), height: UInt32(self.size.1), outputFormat: outputFormat)
         (self.baseTex, self.textTex) = Self.makeLayerTextures(device: device, width: self.size.0, height: self.size.1)
     }
@@ -908,15 +897,15 @@ final class LiveGfx {
         rp.colorAttachments[0].clearColor = clear
         rp.colorAttachments[0].storeAction = .store
         guard let enc = cmd.makeRenderCommandEncoder(descriptor: rp) else { return }
-        if !insts.isEmpty {
-            if insts.count > instCap {
-                while instCap < insts.count { instCap *= 2 }
-                instBuf = device.makeBuffer(length: instCap * MemoryLayout<LiveUIInst>.stride, options: .storageModeShared)!
-            }
-            _ = insts.withUnsafeBytes { raw in memcpy(instBuf.contents(), raw.baseAddress!, raw.count) }
+        // Base and glyph layers are encoded before submission and need separate instance storage.
+        let instances = insts.withUnsafeBytes { bytes -> MTLBuffer? in
+            guard !bytes.isEmpty, let ptr = bytes.baseAddress else { return nil }
+            return device.makeBuffer(bytes: ptr, length: bytes.count, options: .storageModeShared)
+        }
+        if let instances {
             enc.setRenderPipelineState(uiPipeline)
-            enc.setVertexBuffer(instBuf, offset: 0, index: 0)
-            enc.setFragmentBuffer(instBuf, offset: 0, index: 0)
+            enc.setVertexBuffer(instances, offset: 0, index: 0)
+            enc.setFragmentBuffer(instances, offset: 0, index: 0)
             enc.setFragmentTexture(atlasTex, index: 0)
             enc.setFragmentSamplerState(sampler, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: insts.count)

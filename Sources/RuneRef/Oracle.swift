@@ -68,6 +68,13 @@ public struct OraclePrimitive: Codable, Sendable, Equatable {
 
     /// Converts a Swift `RuneRef.Primitive` (straight alpha, `[x, y, w, h]` clip) into an `OraclePrimitive`.
     public static func fromInstance(_ p: Primitive, node: UInt32 = 0, source: String = "") -> OraclePrimitive {
+        fromInstance(p, atlasWidth: 1, atlasHeight: 1, node: node, source: source)
+    }
+
+    /// Supply the glyph atlas dimensions to convert normalized UV edges back to oracle texels.
+    public static func fromInstance(
+        _ p: Primitive, atlasWidth: Float, atlasHeight: Float, node: UInt32 = 0, source: String = ""
+    ) -> OraclePrimitive {
         func premul(_ v: SIMD4<Float>) -> [Float] {
             let a = min(max(v.w, 0), 1)
             return [v.x * a, v.y * a, v.z * a, a]
@@ -83,8 +90,23 @@ public struct OraclePrimitive: Codable, Sendable, Equatable {
         let turnArr: [Float]? = (isLayer && p.turn != 0)
             ? [p.turn, p.rect.x + p.rect.z * 0.5, p.rect.y + p.rect.w * 0.5]
             : nil
-        let borderArr = isLayer ? [0, 0, 0, 0] : premul(p.border)
-        let uvArr = p.params.y == 4.0 ? premul(p.border) : [p.uv.x, p.uv.y, p.uv.z, p.uv.w]
+        let borderArr: [Float]
+        if p.params.y == Float(PrimitiveKind.image.rawValue) {
+            borderArr = [p.border.x, p.border.y, p.border.z, p.border.w]
+        } else {
+            borderArr = isLayer ? [0, 0, 0, 0] : premul(p.border)
+        }
+        var paramsArr = [p.params.x, p.params.y, p.params.z, p.params.w]
+        let uvArr: [Float]
+        if p.params.y == Float(PrimitiveKind.glyph.rawValue) {
+            let nativeSize = p.params.z == 1
+            uvArr = [p.uv.x * atlasWidth, p.uv.y * atlasHeight,
+                     nativeSize ? 0 : (p.uv.z - p.uv.x) * atlasWidth,
+                     nativeSize ? 0 : (p.uv.w - p.uv.y) * atlasHeight]
+            paramsArr = [p.turn, p.params.y, 0, p.params.w]
+        } else {
+            uvArr = p.params.y == 4.0 ? premul(p.border) : [p.uv.x, p.uv.y, p.uv.z, p.uv.w]
+        }
         return OraclePrimitive(
             node: node,
             source: source,
@@ -92,7 +114,7 @@ public struct OraclePrimitive: Codable, Sendable, Equatable {
             radii: [p.radii.x, p.radii.y, p.radii.z, p.radii.w],
             fill: premul(p.fill),
             border: borderArr,
-            params: [p.params.x, p.params.y, p.params.z, p.params.w],
+            params: paramsArr,
             uv: uvArr,
             clip: clipBox,
             fade: fadeArr,
@@ -143,7 +165,7 @@ public struct OraclePrimitive: Codable, Sendable, Equatable {
             let aw = max(atlasWidth, 1.0)
             let ah = max(atlasHeight, 1.0)
             uvOut = SIMD4<Float>(uv[0] / aw, uv[1] / ah, (uv[0] + uw) / aw, (uv[1] + vh) / ah)
-            paramsOut = SIMD4<Float>(0.0, 2.0, 0.0, params[3])
+            paramsOut = SIMD4<Float>(0.0, 2.0, uv[2] <= 0 ? 1 : 0, params[3])
             turnOut = params[0]
         case 3:
             // OraclePrimitive insetShadow: params[0] = spread, params[2] = sigma
@@ -153,6 +175,8 @@ public struct OraclePrimitive: Codable, Sendable, Equatable {
             borderOut = unpremul(uv)
             paramsOut = SIMD4<Float>(params[0], 4.0, .pi * 0.5, 0.0)
             uvOut = .zero
+        case 7 where border.count == 4:
+            borderOut = SIMD4<Float>(border[0], border[1], border[2], border[3])
         case 8:
             // OraclePrimitive layerBegin: fill[3] = opacity, border = clip radii, params[0] = additive, params[2] = blur
             fillOut = .zero

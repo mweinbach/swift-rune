@@ -84,6 +84,7 @@ public final class AppShared<State>: @unchecked Sendable {
     private var errorMessage: String?
     private var pending = AppDrainedRequests<State>()
     public let shortcuts = ShortcutHub<State>()
+    internal let menuState = AppMenuState<State>()
 
     public init(waker: Waker = Waker(), isVisible: Bool = false) {
         self.waker = waker
@@ -443,7 +444,14 @@ public struct AppWindowSpec<State> {
     public var childWindows: [AnyWindowSpec]
     public var args: [String]?
     internal var configureRuntime: ((AnyObject) -> Void)?
+    #if os(macOS)
+    internal var compositor: AnyCompositor<State>?
+    internal var frameDrawnUpdate: ((inout State, FrameEncoded, inout Tx) -> Void)?
+    #endif
     private let runAction: (@MainActor ([String]?) throws -> Void)?
+    #if os(Windows) || os(Linux)
+    internal let desktopBuilder: App<State>?
+    #endif
 
     public init(
         app: App<State>,
@@ -454,6 +462,9 @@ public struct AppWindowSpec<State> {
         onCreated: ((WindowHandle) -> Void)? = nil
     ) {
         self.key = key ?? app.title
+        #if os(Windows) || os(Linux)
+        self.desktopBuilder = app
+        #endif
         self.appSpec = app.intoSpec()
         var resolvedOptions = options ?? app.windowOptionsValue
         if app.isWindowless && options == nil {
@@ -473,6 +484,10 @@ public struct AppWindowSpec<State> {
         self.onOpenUrl = app.onOpenUrlHook
         self.onFrameEncoded = app.onFrameEncodedHook
         self.onFrameDrawn = app.onFrameInspectHook
+        #if os(macOS)
+        self.compositor = app.compositorValue
+        self.frameDrawnUpdate = app.onFrameDrawnHook
+        #endif
         self.windowless = app.isWindowless
         self.fitContentHeight = app.isFitContentHeight
         self.menuItems = app.menuItems
@@ -492,6 +507,9 @@ public struct AppWindowSpec<State> {
 
     public init(key: String, app: AppSpec<State>) {
         self.key = key
+        #if os(Windows) || os(Linux)
+        self.desktopBuilder = nil
+        #endif
         self.appSpec = app
         self.options = .default
         self.macosWindow = MacWindowOptions()
@@ -665,7 +683,7 @@ public struct AnyWindowSpec {
     public let handle: WindowHandle
     public let secondary: Bool
     private var childWindows: [AnyWindowSpec]
-    private let entry: HostedWindowEntry?
+    internal let nativeHostEntry: NativeHostedWindowEntry?
     private let runner: @MainActor ([String]?) throws -> Void
 
     public init(
@@ -681,7 +699,7 @@ public struct AnyWindowSpec {
         self.handle = WindowHandle(key: title)
         self.secondary = false
         self.childWindows = []
-        self.entry = nil
+        self.nativeHostEntry = nil
         self.runner = runner
     }
 
@@ -700,7 +718,7 @@ public struct AnyWindowSpec {
         self.handle = h
         self.secondary = secondary
         self.childWindows = spec.childWindows
-        self.entry = entry
+        self.nativeHostEntry = entry
         nonisolated(unsafe) let capturedEntry = entry
         self.runner = runner ?? { arguments in
             let parsed = arguments.map { ToolingArgs.parse($0) } ?? ToolingArgs.parse()
@@ -716,10 +734,14 @@ public struct AnyWindowSpec {
     }
 
     public func makeHostEntry() -> HostedWindowEntry {
-        guard let entry else {
+        requireNativeHostEntry()
+    }
+
+    internal func requireNativeHostEntry() -> NativeHostedWindowEntry {
+        guard let nativeHostEntry else {
             preconditionFailure("AnyWindowSpec created without an AppWindowSpec has no HostedWindowEntry")
         }
-        return entry
+        return nativeHostEntry
     }
 
     public mutating func takeChildWindows() -> [AnyWindowSpec] {
@@ -804,6 +826,19 @@ public struct App<State> {
     public var fontURLStrings: [String] = []
 
     public let sharedHandle: AppHandle<State>
+
+    #if os(Windows) || os(Linux)
+    /// A spec created directly from an AppSpec already owns a handle which can have queued work.
+    internal init(windowSpec spec: AppSpec<State>, shared: AppShared<State>?) {
+        title = spec.title
+        size = spec.size
+        minSize = spec.minSize
+        dark = spec.dark
+        makeState = spec.makeState
+        view = spec.view
+        sharedHandle = AppHandle(shared: shared ?? AppShared())
+    }
+    #endif
 
     public init(
         title: String = "Rune",

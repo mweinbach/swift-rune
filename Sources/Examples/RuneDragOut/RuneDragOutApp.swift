@@ -23,8 +23,13 @@ public struct DragOutState: Sendable {
     public static func initial() -> DragOutState {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("Dragged out of Rune.txt")
         try? "This file was dragged out of a Rune window.\n".write(to: file, atomically: true, encoding: .utf8)
-        let appPath = ProcessInfo.processInfo.environment["DRAG_OUT_APP"] ?? "/System/Applications/Calculator.app"
-        return DragOutState(file: file, app: URL(fileURLWithPath: appPath))
+        #if os(macOS)
+        let exampleApp = URL(fileURLWithPath: "/System/Applications/Calculator.app")
+        #else
+        let exampleApp = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
+        #endif
+        let app = ProcessInfo.processInfo.environment["DRAG_OUT_APP"].map { URL(fileURLWithPath: $0) } ?? exampleApp
+        return DragOutState(file: file, app: app)
     }
 }
 

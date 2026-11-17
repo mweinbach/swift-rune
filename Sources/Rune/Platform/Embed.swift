@@ -56,8 +56,7 @@ public struct EmbedFrame: Sendable, Equatable {
     }
 }
 
-/// Hosts a Rune `Runtime` inside a caller-owned `CAMetalLayer` without creating an app window
-/// (`platform::embed::LayerHost`).
+/// Hosts a Rune runtime inside a caller's rendering loop.
 public final class LayerHost<State> {
     public let runtime: Runtime<State>
     public let config: EmbedHostConfig
@@ -71,6 +70,24 @@ public final class LayerHost<State> {
     private var lastViewport: Vec2
     private var lastScale: Float
     private var hasRenderedFirstFrame = false
+    private weak var lastPresenter: AnyObject?
+    private var scheduledWake: Double?
+
+    private static func makeRuntime(spec: AppSpec<State>, viewport: Vec2, scale: Float,
+                                    dark: Bool, reducedMotion: Bool) -> Runtime<State> {
+        HeadlessRunner.registerFonts(spec.fonts)
+        let rt = Runtime<State>(state: spec.makeState(), viewport: viewport, pixelScale: scale,
+                                systemDark: spec.dark ?? dark, reducedMotion: reducedMotion,
+                                onKey: spec.onKey, view: spec.view)
+        rt.srgbBlend = spec.srgbBlend
+        rt.windowTitle = spec.title
+        rt.poll = spec.poll
+        rt.onAppFileDrop = spec.onFileDrop
+        rt.onFileDrop = spec.onFileDropPhase
+        rt.applyCapturePresets()
+        spec.setup?(rt.waker)
+        return rt
+    }
 
     #if canImport(Metal) && canImport(QuartzCore)
     /// Attaches a `Runtime<State>` backed by `spec` to `layer`.
@@ -86,18 +103,8 @@ public final class LayerHost<State> {
             ? config.initialSize
             : spec.size
         let resolvedScale = max(0.5, scale)
-        let rt = Runtime<State>(
-            state: spec.makeState(),
-            viewport: initialSize,
-            pixelScale: resolvedScale,
-            systemDark: spec.dark ?? dark,
-            reducedMotion: reducedMotion,
-            onKey: spec.onKey,
-            view: spec.view
-        )
-        // The capture presets (`RUNE_CONTRAST`, `RUNE_INCREASE_CONTRAST`) as `tooling::runtime_for` applies them (#981).
-        rt.applyCapturePresets()
-        self.runtime = rt
+        self.runtime = Self.makeRuntime(spec: spec, viewport: initialSize, scale: resolvedScale,
+                                        dark: dark, reducedMotion: reducedMotion)
         self.config = config
         self.lastViewport = initialSize
         self.lastScale = resolvedScale
@@ -106,7 +113,7 @@ public final class LayerHost<State> {
         if let layer {
             let dev = layer.device ?? MTLCreateSystemDefaultDevice()
             layer.device = dev
-            layer.pixelFormat = .bgra8Unorm
+            layer.pixelFormat = spec.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
             layer.framebufferOnly = false
             layer.isOpaque = !config.transparentBackground
             layer.contentsScale = CGFloat(resolvedScale)
@@ -149,17 +156,8 @@ public final class LayerHost<State> {
             ? config.initialSize
             : spec.size
         let resolvedScale = max(0.5, scale)
-        self.runtime = Runtime<State>(
-            state: spec.makeState(),
-            viewport: initialSize,
-            pixelScale: resolvedScale,
-            systemDark: spec.dark ?? dark,
-            reducedMotion: reducedMotion,
-            onKey: spec.onKey,
-            view: spec.view
-        )
-        // The capture presets (`RUNE_CONTRAST`, `RUNE_INCREASE_CONTRAST`) as `tooling::runtime_for` applies them (#981).
-        self.runtime.applyCapturePresets()
+        self.runtime = Self.makeRuntime(spec: spec, viewport: initialSize, scale: resolvedScale,
+                                        dark: dark, reducedMotion: reducedMotion)
         self.config = config
         self.lastViewport = initialSize
         self.lastScale = resolvedScale
@@ -179,9 +177,7 @@ public final class LayerHost<State> {
         let resolvedScale = max(0.5, scale ?? lastScale)
         lastViewport = clampedViewport
         lastScale = resolvedScale
-        runtime.viewport = clampedViewport
-        runtime.pixelScale = resolvedScale
-        runtime.markNeedsCommit()
+        runtime.setViewport(clampedViewport, pixelScale: resolvedScale)
 
         #if canImport(Metal) && canImport(QuartzCore)
         if let layer {
@@ -197,30 +193,45 @@ public final class LayerHost<State> {
     /// Evaluates one frame at `now` seconds and presents to the attached `CAMetalLayer` when needed.
     @discardableResult
     public func frame(at now: Double) -> EmbedFrame {
-        let startNs = DispatchTime.now().uptimeNanoseconds
-
-        let customScene = compositorHook?(runtime, now)
-        let shouldDraw = !hasRenderedFirstFrame || runtime.hasPendingCommit || runtime.isAnimating || customScene != nil
-        var drew = false
-        if shouldDraw {
-            let scene = customScene ?? runtime.frame(at: now)
-            hasRenderedFirstFrame = true
+        evaluateFrame(at: now, presenter: self, forceRedraw: false) { customScene in
             #if canImport(Metal) && canImport(QuartzCore)
             if let layer {
-                if let renderer, let drawable = layer.nextDrawable() {
-                    renderer.render(scene: scene, to: drawable)
-                    drew = true
+                guard let renderer, let drawable = layer.nextDrawable() else { return false }
+                if let customScene {
+                    renderer.render(scene: customScene, to: drawable)
+                } else {
+                    renderer.draw(frame: renderer.frame(runtime, at: now), to: drawable)
                 }
-            } else {
-                drew = true
+                return true
             }
-            #else
-            drew = true
             #endif
+            if customScene == nil { _ = runtime.frame(at: now) }
+            return true
+        }
+    }
+
+    fileprivate func evaluateFrame(
+        at now: Double, presenter: AnyObject, forceRedraw: Bool,
+        present: (RefScene?) throws -> Bool
+    ) rethrows -> EmbedFrame {
+        let startNs = RuneExecutionContext.uptimeNanoseconds
+
+        let customScene = compositorHook?(runtime, now)
+        let wakeDue = scheduledWake.map { now >= $0 } ?? false
+        let shouldDraw = forceRedraw || lastPresenter !== presenter || wakeDue || !hasRenderedFirstFrame || runtime.hasPendingCommit
+            || runtime.isAnimating || runtime.livePending || runtime.poll != nil || customScene != nil
+        var drew = false
+        if shouldDraw {
+            // Retry even when building the scene consumed the runtime's dirty flag.
+            hasRenderedFirstFrame = false
+            drew = try present(customScene)
+            hasRenderedFirstFrame = drew
+            if drew { lastPresenter = presenter }
         }
 
-        let wakeAfterSecs: Double? = runtime.nextWakeDeadline(after: now).map { max(0.0, $0 - now) }
-        let elapsedNs = DispatchTime.now().uptimeNanoseconds &- startNs
+        scheduledWake = runtime.nextWakeDeadline(after: now)
+        let wakeAfterSecs = scheduledWake.map { max(0.0, $0 - now) }
+        let elapsedNs = RuneExecutionContext.uptimeNanoseconds &- startNs
         return EmbedFrame(
             drew: drew,
             animating: runtime.isAnimating,
@@ -231,8 +242,48 @@ public final class LayerHost<State> {
 
     /// Mutates app state directly inside the host's runtime.
     public func update(_ body: (inout State, inout Tx) -> Void) {
-        var tx = Tx()
-        body(&runtime.state, &tx)
-        runtime.markNeedsCommit()
+        runtime.update(body)
     }
 }
+
+#if canImport(CRuneGL)
+/// Draws embedded Rune layers into a caller-owned OpenGL 3.3 or OpenGL ES 3 context.
+/// The caller binds its framebuffer, invokes `draw`, and presents its own swapchain.
+/// Construct, draw and close on the owning thread with the same context current.
+public final class OpenGLLayerRenderer {
+    public typealias ProcResolver = @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutableRawPointer?
+    private let renderer: PortableGLRenderer
+    public var adapter: DisplayGpuAdapter { renderer.adapter }
+
+    public init(resolve: @escaping ProcResolver, isGLES: Bool = false,
+                shaderSource: ((String) throws -> String)? = nil) throws {
+        renderer = try PortableGLRenderer(resolve: resolve, isGLES: isGLES, shaderSource: shaderSource)
+    }
+
+    /// Active layer storage, GPU passes, and retained-cache hit and eviction counters.
+    public func layerStats() -> LayerStats { renderer.layerStats() }
+
+    /// Limits retained layer texture storage in bytes. Shrinking the budget evicts
+    /// entries immediately. A zero budget keeps drawing using transient targets.
+    public func setLayerCacheBudget(_ bytes: Int) { renderer.setLayerCacheBudget(bytes) }
+
+    /// Force a redraw when the containing framebuffer has been cleared or replaced.
+    @discardableResult
+    public func draw<State>(_ host: LayerHost<State>, at time: Double, forceRedraw: Bool = false) throws -> EmbedFrame {
+        try host.evaluateFrame(at: time, presenter: self, forceRedraw: forceRedraw) { customScene in
+            if let customScene {
+                try renderer.draw(customScene)
+            } else {
+                try renderer.draw(renderer.frame(host.runtime, at: time))
+            }
+            return true
+        }
+    }
+
+    /// Release the GL resources before detaching or destroying the context.
+    public func close() { renderer.close() }
+
+    /// Release the CPU-side resources after the driver already destroyed the context.
+    public func abandon() { renderer.abandon() }
+}
+#endif

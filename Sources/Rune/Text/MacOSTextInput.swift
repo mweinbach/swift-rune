@@ -1,6 +1,6 @@
 import Foundation
 
-#if canImport(AppKit)
+#if os(macOS) && canImport(AppKit)
 import AppKit
 #endif
 
@@ -139,7 +139,7 @@ public enum ImeUTF16Bridge {
             let clampedEnd = min(fullLen, effective.location + max(1, effective.length))
             let segRange = NSRange(location: clampedStart, length: clampedEnd - clampedStart)
 
-            #if canImport(AppKit)
+            #if os(macOS) && canImport(AppKit)
             let isThickUnderline: Bool
             if let styleRaw = attrs[.underlineStyle] as? Int {
                 let style = NSUnderlineStyle(rawValue: styleRaw)

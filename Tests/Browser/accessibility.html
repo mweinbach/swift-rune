@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune browser semantics</title>
+<canvas width="300" height="200"></canvas>
+<button id="outside">Outside Rune</button>
+<pre id="result">Running…</pre>
+<script type="module">
+import { mountRuneAccessibility } from '../../Sources/Rune/Resources/Web/rune-web-accessibility.mjs';
+import { mountRuneFields } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+
+const result = document.querySelector('#result');
+const canvas = document.querySelector('canvas');
+const events = [];
+const send = event => { events.push(event); return true; };
+const host = mountRuneAccessibility(canvas, send);
+const fields = mountRuneFields(canvas, send, host.attachEditor);
+function expect(value, message) { if (!value) throw Error(message); }
+const toggle = (path, y) => ({ role: 'switch', name: 'Lights', path, key: 'toggle', bounds: [35, y, 60, 25],
+    actions: ['press', 'focus'], states: [], value: 'false' });
+const field = { role: 'password-input', name: 'Passphrase', path: 'secret', key: 'secret',
+    bounds: [35, 125, 150, 30], actions: ['focus', 'press', 'set-value'] };
+const a = toggle('first/toggle', 30), b = toggle('second/toggle', 75);
+const range = { role: 'slider', key: 'volume', path: 'volume', bounds: [35, 170, 150, 20],
+    name: 'Volume', range: [40, 0, 100, 5], actions: ['focus', 'increment', 'decrement', 'set-value'] };
+const packet = { width: 300, height: 200, root: { key: 'root', path: 'root', role: 'group',
+    bounds: [0, 0, 300, 200], children: [a, b, field, range] } };
+try {
+    host.sync(packet);
+    const toggles = document.querySelectorAll('[role=switch]');
+    expect(toggles.length === 2, 'Repeated local keys must remain independent');
+    const control = toggles[1];
+    const rect = control.getBoundingClientRect(), view = canvas.getBoundingClientRect();
+    expect(rect.left === view.left + 35 && rect.top === view.top + 75 && rect.width === 60,
+        'Accessible switch bounds must coincide with drawn pixels');
+    control.focus();
+    expect(events.length === 1 && events[0].action === 'focus', 'Focus must not invoke the switch');
+    control.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true, cancelable: true }));
+    expect(events.at(-1).key === b.path && events.at(-1).action === 'press', 'Space must invoke the mounted switch');
+    b.value = 'true';
+    b.states = ['focused'];
+    host.sync(packet);
+    expect(document.activeElement === control && control.getAttribute('aria-checked') === 'true', 'State and focus survive repaint');
+    const outside = document.querySelector('#outside');
+    outside.focus();
+    host.sync(packet);
+    expect(document.activeElement === outside, 'A passive redraw must preserve page focus');
+    const slider = document.querySelector('input[type=range]');
+    slider.value = '65';
+    slider.dispatchEvent(new Event('input', {bubbles:true}));
+    expect(events.at(-1).action === 'set-value' && events.at(-1).number === 65, 'Native range changes must reach Rune');
+    fields.sync({ key:'secret', label:'Passphrase', secure:true }, true);
+    const visiblePasswords = [...document.querySelectorAll('input[type=password]')].filter(e => !e.hidden);
+    expect(visiblePasswords.length === 1 && document.activeElement === visiblePasswords[0],
+        'One native password editor owns the focused field');
+    expect(visiblePasswords[0].getBoundingClientRect().width === 150, 'Native IME editor must align with the field');
+    fields.sync(null);
+    packet.root.children = [a];
+    host.sync(packet);
+    expect(!control.isConnected, 'Removed controls must leave the DOM');
+    result.textContent = 'PASS roles, actions, repeated keys, field focus, bounds and teardown';
+} catch (error) { result.textContent = 'FAIL ' + error.stack; }
+finally { fields.dispose(); host.dispose(); }
+</script>

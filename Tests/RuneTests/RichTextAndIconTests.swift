@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Rune
 
@@ -110,7 +111,7 @@ struct RichTextAndIconTests {
     }
 
     @Test("Multi-color SVGIcon rasterizes RGB colors, gradients, currentColor, and monochrome fallback")
-    func multiColorSVGIcon() {
+    func multiColorSVGIcon() throws {
         let badge = SVGIcon(
             viewBox: 24,
             body: """
@@ -128,21 +129,66 @@ struct RichTextAndIconTests {
         #expect(badge.isColorIcon == true)
 
         let rasterizer = ColorIconRasterizer()
-        let img = rasterizer.rasterize(badge, pixelSize: 48, currentColor: .srgb(1, 1, 1))
-        #expect(img != nil)
-        #expect(img?.width == 48 && img?.height == 48)
-        let rgba = img!.mips[0].rgba
-        #expect(rgba.count == 48 * 48 * 4)
-        // Left green rect pixel around (x=12, y=24) has non-zero green channel
-        let idx = (24 * 48 + 12) * 4
-        #expect(rgba[idx + 1] > 180)
-        #expect(rgba[idx + 3] > 200)
+        let img = try #require(rasterizer.rasterize(badge, pixelSize: 48, currentColor: .srgb(1, 1, 0)))
+        let mip = try #require(img.mips.first)
+        #expect(img.width == 48 && img.height == 48)
+        #expect(mip.rgba.count == 48 * 48 * 4)
+        #expect(pixel(mip, x: 12, y: 17) == [0, 255, 0, 255])
+        #expect(pixel(mip, x: 12, y: 24) == [255, 255, 0, 255])
+        #expect(pixel(mip, x: 3, y: 10) == [0, 0, 0, 0])
+        let start = pixel(mip, x: 29, y: 19)
+        let end = pixel(mip, x: 39, y: 29)
+        #expect(start[0] > 160 && start[1] == 0 && start[2] > 40 && start[2] < 100 && start[3] == 255)
+        #expect(end[0] > 30 && end[0] < 90 && end[1] == 0 && end[2] > 170 && end[3] == 255)
 
         // Monochrome SVGIcon with XML body rasterizes cleanly into GlyphAtlas
         let monoXml = SVGIcon(viewBox: 24, body: "<rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" rx=\"3\"/>")
         #expect(monoXml.isColorIcon == false)
         let entry = GlyphAtlas().rasterizeIcon(monoXml, pixelSize: 24)
         #expect(entry.uv.z > entry.uv.x)
+    }
+
+    @Test func translucentSVGIconSamplesAndTint() throws {
+        let icon = SVGIcon(viewBox: 8, body: """
+            <g transform="translate(2.5 1)" opacity="0.5">
+                <rect width="3" height="3" fill="#804020"/>
+            </g>
+            """)
+        let renderer = ColorIconRasterizer()
+        let fill = try #require(renderer.rasterize(icon, pixelSize: 8)?.mips.first)
+        let tint = try #require(renderer.rasterize(icon, pixelSize: 8, oneColor: .srgb(0.25, 0.5, 1))?.mips.first)
+
+        for (mip, rgb) in [(fill, [128, 64, 32] as [UInt8]), (tint, [64, 128, 255])] {
+            #expect(pixel(mip, x: 0, y: 2) == [0, 0, 0, 0])
+            // The translated left edge covers half a pixel. The interior has only group opacity.
+            for (x, expectedAlpha) in [(2, 64), (3, 128)] {
+                let sample = pixel(mip, x: x, y: 2)
+                #expect(abs(Int(sample[3]) - expectedAlpha) <= 1)
+                let reference = DecodedImage.generateMipChain(width: 1, height: 1, rgba: Data(rgb + [sample[3]]))
+                let expected = try #require(reference.first)
+                for i in 0..<3 {
+                    #expect(abs(Int(sample[i]) - Int(expected.rgba[i])) <= 2)
+                }
+            }
+        }
+    }
+
+    private func pixel(_ mip: ImageMipLevel, x: Int, y: Int) -> [UInt8] {
+        let offset = (y * Int(mip.width) + x) * 4
+        return Array(mip.rgba[offset..<(offset + 4)])
+    }
+
+    @Test func colorIconClipsFarOutsideItsViewBox() throws {
+        let icon = SVGIcon(viewBox: 16, body: ##"""
+            <rect x="-100000" y="-100000" width="100008" height="100004" fill="#0080ff"/>
+            """##)
+        let mip = try #require(ColorIconRasterizer().rasterize(icon, pixelSize: 16)?.mips.first)
+        for y in 0..<16 {
+            for x in 0..<16 {
+                let expected: [UInt8] = x < 8 && y < 4 ? [0, 128, 255, 255] : [0, 0, 0, 0]
+                #expect(pixel(mip, x: x, y: y) == expected)
+            }
+        }
     }
 
     @Test("El.link hit tests link byte range only, preserves focus, emits ElementInfo, and handles secondary clicks")

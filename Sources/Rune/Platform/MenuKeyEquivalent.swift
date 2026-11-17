@@ -53,12 +53,14 @@ public struct MenuKeyEquivalent: Sendable, Equatable {
             }
         }
 
-        var mask: UInt = 0
-        if chord.mods.ctrl { mask |= Self.controlMask }
-        if chord.mods.alt { mask |= Self.optionMask }
-        if chord.mods.shift { mask |= Self.shiftMask }
-        if chord.mods.cmd || chord.mods.logo { mask |= Self.commandMask }
-        self.modifierMask = mask
+        self.modifierMask = chord.mods(on: .mac).reduce(into: 0) { mask, modifier in
+            switch modifier {
+            case .ctrl: mask |= Self.controlMask
+            case .alt: mask |= Self.optionMask
+            case .shift: mask |= Self.shiftMask
+            case .primary, .super: mask |= Self.commandMask
+            }
+        }
     }
 
     /// Parses an accelerator string (`"cmd+b"`, `"mod+shift+z"`) into a menu key equivalent.

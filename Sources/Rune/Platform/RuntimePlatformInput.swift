@@ -364,16 +364,19 @@ extension Runtime {
         return onAppFileDrop != nil || onFileDrop != nil
     }
 
-    internal func routeFileDropPhase(_ phase: FileDropPhase, at now: Double) {
+    internal func routeFileDropPhase(_ phase: FileDropPhase, at now: Double) -> Bool {
         switch phase {
         case .entered(let files, let pt):
             dragFiles(files.map(\.url), at: pt, at: now)
+            return !files.isEmpty && (dropHoverAccepted || onAppFileDrop != nil)
         case .hovered(let pt):
             dragFilesTo(pt, at: now)
+            return !(draggedFiles?.isEmpty ?? true) && (dropHoverAccepted || onAppFileDrop != nil)
         case .exited:
             dragFilesLeave(at: now)
+            return false
         case .dropped(let files, let pt):
-            _ = dropFiles(files.map(\.url), at: pt, at: now)
+            return dropFiles(files.map(\.url), at: pt, at: now)
         }
     }
 

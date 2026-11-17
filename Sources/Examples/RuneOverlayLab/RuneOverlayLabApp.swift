@@ -618,9 +618,8 @@ public enum RuneOverlayLabApp {
         )
         .configured(pillOptions)
         .onCreated { created in
-            fputs(
-                "overlay-lab pill created (windowNumber: \(String(describing: created.windowNumber)), captureExclusion: \(created.capabilities.captureExclusion))\n",
-                stderr
+            RuneStandardIO.error(
+                "overlay-lab pill created (windowNumber: \(String(describing: created.windowNumber)), captureExclusion: \(created.capabilities.captureExclusion))\n"
             )
         }
 
@@ -659,9 +658,8 @@ public enum RuneOverlayLabApp {
             )
             .configured(opts)
             .onCreated { created in
-                fputs(
-                    "overlay-lab picker-\(idx) created (windowNumber: \(String(describing: created.windowNumber)), captureExclusion: \(created.capabilities.captureExclusion))\n",
-                    stderr
+                RuneStandardIO.error(
+                    "overlay-lab picker-\(idx) created (windowNumber: \(String(describing: created.windowNumber)), captureExclusion: \(created.capabilities.captureExclusion))\n"
                 )
             }
             .onKey { state, event, _ in
@@ -746,9 +744,8 @@ public enum RuneOverlayLabApp {
                 if let seconds = autoQuitSeconds, seconds > 0 {
                     Thread.detachNewThread {
                         Thread.sleep(forTimeInterval: 0.75)
-                        fputs(
-                            "overlay-lab window=\(String(describing: lab.pill.windowNumber)) capture=\(lab.pill.captureExclusion)\n",
-                            stderr
+                        RuneStandardIO.error(
+                            "overlay-lab window=\(String(describing: lab.pill.windowNumber)) capture=\(lab.pill.captureExclusion)\n"
                         )
                         Thread.sleep(forTimeInterval: seconds)
                         lab.hideAll()

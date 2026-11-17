@@ -10,6 +10,11 @@ struct RuneRefTests {
         #expect(throws: RefSceneError.invalidDimensions(width: 0, height: 100)) {
             try RefScene(width: 0, height: 100).validate()
         }
+        var malformed = RefScene(width: 1, height: 1)
+        malformed.images.width = Int.max
+        #expect(throws: RefSceneError.invalidAtlasDimensions(width: .max, height: 1)) {
+            try malformed.validate()
+        }
 
         let nanPrim = Primitive.roundedRect(
             rect: SIMD4<Float>(.nan, 0, 10, 10),
@@ -69,6 +74,18 @@ struct RuneRefTests {
             let px = frame.pixel(x: k, y: k)
             #expect(px == SIMD4<UInt8>(255, 255, 255, 255), "Seam detected at (\(k), \(k)): \(px)")
         }
+    }
+
+    @Test("A tolerated difference retains the measured channel delta")
+    func differenceWithinTolerance() {
+        let scene = RefScene(width: 1, height: 1)
+        let expected = Frame(width: 1, height: 1, rgba: [40, 50, 60, 255])
+        let actual = Frame(width: 1, height: 1, rgba: [40, 52, 60, 255])
+        let result = RuneRef.compare(scene: scene, expected: expected, actual: actual, channelTolerance: 2)
+        #expect(result.passed)
+        #expect(result.differingPixels == 0)
+        #expect(result.maxChannelDelta == 2)
+        #expect(result.worstBlame == nil)
     }
 
     @Test("PNG encode and decode round-trips rendered frame cleanly")
@@ -388,6 +405,22 @@ struct RuneRefTests {
         #expect(diff.passed, "Semi-transparent PNG round-trip mismatch: \(diff)")
     }
 
+    @Test("Grayscale and RGB PNG transparency keys match the complete sample")
+    func portablePNGTransparencyKeys() throws {
+        // Each fixture has a transparent pixel followed by a near match.
+        // FFmpeg yields the straight RGBA bytes below.
+        let fixtures: [(String, [UInt8])] = [
+            ("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAAAAADRSSBWAAAAAnRSTlMAJT2XGX8AAAALSURBVHicY1BVAwAAcwBMHTPEOAAAAABJRU5ErkJggg==",
+             [37, 37, 37, 0, 38, 38, 38, 255]),
+            ("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAABnRSTlMACwAWACFNtPkcAAAAD0lEQVR4nGPgFlPkFlMCAAGqAIY9sMQ3AAAAAElFTkSuQmCC",
+             [11, 22, 33, 0, 11, 22, 34, 255])
+        ]
+        for (base64, expected) in fixtures {
+            let data = try #require(Data(base64Encoded: base64))
+            #expect(try PortablePNG.decode(data).rgba == expected)
+        }
+    }
+
     @Test("PortablePNG encodes, decodes, and unfilters scanline types 0..4")
     func portablePNGRoundTripAndUnfiltering() throws {
         // 1. Exact byte-for-byte round-trip via PortablePNG
@@ -404,6 +437,12 @@ struct RuneRefTests {
             }
         }
         let encoded = try PortablePNG.encode(width: width, height: height, rgba: rgba)
+        #expect(throws: PortablePNG.Error.invalidDimensions(width: Int.max, height: 2)) {
+            try PortablePNG.encode(width: Int.max, height: 2, rgba: [])
+        }
+        #expect(throws: PortablePNG.Error.invalidDimensions(width: width, height: height)) {
+            try PortablePNG.decode(encoded, maxDimension: width - 1)
+        }
         let decoded = try PortablePNG.decode(encoded)
         #expect(decoded.width == width)
         #expect(decoded.height == height)

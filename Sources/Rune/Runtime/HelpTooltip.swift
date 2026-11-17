@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
 import RuneRef
 
@@ -438,16 +441,17 @@ private struct HelpTipRow {
 }
 
 /// Measures, positions, and draws `tip` in `look`, returning `[x, y, w, h]` in window points.
-internal func drawHelpTooltip(
+internal func drawHelpTooltip<State>(
     _ tip: HelpDrawnTip,
     look: HelpLook,
-    viewport: Vec2,
-    pixelScale: Float,
-    srgbBlend: Bool,
-    systemDark: Bool,
-    textSystem: TextSystem,
-    primitives: inout [Primitive]
+    runtime: Runtime<State>,
+    primitives: inout [Primitive],
+    recordGlyphPage: (Int, UInt16) -> Void
 ) -> SIMD4<Float> {
+    let viewport = runtime.viewport
+    let pixelScale = runtime.pixelScale
+    let srgbBlend = runtime.srgbBlend
+    let textSystem = runtime.textSystem
     let e = tip.anchor
     let s = max(1.0, pixelScale)
     let keyLook = look.key
@@ -609,21 +613,13 @@ internal func drawHelpTooltip(
 
     func emitShapedGlyphs(_ shaped: ShapedText, originPx: SIMD2<Float>, inkColor: Color) {
         let scaledOrigin = scalePoint(originPx)
-        let gamma: Float = systemDark ? 0.88 : 1.05
         for g in shaped.glyphs {
             let gc = (g.color ?? inkColor).scaleAlpha(alpha).simd4(srgb: srgbBlend)
-            primitives.append(.glyph(
-                rect: SIMD4<Float>(
-                    scaledOrigin.x + g.rect.x * s * k,
-                    scaledOrigin.y + g.rect.y * s * k,
-                    g.rect.z * s * k,
-                    g.rect.w * s * k
-                ),
-                uv: g.uv,
-                color: gc,
-                gamma: gamma,
-                clip: fullClip
-            ))
+            let rect = SIMD4<Float>(scaledOrigin.x + g.rect.x * s * k, scaledOrigin.y + g.rect.y * s * k,
+                                    g.rect.z * s * k, g.rect.w * s * k)
+            let primitive = runtime.referenceTextPrimitive(g, rect: rect, ink: gc, clip: fullClip)
+            if primitive.kind == .glyph { recordGlyphPage(primitives.count, g.atlasPage) }
+            primitives.append(primitive)
         }
     }
 

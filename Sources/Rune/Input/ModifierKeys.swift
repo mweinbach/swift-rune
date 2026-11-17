@@ -19,7 +19,7 @@ public struct ModifierKeysState: Sendable {
     /// Whether queued modifier events are waiting to run.
     public var hasQueuedEvents: Bool = false
 
-    #if os(windows)
+    #if os(Windows)
     public static let altGrClearsFlagsDefault = true
     #else
     public static let altGrClearsFlagsDefault = false

@@ -261,6 +261,76 @@ struct WheelOwnerHandoffParityTests {
         #expect(rt.scrollOffset(forKey: "section").y == 0.0)
     }
 
+    @MainActor
+    private func nestedLists() -> Runtime<Void> {
+        let runtime = Runtime<Void>(state: (), viewport: Vec2(200, 120), pixelScale: 1) { _, _ in
+            let inner: El<Void> = col().key("inner").size(200, 80).scrollY()
+                .child(el().size(200, 180))
+            return col().key("outer").size(200, 120).scrollY()
+                .child(inner)
+                .child(el().size(200, 300))
+        }
+        _ = runtime.frame(at: 0)
+        return runtime
+    }
+
+    @MainActor
+    @Test("a nested wheel run stays at its edge until 0.5 seconds after the last delta")
+    func verticalRunKeepsItsViewport() {
+        let rt = nestedLists()
+        rt.wheelXY(60, 50, 0, -150, now: 1)
+        #expect(rt.scrollOffset(forKey: "inner").y == 100)
+        #expect(rt.scrollOffset(forKey: "outer").y == 0)
+        rt.wheelXY(60, 50, 0, -15, now: 1.5)
+        rt.wheelXY(60, 50, 0, -15, now: 2)
+        #expect(rt.scrollOffset(forKey: "outer").y == 0)
+        rt.wheelXY(60, 50, 0, -15, now: 2.501)
+        #expect(rt.scrollOffset(forKey: "outer").y == 15)
+        // Reversing a run that moved keeps it on the same viewport.
+        rt.wheelXY(60, 50, 0, 10, now: 2.55)
+        #expect(rt.scrollOffset(forKey: "outer").y == 5)
+        #expect(rt.scrollOffset(forKey: "inner").y == 100)
+    }
+
+    @MainActor
+    @Test("a vertical run measures pointer slop from its first delta")
+    func verticalRunPointerSlop() {
+        let rt = nestedLists()
+        rt.wheelXY(60, 50, 0, -150, now: 1)
+        rt.wheelXY(66, 57, 0, -10, now: 1.01)
+        #expect(rt.scrollOffset(forKey: "outer").y == 0)
+        rt.wheelXY(66, 58, 0, -10, now: 1.02)
+        #expect(rt.scrollOffset(forKey: "outer").y == 10)
+    }
+
+    @Test("a vertical run whose initial delta was too small to move releases on reversal")
+    func verticalRunWithoutMovement() {
+        var lock = WheelLock()
+        lock.ranVertical(path: "list", at: 1, x: 5, y: 10, dy: -0.001, moved: false, continued: false)
+        #expect(lock.verticalTarget(at: 1.1, x: 5, y: 10, dy: -1) == "list")
+        #expect(lock.verticalTarget(at: 1.1, x: 5, y: 10, dy: 1) == nil)
+    }
+
+    @MainActor
+    @Test("trackpad momentum keeps its viewport, a new touch and a lost pointer repick")
+    func verticalRunPhaseAndPointerLoss() {
+        let rt = nestedLists()
+        rt.wheelBegan(now: 1)
+        rt.wheelXY(60, 50, 0, -150, now: 1.01)
+        rt.wheelEnded(now: 1.02)
+        rt.wheelBegan(now: 1.03)
+        rt.wheelXY(60, 50, 0, -10, now: 1.04)
+        #expect(rt.scrollOffset(forKey: "outer").y == 0)
+        rt.wheelEnded(now: 1.05)
+        rt.wheelBegan(now: 1.06)
+        rt.wheelXY(60, 50, 0, -10, now: 1.07)
+        #expect(rt.scrollOffset(forKey: "outer").y == 10)
+        rt.pointerExit(at: 1.075)
+        rt.wheelXY(60, 50, 0, 5, now: 1.08)
+        #expect(rt.scrollOffset(forKey: "inner").y == 95)
+        #expect(rt.scrollOffset(forKey: "outer").y == 10)
+    }
+
     /// #1021 through `fling` / `fling_xy` (`pointer.rs` `fling` on `scroll_at`, `scroll/x.rs`
     /// `fling_xy` on `scroll_at_axis`): a fling over a viewport whose content fits releases into
     /// the one around it, and a mostly sideways fling over a strip that fits is the vertical one.

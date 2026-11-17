@@ -19,6 +19,7 @@ struct ImageDecoderPanic: Error, Sendable {
 
 /// Test-only gate a decode waits on before it runs (`image.rs` `Input::Gated`'s
 /// `mpsc::Receiver<()>`): `release()` lets exactly one waiting decode proceed.
+#if !os(WASI)
 final class ImageDecodeGate: @unchecked Sendable {
     private let semaphore = DispatchSemaphore(value: 0)
 
@@ -31,6 +32,8 @@ final class ImageDecodeGate: @unchecked Sendable {
     func wait() { semaphore.wait() }
 }
 
+#endif
+
 /// What an `ImageCache` request decodes (`image.rs` `Input`).
 indirect enum ImageDecodeInput: Sendable {
     /// `ImageCache.load(_:)` bytes (`Input::Encoded`).
@@ -40,7 +43,9 @@ indirect enum ImageDecodeInput: Sendable {
     /// A decoder that panics, standing in for a codec bug (`#[cfg(test)] Input::Panic`).
     case panic
     /// A decode that waits on `gate` first (`#[cfg(test)] Input::Gated`).
+    #if !os(WASI)
     case gated(ImageDecodeInput, ImageDecodeGate)
+    #endif
 
     /// The straight RGBA size, for the inline-finish check in `ImageCache::request_set`.
     var rgbaPixelCount: UInt64? {
@@ -58,9 +63,11 @@ indirect enum ImageDecodeInput: Sendable {
             return ImageCache.land(url: "rgba", fetched: .rgba(width: w, height: h, data: bytes), pixelSize: max(w, h))
         case .panic:
             throw ImageDecoderPanic("decoder bug")
+        #if !os(WASI)
         case .gated(let input, let gate):
             gate.wait()
             return try input.decode()
+        #endif
         }
     }
 
@@ -90,6 +97,28 @@ final class ImageDecoderPool: @unchecked Sendable {
 
     static let shared = ImageDecoderPool()
 
+    #if os(WASI)
+    let threadCount = 1
+
+    func submit(_ job: Job) {
+        if BrowserImageCodec.enabled, case .encoded(let bytes) = job.input {
+            // Keep APNG playback on browsers without an animated WebCodecs decoder.
+            // Static PNGs and encodings outside the portable reader use the async host.
+            if let image = try? AnimatedPNG.decodeIfAnimated(bytes, id: "image", maxDimension: nil) {
+                job.image.resolve(with: .success(image))
+                job.wake()
+                return
+            }
+            BrowserImageCodec.submit(.bytes(bytes), name: "image") { result in
+                job.image.resolve(with: result)
+                job.wake()
+            }
+            return
+        }
+        job.image.resolve(with: job.input.decodeCaught())
+        job.wake()
+    }
+    #else
     private let condition = NSCondition()
     private var jobs: [Job] = []
     private var started = false
@@ -135,4 +164,5 @@ final class ImageDecoderPool: @unchecked Sendable {
             job.wake()
         }
     }
+    #endif
 }

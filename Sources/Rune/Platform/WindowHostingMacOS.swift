@@ -489,6 +489,26 @@ public enum RuneMacWindowConfig {
     }
 
     @MainActor
+    private static func configureContentSize(of window: NSWindow, options: WindowOptions, minSize: (Float, Float), maxSize: (Float, Float)?) {
+        window.contentMinSize = NSSize(width: CGFloat(minSize.0), height: CGFloat(minSize.1))
+        if let maxSize {
+            window.contentMaxSize = NSSize(width: CGFloat(maxSize.0), height: CGFloat(maxSize.1))
+        }
+        let current = window.contentRect(forFrameRect: window.frame).size
+        let requested: Vec2
+        if let pixels = options.physicalSize {
+            let scale = Float(window.backingScaleFactor)
+            requested = Vec2(Float(pixels.0) / scale, Float(pixels.1) / scale)
+        } else {
+            requested = Vec2(Float(current.width), Float(current.height))
+        }
+        // AppKit applies size limits only during interactive resizing. Apply them at creation too.
+        let size = WindowFrame.clampSize((requested.x, requested.y), min: minSize, max: maxSize)
+        let points = NSSize(width: CGFloat(size.0), height: CGFloat(size.1))
+        if current != points { window.setContentSize(points) }
+    }
+
+    @MainActor
     public static func makeWindow(
         title: String,
         size: Vec2,
@@ -499,13 +519,14 @@ public enum RuneMacWindowConfig {
         macos: MacWindowOptions,
         openAs: OpenAs
     ) -> NSWindow {
-        var style: NSWindow.StyleMask = options.borderless ? [.borderless] : [.titled, .closable, .miniaturizable]
-        if options.resizable && !options.borderless {
-            style.insert(.resizable)
-        }
         let effectiveChrome = frameChrome(chrome: chrome, titlebar: titlebar)
-        if !options.borderless && effectiveChrome.fullSizeContent {
-            style.insert(.fullSizeContentView)
+        let borderless = options.borderless || chrome.borderless
+        var style: NSWindow.StyleMask = borderless ? [.borderless] : [.titled]
+        if !borderless {
+            if options.closable { style.insert(.closable) }
+            if options.minimizable { style.insert(.miniaturizable) }
+            if options.resizable { style.insert(.resizable) }
+            if effectiveChrome.fullSizeContent || macos.fullSizeContentView { style.insert(.fullSizeContentView) }
         }
         let rect = NSRect(x: 0, y: 0, width: CGFloat(size.x), height: CGFloat(size.y))
         let window: NSWindow
@@ -531,15 +552,17 @@ public enum RuneMacWindowConfig {
         }
         window.title = title
         window.isReleasedWhenClosed = false
+        window.hasShadow = options.hasShadow
+        window.isMovableByWindowBackground = macos.movableByWindowBackground
         if options.transparent {
             window.isOpaque = false
             window.backgroundColor = .clear
         }
-        if !options.borderless && effectiveChrome.fullSizeContent {
-            window.titlebarAppearsTransparent = true
-            window.titleVisibility = .hidden
+        if !borderless {
+            window.titlebarAppearsTransparent = effectiveChrome.fullSizeContent || macos.titlebarAppearsTransparent
+            if effectiveChrome.fullSizeContent || macos.hidesTitle { window.titleVisibility = .hidden }
         }
-        if options.alwaysOnTop {
+        if options.alwaysOnTop || macos.floatingLevel {
             window.level = .floating
         }
         if options.clickThrough {
@@ -547,14 +570,7 @@ public enum RuneMacWindowConfig {
         }
         let appMinTuple = minSize.map { ($0.x, $0.y) }
         let (minLim, maxLim) = options.sizeLimits(appMin: appMinTuple)
-        window.contentMinSize = NSSize(width: CGFloat(minLim.0), height: CGFloat(minLim.1))
-        if let maxLim {
-            window.contentMaxSize = NSSize(width: CGFloat(maxLim.0), height: CGFloat(maxLim.1))
-        }
-        if let phys = options.physicalSize {
-            let scale = window.backingScaleFactor
-            window.setContentSize(NSSize(width: CGFloat(phys.0) / scale, height: CGFloat(phys.1) / scale))
-        }
+        configureContentSize(of: window, options: options, minSize: minLim, maxSize: maxLim)
         if let pos = options.position {
             window.setFrameTopLeftPoint(NSPoint(x: CGFloat(pos.0), y: CGFloat(pos.1)))
         }
@@ -614,6 +630,7 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
         // read again (`window/events.rs`).
         view.rereadSystemAccessibilitySettings()
         entry.setFocused(runtimeObj: runtime, focused: true)
+        view.takeMenuFocus()
         view.requestRender()
     }
 
@@ -703,14 +720,16 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
 
 @MainActor
 private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
-    private let entry: HostedWindowEntry
+    private let entry: NativeHostedWindowEntry
     private let runtime: AnyObject
     private let renderer: MetalRenderer
     private let metalLayer = CAMetalLayer()
     private let startTime = CACurrentMediaTime()
     private let timeScale: Double
     private let respectSystemAppearance: Bool
-    private var displayLinkDriver: MacOSDisplayLinkDriver?
+    private var lastFrameTime: Double = 0
+    private lazy var displayLinkDriver = MacOSDisplayLinkDriver { [weak self] in self?.requestRender() }
+    private var materialHost: RuneMaterialHost?
     private var trackingAreaRef: NSTrackingArea?
     private var didSignalReady = false
     private var didRunOnReady = false
@@ -745,7 +764,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
 
     init(
         frame: NSRect,
-        entry: HostedWindowEntry,
+        entry: NativeHostedWindowEntry,
         runtime: AnyObject,
         renderer: MetalRenderer,
         timeScale: Double,
@@ -811,11 +830,22 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     }
 
     func stopTimer() {
-        displayLinkDriver?.stop()
-        displayLinkDriver = nil
+        displayLinkDriver.stop()
         if let w = window {
             windowFrameDriver.landFrame(window: w)
         }
+    }
+
+    private func sleepUntilRuntimeWake() {
+        guard let window, window.isVisible || window.isMiniaturized, slot?.isTornDown != true else { stopTimer(); return }
+        windowFrameDriver.landFrame(window: window)
+        let deadline = entry.wakeDeadline(runtimeObj: runtime, covered: !coverDriver.canDraw)
+        displayLinkDriver.sleep(until: deadline, now: nowSeconds(), timeScale: timeScale)
+    }
+
+    override func viewWillStartLiveResize() {
+        super.viewWillStartLiveResize()
+        materialHost?.setLiveResizing(true, mode: MaterialMode.fromEnv())
     }
 
     private func nowSeconds() -> Double {
@@ -856,9 +886,17 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         entry.readSystemAccessibilitySettings(runtimeObj: runtime, forceReducedMotion: forceReducedMotion)
     }
 
+    func takeMenuFocus() {
+        // AppKit has one application menu, shared by every window.
+        RuneNativeMenuHost.shared.clear()
+        appliedMenuRevision = 0
+    }
+
     func requestRender() {
-        guard bounds.width > 0 && bounds.height > 0 else { return }
+        guard bounds.width > 0 && bounds.height > 0, slot?.isTornDown != true else { return }
         let t = nowSeconds()
+        let dt = Float(max(0, t - lastFrameTime))
+        lastFrameTime = t
         if let w = window {
             let scale = Float(w.backingScaleFactor)
             _ = windowFrameDriver.step(window: w, now: t, scale: scale, resting: isWindowResting) { [weak self] vp, sc in
@@ -869,18 +907,31 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         isWindowResting = !(inLiveResize || windowFrameDriver.isMoving)
         entry.setWindowResting(runtimeObj: runtime, resting: isWindowResting)
         entry.applyAppStateUpdates(runtimeObj: runtime, at: t, shortcutGuard: slot?.shortcutGuard)
-        entry.syncNativeMenus(
-            runtimeObj: runtime,
-            appliedRevision: &appliedMenuRevision,
-            nowProvider: { [weak self] in self?.nowSeconds() ?? 0.0 },
-            onDispatched: { [weak self] in self?.requestRender() }
-        )
+        if window?.isKeyWindow == true {
+            entry.syncNativeMenus(
+                runtimeObj: runtime,
+                appliedRevision: &appliedMenuRevision,
+                nowProvider: { [weak self] in self?.nowSeconds() ?? 0.0 },
+                onDispatched: { [weak self] in self?.requestRender() }
+            )
+        }
         if !coverDriver.canDraw {
             coveredTick(at: t)
             return
         }
         let commitsBefore = entry.viewCommitCount(runtimeObj: runtime)
-        let refScene = entry.frame(runtimeObj: runtime, at: t)
+        let materialMode = MaterialMode.fromEnv()
+        let nativeMaterials = window?.isOpaque == false && materialMode != .fallback
+        let started = CACurrentMediaTime()
+        let renderFrame = entry.renderFrame(runtimeObj: runtime, renderer: renderer, at: t, nativeMaterials: nativeMaterials)
+        let updateMs = (CACurrentMediaTime() - started) * 1000
+        let format: MTLPixelFormat = renderFrame.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
+        if metalLayer.pixelFormat != format { metalLayer.pixelFormat = format }
+        if materialHost == nil, nativeMaterials, !renderFrame.materials.isEmpty {
+            materialHost = RuneMaterialHost(frame: bounds)
+        }
+        materialHost?.update(draws: renderFrame.materials, in: self, layer: metalLayer,
+                             scale: metalLayer.contentsScale, mode: materialMode)
         // A new `Cx::set_titlebar` / `Cx::titlebar_height` moves the traffic lights and the band
         // (`window/lifecycle.rs` `take_titlebar_changed`); changed insets re-run the view next.
         if entry.takeTitlebarChanged(runtimeObj: runtime), let w = window {
@@ -897,7 +948,10 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             return
         }
         if let drawable = metalLayer.nextDrawable() {
-            renderer.render(scene: refScene, to: drawable)
+            let synced = metalLayer.presentsWithTransaction && materialMode != .unsynced
+            entry.present(renderFrame, drawable: drawable, renderer: renderer, runtimeObj: runtime,
+                          dt: dt, started: started, updateMs: updateMs, synchronized: synced,
+                          committed: entry.viewCommitCount(runtimeObj: runtime) != commitsBefore)
             drawableCounter &+= 1
             shadowResample.presented(drawableCounter)
             slot?.stepRest(.drew(now: ProcessInfo.processInfo.systemUptime, lowMemory: false))
@@ -922,15 +976,10 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
                 || accessibilityHost.announcementChanged(entry.accessibilityAnnouncement(runtimeObj: runtime))
         )
 
-        if entry.isAnimating(runtimeObj: runtime) || windowFrameDriver.isMoving {
-            if displayLinkDriver == nil {
-                displayLinkDriver = MacOSDisplayLinkDriver { [weak self] in
-                    self?.requestRender()
-                }
-            }
-            displayLinkDriver?.start(in: self)
+        if timeScale > 0 && (entry.isAnimating(runtimeObj: runtime) || entry.compositorAnimating || windowFrameDriver.isMoving) {
+            displayLinkDriver.start(in: self)
         } else {
-            stopTimer()
+            sleepUntilRuntimeWake()
         }
     }
 
@@ -941,7 +990,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         let outcome = coverDriver.setOccluded(occluded, runtime: entry.coveredRuntime(runtimeObj: runtime), at: nowSeconds())
         switch outcome {
         case .rest:
-            stopTimer()
+            sleepUntilRuntimeWake()
         case .redraw:
             requestRender()
         case .none:
@@ -977,6 +1026,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             treeCommitted: committed || a11yFollowUp
                 || accessibilityHost.announcementChanged(entry.accessibilityAnnouncement(runtimeObj: runtime))
         )
+        sleepUntilRuntimeWake()
     }
 
     /// `App::on_ready`, once per window: at its first drawn frame or first covered one.
@@ -990,13 +1040,13 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     private func applyWindowFrameRequest(at t: Double) {
         guard let frameReq = entry.takeWindowFrameRequest(runtimeObj: runtime), let w = window else { return }
         let scale = Float(w.backingScaleFactor)
-        let minSz = entry.options.minSize ?? WindowOptions.defaultMinSize
+        let (minSize, maxSize) = entry.options.sizeLimits(appMin: entry.hostMinSize)
         windowFrameDriver.applyRequest(
             frameReq,
             window: w,
             now: t,
-            minSize: (minSz.x, minSz.y),
-            maxSize: entry.options.maxSize.map { ($0.x, $0.y) },
+            minSize: minSize,
+            maxSize: maxSize,
             scale: scale
         ) { [weak self] vp, sc in
             guard let self else { return }
@@ -1171,6 +1221,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         if let window {
             _ = fnKeyMonitor.start(on: window)
         } else {
+            stopTimer()
             fnKeyMonitor.stop()
         }
     }
@@ -1396,9 +1447,15 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         let host = RuneMultiWindowHost(runOptions: options, parsed: parsed)
         app.delegate = host
         MacOSQuitHook.install()
+        defer {
+            for slot in host.slots {
+                slot.entry.markMenusRunning(false)
+            }
+            RuneNativeMenuHost.shared.clear()
+        }
 
         for spec in windows {
-            try host.openEntry(spec.makeHostEntry())
+            try host.openEntry(spec.requireNativeHostEntry())
         }
 
         // `RUNE_OPEN_INACTIVE` (a tool's launch): the app doesn't take activation at launch
@@ -1406,19 +1463,13 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         if OpenInactiveLaunch.activatesAtLaunch(accessory: options.accessory) {
             app.activate(ignoringOtherApps: true)
         }
-        defer {
-            for slot in host.slots {
-                slot.entry.markMenusRunning(false)
-            }
-            RuneNativeMenuHost.shared.clear()
-        }
         withExtendedLifetime(host) {
             app.run()
         }
         QuitLifecycle.finishOrderlyExit()
     }
 
-    private func openEntry(_ specEntry: HostedWindowEntry) throws {
+    private func openEntry(_ specEntry: NativeHostedWindowEntry) throws {
         // Never duplicate an already-open non-torn-down key.
         if slots.contains(where: { !$0.isTornDown && $0.entry.key == specEntry.key }) {
             return
@@ -1429,19 +1480,19 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         let waker = Waker()
         let scale = Float(NSScreen.main?.backingScaleFactor ?? 2.0)
         let reducedMotion = parsed.reducedMotion || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let renderer = try MetalRenderer()
+        specEntry.markMenusRunning(true)
         let rt = specEntry.createRuntime(
             pixelScale: scale,
             systemDark: sysDark,
             reducedMotion: reducedMotion,
             waker: waker
         )
-        specEntry.markMenusRunning(true)
-        let renderer = try MetalRenderer()
         let initialVP = specEntry.runtimeViewport(runtimeObj: rt)
         let window = RuneMacWindowConfig.makeWindow(
             title: specEntry.title,
             size: initialVP,
-            minSize: specEntry.minSize,
+            minSize: specEntry.hostMinSize.map { Vec2($0.0, $0.1) },
             chrome: specEntry.chrome,
             titlebar: specEntry.titlebar,
             options: specEntry.options,
@@ -1449,8 +1500,13 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             openAs: specEntry.openAs
         )
         let respectSysDark = parsed.darkOverride == nil && specEntry.darkOverride == nil
+        let contentRect = window.contentRect(forFrameRect: window.frame)
+        let viewport = Vec2(Float(contentRect.width), Float(contentRect.height))
+        if initialVP != viewport || scale != Float(window.backingScaleFactor) {
+            specEntry.stepViewport(runtimeObj: rt, viewport: viewport, pixelScale: Float(window.backingScaleFactor))
+        }
         let view = RuneHostedMetalView(
-            frame: NSRect(x: 0, y: 0, width: CGFloat(initialVP.x), height: CGFloat(initialVP.y)),
+            frame: NSRect(origin: .zero, size: contentRect.size),
             entry: specEntry,
             runtime: rt,
             renderer: renderer,
@@ -1555,7 +1611,7 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
     func drainOpenedWindows() {
         let opened = RuneMultiWindow.takeOpened()
         for spec in opened {
-            try? openEntry(spec.makeHostEntry())
+            try? openEntry(spec.requireNativeHostEntry())
         }
     }
 
@@ -1565,6 +1621,8 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         guard !slot.isTornDown else { return }
         let win = slot.window
         switch request {
+        case .minimize:
+            win.miniaturize(nil)
         case .focus:
             if win.isMiniaturized { win.deminiaturize(nil) }
             if slot.entry.macosWindow.nonactivatingPanel {

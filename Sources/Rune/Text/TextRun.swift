@@ -8,6 +8,7 @@ private final class RunCellLayoutCache: @unchecked Sendable {
     struct Key: Hashable {
         var runHash: UInt64
         var fontEpoch: UInt64
+        var language: String?
         var text: String
         var style: TextStyle
         var scale100: Int
@@ -40,7 +41,7 @@ private final class RunCellLayoutCache: @unchecked Sendable {
         }()
         let key = Key(
             runHash: run.hash,
-            fontEpoch: textSystem.currentFontEpoch,
+            fontEpoch: textSystem.currentFontEpoch, language: textSystem.language,
             text: run.text,
             style: singleStyle,
             scale100: Int((scale * 100.0).rounded()),
@@ -71,9 +72,9 @@ internal final class TextRunCellLayout: @unchecked Sendable {
     let pixelScale: Float
     let style: TextStyle
     let utf8Starts: [Int]
-    let xsPx: [Float]
-
     #if canImport(CoreText) && canImport(CoreGraphics)
+    // Logical leading and trailing edges can run in either visual direction.
+    private let cellEdgesPx: [SIMD2<Float>]
     private struct CapturedGlyph: @unchecked Sendable {
         var graphemeIndex: Int
         var font: CTFont
@@ -85,6 +86,8 @@ internal final class TextRunCellLayout: @unchecked Sendable {
     }
     private let capturedGlyphs: [CapturedGlyph]
     private let baselineYPx: Float
+    #else
+    private let xsPx: [Float]
     #endif
 
     private struct PortableCapturedChar: Sendable {
@@ -92,6 +95,9 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         var char: Character
     }
     private let portableChars: [PortableCapturedChar]
+    #if canImport(CRuneDesktopText) && !canImport(CoreText)
+    private let desktop: DesktopTextLine?
+    #endif
 
     init(text: String, textSystem: TextSystem, style: TextStyle, pixelScale: Float) {
         self.text = text
@@ -121,7 +127,7 @@ internal final class TextRunCellLayout: @unchecked Sendable {
 
         #if canImport(CoreText) && canImport(CoreGraphics)
         if text.isEmpty {
-            self.xsPx = [0]
+            self.cellEdgesPx = []
             self.capturedGlyphs = []
             self.baselineYPx = 0
             self.portableChars = []
@@ -132,6 +138,18 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         if style.letterSpacing != 0 {
             attrs[kCTKernAttributeName] = NSNumber(value: style.letterSpacing * scale)
         }
+        if let language = TextLanguageRegistry.effectiveLanguageTag(for: text, chosen: textSystem.language) {
+            attrs[kCTLanguageAttributeName] = language
+        }
+        var previousDirection: Bool?
+        if let rtl = TextSystem.paragraphIsRTL(text, style: style, previous: &previousDirection) {
+            var direction: CTWritingDirection = rtl ? .rightToLeft : .leftToRight
+            attrs[kCTParagraphStyleAttributeName] = withUnsafeBytes(of: &direction) { bytes in
+                var setting = CTParagraphStyleSetting(spec: .baseWritingDirection, valueSize: bytes.count,
+                                                      value: bytes.baseAddress!)
+                return CTParagraphStyleCreate(&setting, 1)
+            }
+        }
         let attrStr = CFAttributedStringCreate(kCFAllocatorDefault, text as CFString, attrs as CFDictionary)!
         let ctLine = CTLineCreateWithAttributedString(attrStr)
         let fullWPx = Float(CTLineGetTypographicBounds(ctLine, nil, nil, nil))
@@ -140,18 +158,23 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         let lhPx = style.resolvedLineHeight * scale
         self.baselineYPx = InlineCodeBox.quantizedBox(ascentPx: ascPx, descentPx: descPx, lineHeightPx: lhPx).over
 
-        var xs: [Float] = []
-        xs.reserveCapacity(chars.count + 1)
-        var prevX: Float = 0
-        for i in 0..<chars.count {
-            let off = Float(CTLineGetOffsetForStringIndex(ctLine, u16Starts[i], nil))
-            let snapped = off.isFinite ? (off * 64.0).rounded() / 64.0 : prevX
-            xs.append(snapped)
-            prevX = snapped
+        // At a bidi boundary two logical offsets can share a strong caret. CoreText also
+        // reports the leading and trailing edges of each cluster, including inside ligatures.
+        var edges = [SIMD2<Float>](repeating: SIMD2(repeating: .nan), count: chars.count)
+        CTLineEnumerateCaretOffsets(ctLine) { offset, index, leading, _ in
+            let i = Self.graphemeIndex(forU16: index, in: u16Starts)
+            if leading && index == u16Starts[i] { edges[i].x = Float(offset) }
+            if !leading && index == u16Starts[i + 1] - 1 { edges[i].y = Float(offset) }
         }
-        // The run ends at its width in 64ths of a pixel, as a text box does (`text_width`, #934).
-        xs.append(TextBoxGeometry.textWidth(fullWPx))
-        self.xsPx = xs
+        let rightEdge = TextBoxGeometry.textWidth(fullWPx)
+        func snapped(_ offset: Float, at index: Int) -> Float {
+            // Format controls can share a single native edge with their neighbor.
+            let x = offset.isFinite ? offset : Float(CTLineGetOffsetForStringIndex(ctLine, index, nil))
+            return x == fullWPx ? rightEdge : (x * 64).rounded() / 64
+        }
+        self.cellEdgesPx = edges.enumerated().map { i, edge in
+            SIMD2(snapped(edge.x, at: u16Starts[i]), snapped(edge.y, at: u16Starts[i + 1]))
+        }
 
         var captured: [CapturedGlyph] = []
         let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] ?? []
@@ -185,6 +208,10 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         self.capturedGlyphs = captured
         self.portableChars = []
         #else
+        #if canImport(CRuneDesktopText) && !canImport(CoreText)
+        desktop = DesktopTextLine(text: text, start: 0, style: style,
+            families: textSystem.families(), language: textSystem.language, scale: scale, span: { _ in nil })
+        #endif
         var xs: [Float] = []
         var pChars: [PortableCapturedChar] = []
         xs.reserveCapacity(chars.count + 1)
@@ -194,6 +221,12 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         for (i, ch) in chars.enumerated() {
             let xPx = (penPt * scale * 64.0).rounded() / 64.0
             xs.append(xPx)
+            #if canImport(CRuneDesktopText) && !canImport(CoreText)
+            if let cell = desktop?.cells[u8Starts[i]] {
+                penPt += cell.advance + style.letterSpacing
+                continue
+            }
+            #endif
             pChars.append(PortableCapturedChar(graphemeIndex: i, char: ch))
             let scalarSum = ch.unicodeScalars.reduce(Float(0)) { acc, sc in
                 acc + PortableGlyphFont.advanceRatio(for: sc, mono: isMono) * style.size
@@ -241,7 +274,15 @@ internal final class TextRunCellLayout: @unchecked Sendable {
     func advance(atByte byteOffset: Int, scale: Float? = nil) -> Float? {
         guard let i = graphemeIndex(atByte: byteOffset) else { return nil }
         let s = max(1.0, scale ?? pixelScale)
-        return max(0.0, (xsPx[i + 1] - xsPx[i]) / s)
+        return widthPx(at: i) / s
+    }
+
+    private func widthPx(at i: Int) -> Float {
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        return abs(cellEdgesPx[i].y - cellEdgesPx[i].x)
+        #else
+        return max(0, xsPx[i + 1] - xsPx[i])
+        #endif
     }
 
     func shapeCell(
@@ -254,41 +295,54 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         let invS = 1.0 / s
         let lhPt = style.resolvedLineHeight
         let hPt = TextSystem.specLineHeight(lineCount: 1, lineHeightPt: lhPt, scale: s, exact: style.exactLines)
-        let wPt = max(0.0, (xsPx[gi + 1] - xsPx[gi]) * invS)
+        let wPt = widthPx(at: gi) * invS
         let b0 = text.utf8.index(text.utf8.startIndex, offsetBy: utf8Starts[gi])
         let b1 = text.utf8.index(text.utf8.startIndex, offsetBy: utf8Starts[gi + 1])
         let cellStr = String(text[b0..<b1])
 
-        let glyphsOut: [PositionedGlyph]
         #if canImport(CoreText) && canImport(CoreGraphics)
-        glyphsOut = emitGlyphs
-            ? emitCapturedGlyphs(graphemeIndex: gi, using: textSystem, originXPx: -xsPx[gi], baselineYPx: baselineYPx)
+        let edges = cellEdgesPx[gi]
+        let rtl = edges.x > edges.y
+        let glyphsOut = emitGlyphs
+            ? emitCapturedGlyphs(graphemeIndex: gi, using: textSystem,
+                                 originXPx: -min(edges.x, edges.y), baselineYPx: baselineYPx)
             : []
-        return ShapedText(
-            size: Vec2(wPt, hPt),
-            lineCount: 1,
-            lineHeight: lhPt,
-            glyphs: glyphsOut,
-            underlines: [],
-            backgrounds: [],
-            lineStrings: [(0, cellStr, 0, 0, nil)],
-            forcedDirection: style.direction
-        )
         #else
-        glyphsOut = emitGlyphs
+        var glyphsOut = emitGlyphs
             ? emitPortableGlyphs(graphemeIndex: gi, using: textSystem, startXPt: 0, baselineYPt: lhPt * 0.78)
             : []
-        return ShapedText(
+        for index in glyphsOut.indices { glyphsOut[index].utf8Offset = 0 }
+        #if canImport(CRuneDesktopText) && !canImport(CoreText)
+        let rtl = desktop?.cells[utf8Starts[gi]]?.isRTL ?? (style.direction == .rtl)
+        #else
+        let rtl = style.direction == .rtl
+        #endif
+        #endif
+        let offsets = Array(repeating: rtl ? wPt : 0, count: cellStr.utf8.count) + [rtl ? 0 : wPt]
+        let shaped = ShapedText(
             size: Vec2(wPt, hPt),
             lineCount: 1,
             lineHeight: lhPt,
             glyphs: glyphsOut,
             underlines: [],
             backgrounds: [],
-            portableLines: [(0, cellStr, 0, 0, [0, wPt])],
-            forcedDirection: style.direction
+            portableLines: [(0, cellStr, 0, 0, offsets)],
+            forcedDirection: style.direction,
+            lineIsRTL: [rtl],
+            primaryIsRTL: rtl
         )
+        #if canImport(CRuneDesktopText) && !canImport(CoreText)
+        if emitGlyphs, let desktop, let cell = desktop.cells[byteOffset] {
+            let resting = DesktopRestingText(glide: .zero, cache: true)
+            resting.add(.init(native: desktop, originX: -cell.left, baselineY: desktop.baseline,
+                              colors: [:], sourceByteOffset: byteOffset), at: 0)
+            var slice = shaped
+            slice.lineGlyphRanges = [0..<glyphsOut.count]
+            slice.desktopRestingText = resting
+            return slice
+        }
         #endif
+        return shaped
     }
 
     /// Emits `PositionedGlyph` quads for the grapheme starting at `byteOffset`,
@@ -309,6 +363,14 @@ internal final class TextRunCellLayout: @unchecked Sendable {
             baselineYPx: originBaselinePx
         )
         #else
+        #if canImport(CRuneDesktopText) && !canImport(CoreText)
+        if let desktop, let cell = desktop.cells[byteOffset] {
+            // This API already returns world-space points. Fold its absolute origin into the
+            // pen here, so callers can draw the resulting quads without another translation.
+            return desktop.glyphs(for: cell, originX: originPt.x, baselineY: originPt.y + desktop.baseline,
+                color: nil, atlas: textSystem.glyphAtlas, cache: true, restingXPx: 0)
+        }
+        #endif
         let startXPt = originPt.x + xsPx[gi] / pixelScale
         let baselinePt = originPt.y + style.resolvedLineHeight * 0.78
         return emitPortableGlyphs(
@@ -329,7 +391,8 @@ internal final class TextRunCellLayout: @unchecked Sendable {
     ) -> [PositionedGlyph] {
         let invS = 1.0 / pixelScale
         var glyphsOut: [PositionedGlyph] = []
-        for cg in capturedGlyphs where cg.graphemeIndex == gi {
+        let first = partitionPoint(capturedGlyphs) { $0.graphemeIndex < gi }
+        for cg in capturedGlyphs[first...].prefix(while: { $0.graphemeIndex == gi }) {
             let gxPx = originXPx + cg.runPosXPx
             let gyPx = targetBaselinePx - cg.runPosYPx
             if cg.isColor, let colorEntry = textSystem.glyphAtlas.rasterizeColorGlyph(
@@ -346,9 +409,7 @@ internal final class TextRunCellLayout: @unchecked Sendable {
                         Float(colorEntry.pixelSize.x) * invS,
                         Float(colorEntry.pixelSize.y) * invS
                     ),
-                    uv: .zero,
-                    color: nil,
-                    colorGlyphIndex: colorEntry.index
+                    colorGlyph: colorEntry
                 ))
                 continue
             }
@@ -391,6 +452,12 @@ internal final class TextRunCellLayout: @unchecked Sendable {
     ) -> [PositionedGlyph] {
         let s = pixelScale
         let invS = 1.0 / s
+        #if canImport(CRuneDesktopText) && !canImport(CoreText)
+        if let desktop, let cell = desktop.cells[utf8Starts[gi]] {
+            return desktop.glyphs(for: cell, originX: startXPt - cell.left, baselineY: desktop.baseline,
+                color: nil, atlas: textSystem.glyphAtlas, cache: true)
+        }
+        #endif
         let isMono = style.family == .monospace
         var glyphsOut: [PositionedGlyph] = []
         var xPt = startXPt
@@ -399,11 +466,9 @@ internal final class TextRunCellLayout: @unchecked Sendable {
                 let adv = PortableGlyphFont.advanceRatio(for: sc, mono: isMono) * style.size
                 let entry = textSystem.glyphAtlas.rasterizePortableGlyph(
                     scalar: sc,
-                    fontSize: style.size,
-                    weight: style.weight,
-                    italic: style.italic,
-                    monospace: isMono,
-                    scale: s
+                    fontSizePx: style.size * s,
+                    bold: style.weight >= 600,
+                    italic: style.italic
                 )
                 if entry.pixelSize.x > 0 && entry.pixelSize.y > 0 {
                     glyphsOut.append(PositionedGlyph(

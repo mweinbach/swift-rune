@@ -380,7 +380,7 @@ struct TreeAndSearchTests {
         #expect(rt.state.picked == ["src", "src/main.rs"])
     }
 
-    @Test("Multi-select extends with Shift, toggles with Cmd-click, and selects all with Cmd-A")
+    @Test("Multi-select extends with Shift, toggles rows and selects all with the primary modifier")
     func multiSelectShiftAndCmd() {
         var m = buildRepoModel().multiSelect(true)
         m.expandAll()
@@ -393,12 +393,13 @@ struct TreeAndSearchTests {
 
         let libRect = treeRows(rt).first { $0.label == "lib.rs" }!.rect
         let pt = Vec2(libRect[0] + 40, libRect[1] + 5)
-        rt.pointerDown(at: pt, mods: Mods(cmd: true), at: 0)
-        rt.pointerUp(at: pt, mods: Mods(cmd: true), at: 0)
+        let primary = RuneKitTestKey.primaryMods()
+        rt.pointerDown(at: pt, mods: primary, at: 0)
+        rt.pointerUp(at: pt, mods: primary, at: 0)
         rt.frame(at: 0)
         #expect(rt.state.files.selectedIDs.count == 4)
 
-        press(rt, .command("a"), mods: Mods(cmd: true))
+        press(rt, .command("a"), mods: primary)
         #expect(rt.state.files.selectedIDs.count == rt.state.files.visibleCount)
     }
 

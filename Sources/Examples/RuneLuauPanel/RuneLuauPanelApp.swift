@@ -16,7 +16,7 @@ public struct LuauPanelState {
 
     public static func initial() -> LuauPanelState {
         let options = ScriptOptions().onLog { level, line in
-            fputs("luau-panel \(level.rawValue): \(line)\n", stderr)
+            RuneStandardIO.error("luau-panel \(level.rawValue): \(line)\n")
         }
         let script = Script(name: "panel", sources: embeddedSources(), options: options)
         return LuauPanelState(script: script)

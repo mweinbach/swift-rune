@@ -11,13 +11,22 @@ public protocol CpuBootExec: Sendable {
 /// Threads spawned for a single `CpuBoot.paint` call and joined before returning (`cpu_boot::raster::Spawn`).
 public struct CpuBootSpawnExec: CpuBootExec {
     public let count: Int
-    public var threads: Int { max(1, count) }
+    public var threads: Int {
+        #if os(WASI)
+        1
+        #else
+        max(1, count)
+        #endif
+    }
 
     public init(_ count: Int) {
         self.count = count
     }
 
     public func run(_ job: @Sendable () -> Void) {
+        #if os(WASI)
+        job()
+        #else
         let n = threads
         if n <= 1 {
             job()
@@ -26,6 +35,7 @@ public struct CpuBootSpawnExec: CpuBootExec {
         DispatchQueue.concurrentPerform(iterations: n) { _ in
             job()
         }
+        #endif
     }
 }
 
@@ -888,7 +898,7 @@ public enum CpuBootRaster {
                         let endAt = min(at + chunk, tiles.count)
                         for tileIdx in at..<endAt {
                             let t = Int(tiles[tileIdx])
-                            let began = DispatchTime.now().uptimeNanoseconds
+                            let began = RuneExecutionContext.uptimeNanoseconds
                             painter.tile = painter.tileRect(tx: UInt32(t) % bins.cols, ty: UInt32(t) / bins.cols)
                             if phase == 0 && !bins.covered[t] {
                                 painter.surface.fill(painter.tile, clearBGRA)
@@ -910,7 +920,7 @@ public enum CpuBootRaster {
                                 }
                             }
                             painter.depth = 0
-                            let elapsed = DispatchTime.now().uptimeNanoseconds &- began
+                            let elapsed = RuneExecutionContext.uptimeNanoseconds &- began
                             painter.stats.slowestTileNs = max(painter.stats.slowestTileNs, elapsed)
                         }
                     }
@@ -941,7 +951,7 @@ public enum CpuBootRaster {
                         && Int32(ty * CpuBootBin.tileH) < b.w
                         && Int32((ty + 1) * CpuBootBin.tileH) > b.y
                 }
-                let began = DispatchTime.now().uptimeNanoseconds
+                let began = RuneExecutionContext.uptimeNanoseconds
                 if shown {
                     let snapshot = target.pixels
                     let blurredResult = CpuBootBackdrop.blur(
@@ -962,7 +972,7 @@ public enum CpuBootRaster {
                 } else {
                     blurred.append(nil)
                 }
-                report.blurNs += DispatchTime.now().uptimeNanoseconds &- began
+                report.blurNs += RuneExecutionContext.uptimeNanoseconds &- began
             }
             from = until
         }

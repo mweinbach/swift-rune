@@ -43,7 +43,7 @@ struct SelectionGroupVirtualRowParityTests {
         /// `support::command`, and whether the runtime took the key.
         @discardableResult
         func command(_ c: Character) -> Bool {
-            let took = rt.keyDown(KeyEvent(key: .command(c), mods: Mods(cmd: true)), at: t)
+            let took = rt.keyDown(KeyEvent(key: .command(c), mods: RuneTestKey.primaryMods()), at: t)
             tick()
             return took
         }

@@ -4,6 +4,8 @@ import Foundation
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif os(Windows)
+import WinSDK
 #endif
 
 /// Frame update phase indices matching `tooling::interaction::PHASE_NAMES`.
@@ -324,6 +326,7 @@ public final class InteractionSymbolCache {
 
 /// Demangling & frame classification helpers (`tooling/interaction/stack.rs`).
 public enum InteractionDemangle {
+    #if canImport(Darwin) || canImport(Glibc) || os(Windows)
     private typealias SwiftDemangleFn = @convention(c) (
         UnsafePointer<CChar>?,
         Int,
@@ -332,25 +335,32 @@ public enum InteractionDemangle {
         UInt32
     ) -> UnsafeMutablePointer<CChar>?
 
-    #if canImport(Darwin)
     private static let swiftDemangleFn: SwiftDemangleFn? = {
-        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "swift_demangle") else { // RTLD_DEFAULT
-            return nil
-        }
+        #if os(Windows)
+        let runtime = "swiftCore.dll".withCString(encodedAs: UTF16.self) { GetModuleHandleW($0) }
+        guard let runtime, let sym = GetProcAddress(runtime, "swift_demangle") else { return nil }
+        #elseif canImport(Darwin)
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "swift_demangle") else { return nil }
+        #else
+        guard let sym = dlsym(nil, "swift_demangle") else { return nil }
+        #endif
         return unsafeBitCast(sym, to: SwiftDemangleFn.self)
     }()
     #endif
 
-    /// Demangles a symbol name (Swift `$s...`, Darwin leading `_`, or Rust hash suffix).
+    /// Demangles a Swift symbol and removes C name decoration or a trailing Rust symbol hash.
     public static func demangled(_ raw: String) -> String {
+        demangled(raw, isLinkerSymbol: true)
+    }
+
+    fileprivate static func demangled(_ raw: String, isLinkerSymbol: Bool) -> String {
         guard !raw.isEmpty else { return raw }
         var name = raw
-        #if canImport(Darwin)
+        #if canImport(Darwin) || canImport(Glibc) || os(Windows)
         let checkSwift = name.hasPrefix("_$s") || name.hasPrefix("$s") || name.hasPrefix("_$S") || name.hasPrefix("$S") || name.hasPrefix("_T")
         if checkSwift, let fn = swiftDemangleFn {
             let result = name.withCString { cstr -> String? in
-                let len = strlen(cstr)
-                guard let out = fn(cstr, len, nil, nil, 0) else { return nil }
+                guard let out = fn(cstr, name.utf8.count, nil, nil, 0) else { return nil }
                 defer { free(out) }
                 return String(cString: out)
             }
@@ -358,7 +368,9 @@ public enum InteractionDemangle {
                 return result
             }
         }
-        if name.hasPrefix("_") && !name.hasPrefix("__") {
+        #endif
+        #if canImport(Darwin) || (os(Windows) && arch(i386))
+        if isLinkerSymbol && name.hasPrefix("_") && !name.hasPrefix("__") {
             name.removeFirst()
         }
         #endif
@@ -622,7 +634,8 @@ public final class InteractionThreadSamplerTarget: @unchecked Sendable {
                dladdr(ptr, &info) != 0,
                let sname = info.dli_sname {
                 let rawName = String(cString: sname)
-                let demangled = InteractionDemangle.demangled(rawName)
+                // Darwin's dladdr has already removed Mach-O's linker prefix.
+                let demangled = InteractionDemangle.demangled(rawName, isLinkerSymbol: false)
                 return InteractionStackFrame(name: demangled, isApp: !InteractionDemangle.isLibrary(demangled))
             }
             #endif
@@ -1352,7 +1365,7 @@ public final class InteractionTracker {
 
     public static func recordActiveThreadPhase(_ index: Int, ms: Double) {
         guard index >= 0, index < InteractionPhase.allCases.count else { return }
-        guard let box = Thread.current.threadDictionary[phaseDictKey] as? ActivePhaseBox else { return }
+        guard let box = RuneExecutionContext.locals[phaseDictKey] as? ActivePhaseBox else { return }
         box.times[index] += ms
     }
 
@@ -1369,7 +1382,7 @@ public final class InteractionTracker {
         testSlowReports.removeAll()
         testSlowFrameReports.removeAll()
         testRollups.removeAll()
-        Thread.current.threadDictionary.removeObject(forKey: phaseDictKey)
+        RuneExecutionContext.locals.removeObject(forKey: phaseDictKey)
     }
 
     public init() {}
@@ -1415,7 +1428,7 @@ public final class InteractionTracker {
         if fx.contains(where: { if case .startPhases = $0 { return true }; return false }) {
             phaseTimes = [Double](repeating: 0, count: InteractionPhase.allCases.count)
             activePhases = true
-            Thread.current.threadDictionary[Self.phaseDictKey] = ActivePhaseBox()
+            RuneExecutionContext.locals[Self.phaseDictKey] = ActivePhaseBox()
         }
     }
 
@@ -1434,7 +1447,7 @@ public final class InteractionTracker {
     ) -> SlowFrameReport? {
         if case .open = frameState {
             var captured = phaseTimes
-            if let box = Thread.current.threadDictionary[Self.phaseDictKey] as? ActivePhaseBox {
+            if let box = RuneExecutionContext.locals[Self.phaseDictKey] as? ActivePhaseBox {
                 for i in 0..<captured.count {
                     captured[i] += box.times[i]
                 }
@@ -1446,7 +1459,7 @@ public final class InteractionTracker {
             )
             if fx.contains(where: { if case .stopPhases = $0 { return true }; return false }) {
                 activePhases = false
-                Thread.current.threadDictionary.removeObject(forKey: Self.phaseDictKey)
+                RuneExecutionContext.locals.removeObject(forKey: Self.phaseDictKey)
             }
             return nil
         }

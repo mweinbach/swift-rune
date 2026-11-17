@@ -104,6 +104,19 @@ extension Runtime {
         }
     }
 
+    internal func beginFrameTimers(at now: Double) -> (due: Bool, alreadyPolled: Bool) {
+        let due = wakeDeadlines.first.map { now >= $0 } ?? false
+        let alreadyPolled = timerWake.framePolled(due: due)
+        drainDueWakeDeadlines(through: now)
+        return (due, alreadyPolled)
+    }
+
+    /// Window callbacks may have queued timers after paint. Covered windows only wake to run those timers.
+    internal func windowWakeDeadline(covered: Bool) -> Double? {
+        schedulePendingWakes(from: currentTime)
+        return covered ? pollWakeDeadline() : wakeDeadline()
+    }
+
     internal func drainDueWakeDeadlines(through now: Double) {
         guard let firstFuture = wakeDeadlines.firstIndex(where: { $0 > now }) else {
             wakeDeadlines.removeAll(keepingCapacity: true)

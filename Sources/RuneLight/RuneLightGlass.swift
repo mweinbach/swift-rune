@@ -376,6 +376,8 @@ public final class GlassRenderer: @unchecked Sendable {
         }
     }
 }
+#elseif canImport(CRuneGL) && (os(Linux) || os(Windows))
+public typealias GlassRenderer = GlassGLRenderer
 #else
 public final class GlassRenderer: @unchecked Sendable {
     public init() throws {

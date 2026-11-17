@@ -11,6 +11,23 @@ struct WindowWakeFullParityTests {
         var growOnPoll: Bool
     }
 
+    @Test func productionFramesRetireDueTimersAndPreserveTheNextWake() {
+        let runtime = Runtime(state: 0, viewport: Vec2(8, 8)) { _, _ in el().size(8, 8) }
+        runtime.poll = { count, _, tx in
+            count += 1
+            if count < 3 { tx.wakeAfter(0.25) }
+            return false
+        }
+        _ = runtime.renderFrame(at: 5)
+        #expect(runtime.wakeDeadline() == 5.25)
+        _ = runtime.renderFrame(at: 5.25)
+        #expect(runtime.wakeDeadline() == 5.5)
+        _ = runtime.renderFrame(at: 5.75)
+        #expect(runtime.wakeDeadline() == nil)
+        #expect(runtime.state == 3)
+        #expect(!runtime.isAnimating)
+    }
+
     @Test("window_wake.rs:78 - a hidden window that fits its content learns its height before it shows")
     func aHiddenWindowThatFitsItsContentLearnsItsHeightBeforeItShows() {
         let rt = Runtime<HiddenFitState>(

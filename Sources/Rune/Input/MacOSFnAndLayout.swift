@@ -133,15 +133,15 @@ public enum MacOSKeyboardLayout {
     /// Overrides translation on the current thread (test hook matching `layout_macos::force`).
     public static func force(_ translator: ForcedTranslator?) {
         if let translator {
-            Thread.current.threadDictionary[forcedThreadKey] = translator
+            RuneExecutionContext.locals[forcedThreadKey] = translator
         } else {
-            Thread.current.threadDictionary.removeObject(forKey: forcedThreadKey)
+            RuneExecutionContext.locals.removeObject(forKey: forcedThreadKey)
         }
     }
 
     /// Translates `key` with Carbon `modifiers` (`cmdKey`, `shiftKey`, ...), honoring `force(_:)` and main-thread TIS safety.
     public static func label(key: UInt32, modifiers: UInt32) -> String? {
-        if let forced = Thread.current.threadDictionary[forcedThreadKey] as? ForcedTranslator {
+        if let forced = RuneExecutionContext.locals[forcedThreadKey] as? ForcedTranslator {
             return forced(key, modifiers)
         }
         #if os(macOS)

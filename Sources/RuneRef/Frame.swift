@@ -5,6 +5,17 @@ import ImageIO
 import UniformTypeIdentifiers
 #endif
 
+extension Data.WritingOptions {
+    /// WASI Preview 1 has no temporary directory for Foundation's atomic replacement.
+    package static var runeOutput: Self {
+        #if os(WASI)
+        []
+        #else
+        .atomic
+        #endif
+    }
+}
+
 /// Rendered RGBA8 image produced by `RuneRef` or read back from `MetalRenderer`.
 public struct Frame: Sendable, Equatable {
     public let width: Int
@@ -70,7 +81,7 @@ public struct Frame: Sendable, Equatable {
         let parent = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
         let bytes = try pngData()
-        try bytes.write(to: url, options: .atomic)
+        try bytes.write(to: url, options: .runeOutput)
     }
 
     public static func fromPNG(data: Data) throws -> Frame {
@@ -153,6 +164,21 @@ public struct Difference: Sendable, Equatable {
     public var passed: Bool
 }
 
+/// A captured surface in display-list order. Its sampler takes a scene-space pixel
+/// center and returns premultiplied RGBA in the scene's blending color space.
+public struct RefSurfaceDraw: Sendable {
+    public let beforeInstance: UInt32
+    public let rect: SIMD4<Float>
+    public let shade: @Sendable (SIMD2<Float>) -> SIMD4<Float>
+
+    public init(beforeInstance: UInt32, rect: SIMD4<Float>,
+                shade: @escaping @Sendable (SIMD2<Float>) -> SIMD4<Float>) {
+        self.beforeInstance = beforeInstance
+        self.rect = rect
+        self.shade = shade
+    }
+}
+
 /// Deterministic CPU reference renderer for `RefScene`.
 public enum RuneRef {
     private struct LayerTarget {
@@ -170,6 +196,11 @@ public enum RuneRef {
 
     /// Renders `scene` deterministically on the CPU into an sRGB8 `Frame`.
     public static func render(_ scene: RefScene) throws(RefSceneError) -> Frame {
+        try render(scene, surfaces: [])
+    }
+
+    /// Draws captured surfaces at their insertion indices in the active layer.
+    public static func render(_ scene: RefScene, surfaces: [RefSurfaceDraw]) throws(RefSceneError) -> Frame {
         try scene.validate()
         let w = scene.width
         let h = scene.height
@@ -200,7 +231,39 @@ public enum RuneRef {
             return src + dst * invSa
         }
 
-        for prim in scene.primitives {
+        let orderedSurfaces = surfaces.sorted { $0.beforeInstance < $1.beforeInstance }
+        var nextSurface = 0
+        func drawSurfaces(before index: UInt32) {
+            while nextSurface < orderedSurfaces.count && orderedSurfaces[nextSurface].beforeInstance <= index {
+                let draw = orderedSurfaces[nextSurface]
+                nextSurface += 1
+                let r = draw.rect
+                guard r.x.isFinite, r.y.isFinite, r.z.isFinite, r.w.isFinite,
+                      r.z > 0, r.w > 0 else { continue }
+                // Match the half-open coverage of the GPU quad at pixel centers.
+                func bound(_ edge: Float, _ limit: Int) -> Int {
+                    Int(min(Float(limit), max(0, ceilf(edge - 0.5))))
+                }
+                let xs = bound(r.x, w)..<bound(r.x + r.z, w)
+                let ys = bound(r.y, h)..<bound(r.y + r.w, h)
+                for y in ys {
+                    for x in xs {
+                        let src = draw.shade(SIMD2(Float(x) + 0.5, Float(y) + 0.5))
+                        if src.w <= 0 { continue }
+                        let i = y * w + x
+                        if layerStack.isEmpty {
+                            rootBuffer[i] = compositeOver(rootBuffer[i], src)
+                        } else {
+                            let top = layerStack.count - 1
+                            layerStack[top].buffer[i] = compositeOver(layerStack[top].buffer[i], src)
+                        }
+                    }
+                }
+            }
+        }
+
+        for (index, prim) in scene.primitives.enumerated() {
+            if nextSurface < orderedSurfaces.count { drawSurfaces(before: UInt32(index)) }
             switch prim.kind {
             case .layerBegin:
                 layerStack.append(
@@ -357,6 +420,8 @@ public enum RuneRef {
             }
         }
 
+        drawSurfaces(before: .max)
+
         // Convert premultiplied floating buffer to output RGBA8 bytes
         var rgba = Array<UInt8>(repeating: 0, count: pixelCount * 4)
         for i in 0..<pixelCount {
@@ -423,10 +488,10 @@ public enum RuneRef {
                 if d > channelTolerance {
                     diffCount += 1
                     if d > maxDelta {
-                        maxDelta = d
                         worstCoords = (x, y, e, a)
                     }
                 }
+                maxDelta = max(maxDelta, d)
             }
         }
 

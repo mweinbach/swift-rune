@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
 import RuneRef
 #if canImport(simd)
@@ -493,70 +496,201 @@ public final class Runtime<State> {
     internal struct ImageAtlasPacker {
         var atlas = RGBA8Atlas(width: 64, height: 64)
         var revision: UInt64 = ImageAtlasRevisionSeed.allocate()
+        private var patch: ImageAtlasPatch?
+        private var patchPublished = false
+
+        mutating func publishPatch() -> ImageAtlasPatch? {
+            patchPublished = true
+            return patch
+        }
         var shelfX: Int = 1
         var shelfY: Int = 1
         var shelfH: Int = 0
-        var cache: [Int: SIMD4<Float>] = [:]
+        private enum BitmapKey: Hashable {
+            case image(Int, Int, [UInt8])
+            case colorGlyph(Int, Int, Data)
+
+            func hash(into hasher: inout Hasher) {
+                // Equality still checks all pixels, including images with identical transparent borders.
+                switch self {
+                case let .image(w, h, bytes):
+                    hasher.combine(0)
+                    hasher.combine(w)
+                    hasher.combine(h)
+                    hasher.combine(bytes.prefix(128))
+                    hasher.combine(bytes.suffix(128))
+                case let .colorGlyph(w, h, bytes):
+                    hasher.combine(1)
+                    hasher.combine(w)
+                    hasher.combine(h)
+                    hasher.combine(bytes)
+                }
+            }
+        }
+
+        private var cache: [BitmapKey: SIMD4<Float>] = [:]
+        private struct PixelSlot {
+            var edges: SIMD4<Float>
+            var generation: UInt64
+            var frame: Int
+        }
+        private struct PixelKey: Hashable {
+            var id: UInt64
+            var level: Int
+        }
+        private var pixelSlots: [PixelKey: PixelSlot] = [:]
+        private var freeSlots: [SIMD2<Int>: [SIMD4<Float>]] = [:]
+        private var placedSlots: Set<PixelKey> = []
+
+        /// Streaming pixels and decoded animations overwrite their own atlas rectangle.
+        mutating func insert(_ sample: PixelsPresentation, for id: UInt64, drawnSize: SIMD2<Float>) -> SIMD4<Float> {
+            let selection = sample.selectedMip(for: drawnSize)
+            let key = PixelKey(id: id, level: selection?.level ?? 0)
+            placedSlots.insert(key)
+            // Keep original straight RGBA at natural size, and linear-light area samples when shrinking.
+            let mip = key.level > 0 ? selection?.mip : nil
+            let w = Int(mip?.width ?? sample.width)
+            let h = Int(mip?.height ?? sample.height)
+            let size = SIMD2(w, h)
+            let edges: SIMD4<Float>
+            if let slot = pixelSlots[key], dimensions(slot.edges) == size {
+                if slot.generation == sample.generation && slot.frame == sample.frameIndex { return slot.edges }
+                edges = slot.edges
+            } else {
+                if let old = pixelSlots[key] { freeSlots[dimensions(old.edges), default: []].append(old.edges) }
+                edges = freeSlots[size]?.popLast() ?? allocate(width: w, height: h)
+            }
+            var bytes = mip.map { Array($0.rgba) } ?? sample.rgba
+            if mip != nil || sample.premultiplied {
+                // Mip-only sources store sRGB-encoded, premultiplied linear color. Both
+                // the reference scene and legacy GPU hosts expect straight sRGB images.
+                for i in stride(from: 0, to: bytes.count, by: 4) {
+                    let alpha = bytes[i + 3]
+                    guard alpha > 0, alpha < 255 else { continue }
+                    let divisor = Float(alpha) / 255
+                    for c in i..<(i + 3) {
+                        bytes[c] = LinearMipGenerator.linearToSrgb(LinearMipGenerator.srgbToLinear(bytes[c]) / divisor)
+                    }
+                }
+            }
+            write(bytes, width: w, height: h, at: edges)
+            pixelSlots[key] = PixelSlot(edges: edges, generation: sample.generation, frame: sample.frameIndex)
+            return edges
+        }
+
+        private func dimensions(_ edges: SIMD4<Float>) -> SIMD2<Int> {
+            SIMD2(Int(edges.z - edges.x), Int(edges.w - edges.y))
+        }
+
+        mutating func finishPixelPaint() {
+            if placedSlots.count < pixelSlots.count {
+                for (key, slot) in pixelSlots where !placedSlots.contains(key) {
+                    freeSlots[dimensions(slot.edges), default: []].append(slot.edges)
+                    pixelSlots.removeValue(forKey: key)
+                }
+            }
+            placedSlots.removeAll(keepingCapacity: true)
+        }
 
         mutating func insert(_ img: RGBA8Atlas) -> SIMD4<Float> {
-            var hasher = Hasher()
-            hasher.combine(img.width)
-            hasher.combine(img.height)
-            if img.texels.count <= 256 {
-                hasher.combine(img.texels)
-            } else {
-                hasher.combine(img.texels.prefix(128))
-                hasher.combine(img.texels.suffix(128))
-            }
-            let h = hasher.finalize()
-            if let uv = cache[h] { return uv }
+            let key = BitmapKey.image(img.width, img.height, img.texels)
+            if let cached = cache[key] { return cached }
+            return place(img.texels, width: img.width, height: img.height, key: key)
+        }
 
-            let bw = img.width
-            let bh = img.height
-            if bw + 2 > atlas.width || shelfY + bh + 2 > atlas.height {
-                let newW = max(atlas.width * 2, bw + 4)
-                let newH = max(atlas.height * 2, shelfY + bh + 4)
+        mutating func insert(_ glyph: GlyphAtlas.ColorGlyphEntry) -> SIMD4<Float> {
+            let key = BitmapKey.colorGlyph(glyph.pixelSize.x, glyph.pixelSize.y, glyph.rgba)
+            if let cached = cache[key] { return cached }
+            // Font rasterizers supply premultiplied sRGB. Both Rune image shaders consume straight sRGB.
+            var pixels = Array(glyph.rgba)
+            for offset in stride(from: 0, to: pixels.count, by: 4) {
+                let a = Int(pixels[offset + 3])
+                if a == 255 || a == 0 { continue }
+                for channel in offset..<(offset + 3) {
+                    pixels[channel] = UInt8(clamping: (Int(pixels[channel]) * 255 + a / 2) / a)
+                }
+            }
+            return place(pixels, width: glyph.pixelSize.x, height: glyph.pixelSize.y, key: key)
+        }
+
+        /// Returns texel edges, which remain stable when later inserts enlarge the backing texture.
+        private mutating func place(_ pixels: [UInt8], width bw: Int, height bh: Int, key: BitmapKey) -> SIMD4<Float> {
+            let edges = allocate(width: bw, height: bh)
+            write(pixels, width: bw, height: bh, at: edges)
+            cache[key] = edges
+            return edges
+        }
+
+        private mutating func allocate(width bw: Int, height bh: Int) -> SIMD4<Float> {
+            if shelfX + bw + 1 > atlas.width && bw + 2 <= atlas.width {
+                shelfX = 1
+                shelfY += shelfH + 1
+                shelfH = 0
+            }
+            if shelfX + bw + 1 > atlas.width || shelfY + bh + 1 > atlas.height {
+                let newW = max(atlas.width * 2, shelfX + bw + 1)
+                let newH = max(atlas.height * 2, shelfY + bh + 1)
                 var grown = RGBA8Atlas(width: newW, height: newH)
                 for r in 0..<atlas.height {
                     let srcOff = r * atlas.width * 4
                     let dstOff = r * newW * 4
                     grown.texels.replaceSubrange(dstOff..<(dstOff + atlas.width * 4), with: atlas.texels[srcOff..<(srcOff + atlas.width * 4)])
                 }
-                let rx = Float(atlas.width) / Float(newW)
-                let ry = Float(atlas.height) / Float(newH)
-                for (k, var v) in cache {
-                    v.x *= rx; v.z *= rx
-                    v.y *= ry; v.w *= ry
-                    cache[k] = v
-                }
                 atlas = grown
                 revision &+= 1
             }
-            if shelfX + bw + 1 >= atlas.width {
-                shelfX = 1
-                shelfY += shelfH + 1
-                shelfH = 0
-            }
-            if shelfY + bh + 1 >= atlas.height {
-                return insert(img)
-            }
-            for r in 0..<bh {
-                let srcOff = r * bw * 4
-                let dstOff = ((shelfY + r) * atlas.width + shelfX) * 4
-                atlas.texels.replaceSubrange(dstOff..<(dstOff + bw * 4), with: img.texels[srcOff..<(srcOff + bw * 4)])
-            }
             let uv = SIMD4<Float>(
-                Float(shelfX) / Float(atlas.width),
-                Float(shelfY) / Float(atlas.height),
-                Float(shelfX + bw) / Float(atlas.width),
-                Float(shelfY + bh) / Float(atlas.height)
+                Float(shelfX), Float(shelfY), Float(shelfX + bw), Float(shelfY + bh)
             )
             shelfX += bw + 1
             shelfH = max(shelfH, bh)
-            cache[h] = uv
-            revision &+= 1
             return uv
         }
+
+        private mutating func write(_ pixels: [UInt8], width: Int, height: Int, at edges: SIMD4<Float>) {
+            for row in 0..<height {
+                let src = row * width * 4
+                let dst = ((Int(edges.y) + row) * atlas.width + Int(edges.x)) * 4
+                atlas.texels.replaceSubrange(dst..<(dst + width * 4), with: pixels[src..<(src + width * 4)])
+            }
+            let rect = SIMD4<Int>(edges)
+            if patchPublished || patch == nil {
+                patch = ImageAtlasPatch(fromRevision: revision, edges: rect)
+                patchPublished = false
+            } else {
+                patch?.include(rect)
+            }
+            revision &+= 1
+        }
+    }
+
+    internal func placedPixels(_ pixels: Pixels, at time: Double, visible: Bool, box: SIMD4<Float>,
+                               fit: SurfaceFit?, place: SurfacePlace) -> (uv: SIMD4<Float>, sample: PixelsPresentation)? {
+        guard let sample = imagePlayback.sample(pixels, at: time) else { return nil }
+        if visible {
+            shownPixelIDs.insert(pixels.id)
+            if liveVisible, let next = sample.nextDeadline, cxSettings.viewTimeScale > 0 {
+                let due = currentTime + max(0, next - time) / Double(cxSettings.viewTimeScale)
+                nextImageWake = min(nextImageWake ?? due, due)
+            }
+        }
+        let fullRect = fit.map { place.imageRect(forNode: box, imageSize: (sample.width, sample.height), fit: $0) } ?? box
+        return (imagePacker.insert(sample, for: pixels.id, drawnSize: SIMD2(fullRect.z, fullRect.w)), sample)
+    }
+
+    internal func beginPixelPaint() {
+        shownPixelIDs.removeAll(keepingCapacity: true)
+        nextImageWake = nil
+    }
+
+    internal func finishPixelPaint() {
+        imagePlayback.retain(shownPixelIDs)
+        imagePacker.finishPixelPaint()
+    }
+
+    internal func colorGlyphImage(_ glyph: PositionedGlyph) -> (uv: SIMD4<Float>, pixelSize: SIMD2<Int>)? {
+        guard let entry = textSystem.colorGlyph(for: glyph) else { return nil }
+        return (imagePacker.insert(entry), entry.pixelSize)
     }
 
     public var state: State
@@ -648,6 +782,7 @@ public final class Runtime<State> {
     public internal(set) var isAnimating: Bool = false
     public internal(set) var surfaces: [SurfaceDraw] = []
     private var videoSignature: UInt64 = 0
+    private var nextVideoWake: Double?
     private var lastVideoSnapshots: [String: VideoSnapshot] = [:]
     public private(set) var viewCommitCount: Int = 0
     public private(set) var viewCallCount: Int = 0
@@ -923,7 +1058,6 @@ public final class Runtime<State> {
     internal var growthRows: [String: RuntimeGrowthEntry] = [:]
     internal var growthStacks: [String: RuntimeGrowthStackState] = [:]
     internal var foldHeaders: [String: String] = [:]
-    internal var growthSubstepAccumulator: Double = 0
     internal var lastGrowthStepTime: Double? = nil
     internal var pendingGrowthStepNow: Double? = nil
     internal var atBottomStates: [NodeId: Bool] = [:]
@@ -1127,6 +1261,9 @@ public final class Runtime<State> {
     internal var hitGeometryByPath: [String: HitGeometry] = [:]
     internal var paintOrderPaths: [String] = []
     internal var imagePacker = ImageAtlasPacker()
+    private var imagePlayback = ImagePlayback()
+    private var shownPixelIDs: Set<UInt64> = []
+    private var nextImageWake: Double?
     internal let residentCacheTracker = ResidentLayerTracker()
     internal var retainedLayout = RetainedLayoutCoordinator()
     internal var needsCommit: Bool = true
@@ -1488,7 +1625,17 @@ public final class Runtime<State> {
 
     /// Earliest future wall-clock timestamp when an active `enterDelay`, tooltip wait, or `looping`/`cycle` animation needs a frame.
     public func nextWakeDeadline(after now: Double) -> Double? {
-        var best: Double? = nil
+        nextWakeDeadline(after: now, includePaint: true)
+    }
+
+    internal func nextWakeDeadline(after now: Double, includePaint: Bool) -> Double? {
+        var best: Double?
+        if includePaint {
+            best = nextVideoWake.map { max($0, now) }
+            if liveVisible, cxSettings.viewTimeScale > 0, let due = nextImageWake {
+                best = min(best ?? .infinity, max(now, due))
+            }
+        }
         if let storeWake = scene.store.waitingUntil() {
             let scale = Double(cxSettings.viewTimeScale)
             if scale > 0 {
@@ -1625,11 +1772,9 @@ public final class Runtime<State> {
     ) -> RefScene {
         lastWasSettled = false
         let wasQuiet = !frameHadInputSinceLastFrame && !isAnimating
-        let dueTimerDeadline = wakeDeadlines.first.map { now >= $0 } ?? false
+        let timer = beginFrameTimers(at: now)
         let pendingDue = pendingUpdateWakes.contains { ($0.scheduledAt + $0.delay) <= now }
-        let dueTimer = dueTimerDeadline || pendingDue
-        let timerAlreadyPolled = timerWake.framePolled(due: dueTimerDeadline)
-        drainDueWakeDeadlines(through: now)
+        let dueTimer = timer.due || pendingDue
         let wasLive = frameHadLiveWake
         // The input cause is input that changed the model (`if r { why |= INPUT }`), not any
         // input's arrival; arrival alone only ends the frame's quiet.
@@ -1668,7 +1813,7 @@ public final class Runtime<State> {
         var (frameOut, animNow) = stepToFrameOutputScaled(
             at: now,
             splitStep: splitStep,
-            skipFramePoll: timerAlreadyPolled
+            skipFramePoll: timer.alreadyPolled
         )
         var sceneOut = measureFramePhase(.paint) {
             buildRefScene(frameOut: frameOut, now: animNow, startShapedCount: frameStartShapedCount)
@@ -1714,6 +1859,17 @@ public final class Runtime<State> {
             interactionBuilt(sceneOut: sceneOut)
         }
         return sceneOut
+    }
+
+    internal func finishSurfaceVideoPaint(_ paint: SurfaceVideoPaint) {
+        videoSignature = paint.signature
+        lastVideoSnapshots = paint.snapshots
+        nextVideoWake = paint.nextWake
+        if paint.active {
+            animSources |= AnimSource.video
+        } else {
+            animSources &= ~AnimSource.video
+        }
     }
 
     internal func finishPostFrameHooks(at now: Double) {
@@ -1789,7 +1945,7 @@ public final class Runtime<State> {
     }
 
     private func interactionFrameBegins() {
-        let nowNs = DispatchTime.now().uptimeNanoseconds
+        let nowNs = RuneExecutionContext.uptimeNanoseconds
         let cpuMs = PerfWarn.threadCpuMs()
         if let finished = perfWatch.interaction.frameBegins(queued: false, nowNs: nowNs, cpuMs: cpuMs) {
             handleInteractionFinished(finished)
@@ -1797,7 +1953,7 @@ public final class Runtime<State> {
     }
 
     private func interactionBuilt(sceneOut: RefScene) {
-        let nowNs = DispatchTime.now().uptimeNanoseconds
+        let nowNs = RuneExecutionContext.uptimeNanoseconds
         let cpuMs = PerfWarn.threadCpuMs()
         if let slowFrame = perfWatch.interaction.built(
             shaped: UInt32(sceneOut.primitives.count),
@@ -1811,7 +1967,7 @@ public final class Runtime<State> {
     }
 
     public func interactionPresented(
-        submittedNs: UInt64 = DispatchTime.now().uptimeNanoseconds,
+        submittedNs: UInt64 = RuneExecutionContext.uptimeNanoseconds,
         presentsAtNs: UInt64? = nil,
         slowMs: Double = InteractionTracker.defaultSlowMs,
         overloaded: Bool = false
@@ -6525,7 +6681,7 @@ public final class Runtime<State> {
         let targetAuth = spans.map { $0.map(\.text).joined() } ?? text
         let targetScale = max(pxScale, 1.0)
         if isExiting, let exiting = exitingTextLayouts[snapId]?.box {
-            if glidePx == .zero, exiting.hasGlyphs {
+            if glidePx == .zero, exiting.hasGlyphs, exiting.shapeKey.usesSmoothing(textSystem.smoothing) {
                 return exiting
             }
             let filled = textSystem.layoutKeyed(
@@ -6559,8 +6715,7 @@ public final class Runtime<State> {
                 }
                 return abs(mw - ww) <= 0.75
             }()
-            if matchesText && matchesWidth {
-                #if canImport(CoreText) && canImport(CoreGraphics)
+            if matchesText && matchesWidth && live.shapeKey.usesSmoothing(textSystem.smoothing) {
                 if let laid = live.paragraphs, laid.waiting, let request = paragraphs, !request.highlights.isEmpty {
                     let prepared = textSystem.prepareHighlights(request.highlights, in: laid, field: request.field)
                     if prepared !== laid {
@@ -6569,7 +6724,6 @@ public final class Runtime<State> {
                         return box
                     }
                 }
-                #endif
                 if live.hasGlyphs {
                     return live
                 }
@@ -6622,12 +6776,48 @@ public final class Runtime<State> {
         return box
     }
 
+    /// Color glyph bitmaps share the image atlas. Only coverage glyphs use the foreground RGB.
+    internal func referenceTextPrimitive(
+        _ glyph: PositionedGlyph, rect: SIMD4<Float>, ink: SIMD4<Float>, clip: SIMD4<Float>, turn: Float = 0,
+        forceScaled: Bool = false
+    ) -> Primitive {
+        if let image = colorGlyphImage(glyph) {
+            return .image(rect: rect, uv: image.uv, tint: SIMD4(1, 1, 1, ink.w), clip: clip, turn: turn)
+        }
+        return referenceGlyphMask(rect: rect, uv: glyph.uv, ink: ink, clip: clip, turn: turn, forceScaled: forceScaled)
+    }
+
+    private func referenceGlyphMask(rect: SIMD4<Float>, uv: SIMD4<Float>, ink: SIMD4<Float>, clip: SIMD4<Float>,
+                                    turn: Float = 0, forceScaled: Bool) -> Primitive {
+        let atlas = textSystem.glyphAtlas.atlas
+        let width = max(1, (uv.z - uv.x) * Float(atlas.width))
+        let height = max(1, (uv.w - uv.y) * Float(atlas.height))
+        let nativeSize = !forceScaled && abs(width - rect.z) <= 0.5 && abs(height - rect.w) <= 0.5
+        let premultiplied = SIMD4(ink.x * ink.w, ink.y * ink.w, ink.z * ink.w, ink.w)
+        return .glyph(rect: rect, uv: uv, color: ink, gamma: textSystem.coverageExponent(premultiplied),
+                      clip: clip, turn: turn, nativeSize: nativeSize)
+    }
+
     private func buildRefScene(frameOut: FrameOutput, now: Double, startShapedCount: UInt64? = nil) -> RefScene {
+        beginPixelPaint()
+        defer { finishPixelPaint() }
         let baselineShapedCount = startShapedCount ?? textSystem.shapedCallCount
         textSystem.glyphAtlas.beginFrame(pinnedMask: lastPinnedGlyphMask)
         textSystem.glyphCache.beginFrame()
         var glyphPageEntries: [(index: Int, page: UInt16)] = []
         var usedGlyphMask: UInt32 = 0
+        func recordGlyphPage(_ index: Int, _ page: UInt16) {
+            glyphPageEntries.append((index, page))
+            usedGlyphMask |= UInt32(1) << min(UInt32(page), 31)
+        }
+
+        func textPrimitive(_ glyph: PositionedGlyph, rect: SIMD4<Float>, ink: SIMD4<Float>,
+                           clip: SIMD4<Float>, turn: Float = 0, forceScaled: Bool = false, at index: Int) -> Primitive {
+            let primitive = referenceTextPrimitive(glyph, rect: rect, ink: ink, clip: clip, turn: turn, forceScaled: forceScaled)
+            if primitive.kind == .glyph { recordGlyphPage(index, glyph.atlasPage) }
+            return primitive
+        }
+
         let pxScale = pixelScale
         let devW = max(1, Int((viewport.x * pxScale).rounded()))
         let devH = max(1, Int((viewport.y * pxScale).rounded()))
@@ -6903,9 +7093,7 @@ public final class Runtime<State> {
         var newInteractiveHits: [HelpInteractiveHitRecord] = []
         var newLinkBoxes: [String: [TextLinkBox]] = [:]
         var builtSurfaces: [SurfaceDraw] = []
-        var videosActive = false
-        var newVideoSig: UInt64 = 0
-        var newVideoSnaps: [String: VideoSnapshot] = [:]
+        var surfaceVideo = SurfaceVideoPaint()
         var newDrawnRectByPath: [String: MotionRect] = [:]
         var newRectSpringingById: [NodeId: Bool] = [:]
         kitHooks.unseenPresence.beginFrame()
@@ -7647,12 +7835,8 @@ public final class Runtime<State> {
             }
 
             if let (surf, _) = el.surfacePayload {
-                if let vsnap = surf.videoSnapshot() {
-                    newVideoSnaps[snap.path] = vsnap
-                }
-                if !surfaceVisible {
-                    newVideoSig = VideoSignature.foldUnpulled(newVideoSig, surface: surf)
-                }
+                surfaceVideo.snapshot(surf, path: snap.path)
+                if !surfaceVisible { surfaceVideo.unpulled(surf) }
             }
 
             if shouldEmit {
@@ -7788,13 +7972,7 @@ public final class Runtime<State> {
                                 turn: useLayer ? 0 : p.rotate
                             )))
                         }
-                        let wakeHandle = self.waker
-                        if let pulled = surf.pullVideo(clock: now, wake: { wakeHandle.wake() }) {
-                            if pulled.active {
-                                videosActive = true
-                            }
-                            newVideoSig = VideoSignature.fold(newVideoSig, generation: pulled.generation, surfaceKey: surf.key)
-                        }
+                        surfaceVideo.pull(surf, at: now, wallTime: currentTime, waker: waker)
                         builtSurfaces.append(SurfaceDraw(
                             surface: surf.placed(el.surfacePlace),
                             fit: fit,
@@ -7934,13 +8112,11 @@ public final class Runtime<State> {
                             turn: useLayer ? 0 : p.rotate
                         ))
                     } else if let px = el.pixelsPayload {
-                        let sz = px.size
-                        if sz.width > 0 && sz.height > 0 {
-                            let atlas = RGBA8Atlas(width: Int(sz.width), height: Int(sz.height), texels: px.rgbaBytes())
-                            let normUV = imagePacker.insert(atlas)
+                        if let (uv, sz) = placedPixels(px, at: now, visible: surfaceVisible && paintAlphaTotal > 0.001,
+                                                       box: devRect, fit: el.pixelsFitMode, place: el.surfacePlace) {
                             let fitted = Runtime.fittedPixelsGeometry(
                                 box: devRect,
-                                uv: normUV,
+                                uv: uv,
                                 imageWidth: Float(sz.width),
                                 imageHeight: Float(sz.height),
                                 fit: el.pixelsFitMode,
@@ -7958,7 +8134,8 @@ public final class Runtime<State> {
                                 uv: fitted.uv,
                                 tint: tint,
                                 clip: devClip,
-                                turn: useLayer ? 0 : p.rotate
+                                turn: useLayer ? 0 : p.rotate,
+                                sourceTexelBounds: fitted.uv == uv ? .zero : uv
                             ))
                         }
                     }
@@ -8194,21 +8371,13 @@ public final class Runtime<State> {
                                 )
                                 for g in shaped.glyphs {
                                     let gc = (g.color ?? defaultGridColor).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                                    let primIdx = primitives.count
-                                    primitives.append(.glyph(
-                                        rect: SIMD4<Float>(
-                                            (baseX + g.rect.x * scaleVec.x) * pxScale,
-                                            (rowY + g.rect.y * scaleVec.y) * pxScale,
-                                            g.rect.z * scaleVec.x * pxScale,
-                                            g.rect.w * scaleVec.y * pxScale
-                                        ),
-                                        uv: g.uv,
-                                        color: gc,
-                                        gamma: systemDark ? 0.88 : 1.05,
-                                        clip: devClip
-                                    ))
-                                    glyphPageEntries.append((primIdx, g.atlasPage))
-                                    usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
+                                    let rect = SIMD4<Float>(
+                                        (baseX + g.rect.x * scaleVec.x) * pxScale,
+                                        (rowY + g.rect.y * scaleVec.y) * pxScale,
+                                        g.rect.z * scaleVec.x * pxScale,
+                                        g.rect.w * scaleVec.y * pxScale
+                                    )
+                                    primitives.append(textPrimitive(g, rect: rect, ink: gc, clip: devClip, at: primitives.count))
                                 }
                             }
                             for cell in row.cells where !cell.text.isEmpty {
@@ -8223,21 +8392,13 @@ public final class Runtime<State> {
                                 let cx = baseX + Float(cell.column) * cellW
                                 for g in shaped.glyphs {
                                     let gc = cell.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                                    let primIdx = primitives.count
-                                    primitives.append(.glyph(
-                                        rect: SIMD4<Float>(
-                                            (cx + g.rect.x * scaleVec.x) * pxScale,
-                                            (rowY + g.rect.y * scaleVec.y) * pxScale,
-                                            g.rect.z * scaleVec.x * pxScale,
-                                            g.rect.w * scaleVec.y * pxScale
-                                        ),
-                                        uv: g.uv,
-                                        color: gc,
-                                        gamma: systemDark ? 0.88 : 1.05,
-                                        clip: devClip
-                                    ))
-                                    glyphPageEntries.append((primIdx, g.atlasPage))
-                                    usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
+                                    let rect = SIMD4<Float>(
+                                        (cx + g.rect.x * scaleVec.x) * pxScale,
+                                        (rowY + g.rect.y * scaleVec.y) * pxScale,
+                                        g.rect.z * scaleVec.x * pxScale,
+                                        g.rect.w * scaleVec.y * pxScale
+                                    )
+                                    primitives.append(textPrimitive(g, rect: rect, ink: gc, clip: devClip, at: primitives.count))
                                 }
                             }
                             if let overlay = row.overlayShape {
@@ -8295,6 +8456,8 @@ public final class Runtime<State> {
                     scaleStill: nodeScaleMotion == .still && abs(textRasterScale - 1.0) < 1e-5,
                     scale: SIMD2<Float>(scaleVec.x, scaleVec.y)
                 )
+                let filterTextGlyphs = nodeScaleMotion != .still ||
+                    abs(scaleVec.x - textRasterScale) > 1e-4 || abs(scaleVec.y - textRasterScale) > 1e-4
                 let textShiftPx: SIMD2<Float> = textRestsExact ? textExactOffPx : .zero
                 let snappedOriginX = (snappedEdgesPx[0] + textShiftPx.x) / pxScale
                 let snappedOriginY = (snappedEdgesPx[1] + textShiftPx.y) / pxScale
@@ -8395,8 +8558,9 @@ public final class Runtime<State> {
                                     rect.y += glidePx.y
                                     glyphPageEntries.append((primitives.count, page))
                                     usedGlyphMask |= UInt32(1) << min(UInt32(page), 31)
-                                    primitives.append(.glyph(rect: rect, uv: uv, color: color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
-                                                             gamma: systemDark ? 0.88 : 1.05, clip: devInputClip))
+                                    primitives.append(referenceGlyphMask(rect: rect, uv: uv,
+                                        ink: color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend), clip: devInputClip,
+                                        forceScaled: filterTextGlyphs))
                                 }
                             )
                         }
@@ -8570,21 +8734,10 @@ public final class Runtime<State> {
                             let ink = fieldMarks.last { $0.fg != nil && $0.byteRange.contains(g.utf8Offset) }?.fg ?? baseGlyphColor
                             guard textFlightTarget == nil, !showingPlaceholder || !departingText else { continue }
                             let gc = ink.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                            let primIdx = primitives.count
-                            primitives.append(.glyph(
-                                rect: SIMD4<Float>(
-                                    (inputRestOriginX + g.rect.x * scaleVec.x) * pxScale,
-                                    gy,
-                                    g.rect.z * scaleVec.x * pxScale,
-                                    gh
-                                ),
-                                uv: g.uv,
-                                color: gc,
-                                gamma: systemDark ? 0.88 : 1.05,
-                                clip: devInputClip
-                            ))
-                            glyphPageEntries.append((primIdx, g.atlasPage))
-                            usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
+                            let rect = SIMD4<Float>((inputRestOriginX + g.rect.x * scaleVec.x) * pxScale,
+                                                   gy, g.rect.z * scaleVec.x * pxScale, gh)
+                            primitives.append(textPrimitive(g, rect: rect, ink: gc, clip: devInputClip,
+                                                            forceScaled: filterTextGlyphs, at: primitives.count))
                         }
 
                         // Caret bar when focused & window focused
@@ -8632,7 +8785,7 @@ public final class Runtime<State> {
                     // measured (`relayout::lay_out_text`, #948).
                     let wrapWidth = TextBoxGeometry.wrapWidth(max(0, snap.targetRect.width - el.layout.padding.left - el.layout.padding.right), scale: textRasterScale * pxScale)!
                     let labelBox: TextLayoutBox?
-                    let shaped: ShapedText
+                    var shaped: ShapedText
                     if resolvedText.truncateFade || resolvedText.advanceRun != nil || isClampedOrEllipsis {
                         labelBox = nil
                         shaped = resolvedText.shape(
@@ -8662,6 +8815,13 @@ public final class Runtime<State> {
                         labelBox = box
                         shaped = box.shaped
                     }
+                    #if canImport(CRuneDesktopText) && !canImport(CoreText)
+                    let placedNativeGlyphs = textRestsExact && (shaped.desktopRestingText?.place(
+                        &shaped, at: restOriginX * pxScale, atlas: textSystem.glyphAtlas
+                    ) ?? false)
+                    #else
+                    let placedNativeGlyphs = false
+                    #endif
                     let elided = shaped.elided
                     if !nodeIsSecure {
                         elementDrawnText = shaped.drawnText
@@ -8713,21 +8873,31 @@ public final class Runtime<State> {
                         textOriginY: textOriginY,
                         scaleVec: scaleVec,
                         pxScale: pxScale,
+                        shapeScale: textRasterScale * pxScale,
                         localAlpha: localAlpha,
                         defaultTextColor: defaultTextColor,
-                        defaultRingOutline: defaultRingOutline,
-                        forceFocusRings: forceFocusRings,
                         isFocused: isFocused,
                         isExiting: p.isExiting,
                         shouldEmit: shouldEmit,
                         visClip: visClip,
-                        devClip: devClip,
-                        useLayer: useLayer,
-                        effRotate: effRotate,
-                        into: &primitives,
                         linkBoxes: &newLinkBoxes,
-                        helpHits: &newHelpHits,
-                        interactiveHits: &newInteractiveHits
+                        recordHit: { link, index, edges in
+                            if let words = link.help, !words.isEmpty {
+                                newHelpHits.append(HelpHitRecord(
+                                    path: snap.path, key: link.id, rect: edges, seq: newInteractiveHits.count,
+                                    text: runeHelpWords(words), side: el.helpSide, linkIndex: index
+                                ))
+                            }
+                            newInteractiveHits.append(HelpInteractiveHitRecord(path: snap.path, rect: edges))
+                        },
+                        emitRect: { rect, radius, fill, border, width in
+                            primitives.append(.roundedRect(
+                                rect: rect, radii: SIMD4(repeating: radius),
+                                fill: fill.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                                borderColor: border.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                                borderWidth: width, clip: devClip, turn: useLayer ? 0 : effRotate
+                            ))
+                        }
                     )
                     // Laid out from its exact place, its baselines round once where they land, as Skia
                     // rounds a text blob; its decorations round against them (`content.rs`, #935).
@@ -8888,7 +9058,7 @@ public final class Runtime<State> {
                                 : (-Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
                             glyphsToEmit = textSystem.glyphCache.glyphsInBandCached(
                                 key: GlyphReplayKey(shapeKey: labelBox.shapeKey, maxWidth: labelBox.maxWidth, glidePx: glidePx),
-                                keep: resolvedText.isSecure ? .secret : (glidePx == .zero ? .cached : .owned),
+                                keep: resolvedText.isSecure ? .secret : (glidePx == .zero && !placedNativeGlyphs ? .cached : .owned),
                                 bandTopPt: lblBandTop,
                                 bandBottomPt: lblBandBot
                             ) {
@@ -8912,27 +9082,15 @@ public final class Runtime<State> {
                             if effGlyphAlpha <= 0.0005 { continue }
                             let baseGlyphColor = g.color.map { applyPressColor(effPressColor, to: $0, frac: effPressFrac) } ?? defaultTextColor
                             let gc = (selPaintInk?.color(for: inkGlyph) ?? linkInkColor(for: inkGlyph, ranges: highlightInks) ?? linkInkColor(for: inkGlyph, ranges: linkInks) ?? baseGlyphColor).scaleAlpha(effGlyphAlpha).simd4(srgb: srgbBlend)
-                            let primIdx = primitives.count
-                            var prim = attachFade(.glyph(
-                                rect: SIMD4<Float>(
-                                    gx,
-                                    gy,
-                                    g.rect.z * scaleVec.x * pxScale,
-                                    gh
-                                ),
-                                uv: g.uv,
-                                color: gc,
-                                gamma: systemDark ? 0.88 : 1.05,
-                                clip: glyphClip,
-                                turn: useLayer ? 0 : effRotate
-                            ))
+                            let rect = SIMD4<Float>(gx, gy, g.rect.z * scaleVec.x * pxScale, gh)
+                            var prim = attachFade(textPrimitive(g, rect: rect, ink: gc, clip: glyphClip,
+                                                               turn: useLayer ? 0 : effRotate, forceScaled: filterTextGlyphs,
+                                                               at: primitives.count))
                             if let fRes = fadeRes, fRes.isTruncated, fRes.refFade != .zero, activeFadeEdges.isEmpty {
                                 prim.fade = fRes.refFade
                                 prim.fadeOrigin = fRes.refFadeOrigin
                             }
                             primitives.append(prim)
-                            glyphPageEntries.append((primIdx, g.atlasPage))
-                            usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
                         }
                         if wrapTruncateLayer {
                             primitives.append(.layerEnd(clip: glyphClip))
@@ -9525,10 +9683,8 @@ public final class Runtime<State> {
 
         if !activeTextFlights.isEmpty {
             forEachTextFlightGlyph(at: now) { glyph, deviceRect, ink, clip in
-                let index = primitives.count
-                primitives.append(.glyph(rect: deviceRect, uv: glyph.uv, color: ink, gamma: systemDark ? 0.88 : 1.05, clip: clip))
-                glyphPageEntries.append((index, glyph.atlasPage))
-                usedGlyphMask |= UInt32(1) << min(UInt32(glyph.atlasPage), 31)
+                primitives.append(textPrimitive(glyph, rect: deviceRect, ink: ink, clip: clip,
+                                                forceScaled: true, at: primitives.count))
             }
             for entry in activeTextFlights {
                 let (srcAlpha, _) = entry.state.alphas(
@@ -9671,13 +9827,9 @@ public final class Runtime<State> {
         kitHooks.unseenPresence.recordPostBuildFilterSeen(nodes: flatNodes)
         helpState.hits = newHelpHits
         helpState.interactiveHits = newInteractiveHits
-        updateHelp(at: now, primitives: &primitives)
+        updateHelp(at: now, primitives: &primitives, recordGlyphPage: recordGlyphPage)
         surfaces = builtSurfaces
-        videoSignature = newVideoSig
-        lastVideoSnapshots = newVideoSnaps
-        if videosActive {
-            isAnimating = true
-        }
+        finishSurfaceVideoPaint(surfaceVideo)
         _ = now
         lastPinnedGlyphMask = usedGlyphMask
         let pageCount = textSystem.glyphAtlas.pageCount
@@ -9690,6 +9842,11 @@ public final class Runtime<State> {
             }
         }
 
+        let imageDimensions = SIMD4<Float>(Float(imagePacker.atlas.width), Float(imagePacker.atlas.height),
+                                           Float(imagePacker.atlas.width), Float(imagePacker.atlas.height))
+        for index in primitives.indices where primitives[index].kind == .image {
+            primitives[index].uv /= imageDimensions
+        }
         let totalGlyphs = primitives.count(where: { $0.kind == .glyph })
         let shapedDelta = UInt32(truncatingIfNeeded: min(UInt64(UInt32.max), textSystem.shapedCallCount &- baselineShapedCount))
         FrameStatsSidecar.set(self, glyphs: totalGlyphs, shaped: shapedDelta)
@@ -10029,6 +10186,7 @@ public final class Runtime<State> {
     }
 
     public func pointerExit(at now: Double) {
+        wheelLost()
         hoverHold = HoverHold()
         pointerPosition = Vec2(-10000, -10000)
         if hoveredLink != nil {
@@ -10229,11 +10387,12 @@ public final class Runtime<State> {
                     let stateRevealed = edit.isRevealed
                     if node.el.isSecure {
                         edit.isSecure = true
-                        if node.el.isRevealed { edit.isRevealed = true }
+                        if let revealed = node.el.revealedOverride { edit.isRevealed = revealed }
                     }
                     if !edit.isHiddenMultiline {
                         let isSecure = edit.isSecure || node.el.isSecure
-                        let offset = textHitOffset(node: node, windowPos: pos, edit: edit)
+                        let hit = textCaretHit(node: node, windowPos: pos, edit: edit)
+                        let offset = hit.utf8Offset
                         if !isSecure, drag.clicks == 2, let origin = drag.textSelectionOrigin {
                             let unit = edit.wordUnitRange(atUTF8Offset: offset)
                             let ext = SelectionMath.extendSelection(origin: origin, at: unit)
@@ -10245,7 +10404,7 @@ public final class Runtime<State> {
                             edit.setCursor(utf8Offset: ext.anchor, extendSelection: false)
                             edit.setCursor(utf8Offset: ext.focus, extendSelection: true)
                         } else {
-                            edit.setCursor(utf8Offset: offset, extendSelection: true)
+                            edit.setCursor(hit, extendSelection: true)
                         }
                     } else {
                         let end = edit.text.utf8.count
@@ -10759,7 +10918,7 @@ public final class Runtime<State> {
             let stateRevealed = edit.isRevealed
             if node.el.isSecure {
                 edit.isSecure = true
-                if node.el.isRevealed { edit.isRevealed = true }
+                if let revealed = node.el.revealedOverride { edit.isRevealed = revealed }
             }
             let textSelOrigin: (Int, Int)?
             if edit.isHiddenMultiline {
@@ -10771,7 +10930,8 @@ public final class Runtime<State> {
                 }
             } else {
                 let isSecure = edit.isSecure || node.el.isSecure
-                let offset = textHitOffset(node: node, windowPos: pos, edit: edit)
+                let hit = textCaretHit(node: node, windowPos: pos, edit: edit)
+                let offset = hit.utf8Offset
                 if clickCount >= 3 {
                     if isSecure {
                         edit.selectAll()
@@ -10794,7 +10954,7 @@ public final class Runtime<State> {
                         textSelOrigin = origin
                     }
                 } else {
-                    edit.setCursor(utf8Offset: offset, extendSelection: mods.shift || inputMachines.currentMods.shift)
+                    edit.setCursor(hit, extendSelection: mods.shift || inputMachines.currentMods.shift)
                     textSelOrigin = nil
                 }
             }
@@ -10920,7 +11080,7 @@ public final class Runtime<State> {
         let alreadyActivated = releasedPath != nil && activatedOnPointerDown
         activatedOnPointerDown = false
         let notePath = releasedPath
-        let startedNs = InteractionGate.isOn ? DispatchTime.now().uptimeNanoseconds : 0
+        let startedNs = InteractionGate.isOn ? RuneExecutionContext.uptimeNanoseconds : 0
         let wasPressedInside = pressedPointerInside
         pressedPath = nil
         pressedKey = nil
@@ -11102,7 +11262,7 @@ public final class Runtime<State> {
                     ? "on_double_press"
                     : "on_press"
                 if let note = interactionNote(action: action, rank: 3, path: notePath) {
-                    let endedNs = DispatchTime.now().uptimeNanoseconds
+                    let endedNs = RuneExecutionContext.uptimeNanoseconds
                     let handlerMs = Double(endedNs >= startedNs ? endedNs - startedNs : 0) / 1_000_000.0
                     perfWatch.interaction.noted(note: note, arrivedNs: startedNs, startedNs: startedNs, handlerMs: handlerMs)
                 }
@@ -11117,7 +11277,7 @@ public final class Runtime<State> {
             applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
             if InteractionGate.isOn {
                 if let note = interactionNote(action: "on_middle_press", rank: 3, path: notePath) {
-                    let endedNs = DispatchTime.now().uptimeNanoseconds
+                    let endedNs = RuneExecutionContext.uptimeNanoseconds
                     let handlerMs = Double(endedNs >= startedNs ? endedNs - startedNs : 0) / 1_000_000.0
                     perfWatch.interaction.noted(note: note, arrivedNs: startedNs, startedNs: startedNs, handlerMs: handlerMs)
                 }
@@ -11498,11 +11658,16 @@ public final class Runtime<State> {
                     }()
                     : nil
                 var editLayout: ShapedText? = nil
+                let binding = ev.controlBinding
+                let horizontal = ev.key == .arrowLeft || ev.key == .arrowRight ||
+                    binding == "a" || binding == "e" || binding == "b" || binding == "f"
                 let vertical = edit.multiline && (
-                    ((ev.key == .arrowUp || ev.key == .arrowDown) && !ev.mods.primaryCommand) ||
-                    ev.controlBinding == "p" || ev.controlBinding == "n"
+                    ((ev.key == .arrowUp || ev.key == .arrowDown) && !ev.mods.isTextLineCommand) ||
+                    binding == "p" || binding == "n"
                 )
-                if !edit.isSecure && (ev.key == .arrowLeft || ev.key == .arrowRight || vertical) {
+                let visualHomeEnd = edit.multiline && !KeyPlatform.current.isMac && !ev.mods.ctrl &&
+                    (ev.key == .home || ev.key == .end)
+                if (!edit.isSecure || edit.isRevealed) && (horizontal || vertical || visualHomeEnd) {
                     let pad = fNode.el.layout.padding
                     let innerW = max(0, fNode.targetRect.width - pad.left - pad.right)
                     let resolvedInput = ElDisplayResolver.resolveInput(el: fNode.el, edit: edit, innerWidth: innerW, pxScale: pixelScale)
@@ -11525,7 +11690,8 @@ public final class Runtime<State> {
                             style: resolvedInput.style,
                             maxWidth: resolvedInput.maxWidthForShape,
                             pixelScale: pixelScale,
-                            emitGlyphs: false
+                            emitGlyphs: false,
+                            bypassCache: edit.isSecure
                         )
                     }
                 }
@@ -12126,10 +12292,15 @@ public final class Runtime<State> {
 
     /// Delivers an inbound OS file-drop event (`entered`, `hovered`, `dropped`, `exited`).
     public func fileDrop(_ phase: FileDropPhase, at now: Double) {
+        _ = receiveFileDrop(phase, at: now)
+    }
+
+    /// Returns the result of routing this phase to a native drop destination.
+    internal func receiveFileDrop(_ phase: FileDropPhase, at now: Double) -> Bool {
         currentTime = now
         fileDropState.handle(phase)
         flightRecorder.record(kind: "fileDrop", at: now)
-        routeFileDropPhase(phase, at: now)
+        let accepted = routeFileDropPhase(phase, at: now)
         if let handler = onFileDrop {
             var tx = makeTx(at: now)
             handler(&state, phase, &tx)
@@ -12137,7 +12308,10 @@ public final class Runtime<State> {
             if !tx.liveOnlyRequested {
                 dirtyCommit(at: now, why: CommitWhy.input)
             }
+            if case .exited = phase { return false }
+            return true
         }
+        return accepted
     }
 
     /// Returns and clears any URL open requests queued in headless mode.
@@ -13092,7 +13266,7 @@ public final class Runtime<State> {
         let t = now ?? currentTime
         let inputMark = noteInput(at: t, routed: true)
         defer { endInputDispatch(inputMark, queuedAction: true) }
-        let imeStartNs = InteractionGate.isOn ? DispatchTime.now().uptimeNanoseconds : 0
+        let imeStartNs = InteractionGate.isOn ? RuneExecutionContext.uptimeNanoseconds : 0
         flushPendingCommitIfNeeded(at: t)
         let shellIme: Ime?
         switch event {
@@ -13136,7 +13310,7 @@ public final class Runtime<State> {
         }
         if InteractionGate.isOn,
            let note = interactionNote(action: "key_edit", rank: 3, path: focusedPath) {
-            let endedNs = DispatchTime.now().uptimeNanoseconds
+            let endedNs = RuneExecutionContext.uptimeNanoseconds
             let handlerMs = Double(endedNs >= imeStartNs ? endedNs - imeStartNs : 0) / 1_000_000.0
             perfWatch.interaction.noted(note: note, arrivedNs: imeStartNs, startedNs: imeStartNs, handlerMs: handlerMs)
         }
@@ -13727,11 +13901,17 @@ public final class Runtime<State> {
     }
 
     internal func textHitOffset(node: FlatNode, windowPos: Vec2, edit: TextEdit) -> Int {
+        textCaretHit(node: node, windowPos: windowPos, edit: edit).utf8Offset
+    }
+
+    internal func textCaretHit(node: FlatNode, windowPos: Vec2, edit: TextEdit) -> TextCursorMove {
         var resolvedEdit = edit
         if node.el.isSecure {
             resolvedEdit.isSecure = true
             if let rev = node.el.revealedOverride { resolvedEdit.isRevealed = rev }
         }
+        guard !resolvedEdit.text.isEmpty else { return TextCursorMove(utf8Offset: 0) }
+        if resolvedEdit.isHiddenMultiline { return TextCursorMove(utf8Offset: resolvedEdit.text.utf8.count) }
         let rect = presentedRectByPath[node.path] ?? node.targetRect
         let sc = presentedScaleByPath[node.path] ?? Vec2(1, 1)
         let innerW = max(0, rect.width - (node.el.layout.padding.left + node.el.layout.padding.right) * sc.x)
@@ -13761,24 +13941,34 @@ public final class Runtime<State> {
                 style: resolvedInput.style,
                 maxWidth: resolvedInput.maxWidthForShape,
                 pixelScale: pixelScale,
-                emitGlyphs: false
+                emitGlyphs: false,
+                bypassCache: resolvedEdit.isSecure
             )
         }
         let hScroll = resolvedEdit.multiline ? 0 : (inputMachines.inputScroll[node.path] ?? 0)
-        let localX = (windowPos.x - (rect.x + node.el.layout.padding.left * sc.x)) / max(0.01, sc.x) + hScroll
-        let localY = (windowPos.y - (rect.y + node.el.layout.padding.top * sc.y)) / max(0.01, sc.y)
-        let hit = textSystem.hitTestUTF8Offset(in: shaped, localX: localX, localY: localY, pixelScale: pixelScale)
-        if resolvedEdit.isSecure {
-            // Map bullet index (`•` is 3 UTF-8 bytes) back to underlying grapheme index!
-            let charIdx = max(0, hit / 3)
-            var byteCount = 0
-            for (i, ch) in resolvedEdit.text.enumerated() {
-                if i >= charIdx { break }
-                byteCount += ch.utf8.count
+        let point = hitGeometryByPath[node.path]?.turn?.unturn(windowPos) ?? windowPos
+        let localX = (point.x - (rect.x + node.el.layout.padding.left * sc.x)) / max(0.01, sc.x) + hScroll
+        let localY = (point.y - (rect.y + node.el.layout.padding.top * sc.y)) / max(0.01, sc.y)
+        let line = shaped.lineIndex(atLocalY: localY, lineCount: shaped.cursorLineCount)
+        var hit = textSystem.caretHit(in: shaped, on: line, atX: localX, pixelScale: pixelScale)
+        if resolvedEdit.isSecure && !resolvedEdit.isRevealed {
+            // The mask draws one bullet per scalar. Editing still lands at a grapheme edge.
+            var remaining = hit.utf8Offset / "•".utf8.count
+            var byte = 0
+            for character in resolvedEdit.text {
+                let count = character.unicodeScalars.count
+                if remaining < count {
+                    if remaining > count - remaining { byte += character.utf8.count }
+                    break
+                }
+                remaining -= count
+                byte += character.utf8.count
             }
-            return byteCount
+            hit.utf8Offset = byte
+        } else {
+            hit.utf8Offset = resolvedEdit.snapToGraphemeBoundary(hit.utf8Offset)
         }
-        return resolvedEdit.snapToGraphemeBoundary(hit)
+        return hit
     }
 
     // MARK: - Tooltips (`El.help` + `HelpLook`)
@@ -13899,7 +14089,7 @@ public final class Runtime<State> {
         return parts
     }
 
-    private func updateHelp(at now: Double, primitives: inout [Primitive]) {
+    private func updateHelp(at now: Double, primitives: inout [Primitive], recordGlyphPage: (Int, UInt16) -> Void) {
         helpState.regions.removeAll(keepingCapacity: true)
         if useNativeHelp {
             var regions: [(SIMD4<Float>, String)] = []
@@ -13970,12 +14160,9 @@ public final class Runtime<State> {
                 _ = drawHelpTooltip(
                     fadeDrawn,
                     look: look,
-                    viewport: viewport,
-                    pixelScale: pixelScale,
-                    srgbBlend: srgbBlend,
-                    systemDark: systemDark,
-                    textSystem: textSystem,
-                    primitives: &primitives
+                    runtime: self,
+                    primitives: &primitives,
+                    recordGlyphPage: recordGlyphPage
                 )
             } else {
                 helpState.leaving = nil
@@ -14005,12 +14192,9 @@ public final class Runtime<State> {
                 let tipRect = drawHelpTooltip(
                     drawn,
                     look: look,
-                    viewport: viewport,
-                    pixelScale: pixelScale,
-                    srgbBlend: srgbBlend,
-                    systemDark: systemDark,
-                    textSystem: textSystem,
-                    primitives: &primitives
+                    runtime: self,
+                    primitives: &primitives,
+                    recordGlyphPage: recordGlyphPage
                 )
                 helpState.currentTip = (runeHelpWords(drawn.text), tipRect)
                 helpState.drawn = drawn

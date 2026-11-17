@@ -532,6 +532,7 @@ struct RecorderParityTests {
         #expect(failedNow)
     }
 
+    #if (os(macOS) && canImport(AVFoundation) && canImport(CoreAudio)) || canImport(CRuneMedia)
     @Test("a_second_stop_while_the_device_finishes_changes_nothing")
     func secondStopWhileDeviceFinishesChangesNothing() {
         let rec = Recorder.toFile(FileManager.default.temporaryDirectory.appendingPathComponent("rune-recorder-second-stop.m4a"))
@@ -582,6 +583,7 @@ struct RecorderParityTests {
         #expect(ProcessInfo.processInfo.systemUptime - started < 1.0)
         #expect(session.tryPopAll().isEmpty)
     }
+    #endif
 
     @Test("cancel_deletes_the_file_of_a_recording_in_progress")
     func cancelDeletesFileOfRecordingInProgress() {

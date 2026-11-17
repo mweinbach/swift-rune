@@ -12,31 +12,72 @@ struct ContentSlideAndMotionTests {
         GrowTrack(h: h, v: 0, target: target)
     }
 
+    @Test("Fold rows and their siblings advance to the actual frame time", arguments: [60, 120, 144, 165, 240])
+    func foldsUseEachFramesTime(refreshRate: Int) throws {
+        let spring = Spring(duration: 0.35, bounce: 0)
+        let runtime = Runtime<Bool>(state: false, viewport: Vec2(400, 600), pixelScale: 2, systemDark: true) { opened, _ in
+            var stack: El<Bool> = col().key("stack").growth(GrowthSpec())
+            if opened {
+                for key in ["first", "second"] {
+                    stack = stack.child(el().key(key).h(100).wFull().foldGlide(spring))
+                }
+            }
+            return stack.child(el().key("below").h(40).wFull())
+        }
+        _ = runtime.frame(at: 0)
+        runtime.update(at: 0) { opened, _ in opened = true }
+        _ = runtime.frame(at: 0)
+        for number in 1...8 {
+            let time = Double(number) / Double(refreshRate)
+            _ = runtime.frame(at: time)
+            let height = try #require(runtime.elements().first { $0.key == "below" }?.rect[1])
+            let expected = spring.sample(from: Float(0), velocity: 0, target: 200, at: Float(time)).0
+            #expect(abs(height - expected) <= 0.51, "frame \(number) at \(refreshRate) Hz, height \(height), expected \(expected)")
+        }
+    }
+
+    @Test("A fractional frame moves both closing slack and settling contents")
+    func slackAndContentUseFractionalFrames() {
+        let duration = Growth.substep * 0.5
+        let steps = GrowthSteps(duration: duration)
+        #expect(Array(steps) == [duration])
+        #expect(GrowthSteps(duration: 4).count == 240)
+        var slack = ScrollSlack(track: growthTrack(h: 100, target: 0), phase: .closing(acc: 0))
+        slack.settle(growing: false, now: 1, dt: duration, spec: GrowthSpec())
+        #expect(slack.height < 100)
+        #expect(slack.phase == .closing(acc: 0))
+
+        let slide = SlidePhase.settling(dy: 20, v: 5)
+        let expected = Growth.spring.sample(from: Float(20), velocity: 5, target: 0, at: duration)
+        #expect(slide.step(growth: slack.track, spring: Growth.spring, steps: steps) == .settling(dy: expected.0, v: expected.1))
+    }
+
     @Test("content_slide: a_slide_shrinks_with_the_growth_left_to_open")
     func slideShrinksWithGrowthLeftToOpen() {
         let phase = SlidePhase.following(dy: -20.0, v: 0.0, at: 0.0)
-        let next = phase.step(growth: growthTrack(h: 50.0, target: 100.0), spring: Growth.spring, steps: 12)
+        let next = phase.step(growth: growthTrack(h: 50.0, target: 100.0), spring: Growth.spring, steps: GrowthSteps(duration: 1.0 / 20.0))
         guard case .following(let dy, let v, let at) = next else {
             Issue.record("Expected .following phase, got \(next)")
             return
         }
         #expect(dy == -10.0 && at == 50.0, "half the growth left, half the slide")
         #expect(abs(v - (10.0 / (12.0 * Growth.substep))) < 1e-3, "speed measured for spring handoff: \(v)")
-        let same = next.step(growth: growthTrack(h: 75.0, target: 100.0), spring: Growth.spring, steps: 0)
+        let same = next.step(growth: growthTrack(h: 75.0, target: 100.0), spring: Growth.spring, steps: GrowthSteps(duration: 0))
         #expect(same == .following(dy: -5.0, v: v, at: 75.0))
     }
 
     @Test("content_slide: a_growth_that_stops_opening_toward_it_hands_its_speed_to_a_spring")
     func growthStopsOpeningHandsSpeedToSpring() {
         let phase = SlidePhase.following(dy: -10.0, v: 300.0, at: 50.0)
-        let next = phase.step(growth: growthTrack(h: 50.0, target: 20.0), spring: Growth.spring, steps: 1)
+        let step = GrowthSteps(duration: Growth.substep)
+        let next = phase.step(growth: growthTrack(h: 50.0, target: 20.0), spring: Growth.spring, steps: step)
         guard case .settling(let dy, let v) = next else {
             Issue.record("Expected .settling phase, got \(next)")
             return
         }
         let (wantDy, wantV) = Growth.spring.sample(from: -10.0, velocity: 300.0, target: 0.0, at: Growth.substep)
         #expect(dy == wantDy && v == wantV)
-        if case .settling = next.step(growth: growthTrack(h: 0.0, target: 100.0), spring: Growth.spring, steps: 1) {
+        if case .settling = next.step(growth: growthTrack(h: 0.0, target: 100.0), spring: Growth.spring, steps: step) {
             // Re-opening growth never pulls a settling slide back into .following.
         } else {
             Issue.record("Expected settling phase to remain .settling")
@@ -51,7 +92,7 @@ struct ContentSlideAndMotionTests {
         var phase = SlidePhase.settling(dy: -40.0, v: 0.0)
         var frames = 0
         while phase.live {
-            phase = phase.step(growth: growthTrack(h: 0.0, target: 0.0), spring: Growth.spring, steps: 2)
+            phase = phase.step(growth: growthTrack(h: 0.0, target: 0.0), spring: Growth.spring, steps: GrowthSteps(duration: 1.0 / 120.0))
             frames += 1
             #expect(frames < 240, "springs home within 2s: \(phase)")
         }

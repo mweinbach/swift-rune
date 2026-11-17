@@ -36,7 +36,7 @@ internal final class RenderFrameEngine {
         let springs: Bool
     }
     private var extraPipelines: [ExtraPipelineKey: MTLRenderPipelineState] = [:]
-    private var layersPreparedState: (count: Int, width: Int, height: Int)? = nil
+    fileprivate var layersPreparedState: (instances: [RenderInstance], tracker: ResidentLayerTracker?, width: Int, height: Int, revision: UInt64)?
 
     var layerBlur: LayerBlurPipeline?
     let backdropBlur: BackdropBlurPass
@@ -317,10 +317,37 @@ internal final class RenderFrameEngine {
             isolate: allowIsolation,
             tracker: frame.residentTracker
         )
-        layersPreparedState = (count: frame.instances.count, width: vw, height: vh)
+        layersPreparedState = (frame.instances, frame.residentTracker, vw, vh, layersPool.planRevision)
+    }
+
+    private func hasPlan(for frame: RenderFrame, viewport: (Int, Int)) -> Bool {
+        guard let prepared = layersPreparedState, prepared.tracker === frame.residentTracker,
+              prepared.width == viewport.0, prepared.height == viewport.1, prepared.revision == layersPool.planRevision,
+              prepared.instances.count == frame.instances.count else { return false }
+        return prepared.instances.withUnsafeBufferPointer { prior in
+            frame.instances.withUnsafeBufferPointer { $0.baseAddress == prior.baseAddress }
+        }
+    }
+
+    func selectCache(for frame: RenderFrame, viewport: (Int, Int)? = nil, command: MTLCommandBuffer? = nil) -> MetalRenderer.RendererError? {
+        let ordered = layersPool.canUseTextures(in: command)
+        if !ordered, let first = frame.elidedLayers.first { return .missingCachedLayer(first.node) }
+        // A prepared plan can retire a cache belonging to a clipped-out layer. Its visible
+        // layers have already been validated and remain usable while the plan is current.
+        if !frame.elidedLayers.isEmpty, !hasPlan(for: frame, viewport: viewport ?? (frame.width, frame.height)),
+           let missing = layersPool.missingLayer(in: frame) { return .missingCachedLayer(missing) }
+        layersPool.registerTracker(frame.residentTracker)
+        uploader.selectRuntime(frame.residentTracker)
+        if !ordered {
+            layersPool.discardUnorderedSubmission()
+            backdropBlur.giveBack()
+            backdrops.removeAll()
+        }
+        return nil
     }
 
     func prepare(frame: RenderFrame, viewport: (Int, Int)) {
+        guard selectCache(for: frame, viewport: viewport) == nil else { return }
         let vw = max(1, viewport.0)
         let vh = max(1, viewport.1)
         lastViewportSize = (vw, vh)
@@ -332,7 +359,8 @@ internal final class RenderFrameEngine {
             device: device,
             pages: frame.imagePages,
             fallback: frame.images,
-            revision: frame.imageRevision
+            revision: frame.imageRevision,
+            patch: frame.imagePatch
         )
         _ = uploader.ensureInstanceBuffer(device: device, instances: frame.instances)
         uploader.prepareBatches(instances: frame.instances, glyphPageCount: 1, imagePageCount: max(1, preparedPages.count))
@@ -386,14 +414,13 @@ internal final class RenderFrameEngine {
     ) {
         let targetW = max(1, target.width)
         let targetH = max(1, target.height)
+        guard selectCache(for: frame, viewport: (targetW, targetH), command: commandBuffer) == nil else { return }
         lastViewportSize = (targetW, targetH)
         let viewport = SIMD2<Float>(Float(targetW), Float(targetH))
-        let alreadyPrepared = layersPreparedState.map {
-            $0.count == frame.instances.count && $0.width == targetW && $0.height == targetH
-        } ?? false
-        if !alreadyPrepared {
+        if !hasPlan(for: frame, viewport: (targetW, targetH)) {
             prepareLayersForFrame(frame: frame, viewport: (targetW, targetH))
         }
+        layersPool.recordUse(of: commandBuffer)
         defer {
             layersPool.endFrame()
             if range == nil || (range?.upperBound ?? 0) >= frame.instances.count {
@@ -406,11 +433,13 @@ internal final class RenderFrameEngine {
             device: device,
             pages: frame.imagePages,
             fallback: frame.images,
-            revision: frame.imageRevision
+            revision: frame.imageRevision,
+            patch: frame.imagePatch
         )
+        uploader.atlasesRead(by: commandBuffer)
         let imageTex = imagePages.first ?? uploader.imageTexture
         let instances = frame.instances
-        guard let instanceBuffer = uploader.ensureInstanceBuffer(device: device, instances: instances) else {
+        guard let instanceBuffer = uploader.ensureInstanceBuffer(device: device, instances: instances, readBy: commandBuffer) else {
             return
         }
         uploader.prepareBatches(instances: instances, glyphPageCount: 1, imagePageCount: max(1, imagePages.count))
@@ -437,10 +466,6 @@ internal final class RenderFrameEngine {
             pad: springsActive ? splitSpringTime(springTimeSeconds) : .zero,
             flags: SIMD4<Float>(frame.srgbBlend ? 1 : 0, byteSource ? 1 : 0, 0, 0)
         )
-        guard let rootGlobalsBuffer = uploader.ensureGlobalsBuffer(device: device, globals: globals) else {
-            return
-        }
-
         if let sr = surfaceRenderer {
             sr.srgbBlend = frame.srgbBlend
             if !frame.surfaces.isEmpty {
@@ -826,13 +851,13 @@ internal final class RenderFrameEngine {
                         }
                     }
 
-                    if let nid = finished.cacheNodeId, let sig = finished.cacheSignature {
-                        if compositedSource !== finished.texture, let sIdx = finished.scopeIndex {
+                    if let nid = finished.cacheNodeId, let sig = finished.cacheSignature, let sIdx = finished.scopeIndex {
+                        if compositedSource !== finished.texture {
                             layersPool.detachInUse(compositedSource)
                             layersPool.updateTargetTexture(at: sIdx, texture: compositedSource)
                             layersPool.recycleTarget(finished.texture)
                         }
-                        frame.residentTracker?.markResident(nodeId: nid, signature: sig)
+                        layersPool.finishCachedLayer(at: sIdx, node: nid, signature: sig)
                     }
 
                     let destRect = SIMD4<Float>(
@@ -981,20 +1006,19 @@ internal final class RenderFrameEngine {
                     let cur = stack[stack.count - 1]
                     var layerGlobals = globals
                     layerGlobals.projection = cur.projection
-                    if let gBuf = uploader.ensureGlobalsBuffer(device: device, globals: layerGlobals) ?? .some(rootGlobalsBuffer) {
-                        backdropBlur.encode(
-                            device: device,
-                            commandBuffer: commandBuffer,
-                            source: cur.texture,
-                            target: cur.texture,
-                            targetFormat: cur.format,
-                            instanceIndex: i,
-                            instance: inst,
-                            instanceBuffer: instanceBuffer,
-                            globalsBuffer: gBuf,
-                            viewport: SIMD2<Float>(Float(cur.texture.width), Float(cur.texture.height)),
-                            originOffset: cur.origin
-                        )
+                    backdropBlur.encode(
+                        device: device,
+                        commandBuffer: commandBuffer,
+                        source: cur.texture,
+                        target: cur.texture,
+                        targetFormat: cur.format,
+                        instanceIndex: i,
+                        instance: inst,
+                        instanceBuffer: instanceBuffer,
+                        viewport: SIMD2<Float>(Float(cur.texture.width), Float(cur.texture.height)),
+                        originOffset: cur.origin
+                    ) { encoder in
+                        encoder.setVertexBytes(&layerGlobals, length: MemoryLayout<RenderGlobals>.stride, index: 1)
                     }
                 }
                 i += 1
@@ -1013,11 +1037,10 @@ internal final class RenderFrameEngine {
 
     func renderOffscreen(
         _ frame: RenderFrame,
-        surfaceRenderer: SurfaceRenderer?,
         commandQueue: MTLCommandQueue,
-        hook: EffectHook?,
-        backdropHook: EffectBackdropHook?
+        encode: (MTLTexture, MTLCommandBuffer) -> Void
     ) throws -> Frame {
+        if let error = selectCache(for: frame) { throw error }
         let w = max(1, frame.width)
         let h = max(1, frame.height)
         let pixelFormat: MTLPixelFormat = frame.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
@@ -1034,18 +1057,11 @@ internal final class RenderFrameEngine {
             throw MetalRenderer.RendererError.metalUnavailable
         }
 
-        draw(
-            frame: frame,
-            into: targetTex,
-            commandBuffer: cmdBuf,
-            surfaceRenderer: surfaceRenderer,
-            hook: hook,
-            backdropHook: backdropHook,
-            defaultUI: true
-        )
+        encode(targetTex, cmdBuf)
         gpuLoss.attach(to: cmdBuf)
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
+        if let error = cmdBuf.error { throw error }
 
         var bgra = Array<UInt8>(repeating: 0, count: w * h * 4)
         targetTex.getBytes(&bgra, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
@@ -1082,6 +1098,12 @@ internal final class RenderFrameEngine {
 }
 
 extension MetalRenderer {
+    /// Builds a frame using the cached layer textures available on this renderer.
+    public func frame<State>(_ runtime: Runtime<State>, at time: Double) -> RenderFrame {
+        renderEngine.layersPool.registerTracker(runtime.residentCacheTracker)
+        return runtime.renderFrame(at: time)
+    }
+
     /// Renders an upstream-parity `RenderFrame` into a `CAMetalDrawable` and presents it.
     public func draw(
         frame: RenderFrame,
@@ -1090,7 +1112,9 @@ extension MetalRenderer {
         backdropHook: EffectBackdropHook? = nil,
         synchronized: Bool = false
     ) {
-        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+        let viewport = (drawable.texture.width, drawable.texture.height)
+        guard renderEngine.selectCache(for: frame, viewport: viewport) == nil,
+              let cmdBuf = commandQueue.makeCommandBuffer() else { return }
         encodeUI(frame: frame, into: drawable.texture, commandBuffer: cmdBuf, hook: hook, backdropHook: backdropHook)
         renderEngine.gpuLoss.attach(to: cmdBuf)
         if synchronized {
@@ -1182,15 +1206,9 @@ extension MetalRenderer {
         hook: EffectHook? = nil,
         backdropHook: EffectBackdropHook? = nil
     ) throws -> Frame {
-        let pixelFormat: MTLPixelFormat = frame.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
-        let sr = acquireSurfaceRenderer(pixelFormat: pixelFormat)
-        return try renderEngine.renderOffscreen(
-            frame,
-            surfaceRenderer: sr,
-            commandQueue: commandQueue,
-            hook: hook,
-            backdropHook: backdropHook
-        )
+        try renderEngine.renderOffscreen(frame, commandQueue: commandQueue) { target, commands in
+            encodeUI(frame: frame, into: target, commandBuffer: commands, hook: hook, backdropHook: backdropHook)
+        }
     }
 
     // MARK: - GPU Springs, Cache Budget & `#819` Give-Back
@@ -1235,6 +1253,7 @@ extension MetalRenderer {
     /// `#819` GPU memory give-back on window rest / occlusion.
     public func giveBack(all: Bool = false, residentCaches: Bool = false) {
         renderEngine.layersPool.giveBack(all: all, residentCaches: residentCaches)
+        renderEngine.layersPreparedState = nil
         renderEngine.backdropBlur.giveBack()
         renderEngine.backdrops.removeAll()
         renderEngine.extraFormats.removeAll()

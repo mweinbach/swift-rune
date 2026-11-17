@@ -301,7 +301,7 @@ struct FlightsAndOneSnapProofParityTests {
             }
         }
 
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
 
         // 1. still_scaled & still_anchored (5x5 pixel-phase sweep)
         struct ScaledCase {

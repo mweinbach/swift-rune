@@ -38,7 +38,7 @@ public extension AccessibilityTreeBuilder {
             let enabled = !info.disabled && !info.inert
             var actions: [AccessibilityAction] = []
             if enabled {
-                if [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox].contains(info.role) ||
+                if [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox, .menuItemRadio].contains(info.role) ||
                     input?.pressable == true || input?.isInput == true {
                     actions.append(.press)
                 }
@@ -69,12 +69,15 @@ public extension AccessibilityTreeBuilder {
                                                      children: { childrenByParent[$0] ?? [] }, keyAt: { elements[$0].key })
             }.flatMap(words)
             let givenName = AccessibilityNameSource.nonblank(info.label) ?? relatedName
-            let controlName = givenName ?? (input?.isDefaultButton == true && !isSecure ? words(idx) : nil)
+            let role: ElementRole = input?.isDefaultButton == true ? .button : info.role
+            let controlName = AccessibilityRoleRules.controlName(
+                given: givenName, role: role, isDefaultButton: input?.isDefaultButton == true, secure: isSecure,
+                words: words(idx)
+            )
             // Element keys identify targets. A keyed, unnamed part inside a button does
             // not contribute words; older flat records carry only their fallback key.
             let fallback = input == nil ? info.key : (info.role == .text ? info.text : nil)
             let projectedLabel = controlName ?? (isSecure ? "Password" : fallback)
-            let role: ElementRole = input?.isDefaultButton == true ? .button : info.role
             let nodeId = info.key ?? info.path
 
             var projected = AccessibilityNode(
@@ -239,7 +242,10 @@ public extension Runtime {
                 ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: editMultiline)
                 : AccessibilityRoleRules.role(for: el, focusable: nodeTakesFocus(el) && !node.effectiveInert)
             let givenName = AccessibilityNameSource.nonblank(el.a11yLabel) ?? labelledByText
-            let controlName = givenName ?? (el.isDefaultButton && resolvedRole == .button && !isSecure ? a11yWords(idx) : nil)
+            let controlName = AccessibilityRoleRules.controlName(
+                given: givenName, role: resolvedRole, isDefaultButton: el.isDefaultButton, secure: isSecure,
+                words: a11yWords(idx)
+            )
             let resolvedLabel = controlName ?? (isSecure ? "Password" : (el.role == .textInput ? nil : richPlain))
             let hasLinks = hasActiveTextLinks(el)
             var builtChildren = (childrenByParent[idx] ?? []).map(build)
@@ -254,9 +260,9 @@ public extension Runtime {
                 let parentFocused = (node.path == focusedPath) && !node.el.isA11yHidden
                 let activeIdx = focusedLinkIndex ?? 0
                 for box in boxes {
-                    let linkFocusable = el.focusable && !node.effectiveInert && el.opacity > 0.001 && box.windowUnion.z > 0 && box.windowUnion.w > 0
+                    let linkFocusable = enabled && el.focusable && el.opacity > 0.001 && box.windowUnion.z > 0 && box.windowUnion.w > 0
                     let linkFocused = parentFocused && (activeIdx == box.linkIndex)
-                    var linkActions: [AccessibilityAction] = [.press]
+                    var linkActions: [AccessibilityAction] = enabled ? [.press] : []
                     if linkFocusable {
                         linkActions.append(.focus)
                     }
@@ -270,6 +276,7 @@ public extension Runtime {
                         isFocused: linkFocused,
                         isFocusable: linkFocusable,
                         url: box.link.id,
+                        isDisabled: !enabled,
                         actions: linkActions
                     )
                     link.runtimePath = "\(node.path)#link-\(box.linkIndex)"
@@ -403,28 +410,45 @@ public extension Runtime {
                 return false
             }
             // `(Click, None) if input => A11yAct::Focus(None)` → `set_focus(path, true)`.
-            if action == .press && !a11yPressable(flat.el) && flat.el.handlers.editLens != nil {
+            if action == .focus || (action == .press && !a11yPressable(flat.el) && flat.el.handlers.editLens != nil) {
+                guard !flat.el.a11yDisabled else { return false }
                 setFocus(path: flat.path, keyboard: true, at: now)
+                focusedLinkIndex = nil
                 dirtyCommit(at: now)
                 return true
             }
         } else {
-            // An inline text link is a sub-node of its text, not an element of its own:
-            // `(Click, Some(link))` presses it whatever its text offers (`actions.rs:49`).
-            guard action == .press || action == .focus, target?.role == .link else {
+            // Inline links share their text owner's focus path but receive actions by link index.
+            guard let target, !target.inert, let parent = target.parentIndex, all.indices.contains(parent),
+                  let owner = a11yTargetIndex(all[parent].path), a11yAllowed(owner), !flatNodes[owner].el.a11yDisabled,
+                  let box = linkBoxesByPath[all[parent].path]?.first(where: {
+                      target.path == "\(all[parent].path)#link-\($0.linkIndex)"
+                  }) else { return false }
+            let text = flatNodes[owner]
+            switch action {
+            case .focus where target.focusable:
+                setFocus(path: text.path, keyboard: true, at: now)
+                focusedLinkIndex = box.linkIndex
+                focusedKey = box.link.id
+                dirtyCommit(at: now)
+            case .press:
+                guard let onLink = text.el.handlers.onLink else { return false }
+                var tx = makeTx(at: now)
+                onLink(&state, box.link.id, &tx)
+                applyTx(tx, at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
+            default:
                 return false
             }
+            return true
         }
-        guard let target, !target.inert,
-              target.rect.count >= 4 else {
-            return false
-        }
-        let cx = target.rect[0] + target.rect[2] * 0.5
-        let cy = target.rect[1] + target.rect[3] * 0.5
-        let center = Vec2(cx, cy)
+        guard let target, !target.inert, target.rect.count >= 4 else { return false }
+        let center = Vec2(target.rect[0] + target.rect[2] * 0.5, target.rect[1] + target.rect[3] * 0.5)
 
         switch action {
-        case .press, .focus:
+        case .focus:
+            return false
+        case .press:
             pressDown(at: center, at: now, mouse: false)
             pointerUp(at: center, button: .primary, mods: Mods(), at: now)
             return true

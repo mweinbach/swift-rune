@@ -1,5 +1,13 @@
 import Foundation
-import simd
+#if os(Android)
+import Android
+#endif
+
+public enum LayerPoolLimits {
+    public static let maxDimension: Int = 4096
+    public static let spareBudgetBytes: Int = 32 * 1024 * 1024
+    public static let restingSpareBudgetBytes: Int = 8 * 1024 * 1024
+}
 
 /// A layer's scope as recorded by the planning walk (`crates/rune/src/render/layers/plan.rs`).
 public struct LayerPlanScope: Sendable, Equatable {

@@ -226,6 +226,11 @@ internal struct RecorderControl: @unchecked Sendable {
             phase = .failed(err)
             return .none
 
+        case let (.recording(attempt, .device, _), .failed(a, err)) where a == attempt,
+             let (.paused(attempt, .device), .failed(a, err)) where a == attempt:
+            phase = .failed(err)
+            return .one(.silence)
+
         case let (.recording(attempt, _, anchorInit), .interrupted(a, reason, duration)) where a == attempt:
             var anchor = anchorInit
             Self.advance(elapsed: &elapsed, anchor: &anchor, now: now)

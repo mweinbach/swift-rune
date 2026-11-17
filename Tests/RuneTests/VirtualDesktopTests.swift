@@ -251,7 +251,6 @@ struct VirtualDesktopTests {
         #expect(DesktopReopen.target(hiddenOnly) == 1)
     }
 
-    #if canImport(CoreGraphics) && canImport(ImageIO)
     @Test("virtual_desktop/tests.rs: fitBackdrop crops to output aspect, keeps same-size pixels, and refuses over-max before decode")
     func fitBackdropCropsToAspectAndRefusesOverMax() throws {
         let dir = FileManager.default.temporaryDirectory
@@ -260,27 +259,7 @@ struct VirtualDesktopTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         func writePNG(path: URL, width: Int, height: Int, rgba: [UInt8]) throws {
-            let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-            guard let provider = CGDataProvider(data: Data(rgba) as CFData),
-                  let image = CGImage(
-                    width: width,
-                    height: height,
-                    bitsPerComponent: 8,
-                    bitsPerPixel: 32,
-                    bytesPerRow: width * 4,
-                    space: cs,
-                    bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
-                    provider: provider,
-                    decode: nil,
-                    shouldInterpolate: false,
-                    intent: .defaultIntent
-                  ),
-                  let dest = CGImageDestinationCreateWithURL(path as CFURL, "public.png" as CFString, 1, nil) else {
-                Issue.record("Failed to encode test PNG \(path.lastPathComponent)")
-                return
-            }
-            CGImageDestinationAddImage(dest, image, nil)
-            #expect(CGImageDestinationFinalize(dest))
+            try PortablePNG.encode(width: width, height: height, rgba: rgba).write(to: path)
         }
 
         // Red, green, blue thirds side-by-side: square output keeps the green middle.
@@ -316,7 +295,6 @@ struct VirtualDesktopTests {
             #expect(err.localizedDescription.contains("\(hugeW)x1"))
         }
     }
-    #endif
 
     @Test("virtual_desktop/tests.rs: hidden window lets go of a captured pointer")
     func hiddenWindowReleasesCapturedPointer() {

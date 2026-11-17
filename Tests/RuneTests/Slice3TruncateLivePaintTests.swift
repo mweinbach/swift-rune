@@ -230,6 +230,14 @@ struct Slice3TruncateLivePaintTests {
         #expect((midShaped.elided?.head ?? 0) > 0)
         #expect((midShaped.elided?.tail ?? text.utf8.count) < text.utf8.count)
 
+        for keep: TextKeep in [.cached, .owned, .secret] {
+            let keyed = ts.layoutKeyed(text: text, style: midStyle, maxWidth: 90, pixelScale: 1,
+                                       emitGlyphs: true, keep: keep).shaped
+            #expect(keyed.elided == midShaped.elided)
+            #expect(keyed.drawnText == midShaped.drawnText)
+            #expect(keyed.size == ts.measure(text, style: midStyle, maxWidth: 90, pixelScale: 1, keep: keep))
+        }
+
         // Combining mark attached to space (" \u{0301}") must never be split onto a bare combining accent.
         let graphemeText = "a \u{0301}b \u{0301}c \u{0301}d \u{0301}e"
         for mode in [TextElide.end, .head, .middle] {
@@ -303,6 +311,15 @@ struct Slice3TruncateLivePaintTests {
         #expect(e.contentOffset(forDrawn: 1) == 1)
         #expect(e.contentOffset(forDrawn: 4 + 3 + 2) == 14)
         #expect(e.selectionRange(1..<14) == (1..<(4 + 3 + 2)))
+
+        // The cut starts and ends at span boundaries, so the inserted glyph uses the base style.
+        let spans = [TextSpan("0123", color: Self.red), TextSpan("456789AB", color: Self.blue), TextSpan("CDEF", color: Self.green)]
+        let drawn = e.drawnString(from: src)
+        let visible = e.mapSpans(spans, originalLength: src.utf8.count, drawn: drawn)
+        #expect(visible.map(\.text) == ["0123", "…", "CDEF"])
+        #expect(visible.map(\.color) == [Self.red, nil, Self.green])
+        let all = TextElision(head: 0, tail: src.utf8.count)
+        #expect(all.mapSpans(spans, originalLength: src.utf8.count, drawn: "…") == [TextSpan("…")])
     }
 
     @Test("2.3 truncate: elision and shape caches reuse entries and prune stale elisions on commit")
@@ -469,8 +486,8 @@ struct Slice3TruncateLivePaintTests {
         #expect(prefixRange.count > 0)
     }
 
-    @Test("2.7 truncate: drag selection and Cmd+A on truncated text copy full authored text")
-    func truncateDragSelectionAndCmdACopyAuthoredText() {
+    @Test("2.7 truncate: drag selection and Select All on truncated text copy full authored text")
+    func truncateDragSelectionAndSelectAllCopyAuthoredText() {
         struct S {}
         let full = "Header part that is kept — Middle elided text — Footer kept"
         let rt = Runtime<S>(
@@ -512,8 +529,8 @@ struct Slice3TruncateLivePaintTests {
         let dragged = rt.selectedText() ?? ""
         #expect(dragged == full, "Dragging across '…' must select full authored text: got '\(dragged)'")
 
-        // Cmd+A copies complete authored text while keeping selection geometry within drawn box.
-        _ = rt.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: 0.15)
+        // Select All includes complete authored text while keeping selection geometry within drawn box.
+        _ = rt.keyDown(KeyEvent(key: .command("a"), mods: RuneTestKey.primaryMods()), at: 0.15)
         _ = rt.frame(at: 0.16)
         #expect(rt.selectedText() == full)
     }

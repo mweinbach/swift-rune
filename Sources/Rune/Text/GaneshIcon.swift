@@ -3,6 +3,9 @@
 // convex quad-edge fills, analytic anti-aliased paths) and SVG body / group inheritance rasterizer.
 
 import Foundation
+#if os(Android)
+import Android
+#endif
 
 internal enum GaneshArea {
     enum Shape {
@@ -269,7 +272,7 @@ internal enum GaneshArea {
         b.close()
     }
 
-    private static func buildGPath(_ shape: Shape, tolerance: Float) -> GPath? {
+    static func buildGPath(_ shape: Shape, tolerance: Float) -> GPath? {
         var b = GPathBuilder()
         b.conicTolerance = tolerance
         switch shape {
@@ -292,6 +295,26 @@ internal enum GaneshArea {
             pushRoundRect(&b, lo: lo, hi: hi, r: r)
         }
         return b.finish()
+    }
+
+    /// Covers a fill or stroke in a rectangular SVG viewport. Stroke widths
+    /// are authored in user coordinates, including under nonuniform scaling.
+    static func coverage(
+        of path: GPath, transform: GTransform, pen: GStroke?, rule: GAAARule,
+        width: Int, height: Int, into output: inout [UInt8]
+    ) {
+        let outline: GPath?
+        if let pen {
+            outline = path.stroke(pen, resolutionScale: GPathStroker.computeResolutionScale(transform))
+        } else {
+            outline = path
+        }
+        guard let device = outline?.transform(transform) else {
+            for i in output.indices { output[i] = 0 }
+            return
+        }
+        GaneshAAA.fillClipped(path: device, rule: pen == nil ? rule : .nonZero,
+                              width: width, height: height, out: &output)
     }
 
     static func renderAAA(shape shapeIn: Shape, pen: Pen?, fillRule: GAAARule, ctm: GTransform, origin: GPoint, px: Int, out: inout [UInt8]) {

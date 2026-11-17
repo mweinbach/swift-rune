@@ -1,10 +1,15 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
 import RuneRef
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
 #endif
 #if canImport(simd)
 import simd
@@ -173,6 +178,8 @@ public struct ToolingArgs: Sendable, Equatable {
     public var reducedMotion: Bool = false
     public var timeScale: Double = 1.0
     public var forceCPU: Bool = false
+    /// Require the platform GPU driver for captures, surfacing initialization errors.
+    public var requireGPU: Bool = false
     public var durationOverride: Double? = nil
     public var durationAuto: Bool = false
     public var atTime: Double? = nil
@@ -446,6 +453,10 @@ public struct ToolingArgs: Sendable, Equatable {
                 out.reducedMotion = true
             case "--cpu", "--force-cpu":
                 out.forceCPU = true
+                out.requireGPU = false
+            case "--gpu":
+                out.requireGPU = true
+                out.forceCPU = false
             case "--html":
                 if i + 1 < arguments.count { out.htmlPath = arguments[i + 1]; i += 1 }
             case "--html-template":
@@ -605,7 +616,11 @@ public enum ToolingError: Error, LocalizedError, Equatable, Sendable {
         case .unsupportedVideoContainer(let ext):
             return "unsupported video container .\(ext) (expected .mp4, .mov, or .webm)"
         case .ffmpegUnavailable:
+            #if os(Windows)
+            return "--video needs ffmpeg.exe on PATH"
+            #else
             return "--video needs ffmpeg on PATH (macOS: brew install ffmpeg; Debian/Ubuntu: apt install ffmpeg)"
+            #endif
         case .ffmpegFailed(let status):
             return "ffmpeg failed writing video (exit status \(status))"
         case .encoderError(let message):
@@ -1153,7 +1168,7 @@ public enum HeadlessRunner {
     @discardableResult
     public static func run<State>(_ app: App<State>, args: ToolingArgs, shortcutRegistry: ShortcutRegistry? = nil) throws -> Output {
         var effectiveArgs = args
-        if app.gpuBackendPreference == .software {
+        if app.gpuBackendPreference == .software && !args.requireGPU {
             effectiveArgs.forceCPU = true
         }
         if !app.childWindows.isEmpty {
@@ -1223,6 +1238,8 @@ public enum HeadlessRunner {
                   let cgFont = CGFont(provider) else { continue }
             CTFontManagerRegisterGraphicsFont(cgFont, nil)
         }
+        #elseif canImport(CRuneDesktopText)
+        DesktopAppFonts.shared.register(fonts)
         #endif
     }
 
@@ -1240,6 +1257,7 @@ public enum HeadlessRunner {
         windowOptions: WindowOptions? = nil,
         menuItems: [NativeMenuItem<State>] = [],
         shortcutRegistry: ShortcutRegistry? = nil,
+        standardError: FileHandle = .standardError,
         extraConfigure: ((Runtime<State>, Waker) -> Void)? = nil
     ) throws -> Output {
         if args.listWindows {
@@ -1349,17 +1367,8 @@ public enum HeadlessRunner {
         extraConfigure?(runtime, waker)
         var shortcutGuard: ShortcutGuard?
         if let appShared {
-            AppMenuBridge.markRunning(appShared, running: true, headless: true)
+            AppMenuBridge.attach(menuItems, to: appShared, headless: true)
             shortcutGuard = ShortcutGuard.attach(shared: appShared, wake: waker, headless: true)
-            if !menuItems.isEmpty {
-                do {
-                    try AppMenuBridge.setMenu(menuItems, for: appShared)
-                } catch let err as MenuError {
-                    AppMenuBridge.recordError(err, for: appShared)
-                } catch {
-                    AppMenuBridge.recordError(.unsupported, for: appShared)
-                }
-            }
         }
         defer {
             shortcutGuard?.close()
@@ -1397,48 +1406,48 @@ public enum HeadlessRunner {
         let surfaceW = max(1, Int((vp.x * args.pixelScale).rounded()))
         let surfaceH = max(1, Int((vp.y * args.pixelScale).rounded()))
 
-        #if canImport(Metal)
-        let metalRenderer: MetalRenderer? = args.forceCPU ? nil : (try? MetalRenderer())
-        func captureFrame(at now: Double) -> (refScene: RefScene?, renderFrame: RenderFrame?) {
-            if metalRenderer != nil {
-                return (nil, runtime.renderFrame(at: now))
+        let gpu = try OffscreenGPURenderer.selected(for: args)
+        typealias CapturedFrame = (refScene: RefScene?, renderFrame: RenderFrame?, surfaces: [RefSurfaceDraw])
+        func captureFrame(at now: Double) throws -> CapturedFrame {
+            if let gpu {
+                return (nil, try gpu.frame(runtime, at: now), [])
             }
-            return (runtime.frame(at: now), nil)
+            let scene = runtime.frame(at: now)
+            let surfaces = try NativeSurfaceReference.capture(runtime.surfaces, srgbBlend: scene.srgbBlend)
+            return (scene, nil, surfaces)
         }
-        func renderCaptured(_ cap: (refScene: RefScene?, renderFrame: RenderFrame?)) throws -> Frame {
-            if let gpu = metalRenderer, let rf = cap.renderFrame {
+        func renderCaptured(_ cap: CapturedFrame) throws -> Frame {
+            if let gpu, let rf = cap.renderFrame {
                 return try gpu.renderOffscreen(rf)
             }
-            return try RuneRef.render(cap.refScene ?? runtime.frame(at: runtime.currentTime))
+            guard let scene = cap.refScene else { throw OffscreenRenderError.capture("Missing captured Rune scene") }
+            return try RuneRef.render(scene, surfaces: cap.surfaces)
         }
-        let devKey = metalRenderer.map { DeviceKey(rawValue: $0.device.registryID) } ?? DeviceKey(rawValue: 0)
-        #else
-        func captureFrame(at now: Double) -> (refScene: RefScene?, renderFrame: RenderFrame?) {
-            (runtime.frame(at: now), nil)
-        }
-        func renderCaptured(_ cap: (refScene: RefScene?, renderFrame: RenderFrame?)) throws -> Frame {
-            return try RuneRef.render(cap.refScene!)
-        }
-        let devKey = DeviceKey(rawValue: 0)
-        #endif
+        let devKey = gpu?.deviceKey ?? DeviceKey(rawValue: 0)
+        var lastCompositedTime: Double?
 
-        func renderAndReport(_ cap: (refScene: RefScene?, renderFrame: RenderFrame?), at now: Double, reportEncoded: Bool = true) throws -> Frame {
+        func renderAndReport(_ cap: CapturedFrame, at now: Double, reportEncoded: Bool = true) throws -> Frame {
             let commitsBefore = runtime.viewCommitCount
             var rendered: Frame? = nil
             var drawCount = 0
-            if let comp = compositor {
+            let dt = Float(max(0, now - (lastCompositedTime ?? now)))
+            lastCompositedTime = now
+            if let comp = compositor, let gpu, let frame = cap.renderFrame {
+                (rendered, drawCount) = try gpu.renderOffscreen(frame, compositor: comp, runtime: runtime,
+                                                               at: now, dt: dt)
+            } else if let comp = compositor {
                 #if canImport(Metal)
                 let compFrame = CompositorFrame<State>(
                     deviceKey: devKey,
                     pixelSize: (surfaceW, surfaceH),
-                    dt: 1.0 / 60.0,
+                    dt: dt,
                     updateMilliseconds: 0.0,
                     srgbBlend: runtime.srgbBlend,
                     runtime: runtime,
-                    device: metalRenderer?.device,
-                    commandQueue: metalRenderer?.commandQueue,
+                    device: gpu?.metal.device,
+                    commandQueue: gpu?.metal.commandQueue,
                     pixelFormat: runtime.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb,
-                    renderer: metalRenderer,
+                    renderer: gpu?.metal,
                     drawUI: {
                         drawCount += 1
                         rendered = try? renderCaptured(cap)
@@ -1448,7 +1457,7 @@ public enum HeadlessRunner {
                 let compFrame = CompositorFrame<State>(
                     deviceKey: devKey,
                     pixelSize: (surfaceW, surfaceH),
-                    dt: 1.0 / 60.0,
+                    dt: dt,
                     updateMilliseconds: 0.0,
                     srgbBlend: runtime.srgbBlend,
                     runtime: runtime,
@@ -1459,6 +1468,7 @@ public enum HeadlessRunner {
                 )
                 #endif
                 comp.render(frame: compFrame)
+                defer { compFrame.endFrame() }
                 if !comp.drawsOwnContent && compFrame.uiDrawCount == 0 {
                     compFrame.drawUI()
                 }
@@ -1628,13 +1638,13 @@ public enum HeadlessRunner {
 
         // Mount at the origin of the virtual clock so scripted events reach the
         // initial layout before the clock advances to the requested capture.
-        var lastCaptured = captureFrame(at: 0)
+        var lastCaptured = try captureFrame(at: 0)
         if runtime.hasPendingWindowFrame {
             _ = runtime.takeFitWindowHeld()
             applyPendingWindowFrame(at: 0)
         }
         if runtime.viewport != vp {
-            lastCaptured = captureFrame(at: 0)
+            lastCaptured = try captureFrame(at: 0)
         }
         var capturedStripFrames: [Frame] = []
         var dumpedFrameCount = 0
@@ -1694,12 +1704,14 @@ public enum HeadlessRunner {
             }
 
             while simTime <= maxSimTime || (targetOutputFrames != nil && dumpedFrameCount < (targetOutputFrames ?? 0)) {
+                #if !os(WASI)
                 if args.realtime {
                     let ahead = simTime - Date().timeIntervalSince(wallStart)
                     if ahead > 0 {
                         Thread.sleep(forTimeInterval: ahead)
                     }
                 }
+                #endif
                 while stepCursor < steps.count && steps[stepCursor].t <= simTime + 1e-6 {
                     let s = steps[stepCursor]
                     stepCursor += 1
@@ -1789,12 +1801,7 @@ public enum HeadlessRunner {
                         runtime.windowFocused = foc
                     case .mark(let markName):
                         if args.realtime {
-                            print("rune-mark \(markName) \(s.t)")
-                            #if canImport(Darwin)
-                            Darwin.fflush(stdout)
-                            #elseif canImport(Glibc)
-                            Glibc.fflush(stdout)
-                            #endif
+                            RuneStandardIO.output("rune-mark \(markName) \(s.t)\n")
                         }
                     case .reopen:
                         _ = runtime.dispatchReopen(hasVisibleWindows: true, at: animNow)
@@ -1829,7 +1836,7 @@ public enum HeadlessRunner {
                 stepWindowFrame(at: animNow)
                 runtime.windowResting = (windowFrameMove == nil && !runtime.hasPendingWindowFrame)
                 let frameClockStart = Date()
-                lastCaptured = captureFrame(at: animNow)
+                lastCaptured = try captureFrame(at: animNow)
                 if runtime.hasPendingWindowFrame {
                     let shown = (frameIndex == 0 || runtime.takeFitWindowHeld()) ? 0.0 : (dt * args.timeScale)
                     applyPendingWindowFrame(at: animNow - shown)
@@ -1917,7 +1924,7 @@ public enum HeadlessRunner {
             )
         }
         if args.firstPixels {
-            FileHandle.standardError.write(Data("rune: first pixels \(finalFrame.width)x\(finalFrame.height)\n".utf8))
+            standardError.write(Data("rune: first pixels \(finalFrame.width)x\(finalFrame.height)\n".utf8))
         }
         if !args.cropRects.isEmpty {
             finalFrame = tileCrops(finalFrame, cropRectsPt: args.cropRects, scale: args.pixelScale)
@@ -1935,7 +1942,7 @@ public enum HeadlessRunner {
             finalFrame = cropFrame(finalFrame, rectPt: stageEl.rect, scale: args.pixelScale)
         }
         let chromeOverlaps: [String] = chromeLights.map {
-            Self.findTrafficLightOverlaps(runtime: runtime, lights: $0)
+            Self.findTrafficLightOverlaps(runtime: runtime, lights: $0, standardError: standardError)
         } ?? []
         let treeData = try runtime.treeJSONData(pretty: true, realTime: runtime.currentTime)
 
@@ -1945,7 +1952,7 @@ public enum HeadlessRunner {
         if let treePath = args.treePath {
             let url = URL(fileURLWithPath: treePath)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try treeData.write(to: url, options: .atomic)
+            try treeData.write(to: url, options: .runeOutput)
         }
         if let stripPath = args.stripPath {
             let frames = capturedStripFrames.isEmpty ? [finalFrame] : capturedStripFrames
@@ -1957,7 +1964,7 @@ public enum HeadlessRunner {
         try videoEncoder?.finish()
         // Headless runs open no links (`Tx::open_url`): say which URLs handlers asked to open.
         for req in runtime.urlOpener.takeRequests() {
-            FileHandle.standardError.write(Data("rune: open_url \(req.url) (headless: not opened)\n".utf8))
+            standardError.write(Data("rune: open_url \(req.url) (headless: not opened)\n".utf8))
         }
 
         return Output(
@@ -2093,7 +2100,7 @@ public enum HeadlessRunner {
         return Frame(width: w, height: h, rgba: px)
     }
 
-    private static func findTrafficLightOverlaps<State>(runtime: Runtime<State>, lights: [[Float]]) -> [String] {
+    private static func findTrafficLightOverlaps<State>(runtime: Runtime<State>, lights: [[Float]], standardError: FileHandle) -> [String] {
         guard lights.count >= 3 else { return [] }
         let m: Float = 4.0
         let zx0 = lights[0][0] - m
@@ -2107,7 +2114,7 @@ public enum HeadlessRunner {
             guard drawn, e.opacity > 0.01, v.count == 4, v[2] > 0.0, v[3] > 0.0 else { continue }
             if v[0] < zx1 && (v[0] + v[2]) > zx0 && v[1] < zy1 && (v[1] + v[3]) > zy0 {
                 overlaps.append(e.key ?? e.path)
-                FileHandle.standardError.write(Data("rune: chrome: \(e.path) overlaps the traffic lights at \(v)\n".utf8))
+                standardError.write(Data("rune: chrome: \(e.path) overlaps the traffic lights at \(v)\n".utf8))
             }
         }
         return overlaps
@@ -2786,7 +2793,7 @@ internal final class ToolingTraceWriter {
         let url = URL(fileURLWithPath: path)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let body = lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")
-        try Data(body.utf8).write(to: url, options: .atomic)
+        try Data(body.utf8).write(to: url, options: .runeOutput)
     }
 
     private static func r2(_ v: Float) -> Double {
@@ -2805,11 +2812,11 @@ internal final class ToolingTraceWriter {
     }
 }
 
-internal final class ToolingVideoEncoder {
+package final class ToolingVideoEncoder {
     private let width: Int
     private let height: Int
     private let outputPath: String
-    #if os(macOS) || os(Linux)
+    #if os(macOS) || os(Linux) || os(Windows)
     private let process: Process
     private let stdinPipe: Pipe
     private var finished = false
@@ -2851,8 +2858,8 @@ internal final class ToolingVideoEncoder {
         return out
     }
 
-    #if os(macOS) || os(Linux)
-    convenience init(outputPath: String, width: Int, height: Int, fps: Double) throws {
+    #if os(macOS) || os(Linux) || os(Windows)
+    package convenience init(outputPath: String, width: Int, height: Int, fps: Double) throws {
         let args = try Self.ffmpegArgs(outputPath: outputPath, width: width, height: height, fps: fps)
         guard let ffmpegPath = Self.findFFmpegOnPath() else {
             throw ToolingError.ffmpegUnavailable
@@ -2873,7 +2880,7 @@ internal final class ToolingVideoEncoder {
         self.init(process: proc, stdinPipe: pipe, outputPath: outputPath, width: width, height: height)
     }
     #else
-    init(outputPath: String, width: Int, height: Int, fps: Double) throws {
+    package init(outputPath: String, width: Int, height: Int, fps: Double) throws {
         self.width = width
         self.height = height
         self.outputPath = outputPath
@@ -2882,28 +2889,33 @@ internal final class ToolingVideoEncoder {
     }
     #endif
 
-    #if os(macOS) || os(Linux)
+    #if os(macOS) || os(Linux) || os(Windows)
     init(process: Process, stdinPipe: Pipe, outputPath: String, width: Int, height: Int) {
         self.width = width
         self.height = height
         self.outputPath = outputPath
         self.process = process
         self.stdinPipe = stdinPipe
+        // The child owns the reader. A spare reader in the parent would keep a
+        // blocked frame write alive after the encoder has exited.
+        try? stdinPipe.fileHandleForReading.close()
         #if canImport(Darwin)
         _ = Darwin.fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         #endif
     }
     #endif
 
-    func writeFrame(_ frame: Frame) throws {
-        #if os(macOS) || os(Linux)
+    package func writeFrame(_ frame: Frame) throws {
+        #if os(macOS) || os(Linux) || os(Windows)
         guard frame.width == width, frame.height == height else { return }
         if !process.isRunning {
+            try? stdinPipe.fileHandleForWriting.close()
+            finished = true
             process.waitUntilExit()
             throw ToolingError.encoderError(message: "video encoder stopped reading (status \(process.terminationStatus))")
         }
         do {
-            try stdinPipe.fileHandleForWriting.write(contentsOf: frame.rgba)
+            try writePixels(frame.rgba)
         } catch {
             try? stdinPipe.fileHandleForWriting.close()
             finished = true
@@ -2913,9 +2925,41 @@ internal final class ToolingVideoEncoder {
         #endif
     }
 
+    #if os(macOS) || os(Linux) || os(Windows)
+    private func writePixels(_ bytes: [UInt8]) throws {
+        #if os(Linux)
+        // Pipes lack Darwin's F_SETNOSIGPIPE. Block SIGPIPE only for this write,
+        // so an encoder exiting early is a recoverable EPIPE on the calling thread.
+        var pipeSignals = sigset_t()
+        sigemptyset(&pipeSignals)
+        sigaddset(&pipeSignals, SIGPIPE)
+        var savedMask = sigset_t()
+        let maskError = pthread_sigmask(SIG_BLOCK, &pipeSignals, &savedMask)
+        guard maskError == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(maskError))
+        }
+        defer { pthread_sigmask(SIG_SETMASK, &savedMask, nil) }
+        var pending = sigset_t()
+        sigpending(&pending)
+        let wasPending = sigismember(&pending, SIGPIPE) == 1
+        do {
+            try stdinPipe.fileHandleForWriting.write(contentsOf: bytes)
+        } catch {
+            if !wasPending {
+                var immediate = timespec()
+                while sigtimedwait(&pipeSignals, nil, &immediate) == -1 && errno == EINTR {}
+            }
+            throw error
+        }
+        #else
+        try stdinPipe.fileHandleForWriting.write(contentsOf: bytes)
+        #endif
+    }
+    #endif
+
     @discardableResult
-    func finish() throws -> String? {
-        #if os(macOS) || os(Linux)
+    package func finish() throws -> String? {
+        #if os(macOS) || os(Linux) || os(Windows)
         guard !finished else { return nil }
         finished = true
         try? stdinPipe.fileHandleForWriting.close()
@@ -2930,7 +2974,7 @@ internal final class ToolingVideoEncoder {
     }
 
     deinit {
-        #if os(macOS) || os(Linux)
+        #if os(macOS) || os(Linux) || os(Windows)
         if !finished {
             try? stdinPipe.fileHandleForWriting.close()
             if process.isRunning {
@@ -2941,14 +2985,7 @@ internal final class ToolingVideoEncoder {
         #endif
     }
 
-    private static func findFFmpegOnPath() -> String? {
-        let envPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        for dir in envPath.split(separator: ":") {
-            let candidate = URL(fileURLWithPath: String(dir)).appendingPathComponent("ffmpeg").path
-            if FileManager.default.isExecutableFile(atPath: candidate) {
-                return candidate
-            }
-        }
-        return nil
+    static func findFFmpegOnPath(_ searchPath: String? = nil) -> String? {
+        RuneExecutableSearch.find("ffmpeg", searchPath: searchPath)
     }
 }

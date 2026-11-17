@@ -352,7 +352,7 @@ public enum RuneMotionBentoApp {
             }
             try makeApp(config: cfg, arguments: rest).run()
         } catch {
-            fputs("motion-bento: \(error)\n", stderr)
+            RuneStandardIO.error("motion-bento: \(error)\n")
             exit(2)
         }
     }

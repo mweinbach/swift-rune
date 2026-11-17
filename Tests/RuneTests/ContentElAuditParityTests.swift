@@ -117,6 +117,12 @@ struct ContentElAuditParityTests {
         _ = system.shape(text: "111111", spans: nil, style: style, maxWidth: nil, pixelScale: 1.0, emitGlyphs: true)
         #expect(system.shapeMissCount == missesAfterTabular)
 
+        let variableStyle = style.variations("wght=600")
+        _ = system.shape(text: "111111", style: variableStyle, maxWidth: nil, pixelScale: 1.0)
+        #expect(system.shapeMissCount == missesAfterTabular + 1)
+        _ = system.shape(text: "111111", style: variableStyle, maxWidth: nil, pixelScale: 1.0)
+        #expect(system.shapeMissCount == missesAfterTabular + 1)
+
         // Measure widths under tabular vs proportional numerals
         let tnum = style.features("'tnum' 1")
         let tnum1 = system.measure("111111", style: tnum, maxWidth: nil, pixelScale: 1.0)

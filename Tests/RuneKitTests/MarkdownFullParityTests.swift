@@ -770,6 +770,13 @@ struct MarkdownFullParityTests {
         #expect(boxes[0].label == "alpha" && boxes[0].selected == "false" && boxes[0].focusable)
         #expect(boxes[1].label == "beta" && boxes[1].selected == "true" && boxes[1].focusable)
 
+        var spokenBoxes: [AccessibilityNode] = []
+        AccessibilityIdentity.walk(rt.accessibilitySnapshot()) { node, _ in
+            if node.role == .checkbox { spokenBoxes.append(node) }
+        }
+        #expect(spokenBoxes.map(\.label) == ["alpha", "beta"])
+        #expect(spokenBoxes.allSatisfy { $0.children.isEmpty })
+
         let marks = rt.elements().filter { $0.key == "mark" }
         #expect(marks.count == 2)
         #expect(marks[0].opacity == 0 && marks[1].opacity == 1)
@@ -1229,7 +1236,7 @@ struct MarkdownFullParityTests {
             rt.update(at: t) { _, tx in action(&tx) }
             t += 1.0 / 60.0
             _ = rt.frame(at: t)
-            _ = rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: t)
+            _ = rt.keyDown(KeyEvent(key: .command("c"), mods: RuneKitTestKey.primaryMods()), at: t)
             t += 1.0 / 60.0
             _ = rt.frame(at: t)
             return rt.clipboard.text
@@ -1265,7 +1272,7 @@ struct MarkdownFullParityTests {
         )
         let midSel = copyRT.selectedText() ?? ""
         #expect(midSel.contains("alpha") && !midSel.hasPrefix("Hello"))
-        _ = copyRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: t)
+        _ = copyRT.keyDown(KeyEvent(key: .command("c"), mods: RuneKitTestKey.primaryMods()), at: t)
         t += 1.0 / 60.0
         _ = copyRT.frame(at: t)
         let expectedTail = String(copySrcDoc.dropFirst(9)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1303,7 +1310,7 @@ struct MarkdownFullParityTests {
             keyRT.pointerUp(at: clickPt, button: .primary, mods: .none, at: kt)
             kt += 1.0 / 60.0
             _ = keyRT.frame(at: kt)
-            _ = keyRT.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: kt)
+            _ = keyRT.keyDown(KeyEvent(key: .command("a"), mods: RuneKitTestKey.primaryMods()), at: kt)
             kt += 1.0 / 60.0
             _ = keyRT.frame(at: kt)
             #expect(keyRT.state.keys == [.command("a")])
@@ -1322,7 +1329,7 @@ struct MarkdownFullParityTests {
         _ = ruledRT.frame(at: 0.0)
         ruledRT.update(at: 0.01) { _, tx in tx.selectAllText("note") }
         _ = ruledRT.frame(at: 0.02)
-        _ = ruledRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.02)
+        _ = ruledRT.keyDown(KeyEvent(key: .command("c"), mods: RuneKitTestKey.primaryMods()), at: 0.02)
         #expect(ruledRT.clipboard.text == ruled)
 
         let crlf = "```rust\r\nfn main() {}\r\n```\r\n\r\n```diff\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n```\r\n"
@@ -1332,7 +1339,7 @@ struct MarkdownFullParityTests {
         _ = crlfRT.frame(at: 0.0)
         crlfRT.update(at: 0.01) { _, tx in tx.selectAllText("note") }
         _ = crlfRT.frame(at: 0.02)
-        _ = crlfRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.02)
+        _ = crlfRT.keyDown(KeyEvent(key: .command("c"), mods: RuneKitTestKey.primaryMods()), at: 0.02)
         #expect(crlfRT.clipboard.text == crlf)
         #expect(crlfRT.selectedText() == "fn main() {}\n\n@@ -1 +1 @@\n-old\n+new")
 
@@ -1368,8 +1375,8 @@ struct MarkdownFullParityTests {
             _ = pyRT.frame(at: pt)
         }
         #expect(pyRT.selectedText() == "def")
-        _ = pyRT.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: pt)
-        _ = pyRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: pt)
+        _ = pyRT.keyDown(KeyEvent(key: .command("a"), mods: RuneKitTestKey.primaryMods()), at: pt)
+        _ = pyRT.keyDown(KeyEvent(key: .command("c"), mods: RuneKitTestKey.primaryMods()), at: pt)
         #expect(pyRT.clipboard.text == pyCode)
 
         // 6. markdown_select: a_drag_selects_from_a_paragraph_into_a_code_block & a_selection_survives_its_message_and_the_next_streaming_in
@@ -1398,9 +1405,9 @@ struct MarkdownFullParityTests {
         drag(streamRT, from: Vec2(m0Para[1].x - 3.0, m0Para[1].y), to: Vec2(m0Code[2].x - 3.0, m0Code[2].y), t: &st)
         let m0Dragged = streamRT.selectedText() ?? ""
         #expect(m0Dragged.hasPrefix("ello world and link.") && m0Dragged.contains("alpha") && m0Dragged.contains("beta") && m0Dragged.contains("fn"))
-        _ = streamRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: st)
+        _ = streamRT.keyDown(KeyEvent(key: .command("c"), mods: RuneKitTestKey.primaryMods()), at: st)
         #expect(streamRT.clipboard.text == m0Dragged)
-        _ = streamRT.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: st)
+        _ = streamRT.keyDown(KeyEvent(key: .command("a"), mods: RuneKitTestKey.primaryMods()), at: st)
         #expect(streamRT.selectedText()?.contains("Second message") == false)
         #expect(streamRT.selectedText()?.contains("Hello world and link.") == true)
 

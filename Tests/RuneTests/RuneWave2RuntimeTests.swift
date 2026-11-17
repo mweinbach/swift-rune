@@ -105,7 +105,7 @@ final class RuneWave2RuntimeTests: XCTestCase {
         rt.fileDrop(.entered([f], at: Vec2(10, 20)), at: 0.1)
         XCTAssertTrue(rt.fileDropState.isHovering)
         rt.fileDrop(.hovered(at: Vec2(42, 20)), at: 0.2)
-        rt.fileDrop(.dropped([f], at: Vec2(42, 20)), at: 0.3)
+        XCTAssertTrue(rt.receiveFileDrop(.dropped([f], at: Vec2(42, 20)), at: 0.3))
         XCTAssertFalse(rt.fileDropState.isHovering)
         XCTAssertEqual(rt.fileDropState.lastDroppedFiles, [f])
         XCTAssertEqual(rt.fileDropState.lastDragOutItem, item)

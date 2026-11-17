@@ -58,30 +58,53 @@ public enum GpuPickReason: Sendable, Equatable {
     }
 }
 
-/// Apple native-Metal vs wgpu selection parity helpers (`gpu::backend`).
+/// GPU backend selection for a Rune window.
 public enum GpuBackendPolicy {
-    #if os(macOS)
+    #if canImport(Metal)
     public static let defaultBackend: GpuBackend = .metal
+    #elseif os(Linux) || os(Windows) || os(Android) || os(WASI)
+    public static let defaultBackend: GpuBackend = .gl
     #else
-    public static let defaultBackend: GpuBackend = .metal
+    public static let defaultBackend: GpuBackend = .software
     #endif
 
-    /// Resolves effective backend from `RUNE_GPU_BACKEND` (`"metal"` / `"wgpu"`) over app choice over default.
+    /// Uses the environment override, then the app's choice, then the host default.
     public static func resolve(env: String?, chosen: GpuBackend?) -> GpuBackend {
-        switch env {
-        case "metal":
-            return .metal
-        case "wgpu":
-            return .webGpu
-        default:
-            return chosen ?? defaultBackend
-        }
+        let backend = environmentBackend(env) ?? chosen ?? .auto
+        return backend == .auto ? defaultBackend : backend
     }
 
     /// True when neither `RUNE_GPU_BACKEND` nor an explicit app preference selected the backend.
     public static func defaulted(env: String?, chosen: GpuBackend?) -> Bool {
-        let explicitEnv = (env == "metal" || env == "wgpu")
-        return !explicitEnv && chosen == nil
+        let requested = environmentBackend(env) ?? chosen
+        return requested == nil || requested == .auto
+    }
+
+    private static func environmentBackend(_ value: String?) -> GpuBackend? {
+        guard let value else { return nil }
+        return value == "wgpu" ? .webGpu : GpuBackend(rawValue: value)
+    }
+
+    struct UnavailableBackend: Error, CustomStringConvertible {
+        let requested: GpuBackend
+        let available: GpuBackend
+        var description: String {
+            "Rune's window host uses \(available.rawValue). Requested backend \(requested.rawValue) is unavailable."
+        }
+    }
+
+    static func windowBackend(_ chosen: GpuBackend = .auto) -> GpuBackend {
+        resolve(env: ProcessInfo.processInfo.environment["RUNE_GPU_BACKEND"], chosen: chosen)
+    }
+
+    static func checkWindowBackend(_ chosen: GpuBackend = .auto) throws {
+        let selected = windowBackend(chosen)
+        #if canImport(UIKit) && !os(watchOS)
+        if selected == .software { return }
+        #endif
+        guard selected == defaultBackend else {
+            throw UnavailableBackend(requested: selected, available: defaultBackend)
+        }
     }
 
     /// Human-readable GPU backend description matching `gpu::backend::describe`.

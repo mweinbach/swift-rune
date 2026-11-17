@@ -1,4 +1,7 @@
 import Foundation
+#if !os(WASI) && canImport(CoreFoundation)
+import CoreFoundation
+#endif
 
 // Undo steps as changes (`crates/rune/src/edit/history.rs`, #990): each step stores the text it
 // replaced and the selection, marks and blocks on either side (`Change`), not two whole copies of
@@ -376,7 +379,11 @@ extension TextEdit {
 
     static func historyInt(_ value: Any?) -> Int? {
         guard let num = value as? NSNumber else { return nil }
+        #if !os(WASI) && canImport(CoreFoundation)
         if CFGetTypeID(num) == CFBooleanGetTypeID() { return nil }
+        #else
+        if type(of: num) == type(of: NSNumber(value: true)) { return nil }
+        #endif
         let d = num.doubleValue
         guard d >= 0, d.rounded(.towardZero) == d, d <= Double(Int.max) else { return nil }
         return Int(d)

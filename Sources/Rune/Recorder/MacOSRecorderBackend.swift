@@ -4,63 +4,8 @@ import Foundation
 @preconcurrency import AVFoundation
 import CoreAudio
 
-internal final class RecorderBackendSession: @unchecked Sendable {
-    enum Command {
-        case pause
-        case resume
-        case stop(CheckedReply<Result<Double, RecorderError>>)
-        case cancel(CheckedReply<Void>)
-    }
-
-    final class CheckedReply<T: Sendable>: @unchecked Sendable {
-        private let sem = DispatchSemaphore(value: 0)
-        private let lock = NSLock()
-        private var value: T?
-
-        func send(_ v: T) {
-            lock.withLock { value = v }
-            sem.signal()
-        }
-
-        func wait(timeout: TimeInterval) -> T? {
-            let result = sem.wait(timeout: .now() + timeout)
-            guard result == .success else { return nil }
-            return lock.withLock { value }
-        }
-    }
-
-    private let lock = NSLock()
-    private var queue: [Command] = []
-    private let sem = DispatchSemaphore(value: 0)
-
-    init() {}
-
-    func send(_ cmd: Command) {
-        lock.withLock { queue.append(cmd) }
-        sem.signal()
-    }
-
-    func pop(timeout: TimeInterval) -> Command? {
-        if let first = lock.withLock({ queue.isEmpty ? nil : queue.removeFirst() }) {
-            return first
-        }
-        _ = sem.wait(timeout: .now() + timeout)
-        return lock.withLock { queue.isEmpty ? nil : queue.removeFirst() }
-    }
-
-    func tryPopAll() -> [Command] {
-        lock.withLock {
-            let all = queue
-            queue.removeAll()
-            return all
-        }
-    }
-}
-
 internal enum RecorderBackend {
     static let deviceCheckTicks: UInt32 = 15
-    static let replyPatience: TimeInterval = 5.0
-    private static let onRecorderThreadKey = "rune.onRecorderThread"
 
     static func defaultInputDevice() -> AudioObjectID? {
         var address = AudioObjectPropertyAddress(
@@ -148,48 +93,13 @@ internal enum RecorderBackend {
         options: RecorderOptions
     ) -> Result<RecorderBackendSession, RecorderError> {
         let session = RecorderBackendSession()
-        weak let weakShared = shared
+        let owner: @Sendable () -> RecorderShared? = { [weak shared] in shared }
         let thread = Thread {
-            run(weakShared: weakShared, attempt: attempt, url: url, options: options, session: session)
+            run(owner: owner, attempt: attempt, url: url, options: options, session: session)
         }
         thread.name = "rune-recorder"
         thread.start()
         return .success(session)
-    }
-
-    static func pause(_ session: RecorderBackendSession) {
-        session.send(.pause)
-    }
-
-    static func resume(_ session: RecorderBackendSession) {
-        session.send(.resume)
-    }
-
-    static func stop(_ session: RecorderBackendSession) -> Result<Double, RecorderError> {
-        let reply = RecorderBackendSession.CheckedReply<Result<Double, RecorderError>>()
-        session.send(.stop(reply))
-        return reply.wait(timeout: replyPatience) ?? .failure("the recorder didn't stop")
-    }
-
-    static func finish(_ session: RecorderBackendSession) {
-        let onThread = (Thread.current.threadDictionary[onRecorderThreadKey] as? Bool) ?? false
-        if !onThread {
-            _ = stop(session)
-        }
-    }
-
-    static func cancel(_ session: RecorderBackendSession) {
-        let reply = RecorderBackendSession.CheckedReply<Void>()
-        session.send(.cancel(reply))
-        _ = reply.wait(timeout: replyPatience)
-    }
-
-    static func markRecorderThread() {
-        Thread.current.threadDictionary[onRecorderThreadKey] = true
-    }
-
-    static func idleSession() -> RecorderBackendSession {
-        RecorderBackendSession()
     }
 
     private static func open(url: URL, options: RecorderOptions) -> Result<(AVAudioRecorder, AudioObjectID?), RecorderError> {
@@ -213,13 +123,13 @@ internal enum RecorderBackend {
     }
 
     private static func run(
-        weakShared: RecorderShared?,
+        owner: () -> RecorderShared?,
         attempt: UInt64,
         url: URL,
         options: RecorderOptions,
         session: RecorderBackendSession
     ) {
-        Thread.current.threadDictionary[onRecorderThreadKey] = true
+        markRecorderThread()
         let opened: Result<(AVAudioRecorder, AudioObjectID?), RecorderError> = autoreleasepool {
             open(url: url, options: options)
         }
@@ -230,11 +140,12 @@ internal enum RecorderBackend {
             recorder = pair.0
             startDevice = pair.1
         case .failure(let err):
-            weakShared?.beganFailure(attempt: attempt, error: err.message)
+            session.complete(.failure(err))
+            owner()?.beganFailure(attempt: attempt, error: err.message)
             return
         }
 
-        weakShared?.began(attempt: attempt)
+        owner()?.began(attempt: attempt)
         var meter = RecorderMeter()
         var last = ProcessInfo.processInfo.systemUptime
         var ticks: UInt32 = 0
@@ -259,20 +170,24 @@ internal enum RecorderBackend {
                     case .stop(let reply):
                         recorded = max(recorded, recorder.currentTime)
                         recorder.stop()
+                        session.complete(.success(recorded))
                         reply.send(.success(recorded))
                         return true
                     case .cancel(let reply):
                         recorder.stop()
                         recorder.deleteRecording()
+                        session.complete(.failure(RecorderError("The recording was cancelled")))
                         reply.send(())
                         return true
                     }
                 }
-                if paused { return false }
-                guard let shared = weakShared else {
+                guard let shared = owner() else {
+                    recorded = max(recorded, recorder.currentTime)
                     recorder.stop()
+                    session.complete(.success(recorded))
                     return true
                 }
+                if paused { return false }
                 recorder.updateMeters()
                 let peak = recorder.peakPower(forChannel: 0)
                 let avg = recorder.averagePower(forChannel: 0)
@@ -293,6 +208,7 @@ internal enum RecorderBackend {
                 }
                 if let reason = lostReason {
                     recorder.stop()
+                    session.complete(.success(recorded))
                     shared.interrupted(attempt: attempt, reason: reason, duration: recorded)
                     return true
                 }
@@ -303,7 +219,7 @@ internal enum RecorderBackend {
     }
 }
 
-#else
+#elseif !canImport(CRuneMedia) || (!os(Windows) && !os(Linux))
 
 internal final class RecorderBackendSession: @unchecked Sendable {
     enum Command {

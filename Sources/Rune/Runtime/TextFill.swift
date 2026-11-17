@@ -22,7 +22,6 @@ extension Runtime {
     }
 
     private func fillTextWithin(budget: Double, reach: Float?) -> Bool {
-        #if canImport(CoreText) && canImport(CoreGraphics)
         var more = false
         for (id, rec) in nodeTextLayouts where rec.isInput {
             guard let p = rec.box.paragraphs, p.waiting else { continue }
@@ -42,9 +41,6 @@ extension Runtime {
         }
         if !more { textRows.removeAll() }
         return more
-        #else
-        return false
-        #endif
     }
 
     /// Whether `ev` reads a text's layout away from its caret: caret movement or a shortcut.
@@ -63,7 +59,7 @@ extension Runtime {
     /// The paragraph request for a field's layout (`TextSpec::by_paragraph` /
     /// `paragraphs_flow` / `plaintext_flow`, resolved into its style by
     /// `ElDisplayResolver.applyByParagraph`): nil when it lays out as one text. A field with
-    /// spans, pills or blocks other than paragraphs keeps one CoreText layout, whose paragraphs
+    /// spans, pills or blocks other than paragraphs keeps one text layout, whose paragraphs
     /// read the same ways (`TextStyle.byParagraphStart`), pills isolated.
     internal static func paragraphRequest(field: NodeId, el: El<State>, edit: TextEdit, resolved: ElResolvedInput) -> ParagraphRequest? {
         guard !resolved.showingPlaceholder, !resolved.isSecure, let start = resolved.style.byParagraphStart,

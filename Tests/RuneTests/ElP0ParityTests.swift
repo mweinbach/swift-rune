@@ -62,8 +62,8 @@ struct ElP0ParityTests {
         rt.pointerDown(at: Vec2(pwRect[0] + 5, pwRect[1] + 5), at: 0.03)
         rt.pointerUp(at: Vec2(pwRect[0] + 5, pwRect[1] + 5), at: 0.04)
         rt.clipboard = ClipboardContent("sentinel")
-        _ = rt.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: 0.05)
-        _ = rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.06)
+        _ = rt.keyDown(KeyEvent(key: .command("a"), mods: RuneTestKey.primaryMods()), at: 0.05)
+        _ = rt.keyDown(KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods()), at: 0.06)
         #expect(rt.clipboard.text == "sentinel")
     }
 

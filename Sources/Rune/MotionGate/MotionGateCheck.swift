@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 #if canImport(simd)
 import simd
 #endif

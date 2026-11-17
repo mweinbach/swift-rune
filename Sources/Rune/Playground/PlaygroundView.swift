@@ -86,15 +86,15 @@ extension PlaygroundLive {
     internal func buildView(
         appState: State,
         appView: (State, inout Cx<State>) -> El<State>,
-        cx: inout Cx<State>,
-        viewport: Vec2
+        cx: inout Cx<State>
     ) -> El<State> {
         let dark = isDark(appState: appState, systemDark: cx.getSystemDark())
         let t = Tok.theme(dark: dark)
+        if !isOpen && !showBar {
+            return appView(appState, &cx)
+        }
+        let viewport = cx.viewport
         if !isOpen {
-            if !showBar {
-                return appView(appState, &cx)
-            }
             let root = appView(appState, &cx)
             return col()
                 .key("playground-closed")

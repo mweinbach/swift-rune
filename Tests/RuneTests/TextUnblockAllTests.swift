@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 import RuneMotion
 import RuneRef
@@ -98,13 +101,7 @@ struct TextUnblockAllTests {
         _ = bad.wait(timeout: 1.0)
         #expect(bad.error?.message.hasPrefix("https://example.com/a.svg: ") == true)
 
-        final class WakeCounter: @unchecked Sendable {
-            private let lock = NSLock()
-            private var value = 0
-            func inc() { lock.lock(); value += 1; lock.unlock() }
-            func get() -> Int { lock.lock(); defer { lock.unlock() }; return value }
-        }
-        let woke = WakeCounter()
+        let woke = DispatchSemaphore(value: 0)
         MockImageURLProtocol.handler = { req in
             let url = req.url!
             let svg = ##"<svg width="12" height="12" viewBox="0 0 12 12"><rect x="0" y="0" width="12" height="12" fill="#3366ff"/></svg>"##
@@ -117,7 +114,7 @@ struct TextUnblockAllTests {
         cfg.protocolClasses = [MockImageURLProtocol.self]
         let session = URLSession(configuration: cfg)
         let cache = ImageCache(
-            wake: { woke.inc() },
+            wake: { woke.signal() },
             session: session
         )
 
@@ -128,7 +125,8 @@ struct TextUnblockAllTests {
         }
         #expect(remote.error == nil)
         #expect(remote.size?.0 == 40)
-        #expect(woke.get() >= 1)
+        // The cache publishes the decoded pixels before calling the application's wake closure.
+        #expect(woke.wait(timeout: .now() + 3) == .success)
     }
 
     @Test("from_url_tests 4: urlSet picks narrowest source >= target px and shares handle")
@@ -200,7 +198,7 @@ struct TextUnblockAllTests {
 
         #expect(elNode.pillChips.count == 2) // bare icon @3 + pill @tag
         #expect(elNode.inlineIcons.count == 1)
-        #expect(elNode.inlineIcons[0].byteOffset == 3)
+        #expect(elNode.inlineIcons.first?.byteOffset == 3)
 
         // Calling .spans(...) preserves pill label foreground color & styling (pills/tests.rs:30)
         let respanned = elNode.spans([RichSpan(0..<2).bold()])
@@ -240,7 +238,7 @@ struct TextUnblockAllTests {
     }
 
     @Test("text/quality_tests.rs: pill chips reserve exact room, never overlap at wraps, keep caret outside, and wrap wide pills")
-    func pillRoomWrappingAndWidePillParity() {
+    func pillRoomWrappingAndWidePillParity() throws {
         let dot = SVGIcon(viewBox: 24, paths: ["M12 4 A8 8 0 1 0 12 20 A8 8 0 1 0 12 4 Z"])
         let ts = TextSystem()
         let style = TextStyle(size: 14, weight: 400, wrap: .wrap)
@@ -262,7 +260,8 @@ struct TextUnblockAllTests {
         for width in stride(from: 140, through: 420, by: 14) {
             let maxW = Float(width)
             let shaped = ts.shape(text: content, pills: pills, style: style, maxWidth: maxW, pixelScale: 2.0, emitGlyphs: true)
-            #expect(shaped.pillChips.count == 3, "Expected 3 pill chips at width \(width)")
+            try #require(shaped.pillChips.count == 3, "Expected 3 pill chips at width \(width)")
+            #expect(shaped.pillChips.map(\.pillIndex) == Array(pills.indices))
             #expect(shaped.pillChips[1].iconRect != nil)
             if let ir = shaped.pillChips[1].iconRect {
                 let cr = shaped.pillChips[1].rect
@@ -289,7 +288,8 @@ struct TextUnblockAllTests {
             let shaped = ts.shape(text: wideContent, pills: widePill, style: style, maxWidth: maxW, pixelScale: 2.0, emitGlyphs: true)
             #expect(shaped.pillChips.count >= 2, "Wide pill must wrap into >= 2 chips at width \(width)")
             for c in shaped.pillChips {
-                #expect(c.rect.x >= -0.5 && c.rect.x + c.rect.z <= maxW + 1.0)
+                #expect(c.rect.x >= -0.5 && c.rect.x + c.rect.z <= maxW + 1.0,
+                        "Pill fragment \(c.rect) should fit width \(width)")
             }
         }
     }
@@ -391,7 +391,7 @@ struct TextUnblockAllTests {
 
     // MARK: - 4. tests/selectable_text.rs
 
-    @Test("selectable_text.rs: drag, double-click word, triple-click line, Shift extend, and Cmd+C without moving layout")
+    @Test("selectable_text.rs: drag, double-click word, triple-click line, Shift extend, and Copy without moving layout")
     func selectableTextRuntimeParity() {
         struct SelState { var copied: String? = nil }
         let rt = Runtime(state: SelState(), viewport: Vec2(360, 140), pixelScale: 2) { _, _ in
@@ -415,8 +415,8 @@ struct TextUnblockAllTests {
         _ = rt.frame(at: 0.16)
         #expect(rt.selectedText()?.isEmpty == false)
 
-        // Cmd+C invokes selectionCopy & populates clipboard without mutating element geometry
-        #expect(rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.2))
+        // Copy invokes selectionCopy & populates clipboard without mutating element geometry
+        #expect(rt.keyDown(KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods()), at: 0.2))
         #expect(rt.clipboard.text.hasPrefix("copied:") == true)
         let afterRect = rt.element(byKey: "cmd")!.rect
         #expect(beforeRect == afterRect)

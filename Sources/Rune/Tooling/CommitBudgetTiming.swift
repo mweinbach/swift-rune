@@ -130,7 +130,7 @@ extension CommitBudget {
     private static let threadKey = "rune.perfWarn.commitBudget"
 
     private static var threadState: ThreadState {
-        let dict = Thread.current.threadDictionary
+        let dict = RuneExecutionContext.locals
         if let state = dict[threadKey] as? ThreadState { return state }
         let state = ThreadState()
         dict[threadKey] = state
@@ -155,7 +155,7 @@ extension CommitBudget {
             let outer = state.depth == 0
             state.depth += 1
             if outer { state.times = [Double](repeating: 0, count: FRAME_PHASES) }
-            return Commit(begun: (DispatchTime.now().uptimeNanoseconds, outer))
+            return Commit(begun: (RuneExecutionContext.uptimeNanoseconds, outer))
         }
 
         /// The commit is done; `why` is what made the frame commit, as `CommitWhy` bits.
@@ -167,7 +167,7 @@ extension CommitBudget {
             guard begun.outer, let budget = CommitBudget.currentBudgetMs() else { return }
             let hook = CommitBudget.testHook
             hook?.noteCause(why)
-            let realNow = DispatchTime.now().uptimeNanoseconds
+            let realNow = RuneExecutionContext.uptimeNanoseconds
             let total = Double(realNow &- begun.startNs) / 1_000_000.0
             if total <= budget { return }
             let now = realNow &+ (hook?.clockOffsetNs ?? 0)

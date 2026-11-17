@@ -10,8 +10,8 @@ import Metal
 
 /// Port of `crates/rune-light/examples/shader_first_use.rs`.
 ///
-/// Times first-use shader & pipeline compilation for `MetalRenderer` (`Rune`),
-/// `FxRenderer` (`RuneFX`), `LightRenderer` (`RuneLight`), and `GlassRenderer` (`RuneLight`).
+/// Times shader and pipeline first use for Rune, RuneFX, lighting, and glass.
+/// Desktop hosts can select the OpenGL path with `--gl`.
 /// Prints one JSON line in milliseconds, and supports `--snap PATH` for smoke checks.
 @main
 enum RuneLightShaderFirstUseApp {
@@ -24,6 +24,17 @@ enum RuneLightShaderFirstUseApp {
             guard let i = args.firstIndex(of: "--snap"), i + 1 < args.count else { return nil }
             return args[i + 1]
         }()
+
+        #if canImport(CRuneGL) && canImport(CRuneOffscreenGL)
+        #if canImport(Metal)
+        if args.contains("--gl") {
+            try runGL(snapPath: snapPath)
+            return
+        }
+        #else
+        try runGL(snapPath: snapPath)
+        #endif
+        #endif
 
         #if canImport(Metal)
         let clock = ContinuousClock()
@@ -95,13 +106,17 @@ enum RuneLightShaderFirstUseApp {
             }
         }
 
+        report(deviceMs, runeMs, fxMs, lightMs, glassMs)
+        #elseif !canImport(CRuneGL) || !canImport(CRuneOffscreenGL)
+        RuneStandardIO.error("error: a desktop GL context or Metal device is required\n")
+        Foundation.exit(1)
+        #endif
+    }
+
+    static func report(_ deviceMs: Double, _ runeMs: Double, _ fxMs: Double, _ lightMs: Double, _ glassMs: Double) {
         print(String(
             format: "{\"device\":%.3f,\"rune\":%.3f,\"fx\":%.3f,\"light\":%.3f,\"glass\":%.3f}",
             deviceMs, runeMs, fxMs, lightMs, glassMs
         ))
-        #else
-        fputs("error: Metal unavailable on this platform\n", stderr)
-        Foundation.exit(1)
-        #endif
     }
 }

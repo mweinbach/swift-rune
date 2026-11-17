@@ -5,6 +5,11 @@ import Darwin
 import Glibc
 #elseif canImport(Musl)
 import Musl
+#elseif canImport(Android)
+import Android
+#elseif os(Windows)
+import WinSDK
+import ucrt
 #endif
 
 /// Bounded nonblocking URL channel matching `std::sync::mpsc::sync_channel::<PathBuf>` for
@@ -318,14 +323,14 @@ public final class PerfFileRecorder: @unchecked Sendable {
         do {
             try FileManager.default.createDirectory(at: config.directory, withIntermediateDirectories: true)
             let lockURL = config.directory.appendingPathComponent(".perf.lock")
-            let fd = openFileLock(at: lockURL)
-            guard fd >= 0 else {
-                _ = health.incrementErrors()
-                return
-            }
-            defer { close(fd) }
+            let fd = try openFileLock(at: lockURL)
+            defer { closeFileLock(fd) }
 
-            guard acquireLock(fd: fd, health: health) else { return }
+            while try !tryLock(fd) {
+                if health.isStopped { return }
+                Thread.sleep(forTimeInterval: 0.1)
+                if health.isStopped { return }
+            }
 
             let writer = PerfStoreWriter(config: config, startNanos: startNanos, health: health)
             var lastChecked: Date?
@@ -354,41 +359,54 @@ public final class PerfFileRecorder: @unchecked Sendable {
         }
     }
 
-    private static func openFileLock(at url: URL) -> Int32 {
-        #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
-        return url.path.withCString { cPath in
-            open(cPath, O_CREAT | O_RDWR, 0o644)
+    static func openFileLock(at url: URL) throws -> Int32 {
+        #if os(Windows)
+        var fd: Int32 = -1
+        let error = url.path.withCString(encodedAs: UTF16.self) { path in
+            _wsopen_s(&fd, path, _O_CREAT | _O_RDWR | _O_NOINHERIT, _SH_DENYNO, _S_IREAD | _S_IWRITE)
         }
+        guard error == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(error)) }
+        return fd
+        #elseif canImport(Darwin) || canImport(Glibc) || canImport(Musl) || canImport(Android)
+        let fd = url.path.withCString { open($0, O_CREAT | O_RDWR, 0o644) }
+        guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        return fd
         #else
-        return -1
+        throw PerfRecorderError.io("File locking is unavailable on this platform")
         #endif
     }
 
-    private static func acquireLock(fd: Int32, health: SharedHealth) -> Bool {
-        #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
-        while true {
-            if flock(fd, LOCK_EX | LOCK_NB) == 0 {
-                return true
-            }
-            let err = errno
-            if health.isStopped {
-                return false
-            }
-            if err == EINTR {
-                continue
-            }
-            if err == EWOULDBLOCK || err == EAGAIN {
-                Thread.sleep(forTimeInterval: 0.1)
-                if health.isStopped {
-                    return false
-                }
-                continue
-            }
-            _ = health.incrementErrors()
-            return false
-        }
+    static func closeFileLock(_ fd: Int32) {
+        #if os(Windows)
+        _ = _close(fd)
         #else
-        return !health.isStopped
+        _ = close(fd)
+        #endif
+    }
+
+    /// Returns false while another writer owns the lock. Closing the descriptor releases ownership.
+    static func tryLock(_ fd: Int32) throws -> Bool {
+        #if os(Windows)
+        let rawHandle = _get_osfhandle(fd)
+        guard rawHandle != -1, let handle = HANDLE(bitPattern: rawHandle) else {
+            throw PerfRecorderError.io("Invalid recorder lock handle")
+        }
+        var overlapped = OVERLAPPED()
+        if LockFileEx(handle, DWORD(LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY), 0,
+                      DWORD.max, DWORD.max, &overlapped) { return true }
+        let error = GetLastError()
+        if error == ERROR_LOCK_VIOLATION { return false }
+        throw PerfRecorderError.io("LockFileEx failed with Windows error \(error)")
+        #elseif canImport(Darwin) || canImport(Glibc) || canImport(Musl) || canImport(Android)
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            let error = errno
+            if error == EINTR { continue }
+            if error == EWOULDBLOCK || error == EAGAIN { return false }
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(error))
+        }
+        return true
+        #else
+        throw PerfRecorderError.io("File locking is unavailable on this platform")
         #endif
     }
 }
@@ -756,14 +774,7 @@ final class PerfStoreWriter {
         if data.count > limit {
             throw PerfRecorderError.io("performance record exceeds byte cap")
         }
-        let tmp = directory.appendingPathComponent(".\(name).tmp")
-        let dest = directory.appendingPathComponent(name)
-        try data.write(to: tmp, options: [])
-        if FileManager.default.fileExists(atPath: dest.path) {
-            _ = try FileManager.default.replaceItemAt(dest, withItemAt: tmp)
-        } else {
-            try FileManager.default.moveItem(at: tmp, to: dest)
-        }
+        try data.write(to: directory.appendingPathComponent(name), options: .atomic)
     }
 
     private static func sampleDictionary(_ s: FrameSample) -> [String: Any] {

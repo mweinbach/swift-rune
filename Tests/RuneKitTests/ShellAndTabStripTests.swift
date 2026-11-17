@@ -72,8 +72,10 @@ struct ShellAndTabStripTests {
 
         #expect(!isSidebarToggle(.text("b"), mods: Mods(cmd: true), macOS: true))
         #expect(isSidebarToggle(.text("b"), mods: Mods(shift: true, cmd: true), macOS: true))
+        #expect(isSidebarToggle(.text("b"), mods: Mods(shift: true, cmd: true, logo: true), macOS: true))
         #expect(!isSidebarToggle(.text("b"), mods: Mods(ctrl: true), macOS: true))
         #expect(isSidebarToggle(.text("b"), mods: Mods(shift: true, ctrl: true), macOS: false))
+        #expect(!isSidebarToggle(.text("b"), mods: Mods(shift: true, ctrl: true, logo: true), macOS: false))
         #expect(isSidebarToggle(.text("s"), mods: Mods(ctrl: true, cmd: true), macOS: true))
         #expect(!isSidebarToggle(.text("s"), mods: Mods(ctrl: true, cmd: true), macOS: false))
     }
@@ -1523,7 +1525,7 @@ struct ShellAndTabStripTests {
         step()
         focusKey("row1-rename")
         #expect(focusedKey() == "row1-rename")
-        _ = rt.keyDown(KeyEvent(key: .text("b"), mods: Mods(shift: true, cmd: true)), at: t + 0.005)
+        _ = rt.keyDown(KeyEvent(key: .text("b"), mods: RuneKitTestKey.primaryMods(shift: true)), at: t + 0.005)
         step()
         #expect(!rt.state.sidebar.isOpen)
         #expect(focusedKey() == "sv-sidebar-toggle")

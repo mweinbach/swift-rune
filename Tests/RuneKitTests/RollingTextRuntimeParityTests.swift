@@ -214,9 +214,11 @@ struct RollingTextRuntimeParityTests {
         #expect(DefaultFonts.registerIfNeeded())
         let plex = TextStyle(size: 11, weight: 400).mono().family(.named(DefaultFonts.monoFamily))
         let inter = TextStyle(size: 13, weight: 400).family(.named(DefaultFonts.sansFamily))
+        #if canImport(CoreText)
         let probe = TextSystem()
         #expect((CTFontCopyFamilyName(probe.resolveCTFont(style: plex, pixelScale: 2)) as String) == "IBM Plex Mono")
         #expect((CTFontCopyFamilyName(probe.resolveCTFont(style: inter, pixelScale: 2)) as String) == "Inter")
+        #endif
         for (label, font) in [("Copy password", plex), ("Copy password", inter), ("AVATAR Tokyo, WAVE", inter)] {
             let store = RollingTextStore()
             let rt = Runtime(state: PairState(text: label, font: font), viewport: Vec2(600, 120), pixelScale: 2.0, systemDark: true) { s, _ in

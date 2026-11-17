@@ -113,15 +113,13 @@ internal enum RuntimeGrowthRun: Sendable {
     }
 
     mutating func step(
-        steps: Int,
+        by dt: Float,
         spring: Spring,
         edge: StreamEdge,
         grows: inout [String: RuntimeGrowthEntry]
     ) -> Float {
         guard case .formed(let rows, let extents, let targets, var track) = self else { return 0 }
-        for _ in 0..<steps {
-            track.step(spring: spring, edge: edge, carryingTail: false)
-        }
+        track.step(by: dt, spring: spring, edge: edge, carryingTail: false)
         var left = track.h
         var grown: Float = 0
         for (k, extent) in zip(rows, extents) {

@@ -162,17 +162,17 @@ private enum SceneClockStorage {
     private static let key = "rune.sceneClock.threadLocal"
 
     static func current() -> SceneClock {
-        (Thread.current.threadDictionary[key] as? SceneClock) ?? SceneClock()
+        (RuneExecutionContext.locals[key] as? SceneClock) ?? SceneClock()
     }
 
     static func with<T>(_ clock: SceneClock, _ body: () throws -> T) rethrows -> T {
-        let prev = Thread.current.threadDictionary[key]
-        Thread.current.threadDictionary[key] = clock
+        let prev = RuneExecutionContext.locals[key]
+        RuneExecutionContext.locals[key] = clock
         defer {
             if let prev {
-                Thread.current.threadDictionary[key] = prev
+                RuneExecutionContext.locals[key] = prev
             } else {
-                Thread.current.threadDictionary.removeObject(forKey: key)
+                RuneExecutionContext.locals.removeObject(forKey: key)
             }
         }
         return try body()

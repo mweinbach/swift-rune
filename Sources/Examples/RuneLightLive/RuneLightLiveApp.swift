@@ -1,4 +1,5 @@
 import Foundation
+import Rune
 import RuneLight
 import RuneRef
 
@@ -11,7 +12,11 @@ import AppKit
 import MetalKit
 #endif
 
-#if canImport(Metal)
+private func liveError(_ message: String) -> NSError {
+    NSError(domain: "RuneLightLive", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+}
+
+#if canImport(Metal) || (canImport(CRuneGL) && canImport(CRuneOffscreenGL))
 private func runSnap(
     path: String,
     which: LiveSceneKind,
@@ -21,51 +26,77 @@ private func runSnap(
     after: Double,
     mode: LightMode,
     machined: Bool,
-    bare: Bool
+    bare: Bool,
+    preferGL: Bool
 ) throws {
-    let w = 2560
-    let h = 1600
-    guard let device = MTLCreateSystemDefaultDevice() else {
-        throw NSError(domain: "RuneLightLive", code: 1, userInfo: [NSLocalizedDescriptionKey: "Metal unavailable"])
-    }
-    let gfx = try LiveGfx(device: device, width: w, height: h, outputFormat: .rgba8Unorm)
-    let st = LiveState(which: which)
-    st.fake = 0.0
-    let vp = SIMD2<Float>(Float(w), Float(h))
-    _ = st.buildFrame(ts: gfx.ts, scale: 2.0, viewportPx: vp)
+    let width = 2560
+    let height = 1600
+    let viewport = SIMD2<Float>(Float(width), Float(height))
 
-    if let p = at {
-        st.pointerMove(p)
-        if which == .chat {
-            st.jump(p)
-        }
-        if let release = click {
-            st.button(down: true)
-            if release {
-                st.button(down: false)
+    func buildFrame(using text: TextSystem) -> LiveFrame {
+        let state = LiveState(which: which)
+        state.fake = 0
+        _ = state.buildFrame(ts: text, scale: 2, viewportPx: viewport)
+        if let at {
+            state.pointerMove(at)
+            if which == .chat { state.jump(at) }
+            if let release = click {
+                state.button(down: true)
+                if release { state.button(down: false) }
             }
         }
+        state.rays = rays
+        state.mode = mode
+        state.machined = machined
+        state.bare = bare
+        state.fake = after
+        var (frame, _) = state.buildFrame(ts: text, scale: 2, viewportPx: viewport)
+        frame.settings.seed = 0
+        return frame
     }
-    st.rays = rays
-    st.mode = mode
-    st.machined = machined
-    st.bare = bare
-    st.fake = after
 
-    let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
-    desc.usage = [.renderTarget, .shaderRead]
-    desc.storageMode = .shared
-    let out = device.makeTexture(descriptor: desc)!
+    func capture() throws -> Frame {
+        #if canImport(Metal)
+        if !preferGL {
+            guard let device = MTLCreateSystemDefaultDevice() else {
+                throw liveError("Metal unavailable")
+            }
+            DisplayGpuAdapter(backend: .metal, device: device.name).reportIfRequested()
+            let gfx = try LiveGfx(device: device, width: width, height: height, outputFormat: .rgba8Unorm)
+            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+            desc.usage = [.renderTarget, .shaderRead]
+            desc.storageMode = .shared
+            guard let out = device.makeTexture(descriptor: desc) else {
+                throw liveError("Cannot allocate snapshot texture")
+            }
+            gfx.render(buildFrame(using: gfx.ts), into: out)
+            var rgba = [UInt8](repeating: 0, count: width * height * 4)
+            out.getBytes(&rgba, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+            return Frame(width: width, height: height, rgba: rgba)
+        }
+        #endif
+        #if canImport(CRuneGL) && canImport(CRuneOffscreenGL)
+        let context = try OffscreenGLContext()
+        defer { context.close() }
+        let layers = try LightGLLayers(resolve: OffscreenGLContext.resolve)
+        defer { layers.close() }
+        DisplayGpuAdapter(backend: OffscreenGLContext.isGLES ? .openGLES : .openGL,
+                          device: layers.adapterName).reportIfRequested()
+        let frame = buildFrame(using: layers.ts)
+        try layers.drawUI(base: frame.base, text: frame.text, clear: frame.clear, width: width, height: height)
+        return try context.withFramebuffer(width: width, height: height) {
+            try layers.composite(scene: LightScene(prims: frame.prims, lights: frame.lights, settings: frame.settings))
+        }
+        #else
+        throw liveError("OpenGL snapshots require a desktop OpenGL context")
+        #endif
+    }
 
-    let (frame, _) = st.buildFrame(ts: gfx.ts, scale: 2.0, viewportPx: vp)
-    gfx.render(frame, into: out)
-
-    var rgba = [UInt8](repeating: 0, count: w * h * 4)
-    out.getBytes(&rgba, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+    let result = try capture()
     let url = URL(fileURLWithPath: path)
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try Frame(width: w, height: h, rgba: rgba).writePNG(to: url)
-    fputs("wrote \(path)\n", stderr)
+    try result.writePNG(to: url)
+    FileHandle.standardError.write(Data("wrote \(path)\n".utf8))
 }
 #endif
 
@@ -217,7 +248,7 @@ enum RuneLightLiveApp {
         }
         let which: LiveSceneKind = arg("--scene") == "chat" ? .chat : .flashlight
 
-        #if canImport(Metal)
+        #if canImport(Metal) || (canImport(CRuneGL) && canImport(CRuneOffscreenGL))
         if let path = arg("--snap") {
             let at: SIMD2<Float>? = arg("--at").flatMap { s in
                 let parts = s.split(separator: ",")
@@ -240,12 +271,14 @@ enum RuneLightLiveApp {
                 after: after,
                 mode: mode,
                 machined: !args.contains("--soft"),
-                bare: args.contains("--bare")
+                bare: args.contains("--bare"),
+                preferGL: args.contains("--gl")
             )
             return
         }
+        #endif
 
-        #if canImport(AppKit) && canImport(MetalKit)
+        #if canImport(AppKit) && canImport(MetalKit) && canImport(Metal)
         MainActor.assumeIsolated {
             let app = NSApplication.shared
             app.setActivationPolicy(.regular)
@@ -260,13 +293,10 @@ enum RuneLightLiveApp {
             _ = wc
             app.run()
         }
+        #elseif (os(Windows) || os(Linux)) && canImport(CRuneGL)
+        try MainActor.assumeIsolated { try runGLLiveWindow(which: which) }
         #else
-        fputs("error: interactive window requires AppKit/MetalKit; pass --snap PATH for headless rendering\n", stderr)
-        Foundation.exit(1)
-        #endif
-        #else
-        fputs("error: Metal unavailable on this platform\n", stderr)
-        Foundation.exit(1)
+        throw liveError("The live lighting window requires a desktop display")
         #endif
     }
 }

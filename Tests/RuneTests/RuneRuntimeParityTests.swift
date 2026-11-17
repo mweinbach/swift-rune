@@ -4,11 +4,11 @@ import Testing
 @testable import RuneMotion
 @testable import RuneRef
 
-@Suite("Rune Runtime, MetalRenderer, Live & Tooling Parity Tests")
+@Suite("Rune Runtime, GPU, Live & Tooling Parity Tests")
 struct RuneRuntimeParityTests {
-    @Test("MetalRenderer offscreen GPU output matches RuneRef CPU output")
-    func metalVsRefEquivalence() throws {
-        let renderer = try MetalRenderer()
+    @Test("Offscreen GPU output matches RuneRef CPU output")
+    func gpuVsRefEquivalence() throws {
+        let renderer = try OffscreenGPURenderer()
         let w = 160
         let h = 120
         let fullClip = SIMD4<Float>(0, 0, Float(w), Float(h))
@@ -148,19 +148,24 @@ struct RuneRuntimeParityTests {
         #expect(rt.element(byKey: "inner")!.scrolled[1] == 120)
         #expect(rt.element(byKey: "outer")!.scrolled[1] == 0)
 
-        // Inner is at bottom (120); next wheel down chains to outer!
+        // Keep the current wheel gesture on its inner viewport at the edge.
         rt.wheel(WheelEvent(dx: 0, dy: -50), at: innerPt, now: 0.5)
         _ = rt.frame(at: 0.55)
+        #expect(rt.element(byKey: "outer")!.scrolled[1] == 0)
+
+        // A new gesture after the half-second idle interval chains to the outer viewport.
+        rt.wheel(WheelEvent(dx: 0, dy: -50), at: innerPt, now: 1.01)
+        _ = rt.frame(at: 1.05)
         #expect(rt.element(byKey: "outer")!.scrolled[1] == 50)
 
         // Fling outer: upstream pointer.rs:501-509 & motion/tracks.rs:180-186 pass -velocity so
         // negative vy scrolls deeper into content and positive vy moves content back down (reduces scroll offset).
-        rt.fling(vx: 0, vy: -400, at: Vec2(250, 250), now: 0.6)
-        _ = rt.frame(at: 0.7)
+        rt.fling(vx: 0, vy: -400, at: Vec2(250, 250), now: 1.1)
+        _ = rt.frame(at: 1.2)
         let afterDown = rt.element(byKey: "outer")!.scrolled[1]
         #expect(afterDown > 50)
-        rt.fling(vx: 0, vy: 800, at: Vec2(250, 250), now: 0.75)
-        _ = rt.frame(at: 0.85)
+        rt.fling(vx: 0, vy: 800, at: Vec2(250, 250), now: 1.25)
+        _ = rt.frame(at: 1.35)
         #expect(rt.element(byKey: "outer")!.scrolled[1] < afterDown)
         #expect(rt.element(byKey: "outer")!.scrolled[1] < 50)
     }

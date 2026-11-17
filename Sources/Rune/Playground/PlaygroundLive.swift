@@ -1187,19 +1187,15 @@ public final class PlaygroundLive<State> {
     }
 
     internal func nav(_ event: KeyEvent, region: PlaygroundRegion) -> PlaygroundListNavResult {
-        let m = event.mods
-        #if os(macOS) || os(iOS)
-        let other = m.alt || m.ctrl
-        #else
-        let other = m.alt || m.logo
-        #endif
-        guard isOpen, !other, region != .stage else { return .pass }
+        let modifiers = ChordBits.held(event.mods, platform: .current) & ~ChordBits.shift
+        let primary = modifiers == ChordBits.primary
+        guard isOpen, modifiers == 0 || primary, region != .stage else { return .pass }
 
         let letter: Character? = {
-            if case .text(let s) = event.key, !m.cmd, s.count == 1, let c = s.first {
+            if case .text(let s) = event.key, !primary, s.count == 1, let c = s.first {
                 return Character(c.lowercased())
             }
-            if case .space = event.key, !m.cmd {
+            if case .space = event.key, !primary {
                 return " "
             }
             return nil
@@ -1210,9 +1206,9 @@ public final class PlaygroundLive<State> {
             switch event.key {
             case .tab, .escape, .arrowLeft:
                 return .outOfSide
-            case .arrowUp where !m.cmd:
+            case .arrowUp where !primary:
                 return .sideStep(-1)
-            case .arrowDown where !m.cmd:
+            case .arrowDown where !primary:
                 return .sideStep(1)
             default:
                 break
@@ -1228,8 +1224,8 @@ public final class PlaygroundLive<State> {
         if inSide { return .pass }
         if letter == "/" { return .filter }
 
-        let listRes = listNav(event, letter: letter)
-        if case .pass = listRes, !m.cmd {
+        let listRes = listNav(event, letter: letter, primary: primary)
+        if case .pass = listRes, !primary {
             switch event.key {
             case .arrowUp, .arrowDown, .arrowLeft, .arrowRight, .enter:
                 return .stay
@@ -1240,7 +1236,7 @@ public final class PlaygroundLive<State> {
         return listRes
     }
 
-    private func listNav(_ event: KeyEvent, letter: Character?) -> PlaygroundListNavResult {
+    private func listNav(_ event: KeyEvent, letter: Character?, primary: Bool) -> PlaygroundListNavResult {
         let m = event.mods
         if event.key == .tab {
             return m.shift ? .intoStage : .intoSide
@@ -1266,13 +1262,13 @@ public final class PlaygroundLive<State> {
 
         let to: PlaygroundTreeRow
         switch (event.key, letter, header) {
-        case (.arrowUp, _, _) where !m.cmd && !query.isEmpty && (at == nil || at! <= firstStoryIdx):
+        case (.arrowUp, _, _) where !primary && !query.isEmpty && (at == nil || at! <= firstStoryIdx):
             return .filter
-        case (.arrowUp, _, _) where m.cmd:
+        case (.arrowUp, _, _) where primary:
             to = currentRows.first(where: isStoryRow) ?? lastStory
-        case (.arrowDown, _, _) where m.cmd:
+        case (.arrowDown, _, _) where primary:
             to = lastStory
-        case _ where m.cmd:
+        case _ where primary:
             return .pass
         case (.arrowUp, _, _):
             let idx = at.map { ($0 + n - 1) % n } ?? 0

@@ -1,5 +1,7 @@
 #if canImport(CoreGraphics)
 import CoreGraphics
+#else
+import struct RuneMac.CGRect
 #endif
 import Foundation
 import Testing

@@ -1,6 +1,6 @@
 import Foundation
 import RuneMotion
-#if canImport(AppKit)
+#if os(macOS) && canImport(AppKit)
 import AppKit
 #endif
 
@@ -179,7 +179,7 @@ public final class DropPointer: @unchecked Sendable {
         if let windowSampler {
             return windowSampler(window)
         }
-        #if canImport(AppKit)
+        #if os(macOS) && canImport(AppKit)
         guard Thread.isMainThread, let obj = window else { return nil }
         nonisolated(unsafe) let target = obj
         return MainActor.assumeIsolated {

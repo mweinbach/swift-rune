@@ -648,11 +648,11 @@ private enum FramePhaseStorage {
     private static let key = "rune.frameProfile.phases"
 
     static func record(_ phase: FramePhase, wallMs: Double, cpuMs: Double) {
-        var row = (Thread.current.threadDictionary[key] as? [Double])
+        var row = (RuneExecutionContext.locals[key] as? [Double])
             ?? Array(repeating: 0.0, count: 2 * FRAME_PHASES)
         row[phase.rawValue] += wallMs
         row[phase.rawValue + FRAME_PHASES] += cpuMs
-        Thread.current.threadDictionary[key] = row
+        RuneExecutionContext.locals[key] = row
         if CommitBudget.isOn {
             CommitBudget.add(phase, ms: wallMs)
         }
@@ -662,9 +662,9 @@ private enum FramePhaseStorage {
     }
 
     static func take() -> [Double] {
-        let current = (Thread.current.threadDictionary[key] as? [Double])
+        let current = (RuneExecutionContext.locals[key] as? [Double])
             ?? Array(repeating: 0.0, count: 2 * FRAME_PHASES)
-        Thread.current.threadDictionary[key] = Array(repeating: 0.0, count: 2 * FRAME_PHASES)
+        RuneExecutionContext.locals[key] = Array(repeating: 0.0, count: 2 * FRAME_PHASES)
         return current
     }
 }
@@ -695,10 +695,10 @@ public func recordFramePhase(_ phase: FramePhase, wallMs: Double, cpuMs: Double 
 /// Measures wall + thread CPU time of `body` and accumulates it into `phase`.
 @inline(__always)
 public func measureFramePhase<T>(_ phase: FramePhase, _ body: () throws -> T) rethrows -> T {
-    let wallStart = DispatchTime.now().uptimeNanoseconds
+    let wallStart = RuneExecutionContext.uptimeNanoseconds
     let cpuStart = threadCpuMs()
     defer {
-        let wallEnd = DispatchTime.now().uptimeNanoseconds
+        let wallEnd = RuneExecutionContext.uptimeNanoseconds
         let wallMs = Double(wallEnd &- wallStart) / 1_000_000.0
         let cpuMs = max(0.0, threadCpuMs() - cpuStart)
         FramePhaseStorage.record(phase, wallMs: wallMs, cpuMs: cpuMs)
@@ -1259,8 +1259,7 @@ public final class WindowHandle: @unchecked Sendable {
     private var statsStorage = WindowSurfaceStats()
     private var placementProvider: (() -> WindowPlacement?)?
     private var clickThroughApplier: ((Bool) -> Result<Void, Error>)?
-    private let minimizeImpl: @Sendable () -> Void
-    private let placeImpl: @Sendable (PlaceRequest) -> Void
+    private let placeImpl: (@Sendable (PlaceRequest) -> Void)?
 
     /// Creates an unbound handle for a named window (`WindowHandle::new(key)`).
     public init(key: String) {
@@ -1269,8 +1268,7 @@ public final class WindowHandle: @unchecked Sendable {
         self.titleStorage = key
         self.visibleFlag = true
         self.positionStorage = nil
-        self.minimizeImpl = {}
-        self.placeImpl = { _ in }
+        self.placeImpl = nil
     }
 
     /// Creates a closure-backed handle delivered to `App.onWindow` / `App.onReady`.
@@ -1291,7 +1289,6 @@ public final class WindowHandle: @unchecked Sendable {
         self.titleStorage = title
         self.visibleFlag = isVisible
         self.positionStorage = position
-        self.minimizeImpl = onMinimize
         self.placeImpl = onPlace
         self.route = .bound(slot: 0) { _, request in
             switch request {
@@ -1299,6 +1296,8 @@ public final class WindowHandle: @unchecked Sendable {
                 onClose()
             case .focus:
                 onFocus()
+            case .minimize:
+                onMinimize()
             case .show:
                 onShow()
             case .hide:
@@ -1451,7 +1450,7 @@ public final class WindowHandle: @unchecked Sendable {
         send(.close)
     }
 
-    public func minimize() { minimizeImpl() }
+    public func minimize() { send(.minimize) }
 
     public func show() { setVisible(true) }
     public func hide() { setVisible(false) }
@@ -1492,6 +1491,10 @@ public final class WindowHandle: @unchecked Sendable {
     public func setTaskbar(_ state: TaskbarState) { send(.setTaskbar(state)) }
     public func flash(_ on: Bool) { send(.flash(on)) }
 
+    /// When enabled, pointer input passes through the window's content to the window below.
+    /// A bound Windows or Linux handle applies the change on its event thread before returning.
+    /// On native Wayland, decorations can have independent input surfaces. Use a borderless
+    /// window when the entire overlay should pass through pointer input.
     public func setClickThrough(_ clickThrough: Bool) throws {
         lock.lock()
         let applier = clickThroughApplier
@@ -1503,6 +1506,8 @@ public final class WindowHandle: @unchecked Sendable {
         }
     }
 
+    /// The live window frame and client area in physical pixels. Returns nil while unbound
+    /// or on native Wayland, where the compositor does not expose a global window position.
     public func placement() -> WindowPlacement? {
         lock.lock()
         let provider = placementProvider
@@ -1517,6 +1522,12 @@ public final class WindowHandle: @unchecked Sendable {
         }
         visibleFlag = true
         lock.unlock()
-        placeImpl(request)
+        if let placeImpl {
+            placeImpl(request)
+        } else {
+            if let position = request.position { setPosition(position) }
+            if let size = request.size { resizeInstant((size.x, size.y)) }
+            if request.activate { open() } else { show() }
+        }
     }
 }

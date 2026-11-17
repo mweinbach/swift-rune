@@ -12,12 +12,16 @@ public struct ShortcutModifiers: OptionSet, Sendable, Hashable {
     public static let shift   = ShortcutModifiers(rawValue: 1 << 3)
 
     public var keycaps: [String] {
-        keycaps(macOS: true)
+        keycaps(on: .current)
     }
 
     public func keycaps(macOS: Bool) -> [String] {
+        keycaps(on: macOS ? .mac : .linux)
+    }
+
+    public func keycaps(on platform: KeyPlatform) -> [String] {
         var caps: [String] = []
-        if macOS {
+        if platform == .mac {
             if contains(.control) { caps.append("⌃") }
             if contains(.option)  { caps.append("⌥") }
             if contains(.shift)   { caps.append("⇧") }
@@ -26,7 +30,7 @@ public struct ShortcutModifiers: OptionSet, Sendable, Hashable {
             if contains(.control) { caps.append("Ctrl") }
             if contains(.option)  { caps.append("Alt") }
             if contains(.shift)   { caps.append("Shift") }
-            if contains(.command) { caps.append("Super") }
+            if contains(.command) { caps.append(platform == .windows ? "Win" : "Super") }
         }
         return caps
     }
@@ -43,20 +47,47 @@ public struct ShortcutChord: Sendable, Equatable, Hashable {
     }
 
     public var keycaps: [String] {
-        keycaps(macOS: true)
+        keycaps(on: .current)
     }
 
     public func keycaps(macOS: Bool) -> [String] {
-        modifiers.keycaps(macOS: macOS) + [key.uppercased()]
+        keycaps(on: macOS ? .mac : .linux)
+    }
+
+    public func keycaps(on platform: KeyPlatform) -> [String] {
+        if let shortcut = try? parsedShortcut() {
+            return shortcut.keycaps(on: platform)
+        }
+        return modifiers.keycaps(on: platform) + [key.uppercased()]
     }
 
     public var displayString: String {
-        displayString(macOS: true)
+        displayString(on: .current)
     }
 
     public func displayString(macOS: Bool) -> String {
-        let caps = keycaps(macOS: macOS)
-        return macOS ? caps.joined() : caps.joined(separator: "+")
+        displayString(on: macOS ? .mac : .linux)
+    }
+
+    public func displayString(on platform: KeyPlatform) -> String {
+        keycaps(on: platform).joined(separator: platform == .mac ? "" : "+")
+    }
+
+    /// The hardware accelerator accepted by `AppHandle.registerShortcut`.
+    public func parsedShortcut() throws(ShortcutError) -> ParsedShortcut {
+        let name: String = switch key {
+        case "+": "plus"
+        case " ": "space"
+        default: key
+        }
+        guard var shortcut = try? ParsedShortcut.parseOn(name), shortcut.mods == 0 else {
+            throw .invalidAccelerator(key)
+        }
+        if modifiers.contains(.control) { shortcut.mods |= ParsedShortcut.ctrlBit }
+        if modifiers.contains(.option) { shortcut.mods |= ParsedShortcut.altBit }
+        if modifiers.contains(.shift) { shortcut.mods |= ParsedShortcut.shiftBit }
+        if modifiers.contains(.command) { shortcut.mods |= ParsedShortcut.superBit }
+        return shortcut
     }
 
     public var hasPrimaryModifier: Bool {
@@ -83,17 +114,25 @@ public enum ShortcutValidationError: Error, Sendable, Equatable {
     case custom(String)
 
     public func defaultMessage(for chord: ShortcutChord?) -> String {
-        defaultMessage(for: chord, macOS: true)
+        defaultMessage(for: chord, on: .current)
     }
 
     public func defaultMessage(for chord: ShortcutChord?, macOS: Bool) -> String {
+        defaultMessage(for: chord, on: macOS ? .mac : .linux)
+    }
+
+    public func defaultMessage(for chord: ShortcutChord?, on platform: KeyPlatform) -> String {
         guard let chord else {
             return self == .invalidKey ? "That key can't be part of a shortcut." : "The shortcut couldn't be cleared."
         }
-        let label = chord.displayString(macOS: macOS)
+        let label = chord.displayString(on: platform)
         switch self {
         case .missingModifier:
-            return macOS ? "Add ⌘, ⌃ or ⌥." : "Add Ctrl, Alt or Super."
+            switch platform {
+            case .mac: return "Add ⌘, ⌃ or ⌥."
+            case .windows: return "Add Ctrl, Alt or Win."
+            case .linux: return "Add Ctrl, Alt or Super."
+            }
         case .invalidKey: return "That key can't be part of a shortcut."
         case .conflict: return "\(label) is already in use."
         case .unsupported: return "This desktop doesn't support global shortcuts."
@@ -173,17 +212,21 @@ public struct ShortcutRecorderState: Sendable, Equatable {
     }
 
     public var keycaps: [String] {
-        keycaps(macOS: true)
+        keycaps(on: .current)
     }
 
     public func keycaps(macOS: Bool) -> [String] {
+        keycaps(on: macOS ? .mac : .linux)
+    }
+
+    public func keycaps(on platform: KeyPlatform) -> [String] {
         if let refused = refusedChord {
-            return refused.keycaps(macOS: macOS)
+            return refused.keycaps(on: platform)
         }
         if isRecording {
-            return heldModifiers.keycaps(macOS: macOS)
+            return heldModifiers.keycaps(on: platform)
         }
-        return shortcut?.keycaps(macOS: macOS) ?? []
+        return shortcut?.keycaps(on: platform) ?? []
     }
 
     public mutating func markUnregistered() {
@@ -450,7 +493,7 @@ public struct ShortcutRecorder<State> {
 
     static func mapModifiers(_ mods: Mods) -> ShortcutModifiers {
         var out: ShortcutModifiers = []
-        if mods.cmd { out.insert(.command) }
+        if mods.cmd || mods.logo { out.insert(.command) }
         if mods.ctrl { out.insert(.control) }
         if mods.alt { out.insert(.option) }
         if mods.shift { out.insert(.shift) }
@@ -585,11 +628,7 @@ public struct ShortcutRecorder<State> {
     }
 
     static func mapKeyEvent(_ ev: KeyEvent) -> ShortcutInputEvent? {
-        var mods: ShortcutModifiers = []
-        if ev.mods.cmd { mods.insert(.command) }
-        if ev.mods.ctrl { mods.insert(.control) }
-        if ev.mods.alt { mods.insert(.option) }
-        if ev.mods.shift { mods.insert(.shift) }
+        let mods = mapModifiers(ev.mods)
 
         let keyName: String
         switch ev.key {

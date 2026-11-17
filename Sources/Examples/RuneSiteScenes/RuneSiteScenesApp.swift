@@ -597,7 +597,7 @@ public enum RuneSiteScenesApp {
         do {
             _ = try runCLI()
         } catch let err as CLIError {
-            fputs("\(err.description)\n", stderr)
+            RuneStandardIO.error("\(err.description)\n")
             Foundation.exit(1)
         }
     }

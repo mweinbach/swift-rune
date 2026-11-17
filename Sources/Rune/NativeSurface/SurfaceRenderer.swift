@@ -35,10 +35,10 @@ public final class SurfaceRenderer: @unchecked Sendable {
         let color: SurfaceColorInfo
         let orient: Orient
         let textures: [MTLTexture] // [plane0, plane1]
-        #if os(macOS)
+        #if canImport(CoreVideo) && canImport(IOSurface)
         let token: RetainedPlaneToken?
         #endif
-        let objectId: UInt64
+        let revision: UInt64
     }
 
     private final class PreparedDraw {
@@ -74,11 +74,11 @@ public final class SurfaceRenderer: @unchecked Sendable {
     private var pipelinesSourceOver: [MTLPixelFormat: MTLRenderPipelineState] = [:]
     private var pipelinesAdditive: [MTLPixelFormat: MTLRenderPipelineState] = [:]
 
-    #if os(macOS)
+    #if canImport(CoreVideo) && canImport(IOSurface)
     private var importer: CVPixelBufferImporter?
     #endif
 
-    private var cache: [UInt: ImportedFrame] = [:]
+    private var cache: [UInt: (surface: NativeSurface, frame: ImportedFrame)] = [:]
     private var draws: [PreparedDraw] = []
 
     public init(device: MTLDevice, pixelFormat: MTLPixelFormat = .bgra8Unorm_srgb) throws {
@@ -117,7 +117,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
     public var count: Int { draws.count }
     public var isEmpty: Bool { draws.isEmpty }
 
-    #if os(macOS)
+    #if canImport(CoreVideo) && canImport(IOSurface)
     public var livePlanes: Int {
         importer?.livePlanes ?? 0
     }
@@ -176,25 +176,26 @@ public final class SurfaceRenderer: @unchecked Sendable {
         let activeKeys = Set(inputDraws.map { $0.surface.key })
         cache = cache.filter { activeKeys.contains($0.key) }
 
+        var snapshots: [UInt: (frame: NativeSurfaceVideoFrame, mirrored: Bool, revision: UInt64)] = [:]
         var prepared: [PreparedDraw] = []
         prepared.reserveCapacity(inputDraws.count)
 
         for d in inputDraws {
             guard d.rect.z > 0 && d.rect.w > 0 else { continue }
-            guard let (frame, mirrored) = d.surface.latestMirrored() else {
-                cache.removeValue(forKey: d.surface.key)
+            let cacheKey = d.surface.key
+            guard let snapshot = snapshots[cacheKey] ?? d.surface.renderSnapshot() else {
+                cache.removeValue(forKey: cacheKey)
                 continue
             }
 
-            let cacheKey = d.surface.key
-            let frameSig = Self.frameSignature(frame)
+            snapshots[cacheKey] = snapshot
             let imported: ImportedFrame
-            if let cached = cache[cacheKey], cached.objectId == frameSig {
+            if let cached = cache[cacheKey]?.frame, cached.revision == snapshot.revision {
                 imported = cached
             } else {
                 do {
-                    imported = try importFrame(frame, signature: frameSig)
-                    cache[cacheKey] = imported
+                    imported = try importFrame(snapshot.frame, revision: snapshot.revision)
+                    cache[cacheKey] = (d.surface, imported)
                     d.surface.setLastError(nil)
                 } catch {
                     d.surface.setLastError("\(error)")
@@ -203,12 +204,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
                 }
             }
 
-            let upright = imported.orient.upright(width: imported.size.0, height: imported.size.1)
-            let imageRect = d.surface.place.imageRect(forNode: d.rect, imageSize: upright, fit: d.fit)
-            let exact = abs(imageRect.z - Float(upright.0)) < 0.001
-                && abs(imageRect.w - Float(upright.1)) < 0.001
-                && abs(imageRect.x - imageRect.x.rounded()) < 0.001
-                && abs(imageRect.y - imageRect.y.rounded()) < 0.001
+            let (imageRect, exact) = d.imageGeometry(frame: snapshot.frame)
 
             let fmtCode: Float
             switch imported.format {
@@ -237,7 +233,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
                 fade: d.fade,
                 fadeOrigin: SIMD4<Float>(d.fadeOrigin.x, d.fadeOrigin.y, d.opacity, 0),
                 color: SIMD4<Float>(fmtCode, matrixCode, transferCode, d.opacity),
-                sampling: SIMD4<Float>(exact ? 1.0 : 0.0, Float(imported.size.0), Float(imported.size.1), mirrored ? 1.0 : 0.0),
+                sampling: SIMD4<Float>(exact ? 1.0 : 0.0, Float(imported.size.0), Float(imported.size.1), snapshot.mirrored ? 1.0 : 0.0),
                 orient: SIMD4<Float>(imported.orient.m00, imported.orient.m01, imported.orient.m10, imported.orient.m11),
                 clipFade: d.clipFade
             )
@@ -274,7 +270,6 @@ public final class SurfaceRenderer: @unchecked Sendable {
     ) {
         guard index >= 0 && index < draws.count else { return }
         let p = draws[index]
-        p.drawn = true
         let fmt = pixelFormat ?? primaryFormat
         guard let pipe = try? pipeline(for: fmt, blend: blend) else { return }
         encoder.setRenderPipelineState(pipe)
@@ -292,6 +287,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
         encoder.setFragmentSamplerState(samplerLinear, index: 0)
         encoder.setFragmentSamplerState(samplerNearest, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        p.drawn = true
     }
 
     /// Attaches retention tokens and submission/completion timing reporters to `commandBuffer`,
@@ -303,14 +299,14 @@ public final class SurfaceRenderer: @unchecked Sendable {
 
         let submittedAt = ContinuousClock.now
         var heldTextures: [MTLTexture] = []
-        #if os(macOS)
+        #if canImport(CoreVideo) && canImport(IOSurface)
         var heldTokens: [RetainedPlaneToken] = []
         #endif
         var reporters: [(NativeSurface, FrameTiming)] = []
 
         for p in drawnDraws {
             heldTextures.append(contentsOf: p.imported.textures)
-            #if os(macOS)
+            #if canImport(CoreVideo) && canImport(IOSurface)
             if let tok = p.imported.token {
                 heldTokens.append(tok)
             }
@@ -324,16 +320,17 @@ public final class SurfaceRenderer: @unchecked Sendable {
             surface.report(timing)
         }
 
-        #if os(macOS)
+        #if canImport(CoreVideo) && canImport(IOSurface)
         let capturedTokens = heldTokens
         #endif
         let capturedTextures = heldTextures
         let immutableReporters = reporters
         commandBuffer.addCompletedHandler { cb in
             withExtendedLifetime(capturedTextures) {}
-            #if os(macOS)
+            #if canImport(CoreVideo) && canImport(IOSurface)
             withExtendedLifetime(capturedTokens) {}
             #endif
+            guard cb.status == .completed else { return }
             let completedAt = ContinuousClock.now
             let gStart: Double? = cb.gpuStartTime > 0 ? cb.gpuStartTime : nil
             let gEnd: Double? = (cb.gpuEndTime >= cb.gpuStartTime && cb.gpuEndTime > 0) ? cb.gpuEndTime : nil
@@ -346,28 +343,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
         }
     }
 
-    private static func frameSignature(_ frame: NativeSurfaceVideoFrame) -> UInt64 {
-        var h = Hasher()
-        h.combine(frame.id)
-        h.combine(frame.size.0)
-        h.combine(frame.size.1)
-        h.combine(frame.format)
-        h.combine(frame.color)
-        h.combine(frame.orient)
-        switch frame.source {
-        case .bytes(let b):
-            h.combine(0 as UInt8)
-            h.combine(b.planes.count)
-        #if os(macOS)
-        case .pixelBuffer(let pb):
-            h.combine(1 as UInt8)
-            h.combine(ObjectIdentifier(pb))
-        #endif
-        }
-        return UInt64(bitPattern: Int64(h.finalize()))
-    }
-
-    private func importFrame(_ frame: NativeSurfaceVideoFrame, signature: UInt64) throws -> ImportedFrame {
+    private func importFrame(_ frame: NativeSurfaceVideoFrame, revision: UInt64) throws -> ImportedFrame {
         switch frame.source {
         case .bytes(let bf):
             let tex0Fmt: MTLPixelFormat
@@ -384,7 +360,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
             } else {
                 tex1 = try uploadTexture(width: Int(bf.width) / 2, height: Int(bf.height) / 2, pixelFormat: .rg8Unorm, bytesPerRow: Int(bf.width), data: bf.planes[1])
             }
-            #if os(macOS)
+            #if canImport(CoreVideo) && canImport(IOSurface)
             return ImportedFrame(
                 frameId: frame.id,
                 size: frame.size,
@@ -393,7 +369,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
                 orient: frame.orient,
                 textures: [tex0, tex1],
                 token: nil,
-                objectId: signature
+                revision: revision
             )
             #else
             return ImportedFrame(
@@ -403,10 +379,10 @@ public final class SurfaceRenderer: @unchecked Sendable {
                 color: frame.color,
                 orient: frame.orient,
                 textures: [tex0, tex1],
-                objectId: signature
+                revision: revision
             )
             #endif
-        #if os(macOS)
+        #if canImport(CoreVideo) && canImport(IOSurface)
         case .pixelBuffer(let pb):
             if importer == nil {
                 importer = try CVPixelBufferImporter(device: device)
@@ -422,7 +398,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
                 orient: frame.orient,
                 textures: textures,
                 token: token,
-                objectId: signature
+                revision: revision
             )
         #endif
         }

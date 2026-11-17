@@ -1,4 +1,6 @@
+#if canImport(CoreText)
 import CoreText
+#endif
 import Foundation
 import Testing
 @testable import Rune
@@ -22,6 +24,7 @@ struct DefaultFontsParityTests {
         #expect(DefaultFonts.registerIfNeeded())
     }
 
+    #if canImport(CoreText)
     @Test("default systemUI resolves to Inter across weights and monospace resolves to IBM Plex Mono")
     func defaultFamiliesResolveToBundledInterAndPlex() throws {
         let ts = TextSystem()
@@ -40,6 +43,7 @@ struct DefaultFontsParityTests {
         #expect((CTFontCopyPostScriptName(semibold) as String) == "Inter-SemiBold")
         #expect((CTFontCopyPostScriptName(mono) as String) == "IBMPlexMono")
     }
+    #endif
 
     @Test("default fonts shape representative Latin/Unicode/code strings deterministically")
     func defaultFontsShapeDeterministically() throws {

@@ -112,6 +112,9 @@ public struct FxRenderPassGraph: Sendable, Equatable {
     public let instances: [FxInstRaw]
     public let tableData: [SIMD4<Float>]
     public let stats: FxStats
+    /// Indexes into a simulation are valid only on the planner and frame that supplied them.
+    let simulationID: UUID?
+    let simulationFrame: UInt64?
 
     public static func build(
         viewport: SIMD2<UInt32>,
@@ -232,7 +235,9 @@ public struct FxRenderPassGraph: Sendable, Equatable {
             prepared: prepared,
             instances: instances,
             tableData: tableData,
-            stats: stats
+            stats: stats,
+            simulationID: fireSim?.identity,
+            simulationFrame: fireSim?.frame
         )
     }
 }
@@ -760,7 +765,7 @@ public final class FxRenderer: @unchecked Sendable {
     @discardableResult
     public func blurBackdrop(commandBuffer: MTLCommandBuffer, backdrop: MTLTexture, layer: Int) throws -> Bool {
         setLayerBackdrop(backdrop, layer: layer)
-        guard let item = preparedByLayer[layer], item.blurPx > 0.0 else { return false }
+        guard let item = preparedByLayer[layer], let graph = lastGraph, item.blurPx > 0.0 else { return false }
         if blurDownPipeline == nil || blurUpPipeline == nil {
             try compileUtilityPipelines()
         }
@@ -778,13 +783,38 @@ public final class FxRenderer: @unchecked Sendable {
         let level = min(max(log2f(max(item.blurPx / 2.0, 1.0)), 0.0), Float(mips - 1))
         let n = min(max(Int(ceilf(level)), 1), mips - 1)
         let frac = min(max(level - Float(n - 1), 0.0), 1.0)
-        let margin = item.blurPx * 3.0 + 8.0
-        let vw = lastViewport.x
-        let vh = lastViewport.y
-        let rx0 = max(item.boundsPx.x - margin, 0.0)
-        let ry0 = max(item.boundsPx.y - margin, 0.0)
-        let rx1 = min(item.boundsPx.z + margin, Float(vw))
-        let ry1 = min(item.boundsPx.w + margin, Float(vh))
+        let bounds = item.boundsPx
+        let instance = graph.instances[Int(item.instanceIndex)]
+        let scale = instance.shape.y
+        let sampleMargin: Float
+        if item.kind == .fill {
+            // The fluted-glass shader samples across each rib, including chromatic dispersion.
+            sampleMargin = 1.35 * abs(instance.p0.z) * (1 + 0.3 * abs(instance.p1.x)) * scale
+        } else {
+            // Lens magnification moves samples about the shape center before applying the bevel.
+            let presence = instance.p1.x
+            let mag = 1 + (instance.p0.w - 1) * presence
+            let cx = (instance.rect.x + instance.rect.z / 2) * scale
+            let cy = (instance.rect.y + instance.rect.w / 2) * scale
+            let extent = max(abs(bounds.x - cx), abs(bounds.z - cx), abs(bounds.y - cy), abs(bounds.w - cy))
+            let bend = 1.12 * abs(instance.p0.y) * presence * (1 + abs(instance.p0.z)) * scale
+            sampleMargin = mag == 0 ? .infinity : extent * abs(1 / mag - 1) + bend / abs(mag)
+        }
+
+        // Propagate the support of the two filters backwards from the pixels the layer samples.
+        // A bilinear up tap can reach two source texels, and a bilinear down tap can reach three.
+        func texelSize(_ mip: Int) -> Float {
+            max(Float(lastViewport.x) / Float(pyr.down[mip].width),
+                Float(lastViewport.y) / Float(pyr.down[mip].height))
+        }
+        var upMargins = [Float](repeating: sampleMargin + texelSize(0), count: n + 1)
+        for mip in 1...n {
+            upMargins[mip] = upMargins[mip - 1] + 2 * texelSize(mip)
+        }
+        var downMargins = upMargins
+        for mip in (0..<n).reversed() {
+            downMargins[mip] = downMargins[mip + 1] + 3 * texelSize(mip)
+        }
 
         let base = blurSlot
         blurSlot += mips
@@ -802,30 +832,28 @@ public final class FxRenderer: @unchecked Sendable {
             memcpy(instBuffer.contents().advanced(by: instOffset), &xf, MemoryLayout<SIMD4<Float>>.stride)
         }
 
-        func scissorRect(mip m: Int) -> MTLScissorRect {
-            let k = Float(2 << m)
-            let w = max(((vw + 1) / 2) >> m, 1)
-            let h = max(((vh + 1) / 2) >> m, 1)
-            let x0 = min(UInt32(max(floorf(rx0 / k), 0.0)) &- min(UInt32(max(floorf(rx0 / k), 0.0)), 2), w - 1)
-            let y0 = min(UInt32(max(floorf(ry0 / k), 0.0)) &- min(UInt32(max(floorf(ry0 / k), 0.0)), 2), h - 1)
-            let x1 = min(UInt32(max(ceilf(rx1 / k), 0.0)) + 2, w)
-            let y1 = min(UInt32(max(ceilf(ry1 / k), 0.0)) + 2, h)
-            return MTLScissorRect(
-                x: Int(x0),
-                y: Int(y0),
-                width: Int(max(x1, x0 + 1) - x0),
-                height: Int(max(y1, y0 + 1) - y0)
-            )
+        func scissor(_ dst: MTLTexture, margin: Float) -> MTLScissorRect {
+            let sx = Float(dst.width) / Float(lastViewport.x)
+            let sy = Float(dst.height) / Float(lastViewport.y)
+            let x0 = Int(max(0, floorf((bounds.x - margin) * sx)))
+            let y0 = Int(max(0, floorf((bounds.y - margin) * sy)))
+            let x1 = Int(min(Float(dst.width), ceilf((bounds.z + margin) * sx)))
+            let y1 = Int(min(Float(dst.height), ceilf((bounds.w + margin) * sy)))
+            return MTLScissorRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
         }
 
-        func runPass(pso: MTLRenderPipelineState, src: MTLTexture, fine: MTLTexture, dst: MTLTexture, slot: Int, mip: Int) {
+        func runPass(pso: MTLRenderPipelineState, src: MTLTexture, fine: MTLTexture,
+                     dst: MTLTexture, slot: Int, margin: Float) {
             let rpd = MTLRenderPassDescriptor()
             rpd.colorAttachments[0].texture = dst
-            rpd.colorAttachments[0].loadAction = .load
+            // Neighboring taps can cross the scissor at coarser levels. Loading
+            // unwritten float texels can propagate NaNs through the entire blur.
+            rpd.colorAttachments[0].loadAction = .clear
+            rpd.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
             rpd.colorAttachments[0].storeAction = .store
             guard let pass = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) else { return }
             pass.label = "fx blur"
-            pass.setScissorRect(scissorRect(mip: mip))
+            pass.setScissorRect(scissor(dst, margin: margin))
             pass.setRenderPipelineState(pso)
             pass.setFragmentTexture(src, index: 0)
             pass.setFragmentTexture(fine, index: 1)
@@ -837,11 +865,11 @@ public final class FxRenderer: @unchecked Sendable {
 
         for m in 0...n {
             let src = (m == 0) ? backdrop : pyr.down[m - 1]
-            runPass(pso: downPSO, src: src, fine: dummyTexture, dst: pyr.down[m], slot: base + m, mip: m)
+            runPass(pso: downPSO, src: src, fine: dummyTexture, dst: pyr.down[m], slot: base + m, margin: downMargins[m])
         }
         for m in (0..<n).reversed() {
             let src = (m + 1 == n) ? pyr.down[m + 1] : pyr.up[m + 1]
-            runPass(pso: upPSO, src: src, fine: pyr.down[m], dst: pyr.up[m], slot: base + m, mip: m)
+            runPass(pso: upPSO, src: src, fine: pyr.down[m], dst: pyr.up[m], slot: base + m, margin: upMargins[m])
         }
         return true
     }

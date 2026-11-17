@@ -749,9 +749,9 @@ struct PixelSnapParityTests {
         var spring: Float
     }
 
-    private func makeGlideRuntime(at: SIMD2<Float> = .zero, spring: Float) -> Runtime<GlideCard> {
+    private func makeGlideRuntime(at: SIMD2<Float> = .zero, spring: Float, title: String = "Quiet harbor glides") -> Runtime<GlideCard> {
         Runtime(state: GlideCard(at: at, spring: spring), viewport: Vec2(240, 120), pixelScale: 2.0) { s, _ in
-            let label: El<GlideCard> = text("Quiet harbor glides")
+            let label: El<GlideCard> = text(title)
                 .font(TextStyle(size: 13.0, weight: 500.0))
                 .color(.white)
             let sp = Spring(duration: s.spring, bounce: 0.0)
@@ -841,6 +841,45 @@ struct PixelSnapParityTests {
         }
         #expect(ticks.isEmpty, "ink ticks against card: \(ticks)")
     }
+
+    #if os(macOS) || os(Linux) || os(Windows)
+    @Test("Native GPU glyph coverage follows the card at fractional device pixels")
+    func nativeGlyphGlideReadback() throws {
+        let gpu = try OffscreenGPURenderer()
+        let rt = makeGlideRuntime(spring: 0.3, title: "Quiet harbor glides offshore")
+        _ = rt.renderFrame(at: 0)
+        rt.update(at: 0) { card, _ in card.at = SIMD2(2, 2) }
+        var minOffset = SIMD2<Float>(repeating: .greatestFiniteMagnitude)
+        var maxOffset = -minOffset
+        var fractional = 0
+        for step in 1...24 {
+            var frame = rt.renderFrame(at: Double(step) / 120)
+            let card = try #require(frame.instances.first { $0.params.y == KIND_RECT && $0.fill.w > 0 })
+            let origin = SIMD2(card.rect.x, card.rect.y)
+            if abs(origin.x - origin.x.rounded()) > 0.15 { fractional += 1 }
+            frame.instances.removeAll { $0.params.y != KIND_GLYPH }
+            frame.clearColor = .zero
+            let image = try gpu.renderOffscreen(frame)
+            var weight = 0
+            var xSum = 0, ySum = 0
+            for y in 0..<image.height {
+                for x in 0..<image.width {
+                    let alpha = Int(image.rgba[(y * image.width + x) * 4 + 3])
+                    weight += alpha
+                    xSum += alpha * x
+                    ySum += alpha * y
+                }
+            }
+            try #require(weight > 0)
+            let offset = SIMD2(Float(xSum), Float(ySum)) / Float(weight) - origin
+            minOffset = SIMD2(min(minOffset.x, offset.x), min(minOffset.y, offset.y))
+            maxOffset = SIMD2(max(maxOffset.x, offset.x), max(maxOffset.y, offset.y))
+        }
+        #expect(fractional > 4)
+        #expect(maxOffset.x - minOffset.x <= 0.30)
+        #expect(maxOffset.y - minOffset.y <= 0.30)
+    }
+    #endif
 
     @Test("a_glide_keeps_the_atlas_bounded")
     func glideKeepsAtlasBounded() {
@@ -960,7 +999,7 @@ struct PixelSnapParityTests {
             }
         }
 
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rectKind = Float(PrimitiveKind.roundedRect.rawValue)
         for anchored in [false, true] {
             var minIconArea = Float.greatestFiniteMagnitude
@@ -1052,7 +1091,7 @@ struct PixelSnapParityTests {
             )
         }
 
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         for zoom: Float in [1.0, 1.6] {
             let rt = Runtime<MovingCase>(
                 state: MovingCase(at: .zero, zoom: zoom),
@@ -1112,7 +1151,7 @@ struct PixelSnapParityTests {
             return col().size(160.0, 160.0).child(page).child(pop)
         }
 
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<SwapCase>(
             state: SwapCase(swapped: false, discR: 2.8),
             viewport: Vec2(160.0, 160.0),

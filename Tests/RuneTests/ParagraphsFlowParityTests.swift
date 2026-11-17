@@ -20,11 +20,22 @@ struct ParagraphsFlowParityTests {
         return s
     }()
 
-    #if canImport(CoreText) && canImport(CoreGraphics)
     /// `newline`: a quarter of the primary font's ascent and descent at the field's size, points.
-    static func newlinePt(_ ts: TextSystem, scale: Float) -> Float {
+    static func newlinePt(_ ts: TextSystem, scale: Float) throws -> Float {
+        #if canImport(CoreText) && canImport(CoreGraphics)
         let font = ts.resolveCTFont(style: style, pixelScale: scale)
         return 0.25 * Float(CTFontGetAscent(font) + abs(CTFontGetDescent(font))) / scale
+        #elseif canImport(CRuneDesktopText)
+        let line = DesktopTextLine(text: " ", start: 0, style: style, families: ts.families(),
+                                   language: ts.language, scale: scale, span: { _ in nil })
+        #if os(Linux) || os(Windows)
+        return 0.25 * (try #require(line)).strutFontHeightPt
+        #else
+        return 0.25 * (line?.strutFontHeightPt ?? style.size)
+        #endif
+        #else
+        return 0.25 * style.size
+        #endif
     }
 
     @Test("a selection across a paragraph break shows the break newline-wide at the end of its line (range_boxes)")
@@ -36,7 +47,7 @@ struct ParagraphsFlowParityTests {
         let pl = try #require(box.paragraphs)
         #expect(pl.paragraphs.count == 3)
         let shaped = box.shaped
-        let ws = Self.newlinePt(ts, scale: 2)
+        let ws = try Self.newlinePt(ts, scale: 2)
         #expect(abs(shaped.paragraphNewlinePt - ws) < 1e-4)
         // Each paragraph's own boxes, as its own layout gives them.
         let ab = ts.layoutKeyed(text: "ab", style: Self.style, maxWidth: 300, pixelScale: 2, emitGlyphs: false, keep: .owned).shaped
@@ -77,12 +88,32 @@ struct ParagraphsFlowParityTests {
         #expect(pl.paragraphs.map(\.flow) == [.rtl, .ltr])
         let ws = box.shaped.paragraphNewlinePt
         let first = pl.paragraphs[0]
+        let line = try #require(box.shaped.textTestLines.first)
+        let advance = try #require(box.shaped.lineAdvancesPx.first)
+        #expect(abs(line.originX + advance.widthPx / 2 - 300) < 0.01)
         let own = ts.selectionRects(in: first.layout.shaped, utf8Range: 0..<first.end, pixelScale: 2)
         let ownLeft = try #require(own.map(\.x).min())
         let rects = ts.selectionRects(in: box.shaped, utf8Range: 0..<(first.end + 1), pixelScale: 2)
         #expect(rects.count == own.count)
         let left = try #require(rects.map(\.x).min())
         #expect(abs(left - (ownLeft - ws)) < 1e-3)
+    }
+
+    @Test("drawing one visible paragraph emits atlas glyphs at authored UTF-8 offsets")
+    func visibleParagraphGlyphs() throws {
+        let ts = TextSystem()
+        let box = ts.layoutInput(text: "é\nWQ\nfern", spans: nil, pills: [], style: Self.style,
+                                 maxWidth: 240, pixelScale: 2, emitGlyphs: false,
+                                 request: ParagraphRequest(field: 5, forced: .ltr, startFlow: .ltr))
+        let layout = try #require(box.paragraphs)
+        let paragraph = layout.paragraphs[1]
+        let center = paragraph.y + paragraph.height / 2
+        let drawn = layout.glyphs(top: center, bottom: center, using: ts)
+        let origin = "é\n".utf8.count
+        #expect(Set(drawn.map(\.utf8Offset)) == [origin, origin + 1])
+        #expect(drawn.contains { $0.rect.z > 0 && $0.rect.w > 0 && $0.uv.z > $0.uv.x })
+        let own = layout.glyphs(at: 1, using: ts)
+        #expect(drawn.map(\.rect.y) == own.map { $0.rect.y + paragraph.y / 2 })
     }
 
     @Test("by-paragraph keys: a paragraph with no strong character reads as the one before it, the first the start flow")
@@ -99,25 +130,32 @@ struct ParagraphsFlowParityTests {
         #expect(underRtl.composed.lineIsRTL == [true, false, false, true, true])
     }
 
-    @Test("one CoreText layout of a dirByParagraph text resolves paragraphs as key_paragraphs does")
-    func singleLayoutPlaintextParagraphs() {
+    @Test("one layout of a dirByParagraph text resolves paragraphs as key_paragraphs does")
+    func singleLayoutPlaintextParagraphs() throws {
         let ts = TextSystem()
         let arabic = "\u{645}\u{631}\u{62D}\u{628}\u{627}"
         var plain = Self.style
         plain.byParagraphStart = .ltr
         let a = ts.shape(text: "\(arabic)\n123\nhello", style: plain, maxWidth: 300, pixelScale: 1, emitGlyphs: false)
         #expect(a.lineIsRTL == [true, true, false])
+        let line = try #require(a.textTestLines.first)
+        let advance = try #require(a.lineAdvancesPx.first)
+        #expect(abs(line.originX + advance.widthPx - 300) < 0.01)
         var rtlStart = Self.style
         rtlStart.byParagraphStart = .rtl
         let b = ts.shape(text: "123\nhello", style: rtlStart, maxWidth: 300, pixelScale: 1, emitGlyphs: false)
         #expect(b.lineIsRTL == [true, false])
-        // Without it (not a by-paragraph text) a neutral line takes CoreText's natural way.
+        // Without it, a neutral line takes its natural direction.
         let c = ts.shape(text: "\(arabic)\n123", style: Self.style, maxWidth: 300, pixelScale: 1, emitGlyphs: false)
         #expect(c.lineIsRTL == [true, false])
+        // Arabic-Indic digits are weak, and a directional isolate keeps its contents private.
+        let mixed = ts.shape(text: "\u{0661}\u{0662} English\n\u{2068}\(arabic)\u{2069} English",
+                             style: Self.style, maxWidth: 300, pixelScale: 1, emitGlyphs: false)
+        #expect(mixed.lineIsRTL == [false, false])
     }
 
     @Test("a by-paragraph field's pill label is isolated: its paragraph's direction skips it (with_isolates, flow_of)")
-    func pillLabelsAreIsolated() {
+    func pillLabelsAreIsolated() throws {
         let ts = TextSystem()
         let arabic = "\u{645}\u{631}\u{62D}\u{628}\u{627}"
         let label = "@src/app.ts"
@@ -128,11 +166,12 @@ struct ParagraphsFlowParityTests {
         let isolated = ts.shape(text: text, pills: [pill], style: byParagraph, maxWidth: 400, pixelScale: 1, emitGlyphs: false)
         // The label's letters don't count: the line reads right to left from its Arabic.
         #expect(isolated.lineIsRTL.first == true)
-        // FSI after the pill's lead and PDI before its trail, each a marker (U+2068 / U+2069).
-        #expect(isolated.markerMap.entries.count == 4)
         // One layout of the same text that isn't by paragraph reads the label's letters first.
         let whole = ts.shape(text: text, pills: [pill], style: Self.style, maxWidth: 400, pixelScale: 1, emitGlyphs: false)
         #expect(whole.lineIsRTL.first == false)
+        // On CoreText inline advance markers, FSI and PDI are part of the laid-out string.
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        #expect(isolated.markerMap.entries.count == 4)
         #expect(whole.markerMap.entries.count == 2)
         // A caret either side of the pill and inside its label lands where the markers map it.
         for at in [0, label.utf8.count, label.utf8.count + 1] {
@@ -140,8 +179,22 @@ struct ParagraphsFlowParityTests {
             let shapedU16 = isolated.markerMap.shapedU16(forAuthU16: u16)
             #expect(isolated.markerMap.authU16(forShapedU16: shapedU16) == u16)
         }
+        #endif
+        #if canImport(CoreText) || os(Linux) || os(Windows)
+        // The Arabic word is visually to the left of the isolated label in this RTL paragraph.
+        let wordStart = label.utf8.count + 1
+        let word = ts.selectionRects(in: isolated, utf8Range: wordStart..<(wordStart + arabic.utf8.count), pixelScale: 1)
+        let middle = ts.selectionRects(in: isolated, utf8Range: 1..<4, pixelScale: 1)
+        let wordRight = try #require(word.map { $0.x + $0.z }.max())
+        let labelLeft = try #require(middle.map(\.x).min())
+        #expect(wordRight <= labelLeft + 0.01)
+        let chip = try #require(isolated.pillChips.first).rect
+        #expect(wordRight <= chip.x + 1)
+        #expect(chip.x <= labelLeft && labelLeft < chip.x + chip.z)
+        let caret = ts.caretRect(in: isolated, utf8Offset: 2, pixelScale: 1)
+        #expect(ts.hitTestUTF8Offset(in: isolated, localX: caret.x, localY: caret.y + caret.w / 2, pixelScale: 1) == 2)
+        #endif
     }
-    #endif
 
     // MARK: - TextSpec::by_paragraph / paragraphs_flow / plaintext_flow
 

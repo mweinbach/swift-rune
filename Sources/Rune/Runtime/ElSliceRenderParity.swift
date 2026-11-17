@@ -554,7 +554,8 @@ internal extension Runtime {
 
         if clampedCatchUp > 0.0 {
             var stepClock = t0
-            while let wake = nextWakeDeadline(after: stepClock), wake <= catchUpEnd + 1e-9 {
+            // Paint-owned deadlines are consumed by the final paint, never by a timer poll.
+            while let wake = nextWakeDeadline(after: stepClock, includePaint: false), wake <= catchUpEnd + 1e-9 {
                 let w = min(catchUpEnd, max(stepClock, wake))
                 let animW = cxSettings.advanceClock(to: w)
                 if !fitWindowState.frameHolds() {

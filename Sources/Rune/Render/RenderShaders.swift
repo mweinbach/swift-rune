@@ -299,7 +299,8 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         RenderInstanceIn i = instances[iid];
         i.rect = float4(i.rect.xy + offset, i.rect.zw);
         i.fill *= alpha;
-        i.border *= alpha;
+        // Image border stores atlas bounds rather than a paint color.
+        if (i.params.y != 7.0) { i.border *= alpha; }
         if (i.params.y > 3.5 && i.params.y < 4.5) { i.uv *= alpha; }
         if (i.params.y > 4.5 && i.params.y < 6.5) {
             i.radii += float4(offset, offset);
@@ -431,9 +432,7 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
     }
 
     static inline float4 image_texel(int2 t, bool premultiplied, texture2d<float> images, constant RenderGlobals &g) {
-        int2 dims = int2(images.get_width(), images.get_height());
-        int2 ct = clamp(t, int2(0), max(dims - int2(1), int2(0)));
-        float4 c = images.read(uint2(ct));
+        float4 c = images.read(uint2(t));
         if (g.flags.x > 0.5) {
             if (c.a <= 0.0) { return float4(0.0); }
             float3 lin = select(c.rgb, c.rgb / c.a, premultiplied);
@@ -638,13 +637,19 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
                 float2 arc = ring_arc(i.pos.xy + g.projection.xy - i.rect.xy, i.rect.zw, i.radii, bw);
                 col = mix(i.fill, i.border, t) * (ring * dash_cov(arc.x, arc.y, i.uv.xyz));
             } else {
-                float2 local = (i.p - i.rect.xy) * i.uv.zw / i.rect.zw - float2(0.5);
-                int2 lo = int2(i.uv.xy);
-                int2 hi = lo + int2(i.uv.zw) - int2(1);
-                float2 base = floor(local);
-                float2 f = local - base;
-                int2 t0 = clamp(lo + int2(base), lo, hi);
-                int2 t1 = clamp(lo + int2(base) + int2(1, 1), lo, hi);
+                float2 size = float2(images.get_width(), images.get_height());
+                float2 end = i.uv.xy + i.uv.zw;
+                // The UV window may be a fractional crop within a larger packed image.
+                bool hasBounds = all(i.border.zw > i.border.xy);
+                float2 lower = clamp(hasBounds ? i.border.xy : min(i.uv.xy, end), float2(0), size);
+                float2 upper = clamp(hasBounds ? i.border.zw : max(i.uv.xy, end), float2(0), size);
+                float2 lo = min(floor(lower + lower * 1.1920929e-7), size - 1.0);
+                float2 hi = clamp(ceil(upper - upper * 1.1920929e-7) - 1.0, lo, size - 1.0);
+                float2 coords = (i.p - i.rect.xy) / i.rect.zw;
+                float2 pixel = clamp(i.uv.xy + coords * i.uv.zw - 0.5, lo, hi);
+                int2 t0 = int2(floor(pixel));
+                int2 t1 = min(t0 + int2(1), int2(hi));
+                float2 f = fract(pixel);
                 bool premultiplied = i.params.z > 0.5;
                 float4 c = mix(
                     mix(image_texel(t0, premultiplied, images, g), image_texel(int2(t1.x, t0.y), premultiplied, images, g), f.x),

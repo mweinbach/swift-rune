@@ -5,6 +5,23 @@ import Testing
 @Suite("Text Closeout Remaining Parity (Language, Trak, Cursor, Metrics, Input, Image, Spell, A11y)")
 struct TextCloseoutRemainingTests {
 
+    @Test func imageIDsUseTheSameSHA256OnEveryPlatform() {
+        let vectors = [
+            ("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+            ("abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+            ("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"),
+            (String(repeating: "a", count: 64),
+             "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"),
+        ]
+        for (message, hex) in vectors {
+            let data = Data(message.utf8)
+            let bytes = ImageContentDigest.sha256(data)
+            #expect(bytes.map { String(format: "%02x", $0) }.joined() == hex)
+            #expect(ImageId.contentHash(data).bytes == bytes)
+        }
+    }
+
     // MARK: - text/language.rs (2 Rust tests)
 
     @Test
@@ -179,8 +196,8 @@ struct TextCloseoutRemainingTests {
         let shaped = ts.shape(text: text, spans: nil, style: style, maxWidth: 110, pixelScale: 1.0, emitGlyphs: false)
         #expect(shaped.lineCount >= 2)
 
-        let line0End = shaped.lineStrings[0].utf8Start + shaped.lineStrings[0].text.utf8.count
-        if shaped.lineStrings.count >= 2 && shaped.lineStrings[1].utf8Start == line0End {
+        let line0End = shaped.textTestLines[0].utf8Start + shaped.textTestLines[0].text.utf8.count
+        if shaped.textTestLines.count >= 2 && shaped.textTestLines[1].utf8Start == line0End {
             let upRect = ts.caretRect(in: shaped, utf8Offset: line0End, affinity: .upstream, pixelScale: 1.0)
             let downRect = ts.caretRect(in: shaped, utf8Offset: line0End, affinity: .downstream, pixelScale: 1.0)
             #expect(upRect.y < downRect.y)
@@ -237,9 +254,11 @@ struct TextCloseoutRemainingTests {
         #expect(TextCoreTextMatch.browserDefault(platform: "MacIntel", touchPoints: 0) == .on)
         #expect(TextCoreTextMatch.browserDefault(platform: "MacIntel", touchPoints: 5) == .off)
         #expect(TextCoreTextMatch.coverageExponent(mode: .off, fill: [1, 1, 1, 1], apple: true, windows: false) == 1.0)
-        #expect(TextCoreTextMatch.coverageExponent(mode: .off, fill: [0, 0, 0, 1], apple: false, windows: false) > 1.0)
-        #expect(TextCoreTextMatch.coverageExponent(mode: .off, fill: [1, 1, 1, 1], apple: false, windows: true) < 1.0)
-        #expect(TextCoreTextMatch.coverageExponent(mode: .off, fill: [0, 0, 0, 1], apple: false, windows: true) > 1.0)
+        #expect(TextCoreTextMatch.coverageExponent(mode: .off, fill: [0, 0, 0, 1], apple: false, windows: false) == 1.02)
+        #expect(abs(TextCoreTextMatch.coverageExponent(mode: .off, fill: [1, 1, 1, 1], apple: false, windows: false) - 0.83) < 1e-6)
+        #expect(abs(TextCoreTextMatch.coverageExponent(mode: .off, fill: [0.25, 0.25, 0.25, 0.5], apple: false, windows: false) - 0.925) < 1e-6)
+        #expect(abs(TextCoreTextMatch.coverageExponent(mode: .off, fill: [1, 1, 1, 1], apple: false, windows: true) - 0.45) < 1e-6)
+        #expect(TextCoreTextMatch.coverageExponent(mode: .off, fill: [0, 0, 0, 1], apple: false, windows: true) == 1.12)
         #expect(TextCoreTextMatch.coverageExponent(mode: .directWrite, fill: [0, 0, 0, 1], apple: false, windows: true) == 1.0)
         #expect(TextCoreTextMatch.coverageExponent(mode: .windfoilChromium, fill: [0, 0, 0, 1], apple: true, windows: false) > 1.0)
         #expect(FontSmoothing.all.count == 10)
@@ -369,7 +388,6 @@ struct TextCloseoutRemainingTests {
             scale: 2.0
         )
         #expect(sel?.selected.url == "2x.png")
-        #expect(ImageId.contentHash(Data("abc".utf8)).bytes.count == 32)
 
         let anim = DecodedImage(
             id: "a",

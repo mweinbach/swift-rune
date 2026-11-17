@@ -234,7 +234,7 @@ public enum RuneGlassPanelApp {
         if s.landed == nil && now - started >= GlassPanelConfig.flightSeconds {
             s.landed = now
             let elapsed = String(format: "%.3f", now - started)
-            fputs("glass-panel: flight drew \(s.frames) frames in \(elapsed) s\n", stderr)
+            RuneStandardIO.error("glass-panel: flight drew \(s.frames) frames in \(elapsed) s\n")
         }
         if let landed = s.landed, now - landed >= GlassPanelConfig.holdSeconds {
             s.handed = true

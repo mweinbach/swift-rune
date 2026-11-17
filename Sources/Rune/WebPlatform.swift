@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
 import RuneRef
 
@@ -94,6 +97,16 @@ public enum WebMath {
 
 /// Translates DOM `KeyboardEvent.code` / `KeyboardEvent.key` into `Rune.Key`.
 public enum WebKeyMap {
+    static func physical(_ code: String) -> PhysicalKeyCode? {
+        switch code {
+        case "MetaLeft", "OSLeft": return .superLeft
+        case "MetaRight", "OSRight": return .superRight
+        default:
+            guard let first = code.first else { return nil }
+            return PhysicalKeyCode(rawValue: first.lowercased() + code.dropFirst())
+        }
+    }
+
     public static func translate(code: String, key: String = "") -> Key? {
         switch code {
         case "Enter", "NumpadEnter": return .enter
@@ -231,6 +244,13 @@ public struct WebFieldMirror: Sendable, Equatable, Encodable {
 @MainActor
 public final class WebAppHost<State> {
     public let runtime: Runtime<State>
+    private var gpuFrames = false
+    let compositor: AnyCompositor<State>?
+    private let compositorDevice = DeviceKey.next()
+    private var previousCompositorTime: Double?
+    private(set) var uiPasses = 1
+    private let followsSystemAppearance: Bool
+    private let forceReducedMotion: Bool
     /// Receives field changes for the page's textarea or password input. An activating
     /// input event requests browser focus even if the mirrored value stayed the same.
     public var onFieldChange: ((WebFieldMirror?, _ activate: Bool) -> Void)?
@@ -239,49 +259,73 @@ public final class WebAppHost<State> {
     public private(set) var surfaceSize: (UInt32, UInt32)
     public private(set) var devicePixelRatio: Float
 
-    public init(
+    public convenience init(
         spec: AppSpec<State>,
         config: WebAppConfig = WebAppConfig(),
         viewport: Vec2? = nil,
         devicePixelRatio: Float = 1.0,
-        dark: Bool? = nil
+        dark: Bool? = nil,
+        forceReducedMotion: Bool = false
     ) {
         let vp = viewport ?? spec.size
         let dpr = max(0.5, devicePixelRatio)
-        self.config = config
-        self.devicePixelRatio = dpr
-        self.surfaceSize = WebMath.fixCanvasSize(
-            css: (vp.x, vp.y),
-            reported: (UInt32((vp.x * dpr).rounded()), UInt32((vp.y * dpr).rounded())),
-            spec: (spec.size.x, spec.size.y),
-            scale: dpr,
-            fitHeight: config.fitContentHeight
-        )
         HeadlessRunner.registerFonts(spec.fonts)
         let waker = Waker()
         spec.setup?(waker)
-        self.runtime = Runtime<State>(
+        let runtime = Runtime<State>(
             state: spec.makeState(),
             viewport: vp,
             pixelScale: dpr,
             systemDark: dark ?? spec.dark ?? true,
-            reducedMotion: false,
+            reducedMotion: forceReducedMotion,
             waker: waker,
             onKey: spec.onKey,
             view: spec.view
         )
-        self.runtime.windowTitle = spec.title
-        self.runtime.srgbBlend = spec.srgbBlend
-        self.runtime.poll = spec.poll
-        self.runtime.onAppFileDrop = spec.onFileDrop
-        self.runtime.onFileDrop = spec.onFileDropPhase
+        runtime.windowTitle = spec.title
+        runtime.srgbBlend = spec.srgbBlend
+        runtime.poll = spec.poll
+        runtime.onAppFileDrop = spec.onFileDrop
+        runtime.onFileDrop = spec.onFileDropPhase
+        self.init(runtime: runtime, compositor: nil, config: config, requestedSize: spec.size,
+                  followsSystemAppearance: dark == nil && spec.dark == nil, forceReducedMotion: forceReducedMotion)
+    }
+
+    public convenience init(app: App<State>, viewport: Vec2? = nil, devicePixelRatio: Float = 1.0,
+                            dark: Bool? = nil, forceReducedMotion: Bool = false, sceneName: String? = nil) {
+        HeadlessRunner.registerFonts(app.fontData)
+        let runtime = app.makeRuntime(viewport: viewport, pixelScale: max(0.5, devicePixelRatio),
+                                      systemDark: dark, reducedMotion: forceReducedMotion, sceneName: sceneName)
+        self.init(runtime: runtime, compositor: app.compositorValue, config: app.webAppConfig, requestedSize: app.size,
+                  followsSystemAppearance: dark == nil && app.dark == nil, forceReducedMotion: forceReducedMotion)
+    }
+
+    private init(runtime: Runtime<State>, compositor: AnyCompositor<State>?, config: WebAppConfig,
+                 requestedSize: Vec2, followsSystemAppearance: Bool, forceReducedMotion: Bool) {
+        self.runtime = runtime
+        self.compositor = compositor
+        self.followsSystemAppearance = followsSystemAppearance
+        self.forceReducedMotion = forceReducedMotion
+        self.config = config
+        let vp = runtime.viewport
+        let dpr = runtime.pixelScale
+        self.devicePixelRatio = dpr
+        self.surfaceSize = WebMath.fixCanvasSize(
+            css: (vp.x, vp.y),
+            reported: (UInt32((vp.x * dpr).rounded()), UInt32((vp.y * dpr).rounded())),
+            spec: (requestedSize.x, requestedSize.y),
+            scale: dpr,
+            fitHeight: config.fitContentHeight
+        )
         // The capture presets as `tooling::runtime_for` applies them (#981); a browser has no machine settings to read here.
         self.runtime.applyCapturePresets()
     }
 
     @discardableResult
     public func resize(cssSize: (Float, Float), reportedPixels: (UInt32, UInt32), scale: Float) -> Bool {
-        devicePixelRatio = max(0.5, scale)
+        let nextScale = max(0.5, scale)
+        let scaleChanged = devicePixelRatio != nextScale
+        devicePixelRatio = nextScale
         let fixed = WebMath.fixCanvasSize(
             css: cssSize,
             reported: reportedPixels,
@@ -294,12 +338,12 @@ public final class WebAppHost<State> {
             next: fixed,
             document: config.webDocument
         )
-        if shouldReconfig {
+        if shouldReconfig || scaleChanged {
             surfaceSize = nextSize
-            runtime.pixelScale = devicePixelRatio
-            runtime.viewport = Vec2(Float(nextSize.0) / devicePixelRatio, Float(nextSize.1) / devicePixelRatio)
+            let points = Vec2(Float(nextSize.0) / devicePixelRatio, Float(nextSize.1) / devicePixelRatio)
+            runtime.setWindowViewport(points, pixelScale: devicePixelRatio)
         }
-        return shouldReconfig
+        return shouldReconfig || scaleChanged
     }
 
     func syncField(activate: Bool) {
@@ -316,17 +360,65 @@ public final class WebAppHost<State> {
         }
     }
 
-    public func renderFrame(at now: Double) throws -> Frame {
+    public func renderScene(at now: Double) -> RefScene {
         _ = MainQueueDispatcher.shared.drain()
         let scene = runtime.frame(at: now)
         syncField(activate: false)
-        return try RuneRef.render(scene)
+        return scene
+    }
+
+    private func compose(at now: Double, started: Double, width: Int, height: Int) throws {
+        guard let compositor else { return }
+        guard !compositor.features.contains(.requiresMetal) else { throw CompositorError.nativeCompositorInBrowser }
+        let dt = Float(max(0, now - (previousCompositorTime ?? now)))
+        previousCompositorTime = now
+        var passes = 0
+        let frame = CompositorFrame(deviceKey: compositorDevice, pixelSize: (width, height), dt: dt,
+                                    updateMilliseconds: (ProcessInfo.processInfo.systemUptime - started) * 1000,
+                                    srgbBlend: runtime.srgbBlend, runtime: runtime, drawUI: { passes += 1 })
+        // The browser executes each requested UI pass and calls the JS drawEffect for its effect slots.
+        frame.drawUIWithEffects = { _ in throw CompositorError.nativeCompositorInBrowser }
+        defer { frame.endFrame() }
+        compositor.render(frame: frame)
+        if passes == 0 && !compositor.drawsOwnContent { frame.drawUI() }
+        uiPasses = passes
+    }
+
+    func renderGPUFrame(at now: Double) throws -> RenderFrame {
+        gpuFrames = true
+        let started = ProcessInfo.processInfo.systemUptime
+        _ = MainQueueDispatcher.shared.drain()
+        var frame = runtime.renderFrame(at: now)
+        syncField(activate: false)
+        try compose(at: now, started: started, width: frame.width, height: frame.height)
+        if uiPasses == 0 {
+            frame.instances = []
+            frame.marks = []
+            frame.surfaces = []
+            frame.materials = []
+            frame.elidedLayers = []
+            frame.residentTracker = nil
+        }
+        return frame
+    }
+
+    public func renderFrame(at now: Double) throws -> Frame {
+        let started = ProcessInfo.processInfo.systemUptime
+        var scene = renderScene(at: now)
+        try compose(at: now, started: started, width: scene.width, height: scene.height)
+        if uiPasses == 0 {
+            scene.primitives = []
+            return try RuneRef.render(scene)
+        }
+        let surfaces = try NativeSurfaceReference.capture(runtime.surfaces, srgbBlend: runtime.srgbBlend)
+        return try RuneRef.render(scene, surfaces: surfaces)
     }
 
     /// A shortcut can mount a field and request focus in one transaction. Apply that frame
     /// while the browser still grants keyboard/IME activation for the originating event.
     private func finishActivation(at now: Double) {
-        _ = runtime.frame(at: now)
+        if gpuFrames { _ = runtime.renderFrame(at: now) }
+        else { _ = runtime.frame(at: now) }
         syncField(activate: true)
     }
 
@@ -335,33 +427,43 @@ public final class WebAppHost<State> {
     }
 
     func handleKeyDown(code: String, key: String, mods: Mods, fromField: Bool, at now: Double) -> Bool {
-        defer { finishActivation(at: now) }
+        handleKey(code: code, key: key, mods: mods, fromField: fromField, pressed: true, repeated: false, at: now)
+    }
+
+    func handleKey(code: String, key: String, mods: Mods, fromField: Bool,
+                   pressed: Bool, repeated: Bool, at now: Double) -> Bool {
+        defer { if pressed { finishActivation(at: now) } }
         func dispatch() -> Bool {
             var mapped = WebKeyMap.translate(code: code, key: key)
             if mods.ctrl || mods.cmd, case .text(let value) = mapped, let letter = value.lowercased().first {
                 mapped = .command(letter)
             }
-            guard let mapped else { return false }
-            return runtime.keyDown(KeyEvent(key: mapped, mods: mods), at: now)
+            let fallback = mapped.map { KeyEvent(key: $0, mods: mods) }
+            if !fromField, let physical = WebKeyMap.physical(code) {
+                return runtime.physicalInput(.key(key: physical, mods: mods, pressed: pressed, repeat: repeated),
+                                             fallbackKey: fallback, at: now)
+            }
+            guard let fallback else { return false }
+            return pressed ? runtime.keyDown(fallback, isRepeat: repeated, at: now) : runtime.keyUp(fallback, at: now)
         }
         if fromField {
             // The page's own key event counts as typing; winit supplies arrival scopes for canvas keys.
             InputTime.noteDispatched()
             return dispatch()
         }
-        return runtime.hostInput(.keyPress, dispatch)
+        return runtime.hostInput(pressed ? .keyPress : .keyRelease, dispatch)
     }
 
     enum PointerPhase { case down, move, up }
 
     func handlePointer(_ phase: PointerPhase, x: Float, y: Float, button: PointerButton,
-                       pointerType: String, at now: Double) {
+                       pointerType: String, mods: Mods = .none, at now: Double) {
         let point = Vec2(x, y)
         func dispatch() {
             switch phase {
-            case .down: runtime.pressDown(at: point, button: button, at: now, mouse: pointerType == "mouse")
-            case .move: runtime.pointerMove(to: point, mods: .none, at: now)
-            case .up: runtime.pointerUp(at: point, button: button, mods: .none, at: now)
+            case .down: runtime.pressDown(at: point, button: button, mods: mods, at: now, mouse: pointerType == "mouse")
+            case .move: runtime.pointerMove(to: point, mods: mods, at: now)
+            case .up: runtime.pointerUp(at: point, button: button, mods: mods, at: now)
             }
         }
         // winit delivers touch separately. Its arrival-time filter covers mouse and pen events.
@@ -390,6 +492,13 @@ public final class WebAppHost<State> {
                       pointerType: runtime.touchControls() ? "touch" : "mouse", at: now)
     }
 
+    func updatePreferences(dark: Bool, reducedMotion: Bool, increasedContrast: Bool, hover: Bool, coarse: Bool) {
+        if followsSystemAppearance { runtime.systemDark = dark }
+        runtime.setSystemReducedMotion(forceReducedMotion || reducedMotion)
+        runtime.setSystemIncreasedContrast(increasedContrast)
+        _ = handlePrimaryPointer(hover: hover, coarse: coarse)
+    }
+
     @discardableResult
     public func handlePrimaryPointer(hover: Bool, coarse: Bool) -> Bool {
         runtime.setWebPointerCapability(hover: hover, coarse: coarse)
@@ -406,8 +515,20 @@ public enum WebApp {
             spec: spec,
             viewport: vp,
             devicePixelRatio: 1.0,
-            dark: parsed.darkOverride ?? spec.dark
+            dark: parsed.darkOverride ?? spec.dark,
+            forceReducedMotion: parsed.reducedMotion
         )
+        try run(host)
+    }
+
+    @MainActor
+    public static func run<State>(_ app: App<State>, parsed: ToolingArgs) throws {
+        try run(WebAppHost(app: app, viewport: parsed.viewportOverride, dark: parsed.darkOverride,
+                           forceReducedMotion: parsed.reducedMotion, sceneName: parsed.sceneName))
+    }
+
+    @MainActor
+    private static func run<State>(_ host: WebAppHost<State>) throws {
         if RuneWebReactor.enabled {
             RuneWebReactor.session = WebBrowserSession(host)
         } else {

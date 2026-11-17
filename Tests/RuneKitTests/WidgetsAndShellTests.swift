@@ -111,7 +111,9 @@ struct WidgetsAndShellTests {
         rec.handle(.keyDown(key: "k", modifiers: [.command, .shift], isRepeat: false))
         #expect(!rec.isRecording)
         #expect(rec.shortcut == ShortcutChord(key: "k", modifiers: [.command, .shift]))
-        #expect(rec.shortcut?.keycaps == ["⇧", "⌘", "K"])
+        #expect(rec.shortcut?.keycaps(on: .mac) == ["⇧", "⌘", "K"])
+        #expect(rec.shortcut?.keycaps(on: .windows) == ["Shift", "Win", "K"])
+        #expect(rec.shortcut?.keycaps(on: .linux) == ["Shift", "Super", "K"])
 
         // Backspace clears
         rec.begin()

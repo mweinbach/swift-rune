@@ -41,15 +41,7 @@ struct SpringTrack: Sendable {
     }
 }
 
-struct DemoUIInst: Sendable {
-    var rect: SIMD4<Float>   // px x, y, w, h
-    var radii: SIMD4<Float>  // px tl, tr, br, bl
-    var fill: SIMD4<Float>   // premultiplied linear
-    var border: SIMD4<Float> // premultiplied linear
-    var params: SIMD4<Float> // bw, kind (0 rect, 1 glyph), 0, 1
-    var uv: SIMD4<Float>     // atlas uv u0, v0, u1, v1
-    var vp: SIMD4<Float>     // viewport px w, h, 0, 0
-}
+typealias DemoUIInst = LightUIInstance
 
 #if canImport(Metal)
 private let demoUIMetalSource = """
@@ -133,8 +125,6 @@ final class DemoUIRenderer {
     let sampler: MTLSamplerState
     private var atlasTex: MTLTexture
     private var atlasGen: UInt64 = 0
-    private var instBuf: MTLBuffer
-    private var instCap: Int
 
     init(device: MTLDevice, pixelFormat: MTLPixelFormat = .rgba16Float) throws {
         precondition(MemoryLayout<DemoUIInst>.stride == 112)
@@ -166,8 +156,6 @@ final class DemoUIRenderer {
         td.storageMode = .shared
         self.atlasTex = device.makeTexture(descriptor: td)!
 
-        self.instCap = 1024
-        self.instBuf = device.makeBuffer(length: self.instCap * MemoryLayout<DemoUIInst>.stride, options: .storageModeShared)!
     }
 
     private func syncAtlas(_ glyphAtlas: GlyphAtlas) {
@@ -202,16 +190,9 @@ final class DemoUIRenderer {
         glyphAtlas: GlyphAtlas
     ) {
         syncAtlas(glyphAtlas)
-        if insts.count > instCap {
-            var nextCap = instCap
-            while nextCap < insts.count { nextCap *= 2 }
-            instCap = nextCap
-            instBuf = device.makeBuffer(length: instCap * MemoryLayout<DemoUIInst>.stride, options: .storageModeShared)!
-        }
-        if !insts.isEmpty {
-            _ = insts.withUnsafeBytes { raw in
-                memcpy(instBuf.contents(), raw.baseAddress!, raw.count)
-            }
+        // The base and text passes share a command buffer. Each encoded draw must own its instance bytes.
+        let instances = insts.withUnsafeBytes { bytes in
+            bytes.isEmpty ? nil : bytes.baseAddress.flatMap { device.makeBuffer(bytes: $0, length: bytes.count, options: .storageModeShared) }
         }
 
         let rp = MTLRenderPassDescriptor()
@@ -220,10 +201,10 @@ final class DemoUIRenderer {
         rp.colorAttachments[0].clearColor = clear
         rp.colorAttachments[0].storeAction = .store
         guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rp) else { return }
-        if !insts.isEmpty {
+        if !insts.isEmpty, let instances {
             enc.setRenderPipelineState(pipeline)
-            enc.setVertexBuffer(instBuf, offset: 0, index: 0)
-            enc.setFragmentBuffer(instBuf, offset: 0, index: 0)
+            enc.setVertexBuffer(instances, offset: 0, index: 0)
+            enc.setFragmentBuffer(instances, offset: 0, index: 0)
             enc.setFragmentTexture(atlasTex, index: 0)
             enc.setFragmentSamplerState(sampler, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: insts.count)

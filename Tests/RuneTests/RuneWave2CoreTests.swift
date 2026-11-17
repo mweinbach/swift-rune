@@ -338,15 +338,15 @@ struct RuneWave2CoreTests {
         }
         let registry = ShortcutRegistry()
         let fired = FiredBox()
-        let r1 = registry.register(id: "palette", accelerator: "cmd+shift+p", label: "Command Palette") {
+        let r1 = registry.register(id: "palette", accelerator: "mod+shift+p", label: "Command Palette") {
             fired.items.append("palette")
         }
         #expect(r1 == .success("palette"))
 
-        let conflict = registry.register(id: "dup", accelerator: "cmd+shift+p") {}
+        let conflict = registry.register(id: "dup", accelerator: "mod+shift+p") {}
         #expect(conflict == .failure(.conflict(existingId: "palette")))
 
-        let chordRes = registry.register(id: "save-all", accelerator: "cmd+k, cmd+s") {
+        let chordRes = registry.register(id: "save-all", accelerator: "mod+k, mod+s") {
             fired.items.append("save-all")
         }
         #expect(chordRes == .success("save-all"))
@@ -355,12 +355,12 @@ struct RuneWave2CoreTests {
             #expect(ShortcutSequence.formatDisplay(seq, macOSSymbols: true) == "⇧⌘P")
         }
 
-        let d1 = registry.dispatch(KeyEvent(key: .command("p"), mods: Mods(shift: true, cmd: true)))
+        let d1 = registry.dispatch(KeyEvent(key: .command("p"), mods: RuneTestKey.primaryMods(shift: true)))
         #expect(d1 == .handled(id: "palette"))
 
-        let d2 = registry.dispatch(KeyEvent(key: .command("k"), mods: Mods(cmd: true)))
+        let d2 = registry.dispatch(KeyEvent(key: .command("k"), mods: RuneTestKey.primaryMods()))
         #expect(d2 == .pendingChord)
-        let d3 = registry.dispatch(KeyEvent(key: .command("s"), mods: Mods(cmd: true)))
+        let d3 = registry.dispatch(KeyEvent(key: .command("s"), mods: RuneTestKey.primaryMods()))
         #expect(d3 == .handled(id: "save-all"))
         #expect(fired.items == ["palette", "save-all"])
     }

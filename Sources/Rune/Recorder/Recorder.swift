@@ -286,6 +286,10 @@ internal final class RecorderShared: @unchecked Sendable {
         case (.undetermined, .some):
             answer = resolveFakePermission()
         case (.undetermined, .none):
+            #if canImport(CRuneMedia) && (os(Windows) || os(Linux))
+            // Desktop sound servers enforce access when opening the requested device.
+            return .permission(attempt: attempt, granted: .success(()))
+            #else
             weak let weakSelf = self
             RecorderBackend.requestPermission { ans in
                 guard let strong = weakSelf else { return }
@@ -293,6 +297,7 @@ internal final class RecorderShared: @unchecked Sendable {
                 strong.settle()
             }
             return nil
+            #endif
         default:
             answer = status
         }
@@ -306,7 +311,13 @@ internal final class RecorderShared: @unchecked Sendable {
         case .restricted:
             return .failure("microphone access is restricted on this device")
         case .denied, .undetermined:
+            #if os(Windows)
+            return .failure("microphone access is denied: check Settings > Privacy & security > Microphone")
+            #elseif os(Linux)
+            return .failure("microphone access is denied by the audio service")
+            #else
             return .failure("microphone access is denied: allow it in System Settings > Privacy & Security > Microphone")
+            #endif
         }
     }
 
@@ -329,18 +340,18 @@ internal final class RecorderShared: @unchecked Sendable {
     }
 
     private func followHeadless() {
-        var list = (Thread.current.threadDictionary[Self.headlessKey] as? [WeakBox]) ?? []
+        var list = (RuneExecutionContext.locals[Self.headlessKey] as? [WeakBox]) ?? []
         list.removeAll { $0.value == nil }
         if !list.contains(where: { $0.value === self }) {
             list.append(WeakBox(self))
         }
-        Thread.current.threadDictionary[Self.headlessKey] = list
+        RuneExecutionContext.locals[Self.headlessKey] = list
     }
 
     static func headlessList() -> [RecorderShared] {
-        var list = (Thread.current.threadDictionary[headlessKey] as? [WeakBox]) ?? []
+        var list = (RuneExecutionContext.locals[headlessKey] as? [WeakBox]) ?? []
         list.removeAll { $0.value == nil }
-        Thread.current.threadDictionary[headlessKey] = list
+        RuneExecutionContext.locals[headlessKey] = list
         return list.compactMap(\.value)
     }
 

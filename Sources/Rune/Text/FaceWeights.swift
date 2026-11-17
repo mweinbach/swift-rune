@@ -8,8 +8,8 @@ import CoreText
 ///
 /// Without a declaration, CoreText CSS weight matching maps intermediate weights (such as `530`
 /// on IBM Plex Mono with Text `450` and Bold `700`) toward the heavier cut. When a requested
-/// weight falls inside a declared face's `range`, `TextSystem.resolveCTFont` targets that face's
-/// `weight` instead.
+/// weight falls inside a declared face's `range`, Rune requests the declared face weight from
+/// the native shaper.
 public struct FaceWeights: Sendable, Hashable, Codable {
     public var family: String
     public var weight: Float

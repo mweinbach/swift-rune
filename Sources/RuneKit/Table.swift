@@ -307,7 +307,7 @@ public struct TableState: Sendable {
         }
         cursorHint = i
         anchorHint = i
-        if multi && mods.cmd {
+        if multi && mods.primaryCommand {
             if selected.contains(id) {
                 selected.remove(id)
             } else {
@@ -358,26 +358,14 @@ public struct TableState: Sendable {
 
     mutating func handleKey(_ ev: KeyEvent, len: Int, idAt: (Int) -> String, tx: inout Tx, keyRepeat: Bool = false) -> TableKeyOutcome {
         let m = ev.mods
-        if len == 0 || m.alt || (m.ctrl && !m.cmd) || (m.logo && !m.cmd) {
+        if len == 0 {
             return .ignored
         }
-        if multi && m.cmd {
-            switch ev.key {
-            case .command(let ch):
-                if String(ch).lowercased() == "a" {
-                    selected = Set((0..<len).map(idAt))
-                    return .handled
-                }
-            case .text(let s):
-                if s.lowercased() == "a" {
-                    selected = Set((0..<len).map(idAt))
-                    return .handled
-                }
-            default:
-                break
-            }
+        if multi && m.primaryCommand && m.primaryAlone && ev.isCommand("a") {
+            selected = Set((0..<len).map(idAt))
+            return .handled
         }
-        if m.cmd {
+        if m.cmd || m.ctrl || m.alt || m.logo {
             return .ignored
         }
 

@@ -63,6 +63,7 @@ public struct TextShapeKey: Hashable, Sendable {
     public var spans: [TextSpan]?
     public var pills: [PillChip]
     public var style: TextStyle
+    private let inheritedSmoothing: FontSmoothing
     public var scale100: Int
     public var fontEpoch: UInt64
     public var languageTag: String?
@@ -82,10 +83,28 @@ public struct TextShapeKey: Hashable, Sendable {
         maxWidth: Float?,
         pretty: Bool = false
     ) {
+        self.init(authText: authText, spans: spans, pills: pills, style: style, pixelScale: pixelScale,
+                  fontEpoch: fontEpoch, languageTag: languageTag, maxWidth: maxWidth, pretty: pretty,
+                  defaultSmoothing: .platformDefault)
+    }
+
+    public init(
+        authText: String,
+        spans: [TextSpan]?,
+        pills: [PillChip],
+        style: TextStyle,
+        pixelScale: Float,
+        fontEpoch: UInt64,
+        languageTag: String?,
+        maxWidth: Float?,
+        pretty: Bool = false,
+        defaultSmoothing: FontSmoothing
+    ) {
         self.authText = authText
         self.spans = spans
         self.pills = pills
         self.style = style
+        self.inheritedSmoothing = style.fontSmoothing == .systemDefault ? defaultSmoothing : .systemDefault
         self.scale100 = Int((max(1.0, pixelScale) * 100.0).rounded())
         self.fontEpoch = fontEpoch
         self.languageTag = languageTag
@@ -93,6 +112,17 @@ public struct TextShapeKey: Hashable, Sendable {
             ? (maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1)
             : -1
         self.pretty = Self.layoutPretty(pretty, style: style)
+    }
+
+    /// Keep the authored style on the layout while including its actual mask rasterizer in the cache key.
+    var rasterStyle: TextStyle {
+        var result = style
+        if result.fontSmoothing == .systemDefault { result.fontSmoothing = inheritedSmoothing }
+        return result
+    }
+
+    func usesSmoothing(_ mode: FontSmoothing) -> Bool {
+        style.fontSmoothing != .systemDefault || inheritedSmoothing == mode
     }
 
     /// Pretty wrapping re-breaks only plainly wrapped, unclamped, unjustified proportional text
@@ -216,6 +246,9 @@ public final class TextLayoutBox: @unchecked Sendable {
     public var hasGlyphs: Bool
     internal let prepared: TextPreparedShape?
     internal var lastUsedCommit: UInt64 = 0
+    // Page recycling invalidates UVs in a cached desktop text layout.
+    internal var desktopAtlasResets: UInt64?
+    internal var desktopPages: Set<UInt16> = []
     /// A by-paragraph field's paragraphs (`TextLayout::Paragraphs`), whose stacked lines `shaped`
     /// holds; nil for one layout (`TextLayout::Single`).
     internal var paragraphs: ParagraphLayout? = nil
@@ -263,6 +296,8 @@ public final class TextLayoutBox: @unchecked Sendable {
             hasGlyphs: hasGlyphs,
             prepared: prepared
         )
+        out.desktopAtlasResets = desktopAtlasResets
+        out.desktopPages = desktopPages
         out.paragraphs = paragraphs
         return out
     }

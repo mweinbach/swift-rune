@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="result"></pre>
+<script type="module">
+import { createRuneTextImports, runeTextFontsReady } from '../../Sources/Rune/Resources/Web/rune-web-text.mjs';
+
+const check = (condition, message) => { if (!condition) throw Error(message); };
+try {
+    const memory = new WebAssembly.Memory({ initial: 16 });
+    const data = new DataView(memory.buffer);
+    const bytes = new Uint8Array(memory.buffer);
+    const utf8 = new TextEncoder();
+    const host = createRuneTextImports(() => memory);
+    for (const [navigator, kind] of [
+        [{ userAgentData: { platform: 'macOS' } }, 1],
+        [{ platform: 'MacIntel', maxTouchPoints: 5 }, 2],
+        [{ platform: 'iPhone' }, 2],
+        [{ userAgentData: { platform: 'Windows' }, platform: 'Linux' }, 3],
+        [{ platform: 'Linux aarch64' }, 0],
+    ]) {
+        const bridge = createRuneTextImports(() => memory, { defaultView: { navigator } });
+        check(bridge.platform() === kind, 'Wrong native text raster platform');
+    }
+    const font = new Uint8Array(await (await fetch('../../Sources/Rune/Resources/Fonts/Inter-Regular.ttf')).arrayBuffer());
+    bytes.set(font, 0);
+    check(host.font(0, font.length) === 1, 'App font registration failed');
+    await runeTextFontsReady(memory);
+    const family = utf8.encode('Inter');
+    bytes.set(family, 256);
+    function shape(text, direction = 0, features = '') {
+        const input = utf8.encode(text);
+        bytes.set(input, 512);
+        const id = host.create(512, input.length, 256, family.length, 36, 400, 0, 0, direction, 0, 40);
+        check(id, 'No browser text engine');
+        try {
+            if (features) {
+                const settings = utf8.encode(features);
+                bytes.set(settings, 1024);
+                host.configure(id, 0, 0, 1024, settings.length, 0, 0, 0, 40);
+            }
+            const advance = data.getFloat32(0, true);
+            const x = data.getInt32(12, true), y = data.getInt32(16, true);
+            const width = data.getInt32(20, true), height = data.getInt32(24, true);
+            check(width > 0 && height > 0 && host.mask(id, x, y, width, height, 4096), 'No ink');
+            const mask = bytes.slice(4096, 4096 + width * height);
+            const ink = mask.filter(a => a > 0).length;
+            let colorPixels = 0;
+            if (host.has_color(id)) {
+                check(host.color(id, x, y, width, height, 32768), 'Color readback');
+                const rgba = bytes.subarray(32768, 32768 + width * height * 4);
+                for (let i = 0; i < rgba.length; i += 4) {
+                    if (rgba[i + 3] && rgba[i] !== rgba[i + 2]) ++colorPixels;
+                }
+            }
+            check(colorPixels > 0 || mask.some(a => a > 0 && a < 255), 'Coverage lacks antialiasing');
+            check(data.getFloat32(28, true) > data.getFloat32(36, true) && data.getFloat32(36, true) > 0, 'Face metrics missing');
+            const cells = [];
+            let offset = 0;
+            for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)) {
+                const end = offset + utf8.encode(segment).length;
+                const dir = host.cell(id, offset, end, 64, 68);
+                cells.push({ x: data.getFloat32(64, true), width: data.getFloat32(68, true), dir });
+                offset = end;
+            }
+            return { advance, cells, ink, mask, colorPixels };
+        } finally { host.release(id); }
+    }
+    const han = shape('漢'), day = shape('日');
+    check(han.ink !== day.ink && han.ink > 40 && day.ink > 40, 'CJK fallback collapsed to a replacement box');
+    const latin = shape('é'), combining = shape('e\u0301');
+    check(combining.cells.length === 1 && latin.mask.join() === combining.mask.join(), 'Combining mark separated');
+    const mixed = shape('A אבג B');
+    const hebrew = mixed.cells.slice(2, 5);
+    check(hebrew.every(c => c.dir < 0) && hebrew[0].x > hebrew[1].x && hebrew[1].x > hebrew[2].x, 'RTL order failed');
+    const arabic = shape('سلام', 2);
+    check(arabic.cells[0].x > arabic.cells[3].x && arabic.ink > 70, 'Arabic shaping failed');
+    check(shape('A\0日').cells.at(-1).width > 10, 'An internal NUL truncated the line');
+    const kern = shape('AV').advance;
+    check(kern < shape('A').advance + shape('V').advance, 'Kerning lost');
+    check(shape('AV', 0, 'kern=0.0').advance > kern, 'Authored OpenType settings were lost');
+    const emoji = shape('😀');
+    check(emoji.colorPixels > 40 && emoji.ink === 0, 'Intrinsic emoji color leaked into the tintable mask');
+    const paragraph = 'Rune אבג 日本語 e\u0301 '.repeat(125);
+    const encoded = utf8.encode(paragraph);
+    bytes.set(encoded, 512);
+    const long = host.create(512, encoded.length, 256, family.length, 16, 400, 0, 0, 0, 0, 40);
+    try {
+        const end = host.caret(long, encoded.length);
+        check(end > 12000 && Math.abs(end - data.getFloat32(0, true)) < 5, 'Long mixed-direction line geometry');
+    } finally { host.release(long); }
+    document.querySelector('#result').textContent = JSON.stringify({ passed: true, cjkInk: [han.ink, day.ink],
+        combiningInk: combining.ink, arabicInk: arabic.ink, hebrewVisualPositions: hebrew.map(c => c.x),
+        colorEmojiPixels: emoji.colorPixels, kernedAdvance: kern });
+} catch (error) {
+    document.querySelector('#result').textContent = String(error.stack || error);
+}
+</script>

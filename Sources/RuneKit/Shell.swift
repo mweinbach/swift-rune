@@ -614,8 +614,8 @@ public typealias SidebarPeek = PaneState.SidebarPeek
 
 /// Returns `true` when `(key, mods)` matches the standard sidebar toggle shortcut (`Shift+Cmd+B` or
 /// `Ctrl+Cmd+S` on macOS, `Ctrl+Shift+B` off macOS).
-public func isSidebarToggle(_ key: Key, mods: Mods, macOS: Bool = true) -> Bool {
-    guard !mods.alt && !mods.logo else { return false }
+public func isSidebarToggle(_ key: Key, mods: Mods, macOS: Bool = KeyPlatform.current == .mac) -> Bool {
+    guard !mods.alt, !mods.logo || (macOS && mods.cmd) else { return false }
     let letter: String
     switch key {
     case .text(let s): letter = s.lowercased()

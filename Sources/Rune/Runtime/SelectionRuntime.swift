@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
 
 internal enum SelectionEdgeScrollState: Equatable {
@@ -999,7 +1002,7 @@ internal extension Runtime {
         if let fPath = focusedPath, focusedInputElement(at: fPath)?.handlers.editLens != nil {
             return false
         }
-        let plain = ev.mods.primaryCommand && !ev.mods.shift && !ev.mods.alt && !(ev.mods.ctrl && ev.mods.cmd)
+        let plain = ev.mods.primaryCommand && ev.mods.primaryAlone && !ev.mods.shift
         guard plain else { return false }
 
         let isC = ev.key == .command("c") || ev.key == .text("c") || ev.key == .text("C")

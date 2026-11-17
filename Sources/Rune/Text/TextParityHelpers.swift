@@ -1,4 +1,7 @@
 import Foundation
+#if os(WASI) && canImport(CRuneDesktopText)
+import CRuneDesktopText
+#endif
 #if canImport(simd)
 import simd
 #endif
@@ -252,6 +255,7 @@ public struct RunLayout: Sendable {
 
     /// Point advance width of the grapheme starting at UTF-8 byte `offset`.
     public func advance(atUTF8Offset offset: Int, scale: Float? = nil) -> Float? {
+        if let cellLayout { return cellLayout.advance(atByte: offset, scale: scale) }
         guard let i = graphemeIndex(atUTF8Offset: offset), i + 1 < graphemes.count else { return nil }
         let s = max(scale ?? self.scale, 1.0)
         return max(0, (graphemes[i + 1].xPx - graphemes[i].xPx) / s)
@@ -364,17 +368,54 @@ public enum TextCoreTextMatch {
         return (isMac && touchPoints <= 1) ? .on : .off
     }
 
-    /// Coverage gamma exponent for non-Apple / non-smoothed text (`coverage_exponent`).
+    /// Coverage exponent for a grayscale mask drawn with premultiplied ink (`coverage_exponent`).
     public static func coverageExponent(mode: FontSmoothing, fill: [Float], apple: Bool, windows: Bool) -> Float {
-        guard fill.count >= 4, fill[3] > 0 else { return 1.0 }
+        guard fill.count >= 4 else { return 1 }
+        return coverageExponent(mode: mode, premultiplied: SIMD4(fill[0], fill[1], fill[2], fill[3]), apple: apple, windows: windows)
+    }
+
+    fileprivate static func coverageExponent(mode: FontSmoothing, premultiplied fill: SIMD4<Float>, apple: Bool, windows: Bool) -> Float {
+        guard fill.w > 0 else { return 1 }
         let resolved = (mode == .systemDefault) ? FontSmoothing.classic : mode
         let directWrite = (resolved == .directWrite || resolved == .clearType) && windows
         let chromium = resolved.isChromiumOutline
         if (apple && !chromium) || directWrite || resolved == .on || resolved == .windfoil {
             return 1.0
         }
-        let luma = ((0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2]) / fill[3]).clamped01()
+        let luma = ((0.2126 * fill.x + 0.7152 * fill.y + 0.0722 * fill.z) / fill.w).clamped01()
+        if !apple && !windows && resolved == .off {
+            return 1.02 + (0.83 - 1.02) * luma
+        }
         return 1.12 + (0.45 - 1.12) * luma
+    }
+}
+
+/// With WASI the browser supplies the font rasterizer and its smoothing convention.
+private enum TextRasterPlatform: Int32 {
+    // The browser bridge returns these values from rune_browser_text_platform().
+    case other = 0, macDesktop = 1, appleMobile = 2, windows = 3
+
+    static let current: Self = {
+        #if os(macOS)
+        return .macDesktop
+        #elseif canImport(Darwin)
+        return .appleMobile
+        #elseif os(Windows)
+        return .windows
+        #elseif os(WASI) && canImport(CRuneDesktopText)
+        return Self(rawValue: rune_browser_text_platform()) ?? .other
+        #else
+        return .other
+        #endif
+    }()
+}
+
+extension TextSystem {
+    /// Returns the grayscale mask exponent for this text system's smoothing mode and paint color.
+    public func coverageExponent(_ premultiplied: SIMD4<Float>) -> Float {
+        let platform = TextRasterPlatform.current
+        return TextCoreTextMatch.coverageExponent(mode: smoothing, premultiplied: premultiplied,
+            apple: platform == .macDesktop || platform == .appleMobile, windows: platform == .windows)
     }
 }
 
@@ -394,19 +435,15 @@ extension FontSmoothing {
     ]
 
     public static var classic: FontSmoothing {
-        #if os(macOS)
-        return .on
+        #if os(Windows)
+        return .directWrite
         #else
-        return .off
+        return TextRasterPlatform.current == .macDesktop ? .on : .off
         #endif
     }
 
     public static var platformDefault: FontSmoothing {
-        #if os(macOS)
-        return .on
-        #else
-        return .windfoilChromium
-        #endif
+        classic == .on ? .on : .windfoilChromium
     }
 
     public var isOutlineMode: Bool {
@@ -515,7 +552,7 @@ public struct RichLayoutOptions: Equatable, Sendable {
 /// Each thread measures with its own shaper and bounded ink cache (`text/measure.rs`).
 internal final class ThreadTextMeasurer {
     static var current: ThreadTextMeasurer {
-        let dictionary = Thread.current.threadDictionary
+        let dictionary = RuneExecutionContext.locals
         let key = "rune.text.measurer"
         if let current = dictionary[key] as? ThreadTextMeasurer { return current }
         let current = ThreadTextMeasurer()

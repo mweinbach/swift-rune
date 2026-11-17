@@ -39,19 +39,19 @@ public enum FontFamiliesRegistry {
     private static let overrideKey = "rune.fontFamilies.override"
 
     internal static var threadOverride: State? {
-        get { Thread.current.threadDictionary[overrideKey] as? State }
+        get { RuneExecutionContext.locals[overrideKey] as? State }
         set {
             if let newValue {
-                Thread.current.threadDictionary[overrideKey] = newValue
+                RuneExecutionContext.locals[overrideKey] = newValue
             } else {
-                Thread.current.threadDictionary.removeObject(forKey: overrideKey)
+                RuneExecutionContext.locals.removeObject(forKey: overrideKey)
             }
         }
     }
 
     private static let windowKey = "rune.fontFamilies.windows"
     internal static var windowChoice: State? {
-        Thread.current.threadDictionary[windowKey] as? State
+        RuneExecutionContext.locals[windowKey] as? State
     }
 
     internal static var settingsEpoch: UInt64 {
@@ -68,7 +68,7 @@ public enum FontFamiliesRegistry {
 
     internal static func chooseWindowFamilies(sans: String, mono: String) {
         if let choice = windowChoice, choice.sans == sans && choice.mono == mono { return }
-        Thread.current.threadDictionary[windowKey] = makeState(sans: sans, mono: mono)
+        RuneExecutionContext.locals[windowKey] = makeState(sans: sans, mono: mono)
     }
 
     internal static func snapshot() -> State {
@@ -126,9 +126,9 @@ public enum FontFamiliesRegistry {
         defer {
             threadOverride = previous
             if let previousWindowChoice {
-                Thread.current.threadDictionary[windowKey] = previousWindowChoice
+                RuneExecutionContext.locals[windowKey] = previousWindowChoice
             } else {
-                Thread.current.threadDictionary.removeObject(forKey: windowKey)
+                RuneExecutionContext.locals.removeObject(forKey: windowKey)
             }
         }
         try body()
@@ -649,6 +649,11 @@ public enum SVGIconRenderer {
     public struct PaintStop: Sendable, Equatable {
         public var offset: Float
         public var color: Color
+        public var usesCurrentColor = false
+
+        func resolvedColor(_ currentColor: Color) -> Color {
+            usesCurrentColor ? currentColor.alpha(currentColor.a * color.a) : color
+        }
     }
 
     public struct LinearGradient: Sendable, Equatable {
@@ -658,6 +663,8 @@ public enum SVGIconRenderer {
         public var x2: Float
         public var y2: Float
         public var stops: [PaintStop]
+        public var usesUserSpace = false
+        public var transform: [Float] = [1, 0, 0, 1, 0, 0]
     }
 
     public enum FillStyle: Sendable, Equatable {
@@ -688,10 +695,15 @@ public enum SVGIconRenderer {
 
     /// Parses raw SVG body XML into flattened `DrawCommand` list + `LinearGradient` table.
     public static func parseBody(_ body: String) -> ParsedBody {
+        parseBody(body, defaultFill: "currentColor")
+    }
+
+    static func parseBody(_ body: String, defaultFill: String) -> ParsedBody {
         var gradients: [String: LinearGradient] = [:]
         var activeGradient: LinearGradient? = nil
 
         struct Scope {
+            var tag: String
             var transform: [Float]
             var paints: Bool
             var opacity: Float
@@ -699,11 +711,11 @@ public enum SVGIconRenderer {
         }
 
         let identity: [Float] = [1, 0, 0, 1, 0, 0]
-        var scopes: [Scope] = [Scope(transform: identity, paints: true, opacity: 1.0, inheritedAttrs: [:])]
+        var scopes = [Scope(tag: "", transform: identity, paints: true, opacity: 1, inheritedAttrs: ["fill": defaultFill])]
         var commands: [DrawCommand] = []
 
         let inheritedKeys = Set([
-            "fill", "stroke", "stroke-width", "stroke-linecap",
+            "color", "fill", "stroke", "stroke-width", "stroke-linecap",
             "stroke-linejoin", "fill-rule", "fill-opacity", "stroke-opacity"
         ])
 
@@ -716,7 +728,8 @@ public enum SVGIconRenderer {
                 if endTag == "lineargradient", let grad = activeGradient {
                     gradients[grad.id] = grad
                     activeGradient = nil
-                } else if scopes.count > 1 {
+                }
+                if scopes.count > 1 && scopes.last?.tag == endTag {
                     scopes.removeLast()
                 }
                 continue
@@ -725,14 +738,33 @@ public enum SVGIconRenderer {
             let isSelfClosing = raw.hasSuffix("/")
             let bodyTag = raw.dropFirst(raw.hasPrefix("<") ? 1 : 0)
             let tag = bodyTag.split(whereSeparator: { $0.isWhitespace || $0 == "/" }).first.map { String($0).lowercased() } ?? ""
+            let attrs = attributes(in: raw)
+            let parent = scopes.last!
+            let ownTransform = attrs["transform"].map(parseTransform) ?? identity
+            let composedTransform = multiply(ownTransform, parent.transform)
+            let nonRendering = ["defs", "clippath", "mask", "symbol", "lineargradient"].contains(tag)
+            let paints = parent.paints && attrs["display"] != "none" && !nonRendering
+            let combinedOpacity = parent.opacity * opacity(attrs["opacity"])
+
+            var mergedAttrs = parent.inheritedAttrs
+            for (key, value) in attrs where inheritedKeys.contains(key) && value != "inherit" {
+                if key != "color" || value.lowercased() != "currentcolor" { mergedAttrs[key] = value }
+            }
+            let inheritedColor = mergedAttrs["color"].flatMap(parseColor)
+            if !isSelfClosing && (nonRendering || tag == "g" || tag == "a" || tag == "svg") {
+                scopes.append(Scope(tag: tag, transform: composedTransform, paints: paints,
+                                    opacity: combinedOpacity, inheritedAttrs: mergedAttrs))
+            }
 
             if tag == "lineargradient" {
-                let id = attribute(in: raw, named: "id") ?? ""
-                let x1 = parseLengthOrPercent(attribute(in: raw, named: "x1"), defaultValue: 0)
-                let y1 = parseLengthOrPercent(attribute(in: raw, named: "y1"), defaultValue: 0)
-                let x2 = parseLengthOrPercent(attribute(in: raw, named: "x2"), defaultValue: 1)
-                let y2 = parseLengthOrPercent(attribute(in: raw, named: "y2"), defaultValue: 0)
-                let grad = LinearGradient(id: id, x1: x1, y1: y1, x2: x2, y2: y2, stops: [])
+                let id = attrs["id"] ?? ""
+                let x1 = parseLengthOrPercent(attrs["x1"], defaultValue: 0)
+                let y1 = parseLengthOrPercent(attrs["y1"], defaultValue: 0)
+                let x2 = parseLengthOrPercent(attrs["x2"], defaultValue: 1)
+                let y2 = parseLengthOrPercent(attrs["y2"], defaultValue: 0)
+                let grad = LinearGradient(id: id, x1: x1, y1: y1, x2: x2, y2: y2, stops: [],
+                                          usesUserSpace: attrs["gradientUnits"] == "userSpaceOnUse",
+                                          transform: attrs["gradientTransform"].map(parseTransform) ?? identity)
                 if isSelfClosing {
                     gradients[id] = grad
                 } else {
@@ -742,54 +774,30 @@ public enum SVGIconRenderer {
             }
 
             if tag == "stop", activeGradient != nil {
-                let off = parseLengthOrPercent(attribute(in: raw, named: "offset"), defaultValue: 0)
-                let colStr = attribute(in: raw, named: "stop-color") ?? "#000000"
-                let stopAlpha = Float(attribute(in: raw, named: "stop-opacity") ?? "") ?? 1.0
-                if let baseCol = parseColor(colStr) {
-                    activeGradient?.stops.append(PaintStop(offset: off, color: baseCol.alpha(baseCol.a * stopAlpha)))
-                }
+                let off = parseLengthOrPercent(attrs["offset"], defaultValue: 0)
+                let offset = max(activeGradient?.stops.last?.offset ?? 0, min(1, off))
+                let value = attrs["stop-color"] ?? "black"
+                let isCurrent = value.lowercased() == "currentcolor"
+                let color = (isCurrent ? inheritedColor : parseColor(value)) ?? .black
+                activeGradient?.stops.append(PaintStop(offset: offset, color: color.alpha(color.a * opacity(attrs["stop-opacity"])),
+                                                       usesCurrentColor: isCurrent && inheritedColor == nil))
                 continue
             }
 
-            let parent = scopes.last!
-            let ownTransform = attribute(in: raw, named: "transform").map(parseTransform) ?? identity
-            let composedTransform = multiply(ownTransform, parent.transform)
-            let paints = parent.paints && attribute(in: raw, named: "display") != "none" && tag != "defs" && tag != "clippath" && tag != "mask"
-            let groupOpacity = (Float(attribute(in: raw, named: "opacity") ?? "") ?? 1.0)
-            let combinedOpacity = parent.opacity * max(0, min(1, groupOpacity))
-
-            var mergedAttrs = parent.inheritedAttrs
-            for key in inheritedKeys {
-                if let val = attribute(in: raw, named: key) {
-                    mergedAttrs[key] = val
-                }
-            }
-
-            if tag == "g" || tag == "a" || tag == "svg" || tag == "defs" {
-                if !isSelfClosing {
-                    scopes.append(Scope(
-                        transform: composedTransform,
-                        paints: paints,
-                        opacity: combinedOpacity,
-                        inheritedAttrs: mergedAttrs
-                    ))
-                }
+            guard paints, let d = elementPathData(tag: tag, attributes: attrs) else {
                 continue
             }
 
-            guard paints, let d = elementPathData(tag: tag, rawElement: raw) else {
-                continue
-            }
-
-            let fillAttr = mergedAttrs["fill"] ?? "currentColor"
-            let fillStyle = parseFillStyle(fillAttr)
-            let fillOpacity = Float(mergedAttrs["fill-opacity"] ?? "") ?? 1.0
+            let fillStyle = parseFillStyle(mergedAttrs["fill"] ?? defaultFill, currentColor: inheritedColor)
+            let fillOpacity = opacity(mergedAttrs["fill-opacity"])
             let evenOdd = (mergedAttrs["fill-rule"] == "evenodd")
 
             let strokeAttr = mergedAttrs["stroke"]
-            let strokeStyle: FillStyle? = (strokeAttr != nil && strokeAttr != "none") ? parseFillStyle(strokeAttr!) : nil
+            let strokeStyle = strokeAttr.flatMap { value -> FillStyle? in
+                value == "none" ? nil : parseFillStyle(value, currentColor: inheritedColor)
+            }
             let strokeWidth = Float((mergedAttrs["stroke-width"] ?? "").replacingOccurrences(of: "px", with: "")) ?? 1.0
-            let strokeOpacity = Float(mergedAttrs["stroke-opacity"] ?? "") ?? 1.0
+            let strokeOpacity = opacity(mergedAttrs["stroke-opacity"])
             let lineCap = mergedAttrs["stroke-linecap"] ?? "butt"
             let lineJoin = mergedAttrs["stroke-linejoin"] ?? "miter"
 
@@ -865,26 +873,37 @@ public enum SVGIconRenderer {
     // MARK: - XML Attribute & Path Extraction Helpers
 
     static func attribute(in element: String, named key: String) -> String? {
-        for quote in ["\"", "'"] {
-            let needle = "\(key)=\(quote)"
-            if let start = element.range(of: needle) {
-                let after = element[start.upperBound...]
-                if let end = after.firstIndex(of: Character(quote)) {
-                    return String(after[..<end])
-                }
-            }
-        }
-        return nil
+        attributes(in: element)[key]
     }
 
-    static func elementPathData(tag: String, rawElement: String) -> String? {
+    private static func attributes(in element: String) -> [String: String] {
+        var attributes: [String: String] = [:]
+        var tail = element.drop(while: { !$0.isWhitespace })
+        while !tail.isEmpty {
+            tail = tail.drop(while: \.isWhitespace)
+            let name = tail.prefix { !$0.isWhitespace && $0 != "=" && $0 != "/" && $0 != ">" }
+            guard !name.isEmpty else { break }
+            tail = tail[name.endIndex...].drop(while: \.isWhitespace)
+            guard tail.first == "=" else { break }
+            tail = tail.dropFirst().drop(while: \.isWhitespace)
+            guard let quote = tail.first, quote == "\"" || quote == "'" else { break }
+            tail = tail.dropFirst()
+            guard let end = tail.firstIndex(of: quote) else { break }
+            attributes[String(name)] = String(tail[..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+            tail = tail[tail.index(after: end)...]
+        }
+        return attributes
+    }
+
+    private static func elementPathData(tag: String, attributes: [String: String]) -> String? {
         func num(_ name: String) -> Float {
-            guard let raw = attribute(in: rawElement, named: name) else { return 0 }
-            return Float(raw.replacingOccurrences(of: "px", with: "")) ?? 0
+            guard let raw = attributes[name], let value = Float(raw.replacingOccurrences(of: "px", with: "")),
+                  value.isFinite else { return 0 }
+            return value
         }
         switch tag {
         case "path":
-            return attribute(in: rawElement, named: "d")
+            return attributes["d"]
         case "rect":
             let (x, y, w, h) = (num("x"), num("y"), num("width"), num("height"))
             guard w > 0, h > 0 else { return nil }
@@ -904,7 +923,7 @@ public enum SVGIconRenderer {
         case "line":
             return "M\(num("x1")) \(num("y1"))L\(num("x2")) \(num("y2"))"
         case "polyline", "polygon":
-            guard let ptsRaw = attribute(in: rawElement, named: "points") else { return nil }
+            guard let ptsRaw = attributes["points"] else { return nil }
             let nums = parseNumbers(ptsRaw)
             guard nums.count >= 2 else { return nil }
             var out = ""
@@ -927,7 +946,7 @@ public enum SVGIconRenderer {
         for c in raw {
             let startsNew = (c == "-" || c == "+") && prev != "e" && prev != "E"
             if c == "," || c.isWhitespace || (startsNew && !cur.isEmpty) {
-                if let val = Float(cur) { out.append(val) }
+                if let val = Float(cur), val.isFinite { out.append(val) }
                 cur.removeAll(keepingCapacity: true)
             }
             if c != "," && !c.isWhitespace {
@@ -935,7 +954,7 @@ public enum SVGIconRenderer {
             }
             prev = c
         }
-        if let val = Float(cur) { out.append(val) }
+        if let val = Float(cur), val.isFinite { out.append(val) }
         return out
     }
 
@@ -943,16 +962,20 @@ public enum SVGIconRenderer {
         guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
             return defaultValue
         }
-        if raw.hasSuffix("%") {
-            return (Float(raw.dropLast()) ?? (defaultValue * 100)) / 100.0
-        }
-        return Float(raw.replacingOccurrences(of: "px", with: "")) ?? defaultValue
+        let percent = raw.hasSuffix("%")
+        let number = raw.dropLast(percent ? 1 : (raw.hasSuffix("px") ? 2 : 0))
+        guard let value = Float(number), value.isFinite else { return defaultValue }
+        return percent ? value / 100 : value
     }
 
-    static func parseFillStyle(_ value: String) -> FillStyle {
+    private static func opacity(_ value: String?) -> Float {
+        min(1, max(0, parseLengthOrPercent(value, defaultValue: 1)))
+    }
+
+    static func parseFillStyle(_ value: String, currentColor: Color? = nil) -> FillStyle {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed == "none" { return .none }
-        if trimmed == "currentColor" { return .currentColor }
+        if trimmed.lowercased() == "currentcolor" { return currentColor.map(FillStyle.solid) ?? .currentColor }
         if trimmed.hasPrefix("url(#"), trimmed.hasSuffix(")") {
             let id = String(trimmed.dropFirst(5).dropLast())
             return .gradient(id)
@@ -960,7 +983,7 @@ public enum SVGIconRenderer {
         if let col = parseColor(trimmed) {
             return .solid(col)
         }
-        return .currentColor
+        return currentColor.map(FillStyle.solid) ?? .currentColor
     }
 
     static func parseColor(_ raw: String) -> Color? {
@@ -979,8 +1002,24 @@ public enum SVGIconRenderer {
             return .srgb(nums[0] / 255.0, nums[1] / 255.0, nums[2] / 255.0, nums[3])
         }
         switch s {
-        case "black": return Color(r: 0, g: 0, b: 0, a: 1)
-        case "white": return Color(r: 1, g: 1, b: 1, a: 1)
+        case "transparent": return .transparent
+        case "black": return .black
+        case "white": return .white
+        case "silver": return .rgba8(192, 192, 192, 255)
+        case "gray", "grey": return .rgba8(128, 128, 128, 255)
+        case "maroon": return .rgba8(128, 0, 0, 255)
+        case "red": return .rgba8(255, 0, 0, 255)
+        case "purple": return .rgba8(128, 0, 128, 255)
+        case "fuchsia", "magenta": return .rgba8(255, 0, 255, 255)
+        case "green": return .rgba8(0, 128, 0, 255)
+        case "lime": return .rgba8(0, 255, 0, 255)
+        case "olive": return .rgba8(128, 128, 0, 255)
+        case "yellow": return .rgba8(255, 255, 0, 255)
+        case "navy": return .rgba8(0, 0, 128, 255)
+        case "blue": return .rgba8(0, 0, 255, 255)
+        case "teal": return .rgba8(0, 128, 128, 255)
+        case "aqua", "cyan": return .rgba8(0, 255, 255, 255)
+        case "orange": return .rgba8(255, 165, 0, 255)
         default: return nil
         }
     }
@@ -1086,16 +1125,9 @@ public final class ColorIconRasterizer: @unchecked Sendable {
             return nil
         }
         let px = max(1, pixelSize)
-        let tintHex: String
-        if let one = oneColor {
-            tintHex = "one:\(one.hexKey)"
-        } else if body.contains("currentColor") {
-            tintHex = currentColor.hexKey
-        } else {
-            tintHex = ""
-        }
-
-        let key = CacheKey(icon: icon, px: px, tintKey: tintHex, mirrored: mirrored)
+        guard px <= LinearMipGenerator.maxDecodeDimension, icon.viewBox.isFinite, icon.viewBox > 0 else { return nil }
+        let tintKey = currentColor.hexKey + (oneColor.map { "/" + $0.hexKey } ?? "")
+        let key = CacheKey(icon: icon, px: px, tintKey: tintKey, mirrored: mirrored)
         lock.lock()
         if var entry = cache[key] {
             entry.used = true
@@ -1131,8 +1163,8 @@ public final class ColorIconRasterizer: @unchecked Sendable {
         let byteCost = mips.reduce(0) { $0 + $1.rgba.count }
 
         lock.lock()
-        cache[key] = CacheEntry(image: decoded, byteCost: byteCost, used: true)
-        totalBytes += byteCost
+        let previous = cache.updateValue(CacheEntry(image: decoded, byteCost: byteCost, used: true), forKey: key)
+        totalBytes += byteCost - (previous?.byteCost ?? 0)
         lock.unlock()
         return decoded
     }
@@ -1146,123 +1178,131 @@ public final class ColorIconRasterizer: @unchecked Sendable {
     ) -> [UInt8]? {
         let parsed = SVGIconRenderer.parseBody(body)
         guard !parsed.commands.isEmpty else { return nil }
-
-        #if canImport(CoreGraphics)
-        var bytes = [UInt8](repeating: 0, count: px * px * 4)
-        let srgb = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(
-            data: &bytes,
-            width: px,
-            height: px,
-            bitsPerComponent: 8,
-            bytesPerRow: px * 4,
-            space: srgb,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
-        ) else {
-            return nil
+        let scale = Float(px) / viewBox
+        var rgba = SVGIconRenderer.rasterize(parsed, width: px, height: px,
+                                             transform: .scale(scale, scale), currentColor: currentColor)
+        if let tint = oneColor {
+            let color = tint.srgbComponents
+            let rgb = SIMD3<UInt8>(UInt8((color.r * 255).rounded()), UInt8((color.g * 255).rounded()),
+                                   UInt8((color.b * 255).rounded()))
+            for i in stride(from: 0, to: rgba.count, by: 4) where rgba[i + 3] > 0 {
+                rgba[i] = rgb.x
+                rgba[i + 1] = rgb.y
+                rgba[i + 2] = rgb.z
+            }
         }
-        ctx.setAllowsAntialiasing(true)
-        ctx.setShouldAntialias(true)
-        ctx.translateBy(x: 0, y: CGFloat(px))
-        let scale = CGFloat(px) / CGFloat(viewBox)
-        ctx.scaleBy(x: scale, y: -scale)
+        return rgba
+    }
+}
 
-        func cgColor(_ color: Color, opacity: Float) -> CGColor {
-            let comps = color.alpha(color.a * opacity).srgbComponents
-            return CGColor(
-                colorSpace: srgb,
-                components: [CGFloat(comps.r), CGFloat(comps.g), CGFloat(comps.b), CGFloat(comps.a)]
-            ) ?? CGColor(gray: 1.0, alpha: 1.0)
-        }
+extension SVGIconRenderer {
+    /// Composites SVG paint commands into the straight sRGB pixels consumed by the mip generator.
+    internal static func rasterize(_ parsed: ParsedBody, width: Int, height: Int,
+                                   transform: GTransform, currentColor: Color) -> [UInt8] {
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        var mask = [UInt8](repeating: 0, count: width * height)
 
-        for cmd in parsed.commands {
-            ctx.saveGState()
-            let t = cmd.transform
-            ctx.concatenate(CGAffineTransform(
-                a: CGFloat(t[0]), b: CGFloat(t[1]),
-                c: CGFloat(t[2]), d: CGFloat(t[3]),
-                tx: CGFloat(t[4]), ty: CGFloat(t[5])
-            ))
-            let cgPath = GlyphAtlas.parseSVGPath(cmd.pathData)
+        for command in parsed.commands {
+            let t = command.transform
+            let ctm = GTransform.then(GTransform(xx: t[0], xy: t[1], yx: t[2], yy: t[3], tx: t[4], ty: t[5]), transform)
+            let resolution = GPathStroker.computeResolutionScale(ctm)
+            let elements = GSVGPathParser.parse(command.pathData)
+            guard let path = GaneshArea.buildGPath(.path(elements), tolerance: 0.25 / resolution) else { continue }
 
-            switch cmd.fill {
-            case .none:
-                break
-            case .solid(let col):
-                ctx.addPath(cgPath)
-                ctx.setFillColor(cgColor(col, opacity: cmd.fillOpacity * cmd.opacity))
-                ctx.fillPath(using: cmd.evenOdd ? .evenOdd : .winding)
-            case .currentColor:
-                ctx.addPath(cgPath)
-                ctx.setFillColor(cgColor(currentColor, opacity: cmd.fillOpacity * cmd.opacity))
-                ctx.fillPath(using: cmd.evenOdd ? .evenOdd : .winding)
-            case .gradient(let gradId):
-                if let grad = parsed.gradients[gradId], !grad.stops.isEmpty {
-                    let gradColors = grad.stops.map { cgColor($0.color, opacity: cmd.fillOpacity * cmd.opacity) } as CFArray
-                    let locs = grad.stops.map { CGFloat($0.offset) }
-                    if let cgGrad = CGGradient(colorsSpace: srgb, colors: gradColors, locations: locs) {
-                        ctx.saveGState()
-                        ctx.addPath(cgPath)
-                        if cmd.evenOdd { ctx.clip(using: .evenOdd) } else { ctx.clip() }
-                        let bb = cgPath.boundingBox
-                        let p1 = CGPoint(x: bb.minX + CGFloat(grad.x1) * bb.width, y: bb.minY + CGFloat(grad.y1) * bb.height)
-                        let p2 = CGPoint(x: bb.minX + CGFloat(grad.x2) * bb.width, y: bb.minY + CGFloat(grad.y2) * bb.height)
-                        ctx.drawLinearGradient(cgGrad, start: p1, end: p2, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
-                        ctx.restoreGState()
+            func draw(_ style: FillStyle, opacity: Float, pen: GStroke?, rule: GAAARule) {
+                guard opacity > 0, let paint = pixelPaint(style, parsed: parsed, tint: currentColor,
+                                                          bounds: path.bounds, transform: ctm) else { return }
+                GaneshArea.coverage(of: path, transform: ctm, pen: pen, rule: rule,
+                                    width: width, height: height, into: &mask)
+                for index in mask.indices where mask[index] > 0 {
+                    let pixel = index * 4
+                    let source = paint.sample(index: index, width: width)
+                    let alpha = min(1, source.w * opacity * Float(mask[index]) / 255)
+                    guard alpha > 0 else { continue }
+                    let remaining = Float(rgba[pixel + 3]) / 255 * (1 - alpha)
+                    let outAlpha = alpha + remaining
+                    for channel in 0..<3 {
+                        let value = (source[channel] * 255 * alpha + Float(rgba[pixel + channel]) * remaining) / outAlpha
+                        rgba[pixel + channel] = UInt8(clamping: Int(value.rounded()))
                     }
+                    rgba[pixel + 3] = UInt8(clamping: Int((outAlpha * 255).rounded()))
                 }
             }
 
-            if let stroke = cmd.stroke, cmd.strokeWidth > 0 {
-                let strokeCol: Color?
-                switch stroke {
-                case .none: strokeCol = nil
-                case .solid(let c): strokeCol = c
-                case .currentColor: strokeCol = currentColor
-                case .gradient(let id): strokeCol = parsed.gradients[id]?.stops.first?.color ?? currentColor
+            draw(command.fill, opacity: command.opacity * command.fillOpacity, pen: nil,
+                 rule: command.evenOdd ? .evenOdd : .nonZero)
+            if let stroke = command.stroke, command.strokeWidth > 0 {
+                let cap: GLineCap = switch command.lineCap {
+                case "round": .round
+                case "square": .square
+                default: .butt
                 }
-                if let strokeCol {
-                    ctx.addPath(cgPath)
-                    ctx.setStrokeColor(cgColor(strokeCol, opacity: cmd.strokeOpacity * cmd.opacity))
-                    ctx.setLineWidth(CGFloat(cmd.strokeWidth))
-                    ctx.setLineCap(cmd.lineCap == "round" ? .round : (cmd.lineCap == "square" ? .square : .butt))
-                    ctx.setLineJoin(cmd.lineJoin == "round" ? .round : (cmd.lineJoin == "bevel" ? .bevel : .miter))
-                    ctx.strokePath()
+                let join: GLineJoin = switch command.lineJoin {
+                case "round": .round
+                case "bevel": .bevel
+                default: .miter
                 }
+                let pen = GStroke(width: command.strokeWidth, miterLimit: 4, lineCap: cap, lineJoin: join)
+                draw(stroke, opacity: command.opacity * command.strokeOpacity, pen: pen, rule: .nonZero)
             }
-            ctx.restoreGState()
+        }
+        return rgba
+    }
+
+    private enum PixelPaint {
+        case solid(SIMD4<Float>)
+        case linear(step: GPoint, bias: Float, stops: [(Float, SIMD4<Float>)])
+
+        func sample(index: Int, width: Int) -> SIMD4<Float> {
+            switch self {
+            case .solid(let rgba):
+                return rgba
+            case let .linear(step, bias, stops):
+                let t = (Float(index % width) + 0.5) * step.x + (Float(index / width) + 0.5) * step.y + bias
+                var previous = stops[0]
+                for stop in stops.dropFirst() {
+                    if t < stop.0 {
+                        let mix = max(0, (t - previous.0) / (stop.0 - previous.0))
+                        return previous.1 + (stop.1 - previous.1) * mix
+                    }
+                    previous = stop
+                }
+                return previous.1
+            }
+        }
+    }
+
+    private static func pixelPaint(_ style: FillStyle, parsed: ParsedBody, tint: Color,
+                                   bounds: GRect, transform: GTransform) -> PixelPaint? {
+        func components(_ color: Color) -> SIMD4<Float> {
+            let c = color.srgbComponents
+            return SIMD4(c.r, c.g, c.b, c.a)
         }
 
-        // Convert to one-color silhouette preserving rendered alpha coverage (`color_icon.rs:107-110`)
-        if let one = oneColor {
-            let c = one.srgbComponents
-            let rByte = UInt8(min(255, max(0, (c.r * 255.0).rounded())))
-            let gByte = UInt8(min(255, max(0, (c.g * 255.0).rounded())))
-            let bByte = UInt8(min(255, max(0, (c.b * 255.0).rounded())))
-            for i in stride(from: 0, to: bytes.count, by: 4) {
-                let a = Float(bytes[i + 3]) / 255.0
-                bytes[i] = UInt8((Float(rByte) * a).rounded())
-                bytes[i + 1] = UInt8((Float(gByte) * a).rounded())
-                bytes[i + 2] = UInt8((Float(bByte) * a).rounded())
+        switch style {
+        case .none: return nil
+        case .solid(let color): return .solid(components(color))
+        case .currentColor: return .solid(components(tint))
+        case .gradient(let id):
+            guard let gradient = parsed.gradients[id], !gradient.stops.isEmpty else { return nil }
+            let stops = gradient.stops.map { ($0.offset, components($0.resolvedColor(tint))) }
+            let t = gradient.transform
+            var ctm = GTransform(xx: t[0], xy: t[1], yx: t[2], yy: t[3], tx: t[4], ty: t[5])
+            if !gradient.usesUserSpace {
+                let box = GTransform(xx: bounds.width, xy: 0, yx: 0, yy: bounds.height,
+                                     tx: bounds.left, ty: bounds.top)
+                ctm = .then(ctm, box)
             }
+            ctm = .then(ctm, transform)
+            let direction = GPoint(x: gradient.x2 - gradient.x1, y: gradient.y2 - gradient.y1)
+            let divisor = (ctm.xx * ctm.yy - ctm.xy * ctm.yx) * direction.lengthSqd
+            guard divisor.isFinite, divisor != 0 else { return .solid(stops[stops.count - 1].1) }
+            // The gradient runs in SVG coordinates. Map its projection into device space once per shape.
+            let step = GPoint(x: (ctm.yy * direction.x - ctm.xy * direction.y) / divisor,
+                              y: (ctm.xx * direction.y - ctm.yx * direction.x) / divisor)
+            let start = ctm.transformPoint(GPoint(x: gradient.x1, y: gradient.y1))
+            return .linear(step: step, bias: -start.dot(step), stops: stops)
         }
-        return bytes
-        #else
-        let paths = SVGIconRenderer.extractPathStrings(fromBody: body)
-        let alpha = PortableSVGRasterizer.rasterize(SVGIcon(viewBox: viewBox, paths: paths, strokeWidth: nil), pixelSize: px)
-        let tint = oneColor ?? currentColor
-        let c = tint.srgbComponents
-        var out = [UInt8](repeating: 0, count: px * px * 4)
-        for i in 0..<(px * px) {
-            let a = alpha[i]
-            let af = Float(a) / 255.0
-            out[i * 4 + 0] = UInt8((c.r * 255.0 * af).rounded())
-            out[i * 4 + 1] = UInt8((c.g * 255.0 * af).rounded())
-            out[i * 4 + 2] = UInt8((c.b * 255.0 * af).rounded())
-            out[i * 4 + 3] = a
-        }
-        return out
-        #endif
     }
 }
 

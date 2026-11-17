@@ -1,5 +1,6 @@
-import CoreGraphics
+#if canImport(CoreText)
 import CoreText
+#endif
 import Foundation
 import Testing
 @testable import Rune
@@ -14,7 +15,7 @@ struct UpText2ParityTests {
     private static let paragraph = "Careful typography avoids leaving a single short trailing word alone at the bottom of a long paragraph."
 
     private static func lastWords(_ s: ShapedText) -> [Substring] {
-        (s.lineStrings.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        (s.textTestLines.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
     }
 
     /// A width where greedy breaking leaves only one short word on the last line.
@@ -22,7 +23,7 @@ struct UpText2ParityTests {
         for wInt in stride(from: 130, through: 360, by: 2) {
             let w = Float(wInt)
             let s = ts.shape(text: text, pills: pills, style: style, maxWidth: w, pixelScale: 1.0, emitGlyphs: false, pretty: false)
-            guard s.lineCount >= 3, let last = s.lineStrings.last?.text else { continue }
+            guard s.lineCount >= 3, let last = s.textTestLines.last?.text else { continue }
             let t = last.trimmingCharacters(in: .whitespacesAndNewlines)
             if !t.isEmpty, !t.contains(" "), s.lineAdvancePx(at: s.lineCount - 1) < w / 3.0 {
                 return w
@@ -47,9 +48,9 @@ struct UpText2ParityTests {
         TextSystem.setPrettyWrap(true)
         let pretty = ts.shape(text: Self.paragraph, pills: pills, style: style, maxWidth: width, pixelScale: 1.0, emitGlyphs: false, pretty: true)
         #expect(pretty.lineCount == greedy.lineCount, "pretty keeps the greedy line count")
-        #expect(Self.lastWords(pretty).count >= 2, "the pill paragraph pulls a word down: \(pretty.lineStrings.map(\.text))")
+        #expect(Self.lastWords(pretty).count >= 2, "the pill paragraph pulls a word down: \(pretty.textTestLines.map(\.text))")
         #expect(pretty.pillChips.count == greedy.pillChips.count)
-        #expect(pretty.lineStrings.map(\.text).joined() == greedy.lineStrings.map(\.text).joined())
+        #expect(pretty.textTestLines.map(\.text).joined() == greedy.textTestLines.map(\.text).joined())
     }
 
     @Test("#933: wrapAnywhere text wraps prettily when no word breaks inside, and El text resolves pretty")
@@ -65,7 +66,7 @@ struct UpText2ParityTests {
         TextSystem.setPrettyWrap(true)
         let pretty = ts.shape(text: Self.paragraph, style: style, maxWidth: width, pixelScale: 1.0, emitGlyphs: false, pretty: true)
         #expect(pretty.lineCount == greedy.lineCount)
-        #expect(Self.lastWords(pretty).count >= 2, "\(pretty.lineStrings.map(\.text))")
+        #expect(Self.lastWords(pretty).count >= 2, "\(pretty.textTestLines.map(\.text))")
 
         // `TextSpec.pretty`: greedy, redacted and justify opt out; wrap_anywhere no longer does.
         let el: El<Int> = Rune.text(Self.paragraph).font(style).w(width)
@@ -89,7 +90,7 @@ struct UpText2ParityTests {
         for wInt in stride(from: 90, through: 300, by: 2) {
             let w = Float(wInt)
             let greedy = ts.shape(text: text, style: style, maxWidth: w, pixelScale: 1.0, emitGlyphs: false, pretty: false)
-            let lines = greedy.lineStrings.map(\.text)
+            let lines = greedy.textTestLines.map(\.text)
             guard lines.count >= 3 else { continue }
             // A line ending between two letters: the long word broken inside (`BreakReason::Emergency`).
             let broken = zip(lines, lines.dropFirst()).contains { a, b in
@@ -99,7 +100,7 @@ struct UpText2ParityTests {
             let last = (lines.last ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard broken, !last.contains(" "), greedy.lineAdvancePx(at: greedy.lineCount - 1) < w / 3.0 else { continue }
             let pretty = ts.shape(text: text, style: style, maxWidth: w, pixelScale: 1.0, emitGlyphs: false, pretty: true)
-            #expect(pretty.lineStrings.map(\.text) == lines, "width \(w)")
+            #expect(pretty.textTestLines.map(\.text) == lines, "width \(w)")
             checked += 1
         }
         #expect(checked > 0, "found a width with an emergency break and a lone last word")
@@ -178,12 +179,14 @@ struct UpText2ParityTests {
         #expect(DefaultFonts.registerIfNeeded())
         let ts = TextSystem()
         let style = TextStyle(size: 13, weight: 400, lineHeight: 16)
+        #if canImport(CoreText)
         let sans = ts.resolveCTFont(style: style, pixelScale: 1)
         var monoStyle = style
         monoStyle.family = .monospace
         let mono = ts.resolveCTFont(style: monoStyle, pixelScale: 1)
         #expect((CTFontCopyFamilyName(sans) as String).contains("Inter"))
         #expect((CTFontCopyFamilyName(mono) as String).contains("Plex"))
+        #endif
 
         let text = Self.codeSpans().map(\.text).joined()
         let want: [(scale: Float, heightPx: Float)] = [(1, 17), (2, 33), (1.25, 20), (1.5, 24), (1.875, 30)]
@@ -202,7 +205,7 @@ struct UpText2ParityTests {
         #expect(shaped.lineCount == 2)
         #expect(shaped.size.y == 33)
         #expect(shaped.grownLineTopsPt == [0, 17])
-        #expect(shaped.lineStrings[1].originY == 17)
+        #expect(shaped.textTestLines[1].originY == 17)
         let hit = ts.hitTestUTF8Offset(in: shaped, localX: 0.5, localY: 16.5, pixelScale: 1)
         #expect(hit < text.utf8.count, "16.5 pt is still the grown first line")
         let hit2 = ts.hitTestUTF8Offset(in: shaped, localX: 0.5, localY: 17.5, pixelScale: 1)
@@ -242,7 +245,7 @@ struct UpText2ParityTests {
         let twoText = two.map(\.text).joined()
         let shaped = ts.shape(text: twoText, spans: two, style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true)
         #expect(shaped.grownLineTopsPt == [0, 16])
-        #expect(shaped.lineStrings[1].originY == 16)
+        #expect(shaped.textTestLines[1].originY == 16)
         #expect(abs(shaped.size.y - 32.40625) < 1e-4)
         let plain = ts.shape(text: twoText, style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true)
         let secondGlyphs = shaped.glyphs[shaped.lineGlyphRanges[1]]
@@ -338,6 +341,7 @@ struct UpText2ParityTests {
         #expect(a.y == b.y && a.w == b.w, "the code's height")
         #expect(a.z > b.z, "padding widens it")
 
+        #if canImport(CoreText)
         // The code's box: round(ascent) + round(descent) of its font, in device px.
         var monoStyle = style
         monoStyle.family = .monospace
@@ -358,6 +362,7 @@ struct UpText2ParityTests {
         let base = asc.rounded() + floor((lhPx - asc.rounded() - desc.rounded()) * 0.5)
         #expect(m.y * 2.0 == (base - cap * 1.35).rounded())
         #expect((m.y + m.w) * 2.0 == (base + cap * 0.55).rounded())
+        #endif
     }
 
     // MARK: - #954: AppleFontSmoothing 0
@@ -379,10 +384,10 @@ struct UpText2ParityTests {
         // `defaults write -g AppleFontSmoothing -bool false`: a CFBoolean is neither CFNumber nor
         // CFString, so upstream's downcasts fail and smoothing stays on.
         #expect(AppleFontSmoothingPreference.level(from: kCFBooleanFalse) == nil)
-        #expect(AppleFontSmoothingPreference.level(from: false) == nil)
         #expect(AppleFontSmoothingPreference.allows(value: kCFBooleanFalse))
-        #expect(AppleFontSmoothingPreference.level(from: 0) == 0)
         #endif
+        #expect(AppleFontSmoothingPreference.level(from: false) == nil)
+        #expect(AppleFontSmoothingPreference.level(from: 0) == 0)
         // `CFNumber::as_i64` is lossless only: `-float 0.5` is `None`,
         // so smoothing stays allowed; a whole float still reads as its integer.
         #expect(AppleFontSmoothingPreference.level(from: NSNumber(value: 0.5)) == nil)

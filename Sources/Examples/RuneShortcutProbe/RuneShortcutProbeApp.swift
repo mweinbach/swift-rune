@@ -1,16 +1,8 @@
 import Foundation
 import Rune
-#if canImport(Darwin)
-import Darwin
-#endif
 
 /// Global shortcut registration, conflict probing, runtime register/unregister, and dispatch probe
 /// mirroring `crates/rune/examples/shortcut_probe.rs`.
-///
-/// NOTE: `Sources/Rune` does not yet expose `App.globalShortcut(...)` or
-/// `AppHandle.{takeShortcutErrors,registerShortcut,unregisterShortcut}`. This port drives
-/// `ShortcutRegistry` and `MacOSGlobalHotKeyBackend` directly under a windowless `.accessory()`
-/// `App` while honoring `--probe-conflict`, `--tree`, `READY`, `CONFLICT`, `FIRED`, and stdin EOF.
 @main
 public enum RuneShortcutProbeApp {
     public struct State: Sendable {
@@ -48,106 +40,59 @@ public enum RuneShortcutProbeApp {
         let rawArgs = Array(CommandLine.arguments.dropFirst())
         let probeConflict = rawArgs.contains("--probe-conflict")
         let forwardedArgs = rawArgs.filter { $0 != "--probe-conflict" }
-        let isHeadless = ToolingArgs.parse(forwardedArgs).isHeadlessRequested
-
         let firedCounter = AtomicCounter()
-        let registry = ShortcutRegistry()
-
-        #if os(macOS)
-        let backend = isHeadless ? nil : (try? MacOSGlobalHotKeyBackend())
-        #endif
-
         let app = App<State>(
             "Shortcut Probe",
             size: Vec2(240, 100),
             init: { State() },
             view: { s, _ in
                 col()
-                    .wFull()
-                    .hFull()
+                    .sizeFull()
                     .bg(Color(r: 0.08, g: 0.09, b: 0.12, a: 1.0))
                     .center()
-                    .child(
-                        text("FIRED \(s.fired)")
-                            .font(Tok.Typography.title)
-                            .color(.white)
-                    )
+                    .child(text("FIRED \(s.fired)").font(Tok.Typography.title).color(.white))
             }
         )
+        .globalShortcut(primaryAccel) { state in
+            state.fired = firedCounter.increment()
+            RuneStandardIO.output("FIRED \(state.fired)\n")
+        }
         .args(forwardedArgs)
         .windowless(true)
         .accessory(true)
 
         let handle = app.handle()
-
-        if !isHeadless {
-            let primaryRes = registry.register(id: "primary", accelerator: primaryAccel, scope: .global) {
-                let n = firedCounter.increment()
-                handle.update { s, _ in s.fired = n }
-                print("FIRED \(n)")
-                fflush(stdout)
-            }
-            #if os(macOS)
-            if case .success = primaryRes, let chord = Chord(parsing: primaryAccel), let backend {
-                let osRes = backend.register(id: "primary", chord: chord) {
-                    let n = firedCounter.increment()
-                    handle.update { s, _ in s.fired = n }
-                    print("FIRED \(n)")
-                    fflush(stdout)
-                }
-                if case .failure = osRes, probeConflict {
-                    print("CONFLICT")
-                    fflush(stdout)
+        if !ToolingArgs.parse(forwardedArgs).isHeadlessRequested {
+            handle.update { _, tx in
+                let errors = handle.takeShortcutErrors()
+                if probeConflict, errors.count == 1, case .alreadyInUse = errors[0] {
+                    RuneStandardIO.output("CONFLICT\n")
+                    tx.quit()
                     return
                 }
-            }
-            #endif
-
-            if probeConflict {
-                let dupRes = registry.register(id: "conflict", accelerator: primaryAccel, scope: .global) {}
-                if case .failure(.conflict) = dupRes {
-                    print("CONFLICT")
-                    fflush(stdout)
+                guard errors.isEmpty, !probeConflict else {
+                    RuneStandardIO.error("Shortcut probe received unexpected registration results: \(errors)\n")
+                    tx.quit()
                     return
                 }
-            }
-
-            let extraRes = registry.register(id: "extra", accelerator: secondaryAccel, scope: .global) {
-                let n = firedCounter.increment()
-                handle.update { s, _ in s.fired = n }
-                print("FIRED \(n)")
-                fflush(stdout)
-            }
-            #if os(macOS)
-            if case .success = extraRes, let chord = Chord(parsing: secondaryAccel) {
-                _ = backend?.register(id: "extra", chord: chord) {
-                    let n = firedCounter.increment()
-                    handle.update { s, _ in s.fired = n }
-                    print("FIRED \(n)")
-                    fflush(stdout)
+                do {
+                    let key = try ParsedShortcut.parseOn(secondaryAccel)
+                    let id = try handle.registerShortcut(key) { _, _ in }.get()
+                    try handle.unregisterShortcut(id).get()
+                    RuneStandardIO.output("READY\n")
+                } catch {
+                    RuneStandardIO.error("Shortcut probe could not register and unregister: \(error)\n")
+                    tx.quit()
                 }
             }
-            #endif
-
-            _ = registry.unregister(id: "extra")
-            #if os(macOS)
-            _ = backend?.unregister(id: "extra")
-            #endif
-
-            print("READY")
-            fflush(stdout)
-
-            Thread.detachNewThread {
-                while readLine() != nil {}
-                handle.quit()
+            if !probeConflict {
+                Thread.detachNewThread {
+                    while readLine() != nil {}
+                    handle.quit()
+                }
             }
         }
-
         try app.run(arguments: forwardedArgs)
-        if !isHeadless {
-            print("FIRED \(firedCounter.value())")
-            fflush(stdout)
-        }
     }
 
     public static func runHeadlessVerify() -> Report {

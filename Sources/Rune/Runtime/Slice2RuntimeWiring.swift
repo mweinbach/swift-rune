@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
 
 // MARK: - Slice 2 Runtime State & Wiring (Scroll Core, WheelLock, Touch, Nudge, PixelHold, ScrollMode, Tx Actions)

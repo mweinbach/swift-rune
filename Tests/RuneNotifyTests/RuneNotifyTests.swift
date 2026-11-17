@@ -234,13 +234,23 @@ struct RuneNotifyTests {
         #expect(service.post(critical))
         #expect(mock.activeNotifications.first?.urgency == .critical)
 
-        // Default non-Windows platform parity: returns nil / success cleanly.
+        #if !os(Windows)
+        // Other hosts have no Windows COM activation class.
         #expect(RuneNotify.clickFromURL("rune-notify://notification/n-1") == nil)
         try RuneNotify.serveActivations("{00000000-0000-0000-0000-000000000000}").get()
         #expect(RuneNotify.waitActivation("{00000000-0000-0000-0000-000000000000}", timeout: 0) == nil)
+        #endif
     }
 
     @Test func topLevelRuneNotifyWrappersAndLiveFocusCheckDoNotCrash() throws {
+        #if os(Windows)
+        // Full registration, shell activation and toast delivery run in a separate test process.
+        #expect(RuneNotify.clickFromURL("https://example.com/") == nil)
+        if case .success = RuneNotify.registerWithResult(NotificationIdentity(id: "invalid\\id", name: "")) {
+            Issue.record("Windows accepted an invalid application identity")
+        }
+        #expect(RuneNotify.waitActivation("invalid class", timeout: 0) == nil)
+        #else
         let identity = NotificationIdentity(id: "dev.rune.wrapper-test", name: "Rune Wrapper")
             .icon("/tmp/rune.png")
             .activation("rune-wrapper")
@@ -264,6 +274,7 @@ struct RuneNotifyTests {
         #expect(RuneNotify.clickFromURL("rune-wrapper://notification/wrap-1") == nil)
         try RuneNotify.serveActivations("{12345678-1234-1234-1234-1234567890ab}").get()
         #expect(RuneNotify.waitActivation("{12345678-1234-1234-1234-1234567890ab}", timeout: 0) == nil)
+        #endif
     }
 
     @Test func linuxNotifySendBackendCliArgsAndErrorPaths() throws {

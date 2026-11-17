@@ -487,13 +487,13 @@ struct ElInc5AUnblockersTests {
         rich.html = "<b>hello</b>"
         rich.text = "hello"
         board.writeRich(RichClipboardPayload(content: rich))
-        #expect(rt.keyDown(KeyEvent(key: .text("v"), mods: Mods(cmd: true)), at: 0.2))
+        #expect(rt.keyDown(KeyEvent(key: .text("v"), mods: RuneTestKey.primaryMods()), at: 0.2))
         #expect(rt.state.interceptedRich)
         #expect(rt.state.edit.text.isEmpty)
 
         // Plain paste falls through onInputPaste and inserts into TextEdit
         board.writeText("plain")
-        #expect(rt.keyDown(KeyEvent(key: .text("v"), mods: Mods(cmd: true)), at: 0.3))
+        #expect(rt.keyDown(KeyEvent(key: .text("v"), mods: RuneTestKey.primaryMods()), at: 0.3))
         #expect(rt.state.edit.text == "plain")
     }
 
@@ -792,7 +792,7 @@ struct ElInc5AUnblockersTests {
         _ = rt.frame(at: 0.51)
         #expect(rt.keyUp(KeyEvent(key: .space), at: 0.52))
         #expect(rt.state.keyLog == ["modal:space"])
-        #expect(rt.keyDown(KeyEvent(key: .text("v"), mods: Mods(cmd: true)), at: 0.53))
+        #expect(rt.keyDown(KeyEvent(key: .text("v"), mods: RuneTestKey.primaryMods()), at: 0.53))
         #expect(rt.state.pasteLog == ["modal-paste"])
     }
 

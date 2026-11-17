@@ -138,7 +138,7 @@ public enum RuneWindowScrollCostApp {
             Thread.sleep(forTimeInterval: TimeInterval(timeoutSecs))
             let finished = tracker.lock.withLock { tracker.finished }
             if !finished {
-                fputs("scroll_window: timed out before completing\n", stderr)
+                RuneStandardIO.error("scroll_window: timed out before completing\n")
                 #if canImport(Darwin)
                 Darwin.exit(1)
                 #endif

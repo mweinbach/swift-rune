@@ -3,9 +3,9 @@ import RuneMotion
 
 // MARK: - Platform Capabilities & Runtime ID Scope
 
-/// Whether this platform shows native pop-up menus (macOS and Windows; `popup_menu/mod.rs:51`).
+/// Whether the window host presents pop-up menus requested through `Tx.popupMenu`.
 public func popupMenuSupported() -> Bool {
-    #if os(macOS) || os(Windows)
+    #if os(macOS) || os(Windows) || os(Linux)
     return true
     #else
     return false
@@ -328,41 +328,42 @@ extension Tx {
 
 // MARK: - AppHandle Native Menu Bridge (`native_menu/mod.rs:160-180`)
 
-/// Thread-safe storage bridging `AppHandle.setMenu` / `takeMenuErrors` with host menu sync without
-/// modifying `Shell/App.swift`.
+/// Each app owns its menu model and errors, including after its last window closes.
+internal final class AppMenuState<State>: @unchecked Sendable {
+    fileprivate let lock = NSLock()
+    fileprivate var items: [NativeMenuItem<State>] = []
+    fileprivate var revision: UInt64 = 0
+    fileprivate var isRunning = false
+    fileprivate var isHeadless = false
+    fileprivate var nativeSupported = AppMenuBridge.defaultNativeSupported
+    fileprivate var errors: [MenuError] = []
+
+    fileprivate func replaceItems(_ items: [NativeMenuItem<State>]) {
+        self.items = items
+        revision &+= 1
+        #if os(Linux) || os(Windows)
+        if isRunning && nativeSupported && !isHeadless && items.contains(where: { $0.location == .dock }) {
+            errors.append(.backend("The Dock menu location is only available on macOS"))
+        }
+        #endif
+    }
+
+    fileprivate func action(id: String, revision: UInt64) -> ((inout State, inout Tx) -> Void)? {
+        guard isRunning, nativeSupported || isHeadless, self.revision == revision else { return nil }
+        return items.first(where: { !$0.isSeparator && $0.id == id && $0.enabled })?.action
+    }
+}
+
+/// Connects the app's menu model to a native window or headless runtime.
 public final class AppMenuBridge: @unchecked Sendable {
-    private static let shared = AppMenuBridge()
+    private init() {}
 
     public static var defaultNativeSupported: Bool {
-        #if os(macOS)
+        #if os(macOS) || os(Windows) || os(Linux)
         return true
         #else
         return false
         #endif
-    }
-
-    private final class Box<State>: @unchecked Sendable {
-        var items: [NativeMenuItem<State>] = []
-        var revision: UInt64 = 0
-        var isRunning: Bool = false
-        var isHeadless: Bool = false
-        var nativeSupported: Bool = defaultNativeSupported
-        var errors: [MenuError] = []
-    }
-
-    private let lock = NSLock()
-    private var boxes: [ObjectIdentifier: AnyObject] = [:]
-
-    private init() {}
-
-    private func box<State>(for shared: AppShared<State>) -> Box<State> {
-        let key = ObjectIdentifier(shared)
-        if let existing = boxes[key] as? Box<State> {
-            return existing
-        }
-        let created = Box<State>()
-        boxes[key] = created
-        return created
     }
 
     public static func markRunning<State>(
@@ -371,126 +372,103 @@ public final class AppMenuBridge: @unchecked Sendable {
         headless: Bool = false,
         nativeSupported: Bool = defaultNativeSupported
     ) {
-        shared.lock.lock()
-        let b = shared.box(for: appShared)
-        b.isRunning = running
-        b.isHeadless = headless
-        b.nativeSupported = running ? nativeSupported : defaultNativeSupported
-        shared.lock.unlock()
+        let menu = appShared.menuState
+        menu.lock.withLock {
+            if menu.isRunning && !running {
+                menu.items.removeAll()
+                menu.revision &+= 1
+            }
+            menu.isRunning = running
+            menu.isHeadless = running && headless
+            menu.nativeSupported = running ? nativeSupported : defaultNativeSupported
+        }
     }
 
-    /// Attaches startup menu items for a run (`native_menu::Guard::attach`).
-    /// On unsupported native non-headless targets, retains initial items and records `.unsupported`.
+    /// Attaches startup menu items for a run, keeping validation errors available on the handle.
     public static func attach<State>(
         _ items: [NativeMenuItem<State>],
         to appShared: AppShared<State>,
         headless: Bool = false,
         nativeSupported: Bool = defaultNativeSupported
     ) {
-        shared.lock.lock()
-        let b = shared.box(for: appShared)
-        b.isRunning = true
-        b.isHeadless = headless
-        b.nativeSupported = nativeSupported
-        if !items.isEmpty {
-            if !nativeSupported && !headless {
-                b.items = items
-                b.revision &+= 1
-                b.errors.append(.unsupported)
-                shared.lock.unlock()
+        let menu = appShared.menuState
+        menu.lock.withLock {
+            menu.isRunning = true
+            menu.isHeadless = headless
+            menu.nativeSupported = nativeSupported
+            if !nativeSupported && !headless && !items.isEmpty {
+                menu.replaceItems(items)
+                menu.errors.append(.unsupported)
                 return
             }
-            shared.lock.unlock()
             do {
                 try NativeMenuValidator.validate(items)
-                shared.lock.lock()
-                b.items = items
-                b.revision &+= 1
-                shared.lock.unlock()
-                appShared.wake()
-            } catch let err as MenuError {
-                recordError(err, for: appShared)
+                menu.replaceItems(items)
+            } catch let error as MenuError {
+                menu.replaceItems([])
+                menu.errors.append(error)
             } catch {
-                recordError(.unsupported, for: appShared)
+                menu.replaceItems([])
+                menu.errors.append(.backend(String(describing: error)))
             }
-        } else {
-            shared.lock.unlock()
         }
+        appShared.wake()
     }
 
     public static func recordError<State>(_ error: MenuError, for appShared: AppShared<State>) {
-        shared.lock.lock()
-        shared.box(for: appShared).errors.append(error)
-        shared.lock.unlock()
+        let menu = appShared.menuState
+        menu.lock.withLock { menu.errors.append(error) }
     }
 
     public static func setMenu<State>(_ items: [NativeMenuItem<State>], for appShared: AppShared<State>) throws {
-        shared.lock.lock()
-        let b = shared.box(for: appShared)
-        let allowed = b.nativeSupported || b.isHeadless
-        guard allowed else {
-            shared.lock.unlock()
-            throw MenuError.unsupported
+        let menu = appShared.menuState
+        try menu.lock.withLock {
+            guard menu.nativeSupported || menu.isHeadless else { throw MenuError.unsupported }
+            guard menu.isRunning else { throw MenuError.notRunning }
+            try NativeMenuValidator.validate(items)
+            menu.replaceItems(items)
         }
-        guard b.isRunning else {
-            shared.lock.unlock()
-            throw MenuError.notRunning
-        }
-        shared.lock.unlock()
-
-        try NativeMenuValidator.validate(items)
-
-        shared.lock.lock()
-        b.items = items
-        b.revision &+= 1
-        shared.lock.unlock()
-
         appShared.wake()
     }
 
     public static func snapshot<State>(for appShared: AppShared<State>) -> (items: [NativeMenuItem<State>], revision: UInt64) {
-        shared.lock.lock()
-        defer { shared.lock.unlock() }
-        let b = shared.box(for: appShared)
-        return (b.items, b.revision)
+        let menu = appShared.menuState
+        return menu.lock.withLock { (menu.items, menu.revision) }
     }
 
-    /// Enqueues execution of a menu item by id or unique title (`native_menu::fire`).
-    /// Re-checks running status, menu revision, and enabled state when drained so menu
-    /// replacement, disabling, or shutdown before the next frame cancels stale actions.
+    internal static func desktopSnapshot<State>(
+        for appShared: AppShared<State>, applicationTitle: String, after revision: UInt64?
+    ) -> DesktopMenuSnapshot? {
+        let snapshot = snapshot(for: appShared)
+        guard snapshot.revision != revision else { return nil }
+        return DesktopMenuSnapshot(revision: snapshot.revision, items: snapshot.items, applicationTitle: applicationTitle)
+    }
+
+    /// A platform menu supplies the revision it actually displayed so stale native events are harmless.
+    @discardableResult
+    internal static func fireIfCurrent<State>(id: String, revision: UInt64, for appShared: AppShared<State>) -> Bool {
+        let menu = appShared.menuState
+        guard menu.lock.withLock({ menu.action(id: id, revision: revision) != nil }) else { return false }
+        enqueue(id: id, revision: revision, for: appShared)
+        return true
+    }
+
+    /// Fires an item by id or unique title on the next frame, if its revision is still installed.
     public static func fire<State>(_ selector: String, for appShared: AppShared<State>) throws {
-        shared.lock.lock()
-        let b = shared.box(for: appShared)
-        let running = b.isRunning
-        let allowed = b.nativeSupported || b.isHeadless
-        let items = b.items
-        let capturedRevision = b.revision
-        shared.lock.unlock()
-
-        guard allowed else {
-            throw MenuError.unsupported
+        let menu = appShared.menuState
+        let (id, revision) = try menu.lock.withLock {
+            guard menu.nativeSupported || menu.isHeadless else { throw MenuError.unsupported }
+            guard menu.isRunning else { throw MenuError.notRunning }
+            let index = try NativeMenuValidator.lookupIndex(selector: selector, in: menu.items)
+            return (menu.items[index].id, menu.revision)
         }
-        guard running else {
-            throw MenuError.notRunning
-        }
+        enqueue(id: id, revision: revision, for: appShared)
+    }
 
-        let idx = try NativeMenuValidator.lookupIndex(selector: selector, in: items)
-        let targetId = items[idx].id
-
-        appShared.enqueueUpdateIf { state, tx in
-            shared.lock.lock()
-            let box = shared.box(for: appShared)
-            let stillValid = box.isRunning && box.revision == capturedRevision
-            let action: ((inout State, inout Tx) -> Void)?
-            if stillValid,
-               let latest = box.items.first(where: { !$0.isSeparator && $0.id == targetId }),
-               latest.enabled {
-                action = latest.action
-            } else {
-                action = nil
-            }
-            shared.lock.unlock()
-
+    private static func enqueue<State>(id: String, revision: UInt64, for appShared: AppShared<State>) {
+        appShared.enqueueUpdateIf { [weak appShared] state, tx in
+            guard let menu = appShared?.menuState else { return false }
+            let action = menu.lock.withLock { menu.action(id: id, revision: revision) }
             guard let action else { return false }
             action(&state, &tx)
             return true
@@ -498,12 +476,12 @@ public final class AppMenuBridge: @unchecked Sendable {
     }
 
     public static func takeMenuErrors<State>(for appShared: AppShared<State>) -> [MenuError] {
-        shared.lock.lock()
-        defer { shared.lock.unlock() }
-        let b = shared.box(for: appShared)
-        let out = b.errors
-        b.errors.removeAll()
-        return out
+        let menu = appShared.menuState
+        return menu.lock.withLock {
+            let errors = menu.errors
+            menu.errors.removeAll()
+            return errors
+        }
     }
 }
 

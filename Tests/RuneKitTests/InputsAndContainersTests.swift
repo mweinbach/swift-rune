@@ -112,7 +112,7 @@ struct InputsAndContainersTests {
         _ = rt.keyDown(KeyEvent(key: .enter), at: t)
         #expect(rt.state.sent == 1)
 
-        _ = rt.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: t)
+        _ = rt.keyDown(KeyEvent(key: .command("a"), mods: RuneKitTestKey.primaryMods()), at: t)
         _ = rt.keyDown(KeyEvent(key: .backspace), at: t)
         for _ in 0..<60 {
             t += 1.0 / 60.0
@@ -851,9 +851,8 @@ struct InputsAndContainersTests {
         let rtlBox = try #require(rt.element(byKey: "rtl-auto-input")?.rect)
         var t = 0.01
         click(rt, at: center(of: rtlBox), t: &t)
-        if let caretRect = rt.element(byKey: "rtl-auto-input")?.caret {
-            #expect(caretRect[0] > rtlBox[0] + rtlBox[2] * 0.5)
-        }
+        let caretRect = try #require(rt.element(byKey: "rtl-auto-input")?.caret)
+        #expect(caretRect[0] > rtlBox[0] + rtlBox[2] * 0.5)
         // Rich decorations + pills emit chip/pill backgrounds and image/icon quads (more primitives than plain text).
         #expect(frame.primitives.count > 12)
         let richIn = try #require(rt.element(byKey: "rich-in-input"))

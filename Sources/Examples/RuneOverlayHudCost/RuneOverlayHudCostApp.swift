@@ -105,7 +105,7 @@ public enum RuneOverlayHudCostApp {
         }
 
         public var features: CompositorFeatures {
-            [.customClear]
+            [.customClear, .requiresMetal]
         }
 
         public var isAnimating: Bool { true }

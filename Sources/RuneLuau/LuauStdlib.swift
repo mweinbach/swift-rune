@@ -1738,11 +1738,13 @@ internal enum LuauStdlib {
             let utc = fmt.hasPrefix("!")
             let spec = utc ? String(fmt.dropFirst()) : fmt
             var t = tm()
-            if utc {
-                gmtime_r(&rawTime, &t)
-            } else {
-                localtime_r(&rawTime, &t)
-            }
+            #if os(Windows)
+            let converted = utc ? gmtime_s(&t, &rawTime) : localtime_s(&t, &rawTime)
+            guard converted == 0 else { return .values([.nil]) }
+            #else
+            let converted = utc ? gmtime_r(&rawTime, &t) : localtime_r(&rawTime, &t)
+            guard converted != nil else { return .values([.nil]) }
+            #endif
             if spec == "*t" {
                 let tbl = LuauTable()
                 tbl.rawSet("year", value: .number(Double(Int(t.tm_year) + 1900)))

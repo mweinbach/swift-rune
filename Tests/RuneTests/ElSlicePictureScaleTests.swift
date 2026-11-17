@@ -48,11 +48,27 @@ struct ElSlicePictureScaleTests {
             var maxX = -Float.greatestFiniteMagnitude
             var maxY = -Float.greatestFiniteMagnitude
             for q in gs {
-                minX = min(minX, q.rect.x)
-                minY = min(minY, q.rect.y)
-                maxX = max(maxX, q.rect.x + q.rect.z)
-                maxY = max(maxY, q.rect.y + q.rect.w)
+                // Measure covered texels. CoreText and native line tiles can reserve different
+                // transparent borders for the same glyph.
+                let width = Int((q.uv.z > 0 ? q.uv.z : q.rect.z).rounded())
+                let height = Int((q.uv.z > 0 ? q.uv.w : q.rect.w).rounded())
+                let left = Int(q.uv.x.rounded()), top = Int(q.uv.y.rounded())
+                guard width > 0, height > 0, left >= 0, top >= 0,
+                      left + width <= rf.glyphs.width, top + height <= rf.glyphs.height else {
+                    Issue.record("Glyph rectangle falls outside its atlas")
+                    continue
+                }
+                let dx = q.rect.z / Float(width), dy = q.rect.w / Float(height)
+                for y in 0..<height {
+                    for x in 0..<width where rf.glyphs.texels[(top + y) * rf.glyphs.width + left + x] > 0 {
+                        minX = min(minX, q.rect.x + Float(x) * dx)
+                        minY = min(minY, q.rect.y + Float(y) * dy)
+                        maxX = max(maxX, q.rect.x + Float(x + 1) * dx)
+                        maxY = max(maxY, q.rect.y + Float(y + 1) * dy)
+                    }
+                }
             }
+            #expect(minX < maxX && minY < maxY, "the label has visible ink")
             return ([minX, minY, maxX, maxY], gs.allSatisfy { $0.uv.z == 0.0 })
         }
 
@@ -74,9 +90,8 @@ struct ElSlicePictureScaleTests {
             let (half, crisp) = glyphBoundsAndCrisp(rt)
             let hw = half[2] - half[0]
             let hh = half[3] - half[1]
-            // Subtract constant 2px per-side GlyphAtlas pad (+4px per axis).
-            let rw = (hw - 4.0) / (w - 4.0)
-            let rh = (hh - 4.0) / (h - 4.0)
+            let rw = hw / w
+            let rh = hh / h
             #expect(abs(rw - 0.5) < 0.03 && abs(rh - 0.5) < 0.06, "glyphs draw at half size: \(hw)x\(hh) vs \(w)x\(h)")
             for axis in 0..<2 {
                 let want = c[axis] + (rest[axis] - c[axis]) * 0.5
@@ -116,9 +131,14 @@ struct ElSlicePictureScaleTests {
         tp += 1.0 / 120.0
         rtPress.pointerUp(at: Vec2(100, 40), at: tp)
         _ = rtPress.frame(at: tp)
+        // The release starts the spring at its held value. Sample after it has advanced.
+        tp += 3.0 / 120.0
+        _ = rtPress.frame(at: tp)
         let (moving, crispMoving) = glyphBoundsAndCrisp(rtPress)
         let mw = (moving[2] - moving[0]) / w
         #expect(mw > 0.9 && mw < 1.0, "springing back: \(mw)")
+        let cardScale = rtPress.elements().first { $0.key == "card" }!.rect[2] / 200
+        #expect(abs(mw - cardScale) < 0.02, "glyph width \(mw) follows card scale \(cardScale)")
         #expect(!crispMoving, "moving scale samples rest-size glyphs")
 
         for _ in 0..<120 {

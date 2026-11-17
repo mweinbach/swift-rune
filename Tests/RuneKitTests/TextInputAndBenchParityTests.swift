@@ -279,7 +279,11 @@ struct TextInputAndBenchParityTests {
         let rebuildP50 = Self.percentile(&rebuild, 0.5)
         let dragP50 = Self.percentile(&drag, 0.5)
         #expect(firstMs >= 0.0 && sortMs >= 0.0)
-        #expect(scrollP50 < 200.0 && scrollP95 < 500.0 && commitP50 < 500.0 && rebuildP50 < 500.0 && dragP50 < 500.0)
+        #expect(scrollP50 < 200.0)
+        #expect(scrollP95 < 500.0)
+        #expect(commitP50 < 500.0)
+        #expect(rebuildP50 < 500.0)
+        #expect(dragP50 < 500.0)
     }
 
     // MARK: - 5. crates/rune-kit/tests/tree.rs:350
@@ -360,6 +364,7 @@ struct TextInputAndBenchParityTests {
         let p50 = Self.percentile(&frames, 0.5)
         let p95 = Self.percentile(&frames, 0.95)
         #expect(modelMs >= 0.0 && firstMs >= 0.0 && endMs >= 0.0 && filterMs >= 0.0)
-        #expect(p50 < 200.0 && p95 < 500.0)
+        #expect(p50 < 200.0)
+        #expect(p95 < 500.0)
     }
 }

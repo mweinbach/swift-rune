@@ -1,0 +1,100 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune WebGL transparent frame precision</title>
+<canvas></canvas>
+<pre id="result">Running…</pre>
+<script type="module">
+import { RuneWebGL, loadRuneShaders } from '../../Sources/Rune/Resources/Web/rune-webgl.mjs';
+
+const width = 16, height = 8;
+const viewport = [0, 0, width, height];
+
+function primitive(kind, rect, fill, parameter = 0) {
+    const words = new Float32Array(32);
+    words.set(rect);
+    words.set(fill, 8);
+    words.set([parameter, kind, 0, 1], 16);
+    words.set(viewport, 24);
+    return words;
+}
+
+function packet(gamma, clear, primitives) {
+    const bytes = new Uint8Array(56 + primitives.length * 128 + 5);
+    new Uint32Array(bytes.buffer, 0, 14).set([0x32475352, width, height, gamma ? 7 : 6,
+        primitives.length, 1, 1, 1, 1]);
+    new Float32Array(bytes.buffer, 36, 4).set(clear);
+    primitives.forEach((p, i) => new Float32Array(bytes.buffer, 56 + i * 128, 32).set(p));
+    bytes.fill(255, bytes.length - 5);
+    return bytes;
+}
+
+const result = document.querySelector('#result');
+let renderer;
+try {
+    const shaders = await loadRuneShaders();
+    renderer = new RuneWebGL(document.querySelector('canvas'), shaders);
+    const verify = (label, gamma, clear, primitives, expected, alternate) => {
+        const gl = renderer.gl;
+        const scene = packet(gamma, clear, primitives);
+        renderer.draw(scene.buffer, 0, scene.byteLength);
+        const actual = new Uint8Array(4);
+        gl.readPixels(2, 3, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, actual);
+        const matches = pixel => actual.every((v, i) => Math.abs(v - pixel[i]) <= 1);
+        if (gl.getError() !== gl.NO_ERROR || !(matches(expected) || (alternate && matches(alternate)))) {
+            throw Error(`${label}: got ${actual}; expected ${expected}`);
+        }
+    };
+    // Reference values are Metal readbacks. The root stores premultiplied bytes before
+    // converting back to straight RGBA, which makes the quantization visible.
+    for (const [alpha, gammaPixel, linearPixel, alternateLinear] of [
+        [0.01, [0, 85, 170, 3], [79, 139, 215, 3]],
+        // At 0.005 linear, the Apple sRGB hardware stores red code 15 and SwiftShader stores 16.
+        [0.05, [20, 78, 196, 13], [86, 148, 228, 13], [90, 148, 228, 13]],
+        [0.2, [25, 75, 205, 51], [90, 148, 230, 51]],
+        [0.6, [25, 77, 203, 153], [89, 149, 231, 153]]
+    ]) {
+        const clear = [0.1 * alpha, 0.3 * alpha, 0.8 * alpha, alpha];
+        for (const [gamma, expected] of [[true, gammaPixel], [false, linearPixel]]) {
+            const alternate = gamma ? undefined : alternateLinear;
+            verify('clear', gamma, clear, [], expected, alternate);
+            verify('rectangle', gamma, [0, 0, 0, 0], [primitive(0, viewport, clear)], expected, alternate);
+        }
+    }
+    verify('linear color with zero stored alpha', false, [0.001, 0.0003, 0.0001, 0.001], [], [3, 1, 0, 0]);
+    // Each root draw is quantized, including draws after a backdrop swaps the active target.
+    const faint = primitive(0, viewport, [0.001, 0.001, 0.001, 0.001]);
+    const haze = primitive(13, [8, 0, 8, 8], [0, 0, 0, 1], 3);
+    verify('repeated fragments', true, [0, 0, 0, 0], Array(8).fill(faint), [0, 0, 0, 0]);
+    verify('fragments following backdrop', true, [0, 0, 0, 0], [haze, ...Array(8).fill(faint)], [0, 0, 0, 0]);
+    if (renderer.floatTargets) {
+        const group = primitive(8, viewport, [0, 0, 0, 0.75]);
+        const end = primitive(9, viewport, []);
+        verify('isolated layer retains precision', true, [0, 0, 0, 0],
+            [group, ...Array(8).fill(faint), end], [255, 255, 255, 2]);
+    }
+    renderer.dispose();
+    const fallbackCanvas = document.createElement('canvas');
+    const fallback = fallbackCanvas.getContext('webgl2', {
+        premultipliedAlpha: false, depth: false, stencil: false, antialias: false
+    });
+    const extension = fallback.getExtension.bind(fallback);
+    fallback.getExtension = name => name === 'EXT_color_buffer_float' ? null : extension(name);
+    renderer = new RuneWebGL(fallbackCanvas, shaders);
+    if (renderer.floatTargets) throw Error('No-float fixture acquired a floating-point target');
+    const soft = [0.001, 0.003, 0.008, 0.01];
+    const backdrop = primitive(13, viewport, [0, 0, 0, 1], 3);
+    const group = primitive(8, viewport, [0, 0, 0, 1]);
+    const end = primitive(9, viewport, []);
+    for (const gamma of [false, true, false]) {
+        const expected = gamma ? [0, 85, 170, 3] : [79, 139, 215, 3];
+        verify('no-float group', gamma, [0, 0, 0, 0], [group, primitive(0, viewport, soft), end], expected);
+        // The blurred copy composites over the original translucent clear.
+        verify('no-float backdrop', gamma, soft, [backdrop], [...expected.slice(0, 3), 6]);
+    }
+    result.textContent = 'PASS ' + renderer.info.renderer;
+} catch (error) {
+    result.textContent = 'FAIL ' + error.stack;
+} finally {
+    renderer?.dispose();
+}
+</script>

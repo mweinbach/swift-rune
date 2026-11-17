@@ -14,17 +14,17 @@ public enum SyncRecorder {
         }
 
         let sha = try ProcessRunner.runChecked(
-            executable: "/usr/bin/git",
+            executable: "git",
             arguments: ["-C", upstreamRoot.path, "rev-parse", "HEAD"]
         ).trimmingCharacters(in: .whitespacesAndNewlines)
 
         let date = try ProcessRunner.runChecked(
-            executable: "/usr/bin/git",
+            executable: "git",
             arguments: ["-C", upstreamRoot.path, "show", "-s", "--format=%cI", "HEAD"]
         ).trimmingCharacters(in: .whitespacesAndNewlines)
 
         let subject = try ProcessRunner.runChecked(
-            executable: "/usr/bin/git",
+            executable: "git",
             arguments: ["-C", upstreamRoot.path, "show", "-s", "--format=%s", "HEAD"]
         ).trimmingCharacters(in: .whitespacesAndNewlines)
 

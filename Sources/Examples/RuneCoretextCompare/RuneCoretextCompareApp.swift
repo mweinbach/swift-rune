@@ -205,7 +205,7 @@ public enum RuneCoretextCompareApp {
                 print(output)
             }
         } catch {
-            fputs("\(error)\n", stderr)
+            RuneStandardIO.error("\(error)\n")
             Foundation.exit(1)
         }
     }

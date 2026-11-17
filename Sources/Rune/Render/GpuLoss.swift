@@ -118,7 +118,7 @@ public final class GpuDeviceTracker: @unchecked Sendable {
         lock.unlock()
 
         if let emitLine {
-            fputs(emitLine, stderr)
+            RuneStandardIO.error(emitLine)
         }
         return printed
     }

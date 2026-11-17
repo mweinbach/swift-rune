@@ -114,7 +114,7 @@ public enum RuneOverlayApp {
                     do {
                         try handle.setClickThrough(false)
                     } catch {
-                        fputs("click-through: \(error)\n", stderr)
+                        RuneStandardIO.error("click-through: \(error)\n")
                     }
                 }
             }
@@ -221,9 +221,8 @@ public enum RuneOverlayApp {
                 .options(WindowOptions.overlay(display: display))
                 .onCreated { handle in
                     overlayHandles.append(handle)
-                    fputs(
-                        "overlay native window number: \(String(describing: handle.windowNumber))\n",
-                        stderr
+                    RuneStandardIO.error(
+                        "overlay native window number: \(String(describing: handle.windowNumber))\n"
                     )
                 }
                 .boxed()

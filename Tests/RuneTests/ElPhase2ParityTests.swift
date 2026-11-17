@@ -350,27 +350,17 @@ struct ElPhase2ParityTests {
         #expect(opener.takeRequests().isEmpty)
 
         let pipe = Pipe()
-        let savedErr = dup(STDERR_FILENO)
-        var stderrRestored = false
-        dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
-        defer {
-            if !stderrRestored {
-                dup2(savedErr, STDERR_FILENO)
-            }
-            close(savedErr)
-        }
         let openApp = App(title: "OpenUrlStderr", size: Vec2(100, 60), state: 0) { _, _ in
             el().key("btn").size(100, 60).onClick { _, tx in _ = try? tx.openURL("https://rune.dev/headless") }
         }
-        _ = try HeadlessRunner.run(
-            openApp,
+        _ = try HeadlessRunner.runWithHooks(
+            spec: openApp.intoSpec(),
             args: ToolingArgs.parse([
                 "--force-cpu", "--scale", "1",
                 "--script", "[{\"t\":0.01,\"press\":[20,20],\"frames\":1}]",
-            ])
+            ]),
+            standardError: pipe.fileHandleForWriting
         )
-        dup2(savedErr, STDERR_FILENO)
-        stderrRestored = true
         pipe.fileHandleForWriting.closeFile()
         let errText = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         #expect(errText.contains("rune: open_url https://rune.dev/headless (headless: not opened)"))

@@ -81,20 +81,29 @@ public struct TextElision: Sendable, Equatable, Hashable {
         var out: [TextSpan] = []
         out.reserveCapacity(spans.count)
         var cursor = 0
+        var emitted = 0
+        func substring(_ lo: Int, _ hi: Int) -> String {
+            let start = drawn.utf8.index(drawn.utf8.startIndex, offsetBy: lo)
+            let end = drawn.utf8.index(start, offsetBy: hi - lo)
+            return String(drawn[start..<end])
+        }
         for sp in spans {
             let len = sp.text.utf8.count
             let r = mark(cursor, min(originalLength, cursor + len), isLink: false)
             cursor += len
             guard !r.isEmpty else { continue }
-            let lo = min(r.lowerBound, drawnLen)
+            let lo = max(emitted, min(r.lowerBound, drawnLen))
             let hi = max(lo, min(r.upperBound, drawnLen))
             guard lo < hi else { continue }
+            // At a span boundary neither visible span may own the inserted ellipsis.
+            // Keep those bytes in the shaped text, using the label's base style.
+            if emitted < lo { out.append(TextSpan(substring(emitted, lo))) }
             var copy = sp
-            let sIdx = drawn.utf8.index(drawn.utf8.startIndex, offsetBy: lo)
-            let eIdx = drawn.utf8.index(drawn.utf8.startIndex, offsetBy: hi)
-            copy.text = String(drawn[sIdx..<eIdx])
+            copy.text = substring(lo, hi)
             out.append(copy)
+            emitted = hi
         }
+        if emitted < drawnLen { out.append(TextSpan(substring(emitted, drawnLen))) }
         return out
     }
 

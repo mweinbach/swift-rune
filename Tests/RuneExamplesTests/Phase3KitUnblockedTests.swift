@@ -207,9 +207,10 @@ struct Phase3KitUnblockedTests {
         #expect(s.sidebar.isOpen)
         #expect(!s.inspector.isOpen)
         var tx = Tx()
+        let usesCommand = KeyPlatform.current == .mac
         let toggledSidebar = shellExampleOnKey(
             &s,
-            ev: KeyEvent(key: .text("b"), mods: Mods(shift: true, cmd: true)),
+            ev: KeyEvent(key: .text("b"), mods: Mods(shift: true, ctrl: !usesCommand, cmd: usesCommand, logo: usesCommand)),
             &tx
         )
         #expect(toggledSidebar)
@@ -217,7 +218,7 @@ struct Phase3KitUnblockedTests {
 
         let toggledInspector = shellExampleOnKey(
             &s,
-            ev: KeyEvent(key: .text("i"), mods: Mods(alt: true, cmd: true)),
+            ev: KeyEvent(key: .command("i"), mods: Mods(ctrl: !usesCommand, alt: true, cmd: usesCommand, logo: usesCommand)),
             &tx
         )
         #expect(toggledInspector)

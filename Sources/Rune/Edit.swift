@@ -24,9 +24,12 @@ public struct Mods: Sendable, Hashable, Codable {
 
     public static let none = Mods()
 
-    /// Platform primary shortcut modifier (`cmd` on macOS/iOS, `ctrl` elsewhere).
+    /// A native Apple Command, or a scripted Command independent of the physical Control key.
+    internal var isTextLineCommand: Bool { cmd && (KeyPlatform.current.isMac || !ctrl) }
+
+    /// Platform primary shortcut modifier (`cmd` on Apple window hosts, `ctrl` elsewhere).
     public var primaryCommand: Bool {
-        #if os(macOS) || os(iOS)
+        #if os(macOS) || os(iOS) || os(tvOS) || os(visionOS)
         return cmd
         #else
         return ctrl
@@ -300,7 +303,7 @@ public struct Chord: Sendable, Hashable, CustomStringConvertible {
         if active.contains(.alt) { parts.append("Alt") }
         if active.contains(.shift) { parts.append("Shift") }
         if active.contains(.primary) || active.contains(.super) {
-            #if os(macOS) || os(iOS)
+            #if os(macOS) || os(iOS) || os(tvOS) || os(visionOS)
             parts.append("Cmd")
             #else
             parts.append(active.contains(.super) ? "Super" : "Ctrl")
@@ -739,6 +742,11 @@ public struct TextEdit: Sendable, Equatable {
         caretAffinity = .downstream
     }
 
+    internal mutating func setCursor(_ hit: TextCursorMove, extendSelection: Bool = false) {
+        setCursor(utf8Offset: hit.utf8Offset, extendSelection: extendSelection)
+        if cursor == hit.utf8Offset { caretAffinity = hit.affinity }
+    }
+
     public mutating func selectWord(atUTF8Offset offset: Int) {
         breakHistoryGroup()
         let snapped = snapToGraphemeBoundary(offset)
@@ -939,6 +947,14 @@ public struct TextEdit: Sendable, Equatable {
             moveDown(extend: extend)
         } else {
             moveUp(extend: extend)
+        }
+    }
+
+    private mutating func moveToLineEdge(end: Bool, extend: Bool, layout: ShapedText?, textSystem: TextSystem?) {
+        if let layout, layout.cursorLineCount > 0 {
+            lineEdge(end: end, in: layout, textSystem: textSystem ?? TextSystem(), extend: extend)
+        } else {
+            setCursor(utf8Offset: end ? lineEnd(for: cursor) : lineStart(for: cursor), extendSelection: extend)
         }
     }
 
@@ -1576,10 +1592,11 @@ public struct TextEdit: Sendable, Equatable {
                     return .navigation
                 }
                 switch ctrlLetter {
-                case "a": moveLeft(extend: shift, toLineBoundary: true)
-                case "e": moveRight(extend: shift, toLineBoundary: true)
-                case "b": moveLeft(extend: shift)
-                case "f": moveRight(extend: shift)
+                case "a", "e", "b", "f":
+                    let right = ctrlLetter == "e" || ctrlLetter == "f"
+                    let line = ctrlLetter == "a" || ctrlLetter == "e"
+                    let arrow = KeyEvent(key: right ? .arrowRight : .arrowLeft, mods: Mods(shift: shift, cmd: line))
+                    return handleKey(arrow, layout: layout, textSystem: textSystem, pixelScale: pixelScale)
                 default:
                     moveVerticalKey(down: ctrlLetter == "n", extend: shift, layout: layout, textSystem: textSystem, pixelScale: pixelScale)
                 }
@@ -1643,11 +1660,29 @@ public struct TextEdit: Sendable, Equatable {
                 return .ignored
             }
             switch ev.key {
-            case .arrowLeft:
-                moveLeft(extend: shift, toLineBoundary: true)
-                return .navigation
-            case .arrowRight:
-                moveRight(extend: shift, toLineBoundary: true)
+            case .arrowLeft, .arrowRight, .arrowUp, .arrowDown, .home, .end, .backspace, .delete:
+                break
+            case .enter where multiline && isSecure:
+                return .submit
+            default:
+                return .ignored
+            }
+        } else if ev.mods.primaryCommand {
+            return .ignored
+        }
+
+        if !shift && hasSelection && (ev.key == .arrowLeft || ev.key == .arrowRight) {
+            collapseHorizontalSelection(right: ev.key == .arrowRight, layout: layout,
+                                        textSystem: textSystem, pixelScale: pixelScale)
+            return .navigation
+        }
+
+        // Native Ctrl is both the physical word modifier and the shortcut modifier on Windows and Linux.
+        // A script can send cmd without Ctrl to request the same line command as an Apple keyboard.
+        if ev.mods.isTextLineCommand {
+            switch ev.key {
+            case .arrowLeft, .arrowRight:
+                moveToLineEdge(end: ev.key == .arrowRight, extend: shift, layout: layout, textSystem: textSystem)
                 return .navigation
             case .arrowUp:
                 setCursor(utf8Offset: 0, extendSelection: shift)
@@ -1678,19 +1713,9 @@ public struct TextEdit: Sendable, Equatable {
                     return .modified
                 }
                 return .ignored
-            case .enter:
-                if multiline && isSecure {
-                    return .submit
-                }
-                return .ignored
             default:
-                return .ignored
+                break
             }
-        }
-
-        // AltGr / extra modifiers alongside Cmd other than Shift leave primary commands untouched.
-        if ev.mods.primaryCommand {
-            return .ignored
         }
 
         switch ev.key {
@@ -1700,43 +1725,32 @@ public struct TextEdit: Sendable, Equatable {
             breakHistoryGroup()
         }
 
+        let word = alt || (ev.mods.ctrl && !KeyPlatform.current.isMac)
         switch ev.key {
         case .backspace:
             let beforeText = text
             let beforeBlocks = blocks
-            let isWord = alt || ev.mods.ctrl
-            backspace(word: isWord, line: false, kind: isWord ? .deleteRun : .delete)
+            backspace(word: word, line: false, kind: word ? .deleteRun : .delete)
             return (text != beforeText || blocks != beforeBlocks) ? .modified : .navigation
 
         case .delete:
             let before = text
-            let isWord = alt || ev.mods.ctrl
-            deleteForward(word: isWord, kind: isWord ? .deleteRun : .delete)
+            deleteForward(word: word, kind: word ? .deleteRun : .delete)
             return text != before ? .modified : .navigation
 
-        case .arrowLeft:
-            let word = alt || ev.mods.ctrl
-            if !(!shift && hasSelection && !word),
-               let (nextPos, aff) = visualStep(layout: layout, right: false, word: word) {
-                setCursor(utf8Offset: nextPos, extendSelection: shift)
-                caretAffinity = aff
-            } else {
-                moveLeft(extend: shift, word: word)
-            }
-            return .navigation
-
-        case .arrowRight:
-            if !shift && !alt && !ev.mods.ctrl && atEndOfTrailingBlock() {
+        case .arrowLeft, .arrowRight:
+            let right = ev.key == .arrowRight
+            if right && !shift && !alt && !ev.mods.ctrl && atEndOfTrailingBlock() {
                 leaveTrailingBlock()
                 return .modified
             }
-            let word = alt || ev.mods.ctrl
-            if !(!shift && hasSelection && !word),
-               let (nextPos, aff) = visualStep(layout: layout, right: true, word: word) {
+            if let (nextPos, aff) = visualStep(layout: layout, right: right, word: word) {
                 setCursor(utf8Offset: nextPos, extendSelection: shift)
                 caretAffinity = aff
-            } else {
+            } else if right {
                 moveRight(extend: shift, word: word)
+            } else {
+                moveLeft(extend: shift, word: word)
             }
             return .navigation
 
@@ -1749,12 +1763,13 @@ public struct TextEdit: Sendable, Equatable {
             moveVerticalKey(down: down, extend: shift, layout: layout, textSystem: textSystem, pixelScale: pixelScale)
             return .navigation
 
-        case .home:
-            moveLeft(extend: shift, toLineBoundary: true)
-            return .navigation
-
-        case .end:
-            moveRight(extend: shift, toLineBoundary: true)
+        case .home, .end:
+            let end = ev.key == .end
+            if KeyPlatform.current.isMac || ev.mods.ctrl {
+                setCursor(utf8Offset: end ? text.utf8.count : 0, extendSelection: shift)
+            } else {
+                moveToLineEdge(end: end, extend: shift, layout: layout, textSystem: textSystem)
+            }
             return .navigation
 
         case .enter:
@@ -1859,16 +1874,11 @@ public struct TextEdit: Sendable, Equatable {
 
     public func snapToGraphemeBoundary(_ utf8Offset: Int) -> Int {
         let clamped = utf8Offset.clamped(to: 0...text.utf8.count)
-        if clamped == 0 || clamped == text.utf8.count { return clamped }
-        var bytePos = 0
-        for ch in text {
-            let nextPos = bytePos + ch.utf8.count
-            if clamped <= nextPos {
-                return (clamped - bytePos <= nextPos - clamped) ? bytePos : nextPos
-            }
-            bytePos = nextPos
-        }
-        return text.utf8.count
+        let lower = text.graphemeByte(atOrBefore: clamped)
+        guard lower < clamped else { return lower }
+        let start = text.utf8.index(text.startIndex, offsetBy: lower)
+        let upper = text.utf8.distance(from: text.startIndex, to: text.index(after: start))
+        return clamped - lower <= upper - clamped ? lower : upper
     }
 
     public func stringIndex(forUTF8Offset offset: Int) -> String.Index {
@@ -2009,7 +2019,7 @@ public struct TextEdit: Sendable, Equatable {
         var idx = stringIndex(forUTF8Offset: offset)
         while idx > text.startIndex {
             let prev = text.index(before: idx)
-            if text[prev] == "\n" { break }
+            if text[prev].isNewline { break }
             idx = prev
         }
         return text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
@@ -2017,7 +2027,7 @@ public struct TextEdit: Sendable, Equatable {
 
     private func lineEnd(for offset: Int) -> Int {
         var idx = stringIndex(forUTF8Offset: offset)
-        while idx < text.endIndex && text[idx] != "\n" {
+        while idx < text.endIndex && !text[idx].isNewline {
             idx = text.index(after: idx)
         }
         return text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)

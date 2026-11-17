@@ -32,13 +32,12 @@ struct TextClipboardImageParityTests {
         _ = e.handleKey(KeyEvent(key: .arrowLeft, mods: Mods(alt: true)))
         #expect(e.cursor == 0)
 
-        // Forward Option+Right from 0 stops after "hi" (2), then takes whole pill (12), then end (13).
-        _ = e.handleKey(KeyEvent(key: .arrowRight, mods: Mods(alt: true)))
-        #expect(e.cursor == 2)
-        _ = e.handleKey(KeyEvent(key: .arrowRight, mods: Mods(alt: true)))
-        #expect(e.cursor == 12)
-        _ = e.handleKey(KeyEvent(key: .arrowRight, mods: Mods(alt: true)))
-        #expect(e.cursor == 13)
+        // Apple motion stops at word ends. Windows and Linux advance to the next word start.
+        let forwardStops = KeyPlatform.current == .mac ? [2, 12, 13] : [3, 13]
+        for stop in forwardStops {
+            _ = e.handleKey(KeyEvent(key: .arrowRight, mods: Mods(alt: true)))
+            #expect(e.cursor == stop)
+        }
     }
 
     @Test("r378 exact sequence: hi @noah! Option+Left stops at trailing edge before pill")
@@ -124,21 +123,23 @@ struct TextClipboardImageParityTests {
 
     // MARK: - #225 Blocker 3: Format Chords & History Coalescing / UndoGroup
 
-    @Test("Cmd+B/I/U format chords honor rich mode and allow masks; plain fields ignore them")
+    @Test("Formatting shortcuts honor rich mode and allowed marks")
     func formatChordDispatchAndAllowMask() {
+        let bold = KeyEvent(key: .command("b"), mods: RuneTestKey.primaryMods())
+        let italic = KeyEvent(key: .command("i"), mods: RuneTestKey.primaryMods())
         let plain = TextEdit("hello", multiline: true)
         var plainCopy = plain
         plainCopy.selectAll()
-        #expect(plainCopy.formatChord(KeyEvent(key: .command("b"), mods: Mods(cmd: true, logo: true))) == nil)
-        let plainOut = plainCopy.handleKey(KeyEvent(key: .command("b"), mods: Mods(cmd: true, logo: true)))
+        #expect(plainCopy.formatChord(bold) == nil)
+        let plainOut = plainCopy.handleKey(bold)
         #expect(plainOut == .ignored)
 
         var restricted = TextEdit("hello", multiline: true).rich(true).allowRichMarks([.italic])
         restricted.selectAll()
-        #expect(restricted.formatChord(KeyEvent(key: .command("b"), mods: Mods(cmd: true, logo: true))) == nil)
-        let boldOut = restricted.handleKey(KeyEvent(key: .command("b"), mods: Mods(cmd: true, logo: true)))
+        #expect(restricted.formatChord(bold) == nil)
+        let boldOut = restricted.handleKey(bold)
         #expect(boldOut == .ignored)
-        let italicOut = restricted.handleKey(KeyEvent(key: .command("i"), mods: Mods(cmd: true, logo: true)))
+        let italicOut = restricted.handleKey(italic)
         #expect(italicOut == .modified)
         #expect(restricted.hasRichMark(.italic))
         #expect(!restricted.hasRichMark(.bold))

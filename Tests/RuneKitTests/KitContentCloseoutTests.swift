@@ -257,17 +257,22 @@ struct KitContentCloseoutTests {
         #expect(defEl?.rect[2] == 24 && defEl?.rect[3] == 24)
         #expect(defEl?.help == nil)
 
+        let command: String = switch KeyPlatform.current {
+        case .mac: "⌘"
+        case .windows: "Win+"
+        case .linux: "Super+"
+        }
         let helpOnlyEl = rt.element(byKey: "help-only")
         #expect(helpOnlyEl?.label == "Copy link")
         #expect((helpOnlyEl?.a11yDescription ?? "") == "")
-        #expect(helpOnlyEl?.help == "Copy link  ⌘O")
+        #expect(helpOnlyEl?.help == "Copy link  \(command)O")
 
         let lblHelpEl = rt.element(byKey: "lbl-help")
         #expect(lblHelpEl?.label == "Copy")
         #expect(lblHelpEl?.a11yDescription == "Copy link")
-        #expect(lblHelpEl?.help == "Copy link  ⌘L")
+        #expect(lblHelpEl?.help == "Copy link  \(command)L")
 
-        #expect(rt.element(byKey: "cmd-btn")?.help == "Open item  ⌘O")
+        #expect(rt.element(byKey: "cmd-btn")?.help == "Open item  \(command)O")
         #expect(rt.element(byKey: "raw-btn")?.help == "More  click")
 
         let a11y = rt.accessibilitySnapshot()
@@ -278,9 +283,9 @@ struct KitContentCloseoutTests {
             }
             return nil
         }
-        #expect(findNode(a11y, id: "help-only")?.keyboardShortcut == "⌘O")
-        #expect(findNode(a11y, id: "lbl-help")?.keyboardShortcut == "⌘L")
-        #expect(findNode(a11y, id: "cmd-btn")?.keyboardShortcut == "⌘O")
+        #expect(findNode(a11y, id: "help-only")?.keyboardShortcut == "\(command)O")
+        #expect(findNode(a11y, id: "lbl-help")?.keyboardShortcut == "\(command)L")
+        #expect(findNode(a11y, id: "cmd-btn")?.keyboardShortcut == "\(command)O")
         #expect(findNode(a11y, id: "raw-btn")?.keyboardShortcut == "click")
 
         for (idx, (_, expectedSide, _, _)) in sizeSpecs.enumerated() {

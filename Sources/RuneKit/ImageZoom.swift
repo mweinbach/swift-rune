@@ -525,7 +525,7 @@ public struct ImageZoomState: Sendable, Equatable {
         case .text(let t) where bare && t == "0":
             fit(tx: &tx, now: now)
             return false
-        case .command(let ch) where !m.alt:
+        case .command(let ch) where m.primaryAlone:
             switch ch {
             case "=", "+":
                 zoomIn(tx: &tx, now: now)

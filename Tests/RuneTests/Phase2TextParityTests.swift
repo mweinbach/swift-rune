@@ -1,5 +1,6 @@
-import CoreGraphics
+#if canImport(CoreText)
 import CoreText
+#endif
 import Foundation
 import Testing
 @testable import Rune
@@ -74,9 +75,13 @@ struct Phase2TextParityTests {
         #expect(!MacOSHinter.eligible(ppem: 19.0))
         #expect(!MacOSHinter.eligible(ppem: 12.5))
 
+        #if canImport(CoreText)
         let ts = TextSystem()
         let ctFont = ts.resolveCTFont(style: TextStyle(size: 13, weight: 400), pixelScale: 1)
         let metrics = try #require(MacOSHinter.trueTypeMetrics(font: ctFont))
+        #else
+        let metrics = MacOSHintMetrics(upem: 2048, xHeight: 1118, capHeight: 1490, maxY: 1984, stemHeight: 170)
+        #endif
         #expect(metrics.upem > 0)
         #expect(metrics.xHeight > 0)
         #expect(metrics.capHeight > metrics.xHeight)
@@ -98,7 +103,7 @@ struct Phase2TextParityTests {
         for wInt in stride(from: 130, through: 340, by: 2) {
             let w = Float(wInt)
             let s = ts.shape(text: paragraph, style: style, maxWidth: w, pixelScale: 1.0, emitGlyphs: false, pretty: false)
-            if s.lineCount >= 3, let lastStr = s.lineStrings.last?.text {
+            if s.lineCount >= 3, let lastStr = s.textTestLines.last?.text {
                 let lastText = lastStr.trimmingCharacters(in: .whitespacesAndNewlines)
                 let lastW = s.lineAdvancePx(at: s.lineCount - 1)
                 if !lastText.contains(" "), !lastText.isEmpty, lastW < (w / 3.0) {
@@ -119,14 +124,14 @@ struct Phase2TextParityTests {
         let width = try #require(Self.findOrphanWidth(ts: ts, paragraph: paragraph, style: style))
 
         let greedy = ts.shape(text: paragraph, style: style, maxWidth: width, pixelScale: 1.0, emitGlyphs: false, pretty: false)
-        let lastGreedyWords = (greedy.lineStrings.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        let lastGreedyWords = (greedy.textTestLines.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
         #expect(lastGreedyWords.count == 1)
 
         TextSystem.setPrettyWrap(true)
         let pretty = ts.shape(text: paragraph, style: style, maxWidth: width, pixelScale: 1.0, emitGlyphs: false, pretty: true)
         #expect(pretty.lineCount == greedy.lineCount)
-        let lastPrettyWords = (pretty.lineStrings.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
-        #expect(lastPrettyWords.count >= 2, "Expected pretty wrap to pull another word down onto last line, got: \(pretty.lineStrings.map(\.text))")
+        let lastPrettyWords = (pretty.textTestLines.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        #expect(lastPrettyWords.count >= 2, "Expected pretty wrap to pull another word down onto last line, got: \(pretty.textTestLines.map(\.text))")
 
         // Trailing bidi isolate (\u{2066}...\u{2069}) keeps the paragraph greedy (#919).
         let isolateTailPara = "Careful typography avoids leaving a single short trailing word alone at the bottom of a long \u{2066}end.\u{2069}"
@@ -134,7 +139,7 @@ struct Phase2TextParityTests {
         let isoGreedy = ts.shape(text: isolateTailPara, style: style, maxWidth: isoW, pixelScale: 1.0, emitGlyphs: false, pretty: false)
         let isoPretty = ts.shape(text: isolateTailPara, style: style, maxWidth: isoW, pixelScale: 1.0, emitGlyphs: false, pretty: true)
         #expect(isoPretty.lineCount == isoGreedy.lineCount)
-        #expect(isoPretty.lineStrings.map(\.text) == isoGreedy.lineStrings.map(\.text))
+        #expect(isoPretty.textTestLines.map(\.text) == isoGreedy.textTestLines.map(\.text))
 
         // Isolate on an earlier line (NOT the last line) still allows pretty wrap.
         let isolateEarlyPara = "Careful \u{2066}typesetting\u{2069} avoids leaving a single short trailing word alone at the bottom of a long paragraph."
@@ -142,7 +147,7 @@ struct Phase2TextParityTests {
         let earlyGreedy = ts.shape(text: isolateEarlyPara, style: style, maxWidth: earlyW, pixelScale: 1.0, emitGlyphs: false, pretty: false)
         let earlyPretty = ts.shape(text: isolateEarlyPara, style: style, maxWidth: earlyW, pixelScale: 1.0, emitGlyphs: false, pretty: true)
         #expect(earlyPretty.lineCount == earlyGreedy.lineCount)
-        let earlyLastWords = (earlyPretty.lineStrings.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        let earlyLastWords = (earlyPretty.textTestLines.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
         #expect(earlyLastWords.count >= 2)
     }
 
@@ -169,8 +174,8 @@ struct Phase2TextParityTests {
         let shapedPretty = resPretty.shape(using: ts, maxWidth: width, pixelScale: 1.0, emitGlyphs: false)
         let shapedGreedy = resGreedy.shape(using: ts, maxWidth: width, pixelScale: 1.0, emitGlyphs: false)
         #expect(shapedPretty.lineCount == shapedGreedy.lineCount)
-        let greedyWords = (shapedGreedy.lineStrings.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
-        let prettyWords = (shapedPretty.lineStrings.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        let greedyWords = (shapedGreedy.textTestLines.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        let prettyWords = (shapedPretty.textTestLines.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
         #expect(greedyWords.count == 1)
         #expect(prettyWords.count >= 2)
     }
@@ -189,27 +194,27 @@ struct Phase2TextParityTests {
         #expect(ts.cachedLayoutBox(for: greedyBox.shapeKey) === greedyBox)
         #expect(ts.cachedLayoutBox(for: prettyBox.shapeKey) === prettyBox)
 
-        let greedyLast = (greedyBox.shaped.lineStrings.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
-        let prettyLast = (prettyBox.shaped.lineStrings.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        let greedyLast = (greedyBox.shaped.textTestLines.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        let prettyLast = (prettyBox.shaped.textTestLines.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
         #expect(greedyLast.count == 1)
         #expect(prettyLast.count >= 2)
         #expect(prettyBox.shaped.lineCount == greedyBox.shaped.lineCount)
 
         // The retained pretty layout matches the one-shot pretty shape/measure paths.
         let shapedPretty = ts.shape(text: paragraph, style: style, maxWidth: width, pixelScale: 1.0, emitGlyphs: false, pretty: true)
-        #expect(shapedPretty.lineStrings.map(\.text) == prettyBox.shaped.lineStrings.map(\.text))
+        #expect(shapedPretty.textTestLines.map(\.text) == prettyBox.shaped.textTestLines.map(\.text))
         #expect(ts.measure(paragraph, style: style, maxWidth: width, pixelScale: 1.0, pretty: true) == prettyBox.shaped.size)
 
         // A glyph fill of the cached pretty layout stays pretty.
         let filled = ts.layoutKeyed(text: paragraph, style: style, maxWidth: width, pixelScale: 1.0, emitGlyphs: true, pretty: true)
-        #expect(filled.shaped.lineStrings.map(\.text) == prettyBox.shaped.lineStrings.map(\.text))
+        #expect(filled.shaped.textTestLines.map(\.text) == prettyBox.shaped.textTestLines.map(\.text))
 
         // Re-breaking the retained pretty layout at another width stays pretty.
         let width2 = width + 1
         let rebroken = ts.layoutKeyed(text: paragraph, style: style, maxWidth: width2, pixelScale: 1.0, emitGlyphs: false, pretty: true)
         let freshPretty = TextSystem().shape(text: paragraph, style: style, maxWidth: width2, pixelScale: 1.0, emitGlyphs: false, pretty: true)
         #expect(rebroken.shapeKey.pretty)
-        #expect(rebroken.shaped.lineStrings.map(\.text) == freshPretty.lineStrings.map(\.text))
+        #expect(rebroken.shaped.textTestLines.map(\.text) == freshPretty.textTestLines.map(\.text))
     }
 
     // MARK: - #896: El.placeholderFont & InputSpec.placeholderStyle
@@ -388,6 +393,9 @@ struct Phase2TextParityTests {
         let afterEpoch = FontFamiliesRegistry.currentEpoch()
         #expect(afterEpoch > beforeEpoch)
 
+        #expect(FaceWeightsRegistry.declaredFace(in: TextSystem.faceWeights, family: "Georgia", requestedWeight: 530)?.weight == 400)
+        #expect(FaceWeightsRegistry.declaredFace(in: TextSystem.faceWeights, family: "Georgia", requestedWeight: 650)?.weight == 700)
+        #if canImport(CoreText)
         let ts = TextSystem()
         // Use a named family so these process-wide declarations leave the bundled slots usable by other windows.
         let mid = ts.resolveCTFont(style: TextStyle(size: 13, weight: 530, family: .custom("Georgia")), pixelScale: 1)
@@ -395,5 +403,12 @@ struct Phase2TextParityTests {
 
         let heavy = ts.resolveCTFont(style: TextStyle(size: 13, weight: 650, family: .custom("Georgia")), pixelScale: 1)
         #expect((CTFontCopyPostScriptName(heavy) as String) == "Georgia-Bold")
+        #elseif canImport(CRuneDesktopText)
+        let style = TextStyle(size: 13, weight: 530, family: .custom("Georgia"))
+        let families = (sans: "Inter", mono: "IBM Plex Mono")
+        let middle = DesktopFont(style: style, span: nil, families: families, language: nil, scale: 1)
+        let heavy = DesktopFont(style: style, span: TextSpan("bold", weight: 650), families: families, language: nil, scale: 1)
+        #expect(middle.weight == 400 && heavy.weight == 700)
+        #endif
     }
 }

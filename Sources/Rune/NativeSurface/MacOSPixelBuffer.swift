@@ -1,6 +1,6 @@
 import Foundation
 
-#if os(macOS)
+#if canImport(CoreVideo) && canImport(IOSurface) && canImport(Metal)
 import CoreVideo
 import IOSurface
 import Metal

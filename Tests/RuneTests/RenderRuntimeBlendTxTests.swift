@@ -221,11 +221,11 @@ struct RenderRuntimeBlendTxTests {
         #expect(rt.renderFrame(at: 0.04).srgbBlend == false)
     }
 
-#if canImport(Metal) && canImport(QuartzCore)
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
     /// Upstream: `crates/rune/tests/srgb_blend_runtime.rs:56` `a_self_drawn_runtime_renders_gamma_blended_pixels`
     @Test("srgb_blend_runtime.rs:56 a_self_drawn_runtime_renders_gamma_blended_pixels")
     func selfDrawnRuntimeRendersGammaBlendedPixels() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
 
         let rtGamma = makeBlendTestRuntime(srgbBlend: true)
         _ = rtGamma.renderFrame(at: 0.0)
@@ -251,13 +251,20 @@ struct RenderRuntimeBlendTxTests {
     private final class BlendTrackingCompositor: Compositor {
         typealias State = Bool
         var srgbHistory: [Bool] = []
+        #if canImport(Metal)
         var formatHistory: [MTLPixelFormat] = []
+        #endif
         var isAnimating: Bool { false }
         var drawsOwnContent: Bool { false }
 
         func render(frame: CompositorFrame<Bool>) {
             srgbHistory.append(frame.srgbBlend)
+            #if canImport(Metal)
             formatHistory.append(frame.pixelFormat)
+            #else
+            #expect(frame.openGL?.pixelSize.width == frame.pixelSize.width)
+            #expect(frame.openGL?.pixelSize.height == frame.pixelSize.height)
+            #endif
             frame.drawUI()
         }
     }
@@ -284,6 +291,7 @@ struct RenderRuntimeBlendTxTests {
         let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("rune-srgb-live-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tmpDir) }
         var args = ToolingArgs()
+        args.requireGPU = true
         args.scriptArg = """
         [
           { "t": 0.05, "type": "tap", "key": "btn" },
@@ -295,11 +303,13 @@ struct RenderRuntimeBlendTxTests {
         args.fps = 30.0
         let out = try HeadlessRunner.run(app, args: args)
 
-        // Single headless run starts linear/sRGB-target (.bgra8Unorm_srgb, false) and switches live to (.bgra8Unorm, true)
+        // The same runner switches its rendering target from linear to gamma blending.
         #expect(comp.srgbHistory.first == false)
         #expect(comp.srgbHistory.last == true)
+        #if canImport(Metal)
         #expect(comp.formatHistory.first == .bgra8Unorm_srgb)
         #expect(comp.formatHistory.last == .bgra8Unorm)
+        #endif
 
         // Final frame rendered with gamma sRGB blending produces ~128 green on the hovered red+white(0.5) box
         let px = sampleRGBA(out.finalFrame, x: 10, y: 10)
@@ -308,6 +318,9 @@ struct RenderRuntimeBlendTxTests {
         #expect(abs(Int(px.b) - 128) <= 2)
     }
 
+    #endif
+
+    #if canImport(Metal) && canImport(QuartzCore)
     /// Upstream: `crates/rune/tests/srgb_blend_runtime.rs:133` `switching_format_keeps_the_glyph_atlas_and_extra_pipelines`
     @Test("srgb_blend_runtime.rs:133 switching_format_keeps_the_glyph_atlas_and_extra_pipelines")
     func switchingFormatKeepsGlyphAtlasAndExtraPipelines() throws {

@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
 
 /// Constants for timeline row growth (`rune::growth`).
@@ -39,6 +42,28 @@ public enum Growth {
         public static let landMin: Float = 8.0
         public static let max: Float = 40.0
         public static let accel: Float = 6000.0
+    }
+}
+
+/// The time slices for one displayed frame, including its final partial slice.
+internal struct GrowthSteps: RandomAccessCollection {
+    private let whole: Int
+    private let remainder: Float
+
+    init(duration: Float) {
+        let duration = Swift.max(0, Swift.min(1, duration.isNaN ? 0 : duration))
+        whole = Int(floor(duration / Growth.substep + 1e-4))
+        let left = duration - Float(whole) * Growth.substep
+        remainder = left > 1e-6 ? left : 0
+    }
+
+    var startIndex: Int { 0 }
+    var endIndex: Int { whole + (remainder > 0 ? 1 : 0) }
+    var duration: Float { Float(whole) * Growth.substep + remainder }
+
+    subscript(index: Int) -> Float {
+        precondition(indices.contains(index))
+        return index < whole ? Growth.substep : remainder
     }
 }
 
@@ -288,7 +313,10 @@ public struct GrowTrack: Sendable, Equatable {
 
     /// Advances one fixed `1/240` s substep (`GrowTrack::step`).
     public mutating func step(spring baseSpring: Spring, edge: StreamEdge, carryingTail: Bool) {
-        let dt = Growth.substep
+        step(by: Growth.substep, spring: baseSpring, edge: edge, carryingTail: carryingTail)
+    }
+
+    internal mutating func step(by dt: Float, spring baseSpring: Spring, edge: StreamEdge, carryingTail: Bool) {
         let activeSpring = baseSpring.withDuration(
             Swift.max(baseSpring.duration, duration) * Swift.max(edge.duration, 0.05)
         )
@@ -305,7 +333,7 @@ public struct GrowTrack: Sendable, Equatable {
             h = target
             v = 0.0
         } else if case .climbing = pace, rem > 0.0 {
-            climb(remaining: rem, carryingTail: carryingTail)
+            climb(remaining: rem, carryingTail: carryingTail, dt: dt)
         } else if !streaming, case .fold(let own, _, _, _) = motion {
             let (x, nextV) = own.sample(from: h, velocity: v, target: aim, at: dt)
             let landed = (rem >= 0.0 && x >= aim) || (rem <= 0.0 && x <= aim)
@@ -379,8 +407,7 @@ public struct GrowTrack: Sendable, Equatable {
         }
     }
 
-    private mutating func climb(remaining rem: Float, carryingTail: Bool) {
-        let dt = Growth.substep
+    private mutating func climb(remaining rem: Float, carryingTail: Bool, dt: Float) {
         guard case .climbing(var ended) = pace else { return }
         ended = streaming ? 0.0 : (ended + dt)
         pace = .climbing(ended: ended)

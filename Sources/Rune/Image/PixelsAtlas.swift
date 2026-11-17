@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#endif
 #if canImport(simd)
 import simd
 #endif
@@ -22,8 +24,12 @@ public struct ImageId: Hashable, Sendable {
     }
 
     public static func contentHash(_ data: Data) -> ImageId {
+        #if canImport(CryptoKit)
         let digest = SHA256.hash(data: data)
         return ImageId(bytes: Array(digest))
+        #else
+        return ImageId(bytes: ImageContentDigest.sha256(data))
+        #endif
     }
 
     public static func forURL(_ url: String, pixelSize: UInt32) -> ImageId {
@@ -76,21 +82,7 @@ extension DecodedImage {
     /// Selects the animated frame at `elapsedSeconds`, honoring `loopCount > 0` (`D-G2`, `animated::Motion::at`).
     public func frameStoppingAfterLoops(at elapsedSeconds: Double) -> AnimatedImageFrame? {
         guard !frames.isEmpty else { return nil }
-        if frames.count == 1 { return frames[0] }
-        let total = totalAnimationDuration
-        guard total > 0 else { return frames[0] }
-        if elapsedSeconds <= 0 { return frames[0] }
-        if loopCount > 0 && elapsedSeconds >= total * Double(loopCount) {
-            return frames.last
-        }
-        var t = elapsedSeconds.truncatingRemainder(dividingBy: total)
-        if t < 0 { t += total }
-        var acc = 0.0
-        for f in frames {
-            acc += f.durationSeconds
-            if t < acc { return f }
-        }
-        return frames.last
+        return frames[framePosition(at: elapsedSeconds, startingAt: 0).index]
     }
 }
 
@@ -147,10 +139,9 @@ public final class Pixels: @unchecked Sendable {
     /// Replaces the frame contents with straight-alpha RGBA8 pixels (`Pixels::set`).
     /// Ignores payloads shorter than `width * height * 4` or oversized frames (`> 8192`).
     public func set(width: UInt32, height: UInt32, rgba: [UInt8]) {
+        guard width > 0, height > 0, width <= IMAGE_MAX_SIDE, height <= IMAGE_MAX_SIDE else { return }
         let needed = Int(width) * Int(height) * 4
-        guard width > 0, height > 0, width <= IMAGE_MAX_SIDE, height <= IMAGE_MAX_SIDE, rgba.count >= needed else {
-            return
-        }
+        guard rgba.count >= needed else { return }
         var toWake: [Waker] = []
         var wakesToNotify: [LiveWake] = []
         lock.lock()
@@ -172,13 +163,15 @@ public final class Pixels: @unchecked Sendable {
     }
 
     public func setDecoded(_ image: DecodedImage) {
-        guard let base = image.mips.first else { return }
+        guard let base = image.mips.first, base.width > 0, base.height > 0,
+              base.width <= IMAGE_MAX_SIDE, base.height <= IMAGE_MAX_SIDE,
+              base.rgba.count == Int(base.width) * Int(base.height) * 4 else { return }
         var toWake: [Waker] = []
         var wakesToNotify: [LiveWake] = []
         lock.lock()
         widthValue = base.width
         heightValue = base.height
-        rgbaData = Array(base.rgba)
+        rgbaData = []
         decodedMips = image
         generationValue &+= 1
         wakers.removeAll { $0.ref == nil }
@@ -228,9 +221,8 @@ public final class Pixels: @unchecked Sendable {
     }
 
     public func rgbaBytes() -> [UInt8] {
-        lock.lock()
-        defer { lock.unlock() }
-        return rgbaData
+        let snap = snapshot()
+        return snap.mips?.mips.first.map { Array($0.rgba) } ?? snap.rgba
     }
 
     public var isPremultiplied: Bool {
@@ -243,6 +235,75 @@ public final class Pixels: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return (widthValue, heightValue, rgbaData, decodedMips, generationValue)
+    }
+}
+
+/// An atomic pixel snapshot. The raw RGBA is only materialized when an upload is needed.
+internal struct PixelsPresentation {
+    let width: UInt32
+    let height: UInt32
+    let generation: UInt64
+    let frameIndex: Int
+    let nextDeadline: Double?
+    fileprivate let baseBytes: [UInt8]
+    fileprivate let frameBytes: Data?
+    fileprivate let mips: [ImageMipLevel]?
+    var rgba: [UInt8] { (frameBytes ?? mips?.first?.rgba).map(Array.init) ?? baseBytes }
+    var premultiplied: Bool { mips != nil && frameBytes == nil }
+
+    /// Smallest mip at least as large as the on-screen drawing in both axes.
+    func selectedMip(for drawnSize: SIMD2<Float>) -> (level: Int, mip: ImageMipLevel)? {
+        guard let mips, !mips.isEmpty else { return nil }
+        let minW = min(max(1.0, drawnSize.x), Float(width))
+        let minH = min(max(1.0, drawnSize.y), Float(height))
+        var level = 0
+        while level + 1 < mips.count {
+            let next = mips[level + 1]
+            if Float(next.width) < minW || Float(next.height) < minH { break }
+            level += 1
+        }
+        let mip = mips[level]
+        guard mip.width > 0, mip.height > 0, mip.width <= IMAGE_MAX_SIDE, mip.height <= IMAGE_MAX_SIDE,
+              mip.rgba.count == Int(mip.width) * Int(mip.height) * 4 else { return nil }
+        return (level, mip)
+    }
+}
+
+/// Each atlas starts an animation on the first timed paint of a pixel generation.
+internal struct ImagePlayback: Sendable {
+    private var starts: [UInt64: (generation: UInt64, time: Double)] = [:]
+
+    mutating func sample(_ pixels: Pixels, at now: Double?) -> PixelsPresentation? {
+        let snap = pixels.snapshot()
+        guard snap.width > 0, snap.height > 0, snap.width <= IMAGE_MAX_SIDE, snap.height <= IMAGE_MAX_SIDE else {
+            return nil
+        }
+        var index = 0
+        var deadline: Double?
+        if let image = snap.mips, image.isAnimated, let now, now.isFinite {
+            let origin: Double
+            if let prior = starts[pixels.id], prior.generation == snap.generation {
+                origin = prior.time
+            } else {
+                origin = now
+                starts[pixels.id] = (snap.generation, now)
+            }
+            (index, deadline) = image.framePosition(at: now, startingAt: origin)
+        }
+        let frame = snap.mips.flatMap { $0.frames.isEmpty ? nil : $0.frames[index] }.flatMap {
+            guard $0.width > 0, $0.height > 0, $0.width <= IMAGE_MAX_SIDE, $0.height <= IMAGE_MAX_SIDE,
+                  $0.rgba.count == Int($0.width) * Int($0.height) * 4 else { return nil as AnimatedImageFrame? }
+            return $0
+        }
+        return PixelsPresentation(
+            width: frame?.width ?? snap.width, height: frame?.height ?? snap.height,
+            generation: snap.generation, frameIndex: index, nextDeadline: deadline,
+            baseBytes: snap.rgba, frameBytes: frame?.rgba, mips: snap.mips?.mips(forFrame: index)
+        )
+    }
+
+    mutating func retain(_ ids: Set<UInt64>) {
+        if !starts.isEmpty { starts = starts.filter { ids.contains($0.key) } }
     }
 }
 
@@ -280,6 +341,22 @@ public struct ImagePage: Sendable {
         shelfH = max(shelfH, h)
         return at
     }
+
+    fileprivate mutating func write(_ source: some ContiguousBytes, x: UInt32, y: UInt32, w: UInt32, h: UInt32) {
+        let rowBytes = Int(w) * 4
+        let pageStride = Int(width) * 4
+        let offset = Int(y) * pageStride + Int(x) * 4
+        source.withUnsafeBytes { src in
+            data.withUnsafeMutableBytes { dst in
+                guard let src = src.baseAddress, let dst = dst.baseAddress else { return }
+                for row in 0..<Int(h) {
+                    (dst + offset + row * pageStride).copyMemory(from: src + row * rowBytes, byteCount: rowBytes)
+                }
+            }
+        }
+        let end = y + h
+        dirty = dirty.map { min($0.lowerBound, y)..<max($0.upperBound, end) } ?? y..<end
+    }
 }
 
 /// Placement result inside `ImageAtlas` (`rune::image::pixels::Placed`).
@@ -314,41 +391,21 @@ public struct ImageAtlas: Sendable {
 
     public var pages: [ImagePage] = []
     private var slots: [SlotKey: Slot] = [:]
-    private var starts: [UInt64: Double] = [:]
+    private var playback = ImagePlayback()
     public private(set) var copies: UInt64 = 0
 
     public init() {}
 
     /// Places `pixels` for `drawnSize` (device pixels), copying bytes on first use or generation change.
     public mutating func place(_ pixels: Pixels, drawnSize: SIMD2<Float>, at now: Double? = nil) -> PlacedImage? {
-        let snap = pixels.snapshot()
-        var w = snap.width
-        var h = snap.height
-        guard w > 0, h > 0, w <= IMAGE_MAX_SIDE, h <= IMAGE_MAX_SIDE else { return nil }
+        guard let snap = playback.sample(pixels, at: now) else { return nil }
+        let selected = snap.selectedMip(for: drawnSize)
+        let mip = selected?.mip
+        let w = mip?.width ?? snap.width
+        let h = mip?.height ?? snap.height
+        guard mip != nil || snap.baseBytes.count >= Int(w) * Int(h) * 4 else { return nil }
 
-        var level = 0
-        let sourceBytes: [UInt8]
-        let isPremultiplied: Bool
-        if let decoded = snap.mips, !decoded.mips.isEmpty {
-            isPremultiplied = true
-            while level + 1 < decoded.mips.count {
-                let next = decoded.mips[level + 1]
-                let minW = min(max(1.0, drawnSize.x), Float(snap.width))
-                let minH = min(max(1.0, drawnSize.y), Float(snap.height))
-                if Float(next.width) < minW || Float(next.height) < minH { break }
-                level += 1
-            }
-            let mip = decoded.mips[level]
-            w = mip.width
-            h = mip.height
-            sourceBytes = Array(mip.rgba)
-        } else {
-            isPremultiplied = false
-            sourceBytes = snap.rgba
-        }
-        guard sourceBytes.count >= Int(w) * Int(h) * 4 else { return nil }
-
-        let key = SlotKey(pixelsID: pixels.id, level: level)
+        let key = SlotKey(pixelsID: pixels.id, level: selected?.level ?? 0)
         if let existing = slots[key], existing.w != w || existing.h != h {
             slots.removeValue(forKey: key)
         }
@@ -359,28 +416,18 @@ public struct ImageAtlas: Sendable {
         guard var slot = slots[key] else { return nil }
         pages[slot.page].touched = true
 
-        if slot.generation != snap.generation {
+        if slot.generation != snap.generation || slot.frameIndex != snap.frameIndex {
             slot.generation = snap.generation
-            slot.frameIndex = 0
+            slot.frameIndex = snap.frameIndex
             slots[key] = slot
             copies &+= 1
-            let pageRowBytes = Int(pages[slot.page].width) * 4
-            let copyRowBytes = Int(w) * 4
-            for line in 0..<Int(h) {
-                let dstStart = (Int(slot.y) + line) * pageRowBytes + Int(slot.x) * 4
-                let srcStart = line * copyRowBytes
-                pages[slot.page].data[dstStart..<(dstStart + copyRowBytes)] = sourceBytes[srcStart..<(srcStart + copyRowBytes)]
-            }
-            let y0 = slot.y
-            let y1 = slot.y + h
-            if let old = pages[slot.page].dirty {
-                pages[slot.page].dirty = min(old.lowerBound, y0)..<max(old.upperBound, y1)
+            if let mip {
+                pages[slot.page].write(mip.rgba, x: slot.x, y: slot.y, w: w, h: h)
             } else {
-                pages[slot.page].dirty = y0..<y1
+                pages[slot.page].write(snap.baseBytes, x: slot.x, y: slot.y, w: w, h: h)
             }
         }
-        _ = now
-        return PlacedImage(rect: SIMD4<UInt32>(slot.x, slot.y, w, h), page: slot.page, premultiplied: isPremultiplied)
+        return PlacedImage(rect: SIMD4<UInt32>(slot.x, slot.y, w, h), page: slot.page, premultiplied: mip != nil)
     }
 
     public mutating func endFrame() {
@@ -388,6 +435,7 @@ public struct ImageAtlas: Sendable {
         slots = slots.filter { _, slot in
             pages[slot.page].touched || (slot.page == 0 && firstKept)
         }
+        playback.retain(Set(slots.keys.map(\.pixelsID)))
         for i in pages.indices {
             pages[i].shown = pages[i].touched
             pages[i].touched = false
@@ -415,8 +463,7 @@ public struct ImageAtlas: Sendable {
         slots = slots.filter { _, slot in
             slot.page < currentPages.count && currentPages[slot.page].shown
         }
-        let activePixelsIDs = Set(slots.keys.map(\.pixelsID))
-        starts = starts.filter { activePixelsIDs.contains($0.key) }
+        playback.retain(Set(slots.keys.map(\.pixelsID)))
         for i in pages.indices {
             let hasSlot = slots.values.contains { $0.page == i }
             if !hasSlot {

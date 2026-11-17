@@ -1,5 +1,5 @@
 import Foundation
-#if os(macOS)
+#if !os(WASI) && canImport(CoreFoundation)
 import CoreFoundation
 #endif
 
@@ -35,13 +35,13 @@ public enum AppleFontSmoothingPreference {
         if let string = value as? String {
             return Int64(string.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        if let number = value as? NSNumber, !(value is Bool) {
-            // `CFNumber::as_i64`: only a lossless conversion to a 64-bit integer.
-            let d = number.doubleValue
-            if d.rounded(.towardZero) != d { return nil }
-            return Int64(exactly: d)
-        }
-        return nil
+        guard let number = value as? NSNumber else { return nil }
+        #if !os(WASI) && canImport(CoreFoundation)
+        guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        #else
+        guard type(of: number) != type(of: NSNumber(value: true)) else { return nil }
+        #endif
+        return Int64(exactly: number)
         #endif
     }
 

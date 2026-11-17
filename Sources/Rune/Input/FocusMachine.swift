@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 
 // MARK: - Focus & Modal State Machines (`runtime/input/focus_machine.rs`, `modal_focus.rs`, `focus.rs`)
 

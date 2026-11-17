@@ -6,6 +6,11 @@ import RuneMotion
 
 @Suite("RuneKnobs Tests")
 struct RuneKnobsTests {
+    private static func primaryMods(shift: Bool = false) -> Mods {
+        let usesCommand = KeyPlatform.current == .mac
+        return Mods(shift: shift, ctrl: !usesCommand, cmd: usesCommand, logo: usesCommand)
+    }
+
     struct TestAppState {
         var knobs = Knobs()
         var filterEdit = TextEdit()
@@ -119,12 +124,12 @@ struct RuneKnobsTests {
         #expect(knobs.saved[group.name]?.isEmpty == true)
     }
 
-    @Test func shortcutCmdShiftKAndEscapeToggle() {
+    @Test func primaryShiftKAndEscapeToggle() {
         var knobs = Knobs()
         #expect(!knobs.open)
 
-        let cmdShiftK = KeyEvent(key: .command("k"), mods: Mods(shift: true, cmd: true))
-        #expect(RuneKnobs.key(&knobs, event: cmdShiftK))
+        let shiftK = KeyEvent(key: .command("k"), mods: Self.primaryMods(shift: true))
+        #expect(RuneKnobs.key(&knobs, event: shiftK))
         #expect(knobs.open)
 
         let esc = KeyEvent(key: .escape)
@@ -134,9 +139,8 @@ struct RuneKnobsTests {
         // Escape when already closed is not consumed.
         #expect(!RuneKnobs.key(&knobs, event: esc))
 
-        // Text-based Cmd+Shift+K also toggles.
-        let textCmdShiftK = KeyEvent(key: .text("K"), mods: Mods(shift: true, cmd: true))
-        #expect(RuneKnobs.key(&knobs, event: textCmdShiftK))
+        let textShiftK = KeyEvent(key: .text("K"), mods: Self.primaryMods(shift: true))
+        #expect(RuneKnobs.key(&knobs, event: textShiftK))
         #expect(knobs.open)
     }
 
@@ -1094,9 +1098,9 @@ struct RuneKnobsTests {
         _ = rt1.keyDown(KeyEvent(key: .arrowLeft, mods: Mods(shift: true)), at: 1.5); tick1()
         #expect(rt1.state.knobs.edit.selectedUTF8Range == 2..<3)
         // Unhandled modifier chord while filtering must not clear `filtering` (tree.rs:205-212)
-        _ = rt1.keyDown(KeyEvent(key: .text("q"), mods: Mods(cmd: true)), at: 1.55); tick1()
+        _ = rt1.keyDown(KeyEvent(key: .text("q"), mods: Self.primaryMods()), at: 1.55); tick1()
         #expect(rt1.state.knobs.filtering)
-        _ = rt1.keyDown(KeyEvent(key: .text("a"), mods: Mods(cmd: true)), at: 1.6); tick1()
+        _ = rt1.keyDown(KeyEvent(key: .text("a"), mods: Self.primaryMods()), at: 1.6); tick1()
         #expect(rt1.state.knobs.edit.selectedUTF8Range == 0..<5)
         _ = rt1.keyDown(KeyEvent(key: .text("left")), at: 1.7); tick1()
         #expect(rt1.state.knobs.query == "left")
@@ -1104,13 +1108,22 @@ struct RuneKnobsTests {
         // word_and_line_deletes_and_paste_work (`filter_tests.rs:105`)
         let (rt2, tick2) = makeRt()
         _ = rt2.keyDown(KeyEvent(key: .text("right pad")), at: 1.0); tick2()
-        _ = rt2.keyDown(KeyEvent(key: .backspace, mods: Mods(alt: true)), at: 1.1); tick2()
+        let usesCommand = KeyPlatform.current == .mac
+        let word = Mods(ctrl: !usesCommand, alt: usesCommand)
+        _ = rt2.keyDown(KeyEvent(key: .backspace, mods: word), at: 1.1); tick2()
         #expect(rt2.state.knobs.query == "right ")
-        _ = rt2.keyDown(KeyEvent(key: .arrowLeft, mods: Mods(alt: true)), at: 1.2); tick2()
+        _ = rt2.keyDown(KeyEvent(key: .arrowLeft, mods: word), at: 1.2); tick2()
         #expect(rt2.state.knobs.edit.selectedUTF8Range == 0..<0)
-        _ = rt2.keyDown(KeyEvent(key: .arrowRight, mods: Mods(cmd: true)), at: 1.3); tick2()
+        let endOfLine = usesCommand ? KeyEvent(key: .arrowRight, mods: Self.primaryMods()) : KeyEvent(key: .end)
+        _ = rt2.keyDown(endOfLine, at: 1.3); tick2()
         #expect(rt2.state.knobs.edit.selectedUTF8Range == 6..<6)
-        _ = rt2.keyDown(KeyEvent(key: .backspace, mods: Mods(cmd: true)), at: 1.4); tick2()
+        if usesCommand {
+            _ = rt2.keyDown(KeyEvent(key: .backspace, mods: Self.primaryMods()), at: 1.4)
+        } else {
+            _ = rt2.keyDown(KeyEvent(key: .home, mods: Mods(shift: true)), at: 1.35)
+            _ = rt2.keyDown(KeyEvent(key: .backspace), at: 1.4)
+        }
+        tick2()
         #expect(rt2.state.knobs.query.isEmpty)
         rt2.paste(ClipboardContent("gap"), at: 1.5); tick2()
         #expect(rt2.state.knobs.query == "gap")

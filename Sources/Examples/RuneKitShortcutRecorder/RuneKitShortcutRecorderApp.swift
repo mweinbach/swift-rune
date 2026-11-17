@@ -3,13 +3,13 @@ import Rune
 import RuneKit
 
 /// Port of `crates/rune-kit/examples/shortcut_recorder.rs`.
-/// Ctrl-Shift-Space is reserved locally as a conflict demonstration until `App.globalShortcut`
-/// lands from `gap/platform`.
 public struct ShortcutRecorderDemoState: Sendable {
     public var recorder = ShortcutRecorderState()
-    public var registered: ShortcutChord? = nil
-    public var activations: Int = 0
-    public var owner: String? = nil
+    public var registered: ShortcutChord?
+    public var activations = 0
+    public var owner: String?
+    var handle: AppHandle<ShortcutRecorderDemoState>?
+    var registration: UInt32?
 
     public init() {}
 }
@@ -17,56 +17,56 @@ public struct ShortcutRecorderDemoState: Sendable {
 public enum RuneKitShortcutRecorderApp {
     public static let reservedConflict = ShortcutChord(key: "space", modifiers: [.control, .shift])
 
-    public static func change(state: inout ShortcutRecorderDemoState, next: ShortcutChord?) -> ShortcutValidationError? {
-        if let next, next == reservedConflict {
-            state.owner = "Rune shortcut demo"
-            return .conflict
+    private static func validationError(_ error: ShortcutError) -> ShortcutValidationError {
+        switch error {
+        case .alreadyInUse, .conflict: .conflict
+        case .invalidAccelerator: .invalidKey
+        case .unmodifiedDisallowed: .missingModifier
+        case .permissionDenied: .permissionDenied
+        case .unsupported: .unsupported
+        case .rejectedByOS(let message): .custom(message)
+        case .notRunning: .custom("The shortcut service is not running.")
+        case .unknownId: .custom("The previous shortcut is no longer registered.")
         }
+    }
+
+    public static func change(state: inout ShortcutRecorderDemoState, next: ShortcutChord?) -> ShortcutValidationError? {
         state.owner = nil
+        guard let handle = state.handle else { return validationError(.notRunning) }
+        var newID: UInt32?
+        if let next {
+            let shortcut: ParsedShortcut
+            do {
+                shortcut = try next.parsedShortcut()
+            } catch {
+                return validationError(error)
+            }
+            switch handle.registerShortcut(shortcut, { state, _ in state.activations += 1 }) {
+            case .success(let id):
+                newID = id
+            case .failure(let error):
+                if case .alreadyInUse(let owner) = error {
+                    state.owner = owner ?? handle.shortcutOwner(shortcut)
+                } else if case .conflict = error {
+                    state.owner = handle.shortcutOwner(shortcut)
+                }
+                return validationError(error)
+            }
+        }
+        if let oldID = state.registration, case .failure(let error) = handle.unregisterShortcut(oldID) {
+            if let newID, case .failure(let rollbackError) = handle.unregisterShortcut(newID) {
+                return validationError(rollbackError)
+            }
+            return validationError(error)
+        }
+        state.registration = newID
         state.registered = next
         return nil
     }
 
-    public static func mapModifiers(_ mods: Mods) -> ShortcutModifiers {
-        var out: ShortcutModifiers = []
-        if mods.cmd { out.insert(.command) }
-        if mods.ctrl { out.insert(.control) }
-        if mods.alt { out.insert(.option) }
-        if mods.shift { out.insert(.shift) }
-        return out
-    }
-
-    public static func mapKey(_ key: Key) -> String? {
-        switch key {
-        case .text(let s): return s
-        case .command(let c): return String(c)
-        case .enter: return "Return"
-        case .escape: return "Escape"
-        case .backspace: return "Backspace"
-        case .delete: return "Delete"
-        case .tab: return "Tab"
-        case .space: return "space"
-        case .arrowLeft: return "Left"
-        case .arrowRight: return "Right"
-        case .arrowUp: return "Up"
-        case .arrowDown: return "Down"
-        case .home: return "Home"
-        case .end: return "End"
-        case .pageUp: return "PageUp"
-        case .pageDown: return "PageDown"
-        case .f(let n): return "F\(n)"
-        case .insert: return "Insert"
-        case .contextMenu: return "Menu"
-        case .printScreen: return "PrintScreen"
-        case .scrollLock: return "ScrollLock"
-        case .pause: return "Pause"
-        case .modifier: return nil
-        }
-    }
-
     public static func view(state: ShortcutRecorderDemoState, cx: inout Cx<ShortcutRecorderDemoState>) -> El<ShortcutRecorderDemoState> {
         let k = Kit.neutral(dark: true)
-        var root: El<ShortcutRecorderDemoState> = col()
+        return col()
             .p(24)
             .gap(16)
             .wFull()
@@ -74,57 +74,28 @@ public enum RuneKitShortcutRecorderApp {
             .bg(k.c.page)
             .child(text("Launcher shortcut").font(k.ty.uiCompact).color(k.c.textBase))
             .child(
-                k.shortcutRecorder(
-                    key: "shortcut",
-                    state: state.recorder,
-                    onBegin: { s in s.recorder.begin() },
-                    onClear: { s in
-                        _ = change(state: &s, next: nil)
-                        s.recorder.shortcut = nil
-                        s.recorder.cancel()
+                ShortcutRecorder<ShortcutRecorderDemoState>(key: "shortcut", \.recorder)
+                    .onChange(change)
+                    .errorMessage { error, chord in
+                        if let chord, let owner = state.owner {
+                            return "\(chord.keycaps.joined(separator: " ")) is used by \(owner)."
+                        }
+                        return error.defaultMessage(for: chord)
                     }
-                )
+                    .build(using: k, in: state)
             )
             .child(text("Activations: \(state.activations)").font(k.ty.uiCompact).color(k.c.textMuted))
-
-        if let owner = state.owner, let chord = state.recorder.refusedChord {
-            root = root.child(
-                text("\(chord.keycaps.joined(separator: " ")) is used by \(owner).")
-                    .font(k.ty.smallMedium)
-                    .color(k.c.danger.fg)
-            )
-        }
-        return root
-    }
-
-    public static func onKey(state: inout ShortcutRecorderDemoState, event: KeyEvent, tx: inout Tx) -> Bool {
-        if state.recorder.isRecording {
-            if let keyName = mapKey(event.key) {
-                let mods = mapModifiers(event.mods)
-                var copyState = state
-                var rec = copyState.recorder
-                let handled = rec.handle(.keyDown(key: keyName, modifiers: mods, isRepeat: false)) { chord in
-                    change(state: &copyState, next: chord)
-                }
-                copyState.recorder = rec
-                state = copyState
-                return handled
-            }
-            return false
-        }
-        if let active = state.registered,
-           let keyName = mapKey(event.key),
-           keyName.lowercased() == active.key.lowercased(),
-           mapModifiers(event.mods) == active.modifiers {
-            state.activations += 1
-            return true
-        }
-        return false
     }
 
     public static func makeApp() -> App<ShortcutRecorderDemoState> {
-        App(title: "Shortcut recorder", size: Vec2(360, 180), state: ShortcutRecorderDemoState(), view: view)
-            .onKey(onKey)
+        let app = App(title: "Shortcut recorder", size: Vec2(360, 180), state: ShortcutRecorderDemoState(), view: view)
+            .globalShortcut("ctrl+shift+space") { _ in }
+        let handle = app.handle()
+        return app.initState {
+            var state = ShortcutRecorderDemoState()
+            state.handle = handle
+            return state
+        }
     }
 }
 

@@ -1,5 +1,8 @@
 import Foundation
 import RuneMotion
+#if !canImport(Darwin) && canImport(Dispatch)
+import Synchronization
+#endif
 
 // MARK: - 1. Audio Recorder Backwards-Compatible Wrapper
 
@@ -916,12 +919,13 @@ public final class RewindScrubber: @unchecked Sendable {
 
 // MARK: - 4. Hot Reload Watcher & ColdBox
 
-/// Live file/directory watcher using `DispatchSourceFileSystemObject` (`rune::hot`).
+/// Watches files and directories for edits, replacements, and removal (`rune::hot`).
 public final class HotWatcher: @unchecked Sendable {
+    #if canImport(Dispatch)
     private let lock = NSLock()
-    private var sources: [DispatchSourceFileSystemObject] = []
-    private var fileDescriptors: [Int32] = []
+    private var sources: [any DispatchSourceProtocol] = []
     private let queue = DispatchQueue(label: "rune.hot.watcher", qos: .utility)
+    #endif
 
     public init() {}
 
@@ -930,6 +934,7 @@ public final class HotWatcher: @unchecked Sendable {
     }
 
     public func watch(path: URL, onChange: @escaping @Sendable (URL) -> Void) -> Bool {
+        #if canImport(Darwin)
         let fd = open(path.path, O_EVTONLY)
         guard fd >= 0 else { return false }
         let source = DispatchSource.makeFileSystemObjectSource(
@@ -943,25 +948,61 @@ public final class HotWatcher: @unchecked Sendable {
         source.setCancelHandler {
             close(fd)
         }
-        lock.withLock {
-            fileDescriptors.append(fd)
-            sources.append(source)
+        #elseif canImport(Dispatch)
+        guard let initial = FileStamp(path) else { return false }
+        let last = Mutex<FileStamp?>(initial)
+        let source = DispatchSource.makeTimerSource(queue: queue)
+        source.schedule(deadline: .now() + .milliseconds(100), repeating: .milliseconds(100))
+        source.setEventHandler {
+            let next = FileStamp(path)
+            let changed = last.withLock { previous in
+                guard previous != next else { return false }
+                previous = next
+                return true
+            }
+            if changed { onChange(path) }
         }
-        source.resume()
+        #endif
+        #if canImport(Dispatch)
+        lock.withLock {
+            sources.append(source)
+            source.activate()
+        }
         return true
+        #else
+        return false
+        #endif
     }
 
     public func stop() {
-        let toCancel = lock.withLock { () -> [DispatchSourceFileSystemObject] in
+        #if canImport(Dispatch)
+        let toCancel = lock.withLock { () -> [any DispatchSourceProtocol] in
             let s = sources
             sources.removeAll()
-            fileDescriptors.removeAll()
             return s
         }
         for s in toCancel {
             s.cancel()
         }
+        #endif
     }
+
+    #if !canImport(Darwin) && canImport(Dispatch)
+    private struct FileStamp: Equatable {
+        let modified: Date?
+        let size: UInt64?
+        let fileNumber: UInt64?
+        let permissions: UInt16?
+
+        init?(_ url: URL) {
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+            modified = attributes[.modificationDate] as? Date
+            size = (attributes[.size] as? NSNumber)?.uint64Value
+            fileNumber = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value
+            permissions = (attributes[.posixPermissions] as? NSNumber)?.uint16Value
+        }
+    }
+    #endif
 }
 
 /// Copy-on-write lazy storage box (`rune::cold::Cold<T>`).

@@ -204,7 +204,7 @@ public enum ToolingProcessArgs {
 
     private static let knownBoolFlags: Set<String> = [
         "--list-scenes", "--list-windows", "--whole-window", "--trace-all", "--chrome",
-        "--realtime", "--cpu", "--force-cpu", "--dark", "--light", "--reduced-motion",
+        "--realtime", "--cpu", "--force-cpu", "--gpu", "--dark", "--light", "--reduced-motion",
         "--first-pixels", "--native", "--pointer", "--help", "-h",
     ]
 

@@ -1,0 +1,115 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune WebGL2 scene integration</title>
+<canvas></canvas>
+<pre id="result">Running…</pre>
+<script type="module">
+import { mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+
+const result = document.querySelector('#result');
+const canvas = document.querySelector('canvas');
+const w = 24, h = 16;
+const clip = [0, 0, w, h];
+
+function primitive(kind, rect, color, params = [0, kind, 0, 1], uv = [0, 0, 0, 0]) {
+    const p = new Float32Array(32);
+    p.set(rect);
+    p.set(color, 8);
+    p.set(params, 16);
+    p.set(uv, 20);
+    p.set(clip, 24);
+    return p;
+}
+
+const instances = [
+    primitive(0, [4, 2, 12, 12], [1, 0, 0, 1]),
+    primitive(8, clip, [0, 0, 0, 0.5], [0, 8, 0, 0]),
+    primitive(0, [8, 2, 6, 8], [0, 1, 0, 1]),
+    primitive(9, clip, []),
+    primitive(2, [0, 2, 3, 10], [1, 1, 1, 1], [0, 2, 0, 1], [0, 0, 1, 1]),
+    primitive(7, [16, 2, 6, 4], [1, 1, 1, 1], [0, 7, 0, 1], [0, 0, 1, 1])
+];
+const memory = new WebAssembly.Memory({ initial: 1 });
+let rendered = false;
+let uploads = 0;
+function scene(time, force) {
+    if (rendered && !force) return 0;
+    rendered = true;
+    ++uploads;
+    const word = new Uint32Array(memory.buffer);
+    word.set([0x32475352, w, h, 7, instances.length, 1, 1, 1, 1]);
+    word[13] = 0;
+    const floats = new Float32Array(memory.buffer);
+    floats.set([0, 0, 0, 1], 9);
+    instances.forEach((p, i) => floats.set(p, 14 + 32 * i));
+    const offset = 56 + 128 * instances.length;
+    new Uint8Array(memory.buffer).set([128, 0, 127, 255, 255], offset);
+    return offset + 5;
+}
+
+let app;
+try {
+    const gl = canvas.getContext('webgl2', {
+        alpha: true, premultipliedAlpha: false, depth: false, stencil: false, antialias: false
+    });
+    if (!gl) throw Error('WebGL 2 is unavailable');
+    const draw = gl.drawArrays.bind(gl);
+    let presented = 0;
+    gl.drawArrays = (...args) => {
+        draw(...args);
+        if (gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) === null) ++presented;
+    };
+    const uiPasses = 2;
+    app = mountRuneBrowser(canvas, { exports: {
+        memory, rune_web_enable() {}, __main_void: () => 0, rune_web_scene: scene, rune_web_ui_passes: () => uiPasses,
+        rune_web_frame() { throw Error('Unexpected CPU rasterization'); },
+        rune_web_field: () => 0, rune_web_buffer: () => 0, rune_web_event: () => 0
+    } });
+    const duringLoad = gl.getExtension('WEBGL_lose_context');
+    if (duringLoad) {
+        let ready = false;
+        app.ready.then(() => { ready = true; }, () => {});
+        const lost = new Promise(resolve => canvas.addEventListener('webglcontextlost', resolve, { once: true }));
+        duringLoad.loseContext();
+        await lost;
+        await new Promise(resolve => setTimeout(resolve, 100));
+        if (ready || uploads) throw Error('Rune reported ready before presenting the first frame');
+        duringLoad.restoreContext();
+    }
+    await app.ready;
+    if (presented !== uiPasses * uploads) throw Error('The browser did not present both requested UI passes');
+    if (gl.getError() !== gl.NO_ERROR) throw Error('WebGL reported an error after drawing the scene');
+    function expectPixel(x, y, expected) {
+        const pixel = new Uint8Array(4);
+        gl.readPixels(x, h - y - 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+        if (pixel.some((v, i) => Math.abs(v - expected[i]) > 2))
+            throw Error(`Pixel (${x},${y}) is ${pixel}, expected ${expected}`);
+    }
+    expectPixel(5, 3, [255, 0, 0, 255]);
+    expectPixel(9, 5, [128, 128, 0, 255]);
+    expectPixel(1, 5, [128, 128, 128, 255]);
+    expectPixel(18, 3, [0, 127, 255, 255]);
+    expectPixel(18, 12, [0, 0, 0, 255]);
+    const lifecycle = gl.getExtension('WEBGL_lose_context');
+    if (lifecycle) {
+        const before = uploads;
+        const lost = new Promise(resolve => canvas.addEventListener('webglcontextlost', resolve, { once: true }));
+        const restored = new Promise(resolve => canvas.addEventListener('webglcontextrestored', resolve, { once: true }));
+        lifecycle.loseContext();
+        await lost;
+        await new Promise(resolve => setTimeout(resolve, 80));
+        lifecycle.restoreContext();
+        await restored;
+        if (uploads <= before) throw Error('Restored context did not request complete scene and atlases');
+        if (presented !== uiPasses * uploads) throw Error('Restored context skipped a requested UI pass');
+        if (gl.getError() !== gl.NO_ERROR) throw Error('WebGL reported an error after restoring its context');
+        expectPixel(9, 5, [128, 128, 0, 255]);
+        expectPixel(18, 3, [0, 127, 255, 255]);
+    }
+    result.textContent = 'PASS ' + JSON.stringify({ ...app.renderer, restored: !!lifecycle, uploads, presented });
+} catch (error) {
+    result.textContent = 'FAIL ' + error.stack;
+} finally {
+    app?.dispose();
+}
+</script>

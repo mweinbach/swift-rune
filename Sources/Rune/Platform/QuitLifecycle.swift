@@ -133,7 +133,7 @@ public enum QuitLifecycle {
                 lock.unlock()
                 if done { break }
                 let ms = Int(max(0.0, Date().timeIntervalSince(startedAt) * 1000.0))
-                fputs("rune: still quitting \(ms) ms after the quit started: \(QuitMarks.summary())\n", stderr)
+                RuneStandardIO.error("rune: still quitting \(ms) ms after the quit started: \(QuitMarks.summary())\n")
             }
         }
     }
@@ -144,7 +144,7 @@ public enum QuitLifecycle {
         Thread.detachNewThread {
             Thread.sleep(forTimeInterval: delay)
             let ms = Int(delay * 1000.0)
-            fputs("rune: the quit didn't end within \(ms) ms of the app's last step, so the process ends itself: \(QuitMarks.summary())\n", stderr)
+            RuneStandardIO.error("rune: the quit didn't end within \(ms) ms of the app's last step, so the process ends itself: \(QuitMarks.summary())\n")
             QuitMarks.record("quit.deadline")
             endProcess()
         }
@@ -236,7 +236,7 @@ public enum RelaunchController {
         do {
             try start(arguments: arguments, waitVar: afterEnvVar)
         } catch {
-            fputs("rune: couldn't start the app again: \(error)\n", stderr)
+            RuneStandardIO.error("rune: couldn't start the app again: \(error)\n")
         }
         #endif
     }
@@ -340,7 +340,7 @@ public enum MacOSQuitHook {
             // Refresh AppKit's optional-selector cache.
             app.delegate = delegate
         } else {
-            fputs("rune: could not add applicationShouldTerminate: to the app delegate\n", stderr)
+            RuneStandardIO.error("rune: could not add applicationShouldTerminate: to the app delegate\n")
         }
     }
 }

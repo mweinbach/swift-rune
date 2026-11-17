@@ -292,9 +292,7 @@ private func defaultNotificationCommandRunner(executableURL: URL, arguments: [St
 /// Injectable subprocess runner used by `LinuxNotifySendBackend` and `WindowsToastBackend`.
 public typealias NotificationCommandRunner = @Sendable (_ executableURL: URL, _ arguments: [String]) throws -> Void
 
-/// Linux `notify-send` CLI notification backend.
-///
-/// Note: Live `notify-send` binary execution and D-Bus daemon delivery are `N/A-platform` on Darwin/iOS/Windows.
+/// Freedesktop notifications. Pass a command runner to use the legacy `notify-send` transport.
 public final class LinuxNotifySendBackend: NotificationBackend, @unchecked Sendable {
     public static let shared = LinuxNotifySendBackend()
 
@@ -304,9 +302,15 @@ public final class LinuxNotifySendBackend: NotificationBackend, @unchecked Senda
 
     private let lock = NotifyLock(initialState: State())
     private let availableOverride: Bool?
+    private let native: (any NotificationBackend)?
     private let runner: NotificationCommandRunner
 
     public init(isAvailable: Bool? = nil, runner: NotificationCommandRunner? = nil) {
+        #if os(Linux)
+        native = runner == nil ? NativeLinuxNotifications.shared : nil
+        #else
+        native = nil
+        #endif
         self.availableOverride = isAvailable
         self.runner = runner ?? defaultNotificationCommandRunner
     }
@@ -315,11 +319,12 @@ public final class LinuxNotifySendBackend: NotificationBackend, @unchecked Senda
         if let availableOverride {
             return availableOverride
         }
+        if let native { return native.isAvailable }
         return FileManager.default.isExecutableFile(atPath: "/usr/bin/notify-send")
             || FileManager.default.isExecutableFile(atPath: "/bin/notify-send")
     }
 
-    public var isAppFocused: Bool { false }
+    public var isAppFocused: Bool { native?.isAppFocused ?? false }
 
     public func register(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
         adopt(identity)
@@ -329,6 +334,7 @@ public final class LinuxNotifySendBackend: NotificationBackend, @unchecked Senda
         guard !identity.id.isEmpty else {
             return .failure(.message("not an app id: \(identity.id)"))
         }
+        if case let .failure(error)? = native?.adopt(identity) { return .failure(error) }
         lock.withLock { $0.identity = identity }
         return .success(())
     }
@@ -372,6 +378,8 @@ public final class LinuxNotifySendBackend: NotificationBackend, @unchecked Senda
     }
 
     public func post(_ notification: Notification) -> Bool {
+        if availableOverride == false { return false }
+        if let native { return native.post(notification) }
         guard isAvailable else { return false }
         let args = buildArguments(for: notification)
         do {
@@ -382,9 +390,11 @@ public final class LinuxNotifySendBackend: NotificationBackend, @unchecked Senda
         }
     }
 
-    public func remove(ids: [String]) {}
-    public func setClickHandler(_ handler: (@Sendable (NotificationClick) -> Void)?) {}
-    public func bringToFront() {}
+    public func remove(ids: [String]) { native?.remove(ids: ids) }
+    public func setClickHandler(_ handler: (@Sendable (NotificationClick) -> Void)?) {
+        native?.setClickHandler(handler)
+    }
+    public func bringToFront() { native?.bringToFront() }
 
     private static func replaceIdentifier(for id: String) -> UInt32 {
         if let numeric = UInt32(id), numeric > 0 {
@@ -399,10 +409,7 @@ public final class LinuxNotifySendBackend: NotificationBackend, @unchecked Senda
     }
 }
 
-/// Windows PowerShell WinRT toast notification backend.
-///
-/// Note: Live WinRT COM activation (`serveActivations`/`waitActivation`) and Windows Registry
-/// (`HKCU\Software\Classes\AppUserModelId`) calls are `N/A-platform` on Darwin/Linux.
+/// Windows toast notifications. A custom command runner can be injected for legacy callers and tests.
 public final class WindowsToastBackend: NotificationBackend, @unchecked Sendable {
     public static let shared = WindowsToastBackend()
 
@@ -413,29 +420,51 @@ public final class WindowsToastBackend: NotificationBackend, @unchecked Sendable
     private let lock = NotifyLock(initialState: State())
     private let availableOverride: Bool?
     private let runner: NotificationCommandRunner
+    #if os(Windows)
+    private let native: NativeWindowsNotifications?
+    #endif
 
     public init(isAvailable: Bool? = nil, runner: NotificationCommandRunner? = nil) {
+        #if os(Windows)
+        self.native = runner == nil ? .shared : nil
+        #endif
         self.availableOverride = isAvailable
         self.runner = runner ?? defaultNotificationCommandRunner
     }
 
     public var isAvailable: Bool {
+        #if os(Windows)
+        availableOverride ?? native?.isAvailable ?? true
+        #else
         availableOverride ?? true
+        #endif
     }
 
-    public var isAppFocused: Bool { false }
+    public var isAppFocused: Bool {
+        #if os(Windows)
+        native?.isAppFocused ?? false
+        #else
+        false
+        #endif
+    }
 
     public func register(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
-        adopt(identity)
+        #if os(Windows)
+        if let native { return native.register(identity) }
+        #endif
+        return adopt(identity)
     }
 
     public func adopt(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
+        #if os(Windows)
+        if let native { return native.adopt(identity) }
+        #endif
         guard !identity.id.isEmpty, !identity.id.contains("\\") else {
             return .failure(.message("not an app id: \(identity.id)"))
         }
         var normalized = identity
         if let scheme = identity.activationScheme {
-            guard let valid = Self.validScheme(scheme) else {
+            guard let valid = WindowsToastContent.validScheme(scheme) else {
                 return .failure(.message("not a URL scheme: \(scheme)"))
             }
             normalized.activationScheme = valid
@@ -445,35 +474,17 @@ public final class WindowsToastBackend: NotificationBackend, @unchecked Sendable
     }
 
     public func clickFromURL(_ url: String) -> NotificationClick? {
-        guard let scheme = lock.withLock({ $0.identity?.activationScheme }), !scheme.isEmpty else {
-            return nil
-        }
-        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let schemeSplit = trimmed.range(of: "://") else { return nil }
-        let head = String(trimmed[..<schemeSplit.lowerBound])
-        guard head.caseInsensitiveCompare(scheme) == .orderedSame else { return nil }
-        let rest = String(trimmed[schemeSplit.upperBound...])
-        guard rest.hasPrefix("notification/") else { return nil }
-        let afterHost = String(rest.dropFirst("notification/".count))
-        let parts = afterHost.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        let rawId = String(parts[0]).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let id = rawId.removingPercentEncoding ?? rawId
-        var info: [(String, String)] = []
-        if parts.count > 1, !parts[1].isEmpty {
-            for item in parts[1].split(separator: "&") {
-                let kv = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-                let k = String(kv[0]).replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? String(kv[0])
-                let v = kv.count > 1
-                    ? (String(kv[1]).replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? String(kv[1]))
-                    : ""
-                info.append((k, v))
-            }
-        }
-        return NotificationClick(id: id, info: info)
+        #if os(Windows)
+        if let native { return native.clickFromURL(url) }
+        #endif
+        return WindowsToastContent.click(url: url, scheme: lock.withLock { $0.identity?.activationScheme })
     }
 
     public func post(_ notification: Notification) -> Bool {
         guard isAvailable else { return false }
+        #if os(Windows)
+        if let native { return native.post(notification) }
+        #endif
         let appId = lock.withLock { $0.identity?.id } ?? "Rune"
         let escapedApp = Self.escapePowerShellSingleQuoted(appId)
         let escapedTitle = Self.escapePowerShellSingleQuoted(Self.escapeXML(notification.title))
@@ -498,20 +509,37 @@ public final class WindowsToastBackend: NotificationBackend, @unchecked Sendable
         }
     }
 
-    public func remove(ids: [String]) {}
-    public func setClickHandler(_ handler: (@Sendable (NotificationClick) -> Void)?) {}
-    public func bringToFront() {}
+    public func remove(ids: [String]) {
+        #if os(Windows)
+        native?.remove(ids: ids)
+        #endif
+    }
 
-    private static func validScheme(_ scheme: String) -> String? {
-        guard scheme.count >= 2, let first = scheme.first, first.isASCII && first.isLetter else {
-            return nil
-        }
-        guard scheme.allSatisfy({ ch in
-            ch.isASCII && (ch.isLetter || ch.isNumber || ch == "+" || ch == "-" || ch == ".")
-        }) else {
-            return nil
-        }
-        return scheme.lowercased()
+    public func setClickHandler(_ handler: (@Sendable (NotificationClick) -> Void)?) {
+        #if os(Windows)
+        native?.setClickHandler(handler)
+        #endif
+    }
+
+    public func bringToFront() {
+        #if os(Windows)
+        native?.bringToFront()
+        #endif
+    }
+
+    public func serveActivations(_ clsid: String) -> Result<Void, NotificationError> {
+        #if os(Windows)
+        if let native { return native.serveActivations(clsid) }
+        #endif
+        return .success(())
+    }
+
+    public func waitActivation(_ clsid: String, timeout: TimeInterval) -> NotificationClick? {
+        #if os(Windows)
+        return native?.waitActivation(clsid, timeout: timeout)
+        #else
+        return nil
+        #endif
     }
 
     private static func escapeXML(_ s: String) -> String {
@@ -532,9 +560,9 @@ public enum PlatformDefaultNotificationBackend {
         #if canImport(UserNotifications)
         return UserNotificationsBackend.shared
         #elseif os(Linux)
-        return LinuxNotifySendBackend.shared
+        return NativeLinuxNotifications.shared
         #elseif os(Windows)
-        return WindowsToastBackend.shared
+        return NativeWindowsNotifications.shared
         #else
         return MockNotificationBackend(available: false)
         #endif

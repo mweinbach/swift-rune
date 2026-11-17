@@ -1,11 +1,9 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 @testable import RunePerf
-#if canImport(Darwin)
-import Darwin
-#elseif canImport(Glibc)
-import Glibc
-#endif
 
 @Suite("RunePerf & Procwatch Upstream Parity Tests")
 struct RunePerfUpstreamTests {
@@ -223,6 +221,9 @@ struct RunePerfUpstreamTests {
         writer.accept(FrameSample(window: 99, seq: 99, outcome: .drawn, updateMs: 300.0, renderMs: 1.0, timestampMs: 200_000))
         writer.flush()
         #expect(channel.tryReceive() != nil)
+        let updatedData = try Data(contentsOf: dir.appendingPathComponent("perf.json"))
+        let updatedSnapshot = try #require(try JSONSerialization.jsonObject(with: updatedData) as? [String: Any])
+        #expect((updatedSnapshot["incidents"] as? NSNumber)?.intValue == 41)
 
         // Also check bounded async handler overload releases slots after execution.
         let hookSem = DispatchSemaphore(value: 0)
@@ -278,32 +279,26 @@ struct RunePerfUpstreamTests {
         #expect(threwOversize)
     }
 
+    private func withHeldStoreLock<T>(in directory: URL, _ body: () throws -> T) throws -> T {
+        let fd = try PerfFileRecorder.openFileLock(at: directory.appendingPathComponent(".perf.lock"))
+        defer { PerfFileRecorder.closeFileLock(fd) }
+        try #require(try PerfFileRecorder.tryLock(fd))
+        return try body()
+    }
+
     @Test func replacementAcquiresAfterOldOwnerReleases() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("runeperf-handoff-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        let lockPath = dir.appendingPathComponent(".perf.lock").path
-        let lockFd = lockPath.withCString { open($0, O_CREAT | O_RDWR, 0o644) }
-        #expect(lockFd >= 0)
-        #expect(flock(lockFd, LOCK_EX | LOCK_NB) == 0)
-        var lockReleased = false
-        defer {
-            if !lockReleased {
-                flock(lockFd, LOCK_UN)
-                close(lockFd)
-            }
-        }
-
         let channel = PerfIncidentChannel(capacity: 1)
         let config = PerfConfig(directory: dir, app: "replacement").incidents(channel: channel)
-        let recorder = try PerfFileRecorder.start(config: config)
-        #expect(recorder.record(FrameSample(window: 1, seq: 1, outcome: .drawn, updateMs: 300.0, renderMs: 1.0)))
-
-        flock(lockFd, LOCK_UN)
-        close(lockFd)
-        lockReleased = true
+        let recorder = try withHeldStoreLock(in: dir) {
+            let recorder = try PerfFileRecorder.start(config: config)
+            #expect(recorder.record(FrameSample(window: 1, seq: 1, outcome: .drawn, updateMs: 300.0, renderMs: 1.0)))
+            return recorder
+        }
 
         let notifiedURL = channel.receive(timeout: 5.0)
         #expect(notifiedURL != nil)
@@ -334,23 +329,16 @@ struct RunePerfUpstreamTests {
         // Lock contention test: held .perf.lock causes cancellation without touching owner files
         let contendedDir = dir.appendingPathComponent("locked", isDirectory: true)
         try FileManager.default.createDirectory(at: contendedDir, withIntermediateDirectories: true)
-        let lockPath = contendedDir.appendingPathComponent(".perf.lock").path
-        let lockFd = lockPath.withCString { open($0, O_CREAT | O_RDWR, 0o644) }
-        #expect(lockFd >= 0)
-        #expect(flock(lockFd, LOCK_EX | LOCK_NB) == 0)
-        defer {
-            flock(lockFd, LOCK_UN)
-            close(lockFd)
+        try withHeldStoreLock(in: contendedDir) {
+            var blockedRecorder: PerfFileRecorder? = try PerfFileRecorder.start(config: PerfConfig(directory: contendedDir, app: "replacement"))
+            for i in 0..<1_000 {
+                _ = blockedRecorder?.record(FrameSample(window: 1, seq: UInt64(i), outcome: .skipped))
+            }
+            #expect(blockedRecorder?.droppedSamples == 744)
+            // Drop without calling shutdown() so deinit cancels lock wait AND joins the writer thread before returning.
+            blockedRecorder = nil
+            #expect(!FileManager.default.fileExists(atPath: contendedDir.appendingPathComponent("perf.json").path))
         }
-
-        var blockedRecorder: PerfFileRecorder? = try PerfFileRecorder.start(config: PerfConfig(directory: contendedDir, app: "replacement"))
-        for i in 0..<1_000 {
-            _ = blockedRecorder?.record(FrameSample(window: 1, seq: UInt64(i), outcome: .skipped))
-        }
-        #expect(blockedRecorder?.droppedSamples == 744)
-        // Drop without calling shutdown() so deinit cancels lock wait AND joins the writer thread before returning.
-        blockedRecorder = nil
-        #expect(!FileManager.default.fileExists(atPath: contendedDir.appendingPathComponent("perf.json").path))
 
         // Drop without calling shutdown() on an unlocked recorder drains and writes perf.json on worker join.
         let dropDir = dir.appendingPathComponent("drop-joins", isDirectory: true)
@@ -364,30 +352,17 @@ struct RunePerfUpstreamTests {
         // Release .perf.lock after contention and verify the 256 queued samples drain/flush cleanly to disk.
         let drainDir = dir.appendingPathComponent("drain-after-lock", isDirectory: true)
         try FileManager.default.createDirectory(at: drainDir, withIntermediateDirectories: true)
-        let drainLockPath = drainDir.appendingPathComponent(".perf.lock").path
-        let drainLockFd = drainLockPath.withCString { open($0, O_CREAT | O_RDWR, 0o644) }
-        #expect(drainLockFd >= 0)
-        #expect(flock(drainLockFd, LOCK_EX | LOCK_NB) == 0)
-        var drainReleased = false
-        defer {
-            if !drainReleased {
-                flock(drainLockFd, LOCK_UN)
-                close(drainLockFd)
-            }
-        }
-
         let drainChannel = PerfIncidentChannel(capacity: 4)
         let drainConfig = PerfConfig(directory: drainDir, app: "drain-app").incidents(channel: drainChannel)
-        let drainRecorder = try PerfFileRecorder.start(config: drainConfig)
-        for i in 0..<1_000 {
-            let updateMs = (i == 0) ? 300.0 : 20.0
-            _ = drainRecorder.record(FrameSample(window: 1, seq: UInt64(i), outcome: .drawn, updateMs: updateMs, renderMs: 1.0))
+        let drainRecorder = try withHeldStoreLock(in: drainDir) {
+            let drainRecorder = try PerfFileRecorder.start(config: drainConfig)
+            for i in 0..<1_000 {
+                let updateMs = (i == 0) ? 300.0 : 20.0
+                _ = drainRecorder.record(FrameSample(window: 1, seq: UInt64(i), outcome: .drawn, updateMs: updateMs, renderMs: 1.0))
+            }
+            #expect(drainRecorder.droppedSamples == 744)
+            return drainRecorder
         }
-        #expect(drainRecorder.droppedSamples == 744)
-
-        flock(drainLockFd, LOCK_UN)
-        close(drainLockFd)
-        drainReleased = true
 
         // Wait for the writer to acquire the lock and flush its queued incident + snapshot, then shut down.
         let incidentURL = drainChannel.receive(timeout: 5.0)

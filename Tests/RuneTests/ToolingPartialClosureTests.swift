@@ -1,6 +1,4 @@
-import CoreGraphics
 import Foundation
-import ImageIO
 import Testing
 @testable import Rune
 import RuneMotion
@@ -1024,47 +1022,11 @@ struct ToolingPartialClosureTests {
     }
 
     private func writeRGBAPNG(at url: URL, width: Int, height: Int, rgba: [UInt8]) throws {
-        let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-        var mutable = rgba
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-        guard let ctx = CGContext(
-            data: &mutable,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: width * 4,
-            space: space,
-            bitmapInfo: bitmapInfo.rawValue
-        ), let cgImage = ctx.makeImage(),
-              let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else {
-            throw NSError(domain: "ToolingPartialClosureTests", code: 1)
-        }
-        CGImageDestinationAddImage(dest, cgImage, nil)
-        #expect(CGImageDestinationFinalize(dest))
+        try Frame(width: width, height: height, rgba: rgba).writePNG(to: url)
     }
 
-    private func readRGBAPNG(at url: URL) throws -> (width: Int, height: Int, rgba: [UInt8]) {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            throw NSError(domain: "ToolingPartialClosureTests", code: 2)
-        }
-        let w = cgImage.width
-        let h = cgImage.height
-        var rgba = [UInt8](repeating: 0, count: w * h * 4)
-        let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(
-            data: &rgba,
-            width: w,
-            height: h,
-            bitsPerComponent: 8,
-            bytesPerRow: w * 4,
-            space: space,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            throw NSError(domain: "ToolingPartialClosureTests", code: 3)
-        }
-        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
-        return (w, h, rgba)
+    private func readRGBAPNG(at url: URL) throws -> Frame {
+        try Frame.fromPNG(data: Data(contentsOf: url))
     }
 
     private func makeDesktopPair(
@@ -1259,7 +1221,7 @@ struct ToolingPartialClosureTests {
         let plain = try runTrace(name: "plain", timed: false)
         let timed = try runTrace(name: "timed", timed: true)
 
-        func strip(_ text: String) throws -> [NSDictionary] {
+        func strip(_ text: String) throws -> [Data] {
             try text.split(separator: "\n").map { line in
                 var obj = try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
                 obj.removeValue(forKey: "target_ms")
@@ -1269,16 +1231,13 @@ struct ToolingPartialClosureTests {
                     q["cpu_ms"] = 0.0
                     obj["quality"] = q
                 }
-                return obj as NSDictionary
+                return try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
             }
         }
 
         let plainStripped = try strip(plain)
         let timedStripped = try strip(timed)
-        #expect(plainStripped.count == timedStripped.count)
-        for (p, t) in zip(plainStripped, timedStripped) {
-            #expect(p.isEqual(to: t))
-        }
+        #expect(plainStripped == timedStripped)
         #expect(!plain.contains("present_ms") && !plain.contains("target_ms"))
 
         let frames = try timed.split(separator: "\n").dropFirst().map {

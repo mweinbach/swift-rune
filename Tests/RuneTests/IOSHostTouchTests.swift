@@ -1,11 +1,56 @@
 #if canImport(UIKit) && !os(watchOS)
 import Testing
 import UIKit
+import Metal
+import QuartzCore
 import RuneMotion
 @testable import Rune
 
 @MainActor
 struct IOSHostTouchTests {
+    @Test("All UIKit hosts use the Command key for primary shortcuts")
+    func primaryKeyboardModifier() {
+        #expect(KeyPlatform.current == .mac)
+        #expect(Mods(cmd: true).primaryCommand)
+        #expect(!Mods(ctrl: true).primaryCommand)
+    }
+
+    @Test("UIKit preserves app callbacks and waits for a drawable before reporting ready")
+    func embeddedApp() throws {
+        let app = App("Embedded", size: Vec2(200, 120), init: { 0 }) { count, _ in
+            el().key("button").role(.button).size(80, 40).label("Count \(count)").onClick { $0 += 1 }
+        }.onFocus { state, _, _ in state += 1 }
+        let controller = try IOSApp.makeViewController(app)
+        let view = controller.runeView
+        let runtime = view.runtime
+        runtime.dispatchFocus(false, at: 0)
+        #expect(runtime.state == 1)
+        view.renderTick()
+        #expect(!view.didSignalReady)
+        #expect(runtime.viewCommitCount == 0)
+        _ = runtime.renderFrame(at: 0)
+        let elements = try #require(view.accessibilityElements as? [RuneUIAccessibilityElement])
+        let first = try #require(elements.first { $0.accessibilityIdentifier == "button" })
+        runtime.update(at: 0.5) { state, _ in state += 1 }
+        _ = runtime.renderFrame(at: 0.5)
+        let updated = try #require((view.accessibilityElements as? [RuneUIAccessibilityElement])?.first {
+            $0.accessibilityIdentifier == "button"
+        })
+        #expect(updated === first)
+        #expect(updated.accessibilityLabel == "Count 2")
+    }
+
+    @Test("A linear-light UIKit scene gets an sRGB Metal drawable capable of backdrop sampling",
+          .enabled(if: MTLCreateSystemDefaultDevice() != nil))
+    func linearDrawable() throws {
+        let spec = AppSpec(title: "Linear", srgbBlend: false, state: false) { _, _ in el() }
+        let controller = try IOSApp.makeViewController(spec)
+        let layer = try #require(controller.runeView.layer as? CAMetalLayer)
+        #expect(layer.device != nil)
+        #expect(layer.pixelFormat == .bgra8Unorm_srgb)
+        #expect(!layer.framebufferOnly)
+    }
+
     @Test("The first contact owns the pan until it lifts or the host detaches")
     func primaryContactAndTeardown() throws {
         let runtime = Runtime(state: 0, viewport: Vec2(200, 200), pixelScale: 1) { _, _ in

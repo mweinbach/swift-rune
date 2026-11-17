@@ -114,7 +114,7 @@ public enum GrowthCaps {
     public static let fixedSubstep: Double = 1.0 / 240.0
 }
 
-/// Integrates a growing row's presented height on fixed 1/240s substeps with speed & deceleration caps.
+/// Integrates a growing row's presented height with speed and deceleration caps.
 public struct GrowthRowState: Sendable, Equatable {
     public var targetHeight: Float
     public var presentedHeight: Float
@@ -122,7 +122,6 @@ public struct GrowthRowState: Sendable, Equatable {
     public var maskHeight: Float
     public var edge: StreamEdge
     public var isStreaming: Bool
-    private var accumulator: Double = 0
 
     public init(
         targetHeight: Float = 0,
@@ -144,16 +143,13 @@ public struct GrowthRowState: Sendable, Equatable {
         abs(targetHeight - presentedHeight) < 0.25 && abs(velocity) < 1.0 && maskHeight <= 0.1
     }
 
-    /// Advances the growth spring by `dt` seconds using fixed `1/240s` substeps.
+    /// Advances by the frame's duration in slices of at most 1/240 s.
     public mutating func step(dt: Double) {
         guard dt > 0 else { return }
-        accumulator += min(dt, 0.1)
-        let h = Float(GrowthCaps.fixedSubstep)
         let dur = max(0.05, Float(GrowthCaps.growthSpring.duration) * edge.duration)
         let omega = 2.0 * Float.pi / dur
 
-        while accumulator >= GrowthCaps.fixedSubstep {
-            accumulator -= GrowthCaps.fixedSubstep
+        for h in GrowthSteps(duration: Float(dt)) {
             let diff = targetHeight - presentedHeight
             let dist = abs(diff)
 

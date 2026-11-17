@@ -1,5 +1,6 @@
-import CoreGraphics
+#if canImport(CoreText)
 import CoreText
+#endif
 import Foundation
 import Testing
 @testable import Rune
@@ -14,52 +15,11 @@ struct UpText3ParityTests {
 
     private static let paragraph = "Careful typography avoids leaving a single short trailing word alone at the bottom of a long paragraph."
 
-    /// Greedy lines of `shaped[from...]` broken by CoreText at `widthPx`, as `TextSystem` hands
-    /// them to the pretty breaker (absolute string indices, `strIndexBase` 0).
-    private static func greedyLines(
-        typesetter: CTTypesetter,
-        in ns: NSString,
-        from start: Int,
-        widthPx: Double
-    ) -> [PrettyLineBreaker.GreedyLineInfo] {
-        var out: [PrettyLineBreaker.GreedyLineInfo] = []
-        var cursor = start
-        while cursor < ns.length {
-            let count = max(1, CTTypesetterSuggestLineBreak(typesetter, cursor, widthPx))
-            out.append(lineInfo(typesetter: typesetter, start: cursor, count: count))
-            cursor += count
-        }
-        return out
-    }
-
-    private static func lineInfo(typesetter: CTTypesetter, start: Int, count: Int) -> PrettyLineBreaker.GreedyLineInfo {
-        let line = CTTypesetterCreateLine(typesetter, CFRangeMake(start, count))
-        return PrettyLineBreaker.GreedyLineInfo(
-            u16Start: start,
-            u16End: start + count,
-            widthPx: Float(CTLineGetTypographicBounds(line, nil, nil, nil)),
-            trailingWsPx: Float(CTLineGetTrailingWhitespaceWidth(line)),
-            hasRTLRun: false,
-            ctLine: line,
-            strIndexBase: 0
-        )
-    }
-
-    private static func typesetter(_ s: String, font: CTFont) -> CTTypesetter {
-        let attr = CFAttributedStringCreate(kCFAllocatorDefault, s as CFString, [kCTFontAttributeName: font] as CFDictionary)!
-        return CTTypesetterCreateWithAttributedString(attr)
-    }
-
     @Test("#1023: sliceable lines are valid ranges that hold text; a box-only line is not")
     func sliceableLines() throws {
         let ns = "ab \u{FFFC}cd\u{FFFC}" as NSString
-        let font = CTFontCreateWithName("Helvetica" as CFString, 14, nil)
-        let ts = Self.typesetter(ns as String, font: font)
         func info(_ start: Int, _ end: Int) -> PrettyLineBreaker.GreedyLineInfo {
-            var l = Self.lineInfo(typesetter: ts, start: 0, count: ns.length)
-            l.u16Start = start
-            l.u16End = end
-            return l
+            .init(u16Start: start, u16End: end, widthPx: 0, trailingWsPx: 0, hasRTLRun: false)
         }
         let boxes: Set<Int> = [3, 6]
         #expect(PrettyLineBreaker.isSliceable(info(0, 3), in: ns, boxU16: boxes), "text")
@@ -80,52 +40,45 @@ struct UpText3ParityTests {
         #expect(DefaultFonts.registerIfNeeded())
         let system = TextSystem()
         let style = TextStyle(size: 14, weight: 400).wrapped()
-        let font = system.resolveCTFont(style: style, pixelScale: 1)
-        // Long enough to wrap over more than the 4 lines the breaker scores.
         let paragraph = "Careful typography avoids leaving a single short trailing word alone at the bottom of a long paragraph, so the eye moves on to the next one without a stop."
-        let plainNS = paragraph as NSString
-        let plainTS = Self.typesetter(paragraph, font: font)
-        // A line holding only a pill's box, then the paragraph: the box is its own (first) line.
-        let boxedText = "\u{FFFC}" + paragraph
-        let boxedNS = boxedText as NSString
-        let boxedTS = Self.typesetter(boxedText, font: font)
+        let ns = paragraph as NSString
+        let unwrapped = system.shape(text: paragraph, style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: false)
+        // This ASCII fixture has identical UTF-8 and UTF-16 offsets. Measure positions with the active shaper.
+        let positions = (0...ns.length).map { system.caretRect(in: unwrapped, utf8Offset: $0, pixelScale: 1).x }
+        for w in stride(from: Float(80), through: 400, by: 2) {
+            let shaped = system.shape(text: paragraph, style: style, maxWidth: w, pixelScale: 1, emitGlyphs: false)
+            let lines = zip(shaped.textTestLines, shaped.lineAdvancesPx).map { line, advance in
+                PrettyLineBreaker.GreedyLineInfo(u16Start: line.utf8Start, u16End: line.utf8Start + line.text.utf16.count,
+                    widthPx: advance.widthPx, trailingWsPx: advance.trailingWsPx, hasRTLRun: false)
+            }
+            guard lines.count >= 4, let plainCaps = PrettyLineBreaker.prettyLineCaps(lines: lines, in: ns,
+                fontSizePt: 14, scale: 1, maxWidthPx: w, advanceAtUTF16: { positions[$0] }) else { continue }
+            #expect(!plainCaps.isEmpty)
 
-        // A width where the plain paragraph's greedy last line is a lone short word over 4+ lines,
-        // which the pretty breaker re-breaks.
-        var found: (width: Float, plainCaps: [Int: CGFloat])? = nil
-        for wInt in stride(from: 80, through: 400, by: 2) {
-            let w = Float(wInt)
-            let lines = Self.greedyLines(typesetter: plainTS, in: plainNS, from: 0, widthPx: Double(w))
-            guard lines.count >= 4,
-                  let caps = PrettyLineBreaker.prettyLineCaps(lines: lines, in: plainNS, fontSizePt: 14, scale: 1, maxWidthPx: w)
-            else { continue }
-            found = (w, caps)
-            break
+            // Prepend a box-only line outside the four-line scoring window. No line in the paragraph may be rebroken.
+            let boxed = "\u{FFFC}" + paragraph as NSString
+            let box = PrettyLineBreaker.GreedyLineInfo(u16Start: 0, u16End: 1, widthPx: 8, trailingWsPx: 0, hasRTLRun: false)
+            let prefixed = [box] + lines.map { original in
+                var shifted = original
+                shifted.u16Start += 1
+                shifted.u16End += 1
+                return shifted
+            }
+            let prefixedX: (Int) -> Float = { $0 == 0 ? 0 : 8 + positions[$0 - 1] }
+            #expect(PrettyLineBreaker.prettyLineCaps(lines: prefixed, in: boxed, fontSizePt: 14, scale: 1,
+                maxWidthPx: w, boxU16: [0], advanceAtUTF16: prefixedX) == nil)
+            let asText = try #require(PrettyLineBreaker.prettyLineCaps(lines: prefixed, in: boxed, fontSizePt: 14,
+                scale: 1, maxWidthPx: w, advanceAtUTF16: prefixedX))
+            #expect(Set(asText.keys) == Set(plainCaps.keys.map { $0 + 1 }))
+
+            let last = ns.length
+            let tail = paragraph + "\u{FFFC}" as NSString
+            let endBox = PrettyLineBreaker.GreedyLineInfo(u16Start: last, u16End: last + 1, widthPx: 8, trailingWsPx: 0, hasRTLRun: false)
+            #expect(PrettyLineBreaker.prettyLineCaps(lines: lines + [endBox], in: tail, fontSizePt: 14, scale: 1,
+                maxWidthPx: w, boxU16: [last], advanceAtUTF16: { $0 > last ? positions[last] + 8 : positions[$0] }) == nil)
+            return
         }
-        let (width, plainCaps) = try #require(found, "a width where the plain paragraph wraps prettily")
-        #expect(!plainCaps.isEmpty)
-
-        // The same lines after a box-only line (outside the last 4 lines the breaker scores):
-        // the box line can't be sliced, so the paragraph keeps its greedy breaks.
-        let paraLines = Self.greedyLines(typesetter: boxedTS, in: boxedNS, from: 1, widthPx: Double(width))
-        #expect(paraLines.map { $0.u16Start - 1 } == Self.greedyLines(typesetter: plainTS, in: plainNS, from: 0, widthPx: Double(width)).map(\.u16Start))
-        let boxLine = Self.lineInfo(typesetter: boxedTS, start: 0, count: 1)
-        let withBoxLine = [boxLine] + paraLines
-        #expect(PrettyLineBreaker.prettyLineCaps(lines: withBoxLine, in: boxedNS, fontSizePt: 14, scale: 1, maxWidthPx: width, boxU16: [0]) == nil)
-        // The placeholder as text (no box there) is sliceable: the paragraph wraps prettily again,
-        // as the plain one does, one line down.
-        let asText = try #require(PrettyLineBreaker.prettyLineCaps(lines: withBoxLine, in: boxedNS, fontSizePt: 14, scale: 1, maxWidthPx: width, boxU16: []))
-        #expect(Set(asText.keys) == Set(plainCaps.keys.map { $0 + 1 }))
-
-        // A box-only last line keeps the greedy breaks too.
-        let tailText = paragraph + "\u{FFFC}"
-        let tailNS = tailText as NSString
-        let tailTS = Self.typesetter(tailText, font: font)
-        var tailLines = Self.greedyLines(typesetter: tailTS, in: tailNS, from: 0, widthPx: Double(width))
-            .filter { $0.u16Start < plainNS.length }
-        tailLines[tailLines.count - 1] = Self.lineInfo(typesetter: tailTS, start: tailLines[tailLines.count - 1].u16Start, count: plainNS.length - tailLines[tailLines.count - 1].u16Start)
-        tailLines.append(Self.lineInfo(typesetter: tailTS, start: plainNS.length, count: 1))
-        #expect(PrettyLineBreaker.prettyLineCaps(lines: tailLines, in: tailNS, fontSizePt: 14, scale: 1, maxWidthPx: width, boxU16: [plainNS.length]) == nil)
+        Issue.record("No width produced a lone last word that pretty wrapping could rebreak")
     }
 
     @Test("#1023: paragraphs with pills still wrap prettily when every line holds text")
@@ -143,15 +96,15 @@ struct UpText3ParityTests {
         for wInt in stride(from: 130, through: 360, by: 2) {
             let w = Float(wInt)
             let greedy = ts.shape(text: Self.paragraph, pills: pills, style: style, maxWidth: w, pixelScale: 1.0, emitGlyphs: false, pretty: false)
-            guard greedy.lineCount >= 3, let last = greedy.lineStrings.last?.text else { continue }
+            guard greedy.lineCount >= 3, let last = greedy.textTestLines.last?.text else { continue }
             let t = last.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty, !t.contains(" "), greedy.lineAdvancePx(at: greedy.lineCount - 1) < w / 3.0 else { continue }
             // Every line holds text (the pill's boxes sit with its label).
-            #expect(greedy.lineStrings.allSatisfy { !$0.text.isEmpty })
+            #expect(greedy.textTestLines.allSatisfy { !$0.text.isEmpty })
             let pretty = ts.shape(text: Self.paragraph, pills: pills, style: style, maxWidth: w, pixelScale: 1.0, emitGlyphs: false, pretty: true)
             #expect(pretty.lineCount == greedy.lineCount)
-            let words = (pretty.lineStrings.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
-            #expect(words.count >= 2, "width \(w): \(pretty.lineStrings.map(\.text))")
+            let words = (pretty.textTestLines.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+            #expect(words.count >= 2, "width \(w): \(pretty.textTestLines.map(\.text))")
             checked += 1
         }
         #expect(checked > 0)
@@ -172,10 +125,12 @@ struct UpText3ParityTests {
         var mono = sans
         mono.family = .monospace
         #expect(sans.resolvedLineHeight == 16.25, "line_height 0: size * 1.25")
+        #if canImport(CoreText)
         let sansFont = ts.resolveCTFont(style: sans, pixelScale: 1)
         let monoFont = ts.resolveCTFont(style: mono, pixelScale: 1)
         #expect((CTFontCopyFamilyName(sansFont) as String).contains("Inter"))
         #expect((CTFontCopyFamilyName(monoFont) as String).contains("Plex"))
+        #endif
 
         // Inter (ascender 0.96875, descender 0.2412 em) and IBM Plex Mono (1.025, 0.275 em) at 13 px,
         // in a 16.25 px line: Plex reaches a pixel further under the baseline at 1x (17.25 px line)

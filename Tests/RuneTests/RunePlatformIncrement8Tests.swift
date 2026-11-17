@@ -365,7 +365,7 @@ struct RunePlatformIncrement8Tests {
 
     @Test("popupMenuSupported and DragItem.isEmpty match platform contract")
     func popupSupportedAndDragItemIsEmpty() {
-        #if os(macOS) || os(Windows)
+        #if os(macOS) || os(Windows) || os(Linux)
         #expect(popupMenuSupported() == true)
         #else
         #expect(popupMenuSupported() == false)
@@ -409,8 +409,9 @@ struct RunePlatformIncrement8Tests {
     func appHandleSetMenuAndTakeMenuErrors() throws {
         let app = App(title: "MenuTest", state: 0) { _, _ in el() }
         let handle = app.sharedHandle
+        let inactiveError: MenuError = AppMenuBridge.defaultNativeSupported ? .notRunning : .unsupported
 
-        #expect(throws: MenuError.notRunning) {
+        #expect(throws: inactiveError) {
             try handle.setMenu([NativeMenuItem(id: "open", title: "Open") { _, _ in }])
         }
 
@@ -459,7 +460,7 @@ struct RunePlatformIncrement8Tests {
         #expect(handle.takeMenuErrors().isEmpty)
 
         // Stopped again once run finishes.
-        #expect(throws: MenuError.notRunning) {
+        #expect(throws: inactiveError) {
             try handle.setMenu([])
         }
     }
@@ -705,13 +706,15 @@ struct RunePlatformIncrement8Tests {
         #expect(spec.appShared != nil)
 
         let entry = spec.boxed().makeHostEntry()
+        #expect(entry.fitsContentHeight)
+        #expect(entry.hostMinSize?.0 == WindowOptions.defaultMinSize.x && entry.hostMinSize?.1 == 0)
         entry.markMenusRunning(true)
         let startupErrors = app.sharedHandle.takeMenuErrors()
         #expect(startupErrors.count == 1)
         entry.markMenusRunning(false)
 
         let rtObj = entry.createRuntime(pixelScale: 1.0, systemDark: false, reducedMotion: false, waker: Waker())
-        #expect(entry.runtimeViewport(runtimeObj: rtObj) == Vec2(320, 140))
+        #expect(entry.runtimeViewport(runtimeObj: rtObj) == Vec2(WindowOptions.defaultMinSize.x, 140))
     }
 
     @Test("HeadlessRunner clamps initial fitContentHeight and holds motion for one frame during fit resize")

@@ -29,6 +29,7 @@ let package = Package(
         .library(name: "RuneLuau", targets: ["RuneLuau"]),
         .library(name: "RuneRegister", targets: ["RuneRegister"]),
         .library(name: "RuneStaging", targets: ["RuneStaging"]),
+        .library(name: "RuneHelloAndroid", type: .dynamic, targets: ["RuneHelloAndroid"]),
         .executable(name: "rune-hello", targets: ["RuneHello"]),
         .executable(name: "rune-todo", targets: ["RuneTodo"]),
         .executable(name: "rune-settings", targets: ["RuneSettings"]),
@@ -128,7 +129,127 @@ let package = Package(
         .executable(name: "rune-kit-rich-editor", targets: ["RuneKitRichEditor"]),
         .executable(name: "rune-www", targets: ["RuneWww"]),
     ],
+    traits: [
+        .default(enabledTraits: ["DesktopMedia"]),
+        .trait(name: "DesktopMedia", description: "Play desktop audio and video and record microphone audio on Linux and Windows.")
+    ],
     targets: [
+        .systemLibrary(name: "CWebP", pkgConfig: "libwebpdemux", providers: [
+            .apt(["libwebp-dev"]), .yum(["libwebp-devel"])
+        ]),
+        .target(name: "CRuneDesktopImages", dependencies: [
+            .target(name: "CGtk3", condition: .when(platforms: [.linux])),
+            .target(name: "CWebP", condition: .when(platforms: [.linux])),
+        ], linkerSettings: [
+            .linkedLibrary("gdk_pixbuf-2.0", .when(platforms: [.linux])),
+            .linkedLibrary("gobject-2.0", .when(platforms: [.linux])),
+            .linkedLibrary("glib-2.0", .when(platforms: [.linux])),
+            .linkedLibrary("webpdemux", .when(platforms: [.linux])),
+            .linkedLibrary("lcms2", .when(platforms: [.linux])),
+            .linkedLibrary("windowscodecs", .when(platforms: [.windows])),
+            .linkedLibrary("jnigraphics", .when(platforms: [.android])),
+            .linkedLibrary("dl", .when(platforms: [.android])),
+            .linkedLibrary("ole32", .when(platforms: [.windows])),
+        ]),
+        .systemLibrary(name: "CGStreamer", pkgConfig: "gstreamer-app-1.0", providers: [
+            .apt(["libgstreamer-plugins-base1.0-dev"]), .yum(["gstreamer1-plugins-base-devel"])
+        ]),
+        .target(name: "CRuneMedia", dependencies: [
+            .target(name: "CGStreamer", condition: .when(platforms: [.linux]))
+        ], linkerSettings: [
+            .linkedLibrary("runtimeobject", .when(platforms: [.windows])),
+            .linkedLibrary("gstvideo-1.0", .when(platforms: [.linux])),
+            .linkedLibrary("mfplat", .when(platforms: [.windows])),
+            .linkedLibrary("mfreadwrite", .when(platforms: [.windows])),
+            .linkedLibrary("mfuuid", .when(platforms: [.windows])),
+            .linkedLibrary("mfplay", .when(platforms: [.windows])),
+            .linkedLibrary("ole32", .when(platforms: [.windows])),
+        ]),
+        .systemLibrary(name: "CSDL2", pkgConfig: "sdl2", providers: [
+            .apt(["libsdl2-dev"]), .yum(["SDL2-devel"])
+        ]),
+        .systemLibrary(name: "CPangoCairo", pkgConfig: "pangocairo", providers: [
+            .apt(["libpango1.0-dev"]), .yum(["pango-devel"])
+        ]),
+        .systemLibrary(name: "CATKBridge", pkgConfig: "atk-bridge-2.0", providers: [
+            .apt(["libatk-bridge2.0-dev"]), .yum(["at-spi2-core-devel"])
+        ]),
+        .systemLibrary(name: "CGtk3", pkgConfig: "gtk+-3.0", providers: [
+            .apt(["libgtk-3-dev"]), .yum(["gtk3-devel"])
+        ]),
+        .target(name: "CRuneGL"),
+        .target(name: "CRuneAndroid", linkerSettings: [
+            .linkedLibrary("EGL", .when(platforms: [.android])),
+            .linkedLibrary("GLESv3", .when(platforms: [.android])),
+            .linkedLibrary("android", .when(platforms: [.android])),
+            .linkedLibrary("log", .when(platforms: [.android])),
+            .linkedLibrary("dl", .when(platforms: [.android])),
+        ]),
+        .target(name: "CRuneWin32", linkerSettings: [
+            .linkedLibrary("user32", .when(platforms: [.windows])),
+            .linkedLibrary("gdi32", .when(platforms: [.windows])),
+            .linkedLibrary("dwmapi", .when(platforms: [.windows])),
+            .linkedLibrary("shell32", .when(platforms: [.windows])),
+            .linkedLibrary("opengl32", .when(platforms: [.windows])),
+            .linkedLibrary("imm32", .when(platforms: [.windows])),
+            .linkedLibrary("comctl32", .when(platforms: [.windows])),
+            .linkedLibrary("uiautomationcore", .when(platforms: [.windows])),
+            .linkedLibrary("oleaut32", .when(platforms: [.windows])),
+            .linkedLibrary("ole32", .when(platforms: [.windows])),
+            .linkedLibrary("uuid", .when(platforms: [.windows])),
+            .linkedLibrary("advapi32", .when(platforms: [.windows])),
+        ]),
+        .target(name: "CRuneLinux", dependencies: [
+            "CRuneNotify",
+            .target(name: "CSDL2", condition: .when(platforms: [.linux])),
+            .target(name: "CGtk3", condition: .when(platforms: [.linux])),
+        ], linkerSettings: [
+            .linkedLibrary("X11", .when(platforms: [.linux])),
+            .linkedLibrary("X11-xcb", .when(platforms: [.linux])),
+            .linkedLibrary("xcb", .when(platforms: [.linux])),
+            .linkedLibrary("Xext", .when(platforms: [.linux])),
+            .linkedLibrary("wayland-client", .when(platforms: [.linux])),
+        ]),
+        .target(name: "CRuneLinuxA11y", dependencies: [
+            .target(name: "CATKBridge", condition: .when(platforms: [.linux])),
+            .target(name: "CPangoCairo", condition: .when(platforms: [.linux]))
+        ], linkerSettings: [
+            .linkedLibrary("pango-1.0", .when(platforms: [.linux])),
+            .linkedLibrary("atk-1.0", .when(platforms: [.linux])),
+            .linkedLibrary("glib-2.0", .when(platforms: [.linux])),
+            .linkedLibrary("gobject-2.0", .when(platforms: [.linux])),
+        ]),
+        .target(name: "CRuneDesktopServices", dependencies: [
+            .target(name: "CRuneLinuxA11y", condition: .when(platforms: [.linux])),
+            .target(name: "CGtk3", condition: .when(platforms: [.linux])),
+            .target(name: "CSDL2", condition: .when(platforms: [.linux])),
+        ], linkerSettings: [
+            .linkedLibrary("X11", .when(platforms: [.linux])),
+            .linkedLibrary("xcb", .when(platforms: [.linux])),
+            .linkedLibrary("xkbcommon", .when(platforms: [.linux])),
+            .linkedLibrary("wayland-client", .when(platforms: [.linux])),
+            .linkedLibrary("user32", .when(platforms: [.windows])),
+            .linkedLibrary("gdi32", .when(platforms: [.windows])),
+            .linkedLibrary("shell32", .when(platforms: [.windows])),
+            .linkedLibrary("ole32", .when(platforms: [.windows])),
+            .linkedLibrary("uuid", .when(platforms: [.windows])),
+        ]),
+        .target(name: "CRuneDesktopText", dependencies: [
+            .target(name: "CPangoCairo", condition: .when(platforms: [.linux]))
+        ], linkerSettings: [
+            .linkedLibrary("dwrite", .when(platforms: [.windows])),
+            .linkedLibrary("fontconfig", .when(platforms: [.linux])),
+            .linkedLibrary("pangoft2-1.0", .when(platforms: [.linux])),
+        ]),
+        .target(name: "CRuneOffscreenGL", dependencies: [
+            "CRuneGL", .target(name: "CRuneWin32", condition: .when(platforms: [.windows]))
+        ], linkerSettings: [
+            .linkedFramework("OpenGL", .when(platforms: [.macOS])),
+            .linkedLibrary("EGL", .when(platforms: [.linux])),
+            .linkedLibrary("GLESv2", .when(platforms: [.linux])),
+            .linkedLibrary("dl", .when(platforms: [.linux])),
+            .linkedLibrary("opengl32", .when(platforms: [.windows])),
+        ]),
         .target(
             name: "RuneMotion",
             path: "Sources/RuneMotion"
@@ -144,17 +265,29 @@ let package = Package(
         .target(
             name: "Rune",
             dependencies: [
+                "CRuneDesktopText",
                 "RuneMotion",
                 "RuneRef",
                 "RuneTaffy",
+                .target(name: "CRuneGL", condition: .when(platforms: [.linux, .windows, .android, .macOS])),
+                .target(name: "CRuneOffscreenGL", condition: .when(platforms: [.macOS, .linux, .windows])),
+                .target(name: "CRuneAndroid", condition: .when(platforms: [.android])),
+                .target(name: "CRuneLinux", condition: .when(platforms: [.linux])),
+                .target(name: "CRuneLinuxA11y", condition: .when(platforms: [.linux])),
+                .target(name: "CRuneDesktopServices", condition: .when(platforms: [.linux, .windows])),
+                .target(name: "CRuneDesktopImages", condition: .when(platforms: [.linux, .windows, .android])),
+                .target(name: "CRuneMedia", condition: .when(platforms: [.linux, .windows], traits: ["DesktopMedia"])),
+                .target(name: "CRuneWin32", condition: .when(platforms: [.windows])),
             ],
             path: "Sources/Rune",
             resources: [
                 .copy("Resources/Metal"),
+                .copy("Resources/GL"),
                 .copy("Resources/Fonts"),
                 .copy("Resources/Web"),
             ],
             linkerSettings: [
+                .linkedLibrary("_FoundationICU", .when(platforms: [.linux, .windows, .android, .wasi])),
                 .linkedLibrary("user32", .when(platforms: [.windows])),
                 .linkedLibrary("gdi32", .when(platforms: [.windows])),
                 .linkedLibrary("dwmapi", .when(platforms: [.windows])),
@@ -174,8 +307,22 @@ let package = Package(
             ],
             path: "Sources/RuneKit"
         ),
+        .target(name: "CRuneNotify", dependencies: [
+            .target(name: "CGtk3", condition: .when(platforms: [.linux])),
+        ], linkerSettings: [
+            .linkedLibrary("gio-2.0", .when(platforms: [.linux])),
+            .linkedLibrary("gobject-2.0", .when(platforms: [.linux])),
+            .linkedLibrary("glib-2.0", .when(platforms: [.linux])),
+            .linkedLibrary("advapi32", .when(platforms: [.windows])),
+            .linkedLibrary("shell32", .when(platforms: [.windows])),
+            .linkedLibrary("user32", .when(platforms: [.windows])),
+            .linkedLibrary("ole32", .when(platforms: [.windows])),
+            .linkedLibrary("runtimeobject", .when(platforms: [.windows])),
+            .linkedLibrary("uuid", .when(platforms: [.windows])),
+        ]),
         .target(
             name: "RuneNotify",
+            dependencies: ["CRuneNotify"],
             path: "Sources/RuneNotify"
         ),
         .target(
@@ -188,6 +335,7 @@ let package = Package(
             path: "Sources/RunePerf",
             linkerSettings: [
                 .linkedLibrary("psapi", .when(platforms: [.windows])),
+                .linkedLibrary("ws2_32", .when(platforms: [.windows])),
             ]
         ),
         .target(
@@ -196,17 +344,23 @@ let package = Package(
         ),
         .target(
             name: "RuneFX",
-            dependencies: ["RuneMotion", "Rune"],
+            dependencies: ["RuneMotion", "Rune",
+                .target(name: "CRuneGL", condition: .when(platforms: [.macOS, .linux, .windows, .android]))
+            ],
             path: "Sources/RuneFX",
             resources: [
+                .copy("Resources/GL"),
                 .copy("Resources/Metal"),
             ]
         ),
         .target(
             name: "RuneLight",
-            dependencies: ["Rune"],
+            dependencies: ["Rune",
+                .target(name: "CRuneGL", condition: .when(platforms: [.macOS, .linux, .windows, .android]))
+            ],
             path: "Sources/RuneLight",
             resources: [
+                .copy("Resources/GL"),
                 .copy("Resources/Metal"),
             ]
         ),
@@ -244,9 +398,12 @@ let package = Package(
         ),
         .executableTarget(
             name: "RuneHello",
-            dependencies: ["Rune"],
+            dependencies: ["Rune", "RuneHelloScene"],
             path: "Sources/Examples/RuneHello"
         ),
+        .target(name: "RuneHelloScene", dependencies: ["Rune"], path: "Sources/Examples/RuneHelloScene"),
+        .target(name: "RuneHelloAndroid", dependencies: ["Rune", "RuneHelloScene"], path: "Sources/Examples/RuneHelloAndroid",
+                linkerSettings: [.unsafeFlags(["-Xlinker", "--no-undefined"], .when(platforms: [.android]))]),
         .executableTarget(
             name: "RuneTodo",
             dependencies: ["Rune"],
@@ -469,32 +626,46 @@ let package = Package(
         ),
         .executableTarget(
             name: "RuneFxFirstGlow",
-            dependencies: ["RuneFX", "RuneRef"],
+            dependencies: ["RuneFX", "RuneRef", "Rune"],
             path: "Sources/Examples/RuneFxFirstGlow"
         ),
         .executableTarget(
             name: "RuneFxGallery",
-            dependencies: ["RuneFX", "RuneRef"],
+            dependencies: ["RuneFX", "RuneRef", "Rune",
+                .target(name: "CRuneGL", condition: .when(platforms: [.macOS, .linux, .windows]))
+            ],
             path: "Sources/Examples/RuneFxGallery"
         ),
         .executableTarget(
             name: "RuneLightShaderFirstUse",
-            dependencies: ["Rune", "RuneFX", "RuneLight", "RuneRef"],
+            dependencies: ["Rune", "RuneFX", "RuneLight", "RuneRef",
+                .target(name: "CRuneGL", condition: .when(platforms: [.macOS, .linux, .windows])),
+                .target(name: "CRuneOffscreenGL", condition: .when(platforms: [.macOS, .linux, .windows])),
+            ],
             path: "Sources/Examples/RuneLightShaderFirstUse"
         ),
         .executableTarget(
             name: "RuneLightFrameBench",
-            dependencies: ["RuneFX", "RuneLight", "RuneRef"],
+            dependencies: ["Rune", "RuneFX", "RuneLight", "RuneRef",
+                .target(name: "CRuneGL", condition: .when(platforms: [.macOS, .linux, .windows])),
+                .target(name: "CRuneOffscreenGL", condition: .when(platforms: [.macOS, .linux, .windows])),
+            ],
             path: "Sources/Examples/RuneLightFrameBench"
         ),
         .executableTarget(
             name: "RuneLightDemos",
-            dependencies: ["Rune", "RuneLight", "RuneMotion", "RuneRef"],
+            dependencies: ["Rune", "RuneLight", "RuneMotion", "RuneRef",
+                .target(name: "CRuneGL", condition: .when(platforms: [.macOS, .linux, .windows])),
+                .target(name: "CRuneOffscreenGL", condition: .when(platforms: [.macOS, .linux, .windows]))
+            ],
             path: "Sources/Examples/RuneLightDemos"
         ),
         .executableTarget(
             name: "RuneLightLive",
-            dependencies: ["Rune", "RuneLight", "RuneMotion", "RuneRef"],
+            dependencies: ["Rune", "RuneLight", "RuneMotion", "RuneRef",
+                .target(name: "CRuneGL", condition: .when(platforms: [.macOS, .linux, .windows])),
+                .target(name: "CRuneOffscreenGL", condition: .when(platforms: [.macOS, .linux, .windows]))
+            ],
             path: "Sources/Examples/RuneLightLive"
         ),
         .executableTarget(
@@ -739,7 +910,7 @@ let package = Package(
         ),
         .testTarget(
             name: "RuneRefTests",
-            dependencies: ["RuneRef", "Rune"],
+            dependencies: ["RuneRef", "Rune", "RuneRefCLI"],
             path: "Tests/RuneRefTests"
         ),
         .testTarget(
@@ -747,11 +918,18 @@ let package = Package(
             dependencies: ["RuneI18n"],
             path: "Tests/RuneI18nTests"
         ),
+        .target(name: "CRuneTestSockets", path: "Tests/Support/CRuneTestSockets", linkerSettings: [
+            .linkedLibrary("ws2_32", .when(platforms: [.windows]))
+        ]),
         .testTarget(
             name: "RuneTests",
-            dependencies: ["Rune", "RuneMotion", "RuneRef"],
+            dependencies: [
+                "Rune", "RuneMotion", "RuneRef", "CRuneDesktopText",
+                .target(name: "CRuneTestSockets", condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS, .linux, .windows])),
+                .target(name: "CRuneOffscreenGL", condition: .when(platforms: [.macOS, .linux, .windows]))
+            ],
             path: "Tests/RuneTests",
-            exclude: ["Fixtures"]
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "RuneKitTests",
@@ -760,7 +938,7 @@ let package = Package(
         ),
         .testTarget(
             name: "RuneNotifyTests",
-            dependencies: ["RuneNotify"],
+            dependencies: ["RuneNotify", "CRuneNotify"],
             path: "Tests/RuneNotifyTests"
         ),
         .testTarget(
@@ -780,12 +958,17 @@ let package = Package(
         ),
         .testTarget(
             name: "RuneFXTests",
-            dependencies: ["RuneFX", "RuneMotion", "Rune"],
+            dependencies: ["RuneFX", "RuneMotion", "Rune",
+                .target(name: "CRuneGL", condition: .when(platforms: [.macOS, .linux, .windows])),
+                .target(name: "CRuneOffscreenGL", condition: .when(platforms: [.macOS, .linux, .windows]))
+            ],
             path: "Tests/RuneFXTests"
         ),
         .testTarget(
             name: "RuneLightTests",
-            dependencies: ["RuneLight", "RuneFX", "Rune"],
+            dependencies: ["RuneLight", "RuneFX", "Rune",
+                .target(name: "CRuneOffscreenGL", condition: .when(platforms: [.macOS, .linux, .windows]))
+            ],
             path: "Tests/RuneLightTests"
         ),
         .testTarget(

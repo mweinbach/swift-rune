@@ -47,7 +47,8 @@ extension Runtime {
         let spellEnabled = (node.el.spellcheck || node.el.isSpellcheck) && !isSecure
 
         if fromPointer {
-            let offset = textHitOffset(node: node, windowPos: windowPos, edit: edit)
+            let hit = textCaretHit(node: node, windowPos: windowPos, edit: edit)
+            let offset = hit.utf8Offset
             let sel = edit.selectedUTF8Range
             if !edit.hasSelection || offset < sel.lowerBound || offset > sel.upperBound {
                 var hitWordRange: Range<Int>? = nil
@@ -60,7 +61,7 @@ extension Runtime {
                     edit.setCursor(utf8Offset: range.lowerBound, extendSelection: false)
                     edit.setCursor(utf8Offset: range.upperBound, extendSelection: true)
                 } else {
-                    edit.setCursor(utf8Offset: offset, extendSelection: false)
+                    edit.setCursor(hit)
                 }
                 editLens.set(&state, edit)
             }

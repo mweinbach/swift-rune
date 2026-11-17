@@ -85,6 +85,7 @@ extension Runtime {
         let inputMark = beginInputDispatch(at: now)
         defer { endInputDispatch(inputMark) }
         if pressing() {
+            wheelLost()
             inputMachines.pressedLeft = true
         } else {
             pointerExit(at: now)
@@ -120,7 +121,6 @@ extension Runtime {
         pressedButton = .primary
         pressedPointerInside = false
         pressedTint = nil
-        wheelLost()
         pointerExit(at: now)
         dragFilesLeave(at: now)
     }

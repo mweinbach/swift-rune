@@ -1,6 +1,9 @@
 import Foundation
 import RuneMotion
 import RuneRef
+#if os(macOS)
+import QuartzCore
+#endif
 
 // MARK: - Display & Run Options (window/spec.rs)
 
@@ -285,6 +288,7 @@ public struct WindowSurfaceStats: Equatable, Sendable {
 /// Request sent through a `WindowHandle`, either queued before binding or dispatched live.
 public enum WindowHandleRequest: Equatable, Sendable {
     case focus
+    case minimize
     case open
     case close
     case show
@@ -307,6 +311,7 @@ public protocol HostedWindowEntry: AnyObject {
     var title: String { get }
     var size: Vec2 { get }
     var minSize: Vec2? { get }
+    var fitsContentHeight: Bool { get }
     var darkOverride: Bool? { get }
     var options: WindowOptions { get }
     var macosWindow: MacWindowOptions { get }
@@ -399,14 +404,44 @@ public protocol HostedWindowEntry: AnyObject {
     func makeDesktopMember(scale: Float, dark: Bool, isMain: Bool) -> any DesktopMember
 }
 
-final class TypedHostedWindowEntry<State>: HostedWindowEntry {
-    private var spec: AppWindowSpec<State>
+extension HostedWindowEntry {
+    public var fitsContentHeight: Bool { false }
+
+    internal var hostMinSize: (Float, Float)? {
+        let appMin = minSize.map { ($0.x, $0.y) }
+        return fitsContentHeight ? options.fitMinSize(appMin: appMin) : appMin
+    }
+}
+
+/// Production frames and timed wakes for a native window opened from an `AppWindowSpec`.
+internal protocol NativeHostedWindowEntry: HostedWindowEntry {
+    func wakeDeadline(runtimeObj: AnyObject, covered: Bool) -> Double?
+    #if os(macOS)
+    func renderFrame(runtimeObj: AnyObject, renderer: MetalRenderer, at time: Double, nativeMaterials: Bool) -> RenderFrame
+    var compositorAnimating: Bool { get }
+    func present(_ frame: RenderFrame, drawable: CAMetalDrawable, renderer: MetalRenderer, runtimeObj: AnyObject,
+                 dt: Float, started: Double, updateMs: Double, synchronized: Bool, committed: Bool)
+    #endif
+}
+
+final class TypedHostedWindowEntry<State>: NativeHostedWindowEntry {
+    let spec: AppWindowSpec<State>
+    #if os(macOS)
+    private let reports: FrameReports<State>?
+    var compositorAnimating: Bool { spec.compositor?.isAnimating ?? false }
+    #endif
     let secondary: Bool
     let handle: WindowHandle
     private var didFireCreated = false
 
     init(spec: AppWindowSpec<State>, handle: WindowHandle, secondary: Bool) {
         self.spec = spec
+        #if os(macOS)
+        reports = spec.onFrameEncoded != nil || spec.onFrameDrawn != nil || spec.frameDrawnUpdate != nil
+            ? FrameReports(onFrameEncoded: spec.onFrameEncoded, onFrameDrawn: spec.frameDrawnUpdate,
+                           onInspectDrawn: spec.onFrameDrawn, windowKey: spec.key)
+            : nil
+        #endif
         self.handle = handle
         self.secondary = secondary
     }
@@ -415,6 +450,7 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     var title: String { spec.appSpec.title }
     var size: Vec2 { spec.appSpec.size }
     var minSize: Vec2? { spec.appSpec.minSize }
+    var fitsContentHeight: Bool { spec.fitContentHeight }
     var darkOverride: Bool? { spec.appSpec.dark }
     var options: WindowOptions { spec.options }
     var macosWindow: MacWindowOptions { spec.macosWindow }
@@ -448,11 +484,11 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         spec.configureRuntime?(rt)
         spec.appShared?.setWaker(waker)
         if rt.fitHeight {
-            let minSz = spec.options.minSize ?? spec.appSpec.minSize ?? .zero
+            let limits = options.sizeLimits(appMin: hostMinSize)
             let clamped = WindowFrame.clampSize(
                 (rt.viewport.x, rt.contentHeight()),
-                min: (minSz.x, minSz.y),
-                max: spec.options.maxSize.map { ($0.x, $0.y) }
+                min: limits.0,
+                max: limits.1
             )
             rt.setViewport(Vec2(clamped.0, clamped.1), pixelScale: pixelScale)
         }
@@ -477,6 +513,27 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     func frame(runtimeObj: AnyObject, at time: Double) -> RefScene {
         rt(runtimeObj).frame(at: time)
     }
+
+    func wakeDeadline(runtimeObj: AnyObject, covered: Bool) -> Double? {
+        rt(runtimeObj).windowWakeDeadline(covered: covered)
+    }
+
+    #if os(macOS)
+    func renderFrame(runtimeObj: AnyObject, renderer: MetalRenderer, at time: Double, nativeMaterials: Bool) -> RenderFrame {
+        let runtime = rt(runtimeObj)
+        runtime.nativeMaterials = nativeMaterials
+        return renderer.frame(runtime, at: time)
+    }
+
+    func present(_ frame: RenderFrame, drawable: CAMetalDrawable, renderer: MetalRenderer, runtimeObj: AnyObject,
+                 dt: Float, started: Double, updateMs: Double, synchronized: Bool, committed: Bool) {
+        let runtime = rt(runtimeObj)
+        let count = renderer.present(frame: frame, drawable: drawable, compositor: spec.compositor, runtime: runtime,
+                                     dt: dt, updateMilliseconds: updateMs, synchronized: synchronized)
+        reports?.presented(frame, at: runtime.currentTime, started: started, updateMs: updateMs, drawCount: count,
+                           committed: committed, runtime: runtime, compositor: spec.compositor)
+    }
+    #endif
 
     func coveredRuntime(runtimeObj: AnyObject) -> any CoveredWindowRuntime {
         rt(runtimeObj)
@@ -537,15 +594,10 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
 
     func markMenusRunning(_ running: Bool) {
         guard let appShared = spec.appShared else { return }
-        AppMenuBridge.markRunning(appShared, running: running, headless: false)
-        if running, !spec.menuItems.isEmpty {
-            do {
-                try AppMenuBridge.setMenu(spec.menuItems, for: appShared)
-            } catch let err as MenuError {
-                AppMenuBridge.recordError(err, for: appShared)
-            } catch {
-                AppMenuBridge.recordError(.unsupported, for: appShared)
-            }
+        if running {
+            AppMenuBridge.attach(spec.menuItems, to: appShared)
+        } else {
+            AppMenuBridge.markRunning(appShared, running: false)
         }
     }
 
@@ -564,16 +616,11 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
             RuneNativeMenuHost.shared.clear()
             return
         }
-        let r = rt(runtimeObj)
+        let revision = snap.revision
         do {
-            try RuneNativeMenuHost.shared.apply(items: snap.items) { [weak r] itemId in
-                guard let r else { return }
-                let latest = AppMenuBridge.snapshot(for: appShared).items
-                guard let item = latest.first(where: { !$0.isSeparator && $0.id == itemId }) else { return }
-                let action = item.action
-                r.update(at: nowProvider()) { state, tx in
-                    action(&state, &tx)
-                }
+            try RuneNativeMenuHost.shared.apply(items: snap.items) { [weak appShared] itemId in
+                guard let appShared,
+                      AppMenuBridge.fireIfCurrent(id: itemId, revision: revision, for: appShared) else { return }
                 onDispatched()
             }
         } catch let err as MenuError {
@@ -903,6 +950,25 @@ public enum MultiWindowError: Error, LocalizedError, Equatable {
 public enum RuneMultiWindow {
     private static let openedLock = NSLock()
     nonisolated(unsafe) private static var pendingOpened: [AnyWindowSpec] = []
+    nonisolated(unsafe) private static var wakeHost: (@Sendable () -> Void)?
+    nonisolated(unsafe) private static var desktopHandles: [String: WindowHandle] = [:]
+
+    static func setOpenWake(_ wake: (@Sendable () -> Void)?) {
+        openedLock.withLock {
+            wakeHost = wake
+            if wake == nil { desktopHandles.removeAll() }
+        }
+    }
+
+    static func trackDesktopHandle(_ handle: WindowHandle) {
+        openedLock.withLock { desktopHandles[handle.key] = handle }
+    }
+
+    static func releaseDesktopHandle(_ handle: WindowHandle) {
+        openedLock.withLock {
+            if desktopHandles[handle.key] === handle { desktopHandles[handle.key] = nil }
+        }
+    }
 
     /// Each window followed depth-first by any secondary windows attached via `window(_:)`.
     public static func flatten(_ windows: [AnyWindowSpec]) -> [AnyWindowSpec] {
@@ -934,8 +1000,16 @@ public enum RuneMultiWindow {
         let anySpec = AnyWindowSpec(spec, handle: WindowHandle(key: spec.key), secondary: false)
         if !headless {
             openedLock.lock()
+            if let existing = desktopHandles[spec.key] {
+                openedLock.unlock()
+                existing.open()
+                return existing
+            }
+            if wakeHost != nil { desktopHandles[spec.key] = anySpec.handle }
             pendingOpened.append(anySpec)
+            let wake = wakeHost
             openedLock.unlock()
+            wake?()
         }
         return anySpec.handle
     }
@@ -1035,6 +1109,8 @@ public enum RuneMultiWindow {
         }
         #if os(macOS)
         try RuneMultiWindowHost.run(flat, options: options, parsed: parsed)
+        #elseif os(Windows) || os(Linux)
+        try DesktopWindowGroup.run(flat, options: options, parsed: parsed)
         #else
         _ = try runHeadless(flat, args: parsed, options: options)
         #endif
@@ -1066,7 +1142,15 @@ public enum RuneMultiWindow {
            let loaded = try? DesktopComposite.loadBackdrop(imagePath: desktopPath, scale: parsed.pixelScale) {
             displays = loaded.desktop.displayInfos()
         } else {
+            #if os(macOS) || os(Linux) || os(Windows)
+            if parsed.isHeadlessRequested {
+                displays = VirtualDesktop.single(scale: Double(max(0.5, parsed.pixelScale))).displayInfos()
+            } else {
+                displays = try DesktopDisplays.connected()
+            }
+            #else
             displays = VirtualDesktop.single(scale: Double(max(0.5, parsed.pixelScale))).displayInfos()
+            #endif
         }
         let windows = factory(displays)
         try runWindows(windows, options: options, arguments: arguments)

@@ -104,7 +104,10 @@ internal struct ParagraphPiece {
 
 /// A by-paragraph field's paragraphs, top to bottom, in device px (`ParagraphLayout`).
 internal final class ParagraphLayout: @unchecked Sendable {
-    internal private(set) var paragraphs: [Paragraph]
+    private var records: [Paragraph]
+    /// Painting replaces a record's measured layout with its glyph-bearing layout.
+    /// Give readers a consistent snapshot while paint or the next layout pass is running.
+    var paragraphs: [Paragraph] { lock.withLock { records } }
     let width: Float
     let fullWidth: Float
     let height: Float
@@ -126,7 +129,7 @@ internal final class ParagraphLayout: @unchecked Sendable {
     private var composedCache: ShapedText? = nil
 
     init(paragraphs: [Paragraph], width: Float, fullWidth: Float, height: Float, maxWidth: Float?, align: TextAlign, whole: UInt64, keyed: ParagraphKeyed?, lazy: LazyFill?, content: [UInt8], style: TextStyle, scale: Float, forced: TextFlow?, baseFont: AnyObject?) {
-        self.paragraphs = paragraphs
+        self.records = paragraphs
         self.baseFont = baseFont
         self.width = width
         self.fullWidth = fullWidth
@@ -152,20 +155,24 @@ internal final class ParagraphLayout: @unchecked Sendable {
     var waitingLines: Int { paragraphs.reduce(0) { $0 + ($1.shaped ? 0 : Int($1.lines)) } }
 
     /// The paragraph indices shaped, top to bottom.
-    var shapedIndices: [Int] { paragraphs.indices.filter { paragraphs[$0].shaped } }
+    var shapedIndices: [Int] {
+        let paragraphs = self.paragraphs
+        return paragraphs.indices.filter { paragraphs[$0].shaped }
+    }
 
-    fileprivate static func piece(_ k: Int, _ p: Paragraph) -> ParagraphPiece {
-        ParagraphPiece(layout: p.layout, start: p.start, end: p.end, y: p.y, height: p.height, flow: p.flow, index: k)
+    fileprivate func piece(_ k: Int, _ p: Paragraph) -> ParagraphPiece {
+        ParagraphPiece(layout: p.layout, start: p.start, end: paragraphTextEnd(content, p.start, p.end), y: p.y, height: p.height, flow: p.flow, index: k)
     }
 
     /// Its pieces that meet device rows `top...bottom`, top to bottom (`TextFlow::pieces_in`).
     func pieces(top: Float, bottom: Float) -> [ParagraphPiece] {
+        let paragraphs = self.paragraphs
         var from = partitionPoint(paragraphs) { $0.y + $0.height < top }
         from = max(0, from)
         var out: [ParagraphPiece] = []
         var k = from
         while k < paragraphs.count, paragraphs[k].y <= bottom {
-            out.append(Self.piece(k, paragraphs[k]))
+            out.append(piece(k, paragraphs[k]))
             k += 1
         }
         return out
@@ -187,34 +194,35 @@ internal final class ParagraphLayout: @unchecked Sendable {
     /// The piece holding content byte `at`: a paragraph owns the bytes from its start to its end,
     /// the caret after its last word included (`TextFlow::piece_at`).
     func piece(at: Int) -> ParagraphPiece {
+        let paragraphs = self.paragraphs
         let k = min(partitionPoint(paragraphs) { $0.end < at }, paragraphs.count - 1)
-        return Self.piece(k, paragraphs[k])
+        return piece(k, paragraphs[k])
     }
 
     /// The piece at device row `y`, the first or last past either end (`TextFlow::piece_at_y`).
     func piece(atY y: Float) -> ParagraphPiece {
+        let paragraphs = self.paragraphs
         let k = min(partitionPoint(paragraphs) { $0.y + $0.height <= y }, paragraphs.count - 1)
-        return Self.piece(k, paragraphs[k])
+        return piece(k, paragraphs[k])
     }
 
     /// Paragraph `k`'s glyph quads (points, from its own top-left), shaped with glyphs the
     /// first time it is drawn: a measure lays a field out without them.
     func glyphs(at k: Int, using textSystem: TextSystem) -> [PositionedGlyph] {
-        lock.lock()
-        let p = paragraphs[k]
-        lock.unlock()
-        guard p.shaped, p.start < p.end else { return [] }
-        if p.layout.hasGlyphs { return p.layout.shaped.glyphs }
-        #if canImport(CoreText) && canImport(CoreGraphics)
-        let filled = textSystem.rebreakOwned(p.layout, maxWidth: p.layout.maxWidth, emitGlyphs: true)
-            ?? textSystem.layoutKeyed(text: p.layout.authText, style: p.layout.style, maxWidth: p.layout.maxWidth, pixelScale: scale, emitGlyphs: true, keep: .owned, countAsRebreak: false)
-        lock.lock()
-        if k < paragraphs.count, paragraphs[k].key == p.key { paragraphs[k].layout = filled }
-        lock.unlock()
+        let p = lock.withLock { records[k] }
+        guard p.shaped, !p.layout.authText.isEmpty else { return [] }
+        if p.layout.hasGlyphs {
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            return p.layout.shaped.glyphs
+            #else
+            if textSystem.glyphAtlas.retainPages(p.layout.desktopPages, since: p.layout.desktopAtlasResets) {
+                return p.layout.shaped.glyphs
+            }
+            #endif
+        }
+        let filled = textSystem.breakParagraph(p.layout, maxWidth: p.layout.maxWidth, emitGlyphs: true)
+        lock.withLock { records[k].layout = filled }
         return filled.shaped.glyphs
-        #else
-        return []
-        #endif
     }
 
     /// Its paragraphs' lines stacked as one `ShapedText` at content byte offsets, for the caret,
@@ -234,9 +242,14 @@ internal final class ParagraphLayout: @unchecked Sendable {
     }
 
     private func compose() -> ShapedText {
+        let paragraphs = self.paragraphs
         var out = paragraphs.first?.layout.shaped ?? lazy?.ascii.empty.shaped ?? ShapedText(size: .zero, lineCount: 1, lineHeight: style.resolvedLineHeight, glyphs: [], underlines: [], backgrounds: [])
         let invS = 1.0 / max(scale, 1e-4)
         let lhPt = style.resolvedLineHeight
+        #if canImport(CRuneDesktopText) && !canImport(CoreText)
+        out.desktopParagraph = nil
+        out.desktopRestingText = nil
+        #endif
         out.glyphs = []
         out.underlines = []
         out.strikethroughs = []
@@ -263,6 +276,10 @@ internal final class ParagraphLayout: @unchecked Sendable {
         }
         #if canImport(CoreText) && canImport(CoreGraphics)
         var lines: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)] = []
+        #else
+        var lines: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
+        out.portableBidiCells.removeAll()
+        #endif
         var markerLines: [ShapedText.MarkerMap.LineRange] = []
         lines.reserveCapacity(paragraphs.count)
         // Each paragraph's UTF-16 start in the whole text, for the motion code's run indices.
@@ -275,24 +292,38 @@ internal final class ParagraphLayout: @unchecked Sendable {
                 at += 1
             }
         }
+        #if canImport(CoreText) && canImport(CoreGraphics)
         let emptyLine: CTLine = {
             let font = baseFont as! CTFont
             let attr = CFAttributedStringCreate(kCFAllocatorDefault, "" as CFString, [kCTFontAttributeName: font] as CFDictionary)!
             return CTLineCreateWithAttributedString(attr)
         }()
+        #endif
         var spans: [ParagraphLineSpan] = []
         spans.reserveCapacity(paragraphs.count)
         for p in paragraphs {
             advanceU16(to: p.start)
             let firstLine = lines.count
-            defer { spans.append(ParagraphLineSpan(start: p.start, end: p.end, firstLine: firstLine, lineCount: lines.count - firstLine, rtl: p.flow == .rtl, shaped: p.shaped && p.start < p.end && !p.layout.shaped.lineStrings.isEmpty)) }
             let yPt = p.y * invS
             let s = p.layout.shaped
-            if !p.shaped || p.start == p.end || s.lineStrings.isEmpty {
-                let text = p.start == p.end ? "" : String(decoding: content[p.start..<p.end], as: UTF8.self)
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            let records = s.lineStrings
+            #else
+            let records = s.portableLines
+            #endif
+            let end = paragraphTextEnd(content, p.start, p.end)
+            let hasText = p.shaped && p.start < end && !records.isEmpty
+            defer { spans.append(ParagraphLineSpan(start: p.start, end: end, firstLine: firstLine, lineCount: lines.count - firstLine, rtl: p.flow == .rtl, shaped: hasText)) }
+            if !hasText {
+                let text = p.start == end ? "" : String(decoding: content[p.start..<end], as: UTF8.self)
                 // An empty line's caret stands at its start: the right edge of a right-to-left one.
-                let x: Float = (p.start == p.end && p.flow == .rtl) ? max(0, (maxWidth.map { $0 * scale } ?? width)) * invS : 0
-                lines.append((p.start, text, yPt, x, (p.shaped || p.start == p.end) ? emptyLine : nil))
+                let x: Float = (p.start == end && p.flow == .rtl) ? max(0, (maxWidth.map { $0 * scale } ?? width)) * invS : 0
+                #if canImport(CoreText) && canImport(CoreGraphics)
+                lines.append((p.start, text, yPt, x, (p.shaped || p.start == end) ? emptyLine : nil))
+                #else
+                out.portableBidiCells[lines.count] = []
+                lines.append((p.start, text, yPt, x, [0]))
+                #endif
                 let u16Len = text.utf16.count
                 markerLines.append(.init(shapedU16Start: 0, shapedU16End: u16Len, authU16Start: u16, authU16End: u16 + u16Len, authUTF8Start: p.start))
                 tops.append(yPt)
@@ -303,8 +334,10 @@ internal final class ParagraphLayout: @unchecked Sendable {
                 baseline(p.shaped ? p.layout.shaped : (lazy?.ascii.empty.shaped ?? p.layout.shaped), 0, p.y)
                 continue
             }
-            for (i, rec) in s.lineStrings.enumerated() {
-                lines.append((rec.utf8Start + p.start, rec.text, rec.originY + yPt, rec.originX, rec.ctLine))
+            for (i, rec) in records.enumerated() {
+                let byte = p.start + rec.utf8Start
+                #if canImport(CoreText) && canImport(CoreGraphics)
+                lines.append((byte, rec.text, rec.originY + yPt, rec.originX, rec.ctLine))
                 if i < s.markerMap.lines.count {
                     var lr = s.markerMap.lines[i]
                     lr.authU16Start += u16
@@ -312,6 +345,20 @@ internal final class ParagraphLayout: @unchecked Sendable {
                     lr.authUTF8Start += p.start
                     markerLines.append(lr)
                 }
+                #else
+                if let cells = s.portableBidiCells[i] {
+                    out.portableBidiCells[lines.count] = cells.map { cell in
+                        PortableCaretCell(range: (p.start + cell.range.lowerBound)..<(p.start + cell.range.upperBound),
+                                          left: cell.left, width: cell.width, rtl: cell.rtl, space: cell.space,
+                                          pillEdge: cell.pillEdge)
+                    }
+                }
+                lines.append((byte, rec.text, rec.originY + yPt, rec.originX, rec.charOffsets))
+                advanceU16(to: byte)
+                let length = rec.text.utf16.count
+                markerLines.append(.init(shapedU16Start: 0, shapedU16End: length, authU16Start: u16,
+                                         authU16End: u16 + length, authUTF8Start: byte))
+                #endif
                 tops.append(yPt + s.lineTopPt(i))
                 boxHeights.append(s.lineBoxHeightPt(i))
                 metricHeights.append(s.lineMetricHeightPt(i))
@@ -319,9 +366,8 @@ internal final class ParagraphLayout: @unchecked Sendable {
                 baseline(s, i, p.y)
             }
         }
+        #if canImport(CoreText) && canImport(CoreGraphics)
         out.lineStrings = lines
-        out.paragraphSpans = spans
-        out.lineIsRTL = spans.flatMap { Array(repeating: $0.rtl, count: $0.lineCount) }
         // `newline`: a quarter of the primary font's ascent and descent, at the field's size.
         if let font = baseFont {
             let f = font as! CTFont
@@ -329,12 +375,17 @@ internal final class ParagraphLayout: @unchecked Sendable {
         } else {
             out.paragraphNewlinePt = 0.25 * style.size
         }
+        #else
+        out.portableLines = lines
+        out.paragraphNewlinePt = paragraphs.lazy.map { $0.layout.shaped.paragraphNewlinePt }.first { $0 > 0 } ?? 0.25 * style.size
+        #endif
+        out.paragraphSpans = spans
+        out.lineIsRTL = spans.flatMap { Array(repeating: $0.rtl, count: $0.lineCount) }
         var mm = ShapedText.MarkerMap()
         mm.authText = out.drawnText
         mm.lines = markerLines
         out.markerMap = mm
         out.lineCount = max(1, lines.count)
-        #endif
         out.lineAdvancesPx = advances
         out.lineGlyphRanges = Array(repeating: 0..<0, count: advances.count)
         out.grownLineTopsPt = tops
@@ -394,7 +445,9 @@ internal struct ParagraphCacheEntry {
     init(_ layout: ParagraphLayout, used: UInt64, textLen: Int) {
         self.layout = layout
         self.used = used
-        self.cost = min(textLen * ParagraphState.layoutPerByte + ParagraphState.layoutBase, Int(UInt32.max))
+        let maxCost = Int(clamping: UInt32.max)
+        let maxTextLen = (maxCost - ParagraphState.layoutBase) / ParagraphState.layoutPerByte
+        self.cost = textLen > maxTextLen ? maxCost : textLen * ParagraphState.layoutPerByte + ParagraphState.layoutBase
     }
 }
 
@@ -512,6 +565,12 @@ internal struct ParagraphRuns {
     var edit: Bool
 }
 
+/// Paragraph records are split at LF. A preceding CR belongs to the same authored break,
+/// so shaping, measuring, and selection must stop before it.
+internal func paragraphTextEnd(_ content: [UInt8], _ start: Int, _ end: Int) -> Int {
+    end > start && end < content.count && content[end] == 0x0A && content[end - 1] == 0x0D ? end - 1 : end
+}
+
 /// `\n` bytes in `s[a..<b]`, counted eight at a time (`count_newlines`).
 internal func countNewlines(_ s: [UInt8], _ a: Int, _ b: Int) -> Int {
     var n = 0
@@ -519,7 +578,11 @@ internal func countNewlines(_ s: [UInt8], _ a: Int, _ b: Int) -> Int {
     s.withUnsafeBytes { raw in
         while i + 8 <= b {
             let w = raw.loadUnaligned(fromByteOffset: i, as: UInt64.self).littleEndian ^ 0x0a0a_0a0a_0a0a_0a0a
-            n += ((w &- 0x0101_0101_0101_0101) & ~w & 0x8080_8080_8080_8080).nonzeroBitCount
+            // Count each matching byte independently. Subtracting 0x01 per byte
+            // borrows across adjacent LF/vertical-tab bytes and counts both as LF.
+            let lowBits: UInt64 = 0x7f7f_7f7f_7f7f_7f7f
+            let nonzero = ((w & lowBits) &+ lowBits) | w | lowBits
+            n += (~nonzero).nonzeroBitCount
             i += 8
         }
     }
@@ -568,6 +631,7 @@ extension TextSystem {
     internal func paragraphStyleKey(_ style: TextStyle, scale: Float) -> UInt64 {
         var h = Hasher()
         h.combine(style)
+        if style.fontSmoothing == .systemDefault { h.combine(smoothing) }
         h.combine(scale)
         h.combine(currentFontEpoch)
         h.combine(language)
@@ -589,26 +653,31 @@ extension TextSystem {
         countAsRebreak: Bool = true,
         request: ParagraphRequest?
     ) -> TextLayoutBox {
-        #if canImport(CoreText) && canImport(CoreGraphics)
         if let request, keep != .secret, spans?.isEmpty ?? true, pills.isEmpty, style.wrap == .wrap, style.maxLines == 0, text.utf8.contains(0x0a) {
             let laid = layoutParagraphs(text: text, style: style, maxWidth: maxWidth, pixelScale: pixelScale, request: request)
             let prepared = prepareHighlights(request.highlights, in: laid, field: request.field)
             return paragraphBox(prepared, text: text, style: style, pixelScale: pixelScale)
         }
-        #endif
         return layoutKeyed(text: text, spans: spans, pills: pills, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs, keep: keep, countAsRebreak: countAsRebreak)
     }
 
     /// The `TextLayoutBox` a node holds for `laid`.
     internal func paragraphBox(_ laid: ParagraphLayout, text: String, style: TextStyle, pixelScale: Float) -> TextLayoutBox {
         let scale = max(pixelScale, 1.0)
-        let key = TextShapeKey(authText: text, spans: nil, pills: [], style: style, pixelScale: scale, fontEpoch: currentFontEpoch, languageTag: language, maxWidth: laid.maxWidth)
+        let key = TextShapeKey(authText: text, spans: nil, pills: [], style: style, pixelScale: scale, fontEpoch: currentFontEpoch,
+                               languageTag: language, maxWidth: laid.maxWidth, defaultSmoothing: smoothing)
         let box = TextLayoutBox(shapeKey: key, authText: text, spans: nil, pills: [], style: style, pixelScale: scale, maxWidth: laid.maxWidth, shaped: laid.composed, hasGlyphs: true, prepared: nil)
         box.paragraphs = laid
         return box
     }
 
-    #if canImport(CoreText) && canImport(CoreGraphics)
+    /// Break a retained paragraph at a new width or materialize its glyphs for paint.
+    fileprivate func breakParagraph(_ box: TextLayoutBox, maxWidth: Float?, emitGlyphs: Bool) -> TextLayoutBox {
+        if let retained = rebreakOwned(box, maxWidth: maxWidth, emitGlyphs: emitGlyphs) { return retained }
+        return layoutKeyed(text: box.authText, style: box.style, maxWidth: maxWidth, pixelScale: box.pixelScale,
+                           emitGlyphs: emitGlyphs, keep: .owned, countAsRebreak: false)
+    }
+
     /// `layout_text`'s by-paragraph half: the cached layout at this width, else one laid out from
     /// the field's last (`prev`) and this text's at the other width a measure asked for (`other`).
     internal func layoutParagraphs(text: String, style: TextStyle, maxWidth: Float?, pixelScale: Float, request: ParagraphRequest) -> ParagraphLayout {
@@ -671,9 +740,9 @@ extension TextSystem {
 
     /// A paragraph's measures from its layout: height (device px, at least a line when empty)
     /// and width without and with trailing whitespace.
-    fileprivate static func measures(_ box: TextLayoutBox, blank: Bool, scale: Float, linePx: Float) -> (Float, SIMD2<Float>) {
+    internal static func measures(_ box: TextLayoutBox, blank: Bool, scale: Float, linePx: Float) -> (Float, SIMD2<Float>) {
         let s = box.shaped
-        let n = s.lineStrings.count
+        let n = s.cursorLineCount
         var h: Float = n == 0 ? 0 : (s.lineTopPt(n - 1) + s.lineBoxHeightPt(n - 1)) * scale
         if blank || n == 0 { h = max(h, linePx) }
         var w: Float = 0
@@ -775,20 +844,20 @@ extension TextSystem {
             // other width measuring asks for, breaks again here rather than shaping anew.
             let again: Paragraph? = kept != nil ? (rebreak ? kept : nil) : twin
             let pstyle = Self.styled(style, f.flow)
+            let textEnd = paragraphTextEnd(content, f.start, f.end)
             let layout: TextLayoutBox
             if let o = again {
                 fresh += f.end - f.start
-                layout = rebreakOwned(o.layout, maxWidth: maxWidth, emitGlyphs: false)
-                    ?? layoutKeyed(text: String(decoding: content[f.start..<f.end], as: UTF8.self), style: pstyle, maxWidth: maxWidth, pixelScale: scale, emitGlyphs: false, keep: .owned, countAsRebreak: false)
+                layout = breakParagraph(o.layout, maxWidth: maxWidth, emitGlyphs: false)
             } else if let o = kept {
                 layout = o.layout
             } else {
                 st.shapedParagraphs += 1
                 fresh += f.end - f.start
-                layout = layoutKeyed(text: String(decoding: content[f.start..<f.end], as: UTF8.self), style: pstyle, maxWidth: maxWidth, pixelScale: scale, emitGlyphs: false, keep: .owned, countAsRebreak: false)
+                layout = layoutKeyed(text: String(decoding: content[f.start..<textEnd], as: UTF8.self), style: pstyle, maxWidth: maxWidth, pixelScale: scale, emitGlyphs: false, keep: .owned, countAsRebreak: false)
             }
             // A paragraph kept as it was keeps its measures too.
-            let (height, widths): (Float, SIMD2<Float>) = (kept != nil && again == nil) ? (kept!.height, kept!.widths) : Self.measures(layout, blank: f.start == f.end, scale: scale, linePx: line)
+            let (height, widths): (Float, SIMD2<Float>) = (kept != nil && again == nil) ? (kept!.height, kept!.widths) : Self.measures(layout, blank: f.start == textEnd, scale: scale, linePx: line)
             width = max(width, widths.x)
             fullWidth = max(fullWidth, widths.y)
             paragraphs.append(Paragraph(start: f.start, end: f.end, y: Float(y.rounded()), height: height, widths: widths, flow: f.flow, key: f.key, layout: layout, shaped: true, lines: 1, run: false))
@@ -799,7 +868,12 @@ extension TextSystem {
         let lazy: LazyFill? = waiting > 0 ? asciiLine(style: style, scale: scale).map {
             LazyFill(content: content, style: style, scale: scale, cacheKey: cacheKey, styleKey: styleKey, forced: forced, startFlow: startFlow, ascii: $0)
         } : nil
-        return (ParagraphLayout(paragraphs: paragraphs, width: width, fullWidth: fullWidth, height: Float(y), maxWidth: maxWidth, align: style.align, whole: whole, keyed: keyed, lazy: lazy, content: content, style: style, scale: scale, forced: forced, baseFont: resolveCTFont(style: style, pixelScale: scale)), fresh)
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        let baseFont: AnyObject? = resolveCTFont(style: style, pixelScale: scale)
+        #else
+        let baseFont: AnyObject? = nil
+        #endif
+        return (ParagraphLayout(paragraphs: paragraphs, width: width, fullWidth: fullWidth, height: Float(y), maxWidth: maxWidth, align: style.align, whole: whole, keyed: keyed, lazy: lazy, content: content, style: style, scale: scale, forced: forced, baseFont: baseFont), fresh)
     }
 
     /// The paragraphs an edit left whole, with their keys: those before it (`head`) and after it
@@ -882,6 +956,7 @@ extension TextSystem {
                 b = e
             }
             let s = start
+            let textEnd = paragraphTextEnd(content, s, b)
             start = b + 1
             let lastFlow = run?.flow ?? found.last?.flow ?? startFlow
             if let r = runs {
@@ -890,10 +965,10 @@ extension TextSystem {
                 let floor = run?.w ?? 0
                 let printable = known.map { $0 & ParagraphConstants.printable != 0 }
                 var fits: (Float, Float)? = nil
-                if !(near || s == b || printable == false) {
+                if !(near || s == textEnd || printable == false) {
                     fits = r.ascii.narrow(r.maxWidth)
-                        ? r.ascii.narrowest(content, s, b, floor: floor)
-                        : r.ascii.oneLine(content, s, b, maxWidth: r.maxWidth, floor: floor, printableKnown: printable == true)
+                        ? r.ascii.narrowest(content, s, textEnd, floor: floor)
+                        : r.ascii.oneLine(content, s, textEnd, maxWidth: r.maxWidth, floor: floor, printableKnown: printable == true)
                 }
                 // Printable ASCII: its letters are its only strong characters, all left to right.
                 let letter: () -> Bool = {
@@ -903,7 +978,7 @@ extension TextSystem {
                     return false
                 }
                 if record != nil {
-                    let shown = fits != nil || (s < b && asciiPrintable(content, s, b))
+                    let shown = fits != nil || (s < textEnd && asciiPrintable(content, s, textEnd))
                     record!.ends.append(UInt32(b - a))
                     record!.flags.append(shown ? (ParagraphConstants.printable | (letter() ? ParagraphConstants.letter : 0)) : 0)
                 }
@@ -926,7 +1001,7 @@ extension TextSystem {
                 }
                 close()
             }
-            let words = String(decoding: content[s..<b], as: UTF8.self)
+            let words = String(decoding: content[s..<textEnd], as: UTF8.self)
             let flow = forced ?? paragraphFlowOf(words) ?? lastFlow
             // Its bytes, as a Rust `str` hashes (not Swift's canonical-equivalence `String` hash).
             var h = Hasher()
@@ -941,10 +1016,8 @@ extension TextSystem {
         close()
         st.lineScan = record ?? cache
     }
-    #endif
 }
 
-#if canImport(CoreText) && canImport(CoreGraphics)
 extension TextSystem {
     /// Boxes covering content bytes `utf8Range` of a by-paragraph field (`TextFlow::range_boxes`):
     /// each paragraph boxes the bytes it holds as its own layout does, and a selected line break
@@ -957,7 +1030,7 @@ extension TextSystem {
         guard a < b else { return out }
         let ws = shaped.paragraphNewlinePt
         let invS = 1.0 / (pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0)
-        var k = partitionPoint(ps) { $0.end < a }
+        var k = max(0, partitionPoint(ps) { $0.start <= a } - 1)
         while k < ps.count, ps[k].start <= b {
             let p = ps[k]
             let first = out.count
@@ -966,8 +1039,12 @@ extension TextSystem {
             if p.shaped, a < p.end, p.start < b {
                 out.append(contentsOf: selectionRects(in: shaped, lines: lines, utf8Range: max(a, p.start)..<min(b, p.end), pixelScale: pixelScale))
             }
-            if k + 1 < ps.count, a <= p.end, p.end < b, let last = lines.last {
+            if k + 1 < ps.count, a < ps[k + 1].start, p.end < b, let last = lines.last {
+                #if canImport(CoreText) && canImport(CoreGraphics)
                 let rec = shaped.lineStrings[last]
+                #else
+                let rec = shaped.portableLines[last]
+                #endif
                 let top = rec.originY
                 let height = shaped.lineBoxHeightPt(last)
                 // Its last line's start and end; a blank (or waiting) paragraph's caret edge.
@@ -994,4 +1071,3 @@ extension TextSystem {
         return out
     }
 }
-#endif

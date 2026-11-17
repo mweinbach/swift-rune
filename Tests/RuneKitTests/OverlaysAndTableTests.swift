@@ -348,8 +348,8 @@ struct OverlaysAndTableTests {
         #expect(rt.state.table.selected == ["f0"])
     }
 
-    @Test("Multi-select table extends with Shift and selects all with Cmd-A")
-    func multiSelectShiftExtendsAndCmdASelectsAll() {
+    @Test("Multi-select table extends with Shift, toggles rows and selects all with the primary modifier")
+    func multiSelectShiftExtendsAndCmdASelectsAll() throws {
         let rt = makeTableRuntime(TableApp(n: 30, multi: true))
         _ = rt.keyDown(KeyEvent(key: .tab, mods: .none), at: 0.1)
         rt.frame(at: 0.11)
@@ -361,8 +361,15 @@ struct OverlaysAndTableTests {
         rt.frame(at: 0.17)
         #expect(rt.state.table.selected.sorted() == ["f0", "f1", "f2"])
 
-        _ = rt.keyDown(KeyEvent(key: .text("a"), mods: Mods(cmd: true)), at: 0.18)
-        rt.frame(at: 0.19)
+        let row = try #require(rt.element(byKey: "f1")).rect
+        let point = Vec2(row[0] + 12, row[1] + row[3] * 0.5)
+        let primary = RuneKitTestKey.primaryMods()
+        rt.pointerDown(at: point, mods: primary, at: 0.18)
+        rt.pointerUp(at: point, mods: primary, at: 0.19)
+        rt.frame(at: 0.20)
+        #expect(rt.state.table.selected.sorted() == ["f0", "f2"])
+        _ = rt.keyDown(KeyEvent(key: .text("a"), mods: primary), at: 0.21)
+        rt.frame(at: 0.22)
         #expect(rt.state.table.selectedCount == 30)
     }
 

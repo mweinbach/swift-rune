@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(Metal)
 import Metal
+#endif
 import Rune
 
 public struct NativeBenchRunStats: Sendable, Codable {
@@ -96,6 +98,8 @@ public enum VideoTilesBench {
         framesPerRun: Int = 30,
         pace60Hz: Bool = true
     ) throws -> NativeBenchResult {
+        #if canImport(Metal) || os(Windows) || os(Linux)
+        #if canImport(Metal)
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue() else {
             throw NSError(
@@ -104,6 +108,9 @@ public enum VideoTilesBench {
                 userInfo: [NSLocalizedDescriptionKey: "Metal device unavailable"]
             )
         }
+        #else
+        let renderer = try OffscreenGPURenderer()
+        #endif
 
         let overallStart = ContinuousClock.now
         var profileResults: [NativeBenchProfileResult] = []
@@ -113,10 +120,20 @@ public enum VideoTilesBench {
         encoder.outputFormatting = [.sortedKeys]
 
         for (tiles, w, h) in profiles {
-            let columns = max(1, UInt32(Double(tiles).squareRoot()))
-            let outW = w * columns
-            let outH = h * columns
+            guard tiles > 0, w > 0, h > 0 else {
+                throw NSError(domain: "RuneVideoTiles", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: "Tile count and dimensions must be positive"])
+            }
+            let columns = Int(Double(tiles).squareRoot())
+            let rows = (tiles - 1) / columns + 1
+            guard columns <= Int(16_384 / w), rows <= Int(16_384 / h) else {
+                throw NSError(domain: "RuneVideoTiles", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: "Tile grid exceeds the maximum render target size"])
+            }
+            let outW = w * UInt32(columns)
+            let outH = h * UInt32(rows)
 
+            #if canImport(Metal)
             let texDesc = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .bgra8Unorm_srgb,
                 width: Int(outW),
@@ -134,23 +151,26 @@ public enum VideoTilesBench {
             }
 
             let renderer = try SurfaceRenderer(device: device, pixelFormat: .bgra8Unorm_srgb)
+            let completionSem = DispatchSemaphore(value: 0)
+            #endif
             let surfaces = (0..<tiles).map { _ in NativeSurface() }
             let timingsBox = BenchTimingsBox()
-            let completionSem = DispatchSemaphore(value: 0)
 
             surfaces[0].setObserver { timing in
                 if let start = timing.gpuStartSeconds, let end = timing.gpuEndSeconds, end >= start {
                     timingsBox.append((end - start) * 1000.0)
                 }
+                #if canImport(Metal)
                 if timing.completedAt != nil {
                     completionSem.signal()
                 }
+                #endif
             }
 
             let fullClip = SIMD4<Float>(0, 0, Float(outW), Float(outH))
             let draws: [SurfaceDraw] = surfaces.enumerated().map { idx, surface in
-                let col = UInt32(idx) % columns
-                let row = UInt32(idx) / columns
+                let col = UInt32(idx % columns)
+                let row = UInt32(idx / columns)
                 return SurfaceDraw(
                     surface: surface,
                     fit: .fit,
@@ -159,6 +179,9 @@ public enum VideoTilesBench {
                     clip: fullClip
                 )
             }
+            #if !canImport(Metal)
+            let renderFrame = RenderFrame(width: Int(outW), height: Int(outH), surfaces: draws)
+            #endif
 
             // Three independent recyclable buffers per tile pre-allocated before timing.
             #if os(macOS)
@@ -196,6 +219,7 @@ public enum VideoTilesBench {
                         #endif
                     }
 
+                    #if canImport(Metal)
                     renderer.prepare(draws: draws, viewport: (outW, outH))
                     guard let cmd = queue.makeCommandBuffer() else { continue }
                     let passDesc = MTLRenderPassDescriptor()
@@ -212,17 +236,28 @@ public enum VideoTilesBench {
                     }
                     renderer.trackSubmission(commandBuffer: cmd)
                     cmd.commit()
-
                     let elapsedDur = ContinuousClock.now - begin
+                    #else
+                    _ = try renderer.renderOffscreen(renderFrame)
+                    guard let timing = surfaces[0].timing(), timing.frameId == frameId else {
+                        throw NSError(domain: "RuneVideoTiles", code: 3,
+                                      userInfo: [NSLocalizedDescriptionKey: "GPU did not submit the benchmark frame"])
+                    }
+                    // CPU submission ends before the GL fence wait and framebuffer readback.
+                    let elapsedDur = timing.submittedAt - begin
+                    #endif
                     let elapsedMs = Double(elapsedDur.components.seconds) * 1000.0
                         + Double(elapsedDur.components.attoseconds) / 1e15
                     cpuMs.append(elapsedMs)
 
+                    #if canImport(Metal)
                     _ = completionSem.wait(timeout: .now() + .seconds(10))
+                    #endif
                     if pace60Hz {
-                        let paceTargetMs = 1000.0 / 60.0
-                        if elapsedMs < paceTargetMs {
-                            Thread.sleep(forTimeInterval: (paceTargetMs - elapsedMs) / 1000.0)
+                        let remaining = Duration.seconds(1.0 / 60.0) - (ContinuousClock.now - begin)
+                        if remaining > .zero {
+                            let parts = remaining.components
+                            Thread.sleep(forTimeInterval: Double(parts.seconds) + Double(parts.attoseconds) / 1e18)
                         }
                     }
                     totalFrames += 1
@@ -278,5 +313,9 @@ public enum VideoTilesBench {
             elapsedSeconds: elapsedSeconds,
             fps: Double(totalFrames) / elapsedSeconds
         )
+        #else
+        throw NSError(domain: "RuneVideoTiles", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: "This platform has no native-surface GPU benchmark"])
+        #endif
     }
 }

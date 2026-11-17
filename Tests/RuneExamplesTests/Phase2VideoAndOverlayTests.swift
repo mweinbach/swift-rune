@@ -1,5 +1,4 @@
 import Foundation
-import Metal
 import Testing
 @testable import Rune
 @testable import RuneBackground
@@ -119,7 +118,7 @@ struct Phase2VideoAndOverlayTests {
 
     // MARK: - RuneVideoTiles
 
-    @Test("video-tiles: 2x2 NativeSurface grid renders synthetic frames and native Metal bench")
+    @Test("video-tiles: 2x2 NativeSurface grid renders synthetic frames and runs the native GPU benchmark")
     func videoTilesRenderAndBench() throws {
         #expect(VideoTilesBench.upstreamProfiles.count == 5)
         #expect(VideoTilesBench.upstreamProfiles.map(\.tiles) == [1, 4, 9, 1, 1])
@@ -141,7 +140,7 @@ struct Phase2VideoAndOverlayTests {
         #expect(hasPixelVariation(frame30Out.finalFrame.rgba))
         #expect(initialOut.finalFrame.rgba != frame30Out.finalFrame.rgba)
 
-        if MTLCreateSystemDefaultDevice() != nil {
+        if try OffscreenGPURenderer.selected(for: ToolingArgs()) != nil {
             let result = try VideoTilesBench.runNativeBench(
                 profiles: [(4, 640, 360)],
                 runs: 2,
@@ -150,6 +149,8 @@ struct Phase2VideoAndOverlayTests {
             )
             #expect(result.totalFrames == 8)
             #expect(result.profiles.count == 1)
+            #expect(result.profiles[0].source == [640, 360])
+            #expect(result.profiles[0].target == [1280, 720])
             #expect(result.profiles[0].warmupRuns == 1)
             #expect(result.profiles[0].runs.count == 1)
             #expect(result.fps > 0.0)

@@ -68,7 +68,9 @@ public enum PortablePNG {
 
     /// Encodes an 8-bit RGBA8 buffer as a valid RFC-2083 PNG.
     public static func encode(width: Int, height: Int, rgba: [UInt8]) throws -> Data {
-        guard width > 0, height > 0 else {
+        guard width > 0, height > 0,
+              UInt32(exactly: width) != nil, UInt32(exactly: height) != nil,
+              width <= (Int.max / height - 1) / 4 else {
             throw Error.invalidDimensions(width: width, height: height)
         }
         let expected = width * height * 4
@@ -76,15 +78,12 @@ public enum PortablePNG {
             throw Error.invalidPixelBufferCount(expected: expected, actual: rgba.count)
         }
 
-        // Build filtered scanlines (filter 0 = None, or 1 = Sub for better compressibility).
         let rowBytes = width * 4
         var scanlines = [UInt8]()
         scanlines.reserveCapacity(height * (1 + rowBytes))
         for y in 0..<height {
             let rowStart = y * rowBytes
-            // Use filter 1 (Sub) for rows > 0 pixels wide to exercise and benefit from filtering,
-            // or filter 0 (None). Let's use Sub (1) on odd rows and None (0) on even rows?
-            // Actually Sub (1) on all rows is simple, fast, and deterministic.
+            // Sub filtering stores the difference from the previous pixel.
             scanlines.append(1)
             for x in 0..<rowBytes {
                 let raw = rgba[rowStart + x]
@@ -122,6 +121,11 @@ public enum PortablePNG {
 
     /// Decodes an RFC-2083 PNG into an 8-bit RGBA8 buffer.
     public static func decode(_ data: Data) throws -> DecodedImage {
+        try decode(data, maxDimension: Int.max)
+    }
+
+    /// Rejects an oversized image from its header before inflating the pixel data.
+    public static func decode(_ data: Data, maxDimension: Int) throws -> DecodedImage {
         let bytes = [UInt8](data)
         guard bytes.count >= 8, Array(bytes[0..<8]) == signature else {
             throw Error.invalidSignature
@@ -138,10 +142,12 @@ public enum PortablePNG {
         var idatData = [UInt8]()
 
         while offset < bytes.count {
-            guard offset + 12 <= bytes.count else {
+            guard bytes.count - offset >= 12 else {
                 throw Error.truncatedData
             }
-            let length = Int(readUInt32BE(bytes, at: offset))
+            guard let length = Int(exactly: readUInt32BE(bytes, at: offset)), length <= bytes.count - offset - 12 else {
+                throw Error.truncatedData
+            }
             let typeBytes = bytes[(offset + 4)..<(offset + 8)]
             let chunkType = String(bytes: typeBytes, encoding: .ascii) ?? "????"
             let payloadStart = offset + 8
@@ -163,14 +169,15 @@ public enum PortablePNG {
                 guard payload.count == 13 else {
                     throw Error.truncatedData
                 }
-                width = Int(readUInt32BE(payload, at: 0))
-                height = Int(readUInt32BE(payload, at: 4))
+                width = Int(clamping: readUInt32BE(payload, at: 0))
+                height = Int(clamping: readUInt32BE(payload, at: 4))
                 bitDepth = payload[8]
                 colorType = payload[9]
                 let compression = payload[10]
                 let filter = payload[11]
                 let interlace = payload[12]
-                guard width > 0, height > 0 else {
+                guard width > 0, height > 0, width <= maxDimension, height <= maxDimension,
+                      width <= (Int.max / height - 1) / 4 else {
                     throw Error.invalidDimensions(width: width, height: height)
                 }
                 guard compression == 0, filter == 0, interlace == 0, bitDepth == 8,
@@ -195,7 +202,6 @@ public enum PortablePNG {
         guard hasIHDR else { throw Error.missingIHDR }
         guard !idatData.isEmpty else { throw Error.missingIDAT }
 
-        let decompressed = try zlibDecompress(idatData)
         let bpp: Int = switch colorType {
         case 0: 1
         case 2: 3
@@ -207,6 +213,7 @@ public enum PortablePNG {
 
         let rowBytes = width * bpp
         let expectedScanlineBytes = height * (1 + rowBytes)
+        let decompressed = try zlibDecompress(idatData, maximumSize: expectedScanlineBytes)
         guard decompressed.count >= expectedScanlineBytes else {
             throw Error.truncatedData
         }
@@ -214,6 +221,11 @@ public enum PortablePNG {
         var prevRow = [UInt8](repeating: 0, count: rowBytes)
         var rgba = [UInt8]()
         rgba.reserveCapacity(width * height * 4)
+        // PNG stores the transparent grayscale/RGB key in big-endian 16-bit
+        // fields, even when the actual samples have eight bits.
+        let hasGrayKey = transparency.count == 2 && transparency[0] == 0
+        let hasRGBKey = transparency.count == 6 &&
+            transparency[0] == 0 && transparency[2] == 0 && transparency[4] == 0
 
         for y in 0..<height {
             let scanlineStart = y * (1 + rowBytes)
@@ -235,7 +247,9 @@ public enum PortablePNG {
                     rgba.append(recon[i])
                     rgba.append(recon[i + 1])
                     rgba.append(recon[i + 2])
-                    rgba.append(255)
+                    let transparent = hasRGBKey && recon[i] == transparency[1] &&
+                        recon[i + 1] == transparency[3] && recon[i + 2] == transparency[5]
+                    rgba.append(transparent ? 0 : 255)
                 }
             case 0: // Grayscale
                 for x in 0..<width {
@@ -243,7 +257,7 @@ public enum PortablePNG {
                     rgba.append(g)
                     rgba.append(g)
                     rgba.append(g)
-                    rgba.append(255)
+                    rgba.append(hasGrayKey && g == transparency[1] ? 0 : 255)
                 }
             case 4: // Grayscale + Alpha
                 for x in 0..<width {
@@ -339,7 +353,7 @@ public enum PortablePNG {
 
     // MARK: - Chunk & Checksum Helpers
 
-    private static func appendChunk(type: String, payload: [UInt8], to out: inout Data) {
+    package static func appendChunk(type: String, payload: [UInt8], to out: inout Data) {
         var header = [UInt8]()
         header.reserveCapacity(8)
         appendUInt32BE(UInt32(payload.count), to: &header)
@@ -381,7 +395,7 @@ public enum PortablePNG {
         return c
     }
 
-    private static func crc32(_ slice: ArraySlice<UInt8>) -> UInt32 {
+    package static func crc32(_ slice: ArraySlice<UInt8>) -> UInt32 {
         var c: UInt32 = 0xFFFF_FFFF
         for b in slice {
             c = crcTable[Int((c ^ UInt32(b)) & 0xFF)] ^ (c >> 8)
@@ -435,9 +449,9 @@ public enum PortablePNG {
         return out
     }
 
-    // MARK: - Zlib / DEFLATE Decompression (RFC 1950 + RFC 1951)
+    // MARK: - Zlib, gzip, and DEFLATE (RFC 1950–1952)
 
-    private static func zlibDecompress(_ bytes: [UInt8]) throws -> [UInt8] {
+    private static func zlibDecompress(_ bytes: [UInt8], maximumSize: Int) throws -> [UInt8] {
         guard bytes.count >= 6 else {
             throw Error.invalidZlibHeader
         }
@@ -451,6 +465,60 @@ public enum PortablePNG {
         }
 
         var reader = BitReader(bytes: bytes, byteOffset: 2)
+        let output = try inflate(reader: &reader, maximumSize: maximumSize,
+                                 sizeError: .invalidDeflateStream("pixel data exceeds PNG dimensions"))
+        guard bytes.count - reader.byteOffset >= 4 else { throw Error.invalidZlibChecksum }
+        let expectedAdler = readUInt32BE(bytes, at: bytes.count - 4)
+        guard expectedAdler == adler32(output) else { throw Error.invalidZlibChecksum }
+        return output
+    }
+
+    /// Expands all RFC 1952 members, bounding the combined output as DEFLATE emits bytes.
+    package static func gunzip(_ data: Data, maximumSize: Int) throws -> Data {
+        let sizeError = Error.invalidDeflateStream("expanded gzip data exceeds \(maximumSize)-byte limit")
+        guard maximumSize >= 0 else { throw sizeError }
+        let bytes = Array(data)
+        var reader = BitReader(bytes: bytes, byteOffset: 0)
+        var result = Data()
+        repeat {
+            let start = reader.byteOffset
+            guard bytes.count - start >= 10, bytes[start] == 0x1f, bytes[start + 1] == 0x8b,
+                  bytes[start + 2] == 8, bytes[start + 3] & 0xe0 == 0 else {
+                throw Error.invalidDeflateStream("invalid gzip header")
+            }
+            let flags = bytes[start + 3]
+            reader.byteOffset += 10
+            if flags & 0x04 != 0 {
+                let length = try reader.readUInt16LE()
+                _ = try reader.readBytes(Int(length))
+            }
+            for flag: UInt8 in [0x08, 0x10] where flags & flag != 0 {
+                guard let end = bytes[reader.byteOffset...].firstIndex(of: 0) else {
+                    throw Error.invalidDeflateStream("unterminated gzip header field")
+                }
+                reader.byteOffset = end + 1
+            }
+            if flags & 0x02 != 0 {
+                let checksum = UInt16(truncatingIfNeeded: crc32(bytes[start..<reader.byteOffset]))
+                guard try reader.readUInt16LE() == checksum else {
+                    throw Error.invalidDeflateStream("invalid gzip header checksum")
+                }
+            }
+            let member = try inflate(reader: &reader, maximumSize: maximumSize - result.count, sizeError: sizeError)
+            guard bytes.count - reader.byteOffset >= 8 else {
+                throw Error.invalidDeflateStream("truncated gzip trailer")
+            }
+            let checksum = try reader.readUInt32LE()
+            let length = try reader.readUInt32LE()
+            guard length == UInt32(truncatingIfNeeded: member.count), checksum == crc32(member[...]) else {
+                throw Error.invalidDeflateStream("invalid gzip trailer")
+            }
+            result.append(contentsOf: member)
+        } while reader.byteOffset < bytes.count
+        return result
+    }
+
+    private static func inflate(reader: inout BitReader, maximumSize: Int, sizeError: Error) throws -> [UInt8] {
         var output = [UInt8]()
 
         var bfinal = false
@@ -465,6 +533,9 @@ public enum PortablePNG {
                 guard len == ~nlen else {
                     throw Error.invalidDeflateStream("stored block length mismatch")
                 }
+                guard Int(len) <= maximumSize - output.count else {
+                    throw sizeError
+                }
                 let slice = try reader.readBytes(Int(len))
                 output.append(contentsOf: slice)
             case 1: // Fixed Huffman
@@ -472,6 +543,8 @@ public enum PortablePNG {
                     reader: &reader,
                     litTree: fixedLitTree,
                     distTree: fixedDistTree,
+                    maximumSize: maximumSize,
+                    sizeError: sizeError,
                     output: &output
                 )
             case 2: // Dynamic Huffman
@@ -480,6 +553,8 @@ public enum PortablePNG {
                     reader: &reader,
                     litTree: litTree,
                     distTree: distTree,
+                    maximumSize: maximumSize,
+                    sizeError: sizeError,
                     output: &output
                 )
             default:
@@ -488,14 +563,6 @@ public enum PortablePNG {
         }
 
         reader.alignToByte()
-        guard reader.byteOffset + 4 <= bytes.count else {
-            throw Error.invalidZlibChecksum
-        }
-        let expectedAdler = readUInt32BE(bytes, at: bytes.count - 4)
-        let actualAdler = adler32(output)
-        guard expectedAdler == actualAdler else {
-            throw Error.invalidZlibChecksum
-        }
         return output
     }
 
@@ -545,7 +612,7 @@ public enum PortablePNG {
         }
 
         mutating func readUInt16LE() throws -> UInt16 {
-            guard byteOffset + 2 <= bytes.count else {
+            guard bytes.count - byteOffset >= 2 else {
                 throw Error.invalidDeflateStream("unexpected end of stored block")
             }
             let val = UInt16(bytes[byteOffset]) | (UInt16(bytes[byteOffset + 1]) << 8)
@@ -553,8 +620,13 @@ public enum PortablePNG {
             return val
         }
 
+        mutating func readUInt32LE() throws -> UInt32 {
+            let low = UInt32(try readUInt16LE())
+            return low | (UInt32(try readUInt16LE()) << 16)
+        }
+
         mutating func readBytes(_ count: Int) throws -> ArraySlice<UInt8> {
-            guard byteOffset + count <= bytes.count else {
+            guard count <= bytes.count - byteOffset else {
                 throw Error.invalidDeflateStream("unexpected end of stored payload")
             }
             let slice = bytes[byteOffset..<(byteOffset + count)]
@@ -688,11 +760,16 @@ public enum PortablePNG {
         reader: inout BitReader,
         litTree: HuffmanTree,
         distTree: HuffmanTree,
+        maximumSize: Int,
+        sizeError: Error,
         output: inout [UInt8]
     ) throws {
         while true {
             let sym = try litTree.decode(&reader)
             if sym < 256 {
+                guard output.count < maximumSize else {
+                    throw sizeError
+                }
                 output.append(UInt8(sym))
             } else if sym == 256 {
                 return
@@ -702,6 +779,9 @@ public enum PortablePNG {
                     throw Error.invalidDeflateStream("invalid length symbol \(sym)")
                 }
                 let length = lengthBases[lenIdx] + (try reader.readBits(lengthExtra[lenIdx]))
+                guard length <= maximumSize - output.count else {
+                    throw sizeError
+                }
                 let distSym = try distTree.decode(&reader)
                 guard distSym >= 0, distSym < distBases.count else {
                     throw Error.invalidDeflateStream("invalid distance symbol \(distSym)")

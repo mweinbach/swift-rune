@@ -152,6 +152,7 @@ public enum FireSimPhase: Sendable, Equatable {
 }
 
 private final class FireSimGrid: @unchecked Sendable {
+    var id: UInt64 = 0
     var claim: FireSimClaim
     let size: SIMD2<UInt32>
     #if canImport(Metal)
@@ -191,6 +192,7 @@ private final class FireSimGrid: @unchecked Sendable {
 /// with initial warmup (`1.2s`) on new grids or time rewinds. Supports both full 6-pass Metal compute
 /// solving (`record(commandBuffer:pipelines:)`) and headless CPU stepping (`stepCPU()`).
 public final class FireSim: @unchecked Sendable {
+    let identity = UUID()
     public static let dt: Float = 1.0 / 60.0
     public static let jacobiIterations: Int = 14
     public static let maxSteps: Int = 4
@@ -202,6 +204,7 @@ public final class FireSim: @unchecked Sendable {
     private let device: MTLDevice?
     #endif
     private var grids: [FireSimGrid] = []
+    private var nextGridID: UInt64 = 0
     public private(set) var frame: UInt64 = 0
 
     #if canImport(Metal)
@@ -313,6 +316,8 @@ public final class FireSim: @unchecked Sendable {
             grids.append(FireSimGrid(claim: claim, size: size))
             #endif
             idx = grids.count - 1
+            nextGridID &+= 1
+            grids[idx].id = nextGridID
         }
 
         let g = grids[idx]
@@ -363,6 +368,28 @@ public final class FireSim: @unchecked Sendable {
         return grids[index].simTime
     }
 
+    /// Stable across the index shifts caused by pruning at the start of a frame.
+    func gridID(at index: Int) -> UInt64 { grids[index].id }
+
+    func complete(_ plan: FireSimPlan, at index: Int) {
+        let grid = grids[index]
+        grid.currentIndex ^= plan.steps & 1
+        grid.simTime = plan.start.t0 + Float(plan.steps) * Self.dt
+        grid.phase = .stepped
+    }
+
+    /// A driver error can leave a partially written field. Recreate the whole warmup when retried.
+    func restart(_ plan: FireSimPlan, at index: Int) {
+        let target = plan.start.t0 + Float(plan.steps) * Self.dt
+        let reset = Self.schedule(prev: nil, target: target, frozen: false)
+        let grid = grids[index]
+        grid.simTime = nil
+        grid.currentIndex = 0
+        grid.phase = .planned(FireSimPlan(steps: reset.steps, start: reset.start,
+                                          kernelParams: plan.kernelParams, uniform: plan.uniform,
+                                          gridSize: plan.gridSize, cellSize: plan.cellSize))
+    }
+
     public func phase(at index: Int) -> FireSimPhase? {
         guard index >= 0 && index < grids.count else { return nil }
         return grids[index].phase
@@ -394,11 +421,9 @@ public final class FireSim: @unchecked Sendable {
     @discardableResult
     public func stepCPU() -> Bool {
         guard pending else { return false }
-        for g in grids {
-            guard case .planned(let plan) = g.phase else { continue }
-            g.currentIndex ^= (plan.steps & 1)
-            g.simTime = plan.start.t0 + Float(plan.steps) * Self.dt
-            g.phase = .stepped
+        for index in grids.indices {
+            guard case .planned(let plan) = grids[index].phase else { continue }
+            complete(plan, at: index)
         }
         return true
     }

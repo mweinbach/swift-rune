@@ -136,13 +136,13 @@ struct RenderCloseoutGapTests {
         }
     }
 
-    #if canImport(Metal)
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
 
     // MARK: - `radial_srgb.rs:61, 95, 217, 318`
 
     @Test("radial_gradient_centre_edge_and_monotonic_falloff (radial_srgb.rs:61)")
     func radialGradientCentreEdgeAndMonotonicFalloff() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         struct S {}
         let rt = Runtime<S>(
             state: S(),
@@ -184,7 +184,7 @@ struct RenderCloseoutGapTests {
 
     @Test("radial_gradient_multi_stop_elliptical_quad_shrinking_and_validation (radial_srgb.rs:95)")
     func radialGradientMultiStopEllipticalQuadShrinkingAndValidation() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<Bool>(
             state: false,
             viewport: Vec2(140, 100),
@@ -321,7 +321,7 @@ struct RenderCloseoutGapTests {
 
     @Test("srgb_blend_matches_css_and_core_animation_glow_reference (radial_srgb.rs:217)")
     func srgbBlendMatchesCssAndCoreAnimationGlowReference() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let bg = hex("#100e11")!
         let glow = hex("#40bf80")!.alpha(0.16)
         let bgSrgb = [Self.srgbEncode(bg.r), Self.srgbEncode(bg.g), Self.srgbEncode(bg.b)]
@@ -356,8 +356,19 @@ struct RenderCloseoutGapTests {
         #expect(expectedCenter == [24, 42, 35])
         let linC = pxLinear.pixel(x: 120, y: 120)
         let srgbC = pxSrgb.pixel(x: 120, y: 120)
-        #expect(linC == SIMD4<UInt8>(29, 83, 56, 255))
-        #expect([srgbC.x, srgbC.y, srgbC.z] == expectedCenter)
+        #if canImport(Metal)
+        let centerTolerance = 0
+        #else
+        // Fixed-point GL blending can round the source to the attachment's
+        // precision before source-over, moving a final channel by one byte.
+        let centerTolerance = 1
+        #endif
+        let expectedLinear = [29, 83, 56]
+        for channel in 0..<3 {
+            #expect(abs(Int(linC[channel]) - expectedLinear[channel]) <= centerTolerance)
+            #expect(abs(Int(srgbC[channel]) - Int(expectedCenter[channel])) <= centerTolerance)
+        }
+        #expect(linC.w == 255 && srgbC.w == 255)
 
         let sigma: Float = 15.0
         let scale = sqrtf(0.5) / sigma
@@ -402,6 +413,9 @@ struct RenderCloseoutGapTests {
         #expect(Self.approxRGBA([blurC.x, blurC.y, blurC.z], expectedCenter, tol: 1))
     }
 
+    #endif
+
+    #if canImport(Metal)
     private final class SrgbCheckCompositor: Compositor {
         typealias State = Int
         var seen: (srgbBlend: Bool, format: MTLPixelFormat)?
@@ -1006,9 +1020,12 @@ struct RenderCloseoutGapTests {
         #expect(bdPos != nil && lyPos != nil && bdPos! < lyPos!)
     }
 
+    #endif
+
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
     @Test("nested_fade_and_streaming_mask_and_group_projection (clip.rs:91,122)")
     func clipFadeIsolationAndStreamingMask() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         for scale: Float in [1.0, 2.0] {
             let rtPlain = Runtime<Bool>(
                 state: false,

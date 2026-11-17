@@ -110,7 +110,7 @@ struct Slice4LibsParityTests {
 
         let copyRect = try #require(rt.element(byKey: "copy")).rect
         let copyCenter = Vec2(copyRect[0] + copyRect[2] * 0.5, copyRect[1] + copyRect[3] * 0.5)
-        let copyKey = KeyEvent(key: .command("c"), mods: Mods(cmd: true))
+        let copyKey = KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods())
 
         // Order 1: press ("response") then Cmd+C ("héllo 👋") -> Cmd+C wins; consumed once.
         rt.pointerDown(at: copyCenter, at: 0.02)

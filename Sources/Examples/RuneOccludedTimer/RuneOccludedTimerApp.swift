@@ -216,7 +216,7 @@ public enum RuneOccludedTimerApp {
             while true {
                 Thread.sleep(forTimeInterval: 1.0)
                 let elapsed = Int(Date().timeIntervalSince(start))
-                fputs("occluded-timer t=\(elapsed) fired=\(counter.fired) worst_ms=\(counter.worstMs)\n", stderr)
+                RuneStandardIO.error("occluded-timer t=\(elapsed) fired=\(counter.fired) worst_ms=\(counter.worstMs)\n")
                 if let quitSeconds, elapsed >= quitSeconds {
                     onQuit()
                     return

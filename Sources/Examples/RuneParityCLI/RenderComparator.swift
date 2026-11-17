@@ -456,17 +456,6 @@ public enum RenderComparator {
             throw ParityError.missingExampleMapping(exampleName)
         }
 
-        // Verify cargo is available
-        let whichCargo = try ProcessRunner.run(executable: "/usr/bin/which", arguments: ["cargo"])
-        let cargoBin = whichCargo.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard whichCargo.exitCode == 0 && !cargoBin.isEmpty else {
-            throw ParityError.commandFailed(
-                command: "which cargo",
-                exitCode: whichCargo.exitCode,
-                stderr: "cargo is not installed or not in PATH; pass --rust-png / --swift-png to compare pre-captured renders."
-            )
-        }
-
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("rune-parity-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -490,15 +479,19 @@ public enum RenderComparator {
             "--tree", rustTree.path,
         ]
         cargoArgs.append(contentsOf: extraFlags)
-        _ = try ProcessRunner.runChecked(executable: cargoBin, arguments: cargoArgs, currentDirectory: upstreamRoot)
+        _ = try ProcessRunner.runChecked(executable: "cargo", arguments: cargoArgs, currentDirectory: upstreamRoot)
 
         var swiftArgs = [
-            "swift", "run", mapping.swiftProduct,
+            "run", mapping.swiftProduct,
             "--snap", swiftPNG.path,
             "--tree", swiftTree.path,
         ]
         swiftArgs.append(contentsOf: extraFlags)
-        _ = try ProcessRunner.runChecked(executable: "/usr/bin/xcrun", arguments: swiftArgs, currentDirectory: swiftRoot)
+        #if os(macOS)
+        _ = try ProcessRunner.runChecked(executable: "/usr/bin/xcrun", arguments: ["swift"] + swiftArgs, currentDirectory: swiftRoot)
+        #else
+        _ = try ProcessRunner.runChecked(executable: "swift", arguments: swiftArgs, currentDirectory: swiftRoot)
+        #endif
 
         let imgDiff = try compareImages(
             rustPNG: rustPNG,

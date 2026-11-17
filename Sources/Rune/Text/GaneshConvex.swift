@@ -3,6 +3,9 @@
 // convex stroke tessellation (`GrAAConvexTessellator`), and D3D11-style subpixel triangle rasterizer.
 
 import Foundation
+#if os(Android)
+import Android
+#endif
 
 internal enum GaneshConvex {
 

@@ -221,7 +221,7 @@ public extension Runtime {
         var actions: [AccessibilityAction] = []
         // `on_press.is_some() || input.is_some()`; Swift also reads its press roles as pressable.
         if a11yPressable(el) || el.handlers.editLens != nil ||
-           [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox].contains(el.role) {
+           [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox, .menuItemRadio].contains(el.role) {
             actions.append(.press)
         }
         if el.focusable {
@@ -276,7 +276,7 @@ public extension Runtime {
 
     /// Focuses field `idx` (as a reader focuses it first) and edits the focused field through its
     /// editor (`a11y_edit` → `with_focused`): its change handlers run only when the text changed.
-    private func a11yEdit(index idx: Int, at now: Double, _ apply: (inout TextEdit) -> Void) -> Bool {
+    internal func a11yEdit(index idx: Int, at now: Double, _ apply: (inout TextEdit) -> Void) -> Bool {
         let path = flatNodes[idx].path
         if focusedPath != path { setFocus(path: path, keyboard: true, at: now) }
         guard let fp = focusedPath,

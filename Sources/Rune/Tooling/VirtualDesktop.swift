@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
 import RuneRef
 
@@ -279,7 +282,7 @@ public enum DesktopComposite {
     public static func fitBackdrop(imagePath: String, targetSize: (Int, Int)) throws -> [UInt8] {
         let url = URL(fileURLWithPath: imagePath)
         let (w, h) = targetSize
-        guard w > 0, h > 0 else {
+        guard w > 0, h > 0, max(w, h) <= maxBackdropSide else {
             throw VirtualDesktopError.invalidBackdrop("\(imagePath): invalid target size \(w)x\(h)")
         }
 
@@ -326,7 +329,8 @@ public enum DesktopComposite {
         srcCtx.draw(cgImage, in: CGRect(x: 0, y: 0, width: iw, height: ih))
         return fitBackdrop(rgba: srcRGBA, width: iw, height: ih, targetSize: targetSize, alreadyPremultiplied: true)
         #else
-        throw VirtualDesktopError.invalidBackdrop("\(imagePath): image decoding unavailable on this platform")
+        let image = try readBackdropPNG(url)
+        return fitBackdrop(rgba: image.rgba, width: image.width, height: image.height, targetSize: targetSize)
         #endif
     }
 
@@ -367,6 +371,12 @@ public enum DesktopComposite {
         }
         srcCtx.draw(cgImage, in: CGRect(x: 0, y: 0, width: iw, height: ih))
         let rgba = fitBackdrop(rgba: srcRGBA, width: iw, height: ih, targetSize: (iw, ih), alreadyPremultiplied: true)
+        #else
+        let image = try readBackdropPNG(URL(fileURLWithPath: imagePath))
+        let iw = image.width
+        let ih = image.height
+        let rgba = fitBackdrop(rgba: image.rgba, width: iw, height: ih, targetSize: (iw, ih))
+        #endif
         let display = VirtualDisplay(
             id: 1,
             frame: [0.0, 0.0, Double(iw) / Double(validScale), Double(ih) / Double(validScale)],
@@ -374,11 +384,17 @@ public enum DesktopComposite {
             primary: true
         )
         return (iw, ih, rgba, VirtualDesktop(displays: [display]))
-        #else
-        throw VirtualDesktopError.invalidBackdrop("\(imagePath): image decoding unavailable on this platform")
-        #endif
     }
 
+    #if !canImport(ImageIO) || !canImport(CoreGraphics)
+    private static func readBackdropPNG(_ url: URL) throws -> PortablePNG.DecodedImage {
+        do {
+            return try PortablePNG.decode(Data(contentsOf: url), maxDimension: maxBackdropSide)
+        } catch {
+            throw VirtualDesktopError.invalidBackdrop("\(url.path): \(error)")
+        }
+    }
+    #endif
     /// Crops `rgba` (`width x height`) to `targetSize`'s aspect ratio, scales, and returns opaque RGBA8.
     public static func fitBackdrop(
         rgba: [UInt8],
@@ -853,6 +869,11 @@ public protocol DesktopMember: AnyObject {
     func renderFrame(scale: Float) -> Frame?
 }
 
+private protocol DesktopCaptureWindow: AnyObject {
+    var captureRenderer: OffscreenGPURenderer? { get set }
+    func capture(scale: Float, gpu: OffscreenGPURenderer?) throws -> Frame
+}
+
 private final class DesktopWakeFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var flag = false
@@ -872,7 +893,7 @@ private final class DesktopWakeFlag: @unchecked Sendable {
 }
 
 /// Real `Runtime<State>` window member for `VirtualDesk` (`tooling::virtual_desktop::Window`).
-public final class DesktopWindow<State>: DesktopMember {
+public final class DesktopWindow<State>: DesktopMember, DesktopCaptureWindow {
     public let key: String
     public let runtime: Runtime<State>
     public private(set) var frame: [Float]
@@ -888,6 +909,11 @@ public final class DesktopWindow<State>: DesktopMember {
 
     private var currentTime: Double = 0
     private var lastScene: RefScene?
+    private var capturedSurfaces: Result<[RefSurfaceDraw], any Error> = .success([])
+    fileprivate weak var captureRenderer: OffscreenGPURenderer?
+    private var lastProductionFrame: Result<RenderFrame, any Error>?
+    private let compositor: AnyCompositor<State>?
+    private var lastCompositedTime: Double?
     private var pendingClose = false
     private let appShared: AppShared<State>?
     private var shortcutGuard: ShortcutGuard?
@@ -907,6 +933,13 @@ public final class DesktopWindow<State>: DesktopMember {
         tabVisitsControls: Bool = false
     ) {
         self.key = key
+        #if os(macOS)
+        self.compositor = spec.compositor
+        #elseif os(Linux) || os(Windows)
+        self.compositor = spec.desktopBuilder?.compositorValue
+        #else
+        self.compositor = nil
+        #endif
         let wakeFlag = DesktopWakeFlag()
         self.sharedWakeFlag = wakeFlag
         let w = Waker { wakeFlag.set(true) }
@@ -1112,7 +1145,19 @@ public final class DesktopWindow<State>: DesktopMember {
 
     public func advance(dt: Double) {
         currentTime += dt
-        lastScene = runtime.frame(at: currentTime)
+        if let captureRenderer {
+            lastProductionFrame = Result { try captureRenderer.frame(runtime, at: currentTime) }
+            lastScene = nil
+        } else {
+            captureReferenceScene()
+            lastProductionFrame = nil
+        }
+    }
+
+    private func captureReferenceScene() {
+        let scene = runtime.frame(at: currentTime)
+        lastScene = scene
+        capturedSurfaces = Result { try NativeSurfaceReference.capture(runtime.surfaces, srgbBlend: scene.srgbBlend) }
     }
 
     public func setFocused(_ focused: Bool) {
@@ -1190,15 +1235,30 @@ public final class DesktopWindow<State>: DesktopMember {
     }
 
     public func renderFrame(scale: Float) -> Frame? {
-        runtime.pixelScale = scale
-        let scene = lastScene ?? runtime.frame(at: currentTime)
-        lastScene = scene
-        #if canImport(Metal) && canImport(QuartzCore)
-        if let renderer = try? MetalRenderer(), let frame = try? renderer.renderOffscreen(scene) {
-            return frame
+        try? capture(scale: scale, gpu: captureRenderer ?? OffscreenGPURenderer.selected(for: ToolingArgs()))
+    }
+
+    fileprivate func capture(scale: Float, gpu: OffscreenGPURenderer?) throws -> Frame {
+        let scaleChanged = runtime.pixelScale != scale
+        if scaleChanged { runtime.setViewport(runtime.viewport, pixelScale: scale) }
+        if let gpu {
+            let frame: RenderFrame
+            if !scaleChanged, captureRenderer === gpu, let lastProductionFrame {
+                frame = try lastProductionFrame.get()
+            } else {
+                frame = try gpu.frame(runtime, at: currentTime)
+            }
+            if let compositor {
+                let dt = Float(max(0, currentTime - (lastCompositedTime ?? currentTime)))
+                let (pixels, _) = try gpu.renderOffscreen(frame, compositor: compositor, runtime: runtime, at: currentTime, dt: dt)
+                lastCompositedTime = currentTime
+                return pixels
+            }
+            return try gpu.renderOffscreen(frame)
         }
-        #endif
-        return try? RuneRef.render(scene)
+        if lastScene == nil || scaleChanged { captureReferenceScene() }
+        guard let scene = lastScene else { throw OffscreenRenderError.capture("Missing virtual window scene") }
+        return try RuneRef.render(scene, surfaces: capturedSurfaces.get())
     }
 }
 
@@ -1435,11 +1495,18 @@ public final class VirtualDesk {
 
     /// Renders all visible windows in z-order and composites them over `backdropRGBA`.
     public func renderCompositeFrame(backdropRGBA: [UInt8], width: Int, height: Int) -> Frame {
+        renderCompositeFrame(backdropRGBA: backdropRGBA, width: width, height: height) {
+            $0.renderFrame(scale: self.scale)
+        }
+    }
+
+    private func renderCompositeFrame(backdropRGBA: [UInt8], width: Int, height: Int,
+                                      capture: (any DesktopMember) throws -> Frame?) rethrows -> Frame {
         let keyIndex = focus.focusedIndex
         var layers: [(rgba: [UInt8], width: Int, height: Int, originPx: (Float, Float), cornerRadiusPx: Float, hasShadow: Bool, isKey: Bool)] = []
         for i in zOrder {
             let m = members[i]
-            guard m.visible, let frame = m.renderFrame(scale: scale) else { continue }
+            guard m.visible, let frame = try capture(m) else { continue }
             layers.append((
                 rgba: frame.rgba,
                 width: frame.width,
@@ -1486,6 +1553,10 @@ public final class VirtualDesk {
         for m in members {
             m.start(desktop: desktop)
         }
+        let captureWindows = members.compactMap { $0 as? any DesktopCaptureWindow }
+        let gpu = captureWindows.isEmpty ? nil : try OffscreenGPURenderer.selected(for: args)
+        for member in captureWindows { member.captureRenderer = gpu }
+        defer { for member in captureWindows { member.captureRenderer = nil } }
         let originPt = (Float(desktop.primaryDisplay.frame[0]), Float(desktop.primaryDisplay.frame[1]))
         let desk = VirtualDesk(members: members, origin: originPt, scale: validScale)
 
@@ -1616,11 +1687,16 @@ public final class VirtualDesk {
             }
         }
 
-        let finalComposite = desk.renderCompositeFrame(
+        let finalComposite = try desk.renderCompositeFrame(
             backdropRGBA: backdropRGBA,
             width: width,
             height: height
-        )
+        ) { member in
+            if let window = member as? any DesktopCaptureWindow {
+                return try window.capture(scale: validScale, gpu: gpu)
+            }
+            return member.renderFrame(scale: validScale)
+        }
         if let snapPath = args.snapPath {
             let snapURL = URL(fileURLWithPath: snapPath)
             try FileManager.default.createDirectory(at: snapURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -1642,7 +1718,7 @@ public final class VirtualDesk {
         if let treePath = args.treePath {
             let treeURL = URL(fileURLWithPath: treePath)
             try FileManager.default.createDirectory(at: treeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try treeData.write(to: treeURL, options: .atomic)
+            try treeData.write(to: treeURL, options: .runeOutput)
         }
 
         let run = HeadlessRun(

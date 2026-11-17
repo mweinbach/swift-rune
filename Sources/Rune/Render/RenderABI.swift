@@ -133,9 +133,12 @@ public struct RenderInstance: Sendable, Equatable {
     public var rect: SIMD4<Float>
     public var radii: SIMD4<Float>
     public var fill: SIMD4<Float>
+    /// Cropped images carry their full source texel edges `[left, top, right, bottom]` here.
+    /// Right and bottom are exclusive. Zero bounds use the image UV rectangle.
     public var border: SIMD4<Float>
     /// `[borderWidth / flag, kind, shadowSigma / bleed / soft, glyphGamma / scale / t1]`
     public var params: SIMD4<Float>
+    /// Images use texel-space `[x, y, width, height]`, including fractional crops and signed spans.
     public var uv: SIMD4<Float>
     /// Clip bounds `[x0, y0, x1, y1]` in device pixels.
     public var clip: SIMD4<Float>
@@ -247,13 +250,15 @@ public func unpackFloat4ToU64(_ v: SIMD4<Float>) -> UInt64 {
 public final class ResidentLayerTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [UInt64: UInt64] = [:]
+    private weak var publisher: AnyObject?
+    private var available: (@Sendable () -> Bool)?
 
     public init() {}
 
     public func isResident(nodeId: UInt64, signature: UInt64) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return entries[nodeId] == signature
+        return entries[nodeId] == signature && available?() != false
     }
 
     public func markResident(nodeId: UInt64, signature: UInt64) {
@@ -271,7 +276,55 @@ public final class ResidentLayerTracker: @unchecked Sendable {
     public func replaceAll(with active: [UInt64: UInt64]) {
         lock.lock()
         defer { lock.unlock() }
+        publisher = nil
+        available = nil
         entries = active
+    }
+
+    /// A viewport may migrate between devices. Only its current cache owner can
+    /// publish residency or clear entries during context teardown.
+    func acquire(for owner: AnyObject) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if publisher === owner { return false }
+        publisher = owner
+        available = nil
+        entries.removeAll(keepingCapacity: true)
+        return true
+    }
+
+    func publish(_ active: [UInt64: UInt64], from owner: AnyObject) {
+        lock.lock()
+        defer { lock.unlock() }
+        if publisher === owner { entries = active }
+    }
+
+    func setAvailability(_ check: (@Sendable () -> Bool)?, from owner: AnyObject) {
+        lock.lock()
+        defer { lock.unlock() }
+        if publisher === owner { available = check }
+    }
+
+    func markResident(nodeId: UInt64, signature: UInt64, from owner: AnyObject) {
+        lock.lock()
+        defer { lock.unlock() }
+        if publisher === owner { entries[nodeId] = signature }
+    }
+
+    func evict(nodeId: UInt64, from owner: AnyObject) {
+        lock.lock()
+        defer { lock.unlock() }
+        if publisher === owner { entries.removeValue(forKey: nodeId) }
+    }
+
+    func release(_ owner: AnyObject) {
+        lock.lock()
+        defer { lock.unlock() }
+        if publisher === owner {
+            publisher = nil
+            available = nil
+            entries.removeAll()
+        }
     }
 
     public func clear() {
@@ -283,7 +336,7 @@ public final class ResidentLayerTracker: @unchecked Sendable {
     public var count: Int {
         lock.lock()
         defer { lock.unlock() }
-        return entries.count
+        return available?() == false ? 0 : entries.count
     }
 
     public var isEmpty: Bool { count == 0 }
@@ -512,7 +565,7 @@ public func foldEndLayer(
                 inst.fade = scope.fade
             }
             inst.fill *= opacity
-            if inst.params.y != KIND_GLYPH {
+            if inst.params.y != KIND_GLYPH && inst.params.y != KIND_IMAGE {
                 inst.border *= opacity
             }
             if inst.params.y == KIND_GRADIENT {
@@ -640,17 +693,35 @@ public typealias EffectBackdropHook = (EffectPhase, EffectSite) -> Void
 
 // MARK: - RenderFrame (Full Upstream Frame Payload)
 
+/// All writes between two published snapshots of the runtime's image texture.
+internal struct ImageAtlasPatch: Sendable {
+    let fromRevision: UInt64
+    var edges: SIMD4<Int>
+
+    mutating func include(_ rect: SIMD4<Int>) {
+        edges = SIMD4(min(edges.x, rect.x), min(edges.y, rect.y), max(edges.z, rect.z), max(edges.w, rect.w))
+    }
+}
+
 /// Complete device-pixel frame built by `Runtime.renderFrame(at:)` matching upstream `render::Instance`.
 public struct RenderFrame: Sendable {
+    /// Captures whose children the painter omitted in favor of a resident texture.
+    /// A frame captured on another device cannot recreate those pixels on its own.
+    var elidedLayers: [(index: Int, node: UInt64, signature: UInt64)] = []
     public var width: Int
     public var height: Int
     public var srgbBlend: Bool
     public var clearColor: SIMD4<Float>
     public var glyphs: R8Atlas
     public var glyphGeneration: UInt64
-    public var images: RGBA8Atlas
+    internal var imagePatch: ImageAtlasPatch?
+    public var images: RGBA8Atlas {
+        didSet { imagePatch = nil }
+    }
     public var imagePages: [RGBA8Atlas]
-    public var imageRevision: UInt64
+    public var imageRevision: UInt64 {
+        didSet { imagePatch = nil }
+    }
     public var instances: [RenderInstance]
     public var marks: [UInt32]
     public var surfaces: [SurfaceDraw]

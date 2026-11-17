@@ -1,4 +1,7 @@
 import Foundation
+#if os(Android)
+import Android
+#endif
 import RuneMotion
 
 // MARK: - Per-Element Drop Spec
@@ -94,6 +97,10 @@ public struct DragOutStart: Sendable, Equatable {
 // MARK: - DragImage Helpers
 
 extension DragImage {
+    static func containsRGBA(width: UInt32, height: UInt32, bytes: Int) -> Bool {
+        width > 0 && height > 0 && UInt64(width) * UInt64(height) <= UInt64(bytes / 4)
+    }
+
     internal static func srgbDecode(_ c: Float) -> Float {
         c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
     }
@@ -110,7 +117,7 @@ extension DragImage {
         if let pngData, !pngData.isEmpty {
             return pngData
         }
-        guard width > 0, height > 0, rgba.count >= Int(width) * Int(height) * 4 else {
+        guard Self.containsRGBA(width: width, height: height, bytes: rgba.count) else {
             return nil
         }
         return ClipboardImage.encodeRGBAAsPNG(width: Int(width), height: Int(height), rgba: rgba)
@@ -154,7 +161,7 @@ extension DragImage {
             } else {
                 decoded = nil
             }
-        } else if width > 0, height > 0, rgba.count >= Int(width) * Int(height) * 4 {
+        } else if Self.containsRGBA(width: width, height: height, bytes: rgba.count) {
             decoded = (width, height, rgba)
         } else {
             decoded = nil
@@ -191,12 +198,14 @@ extension DragImage {
 
     /// Clamps `rect` (points) in device pixels `[x, y, w, h]` to `size` (`drag_out/mod.rs::crop`).
     public static func snapshotCrop(rect: MotionRect, scale: Float, size: (UInt32, UInt32)) -> [UInt32]? {
-        let maxW = Float(size.0)
-        let maxH = Float(size.1)
-        let x0 = UInt32(max(0, min(maxW, floor(rect.x * scale))))
-        let y0 = UInt32(max(0, min(maxH, floor(rect.y * scale))))
-        let x1 = UInt32(max(0, min(maxW, ceil((rect.x + rect.width) * scale))))
-        let y1 = UInt32(max(0, min(maxH, ceil((rect.y + rect.height) * scale))))
+        guard scale.isFinite, scale > 0, rect.x.isFinite, rect.y.isFinite,
+              rect.width.isFinite, rect.height.isFinite else { return nil }
+        let factor = Double(scale)
+        let x = Double(rect.x), y = Double(rect.y)
+        let x0 = UInt32(max(0, min(Double(size.0), floor(x * factor))))
+        let y0 = UInt32(max(0, min(Double(size.1), floor(y * factor))))
+        let x1 = UInt32(max(0, min(Double(size.0), ceil((x + Double(rect.width)) * factor))))
+        let y1 = UInt32(max(0, min(Double(size.1), ceil((y + Double(rect.height)) * factor))))
         guard x1 > x0, y1 > y0 else { return nil }
         return [x0, y0, x1 - x0, y1 - y0]
     }

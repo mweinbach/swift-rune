@@ -1,12 +1,15 @@
 import Testing
 import Foundation
+#if os(macOS)
 import AppKit
+#endif
 @testable import Rune
 
 @Suite("RunePlatformCloseoutDesktopTests")
 struct RunePlatformCloseoutDesktopTests {
     // MARK: - Helpers
 
+    #if os(macOS)
     private static let pngBytes: Data = {
         ClipboardImage.encodeRGBAAsPNG(width: 1, height: 1, rgba: Data([255, 0, 0, 255]))!
     }()
@@ -28,6 +31,7 @@ struct RunePlatformCloseoutDesktopTests {
         }
         return pb
     }
+    #endif
 
     private static func eq(_ key: String, _ mask: UInt) -> MenuKeyEquivalent {
         MenuKeyEquivalent(key: key, modifierMask: mask)
@@ -35,6 +39,7 @@ struct RunePlatformCloseoutDesktopTests {
 
     // MARK: - platform/macos/drop.rs (13 tests)
 
+    #if os(macOS)
     @Test("drop: a file URL is its path")
     @MainActor
     func dropFileURLIsItsPath() {
@@ -76,6 +81,7 @@ struct RunePlatformCloseoutDesktopTests {
         let items = MacOSDropReader.inspectItems(in: pb).map(\.1)
         #expect(items == [.promise(extension: "png")])
     }
+    #endif
 
     @Test("drop: hover paths stand in for files to come")
     func dropHoverPathsStandInForFilesToCome() {
@@ -111,6 +117,7 @@ struct RunePlatformCloseoutDesktopTests {
         #expect(DropTempNaming.freeName(stem: "Image", ext: "png", existing: existing) == "Image 3.png")
     }
 
+    #if os(macOS)
     @Test("drop: text alone gives nothing")
     @MainActor
     func dropTextAloneGivesNothing() {
@@ -143,6 +150,7 @@ struct RunePlatformCloseoutDesktopTests {
         #expect(paths.map(\.lastPathComponent) == ["Image.png", "Image 2.png", "kitten.png"])
         #expect(try Data(contentsOf: paths[0]) == Self.pngBytes)
     }
+    #endif
 
     @Test("drop: URL stems")
     func dropURLStems() {
@@ -152,6 +160,7 @@ struct RunePlatformCloseoutDesktopTests {
         #expect(DropTempNaming.urlStem(fromURLString: "data:image/png;base64,AAAA") == nil)
     }
 
+    #if os(macOS)
     @Test("drop: the operation follows the source")
     @MainActor
     func dropOperationFollowsSource() {
@@ -160,6 +169,7 @@ struct RunePlatformCloseoutDesktopTests {
         #expect(MacOSDropReader.operation(forSourceMask: 0) == 0)
         #expect(MacOSDropReader.operation(forSourceMask: 2) == 0)
     }
+    #endif
 
     @Test("drop: moves coalesce and steps track the drag")
     func dropMovesCoalesceAndStepsTrackDrag() {
@@ -271,6 +281,7 @@ struct RunePlatformCloseoutDesktopTests {
         #expect(Array(png[1..<4]) == Array("PNG".utf8))
         #expect(DragItem().rgba(width: 2, height: 2, pixels: Data([0, 0, 0, 0])).pngData == nil)
         #expect(DragImage.rgba(width: 0, height: 0, pixels: Data()) == nil)
+        #expect(DragImage.rgba(width: .max, height: .max, pixels: Data([0])) == nil)
         #expect(DragImage.rgba(width: 1, height: 1, pixels: Data([0, 0, 0, 0]))?.size(8, 8).pointsSize == Vec2(8, 8))
     }
 
@@ -280,6 +291,8 @@ struct RunePlatformCloseoutDesktopTests {
         #expect(DragImage.snapshotCrop(rect: MotionRect.fromXYWH(-5, -5, 10, 10), scale: 2, size: (400, 300)) == [0, 0, 10, 10])
         #expect(DragImage.snapshotCrop(rect: MotionRect.fromXYWH(190, 0, 50, 10), scale: 2, size: (400, 300)) == [380, 0, 20, 20])
         #expect(DragImage.snapshotCrop(rect: MotionRect.fromXYWH(500, 0, 10, 10), scale: 2, size: (400, 300)) == nil)
+        #expect(DragImage.snapshotCrop(rect: .fromXYWH(0, 0, 3e9, 1), scale: 2, size: (.max, 1)) == [0, 0, .max, 1])
+        #expect(DragImage.snapshotCrop(rect: .fromXYWH(0, 0, 1, 1), scale: .nan, size: (1, 1)) == nil)
     }
 
     @Test("drag_out: readback unpremultiplies and swaps bgra")
@@ -325,6 +338,7 @@ struct RunePlatformCloseoutDesktopTests {
         #expect(MacOSDragOutLogic.outcome(from: 0) == .cancelled)
     }
 
+    #if os(macOS)
     @Test("drag_out macos: unended session reports cancelled once and ended session does not repeat")
     @MainActor
     func dragOutMacOSSessionCompletionGuards() {
@@ -354,6 +368,7 @@ struct RunePlatformCloseoutDesktopTests {
         }
         #expect(log2 == [.copied])
     }
+    #endif
 
     // MARK: - tray.rs (2 tests)
 
@@ -437,6 +452,8 @@ struct RunePlatformCloseoutDesktopTests {
         #expect(Chord(parsing: "cmd+=")?.menuKeycaps().last == "=")
         #expect(Chord(parsing: "cmd+shift+z")?.menuKeycaps().last == "Z")
         #expect(Chord(parsing: "ctrl+f5")?.menuKeycaps().last == "F5")
-        #expect(Chord(parsing: "ctrl+left")?.menuKeycaps().last == "←")
+        #expect(Chord(parsing: "ctrl+left")?.menuKeycaps(on: .mac) == ["⌃", "←"])
+        #expect(Chord(parsing: "ctrl+left")?.menuKeycaps(on: .linux) == ["Ctrl", "Left"])
+        #expect(Chord(parsing: "ctrl+left")?.menuKeycaps(on: .windows) == ["Ctrl", "Left"])
     }
 }

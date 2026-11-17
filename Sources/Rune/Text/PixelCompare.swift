@@ -1,4 +1,8 @@
 import Foundation
+import RuneRef
+#if os(Android)
+import Android
+#endif
 #if canImport(CoreText) && canImport(CoreGraphics)
 import CoreText
 import CoreGraphics
@@ -170,7 +174,16 @@ public struct PixelCompareImage: Sendable, Equatable {
         }
         return PixelCompareImage(width: UInt32(w), height: UInt32(h), rgb: rgb)
         #else
-        throw PixelCompareError.message("ImageIO unavailable on this platform")
+        let decoded = try PortablePNG.decode(Data(contentsOf: url))
+        var rgb = [UInt8]()
+        rgb.reserveCapacity(decoded.width * decoded.height * 3)
+        for i in stride(from: 0, to: decoded.rgba.count, by: 4) {
+            let alpha = Int(decoded.rgba[i + 3])
+            for c in 0..<3 {
+                rgb.append(UInt8((Int(decoded.rgba[i + c]) * alpha + 127) / 255))
+            }
+        }
+        return PixelCompareImage(width: UInt32(decoded.width), height: UInt32(decoded.height), rgb: rgb)
         #endif
     }
 
@@ -208,7 +221,7 @@ public struct PixelCompareImage: Sendable, Equatable {
             throw PixelCompareError.message("failed to finalize PNG at \(url.path)")
         }
         #else
-        throw PixelCompareError.message("ImageIO unavailable on this platform")
+        try writePortablePNG(to: url, greenOnly: false)
         #endif
     }
 
@@ -243,9 +256,27 @@ public struct PixelCompareImage: Sendable, Equatable {
             throw PixelCompareError.message("failed to finalize grayscale PNG at \(url.path)")
         }
         #else
-        throw PixelCompareError.message("ImageIO unavailable on this platform")
+        try writePortablePNG(to: url, greenOnly: true)
         #endif
     }
+
+    #if !canImport(ImageIO) || !canImport(CoreGraphics) || !canImport(UniformTypeIdentifiers)
+    private func writePortablePNG(to url: URL, greenOnly: Bool) throws {
+        let pixelCount = UInt64(width) * UInt64(height)
+        guard pixelCount <= UInt64(Int.max) / 4, rgb.count == Int(pixelCount) * 3 else {
+            throw PixelCompareError.message("RGB buffer does not match \(width)x\(height)")
+        }
+        var rgba = [UInt8]()
+        rgba.reserveCapacity(Int(pixelCount) * 4)
+        for i in stride(from: 0, to: rgb.count, by: 3) {
+            rgba.append(greenOnly ? rgb[i + 1] : rgb[i])
+            rgba.append(rgb[i + 1])
+            rgba.append(greenOnly ? rgb[i + 1] : rgb[i + 2])
+            rgba.append(255)
+        }
+        try PortablePNG.encode(width: Int(width), height: Int(height), rgba: rgba).write(to: url)
+    }
+    #endif
 }
 
 public enum PixelCompareError: Error, CustomStringConvertible, Sendable {
@@ -410,7 +441,7 @@ public final class PixelCompareHarness {
                 let gh = max(0, Int((glyph.rect.w * scale).rounded()))
                 guard gw > 0, gh > 0 else { continue }
 
-                if let colorIndex = glyph.colorGlyphIndex, colorIndex != 0, let ce = textSystem.colorGlyph(colorIndex) {
+                if let ce = textSystem.colorGlyph(for: glyph) {
                     for row in 0..<ce.pixelSize.y {
                         let dy = dstY0 + row
                         guard dy >= 0 && dy < h else { continue }

@@ -1,13 +1,11 @@
 import Foundation
 import Testing
+import RuneRef
 #if canImport(CoreText)
 import CoreText
 #endif
 #if canImport(CoreGraphics)
 import CoreGraphics
-#endif
-#if canImport(ImageIO)
-import ImageIO
 #endif
 @testable import Rune
 
@@ -15,31 +13,10 @@ import ImageIO
 struct TextAudit958ParityTests {
     // MARK: - Helpers
 
-    private static func makeMinimalValidPNG(width: Int, height: Int, rgba: [UInt8]? = nil) -> [UInt8] {
-        let pixels = rgba ?? [UInt8](repeating: 0xFF, count: max(1, width * height * 4))
-        #if canImport(CoreGraphics) && canImport(ImageIO)
-        var buf = pixels
-        if let cs = CGColorSpace(name: CGColorSpace.sRGB),
-           let ctx = CGContext(
-               data: &buf,
-               width: width,
-               height: height,
-               bitsPerComponent: 8,
-               bytesPerRow: width * 4,
-               space: cs,
-               bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-           ),
-           let cgImg = ctx.makeImage() {
-            let mdata = NSMutableData()
-            if let dest = CGImageDestinationCreateWithData(mdata, "public.png" as CFString, 1, nil) {
-                CGImageDestinationAddImage(dest, cgImg, nil)
-                if CGImageDestinationFinalize(dest) {
-                    return [UInt8](mdata as Data)
-                }
-            }
-        }
-        #endif
-        return []
+    private static func makeMinimalValidPNG(width: Int, height: Int) throws -> [UInt8] {
+        let pixels = [UInt8](repeating: 255, count: width * height * 4)
+        let frame = Frame(width: width, height: height, rgba: pixels)
+        return [UInt8](try frame.pngData())
     }
 
     // MARK: - Wave A: glyphsIn & ParsedShortcut.fromPhysicalKey / physicalKey / requireModifier
@@ -235,6 +212,41 @@ struct TextAudit958ParityTests {
         #expect(a.glyphs[0].rect.x >= 0 && a.glyphs[0].rect.x < 4.0)
         #expect(a.size != b.size)
         #expect(a.glyphs != b.glyphs)
+    }
+
+    @Test("Retained glyphs follow smoothing changes and preserve a label's explicit override")
+    func retainedGlyphSmoothingChanges() throws {
+        func makeRuntime() -> Runtime<Void> {
+            Runtime(state: (), viewport: Vec2(160, 72), pixelScale: 1) { _, _ in
+                col().sizeFull().center().bg(.black)
+                    .child(text("Lights on").font(Tok.Typography.title).w(79.5).color(.white))
+                    .child(text("Explicit").font(TextStyle(size: 13, fontSmoothing: .off)).w(79.5).color(.white))
+            }
+        }
+
+        let runtime = makeRuntime()
+        let modes: [FontSmoothing] = [.on, .windfoilChromium, .off, .windfoilChromium]
+        for (step, mode) in modes.enumerated() {
+            let time = Double(step)
+            runtime.fontSmoothing = mode
+            let scene = runtime.frame(at: time)
+            for (label, expected) in [("Lights on", mode), ("Explicit", .off)] {
+                let layout = try #require(runtime.nodeTextLayouts.values.first { $0.box.authText == label }?.box)
+                let pens = layout.shaped.glyphPens
+                try #require(!pens.isEmpty)
+                #expect(pens.allSatisfy { $0.smoothing == expected })
+            }
+            let cached = runtime.textSystem.glyphCache.flattened
+            #expect(cached > 0)
+            #expect(runtime.frame(at: time).primitives == scene.primitives)
+            #expect(runtime.textSystem.glyphCache.flattened == cached)
+
+            let fresh = makeRuntime()
+            fresh.fontSmoothing = mode
+            let actual = try RuneRef.render(scene)
+            let expected = try RuneRef.render(fresh.frame(at: time))
+            #expect(actual == expected)
+        }
     }
 
     // MARK: - L756 & L759: CoreGraphics vs Analytic Outline Mask & Corpus Sweep
@@ -563,7 +575,7 @@ struct TextAudit958ParityTests {
 
     @Test("L893 & L900 (cursor/image_tests.rs:13,:120): Cursor.image in Runtime and PNG/hotspot/size errors")
     func cursorImageRuntimeAndValidationParity() throws {
-        let validPNG = Self.makeMinimalValidPNG(width: 16, height: 16)
+        let validPNG = try Self.makeMinimalValidPNG(width: 16, height: 16)
         #expect(!validPNG.isEmpty)
 
         let ci = CursorImage(png: validPNG, hot: SIMD2<Float>(4, 6))
@@ -587,11 +599,11 @@ struct TextAudit958ParityTests {
         let nanHot = try CursorImage(png: validPNG, hot: SIMD2<Float>(.nan, .infinity)).decodedMetrics()
         #expect(nanHot.hot.x == 0 && nanHot.hot.y == 7)
 
-        let oddPNG = Self.makeMinimalValidPNG(width: 5, height: 5)
+        let oddPNG = try Self.makeMinimalValidPNG(width: 5, height: 5)
         let oddCss = try CursorImage(png: oddPNG, hot: SIMD2<Float>(9, 9)).cssCursor(url: "blob:x")
         #expect(oddCss == "image-set(url(\"blob:x\") 2x) 2 2, auto")
 
-        let bigPNG = Self.makeMinimalValidPNG(width: 300, height: 8)
+        let bigPNG = try Self.makeMinimalValidPNG(width: 300, height: 8)
         #expect(throws: CursorImageError.invalidDimensions(width: 300, height: 8, maxSide: 256)) {
             _ = try CursorImage(png: bigPNG, hot: .zero).decodedMetrics()
         }

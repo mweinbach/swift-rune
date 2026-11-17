@@ -22,7 +22,9 @@ struct GpuHealthAndBackendParityTests {
         #expect(GpuBackendPolicy.resolve(env: "metal", chosen: .webGpu) == .metal)
         #expect(GpuBackendPolicy.resolve(env: "wgpu", chosen: .metal) == .webGpu)
         #expect(GpuBackendPolicy.resolve(env: nil, chosen: .webGpu) == .webGpu)
-        #expect(GpuBackendPolicy.resolve(env: nil, chosen: nil) == .metal)
+        #expect(GpuBackendPolicy.resolve(env: nil, chosen: nil) == GpuBackendPolicy.defaultBackend)
+        #expect(GpuBackendPolicy.resolve(env: "auto", chosen: .vulkan) == GpuBackendPolicy.defaultBackend)
+        #expect(GpuBackendPolicy.resolve(env: "gl", chosen: .metal) == .gl)
 
         #expect(GpuBackendPolicy.defaulted(env: nil, chosen: nil) == true)
         #expect(GpuBackendPolicy.defaulted(env: "metal", chosen: nil) == false)

@@ -72,13 +72,19 @@ public final class MetalRenderer {
     public enum RendererError: Error, CustomStringConvertible {
         case metalUnavailable
         case shaderCompileFailed(String)
+        case missingCachedLayer(UInt64)
 
         public var description: String {
             switch self {
             case .metalUnavailable: return "No Metal device is available on this machine"
             case .shaderCompileFailed(let msg): return "Metal shader compilation failed: \(msg)"
+            case .missingCachedLayer(let node): return "Rune layer \(node) is unavailable. Rebuild the frame on its drawing renderer."
             }
         }
+    }
+
+    deinit {
+        renderEngine.layersPool.registerTracker(nil)
     }
 
     public init(device: MTLDevice? = nil) throws {
@@ -161,6 +167,7 @@ public final class MetalRenderer {
         sampDesc.tAddressMode = .clampToEdge
         self.samplerLinear = dev.makeSamplerState(descriptor: sampDesc)!
         self.renderEngine = try RenderFrameEngine(device: dev)
+        self.renderEngine.layersPool.drawingQueue = queue
     }
 
     /// Evaluates an array of `GPUSpringNode` tracks on the Metal GPU at `timeSeconds`.
@@ -726,6 +733,32 @@ public final class MetalRenderer {
         return 2.0 * topLen + 3.0 * cornerLen + 2.0 * sideLen + saturate(atan2(-(p.y + sy), -(p.x + sx)) / 1.5707963268) * cornerLen;
     }
 
+    static inline float4 image_texel(texture2d<float> atlas, uint2 pixel) {
+        float4 texel = atlas.read(pixel);
+        return float4(texel.rgb * texel.a, texel.a);
+    }
+
+    static inline float4 sample_image(texture2d<float> atlas, float4 uv, float4 source, float2 coords) {
+        float2 size = float2(atlas.get_width(), atlas.get_height());
+        float2 start = saturate(uv.xy) * size;
+        float2 end = saturate(uv.zw) * size;
+        float2 lower = min(start, end);
+        float2 upper = max(start, end);
+        if (all(source.zw > source.xy)) {
+            lower = clamp(source.xy, float2(0), size);
+            upper = clamp(source.zw, float2(0), size);
+        }
+        // Normalizing an integer texel edge can round it just outside its atlas slot.
+        float2 lo = min(floor(lower + lower * 1.1920929e-7), size - 1.0);
+        float2 hi = clamp(ceil(upper - upper * 1.1920929e-7) - 1.0, lo, size - 1.0);
+        float2 pixel = clamp(mix(start, end, coords) - 0.5, lo, hi);
+        uint2 first = uint2(floor(pixel));
+        uint2 last = min(first + uint2(1), uint2(hi));
+        float2 f = fract(pixel);
+        return mix(mix(image_texel(atlas, first), image_texel(atlas, uint2(last.x, first.y)), f.x),
+                   mix(image_texel(atlas, uint2(first.x, last.y)), image_texel(atlas, last), f.x), f.y);
+    }
+
     fragment float4 rune_fragment(
         Varyings in [[stage_in]],
         constant Primitive *prims [[buffer(0)]],
@@ -803,10 +836,20 @@ public final class MetalRenderer {
             float a = prim.fill.w * cov;
             outPremul = float4(prim.fill.rgb * a, a);
         } else if (kind == 2) {
-            float2 uNorm = (localP + halfSize) / max(prim.rect.zw, float2(1e-4));
-            if (uNorm.x < 0.0 || uNorm.x > 1.0 || uNorm.y < 0.0 || uNorm.y > 1.0) return float4(0.0);
-            float2 uv = mix(prim.uv.xy, prim.uv.zw, uNorm);
-            float cov = glyphAtlas.sample(samp, uv).r;
+            float cov;
+            if (prim.params.z == 1.0 && prim.turn == 0.0) {
+                float2 offset = frag - prim.rect.xy;
+                if (any(offset < 0.0) || any(offset >= prim.rect.zw)) return float4(0.0);
+                float2 size = float2(glyphAtlas.get_width(), glyphAtlas.get_height());
+                float2 start = prim.uv.xy * size;
+                float2 texel = floor(start + abs(start) * 1.1920929e-7) + floor(offset);
+                if (any(texel < 0.0) || any(texel >= size)) return float4(0.0);
+                cov = glyphAtlas.read(uint2(texel)).r;
+            } else {
+                float2 uNorm = (localP + halfSize) / max(prim.rect.zw, float2(1e-4));
+                if (uNorm.x < 0.0 || uNorm.x > 1.0 || uNorm.y < 0.0 || uNorm.y > 1.0) return float4(0.0);
+                cov = glyphAtlas.sample(samp, mix(prim.uv.xy, prim.uv.zw, uNorm)).r;
+            }
             if (prim.params.w > 0.0 && abs(prim.params.w - 1.0) > 1e-3) {
                 cov = pow(saturate(cov), prim.params.w);
             }
@@ -828,6 +871,11 @@ public final class MetalRenderer {
             float maxExt = abs(dir.x) * halfSize.x + abs(dir.y) * halfSize.y;
             float t = maxExt > 1e-4 ? saturate(0.5 + dot(localP, dir) / (2.0 * maxExt)) : 0.5;
             float4 col = mix(prim.fill, prim.border, t);
+            if (prim.params.x > 0.0) {
+                float2 innerHalf = max(float2(0.0), halfSize - prim.params.x);
+                float4 innerRadii = max(float4(0.0), abs(prim.radii) - prim.params.x);
+                outerCov = max(0.0, outerCov - box_cov(sd_box(localP, innerHalf, innerRadii)));
+            }
             float a = col.w * outerCov;
             outPremul = float4(col.rgb * a, a);
         } else if (kind == 5) {
@@ -887,11 +935,8 @@ public final class MetalRenderer {
             float outerCov = box_cov(sd_box(localP, halfSize, prim.radii));
             if (outerCov <= 0.0) return float4(0.0);
             float2 uNorm = saturate((localP + halfSize) / max(prim.rect.zw, float2(1e-4)));
-            float2 uv = mix(prim.uv.xy, prim.uv.zw, uNorm);
-            float4 tex = imageAtlas.sample(samp, uv);
-            float4 c = tex * prim.fill;
-            float a = c.w * outerCov;
-            outPremul = float4(c.rgb * a, a);
+            float4 tex = sample_image(imageAtlas, prim.uv, prim.border, uNorm);
+            outPremul = tex * float4(prim.fill.rgb, 1.0) * (prim.fill.a * outerCov);
         } else if (kind == 10) {
             float bw = max(0.5, prim.params.x);
             float outerCov = box_cov(sd_box(localP, halfSize, prim.radii));

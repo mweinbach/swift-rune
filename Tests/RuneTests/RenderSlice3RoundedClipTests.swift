@@ -5,6 +5,7 @@ import RuneMotion
 
 #if canImport(Metal) && canImport(QuartzCore)
 import Metal
+#endif
 
 @Suite("Slice 3 Rounded Clip Parity Tests (rounded_clip_tests.rs)")
 struct RenderSlice3RoundedClipTests {
@@ -20,6 +21,7 @@ struct RenderSlice3RoundedClipTests {
             * min(max(rect[3] - y + 0.5, 0.0), 1.0)
     }
 
+    #if canImport(Metal)
     private func drawRaw(renderer: MetalRenderer, frame: RenderFrame) throws -> [UInt8] {
         let w = max(1, frame.width)
         let h = max(1, frame.height)
@@ -50,6 +52,8 @@ struct RenderSlice3RoundedClipTests {
         }
         return rgba
     }
+
+    #endif
 
     // 1. #127 (`rounded_clip_tests.rs:6`)
     @Test("packed_clip_radii_boundaries_and_fade_lanes_do_not_collide")
@@ -97,6 +101,7 @@ struct RenderSlice3RoundedClipTests {
         }
     }
 
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
     // 3. #131 (`rounded_clip_tests.rs:47`)
     @Test("per_corner_video_clip_matches_the_primitive_mask")
     func perCornerVideoClipMatchesThePrimitiveMask() throws {
@@ -105,7 +110,7 @@ struct RenderSlice3RoundedClipTests {
         let byteFrame = try ByteFrame(width: 1, height: 1, format: .bgra, color: .srgb, planes: [Data(repeating: 255, count: 4)])
         try surface.pushBytes(byteFrame, frameId: 1)
 
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         for continuous in [false, true] {
             var outs: [[UInt8]] = []
             for video in [false, true] {
@@ -136,6 +141,8 @@ struct RenderSlice3RoundedClipTests {
         }
     }
 
+    #endif
+
     // 4. #132 (`rounded_clip_tests.rs:83`)
     @Test("raised_children_keep_the_ancestors_per_corner_clip")
     func raisedChildrenKeepTheAncestorsPerCornerClip() {
@@ -156,11 +163,12 @@ struct RenderSlice3RoundedClipTests {
         }
     }
 
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
     // 5. #133 (`rounded_clip_tests.rs:109`)
     @Test("rounded_clip_direct_nested_and_rectangular_intersections")
     func roundedClipDirectNestedAndRectangularIntersections() throws {
         #expect(MemoryLayout<RenderInstance>.stride == 128)
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         for mode in 0..<3 {
             let rt = Runtime<Int>(state: mode, viewport: Vec2(64, 48), pixelScale: 1.0) { m, _ in
                 let white: El<Int> = el().size(100, 100).absolute(x: -30, y: -30).bg(.white)
@@ -182,9 +190,11 @@ struct RenderSlice3RoundedClipTests {
             rt.srgbBlend = true
             let rf = rt.renderFrame(at: 0.0)
             let frame = try renderer.renderOffscreen(rf)
+            #if canImport(Metal)
             if mode == 0 {
-                #expect(renderer.layerStats().extraPasses == 0, "ordinary rounded clip stays direct")
+                #expect(renderer.metal.layerStats().extraPasses == 0, "ordinary rounded clip stays direct")
             }
+            #endif
             for y in 0..<48 {
                 for x in 0..<64 {
                     let px = Float(x) + 0.5
@@ -228,7 +238,7 @@ struct RenderSlice3RoundedClipTests {
         let liveClipped = Live<Vec2>(.zero)
         let plain = makeRt(clipped: false, live: livePlain)
         let clipped = makeRt(clipped: true, live: liveClipped)
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
 
         for offset: Float in [0.0, 26.0, 32.0] {
             _ = livePlain.set(Vec2(offset, 0.0))
@@ -265,7 +275,7 @@ struct RenderSlice3RoundedClipTests {
     // 7. #135 (`rounded_clip_tests.rs:202`)
     @Test("rounded_clip_preserves_every_primitive_lane_and_feathers")
     func roundedClipPreservesEveryPrimitiveLaneAndFeathers() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         var glyphTexels = [UInt8](repeating: 0, count: 64 * 64)
         for y in 0..<48 {
             for x in 0..<64 {
@@ -342,7 +352,9 @@ struct RenderSlice3RoundedClipTests {
                 instances: [instance]
             )
             let clipped = try renderer.renderOffscreen(clippedFrame).rgba
-            #expect(renderer.layerStats().extraPasses == 0)
+            #if canImport(Metal)
+            #expect(renderer.metal.layerStats().extraPasses == 0)
+            #endif
 
             var cut = false
             func toPremul(_ rgba: [UInt8], at: Int) -> [Float] {
@@ -370,7 +382,7 @@ struct RenderSlice3RoundedClipTests {
     // 8. #136 (`rounded_clip_tests.rs:249`)
     @Test("rounded_clip_native_video_inherits_capsule_without_a_layer")
     func roundedClipNativeVideoInheritsCapsuleWithoutALayer() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let surface = NativeSurface()
         let byteFrame = try ByteFrame(width: 1, height: 1, format: .bgra, color: .srgb, planes: [Data(repeating: 255, count: 4)])
         try surface.pushBytes(byteFrame, frameId: 1)
@@ -386,7 +398,9 @@ struct RenderSlice3RoundedClipTests {
         rt.srgbBlend = true
         let rf = rt.renderFrame(at: 0.0)
         let out = try renderer.renderOffscreen(rf).rgba
-        #expect(renderer.layerStats().extraPasses == 0)
+        #if canImport(Metal)
+        #expect(renderer.metal.layerStats().extraPasses == 0)
+        #endif
         for y in 0..<48 {
             for x in 0..<64 {
                 let a = mask(Float(x) + 0.5, Float(y) + 0.5, [8, 8, 56, 40], 16.0)
@@ -400,7 +414,7 @@ struct RenderSlice3RoundedClipTests {
     @Test("rounded_clip_live_truncated_text_preserves_corner_centres")
     func roundedClipLiveTruncatedTextPreservesCornerCentres() throws {
         typealias State = (clipped: Bool, text: LiveText, truncate: Bool)
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         for scale: Float in [1.0, 2.0] {
             for truncate in [false, true] {
                 let value = LiveText("MMMMMMMM")
@@ -451,7 +465,7 @@ struct RenderSlice3RoundedClipTests {
     @Test("live_text_clear_of_rounded_corners_draws_without_a_layer")
     func liveTextClearOfRoundedCornersDrawsWithoutALayer() throws {
         typealias State = (clipped: Bool, text: LiveText)
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let bgCol = Color.oklch(0.25, 0.04, 260.0)
         for scale: Float in [1.0, 2.0] {
             let value = LiveText("0000")
@@ -501,6 +515,8 @@ struct RenderSlice3RoundedClipTests {
         }
     }
 
+    #endif
+
     // 11a. #139a (`rounded_clip_tests.rs:358`)
     @Test("rounded_clip_and_dissolve_follow_retained_presence")
     func roundedClipAndDissolveFollowRetainedPresence() {
@@ -532,11 +548,12 @@ struct RenderSlice3RoundedClipTests {
         #expect(rfDone.instances.allSatisfy { $0.params.y != KIND_LAYER })
     }
 
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
     // 11b. #139b (`rounded_clip_tests.rs:375`)
     @Test("rounded_clip_leaves_central_scroll_rectangles_on_the_direct_path")
     func roundedClipLeavesCentralScrollRectanglesOnTheDirectPath() throws {
         typealias State = (rounded: Bool, horizontal: Bool)
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         for horizontal in [false, true] {
             var frames: [[UInt8]] = []
             for rounded in [false, true] {
@@ -556,7 +573,9 @@ struct RenderSlice3RoundedClipTests {
                 rt.srgbBlend = true
                 let rf = rt.renderFrame(at: 0.0)
                 let frame = try renderer.renderOffscreen(rf)
-                #expect(renderer.layerStats().targets == 0)
+                #if canImport(Metal)
+                #expect(renderer.metal.layerStats().targets == 0)
+                #endif
                 frames.append(frame.rgba)
             }
             #expect(frames[0] == frames[1], "central strip misses every rounded corner")
@@ -570,7 +589,7 @@ struct RenderSlice3RoundedClipTests {
             var rounded: Bool
             var edit = TextEdit("MMMMMMMMMMMM")
         }
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         for scale: Float in [1.0, 2.0] {
             let w = Int((96.0 * scale).rounded())
             let h = Int((56.0 * scale).rounded())
@@ -603,6 +622,9 @@ struct RenderSlice3RoundedClipTests {
         }
     }
 
+    #endif
+
+    #if canImport(Metal)
     // 11d. #139d (`rounded_clip_tests.rs:434`)
     @Test("per_corner_continuous_card_clips_image_child_and_nested_layers")
     func perCornerContinuousCardClipsImageChildAndNestedLayers() throws {
@@ -713,5 +735,5 @@ struct RenderSlice3RoundedClipTests {
         }
         #expect(nestedFrame.rgba[(48 * 128 + 64) * 4 + 3] == 255, "interior remains opaque")
     }
+    #endif
 }
-#endif

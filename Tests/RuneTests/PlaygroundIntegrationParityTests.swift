@@ -90,6 +90,27 @@ struct PlaygroundDeepIntegrationTests {
     private struct Real {}
     private struct Card {}
 
+    @Test("window resize rebuilds the playground bar and its centered app content")
+    func windowResizeRelayoutsPlayground() throws {
+        let runtime = Runtime(state: Real(), viewport: Vec2(320, 200)) { _, _ in
+            col().sizeFull().center().child(el().key("control").size(38, 22))
+        }
+        _ = try PlaygroundAttach.attach(
+            runtime: runtime, host: nil, scenes: ["example": { _, _ in }],
+            makeState: { Real() }, env: [:], windowed: true
+        )
+        _ = runtime.renderFrame(at: 0)
+        let before = try #require(runtime.find("control"))
+        runtime.setViewport(Vec2(580, 452))
+        _ = runtime.renderFrame(at: 1)
+        let root = try #require(pgElement(runtime, "playground-closed"))
+        let after = try #require(runtime.find("control"))
+        #expect(root.rect[2] == 580)
+        #expect(root.rect[3] == 452)
+        #expect(after.x - before.x == 130)
+        #expect(after.y - before.y == 126)
+    }
+
     private func makePlayground() -> PlaygroundHost<Real> {
         let cardView: (Card, inout Cx<Card>) -> El<Card> = { _, _ in text("card").key("card") }
         return PlaygroundHost<Real>()
@@ -237,7 +258,7 @@ struct PlaygroundDeepIntegrationTests {
         pgTap(rt, "playground-filter", clock: &t)
         #expect(pgFocused(rt) == "playground-filter", "a click focuses it")
         pgTyped(rt, "hud", clock: &t)
-        pgPress(rt, .command("a"), mods: Mods(cmd: true), clock: &t)
+        pgPress(rt, .command("a"), mods: RuneTestKey.primaryMods(), clock: &t)
         pgTyped(rt, "portal", clock: &t)
         #expect(rows(rt) == ["group-3", "group-3-1", "item-4", "group-1", "group-2-1", "group-2-2", "item-2"], "⌘A selects what's typed, which typing replaces")
         pgPress(rt, .arrowDown, clock: &t)
@@ -334,7 +355,7 @@ struct PlaygroundKeysIntegrationTests {
         .scene("Palette/Search") { s, _ in s.scene = "search" }
         .onKey { s, ev, _ in
             switch ev.key {
-            case .command("k") where ev.mods.cmd:
+            case .command("k") where ev.mods.primaryCommand:
                 s.palette = !s.palette
             case .escape where s.palette:
                 s.palette = false
@@ -364,7 +385,7 @@ struct PlaygroundKeysIntegrationTests {
         pgPress(rt, .arrowDown, clock: &t)
         #expect(stageState(rt).0 == "search", "↓ opens the next story, the keyboard still on the list")
         #expect(pgSays(rt, "playground-hint").hasPrefix("↑↓ stories"))
-        pgPress(rt, .command("k"), mods: Mods(cmd: true), clock: &t)
+        pgPress(rt, .command("k"), mods: RuneTestKey.primaryMods(), clock: &t)
         #expect(stageState(rt).1, "⌘K reaches the story's on_key")
         pgTyped(rt, "3", clock: &t)
         #expect(stageState(rt).2 == "3", "and so does a digit")
@@ -381,7 +402,7 @@ struct PlaygroundKeysIntegrationTests {
         let st2 = stageState(rt)
         #expect(st2.0 == "launch" && st2.1 == false && st2.2 == "", "so are the arrows, and none reach the story")
         pgPress(rt, .tab, clock: &t)
-        pgPress(rt, .command("k"), mods: Mods(cmd: true), clock: &t)
+        pgPress(rt, .command("k"), mods: RuneTestKey.primaryMods(), clock: &t)
         #expect(stageState(rt).1, "from the side column too")
         pgPress(rt, .escape, clock: &t)
         #expect(stageState(rt).1 && pgSays(rt, "playground-hint").hasPrefix("↑↓ stories"), "Esc there goes back to the list")
@@ -403,7 +424,7 @@ struct PlaygroundKeysIntegrationTests {
         #expect(st.0 == "launch" && st.1 == false && st.2 == "", "the field keeps what's typed")
         pgPress(rt, .backspace, clock: &t)
         #expect(pgShown(rt, "playground-item-1") && !pgShown(rt, "playground-item-0"))
-        pgPress(rt, .command("k"), mods: Mods(cmd: true), clock: &t)
+        pgPress(rt, .command("k"), mods: RuneTestKey.primaryMods(), clock: &t)
         #expect(stageState(rt).1, "a chord the field doesn't use reaches the story")
         pgPress(rt, .enter, clock: &t)
         #expect(stageState(rt).0 == "search", "Return opens the first match")

@@ -20,14 +20,14 @@ public enum CpuBootShade {
     @inline(__always)
     public static func sdContinuous(_ p: SIMD2<Float>, half: SIMD2<Float>, r: Float) -> Float {
         let e = CONTINUOUS_K * r
-        let q = half - abs(p)
+        let q = half - SIMD2(abs(p.x), abs(p.y))
         let v = SIMD2<Float>(repeating: e) - q
         if v.x <= 0.0 || v.y <= 0.0 {
             return max(-q.x, -q.y)
         }
         let u = atan2f(v.y, v.x) * (4.0 / 3.14159265) - 1.0
         let u2 = u * u
-        return simd_length(v) - e * (1.14602295 + u2 * (-0.37573161 + u2 * (0.30796609 - 0.07724354 * u2)))
+        return (v.x * v.x + v.y * v.y).squareRoot() - e * (1.14602295 + u2 * (-0.37573161 + u2 * (0.30796609 - 0.07724354 * u2)))
     }
 
     @inline(__always)
@@ -42,8 +42,9 @@ public enum CpuBootShade {
             return sdContinuous(p, half: half, r: min(-r, min(half.x, half.y)))
         }
         r = min(r, min(half.x, half.y))
-        let q = abs(p) - half + SIMD2<Float>(repeating: r)
-        return min(max(q.x, q.y), 0.0) + simd_length(simd_max(q, .zero)) - r
+        let q = SIMD2(abs(p.x), abs(p.y)) - half + SIMD2<Float>(repeating: r)
+        let dx = max(q.x, 0), dy = max(q.y, 0)
+        return min(max(q.x, q.y), 0.0) + (dx * dx + dy * dy).squareRoot() - r
     }
 
     @inline(__always)
@@ -82,19 +83,25 @@ public enum CpuBootShade {
 
         /// Margin inside `rect` beyond which `alpha(p)` is guaranteed `1.0`.
         public func inset() -> SIMD4<Float> {
-            let l = abs(fadeWidth.x) > 0 ? abs(fadeWidth.x) + fadeOffset.x * abs(fadeWidth.x) + 0.5 : 0.5
-            let t = abs(fadeWidth.y) > 0 ? abs(fadeWidth.y) + fadeOffset.y * abs(fadeWidth.y) + 0.5 : 0.5
-            let r = abs(fadeWidth.z) > 0 ? abs(fadeWidth.z) + fadeOffset.z * abs(fadeWidth.z) + 0.5 : 0.5
-            let b = abs(fadeWidth.w) > 0 ? abs(fadeWidth.w) + fadeOffset.w * abs(fadeWidth.w) + 0.5 : 0.5
-            return SIMD4<Float>(l, t, r, b)
+            var result = SIMD4<Float>(repeating: 0.5)
+            for edge in 0..<4 where fadeOffset[edge] < 1 {
+                result[edge] = max(0.5, abs(fadeWidth[edge]))
+            }
+            return result
         }
 
         public func alpha(_ p: SIMD2<Float>) -> Float {
             let hard = SIMD4<Float>(p.x - rect.x, p.y - rect.y, rect.z - p.x, rect.w - p.y)
             var a: Float = 1.0
             for edge in 0..<4 {
-                let d = hard[edge] + (fadeWidth[edge] != 0.0 ? fadeOffset[edge] * abs(fadeWidth[edge]) : 0.0)
-                a *= ramp(d, fade: fadeWidth[edge])
+                let d = hard[edge], f = fadeWidth[edge], offset = fadeOffset[edge]
+                if offset >= 1 {
+                    a *= ramp(d, fade: 0)
+                } else if offset > 0 {
+                    a *= min(ramp(d, fade: 0), ramp(d + offset * abs(f), fade: f))
+                } else {
+                    a *= ramp(d, fade: f)
+                }
             }
             if let r = radii {
                 let half = SIMD2<Float>((rect.z - rect.x) * 0.5, (rect.w - rect.y) * 0.5)
@@ -626,25 +633,30 @@ public enum CpuBootShade {
     }
 
     public static func image(_ i: RenderInstance, page: CpuBootImage, p: SIMD2<Float>) -> SIMD4<Float> {
+        guard page.width > 0, page.height > 0, i.rect.z > 0, i.rect.w > 0 else { return .zero }
         let half = SIMD2<Float>(i.rect.z * 0.5, i.rect.w * 0.5)
         let d = sdRounded(SIMD2<Float>(p.x - i.rect.x - half.x, p.y - i.rect.y - half.y), half: half, radii: i.radii)
-        let localX = (p.x - i.rect.x) * i.uv.z / max(i.rect.z, 1e-6) - 0.5
-        let localY = (p.y - i.rect.y) * i.uv.w / max(i.rect.w, 1e-6) - 0.5
-        let loX = Int(i.uv.x)
-        let loY = Int(i.uv.y)
-        let hiX = loX + Int(i.uv.z) - 1
-        let hiY = loY + Int(i.uv.w) - 1
-        let bx = floorf(localX)
-        let by = floorf(localY)
-        let fx = localX - bx
-        let fy = localY - by
-        let t0x = min(max(loX + Int(bx), loX), max(loX, hiX))
-        let t0y = min(max(loY + Int(by), loY), max(loY, hiY))
-        let t1x = min(max(loX + Int(bx) + 1, loX), max(loX, hiX))
-        let t1y = min(max(loY + Int(by) + 1, loY), max(loY, hiY))
+        let hasBounds = i.border.z > i.border.x && i.border.w > i.border.y
+        func taps(start: Float, span: Float, lowerBound: Float, upperBound: Float, count: Int, at coordinate: Float)
+            -> (first: Int, last: Int, weight: Float) {
+            let end = start + span
+            let lower = min(Float(count), max(0, hasBounds ? lowerBound : min(start, end)))
+            let upper = min(Float(count), max(0, hasBounds ? upperBound : max(start, end)))
+            let lo = min(Float(count - 1), floorf(lower + lower * Float.ulpOfOne))
+            let hi = min(Float(count - 1), max(lo, ceilf(upper - upper * Float.ulpOfOne) - 1))
+            let pixel = min(hi, max(lo, start + coordinate * span - 0.5))
+            let base = floorf(pixel)
+            return (Int(base), min(Int(base) + 1, Int(hi)), pixel - base)
+        }
+        let x = taps(start: i.uv.x, span: i.uv.z, lowerBound: i.border.x, upperBound: i.border.z,
+                     count: page.width, at: (p.x - i.rect.x) / i.rect.z)
+        let y = taps(start: i.uv.y, span: i.uv.w, lowerBound: i.border.y, upperBound: i.border.w,
+                     count: page.height, at: (p.y - i.rect.y) / i.rect.w)
         let pm = i.params.z > 0.5
-        let top = mix4(imageTexel(page, x: t0x, y: t0y, premultiplied: pm), imageTexel(page, x: t1x, y: t0y, premultiplied: pm), fx)
-        let bottom = mix4(imageTexel(page, x: t0x, y: t1y, premultiplied: pm), imageTexel(page, x: t1x, y: t1y, premultiplied: pm), fx)
-        return mix4(top, bottom, fy) * (i.fill.w * clamp01(0.5 - d))
+        let top = mix4(imageTexel(page, x: x.first, y: y.first, premultiplied: pm),
+                       imageTexel(page, x: x.last, y: y.first, premultiplied: pm), x.weight)
+        let bottom = mix4(imageTexel(page, x: x.first, y: y.last, premultiplied: pm),
+                          imageTexel(page, x: x.last, y: y.last, premultiplied: pm), x.weight)
+        return mix4(top, bottom, y.weight) * (i.fill.w * clamp01(0.5 - d))
     }
 }

@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(Metal)
 import Metal
+#endif
 import Testing
 @testable import Rune
 
@@ -55,6 +57,7 @@ struct RenderSlice3LayerTests {
         }
     }
 
+    #if canImport(Metal)
     private func drawRaw(
         renderer: MetalRenderer,
         frame: RenderFrame,
@@ -111,12 +114,15 @@ struct RenderSlice3LayerTests {
         return raw
     }
 
+    #endif
+
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
     // 1. #34 (`layer_tests.rs:14`)
     @Test("raised_children_of_cached_clipped_groups_stay_visible_and_clipped")
     @MainActor
     func raisedChildrenOfCachedClippedGroupsStayVisibleAndClipped() throws {
         struct S {}
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<S>(state: S(), viewport: Vec2(32, 32), pixelScale: 1.0) { _, _ in
             el().size(32, 32).child(
                 el().size(16, 16).clipRounded(8).cache().opacity(0.5).child(
@@ -128,9 +134,8 @@ struct RenderSlice3LayerTests {
         rt.srgbBlend = false
         for _ in 0..<3 {
             let rf = rt.renderFrame(at: 0.0)
-            renderer.prepare(frame: rf, viewport: (32, 32))
-            let out = try drawRaw(renderer: renderer, frame: rf, pixelFormat: .bgra8Unorm_srgb)
-            near(out[(8 * 32 + 8) * 4..<(8 * 32 + 9) * 4], srgbBytes(SIMD4<Float>(repeating: 0.5)), label: "inside")
+            let out = try renderer.renderOffscreen(rf).rgba
+            near(out[(8 * 32 + 8) * 4..<(8 * 32 + 9) * 4], [255, 255, 255, 128], label: "inside")
             near(out[(8 * 32 + 20) * 4..<(8 * 32 + 21) * 4], [0, 0, 0, 0], label: "outside-clip")
             near(out[0..<4], [0, 0, 0, 0], label: "corner")
         }
@@ -139,18 +144,19 @@ struct RenderSlice3LayerTests {
     // 2. #35 (`layer_tests.rs:54`)
     @Test("isolated_layers_match_scalar_overlap_crossfade_and_nesting")
     func isolatedLayersMatchScalarOverlapCrossfadeAndNesting() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let bounds = SIMD4<Float>(4, 4, 24, 8)
         var instances = groupInstances(bounds, opacity: 0.5, color: SIMD4<Float>(1, 1, 1, 1))
         var frame = RenderFrame(width: 32, height: 16, srgbBlend: false, clearColor: .zero, instances: instances)
-        renderer.prepare(frame: frame, viewport: (32, 16))
-        var out = try drawRaw(renderer: renderer, frame: frame, pixelFormat: .bgra8Unorm_srgb)
+        var out = try renderer.renderOffscreen(frame).rgba
         for x in [6, 16, 26] {
-            near(out[(8 * 32 + x) * 4..<(8 * 32 + x + 1) * 4], srgbBytes(SIMD4<Float>(repeating: 0.5)), label: "x=\(x)")
+            near(out[(8 * 32 + x) * 4..<(8 * 32 + x + 1) * 4], [255, 255, 255, 128], label: "x=\(x)")
         }
-        #expect(renderer.layerStats().targets == 1)
-        #expect(renderer.layerStats().bytes == 64 * 64 * 8, "minimum bucket")
-        let allocations = renderer.layerStats().allocations
+        #if canImport(Metal)
+        #expect(renderer.metal.layerStats().targets == 1)
+        #expect(renderer.metal.layerStats().bytes == 64 * 64 * 8, "minimum bucket")
+        let allocations = renderer.metal.layerStats().allocations
+        #endif
 
         // Two opaque states, each with internal overlap. Source-over crossfade is B(1-t) over
         // A(t): alpha = 1-t+t^2, NOT 1. Internal child overlap must never alter that oracle.
@@ -158,45 +164,49 @@ struct RenderSlice3LayerTests {
             instances = groupInstances(bounds, opacity: t, color: SIMD4<Float>(1, 0, 0, 1))
             instances.append(contentsOf: groupInstances(bounds, opacity: 1 - t, color: SIMD4<Float>(0, 0, 1, 1)))
             frame.instances = instances
-            renderer.prepare(frame: frame, viewport: (32, 16))
-            out = try drawRaw(renderer: renderer, frame: frame, pixelFormat: .bgra8Unorm_srgb)
-            let want = srgbBytes(SIMD4<Float>(t * t, 0, 1 - t, 1 - t + t * t))
+            out = try renderer.renderOffscreen(frame).rgba
+            let alpha = 1 - t + t * t
+            let want = srgbBytes(SIMD4<Float>(t * t / alpha, 0, (1 - t) / alpha, alpha))
             for x in [6, 16, 26] {
                 near(out[(8 * 32 + x) * 4..<(8 * 32 + x + 1) * 4], want, label: "crossfade t=\(t) x=\(x)")
             }
         }
-        #expect(renderer.layerStats().allocations == allocations + 1, "reuse targets while opacity changes")
+        #if canImport(Metal)
+        #expect(renderer.metal.layerStats().allocations == allocations + 1, "reuse targets while opacity changes")
+        #endif
 
         instances = [.beginLayer(bounds: bounds, clip: NO_CLIP, spec: LayerSpec(opacity: 0.5))]
         instances.append(contentsOf: groupInstances(bounds, opacity: 0.5, color: SIMD4<Float>(1, 1, 1, 1)))
         instances.append(.endLayer())
         frame.instances = instances
-        renderer.prepare(frame: frame, viewport: (32, 16))
-        out = try drawRaw(renderer: renderer, frame: frame, pixelFormat: .bgra8Unorm_srgb)
-        near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], srgbBytes(SIMD4<Float>(repeating: 0.25)), label: "nested")
+        out = try renderer.renderOffscreen(frame).rgba
+        near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], [255, 255, 255, 64], label: "nested")
 
         instances = groupInstances(bounds, opacity: 0.5, color: SIMD4<Float>(1, 1, 1, 1))
         for idx in 0..<3 {
             instances[idx].clip = SIMD4<Float>(8, 5, 24, 11)
         }
         frame.instances = instances
-        renderer.prepare(frame: frame, viewport: (32, 16))
-        out = try drawRaw(renderer: renderer, frame: frame, pixelFormat: .bgra8Unorm_srgb)
-        #expect(renderer.layerStats().bytes == 64 * 64 * 8, "clip uses the minimum bucket")
-        #expect(renderer.layersPool.planner.dispositions[0].rect == SIMD4<Float>(8, 5, 16, 6))
+        out = try renderer.renderOffscreen(frame).rgba
+        #if canImport(Metal)
+        #expect(renderer.metal.layerStats().bytes == 64 * 64 * 8, "clip uses the minimum bucket")
+        #expect(renderer.metal.layersPool.planner.dispositions[0].rect == SIMD4<Float>(8, 5, 16, 6))
+        #endif
         near(out[(8 * 32 + 6) * 4..<(8 * 32 + 7) * 4], [0, 0, 0, 0], label: "clipped-out x=6")
-        near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], srgbBytes(SIMD4<Float>(repeating: 0.5)), label: "clipped-in x=16")
+        near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], [255, 255, 255, 128], label: "clipped-in x=16")
 
         for alpha in [Float(1.0), 0.0] {
             instances = groupInstances(bounds, opacity: alpha, color: SIMD4<Float>(1, 1, 1, 1))
             frame.instances = instances
-            renderer.prepare(frame: frame, viewport: (32, 16))
-            out = try drawRaw(renderer: renderer, frame: frame, pixelFormat: .bgra8Unorm_srgb)
-            near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], srgbBytes(SIMD4<Float>(repeating: alpha)), label: "endpoint \(alpha)")
-            #expect(renderer.layerStats().targets == 0, "release on both endpoints")
-            #expect(renderer.layerStats().extraPasses == 0)
+            out = try renderer.renderOffscreen(frame).rgba
+            near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], [UInt8](repeating: UInt8(alpha * 255), count: 4), label: "endpoint \(alpha)")
+            #if canImport(Metal)
+            #expect(renderer.metal.layerStats().targets == 0, "release on both endpoints")
+            #expect(renderer.metal.layerStats().extraPasses == 0)
+            #endif
         }
 
+        #if canImport(Metal)
         // Fully opaque streams allocate no planner storage and issue only the ordinary pass.
         let ordinary = try MetalRenderer()
         let ordinaryFrame = RenderFrame(width: 32, height: 16, srgbBlend: false, clearColor: .zero, instances: [rectInstance(bounds, SIMD4<Float>(1, 1, 1, 1))])
@@ -204,6 +214,7 @@ struct RenderSlice3LayerTests {
         _ = try drawRaw(renderer: ordinary, frame: ordinaryFrame, pixelFormat: .bgra8Unorm_srgb)
         #expect(ordinary.layerStats() == LayerStats())
         #expect(ordinary.layersPool.planner.capacities() == [0, 0, 0, 0, 0])
+        #endif
     }
 
     // 2b. #36 (`layer_tests.rs:116`)
@@ -211,7 +222,7 @@ struct RenderSlice3LayerTests {
     @MainActor
     func leafDimmingKeepsContainerOpacityIsolated() throws {
         let alpha = Live<Float>(0.5)
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<Live<Float>>(state: alpha, viewport: Vec2(32, 16), pixelScale: 1.0) { a, _ in
             el().size(32, 16).liveOpacity(a.binding)
                 .child(el().size(24, 8).absolute(x: 4, y: 4).bg(.white))
@@ -223,11 +234,13 @@ struct RenderSlice3LayerTests {
         for (value, expectedTargets) in [(Float(0.5), 1), (Float(1.0), 0)] {
             alpha.set(value)
             let rf = rt.renderFrame(at: 0.0)
-            renderer.prepare(frame: rf, viewport: (32, 16))
-            #expect(renderer.layerStats().targets == expectedTargets)
-            let out = try drawRaw(renderer: renderer, frame: rf, pixelFormat: .bgra8Unorm_srgb)
-            near(out[(8 * 32 + 6) * 4..<(8 * 32 + 7) * 4], srgbBytes(SIMD4<Float>(repeating: 0.5 * value)), label: "alpha=\(value) x=6")
-            near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], srgbBytes(SIMD4<Float>(repeating: 0.75 * value)), label: "alpha=\(value) x=16")
+            #expect(rf.instances.filter { $0.params.y == KIND_LAYER }.count == expectedTargets)
+            let out = try renderer.renderOffscreen(rf).rgba
+            #if canImport(Metal)
+            #expect(renderer.metal.layerStats().targets == expectedTargets)
+            #endif
+            near(out[(8 * 32 + 6) * 4..<(8 * 32 + 7) * 4], [255, 255, 255, UInt8((255 * 0.5 * value).rounded())], label: "alpha=\(value) x=6")
+            near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], [255, 255, 255, UInt8((255 * 0.75 * value).rounded())], label: "alpha=\(value) x=16")
         }
     }
 
@@ -238,7 +251,7 @@ struct RenderSlice3LayerTests {
         typealias State = (a0: Live<Float>, a1: Live<Float>)
         let a0 = Live<Float>(0.5)
         let a1 = Live<Float>(0.5)
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<State>(state: (a0, a1), viewport: Vec2(32, 16), pixelScale: 1.0) { s, _ in
             func makeState(_ alpha: Live<Float>, _ color: Color) -> El<State> {
                 el().size(24, 8).absolute(x: 4, y: 4).liveOpacity(alpha.binding)
@@ -256,15 +269,19 @@ struct RenderSlice3LayerTests {
             a0.set(1.0 - t)
             a1.set(t)
             let rf = rt.renderFrame(at: 0.0)
-            renderer.prepare(frame: rf, viewport: (32, 16))
-            let out = try drawRaw(renderer: renderer, frame: rf, pixelFormat: .rgba8Unorm)
+            let out = try renderer.renderOffscreen(rf).rgba
             if t == 0.0 || t == 1.0 {
                 #expect(rf.instances.allSatisfy { $0.params.y != KIND_LAYER }, "no dissolve scope at rest")
-                #expect(renderer.layerStats().extraPasses == 0)
+                #if canImport(Metal)
+                #expect(renderer.metal.layerStats().extraPasses == 0)
+                #endif
             } else {
-                #expect(renderer.layerStats().targets >= 1, "mid-fade dissolve must isolate")
+                #expect(rf.instances.contains { $0.params.y == KIND_LAYER }, "mid-fade dissolve must isolate")
+                #if canImport(Metal)
+                #expect(renderer.metal.layerStats().targets >= 1, "mid-fade dissolve must isolate")
+                #endif
             }
-            let want: [UInt8] = [UInt8(((1.0 - t) * 255.0).rounded()), 0, UInt8((t * 255.0).rounded()), 255]
+            let want = srgbBytes(SIMD4<Float>(1 - t, 0, t, 1))
             for x in [6, 16, 26] {
                 near(out[(8 * 32 + x) * 4..<(8 * 32 + x + 1) * 4], want, label: "t=\(t) x=\(x)")
                 #expect(out[(8 * 32 + x) * 4 + 3] == 255, "opaque coverage at t=\(t)")
@@ -278,9 +295,10 @@ struct RenderSlice3LayerTests {
                 a0.set(1.0 - t)
                 a1.set(t)
                 let rf = rt.renderFrame(at: 0.0)
-                renderer.prepare(frame: rf, viewport: (32, 16))
-                let out = try drawRaw(renderer: renderer, frame: rf, pixelFormat: .rgba8Unorm)
-                #expect((renderer.layerStats().targets > 0) == (t == moving), "boundary rest=\(rest) t=\(t)")
+                let out = try renderer.renderOffscreen(rf).rgba
+                #if canImport(Metal)
+                #expect((renderer.metal.layerStats().targets > 0) == (t == moving), "boundary rest=\(rest) t=\(t)")
+                #endif
                 frames.append(out)
             }
             #expect(frames[0] == frames[1], "scope boundary at \(rest)")
@@ -292,10 +310,9 @@ struct RenderSlice3LayerTests {
         all.append(contentsOf: groupInstances(bounds, opacity: 1.0, color: SIMD4<Float>(0.5, 0, 0, 0.5)))
         all.append(.endLayer())
         let allFrame = RenderFrame(width: 32, height: 16, srgbBlend: false, clearColor: .zero, instances: all)
-        renderer.prepare(frame: allFrame, viewport: (32, 16))
-        var out = try drawRaw(renderer: renderer, frame: allFrame, pixelFormat: .rgba8Unorm)
-        near(out[(8 * 32 + 6) * 4..<(8 * 32 + 7) * 4], [128, 0, 0, 128], label: "sole-single")
-        near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], [191, 0, 0, 191], label: "sole-overlap")
+        var out = try renderer.renderOffscreen(allFrame).rgba
+        near(out[(8 * 32 + 6) * 4..<(8 * 32 + 7) * 4], [255, 0, 0, 128], label: "sole-single")
+        near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], [255, 0, 0, 191], label: "sole-overlap")
 
         // Saturate colour as well as alpha before enclosing group's fade.
         let nested: [RenderInstance] = [
@@ -307,9 +324,8 @@ struct RenderSlice3LayerTests {
             .endLayer(),
         ]
         let nestedFrame = RenderFrame(width: 32, height: 16, srgbBlend: false, clearColor: .zero, instances: nested)
-        renderer.prepare(frame: nestedFrame, viewport: (32, 16))
-        out = try drawRaw(renderer: renderer, frame: nestedFrame, pixelFormat: .rgba8Unorm)
-        near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], [64, 64, 64, 64], label: "nested-saturate")
+        out = try renderer.renderOffscreen(nestedFrame).rgba
+        near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], [255, 255, 255, 64], label: "nested-saturate")
     }
 
     // 4. #38 (`layer_tests.rs:205`)
@@ -325,7 +341,7 @@ struct RenderSlice3LayerTests {
             Beat(at: 0.0, opacity: 0.0),
             Beat(at: 1.0, easing: .linear),
         ])
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let rt = Runtime<S>(state: S(), viewport: Vec2(32, 16), pixelScale: 1.0) { _, _ in
             el().size(32, 16).dissolve()
                 .child(el().size(32, 16).absolute(x: 0, y: 0).bg(.white).sequence(outSeq))
@@ -338,8 +354,7 @@ struct RenderSlice3LayerTests {
             now += dt
             let rf = rt.renderFrame(at: now)
             #expect(rf.instances.contains { $0.params.y == KIND_LAYER } == active)
-            renderer.prepare(frame: rf, viewport: (32, 16))
-            let out = try drawRaw(renderer: renderer, frame: rf, pixelFormat: .bgra8Unorm_srgb)
+            let out = try renderer.renderOffscreen(rf).rgba
             for idx in stride(from: 3, to: out.count, by: 4) {
                 #expect(out[idx] == 255, "complementary sequences retain opaque coverage at t=\(now)")
             }
@@ -349,7 +364,7 @@ struct RenderSlice3LayerTests {
     // 5. #39 (`layer_tests.rs:229`)
     @Test("dissolve_adds_direct_primitives_and_native_surfaces_then_clamps_before_opacity")
     func dissolveAddsDirectPrimitivesAndNativeSurfacesThenClampsBeforeOpacity() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let bounds = SIMD4<Float>(4, 4, 24, 8)
         let content: [RenderInstance] = [
             rectInstance(SIMD4<Float>(0, 0, 32, 16), SIMD4<Float>(0, 1, 0, 1)),
@@ -378,12 +393,14 @@ struct RenderSlice3LayerTests {
             instances: content,
             surfaces: [draw]
         )
-        renderer.prepare(frame: frame, viewport: (32, 16))
-        let out = try drawRaw(renderer: renderer, frame: frame, pixelFormat: .rgba8Unorm)
-        near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], [128, 128, 128, 255], label: "clamped-blend")
+        let out = try renderer.renderOffscreen(frame).rgba
+        near(out[(8 * 32 + 16) * 4..<(8 * 32 + 17) * 4], srgbBytes(SIMD4<Float>(0.5, 0.5, 0.5, 1)), label: "clamped-blend")
         near(out[0..<4], [0, 255, 0, 255], label: "background")
     }
 
+    #endif
+
+    #if canImport(Metal)
     // 6. #40 (`layer_tests.rs:253`)
     @Test("scale_and_fade_reuse_bucket_for_sixty_growing_frames")
     @MainActor
@@ -438,6 +455,7 @@ struct RenderSlice3LayerTests {
             #expect(renderer.layerStats().allocations == allocations + 1)
         }
     }
+    #endif
 
     // 7. #41 (`layer_tests.rs:291`)
     @Test("live_group_opacity_changes_scopes_without_view_or_layout_work")
@@ -510,12 +528,13 @@ struct RenderSlice3LayerTests {
         #expect(groupRt.commitCount == commits)
     }
 
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
     // 9. #44 (`layer_tests.rs:369`)
     @Test("clipped_single_draw_fades_do_not_allocate_targets")
     @MainActor
     func clippedSingleDrawFadesDoNotAllocateTargets() throws {
         typealias State = (surface: NativeSurface?, mode: UInt8)
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let surface = NativeSurface()
         let bf = try ByteFrame(width: 1, height: 1, format: .bgra, color: .srgb, planes: [Data(repeating: 255, count: 4)])
         try surface.pushBytes(bf, frameId: 1)
@@ -545,9 +564,10 @@ struct RenderSlice3LayerTests {
                 rt.srgbBlend = false
                 let rf = rt.renderFrame(at: 0.0)
                 #expect(rf.instances.allSatisfy { $0.params.y != KIND_LAYER })
-                renderer.prepare(frame: rf, viewport: (64, 48))
-                let out = try drawRaw(renderer: renderer, frame: rf, pixelFormat: .bgra8Unorm_srgb)
-                #expect(renderer.layerStats().targets == 0, "mode=\(mode) video=\(video)")
+                let out = try renderer.renderOffscreen(rf).rgba
+                #if canImport(Metal)
+                #expect(renderer.metal.layerStats().targets == 0, "mode=\(mode) video=\(video)")
+                #endif
                 #expect(out[(24 * 64 + 32) * 4 + 3] == 128)
                 #expect(out[(24 * 64 + 4) * 4 + 3] == 0)
                 if mode == 1 {
@@ -558,6 +578,8 @@ struct RenderSlice3LayerTests {
             #expect(frames[0] == frames[1], "primitive and video inherit identical clips/fades at mode \(mode)")
         }
     }
+
+    #endif
 
     // 10. #45 (`layer_tests.rs:410`)
     @Test("opacity_motion_samples_group_alpha_until_the_terminal_frame")
@@ -597,6 +619,7 @@ struct RenderSlice3LayerTests {
         #expect(rt.commitCount == commits)
     }
 
+    #if canImport(Metal)
     // 11. #46 (`layer_tests.rs:433`)
     @Test("isolated_layers_preserve_image_video_spring_and_list_order")
     func isolatedLayersPreserveImageVideoSpringAndListOrder() throws {
@@ -698,6 +721,7 @@ struct RenderSlice3LayerTests {
             near(out[(y * 32 + x) * 4..<(y * 32 + x + 1) * 4], want, label: "(\(x),\(y))")
         }
     }
+    #endif
 
     // 13. #42 (`layer_tests.rs:321`)
     @Test("isolated_exit_descendants_stay_inside_their_fading_parent")

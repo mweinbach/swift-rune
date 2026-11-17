@@ -7,9 +7,75 @@ import RuneRef
 #if canImport(Metal) && canImport(QuartzCore)
 import Metal
 import QuartzCore
+#endif
 
+#if canImport(Metal) || canImport(CRuneOffscreenGL)
 @Suite("Render Clip, Backdrop, Alpha & BorderDash Parity Tests")
 struct RenderClipBackdropDashTests {
+    @Test("Backdrop blur samples the current frame at fractional snapshot edges")
+    func backdropSnapshotIncludesBilinearFootprint() throws {
+        let renderer = try OffscreenGPURenderer()
+        let viewport = SIMD4<Float>(0, 0, 137, 95)
+        let rect = SIMD4<Float>(29, 14, 49, 43)
+        func render(_ color: SIMD4<Float>, _ bounds: SIMD4<Float>) throws -> Frame {
+            let blur = RenderInstance(rect: bounds, fill: SIMD4(0, 0, 0, 1),
+                                      params: SIMD4(0.25, KIND_BACKDROP_BLUR, 0, 0), clip: viewport)
+            return try renderer.renderOffscreen(RenderFrame(width: 137, height: 95, srgbBlend: true,
+                                                             clearColor: color, instances: [blur]))
+        }
+        let green = SIMD4<Float>(0, 1, 0, 1)
+        _ = try render(SIMD4(1, 0, 0, 1), viewport)
+        let afterRed = try render(green, rect)
+        _ = try render(SIMD4(0, 0, 1, 1), viewport)
+        let afterBlue = try render(green, rect)
+        #expect(afterRed.rgba == afterBlue.rgba)
+        #expect(afterRed.pixel(x: 77, y: 14) == SIMD4(0, 255, 0, 255))
+    }
+
+    @Test("A backdrop samples saturated root pixels in either blend space")
+    func backdropUsesNormalizedRootColor() throws {
+        let renderer = try OffscreenGPURenderer()
+        for gamma in [false, true] {
+            func blurred(red: Float) throws -> Frame {
+                let rectangle = RenderInstance(
+                    rect: SIMD4(0, 0, 16, 32), fill: SIMD4(red, 0, 0, 1), clip: NO_CLIP
+                )
+                let backdrop = RenderInstance(
+                    rect: SIMD4(0, 0, 32, 32), fill: SIMD4(0, 0, 0, 1),
+                    params: SIMD4(4, KIND_BACKDROP_BLUR, 0, 1), clip: NO_CLIP
+                )
+                return try renderer.renderOffscreen(RenderFrame(
+                    width: 32, height: 32, srgbBlend: gamma, clearColor: SIMD4(0, 0, 0, 1),
+                    instances: [rectangle, backdrop]
+                ))
+            }
+            let clipped = try blurred(red: 1)
+            let overRange = try blurred(red: 1.5)
+            let transition = clipped.pixel(x: 16, y: 16).x
+            #expect(transition > 0 && transition < 255)
+            #expect(overRange.rgba == clipped.rgba)
+        }
+    }
+
+    @Test("RefScene gradient borders leave the interior clear on the GPU")
+    func gradientBorderMatchesReference() throws {
+        let scene = RefScene(width: 24, height: 24, srgbBlend: true, clearColor: .zero, primitives: [
+            .linearGradient(rect: SIMD4(2, 2, 20, 20), radii: SIMD4(repeating: 4),
+                            topColor: SIMD4(1, 0, 0, 1), bottomColor: SIMD4(0, 0, 1, 1),
+                            borderWidth: 3, clip: SIMD4(0, 0, 24, 24)),
+        ])
+        let cpu = try RuneRef.render(scene)
+        let gpu = try OffscreenGPURenderer().renderOffscreen(scene)
+        #expect(gpu.pixel(x: 12, y: 12) == .zero)
+        for y in [3, 12, 20] {
+            let expected = cpu.pixel(x: 12, y: y)
+            let actual = gpu.pixel(x: 12, y: y)
+            for channel in 0..<4 {
+                #expect(abs(Int(actual[channel]) - Int(expected[channel])) <= 1)
+            }
+        }
+    }
+
     private func sampleRGBA(_ frame: Frame, x: Int, y: Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8) {
         let cx = max(0, min(frame.width - 1, x))
         let cy = max(0, min(frame.height - 1, y))
@@ -33,7 +99,7 @@ struct RenderClipBackdropDashTests {
     /// Upstream: `crates/rune/tests/clip.rs:37` `overflowing_scroll_content_stays_inside_the_box_as_it_scrolls`
     @Test("clip.rs:37 overflowing_scroll_content_stays_inside_the_box_as_it_scrolls")
     func overflowingScrollContentStaysInsideBoxAsItScrolls() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         struct S {}
         let red = Color(r: 1, g: 0, b: 0, a: 1)
         let rt = Runtime<S>(state: S(), viewport: Vec2(40, 40), pixelScale: 1.0) { _, _ in
@@ -120,7 +186,7 @@ struct RenderClipBackdropDashTests {
     /// Upstream: `crates/rune/tests/clip.rs:78` `an_explicit_soft_clip_still_wins`
     @Test("clip.rs:78 an_explicit_soft_clip_still_wins")
     func explicitSoftClipStillWins() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         struct S {}
         let red = Color(r: 1, g: 0, b: 0, a: 1)
         let rt = Runtime<S>(state: S(), viewport: Vec2(40, 40), pixelScale: 1.0) { _, _ in
@@ -134,7 +200,8 @@ struct RenderClipBackdropDashTests {
 
         let rf = rt.renderFrame(at: 0.0)
         // Look at the packed fade on the soft-clipped layer/instance: all 4 edges preserve explicit fade width 6
-        let faded = try #require(rf.instances.first(where: { $0.fade.z != 0 || ($0.fade.x != 0 || $0.fade.y != 0) }))
+        let fadingInstance = rf.instances.first { $0.fade.z != 0 || $0.fade.x != 0 || $0.fade.y != 0 }
+        let faded = try #require(fadingInstance)
         let decoded = unpackFade(faded.fade)
         #expect(abs(decoded.width.x - 6.0) < 0.25)
         #expect(abs(decoded.width.y - 6.0) < 0.25)
@@ -154,7 +221,7 @@ struct RenderClipBackdropDashTests {
     /// Upstream: `crates/rune/tests/clip.rs:90` `packed_fades_survive_group_layer_projection_without_double_application`
     @Test("clip.rs:90 packed_fades_survive_group_layer_projection_without_double_application")
     func packedFadesSurviveGroupLayerProjectionWithoutDoubleApplication() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         struct S {}
 
         for (scale, rounded): (Float, Float) in [(1.0, 0.0), (1.0, 10.0), (2.0, 0.0), (2.0, 10.0)] {
@@ -224,7 +291,7 @@ struct RenderClipBackdropDashTests {
     /// Upstream: `crates/rune/tests/clip.rs:122` `narrower_nested_edge_and_streaming_mask_survive_outer_fades`
     @Test("clip.rs:122 narrower_nested_edge_and_streaming_mask_survive_outer_fades")
     func narrowerNestedEdgeAndStreamingMaskSurviveOuterFades() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
 
         // Part A: Narrower inner clipFade survives outer clipFade without getting erased
         struct ClipS {}
@@ -288,7 +355,7 @@ struct RenderClipBackdropDashTests {
     /// Upstream: `crates/rune/tests/clip.rs:204` `a_linear_fade_falls_in_proportion_to_distance_from_the_edge`
     @Test("clip.rs:204 a_linear_fade_falls_in_proportion_to_distance_from_the_edge")
     func linearFadeFallsInProportionToDistanceFromEdge() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
 
         // 1. CPU RefScene path via Runtime.frame(at:)
         struct S {}
@@ -364,7 +431,7 @@ struct RenderClipBackdropDashTests {
     /// Upstream: `crates/rune/tests/backdrop_blur.rs:103` `without_backdrop_blur_the_frame_is_unchanged`
     @Test("backdrop_blur.rs:103 without_backdrop_blur_the_frame_is_unchanged")
     func withoutBackdropBlurFrameIsUnchanged() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         struct S {}
         let tint = Color(r: 0, g: 1, b: 0, a: 0.4)
         let rtZero = Runtime<S>(state: S(), viewport: Vec2(40, 40), pixelScale: 1.0) { _, _ in
@@ -410,7 +477,7 @@ struct RenderClipBackdropDashTests {
     /// Upstream: `crates/rune/tests/backdrop_blur.rs:113` `two_bars_each_blur_their_own_backdrop`
     @Test("backdrop_blur.rs:113 two_bars_each_blur_their_own_backdrop")
     func twoBarsEachBlurTheirOwnBackdrop() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         struct S {}
         let redHalf = Color(r: 1, g: 0, b: 0, a: 0.5)
         let rt = Runtime<S>(state: S(), viewport: Vec2(200, 120), pixelScale: 1.0) { _, _ in
@@ -435,7 +502,7 @@ struct RenderClipBackdropDashTests {
     /// Upstream: `crates/rune/tests/backdrop_blur.rs:136` `a_faded_bar_blurs_the_window_not_its_own_layer`
     @Test("backdrop_blur.rs:136 a_faded_bar_blurs_the_window_not_its_own_layer")
     func fadedBarBlursWindowNotOwnLayer() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         struct S {}
         let rt = Runtime<S>(state: S(), viewport: Vec2(200, 120), pixelScale: 1.0) { _, _ in
             col().size(200, 120)
@@ -464,7 +531,7 @@ struct RenderClipBackdropDashTests {
     /// Upstream: `crates/rune/tests/backdrop_blur.rs:191` `scrolled_content_changes_the_blur_and_a_still_frame_stays_idle`
     @Test("backdrop_blur.rs:191 scrolled_content_changes_the_blur_and_a_still_frame_stays_idle")
     func scrolledContentChangesBlurAndStillFrameStaysIdle() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         struct S {}
         let red = Color(r: 1, g: 0, b: 0, a: 1)
         let blue = Color(r: 0, g: 0, b: 1, a: 1)
@@ -508,6 +575,7 @@ struct RenderClipBackdropDashTests {
         #expect(rt.hasPendingCommit == false)
     }
 
+    #if canImport(Metal) && canImport(QuartzCore)
     /// Upstream: `crates/rune/src/render/backdrop_tests.rs:7` `backdrop_pool_is_lazy_reused_resized_and_follows_live_formats`
     @Test("backdrop_tests.rs:7 backdrop_pool_is_lazy_reused_resized_and_follows_live_formats")
     func backdropPoolIsLazyReusedResizedAndFollowsLiveFormats() throws {
@@ -580,10 +648,12 @@ struct RenderClipBackdropDashTests {
         }
     }
 
+    #endif
+
     /// Upstream: `crates/rune/src/render/surface_alpha.rs:14` `gpu_straight_alpha_matches_cpu_reference`
     @Test("surface_alpha.rs:14 gpu_straight_alpha_matches_cpu_reference")
     func gpuStraightAlphaMatchesCpuReference() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let emptyAtlas = GlyphAtlas().compositedAtlas()
 
         // Match upstream premultiplied clear colors: half-transparent teal, fully transparent, opaque color
@@ -704,7 +774,7 @@ struct RenderClipBackdropDashTests {
     /// Upstream: `crates/rune/tests/border_dash.rs:62` `dashes_antialias_like_the_solid_border_and_show_the_fill_between`
     @Test("border_dash.rs:62 dashes_antialias_like_the_solid_border_and_show_the_fill_between")
     func dashesAntialiasLikeSolidBorderAndShowFillBetween() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let solid = try renderer.renderOffscreen(makeCapsuleFrame(mode: .solid))
         let dashed = try renderer.renderOffscreen(makeCapsuleFrame(mode: .dashed))
         let filled = try renderer.renderOffscreen(makeCapsuleFrame(mode: .filledDashed))

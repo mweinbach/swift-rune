@@ -920,6 +920,7 @@ public enum ElementRole: String, Sendable, Hashable, Codable {
     case listItem = "listitem"
     case heading = "heading"
     case dialog = "dialog"
+    case menuBar = "menubar"
     case menu = "menu"
     case menuItem = "menuitem"
     case image = "img"
@@ -946,6 +947,7 @@ public enum ElementRole: String, Sendable, Hashable, Codable {
     case status = "status"
     case list = "list"
     case menuItemCheckbox = "menu-item-check-box"
+    case menuItemRadio = "menu-item-radio"
     case passwordInput = "password-input"
     case multilineTextInput = "multiline-text-input"
     case mark = "mark"
@@ -1401,12 +1403,10 @@ public struct El<State> {
     private var _cold: ElColdBox<State>? = nil
 
     private mutating func ensureCold() -> ElColdBox<State> {
-        if let current = _cold {
-            if !isKnownUniquelyReferenced(&_cold) {
-                _cold = ElColdBox(current.data.clone())
-            }
-        } else {
+        if _cold == nil {
             _cold = ElColdBox(ElColdData<State>())
+        } else if !isKnownUniquelyReferenced(&_cold) {
+            _cold = ElColdBox(_cold!.data.clone())
         }
         return _cold!
     }
@@ -4102,7 +4102,7 @@ extension El {
 
     /// Plays `player` inside this element's box (`fit` letterboxes, `fill` crops).
     public func video(_ player: Player, _ fit: SurfaceFit = .fit) -> Self {
-        nativeSurface(player.surface, fit)
+        nativeSurface(player.surface.retaining(player), fit)
     }
 
     /// Anchors a `nativeSurface` or `video` frame along `(horizontal, vertical)` inside its box.

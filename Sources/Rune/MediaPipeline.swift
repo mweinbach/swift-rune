@@ -1,4 +1,10 @@
 import Foundation
+#if canImport(CRuneMedia)
+import Dispatch
+#endif
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import RuneMotion
 import RuneRef
 
@@ -14,6 +20,9 @@ import Metal
 #if canImport(AVFoundation)
 import AVFoundation
 import CoreVideo
+#endif
+#if os(visionOS)
+import os
 #endif
 
 // MARK: - 1. Image Pipeline
@@ -48,7 +57,13 @@ public struct AnimatedImageFrame: Sendable, Equatable {
         self.width = width
         self.height = height
         self.rgba = rgba
-        self.durationSeconds = max(0.01, durationSeconds)
+        self.durationSeconds = durationSeconds.isFinite ? max(0.01, durationSeconds) : 0.1
+    }
+
+    /// Browsers present an encoded delay of 10 ms or less for 100 ms.
+    internal init(decodedWidth width: UInt32, height: UInt32, rgba: Data, durationSeconds: Double) {
+        self.init(width: width, height: height, rgba: rgba,
+                  durationSeconds: durationSeconds <= 0.01 ? 0.1 : durationSeconds)
     }
 }
 
@@ -59,12 +74,23 @@ public struct DecodedImage: Sendable, Equatable {
     public let height: UInt32
     public let mips: [ImageMipLevel]
     public let frames: [AnimatedImageFrame]
+    /// Total plays, with zero denoting continuous playback.
     public let loopCount: Int
+    private let frameEnds: [Double]
+    private let laterMips: [[ImageMipLevel]]
 
     public var isAnimated: Bool { frames.count > 1 }
 
     public var totalAnimationDuration: Double {
-        frames.reduce(0.0) { $0 + $1.durationSeconds }
+        frameEnds.last ?? 0
+    }
+
+    fileprivate var cacheByteCost: Int {
+        let mipBytes = mips.reduce(0) { $0 + $1.rgba.count }
+        let frameBytes = frames.reduce(0) { $0 + $1.rgba.count }
+        return laterMips.reduce(mipBytes + frameBytes) { total, chain in
+            chain.reduce(total) { $0 + $1.rgba.count }
+        }
     }
 
     public init(
@@ -78,27 +104,84 @@ public struct DecodedImage: Sendable, Equatable {
         self.id = id
         self.width = width
         self.height = height
-        self.mips = mips
-        self.frames = frames
+        // Hold the composited straight frames for UI clients and the prefiltered
+        // chains for the atlas. Large animations retain just their first frame.
+        var bytes: UInt64 = 0
+        let canAnimate = frames.count > 1 && frames.allSatisfy { frame in
+            guard let cost = Self.animationStorage(width: frame.width, height: frame.height),
+                  UInt64(frame.rgba.count) == UInt64(frame.width) * UInt64(frame.height) * 4 else { return false }
+            bytes += cost
+            return bytes <= UInt64(LinearMipGenerator.maxDecodedBytes)
+        }
+        self.frames = canAnimate || frames.count <= 1 ? frames : Array(frames.prefix(1))
+        if mips.isEmpty, let first = self.frames.first,
+           first.width <= IMAGE_MAX_SIDE, first.height <= IMAGE_MAX_SIDE {
+            self.mips = Self.generateMipChain(width: first.width, height: first.height, rgba: first.rgba)
+        } else {
+            self.mips = mips
+        }
+        self.laterMips = self.frames.dropFirst().map {
+            Self.generateMipChain(width: $0.width, height: $0.height, rgba: $0.rgba)
+        }
+        var end = 0.0
+        self.frameEnds = self.frames.map {
+            end += $0.durationSeconds
+            return end
+        }
         self.loopCount = loopCount
     }
 
-    /// Selects the frame corresponding to `elapsedSeconds` in an animated image.
+    /// The raw RGBA canvas and its premultiplied mip chain, including level zero.
+    internal static func animationStorage(width: UInt32, height: UInt32) -> UInt64? {
+        guard width > 0, height > 0, width <= IMAGE_MAX_SIDE, height <= IMAGE_MAX_SIDE else { return nil }
+        var w = UInt64(width), h = UInt64(height)
+        var bytes = w * h * 4
+        while true {
+            bytes += w * h * 4
+            if w == 1 && h == 1 { return bytes }
+            w = max(1, w / 2)
+            h = max(1, h / 2)
+        }
+    }
+
+    internal func mips(forFrame index: Int) -> [ImageMipLevel] {
+        index == 0 ? mips : laterMips[index - 1]
+    }
+
+    internal func framePosition(at now: Double, startingAt origin: Double) -> (index: Int, next: Double?) {
+        guard frames.count > 1 else { return (0, nil) }
+        let last = frames.count - 1
+        let period = totalAnimationDuration
+        guard now.isFinite, origin.isFinite, period.isFinite, period > 0 else { return (0, nil) }
+        let time = max(now, origin)
+        var cycle = ((time - origin) / period).rounded(.down)
+        // Compare absolute timestamps; subtracting the origin can round a
+        // just-delivered frame deadline back into the previous frame.
+        if origin + cycle * period > time { cycle -= 1 }
+        else if origin + (cycle + 1) * period <= time { cycle += 1 }
+        if loopCount > 0 && cycle >= Double(loopCount) { return (last, nil) }
+        let base = origin + cycle * period
+        var lo = 0, hi = last
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if base + frameEnds[mid] <= time { lo = mid + 1 }
+            else { hi = mid }
+        }
+        if lo == last && loopCount > 0 && cycle + 1 >= Double(loopCount) { return (last, nil) }
+        let next = lo == last ? origin + (cycle + 1) * period : base + frameEnds[lo]
+        return (lo, next > time ? next : nil)
+    }
+
+    /// Selects a frame on the playback timeline. Negative times wrap within one play.
     public func frame(at elapsedSeconds: Double) -> AnimatedImageFrame? {
         guard !frames.isEmpty else { return nil }
-        if frames.count == 1 { return frames[0] }
-        let total = totalAnimationDuration
-        guard total > 0 else { return frames[0] }
-        var t = elapsedSeconds.truncatingRemainder(dividingBy: total)
-        if t < 0 { t += total }
-        var acc = 0.0
-        for frame in frames {
-            acc += frame.durationSeconds
-            if t < acc {
-                return frame
-            }
+        guard elapsedSeconds.isFinite else { return frames.last }
+        var time = elapsedSeconds
+        if time < 0, totalAnimationDuration > 0 {
+            time = time.truncatingRemainder(dividingBy: totalAnimationDuration)
+            if time < 0 { time += totalAnimationDuration }
         }
-        return frames.last
+        return frames[framePosition(at: time, startingAt: 0).index]
     }
 
     /// Generates a full linear-light area-resampled mipmap chain from an RGBA8 image.
@@ -106,8 +189,13 @@ public struct DecodedImage: Sendable, Equatable {
         LinearMipGenerator.generateChain(width: width, height: height, straightRGBA: rgba)
     }
 
-    /// Decodes encoded image bytes (PNG, JPEG, WebP, HEIC, AVIF, GIF, APNG) via `CGImageSource`.
+    /// Decodes an image using the host's codecs and builds its GPU mip chain.
     public static func decode(data: Data, id: String = UUID().uuidString, maxDimension: Int? = nil) throws -> DecodedImage {
+        #if !canImport(ImageIO) || !canImport(CoreGraphics)
+        if let animation = try AnimatedPNG.decodeIfAnimated(data, id: id, maxDimension: maxDimension) {
+            return animation
+        }
+        #endif
         #if canImport(ImageIO) && canImport(CoreGraphics)
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
             throw ImageError("failed to create CGImageSource")
@@ -119,29 +207,40 @@ public struct DecodedImage: Sendable, Equatable {
 
         var loopCount = 0
         if let props = CGImageSourceCopyProperties(source, nil) as? [CFString: Any] {
-            if let gif = props[kCGImagePropertyGIFDictionary] as? [CFString: Any],
-               let lc = gif[kCGImagePropertyGIFLoopCount] as? Int {
-                loopCount = lc
+            if let gif = props[kCGImagePropertyGIFDictionary] as? [CFString: Any] {
+                loopCount = gif[kCGImagePropertyGIFLoopCount] as? Int ?? 1
             } else if let png = props[kCGImagePropertyPNGDictionary] as? [CFString: Any],
                       let lc = png[kCGImagePropertyAPNGLoopCount] as? Int {
+                loopCount = lc
+            } else if let webp = props[kCGImagePropertyWebPDictionary] as? [CFString: Any],
+                      let lc = webp[kCGImagePropertyWebPLoopCount] as? Int {
+                loopCount = lc
+            } else if let heics = props[kCGImagePropertyHEICSDictionary] as? [CFString: Any],
+                      let lc = heics[kCGImagePropertyHEICSLoopCount] as? Int {
                 loopCount = lc
             }
         }
 
         var frames: [AnimatedImageFrame] = []
+        var animationBytes: UInt64 = 0
+        var thumbnailLimit = maxDimension.flatMap { $0 > 0 ? $0 : nil }
+        if thumbnailLimit == nil, count == 1,
+           let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+           let orientation = props[kCGImagePropertyOrientation] as? Int, (2...8).contains(orientation),
+           let width = props[kCGImagePropertyPixelWidth] as? Int,
+           let height = props[kCGImagePropertyPixelHeight] as? Int {
+            // ImageIO's thumbnail transform also applies EXIF rotations and
+            // reflections when the requested size is the original size.
+            thumbnailLimit = max(width, height)
+        }
         for idx in 0..<count {
-            let options: [CFString: Any]
-            if let maxDim = maxDimension, maxDim > 0 {
-                options = [
+            let cgImg: CGImage?
+            if let limit = thumbnailLimit {
+                let options: [CFString: Any] = [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
-                    kCGImageSourceThumbnailMaxPixelSize: maxDim,
+                    kCGImageSourceThumbnailMaxPixelSize: limit,
                     kCGImageSourceCreateThumbnailWithTransform: true,
                 ]
-            } else {
-                options = [:]
-            }
-            let cgImg: CGImage?
-            if let maxDim = maxDimension, maxDim > 0 {
                 cgImg = CGImageSourceCreateThumbnailAtIndex(source, idx, options as CFDictionary)
             } else {
                 cgImg = CGImageSourceCreateImageAtIndex(source, idx, nil)
@@ -161,30 +260,17 @@ public struct DecodedImage: Sendable, Equatable {
             guard !overflow1, !overflow2, byteCount <= LinearMipGenerator.maxDecodedBytes else {
                 throw ImageError("decoded image buffer exceeds 256 MiB cap")
             }
-
-            var rgba = Data(count: byteCount)
-            let cs = CGColorSpaceCreateDeviceRGB()
-            let bi = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
-            let drawn = rgba.withUnsafeMutableBytes { ptr -> Bool in
-                guard let base = ptr.baseAddress,
-                      let ctx = CGContext(
-                          data: base,
-                          width: w,
-                          height: h,
-                          bitsPerComponent: 8,
-                          bytesPerRow: w * 4,
-                          space: cs,
-                          bitmapInfo: bi.rawValue
-                      ) else {
-                    return false
+            if count > 1, let cost = animationStorage(width: UInt32(w), height: UInt32(h)) {
+                animationBytes += cost
+                if animationBytes > UInt64(LinearMipGenerator.maxDecodedBytes), let first = frames.first {
+                    frames = [first]
+                    break
                 }
-                ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
-                return true
             }
-            guard drawn else { throw ImageError("failed to rasterize frame \(idx)") }
 
+            let rgba = try straightRGBA(img, byteCount: byteCount)
             let delay = frameDelaySeconds(source: source, index: idx)
-            frames.append(AnimatedImageFrame(width: UInt32(w), height: UInt32(h), rgba: rgba, durationSeconds: delay))
+            frames.append(AnimatedImageFrame(decodedWidth: UInt32(w), height: UInt32(h), rgba: rgba, durationSeconds: delay))
         }
 
         let first = frames[0]
@@ -197,35 +283,78 @@ public struct DecodedImage: Sendable, Equatable {
             frames: frames,
             loopCount: loopCount
         )
+        #elseif canImport(CRuneDesktopImages) && !os(Android)
+        return try DesktopImageCodec.decode(data, id: id, maxDimension: maxDimension)
         #else
-        if let decoded = try? PortablePNG.decode(data) {
-            guard decoded.width > 0, decoded.height > 0,
-                  decoded.width <= LinearMipGenerator.maxDecodeDimension,
-                  decoded.height <= LinearMipGenerator.maxDecodeDimension else {
-                throw ImageError("image dimensions \(decoded.width)x\(decoded.height) exceed limits")
-            }
-            let byteCount = decoded.width * decoded.height * 4
-            guard byteCount <= LinearMipGenerator.maxDecodedBytes else {
-                throw ImageError("decoded image buffer exceeds 256 MiB cap")
-            }
-            let w = UInt32(decoded.width)
-            let h = UInt32(decoded.height)
-            let rgbaData = Data(decoded.rgba)
-            let mips = generateMipChain(width: w, height: h, rgba: rgbaData)
-            return DecodedImage(
-                id: id,
-                width: w,
-                height: h,
-                mips: mips,
-                frames: [AnimatedImageFrame(width: w, height: h, rgba: rgbaData, durationSeconds: 0.1)],
-                loopCount: 0
-            )
+        #if os(Android) && canImport(CRuneDesktopImages)
+        do {
+            return try DesktopImageCodec.decode(data, id: id, maxDimension: maxDimension)
+        } catch where data.starts(with: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) {
+            // Android 24–29 can decode a portable PNG before a Java activity attaches.
         }
-        throw ImageError("ImageIO unavailable on this platform and data is not a valid PNG")
+        #endif
+        let decoded: PortablePNG.DecodedImage
+        do {
+            decoded = try PortablePNG.decode(data, maxDimension: LinearMipGenerator.maxDecodeDimension)
+        } catch {
+            throw ImageError("Could not decode image: \(error)")
+        }
+        let size = ImageThumbnail.size(width: decoded.width, height: decoded.height, maxDimension: maxDimension)
+        let rgba = ImageThumbnail.resize(Data(decoded.rgba), width: decoded.width, height: decoded.height, to: size)
+        let w = UInt32(size.width), h = UInt32(size.height)
+        return DecodedImage(id: id, width: w, height: h, mips: generateMipChain(width: w, height: h, rgba: rgba),
+                            frames: [AnimatedImageFrame(width: w, height: h, rgba: rgba, durationSeconds: 0.1)])
         #endif
     }
 
     #if canImport(ImageIO)
+    private static func straightRGBA(_ img: CGImage, byteCount: Int) throws -> Data {
+        let w = img.width, h = img.height
+        let byteOrder = img.bitmapInfo.intersection(.byteOrderMask)
+        // ImageIO supplies many GIF, PNG, and WebP frames as straight sRGB.
+        // Keep those bytes intact, including color at very low alpha.
+        if img.bitsPerComponent == 8, img.bitsPerPixel == 32, img.alphaInfo == .last,
+           img.bytesPerRow == w * 4, byteOrder.isEmpty || byteOrder == .byteOrder32Big,
+           img.colorSpace?.name == CGColorSpace.sRGB, img.decode == nil,
+           let bytes = img.dataProvider?.data, CFDataGetLength(bytes) == byteCount {
+            return bytes as Data
+        }
+        var rgba = Data(count: byteCount)
+        let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let bi = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        let drawn = rgba.withUnsafeMutableBytes { ptr -> Bool in
+            guard let base = ptr.baseAddress,
+                  let ctx = CGContext(
+                      data: base,
+                      width: w,
+                      height: h,
+                      bitsPerComponent: 8,
+                      bytesPerRow: w * 4,
+                      space: cs,
+                      bitmapInfo: bi.rawValue
+                  ) else {
+                return false
+            }
+            ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard drawn else { throw ImageError("failed to rasterize frame") }
+
+        // CGContext writes premultiplied bytes. The public frames and the
+        // input of the linear-light mip generator both use straight RGBA.
+        rgba.withUnsafeMutableBytes { raw in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            for offset in stride(from: 0, to: bytes.count, by: 4) {
+                let alpha = Int(bytes[offset + 3])
+                if alpha == 0 || alpha == 255 { continue }
+                for channel in offset..<(offset + 3) {
+                    bytes[channel] = UInt8(clamping: (Int(bytes[channel]) * 255 + alpha / 2) / alpha)
+                }
+            }
+        }
+        return rgba
+    }
+
     private static func frameDelaySeconds(source: CGImageSource, index: Int) -> Double {
         guard let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any] else {
             return 0.1
@@ -246,9 +375,9 @@ public struct DecodedImage: Sendable, Equatable {
                 return delay
             }
         }
-        if let webp = props[kCGImagePropertyWebPDictionary] as? [CFString: Any],
-           let delay = webp[kCGImagePropertyWebPDelayTime] as? Double, delay > 0 {
-            return delay
+        if let webp = props[kCGImagePropertyWebPDictionary] as? [CFString: Any] {
+            if let delay = webp[kCGImagePropertyWebPUnclampedDelayTime] as? Double, delay > 0 { return delay }
+            if let delay = webp[kCGImagePropertyWebPDelayTime] as? Double, delay > 0 { return delay }
         }
         if let heics = props[kCGImagePropertyHEICSDictionary] as? [CFString: Any],
            let delay = heics[kCGImagePropertyHEICSDelayTime] as? Double, delay > 0 {
@@ -294,7 +423,7 @@ public final class ImageDecodePool: @unchecked Sendable {
     }
 
     public func insert(_ image: DecodedImage, forKey key: String) {
-        let cost = image.mips.reduce(0) { $0 + $1.rgba.count }
+        let cost = image.cacheByteCost
         lock.lock()
         defer { lock.unlock() }
         if let old = cache.removeValue(forKey: key) {
@@ -340,9 +469,22 @@ public final class ImageDecodePool: @unchecked Sendable {
         if let hit = cached(forKey: key) {
             return hit
         }
+        #if os(WASI)
+        let decoded: DecodedImage
+        if BrowserImageCodec.enabled {
+            decoded = try await withCheckedThrowingContinuation { continuation in
+                BrowserImageCodec.submit(.bytes(data), name: key, limit: maxDimension) {
+                    continuation.resume(with: $0)
+                }
+            }
+        } else {
+            decoded = try DecodedImage.decode(data: data, id: key, maxDimension: maxDimension)
+        }
+        #else
         let decoded = try await Task.detached(priority: .userInitiated) {
             try DecodedImage.decode(data: data, id: key, maxDimension: maxDimension)
         }.value
+        #endif
         insert(decoded, forKey: key)
         return decoded
     }
@@ -364,8 +506,19 @@ public final class ImageDecodePool: @unchecked Sendable {
         if let hit = cached(forKey: key) {
             return hit
         }
+        #if os(WASI)
+        guard BrowserImageCodec.enabled else { throw ImageLoadError("URL loading requires a browser host") }
+        let image: DecodedImage = try await withCheckedThrowingContinuation { continuation in
+            BrowserImageCodec.submit(.thumbnailURL(url.absoluteString), name: key, limit: maxDimension) {
+                continuation.resume(with: $0)
+            }
+        }
+        insert(image, forKey: key)
+        return image
+        #else
         let (data, _) = try await URLSession.shared.data(from: url)
         return try await decode(data: data, key: key, maxDimension: maxDimension)
+        #endif
     }
 
     #if canImport(Metal)
@@ -440,8 +593,7 @@ public struct VideoPixelFrame: Sendable, Equatable {
     }
 }
 
-/// Media player supporting `AVFoundation` video playback/frame extraction and deterministic
-/// procedural synthetic test-pattern sources for headless rendering & examples.
+/// A clock-driven video source for frame extraction and procedural test patterns.
 public final class VideoPlayer: @unchecked Sendable {
     private let lock = NSLock()
     public let source: VideoSource
@@ -459,6 +611,8 @@ public final class VideoPlayer: @unchecked Sendable {
     #if canImport(AVFoundation)
     private var avAsset: AVURLAsset?
     private var imageGenerator: AVAssetImageGenerator?
+    #elseif canImport(CRuneMedia)
+    private var desktopDecoder: DesktopMediaDecoder?
     #endif
 
     public init(source: VideoSource) {
@@ -482,9 +636,17 @@ public final class VideoPlayer: @unchecked Sendable {
             if FileManager.default.fileExists(atPath: url.path) {
                 self._state = .ready
             }
+            #elseif canImport(CRuneMedia)
+            if url.isFileURL {
+                openDesktopDecoder(url)
+            } else {
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    self?.openDesktopDecoder(url)
+                }
+            }
             #else
             _ = url
-            self._state = .failed("AVFoundation unavailable")
+            self._state = .failed("Native video decoding is unavailable in this build")
             #endif
         }
     }
@@ -593,9 +755,22 @@ public final class VideoPlayer: @unchecked Sendable {
             #if canImport(AVFoundation) && canImport(CoreGraphics)
             guard let gen = imageGenerator else { return nil }
             let cmTime = CMTime(seconds: max(0.0, timeSeconds), preferredTimescale: 600)
+            #if os(visionOS)
+            // The synchronous frame API waits for the image generator's individual
+            // completion. Each simultaneous request owns its result and signal.
+            let result = OSAllocatedUnfairLock(initialState: CGImage?.none)
+            let completed = DispatchSemaphore(value: 0)
+            gen.generateCGImageAsynchronously(for: cmTime) { image, _, _ in
+                result.withLock { $0 = image }
+                completed.signal()
+            }
+            completed.wait()
+            guard let cgImg = result.withLock({ $0 }) else { return nil }
+            #else
             guard let cgImg = try? gen.copyCGImage(at: cmTime, actualTime: nil) else {
                 return nil
             }
+            #endif
             let w = cgImg.width
             let h = cgImg.height
             guard w > 0, h > 0 else { return nil }
@@ -626,11 +801,76 @@ public final class VideoPlayer: @unchecked Sendable {
                 timeSeconds: timeSeconds,
                 frameIndex: UInt64(max(0.0, timeSeconds) * _fps)
             )
+            #elseif canImport(CRuneMedia)
+            guard let decoder = lock.withLock({ desktopDecoder }), timeSeconds.isFinite else { return nil }
+            let seconds = max(0, min(timeSeconds, decoder.meta.duration ?? timeSeconds))
+            do {
+                guard let frame = try decoder.frame(at: seconds) else { return nil }
+                let index = UInt64(clamping: decoder.meta.frameIndex(at: seconds))
+                return Self.uprightFrame(frame, orientation: decoder.orient, time: seconds, index: index)
+            } catch {
+                lock.withLock { _state = .failed(String(describing: error)) }
+                return nil
+            }
             #else
             return nil
             #endif
         }
     }
+
+    #if canImport(CRuneMedia)
+    private func openDesktopDecoder(_ url: URL) {
+        do {
+            let asset = try DesktopMediaSource(request: MediaRequest(source: .url(url)))
+            let decoder = try DesktopMediaDecoder(source: asset, kind: .video, headless: true)
+            guard let (width, height) = decoder.meta.size else {
+                lock.withLock { _state = .failed("Media has no playable video track") }
+                return
+            }
+            lock.withLock {
+                desktopDecoder = decoder
+                _naturalSize = Vec2(Float(width), Float(height))
+                _duration = decoder.meta.duration ?? 0
+                _fps = 1 / decoder.meta.frameDuration
+                if _duration > 0 { _currentTime = min(_currentTime, _duration) }
+                if _state == .loading { _state = .ready }
+            }
+        } catch {
+            lock.withLock { _state = .failed(String(describing: error)) }
+        }
+    }
+
+    /// The decoder supplies tightly packed BGRA in stored orientation. The public
+    /// VideoPixelFrame contract uses upright RGBA, as does AVAssetImageGenerator.
+    private static func uprightFrame(_ frame: ByteFrame, orientation o: Orient,
+                                     time: Double, index: UInt64) -> VideoPixelFrame {
+        let (width, height) = o.upright(width: frame.width, height: frame.height)
+        let sourceWidth = Int(frame.width)
+        let originX = min(o.m00, o.m01) < 0 ? sourceWidth - 1 : 0
+        let originY = min(o.m10, o.m11) < 0 ? Int(frame.height) - 1 : 0
+        let origin = 4 * (originY * sourceWidth + originX)
+        let stepX = 4 * (Int(o.m00) + Int(o.m10) * sourceWidth)
+        let stepY = 4 * (Int(o.m01) + Int(o.m11) * sourceWidth)
+        var rgba = Data(count: frame.planes[0].count)
+        frame.planes[0].withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+            rgba.withUnsafeMutableBytes { (output: UnsafeMutableRawBufferPointer) in
+                var dst = 0
+                for y in 0..<Int(height) {
+                    var src = origin + y * stepY
+                    for _ in 0..<width {
+                        output[dst] = source[src + 2]
+                        output[dst + 1] = source[src + 1]
+                        output[dst + 2] = source[src]
+                        output[dst + 3] = source[src + 3]
+                        src += stepX
+                        dst += 4
+                    }
+                }
+            }
+        }
+        return VideoPixelFrame(width: width, height: height, rgba: rgba, timeSeconds: time, frameIndex: index)
+    }
+    #endif
 
     public static func renderSyntheticFrame(
         pattern: SyntheticVideoPattern,

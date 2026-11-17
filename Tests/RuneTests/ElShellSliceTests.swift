@@ -256,7 +256,7 @@ struct ElShellSliceTests {
     }
 
     @Test("reveal(wordFade:) fades words gradually over time and supports streaming appends")
-    func revealWordFadeGradualAndStreaming() {
+    func revealWordFadeGradualAndStreaming() throws {
         struct MountState {
             var show = false
             var body = "Alpha beta gamma delta"
@@ -267,30 +267,45 @@ struct ElShellSliceTests {
             ] : []
             return col().children(kids)
         }
-        _ = rt.frame(at: 0.0)
+        func inkByColumn(at time: Double, fullyShown: Bool = false) throws -> [Int] {
+            var scene = rt.frame(at: time)
+            scene.clearColor = .zero
+            scene.primitives.removeAll { $0.kind != .glyph }
+            if fullyShown {
+                #expect(!scene.primitives.isEmpty)
+                #expect(scene.primitives.allSatisfy { $0.fill.w > 0.98 })
+            }
+            let image = try RuneRef.render(scene)
+            var columns = [Int](repeating: 0, count: image.width)
+            for y in 0..<image.height {
+                for x in columns.indices {
+                    columns[x] += Int(image.rgba[(y * image.width + x) * 4 + 3])
+                }
+            }
+            return columns
+        }
 
-        // Mount at t = 0.05 -> Phase is .entering; later words start staggered and fade in gradually
-        rt.update { s, _ in s.show = true }
-        let fStart = rt.frame(at: 0.05)
-        let glyphsAtStart = fStart.primitives.filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }
-        #expect(glyphsAtStart.count < 18)
+        _ = rt.frame(at: 0)
+        rt.update { state, _ in state.show = true }
+        let start = try inkByColumn(at: 0.05)
         #expect(rt.isAnimating)
+        let mounting = try inkByColumn(at: 0.12)
+        let shown = try inkByColumn(at: 0.60, fullyShown: true)
+        #expect(start.reduce(0, +) < mounting.reduce(0, +))
+        #expect(mounting.reduce(0, +) < shown.reduce(0, +))
+        let lastOldColumn = try #require(shown.lastIndex { $0 > 0 })
 
-        // Advance well past stagger + fade (0.20s + ~0.08s) -> all words fully opaque
-        let fDone = rt.frame(at: 0.60)
-        let glyphsWhenDone = fDone.primitives.filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }
-        #expect(glyphsWhenDone.count >= 18)
-        #expect(glyphsWhenDone.allSatisfy { $0.fill.w > 0.98 })
-
-        // Append more words while keeping earlier ones shown
-        rt.update { s, _ in s.body.append(" epsilon zeta") }
-        let fAppend = rt.frame(at: 0.61)
-        let glyphsAfterAppend = fAppend.primitives.filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }
-        #expect(glyphsAfterAppend.count >= glyphsWhenDone.count && glyphsAfterAppend.count < 30)
-
-        let fFinal = rt.frame(at: 1.50)
-        let finalGlyphs = fFinal.primitives.filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }
-        #expect(finalGlyphs.count >= 28)
+        rt.update { state, _ in state.body.append(" epsilon zeta") }
+        let appended = try inkByColumn(at: 0.61)
+        #expect(rt.isAnimating)
+        let fading = try inkByColumn(at: 0.68)
+        let final = try inkByColumn(at: 1.50, fullyShown: true)
+        // The settled prefix stays visible while the newly appended words gain ink.
+        #expect(appended[...lastOldColumn] == final[...lastOldColumn])
+        #expect(fading[...lastOldColumn] == final[...lastOldColumn])
+        let suffix = (lastOldColumn + 1)..<final.count
+        #expect(appended[suffix].reduce(0, +) < fading[suffix].reduce(0, +))
+        #expect(fading[suffix].reduce(0, +) < final[suffix].reduce(0, +))
         #expect(!rt.isAnimating)
     }
 
@@ -383,7 +398,7 @@ struct ElShellSliceTests {
         _ = rt6.frame(at: 0.14)
 
         #expect(rt6.selectedText() == "ask @reviewer to look")
-        let selHandled = rt6.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.16)
+        let selHandled = rt6.keyDown(KeyEvent(key: .command("c"), mods: RuneTestKey.primaryMods()), at: 0.16)
         _ = rt6.frame(at: 0.16)
         #expect(selHandled)
         #expect(rt6.clipboard.text == "ask @reviewer to look")
