@@ -1584,7 +1584,6 @@ public enum HeadlessRunner {
             return out
         }
 
-        // Initial settled frame at t = 0 (or `--at` if specified)
         var windowFrameMove: WindowFrameMove? = nil
         var currentOuterFrame: [Float] = [0, 0, vp.x, vp.y]
         var scriptedResizeFrom: Vec2 = vp
@@ -1627,14 +1626,15 @@ public enum HeadlessRunner {
             }
         }
 
-        let initialT = (resolvedAtTime ?? 0.0) * args.timeScale
-        var lastCaptured = captureFrame(at: initialT)
+        // Mount at the origin of the virtual clock so scripted events reach the
+        // initial layout before the clock advances to the requested capture.
+        var lastCaptured = captureFrame(at: 0)
         if runtime.hasPendingWindowFrame {
             _ = runtime.takeFitWindowHeld()
-            applyPendingWindowFrame(at: initialT)
+            applyPendingWindowFrame(at: 0)
         }
         if runtime.viewport != vp {
-            lastCaptured = captureFrame(at: initialT)
+            lastCaptured = captureFrame(at: 0)
         }
         var capturedStripFrames: [Frame] = []
         var dumpedFrameCount = 0
@@ -1722,7 +1722,9 @@ public enum HeadlessRunner {
                         resolvedPos = Vec2(anchorPos.x + dx, anchorPos.y + dy)
                     }
 
-                    let animNow = simTime * args.timeScale
+                    // Input reaches the clock of the last drawn frame. The
+                    // upcoming frame then advances newly retargeted springs.
+                    let animNow = runtime.currentTime
                     switch s.action {
                     case .move:
                         runtime.pointerMove(to: resolvedPos, at: animNow)
