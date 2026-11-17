@@ -217,6 +217,57 @@ struct ElAndLiveHooksParityTests {
         }
     }
 
+    @Test("Both frame APIs report inherited exit effects and send input to the live replacement", arguments: [false, true])
+    func retainedExitInspection(nativeFrame: Bool) throws {
+        struct State {
+            var showing = true
+            var clicks: [String] = []
+        }
+        let rt = Runtime(state: State(), viewport: Vec2(120, 80), pixelScale: 1) { state, _ in
+            let root: El<State> = col().size(120, 80)
+            if !state.showing {
+                return root.child(el().key("replacement").size(80, 40).role(.button)
+                    .onClick { $0.clicks.append("replacement") })
+            }
+            let controls: [El<State>] = ["ordinary", "raised"].map { key in
+                el().key(key).size(40, 40).role(.button).opacity(0.5).raise(key == "raised")
+                    .onClick { $0.clicks.append(key) }
+            }
+            return root.child(row().key("departing").size(80, 40).label("Departing controls")
+                .opacity(0.8).transition(.blur(sigma: 4)).children(controls))
+        }
+        func draw(_ time: Double) {
+            if nativeFrame { _ = rt.renderFrame(at: time) } else { _ = rt.frame(at: time) }
+        }
+        func accessibleIDs(_ node: AccessibilityNode) -> [String] {
+            [node.id] + node.children.flatMap(accessibleIDs)
+        }
+
+        draw(0)
+        let departingKeys = ["departing", "ordinary", "raised"]
+        #expect(Set(departingKeys).isSubset(of: accessibleIDs(rt.accessibilitySnapshot())))
+        rt.update(at: 0.01) { state, _ in state.showing = false }
+        draw(0.01)
+        draw(0.06)
+
+        let parent = try #require(rt.element(byKey: "departing"))
+        #expect(parent.exiting && parent.inert)
+        #expect(parent.blur > 0)
+        #expect(parent.opacity > 0 && parent.opacity < 0.8)
+        for key in ["ordinary", "raised"] {
+            let child = try #require(rt.element(byKey: key))
+            #expect(child.exiting && child.inert)
+            #expect(abs(child.blur - parent.blur) < 0.0001)
+            #expect(abs(child.opacity - parent.opacity * 0.5) < 0.0001)
+        }
+        let visibleIDs = Set(accessibleIDs(rt.accessibilitySnapshot()))
+        #expect(visibleIDs.isDisjoint(with: departingKeys))
+        #expect(visibleIDs.contains("replacement"))
+        rt.pointerDown(at: Vec2(60, 20), at: 0.07)
+        rt.pointerUp(at: Vec2(60, 20), at: 0.08)
+        #expect(rt.state.clicks == ["replacement"])
+    }
+
     @Test("Streaming pixels inside a cached subtree stay drawable on each publication")
     func cachedPixelSourceDrawsNewContents() {
         let pixels = Pixels()

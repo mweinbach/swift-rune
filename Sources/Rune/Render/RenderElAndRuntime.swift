@@ -1536,6 +1536,8 @@ extension Runtime {
             var infoVisible = visibleClipPt
             var presenceScreenClip = initialClipPt
             var infoOpacity = effOpacity
+            var infoBlur = effBlur
+            let infoExiting = isExiting || parentScope?.exiting == true
             var loopVisible = false
             if liveVisible, !reducedMotion, !isExiting, let track = loopRuntime.tracks[nid] {
                 let home = effRect.offsetBy(Vec2(-loopOffset.x * pinh.scale.x, -loopOffset.y * pinh.scale.y))
@@ -1564,8 +1566,9 @@ extension Runtime {
                 }
                 scope.opacity *= ownOpacity
                 scope.blur += effBlur * max(sc.x, sc.y)
+                infoBlur = (parentElementIndex.map { newElements[$0].blur } ?? 0) + effBlur * sc.x
                 if let parentScreenClip { presenceScreenClip = intersectRects(parentScreenClip, initialClipPt) }
-                scope.exiting = scope.exiting || isExiting
+                scope.exiting = infoExiting
                 newHitGeometries[node.path] = HitGeometry(
                     path: node.path, parentPath: parentElementIndex.map { newElements[$0].path },
                     rect: effRect, clipRect: scope.localClip ?? effRect,
@@ -1638,7 +1641,7 @@ extension Runtime {
                 visible: infoVisible == infoRect ? rect : infoVisible.xywh,
                 opacity: infoOpacity,
                 scale: sc.x,
-                blur: effBlur,
+                blur: infoBlur,
                 radius: abs(radiiPt.x),
                 fill: effBg,
                 textColor: liveTextColor ?? el.textColor,
@@ -1652,9 +1655,9 @@ extension Runtime {
                 focusable: el.focusable && !effInert,
                 focused: focused,
                 focusVisible: focused && focusVisible,
-                inert: effInert,
+                inert: effInert || infoExiting,
                 moving: pose?.ownMoving ?? moving,
-                exiting: isExiting,
+                exiting: infoExiting,
                 hover: isExiting ? 0 : (hoverFrac > 0 ? hoverFrac : (hovered ? 1 : 0)),
                 press: pressed ? 1 : 0,
                 scrolled: reportedScroll == carried ? lastCarriedPair : [reportedScroll.x, reportedScroll.y],
