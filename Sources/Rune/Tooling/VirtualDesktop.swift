@@ -1470,6 +1470,17 @@ public final class VirtualDesk {
         width: Int,
         height: Int
     ) throws -> HeadlessRunner.Output {
+        let selected: any DesktopMember
+        if let key = args.windowName {
+            guard let member = members.first(where: { $0.key == key }) else {
+                throw MultiWindowError.unknownWindow(key: key, available: members.map(\.key))
+            }
+            selected = member
+        } else if let first = members.first {
+            selected = first
+        } else {
+            throw ToolingError.invalidArgument("the app created no windows")
+        }
         let validScale = max(0.5, args.pixelScale)
         let fps = max(1.0, args.fps)
         for m in members {
@@ -1625,12 +1636,9 @@ public final class VirtualDesk {
                 "focused": st.focused,
             ]
         }
-        let treeObj: [String: Any] = [
-            "t": endTime,
-            "scale": validScale,
-            "windows": windowsTree,
-        ]
-        let treeData = (try? JSONSerialization.data(withJSONObject: treeObj, options: [.sortedKeys, .prettyPrinted])) ?? Data("{}".utf8)
+        var treeObj = selected.treeJSON(at: endTime)
+        treeObj["windows"] = windowsTree
+        let treeData = try JSONSerialization.data(withJSONObject: treeObj, options: [.sortedKeys, .prettyPrinted])
         if let treePath = args.treePath {
             let treeURL = URL(fileURLWithPath: treePath)
             try FileManager.default.createDirectory(at: treeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
