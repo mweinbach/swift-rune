@@ -109,6 +109,7 @@ struct Phase2ShellParityTests {
         App<Int>(title: title, size: Vec2(40, 40), state: 0) { _, _ in el() }
     }
 
+    // Live mock backends share process-wide claims, so independent tests use distinct chords.
     private func chord(_ text: String) -> ParsedShortcut {
         try! ParsedShortcut.parseOn(text)
     }
@@ -1062,7 +1063,7 @@ struct Phase2ShellParityTests {
         let firstWake = Waker { firstWakes.add(1) }
         shared.setWaker(firstWake)
         let first = ShortcutGuard.attachWith(shared: shared, wake: firstWake, headless: false, connect: capture)
-        _ = try! app.handle().registerShortcut(chord("ctrl+alt+f8")) { _, _ in }.get()
+        _ = try! app.handle().registerShortcut(chord("ctrl+alt+f13")) { _, _ in }.get()
         let press = sinkBox.sink
         #expect(press != nil)
 
@@ -1280,9 +1281,9 @@ struct Phase2ShellParityTests {
             return .success(MockBackendDriver(onDrop: { live1.add(-1) }))
         }
 
-        let aChord = chord("ctrl+alt+f1")
-        let bChord = chord("ctrl+alt+f2")
-        let dChord = chord("ctrl+alt+f4")
+        let aChord = chord("ctrl+alt+f14")
+        let bChord = chord("ctrl+alt+f15")
+        let dChord = chord("ctrl+alt+f16")
         let walks = interleavings([.aClosesRouting, .aReleasesEngine, .aEnds], [.bInstalls, .bRoutes, .bRegisters])
 
         var sawStale = false
@@ -1489,7 +1490,7 @@ struct Phase2ShellParityTests {
             box.attaching = nil
         }
 
-        let sc = chord("ctrl+alt+f8")
+        let sc = chord("ctrl+alt+f17")
         let answer = SignalChannel<Result<UInt32, ShortcutError>>()
         Thread {
             answer.send(handle.registerShortcut(sc) { s, _ in s += 1 })
