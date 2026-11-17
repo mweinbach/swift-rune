@@ -141,6 +141,43 @@ struct RenderSlice3LayerTests {
         }
     }
 
+    @Test("Raising a descendant preserves pixels rotated into the viewport")
+    @MainActor
+    func raisedDescendantRotatedIntoViewport() throws {
+        let renderer = try OffscreenGPURenderer()
+        for (turned, cached) in [(true, false), (true, true), (false, true)] {
+            for raised in [false, true] {
+                let rt = Runtime(state: raised, viewport: Vec2(64, 64), pixelScale: 1) { raised, _ in
+                    let dot: El<Bool> = el().size(20, 20).absolute(x: 10, y: 90).bg(.white).raise(raised)
+                    let group: El<Bool> = el().size(40, 120).child(dot)
+                    return el().size(64, 64).child(
+                        el().size(40, 120).absolute(x: 12, y: 0).rotate(turned ? .pi : 0).cache(cached).child(group)
+                    )
+                }
+                rt.clearColor = Color(r: 0, g: 0, b: 0, a: 0)
+                rt.srgbBlend = false
+                let frame = rt.renderFrame(at: 0)
+                let fills = frame.instances.filter { $0.params.y == KIND_RECT && $0.fill == SIMD4<Float>(repeating: 1) }
+                let label = "turned=\(turned), cached=\(cached), raised=\(raised)"
+                // Offscreen content stays in its cache. Raising takes the leaf outside that cache.
+                let shouldDraw = turned || (cached && !raised)
+                #expect(fills.count == (shouldDraw ? 1 : 0), "\(label)")
+
+                // The half turn around (32, 60) brings the offscreen rectangle to (22, 10).
+                let pixels = try renderer.renderOffscreen(frame)
+                var mismatches = 0
+                for y in 0..<64 {
+                    for x in 0..<64 {
+                        let inside = turned && (22..<42).contains(x) && (10..<30).contains(y)
+                        let expected = SIMD4<UInt8>(repeating: inside ? 255 : 0)
+                        if pixels.pixel(x: x, y: y) != expected { mismatches += 1 }
+                    }
+                }
+                #expect(mismatches == 0, "\(label)")
+            }
+        }
+    }
+
     // 2. #35 (`layer_tests.rs:54`)
     @Test("isolated_layers_match_scalar_overlap_crossfade_and_nesting")
     func isolatedLayersMatchScalarOverlapCrossfadeAndNesting() throws {

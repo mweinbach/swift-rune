@@ -686,6 +686,7 @@ private struct SavedRaisedNodeState {
     var enclosingLayerOpacity: Float
     var nextInert: Bool
     var nextChildTransform: PresentedTransform
+    var childIsRotated: Bool
     var isDissolveScope: Bool
     var scaleMotionRaw: Int
     var rectPx: SIMD4<Float>
@@ -2211,6 +2212,7 @@ extension Runtime {
                     enclosingLayerOpacity: enclosingLayerOpacity,
                     nextInert: effInert,
                     nextChildTransform: nextChildTransform,
+                    childIsRotated: parentIsRotated || abs(el.rotate) > 1e-4,
                     isDissolveScope: isDissolveScope,
                     scaleMotionRaw: nodeScaleMotion.rawValue,
                     rectPx: rectPx,
@@ -3828,7 +3830,10 @@ extension Runtime {
                     parentIsDissolve: pst.isDissolveScope,
                     parentScaleMotion: PaintScaleMotion(rawValue: pst.scaleMotionRaw) ?? .still,
                     parentElementIndex: pst.elementIndex,
-                    allowRaised: true
+                    allowRaised: true,
+                    // The raised branch paints outside ancestor caches, inside the reopened turns.
+                    parentInCache: false,
+                    parentIsRotated: pst.childIsRotated
                 )
             } else {
                 paintSubtree(slot, parentClip: rootClip, inheritedInert: false, parentOpacity: 1.0, allowRaised: true)
