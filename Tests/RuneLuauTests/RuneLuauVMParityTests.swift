@@ -401,7 +401,38 @@ struct RuneLuauVMParityTests {
 
     // MARK: - 6. Watchdog
 
-    @Test("Default 250ms watchdog aborts infinite loop under 260ms and resists pcall")
+    @Test("The watchdog samples the clock every 256 instructions and expires at the default deadline")
+    func watchdogSamplesDefaultDeadline() throws {
+        let start = ContinuousClock.now
+        var now = start
+        var clockReads = 0
+        let watchdog = LuauWatchdog(now: {
+            clockReads += 1
+            return now
+        })
+        let limit = ScriptOptions().timeLimit
+        #expect(limit == .milliseconds(250))
+        let armed = watchdog.arm(timeLimit: limit)
+        defer { armed.disarm() }
+        #expect(clockReads == 1)
+
+        now = start + limit - .nanoseconds(1)
+        for _ in 0..<256 { try watchdog.tick() }
+        #expect(clockReads == 2)
+
+        now = start + limit
+        for _ in 0..<255 { try watchdog.tick() }
+        #expect(clockReads == 2)
+        do {
+            try watchdog.tick()
+            Issue.record("expected a timeout on the next clock sample")
+        } catch let error as LuauRuntimeError {
+            #expect(error.isTimeout)
+        }
+        #expect(clockReads == 3)
+    }
+
+    @Test("The default watchdog stops an infinite loop and its pcall wrapper")
     func watchdogDefault250msAndPcallImmunity() throws {
         let spinSrc = Sources.single("""
         local M = {}
@@ -416,29 +447,22 @@ struct RuneLuauVMParityTests {
         end
         return M
         """)
-        let opts = ScriptOptions()
-        #expect(opts.timeLimit == .milliseconds(250))
-
-        let script = Script(name: "watchdog", sources: spinSrc, options: opts)
+        let options = ScriptOptions()
+        let script = Script(name: "watchdog", sources: spinSrc, options: options)
         script.prewarm()
         #expect(script.error == nil)
 
-        let t0 = ContinuousClock.now
-        do {
-            _ = try script.query("spin")
-            Issue.record("expected timeout error")
-        } catch let err as ScriptError {
-            #expect(err.kind == .timeout)
-        }
-        let elapsed = t0.duration(to: .now)
-        #expect(elapsed >= .milliseconds(240))
-        #expect(elapsed < .milliseconds(260))
-
-        do {
-            _ = try script.query("spinPcall")
-            Issue.record("expected pcall to be unable to catch timeout")
-        } catch let err as ScriptError {
-            #expect(err.kind == .timeout)
+        for entry in ["spin", "spinPcall"] {
+            let started = ContinuousClock.now
+            do {
+                _ = try script.query(entry)
+                Issue.record("expected \(entry) to time out")
+            } catch let error as ScriptError {
+                #expect(error.kind == .timeout)
+            }
+            let elapsed = started.duration(to: .now)
+            #expect(elapsed >= options.timeLimit)
+            #expect(elapsed < .seconds(2), "\(entry) took \(elapsed)")
         }
     }
 
