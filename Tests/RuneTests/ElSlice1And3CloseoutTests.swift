@@ -20,13 +20,17 @@ struct ElSlice1And3CloseoutTests {
 
     // MARK: - 1. src/el/a11y.rs Props on El (L59, L142, L147-149, L151-152, L158, L160-163, L168)
 
-    @Test("Integer scrolling reuses retained mask draws and reproduces the fresh command stream")
-    func retainedTranslatedLabelDraws() throws {
+    @Test("Integer scrolling reuses plain and syntax-colored masks and reproduces fresh draws", arguments: [false, true])
+    func retainedTranslatedLabelDraws(colored: Bool) throws {
         func app() -> Runtime<Int> {
             let rt = Runtime<Int>(state: 0, viewport: Vec2(360, 220), pixelScale: 1) { version, _ in
                 // A font with a negative left bearing needs room for its complete mask.
                 let rows: [El<Int>] = (0..<20).map { i in
-                    text("row \(i) value \(version)").key("r\(i)").size(280, 24).pl(8)
+                    let label: El<Int> = colored
+                        ? rich([TextSpan("row \(i) ", color: .srgb(1, 0, 0)),
+                                TextSpan("value \(version)", color: .srgb(0, 1, 0), background: .black)])
+                        : text("row \(i) value \(version)")
+                    return label.key("r\(i)").size(280, 24).pl(8)
                 }
                 return col().key("scroll").size(360, 220).scroll(ScrollSpec(stickBottom: false)).children(rows)
             }
@@ -60,6 +64,27 @@ struct ElSlice1And3CloseoutTests {
         #expect(reused)
     }
 
+    @Test("Live opacity updates syntax ink when a label's default foreground is transparent")
+    func retainedSpanOpacity() throws {
+        func app() -> Runtime<Live<Float>> {
+            let rt = Runtime(state: Live<Float>(1), viewport: Vec2(160, 50), pixelScale: 1) { alpha, _ in
+                rich([TextSpan("color", color: .white)]).key("syntax").size(150, 40).pl(8)
+                    .color(.transparent).liveOpacity(alpha.binding)
+            }
+            rt.textSystem.smoothing = .off
+            return rt
+        }
+        let retained = app(), fresh = app()
+        let first = retained.renderFrame(at: 0)
+        _ = fresh.renderFrame(at: 0)
+        #expect(!retained.labelDraws.isEmpty)
+        for rt in [retained, fresh] { rt.state.set(0.25) }
+        fresh.labelDraws.removeAll()
+        let changed = retained.renderFrame(at: 1)
+        #expect(changed.instances == fresh.renderFrame(at: 1).instances)
+        #expect(changed.instances != first.instances)
+    }
+
     @Test("Deep native paint traversal shapes visible text on a Swift task stack")
     func deepNativePaintTraversal() {
         let rt = Runtime(state: (), viewport: Vec2(100, 100), pixelScale: 1) { _, _ -> El<Void> in
@@ -91,6 +116,35 @@ struct ElSlice1And3CloseoutTests {
         let on = rt.renderFrame(at: 0.1)
         #expect(rt.element(byKey: "label")?.visible[3] ?? 0 > 0)
         #expect(on.instances.contains { $0.params.y == KIND_GLYPH })
+    }
+
+    @Test("Offscreen syntax spans retain their geometry and multiline overflow still paints")
+    func offscreenRichSingleLinePaint() throws {
+        let rt = Runtime(state: false, viewport: Vec2(160, 90), pixelScale: 1) { moved, _ -> El<Bool> in
+            let syntax: El<Bool> = rich([TextSpan("let ", color: .white), TextSpan("row", background: .black)])
+                .noWrap().key("syntax").pin(top: moved ? 45 : 350, left: 0).size(140, 24).mark(23)
+            let overflow: El<Bool> = rich([TextSpan(String(repeating: "line\n", count: 12) + "tail", color: .white)])
+                .noWrap().key("overflow").pin(top: -90, left: 0).size(140, 12).mark(24)
+            let wrapped: El<Bool> = rich([TextSpan(String(repeating: "word ", count: 40), color: .white)])
+                .font(TextStyle(size: 14, wrap: .ellipsis, maxLines: 8))
+                .key("wrapped").pin(top: -70, left: 90).size(60, 12).mark(25)
+            let large: El<Bool> = rich([TextSpan("T", monospace: true, size: 80)])
+                .font(TextStyle(size: 10, lineHeight: 40)).key("large")
+                .pin(top: -180, left: 0).size(140, 10).mark(26)
+            return el().size(160, 90).clip(true).children([syntax, overflow, wrapped, large])
+        }
+        let off = rt.renderFrame(at: 0)
+        #expect(rt.element(byKey: "syntax")?.visible[3] == 0)
+        #expect(!off.marks.contains(23))
+        #expect(zip(off.marks, off.instances).contains { $0 == 24 && $1.params.y == KIND_GLYPH })
+        #expect(zip(off.marks, off.instances).contains { $0 == 25 && $1.params.y == KIND_GLYPH })
+        #if canImport(CoreText)
+        #expect(zip(off.marks, off.instances).contains { $0 == 26 && $1.params.y == KIND_GLYPH })
+        #endif
+        rt.update(at: 0.1) { moved, tx in moved = true; tx.instant() }
+        let on = rt.renderFrame(at: 0.1)
+        #expect(rt.element(byKey: "syntax")?.rect == [0, 45, 140, 24])
+        #expect(zip(on.marks, on.instances).contains { $0 == 23 && $1.params.y == KIND_GLYPH })
     }
 
     @Test("Overscan culls guide and icon draws while retaining geometry, overflowing children, and input")

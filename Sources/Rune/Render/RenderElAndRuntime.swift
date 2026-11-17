@@ -641,6 +641,7 @@ private typealias PaintHeader = (
 private struct PaintContext {
     let clip: RenderClipState
     let inert: Bool
+    let groupHover: Float
     let opacity: Float
     let enclosingOpacity: Float
     let transform: PresentedTransform
@@ -971,8 +972,11 @@ extension Runtime {
             let isGroupScope = el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil
             return (effInert, isGroupScope ? ownHoverFrac : scope.group, ownPress)
         }
-        let needsInteractionPrepass = topology.hasGroupOpacity || topology.hasPressColor || !topology.dissolveIndices.isEmpty
-            || !loopRuntime.tracks.isEmpty || !exitingIds.isEmpty || !elSliceRenderState.groupFadeIds.isEmpty
+        let hasGroupOpacity = topology.hasGroupOpacity || !elSliceRenderState.groupFadeIds.isEmpty
+        // Group opacity follows the current parent in paint order. Raised or dissolving
+        // branches can draw out of order or inspect children before the first child paints.
+        let needsInteractionPrepass = (hasGroupOpacity && hasRaised) || topology.hasPressColor
+            || !topology.dissolveIndices.isEmpty || !loopRuntime.tracks.isEmpty || !exitingIds.isEmpty
         if needsInteractionPrepass {
             var pending: [(slot: Int, scope: InteractionScope)] = []
             for root in topology.roots.reversed() { pending.append((root, (false, 0, (nil, 0)))) }
@@ -1250,9 +1254,10 @@ extension Runtime {
 
         @inline(never)
         func paintNodeHeader(
-            _ node: FlatNode,
+            _ node: FlatNode, el: El<State>, presented: Presented?, loop: LoopSampleResult?,
             parentClip inheritedClip: RenderClipState,
             inheritedInert: Bool,
+            groupHover: inout Float,
             parentOpacity: Float,
             enclosingLayerOpacity: Float = 1,
             inheritedTransform: PresentedTransform,
@@ -1263,11 +1268,6 @@ extension Runtime {
             parentIsRotated: Bool = false
         ) -> PaintHeader {
             let nid = node.nodeId
-            let presented = presentedById[nid]
-            let loop = loopSamples[nid]
-            var authored = presentedGrowthElement(node)
-            authored.rotate = (presented?.rotate ?? authored.rotate) + (loop?.rotation ?? 0)
-            let el = authored
             var parentClip = inheritedClip
             if let edge = el.stickyConfig?.edge {
                 let slot: Int
@@ -1455,7 +1455,20 @@ extension Runtime {
             let restScale = el.anchor != nil && effectiveParentScaleMotion == .still ? pinh.scale.x : pinh.stillScale
             nextChildTransform.stillScale = nodeScaleMotion == .still ? sc.x : restScale
             let rasterScale = nodeScaleMotion.raster(sc: sc.x, rest: restScale)
-            let ownOpacity = needsInteractionPrepass ? (nodeOwnOpacityById[nid] ?? 1) : (liveOpacity ?? presented?.opacity ?? el.opacity).clamped(to: 0...1)
+            let effInert = inheritedInert || el.isInert
+            let hoverFrac = needsInteractionPrepass ? (nodeHoverFracById[nid] ?? 0) : resolveNodeHoverFrac(node, inert: effInert)
+            let ownOpacity: Float
+            if needsInteractionPrepass {
+                ownOpacity = nodeOwnOpacityById[nid] ?? 1
+            } else {
+                let groupFactor = hasGroupOpacity
+                    ? resolveGroupOpacityFactor(nodeId: nid, el: el, nodePath: node.path, inheritedGroupFrac: groupHover)
+                    : 1
+                ownOpacity = ((liveOpacity ?? presented?.opacity ?? el.opacity) * groupFactor).clamped(to: 0...1)
+                if hasGroupOpacity && (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil) {
+                    groupHover = hoverFrac
+                }
+            }
             let effOpacity = (parentOpacity * ownOpacity).clamped(to: 0...1)
             let effBlur = max(0, liveBlur ?? presented?.blur ?? el.blur)
             let isContinuousCorners = (el.runtimeExtras[RenderExtrasKey.continuousCorners] as? Bool) ?? false
@@ -1471,7 +1484,6 @@ extension Runtime {
             } ?? baseRadii).withContinuousCorners(isContinuousCorners)
             let radiiPx = radiiPt * scale
 
-            let effInert = inheritedInert || el.isInert
             let visibleClipPt = intersectRects(parentClip.rectPt, effRect)
             newPresentedRects[node.path] = effRect
             newPresentedScales[node.path] = sc
@@ -1484,7 +1496,6 @@ extension Runtime {
             if !isExiting {
                 if parentSpringing || ownSpatialMoving { newRectSpringingById[nid] = true }
             }
-            let hoverFrac = needsInteractionPrepass ? (nodeHoverFracById[nid] ?? 0) : resolveNodeHoverFrac(node, inert: effInert)
             let flatFocusWithin = el.focusWithinFlat && !effInert && !isExiting && isFocusWithin(node.path)
             let hovered = !flatFocusWithin && !isExiting && (hoverFrac > 0.0005 || (!effInert && matchesAuthoredKey(hoveredKey, node.key)))
             let pressed = isNodePressedVisually(path: node.path, effectiveInert: effInert || isExiting) || (!effInert && !isExiting && pressedPath != node.path && pressedPointerInside && matchesAuthoredKey(pressedKey, node.key))
@@ -1728,23 +1739,29 @@ extension Runtime {
                     && !focused && !el.focusable && el.focusWithinRing == nil && el.anchor == nil
             }
             let clippedSingleLine: Bool
-            if !clipMisses, parentClip.viewportApplies, !parentInCache, !parentIsRotated, sc.y > 0,
+            if !clipMisses, canCullToViewport, sc.y > 0,
                effRect.bottom * scale < max(0, clip.y) || effRect.top * scale > min(Float(heightPx), clip.w),
-               let text = el.plainText, el.textStyle.wrap == .ellipsis || el.isTruncateFadeEnabled,
-               el.liveText == nil, el.advanceInRun == nil, el.richSpans == nil, el.pillChips.isEmpty,
-               el.iconPayload == nil, el.imagePayload == nil, el.shapes.isEmpty, shadows.isEmpty,
-               effBlur == 0, el.rotate == 0, el.backdropBlur == 0, !el.isolatedLayer,
-               el.runtimeExtras[RenderExtrasKey.effectSpec] == nil, el.focusRingColor == nil,
-               el.focusWithinRing == nil, el.elOutline == nil, !focused, !el.focusable {
-                // Rust's painted check intersects the drawn bounds with the device viewport.
-                // The shaper retains two ems around visible lines for glyph overhang.
+               el.plainText != nil || el.richSpans != nil,
+               el.isTruncateFadeEnabled || (el.textStyle.wrap != .wrap && el.textStyle.maxLines == 0),
+               el.liveText == nil, el.advanceInRun == nil, el.pillChips.isEmpty,
+               el.iconPayload == nil, el.imagePayload == nil, el.terminalGridPayload == nil, el.shapes.isEmpty, shadows.isEmpty,
+               el.backdropBlur == 0, el.focusRingColor == nil, el.focusWithinRing == nil, el.elOutline == nil,
+               !focused, !el.focusable, el.textHighlights == nil, el.spanRingsSpec.isEmpty, el.elStrikes.isEmpty,
+               el.runtimeExtras.isEmpty || (el.runtimeExtras.count == 1 && el.elMark != nil) {
+                // A no-wrap label may still contain hard breaks. Keep the shaper's overhang
+                // allowance and account for the text offset from vertical padding.
                 let yScale = max(abs(sc.y) * scale, 0.0625)
+                let spans = el.richSpans
                 let band = TextRasterWindow(lowerY: max(0, clip.y) / yScale,
                                             upperY: min(Float(heightPx), clip.w) / yScale)
-                    .expanded(for: el.textStyle, spans: nil, scale: yScale)
-                let outside = effRect.bottom * scale < band.lowerY * yScale
-                    || effRect.top * scale > band.upperY * yScale
-                clippedSingleLine = outside && !text.contains(where: \.isNewline)
+                    .expanded(for: el.textStyle, spans: spans, scale: yScale)
+                let padding = el.layout.padding.top * yScale
+                let outside = effRect.bottom * scale + max(0, padding) < band.lowerY * yScale
+                    || effRect.top * scale + min(0, padding) > band.upperY * yScale
+                // A larger span can move the baseline by the font's line-height multiplier.
+                // Use the measured line boxes for those labels.
+                clippedSingleLine = outside && el.plainText?.contains(where: \.isNewline) != true
+                    && spans?.contains(where: { $0.pad > 0 || ($0.size ?? 0) > el.textStyle.size || $0.text.contains(where: \.isNewline) }) != true
             } else {
                 clippedSingleLine = false
             }
@@ -3356,7 +3373,7 @@ extension Runtime {
                 let canRetain = !freshRaster && restsExact && !forceScaled && !isRotatedScope && !inCacheScope
                     && glide == .zero && raster == nil && outlineMode == nil && !lcdMask
                     && inkMode == textSystem.smoothing && motionRasterGlyphs == nil
-                    && el.plainText != nil && el.richSpans == nil && el.liveText == nil
+                    && el.liveText == nil && pressTint.frac == 0 && selectionInk == nil
                     && el.advanceInRun == nil && !el.isSecure && el.textHighlights == nil
                     && !el.isSelectable && wordFadeMask == nil && linkInks.isEmpty && !labelGlyphs.isEmpty
                     && shaped.lineGlyphRanges.count == 1
@@ -3365,7 +3382,7 @@ extension Runtime {
                 let retained = canRetain ? labelDraws[nid] : nil
                 let reused = retained?.replay(
                     glyphs: labelGlyphs, at: restOrigin, clip: glyphClipEdges, fade: glyphFade, visible: visible,
-                    ink: runInk, baseline: shaped.lineBaselinesPx.first, scale: scale, smoothing: inkMode, srgb: srgbBlend, atlas: textSystem.glyphAtlas,
+                    ink: runInk, opacity: localOpacity, baseline: shaped.lineBaselinesPx.first, scale: scale, smoothing: inkMode, srgb: srgbBlend, atlas: textSystem.glyphAtlas,
                     into: &instances, marks: &marks, fixups: &glyphFixups
                 ) == true
                 if reused {
@@ -3412,8 +3429,8 @@ extension Runtime {
                     }
                     if canRetain, instances.count - firstDraw == labelGlyphs.count,
                        glyphFixups.count - firstFixup == labelGlyphs.count,
-                       labelGlyphs.allSatisfy({ $0.color == nil && !$0.hasLCDMask }),
-                       instances[firstDraw...].allSatisfy({ $0.params.y == KIND_GLYPH && $0.fill == runInk }) {
+                       labelGlyphs.allSatisfy({ !$0.hasLCDMask }),
+                       instances[firstDraw...].allSatisfy({ $0.params.y == KIND_GLYPH }) {
                         var draws: [RetainedLabelDraws.Draw] = []
                         var pages: Set<UInt16> = []
                         draws.reserveCapacity(labelGlyphs.count)
@@ -3422,7 +3439,7 @@ extension Runtime {
                             pages.insert(fixup.page)
                         }
                         nextLabelDraws[nid] = RetainedLabelDraws(
-                            source: labelGlyphs, origin: restOrigin, bounds: runBounds, ink: runInk, baseline: shaped.lineBaselinesPx.first, scale: scale,
+                            source: labelGlyphs, origin: restOrigin, bounds: runBounds, ink: runInk, opacity: localOpacity, baseline: shaped.lineBaselinesPx.first, scale: scale,
                             smoothing: inkMode, srgb: srgbBlend, pages: pages, resets: textSystem.glyphAtlas.resets, draws: draws
                         )
                     }
@@ -3699,7 +3716,7 @@ extension Runtime {
         ) -> Bool {
             var nextSlot: Int? = rootSlot
             var context = PaintContext(
-                clip: parentClip, inert: inheritedInert, opacity: parentOpacity, enclosingOpacity: enclosingLayerOpacity,
+                clip: parentClip, inert: inheritedInert, groupHover: 0, opacity: parentOpacity, enclosingOpacity: enclosingLayerOpacity,
                 transform: inheritedTransform, dissolve: parentIsDissolve, scaleMotion: parentScaleMotion,
                 element: parentElementIndex, allowRaised: allowRaised, inCache: parentInCache, rotated: parentIsRotated
             )
@@ -3715,12 +3732,27 @@ extension Runtime {
                 } else {
                     let savedMark = currentInheritedMark
                     currentInheritedMark = node.el.elMark ?? savedMark
-                    let h = paintNodeHeader(
-                        node, parentClip: context.clip, inheritedInert: context.inert, parentOpacity: context.opacity,
-                        enclosingLayerOpacity: context.enclosingOpacity, inheritedTransform: context.transform,
-                        parentIsDissolve: context.dissolve, parentScaleMotion: context.scaleMotion,
-                        parentElementIndex: context.element, parentInCache: context.inCache, parentIsRotated: context.rotated
-                    )
+                    var groupHover = context.groupHover
+                    let presented = presentedById[node.nodeId]
+                    let loop = loopSamples[node.nodeId]
+                    let turn = (presented?.rotate ?? node.el.rotate) + (loop?.rotation ?? 0)
+                    func header(_ el: El<State>) -> PaintHeader {
+                        paintNodeHeader(
+                            node, el: el, presented: presented, loop: loop,
+                            parentClip: context.clip, inheritedInert: context.inert, groupHover: &groupHover, parentOpacity: context.opacity,
+                            enclosingLayerOpacity: context.enclosingOpacity, inheritedTransform: context.transform,
+                            parentIsDissolve: context.dissolve, parentScaleMotion: context.scaleMotion,
+                            parentElementIndex: context.element, parentInCache: context.inCache, parentIsRotated: context.rotated
+                        )
+                    }
+                    let h: PaintHeader
+                    if turn == node.el.rotate && !slice2State.joinedRowsWithoutRevealMask.contains(node.nodeId) {
+                        h = header(node.el)
+                    } else {
+                        var adjusted = presentedGrowthElement(node)
+                        adjusted.rotate = turn
+                        h = header(adjusted)
+                    }
                     #if DEBUG
                     if let paint = pendingTextPaint {
                         pendingTextPaint = nil
@@ -3729,9 +3761,8 @@ extension Runtime {
                     #endif
                     let children = topology.children(of: node)
                     if (h.continueSubtree || publishHitGeometry), let first = children.first {
-                        let turn = (presentedById[node.nodeId]?.rotate ?? node.el.rotate) + (loopSamples[node.nodeId]?.rotation ?? 0)
                         context = PaintContext(
-                            clip: h.nextChildClip, inert: h.nextInert,
+                            clip: h.nextChildClip, inert: h.nextInert, groupHover: groupHover,
                             opacity: h.continueSubtree ? (h.needsLayer ? 1 : h.effOpacity).clamped(to: 0...1) : 0,
                             enclosingOpacity: h.needsLayer ? context.enclosingOpacity * h.effOpacity : context.enclosingOpacity,
                             transform: h.nextChildTransform, dissolve: h.isDissolveScope, scaleMotion: h.scaleMotion,

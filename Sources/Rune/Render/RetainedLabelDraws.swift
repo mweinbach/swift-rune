@@ -16,6 +16,8 @@ internal struct RetainedLabelDraws {
     var origin: SIMD2<Float>
     var bounds: SIMD4<Float>
     var ink: SIMD4<Float>
+    // Span colors come from the retained glyphs. Their alpha can change even if default ink is clear.
+    var opacity: Float
     var baseline: Float?
     var scale: Float
     var smoothing: FontSmoothing
@@ -26,10 +28,10 @@ internal struct RetainedLabelDraws {
 
     func replay(
         glyphs: [PositionedGlyph], at origin: SIMD2<Float>, clip: SIMD4<Float>, fade: SIMD4<UInt32>,
-        visible: SIMD4<Float>, ink: SIMD4<Float>, baseline: Float?, scale: Float, smoothing: FontSmoothing, srgb: Bool,
+        visible: SIMD4<Float>, ink: SIMD4<Float>, opacity: Float, baseline: Float?, scale: Float, smoothing: FontSmoothing, srgb: Bool,
         atlas: GlyphAtlas, into instances: inout [RenderInstance], marks: inout [UInt32], fixups: inout [GlyphUVFixup]
     ) -> Bool {
-        guard self.ink == ink, self.baseline == baseline, self.scale == scale, self.smoothing == smoothing, self.srgb == srgb,
+        guard self.ink == ink, self.opacity == opacity, self.baseline == baseline, self.scale == scale, self.smoothing == smoothing, self.srgb == srgb,
               source.count == glyphs.count, source.withUnsafeBufferPointer({ previous in
                   glyphs.withUnsafeBufferPointer { $0.baseAddress == previous.baseAddress }
               }) else { return false }
