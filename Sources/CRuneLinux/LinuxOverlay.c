@@ -602,6 +602,13 @@ void rune_overlay_free(RuneLinuxOverlay *s) {
         owned_xdisplay = NULL;
     }
     g_free(s);
-    if (--host_count == 0) { clear_gl_context(); rune_linux_register_gl_reset(NULL); }
+    if (--host_count == 0) {
+        // GtkGLArea destruction can unbind EGL and clear GDK's thread state.
+        // Invalidate SDL's independent cache even in that case, so its next
+        // MakeCurrent restores the ordinary window's draw surface.
+        gdk_gl_context_clear_current();
+        SDL_GL_MakeCurrent(NULL, NULL);
+        rune_linux_register_gl_reset(NULL);
+    }
 }
 #endif

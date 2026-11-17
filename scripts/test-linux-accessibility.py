@@ -220,6 +220,14 @@ def test_scroll_to_field(binary):
         bounds = editor.get_character_extents(0, Atspi.CoordType.WINDOW)
         assert bounds.width > 0 and bounds.height > 0, "Revealed field lost its keyed-root text layout"
         print("AT-SPI Rune: component and text range scrolled an offscreen field into view")
+        for text, spans in [("can't 3.14!!", [(0, 5), (5, 6), (6, 10), (10, 11), (11, 12)]),
+                            ("one two", [(0, 3), (3, 4), (4, 7)])]:
+            assert editor.set_text_contents(text)
+            wait_for(lambda: Atspi.Text.get_text(editor, 0, -1) == text)
+            for start, end in spans:
+                word = editor.get_string_at_offset(end - 1, Atspi.TextGranularity.WORD)
+                assert (word.start_offset, word.end_offset, word.content) == (start, end, text[start:end])
+        print("AT-SPI Rune: shaped contractions, decimals, spaces and punctuation survive edits")
 
 
 if __name__ == "__main__":

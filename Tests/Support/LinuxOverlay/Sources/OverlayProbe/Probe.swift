@@ -34,6 +34,9 @@ private final class Controls: @unchecked Sendable {
             let hit: El<Int> = el().size(64, 36)
                 .bg(clicks.isMultiple(of: 2) ? Color(r: 0, g: 1, b: 0) : Color(r: 1, g: 0, b: 1))
                 .hit().role(.button).label("Overlay toggle")
+                .onPointerDown { count, _, _ in
+                    if count == 3 { report("drag-press") }
+                }
                 .dragOut { _ in DragItem().text("Rune overlay drag") }
                 .onDragOutEnd { _, outcome, _ in report("drag-answered \(outcome == .cancelled)") }
                 .onClick { count, tx in

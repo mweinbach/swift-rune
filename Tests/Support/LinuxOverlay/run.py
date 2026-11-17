@@ -239,8 +239,9 @@ def test(args, directory, runtime):
             assert_color("assistive-press", bottom_sample, magenta)
             # Feed real pointer motion into the private display. On Sway this
             # goes through its nested X11 input backend and reaches Rune on Wayland.
-            run("xdotool", "mousemove", *map(str, bottom), "mousedown", "1",
-                "mousemove", str(bottom[0]+20), str(bottom[1]))
+            run("xdotool", "mousemove", *map(str, bottom), "mousedown", "1")
+            wait("drag press", lambda: "drag-press" in lines())
+            run("xdotool", "mousemove", str(bottom[0]+20), str(bottom[1]))
             wait("Linux drag result", lambda: "drag-answered true" in lines())
             run("xdotool", "mouseup", "1")
             send_command("release")

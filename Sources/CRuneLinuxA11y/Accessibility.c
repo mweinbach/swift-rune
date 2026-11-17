@@ -12,6 +12,8 @@ typedef struct {
     GPtrArray *children;
     RuneA11yWindow *window;
     char *target, *text, *shortcut;
+    int text_length;
+    PangoLogAttr *text_attrs;
     RuneA11yProperties properties;
     GArray *text_cells;
     guint64 states;
@@ -174,6 +176,7 @@ static void finalize(GObject *obj) {
     g_ptr_array_unref(node->children);
     g_free(node->target);
     g_free(node->text);
+    g_free(node->text_attrs);
     g_free(node->shortcut);
     g_clear_pointer(&node->text_cells, g_array_unref);
     G_OBJECT_CLASS(rune_accessible_parent_class)->finalize(obj);
@@ -319,7 +322,7 @@ static const char *visible_text(AtkText *obj) {
     RuneAccessible *node = (RuneAccessible *)obj;
     return node->text ? node->text : "";
 }
-static int character_count(AtkText *text) { return (int)g_utf8_strlen(visible_text(text), -1); }
+static int character_count(AtkText *text) { return ((RuneAccessible *)text)->text_length; }
 static char *get_text(AtkText *text, int start, int end) {
     const char *value = visible_text(text);
     int n = character_count(text);
@@ -395,7 +398,7 @@ static gint offset_at_point(AtkText *text, gint x, gint y, AtkCoordType coords) 
 static gboolean text_boundary(PangoLogAttr attr, AtkTextGranularity unit) {
     switch (unit) {
     case ATK_TEXT_GRANULARITY_CHAR: return attr.is_cursor_position;
-    case ATK_TEXT_GRANULARITY_WORD: return attr.is_word_start;
+    case ATK_TEXT_GRANULARITY_WORD: return attr.is_word_boundary;
     case ATK_TEXT_GRANULARITY_SENTENCE: return attr.is_sentence_start;
     case ATK_TEXT_GRANULARITY_LINE:
     case ATK_TEXT_GRANULARITY_PARAGRAPH: return attr.is_mandatory_break;
@@ -404,11 +407,11 @@ static gboolean text_boundary(PangoLogAttr attr, AtkTextGranularity unit) {
 }
 
 static char *string_at_offset(AtkText *obj, int offset, AtkTextGranularity unit, int *start, int *end) {
+    RuneAccessible *node = (RuneAccessible *)obj;
     int count = character_count(obj);
     *start = *end = -1;
     if (offset < 0 || offset >= count || unit > ATK_TEXT_GRANULARITY_PARAGRAPH) return NULL;
     if (unit == ATK_TEXT_GRANULARITY_LINE) {
-        RuneAccessible *node = (RuneAccessible *)obj;
         const RuneA11yTextCell *at = cell_for_offset(node, offset);
         if (at) {
             const RuneA11yTextCell *cells = (const RuneA11yTextCell *)node->text_cells->data;
@@ -419,13 +422,14 @@ static char *string_at_offset(AtkText *obj, int offset, AtkTextGranularity unit,
             return get_text(obj, *start, *end);
         }
     }
-    PangoLogAttr *attrs = g_new0(PangoLogAttr, count + 1);
-    pango_get_log_attrs(visible_text(obj), -1, -1, pango_language_get_default(), attrs, count + 1);
+    if (!node->text_attrs) {
+        node->text_attrs = g_new0(PangoLogAttr, (gsize)count + 1);
+        pango_get_log_attrs(visible_text(obj), -1, -1, pango_language_get_default(), node->text_attrs, count + 1);
+    }
     *start = offset;
     *end = offset + 1;
-    while (*start > 0 && !text_boundary(attrs[*start], unit)) --*start;
-    while (*end < count && !text_boundary(attrs[*end], unit)) ++*end;
-    g_free(attrs);
+    while (*start > 0 && !text_boundary(node->text_attrs[*start], unit)) --*start;
+    while (*end < count && !text_boundary(node->text_attrs[*end], unit)) ++*end;
     return get_text(obj, *start, *end);
 }
 
@@ -636,12 +640,14 @@ static void change_text(RuneAccessible *node, const char *value) {
     if (!g_strcmp0(node->text, value)) return;
     gboolean text_node = ATK_IS_TEXT(node);
     if (text_node && node->text && *node->text)
-        g_signal_emit_by_name(node, "text-changed::delete", 0, (int)g_utf8_strlen(node->text, -1));
+        g_signal_emit_by_name(node, "text-changed::delete", 0, node->text_length);
     g_free(node->text);
+    g_clear_pointer(&node->text_attrs, g_free);
     g_clear_pointer(&node->text_cells, g_array_unref);
     node->text = g_strdup(value);
+    node->text_length = value ? (int)g_utf8_strlen(value, -1) : 0;
     if (text_node && value && *value)
-        g_signal_emit_by_name(node, "text-changed::insert", 0, (int)g_utf8_strlen(value, -1));
+        g_signal_emit_by_name(node, "text-changed::insert", 0, node->text_length);
 }
 static void retire_node(RuneAccessible *node) {
     orphan(node);
