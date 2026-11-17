@@ -30,6 +30,7 @@ uniform vec4 uSourceRect;
 uniform vec4 uClearColor;
 out vec4 outColor;
 
+#ifndef RUNE_ROOT_PASS
 float frameBoxDistance(vec2 p, vec2 halfSize, vec4 corners) {
     float r = p.x > 0.0 ? (p.y > 0.0 ? corners.z : corners.y) : (p.y > 0.0 ? corners.w : corners.x);
     vec2 edge = halfSize - abs(p);
@@ -141,6 +142,8 @@ vec4 layer(ivec2 px, vec2 frag, vec2 size) {
     return value * (clamp(uPose.w, 0.0, 1.0) * coverage);
 }
 
+#endif
+
 vec3 encodeSRGB(vec3 x) {
     return mix(1.055 * pow(x, vec3(1.0 / 2.4)) - 0.055, 12.92 * x, lessThanEqual(x, vec3(0.0031308)));
 }
@@ -149,12 +152,33 @@ vec3 decodeSRGB(vec3 x) {
     return mix(pow((x + 0.055) / 1.055, vec3(2.4)), x / 12.92, lessThanEqual(x, vec3(0.04045)));
 }
 
+vec4 displayPixel(ivec2 px) {
+    // Intermediate buffers hold premultiplied values in the scene's blending space.
+    vec4 value = texelFetch(uSource, px, 0);
+    if (uMode == 6 && uSRGBBlend == 0) {
+        // Recover the stored sRGB byte before dividing. Hardware samplers can
+        // approximate sRGB decoding, which is visible after division by a small alpha.
+        vec3 stored = floor(encodeSRGB(value.rgb) * 255.0 + 0.5) / 255.0;
+        value.rgb = decodeSRGB(stored);
+    }
+    float alpha = clamp(value.a, 0.0, 1.0);
+    // Production reads a UNorm root. At zero stored alpha Metal returns its stored
+    // RGB bytes, including tiny linear values represented by the sRGB attachment.
+    vec3 rgb = alpha > 1e-5 ? clamp(value.rgb / alpha, 0.0, 1.0) : (uMode == 6 ? value.rgb : vec3(0.0));
+    if (uSRGBBlend == 0 && uDisplaySRGB == 0) rgb = encodeSRGB(rgb);
+    if (uSRGBBlend != 0 && uDisplaySRGB != 0) rgb = decodeSRGB(rgb);
+    return vec4(rgb, alpha);
+}
+
 void main() {
     if (uMode == 7) {
         outColor = uClearColor;
         return;
     }
     ivec2 px = ivec2(gl_FragCoord.xy);
+#ifdef RUNE_ROOT_PASS
+    outColor = displayPixel(px);
+#else
     vec2 size = vec2(textureSize(uSource, 0));
     vec4 target = uTargetRect.z > 0.0 ? uTargetRect : vec4(0.0, 0.0, size);
     vec2 frag = target.xy + vec2(gl_FragCoord.x, target.w - gl_FragCoord.y);
@@ -184,20 +208,7 @@ void main() {
         bool inside = all(greaterThanEqual(coord, ivec2(0))) && all(lessThan(coord, ivec2(size)));
         outColor = inside ? texelFetch(uSource, ivec2(coord.x, int(size.y)-1-coord.y), 0) : vec4(0.0);
     } else {
-        // Intermediate buffers hold premultiplied values in the scene's blending space.
-        vec4 value = texelFetch(uSource, px, 0);
-        if (uMode == 6 && uSRGBBlend == 0) {
-            // Recover the stored sRGB byte before dividing. Hardware samplers can
-            // approximate sRGB decoding, which is visible after division by a small alpha.
-            vec3 stored = floor(encodeSRGB(value.rgb) * 255.0 + 0.5) / 255.0;
-            value.rgb = decodeSRGB(stored);
-        }
-        float alpha = clamp(value.a, 0.0, 1.0);
-        // Production reads a UNorm root. At zero stored alpha Metal returns its stored
-        // RGB bytes, including tiny linear values represented by the sRGB attachment.
-        vec3 rgb = alpha > 1e-5 ? clamp(value.rgb / alpha, 0.0, 1.0) : (uMode == 6 ? value.rgb : vec3(0.0));
-        if (uSRGBBlend == 0 && uDisplaySRGB == 0) rgb = encodeSRGB(rgb);
-        if (uSRGBBlend != 0 && uDisplaySRGB != 0) rgb = decodeSRGB(rgb);
-        outColor = vec4(rgb, alpha);
+        outColor = displayPixel(px);
     }
+#endif
 }

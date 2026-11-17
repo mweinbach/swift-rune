@@ -3,6 +3,31 @@ import Testing
 
 @Suite("Deferred desktop glyph tiles")
 struct DesktopOutlineTileTests {
+    @Test("A mixed native tile selects the general curve shader")
+    func unitWindfoilProfile() throws {
+        let store = OutlineStore()
+        let found = store.glyph(.init(font: 1, glyph: 1)) {
+            OutlineBuilder.build(commands: [.moveTo(.zero), .lineTo(SIMD2(1, 0)),
+                                            .lineTo(SIMD2(1, 1)), .close], upem: 1)
+        }
+        guard case let .outline(record) = found else { Issue.record("Fixture produced no curves"); return }
+        let base = GlyphOutline(pen: SIMD2(1.25, 2.5), scale: 1, zoom: 1, record: record.record)
+        var scaled = base, dilated = base, slug = base, hinted = base
+        scaled.scale = 0.5
+        dilated.radius = 0.1
+        slug.coverage = 1
+        hinted.hint = 1
+        for other in [base, scaled, dilated, slug, hinted] {
+            let glyphs = [base, other].map { TextOutlineGlyph(rect: SIMD4(0, 0, 3, 3), outline: $0) }
+            let group = TextOutlineGroup(size: SIMD2(3, 3), glyphs: glyphs, smoothing: .windfoil, generation: store.generation)
+            let tile = try #require(DesktopOutlineTile(group: group, width: 3, height: 3))
+            let fill = try #require(store.fill(for: tile))
+            let snapshot = try #require(store.snapshot())
+            let queued = QueuedOutlineFill(rect: SIMD4(1, 1, 3, 3), fill: fill)
+            #expect(queued.isUnitWindfoil(in: snapshot) == (other == base))
+        }
+    }
+
     @Test("Cell bounds retain a thin Slug feature whose box-filter fallback rounds to zero")
     func slugFringe() throws {
         let store = OutlineStore()

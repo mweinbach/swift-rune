@@ -17,6 +17,12 @@ void rune_gl_reuse_spring_instances(RuneGL *renderer, int same_storage);
  * pipeline is usable and layers draw unfiltered without a working blur shader. */
 int rune_gl_configure_frame(RuneGL *renderer, const char *vertex, const char *fragment,
                             const char *fullscreen, const char *blur, char *error, size_t capacity);
+/* Optional specializations of the bundled Rune paint ABI. A custom renderer
+ * can continue to use its general program for every draw. */
+int rune_gl_configure_common_frame(RuneGL *renderer, const char *vertex, const char *fragment,
+                                   char *error, size_t capacity);
+int rune_gl_configure_mask_fill(RuneGL *renderer, const char *vertex, const char *fragment, int unit_windfoil,
+                                char *error, size_t capacity);
 
 /* Prepare an optional glyph pipeline. A refused RGB variant leaves the grayscale
  * outline pipeline intact. Records are 1024 RGBA32UI texels per row; first_row
@@ -30,6 +36,10 @@ int rune_gl_upload_outline_rows(RuneGL *renderer, int rows, int first_row, const
  * The fill pass restores the host framebuffer. */
 int rune_gl_fill_outline_masks(RuneGL *renderer, size_t page, int width, int height, const uint8_t *base,
                                const void *instances, size_t count, char *error, size_t capacity);
+/* unit_windfoil is valid only when every component uses ordinary Windfoil at
+ * unit scale, with zero dilation and no vertical hint. */
+int rune_gl_fill_outline_masks_for_profile(RuneGL *renderer, size_t page, int width, int height, const uint8_t *base,
+                                          const void *instances, size_t count, int unit_windfoil, char *error, size_t capacity);
 void rune_gl_select_outline(RuneGL *renderer, int active, int lcd);
 
 /* Opt in after configuring the stock Rune frame shaders. Shader replacement resets this flag.

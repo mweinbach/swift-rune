@@ -4,6 +4,9 @@
 #include "gl_api.h"
 
 typedef struct RuneGLProduction RuneGLProduction;
+enum RuneGLPaintVariant {
+    RUNE_GL_FRAME, RUNE_GL_OUTLINE, RUNE_GL_OUTLINE_LCD, RUNE_GL_MASK_FILL, RUNE_GL_COMMON
+};
 typedef struct {
     GLuint tracks, ids;
     GLfloat seconds, fraction;

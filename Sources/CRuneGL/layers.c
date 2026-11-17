@@ -46,8 +46,8 @@ typedef struct {
 
 struct RuneGLLayers {
     const RuneGLAPI *gl;
-    GLuint program, vao;
-    GLint mode, radius, horizontal, bounds, rect, clip, radii, fade, pose, srgb_blend, display_srgb;
+    GLuint program, root_program, vao;
+    GLint mode, root_mode, radius, horizontal, bounds, rect, clip, radii, fade, pose, srgb_blend, display_srgb;
     GLint frame_style, frame_clip, clip_widths, clip_offsets, clip_corners, hole;
     GLint target_rect, source_rect, clear_color;
     int backdrop_count;
@@ -161,7 +161,9 @@ RuneGLLayers *rune_layers_create(const RuneGLAPI *gl, int es, const char *vertex
     gl->UseProgram(layers->program);
     gl->Uniform1i(gl->GetUniformLocation(layers->program, "uSource"), 0);
     gl->Uniform1i(gl->GetUniformLocation(layers->program, "uBlurred"), 1);
+    layers->root_program = layers->program;
     layers->mode = gl->GetUniformLocation(layers->program, "uMode");
+    layers->root_mode = layers->mode;
     layers->radius = gl->GetUniformLocation(layers->program, "uRadius");
     layers->horizontal = gl->GetUniformLocation(layers->program, "uHorizontal");
     layers->bounds = gl->GetUniformLocation(layers->program, "uBounds");
@@ -192,8 +194,36 @@ void rune_layers_destroy(RuneGLLayers *layers) {
     rune_gl_blur_destroy(layers->production_blur);
     rune_cache_destroy(layers->cache);
     layers->gl->DeleteVertexArrays(1, &layers->vao);
+    if (layers->root_program != layers->program) layers->gl->DeleteProgram(layers->root_program);
     layers->gl->DeleteProgram(layers->program);
     free(layers);
+}
+
+// The optional root program shares the compositor VAO and unit zero. A failed
+// compile leaves presentation and the sRGB clear on the working layer program.
+int rune_layers_configure_present(RuneGLLayers *layers, const char *vertex, const char *fragment,
+                                  char *error, size_t capacity) {
+    const RuneGLAPI *gl = layers->gl;
+    GLuint program = rune_gl_program(gl, layers->es, vertex, fragment, error, capacity);
+    if (!program) return 0;
+    GLint source = gl->GetUniformLocation(program, "uSource");
+    GLint mode = gl->GetUniformLocation(program, "uMode");
+    GLint srgb = gl->GetUniformLocation(program, "uSRGBBlend");
+    GLint display = gl->GetUniformLocation(program, "uDisplaySRGB");
+    GLint clear = gl->GetUniformLocation(program, "uClearColor");
+    if (source < 0 || mode < 0 || srgb < 0 || display < 0 || clear < 0) {
+        gl->DeleteProgram(program);
+        return fail(error, capacity, "Rune root presentation shader interface mismatch");
+    }
+    gl->UseProgram(program);
+    gl->Uniform1i(source, 0);
+    if (layers->root_program != layers->program) gl->DeleteProgram(layers->root_program);
+    layers->root_program = program;
+    layers->root_mode = mode;
+    layers->srgb_blend = srgb;
+    layers->display_srgb = display;
+    layers->clear_color = clear;
+    return 1;
 }
 
 int rune_layers_configure_blur(RuneGLLayers *layers, const char *vertex, const char *fragment,
@@ -395,7 +425,7 @@ void rune_layers_clear_root(RuneGLLayers *layers, const float *clear, GLuint atl
         ((r > 0 && r < 1) || (g > 0 && g < 1) || (b > 0 && b < 1))) {
         // Desktop clear operations can bypass the attachment's sRGB conversion.
         // Draw its linear clear color with the same conversion as every UI fragment.
-        gl->UseProgram(layers->program);
+        gl->UseProgram(layers->root_program);
         gl->BindVertexArray(layers->vao);
         gl->Uniform4f(layers->clear_color, r, g, b, a);
         pass(layers, CLEAR_FRAME, layers->levels[0].target.fbo, atlas, 0);
@@ -413,7 +443,8 @@ static void pass(RuneGLLayers *layers, int mode, GLuint dst, GLuint src, GLuint 
     gl->BindTexture(GL_TEXTURE_2D, src);
     gl->ActiveTexture(GL_TEXTURE1);
     gl->BindTexture(GL_TEXTURE_2D, other ? other : src);
-    gl->Uniform1i(layers->mode, mode);
+    int root = mode == PRESENT || mode == PRESENT_FRAME || mode == CLEAR_FRAME;
+    gl->Uniform1i(root ? layers->root_mode : layers->mode, mode);
     if (mode == COMPOSITE) {
         gl->Enable(GL_BLEND);
         gl->BlendEquation(GL_FUNC_ADD);
@@ -962,7 +993,7 @@ void rune_layers_effect_end(RuneGLLayers *layers, const int clip[4], int commit)
 int rune_layers_present(RuneGLLayers *layers, unsigned framebuffer, char *error, size_t capacity) {
     if (layers->depth) return fail(error, capacity, "Unclosed Rune GL layer at presentation");
     const RuneGLAPI *gl = layers->gl;
-    gl->UseProgram(layers->program);
+    gl->UseProgram(layers->root_program);
     gl->BindVertexArray(layers->vao);
     gl->BindFramebuffer(GL_FRAMEBUFFER, framebuffer);
     gl->Viewport(0, 0, layers->width, layers->height);

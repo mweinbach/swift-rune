@@ -86,6 +86,26 @@ extension QueuedOutlineFill {
         }
     }
 
+    /// A grouped native tile can contain different fonts and coverage modes.
+    /// Inspect its immutable components before selecting the unit Windfoil shader.
+    func isUnitWindfoil(in curves: RenderOutlineAtlas) -> Bool {
+        guard fill.coverage == 4 else {
+            return fill.coverage == 0 && fill.hint == 0 && fill.radius == 0 && fill.scale == 1
+        }
+        let available = min(curves.usedTexels, curves.texels.count)
+        guard let record = Int(exactly: fill.record), record < available, curves.texels[record].x <= 64 else { return false }
+        let count = Int(curves.texels[record].x)
+        guard record + 1 + 3 * count <= available else { return false }
+        for i in 0..<count {
+            let entry = record + 1 + 3 * i
+            let transform = curves.texels[entry + 1], glyph = curves.texels[entry + 2]
+            if glyph.z != 0 || glyph.y != 0 || transform.z != Float(1).bitPattern || Float(bitPattern: transform.w) != 0 {
+                return false
+            }
+        }
+        return true
+    }
+
     /// The atlas pass uses the same Rune glyph shader as a directly drawn
     /// outline. A negative exponent requests R8 coverage with byte rounding.
     var instance: RenderInstance {

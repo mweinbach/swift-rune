@@ -28,7 +28,7 @@ struct RuneGL {
     RuneGLAPI gl;
     RuneGLLayers *layers;
     RuneGLSurfaces *surfaces;
-    RuneGLProduction *production, *outline_program, *lcd_program;
+    RuneGLProduction *production, *outline_program, *lcd_program, *mask_program, *unit_mask_program, *common_program;
     GLuint outline_texture;
     int outline_rows, use_outlines, use_lcd, opaque_root;
     GLuint glyph_fill_target, glyph_fill_buffer;
@@ -111,9 +111,10 @@ GLuint rune_gl_program_variant(const RuneGLAPI *gl, int es, int variant, const c
     const char *dual = es ? "#version 300 es\n#extension GL_EXT_blend_func_extended : require\n"
                             "precision highp float;\nprecision highp int;\nprecision highp sampler2D;\n#define RUNE_OUTLINE_LCD 1\n"
                           : "#version 330 core\n#define RUNE_OUTLINE_LCD 1\n";
-    GLuint vs = compile_shader(gl, GL_VERTEX_SHADER, classic, variant ? "#define RUNE_OUTLINE_VERTEX 1\n" : "", vertex, error, size);
+    int outline_vertex = variant == RUNE_GL_OUTLINE || variant == RUNE_GL_OUTLINE_LCD || variant == RUNE_GL_MASK_FILL;
+    GLuint vs = compile_shader(gl, GL_VERTEX_SHADER, classic, outline_vertex ? "#define RUNE_OUTLINE_VERTEX 1\n" : "", vertex, error, size);
     if (!vs) return 0;
-    GLuint fs = compile_shader(gl, GL_FRAGMENT_SHADER, variant == 2 ? dual : classic, "", fragment, error, size);
+    GLuint fs = compile_shader(gl, GL_FRAGMENT_SHADER, variant == RUNE_GL_OUTLINE_LCD ? dual : classic, "", fragment, error, size);
     if (!fs) {
         gl->DeleteShader(vs);
         return 0;
@@ -196,6 +197,12 @@ RuneGL *rune_gl_create_device(RuneGLResolve resolve, const char *fullscreen, con
 failure:
     rune_gl_destroy(r);
     return NULL;
+}
+
+int rune_gl_configure_present(RuneGL *r, const char *fullscreen, const char *fragment,
+                              char *error, size_t capacity) {
+    if (!r || r->drawing || !fullscreen || !fragment) return fail(error, capacity, "Invalid Rune presentation pipeline");
+    return rune_layers_configure_present(r->layers, fullscreen, fragment, error, capacity);
 }
 
 int rune_gl_configure_reference_blur(RuneGL *r, const char *fullscreen, const char *fragment,
@@ -315,8 +322,30 @@ int rune_gl_configure_frame(RuneGL *r, const char *vertex, const char *fragment,
     int blur_ready = rune_layers_configure_blur(r->layers, fullscreen, blur, error, size);
     if (r->production) rune_production_destroy(r->production);
     r->production = production;
+    rune_production_destroy(r->common_program);
+    r->common_program = NULL;
     rune_gl_enable_frame_damage(r, 0);
     return blur_ready ? 1 : 2;
+}
+
+static int replace_program(RuneGL *r, RuneGLProduction **slot, int variant, const char *vertex,
+                           const char *fragment, char *error, size_t size) {
+    RuneGLProduction *p = rune_production_create(&r->gl, r->es, variant, vertex, fragment, error, size);
+    if (!p) return 0;
+    rune_production_destroy(*slot);
+    *slot = p;
+    r->damage.valid = 0;
+    return 1;
+}
+
+int rune_gl_configure_common_frame(RuneGL *r, const char *vertex, const char *fragment, char *error, size_t size) {
+    if (!r || r->drawing || !r->production || !vertex || !fragment) return fail(error, size, "Invalid Rune common paint pipeline");
+    return replace_program(r, &r->common_program, RUNE_GL_COMMON, vertex, fragment, error, size);
+}
+
+int rune_gl_configure_mask_fill(RuneGL *r, const char *vertex, const char *fragment, int unit_windfoil, char *error, size_t size) {
+    if (!r || r->drawing || !vertex || !fragment) return fail(error, size, "Invalid Rune glyph mask pipeline");
+    return replace_program(r, unit_windfoil ? &r->unit_mask_program : &r->mask_program, RUNE_GL_MASK_FILL, vertex, fragment, error, size);
 }
 
 int rune_gl_outline_eligible(const RuneGL *r) {
@@ -349,13 +378,8 @@ int rune_gl_configure_outline(RuneGL *r, const char *vertex, const char *fragmen
                               char *error, size_t size) {
     if (!r || r->drawing || !vertex || !fragment) return fail(error, size, "Invalid Rune outline pipeline");
     if (lcd && !supports_dual_source(r)) return fail(error, size, "Dual-source text blending is unavailable");
-    RuneGLProduction *p = rune_production_create(&r->gl, r->es, lcd ? 2 : 1, vertex, fragment, error, size);
-    if (!p) return 0;
     RuneGLProduction **slot = lcd ? &r->lcd_program : &r->outline_program;
-    rune_production_destroy(*slot);
-    *slot = p;
-    r->damage.valid = 0;
-    return 1;
+    return replace_program(r, slot, lcd ? RUNE_GL_OUTLINE_LCD : RUNE_GL_OUTLINE, vertex, fragment, error, size);
 }
 
 void rune_gl_select_outline(RuneGL *r, int active, int lcd) {
@@ -389,6 +413,9 @@ void rune_gl_destroy(RuneGL *r) {
     if (r->production) rune_production_destroy(r->production);
     rune_production_destroy(r->outline_program);
     rune_production_destroy(r->lcd_program);
+    rune_production_destroy(r->mask_program);
+    rune_production_destroy(r->unit_mask_program);
+    rune_production_destroy(r->common_program);
     if (r->glyph_fill_target) r->gl.DeleteFramebuffers(1, &r->glyph_fill_target);
     if (r->glyph_fill_buffer) r->gl.DeleteBuffers(1, &r->glyph_fill_buffer);
     if (r->outline_texture) r->gl.DeleteTextures(1, &r->outline_texture);
@@ -662,7 +689,15 @@ int rune_gl_upload_atlas_page(RuneGL *r, int channels, size_t page, int width, i
 
 int rune_gl_fill_outline_masks(RuneGL *r, size_t page, int width, int height, const uint8_t *base,
                                const void *instances, size_t count, char *error, size_t size) {
-    if (!rune_gl_outline_eligible(r) || !r->outline_program || !r->outline_texture ||
+    return rune_gl_fill_outline_masks_for_profile(r, page, width, height, base, instances, count, 0, error, size);
+}
+
+int rune_gl_fill_outline_masks_for_profile(RuneGL *r, size_t page, int width, int height, const uint8_t *base,
+                                          const void *instances, size_t count, int unit_windfoil, char *error, size_t size) {
+    if (!rune_gl_outline_eligible(r)) return fail(error, size, "Rune GPU glyph fills are unavailable");
+    RuneGLProduction *program = unit_windfoil ? r->unit_mask_program : r->mask_program;
+    if (!program) program = r->outline_program;
+    if (!program || !r->outline_texture ||
         (page && page >= r->glyph_pages.count) || width < 1 || height < 1 ||
         width > r->max_texture_size || height > r->max_texture_size ||
         count > INT_MAX || count > PTRDIFF_MAX / 128 || (!instances && count))
@@ -706,14 +741,34 @@ int rune_gl_fill_outline_masks(RuneGL *r, size_t page, int width, int height, co
     if (!r->glyph_fill_buffer) gl->GenBuffers(1, &r->glyph_fill_buffer);
     gl->BindBuffer(GL_ARRAY_BUFFER, r->glyph_fill_buffer);
     gl->BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(count * 128), instances, GL_STREAM_DRAW);
-    rune_production_batch(r->outline_program, r->glyph_fill_buffer, width, height, 0, 0,
+    rune_production_batch(program, r->glyph_fill_buffer, width, height, 0, 0,
                           0, count, 0, 0, 1, &r->springs);
     gl->BindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)destination);
     r->damage.valid = 0;
     return check_gl(gl, "Filling Rune GPU glyph masks", error, size);
 }
 
-static void draw_bound_batch(RuneGL *r, GLuint glyph_texture, GLuint image_texture, int production, int width, int height, int srgb_blend,
+/* Select once per existing texture-page batch. Mixed batches stay on the
+ * general program so alternating borders and labels don't split painter order
+ * into an extra GL draw for every primitive. */
+static int common_frame_batch(const void *instances, size_t first, size_t count) {
+    const uint8_t *bytes = (const uint8_t *)instances + first * 128;
+    for (size_t i = 0; i < count; ++i, bytes += 128) {
+        const float *p = (const float *)bytes;
+        if (p[16] != 0) return 0;
+        if (p[17] == 0) {
+            if (p[4] < 0 || p[5] < 0 || p[6] < 0 || p[7] < 0) return 0;
+        } else if (p[17] == 2) {
+            if (p[4] != 0 || p[7] != 0 || p[22] != 0) return 0;
+        } else return 0;
+        uint32_t fade[4];
+        memcpy(fade, bytes + 112, sizeof(fade));
+        if (fade[0] || fade[1] || fade[3]) return 0;
+    }
+    return 1;
+}
+
+static void draw_bound_batch(RuneGL *r, const void *instances, GLuint glyph_texture, GLuint image_texture, int production, int width, int height, int srgb_blend,
                        int in_layer, size_t start, size_t count) {
     if (!count) return;
     const RuneGLAPI *gl = &r->gl;
@@ -729,7 +784,9 @@ static void draw_bound_batch(RuneGL *r, GLuint glyph_texture, GLuint image_textu
         rune_layers_target_geometry(r->layers, &x, &y, &width, &height);
         gl->Viewport(0, 0, width, height);
         RuneGLProduction *program = r->production;
-        if (r->use_outlines && !r->springs.tracks) {
+        if (r->common_program && !r->springs.tracks && common_frame_batch(instances, start, count)) {
+            program = r->common_program;
+        } else if (r->use_outlines && !r->springs.tracks) {
             int dual = r->use_lcd && r->opaque_root && !in_layer && !rune_layers_additive(r->layers);
             program = dual ? r->lcd_program : r->outline_program;
             if (dual) gl->BlendFunc(GL_ONE, GL_ONE_MINUS_SRC1_COLOR);
@@ -778,12 +835,12 @@ static void draw_batch(RuneGL *r, const void *instances, int production, int wid
             GLuint *bound = is_glyph ? &glyph : &image;
             if (*bound == wanted) continue;
             if (i != first)
-                draw_bound_batch(r, glyph, image, production, width, height, srgb_blend, in_layer, first, i - first);
+                draw_bound_batch(r, instances, glyph, image, production, width, height, srgb_blend, in_layer, first, i - first);
             first = i;
             *bound = wanted;
         }
     }
-    draw_bound_batch(r, glyph, image, production, width, height, srgb_blend, in_layer, first, end - first);
+    draw_bound_batch(r, instances, glyph, image, production, width, height, srgb_blend, in_layer, first, end - first);
 }
 
 /* A hidden or cached group skips all children, including its native surfaces. */

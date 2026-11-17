@@ -23,6 +23,9 @@ int rune_gl_window_snapshot(RuneGLResolve resolve, int32_t x, int32_t y, int32_t
  * configure the production and/or reference pipeline before drawing that ABI. */
 RuneGL *rune_gl_create_device(RuneGLResolve resolve, const char *fullscreen_source,
                               const char *layer_source, char *error, size_t error_size);
+/* Optional compact fullscreen pipeline for the compositor's root presentation and clear. */
+int rune_gl_configure_present(RuneGL *renderer, const char *fullscreen_source, const char *fragment_source,
+                              char *error, size_t error_capacity);
 int rune_gl_configure_reference_blur(RuneGL *renderer, const char *fullscreen_source, const char *fragment_source,
                                      char *error, size_t error_capacity);
 int rune_gl_configure_reference(RuneGL *renderer, const char *vertex_source,

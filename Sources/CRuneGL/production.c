@@ -33,7 +33,10 @@ RuneGLProduction *rune_production_create(const RuneGLAPI *gl, int es, int varian
     p->in_layer = gl->GetUniformLocation(p->program, "uInLayer");
     GLint glyph = gl->GetUniformLocation(p->program, "uGlyphAtlas");
     GLint image = gl->GetUniformLocation(p->program, "uImageAtlas");
-    if (p->viewport < 0 || p->origin < 0 || p->srgb_blend < 0 || p->in_layer < 0 || glyph < 0 || image < 0) {
+    const int mask_fill = variant == RUNE_GL_MASK_FILL;
+    if (p->viewport < 0 || p->origin < 0 ||
+        (!mask_fill && (p->srgb_blend < 0 || p->in_layer < 0 || glyph < 0 ||
+                        (variant != RUNE_GL_COMMON && image < 0)))) {
         if (error && capacity) snprintf(error, capacity, "Rune GL frame shader interface mismatch");
         rune_production_destroy(p);
         return NULL;
@@ -41,7 +44,7 @@ RuneGLProduction *rune_production_create(const RuneGLAPI *gl, int es, int varian
     gl->Uniform1i(glyph, 0);
     gl->Uniform1i(image, 1);
     p->atlas_fill = gl->GetUniformLocation(p->program, "uAtlasFill");
-    if (variant) {
+    if (variant == RUNE_GL_OUTLINE || variant == RUNE_GL_OUTLINE_LCD || mask_fill) {
         GLint outlines = gl->GetUniformLocation(p->program, "uOutlines");
         if (outlines < 0 || p->atlas_fill < 0) {
             if (error && capacity) snprintf(error, capacity, "Rune outline shader has no integer outline store");

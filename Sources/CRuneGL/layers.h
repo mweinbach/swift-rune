@@ -19,6 +19,8 @@ int rune_layers_cache_composite(RuneGLLayers *layers, const float *marker, const
 RuneGLLayers *rune_layers_create(const RuneGLAPI *gl, int es, const char *vertex,
                                  const char *fragment, char *error, size_t capacity);
 void rune_layers_destroy(RuneGLLayers *layers);
+int rune_layers_configure_present(RuneGLLayers *layers, const char *vertex, const char *fragment,
+                                  char *error, size_t capacity);
 int rune_layers_configure_blur(RuneGLLayers *layers, const char *vertex, const char *fragment,
                                char *error, size_t capacity);
 int rune_layers_frame(RuneGLLayers *layers, int width, int height, int srgb_blend, int production,

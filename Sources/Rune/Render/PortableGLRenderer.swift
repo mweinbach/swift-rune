@@ -37,6 +37,7 @@ internal final class PortableGLRenderer {
     var previousCompositorTime: Double?
     private var nativeSurfaces: PortableGLSurfaces?
     private var frameProgramReady = false
+    private var maskPrograms: [Bool: Bool] = [:]
     private var grayscaleOutlinesReady: Bool?
     private var lcdOutlinesReady: Bool?
     private var outlineDiagnostic: String?
@@ -100,6 +101,10 @@ internal final class PortableGLRenderer {
         #endif
         guard let handle = rune_gl_create_device(resolve, fullscreen, layer, &error, capacity) else {
             throw RenderError(Self.message(error))
+        }
+        if usesBundledShaders {
+            // Compile the root clear and display transfer separately from layer effects.
+            _ = rune_gl_configure_present(handle, fullscreen, "#define RUNE_ROOT_PASS 1\n" + layer, &error, capacity)
         }
         #if os(Windows)
         rune_win_shared_note_window()
@@ -217,6 +222,11 @@ internal final class PortableGLRenderer {
         }
         let support = prepareOutlineText(lcd: snapshot.requestsLCD)
         guard support.outlines else { throw RenderError(outlineDiagnostic ?? "GPU glyph outlines unavailable") }
+        try uploadOutlines(snapshot, on: handle)
+        rune_gl_select_outline(handle, 1, support.lcd ? 1 : 0)
+    }
+
+    private func uploadOutlines(_ snapshot: RenderOutlineAtlas, on handle: OpaquePointer) throws {
         let width = Int(OutlineStore.width)
         let used = snapshot.usedTexels
         guard used > 0, used <= width * Int(OutlineStore.maxRows),
@@ -241,7 +251,6 @@ internal final class PortableGLRenderer {
             }
             uploadedOutline = (snapshot.storeID, snapshot.generation, used)
         }
-        rune_gl_select_outline(handle, 1, support.lcd ? 1 : 0)
     }
 
     func setLayerCacheBudget(_ bytes: Int) {
@@ -293,6 +302,9 @@ internal final class PortableGLRenderer {
         _ = rune_win_boot_end("gl_frame_blur_shaders", shaderStart)
         #endif
         rune_gl_enable_frame_damage(handle, usesBundledShaders ? 1 : 0)
+        if usesBundledShaders, let common = try? shaderSource("common_frame.frag") {
+            _ = rune_gl_configure_common_frame(handle, vertex, common, &error, capacity)
+        }
         frameProgramReady = true
     }
 
@@ -342,7 +354,7 @@ internal final class PortableGLRenderer {
     /// A different store, page recycle or replay of an older snapshot reloads the page.
     private func prepareGlyphs(_ frame: RenderFrame, on handle: OpaquePointer) throws -> R8Atlas {
         let plans: [OutlineMaskPlan?] = frame.glyphPageFills.isEmpty ? frame.maskFills.map { [$0] } ?? [] : frame.glyphPageFills
-        if !maskFillsRefused, plans.contains(where: { $0 != nil }), prepareOutlineText(lcd: false).outlines {
+        if !maskFillsRefused, plans.contains(where: { $0 != nil }), rune_gl_outline_eligible(handle) != 0 {
             do {
                 if filledPages.keys.contains(where: { !plans.indices.contains($0) || plans[$0] == nil }) {
                     forgetMaskPages()
@@ -376,12 +388,32 @@ internal final class PortableGLRenderer {
         return materialized.first ?? frame.glyphs
     }
 
+    private func prepareMaskProgram(unitWindfoil: Bool, on handle: OpaquePointer) -> Bool {
+        if usesBundledShaders && maskPrograms[unitWindfoil] == nil {
+            maskPrograms[unitWindfoil] = false
+            if let vertex = try? shaderSource("frame.vert"), let curves = try? shaderSource("outline.frag"),
+               let mask = try? shaderSource("outline_mask.frag") {
+                var error = [CChar](repeating: 0, count: 512)
+                let capacity = error.count
+                let profile = unitWindfoil ? "#define RUNE_UNIT_WINFOIL 1\n" : ""
+                maskPrograms[unitWindfoil] = rune_gl_configure_mask_fill(handle, vertex, profile + curves + "\n" + mask,
+                                                                       unitWindfoil ? 1 : 0, &error, capacity) != 0
+            }
+        }
+        return maskPrograms[unitWindfoil] == true || (!unitWindfoil && prepareOutlineText(lcd: false).outlines)
+    }
+
     private func fillMasks(_ plan: OutlineMaskPlan, page: Int, patch: GlyphAtlasPatch?, on handle: OpaquePointer) throws {
         let resident = filledPages[page]
         var prefix = resident?.prefix(of: plan)
         let sameBase = resident?.baseGeneration == plan.baseGeneration
         if sameBase, prefix == plan.fills.count { return }
         var jobs: [RenderInstance] = []
+        var unitWindfoil = usesBundledShaders
+        func enqueue(_ item: QueuedOutlineFill) {
+            if unitWindfoil { unitWindfoil = item.isUnitWindfoil(in: plan.curves) }
+            jobs.append(item.instance)
+        }
         var error = [CChar](repeating: 0, count: 512)
         let width = Int32(plan.base.width), height = Int32(plan.base.height)
         if !sameBase {
@@ -392,19 +424,23 @@ internal final class PortableGLRenderer {
                                      patch: patch, current: $0, error: &error)
                 }
                 guard ok else { throw RenderError(Self.message(error)) }
-                jobs = plan.fills.prefix(retained).filter { $0.overlaps(patch.edges, in: plan.base) }.map(\.instance)
+                for item in plan.fills.prefix(retained) where item.overlaps(patch.edges, in: plan.base) { enqueue(item) }
             } else {
                 prefix = nil
             }
         }
-        jobs.append(contentsOf: plan.fills.dropFirst(prefix ?? 0).map(\.instance))
+        for item in plan.fills.dropFirst(prefix ?? 0) { enqueue(item) }
         if prefix == nil || !jobs.isEmpty {
-            try bindOutlines(plan.curves, on: handle)
+            let simple = unitWindfoil && prepareMaskProgram(unitWindfoil: true, on: handle)
+            guard simple || prepareMaskProgram(unitWindfoil: false, on: handle) else {
+                throw RenderError("GPU glyph mask pipeline unavailable")
+            }
+            try uploadOutlines(plan.curves, on: handle)
             let capacity = error.count
             let ok = jobs.withUnsafeBytes { instances in
                 plan.base.texels.withUnsafeBufferPointer { base in
-                    rune_gl_fill_outline_masks(handle, page, width, height, prefix == nil ? base.baseAddress : nil,
-                                               instances.baseAddress, jobs.count, &error, capacity)
+                    rune_gl_fill_outline_masks_for_profile(handle, page, width, height, prefix == nil ? base.baseAddress : nil,
+                                                           instances.baseAddress, jobs.count, simple ? 1 : 0, &error, capacity)
                 }
             }
             guard ok != 0 else { throw RenderError(Self.message(error)) }
