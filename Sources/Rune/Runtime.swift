@@ -2004,7 +2004,7 @@ public final class Runtime<State> {
         }
 
         _ = stepSelectableEdgeScroll(at: now)
-        let growthMoving = needsCommit ? false : advanceGrowthRows(at: now)
+        let growthMoving = needsCommit ? false : advanceGrowthRows(at: now, headers: foldHeaders)
         let isInitiallyScrolling = scrollMovedSinceLastFrame || scrollStore.isAnimating
         if isInitiallyScrolling {
             layoutFeedback.step(.reopened)
@@ -3090,7 +3090,7 @@ public final class Runtime<State> {
         }
         let growthStepNow = pendingGrowthStepNow ?? now
         let steppedAfterRetarget = (lastGrowthStepTime != growthStepNow && !cut && !commitKind.lands && !reducedMotion)
-            ? advanceGrowthRows(at: growthStepNow, markRelayoutDirty: false)
+            ? advanceGrowthRows(at: growthStepNow, headers: effectiveFoldHeaders, markRelayoutDirty: false)
             : false
         placeTailHandoffRows()
         let needsGrowthClamp = growthCapture.needsClampedRelayout || steppedAfterRetarget || growthRows.values.contains { entry in

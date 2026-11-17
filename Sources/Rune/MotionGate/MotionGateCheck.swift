@@ -320,7 +320,7 @@ public final class MotionGateRecording: @unchecked Sendable {
                     scale: e.scale,
                     flags: flags,
                     phase: (e.loopPhase ?? m.loopPhase).map(Float.init) ?? .nan,
-                    scrolled: m.carriedScrolled ?? e.scrolled
+                    scrolled: m.carriedScrolled ?? e.carriedScrolled
                 )
             ))
             if let paints {

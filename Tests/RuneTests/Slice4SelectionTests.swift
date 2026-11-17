@@ -455,7 +455,7 @@ struct Slice4SelectionTests {
 
         #expect(rt.keyDown(KeyEvent(key: .command("a"), mods: RuneTestKey.primaryMods()), at: 0.6))
         let scene = rt.frame(at: 0.62)
-        let expectedInputSelColor = Tok.accent(0, dark: true).alpha(0.28)
+        let expectedInputSelColor = Color.white.alpha(0.2)
         let inputSelPrims = matchingRects(in: scene, color: expectedInputSelColor)
         #expect(!inputSelPrims.isEmpty)
         for p in inputSelPrims {

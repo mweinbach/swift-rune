@@ -622,6 +622,30 @@ struct ContentSlideAndMotionTests {
         #expect(abs((after.last ?? 0) - 28.0) < 0.01)
     }
 
+    @Test("A held fold gives its header the first spring step and reports the following scroll", arguments: [false, true])
+    func heldFoldScrollsFromItsFirstStep(native: Bool) throws {
+        let rt = Runtime(state: FoldHeldState(open: true, afterHeight: 100),
+                         viewport: Vec2(300, 200), pixelScale: 1) { s, _ in makeFoldHeldEl(s) }
+        func draw(_ frame: Int) {
+            let time = Double(frame) / 120
+            if native { _ = rt.renderFrame(at: time) } else { _ = rt.frame(at: time) }
+        }
+        draw(0)
+        rt.update(at: 0) { _, tx in tx.scrollToInstant("scroll", x: 0, y: 1100) }
+        for frame in 1...4 { draw(frame) }
+        rt.update(at: rt.currentTime) { state, tx in
+            state.open = false
+            tx.keepOnScreen("hdr")
+        }
+        // Header positions from the upstream held-section fixture at 120 Hz, in window points.
+        for (frame, expectedY) in [(5, Float(2.516)), (6, 8.344), (7, 15.672)] {
+            draw(frame)
+            let header = try #require(rt.element(byKey: "hdr"))
+            #expect(abs(header.rect[1] - expectedY) < 0.05)
+            #expect(header.scrolling == (frame > 5))
+        }
+    }
+
     @Test("fold_glide: a_long_fold_shut_from_its_stuck_header_at_the_end_is_one_motion")
     func aLongFoldShutFromItsStuckHeaderAtTheEndIsOneMotion() {
         for short: Float in [130, 80, 40, 20, 8] {

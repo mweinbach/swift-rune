@@ -538,7 +538,7 @@ internal extension Runtime {
                     lastScaledAnimNow = animW
                 }
                 currentTime = w
-                _ = advanceGrowthRows(at: w)
+                _ = advanceGrowthRows(at: w, headers: foldHeaders)
                 scrollStore.sample(at: lastScaledAnimNow)
                 liveStore.sample(at: lastScaledAnimNow)
                 scene.setTime(lastScaledAnimNow)
@@ -568,7 +568,7 @@ internal extension Runtime {
                     lastScaledAnimNow = animC
                 }
                 currentTime = catchUpEnd
-                _ = advanceGrowthRows(at: catchUpEnd)
+                _ = advanceGrowthRows(at: catchUpEnd, headers: foldHeaders)
                 scrollStore.sample(at: lastScaledAnimNow)
                 liveStore.sample(at: lastScaledAnimNow)
                 scene.setTime(lastScaledAnimNow)

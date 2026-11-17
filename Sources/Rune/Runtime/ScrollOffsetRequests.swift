@@ -228,7 +228,7 @@ extension Runtime {
             } else {
                 oldEnd = nil
             }
-            guard laid != nil || oldEnd != nil || previous.hand.direct || previous.hand.shrinkCut else { continue }
+            guard laid != nil || oldEnd != nil || previous.hand.direct || previous.hand.scrolling || previous.hand.shrinkCut else { continue }
             var mode = previous
             ScrollMode.step(&mode, .growth(moving: laid != nil))
             let held = reducedMotion || mode.hand.shrinkCut || scrollRequestsState.owns(path)

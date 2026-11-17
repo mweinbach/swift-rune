@@ -60,8 +60,8 @@ struct DefaultFontsParityTests {
     @Test("native default slots both resolve to Inter, including intermediate CSS weights")
     func nativeDefaultFamiliesMatchRust() throws {
         let ts = TextSystem()
-        let cases: [(Float, String)] = [(350, "Regular"), (400, "Regular"), (400.25, "Medium"), (401, "Medium"),
-                                        (440, "Medium"), (500, "Medium"), (501, "SemiBold"),
+        let cases: [(Float, String)] = [(350, "Regular"), (399.75, "Regular"), (400, "Regular"), (400.25, "Medium"), (401, "Medium"),
+                                        (440, "Medium"), (499.75, "Medium"), (500, "Medium"), (500.25, "SemiBold"), (501, "SemiBold"),
                                         (550, "SemiBold"), (600, "SemiBold"), (900, "SemiBold")]
         for (weight, face) in cases {
             let style = TextStyle(size: 13, weight: weight)
@@ -87,9 +87,31 @@ struct DefaultFontsParityTests {
         }
         let regular = width(400), medium = width(500), semibold = width(600)
         #expect(regular < medium && medium < semibold)
-        #expect(width(350) == regular)
-        #expect(width(401) == medium && width(440) == medium)
-        #expect(width(501) == semibold && width(550) == semibold && width(900) == semibold)
+        #expect(width(350) == regular && width(399.75) == regular)
+        #expect(width(400.25) == medium && width(401) == medium && width(440) == medium && width(499.75) == medium)
+        #expect(width(500.25) == semibold && width(501) == semibold && width(550) == semibold && width(900) == semibold)
+    }
+    #endif
+
+    #if canImport(CoreText) || os(Linux)
+    @Test("fractional CSS weights reach a variable face and an authored wght coordinate takes precedence")
+    func variableWeightsAndExplicitAxes() throws {
+        let url = try #require(Bundle.module.url(forResource: "RuneFractionalWeight", withExtension: "ttf", subdirectory: "Fixtures"))
+        HeadlessRunner.registerFonts([try Data(contentsOf: url)])
+        let system = TextSystem()
+        let family = FontFamily.named("Rune Fractional Weight Fixture")
+        func width(_ weight: Float, _ axis: Float? = nil) -> Float {
+            let style = TextStyle(size: 32, weight: weight, family: family)
+            return system.measure("R", style: axis.map { style.variations("'wght' \($0)") } ?? style, maxWidth: nil, pixelScale: 1).x
+        }
+        // This two-glyph fixture's R advances by ten design units for each unit of wght.
+        for weight: Float in [399.75, 400.25, 499.75, 500.25] {
+            #expect(width(weight) == width(400, weight))
+        }
+        #expect(width(399.75) < width(400) && width(400) < width(400.25))
+        #expect(width(499.75) < width(500) && width(500) < width(500.25))
+        #expect(width(400.25, 500.25) == width(500.25))
+        #expect(width(500.25, 399.75) == width(399.75))
     }
     #endif
 

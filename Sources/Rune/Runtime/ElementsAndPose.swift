@@ -359,7 +359,8 @@ extension Runtime {
         }
         let isOwnScrollGliding = !el.layout.scrollAxes.isEmpty
             && (scrollGlidingPaths.contains(snap.path) || scrollStore.isMoving(NodeId.hash("scroll:" + snap.path), Props.SCROLL))
-        let isOwnScrollMoving = isOwnScrollGliding || (!el.layout.scrollAxes.isEmpty && frameMovedScrollPaths.contains(snap.path))
+        let isOwnScrollMoving = isOwnScrollGliding || (!el.layout.scrollAxes.isEmpty
+            && (frameMovedScrollPaths.contains(snap.path) || slice2State.scrollModes[snap.path]?.hand.scrolling == true))
         let rowTrackMoving = growthMoving ?? (!growthRows.isEmpty && (growthRows["growth:\(snap.path)"]?.track.moving == true
             || growthRows["fold:\(snap.path)"]?.track.moving == true))
         let isOwnGrowthMoving = rowTrackMoving || ((el.runtimeExtras["motionGate.inGrowingRow"] as? Bool) ?? false)

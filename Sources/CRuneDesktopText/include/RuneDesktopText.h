@@ -60,6 +60,11 @@ typedef struct {
 RuneDesktopLine *rune_desktop_line_create(const char *utf8, int32_t length,
     const char *family, float size_px, int32_t weight, int32_t italic,
     int32_t mono, int32_t direction);
+#if defined(__linux__) && !defined(__ANDROID__)
+RuneDesktopLine *rune_linux_line_create_configured(const char *utf8, int32_t length,
+    const char *family, float size_px, int32_t weight, int32_t italic, int32_t mono, int32_t direction,
+    const char *language, const char *features, const char *variations);
+#endif
 // Apply a language tag and comma-separated tag=value numeric OpenType settings after creation.
 void rune_desktop_line_configure(RuneDesktopLine *line, const char *language,
     const char *features, const char *variations);

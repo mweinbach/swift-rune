@@ -50,7 +50,14 @@ struct DesktopFont: Hashable {
             FaceWeightsRegistry.declaredFace(in: TextSystem.faceWeights, family: $0, requestedWeight: requestedWeight)
         }
         let matchedWeight = declared?.weight ?? requestedWeight
-        weight = Int32(matchedWeight.isFinite ? min(900, max(100, matchedWeight)) : 400)
+        let cssWeight = matchedWeight.isFinite ? min(900, max(100, matchedWeight)) : 400
+        #if os(Linux)
+        // Pango's face selector accepts integer weights. Preserve which side of
+        // an available static cut CSS searches first (Fontique's 400/500 rule).
+        weight = Int32(cssWeight.rounded(cssWeight < 400 ? .down : .up))
+        #else
+        weight = Int32(cssWeight)
+        #endif
         italic = span?.italic == true || style.italic
         direction = style.direction.map { $0 == .rtl ? 2 : 1 } ?? 0
         self.language = language ?? ""
@@ -67,6 +74,12 @@ struct DesktopFont: Hashable {
         }
         features = settings(style.shapingFeatures(monospace: mono)).joined(separator: ",")
         var axes = settings(style.variations)
+        #if os(Linux)
+        // A variable face can represent the exact weight; an authored axis wins.
+        if !axes.contains(where: { $0.hasPrefix("wght=") }) {
+            axes.append("wght=\(cssWeight)")
+        }
+        #endif
         if case .fixed(let points) = style.opticalSize, points.isFinite,
            !axes.contains(where: { $0.hasPrefix("opsz=") }) { axes.append("opsz=\(points)") }
         variations = axes.joined(separator: ",")
@@ -415,6 +428,9 @@ private final class DesktopTextRun {
         #if os(Windows)
         let result = rune_windows_line_create(text, length, font.family, font.sizePx,
             font.weight, font.italic ? 1 : 0, font.mono ? 1 : 0, font.direction, font.chromiumMask ? 1 : 0)
+        #elseif os(Linux)
+        let result = rune_linux_line_create_configured(text, length, font.family, font.sizePx,
+            font.weight, font.italic ? 1 : 0, font.mono ? 1 : 0, font.direction, font.language, font.features, font.variations)
         #else
         let result = rune_desktop_line_create(text, length, font.family, font.sizePx,
             font.weight, font.italic ? 1 : 0, font.mono ? 1 : 0, font.direction)
@@ -423,9 +439,11 @@ private final class DesktopTextRun {
         self.textKey = TextUTF8Key(text)
         self.font = font
         native = line
+        #if !os(Linux)
         if !font.language.isEmpty || !font.features.isEmpty || !font.variations.isEmpty {
             rune_desktop_line_configure(line, font.language, font.features, font.variations)
         }
+        #endif
         metrics = rune_desktop_line_metrics(line)
         hasColor = rune_desktop_line_has_color(line) != 0
     }

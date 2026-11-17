@@ -1632,7 +1632,7 @@ extension Runtime {
         return walk(rootEl, parentPath: "", siblingIndex: 0, siblingKeysSeen: &rootSeen, inGrowthSpec: nil)
     }
 
-    internal func advanceGrowthRows(at now: Double, markRelayoutDirty: Bool = true) -> Bool {
+    internal func advanceGrowthRows(at now: Double, headers: [String: String], markRelayoutDirty: Bool = true) -> Bool {
         var flushedHold = false
         let prevNow = lastGrowthStepTime
         let hasDeferredAtEnd = growthStacks.values.contains { !$0.pendingHeights.isEmpty || !$0.closing.isEmpty || !$0.runs.isEmpty }
@@ -1849,7 +1849,7 @@ extension Runtime {
             }
         }
         for (gKey, d) in gave {
-            if let headerPath = foldHeaders[gKey] {
+            if let headerPath = headers[gKey] {
                 for idx in scrollRequestsState.keeps.indices where scrollRequestsState.keeps[idx].hold?.path == headerPath {
                     let vpPath = scrollRequestsState.keeps[idx].viewport
                     let scale = nodeByPath[vpPath].map { flatNodes[$0].inheritedScale } ?? 1.0
@@ -2576,6 +2576,7 @@ extension Runtime {
             scrollStore.snap(nid, Props.SCROLL, to: next)
             scrollOffsets[k.viewport] = next
             scrollGlidingPaths.remove(k.viewport)
+            updateScrollMode(forPath: k.viewport, event: .moved)
             deltas[k.viewport] = Vec2(0, (deltas[k.viewport]?.y ?? 0) + (toY - cur.y))
             if sNode.el.layout.stickBottom && delta >= 0 && maxExt.y > 0.5 && abs(toY - maxExt.y) <= 1.0 {
                 wasPinnedToBottom.insert(k.viewport)
