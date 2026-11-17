@@ -1,7 +1,7 @@
 /* From the repository root:
    cc -ISources/CRuneLinuxA11y/include Tests/Support/LinuxAccessibility/SparseUpdates.c \
       Sources/CRuneLinuxA11y/Accessibility.c Sources/CRuneLinuxA11y/GLibWake.c \
-      $(pkg-config --cflags --libs atk atk-bridge-2.0 pango) -o /tmp/rune-sparse-atk
+      $(pkg-config --cflags --libs atk atk-bridge-2.0 atspi-2 dbus-1 pango) -o /tmp/rune-sparse-atk
    dbus-run-session -- /tmp/rune-sparse-atk */
 #include "CRuneLinuxA11y.h"
 #include <atk/atk.h>

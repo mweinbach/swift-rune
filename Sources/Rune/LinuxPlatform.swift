@@ -542,7 +542,9 @@ final class LinuxWindowSession<State> {
         handle.attachSurfaceMeter(surfaceMeter)
         runtime.surfaceMeter = surfaceMeter
         handle.setWindowNumber(id)
-        accessibility = LinuxAccessibilityHost(title: app.title, waker: waker, isVisible: visible)
+        accessibility = LinuxAccessibilityHost(title: app.title, waker: waker, isVisible: visible) { [weak runtime] host in
+            if let runtime { host.serviceDemand(runtime: runtime) }
+        }
         appearance = LinuxAppearanceObserver(followsScheme: parsed.darkOverride == nil && app.dark == nil,
                                              forceReducedMotion: parsed.reducedMotion)
         appearance.update(runtime)

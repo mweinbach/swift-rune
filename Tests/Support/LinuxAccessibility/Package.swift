@@ -9,7 +9,7 @@ let package = Package(
             name: "rune-sparse-atk-probe",
             dependencies: [.product(name: "Rune", package: "swift-rune")],
             path: ".",
-            exclude: ["SparseUpdates.c", "External.py"],
+            exclude: ["SparseUpdates.c", "ObserveParents.c", "External.py", "Demand.py"],
             sources: ["SparseTree.swift"]
         )
     ]

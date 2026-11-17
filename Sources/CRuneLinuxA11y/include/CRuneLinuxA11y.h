@@ -42,6 +42,11 @@ typedef struct {
 
 /* Calls run on the SDL host thread. Only wake is called on a background poll thread. */
 RuneA11yWindow *rune_ax_open(const char *title, int visible, RuneA11yWake wake, void *context);
+/* The desktop setting, an attached reader, or an AT-SPI event listener requires a tree.
+   The optional projection callback runs on the host thread before answering the first
+   reader request so a parked window can expose its current layout immediately. */
+int rune_ax_is_active(RuneA11yWindow *);
+void rune_ax_set_projection_callback(RuneA11yWindow *, RuneA11yWake callback, void *context);
 void rune_ax_visible(RuneA11yWindow *, int visible);
 /* Add/remove another toolkit's native AtkObject from the shared application root. */
 void rune_ax_toolkit_window(void *accessible, int visible);

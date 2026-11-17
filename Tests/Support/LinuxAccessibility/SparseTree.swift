@@ -6,6 +6,7 @@ enum SparseTree {
         var items = ["C", "A", "B"]
         var renamed = false
         var heading = false
+        var scrolled = false
     }
 
     static func button(_ key: String, _ label: String, _ press: @escaping (inout State, inout Tx) -> Void = { _, _ in }) -> El<State> {
@@ -15,12 +16,19 @@ enum SparseTree {
 
     static func view(_ state: State, _: inout Cx<State>) -> El<State> {
         let actions: El<State> = row().key("actions").label("Actions").gap(4)
-            .child(button("rename", "Rename") { state, _ in state.renamed = true })
+            .child(button("rename", "Rename") { state, tx in
+                state.renamed = true
+                tx.setTitle("Rune sparse ATK probe — renamed")
+            })
             .child(button("reorder", "Reorder") { state, _ in
                 if let last = state.items.popLast() { state.items.insert(last, at: 0) }
             })
             .child(button("remove", "Remove") { state, _ in state.items.removeAll { $0 == "B" } })
-            .child(button("scroll", "Scroll") { _, tx in tx.scrollToY("viewport", 30) })
+            .child(button("scroll", "Scroll") { state, tx in
+                state.scrolled.toggle()
+                tx.scrollToY("viewport", state.scrolled ? 30 : 0)
+                tx.setTitle("Rune sparse ATK probe — scroll \(state.scrolled ? 30 : 0)")
+            })
             .child(button("retype", "Retype") { state, _ in state.heading.toggle() })
         let items: El<State> = row().key("items").label("Items").gap(4)
             .children(state.items.map { button("item-" + $0, $0 == "A" && state.renamed ? "A edited" : $0) })

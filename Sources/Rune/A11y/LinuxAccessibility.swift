@@ -8,6 +8,8 @@ import RuneMotion
 final class LinuxAccessibilityHost {
     private let waker: Waker
     private let overlay: Bool
+    private let projectOnDemand: (LinuxAccessibilityHost) -> Void
+    private var publishing = false
     private var window: OpaquePointer?
     private var lastRoot: AccessibilityNode?
     private var lastTitle = ""
@@ -57,20 +59,36 @@ final class LinuxAccessibilityHost {
     }
     private var requests: [Request] = []
 
-    init(title: String, waker: Waker, isVisible: Bool = true, overlay: Bool = false) {
+    init(title: String, waker: Waker, isVisible: Bool = true, overlay: Bool = false,
+         projectOnDemand: @escaping (LinuxAccessibilityHost) -> Void) {
         self.overlay = overlay
         self.waker = waker
+        self.projectOnDemand = projectOnDemand
         self.lastTitle = title
         let open = overlay ? rune_ax_open_overlay : rune_ax_open
         self.window = open(title, isVisible ? 1 : 0, { context in
             guard let context else { return }
             Unmanaged<Waker>.fromOpaque(context).takeUnretainedValue().wake()
         }, Unmanaged.passUnretained(waker).toOpaque())
+        rune_ax_set_projection_callback(window, { context in
+            guard let context else { return }
+            let host = Unmanaged<LinuxAccessibilityHost>.fromOpaque(context).takeUnretainedValue()
+            host.projectOnDemand(host)
+        }, Unmanaged.passUnretained(self).toOpaque())
     }
 
     deinit { rune_ax_close(window) }
 
     func setVisible(_ visible: Bool) { rune_ax_visible(window, visible ? 1 : 0) }
+
+    func serviceDemand<State>(runtime: Runtime<State>) {
+        guard let window, lastWindowRect.count >= 2, !publishing else { return }
+        let readerNeedsTree = rune_ax_is_active(window) != 0
+        let treeIsPublished = !published.isEmpty
+        if readerNeedsTree != treeIsPublished {
+            update(runtime: runtime, windowX: lastWindowRect[0], windowY: lastWindowRect[1])
+        }
+    }
 
     @discardableResult
     func pump<State>(runtime: Runtime<State>, at now: Double, requestWindowFocus: () -> Void = {}) -> Bool {
@@ -111,6 +129,8 @@ final class LinuxAccessibilityHost {
             }
         }
         requests.removeAll(keepingCapacity: true)
+        // A reader can attach or leave while the window has no scheduled frame.
+        serviceDemand(runtime: runtime)
         return changed
     }
 
@@ -139,20 +159,31 @@ final class LinuxAccessibilityHost {
     }
 
     func update<State>(runtime: Runtime<State>, windowX: Int32, windowY: Int32) {
-        guard let window else { return }
+        guard let window, !publishing else { return }
+        publishing = true
+        defer { publishing = false }
         let width = pixel(runtime.viewport.x), height = pixel(runtime.viewport.y)
         let title = runtime.windowTitle ?? lastTitle
         let windowRect = [windowX, windowY, width, height]
-        var root = runtime.nativeAccessibilitySnapshot()
-        if runtime.a11yAnnouncement.count != 0 {
-            root.children.append(AccessibilityTreeState.announcerNode(runtime.a11yAnnouncement, holdWords: false))
-        }
         if lastTitle != title || lastWindowRect != windowRect || lastWindowFocused != runtime.windowFocused {
             rune_ax_begin(window, title, windowX, windowY, width, height, runtime.windowFocused ? 1 : 0)
         }
         lastTitle = title
         lastWindowRect = windowRect
         lastWindowFocused = runtime.windowFocused
+        guard rune_ax_is_active(window) != 0 else {
+            if !published.isEmpty {
+                for key in published.keys { rune_ax_remove(window, key.source) }
+                published.removeAll()
+                fields.removeAll()
+                lastRoot = nil
+            }
+            return
+        }
+        var root = runtime.nativeAccessibilitySnapshot()
+        if runtime.a11yAnnouncement.count != 0 {
+            root.children.append(AccessibilityTreeState.announcerNode(runtime.a11yAnnouncement, holdWords: false))
+        }
         hasAnnouncements = false
         publish(root, parent: nil, index: 0, clip: .fromXYWH(0, 0, runtime.viewport.x, runtime.viewport.y), place: false)
         for key in published.keys where nextPublished[key] == nil { rune_ax_remove(window, key.source) }
@@ -160,10 +191,13 @@ final class LinuxAccessibilityHost {
         nextPublished.removeAll(keepingCapacity: true)
         swap(&fields, &nextFields)
         nextFields.removeAll(keepingCapacity: true)
-        if hasAnnouncements {
+        if hasAnnouncements, let lastRoot {
             for announcement in AccessibilityTreeBuilder.liveAnnouncements(previous: lastRoot, current: root) {
                 rune_ax_announce(window, announcement.text, announcement.politeness == .assertive ? 1 : 0)
             }
+        } else if lastRoot == nil, runtime.a11yAnnouncement.recent(), let words = runtime.a11yAnnouncement.words {
+            // Match the upstream attach window for words spoken while a reader was starting.
+            rune_ax_announce(window, words.text, words.politeness == .assertive ? 1 : 0)
         }
         lastRoot = root
         // The caret or horizontal input offset can change while the semantic frame stays still.

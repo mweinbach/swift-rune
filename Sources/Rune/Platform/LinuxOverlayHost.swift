@@ -81,7 +81,9 @@ private func wakeLinuxOverlayLoop(_ context: UnsafeMutableRawPointer?) {
             do { try makeRenderer() } catch { close(); throw error }
         }
         accessibility = LinuxAccessibilityHost(title: handle.name, waker: handle.withLockedRuntime { $0.waker },
-                                                isVisible: false, overlay: true)
+                                                isVisible: false, overlay: true) { [weak handle] host in
+            handle?.withLockedRuntime { host.serviceDemand(runtime: $0) }
+        }
         configure()
         let xid = rune_overlay_xid(window)
         let name = backend == RuneOverlayLayer ? "Wayland layer-shell" : backend == RuneOverlayXWayland ? "XWayland" : "X11"

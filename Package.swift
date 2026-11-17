@@ -228,6 +228,8 @@ let package = Package(
         ], linkerSettings: [
             .linkedLibrary("pango-1.0", .when(platforms: [.linux])),
             .linkedLibrary("atk-1.0", .when(platforms: [.linux])),
+            .linkedLibrary("atspi", .when(platforms: [.linux])),
+            .linkedLibrary("dbus-1", .when(platforms: [.linux])),
             .linkedLibrary("glib-2.0", .when(platforms: [.linux])),
             .linkedLibrary("gobject-2.0", .when(platforms: [.linux])),
         ]),

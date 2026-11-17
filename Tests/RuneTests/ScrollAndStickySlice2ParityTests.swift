@@ -101,6 +101,15 @@ struct ScrollAndStickySlice2ParityTests {
         compare(rt.flatNodes)
         compare(rt.flatNodes.reversed())
 
+        // A paint order which reaches a raised branch first has not published its
+        // outer viewport's scale yet. Its provisional sum must not stick to siblings.
+        let first = try #require(rt.flatNodes.first { $0.path == leaf })
+        var pending = rt.makeCarriedScrollCache()
+        _ = rt.carriedScroll(for: first, scales: [inner: Vec2(1.25, 0.66)], cache: &pending) { turns[$0] }
+        let ready = rt.carriedScroll(for: first, scales: scales, cache: &pending) { turns[$0] }
+        var fresh: [Vec2?] = []
+        #expect(ready == rt.carriedScroll(for: first, scales: scales, cache: &fresh) { turns[$0] })
+
         rt.scrollOffsets[leaf] = Vec2(4, 12)
         #expect(rt.makeCarriedScrollCache().isEmpty)
         compare(rt.flatNodes)

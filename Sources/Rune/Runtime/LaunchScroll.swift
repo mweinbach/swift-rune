@@ -103,6 +103,13 @@ extension Runtime {
             guard let viewport = node.enclosingScrollIndex else { return .zero }
             if let value = cache[viewport] { return value }
             let value = uncachedCarriedScroll(for: node, scales: scales, turn: turn)
+            // Raised or reparented content can precede the authored scroll ancestors in
+            // presentation order. Their scales and turns become available during this paint.
+            var ancestor: Int? = viewport
+            while let i = ancestor {
+                guard scales[flatNodes[i].path] != nil else { return value }
+                ancestor = flatNodes[i].enclosingScrollIndex
+            }
             cache[viewport] = value
             return value
         }

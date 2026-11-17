@@ -3,6 +3,9 @@
 #include "GLibWake.h"
 #include <atk/atk.h>
 #include <atk-bridge.h>
+#include <atspi/atspi.h>
+#include <atspi/atspi-gmain.h>
+#include <dbus/dbus.h>
 #include <pango/pango.h>
 #include <math.h>
 #include <string.h>
@@ -26,8 +29,9 @@ struct RuneA11yWindow {
     GHashTable *nodes;
     GQueue requests;
     RuneGLibWatch *watch;
-    RuneA11yWake action_wake;
+    RuneA11yWake wake, project;
     void *wake_context;
+    void *project_context;
     int x, y;
     gboolean visible;
     guint generation;
@@ -40,6 +44,230 @@ typedef struct {
 } ActionRequest;
 
 static RuneAccessible *application;
+static GSList *windows;
+static DBusConnection *access_bus;
+static DBusConnection *session_bus;
+static GHashTable *readers, *listeners;
+static gboolean desktop_enabled, tree_required = TRUE;
+static gboolean waiting_for_listeners, listeners_changed;
+static guint bus_generation, status_revision;
+
+#define REGISTRY_NAME "org.a11y.atspi.Registry"
+#define REGISTRY_PATH "/org/a11y/atspi/registry"
+
+static void update_demand(void) {
+    gboolean needed = !access_bus || desktop_enabled || g_hash_table_size(readers) || g_hash_table_size(listeners);
+    if (tree_required == needed) return;
+    tree_required = needed;
+    for (GSList *i = windows; i; i = i->next) {
+        RuneA11yWindow *window = i->data;
+        if (needed && window->project) window->project(window->project_context);
+        window->wake(window->wake_context);
+    }
+}
+
+static void refresh_listeners(void);
+static void listener_reply(DBusPendingCall *call, void *data) {
+    DBusMessage *reply = dbus_pending_call_steal_reply(call);
+    if (GPOINTER_TO_UINT(data) != bus_generation) {
+        if (reply) dbus_message_unref(reply);
+        return;
+    }
+    waiting_for_listeners = FALSE;
+    DBusMessageIter list, entry;
+    if (!listeners_changed && reply && dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_METHOD_RETURN &&
+        dbus_message_iter_init(reply, &list) && dbus_message_iter_get_arg_type(&list) == DBUS_TYPE_ARRAY) {
+        g_hash_table_remove_all(listeners);
+        dbus_message_iter_recurse(&list, &entry);
+        while (dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_STRUCT) {
+            DBusMessageIter field;
+            dbus_message_iter_recurse(&entry, &field);
+            if (dbus_message_iter_get_arg_type(&field) == DBUS_TYPE_STRING) {
+                const char *name;
+                dbus_message_iter_get_basic(&field, &name);
+                if (name[0] == ':' && g_strcmp0(name, dbus_bus_get_unique_name(access_bus)))
+                    g_hash_table_add(listeners, g_strdup(name));
+            }
+            dbus_message_iter_next(&entry);
+        }
+        update_demand();
+    }
+    if (reply) dbus_message_unref(reply);
+    if (listeners_changed) { listeners_changed = FALSE; refresh_listeners(); }
+}
+
+static void refresh_listeners(void) {
+    /* The registry filters this reply by the calling application's bus name. Its
+       registration signals do not carry the target app, and deregistration uses prefixes. */
+    if (waiting_for_listeners) { listeners_changed = TRUE; return; }
+    DBusMessage *request = dbus_message_new_method_call(REGISTRY_NAME, REGISTRY_PATH, REGISTRY_NAME, "GetRegisteredEvents");
+    if (!request) return;
+    DBusPendingCall *pending = NULL;
+    if (dbus_connection_send_with_reply(access_bus, request, &pending, -1) && pending) {
+        waiting_for_listeners = TRUE;
+        if (!dbus_pending_call_set_notify(pending, listener_reply, GUINT_TO_POINTER(bus_generation), NULL))
+            waiting_for_listeners = FALSE;
+        dbus_pending_call_unref(pending);
+    }
+    dbus_message_unref(request);
+}
+
+static DBusHandlerResult access_message(DBusConnection *bus, DBusMessage *msg, void *data) {
+    (void)data;
+    if (dbus_message_is_signal(msg, DBUS_INTERFACE_DBUS, "NameOwnerChanged")) {
+        const char *name, *old, *now;
+        if (dbus_message_get_args(msg, NULL, DBUS_TYPE_STRING, &name, DBUS_TYPE_STRING, &old,
+                                  DBUS_TYPE_STRING, &now, DBUS_TYPE_INVALID)) {
+            if (name[0] == ':' && !*now) {
+                g_hash_table_remove(readers, name);
+                g_hash_table_remove(listeners, name);
+                if (waiting_for_listeners) listeners_changed = TRUE;
+                update_demand();
+            }
+            if (g_str_equal(name, REGISTRY_NAME)) {
+                g_hash_table_remove_all(listeners);
+                update_demand();
+                if (*now) refresh_listeners();
+            }
+        }
+    } else if (dbus_message_is_signal(msg, REGISTRY_NAME, "EventListenerRegistered") ||
+               dbus_message_is_signal(msg, REGISTRY_NAME, "EventListenerDeregistered")) {
+        refresh_listeners();
+    } else if (dbus_message_get_type(msg) == DBUS_MESSAGE_TYPE_METHOD_CALL) {
+        const char *path = dbus_message_get_path(msg), *iface = dbus_message_get_interface(msg);
+        const char *sender = dbus_message_get_sender(msg);
+        /* Standard readers request the private peer address here before switching
+           to that peer. Raw AT-SPI clients also read the application directly. The
+           registry's startup Properties.Set(Application.Id) is infrastructure. */
+        if (sender && sender[0] == ':' && g_strcmp0(sender, dbus_bus_get_unique_name(bus)) &&
+            path && (g_str_has_prefix(path, "/org/a11y/atspi/accessible/") || g_str_equal(path, "/org/a11y/atspi/cache")) &&
+            iface && (g_str_has_prefix(iface, "org.a11y.atspi.") ||
+                      dbus_message_is_method_call(msg, DBUS_INTERFACE_PROPERTIES, "Get") ||
+                      dbus_message_is_method_call(msg, DBUS_INTERFACE_PROPERTIES, "GetAll") ||
+                      dbus_message_is_method_call(msg, DBUS_INTERFACE_INTROSPECTABLE, "Introspect")) &&
+            !g_hash_table_contains(readers, sender)) {
+            g_hash_table_add(readers, g_strdup(sender));
+            update_demand();
+        }
+    }
+    return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+}
+
+static void watch_access_bus(void) {
+    if (access_bus && dbus_connection_get_is_connected(access_bus)) return;
+    ++bus_generation;
+    if (access_bus) {
+        dbus_connection_remove_filter(access_bus, access_message, NULL);
+        dbus_connection_unref(access_bus);
+        access_bus = NULL;
+        g_clear_pointer(&readers, g_hash_table_unref);
+        g_clear_pointer(&listeners, g_hash_table_unref);
+        waiting_for_listeners = listeners_changed = FALSE;
+    }
+    DBusConnection *bus = atspi_get_a11y_bus();
+    if (!bus || !dbus_connection_add_filter(bus, access_message, NULL, NULL)) { update_demand(); return; }
+    access_bus = dbus_connection_ref(bus);
+    readers = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    listeners = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    /* Raw accessible queries do not install ATK's per-client disconnect match. */
+    dbus_bus_add_match(bus, "type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged'", NULL);
+    update_demand();
+}
+
+#define STATUS_SERVICE "org.a11y.Bus"
+#define STATUS_PATH "/org/a11y/bus"
+#define STATUS_IFACE "org.a11y.Status"
+
+static void apply_status(DBusMessageIter *variant) {
+    DBusMessageIter value;
+    if (dbus_message_iter_get_arg_type(variant) != DBUS_TYPE_VARIANT) return;
+    dbus_message_iter_recurse(variant, &value);
+    if (dbus_message_iter_get_arg_type(&value) != DBUS_TYPE_BOOLEAN) return;
+    dbus_bool_t enabled;
+    dbus_message_iter_get_basic(&value, &enabled);
+    desktop_enabled = enabled;
+    ++status_revision;
+    update_demand();
+}
+
+static void status_reply(DBusPendingCall *call, void *data) {
+    DBusMessage *reply = dbus_pending_call_steal_reply(call);
+    if (!reply) return;
+    DBusMessageIter variant;
+    if (GPOINTER_TO_UINT(data) == status_revision && dbus_message_iter_init(reply, &variant)) apply_status(&variant);
+    dbus_message_unref(reply);
+}
+
+static void query_status(void) {
+    DBusMessage *request = dbus_message_new_method_call(STATUS_SERVICE, STATUS_PATH, DBUS_INTERFACE_PROPERTIES, "Get");
+    if (!request) return;
+    const char *iface = STATUS_IFACE, *property = "IsEnabled";
+    DBusPendingCall *pending = NULL;
+    if (dbus_message_append_args(request, DBUS_TYPE_STRING, &iface, DBUS_TYPE_STRING, &property, DBUS_TYPE_INVALID) &&
+        dbus_connection_send_with_reply(session_bus, request, &pending, -1) && pending) {
+        dbus_pending_call_set_notify(pending, status_reply, GUINT_TO_POINTER(++status_revision), NULL);
+        dbus_pending_call_unref(pending);
+    }
+    dbus_message_unref(request);
+}
+
+static DBusHandlerResult session_message(DBusConnection *bus, DBusMessage *msg, void *data) {
+    (void)bus; (void)data;
+    if (dbus_message_is_signal(msg, DBUS_INTERFACE_PROPERTIES, "PropertiesChanged") &&
+        dbus_message_has_path(msg, STATUS_PATH) && dbus_message_has_signature(msg, "sa{sv}as")) {
+        DBusMessageIter fields, entries, item;
+        const char *iface, *property;
+        dbus_message_iter_init(msg, &fields);
+        dbus_message_iter_get_basic(&fields, &iface);
+        if (!g_str_equal(iface, STATUS_IFACE)) return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+        dbus_message_iter_next(&fields);
+        dbus_message_iter_recurse(&fields, &entries);
+        while (dbus_message_iter_get_arg_type(&entries) == DBUS_TYPE_DICT_ENTRY) {
+            dbus_message_iter_recurse(&entries, &item);
+            dbus_message_iter_get_basic(&item, &property);
+            if (g_str_equal(property, "IsEnabled")) { dbus_message_iter_next(&item); apply_status(&item); }
+            dbus_message_iter_next(&entries);
+        }
+        dbus_message_iter_next(&fields);
+        dbus_message_iter_recurse(&fields, &entries);
+        while (dbus_message_iter_get_arg_type(&entries) == DBUS_TYPE_STRING) {
+            dbus_message_iter_get_basic(&entries, &property);
+            if (g_str_equal(property, "IsEnabled")) { query_status(); break; }
+            dbus_message_iter_next(&entries);
+        }
+    } else if (dbus_message_is_signal(msg, DBUS_INTERFACE_DBUS, "NameOwnerChanged")) {
+        const char *name, *old, *now;
+        if (dbus_message_get_args(msg, NULL, DBUS_TYPE_STRING, &name, DBUS_TYPE_STRING, &old, DBUS_TYPE_STRING, &now,
+                                  DBUS_TYPE_INVALID) && g_str_equal(name, STATUS_SERVICE)) {
+            if (*now) {
+                watch_access_bus();
+                if (access_bus) refresh_listeners();
+                query_status();
+            } else {
+                desktop_enabled = FALSE;
+                ++status_revision;
+                update_demand();
+            }
+        }
+    }
+    return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+}
+
+static void watch_session_status(void) {
+    /* Poll the session descriptor alongside ATK's descriptor in the host's native
+       wait. A worker-thread GIO notification can otherwise sit on GLib's default
+       context until unrelated SDL input wakes a parked window. */
+    session_bus = dbus_bus_get_private(DBUS_BUS_SESSION, NULL);
+    if (!session_bus) return;
+    dbus_connection_set_exit_on_disconnect(session_bus, FALSE);
+    dbus_connection_add_filter(session_bus, session_message, NULL, NULL);
+    dbus_bus_add_match(session_bus, "type='signal',sender='" STATUS_SERVICE "',path='" STATUS_PATH "',"
+                       "interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',arg0='" STATUS_IFACE "'", NULL);
+    dbus_bus_add_match(session_bus, "type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',"
+                       "member='NameOwnerChanged',arg0='" STATUS_SERVICE "'", NULL);
+    atspi_dbus_connection_setup_with_g_main(session_bus, NULL);
+    query_status();
+}
 
 static void component_iface(AtkComponentIface *);
 static void action_iface(AtkActionIface *);
@@ -224,7 +452,7 @@ static gboolean queue_request(RuneAccessible *node, int kind, const char *text, 
     request->number = number;
     request->start = start; request->end = end;
     g_queue_push_tail(&node->window->requests, request);
-    if (node->window->action_wake) node->window->action_wake(node->window->wake_context);
+    if (!node->window->watch) node->window->wake(node->window->wake_context);
     return TRUE;
 }
 static gboolean queue_action(RuneAccessible *node, int kind, const char *text, double number) {
@@ -534,21 +762,22 @@ static RuneA11yWindow *open_window(const char *title, int visible, RuneA11yWake 
         application = g_object_new(rune_accessible_get_type(), NULL);
         atk_object_set_role(ATK_OBJECT(application), ATK_ROLE_APPLICATION);
         atk_object_set_name(ATK_OBJECT(application), title);
+        /* ATK consumes registry event signals. Observe them before its filter. */
+        watch_access_bus();
         if (atk_bridge_adaptor_init(NULL, NULL) != 0) {
             util->get_root = old_root; util->get_toolkit_name = old_name; util->get_toolkit_version = old_version;
             g_clear_object(&application);
             g_type_class_unref(util);
             return NULL;
         }
+        if (access_bus) refresh_listeners();
+        watch_session_status();
         g_type_class_unref(util);
     }
     RuneA11yWindow *window = g_new0(RuneA11yWindow, 1);
-    if (overlay) {
-        /* The GTK overlay already owns a host-loop descriptor watch. Wake its
-         * Rune handle only when an AT-SPI request needs the runtime to act. */
-        window->action_wake = wake;
-        window->wake_context = context;
-    } else {
+    window->wake = wake;
+    window->wake_context = context;
+    if (!overlay) {
         window->watch = rune_glib_watch_new(wake, context);
         if (!window->watch) { g_free(window); return NULL; }
     }
@@ -558,8 +787,19 @@ static RuneA11yWindow *open_window(const char *title, int visible, RuneA11yWake 
     atk_object_set_role(ATK_OBJECT(window->frame), ATK_ROLE_FRAME);
     atk_object_set_name(ATK_OBJECT(window->frame), title);
     rune_ax_visible(window, visible);
+    windows = g_slist_prepend(windows, window);
     if (window->watch) rune_glib_watch_arm(window->watch);
     return window;
+}
+
+int rune_ax_is_active(RuneA11yWindow *window) {
+    return window && tree_required;
+}
+
+void rune_ax_set_projection_callback(RuneA11yWindow *window, RuneA11yWake callback, void *context) {
+    if (!window) return;
+    window->project = callback;
+    window->project_context = context;
 }
 
 void rune_ax_toolkit_window(void *accessible, int visible) {
@@ -769,6 +1009,7 @@ void rune_ax_announce(RuneA11yWindow *w, const char *text, int assertive) {
 
 void rune_ax_close(RuneA11yWindow *w) {
     if (!w) return;
+    windows = g_slist_remove(windows, w);
     if (w->watch) rune_glib_watch_free(w->watch);
     retire_nodes(w, TRUE);
     rune_ax_visible(w, FALSE);
