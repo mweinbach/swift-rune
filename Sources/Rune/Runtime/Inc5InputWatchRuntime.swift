@@ -431,7 +431,7 @@ extension Runtime {
             let el = node.el
             if (el.hoverBg?.a ?? 0) > 0 || el.isHoverGroup || el.hoverGroupShare != nil { hoverTrackIndices.append(i) }
             if el.isHoverAlone || el.hoverGroupShare != nil { hoverGroupIndices.append(i) }
-            if el.handlers.onHoverChange != nil { hasHoverChangeHandlers = true }
+            if !hasHoverChangeHandlers, el.hasAuthoredHandlers, el.handlers.onHoverChange != nil { hasHoverChangeHandlers = true }
             if el.hoverWithinSpec != nil || el.hoverMotionSpec != nil { hasAuthoredHoverCurves = true }
         }
         hoverOrderMatchesPaint = flatNodes.count == builtHoverIds.count

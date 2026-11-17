@@ -51,7 +51,7 @@ internal enum DirPin: Int, Sendable, Hashable {
 /// Resolve an inherited flow, explicit direction, or input's forced direction for this node.
 internal func stepDirection<State>(parent: Flow, el: El<State>, state: State?) -> (flow: Flow, mirror: Bool) {
     let direction: Direction?
-    if el.hasAuthoredHandlers, let state, let forced = el.handlers.editLens?.get(state).forcedDir {
+    if el.hasEditLens, let state, let forced = el.handlers.editLens?.get(state).forcedDir {
         direction = forced == .rtl ? .rtl : .ltr
     } else {
         direction = el.explicitDir

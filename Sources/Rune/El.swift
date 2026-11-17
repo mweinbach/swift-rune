@@ -1796,7 +1796,13 @@ public struct El<State> {
     public var isolatesSpec: [(range: Range<Int>, dir: Direction)] { get { _cold?.data.isolates ?? [] } set { ensureCold().data.isolates = newValue.isEmpty ? nil : newValue } }
     var liveBindings: [BoundLiveProperty] { get { _cold?.data.liveBindings ?? [] } set { ensureCold().data.liveBindings = newValue.isEmpty ? nil : newValue } }
     public var handlers: ElementHandlers<State> {
-        get { _cold?.data.handlersBox?.value ?? ElementHandlers<State>() }
+        _read {
+            if let box = _cold?.data.handlersBox {
+                yield box.value
+            } else {
+                yield ElementHandlers<State>()
+            }
+        }
         set {
             let box = ensureCold()
             var newValue = newValue
