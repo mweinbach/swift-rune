@@ -275,6 +275,35 @@ struct TouchAtOnceAndInputWaitingTests {
         #expect(waits(.wheel) { rt.wheel(WheelEvent(dx: 0, dy: -30, precise: true, mods: .none), at: Vec2(100, 350), now: t) })
     }
 
+    #if canImport(Dispatch)
+    @Test("input time scopes and the last dispatch belong to the calling thread")
+    func independentInputThreadsKeepTheirOwnArrival() {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let worker = DispatchGroup()
+        InputTime.scope(at: 101) {
+            DispatchQueue.global().async(group: worker) {
+                InputTime.scope(at: 202) {
+                    entered.signal()
+                    release.wait()
+                }
+            }
+            entered.wait()
+            defer {
+                release.signal()
+                worker.wait()
+            }
+            #expect(InputTime.arrival() == 101)
+            #expect(InputTime.lastInput() == 101)
+            InputTime.withArrival(nil) {
+                #expect(InputTime.arrival() == nil)
+                #expect(InputTime.lastInput() == 101)
+            }
+            #expect(InputTime.arrival() == 101)
+        }
+    }
+    #endif
+
     @Test("input_waiting: what a host-dispatched press queues carries its stamp, and lastInput is the dispatch")
     func aHostDispatchedPressStampsWhatItQueues() {
         let rt = waitingRig()
