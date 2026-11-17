@@ -87,33 +87,34 @@ struct WindowLifecycleParityTests {
         #expect(rt.state.dropped == ["doc.txt"])
     }
 
-    @Test("window/covered_tests.rs:70 - covered window settles motion when it uncovers")
-    func coveredWindowLandsMotionWhenUncovered() {
-        struct State: Equatable {
-            var expanded = false
-        }
+    @Test("Motion holds its presented position while covered and lands in one frame when uncovered")
+    func coveredWindowLandsMotionWhenUncovered() throws {
         let rt = Runtime(
-            state: State(),
-            viewport: Vec2(200, 100),
-            view: { s, _ in
-                El<State>().size(200, 100).child(
-                    El<State>().key("bar")
-                        .w(s.expanded ? 180 : 40)
-                        .h(20)
-                        .animate(.default)
-                )
-            }
+            state: Float(0),
+            viewport: Vec2(100, 100),
+            view: { x, _ in El<Float>().child(El<Float>().key("box").absolute(x: x, y: 0).size(10, 10)) }
         )
-        _ = rt.frame(at: 0.0)
+        let spring = Spring(duration: 0.3)
+        _ = rt.frame(at: 0)
+        rt.update(at: 0) { x, tx in x = 80; tx.motion(spring) }
+        _ = rt.frame(at: 1.0 / 120.0)
+        _ = rt.frame(at: 0.05)
+        let mid = try #require(rt.presented("box")?.rect.first)
+        #expect(mid > 0 && mid < 80)
+        #expect(rt.isAnimating)
+
         rt.setLiveVisible(false)
-        rt.update(at: 0.01) { s, _ in s.expanded = true }
-        coveredStep(rt, at: 0.02)
+        let commits = rt.viewCommitCount
+        rt.update(at: 0.06) { x, tx in x = 40; tx.motion(spring) }
+        coveredStep(rt, at: 0.07)
+        #expect(rt.presented("box")?.rect.first == mid)
+        #expect(rt.viewCommitCount == commits)
 
         rt.setLiveVisible(true)
         rt.settleAll()
-        _ = rt.frame(at: 0.03)
-        let barWidth = rt.elements().first(where: { $0.key == "bar" })?.rect[2]
-        #expect(barWidth == 180)
+        _ = rt.frame(at: 0.08)
+        #expect(rt.presented("box")?.rect.first == 40)
+        #expect(!rt.isAnimating)
     }
 
     // MARK: - window/life_tests.rs (3 tests)
