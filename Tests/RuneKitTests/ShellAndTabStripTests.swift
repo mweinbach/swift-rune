@@ -474,6 +474,8 @@ struct ShellAndTabStripTests {
             }
             let tab = try #require(rt.element(byKey: "tabs-tab-b")).rect
             let p = Vec2(tab[0] + 2, tab[1] + 2)
+            rt.pointerMove(to: p, at: 0.06)
+            _ = rt.frame(at: 0.06)
             rt.pointerDown(at: p, at: 0.1)
             #expect(rt.state.selected == "b")
             #expect(rt.state.calls == ["b"])
@@ -482,8 +484,27 @@ struct ShellAndTabStripTests {
             rt.pointerUp(at: p, at: 0.2)
             _ = rt.frame(at: 0.2)
             #expect(rt.state.calls == ["b"])
-            #expect(rt.commitCount == beforeRelease)
+            #expect(rt.commitCount == beforeRelease, "\(orientation)")
         }
+    }
+
+    @Test("A strip without drag state keeps ordinary mouse and keyboard activation")
+    func tabWithoutDragStateActivatesOnClick() throws {
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime(state: 0, viewport: Vec2(240, 80)) { _, _ in
+            TabStrip<Int>(key: "tabs", tabs: [StripTabItem(id: "active", title: "Active")], selected: "active")
+                .onSelect { count, _, _ in count += 1 }
+                .build(0, kit: kit)
+        }
+        _ = rt.frame(at: 0)
+        let rect = try #require(rt.element(byKey: "tabs-tab-active")).rect
+        let center = Vec2(rect[0] + rect[2] / 2, rect[1] + rect[3] / 2)
+        rt.pointerDown(at: center, at: 0.1)
+        #expect(rt.state == 0)
+        rt.pointerUp(at: center, at: 0.2)
+        #expect(rt.state == 1)
+        #expect(rt.keyDown(KeyEvent(key: .space), at: 0.3))
+        #expect(rt.state == 2)
     }
 
     @Test("TabStrip enforces pinned partition, suppresses active separators, and handles select/close in Runtime")

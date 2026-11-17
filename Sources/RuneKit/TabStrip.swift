@@ -799,6 +799,7 @@ public struct TabStrip<State> {
         // Every horizontal tab is drawn this wide (`width: Some(tab_w)`), so a run of unbuilt
         // tabs is exactly as long as they would be.
         let tabW = computedUnpinnedWidth ?? Self.defaultTabWidth(overflowMode)
+        let unpinnedDensity = density ?? (vertical ? dens : TabOverflow.densityFor(tabW))
         let pinnedW = overflowMode.pinnedTabWidth
         let tabWidth: Float? = vertical ? computedUnpinnedWidth : tabW
         let pitch: (Bool, Bool) -> Float = { pin, twoLine in
@@ -867,7 +868,7 @@ public struct TabStrip<State> {
                     item: item,
                     index: i,
                     tabBarCount: count,
-                    dens: dens,
+                    dens: item.isPinned ? .iconOnly : unpinnedDensity,
                     tabH: tabH,
                     computedUnpinnedWidth: tabWidth,
                     dragStateValue: dragStateValue,
@@ -943,8 +944,10 @@ public struct TabStrip<State> {
                 .bg(fillColor ?? k.c.layer01)
                 .borderSides(bottom: 1.0, color: k.c.borderMuted)
             if let dragKeyPath {
-                strip = strip.onHover { s, inside, _ in
+                strip = strip.onHover { s, inside, tx in
+                    let previousWidth = s[keyPath: dragKeyPath].widthLock
                     if !inside { s[keyPath: dragKeyPath].leave() }
+                    if s[keyPath: dragKeyPath].widthLock == previousWidth { tx.liveOnly() }
                 }
             }
             if let leadingEl { strip = strip.child(leadingEl) }
@@ -1256,14 +1259,9 @@ public struct TabStrip<State> {
                     tx.liveOnly()
                     return
                 }
-                if dragKeyPath == nil && selectEarly && isSelected {
-                    tx.liveOnly()
-                    return
-                }
                 onSelectFn(&s, idCopy, &tx)
                 tx.scrollIntoViewIn(scroll, key)
             }
-            if dragKeyPath == nil && selectEarly { tab = tab.pressOnDown() }
         }
         if let onDoubleClickFn {
             tab = tab.onDoubleClick { s, tx in

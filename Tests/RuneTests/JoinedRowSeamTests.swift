@@ -8,8 +8,9 @@ struct JoinedRowSeamTests {
         var pressed = 0
     }
 
-    @Test("Previously visible faces share their painted and interactive seam while another row crosses")
-    func drawnAndInteractiveSeam() throws {
+    @Test("Previously visible faces share their painted and interactive seam while another row crosses",
+          arguments: [false, true])
+    func drawnAndInteractiveSeam(native: Bool) throws {
         let runtime = Runtime<Feed>(state: Feed(), viewport: Vec2(280, 180), pixelScale: 1) { state, _ in
             let split = state.phase == 1
             func prompt(_ key: String, _ label: String, _ hit: Int) -> El<Feed> {
@@ -33,9 +34,13 @@ struct JoinedRowSeamTests {
             tx.growVisibleTail("rows")
             return true
         }
+        func draw(at time: Double) {
+            if native { _ = runtime.renderFrame(at: time) }
+            else { _ = runtime.frame(at: time) }
+        }
         var frame = 0
         while runtime.state.phase == 0 && frame <= 36 {
-            _ = runtime.frame(at: Double(frame) / 60)
+            draw(at: Double(frame) / 60)
             frame += 1
         }
         try #require(runtime.state.phase == 1)
@@ -45,15 +50,17 @@ struct JoinedRowSeamTests {
             #expect(abs(bottom[1] - top[1] - top[3] - 4) < 0.05, "frame \(step): \(top), \(bottom)")
             if step == 4 {
                 let time = Double(frame - 1) / 60
-                for (rect, hit) in [(top, 1), (bottom, 2)] {
+                for (key, rect, hit) in [("top", top, 1), ("bottom", bottom, 2)] {
                     let position = Vec2(80, rect[1] + 15)
+                    #expect(runtime.contains(key, x: position.x, y: position.y))
+                    #expect(runtime.elementAt(position.x, position.y)?.key == key)
                     runtime.pointerDown(at: position, at: time)
                     runtime.pointerUp(at: position, at: time)
-                    _ = runtime.frame(at: time)
+                    draw(at: time)
                     #expect(runtime.state.pressed == hit)
                 }
             }
-            _ = runtime.frame(at: Double(frame) / 60)
+            draw(at: Double(frame) / 60)
             frame += 1
         }
     }

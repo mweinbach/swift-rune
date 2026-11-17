@@ -564,6 +564,34 @@ struct ResizeRelayoutParityTests {
         #expect(plain.nextCommitKind(tx: tx) == .rebuild, "no virtual rows to remount")
     }
 
+    @Test("indexed rows remount without rerunning the view with or without a declining scroll-end observer", arguments: [false, true])
+    func decliningScrollEndObserverPreservesVirtualRemount(_ observes: Bool) {
+        var views = 0
+        var reports: [Bool] = []
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(200, 100), pixelScale: 1) { _, _ in
+            views += 1
+            let rows: El<Int> = col().key("rows").wFull()
+                .virtualRows(200, 24, key: { _, i in "row-\(i)" }) { _, _ in el().wFull().h(24) }
+            let scroll = col().key("scroll").size(200, 100).scrollY(stickBottom: false).child(rows)
+            if observes {
+                return scroll.onAtBottomIf { _, at in
+                    reports.append(at)
+                    return false
+                }
+            }
+            return scroll
+        }
+        _ = rt.frame(at: 0)
+        _ = rt.frame(at: 0.02)
+        let initialViews = views
+        rt.wheel(WheelEvent(dx: 0, dy: -5000), at: Vec2(50, 50), now: 0.03)
+        _ = rt.frame(at: 0.04)
+        _ = rt.frame(at: 0.05)
+        #expect((rt.virtualLists.values.first?.lastMountedRange.lowerBound ?? 0) > 0)
+        #expect(views == initialViews)
+        #expect(reports == (observes ? [false, true] : []))
+    }
+
     // MARK: - Live Bindings During Relayout (relayout/live.rs)
 
     private struct LiveBindings {

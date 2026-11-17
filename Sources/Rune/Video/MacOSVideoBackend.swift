@@ -68,7 +68,6 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         }
 
         deinit {
-            VideoHeadless.unregister(self)
             #if os(macOS)
             lock.lock()
             let timer = audioTimer
@@ -167,7 +166,9 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         self.surface = NativeSurface(id: key)
         self.inner.surface = self.surface
         self.surface.withVideo(self.inner)
-        VideoHeadless.register(self.inner)
+        if request.kind == .audio && !MediaPlaybackGate.isEnabled {
+            VideoHeadless.registerAudio(inner)
+        }
         probeAndInitialize()
     }
 

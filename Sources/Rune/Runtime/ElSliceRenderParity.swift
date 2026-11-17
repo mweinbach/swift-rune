@@ -164,6 +164,8 @@ internal extension Runtime {
         nodes: [FlatNode],
         preState: PreCommitGroupSnapshot,
         cut: Bool,
+        snaps: Bool,
+        specs: [NodeSpec],
         ancestorInstants: [Bool]
     ) {
         var liveIds = Set<NodeId>(minimumCapacity: nodes.count)
@@ -177,7 +179,8 @@ internal extension Runtime {
                 ?? node.el.styleSpring.map { Anim<Float>(curve: Curve.from($0)) }
                 ?? Anim<Float>(curve: Curve.from(MotionTokens.DEFAULT))
             let isInstantMotion = (motion.curve == .instant)
-            let restQuiet = cut || !wasPresent || wasExiting || reducedMotion || ancestorInstant || node.el.hasInstantChanges || isInstantMotion
+            let snapStyle = snaps && specs[i].styleSpring == nil
+            let restQuiet = cut || snapStyle || !wasPresent || wasExiting || reducedMotion || ancestorInstant || node.el.hasInstantChanges || isInstantMotion
 
             if let (restOp, _) = node.el.groupOpacity {
                 let to = restOp.clamped(to: 0...1)

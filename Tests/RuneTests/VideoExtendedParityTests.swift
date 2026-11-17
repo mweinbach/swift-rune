@@ -2074,6 +2074,32 @@ struct VideoRuntimeExtendedParityTests {
         #expect(a.isPlaying)
     }
 
+    @Test("headless audio and drawn video follow the clock of the runtime driving them")
+    func headlessMediaIgnoresFramesOnAnotherThread() {
+        let audio = Player.audio(Self.fixtureURL("silence.wav").path)
+        let video = Player(source: .file(Self.fixtureURL("rgbw.mp4")))
+        let rt = Runtime(state: video, viewport: Vec2(32, 18), view: Self.scrolledVideoView)
+        audio.play()
+        video.play()
+        _ = rt.frame(at: 0)
+        _ = rt.frame(at: 0.1)
+
+        let finished = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            let other = Runtime(state: (), viewport: Vec2(10, 10), view: { _, _ in el() })
+            _ = other.frame(at: 5)
+            finished.signal()
+        }
+        finished.wait()
+
+        #expect(abs(audio.time - 0.1) < 1e-6)
+        #expect(abs(video.time - 0.1) < 1e-6)
+        #expect(abs(VideoHeadless.virtualClock - 0.1) < 1e-6)
+        _ = rt.frame(at: 0.2)
+        #expect(abs(audio.time - 0.2) < 1e-6)
+        #expect(abs(video.time - 0.2) < 1e-6)
+    }
+
     @Test("a_replaced_waker_is_dropped_outside_the_slots_lock")
     func aReplacedWakerIsDroppedOutsideTheSlotsLock() {
         final class FlagBox: @unchecked Sendable {

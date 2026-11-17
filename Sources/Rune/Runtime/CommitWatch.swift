@@ -60,8 +60,9 @@ extension Runtime {
     /// what poll, handlers and state changes left pending, a pending `Tx::settle`, layout
     /// handlers that asked for it and layout reads that moved. A virtual window's shift only
     /// counts when nothing else (dirty state, a relayout, a settle) would commit anyway.
-    internal func frameCommitWhy(settle: Bool, layout: Bool, read: Bool) -> UInt16 {
+    internal func takeFrameCommitWhy(settle: Bool, layout: Bool, read: Bool) -> UInt16 {
         var why = commitWhyPending
+        commitWhyPending = 0
         if settle { why |= CommitWhy.settle }
         if layout { why |= CommitWhy.layout }
         if read { why |= CommitWhy.read }
@@ -71,15 +72,12 @@ extension Runtime {
         return why
     }
 
-    /// A scroll that moved a viewport commits when a virtual list's window may shift, the view
-    /// read a scroll offset, or scroll callbacks (`on_at_bottom`, `on_far_from_bottom`) watch it.
-    /// Upstream queues those from the frame as actions that aren't input (`ActionQueue::push`,
-    /// action.rs:87-90: `AtBottom` and `FarFromBottom` are `input: false`), so their handlers'
-    /// changes commit for `DIRTY` (frame.rs: `why |= if input { INPUT } else { DIRTY }`).
+    /// A scroll that moved a viewport commits when a virtual list's window may shift or the
+    /// view read a scroll offset. Scroll-end handlers contribute `DIRTY` when they run and
+    /// report a change (`dispatchScrollEndReport`, `input/action.rs::AtBottom`).
     internal var scrollCommitWhy: UInt16 {
         (activeVirtualPaths.isEmpty ? 0 : CommitWhy.virtual)
             | (lastViewReadScroll ? CommitWhy.read : 0)
-            | (hasScrollCallbacks() ? CommitWhy.dirty : 0)
     }
 }
 

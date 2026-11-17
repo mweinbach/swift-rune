@@ -510,7 +510,6 @@ extension Runtime {
               cached.reusable,
               !activeVirtualPaths.isEmpty,
               !lastViewReadScroll,
-              !hasScrollCallbacks(),
               playgroundHost == nil,
               !cached.viewportRead || cached.viewport == viewport else {
             return nil

@@ -153,6 +153,7 @@ struct PollInputSplitParityTests {
             }
             rt.state.pollDue = true
             _ = try #require(rt.restingWake(), "\(kind): the runtime rests, so the poll runs alone")
+            rt.commitWhy = 0
             switch kind {
             case "hover":
                 rt.pointerMove(to: try Self.centre(rt, "hov"), at: 1.005)
@@ -168,6 +169,9 @@ struct PollInputSplitParityTests {
             default:
                 _ = rt.keyUp(KeyEvent(key: .text("a"), mods: .none), at: 1.005)
             }
+            #expect(rt.commitWhy & CommitWhy.poll != 0)
+            #expect((rt.commitWhy & CommitWhy.route != 0) == (kind == "keyUp"),
+                    "\(kind): \(CommitWhy.names(rt.commitWhy))")
             #expect(rt.state.clickedWide, "\(kind): the handler ran")
             for i in 1...4 { _ = rt.frame(at: 1.0 + Double(i) / 60.0) }
             Self.expectSplit(rt, kind)

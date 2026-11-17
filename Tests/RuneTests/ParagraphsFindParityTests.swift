@@ -40,6 +40,26 @@ struct ParagraphsFindParityTests {
         var field = TextEdit("abc\néx", multiline: true)
     }
 
+    @Test("a secure match in an earlier viewport leaves reveal ownership with the field that has boxes")
+    func firstVisibleMatchOwnsReveal() throws {
+        let mark = TextHighlight(0..<1, bg: .white, key: "match")
+        let rt = Runtime<State>(state: State(), viewport: Vec2(240, 160), pixelScale: 2) { _, _ in
+            col().children([
+                col().key("private-pane").size(240, 80).scrollY().child(
+                    textInput(key: "private", \State.field).secure().textHighlight(mark)
+                ),
+                col().key("public-pane").size(240, 80).scrollY().child(
+                    textInput(key: "public", \State.field).textHighlight(mark)
+                )
+            ])
+        }
+        _ = rt.frame(at: 0)
+        let hit = try #require(rt.highlightTargetWithNode(selector: "match"))
+        let onlyPublic = try #require(rt.highlightTargetWithNode(selector: "public/match"))
+        #expect(hit.nodeIndex == onlyPublic.nodeIndex)
+        #expect(hit.rect == onlyPublic.rect)
+    }
+
     @Test("both paint paths and layout reads place the match at the authored bytes in the second paragraph")
     func fieldMatchPaintAndRead() throws {
         let ink = Color.srgb(1, 0, 0, 1)
@@ -51,8 +71,8 @@ struct ParagraphsFindParityTests {
         let ref = rt.frame(at: 0)
         let hit = try #require(rt.highlightTargetWithNode(selector: "field/match"))
         #expect(hit.rect.y > 0)
-        let red = SIMD4<Float>(1, 0, 0, 1)
-        let green = SIMD4<Float>(0, 1, 0, 1)
+        let red = ink.simd4(srgb: rt.srgbBlend)
+        let green = background.simd4(srgb: rt.srgbBlend)
         let mark = try #require(ref.primitives.first { $0.fill == green })
         #expect(abs(mark.rect.x / 2 - hit.rect.x) < 0.01)
         #expect(abs(mark.rect.y / 2 - hit.rect.y) < 0.01)

@@ -150,6 +150,8 @@ internal struct RuntimeGrowthStackState: Sendable {
     /// Removed row growth keys mapped to when their space starts closing.
     var closing: [String: Double] = [:]
     var gap: Float = 0
+    /// Room below the last row beyond the stack's own bottom padding and border.
+    var trailingSpace: Float = 0
     var spring: Spring = Growth.spring
     var edge: StreamEdge = .feather
     /// Fold rows opening or shutting together as one block.

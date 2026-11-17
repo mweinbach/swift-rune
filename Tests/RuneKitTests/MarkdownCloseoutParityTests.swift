@@ -6,6 +6,7 @@ import Testing
 @Suite("RuneKit Content Closeout Parity Tests (All Remaining S2/S3 Cases)")
 struct MarkdownCloseoutParityTests {
     @Test("An outside list disc uses a whole device pixel box inside the reserved marker column")
+    @MainActor
     func outsideListDiscTracksScale() throws {
         let style = MarkdownStyle.fromKit(Kit.neutral(dark: false)).listMarkersOutside(true)
         let rt = Runtime(state: 0, viewport: Vec2(280, 120)) { _, _ in

@@ -359,6 +359,7 @@ public final class Runtime<State> {
         var foldHeaderPath: String? = nil
         var foldHeaderLift: Float = 0
         var growthClosingShiftY: Float = 0
+        var naturalLayout: LayoutEngine.ResultNode? = nil
     }
 
     private struct PaintInh {
@@ -1952,7 +1953,7 @@ public final class Runtime<State> {
             kitHooks.frameGrowthStepDt = 0
             pendingGrowthStepNow = now
             defer { pendingGrowthStepNow = nil }
-            let why = frameCommitWhy(settle: explicitSettleRequested, layout: ranLayoutFeedback, read: false)
+            let why = takeFrameCommitWhy(settle: explicitSettleRequested, layout: ranLayoutFeedback, read: false)
             commitFor(why: why, at: commitAt, cut: shouldCut, resizeSnap: resizeSnap)
             kitHooks.frameGrowthStepDt = 0
             reconcileDropHoverAfterCommit(at: now)
@@ -1975,7 +1976,7 @@ public final class Runtime<State> {
                 hasExternalDirtyCommit = false
                 popupNeedsLayout = false
             }
-            growthMoving = growthRows.values.contains { $0.track.moving }
+            growthMoving = !slice2State.liveContentSlides.slides.isEmpty || growthRows.values.contains { $0.track.moving }
                 || growthStacks.values.contains { !$0.pendingHeights.isEmpty || !$0.closing.isEmpty || !$0.runs.isEmpty }
             didCommitThisFrame = true
         }
@@ -2006,6 +2007,7 @@ public final class Runtime<State> {
         syncMotionLoopClock(to: now, animNow: animNow)
 
         // Sample inertial scroll decay tracks and re-position scrolled rects without running views
+        followShrinkingScrollEnds(at: prevAnimNow)
         followScrollOffsetAims(animNow: animNow)
         let scrollDt: Float = {
             let prev = lastScrollTickTime ?? now
@@ -2289,7 +2291,7 @@ public final class Runtime<State> {
         return out
     }
 
-    internal func flushPendingCommitIfNeeded(at now: Double) {
+    internal func flushPendingCommitIfNeeded(at now: Double, routed: Bool = true) {
         // frame.rs:563: only when a handler or poll ran, or the state is dirty (`ran || dirty`).
         if needsCommit, commitWhyPending & (CommitWhy.input | CommitWhy.poll | CommitWhy.dirty) != 0 {
             // A routed event (key, physical key, IME, paste) sees the state an earlier handler
@@ -2300,7 +2302,7 @@ public final class Runtime<State> {
             // at the release would take out of it. File steps don't either: upstream holds a
             // stale one to the next frame (`hold_files`) rather than committing before it.
             needsCommit = false
-            commitFor(why: CommitWhy.route, at: now, cut: forceInitialSettle)
+            commitFor(why: routed ? CommitWhy.route : 0, at: now, cut: forceInitialSettle)
             forceInitialSettle = false
         }
     }
@@ -2416,13 +2418,6 @@ public final class Runtime<State> {
         return nil
     }
 
-    internal func hasScrollCallbacks() -> Bool {
-        flatNodes.contains {
-            $0.el.handlers.atBottomReport != nil
-                || $0.el.handlers.farFromBottomReport != nil
-        }
-    }
-
     internal var scrollRequiresCommit: Bool {
         virtualListsNeedWindowUpdate() || lastViewReadScroll
     }
@@ -2453,6 +2448,7 @@ public final class Runtime<State> {
         var effectiveReducedMotion: Bool?
         var measuredGrowthRows: [String: RuntimeGrowthEntry]?
         var measuredGrowthStacks: [String: RuntimeGrowthStackState]?
+        var naturalJoinedRowTargets: [NodeId: MotionRect] = [:]
         var foldOpens: [PendingFoldOpen] = []
         var scrollCuts: [(viewport: String, cut: Float)] = []
         var foldHeaderUpdates: [(foldKey: String, headerPath: String)] = []
@@ -2889,9 +2885,12 @@ public final class Runtime<State> {
             wasPinnedToBottom = savedPinnedBottom
             kitHooks.growthStacks = savedKitGrowthStacks
         } while true
-        if commitKind == .unprompted && !cut && !reducedMotion && !isResizeRelayout && !activeResizeSnap && !slice2State.activeLiveTail.inkByStack.isEmpty {
-            prepareLiveTails(root: layoutRoot, solved: solvedRoot, expansion: virtualExpansion,
-                             previousLists: savedVirtualLists, now: now)
+        let acceptsLiveTail = commitKind == .unprompted && !cut && !reducedMotion && !isResizeRelayout
+            && !activeResizeSnap && !slice2State.activeLiveTail.inkByStack.isEmpty
+        var naturalJoinedRowTargets: [NodeId: MotionRect] = [:]
+        if acceptsLiveTail || !slice2State.joinedRowSeams.isEmpty {
+            naturalJoinedRowTargets = prepareLiveTails(root: layoutRoot, solved: solvedRoot, expansion: virtualExpansion,
+                                                       previousLists: savedVirtualLists, now: now, acceptsRequests: acceptsLiveTail)
         }
         let growthCapture = updateGrowthRowsPostLayout(
             rootResult: solvedRoot,
@@ -2917,6 +2916,7 @@ public final class Runtime<State> {
             return (t.moving && (abs(t.h - t.target) > 1e-4 || t.isShuttingFold))
                 || (t.streaming && (t.h < entry.naturalHeight - 0.1 || entry.withheld > 0.01))
         }
+        let naturalRoot = needsGrowthClamp ? solvedRoot : nil
         if needsGrowthClamp {
             layoutRoot = applyGrowthConstraints(in: layoutRoot)
             textLayoutCollector.map.removeAll(keepingCapacity: true)
@@ -2972,7 +2972,8 @@ public final class Runtime<State> {
                 enclosingHScrollIndex: nil,
                 staticInh: StaticInh(),
                 parentFlow: .ltr,
-                parentDirected: false
+                parentDirected: false,
+                naturalLayout: naturalRoot
             )
         ]
 
@@ -3131,9 +3132,20 @@ public final class Runtime<State> {
                 let maxSX = el.layout.scrollAxes.contains(.horizontal)
                     ? max(0, solved.layout.contentSize.x - targetRect.width)
                     : 0
-                let maxSY = el.layout.scrollAxes.contains(.vertical)
-                    ? max(0, solved.layout.contentSize.y - targetRect.height)
-                    : 0
+                let maxSY: Float
+                if el.layout.scrollAxes.contains(.vertical) {
+                    let growthChild = el.children.firstIndex { $0.growthSpec != nil }
+                    let natural = item.naturalLayout?.layout ?? solved.layout
+                    maxSY = growthScrollMaximum(
+                        path: path, stackPath: growthChild.map { childPaths[$0] },
+                        stackBottom: growthChild.map { solved.children[$0].layout.localRect.bottom } ?? 0,
+                        viewportHeight: targetRect.height,
+                        measured: max(0, solved.layout.contentSize.y - targetRect.height),
+                        natural: max(0, natural.contentSize.y - natural.localRect.height)
+                    )
+                } else {
+                    maxSY = 0
+                }
                 let oldMax = scrollMaxExtents[path] ?? .zero
                 scrollMaxExtents[path] = Vec2(maxSX, maxSY)
 
@@ -3358,6 +3370,10 @@ public final class Runtime<State> {
                     && abs(curTarget.width - localTarget.width) < 0.1
                     && abs(curTarget.height - localTarget.height) < 0.1
             }
+            let rowGrowthKey = el.foldGlideSpec != nil ? "fold:\(path)" : "growth:\(path)"
+            let hasGrowthSlide = growthRows[rowGrowthKey]?.contentSlide != nil
+            let isRunningFlight = !hasGrowthSlide && (activeFlightIds.contains(nid) || launchedFlightIds.contains(nid))
+            let followsWindow = pendingResizeRelayout && !isRunningFlight && !scene.store.isAnimating(nid, Props.FRAME)
             var layoutAnimSpec: LayoutAnim?
             let isStackContainer = (el.growthSpec != nil) || (el.virtualEstimate != nil)
             let (selfInRow, childInRow) = ParityLayoutAnimation.resolveRowLayout(
@@ -3366,7 +3382,7 @@ public final class Runtime<State> {
                 hasAnimateLayout: el.layoutAnim != nil,
                 isStackContainer: isStackContainer
             )
-            if commitCut || reducedMotion || pixelsAspectSnapIds.remove(nid) != nil {
+            if commitCut || reducedMotion || pixelsAspectSnapIds.remove(nid) != nil || followsWindow {
                 layoutAnimSpec = nil
             } else if selfInstantLayoutOrStyle {
                 layoutAnimSpec = (keepsFlights && isRunningSameSceneFrame()) ? .instant : nil
@@ -3385,25 +3401,26 @@ public final class Runtime<State> {
                 layoutAnimSpec = (el.layoutAnim != nil || selfInRow == .horizontal) ? resolved : nil
             } else if selfInRow == .snaps {
                 layoutAnimSpec = el.layoutAnim != nil ? .instant : nil
+            } else if el.layoutAnim == nil, commitMotion == nil, !isRunningFlight, el.virtualEstimate == nil {
+                // Ordinary layout changes spring on the inherited element motion.
+                // Virtual containers, explicit transactions and flights own their placement.
+                layoutAnimSpec = LayoutAnim(spring: nodeStyleSpring ?? MotionTokens.DEFAULT)
             } else {
                 layoutAnimSpec = el.layoutAnim
             }
-            if !selfInstantLayoutOrStyle, layoutAnimSpec == nil, let cm = commitMotion {
+            if !selfInstantLayoutOrStyle, !followsWindow, layoutAnimSpec == nil, let cm = commitMotion {
                 layoutAnimSpec = LayoutAnim(x: cm.anim, y: cm.anim)
             }
-            let rowGrowthKey = el.foldGlideSpec != nil ? "fold:\(path)" : "growth:\(path)"
-            let hasGrowthSlide = growthRows[rowGrowthKey]?.contentSlide != nil
             // Growth lays out row frames as their heights change. A row already sliding to its
             // authored offset keeps that spring through those layout passes.
             var offsetAnim = el.offsetMotionAnim
             if item.parentHasGrowth && !commitKind.lands && offsetAnim == nil {
                 offsetAnim = .spring(styleSp ?? MotionTokens.SETTLE)
             }
-            let isRunningFlight = !hasGrowthSlide && (activeFlightIds.contains(nid) || launchedFlightIds.contains(nid))
             if layoutAnimSpec == nil && !selfInstantLayoutOrStyle && !commitCut && !reducedMotion && !commitKind.lands && isRunningFlight {
                 layoutAnimSpec = LayoutAnim(spring: el.flightSpring ?? el.styleSpring ?? MotionTokens.SETTLE, travel: .screen)
             }
-            if el.isWidthLeads && !selfInstantLayoutOrStyle {
+            if el.isWidthLeads && !selfInstantLayoutOrStyle && !followsWindow {
                 if let la = layoutAnimSpec {
                     layoutAnimSpec = la.widthLeads()
                 } else {
@@ -3529,7 +3546,8 @@ public final class Runtime<State> {
                     parentDirected: nodeDirected,
                     foldHeaderPath: childFoldHeaderPath,
                     foldHeaderLift: childFoldHeaderLift,
-                    growthClosingShiftY: closingChildShiftsY[cIdx]
+                    growthClosingShiftY: closingChildShiftsY[cIdx],
+                    naturalLayout: item.naturalLayout?.children[cIdx]
                 ))
             }
             walkStack.append(contentsOf: childItems.reversed())
@@ -3537,7 +3555,7 @@ public final class Runtime<State> {
 
         LayoutDiagnostics.checkCollapsedScrolls(nodes: newFlat)
 
-        return MeasurePassResult(
+        let pass = MeasurePassResult(
             viewRootEl: rootEl,
             expandedRootEl: expandedRoot,
             nodes: newFlat,
@@ -3558,6 +3576,8 @@ public final class Runtime<State> {
             foldHeaderUpdates: growthCapture.foldHeaderUpdates,
             textLayouts: textLayoutCollector.map
         )
+        pass.naturalJoinedRowTargets = naturalJoinedRowTargets
+        return pass
     }
 
     private func rectForRead(key: String, nodes: [FlatNode], index: LayoutKeyIndex?) -> [Float]? {
@@ -3659,7 +3679,6 @@ public final class Runtime<State> {
                 )
             }
             guard matches.contains(true) else { continue }
-            if ownerIdx == nil { ownerIdx = i }
             let baseRect = scrolled ? n.targetRect : n.unscrolledRect
             for (k, r) in highlightBoxes(node: n, boxRect: baseRect) where matches[k] {
                 if let u = union {
@@ -3670,6 +3689,7 @@ public final class Runtime<State> {
                         bottom: max(u.bottom, r.bottom)
                     )
                 } else {
+                    ownerIdx = i
                     union = r
                 }
             }
@@ -4516,11 +4536,15 @@ public final class Runtime<State> {
         }
         let reorderedSlides = prepareGrowthRowReorderSlides(
             specs: &specs,
+            colorSpring: commitColorSpring,
             nodes: pass.nodes,
             instant: commitKind.snaps,
             lands: commitKind.lands,
-            relayout: false,
-            commitCut: commitCut
+            relayout: activeResizeSnap,
+            commitCut: commitCut,
+            concealing: !concealedSecureIndices.isEmpty,
+            ancestorInstants: pass.ancestorInstants,
+            naturalTargets: pass.naturalJoinedRowTargets
         )
         syncRideTrailingFlags(pass.nodes, on: &scene)
         var pendingBorderBottoms: [(id: NodeId, seed: MotionColor?, target: MotionColor, spring: Spring?)] = []
@@ -4625,6 +4649,9 @@ public final class Runtime<State> {
                 let glideSp = layoutSpringX ?? specs[i].styleSpring ?? commitMotion?.spring ?? MotionTokens.SETTLE
                 for j in i..<end {
                     specs[j].layoutAnim = .instant
+                    if !slice2State.joinedRowSeams.isEmpty, pass.nodes[j].el.growthSpec != nil {
+                        slice2State.joinedRowSeams.removeValue(forKey: pass.nodes[j].nodeId)
+                    }
                 }
                 scene.set(n.nodeId, Props.OFFSET, Vec2((drawn.x - n.localRect.x) + jump, specs[i].offset.y))
                 frameLandingHoldIds.insert(n.nodeId)
@@ -4687,7 +4714,9 @@ public final class Runtime<State> {
         setGroupRestAfterCommit(
             nodes: pass.nodes,
             preState: preGroupSnapshot,
-            cut: commitCut || commitKind.snaps,
+            cut: commitCut,
+            snaps: commitKind.snaps,
+            specs: specs,
             ancestorInstants: pass.ancestorInstants
         )
         syncShadowTracks(
@@ -4696,7 +4725,6 @@ public final class Runtime<State> {
             specs: specs,
             at: scaledCommitNow,
             cut: commitCut,
-            snapMounts: commitKind.snaps,
             lands: commitKind.lands,
             prevMountedIds: prevMountedIds
         )
@@ -7988,21 +8016,29 @@ public final class Runtime<State> {
                         let inputTextOriginX = textOriginX - inputScrollX * scaleVec.x
                         let inputRestOriginX = restOriginX - inputScrollX * scaleVec.x
 
-                        if !resolvedInput.blocks.isEmpty {
+                        if resolvedInput.style.hasBlockInsets {
                             RichTextFieldRender.emitBlockDecorations(
-                                blocks: resolvedInput.blocks,
-                                richStyle: resolvedInput.richStyle,
-                                displayText: renderedStr,
-                                shaped: shaped,
-                                innerW: innerW,
-                                textOriginX: inputRestOriginX,
-                                textOriginY: restOriginY,
-                                scaleVec: scaleVec,
-                                pxScale: pxScale,
-                                localAlpha: localAlpha,
-                                srgbBlend: srgbBlend,
-                                devClip: devInputClip,
-                                into: &primitives
+                                blocks: resolvedInput.blocks, softBreaks: edit.softBreaks,
+                                richStyle: resolvedInput.richStyle, displayText: showingPlaceholder ? "" : renderedStr, shaped: shaped,
+                                textSystem: textSystem, font: showingPlaceholder ? el.textStyle : resolvedInput.style, textColor: defaultTextColor,
+                                innerW: innerW, textOriginX: inputRestOriginX, textOriginY: restOriginY,
+                                scaleVec: scaleVec, pxScale: pxScale, shapingScale: pxScale,
+                                rect: { box, radius, color in
+                                    var rect = box
+                                    rect.x += glidePx.x
+                                    rect.y += glidePx.y
+                                    primitives.append(.roundedRect(rect: rect, radii: SIMD4(repeating: radius),
+                                                                   fill: color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend), clip: devInputClip))
+                                },
+                                glyph: { box, uv, page, color in
+                                    var rect = box
+                                    rect.x += glidePx.x
+                                    rect.y += glidePx.y
+                                    glyphPageEntries.append((primitives.count, page))
+                                    usedGlyphMask |= UInt32(1) << min(UInt32(page), 31)
+                                    primitives.append(.glyph(rect: rect, uv: uv, color: color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                                                             gamma: systemDark ? 0.88 : 1.05, clip: devInputClip))
+                                }
                             )
                         }
 
@@ -8596,13 +8632,8 @@ public final class Runtime<State> {
                 }
             }
 
-            let hasVisualBlocker = fillColor.a > 0.001 || el.gradient != nil ||
-                (el.borderWidth > 0 && borderColor.a > 0.001) || el.imagePayload != nil || el.pixelsPayload != nil ||
-                el.backdropBlur >= 0.5 || !el.shapes.isEmpty
-            let hnd = el.handlers
-            let isInteractiveBlocker = hnd.onClick != nil || hnd.onClickPress != nil || hnd.onDoubleClick != nil ||
-                hnd.onPointerDown != nil || hnd.onDrag != nil || hnd.onHover != nil ||
-                hnd.editLens != nil || el.isModal || el.explicitHit
+            let hasVisualBlocker = el.blocksHits(fill: fillColor, border: borderColor)
+            let isInteractiveBlocker = el.blocksInteractiveHits
             let resolvedRawHelp: String? = {
                 guard let h = el.a11yHelp, !h.isEmpty else { return nil }
                 if el.isHelpWhenTruncated && !textTruncated { return nil }
@@ -10906,7 +10937,7 @@ public final class Runtime<State> {
     @discardableResult
     public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, baseChar: Character? = nil, at now: Double) -> Bool {
         if case .key(_, _, true, _) = event { dropOwedFocus() }
-        let inputMark = noteInput(at: now)
+        let inputMark = noteInput(at: now, routed: true)
         defer { endInputDispatch(inputMark, queuedAction: true) }
         let prevCode = currentPhysicalKey
         let prevBase = currentKeyBase
@@ -10927,7 +10958,7 @@ public final class Runtime<State> {
     internal func dispatchPhysicalInputOnly(_ event: PhysicalInput, at now: Double) -> Bool {
         currentTime = now
         if case .key(_, _, true, _) = event { dropOwedFocus() }
-        commitPolledChangeApart(at: now)
+        commitPolledChangeApart(at: now, routed: true)
         let prevPhys = slice2State.currentPhysicalKey
         let prevRep = slice2State.currentKeyRepeat
         let prevMods = slice2State.currentMods
@@ -11037,7 +11068,7 @@ public final class Runtime<State> {
         // step's press for the stage (`Action::Key { stage: true }`) doesn't. As upstream
         // (frame.rs:565), before this key's commit boundary resolves an ask not yet committed.
         if playgroundLive?.pressing != true { dropOwedFocus() }
-        let inputMark = noteInput(at: now)
+        let inputMark = noteInput(at: now, routed: true)
         defer { endInputDispatch(inputMark, queuedAction: true) }
         // A caret key or a shortcut reads the field's layout where it lands: a long paste's
         // paragraphs still waiting there are shaped first. Typing at the caret needs none.
@@ -11564,7 +11595,7 @@ public final class Runtime<State> {
     }
 
     public func paste(_ content: ClipboardContent, at now: Double) {
-        let inputMark = beginInputDispatch(at: now)
+        let inputMark = beginInputDispatch(at: now, routed: true)
         defer { endInputDispatch(inputMark, queuedAction: true) }
         flushPendingCommitIfNeeded(at: now)
         deliverPaste(content, at: now)
@@ -12219,7 +12250,6 @@ public final class Runtime<State> {
             a11yAnnouncement.say(ann.text, politeness: ann.politeness)
         }
         processTxSlice2Actions(&mutableTx, at: now)
-        flushPendingSentKeys(at: now)
         // A latched focus ask schedules a commit (`latch_requests`: `focus_to` sets `dirty`), so a
         // `Tx.focusWhenShown` from a poll or handler that changed nothing still resolves.
         let latchedFocusWhenShown = tx.requestedFocusKey != nil && tx.focusAskedWhenShown
@@ -12815,7 +12845,7 @@ public final class Runtime<State> {
 
     @discardableResult
     internal func dispatchImeEvent(_ event: ImeEvent, recordReleaseGuard: Bool, at now: Double? = nil) -> Bool {
-        let inputMark = noteInput(at: now ?? currentTime)
+        let inputMark = noteInput(at: now ?? currentTime, routed: true)
         defer { endInputDispatch(inputMark, queuedAction: true) }
         let imeStartNs = InteractionGate.isOn ? DispatchTime.now().uptimeNanoseconds : 0
         let t = now ?? currentTime

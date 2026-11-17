@@ -199,6 +199,28 @@ struct CommitWatchTests {
         #expect(got.allSatisfy { $0 & CommitWhy.input == 0 }, "nothing here is input: \(got.map(CommitWhy.names))")
     }
 
+    @Test("a scroll read commits without a dirty cause when scroll-end handlers return false")
+    func scrollEndReportsCanDeclineDirtyDuringRead() {
+        let rt = Runtime<Feed>(state: Feed(), viewport: Vec2(200, 100), pixelScale: 1.0) { _, cx in
+            _ = cx.scrollOffset(of: "scroll")
+            return col().key("scroll").size(200, 100).scrollY(stickBottom: false)
+                .onAtBottomIf { s, at in s.atBottom.append(at); return false }
+                .onFarFromBottomIf(50) { s, far in s.far.append(far); return false }
+                .child(el().size(200, 400).shrink(0))
+        }
+        _ = rt.frame(at: 0)
+        _ = rt.frame(at: 1.0 / 60.0)
+        let got = causes {
+            rt.wheel(WheelEvent(dx: 0, dy: -400), at: Vec2(50, 50), now: 0.03)
+            _ = rt.frame(at: 0.04)
+            _ = rt.frame(at: 0.05)
+        }
+        #expect(rt.state.atBottom == [false, true])
+        #expect(rt.state.far == [true, false])
+        #expect(got.contains { $0 & CommitWhy.read != 0 })
+        #expect(got.allSatisfy { $0 & CommitWhy.dirty == 0 }, "\(got.map(CommitWhy.names))")
+    }
+
     private struct Fields {
         var a = TextEdit("")
         var b = TextEdit("")

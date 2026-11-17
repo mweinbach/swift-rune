@@ -51,8 +51,8 @@ struct ExampleParityTests {
     }
 
     @Test("hello: a scripted tap springs and settles on the virtual clock",
-          arguments: [("0.25", 152.91, true), ("1", 159.0, false)])
-    func helloHeadlessTapAtCaptureTime(time: String, knobX: Double, moving: Bool) throws {
+          arguments: [("0.25", 152.91, 58.39, true), ("1", 159.0, 57.62, false)])
+    func helloHeadlessTapAtCaptureTime(time: String, knobX: Double, labelWidth: Double, moving: Bool) throws {
         let args = ToolingArgs.parse([
             "--script", #"[{"t":0.1,"type":"tap","key":"switch"}]"#,
             "--at", time, "--scale", "2",
@@ -62,7 +62,10 @@ struct ExampleParityTests {
         let elements = try #require(tree["elements"] as? [[String: Any]])
         let knob = try #require(elements.first { $0["key"] as? String == "knob" })
         let rect = try #require(knob["rect"] as? [Double])
-        #expect(elements.contains { $0["text"] as? String == "Lights on" })
+        let label = try #require(elements.first { $0["text"] as? String == "Lights on" })
+        let labelRect = try #require(label["rect"] as? [Double])
+        try #require(labelRect.count == 4)
+        #expect(abs(labelRect[2] - labelWidth) <= 0.01)
         let x = try #require(rect.first)
         #expect(abs(x - knobX) <= 0.01)
         #expect(tree["animating"] as? Bool == moving)

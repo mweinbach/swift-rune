@@ -29,6 +29,8 @@ struct VirtualSelectionEndsParityTests {
         #expect(sel.anchor == 0 && sel.focus == W.len)
         #expect(sel.originStart == 0 && sel.originEnd == 0)
         #expect(sel.far?.path == walk.path(W.rows - 1))
+        let holder = try #require(walk.rt.selectionHolderNode())
+        #expect(walk.rt.flatNodes[holder].path == walk.path(W.rows - 1))
         if case .dragging(_, let unit) = walk.rt.selectionState.coordinator.phase {
             #expect(unit == .character)
         } else {

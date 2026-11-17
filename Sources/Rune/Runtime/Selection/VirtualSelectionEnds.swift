@@ -302,6 +302,13 @@ internal extension Runtime {
         return (sameGroup && SelectionMath.kept(then: far.content, now: f.text, upto: upto)) ? f : nil
     }
 
+    /// The mounted node that represents the selection for scrolling (`Runtime::selection_holder`).
+    func selectionHolderNode(_ resolvedHolder: SelectionEndRef? = nil) -> Int? {
+        guard let holder = resolvedHolder ?? selectionHolderEnd() else { return nil }
+        return holder.mountedIdx ?? focusHolderEnd(holder)?.mountedIdx
+            ?? holder.groupPath.flatMap(liveNode) ?? holder.listIdx
+    }
+
     // MARK: - Pins and the texts between (`sync_selection_pins`, `between_hash_ends`, `seal_between`)
 
     /// The rows list `listPath` keeps pinned for the selection: its anchor's row, then its
