@@ -542,22 +542,31 @@ struct ScrollRuntimeSlice2ParityTests {
             )
         }
         _ = rt.frame(at: 0.0)
-        // Start long glide then retarget nearer mid-flight -> doesn't overshoot target
-        rt.update(at: 0.01) { _, tx in tx.scrollTo("scroll", x: 0, y: 1200) }
-        var t = 0.02
-        for _ in 0..<6 {
-            t += 1.0 / 120.0
+        // scroll_retarget.rs: a second request stops just ahead of the moving viewport.
+        // The long first glide cuts to within two viewport heights of its destination.
+        let dt = 1.0 / 60.0
+        var t = dt
+        rt.update(at: 0) { _, tx in tx.scrollToInstant("scroll", x: 0, y: 1000) }
+        _ = rt.frame(at: t)
+        rt.update(at: t) { _, tx in tx.scrollTo("scroll", x: 0, y: 0) }
+        for _ in 0..<5 {
+            t += dt
             _ = rt.frame(at: t)
         }
-        let mid = rt.scrollOffset(forKey: "scroll").y
-        #expect(mid > 50 && mid < 500)
-        rt.update(at: t) { _, tx in tx.scrollTo("scroll", x: 0, y: 500) }
-        for _ in 0..<180 {
-            t += 1.0 / 120.0
+        var previous = rt.scrollOffset(forKey: "scroll").y
+        #expect(previous < 900)
+        let target = previous - 40
+        rt.update(at: t) { _, tx in tx.scrollTo("scroll", x: 0, y: target) }
+        for _ in 0..<240 {
+            t += dt
             _ = rt.frame(at: t)
-            #expect(rt.scrollOffset(forKey: "scroll").y <= 505)
+            let current = rt.scrollOffset(forKey: "scroll").y
+            #expect(current >= target - 0.05)
+            #expect(current <= previous + 1e-6)
+            previous = current
+            if rt.scrollGlidingPaths.isEmpty { break }
         }
-        #expect(abs(rt.scrollOffset(forKey: "scroll").y - 500) < 0.5)
+        #expect(previous == target)
 
         // Custom quicker spring covers more on first frame
         rt.update(at: t) { _, tx in tx.scrollToInstant("scroll", x: 0, y: 0) }
