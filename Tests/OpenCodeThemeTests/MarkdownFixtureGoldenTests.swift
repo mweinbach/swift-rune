@@ -160,38 +160,10 @@ Done. All 14 tests in `src/net` pass.
         return try JSONDecoder().decode([GoldenNode].self, from: data)
     }
 
-    // Strip only Rune `El.isolate` LRI/PDI wrappers around prose tokens (`What's`, `half-open`,
-    // and outer wrapper around inline code) because `Sources/Rune` does not expose `El.isolate`;
-    // inline code isolates emitted by `RuneKit` (`\u{202F}\u{202F}\u{2066}...\u{2069}\u{202F}\u{202F}`)
-    // are kept verbatim so any `RuneKit` isolate regression still fails.
-    private static func stripCoreElIsolates(_ s: String) -> String {
-        let pad = "\u{202F}\u{202F}"
-        var out = ""
-        var i = s.startIndex
-        while i < s.endIndex {
-            let ch = s[i]
-            let next = s.index(after: i)
-            if ch == "\u{2066}" {
-                if s[..<i].hasSuffix(pad) {
-                    out.append(ch)
-                }
-            } else if ch == "\u{2069}" {
-                if s[next...].hasPrefix(pad) {
-                    out.append(ch)
-                }
-            } else {
-                out.append(ch)
-            }
-            i = next
-        }
-        return out
-    }
-
     private static func roleMatches(_ actual: ElementRole, expected: String) -> Bool {
         switch expected {
         case "image": return actual == .image      // Rust "image" <-> Swift ElementRole.image ("img")
         case "cell": return actual == .gridCell    // Rust "cell" <-> Swift ElementRole.gridCell ("gridcell")
-        case "figure": return actual == .group     // Swift ElementRole has no `.figure`; Mermaid card uses `.group`
         default: return actual.rawValue == expected
         }
     }
@@ -227,8 +199,7 @@ Done. All 14 tests in `src/net` pass.
             #expect(aPath == e.path, "\(name)[\(i)] path: \(aPath) != \(e.path)")
             #expect(Self.roleMatches(a.role, expected: e.role), "\(name)[\(i)] (\(e.path)) role: \(a.role.rawValue) != \(e.role)")
             #expect(a.key == e.key, "\(name)[\(i)] (\(e.path)) key")
-            let expectedText = e.text.map(Self.stripCoreElIsolates)
-            #expect(a.text == expectedText, "\(name)[\(i)] (\(e.path)) text")
+            #expect(a.text == e.text, "\(name)[\(i)] (\(e.path)) text")
             #expect(a.fill.hex() == e.fill, "\(name)[\(i)] (\(e.path)) fill: \(a.fill.hex()) != \(e.fill)")
             #expect(a.textColor?.hex() == e.color, "\(name)[\(i)] (\(e.path)) color: \(a.textColor?.hex() ?? "nil") != \(e.color ?? "nil")")
             let expectedOpacity = Float(e.opacity ?? 1.0)

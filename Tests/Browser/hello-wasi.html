@@ -18,27 +18,29 @@ try {
     const { instance } = await instantiateRuneBrowser(fetch('/__rune/app.wasm'), { wasi_snapshot_preview1: wasi.wasiImport });
     wasi.initialize(instance);
     const api = instance.exports;
-    const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: false, depth: false, stencil: false, antialias: false });
-    if (!gl) throw Error('WebGL 2 is unavailable');
+    const backend = new URL(location.href).searchParams.get('backend') ?? 'webgl2';
+    const sample = new OffscreenCanvas(1, 1).getContext('2d', { willReadFrequently: true });
     let geometry, presented;
-    const drawArrays = gl.drawArrays.bind(gl);
-    gl.drawArrays = (...args) => {
-        drawArrays(...args);
-        if (!geometry || gl.getParameter(gl.FRAMEBUFFER_BINDING) !== null) return;
-        const { sw, height } = geometry;
-        const pixel = new Uint8Array(4);
-        gl.readPixels(Math.floor(sw[0] + sw[2] * 0.22), height - 1 - Math.floor(sw[1] + sw[3] / 2),
-            1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
-        presented = { ...geometry, pixel: Array.from(pixel) };
-    };
     app = mountRuneBrowser(canvas, { exports: {
         ...api,
         rune_web_frame() { throw Error('The browser invoked the CPU rasterizer'); },
+        rune_web_accessibility() {
+            // The host projects accessibility immediately after it presents a GPU scene.
+            // Sample the actual canvas while its drawing buffer still belongs to this frame.
+            if (geometry) {
+                const { sw } = geometry;
+                sample.drawImage(canvas, Math.floor(sw[0] + sw[2] * 0.22), Math.floor(sw[1] + sw[3] / 2),
+                    1, 1, 0, 0, 1, 1);
+                presented = { ...geometry, pixel: Array.from(sample.getImageData(0, 0, 1, 1).data) };
+            }
+            return api.rune_web_accessibility();
+        },
         rune_web_scene(time, force) {
             const length = api.rune_web_scene(time, force);
             if (length <= 0) return length;
             const ptr = api.rune_web_buffer(0), h = new Uint32Array(api.memory.buffer, ptr, 14);
-            if (h[0] !== 0x32475352) throw Error('Unexpected RenderFrame packet');
+            if (h[0] === 0x31435352) return length; // A cycle update retains the preceding scene geometry.
+            if (h[0] !== 0x32475352 && h[0] !== 0x33475352) throw Error('Unexpected RenderFrame packet');
             const instances = new Float32Array(api.memory.buffer, ptr + 56, h[4] * 32);
             const scale = h[1] / host.getBoundingClientRect().width;
             const findRect = (w, h) => {
@@ -51,8 +53,9 @@ try {
             if (sw && knob) geometry = { sw, knob, scale, width: h[1], height: h[2], instances: h[4] };
             return length;
         }
-    } });
+    } }, { backend });
     await app.ready;
+    if (backend === 'webgpu' && app.renderer?.api !== 'WebGPU') throw Error('Expected a native WebGPU renderer');
     const initial = presented;
     if (!initial || initial.width !== 320 * devicePixelRatio || initial.height !== 200 * devicePixelRatio) {
         throw Error('Initial GPU viewport did not match the application and its device scale');

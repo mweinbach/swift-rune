@@ -4,6 +4,7 @@
 #include <commctrl.h>
 #include <stdlib.h>
 #include "RuneMenus.h"
+#include "WindowRedraw.h"
 
 struct RuneWinMenu {
     HWND hwnd;
@@ -24,7 +25,7 @@ static LRESULT CALLBACK menu_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UIN
     case WM_EXITMENULOOP:
         if (m->tracking) --m->tracking;
         // A menu revision received while the native menu was open may now be installed.
-        InvalidateRect(hwnd, NULL, FALSE);
+        rune_request_window_paint(hwnd, FALSE);
         break;
     case WM_MENUCOMMAND: {
         for (int i = 0; i < GetMenuItemCount(m->bar); ++i) {

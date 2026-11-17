@@ -91,16 +91,19 @@ private func win32PopupDone(_ context: UnsafeMutableRawPointer?, _ command: UInt
 final class WindowsPopup<State> {
     private let window: OpaquePointer
     private let runtime: Runtime<State>
+    private let lock: NSRecursiveLock?
     private var active: WindowsPopupOperation?
     private var closed = false
 
-    init(window: OpaquePointer, runtime: Runtime<State>) {
+    init(window: OpaquePointer, runtime: Runtime<State>, lock: NSRecursiveLock? = nil) {
         self.window = window
         self.runtime = runtime
+        self.lock = lock
     }
 
     func pump() {
         guard !closed else { return }
+        if runtime.windowFocused { syncScheme() }
         if let active, runtime.popupQueue.front !== active.request {
             rune_win_popup_cancel(rune_win_hwnd(window))
             return
@@ -113,6 +116,9 @@ final class WindowsPopup<State> {
             let operation = WindowsPopupOperation(request: request) { [weak self] operation, picked in
                 guard let self, self.active === operation else { return }
                 self.active = nil
+                // An overlay may also be updated by the application from another thread.
+                self.lock?.lock()
+                defer { self.lock?.unlock() }
                 if self.runtime.popupIsOpen, self.runtime.popupQueue.front === operation.request {
                     try? self.runtime.resolvePopup(picked)
                 }
@@ -126,6 +132,7 @@ final class WindowsPopup<State> {
     }
 
     private func post(_ show: PopupShow, operation: WindowsPopupOperation) -> Bool {
+        syncScheme()
         guard let native = rune_win_popup_create() else { return false }
         guard operation.populate(native, from: show.menu) else {
             rune_win_popup_dispose(native)
@@ -149,6 +156,11 @@ final class WindowsPopup<State> {
             rune_win_popup_dispose(native)
         }
         return posted != 0
+    }
+
+    private func syncScheme() {
+        let dark = runtime.backdropDark() ?? runtime.systemDark
+        rune_win_menu_scheme(dark ? RuneWinMenuDark : RuneWinMenuLight)
     }
 
     func cancel() {

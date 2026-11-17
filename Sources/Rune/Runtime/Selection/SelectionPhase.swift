@@ -256,16 +256,29 @@ public enum SelectionMath {
             return (start, end)
         case .word:
             guard len > 0 else { return (0, 0) }
-            let bytes = Array(utf8)
-            if i > 0 && i < len && (bytes[i] == UInt8(ascii: "\n") || bytes[i] == UInt8(ascii: "\r"))
-                && bytes[i - 1] != UInt8(ascii: "\n")
+            func byte(at offset: Int) -> UInt8 {
+                utf8[utf8.index(utf8.startIndex, offsetBy: offset)]
+            }
+            if i > 0 && i < len && (byte(at: i) == UInt8(ascii: "\n") || byte(at: i) == UInt8(ascii: "\r"))
+                && byte(at: i - 1) != UInt8(ascii: "\n")
             {
                 i = prevCharBoundary(in: content, offset: i)
-                if i > 0 && i < len && bytes[i] == UInt8(ascii: "\r") && bytes[i - 1] != UInt8(ascii: "\n") {
+                if i > 0 && i < len && byte(at: i) == UInt8(ascii: "\r") && byte(at: i - 1) != UInt8(ascii: "\n") {
                     i = prevCharBoundary(in: content, offset: i)
                 }
             }
 
+            #if os(WASI) && RUNE_BROWSER_TEXT
+            return trimUncopied(uncopied, range: BrowserSegmentation.wordRange(in: content, at: i))
+            #elseif canImport(Darwin) || os(Linux) || os(Android)
+            return trimUncopied(uncopied, range: NativeWordSegmentation.wordRange(in: content, at: i))
+            #elseif os(Windows)
+            let ends = WindowsWordSegmenter.boundaries(in: content) ?? WindowsWordSegmenter.ruleBasedBoundaries(in: content)
+            let segment = partitionPoint(ends) { $0 <= i }
+            let start = segment > 0 ? ends[segment - 1] : 0
+            let end = segment < ends.count ? ends[segment] : len
+            return trimUncopied(uncopied, range: (start, end))
+            #else
             enum SpanKind { case word, whitespace, newline, punctuation }
             func classify(_ scalar: Unicode.Scalar) -> SpanKind {
                 if scalar == "\n" || scalar == "\r" { return .newline }
@@ -308,6 +321,7 @@ public enum SelectionMath {
             }
             let raw = foundTarget ? (spanStart, len) : (len, len)
             return trimUncopied(uncopied, range: raw)
+            #endif
         }
     }
 

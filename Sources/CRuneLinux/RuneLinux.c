@@ -5,6 +5,7 @@
 #include "RuneNotifyLinuxFocus.h"
 #include "../CSDL2/shim.h"
 #include <stdlib.h>
+#include <limits.h>
 
 struct RuneLinuxWindow {
     SDL_Window *window;
@@ -12,10 +13,17 @@ struct RuneLinuxWindow {
     uint32_t id, wake;
     bool right_alt_held, right_alt_is_altgr;
     unsigned keymap_generation;
+    bool release_float_on_present;
+    bool swap_paced;
+    uint32_t refresh_checked;
+    int32_t refresh_hz;
+    unsigned refresh_generation;
+    RuneLinuxWindowOptions options;
 };
 
 static uint32_t group_wake_type;
 static unsigned keymap_generation;
+static unsigned display_generation = 1;
 static int (*resolve_altgr)(uint32_t window_id);
 
 void rune_linux_set_altgr_resolver(int (*resolve)(uint32_t window_id)) {
@@ -47,6 +55,19 @@ static RuneLinuxWindow *fail_open(RuneLinuxWindow *host) {
     return NULL;
 }
 
+static void apply_size_limits(SDL_Window *window, const RuneLinuxWindowOptions *options) {
+    // SDL2 rejects zero limits. A fresh window already has no maximum.
+    if (options->minWidth > 0 && options->minHeight > 0)
+        SDL_SetWindowMinimumSize(window, options->minWidth, options->minHeight);
+    if (options->maxWidth > 0 && options->maxHeight > 0)
+        SDL_SetWindowMaximumSize(window, options->maxWidth, options->maxHeight);
+}
+
+static int logical_dimension(uint32_t physical, int logical, int pixels) {
+    double points = pixels > 0 ? (double)physical * logical / pixels : physical;
+    return (int)SDL_clamp(points + 0.5, 1.0, (double)INT_MAX);
+}
+
 RuneLinuxWindow *rune_linux_open(const char *title, RuneLinuxWindowOptions options) {
     RuneLinuxWindow *host = calloc(1, sizeof *host);
     if (!host) { SDL_OutOfMemory(); return NULL; }
@@ -60,21 +81,35 @@ RuneLinuxWindow *rune_linux_open(const char *title, RuneLinuxWindowOptions optio
     SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
     Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_HIDDEN;
-    if (options.resizable) flags |= SDL_WINDOW_RESIZABLE;
+    // Both SDL drivers advertise min == max for a fixed-size window. Leave its
+    // real limits unset until it has mapped and submitted its first buffer.
+    host->options = options;
+    host->release_float_on_present = options.floatOnOpen && !options.fullScreen;
+    if (options.resizable && !host->release_float_on_present) flags |= SDL_WINDOW_RESIZABLE;
     if (options.borderless) flags |= SDL_WINDOW_BORDERLESS;
     if (options.alwaysOnTop) flags |= SDL_WINDOW_ALWAYS_ON_TOP;
     if (options.maximized) flags |= SDL_WINDOW_MAXIMIZED;
     if (options.fullScreen) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     // Allocate the first GL drawable at the bounded size, before SDL applies resize hints.
-    int width = SDL_max(options.width, options.minWidth);
-    int height = SDL_max(options.height, options.minHeight);
-    if (options.maxWidth > 0 && options.maxHeight > 0) {
-        width = SDL_min(width, options.maxWidth);
-        height = SDL_min(height, options.maxHeight);
+    int width = options.width, height = options.height;
+    if (!host->release_float_on_present) {
+        width = SDL_max(width, options.minWidth);
+        height = SDL_max(height, options.minHeight);
+        if (options.maxWidth > 0 && options.maxHeight > 0) {
+            width = SDL_min(width, options.maxWidth);
+            height = SDL_min(height, options.maxHeight);
+        }
     }
     host->window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                     width, height, flags);
     if (!host->window) return fail_open(host);
+    if (options.physicalWidth && options.physicalHeight) {
+        int w, h, pw, ph;
+        SDL_GetWindowSize(host->window, &w, &h);
+        SDL_GL_GetDrawableSize(host->window, &pw, &ph);
+        SDL_SetWindowSize(host->window, logical_dimension(options.physicalWidth, w, pw),
+                          logical_dimension(options.physicalHeight, h, ph));
+    }
     host->context = SDL_GL_CreateContext(host->window);
     if (!host->context) return fail_open(host);
     host->id = SDL_GetWindowID(host->window);
@@ -82,15 +117,14 @@ RuneLinuxWindow *rune_linux_open(const char *title, RuneLinuxWindowOptions optio
     host->wake = group_wake_type ? group_wake_type : SDL_RegisterEvents(1);
     if (host->wake == (Uint32)-1) { SDL_SetError("No available SDL event IDs"); return fail_open(host); }
     SDL_GL_SetSwapInterval(1);
-    SDL_SetWindowMinimumSize(host->window, options.minWidth, options.minHeight);
-    if (options.maxWidth > 0 && options.maxHeight > 0)
-        SDL_SetWindowMaximumSize(host->window, options.maxWidth, options.maxHeight);
+    host->swap_paced = SDL_GL_GetSwapInterval() != 0;
+    if (!host->release_float_on_present) apply_size_limits(host->window, &options);
 #if SDL_VERSION_ATLEAST(2, 0, 22)
     SDL_SetHint(SDL_HINT_IME_SUPPORT_EXTENDED_TEXT, "1");
 #endif
     SDL_StartTextInput();
     rune_notify_linux_window_opened(host->id, host->wake, rune_linux_wake);
-    if (options.visible) SDL_ShowWindow(host->window);
+    if (options.visible) rune_linux_show(host);
     return host;
 }
 
@@ -105,8 +139,40 @@ void rune_linux_close(RuneLinuxWindow *host) {
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 void *rune_linux_gl_proc(const char *name) { return SDL_GL_GetProcAddress(name); }
-bool rune_linux_make_current(RuneLinuxWindow *host) { return SDL_GL_MakeCurrent(host->window, host->context) == 0; }
-void rune_linux_present(RuneLinuxWindow *host) { SDL_GL_SwapWindow(host->window); }
+static void (*clear_foreign_context)(void);
+void rune_linux_register_gl_reset(void (*reset)(void)) { clear_foreign_context = reset; }
+bool rune_linux_make_current(RuneLinuxWindow *host) {
+    if (clear_foreign_context) clear_foreign_context();
+    return SDL_GL_MakeCurrent(host->window, host->context) == 0;
+}
+bool rune_linux_present(RuneLinuxWindow *host) {
+    // SDL2 exposes swap failures through the thread's error string.
+    SDL_ClearError();
+    SDL_GL_SwapWindow(host->window);
+    if (*SDL_GetError()) return false;
+    if (host->release_float_on_present && (SDL_GetWindowFlags(host->window) & SDL_WINDOW_SHOWN)) {
+        host->release_float_on_present = false;
+        SDL_SetWindowResizable(host->window, host->options.resizable ? SDL_TRUE : SDL_FALSE);
+        apply_size_limits(host->window, &host->options);
+    }
+    return true;
+}
+
+bool rune_linux_present_paced(const RuneLinuxWindow *host) {
+    return host->swap_paced;
+}
+
+int32_t rune_linux_refresh_hz(RuneLinuxWindow *host) {
+    const uint32_t now = SDL_GetTicks();
+    if (host->refresh_generation == display_generation && now - host->refresh_checked < 1000)
+        return host->refresh_hz;
+    const int display = SDL_GetWindowDisplayIndex(host->window);
+    SDL_DisplayMode mode;
+    host->refresh_hz = display >= 0 && SDL_GetCurrentDisplayMode(display, &mode) == 0 ? mode.refresh_rate : 0;
+    host->refresh_generation = display_generation;
+    host->refresh_checked = now;
+    return host->refresh_hz;
+}
 uint32_t rune_linux_id(RuneLinuxWindow *host) { return host->id; }
 uint32_t rune_linux_wake_type(RuneLinuxWindow *host) { return host->wake; }
 void rune_linux_wake(uint32_t id, uint32_t type) {
@@ -122,7 +188,18 @@ void rune_linux_size(RuneLinuxWindow *host, int *w, int *h, int *pixelW, int *pi
 void rune_linux_set_title(RuneLinuxWindow *host, const char *title) { SDL_SetWindowTitle(host->window, title); }
 void rune_linux_set_size(RuneLinuxWindow *host, int w, int h) { SDL_SetWindowSize(host->window, w, h); }
 void rune_linux_center(RuneLinuxWindow *host) { SDL_SetWindowPosition(host->window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED); }
-void rune_linux_show(RuneLinuxWindow *host) { SDL_ShowWindow(host->window); }
+void rune_linux_show(RuneLinuxWindow *host) {
+    SDL_ShowWindow(host->window);
+    // SDL2 creates the xdg_toplevel on ShowWindow. Size hints sent to the
+    // hidden SDL window do not reach that role before its first buffer.
+    if (SDL_strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0) {
+        int w, h;
+        SDL_GetWindowMinimumSize(host->window, &w, &h);
+        // Setting either hint publishes both. A fixed SDL window advertises
+        // its current width and height for both bounds.
+        SDL_SetWindowMinimumSize(host->window, SDL_max(1, w), SDL_max(1, h));
+    }
+}
 void rune_linux_hide(RuneLinuxWindow *host) { SDL_HideWindow(host->window); }
 void rune_linux_focus(RuneLinuxWindow *host) {
     rune_linux_activate(host, NULL);
@@ -130,7 +207,11 @@ void rune_linux_focus(RuneLinuxWindow *host) {
 void rune_linux_activate(RuneLinuxWindow *host, const char *activation_token) {
     rune_linux_activate_notification_window(host->window, activation_token);
 }
-void rune_linux_minimize(RuneLinuxWindow *host) { SDL_MinimizeWindow(host->window); }
+void rune_linux_minimize(RuneLinuxWindow *host) {
+    Uint32 flags = SDL_GetWindowFlags(host->window);
+    if (!host->options.borderless && (flags & SDL_WINDOW_SHOWN) && !(flags & SDL_WINDOW_MINIMIZED))
+        SDL_MinimizeWindow(host->window);
+}
 void rune_linux_topmost(RuneLinuxWindow *host, bool on) { SDL_SetWindowAlwaysOnTop(host->window, on ? SDL_TRUE : SDL_FALSE); }
 void rune_linux_flash(RuneLinuxWindow *host, bool on) { SDL_FlashWindow(host->window, on ? SDL_FLASH_UNTIL_FOCUSED : SDL_FLASH_CANCEL); }
 void rune_linux_set_ime_rect(int x, int y, int w, int h) {
@@ -177,8 +258,10 @@ static RuneLinuxEventKind translate_window(SDL_WindowEvent w, RuneLinuxEvent *ou
 #if SDL_VERSION_ATLEAST(2, 0, 18)
     case SDL_WINDOWEVENT_DISPLAY_CHANGED:
 #endif
+        ++display_generation;
         return RuneLinuxResized;
     case SDL_WINDOWEVENT_MOVED:
+        ++display_generation;
         out->x = w.data1; out->y = w.data2;
         return RuneLinuxMoved;
     case SDL_WINDOWEVENT_LEAVE: return RuneLinuxLeave;
@@ -217,6 +300,11 @@ static RuneLinuxEventKind translate(const SDL_Event *e, RuneLinuxEvent *out) {
     }
     out->modifiers = translate_modifiers(SDL_GetModState());
     switch (e->type) {
+#if SDL_VERSION_ATLEAST(2, 0, 9)
+    case SDL_DISPLAYEVENT:
+        ++display_generation;
+        return RuneLinuxIgnored;
+#endif
     case SDL_KEYMAPCHANGED:
         ++keymap_generation;
         return RuneLinuxIgnored;

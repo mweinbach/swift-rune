@@ -1,0 +1,20 @@
+[package]
+name = "rune-spellbook"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+spellbook = "=0.4.2"
+unicode-segmentation = "=1.13.3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

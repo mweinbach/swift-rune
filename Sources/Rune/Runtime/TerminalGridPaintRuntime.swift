@@ -61,6 +61,7 @@ extension Runtime {
         defaultColor: Color = .white,
         effRotate: Float,
         useLayer: Bool,
+        lcdAvailable: (() -> Bool)? = nil,
         primitives: inout [Primitive],
         glyphPageEntries: inout [(index: Int, page: UInt16)],
         usedGlyphMask: inout UInt32,
@@ -125,8 +126,17 @@ extension Runtime {
             shapeKey.combine(row.contentFingerprint)
             shapeKey.combine(textSystem.glyphAtlas.placementClock)
             let contentHash = UInt64(bitPattern: Int64(shapeKey.finalize()))
+            let nativeLCD: Bool
+            #if os(Windows)
+            func wantsLCD(_ mode: FontSmoothing) -> Bool { (mode == .systemDefault ? textSystem.smoothing : mode) == .clearType }
+            nativeLCD = lcdAvailable != nil && (wantsLCD(row.style.fontSmoothing) || row.cells.contains { wantsLCD($0.style.fontSmoothing) })
+                && lcdAvailable?() == true
+            #else
+            nativeLCD = false
+            #endif
             var hasher = Hasher()
             hasher.combine(contentHash)
+            hasher.combine(nativeLCD)
             hasher.combine(rowR.x.bitPattern)
             hasher.combine(rowR.y.bitPattern)
             hasher.combine(rowR.z.bitPattern)
@@ -152,7 +162,7 @@ extension Runtime {
                 for relIdx in cached.glyphPrimOffsets {
                     let absIdx = baseIdx + relIdx
                     guard let page = cached.glyphPages[relIdx] else { continue }
-                    glyphPageEntries.append((absIdx, page))
+                    if page != 0 { glyphPageEntries.append((absIdx, page)) }
                     usedGlyphMask |= UInt32(1) << min(UInt32(page), 31)
                 }
                 for (page, texels) in cached.touchedPages {
@@ -233,7 +243,7 @@ extension Runtime {
                     roundedBaselines: baselines,
                     insertImage: { self.imagePacker.insert($0) },
                     glyphPage: { index, page in
-                        glyphPageEntries.append((index, page))
+                        if page != 0 { glyphPageEntries.append((index, page)) }
                         usedGlyphMask |= UInt32(1) << min(UInt32(page), 31)
                     },
                     into: &primitives
@@ -253,7 +263,7 @@ extension Runtime {
                     let gc = (g.color ?? baseColor).scaleAlpha(localAlpha).simd4(srgb: srgb)
                     let absIdx = primitives.count
                     let relIdx = absIdx - rowStartIdx
-                    let primitive = referenceTextPrimitive(g, rect: rect, ink: gc, clip: glyphClip, turn: rot)
+                    let (primitive, page) = referenceTextPrimitive(g, rect: rect, ink: gc, clip: glyphClip, turn: rot, nativeLCD: nativeLCD)
                     primitives.append(primitive)
                     if primitive.kind == .image {
                         glyphCount += 1
@@ -261,15 +271,15 @@ extension Runtime {
                         continue
                     }
                     let texels = UInt32(max(0, gw * gh))
-                    if let existingIdx = touchedPages.firstIndex(where: { $0.0 == g.atlasPage }) {
+                    if let existingIdx = touchedPages.firstIndex(where: { $0.0 == page }) {
                         touchedPages[existingIdx].1 &+= texels
                     } else {
-                        touchedPages.append((g.atlasPage, texels))
+                        touchedPages.append((page, texels))
                     }
-                    glyphPageEntries.append((absIdx, g.atlasPage))
-                    usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
+                    if page != 0 { glyphPageEntries.append((absIdx, page)) }
+                    usedGlyphMask |= UInt32(1) << min(UInt32(page), 31)
                     rowGlyphOffsets.append(relIdx)
-                    rowGlyphPages[relIdx] = g.atlasPage
+                    rowGlyphPages[relIdx] = page
                     glyphCount += 1
                 }
             }
@@ -385,7 +395,8 @@ extension Runtime {
         opacity: Float, defaultColor: Color,
         into instances: inout [RenderInstance], marks: inout [UInt32],
         glyphFixups: inout [(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16, forceScaled: Bool)],
-        imageFixups: inout [(index: Int, texelEdges: SIMD4<Float>, imgW: Float, imgH: Float)]
+        imageFixups: inout [(index: Int, texelEdges: SIMD4<Float>, imgW: Float, imgH: Float)],
+        lcdAvailable: @escaping () -> Bool, usedLCD: inout Bool
     ) {
         var primitives: [Primitive] = []
         var glyphPages: [(index: Int, page: UInt16)] = []
@@ -393,6 +404,7 @@ extension Runtime {
         var count = 0
         paintTerminalGrid(grid, devRect: snappedRect, exactRectPx: exactRect, devClip: clip,
                           localAlpha: opacity, defaultColor: defaultColor, effRotate: 0, useLayer: false,
+                          lcdAvailable: lcdAvailable,
                           primitives: &primitives, glyphPageEntries: &glyphPages, usedGlyphMask: &mask, glyphCount: &count)
         let pages = Dictionary(uniqueKeysWithValues: glyphPages.map { ($0.index, $0.page) })
         func premultiply(_ c: SIMD4<Float>) -> SIMD4<Float> {
@@ -405,10 +417,11 @@ extension Runtime {
             case .roundedRect:
                 break
             case .glyph:
+                usedLCD = usedLCD || p.radii.x == 1
                 i.params = SIMD4<Float>(0, KIND_GLYPH, 0, p.params.w)
                 glyphFixups.append((instances.count, p.uv, p.rect.z, p.rect.w, pages[index] ?? 0, false))
             case .image:
-                i.params = SIMD4<Float>(0, KIND_IMAGE, 0, 1)
+                i.params = SIMD4<Float>(Float(p.imagePage), KIND_IMAGE, 0, 1)
                 imageFixups.append((instances.count, p.uv, p.rect.z, p.rect.w))
             case .segment:
                 i.radii = p.uv

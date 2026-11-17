@@ -76,6 +76,14 @@ RuneLayerCache *rune_cache_create(const RuneGLAPI *gl) {
     return cache;
 }
 
+void rune_cache_rest(RuneLayerCache *cache) {
+    for (Entry *entry = cache->oldest; entry;) {
+        Entry *next = entry->newer;
+        if (entry->pinned_frame != cache->frame) evict(cache, entry);
+        entry = next;
+    }
+}
+
 void rune_cache_clear(RuneLayerCache *cache) {
     while (cache->oldest) evict(cache, cache->oldest);
 }

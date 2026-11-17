@@ -21,8 +21,8 @@ struct ColorGlyphPaintTests {
         #expect(packer.atlas.height > 64)
         #expect(r != b)
         #expect(packer.insert(red) == r)
-        let redIndex = ((Int(r.y) + height / 2) * packer.atlas.width + Int(r.x) + width / 2) * 4
-        let blueIndex = ((Int(b.y) + height / 2) * packer.atlas.width + Int(b.x) + width / 2) * 4
+        let redIndex = ((Int(r.edges.y) + height / 2) * packer.atlas.width + Int(r.edges.x) + width / 2) * 4
+        let blueIndex = ((Int(b.edges.y) + height / 2) * packer.atlas.width + Int(b.edges.x) + width / 2) * 4
         #expect(Array(packer.atlas.texels[redIndex..<(redIndex + 4)]) == [255, 0, 0, 128])
         #expect(Array(packer.atlas.texels[blueIndex..<(blueIndex + 4)]) == [0, 0, 255, 128])
     }

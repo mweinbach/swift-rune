@@ -61,13 +61,14 @@ public final class OffscreenGPURenderer {
 
     static func selected(for args: ToolingArgs) throws -> OffscreenGPURenderer? {
         let report = ProcessInfo.processInfo.environment["RUNE_GPU_INFO"] == "1"
-        if args.forceCPU && !args.requireGPU {
+        let needsGPU = args.requireGPU || args.cpuBootDirectory != nil
+        if args.forceCPU && !needsGPU {
             if report { RuneStandardIO.error("Rune CPU: reference renderer selected\n") }
             return nil
         }
         do {
             return try OffscreenGPURenderer(reportAdapter: args.requireGPU)
-        } catch OffscreenRenderError.unavailable(let reason) where !args.requireGPU {
+        } catch OffscreenRenderError.unavailable(let reason) where !needsGPU {
             if report { RuneStandardIO.error("Rune CPU: offscreen GPU unavailable (\(reason))\n") }
             return nil
         }
@@ -110,7 +111,7 @@ public final class OffscreenGPURenderer {
         #if canImport(Metal)
         return try metal.renderOffscreen(scene, surfaces: surfaces)
         #elseif canImport(CRuneOffscreenGL)
-        return try context.withFramebuffer(width: scene.width, height: scene.height) {
+        return try captureGL(width: scene.width, height: scene.height) {
             try gl.draw(scene, surfaces: surfaces)
         }
         #else
@@ -122,7 +123,7 @@ public final class OffscreenGPURenderer {
         #if canImport(Metal)
         return try metal.renderOffscreen(frame)
         #elseif canImport(CRuneOffscreenGL)
-        return try context.withFramebuffer(width: frame.width, height: frame.height) {
+        return try captureGL(width: frame.width, height: frame.height) {
             try gl.draw(frame)
         }
         #else
@@ -160,7 +161,11 @@ public final class OffscreenGPURenderer {
         #elseif canImport(CRuneOffscreenGL)
         try context.bindFramebuffer(width: frame.width, height: frame.height)
         try gl.draw(frame)
-        return try context.finishSubmission(gl.handle)
+        let submitted = try context.finishSubmission(gl.handle)
+        #if os(Linux)
+        if gl.needsSurfaceCompletionPoll { _ = gl.pollSurfaceCompletions() }
+        #endif
+        return submitted
         #else
         throw OffscreenRenderError.unavailable("This platform has no offscreen GPU renderer")
         #endif
@@ -177,7 +182,7 @@ public final class OffscreenGPURenderer {
         return (pixels, count)
         #elseif canImport(CRuneOffscreenGL)
         var count = 0
-        let pixels = try context.withFramebuffer(width: frame.width, height: frame.height) {
+        let pixels = try captureGL(width: frame.width, height: frame.height) {
             count = try gl.draw(frame, compositor: compositor, runtime: runtime, at: time, frameDelta: dt)
         }
         return (pixels, count)
@@ -185,6 +190,16 @@ public final class OffscreenGPURenderer {
         throw OffscreenRenderError.unavailable("This platform has no offscreen GPU renderer")
         #endif
     }
+
+    #if !canImport(Metal) && canImport(CRuneOffscreenGL)
+    private func captureGL(width: Int, height: Int, draw: () throws -> Void) throws -> Frame {
+        let frame = try context.withFramebuffer(width: width, height: height, draw)
+        #if os(Linux)
+        if gl.needsSurfaceCompletionPoll { _ = gl.pollSurfaceCompletions() }
+        #endif
+        return frame
+    }
+    #endif
 
     deinit {
         #if !canImport(Metal) && canImport(CRuneOffscreenGL)

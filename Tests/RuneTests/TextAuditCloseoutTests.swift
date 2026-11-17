@@ -647,7 +647,7 @@ struct TextAuditCloseoutTests {
 
     // MARK: - 12. Runtime host/editor/atlas wiring integration
 
-    @Test("Runtime KeyDiagnostics, bidi layout arrow stepping, toHTML dir=, MacOSKeyboardLayout keycaps, and multi-page GlyphAtlas frame compositing")
+    @Test("Runtime KeyDiagnostics, bidi layout arrow stepping, toHTML dir=, MacOSKeyboardLayout keycaps, and multi-page GlyphAtlas frame sampling")
     @MainActor
     func runtimeWiringIntegrationParity() throws {
         // 1. KeyDiagnostics auto-runs during Runtime commitTreePass
@@ -683,7 +683,7 @@ struct TextAuditCloseoutTests {
         #expect(sc.keycaps(on: .mac) == ["⌘", "X"])
         #expect(sc.menuKeycaps(on: .mac) == ["⌘", "B"])
 
-        // 4. Multi-page GlyphAtlas compositing in Runtime.frame(at:)
+        // 4. Multi-page GlyphAtlas sampling in Runtime.frame(at:)
         let smallAtlas = GlyphAtlas(width: 64, height: 64)
         let smallTs = TextSystem(glyphAtlas: smallAtlas)
         struct BigTextState: Sendable {}
@@ -700,6 +700,9 @@ struct TextAuditCloseoutTests {
         let scene = bigRt.frame(at: 0)
         try scene.validate()
         #expect(smallAtlas.pageCount > 1)
-        #expect(scene.glyphs.height == 64 * smallAtlas.pageCount)
+        #expect(scene.glyphPages.count == smallAtlas.pageCount)
+        #expect(scene.glyphPages.allSatisfy { $0.width == 64 && $0.height == 64 })
+        #expect(scene.primitives.contains { $0.kind == .glyph && $0.glyphPage > 0 })
+        #expect(scene.primitives.filter { $0.kind == .glyph }.allSatisfy { $0.uv.y >= 0 && $0.uv.w <= 1 })
     }
 }

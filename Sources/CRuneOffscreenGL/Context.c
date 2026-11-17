@@ -18,8 +18,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <CRuneWin32.h>
+#include "../CRuneWin32/LazyGL.h"
 #include <limits.h>
 #else
+#include <RuneLinuxGPUSelection.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <dlfcn.h>
@@ -82,23 +84,23 @@ void *rune_offscreen_gl_proc(const char *name) {
 #elif defined(_WIN32)
 static int open_context(RuneOffscreenGLContext *gl, char *error, size_t size) {
     static const uint16_t title[] = {'R','u','n','e',0};
-    gl->previous_dc = wglGetCurrentDC();
-    gl->previous = wglGetCurrentContext();
+    gl->previous_dc = rune_lazy_wglGetCurrentDC();
+    gl->previous = rune_lazy_wglGetCurrentContext();
     gl->window = rune_win_create(title, 1, 1, 0, 0, 0, error, size > INT_MAX ? INT_MAX : (int32_t)size);
     if (!gl->window) return 0;
-    gl->dc = wglGetCurrentDC();
-    gl->context = wglGetCurrentContext();
+    gl->dc = rune_lazy_wglGetCurrentDC();
+    gl->context = rune_lazy_wglGetCurrentContext();
     return gl->context != NULL;
 }
 
 int rune_offscreen_gl_current(RuneOffscreenGLContext *gl) {
-    return gl && gl->context && ((wglGetCurrentContext() == gl->context && wglGetCurrentDC() == gl->dc) ||
-        wglMakeCurrent(gl->dc, gl->context));
+    return gl && gl->context && ((rune_lazy_wglGetCurrentContext() == gl->context && rune_lazy_wglGetCurrentDC() == gl->dc) ||
+        rune_lazy_wglMakeCurrent(gl->dc, gl->context));
 }
 
 static void close_context(RuneOffscreenGLContext *gl) {
     rune_win_destroy(gl->window);
-    wglMakeCurrent(gl->previous_dc, gl->previous);
+    rune_lazy_wglMakeCurrent(gl->previous_dc, gl->previous);
 }
 
 void *rune_offscreen_gl_proc(const char *name) {
@@ -120,7 +122,8 @@ static int open_context(RuneOffscreenGLContext *gl, char *error, size_t size) {
     gl->previous_api = eglQueryAPI();
     PFNEGLGETPLATFORMDISPLAYEXTPROC platform_display =
         (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
-    if (platform_display) {
+    gl->display = rune_gpu_offscreen_display();
+    if (gl->display == EGL_NO_DISPLAY && platform_display) {
         gl->display = platform_display(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
     }
     if (gl->display == EGL_NO_DISPLAY || !eglInitialize(gl->display, NULL, NULL)) {

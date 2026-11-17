@@ -17,7 +17,7 @@ final class WASIBrowserExecutor: MainExecutor, TaskExecutor, SchedulingExecutor,
 
     private struct Timer {
         let job: UnownedJob
-        let isDue: () -> Bool
+        let delay: () -> Double
     }
     private var timers: [Timer] = []
     private var nextTimer = 0
@@ -40,11 +40,28 @@ final class WASIBrowserExecutor: MainExecutor, TaskExecutor, SchedulingExecutor,
 
     func enqueue(_ job: consuming ExecutorJob) {
         let priority = job.priority.rawValue
+        let first = ready.isEmpty
         ready[priority, default: []].append(UnownedJob(job))
+        if first && mounted && !running { WASIEventLoop.wake(after: 0) }
     }
 
     func enqueue<C: _Concurrency.Clock>(_ job: consuming ExecutorJob, at instant: C.Instant, tolerance: C.Duration?, clock: C) {
-        timers.append(Timer(job: UnownedJob(job), isDue: { clock.now >= instant }))
+        let timer = Timer(job: UnownedJob(job), delay: {
+            let now = clock.now
+            if now >= instant { return 0 }
+            if let remaining = now.duration(to: instant) as? Duration {
+                return remaining / .seconds(1)
+            }
+            // A custom clock with its own unit can only be sampled while it has a pending job.
+            return 1 / 60
+        })
+        timers.append(timer)
+        if mounted && !running { WASIEventLoop.wake(after: timer.delay()) }
+    }
+
+    func nextDelay() -> Double {
+        guard ready.isEmpty else { return 0 }
+        return timers.lazy.map { $0.delay() }.min() ?? .infinity
     }
 
     func run() { runUntil { false } }
@@ -60,7 +77,7 @@ final class WASIBrowserExecutor: MainExecutor, TaskExecutor, SchedulingExecutor,
         var remaining = min(64, timers.count)
         while remaining > 0 && ContinuousClock.now < timerDeadline {
             if nextTimer >= timers.count { nextTimer = 0 }
-            if timers[nextTimer].isDue() {
+            if timers[nextTimer].delay() <= 0 {
                 let job = timers[nextTimer].job
                 timers.swapAt(nextTimer, timers.count - 1)
                 timers.removeLast()

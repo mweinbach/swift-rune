@@ -1,4 +1,7 @@
 import Foundation
+#if os(WASI)
+import CRuneDesktopText
+#endif
 
 /// Execution-local state and monotonic time used by the input and frame pipelines.
 @usableFromInline
@@ -62,14 +65,37 @@ internal enum WASIEventLoop {
 
     nonisolated(unsafe) private static var pending: [Scheduled] = []
 
-    static func schedule(after delay: Double = 0, _ run: @escaping @Sendable () -> Void) {
-        pending.append(Scheduled(deadline: ProcessInfo.processInfo.systemUptime + delay, run: run))
+    nonisolated(unsafe) private static var appWake = false
+
+    static func wakeApp() {
+        appWake = true
+        rune_browser_host_wake(0)
     }
 
-    static func reset() { pending.removeAll() }
+    static func wake(after delay: Double) { rune_browser_host_wake(delay) }
 
-    static func poll() {
+    static func nextDelay() -> Double {
+        if appWake || BrowserImageCodec.canStart { return 0 }
+        let now = ProcessInfo.processInfo.systemUptime
+        let deadline = pending.lazy.map(\.deadline).min() ?? .infinity
+        return min(max(0, deadline - now), WASIBrowserExecutor.shared.nextDelay())
+    }
+
+    static func schedule(after delay: Double = 0, _ run: @escaping @Sendable () -> Void) {
+        pending.append(Scheduled(deadline: ProcessInfo.processInfo.systemUptime + delay, run: run))
+        wake(after: delay)
+    }
+
+    static func reset() { pending.removeAll(); appWake = false }
+
+    @MainActor static func poll() {
         WASIBrowserExecutor.shared.run()
+        defer {
+            if appWake {
+                appWake = false
+                RuneWebReactor.session?.requestPaint()
+            }
+        }
         guard !pending.isEmpty else { return }
         let now = ProcessInfo.processInfo.systemUptime
         let due = pending.filter { $0.deadline <= now }

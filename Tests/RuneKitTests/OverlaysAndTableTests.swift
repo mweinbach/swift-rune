@@ -145,7 +145,7 @@ struct OverlaysAndTableTests {
         }
     }
 
-    private func makeTableRuntime(_ app: TableApp, size: Vec2 = Vec2(500, 300)) -> Runtime<TableApp> {
+    private func makeTableRuntime(_ app: TableApp, size: Vec2 = Vec2(500, 300), tableHeight: Float? = nil) -> Runtime<TableApp> {
         let k = Kit.neutral(dark: true)
         let rt = Runtime(state: app, viewport: size, systemDark: true) { s, cx in
             col().size(size.x, size.y).child(
@@ -177,7 +177,7 @@ struct OverlaysAndTableTests {
                 .onOpen { s, id, _ in s.opened.append(id) }
                 .zebra(true)
                 .build(s, cx: cx, kit: k)
-                .h(size.y)
+                .h(tableHeight ?? size.y)
             )
         }
         rt.frame(at: 0.0)
@@ -187,6 +187,182 @@ struct OverlaysAndTableTests {
 
     private func tableHeader(_ rt: Runtime<TableApp>, _ id: String) -> ElementInfo {
         rt.elements().first { !$0.exiting && $0.key == id && $0.label != nil }!
+    }
+
+    @Test("Table state keeps distinct UTF-8 row and column IDs after reordering")
+    func distinctUnicodeTableState() {
+        let composed = "\u{e9}", decomposed = "e\u{301}"
+        let rows = [composed, decomposed, "end"]
+        var state = TableState(multi: true)
+        var tx = Tx()
+        _ = state.handleKey(KeyEvent(key: .command("a")), len: rows.count, idAt: { rows[$0] }, tx: &tx)
+        #expect(state.selectedCount == 3 && state.selected.count == 2)
+        #expect(Set(state.exactSelectedIDs.map { Array($0.utf8) }) == Set(rows.map { Array($0.utf8) }))
+        state.click(row: 0, len: rows.count, mods: RuneKitTestKey.primaryMods(), idAt: { rows[$0] })
+        #expect(!state.isSelected(composed) && state.isSelected(decomposed))
+        state.click(row: 0, len: rows.count, mods: RuneKitTestKey.primaryMods(), idAt: { rows[$0] })
+        #expect(state.selectedCount == 3)
+        let reordered = [decomposed, composed, "end"]
+        _ = state.handleKey(KeyEvent(key: .arrowDown), len: rows.count, idAt: { reordered[$0] }, tx: &tx)
+        #expect(state.cursor == "end")
+        state.reveal(decomposed, len: rows.count, idAt: { reordered[$0] }, tx: &tx)
+        _ = state.handleKey(KeyEvent(key: .arrowDown, mods: Mods(shift: true)), len: rows.count,
+                            idAt: { reordered[$0] }, tx: &tx)
+        #expect(state.selectedCount == 2 && state.isSelected(composed) && state.isSelected(decomposed))
+
+        state.setSort(composed, .ascending)
+        #expect(state.nextSort(composed) == .descending && state.nextSort(decomposed) == .ascending)
+        state.setColumnWidth(composed, 71)
+        state.setColumnWidth(decomposed, 139)
+        state.widths["other"] = 89
+        let columns = [TableCol(composed, "A"), TableCol(decomposed, "B"), TableCol("other", "C")]
+        #expect(state.resolvedColumnWidths(columns: columns, totalWidth: 500) == [71, 139, 89])
+        state.resetColumnWidth(decomposed)
+        #expect(state.columnWidth(composed) == 71 && state.columnWidth(decomposed) == nil)
+        state.setColumnWidth(decomposed, 139)
+        state.widths.removeAll()
+        #expect(state.columnWidth(composed) == nil && state.columnWidth(decomposed) == nil)
+        state.laidOut = [decomposed: 139]
+        state.laidOut = ["other": 89]
+        #expect(state.laidOut == ["other": 89])
+
+        let kelvin = ["K", "\u{212a}"]
+        state.select(kelvin[0])
+        #expect(!state.isSelected(kelvin[1]))
+        state.click(row: 1, len: kelvin.count, mods: RuneKitTestKey.primaryMods(), idAt: { kelvin[$0] })
+        #expect(state.selectedCount == 2 && state.isSelected(kelvin[1]))
+    }
+
+    @Test("Table click, keyboard, sort, and resize callbacks retain authored UTF-8 IDs")
+    func distinctUnicodeTableEvents() throws {
+        let rowA = "row-\u{e9}", rowB = "row-e\u{301}"
+        let colA = "col-\u{e9}", colB = "col-e\u{301}"
+        let ids = [rowA, rowB]
+        struct App {
+            var table = TableState(multi: true)
+            var picks: [String] = []
+            var opened: [String] = []
+            var sorts: [String] = []
+        }
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime(state: App(), viewport: Vec2(400, 140)) { s, cx in
+            TableView<App>(\.table, len: { _ in ids.count }, rowID: { _, i in ids[i] })
+                .column(TableCol(colA, "A").width(90).sortable())
+                .column(TableCol(colB, "B").width(130).sortable())
+                .cell { _, _, id in .text(id) }
+                .onSelect { s, id, _ in s.picks.append(id) }
+                .onOpen { s, id, _ in s.opened.append(id) }
+                .onSort { s, id, _, _ in s.sorts.append(id) }
+                .build(s, cx: cx, kit: kit).size(400, 140)
+        }
+        rt.frame(at: 0)
+        rt.frame(at: 0.016)
+        func bounds(_ id: String, _ role: ElementRole) throws -> [Float] {
+            let element = try #require(rt.elements().first {
+                !$0.exiting && $0.role == role && $0.key?.utf8.elementsEqual(id.utf8) == true
+            })
+            return element.rect
+        }
+        func semantic(_ id: String, _ role: ElementRole) -> AccessibilityNode? {
+            var pending = [rt.accessibilitySnapshot()]
+            while let node = pending.popLast() {
+                if node.role == role && node.id.utf8.elementsEqual(id.utf8) { return node }
+                pending.append(contentsOf: node.children)
+            }
+            return nil
+        }
+        func click(_ id: String, _ role: ElementRole, at time: Double, mods: Mods = .none) throws {
+            let r = try bounds(id, role)
+            let point = Vec2(r[0] + 12, r[1] + r[3] / 2)
+            rt.pointerDown(at: point, mods: mods, at: time)
+            rt.pointerUp(at: point, mods: mods, at: time + 0.01)
+            rt.frame(at: time + 0.02)
+        }
+        try click(rowA, .row, at: 0.10)
+        _ = rt.keyDown(KeyEvent(key: .arrowDown), at: 0.2)
+        _ = rt.keyDown(KeyEvent(key: .enter), at: 0.21)
+        rt.frame(at: 0.22)
+        #expect(rt.state.picks.map { Array($0.utf8) } == ids.map { Array($0.utf8) })
+        #expect(rt.state.opened.map { Array($0.utf8) } == [Array(rowB.utf8)])
+        #expect(rt.element(byKey: rowA)?.itemSelected == false)
+        #expect(rt.element(byKey: rowB)?.itemSelected == true)
+        #expect(semantic("table", .grid)?.activeDescendant?.utf8.elementsEqual(rowB.utf8) == true)
+        #expect(semantic(rowB, .row)?.isSelected == true)
+        try click(rowA, .row, at: 0.4, mods: RuneKitTestKey.primaryMods())
+        #expect(rt.state.table.selectedCount == 2)
+        try click(colA, .columnHeader, at: 0.6)
+        try click(colB, .columnHeader, at: 0.8)
+        #expect(rt.state.sorts.map { Array($0.utf8) } == [Array(colA.utf8), Array(colB.utf8)])
+        #expect(rt.state.table.sort?.1 == .ascending)
+        #expect(semantic(colA, .columnHeader)?.sortAscending == nil)
+        #expect(semantic(colB, .columnHeader)?.sortAscending == true)
+        #expect(semantic(colA, .gridCell) != nil && semantic(colB, .gridCell) != nil)
+        let handle = try bounds(colB + "-resize", .splitter)
+        let start = Vec2(handle[0] + handle[2] / 2, handle[1] + handle[3] / 2)
+        rt.pointerDown(at: start, at: 1.0)
+        rt.pointerMove(to: Vec2(start.x + 20, start.y), at: 1.05)
+        rt.frame(at: 1.06)
+        rt.pointerUp(at: Vec2(start.x + 20, start.y), at: 1.1)
+        rt.frame(at: 1.11)
+        #expect(rt.state.table.columnWidth(colA) == nil)
+        #expect(rt.state.table.columnWidth(colB) == 150)
+        let a = try bounds(colA, .columnHeader), b = try bounds(colB, .columnHeader)
+        #expect(a[2] == 90 && b[2] == 150)
+    }
+
+    @Test("A horizontally scrolling parent keeps the header aligned with virtual rows")
+    func tableHeaderTracksHorizontalParent() throws {
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime(state: TableApp(n: 500, multi: false), viewport: Vec2(220, 170)) { s, cx in
+            col().key("outer").size(220, 170).scrollX().child(
+                TableView<TableApp>(\.table, len: { $0.files.count }, rowID: { $0.files[$1].id })
+                    .column(TableCol("name", "Name").width(280))
+                    .column(TableCol("size", "Size").width(100))
+                    .cell { _, _, _ in .text("X") }
+                    .build(s, cx: cx, kit: kit)
+                    .size(380, 170)
+            )
+        }
+        rt.frame(at: 0)
+        rt.update(at: 0.05) { _, tx in tx.scrollTo("outer", offset: Vec2(160, 0), animated: false) }
+        rt.frame(at: 0.06)
+        let header = tableHeader(rt, "size")
+        let cell = try #require(rt.elements().first { $0.role == .gridCell && $0.key == "size" })
+        #expect(rt.scrollOffset(forKey: "outer").x == 160)
+        #expect(header.rect[0] == 120)
+        #expect(cell.rect[0] == header.rect[0])
+        #expect(cell.rect[2] == header.rect[2])
+    }
+
+    @Test("Scrolling an unchanged table builds only newly mounted cells")
+    func tableReusesRowsDuringWheelScroll() {
+        let kit = Kit.neutral(dark: true)
+        var viewBuilds = 0
+        var cellBuilds = 0
+        let rt = Runtime(state: TableApp(n: 1_000, multi: false), viewport: Vec2(500, 300)) { state, cx in
+            viewBuilds += 1
+            return TableView<TableApp>(\.table, len: { $0.files.count }, rowID: { $0.files[$1].id })
+                .column(TableCol("name", "Name"))
+                .cell { state, index, _ in
+                    cellBuilds += 1
+                    return .text(state.files[index].name)
+                }
+                .zebra(true)
+                .build(state, cx: cx, kit: kit)
+                .size(500, 300)
+        }
+        for frame in 0..<12 { rt.frame(at: Double(frame) / 60) }
+        viewBuilds = 0
+        cellBuilds = 0
+        for frame in 12..<24 {
+            let time = Double(frame) / 60
+            rt.wheel(WheelEvent(dx: 0, dy: -48), at: Vec2(170, 140), now: time)
+            rt.frame(at: time)
+        }
+        #expect(viewBuilds == 0)
+        // Twelve wheel ticks advance just over twenty rows. Allow an extra half viewport to fill.
+        #expect((1...30).contains(cellBuilds))
+        #expect((rt.element(byKey: "f21")?.visible[3] ?? 0) == 28)
     }
 
     @Test("Fixed table columns keep their width and flex takes the rest in header and body")
@@ -254,6 +430,14 @@ struct OverlaysAndTableTests {
     @Test("Table header click sorts ascending/descending and ignores non-sortable column")
     func headerClickSortsAndShowsDirection() {
         let rt = makeTableRuntime(TableApp(n: 50, multi: false))
+        func sortAscending(_ column: String) -> Bool? {
+            var nodes = [rt.accessibilitySnapshot()]
+            while let node = nodes.popLast() {
+                if node.role == .columnHeader && node.id == column { return node.sortAscending }
+                nodes.append(contentsOf: node.children)
+            }
+            return nil
+        }
         let sizeRect = tableHeader(rt, "size").rect
         let cx = sizeRect[0] + 20.0
         let cy = sizeRect[1] + sizeRect[3] * 0.5
@@ -264,7 +448,7 @@ struct OverlaysAndTableTests {
         #expect(rt.state.sorts.count == 1)
         #expect(rt.state.sorts[0].0 == "size" && rt.state.sorts[0].1 == .ascending)
         #expect(rt.state.table.sort?.0 == "size" && rt.state.table.sort?.1 == .ascending)
-        #expect(tableHeader(rt, "size").help == "ascending")
+        #expect(sortAscending("size") == true)
         for i in 1..<rt.state.files.count {
             #expect(rt.state.files[i - 1].size <= rt.state.files[i].size)
         }
@@ -273,8 +457,8 @@ struct OverlaysAndTableTests {
         rt.pointerUp(at: Vec2(cx, cy), at: 0.21)
         rt.frame(at: 0.22)
         #expect(rt.state.table.sort?.0 == "size" && rt.state.table.sort?.1 == .descending)
-        #expect(tableHeader(rt, "size").help == "descending")
-        #expect(tableHeader(rt, "name").help == nil)
+        #expect(sortAscending("size") == false)
+        #expect(sortAscending("name") == nil)
 
         let kindRect = tableHeader(rt, "kind").rect
         rt.pointerDown(at: Vec2(kindRect[0] + 20.0, kindRect[1] + kindRect[3] * 0.5), at: 0.3)
@@ -343,9 +527,34 @@ struct OverlaysAndTableTests {
         #expect((selectedRow?.visible[3] ?? 0) > 20.0)
 
         send(.enter, at: 1.0)
+        _ = rt.keyDown(KeyEvent(key: .enter, mods: .none), isRepeat: true, at: 1.05)
+        rt.frame(at: 1.06)
         #expect(rt.state.opened == ["f199"])
         send(.home, at: 1.1)
         #expect(rt.state.table.selected == ["f0"])
+    }
+
+    @Test("A short table pages by its body height and reveals an unmounted ID after a same-count reorder")
+    func tablePagesInsideItsViewportAndRevealsReorderedID() throws {
+        let rt = makeTableRuntime(TableApp(n: 500, multi: false), size: Vec2(500, 900), tableHeight: 170)
+        let viewport = try #require(rt.element(byKey: "table-viewport"))
+        #expect(rt.state.table.viewport == viewport.rect[3])
+        #expect(viewport.rect[3] == 140)
+        _ = rt.keyDown(KeyEvent(key: .tab, mods: .none), at: 0.1)
+        _ = rt.keyDown(KeyEvent(key: .home, mods: .none), at: 0.11)
+        _ = rt.keyDown(KeyEvent(key: .pageDown, mods: .none), at: 0.12)
+        rt.frame(at: 0.13)
+        #expect(rt.state.table.cursor == "f4")
+
+        rt.update(at: 0.2) { state, _ in state.files.reverse() }
+        rt.frame(at: 0.21)
+        #expect(rt.element(byKey: "f0") == nil)
+        rt.update(at: 0.25) { state, tx in state.table.reveal("f0", tx: &tx) }
+        for i in 1...60 { rt.frame(at: 0.25 + Double(i) / 60) }
+        let selected = try #require(rt.element(byKey: "f0"))
+        #expect(selected.itemSelected)
+        #expect(selected.visible[3] > 27)
+        #expect(rt.element(byKey: "header")?.rect[1] == 0)
     }
 
     @Test("Multi-select table extends with Shift, toggles rows and selects all with the primary modifier")
@@ -370,6 +579,9 @@ struct OverlaysAndTableTests {
         #expect(rt.state.table.selected.sorted() == ["f0", "f2"])
         _ = rt.keyDown(KeyEvent(key: .text("a"), mods: primary), at: 0.21)
         rt.frame(at: 0.22)
+        #expect(rt.state.table.selectedCount == 30)
+        rt.update(at: 0.23) { state, _ in state.table.select("f0") }
+        #expect(rt.keyDown(KeyEvent(key: .command("a"), mods: .none), at: 0.24))
         #expect(rt.state.table.selectedCount == 30)
     }
 

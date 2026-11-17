@@ -177,6 +177,9 @@ public struct ToolingArgs: Sendable, Equatable {
     public var darkOverride: Bool? = nil
     public var reducedMotion: Bool = false
     public var timeScale: Double = 1.0
+    public var cpuBootDirectory: String?
+    public var cpuBootThreads: Int = 6
+    private var parseError: String?
     public var forceCPU: Bool = false
     /// Require the platform GPU driver for captures, surfacing initialization errors.
     public var requireGPU: Bool = false
@@ -219,6 +222,7 @@ public struct ToolingArgs: Sendable, Equatable {
 
     public var isHeadlessRequested: Bool {
         snapPath != nil
+            || cpuBootDirectory != nil || cropKey != nil || parseError != nil
             || treePath != nil
             || htmlPath != nil
             || (!isNative && (
@@ -288,6 +292,25 @@ public struct ToolingArgs: Sendable, Equatable {
             switch arg {
             case "--snap":
                 if i + 1 < arguments.count { out.snapPath = arguments[i + 1]; i += 1 }
+            case "--cpu-boot":
+                if i + 1 < arguments.count {
+                    i += 1
+                    out.cpuBootDirectory = arguments[i]
+                } else {
+                    out.parseError = "--cpu-boot needs a value"
+                }
+            case "--cpu-boot-threads":
+                if i + 1 < arguments.count {
+                    i += 1
+                    let raw = arguments[i].trimmingCharacters(in: .whitespaces)
+                    if let n = Double(raw), n.isFinite, let count = Int(exactly: max(1, n.rounded(.towardZero))) {
+                        out.cpuBootThreads = count
+                    } else {
+                        out.parseError = "not a number: \(raw)"
+                    }
+                } else {
+                    out.parseError = "--cpu-boot-threads needs a value"
+                }
             case "--tree":
                 if i + 1 < arguments.count { out.treePath = arguments[i + 1]; i += 1 }
             case "--scene":
@@ -359,14 +382,21 @@ public struct ToolingArgs: Sendable, Equatable {
                 }
             case "--crop":
                 if i + 1 < arguments.count {
-                    let v = arguments[i + 1]
-                    let parts = v.split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
-                    if parts.count == 4 {
-                        out.cropRects.append(parts)
-                    } else {
-                        out.cropKey = v
-                    }
                     i += 1
+                    let value = arguments[i]
+                    if value.contains(",") {
+                        let fields = value.split(separator: ",", omittingEmptySubsequences: false)
+                        let points = fields.compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
+                        if fields.count == 4, points.count == 4 {
+                            out.cropRects.append(points)
+                        } else {
+                            out.parseError = "--crop is x,y,w,h in points, or an element's key or path"
+                        }
+                    } else {
+                        out.cropKey = value
+                    }
+                } else {
+                    out.parseError = "--crop needs a value"
                 }
             case "--every":
                 if i + 1 < arguments.count, let v = Int(arguments[i + 1]) { out.stripEvery = max(1, v); i += 1 }
@@ -523,7 +553,7 @@ public struct ToolingArgs: Sendable, Equatable {
                 }
             case "--snap", "--tree", "--scene", "--script", "--frames", "--out", "--strip",
                  "--cols", "--fps", "--time-scale", "--duration", "--at", "--start",
-                 "--crop", "--every", "--variant", "--window", "--trace", "--video",
+                 "--crop", "--cpu-boot", "--cpu-boot-threads", "--every", "--variant", "--window", "--trace", "--video",
                  "--theme", "--desktop", "--html", "--html-template", "--html-widths":
                 _ = try nextVal()
             default:
@@ -532,16 +562,24 @@ public struct ToolingArgs: Sendable, Equatable {
             i += 1
         }
         let parsed = parse(arguments)
+        try parsed.checkCaptureArguments()
         if parsed.playgroundVariant != nil && !parsed.hasPlayground {
             throw ToolingError.invalidArgument("--variant needs --playground")
-        }
-        if parsed.cropKey != nil && parsed.snapPath == nil {
-            throw ToolingError.invalidArgument("--crop KEY needs --snap")
         }
         if parsed.wholeWindow && (!parsed.hasPlayground || parsed.snapPath == nil) {
             throw ToolingError.invalidArgument("--whole-window needs --playground and --snap")
         }
         return parsed
+    }
+
+    func checkCaptureArguments() throws {
+        if let parseError { throw ToolingError.invalidArgument(parseError) }
+        if cropKey != nil && snapPath == nil {
+            throw ToolingError.invalidArgument("--crop KEY needs --snap")
+        }
+        if cpuBootDirectory != nil && snapPath == nil {
+            throw ToolingError.invalidArgument("--cpu-boot needs --snap")
+        }
     }
 }
 
@@ -565,8 +603,11 @@ public struct ScriptStep: Sendable, Equatable {
         case shortcut(Chord)
         case paste(ClipboardContent)
         case ime(Ime)
+        case scroll(dx: Float, dy: Float)
         case wheel(WheelEvent)
         case magnify(MagnifyEvent)
+        case rotate(RotateEvent)
+        case smartMagnify
         case fling(vx: Float, vy: Float)
         case resize(Vec2)
         case resizeDelta(dw: Float, dh: Float)
@@ -579,6 +620,13 @@ public struct ScriptStep: Sendable, Equatable {
         case dragFilesLeave
         case popupPick(String?)
         case fileDialogAnswer(URL?)
+
+        var usesCurrentPointer: Bool {
+            switch self {
+            case .scroll, .wheel, .fling, .magnify, .rotate, .smartMagnify: true
+            default: false
+            }
+        }
     }
 
     public var t: Double
@@ -975,7 +1023,11 @@ public enum HeadlessRunner {
                 out.append(ScriptStep(t: t, position: .relative(0, 0), action: .paste(parseScriptPaste(from: e))))
 
             case "ime":
-                if let commit = e["commit"] as? String {
+                if let endpoints = e["select"] as? [Int] {
+                    guard endpoints.count == 2, endpoints[0] >= 0, endpoints[0] <= endpoints[1] else { continue }
+                    let range = endpoints[0]..<endpoints[1]
+                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: .ime(.select(range))))
+                } else if let commit = e["commit"] as? String {
                     out.append(ScriptStep(t: t, position: .relative(0, 0), action: .ime(.commit(commit))))
                 } else if let preedit = e["preedit"] as? String {
                     let cursorArr = e["cursor"] as? [Int]
@@ -1031,35 +1083,48 @@ public enum HeadlessRunner {
                 if case .relative = pos {} else {
                     out.append(ScriptStep(t: t, position: pos, action: .move))
                 }
-                out.append(ScriptStep(t: t, position: pos, action: .wheel(WheelEvent(dx: dx, dy: dy, precise: true, phase: phase, mods: mods))))
+                out.append(ScriptStep(t: t, position: pos, action: .wheel(WheelEvent(dx: dx, dy: dy, precise: e["precise"] as? Bool ?? true, phase: phase, mods: mods))))
 
-            case "magnify":
-                let delta = (e["delta"] as? NSNumber)?.floatValue ?? 0
-                let phase = parseGesturePhase(e["phase"] as? String)
+            case "magnify", "rotate", "smart-magnify":
                 if case .relative = pos {} else {
                     out.append(ScriptStep(t: t, position: pos, action: .move))
                 }
-                out.append(ScriptStep(t: t, position: pos, action: .magnify(MagnifyEvent(delta: delta, phase: phase))))
+                let phase = parseGesturePhase(e["phase"] as? String)
+                let action: ScriptStep.Action
+                switch ty {
+                case "magnify":
+                    let delta = (e["delta"] as? NSNumber)?.floatValue ?? 0
+                    action = .magnify(MagnifyEvent(delta: delta, phase: phase))
+                case "rotate":
+                    let degrees = (e["degrees"] as? NSNumber)?.floatValue ?? 0
+                    action = .rotate(RotateEvent(degrees: degrees, phase: phase))
+                default:
+                    action = .smartMagnify
+                }
+                out.append(ScriptStep(t: t, position: pos, action: action))
 
             case "scroll":
                 let dx = (e["dx"] as? NSNumber)?.floatValue ?? 0
                 let dy = (e["dy"] as? NSNumber)?.floatValue ?? 0
-                let dur = max(0.02, (e["dur"] as? NSNumber)?.doubleValue ?? 0.24)
-                if case .relative = pos {} else {
-                    out.append(ScriptStep(t: t, position: pos, action: .move))
-                }
-                let steps = max(2, Int(ceil(dur * 60.0)))
-                var prevF: Float = 0
-                for s in 1...steps {
-                    let f = Float(s) / Float(steps)
-                    let eased = f * f * (3.0 - 2.0 * f)
-                    let df = eased - prevF
-                    prevF = eased
+                let duration = max(0.01, (e["dur"] as? NSNumber)?.doubleValue ?? 0.2)
+                let steps = Int(ceil(duration * 120))
+                out.append(ScriptStep(t: t, position: pos, action: .move))
+                var previous = Vec2.zero
+                for index in 1...steps {
+                    let fraction = Float(index) / Float(steps)
+                    let distance = fraction * (2 - fraction)
+                    let current = Vec2(dx * distance, dy * distance)
                     out.append(ScriptStep(
-                        t: t + dur * Double(s) / Double(steps),
-                        position: .relative(0, 0),
-                        action: .wheel(WheelEvent(dx: dx * df, dy: dy * df, mods: mods))
+                        t: t + duration * Double(index) / Double(steps),
+                        position: pos,
+                        action: .scroll(dx: current.x - previous.x, dy: current.y - previous.y)
                     ))
+                    previous = current
+                }
+                if e["fling"] as? Bool == true {
+                    let vx = 2 * dx / Float(duration) * 0.25
+                    let vy = 2 * dy / Float(duration) * 0.25
+                    out.append(ScriptStep(t: t + duration + 0.0001, position: pos, action: .fling(vx: vx, vy: vy)))
                 }
 
             case "fling":
@@ -1233,11 +1298,13 @@ public enum HeadlessRunner {
 
     internal static func registerFonts(_ fonts: [Data]) {
         #if canImport(CoreText) && canImport(CoreGraphics)
+        var changed = false
         for data in fonts {
             guard let provider = CGDataProvider(data: data as CFData),
                   let cgFont = CGFont(provider) else { continue }
-            CTFontManagerRegisterGraphicsFont(cgFont, nil)
+            if CTFontManagerRegisterGraphicsFont(cgFont, nil) { changed = true }
         }
+        if changed { FontFamiliesRegistry.bumpEpoch() }
         #elseif canImport(CRuneDesktopText)
         DesktopAppFonts.shared.register(fonts)
         #endif
@@ -1260,6 +1327,7 @@ public enum HeadlessRunner {
         standardError: FileHandle = .standardError,
         extraConfigure: ((Runtime<State>, Waker) -> Void)? = nil
     ) throws -> Output {
+        try args.checkCaptureArguments()
         if args.listWindows {
             for key in availableWindows {
                 print(key)
@@ -1407,6 +1475,13 @@ public enum HeadlessRunner {
         let surfaceH = max(1, Int((vp.y * args.pixelScale).rounded()))
 
         let gpu = try OffscreenGPURenderer.selected(for: args)
+        let cpuBoot = try args.cpuBootDirectory.map { directory in
+            guard let gpu else { throw OffscreenRenderError.unavailable("--cpu-boot needs an offscreen GPU") }
+            // Both painters must see the children of a cached layer, including on replay.
+            try gpu.setLayerCacheBudget(0)
+            return try CpuBootCapture(directory: directory, threads: args.cpuBootThreads, adapter: gpu.adapter,
+                                      atlas: runtime.textSystem.glyphAtlas)
+        }
         typealias CapturedFrame = (refScene: RefScene?, renderFrame: RenderFrame?, surfaces: [RefSurfaceDraw])
         func captureFrame(at now: Double) throws -> CapturedFrame {
             if let gpu {
@@ -1576,11 +1651,8 @@ public enum HeadlessRunner {
         let chromeLights: [[Float]]? = args.chromeOverlay ? chrome.trafficLightRects() : nil
         var screencastKeycaps = Keycaps()
         var pointerRipples: [(x: Float, y: Float, t: Double)] = []
-        func applyChromeOverlay(_ frame: Frame, at simT: Double = runtime.currentTime) -> Frame {
+        func applyInputOverlay(_ frame: Frame, at simT: Double) -> Frame {
             var out = frame
-            if let lights = chromeLights {
-                out = Self.paintTrafficLights(out, scale: args.pixelScale, lights: lights)
-            }
             if args.showPointer {
                 out = Self.paintPointerRipples(out, scale: args.pixelScale, presses: pointerRipples, at: simT)
             }
@@ -1592,6 +1664,12 @@ public enum HeadlessRunner {
                 }
             }
             return out
+        }
+
+        func applyChromeOverlay(_ frame: Frame, at simT: Double = runtime.currentTime) -> Frame {
+            let withInput = applyInputOverlay(frame, at: simT)
+            guard let lights = chromeLights else { return withInput }
+            return Self.paintTrafficLights(withInput, scale: args.pixelScale, lights: lights)
         }
 
         var windowFrameMove: WindowFrameMove? = nil
@@ -1636,6 +1714,10 @@ public enum HeadlessRunner {
             }
         }
 
+        let motionEnvironment = ProcessInfo.processInfo.environment
+        let motionPath = motionEnvironment["RUNE_MOTION_GATE"]
+        let motion = motionPath.map { _ in MotionGateSampler(runtime: runtime, hz: max(1, args.fps)) }
+
         // Mount at the origin of the virtual clock so scripted events reach the
         // initial layout before the clock advances to the requested capture.
         var lastCaptured = try captureFrame(at: 0)
@@ -1651,7 +1733,8 @@ public enum HeadlessRunner {
         var didFireReady = false
         var lastRenderedLoopFrame: Frame? = nil
 
-        let needsLoop = !steps.isEmpty
+        var selectedSnapshot: Frame?
+        let needsLoop = cpuBoot != nil || motion != nil || !steps.isEmpty
             || resolvedAtTime != nil
             || args.durationOverride != nil
             || args.durationAuto
@@ -1684,7 +1767,7 @@ public enum HeadlessRunner {
                 return steps.isEmpty ? 0.0 : (lastEventTime + 1.0)
             }()
             let snapFrame = max(0, Int((snapT * fps).rounded()))
-            let lastOutputFrame = targetOutputFrames.map { startFrame + max(1, $0) - 1 } ?? 0
+            let lastOutputFrame = startFrame + max(1, targetOutputFrames ?? 1) - 1
             let lastFrame = max(snapFrame, lastOutputFrame)
             initialPublishedRun.start = resolvedStartTime
             initialPublishedRun.frames = targetOutputFrames ?? max(1, lastFrame + 1)
@@ -1694,9 +1777,9 @@ public enum HeadlessRunner {
             var simStep = 0
             var simTime: Double = 0.0
             var stepCursor = 0
-            var anchorPos = Vec2(vp.x * 0.5, vp.y * 0.5)
+            var lastDown = Vec2.zero
             var frameIndex = 0
-            let stripStride = args.stripEvery ?? max(1, Int(fps / 12.0))
+            let dumpStride = max(1, args.stripEvery ?? 1)
             let wallStart = Date()
 
             if let dumpDir {
@@ -1712,26 +1795,32 @@ public enum HeadlessRunner {
                     }
                 }
                 #endif
+                let fillNsBeforeUpdate = cpuBoot.map { _ in runtime.textSystem.glyphAtlas.outlineFillStats.elapsedNs } ?? 0
+                let frameClockStart = RuneExecutionContext.uptimeNanoseconds
                 while stepCursor < steps.count && steps[stepCursor].t <= simTime + 1e-6 {
                     let s = steps[stepCursor]
                     stepCursor += 1
+                    if let motion {
+                        switch s.action {
+                        case .mark: break
+                        default: motion.input("script")
+                        }
+                    }
 
                     let resolvedPos: Vec2
                     switch s.position {
                     case .key(let k):
-                        if let elInfo = runtime.element(byKey: k) {
-                            let cx = elInfo.rect[0] + elInfo.rect[2] * 0.5
-                            let cy = elInfo.rect[1] + elInfo.rect[3] * 0.5
-                            resolvedPos = Vec2(cx, cy)
-                            anchorPos = resolvedPos
-                        } else {
-                            resolvedPos = anchorPos
+                        guard let center = runtime.find(k) else {
+                            throw ToolingError.invalidArgument("script: no element with key \"\(k)\"")
                         }
+                        resolvedPos = center
                     case let .xy(x, y):
-                        resolvedPos = Vec2(x, y)
-                        anchorPos = resolvedPos
+                        let zoom = runtime.zoom()
+                        resolvedPos = Vec2(x / zoom, y / zoom)
+                    case .relative where s.action.usesCurrentPointer:
+                        resolvedPos = runtime.pointer() ?? .zero
                     case let .relative(dx, dy):
-                        resolvedPos = Vec2(anchorPos.x + dx, anchorPos.y + dy)
+                        resolvedPos = Vec2(lastDown.x + dx, lastDown.y + dy)
                     }
 
                     // Input reaches the clock of the last drawn frame. The
@@ -1741,6 +1830,7 @@ public enum HeadlessRunner {
                     case .move:
                         runtime.pointerMove(to: resolvedPos, at: animNow)
                     case let .down(btn, mods):
+                        lastDown = resolvedPos
                         pointerRipples.append((resolvedPos.x, resolvedPos.y, simTime))
                         runtime.pointerDown(at: resolvedPos, button: btn, mods: mods, at: animNow)
                     case let .up(btn, mods):
@@ -1774,13 +1864,21 @@ public enum HeadlessRunner {
                     case .paste(let clip):
                         runtime.paste(clip, at: animNow)
                     case .ime(let imeEv):
-                        _ = runtime.dispatchIme(imeEv, at: animNow)
+                        _ = runtime.ime(imeEv, at: animNow)
+                    case let .scroll(dx, dy):
+                        let zoom = runtime.zoom()
+                        runtime.wheelXY(resolvedPos.x, resolvedPos.y, dx / zoom, dy / zoom, now: animNow)
                     case .wheel(let wev):
                         runtime.wheel(wev, at: resolvedPos, now: animNow)
                     case .magnify(let mev):
                         runtime.magnify(mev, at: resolvedPos, now: animNow)
+                    case .rotate(let event):
+                        runtime.rotate(event, at: resolvedPos, now: animNow)
+                    case .smartMagnify:
+                        runtime.smartMagnify(at: resolvedPos, now: animNow)
                     case let .fling(vx, vy):
-                        runtime.fling(vx: vx, vy: vy, at: resolvedPos, now: animNow)
+                        let zoom = runtime.zoom()
+                        runtime.fling(vx: vx / zoom, vy: vy / zoom, at: resolvedPos, now: animNow)
                     case .resize(let newVP):
                         windowFrameMove = nil
                         scriptedResizeFrom = newVP
@@ -1788,7 +1886,7 @@ public enum HeadlessRunner {
                         runtime.setViewport(newVP, pixelScale: args.pixelScale)
                     case let .resizeDelta(dw, dh):
                         if dw == 0.0 && dh == 0.0 {
-                            scriptedResizeFrom = runtime.viewport
+                            scriptedResizeFrom = runtime.windowViewport()
                         }
                         let nextVP = Vec2(
                             max(1.0, scriptedResizeFrom.x + dw),
@@ -1835,67 +1933,86 @@ public enum HeadlessRunner {
                 }
                 stepWindowFrame(at: animNow)
                 runtime.windowResting = (windowFrameMove == nil && !runtime.hasPendingWindowFrame)
-                let frameClockStart = Date()
+                motion?.before(runtime)
                 lastCaptured = try captureFrame(at: animNow)
                 if runtime.hasPendingWindowFrame {
                     let shown = (frameIndex == 0 || runtime.takeFitWindowHeld()) ? 0.0 : (dt * args.timeScale)
                     applyPendingWindowFrame(at: animNow - shown)
                 }
-                let frameCpuMs = Date().timeIntervalSince(frameClockStart) * 1000.0
+                let updateNs = RuneExecutionContext.uptimeNanoseconds - frameClockStart
+                let frameCpuMs = Double(updateNs) / 1_000_000
+                let takeSnapshot = simStep == snapFrame && args.snapPath != nil
+                if let cpuBoot, let frame = lastCaptured.renderFrame {
+                    let fills = runtime.textSystem.glyphAtlas.outlineFillStats
+                    // The upstream CPU stage owns mask raster and copy, even when layout requested them.
+                    let updateFillNs = min(updateNs, fills.elapsedNs &- fillNsBeforeUpdate)
+                    try cpuBoot.paint(frame, smoothing: runtime.fontSmoothing,
+                                      atlasResets: Int(clamping: runtime.textSystem.glyphAtlas.resets),
+                                      frameIndex: simStep, updateNs: updateNs - updateFillNs,
+                                      snapshot: takeSnapshot, fills: fills)
+                }
                 traceWriter?.recordFrame(runtime: runtime, tMs: simTime * 1000.0, cpuMs: frameCpuMs)
+                motion?.frame(runtime, awake: runtime.isAnimating || windowFrameMove != nil, renderFrame: lastCaptured.renderFrame)
 
                 if args.realtime && !didFireReady {
                     didFireReady = true
                     onReady?(WindowHandle(key: windowKey))
                 }
 
-                if simTime + 1e-6 >= resolvedStartTime {
-                    if let targetCount = targetOutputFrames, dumpedFrameCount >= targetCount {
-                        break
-                    }
-                    let needDump = dumpDir != nil
+                var snapshotPixels: Frame?
+                var drewFrame = false
+                if takeSnapshot {
+                    let rendered = try renderAndReport(lastCaptured, at: animNow)
+                    reportedInLoop = true
+                    snapshotPixels = rendered
+                    drewFrame = true
+                    try cpuBoot?.gpu(applyInputOverlay(rendered, at: simTime))
+                    selectedSnapshot = try Self.snapshotCrop(applyChromeOverlay(rendered, at: simTime),
+                                                             runtime: runtime, args: args)
+                }
+                if simStep >= startFrame && (targetOutputFrames.map { dumpedFrameCount < $0 } ?? true) {
+                    let sample = targetOutputFrames != nil && frameIndex.isMultiple(of: dumpStride)
+                    let needDump = dumpDir != nil && sample
                     let needVideo = videoEncoder != nil
-                    let needStrip = args.stripPath != nil && (frameIndex % stripStride == 0)
+                    let needStrip = args.stripPath != nil && sample
                     let hasFrameObservers = compositor != nil
                         || (reports?.wanted ?? false)
                         || (reports?.onFrameDrawn != nil)
                         || (reports?.onInspectDrawn != nil)
                     let needRender = needDump || needVideo || needStrip || (args.frameCount != nil && hasFrameObservers)
                     if needRender {
-                        let renderedBase = try renderAndReport(lastCaptured, at: animNow, reportEncoded: true)
+                        let renderedBase = try snapshotPixels ?? renderAndReport(lastCaptured, at: animNow)
+                        drewFrame = true
                         reportedInLoop = true
                         let baseFrame = applyChromeOverlay(renderedBase, at: simTime)
                         lastRenderedLoopFrame = baseFrame
                         if needVideo {
                             try videoEncoder?.writeFrame(baseFrame)
                         }
-                        var f = baseFrame
-                        if !args.cropRects.isEmpty {
-                            f = tileCrops(f, cropRectsPt: args.cropRects, scale: args.pixelScale)
-                        }
-                        if let dumpDir {
+                        if needDump, let dumpDir {
                             let outURL = URL(fileURLWithPath: dumpDir).appendingPathComponent(String(format: "frame_%04d.png", frameIndex))
-                            try f.writePNG(to: outURL)
-                            dumpedFrameCount += 1
-                        } else if needVideo || targetOutputFrames != nil {
-                            dumpedFrameCount += 1
+                            try baseFrame.writePNG(to: outURL)
                         }
                         if needStrip {
-                            capturedStripFrames.append(f)
+                            capturedStripFrames.append(try tileCrops(baseFrame, cropRectsPt: args.cropRects, scale: args.pixelScale))
                         }
-                    } else {
-                        if reports != nil {
-                            _ = try renderAndReport(lastCaptured, at: animNow, reportEncoded: true)
-                            reportedInLoop = true
-                        }
-                        if targetOutputFrames != nil {
-                            dumpedFrameCount += 1
-                        }
+                    } else if reports != nil && !drewFrame {
+                        _ = try renderAndReport(lastCaptured, at: animNow, reportEncoded: true)
+                        drewFrame = true
+                        reportedInLoop = true
                     }
+                    if targetOutputFrames != nil { dumpedFrameCount += 1 }
                     frameIndex += 1
                 }
 
-                let explicitLengthRequested = args.durationAuto
+                if cpuBoot != nil, !drewFrame, let gpu, let frame = lastCaptured.renderFrame {
+                    if compositor != nil {
+                        _ = try renderAndReport(lastCaptured, at: animNow)
+                    } else {
+                        _ = try gpu.submitOffscreen(frame)
+                    }
+                }
+                let explicitLengthRequested = args.snapPath != nil || args.durationAuto
                     || args.durationOverride != nil
                     || resolvedAtTime != nil
                     || args.frameCount != nil
@@ -1904,7 +2021,7 @@ public enum HeadlessRunner {
                 if !explicitLengthRequested && stepCursor >= steps.count && !runtime.isAnimating && windowFrameMove == nil && simTime >= lastEventTime + dt {
                     break
                 }
-                if let targetCount = targetOutputFrames, dumpedFrameCount >= targetCount {
+                if let targetCount = targetOutputFrames, dumpedFrameCount >= targetCount, simStep >= snapFrame {
                     break
                 }
                 simStep += 1
@@ -1915,31 +2032,18 @@ public enum HeadlessRunner {
             onReady?(WindowHandle(key: windowKey))
         }
 
-        var finalFrame = if let lastRenderedLoopFrame {
-            lastRenderedLoopFrame
+        let finalFrame: Frame
+        if let selectedSnapshot {
+            finalFrame = selectedSnapshot
         } else {
-            applyChromeOverlay(
-                try renderAndReport(lastCaptured, at: runtime.currentTime, reportEncoded: !reportedInLoop),
+            let lastFrame = try lastRenderedLoopFrame ?? applyChromeOverlay(
+                renderAndReport(lastCaptured, at: runtime.currentTime, reportEncoded: !reportedInLoop),
                 at: runtime.currentTime
             )
+            finalFrame = try Self.snapshotCrop(lastFrame, runtime: runtime, args: args)
         }
         if args.firstPixels {
             standardError.write(Data("rune: first pixels \(finalFrame.width)x\(finalFrame.height)\n".utf8))
-        }
-        if !args.cropRects.isEmpty {
-            finalFrame = tileCrops(finalFrame, cropRectsPt: args.cropRects, scale: args.pixelScale)
-        } else if let cropKey = args.cropKey {
-            if args.hasPlayground && !args.wholeWindow {
-                let all = runtime.elements()
-                if let idx = Runtime<State>.stageElementIndex(in: all, key: cropKey) {
-                    finalFrame = cropFrame(finalFrame, rectPt: all[idx].rect, scale: args.pixelScale)
-                }
-            } else if let elInfo = runtime.element(byKey: cropKey) {
-                finalFrame = cropFrame(finalFrame, rectPt: elInfo.rect, scale: args.pixelScale)
-            }
-        } else if args.hasPlayground && !args.wholeWindow,
-                  let stageEl = runtime.elements().first(where: { Runtime<State>.isPlaygroundStageKey($0.key) }) {
-            finalFrame = cropFrame(finalFrame, rectPt: stageEl.rect, scale: args.pixelScale)
         }
         let chromeOverlaps: [String] = chromeLights.map {
             Self.findTrafficLightOverlaps(runtime: runtime, lights: $0, standardError: standardError)
@@ -1954,14 +2058,17 @@ public enum HeadlessRunner {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try treeData.write(to: url, options: .runeOutput)
         }
-        if let stripPath = args.stripPath {
-            let frames = capturedStripFrames.isEmpty ? [finalFrame] : capturedStripFrames
-            let useGutter = (frames.count > args.stripCols) || !args.cropRects.isEmpty
-            let strip = stitchGridStrip(frames: frames, cols: args.stripCols, gap: useGutter ? 4 : 0)
+        if let stripPath = args.stripPath, !capturedStripFrames.isEmpty {
+            let strip = stitchGridStrip(frames: capturedStripFrames, cols: args.stripCols, gap: Int(4 * args.pixelScale))
             try strip.writePNG(to: URL(fileURLWithPath: stripPath))
         }
         try traceWriter?.finish()
         try videoEncoder?.finish()
+        if let motion, let motionPath {
+            try MotionGateGate.writeEvidence(cell: "", rec: motion.rec, out: motionPath, environment: motionEnvironment)
+            let findings = motionGateCheck(motion.rec).map { "\($0)\n" }.joined()
+            try Data(findings.utf8).write(to: URL(fileURLWithPath: motionPath), options: .runeOutput)
+        }
         // Headless runs open no links (`Tx::open_url`): say which URLs handlers asked to open.
         for req in runtime.urlOpener.takeRequests() {
             standardError.write(Data("rune: open_url \(req.url) (headless: not opened)\n".utf8))
@@ -1979,28 +2086,20 @@ public enum HeadlessRunner {
         )
     }
 
-    private static func cropFrame(_ frame: Frame, rectPt: [Float], scale: Float) -> Frame {
-        guard rectPt.count == 4 else { return frame }
-        let x0 = max(0, Int((rectPt[0] * scale).rounded(.down)))
-        let y0 = max(0, Int((rectPt[1] * scale).rounded(.down)))
-        let x1 = min(frame.width, Int(((rectPt[0] + rectPt[2]) * scale).rounded(.up)))
-        let y1 = min(frame.height, Int(((rectPt[1] + rectPt[3]) * scale).rounded(.up)))
-        let cw = x1 - x0
-        let ch = y1 - y0
-        guard cw > 0 && ch > 0 else { return frame }
-        var out = Array<UInt8>(repeating: 0, count: cw * ch * 4)
-        for row in 0..<ch {
-            let srcStart = ((y0 + row) * frame.width + x0) * 4
-            let dstStart = row * cw * 4
-            out.replaceSubrange(dstStart..<(dstStart + cw * 4), with: frame.rgba[srcStart..<(srcStart + cw * 4)])
+    static func tileCrops(_ frame: Frame, cropRectsPt: [[Float]], scale: Float) throws -> Frame {
+        guard !cropRectsPt.isEmpty else { return frame }
+        let cropped = try cropRectsPt.map { rect -> Frame in
+            // Strip rectangles round each origin and length separately, unlike a named element crop.
+            let pixel = rect.map { max(0, ($0 * scale).rounded()) }
+            guard pixel.count == 4, let x = Int(exactly: pixel[0]), let y = Int(exactly: pixel[1]),
+                  let width = Int(exactly: pixel[2]), let height = Int(exactly: pixel[3]),
+                  x <= frame.width, y <= frame.height, width <= frame.width - x, height <= frame.height - y else {
+                throw ToolingError.invalidArgument("--crop outside the frame")
+            }
+            return clippedFrame(frame, rectPt: pixel, scale: 1) ?? Frame(width: width, height: height, rgba: [])
         }
-        return Frame(width: cw, height: ch, rgba: out)
-    }
-
-    private static func tileCrops(_ frame: Frame, cropRectsPt: [[Float]], scale: Float, gap: Int = 4) -> Frame {
-        let cropped = cropRectsPt.map { cropFrame(frame, rectPt: $0, scale: scale) }
-        guard !cropped.isEmpty else { return frame }
         if cropped.count == 1 { return cropped[0] }
+        let gap = Int(4 * scale)
         let tw = cropped.map(\.width).max() ?? frame.width
         let th = cropped.map(\.height).reduce(0, +) + gap * (cropped.count - 1)
         var out = [UInt8](repeating: 0, count: tw * th * 4)
@@ -2146,8 +2245,11 @@ public enum HeadlessRunner {
         case .shortcut(let chord): ev = .shortcut(chord.description)
         case .paste(let c): ev = .paste(c.text)
         case .ime: ev = .mark("ime")
+        case let .scroll(dx, dy): ev = .scroll(dx: dx, dy: dy)
         case .wheel(let w): ev = .wheel(dx: w.dx, dy: w.dy, mods: w.mods)
-        case .magnify: ev = .mark("magnify")
+        case .magnify(let event): ev = .magnify(event)
+        case .rotate(let event): ev = .rotate(event)
+        case .smartMagnify: ev = .smartMagnify
         case let .fling(vx, vy): ev = .fling(vx: vx, vy: vy)
         case .resize(let sz): ev = .resize(sz)
         case let .resizeDelta(dw, dh): ev = .resize(Vec2(dw, dh))
@@ -2369,51 +2471,56 @@ public struct TracePresentSummary: Sendable, Equatable {
     public var lag: TracePresentSpread?
 
     public static func ofTrace(_ text: String) -> TracePresentSummary? {
-        var dicts: [[String: Any]] = []
+        var samples: TracePresentSamples?
         for rawLine in text.split(whereSeparator: \.isNewline) {
-            guard let data = rawLine.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                continue
-            }
-            dicts.append(obj)
-        }
-        guard let header = dicts.first else { return nil }
-        let rawHz = (header["hz"] as? NSNumber)?.doubleValue
-        let hz = (rawHz.map { $0 > 0 ? $0 : nil } ?? nil) ?? 60.0
-        var frames = 0
-        var presented = 0
-        var skipped = 0
-        var timed = false
-        var intervals: [Double] = []
-        var lags: [Double] = []
-        for frame in dicts.dropFirst() where frame["t"] != nil {
-            frames += 1
-            guard let rawPresent = frame["present_ms"] else { continue }
-            timed = true
-            guard let presentNum = rawPresent as? NSNumber, !(rawPresent is NSNull) else {
-                skipped += 1
-                continue
-            }
-            let present = presentNum.doubleValue
-            presented += 1
-            if let dtNum = frame["present_dt_ms"] as? NSNumber, !(frame["present_dt_ms"] is NSNull) {
-                intervals.append(dtNum.doubleValue)
-            }
-            if let targetNum = frame["target_ms"] as? NSNumber, !(frame["target_ms"] is NSNull) {
-                lags.append(present - targetNum.doubleValue)
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(rawLine.utf8)) as? [String: Any] else { continue }
+            if samples == nil {
+                samples = TracePresentSamples(hz: (obj["hz"] as? NSNumber)?.doubleValue ?? 60)
+            } else if obj["t"] != nil {
+                let at = (obj["present_ms"] as? NSNumber)?.doubleValue
+                samples?.append(at: at, skipped: obj["present_ms"] != nil && at == nil,
+                                interval: (obj["present_dt_ms"] as? NSNumber)?.doubleValue,
+                                target: (obj["target_ms"] as? NSNumber)?.doubleValue)
             }
         }
-        guard timed else { return nil }
-        let missedMs = 1.5 * 1000.0 / hz
+        return samples?.summary()
+    }
+
+    internal var displayDescription: String {
+        func spread(_ sample: TracePresentSpread?) -> String {
+            guard let sample else { return "none" }
+            return String(format: "p50 %.2f p95 %.2f max %.2f ms", sample.p50, sample.p95, sample.max)
+        }
+        return String(format: "present: %d frames, %d presented, %d skipped at %.0f Hz; interval %@; %d bunched (<2 ms), %d missed (>%.2f ms); lag %@",
+                      frames, presented, skipped, hz, spread(interval), bunched, missed, 1500 / hz, spread(lag))
+    }
+}
+
+private struct TracePresentSamples {
+    let hz: Double
+    private var frames = 0
+    private var presented = 0
+    private var skipped = 0
+    private var intervals: [Double] = []
+    private var lags: [Double] = []
+
+    init(hz: Double) { self.hz = hz > 0 && hz.isFinite ? hz : 60 }
+
+    mutating func append(at: Double?, skipped: Bool, interval: Double?, target: Double?) {
+        frames += 1
+        if skipped { self.skipped += 1 }
+        guard let at else { return }
+        presented += 1
+        if let interval { intervals.append(interval) }
+        if let target { lags.append(at - target) }
+    }
+
+    func summary() -> TracePresentSummary? {
+        guard presented + skipped > 0 else { return nil }
         return TracePresentSummary(
-            hz: hz,
-            frames: frames,
-            presented: presented,
-            skipped: skipped,
-            interval: TracePresentSpread.of(intervals),
-            bunched: intervals.filter { $0 < bunchedMs }.count,
-            missed: intervals.filter { $0 > missedMs }.count,
-            lag: TracePresentSpread.of(lags)
+            hz: hz, frames: frames, presented: presented, skipped: skipped, interval: TracePresentSpread.of(intervals),
+            bunched: intervals.count { $0 < TracePresentSummary.bunchedMs },
+            missed: intervals.count { $0 > 1500 / hz }, lag: TracePresentSpread.of(lags)
         )
     }
 }
@@ -2439,6 +2546,7 @@ private final class TracePresentsQueue {
         var lineWithoutBrace: String
         var present: Present
         var continuous: Bool
+        var targetMs: Double?
         var age: UInt32
     }
 
@@ -2452,7 +2560,11 @@ private final class TracePresentsQueue {
     private var pending: [Pending] = []
     private var cadence: Cadence = .broken
 
-    init(source: any TracePresentSource, startNs: UInt64) {
+    private var samples: TracePresentSamples
+    var summary: TracePresentSummary? { samples.summary() }
+
+    init(source: any TracePresentSource, startNs: UInt64, hz: Double) {
+        samples = TracePresentSamples(hz: hz)
         self.source = source
         self.startNs = startNs
     }
@@ -2466,12 +2578,12 @@ private final class TracePresentsQueue {
         return r3(Double(diff) / 1_000_000.0)
     }
 
-    func push(lineWithoutBrace: String, seq: UInt64?, continuous: Bool, into out: inout [String]) {
+    func push(lineWithoutBrace: String, seq: UInt64?, continuous: Bool, targetMs: Double?, into out: inout [String]) {
         for i in pending.indices {
             pending[i].age &+= 1
         }
         let present: Present = seq.map { .waiting(seq: $0) } ?? .noDrawable
-        pending.append(Pending(lineWithoutBrace: lineWithoutBrace, present: present, continuous: continuous, age: 0))
+        pending.append(Pending(lineWithoutBrace: lineWithoutBrace, present: present, continuous: continuous, targetMs: targetMs, age: 0))
         poll()
         writeReady(into: &out, all: false)
     }
@@ -2479,6 +2591,11 @@ private final class TracePresentsQueue {
     func flush(into out: inout [String]) {
         poll()
         writeReady(into: &out, all: true)
+    }
+
+    func hasOutstandingPresents() -> Bool {
+        poll()
+        return pending.contains { if case .waiting = $0.present { true } else { false } }
     }
 
     private func poll() {
@@ -2519,15 +2636,18 @@ private final class TracePresentsQueue {
         switch item.present {
         case .landed(_, let at):
             cadence = .after(at)
+            samples.append(at: at, skipped: false, interval: last.map { Self.r3(at - $0) }, target: item.targetMs)
             line.append(",\"present_ms\":\(at)")
             if let last {
                 line.append(",\"present_dt_ms\":\(Self.r3(at - last))")
             }
         case .skipped:
             cadence = .broken
+            samples.append(at: nil, skipped: true, interval: nil, target: nil)
             line.append(",\"present_ms\":null")
         case .noDrawable, .waiting:
             cadence = .broken
+            samples.append(at: nil, skipped: false, interval: nil, target: nil)
         }
         line.append("}")
         return line
@@ -2535,6 +2655,8 @@ private final class TracePresentsQueue {
 }
 
 internal final class ToolingTraceWriter {
+    private let hz: Double
+    var presentSummary: TracePresentSummary? { presents?.summary }
     private let path: String
     private let traceAll: Bool
     private var lines: [String] = []
@@ -2546,6 +2668,7 @@ internal final class ToolingTraceWriter {
     private var goals: [UInt32: [Int64]] = [:]
     private var channels = TraceChannels()
     private var presents: TracePresentsQueue?
+    private var receiveLines: (([String]) -> Void)?
 
     convenience init(path: String, viewport: Vec2, fps: Double, scale: Float, traceAll: Bool) {
         self.init(path: path, viewport: viewport, fps: fps, scale: scale, traceAll: traceAll, clock: .virtual)
@@ -2563,6 +2686,7 @@ internal final class ToolingTraceWriter {
     }
 
     init(path: String, viewport: Vec2, fps: Double, scale: Float, traceAll: Bool, clock: TraceClockMode) {
+        self.hz = fps
         self.path = path
         self.traceAll = traceAll
         var header: [String: Any] = [
@@ -2585,7 +2709,20 @@ internal final class ToolingTraceWriter {
     }
 
     func recordPresents(source: any TracePresentSource, startNs: UInt64) {
-        presents = TracePresentsQueue(source: source, startNs: startNs)
+        presents = TracePresentsQueue(source: source, startNs: startNs, hz: hz)
+    }
+
+    /// A live window can run indefinitely. Deliver ready JSONL in submission order,
+    /// including the header, while the trace is open.
+    func streamLines(to receiver: @escaping ([String]) -> Void) {
+        receiveLines = receiver
+        sendReadyLines()
+    }
+
+    private func sendReadyLines() {
+        guard let receiveLines, !lines.isEmpty else { return }
+        receiveLines(lines)
+        lines.removeAll(keepingCapacity: false)
     }
 
     func recordFrame<State>(runtime: Runtime<State>, tMs: Double, cpuMs: Double) {
@@ -2593,6 +2730,7 @@ internal final class ToolingTraceWriter {
     }
 
     func frameTimed<State>(runtime: Runtime<State>, tMs: Double, cpuMs: Double, timing: TraceFrameTiming = TraceFrameTiming()) {
+        defer { sendReadyLines() }
         let els = runtime.elements()
         func isTraced(_ e: ElementInfo) -> Bool {
             (traceAll || e.key != nil || e.traceName != nil) && !e.virtualExtent
@@ -2739,7 +2877,7 @@ internal final class ToolingTraceWriter {
             ],
         ]
         if let targetMs = timing.targetMs {
-            line["target_ms"] = (targetMs * 1000.0).rounded() / 1000.0
+            line["target_ms"] = Self.r3(targetMs)
         }
         if runtime.pressedPath != nil {
             line["k"] = 1
@@ -2778,6 +2916,7 @@ internal final class ToolingTraceWriter {
                         lineWithoutBrace: json,
                         seq: timing.drawable,
                         continuous: timing.continuous,
+                        targetMs: timing.targetMs.map { Self.r3($0) },
                         into: &lines
                     )
                     return
@@ -2788,8 +2927,22 @@ internal final class ToolingTraceWriter {
         }
     }
 
-    func finish() throws {
+    var awaitingPresentations: Bool { presents?.hasOutstandingPresents() == true }
+
+    func finish(waitForPresents seconds: Double = 0) throws {
+        #if canImport(QuartzCore) && !os(watchOS)
+        if seconds > 0 {
+            let deadline = ProcessInfo.processInfo.systemUptime + seconds
+            while awaitingPresentations && ProcessInfo.processInfo.systemUptime < deadline {
+                Thread.sleep(forTimeInterval: 0.002)
+            }
+        }
+        #endif
         presents?.flush(into: &lines)
+        if receiveLines != nil {
+            sendReadyLines()
+            return
+        }
         let url = URL(fileURLWithPath: path)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let body = lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")
@@ -2800,7 +2953,7 @@ internal final class ToolingTraceWriter {
         (Double(v) * 100.0).rounded() / 100.0
     }
 
-    private static func r3(_ v: Float) -> Double {
+    private static func r3<T: BinaryFloatingPoint>(_ v: T) -> Double {
         (Double(v) * 1000.0).rounded() / 1000.0
     }
 

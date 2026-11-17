@@ -136,15 +136,22 @@ public final class RuneOverlayPanel: NSPanel {
 @MainActor
 public final class RuneOverlayMetalView<State>: NSView {
     private let metalLayer = CAMetalLayer()
+    private var materialHost: RuneMaterialHost?
     private var renderer: MetalRenderer?
-    private let startTime = CACurrentMediaTime()
+    fileprivate var deviceName: String? { renderer?.device.name }
+    private let startTime: CFTimeInterval
     private var trackingAreaRef: NSTrackingArea?
-    private var frameCounter: UInt64 = 0
+    private(set) var submittedFrames: UInt64 = 0
+    private(set) var lastFrameWasUnchanged = false
+    private var settledFrame: SettledWindowFrame?
+    private var lastFrameTime: Double = 0
 
     public var hitTester = RuneOverlayHitTester()
     public var includeModifierKeys: Bool = false
 
-    var onEvaluateFrame: ((_ nowSeconds: Double, _ settle: Bool) -> (scene: RefScene, regions: [MotionRect], isAnimating: Bool, srgbBlend: Bool))?
+    var onEvaluateFrame: ((_ nowSeconds: Double, _ settle: Bool, _ renderer: MetalRenderer,
+                           _ nativeMaterials: Bool) -> (frame: RenderFrame, regions: [MotionRect], isAnimating: Bool)?)?
+    var onPresentFrame: ((RenderFrame, CAMetalDrawable, MetalRenderer, Double, Double, Bool) -> Bool)?
     var onPointerMove: ((_ point: Vec2, _ mods: Mods, _ nowSeconds: Double) -> Void)?
     var onPointerExit: ((_ nowSeconds: Double) -> Void)?
     var onPointerDown: ((_ point: Vec2, _ button: PointerButton, _ mods: Mods, _ nowSeconds: Double) -> Void)?
@@ -154,13 +161,22 @@ public final class RuneOverlayMetalView<State>: NSView {
     var onKeyDown: ((_ event: KeyEvent, _ nowSeconds: Double) -> Bool)?
     var onAppearanceChanged: ((_ isDark: Bool) -> Void)?
     var onNeedsResyncGeometry: ((_ width: Float, _ height: Float, _ scale: Float) -> Void)?
+    var onWindowOrigin: ((MacOSWindowOrigin?) -> Void)?
+    private var originWatch: MacOSWindowOriginWatch?
     var onFailure: ((_ message: String) -> Void)?
     weak var pointerState: OverlayPointerState?
     var onRegionsUpdated: (([MotionRect]) -> Void)?
+    /// nil while there is pending work, infinity if no future timer is armed.
+    var restingDeadline: ((_ frameTime: Double) -> Double?)?
     var onSyncPassthrough: (() -> Void)?
     var onAfterFrame: ((RuneOverlayMetalView<State>) -> Void)?
 
-    public init(frame: NSRect, srgbBlend: Bool = true) {
+    public convenience init(frame: NSRect, srgbBlend: Bool = true) {
+        self.init(frame: frame, srgbBlend: srgbBlend, screen: NSScreen.main)
+    }
+
+    init(frame: NSRect, srgbBlend: Bool, screen: NSScreen?, startTime: CFTimeInterval = CACurrentMediaTime()) {
+        self.startTime = startTime
         super.init(frame: frame)
         self.wantsLayer = true
         metalLayer.pixelFormat = .bgra8Unorm_srgb
@@ -169,7 +185,7 @@ public final class RuneOverlayMetalView<State>: NSView {
         metalLayer.backgroundColor = NSColor.clear.cgColor
         metalLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
         do {
-            let r = try MetalRenderer()
+            let r = try MetalRenderer(device: MetalAdapterPicker.forScreen(screen))
             self.renderer = r
             metalLayer.device = r.device
         } catch {
@@ -222,6 +238,11 @@ public final class RuneOverlayMetalView<State>: NSView {
         syncDrawableGeometry()
     }
 
+    override public func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        originWatch = MacOSWindowOriginWatch(window: window) { [weak self] origin in self?.onWindowOrigin?(origin) }
+    }
+
     override public func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         syncDrawableGeometry()
@@ -247,7 +268,9 @@ public final class RuneOverlayMetalView<State>: NSView {
     }
 
     @discardableResult
-    public func renderFrame(settle: Bool = false, visible: Bool = true, drawing: Bool = true) -> OverlaySurfaceSnapshot {
+    public func renderFrame(settle: Bool = false, visible: Bool = true, drawing: Bool = true,
+                            targetTimestamp: CFTimeInterval? = nil, quietTimer: Bool = false) -> OverlaySurfaceSnapshot {
+        lastFrameWasUnchanged = false
         let scale = Float(window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0)
         let w = Float(max(1, bounds.width))
         let h = Float(max(1, bounds.height))
@@ -258,9 +281,15 @@ public final class RuneOverlayMetalView<State>: NSView {
             metalLayer.drawableSize = CGSize(width: pxW, height: pxH)
         }
 
-        guard let eval = onEvaluateFrame else {
+        let evaluationStart = CACurrentMediaTime()
+        let frameTime = max(lastFrameTime, (targetTimestamp ?? evaluationStart) - startTime)
+        lastFrameTime = frameTime
+        let materialMode = MaterialMode.launchMode
+        guard let renderer,
+              var result = onEvaluateFrame?(frameTime, settle, renderer, window?.isOpaque == false && materialMode != .fallback)
+        else {
             return OverlaySurfaceSnapshot(
-                frameCount: frameCounter,
+                frameCount: submittedFrames,
                 pixelWidth: pxW,
                 pixelHeight: pxH,
                 backingScale: scale,
@@ -271,31 +300,57 @@ public final class RuneOverlayMetalView<State>: NSView {
             )
         }
 
-        let result = eval(nowSeconds(), settle)
+        result.frame.clearColor = .zero
+        let format: MTLPixelFormat = result.frame.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
+        if metalLayer.pixelFormat != format { metalLayer.pixelFormat = format }
         hitTester.regions = result.regions
         pointerState?.regions = result.regions
         onRegionsUpdated?(result.regions)
 
-        if let renderer, bounds.width > 0, bounds.height > 0, let drawable = metalLayer.nextDrawable() {
-            renderer.render(scene: result.scene, to: drawable)
+        let deadline = visible && !result.isAnimating ? restingDeadline?(frameTime) : nil
+        let saveFrame = deadline?.isFinite == true
+        let candidate = deadline != nil && (quietTimer || saveFrame) ? SettledWindowFrame(result.frame, scale: scale) : nil
+        lastFrameWasUnchanged = quietTimer && candidate != nil && candidate == settledFrame
+        settledFrame = nil
+        if lastFrameWasUnchanged {
+            if saveFrame { settledFrame = candidate }
+        } else if bounds.width > 0, bounds.height > 0, let drawable = metalLayer.nextDrawable() {
+            let updateMs = (CACurrentMediaTime() - evaluationStart) * 1000
+            let submitted = RuneMaterialHost.present(host: &materialHost, draws: result.frame.materials, in: self,
+                                                     layer: metalLayer, scale: CGFloat(scale), mode: materialMode) { synced -> Bool in
+                if let onPresentFrame { return onPresentFrame(result.frame, drawable, renderer, frameTime, updateMs, synced) }
+                if case let .failure(error) = renderer.draw(frame: result.frame, to: drawable, synchronized: synced) {
+                    onFailure?(error.localizedDescription)
+                    return false
+                }
+                return true
+            }
+            if submitted {
+                submittedFrames &+= 1
+                if saveFrame { settledFrame = candidate }
+            }
         }
-        frameCounter &+= 1
         if visible {
             onAfterFrame?(self)
         }
         return OverlaySurfaceSnapshot(
-            frameCount: frameCounter,
+            frameCount: submittedFrames,
             pixelWidth: pxW,
             pixelHeight: pxH,
             backingScale: scale,
-            srgbBlend: result.srgbBlend,
+            srgbBlend: result.frame.srgbBlend,
             isVisible: visible,
             isDrawing: drawing,
             isAnimating: result.isAnimating
         )
     }
 
+    fileprivate func forgetSettledFrame() {
+        settledFrame = nil
+    }
+
     public func releaseGpuResources() {
+        forgetSettledFrame()
         renderer = nil
         metalLayer.device = nil
         metalLayer.sublayers = nil
@@ -441,10 +496,17 @@ public final class RuneOverlayMacOSHost<State> {
     public private(set) var surfaceDescription: String?
     public let pointerState = OverlayPointerState()
 
-    private var frameTimer: Timer?
+    private lazy var displayLink = MacOSDisplayLinkDriver { [weak self] in self?.frameOpportunity() }
+    var clockOrigin = CACurrentMediaTime()
+    private var lastFramelessPoll = -Double.infinity
+    private var occlusionObserver: NSObjectProtocol?
+    private var frameRequested = false
+    private var quietTimerRequested = false
+    private var retryAt: Double?
+    private var retryDelay = 1.0 / 60.0
     private var holdDeadlineTimer: Timer?
-    private nonisolated(unsafe) var globalMouseMonitor: Any?
-    private nonisolated(unsafe) var localMouseMonitor: Any?
+    private var globalMouseMonitor: Any?
+    private var localMouseMonitor: Any?
     private let fnKeyMonitor = FnKeyMonitor()
 
     public var resolvedPlacementSize: Vec2
@@ -459,6 +521,13 @@ public final class RuneOverlayMacOSHost<State> {
     public var onHideCleanup: (() -> Void)?
     public var configureView: ((RuneOverlayMetalView<State>) -> Void)?
     public var shouldKeepDrawing: (() -> Bool)?
+    var nextWake: (() -> Double?)?
+    var nextFramelessWake: (() -> Double?)?
+    var pollFrameless: ((_ now: Double) -> Void)?
+    var pollResting: ((_ now: Double) -> Bool)?
+    var canRestAfterFrame: (() -> Bool)?
+    var canDraw: (() -> Bool)?
+    var onOcclusion: ((Bool) -> Bool)?
 
     public init(
         size: Vec2,
@@ -478,7 +547,12 @@ public final class RuneOverlayMacOSHost<State> {
         )
     }
 
-    deinit {
+    isolated deinit {
+        displayLink.stop()
+        holdDeadlineTimer?.invalidate()
+        fnKeyMonitor.stop()
+        panel?.orderOut(nil)
+        if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
         if let monitor = globalMouseMonitor {
             NSEvent.removeMonitor(monitor)
         }
@@ -526,7 +600,8 @@ public final class RuneOverlayMacOSHost<State> {
 
         let view = RuneOverlayMetalView<State>(
             frame: NSRect(origin: .zero, size: targetFrame.size),
-            srgbBlend: options.srgbBlend
+            srgbBlend: options.srgbBlend,
+            screen: p.screen, startTime: clockOrigin
         )
         view.includeModifierKeys = options.modifierKeys
         view.hitTester.input = options.input
@@ -546,15 +621,28 @@ public final class RuneOverlayMacOSHost<State> {
             self?.onFailure?(msg)
         }
         configureView?(view)
+        view.restingDeadline = { [weak self] time in
+            guard let self, self.canRestAfterFrame?() == true else { return nil }
+            let deadline = self.nextWake?() ?? .infinity
+            return deadline > time + 1 / self.displayLink.refreshHz ? deadline : nil
+        }
 
-        p.contentView = view
+        RuneMaterialHost.install(view, in: p)
         p.setFrame(targetFrame, display: false)
         view.syncDrawableGeometry()
 
         self.panel = p
         self.metalView = view
+        occlusionObserver = NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
+                                                                    object: p, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.presence.isVisible else { return }
+                self.sampleOcclusion()
+                self.scheduleNextFrame()
+            }
+        }
         _ = fnKeyMonitor.start(on: p)
-        let deviceName = MTLCreateSystemDefaultDevice()?.name ?? "Metal"
+        let deviceName = view.deviceName ?? "Metal"
         self.surfaceDescription = "macOS NSPanel Metal (\(deviceName))"
         capabilities = OverlayCapabilities(
             captureExclusion: presence.requested ? .requested : .supported,
@@ -576,6 +664,7 @@ public final class RuneOverlayMacOSHost<State> {
             onSurfaceSnapshot?(snap)
         }
         carryOut(presence.step(.prewarmEnds))
+        scheduleNextFrame()
     }
 
     public func show(fadeSeconds: Double, settleBeforeReveal: Bool) {
@@ -583,16 +672,21 @@ public final class RuneOverlayMacOSHost<State> {
         guard ensurePanel() != nil else { return }
         placePanel()
         if !wasFadingOut, let view = metalView {
+            frameRequested = false
+            quietTimerRequested = false
+            let previous = view.submittedFrames
             let snap = view.renderFrame(settle: settleBeforeReveal, visible: true, drawing: true)
+            trackSubmission(snap, previous: previous, view: view)
             onSurfaceSnapshot?(snap)
         }
         carryOut(presence.step(.show(fadeSeconds: fadeSeconds)))
         syncMousePassthrough()
         installMouseMonitorsIfNeeded()
-        scheduleFrameLoopIfNeeded()
+        scheduleNextFrame()
     }
 
     public func hide(fadeSeconds: Double) {
+        defer { scheduleNextFrame() }
         onHideCleanup?()
         removeMouseMonitors()
         if panel == nil {
@@ -612,6 +706,8 @@ public final class RuneOverlayMacOSHost<State> {
     public func releasePanel() {
         onHideCleanup?()
         fnKeyMonitor.stop()
+        if let occlusionObserver { NotificationCenter.default.removeObserver(occlusionObserver) }
+        occlusionObserver = nil
         stopFrameLoop()
         removeMouseMonitors()
         pointerState.stopped()
@@ -622,6 +718,7 @@ public final class RuneOverlayMacOSHost<State> {
         panel = nil
         metalView = nil
         onPanelStateChanged?(nil, capabilities)
+        scheduleNextFrame()
     }
 
     /// Drains any recorded `Fn` / Globe transitions captured on this overlay panel.
@@ -666,6 +763,7 @@ public final class RuneOverlayMacOSHost<State> {
         syncMousePassthrough()
         if presence.isVisible {
             installMouseMonitorsIfNeeded()
+            scheduleNextFrame()
         }
     }
 
@@ -740,7 +838,7 @@ public final class RuneOverlayMacOSHost<State> {
         let frame = screen.frame
         let local = OverlayGeometry.localRect(
             at: overlayPlacement,
-            placement: options.placement,
+            placement: options.resolvedPlacement,
             area: Vec2(Float(frame.size.width), Float(frame.size.height))
         )
         let appKit = OverlayGeometry.appKitFrame(
@@ -824,6 +922,7 @@ public final class RuneOverlayMacOSHost<State> {
                 let followUp = self.presence.step(.fadeEnded(fence: fence))
                 self.carryOut(followUp)
                 self.onFadeCompleted?(self.presence.isVisible, self.presence.isOrdered)
+                defer { self.scheduleNextFrame() }
                 if !self.presence.isOrdered {
                     self.panel?.allowsKeyFocus = (self.options.keyPolicy == .activating)
                     self.pointerState.stopped()
@@ -942,39 +1041,100 @@ public final class RuneOverlayMacOSHost<State> {
         holdDeadlineTimer = timer
     }
 
-    private func scheduleFrameLoopIfNeeded() {
-        guard frameTimer == nil, presence.isOrdered else { return }
-        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let view = self.metalView else { return }
-                guard self.presence.isOrdered else {
-                    self.stopFrameLoop()
-                    return
-                }
-                self.handlePointerSample()
-                if self.shouldKeepDrawing?() == true || view.hitTester.resolvedInput == .regions || self.pointerState.isCaptured {
-                    let snap = view.renderFrame(
-                        settle: false,
-                        visible: self.presence.isVisible,
-                        drawing: self.presence.isOrdered
-                    )
-                    self.onSurfaceSnapshot?(snap)
-                    self.syncMousePassthrough()
-                    if !snap.isAnimating && self.shouldKeepDrawing?() == false && !self.pointerState.isCaptured {
-                        self.stopFrameLoop()
-                    }
-                }
-            }
+    private func sampleOcclusion() {
+        if let panel, presence.isVisible, panel.isVisible,
+           onOcclusion?(!panel.occlusionState.contains(.visible)) == true {
+            retryAt = nil
+            retryDelay = 1 / displayLink.refreshHz
+            metalView?.forgetSettledFrame()
         }
-        RunLoop.main.add(timer, forMode: .common)
-        frameTimer = timer
+    }
+
+    /// External publications and input share one pending frame until a display opportunity.
+    func requestFrame() {
+        guard presence.isOrdered else { return }
+        quietTimerRequested = false
+        frameRequested = true
+        frameOpportunity()
+    }
+
+    func scheduleNextFrame() {
+        let now = CACurrentMediaTime() - clockOrigin
+        let covered = presence.isOrdered && canDraw?() == false
+        guard let view = metalView, presence.isOrdered, !covered, (retryAt ?? 0) <= now else {
+            // A covered panel rechecks WindowServer even without an uncover notification.
+            let retry = covered ? now + 1 : (retryAt ?? .infinity)
+            let poll = (nextFramelessWake?()).map { max($0, lastFramelessPoll + 1 / displayLink.refreshHz) }
+            let next = min(poll ?? .infinity, retry)
+            displayLink.sleep(until: next.isFinite ? next : nil, now: now, timeScale: 1)
+            return
+        }
+        if frameRequested || shouldKeepDrawing?() == true {
+            displayLink.start(in: view)
+            return
+        }
+        let deadline = nextWake?()
+        if let deadline, deadline <= now + 1 / displayLink.refreshHz {
+            displayLink.start(in: view)
+        } else {
+            displayLink.sleep(until: deadline, now: now, timeScale: 1)
+        }
+    }
+
+    private func frameOpportunity() {
+        let now = CACurrentMediaTime() - clockOrigin
+        if presence.isOrdered, canDraw?() == false { sampleOcclusion() }
+        guard let view = metalView, presence.isOrdered, canDraw?() != false, (retryAt ?? 0) <= now else {
+            if let due = nextFramelessWake?(), due <= now, lastFramelessPoll + 1 / displayLink.refreshHz <= now {
+                lastFramelessPoll = now
+                pollFrameless?(now)
+            }
+            scheduleNextFrame()
+            return
+        }
+        if !frameRequested && shouldKeepDrawing?() != true {
+            guard let deadline = nextWake?(), deadline <= now,
+                  pollResting?(now) != false else { scheduleNextFrame(); return }
+            quietTimerRequested = true
+        }
+        guard let target = displayLink.beginFrame(in: view, paced: true).target else {
+            frameRequested = true
+            return
+        }
+        defer { displayLink.endFrame() }
+        frameRequested = false
+        let quietTimer = quietTimerRequested
+        quietTimerRequested = false
+        let previous = view.submittedFrames
+        let snapshot = view.renderFrame(visible: presence.isVisible, drawing: true, targetTimestamp: target, quietTimer: quietTimer)
+        trackSubmission(snapshot, previous: previous, view: view)
+        onSurfaceSnapshot?(snapshot)
+        scheduleNextFrame()
+    }
+
+    private func trackSubmission(_ snapshot: OverlaySurfaceSnapshot, previous: UInt64, view: RuneOverlayMetalView<State>) {
+        if view.lastFrameWasUnchanged { return }
+        if snapshot.frameCount != previous {
+            displayLink.submitted()
+            retryAt = nil
+            retryDelay = 1 / displayLink.refreshHz
+        } else if view.hasRenderer, view.onEvaluateFrame != nil {
+            // WindowServer can decline a drawable while a panel is changing spaces.
+            frameRequested = true
+            retryAt = view.nowSeconds() + retryDelay
+            retryDelay = min(1, retryDelay * 2)
+        }
     }
 
     private func stopFrameLoop() {
         holdDeadlineTimer?.invalidate()
         holdDeadlineTimer = nil
-        frameTimer?.invalidate()
-        frameTimer = nil
+        frameRequested = false
+        quietTimerRequested = false
+        retryAt = nil
+        retryDelay = 1 / displayLink.refreshHz
+        displayLink.stop()
     }
+
 }
 #endif

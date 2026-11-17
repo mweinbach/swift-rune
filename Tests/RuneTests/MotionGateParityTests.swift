@@ -9,12 +9,14 @@ struct GpuHealthAndBackendParityTests {
     func gpuErrorLogDeduplicationAndQuiet() {
         var log = GpuErrorLog()
         #expect(log.note("device lost A") == .first)
-        #expect(log.note("device lost A") == .quiet)
+        for _ in 0..<300 { #expect(log.note("device lost A") == .quiet) }
         #expect(log.note("swapchain stale B") == .new)
         #expect(log.note("command buffer timeout C") == .new)
         #expect(log.note("fence error D") == .new)
         #expect(log.note("fifth error E") == .mute)
-        #expect(log.note("extra noise F") == .quiet)
+        for meaning in ["extra noise F", "extra noise G", "extra noise H", "device lost A"] {
+            #expect(log.note(meaning) == .quiet)
+        }
     }
 
     @Test("GpuBackendPolicy prioritizes env over app choice over platform default and formats description")

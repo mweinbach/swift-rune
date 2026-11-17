@@ -321,28 +321,40 @@ public struct ImagePage: Sendable {
 
     public init(width: UInt32, height: UInt32) {
         let w = (width > IMAGE_ATLAS_SIZE || height > IMAGE_ATLAS_SIZE) ? width : IMAGE_ATLAS_SIZE
-        let h = (width > IMAGE_ATLAS_SIZE || height > IMAGE_ATLAS_SIZE) ? height : IMAGE_ATLAS_SIZE
+        let h = (width > IMAGE_ATLAS_SIZE || height > IMAGE_ATLAS_SIZE) ? height : Self.shelfHeight(for: height)
         self.width = w
         self.height = h
         self.data = [UInt8](repeating: 0, count: Int(w) * Int(h) * 4)
         self.dirty = nil
     }
 
+    private static func shelfHeight(for required: UInt32) -> UInt32 {
+        var rows: UInt32 = 128
+        while rows < required && rows < IMAGE_ATLAS_SIZE { rows *= 2 }
+        return rows
+    }
+
     mutating func allocate(width w: UInt32, height h: UInt32) -> (UInt32, UInt32)? {
-        guard w <= width, h <= height else { return nil }
+        let shelf = width == IMAGE_ATLAS_SIZE && height <= IMAGE_ATLAS_SIZE
+        guard w <= width, h <= (shelf ? IMAGE_ATLAS_SIZE : height) else { return nil }
         if shelfX + w > width {
             shelfY += shelfH
             shelfX = 0
             shelfH = 0
         }
-        guard shelfY + h <= height else { return nil }
+        if shelfY + h > height {
+            guard shelf, shelfY + h <= IMAGE_ATLAS_SIZE else { return nil }
+            height = Self.shelfHeight(for: shelfY + h)
+            data.append(contentsOf: repeatElement(0, count: Int(height) * Int(width) * 4 - data.count))
+            dirty = 0..<height
+        }
         let at = (shelfX, shelfY)
         shelfX += w
         shelfH = max(shelfH, h)
         return at
     }
 
-    fileprivate mutating func write(_ source: some ContiguousBytes, x: UInt32, y: UInt32, w: UInt32, h: UInt32) {
+    mutating func write(_ source: some ContiguousBytes, x: UInt32, y: UInt32, w: UInt32, h: UInt32) {
         let rowBytes = Int(w) * 4
         let pageStride = Int(width) * 4
         let offset = Int(y) * pageStride + Int(x) * 4
@@ -403,7 +415,7 @@ public struct ImageAtlas: Sendable {
         let mip = selected?.mip
         let w = mip?.width ?? snap.width
         let h = mip?.height ?? snap.height
-        guard mip != nil || snap.baseBytes.count >= Int(w) * Int(h) * 4 else { return nil }
+        guard mip != nil || (snap.frameBytes?.count ?? snap.baseBytes.count) >= Int(w) * Int(h) * 4 else { return nil }
 
         let key = SlotKey(pixelsID: pixels.id, level: selected?.level ?? 0)
         if let existing = slots[key], existing.w != w || existing.h != h {
@@ -423,6 +435,8 @@ public struct ImageAtlas: Sendable {
             copies &+= 1
             if let mip {
                 pages[slot.page].write(mip.rgba, x: slot.x, y: slot.y, w: w, h: h)
+            } else if let frame = snap.frameBytes {
+                pages[slot.page].write(frame, x: slot.x, y: slot.y, w: w, h: h)
             } else {
                 pages[slot.page].write(snap.baseBytes, x: slot.x, y: slot.y, w: w, h: h)
             }
@@ -431,53 +445,45 @@ public struct ImageAtlas: Sendable {
     }
 
     public mutating func endFrame() {
-        let firstKept = pages.first.map { $0.width <= IMAGE_ATLAS_SIZE && $0.height <= IMAGE_ATLAS_SIZE } ?? false
-        slots = slots.filter { _, slot in
-            pages[slot.page].touched || (slot.page == 0 && firstKept)
+        finishPages(resting: false)
+    }
+
+    /// At rest, forget unseen images including those in the spare first shelf.
+    public mutating func rest() {
+        finishPages(resting: true)
+    }
+
+    private mutating func finishPages(resting: Bool) {
+        let firstSpare = !resting && pages.first.map { $0.width <= IMAGE_ATLAS_SIZE && $0.height <= IMAGE_ATLAS_SIZE } == true
+        var livePages = Set<Int>()
+        var liveImages = Set<UInt64>()
+        slots = slots.filter { key, slot in
+            let page = pages[slot.page]
+            let keep = resting ? page.shown : page.touched || (slot.page == 0 && firstSpare)
+            if keep {
+                livePages.insert(slot.page)
+                liveImages.insert(key.pixelsID)
+            }
+            return keep
         }
-        playback.retain(Set(slots.keys.map(\.pixelsID)))
+        playback.retain(liveImages)
         for i in pages.indices {
-            pages[i].shown = pages[i].touched
-            pages[i].touched = false
-            let hasSlot = slots.values.contains { $0.page == i }
-            if !hasSlot {
+            if !resting {
+                pages[i].shown = pages[i].touched
+                pages[i].touched = false
+            }
+            if !livePages.contains(i) {
                 pages[i].shelfX = 0
                 pages[i].shelfY = 0
                 pages[i].shelfH = 0
                 pages[i].dirty = nil
-                if pages[i].width > IMAGE_ATLAS_SIZE || pages[i].height > IMAGE_ATLAS_SIZE {
+                if resting || pages[i].width > IMAGE_ATLAS_SIZE || pages[i].height > IMAGE_ATLAS_SIZE {
                     pages[i].data = []
                 }
             }
         }
-        let keepCount = (slots.values.map { $0.page + 1 }.max()) ?? 0
-        if keepCount < pages.count {
-            pages.removeSubrange(keepCount..<pages.count)
-        }
-    }
-
-    /// Window at rest (`ImageAtlas::rest`): forgets images not shown in the last frame (including page 0)
-    /// and releases the CPU buffer of every empty page.
-    public mutating func rest() {
-        let currentPages = pages
-        slots = slots.filter { _, slot in
-            slot.page < currentPages.count && currentPages[slot.page].shown
-        }
-        playback.retain(Set(slots.keys.map(\.pixelsID)))
-        for i in pages.indices {
-            let hasSlot = slots.values.contains { $0.page == i }
-            if !hasSlot {
-                pages[i].shelfX = 0
-                pages[i].shelfY = 0
-                pages[i].shelfH = 0
-                pages[i].dirty = nil
-                pages[i].data = []
-            }
-        }
-        let keepCount = (slots.values.map { $0.page + 1 }.max()) ?? 0
-        if keepCount < pages.count {
-            pages.removeSubrange(keepCount..<pages.count)
-        }
+        let keepCount = (livePages.max() ?? -1) + 1
+        if keepCount < pages.count { pages.removeLast(pages.count - keepCount) }
     }
 
     public mutating func invalidate() {

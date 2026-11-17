@@ -7,6 +7,7 @@ typedef struct RuneLayerCache RuneLayerCache;
 RuneLayerCache *rune_cache_create(const RuneGLAPI *gl);
 void rune_cache_destroy(RuneLayerCache *cache);
 void rune_cache_clear(RuneLayerCache *cache);
+void rune_cache_rest(RuneLayerCache *cache);
 void rune_cache_budget(RuneLayerCache *cache, uint64_t budget);
 uint64_t rune_cache_budget_bytes(const RuneLayerCache *cache);
 RuneGLLayerCacheStats rune_cache_stats(const RuneLayerCache *cache);

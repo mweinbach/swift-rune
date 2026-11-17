@@ -78,29 +78,28 @@ public struct MotionElement: Sendable, Equatable {
 
     /// Fixed-cost hash of up to the first 64 and last 64 UTF-8 bytes; 0 for empty or secure text.
     public static func computeTextHash(_ text: String) -> UInt64 {
-        let bytes = Array(text.utf8)
-        guard !bytes.isEmpty else { return 0 }
-        var h: UInt64 = 0xcbf2_9ce4_8422_2325 ^ UInt64(bytes.count)
-        func mix(_ slice: ArraySlice<UInt8>) {
-            var idx = slice.startIndex
-            while idx < slice.endIndex {
-                let end = min(idx + 8, slice.endIndex)
-                var word: UInt64 = 0
-                for (shiftIdx, bIdx) in (idx..<end).enumerated() {
-                    word |= UInt64(slice[bIdx]) << UInt64(shiftIdx * 8)
+        var text = text
+        return text.withUTF8 { bytes in
+            guard !bytes.isEmpty else { return 0 }
+            var h: UInt64 = 0xcbf2_9ce4_8422_2325 ^ UInt64(bytes.count)
+            func mix(_ range: Range<Int>) {
+                var idx = range.lowerBound
+                while idx < range.upperBound {
+                    let end = min(idx + 8, range.upperBound)
+                    var word: UInt64 = 0
+                    for i in idx..<end {
+                        word |= UInt64(bytes[i]) << ((i - idx) * 8)
+                    }
+                    h = (h ^ word) &* 0x9e37_79b9_7f4a_7c15
+                    h = (h << 29) | (h >> 35)
+                    idx = end
                 }
-                h = (h ^ word) &* 0x9e37_79b9_7f4a_7c15
-                h = (h << 29) | (h >> 35)
-                idx = end
             }
+            let head = min(bytes.count, 64)
+            mix(0..<head)
+            mix(max(head, bytes.count - 64)..<bytes.count)
+            return max(h, 1)
         }
-        let head = min(bytes.count, 64)
-        mix(bytes[0..<head])
-        let tailStart = max(head, bytes.count - 64)
-        if tailStart < bytes.count {
-            mix(bytes[tailStart..<bytes.count])
-        }
-        return max(h, 1)
     }
 }
 
@@ -118,8 +117,6 @@ internal struct PoseNodeSnapshot {
 
 internal struct RawPoseNodeData {
     var nodeId: NodeId
-    var path: String
-    var key: String?
     var anchorKey: String?
     var rotation: Float
     var scale: Float
@@ -130,7 +127,38 @@ internal struct RawPoseNodeData {
     var ownLiveIntent: UInt32
     var ownMotionLive: Bool
     var instantHoverGroupRule: Bool
-    var loopActive: Bool
+    var loopPhase: Double?
+    var virtualExtent: Bool
+    var revealing: Bool
+}
+
+/// Paint publishes rectangles, opacity and movement in ElementInfo. Retain only additional pose data.
+internal struct NativeFrameInspection {
+    var rawPoseByPath: [String: RawPoseNodeData]
+    var landingHolds: Set<NodeId>
+    var elementCount: Int
+    var hasInheritedFlags: Bool
+    var a11yMaterialized = true
+    var inheritedFlagsMaterialized = false
+    var materialized = false
+}
+
+private enum PoseVisit: UInt8 { case unseen, visiting, done }
+
+private struct PoseInheritance {
+    var moving = false
+    var scrolling = false
+    var growing = false
+    var motionLive = false
+    var intent: UInt32 = 0
+
+    mutating func formUnion(_ other: Self) {
+        moving = moving || other.moving
+        scrolling = scrolling || other.scrolling
+        growing = growing || other.growing
+        motionLive = motionLive || other.motionLive
+        intent |= other.intent
+    }
 }
 
 extension Runtime {
@@ -290,14 +318,100 @@ extension Runtime {
         return false
     }
 
+    internal func movingGrowthPaintPaths() -> Set<String> {
+        var paths: Set<String> = []
+        for (key, row) in growthRows where row.track.moving {
+            if let path = slice2State.growthRowPathByKey[key] {
+                paths.insert(path)
+            } else if let separator = key.firstIndex(of: ":") {
+                paths.insert(String(key[key.index(after: separator)...]))
+            }
+        }
+        return paths
+    }
+
+    internal func needsPaintPose(
+        _ node: FlatNode, el: El<State>, rotation: Float, shadows: [Shadow], growing: Bool, inFlight: Bool
+    ) -> Bool {
+        if rotation != 0 || !shadows.isEmpty || el.anchor != nil || !el.liveBindings.isEmpty
+            || el.groupOpacity != nil || !el.layout.scrollAxes.isEmpty || el.layoutAnim?.travel == .screen
+            || growing || inFlight { return true }
+        if (!loopRuntime.tracks.isEmpty && loopRuntime.tracks[node.nodeId] != nil)
+            || (!activeVirtualPaths.isEmpty && activeVirtualPaths.contains(node.path))
+            || (el.iconPayload != nil && scene.store.isMoving(node.nodeId, Props.ICON_TURN)) { return true }
+        let extras = el.runtimeExtras
+        return !extras.isEmpty && (extras["motionGate.motionIntent"] != nil
+            || extras["motionGate.inGrowingRow"] != nil || extras["motionGate.revealing"] != nil)
+    }
+
+    internal func inspectPaintedNode(
+        _ snap: FlatNode, el: El<State>, rotation: Float, scale: Float, shadows: [Shadow], liveShadowColor: Color?,
+        spatialMoving: Bool, flightTarget: Bool, inFlight: Bool, growthMoving: Bool? = nil
+    ) -> RawPoseNodeData {
+        var nodeLoopPhase: Double?
+        var ownLoopActive = false
+        if let track = loopRuntime.tracks[snap.nodeId] {
+            let nodeTime = scene.store.nodeTime(snap.nodeId)
+            let sequence: Bool
+            if case .sequence = el.loopingSpec?.kind { sequence = true } else { sequence = false }
+            nodeLoopPhase = reducedMotion && !sequence ? 0 : track.phase(at: nodeTime)
+            ownLoopActive = !reducedMotion && track.isActive(at: nodeTime)
+        }
+        let isOwnScrollGliding = !el.layout.scrollAxes.isEmpty
+            && (scrollGlidingPaths.contains(snap.path) || scrollStore.isMoving(NodeId.hash("scroll:" + snap.path), Props.SCROLL))
+        let isOwnScrollMoving = isOwnScrollGliding || (!el.layout.scrollAxes.isEmpty && frameMovedScrollPaths.contains(snap.path))
+        let rowTrackMoving = growthMoving ?? (!growthRows.isEmpty && (growthRows["growth:\(snap.path)"]?.track.moving == true
+            || growthRows["fold:\(snap.path)"]?.track.moving == true))
+        let isOwnGrowthMoving = rowTrackMoving || ((el.runtimeExtras["motionGate.inGrowingRow"] as? Bool) ?? false)
+        let nodeRevealing = flightTarget
+            || ((el.runtimeExtras["motionGate.revealing"] as? Bool) ?? false)
+        let ownPaintPoseMoving = paintPoseSpringing(for: snap.nodeId, shadowCount: shadows.count)
+        let nodeOwnMoving = spatialMoving
+            || ownPaintPoseMoving
+            || ownLoopActive
+            || inFlight
+            || isOwnGrowthMoving
+        let (ownLiveBits, ownMotionLive) = computeOwnLiveIntent(el: el)
+        let isVirtualExt = activeVirtualPaths.contains(snap.path)
+            && el.background.a == 0
+            && el.borderWidth == 0
+            && shadows.isEmpty
+            && el.plainText == nil
+            && el.richSpans == nil
+            && el.liveText == nil
+            && el.iconPayload == nil
+
+        var paintedShadows = shadows
+        if let liveShadowColor, !paintedShadows.isEmpty { paintedShadows[0].color = liveShadowColor }
+        return RawPoseNodeData(
+            nodeId: snap.nodeId,
+            anchorKey: el.anchor?.key,
+            rotation: rotation,
+            scale: scale,
+            shadows: paintedShadows,
+            ownMoving: nodeOwnMoving || isOwnScrollGliding,
+            ownScrolling: isOwnScrollMoving,
+            ownGrowingRow: isOwnGrowthMoving,
+            ownLiveIntent: ownLiveBits,
+            ownMotionLive: ownMotionLive,
+            instantHoverGroupRule: computeInstantHoverGroupRule(snap: snap),
+            loopPhase: nodeLoopPhase,
+            virtualExtent: isVirtualExt,
+            revealing: nodeRevealing
+        )
+    }
+
     internal func finalizeElementTreeSnapshots(
         infos: inout [ElementInfo],
-        rawPoseByPath: [String: RawPoseNodeData]
+        rawPoseByPath: [String: RawPoseNodeData],
+        landingHolds: Set<NodeId>,
+        nativeCount: Int? = nil, motionElements: Bool = true
     ) {
-        let count = infos.count
-        var infoIdxByPath: [String: Int] = Dictionary(minimumCapacity: count)
-        for i in 0..<count {
-            infoIdxByPath[infos[i].path] = i
+        let count = nativeCount ?? infos.count
+        var infoIdxByPath: [String: Int] = [:]
+        if nativeCount == nil {
+            infoIdxByPath.reserveCapacity(count)
+            for i in 0..<count { infoIdxByPath[infos[i].path] = i }
         }
 
         // Resolve step_up index: anchored target (`el.anchor?.key`) first, else DFS tree parent.
@@ -305,7 +419,9 @@ extension Runtime {
         var treeParentIdx = [Int?](repeating: nil, count: count)
         for i in 0..<count {
             let info = infos[i]
-            if let pid = info.parentIndex, flatNodes.indices.contains(pid),
+            if nativeCount != nil {
+                treeParentIdx[i] = info.parentIndex
+            } else if let pid = info.parentIndex, flatNodes.indices.contains(pid),
                let mappedParent = infoIdxByPath[flatNodes[pid].path],
                mappedParent != i {
                 treeParentIdx[i] = mappedParent
@@ -316,7 +432,7 @@ extension Runtime {
                 }
             }
             if let anchorKey = rawPoseByPath[info.path]?.anchorKey {
-                if let matchIdx = infos.firstIndex(where: {
+                if let matchIdx = infos.prefix(count).firstIndex(where: {
                     !$0.exiting && selectsElementSelector(anchorKey, path: $0.path, key: $0.key)
                 }) {
                     stepUpIdx[i] = matchIdx
@@ -328,67 +444,64 @@ extension Runtime {
             }
         }
 
-        var effMoving = [Bool](repeating: false, count: count)
-        var effScrolling = [Bool](repeating: false, count: count)
-        var effGrowing = [Bool](repeating: false, count: count)
-        var effLiveIntent = [UInt32](repeating: 0, count: count)
-        var effMotionLive = [Bool](repeating: false, count: count)
-
-        for i in 0..<count {
-            let rawSelf = rawPoseByPath[infos[i].path]
-            var moving = infos[i].moving || (rawSelf?.ownMoving ?? false)
-            var scrolling = false
-            var growing = false
-            var intent = infos[i].liveIntent | (rawSelf?.ownLiveIntent ?? 0)
-            var motionLive = (rawSelf?.ownMotionLive ?? false)
-            if let nid = rawSelf?.nodeId, frameLandingHoldIds.contains(nid) {
-                intent |= 1 | 2
-                motionLive = true
+        // Most parents precede their children. An anchor can target any later node or form a cycle.
+        // Memoize each inclusive ancestor union once, including every member of an anchor cycle.
+        var inherited = [PoseInheritance]()
+        inherited.reserveCapacity(count)
+        for info in infos.prefix(count) {
+            let raw = rawPoseByPath[info.path]
+            let landing = !landingHolds.isEmpty && landingHolds.contains(raw?.nodeId ?? NodeId.hash(info.path))
+            inherited.append(PoseInheritance(
+                moving: info.moving || raw?.ownMoving == true,
+                scrolling: raw?.ownScrolling == true,
+                growing: raw?.ownGrowingRow == true,
+                motionLive: landing || raw?.ownMotionLive == true,
+                intent: (raw?.ownLiveIntent ?? 0) | (landing ? 1 | 2 : 0)
+                    | (raw?.instantHoverGroupRule == true ? 4 | 16 : 0)
+            ))
+        }
+        var visit = [PoseVisit](repeating: .unseen, count: count)
+        var chain: [Int] = []
+        for i in 0..<count where visit[i] == .unseen {
+            var cursor: Int? = i
+            while let c = cursor, visit[c] == .unseen {
+                visit[c] = .visiting
+                chain.append(c)
+                cursor = stepUpIdx[c]
             }
-            if rawSelf?.instantHoverGroupRule == true {
-                intent |= 4 | 16
-            }
-
-            var visited = Set<Int>()
-            var cur = stepUpIdx[i]
-            while let ancIdx = cur, !visited.contains(ancIdx) {
-                visited.insert(ancIdx)
-                let ancInfo = infos[ancIdx]
-                let ancRaw = rawPoseByPath[ancInfo.path]
-                if ancInfo.moving || (ancRaw?.ownMoving ?? false) { moving = true }
-                if ancRaw?.ownScrolling == true { scrolling = true }
-                if ancRaw?.ownGrowingRow == true { growing = true }
-                if let ar = ancRaw {
-                    intent |= ar.ownLiveIntent
-                    if ar.ownMotionLive { motionLive = true }
-                    if frameLandingHoldIds.contains(ar.nodeId) {
-                        intent |= 1 | 2
-                        motionLive = true
-                    }
-                    if ar.instantHoverGroupRule {
-                        intent |= 4 | 16
+            var parent = PoseInheritance()
+            if let c = cursor {
+                if visit[c] == .done {
+                    parent = inherited[c]
+                } else {
+                    for member in chain.reversed() {
+                        parent.formUnion(inherited[member])
+                        if member == c { break }
                     }
                 }
-                cur = stepUpIdx[ancIdx]
             }
-
-            effMoving[i] = moving
-            effScrolling[i] = scrolling
-            effGrowing[i] = growing
-            effLiveIntent[i] = intent
-            effMotionLive[i] = motionLive
-            infos[i].moving = moving
-            infos[i].scrolling = scrolling
-            infos[i].inGrowingRow = growing
-            infos[i].liveIntent = intent
+            while let member = chain.popLast() {
+                parent.formUnion(inherited[member])
+                inherited[member] = parent
+                visit[member] = .done
+            }
         }
 
         var nextPoseNodes: [PoseNodeSnapshot] = []
-        nextPoseNodes.reserveCapacity(count)
         var nextMotion: [MotionElement] = []
-        nextMotion.reserveCapacity(count)
+        if motionElements {
+            nextPoseNodes.reserveCapacity(count)
+            nextMotion.reserveCapacity(count)
+        }
 
         for i in 0..<count {
+            let motion = inherited[i]
+            let parent = stepUpIdx[i].map { inherited[$0] }
+            infos[i].moving = motion.moving
+            infos[i].scrolling = parent?.scrolling == true
+            infos[i].inGrowingRow = parent?.growing == true
+            infos[i].liveIntent |= motion.intent
+            guard motionElements else { continue }
             let info = infos[i]
             let raw = rawPoseByPath[info.path]
             let nid = raw?.nodeId ?? NodeId.hash(info.path)
@@ -401,14 +514,14 @@ extension Runtime {
                 rotation: raw?.rotation ?? 0,
                 scale: raw?.scale ?? info.scale,
                 shadows: raw?.shadows ?? [],
-                moving: effMoving[i]
+                moving: info.moving
             ))
 
             var flags: UInt16 = 0
             if info.exiting { flags |= MotionElement.EXITING }
-            if effScrolling[i] { flags |= MotionElement.SCROLLING }
-            if effGrowing[i] || info.revealing { flags |= MotionElement.GROWING }
-            if effMotionLive[i] { flags |= MotionElement.LIVE }
+            if info.scrolling { flags |= MotionElement.SCROLLING }
+            if info.inGrowingRow || info.revealing { flags |= MotionElement.GROWING }
+            if motion.motionLive { flags |= MotionElement.LIVE }
             if info.virtualExtent { flags |= MotionElement.VIRTUAL }
             if info.role == .text { flags |= MotionElement.TEXT }
             if info.loopPhase != nil { flags |= MotionElement.LOOP }
@@ -434,30 +547,84 @@ extension Runtime {
             ))
         }
 
-        lastPoseNodes = nextPoseNodes
-        lastMotionElements = nextMotion
-        frameMovedScrollPaths.removeAll(keepingCapacity: true)
-        frameLandingHoldIds.removeAll(keepingCapacity: true)
+        if motionElements {
+            lastPoseNodes = nextPoseNodes
+            lastMotionElements = nextMotion
+        }
+    }
+
+    internal func invalidateNativeMotionElements() {
+        nativeInspection?.materialized = false
+    }
+
+    internal func materializeNativeInspection(motionElements: Bool = true) {
+        guard let snapshot = nativeInspection, !snapshot.materialized,
+              motionElements || !snapshot.inheritedFlagsMaterialized else { return }
+        finalizeElementTreeSnapshots(
+            infos: &lastElements, rawPoseByPath: snapshot.rawPoseByPath,
+            landingHolds: snapshot.landingHolds, nativeCount: snapshot.elementCount, motionElements: motionElements
+        )
+        for index in snapshot.elementCount..<lastElements.count {
+            if let parent = lastElements[index].parentIndex, parent < snapshot.elementCount {
+                lastElements[index].moving = lastElements[parent].moving
+            }
+        }
+        nativeInspection?.inheritedFlagsMaterialized = true
+        nativeInspection?.materialized = motionElements
+    }
+
+    private func nativeInfoIndex(_ selector: String, count: Int) -> Int? {
+        let infos = lastElements.prefix(count)
+        if !selector.utf8.contains(0x2f), let exact = infos.firstIndex(where: { matchesAuthoredKey($0.key, selector) }) {
+            return exact
+        }
+        return infos.firstIndex { selectsElementSelector(selector, path: $0.path, key: $0.key) }
     }
 
     /// Drawn `[x, y, w, h]` in points and effective opacity (ancestors included) of the element
     /// matching `key`, exiting or not, as of the last frame (`elements.rs:406`).
     public func presented(_ key: String) -> (rect: [Float], opacity: Float)? {
-        if !key.contains("/"), let exact = lastPoseNodes.first(where: { $0.key == key }) {
-            return (exact.rect, exact.opacity)
+        if let nativeInspection {
+            guard let index = nativeInfoIndex(key, count: nativeInspection.elementCount) else { return nil }
+            let info = lastElements[index]
+            return (info.rect, info.opacity)
         }
-        guard let matched = lastPoseNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) else {
-            return nil
-        }
+        let exact = key.utf8.contains(0x2f) ? nil : lastPoseNodes.first { matchesAuthoredKey($0.key, key) }
+        guard let matched = exact ?? lastPoseNodes.first(where: {
+            selectsElementSelector(key, path: $0.path, key: $0.key)
+        }) else { return nil }
         return (matched.rect, matched.opacity)
     }
 
     /// The presented rotation, scale, and shadows of the element matching `key`, exiting or not,
     /// as of the last frame, and whether any spring or decorative loop still moves them (`elements.rs:497`).
     public func presentedPose(_ key: String) -> Pose? {
+        if let snapshot = nativeInspection, !snapshot.materialized {
+            guard let index = nativeInfoIndex(key, count: snapshot.elementCount) else { return nil }
+            let node = lastElements[index]
+            let raw = snapshot.rawPoseByPath[node.path]
+            var moving = node.moving || raw?.ownMoving == true
+            if !moving && snapshot.hasInheritedFlags {
+                var visited: Set<Int> = []
+                var cursor: Int? = index
+                while let i = cursor, visited.insert(i).inserted {
+                    let info = lastElements[i]
+                    let own = snapshot.rawPoseByPath[info.path]
+                    if info.moving || own?.ownMoving == true {
+                        moving = true
+                        break
+                    }
+                    cursor = info.parentIndex
+                    if let anchor = own?.anchorKey, let target = lastElements.prefix(snapshot.elementCount).firstIndex(where: {
+                        !$0.exiting && selectsElementSelector(anchor, path: $0.path, key: $0.key)
+                    }) { cursor = target }
+                }
+            }
+            return Pose(rotation: raw?.rotation ?? 0, scale: node.scale, shadows: raw?.shadows ?? [], moving: moving)
+        }
         let matched: PoseNodeSnapshot?
-        if !key.contains("/") {
-            matched = lastPoseNodes.first(where: { $0.key == key })
+        if !key.utf8.contains(0x2f) {
+            matched = lastPoseNodes.first(where: { matchesAuthoredKey($0.key, key) })
                 ?? lastPoseNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) })
         } else {
             matched = lastPoseNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) })
@@ -474,13 +641,15 @@ extension Runtime {
     /// Fills `out` with the presented `MotionElement`s of the last frame in tree order,
     /// preserving `out`'s existing capacity (`motion_elements.rs:78`).
     public func motionElements(_ out: inout [MotionElement]) {
+        materializeNativeInspection()
         out.removeAll(keepingCapacity: true)
         out.append(contentsOf: lastMotionElements)
     }
 
     /// Convenience returning a new array of the last frame's `MotionElement`s.
     public func motionElements() -> [MotionElement] {
-        lastMotionElements
+        materializeNativeInspection()
+        return lastMotionElements
     }
 
     /// Returns `(path, key)` for the element with `id`, as `ElementInfo.path` and `ElementInfo.key` (`motion_elements.rs:156`).
@@ -491,6 +660,7 @@ extension Runtime {
         if let n = exitingSnapshots[id] {
             return (n.path, n.key)
         }
+        materializeNativeInspection()
         if let p = lastPoseNodes.first(where: { $0.nodeId == id }) {
             return (p.path, p.key)
         }

@@ -105,24 +105,21 @@ public enum Syntax: Int, CaseIterable, Sendable, Hashable {
         return ""
     }
 
-    private static let lexerState = LexerState()
+    private static var lexerState: LexerState {
+        runeExecutionLocal(forKey: "rune.kit.syntaxLexer", create: LexerState.init)
+    }
 
     private final class LexerState: @unchecked Sendable {
-        private let lock = NSLock()
         private let whole = Highlighter()
         private var stream: HighlightStream?
         private var lastLang: Language?
         private var lastCode: String = ""
 
         func tokens(language: Language, code: String) -> [HighlightSpan] {
-            lock.lock()
-            defer { lock.unlock() }
-            if var s = stream, s.language == language, s.continues(code) {
-                let res = s.highlight(code)
-                stream = s
-                return res
+            if stream?.language == language, stream?.continues(code) == true {
+                return stream!.highlight(code)
             }
-            if let prevLang = lastLang, prevLang == language, code.count > lastCode.count, code.hasPrefix(lastCode) {
+            if let prevLang = lastLang, prevLang == language, code.utf8.count > lastCode.utf8.count, code.utf8.starts(with: lastCode.utf8) {
                 lastLang = nil
                 lastCode = ""
                 var s = HighlightStream(language: language)
@@ -296,29 +293,24 @@ public struct SyntaxHighlight: Sendable, Equatable, Hashable {
 /// Cached syntax highlighter (`rune_kit::syntax::Highlighter`).
 public struct SyntaxHighlighter: Sendable {
     private let fn: (@Sendable (String?, String) -> [SyntaxHighlight])?
-    var id: String
+    private var identity: KitSourceKey
+    var id: String { identity.source }
 
     public static let builtin = SyntaxHighlighter(builtinID: "builtin")
 
     private init(builtinID: String) {
         self.fn = nil
-        self.id = builtinID
+        self.identity = KitSourceKey(builtinID)
     }
 
-    private static let counterLock = NSLock()
-    private nonisolated(unsafe) static var nextCustomID: UInt64 = 0
-
-    public init(id: String? = nil, _ fn: @escaping @Sendable (String?, String) -> [SyntaxHighlight]) {
+    /// Highlighters constructed at the same call site share their per-thread results.
+    /// Supply a key for captured settings that change how a block is highlighted.
+    public init(
+        id: String? = nil, file: StaticString = #fileID, line: UInt = #line, column: UInt = #column,
+        _ fn: @escaping @Sendable (String?, String) -> [SyntaxHighlight]
+    ) {
         self.fn = fn
-        if let id {
-            self.id = "custom:\(id)"
-        } else {
-            Self.counterLock.lock()
-            Self.nextCustomID &+= 1
-            let n = Self.nextCustomID
-            Self.counterLock.unlock()
-            self.id = "custom:#\(n)"
-        }
+        self.identity = KitSourceKey(id.map { "custom:\($0)" } ?? "closure:\(file):\(line):\(column)")
     }
 
     public var isBuiltin: Bool { fn == nil }
@@ -326,14 +318,15 @@ public struct SyntaxHighlighter: Sendable {
     /// Separates cached output by an additional key (e.g. `"dark"` vs `"light"`).
     public func key(_ key: String) -> SyntaxHighlighter {
         var copy = self
-        copy.id = "\(id)::\(key)"
+        copy.identity = KitSourceKey("key:\(id.utf8.count):\(id)\(key)")
         return copy
     }
 
     public func highlight(language: String?, code: String) -> [SyntaxHighlight] {
         let limited = Syntax.limitedSource(code)
-        let cacheKey = CacheKey(id: id, language: language, code: limited)
-        if let hit = Self.cache.get(cacheKey) {
+        let cache = Self.cache
+        let cacheKey = CacheKey(id: identity, language: language.map(KitSourceKey.init), code: KitSourceKey(limited))
+        if let hit = cache.get(cacheKey) {
             return hit
         }
         let result: [SyntaxHighlight]
@@ -343,17 +336,19 @@ public struct SyntaxHighlighter: Sendable {
             result = Syntax.builtin(language: language, code: limited)
         }
         let estimatedBytes = limited.utf8.count + result.count * MemoryLayout<SyntaxHighlight>.stride + 96
-        Self.cache.insert(cacheKey, value: result, bytes: estimatedBytes)
+        cache.insert(cacheKey, value: result, bytes: estimatedBytes)
         return result
     }
 
     private struct CacheKey: Hashable, Sendable {
-        let id: String
-        let language: String?
-        let code: String
+        let id: KitSourceKey
+        let language: KitSourceKey?
+        let code: KitSourceKey
     }
 
-    private static let cache = BudgetCache<CacheKey, [SyntaxHighlight]>(limitBytes: 4 << 20)
+    private static var cache: BudgetCache<CacheKey, [SyntaxHighlight]> {
+        runeExecutionLocal(forKey: "rune.kit.syntaxHighlights", create: { BudgetCache(limitBytes: 4 << 20) })
+    }
 
     private static func tidy(_ input: [SyntaxHighlight], source: String) -> [SyntaxHighlight] {
         let utf8 = source.utf8
@@ -364,7 +359,7 @@ public struct SyntaxHighlighter: Sendable {
                   item.range.upperBound <= totalBytes else { return false }
             let startIdx = utf8.index(utf8.startIndex, offsetBy: item.range.lowerBound)
             let endIdx = utf8.index(utf8.startIndex, offsetBy: item.range.upperBound)
-            return startIdx.samePosition(in: source) != nil && endIdx.samePosition(in: source) != nil
+            return startIdx.samePosition(in: source.unicodeScalars) != nil && endIdx.samePosition(in: source.unicodeScalars) != nil
         }
         valid.sort { $0.range.lowerBound < $1.range.lowerBound }
         var out: [SyntaxHighlight] = []
@@ -434,7 +429,7 @@ public struct SyntaxTheme: Sendable, Equatable, Hashable {
 
     public func withWeight(_ kind: Syntax, _ weight: Float) -> SyntaxTheme {
         var copy = self
-        copy.weights[kind.rawValue] = weight.clamped(to: 1...1000)
+        copy.weights[kind.rawValue] = weight.isNaN ? nil : weight.clamped(to: 1...1000).rounded(.towardZero)
         return copy
     }
 
@@ -446,6 +441,16 @@ public struct SyntaxTheme: Sendable, Equatable, Hashable {
         switch p {
         case .kind(let k): color(for: k)
         case .color(let c): c
+        }
+    }
+
+    /// Byte-range Rune spans for highlighted code embedded at a UTF-8 offset.
+    public func spans(_ highlights: [SyntaxHighlight], offset: Int) -> [RichSpan] {
+        highlights.map { item in
+            var span = RichSpan((item.range.lowerBound + offset)..<(item.range.upperBound + offset))
+            span.color = paint(item.paint)
+            if case let .kind(kind) = item.paint { span.weight = weight(for: kind) }
+            return span
         }
     }
 
@@ -512,7 +517,9 @@ extension Kit {
         theme: SyntaxTheme? = nil
     ) -> El<State> {
         let resolvedTheme = theme ?? SyntaxTheme.fromKit(self)
-        let lines = code.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let normalized = code.replacingOccurrences(of: "\r\n", with: "\n")
+        let highlights = highlighter.highlight(language: language, code: normalized)
+        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false)
         let lineCount = max(1, lines.count)
         let gutterWidth = Float(max(2, String(lineCount).count) * 8 + 16)
 
@@ -541,11 +548,27 @@ extension Kit {
             .wFull()
             .py(6)
 
+        body.children.reserveCapacity(lines.count)
+        var firstHighlight = 0
+        var lineStart = 0
         for (idx, lineText) in lines.enumerated() {
             let lineNum = idx + 1
             let selected = lineSelection?.contains(lineNum) ?? false
-            let lineHighlights = highlighter.highlight(language: language, code: lineText)
-            let spans = resolvedTheme.spans(for: lineText, highlights: lineHighlights, defaultColor: c.textBase, monospace: true)
+            let lineEnd = lineStart + lineText.utf8.count
+            while firstHighlight < highlights.count && highlights[firstHighlight].range.upperBound <= lineStart {
+                firstHighlight += 1
+            }
+            var lineHighlights: [SyntaxHighlight] = []
+            for highlight in highlights[firstHighlight...] {
+                if highlight.range.lowerBound >= lineEnd { break }
+                let start = max(lineStart, highlight.range.lowerBound)
+                let end = min(lineEnd, highlight.range.upperBound)
+                if start < end {
+                    lineHighlights.append(SyntaxHighlight(range: (start - lineStart)..<(end - lineStart), paint: highlight.paint))
+                }
+            }
+            let spans = resolvedTheme.spans(for: String(lineText), highlights: lineHighlights, defaultColor: c.textBase, monospace: true)
+            lineStart = lineEnd + 1
 
             var lineRow: El<State> = row()
                 .key("\(key)-line-\(lineNum)")
@@ -578,7 +601,7 @@ extension Kit {
                         .minW(0)
                 )
             }
-            body = body.child(lineRow)
+            body.children.append(lineRow)
         }
 
         return col()

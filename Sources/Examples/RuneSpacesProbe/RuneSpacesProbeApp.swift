@@ -8,9 +8,6 @@ import CoreGraphics
 #endif
 
 /// Windowless overlay Spaces / capture-exclusion / layer probe mirroring `crates/rune/examples/spaces_probe.rs`.
-///
-/// NOTE: `Sources/Rune` does not yet wire `App.overlay(_:receiver:)` into `MacOSApp`, so the overlay
-/// handle is driven directly on `@MainActor` from the probe sequence.
 @main
 public enum RuneSpacesProbeApp {
     public struct State: Sendable {

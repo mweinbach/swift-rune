@@ -1,0 +1,130 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune native document node mirror</title>
+<canvas width="480" height="320"></canvas>
+<pre id="result">Running…</pre>
+<script type="module">
+import { mountRuneAccessibility } from '../../Sources/Rune/Resources/Web/rune-web-accessibility.mjs';
+
+const result = document.querySelector('#result');
+const canvas = document.querySelector('canvas');
+const events = [];
+const host = mountRuneAccessibility(canvas, event => { events.push(event); return true; }, true);
+const frame = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+function check(value, reason) { if (!value) throw new Error(reason); }
+const font = { family: 'monospace', size: 18, weight: 500, lineHeight: 25, tracking: 0.5, italic: false, align: 'left' };
+const paragraph = { role: 'text', path: '/main/code/line', key: 'line', name: 'A selectable line of code', selectable: true,
+    bounds: [40, 140, 400, 28], font };
+const scroller = { role: 'group', path: '/main/code', key: 'code', bounds: [30, 130, 140, 45],
+    pageScrollX: 18, pageContentWidth: 560, children: [paragraph] };
+const heading = { role: 'heading', path: '/main/heading', key: 'title', name: 'Chapter four', level: 4,
+    anchor: 'chapter-four', selectable: true, bounds: [20, 15, 250, 28], font };
+const jump = { role: 'link', path: '/main/jump', key: 'jump', url: '#chapter-four', name: 'Jump to chapter',
+    actions: ['press'], bounds: [20, 55, 240, 25] };
+const command = { role: 'link', path: '/main/command', key: 'command', name: 'Run command',
+    url: 'javascript:unused()', actions: ['press'], bounds: [20, 85, 240, 25] };
+const packet = { document: true, width: 480, height: 320,
+    root: { role: 'main', path: '/main', key: 'main', bounds: [0, 0, 480, 320], children: [heading, jump, command, scroller] } };
+try {
+    host.sync(packet);
+    await frame();
+    let title = document.getElementById('chapter-four');
+    const main = document.querySelector('main');
+    check(main?.contains(title) && title.localName === 'h4' && title.textContent === heading.name,
+        'Heading must be native, addressable by its fragment, and present in native Find');
+    const jumpLink = main.querySelector('a[href="#chapter-four"]');
+    const commandLink = main.querySelector('[data-rune-target="/main/command"]');
+    check(jumpLink.textContent === jump.name && !commandLink.hasAttribute('href'), 'Native fragment and logical link separation');
+    const navigated = new Promise(resolve => addEventListener('hashchange', resolve, { once: true }));
+    jumpLink.click();
+    if (location.hash !== '#chapter-four') await navigated;
+    check(location.hash === '#chapter-four' && !events.some(e => e.key === jump.path && e.action === 'press'),
+        'A fragment click must navigate without duplicate Rune activation');
+    commandLink.click();
+    check(events.at(-1)?.key === command.path && events.at(-1)?.action === 'press',
+        'A logical action link must reach Rune without navigating');
+    const code = main.querySelector('[data-rune-scroll-x]');
+    const p = code.querySelector('p');
+    check(code.scrollWidth === 560 && code.scrollLeft === 18 && !events.some(e => e.kind === 'pageScrollX'),
+        'Explicit overflow and initial offset had to apply without echo');
+    check(Math.abs(p.getBoundingClientRect().left - code.getBoundingClientRect().left - (10 - 18)) < 1,
+        'Native offset must apply exactly once to unscrolled document coordinates');
+    const css = getComputedStyle(p);
+    check(css.userSelect === 'text' && css.fontSize === '18px' && css.lineHeight === '25px' && css.pointerEvents === 'auto',
+        'The native selection hit region and font must match the drawn line');
+    const selection = getSelection();
+    const range = new Range();
+    range.selectNodeContents(p);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    check(selection.toString() === paragraph.name, 'Native document selection did not return the drawn line');
+    const before = p.firstChild;
+    code.scrollLeft = 95;
+    await frame();
+    const moves = () => events.filter(e => e.kind === 'pageScrollX');
+    check(moves().length === 1 && moves()[0].key === scroller.path && moves()[0].x === 95, 'User scroll sends one offset');
+    const { children, ...scrollerUpdate } = scroller;
+    host.sync({ local: true, nodes: [{ ...scrollerUpdate, pageScrollX: 330 }] });
+    await frame();
+    check(code.scrollLeft === 330 && moves().length === 1 && before === p.firstChild && selection.toString() === paragraph.name,
+        'Runtime scroll must preserve the selection and avoid another scroll event');
+    host.sync({ local: true, nodes: [{ ...heading, level: 2, anchor: 'chapter-two' }] });
+    title = document.getElementById('chapter-two');
+    check(!document.getElementById('chapter-four') && title.localName === 'h2' && title.textContent === heading.name,
+        'The correct native heading and anchor must survive an incremental update');
+    const para = { ...paragraph, bounds: [10, 10, 400, 28], name: 'See 🦊 Rune and café.' };
+    const richLink = { role: 'link', path: para.path + '#link-0', key: 'docs', url: 'https://example.org/',
+        name: 'Rune docs', inlineStart: 7, inlineEnd: 11, bounds: [30, 0, 40, 24], actions: ['press'] };
+    const continuation = { ...para, key: 'next-line', path: '/main/code/next-line', name: 'and café.', bounds:[10, 40, 200, 28] };
+    const local = { role: 'link', path: continuation.path + '#link-0', key: 'help', url: 'show-help',
+        name: 'Open help', inlineStart: 16, inlineEnd: 20, bounds: [120, 0, 40, 24], actions: ['press'] };
+    host.sync({ local: true, nodes: [para, richLink, local], children: { [para.path]:[richLink.path, local.path] } });
+    const external = p.querySelector('a[href^=https]');
+    check(p.textContent === para.name && external.textContent === 'Rune' && external.getAttribute('aria-label') === 'Rune docs'
+            && external.target === '_blank' && external.relList.contains('noopener'),
+        'UTF-16 text ranges must create native links without duplicating the selectable label');
+    const start = p.firstChild, end = local.inlineEnd - local.inlineStart;
+    const localAnchor = p.querySelector('[aria-label="Open help"]');
+    check(localAnchor?.textContent === 'café' && !localAnchor.hasAttribute('href'), 'Inline logical link keeps authored glyphs');
+    range.setStart(start, 4);
+    range.setEnd(localAnchor.firstChild, end);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const selected = selection.toString();
+    host.sync({ local: true, bounds: { [para.path]: [15, 15, 400, 28], [richLink.path]: [35, 0, 40, 24] } });
+    check(selected === '🦊 Rune and café' && selection.toString() === selected && external.isConnected,
+        'Geometry-only patches must preserve the native selection across both inline links');
+    const identity = localAnchor.id;
+    localAnchor.focus();
+    function checkMovedAction() {
+        const prior = events.length;
+        localAnchor.click();
+        check(localAnchor.id === identity && localAnchor.dataset.runeTarget === local.path &&
+            events.length === prior + 1 && events[prior].action === 'press' && events[prior].key === local.path,
+            'Joining or wrapping text must keep the same link and dispatch one action to the original Rune path');
+    }
+    // A wide text line joins independently keyed tokens. After a wrap the second token has
+    // its own paragraph, while the link's original runtime path stays stable in both layouts.
+    host.sync({ local: true, nodes: [{ ...para, name: 'See 🦊 Rune' }, continuation,
+        { ...local, inlineStart: 4, inlineEnd: 8 }], children: {
+        [scroller.path]: [para.path, continuation.path], [para.path]: [richLink.path], [continuation.path]: [local.path]
+    } });
+    const paragraphs = code.querySelectorAll('p');
+    check(paragraphs.length === 2 && paragraphs[0] === p && p.textContent === 'See 🦊 Rune' &&
+        paragraphs[1].textContent === continuation.name && localAnchor.parentNode === paragraphs[1] &&
+        localAnchor.textContent === 'café' && main.querySelectorAll('[aria-label="Open help"]').length === 1,
+        'A wrap must split the selected glyphs into two paragraphs without repeating or replacing the link');
+    checkMovedAction();
+    host.sync({ local: true, nodes: [local, para], removed: [continuation.path], children: {
+        [para.path]: [richLink.path, local.path], [scroller.path]: [para.path]
+    } });
+    check(code.querySelectorAll('p').length === 1 && localAnchor.parentNode === p &&
+        p.textContent === para.name && main.querySelectorAll('[aria-label="Open help"]').length === 1,
+        'Rejoining must restore the full text and reparent the same link before dropping its old paragraph');
+    checkMovedAction();
+    host.sync({ local: true, removed: [richLink.path, local.path], children: { [para.path]: [] } });
+    check(p.textContent === para.name && !p.querySelector('a'), 'Removing link ranges must restore one plain selectable paragraph');
+    result.textContent = 'PASS native heading, fragment navigation, rich link split/rejoin, retained Unicode selection, and two-way horizontal scroll';
+} catch (error) { result.textContent = 'FAIL ' + error.stack; }
+finally { host.dispose(); }
+</script>

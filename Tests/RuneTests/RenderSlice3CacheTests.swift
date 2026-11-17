@@ -1133,23 +1133,27 @@ struct RenderSlice3CacheTests {
         rt.srgbBlend = false
         let rf = rt.renderFrame(at: 0.0)
         let pageCount = rt.textSystem.glyphAtlas.pageCount
-        let pageH = Float(rf.glyphs.height) / Float(max(1, pageCount))
+        #expect(rf.glyphPages.count == pageCount)
+        #if os(macOS)
+        // At these sizes every ink reaches the same dilation cap. Rust allocates each
+        // glyph once, including under the default CoreGraphics smoothing mode.
+        #expect(rt.textSystem.glyphAtlas.rasterized == 24 * 14)
+        #expect(pageCount == 2)
+        #endif
         #expect(pageCount >= 2, "single frame must allocate >= 2 pages (got \(pageCount))")
         #expect(rt.textSystem.glyphAtlas.resets == 0, "single frame must not reset a live page mid-frame")
-        #expect(rf.instances.contains { $0.params.y == KIND_GLYPH && $0.uv.y < pageH }, "has page 0 glyphs")
-        #expect(rf.instances.contains { $0.params.y == KIND_GLYPH && $0.uv.y >= pageH }, "has page 1+ glyphs")
+        #expect(rf.instances.contains { $0.params.y == KIND_GLYPH && $0.params.z == 0 }, "has page 0 glyphs")
+        #expect(rf.instances.contains { $0.params.y == KIND_GLYPH && $0.params.z >= 1 }, "has page 1+ glyphs")
 
         let out = try drawRaw(renderer: renderer, frame: rf)
         for page in 0..<2 {
-            let pageMinY = Float(page) * pageH
-            let pageMaxY = Float(page + 1) * pageH
             var found: RenderInstance? = nil
             for inst in rf.instances {
                 let inViewport = inst.rect.x >= 0
                     && inst.rect.y >= 0
                     && (inst.rect.x + inst.rect.z) <= 512
                     && (inst.rect.y + inst.rect.w) <= 512
-                if inst.params.y == KIND_GLYPH && inst.uv.y >= pageMinY && inst.uv.y < pageMaxY && inViewport {
+                if inst.params.y == KIND_GLYPH && inst.params.z == Float(page) && inViewport {
                     found = inst
                     break
                 }

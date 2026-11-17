@@ -1093,10 +1093,11 @@ public enum InteractionGate {
     }
 
     nonisolated(unsafe) public static var forceOnForTesting: Bool? = nil
+    private static let enabledForProcess = isEnabled()
 
     public static var isOn: Bool {
         if let forced = forceOnForTesting { return forced }
-        return isEnabled()
+        return enabledForProcess
     }
 
     public static func isEnabled(headless: Bool = false) -> Bool {
@@ -1408,9 +1409,47 @@ public final class InteractionTracker {
         var times = [Double](repeating: 0, count: InteractionPhase.allCases.count)
     }
 
-    nonisolated(unsafe) public static var testSlowReports: [SlowInteractionReport] = []
-    nonisolated(unsafe) public static var testSlowFrameReports: [SlowFrameReport] = []
-    nonisolated(unsafe) public static var testRollups: [(rolls: [InteractionRollup.Roll], fromNs: UInt64, toNs: UInt64)] = []
+    /// Native opt-in profiling can run for days. Keep the most recent diagnostic records.
+    internal final class History<Value: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private let limit: Int
+        private var records: [Value] = []
+
+        init(limit: Int) {
+            precondition(limit > 0)
+            self.limit = limit
+        }
+
+        var snapshot: [Value] {
+            get { lock.withLock { records } }
+            set { lock.withLock { records = Array(newValue.suffix(limit)) } }
+        }
+
+        func append(_ record: Value) {
+            lock.withLock {
+                if records.count == limit { records.removeFirst() }
+                records.append(record)
+            }
+        }
+    }
+
+    // One minute of rate-limited slow records and one hour of minute rollups.
+    internal static let slowReports = History<SlowInteractionReport>(limit: Int(slowPerSecond) * 60)
+    internal static let slowFrameReports = History<SlowFrameReport>(limit: Int(slowPerSecond) * 60)
+    internal static let rollupReports = History<(rolls: [InteractionRollup.Roll], fromNs: UInt64, toNs: UInt64)>(limit: 60)
+
+    public static var testSlowReports: [SlowInteractionReport] {
+        get { slowReports.snapshot }
+        set { slowReports.snapshot = newValue }
+    }
+    public static var testSlowFrameReports: [SlowFrameReport] {
+        get { slowFrameReports.snapshot }
+        set { slowFrameReports.snapshot = newValue }
+    }
+    public static var testRollups: [(rolls: [InteractionRollup.Roll], fromNs: UInt64, toNs: UInt64)] {
+        get { rollupReports.snapshot }
+        set { rollupReports.snapshot = newValue }
+    }
 
     public static func resetForTesting() {
         InteractionGate.forceOnForTesting = nil
@@ -1463,6 +1502,7 @@ public final class InteractionTracker {
         if fx.contains(where: { if case .startPhases = $0 { return true }; return false }) {
             phaseTimes = [Double](repeating: 0, count: InteractionPhase.allCases.count)
             activePhases = true
+            FrameProfiling.observe(FrameProfiling.interaction, true)
             RuneExecutionContext.locals[Self.phaseDictKey] = ActivePhaseBox()
         }
     }
@@ -1494,6 +1534,7 @@ public final class InteractionTracker {
             )
             if fx.contains(where: { if case .stopPhases = $0 { return true }; return false }) {
                 activePhases = false
+                FrameProfiling.observe(FrameProfiling.interaction, false)
                 RuneExecutionContext.locals.removeObject(forKey: Self.phaseDictKey)
             }
             return nil

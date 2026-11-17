@@ -40,11 +40,11 @@ struct Slice4SelectionTests {
         let emptyItem = SelectedText(
             path: "@root/0",
             key: "title",
-            range: 3..<3,
+            range: 0..<0,
             len: 0,
             whole: false,
             text: "",
-            content: "hello world"
+            content: ""
         )
         #expect(emptyItem.isEmpty)
         #expect(!emptyItem.isSelected)
@@ -52,6 +52,11 @@ struct Slice4SelectionTests {
         #expect(emptyItem.key == "title")
         #expect(emptyItem.len == 0)
         #expect(emptyItem.text.isEmpty)
+
+        let caretInText = SelectedText(path: "@root/0", range: 2..<2, len: "éx".utf8.count,
+                                       whole: false, text: "", content: "")
+        #expect(!caretInText.isEmpty)
+        #expect(!caretInText.isSelected)
 
         let wholeItem = SelectedText(
             path: "@root/0",
@@ -114,7 +119,7 @@ struct Slice4SelectionTests {
         let rt = Runtime(state: S(), viewport: Vec2(360, 140), pixelScale: 1) { (s: S, cx: inout Cx<S>) -> El<S> in
             cx.markTexts(s.marks)
             let children: [El<S>] = s.show
-                ? [text(s.body).key("doc").font(TextStyle(size: 14)).selectionStyle(SelectionStyle(highlight: markColor)).selectable()]
+                ? [text(s.body).key("doc").font(TextStyle(size: 14)).selectionStyle(SelectionStyle(highlight: markColor)).uncopied(3..<5).selectable()]
                 : []
             return col().p(12).children(children)
         }
@@ -127,6 +132,9 @@ struct Slice4SelectionTests {
         rt.pointerUp(at: Vec2(r[0] + 90, y), at: 0.14)
         let sel = try #require(rt.currentTextSelection())
         let item = try #require(sel.texts.first)
+        let drawn = String(decoding: rt.state.body.utf8.dropFirst(item.range.lowerBound).prefix(item.range.count), as: UTF8.self)
+        #expect(item.text != drawn)
+        #expect(item.mark().text == drawn)
         rt.update { st, _ in st.marks = [item.mark()] }
 
         // Clear active selection by clicking outside; mark box still renders with square corners.

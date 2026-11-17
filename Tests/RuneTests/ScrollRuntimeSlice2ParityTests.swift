@@ -342,21 +342,158 @@ struct ScrollRuntimeSlice2ParityTests {
         #expect(log.reports.count == 1)
         #expect(log.reports[0].scrolled == false)
 
-        // Glide produces multiple scroll reports with scrolled == true
+        // App glides deliver each changed position without reporting a hand gesture.
         rt.update(at: 0.01) { _, tx in tx.scrollTo("list", x: 0, y: 200) }
-        let _ = settle(rt, start: 0.01)
-        #expect(log.reports.count > 2)
-        #expect((log.reports.last?.offset.y ?? 0) > 199)
-        #expect(log.reports.dropFirst().contains(where: { $0.scrolled }))
+        var now = settle(rt, start: 0.01)
+        #expect(log.reports.count > 5)
+        #expect(log.reports.last?.offset.y == 200)
+        #expect(log.reports.allSatisfy { !$0.scrolled })
+
+        var before = log.reports.count
+        now += 0.01
+        rt.update(at: now) { _, tx in tx.scrollToY("list", 100) }
+        now = settle(rt, start: now)
+        #expect(log.reports[before...].filter(\.scrolled).map(\.offset.y) == [100])
+
+        before = log.reports.count
+        now += 0.01
+        rt.wheelXY(100, 100, dx: 0, dy: -30, at: now)
+        now = settle(rt, start: now)
+        #expect(log.reports[before...].filter(\.scrolled).map(\.offset.y) == [130])
+
+        before = log.reports.count
+        now += 0.01
+        rt.update(at: now) { _, tx in tx.scrollPage("list", 1) }
+        now = settle(rt, start: now)
+        #expect(log.reports[before...].filter(\.scrolled).map(\.offset.y) == [310])
+
+        // The live-only offset path handles the long-trip cut and the rest of the glide.
+        before = log.reports.count
+        now += 0.01
+        rt.update(at: now) { _, tx in
+            tx.liveOnly()
+            tx.scrollTo("list", x: 0, y: 750)
+        }
+        now = settle(rt, start: now)
+        #expect(log.reports.count > before + 5)
+        #expect(log.reports.last?.offset.y == 750)
+        #expect(log.reports[before...].allSatisfy { !$0.scrolled })
+
+        before = log.reports.count
+        now += 0.01
+        rt.update(at: now) { _, tx in tx.scrollToBottomInstant("list") }
+        now = settle(rt, start: now)
+        #expect(log.reports.last?.offset.y == 800)
+        #expect(log.reports[before...].allSatisfy { !$0.scrolled })
 
         // Upstream `watch.rs::a_rebuilt_handler_hears_where_the_viewport_stands`:
         // rebuilding creates a new `onScrollOffset` closure/token, which hears once on commit and not again on subsequent idle frames.
         let beforeRebuild = log.reports.count
-        rt.update(at: 5.0) { s, _ in s.bump += 1 }
-        _ = rt.frame(at: 5.01)
+        rt.update(at: now + 0.01) { s, _ in s.bump += 1 }
+        _ = rt.frame(at: now + 0.02)
         #expect(log.reports.count == beforeRebuild + 1)
-        _ = rt.frame(at: 5.02)
+        _ = rt.frame(at: now + 0.03)
         #expect(log.reports.count == beforeRebuild + 1)
+    }
+
+    @Test("a jump on one axis marks one frame of a simultaneous app glide")
+    func scrollWatchMixedAxes() {
+        var reports: [(pos: Vec2, hand: Bool)] = []
+        let rt = Runtime<Void>(state: (), viewport: Vec2(200, 200)) { _, _ in
+            col().key("xy").size(200, 200).scrollXY()
+                .onScrollOffset { reports.append(($0.offset, scrollWatchState().scrolled)) }
+                .child(el().size(1000, 1000))
+        }
+        _ = rt.frame(at: 0)
+        reports.removeAll()
+        rt.update(at: 0.01) { _, tx in tx.scrollTo("xy", x: 0, y: 200) }
+        var now = settle(rt, start: 0.01)
+        #expect(reports.count > 5)
+        #expect(reports.last?.pos == Vec2(0, 200))
+        #expect(reports.filter(\.hand).count == 1)
+
+        reports.removeAll()
+        now += 0.01
+        rt.update(at: now) { _, tx in
+            tx.liveOnly()
+            tx.scrollTo("xy", x: 150, y: 350)
+        }
+        _ = settle(rt, start: now)
+        #expect(reports.last?.pos == Vec2(150, 350))
+        #expect(reports.allSatisfy { !$0.hand })
+    }
+
+    @Test("offset requests on a row or highlight select the nearest viewport with a requested axis")
+    func scrollOffsetDescendantAndHighlight() {
+        let rt = Runtime<Void>(state: (), viewport: Vec2(200, 200)) { _, _ in
+            col().key("outer").size(200, 200).scrollY().child(
+                col().key("inner").size(200, 1000).scrollX().child(
+                    text("target").key("child").size(1000, 1000)
+                        .textHighlight(TextHighlight(0..<6, bg: .white).key("mark"))
+                )
+            )
+        }
+        var now = 0.0
+        _ = rt.frame(at: now)
+        for live in [false, true] {
+            for target in ["child", "mark"] {
+                now += 0.1
+                rt.update(at: now) { _, tx in
+                    if live { tx.liveOnly() }
+                    tx.scrollToY(target, live ? 125 : 100)
+                    tx.scrollToX(target, live ? 90 : 75)
+                }
+                now = settle(rt, start: now)
+                #expect(rt.scrollOffset(forKey: "outer") == Vec2(0, live ? 125 : 100))
+                #expect(rt.scrollOffset(forKey: "inner") == Vec2(live ? 90 : 75, 0))
+
+                // Reset the direct viewport targets so each selector must move both axes itself.
+                now += 0.1
+                rt.update(at: now) { _, tx in
+                    tx.scrollToY("outer", 0)
+                    tx.scrollToX("inner", 0)
+                }
+                now = settle(rt, start: now)
+            }
+        }
+    }
+
+    @Test("pinned scroll callbacks include the dock slack sampled in the frame")
+    func scrollWatchPinnedDockSlack() throws {
+        var last: ScrollPos?
+        var handReports = 0
+        let rt = Runtime<Float>(state: 200, viewport: Vec2(300, 400)) { dock, _ in
+            col().size(300, 400)
+                .child(col().key("scroll").wFull().grow().scrollY(stickBottom: true)
+                    .onScrollOffset { pos in
+                        last = pos
+                        if scrollWatchState().scrolled { handReports += 1 }
+                    }
+                    .child(col().key("stack").wFull().growth()
+                        .child(el().key("lead").wFull().h(400))
+                        .child(el().key("grow").wFull().h(230))))
+                .child(el().key("composer").wFull().h(dock))
+        }
+        var now = 0.0
+        _ = rt.frame(at: now)
+        now = settle(rt, start: now)
+        let path = try #require(rt.element(byKey: "scroll")?.path)
+        rt.update(at: now + 0.001) { state, _ in state = 100 }
+        var peak: Float = 0
+        var maxError: Float = 0
+        for _ in 0..<160 {
+            now += 1.0 / 120
+            _ = rt.frame(at: now)
+            let slack = rt.slice2State.scrollSlacks[path]?.height ?? 0
+            peak = max(peak, slack)
+            let position = try #require(last)
+            let expected = rt.scrollOffset(forKey: "scroll").y + slack
+            maxError = max(maxError, abs(position.offset.y - expected))
+        }
+        #expect(peak > 20)
+        #expect(maxError < 0.01)
+        #expect(handReports == 0)
+        #expect(abs((last?.offset.y ?? 0) - 330) < 0.01)
     }
 
     // MARK: - tests/pinned_scroll.rs, stick_fit.rs, stick_resize.rs

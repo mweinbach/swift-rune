@@ -21,30 +21,33 @@ internal extension Runtime {
 
     /// A piece of a text as copying takes it: `range` of `content`, its uncopied spans left out
     /// (`selectable.rs` `selected_piece`, `virtual/selection.rs` `offscreen_piece`).
-    private func selectionPiece(path: String, key: String?, content: String, uncopied: [Range<Int>], range: Range<Int>, base: String?) -> SelectedText {
+    private func selectionPiece(path: String, key: String?, content: String, uncopied: [Range<Int>], source: TextCaseMapping?, range: Range<Int>, base: String?) -> SelectedText {
         let len = content.utf8.count
         let full = uncopied.isEmpty ? (0, len) : SelectionMath.trimUncopied(uncopied, range: (0, len))
         let whole = !range.isEmpty && len > 0 && range.lowerBound <= full.0 && range.upperBound >= full.1
+        let copied = CopyJoin.copySlice(in: content, range: range, uncopied: uncopied, source: source)
         return SelectedText(
             path: pathRelative(path, to: base),
             key: key,
             range: range,
             len: len,
             whole: whole,
-            text: CopyJoin.copySlice(in: content, range: range, uncopied: uncopied),
-            content: content
+            text: copied,
+            content: source == nil && uncopied.isEmpty ? copied : CopyJoin.copySlice(in: content, range: range, uncopied: [])
         )
     }
 
     /// Mounted text `j` as a piece with `range` selected (`Runtime::selected_piece`).
     private func mountedPiece(_ j: Int, _ range: Range<Int>, base: String?) -> SelectedText {
         let n = flatNodes[j]
-        return selectionPiece(path: n.path, key: n.key, content: selectableNodeText(n) ?? "", uncopied: n.el.uncopiedRanges, range: range, base: base)
+        let content = n.effectiveInert ? nil : n.el.selectableContent
+        return selectionPiece(path: n.path, key: n.key, content: content?.displayed ?? "", uncopied: content?.uncopied ?? [],
+                              source: content?.source, range: range, base: base)
     }
 
     /// Offscreen text `t` as a piece with `range` selected (`offscreen_piece`).
     private func offscreenPiece(_ t: OffscreenSelectable, _ range: Range<Int>, base: String?) -> SelectedText {
-        selectionPiece(path: t.path, key: t.key, content: t.text, uncopied: t.uncopied, range: range, base: base)
+        selectionPiece(path: t.path, key: t.key, content: t.text, uncopied: t.uncopied, source: t.source, range: range, base: base)
     }
 
     /// Node `j` is `a` or lies under it.
@@ -177,7 +180,7 @@ internal extension Runtime {
             let beside = prevMounted.map { CopyJoin.beside(copyBox($0), copyBox(j)) } ?? false
             let capped = out.push(
                 piece.text,
-                fromStart: CopyJoin.fromStart(range: a..<b, len: len, uncopied: el.uncopiedRanges),
+                fromStart: CopyJoin.fromStart(range: a..<b, len: len, uncopied: el.selectableContent?.uncopied ?? []),
                 copyBreakBefore: breaks.before, copyBreakAfter: breaks.after, copyPrefix: el.copyPrefixString,
                 beside: beside, cap: cap
             )

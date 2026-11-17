@@ -90,7 +90,10 @@ struct PixelsAlphaRenderingTests {
         #expect(instances.first?.fill.w == 0.5)
         let pages = Array(repeating: RGBA8Atlas(width: 2, height: 2), count: 4)
         let frame = RenderFrame(width: 4, height: 4, imagePages: pages, instances: instances)
-        let packed = try #require(frame.preparedForGL().instances.first)
+        try frame.validateForGL()
+        #expect(frame.instances[0].uv == SIMD4<Float>(0.5, 0, 1, 1))
+        #expect(frame.instances[0].border == source)
+        let packed = try #require(frame.packedForLegacyWebPacket().instances.first)
         #expect(packed.uv == SIMD4<Float>(2.5, 2, 1, 1))
         #expect(packed.border == SIMD4<Float>(2, 2, 4, 3))
     }

@@ -1,9 +1,10 @@
-import { RuneWebFrameRenderer, decodeWebSurfaces } from './rune-webgl-frame.mjs';
+import { RuneInstanceUploads } from './rune-instance-uploads.mjs';
+import { RuneCycleScene } from './rune-web-cycles.mjs';
+import { RuneWebFrameRenderer } from './rune-webgl-frame.mjs';
 
 // The WASI reactor retains layout and input. Each packet contains the same device-pixel
 // RenderInstance stream used by Metal and desktop GL. Unchanged atlases stay on the GPU.
 const stride = 128;
-const headerBytes = 56;
 const shaderFiles = ['frame.vert', 'frame.frag', 'fullscreen.vert', 'layer.frag', 'surface.vert', 'surface.frag', 'frame_blur.frag'];
 
 export async function loadRuneShaders(directory = new URL('../GL/', import.meta.url)) {
@@ -67,7 +68,9 @@ export class RuneWebGL {
         this.drawEffect = drawEffect;
         this.surfaceTiming = surfaceTiming;
         this.targets = [];
-        this.atlases = [];
+        this.imagePages = [];
+        this.glyphPages = [];
+        this.instanceUploads = new RuneInstanceUploads();
         this.maxSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
         this.floatTargets = !!gl.getExtension('EXT_color_buffer_float');
         const debug = gl.getExtension('WEBGL_debug_renderer_info');
@@ -99,7 +102,8 @@ export class RuneWebGL {
                 gl.enableVertexAttribArray(i);
                 gl.vertexAttribDivisor(i, 1);
             }
-            for (let i = 0; i < 2; ++i) this.atlases.push({ texture: gl.createTexture() });
+            this.emptyImage = { texture: gl.createTexture() };
+            this.atlas(this.emptyImage, 1, 1, gl.SRGB8_ALPHA8, gl.RGBA, {full: true, data: new Uint8Array(4)});
             gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
             gl.disable(gl.DITHER);
             this.frameRenderer = new RuneWebFrameRenderer(this, sources);
@@ -156,10 +160,10 @@ export class RuneWebGL {
         this.targets.length = 0;
     }
 
-    atlas(slot, width, height, internal, format, update) {
+    atlas(atlas, width, height, internal, format, update) {
         const gl = this.gl;
-        const atlas = this.atlases[slot];
-        gl.activeTexture(gl.TEXTURE0 + slot);
+        if (!update && atlas.width === width && atlas.height === height && atlas.internal === internal) return;
+        gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, atlas.texture);
         if (atlas.width !== width || atlas.height !== height || atlas.internal !== internal) {
             if (!update?.full) throw new Error('Rune scene needs a complete atlas for this WebGL context');
@@ -169,6 +173,47 @@ export class RuneWebGL {
         } else if (update) {
             gl.texSubImage2D(gl.TEXTURE_2D, 0, update.x, update.y, update.width, update.height, format, gl.UNSIGNED_BYTE, update.data);
         }
+    }
+
+    syncAtlases(glyphs, images) {
+        const gl = this.gl;
+        const allocated = [];
+        const prepare = (resident, pages, internal, format) => pages.map((page, index) => {
+            if (!page.width) return null;
+            const old = resident[index];
+            if (old?.width === page.width && old.height === page.height) return old;
+            if (!page.update?.full) throw new Error('Rune texture page needs a complete atlas for this WebGL context');
+            const texture = gl.createTexture();
+            if (!texture) throw new Error('Could not allocate Rune WebGL atlas texture');
+            allocated.push(texture);
+            const atlas = {texture};
+            this.atlas(atlas, page.width, page.height, internal, format, page.update);
+            const error = gl.getError();
+            if (error !== gl.NO_ERROR) throw new Error('Could not allocate Rune WebGL atlas storage (' + error + ')');
+            return atlas;
+        });
+        let nextGlyphs, nextImages;
+        try {
+            // An allocation can fail after an earlier page succeeded. Keep the old banks
+            // usable until replacements for both texture formats are ready.
+            nextGlyphs = prepare(this.glyphPages, glyphs, gl.R8, gl.RED);
+            nextImages = prepare(this.imagePages, images, gl.SRGB8_ALPHA8, gl.RGBA);
+        } catch (error) {
+            for (const texture of allocated) gl.deleteTexture(texture);
+            throw error;
+        }
+        const commit = (old, next, pages, internal, format) => {
+            for (let i = 0; i < old.length; ++i) {
+                const atlas = old[i];
+                if (!atlas) continue;
+                if (atlas !== next[i]) gl.deleteTexture(atlas.texture);
+                else if (pages[i].update) this.atlas(atlas, atlas.width, atlas.height, internal, format, pages[i].update);
+            }
+        };
+        commit(this.glyphPages, nextGlyphs, glyphs, gl.R8, gl.RED);
+        commit(this.imagePages, nextImages, images, gl.SRGB8_ALPHA8, gl.RGBA);
+        this.glyphPages = nextGlyphs;
+        this.imagePages = nextImages;
     }
 
     fullscreen(mode, destination, source, second = source, additive = false) {
@@ -199,7 +244,7 @@ export class RuneWebGL {
         gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
 
-    drawInstances(first, count, destination, depth, additive) {
+    drawInstances(instances, first, count, destination, depth, additive) {
         if (!count) return;
         const gl = this.gl;
         const { program, uniforms: u } = this.primitive;
@@ -207,8 +252,6 @@ export class RuneWebGL {
         gl.useProgram(program);
         gl.bindVertexArray(this.primitiveVAO);
         gl.bindBuffer(gl.ARRAY_BUFFER, this.instances);
-        for (let i = 0; i < 7; ++i) gl.vertexAttribPointer(i, 4, gl.FLOAT, false, stride, first * stride + i * 16);
-        gl.vertexAttribIPointer(7, 4, gl.UNSIGNED_INT, stride, first * stride + 112);
         gl.viewport(0, 0, destination.width, destination.height);
         gl.uniform2f(u.uViewport, destination.width, destination.height);
         if (u.uOrigin) gl.uniform2f(u.uOrigin, destination.x, destination.y);
@@ -216,71 +259,46 @@ export class RuneWebGL {
         gl.uniform1i(u.uInLayer, depth ? 1 : 0);
         gl.uniform1i(u.uGlyphAtlas, 0);
         gl.uniform1i(u.uImageAtlas, 1);
-        for (let i = 0; i < 2; ++i) {
-            gl.activeTexture(gl.TEXTURE0 + i);
-            gl.bindTexture(gl.TEXTURE_2D, this.atlases[i].texture);
-        }
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.ONE, additive ? gl.ONE : gl.ONE_MINUS_SRC_ALPHA);
-        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+        const draw = (start, length, image, glyph) => {
+            for (let i = 0; i < 7; ++i) gl.vertexAttribPointer(i, 4, gl.FLOAT, false, stride, start * stride + i * 16);
+            gl.vertexAttribIPointer(7, 4, gl.UNSIGNED_INT, stride, start * stride + 112);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, (this.glyphPages[glyph] ?? this.emptyImage).texture);
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, (this.imagePages[image] ?? this.emptyImage).texture);
+            gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, length);
+        };
+        this.instanceUploads.forEachRun(first, count, draw);
     }
 
-    draw(memory, pointer, length) {
-        if (length < headerBytes || pointer % 4) throw new Error('Invalid Rune scene header');
-        const h = new Uint32Array(memory, pointer, headerBytes / 4);
-        if (h[0] !== 0x32475352) throw new Error('Unsupported Rune GPU scene format');
-        const [, width, height, flags, count, gw, gh, iw, ih] = h;
-        if ([width, height, gw, gh, iw, ih].some(n => !n || n > this.maxSize)) {
-            throw new Error(`Rune scene exceeds WebGL texture limits (${this.maxSize})`);
-        }
-        const primitiveBytes = count * stride;
-        let offset = headerBytes + primitiveBytes;
-        if (length < offset) throw new Error('Invalid Rune scene length');
-        const packet = new DataView(memory, pointer, length);
-        let sequence, duplicate = false;
-        if (flags & 32) {
-            const previous = packet.getUint32(offset, true);
-            sequence = packet.getUint32(offset + 4, true);
-            offset += 8;
-            duplicate = sequence === this.atlasSequence;
-            if (!duplicate && (flags & 6) !== 6 && previous !== this.atlasSequence) {
-                throw new Error('Rune atlas patch requires its matching resident scene');
-            }
-        }
-        function readAtlas(width, height, channels, fullFlag, patchFlag) {
-            const full = !!(flags & fullFlag);
-            let x = 0, y = 0, w = width, h = height;
-            if (flags & patchFlag) {
-                if (full || sequence === undefined) throw new Error('Invalid Rune atlas flags');
-                x = packet.getUint32(offset, true);
-                y = packet.getUint32(offset + 4, true);
-                w = packet.getUint32(offset + 8, true);
-                h = packet.getUint32(offset + 12, true);
-                offset += 16;
-                if (!w || !h || x + w > width || y + h > height) throw new Error('Rune atlas patch exceeds its texture');
-            } else if (!full) { return null; }
-            const size = w * h * channels;
-            if (size > length - offset) throw new Error('Truncated Rune atlas data');
-            const data = new Uint8Array(memory, pointer + offset, size);
-            offset += size;
-            return { full, x, y, width: w, height: h, data };
-        }
-        const glyphs = readAtlas(gw, gh, 1, 2, 8);
-        const images = readAtlas(iw, ih, 4, 4, 16);
-        const surfaces = decodeWebSurfaces(memory, pointer + offset, pointer + length, h[13]);
+    draw(memory, pointer, length, repeatPass = 0) {
+        this.cycleScene ??= new RuneCycleScene();
+        const scene = this.cycleScene.decode(memory, pointer, length, this.maxSize, this.atlasSequence);
+        const {width, height, count, sequence, duplicate, glyphPages, imagePages, surfaces, clear, instances, srgbBlend,
+            damage, retainCycleTarget} = scene;
         const gl = this.gl;
         this.resize(width, height);
-        const clear = new Float32Array(memory, pointer + 36, 4);
-        const instances = new Float32Array(memory, pointer + headerBytes, count * 32);
-        this.srgbBlend = !!(flags & 1);
-        if (!duplicate) {
-            this.atlas(0, gw, gh, gl.R8, gl.RED, glyphs);
-            this.atlas(1, iw, ih, gl.SRGB8_ALPHA8, gl.RGBA, images);
+        this.srgbBlend = srgbBlend;
+        if (!duplicate && !repeatPass) {
+            this.syncAtlases(glyphPages, imagePages);
             this.atlasSequence = sequence;
         }
         gl.viewport(0, 0, width, height);
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.instances);
-        gl.bufferData(gl.ARRAY_BUFFER, instances, gl.DYNAMIC_DRAW);
+        if (!repeatPass) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.instances);
+            const bytes = instances.byteLength;
+            const grow = bytes > (this.instanceCapacity ?? 0);
+            if (grow) {
+                const capacity = 2 ** Math.ceil(Math.log2(bytes));
+                gl.bufferData(gl.ARRAY_BUFFER, capacity, gl.DYNAMIC_DRAW);
+                this.instanceCapacity = gl.getBufferParameter(gl.ARRAY_BUFFER, gl.BUFFER_SIZE);
+                if (this.instanceCapacity < bytes) throw Error('Could not allocate the Rune WebGL instance buffer');
+            }
+            this.instanceUploads.prepare(scene, grow, (first, end) =>
+                gl.bufferSubData(gl.ARRAY_BUFFER, first * stride, instances, first * 32, (end - first) * 32));
+        }
         for (const target of this.targets) target.used = false;
         // Metal stores each root blend in UNorm8. An sRGB attachment preserves linear blending.
         const root = this.target(0, 0, width, height, this.rootFormat);
@@ -288,8 +306,25 @@ export class RuneWebGL {
         this.info.layerTarget = this.floatTargets ? 'RGBA16F' : this.info.colorTarget;
         gl.bindFramebuffer(gl.FRAMEBUFFER, root.fbo);
         gl.clearColor(clear[0], clear[1], clear[2], clear[3]);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        this.frameRenderer.render({ instances, count, width, height, surfaces, root, clear, srgbBlend: this.srgbBlend });
+        if (damage && this.cycleRoot === root) {
+            gl.enable(gl.SCISSOR_TEST);
+            try {
+                for (const {area: [l,t,r,b], runs} of damage) {
+                    gl.scissor(l, height - b, r - l, b - t);
+                    gl.clear(gl.COLOR_BUFFER_BIT);
+                    for (const [first, end] of runs)
+                        this.drawInstances(instances, first, end - first, root, 0, false);
+                }
+            } finally {
+                gl.disable(gl.SCISSOR_TEST);
+                root.inUse = false;
+            }
+            this.fullscreen(6, null, root);
+        } else {
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            this.frameRenderer.render({ instances, count, width, height, surfaces, root, clear, srgbBlend: this.srgbBlend });
+        }
+        this.cycleRoot = retainCycleTarget ? root : null;
         this.targets = this.targets.filter(target => {
             if (target.used) return true;
             gl.deleteFramebuffer(target.fbo);
@@ -299,10 +334,13 @@ export class RuneWebGL {
     }
 
     dispose() {
+        this.instanceUploads = null;
         this.frameRenderer?.dispose();
         const gl = this.gl;
         this.clearTargets();
-        for (const atlas of this.atlases) gl.deleteTexture(atlas.texture);
+        for (const atlas of [this.emptyImage, ...this.glyphPages, ...this.imagePages]) {
+            if (atlas) gl.deleteTexture(atlas.texture);
+        }
         gl.deleteProgram(this.primitive?.program ?? null);
         gl.deleteProgram(this.layer?.program ?? null);
         gl.deleteBuffer(this.vertices ?? null);

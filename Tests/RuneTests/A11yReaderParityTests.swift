@@ -8,6 +8,48 @@ import AppKit
 @Suite("Screen reader field ranges and control names")
 @MainActor
 struct A11yReaderParityTests {
+    @Test func keyedRootDescendantsRetainTextUnderTheirRuntimeIdentity() throws {
+        struct Form { var draft = TextEdit("A🦀e\u{301}") }
+        let rt = Runtime(state: Form(), viewport: Vec2(300, 120), systemDark: false) { _, _ in
+            col().key("document").child(col().key("section").child(textInput(key: "draft", \Form.draft)))
+        }
+        rt.frame(at: 0)
+        let field = try #require(rt.flatNodes.first { $0.key == "draft" })
+        #expect(try #require(rt.nodeTextLayouts[field.nodeId]).box.authText == rt.state.draft.text)
+    }
+
+    @Test func readerRevealsAnOffscreenDescendantWithoutFocusingIt() throws {
+        let rt = Runtime(state: 0, viewport: Vec2(300, 120), systemDark: false) { _, _ in
+            col().key("scroll").sizeFull().scrollY().children([
+                row().h(380).shrink(0),
+                text("Last row").key("last").h(30).shrink(0)
+            ])
+        }
+        rt.frame(at: 0)
+        let tree = rt.accessibilitySnapshot()
+        let row = try #require(tree.children.first { $0.id == "last" })
+        #expect(!tree.actions.contains(.scrollIntoView))
+        #expect(row.actions.contains(.scrollIntoView))
+        #expect(row.frame.top >= rt.viewport.y)
+
+        #if os(macOS)
+        let action = NSAccessibility.Action(rawValue: "AXScrollToVisible")
+        let runtime = MacOSUnsafeSendableBox(rt)
+        let element = AppKitAccessibilityMapper.buildElement(from: row, onAction: { id, action in
+            MainActor.assumeIsolated { _ = runtime.value.accessibilityAction(id, action, at: 0.1) }
+        })
+        #expect(element.accessibilityActionNames().contains(action))
+        element.accessibilityPerformAction(action)
+        #else
+        #expect(rt.accessibilityAction(try #require(row.runtimePath), .scrollIntoView, at: 0.1))
+        #endif
+        rt.frame(at: 0.2)
+        let scrolled = rt.accessibilitySnapshot()
+        #expect((scrolled.scrollY ?? 0) > 0)
+        #expect(try #require(scrolled.children.first { $0.id == "last" }).frame.top < rt.viewport.y)
+        #expect(rt.focusedKey == nil)
+    }
+
     @Test func labelledControlRetainsIndependentChildren() {
         let rt = Runtime(state: 0, viewport: Vec2(320, 120), systemDark: true) { _, _ in
             row().key("control").role(.button).label("Open document").children([

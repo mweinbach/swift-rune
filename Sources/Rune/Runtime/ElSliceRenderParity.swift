@@ -125,6 +125,7 @@ internal struct ElLoopCatchUpClock {
 }
 
 internal struct ElSliceRenderState {
+    var groupRestIds: Set<NodeId> = []
     var groupFadeIds: Set<NodeId> = []
     var scaleSettles: [NodeId: ElScaleSettle] = [:]
     var nodeCaches: [NodeId: ElNodeCacheEntry] = [:]
@@ -135,6 +136,7 @@ internal struct ElSliceRenderState {
 }
 
 internal struct PreCommitGroupSnapshot {
+    let indices: [Int]
     let presentIds: Set<NodeId>
     let exitingIds: Set<NodeId>
 }
@@ -143,21 +145,21 @@ internal extension Runtime {
     // MARK: - Group Opacity (`group_opacity.rs`)
 
     func capturePreCommitGroupSnapshot() -> PreCommitGroupSnapshot {
-        var presentIds = Set<NodeId>(minimumCapacity: flatNodes.count)
-        var exitingIds = Set<NodeId>(minimumCapacity: exitingSnapshots.count)
-        for node in flatNodes where scene.contains(node.nodeId) {
-            presentIds.insert(node.nodeId)
-            if case .exiting = scene.phase(node.nodeId) {
-                exitingIds.insert(node.nodeId)
+        var indices = layoutObservers.groupOpacity
+        // An element that dropped groupOpacity may need to animate its old track back to one.
+        for id in elSliceRenderState.groupRestIds {
+            if let node = nodeById[id], node.el.groupOpacity == nil { indices.append(node.index) }
+        }
+        var presentIds = Set<NodeId>(minimumCapacity: indices.count)
+        var exitingIds = Set<NodeId>()
+        for i in indices {
+            let id = flatNodes[i].nodeId
+            if let phase = scene.phase(id) {
+                presentIds.insert(id)
+                if case .exiting = phase { exitingIds.insert(id) }
             }
         }
-        for id in exitingSnapshots.keys where scene.contains(id) {
-            presentIds.insert(id)
-            if case .exiting = scene.phase(id) {
-                exitingIds.insert(id)
-            }
-        }
-        return PreCommitGroupSnapshot(presentIds: presentIds, exitingIds: exitingIds)
+        return PreCommitGroupSnapshot(indices: indices, presentIds: presentIds, exitingIds: exitingIds)
     }
 
     func setGroupRestAfterCommit(
@@ -168,10 +170,9 @@ internal extension Runtime {
         specs: [NodeSpec],
         ancestorInstants: [Bool]
     ) {
-        var liveIds = Set<NodeId>(minimumCapacity: nodes.count)
-        for (i, node) in nodes.enumerated() {
+        for i in preState.indices {
+            let node = nodes[i]
             let nid = node.nodeId
-            liveIds.insert(nid)
             let wasPresent = preState.presentIds.contains(nid)
             let wasExiting = preState.exitingIds.contains(nid)
             let ancestorInstant = i < ancestorInstants.count ? ancestorInstants[i] : false
@@ -183,6 +184,7 @@ internal extension Runtime {
             let restQuiet = cut || snapStyle || !wasPresent || wasExiting || reducedMotion || ancestorInstant || node.el.hasInstantChanges || isInstantMotion
 
             if let (restOp, _) = node.el.groupOpacity {
+                elSliceRenderState.groupRestIds.insert(nid)
                 let to = restOp.clamped(to: 0...1)
                 let had = scene.store.has(nid, Props.GROUP_REST)
                 elSliceRenderState.groupFadeIds.remove(nid)
@@ -209,6 +211,7 @@ internal extension Runtime {
                 let cur = scene.get(nid, Props.GROUP_REST) ?? 1.0
                 if restQuiet || (abs(cur - 1.0) <= 1e-4 && !scene.store.isAnimating(nid, Props.GROUP_REST)) {
                     scene.store.remove(nid, Props.GROUP_REST)
+                    elSliceRenderState.groupRestIds.remove(nid)
                     elSliceRenderState.groupFadeIds.remove(nid)
                 } else {
                     let curTarget = scene.store.target(nid, Props.GROUP_REST) ?? cur
@@ -217,10 +220,12 @@ internal extension Runtime {
                     }
                     elSliceRenderState.groupFadeIds.insert(nid)
                 }
+            } else {
+                elSliceRenderState.groupRestIds.remove(nid)
             }
         }
         elSliceRenderState.groupFadeIds = elSliceRenderState.groupFadeIds.filter {
-            scene.contains($0) && (liveIds.contains($0) || exitingSnapshots[$0] != nil)
+            scene.contains($0) && (nodeById[$0] != nil || exitingSnapshots[$0] != nil)
         }
     }
 
@@ -228,9 +233,11 @@ internal extension Runtime {
         guard !elSliceRenderState.groupFadeIds.isEmpty else { return }
         for id in Array(elSliceRenderState.groupFadeIds) {
             if !scene.contains(id) {
+                elSliceRenderState.groupRestIds.remove(id)
                 elSliceRenderState.groupFadeIds.remove(id)
             } else if !scene.store.isAnimating(id, Props.GROUP_REST) {
                 scene.store.remove(id, Props.GROUP_REST)
+                elSliceRenderState.groupRestIds.remove(id)
                 elSliceRenderState.groupFadeIds.remove(id)
             }
         }
@@ -276,82 +283,51 @@ internal extension Runtime {
 
     // MARK: - Picture Scale, ScaleSettle, PressScale & Exiting Live Subscriptions (`picture_scale.rs`)
 
+    /// A live zoom changes the raster bucket for the whole subtree. Only a node's own scale
+    /// can promote the inherited motion to a spring, which samples its nearest still ancestor.
+    func textScaleMotion(node: NodeId, local: Float, world: Float, inherited: PaintScaleMotion,
+                         live: Bool, anchored: Bool, animating: Bool, at now: Double) -> PaintScaleMotion {
+        let observed = resolveScaleSettle(nodeId: node, scale: anchored ? world : local,
+                                         isAnimated: animating || (anchored && inherited == .moving), animNow: now,
+                                         trackIdentity: anchored || live)
+        guard observed.moving else { return inherited }
+        return max(inherited, live || (anchored && inherited == .live) ? .live : .moving)
+    }
+
     func resolveScaleSettle(
         nodeId: NodeId,
         scale sc: Float,
         isAnimated: Bool,
-        animNow: Double
+        animNow: Double,
+        trackIdentity: Bool = false
     ) -> (motion: PaintScaleMotion, raster: Float, moving: Bool) {
-        let clampedScale = max(0.0625, sc.isFinite ? sc : 1.0)
-        if reducedMotion || cxSettings.hostReducedMotion {
-            let entry = ElScaleSettle(
-                stillScale: clampedScale,
-                scale: clampedScale,
-                since: animNow,
-                moving: false,
-                lastAnimNow: animNow
-            )
-            elSliceRenderState.scaleSettles[nodeId] = entry
-            return (.still, clampedScale, false)
+        let prior = elSliceRenderState.scaleSettles[nodeId]
+        // Identity-only nodes need no per-frame tracking. Anchors and live scale start observing
+        // at identity so their text can retain its last crisp raster during a driven transition.
+        if prior == nil, sc == 1, !isAnimated, !trackIdentity {
+            return (.still, 1, false)
         }
-        if var entry = elSliceRenderState.scaleSettles[nodeId] {
-            if abs(entry.lastAnimNow - animNow) <= 1e-9 {
-                let effectiveMoving = entry.moving || isAnimated
-                if effectiveMoving && !entry.moving {
-                    entry.moving = true
-                    entry.scale = clampedScale
-                    entry.since = animNow
-                    elSliceRenderState.scaleSettles[nodeId] = entry
-                }
-                let motion: PaintScaleMotion = effectiveMoving ? .moving : .still
-                let raster = effectiveMoving ? entry.stillScale : clampedScale
-                return (motion, raster, effectiveMoving)
-            }
-            if isAnimated {
-                entry.moving = true
-                entry.wasAnimated = true
-                entry.scale = clampedScale
-                entry.since = animNow
-            } else if abs(clampedScale - entry.stillScale) > 1e-4 {
-                if entry.wasAnimated {
-                    entry.stillScale = clampedScale
-                    entry.scale = clampedScale
-                    entry.moving = false
-                    entry.wasAnimated = false
-                } else if abs(clampedScale - entry.scale) > 1e-4 {
-                    entry.scale = clampedScale
-                    entry.since = animNow
-                    entry.moving = true
-                    entry.wasAnimated = false
-                } else if animNow - entry.since >= ElSliceRenderConstants.staticScaleSettle {
-                    entry.stillScale = clampedScale
-                    entry.moving = false
-                } else {
-                    entry.moving = true
-                }
-            } else {
-                entry.scale = clampedScale
-                entry.moving = false
-                entry.wasAnimated = false
-            }
-            entry.lastAnimNow = animNow
-            elSliceRenderState.scaleSettles[nodeId] = entry
-            let motion: PaintScaleMotion = entry.moving ? .moving : .still
-            let raster = entry.moving ? entry.stillScale : clampedScale
-            return (motion, raster, entry.moving)
-        } else {
-            let entry = ElScaleSettle(
-                stillScale: clampedScale,
-                scale: clampedScale,
-                since: animNow,
-                moving: isAnimated,
-                wasAnimated: isAnimated,
-                lastAnimNow: animNow
-            )
-            elSliceRenderState.scaleSettles[nodeId] = entry
-            let motion: PaintScaleMotion = isAnimated ? .moving : .still
-            return (motion, clampedScale, isAnimated)
+        let snap = lastWasSettled || reducedMotion || cxSettings.hostReducedMotion
+        if !snap, let prior, prior.lastAnimNow == animNow, prior.scale.bitPattern == sc.bitPattern,
+           prior.wasAnimated == isAnimated {
+            return (prior.moving ? .moving : .still, prior.stillScale, prior.moving)
         }
+        let rasterScale = max(0.0625, sc.isFinite ? sc : 1)
+        var entry = prior ?? ElScaleSettle(stillScale: rasterScale, scale: sc, since: -.infinity,
+                                          moving: false, lastAnimNow: animNow)
+        if snap || (!isAnimated && entry.wasAnimated) {
+            entry.scale = sc
+            entry.since = -.infinity
+        } else if abs(sc - entry.scale) > 1e-5 {
+            entry.scale = sc
+            entry.since = animNow
+        }
+        entry.wasAnimated = !snap && isAnimated
+        entry.moving = !snap && (isAnimated || animNow - entry.since < ElSliceRenderConstants.staticScaleSettle)
+        entry.lastAnimNow = animNow
+        if !entry.moving { entry.stillScale = rasterScale }
+        elSliceRenderState.scaleSettles[nodeId] = entry
+        return (entry.moving ? .moving : .still, entry.stillScale, entry.moving)
     }
 
     func pruneScaleSettles() {
@@ -502,8 +478,8 @@ internal extension Runtime {
             }
         }
 
-        for node in flatNodes {
-            subscribeNode(node, exiting: false)
+        for index in layoutObservers.liveSources {
+            subscribeNode(flatNodes[index], exiting: false)
         }
         for (nid, snap) in exitingSnapshots where nodeById[nid] == nil && scene.contains(nid) {
             subscribeNode(snap, exiting: true)

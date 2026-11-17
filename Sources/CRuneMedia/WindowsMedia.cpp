@@ -15,6 +15,9 @@
 #include "CRuneMedia.h"
 #include "WindowsAudio.h"
 #include "WindowsMediaFoundation.h"
+#include "WindowsVideoGPU.h"
+#include "RuneVideoClock.h"
+#include <algorithm>
 
 using Microsoft::WRL::ComPtr;
 using rune_mf::api;
@@ -47,6 +50,10 @@ struct RuneMedia {
     using Clock = std::chrono::steady_clock;
     Clock::time_point anchorTick = Clock::now();
     double rate = 1;
+    bool nv12 = false;
+    rune_video::Ring ring;
+    RunePictureInfo picture{};
+    rune_video::Crop crop{};
     LONG stride = 0;
     UINT32 decodedWidth = 0;
     UINT32 decodedHeight = 0;
@@ -64,6 +71,13 @@ struct RuneMedia {
         reader.Reset();
         if (started) api().shutdown();
         if (mta) CoDecrementMTAUsage(mta);
+    }
+
+    void releaseAudio(HRESULT reason = S_OK) {
+        audio.close();
+        audioOpened = false;
+        if (FAILED(reason))
+            std::fprintf(stderr, "Rune video: audio output unavailable (HRESULT 0x%08lx)\n", static_cast<unsigned long>(reason));
     }
 
     double clock() const {
@@ -89,8 +103,10 @@ HRESULT selectFormat(IMFSourceReader *reader, DWORD stream, REFGUID major, REFGU
 HRESULT prepareReader(RuneMedia &m, bool audioOnly) {
     ComPtr<IMFAttributes> options;
     HRESULT hr = api().attributes(&options, 2);
-    if (SUCCEEDED(hr)) hr = options->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
-    if (SUCCEEDED(hr)) hr = options->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    if (SUCCEEDED(hr) && !m.nv12) hr = options->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
+    if (SUCCEEDED(hr) && m.nv12) hr = options->SetUINT32(MF_SOURCE_READER_DISABLE_DXVA, !m.ring.gpu);
+    if (SUCCEEDED(hr) && m.ring.gpu) hr = options->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, m.ring.gpu->manager.Get());
+    if (SUCCEEDED(hr)) hr = options->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, !m.nv12 || m.ring.gpu != nullptr);
     if (SUCCEEDED(hr)) hr = api().open(m.uri.get(), options.Get(), &m.reader);
     if (FAILED(hr)) return hr;
 
@@ -118,21 +134,60 @@ HRESULT prepareReader(RuneMedia &m, bool audioOnly) {
     if (SUCCEEDED(MFGetAttributeRatio(video.Get(), MF_MT_FRAME_RATE, &numerator, &denominator))
         && numerator && denominator)
         m.info.frame_duration = static_cast<double>(denominator) / numerator;
+    else if (m.nv12)
+        m.info.frame_duration = 1.0 / 30.0;
     // Preserve the track's storage orientation during color conversion. Rune exposes
     // the original pixels and applies their display transform when drawing the frame.
     const UINT32 sourceRotation = MFGetAttributeUINT32(video.Get(), MF_MT_VIDEO_ROTATION, 0);
     hr = m.reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
     if (SUCCEEDED(hr)) hr = m.reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
     if (FAILED(hr)) return hr;
-    hr = selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                      MFMediaType_Video, MFVideoFormat_RGB32, sourceRotation);
-    if (FAILED(hr) && sourceRotation)
-        hr = selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_VIDEO_STREAM, MFMediaType_Video, MFVideoFormat_RGB32);
+    if (m.nv12) {
+        hr = selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_VIDEO_STREAM, MFMediaType_Video, MFVideoFormat_NV12);
+    } else {
+        hr = selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_VIDEO_STREAM, MFMediaType_Video, MFVideoFormat_RGB32, sourceRotation);
+        if (FAILED(hr) && sourceRotation)
+            hr = selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_VIDEO_STREAM, MFMediaType_Video, MFVideoFormat_RGB32);
+    }
     if (FAILED(hr)) return hr;
     ComPtr<IMFMediaType> decoded;
     hr = m.reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &decoded);
     if (SUCCEEDED(hr)) hr = MFGetAttributeSize(decoded.Get(), MF_MT_FRAME_SIZE, &m.decodedWidth, &m.decodedHeight);
     if (FAILED(hr)) return hr;
+    if (m.nv12) {
+        if (m.decodedWidth < 2 || m.decodedHeight < 2 || m.decodedWidth > 16384 || m.decodedHeight > 16384)
+            return MF_E_INVALIDMEDIATYPE;
+        auto &c = m.crop;
+        c = {0, 0, m.decodedWidth & ~1u, m.decodedHeight & ~1u};
+        MFVideoArea area{};
+        UINT32 blobSize = 0;
+        if (SUCCEEDED(decoded->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE, reinterpret_cast<UINT8 *>(&area), sizeof(area), &blobSize)) &&
+            blobSize == sizeof(area) && area.Area.cx > 0 && area.Area.cy > 0) {
+            c.x = static_cast<UINT32>(std::max<int>(0, area.OffsetX.value)) & ~1u;
+            c.y = static_cast<UINT32>(std::max<int>(0, area.OffsetY.value)) & ~1u;
+            if (c.x >= m.decodedWidth || c.y >= m.decodedHeight) return MF_E_INVALIDMEDIATYPE;
+            c.width = std::min<UINT32>(area.Area.cx, m.decodedWidth - c.x) & ~1u;
+            c.height = std::min<UINT32>(area.Area.cy, m.decodedHeight - c.y) & ~1u;
+            if (!c.width || !c.height) return MF_E_INVALIDMEDIATYPE;
+        }
+        // Some source readers omit container colorimetry on the negotiated NV12
+        // type. It still describes the original YCbCr samples.
+        auto attribute = [&](REFGUID key) {
+            UINT32 value = MFGetAttributeUINT32(decoded.Get(), key, 0);
+            return value ? value : MFGetAttributeUINT32(video.Get(), key, 0);
+        };
+        UINT32 matrix = attribute(MF_MT_YUV_MATRIX);
+        auto &p = m.picture;
+        p.width = c.width; p.height = c.height; p.natural_width = c.width;
+        p.bt709 = matrix == MFVideoTransferMatrix_BT709 || (matrix != MFVideoTransferMatrix_BT601 && c.height >= 720);
+        p.full_range = attribute(MF_MT_VIDEO_NOMINAL_RANGE) == MFNominalRange_0_255;
+        if (SUCCEEDED(MFGetAttributeRatio(decoded.Get(), MF_MT_PIXEL_ASPECT_RATIO, &numerator, &denominator)) && numerator && denominator) {
+            p.natural_width = static_cast<UINT32>(std::min(double(UINT32_MAX), std::max(1.0, std::round(double(c.width) * numerator / denominator))));
+        }
+        m.info.width = c.width; m.info.height = c.height;
+        m.info.rotation_clockwise = static_cast<int>(MFGetAttributeUINT32(decoded.Get(), MF_MT_VIDEO_ROTATION, sourceRotation));
+        return S_OK;
+    }
     const UINT32 remaining = MFGetAttributeUINT32(decoded.Get(), MF_MT_VIDEO_ROTATION, 0);
     if (remaining >= 360 || remaining % 90 || sourceRotation >= 360 || sourceRotation % 90) return MF_E_INVALIDMEDIATYPE;
     m.appliedRotation = (sourceRotation + 360 - remaining) % 360;
@@ -164,7 +219,7 @@ HRESULT readNext(RuneMedia &m, FrameSample &result) {
             if (FAILED(m.reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &type))
                 || FAILED(MFGetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, &w, &h))
                 || FAILED(type->GetGUID(MF_MT_SUBTYPE, &subtype))
-                || w != m.decodedWidth || h != m.decodedHeight || subtype != MFVideoFormat_RGB32)
+                || w != m.decodedWidth || h != m.decodedHeight || subtype != (m.nv12 ? MFVideoFormat_NV12 : MFVideoFormat_RGB32))
                 return MF_E_INVALIDMEDIATYPE;
             UINT32 stride = 0;
             if (SUCCEEDED(type->GetUINT32(MF_MT_DEFAULT_STRIDE, &stride)))
@@ -267,7 +322,18 @@ HRESULT copyBGRA(const RuneMedia &m, uint8_t *dst) {
 }
 
 HRESULT statusOf(RuneMedia &m, double *seconds, bool *ended) {
-    if (m.audioOpened) return m.audio.position(seconds, ended);
+    if (m.audioOpened) {
+        HRESULT hr = m.audio.position(seconds, ended);
+        if (SUCCEEDED(hr)) {
+            m.anchor = *seconds;
+            m.anchorTick = RuneMedia::Clock::now();
+            return S_OK;
+        }
+        if (!m.info.width) return hr;
+        // Losing an audio endpoint doesn't invalidate decoded pictures. Keep the
+        // last known position on the monotonic clock until sound can be reopened.
+        m.releaseAudio(hr);
+    }
     *seconds = m.clock();
     *ended = m.playing && ((m.info.duration >= 0 && *seconds >= m.info.duration)
                             || (m.info.duration < 0 && m.reachedEOF && m.current.sample
@@ -277,8 +343,8 @@ HRESULT statusOf(RuneMedia &m, double *seconds, bool *ended) {
 
 } // namespace
 
-RuneMedia *rune_media_open(const char *uri, int audio_only, int headless,
-                           RuneMediaInfo *info, char *error, size_t capacity) {
+static RuneMedia *openMedia(const char *uri, int audio_only, int headless, const int64_t *adapter,
+                            RuneMediaInfo *info, RunePictureInfo *picture, char *error, size_t capacity) {
     Apartment apartment;
     if (!uri || !info || !apartment.ready() || !api().available()) {
         failure(error, capacity, "initialization (Windows Media Feature Pack required)", E_NOINTERFACE);
@@ -296,11 +362,44 @@ RuneMedia *rune_media_open(const char *uri, int audio_only, int headless,
     if (SUCCEEDED(hr)) {
         m->started = true;
         m->headless = headless != 0;
+        if (picture) {
+            m->nv12 = true;
+            try { if (!m->headless) m->ring.gpu = rune_video::openDevice(adapter); }
+            catch (const std::bad_alloc &) { failure(error, capacity, "video device allocation", E_OUTOFMEMORY); return nullptr; }
+        }
         hr = prepareReader(*m, audio_only != 0);
+        if (FAILED(hr) && m->ring.gpu) {
+            m->reader.Reset();
+            m->ring.gpu.reset();
+            hr = prepareReader(*m, audio_only != 0);
+        }
+        if (FAILED(hr) && m->nv12) {
+            m->reader.Reset();
+            m->nv12 = false;
+            hr = prepareReader(*m, audio_only != 0);
+        }
     }
     if (FAILED(hr)) { failure(error, capacity, "opening stream", hr); return nullptr; }
     *info = m->info;
+    if (picture) *picture = m->nv12 ? m->picture : RunePictureInfo{};
     return m.release();
+}
+
+RuneMedia *rune_media_open(const char *uri, int audio_only, int headless,
+                           RuneMediaInfo *info, char *error, size_t capacity) {
+    return openMedia(uri, audio_only, headless, nullptr, info, nullptr, error, capacity);
+}
+
+RuneMedia *rune_media_open_video(const char *uri, const int64_t *adapter, RuneMediaInfo *info,
+                                 RunePictureInfo *picture, char *error, size_t capacity) {
+    if (!picture) { failure(error, capacity, "video metadata", E_INVALIDARG); return nullptr; }
+    return openMedia(uri, 0, 0, adapter, info, picture, error, capacity);
+}
+
+RuneMedia *rune_media_open_still(const char *uri, RuneMediaInfo *info, RunePictureInfo *picture,
+                                 char *error, size_t capacity) {
+    if (!picture) { failure(error, capacity, "still metadata", E_INVALIDARG); return nullptr; }
+    return openMedia(uri, 0, 1, nullptr, info, picture, error, capacity);
 }
 
 void rune_media_close(RuneMedia *m) {
@@ -308,17 +407,13 @@ void rune_media_close(RuneMedia *m) {
     delete m;
 }
 
-int rune_media_frame(RuneMedia *m, double seconds, uint8_t *pixels, size_t length,
-                     char *error, size_t capacity) {
-    if (!m || !std::isfinite(seconds) || !m->info.width || !pixels
-        || length < static_cast<size_t>(m->info.width) * m->info.height * 4) {
-        failure(error, capacity, "frame buffer", E_INVALIDARG); return -1;
-    }
-    Apartment apartment;
+static HRESULT selectFrame(RuneMedia *m, double seconds) {
     const bool poll = seconds < 0;
     bool ended = false;
-    HRESULT hr = apartment.ready() ? S_OK : apartment.status;
+    HRESULT hr = S_OK;
     if (SUCCEEDED(hr) && poll) hr = statusOf(*m, &seconds, &ended);
+    if (SUCCEEDED(hr) && poll && m->playing) seconds += rune_media_present_lead() * m->rate;
+    if (!poll && m->headless && m->nv12) seconds += m->info.frame_duration * 0.5;
     if (SUCCEEDED(hr)) {
         if (!std::isfinite(seconds) || seconds > 9e11) hr = E_INVALIDARG;
         else {
@@ -330,11 +425,61 @@ int rune_media_frame(RuneMedia *m, double seconds, uint8_t *pixels, size_t lengt
             hr = atTime(*m, static_cast<LONGLONG>(std::llround(seconds * ticksPerSecond)));
         }
     }
-    if (hr == S_FALSE || (SUCCEEDED(hr) && poll && m->lastDelivered == m->current.time)) return 0;
+    return (hr == S_OK && poll && m->lastDelivered == m->current.time) ? S_FALSE : hr;
+}
+
+int rune_media_picture(RuneMedia *m, double seconds, double retainingTime, RuneMediaPicture **picture, char *error, size_t capacity) {
+    if (!m || !picture || !std::isfinite(seconds)) {
+        failure(error, capacity, "picture arguments", E_INVALIDARG); return -1;
+    }
+    *picture = nullptr;
+    if (!m->nv12) return 2;
+    if (!m->info.width) return 0;
+    Apartment apartment;
+    auto capture = [&]() {
+        HRESULT hr = selectFrame(m, seconds);
+        if (hr != S_OK) return hr;
+        if (retainingTime >= 0 && retainingTime == double(m->current.time) / ticksPerSecond) return S_FALSE;
+        return m->ring.capture(m->current.sample.Get(), m->decodedWidth, m->decodedHeight, m->crop, picture);
+    };
+    HRESULT hr = apartment.ready() ? capture() : apartment.status;
+    if (FAILED(hr) && apartment.ready() && m->ring.gpu &&
+        (FAILED(m->ring.gpu->device->GetDeviceRemovedReason()) || hr == MF_E_HW_MFT_FAILED_START_STREAMING ||
+         hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)) {
+        const RunePictureInfo expected = m->picture;
+        m->next = {}; m->current = {};
+        m->reader.Reset();
+        m->ring = {};
+        m->reachedEOF = false;
+        m->lastDelivered = -1;
+        hr = prepareReader(*m, false);
+        if (SUCCEEDED(hr) && (m->picture.width != expected.width || m->picture.height != expected.height ||
+            m->picture.full_range != expected.full_range || m->picture.bt709 != expected.bt709)) hr = MF_E_INVALIDMEDIATYPE;
+        if (SUCCEEDED(hr)) hr = capture();
+    }
+    if (hr == S_FALSE) return 0;
+    if (FAILED(hr)) { failure(error, capacity, "NV12 video picture", hr); return -1; }
+    m->lastDelivered = m->current.time;
+    return 1;
+}
+
+int rune_media_frame(RuneMedia *m, double seconds, uint8_t *pixels, size_t length,
+                     char *error, size_t capacity) {
+    if (!m || m->nv12 || !std::isfinite(seconds) || !m->info.width || !pixels
+        || length < static_cast<size_t>(m->info.width) * m->info.height * 4) {
+        failure(error, capacity, "frame buffer", E_INVALIDARG); return -1;
+    }
+    Apartment apartment;
+    HRESULT hr = apartment.ready() ? selectFrame(m, seconds) : apartment.status;
+    if (hr == S_FALSE) return 0;
     if (SUCCEEDED(hr)) hr = copyBGRA(*m, pixels);
     if (FAILED(hr)) { failure(error, capacity, "video decode", hr); return -1; }
     m->lastDelivered = m->current.time;
     return 1;
+}
+
+double rune_media_last_picture_time(const RuneMedia *m) {
+    return m && m->lastDelivered >= 0 ? double(m->lastDelivered) / ticksPerSecond : -1.0;
 }
 
 int rune_media_transport(RuneMedia *m, int playing, double seek, double rate, double volume,
@@ -347,8 +492,9 @@ int rune_media_transport(RuneMedia *m, int playing, double seek, double rate, do
     double time = m->clock();
     bool ended = false;
     if (m->audioOpened) {
-        HRESULT hr = m->audio.position(&time, &ended);
+        HRESULT hr = statusOf(*m, &time, &ended);
         if (FAILED(hr)) return failure(error, capacity, "audio position", hr);
+        if (muted || volume == 0) m->releaseAudio();
     }
     if (seek >= 0) time = m->info.duration >= 0 ? std::fmin(seek, m->info.duration) : seek;
     // Opening the audio endpoint is deferred until playback first needs it.
@@ -356,9 +502,13 @@ int rune_media_transport(RuneMedia *m, int playing, double seek, double rate, do
     bool newAudio = false;
     if (!m->audioOpened && needsAudio) {
         HRESULT hr = m->audio.open(m->uri.get());
-        if (FAILED(hr)) return failure(error, capacity, "audio output", hr);
-        m->audioOpened = true;
-        newAudio = true;
+        if (FAILED(hr)) {
+            if (!m->info.width) return failure(error, capacity, "audio output", hr);
+            m->releaseAudio(hr);
+        } else {
+            m->audioOpened = true;
+            newAudio = true;
+        }
     }
     if (m->audioOpened) {
         HRESULT hr = S_OK;
@@ -368,7 +518,10 @@ int rune_media_transport(RuneMedia *m, int playing, double seek, double rate, do
         if (SUCCEEDED(hr)) hr = m->audio.setMuted(muted != 0);
         if (SUCCEEDED(hr) && (newAudio || seek >= 0 || ended || m->playing != (playing != 0)))
             hr = m->audio.setPlaying(playing != 0);
-        if (FAILED(hr)) return failure(error, capacity, "audio transport", hr);
+        if (FAILED(hr)) {
+            if (!m->info.width) return failure(error, capacity, "audio transport", hr);
+            m->releaseAudio(hr);
+        }
     }
     m->anchor = time;
     m->anchorTick = RuneMedia::Clock::now();
@@ -386,5 +539,20 @@ int rune_media_status(RuneMedia *m, double *seconds, int *ended, char *error, si
     if (FAILED(hr)) return failure(error, capacity, "playback clock", hr);
     *ended = done ? 1 : 0;
     return 1;
+}
+
+double rune_media_next_video_delay(RuneMedia *m) {
+    if (!m || !m->playing) return rune_media_refresh_period();
+    Apartment apartment;
+    double time = 0;
+    bool ended = false;
+    if (!apartment.ready() || FAILED(statusOf(*m, &time, &ended))) return rune_media_refresh_period();
+    if (m->next.sample)
+        return rune_media_refresh_wake((m->next.time / ticksPerSecond - time) / m->rate);
+    // The last picture stays on screen through its entire duration. EOS needs the
+    // actual media time, so do not bring this last wake forward to a display slot.
+    if (m->reachedEOF && m->info.duration >= 0)
+        return std::fmax(0.001, (m->info.duration - time) / m->rate);
+    return rune_media_refresh_period();
 }
 #endif

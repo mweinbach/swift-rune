@@ -15,6 +15,57 @@ struct HoverRuntimeParityTests {
         var rows: Int
     }
 
+    @Test("A stationary pointer follows scrolling rows and only reruns views that read its key")
+    func paintHoverAndViewHoverDuringScroll() {
+        for native in [false, true] {
+            for readsHover in [false, true] {
+                var viewCalls = 0
+                var seenKey: String?
+                let rt = Runtime(state: false, viewport: Vec2(140, 90), pixelScale: 1) { _, context -> El<Bool> in
+                    viewCalls += 1
+                    let cx = context
+                    let label: El<Bool> = memo("hover-reading-label", 0) {
+                        if readsHover { seenKey = cx.hoveredKey }
+                        return el().size(1, 1)
+                    }
+                    let rows: [El<Bool>] = (0..<20).map { i in
+                        el().key("r\(i)").wFull().h(30).hover(.white)
+                            .help("row \(i)").onClick { _ in }
+                    }
+                    return col().size(140, 90).scroll(ScrollSpec(stickBottom: false))
+                        .children(rows).child(label)
+                }
+                rt.helpDelay = 0
+                func paint(_ time: Double) {
+                    if native { _ = rt.renderFrame(at: time) } else { _ = rt.frame(at: time) }
+                }
+                paint(0)
+                let point = Vec2(20, 15)
+                rt.pointerMove(to: point, at: 0.01)
+                paint(0.02)
+                paint(0.04)
+                let before = viewCalls
+                let first = rt.hoveredKey
+                #expect(first == "r0")
+                if readsHover { #expect(seenKey == first) }
+                rt.wheel(WheelEvent(dy: -60), at: point, now: 0.05)
+                for frame in 1...30 { paint(0.05 + Double(frame) / 60) }
+                let landed = rt.hoveredKey
+                #expect(landed != nil && landed != first)
+                #expect(rt.element(byKey: landed ?? "")?.hover ?? 0 > 0.9)
+                if readsHover {
+                    #expect(seenKey == landed)
+                    #expect(viewCalls > before)
+                } else {
+                    #expect(viewCalls == before)
+                }
+                if !native, let key = landed {
+                    #expect(rt.helpTooltip()?.text == "row " + key.dropFirst())
+                }
+            }
+        }
+    }
+
     /// `hover_tests.rs:6` `view`.
     static func view(_ s: HoverState, _ cx: inout Cx<HoverState>) -> El<HoverState> {
         let rows: [El<HoverState>] = (0..<s.rows).map { i in

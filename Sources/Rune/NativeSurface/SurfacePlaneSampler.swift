@@ -12,6 +12,20 @@ extension NativeSurfaceVideoFrame {
                 throw NativeSurfaceError.importFailed("byte surface size or format differs from its frame")
             }
             return bytes.planes
+        #if os(Windows)
+        case .shared(let frame):
+            guard size == (frame.texture.width, frame.texture.height), format == .bgra else {
+                throw NativeSurfaceError.importFailed("shared surface size or format differs from its frame")
+            }
+            return [try frame.bytes()]
+        #if canImport(CRuneMedia)
+        case .decoded(let picture):
+            guard size == (picture.width, picture.height), format == picture.format else {
+                throw NativeSurfaceError.importFailed("decoded surface size or format differs from its frame")
+            }
+            return try picture.bytePlanes()
+        #endif
+        #endif
         #if canImport(CoreVideo) && canImport(IOSurface) && canImport(Metal)
         case .pixelBuffer(let source):
             let buffer = source.cvBuffer

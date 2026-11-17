@@ -235,13 +235,6 @@ public func stepPressRepeat(
     }
 }
 
-internal struct PressRepeatPayload {
-    var path: String
-    var windowPos: Vec2
-    var mods: Mods
-    var button: PointerButton
-}
-
 /// Stateful press-repeat machine owned by `Runtime` (`press_repeat::PressRepeat`).
 public struct PressRepeatMachine: Equatable, Sendable {
     public var seq = PressRepeatSeq()
@@ -283,11 +276,21 @@ public struct TitlebarCaption: Equatable, Sendable {
     public var height: Float
     public var hidden: Bool
     public var mirrored: Bool
+    public var maximized: Bool
+    public var minimizable: Bool
+    public var maximizable: Bool
+    public var state: TitlebarCaptionState
 
-    public init(height: Float, hidden: Bool = false, mirrored: Bool = false) {
+    public init(height: Float, hidden: Bool = false, mirrored: Bool = RuneLabels.shared.isRTL,
+                maximized: Bool = false, minimizable: Bool = true, maximizable: Bool = true,
+                state: TitlebarCaptionState = .idle) {
         self.height = height
         self.hidden = hidden
         self.mirrored = mirrored
+        self.maximized = maximized
+        self.minimizable = minimizable
+        self.maximizable = maximizable
+        self.state = state
     }
 }
 
@@ -401,6 +404,7 @@ public struct TitlebarMachine: Equatable, Sendable {
     public var nativeBand: Float = 0.0
     public var windowMenu: WindowMenu? = nil
     public var caption: TitlebarCaption? = nil
+    internal var headlessWindowsTitlebar: Titlebar?
 
     public init() {}
 
@@ -501,6 +505,7 @@ extension Runtime {
     /// returning `true` if a live pointer/drag change requested a view commit.
     @discardableResult
     internal func cancelPointerForFocusLoss(at now: Double) -> Bool {
+        slice2State.autoscroll.cancel()
         var didMarkDirty = false
         kitHooks.titlebar.clear()
         primaryPointerHeld = false

@@ -96,7 +96,10 @@ extension El {
         guard isTextElement else { return self }
         let value = wordFade.isFinite ? wordFade : 0
         var copy = self
-        copy.runtimeExtras[ShellElExtrasKey.revealWordFade] = value
+        copy.textReveal = value
+        if copy.runtimeExtras[ShellElExtrasKey.revealWordFade] != nil {
+            copy.runtimeExtras.removeValue(forKey: ShellElExtrasKey.revealWordFade)
+        }
         return copy
     }
 
@@ -191,7 +194,7 @@ extension El {
     }
 
     internal var elRevealWordFade: Float? {
-        runtimeExtras[ShellElExtrasKey.revealWordFade] as? Float
+        (runtimeExtras[ShellElExtrasKey.revealWordFade] as? Float) ?? (textReveal >= 0 ? textReveal : nil)
     }
 
     internal var elOutline: Outline? {

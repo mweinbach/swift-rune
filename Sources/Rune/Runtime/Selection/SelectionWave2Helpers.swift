@@ -4,6 +4,26 @@ import RuneRef
 
 // MARK: - Selection Highlight Run Joining (`selectable.rs:151-183`)
 
+internal protocol SelectionPaintRect {
+    var rect: SIMD4<Float> { get set }
+    var radii: SIMD4<Float> { get }
+    var fill: SIMD4<Float> { get }
+    var clip: SIMD4<Float> { get }
+    var params: SIMD4<Float> { get }
+    var selectionIsRect: Bool { get }
+    var selectionTurn: Float { get }
+}
+
+extension Primitive: SelectionPaintRect {
+    var selectionIsRect: Bool { kind == .roundedRect }
+    var selectionTurn: Float { turn }
+}
+
+extension RenderInstance: SelectionPaintRect {
+    var selectionIsRect: Bool { params.y == KIND_RECT }
+    var selectionTurn: Float { 0 } // The native renderer rotates an enclosing layer.
+}
+
 /// Joins selection highlight rects drawn by adjacent selectable words/chips on the same visual line
 /// into seamless horizontal runs (`crates/rune/src/runtime/selection/selectable.rs:151-183`).
 public enum SelectionRunExtender {
@@ -21,9 +41,7 @@ public enum SelectionRunExtender {
         turn: Float = 0,
         reach: Float
     ) {
-        var rect = inputRect
         let radii = SIMD4<Float>(repeating: radius)
-        let from = max(0, primitives.count - 256)
 
         func makePrimitive(_ r: SIMD4<Float>) -> Primitive {
             var prim = Primitive.roundedRect(
@@ -38,13 +56,23 @@ public enum SelectionRunExtender {
             return prim
         }
 
+        join(into: &primitives, rect: inputRect, fill: fill, radii: radii, clip: clip, turn: turn, reach: reach,
+             makePrimitive: makePrimitive)
+    }
+
+    internal static func join<P: SelectionPaintRect>(
+        into primitives: inout [P], rect input: SIMD4<Float>, fill: SIMD4<Float>, radii: SIMD4<Float>,
+        clip: SIMD4<Float>, turn: Float, reach: Float, makePrimitive: (SIMD4<Float>) -> P
+    ) {
+        var rect = input
+        let from = max(0, primitives.count - 256)
         if turn == 0 {
             var foundIdx: Int? = nil
             for idx in stride(from: primitives.count - 1, through: from, by: -1) {
                 let p = primitives[idx]
-                guard p.kind == .roundedRect,
+                guard p.selectionIsRect,
                       p.params.x == 0,
-                      p.turn == 0,
+                      p.selectionTurn == 0,
                       p.fill == fill,
                       p.clip == clip,
                       p.radii == radii else { continue }
@@ -58,7 +86,7 @@ public enum SelectionRunExtender {
 
             if let at = foundIdx {
                 let covered = primitives[(at + 1)...].contains {
-                    $0.kind == .roundedRect && $0.fill != fill && $0.fill.w > 0
+                    $0.selectionIsRect && $0.fill != fill && $0.fill.w > 0
                 }
                 let prevRect = primitives[at].rect
                 let top = min(prevRect.y, rect.y)
@@ -79,7 +107,7 @@ public enum SelectionRunExtender {
             // First highlight on its line inside a chip's background: extend left to the chip's edge.
             for idx in stride(from: primitives.count - 1, through: from, by: -1) {
                 let p = primitives[idx]
-                guard p.kind == .roundedRect,
+                guard p.selectionIsRect,
                       p.fill != fill,
                       p.fill.w > 0,
                       p.rect.x >= rect.x - reach,
@@ -144,11 +172,13 @@ public enum CopyHTMLBuilder {
         public var a11yHidden: Bool
         public var rect: MotionRect
         public var text: String?
+        internal var source: TextCaseMapping?
         public var baseWeight: Float
         public var baseItalic: Bool
         public var baseMonospace: Bool
         public var spans: [SpanRun]
         public var links: [LinkRun]
+        public var strikes: [Range<Int>]
         public var uncopied: [Range<Int>]
 
         public init(
@@ -158,11 +188,13 @@ public enum CopyHTMLBuilder {
             a11yHidden: Bool = false,
             rect: MotionRect = .zero,
             text: String? = nil,
+            source: TextCaseMapping? = nil,
             baseWeight: Float = 400,
             baseItalic: Bool = false,
             baseMonospace: Bool = false,
             spans: [SpanRun] = [],
             links: [LinkRun] = [],
+            strikes: [Range<Int>] = [],
             uncopied: [Range<Int>] = []
         ) {
             self.parentIndex = parentIndex
@@ -171,11 +203,13 @@ public enum CopyHTMLBuilder {
             self.a11yHidden = a11yHidden
             self.rect = rect
             self.text = text
+            self.source = source
             self.baseWeight = baseWeight
             self.baseItalic = baseItalic
             self.baseMonospace = baseMonospace
             self.spans = spans
             self.links = links
+            self.strikes = strikes
             self.uncopied = uncopied
         }
     }
@@ -233,13 +267,9 @@ public enum CopyHTMLBuilder {
                         walk = nodes[p].parentIndex
                     }
                     let markerText = (j + 1 < nodes.count) ? nodes[j + 1].text : nil
-                    let ordered: Bool
-                    if let m = markerText {
-                        let trimmed = m.hasSuffix(".") ? String(m.dropLast()) : m
-                        ordered = !trimmed.isEmpty && trimmed.unicodeScalars.allSatisfy { CharacterSet.decimalDigits.contains($0) || ($0.value >= 0x30 && $0.value <= 0x39) }
-                    } else {
-                        ordered = false
-                    }
+                    let ordered = markerText.map { marker in
+                        !marker.isEmpty && marker.utf8.reversed().drop(while: { $0 == 46 }).allSatisfy { (48...57).contains($0) }
+                    } ?? false
                     return .item(list: list, item: j, ordered: ordered)
                 case "cell", "columnheader", "rowheader":
                     var row = j
@@ -250,7 +280,7 @@ public enum CopyHTMLBuilder {
                         if row == j && pRoleLower == "row" {
                             row = p
                         }
-                        if pRoleLower == "table" || pRoleLower == "grid" {
+                        if pRoleLower == "table" {
                             table = p
                             break
                         }
@@ -375,7 +405,7 @@ public enum CopyHTMLBuilder {
             prev = (block, i)
         }
 
-        guard let (p, _) = prev else { return nil }
+        guard let (p, _) = prev else { return "" }
         if case .item = p {} else {
             closeBlock(p, next: nil)
         }
@@ -385,14 +415,18 @@ public enum CopyHTMLBuilder {
 
     private static func inlineHTML(node: NodeSnapshot, text: String, range: Range<Int>) -> String {
         let len = text.utf8.count
-        let a = max(0, min(len, SelectionMath.floorCharBoundary(in: text, offset: range.lowerBound)))
-        let b = max(a, min(len, SelectionMath.floorCharBoundary(in: text, offset: range.upperBound)))
+        let a = max(0, min(len, range.lowerBound))
+        let b = max(a, min(len, range.upperBound))
         guard a < b else { return "" }
 
         var cutSet: Set<Int> = [a, b]
         for s in node.spans {
             cutSet.insert(s.byteRange.lowerBound)
             cutSet.insert(s.byteRange.upperBound)
+        }
+        for strike in node.strikes {
+            cutSet.insert(strike.lowerBound)
+            cutSet.insert(strike.upperBound)
         }
         for l in node.links {
             cutSet.insert(l.byteRange.lowerBound)
@@ -409,7 +443,7 @@ public enum CopyHTMLBuilder {
             let s = cuts[idx]
             let e = cuts[idx + 1]
             guard s < e else { continue }
-            let slice = CopyJoin.copySlice(in: text, range: s..<e, uncopied: node.uncopied)
+            let slice = CopyJoin.copySlice(in: text, range: s..<e, uncopied: node.uncopied, source: node.source)
             guard !slice.isEmpty else { continue }
 
             let inside: (Range<Int>) -> Bool = { $0.lowerBound <= s && e <= $0.upperBound }
@@ -418,10 +452,10 @@ public enum CopyHTMLBuilder {
             let italic = !node.baseItalic
                 && node.spans.contains { inside($0.byteRange) && $0.italic }
             let code = node.spans.contains { inside($0.byteRange) && $0.monospace }
-            let struck = node.spans.contains { inside($0.byteRange) && $0.strikethrough }
-            let link = node.links.first {
-                inside($0.byteRange) && ($0.id.contains("://") || $0.id.hasPrefix("mailto:"))
-            }?.id
+            let struck = node.strikes.contains(where: inside) || node.spans.contains { inside($0.byteRange) && $0.strikethrough }
+            let link = node.links.first { inside($0.byteRange) }.flatMap {
+                $0.id.contains("://") || $0.id.hasPrefix("mailto:") ? $0.id : nil
+            }
 
             if activeHref != link {
                 if activeHref != nil { out.append("</a>") }
@@ -522,6 +556,7 @@ extension TextShapeKey {
         case .systemUI: mix(&h, 0)
         case .monospace: mix(&h, 1)
         case .custom(let n): mix(&h, 2); mixString(&h, n)
+        case .systemMono: mix(&h, 3)
         }
         switch style.wrap {
         case .wrap: mix(&h, 0)

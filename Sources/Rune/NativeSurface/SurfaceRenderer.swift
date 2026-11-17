@@ -14,7 +14,7 @@ public enum SurfaceBlend: UInt8, Sendable, Equatable {
 
 /// GPU surface/video renderer translating `native_surface/video.wgsl` 1:1 to Metal (`rune::native_surface::SurfaceRenderer`).
 public final class SurfaceRenderer: @unchecked Sendable {
-    public struct Uniforms {
+    public struct Uniforms: Equatable {
         public var viewport: SIMD4<Float>
         public var node: SIMD4<Float>
         public var image: SIMD4<Float>
@@ -43,24 +43,22 @@ public final class SurfaceRenderer: @unchecked Sendable {
 
     private final class PreparedDraw {
         var beforeInstance: UInt32
-        let surface: NativeSurface
+        var surface: NativeSurface
         var imported: ImportedFrame
         var uniforms: Uniforms
-        var uniformBuffer: MTLBuffer
+        var uniformBuffer: MTLBuffer?
         var drawn: Bool = false
 
         init(
             beforeInstance: UInt32,
             surface: NativeSurface,
             imported: ImportedFrame,
-            uniforms: Uniforms,
-            uniformBuffer: MTLBuffer
+            uniforms: Uniforms
         ) {
             self.beforeInstance = beforeInstance
             self.surface = surface
             self.imported = imported
             self.uniforms = uniforms
-            self.uniformBuffer = uniformBuffer
         }
     }
 
@@ -80,6 +78,9 @@ public final class SurfaceRenderer: @unchecked Sendable {
 
     private var cache: [UInt: (surface: NativeSurface, frame: ImportedFrame)] = [:]
     private var draws: [PreparedDraw] = []
+    private var activeKeys: Set<UInt> = []
+    private var frameSnapshots: [UInt: (frame: NativeSurfaceVideoFrame, mirrored: Bool, revision: UInt64)] = [:]
+    private(set) var uniformBufferAllocations = 0
 
     public init(device: MTLDevice, pixelFormat: MTLPixelFormat = .bgra8Unorm_srgb) throws {
         self.device = device
@@ -174,22 +175,20 @@ public final class SurfaceRenderer: @unchecked Sendable {
     /// Latches the current picture for each surface draw and prepares GPU textures + uniforms.
     @discardableResult
     public func prepare(draws inputDraws: [SurfaceDraw], viewport: (UInt32, UInt32)) -> Result<Void, MetalTextureSizeError> {
-        let activeKeys = Set(inputDraws.map { $0.surface.key })
-        cache = cache.filter { activeKeys.contains($0.key) }
-
-        var snapshots: [UInt: (frame: NativeSurfaceVideoFrame, mirrored: Bool, revision: UInt64)] = [:]
-        var prepared: [PreparedDraw] = []
-        prepared.reserveCapacity(inputDraws.count)
+        activeKeys.removeAll(keepingCapacity: true)
+        var count = 0
+        defer { frameSnapshots.removeAll(keepingCapacity: true) }
 
         for d in inputDraws {
+            activeKeys.insert(d.surface.key)
             guard d.rect.z > 0 && d.rect.w > 0 else { continue }
             let cacheKey = d.surface.key
-            guard let snapshot = snapshots[cacheKey] ?? d.surface.renderSnapshot() else {
+            guard let snapshot = frameSnapshots[cacheKey] ?? d.surface.renderSnapshot() else {
                 cache.removeValue(forKey: cacheKey)
                 continue
             }
 
-            snapshots[cacheKey] = snapshot
+            frameSnapshots[cacheKey] = snapshot
             let imported: ImportedFrame
             if let cached = cache[cacheKey]?.frame, cached.revision == snapshot.revision {
                 imported = cached
@@ -202,7 +201,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
                     d.surface.setLastError("\(error)")
                     cache.removeValue(forKey: cacheKey)
                     if let sizeError = error as? MetalTextureSizeError {
-                        self.draws = []
+                        draws.removeAll(keepingCapacity: true)
                         return .failure(sizeError)
                     }
                     continue
@@ -243,24 +242,32 @@ public final class SurfaceRenderer: @unchecked Sendable {
                 clipFade: d.clipFade
             )
 
-            guard let uBuf = device.makeBuffer(
-                bytes: &uniforms,
-                length: MemoryLayout<Uniforms>.stride,
-                options: .storageModeShared
-            ) else {
-                continue
+            if count < draws.count {
+                let slot = draws[count]
+                if slot.uniforms != uniforms {
+                    // The previous buffer may still be in flight. Moving draws use Metal's
+                    // inline copy, so a later prepare cannot overwrite earlier commands.
+                    slot.uniformBuffer = nil
+                    slot.uniforms = uniforms
+                } else if slot.uniformBuffer == nil {
+                    // Once geometry settles, even a new video frame can retain this binding.
+                    slot.uniformBuffer = device.makeBuffer(bytes: &uniforms, length: MemoryLayout<Uniforms>.stride,
+                                                           options: .storageModeShared)
+                    if slot.uniformBuffer != nil { uniformBufferAllocations += 1 }
+                }
+                slot.surface = d.surface
+                slot.imported = imported
+                slot.beforeInstance = d.beforeInstance
+                slot.drawn = false
+            } else {
+                draws.append(PreparedDraw(beforeInstance: d.beforeInstance, surface: d.surface,
+                                          imported: imported, uniforms: uniforms))
             }
-
-            prepared.append(PreparedDraw(
-                beforeInstance: d.beforeInstance,
-                surface: d.surface,
-                imported: imported,
-                uniforms: uniforms,
-                uniformBuffer: uBuf
-            ))
+            count += 1
         }
 
-        self.draws = prepared
+        if count < draws.count { draws.removeLast(draws.count - count) }
+        for key in cache.keys where !activeKeys.contains(key) { cache.removeValue(forKey: key) }
         return .success(())
     }
 
@@ -279,14 +286,14 @@ public final class SurfaceRenderer: @unchecked Sendable {
         let fmt = pixelFormat ?? primaryFormat
         guard let pipe = try? pipeline(for: fmt, blend: blend) else { return }
         encoder.setRenderPipelineState(pipe)
-        if let tv = targetViewport {
+        if targetViewport == nil, let buffer = p.uniformBuffer {
+            encoder.setVertexBuffer(buffer, offset: 0, index: 0)
+            encoder.setFragmentBuffer(buffer, offset: 0, index: 0)
+        } else {
             var u = p.uniforms
-            u.viewport = tv
+            if let targetViewport { u.viewport = targetViewport }
             encoder.setVertexBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
             encoder.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
-        } else {
-            encoder.setVertexBuffer(p.uniformBuffer, offset: 0, index: 0)
-            encoder.setFragmentBuffer(p.uniformBuffer, offset: 0, index: 0)
         }
         encoder.setFragmentTexture(p.imported.textures[0], index: 0)
         encoder.setFragmentTexture(p.imported.textures[1], index: 1)

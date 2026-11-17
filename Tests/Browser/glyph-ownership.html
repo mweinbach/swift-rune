@@ -1,0 +1,101 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="result"></pre>
+<script type="module">
+import { createRuneTextImports, runeTextFontsReady } from '../../Sources/Rune/Resources/Web/rune-web-text.mjs';
+
+const check = (ok, message) => { if (!ok) throw Error(message); };
+try {
+    const memory = new WebAssembly.Memory({ initial: 4 });
+    const bytes = new Uint8Array(memory.buffer), view = new DataView(memory.buffer);
+    const host = createRuneTextImports(() => memory);
+    const encode = text => new TextEncoder().encode(text);
+    // Tiny test face with distinct outlines and advances for fi, ffi, and lam-alef GSUB ligatures.
+    const font = Uint8Array.from(atob('AAEAAAALAIAAAwAwR1NVQlFRZboAAAToAAAA3E9TLzJlO5NGAAABOAAAAGBjbWFwIMzDDwAAAcQAAAB8Z2x5ZlnrOvsAAAJYAAABPmhlYWQvvMikAAAAvAAAADZoaGVhBbcBqwAAAPQAAAAkaG10eBs7AMgAAAGYAAAALGxvY2EBigHqAAACQAAAABhtYXhwAA0ABwAAARgAAAAgbmFtZd5pbRcAAAOYAAAA+XBvc3QWweOMAAAElAAAAFQAAQAAAAEAAGzYEGZfDzz1AAMD6AAAAADnIkJ/AAAAAOciQn//OAAAAyoCxgAAAAMAAgAAAAAAAAABAAADUv84AAADUv84/xUDKgABAAAAAAAAAAAAAAAAAAAACwABAAAACwAFAAEAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAMCegGQAAUABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAVAAAAAAAAAIAAAAAD8/Pz8AAAAg/vsDUv84AAADUgDIAAAAAAAAAAAAAAAAAAAAIAADAj8AKAI/ACgCPwAoAj8AKAI/ACgCPwAoAj8AKAK8ACgDUgAoAzQAKAI//zgAAAACAAAAAwAAABQAAwABAAAAFAAEAGgAAAAWABAAAwAGACAAZgBpAHgGJwZE4AD7AfsD/vv//wAAACAAZgBpAHgGJwZE4AD7AfsD/vv////h/53/m/+K+d/5wSAKBQYFBQEOAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAQACAAMAA/AE4AXgBuAH4AjgCfAAEAKAAAAfQCvAAEAAAzNxMBBygKWgFoZPoBwv408AAAAQAoAAAB9AK8AAQAADMTEwEHKAqWASxkAUABfP408AABACgAAAH0ArwABAAAMxMTAQcoCrQBDmQBYwFZ/jTwAAEAKAAAAfQCvAAEAAAzGwIHKArS8GQBhgE2/jTwAAEAKAAAAfQCvAAEAAAzGwIHKArw0mQBqQET/jTwAAEAKAAAAfQCvAAEAAAzEyUTBygKAQ60ZAHM8P408AAAAQAoAAAB9AK8AAQAADMTJRMHKAoBLJZkAe/N/jTwAAABACgAAAH0ArwABAAAMxMlEwcoCgFKeGQCEqr+NPAAAAEAKAAAAfQCvAAEAAAzEyUTBygKAWhaZAI1h/408AAAAf84AFADKgLGAAQAACcBJRcByAEEAtoU/cZkAkQe0v5cAAAAAAAKAH4AAQAAAAAAAQASAAAAAQAAAAAAAgAHABIAAQAAAAAAAwAQABkAAQAAAAAABAASAAAAAQAAAAAABgAQABkAAwABBAkAAQAkACkAAwABBAkAAgAOAE0AAwABBAkAAwAgAFsAAwABBAkABAAkACkAAwABBAkABgAgAFtSdW5lIEdseXBoIEZpeHR1cmVSZWd1bGFyUnVuZUdseXBoRml4dHVyZQBSAHUAbgBlACAARwBsAHkAcABoACAARgBpAHgAdAB1AHIAZQBSAGUAZwB1AGwAYQByAFIAdQBuAGUARwBsAHkAcABoAEYAaQB4AHQAdQByAGUAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALAAAAAwBbAEkATAECAQMAwAEEAQUBBgNsYW0EYWxlZgNmZmkHbGFtYWxlZgZmZmlhbHQAAQAAAAoALgBUAANERkxUABRhcmFiABRsYXRuABQABAAAAAD//wADAAAAAQACAANjYWx0ABRsaWdhABpybGlnACAAAAABAAIAAAABAAAAAAABAAEABAAKADQAVAB0AAQAAAABAAgAAQAcAAEACAACAAYADgAIAAMAAwAEAAcAAgAEAAEAAQADAAQAAAABAAgAAQASAAEACAABAAQACQACAAYAAQABAAUABgAAAAEACAADAAEAEgABACYAAAABAAAAAwABAAEAAgABAAAAAQAIAAEABgACAAEAAQAI'), c => c.charCodeAt(0));
+    bytes.set(font);
+    check(host.font(0, font.length), 'font registration');
+    await runeTextFontsReady(memory);
+    const family = encode('Rune Glyph Fixture');
+    bytes.set(family, 512);
+    function shape(text, dir) {
+        const input = encode(text);
+        bytes.set(input, 256);
+        return host.create(256, input.length, 512, family.length, 40, 400, 0, 0, dir, 0, 40);
+    }
+    function box(ptr) { return [12,16,20,24].map(i => view.getInt32(ptr + i, true)); }
+    function mask(id, rect) {
+        const [x, y, w, h] = rect;
+        check(host.mask(id, x, y, w, h, 1024), 'mask readback');
+        return bytes.slice(1024, 1024 + w * h);
+    }
+    const checked = [];
+    for (const [text, dir] of [['fi', 1], ['ffi', 1], ['لا', 2]]) {
+        for (const pad of ['', 'x ']) {
+            const label = pad + text + (pad ? ' x' : '');
+            const id = shape(label, dir);
+            const rect = box(0), full = mask(id, rect);
+            let byte = encode(pad).length;
+            const firstEnd = byte + encode(text[0]).length;
+            check(host.cell(id, byte, firstEnd, 80, 84) !== 0 && view.getFloat32(84, true) > 0, 'first caret cell');
+            const first = host.extract_ink(id, byte, firstEnd, 64, 40);
+            check(first, 'missing ligature owner for ' + label);
+            const owned = box(64);
+            const ref = shape(text, dir);
+            const refBox = box(0), reference = mask(ref, refBox);
+            check(owned[2] === refBox[2] && owned[3] === refBox[3], 'ligature ink bounds for ' + label + ' ' + owned + ' != ' + refBox);
+            byte = firstEnd;
+            for (const c of text.slice(1)) {
+                const end = byte + encode(c).length;
+                check(host.cell(id, byte, end, 80, 84) !== 0 && view.getFloat32(84, true) > 0, 'continuation caret cell');
+                const continuation = host.extract_ink(id, byte, end, 64, 40);
+                check(continuation && box(64)[2] === 0 && box(64)[3] === 0, 'continuation emitted ink for ' + label);
+                host.release(continuation);
+                byte = end;
+            }
+            check(mask(id, rect).every((b, i) => b === full[i]), 'full label changed');
+            host.release(ref);
+            host.release(id);
+            const extracted = mask(first, owned);
+            check(extracted.every((b, i) => b === reference[i]), 'released-parent glyph pixels for ' + label);
+            host.release(first);
+            checked.push(label);
+        }
+    }
+    // In xffix, calt replaces the shaped ffi with a different glyph whose
+    // negative bearing overlaps the first x. Its own cmap entry is our oracle.
+    const contextual = shape('xffix', 1), fullRect = box(0);
+    const first = host.extract_ink(contextual, 1, 2, 64, 40);
+    check(first, 'contextual ligature owner');
+    const ref = shape('\ue000', 1), refRect = [...fullRect];
+    refRect[0] -= 23; // x advances 575 units at 40 px per 1000 units.
+    const expected = mask(ref, refRect);
+    for (const byte of [2, 3]) {
+        const part = host.extract_ink(contextual, byte, byte + 1, 64, 40);
+        check(part && box(64)[2] === 0, 'contextual continuation claimed ink');
+        host.release(part);
+    }
+    host.release(ref);
+    host.release(contextual);
+    check(mask(first, fullRect).every((v, i) => v === expected[i]), 'overlapping contextual glyph pixels');
+    host.release(first);
+    checked.push('xffix');
+    const individual = shape('ffi', 1);
+    const flags = encode('liga=0');
+    bytes.set(flags, 768);
+    host.configure(individual, 0, 0, 768, flags.length, 0, 0, 0, 40);
+    for (let byte = 0; byte < 3; ++byte) {
+        const part = host.extract_ink(individual, byte, byte + 1, 64, 40);
+        // Stable hosts can delegate an ordinary individual glyph to cell
+        // rasterization. No byte may be marked as a ligature continuation.
+        if (part) {
+            check(box(64)[2] > 0 && mask(part, box(64)).some(v => v), 'disabled liga still consumed byte ' + byte);
+            host.release(part);
+        }
+    }
+    host.release(individual);
+    checked.push('liga=0');
+    document.querySelector('#result').textContent = JSON.stringify({ passed: true, glyphs: checked });
+} catch (error) {
+    document.querySelector('#result').textContent = String(error) + "\n" + error.stack;
+}
+</script>

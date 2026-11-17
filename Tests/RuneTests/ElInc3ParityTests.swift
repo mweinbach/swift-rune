@@ -669,4 +669,14 @@ struct ElInc3ParityTests {
         #expect(rt.element(byKey: "trunc")?.help == nil)
         #expect(rt.helpTooltip() == nil)
     }
+    @Test("Fully visible wrapped text has no truncation tooltip")
+    func wrappedLabelShowsItsWholeContent() {
+        let rt = Runtime(state: false, viewport: Vec2(150, 180), pixelScale: 1) { _, _ -> El<Bool> in
+            text("a wide label that fits on several lines").key("wrapped")
+                .size(65, 175).wrapText().helpWhenTruncated("cut")
+        }
+        _ = rt.frame(at: 0)
+        #expect(rt.element(byKey: "wrapped")?.help == nil)
+    }
+
 }

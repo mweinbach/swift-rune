@@ -1,0 +1,105 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune retained browser accessibility</title>
+<canvas width="500" height="300" tabindex="0"></canvas>
+<button id="outside">Outside Rune</button>
+<pre id="result">Running…</pre>
+<script type="module">
+import { mountRuneAccessibility } from '../../Sources/Rune/Resources/Web/rune-web-accessibility.mjs';
+import { mountRuneFields } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+
+const result = document.querySelector('#result');
+const canvas = document.querySelector('canvas');
+const events = [];
+const send = event => { events.push(event); return true; };
+const host = mountRuneAccessibility(canvas, send);
+const fields = mountRuneFields(canvas, send, host.attachEditor);
+const get = path => document.querySelector('[data-rune-target="' + path + '"]');
+const node = (path, role, bounds, extra = {}) => ({ path, key: path.split('/').at(-1), role, bounds, ...extra });
+const patch = data => host.sync({local: true, ...data});
+function expect(value, message) { if (!value) throw Error(message); }
+try {
+    const first = node('a/option', 'option', [20, 36, 80, 20], {name: 'First'});
+    const second = node('b/option', 'option', [20, 116, 80, 20], {name: 'Second'});
+    const owner = node('b/box', 'combobox', [20, 140, 80, 20], {activeDescendant: 'option', actions: ['focus']});
+    const field = node('b/secret', 'password-input', [110, 140, 100, 20], {name: 'Passphrase'});
+    const flow = node('a', 'group', [10, 30, 290, 75], {children: [first]});
+    const group = node('b', 'group', [10, 110, 290, 75], {children: [second, owner, field]});
+    const container = node('root', 'group', [0, 0, 500, 300], {children: [flow, group]});
+    host.sync({root:container, width:500, height:300});
+    const yInCanvas = path => get(path).getBoundingClientRect().top - canvas.getBoundingClientRect().top;
+    const target = get(second.path), combo = get(owner.path);
+    expect(combo.getAttribute('aria-activedescendant') === target.id, 'Relations use the nearest repeated key');
+    const mirror = canvas.nextElementSibling;
+    const observer = new MutationObserver(() => {});
+    observer.observe(mirror, {subtree:true, attributes:true, childList:true, characterData:true});
+    patch({bounds:{b:[10,120,290,75]}});
+    const touches = observer.takeRecords();
+    expect(touches.length === 1 && touches[0].target === get('b'), 'An inherited translation must change only the moving box');
+    expect(yInCanvas('b/option') === 126, 'Legacy absolute children move with a local-coordinate parent patch');
+    expect(get('b/option') === target, 'Scroll replaces no controls');
+
+    patch({nodes:[{...owner, bounds:[10,30,80,20], states:['focused']}],
+        children:{a:[first.path, second.path], b:[owner.path, field.path]}, bounds:{[second.path]:[12,8,80,20]}});
+    expect(get('b/option') === target && yInCanvas('b/option') === 38, 'Reparented element keeps identity and local geometry');
+    expect(combo.getAttribute('aria-activedescendant') === get('a/option').id, 'Active descendant resolves after reparenting');
+    patch({children:{a:[second.path, first.path]}});
+    expect(combo.getAttribute('aria-activedescendant') === target.id, 'Ambiguous targets follow new DOM order');
+    document.querySelector('#outside').focus();
+    patch({nodes:[{...owner, bounds:[10,30,80,20], states:['focused'], activeDescendant:undefined}]});
+    expect(!combo.hasAttribute('aria-activedescendant') && document.activeElement.id === 'outside', 'Clearing a relation keeps external focus');
+
+    fields.sync({key:field.path, label:'Passphrase', secure:true}, true);
+    const active = document.activeElement;
+    expect(active.type === 'password' && active.parentElement === get(field.path).parentElement, 'Native editor shares its semantic slot');
+    patch({nodes:[{...field, bounds:[100,30,100,20], value:'do-not-echo'}]});
+    expect(document.activeElement === active && !active.value && !get(field.path).value, 'Password payload never enters the DOM');
+    expect(!mirror.textContent.includes('do-not-echo') && !mirror.innerHTML.includes('do-not-echo'), 'Password is absent from mirror markup');
+    fields.sync(null);
+    const oldA = get('a');
+    patch({nodes:[node('a','region',[10,30,290,75],{name:'First section'})]});
+    expect(!oldA.isConnected && get('a/option') && get('b/option') === target, 'A container role replacement keeps its children');
+    patch({removed:[second.path], announcement:{live:'polite',text:'Row removed'}});
+    expect(!target.isConnected && mirror.querySelector('[aria-live=polite]').textContent === 'Row removed', 'Removal and announcement-only patches work');
+
+    const rows = Array.from({length:96}, (_, i) => {
+        const path = 'row' + i;
+        const bounds = [0, i*24, 500, 24];
+        const cells = Array.from({length:4}, (_, c) => node(path + '/c' + c, 'gridcell', [c*125, i*24, 125,24], {name:'Cell ' + i + ' ' + c}));
+        return node(path, 'row', bounds, {children:cells});
+    });
+    const large = node('grid', 'grid', [0,0,500,2500], {children:rows});
+    host.sync({root:large,width:500,height:300});
+    expect(!combo.isConnected && get('row95/c3'), 'Complete resync retires old records and registers hundreds of new slots');
+    const last = get('row95/c3');
+    observer.takeRecords();
+    const fullTimes = [], deltaTimes = [];
+    const mean = samples => samples.reduce((sum,time) => sum + time, 0) / samples.length;
+    for (let frame=1; frame<=60; frame++) {
+        const step = (frame%2)*7;
+        for (let i=0;i<rows.length;i++) {
+            rows[i].bounds[1] = i*24-step;
+            for (const cell of rows[i].children) cell.bounds[1] = i*24-step;
+        }
+        let start = performance.now();
+        host.sync({root:large,width:500,height:300});
+        fullTimes.push(performance.now()-start);
+        observer.takeRecords();
+        const bounds = Object.fromEntries(rows.map((r,i) => [r.path, [0,i*24-step-1,500,24]]));
+        start = performance.now();
+        patch({bounds});
+        deltaTimes.push(performance.now()-start);
+        const mutations = observer.takeRecords();
+        expect(mutations.length === rows.length && mutations.every(m => m.target.getAttribute('role') === 'row'),
+            'Changes to 96 rows must leave all 384 cell DOM nodes untouched');
+    }
+    expect(get('row95/c3') === last, 'Fast scroll keeps cell identity');
+    patch({rootPath:'new', nodes:[node('new','group',[0,0,100,50])], width:100,height:50});
+    expect(!last.isConnected && get('new'), 'Flat full reset drops stale branches');
+    observer.disconnect();
+    result.textContent = 'PASS incremental focus, relations, reparenting, secure editor, teardown, ' +
+        '96 moving rows / 384 stationary cells, 60 frames, mean DOM full ' + mean(fullTimes).toFixed(3) +
+        ' ms, delta ' + mean(deltaTimes).toFixed(3) + ' ms';
+} catch (error) { result.textContent = 'FAIL ' + error.stack; }
+finally { fields.dispose(); host.dispose(); }
+</script>

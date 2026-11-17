@@ -185,7 +185,7 @@ final class AndroidSemanticBridge<State> {
         let mirror = Mirror(key: key, text: secure ? "" : edit.text, secure: secure,
                             anchor: secure ? 0 : ImeUTF16Bridge.utf16Offset(in: edit.text, fromUTF8Offset: edit.anchor),
                             focus: secure ? 0 : ImeUTF16Bridge.utf16Offset(in: edit.text, fromUTF8Offset: edit.cursor))
-        return Field(mirror: mirror, multiline: !el.isSingleLineInput)
+        return Field(mirror: mirror, multiline: edit.multiline)
     }
 
     func refresh() {
@@ -198,7 +198,7 @@ final class AndroidSemanticBridge<State> {
         let observed = rune_android_semantics_reader(peer) != 0
         defer { wasObserved = observed }
         guard observed else { previousTree = nil; return }
-        let root = runtime.accessibilitySnapshot()
+        let root = runtime.nativeAccessibilitySnapshot()
         let nodes = tree.project(root, viewport: .fromXYWH(0, 0, runtime.viewport.x, runtime.viewport.y), scale: runtime.pixelScale)
         let announcement = runtime.a11yAnnouncement
         let snapshot = Snapshot(nodes: nodes, announcement: announcement.spokenText, announcementCount: announcement.count)

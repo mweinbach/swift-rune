@@ -5,11 +5,17 @@
 
 typedef struct RuneA11yWindow RuneA11yWindow;
 typedef void (*RuneA11yWake)(void *);
+/* Shared by the GTK and accessibility hosts to interrupt SDL's native wait. */
+typedef struct RuneGLibWatch RuneGLibWatch;
+RuneGLibWatch *rune_glib_watch_new(RuneA11yWake wake, void *context);
+void rune_glib_watch_arm(RuneGLibWatch *);
+void rune_glib_watch_free(RuneGLibWatch *);
 typedef void (*RuneA11yAction)(void *, const char *target, int kind, const char *text, double number, int start, int end);
 
 enum {
     RUNE_AX_PRESS = 1, RUNE_AX_FOCUS = 2, RUNE_AX_INCREMENT = 4, RUNE_AX_DECREMENT = 8,
-    RUNE_AX_SET_TEXT = 16, RUNE_AX_SET_NUMBER = 32, RUNE_AX_SELECT_TEXT = 64, RUNE_AX_REPLACE_TEXT = 128
+    RUNE_AX_SET_TEXT = 16, RUNE_AX_SET_NUMBER = 32, RUNE_AX_SELECT_TEXT = 64, RUNE_AX_REPLACE_TEXT = 128,
+    RUNE_AX_SCROLL_INTO_VIEW = 256
 };
 enum {
     RUNE_AX_DISABLED = 1 << 0, RUNE_AX_FOCUSABLE = 1 << 1, RUNE_AX_FOCUSED = 1 << 2,
@@ -39,6 +45,8 @@ RuneA11yWindow *rune_ax_open(const char *title, int visible, RuneA11yWake wake, 
 void rune_ax_visible(RuneA11yWindow *, int visible);
 /* Add/remove another toolkit's native AtkObject from the shared application root. */
 void rune_ax_toolkit_window(void *accessible, int visible);
+RuneA11yWindow *rune_ax_open_overlay(const char *title, int visible, RuneA11yWake wake, void *context);
+void rune_ax_take_requests(RuneA11yWindow *, RuneA11yAction consume, void *context);
 void rune_ax_pump(RuneA11yWindow *, RuneA11yAction consume, void *context);
 void rune_ax_begin(RuneA11yWindow *, const char *title, int x, int y, int width, int height, int focused);
 void rune_ax_node(RuneA11yWindow *, const char *key, const char *parent_key, int index,

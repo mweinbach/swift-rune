@@ -10,7 +10,7 @@ extern "C" {
 typedef struct RuneUiaHost RuneUiaHost;
 enum RuneUiaAction {
     RUNE_UIA_PRESS = 1, RUNE_UIA_FOCUS, RUNE_UIA_SET_TEXT, RUNE_UIA_SET_NUMBER,
-    RUNE_UIA_EXPAND, RUNE_UIA_COLLAPSE, RUNE_UIA_SELECT
+    RUNE_UIA_EXPAND, RUNE_UIA_COLLAPSE, RUNE_UIA_SELECT, RUNE_UIA_SCROLL_INTO_VIEW
 };
 typedef struct RuneUiaTextCell {
     int32_t start, end, line;    /* UTF-16 offsets and zero-based visual line */
@@ -28,6 +28,8 @@ typedef struct RuneUiaNode {
     int8_t selected, expanded; /* -1 if unspecified */
     int32_t level, position, size_of_set; /* one-based, zero if unspecified */
     int8_t live;   /* 0 = off, 1 = polite, 2 = assertive */
+    uint8_t scroll_item;
+    uint8_t modal;
 } RuneUiaNode;
 
 RuneUiaHost *rune_uia_attach(void *hwnd);
@@ -36,9 +38,13 @@ int rune_uia_active(const RuneUiaHost *host);
 void rune_uia_begin(RuneUiaHost *host, const char *title);
 void rune_uia_add(RuneUiaHost *host, RuneUiaNode node, const char *key, const char *role,
                   const char *name, const char *help, const char *value, const char *shortcut);
+/* Shaped text supplies grapheme insertion points. Without runs pass NULL/0 to use Unicode scalars. */
 void rune_uia_text_model(RuneUiaHost *host, int32_t id, int32_t anchor, int32_t focus,
                          const uint16_t *text, int32_t length, const int32_t *graphemes, int32_t count);
-void rune_uia_text_geometry(RuneUiaHost *host, int32_t id, const RuneUiaTextCell *cells, int32_t count);
+/* Fills UTF-16 word-boundary flags on demand from a UI Automation client thread. */
+typedef void (*RuneUiaWordBreaks)(const uint16_t *text, int32_t length, uint8_t *flags);
+void rune_uia_text_geometry(RuneUiaHost *host, int32_t id, const RuneUiaTextCell *cells, int32_t count,
+                            RuneUiaWordBreaks word_breaks);
 int rune_uia_pop_text_selection(RuneUiaHost *host, int32_t *id, int32_t *start, int32_t *end, char **expected, int32_t *byteCount);
 void rune_uia_commit(RuneUiaHost *host);
 int rune_uia_pop(RuneUiaHost *host, int32_t *id, int32_t *action, char **text, double *number);

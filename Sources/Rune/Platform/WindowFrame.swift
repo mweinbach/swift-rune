@@ -83,6 +83,15 @@ public struct WindowFrameRequest: Sendable, Equatable {
 /// Pure `[x, y, w, h]` rectangle alias matching `window/frame.rs`.
 public typealias WindowFrameRect = (Float, Float, Float, Float)
 
+extension Runtime {
+    /// A WindowHandle frame event joins any transaction waiting for the next host frame.
+    func queueWindowHandleFrame(_ request: WindowFrameRequest) {
+        var resolved = request
+        resolved.spring = request.animate && !reducedMotion ? MotionTokens.DEFAULT : nil
+        pendingWindowFrame = pendingWindowFrame?.merged(with: resolved) ?? resolved
+    }
+}
+
 /// A window frame moving to `to` on a spring, sampled on the host's clock (`window/frame.rs:51`).
 public struct WindowFrameAnim: Sendable, Equatable {
     public var spring: Spring?

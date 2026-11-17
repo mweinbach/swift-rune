@@ -209,6 +209,11 @@ public enum OutlineCover {
         radius r: Float = 0,
         halfWidth hw: Float = 0.5
     ) -> Float {
+        coverage(store: store, record: record, hint: hint, local: local, scale: scale, radius: r, halfWidth: hw, slug: false)
+    }
+
+    static func coverage(store: OutlineStore, record: UInt32, hint: UInt32, local: SIMD2<Float>,
+                         scale: Float, radius r: Float, halfWidth hw: Float, slug: Bool) -> Float {
         @inline(__always) func f(_ bits: UInt32) -> Float { Float(bitPattern: bits) }
         let head = store.texel(record)
         let count = head[1]
@@ -243,6 +248,7 @@ public enum OutlineCover {
         }
 
         var acc: Float = 0
+        var rays = SIMD3<Float>.zero
         for band in b0...max(b0, b1) {
             let e0: Float = count > 1 ? (y0 + Float(band) / invH) * scale : -3.0e38
             let e1: Float = count > 1 ? (y0 + Float(band + 1) / invH) * scale : 3.0e38
@@ -274,6 +280,12 @@ public enum OutlineCover {
                 let q1 = p0 - local
                 let q2 = p1 - local
                 let q3 = p2 - local
+                if slug {
+                    let connector = code & OutlineBuilder.connectorBit != 0
+                    slugCrossings(q1, q2, q3, low: connector ? -.greatestFiniteMagnitude : be0 - local.y,
+                                  high: connector ? .greatestFiniteMagnitude : be1 - local.y, halfWidth: hw, into: &rays)
+                    continue
+                }
                 let lo = max(wlo, min(q1.y, q3.y))
                 let hi = min(whi, max(q1.y, q3.y))
                 if hi <= lo || max(q1.x, q3.x) <= -hw {
@@ -289,7 +301,39 @@ public enum OutlineCover {
                 acc += integrateX(q1: (q1.x, q1.y), q2: (q2.x, q2.y), q3: (q3.x, q3.y), t: ty, hx: hw)
             }
         }
+        if slug { return 0.5 * (min(abs(rays.x), 1) + min(abs(rays.y + rays.z), 1)) }
         return min(1.0, abs(acc) / (4.0 * hw * hw))
+    }
+
+    /// The shader's two-ray Slug test is needed at cell fringes even though its
+    /// documented software atlas fallback uses the box-filter integration above.
+    private static func slugCrossings(_ p0: SIMD2<Float>, _ p1: SIMD2<Float>, _ p2: SIMD2<Float>,
+                                      low: Float, high: Float, halfWidth: Float, into rays: inout SIMD3<Float>) {
+        func root(_ a: Float, _ b: Float, _ c: Float) -> Float {
+            let quadratic = a - 2 * b + c, linear = 2 * (b - a)
+            if abs(quadratic) < 1e-6 { return min(1, max(0, -a / (abs(linear) < 1e-6 ? 1e-6 : linear))) }
+            let d = sqrt(max(0, linear * linear - 4 * quadratic * a))
+            let t = (-linear - d) / (2 * quadratic)
+            return min(1, max(0, t >= -1e-4 && t <= 1.0001 ? t : (-linear + d) / (2 * quadratic)))
+        }
+        func interpolate(_ a: Float, _ b: Float, _ c: Float, _ t: Float) -> Float {
+            let left = a + (b - a) * t, right = b + (c - b) * t
+            return left + (right - left) * t
+        }
+        let lo = max(min(p0.y, p2.y), low), hi = min(max(p0.y, p2.y), high)
+        if p0.y != p2.y && lo <= 0 && hi > 0 {
+            let x = interpolate(p0.x, p1.x, p2.x, root(p0.y, p1.y, p2.y))
+            let sign: Float = p2.y > p0.y ? 1 : -1
+            rays.x += sign * min(1, max(0, x / (2 * halfWidth) + 0.5))
+            if x > 0 { rays.y += sign }
+        }
+        if p0.x != p2.x && min(p0.x, p2.x) <= 0 && max(p0.x, p2.x) > 0 {
+            let y = interpolate(p0.y, p1.y, p2.y, root(p0.x, p1.x, p2.x))
+            if abs(y) < halfWidth && y >= low && y < high {
+                let sign: Float = p2.x > p0.x ? 1 : -1
+                rays.z -= sign * (min(1, max(0, y / (2 * halfWidth) + 0.5)) - (y > 0 ? 1 : 0))
+            }
+        }
     }
 }
 
@@ -326,6 +370,8 @@ public struct QueuedOutlineFill: Sendable, Equatable {
     /// Texels `[x, y, w, h]`.
     public var rect: SIMD4<UInt32>
     public var fill: OutlineFillParams
+    /// Native run cells can restrict a glyph to part of a shared tile.
+    var crop: SIMD4<Int>?
 
     public init(rect: SIMD4<UInt32>, fill: OutlineFillParams) {
         self.rect = rect
@@ -438,6 +484,9 @@ public enum OutlineMaskFiller {
         width w: UInt32,
         height h: UInt32
     ) -> [UInt8] {
+        if fill.coverage == 4 {
+            return fillTile(store: store, record: fill.record, width: w, height: h)
+        }
         var table = RowTable()
         var census: OutlineFillCensus? = nil
         buildRows(OutlineF4.self, store: store, fill: fill, atY: atY, height: h, into: &table)
@@ -454,6 +503,52 @@ public enum OutlineMaskFiller {
             census: &census
         )
         return out
+    }
+
+    /// Composite the same byte-rounded source coverage as native text rasterization.
+    /// The GPU reads this ordered list from the same immutable outline snapshot.
+    private static func fillTile(store: OutlineStore, record: UInt32, width: UInt32, height: UInt32) -> [UInt8] {
+        var pixels = [UInt8](repeating: 0, count: Int(width) * Int(height))
+        let count = store.texel(record).x
+        guard count <= 64 else { return pixels }
+        for i in 0..<count {
+            let base = record &+ 1 &+ 3 * i
+            let r = store.texel(base), p = store.texel(base &+ 1), g = store.texel(base &+ 2)
+            guard r.x < width, r.y < height, r.z > 0, r.w > 0,
+                  r.z <= width - r.x, r.w <= height - r.y, g.z <= 1 else { continue }
+            let pen = SIMD2(Float(bitPattern: p.x) - Float(r.x), Float(bitPattern: p.y) - Float(r.y))
+            let part = OutlineFillParams(record: g.x, hint: g.y, scale: Float(bitPattern: p.z),
+                                         radius: Float(bitPattern: p.w), pen: pen, coverage: g.z)
+            let mask = fillMask(store: store, fill: part, atX: 0, atY: 0, width: r.z, height: r.w)
+            for row in 0..<Int(r.w) {
+                let src = row * Int(r.z)
+                let dst = (Int(r.y) + row) * Int(width) + Int(r.x)
+                for col in 0..<Int(r.z) where mask[src + col] != 0 {
+                    let alpha = Int(mask[src + col])
+                    pixels[dst + col] = UInt8(alpha + (Int(pixels[dst + col]) * (255 - alpha) + 127) / 255)
+                }
+            }
+        }
+        return pixels
+    }
+
+    /// Query a tile's cell bounds with exactly the solver and byte rounding used to
+    /// paint the full mask. A fringe query builds a single row at its original pen.
+    static func hasInk(store: OutlineStore, fill: OutlineFillParams, columns: Range<Int>, row: Int) -> Bool {
+        var rows = RowTable(), out: [UInt8] = []
+        var census: OutlineFillCensus?
+        buildRows(OutlineF4.self, store: store, fill: fill, atY: UInt32(row), height: 1,
+                  absolutePenY: fill.pen.y, into: &rows)
+        fillTexels(OutlineF4.self, table: rows, coverage: fill.coverage, penX: fill.pen.x, atX: UInt32(columns.lowerBound),
+                   width: UInt32(columns.count), height: 1, absolutePenX: fill.pen.x, out: &out, census: &census)
+        if out.contains(where: { $0 != 0 }) { return true }
+        guard fill.coverage == 1 else { return false }
+        return columns.contains { x in
+            let local = SIMD2(Float(x) + 0.5 - fill.pen.x, fill.pen.y - Float(row) - 0.5)
+            let rays = OutlineCover.coverage(store: store, record: fill.record, hint: fill.hint, local: local,
+                                            scale: fill.scale, radius: fill.radius, halfWidth: 0.5, slug: true)
+            return (rays * 255).rounded(.toNearestOrEven) > 0
+        }
     }
 
     /// Groups fills sharing outline/scale/radius/coverage/height/pen.y (`outline::share_rows`).
@@ -538,6 +633,7 @@ public enum OutlineMaskFiller {
         fill: OutlineFillParams,
         atY: UInt32,
         height h: UInt32,
+        absolutePenY: Float? = nil,
         into table: inout RowTable
     ) {
         @inline(__always) func f(_ bits: UInt32) -> Float { Float(bitPattern: bits) }
@@ -545,7 +641,7 @@ public enum OutlineMaskFiller {
         let scale = fill.scale
         let r = fill.radius
         let hw: Float = 0.5
-        let penY = Float(atY) + fill.pen.y
+        let penY = absolutePenY ?? (Float(atY) + fill.pen.y)
         let head = store.texel(rec)
         let count = head[1]
         let y0 = f(head[2])
@@ -776,12 +872,13 @@ public enum OutlineMaskFiller {
         atX: UInt32,
         width w: UInt32,
         height h: UInt32,
+        absolutePenX: Float? = nil,
         out: inout [UInt8],
         census: inout OutlineFillCensus?
     ) {
         let hw: Float = 0.5
         let across: Float = coverage == 3 ? 3.0 : 1.0
-        let pen = Float(atX) + penX
+        let pen = absolutePenX ?? (Float(atX) + penX)
         @inline(__always) func lxOf(_ col: UInt32) -> Float {
             across == 1.0
                 ? (Float(atX + col) + 0.5 - pen)

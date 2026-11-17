@@ -7,6 +7,9 @@ import RuneRef
 
 #if os(WASI)
 import WASILibc
+#if RUNE_BROWSER_TEXT
+import CRuneDesktopText
+#endif
 #endif
 
 // MARK: - 1. Web Math (platform/web_math.rs)
@@ -138,7 +141,7 @@ public enum WebKeyMap {
 // MARK: - 3. Web App Configuration & Host Driver (app/web.rs & platform/web/)
 
 /// Browser/WASI mounting configuration (`rune::app::web`).
-public struct WebAppConfig: Sendable, Equatable {
+public struct WebAppConfig: Sendable, Equatable, Encodable {
     public var canvasId: String?
     public var fullViewport: Bool
     public var webDocument: Bool
@@ -244,7 +247,16 @@ public struct WebFieldMirror: Sendable, Equatable, Encodable {
 @MainActor
 public final class WebAppHost<State> {
     public let runtime: Runtime<State>
+    private var appShared: AppShared<State>?
     private var gpuFrames = false
+    private var cycleFrame: RenderFrame?
+    private var cycleFrameSerial: UInt64 = 0
+    private var cycleFrameCommit = 0
+    private(set) var sampledCycleFrame = false
+    var recordedCyclePaint: CyclePaint? { cycleFrame == nil ? nil : runtime.cyclePaint }
+    private var compositorAllowsCyclePaint: Bool {
+        compositor?.isAnimating != true && compositor?.drawsOwnContent != true
+    }
     let compositor: AnyCompositor<State>?
     private let compositorDevice = DeviceKey.next()
     private var previousCompositorTime: Double?
@@ -298,15 +310,19 @@ public final class WebAppHost<State> {
                                       systemDark: dark, reducedMotion: forceReducedMotion, sceneName: sceneName)
         self.init(runtime: runtime, compositor: app.compositorValue, config: app.webAppConfig, requestedSize: app.size,
                   followsSystemAppearance: dark == nil && app.dark == nil, forceReducedMotion: forceReducedMotion)
+        appShared = app.sharedHandle.shared
     }
 
     private init(runtime: Runtime<State>, compositor: AnyCompositor<State>?, config: WebAppConfig,
                  requestedSize: Vec2, followsSystemAppearance: Bool, forceReducedMotion: Bool) {
         self.runtime = runtime
+        runtime.recordEvents = false
         self.compositor = compositor
         self.followsSystemAppearance = followsSystemAppearance
         self.forceReducedMotion = forceReducedMotion
         self.config = config
+        if config.webDocument { runtime.pageMode() }
+        else if config.fitContentHeight { runtime.fitHeight = true }
         let vp = runtime.viewport
         let dpr = runtime.pixelScale
         self.devicePixelRatio = dpr
@@ -338,12 +354,20 @@ public final class WebAppHost<State> {
             next: fixed,
             document: config.webDocument
         )
-        if shouldReconfig || scaleChanged {
-            surfaceSize = nextSize
-            let points = Vec2(Float(nextSize.0) / devicePixelRatio, Float(nextSize.1) / devicePixelRatio)
-            runtime.setWindowViewport(points, pixelScale: devicePixelRatio)
+        surfaceSize = nextSize
+        // The GPU may retain a taller backing allocation across mobile toolbar movement.
+        // Layout, hit testing and the band still use the canvas's measured CSS size.
+        let layoutSize = config.webDocument ? fixed : nextSize
+        let points = Vec2(Float(layoutSize.0) / devicePixelRatio, Float(layoutSize.1) / devicePixelRatio)
+        let layoutChanged = runtime.viewport != points
+        if shouldReconfig || scaleChanged || layoutChanged {
+            if config.webDocument {
+                runtime.setViewport(points, pixelScale: devicePixelRatio)
+            } else {
+                runtime.setWindowViewport(points, pixelScale: devicePixelRatio)
+            }
         }
-        return shouldReconfig || scaleChanged
+        return shouldReconfig || scaleChanged || layoutChanged
     }
 
     func syncField(activate: Bool) {
@@ -361,7 +385,9 @@ public final class WebAppHost<State> {
     }
 
     public func renderScene(at now: Double) -> RefScene {
+        cycleFrame = nil
         _ = MainQueueDispatcher.shared.drain()
+        appShared?.applyStateUpdates(to: runtime, at: now)
         let scene = runtime.frame(at: now)
         syncField(activate: false)
         return scene
@@ -384,10 +410,22 @@ public final class WebAppHost<State> {
         uiPasses = passes
     }
 
-    func renderGPUFrame(at now: Double) throws -> RenderFrame {
+    func renderGPUFrame(at now: Double, allowCycle: Bool = false) throws -> RenderFrame {
         gpuFrames = true
+        sampledCycleFrame = false
+        let drained = MainQueueDispatcher.shared.drain()
+        let sharedWork = appShared?.applyStateUpdates(to: runtime, at: now)
+        if allowCycle, drained == 0, sharedWork?.isEmpty != false, compositorAllowsCyclePaint, cycleFrame != nil,
+           runtime.paintCycleTick(frame: &cycleFrame!, serial: cycleFrameSerial, commit: cycleFrameCommit, at: now) {
+            sampledCycleFrame = true
+            if compositor != nil {
+                try compose(at: now, started: ProcessInfo.processInfo.systemUptime,
+                            width: cycleFrame!.width, height: cycleFrame!.height)
+            }
+            return cycleFrame!
+        }
+        cycleFrame = nil
         let started = ProcessInfo.processInfo.systemUptime
-        _ = MainQueueDispatcher.shared.drain()
         var frame = runtime.renderFrame(at: now)
         syncField(activate: false)
         try compose(at: now, started: started, width: frame.width, height: frame.height)
@@ -399,10 +437,20 @@ public final class WebAppHost<State> {
             frame.elidedLayers = []
             frame.residentTracker = nil
         }
+        try frame.validateForGL()
+        if compositorAllowsCyclePaint, runtime.cyclePaint.interval != nil, runtime.restsExceptLoop(),
+           !runtime.hasOtherPaintDeadline, !runtime.isTracing, runtime.rewindRecorder == nil,
+           runtime.cyclePaint.slots.count == runtime.loopRuntime.tracks.count,
+           frame.elidedLayers.isEmpty, frame.surfaces.isEmpty {
+            cycleFrame = frame
+            cycleFrameSerial = runtime.cyclePaint.serial
+            cycleFrameCommit = runtime.viewCommitCount
+        }
         return frame
     }
 
     public func renderFrame(at now: Double) throws -> Frame {
+        gpuFrames = false
         let started = ProcessInfo.processInfo.systemUptime
         var scene = renderScene(at: now)
         try compose(at: now, started: started, width: scene.width, height: scene.height)
@@ -461,6 +509,8 @@ public final class WebAppHost<State> {
         let point = Vec2(x, y)
         func dispatch() {
             switch phase {
+            case .down where button == .secondary: runtime.secondaryDown(at: point, at: now)
+            case .up where button == .secondary: runtime.secondaryUp(at: point, mods: mods, at: now)
             case .down: runtime.pressDown(at: point, button: button, mods: mods, at: now, mouse: pointerType == "mouse")
             case .move: runtime.pointerMove(to: point, mods: mods, at: now)
             case .up: runtime.pointerUp(at: point, button: button, mods: mods, at: now)
@@ -508,6 +558,13 @@ public final class WebAppHost<State> {
 #if os(WASI)
 /// WebAssembly/WASI application host called by `RuneApp.run(spec)`.
 public enum WebApp {
+    /// Fetches a TrueType or OpenType face once the first frame is presented. Relative URLs use the page URL.
+    public static func fontUrlNow(_ url: String) {
+        #if RUNE_BROWSER_TEXT
+        rune_browser_font_url(url, 1)
+        #endif
+    }
+
     @MainActor
     public static func run<State>(_ spec: AppSpec<State>, parsed: ToolingArgs) throws {
         let vp = parsed.viewportOverride ?? spec.size
@@ -531,6 +588,11 @@ public enum WebApp {
     private static func run<State>(_ host: WebAppHost<State>) throws {
         if RuneWebReactor.enabled {
             RuneWebReactor.session = WebBrowserSession(host)
+            host.runtime.waker.setCallback { WASIEventLoop.wakeApp() }
+            #if RUNE_BROWSER_TEXT
+            for url in host.config.fontUrls { rune_browser_font_url(url, 0) }
+            for url in host.config.lateFontUrls { fontUrlNow(url) }
+            #endif
         } else {
             _ = try host.renderFrame(at: 0.0)
         }

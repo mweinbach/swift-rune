@@ -44,23 +44,27 @@ enum MetalTextureLimits {
         if let viewport, viewport != (frame.width, frame.height) {
             try validate(width: viewport.0, height: viewport.1, resource: "Viewport", on: device)
         }
-        let glyph = frame.glyphs
-        try validate(width: glyph.width, height: glyph.height, resource: "Glyph atlas", on: device)
-        let glyphBytes = glyph.width * glyph.height
-        if glyph.texels.count != glyphBytes && !(glyphBytes == 1 && glyph.texels.isEmpty) {
-            throw .byteCount(resource: "Glyph atlas", expected: glyphBytes, actual: glyph.texels.count)
+        let glyphs = frame.baseGlyphPages.isEmpty ? [frame.baseGlyphAtlas] : frame.baseGlyphPages
+        for (index, glyph) in glyphs.enumerated() {
+            let resource = frame.baseGlyphPages.isEmpty ? "Glyph atlas" : "Glyph atlas page \(index)"
+            try validate(width: glyph.width, height: glyph.height, resource: resource, on: device)
+            let glyphBytes = glyph.width * glyph.height
+            if glyph.texels.count != glyphBytes && !(glyph.texels.isEmpty && (glyphBytes == 1 || !frame.baseGlyphPages.isEmpty)) {
+                throw .byteCount(resource: resource, expected: glyphBytes, actual: glyph.texels.count)
+            }
         }
         if frame.imagePages.isEmpty {
             try validateImage(frame.images, resource: "Image atlas", on: device)
         } else {
             for (index, page) in frame.imagePages.enumerated() {
-                try validateImage(page, resource: "Image atlas page \(index)", on: device)
+                try validateImage(page, resource: "Image atlas page \(index)", on: device, allowsEmptyPage: true)
             }
         }
     }
 
-    static func validateImage(_ image: RGBA8Atlas, resource: String, on device: MTLDevice) throws(MetalTextureSizeError) {
+    static func validateImage(_ image: RGBA8Atlas, resource: String, on device: MTLDevice, allowsEmptyPage: Bool = false) throws(MetalTextureSizeError) {
         try validate(width: image.width, height: image.height, resource: resource, on: device)
+        if allowsEmptyPage && image.texels.isEmpty { return }
         let expected = image.width * image.height * 4
         guard image.texels.count == expected else {
             throw .byteCount(resource: resource, expected: expected, actual: image.texels.count)

@@ -1,0 +1,82 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune WebGPU atlas and blend parity</title>
+<canvas id="reference"></canvas><canvas id="candidate"></canvas>
+<pre id="result">Running…</pre>
+<script type="module">
+import { mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+import { width, height, viewWidth, glyphs, images, scene } from './atlas-scene.mjs';
+
+const full = scene(0, 1, { data: glyphs }, { data: images });
+const glyph = { rect: [2, 1, 1, 3], data: Uint8Array.of(252, 11, 193) };
+const image = { rect: [1, 2, 2, 2], data: Uint8Array.of(184, 201, 48, 255, 1, 47, 222, 255,
+    255, 64, 139, 255, 40, 199, 51, 255) };
+const patch = scene(1, 2, glyph, image);
+const packets = [full, patch, patch, scene(2, 3, null, null, false), scene(3, 4)];
+
+function pixel(frame, x, y) {
+    return frame.slice((y * viewWidth + x) * 4, (y * viewWidth + x + 1) * 4);
+}
+function compare(actual, expected, name, tolerance = 1) {
+    let maximum = 0;
+    for (let i = 0; i < expected.length; i++) {
+        const delta = Math.abs(actual[i] - expected[i]);
+        if (delta > tolerance) throw Error(name + ', sample ' + i + ' was ' + actual[i] + ', expected ' + expected[i]);
+        maximum = Math.max(maximum, delta);
+    }
+    return maximum;
+}
+
+async function capture(canvas, backend) {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const reader = new OffscreenCanvas(viewWidth, height).getContext('2d', { willReadFrequently: true });
+    let index = 0, submitted = false, resolve;
+    const finished = new Promise(done => { resolve = done; });
+    const frames = [];
+    const app = mountRuneBrowser(canvas, { exports: {
+        memory, rune_web_enable() {}, __main_void() { return 0; }, rune_web_buffer() { return 0; },
+        rune_web_event() { return 0; }, rune_web_field() { return 0; },
+        rune_web_frame() { throw Error('Unexpected CPU draw'); },
+        rune_web_enable_atlas_patches() {},
+        rune_web_scene() {
+            if (index === packets.length) return 0;
+            const packet = packets[index++];
+            new Uint8Array(memory.buffer).set(packet);
+            submitted = true;
+            return packet.length;
+        },
+        rune_web_accessibility() {
+            if (submitted) {
+                reader.drawImage(canvas, 0, 0);
+                frames.push(reader.getImageData(0, 0, viewWidth, height).data);
+                submitted = false;
+                if (frames.length === packets.length) resolve();
+            }
+            return 0;
+        }
+    } }, { backend, resizeTo: null });
+    try {
+        await app.ready;
+        await finished;
+        return { frames, renderer: app.renderer };
+    } finally { app.dispose(); }
+}
+
+const result = document.getElementById('result');
+try {
+    const gl = await capture(document.querySelector('#reference'), 'webgl2');
+    const gpu = await capture(document.querySelector('#candidate'), 'webgpu');
+    if (gpu.renderer.api !== 'WebGPU' || gl.renderer.api !== 'WebGL 2') throw Error('Expected both native GPU backends');
+    compare(pixel(gl.frames[0], 2, 1), [48, 48, 48, 255], 'Initial glyph');
+    compare(pixel(gl.frames[0], width + 1, 2), [255, 0, 255, 255], 'Initial image');
+    compare(pixel(gl.frames[1], 2, 1), [252, 252, 252, 255], 'Patched glyph');
+    compare(pixel(gl.frames[1], width + 1, 2), image.data.slice(0, 4), 'Patched image');
+    const deltas = gl.frames.map((frame, i) => compare(gpu.frames[i], frame, 'Frame ' + i));
+    for (const backend of [gl, gpu]) {
+        compare(backend.frames[2], backend.frames[1], 'Repeated atlas patch', 0);
+        compare(backend.frames[4], backend.frames[1], 'Return to sRGB blending', 0);
+    }
+    result.textContent = 'PASS ' + JSON.stringify({ webgpu: gpu.renderer, webgl: gl.renderer,
+        pixelsPerFrame: viewWidth * height, maximumChannelDelta: deltas });
+} catch (error) { result.textContent = 'FAIL ' + error.stack; }
+</script>

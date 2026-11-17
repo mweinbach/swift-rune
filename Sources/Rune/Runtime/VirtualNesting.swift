@@ -114,10 +114,9 @@ extension Runtime {
     /// before clamping. The jump there mounts it, and it's placed again from its laid-out top
     /// once it has (`ScrollKeyLandings`).
     internal func virtualRowAnchorOffset(key: String, at: Float) -> (viewport: Int, offset: Float)? {
-        let rowKey = key.firstIndex(of: "/").map { String(key[..<$0]) }
         for node in flatNodes {
             guard let list = virtualLists[node.path],
-                  let index = list.rowPlaces.index(of: key) ?? rowKey.flatMap({ list.rowPlaces.index(of: $0) }),
+                  let index = Self.virtualRevealRow(key, in: list.rowPlaces, path: node.path),
                   let v = nodeByPath[list.scrollPath] else { continue }
             let est = max(1, node.el.virtualEstimate ?? 40)
             return (v, max(0, list.top + list.padTop + list.prefix(index, estimated: est) - at))

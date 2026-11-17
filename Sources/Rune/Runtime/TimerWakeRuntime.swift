@@ -27,7 +27,7 @@ extension Runtime {
 
     /// Native surface frame counts when attached to a live view (`Runtime::surface_stats`), or `nil` headless.
     public func surfaceStats() -> SurfaceStats? {
-        surfaceMeter?.currentStats()
+        surfaceMeter?.currentStats().aged(at: ProcessInfo.processInfo.systemUptime)
     }
 
     /// When the timer poll that stands for the current frame ran, or `currentTime` (`Runtime::polled_at`).
@@ -105,6 +105,11 @@ extension Runtime {
     }
 
     internal func beginFrameTimers(at now: Double) -> (due: Bool, alreadyPolled: Bool) {
+        if fieldSpelling.watch?.path != focusedPath {
+            fieldSpelling.watch = nil
+        } else if let until = fieldSpelling.watch?.wakeAt, now >= until {
+            _ = fieldSpelling.watch?.tick(now: now)
+        }
         let due = wakeDeadlines.first.map { now >= $0 } ?? false
         let alreadyPolled = timerWake.framePolled(due: due)
         drainDueWakeDeadlines(through: now)
@@ -169,15 +174,20 @@ extension Runtime {
 
     /// True when nothing other than a scheduled timer wake asks for a frame (`Runtime::rests`).
     public func rests() -> Bool {
+        nextLoopWakeDeadline(after: currentTime) == nil && restsExceptLoop()
+    }
+
+    internal func restsExceptLoop() -> Bool {
         !isAnimating
             && !isStale
             && !forceInitialSettle
-            && nextLoopWakeDeadline(after: currentTime) == nil
             && pendingWindowFrame == nil
             && hoverDelays.isEmpty
             && !isTooltipWaiting
+            && fieldSpelling.watch?.wakeAt == nil
             && kitHooks.pressRepeat.nextWakeDeadline(after: currentTime) == nil
             && !filesHeld
+            && !hasPendingInput
             && !livePending
             && surfaces.isEmpty
             && !stepsFrames

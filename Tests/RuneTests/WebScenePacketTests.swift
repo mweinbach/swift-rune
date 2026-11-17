@@ -47,6 +47,121 @@ import RuneRef
         #expect(Array(buffer.suffix(16)) == Array(image[40..<48]) + Array(image[72..<80]))
     }
 
+    @Test func independentPagesKeepOriginalUVsAndSendOnlyDirtyTexels() throws {
+        let dims = 16
+        let first = RGBA8Atlas(width: dims, height: dims, texels: [UInt8](repeating: 41, count: 4 * dims * dims))
+        var changed = first
+        let start = (3 * dims + 2) * 4
+        changed.texels.replaceSubrange(start..<start + 4, with: [11, 22, 33, 44])
+        var vacant = RGBA8Atlas()
+        vacant.texels = []
+        let quad = RenderInstance(params: SIMD4(1, KIND_IMAGE, 0, 1), uv: SIMD4(2, 3, 1, 1))
+        var scene = RenderFrame(width: 10, height: 7, glyphs: R8Atlas(texels: [127]),
+                                imagePages: [first, changed, vacant], instances: [quad])
+        scene.imagePageRevisions = [7, 9, 10]
+        scene.imagePagePatches = [nil, ImageAtlasPatch(fromRevision: 8, edges: SIMD4(2, 3, 3, 4)), nil]
+        try scene.validateForGL()
+        let updates = WebAtlasUpdate.imagePages(scene, previous: [first, first, vacant], revisions: [7, 8, 10], force: false)
+        #expect(updates == [.none, .patch(SIMD4(2, 3, 3, 4)), .none])
+        #expect(WebAtlasUpdate.imagePages(scene, previous: [], revisions: [], force: true) == [.full, .full, .none])
+        let encoded = try WebScenePacket(scene: scene, glyphUpdate: .full, imageUpdate: .none,
+                                         sequence: SIMD2(10, 11), pageUpdates: updates)
+        let packet = try #require(encoded)
+        #expect(packet.byteCount == 56 + 128 + 8 + 1 + 3 * 12 + 16 + 4)
+        let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: packet.byteCount, alignment: 4)
+        defer { buffer.deallocate() }
+        packet.write(to: buffer.baseAddress!)
+        func word(_ offset: Int) -> UInt32 { buffer.loadUnaligned(fromByteOffset: offset, as: UInt32.self) }
+        #expect(word(0) == WebScenePacket.pagedMagic && word(28) == 3 && word(32) == 0)
+        #expect(word(56 + 16 * 4) == Float(1).bitPattern && word(56 + 20 * 4) == Float(2).bitPattern)
+        let descriptors = 56 + 128 + 8 + 1
+        #expect(word(descriptors) == 16 && word(descriptors + 8) == 0)
+        #expect(word(descriptors + 20) == 2 && word(descriptors + 24) == 2 && word(descriptors + 28) == 3)
+        #expect(Array(buffer[(descriptors + 40)..<(descriptors + 44)]) == [11, 22, 33, 44])
+        #expect(Array(buffer.suffix(12)) == [UInt8](repeating: 0, count: 12))
+    }
+
+    @Test func pagedGlyphsEncodeLocalUVsAndSparseR8UpdatesWithALegacyImage() throws {
+        let base = R8Atlas(width: 8, height: 4, texels: [UInt8](repeating: 0, count: 32))
+        var page = base
+        page.texels[9] = 31
+        page.texels[17] = 63
+        let empty = R8Atlas(texels: [])
+        let glyph = RenderInstance(params: SIMD4(0, KIND_GLYPH, 1, 1), uv: SIMD4(1, 1, 1, 2))
+        let image = RGBA8Atlas(texels: [91, 92, 93, 94])
+        var scene = RenderFrame(width: 8, height: 4, glyphs: base, images: image, instances: [glyph])
+        scene.glyphPages = [base, page, empty]
+        scene.glyphPageRevisions = [4, 7, 8]
+        scene.glyphPagePatches = [nil, GlyphAtlasPatch(fromRevision: 5, edges: SIMD4(1, 1, 2, 3)), nil]
+        let previous = [base, base, empty]
+        let updates = WebAtlasUpdate.glyphPages(scene.glyphPages, frame: scene, previous: previous, revisions: [4, 5, 8], force: false)
+        #expect(updates == [.none, .patch(SIMD4(1, 1, 2, 3)), .none])
+        #expect(WebAtlasUpdate.glyphPages(scene.glyphPages, frame: scene, previous: previous, revisions: [4, 5, 8], force: true) == [.full, .full, .none])
+        #expect(WebAtlasUpdate.slotsChanged([base, page, empty], since: [base, page, base]))
+        #expect(WebAtlasUpdate.imagePages(scene, previous: [image], revisions: [scene.imageRevision], force: false) == [.none])
+        let encoded = try WebScenePacket(scene: scene, glyphUpdate: .none, imageUpdate: .none, sequence: SIMD2(10, 11),
+                                         pageUpdates: [.full], glyphTransfers: (scene.glyphPages, updates))
+        let packet = try #require(encoded)
+        let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: packet.byteCount, alignment: 4)
+        defer { buffer.deallocate() }
+        packet.write(to: buffer.baseAddress!)
+        func word(_ offset: Int) -> UInt32 { buffer.loadUnaligned(fromByteOffset: offset, as: UInt32.self) }
+        #expect(word(0) == WebScenePacket.pagedMagic && word(12) == 160)
+        #expect(word(20) == 3 && word(24) == 0 && word(28) == 1 && word(32) == 0)
+        #expect(word(56 + 18 * 4) == Float(1).bitPattern && word(56 + 20 * 4) == Float(1).bitPattern)
+        let start = 56 + 128 + 8
+        #expect(word(start) == 8 && word(start + 4) == 4 && word(start + 8) == 0)
+        #expect(word(start + 20) == 2 && word(start + 24) == 1 && word(start + 36) == 2)
+        #expect(Array(buffer[(start + 40)..<(start + 42)]) == [31, 63])
+        #expect(Array(buffer[(start + 42)..<(start + 54)]) == [UInt8](repeating: 0, count: 12))
+        #expect(word(start + 54) == 1 && word(start + 58) == 1 && word(start + 62) == 1)
+        #expect(Array(buffer.suffix(4)) == image.texels)
+        #expect(packet.byteCount == start + 70)
+    }
+
+    @Test func glyphPageHistoryKeepsTexturesAcrossRetriesUntilTheirPacketIsPublished() throws {
+        let base = R8Atlas(width: 10, height: 8)
+        var scene = RenderFrame(width: 32, height: 16, glyphs: base)
+        var history = WebAtlasHistory()
+
+        let legacy = history.prepare(scene, force: false, patches: false)
+        #expect(legacy.glyph == .full && legacy.image == .full && legacy.sequence == nil)
+        history.record(scene, legacy)
+        let upgrade = history.prepare(scene, force: false, patches: true)
+        #expect(upgrade.glyph == .full && upgrade.image == .full && upgrade.sequence == SIMD2(0, 1))
+        history.record(scene, upgrade)
+        let still = history.prepare(scene, force: false, patches: true)
+        #expect(still.glyph == .none && still.image == .none && still.sequence == SIMD2(1, 1))
+
+        scene.glyphPages = [base, base]
+        scene.glyphPageRevisions = [10, 11]
+        let paged = history.prepare(scene, force: false, patches: true)
+        #expect(paged.glyphs?.updates == [.full, .full] && paged.images == [.full])
+        #expect(paged.glyph == .none && paged.image == .none && paged.sequence == SIMD2(1, 2))
+        #expect(history.prepare(scene, force: false, patches: true).sequence == paged.sequence)
+        history.record(scene, paged)
+
+        scene.glyphPages[1].texels[13] = 177
+        scene.glyphPageRevisions = [10, 12]
+        scene.glyphPagePatches = [nil, .init(fromRevision: 11, edges: SIMD4(3, 1, 4, 2))]
+        let updated = history.prepare(scene, force: false, patches: true)
+        #expect(updated.glyphs?.updates == [.none, .patch(SIMD4(3, 1, 4, 2))])
+        #expect(updated.images == [.none] && updated.sequence == SIMD2(2, 3))
+        history.record(scene, updated)
+        #expect(history.prepare(scene, force: false, patches: true).sequence == SIMD2(3, 3))
+        let restored = history.prepare(scene, force: true, patches: true)
+        #expect(restored.glyphs?.updates == [.full, .full] && restored.images == [.full])
+
+        scene.glyphPages[1] = R8Atlas(texels: [])
+        let vacated = history.prepare(scene, force: false, patches: true)
+        #expect(vacated.glyphs?.updates == [.none, .none] && vacated.sequence == SIMD2(3, 4))
+        history.record(scene, vacated)
+        scene.glyphPages = []
+        let single = history.prepare(scene, force: false, patches: true)
+        #expect(single.glyphs == nil && single.images == nil)
+        #expect(single.glyph == .full && single.image == .full && single.sequence == SIMD2(4, 5))
+    }
+
     @MainActor @Test func idleBrowserFramesServeScheduledHover() throws {
         struct Model { var entered = false }
         let spec = AppSpec(title: "Hover", size: Vec2(50, 50), state: Model()) { _, _ in

@@ -11,7 +11,7 @@ private final class RunCellLayoutCache: @unchecked Sendable {
         var language: String?
         var text: String
         var style: TextStyle
-        var scale100: Int
+        var scaleBits: UInt32
         var portable: Bool
     }
 
@@ -45,7 +45,7 @@ private final class RunCellLayoutCache: @unchecked Sendable {
             fontEpoch: textSystem.currentFontEpoch, language: textSystem.language,
             text: run.text,
             style: singleStyle,
-            scale100: Int((scale * 100.0).rounded()),
+            scaleBits: scale.bitPattern,
             portable: isPortable
         )
         lock.lock()
@@ -217,7 +217,7 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         var pChars: [PortableCapturedChar] = []
         xs.reserveCapacity(chars.count + 1)
         pChars.reserveCapacity(chars.count)
-        let isMono = style.family == .monospace
+        let isMono = style.family.isMonospace
         var penPt: Float = 0
         for (i, ch) in chars.enumerated() {
             let xPx = (penPt * scale * 64.0).rounded() / 64.0
@@ -362,7 +362,7 @@ internal final class TextRunCellLayout: @unchecked Sendable {
             graphemeIndex: gi,
             using: textSystem,
             originXPx: originXPx,
-            baselineYPx: originBaselinePx
+            baselineYPx: originBaselinePx, utf8Offset: byteOffset
         )
         #else
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
@@ -395,7 +395,8 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         graphemeIndex gi: Int,
         using textSystem: TextSystem,
         originXPx: Float,
-        baselineYPx targetBaselinePx: Float
+        baselineYPx targetBaselinePx: Float,
+        utf8Offset: Int = 0
     ) -> [PositionedGlyph] {
         let invS = 1.0 / pixelScale
         var glyphsOut: [PositionedGlyph] = []
@@ -417,7 +418,7 @@ internal final class TextRunCellLayout: @unchecked Sendable {
                         Float(colorEntry.pixelSize.x) * invS,
                         Float(colorEntry.pixelSize.y) * invS
                     ),
-                    colorGlyph: colorEntry
+                    colorGlyph: colorEntry, utf8Offset: utf8Offset
                 ))
                 continue
             }
@@ -437,7 +438,7 @@ internal final class TextRunCellLayout: @unchecked Sendable {
             }
             let quadXPx = pen.pixel + entry.bearingPx.x
             let quadYPx = floorY + entry.bearingPx.y
-            glyphsOut.append(PositionedGlyph(
+            var positioned = PositionedGlyph(
                 rect: SIMD4<Float>(
                     quadXPx * invS,
                     quadYPx * invS,
@@ -446,8 +447,11 @@ internal final class TextRunCellLayout: @unchecked Sendable {
                 ),
                 uv: entry.uv,
                 color: nil,
-                atlasPage: entry.page
-            ))
+                atlasPage: entry.page, utf8Offset: utf8Offset
+            )
+            positioned.classicInk = entry.classicInk
+            positioned.outlineGroup = entry.outlineGroup
+            glyphsOut.append(positioned)
         }
         return glyphsOut
     }
@@ -463,10 +467,10 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
         if let desktop, let cell = desktop.cells[utf8Starts[gi]] {
             return desktop.glyphs(for: cell, originX: startXPt - cell.left, baselineY: desktop.baseline,
-                color: nil, atlas: textSystem.glyphAtlas, cache: true)
+                color: nil, atlas: textSystem.glyphAtlas, cache: true, isolateCell: true)
         }
         #endif
-        let isMono = style.family == .monospace
+        let isMono = style.family.isMonospace
         var glyphsOut: [PositionedGlyph] = []
         var xPt = startXPt
         for pc in portableChars where pc.graphemeIndex == gi {

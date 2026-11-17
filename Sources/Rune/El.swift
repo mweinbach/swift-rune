@@ -782,7 +782,12 @@ public struct Cx<State> {
     public internal(set) var reducedMotion: Bool
     public let windowFocused: Bool
     public let focusedKey: String?
-    public let hoveredKey: String?
+    internal let snapshotHoveredKey: String?
+    internal var hoverReadDependency: HoverReadDependency?
+    public var hoveredKey: String? {
+        hoverReadDependency?.record()
+        return snapshotHoveredKey
+    }
     public let pressedKey: String?
     public let waker: Waker
     public var helpLook: HelpLook?
@@ -817,7 +822,7 @@ public struct Cx<State> {
         self.reducedMotion = reducedMotion
         self.windowFocused = windowFocused
         self.focusedKey = focusedKey
-        self.hoveredKey = hoveredKey
+        self.snapshotHoveredKey = hoveredKey
         self.pressedKey = pressedKey
         self.waker = waker
         self.helpLook = helpLook
@@ -853,7 +858,7 @@ public struct Cx<State> {
         self.reducedMotion = reducedMotion
         self.windowFocused = windowFocused
         self.focusedKey = focusedKey
-        self.hoveredKey = hoveredKey
+        self.snapshotHoveredKey = hoveredKey
         self.pressedKey = pressedKey
         self.waker = waker
         self.helpLook = helpLook
@@ -866,15 +871,15 @@ public struct Cx<State> {
     }
 
     public func isFocused(_ key: String) -> Bool {
-        focusedKey == key
+        matchesAuthoredKey(focusedKey, key)
     }
 
     public func isHovered(_ key: String) -> Bool {
-        hoveredKey == key
+        matchesAuthoredKey(hoveredKey, key)
     }
 
     public func isPressed(_ key: String) -> Bool {
-        pressedKey == key
+        matchesAuthoredKey(pressedKey, key)
     }
 
     public func scrollOffset(of key: String) -> Vec2 {
@@ -909,7 +914,10 @@ public struct Cx<State> {
 
 /// Accessibility / semantic role tag (`rune::RoleTag`).
 public enum ElementRole: String, Sendable, Hashable, Codable {
+    /// A layout-only container. Its accessible children belong to the nearest semantic parent.
+    case presentation = "none"
     case group = "group"
+    case scrollView = "scroll-view"
     case text = "text"
     case button = "button"
     case checkbox = "checkbox"
@@ -922,10 +930,12 @@ public enum ElementRole: String, Sendable, Hashable, Codable {
     case listItem = "listitem"
     case heading = "heading"
     case dialog = "dialog"
+    case alertDialog = "alertdialog"
     case menuBar = "menubar"
     case menu = "menu"
     case menuItem = "menuitem"
     case image = "img"
+    case figure = "figure"
     case icon = "icon"
     case separator = "separator"
     case combobox = "combobox"
@@ -936,6 +946,8 @@ public enum ElementRole: String, Sendable, Hashable, Codable {
     case grid = "grid"
     case row = "row"
     case gridCell = "gridcell"
+    case cell = "cell"
+    case rowHeader = "rowheader"
     case columnHeader = "columnheader"
     case radiogroup = "radiogroup"
     case tabList = "tablist"
@@ -943,6 +955,8 @@ public enum ElementRole: String, Sendable, Hashable, Codable {
     case alert = "alert"
     case region = "region"
     case main = "main"
+    case navigation, banner, complementary, form, search
+    case contentInfo = "contentinfo"
     case link = "link"
     case toolbar = "toolbar"
     case splitter = "splitter"
@@ -1013,8 +1027,39 @@ public struct ElementHandlers<State> {
     public var onSmartMagnify: ((inout State, Float, Float, inout Tx) -> Bool)?
     public var pointerButtons: Set<PointerButton>?
 
-    /// Mutable projection into `State` for `textInput` elements!
-    public var editLens: (get: (State) -> TextEdit, set: (inout State, TextEdit) -> Void)?
+    /// Mutable projection into the field's model. A read reflects the mounted element's
+    /// line mode and leaves application state untouched until the editor writes back.
+    public var editLens: (get: (State) -> TextEdit, set: (inout State, TextEdit) -> Void)? {
+        get { boundEditLens }
+        set {
+            readEditModel = newValue?.get
+            boundEditLens = newValue
+            bindEditReader()
+        }
+    }
+    private var readEditModel: ((State) -> TextEdit)?
+    private var boundEditLens: (get: (State) -> TextEdit, set: (inout State, TextEdit) -> Void)?
+    fileprivate var fieldSingleLine: Bool? {
+        didSet { if fieldSingleLine != oldValue { bindEditReader() } }
+    }
+
+    private mutating func bindEditReader() {
+        guard let readEditModel else { return }
+        let singleLine = fieldSingleLine
+        boundEditLens?.get = { state in
+            var edit = readEditModel(state)
+            edit.applyFieldLineMode(singleLine: singleLine)
+            return edit
+        }
+    }
+    /// The app's focused editor must see the same mode as the view, including in
+    /// user-supplied handlers which work on the model directly.
+    internal func syncEditLineMode(in state: inout State) {
+        guard let readEditModel, let lens = boundEditLens else { return }
+        var edit = readEditModel(state)
+        if edit.applyFieldLineMode(singleLine: fieldSingleLine) { lens.set(&state, edit) }
+    }
+
     public var onInputKey: ((inout State, KeyEvent, inout Tx) -> Bool)?
     public var onTextChange: ((inout State, String, inout Tx) -> Void)?
     public var onTextSubmit: ((inout State, String, inout Tx) -> Void)?
@@ -1061,7 +1106,62 @@ public struct ElementHandlers<State> {
     public init() {}
 }
 
+/// The child buffer produced by one memo build. A caller may modify the returned root or
+/// its children. Swift's value semantics detach the child buffer on the first child edit.
+final class MemoLayoutChildren<State> {
+    struct Traits: OptionSet {
+        let rawValue: UInt8
+        static var virtual: Self { Self(rawValue: 1) }
+        static var growth: Self { Self(rawValue: 2) }
+        static var inputPills: Self { Self(rawValue: 4) }
+        static var mutableLayout: Self { Self(rawValue: 8) }
+        static var duplicateKeys: Self { Self(rawValue: 16) }
+    }
+
+    private let children: [El<State>]
+    let traits: Traits
+    let duplicateSiblings: Bool
+
+    init(_ children: [El<State>]) {
+        self.children = children
+        duplicateSiblings = !KeyDiagnostics.uniqueSiblings(children)
+        var traits: Traits = []
+        var stack = children
+        while let child = stack.popLast() {
+            if child.virtualEstimate != nil || child.virtualRowsSource != nil { traits.insert(.virtual) }
+            if child.growthSpec != nil || child.foldGlideSpec != nil { traits.insert(.growth) }
+            if child.handlers.editLens != nil {
+                traits.insert(.mutableLayout)
+                if child.pillStyleLookup != nil || child.pillIconLookup != nil || child.pillColorsSpec != nil {
+                    traits.insert(.inputPills)
+                }
+            }
+            if child.liveText != nil || child.isSecure || child.anchor?.fit == true ||
+                child.layout.aspectFit != nil || (child.pixelsPayload != nil && child.layout.aspectRatio == nil &&
+                    ((child.layout.width == .auto) != (child.layout.height == .auto))) {
+                traits.insert(.mutableLayout)
+            }
+            if let nested = child.memoLayoutChildren, nested.matches(child.children) {
+                traits.formUnion(nested.traits)
+                if child.virtualEstimate == nil && nested.duplicateSiblings { traits.insert(.duplicateKeys) }
+            } else {
+                if child.virtualEstimate == nil && !KeyDiagnostics.uniqueSiblings(child.children) { traits.insert(.duplicateKeys) }
+                stack.append(contentsOf: child.children)
+            }
+        }
+        self.traits = traits
+    }
+
+    func matches(_ current: [El<State>]) -> Bool {
+        guard current.count == children.count else { return false }
+        return children.withUnsafeBufferPointer { original in
+            current.withUnsafeBufferPointer { $0.baseAddress == original.baseAddress }
+        }
+    }
+}
+
 final class ElColdData<State> {
+    var memoLayoutChildren: MemoLayoutChildren<State>?
     var pixelSnapEnabled: Bool = true
     var clipRadius: Float? = nil
     var clipCorners: Corners? = nil
@@ -1080,6 +1180,7 @@ final class ElColdData<State> {
     var foldGlideSpec: FoldGlide? = nil
     var virtualEstimate: Float? = nil
     var virtualRowsSource: VirtualRowSource<State>? = nil
+    var authoredByteExactKey: String? = nil
     var virtualRowsVersion: UInt64? = nil
     var focusSelected: Bool = false
     var revealSelected: Bool = false
@@ -1184,7 +1285,7 @@ final class ElColdData<State> {
     var pillColors: (bg: Color, fg: Color?)? = nil
     var pillIconLookup: ((String) -> SVGIcon?)? = nil
     var pillStyleLookup: ((String) -> PillStyle)? = nil
-    var isSingleLineInput: Bool = false
+    var fieldSingleLine: Bool?
     var editAccessWithheld: Bool = false
     var animateEditLayoutEnabled: Bool = false
     var isIconOneColor: Bool = false
@@ -1198,6 +1299,7 @@ final class ElColdData<State> {
     var opacityMotionAnim: Anim<Float>? = nil
     var scaleMotionAnim: Anim<Vec2>? = nil
     var rotateMotionAnim: Anim<Float>? = nil
+    var blurMotionOverride: BlurMotion?
     var textCaseValue: TextCase? = nil
     var spanRings: [(range: Range<Int>, color: Color, width: Float)]? = nil
     var advanceInRun: (run: TextRun, byteOffset: Int)? = nil
@@ -1247,6 +1349,7 @@ final class ElColdData<State> {
         c.foldGlideSpec = foldGlideSpec
         c.virtualEstimate = virtualEstimate
         c.virtualRowsSource = virtualRowsSource
+        c.authoredByteExactKey = authoredByteExactKey
         c.virtualRowsVersion = virtualRowsVersion
         c.focusSelected = focusSelected
         c.revealSelected = revealSelected
@@ -1310,6 +1413,7 @@ final class ElColdData<State> {
     @inline(never)
     private func copyTextAndMediaFields(to c: ElColdData<State>) {
         c.richSpans = richSpans
+        c.textReveal = textReveal
         c.textHighlights = textHighlights
         c.textLinks = textLinks
         c.liveText = liveText
@@ -1359,7 +1463,7 @@ final class ElColdData<State> {
         c.pillColors = pillColors
         c.pillIconLookup = pillIconLookup
         c.pillStyleLookup = pillStyleLookup
-        c.isSingleLineInput = isSingleLineInput
+        c.fieldSingleLine = fieldSingleLine
         c.editAccessWithheld = editAccessWithheld
         c.animateEditLayoutEnabled = animateEditLayoutEnabled
         c.isIconOneColor = isIconOneColor
@@ -1373,6 +1477,7 @@ final class ElColdData<State> {
         c.opacityMotionAnim = opacityMotionAnim
         c.scaleMotionAnim = scaleMotionAnim
         c.rotateMotionAnim = rotateMotionAnim
+        c.blurMotionOverride = blurMotionOverride
         c.textCaseValue = textCaseValue
         c.spanRings = spanRings
         c.advanceInRun = advanceInRun
@@ -1382,6 +1487,7 @@ final class ElColdData<State> {
         c.liveBindings = liveBindings
         c.handlersBox = handlersBox.map { ElHandlersBox($0.value) }
         c._runtimeExtras = _runtimeExtras
+        c.memoLayoutChildren = memoLayoutChildren
         c.keyLocation = keyLocation
     }
 }
@@ -1413,8 +1519,25 @@ public struct El<State> {
         return _cold!
     }
 
-    public var keyId: String? = nil
+    internal var storageKeyId: String? = nil
+    public var keyId: String? {
+        get { authoredByteExactKey ?? storageKeyId }
+        set {
+            let encoded = newValue.flatMap { VirtualRowKeyEncoding.encodedKey($0, byteExact: false) }
+            assignStoredKey(encoded ?? newValue, authored: encoded == nil ? nil : newValue)
+        }
+    }
+
+    internal mutating func assignStoredKey(_ stored: String?, authored: String?) {
+        storageKeyId = stored
+        if let authored { authoredByteExactKey = authored }
+        else if authoredByteExactKey != nil { authoredByteExactKey = nil }
+    }
     public var role: ElementRole = .group
+    internal var memoLayoutChildren: MemoLayoutChildren<State>? {
+        get { _cold?.data.memoLayoutChildren }
+        set { ensureCold().data.memoLayoutChildren = newValue }
+    }
     internal var memoRegionReused: Bool = false
     internal var memoRegionEnvHash: UInt64 = 0
     public var layout: LayoutStyle
@@ -1439,7 +1562,15 @@ public struct El<State> {
     public var backdropBlur: Float = 0
     public var zIndex: Int = 0
     public var isolatedLayer: Bool = false
-    public var focusable: Bool = false
+    private enum FocusSource: UInt8 {
+        case none, press, explicit
+    }
+    private var focusSource = FocusSource.none
+    public var focusable: Bool {
+        get { focusSource != .none }
+        set { focusSource = newValue ? .explicit : .none }
+    }
+    internal var explicitlyFocusable: Bool { focusSource == .explicit }
     public var focusOptOut: Bool = false
     public var autofocus: Bool = false
     public var focusGroup: Bool = false
@@ -1528,6 +1659,7 @@ public struct El<State> {
         set { ensureCold().data.runtimeExtras["traceNamespace"] = newValue }
     }
     internal var virtualRowsSource: VirtualRowSource<State>? { get { _cold?.data.virtualRowsSource } set { ensureCold().data.virtualRowsSource = newValue } }
+    internal var authoredByteExactKey: String? { get { _cold?.data.authoredByteExactKey } set { ensureCold().data.authoredByteExactKey = newValue } }
     internal var virtualRowsVersionHash: UInt64? { get { _cold?.data.virtualRowsVersion } set { ensureCold().data.virtualRowsVersion = newValue } }
     public var isFocusSelected: Bool { get { _cold?.data.focusSelected ?? false } set { ensureCold().data.focusSelected = newValue } }
     public var isRevealSelected: Bool { get { _cold?.data.revealSelected ?? false } set { ensureCold().data.revealSelected = newValue } }
@@ -1624,7 +1756,14 @@ public struct El<State> {
     public var pillColorsSpec: (bg: Color, fg: Color?)? { get { _cold?.data.pillColors } set { ensureCold().data.pillColors = newValue } }
     public var pillIconLookup: ((String) -> SVGIcon?)? { get { _cold?.data.pillIconLookup } set { ensureCold().data.pillIconLookup = newValue } }
     public var pillStyleLookup: ((String) -> PillStyle)? { get { _cold?.data.pillStyleLookup } set { ensureCold().data.pillStyleLookup = newValue } }
-    public var isSingleLineInput: Bool { get { _cold?.data.isSingleLineInput ?? false } set { ensureCold().data.isSingleLineInput = newValue } }
+    internal var fieldSingleLine: Bool? { _cold?.data.fieldSingleLine }
+    public var isSingleLineInput: Bool {
+        get { fieldSingleLine ?? false }
+        set {
+            ensureCold().data.fieldSingleLine = newValue
+            if hasAuthoredHandlers { handlers.fieldSingleLine = newValue }
+        }
+    }
     /// The field shows its editor but takes no edits from it (upstream `Input::access == None`).
     public var editAccessWithheld: Bool { get { _cold?.data.editAccessWithheld ?? false } set { ensureCold().data.editAccessWithheld = newValue } }
     public var animateEditLayoutEnabled: Bool { get { _cold?.data.animateEditLayoutEnabled ?? false } set { ensureCold().data.animateEditLayoutEnabled = newValue } }
@@ -1639,6 +1778,7 @@ public struct El<State> {
     public var opacityMotionAnim: Anim<Float>? { get { _cold?.data.opacityMotionAnim } set { ensureCold().data.opacityMotionAnim = newValue } }
     public var scaleMotionAnim: Anim<Vec2>? { get { _cold?.data.scaleMotionAnim } set { ensureCold().data.scaleMotionAnim = newValue } }
     public var rotateMotionAnim: Anim<Float>? { get { _cold?.data.rotateMotionAnim } set { ensureCold().data.rotateMotionAnim = newValue } }
+    var blurMotionOverride: BlurMotion? { get { _cold?.data.blurMotionOverride } set { ensureCold().data.blurMotionOverride = newValue } }
     public var textCaseValue: TextCase? { get { _cold?.data.textCaseValue } set { ensureCold().data.textCaseValue = newValue } }
     public var spanRingsSpec: [(range: Range<Int>, color: Color, width: Float)] { get { _cold?.data.spanRings ?? [] } set { ensureCold().data.spanRings = newValue.isEmpty ? nil : newValue } }
     public var advanceInRun: (run: TextRun, byteOffset: Int)? { get { _cold?.data.advanceInRun } set { ensureCold().data.advanceInRun = newValue } }
@@ -1650,6 +1790,8 @@ public struct El<State> {
         get { _cold?.data.handlersBox?.value ?? ElementHandlers<State>() }
         set {
             let box = ensureCold()
+            var newValue = newValue
+            newValue.fieldSingleLine = box.data.fieldSingleLine
             if isKnownUniquelyReferenced(&box.data.handlersBox) {
                 box.data.handlersBox?.value = newValue
             } else {
@@ -1657,6 +1799,7 @@ public struct El<State> {
             }
         }
     }
+    internal var hasAuthoredHandlers: Bool { _cold?.data.handlersBox != nil }
     internal var runtimeExtras: [String: Any] {
         get { _cold?.data.runtimeExtras ?? [:] }
         set { ensureCold().data.runtimeExtras = newValue }
@@ -1677,8 +1820,14 @@ public struct El<State> {
     // MARK: - Identity & Hierarchy
 
     public func key(_ k: String, file: String = #fileID, line: UInt = #line, column: UInt = #column) -> Self {
+        key(k, byteExact: false, file: file, line: line, column: column)
+    }
+
+    /// Kit widgets address tree, table, and column IDs by their original UTF-8 bytes.
+    package func key(_ id: String, byteExact: Bool, file: String = #fileID, line: UInt = #line, column: UInt = #column) -> Self {
+        let encoded = VirtualRowKeyEncoding.encodedKey(id, byteExact: byteExact)
         var copy = self
-        copy.keyId = k
+        copy.assignStoredKey(encoded ?? id, authored: encoded == nil ? nil : id)
         copy.keyLocation = "\(file):\(line):\(column)"
         return copy
     }
@@ -2268,7 +2417,7 @@ public struct El<State> {
 
     public func backdropBlur(_ radius: Float) -> Self {
         var copy = self
-        copy.backdropBlur = max(0, radius)
+        copy.backdropBlur = radius.isFinite ? max(0, radius) : 0
         return copy
     }
 
@@ -2913,9 +3062,7 @@ public struct El<State> {
     }
 
     public func reveal(_ wordFade: Float) -> Self {
-        var copy = self
-        copy.textReveal = max(0, wordFade)
-        return copy
+        reveal(wordFade: max(0, wordFade))
     }
 
     public func arrivesWhole() -> Self {
@@ -2955,8 +3102,20 @@ public struct El<State> {
         key: @escaping (State, Int) -> String,
         build: @escaping (State, Int) -> El<State>
     ) -> Self {
+        virtualRows(count: count, estimatedRowHeight: estimatedRowHeight, byteExactKeys: false, key: key, build: build)
+    }
+
+    /// Set `byteExactKeys` when the original UTF-8 spelling is part of a row's identity,
+    /// for example for file paths containing composed and decomposed names.
+    public func virtualRows(
+        count: Int,
+        estimatedRowHeight: Float,
+        byteExactKeys: Bool,
+        key: @escaping (State, Int) -> String,
+        build: @escaping (State, Int) -> El<State>
+    ) -> Self {
         var copy = self
-        copy.virtualRowsSource = VirtualRowSource(count: count, key: key, build: build)
+        copy.virtualRowsSource = VirtualRowSource(count: count, byteExactKeys: byteExactKeys, key: key, build: build)
         return copy.virtualize(estimatedRowHeight)
     }
 
@@ -2966,7 +3125,7 @@ public struct El<State> {
         key: @escaping (State, Int) -> String,
         build: @escaping (State, Int) -> El<State>
     ) -> Self {
-        virtualRows(count: count, estimatedRowHeight: estimatedRowHeight, key: key, build: build)
+        virtualRows(count: count, estimatedRowHeight: estimatedRowHeight, byteExactKeys: false, key: key, build: build)
     }
 
     public func virtualRowsVersion<H: Hashable>(_ version: H) -> Self {
@@ -3315,7 +3474,7 @@ public struct El<State> {
 
     public func onClick(_ handler: @escaping (inout State, inout Tx) -> Void) -> Self {
         var copy = self
-        if !copy.a11yDisabled && !copy.focusOptOut { copy.focusable = true }
+        if !copy.a11yDisabled && !copy.focusOptOut && !copy.focusable { copy.focusSource = .press }
         if copy.role == .group { copy.role = .button }
         copy.handlers.onClick = handler
         return copy
@@ -3323,7 +3482,7 @@ public struct El<State> {
 
     public func onClickPress(_ handler: @escaping (inout State, PointerPress, inout Tx) -> Void) -> Self {
         var copy = self
-        if !copy.a11yDisabled && !copy.focusOptOut { copy.focusable = true }
+        if !copy.a11yDisabled && !copy.focusOptOut && !copy.focusable { copy.focusSource = .press }
         if copy.role == .group { copy.role = .button }
         copy.handlers.onClickPress = handler
         return copy

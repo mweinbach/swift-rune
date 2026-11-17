@@ -1,0 +1,93 @@
+<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Original page</title><canvas id="scene" style="width:90px;height:40px"></canvas><pre id="result">Running</pre>
+<script type="module">
+import { mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+const canvas = document.querySelector('canvas'), result = document.querySelector('#result');
+const memory = new WebAssembly.Memory({initial:1}), encoder = new TextEncoder(), decoder = new TextDecoder();
+let app, title, lastTitle, resize, full, fit, documentMode, heightRequest;
+function write(text) {
+    const bytes = encoder.encode(text);
+    new Uint8Array(memory.buffer, 0, bytes.length).set(bytes);
+    return bytes.length;
+}
+const instance = {exports:{memory, rune_web_enable(){}, __main_void:()=>0, rune_web_buffer:()=>0,
+    rune_web_field:()=>0, rune_web_frame:()=>0,
+    rune_web_config:()=>write(JSON.stringify({canvasId:'scene', fullViewport:full, fitContentHeight:fit, webDocument:documentMode})),
+    rune_web_window_title() {
+        if (lastTitle === title) return -1;
+        lastTitle = title;
+        return write(title);
+    },
+    rune_web_window_height() {
+        const height = heightRequest ?? -1;
+        heightRequest = undefined;
+        return height;
+    },
+    rune_web_event(size) {
+        const event = JSON.parse(decoder.decode(new Uint8Array(memory.buffer, 0, size)));
+        if (event.kind === 'resize') resize = event;
+        if (event.kind === 'key') title = '';
+        return 1;
+    }
+}};
+const check = (value, why) => { if (!value) throw Error(why); };
+async function until(predicate) {
+    const end = performance.now() + 10000;
+    do {
+        if (predicate()) return;
+        await new Promise(resolve => requestAnimationFrame(resolve));
+    } while (performance.now() < end);
+    throw Error('Timed out during ' + result.textContent + ' (latest resize ' + JSON.stringify(resize) + ')');
+}
+try {
+    title = 'Rune full window'; full = true;
+    app = mountRuneBrowser(null, instance, {backend:'cpu'});
+    await app.ready;
+    check(document.title === title, 'initial title');
+    const initial = canvas.getBoundingClientRect();
+    check(initial.width === visualViewport.width && initial.height === visualViewport.height, 'initial viewport');
+    result.textContent = 'Apply system safe area';
+    await until(() => JSON.stringify(resize?.insets) === '[31,11,17,7]');
+    result.textContent = 'Zoom visual viewport';
+    await until(() => visualViewport.width < initial.width && Math.abs(resize.x - visualViewport.width) < 0.1);
+    check(Math.abs(resize.y - visualViewport.height) < 0.1, 'visible height');
+    // Mobile OSK panning also moves the visual viewport without changing its size.
+    Object.defineProperties(visualViewport, {offsetLeft:{configurable:true,value:6}, offsetTop:{configurable:true,value:9}});
+    visualViewport.dispatchEvent(new Event('scroll'));
+    check(canvas.style.left === '6px' && canvas.style.top === '9px', 'panned origin');
+    delete visualViewport.offsetLeft; delete visualViewport.offsetTop;
+    canvas.dispatchEvent(new KeyboardEvent('keydown', {key:'a',code:'KeyA'}));
+    await until(() => document.title === '');
+    app.dispose();
+    check(document.title === 'Original page' && canvas.style.height === '40px' && !canvas.style.position, 'release full viewport');
+    title = 'Embedded'; lastTitle = undefined; full = false; resize = undefined;
+    app = mountRuneBrowser(null, instance, {backend:'cpu'});
+    await app.ready;
+    check(document.title === 'Original page' && resize?.insets === undefined && canvas.clientHeight === 40 &&
+        resize.x === canvas.parentElement.clientWidth && canvas.style.touchAction === 'none', 'named embedded width and page ownership');
+    app.dispose();
+    check(canvas.style.width === '90px', 'release embedded width');
+    fit = true; full = true; lastTitle = undefined; heightRequest = 117.5;
+    app = mountRuneBrowser(null, instance, {backend:'cpu'});
+    await app.ready;
+    check(canvas.style.touchAction === 'pan-y' && !canvas.style.position && document.title === 'Original page' &&
+        resize.y === 117.5, 'fit height wins for named fullViewport canvas before first presentation');
+    const fitWidth = resize.x;
+    heightRequest = 68;
+    canvas.dispatchEvent(new KeyboardEvent('keydown', {key:'a',code:'KeyA'}));
+    await until(() => resize.y === 68);
+    check(resize.x === fitWidth && canvas.style.height === '68px', 'dynamic app height preserves the parent width');
+    app.dispose();
+    check(canvas.style.height === '40px', 'restore the author height after a fitted app');
+    documentMode = true; title = 'Rune document'; heightRequest = 8;
+    app = mountRuneBrowser(null, instance, {backend:'cpu'});
+    await app.ready;
+    check(document.title === title && resize?.insets === undefined && canvas.closest('[data-rune-band]') &&
+        document.body.style.margin === '0px' && canvas.clientHeight > 512, 'document title, native scroller and unchanged page band');
+    app.dispose();
+    check(document.title === 'Original page' && !document.body.style.margin, 'release document title and body');
+    result.textContent = 'PASS system CSS safe-area insets, native zoom, panned origin, dynamic title, embedded fitted heights and document restoration';
+} catch(error) { result.textContent = 'FAIL ' + error.stack; }
+finally { app?.dispose(); }
+</script>

@@ -20,6 +20,59 @@ struct ElSlice1And3CloseoutTests {
 
     // MARK: - 1. src/el/a11y.rs Props on El (L59, L142, L147-149, L151-152, L158, L160-163, L168)
 
+    @Test("Deep native paint traversal shapes visible text on a Swift task stack")
+    func deepNativePaintTraversal() {
+        let rt = Runtime(state: (), viewport: Vec2(100, 100), pixelScale: 1) { _, _ -> El<Void> in
+            var branch: El<Void> = text("inside").key("leaf").size(90, 25)
+            for level in 0..<72 {
+                branch = el().key("level-\(level)").size(100, 100).child(branch)
+            }
+            return branch
+        }
+        let result = rt.renderFrame(at: 0)
+        #expect(rt.element(byKey: "leaf")?.visible == [0, 0, 90, 25])
+        #expect(result.instances.contains { $0.params.y == KIND_GLYPH })
+    }
+
+    @Test("Unclipped virtual-row labels skip offscreen glyph draws and return when scrolled into view")
+    func offscreenSingleLinePaint() {
+        let rt = Runtime(state: false, viewport: Vec2(120, 90), pixelScale: 1) { moved, _ -> El<Bool> in
+            let label: El<Bool> = text("glyphs").key("label").truncate().w(100).h(20)
+            return el().size(120, 90).clip(true)
+                .child(row().pin(top: moved ? 10 : 350, left: 0).size(120, 22).child(label))
+        }
+        let off = rt.renderFrame(at: 0)
+        #expect(rt.element(byKey: "label")?.visible[3] == 0)
+        #expect(!off.instances.contains { $0.params.y == KIND_GLYPH })
+        rt.update(at: 0.1) { moved, tx in
+            moved = true
+            tx.instant()
+        }
+        let on = rt.renderFrame(at: 0.1)
+        #expect(rt.element(byKey: "label")?.visible[3] ?? 0 > 0)
+        #expect(on.instances.contains { $0.params.y == KIND_GLYPH })
+    }
+
+    @Test("Offscreen clipped cells keep element geometry without submitting invisible draws")
+    func clippedCellsKeepGeometry() {
+        let rt = Runtime(state: false, viewport: Vec2(100, 100), pixelScale: 1) { move, _ -> El<Bool> in
+            let cell: El<Bool> = el().key("clip").pin(top: move ? 20 : 250, left: 0)
+                .size(90, 20).clip(true).child(el().key("ink").size(80, 16).bg(.white))
+            return el().size(100, 100).clip(true).child(cell)
+        }
+        let off = rt.renderFrame(at: 0)
+        #expect(rt.element(byKey: "ink")?.rect[1] == 250)
+        #expect(rt.element(byKey: "ink")?.visible[3] == 0)
+        #expect(!off.instances.contains { $0.params.y == KIND_RECT && $0.rect.z == 80 && $0.fill.w == 1 })
+        rt.update(at: 0.1) { move, tx in
+            move = true
+            tx.instant()
+        }
+        let on = rt.renderFrame(at: 0.1)
+        #expect(rt.element(byKey: "ink")?.rect[1] == 20)
+        #expect(on.instances.contains { $0.params.y == KIND_RECT && $0.rect.z == 80 && $0.fill.w == 1 })
+    }
+
     @Test("el/a11y: busy, labelledBy/describedBy scoping, liveRegion, readOnly, sorted, positionInSet, shortcutHint, and level on El")
     func elA11yPropertiesAndScoping() throws {
         struct S {

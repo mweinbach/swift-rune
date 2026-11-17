@@ -4,10 +4,13 @@ import RuneRef
 /// Binary scene shared with rune-webgl.mjs. WASI runs little-endian; the header is 14 32-bit words.
 struct WebScenePacket {
     static let magic: UInt32 = 0x32475352 // RSG2
+    static let pagedMagic: UInt32 = 0x33475352 // RSG3
     static let headerSize = 56
     let scene: RenderFrame
     let glyphUpdate: WebAtlasUpdate
     let imageUpdate: WebAtlasUpdate
+    let pageUpdates: [WebAtlasUpdate]?
+    let glyphTransfers: (pages: [R8Atlas], updates: [WebAtlasUpdate])?
     let sequence: SIMD2<UInt32>?
     let byteCount: Int
     let surfaces: WebSurfacePacket
@@ -19,7 +22,8 @@ struct WebScenePacket {
     }
 
     init?(scene: RenderFrame, glyphUpdate: WebAtlasUpdate, imageUpdate: WebAtlasUpdate,
-          sequence: SIMD2<UInt32>?, surfaceCache: WebSurfacePacket.Cache = .init()) throws {
+          sequence: SIMD2<UInt32>?, pageUpdates: [WebAtlasUpdate]? = nil, glyphTransfers: (pages: [R8Atlas], updates: [WebAtlasUpdate])? = nil,
+          surfaceCache: WebSurfacePacket.Cache = .init()) throws {
         guard MemoryLayout<RenderInstance>.stride == 128,
               scene.width > 0, scene.height > 0,
               UInt32(exactly: scene.width) != nil, UInt32(exactly: scene.height) != nil,
@@ -37,9 +41,33 @@ struct WebScenePacket {
             case .patch(let edges): return 16 + (edges.z - edges.x) * (edges.w - edges.y) * channels
             }
         }
+        func pageBytes<Page: WebAtlasPixels>(_ pages: [Page], _ updates: [WebAtlasUpdate]) -> Int? {
+            guard !pages.isEmpty, pages.count == updates.count, UInt32(exactly: pages.count) != nil else { return nil }
+            var total = 0
+            for (page, update) in zip(pages, updates) {
+                let count = length(update, texelBytes: page.texels.count, channels: Page.webChannels)
+                guard total <= Int.max - 12, count <= Int.max - 12 - total else { return nil }
+                total += 12 + count
+            }
+            return total
+        }
+        let imageBytes: Int
+        if let pageUpdates {
+            guard sequence != nil, imageUpdate == .none, let bytes = pageBytes(scene.webImagePages, pageUpdates) else { return nil }
+            imageBytes = bytes
+        } else {
+            imageBytes = length(imageUpdate, texelBytes: scene.images.texels.count, channels: 4)
+        }
+        let glyphBytes: Int
+        if let glyphTransfers {
+            guard pageUpdates != nil, glyphUpdate == .none,
+                  let bytes = pageBytes(glyphTransfers.pages, glyphTransfers.updates) else { return nil }
+            glyphBytes = bytes
+        } else {
+            glyphBytes = glyphUpdate == .none ? 0 : length(glyphUpdate, texelBytes: scene.glyphs.texels.count, channels: 1)
+        }
         var size = Self.headerSize + (sequence == nil ? 0 : 8)
-        for fieldSize in [bytes, length(glyphUpdate, texelBytes: scene.glyphs.texels.count, channels: 1),
-                          length(imageUpdate, texelBytes: scene.images.texels.count, channels: 4), surfaces.bytes.count] {
+        for fieldSize in [bytes, glyphBytes, imageBytes, surfaces.bytes.count] {
             let (sum, tooLarge) = size.addingReportingOverflow(fieldSize)
             guard !tooLarge else { return nil }
             size = sum
@@ -47,6 +75,8 @@ struct WebScenePacket {
         self.scene = scene
         self.glyphUpdate = glyphUpdate
         self.imageUpdate = imageUpdate
+        self.pageUpdates = pageUpdates
+        self.glyphTransfers = glyphTransfers
         self.sequence = sequence
         byteCount = size
     }
@@ -59,11 +89,12 @@ struct WebScenePacket {
             case .patch: return patch
             }
         }
-        let flags: UInt32 = (scene.srgbBlend ? 1 : 0) | flags(for: glyphUpdate, full: 2, patch: 8)
-            | flags(for: imageUpdate, full: 4, patch: 16) | (sequence == nil ? 0 : 32)
+        let sceneFlags: UInt32 = (scene.srgbBlend ? 1 : 0) | flags(for: glyphUpdate, full: 2, patch: 8)
+            | flags(for: imageUpdate, full: 4, patch: 16) | (sequence == nil ? 0 : 32) | (glyphTransfers == nil ? 0 : 128)
         let header: [UInt32] = [
-            Self.magic, UInt32(scene.width), UInt32(scene.height), flags, UInt32(scene.instances.count),
-            UInt32(scene.glyphs.width), UInt32(scene.glyphs.height), UInt32(scene.images.width), UInt32(scene.images.height),
+            pageUpdates == nil ? Self.magic : Self.pagedMagic, UInt32(scene.width), UInt32(scene.height), sceneFlags, UInt32(scene.instances.count),
+            UInt32(glyphTransfers?.pages.count ?? scene.baseGlyphAtlas.width), glyphTransfers == nil ? UInt32(scene.baseGlyphAtlas.height) : 0,
+            UInt32(pageUpdates?.count ?? scene.images.width), pageUpdates == nil ? UInt32(scene.images.height) : 0,
             scene.clearColor.x.bitPattern, scene.clearColor.y.bitPattern, scene.clearColor.z.bitPattern, scene.clearColor.w.bitPattern, UInt32(surfaces.count),
         ]
         var offset = 0
@@ -98,8 +129,26 @@ struct WebScenePacket {
                 }
             }
         }
-        appendAtlas(glyphUpdate, texels: scene.glyphs.texels, width: scene.glyphs.width, channels: 1)
-        appendAtlas(imageUpdate, texels: scene.images.texels, width: scene.images.width, channels: 4)
+        func appendPages<Page: WebAtlasPixels>(_ pages: [Page], _ updates: [WebAtlasUpdate]) {
+            for (page, update) in zip(pages, updates) {
+                let vacant = page.texels.isEmpty
+                let header = [vacant ? 0 : UInt32(page.width), vacant ? 0 : UInt32(page.height),
+                              flags(for: update, full: 1, patch: 2)]
+                header.withUnsafeBytes(append)
+                appendAtlas(update, texels: page.texels, width: page.width, channels: Page.webChannels)
+            }
+        }
+        if let glyphTransfers {
+            appendPages(glyphTransfers.pages, glyphTransfers.updates)
+        } else if glyphUpdate != .none {
+            let glyphs = scene.glyphs
+            appendAtlas(glyphUpdate, texels: glyphs.texels, width: glyphs.width, channels: 1)
+        }
+        if let pageUpdates {
+            appendPages(scene.webImagePages, pageUpdates)
+        } else {
+            appendAtlas(imageUpdate, texels: scene.images.texels, width: scene.images.width, channels: 4)
+        }
         surfaces.bytes.withUnsafeBytes(append)
         assert(offset == byteCount)
     }

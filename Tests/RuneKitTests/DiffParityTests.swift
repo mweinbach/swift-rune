@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import RuneKit
 import Rune
@@ -372,12 +373,56 @@ struct DiffParityTests {
     }
 
     @MainActor
-    private func clickElement(_ rt: Runtime<HostState>, key: String, at now: Double) -> Bool {
+    private func clickElement<State>(_ rt: Runtime<State>, key: String, at now: Double) -> Bool {
         guard let el = rt.element(byKey: key), el.rect.count == 4 else { return false }
         let pt = Vec2(el.rect[0] + el.rect[2] * 0.5, el.rect[1] + el.rect[3] * 0.5)
+        rt.pointerMove(to: pt, at: now)
+        _ = rt.frame(at: now)
         rt.pointerDown(at: pt, at: now)
         rt.pointerUp(at: pt, at: now + 0.01)
         return true
+    }
+
+    @Test("Unified diff gutters expose one comment per row and select the opposite line through an empty number column")
+    @MainActor
+    func unifiedGutterCommentAndEmptySelection() throws {
+        let file = FileDiff.fromTexts(path: "example.txt", old: "first\nbefore\nlast\n", new: "first\nafter\nlast\n", context: 3)
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime(state: HostState(diff: DiffState(diff: file)), viewport: Vec2(600, 400)) { state, cx in
+            DiffView(key: "g", kit: kit, state: \HostState.diff)
+                .onComment { state, lines, _ in state.lastSelection = lines }
+                .build(state: state, cx: cx)
+        }
+        _ = rt.frame(at: 0)
+        let buttons = rt.elements().compactMap(\.key).filter { $0.hasSuffix("-plus") }
+        #expect(Set(buttons) == ["g-n-0-plus", "g-o-1-plus", "g-n-2-plus", "g-n-3-plus"])
+        let gutter = try #require(rt.element(byKey: "g-gutter-0"))
+        let button = try #require(rt.element(byKey: "g-n-0-plus"))
+        #expect(abs(button.rect[0] - (gutter.rect[0] + gutter.rect[2] - 10)) < 1)
+        #expect(abs(button.rect[1] - (gutter.rect[1] + 2)) < 1)
+        #expect(button.rect[2] == 16 && button.rect[3] == 16)
+        #expect(button.opacity < 0.01)
+        let code = try #require(rt.element(byKey: "g-code-0"))
+        rt.pointerMove(to: Vec2(code.rect[0] + 40, code.rect[1] + 10), at: 0.05)
+        _ = rt.frame(at: 0.05)
+        _ = rt.frame(at: 1)
+        #expect(try #require(rt.element(byKey: "g-n-0-plus")).opacity > 0.99)
+        #expect(try #require(rt.element(byKey: "g-o-1-plus")).opacity < 0.01)
+
+        #expect(clickElement(rt, key: "g-n-1", at: 1.05))
+        _ = rt.frame(at: 1.07)
+        #expect(rt.state.diff.selectedRange == .line(DiffLineRef(side: .old, line: 2)))
+        #expect(clickElement(rt, key: "g-o-2", at: 1.1))
+        _ = rt.frame(at: 1.12)
+        #expect(rt.state.diff.selectedRange == .line(DiffLineRef(side: .new, line: 2)))
+
+        let oldRange = DiffLineRange(start: DiffLineRef(side: .old, line: 1), end: DiffLineRef(side: .old, line: 2))
+        rt.state.diff.select(oldRange)
+        rt.pointerMove(to: Vec2(code.rect[0] + 40, code.rect[1] + 10), at: 1.2)
+        _ = rt.frame(at: 1.2)
+        #expect(clickElement(rt, key: "g-n-0-plus", at: 1.25))
+        _ = rt.frame(at: 1.27)
+        #expect(rt.state.lastSelection == oldRange)
     }
 
     @Test("DiffView toggles fold/mode/wrap, expands gaps, and copies text through Runtime")
@@ -430,6 +475,102 @@ struct DiffParityTests {
         rt.frame(at: 0.5)
         #expect(!rt.state.diff.expanded)
         #expect(rt.element(byKey: "d-body") == nil)
+    }
+
+    @Test("Directed, cross-side selections copy the anchor side in document order")
+    func directedDiffSelection() {
+        let file = FileDiff.fromTexts(path: "x", old: "keep\nold one\nold two\nend\n",
+                                      new: "keep\nnew one\nnew two\nend\n")
+        var state = DiffState(files: [file, file])
+        let old1 = DiffLineRef(side: .old, line: 1)
+        let old2 = DiffLineRef(side: .old, line: 2)
+        let old3 = DiffLineRef(side: .old, line: 3)
+        let new2 = DiffLineRef(side: .new, line: 2)
+        let new3 = DiffLineRef(side: .new, line: 3)
+        let new4 = DiffLineRef(side: .new, line: 4)
+        let new5 = DiffLineRef(side: .new, line: 5)
+        let cases: [(DiffLineRef, DiffLineRef, String?, String?)] = [
+            (old3, new2, "old two", "old one\nold two"),
+            (new2, old3, "new one", "new one\nnew two"),
+            (old3, old2, "old one\nold two", "old one\nold two"),
+            (new4, old1, "keep\nnew one\nnew two\nend", "keep\nnew one\nnew two\nend"),
+            (old2, new3, "old one\nold two", "old one\nold two"),
+            (new5, old1, nil, nil)
+        ]
+        for mode in [DiffMode.unified, .split] {
+            state.setMode(mode)
+            for (from, to, unified, split) in cases {
+                let range = DiffLineRange(file: 1, start: from, end: to)
+                let expected = mode == .unified ? unified : split
+                state.select(range)
+                #expect(state.selectedRange?.start == from)
+                #expect(state.selectedRange?.end == to)
+                #expect(state.selectedText() == expected)
+                var tx = Tx()
+                let handled = state.key(KeyEvent(key: .command("c"), mods: RuneKitTestKey.primaryMods()), tx: &tx)
+                #expect(handled == (expected != nil))
+                #expect(tx.clipboardWrite?.text == expected)
+            }
+        }
+        state.setMode(.unified)
+        let directed = DiffLineRange(file: 1, start: old3, end: new2)
+        #expect(state.contains(directed, at: old3))
+        #expect(state.contains(directed, at: new2))
+        #expect(!state.contains(directed, at: old2))
+        #expect(!state.contains(directed, at: new3))
+    }
+
+    @Test("A unified gutter drag crosses replacements and keeps its original side when copying")
+    @MainActor
+    func gutterDragAcrossSides() throws {
+        let diff = FileDiff.fromTexts(path: "x", old: "keep\nold one\nold two\nend\n",
+                                      new: "keep\nnew one\nnew two\nend\n")
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime(state: HostState(diff: DiffState(diff: diff)), viewport: Vec2(600, 320)) { state, cx in
+            DiffView(key: "dv", kit: kit, state: \HostState.diff)
+                .onSelect { s, range, _ in s.lastSelection = range }
+                .build(state: state, cx: cx)
+        }
+        _ = rt.frame(at: 0)
+        let old3 = DiffLineRef(side: .old, line: 3)
+        let new2 = DiffLineRef(side: .new, line: 2)
+        let rows = rt.state.diff.rows()
+        let oldRow = try #require(rows.firstIndex { $0.lineRef(for: .unified) == old3 })
+        let newRow = try #require(rows.firstIndex { $0.lineRef(for: .unified) == new2 })
+        let startCell = try #require(rt.element(byKey: "dv-n-\(newRow)"))
+        let endCell = try #require(rt.element(byKey: "dv-n-\(oldRow)"))
+        let start = Vec2(startCell.rect[0] + 8, startCell.rect[1] + 8)
+        let end = Vec2(endCell.rect[0] + 8, endCell.rect[1] + 8)
+        rt.pointerDown(at: start, at: 0.1)
+        rt.pointerMove(to: end, at: 0.2)
+        rt.pointerUp(at: end, at: 0.3)
+        _ = rt.frame(at: 0.3)
+        #expect(rt.state.lastSelection == DiffLineRange(start: new2, end: old3))
+        #expect(rt.state.diff.selectedText() == "new one")
+
+        rt.state.diff.setMode(.split)
+        rt.state.diff.select(nil)
+        func settle(at t: Double) {
+            rt.invalidate(at: t)
+            for tick in 0...30 { _ = rt.frame(at: t + Double(tick) / 30) }
+        }
+        func colorDistance(_ a: Color, _ b: Color) -> Float {
+            max(abs(a.r - b.r), abs(a.g - b.g), abs(a.b - b.b), abs(a.a - b.a))
+        }
+        settle(at: 0.4)
+        let paired = try #require(rt.state.diff.rows().firstIndex { $0.lineRef(for: .split, preferredSide: .old) == old3 })
+        let oldKey = "dv-so-\(paired)"
+        let newKey = "dv-sn-\(paired)"
+        let oldFill = try #require(rt.element(byKey: oldKey)).fill
+        let newFill = try #require(rt.element(byKey: newKey)).fill
+        rt.state.diff.select(DiffLineRange(start: new2, end: old3))
+        settle(at: 1.5)
+        #expect(try colorDistance(#require(rt.element(byKey: oldKey)).fill, oldFill) > 0.05)
+        #expect(try colorDistance(#require(rt.element(byKey: newKey)).fill, newFill) > 0.05)
+        rt.state.diff.select(.line(old3))
+        settle(at: 2.6)
+        #expect(try colorDistance(#require(rt.element(byKey: oldKey)).fill, oldFill) > 0.05)
+        #expect(try colorDistance(#require(rt.element(byKey: newKey)).fill, newFill) < 0.001)
     }
 
     @Test("DiffView gutter pointer press, shift-extend, and drag select ranges cleanly")
@@ -701,7 +842,7 @@ struct DiffParityTests {
         var tx = Tx()
         #expect(state.key(KeyEvent(key: .text("]")), tx: &tx))
         #expect(state.visibleFile == 1)
-        #expect(!tx.scrollToRequests.isEmpty)
+        #expect(tx.scrollOffsetRequests.last?.key == "diff-df1")
         #expect(state.key(KeyEvent(key: .text("[")), tx: &tx))
         #expect(state.visibleFile == 0)
 
@@ -760,18 +901,9 @@ struct DiffParityTests {
         #expect(rt.element(byKey: "custom-note-a1") != nil)
 
         // Click '+' comment button in line 1 deletion cell
-        if let plus = rt.element(byKey: "mv-o-0-plus"), plus.rect.count == 4 {
-            let pt = Vec2(plus.rect[0] + plus.rect[2] * 0.5, plus.rect[1] + plus.rect[3] * 0.5)
-            rt.pointerDown(at: pt, at: 0.1)
-            rt.pointerUp(at: pt, at: 0.12)
-            rt.frame(at: 0.12)
-            #expect(rt.state.commented == DiffLineRange(
-                start: DiffLineRef(side: .old, line: 1),
-                end: DiffLineRef(side: .old, line: 1)
-            ))
-        } else {
-            Issue.record("Missing mv-o-0-plus comment button")
-        }
+        #expect(clickElement(rt, key: "mv-o-0-plus", at: 0.1))
+        rt.frame(at: 0.12)
+        #expect(rt.state.commented == .line(DiffLineRef(side: .old, line: 1)))
     }
 
     // MARK: - 1:1 Rust Parity Additions (`diff/model.rs`, `myers.rs`, `state.rs`, `view.rs`, `tests/diff.rs`)
@@ -812,6 +944,14 @@ struct DiffParityTests {
         #expect(split.hunks.count == 2)
 
         // #31 no_newline_marker_is_captured on old, new, and both sides
+        let newBreak = FileDiff.fromTexts(path: "a", old: "one\ntwo", new: "one\ntwo\n")
+        #expect(newBreak.hunks.first?.lines.map(\.kind) == [.context, .deletion, .addition])
+        #expect(newBreak.hunks.first?.lines.map(\.noNewline) == [false, true, false])
+        let bothMissing = FileDiff.fromTexts(path: "a", old: "one\ntwo", new: "one\nthree")
+        #expect(bothMissing.hunks.first?.lines.map(\.noNewline) == [false, true, true])
+        #expect(FileDiff.fromTexts(path: "a", old: "same", new: "same").hunks.isEmpty)
+        #expect(FileDiff.fromTexts(path: "a", old: "one\r\ntwo\r\n", new: "one\ntwo\n").hunks.isEmpty)
+
         let noNewlinePatch = """
         diff --git a/nn.txt b/nn.txt
         --- a/nn.txt
@@ -884,20 +1024,20 @@ struct DiffParityTests {
             #expect(eqCount == dpLcsLength(a, b))
         }
 
-        // #35: 30k lines with 50 scattered edits reconstruct cleanly and match expected equal count
+        // Rust's search-cap regression. Every seventh line changes, well beyond 1,024 edits.
         let nLarge = 30_000
         let base = (0..<nLarge).map { $0 }
         var edited = base
-        for k in 0..<50 {
-            let idx = (k * 599 + 17) % nLarge
-            edited[idx] = nLarge + k
-        }
+        for i in base.indices where i % 7 == 3 { edited[i] = i + 1_000_000 }
         let hugeOps = Myers.diff(base, edited)
         var hugeEq = 0
         for op in hugeOps {
             if case .equal(let c) = op { hugeEq += c }
         }
-        #expect(hugeEq == nLarge - 50)
+        #expect(hugeEq == nLarge - 4_286)
+        let deleted = hugeOps.reduce(0) { sum, op in if case .delete(let n) = op { sum + n } else { sum } }
+        let inserted = hugeOps.reduce(0) { sum, op in if case .insert(let n) = op { sum + n } else { sum } }
+        #expect(deleted == 4_286 && inserted == 4_286)
 
         // #37: repeated identical blocks stay aligned cleanly
         let blockA = ["fn helper() {", "    let x = 1;", "    let y = 2;", "}"]
@@ -1304,19 +1444,14 @@ struct DiffParityTests {
             #expect(selRT.state.selections.last == .some(range35))
 
             // '+' on selected line 4 comments on range35; on line 9 comments on line 9 alone
-            if let p4 = selRT.element(byKey: "dv-n-\(r4)-plus") {
-                let c4 = Vec2(p4.rect[0] + p4.rect[2] * 0.5, p4.rect[1] + p4.rect[3] * 0.5)
-                selRT.pointerDown(at: c4, at: st); selRT.pointerUp(at: c4, at: st + 0.01); st += 0.02
-                _ = selRT.frame(at: st)
-                #expect(selRT.state.comments == [range35])
-            }
-            if let p9 = selRT.element(byKey: "dv-n-\(r9)-plus") {
-                let c9 = Vec2(p9.rect[0] + p9.rect[2] * 0.5, p9.rect[1] + p9.rect[3] * 0.5)
-                selRT.pointerDown(at: c9, at: st); selRT.pointerUp(at: c9, at: st + 0.01); st += 0.02
-                _ = selRT.frame(at: st)
-                let nine = DiffLineRange(start: DiffLineRef(side: .new, line: 9), end: DiffLineRef(side: .new, line: 9))
-                #expect(selRT.state.comments.count == 2 && selRT.state.comments[1] == nine)
-            }
+            #expect(clickElement(selRT, key: "dv-n-\(r4)-plus", at: st))
+            st += 0.02
+            _ = selRT.frame(at: st)
+            #expect(selRT.state.comments == [range35])
+            #expect(clickElement(selRT, key: "dv-n-\(r9)-plus", at: st))
+            st += 0.02
+            _ = selRT.frame(at: st)
+            #expect(selRT.state.comments == [range35, .line(DiffLineRef(side: .new, line: 9))])
 
             // Escape clears selection
             _ = selRT.keyDown(KeyEvent(key: .escape), at: st); st += 0.01
@@ -1527,6 +1662,7 @@ struct DiffParityTests {
     }
 
     @Test("FileDiff.fold, DiffLineRange.line, DiffState.singleColumn, setHighlighter, and scrollToLine parity")
+    @MainActor
     func diffModelAndStateCloseoutAPIs() {
         let fullOld = (1...30).map { "func f\($0)() { let x = \($0) }" }.joined(separator: "\n") + "\n"
         var newLines = (1...30).map { "func f\($0)() { let x = \($0) }" }
@@ -1571,6 +1707,12 @@ struct DiffParityTests {
         }
         _ = rt.frame(at: 0.0)
         #expect(box.calls > 0)
+        rt.update(at: 0.1) { s, _ in s.setMode(.split) }
+        _ = rt.frame(at: 0.1)
+        #expect(rt.element(byKey: "dv-arow-0") != nil)
+        #expect(rt.element(byKey: "dv-aempty-0") == nil)
+        #expect(rt.element(byKey: "dv-f1-drow-0") != nil)
+        #expect(rt.element(byKey: "dv-f1-dempty-0") == nil)
 
         // DiffState.scrollToLine expands collapsed gap and scrolls to target file line
         var collapsedFileState = DiffState(diff: folded)
@@ -1578,7 +1720,7 @@ struct DiffParityTests {
         collapsedFileState.scrollToLine(0, at: DiffLineRef(side: .new, line: 15), keyPrefix: "dv", tx: &tx)
         #expect(!collapsedFileState.collapsed(file: 0))
         #expect(!tx.scrollOffsetRequests.isEmpty)
-        #expect(tx.scrollOffsetRequests.last?.key == "dv-body")
+        #expect(tx.scrollOffsetRequests.last?.key == "dv-df0.c15")
     }
 
     @Test("tests/diff.rs #183: focused_annotation_input_keeps_navigation_and_escape_keys")
@@ -1723,7 +1865,11 @@ struct DiffParityTests {
         t += 0.30
         _ = rt.keyDown(KeyEvent(key: .f(5)), at: t); t += 0.01
         _ = rt.frame(at: t)
+        #if DEBUG
         #expect(rt.liveOnlyWarnings.count == 1)
+        #else
+        #expect(rt.liveOnlyWarnings.isEmpty)
+        #endif
 
         // #186: 50k-line scattered diff (every 7th changed) constructs & renders windowed slice quickly
         let old50 = (1...50_000).map { "let v_\($0) = compute(\($0));" }.joined(separator: "\n")
@@ -1733,8 +1879,132 @@ struct DiffParityTests {
             DiffView<DiffState>(key: "dv50k", kit: kit, get: { $0 }, set: { $0 = $1 }).build(state: s, cx: cx)
         }
         _ = bigRT.frame(at: 0.0)
-        #expect(bigRT.state.rows(file: 0).count > 10_000)
-        #expect(bigRT.elements().filter { ($0.key ?? "").hasPrefix("dv50k-row-") }.count < 160)
+        #expect(bigFile.additionsCount == 7_142 && bigFile.deletionsCount == 7_142)
+        #expect(bigFile.hunks.count == 1 && bigFile.hunks.first?.lines.count == 57_136)
+        #expect(bigRT.state.rows(file: 0).count == 57_138)
+        let mounted = bigRT.elements().filter { ($0.key ?? "").hasPrefix("dv50k-df") }.count
+        #expect(mounted > 0 && mounted < 160)
+    }
+
+    @Test("Large multi-file diffs mount the viewport and jump by stable document keys")
+    @MainActor
+    func multiFileVirtualization() throws {
+        let lines = (1...128).map { (i: Int) in
+            DiffLine(kind: .context, oldNumber: i, newNumber: i, text: i == 110 ? String(repeating: "w", count: 180) : "line \(i)")
+        }
+        let foldedSource = FileDiff(oldPath: "folded", newPath: "folded", hunks: [],
+                                    source: DiffSource(oldLines: [], newLines: ["e\u{301}\t\tz"]))
+        #expect(foldedSource.textColumns(tabSize: 4) == 9)
+        #expect(foldedSource.textColumns(tabSize: 8) == 17)
+        let hunk = DiffHunk(oldStart: 1, oldCount: lines.count, newStart: 1, newCount: lines.count, lines: lines)
+        var files = (0..<32).map { FileDiff(oldPath: "f\($0)", newPath: "f\($0)", hunks: [hunk]) }
+        files[31].hunks[0].lines[69].text = "last file's line 70"
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime(state: DiffState(files: files), viewport: Vec2(600, 400)) { s, cx in
+            col().wFull().hFull().dir(.rtl).child(
+                DiffView<DiffState>(key: "review", kit: kit, get: { $0 }, set: { $0 = $1 }).build(state: s, cx: cx)
+            )
+        }
+        _ = rt.frame(at: 0)
+        #expect(rt.element(byKey: "review-df0.c1") != nil)
+        let oldNumber = try #require(rt.element(byKey: "review-o-0"))
+        let newNumber = try #require(rt.element(byKey: "review-n-0"))
+        #expect(oldNumber.rect[0] < newNumber.rect[0])
+        #expect(rt.element(byKey: "review-f31-header") == nil)
+        #expect(rt.elements().filter { $0.key?.hasPrefix("review-df") == true }.count < 100)
+
+        rt.wheel(WheelEvent(dx: -250, dy: 0), at: Vec2(300, 200), now: 0.01)
+        for tick in 1...5 { _ = rt.frame(at: 0.01 + Double(tick) / 120) }
+        #expect(rt.scrollOffset(forKey: "review-body").x > 0)
+        rt.setViewport(Vec2(450, 400), pixelScale: 1)
+        _ = rt.frame(at: 0.07)
+        let resizedHeader = try #require(rt.element(byKey: "review-header"))
+        let resizedBody = try #require(rt.element(byKey: "review-body"))
+        #expect(resizedHeader.rect[0] == resizedBody.rect[0])
+        #expect(resizedHeader.rect[2] == resizedBody.rect[2])
+        rt.update(at: 0.1) { state, tx in
+            state.scrollToLine(31, at: DiffLineRef(side: .old, line: 70), keyPrefix: "review", tx: &tx)
+        }
+        for tick in 1...6 { _ = rt.frame(at: 0.1 + Double(tick) / 120) }
+        let target = try #require(rt.element(byKey: "review-df31.c70"))
+        #expect(rt.state.visibleFile == 31)
+        let header = try #require(rt.element(byKey: "review-f31-header"))
+        #expect(abs(header.rect[1] + header.rect[3] - target.rect[1]) <= 1)
+        #expect(rt.element(byKey: "review-row-0") == nil)
+        let mountedRows = rt.elements().filter { !$0.exiting && $0.key?.hasPrefix("review-df") == true }.count
+        // The destination is away from both ends: one 400-point viewport and two on either side.
+        let maximumRows = Int(ceil(5 * rt.viewport.y / DiffLayout.lineHeight))
+        #expect(mountedRows <= maximumRows)
+
+        let original = rt.state
+        rt.update(at: 0.2) { state, _ in
+            state.annotations.append(DiffAnnotation(id: "reviewer", file: 31, side: .new, line: 70, body: "note"))
+        }
+        _ = rt.frame(at: 0.2)
+        #expect(rt.element(byKey: "review-f31-note-reviewer") != nil)
+        var selected = original
+        selected.visibleFile = 0
+        let point = DiffLineRef(side: .new, line: 70)
+        selected.select(DiffLineRange(file: 31, start: point, end: point))
+        #expect(selected.copyText() == "last file's line 70")
+        #expect(original.rows(file: 31).count == 128)
+        #expect(rt.state.rows(file: 31).count == 129)
+        rt.update(at: 0.3) { state, _ in state.setCollapsed(file: 31, true) }
+        _ = rt.frame(at: 0.3)
+        #expect(rt.element(byKey: "review-df31.c70") == nil)
+    }
+
+    // Compare with rune-kit/tests/diff.rs::diff_50k_time in the Rust perf profile.
+    @Test("Release diff timings for commits, scrolling, flings and jumps",
+          .enabled(if: ProcessInfo.processInfo.environment["RUNE_DIFF_BENCH"] == "1"))
+    @MainActor
+    func diff50kTimings() {
+        let kit = Kit.neutral(dark: true)
+        func measure(_ work: () -> Void) -> Double {
+            let start = DispatchTime.now().uptimeNanoseconds
+            work()
+            return Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6
+        }
+        func open(_ count: Int) -> Runtime<DiffState> {
+            let old = (1...count).map { "let value_\($0) = compute(\($0));\n" }.joined()
+            let new = (1...count).map { "let value_\($0) = compute(\($0))\($0 % 7 == 0 ? " + 1" : "");\n" }.joined()
+            let file = FileDiff.fromTexts(path: "big.rs", old: old, new: new)
+            let st = DiffState(diff: file)
+            let rows = st.rows().count
+            let rt = Runtime(state: st, viewport: Vec2(1200, 900), pixelScale: 2) { state, cx in
+                DiffView<DiffState>(key: "dv", kit: kit, get: { $0 }, set: { $0 = $1 })
+                    .onSelect { _, _, _ in }.onComment { _, _, _ in }
+                    .build(state: state, cx: cx)
+            }
+            let ms = measure { _ = rt.renderFrame(at: 0) }
+            let mounted = rt.elements().filter { $0.key?.hasPrefix("dv-df") == true }.count
+            print("diff \(count) lines, \(rows) rows, first frame \(ms) ms, \(mounted) mounted")
+            #expect(mounted > 0 && mounted < 160)
+            return rt
+        }
+        for count in [300, 50_000] {
+            let rt = open(count)
+            var t = 0.0
+            func frame() { t += 1.0 / 120.0; _ = rt.renderFrame(at: t) }
+            for _ in 0..<30 { frame() }
+            func sample(_ label: String, _ n: Int, prepare: (Int) -> Void = { _ in }) {
+                var times: [Double] = []
+                let initialCommits = rt.viewCommitCount
+                for i in 0..<n { prepare(i); times.append(measure(frame)) }
+                times.sort()
+                print("diff \(count) \(label) frame ms p50 \(times[n / 2]) p90 \(times[n * 9 / 10]) p99 \(times[n * 99 / 100]), \(rt.viewCommitCount - initialCommits)/\(n) commits")
+            }
+            sample("commit", 200) { _ in rt.invalidate(at: t) }
+            if count == 50_000 {
+                sample("idle", 200)
+                for dy: Float in [-30, -400] {
+                    sample("wheel \(dy)", 600) { _ in rt.wheel(WheelEvent(dx: 0, dy: dy), at: Vec2(600, 450), now: t) }
+                }
+                sample("jump", 20) { i in
+                    rt.wheel(WheelEvent(dx: 0, dy: i.isMultiple(of: 2) ? -300_000 : 150_000), at: Vec2(600, 450), now: t)
+                }
+            }
+        }
     }
 
     @Test("tests/diff.rs #184: hovering lines at rest builds nothing new under checkLiveOnly")
@@ -1810,6 +2080,112 @@ struct DiffParityTests {
         #expect(h1.oldStart == 14 && h1.oldCount == 7 && h1.newStart == 14 && h1.newCount == 7)
         #expect(h1.lines[3].oldLine == 17 && h1.lines[4].newLine == 17)
         #expect(h1.lines[4].changes.map { String(decoding: Array(h1.lines[4].text.utf8)[$0], as: UTF8.self) } == ["seventeen"])
+    }
+
+    @Test("Diff syntax uses 128 raw source lines, folded context, and side-specific hunk text")
+    func syntaxChunksUseRawSideLines() {
+        let old = ["/*", "\té OLD", "*/"]
+        let new = ["let", "\té NEW", ";"]
+        let hunk = DiffHunk(oldStart: 2, oldCount: 1, newStart: 2, newCount: 1, lines: [
+            DiffLine(kind: .deletion, oldNumber: 2, newNumber: nil, text: old[1]),
+            DiffLine(kind: .addition, oldNumber: nil, newNumber: 2, text: new[1])
+        ])
+        let file = FileDiff(oldPath: "code.rs", newPath: "code.rs", hunks: [hunk],
+                            source: DiffSource(oldLines: old, newLines: new))
+        let st = DiffState(diff: file)
+        // Folded first and third lines open and close the comment around the visible deletion.
+        let commentEnd = old[1].utf8.count
+        let comment = SyntaxHighlight(range: 0..<commentEnd, paint: .kind(.comment))
+        #expect(st.highlights(file: 0, side: .old, line: 2) == [comment])
+
+        let custom = SyntaxHighlighter { _, source in
+            guard let word = source.range(of: "NEW"), source.utf8.filter({ $0 == 10 }).count == 128 else { return [] }
+            let start = source.utf8.distance(from: source.startIndex, to: word.lowerBound)
+            return [SyntaxHighlight(range: start..<(start + 3), paint: .kind(.keyword))]
+        }
+        let colored = st.highlights(file: 0, side: .new, line: 2, using: custom)
+        #expect(colored == [SyntaxHighlight(range: 4..<7, paint: .kind(.keyword))])
+        let kit = Kit.neutral(dark: false)
+        let theme = SyntaxTheme.fromKit(kit)
+        let (shown, offsets) = DiffViewHelpers.expandTabsWithOffsets(new[1], tabSize: 4)
+        let spans = DiffViewHelpers.mergeCodeSpans(code: shown, rawCount: new[1].utf8.count, offsetMap: offsets,
+                                                   highlights: colored, changedRanges: [4..<7], defaultColor: kit.c.textBase,
+                                                   syntaxTheme: theme, wordBg: kit.c.warning.bg, wrap: false)
+        #expect(spans.map(\.text).joined() == "    é NEW")
+        #expect(spans.last?.text == "NEW" && spans.last?.color == theme.color(for: .keyword) && spans.last?.background == kit.c.warning.bg)
+        var copy = st
+        copy.files[0].source = nil
+        #expect(copy.highlights(file: 0, side: .old, line: 2).allSatisfy { $0.paint != .kind(.comment) })
+        #expect(copy.highlights(file: 0, side: .new, line: 2, using: custom) == colored)
+        #expect(st.highlights(file: 0, side: .old, line: 2) == [comment])
+        copy.files[0].newPath = "unknown.ext"
+        #expect(copy.highlights(file: 0, side: .old, line: 2).isEmpty)
+
+        let insertion = DiffHunk(oldStart: 1, oldCount: 0, newStart: 2, newCount: 1, lines: [
+            DiffLine(kind: .addition, oldNumber: nil, newNumber: 2, text: "inserted")
+        ])
+        let oneSide = FileDiff(oldPath: "gap.rs", newPath: "gap.rs", hunks: [insertion],
+                               source: DiffSource(oldLines: [], newLines: ["/*", "inserted", "gap", "*/"]))
+        #expect(DiffState(diff: oneSide).highlights(file: 0, side: .old, line: 2) == [
+            SyntaxHighlight(range: 0..<3, paint: .kind(.comment))
+        ])
+    }
+
+    @Test("Rendered diff rows reuse only visited syntax chunks and refresh identical lines after source or highlighter replacement")
+    @MainActor
+    func syntaxChunksFollowMountedRows() {
+        final class Calls: @unchecked Sendable {
+            let lock = NSLock()
+            private var texts: [String] = []
+            func append(_ text: String) { lock.withLock { texts.append(text) } }
+            var inputs: [String] { lock.withLock { texts } }
+        }
+        func file(_ first: String) -> FileDiff {
+            let lines = [first, "payload"] + (3...384).map { "line \($0)" }
+            return FileDiff.fromTexts(path: "unknown.ext", old: "", new: lines.joined(separator: "\n") + "\n")
+        }
+        let calls = Calls()
+        let color = Color(r: 1, g: 0, b: 1)
+        let syntax = SyntaxHighlighter(id: UUID().uuidString) { _, text in
+            calls.append(text)
+            guard text.hasPrefix("/*\npayload\n") else { return [] }
+            return [SyntaxHighlight(range: 3..<10, paint: .color(color))]
+        }
+        var initial = DiffState(diff: file("/*"))
+        initial.highlighter = syntax
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime(state: initial, viewport: Vec2(520, 200)) { s, cx in
+            DiffView<DiffState>(key: "dv", kit: kit, get: { $0 }, set: { $0 = $1 }).build(state: s, cx: cx)
+        }
+        func painted(at t: Double) -> Bool {
+            let scene = rt.frame(at: t)
+            return scene.primitives.contains { $0.kind == .glyph && $0.fill == color.simd4(srgb: scene.srgbBlend) }
+        }
+        #expect(painted(at: 0))
+        #expect(calls.inputs.count == 1 && calls.inputs[0].hasSuffix("line 128\n"))
+        rt.invalidate(at: 0.01)
+        #expect(painted(at: 0.01))
+        #expect(calls.inputs.count == 1)
+        _ = initial.highlights(file: 0, side: .new, line: 129, using: syntax)
+        #expect(calls.inputs.count == 2 && calls.inputs[1].hasPrefix("line 129\n"))
+        _ = initial.highlights(file: 0, side: .new, line: 256, using: syntax)
+        #expect(calls.inputs.count == 2)
+        let replacement = file("//")
+        rt.update(at: 0.02) { s, _ in s.files[0] = replacement }
+        #expect(!painted(at: 0.02))
+        let all = SyntaxHighlighter { _, source in
+            [SyntaxHighlight(range: 0..<source.utf8.count, paint: .color(color))]
+        }
+        rt.update(at: 0.03) { s, _ in s.setHighlighter(all) }
+        #expect(painted(at: 0.03))
+        let blank = SyntaxHighlighter { _, _ in [] }
+        let overridden = Runtime(state: initial, viewport: Vec2(520, 200)) { s, cx in
+            var view = DiffView<DiffState>(key: "dv", kit: kit, get: { $0 }, set: { $0 = $1 })
+            view.highlighter = blank
+            return view.build(state: s, cx: cx)
+        }
+        let scene = overridden.frame(at: 0)
+        #expect(!scene.primitives.contains { $0.kind == .glyph && $0.fill == color.simd4(srgb: scene.srgbBlend) })
     }
 
     @Test("src/diff/view.rs #46: word_backgrounds_cut_syntax_colours")

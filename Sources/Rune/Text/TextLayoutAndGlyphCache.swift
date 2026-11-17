@@ -11,6 +11,51 @@ public enum TextKeep: Sendable, Hashable {
     case secret
 }
 
+/// Visible vertical interval in the text layout's local points.
+public struct TextRasterWindow: Hashable, Sendable {
+    public var lowerY: Float
+    public var upperY: Float
+
+    public init(lowerY: Float, upperY: Float) {
+        self.lowerY = lowerY
+        self.upperY = upperY
+    }
+
+    internal func intersects(_ top: Float, _ bottom: Float) -> Bool {
+        lowerY < upperY && top < upperY && lowerY < bottom
+    }
+
+    /// The shaping band includes two ems, allowing a large span on a neighbouring line to reach the clip.
+    internal func expanded(for style: TextStyle, spans: [TextSpan]?, scale: Float) -> Self {
+        let em = max(style.size, style.lineHeight ?? style.size, spans?.compactMap(\.size).max() ?? 0)
+        let pad = 2 * em + 2 / max(scale, 0.0625)
+        return Self(lowerY: lowerY - pad, upperY: upperY + pad)
+    }
+
+    /// Search the measured line boxes; glyph masks are requested only for candidate lines.
+    internal func lines(in layout: ShapedText) -> Range<Int> {
+        func first(_ matches: (Int) -> Bool) -> Int {
+            var lo = 0, hi = layout.lineCount
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2
+                if matches(mid) { hi = mid } else { lo = mid + 1 }
+            }
+            return lo
+        }
+        let start = first { layout.lineTopPt($0) + layout.lineBoxHeightPt($0) >= lowerY }
+        let end = first { layout.lineTopPt($0) > upperY }
+        return start..<max(start, end)
+    }
+
+    /// Clips and origins are device coordinates. Captured or turned layers paint in their own space.
+    internal static func paint(top: Float, bottom: Float, viewport: Float, origin: Float,
+                               scale: Float, margin: Float, transformed: Bool) -> Self? {
+        guard !transformed, scale > 0, scale.isFinite else { return nil }
+        return Self(lowerY: (max(top, -margin) - origin) / scale,
+                    upperY: (min(bottom, viewport + margin) - origin) / scale)
+    }
+}
+
 /// Result of classifying a text edit for incremental paragraph / prefix reuse (`text_layout::edited`).
 public enum TextEditKind: Sendable, Equatable {
     case unchanged
@@ -59,12 +104,20 @@ public enum TextLayoutRebreak {
 
 /// Key identifying the font/shaping attributes of a text run independent of wrap width (`text::ShapeKey`).
 public struct TextShapeKey: Hashable, Sendable {
-    public var authText: String
+    private var textKey: TextUTF8Key
+    public var authText: String {
+        get { textKey.source }
+        set { textKey = TextUTF8Key(newValue) }
+    }
     public var spans: [TextSpan]?
     public var pills: [PillChip]
     public var style: TextStyle
     private let inheritedSmoothing: FontSmoothing
-    public var scale100: Int
+    private var scaleBits: UInt32
+    public var scale100: Int {
+        get { Int((Float(bitPattern: scaleBits) * 100).rounded()) }
+        set { scaleBits = (Float(newValue) / 100).bitPattern }
+    }
     public var fontEpoch: UInt64
     public var languageTag: String?
     public var ellipsisMaxWKey: Int
@@ -115,12 +168,12 @@ public struct TextShapeKey: Hashable, Sendable {
         pretty: Bool = false,
         defaultSmoothing: FontSmoothing
     ) {
-        self.authText = authText
+        self.textKey = TextUTF8Key(authText)
         self.spans = spans
         self.pills = pills
         self.style = style
         self.inheritedSmoothing = style.fontSmoothing == .systemDefault ? defaultSmoothing : .systemDefault
-        self.scale100 = Int((max(1.0, pixelScale) * 100.0).rounded())
+        self.scaleBits = max(1.0, pixelScale).bitPattern
         self.fontEpoch = fontEpoch
         self.languageTag = languageTag
         self.ellipsisMaxWKey = (style.wrap == .ellipsis)
@@ -151,7 +204,7 @@ public struct TextShapeKey: Hashable, Sendable {
             && style.align != .justified
             && style.maxLines == 0
             && style.elide == .end
-            && style.family != .monospace
+            && !style.family.isMonospace
     }
 }
 
@@ -169,6 +222,7 @@ internal final class TextPreparedShape: @unchecked Sendable {
     /// Inline code runs whose boxes may grow their lines (`#983`).
     let spanBoxes: [TextSystem.InlineSpanBox]
     #if canImport(CoreText) && canImport(CoreGraphics)
+    var utf8AtUTF16: [Int]?
     let baseFont: CTFont
     let baseAscentPx: CGFloat
     let baseDescentPx: CGFloat
@@ -264,6 +318,12 @@ public final class TextLayoutBox: @unchecked Sendable {
     /// The idle pass that introduced this layout. Ordinary layouts have no pass.
     internal var preparedPass: UInt64?
     internal var preparedRunCells: TextRunCellLayout?
+    /// A partial paint is owned by its measured layout, independent of complete glyph replays.
+    internal var rasterWindow: TextRasterWindow?
+    internal var windowPaint: (window: TextRasterWindow, glide: Vec2, resets: UInt64, box: TextLayoutBox)?
+    #if canImport(CRuneDesktopText) && !canImport(CoreText)
+    internal var desktopRasterLayout: DesktopRasterLayout?
+    #endif
     // Page recycling invalidates UVs in a cached desktop text layout.
     internal var desktopAtlasResets: UInt64?
     internal var desktopPages: Set<UInt16> = []
@@ -272,11 +332,14 @@ public final class TextLayoutBox: @unchecked Sendable {
     internal var paragraphs: ParagraphLayout? = nil
 
     public var estimatedBytes: Int {
-        let layoutBytes = (prepared?.estimatedBytes ?? max(128, authText.utf8.count * 16))
+        let partial = windowPaint?.box.shaped
+        let partialBytes = (partial?.glyphs.count ?? 0) * MemoryLayout<PositionedGlyph>.stride
+            + (partial?.lineGlyphRanges.count ?? 0) * MemoryLayout<Range<Int>>.stride
+        let layoutBytes = partialBytes + (prepared?.estimatedBytes ?? max(128, authText.utf8.count * 16))
             + shaped.glyphs.count * MemoryLayout<PositionedGlyph>.stride
             + shaped.lineCount * 48
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
-        return layoutBytes + (shaped.desktopRestingText?.retainedGlyphBytes ?? 0)
+        return layoutBytes + (shaped.desktopRestingText?.retainedGlyphBytes ?? 0) + (partial?.desktopRestingText?.retainedGlyphBytes ?? 0)
         #else
         return layoutBytes
         #endif
@@ -319,6 +382,7 @@ public final class TextLayoutBox: @unchecked Sendable {
             hasGlyphs: hasGlyphs,
             prepared: prepared
         )
+        out.rasterWindow = rasterWindow
         out.desktopAtlasResets = desktopAtlasResets
         out.desktopPages = desktopPages
         out.preparedPass = preparedPass

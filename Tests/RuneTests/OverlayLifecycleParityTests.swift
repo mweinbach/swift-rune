@@ -284,6 +284,25 @@ struct OverlayLifecycleParityTests {
         }
     }
 
+    // Each branch copies both models and their complete effect history at the common prefix.
+    private static func walkTransitions<Operation, State>(
+        alphabet: [Operation], maxLen: Int, initial: State,
+        _ step: (inout State, Operation, [Operation]) -> Bool
+    ) {
+        var path: [Operation] = []
+        func visit(_ state: State) -> Bool {
+            guard path.count < maxLen else { return true }
+            for operation in alphabet {
+                path.append(operation)
+                var next = state
+                guard step(&next, operation, path), visit(next) else { return false }
+                path.removeLast()
+            }
+            return true
+        }
+        _ = visit(initial)
+    }
+
     @Test("overlay/state_walk_tests.rs:332 - WindowBackoff matches dev for every sequence")
     func overlayBackoffMatchesDevForEverySequence() {
         enum BackoffOp {
@@ -310,52 +329,6 @@ struct OverlayLifecycleParityTests {
                 }
             }
         }
-        func holdsUp(_ seq: [BackoffOp], prewarm: Bool, scale: Double) {
-            let t0 = 50.0
-            var dev = DevBackoff(retry: nil, wait: WindowPacingConstants.occludedRetry)
-            var ours = WindowBackoff()
-            for (k, op) in seq.enumerated() {
-                let now = t0 + 0.011 * scale * Double(k)
-                switch op {
-                case let .missed(missed, paced):
-                    let effect = ours.step(.missed(missed, paced: paced, now: now))
-                    dev.missed(missed, paced: paced, now: now)
-                    #expect(!effect.isEmpty == (dev.retry != nil))
-                case .due:
-                    if let d = ours.deadline, d <= now {
-                        _ = ours.step(.lapsed)
-                    }
-                    if let d = dev.retry, d <= now {
-                        dev.retry = nil
-                    }
-                case let .frame(presents):
-                    if !prewarm {
-                        _ = ours.step(.lapsed)
-                        dev.retry = nil
-                    }
-                    if presents && !prewarm {
-                        _ = ours.step(.presented)
-                        dev.wait = WindowPacingConstants.occludedRetry
-                    }
-                case .at:
-                    if !prewarm {
-                        let t = now + WindowPacingConstants.timerFrame
-                        _ = ours.step(.at(t))
-                        dev.retry = t
-                    }
-                case .reveal:
-                    _ = ours.step(.revealed)
-                    dev.wait = WindowPacingConstants.occludedRetry
-                case .stop:
-                    _ = ours.step(.lapsed)
-                    dev.retry = nil
-                }
-                #expect(ours.deadline == dev.retry)
-                #expect(ours.waiting(now: now) == (dev.retry.map { $0 > now } ?? false))
-                #expect(abs(Self.occludedWait(ours, now: now) - dev.wait) < 1e-9)
-            }
-        }
-
         let alphabet: [BackoffOp] = [
             .missed(.occluded, paced: false),
             .missed(.timeout, paced: false),
@@ -369,11 +342,58 @@ struct OverlayLifecycleParityTests {
             .reveal,
             .stop,
         ]
-        // Walk depth 4 (16,105 sequences x 3 configs = 48,315 checks) — fast in Swift Debug while covering all transition chains
         for (prewarm, scale) in [(false, 1.0), (true, 1.0), (false, 64.0)] {
-            Self.walk(alphabet: alphabet, maxLen: 4) { seq in
-                holdsUp(seq, prewarm: prewarm, scale: scale)
+            let initial = (ours: WindowBackoff(), dev: DevBackoff(wait: WindowPacingConstants.occludedRetry))
+            var visited = 0
+            Self.walkTransitions(alphabet: alphabet, maxLen: 5, initial: initial) { state, op, path in
+                let now = 50.0 + 0.011 * scale * Double(path.count - 1)
+                var wakes: Bool?
+                switch op {
+                case let .missed(missed, paced):
+                    let effect = state.ours.step(.missed(missed, paced: paced, now: now))
+                    state.dev.missed(missed, paced: paced, now: now)
+                    wakes = !effect.isEmpty
+                case .due:
+                    if let d = state.ours.deadline, d <= now {
+                        _ = state.ours.step(.lapsed)
+                    }
+                    if let d = state.dev.retry, d <= now {
+                        state.dev.retry = nil
+                    }
+                case let .frame(presents):
+                    if !prewarm {
+                        _ = state.ours.step(.lapsed)
+                        state.dev.retry = nil
+                    }
+                    if presents && !prewarm {
+                        _ = state.ours.step(.presented)
+                        state.dev.wait = WindowPacingConstants.occludedRetry
+                    }
+                case .at:
+                    if !prewarm {
+                        let t = now + WindowPacingConstants.timerFrame
+                        _ = state.ours.step(.at(t))
+                        state.dev.retry = t
+                    }
+                case .reveal:
+                    _ = state.ours.step(.revealed)
+                    state.dev.wait = WindowPacingConstants.occludedRetry
+                case .stop:
+                    _ = state.ours.step(.lapsed)
+                    state.dev.retry = nil
+                }
+                let expectedWaiting = state.dev.retry.map { $0 > now } ?? false
+                guard wakes.map({ $0 == (state.dev.retry != nil) }) ?? true,
+                      state.ours.deadline == state.dev.retry,
+                      state.ours.waiting(now: now) == expectedWaiting,
+                      abs(Self.occludedWait(state.ours, now: now) - state.dev.wait) < 1e-9 else {
+                    Issue.record("Backoff differs for \(path), prewarm \(prewarm), scale \(scale): \(state)")
+                    return false
+                }
+                visited += 1
+                return true
             }
+            #expect(visited == 177_155) // Every nonempty prefix through depth five.
         }
     }
 
@@ -602,30 +622,33 @@ struct OverlayLifecycleParityTests {
         for platform in Platform.allCases {
             for (defers, callback) in [(false, false), (false, true), (true, false), (true, true)] {
                 let c = Config(platform: platform, defers: defers, callback: callback)
-                Self.walk(alphabet: alphabet, maxLen: 4) { seq in
-                    var dev = DevSurface()
-                    var ours = Ours()
-                    for (i, op) in seq.enumerated() {
-                        let n = UInt32(i + 1)
-                        let beforeLive = dev.live
-                        let beforeReleased = dev.released.count
-                        dev.apply(c, op, n)
-                        ours.apply(c, op, n)
-                        if case let .prepare(_, outcome) = op {
-                            if outcome == .attach && beforeLive == nil && dev.parked != nil { parkedAfterAttach += 1 }
-                            if outcome == .rescale && beforeLive == nil && dev.live != nil { liveAfterRescale += 1 }
-                        }
-                        for (owner, _) in dev.released[beforeReleased...] {
-                            if owner == .live { releasedLive += 1 } else { releasedParked += 1 }
-                        }
-                        #expect(ours.surface.live == dev.live)
-                        #expect(ours.surface.parked == dev.parked)
-                        #expect(ours.surface.isAnnounced == dev.announced)
-                        #expect(ours.heard == dev.heard)
-                        #expect(ours.released.map(\.0) == dev.released.map(\.0))
-                        #expect(ours.released.map(\.1) == dev.released.map(\.1))
+                let initial = (ours: Ours(), dev: DevSurface())
+                var visited = 0
+                Self.walkTransitions(alphabet: alphabet, maxLen: 5, initial: initial) { state, op, path in
+                    let n = UInt32(path.count)
+                    let beforeLive = state.dev.live
+                    let beforeReleased = state.dev.released.count
+                    state.dev.apply(c, op, n)
+                    state.ours.apply(c, op, n)
+                    if case let .prepare(_, outcome) = op {
+                        if outcome == .attach && beforeLive == nil && state.dev.parked != nil { parkedAfterAttach += 1 }
+                        if outcome == .rescale && beforeLive == nil && state.dev.live != nil { liveAfterRescale += 1 }
                     }
+                    for (owner, _) in state.dev.released[beforeReleased...] {
+                        if owner == .live { releasedLive += 1 } else { releasedParked += 1 }
+                    }
+                    guard state.ours.surface.live == state.dev.live,
+                          state.ours.surface.parked == state.dev.parked,
+                          state.ours.surface.isAnnounced == state.dev.announced,
+                          state.ours.heard == state.dev.heard,
+                          state.ours.released.elementsEqual(state.dev.released, by: { $0.0 == $1.0 && $0.1 == $1.1 }) else {
+                        Issue.record("Surface differs for \(c), \(path): \(state)")
+                        return false
+                    }
+                    visited += 1
+                    return true
                 }
+                #expect(visited == 177_155)
             }
         }
         #expect(parkedAfterAttach > 0)
@@ -660,9 +683,6 @@ struct OverlayLifecycleParityTests {
         func withinSlop(_ a: Vec2, _ b: Vec2) -> Bool {
             let s: Float = 4.0
             return abs(a.x - b.x) <= s && abs(a.y - b.y) <= s
-        }
-        func withinRadius(_ a: Vec2, _ b: Vec2) -> Bool {
-            hypotf(a.x - b.x, a.y - b.y) <= 4.0
         }
 
         final class Reference {
@@ -705,7 +725,7 @@ struct OverlayLifecycleParityTests {
             func deadline() -> Double? {
                 guard holding, let since = rising else { return nil }
                 let hasQueuedUp = queue.contains { !$0.forgotten && !$0.down }
-                return since + (hasQueuedUp ? OverlayHold.queuedUpGraceSeconds : OverlayHold.unseenUpGraceSeconds)
+                return since + (hasQueuedUp ? 2.0 : 0.100)
             }
 
             @discardableResult
@@ -754,7 +774,7 @@ struct OverlayLifecycleParityTests {
                 drag = nil
                 let cancelAt = expectedCancel(d.press)
                 expect.append(.cancel(cancelAt))
-                if d.moved || !withinRadius(d.down, cancelAt) { run = nil }
+                if d.moved || !withinSlop(d.down, cancelAt) { run = nil }
                 runtimeAt = cancelAt
             }
 
@@ -830,7 +850,7 @@ struct OverlayLifecycleParityTests {
                     if front.owes { owed = true }
                     landLost(&expect)
                     let clicks: Int
-                    if let (was, count) = run, withinRadius(was, front.at) { clicks = count + 1 } else { clicks = 1 }
+                    if let (was, count) = run, withinSlop(was, front.at) { clicks = count + 1 } else { clicks = 1 }
                     run = (front.at, clicks)
                     runtimeAt = front.at
                     drag = Predicted(press: front.press, down: front.at, moved: false)
@@ -846,11 +866,8 @@ struct OverlayLifecycleParityTests {
                     if let d = drag {
                         drag = nil
                         expect.append(.up(released))
-                        let draggedPastThreshold = d.moved || !withinRadius(d.down, released)
-                        if !draggedPastThreshold {
-                            expect.append(.press)
-                        }
-                        if draggedPastThreshold { run = nil }
+                        expect.append(.press)
+                        if d.moved { run = nil }
                     }
                     let stillHolding = queue.contains { !$0.forgotten && $0.down }
                     holding = stillHolding
@@ -907,7 +924,7 @@ struct OverlayLifecycleParityTests {
                         }
                         if down != click.at { return "press at \(click.at) began at \(down)" }
                         let want: Int
-                        if let lp = lastPress, !lp.moved, withinRadius(lp.down, down) { want = lp.count + 1 } else { want = 1 }
+                        if let lp = lastPress, !lp.moved, withinSlop(lp.down, down) { want = lp.count + 1 } else { want = 1 }
                         if clicks != want { return "\(clicks) clicks, reference \(want)" }
                         lastPress = (down, false, clicks)
                         open = Predicted(press: click.press, down: down, moved: false)
@@ -924,7 +941,7 @@ struct OverlayLifecycleParityTests {
                     cur.moved = cur.moved || !withinSlop(cur.down, atPos)
                     open = cur
                     if var lp = lastPress {
-                        lp.moved = cur.moved || !withinRadius(cur.down, atPos)
+                        lp.moved = cur.moved
                         lastPress = lp
                     }
                     if !isUp { continue }
@@ -943,65 +960,99 @@ struct OverlayLifecycleParityTests {
             }
         }
 
-        // Fast reusable runtime + pointer state per sequence (clock jumps +10s per sequence to reset double-click run)
-        final class DriverState {
-            var heard: [Heard] = []
-            var dragOpen = false
-            weak var runtime: Runtime<DriverState>?
-        }
-        let rt = Runtime<DriverState>(
-            state: DriverState(),
-            viewport: Vec2(2000, 2000),
+        // Reuse the mounted runtime and reset its click count before each independent sequence.
+        let rt = Runtime<[Heard]>(
+            state: [],
+            viewport: Vec2(1000, 100),
             view: { _, _ in
-                el().key("hit").w(2000).h(2000).hit()
-                    .onDrag { s, drag, _ in
-                        if !s.dragOpen {
-                            s.dragOpen = true
-                            s.heard.append(.down(drag.window, drag.clicks))
-                        } else {
-                            s.heard.append(.move(drag.window))
+                el().key("hit").w(1000).h(100).hit()
+                    .onDrag { heard, drag, _ in
+                        switch drag.phase {
+                        case .down: heard.append(.down(drag.window, drag.clicks))
+                        case .move: heard.append(.move(drag.window))
+                        case .up: heard.append(drag.isCancelled ? .cancel(drag.window) : .up(drag.window))
                         }
                     }
-                    .onDragEnd { s, cancelled, _ in
-                        if s.dragOpen {
-                            s.dragOpen = false
-                            let p = s.runtime?.pointerPosition ?? Vec2(0, 0)
-                            s.heard.append(cancelled ? .cancel(p) : .up(p))
-                        }
-                    }
-                    .onClick { s, _ in
-                        s.heard.append(.press)
-                    }
+                    .onClick { heard in heard.append(.press) }
             }
         )
-        rt.state.runtime = rt
         _ = rt.frame(at: 0.0)
 
+        enum RuntimeInput: Hashable {
+            case move(Vec2, Double), down(Vec2, Double), up(Vec2, Double), lost(Vec2, Double)
+
+            func apply(to rt: Runtime<[Heard]>) {
+                switch self {
+                case let .move(point, time): rt.pointerMove(to: point, at: time)
+                case let .down(point, time): rt.pointerDown(at: point, button: .primary, mods: .none, at: time)
+                case let .up(point, time): rt.pointerUp(at: point, button: .primary, mods: .none, at: time)
+                case let .lost(point, time): rt.pointerReleaseLost(at: point, at: time)
+                }
+            }
+        }
+        struct Trace {
+            let parent: Int
+            let input: RuntimeInput?
+            let position: Vec2
+            let heard: [Heard]
+            var children: [RuntimeInput: Int] = [:]
+        }
+
+        // Many panel histories dispatch identical timed inputs to the runtime. Share only
+        // complete runtime-input prefixes, including the event, point and clock at every step.
+        // The panel, reference, callbacks, capture and deadline still run through every letter.
         let epoch = 0.0
+        let initPt = Vec2(5, 5)
+        var traces = [Trace(parent: 0, input: nil, position: initPt, heard: [])]
+        var liveTrace = -1
         var aborted = false
+
+        func restore(_ index: Int) {
+            guard liveTrace != index else { return }
+            if let input = traces[index].input {
+                restore(traces[index].parent)
+                input.apply(to: rt)
+                if rt.pointerPosition != traces[index].position || rt.state != traces[index].heard {
+                    aborted = true
+                    Issue.record("Replaying runtime input \(input) changed its position or callbacks")
+                }
+            } else {
+                rt.cancelPointer(at: epoch)
+                rt.pointerDown(at: Vec2(-9999, -9999), button: .secondary, mods: .none, at: epoch)
+                rt.pointerUp(at: Vec2(-9999, -9999), button: .secondary, mods: .none, at: epoch)
+                rt.pointerMove(to: initPt, at: epoch)
+            }
+            rt.state.removeAll(keepingCapacity: true)
+            liveTrace = index
+        }
+
         func runSequence(plan: Plan, seq: [Letter]) -> Bool {
-            let initPt = makePoint(0, far: false)
-            rt.pointerReleaseLost(at: rt.pointerPosition, at: epoch)
-            // Reset primary click-run tracking while keeping `epoch == 0.0` so grace deadlines stay bit-exact.
-            rt.pointerDown(at: Vec2(-9999, -9999), button: .secondary, mods: .none, at: epoch)
-            rt.pointerUp(at: Vec2(-9999, -9999), button: .secondary, mods: .none, at: epoch)
-            rt.pointerMove(to: initPt, at: epoch)
-            rt.state.heard.removeAll(keepingCapacity: true)
-            rt.state.dragOpen = false
+            var trace = 0
+            var heard: [Heard] = []
+            func dispatch(_ input: RuntimeInput) {
+                if let child = traces[trace].children[input] {
+                    trace = child
+                } else {
+                    restore(trace)
+                    input.apply(to: rt)
+                    let child = traces.count
+                    traces[trace].children[input] = child
+                    traces.append(Trace(parent: trace, input: input, position: rt.pointerPosition, heard: rt.state))
+                    rt.state.removeAll(keepingCapacity: true)
+                    liveTrace = child
+                    trace = child
+                }
+                heard.append(contentsOf: traces[trace].heard)
+            }
 
             let ptr = OverlayPointerState(input: .all, interactive: true)
             let ref = Reference(plan: plan, runtimeAt: initPt)
             let (b0, a0, c0) = ref.read()
             _ = ptr.read(buttons: b0, now: epoch + c0, at: a0, inside: true)
 
-            func drainRuntimeHeard() -> [Heard] {
-                let out = rt.state.heard
-                rt.state.heard.removeAll(keepingCapacity: true)
-                return out
-            }
-
             let steps = seq + [.readUp, .grace, .turn]
             for (stepIdx, letter) in steps.enumerated() {
+                heard.removeAll(keepingCapacity: true)
                 guard let played = ref.play(letter) else { return false }
                 let t = epoch + (played.reading?.2 ?? ref.clock)
 
@@ -1016,29 +1067,29 @@ struct OverlayLifecycleParityTests {
                     }
                 case .cursorMoved:
                     if let lost = ptr.takeLostBeforePosition() {
-                        rt.pointerReleaseLost(at: lost, at: t)
+                        dispatch(.lost(lost, t))
                     }
-                    if let pt = played.at, rt.pointerPosition != pt {
-                        rt.pointerMove(to: pt, at: t)
+                    if let pt = played.at, traces[trace].position != pt {
+                        dispatch(.move(pt, t))
                     }
                 case .mouseDown:
                     let edge = ptr.takeEdge(down: true)
                     if let lost = edge.lostRelease {
-                        rt.pointerReleaseLost(at: lost, at: t)
+                        dispatch(.lost(lost, t))
                     }
                     if let pt = edge.point {
-                        rt.pointerDown(at: pt, button: .primary, mods: .none, at: t)
+                        dispatch(.down(pt, t))
                     }
                 case .mouseUp:
                     let edge = ptr.takeEdge(down: false)
                     if let lost = edge.lostRelease {
-                        rt.pointerReleaseLost(at: lost, at: t)
+                        dispatch(.lost(lost, t))
                     }
-                    let upPt = edge.point ?? rt.pointerPosition
-                    if rt.pointerPosition != upPt {
-                        rt.pointerMove(to: upPt, at: t)
+                    let upPt = edge.point ?? traces[trace].position
+                    if traces[trace].position != upPt {
+                        dispatch(.move(upPt, t))
                     }
-                    rt.pointerUp(at: upPt, button: .primary, mods: .none, at: t)
+                    dispatch(.up(upPt, t))
                     ptr.released()
                     if let (btns, pt, clk) = played.reading {
                         _ = ptr.read(buttons: btns, now: epoch + clk, at: pt, inside: true)
@@ -1048,10 +1099,10 @@ struct OverlayLifecycleParityTests {
                         _ = ptr.read(buttons: btns, now: epoch + clk, at: pt, inside: true)
                     }
                     if let lost = ptr.takeLostBeforePosition() {
-                        rt.pointerReleaseLost(at: lost, at: t)
+                        dispatch(.lost(lost, t))
                     }
-                    if let pt = ptr.takePosition(), rt.pointerPosition != pt {
-                        rt.pointerMove(to: pt, at: t)
+                    if let pt = ptr.takePosition(), traces[trace].position != pt {
+                        dispatch(.move(pt, t))
                     }
                 case .occlude:
                     break
@@ -1059,7 +1110,13 @@ struct OverlayLifecycleParityTests {
                     ptr.viewLost()
                 }
 
-                let heard = drainRuntimeHeard()
+                let actualDeadline = ptr.deadline(poll: nil, occluded: ref.occluded)
+                let expectedDeadline = ref.deadline().map { epoch + $0 }
+                if ptr.isCaptured != ref.holding || actualDeadline != expectedDeadline {
+                    aborted = true
+                    Issue.record("Capture or release deadline differs after step \(stepIdx) (\(letter)) of \(seq): capture \(ptr.isCaptured)/\(ref.holding), deadline \(String(describing: actualDeadline))/\(String(describing: expectedDeadline))")
+                    return false
+                }
                 if heard != played.expect {
                     if !aborted {
                         aborted = true
@@ -1085,22 +1142,21 @@ struct OverlayLifecycleParityTests {
             return true
         }
 
-        // Run depth 5 across all 3 PLANS (~40k+ legal sequences including all multi-click, grace, viewLost, occluded, rebound cases)
         let plans = [
             Plan(farPresses: false, farReadings: false),
             Plan(farPresses: false, farReadings: true),
             Plan(farPresses: true, farReadings: true),
         ]
-        var totalRan = 0
         for plan in plans {
+            var legalSequences = 0
             var stack: [Letter] = []
             func visit() {
                 if aborted { return }
                 if !stack.isEmpty {
                     guard runSequence(plan: plan, seq: stack) else { return }
-                    totalRan += 1
+                    legalSequences += 1
                 }
-                if stack.count == 5 || aborted { return }
+                if stack.count == 6 || aborted { return }
                 for l in Letter.allCases {
                     if aborted { return }
                     stack.append(l)
@@ -1109,9 +1165,10 @@ struct OverlayLifecycleParityTests {
                 }
             }
             visit()
+            // Counted independently by the pinned Rust reference for each plan at depth six.
+            #expect(legalSequences == 744_115)
+            if aborted { return }
         }
-        #expect(!aborted)
-        #expect(totalRan > 25_000)
     }
 
     // MARK: - overlay/tests.rs & overlay/more_tests.rs non-winit/wgpu parity

@@ -121,7 +121,8 @@ struct ProductionGLFrameTests {
     func preservesEffectBits() throws {
         let payload = SIMD4<Float>(Float(bitPattern: 0x7fc0_1234), -0.0, .infinity, 1.0)
         let slot = RenderInstance(rect: clip, params: SIMD4(0, KIND_EFFECT, 0, 0), uv: payload)
-        let frame = try RenderFrame(width: 64, height: 40, instances: [slot]).preparedForGL()
+        let frame = RenderFrame(width: 64, height: 40, instances: [slot])
+        try frame.validateForGL()
         let result = try #require(frame.instances.first)
         #expect((0..<4).allSatisfy { result.uv[$0].bitPattern == payload[$0].bitPattern })
     }
@@ -131,7 +132,7 @@ struct ProductionGLFrameTests {
         var invalid = fixture(byteBlend: false)
         invalid.instances.append(.beginLayer(bounds: clip, clip: clip))
         #expect(throws: RefSceneError.unclosedLayers(remaining: 1)) {
-            try invalid.preparedForGL()
+            try invalid.validateForGL()
         }
     }
 }

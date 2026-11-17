@@ -5,11 +5,6 @@ import AppKit
 #endif
 
 /// Live accessory overlay pacing probe mirroring `crates/rune/examples/pacing_overlay.rs`.
-///
-/// NOTE: `Sources/Rune` does not yet wire `App.overlay(_:receiver:)` into `RuneMultiWindowHost`
-/// or expose an `App`-less `run_windows_with_args(|handle| ...)` helper. This port uses
-/// `RuneMultiWindow.runWindows` with `RunOptions(arguments: [], accessory: true)` and drives the
-/// real `"Pacing Overlay"` `OverlayHandle` directly on the main actor.
 @main
 public enum RunePacingOverlayApp {
     public struct State: Sendable {

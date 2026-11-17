@@ -166,7 +166,7 @@ internal final class LatestPool: @unchecked Sendable {
     )
 
     private let cond = NSCondition()
-    private var queue: [any LatestDrive] = []
+    private var queue = QueueDeque<any LatestDrive>()
     private var liveThreads: Int = 0
     private var idleThreads: Int = 0
     private var startedThreads: Int = 0
@@ -183,7 +183,7 @@ internal final class LatestPool: @unchecked Sendable {
         WASIEventLoop.schedule { task.drive() }
         #else
         cond.lock()
-        queue.append(task)
+        queue.pushBack(task)
         cond.signal()
         if queue.count <= idleThreads || liveThreads >= maxThreads {
             cond.unlock()
@@ -204,8 +204,7 @@ internal final class LatestPool: @unchecked Sendable {
     private func work() {
         cond.lock()
         while true {
-            if !queue.isEmpty {
-                let task = queue.removeFirst()
+            if let task = queue.popFront() {
                 cond.unlock()
                 task.drive()
                 cond.lock()

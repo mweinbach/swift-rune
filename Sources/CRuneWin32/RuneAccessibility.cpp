@@ -6,6 +6,7 @@
 #include <oleauto.h>
 #include <uiautomation.h>
 #include "RuneTextProvider.hpp"
+#include "WindowRedraw.h"
 
 #include <algorithm>
 #include <atomic>
@@ -24,8 +25,8 @@ struct Node {
     int id = 0, parent = -1, control = UIA_WindowControlTypeId;
     std::wstring key, role, name, help, value, shortcut;
     UiaRect rect{};
-    bool focusable = false, disabled = false, secure = false, readOnly = true;
-    bool pressable = false, settable = false, hasRange = false;
+    bool focusable = false, disabled = false, secure = false, readOnly = true, modal = false;
+    bool pressable = false, settable = false, hasRange = false, scrollItem = false;
     int toggle = -1, live = 0, selected = -1, expanded = -1;
     int level = 0, position = 0, size = 0;
     double minimum = 0, maximum = 0, number = 0, step = 0;
@@ -34,6 +35,22 @@ struct Node {
     int anchor = 0, caret = 0;
     std::shared_ptr<RuneUiaTextContent> field;
     const std::wstring &valueText() const { return field ? field->text : value; }
+    bool isDialog() const { return role == L"dialog" || role == L"alertdialog"; }
+    int headingLevel() const { return role == L"heading" ? HeadingLevel1 + std::min(level > 0 ? level : 2, 9) - 1 : 0; }
+    const wchar_t *customLandmark() const {
+        if (role == L"banner") return L"banner";
+        if (role == L"complementary") return L"complementary";
+        if (role == L"contentinfo") return L"content information";
+        if (role == L"region" && !name.empty()) return L"region";
+        return L"";
+    }
+    int landmarkType() const {
+        if (role == L"main") return UIA_MainLandmarkTypeId;
+        if (role == L"navigation") return UIA_NavigationLandmarkTypeId;
+        if (role == L"search") return UIA_SearchLandmarkTypeId;
+        if (role == L"form" && !name.empty()) return UIA_FormLandmarkTypeId;
+        return *customLandmark() ? UIA_CustomLandmarkTypeId : 0;
+    }
 };
 struct Tree {
     std::unordered_map<int, Node> nodes;
@@ -82,6 +99,7 @@ std::wstring wide(const char *utf8) {
 }
 int controlType(const std::string &role) {
     static const std::unordered_map<std::string, int> types = {
+        {"scroll-view", UIA_PaneControlTypeId},
         {"text", UIA_TextControlTypeId}, {"heading", UIA_TextControlTypeId},
         {"button", UIA_ButtonControlTypeId}, {"checkbox", UIA_CheckBoxControlTypeId},
         {"switch", UIA_CheckBoxControlTypeId}, {"radio", UIA_RadioButtonControlTypeId},
@@ -91,13 +109,15 @@ int controlType(const std::string &role) {
         {"progressbar", UIA_ProgressBarControlTypeId}, {"listitem", UIA_ListItemControlTypeId},
         {"option", UIA_ListItemControlTypeId}, {"list", UIA_ListControlTypeId},
         {"listbox", UIA_ListControlTypeId}, {"dialog", UIA_WindowControlTypeId},
+        {"alertdialog", UIA_WindowControlTypeId},
         {"menubar", UIA_MenuBarControlTypeId}, {"menu", UIA_MenuControlTypeId}, {"menuitem", UIA_MenuItemControlTypeId},
         {"menu-item-check-box", UIA_MenuItemControlTypeId}, {"menu-item-radio", UIA_MenuItemControlTypeId}, {"img", UIA_ImageControlTypeId},
         {"icon", UIA_ImageControlTypeId}, {"separator", UIA_SeparatorControlTypeId},
         {"combobox", UIA_ComboBoxControlTypeId}, {"tree", UIA_TreeControlTypeId},
         {"treeitem", UIA_TreeItemControlTypeId}, {"grid", UIA_DataGridControlTypeId},
         {"row", UIA_DataItemControlTypeId}, {"gridcell", UIA_DataItemControlTypeId},
-        {"columnheader", UIA_HeaderItemControlTypeId}, {"tooltip", UIA_ToolTipControlTypeId},
+        {"cell", UIA_DataItemControlTypeId}, {"rowheader", UIA_DataItemControlTypeId},
+        {"columnheader", UIA_DataItemControlTypeId}, {"tooltip", UIA_ToolTipControlTypeId},
         {"link", UIA_HyperlinkControlTypeId}, {"toolbar", UIA_ToolBarControlTypeId},
         {"splitter", UIA_ThumbControlTypeId}, {"status", UIA_StatusBarControlTypeId},
         {"table", UIA_TableControlTypeId}, {"mark", UIA_TextControlTypeId},
@@ -140,6 +160,8 @@ HRESULT intProperty(VARIANT *out, int value) {
     return S_OK;
 }
 bool supports(const Node &n, PATTERNID pattern) {
+    if (pattern == UIA_WindowPatternId) return n.isDialog();
+    if (pattern == UIA_ScrollItemPatternId) return n.scrollItem;
     if (pattern == UIA_InvokePatternId) return n.pressable && n.toggle < 0 && n.selectionContainer < 0;
     if (pattern == UIA_TogglePatternId) return n.toggle >= 0 && n.selectionContainer < 0;
     if (pattern == UIA_ExpandCollapsePatternId) return n.expanded >= 0 && n.pressable;
@@ -154,7 +176,8 @@ bool supports(const Node &n, PATTERNID pattern) {
 class Provider final : public IRawElementProviderSimple, public IRawElementProviderFragment,
     public IRawElementProviderFragmentRoot, public IInvokeProvider, public IToggleProvider,
     public IValueProvider, public IRangeValueProvider, public IExpandCollapseProvider,
-    public ISelectionProvider, public ISelectionItemProvider, public RuneUiaTextSource {
+    public ISelectionProvider, public ISelectionItemProvider, public IScrollItemProvider,
+    public IWindowProvider, public RuneUiaTextSource {
     std::atomic<ULONG> refs{1};
     std::shared_ptr<Window> window;
     int id;
@@ -180,6 +203,8 @@ public:
         else if (iid == __uuidof(IExpandCollapseProvider)) *out = static_cast<IExpandCollapseProvider *>(this);
         else if (iid == __uuidof(ISelectionProvider)) *out = static_cast<ISelectionProvider *>(this);
         else if (iid == __uuidof(ISelectionItemProvider)) *out = static_cast<ISelectionItemProvider *>(this);
+        else if (iid == __uuidof(IScrollItemProvider)) *out = static_cast<IScrollItemProvider *>(this);
+        else if (iid == __uuidof(IWindowProvider)) *out = static_cast<IWindowProvider *>(this);
         else return E_NOINTERFACE;
         AddRef();
         return S_OK;
@@ -203,6 +228,8 @@ public:
         if (pattern == UIA_ExpandCollapsePatternId) *out = static_cast<IExpandCollapseProvider *>(this);
         if (pattern == UIA_SelectionPatternId) *out = static_cast<ISelectionProvider *>(this);
         if (pattern == UIA_SelectionItemPatternId) *out = static_cast<ISelectionItemProvider *>(this);
+        if (pattern == UIA_ScrollItemPatternId) *out = static_cast<IScrollItemProvider *>(this);
+        if (pattern == UIA_WindowPatternId) *out = static_cast<IWindowProvider *>(this);
         AddRef();
         return S_OK;
     }
@@ -214,10 +241,13 @@ public:
         const Node &n = *s.node;
         switch (property) {
         case UIA_ControlTypePropertyId: return intProperty(out, n.control);
+        case UIA_IsDialogPropertyId: return boolProperty(out, n.isDialog());
+        case UIA_WindowIsModalPropertyId: return n.isDialog() ? boolProperty(out, n.modal) : S_OK;
         case UIA_NamePropertyId: return stringProperty(out, n.name);
         case UIA_AutomationIdPropertyId: return stringProperty(out, n.key);
         case UIA_HelpTextPropertyId: return stringProperty(out, n.help);
         case UIA_AriaRolePropertyId:
+            if (n.role == L"scroll-view") return stringProperty(out, L"region");
             if (n.role == L"menu-item-radio") return stringProperty(out, L"menuitemradio");
             if (n.role == L"menu-item-check-box") return stringProperty(out, L"menuitemcheckbox");
             if (n.role == L"password-input" || n.role == L"multiline-text-input") return stringProperty(out, L"textbox");
@@ -233,6 +263,10 @@ public:
             return stringProperty(out, props);
         }
         case UIA_LevelPropertyId: return n.level > 0 ? intProperty(out, n.level) : S_OK;
+        case UIA_HeadingLevelPropertyId: return n.headingLevel() ? intProperty(out, n.headingLevel()) : S_OK;
+        case UIA_LandmarkTypePropertyId: return n.landmarkType() ? intProperty(out, n.landmarkType()) : S_OK;
+        case UIA_LocalizedLandmarkTypePropertyId:
+            return *n.customLandmark() ? stringProperty(out, n.customLandmark()) : S_OK;
         case UIA_PositionInSetPropertyId: return n.position > 0 ? intProperty(out, n.position) : S_OK;
         case UIA_SizeOfSetPropertyId: return n.size > 0 ? intProperty(out, n.size) : S_OK;
         case UIA_AcceleratorKeyPropertyId: return stringProperty(out, n.shortcut);
@@ -290,7 +324,7 @@ public:
         if (n.field.get() != &expected && n.field->text != expected.text) return UIA_E_INVALIDOPERATION;
         Action request{id, 0, L"", 0, start, end, n.field};
         window->actions.push_back(std::move(request));
-        if (!InvalidateRect(window->hwnd, nullptr, FALSE)) {
+        if (!rune_request_window_paint(window->hwnd, TRUE)) {
             window->actions.pop_back();
             return UIA_E_ELEMENTNOTAVAILABLE;
         }
@@ -399,19 +433,21 @@ public:
         const auto found = window->tree->nodes.find(id);
         if (!window->hwnd || found == window->tree->nodes.end()) return UIA_E_ELEMENTNOTAVAILABLE;
         const Node &n = found->second;
-        if (n.disabled) return UIA_E_ELEMENTNOTENABLED;
+        if (n.disabled && kind != RUNE_UIA_SCROLL_INTO_VIEW) return UIA_E_ELEMENTNOTENABLED;
         if (pattern && !supports(n, pattern)) return UIA_E_NOTSUPPORTED;
         if (kind == RUNE_UIA_PRESS && !n.pressable) return UIA_E_NOTSUPPORTED;
         if (kind == RUNE_UIA_FOCUS && !n.focusable) return UIA_E_NOTSUPPORTED;
         if ((kind == RUNE_UIA_SET_TEXT || kind == RUNE_UIA_SET_NUMBER) && (!n.settable || n.readOnly)) return UIA_E_NOTSUPPORTED;
         window->actions.push_back({id, kind, text, number, 0, 0, nullptr});
-        if (!InvalidateRect(window->hwnd, nullptr, FALSE)) {
+        if (!rune_request_window_paint(window->hwnd, TRUE)) {
             window->actions.pop_back();
             return UIA_E_ELEMENTNOTAVAILABLE;
         }
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE SetFocus() override { return enqueue(RUNE_UIA_FOCUS, 0); }
+    HRESULT STDMETHODCALLTYPE ScrollIntoView() override { return enqueue(RUNE_UIA_SCROLL_INTO_VIEW, UIA_ScrollItemPatternId); }
+    HRESULT scrollTextIntoView() override { return enqueue(RUNE_UIA_SCROLL_INTO_VIEW, UIA_TextPatternId); }
     HRESULT STDMETHODCALLTYPE Invoke() override { return enqueue(RUNE_UIA_PRESS, UIA_InvokePatternId); }
     HRESULT STDMETHODCALLTYPE Toggle() override { return enqueue(RUNE_UIA_PRESS, UIA_TogglePatternId); }
     HRESULT expanded(bool desired) {
@@ -524,6 +560,26 @@ public:
         *out = !s.node->settable || s.node->readOnly;
         return S_OK;
     }
+    HRESULT STDMETHODCALLTYPE get_IsModal(BOOL *out) override {
+        if (!out) return E_POINTER;
+        Snapshot s(*window, id);
+        if (!s.node) return UIA_E_ELEMENTNOTAVAILABLE;
+        if (!s.node->isDialog()) return UIA_E_NOTSUPPORTED;
+        *out = s.node->modal;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE get_WindowInteractionState(WindowInteractionState *out) override {
+        if (!out) return E_POINTER;
+        *out = WindowInteractionState_ReadyForUserInteraction;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetVisualState(WindowVisualState) override { return UIA_E_INVALIDOPERATION; }
+    HRESULT STDMETHODCALLTYPE Close() override { return UIA_E_NOTSUPPORTED; }
+    HRESULT STDMETHODCALLTYPE WaitForInputIdle(int, BOOL *) override { return UIA_E_NOTSUPPORTED; }
+    HRESULT STDMETHODCALLTYPE get_CanMaximize(BOOL *) override { return UIA_E_NOTSUPPORTED; }
+    HRESULT STDMETHODCALLTYPE get_CanMinimize(BOOL *) override { return UIA_E_NOTSUPPORTED; }
+    HRESULT STDMETHODCALLTYPE get_IsTopmost(BOOL *) override { return UIA_E_NOTSUPPORTED; }
+    HRESULT STDMETHODCALLTYPE get_WindowVisualState(WindowVisualState *) override { return UIA_E_NOTSUPPORTED; }
     HRESULT range(double *out, double Node::*member) {
         if (!out) return E_POINTER;
         Snapshot s(*window, id); if (!s.node) return UIA_E_ELEMENTNOTAVAILABLE;
@@ -545,6 +601,7 @@ struct RuneUiaHost {
     Provider *root;
     HWND attached; // Owned by the window thread until WM_NCDESTROY or explicit detach.
     bool initializedCOM;
+    bool published = false;
     explicit RuneUiaHost(HWND hwnd) : window(std::make_shared<Window>(hwnd)), root(new Provider(window, 0)), attached(hwnd),
         initializedCOM(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {}
     ~RuneUiaHost() {
@@ -563,7 +620,7 @@ LRESULT CALLBACK accessibilityProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l, UINT
             if (!host->window->hwnd) return 0;
             if (!host->window->active) {
                 host->window->active = true;
-                InvalidateRect(hwnd, nullptr, FALSE);
+                rune_request_window_paint(hwnd, TRUE);
             }
         }
         // UI Automation may send another WM_GETOBJECT during this call.
@@ -572,7 +629,7 @@ LRESULT CALLBACK accessibilityProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l, UINT
     if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS) {
         std::lock_guard<std::mutex> lock(host->window->lock);
         host->window->focusChanged = true;
-        if (host->window->active) InvalidateRect(hwnd, nullptr, FALSE);
+        if (host->window->active) rune_request_window_paint(hwnd, TRUE);
     }
     if (msg == WM_DESTROY) {
         bool active;
@@ -595,7 +652,7 @@ void raiseProperty(Provider *provider, PROPERTYID id, VARIANT before, VARIANT af
     VariantClear(&before);
     VariantClear(&after);
 }
-void raiseChanges(const std::shared_ptr<Window> &window, const Tree &before, const Tree &after, bool focusChanged) {
+void raiseChanges(const std::shared_ptr<Window> &window, const Tree &before, const Tree &after, bool focusChanged, bool uiaListening) {
     bool structureChanged = before.nodes.size() != after.nodes.size();
     bool moved = false;
     for (const auto &pair : after.nodes) {
@@ -605,12 +662,21 @@ void raiseChanges(const std::shared_ptr<Window> &window, const Tree &before, con
             continue;
         }
         const Node &old = prior->second, &node = pair.second;
-        if (node.children != old.children || node.role != old.role ||
+        const bool changedRole = node.role != old.role;
+        if (node.children != old.children || changedRole ||
             node.selectionContainer != old.selectionContainer || node.pressable != old.pressable ||
-            node.hasRange != old.hasRange || (node.expanded >= 0) != (old.expanded >= 0)) structureChanged = true;
+            node.hasRange != old.hasRange || node.scrollItem != old.scrollItem ||
+            (node.expanded >= 0) != (old.expanded >= 0)) structureChanged = true;
         if (old.rect.left != node.rect.left || old.rect.top != node.rect.top ||
             old.rect.width != node.rect.width || old.rect.height != node.rect.height) moved = true;
+        if (!uiaListening) continue;
+        const bool changedDialog = changedRole && old.isDialog() != node.isDialog();
+        const bool changedModal = old.modal != node.modal && old.isDialog() && node.isDialog();
         const bool changedName = old.name != node.name;
+        const bool changedHeading = (changedRole || old.level != node.level) && old.headingLevel() != node.headingLevel();
+        const bool landmarkMayChange = changedRole || old.name.empty() != node.name.empty();
+        const bool changedLandmark = landmarkMayChange && old.landmarkType() != node.landmarkType();
+        const bool changedLandmarkName = landmarkMayChange && wcscmp(old.customLandmark(), node.customLandmark()) != 0;
         const bool changedValue = !node.secure && node.valueText() != old.valueText();
         const bool changedTextSelection = node.field && (old.anchor != node.anchor || old.caret != node.caret);
         const bool changedProtection = old.secure != node.secure;
@@ -621,8 +687,38 @@ void raiseChanges(const std::shared_ptr<Window> &window, const Tree &before, con
         const bool changedExpansion = node.expanded >= 0 && old.expanded != node.expanded;
         const bool changedEnabled = node.disabled != old.disabled;
         if (!(changedName || changedValue || changedRange || changedToggle || changedSelection || changedExpansion ||
-              changedEnabled || changedTextSelection || changedProtection || changedTextPattern)) continue;
+              changedEnabled || changedTextSelection || changedProtection || changedTextPattern ||
+              changedHeading || changedLandmark || changedLandmarkName || changedDialog || changedModal)) continue;
         Provider *p = new Provider(window, node.id);
+        if (changedDialog) {
+            VARIANT a{}, b{};
+            boolProperty(&a, old.isDialog()); boolProperty(&b, node.isDialog());
+            raiseProperty(p, UIA_IsDialogPropertyId, a, b);
+            raiseProperty(p, UIA_IsWindowPatternAvailablePropertyId, a, b);
+        }
+        if (changedModal) {
+            VARIANT a{}, b{};
+            boolProperty(&a, old.modal); boolProperty(&b, node.modal);
+            raiseProperty(p, UIA_WindowIsModalPropertyId, a, b);
+        }
+        if (changedHeading) {
+            VARIANT a{}, b{};
+            if (old.headingLevel()) intProperty(&a, old.headingLevel());
+            if (node.headingLevel()) intProperty(&b, node.headingLevel());
+            raiseProperty(p, UIA_HeadingLevelPropertyId, a, b);
+        }
+        if (changedLandmark) {
+            VARIANT a{}, b{};
+            if (old.landmarkType()) intProperty(&a, old.landmarkType());
+            if (node.landmarkType()) intProperty(&b, node.landmarkType());
+            raiseProperty(p, UIA_LandmarkTypePropertyId, a, b);
+        }
+        if (changedLandmarkName) {
+            VARIANT a{}, b{};
+            if (*old.customLandmark()) stringProperty(&a, old.customLandmark());
+            if (*node.customLandmark()) stringProperty(&b, node.customLandmark());
+            raiseProperty(p, UIA_LocalizedLandmarkTypePropertyId, a, b);
+        }
         if (changedName) {
             VARIANT a{}, b{};
             stringProperty(&a, old.name); stringProperty(&b, node.name);
@@ -678,15 +774,19 @@ void raiseChanges(const std::shared_ptr<Window> &window, const Tree &before, con
         p->Release();
     }
     if (structureChanged) {
-        Provider *p = new Provider(window, 0);
-        UiaRaiseStructureChangedEvent(p, StructureChangeType_ChildrenInvalidated, nullptr, 0);
-        p->Release();
+        if (uiaListening) {
+            Provider *p = new Provider(window, 0);
+            UiaRaiseStructureChangedEvent(p, StructureChangeType_ChildrenInvalidated, nullptr, 0);
+            p->Release();
+        }
+        Snapshot s(*window, 0);
+        if (s.node) NotifyWinEvent(EVENT_OBJECT_REORDER, s.hwnd, OBJID_CLIENT, CHILDID_SELF);
     }
     if (moved) {
         Snapshot s(*window, 0);
         if (s.node) NotifyWinEvent(EVENT_OBJECT_LOCATIONCHANGE, s.hwnd, OBJID_CLIENT, CHILDID_SELF);
     }
-    if (focusChanged || after.focused != before.focused) {
+    if (uiaListening && (focusChanged || after.focused != before.focused)) {
         Snapshot s(*window, after.focused);
         if (s.node) {
             Provider *p = new Provider(window, after.focused);
@@ -749,7 +849,8 @@ void rune_uia_add(RuneUiaHost *host, RuneUiaNode info, const char *key, const ch
     n.secure = info.secure || n.role == L"password-input"; if (!n.secure) n.value = wide(value);
     n.focusable = info.focusable; n.disabled = info.disabled; n.readOnly = info.read_only;
     n.pressable = info.pressable; n.settable = info.settable; n.toggle = info.toggle; n.live = info.live;
-    n.selected = info.selected; n.expanded = info.expanded;
+    n.selected = info.selected; n.expanded = info.expanded; n.scrollItem = info.scroll_item;
+    n.modal = info.modal;
     n.level = info.level; n.position = info.position; n.size = info.size_of_set;
     n.hasRange = info.has_range; n.minimum = info.minimum; n.maximum = info.maximum;
     n.step = info.step; n.number = info.number;
@@ -773,26 +874,61 @@ void rune_uia_add(RuneUiaHost *host, RuneUiaNode info, const char *key, const ch
 }
 void rune_uia_text_model(RuneUiaHost *host, int32_t id, int32_t anchor, int32_t focus,
                          const uint16_t *text, int32_t length, const int32_t *graphemes, int32_t count) {
-    if (!host || !host->staging || !graphemes || count < 1 || length < 0 || (length && !text)) return;
+    if (!host || !host->staging || count < 0 || (count && !graphemes) || length < 0 || (length && !text)) return;
     auto found = host->staging->nodes.find(id);
     if (found == host->staging->nodes.end()) return;
     auto &n = found->second;
     if (n.secure || n.control != UIA_EditControlTypeId || n.field) return;
-    if (graphemes[0] != 0 || graphemes[count - 1] != length) return;
-    for (int i = 1; i < count; ++i) if (graphemes[i] <= graphemes[i - 1]) return;
     auto field = std::make_shared<RuneUiaTextContent>();
+    if (count) {
+        if (graphemes[0] != 0 || graphemes[count - 1] != length) return;
+        for (int i = 1; i < count; ++i) if (graphemes[i] <= graphemes[i - 1]) return;
+        field->characters.assign(graphemes, graphemes + count);
+    } else {
+        field->valueOnly = true;
+        field->characters.reserve(static_cast<size_t>(length) + 1);
+        uint64_t bytes = 0;
+        for (int i = 0; i < length; ++i) {
+            if (IS_LOW_SURROGATE(text[i])) continue;
+            if (field->characters.size() % RuneUiaTextContent::scalarBlock == 0) field->byteBlocks.push_back(bytes);
+            field->characters.push_back(i);
+            bytes += RuneUiaTextContent::utf8Width(text[i]);
+        }
+        if (field->characters.size() % RuneUiaTextContent::scalarBlock == 0) field->byteBlocks.push_back(bytes);
+        field->characters.push_back(length);
+    }
     n.value.clear();
     if (length) field->text.assign(text, text + length);
-    field->graphemes.assign(graphemes, graphemes + count);
     n.anchor = std::max(0, std::min(anchor, length));
     n.caret = std::max(0, std::min(focus, length));
     n.field = std::move(field);
 }
-void rune_uia_text_geometry(RuneUiaHost *host, int32_t id, const RuneUiaTextCell *cells, int32_t count) {
+void rune_uia_text_geometry(RuneUiaHost *host, int32_t id, const RuneUiaTextCell *cells, int32_t count,
+                            RuneUiaWordBreaks wordBreaks) {
     if (!host || !host->staging || !cells || count <= 0) return;
     auto found = host->staging->nodes.find(id);
     if (found == host->staging->nodes.end() || !found->second.field) return;
-    found->second.field->cells.assign(cells, cells + count);
+    auto &field = *found->second.field;
+    if (field.valueOnly) return;
+    std::vector<int> lineStarts;
+    for (int i = 0; i < count;) {
+        const int line = cells[i].line;
+        if (line != static_cast<int>(lineStarts.size())) return;
+        int offset = cells[i].start;
+        while (i < count && cells[i].line == line) {
+            if (cells[i].start < 0 || cells[i].end < cells[i].start || cells[i].end > field.characters.back()) return;
+            offset = std::min(offset, static_cast<int>(cells[i].start));
+            ++i;
+        }
+        auto at = std::lower_bound(field.characters.begin(), field.characters.end(), offset);
+        if (at == field.characters.end() || *at != offset) return;
+        const int start = static_cast<int>(at - field.characters.begin());
+        if (lineStarts.empty() ? start != 0 : start < lineStarts.back()) return;
+        lineStarts.push_back(start);
+    }
+    field.lineStarts = std::move(lineStarts);
+    field.wordBreaks = wordBreaks;
+    field.cells.assign(cells, cells + count);
 }
 void rune_uia_commit(RuneUiaHost *host) {
     if (!host->staging) return;
@@ -807,7 +943,18 @@ void rune_uia_commit(RuneUiaHost *host) {
         focusChanged = window->focusChanged;
         window->focusChanged = false;
     }
-    if (active && UiaClientsAreListening()) raiseChanges(window, *before, *after, focusChanged);
+    const bool first = !host->published;
+    host->published = true;
+    if (first && !active && host->attached) {
+        // A reader may have queried the HWND before the first semantic tree existed.
+        NotifyWinEvent(EVENT_OBJECT_REORDER, host->attached, OBJID_CLIENT, CHILDID_SELF);
+    }
+    if (active) {
+        const bool uia = UiaClientsAreListening() != FALSE;
+        if (uia || IsWinEventHookInstalled(EVENT_OBJECT_REORDER) || IsWinEventHookInstalled(EVENT_OBJECT_LOCATIONCHANGE)) {
+            raiseChanges(window, *before, *after, focusChanged, uia);
+        }
+    }
 }
 int rune_uia_pop(RuneUiaHost *host, int32_t *id, int32_t *action, char **text, double *number) {
     Action next;

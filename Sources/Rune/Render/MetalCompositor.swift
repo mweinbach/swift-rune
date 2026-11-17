@@ -75,14 +75,20 @@ extension MetalRenderer {
 
 extension FrameReports {
     func presented(_ frame: RenderFrame, at time: Double, started: Double, updateMs: Double, drawCount: Int,
-                   committed: Bool, runtime: Runtime<State>, compositor: AnyCompositor<State>?) {
-        let total = (CACurrentMediaTime() - started) * 1000
-        record(FrameEncoded(outcome: .drawn, frameMs: total, updateMs: updateMs, encodeMs: max(0, total - updateMs),
-                            committed: committed, primitives: frame.instances.count,
-                            glyphs: frame.instances.reduce(0) { $0 + ($1.params.y == KIND_GLYPH ? 1 : 0) },
-                            animating: runtime.isAnimating, compositorAnimating: compositor?.isAnimating ?? false,
-                            drawCount: drawCount, compositorSummary: compositor?.summary(), at: time))
-        _ = runtime.updateIf(at: time) { state, tx in flush(state: &state, tx: &tx, at: time) }
+                   committed: Bool, runtime: Runtime<State>, compositor: AnyCompositor<State>?,
+                   target: Double?, refreshHz: Double?, submitted: Double = CACurrentMediaTime()) {
+        if onFrameEncoded != nil || onFrameDrawn != nil {
+            let total = (submitted - started) * 1000
+            record(FrameEncoded(outcome: .drawn, frameMs: total, updateMs: updateMs, encodeMs: max(0, total - updateMs),
+                                committed: committed, primitives: frame.instances.count,
+                                glyphs: frame.instances.reduce(0) { $0 + ($1.params.y == KIND_GLYPH ? 1 : 0) },
+                                animating: runtime.isAnimating, compositorAnimating: compositor?.isAnimating ?? false,
+                                drawCount: drawCount, compositorSummary: compositor?.summary(), at: submitted,
+                                presentsAt: target, started: started, refreshHz: refreshHz))
+            if hasPendingDrawn(at: time) {
+                _ = runtime.updateIf(at: time) { state, tx in flush(state: &state, tx: &tx, at: time) }
+            }
+        }
         inspect(runtime)
     }
 }

@@ -500,7 +500,7 @@ struct ActionsKeybindAndA11yParityTests {
                             label: .text("Share"),
                             onClick: { _, _ in }
                         )
-                        .animateLayout(LayoutAnim.widthLeads(kit.motion.control))
+                        .animateLayout(LayoutAnim.widthLeads(RollingText<String>.defaultSpring))
                     )
             }
         )

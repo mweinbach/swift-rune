@@ -1,0 +1,122 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune browser accessibility scheduling</title>
+<canvas width="2" height="2"></canvas>
+<pre id="result">Running…</pre>
+<script type="module">
+import { mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+
+const canvas = document.querySelector('canvas'), result = document.querySelector('#result');
+const encoder = new TextEncoder();
+const button = {path:'/b', key:'b', role:'button', bounds:[0,0,2,2], name:'First', actions:['focus','press']};
+const full = {width:2, height:2, root:{path:'/', key:'root', role:'group', bounds:[0,0,2,2], children:[button]}};
+const element = () => document.querySelector('[data-rune-target="/b"]');
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+function check(value, message) { if (!value) throw Error(message); }
+async function waitFor(test) {
+    const start = performance.now();
+    while (!test()) {
+        if (performance.now() - start > 3000) throw Error('Accessibility callback did not fire');
+        await sleep(10);
+    }
+}
+
+function reactor(legacy = false) {
+    const memory = new WebAssembly.Memory({initial:1});
+    const bytes = new Uint8Array(memory.buffer);
+    const state = {negotiated:false, painted:false, pulls:0, flushes:0, pending:legacy ? full : -2, due:full};
+    function payload(value) {
+        if (typeof value === 'number') return value;
+        const encoded = encoder.encode(JSON.stringify(value));
+        bytes.set(encoded);
+        return encoded.length;
+    }
+    const api = {
+        memory, rune_web_enable() {}, __main_void: () => 0, rune_web_event: () => 0,
+        rune_web_buffer: () => 0, rune_web_field: () => 0,
+        rune_web_frame() {
+            if (state.painted) return 0;
+            state.painted = true;
+            new Uint32Array(memory.buffer,0,6).set([2,2,0xffffffff,0xffffffff,0xffffffff,0xffffffff]);
+            return 24;
+        },
+        rune_web_accessibility() {
+            ++state.pulls;
+            return payload(state.pending);
+        }
+    };
+    if (!legacy) {
+        api.rune_web_enable_accessibility_patches = () => { state.negotiated = true; };
+        api.rune_web_flush_accessibility = () => {
+            ++state.flushes;
+            return payload(state.due);
+        };
+    }
+    return {exports:api, state};
+}
+
+const originalRAF = window.requestAnimationFrame, originalCancel = window.cancelAnimationFrame;
+let nextFrame, nextID = 0, app;
+function present(probe, value) {
+    probe.state.pending = value;
+    probe.state.painted = false;
+    const frame = nextFrame;
+    check(frame, 'The host did not request its next display frame');
+    frame(performance.now());
+}
+try {
+    // Advance successive display frames in the same JS turn. Idle and timer callbacks still use
+    // the actual browser event loop, independently of system render load or refresh rate.
+    window.requestAnimationFrame = callback => { nextFrame = callback; return ++nextID; };
+    window.cancelAnimationFrame = () => { nextFrame = null; };
+    const probe = reactor();
+    app = mountRuneBrowser(canvas, probe, {backend:'cpu',resizeTo:null});
+    check(probe.state.painted && probe.state.negotiated && probe.state.pulls === 1, 'First presented frame must negotiate its mirror');
+    check(!element() && probe.state.flushes === 0 && canvas.tabIndex === 0,
+        'First frame must show pixels and offer a keyboard tab stop before building accessible DOM');
+    await waitFor(() => element());
+    check(probe.state.flushes === 1 && element().getAttribute('aria-label') === 'First' &&
+        canvas.tabIndex === -1 && element().tabIndex === 0, 'Initial idle pull must move the tab stop to the mounted controls');
+
+    const record = element();
+    probe.state.due = {local:true, nodes:[{...button,name:'Settled'}]};
+    for (let i=0; i<6; i++) present(probe,-1);
+    const lastScroll = performance.now();
+    check(probe.state.flushes === 1 && record.getAttribute('aria-label') === 'First', 'Scrolling must defer and coalesce mirror updates');
+    await waitFor(() => record.getAttribute('aria-label') === 'Settled');
+    const elapsed = performance.now() - lastScroll;
+    check(probe.state.flushes === 2 && element() === record && elapsed >= 145, 'Trailing scroll timer must update the retained node once');
+
+    present(probe,-1);
+    canvas.focus();
+    present(probe,{local:true,nodes:[{...button,name:'Focused immediately',states:['focused']}]});
+    check(document.activeElement === record && record.getAttribute('aria-label') === 'Focused immediately',
+        'A positive focus packet must bypass an outstanding scroll debounce');
+    await sleep(210);
+    check(probe.state.flushes === 2 && record.getAttribute('aria-label') === 'Focused immediately', 'An immediate update must cancel the old debounce');
+
+    present(probe,-1);
+    app.dispose();
+    check(!record.isConnected, 'Disposed app keeps no accessibility DOM');
+    const unopened = reactor();
+    app = mountRuneBrowser(canvas, unopened, {backend:'cpu',resizeTo:null});
+    app.dispose();
+    await sleep(210);
+    check(probe.state.flushes === 2 && unopened.state.flushes === 0 && !element(), 'Dispose must cancel outstanding trailing and initial idle callbacks');
+
+    canvas.tabIndex = 3;
+    const legacy = reactor(true);
+    app = mountRuneBrowser(canvas, legacy, {backend:'cpu',resizeTo:null});
+    check(element()?.getAttribute('aria-label') === 'First' && legacy.state.pulls === 1 && canvas.tabIndex === 3,
+        'A legacy reactor emitting full trees must expose its controls on first present');
+    app.dispose();
+    check(canvas.tabIndex === 3, 'An authored tab order survives mounting and disposal');
+    result.textContent = 'PASS CPU-first pixels, idle tab handoff, 6 scroll frames / 1 trailing flush (' +
+        Math.round(elapsed) + ' ms), immediate focus, idle and timer cancellation, legacy synchronous snapshot';
+} catch (error) { result.textContent = 'FAIL ' + error.message + ' ' + error.stack; }
+finally {
+    app?.dispose();
+    window.requestAnimationFrame = originalRAF;
+    window.cancelAnimationFrame = originalCancel;
+}
+</script>

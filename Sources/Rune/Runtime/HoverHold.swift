@@ -183,7 +183,7 @@ extension Runtime {
     internal func hoveredAlone() -> Int? {
         guard pointerPosition.x > -9000, pointerPosition.y > -9000 else { return nil }
         var best: Int? = nil
-        for i in flatNodes.indices where flatNodes[i].el.isHoverAlone {
+        for i in hoverGroupIndices where flatNodes[i].el.isHoverAlone {
             guard !hoverIsExiting(i), hoverAllowed(i), hoverNodeContains(i) else { continue }
             // `max_by_key(path.len())`: of equally deep matches, the last wins.
             if best.map({ flatNodes[i].path.count >= flatNodes[$0].path.count }) ?? true { best = i }
@@ -195,7 +195,7 @@ extension Runtime {
     /// (`hover.rs::shared_hovered`).
     internal func sharedHovered() -> Set<String> {
         var keys: Set<String> = []
-        for i in flatNodes.indices {
+        for i in hoverGroupIndices {
             guard let key = flatNodes[i].el.hoverGroupShare else { continue }
             if !hoverIsExiting(i) && hoverAllowed(i) && (hoverNodeContains(i) || hoverKeyboardWithin(i)) {
                 keys.insert(key)
@@ -206,12 +206,6 @@ extension Runtime {
 
     internal func hoverFlipContext() -> HoverFlipContext {
         HoverFlipContext(captured: hoverCaptured(), alone: hoveredAlone(), shared: sharedHovered())
-    }
-
-    /// Node `i` has a hover track (`hover().a > 0 || hover_group`).
-    internal func hasHoverTrack(_ i: Int) -> Bool {
-        let el = flatNodes[i].el
-        return (el.hoverBg?.a ?? 0) > 0 || el.isHoverGroup || el.hoverGroupShare != nil
     }
 
     /// Whether node `i`'s hover track goes on (`hover.rs::hover_flip`'s `on`): every hover element

@@ -225,7 +225,7 @@ extension TextSystem {
     /// is exact). A run is taken apart into its lines, each keyed as keying would, before its
     /// first line is shaped. Nil when none were waiting (`fill_paragraphs`).
     internal func fillParagraphs(_ laid: ParagraphLayout, budget: Double, rows: (Float, Float), reach: Float, field: UInt64? = nil) -> (ParagraphLayout, Bool)? {
-        guard let lazy = laid.lazy else { return nil }
+        guard let lazy = laid.lazy, rows.0 <= rows.1, reach >= 0 else { return nil }
         let st = paragraphState
         st.lock.lock()
         defer { st.lock.unlock() }
@@ -242,8 +242,10 @@ extension TextSystem {
             if shapedAny, let limit, start.duration(to: clock.now) >= limit { break }
             // The nearest waiting record: out from where the rows start, both ways.
             let mid = partitionPoint(paragraphs) { $0.y + $0.height < rows.0 }
-            let up = paragraphs[mid...].firstIndex { !$0.shaped }
-            let down = paragraphs[..<mid].lastIndex { !$0.shaped }
+            let first = reach.isFinite ? partitionPoint(paragraphs) { $0.y + $0.height < rows.0 - reach } : 0
+            let end = reach.isFinite ? partitionPoint(paragraphs) { $0.y <= rows.1 + reach } : paragraphs.count
+            let up = paragraphs[mid..<end].firstIndex { !$0.shaped }
+            let down = paragraphs[first..<mid].lastIndex { !$0.shaped }
             let k: Int
             switch (up, down) {
             case let (u?, d?): k = distance(paragraphs[u]) <= distance(paragraphs[d]) ? u : d
@@ -272,6 +274,7 @@ extension TextSystem {
             paragraphs[k].shaped = true
             shapedAny = true
         }
+        guard shapedAny else { return nil }
         var y: Double = 0
         var width: Float = 0
         var fullWidth: Float = 0

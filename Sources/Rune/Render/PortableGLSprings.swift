@@ -157,8 +157,8 @@ package final class GLSpringFrameRenderer {
         rune_gl_frame_springs(renderer.handle, tracksTexture, idsTexture, sampleTime.x, sampleTime.y)
         // Retaining the array forces copy-on-write if its caller edits it. Equal
         // addresses then identify the same bytes uploaded on the previous draw.
-        // Multi-page atlas preparation can rewrite those bytes.
-        let canRetain = tracksTexture != 0 && frame.imagePages.isEmpty
+        // Page binding preserves the original texel coordinates in this buffer.
+        let canRetain = tracksTexture != 0
         let reuse = canRetain && retainedInstances?.count == frame.instances.count &&
             frame.instances.withUnsafeBufferPointer { next in
                 retainedInstances?.withUnsafeBufferPointer { $0.baseAddress == next.baseAddress } == true

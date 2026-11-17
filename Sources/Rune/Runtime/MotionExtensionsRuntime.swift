@@ -1,11 +1,116 @@
 import Foundation
 import RuneMotion
 
+/// Instance locations belong to exactly one ordinary paint. A later paint can reorder
+/// the scene even when its application commit is unchanged.
+struct CyclePaint {
+    /// Browser display timestamps can straddle a nominal vsync by less than a
+    /// millisecond. Only a previously recorded decorative frame may use this slack.
+    static let displayTolerance = 0.0005
+    struct Slot {
+        let node: NodeId
+        var element: Int
+        let path: String
+        let index: Int
+        let rect: SIMD4<Float>
+        let ink: SIMD4<Float>
+        let curve: Cycle
+    }
+
+    private(set) var serial: UInt64 = 0
+    private(set) var slots: [Slot] = []
+    private(set) var interval: Double?
+
+    mutating func begin() {
+        serial &+= 1
+        slots.removeAll(keepingCapacity: true)
+        interval = nil
+    }
+
+    mutating func record(node: NodeId, element: Int, path: String, index: Int, rect: SIMD4<Float>,
+                         ink: SIMD4<Float>, curve: Cycle, interval: Double) {
+        slots.append(Slot(node: node, element: element, path: path, index: index, rect: rect, ink: ink, curve: curve))
+        self.interval = min(self.interval ?? interval, interval)
+    }
+
+    mutating func restoreTreeOrder(_ treeIndex: [Int]) {
+        for i in slots.indices { slots[i].element = treeIndex[slots[i].element] }
+    }
+}
+
+extension El {
+    var isPlainCycleDecoration: Bool {
+        isA11yHidden && children.isEmpty && !hasAuthoredHandlers && !isHit && !focusable &&
+            !autofocus && !focusGroup && a11yHelp == nil && opacity == 1 &&
+            borderWidth == 0 && shadows.isEmpty && blur == 0 && backdropBlur == 0 &&
+            !isolatedLayer && rotate == 0 && plainText == nil && richSpans == nil &&
+            shapes.isEmpty && iconPayload == nil && pixelsPayload == nil && surfacePayload == nil &&
+            imagePayload == nil && terminalGridPayload == nil && gradient == nil &&
+            liveText == nil && liveBindings.isEmpty && hoverBg == nil && pressBg == nil &&
+            pressColor == nil && pressScaleFactor == nil && focusFillColor == nil &&
+            groupOpacity == nil && runtimeExtras.isEmpty
+    }
+}
+
+extension Runtime {
+    func paintCycleTick(frame: inout RenderFrame, serial: UInt64, commit: Int, at now: Double) -> Bool {
+        let clear = clearColor.simd4(srgb: srgbBlend)
+        guard cyclePaint.serial == serial, viewCommitCount == commit, srgbBlend == frame.srgbBlend,
+              frame.clearColor == SIMD4(clear.x * clear.w, clear.y * clear.w, clear.z * clear.w, clear.w),
+              let dt = cyclePaint.interval, cyclePaint.slots.count == loopRuntime.tracks.count,
+              let due = activePaintedLoopWake, due - now <= CyclePaint.displayTolerance, now.isFinite,
+              liveVisible, !reducedMotion, cxSettings.viewTimeScale > 0,
+              !hasOtherPaintDeadline, !isTracing, traceChannels == nil, rewindRecorder == nil,
+              !RasterCheck.enabled, restsExceptLoop(), (pollWakeDeadline() ?? .infinity) > now,
+              !timerWake.isAsked, !polledChange, !virtualFill.resuming(at: now),
+              (nextWakeDeadline(after: currentTime, includePaint: true, includeLoops: false) ?? .infinity) > now,
+              cyclePaint.slots.allSatisfy({ slot in
+                  frame.instances.indices.contains(slot.index) && frame.instances[slot.index].rect == slot.rect &&
+                      frame.instances[slot.index].params.y == KIND_RECT && lastElements.indices.contains(slot.element) &&
+                      lastElements[slot.element].path == slot.path
+              }) else { return false }
+        currentTime = now
+        for slot in cyclePaint.slots {
+            let opacity = slot.curve.sample(at: now)
+            let a = slot.ink.w * opacity
+            frame.instances[slot.index].fill = SIMD4(slot.ink.x * a, slot.ink.y * a, slot.ink.z * a, a)
+            frame.instances[slot.index].params.w = opacity
+            lastElements[slot.element].opacity = opacity
+            hitGeometryByPath[slot.path]?.opacity = opacity
+            kitHooks.unseenPresence.updateCycleOpacity(slot.node, opacity: opacity)
+        }
+        invalidateNativeMotionElements()
+        activePaintedLoopWake = now + dt
+        return true
+    }
+}
+
 /// Runtime hooks bridging `El.childExit`, `El.rideTrailing`, and `LoopClock` / `El.loopOpacity` /
 /// `El.loopRotation` / `El.loopSlide` / `El.cycle` / `Stagger.cascade` into `Runtime`
 /// (`Sources/Rune/El/ChildExit.swift`, `RideTrailing.swift`, `MotionLoopExtensions.swift`,
 /// `Sources/Rune/Runtime/LoopClock.swift`).
 internal extension Runtime {
+    /// Called by both painters for the loop's visible home geometry, including a slide
+    /// whose current pose has moved outside the clip.
+    func schedulePaintedLoop(_ track: LoopTrack, id: NodeId) {
+        let nodeTime = scene.store.nodeTime(id)
+        let scale = Double(scene.store.nodeTimeScale(id)) * Double(cxSettings.viewTimeScale)
+        func wake(after delay: Double) {
+            let due = currentTime + delay
+            activePaintedLoopWake = min(activePaintedLoopWake ?? due, due)
+        }
+        if track.isActive(at: nodeTime) {
+            if let interval = track.frameInterval() {
+                wake(after: interval)
+            } else if scale > 0 {
+                activePaintedLoopsAnimating = true
+            }
+        }
+        if scale > 0, let start = track.pendingStart(at: nodeTime) {
+            wake(after: max(0, start - nodeTime) / scale)
+        }
+    }
+
     /// Captures exiting direct-child `ChildExit` overrides before `flatNodes` is replaced by a commit.
     func collectChildExitOverrides(
         prevNodes: [FlatNode],
@@ -77,7 +182,8 @@ internal extension Runtime {
         loopRuntime.sample(id: id, nodeSize: nodeSize, at: now, wall: wallNow, reducedMotion: reducedMotion)
     }
     func sampleLoopPresentation(id: NodeId, nodeSize: Vec2, wallNow: Double) -> LoopSampleResult? {
-        loopRuntime.sample(
+        guard !loopRuntime.tracks.isEmpty else { return nil }
+        return loopRuntime.sample(
             id: id,
             nodeSize: nodeSize,
             at: scene.store.nodeTime(id),

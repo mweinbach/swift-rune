@@ -85,7 +85,28 @@ extension Runtime {
         return sum
     }
 
-    internal func carriedScroll(for node: FlatNode, scales: [String: Vec2], turn: (String) -> Turn?) -> Vec2 {
+    internal func makeCarriedScrollCache() -> [Vec2?] {
+        guard !scrollOffsets.isEmpty, launchScrollById.isEmpty, !hasActiveExitingNodes else { return [] }
+        return Array(repeating: nil, count: flatNodes.count)
+    }
+
+    internal func carriedScroll(for node: FlatNode, scales: [String: Vec2], cache: inout [Vec2?],
+                                turn: (String) -> Turn?) -> Vec2 {
+        // Below an ordinary parent the ancestor offsets, scale and turn are identical.
+        // A scrolling parent starts a new sum in the original inner-to-outer order.
+        if !cache.isEmpty, flatNodes.indices.contains(node.index), flatNodes[node.index].nodeId == node.nodeId {
+            if let i = node.parentIndex, let carried = cache[i], scrollOffsets[flatNodes[i].path] == nil {
+                cache[node.index] = carried
+                return carried
+            }
+            let carried = uncachedCarriedScroll(for: node, scales: scales, turn: turn)
+            cache[node.index] = carried
+            return carried
+        }
+        return uncachedCarriedScroll(for: node, scales: scales, turn: turn)
+    }
+
+    private func uncachedCarriedScroll(for node: FlatNode, scales: [String: Vec2], turn: (String) -> Turn?) -> Vec2 {
         let hasLaunches = !launchScrollById.isEmpty
         guard hasLaunches || !scrollOffsets.isEmpty else { return .zero }
         var sum = Vec2.zero

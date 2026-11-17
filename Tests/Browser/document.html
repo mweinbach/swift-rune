@@ -1,0 +1,77 @@
+<!doctype html><meta charset="utf-8">
+<style>* {margin:0} #result {position:fixed;right:0;top:0}</style>
+<canvas id="story" style="height:17px;transform:scale(1)"></canvas><pre id="result">Running</pre>
+<script type="module">
+import { mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+const result = document.querySelector('#result'), canvas = document.querySelector('#story');
+const memory = new WebAssembly.Memory({initial:1024}), encoder = new TextEncoder(), decoder = new TextDecoder();
+const state = {w:0,h:0,s:1,top:0,view:0,draws:0,dirty:true};
+const natural = 11000;
+let app;
+const wait = () => new Promise(resolve => requestAnimationFrame(resolve));
+async function frames(n) { for(let i=0;i<n;++i) await wait(); }
+function check(ok,msg) { if(!ok) throw Error(msg); }
+try {
+    app = mountRuneBrowser(null, {exports:{
+        memory, __main_void:()=>0, rune_web_enable(){}, rune_web_buffer:()=>0, rune_web_field:()=>0,
+        rune_web_config() {
+            const data = encoder.encode(JSON.stringify({canvasId:'story',webDocument:true}));
+            new Uint8Array(memory.buffer).set(data); return data.length;
+        },
+        rune_web_event(n) {
+            const e = JSON.parse(decoder.decode(new Uint8Array(memory.buffer,0,n)));
+            if (e.kind === 'resize') {
+                state.w=Math.round(e.x*e.scale);state.h=Math.round(e.y*e.scale);state.s=e.scale;state.view=e.dy;state.dirty=true;
+                return 1;
+            }
+            if (e.kind === 'pageScroll') {
+                const band=state.h/state.s;
+                if(e.y>=state.top+64 && e.y+state.view<=state.top+band-64) return 0;
+                const top=Math.max(0,Math.min(natural-band,e.y-(band-state.view)/2));
+                if(top===state.top)return 0;
+                state.top=top;state.dirty=true;return 1;
+            }
+            return 0;
+        },
+        rune_web_frame(){
+            if(!state.dirty)return 0;
+            state.dirty=false;++state.draws;
+            new Uint32Array(memory.buffer,0,2).set([state.w,state.h]);
+            return 8+state.w*state.h*4;
+        },
+        rune_web_page(){ new Float32Array(memory.buffer,0,3).set([natural,state.top,0]);return 12; }
+    }}, {backend:'cpu'});
+    await app.ready;
+    const wrapper=canvas.closest('[data-rune-band]');
+    check(wrapper && wrapper.offsetHeight===natural,'document spacer missing');
+    check(canvas.clientHeight===innerHeight+512,'canvas must hold only visible height plus two skirts');
+    await frames(5);
+    const initial=state.draws;
+    scrollTo(0,100);await frames(4);
+    check(state.draws===initial && canvas.getBoundingClientRect().top===-100,'in-band motion must scroll existing canvas pixels: '+[state.draws, initial,scrollY, canvas.getBoundingClientRect().top,state.top].join(','));
+    scrollTo(0,850);await frames(4);
+    check(state.draws===initial+1 && state.top===594 && canvas.getBoundingClientRect().top===-256,'new band offset');
+    const wheel=new WheelEvent('wheel',{deltaY:80,cancelable:true});
+    canvas.dispatchEvent(wheel);check(!wheel.defaultPrevented,'page blocked native wheel');
+    const pageKey=new KeyboardEvent('keydown',{key:'PageDown',code:'PageDown',cancelable:true});
+    canvas.dispatchEvent(pageKey);check(!pageKey.defaultPrevented,'page blocked native keyboard scrolling');
+    app.dispose();
+    check(canvas.parentNode===document.body && canvas.style.height==='17px' && canvas.style.transform==='scale(1)' && !wrapper.isConnected,
+        'named canvas disposal did not restore placement or styles');
+    const overflow=document.body.style.overflow;
+    app=mountRuneBrowser(null,{exports:{
+        memory,rune_web_enable(){},__main_void:()=>0,rune_web_event:()=>0,rune_web_buffer:()=>0,
+        rune_web_frame:()=>0,rune_web_field:()=>0,rune_web_config(){
+            const bytes=encoder.encode(JSON.stringify({canvasId:'story',fullViewport:true}));
+            new Uint8Array(memory.buffer).set(bytes);return bytes.length;
+        }
+    }});
+    await app.ready;
+    check(canvas.getBoundingClientRect().width===innerWidth && canvas.getBoundingClientRect().height===innerHeight &&
+        document.body.style.overflow==='hidden','fullViewport canvas layout');
+    app.dispose();
+    check(canvas.style.height==='17px' && document.body.style.overflow===overflow,'fullViewport page styles did not restore');
+    result.textContent='PASS named canvas, 11000pt document, one recenter, native wheel/keys, full viewport and style restoration';
+} catch(error) { result.textContent='FAIL '+error.stack; }
+finally {app?.dispose();}
+</script>

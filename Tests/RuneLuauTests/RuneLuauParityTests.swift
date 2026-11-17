@@ -130,6 +130,72 @@ struct RuneLuauParityTests {
         #expect(inlineContainer?.layout.scrollAxes.contains(.vertical) == false)
     }
 
+    @Test("Mounted Luau virtual rows scroll in Rune without reevaluating the script's surface")
+    func mountedVirtualListUsesRuntimeRows() throws {
+        final class Reads: @unchecked Sendable { var sawState = false }
+        let reads = Reads()
+        var options = ScriptOptions()
+        options.aroundRead = { state, run in
+            if state is LuauTestState { reads.sawState = true }
+            run()
+        }
+        let sources = Sources.single("""
+            local ui = require("@rune/ui")
+            local builds = 0
+            local last = 0
+            local function visible(e) last = e.last end
+            return {
+                render = function()
+                    builds += 1
+                    return ui.col({ w = "full", h = "full" }, {
+                        ui.virtualList({ key = "items", h = "full", count = 100000,
+                            estimatedRowHeight = 24, version = 1,
+                            renderRow = function(i)
+                                return ui.text("row " .. i, {h = 24})
+                            end,
+                            onVisibleRows = visible })
+                    })
+                end,
+                stopReporting = function() visible = nil end,
+                metrics = function() return {builds = builds, last = last} end,
+            }
+            """)
+        let script = Script(name: "mounted-rows", sources: sources, options: options)
+        let runtime = Runtime(state: LuauTestState(), viewport: Vec2(260, 120)) { _, cx in script.view(cx) }
+        _ = runtime.frame(at: 0)
+        let initialBuilds = script.metrics.renders
+        #expect(initialBuilds > 0 && reads.sawState)
+        #expect(runtime.elements().contains { $0.text == "row 1" })
+        #expect(script.metrics.rows > 0 && script.metrics.rows < 100)
+        for step in 1...10 {
+            let now = Double(step) / 120
+            runtime.wheel(WheelEvent(dy: -320), at: Vec2(40, 40), now: now)
+            _ = runtime.frame(at: now)
+        }
+        let final = try script.query("metrics")
+        #expect((final.get("last").asInt64 ?? 0) > 100)
+        #expect(!runtime.elements().contains { $0.text == "row 1" })
+        #expect(runtime.elements().count < 350)
+        #expect(script.metrics.rows < 650)
+
+        // Mount a list that has never reported a range. A reporting handler can
+        // legitimately invalidate its surface while the runtime delivers its last update.
+        let silent = Script(name: "silent-rows", sources: sources, options: options)
+        try silent.call("stopReporting")
+        let silentRuntime = Runtime(state: LuauTestState(), viewport: Vec2(260, 120)) { _, cx in silent.view(cx) }
+        _ = silentRuntime.frame(at: 0)
+        let initialSilentBuilds = silent.metrics.renders
+        #expect(initialSilentBuilds == 1)
+        for step in 1...4 {
+            let now = Double(step) / 120
+            silentRuntime.wheel(WheelEvent(dy: -320), at: Vec2(40, 40), now: now)
+            _ = silentRuntime.frame(at: now)
+        }
+        #expect(!silentRuntime.elements().contains { $0.text == "row 1" })
+        #expect(silent.metrics.renders == initialSilentBuilds)
+        #expect(try silent.query("metrics").get("last").asInt64 == 0)
+    }
+
     @Test("P0: children accept false/number, reject true/reuse/stale elements")
     func childrenValidationAndReuse() throws {
         let script = Script(
@@ -1157,6 +1223,8 @@ struct RuneLuauParityTests {
             "scrollY = 123",
             "estimatedRowHeight = \"tall\"",
             "rowVersions = \"bad\"",
+            "rowVersions = {1, 2, {}}",
+            "version = {}",
             "rowKey = 42",
             "rowError = 42",
         ] {
@@ -1351,13 +1419,73 @@ struct RuneLuauParityTests {
         #expect(collectTexts(recEl).contains("after-pcall"))
     }
 
+    @Test("Layered Luau props finalize in Rust order across mutable and frozen styles")
+    func layeredPropsFinalizeAfterHandlersAndOverrides() throws {
+        let accent = Color.srgb(0.3, 0.4, 0.5)
+        let fill = Color.srgb(0.2, 0.3, 0.1)
+        let script = Script(name: "layers", sources: Sources.single("""
+            local ui = require("@rune/ui")
+            local function callback() end
+            local style = {center = true, disabled = true, selected = true, scrollX = true,
+                           corners = table.freeze({1, "2", 3, 4}), pad = 9}
+            local frozen = table.freeze(table.clone(style))
+            local function box(base, key)
+                return ui.box(base, {key = key, pl = 2, align = "end", justify = "end",
+                    radius = 20, fill = "fill", role = "group", onPress = callback, onHover = callback,
+                    onMiddlePress = callback, focusable = true, scrollX = false, scrollY = true})
+            end
+            return {render = function()
+                return ui.col({
+                    box(style, "mutable"), box(frozen, "frozen"),
+                    ui.box(frozen, {key = "reset", fill = "fill", center = false, selected = false,
+                        disabled = false, align = "end", onPress = callback, role = "group"}),
+                    ui.text("truncate", {key = "text", truncate = true}),
+                    ui.text("wrap", {truncate = true, noWrap = true}, {key = "wrap", wrap = true}),
+                    ui.box({key = "list", role = "list"}), ui.box({key = "status", role = "status"}),
+                })
+            end}
+            """), options: ScriptOptions().palette { name, dark in
+                switch name {
+                case "selected": return accent
+                case "fill": return fill
+                default: return defaultPalette()(name, dark)
+                }
+            })
+        let cx = Cx<LuauTestState>(viewport: Vec2(320, 240))
+        for _ in 0..<2 {
+            let root = script.view(cx)
+            for key in ["mutable", "frozen"] {
+                let box = try #require(findElement(root) { $0.keyId == key })
+                #expect(box.layout.alignItems == .center)
+                #expect(box.layout.justifyContent == .center)
+                #expect(box.layout.padding.left == 2 && box.layout.padding.top == 9)
+                #expect(box.corners == Corners(1, 0, 3, 4))
+                #expect(box.background == accent && box.isFocusSelected)
+                #expect(box.layout.scrollAxes == .both)
+                #expect(box.a11yDisabled && !box.focusable)
+                #expect(box.handlers.onHover != nil)
+                #expect(box.handlers.onClick == nil && box.handlers.onMiddlePress == nil)
+            }
+            let reset = try #require(findElement(root) { $0.keyId == "reset" })
+            #expect(reset.background == fill && !reset.isFocusSelected)
+            #expect(!reset.a11yDisabled && reset.focusable)
+            #expect(reset.layout.alignItems == .end)
+            #expect(reset.role == .group && reset.handlers.onClick != nil)
+            let text = try #require(findElement(root) { $0.keyId == "text" })
+            #expect(text.textStyle.wrap == .ellipsis && text.layout.flexShrink == 1)
+            #expect(findElement(root) { $0.keyId == "wrap" }?.textStyle.wrap == .wrap)
+            #expect(findElement(root) { $0.keyId == "status" }?.role == .status)
+            #expect(findElement(root) { $0.keyId == "list" }?.role == .list)
+        }
+    }
+
     @Test("Props, defaultPalette light/dark tokens, shadow reversal, dir, fadeOut, hoverTransition")
     func propsPaletteShadowsAndTextDirection() throws {
         // 1. Default palette tokens (light & dark)
         let pal = defaultPalette()
         let tokenNames = [
             "bg", "card", "card-border", "text", "text-secondary",
-            "separator", "hover", "press", "control-off", "control-track", "indicator", "selected",
+            "separator", "hover", "press", "control-off", "control-track", "indicator",
         ]
         for tok in tokenNames {
             let light = pal(tok, false)
@@ -1368,6 +1496,7 @@ struct RuneLuauParityTests {
                 #expect(light != dark)
             }
         }
+        #expect(pal("selected", true) == nil)
         #expect(pal("not-a-token", true) == nil)
 
         // 2. Custom palette, reversed shadow order, and exhaustive prop checks
@@ -1438,7 +1567,6 @@ struct RuneLuauParityTests {
         #expect(el.isHoverGroup == true)
         #expect(el.groupColor != nil)
         #expect(el.helpSide == .right)
-        #expect(el.itemSelected == true)
         #expect(el.isFocusSelected == true)
         #expect(el.focusable == true)
         let scx = findElement(root) { $0.keyId == "scx" }!

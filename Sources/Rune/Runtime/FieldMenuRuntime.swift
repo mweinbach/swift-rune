@@ -68,7 +68,7 @@ extension Runtime {
             if focusedPath != node.path {
                 let prevNode = focusedPath.flatMap { nodeByPath[$0] }.map { flatNodes[$0] }
                 handleKitFocusTransition(prevNode: prevNode, newPath: node.path, at: now)
-                focusedPath = node.path
+                assignFocusPath(node.path, keyboard: false)
                 focusedKey = node.key
                 focusedLinkIndex = nil
                 imeReset = true
@@ -215,7 +215,7 @@ extension Runtime {
         case "paste":
             if let node, focusedPath == node.path || nodeByPath[targetPath] != nil {
                 if focusedPath != targetPath {
-                    focusedPath = targetPath
+                    assignFocusPath(targetPath, keyboard: false)
                     focusedKey = node.key
                 }
                 _ = pasteClipboardNow(at: now)

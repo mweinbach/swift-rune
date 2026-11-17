@@ -194,6 +194,8 @@ public final class FlightRecorder: @unchecked Sendable {
 
 public struct RewindElementSnapshot: Sendable, Equatable, Codable {
     public var key: String
+    /// Stable scene identity when the sample came from a Rune window.
+    public var nodeID: UInt64?
     public var left: Float
     public var top: Float
     public var right: Float
@@ -204,8 +206,9 @@ public struct RewindElementSnapshot: Sendable, Equatable, Codable {
         MotionRect(left: left, top: top, right: right, bottom: bottom)
     }
 
-    public init(key: String, rect: MotionRect, opacity: Float) {
+    public init(key: String, rect: MotionRect, opacity: Float, nodeID: UInt64? = nil) {
         self.key = key
+        self.nodeID = nodeID
         self.left = rect.left
         self.top = rect.top
         self.right = rect.right
@@ -298,7 +301,17 @@ public struct RewindChange: Sendable, Equatable {
 }
 
 public struct RewindClip: Sendable, Equatable, Codable {
-    public let frames: [RewindFrame]
+    private typealias Q = RewindTape.Quantized
+    private typealias Entry = (id: UInt32, value: Q)
+    private static let stride = 64
+
+    private let marks: ArraySlice<RewindTape.Mark>
+    private let words: ArraySlice<UInt32>
+    private let starts: [Int]
+    private let checkpoints: [[Entry]]
+    private let nodeIDs: [UInt64?]
+    // Caller-provided frames can contain unquantized coordinates and arbitrary element order.
+    private let authored: (frames: [RewindFrame], ids: [[UInt32]])?
     public let viewportWidth: Float
     public let viewportHeight: Float
     public let names: [String]
@@ -306,216 +319,405 @@ public struct RewindClip: Sendable, Equatable, Codable {
     public let jumps: [[UInt32]]
 
     public var viewport: Vec2 { Vec2(viewportWidth, viewportHeight) }
-    public var len: Int { frames.count }
-    public var isEmpty: Bool { frames.isEmpty }
-
-    public var durationSeconds: Double {
-        guard let first = frames.first, let last = frames.last else { return 0 }
-        return max(0, last.timeSeconds - first.timeSeconds)
-    }
-
+    public var len: Int { marks.count }
+    public var isEmpty: Bool { marks.isEmpty }
+    public var durationSeconds: Double { max(0, -time(0)) }
     public var duration: Double { durationSeconds }
 
+    /// Materializes every frame for compatibility. A single scrub or export range reads its own deltas.
+    public var frames: [RewindFrame] {
+        if let authored { return authored.frames }
+        var result: [RewindFrame] = []
+        result.reserveCapacity(len)
+        var state = checkpoint(before: 0)
+        for k in 0..<len {
+            apply(k, to: &state)
+            result.append(makeFrame(k, state: state))
+        }
+        return result
+    }
+
+    private enum LegacyIdentity: Hashable {
+        case node(UInt64)
+        case label(String, Int)
+    }
+
     public init(frames: [RewindFrame], viewport: Vec2 = Vec2(800, 600)) {
-        self.frames = frames
+        var tape = RewindTape(window: .infinity, maxBytes: .max)
+        var indices: [LegacyIdentity: UInt32] = [:]
+        var nodeIDs: [UInt64?] = []
+        var frameIDs: [[UInt32]] = []
+        for frame in frames {
+            tape.begin(at: frame.timeSeconds, viewport: viewport)
+            var occurrences: [String: Int] = [:]
+            var ids: [UInt32] = []
+            ids.reserveCapacity(frame.elements.count)
+            for shot in frame.elements {
+                let identity: LegacyIdentity
+                if let node = shot.nodeID {
+                    identity = .node(node)
+                } else {
+                    let ordinal = occurrences[shot.key, default: 0]
+                    occurrences[shot.key] = ordinal + 1
+                    identity = .label(shot.key, ordinal)
+                }
+                let id = indices[identity] ?? UInt32(nodeIDs.count)
+                if Int(id) == nodeIDs.count {
+                    indices[identity] = id
+                    nodeIDs.append(shot.nodeID)
+                }
+                ids.append(id)
+                // The same sparse tape can store the original float bits, including subpixel differences.
+                let q: Q = (Int32(bitPattern: shot.left.bitPattern), Int32(bitPattern: shot.top.bitPattern),
+                            Int32(bitPattern: shot.right.bitPattern), Int32(bitPattern: shot.bottom.bitPattern),
+                            Int32(bitPattern: shot.opacity.bitPattern))
+                tape.sample(nodeID: UInt64(id), name: shot.key, q: q)
+            }
+            tape.end()
+            frameIDs.append(ids)
+        }
+        let frozen = tape.frozen()
+        self.init(frozen, viewport: viewport, nodeIDs: nodeIDs, authored: (frames, frameIDs))
+    }
+
+    internal init(_ frozen: RewindTape.Frozen) {
+        self.init(frozen, viewport: frozen.viewport, nodeIDs: frozen.nodeIDs, authored: nil)
+    }
+
+    private init(_ frozen: RewindTape.Frozen, viewport: Vec2, nodeIDs: [UInt64?],
+                 authored: (frames: [RewindFrame], ids: [[UInt32]])?) {
+        self.names = frozen.names
+        self.nodeIDs = nodeIDs
         self.viewportWidth = viewport.x
         self.viewportHeight = viewport.y
-        let indexed = Self.buildIndex(frames: frames)
-        self.names = indexed.names
-        self.activity = indexed.activity
-        self.jumps = indexed.jumps
+        self.authored = authored
+        // A trimmed clip should release the discarded prefix when the live recorder is released.
+        let marks = frozen.marks.startIndex == 0 ? frozen.marks : Array(frozen.marks)[...]
+        let words = frozen.words.startIndex == 0 ? frozen.words : Array(frozen.words)[...]
+        self.marks = marks
+        self.words = words
+        var starts = [words.startIndex]
+        var checkpoints: [[Entry]] = []
+        var state = frozen.base
+        var activity: [Float] = []
+        var jumps: [[UInt32]] = []
+        var previousDistances: [UInt32: Move] = [:]
+        var previous = FrameMotion()
+        var changedSinceCheckpoint = true
+        activity.reserveCapacity(frozen.marks.count)
+        jumps.reserveCapacity(frozen.marks.count)
+        starts.reserveCapacity(frozen.marks.count + 1)
+        for (k, mark) in marks.enumerated() {
+            if k.isMultiple(of: Self.stride) {
+                if !changedSinceCheckpoint, let previous = checkpoints.last {
+                    checkpoints.append(previous)
+                } else {
+                    checkpoints.append(state.enumerated().compactMap { (i, q) in q.map { (UInt32(i), $0) } })
+                }
+                changedSinceCheckpoint = false
+            }
+            if mark.len > 0 { changedSinceCheckpoint = true }
+            let start = starts[k]
+            let end = start + Int(mark.len)
+            starts.append(end)
+            var motion = FrameMotion()
+            Self.apply(words[start..<end], to: &state) { id, before, after in
+                guard let before, let after else { return }
+                if before.4 != after.4 {
+                    if authored == nil {
+                        motion.faded = true
+                    } else {
+                        let a = Float(bitPattern: UInt32(bitPattern: before.4))
+                        let b = Float(bitPattern: UInt32(bitPattern: after.4))
+                        motion.faded = motion.faded || abs(a - b) >= 0.0001
+                    }
+                }
+                guard (before.0, before.1, before.2, before.3) != (after.0, after.1, after.2, after.3) else { return }
+                let a = Self.geometry(before, exact: authored != nil)
+                let b = Self.geometry(after, exact: authored != nil)
+                let d = RewindChange.edgeDistance(a.rect, b.rect)
+                if d > 0 {
+                    motion.order.append(id)
+                    motion.moves[id] = Move(distance: d, before: a.rect, after: b.rect)
+                    motion.most = max(motion.most, d)
+                }
+            }
+            activity.append(motion.most == 0 && motion.faded ? 0.25 : motion.most)
+            if k > 0 { jumps.append(previous.jumps(between: previousDistances, and: motion.moves)) }
+            previousDistances = previous.moves
+            previous = motion
+        }
+        if !frozen.marks.isEmpty { jumps.append(previous.jumps(between: previousDistances, and: [:])) }
+        self.starts = starts
+        self.checkpoints = checkpoints
+        self.activity = activity
+        self.jumps = jumps
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case frames
-        case viewportWidth
-        case viewportHeight
+    private struct Move {
+        var distance: Float
+        var before: MotionRect
+        var after: MotionRect
     }
 
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let frames = try container.decode([RewindFrame].self, forKey: .frames)
-        let vw = try container.decodeIfPresent(Float.self, forKey: .viewportWidth) ?? 800
-        let vh = try container.decodeIfPresent(Float.self, forKey: .viewportHeight) ?? 600
-        self.init(frames: frames, viewport: Vec2(vw, vh))
-    }
+    private struct FrameMotion {
+        var order: [UInt32] = []
+        var moves: [UInt32: Move] = [:]
+        var most: Float = 0
+        var faded = false
 
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(frames, forKey: .frames)
-        try container.encode(viewportWidth, forKey: .viewportWidth)
-        try container.encode(viewportHeight, forKey: .viewportHeight)
-    }
-
-    /// Time of frame `k` relative to the clip end (`<= 0.0`, matching `Clip::time`).
-    public func time(_ index: Int) -> Double {
-        guard index >= 0, index < frames.count, let last = frames.last else { return 0 }
-        return frames[index].timeSeconds - last.timeSeconds
-    }
-
-    /// Largest move of any element in frame `k` (`0.25` when only opacity changed).
-    public func activity(_ index: Int) -> Float {
-        guard index >= 0, index < activity.count else { return 0 }
-        return activity[index]
-    }
-
-    public func hasJump(_ index: Int) -> Bool {
-        guard index >= 0, index < jumps.count else { return false }
-        return !jumps[index].isEmpty
-    }
-
-    public func name(_ id: UInt32) -> String {
-        let idx = Int(id)
-        return (idx >= 0 && idx < names.count) ? names[idx] : ""
-    }
-
-    public func id(forKey key: String) -> UInt32? {
-        names.firstIndex(of: key).map { UInt32($0) }
-    }
-
-    /// All elements on screen at frame `k` (`Clip::frame`).
-    public func frame(_ index: Int) -> [(id: UInt32, snapshot: RewindElementSnapshot)] {
-        guard index >= 0, index < frames.count else { return [] }
-        var nameToId: [String: UInt32] = [:]
-        for (i, n) in names.enumerated() { nameToId[n] = UInt32(i) }
-        return frames[index].elements.compactMap { el in
-            guard let id = nameToId[el.key] else { return nil }
-            return (id, el)
+        func jumps(between prior: [UInt32: Move], and next: [UInt32: Move]) -> [UInt32] {
+            order.filter { id in
+                guard let move = moves[id], move.distance >= 4 else { return false }
+                let near = max(prior[id]?.distance ?? 0, next[id]?.distance ?? 0)
+                let returned = next[id].map { RewindChange.edgeDistance($0.after, move.before) < 0.5 } ?? false
+                return move.distance > 2.5 * near || returned
+            }
         }
     }
 
-    func frameBefore(_ index: Int) -> [(id: UInt32, snapshot: RewindElementSnapshot)] {
-        guard index > 0 else { return [] }
-        return frame(index - 1)
+    private static func geometry(_ q: Q, exact: Bool) -> (rect: MotionRect, opacity: Float) {
+        if !exact { return RewindTape.dequantize(q) }
+        func value(_ bits: Int32) -> Float { Float(bitPattern: UInt32(bitPattern: bits)) }
+        return (MotionRect(left: value(q.0), top: value(q.1), right: value(q.2), bottom: value(q.3)), value(q.4))
+    }
+
+    private func snapshot(_ id: UInt32, _ q: Q) -> RewindElementSnapshot {
+        let value = Self.geometry(q, exact: authored != nil)
+        return RewindElementSnapshot(key: names[Int(id)], rect: value.rect, opacity: value.opacity, nodeID: nodeIDs[Int(id)])
+    }
+
+    private static func apply(_ words: ArraySlice<UInt32>, to state: inout [Q?],
+                              change: (UInt32, Q?, Q?) -> Void = { _, _, _ in }) {
+        RewindTape.decode(words) { id, mask, values in
+            let i = Int(id)
+            let before = state[i]
+            if mask == 0 {
+                state[i] = nil
+            } else {
+                var q = before ?? (0, 0, 0, 0, 0)
+                if mask & 1 != 0 { q.0 = values.0 }
+                if mask & 2 != 0 { q.1 = values.1 }
+                if mask & 4 != 0 { q.2 = values.2 }
+                if mask & 8 != 0 { q.3 = values.3 }
+                if mask & 16 != 0 { q.4 = values.4 }
+                state[i] = q
+            }
+            change(id, before, state[i])
+        }
+    }
+
+    private func apply(_ k: Int, to state: inout [Q?], change: (UInt32, Q?, Q?) -> Void = { _, _, _ in }) {
+        Self.apply(words[starts[k]..<starts[k + 1]], to: &state, change: change)
+    }
+
+    private func checkpoint(before k: Int) -> [Q?] {
+        var state = [Q?](repeating: nil, count: names.count)
+        guard !isEmpty else { return state }
+        for (id, value) in checkpoints[k / Self.stride] { state[Int(id)] = value }
+        let start = k - k % Self.stride
+        for frame in start..<k { apply(frame, to: &state) }
+        return state
+    }
+
+    private func makeFrame(_ index: Int, state: [Q?]) -> RewindFrame {
+        let mark = marks[marks.startIndex + index]
+        let elements = state.enumerated().compactMap { (i, q) in q.map { snapshot(UInt32(i), $0) } }
+        return RewindFrame(index: mark.index, timeSeconds: mark.t, elements: elements)
+    }
+
+    /// Replays one frame by its position in the clip, preserving its original recording index and timestamp.
+    public func recordedFrame(_ index: Int) -> RewindFrame? {
+        guard index >= 0, index < len else { return nil }
+        if let authored { return authored.frames[index] }
+        var state = checkpoint(before: index)
+        apply(index, to: &state)
+        return makeFrame(index, state: state)
+    }
+
+    internal func absoluteTime(_ index: Int) -> Double {
+        guard index >= 0, index < len else { return 0 }
+        return marks[marks.startIndex + index].t
+    }
+
+    public func time(_ index: Int) -> Double {
+        guard index >= 0, index < len else { return 0 }
+        return absoluteTime(index) - absoluteTime(len - 1)
+    }
+
+    public func activity(_ index: Int) -> Float { activity.indices.contains(index) ? activity[index] : 0 }
+    public func hasJump(_ index: Int) -> Bool { jumps.indices.contains(index) && !jumps[index].isEmpty }
+    public func name(_ id: UInt32) -> String {
+        guard let index = Int(exactly: id), names.indices.contains(index) else { return "" }
+        return names[index]
+    }
+    public func id(forKey key: String) -> UInt32? { names.firstIndex(of: key).map(UInt32.init) }
+
+    public func frame(_ index: Int) -> [(id: UInt32, snapshot: RewindElementSnapshot)] {
+        guard index >= 0, index < len else { return [] }
+        if let authored { return Array(zip(authored.ids[index], authored.frames[index].elements)) }
+        var state = checkpoint(before: index)
+        apply(index, to: &state)
+        return state.enumerated().compactMap { (i, q) in q.map { (UInt32(i), snapshot(UInt32(i), $0)) } }
+    }
+
+    internal func frameBefore(_ index: Int) -> [(id: UInt32, snapshot: RewindElementSnapshot)] {
+        if index > 0 { return frame(index - 1) }
+        guard index == 0, let first = checkpoints.first else { return [] }
+        return first.map { ($0.id, snapshot($0.id, $0.value)) }
+    }
+
+    internal func forEachFrameChanges(in range: Range<Int>, _ body: (Int, [RewindChange]) throws -> Void) rethrows {
+        let start = max(0, range.lowerBound), end = min(len, range.upperBound)
+        guard start < end else { return }
+        var state = checkpoint(before: start)
+        for k in start..<end {
+            var changes: [RewindChange] = []
+            let jumped = Set(jumps[k])
+            apply(k, to: &state) { id, before, after in
+                let a = before.map { Self.geometry($0, exact: authored != nil) }
+                let b = after.map { Self.geometry($0, exact: authored != nil) }
+                changes.append(RewindChange(id: id, key: name(id), fromRect: a?.rect, toRect: b?.rect,
+                                            fromOpacity: a?.opacity, toOpacity: b?.opacity, jump: jumped.contains(id)))
+            }
+            changes.sort { a, b in a.jump == b.jump ? a.distance > b.distance : a.jump }
+            try body(k, changes)
+        }
     }
 
     public func changes(atFrame index: Int) -> [RewindChange] {
-        guard index > 0, index < frames.count else { return [] }
-        let prev = Dictionary(uniqueKeysWithValues: frames[index - 1].elements.map { ($0.key, $0) })
-        let curr = Dictionary(uniqueKeysWithValues: frames[index].elements.map { ($0.key, $0) })
-        var nameToId: [String: UInt32] = [:]
-        for (i, n) in names.enumerated() { nameToId[n] = UInt32(i) }
-        let jumpSet = Set(jumps[index])
-        let allKeys = Set(prev.keys).union(curr.keys).sorted()
-        var out: [RewindChange] = []
-        for k in allKeys {
-            let p = prev[k]
-            let c = curr[k]
-            if p?.rect != c?.rect || p?.opacity != c?.opacity {
-                let id = nameToId[k] ?? 0
-                out.append(RewindChange(
-                    id: id,
-                    key: k,
-                    fromRect: p?.rect,
-                    toRect: c?.rect,
-                    fromOpacity: p?.opacity,
-                    toOpacity: c?.opacity,
-                    jump: jumpSet.contains(id)
-                ))
-            }
-        }
-        out.sort { lhs, rhs in
-            if lhs.jump != rhs.jump { return lhs.jump && !rhs.jump }
-            return lhs.distance > rhs.distance
-        }
-        return out
+        guard index >= 0, index < len, starts[index] != starts[index + 1] else { return [] }
+        var changes: [RewindChange] = []
+        forEachFrameChanges(in: index..<(index + 1)) { _, frame in changes = frame }
+        return changes
     }
 
-    /// Convenience upstream alias matching `clip.changes(k)`.
-    public func changes(_ index: Int) -> [RewindChange] {
-        changes(atFrame: index)
-    }
+    public func changes(_ index: Int) -> [RewindChange] { changes(atFrame: index) }
 
-    /// Where element `id` was in each frame of `range` (`Clip::path`).
     public func path(id: UInt32, range: Range<Int>) -> [(frame: Int, snapshot: RewindElementSnapshot)] {
-        let key = name(id)
-        guard !key.isEmpty else { return [] }
-        let start = min(max(0, range.lowerBound), frames.count)
-        let end = min(max(start, range.upperBound), frames.count)
+        let start = max(0, range.lowerBound), end = min(range.upperBound, len)
+        guard let index = Int(exactly: id), names.indices.contains(index), start < end else { return [] }
+        var state = checkpoint(before: start)
         var out: [(Int, RewindElementSnapshot)] = []
         for k in start..<end {
-            if let el = frames[k].elements.first(where: { $0.key == key }) {
-                out.append((k, el))
-            }
+            apply(k, to: &state)
+            if let q = state[index] { out.append((k, snapshot(id, q))) }
         }
         return out
     }
 
-    /// Next frame from `k` in direction `step` (`±1`) where activity > 0 (`Clip::next_active`).
     public func nextActive(from index: Int, step: Int) -> Int? {
         guard step != 0 else { return nil }
-        var i = index + step
-        while i >= 0 && i < frames.count {
-            if activity(i) > 0 { return i }
-            i += step
+        var (i, overflow) = index.addingReportingOverflow(step)
+        while !overflow && activity.indices.contains(i) {
+            if activity[i] > 0 { return i }
+            (i, overflow) = i.addingReportingOverflow(step)
         }
         return nil
     }
 
     public func track(forKey key: String) -> [(timeSeconds: Double, rect: MotionRect, opacity: Float)] {
-        frames.compactMap { frame in
-            guard let el = frame.elements.first(where: { $0.key == key }) else { return nil }
-            return (frame.timeSeconds, el.rect, el.opacity)
+        guard let id = id(forKey: key) else { return [] }
+        return path(id: id, range: 0..<len).map { (absoluteTime($0.frame), $0.snapshot.rect, $0.snapshot.opacity) }
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        guard lhs.viewport == rhs.viewport, lhs.len == rhs.len, lhs.names == rhs.names,
+              lhs.nodeIDs == rhs.nodeIDs, lhs.activity == rhs.activity, lhs.jumps == rhs.jumps else { return false }
+        if let a = lhs.authored, let b = rhs.authored { return a.frames == b.frames }
+        guard lhs.frameBefore(0).elementsEqual(rhs.frameBefore(0), by: { $0.id == $1.id && $0.snapshot == $1.snapshot }) else { return false }
+        if lhs.authored == nil, rhs.authored == nil, lhs.marks.elementsEqual(rhs.marks),
+           lhs.words.elementsEqual(rhs.words) { return true }
+        return (0..<lhs.len).allSatisfy { lhs.recordedFrame($0) == rhs.recordedFrame($0) }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case frames, viewportWidth, viewportHeight, recording
+    }
+
+    // Recorded JSON retains the state before the first kept frame and the dense identity table.
+    // Both matter after eviction, even when a previously seen node is absent in the first frame.
+    private struct Recording: Codable {
+        var version: Int
+        var names: [String]
+        var nodeIDs: [UInt64?]
+        var indices: [Int]
+        var times: [Double]
+        var counts: [UInt32]
+        var base: [UInt32]
+        var words: [UInt32]
+
+        func isValidStream(_ words: [UInt32], range: Range<Int>, absolute: Bool = false) -> Bool {
+            var cursor = range.lowerBound
+            var seen: Set<UInt32> = []
+            while cursor < range.upperBound {
+                let header = words[cursor]
+                let id = header >> 5, mask = header & 31
+                let count = mask.nonzeroBitCount
+                guard Int(id) < names.count, !absolute || mask == 31, seen.insert(id).inserted,
+                      count <= range.upperBound - cursor - 1 else { return false }
+                cursor += 1 + count
+            }
+            return true
+        }
+
+        func frozen(viewport: Vec2, at path: [CodingKey]) throws -> RewindTape.Frozen {
+            let invalid = DecodingError.dataCorrupted(.init(codingPath: path, debugDescription: "Invalid rewind recording"))
+            guard version == 1, names.count == nodeIDs.count, times.count == indices.count,
+                  times.count == counts.count, isValidStream(base, range: base.indices, absolute: true) else { throw invalid }
+            var offset = 0
+            var marks: [RewindTape.Mark] = []
+            marks.reserveCapacity(times.count)
+            for k in times.indices {
+                guard let count = Int(exactly: counts[k]), count <= words.count - offset, times[k].isFinite,
+                      isValidStream(words, range: offset..<(offset + count)) else { throw invalid }
+                marks.append(.init(index: indices[k], t: times[k], len: counts[k]))
+                offset += count
+            }
+            guard offset == words.count else { throw invalid }
+            var state = [Q?](repeating: nil, count: names.count)
+            RewindClip.apply(base[...], to: &state)
+            return RewindTape.Frozen(names: names, nodeIDs: nodeIDs, marks: marks[...],
+                                     words: words[...], base: state, viewport: viewport)
         }
     }
 
-    private static func buildIndex(frames: [RewindFrame]) -> (names: [String], activity: [Float], jumps: [[UInt32]]) {
-        var names: [String] = []
-        var nameToId: [String: UInt32] = [:]
-        for f in frames {
-            for el in f.elements where nameToId[el.key] == nil {
-                nameToId[el.key] = UInt32(names.count)
-                names.append(el.key)
-            }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let width = try values.decodeIfPresent(Float.self, forKey: .viewportWidth) ?? 800
+        let height = try values.decodeIfPresent(Float.self, forKey: .viewportHeight) ?? 600
+        let viewport = Vec2(width, height)
+        if values.contains(.recording) {
+            let recording = try values.decode(Recording.self, forKey: .recording)
+            self.init(try recording.frozen(viewport: viewport, at: decoder.codingPath))
+        } else {
+            self.init(frames: try values.decode([RewindFrame].self, forKey: .frames), viewport: viewport)
         }
+    }
 
-        let n = frames.count
-        var activity = [Float](repeating: 0, count: n)
-        // Per frame: [(id, dist, before, after)]
-        var moved: [[(id: UInt32, dist: Float, before: MotionRect, after: MotionRect)]] = Array(repeating: [], count: n)
-
-        if n > 1 {
-            for k in 1..<n {
-                let prev = Dictionary(uniqueKeysWithValues: frames[k - 1].elements.map { ($0.key, $0) })
-                let curr = Dictionary(uniqueKeysWithValues: frames[k].elements.map { ($0.key, $0) })
-                var most: Float = 0
-                var faded = false
-                for (key, c) in curr {
-                    guard let p = prev[key], let id = nameToId[key] else { continue }
-                    let d = RewindChange.edgeDistance(p.rect, c.rect)
-                    if d > 0 {
-                        moved[k].append((id, d, p.rect, c.rect))
-                        most = max(most, d)
-                    }
-                    if abs(p.opacity - c.opacity) >= 1e-4 {
-                        faded = true
-                    }
-                }
-                activity[k] = (most == 0 && faded) ? 0.25 : most
-            }
-        }
-
-        func findMove(_ k: Int, _ id: UInt32) -> (id: UInt32, dist: Float, before: MotionRect, after: MotionRect)? {
-            guard k >= 0, k < n else { return nil }
-            return moved[k].first { $0.id == id }
-        }
-
-        var jumps: [[UInt32]] = Array(repeating: [], count: n)
-        for k in 0..<n {
-            var frameJumps: [UInt32] = []
-            for m in moved[k] {
-                let prevD = findMove(k - 1, m.id)?.dist ?? 0
-                let nextMove = findMove(k + 1, m.id)
-                let nextD = nextMove?.dist ?? 0
-                let near = max(prevD, nextD)
-                let back = nextMove.map { RewindChange.edgeDistance($0.after, m.before) < 0.5 } ?? false
-                if m.dist >= 4.0 && (m.dist > 2.5 * near || back) {
-                    frameJumps.append(m.id)
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(viewportWidth, forKey: .viewportWidth)
+        try values.encode(viewportHeight, forKey: .viewportHeight)
+        if let authored {
+            try values.encode(authored.frames, forKey: .frames)
+        } else {
+            var base: [UInt32] = []
+            if let first = checkpoints.first {
+                base.reserveCapacity(first.count * 6)
+                for (id, q) in first {
+                    base.append((id << 5) | 31)
+                    base.append(UInt32(bitPattern: q.0))
+                    base.append(UInt32(bitPattern: q.1))
+                    base.append(UInt32(bitPattern: q.2))
+                    base.append(UInt32(bitPattern: q.3))
+                    base.append(UInt32(bitPattern: q.4))
                 }
             }
-            jumps[k] = frameJumps
+            let recording = Recording(version: 1, names: names, nodeIDs: nodeIDs, indices: marks.map(\.index),
+                                      times: marks.map(\.t), counts: marks.map(\.len), base: base, words: Array(words))
+            try values.encode(recording, forKey: .recording)
         }
-        return (names, activity, jumps)
     }
 
     public func exportJSON() throws -> Data {
@@ -547,9 +749,22 @@ public struct RewindTape: Sendable {
     public var paused: Bool = false
     public var viewport: Vec2 = Vec2(800, 600)
 
-    private var ids: [String: UInt32] = [:]
+    /// Copy-on-write views of kept deltas. Indexing runs after the recorder releases its lock.
+    internal struct Frozen: Sendable {
+        let names: [String]
+        let nodeIDs: [UInt64?]
+        let marks: ArraySlice<Mark>
+        let words: ArraySlice<UInt32>
+        let base: [Quantized?]
+        let viewport: Vec2
+    }
+
+    private var sceneIDs: [UInt64: UInt32] = [:]
+    private var legacyIDs: [String: UInt32] = [:]
+    private var nodeIDs: [UInt64?] = []
     public private(set) var names: [String] = []
     private var nameBytes: Int = 0
+    private var compactAt = 4096
     private var last: [Quantized] = []
     private var seen: [UInt32] = []
     private var present: [UInt32] = []
@@ -557,9 +772,19 @@ public struct RewindTape: Sendable {
     private var serial: UInt32 = 0
     private var nextFrameIndex: Int = 0
     private var openFrame: (t: Double, start: Int)? = nil
-    public private(set) var frames: [Mark] = []
-    public private(set) var words: [UInt32] = []
+    private var markBuffer: [Mark] = []
+    private var wordBuffer: [UInt32] = []
+    private var firstMark = 0
+    private var firstWord = 0
+    public var frames: [Mark] { firstMark == 0 ? markBuffer : Array(markBuffer[firstMark...]) }
+    public var words: [UInt32] { firstWord == 0 ? wordBuffer : Array(wordBuffer[firstWord...]) }
     public private(set) var base: [Quantized?] = []
+    internal var frameCount: Int { markBuffer.count - firstMark }
+
+    internal func frozen() -> Frozen {
+        Frozen(names: names, nodeIDs: nodeIDs, marks: markBuffer[firstMark...],
+               words: wordBuffer[firstWord...], base: base, viewport: viewport)
+    }
 
     public init(window: Double = 60.0, maxBytes: Int = 24 << 20) {
         self.window = max(0.0, window)
@@ -569,9 +794,10 @@ public struct RewindTape: Sendable {
     public static func quantize(rect: MotionRect, opacity: Float) -> Quantized {
         func q(_ v: Float, _ k: Float) -> Int32 {
             let scaled = (v * k).rounded()
-            if !scaled.isFinite { return 0 }
-            let clamped = min(Float(Int32.max - 1), max(Float(Int32.min + 1), scaled))
-            return Int32(clamped)
+            if scaled.isNaN { return 0 }
+            if scaled >= Float(Int32.max) { return .max }
+            if scaled <= Float(Int32.min) { return .min }
+            return Int32(scaled)
         }
         return (
             q(rect.left, 100.0),
@@ -615,39 +841,73 @@ public struct RewindTape: Sendable {
     public mutating func begin(at t: Double, viewport: Vec2) {
         serial = max(1, serial &+ 1)
         self.viewport = viewport
-        openFrame = (t, words.count)
+        openFrame = (t, wordBuffer.count)
         nextPresent.removeAll(keepingCapacity: true)
     }
 
     public mutating func sample(key: String, q: Quantized) {
-        let id: UInt32
-        if let existing = ids[key] {
-            id = existing
-        } else {
-            id = UInt32(names.count)
-            nameBytes += key.utf8.count
-            names.append(key)
-            ids[key] = id
-            last.append((Int32.min, Int32.min, Int32.min, Int32.min, Int32.min))
-            seen.append(0)
-            base.append(nil)
+        if nextPresent.count < present.count {
+            let previous = present[nextPresent.count]
+            let i = Int(previous)
+            if nodeIDs[i] == nil && names[i] == key {
+                sample(id: previous, q: q)
+                return
+            }
         }
+        let id: UInt32
+        if let existing = legacyIDs[key] { id = existing }
+        else {
+            id = addIdentity(name: key, nodeID: nil)
+            legacyIDs[key] = id
+        }
+        sample(id: id, q: q)
+    }
+
+    public mutating func sample(nodeID: UInt64, name: String, q: Quantized) {
+        if nextPresent.count < present.count {
+            let previous = present[nextPresent.count]
+            if nodeIDs[Int(previous)] == nodeID {
+                sample(id: previous, q: q)
+                return
+            }
+        }
+        let id: UInt32
+        if let existing = sceneIDs[nodeID] { id = existing }
+        else {
+            id = addIdentity(name: name, nodeID: nodeID)
+            sceneIDs[nodeID] = id
+        }
+        sample(id: id, q: q)
+    }
+
+    private mutating func addIdentity(name: String, nodeID: UInt64?) -> UInt32 {
+        let id = UInt32(names.count)
+        names.append(name)
+        nameBytes += name.utf8.count
+        nodeIDs.append(nodeID)
+        last.append((0, 0, 0, 0, 0))
+        seen.append(0)
+        base.append(nil)
+        return id
+    }
+
+    private mutating func sample(id: UInt32, q: Quantized) {
         let i = Int(id)
         if seen[i] == serial { return }
         let was = seen[i] != 0 && seen[i] == (serial &- 1)
         seen[i] = serial
         nextPresent.append(id)
         let old = last[i]
+        if was && old == q { return }
         var mask: UInt32 = 0
         for f in 0..<Self.fields {
             if !was || Self.field(old, at: f) != Self.field(q, at: f) {
                 mask |= (1 << f)
             }
         }
-        if mask == 0 { return }
-        words.append((id << Self.maskBits) | mask)
+        wordBuffer.append((id << Self.maskBits) | mask)
         for f in 0..<Self.fields where (mask & (1 << f)) != 0 {
-            words.append(UInt32(bitPattern: Self.field(q, at: f)))
+            wordBuffer.append(UInt32(bitPattern: Self.field(q, at: f)))
         }
         last[i] = q
     }
@@ -656,24 +916,62 @@ public struct RewindTape: Sendable {
         guard let open = openFrame else { return }
         openFrame = nil
         for id in present where seen[Int(id)] != serial {
-            words.append(id << Self.maskBits)
+            wordBuffer.append(id << Self.maskBits)
         }
         swap(&present, &nextPresent)
-        let len = UInt32(max(0, words.count - open.start))
-        frames.append(Mark(index: nextFrameIndex, t: open.t, len: len))
+        let len = UInt32(wordBuffer.count - open.start)
+        markBuffer.append(Mark(index: nextFrameIndex, t: open.t, len: len))
         nextFrameIndex += 1
         evict(now: open.t)
+        if names.count >= compactAt { rest() }
+    }
+
+    mutating func rest() {
+        guard !paused, openFrame == nil else { return }
+        var kept = base.map { $0 != nil }
+        for id in present { kept[Int(id)] = true }
+        Self.decode(wordBuffer[firstWord...]) { id, _, _ in kept[Int(id)] = true }
+        let indices = kept.indices.filter { kept[$0] }
+        if indices.count < names.count {
+            var newID = [UInt32](repeating: 0, count: names.count)
+            for (new, old) in indices.enumerated() { newID[old] = UInt32(new) }
+            names = indices.map { names[$0] }
+            nodeIDs = indices.map { nodeIDs[$0] }
+            seen = indices.map { seen[$0] }
+            last = indices.map { last[$0] }
+            base = indices.map { base[$0] }
+            nameBytes = names.reduce(0) { $0 + $1.utf8.count }
+            sceneIDs = sceneIDs.compactMapValues { old in kept[Int(old)] ? newID[Int(old)] : nil }
+            legacyIDs = legacyIDs.compactMapValues { old in kept[Int(old)] ? newID[Int(old)] : nil }
+            present = present.map { newID[Int($0)] }
+            var cursor = firstWord
+            while cursor < wordBuffer.count {
+                let header = wordBuffer[cursor]
+                let mask = header & ((1 << Self.maskBits) - 1)
+                wordBuffer[cursor] = (newID[Int(header >> Self.maskBits)] << Self.maskBits) | mask
+                cursor += 1 + mask.nonzeroBitCount
+            }
+        }
+        compactAt = max(4096, names.count * 2)
+        nextPresent = []
+        if firstMark > 0 || markBuffer.capacity > frameCount * 2 {
+            markBuffer = Array(markBuffer[firstMark...])
+            firstMark = 0
+        }
+        if firstWord > 0 || wordBuffer.capacity > (wordBuffer.count - firstWord) * 2 {
+            wordBuffer = Array(wordBuffer[firstWord...])
+            firstWord = 0
+        }
     }
 
     private mutating func evict(now: Double) {
-        let cutoff = now - window - 1e-6
-        while frames.count > 1, let first = frames.first,
-              (first.t < cutoff || bytes > maxBytes) {
-            let mark = frames.removeFirst()
-            let count = min(Int(mark.len), words.count)
-            var k = 0
-            while k < count {
-                let head = words[k]
+        let cutoff = now - window
+        while frameCount > 1, markBuffer[firstMark].t < cutoff || bytes > maxBytes {
+            let end = firstWord + Int(markBuffer[firstMark].len)
+            firstMark += 1
+            var k = firstWord
+            while k < end {
+                let head = wordBuffer[k]
                 let id = Int(head >> Self.maskBits)
                 let mask = head & ((1 << Self.maskBits) - 1)
                 k += 1
@@ -683,21 +981,28 @@ public struct RewindTape: Sendable {
                 }
                 var q: Quantized = (id < base.count ? base[id] : nil) ?? (0, 0, 0, 0, 0)
                 for f in 0..<Self.fields where (mask & (1 << f)) != 0 {
-                    if k < count {
-                        Self.setField(&q, at: f, value: Int32(bitPattern: words[k]))
-                        k += 1
-                    }
+                    Self.setField(&q, at: f, value: Int32(bitPattern: wordBuffer[k]))
+                    k += 1
                 }
                 if id < base.count { base[id] = q }
             }
-            words.removeFirst(count)
+            firstWord = end
+        }
+        // Amortize prefix reclamation across the many frames that evicted them.
+        if firstMark >= 64 && firstMark >= frameCount {
+            markBuffer.removeFirst(firstMark)
+            firstMark = 0
+        }
+        if firstWord >= 256 && firstWord >= wordBuffer.count - firstWord {
+            wordBuffer.removeFirst(firstWord)
+            firstWord = 0
         }
     }
 
     /// Approximate memory footprint matching `Tape::bytes` (`crates/rune/src/rewind/tape.rs:138`).
     public var bytes: Int {
-        words.count * 4
-            + frames.count * 24
+        (wordBuffer.count - firstWord) * 4
+            + frameCount * 16  // Rust Mark contains an f64 time and u32 word count.
             + nameBytes
             + names.count * (24 + 2 * 20 + 16)
     }
@@ -721,36 +1026,7 @@ public struct RewindTape: Sendable {
     }
 
     public func toFrames() -> [RewindFrame] {
-        var state = base
-        var out: [RewindFrame] = []
-        out.reserveCapacity(frames.count)
-        var cursor = 0
-        for mark in frames {
-            let len = Int(mark.len)
-            let end = min(words.count, cursor + len)
-            Self.decode(words[cursor..<end]) { id, mask, dq in
-                let idx = Int(id)
-                guard idx < state.count else { return }
-                if mask == 0 {
-                    state[idx] = nil
-                    return
-                }
-                var cur = state[idx] ?? (0, 0, 0, 0, 0)
-                for f in 0..<Self.fields where (mask & (1 << f)) != 0 {
-                    Self.setField(&cur, at: f, value: Self.field(dq, at: f))
-                }
-                state[idx] = cur
-            }
-            cursor = end
-            var snaps: [RewindElementSnapshot] = []
-            for id in 0..<state.count {
-                guard let q = state[id] else { continue }
-                let (r, op) = Self.dequantize(q)
-                snaps.append(RewindElementSnapshot(key: names[id], rect: r, opacity: op))
-            }
-            out.append(RewindFrame(index: mark.index, timeSeconds: mark.t, elements: snaps))
-        }
-        return out
+        RewindClip(frozen()).frames
     }
 }
 
@@ -791,29 +1067,44 @@ public final class RewindRecorder: @unchecked Sendable {
         lock.withLock { tape.viewport = viewport }
     }
 
-    public var frameCount: Int { lock.withLock { tape.frames.count } }
+    public var frameCount: Int { lock.withLock { tape.frameCount } }
 
     /// Estimated byte size matching upstream `Rewind::bytes` (`Tape::bytes`).
     public var estimatedBytes: Int { lock.withLock { tape.bytes } }
 
-    public func recordFrame(at timeSeconds: Double, elements: [RewindElementSnapshot]) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !tape.paused else { return }
-        tape.begin(at: timeSeconds, viewport: tape.viewport)
-        for el in elements {
-            tape.sample(key: el.key, q: RewindTape.quantize(rect: el.rect, opacity: el.opacity))
+    /// Records the presented elements directly into the tape. Frozen recordings skip the inspection.
+    internal func recordFrame(at timeSeconds: Double, viewport: Vec2, sample: (inout RewindTape) -> Void) {
+        lock.withLock {
+            guard !tape.paused else { return }
+            tape.begin(at: timeSeconds, viewport: viewport)
+            sample(&tape)
+            tape.end()
         }
-        tape.end()
+    }
+
+    public func recordFrame(at timeSeconds: Double, elements: [RewindElementSnapshot]) {
+        lock.withLock {
+            guard !tape.paused else { return }
+            tape.begin(at: timeSeconds, viewport: tape.viewport)
+            for el in elements {
+                let q = RewindTape.quantize(rect: el.rect, opacity: el.opacity)
+                if let nodeID = el.nodeID { tape.sample(nodeID: nodeID, name: el.key, q: q) }
+                else { tape.sample(key: el.key, q: q) }
+            }
+            tape.end()
+        }
     }
 
     public func freeze() -> RewindClip {
-        lock.lock()
-        tape.paused = true
-        let snap = tape.toFrames()
-        let vp = tape.viewport
-        lock.unlock()
-        return RewindClip(frames: snap, viewport: vp)
+        let snapshot = lock.withLock {
+            tape.paused = true
+            return tape.frozen()
+        }
+        return RewindClip(snapshot)
+    }
+
+    func rest() {
+        lock.withLock { tape.rest() }
     }
 
     public func resume() {
@@ -852,7 +1143,7 @@ public final class RewindScrubber: @unchecked Sendable {
         self.heldRecorder = recorder
         self.clip = clip
         self.isOpen = true
-        let last = max(0, clip.frames.count - 1)
+        let last = max(0, clip.len - 1)
         let activeFrame: Int
         if clip.activity(last) > 0 {
             activeFrame = last
@@ -868,18 +1159,18 @@ public final class RewindScrubber: @unchecked Sendable {
     }
 
     public func close(resuming recorder: RewindRecorder? = nil) {
-        let toResume = recorder ?? heldRecorder
+        let held = heldRecorder
         self.heldRecorder = nil
         self.isOpen = false
         self.clip = nil
         self.anchorFrame = nil
         self.pickedId = nil
-        toResume?.resume()
+        held?.resume()
+        if recorder !== held { recorder?.resume() }
     }
 
     public var currentFrame: RewindFrame? {
-        guard let clip, currentFrameIndex >= 0, currentFrameIndex < clip.frames.count else { return nil }
-        return clip.frames[currentFrameIndex]
+        clip?.recordedFrame(currentFrameIndex)
     }
 
     public func seek(toFrame index: Int) {
@@ -888,8 +1179,8 @@ public final class RewindScrubber: @unchecked Sendable {
 
     /// Shows frame `index`; with `extend == true`, grows the selection from the anchor (`Scrub::seek`).
     public func seek(_ index: Int, extend: Bool) {
-        guard let clip, !clip.frames.isEmpty else { return }
-        let clamped = min(max(0, index), clip.frames.count - 1)
+        guard let clip, !clip.isEmpty else { return }
+        let clamped = min(max(0, index), clip.len - 1)
         if extend {
             if anchorFrame == nil { anchorFrame = currentFrameIndex }
         } else {
@@ -902,9 +1193,9 @@ public final class RewindScrubber: @unchecked Sendable {
     }
 
     public func seek(toFraction fraction: Double) {
-        guard let clip, !clip.frames.isEmpty else { return }
+        guard let clip, !clip.isEmpty else { return }
         let f = fraction.clamped(to: 0...1)
-        let idx = Int((f * Double(clip.frames.count - 1)).rounded())
+        let idx = Int((f * Double(clip.len - 1)).rounded())
         seek(toFrame: idx)
     }
 

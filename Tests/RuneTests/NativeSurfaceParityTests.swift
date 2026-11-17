@@ -27,6 +27,25 @@ struct NativeSurfaceParityTests {
         }
     }
 
+    @Test("Completion of an earlier GPU submission preserves the newest timing")
+    func outOfOrderTimings() {
+        let surface = NativeSurface()
+        let events = Box<[UInt64]>([])
+        surface.setObserver { timing in events.withLock { $0.append(timing.frameId) } }
+        let first = ContinuousClock.now
+        let second = first.advanced(by: .milliseconds(1))
+        let latest = FrameTiming(frameId: 2, submittedAt: second)
+        surface.report(FrameTiming(frameId: 1, submittedAt: first))
+        surface.report(latest)
+        surface.report(FrameTiming(frameId: 1, submittedAt: first, completedAt: second))
+        #expect(surface.timing() == latest)
+        let done = FrameTiming(frameId: 2, submittedAt: second, completedAt: second)
+        surface.report(done)
+        #expect(surface.timing() == done)
+        #expect(surface.counts() == (2, 2))
+        #expect(events.withLock { $0 } == [1, 2, 1, 2])
+    }
+
     @Test("latest frame wins and generation advances with waker")
     func latestFrameWinsAndWakes() throws {
         let surface = NativeSurface()
@@ -436,6 +455,61 @@ struct NativeSurfaceParityTests {
         try surface.pushBytes(green, frameId: 7)
         let second = try renderSingleSurface(draw, size: (1, 1), renderer: first.renderer)
         #expect(second.bytes == [0, 255, 0, 255])
+    }
+
+    @Test("Stationary video reuses uniforms and moving a surface preserves pending Metal draws")
+    func surfaceUniformsSurvivePreparationOfLaterFrames() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let queue = try #require(device.makeCommandQueue())
+        let sr = try SurfaceRenderer(device: device, pixelFormat: .rgba8Unorm)
+        let surface = NativeSurface()
+        let red = try ByteFrame(width: 1, height: 1, format: .rgba, color: .srgb,
+                                planes: [Data([255, 0, 0, 255])])
+        let green = try ByteFrame(width: 1, height: 1, format: .rgba, color: .srgb,
+                                  planes: [Data([0, 255, 0, 255])])
+        try surface.pushBytes(red, frameId: 1)
+        let clip = SIMD4<Float>(0, 0, 2, 1)
+        var draw = SurfaceDraw(surface: surface, fit: .stretch, beforeInstance: 0,
+                               rect: SIMD4(0, 0, 1, 1), clip: clip)
+
+        func prepare() throws { try sr.prepare(draws: [draw], viewport: (2, 1)).get() }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: 2, height: 1, mipmapped: false)
+        desc.usage = .renderTarget
+        desc.storageMode = .shared
+        let command = try #require(queue.makeCommandBuffer())
+        func encode() throws -> MTLTexture {
+            let texture = try #require(device.makeTexture(descriptor: desc))
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = texture
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+            pass.colorAttachments[0].storeAction = .store
+            let encoder = try #require(command.makeRenderCommandEncoder(descriptor: pass))
+            sr.draw(encoder: encoder, index: 0)
+            encoder.endEncoding()
+            sr.trackSubmission(commandBuffer: command)
+            return texture
+        }
+        for _ in 0..<200 { try prepare() }
+        #expect(sr.uniformBufferAllocations == 1)
+        let old = try encode()
+        try surface.pushBytes(green, frameId: 2)
+        try prepare()
+        #expect(sr.uniformBufferAllocations == 1)
+        draw.rect.x = 1
+        try prepare()
+        let moved = try encode()
+        #expect(sr.uniformBufferAllocations == 1)
+        command.commit()
+        command.waitUntilCompleted()
+        #expect(command.status == .completed)
+        func pixels(_ texture: MTLTexture) -> [UInt8] {
+            var bytes = [UInt8](repeating: 0, count: 8)
+            texture.getBytes(&bytes, bytesPerRow: 8, from: MTLRegionMake2D(0, 0, 2, 1), mipmapLevel: 0)
+            return bytes
+        }
+        #expect(pixels(old) == [255, 0, 0, 255, 0, 0, 0, 0])
+        #expect(pixels(moved) == [0, 0, 0, 0, 0, 255, 0, 255])
     }
 
     @Test("GPU stale unscaled frame pins top-left and crops cleanly")

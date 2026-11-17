@@ -534,6 +534,8 @@ public final class CpuPainter {
         let nativeSurfaces: Bool
         let compositor: Bool
         let smoothing: FontSmoothing?
+        let hasOutlines: Bool
+        let outlines: CpuBootScene.OutlineVersion?
         let half: HalfRounding
     }
 
@@ -547,6 +549,8 @@ public final class CpuPainter {
     private var prev: CpuBootScroll.Prev? = nil
     private var resets: Int = 0
     private var flags: SceneFlags? = nil
+    private var clear: SIMD4<Float>?
+    private var atlas = CpuBootAtlasDamage()
     private var changed: [UInt32] = []
     private var marked: [Bool] = []
 
@@ -554,10 +558,14 @@ public final class CpuPainter {
         self.pool = CpuBootPool(threads: threads)
     }
 
+    func attachMasks(to atlas: GlyphAtlas) { atlas.fillMasks(on: pool) }
+
     public func forget() {
         hashes.removeAll()
         prev = nil
         flags = nil
+        clear = nil
+        atlas = CpuBootAtlasDamage()
     }
 
     private func sceneFlags(_ scene: CpuBootScene) -> SceneFlags {
@@ -567,6 +575,8 @@ public final class CpuPainter {
             nativeSurfaces: scene.nativeSurfaces,
             compositor: scene.compositor,
             smoothing: scene.smoothing,
+            hasOutlines: scene.outlines != nil,
+            outlines: scene.outlineVersion,
             half: scene.half
         )
     }
@@ -576,13 +586,19 @@ public final class CpuPainter {
         let start = RuneExecutionContext.uptimeNanoseconds
 
         let currentFlags = sceneFlags(scene)
-        if flags == currentFlags, let fast = tryRecoloured(scene, target: &target, start: start) {
+        let sameInstances = matchesPreviousInstances(scene.instances)
+        // A GPU-only frame never reached the target. Keep the last accepted atlas and tile hashes.
+        if flags != currentFlags || !sameInstances, let why = scene.needsGpu() { throw why }
+        let atlasChanged = atlas.update(scene)
+        let sameClear = clear == scene.clear
+        if flags == currentFlags, sameClear,
+           let fast = tryRecoloured(scene, target: &target, start: start, atlasChanged: atlasChanged,
+                                    sameInstances: sameInstances) {
             return fast
         }
-        if let why = scene.needsGpu() {
-            throw why
-        }
+        if flags != currentFlags { hashes.removeAll(keepingCapacity: true) }
         flags = currentFlags
+        clear = scene.clear
 
         let bins = CpuBootBin.Bins.build(for: scene)
         let binned = RuneExecutionContext.uptimeNanoseconds
@@ -590,7 +606,7 @@ public final class CpuPainter {
         each.removeAll(keepingCapacity: true)
         each.reserveCapacity(scene.instances.count)
         for n in 0..<scene.instances.count {
-            each.append(CpuBootDamage.hashInstance(scene, bins: bins, index: n))
+            each.append(CpuBootDamage.hashInstance(scene, bins: bins, index: n, atlas: &atlas))
         }
         nextHashes.removeAll(keepingCapacity: true)
         nextHashes.reserveCapacity(bins.tileCount)
@@ -632,7 +648,7 @@ public final class CpuPainter {
 
         let planning = RuneExecutionContext.uptimeNanoseconds
         let candidateShift: CpuBootScroll.Shift?
-        if all || resized || byHash < Self.minScrollTiles {
+        if all || resized || atlasChanged || resets != scene.atlasResets || !sameClear || byHash < Self.minScrollTiles {
             candidateShift = nil
         } else if let prev {
             candidateShift = CpuBootScroll.plan(
@@ -708,10 +724,7 @@ public final class CpuPainter {
 
         var rects = CpuBootDamage.rects(dirtyTiles: dirty, cols: bins.cols, size: scene.size, maxRects: Self.maxRects)
         if let shift {
-            rects.append(shift.rect)
-            while rects.count > Self.maxRects {
-                rects.removeLast()
-            }
+            CpuBootDamage.add(shift.rect, to: &rects, maxRects: Self.maxRects)
         }
         let scrolled: (Int32, Int)? = shift.map { ($0.dy, Int($0.rect[1])) }
         prev = CpuBootScroll.Prev(instances: scene.instances, bins: bins)
@@ -721,6 +734,7 @@ public final class CpuPainter {
             tiles: report.tiles,
             rects: rects,
             scrolled: scrolled,
+            scrolledRect: shift?.rect,
             hashNs: hashed &- binned,
             planNs: moving &- planning,
             moveNs: moved &- moving,
@@ -728,10 +742,21 @@ public final class CpuPainter {
         )
     }
 
+    private func matchesPreviousInstances(_ instances: [RenderInstance]) -> Bool {
+        guard let previous = prev?.instances, instances.count == previous.count else { return false }
+        return instances.withUnsafeBytes { lhs in
+            previous.withUnsafeBytes { rhs in
+                lhs.isEmpty || lhs.baseAddress == rhs.baseAddress || memcmp(lhs.baseAddress!, rhs.baseAddress!, lhs.count) == 0
+            }
+        }
+    }
+
     private func tryRecoloured(
         _ scene: CpuBootScene,
         target: inout CpuBootTarget,
-        start: UInt64
+        start: UInt64,
+        atlasChanged: Bool,
+        sameInstances: Bool
     ) -> CpuBootPainted? {
         guard let prev else { return nil }
         if hashes.isEmpty
@@ -742,13 +767,7 @@ public final class CpuPainter {
             return nil
         }
 
-        let hasDirtyImage = scene.images.contains { $0.dirty != nil }
-        let bytesEqual = scene.instances.withUnsafeBytes { lhs in
-            prev.instances.withUnsafeBytes { rhs in
-                lhs.count == rhs.count && (lhs.isEmpty || memcmp(lhs.baseAddress!, rhs.baseAddress!, lhs.count) == 0)
-            }
-        }
-        if !hasDirtyImage && bytesEqual {
+        if !atlasChanged && sameInstances {
             let elapsed = RuneExecutionContext.uptimeNanoseconds &- start
             var report = CpuBootReport()
             report.totalNs = elapsed
@@ -776,9 +795,9 @@ public final class CpuPainter {
                     memcmp(a.baseAddress!, b.baseAddress!, MemoryLayout<RenderInstance>.size) == 0
                 }
             }
-            let same = instEqual && !(newInst.params.y == KIND_IMAGE
-                && imageWritten(scene: scene, inst: newInst)
-                && CpuBootDamage.hashInstance(scene, bins: prev.bins, index: n) != each[n])
+            let sampled = newInst.params.y == KIND_IMAGE || newInst.params.y == KIND_GLYPH
+            let same = instEqual && !(sampled && atlasChanged
+                && CpuBootDamage.hashInstance(scene, bins: prev.bins, index: n, atlas: &atlas) != each[n])
             if same { continue }
             if changed.count == Self.recolouredMax || !isRecolour(newInst, oldInst) {
                 return nil
@@ -812,13 +831,11 @@ public final class CpuPainter {
         for t in 0..<tiles where marked[t] {
             dirty.append(UInt32(t))
         }
-        var updatedInstances = prev.instances
         for n in changed {
             let idx = Int(n)
-            each[idx] = CpuBootDamage.hashInstance(scene, bins: bins, index: idx)
-            updatedInstances[idx] = scene.instances[idx]
+            each[idx] = CpuBootDamage.hashInstance(scene, bins: bins, index: idx, atlas: &atlas)
         }
-        self.prev = CpuBootScroll.Prev(instances: updatedInstances, bins: bins)
+        self.prev = CpuBootScroll.Prev(instances: scene.instances, bins: bins)
         for t in dirty {
             hashes[Int(t)] = CpuBootDamage.rehashTile(scene: scene, bins: bins, each: each, tile: Int(t))
         }
@@ -878,16 +895,6 @@ public final class CpuPainter {
             }
         }
         return sameWords && CpuBootBin.opaqueBox(newInst) == CpuBootBin.opaqueBox(oldInst)
-    }
-
-    private func imageWritten(scene: CpuBootScene, inst: RenderInstance) -> Bool {
-        let idx = Int(inst.params.x)
-        guard idx >= 0 && idx < scene.images.count else { return false }
-        let page = scene.images[idx]
-        guard let (a, b) = page.dirty else { return false }
-        let y0 = UInt32(max(0.0, inst.uv.y))
-        let y1 = UInt32(ceilf(max(0.0, inst.uv.y + inst.uv.w)))
-        return a < y1 && b > y0
     }
 }
 

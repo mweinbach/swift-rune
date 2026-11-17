@@ -1,6 +1,10 @@
 import Foundation
 
 public enum RuneFXCPU: Sendable {
+    // Swift Float.pi rounds toward zero. The upstream f32 constants round to nearest.
+    private static let pi = Float(Double.pi)
+    private static let tau = Float(2 * Double.pi)
+
     public static let emberDrag: Float = 2.4
     public static let sparkleStagger: Float = 0.16
     public static let burstLife: Float = 0.55
@@ -31,7 +35,7 @@ public enum RuneFXCPU: Sendable {
     }
 
     private static func grad(_ cx: Int32, _ cy: Int32, _ seed: UInt32) -> (Float, Float) {
-        let a = hcell(cx, cy, seed) * 2.0 * .pi
+        let a = hcell(cx, cy, seed) * Self.tau
         return (cosf(a), sinf(a))
     }
 
@@ -137,7 +141,7 @@ public enum RuneFXCPU: Sendable {
         let rr = min(max(r, 0.0), min(rect.w, rect.h) * 0.5)
         let bx = rect.w * 0.5 - rr
         let by = rect.h * 0.5 - rr
-        return 4.0 * (by + rr * .pi * 0.5 + bx)
+        return 4.0 * (by + rr * Self.pi * 0.5 + bx)
     }
 
     private static func ss(_ a: Float, _ b: Float, _ x: Float) -> Float {
@@ -482,7 +486,7 @@ public enum RuneFXCPU: Sendable {
             let vy = vt + (v0 - vt) * ek
             let sway = 2.5 + 5.0 * u01(hk &+ 5)
             let fq = 3.0 + 4.0 * u01(hk &+ 6)
-            let ph = 2.0 * .pi * u01(hk &+ 7)
+            let ph = Self.tau * u01(hk &+ 7)
             let drift = (u01(hk &+ 8) - 0.5) * 14.0
             let grow = 1.0 - expf(-age * 3.0)
             let x = x0 + drift * age + sway * sinf(age * fq + ph) * grow
@@ -503,7 +507,8 @@ public enum RuneFXCPU: Sendable {
         let x = min(a / 0.22, 1.0)
         let c: Float = 2.2
         let xm1 = x - 1.0
-        let back = 1.0 + (c + 1.0) * xm1 * xm1 * xm1 + c * xm1 * xm1
+        let squared = xm1 * xm1
+        let back = 1.0 + (c + 1.0) * (squared * xm1) + c * squared
         return back * (1.0 - ss(0.55, 1.0, a))
     }
 
@@ -541,7 +546,7 @@ public enum RuneFXCPU: Sendable {
             }
             if age < 0.0 || age > life { continue }
             let a = age / life
-            let th = 2.0 * .pi * u01(hk &+ 2)
+            let th = Self.tau * u01(hk &+ 2)
             let dx = cosf(th)
             let dy = sinf(th)
             let edge = 1.0 / max(abs(dx) / max(hw, 1.0), abs(dy) / max(hh, 1.0))
@@ -553,10 +558,10 @@ public enum RuneFXCPU: Sendable {
             let v = u01(hk &+ 4)
             let size = p.size * (0.45 + 0.9 * v * v)
             let (sc, env): (Float, Float) = reduced
-                ? (1.0, sinf(.pi * a) * 0.7)
+                ? (1.0, sinf(Self.pi * a) * 0.7)
                 : {
                     let fq = 5.0 + 4.0 * u01(hk &+ 5)
-                    let tw = 0.5 + 0.5 * sinf(2.0 * .pi * fq * age + 2.0 * .pi * u01(hk &+ 6))
+                    let tw = 0.5 + 0.5 * sinf(Self.tau * fq * age + Self.tau * u01(hk &+ 6))
                     return (starScale(a), 1.0 - 0.3 * tw * tw)
                 }()
             if sc * env < 0.01 { continue }
@@ -641,7 +646,7 @@ public enum RuneFXCPU: Sendable {
         let colors = UInt32(max(p.colors.count, 1))
         for k in 0..<n {
             let h = hu(seed, k + 1)
-            let a = (Float(k) + u01(h) * 0.6) / Float(n) * 2.0 * .pi
+            let a = (Float(k) + u01(h) * 0.6) / Float(n) * Self.tau
             let baseX = 0.5 + 0.24 * cosf(a)
             let baseY = 0.5 + 0.24 * sinf(a)
             let x = tt + Float(k) * 7.3
@@ -652,88 +657,78 @@ public enum RuneFXCPU: Sendable {
         }
     }
 
+    /// The pinned void-and-cluster filter has a fixed seed, Gaussian kernel and tile size.
+    /// Its row-major ranks are precomputed so the first blue-noise fill can draw immediately.
     public static let blueNoiseTile: [SIMD4<Float>] = {
-        let N = blueN
-        let M = N * N
-        let sigma: Float = 1.5
-        var kern = [Float](repeating: 0.0, count: M)
-        for y in 0..<N {
-            for x in 0..<N {
-                let dx = Float(min(x, N - x))
-                let dy = Float(min(y, N - y))
-                kern[y * N + x] = expf(-(dx * dx + dy * dy) / (2.0 * sigma * sigma))
-            }
+        let ranks: [UInt16] = [
+             880,  263,  118,  708,  331,  534,  989,  124,  690,  287,   21,  614,  828,  559,  944,    2,
+             295,  171,  698,   49,  919,  610,   78,  518,  402,  677,  175,  837,    5,  997,  634,  367,
+              43,  660,  416,  207,  784,    4,  404,  827,  466,  778,  985,  483,  242,  329,  689,  411,
+             512,  906,  343,  493,  809,  315, 1012,  229,  889,  298,  494,  709,  413,  228,  482,  758,
+             544,  806,  983,  563,  900,  642,  300,  916,   65,  363,  167,  722,   89,  783,  136,  844,
+             639,   88,  763,  585,  198,  450,  646,  760,   30,  791,  968,   90,  596,  877,  116,  951,
+             308,  144,  354,   68,  462,  177,  732,  581,  217,  664,  552,  902,  381,  976,  575,  218,
+             964,  438,  251,  980,   15,  878,  143,  365,  576,  434,  155,  286,  776,  338,  686,  204,
+             865,  509,  726,  852,  277,  970,   84,  502, 1014,  817,  273,   54,  648,  463,  288,   44,
+             362,  799,  131,  665,  388,  718,  532,  957,  210,  911,  652,  517, 1019,   52,  572,  445,
+              12, 1004,  226,  604,  688,  419,  775,  351,  137,  428,  740,  516,  181,  832,  752,  896,
+             537,  696,  921,  496,  268,  818,   70,  305,  700,   41,  358,  835,  212,  401,  913,  762,
+             645,  391,  119,  485,   28,  892,  235,  635,  849,   11,  922,  340,  996,  103,  415,  623,
+             183,  296,   57,  602,  162, 1001,  425,  609,  845,  486,  751,  106,  605,  723,  134,  252,
+             789,  543,  840,  960,  348,  166,  545,  935,  303,  484,  224,  662,  560,  257,  703,   14,
+            1011,  476,  836,  361,  779,  514,   98,  903,  243,  146,  974,  454,  274,  956,  497,  344,
+             943,  178,  292,  620,  734,  820,  449,   94,  721,  580,  802,   74,  875,  372,  936,  519,
+             328,  741,  127,  932,  650,  209,  756,  359,  675,  566,  330,  876,   25,  666,  850,   67,
+             442,  674,   38,  424,  223,   58,  656,  992,  193,  379,  972,  161,  457,  744,  111,  214,
+             868,  613,  255,  448,   17,  312,  967,  474,   32,  785,  196,  704,  535,  383,  164,  590,
+             250,  882,  769, 1020,  579,  909,  373,  276,  846,   31,  672,  527,  244,  829,  569,  670,
+             430,   62,  984,  564,  874,  711,  594,  132,  910,  397, 1002,   97,  821,  293,  990,  742,
+             370,  529,  101,  327,  489,  153,  774,  515,  615,  433,  780,  324,  908,   36,  350,  966,
+             163,  730,  376,  805,  174,  407,  260,  825,  521,  279,  616,  446,  220,  630,  480,  114,
+             937,  200,  638,  831,  262,  673,   75,  872,  138,  249,  938,   91,  608,  707,  487,  281,
+             842,  508,  241,   82,  536, 1023,   42,  661,  168,  765,   55,  941,  693,  885,   13,  798,
+             692,  432,  978,   20,  747,  961,  405,  316, 1005,  717,  554,  179,  422, 1015,  142,  766,
+               6,  619,  915,  676,  345,  753,  471,  931,  357,  881,  573,  341,  135,  390,  553,  282,
+             591,  133,  352,  556,  456,  187,  571,  655,    7,  467,  346,  794,  873,  232,  649,  400,
+             946,  301,  451,  128,  859,  195,  606,  105,  435,  710,  202,  501,  770, 1013,  192,  867,
+              45,  737,  884,  247,  839,  104,  920,  788,  216,  855,  625,   46,  302,  538,   63,  857,
+             557,  190,  719,  981,  562,  311,  803,  261,  998,    1,  310,  858,   60,  612,  464,  336,
+             918,  495,  173,  624,  701,  375,  284,  513,  414,  126,  986,  736,  475,  953,  714,  325,
+              96,  816,  380,   85,  478,   26,  907,  681,  542,  815,  631,  949,  258,  729,  110,  787,
+             265,  394, 1008,   35,  473,  965,   71,  745,  904,  565,  256,  387,  150,  595,  206,  439,
+             999,  657,  269,  894,  781,  636,  409,  122,  213,  366,  452,  148,  551,  412,  977,  643,
+              72,  574,  796,  326,  862,  587,  172,  663,  317,   29,  694,  927,  814,   87,  895,  748,
+             510,  156,  427,  586,  225,  334,  987,  503,  754,  924,   79,  679,  795,  319,  197,  506,
+             939,  208,  684,  129,  253,  767,  396, 1018,  469,  801,  201,  525,  299,  667,  369,  248,
+              18,  804,  955,   59,  725,  149,  838,   40,  306,  598,  864,  236,  962,   24,  843,  695,
+             364,  856,  443,  539,  950,   10,  507,  234,   86,  879,  637,  423,   47, 1010,  546,  833,
+             617,  323,  680,  522,  930,  444,  647,  550,  952,  176,  477,  355,  523,  618,  436,  107,
+             283,  600,   48,  735,  378,  633,  824,  925,  592,  371,  139,  945,  773,  180,  453,   99,
+             973,  191,  389,  113,  297,  790,  221,  368,   92,  712,  823,   50,  761,  157, 1016,  731,
+             883,  170,  995,  290,  893,  188,  321,  120,  716,  270,  500,  685,  335,  603,  871,  275,
+             715,  488,  914,  841,  584,    8, 1017,  671,  870,  417,  280,  654,  891,  392,  233,  533,
+             431,  641,  793,  504,   81,  699,  459,  548,  786,  982,   73,  822,  230,    0,  750,  395,
+             578,   53,  759,  231,  420,  733,  152,  481,  240,  577,  993,  117,  314,  568,  800,    3,
+             307,  100,  374,  215,  589,  813, 1003,   23,  408,  186,  628,  429,  928,  511,  994,  141,
+             898,  339,  160,  640,  934,  349,  547,  905,   61,  808,  182,  499,  933,   80,  668,  975,
+             768,  901,  683,  954,  426,  151,  278,  658,  890,  318,  851,  570,  130,  356,  644,  245,
+             691,  528, 1006,  465,  108,  812,  264,  706,  441,  353,  724,  627,  410,  854,  219,  472,
+             158,  526,  254,   27,  749,  848,  385,  109,  520,  739,   39,  267,  697,  811,   76,  455,
+             860,   22,  792,  304,  588,   51,  991,  140,  601,  959,   16,  259,  764,  123,  360,  607,
+              64,  834,  440,  626,  313,  531,  963,  713,  227,  917,  468,  979,  393,  211,  948,  582,
+             289,  403,  199,  720,  886,  406,  659,  322,  866,  222,  826,  558, 1009,  492,  702,  947,
+             337,  727, 1022,  121,  888,  205,   34,  597,  421,  145,  622,   95,  861,  490,  743,  154,
+             705,  971,  611,  125,  498,  237,  782,  530,   83,  479,  386,  147,  309,   37,  869,  239,
+             651,  194,  384,  561,  687,  460,  807,  294, 1007,  819,  332,  771,  549,   33,  320,  897,
+              66,  470,  830,  333,  958,    9,  912,  185,  632,  755,  899,  669,  797,  599,  399,  524,
+             969,   19,  777,  285,   77,  940,  377,  746,   69,  505,  189,  682,  272, 1021,  653,  382,
+             540,  246,  102,  757,  555,  678,  437,  342,  988,  266,   56,  458,  203,  926,   93,  810,
+             461,  593,  929,  491,  853,  169,  629,  238,  567,  887,  398,  923,  115,  447,  184,  772,
+             863,  621, 1000,  418,  271,  165,  847,  738,  112,  583,  942,  347,  541,  728,  291,  159,
+        ]
+        func threshold(_ i: Int) -> Float { (Float(ranks[i]) + 0.5) / Float(blueN * blueN) }
+        return stride(from: 0, to: ranks.count, by: 4).map { i in
+            SIMD4(threshold(i), threshold(i + 1), threshold(i + 2), threshold(i + 3))
         }
-        var on = [Bool](repeating: false, count: M)
-        var energy = [Float](repeating: 0.0, count: M)
-        func splat(_ i: Int, _ sign: Float) {
-            let ix = i % N
-            let iy = i / N
-            for y in 0..<N {
-                let dy = (y + N - iy) % N
-                for x in 0..<N {
-                    let dx = (x + N - ix) % N
-                    energy[y * N + x] += sign * kern[dy * N + dx]
-                }
-            }
-        }
-        func tightest() -> Int {
-            var best = -1
-            var bestE = -Float.greatestFiniteMagnitude
-            for i in 0..<M where on[i] {
-                if energy[i] > bestE { bestE = energy[i]; best = i }
-            }
-            return best
-        }
-        func voidest() -> Int {
-            var best = -1
-            var bestE = Float.greatestFiniteMagnitude
-            for i in 0..<M where !on[i] {
-                if energy[i] < bestE { bestE = energy[i]; best = i }
-            }
-            return best
-        }
-
-        var ones = 0
-        for i in 0..<M {
-            if u01(hu(UInt32(i), 0xb10e)) < 0.1 {
-                on[i] = true
-                ones += 1
-            }
-        }
-        for i in 0..<M where on[i] { splat(i, 1.0) }
-        for _ in 0..<M {
-            let c = tightest()
-            on[c] = false
-            splat(c, -1.0)
-            let v = voidest()
-            on[v] = true
-            splat(v, 1.0)
-            if v == c { break }
-        }
-        var rank = [Int](repeating: 0, count: M)
-        let protoOn = on
-        let protoE = energy
-        for r in stride(from: ones - 1, through: 0, by: -1) {
-            let c = tightest()
-            on[c] = false
-            splat(c, -1.0)
-            rank[c] = r
-        }
-        on = protoOn
-        energy = protoE
-        for r in ones..<M {
-            let v = voidest()
-            on[v] = true
-            splat(v, 1.0)
-            rank[v] = r
-        }
-        let values = rank.map { (Float($0) + 0.5) / Float(M) }
-        var out: [SIMD4<Float>] = []
-        out.reserveCapacity(M / 4)
-        for i in stride(from: 0, to: M, by: 4) {
-            out.append(SIMD4<Float>(values[i], values[i + 1], values[i + 2], values[i + 3]))
-        }
-        return out
     }()
 }

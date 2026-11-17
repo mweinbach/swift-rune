@@ -1,0 +1,204 @@
+<!doctype html>
+<meta charset="utf-8">
+<canvas></canvas>
+<pre id="result">Testing first-frame text…</pre>
+<script type="module">
+import { instantiateRuneBrowser, mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+import { createRuneTextImports, mountRuneTextFonts, runeTextFontsReady } from '../../Sources/Rune/Resources/Web/rune-web-text.mjs';
+
+const check = (value, message) => { if (!value) throw Error(message); };
+const nativeFetch = fetch;
+const corpus = [
+    'Rune → office “quotes” fi ffl AVAWAY 1/2 ½ €100 ™ — …',
+    'Ýüñçø Łódź Čeština Ştefan Øresund Œuvre ß',
+    '⌘⇧⌥⌃ ⌫ ⎋ ↩ ⏎ «guillemets» ‹›',
+    'Ωμέγα Ελληνικά ΐΰ ϊϋ ς; Άλφα',
+    'Привет, мир! Ґанок ЇЄІ Ђорђе Љубљана ЎЏ'
+];
+const later = ['Tiếng Việt', 'ἀρχή', 'Әліппе'];
+const weights = [[26, 400], [30, 500], [48, 600]]; // Upstream's three styles at 2x.
+const files = ['Inter-Regular', 'Inter-Medium', 'Inter-SemiBold'];
+const utf8 = new TextEncoder();
+const nextFrame = () => new Promise(resolve => requestAnimationFrame(resolve));
+let app;
+try {
+    const ready = [];
+    const requests = [];
+    window.fetch = async (input, options) => {
+        const url = new URL(input.url ?? input, location.href);
+        if (url.pathname.includes('/Resources/Fonts/')) requests.push(url.pathname.split('/Fonts/')[1]);
+        if (/\/Fonts\/web\/Inter-/.test(url.pathname)) await new Promise(resolve => ready.push(resolve));
+        return nativeFetch(input, options);
+    };
+    const refs = await Promise.all(files.map(async (file, i) => {
+        const bytes = await (await nativeFetch('../../Sources/Rune/Resources/Fonts/web/' + file + '.ttf')).arrayBuffer();
+        return new FontFace('Reference Inter', bytes, { weight: String(weights[i][1]) }).load();
+    }));
+    for (const face of refs) document.fonts.add(face);
+    // (module (memory (export "memory") 8) (func (export "rune_web_fonts_changed")))
+    const fixtureReactor = Uint8Array.from(atob('AGFzbQEAAAABBAFgAAADAgEABQMBAAgHIwIGbWVtb3J5AgAWcnVuZV93ZWJfZm9udHNfY2hhbmdlZAAACgQBAgAL'), c => c.charCodeAt(0));
+    // Keep this fixture runnable in the regular browser suite. With --wasm the actual
+    // Swift application mounts, presents and invalidates its caches on the same path.
+    const compiled = (await nativeFetch('/__rune/app.wasm', { method: 'HEAD' })).ok;
+    let source, imports = {}, wasi;
+    if (compiled) {
+        const { WASI, ConsoleStdout, OpenFile, File } = await import('/__rune/shim/index.js');
+        wasi = new WASI(['rune-hello'], [], [new OpenFile(new File([])),
+            ConsoleStdout.lineBuffered(console.log), ConsoleStdout.lineBuffered(console.error)]);
+        imports = { wasi_snapshot_preview1: wasi.wasiImport };
+        source = nativeFetch('/__rune/app.wasm');
+    } else {
+        source = fixtureReactor;
+    }
+    const { instance } = await instantiateRuneBrowser(source, imports);
+    const api = instance.exports;
+    let wakes = 0, frames = 0;
+    check(requests.length === 4 && requests.filter(name => name.startsWith('web/first/')).length === 3 &&
+        requests.includes('IBMPlexMono-Regular.ttf') && !ready.length, 'First frame downloaded the wrong faces: ' + requests);
+    if (compiled) {
+        wasi.initialize(instance);
+        app = mountRuneBrowser(document.querySelector('canvas'), { exports: { ...api,
+            rune_web_fonts_changed() { ++wakes; api.rune_web_fonts_changed(); },
+            rune_web_frame(time) { const n = api.rune_web_frame(time); if (n > 0) ++frames; return n; }
+        } }, { backend: 'cpu' });
+        await app.ready;
+        check(frames > 0, 'Swift did not present the first frame');
+    } else {
+        app = mountRuneTextFonts(api.memory, document, () => ++wakes);
+        app.presented();
+    }
+    check(ready.length === 3, 'Present did not start exactly three full faces');
+    const measureMemory = new WebAssembly.Memory({ initial: 8 });
+    const bridge = createRuneTextImports(() => measureMemory);
+    const data = new DataView(measureMemory.buffer), bytes = new Uint8Array(measureMemory.buffer);
+    function shape(text, family, size, weight, features = '', retain = false) {
+        const input = utf8.encode(text), stack = utf8.encode(family + ', monospace');
+        bytes.set(input, 256); bytes.set(stack, 1024);
+        const id = bridge.create(256, input.length, 1024, stack.length, size, weight, 0, 0, 0, 0, 40);
+        try {
+            if (features) {
+                const settings = utf8.encode(features);
+                bytes.set(settings, 2048);
+                bridge.configure(id, 0, 0, 2048, settings.length, 0, 0, 0, 40);
+            }
+            const metrics = Array.from(bytes.slice(0, 40));
+            const x = data.getInt32(12, true), y = data.getInt32(16, true);
+            const width = data.getInt32(20, true), height = data.getInt32(24, true);
+            check(width * height > 0 && bridge.mask(id, x, y, width, height, 4096), 'Empty glyph mask');
+            const mask = bytes.slice(4096, 4096 + width * height);
+            const carets = [];
+            let offset = 0;
+            for (const char of text) {
+                carets.push(bridge.caret(id, offset));
+                offset += utf8.encode(char).length;
+            }
+            carets.push(bridge.caret(id, offset));
+            return { id, metrics, mask, carets };
+        } finally { if (!retain) bridge.release(id); }
+    }
+    function same(a, b) {
+        return ['metrics', 'mask', 'carets'].every(key =>
+            a[key].length === b[key].length && a[key].every((v, i) => v === b[key][i]));
+    }
+    const full = [], first = [];
+    for (const style of weights) {
+        for (const text of [...corpus, ...later]) {
+            const wanted = shape(text, 'Reference Inter', ...style);
+            const actual = shape(text, 'Inter', ...style);
+            full.push(wanted); first.push(actual);
+            check(same(wanted, actual) === corpus.includes(text), 'First-cut metrics/ink/positions at ' + style + ' for ' + text);
+        }
+    }
+    const oldFeatureRun = shape(later[0], 'Inter', ...weights[0], 'kern=0', true);
+    const expectedFeatureRun = shape(later[0], 'Reference Inter', ...weights[0], 'kern=0');
+    check(!same(oldFeatureRun, expectedFeatureRun), 'First face unexpectedly covered the extended feature run');
+    // Finishing two of the three independent requests cannot replace a single weight.
+    ready[0](); ready[1]();
+    await nextFrame();
+    check(wakes === 0 && same(first[5], shape(later[0], 'Inter', ...weights[0])), 'Partial batch replaced Inter');
+    const framesAtSwap = frames;
+    ready[2]();
+    for (let i = 0; i < 120 && (wakes === 0 || (compiled && frames <= framesAtSwap)); ++i) await nextFrame();
+    check(wakes === 1 && (!compiled || frames > framesAtSwap), 'Complete batch did not invalidate and redraw once');
+    let i = 0;
+    for (const style of weights) for (const text of [...corpus, ...later]) {
+        check(same(full[i++], shape(text, 'Inter', ...style)), 'Full face failed to restore ' + text);
+    }
+    const newFeatureRun = shape(later[0], 'Inter', ...weights[0], 'kern=0', true);
+    check(same(newFeatureRun, expectedFeatureRun), 'A live first-cut feature alias masked the full face');
+    bridge.release(newFeatureRun.id);
+    bridge.release(oldFeatureRun.id);
+    check(requests.length === 7, 'Unexpected font requests: ' + requests);
+    // A failed weight leaves all three cuts installed. App-supplied Inter suppresses the batch.
+    const url = new URL('../../Sources/Rune/Resources/Fonts/', location.href);
+    for (const ownInter of [false, true]) {
+        const frame = document.createElement('iframe');
+        document.body.append(frame);
+        const doc = frame.contentDocument;
+        const loads = [];
+        window.fetch = async (input, options) => {
+            const path = new URL(input, location.href).pathname;
+            loads.push(path);
+            if (path.endsWith('/web/Inter-Medium.ttf')) return new Response(null, { status: 503 });
+            return nativeFetch(input, options);
+        };
+        const { instance } = await instantiateRuneBrowser(fixtureReactor, {}, { document: doc });
+        const memory = instance.exports.memory;
+        const host = createRuneTextImports(() => memory, doc);
+        const saved = [...doc.fonts];
+        const lifecycle = mountRuneTextFonts(memory, doc, () => {});
+        try {
+            if (ownInter) {
+                const own = new Uint8Array(await (await nativeFetch(new URL('Inter-Medium.ttf', url))).arrayBuffer());
+                new Uint8Array(memory.buffer).set(own);
+                check(host.font(0, own.length), 'App Inter registration failed');
+                await runeTextFontsReady(memory);
+            }
+            await lifecycle.presented();
+            const inter = [...doc.fonts].filter(face => face.family === 'Inter');
+            if (ownInter) {
+                check(inter.length === 1 && inter[0].weight === '500' && loads.length === 4, 'Overrode app Inter');
+            } else {
+                check(inter.length === 3 && saved.every(face => doc.fonts.has(face)) && loads.length === 7,
+                    'A failed full weight displaced a cut face');
+            }
+        } finally { lifecycle.dispose(); frame.remove(); }
+    }
+    // Page-relative app URLs deduplicate across windows and stop notifying unmounted reactors.
+    const frame = document.createElement('iframe');
+    document.body.append(frame);
+    const doc = frame.contentDocument;
+    const { instance: appInstance } = await instantiateRuneBrowser(fixtureReactor, {}, { fontDirectory: null, document: doc });
+    const memory = appInstance.exports.memory, fontHost = createRuneTextImports(() => memory, doc);
+    const sent = [], notifications = [0, 0];
+    const firstWindow = mountRuneTextFonts(memory, doc, () => ++notifications[0]);
+    const secondWindow = mountRuneTextFonts(new WebAssembly.Memory({ initial: 1 }), doc, () => ++notifications[1]);
+    try {
+        window.fetch = (input, options) => { sent.push(input); return nativeFetch(input, options); };
+        function request(file, afterPaint) {
+            const data = utf8.encode('../../Sources/Rune/Resources/Fonts/' + file + '.ttf');
+            new Uint8Array(memory.buffer).set(data);
+            fontHost.font_url(0, data.length, Number(afterPaint));
+        }
+        request('Inter-Regular', true);
+        request('Inter-Regular', true);
+        check(sent.length === 0, 'On-demand face fetched before first paint');
+        request('IBMPlexMono-Regular', false);
+        await runeTextFontsReady(memory);
+        check(sent.length === 1 && notifications.join() === '1,1', 'Eager face did not arrive in both windows');
+        secondWindow.dispose();
+        await firstWindow.presented();
+        request('Inter-Regular', true);
+        check(sent.length === 2 && notifications.join() === '2,1', 'Duplicate late fetch or stale window wake');
+    } finally { firstWindow.dispose(); secondWindow.dispose(); frame.remove(); }
+    document.querySelector('#result').textContent = 'PASS ' + JSON.stringify({
+        compiled, wakes, frames, stable: corpus.length * weights.length, recovered: later.length * weights.length,
+        positions: full.reduce((count, line) => count + line.carets.length, 0)
+    });
+} catch (error) {
+    document.querySelector('#result').textContent = 'FAIL ' + (error.stack ?? error);
+} finally {
+    app?.dispose();
+    window.fetch = nativeFetch;
+}
+</script>

@@ -7,6 +7,7 @@ import RuneMotion
 /// assistive requests run on the SDL thread; the descriptor watcher only wakes that thread.
 final class LinuxAccessibilityHost {
     private let waker: Waker
+    private let overlay: Bool
     private var window: OpaquePointer?
     private var lastRoot: AccessibilityNode?
     private var lastTitle = ""
@@ -34,10 +35,12 @@ final class LinuxAccessibilityHost {
     }
     private var requests: [Request] = []
 
-    init(title: String, waker: Waker, isVisible: Bool = true) {
+    init(title: String, waker: Waker, isVisible: Bool = true, overlay: Bool = false) {
+        self.overlay = overlay
         self.waker = waker
         self.lastTitle = title
-        self.window = rune_ax_open(title, isVisible ? 1 : 0, { context in
+        let open = overlay ? rune_ax_open_overlay : rune_ax_open
+        self.window = open(title, isVisible ? 1 : 0, { context in
             guard let context else { return }
             Unmanaged<Waker>.fromOpaque(context).takeUnretainedValue().wake()
         }, Unmanaged.passUnretained(waker).toOpaque())
@@ -90,7 +93,8 @@ final class LinuxAccessibilityHost {
     }
 
     private func drain() {
-        rune_ax_pump(window, { context, target, kind, text, number, start, end in
+        let service = overlay ? rune_ax_take_requests : rune_ax_pump
+        service(window, { context, target, kind, text, number, start, end in
             guard let context, let target else { return }
             let host = Unmanaged<LinuxAccessibilityHost>.fromOpaque(context).takeUnretainedValue()
             let id = String(cString: target)
@@ -99,6 +103,7 @@ final class LinuxAccessibilityHost {
             case RUNE_AX_FOCUS: host.requests.append(.action(id, .focus, nil))
             case RUNE_AX_INCREMENT: host.requests.append(.action(id, .increment, nil))
             case RUNE_AX_DECREMENT: host.requests.append(.action(id, .decrement, nil))
+            case RUNE_AX_SCROLL_INTO_VIEW: host.requests.append(.action(id, .scrollIntoView, nil))
             case RUNE_AX_SET_TEXT:
                 if let text { host.requests.append(.action(id, .setValue, .text(String(cString: text)))) }
             case RUNE_AX_SET_NUMBER: host.requests.append(.action(id, .setValue, .number(number)))
@@ -116,7 +121,7 @@ final class LinuxAccessibilityHost {
         let width = pixel(runtime.viewport.x), height = pixel(runtime.viewport.y)
         let title = runtime.windowTitle ?? lastTitle
         let windowRect = [windowX, windowY, width, height]
-        var root = runtime.accessibilitySnapshot()
+        var root = runtime.nativeAccessibilitySnapshot()
         if runtime.a11yAnnouncement.count != 0 {
             root.children.append(AccessibilityTreeState.announcerNode(runtime.a11yAnnouncement, holdWords: false))
         }
@@ -164,7 +169,9 @@ final class LinuxAccessibilityHost {
             if checked == .mixed { state |= RUNE_AX_MIXED }
         }
 
-        var actions = 0
+        // AT-SPI Component.ScrollTo accepts every runtime element, including a field
+        // already in view. The optional scroll hint resolves to its owning element.
+        var actions = node.runtimePath == nil ? 0 : RUNE_AX_SCROLL_INTO_VIEW
         for action in node.actions {
             switch action {
             case .press: actions |= RUNE_AX_PRESS
@@ -172,6 +179,7 @@ final class LinuxAccessibilityHost {
             case .increment: actions |= RUNE_AX_INCREMENT
             case .decrement: actions |= RUNE_AX_DECREMENT
             case .setValue: actions |= node.range == nil ? RUNE_AX_SET_TEXT : RUNE_AX_SET_NUMBER
+            case .scrollIntoView: actions |= RUNE_AX_SCROLL_INTO_VIEW
             }
         }
         var properties = RuneA11yProperties()

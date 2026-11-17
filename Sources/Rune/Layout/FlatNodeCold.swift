@@ -1,112 +1,73 @@
-import Foundation
 import RuneMotion
 
-/// Cold attributes of a laid-out `Runtime.FlatNode`, boxed so `FlatNode` stays
-/// compact in the contiguous flat node array (`types.rs::NodeCold`, `size_tests.rs`).
-internal final class FlatNodeCold<State> {
-    var el: El<State>
-    var unscrolledRect: MotionRect
-    let committedLayoutTarget: MotionRect
-    let growthRowProjectionY: Float
-    let growthContentShiftY: Float
-    let virtualWindowSnapOriginY: Float
-    var zoomedTargetRect: MotionRect
-    var staticRect: [Float]
-    var contentSize: Vec2
-    var clipRect: MotionRect
-    var scrollShift: Vec2
-    var localSize: Vec2
-    var zOrder: Int
-    var inheritedScale: Float
+/// Effects and growth projections used by a minority of flattened nodes. An empty array is
+/// shared across all ordinary nodes, and the single stored value has native copy-on-write.
+internal struct FlatNodeCold {
+    var growthRowProjectionY: Float = 0
+    var growthContentShiftY: Float = 0
+    var virtualWindowSnapOriginY: Float = 0
     var anchorAttachNorm: Vec2?
-    var activeClipFades: [EdgeFadeSpec]
+    var activeClipFades: [EdgeFadeSpec] = []
     var ownScrollFade: EdgeFadeSpec?
     var ownClipFade: EdgeFadeSpec?
-    var enclosingScrollIndex: Int?
-    var enclosingVScrollIndex: Int?
-    var enclosingHScrollIndex: Int?
-    var flow: Flow
-    var mirroredInRtl: Bool
     var elided: TextElision?
 
-    init(
-        el: El<State>,
-        unscrolledRect: MotionRect,
-        committedLayoutTarget: MotionRect,
-        growthRowProjectionY: Float,
-        growthContentShiftY: Float,
-        virtualWindowSnapOriginY: Float,
-        zoomedTargetRect: MotionRect,
-        staticRect: [Float],
-        contentSize: Vec2,
-        clipRect: MotionRect,
-        scrollShift: Vec2,
-        localSize: Vec2,
-        zOrder: Int,
-        inheritedScale: Float,
-        anchorAttachNorm: Vec2?,
-        activeClipFades: [EdgeFadeSpec],
-        ownScrollFade: EdgeFadeSpec?,
-        ownClipFade: EdgeFadeSpec?,
-        enclosingScrollIndex: Int?,
-        enclosingVScrollIndex: Int?,
-        enclosingHScrollIndex: Int?,
-        flow: Flow = .ltr,
-        mirroredInRtl: Bool = false,
-        elided: TextElision? = nil
-    ) {
-        self.el = el
-        self.unscrolledRect = unscrolledRect
-        self.committedLayoutTarget = committedLayoutTarget
-        self.growthRowProjectionY = growthRowProjectionY
-        self.growthContentShiftY = growthContentShiftY
-        self.virtualWindowSnapOriginY = virtualWindowSnapOriginY
-        self.zoomedTargetRect = zoomedTargetRect
-        self.staticRect = staticRect
-        self.contentSize = contentSize
-        self.clipRect = clipRect
-        self.scrollShift = scrollShift
-        self.localSize = localSize
-        self.zOrder = zOrder
-        self.inheritedScale = inheritedScale
-        self.anchorAttachNorm = anchorAttachNorm
-        self.activeClipFades = activeClipFades
-        self.ownScrollFade = ownScrollFade
-        self.ownClipFade = ownClipFade
-        self.enclosingScrollIndex = enclosingScrollIndex
-        self.enclosingVScrollIndex = enclosingVScrollIndex
-        self.enclosingHScrollIndex = enclosingHScrollIndex
-        self.flow = flow
-        self.mirroredInRtl = mirroredInRtl
-        self.elided = elided
+    var isEmpty: Bool {
+        growthRowProjectionY == 0 && growthContentShiftY == 0 && virtualWindowSnapOriginY == 0 &&
+            anchorAttachNorm == nil && activeClipFades.isEmpty && ownScrollFade == nil &&
+            ownClipFade == nil && elided == nil
     }
+}
 
-    func copy() -> FlatNodeCold<State> {
-        FlatNodeCold(
-            el: el,
-            unscrolledRect: unscrolledRect,
-            committedLayoutTarget: committedLayoutTarget,
-            growthRowProjectionY: growthRowProjectionY,
-            growthContentShiftY: growthContentShiftY,
-            virtualWindowSnapOriginY: virtualWindowSnapOriginY,
-            zoomedTargetRect: zoomedTargetRect,
-            staticRect: staticRect,
-            contentSize: contentSize,
-            clipRect: clipRect,
-            scrollShift: scrollShift,
-            localSize: localSize,
-            zOrder: zOrder,
-            inheritedScale: inheritedScale,
-            anchorAttachNorm: anchorAttachNorm,
-            activeClipFades: activeClipFades,
-            ownScrollFade: ownScrollFade,
-            ownClipFade: ownClipFade,
-            enclosingScrollIndex: enclosingScrollIndex,
-            enclosingVScrollIndex: enclosingVScrollIndex,
-            enclosingHScrollIndex: enclosingHScrollIndex,
-            flow: flow,
-            mirroredInRtl: mirroredInRtl,
-            elided: elided
-        )
+/// Structural identities for one sibling group. Geometry, inherited styling, handlers and
+/// animation specs are evaluated for the current pass even when these paths are reused.
+internal struct FlatChildPaths {
+    struct Address {
+        let path: String
+        let key: String?
+        let id: NodeId
+    }
+    var addresses: [Address] = []
+    var duplicates: [(index: Int, warning: String)] = []
+    var firstChildSlot = 0
+
+    init<State>(_ children: [El<State>], count: Int, parent: String) {
+        guard count > 0 else { return }
+        addresses.reserveCapacity(count)
+        var seen: [String: Int] = [:]
+        for i in 0..<count {
+            let raw = children[i].storageKeyId
+            var key = raw
+            if let raw {
+                let previous = seen[raw, default: 0]
+                seen[raw] = previous + 1
+                if previous != 0 {
+                    let renamed = "\(raw)#dup\(previous)"
+                    duplicates.append((i, "Duplicate sibling key '\(raw)' renamed to '\(renamed)' under \(parent)"))
+                    key = renamed
+                }
+            }
+            let path = key.map { "\(parent)/@\($0)" } ?? "\(parent)/\(i)"
+            let id = children[i].layoutAnim?.travel == .screen ? key.map { NodeId.hash("screen:@" + $0) } : nil
+            addresses.append(Address(path: path, key: key, id: id ?? NodeId.hash(path)))
+        }
+    }
+}
+
+/// The root path and memo owner establish all descendant structural keys. Slots are filled
+/// iteratively during the real tree walk, including arbitrarily deep memo trees.
+internal final class FlatMemoPaths<State> {
+    let owner: MemoLayoutChildren<State>
+    private var slots: [FlatChildPaths?] = [nil]
+
+    init(_ owner: MemoLayoutChildren<State>) { self.owner = owner }
+
+    func children(at slot: Int, source: [El<State>], parent: String) -> FlatChildPaths {
+        if let cached = slots[slot] { return cached }
+        var paths = FlatChildPaths(source, count: source.count, parent: parent)
+        paths.firstChildSlot = slots.count
+        slots.append(contentsOf: repeatElement(nil, count: source.count))
+        slots[slot] = paths
+        return paths
     }
 }

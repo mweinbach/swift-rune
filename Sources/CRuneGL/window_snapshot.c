@@ -33,7 +33,9 @@ int rune_gl_window_snapshot(RuneGLResolve resolve, int32_t x, int32_t y, int32_t
     if (height > 1 && !row) return 0;
     GLint framebuffer, old_read_buffer, pack_buffer, alignment, row_length, skip_pixels, skip_rows;
     get(GL_READ_FRAMEBUFFER_BINDING, &framebuffer);
-    bind_framebuffer(GL_READ_FRAMEBUFFER, 0);
+    GLint drawn;
+    get(GL_DRAW_FRAMEBUFFER_BINDING, &drawn);
+    bind_framebuffer(GL_READ_FRAMEBUFFER, (GLuint)drawn);
     /* Each framebuffer retains its own read-buffer selection. */
     get(GL_READ_BUFFER, &old_read_buffer);
     get(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
@@ -46,7 +48,7 @@ int rune_gl_window_snapshot(RuneGLResolve resolve, int32_t x, int32_t y, int32_t
     pixel_store(GL_PACK_ROW_LENGTH, 0);
     pixel_store(GL_PACK_SKIP_PIXELS, 0);
     pixel_store(GL_PACK_SKIP_ROWS, 0);
-    read_buffer(GL_BACK);
+    read_buffer(drawn ? GL_COLOR_ATTACHMENT0 : GL_BACK);
     read_pixels(x, framebuffer_height - y - height, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     int success = error() == GL_NO_ERROR;
     read_buffer((GLenum)old_read_buffer);

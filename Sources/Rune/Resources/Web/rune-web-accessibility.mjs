@@ -1,6 +1,10 @@
+import { documentTag, installDocumentSelectionStyle, applyDocumentNode, finishDocumentNode }
+    from './rune-web-document-nodes.mjs';
+
 // The canvas owns pointer input. Its transparent sibling exposes Rune's controls in their
 // actual positions to keyboard users, screen readers, and touch exploration.
 const roles = {
+    "scroll-view": "group",
     icon: 'img', splitter: 'separator', 'menu-item-check-box': 'menuitemcheckbox', 'menu-item-radio': 'menuitemradio'
 };
 const fieldRoles = new Set(['textbox', 'password-input', 'multiline-text-input']);
@@ -18,14 +22,25 @@ function attribute(element, name, value) {
 
 let nextMount = 0;
 
-export function mountRuneAccessibility(canvas, send) {
+export function mountRuneAccessibility(canvas, send, documentMode = false) {
     const doc = canvas.ownerDocument;
     const root = doc.createElement('div');
+    root.setAttribute('data-rune-a11y', '');
     root.style.cssText = 'position:absolute;opacity:0;pointer-events:none;overflow:hidden;transform-origin:top left';
+    if (documentMode) {
+        root.setAttribute('role', 'document');
+        root.style.opacity = '1';
+        root.style.color = 'transparent';
+    }
     canvas.after(root);
     const live = doc.createElement('div');
     root.append(live);
     const slots = new Map();
+    const recordsByKey = new Map();
+    const relations = new Set();
+    let page = documentMode;
+    let rootPath;
+    let focusPath;
     const idPrefix = 'rune-ax-' + ++nextMount + '-';
     const listeners = new AbortController();
     let nextID = 0;
@@ -37,7 +52,8 @@ export function mountRuneAccessibility(canvas, send) {
 
     function place() {
         if (!viewport || viewport[0] <= 0 || viewport[1] <= 0) return;
-        const geometry = [canvas.offsetLeft + canvas.clientLeft, canvas.offsetTop + canvas.clientTop,
+        const geometry = documentMode ? [0, 0, ...viewport, 1, 1]
+            : [canvas.offsetLeft + canvas.clientLeft, canvas.offsetTop + canvas.clientTop,
             ...viewport, canvas.clientWidth / viewport[0], canvas.clientHeight / viewport[1]];
         if (placement && geometry.every((value, i) => value === placement[i])) return;
         placement = geometry;
@@ -49,10 +65,14 @@ export function mountRuneAccessibility(canvas, send) {
         root.style.transform = 'scale(' + sx + ',' + sy + ')';
     }
 
+    function tag(node) {
+        return page ? documentTag(node) : node.role === 'text' ? 'span' : 'div';
+    }
+
     function create(node) {
         const field = isEditor(node);
         const range = node.role === 'slider' && !!node.range;
-        const box = doc.createElement(node.role === 'text' ? 'span' : 'div');
+        const box = doc.createElement(tag(node));
         box.style.cssText = 'box-sizing:border-box;position:absolute;pointer-events:none;margin:0;padding:0;border:0';
         const text = node.role === 'text' ? doc.createTextNode('') : null;
         if (text) box.append(text);
@@ -67,23 +87,30 @@ export function mountRuneAccessibility(canvas, send) {
         }
         control.id = idPrefix + ++nextID;
         control.dataset.runeTarget = node.path;
-        return { box, control, field, range, text, node };
+        return { box, control, field, range, text, node, bounds: node.bounds, children: [], parent: null, rect: null };
     }
 
-    function apply(record, node, parentBounds) {
+    function position(record) {
+        const [left, top, w, h] = record.bounds;
+        const width = Math.max(0, w), height = Math.max(0, h);
+        const old = record.rect, style = record.box.style;
+        if (old && left === old[0] && top === old[1] && width === old[2] && height === old[3]) return;
+        if (!old || left !== old[0]) style.left = left + 'px';
+        if (!old || top !== old[1]) style.top = top + 'px';
+        if (!old || width !== old[2]) style.width = width + 'px';
+        if (!old || height !== old[3]) style.height = height + 'px';
+        record.rect = [left, top, width, height];
+    }
+
+    function apply(record, node) {
         const { box, control, field } = record;
-        const [x, y, width, height] = node.bounds;
         const states = new Set(node.states);
-        box.style.left = (x - parentBounds[0]) + 'px';
-        box.style.top = (y - parentBounds[1]) + 'px';
-        box.style.width = Math.max(0, width) + 'px';
-        box.style.height = Math.max(0, height) + 'px';
         box.style.overflow = states.has('clips') ? 'hidden' : 'visible';
 
         const role = roles[node.role] ?? node.role;
         if ((!field || role === 'combobox') && role !== 'text') attribute(control, 'role', role);
         if (role === 'text') {
-            if (record.text.data !== (node.name ?? '')) record.text.data = node.name ?? '';
+            if (!record.inlineFlow && (!page || node.documentText == null) && record.text.data !== (node.name ?? '')) record.text.data = node.name ?? '';
         } else {
             attribute(control, 'aria-label', node.name);
         }
@@ -130,7 +157,9 @@ export function mountRuneAccessibility(canvas, send) {
             control.readOnly = states.has('read-only');
             control.disabled = states.has('disabled');
         }
+        if (page) applyDocumentNode(record, node, send);
         record.node = node;
+        record.bounds = node.bounds;
     }
 
     function attachEditor(next, key) {
@@ -159,64 +188,227 @@ export function mountRuneAccessibility(canvas, send) {
         editor.readOnly = slot.control.readOnly;
     }
 
-    function sync(packet) {
-        const seen = new Set();
-        const ownsFocus = doc.activeElement === canvas || root.contains(doc.activeElement);
-        let focused;
-        const activeRelations = [];
-        const byKey = new Map();
-        function visit(node, parent, previousSibling, parentBounds) {
-            let record = slots.get(node.path);
-            if (record && (record.node.role !== node.role || record.field !== isEditor(node) ||
-                record.range !== (node.role === 'slider' && !!node.range))) {
-                record.box.remove();
-                record = null;
+    function forgetKey(record) {
+        const key = record.node.key;
+        const members = recordsByKey.get(key);
+        if (!members) return;
+        members.delete(record);
+        if (!members.size) recordsByKey.delete(key);
+    }
+
+    function rememberKey(record, key) {
+        if (key == null) return;
+        let members = recordsByKey.get(key);
+        if (!members) recordsByKey.set(key, members = new Set());
+        members.add(record);
+    }
+
+    function resolveTarget(record) {
+        const choices = recordsByKey.get(record.node.activeDescendant);
+        let scope = record.box, target;
+        while (choices?.size && scope && root.contains(scope) && !target) {
+            for (const candidate of choices) {
+                if (scope.contains(candidate.box) && (!target ||
+                    (target.box.compareDocumentPosition(candidate.box) & Node.DOCUMENT_POSITION_PRECEDING))) {
+                    target = candidate;
+                }
             }
-            if (!record) {
+            scope = scope.parentElement;
+        }
+        attribute(record.control, 'aria-activedescendant', target?.control.id);
+        const popup = record.node.role === 'combobox' && target?.box.closest('[role=listbox],[role=tree],[role=grid]');
+        attribute(record.control, 'aria-controls', popup?.id || null);
+    }
+
+    function insertAt(parent, box, anchor) {
+        if (box === anchor) return;
+        // A DOM move preserves an active field's selection and ongoing IME composition.
+        if (box.isConnected && parent.isConnected && parent.moveBefore) parent.moveBefore(box, anchor);
+        else parent.insertBefore(box, anchor);
+    }
+
+    function orderChildren(parent) {
+        let previous = parent.field || parent.range ? parent.control : parent.text;
+        for (const path of parent.children) {
+            const record = slots.get(path);
+            if (!record || record.parent !== parent.node.path) continue;
+            const anchor = previous ? previous.nextSibling : parent.box.firstChild;
+            insertAt(parent.box, record.box, anchor);
+            previous = record.box;
+        }
+    }
+
+    // Older reactors send a complete tree. It uses the same retained slots as newer delta packets.
+    function flatten(rootNode) {
+        const nodes = [], children = Object.create(null);
+        function visit({children: descendants = [], ...node}, parentX, parentY) {
+            const [x, y, width, height] = node.bounds;
+            node.bounds = [x - parentX, y - parentY, width, height];
+            nodes.push(node);
+            children[node.path] = descendants.map(child => child.path);
+            for (const child of descendants) visit(child, x, y);
+        }
+        visit(rootNode, 0, 0);
+        return {rootPath: rootNode.path, nodes, children};
+    }
+
+    function sync(packet) {
+        page = documentMode || (packet.document ?? page);
+        if (page) installDocumentSelectionStyle(root);
+        const patch = packet.root ? flatten(packet.root) : packet;
+        if (patch.bounds && !patch.nodes && !patch.children && !patch.removed &&
+            patch.rootPath == null && packet.width == null && !packet.announcement) {
+            for (const [path, bounds] of Object.entries(patch.bounds)) {
+                const record = slots.get(path);
+                if (record) {
+                    record.bounds = bounds;
+                    position(record);
+                }
+            }
+            return;
+        }
+        const previousFocus = focusPath;
+        const active = doc.activeElement;
+        const ownsFocus = active === canvas || root.contains(active);
+        let relationsChanged = false, editorChanged = false;
+        const positions = new Set(), parents = new Set(), textParents = new Set();
+        const nodes = patch.nodes ?? [];
+        const removed = new Set(patch.removed ?? []);
+        if (patch.rootPath != null) {
+            rootPath = patch.rootPath;
+            const paths = new Set(nodes.map(node => node.path));
+            for (const path of slots.keys()) if (!paths.has(path)) removed.add(path);
+        }
+        const removedParents = new Set();
+        for (const path of removed) {
+            const record = slots.get(path);
+            if (!record) continue;
+            forgetKey(record);
+            relations.delete(record);
+            if (focusPath === path) focusPath = null;
+            if (editorPath === path) editorChanged = true;
+            removedParents.add(record.parent);
+            record.box.remove();
+            slots.delete(path);
+            relationsChanged = true;
+        }
+        for (const path of removedParents) {
+            const parent = slots.get(path);
+            if (parent && !Object.hasOwn(patch.children ?? {}, path)) {
+                parent.children = parent.children.filter(child => !removed.has(child));
+            }
+        }
+        for (const node of nodes) {
+            let record = slots.get(node.path);
+            const previous = record?.node;
+            if (record && (previous.role !== node.role || record.box.localName !== tag(node) || record.field !== isEditor(node) ||
+                record.range !== (node.role === 'slider' && !!node.range))) {
+                const replaced = record;
+                forgetKey(replaced);
+                relations.delete(replaced);
+                replaced.box.remove();
+                record = create(node);
+                record.parent = replaced.parent;
+                record.children = replaced.children;
+                parents.add(record.parent);
+                parents.add(node.path);
+                slots.set(node.path, record);
+                rememberKey(record, node.key);
+                relationsChanged = true;
+            } else if (!record) {
                 record = create(node);
                 slots.set(node.path, record);
+                rememberKey(record, node.key);
+                relationsChanged = true;
+            } else if (previous.key !== node.key) {
+                forgetKey(record);
+                rememberKey(record, node.key);
+                relationsChanged = true;
             }
-            seen.add(node.path);
-            if (!byKey.has(node.key)) byKey.set(node.key, []);
-            byKey.get(node.key).push(record);
-            const anchor = previousSibling ? previousSibling.nextSibling : parent.firstChild;
-            if (anchor !== record.box) parent.insertBefore(record.box, anchor);
-            apply(record, node, parentBounds);
-            if (node.activeDescendant) activeRelations.push(record);
-            else {
-                attribute(record.control, 'aria-activedescendant', null);
-                attribute(record.control, 'aria-controls', null);
+            if (node.activeDescendant) relations.add(record);
+            else relations.delete(record);
+            if (page && previous?.anchor !== node.anchor) relationsChanged = true;
+            if (page && (previous?.inlineStart != null || node.inlineStart != null)) textParents.add(record.parent);
+            if (previous?.activeDescendant !== node.activeDescendant) {
+                relationsChanged = true;
+                if (!node.activeDescendant) {
+                    attribute(record.control, 'aria-activedescendant', null);
+                    attribute(record.control, 'aria-controls', null);
+                }
             }
-            if (node.states?.includes('focused')) focused = record;
-            let previous = record.field || record.range ? record.control : record.text;
-            for (const child of node.children ?? []) previous = visit(child, record.box, previous, node.bounds);
-            return record.box;
+            positions.add(node.path);
+            apply(record, node);
+            if (node.states?.includes('focused')) focusPath = node.path;
+            else if (focusPath === node.path) focusPath = null;
+            if (editorPath === node.path) editorChanged = true;
         }
-        viewport = [packet.width, packet.height];
-        place();
-        visit(packet.root, root, null, [0, 0]);
-        for (const [path, record] of slots) {
-            if (!seen.has(path)) { record.box.remove(); slots.delete(path); }
+        for (const [path, bounds] of Object.entries(patch.bounds ?? {})) {
+            const record = slots.get(path);
+            if (!record) continue;
+            positions.add(path);
+            record.bounds = bounds;
         }
-        for (const record of activeRelations) {
-            const choices = byKey.get(record.node.activeDescendant) ?? [];
-            let scope = record.box, target;
-            while (!target && scope && root.contains(scope)) {
-                target = choices.find(candidate => scope.contains(candidate.box));
-                scope = scope.parentElement;
+        for (const [path, children] of Object.entries(patch.children ?? {})) {
+            const parent = slots.get(path);
+            if (!parent) continue;
+            if (children.length !== parent.children.length || children.some((child, i) => child !== parent.children[i])) {
+                parent.children = children;
+                parents.add(path);
+                relationsChanged = true;
             }
-            attribute(record.control, 'aria-activedescendant', target?.control.id);
-            const popup = record.node.role === 'combobox' && target?.box.closest('[role=listbox],[role=tree],[role=grid]');
-            attribute(record.control, 'aria-controls', popup?.id || null);
+            for (const child of children) {
+                const record = slots.get(child);
+                if (!record || record.parent === path) continue;
+                record.parent = path;
+                parents.add(path);
+            }
+        }
+        const rootNode = slots.get(rootPath);
+        if (rootNode) {
+            rootNode.parent = null;
+            if (rootNode.box.parentNode !== root) insertAt(root, rootNode.box, root.firstChild);
+        }
+        // Mount parents before their children. A keyed branch can move above its old parent
+        // during one update, and inserting it in the old order would form a temporary cycle.
+        const ordered = new Set();
+        function order(path) {
+            if (ordered.has(path)) return;
+            ordered.add(path);
+            const parent = slots.get(path);
+            if (!parent) return;
+            for (let p = parent.parent; p != null; p = slots.get(p)?.parent) {
+                if (parents.has(p)) order(p);
+            }
+            orderChildren(parent);
+        }
+        for (const path of parents) order(path);
+        for (const path of positions) {
+            const record = slots.get(path);
+            if (record) position(record);
+        }
+        if (page) {
+            const changed = new Set([...positions, ...parents, ...removedParents, ...textParents]);
+            for (const path of changed) {
+                const record = slots.get(path);
+                if (record) finishDocumentNode(record, slots);
+            }
+        }
+        if (relationsChanged) for (const record of relations) resolveTarget(record);
+        if (packet.width != null && packet.height != null) {
+            viewport = [packet.width, packet.height];
+            place();
         }
         if (packet.announcement) {
             live.setAttribute('aria-live', packet.announcement.live);
             live.textContent = packet.announcement.text;
         }
-        attachEditor(editor, editorPath);
-        if (focused && !focused.field && ownsFocus && doc.activeElement !== focused.control) {
+        if (editorChanged || (editor && relationsChanged)) attachEditor(editor, editorPath);
+        const focused = slots.get(focusPath);
+        const changedFocus = focusPath !== previousFocus || doc.activeElement !== active || active === canvas;
+        const restore = changedFocus && focused && !focused.field ? focused.control : active;
+        if (ownsFocus && restore?.isConnected && doc.activeElement !== restore) {
             syncingFocus = true;
-            try { focused.control.focus({ preventScroll: true }); } finally { syncingFocus = false; }
+            try { restore.focus({ preventScroll: true }); } finally { syncingFocus = false; }
         }
     }
 
@@ -226,6 +418,8 @@ export function mountRuneAccessibility(canvas, send) {
         const record = target && slots.get(target.dataset.runeTarget);
         if (!record || record.node.states?.includes('disabled')) return;
         const actions = record.node.actions ?? [];
+        if (page && record.box.localName === 'a' && record.box.hasAttribute('href') &&
+            (event.type === 'click' || event.type === 'keydown' && (event.key === 'Enter' || event.key === ' '))) return;
         if (event.type === 'input') {
             if (record.range && actions.includes('set-value') && Number.isFinite(target.valueAsNumber)) {
                 send({kind: 'accessibility', action: 'set-value', key: record.node.path, number: target.valueAsNumber});
@@ -251,5 +445,5 @@ export function mountRuneAccessibility(canvas, send) {
         }
     }
     for (const type of ['focusin', 'click', 'keydown', 'input']) root.addEventListener(type, handle, { signal: listeners.signal });
-    return { sync, place, attachEditor, dispose() { listeners.abort(); slots.clear(); root.remove(); } };
+    return { sync, place, attachEditor, dispose() { listeners.abort(); slots.clear(); recordsByKey.clear(); relations.clear(); root.remove(); } };
 }

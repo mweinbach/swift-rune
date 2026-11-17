@@ -1,6 +1,7 @@
 #if defined(__linux__) && !defined(__ANDROID__)
 #define _GNU_SOURCE
 #include "wayland_clipboard.h"
+#include "wayland_primary.h"
 #include "wayland_drag.h"
 #include "wayland_file_drop.h"
 #include <SDL_syswm.h>
@@ -45,6 +46,8 @@ struct RuneWaylandBoard {
     struct wl_touch *touch;
     struct wl_data_device_manager *manager;
     struct wl_data_device *device;
+    struct RuneWaylandPrimary *primary;
+    struct RunePrimaryGlobals primary_globals;
     struct Offer *selection, *drag;
     uint32_t drop_window;
     float drop_x, drop_y;
@@ -341,6 +344,7 @@ static void seat_name(void *d, struct wl_seat *s, const char *n) { (void)d; (voi
 static const struct wl_seat_listener seat_events = {.capabilities = capabilities, .name = seat_name};
 static void global(void *data, struct wl_registry *registry, uint32_t name, const char *type, uint32_t version) {
     struct RuneWaylandBoard *b = data;
+    rune_wayland_primary_global(&b->primary_globals, name, type, version);
     if (!strcmp(type, "wl_seat") && !b->seat && version >= 3) {
         b->seat = wl_registry_bind(registry, name, &wl_seat_interface, 3);
         wl_seat_add_listener(b->seat, &seat_events, b);
@@ -374,6 +378,7 @@ struct RuneWaylandBoard *rune_wayland_board_open(uint32_t id) {
     if (wl_display_roundtrip_queue(b->display, b->queue) < 0 || !b->seat || !b->manager) goto failed;
     b->device = wl_data_device_manager_get_data_device(b->manager, b->seat);
     wl_data_device_add_listener(b->device, &device_events, b);
+    b->primary = rune_wayland_primary_open(b->registry, b->seat, &b->primary_globals, b->display, b->queue);
     if (wl_display_roundtrip_queue(b->display, b->queue) < 0) goto failed;
     SDL_AddEventWatch(count_presses, b);
     return b;
@@ -386,6 +391,7 @@ void rune_wayland_board_close(struct RuneWaylandBoard *b) {
     SDL_DelEventWatch(count_presses, b);
     if (b->keymap_fd >= 0) close(b->keymap_fd);
     xkb_state_unref(b->key_state);
+    rune_wayland_primary_close(b->primary);
     while (b->offers) free_offer(b, b->offers->data);
     free_source(b->source);
     if (b->device) wl_data_device_release(b->device);
@@ -510,25 +516,70 @@ int64_t rune_wayland_board_write(struct RuneWaylandBoard *b, const RuneMimeData 
     }
     return ++b->revision;
 }
+static GByteArray *read_pipe(int fd, size_t limit, gint64 deadline) {
+    GByteArray *data = g_byte_array_new();
+    int complete = 0;
+    uint8_t buffer[16384];
+    while (ready_fd(fd, POLLIN, deadline)) {
+        ssize_t n = read(fd, buffer, sizeof(buffer));
+        if (!n) { complete = 1; break; }
+        if (n < 0) { if (errno == EINTR) continue; break; }
+        if ((size_t)n > limit - data->len) break;
+        g_byte_array_append(data, buffer, (guint)n);
+    }
+    close(fd);
+    if (!complete) { g_byte_array_unref(data); return NULL; }
+    return data;
+}
 static GByteArray *read_type(struct RuneWaylandBoard *b, const char *type, size_t limit, gint64 deadline) {
     int fds[2];
     if (pipe2(fds, O_CLOEXEC)) return NULL;
     wl_data_offer_receive(b->selection->proxy, type, fds[1]);
     close(fds[1]);
     wl_display_flush(b->display);
-    GByteArray *data = g_byte_array_new();
-    int complete = 0;
-    uint8_t buffer[16384];
-    while (ready_fd(fds[0], POLLIN, deadline)) {
-        ssize_t n = read(fds[0], buffer, sizeof(buffer));
-        if (!n) { complete = 1; break; }
-        if (n < 0) { if (errno == EINTR) continue; break; }
-        if ((size_t)n > limit - data->len) break;
-        g_byte_array_append(data, buffer, (guint)n);
+    return read_pipe(fds[0], limit, deadline);
+}
+
+struct PrimaryRead { int fd; RunePrimaryReply reply; void *context; };
+static gpointer read_primary(gpointer queue) {
+    for (;;) {
+        struct PrimaryRead *read = g_async_queue_pop(queue);
+        GByteArray *bytes = read_pipe(read->fd, RUNE_CLIPBOARD_LIMIT, g_get_monotonic_time() + 2000000);
+        read->reply(read->context, bytes && bytes->len ? bytes->data : NULL, bytes ? bytes->len : 0);
+        if (bytes) g_byte_array_unref(bytes);
+        g_free(read);
     }
-    close(fds[0]);
-    if (!complete) { g_byte_array_unref(data); return NULL; }
-    return data;
+}
+
+void rune_wayland_read_primary_fd(int fd, RunePrimaryReply reply, void *context) {
+    /* Only the host thread queues reads. One worker keeps replies ordered even
+       when the old owner is slow, without blocking the host or CLIPBOARD. */
+    static GAsyncQueue *requests;
+    if (!requests) {
+        requests = g_async_queue_new();
+        GThread *worker = g_thread_try_new("rune-primary", read_primary, requests, NULL);
+        if (!worker) {
+            g_clear_pointer(&requests, g_async_queue_unref);
+            close(fd);
+            reply(context, NULL, 0);
+            return;
+        }
+        g_thread_unref(worker);
+    }
+    struct PrimaryRead *read = g_new(struct PrimaryRead, 1);
+    *read = (struct PrimaryRead){fd, reply, context};
+    g_async_queue_push(requests, read);
+}
+
+void rune_wayland_board_write_primary(struct RuneWaylandBoard *b, const uint8_t *bytes, size_t count) {
+    rune_wayland_board_pump(b);
+    rune_wayland_primary_write(b->primary, b->serial, bytes, count);
+    wl_display_flush(b->display);
+}
+
+void rune_wayland_board_read_primary(struct RuneWaylandBoard *b, RunePrimaryReply reply, void *context) {
+    rune_wayland_board_pump(b);
+    rune_wayland_primary_read(b->primary, b->display, reply, context);
 }
 void rune_wayland_board_read(struct RuneWaylandBoard *b, RuneMimeData *out) {
     if (wl_display_roundtrip_queue(b->display, b->queue) < 0) return;

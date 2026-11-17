@@ -5,6 +5,45 @@ import RuneMotion
 
 @Suite("Resize-Only Relayout Parity (relayout.rs + relayout/live.rs)")
 struct ResizeRelayoutParityTests {
+    @Test("Sticky gutters and headers move and hit correctly inside an unchanged virtual window")
+    func virtualStickyScrollWithinMountedWindow() throws {
+        let rt = Runtime<Int>(state: -1, viewport: Vec2(120, 80), pixelScale: 1) { _, _ in
+            let rows: El<Int> = col().key("rows").w(400).shrink(0)
+                .virtualRows(200, 20, key: { _, i in "row\(i)" }) { _, i in
+                    row().w(400).h(20).shrink(0)
+                        .child(el().key("gutter\(i)").size(20, 20).stickyLeft()
+                            .onClick { state, _ in state = i })
+                        .child(el().key("cell\(i)").size(380, 20))
+                }
+            return col().key("view").size(120, 80).scrollXY()
+                .child(col().w(400).shrink(0)
+                    .child(el().key("header").w(400).h(20).shrink(0).stickyTop())
+                    .child(rows))
+        }
+        for frame in 0..<30 { _ = rt.frame(at: Double(frame) / 60) }
+        let beforeScroll = rt.commitCount
+        let start = try #require(rt.element(byKey: "cell1"))
+        rt.wheel(WheelEvent(dx: -12, dy: 0), at: Vec2(60, 50), now: 0.51)
+        _ = rt.frame(at: 0.52)
+        let gutter = try #require(rt.element(byKey: "gutter1"))
+        let cell = try #require(rt.element(byKey: "cell1"))
+        #expect(rt.commitCount == beforeScroll)
+        #expect(abs(gutter.rect[0]) < 0.05)
+        #expect(abs(cell.rect[0] - start.rect[0] + 12) < 0.05)
+
+        rt.wheel(WheelEvent(dx: 0, dy: -6), at: Vec2(60, 50), now: 0.54)
+        _ = rt.frame(at: 0.55)
+        let shifted = try #require(rt.element(byKey: "gutter1"))
+        let header = try #require(rt.element(byKey: "header"))
+        #expect(rt.commitCount == beforeScroll)
+        #expect(abs(shifted.rect[0]) < 0.05 && abs(shifted.rect[1] - gutter.rect[1] + 6) < 0.05)
+        #expect(abs(header.rect[1]) < 0.05)
+        let hit = Vec2(5, shifted.rect[1] + 10)
+        rt.pointerDown(at: hit, at: 0.56)
+        rt.pointerUp(at: hit, at: 0.57)
+        #expect(rt.state == 1)
+    }
+
     // MARK: - Helpers
 
     private func layoutSignature<S>(_ rt: Runtime<S>) -> [(String, [Float], Int)] {
@@ -79,6 +118,21 @@ struct ResizeRelayoutParityTests {
             #expect(pa.0 == pb.0, "\(label): shown path \(pa.0) vs \(pb.0)")
             #expect(pa.1 == pb.1, "\(label) @ \(pa.0): shown rect \(pa.1) vs \(pb.1)")
         }
+    }
+
+    @Test func firstVirtualMountUsesTheScrollableSpaceBelowFixedSiblings() throws {
+        let runtime = Runtime<Int>(state: 0, viewport: Vec2(200, 100)) { _, _ in col() }
+        let rows: El<Int> = col().key("rows")
+            .virtualRows(500, 10, key: { _, i in String(i) }) { _, _ in col().h(10) }
+        let body: El<Int> = col().key("body").grow(1).minH(0).scrollY().child(rows)
+        let root: El<Int> = col().key("root").wFull().hFull()
+            .child(col().h(90).shrink(0))
+            .child(body)
+
+        _ = runtime.expandVirtualSubtrees(in: root)
+        let state = try #require(runtime.virtualLists["/@root/@body/@rows"])
+        #expect(state.viewport == 10)
+        #expect(state.lastMountedRange == 0..<2)
     }
 
     private func makeParagraphRuntime(_ n: Int) -> (Runtime<Int>, () -> Int) {
@@ -283,15 +337,20 @@ struct ResizeRelayoutParityTests {
     }
 
     @Test("a_narrowing_window_lets_go_of_rows_the_overscan_no_longer_holds")
-    func narrowingWindowLetsGoOfRowsOverscanNoLongerHolds() {
+    func narrowingWindowLetsGoOfRowsOverscanNoLongerHolds() throws {
         let rt = makeScrolledTranscript(sticky: false)
         var t = 1.0
         var ran = 0
         for k in 1...80 {
             let w = 700.0 - 5.0 * Float(k)
             ran += resize(rt, width: w, t: &t)
+            let list = try #require(rt.virtualLists["/0/@scroll/@rows"])
+            let offset = rt.scrollOffset(forKey: "scroll").y - list.top
+            let estimate = try #require(rt.flatNodes.first { $0.path == "/0/@scroll/@rows" }?.el.virtualEstimate)
+            let prefix = list.computeOffsets(estimated: estimate).prefix
+            #expect(list.spare(offset: offset, viewport: list.viewport, prefix: prefix, count: list.lastKeys.count, pinned: false) <= list.viewport, "at \(w)")
         }
-        #expect(ran >= 1 && ran < 25, "the view ran \(ran) times in 80 steps")
+        #expect(ran >= 1 && ran < 20, "the view ran \(ran) times in 80 steps")
     }
 
     @Test("a_resize_that_moves_a_virtual_window_runs_the_view")
@@ -567,11 +626,15 @@ struct ResizeRelayoutParityTests {
     @Test("indexed rows remount without rerunning the view with or without a declining scroll-end observer", arguments: [false, true])
     func decliningScrollEndObserverPreservesVirtualRemount(_ observes: Bool) {
         var views = 0
+        var keyReads = 0
         var reports: [Bool] = []
         let rt = Runtime<Int>(state: 0, viewport: Vec2(200, 100), pixelScale: 1) { _, _ in
             views += 1
             let rows: El<Int> = col().key("rows").wFull()
-                .virtualRows(200, 24, key: { _, i in "row-\(i)" }) { _, _ in el().wFull().h(24) }
+                .virtualRows(200, 24, key: { _, i in
+                    keyReads += 1
+                    return "row-\(i)"
+                }) { _, _ in el().wFull().h(24) }
             let scroll = col().key("scroll").size(200, 100).scrollY(stickBottom: false).child(rows)
             if observes {
                 return scroll.onAtBottomIf { _, at in
@@ -584,11 +647,13 @@ struct ResizeRelayoutParityTests {
         _ = rt.frame(at: 0)
         _ = rt.frame(at: 0.02)
         let initialViews = views
+        let initialKeyReads = keyReads
         rt.wheel(WheelEvent(dx: 0, dy: -5000), at: Vec2(50, 50), now: 0.03)
         _ = rt.frame(at: 0.04)
         _ = rt.frame(at: 0.05)
         #expect((rt.virtualLists.values.first?.lastMountedRange.lowerBound ?? 0) > 0)
         #expect(views == initialViews)
+        #expect(keyReads == initialKeyReads)
         #expect(reports == (observes ? [false, true] : []))
     }
 

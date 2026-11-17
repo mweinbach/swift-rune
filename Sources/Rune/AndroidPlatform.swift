@@ -245,6 +245,7 @@ private final class AndroidSession {
     let waker = Waker()
     private let drawFrame: (Int32, Int32, Float, Bool) throws -> Double
     let textIdle: (Bool) -> Bool
+    let pollGPU: (Bool) -> Bool
     let motion: (AndroidMotionEvent) -> Void
     let key: (Int32, Int32, Int32, Int32, UInt32) -> Bool
     let suspendInput: () -> Void
@@ -261,6 +262,7 @@ private final class AndroidSession {
         let appearanceOverride = parsed.darkOverride ?? app.dark
         let runtime = app.makeRuntime(viewport: app.size, pixelScale: 1, systemDark: appearanceOverride,
                                       reducedMotion: parsed.reducedMotion, waker: waker, sceneName: parsed.sceneName)
+        runtime.recordEvents = false
         configure(runtime)
         textIdle = { run in
             guard !runtime.hasPendingCommit else { return false }
@@ -272,6 +274,10 @@ private final class AndroidSession {
         runtime.wallStart = parsed.timeScale == 1 ? start : nil
         let now = { (ProcessInfo.processInfo.systemUptime - start) * parsed.timeScale }
         var renderer: PortableGLRenderer?
+        pollGPU = { run in
+            guard let renderer, renderer.needsSurfaceCompletionPoll else { return false }
+            return run ? renderer.pollSurfaceCompletions() : true
+        }
         var nativeKeyboardVisible = false
         var activeFinger: Int32?
         var lastMods: Mods = .none
@@ -281,7 +287,7 @@ private final class AndroidSession {
             runtime.viewport = Vec2(Float(width) / scale, Float(height) / scale)
             runtime.systemDark = appearanceOverride ?? dark
             if renderer == nil {
-                renderer = try PortableGLRenderer(resolve: rune_android_resolve, isGLES: true) { name in
+                renderer = try PortableGLRenderer(resolve: rune_android_resolve, isGLES: true, bundledShaderAssets: true) { name in
                     guard let bytes = rune_android_read_shader(activity, name) else { throw AndroidHostError.missingShader(name) }
                     defer { rune_android_free_string(bytes) }
                     return String(cString: bytes)
@@ -447,6 +453,10 @@ public enum AndroidApp {
         callbacks.release_gpu = { ptr, current in
             let host = session(ptr)
             MainActor.assumeIsolated { host.releaseGPU(current != 0) }
+        }
+        callbacks.poll_gpu = { ptr, run in
+            let host = session(ptr)
+            return MainActor.assumeIsolated { host.pollGPU(run != 0) ? 1 : 0 }
         }
         callbacks.suspend_input = { ptr in
             let host = session(ptr)

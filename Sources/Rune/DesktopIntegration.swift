@@ -329,6 +329,7 @@ public final class Clipboard: @unchecked Sendable {
     }
 
     public func writeRich(_ payload: RichClipboardPayload) {
+        if kind == .system && self !== Self.shared { return Self.shared.writeRich(payload) }
         mutate {
             if replace(with: payload) != nil {
                 activeSecret?.markReplaced()
@@ -427,6 +428,7 @@ public final class Clipboard: @unchecked Sendable {
     /// and optionally schedules automatic clearing after `ttlSeconds`.
     @discardableResult
     public func writeSecret(_ text: String, ttlSeconds: Double? = nil) -> SecretClipboardHandle {
+        if kind == .system && self !== Self.shared { return Self.shared.writeSecret(text, ttlSeconds: ttlSeconds) }
         let payload = RichClipboardPayload(text: text, isConcealed: true)
         let handle = mutate {
             guard let revision = replace(with: payload) else {
@@ -571,8 +573,17 @@ public final class Clipboard: @unchecked Sendable {
         _ = clear(expected: nil)
     }
 
+    @discardableResult
+    func clearCurrentSecret() -> Bool {
+        if kind == .system && self !== Self.shared { return Self.shared.clearCurrentSecret() }
+        // clearNow checks the revision under the host clipboard lock even if another writer races us.
+        let secret = mutate { activeSecret }
+        return secret?.clearNow() ?? false
+    }
+
     fileprivate func clear(expected: Int?) -> Bool {
-        mutate { clearOwned(expected: expected) }
+        if kind == .system && self !== Self.shared { return Self.shared.clear(expected: expected) }
+        return mutate { clearOwned(expected: expected) }
     }
 
     private func clearOwned(expected: Int?) -> Bool {
@@ -1775,12 +1786,29 @@ public enum TrayError: Error, Sendable, Equatable {
     case backend(String)
 }
 
-/// System tray / macOS `NSStatusItem` controller with deterministic headless state.
+/// Native system tray controller with deterministic headless state.
 public final class SystemTray: @unchecked Sendable {
     private let lock = NSLock()
-    public private(set) var spec: TraySpec
-    public private(set) var isVisible: Bool = false
-    private var handler: (@Sendable (TrayEvent) -> Void)?
+    private var currentSpec: TraySpec
+    private var visible = false
+    public var spec: TraySpec {
+        lock.lock()
+        defer { lock.unlock() }
+        return currentSpec
+    }
+    public var isVisible: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return visible
+    }
+    private let handler: (@Sendable (TrayEvent) -> Void)?
+    #if os(Windows)
+    private typealias DesktopTray = WindowsSystemTray
+    private var desktopTray: DesktopTray?
+    #elseif os(Linux)
+    private typealias DesktopTray = LinuxSystemTray
+    private var desktopTray: DesktopTray?
+    #endif
     #if os(macOS)
     @MainActor
     private final class TrayTarget: NSObject {
@@ -1801,16 +1829,40 @@ public final class SystemTray: @unchecked Sendable {
     #endif
 
     public init(spec: TraySpec, onEvent: (@Sendable (TrayEvent) -> Void)? = nil) {
-        self.spec = spec
+        self.currentSpec = spec
         self.handler = onEvent
     }
 
     public func update(_ newSpec: TraySpec) {
+        updateSpec { $0 = newSpec }
+    }
+
+    public func setMenu(_ menu: [TrayItem]) {
+        updateSpec { $0.menu = menu }
+    }
+
+    public func setTooltip(_ tooltip: String) {
+        updateSpec { $0.tooltip = tooltip }
+    }
+
+    private func updateSpec(_ change: (inout TraySpec) -> Void) {
         lock.lock()
-        self.spec = newSpec
+        var newSpec = currentSpec
+        change(&newSpec)
+        #if os(Windows) || os(Linux)
+        do { try desktopTray?.update(newSpec) }
+        catch {
+            lock.unlock()
+            return
+        }
+        #endif
+        currentSpec = newSpec
+        #if os(macOS)
+        let wasVisible = visible
+        #endif
         lock.unlock()
         #if os(macOS)
-        if isVisible {
+        if wasVisible {
             Task { @MainActor in
                 self.syncStatusItem()
             }
@@ -1820,33 +1872,63 @@ public final class SystemTray: @unchecked Sendable {
 
     public func showHeadless() {
         lock.lock()
-        isVisible = true
+        visible = true
         lock.unlock()
     }
 
     public func simulateEvent(_ event: TrayEvent) {
-        lock.lock()
-        let h = handler
-        lock.unlock()
-        h?(event)
+        handler?(event)
     }
 
-    #if os(macOS)
-    @MainActor
-    public func showNative() {
+    #if os(Windows) || os(Linux)
+    @discardableResult
+    public func showNative() -> Result<Void, TrayError> {
         lock.lock()
-        isVisible = true
+        defer { lock.unlock() }
+        if desktopTray == nil {
+            do {
+                desktopTray = try DesktopTray(currentSpec) { [weak self] event in
+                    self?.simulateEvent(event)
+                }
+            } catch let error as TrayError {
+                return .failure(error)
+            } catch {
+                return .failure(.backend(String(describing: error)))
+            }
+        }
+        visible = true
+        return .success(())
+    }
+
+    public func removeNative() {
+        lock.lock()
+        let old = desktopTray
+        desktopTray = nil
+        visible = false
+        lock.unlock()
+        // Closing joins the event thread, which can call back into this controller.
+        withExtendedLifetime(old) {}
+    }
+    #endif
+
+    #if os(macOS)
+    @discardableResult
+    @MainActor
+    public func showNative() -> Result<Void, TrayError> {
+        lock.lock()
+        visible = true
         lock.unlock()
         if statusItem == nil {
             statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         }
         syncStatusItem()
+        return .success(())
     }
 
     @MainActor
     public func removeNative() {
         lock.lock()
-        isVisible = false
+        visible = false
         lock.unlock()
         if let item = statusItem {
             NSStatusBar.system.removeStatusItem(item)
@@ -1860,9 +1942,7 @@ public final class SystemTray: @unchecked Sendable {
         if trayTarget == nil {
             trayTarget = TrayTarget(owner: self)
         }
-        lock.lock()
         let current = spec
-        lock.unlock()
         item.button?.title = current.title
         item.button?.toolTip = current.tooltip
         if let icon = current.icon, icon.isValid, let appIcon = AppIcon(width: Int(icon.width), height: Int(icon.height), rgba: icon.rgba) {
@@ -1893,6 +1973,15 @@ public final class SystemTray: @unchecked Sendable {
             }
             item.menu = menu
         }
+    }
+    #elseif !os(Windows) && !os(Linux)
+    @discardableResult
+    public func showNative() -> Result<Void, TrayError> { .failure(.unsupported) }
+
+    public func removeNative() {
+        lock.lock()
+        visible = false
+        lock.unlock()
     }
     #endif
 }
@@ -2829,9 +2918,10 @@ extension Tx {
 }
 
 extension El {
-    /// Attaches a system backdrop material (`NSVisualEffectView`) to this element.
+    /// Uses a native backdrop in transparent macOS windows and a fill elsewhere.
+    /// Glass uses continuous corners for the backdrop, content clip, and shadows.
     public func systemMaterial(_ material: SystemMaterial, blending: MaterialBlendingMode = .behindWindow) -> Self {
-        var copy = self
+        var copy = material == .glass ? continuousCorners() : self
         copy.runtimeExtras["systemMaterial"] = material
         copy.runtimeExtras["systemMaterialBlending"] = blending
         return copy
@@ -2883,10 +2973,11 @@ public enum OverlayKeyPolicy: Sendable, Equatable {
 }
 
 public struct OverlayOptions: Sendable, Equatable {
-    public var placement: OverlayPlacement
+    public var placement: OverlayPlacement { didSet { legacyPlacement = placement } }
     public var legacyPlacement: OverlayPlacement?
     public var display: DisplayTarget
     public var followPointer: Bool
+    public var xwaylandInput = false
     public var level: OverlayLevel
     public var excludeFromCapture: Bool
     public var keyPolicy: OverlayKeyPolicy
@@ -2902,13 +2993,13 @@ public struct OverlayOptions: Sendable, Equatable {
     public var animateReveal: Bool
 
     public init(
-        placement: OverlayPlacement = .edge(.top, margin: 16),
+        placement: OverlayPlacement,
         keyPolicy: OverlayKeyPolicy = .nonActivating,
         releaseGpuWhenHidden: Bool = false,
         levelOffset: Int = 0
     ) {
         self.placement = placement
-        self.legacyPlacement = nil
+        self.legacyPlacement = placement
         self.display = .primary
         self.followPointer = false
         self.level = .status
@@ -2930,6 +3021,7 @@ public struct OverlayOptions: Sendable, Equatable {
         placement: OverlayPlacement? = nil,
         display: DisplayTarget = .primary,
         followPointer: Bool = false,
+        xwaylandInput: Bool = false,
         level: OverlayLevel = .status,
         excludeFromCapture: Bool = false,
         keyPolicy: OverlayKeyPolicy = .nonActivating,
@@ -2948,6 +3040,7 @@ public struct OverlayOptions: Sendable, Equatable {
         self.legacyPlacement = placement
         self.display = display
         self.followPointer = followPointer
+        self.xwaylandInput = xwaylandInput
         self.level = level
         self.excludeFromCapture = excludeFromCapture
         self.keyPolicy = keyPolicy
@@ -2964,7 +3057,7 @@ public struct OverlayOptions: Sendable, Equatable {
     }
 
     public var resolvedPlacement: OverlayPlacement? {
-        legacyPlacement ?? placement
+        legacyPlacement
     }
 }
 
@@ -3008,6 +3101,12 @@ public struct OverlaySpec<State> {
         self.view = view
     }
 
+    public func xwaylandInput(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.options.xwaylandInput = enabled
+        return copy
+    }
+
     public func configured(_ options: OverlayOptions) -> ConfiguredOverlay<State> {
         var copy = options
         if interactive { copy.interactive = true }
@@ -3023,6 +3122,7 @@ public struct ConfiguredOverlay<State> {
     public var onFocus: ((inout State, Bool, inout Tx) -> Void)?
     public var poll: ((inout State, Double, inout Tx) -> Bool)?
     public var onCreated: ((OverlayCreated) -> Void)?
+    var compositorValue: AnyCompositor<State>?
     public var setup: ((inout State, Waker) -> Void)?
 
     public init(spec: OverlaySpec<State>, options: OverlayOptions? = nil) {
@@ -3038,6 +3138,12 @@ public struct ConfiguredOverlay<State> {
 
     public func onFocus(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
         var copy = self; copy.onFocus = handler; return copy
+    }
+
+    public func compositor<C: Compositor>(_ compositor: C) -> Self where C.State == State {
+        var copy = self
+        copy.compositorValue = AnyCompositor(compositor)
+        return copy
     }
 
     public func poll(_ handler: @escaping (inout State, Double, inout Tx) -> Bool) -> Self {
@@ -3091,9 +3197,9 @@ public struct ConfiguredOverlay<State> {
     }
 }
 
-/// Live handle to a floating overlay (`overlay.rs`), backed on macOS by a real `NSPanel` + `MetalRenderer` + `Runtime`.
+/// A floating overlay with its own runtime and a native presentation surface on desktop platforms.
 public final class OverlayHandle<State>: @unchecked Sendable {
-    private let lock = NSLock()
+    private let lock = NSRecursiveLock()
     public let name: String
     public private(set) var isVisible: Bool = false
     public private(set) var size: Vec2
@@ -3117,13 +3223,29 @@ public final class OverlayHandle<State>: @unchecked Sendable {
     private var cachedCapabilities = OverlayCapabilities()
 
     public let runtime: Runtime<State>
+    private let compositor: AnyCompositor<State>?
     private let pollHandler: ((inout State, Double, inout Tx) -> Bool)?
     private let focusHandler: ((inout State, Bool, inout Tx) -> Void)?
     private let onCreatedHandler: ((OverlayCreated) -> Void)?
     private var didRunSetup: Bool = false
     private let setupHandler: ((inout State, Waker) -> Void)?
 
+    #if os(Linux) || os(Windows)
+    private let desktopID = UUID()
+    deinit { DesktopOverlayRegistry.shared.remove(desktopID) }
+
+    private func sendDesktop(_ command: DesktopOverlayCommand) {
+        DesktopOverlayRegistry.shared.send(command, handle: self, id: desktopID)
+    }
+    #endif
+
     #if os(macOS)
+    @MainActor private var lastCompositorTime: Double?
+    private var macWakeQueued = false
+    private var macFrameRequested = false
+    private let macClockOrigin = CACurrentMediaTime()
+    private var macPollDeadline: Double?
+    private var didPollForFrame = false
     @MainActor private var macHost: RuneOverlayMacOSHost<State>?
     @MainActor private lazy var overlayPopupPresenter = MacOSPopupMenuPresenter()
     @MainActor private lazy var overlayDragOutCoordinator = MacOSDragOutCoordinator()
@@ -3152,6 +3274,7 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         let isMacOS = false
         #endif
         self.releasePolicy = OverlayGpuRelease.make(afterSeconds: opts.releaseGpuAfter, isMacOS: isMacOS)
+        self.compositor = configured.compositorValue
         self.pollHandler = configured.poll
         self.focusHandler = configured.onFocus
         self.onCreatedHandler = configured.onCreated
@@ -3175,6 +3298,7 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             },
             view: spec.view
         )
+        rt.recordEvents = false
         rt.nativeOverlay = true
         rt.modifierKeysEnabled = opts.modifierKeys
         rt.srgbBlend = opts.srgbBlend
@@ -3192,6 +3316,7 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         }
 
         #if os(macOS)
+        rt.waker.setCallback { [weak self] in self?.enqueueMacWake(draw: true) }
         if opts.prewarm {
             runOnMainActor {
                 let host = self.makeMacHostIfNeeded()
@@ -3203,6 +3328,9 @@ public final class OverlayHandle<State>: @unchecked Sendable {
                 self.lock.unlock()
             }
         }
+        #elseif os(Linux) || os(Windows)
+        rt.waker.setCallback { [weak self] in self?.sendDesktop(.wake) }
+        if opts.prewarm { sendDesktop(.prewarm) }
         #else
         lock.lock()
         self.availability = .available
@@ -3212,6 +3340,33 @@ public final class OverlayHandle<State>: @unchecked Sendable {
     }
 
     #if os(macOS)
+    private func enqueueMacWake(draw: Bool) {
+        let shouldPost = lock.withLock {
+            if draw, pollHandler != nil, !overlayPresence.isDrawing || overlayPresence.isOccluded {
+                // A setup waker may carry new state to a hidden or covered panel.
+                let now = CACurrentMediaTime() - macClockOrigin
+                macPollDeadline = min(macPollDeadline ?? .infinity, now)
+            }
+            guard overlayPresence.isDrawing || macPollDeadline != nil else { return false }
+            macFrameRequested = macFrameRequested || draw
+            if macWakeQueued { return false }
+            macWakeQueued = true
+            return true
+        }
+        guard shouldPost else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let needsFrame = self.lock.withLock {
+                self.macWakeQueued = false
+                defer { self.macFrameRequested = false }
+                return self.macFrameRequested
+            }
+            let host = self.makeMacHostIfNeeded()
+            if host.presence.isOrdered && (needsFrame || host.shouldKeepDrawing?() == true) { host.requestFrame() }
+            else { host.scheduleNextFrame() }
+        }
+    }
+
     @MainActor
     private func makeMacHostIfNeeded() -> RuneOverlayMacOSHost<State> {
         if let macHost { return macHost }
@@ -3228,6 +3383,7 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             options: currentOptions,
             releaseWhenHidden: release
         )
+        host.clockOrigin = macClockOrigin
         host.onCreated = { [weak self] created in
             guard let self else { return }
             self.lock.lock()
@@ -3281,70 +3437,128 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             self?.surfaceStats = snap
             self?.lock.unlock()
         }
+        host.canDraw = { [weak self] in
+            guard let self else { return false }
+            return self.lock.withLock { self.overlayPresence.isDrawing && !self.overlayPresence.isOccluded }
+        }
+        host.onOcclusion = { [weak self] covered in
+            guard let self else { return false }
+            return self.lock.withLock {
+                guard self.overlayPresence.isOccluded != covered else { return false }
+                return self.setOccludedLocked(covered)
+            }
+        }
         host.shouldKeepDrawing = { [weak self] in
             guard let self else { return false }
-            self.lock.lock()
-            let keep = self.overlayPresence.isDrawing && !self.overlayPresence.isOccluded &&
-                (self.isDirty || !self.isIdle || self.runtime.isAnimating || self.wakeDeadline != nil)
-            self.lock.unlock()
-            return keep
+            return self.lock.withLock {
+                self.isDirty || self.runtime.isAnimating || self.runtime.hasPendingCommit || self.runtime.hasPendingInput || self.runtime.livePending ||
+                    self.compositor?.isAnimating == true
+            }
+        }
+        host.canRestAfterFrame = { [weak self] in
+            guard let self else { return false }
+            return self.lock.withLock { self.compositor == nil && !self.runtime.windowHasFrameWork }
+        }
+        host.nextWake = { [weak self] in
+            self?.nextMacWake(covered: false)
+        }
+        host.nextFramelessWake = { [weak self] in self?.nextMacWake(covered: true) }
+        host.pollFrameless = { [weak self] now in
+            guard let self else { return }
+            self.lock.withLock {
+                if let deadline = self.macPollDeadline, deadline <= now { _ = self.pollDesktopFrame(at: now) }
+                if let deadline = self.runtime.windowWakeDeadline(covered: true), deadline <= now {
+                    _ = self.runtime.pollAlone(at: now)
+                }
+                if self.runtime.hasPendingCommit { self.isDirty = true }
+            }
+        }
+        host.pollResting = { [weak self] now in
+            guard let self else { return false }
+            return self.lock.withLock {
+                // A due runtime timer can affect paint independently of the user's poll
+                // (for example caret blink). Only a plain overlay poll can skip the GPU.
+                if self.compositor != nil || self.runtime.hasPendingInput ||
+                    (self.runtime.windowWakeDeadline(covered: false) ?? .infinity) <= now { return true }
+                if let due = self.macPollDeadline, due <= now {
+                    let polling = self.pollDesktopFrame(at: now)
+                    let changed = self.runtime.hasPendingCommit || self.runtime.isAnimating || self.runtime.livePending
+                    self.isIdle = !(changed || polling)
+                    self.didPollForFrame = changed
+                    return changed
+                }
+                return false
+            }
         }
         host.onHideCleanup = { [weak self] in
             guard let self else { return }
             self.overlayPopupPresenter.cancel()
             self.lock.lock()
             self.runtime.cancelPopups()
+            self.didPollForFrame = false
+            self.macFrameRequested = false
             self.lock.unlock()
         }
         host.configureView = { [weak self] view in
             guard let self else { return }
-            view.onEvaluateFrame = { [weak self] now, settle in
-                guard let self else {
-                    return (
-                        RefScene(width: 1, height: 1, srgbBlend: true, clearColor: .zero, glyphs: R8Atlas(), images: RGBA8Atlas(), primitives: []),
-                        [],
-                        false,
-                        true
-                    )
+            view.onWindowOrigin = { [weak self] origin in
+                guard let self else { return }
+                let needsDraw = self.lock.withLock {
+                    guard self.runtime.updateMacOSOrigin(origin) else { return false }
+                    self.isDirty = true
+                    if self.overlayPresence.isDrawing { self.isIdle = false }
+                    return self.overlayPresence.isDrawing
                 }
-                return self.evaluateLockedFrame(at: now, forceSettle: settle)
+                if needsDraw { self.enqueueMacWake(draw: true) }
+            }
+            view.onEvaluateFrame = { [weak self] now, settle, renderer, nativeMaterials in
+                self?.evaluateMetalFrame(at: now, settle: settle, renderer: renderer, nativeMaterials: nativeMaterials)
+            }
+            view.onPresentFrame = { [weak self] frame, drawable, renderer, time, updateMs, synchronized in
+                guard let self else { return false }
+                return self.lock.withLock {
+                    let dt = Float(max(0, time - (self.lastCompositorTime ?? time)))
+                    self.lastCompositorTime = time
+                    return renderer.present(frame: frame, drawable: drawable, compositor: self.compositor, runtime: self.runtime,
+                                            dt: dt, updateMilliseconds: updateMs, synchronized: synchronized) != nil
+                }
             }
             view.onPointerMove = { [weak self] pt, mods, now in
                 // Idle pointer moves present nothing (`overlay/input.rs` `observe_pointer`).
                 let dirty = self?.withLockedRuntime { rt in
-                    rt.overlayObservePointer(at: pt, mods: mods, at: now)
+                    rt.overlayObservePointer(at: rt.inputPoint(fromWindow: pt), mods: mods, at: now)
                 } ?? false
                 if dirty {
-                    view.renderFrame(settle: false, visible: true, drawing: true)
+                    self?.macHost?.requestFrame()
                 }
             }
             view.onPointerExit = { [weak self] now in
                 self?.withLockedRuntime { rt in rt.pointerExit(at: now) }
-                view.renderFrame(settle: false, visible: true, drawing: true)
+                self?.macHost?.requestFrame()
             }
             view.onPointerDown = { [weak self] pt, btn, mods, now in
-                self?.withLockedRuntime { rt in rt.pointerDown(at: pt, button: btn, mods: mods, at: now) }
-                view.renderFrame(settle: false, visible: true, drawing: true)
+                self?.withLockedRuntime { rt in rt.pointerDown(at: rt.inputPoint(fromWindow: pt), button: btn, mods: mods, at: now) }
+                self?.macHost?.requestFrame()
             }
             view.onPointerUp = { [weak self] pt, btn, mods, now in
-                self?.withLockedRuntime { rt in rt.pointerUp(at: pt, button: btn, mods: mods, at: now) }
+                self?.withLockedRuntime { rt in rt.pointerUp(at: rt.inputPoint(fromWindow: pt), button: btn, mods: mods, at: now) }
                 self?.applyInput()
-                view.renderFrame(settle: false, visible: true, drawing: true)
+                self?.macHost?.requestFrame()
             }
             view.onPointerReleaseLost = { [weak self] pt, now in
-                self?.withLockedRuntime { rt in rt.pointerReleaseLost(at: pt, at: now) }
+                self?.withLockedRuntime { rt in rt.pointerReleaseLost(at: rt.inputPoint(fromWindow: pt), at: now) }
                 self?.applyInput()
-                view.renderFrame(settle: false, visible: true, drawing: true)
+                self?.macHost?.requestFrame()
             }
             view.onWheel = { [weak self] wev, pt, now in
-                self?.withLockedRuntime { rt in rt.wheel(wev, at: pt, now: now) }
-                view.renderFrame(settle: false, visible: true, drawing: true)
+                self?.withLockedRuntime { rt in rt.wheel(wev, at: rt.inputPoint(fromWindow: pt), now: now) }
+                self?.macHost?.requestFrame()
             }
             view.onKeyDown = { [weak self] kev, now in
                 guard let self else { return false }
                 let handled = self.withLockedRuntime { rt in rt.keyDown(kev, at: now) }
                 if handled {
-                    view.renderFrame(settle: false, visible: true, drawing: true)
+                    self.macHost?.requestFrame()
                 }
                 return handled
             }
@@ -3357,9 +3571,9 @@ public final class OverlayHandle<State>: @unchecked Sendable {
                 if let dragStart {
                     self.overlayDragOutCoordinator.start(dragStart, in: metalView) { [weak self] outcome in
                         guard let self else { return }
-                        let now = Date().timeIntervalSinceReferenceDate
+                        let now = metalView.nowSeconds()
                         self.withLockedRuntime { rt in rt.finishDragOut(outcome, at: now) }
-                        metalView.renderFrame(settle: false, visible: true, drawing: true)
+                        self.macHost?.requestFrame()
                     }
                 }
                 if !self.overlayPopupPresenter.isPresenting {
@@ -3376,16 +3590,19 @@ public final class OverlayHandle<State>: @unchecked Sendable {
                         self.overlayPopupPresenter.present(show, in: metalView) { [weak self] picked in
                             guard let self else { return }
                             self.withLockedRuntime { rt in try? rt.resolvePopup(picked) }
-                            metalView.renderFrame(settle: false, visible: true, drawing: true)
+                            self.macHost?.requestFrame()
                         }
                     }
                 }
             }
             view.onNeedsResyncGeometry = { [weak self] w, h, scale in
-                self?.withLockedRuntime { rt in
-                    rt.viewport = Vec2(max(1, w), max(1, h))
-                    rt.pixelScale = max(0.5, scale)
+                let changed = self?.withLockedRuntime { rt in
+                    let size = Vec2(max(1, w), max(1, h))
+                    guard rt.viewport != size || rt.pixelScale != scale else { return false }
+                    rt.setViewport(size, pixelScale: max(0.5, scale))
+                    return true
                 }
+                if changed == true { self?.enqueueMacWake(draw: false) }
             }
         }
         self.macHost = host
@@ -3443,6 +3660,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             self.cachedCapabilities = host.capabilities
             self.lock.unlock()
         }
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.show(dur))
         #endif
     }
 
@@ -3475,6 +3694,9 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         runOnMainActor {
             self.macHost?.hide(fadeSeconds: dur)
         }
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.hide(dur))
+        if effects.contains(.releaseGpu) { sendDesktop(.release) }
         #endif
     }
 
@@ -3501,15 +3723,33 @@ public final class OverlayHandle<State>: @unchecked Sendable {
                 self.macHost?.releasePanel()
             }
         }
+        #elseif os(Linux) || os(Windows)
+        if effects.contains(.releaseGpu) { sendDesktop(.release) }
         #endif
     }
 
     @discardableResult
     public func setOccluded(_ covered: Bool) -> Bool {
-        lock.lock()
-        let accepted = overlayPresence.setOccluded(covered)
-        lock.unlock()
+        let accepted = lock.withLock { setOccludedLocked(covered) }
+        #if os(macOS)
+        if accepted { enqueueMacWake(draw: !covered) }
+        #endif
         return accepted
+    }
+
+    private func setOccludedLocked(_ covered: Bool) -> Bool {
+        #if os(macOS)
+        let wasCovered = overlayPresence.isOccluded
+        #endif
+        guard overlayPresence.setOccluded(covered) else { return false }
+        #if os(macOS)
+        if wasCovered != covered {
+            isIdle = true
+            runtime.setLiveVisible(!covered)
+            if !covered { isDirty = true }
+        }
+        #endif
+        return true
     }
 
     public func requestKeys() {
@@ -3517,6 +3757,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         runOnMainActor {
             self.macHost?.requestKeys()
         }
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.focus)
         #endif
     }
 
@@ -3546,6 +3788,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
                 self.macHost?.updatePlacement(currentPlacement, options: opts)
             }
         }
+        #elseif os(Linux) || os(Windows)
+        if applied != nil { sendDesktop(.configure) }
         #endif
     }
 
@@ -3561,6 +3805,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
                 self.macHost?.updatePlacement(currentPlacement, options: opts)
             }
         }
+        #elseif os(Linux) || os(Windows)
+        if applied != nil { sendDesktop(.configure) }
         #endif
         return applied != nil
     }
@@ -3595,6 +3841,15 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         runOnMainActor {
             self.macHost?.updatePlacement(currentPlacement, options: opts)
         }
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.configure)
+        #endif
+    }
+
+    public func setXwaylandInput(_ enabled: Bool) {
+        lock.withLock { options.xwaylandInput = enabled }
+        #if os(Linux)
+        sendDesktop(.configure)
         #endif
     }
 
@@ -3603,6 +3858,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         runOnMainActor {
             self.macHost?.placePanel()
         }
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.refollow)
         #endif
     }
 
@@ -3620,6 +3877,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         runOnMainActor {
             self.macHost?.updatePlacement(currentPlacement, options: opts)
         }
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.configure)
         #endif
     }
 
@@ -3633,6 +3892,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         runOnMainActor {
             self.macHost?.updatePlacement(currentPlacement, options: opts)
         }
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.configure)
         #endif
     }
 
@@ -3647,6 +3908,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         runOnMainActor {
             self.macHost?.updatePlacement(currentPlacement, options: opts)
         }
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.configure)
         #endif
     }
 
@@ -3662,6 +3925,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         runOnMainActor {
             self.macHost?.updatePlacement(currentPlacement, options: opts)
         }
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.configure)
         #endif
     }
 
@@ -3677,6 +3942,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         runOnMainActor {
             self.macHost?.updatePlacement(currentPlacement, options: opts)
         }
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.configure)
         #endif
     }
 
@@ -3694,6 +3961,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         runOnMainActor {
             self.macHost?.updatePlacement(currentPlacement, options: opts)
         }
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.configure)
         #endif
     }
 
@@ -3716,6 +3985,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         runOnMainActor {
             self.macHost?.setCaptureExclusion(exclude)
         }
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.configure)
         #endif
     }
 
@@ -3728,6 +3999,11 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         isDirty = true
         isIdle = false
         lock.unlock()
+        #if os(macOS)
+        enqueueMacWake(draw: false)
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.wake)
+        #endif
     }
 
     public func updateTx(_ body: (inout State, inout Tx) -> Void) {
@@ -3751,9 +4027,17 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         }
         if let wake = tx.runtimeActions["wakeAfter"] as? Double {
             wakeDeadline = runtime.currentTime + wake
+            #if os(macOS)
+            macPollDeadline = CACurrentMediaTime() - macClockOrigin + wake
+            #endif
             isIdle = false
         }
         lock.unlock()
+        #if os(macOS)
+        if changed || tx.runtimeActions["wakeAfter"] != nil { enqueueMacWake(draw: false) }
+        #elseif os(Linux) || os(Windows)
+        if changed || tx.runtimeActions["wakeAfter"] != nil { sendDesktop(.wake) }
+        #endif
         return changed
     }
 
@@ -3772,6 +4056,11 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             isIdle = false
         }
         lock.unlock()
+        #if os(macOS)
+        enqueueMacWake(draw: false)
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.wake)
+        #endif
     }
 
     public func setScrollBars(_ prefs: SystemScrollBars) {
@@ -3783,6 +4072,11 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             isIdle = false
         }
         lock.unlock()
+        #if os(macOS)
+        enqueueMacWake(draw: false)
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.wake)
+        #endif
     }
 
     public func setContrast(_ highContrast: Bool) {
@@ -3794,6 +4088,11 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             isIdle = false
         }
         lock.unlock()
+        #if os(macOS)
+        enqueueMacWake(draw: false)
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.wake)
+        #endif
     }
 
     public func setAccent(_ accent: SystemAccent) {
@@ -3805,6 +4104,11 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             isIdle = false
         }
         lock.unlock()
+        #if os(macOS)
+        enqueueMacWake(draw: false)
+        #elseif os(Linux) || os(Windows)
+        sendDesktop(.wake)
+        #endif
     }
 
     public func deliverFocus(_ focused: Bool) {
@@ -3821,6 +4125,9 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             isDirty = true
         }
         lock.unlock()
+        #if os(macOS)
+        enqueueMacWake(draw: false)
+        #endif
     }
 
     /// Evaluates a single frame deterministically at `now` (used both live and in headless tests).
@@ -3842,14 +4149,27 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         return scene
     }
 
-    private func evaluateLockedFrame(
-        at now: Double,
-        forceSettle: Bool
-    ) -> (scene: RefScene, regions: [MotionRect], isAnimating: Bool, srgbBlend: Bool) {
-        lock.lock()
-        defer { lock.unlock() }
-        return evaluateStateAndFrameLocked(at: now, forceSettle: forceSettle)
+    #if os(macOS)
+    private func nextMacWake(covered: Bool) -> Double? {
+        lock.withLock {
+            let due = min(macPollDeadline ?? .infinity, runtime.windowWakeDeadline(covered: covered) ?? .infinity)
+            return due.isFinite ? due : nil
+        }
     }
+
+    private func evaluateMetalFrame(at now: Double, settle: Bool, renderer: MetalRenderer, nativeMaterials: Bool)
+        -> (frame: RenderFrame, regions: [MotionRect], isAnimating: Bool) {
+        lock.withLock {
+            if settle { runtime.markNeedsCommit(settle: true) }
+            let polling = didPollForFrame ? wakeDeadline != nil : pollDesktopFrame(at: now)
+            didPollForFrame = false
+            runtime.nativeMaterials = nativeMaterials
+            let frame = renderer.frame(runtime, at: now)
+            finishOverlayEvaluation(polling: polling)
+            return (frame, runtime.overlayInteractiveRegions(), runtime.isAnimating || compositor?.isAnimating == true)
+        }
+    }
+    #endif
 
     private func evaluateStateAndFrameLocked(
         at now: Double,
@@ -3858,27 +4178,10 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         if forceSettle {
             runtime.markNeedsCommit(settle: true)
         }
-        var pollAskedNextFrame = false
-        if let pollHandler {
-            var s = runtime.state
-            var tx = Tx()
-            let changed = pollHandler(&s, now, &tx)
-            runtime.state = s
-            if changed {
-                runtime.markNeedsCommit(settle: tx.settleRequested)
-            }
-            if let wake = tx.runtimeActions["wakeAfter"] as? Double {
-                wakeDeadline = now + wake
-                pollAskedNextFrame = true
-            } else {
-                wakeDeadline = nil
-            }
-        }
+        let pollAskedNextFrame = pollDesktopFrame(at: now)
 
         let scene = runtime.frame(at: now)
-        let regions = runtime.overlayInteractiveRegions()
-        isDirty = false
-        isIdle = !(runtime.isAnimating || pollAskedNextFrame)
+        finishOverlayEvaluation(polling: pollAskedNextFrame)
         surfaceStats = OverlaySurfaceSnapshot(
             frameCount: surfaceStats.frameCount &+ 1,
             pixelWidth: scene.width,
@@ -3889,10 +4192,110 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             isDrawing: overlayPresence.isDrawing,
             isAnimating: runtime.isAnimating
         )
-        return (scene, regions, runtime.isAnimating, runtime.srgbBlend)
+        return (scene, runtime.overlayInteractiveRegions(), runtime.isAnimating, runtime.srgbBlend)
     }
 
-    private func withLockedRuntime<R>(_ body: (Runtime<State>) -> R) -> R {
+    private func finishOverlayEvaluation(polling: Bool) {
+        isDirty = false
+        isIdle = !(runtime.isAnimating || compositor?.isAnimating == true || polling)
+    }
+
+    private func pollDesktopFrame(at now: Double) -> Bool {
+        var pollAskedNextFrame = false
+        if let pollHandler {
+            var s = runtime.state
+            var tx = Tx()
+            let changed = pollHandler(&s, now, &tx)
+            runtime.state = s
+            if changed {
+                runtime.markNeedsCommit(settle: tx.settleRequested)
+            }
+            let deadline = (tx.runtimeActions["wakeAfter"] as? Double).map { now + $0 }
+            #if os(macOS)
+            macPollDeadline = deadline
+            wakeDeadline = overlayPresence.deadline ?? deadline
+            #else
+            wakeDeadline = deadline
+            #endif
+            pollAskedNextFrame = deadline != nil
+        }
+        return pollAskedNextFrame
+    }
+
+    #if os(Windows) || os(Linux)
+    func desktopPresence() -> OverlayPresence { lock.withLock { overlayPresence } }
+
+    func desktopConfiguration() -> (placement: OverlayGeometry.Placement, options: OverlayOptions, visible: Bool) {
+        lock.withLock { (placementSpec, options, isVisible) }
+    }
+
+    func desktopRenderFrame(at now: Double, viewport: Vec2, scale: Float, renderer: PortableGLRenderer, prewarm: Bool = false)
+        -> (frame: RenderFrame, regions: [MotionRect], isAnimating: Bool, nextWake: Double?)? {
+        lock.withLock {
+            guard prewarm || overlayPresence.isDrawing && !overlayPresence.isOccluded else { return nil }
+            if prewarm { runtime.markNeedsCommit(settle: true) }
+            runtime.setViewport(viewport, pixelScale: scale)
+            let polling = pollDesktopFrame(at: now)
+            let frame = renderer.frame(runtime, at: now)
+            finishOverlayEvaluation(polling: polling)
+            let next = [wakeDeadline, runtime.nextWakeDeadline(after: now)].compactMap { $0 }.min()
+            return (frame, runtime.overlayInteractiveRegions(), runtime.isAnimating || compositor?.isAnimating == true || runtime.hasPendingCommit || runtime.livePending, next)
+        }
+    }
+
+    func desktopDraw(_ frame: RenderFrame, at time: Double, renderer: PortableGLRenderer) throws {
+        try lock.withLock {
+            _ = try renderer.draw(frame, compositor: compositor, runtime: runtime, at: time)
+        }
+    }
+
+    func desktopSubmitted(_ frame: RenderFrame, scale: Float) {
+        lock.withLock {
+            surfaceStats = OverlaySurfaceSnapshot(frameCount: surfaceStats.frameCount &+ 1,
+                pixelWidth: frame.width, pixelHeight: frame.height, backingScale: scale, srgbBlend: runtime.srgbBlend,
+                isVisible: isVisible, isDrawing: overlayPresence.isDrawing,
+                isAnimating: runtime.isAnimating || compositor?.isAnimating == true)
+        }
+    }
+
+    #if os(Windows)
+    @MainActor func windowsPopups(window: OpaquePointer) -> WindowsPopup<State> {
+        WindowsPopup(window: window, runtime: runtime, lock: lock)
+    }
+    #endif
+
+    func desktopPrewarm(at time: Double, viewport: Vec2, scale: Float, renderer: PortableGLRenderer) throws {
+        guard let batch = desktopRenderFrame(at: time, viewport: viewport, scale: scale, renderer: renderer, prewarm: true) else { return }
+        try renderer.withOverlayPrewarmTarget(width: batch.frame.width, height: batch.frame.height) {
+            try desktopDraw(batch.frame, at: time, renderer: renderer)
+        }
+    }
+
+    func desktopCreated(windowNumber: UInt32?, capabilities: OverlayCapabilities, description: String) {
+        lock.withLock {
+            availability = .available
+            failure = nil
+            cachedWindowNumber = windowNumber
+            cachedCapabilities = capabilities
+            surfaceDescription = description
+        }
+        onCreatedHandler?(OverlayCreated(windowNumber: windowNumber, capabilities: capabilities))
+    }
+
+    func desktopClosed() {
+        lock.withLock { cachedWindowNumber = nil; cachedCapabilities = OverlayCapabilities(); surfaceDescription = nil }
+    }
+
+    func desktopCapabilities(_ capabilities: OverlayCapabilities) {
+        lock.withLock { cachedCapabilities = capabilities }
+    }
+
+    func desktopFailure(_ message: String) {
+        lock.withLock { availability = .unavailable; failure = message }
+    }
+    #endif
+
+    func withLockedRuntime<R>(_ body: (Runtime<State>) -> R) -> R {
         lock.lock()
         defer { lock.unlock() }
         return body(runtime)

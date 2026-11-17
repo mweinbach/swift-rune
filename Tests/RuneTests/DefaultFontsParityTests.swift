@@ -24,24 +24,56 @@ struct DefaultFontsParityTests {
         #expect(DefaultFonts.registerIfNeeded())
     }
 
+    @MainActor
+    @Test("fonts arriving after a browser frame rebuild committed text at a new font epoch")
+    func lateFacesInvalidateCommittedText() throws {
+        let content = "Tiếng Việt ἀρχή Әліппе"
+        let host = WebAppHost(spec: AppSpec(title: "Fonts", size: Vec2(300, 100), state: 0) { _, _ in
+            text(content)
+        })
+        let browser = WebBrowserSession(host)
+        let first = try browser.renderFrame(at: 0)
+        _ = try #require(first)
+        let before = try #require(host.runtime.textSystem.layoutKeys().first { $0.authText == content })
+        let commits = host.runtime.viewCommitCount
+        browser.fontsChanged()
+        #expect(host.runtime.hasPendingCommit)
+        let next = try browser.renderFrame(at: 1)
+        _ = try #require(next)
+        let after = try #require(host.runtime.textSystem.layoutKeys().first { $0.authText == content })
+        #expect(after.fontEpoch != before.fontEpoch)
+        #expect(host.runtime.viewCommitCount > commits)
+    }
+
+    #if !os(WASI)
+    @Test("fontUrl and fontUrlLater accept native paths and file URLs")
+    func nativeFontURLsLoadAppData() throws {
+        let url = try #require(DefaultFonts.fontURL(named: "IBMPlexMono-Regular"))
+        let data = try Data(contentsOf: url)
+        let app = App(title: "Fonts", state: 0) { _, _ in text("Fonts") }
+        #expect(app.fontUrl(url.path).fontData == [data])
+        #expect(app.fontUrlLater(url.absoluteString).intoSpec().fonts == [data])
+    }
+    #endif
+
     #if canImport(CoreText)
-    @Test("default systemUI resolves to Inter across weights and monospace resolves to IBM Plex Mono")
-    func defaultFamiliesResolveToBundledInterAndPlex() throws {
+    @Test("native default slots both resolve to Inter, including intermediate CSS weights")
+    func nativeDefaultFamiliesMatchRust() throws {
         let ts = TextSystem()
-        let regular = ts.resolveCTFont(style: TextStyle(size: 13, weight: 400), pixelScale: 1)
-        let medium = ts.resolveCTFont(style: TextStyle(size: 15, weight: 500), pixelScale: 1)
-        let semibold = ts.resolveCTFont(style: TextStyle(size: 24, weight: 600), pixelScale: 1)
-        let mono = ts.resolveCTFont(style: TextStyle(size: 13, weight: 400).mono(), pixelScale: 1)
-
-        #expect((CTFontCopyFamilyName(regular) as String) == "Inter")
-        #expect((CTFontCopyFamilyName(medium) as String) == "Inter")
-        #expect((CTFontCopyFamilyName(semibold) as String) == "Inter")
-        #expect((CTFontCopyFamilyName(mono) as String) == "IBM Plex Mono")
-
-        #expect((CTFontCopyPostScriptName(regular) as String) == "Inter-Regular")
-        #expect((CTFontCopyPostScriptName(medium) as String) == "Inter-Medium")
-        #expect((CTFontCopyPostScriptName(semibold) as String) == "Inter-SemiBold")
-        #expect((CTFontCopyPostScriptName(mono) as String) == "IBMPlexMono")
+        let cases: [(Float, String)] = [(350, "Regular"), (400, "Regular"), (400.25, "Medium"), (401, "Medium"),
+                                        (440, "Medium"), (500, "Medium"), (501, "SemiBold"),
+                                        (550, "SemiBold"), (600, "SemiBold"), (900, "SemiBold")]
+        for (weight, face) in cases {
+            let style = TextStyle(size: 13, weight: weight)
+            for selected in [style, style.mono()] {
+                let font = ts.resolveCTFont(style: selected, pixelScale: 1)
+                #expect(CTFontCopyPostScriptName(font) as String == "Inter-\(face)")
+            }
+        }
+        withFontFamilies(sans: "Inter", mono: "IBM Plex Mono") {
+            let configured = TextSystem().resolveCTFont(style: TextStyle(size: 13).mono(), pixelScale: 1)
+            #expect(CTFontCopyPostScriptName(configured) as String == "IBMPlexMono")
+        }
     }
     #endif
 

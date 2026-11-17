@@ -23,7 +23,7 @@ public enum EmbedPrewarm {
         lock.unlock()
 
         #if canImport(Metal) && canImport(QuartzCore)
-        guard let device = MTLCreateSystemDefaultDevice(),
+        guard let device = MetalAdapterPicker.select(),
               (try? MetalRenderer(device: device)) != nil else {
             return false
         }
@@ -81,6 +81,7 @@ public final class LayerHost<State> {
         let rt = Runtime<State>(state: spec.makeState(), viewport: viewport, pixelScale: scale,
                                 systemDark: spec.dark ?? dark, reducedMotion: reducedMotion,
                                 onKey: spec.onKey, view: spec.view)
+        rt.recordEvents = false
         rt.srgbBlend = spec.srgbBlend
         rt.windowTitle = spec.title
         rt.poll = spec.poll
@@ -113,7 +114,7 @@ public final class LayerHost<State> {
         self.layer = layer
 
         if let layer {
-            let dev = layer.device ?? MTLCreateSystemDefaultDevice()
+            let dev = layer.device ?? MetalAdapterPicker.select()
             layer.device = dev
             layer.pixelFormat = spec.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
             layer.framebufferOnly = false
@@ -278,7 +279,7 @@ public final class OpenGLLayerRenderer {
     /// Force a redraw when the containing framebuffer has been cleared or replaced.
     @discardableResult
     public func draw<State>(_ host: LayerHost<State>, at time: Double, forceRedraw: Bool = false) throws -> EmbedFrame {
-        try host.evaluateFrame(at: time, presenter: self, forceRedraw: forceRedraw) { customScene in
+        let frame = try host.evaluateFrame(at: time, presenter: self, forceRedraw: forceRedraw) { customScene in
             if let customScene {
                 try renderer.draw(customScene)
             } else {
@@ -286,6 +287,14 @@ public final class OpenGLLayerRenderer {
             }
             return true
         }
+        #if os(Linux) || os(Android)
+        if renderer.needsSurfaceCompletionPoll && renderer.pollSurfaceCompletions() {
+            var next = frame
+            next.wakeAfterSecs = min(frame.wakeAfterSecs ?? 0.004, 0.004)
+            return next
+        }
+        #endif
+        return frame
     }
 
     /// Release the GL resources before detaching or destroying the context.

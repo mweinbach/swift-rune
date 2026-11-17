@@ -76,33 +76,26 @@ internal final class ResizeCachedViewBuild<State> {
 }
 
 extension RuntimeVirtualListState {
-    /// Mounted height left outside `[offset, offset + viewport]` on the larger side (`Virtual::spare`).
+    /// Measured rows still mounted outside the desired overscan (`VirtualList::spare`).
     func spare(offset: Float, viewport: Float, prefix: [Float], count: Int, pinned: Bool) -> Float {
-        guard count > 0, !lastMountedRange.isEmpty else { return 0 }
-        let lo = max(0, lastMountedRange.lowerBound)
+        guard !pinned, count > 0 else { return 0 }
+        let bounds = overscanBounds(offset: offset, viewport: viewport, prefix: prefix, count: count, pinned: false)
+        let lo = min(count, lastMountedRange.lowerBound)
         let hi = min(count, lastMountedRange.upperBound)
-        guard lo < hi, hi < prefix.count else { return 0 }
-        let mountedTop = prefix[lo]
-        let mountedBot = rowEnd(hi, prefix: prefix)
-        let visLo = max(0, offset)
-        let visHi = pinned ? mountedBot : (visLo + viewport)
-        let above = max(0, visLo - mountedTop)
-        let below = max(0, mountedBot - visHi)
-        return max(above, below)
+        let above = prefix[min(bounds.targetLo, hi)] - prefix[min(lo, bounds.targetLo)]
+        let below = rowEnd(hi, prefix: prefix) - rowEnd(min(max(bounds.targetHi, lo), hi), prefix: prefix)
+        return max(0, above) + max(0, below)
     }
 
-    /// Whether the visible window has moved near or past the mounted range (`Virtual::needs_window`).
+    /// Whether the viewport has approached a mounted edge (`VirtualList::needs_window`).
     func needsWindow(offset: Float, viewport: Float, prefix: [Float], count: Int, pinned: Bool) -> Bool {
         guard count > 0 else { return false }
-        let lo = max(0, lastMountedRange.lowerBound)
+        if pinned { return lastMountedRange.upperBound != count }
+        let lo = min(count, lastMountedRange.lowerBound)
         let hi = min(count, lastMountedRange.upperBound)
-        guard lo <= hi, hi < prefix.count else { return true }
-        let edgeLo = max(0, offset - viewport * 0.25)
-        let edgeHi = offset + viewport * 1.25
-        if lo > 0 && prefix[lo] > edgeLo { return true }
-        if hi < count && rowEnd(hi, prefix: prefix) < edgeHi { return true }
-        if !pinned && lastMountedRange.isEmpty { return true }
-        return false
+        let edge = viewport * (isIndexed ? Self.indexedEdgeMultiplier : Self.nonIndexedEdgeMultiplier)
+        return (lo > 0 && offset < padTop + prefix[lo] + edge) ||
+            (hi < count && offset + viewport > padTop + rowEnd(hi, prefix: prefix) - edge)
     }
 }
 
@@ -172,7 +165,7 @@ extension Runtime {
         if let kp = prevKeyPath {
             targetNode = nodes.first(where: { $0.path == kp })
         } else if let fk = focusedKey {
-            targetNode = nodes.first(where: { $0.key == fk })
+            targetNode = nodes.first(where: { matchesAuthoredKey($0.key, fk) })
         } else if let fp = focusedPath {
             targetNode = nodes.first(where: { $0.path == fp })
         } else {
@@ -180,7 +173,7 @@ extension Runtime {
         }
         guard let node = targetNode,
               let edit = node.el.handlers.editLens?.get(state),
-              focusedPath == node.path || (node.key != nil && focusedKey == node.key) else {
+              focusedPath == node.path || matchesAuthoredKey(focusedKey, node.key) else {
             return nil
         }
         let textStyle = node.el.textStyle
@@ -236,14 +229,14 @@ extension Runtime {
         lists: [String: RuntimeVirtualListState]
     ) -> Bool {
         let seg: String
-        if let rk = el.keyId {
+        if let rk = el.storageKeyId {
             let c = siblingKeysSeen[rk, default: 0]
             siblingKeysSeen[rk] = c + 1
             seg = c == 0 ? "@\(rk)" : "@\(rk)#dup\(c)"
         } else {
             seg = "\(siblingIndex)"
         }
-        let path = parentPath.isEmpty ? (el.keyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
+        let path = parentPath.isEmpty ? (el.storageKeyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
         var changed = false
 
         if let vState = lists[path] {
@@ -299,7 +292,7 @@ extension Runtime {
             let stickyPin = nodeByPath[scrollPath].map { flatNodes[$0].el.layout.stickBottom } == true
                 && wasPinnedToBottom.contains(scrollPath)
             let (prefix, total) = vState.computeOffsets(estimated: est)
-            let scrollY = stickyPin && !vState.nested ? max(0, total - vpH) : (scrollOffsets[scrollPath]?.y ?? 0)
+            let scrollY = stickyPin && !vState.nested ? max(0, vState.top + vState.extent(total: total) - vpH) : (scrollOffsets[scrollPath]?.y ?? 0)
             let (offsetY, pinned) = vState.at(scrollY, pinned: stickyPin, total: total)
             if vState.needsWindow(offset: offsetY, viewport: vpH, prefix: prefix, count: vState.lastKeys.count, pinned: pinned) {
                 return true
@@ -335,7 +328,8 @@ extension Runtime {
             var located = vBefore
             let (oldListY, oldPinned) = located.locate(oldOffsetY, pinned: stickyPin, total: totalBefore)
             let vis = vBefore.visibleRange(offset: oldListY, viewport: vpH, prefix: prefixBefore, count: vBefore.lastKeys.count)
-            let anchorIdx = (vis.isEmpty || oldPinned || located.passed) ? nil : vis.lowerBound
+            // A pending keep or reveal owns this viewport through an animated resize.
+            let anchorIdx = (vis.isEmpty || oldPinned || located.passed || scrollRequestsState.owns(scrollPath)) ? nil : vis.lowerBound
             anchorInfoByList[listPath] = (scrollPath, scrollIdx, vpH, stickyPin, oldOffsetY, oldListY, prefixBefore, anchorIdx)
         }
 
@@ -355,15 +349,16 @@ extension Runtime {
             let est = max(1, (pass.byPath[listPath].flatMap { pass.nodes[$0].el.virtualEstimate }) ?? 40)
             if let lIdx = pass.byPath[listPath], let sIdx = info.scrollIdx {
                 Self.measureVirtualPlacement(&vState, listIdx: lIdx, scrollIdx: sIdx, nodes: pass.nodes)
-                tempLists[listPath] = vState
             }
+            vState.measuredByKey.prepareOffsets(estimated: est, gap: vState.gap)
+            tempLists[listPath] = vState
             let (prefix, total) = vState.computeOffsets(estimated: est)
             let scrollY: Float
             if info.stickyPin {
-                scrollY = vState.nested ? info.oldOffsetY : max(0, total - info.vpH)
+                scrollY = vState.nested ? info.oldOffsetY : max(0, vState.top + vState.extent(total: total) - info.vpH)
             } else if let aIdx = info.anchorIdx, aIdx < prefix.count, aIdx < info.prefixBefore.count {
                 let delta = prefix[aIdx] - info.prefixBefore[aIdx]
-                let listY = max(0, min(max(0, total - info.vpH), info.oldListY + delta))
+                let listY = max(0, min(max(0, vState.extent(total: total) - info.vpH), info.oldListY + delta))
                 let candidate = max(0, info.oldOffsetY + listY - info.oldListY)
                 scrollY = candidate
                 if abs(candidate - info.oldOffsetY) > 0.05 {
@@ -374,9 +369,8 @@ extension Runtime {
             }
             // `windows_move`: the list's own offset within its window (`VirtualList::at`).
             let (offsetY, pinned) = vState.at(scrollY, pinned: info.stickyPin, total: total)
-            let overscanCap = info.vpH * (RuntimeVirtualListState.overscanMultiplier + 1.0)
             if vState.needsWindow(offset: offsetY, viewport: info.vpH, prefix: prefix, count: vState.lastKeys.count, pinned: pinned)
-                || vState.spare(offset: offsetY, viewport: info.vpH, prefix: prefix, count: vState.lastKeys.count, pinned: pinned) > overscanCap {
+                || vState.spare(offset: offsetY, viewport: info.vpH, prefix: prefix, count: vState.lastKeys.count, pinned: pinned) > info.vpH {
                 return (false, tempLists, [:])
             }
         }
@@ -588,7 +582,7 @@ extension Runtime {
         }
 
         if evaluateLayoutMoved(reads: cached.reads, nodes: pass.nodes, force: false)
-            || self.memo.hasInvalidatedReads(against: currentMemoGeometry(nodes: pass.nodes))
+            || self.memo.hasInvalidatedReads(computing: { currentMemoGeometry(nodes: pass.nodes) })
             || (cached.caretRead && caretMoved(from: cxSettings.lastCommittedCaret, in: pass.nodes)) {
             return restoreSavedAndFallback()
         }

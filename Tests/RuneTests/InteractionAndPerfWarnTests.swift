@@ -7,6 +7,21 @@ import WinSDK
 
 @Suite("InteractionTiming & PerfWarn Parity", .serialized, PerfWarningScope())
 struct InteractionAndPerfWarnTests {
+    @Test func activeFramesSkipIdleImageCapture() {
+        let meter = IdleMeter()
+        var captures = 0
+        func snapshot() -> IdleMeter.DrawnSnapshot {
+            captures += 1
+            return .init(instances: [1], surfaceKey: 0)
+        }
+        meter.begins(quiet: false, timer: false, live: false)
+        meter.observeFrame(clock: 0, animating: true, drawn: snapshot(), windowName: nil)
+        #expect(captures == 0)
+        meter.begins(quiet: true, timer: true, live: false)
+        meter.observeFrame(clock: 1, animating: false, drawn: snapshot(), windowName: nil)
+        #expect(captures == 1)
+    }
+
 
     // MARK: - Interaction Names & Interning (interaction/tests.rs)
 

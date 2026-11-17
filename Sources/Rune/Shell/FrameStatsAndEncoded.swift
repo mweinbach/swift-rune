@@ -1,7 +1,9 @@
 import Foundation
 import RuneMotion
 #if os(Windows)
-import WinSDK
+import CRuneWin32
+#elseif os(Android)
+import Android
 #endif
 
 // MARK: - Frame Outcome, Encoded & Reports (frame/encoded.rs)
@@ -301,6 +303,7 @@ public enum Pacing: Sendable, Equatable, Codable {
     case idle
     case paced
     case unpaced
+    case vsync
     case failed(Int32)
 
     public var label: String {
@@ -308,6 +311,7 @@ public enum Pacing: Sendable, Equatable, Codable {
         case .idle: return "idle"
         case .paced: return "display link"
         case .unpaced: return "unpaced"
+        case .vsync: return "vsync"
         case .failed(let code): return "display link failed (\(code))"
         }
     }
@@ -359,16 +363,10 @@ public struct SurfaceStats: Sendable, Equatable, Codable {
     }
 
     public func summary() -> String {
-        var parts = [
-            "\(name)",
-            "\(rates.redraws) redraws/s (\(rates.unpaced) unpaced)",
-            "\(rates.presents) presents/s",
-        ]
-        if rates.failedCount > 0 {
-            parts.append("\(rates.failedCount) failed acquires/s (occluded \(rates.occluded), timeouts \(rates.timeouts), outdated \(rates.outdated))")
-        }
-        parts.append(pacing.label)
-        return parts.joined(separator: ", ")
+        "\(name): \(rates.redraws) redraws/s (\(rates.unpaced) unpaced), \(rates.presents) presents/s, " +
+            "\(rates.failedCount) failed acquires/s (occluded \(rates.occluded), timeout \(rates.timeouts), outdated \(rates.outdated)), " +
+            "\(rates.skipped) skipped/s, \(rates.turns) loop turns/s (\(rates.wakes) wakes); " +
+            "totals \(totals.presents) presents, \(totals.failedCount) failed, \(totals.skipped) skipped; pacing: \(pacing.label)"
     }
 }
 
@@ -431,6 +429,11 @@ public final class SurfaceMeter: @unchecked Sendable {
         }
         waited = false
         return autoTickLocked(now: now)
+    }
+
+    /// A host timer fired within a run-loop turn that the run-loop observer counts separately.
+    func noteDeadlineWake() {
+        lock.withLock { totals.wakes += 1 }
     }
 
     public func noteWaited() {
@@ -525,6 +528,7 @@ public final class SurfaceMeter: @unchecked Sendable {
                 let stats = SurfaceStats(name: name, totals: totals, rates: rates, pacing: pacing, spinWarning: nil)
                 let msg = "rune: surface has spun for \(next) s, a bug in Rune: \(stats.summary())"
                 spinWarning = msg
+                RuneStandardIO.error(msg + "\n")
                 return msg
             }
             spin = next == 0 ? .calm : .hot(seconds: next)
@@ -666,6 +670,10 @@ private enum FramePhaseStorage {
         let totals = current
         totals.values[phase.rawValue] += wallMs
         totals.values[phase.rawValue + FRAME_PHASES] += cpuMs
+        reportWall(phase, wallMs)
+    }
+
+    static func reportWall(_ phase: FramePhase, _ wallMs: Double) {
         if CommitBudget.isOn {
             CommitBudget.add(phase, ms: wallMs)
         }
@@ -681,29 +689,27 @@ private enum FramePhaseStorage {
 }
 
 /// CPU time consumed by the calling thread in milliseconds (`rune::thread_cpu_ms`).
+/// Windows estimates elapsed CPU time from thread cycles calibrated against the performance counter.
 public func threadCpuMs() -> Double {
-    #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+    #if canImport(Darwin)
     return Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1_000_000.0
-    #elseif os(Linux)
+    #elseif os(Linux) || os(Android)
     var ts = timespec()
     guard clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 else { return 0.0 }
     return Double(ts.tv_sec) * 1000.0 + Double(ts.tv_nsec) / 1_000_000.0
     #elseif os(Windows)
-    var creation = FILETIME(), exit = FILETIME(), kernel = FILETIME(), user = FILETIME()
-    guard GetThreadTimes(GetCurrentThread(), &creation, &exit, &kernel, &user) else { return 0.0 }
-    func milliseconds(_ time: FILETIME) -> Double {
-        let ticks = UInt64(time.dwHighDateTime) << 32 | UInt64(time.dwLowDateTime)
-        return Double(ticks) / 10_000.0
-    }
-    return milliseconds(kernel) + milliseconds(user)
+    return max(0, rune_win_thread_cpu_ms())
     #else
     return 0.0
     #endif
 }
 
 /// Returns and clears the current thread's `[wall(6), cpu(6)]` phase timings (`rune::take_frame_phases`).
+/// The first read also arms automatic frame measurements on this thread, unless explicitly disabled.
+/// Call this before the measured frames, or use `FrameProfiling.withRecording` to include the first one.
 public func takeFramePhases() -> [Double] {
-    FramePhaseStorage.take()
+    FrameProfiling.armOnFirstRead()
+    return FramePhaseStorage.take()
 }
 
 /// Accumulates wall + CPU duration into a `FramePhase` slot on the current thread.
@@ -714,8 +720,8 @@ public func recordFramePhase(_ phase: FramePhase, wallMs: Double, cpuMs: Double 
 /// Measures wall + thread CPU time of `body` and accumulates it into `phase`.
 @inline(__always)
 public func measureFramePhase<T>(_ phase: FramePhase, _ body: () throws -> T) rethrows -> T {
-    let wallStart = RuneExecutionContext.uptimeNanoseconds
     let cpuStart = threadCpuMs()
+    let wallStart = RuneExecutionContext.uptimeNanoseconds
     defer {
         let wallEnd = RuneExecutionContext.uptimeNanoseconds
         let wallMs = Double(wallEnd &- wallStart) / 1_000_000.0
@@ -723,6 +729,23 @@ public func measureFramePhase<T>(_ phase: FramePhase, _ body: () throws -> T) re
         FramePhaseStorage.record(phase, wallMs: wallMs, cpuMs: cpuMs)
     }
     return try body()
+}
+
+/// Automatic runtime phases skip clocks and bookkeeping until a profiling consumer requests them.
+@inline(__always)
+func measureRuntimePhase<T>(_ phase: FramePhase, _ body: () throws -> T) rethrows -> T {
+    switch FrameProfiling.automaticMode {
+    case .off:
+        return try body()
+    case .full:
+        return try measureFramePhase(phase, body)
+    case .wallOnly:
+        let start = RuneExecutionContext.uptimeNanoseconds
+        defer {
+            FramePhaseStorage.reportWall(phase, Double(RuneExecutionContext.uptimeNanoseconds &- start) / 1_000_000)
+        }
+        return try body()
+    }
 }
 
 // MARK: - Window / Shell / Options Types (window/spec.rs, window/titlebar.rs, lib.rs)
@@ -1257,6 +1280,8 @@ public enum Ime: Sendable, Equatable {
     case commit(String)
     case cancel
     case deleteSurrounding(beforeUTF8: Int, afterUTF8: Int)
+    /// The UTF-8 byte range of committed text the input method wants to reconvert.
+    case select(Range<Int>)
 }
 
 /// Handle to a native window delivered to `onWindow` / `onReady` or queued pre-bind (`rune::WindowHandle`).
@@ -1276,6 +1301,7 @@ public final class WindowHandle: @unchecked Sendable {
     private var readyFlag = false
     private var numberStorage: UInt32 = 0
     private var statsStorage = WindowSurfaceStats()
+    private var liveMeter: SurfaceMeter?
     private var placementProvider: (() -> WindowPlacement?)?
     private var clickThroughApplier: ((Bool) -> Result<Void, Error>)?
     private let placeImpl: (@Sendable (PlaceRequest) -> Void)?
@@ -1302,6 +1328,7 @@ public final class WindowHandle: @unchecked Sendable {
         onHide: @escaping @Sendable () -> Void = {},
         onSetTitle: @escaping @Sendable (String) -> Void = { _ in },
         onSetPosition: @escaping @Sendable (Vec2) -> Void = { _ in },
+        onFrame: @escaping @Sendable (WindowFrameRequest) -> Void = { _ in },
         onPlace: @escaping @Sendable (PlaceRequest) -> Void = { _ in }
     ) {
         self.key = title
@@ -1325,6 +1352,10 @@ public final class WindowHandle: @unchecked Sendable {
                 onSetTitle(newTitle)
             case .setPosition(let x, let y):
                 onSetPosition(Vec2(Float(x), Float(y)))
+            case .resize(let width, let height, let animate):
+                onFrame(WindowFrameRequest(size: (width, height), animate: animate))
+            case .center:
+                onFrame(WindowFrameRequest(center: true))
             default:
                 break
             }
@@ -1359,6 +1390,8 @@ public final class WindowHandle: @unchecked Sendable {
     public func unbind() {
         lock.lock()
         readyFlag = false
+        if let liveMeter { statsStorage = liveMeter.currentStats() }
+        liveMeter = nil
         numberStorage = 0
         placementProvider = nil
         clickThroughApplier = nil
@@ -1390,8 +1423,17 @@ public final class WindowHandle: @unchecked Sendable {
         return numberStorage != 0 ? numberStorage : nil
     }
 
+    func attachSurfaceMeter(_ meter: SurfaceMeter) {
+        lock.withLock { liveMeter = meter }
+    }
+
+    func attachPlacementProvider(_ provider: @escaping () -> WindowPlacement?) {
+        lock.withLock { placementProvider = provider }
+    }
+
     public func updateSurfaceStats(_ stats: WindowSurfaceStats) {
         lock.lock()
+        liveMeter = nil
         statsStorage = stats
         lock.unlock()
     }
@@ -1399,7 +1441,7 @@ public final class WindowHandle: @unchecked Sendable {
     public var surfaceStats: WindowSurfaceStats {
         lock.lock()
         defer { lock.unlock() }
-        return statsStorage
+        return (liveMeter?.currentStats() ?? statsStorage).aged(at: ProcessInfo.processInfo.systemUptime)
     }
 
     /// A headless run takes pending unbound requests each turn (`WindowHandle::take_headless`).

@@ -8,6 +8,8 @@ extern "C" {
 #endif
 
 typedef struct RuneWinPopupMenu RuneWinPopupMenu;
+typedef enum { RuneWinMenuFollowSystem = 1, RuneWinMenuDark = 2, RuneWinMenuLight = 3 } RuneWinMenuScheme;
+void rune_win_menu_scheme(RuneWinMenuScheme scheme);
 typedef uint32_t (*RuneWinPopupKey)(void *context, uint32_t vk, uint32_t mods, uint32_t shortcut_scalar);
 typedef void (*RuneWinPopupDone)(void *context, uint32_t command);
 

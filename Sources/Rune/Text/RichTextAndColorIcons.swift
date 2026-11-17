@@ -152,7 +152,7 @@ public struct TextCaseMapping: Sendable, Equatable {
     }
 
     public let displayed: String
-    private let sourceUTF8Count: Int
+    internal let authored: String
     private let bounds: [Bound]
 
     public init(source: String, textCase: TextCase) {
@@ -204,34 +204,36 @@ public struct TextCaseMapping: Sendable, Equatable {
         }
         pairs.append(Bound(sourceByte: srcByte, displayedByte: dstByte))
         self.displayed = shown
-        self.sourceUTF8Count = srcByte
+        self.authored = source
         self.bounds = pairs
     }
 
     /// Displayed UTF-8 byte offset where source byte `offset` starts (`up == false`),
     /// or its end when inside an expanding scalar (`up == true`, matching `Source::shown`).
     public func displayedOffset(forSourceUTF8Offset offset: Int, up: Bool = false) -> Int {
-        guard !bounds.isEmpty else { return 0 }
-        if up {
-            let idx = bounds.firstIndex { $0.sourceByte >= offset }
-            return idx.map { bounds[$0].displayedByte } ?? (bounds.last?.displayedByte ?? 0)
-        } else {
-            let idx = bounds.lastIndex { $0.sourceByte <= offset }
-            return idx.map { bounds[$0].displayedByte } ?? 0
-        }
+        bound(at: offset, by: \.sourceByte, up: up).displayedByte
     }
 
     /// Source UTF-8 byte offset of the scalar drawn at displayed byte `offset` (`up == false`),
     /// or the next scalar's start when inside an expanded scalar (`up == true`, matching `Source::source`).
     public func sourceOffset(forDisplayedUTF8Offset offset: Int, up: Bool = false) -> Int {
-        guard !bounds.isEmpty else { return sourceUTF8Count }
-        if up {
-            let idx = bounds.firstIndex { $0.displayedByte >= offset }
-            return idx.map { bounds[$0].sourceByte } ?? sourceUTF8Count
-        } else {
-            let idx = bounds.lastIndex { $0.displayedByte <= offset }
-            return idx.map { bounds[$0].sourceByte } ?? 0
+        bound(at: offset, by: \.displayedByte, up: up).sourceByte
+    }
+
+    private func bound(at offset: Int, by coordinate: KeyPath<Bound, Int>, up: Bool) -> Bound {
+        // Both byte columns are sorted and include the end sentinel.
+        var lo = 0
+        var hi = bounds.count - 1
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2
+            if bounds[mid][keyPath: coordinate] < offset {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
         }
+        if !up && lo > 0 && bounds[lo][keyPath: coordinate] > offset { lo -= 1 }
+        return bounds[lo]
     }
 
     public func displayedRange(forSourceUTF8Range range: Range<Int>) -> Range<Int> {
@@ -357,6 +359,7 @@ public enum RichSpanFlattener {
             var weight: Float? = nil
             var size: Float? = nil
             var italic = base.italic
+            // This flag selects the app's mono slot. An inherited systemMono run keeps its own face.
             var monospace = (base.family == .monospace)
             var underline = false
             var strikethrough = false

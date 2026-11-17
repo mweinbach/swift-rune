@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "RuneMicrophone.h"
+#include "RuneVideoClock.h"
+#include "RuneWindowsMedia.h"
 
 #ifdef __cplusplus
 extern "C" {

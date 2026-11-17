@@ -207,7 +207,9 @@ struct CpuBootParityTests {
         // Whole-pixel scroll by +8px triggers scroll plan/move and matches full fresh paint byte-for-byte
         let sScrolled = makeListScene(scrollY: 8, color0: SIMD4<Float>(0.2, 0.9, 0.3, 1.0))
         let pScroll = try painter.paint(sScrolled, into: &incrementalTarget)
-        #expect(pScroll.scrolled != nil)
+        let moved = try #require(pScroll.scrolled)
+        let movedRect = try #require(pScroll.scrolledRect)
+        #expect(movedRect.count == 4 && Int(movedRect[1]) == moved.1 && moved.0 == 8)
         var refScroll = CpuBootTarget(width: w, height: h)
         _ = try CpuBoot.paint(sScrolled, into: &refScroll, threads: 1)
         #expect(incrementalTarget.pixels == refScroll.pixels)

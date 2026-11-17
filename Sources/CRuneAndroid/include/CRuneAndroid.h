@@ -18,6 +18,8 @@ typedef struct {
     void (*presented)(void *);
     // Query (run == 0) or perform one idle turn. Returns whether more work is owed.
     int32_t (*text_idle)(void *, int32_t run);
+    // Query (run == 0) or poll pending GLsyncs on the originating context.
+    int32_t (*poll_gpu)(void *, int32_t run);
     void (*release_gpu)(void *, int32_t context_current);
     void (*focus)(void *, int32_t active);
     void (*visible)(void *, int32_t active);

@@ -93,6 +93,7 @@ public enum SpellPause {
 public struct SpellPauseWatch: Sendable, Equatable {
     public var path: String
     public var lastText: String
+    private var selection: Range<Int>?
     public var state: SpellPause.State = .settled
     public var wakeAt: Double? = nil
 
@@ -103,13 +104,28 @@ public struct SpellPauseWatch: Sendable, Equatable {
 
     /// Observes the focused field's current text & caret at timestamp `now`, returning the paused caret offset if suppressed.
     public mutating func observe(path: String, text: String, caret: Int, now: Double) -> Int? {
-        let textChanged = (self.path != path || self.lastText != text)
-        self.path = path
-        self.lastText = text
+        observe(path: path, text: text, selection: caret..<caret, now: now)
+    }
 
-        let event: SpellPause.Event = textChanged
-            ? .typed(caret: caret, now: now)
-            : .caretMoved(caret: caret, now: now)
+    internal mutating func observe(path: String, text: String, selection range: Range<Int>, now: Double) -> Int? {
+        if self.path != path {
+            self = SpellPauseWatch(path: path, text: text)
+            selection = range
+            return nil
+        }
+        let event: SpellPause.Event
+        if !lastText.utf8.elementsEqual(text.utf8) {
+            event = .typed(caret: range.upperBound, now: now)
+        } else if selection != range {
+            state = .settled
+            wakeAt = nil
+            selection = range
+            return nil
+        } else {
+            event = .tick(now: now)
+        }
+        selection = range
+        lastText = text
         let (next, effect) = SpellPause.step(state, event: event)
         state = next
         if case let .schedule(t) = effect {
@@ -119,7 +135,7 @@ public struct SpellPauseWatch: Sendable, Equatable {
         } else if case .settled = next {
             wakeAt = nil
         }
-        return SpellPause.waitingCaret(in: state)
+        return range.isEmpty ? SpellPause.waitingCaret(in: state) : nil
     }
 
     /// Advances the timer at `now`, returning `(nextWakeAt, needsRepaint)`.
@@ -174,10 +190,7 @@ public extension SpellChecker {
     ) -> [Range<Int>] {
         let pausedCaret = watch.observe(path: path, text: text, caret: caretUTF8, now: now)
         let raw = misspelledUTF8Ranges(in: text)
-        guard let pausedCaret,
-              let activeWord = SpellPause.wordRange(at: pausedCaret, in: text) else {
-            return raw
-        }
-        return raw.filter { !($0.overlaps(activeWord)) }
+        guard let pausedCaret else { return raw }
+        return raw.filter { pausedCaret < $0.lowerBound || pausedCaret > $0.upperBound }
     }
 }

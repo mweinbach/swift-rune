@@ -246,16 +246,89 @@ public struct VirtualWindow: Sendable, Equatable {
     }
 }
 
+/// Swift strings compare by canonical equivalence. Lists with byte-exact IDs use reversible
+/// ASCII path components so their layout, height and interaction caches share Rust's identity.
+/// A literal component beginning with the escape marker is quoted in either key mode.
+internal enum VirtualRowKeyEncoding {
+    static let marker = "~utf8~"
+    private static let digits = Array("0123456789abcdef".utf8)
+
+    static func components(_ path: String, omittingEmpty: Bool = true) -> [Substring] {
+        // A slash followed by a combining mark belongs to the same Swift Character.
+        path.utf8.split(separator: 0x2f, omittingEmptySubsequences: omittingEmpty).map {
+            path[$0.startIndex..<$0.endIndex]
+        }
+    }
+
+    static func storageKey(_ id: String, byteExact: Bool = true) -> String {
+        encodedKey(id, byteExact: byteExact) ?? id
+    }
+
+    static func encodedKey(_ id: String, byteExact: Bool) -> String? {
+        if byteExact {
+            guard id.utf8.contains(where: { $0 >= 0x80 || $0 == 0x7e }) else { return nil }
+        } else if !id.utf8.contains(0x7e) {
+            return nil
+        }
+        var encoded = false
+        let stored = components(id, omittingEmpty: false).map { part in
+            guard part.hasPrefix(marker) || (byteExact && part.utf8.contains(where: { $0 >= 0x80 })) else { return String(part) }
+            encoded = true
+            var bytes = Array(marker.utf8)
+            bytes.reserveCapacity(bytes.count + part.utf8.count * 2)
+            for byte in part.utf8 {
+                bytes.append(digits[Int(byte >> 4)])
+                bytes.append(digits[Int(byte & 15)])
+            }
+            return String(decoding: bytes, as: UTF8.self)
+        }.joined(separator: "/")
+        return encoded ? stored : nil
+    }
+
+    static func authoredComponent(_ part: Substring) -> String {
+        guard part.hasPrefix(marker) else { return String(part) }
+        let encoded = part.dropFirst(marker.count)
+        let digits = encoded.utf8
+        guard !digits.isEmpty, digits.count.isMultiple(of: 2) else { return String(part) }
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(digits.count / 2)
+        var iterator = digits.makeIterator()
+        while let high = iterator.next(), let low = iterator.next() {
+            guard let a = nibble(high), let b = nibble(low) else { return String(part) }
+            bytes.append(a << 4 | b)
+        }
+        guard let decoded = String(bytes: bytes, encoding: .utf8) else { return String(part) }
+        return decoded
+    }
+
+    private static func nibble(_ digit: UInt8) -> UInt8? {
+        switch digit {
+        case 48...57: return digit - 48
+        case 97...102: return digit - 87
+        default: return nil
+        }
+    }
+
+    static func authoredKey(_ stored: String) -> String? {
+        guard stored.utf8.contains(0x7e) else { return nil }
+        let parts = components(stored, omittingEmpty: false)
+        guard parts.contains(where: { $0.hasPrefix(marker) }) else { return nil }
+        return parts.map(authoredComponent).joined(separator: "/")
+    }
+}
+
 /// The ordered keys own their storage. Most reverse lookups need only a hash and an index.
 /// Full keys are kept in the secondary table only when two different keys share a hash.
 internal struct VirtualRowPlaces<Key: Hashable & Sendable>: Sendable {
     let keys: [Key]
+    let byteExactKeys: Bool
     private var firstByHash: [Int: Int]
     private var collisions: [Key: Int] = [:]
     private(set) var hasDuplicates = false
 
-    init(_ keys: [Key]) {
+    init(_ keys: [Key], byteExactKeys: Bool = false) {
         self.keys = keys
+        self.byteExactKeys = byteExactKeys
         firstByHash = Dictionary(minimumCapacity: keys.count)
         for (index, key) in keys.enumerated() {
             let hash = key.hashValue
@@ -280,6 +353,10 @@ internal struct VirtualRowPlaces<Key: Hashable & Sendable>: Sendable {
 }
 
 internal extension VirtualRowPlaces where Key == String {
+    func index(ofAuthoredKey key: String) -> Int? {
+        index(of: VirtualRowKeyEncoding.storageKey(key, byteExact: byteExactKeys))
+    }
+
     func row(containing targetPath: String, below listPath: String) -> (rowIndex: Int, rowSegment: String)? {
         guard targetPath.hasPrefix(listPath + "/") else { return nil }
         let rest = targetPath.dropFirst(listPath.count + 1)
@@ -302,16 +379,43 @@ internal extension VirtualRowPlaces where Key == String {
 internal struct VirtualRowMeasurements: Sendable {
     var places = VirtualRowPlaces<String>([])
     private(set) var heights: [Float?] = []
+    private var cachedOffsets: (estimate: Float, gap: Float, prefix: [Float])?
 
     mutating func replacePlaces(_ next: VirtualRowPlaces<String>) {
         heights = next.keys.map { self[$0] }
         places = next
+        cachedOffsets = nil
+    }
+
+    func offsets(estimated: Float, gap: Float) -> [Float] {
+        if let cachedOffsets, cachedOffsets.estimate == estimated, cachedOffsets.gap == gap {
+            return cachedOffsets.prefix
+        }
+        var sums: [Float] = []
+        sums.reserveCapacity(heights.count + 1)
+        sums.append(0)
+        var y: Float = 0
+        for i in heights.indices {
+            y += (heights[i] ?? estimated) + (i + 1 < heights.count ? gap : 0)
+            sums.append(y)
+        }
+        return sums
+    }
+
+    mutating func prepareOffsets(estimated: Float, gap: Float) {
+        if cachedOffsets?.estimate != estimated || cachedOffsets?.gap != gap {
+            cachedOffsets = (estimated, gap, offsets(estimated: estimated, gap: gap))
+        }
     }
 
     subscript(_ key: String) -> Float? {
         get { places.index(of: key).flatMap { heights[$0] } }
         set {
-            if let index = places.index(of: key) { heights[index] = newValue }
+            guard let index = places.index(of: key), heights[index] != newValue else { return }
+            if let estimate = cachedOffsets?.estimate, (heights[index] ?? estimate) != (newValue ?? estimate) {
+                cachedOffsets = nil
+            }
+            heights[index] = newValue
         }
     }
 }

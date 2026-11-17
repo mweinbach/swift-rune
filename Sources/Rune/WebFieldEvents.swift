@@ -60,7 +60,6 @@ extension Runtime {
         if replacing {
             // Limit the edit to its changed scalars, keeping surrounding rich spans, pills and undo history.
             let change = Self.replacement(from: expected, to: proposed, caret: focusByte)
-            edit.multiline = !el.isSingleLineInput
             edit.cancelPreedit()
             edit.setSelectionRaw(anchor: base + change.oldRange.lowerBound, cursor: base + change.oldRange.upperBound)
             edit.snapToPills()

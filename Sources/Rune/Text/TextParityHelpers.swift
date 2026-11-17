@@ -103,100 +103,128 @@ public enum TextDecorations {
 /// Identifies inline left-to-right technical units (paths, URLs, flags, numbers, filenames)
 /// inside RTL prose (`rune::text::ltr_units`).
 public enum TextBidiUnits {
-    private static let openChars: Set<Character> = ["(", "[", "{", "\"", "'", "«", "“", "‘", "<"]
-    private static let closeChars: Set<Character> = [")", "]", "}", ">"]
-    private static let endChars: Set<Character> = [".", ",", ";", ":", "!", "?", ")", "]", "}", "\"", "'", "»", "”", "’", "،", "؛", "؟", "۔", "…", ">"]
-
-    private static func pair(_ c: Character) -> Character {
-        switch c {
-        case "(": return ")"
-        case "[": return "]"
-        case "{": return "}"
-        case "<": return ">"
-        case ")": return "("
-        case "]": return "["
-        case "}": return "{"
-        case ">": return "<"
-        default: return c
-        }
-    }
+    private static let openChars: Set<Unicode.Scalar> = ["(", "[", "{", "\"", "'", "«", "“", "‘", "<"]
+    private static let endChars: Set<Unicode.Scalar> = [".", ",", ";", ":", "!", "?", ")", "]", "}", "\"", "'", "»", "”", "’", "،", "؛", "؟", "۔", "…", ">"]
 
     /// Returns UTF-8 byte ranges of LTR units inside `text` (`ltr_units::ltr_units`).
     public static func ltrUnits(in text: String) -> [Range<Int>] {
-        var out: [Range<Int>] = []
-        let utf8 = Array(text.utf8)
-        var bytePos = 0
-        var wordStart = 0
-
-        for ch in text {
-            let chBytes = ch.utf8.count
-            if ch.isWhitespace {
-                if wordStart < bytePos,
-                   let slice = String(bytes: utf8[wordStart..<bytePos], encoding: .utf8),
-                   let localRange = unitRange(in: slice) {
-                    out.append((wordStart + localRange.lowerBound)..<(wordStart + localRange.upperBound))
+        var text = text
+        return text.withUTF8 { bytes in
+            var units: [Range<Int>] = []
+            var start = 0
+            var offset = 0
+            var hasAlnum = false
+            var hasSymbol = false
+            func finishWord() {
+                if hasAlnum, hasSymbol, let range = unit(in: bytes, from: start, to: offset) {
+                    units.append(range)
                 }
-                wordStart = bytePos + chBytes
+                hasAlnum = false
+                hasSymbol = false
             }
-            bytePos += chBytes
+            while offset < bytes.count {
+                let byte = bytes[offset]
+                if isAlnum(byte) {
+                    hasAlnum = true
+                    offset += 1
+                } else if byte < 128 {
+                    if byte == 32 || (9...13).contains(byte) {
+                        finishWord()
+                        start = offset + 1
+                    } else {
+                        hasSymbol = true
+                    }
+                    offset += 1
+                } else {
+                    let scalar = scalar(at: offset, in: bytes)
+                    let next = offset + scalar.utf8.count
+                    if scalar.properties.isWhitespace {
+                        finishWord()
+                        start = next
+                    } else {
+                        hasSymbol = true
+                    }
+                    offset = next
+                }
+            }
+            finishWord()
+            return units
         }
-        if wordStart < utf8.count,
-           let slice = String(bytes: utf8[wordStart..<utf8.count], encoding: .utf8),
-           let localRange = unitRange(in: slice) {
-            out.append((wordStart + localRange.lowerBound)..<(wordStart + localRange.upperBound))
-        }
-        return out
     }
 
-    private static func unitRange(in word: String) -> Range<Int>? {
-        var startIdx = word.startIndex
-        var endIdx = word.endIndex
-        while startIdx < endIdx {
-            let c = word[startIdx]
-            let rest = word[word.index(after: startIdx)..<endIdx]
-            let closesInside = (pair(c) != c) && rest.contains(pair(c))
-            if openChars.contains(c) && !closesInside {
-                startIdx = word.index(after: startIdx)
-            } else {
-                break
-            }
-        }
-        while startIdx < endIdx {
-            let prev = word.index(before: endIdx)
-            let c = word[prev]
-            let head = word[startIdx..<prev]
-            let opensInside = head.contains(pair(c))
-            if endChars.contains(c) && !(closeChars.contains(c) && opensInside) {
-                endIdx = prev
-            } else {
-                break
-            }
-        }
-        let core = String(word[startIdx..<endIdx])
-        guard !core.isEmpty else { return nil }
-        let ascii = core.utf8.allSatisfy { $0 < 0x80 }
-        let hasAlnum = core.utf8.contains { ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) }
-        let hasSymbol = core.utf8.contains { !(($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122)) }
-        let isPath = (core.hasPrefix("/") || core.hasPrefix("~") || core.hasPrefix(".")) && (core.contains("/") || core.contains("\\")) || isDrivePath(core)
-        let isNamed = (core.contains("/") || core.contains("\\")) && hasExtension(core)
-        guard hasAlnum && ((ascii && hasSymbol) || (!ascii && (isPath || isNamed))) else {
-            return nil
-        }
-        let byteStart = word[..<startIdx].utf8.count
-        let byteEnd = word[..<endIdx].utf8.count
-        return byteStart..<byteEnd
+    private static func isLetter(_ byte: UInt8) -> Bool {
+        (65...90).contains(byte) || (97...122).contains(byte)
     }
 
-    private static func isDrivePath(_ s: String) -> Bool {
-        let b = Array(s.utf8)
-        return b.count > 3 && ((b[0] >= 65 && b[0] <= 90) || (b[0] >= 97 && b[0] <= 122)) && b[1] == 58 && (b[2] == 92 || b[2] == 47)
+    private static func isAlnum(_ byte: UInt8) -> Bool {
+        (48...57).contains(byte) || isLetter(byte)
     }
 
-    private static func hasExtension(_ s: String) -> Bool {
-        guard let dot = s.lastIndex(of: ".") else { return false }
-        let stem = s[..<dot]
-        let ext = s[s.index(after: dot)...]
-        return !stem.isEmpty && (1...8).contains(ext.count) && ext.utf8.allSatisfy { ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) }
+    /// All offsets originate at scalar boundaries in String's validated UTF-8.
+    private static func scalar(at offset: Int, in bytes: UnsafeBufferPointer<UInt8>) -> Unicode.Scalar {
+        if bytes[offset] < 128 { return Unicode.Scalar(bytes[offset]) }
+        var iterator = bytes[offset...].makeIterator()
+        var parser = UTF8.ForwardParser()
+        guard case .valid(let encoded) = parser.parseScalar(from: &iterator) else { preconditionFailure("Invalid String UTF-8") }
+        return UTF8.decode(encoded)
+    }
+
+    /// A word can open each bracket kind anywhere in its core. Each missing
+    /// counterpart only needs one search, even in a long chain of unmatched brackets.
+    private static func hasMate(_ bracket: Unicode.Scalar, in bytes: Slice<UnsafeBufferPointer<UInt8>>, missing: inout UInt8) -> Bool {
+        let pair: (mate: Unicode.Scalar, bit: UInt8)
+        switch bracket {
+        case "(": pair = (")", 1)
+        case ")": pair = ("(", 1)
+        case "[": pair = ("]", 2)
+        case "]": pair = ("[", 2)
+        case "{": pair = ("}", 4)
+        case "}": pair = ("{", 4)
+        case "<": pair = (">", 8)
+        case ">": pair = ("<", 8)
+        default: return false
+        }
+        if missing & pair.bit != 0 { return false }
+        if bytes.contains(UInt8(pair.mate.value)) { return true }
+        missing |= pair.bit
+        return false
+    }
+
+    private static func unit(in bytes: UnsafeBufferPointer<UInt8>, from start: Int, to end: Int) -> Range<Int>? {
+        var a = start
+        var b = end
+        var missing: UInt8 = 0
+        while a < b {
+            let c = scalar(at: a, in: bytes)
+            guard openChars.contains(c), !hasMate(c, in: bytes[a..<b], missing: &missing) else { break }
+            a += c.utf8.count
+        }
+        missing = 0
+        while a < b {
+            var last = b - 1
+            while bytes[last] & 0xC0 == 0x80 { last -= 1 }
+            let c = scalar(at: last, in: bytes)
+            guard endChars.contains(c), !hasMate(c, in: bytes[a..<b], missing: &missing) else { break }
+            b = last
+        }
+
+        // Trimming removes only punctuation. A word which reached this point
+        // still contains at least one ASCII letter or digit.
+        let core = bytes[a..<b]
+        if core.allSatisfy({ $0 < 128 }) {
+            return core.contains(where: { !isAlnum($0) }) ? a..<b : nil
+        }
+        let slash = UInt8(ascii: "/")
+        let backslash = UInt8(ascii: "\\")
+        guard core.contains(slash) || core.contains(backslash) else { return nil }
+        let first = bytes[a]
+        if first == slash || first == UInt8(ascii: "~") || first == UInt8(ascii: ".") { return a..<b }
+        if core.count > 3, isLetter(first), bytes[a + 1] == UInt8(ascii: ":"), bytes[a + 2] == backslash || bytes[a + 2] == slash {
+            return a..<b
+        }
+        guard let dot = core.lastIndex(of: UInt8(ascii: ".")), dot > a else { return nil }
+        let ext = bytes[(dot + 1)..<b]
+        return (1...8).contains(ext.count) && ext.allSatisfy(isAlnum) ? a..<b : nil
     }
 }
 
@@ -413,8 +441,12 @@ private enum TextRasterPlatform: Int32 {
 extension TextSystem {
     /// Returns the grayscale mask exponent for this text system's smoothing mode and paint color.
     public func coverageExponent(_ premultiplied: SIMD4<Float>) -> Float {
+        coverageExponent(premultiplied, mode: smoothing)
+    }
+
+    internal func coverageExponent(_ premultiplied: SIMD4<Float>, mode: FontSmoothing) -> Float {
         let platform = TextRasterPlatform.current
-        return TextCoreTextMatch.coverageExponent(mode: smoothing, premultiplied: premultiplied,
+        return TextCoreTextMatch.coverageExponent(mode: mode, premultiplied: premultiplied,
             apple: platform == .macDesktop || platform == .appleMobile, windows: platform == .windows)
     }
 }

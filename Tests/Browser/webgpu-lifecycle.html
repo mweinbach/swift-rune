@@ -1,0 +1,91 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune WebGPU device loss and initialization fallback</title>
+<pre id="result">Running…</pre>
+<script type="module">
+import { mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+import { width, height, viewWidth, glyphs, images, scene } from './atlas-scene.mjs';
+
+function mount(backend) {
+    const canvas = document.createElement('canvas');
+    document.body.append(canvas);
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const sample = new OffscreenCanvas(1, 1).getContext('2d', { willReadFrequently: true });
+    const colors = [], forced = [];
+    const app = mountRuneBrowser(canvas, { exports: {
+        memory, rune_web_enable() {}, __main_void() { return 0; }, rune_web_buffer() { return 0; },
+        rune_web_event() { return 0; }, rune_web_field() { return 0; },
+        rune_web_scene(_time, full) {
+            if (!full && forced.length) return 0;
+            forced.push(full);
+            const color = forced.length === 1 ? [201, 41, 77, 255] : [11, 197, 249, 255];
+            const data = Uint8Array.from(images);
+            data.set(color);
+            const frame = scene(0, forced.length, { data: glyphs }, { data });
+            new Uint8Array(memory.buffer).set(frame);
+            return frame.length;
+        },
+        rune_web_accessibility() {
+            if (canvas.width !== viewWidth || canvas.height !== height) throw Error('Canvas dimensions differ');
+            sample.drawImage(canvas, width, 0, 1, 1, 0, 0, 1, 1);
+            colors.push(Array.from(sample.getImageData(0, 0, 1, 1).data));
+            return 0;
+        }
+    } }, { backend, resizeTo: null });
+    return { app, canvas, colors, forced };
+}
+
+const result = document.getElementById('result'), mounted = [];
+try {
+    if (!navigator.gpu) throw Error('A WebGPU-capable browser is required');
+    const requestAdapter = navigator.gpu.requestAdapter.bind(navigator.gpu);
+    let firstDevice, devices = 0;
+    navigator.gpu.requestAdapter = async options => {
+        const adapter = await requestAdapter(options);
+        const requestDevice = adapter.requestDevice.bind(adapter);
+        adapter.requestDevice = async descriptor => {
+            const device = await requestDevice(descriptor);
+            if (++devices === 1) {
+                firstDevice = device;
+                // The public API allows intentional destruction. Model an unexpected driver reset
+                // by translating its reason; the actual native device and its resources still die.
+                Object.defineProperty(device, 'lost', { value: device.lost.then(info => ({
+                    reason: 'unknown', message: 'Fixture reset (' + info.reason + ')'
+                })) });
+            }
+            return device;
+        };
+        return adapter;
+    };
+    const live = mount(undefined);
+    mounted.push(live.app);
+    await live.app.ready;
+    if (live.app.renderer.api !== 'WebGPU') throw Error('Automatic selection missed WebGPU');
+    firstDevice.destroy();
+    for (let i = 0; i < 300 && live.colors.length < 2; i++) await new Promise(requestAnimationFrame);
+    const colors = [[201, 41, 77, 255], [11, 197, 249, 255]];
+    if (devices !== 2 || JSON.stringify(live.forced) !== '[1,1]' || JSON.stringify(live.colors) !== JSON.stringify(colors)) {
+        throw Error('Device recovery failed: ' + JSON.stringify({ devices, forced: live.forced, colors: live.colors }));
+    }
+    live.app.dispose();
+    navigator.gpu.requestAdapter = async () => null;
+    const fallback = mount(undefined);
+    mounted.push(fallback.app);
+    await fallback.app.ready;
+    if (fallback.app.renderer.api !== 'WebGL 2' || JSON.stringify(fallback.colors[0]) !== JSON.stringify(colors[0])) {
+        throw Error('Automatic WebGL fallback failed to present');
+    }
+    const explicit = mount('webgpu');
+    mounted.push(explicit.app);
+    let rejected = false;
+    try { await explicit.app.ready; } catch { rejected = true; }
+    if (!rejected || explicit.colors.length) throw Error('Explicit WebGPU ignored an unavailable adapter');
+    result.textContent = 'PASS ' + JSON.stringify({ devices, forced: live.forced, colors, fallback: fallback.app.renderer.api,
+        explicitUnavailableRejected: rejected });
+} catch (error) {
+    result.textContent = 'FAIL ' + error.stack;
+} finally {
+    for (const app of mounted) app.dispose();
+    if (navigator.gpu) delete navigator.gpu.requestAdapter;
+}
+</script>

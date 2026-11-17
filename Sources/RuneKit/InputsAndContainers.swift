@@ -384,7 +384,13 @@ public struct Collapsible<State> {
     public var isGhost: Bool = false
     public var children: [El<State>] = []
     public var visualState: ControlVisualState = .rest
-    public var isDisabled: Bool = false
+    public var isDisabled: Bool {
+        get { visualState == .disabled }
+        set {
+            if newValue { visualState = .disabled }
+            else if visualState == .disabled { visualState = .rest }
+        }
+    }
     public var onToggleHandler: ((inout State, inout Tx) -> Void)?
 
     public init(_ title: String, isOpen: Bool = false) {
@@ -413,19 +419,11 @@ public struct Collapsible<State> {
     public func state(_ s: ControlVisualState) -> Collapsible<State> {
         var copy = self
         copy.visualState = s
-        if s == .disabled {
-            copy.isDisabled = true
-        }
         return copy
     }
 
     public func disabled(_ d: Bool = true) -> Collapsible<State> {
-        var copy = self
-        copy.isDisabled = d
-        if d {
-            copy.visualState = .disabled
-        }
-        return copy
+        d ? state(.disabled) : self
     }
 
     public func onToggle(_ f: @escaping (inout State) -> Void) -> Collapsible<State> {
@@ -440,7 +438,7 @@ public struct Collapsible<State> {
 
     public func build(_ k: Kit) -> El<State> {
         let c = k.c
-        let enabled = !isDisabled && visualState != .disabled
+        let enabled = !isDisabled
         let showArrow = isOpen || visualState == .hover
         let arrowIcon: El<State> = icon(isOpen ? k.glyph.triangleDown : k.glyph.triangleRight, size: 14)
             .color(c.iconWeaker)
@@ -500,7 +498,13 @@ public struct AccordionSection<State> {
     public var isExpanded: Bool = false
     public var children: [El<State>] = []
     public var visualState: ControlVisualState = .rest
-    public var isDisabled: Bool = false
+    public var isDisabled: Bool {
+        get { visualState == .disabled }
+        set {
+            if newValue { visualState = .disabled }
+            else if visualState == .disabled { visualState = .rest }
+        }
+    }
     public var onToggleHandler: ((inout State, inout Tx) -> Void)?
 
     public init(_ title: String) {
@@ -528,19 +532,11 @@ public struct AccordionSection<State> {
     public func state(_ s: ControlVisualState) -> AccordionSection<State> {
         var copy = self
         copy.visualState = s
-        if s == .disabled {
-            copy.isDisabled = true
-        }
         return copy
     }
 
     public func disabled(_ d: Bool = true) -> AccordionSection<State> {
-        var copy = self
-        copy.isDisabled = d
-        if d {
-            copy.visualState = .disabled
-        }
-        return copy
+        d ? state(.disabled) : self
     }
 
     public func onToggle(_ f: @escaping (inout State) -> Void) -> AccordionSection<State> {
@@ -602,7 +598,7 @@ public struct Accordion<State> {
 
         let count = sections.count
         for (i, sec) in sections.enumerated() {
-            let enabled = !sec.isDisabled && sec.visualState != .disabled
+            let enabled = !sec.isDisabled
             let top: Float = (i == 0) ? k.radius.lg : 0.0
             let bottom: Float = (i == count - 1 && !sec.isExpanded) ? k.radius.lg : 0.0
 
@@ -2056,8 +2052,17 @@ extension Kit {
         var list: El<State> = col().key(key).wFull().gap(2).focusGroup(true)
 
         func emit(_ item: TreeItem<ID>, depth: Int) {
-            let isExp = expanded.contains(item.id)
-            let isSel = (selected == item.id)
+            let isExp: Bool
+            let isSel: Bool
+            if ID.self == String.self {
+                // Set<String> retains a single spelling of canonically equivalent IDs.
+                let bytes = item.id.description.utf8
+                isExp = expanded.firstIndex(of: item.id).map { expanded[$0].description.utf8.elementsEqual(bytes) } ?? false
+                isSel = selected.map { $0.description.utf8.elementsEqual(bytes) } ?? false
+            } else {
+                isExp = expanded.contains(item.id)
+                isSel = selected == item.id
+            }
             let indent = Float(depth) * 14.0 + 8.0
 
             var rowEl: El<State> = row()

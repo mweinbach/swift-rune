@@ -27,6 +27,28 @@ struct ImageZoomParityTests {
         return rt
     }
 
+    @Test("Very small fitted images can zoom to their full natural detail")
+    func tinyFitRatiosAndZoomLimits() {
+        let ratio: Float = 0.00001
+        #expect(ImageZoomMath.maxScale(fitRatio: ratio) == 800_000)
+        #expect(ImageZoomMath.detailScale(fitRatio: ratio) == 100_000)
+        #expect(ImageZoomMath.maxScale(fitRatio: 0) == .infinity)
+        #expect(ImageZoomMath.detailScale(fitRatio: 0) == .infinity)
+        for invalid: Float in [-0.0, -1, .nan, .infinity, -.infinity] {
+            #expect(ImageZoomMath.maxScale(fitRatio: invalid) == 1)
+            #expect(ImageZoomMath.detailScale(fitRatio: invalid) == 2)
+        }
+        let tiny = Float.leastNormalMagnitude / 2
+        #expect(StageZoom(fit: tiny).maxZoom() == 1 / tiny)
+        #expect(StageZoom(fit: 0).maxZoom() == .infinity)
+        var zoom = ImageZoom()
+        _ = zoom.measure(window: Vec2(140, 120), natural: Vec2(10_000_000, 10_000))
+        #expect(zoom.fitRatio == ratio && zoom.bounds.maxScale == 800_000)
+        #expect(ImageZoom(view: ZoomView(scale: 100_000_000), fitRatio: 0).level == 1192)
+        #expect(ImageZoom(view: ZoomView(scale: .infinity)).level == UInt32.max)
+        #expect(ImageZoom(view: ZoomView(scale: .nan)).level == 0)
+    }
+
     @Test("escape_on_a_zoomed_image_fits_it_before_closing (tests/image_zoom.rs)")
     func escapeOnZoomedImageFitsBeforeClosing() {
         let rt = makePreviewRuntime()

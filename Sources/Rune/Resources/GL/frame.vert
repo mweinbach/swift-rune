@@ -12,6 +12,9 @@ layout(location = 6) in vec4 aClip;
 layout(location = 7) in uvec4 aFade;
 uniform vec2 uViewport;
 uniform vec2 uOrigin;
+#ifdef RUNE_OUTLINE_VERTEX
+uniform int uAtlasFill;
+#endif
 
 out vec2 vPoint;
 flat out vec4 vRect;
@@ -64,6 +67,10 @@ void main() {
         point = center + mat2(c, s, -s, c) * q;
     }
     gl_Position = vec4(((point - uOrigin) / uViewport * 2.0 - 1.0) * vec2(1.0, -1.0), 0.0, 1.0);
+#ifdef RUNE_OUTLINE_VERTEX
+    // Sampling uses GL row zero for the first atlas row, as glTex(Sub)Image2D does.
+    if (uAtlasFill != 0) gl_Position.y = -gl_Position.y;
+#endif
     vParams = aParams;
     vClip = aClip;
     vFade = aFade;

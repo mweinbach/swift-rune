@@ -20,9 +20,8 @@ extension Runtime {
         set { inputMachines.traceChannelsActive = newValue }
     }
 
-    internal func logInputEvent(_ event: String) {
-        guard recordEvents || traceChannels != nil || inputMachines.traceChannelsActive else { return }
-        RuntimeEventLog.push(&events, event)
+    internal func logInputEvent(_ event: @autoclosure () -> String) {
+        logEvent(event())
     }
 
     // MARK: - Runtime Inspection & Pointer Utilities
@@ -102,6 +101,7 @@ extension Runtime {
 
     /// Cancels all held pointer, drag, secondary, and file-drop captures (`Runtime::cancel_pointer`).
     public func cancelPointer(at now: Double = 0.0) {
+        slice2State.autoscroll.cancel()
         _ = cancelActiveDrag(at: nil, time: now)
         armedDragOut = nil
         pendingDragOutStart = nil
@@ -231,7 +231,8 @@ extension Runtime {
                     clicks: drag.clicks,
                     mods: .none,
                     phase: .up,
-                    isCancelled: true
+                    isCancelled: true,
+                    screen: screenPixels(at: pt)
                 )
                 var tx = makeTx(at: now, button: drag.button)
                 onDrag(&state, d, &tx)
@@ -293,16 +294,17 @@ extension Runtime {
         let node = flatNodes[idx]
         var edit = editLens.get(state)
         let spellEnabled = edit.spellcheckEnabled || node.el.spellcheck
-        guard spellEnabled, !edit.isSecure else { return false }
+        guard spellEnabled, !node.el.isSecure, !edit.isSecure else { return false }
         edit.spellcheckEnabled = true
         let offset = textHitOffset(node: node, windowPos: pointerPosition, edit: edit)
         return edit.misspelledUTF8Ranges().contains { range in
-            offset >= range.lowerBound && offset < range.upperBound
+            offset >= range.lowerBound && offset <= range.upperBound
         }
     }
 
     /// Captures a secondary press at `pos` without firing primary handlers (`Runtime::secondary_down`).
     public func secondaryDown(at pos: Vec2, at now: Double = 0.0) {
+        if slice2State.autoscroll.press(.secondary) { return }
         // A secondary press is input: a resting poll's change splits from it (#970).
         let inputMark = noteInput(at: now)
         defer { endInputDispatch(inputMark) }
@@ -339,6 +341,7 @@ extension Runtime {
 
     /// Completes a captured secondary press at `pos` (`Runtime::secondary_up`).
     public func secondaryUp(at pos: Vec2, mods: Mods = .none, at now: Double = 0.0) {
+        if slice2State.autoscroll.release(.secondary) { return }
         let inputMark = noteInput(at: now)
         // The release queued `Action::LinkSecondary`, `Action::SecondaryPress` or a field menu:
         // an input action whatever it changes (#970).

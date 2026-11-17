@@ -7,21 +7,53 @@
 // A standalone WASI command has only Preview 1 imports and uses Rune's bitmap font.
 #ifdef RUNE_BROWSER_TEXT
 #define IMPORT(name) __attribute__((import_module("rune_text"), import_name(name)))
+IMPORT("spell_request") extern int32_t browser_spell_request(int32_t, const uint8_t *, int32_t);
+IMPORT("spell_read") extern void browser_spell_read(uint8_t *, int32_t);
+int32_t rune_browser_spell_request(int32_t op, const uint8_t *input, int32_t length) {
+    return browser_spell_request(op, input, length);
+}
+void rune_browser_spell_read(uint8_t *output, int32_t length) {
+    browser_spell_read(output, length);
+}
 IMPORT("platform") extern int32_t browser_text_platform(void);
+IMPORT("word_range") extern void browser_word_range(const uint8_t *, int32_t, int32_t, int32_t *);
+IMPORT("dictionary_lines") extern void browser_dictionary_lines(const uint8_t *, int32_t, uint8_t *);
+IMPORT("dictionary_words") extern void browser_dictionary_words(const uint8_t *, int32_t, uint8_t *);
 IMPORT("create") extern uint32_t browser_create(const char *, int32_t, const char *, int32_t,
     float, int32_t, int32_t, int32_t, int32_t, RuneDesktopLineMetrics *, uint32_t);
 IMPORT("release") extern void browser_release(uint32_t);
+IMPORT("extract_ink") extern uint32_t browser_extract_ink(uint32_t, int32_t, int32_t,
+    RuneDesktopLineMetrics *, uint32_t);
 IMPORT("caret") extern float browser_caret(uint32_t, int32_t);
 IMPORT("cell") extern int32_t browser_cell(uint32_t, int32_t, int32_t, float *, float *);
 IMPORT("mask") extern int32_t browser_mask(uint32_t, int32_t, int32_t, int32_t, int32_t, uint8_t *);
 IMPORT("has_color") extern int32_t browser_has_color(uint32_t);
 IMPORT("color") extern int32_t browser_color(uint32_t, int32_t, int32_t, int32_t, int32_t, uint8_t *);
 IMPORT("font") extern int32_t browser_register_font(const uint8_t *, uint32_t);
+IMPORT("font_url") extern void browser_font_url(const char *, int32_t, int32_t);
 IMPORT("configure") extern void browser_configure(uint32_t, const char *, int32_t, const char *,
     int32_t, const char *, int32_t, RuneDesktopLineMetrics *, uint32_t);
 #elif defined(__clang__)
 // Standalone implementations below satisfy the same ABI without a text host.
 #pragma clang diagnostic ignored "-Wunused-parameter"
+#endif
+
+#ifdef RUNE_BROWSER_TEXT
+void rune_browser_font_url(const char *url, int32_t late) {
+    if (url) browser_font_url(url, (int32_t)strlen(url), late);
+}
+
+void rune_browser_word_range(const uint8_t *text, int32_t length, int32_t position, int32_t bounds[2]) {
+    browser_word_range(text, length, position, bounds);
+}
+
+void rune_browser_dictionary_lines(const uint8_t *text, int32_t length, uint8_t *breaks) {
+    browser_dictionary_lines(text, length, breaks);
+}
+
+void rune_browser_dictionary_words(const uint8_t *text, int32_t length, uint8_t *breaks) {
+    browser_dictionary_words(text, length, breaks);
+}
 #endif
 
 struct RuneDesktopLine {
@@ -65,6 +97,18 @@ void rune_desktop_line_destroy(RuneDesktopLine *line) {
     if (line) browser_release(line->handle);
 #endif
     free(line);
+}
+
+RuneDesktopLine *rune_desktop_line_extract_ink(const RuneDesktopLine *line, int32_t start, int32_t end) {
+#ifdef RUNE_BROWSER_TEXT
+    if (!line || start < 0 || end < start) return NULL;
+    RuneDesktopLine *ink = calloc(1, sizeof *ink);
+    if (!ink) return NULL;
+    ink->handle = browser_extract_ink(line->handle, start, end, &ink->metrics, sizeof ink->metrics);
+    if (ink->handle) return ink;
+    free(ink);
+#endif
+    return NULL;
 }
 
 RuneDesktopLineMetrics rune_desktop_line_metrics(const RuneDesktopLine *line) {

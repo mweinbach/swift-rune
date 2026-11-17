@@ -16,6 +16,7 @@ public enum AccessibilityAction: String, Sendable, Hashable, Codable {
     case decrement
     /// Sets a new value: an editable text field's text, or a stepped range's number (`Action::SetValue`).
     case setValue = "set-value"
+    case scrollIntoView = "scroll-into-view"
 }
 
 /// Live-region announcement politeness (`rune::LiveRegion`).
@@ -75,6 +76,7 @@ public struct AccessibilityNode: Sendable, Equatable {
     public var id: String
     /// Canonical target for host events. Author keys can repeat in different subtrees.
     internal var runtimePath: String?
+    internal var webDocument: WebDocumentAccessibilityNode?
     public var role: ElementRole
     public var label: String?
     public var value: String?
@@ -92,7 +94,13 @@ public struct AccessibilityNode: Sendable, Equatable {
     public var sizeOfSet: Int?
     public var keyboardShortcut: String?
     public var url: String?
-    public var activeDescendant: String?
+    // A relation identifies an authored key by its original bytes. Its spelling can
+    // change independently of the roles, bounds, and state of the mounted rows.
+    internal var activeDescendantKey: TextUTF8Key?
+    public var activeDescendant: String? {
+        get { activeDescendantKey?.source }
+        set { activeDescendantKey = newValue.map(TextUTF8Key.init) }
+    }
     public var sortAscending: Bool?
     public var isDisabled: Bool
     public var isReadOnly: Bool
@@ -179,7 +187,7 @@ public struct AccessibilityNode: Sendable, Equatable {
         self.sizeOfSet = sizeOfSet
         self.keyboardShortcut = keyboardShortcut
         self.url = url
-        self.activeDescendant = activeDescendant
+        self.activeDescendantKey = activeDescendant.map(TextUTF8Key.init)
         self.sortAscending = sortAscending
         self.isDisabled = isDisabled
         self.isReadOnly = isReadOnly
@@ -213,7 +221,8 @@ public enum AccessibilityTreeBuilder {
         guard AccessibilityRoleRules.isLeafControl(role),
               let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return children }
         func append(_ child: AccessibilityNode, to kept: inout [AccessibilityNode]) {
-            guard !child.keepsControlContent, !child.isFocusable, child.actions.isEmpty, !child.isSecure,
+            // Scrolling a part into view does not make it an independently operable control.
+            guard !child.keepsControlContent, !child.isFocusable, !child.actions.contains(where: { $0 != .scrollIntoView }), !child.isSecure,
                   child.role != .textInput, child.role != .multilineTextInput,
                   child.role != .passwordInput, child.role != .link, child.role != .button, child.role != .grid,
                   child.characterLengths == nil else {
@@ -237,22 +246,21 @@ public enum AccessibilityTreeBuilder {
         AccessibilityNameSource.words(of: element, source: { AccessibilityNameSource($0) }, children: { $0.children })
     }
 
-    private static func relatedWords<State>(key: String?, ancestors: [El<State>], selfKey: String?) -> String? {
+    private static func relatedWords<State>(key: String?, ancestors: [El<State>]) -> String? {
         guard let key else { return nil }
-        func findFirst(in scope: El<State>, isDirectTarget: Bool) -> El<State>? {
+        func findFirst(in scope: El<State>) -> El<State>? {
             for child in scope.children {
-                if child.keyId == key {
-                    // Exclude exact same node if it happens to have an empty or identical key
+                if matchesAuthoredKey(child.keyId, key) {
                     return child
                 }
-                if let hit = findFirst(in: child, isDirectTarget: false) {
+                if let hit = findFirst(in: child) {
                     return hit
                 }
             }
             return nil
         }
         for scope in ancestors.reversed() {
-            if let target = findFirst(in: scope, isDirectTarget: true) {
+            if let target = findFirst(in: scope) {
                 if let name = words(of: target) { return name }
             }
         }
@@ -267,29 +275,45 @@ public enum AccessibilityTreeBuilder {
         focusedKey: String? = nil,
         path: String = "root"
     ) -> AccessibilityNode? {
-        projectNode(
+        // Only the last modal, its descendants and the elements that contain it are exposed.
+        func routeToModal(_ el: El<State>) -> [Int]? {
+            for i in el.children.indices.reversed() {
+                if let route = routeToModal(el.children[i]) { return [i] + route }
+            }
+            return el.isModal ? [] : nil
+        }
+        var roots: [AccessibilityNode] = []
+        let keptRoot = appendNode(
             element: element,
             layout: layout,
             state: state,
             origin: origin,
             focusedKey: focusedKey,
             path: path,
-            ancestors: []
+            ancestors: [], inheritedInert: false, modalRoute: routeToModal(element)?[...],
+            to: &roots
         )
+        let implicitWindow = !keptRoot && element.role == .group && !element.isA11yHidden && element.opacity > 0.01
+        if roots.count <= 1 && !implicitWindow { return roots.first }
+        let frame = layout.layout.localRect
+        return AccessibilityNode(id: path, role: .group, frame: MotionRect.fromXYWH(
+            origin.x + frame.x, origin.y + frame.y, frame.width, frame.height
+        ), children: roots)
     }
 
-    private static func projectNode<State>(
+    @discardableResult
+    private static func appendNode<State>(
         element: El<State>,
         layout: LayoutEngine.ResultNode,
         state: State?,
         origin: Vec2,
         focusedKey: String?,
         path: String,
-        ancestors: [El<State>]
-    ) -> AccessibilityNode? {
-        if element.isInert || element.isA11yHidden {
-            return nil
-        }
+        ancestors: [El<State>], inheritedInert: Bool, modalRoute: ArraySlice<Int>?,
+        to nodes: inout [AccessibilityNode]
+    ) -> Bool {
+        guard !element.isA11yHidden, element.opacity > 0.01 else { return false }
+        let inert = inheritedInert || element.isInert
 
         let nodeId = element.keyId ?? path
         let absRect = MotionRect.fromXYWH(
@@ -299,7 +323,27 @@ public enum AccessibilityTreeBuilder {
             layout.layout.localRect.height
         )
 
-        let enabled = !element.a11yDisabled && !element.isInert
+        func appendChildren(to children: inout [AccessibilityNode]) {
+            let childOrigin = Vec2(absRect.x, absRect.y)
+            let childAncestors = ancestors + [element]
+            for i in 0..<min(element.children.count, layout.children.count) {
+                if let next = modalRoute?.first, i != next { continue }
+                appendNode(element: element.children[i], layout: layout.children[i], state: state,
+                           origin: childOrigin, focusedKey: focusedKey, path: "\(element.storageKeyId ?? path)/#\(i)",
+                           ancestors: childAncestors, inheritedInert: inert,
+                           modalRoute: modalRoute?.isEmpty == false ? modalRoute?.dropFirst() : nil, to: &children)
+            }
+        }
+        let enabled = !element.a11yDisabled && !inert && modalRoute?.isEmpty != false
+        let keyboardTarget = enabled && element.focusable && (element.role != .presentation || element.explicitlyFocusable)
+        guard let semanticRole = AccessibilityRoleRules.projectedRole(for: element, takesFocus: element.focusable,
+                                                                      keyboardTarget: keyboardTarget) else {
+            appendChildren(to: &nodes)
+            return false
+        }
+        var projectedChildren: [AccessibilityNode] = []
+        appendChildren(to: &projectedChildren)
+
         var actions: [AccessibilityAction] = []
         if enabled {
             if element.handlers.onClick != nil || element.handlers.onClickPress != nil {
@@ -322,24 +366,26 @@ public enum AccessibilityTreeBuilder {
         ) {
             appendAction(.setValue, to: &actions)
         }
+        if ancestors.contains(where: { !$0.layout.scrollAxes.isEmpty }) { actions.append(.scrollIntoView) }
 
         var value: String? = element.a11yValue ?? element.a11ySelected
         var fieldSelection: [Int]?
         var isSecure = element.isSecure
         // `RoleCtx::multiline` (`a11y/node.rs:31`): a field that is not single-line.
-        let multiline = element.isMultilineField
+        var multiline = element.isMultilineField
         if let state, let editLens = element.handlers.editLens {
             let edit = editLens.get(state)
+            multiline = edit.multiline
             isSecure = isSecure || edit.isSecure
             value = isSecure ? nil : edit.text
             fieldSelection = isSecure ? nil : [0, edit.anchor, 0, edit.cursor]
         }
 
-        let resolvedRole: ElementRole = element.role == .textInput && (isSecure || multiline)
+        let resolvedRole: ElementRole = element.handlers.editLens != nil || (element.role == .textInput && (isSecure || multiline))
             ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: multiline)
-            : AccessibilityRoleRules.role(for: element, focusable: enabled && element.focusable)
-        let labelledByText = relatedWords(key: element.a11yLabelledBy, ancestors: ancestors, selfKey: element.keyId)
-        let describedByText = relatedWords(key: element.a11yDescribedBy, ancestors: ancestors, selfKey: element.keyId)
+            : semanticRole
+        let labelledByText = relatedWords(key: element.a11yLabelledBy, ancestors: ancestors)
+        let describedByText = relatedWords(key: element.a11yDescribedBy, ancestors: ancestors)
         let givenName = AccessibilityNameSource.nonblank(element.a11yLabel) ?? labelledByText
         let controlName = AccessibilityRoleRules.controlName(
             given: givenName, role: resolvedRole, isDefaultButton: element.isDefaultButton, secure: isSecure,
@@ -347,28 +393,10 @@ public enum AccessibilityTreeBuilder {
         )
         let label = controlName ?? (isSecure ? "Password" : element.plainText)
         let resolvedHelp = element.a11yDescription ?? describedByText ?? element.a11yHelp
-        let isFocused = (focusedKey != nil && element.keyId == focusedKey)
+        let isFocused = enabled && matchesAuthoredKey(element.keyId, focusedKey)
         let selectableRole = [.listItem, .option, .tab, .treeItem, .gridCell, .row].contains(resolvedRole)
         let selectedState: Bool? = (selectableRole || element.itemSelected) ? element.itemSelected : nil
 
-        var projectedChildren: [AccessibilityNode] = []
-        let childOrigin = Vec2(absRect.x, absRect.y)
-        let childAncestors = ancestors + [element]
-        let count = min(element.children.count, layout.children.count)
-        for i in 0..<count {
-            let childPath = "\(nodeId)/#\(i)"
-            if let childNode = projectNode(
-                element: element.children[i],
-                layout: layout.children[i],
-                state: state,
-                origin: childOrigin,
-                focusedKey: focusedKey,
-                path: childPath,
-                ancestors: childAncestors
-            ) {
-                projectedChildren.append(childNode)
-            }
-        }
         var projectedSelection = fieldSelection
         if let grid = element.terminalGridPayload {
             let projected = Self.projectTerminalGrid(grid, nodeId: nodeId, bounds: absRect)
@@ -397,7 +425,7 @@ public enum AccessibilityTreeBuilder {
             url: element.a11yHref,
             activeDescendant: element.a11yActiveDescendant,
             sortAscending: element.a11ySorted,
-            isDisabled: element.a11yDisabled,
+            isDisabled: element.a11yDisabled || inert,
             isReadOnly: element.a11yReadOnly,
             isInvalid: element.a11yInvalid,
             isBusy: element.a11yBusy,
@@ -411,7 +439,8 @@ public enum AccessibilityTreeBuilder {
             children: controlChildren(projectedChildren, role: resolvedRole, name: isSecure ? nil : controlName)
         )
         node.keepsControlContent = element.keepsControlContent
-        return node
+        nodes.append(node)
+        return true
     }
 
     internal static func projectTerminalGrid(
@@ -478,9 +507,27 @@ public enum AccessibilityTreeBuilder {
 #if os(macOS)
 /// Builds an AppKit `NSAccessibilityElement` hierarchy from a projected `AccessibilityNode`.
 public enum AppKitAccessibilityMapper {
+    static func subrole(_ role: ElementRole) -> NSAccessibility.Subrole? {
+        let name: String
+        switch role {
+        case .dialog, .alertDialog: return .dialog
+        case .banner: name = "AXLandmarkBanner"
+        case .complementary: name = "AXLandmarkComplementary"
+        case .contentInfo: name = "AXLandmarkContentInfo"
+        case .form: name = "AXLandmarkForm"
+        case .main: name = "AXLandmarkMain"
+        case .navigation: name = "AXLandmarkNavigation"
+        case .region: name = "AXLandmarkRegion"
+        case .search: name = "AXLandmarkSearch"
+        default: return nil
+        }
+        return NSAccessibility.Subrole(rawValue: name)
+    }
+
     public static func nsRole(for role: ElementRole) -> NSAccessibility.Role {
         switch role {
-        case .group: return .group
+        case .scrollView: return .scrollArea
+        case .presentation, .group, .figure: return .group
         case .text: return .staticText
         case .button: return .button
         case .checkbox: return .checkBox
@@ -493,7 +540,7 @@ public enum AppKitAccessibilityMapper {
         case .progress: return .progressIndicator
         case .listItem: return .row
         case .heading: return NSAccessibility.Role(rawValue: AccessibilityHeading.macRoleName)
-        case .dialog: return .sheet
+        case .dialog, .alertDialog: return .window
         case .menuBar: return .menuBar
         case .menu: return .menu
         case .menuItem: return .menuItem
@@ -506,12 +553,12 @@ public enum AppKitAccessibilityMapper {
         case .treeItem: return .row
         case .grid: return .table
         case .row: return .row
-        case .gridCell: return .cell
-        case .columnHeader: return .column
+        case .cell, .gridCell, .rowHeader, .columnHeader: return .cell
         case .radiogroup: return .radioGroup
         case .tabList: return .tabGroup
         case .tooltip: return .helpTag
-        case .alert, .region, .main, .status, .blockquote: return .group
+        case .alert, .region, .main, .status, .blockquote, .navigation, .banner,
+             .complementary, .contentInfo, .form, .search: return .group
         case .link: return .link
         case .toolbar: return .toolbar
         case .splitter: return .splitter
@@ -608,11 +655,11 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
         }
 
         setAccessibilityRole(AppKitAccessibilityMapper.nsRole(for: node.role))
-        if node.isSecure {
-            setAccessibilitySubrole(.secureTextField)
-        }
+        setAccessibilitySubrole(node.isSecure ? .secureTextField : AppKitAccessibilityMapper.subrole(node.role))
+        if node.isModal || isAccessibilityModal() { setAccessibilityModal(node.isModal) }
         setAccessibilityParent(parent)
         setAccessibilityIdentifier(node.id)
+        setAccessibilityEnabled(!node.isDisabled)
         setAccessibilityLabel(node.label)
         if node.role == .heading {
             // A heading's value is its level, as WebKit and Chromium give VoiceOver
@@ -645,6 +692,19 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
     public override func accessibilityPerformPress() -> Bool { perform(.press) }
     public override func accessibilityPerformIncrement() -> Bool { perform(.increment) }
     public override func accessibilityPerformDecrement() -> Bool { perform(.decrement) }
+
+    // VoiceOver uses this action name on systems predating the public macOS 26 constant.
+    private static let scrollToVisible = NSAccessibility.Action(rawValue: "AXScrollToVisible")
+
+    public override func accessibilityActionNames() -> [NSAccessibility.Action] {
+        // AppKit also consults the modern selectors above. NSAccessibilityElement
+        // declares the informal action protocol but does not implement these methods.
+        supportedActions.contains(.scrollIntoView) ? [Self.scrollToVisible] : []
+    }
+
+    public override func accessibilityPerformAction(_ action: NSAccessibility.Action) {
+        if action == Self.scrollToVisible { _ = perform(.scrollIntoView) }
+    }
 
     /// VoiceOver may set the value only where the node offers `SetValue`.
     public override func isAccessibilitySelectorAllowed(_ selector: Selector) -> Bool {
@@ -681,15 +741,16 @@ public enum UIKitAccessibilityMapper {
     public static func traits(for role: ElementRole) -> UIAccessibilityTraits {
         switch role {
         case .button, .menuItem, .menuItemCheckbox, .menuItemRadio: return .button
-        case .text, .listItem, .group, .dialog, .menu, .separator: return .staticText
-        case .menuBar, .toolbar, .list, .textInput, .passwordInput, .multilineTextInput: return .none
+        case .text, .listItem, .group, .dialog, .alertDialog, .menu, .separator, .figure: return .staticText
+        case .presentation, .scrollView, .menuBar, .toolbar, .list, .textInput, .passwordInput, .multilineTextInput,
+             .navigation, .banner, .complementary, .contentInfo, .form, .search: return .none
         case .splitter, .slider: return .adjustable
         case .status, .progress: return [.staticText, .updatesFrequently]
         case .heading: return .header
         case .image, .icon: return .image
         case .checkbox, .switchControl, .radio, .tab: return .button
         case .combobox, .option, .link: return .button
-        case .listbox, .tree, .treeItem, .grid, .row, .gridCell, .columnHeader, .radiogroup, .tabList, .tooltip, .alert, .region, .main, .mark, .code, .blockquote, .table:
+        case .listbox, .tree, .treeItem, .grid, .row, .cell, .gridCell, .rowHeader, .columnHeader, .radiogroup, .tabList, .tooltip, .alert, .region, .main, .mark, .code, .blockquote, .table:
             return .staticText
         }
     }
@@ -704,6 +765,11 @@ public enum UIKitAccessibilityMapper {
         return updateElements(from: node, container: container, cache: &cache, routingByPath: false, onAction: onAction)
     }
 
+    fileprivate static func isElement(_ node: AccessibilityNode) -> Bool {
+        node.role != .group || node.isFocusable || AccessibilityNameSource.nonblank(node.label) != nil ||
+            node.actions.contains { $0 != .scrollIntoView }
+    }
+
     @MainActor
     internal static func updateElements(
         from root: AccessibilityNode, container: Any,
@@ -714,7 +780,7 @@ public enum UIKitAccessibilityMapper {
         var next: [AccessibilityIdentity: RuneUIAccessibilityElement] = [:]
         var result: [RuneUIAccessibilityElement] = []
         AccessibilityIdentity.walk(root) { node, identity in
-            guard node.role != .group else { return }
+            guard isElement(node) else { return }
             let element: RuneUIAccessibilityElement
             if let existing = cache[identity] {
                 existing.update(node)
@@ -736,6 +802,7 @@ public enum UIKitAccessibilityMapper {
 public final class RuneUIAccessibilityElement: UIAccessibilityElement {
     public private(set) var nodeId: String = ""
     public private(set) var supportedActions: [AccessibilityAction] = []
+    internal private(set) var isRuneFocused = false
     fileprivate var actionTarget = ""
     private let actionHandler: (@Sendable (String, AccessibilityAction) -> Void)?
 
@@ -751,13 +818,21 @@ public final class RuneUIAccessibilityElement: UIAccessibilityElement {
 
     fileprivate func update(_ node: AccessibilityNode) {
         nodeId = node.id
+        isRuneFocused = node.isFocused
         actionTarget = node.id
         supportedActions = node.actions
-        self.isAccessibilityElement = node.role != .group
+        self.isAccessibilityElement = UIKitAccessibilityMapper.isElement(node)
         self.accessibilityIdentifier = node.id
         self.accessibilityLabel = node.label
         self.accessibilityValue = node.value
         self.accessibilityHint = node.help
+        self.accessibilityViewIsModal = node.isModal
+        switch node.role {
+        case .banner, .complementary, .contentInfo, .form, .main, .navigation, .region, .search:
+            accessibilityContainerType = .landmark
+        default:
+            accessibilityContainerType = .none
+        }
         var traits = UIKitAccessibilityMapper.traits(for: node.role)
         if node.isSelected { traits.insert(.selected) }
         if node.isDisabled { traits.insert(.notEnabled) }
@@ -901,27 +976,71 @@ public final class CustomDictionarySpellChecker: SpellCheckBackend, @unchecked S
 
 #if os(macOS)
 /// AppKit `NSSpellChecker` backend on macOS (`rune::spell::macos`).
-public final class MacOSSpellChecker: SpellCheckBackend, @unchecked Sendable {
+public final class MacOSSpellChecker: DictionarySpellCheckBackend, @unchecked Sendable {
+    // AppKit detects a field's languages automatically. There is no per-field dictionary chooser.
+    var installedLanguages: [String] { [] }
+    func selectLanguages(_ tags: [String]) {}
+
     private let lock = NSLock()
     private var ignored: Set<String> = []
     private let documentTag: Int
+    private var generation: UInt64 = 0
+    private struct Languages: Equatable {
+        var current: String
+        var preferred: [String]
+        var automatic: Bool
+    }
+    private var cachedLanguages: Languages?
+    private var cache: [TextUTF8Key: [Range<Int>]] = [:]
+    private var cachedBytes = 0
+    private var observers: [NSObjectProtocol] = []
 
     public init() {
         self.documentTag = NSSpellChecker.uniqueSpellDocumentTag()
+        // AppKit has no learned-word notification; recheck external dictionary changes when
+        // the user returns to the app or changes spelling/language preferences.
+        let center = NotificationCenter.default
+        let changes = [NSApplication.didBecomeActiveNotification, NSLocale.currentLocaleDidChangeNotification,
+                       UserDefaults.didChangeNotification, NSSpellChecker.didChangeAutomaticSpellingCorrectionNotification]
+        observers = changes.map { name in
+            center.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in self?.invalidateRanges() }
+        }
+    }
+
+    deinit {
+        for observer in observers { NotificationCenter.default.removeObserver(observer) }
+        NSSpellChecker.shared.closeSpellDocument(withTag: documentTag)
+    }
+
+    private func invalidateRanges() {
+        lock.withLock { resetRanges() }
+    }
+
+    private func resetRanges() {
+        generation &+= 1
+        cache.removeAll(keepingCapacity: true)
+        cachedBytes = 0
     }
 
     public func misspelledUTF8Ranges(in text: String) -> [Range<Int>] {
         guard !text.isEmpty else { return [] }
+        let key = TextUTF8Key(text)
+        let checker = NSSpellChecker.shared
+        let languages = Languages(current: checker.language(), preferred: checker.userPreferredLanguages,
+                                  automatic: checker.automaticallyIdentifiesLanguages)
+        let (checkedGeneration, ign, cached) = lock.withLock {
+            if cachedLanguages != languages {
+                cachedLanguages = languages
+                resetRanges()
+            }
+            return (generation, ignored, cache[key])
+        }
+        if let cached { return cached }
         let nsString = text as NSString
         let length = nsString.length
         var found: [Range<Int>] = []
         var start = 0
 
-        lock.lock()
-        let ign = ignored
-        lock.unlock()
-
-        let checker = NSSpellChecker.shared
         while start < length {
             let range = checker.checkSpelling(of: text, startingAt: start)
             if range.location == NSNotFound || range.length == 0 || range.location < start {
@@ -934,6 +1053,16 @@ public final class MacOSSpellChecker: SpellCheckBackend, @unchecked Sendable {
                 found.append(lo..<hi)
             }
             start = range.location + range.length
+        }
+        lock.withLock {
+            guard checkedGeneration == generation, cache[key] == nil else { return }
+            // Most recently edited drafts share this bounded cache across frame draws.
+            if cache.count >= 256 || cachedBytes + text.utf8.count > 1_048_576 {
+                cache.removeAll(keepingCapacity: true)
+                cachedBytes = 0
+            }
+            cache[key] = found
+            cachedBytes += text.utf8.count
         }
         return found
     }
@@ -952,6 +1081,7 @@ public final class MacOSSpellChecker: SpellCheckBackend, @unchecked Sendable {
 
     public func learnWord(_ word: String) {
         NSSpellChecker.shared.learnWord(word)
+        invalidateRanges()
     }
 
     public func ignoreWord(_ word: String) {
@@ -959,6 +1089,7 @@ public final class MacOSSpellChecker: SpellCheckBackend, @unchecked Sendable {
         ignored.insert(word.lowercased())
         lock.unlock()
         NSSpellChecker.shared.ignoreWord(word, inSpellDocumentWithTag: documentTag)
+        invalidateRanges()
     }
 }
 #elseif canImport(UIKit) && !os(watchOS)
@@ -1063,6 +1194,8 @@ public final class SpellChecker: @unchecked Sendable {
         return UIKitSpellChecker()
         #elseif os(Windows) || os(Linux)
         return DesktopSpellChecker()
+        #elseif os(WASI) && RUNE_BROWSER_TEXT
+        return BrowserSpellChecker()
         #else
         return CustomDictionarySpellChecker()
         #endif
@@ -1085,7 +1218,7 @@ public final class SpellChecker: @unchecked Sendable {
         "nl-BE": "Flemish",
         "pt-BR": "Brazilian Portuguese",
         "pt-PT": "European Portuguese",
-        "ro-MD": "Moldovan Romanian",
+        "ro-MD": "Moldavian",
         "sw-CD": "Congo Swahili",
         "zh-Hans": "Simplified Chinese",
         "zh-Hant": "Traditional Chinese"
@@ -1126,10 +1259,23 @@ public final class SpellChecker: @unchecked Sendable {
         (backend as? any DictionarySpellCheckBackend)?.selectLanguages(selectedLanguages())
     }
 
+    #if os(WASI) && RUNE_BROWSER_TEXT
+    /// The page provides each advertised tag as `spell/<tag>.aff` and `spell/<tag>.dic`.
+    /// The selected dictionaries are fetched lazily when a field first checks its text.
+    public func setWebDictionaries(_ tags: [String]) {
+        setAvailableLanguages(tags)
+    }
+    #endif
+
     /// Available system spellcheck language tags (`rune::spell::available_languages`).
     public func availableLanguages() -> [String] {
         lock.lock()
         defer { lock.unlock() }
+        #if os(WASI) && RUNE_BROWSER_TEXT
+        if backend is BrowserSpellChecker {
+            return availableList.sorted { languageName(for: $0) < languageName(for: $1) }
+        }
+        #endif
         return availableList
     }
 
@@ -1148,6 +1294,23 @@ public final class SpellChecker: @unchecked Sendable {
     }
 
     private func selectedLanguages() -> [String] {
+        #if os(WASI) && RUNE_BROWSER_TEXT
+        if let browser = backend as? BrowserSpellChecker {
+            let chosen = availableList.filter(chosenLanguages.contains)
+            if !chosen.isEmpty { return chosen }
+            func base(_ tag: String) -> String { String(tag.prefix { $0 != "-" }).lowercased() }
+            var defaults: [String] = []
+            for pref in browser.preferredLanguages {
+                let match = availableList.first { $0.caseInsensitiveCompare(pref) == .orderedSame }
+                    ?? availableList.first { $0.caseInsensitiveCompare(base(pref)) == .orderedSame }
+                if let match, !defaults.contains(where: { base($0) == base(match) }) { defaults.append(match) }
+            }
+            if !defaults.contains(where: { base($0) == "en" }), availableList.contains("en-US") {
+                defaults.append("en-US")
+            }
+            return defaults
+        }
+        #endif
         let chosen = chosenLanguages
         let available = availableList
         if !chosen.isEmpty {

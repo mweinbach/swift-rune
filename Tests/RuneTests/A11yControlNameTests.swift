@@ -42,6 +42,21 @@ struct A11yControlNameTests {
         }
     }
 
+    @Test func nameAndDescriptionReferencesUseTheAuthoredKeyBytes() throws {
+        let composed = "\u{e9}"
+        let decomposed = "e\u{301}"
+        let view: El<Int> = col().children([
+            text("File name").key(composed, byteExact: true),
+            text("Open file").key(decomposed, byteExact: true),
+            el().key("open").role(.button).labelledBy(decomposed).describedBy(composed),
+        ])
+        for tree in try projections(view) {
+            let control = try #require(tree.children.first { $0.id == "open" })
+            #expect(control.label == "Open file")
+            #expect(control.help == "File name")
+        }
+    }
+
     @Test func leafControlsSuppressOnlyRepeatedContent() throws {
         let roles: [ElementRole] = [.checkbox, .radio, .switchControl, .tab, .menuItem, .menuItemCheckbox, .menuItemRadio, .option]
         let view: El<Int> = col().children(roles.map { role in

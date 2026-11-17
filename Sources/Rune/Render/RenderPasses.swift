@@ -1298,6 +1298,24 @@ public final class LayersPool {
         syncResidentCaches(into: tracker)
     }
 
+    /// Window rest preserves the caches referenced by the last frame's elided geometry.
+    func giveBackForWindowRest(all: Bool) {
+        planRevision &+= 1
+        releaseInUse()
+        spare.removeAll()
+        if managedByPlanner {
+            retainedList.removeAll()
+            if all {
+                for i in targetSlots.indices where targetSlots[i]?.cache == nil {
+                    targetSlots[i] = nil
+                }
+            }
+        } else {
+            retainedList.removeAll { $0.slot.lastUsedFrame != frameNumber }
+        }
+        syncResidentCaches(into: tracker)
+    }
+
     /// Gives back temporary or cached GPU memory (`#819` GPU give-back on window rest / hide).
     ///
     /// - `all == false` (idle rest): trims spare buffers down to 8 MiB and drops retained caches if `!residentCaches`.
@@ -1856,6 +1874,18 @@ public final class BackdropBlurPass {
         originOffset: SIMD2<Float>,
         bindGlobals: (MTLRenderCommandEncoder) -> Void
     ) {
+        encode(device: device, commandBuffer: commandBuffer, source: source, target: target,
+               targetFormat: targetFormat, instance: instance, originOffset: originOffset) { encoder in
+            encoder.setVertexBuffer(instanceBuffer, offset: instanceIndex * MemoryLayout<RenderInstance>.stride, index: 0)
+            bindGlobals(encoder)
+        }
+    }
+
+    func encode(
+        device: MTLDevice, commandBuffer: MTLCommandBuffer, source: MTLTexture, target: MTLTexture,
+        targetFormat: MTLPixelFormat, instance: RenderInstance, originOffset: SIMD2<Float>,
+        bindInputs: (MTLRenderCommandEncoder) -> Void
+    ) {
         let sigma = max(instance.params.x, 0.0)
         if sigma <= 0.0 || instance.fill.w <= 0.0 {
             return
@@ -1993,7 +2023,6 @@ public final class BackdropBlurPass {
             }
         }
 
-        let _ = viewport
         let compPipeline: MTLRenderPipelineState
         switch targetFormat {
         case .rgba16Float:
@@ -2017,8 +2046,7 @@ public final class BackdropBlurPass {
         if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) {
             enc.setScissorRect(MTLScissorRect(x: compX0, y: compY0, width: compX1 - compX0, height: compY1 - compY0))
             enc.setRenderPipelineState(compPipeline)
-            enc.setVertexBuffer(instanceBuffer, offset: instanceIndex * MemoryLayout<RenderInstance>.stride, index: 0)
-            bindGlobals(enc)
+            bindInputs(enc)
             enc.setFragmentTexture(upMips[0], index: 0)
             enc.setFragmentSamplerState(samplerLinear, index: 0)
             enc.setFragmentBytes(&compUniform, length: MemoryLayout<BackdropBlurSchedule.Uniforms>.stride, index: 0)
@@ -2036,17 +2064,38 @@ public enum RenderBatchBind: Equatable, Sendable {
     case glyph(Int)
 }
 
+private protocol MetalAtlasPage {
+    var width: Int { get }
+    var height: Int { get }
+    var texels: [UInt8] { get }
+}
+extension R8Atlas: MetalAtlasPage {}
+extension RGBA8Atlas: MetalAtlasPage {}
+
+private extension Array {
+    func sharesStorage(with other: Self) -> Bool {
+        count == other.count && withUnsafeBufferPointer { lhs in
+            other.withUnsafeBufferPointer { rhs in lhs.baseAddress == rhs.baseAddress }
+        }
+    }
+}
+
 public final class AtlasUploader {
     public private(set) var glyphTexture: MTLTexture?
     public private(set) var glyphGeneration: UInt64 = 0
     public private(set) var glyphSize: SIMD2<Int> = .zero
 
+    public private(set) var glyphTextures: [MTLTexture] = []
+    private(set) var glyphUploadBytes: UInt64 = 0
+    private var lastGlyphUploadRegion: MTLRegion?
+    private static let emptyGlyphPage = R8Atlas()
+    private static let emptyImagePage = RGBA8Atlas()
     public private(set) var imageTexture: MTLTexture?
     public private(set) var imageTextures: [MTLTexture] = []
     public private(set) var imageRevision: UInt64 = 0
     public private(set) var imageSize: SIMD2<Int> = .zero
     private(set) var lastImageUploadRegion: MTLRegion?
-    private var holdsRuntimeImage = false
+    private(set) var imageUploadBytes: UInt64 = 0
     private weak var atlasRuntime: ResidentLayerTracker?
     private var hasAtlasRuntime = false
     private struct AtlasReader {
@@ -2064,9 +2113,27 @@ public final class AtlasUploader {
             }
         }
     }
-    private var glyphReaders: [AtlasReader] = []
-    private var imageReaders: [AtlasReader] = []
-    private var imagePagesRevision: UInt64?
+    private var glyphUploads: [PageUpload] = []
+    /// Keeps readers with the specific texture they reference, even if another page is replaced.
+    private final class PageUpload {
+        let texture: MTLTexture
+        var readers: [AtlasReader] = []
+        var revision: UInt64?
+        var lastChange: (from: UInt64, to: UInt64, region: MTLRegion)?
+        // Manually constructed frames may change their bytes without incrementing the revision.
+        var manualPixels: [UInt8]?
+        var deferred = false
+
+        init(texture: MTLTexture) { self.texture = texture }
+
+        func matches(revision: UInt64, runtime: Bool, pixels: [UInt8]) -> Bool {
+            guard self.revision == revision else { return false }
+            guard let manualPixels else { return runtime }
+            guard !runtime else { return false }
+            return manualPixels.sharesStorage(with: pixels)
+        }
+    }
+    private var imageUploads: [PageUpload] = []
 
     /// Each runtime counts revisions locally. A new runtime may supply different pixels
     /// at the same revision while outstanding commands still use the previous textures.
@@ -2077,17 +2144,20 @@ public final class AtlasUploader {
         glyphTexture = nil
         imageTexture = nil
         imageTextures.removeAll()
-        imagePagesRevision = nil
-        glyphReaders.removeAll()
-        imageReaders.removeAll()
+        imageUploads.removeAll()
+        glyphUploads.removeAll()
+        glyphTextures.removeAll()
         lastImageUploadRegion = nil
-        holdsRuntimeImage = false
     }
 
     public private(set) var imageBatches: [(Range<Int>, RenderBatchBind)] = []
     public private(set) var effects: [(Int, RenderInstance)] = []
     public private(set) var batchRuns: UInt64 = 0
     private var lastBatchCount: Int = -1
+    private var lastBatchInstances: [RenderInstance]?
+    private var lastPageCounts = SIMD2<Int>.zero
+    private(set) var usesMissingImagePage = false
+    private var standInImage: MTLTexture?
     private var lastBatchKinds: [UInt32] = []
     private var lastBatchPages: [Float] = []
 
@@ -2101,11 +2171,6 @@ public final class AtlasUploader {
             return reader.status != .completed && reader.status != .error
         }
 
-        func contains(_ other: [RenderInstance]) -> Bool {
-            instances.count == other.count && instances.withUnsafeBufferPointer { prior in
-                other.withUnsafeBufferPointer { $0.baseAddress == prior.baseAddress }
-            }
-        }
     }
 
     private var instanceUploads: [InstanceUpload] = []
@@ -2131,7 +2196,7 @@ public final class AtlasUploader {
     ) -> MTLBuffer? {
         let available: (InstanceUpload) -> Bool = { $0.buffer.device === device && !$0.inUse }
         if let index = instanceUploads.firstIndex(where: {
-            $0.buffer.device === device && ($0.reader === command || !$0.inUse) && $0.contains(instances)
+            $0.buffer.device === device && ($0.reader === command || !$0.inUse) && $0.instances.sharesStorage(with: instances)
         }) {
             instanceUploads[index].reader = command
             return instanceUploads[index].buffer
@@ -2163,108 +2228,66 @@ public final class AtlasUploader {
         return buffer
     }
 
-    /// Keeps the previous glyph mask available to commands already encoded against it.
+    func glyphPageChange(index: Int) -> (from: UInt64, to: UInt64, region: MTLRegion)? {
+        guard glyphUploads.indices.contains(index) else { return nil }
+        return glyphUploads[index].lastChange
+    }
+
     public func syncGlyphAtlas(device: MTLDevice, atlas: R8Atlas, generation: UInt64) -> MTLTexture? {
-        guard MetalTextureLimits.contains(width: atlas.width, height: atlas.height, on: device) else { return nil }
-        let pixels: [UInt8] = atlas.texels.isEmpty && atlas.width == 1 && atlas.height == 1 ? [0] : atlas.texels
-        guard pixels.count == atlas.width * atlas.height else { return nil }
-        let needsCreate = glyphTexture?.device.registryID != device.registryID || glyphSize != SIMD2(atlas.width, atlas.height)
-            || (glyphGeneration != generation && glyphReaders.contains(where: \.pending))
-        if needsCreate {
-            let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .r8Unorm,
-                width: atlas.width,
-                height: atlas.height,
-                mipmapped: false
-            )
-            desc.usage = [.shaderRead]
-            #if os(macOS)
-            desc.storageMode = .managed
-            #else
-            desc.storageMode = .shared
-            #endif
-            guard let tex = device.makeTexture(descriptor: desc) else { return nil }
-            tex.label = "rune.atlas.glyphs"
-            glyphTexture = tex
-            glyphSize = SIMD2<Int>(atlas.width, atlas.height)
-            glyphGeneration = 0
-            glyphReaders.removeAll(keepingCapacity: true)
+        try? syncGlyphPages(device: device, frame: RenderFrame(width: 1, height: 1, glyphs: atlas, glyphGeneration: generation)).first
+    }
+
+    /// A deferred page receives its base bitmap here; the mask compute pass fills the reserved rectangles.
+    func syncGlyphPages(device: MTLDevice, frame: RenderFrame, deferred: Bool = false) throws -> [MTLTexture] {
+        let hasPages = !frame.baseGlyphPages.isEmpty
+        let pages: [R8Atlas]
+        if deferred {
+            pages = hasPages ? frame.baseGlyphPages : [frame.baseGlyphAtlas]
+        } else {
+            pages = hasPages ? frame.glyphPages : [frame.glyphs]
         }
-        guard let tex = glyphTexture else { return nil }
-        if needsCreate || glyphGeneration != generation {
-            pixels.withUnsafeBytes { raw in
-                if let base = raw.baseAddress {
-                    tex.replace(
-                        region: MTLRegionMake2D(0, 0, atlas.width, atlas.height),
-                        mipmapLevel: 0,
-                        withBytes: base,
-                        bytesPerRow: atlas.width
-                    )
-                }
-            }
-            glyphGeneration = generation
+        let plans = deferred ? (frame.glyphPageFills.isEmpty ? frame.maskFills.map { [$0] } ?? [] : frame.glyphPageFills) : []
+        try Self.updatePages(device: device, pages: pages, empty: Self.emptyGlyphPage,
+                             kind: .r8Unorm, namedPages: hasPages, revision: frame.glyphGeneration,
+                             pageRevisions: deferred ? frame.rawGlyphPageRevisions : frame.glyphPageRevisions,
+                             patches: deferred ? frame.rawGlyphPagePatches : frame.glyphPagePatches, deferredPlans: plans, fallbackPatch: nil,
+                             slots: &glyphUploads, textures: &glyphTextures,
+                             bytesWritten: &glyphUploadBytes, lastRegion: &lastGlyphUploadRegion)
+        glyphTexture = glyphTextures[0]
+        glyphSize = SIMD2(glyphTextures[0].width, glyphTextures[0].height)
+        glyphGeneration = frame.glyphGeneration
+        return glyphTextures
+    }
+
+    /// Rust's base bind group uses a transparent stand-in for an unallocated image page.
+    func missingImageTexture(device: MTLDevice) throws -> MTLTexture {
+        if let standInImage, standInImage.device.registryID == device.registryID { return standInImage }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm_srgb, width: 1, height: 1, mipmapped: false)
+        desc.usage = [.shaderRead]
+        #if os(macOS)
+        desc.storageMode = .managed
+        #else
+        desc.storageMode = .shared
+        #endif
+        guard let texture = device.makeTexture(descriptor: desc) else {
+            throw MetalRenderer.RendererError.textureAllocationFailed(resource: "Missing image page", width: 1, height: 1)
         }
-        return tex
+        var clear: UInt32 = 0
+        texture.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &clear, bytesPerRow: 4)
+        standInImage = texture
+        return texture
     }
 
     public func syncImageAtlas(device: MTLDevice, atlas: RGBA8Atlas, revision: UInt64 = 1) -> MTLTexture? {
-        syncImageAtlas(device: device, atlas: atlas, revision: revision, patch: nil)
+        try? requiredImagePages(device: device, pages: [], fallback: atlas, revision: revision, patch: nil).first
     }
 
-    /// A CPU texture replacement must preserve texels already referenced by an unfinished GPU command.
+    /// A command can remain unsubmitted across a subsequent frame preparation.
     func atlasesRead(by command: MTLCommandBuffer) {
-        AtlasReader.record(command, in: &glyphReaders)
-        AtlasReader.record(command, in: &imageReaders)
-    }
-
-    private func syncImageAtlas(device: MTLDevice, atlas: RGBA8Atlas, revision: UInt64, patch: ImageAtlasPatch?) -> MTLTexture? {
-        guard Self.validImageAtlas(atlas, on: device) else { return nil }
-        let isRuntimeImage = patch != nil
-        let changed = revision != imageRevision || isRuntimeImage != holdsRuntimeImage
-        let needsCreate = imageTexture?.device.registryID != device.registryID || imageSize != SIMD2(atlas.width, atlas.height)
-            || (changed && imageReaders.contains(where: \.pending))
-        if needsCreate {
-            let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .rgba8Unorm_srgb,
-                width: atlas.width,
-                height: atlas.height,
-                mipmapped: false
-            )
-            desc.usage = [.shaderRead]
-            #if os(macOS)
-            desc.storageMode = .managed
-            #else
-            desc.storageMode = .shared
-            #endif
-            guard let tex = device.makeTexture(descriptor: desc) else { return nil }
-            tex.label = "rune.atlas.images"
-            imageTexture = tex
-            imageSize = SIMD2<Int>(atlas.width, atlas.height)
+        for upload in glyphUploads { AtlasReader.record(command, in: &upload.readers) }
+        for upload in imageUploads {
+            AtlasReader.record(command, in: &upload.readers)
         }
-        guard let tex = imageTexture else { return nil }
-        if (needsCreate || changed) && !atlas.texels.isEmpty {
-            let region: MTLRegion
-            if !needsCreate, holdsRuntimeImage, let patch, patch.fromRevision == imageRevision {
-                let e = patch.edges
-                region = MTLRegionMake2D(e.x, e.y, e.z - e.x, e.w - e.y)
-            } else {
-                region = MTLRegionMake2D(0, 0, atlas.width, atlas.height)
-            }
-            atlas.texels.withUnsafeBytes { raw in
-                if let base = raw.baseAddress {
-                    tex.replace(
-                        region: region,
-                        mipmapLevel: 0,
-                        withBytes: base.advanced(by: (region.origin.y * atlas.width + region.origin.x) * 4),
-                        bytesPerRow: atlas.width * 4
-                    )
-                }
-            }
-            imageRevision = revision
-            holdsRuntimeImage = isRuntimeImage
-            lastImageUploadRegion = region
-        }
-        return tex
     }
 
     public func syncImagePages(
@@ -2276,71 +2299,113 @@ public final class AtlasUploader {
         (try? requiredImagePages(device: device, pages: pages, fallback: fallback, revision: revision, patch: nil)) ?? []
     }
 
-    private static func validImageAtlas(_ atlas: RGBA8Atlas, on device: MTLDevice) -> Bool {
-        (try? MetalTextureLimits.validateImage(atlas, resource: "Image atlas", on: device)) != nil
-    }
-
     func requiredImagePages(
-        device: MTLDevice, pages: [RGBA8Atlas], fallback: RGBA8Atlas, revision: UInt64, patch: ImageAtlasPatch?
+        device: MTLDevice, pages: [RGBA8Atlas], fallback: RGBA8Atlas, revision: UInt64, patch: ImageAtlasPatch?,
+        pageRevisions: [UInt64] = [], pagePatches: [ImageAtlasPatch?] = []
     ) throws -> [MTLTexture] {
         let atlases = pages.isEmpty ? [fallback] : pages
-        for (index, atlas) in atlases.enumerated() {
-            let resource = pages.isEmpty ? "Image atlas" : "Image atlas page \(index)"
-            try MetalTextureLimits.validateImage(atlas, resource: resource, on: device)
-        }
+        try Self.updatePages(device: device, pages: atlases, empty: Self.emptyImagePage,
+                             kind: .rgba8Unorm_srgb, namedPages: !pages.isEmpty, revision: revision,
+                             pageRevisions: pageRevisions, patches: pagePatches, deferredPlans: [], fallbackPatch: patch,
+                             slots: &imageUploads, textures: &imageTextures, bytesWritten: &imageUploadBytes,
+                             lastRegion: &lastImageUploadRegion)
+        imageTexture = imageTextures[0]
+        imageSize = SIMD2(imageTextures[0].width, imageTextures[0].height)
+        imageRevision = revision
+        return imageTextures
+    }
 
-        // Allocate every secondary page before overwriting any texture from the previous set.
-        let revisionChanged = imagePagesRevision != revision
-        let preserveReaders = revisionChanged && imageReaders.contains(where: \.pending)
-        var secondary: [(texture: MTLTexture, upload: Bool)] = []
-        for index in atlases.indices.dropFirst() {
-            let page = atlases[index]
-            if imageTextures.indices.contains(index) {
-                let texture = imageTextures[index]
-                if texture.device.registryID == device.registryID, texture.width == page.width,
-                   texture.height == page.height, !preserveReaders {
-                    secondary.append((texture, revisionChanged))
+    private static func updatePages<Page: MetalAtlasPage>(
+        device: MTLDevice, pages atlases: [Page], empty: Page, kind: MTLPixelFormat, namedPages: Bool, revision: UInt64,
+        pageRevisions: [UInt64], patches: [ImageAtlasPatch?], deferredPlans: [OutlineMaskPlan?], fallbackPatch: ImageAtlasPatch?,
+        slots: inout [PageUpload], textures: inout [MTLTexture], bytesWritten: inout UInt64, lastRegion: inout MTLRegion?
+    ) throws {
+        let glyph = kind == .r8Unorm
+        let channels = glyph ? 1 : 4
+        let name = glyph ? "Glyph atlas" : "Image atlas"
+        let versioned = pageRevisions.count == atlases.count
+        let runtime = versioned || (!namedPages && fallbackPatch != nil)
+        var uploads = slots
+        if uploads.count > atlases.count { uploads.removeLast(uploads.count - atlases.count) }
+        var pending: [(index: Int, region: MTLRegion)] = []
+        var replaced = uploads.count != slots.count
+
+        // Validate and reserve all pages before changing any previously published texture.
+        for (index, input) in atlases.enumerated() {
+            let resource = namedPages ? "\(name) page \(index)" : name
+            try MetalTextureLimits.validate(width: input.width, height: input.height, resource: resource, on: device)
+            let allowsEmpty = namedPages || (glyph && input.width == 1 && input.height == 1)
+            let expected = input.width * input.height * channels
+            guard input.texels.count == expected || (allowsEmpty && input.texels.isEmpty) else {
+                throw MetalTextureSizeError.byteCount(resource: resource, expected: expected, actual: input.texels.count)
+            }
+            let atlas = input.texels.isEmpty ? empty : input
+            let current = uploads.indices.contains(index) ? uploads[index] : nil
+            let pageRevision = versioned ? pageRevisions[index] : revision
+            let deferred = deferredPlans.indices.contains(index) && deferredPlans[index] != nil
+            var region = MTLRegionMake2D(0, 0, atlas.width, atlas.height)
+            if let current, current.texture.device.registryID == device.registryID,
+               current.texture.width == atlas.width, current.texture.height == atlas.height {
+                if current.deferred == deferred, current.matches(revision: pageRevision, runtime: runtime, pixels: atlas.texels) { continue }
+                if !current.readers.contains(where: \.pending) {
+                    let hint = versioned && patches.indices.contains(index) ? patches[index] : (!namedPages ? fallbackPatch : nil)
+                    if current.deferred == deferred, current.manualPixels == nil, let hint, hint.fromRevision == current.revision {
+                        let e = hint.edges
+                        if e.x >= 0, e.y >= 0, e.x < e.z, e.y < e.w, e.z <= atlas.width, e.w <= atlas.height {
+                            region = MTLRegionMake2D(e.x, e.y, e.z - e.x, e.w - e.y)
+                        }
+                    }
+                    pending.append((index, region))
                     continue
                 }
             }
             let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .rgba8Unorm_srgb, width: page.width, height: page.height, mipmapped: false
+                pixelFormat: kind, width: atlas.width, height: atlas.height, mipmapped: false
             )
-            desc.usage = [.shaderRead]
+            desc.usage = glyph ? [.shaderRead, .renderTarget] : [.shaderRead]
             #if os(macOS)
             desc.storageMode = .managed
             #else
             desc.storageMode = .shared
             #endif
             guard let texture = device.makeTexture(descriptor: desc) else {
-                throw MetalRenderer.RendererError.textureAllocationFailed(resource: "Image atlas page \(index)", width: page.width, height: page.height)
+                throw MetalRenderer.RendererError.textureAllocationFailed(resource: resource, width: atlas.width, height: atlas.height)
             }
-            texture.label = "rune.atlas.images.\(index)"
-            secondary.append((texture, true))
+            texture.label = "rune.\(name).\(index)"
+            let upload = PageUpload(texture: texture)
+            if current == nil { uploads.append(upload) } else { uploads[index] = upload }
+            replaced = true
+            pending.append((index, region))
         }
 
-        let first = atlases[0]
-        guard let firstTexture = syncImageAtlas(device: device, atlas: first, revision: revision, patch: pages.isEmpty ? patch : nil) else {
-            let resource = pages.isEmpty ? "Image atlas" : "Image atlas page 0"
-            throw MetalRenderer.RendererError.textureAllocationFailed(resource: resource, width: first.width, height: first.height)
-        }
-        for (page, pending) in zip(atlases.dropFirst(), secondary) where pending.upload {
-            page.texels.withUnsafeBytes { raw in
-                if let base = raw.baseAddress {
-                    pending.texture.replace(
-                        region: MTLRegionMake2D(0, 0, page.width, page.height), mipmapLevel: 0,
-                        withBytes: base, bytesPerRow: page.width * 4
-                    )
-                }
+        for (index, region) in pending {
+            let atlas = atlases[index].texels.isEmpty ? empty : atlases[index]
+            let upload = uploads[index]
+            atlas.texels.withUnsafeBytes { bytes in
+                guard let base = bytes.baseAddress else { return }
+                upload.texture.replace(
+                    region: region, mipmapLevel: 0,
+                    withBytes: base.advanced(by: (region.origin.y * atlas.width + region.origin.x) * channels),
+                    bytesPerRow: atlas.width * channels
+                )
             }
+            let next = versioned ? pageRevisions[index] : revision
+            upload.lastChange = upload.revision.map { ($0, next, region) }
+            upload.revision = next
+            upload.manualPixels = runtime ? nil : atlas.texels
+            upload.deferred = deferredPlans.indices.contains(index) && deferredPlans[index] != nil
+            bytesWritten &+= UInt64(region.size.width * region.size.height * channels)
+            lastRegion = region
         }
-        imageTextures = [firstTexture] + secondary.map(\.texture)
-        imagePagesRevision = revision
-        return imageTextures
+        if replaced {
+            slots = uploads
+            textures = uploads.map(\.texture)
+        }
     }
 
     /// Shrinks oversized staging buffers back down (`#819` GPU give-back).
     public func trimUploads() {
+        lastBatchInstances = nil
         var keptBytes = 0
         instanceUploads.removeAll { upload in
             guard !upload.inUse else { return false }
@@ -2352,6 +2417,7 @@ public final class AtlasUploader {
 
     public func forgetInstances() {
         instanceUploads.removeAll { !$0.inUse }
+        lastBatchInstances = nil
         lastBatchCount = -1
         lastBatchKinds.removeAll(keepingCapacity: true)
         lastBatchPages.removeAll(keepingCapacity: true)
@@ -2366,54 +2432,55 @@ public final class AtlasUploader {
         imagePageCount: Int = 1
     ) {
         let count = instances.count
-        var kinds: [UInt32] = []
-        var pages: [Float] = []
-        kinds.reserveCapacity(count)
-        pages.reserveCapacity(count)
-        var paramsChanged = (lastBatchCount < 0 || count != lastBatchCount)
-        var newEffects: [(Int, RenderInstance)] = []
-
-        for (idx, inst) in instances.enumerated() {
-            let k = UInt32(max(0, Int(inst.params.y.rounded())))
-            let p: Float = (k == UInt32(KIND_GLYPH)) ? inst.params.z : ((k == UInt32(KIND_IMAGE)) ? inst.params.x : 0.0)
-            kinds.append(k)
-            pages.append(p)
-            if !paramsChanged && (lastBatchKinds[idx] != k || lastBatchPages[idx] != p) {
-                paramsChanged = true
-            }
-            if k == UInt32(KIND_EFFECT) || k == UInt32(KIND_BACKDROP_BLUR) {
-                newEffects.append((idx, inst))
-            }
-        }
-        effects = newEffects
-
-        guard paramsChanged else {
+        let pageCounts = SIMD2(glyphPageCount, imagePageCount)
+        // prepare and draw normally share the same immutable Swift array, including
+        // across multiple surfaces or offscreen ranges from this frame.
+        if pageCounts == lastPageCounts, lastBatchInstances?.sharesStorage(with: instances) == true {
             return
         }
-
+        lastBatchInstances = instances
+        var changed = lastBatchCount != count || pageCounts != lastPageCounts
+        if lastBatchCount != count {
+            lastBatchKinds = Array(repeating: 0, count: count)
+            lastBatchPages = Array(repeating: 0, count: count)
+        }
+        effects.removeAll(keepingCapacity: true)
+        for (idx, inst) in instances.enumerated() {
+            let kind = UInt32(exactly: max(0, inst.params.y.rounded())) ?? UInt32.max
+            let page = kind == UInt32(KIND_IMAGE) ? inst.params.x : (kind == UInt32(KIND_GLYPH) ? inst.params.z : 0)
+            if lastBatchKinds[idx] != kind || lastBatchPages[idx] != page {
+                changed = true
+                lastBatchKinds[idx] = kind
+                lastBatchPages[idx] = page
+            }
+            if kind == UInt32(KIND_EFFECT) || kind == UInt32(KIND_BACKDROP_BLUR) {
+                effects.append((idx, inst))
+            }
+        }
+        guard changed else { return }
         batchRuns &+= 1
         lastBatchCount = count
-        lastBatchKinds = kinds
-        lastBatchPages = pages
+        lastPageCounts = pageCounts
 
+        usesMissingImagePage = false
         imageBatches.removeAll(keepingCapacity: true)
         guard count > 0 else { return }
 
         var curBind: RenderBatchBind = .image(0)
         var batchStart = 0
         for idx in 0..<count {
-            let k = kinds[idx]
+            let k = lastBatchKinds[idx]
             let isBatchedKind = (k == UInt32(KIND_GLYPH) || k == UInt32(KIND_IMAGE) || k == UInt32(KIND_LAYER) || k == UInt32(KIND_EFFECT) || k == UInt32(KIND_BACKDROP_BLUR))
             if !isBatchedKind {
                 continue
             }
             let wanted: RenderBatchBind?
             if k == UInt32(KIND_IMAGE) {
-                let raw = max(0, Int(pages[idx].rounded()))
-                let clamped = imagePageCount > 0 ? min(raw, imagePageCount - 1) : raw
-                wanted = .image(clamped)
+                let raw = Int(exactly: max(0, lastBatchPages[idx]).rounded(.towardZero)) ?? Int.max
+                if raw >= imagePageCount { usesMissingImagePage = true }
+                wanted = .image(raw)
             } else if k == UInt32(KIND_GLYPH) {
-                let g = max(0, Int(pages[idx].rounded()))
+                let g = Int(exactly: max(0, lastBatchPages[idx]).rounded(.towardZero)) ?? Int.max
                 if g == 0 {
                     switch curBind {
                     case .image:
@@ -2422,8 +2489,7 @@ public final class AtlasUploader {
                         wanted = .image(0)
                     }
                 } else {
-                    let clamped = glyphPageCount > 0 ? min(g - 1, glyphPageCount - 1) : (g - 1)
-                    wanted = .glyph(clamped)
+                    wanted = .glyph(g - 1)
                 }
             } else {
                 wanted = nil

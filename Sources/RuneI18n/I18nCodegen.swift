@@ -1,4 +1,7 @@
 import Foundation
+#if os(WASI)
+import WASILibc
+#endif
 
 /// A locale entry in `locales.json` for `I18nCodegen`.
 public struct I18nManifestLocale: Sendable, Equatable, Codable {
@@ -96,7 +99,17 @@ public enum I18nCodegen {
         let result = try compile(from: directory, enumName: enumName, strict: strict)
         let parent = outputFile.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        #if os(WASI)
+        // Stage beside the destination so a single preopened directory covers the rename.
+        let staged = parent.appendingPathComponent(".rune-i18n-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: staged) }
+        try Data(result.swiftSource.utf8).write(to: staged, options: .withoutOverwriting)
+        guard rename(staged.path, outputFile.path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        #else
         try Data(result.swiftSource.utf8).write(to: outputFile, options: .atomic)
+        #endif
         return result
     }
 

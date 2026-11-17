@@ -38,7 +38,6 @@ internal struct KitRuntimeHooksState {
     var isDispatchingByKeys: Bool = false
     var isDispatchingFocusLost: Bool = false
     var pressRepeat = PressRepeatMachine()
-    var pressRepeatPayload: PressRepeatPayload? = nil
     var requestedDragRepeatDelay: Double? = nil
     var pendingTxFocusVisible: Bool? = nil
     var isKeyRepeat: Bool = false
@@ -323,24 +322,17 @@ extension Runtime {
         return didMarkDirty
     }
 
-    internal func armKitDragRepeatIfRequested(path: String, windowPos: Vec2, mods: Mods, button: PointerButton, now: Double) {
+    internal func armKitDragRepeatIfRequested(path: String, now: Double) {
         guard let delay = kitHooks.requestedDragRepeatDelay else {
             return
         }
         kitHooks.requestedDragRepeatDelay = nil
         guard pressedPath == path || activeDrag?.path == path else { return }
-        kitHooks.pressRepeatPayload = PressRepeatPayload(
-            path: path,
-            windowPos: windowPos,
-            mods: mods,
-            button: button
-        )
         _ = kitHooks.pressRepeat.step(.arm(path: path, due: now + delay))
     }
 
     internal func endKitPressRepeat() {
         _ = kitHooks.pressRepeat.step(.end)
-        kitHooks.pressRepeatPayload = nil
         kitHooks.requestedDragRepeatDelay = nil
     }
 
@@ -354,8 +346,6 @@ extension Runtime {
             guard case .fire(let path) = effect,
                   let drag = activeDrag,
                   drag.path == path,
-                  let rep = kitHooks.pressRepeatPayload,
-                  rep.path == path,
                   let idx = nodeByPath[drag.path],
                   let onDrag = flatNodes[idx].el.handlers.onDrag else {
                 continue
@@ -363,19 +353,20 @@ extension Runtime {
             let sx = abs(drag.startScale.x) > 1e-6 ? drag.startScale.x : 1.0
             let sy = abs(drag.startScale.y) > 1e-6 ? drag.startScale.y : 1.0
             let d = Drag(
-                window: rep.windowPos,
-                local: Vec2((rep.windowPos.x - drag.startElementOrigin.x) / sx, (rep.windowPos.y - drag.startElementOrigin.y) / sy),
-                delta: Vec2(rep.windowPos.x - drag.startWindow.x, rep.windowPos.y - drag.startWindow.y),
+                window: pointerPosition,
+                local: Vec2((pointerPosition.x - drag.startElementOrigin.x) / sx, (pointerPosition.y - drag.startElementOrigin.y) / sy),
+                delta: Vec2(pointerPosition.x - drag.startWindow.x, pointerPosition.y - drag.startWindow.y),
                 startLocal: drag.startLocal,
                 size: drag.elementSize,
                 clicks: drag.clicks,
-                mods: rep.mods
+                mods: drag.mods,
+                screen: screenPixels(at: pointerPosition)
             )
             let prevRepeat = slice2State.dragRepeatFiringNow
             let prevMods = slice2State.currentMods
             let prevTime = slice2State.currentInputTime
             slice2State.dragRepeatFiringNow = true
-            slice2State.currentMods = rep.mods
+            slice2State.currentMods = drag.mods
             slice2State.currentInputTime = now
             defer {
                 slice2State.dragRepeatFiringNow = prevRepeat
@@ -387,7 +378,7 @@ extension Runtime {
             onDrag(&state, d, &tx)
             if !tx.askedMotion { tx.instant() }
             applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
-            armKitDragRepeatIfRequested(path: drag.path, windowPos: rep.windowPos, mods: rep.mods, button: drag.button, now: now)
+            armKitDragRepeatIfRequested(path: drag.path, now: now)
         }
     }
 

@@ -504,8 +504,8 @@ struct ElShellSliceTests {
         #expect(outlinedNode.pressScaleFactor == 0.95)
         #expect(outlinedNode.hoverMotionSpec != nil)
         let blurNoneNode: El<Void> = col().blurMotion(.none)
-        #expect(blurNoneNode.runtimeExtras.values.contains { ($0 as? Bool) == true })
-        #expect(outlinedNode.runtimeExtras.values.contains { ($0 as? Bool) == false })
+        #expect(blurNoneNode.blurMotionOverride?.animation.curve == .instant)
+        #expect(outlinedNode.blurMotionOverride?.animation.curve == Curve.from(MotionTokens.SNAPPY))
     }
 
     @Test("dim applies only to existing children without paint-time propagation; layerOpacity opens one layer for subtrees")

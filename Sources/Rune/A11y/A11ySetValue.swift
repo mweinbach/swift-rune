@@ -72,8 +72,18 @@ public struct ElementA11yInput: Sendable, Equatable {
     /// It steps (`focus.step.is_some()`).
     public var steps: Bool
     internal var keepsControlContent = false
+    internal var scrolls = false
     internal var isDefaultButton = false
     internal var labelledBy: String?
+    internal var describedBy: String?
+    internal var description: String?
+    internal var modalMember: Bool?
+    internal var explicitFocus = false
+    internal var rolePressable = false
+    internal var hasImage = false
+    internal var hasTerminalGrid = false
+    internal var explicitInert = false
+    internal var isModal = false
     public var range: A11yRange?
 
     public init(isInput: Bool, editable: Bool, multiline: Bool, pressable: Bool, steps: Bool, range: A11yRange?) {
@@ -81,22 +91,34 @@ public struct ElementA11yInput: Sendable, Equatable {
         self.editable = editable
         self.multiline = multiline
         self.pressable = pressable
+        rolePressable = pressable
         self.steps = steps
         self.range = range
     }
 
-    internal init<State>(_ el: El<State>) {
+    internal init<State>(_ el: El<State>, edit: TextEdit? = nil, modalMember: Bool? = nil) {
         self.init(
             isInput: el.handlers.editLens != nil,
             editable: el.hasEditAccess,
-            multiline: el.isMultilineField,
+            multiline: edit?.multiline ?? el.isMultilineField,
             pressable: el.handlers.onClick != nil || el.handlers.onClickPress != nil,
             steps: el.handlers.onStep != nil,
             range: el.a11yRange
         )
-        keepsControlContent = el.keepsControlContent
+        let primaryHandler = el.a11yHasPrimaryHandler
+        hasTerminalGrid = el.terminalGridPayload != nil
+        keepsControlContent = primaryHandler || hasTerminalGrid || !el.textLinks.isEmpty
+        scrolls = !el.layout.scrollAxes.isEmpty
         isDefaultButton = el.isDefaultButton && AccessibilityRoleRules.role(for: el, focusable: el.focusable && !el.a11yDisabled) == .button
         labelledBy = el.a11yLabelledBy
+        describedBy = el.a11yDescribedBy
+        description = el.a11yDescription
+        self.modalMember = modalMember
+        explicitInert = el.isInert
+        explicitFocus = el.explicitlyFocusable
+        rolePressable = primaryHandler && !el.a11yOwnsKeys
+        hasImage = el.pixelsPayload != nil || el.imagePayload != nil || el.surfacePayload != nil
+        isModal = el.isModal
     }
 }
 
@@ -118,6 +140,19 @@ public extension El {
 }
 
 public extension Runtime {
+    /// Native paint defers accessibility records until a caller inspects the frame.
+    /// Synthetic text ranges and departing nodes keep the records captured at paint.
+    internal func completeNativeAccessibilityRecord(_ info: inout ElementInfo) {
+        guard !info.exiting, let index = nodeByPath[info.path] else { return }
+        let el = flatNodes[index].el
+        var input = info.a11yInput ?? ElementA11yInput(el)
+        input.modalMember = activeModalPath == nil ? nil : modalMemberPaths.contains(info.path)
+        info.a11yInput = input
+        info.modalAncestor = activeModalPath != nil && modalAncestorPaths.contains(info.path)
+        info.focusable = nodeTakesFocus(el)
+        info.label = el.a11yLabel
+    }
+
     /// Asks what an assistive client would of the element keyed (or at path) `id`, with the data
     /// the request carries (`Runtime::accessibility_action(key, action, data)`). Returns whether
     /// anything ran. `SetValue` needs `value`; other actions ignore it.
@@ -187,7 +222,7 @@ public extension Runtime {
 
     /// Native adapters send the full path. An author key remains available to direct callers.
     internal func a11yTargetIndex(_ id: String) -> Int? {
-        nodeByPath[id] ?? flatNodes.firstIndex(where: { $0.key == id })
+        nodeByPath[id] ?? flatNodes.firstIndex(where: { matchesAuthoredKey($0.key, id) })
     }
 
     /// Whether an assistive action may reach node `idx` (`a11y_action`: `allowed(i)` — outside any
@@ -254,7 +289,20 @@ public extension Runtime {
         // `(Increment | Decrement, None) if steps`.
         case .increment, .decrement: return el.handlers.onStep != nil
         case .setValue: return el.hasEditAccess || el.handlers.onStep != nil
+        case .scrollIntoView: return true
         }
+    }
+
+    /// A keyboard focus move or a text field takes the selection's keyboard ownership.
+    /// A pointer highlighting another row leaves the selection alone.
+    internal func assignFocusPath(_ path: String?, keyboard: Bool) {
+        if let path, focusedPath != path, selectionState.coordinator.phase.selection != nil,
+           keyboard || focusedInputElement(at: path)?.handlers.editLens != nil,
+           let held = textSelection(), held.path != path {
+            selectionState.edgeScroll.stop()
+            clearTextSelectionPhase()
+        }
+        focusedPath = path
     }
 
     /// Moves focus to `path` (or clears it), as keyboard focus when `keyboard`
@@ -266,7 +314,7 @@ public extension Runtime {
         handleKitFocusTransition(prevNode: prevNode, newPath: path, at: now)
         finishPreeditIfNeeded(forPath: focusedPath, at: now)
         imeReset = true
-        focusedPath = path
+        assignFocusPath(path, keyboard: keyboard)
         focusedKey = path.flatMap { nodeByPath[$0] }.flatMap { flatNodes[$0].key }
         focusKeyboard = keyboard
         focusVisible = keyboard && path != nil
@@ -288,8 +336,6 @@ public extension Runtime {
         let prevEdit = editLens.get(state)
         var edit = prevEdit
         let stateRevealed = edit.isRevealed
-        // `edit.set_single_line(single_line)`: the field's El decides one line or many.
-        edit.multiline = !el.isSingleLineInput
         if el.isSecure && !edit.isSecure { edit.isSecure = true }
         if let rev = el.revealedOverride { edit.isRevealed = rev }
         apply(&edit)

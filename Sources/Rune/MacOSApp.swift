@@ -83,6 +83,7 @@ public enum MacOSApp {
             view: appBuilder.view
         )
         runtime.windowTitle = appBuilder.title
+        runtime.recordEvents = false
         runtime.urlOpener.headless = false
         runtime.srgbBlend = appBuilder.srgbBlendEnabled
         runtime.fontSmoothing = appBuilder.fontSmoothingMode
@@ -119,8 +120,6 @@ public enum MacOSApp {
             windowed: true
         )
 
-        let renderer = try MetalRenderer()
-        DisplayGpuAdapter(backend: .metal, device: renderer.device.name).reportIfRequested()
         let reports = (appBuilder.onFrameEncodedHook != nil || appBuilder.onFrameDrawnHook != nil || appBuilder.onFrameInspectHook != nil)
             ? FrameReports<State>(
                 onFrameEncoded: appBuilder.onFrameEncodedHook,
@@ -128,10 +127,11 @@ public enum MacOSApp {
                 onInspectDrawn: appBuilder.onFrameInspectHook
             )
             : nil
-        let meter = appBuilder.devStatsReceiver != nil ? SurfaceMeter(name: appBuilder.title) : nil
+        let meter = SurfaceMeter(name: appBuilder.title)
 
         let opts = appBuilder.windowOptionsValue
         let initiallyHidden = appBuilder.isWindowless || !opts.visible
+        let launcher = appBuilder.macosWindowValue.launcher
         let appMin = appBuilder.minSize.map { ($0.x, $0.y) }
         let hostMin = appBuilder.isFitContentHeight ? opts.fitMinSize(appMin: appMin) : appMin
         let (minSize, maxSize) = opts.sizeLimits(appMin: hostMin)
@@ -140,6 +140,8 @@ public enum MacOSApp {
             chrome: appBuilder.chromeStyle, titlebar: appBuilder.customTitlebar,
             options: opts, macos: appBuilder.macosWindowValue, openAs: .normal
         )
+        let renderer = try MetalRenderer(device: MetalAdapterPicker.forScreen(window.screen))
+        DisplayGpuAdapter(backend: .metal, device: renderer.device.name).reportIfRequested()
         let contentSize = window.contentRect(forFrameRect: window.frame).size
         let viewport = Vec2(Float(contentSize.width), Float(contentSize.height))
         if vp != viewport || runtime.pixelScale != Float(window.backingScaleFactor) {
@@ -147,21 +149,30 @@ public enum MacOSApp {
         }
 
         let appShared = appBuilder.sharedHandle.shared
+        let queueFrame: @MainActor @Sendable (WindowFrameRequest) -> Void = { [weak runtime] request in
+            runtime?.queueWindowHandleFrame(request)
+            waker.wake()
+        }
+        let setTitle: @MainActor @Sendable (String) -> Void = { [weak window, weak runtime] title in
+            runtime?.windowTitle = title
+            window?.title = title
+        }
         let windowHandle = WindowHandle(
             title: appBuilder.title,
             isVisible: !initiallyHidden,
             position: opts.position.map { Vec2(Float($0.0), Float($0.1)) },
             onClose: { [weak window] in Task { @MainActor in window?.close() } },
-            onMinimize: { [weak window] in Task { @MainActor in window?.miniaturize(nil) } },
+            onMinimize: { [weak window] in Task { @MainActor in RuneMacWindowConfig.minimize(window, launcher: launcher) } },
             onFocus: { [weak window] in Task { @MainActor in window?.makeKeyAndOrderFront(nil) } },
             onShow: { appShared.requestShow() },
             onHide: { appShared.requestHide() },
-            onSetTitle: { [weak window] newTitle in Task { @MainActor in window?.title = newTitle } },
+            onSetTitle: { title in Task { @MainActor in setTitle(title) } },
             onSetPosition: { [weak window] pt in
                 Task { @MainActor in
-                    window?.setFrameOrigin(NSPoint(x: CGFloat(pt.x), y: CGFloat(pt.y)))
+                    MacOSWindowOrigin.setPosition(of: window, x: CGFloat(pt.x), y: CGFloat(pt.y))
                 }
             },
+            onFrame: { request in Task { @MainActor in queueFrame(request) } },
             onPlace: { [weak window] req in
                 Task { @MainActor in
                     guard let w = window else { return }
@@ -169,7 +180,7 @@ public enum MacOSApp {
                         w.setContentSize(NSSize(width: CGFloat(sz.x), height: CGFloat(sz.y)))
                     }
                     if let pos = req.position {
-                        w.setFrameOrigin(NSPoint(x: CGFloat(pos.x), y: CGFloat(pos.y)))
+                        MacOSWindowOrigin.setPosition(of: w, x: CGFloat(pos.x), y: CGFloat(pos.y))
                     }
                     if req.activate {
                         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -181,6 +192,9 @@ public enum MacOSApp {
             }
         )
 
+        windowHandle.attachPlacementProvider(RuneMacWindowConfig.placementProvider(for: window))
+        defer { windowHandle.unbind() }
+
         AppMenuBridge.attach(appBuilder.menuItems, to: appShared)
         defer {
             AppMenuBridge.markRunning(appShared, running: false, headless: false)
@@ -189,6 +203,7 @@ public enum MacOSApp {
         let shortcutGuard = ShortcutGuard.attach(shared: appShared, wake: waker, headless: false)
         defer { shortcutGuard.close() }
 
+        let nativeTrace = try NativeWindowTrace(args: parsed, recordsDrawables: true)
         let hostView = RuneMetalHostView(
             frame: NSRect(x: 0, y: 0, width: CGFloat(viewport.x), height: CGFloat(viewport.y)),
             runtime: runtime,
@@ -199,12 +214,14 @@ public enum MacOSApp {
             appShared: appShared,
             shortcutGuard: shortcutGuard,
             reports: reports,
+            nativeTrace: nativeTrace,
             surfaceMeter: meter,
             devStatsReceiver: appBuilder.devStatsReceiver,
             windowHandle: windowHandle,
             minWindowSize: minSize,
             maxWindowSize: maxSize,
             onReady: appBuilder.onReadyHook,
+            launcher: launcher,
             chrome: appBuilder.chromeStyle,
             titlebar: (appBuilder.chromeStyle.borderless || opts.borderless) ? nil : appBuilder.customTitlebar
         )
@@ -216,6 +233,13 @@ public enum MacOSApp {
             shared: appBuilder.sharedHandle.shared,
             runtime: runtime,
             shortcutGuard: shortcutGuard,
+            applyHiddenShell: { [weak window] in
+                runtime.applyMacShellRequests(to: window, launcher: launcher)
+            },
+            applyPendingFrame: { [weak hostView] in
+                guard let hostView else { return }
+                hostView.applyWindowFrameRequest(at: hostView.currentElapsedTime())
+            },
             onShowWindow: { [weak window, weak hostView] in
                 guard let window, let hostView else { return }
                 windowHandle.updateVisibility(true)
@@ -284,6 +308,7 @@ public enum MacOSApp {
             },
             onTerminate: {
                 _ = systemObserver
+                RuneStartup.started { try nativeTrace?.finish() }
                 shortcutGuard.close()
                 shortcutBridge.clear()
                 windowlessDriver.stop()
@@ -305,9 +330,10 @@ public enum MacOSApp {
             }
         )
         app.delegate = delegate
+        JumpListStore.installDockMenuIfReady()
         MacOSQuitHook.install()
         window.delegate = delegate
-        window.contentView = hostView
+        RuneMaterialHost.install(hostView, in: window)
         RuneWindowShape.applyCorners(to: window, options: appBuilder.macosWindowValue, transparent: opts.transparent, borderless: opts.borderless || appBuilder.chromeStyle.borderless)
         RuneDragRegions.ownWindowDragging(window: window, chrome: appBuilder.chromeStyle)
         if opts.position == nil { window.center() }
@@ -359,16 +385,18 @@ public enum MacOSApp {
             }
         }
 
-        withExtendedLifetime(delegate) {
+        let overlays = appBuilder.createAttachedOverlays()
+        withExtendedLifetime((delegate, overlays)) {
             app.run()
         }
+        try nativeTrace?.finish()
         windowlessDriver.stop()
         QuitLifecycle.finishOrderlyExit()
     }
 }
 
 @MainActor
-private final class RuneAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+private final class RuneAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, RuneDockJumpReceiver {
     private let keepRunning: Bool
     private let onFocusChange: (Bool) -> Void
     private let onShouldClose: () -> Bool
@@ -409,6 +437,10 @@ private final class RuneAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
         }
     }
 
+    func openDockArgument(_ argument: String) {
+        onOpenUrl(argument)
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         onTerminate()
     }
@@ -440,6 +472,8 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private let runtime: Runtime<State>
     private let renderer: MetalRenderer
     private let metalLayer = CAMetalLayer()
+    private var launchDrawables = MacOSLaunchDrawables()
+    private var settledFrame: SettledWindowFrame?
     private let startTime = CACurrentMediaTime()
     private let timeScale: Double
     private let respectSystemAppearance: Bool
@@ -447,6 +481,8 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private let appShared: AppShared<State>?
     private let shortcutGuard: ShortcutGuard?
     private let reports: FrameReports<State>?
+    private let nativeTrace: NativeWindowTrace?
+    private let loopActivity: AppleSurfaceLoopObserver?
     private let surfaceMeter: SurfaceMeter?
     private let devStatsReceiver: ((SurfaceStats) -> Void)?
     private let windowHandle: WindowHandle?
@@ -455,12 +491,17 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private var didRunOnReady: Bool = false
     private let chromeStyle: Chrome
     private let customTitlebar: Titlebar?
+    private let launcher: Bool
     private var chromeWatch: WindowChromeWatch?
     /// Whether the shown window can draw, and what covering it runs (`window/sight.rs`, #995).
     private var coverDriver = CoveredWindowDriver()
     private var coverWatch: WindowCoverWatch?
     private var lastFrameTime: Double = 0.0
-    private lazy var displayLinkDriver = MacOSDisplayLinkDriver { [weak self] in self?.renderTick() }
+    private lazy var displayLinkDriver: MacOSDisplayLinkDriver = {
+        let driver = MacOSDisplayLinkDriver { [weak self] in self?.renderTick() }
+        driver.deadlineWoke = { [weak self] in self?.surfaceMeter?.noteDeadlineWake() }
+        return driver
+    }()
     private var textIdleObserver: AppleTextIdleObserver?
     private var trackingAreaRef: NSTrackingArea?
     private var didSignalReady = false
@@ -468,7 +509,11 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private let fileDialogPresenter = MacOSFileDialogPresenter()
     private let dragOutCoordinator = MacOSDragOutCoordinator()
     private var materialHost: RuneMaterialHost?
-    private var restingGiveBackDone: Bool = false
+    private lazy var windowRest = AppleWindowRest { [weak self] all in
+        guard let self else { return }
+        runtime.rest(at: nowSeconds())
+        renderer.giveBackForWindowRest(all: all)
+    }
     private let accessibilityHost = MacOSAccessibilityHost()
     private lazy var textInputBridge: MacOSTextInputBridge = MacOSTextInputBridge { [weak self] imeEvent in
         guard let self else { return }
@@ -486,12 +531,12 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private var a11yFollowUp = false
     private let toolTipOwner = MacOSToolTipOwner()
     private let windowFrameDriver = MacOSWindowFrameDriver()
+    private var originWatch: MacOSWindowOriginWatch?
     private let minWindowSize: (Float, Float)
     private let maxWindowSize: (Float, Float)?
     private var appliedMenuRevision: UInt64 = 0
     private let fnKeyMonitor = FnKeyMonitor()
     internal let secureInputClaim = SecureInputClaim(touchOS: true)
-    internal var spellWatch = SpellPauseWatch(path: "")
 
     init(
         frame: NSRect,
@@ -503,15 +548,18 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         appShared: AppShared<State>? = nil,
         shortcutGuard: ShortcutGuard? = nil,
         reports: FrameReports<State>? = nil,
+        nativeTrace: NativeWindowTrace? = nil,
         surfaceMeter: SurfaceMeter? = nil,
         devStatsReceiver: ((SurfaceStats) -> Void)? = nil,
         windowHandle: WindowHandle? = nil,
         minWindowSize: (Float, Float) = (WindowOptions.defaultMinSize.x, WindowOptions.defaultMinSize.y),
         maxWindowSize: (Float, Float)? = nil,
         onReady: ((WindowHandle) -> Void)? = nil,
+        launcher: Bool = false,
         chrome: Chrome = .standard,
         titlebar: Titlebar? = nil
     ) {
+        self.launcher = launcher
         self.chromeStyle = chrome
         self.customTitlebar = titlebar
         self.runtime = runtime
@@ -522,9 +570,12 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         self.appShared = appShared
         self.shortcutGuard = shortcutGuard
         self.reports = reports
+        self.nativeTrace = nativeTrace
         self.surfaceMeter = surfaceMeter
+        self.loopActivity = surfaceMeter.map(AppleSurfaceLoopObserver.init)
         if let surfaceMeter {
             runtime.surfaceMeter = surfaceMeter
+            windowHandle?.attachSurfaceMeter(surfaceMeter)
         }
         self.devStatsReceiver = devStatsReceiver
         self.windowHandle = windowHandle
@@ -533,6 +584,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         self.onReady = onReady
         super.init(frame: frame)
         self.wantsLayer = true
+        launchDrawables.cap(metalLayer)
         metalLayer.device = renderer.device
         metalLayer.pixelFormat = runtime.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
         metalLayer.framebufferOnly = false
@@ -580,7 +632,15 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     override func viewWillStartLiveResize() {
         super.viewWillStartLiveResize()
-        materialHost?.setLiveResizing(true, mode: MaterialMode.fromEnv())
+        windowFrameDriver.userStartedResizing()
+        materialHost?.setLiveResizing(true, mode: MaterialMode.launchMode)
+        RuneMaterialHost.syncWindowFrame(moving: false, live: true, host: materialHost, layer: metalLayer)
+    }
+
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        materialHost?.setLiveResizing(false, mode: MaterialMode.launchMode)
+        RuneMaterialHost.syncWindowFrame(moving: windowFrameDriver.isMoving, live: false, host: materialHost, layer: metalLayer)
     }
 
     private func syncGeometryAndRender() {
@@ -621,6 +681,8 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private func coverChanged(occluded: Bool) {
         switch coverDriver.setOccluded(occluded, runtime: runtime, at: nowSeconds()) {
         case .rest:
+            surfaceMeter?.setPacing(.idle)
+            windowRest.step(.unseen)
             sleepUntilRuntimeWake()
         case .redraw:
             requestRender()
@@ -640,24 +702,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         // (`FirstFrame::skipped`).
         runOnReadyOnce()
         // What the step asked of the shell goes out now (`self.shell(event_loop)`).
-        if let title = runtime.windowTitle, window?.title != title {
-            window?.title = title
-        }
-        if runtime.closeWindowRequested {
-            runtime.clearShellRequests()
-            window?.performClose(nil)
-            return
-        }
-        if runtime.minimizeRequested {
-            runtime.clearShellRequests()
-            window?.miniaturize(nil)
-        }
-        if runtime.quitRequested {
-            let after: QuitAfter = runtime.relaunchRequested ? .relaunch : .exit
-            _ = QuitLifecycle.send(.start(ending: false, after: after))
-            NSApplication.shared.terminate(nil)
-            return
-        }
+        if runtime.applyMacShellRequests(to: window, launcher: launcher) { return }
         applyWindowFrameRequest(at: t)
         pumpPlatformActions()
         // The reader gets the tree the covered step committed, held words or an attaching
@@ -679,7 +724,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     }
 
     /// A `Tx.setWindowFrame` the runtime holds goes to the window (`window/frame.rs`).
-    private func applyWindowFrameRequest(at t: Double) {
+    fileprivate func applyWindowFrameRequest(at t: Double) {
         guard let frameReq = runtime.takeWindowFrameRequest(), let w = window else { return }
         let scale = Float(w.backingScaleFactor)
         windowFrameDriver.applyRequest(
@@ -688,7 +733,8 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             now: t,
             minSize: minWindowSize,
             maxSize: maxWindowSize,
-            scale: scale
+            scale: scale,
+            painting: w.isVisible && !w.isMiniaturized && coverDriver.canDraw
         ) { [weak self] vp, sc in
             self?.runtime.stepViewport(vp, pixelScale: sc)
         }
@@ -696,18 +742,23 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     func stopTimer() {
         displayLinkDriver.stop()
+        RuneMaterialHost.syncWindowFrame(moving: false, live: inLiveResize, host: materialHost, layer: metalLayer)
         if let w = window {
             windowFrameDriver.landFrame(window: w)
         }
     }
 
     fileprivate func cancelPreparedText() {
+        windowRest.cancel()
         textIdleObserver = nil
         runtime.cancelPreparedText()
     }
 
     private func sleepUntilRuntimeWake() {
         guard let window, window.isVisible || window.isMiniaturized else { stopTimer(); return }
+        if windowFrameDriver.isMoving {
+            RuneMaterialHost.syncWindowFrame(moving: false, live: inLiveResize, host: materialHost, layer: metalLayer)
+        }
         windowFrameDriver.landFrame(window: window)
         let deadline = runtime.windowWakeDeadline(covered: !coverDriver.canDraw)
         displayLinkDriver.sleep(until: deadline, now: nowSeconds(), timeScale: timeScale)
@@ -735,10 +786,25 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     private func renderTick() {
         guard bounds.width > 0 && bounds.height > 0 else { return }
-        let t = nowSeconds()
+        guard nativeTrace?.reachedLimit != true else { return }
+        let paced = window?.isVisible == true && coverDriver.canDraw && !inLiveResize
+        let opportunity = displayLinkDriver.beginFrame(in: self, paced: paced)
+        guard let targetTimestamp = opportunity.target else { return }
+        defer { displayLinkDriver.endFrame() }
+        let t = max(lastFrameTime, ((targetTimestamp ?? CACurrentMediaTime()) - startTime) * timeScale)
         let dt = Float(max(0.0, t - lastFrameTime))
         lastFrameTime = t
 
+        applyWindowFrameRequest(at: t)
+        let movingFrame = windowFrameDriver.isMoving
+        if movingFrame {
+            RuneMaterialHost.syncWindowFrame(moving: true, live: inLiveResize, host: materialHost, layer: metalLayer)
+        }
+        defer {
+            if movingFrame && !windowFrameDriver.isMoving {
+                RuneMaterialHost.syncWindowFrame(moving: false, live: inLiveResize, host: materialHost, layer: metalLayer)
+            }
+        }
         if let w = window {
             let scale = Float(w.backingScaleFactor)
             _ = windowFrameDriver.step(window: w, now: t, scale: scale, resting: runtime.windowResting) { [weak self] vp, sc in
@@ -764,6 +830,8 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         }
         syncNativeMenus()
         if !coverDriver.canDraw {
+            surfaceMeter?.setPacing(.idle)
+            surfaceMeter?.skipped()
             coveredTick(at: t)
             return
         }
@@ -773,7 +841,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             metalLayer.pixelFormat = desiredFmt
         }
 
-        let materialMode = MaterialMode.fromEnv()
+        let materialMode = MaterialMode.launchMode
         if let w = window {
             runtime.nativeMaterials = (!w.isOpaque && materialMode != .fallback)
         } else {
@@ -782,6 +850,8 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
         let commitsBefore = runtime.viewCommitCount
         let updateStart = CACurrentMediaTime()
+        nativeTrace?.begin(runtime, now: updateStart,
+                           refreshHz: displayLinkDriver.refreshHz)
         var renderFrame = renderer.frame(runtime, at: t)
         if !metalLayer.isOpaque { renderFrame.clearColor = .zero }
         let updateMs = (CACurrentMediaTime() - updateStart) * 1000.0
@@ -792,48 +862,53 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             DispatchQueue.main.async { [weak self] in self?.requestRender() }
         }
 
-        if materialHost == nil, runtime.nativeMaterials, !renderFrame.materials.isEmpty {
-            materialHost = RuneMaterialHost(frame: bounds)
-        }
-        materialHost?.update(draws: renderFrame.materials, in: self, layer: metalLayer,
-                             scale: CGFloat(runtime.pixelScale), mode: materialMode)
 
-        if let title = runtime.windowTitle, window?.title != title {
-            window?.title = title
-        }
-        if runtime.closeWindowRequested {
-            runtime.clearShellRequests()
-            window?.performClose(nil)
-            return
-        }
-        if runtime.minimizeRequested {
-            runtime.clearShellRequests()
-            window?.miniaturize(nil)
-        }
-        if runtime.quitRequested {
-            let after: QuitAfter = runtime.relaunchRequested ? .relaunch : .exit
-            _ = QuitLifecycle.send(.start(ending: false, after: after))
-            NSApplication.shared.terminate(nil)
-            return
-        }
+        if runtime.applyMacShellRequests(to: window, launcher: launcher) { return }
 
         applyWindowFrameRequest(at: t)
-        let isAnim = timeScale > 0 && (runtime.isAnimating || (compositor?.isAnimating ?? false) || windowFrameDriver.isMoving)
-        if isAnim {
-            restingGiveBackDone = false
-        } else if !restingGiveBackDone {
-            restingGiveBackDone = true
-            let hidden = window?.occlusionState.contains(.visible) == false
-            runtime.rest(at: t)
-            renderer.giveBack(all: hidden, residentCaches: hidden)
+        func needsFrame() -> Bool {
+            runtime.windowHasFrameWork || nativeTrace?.keepsDrawing == true ||
+                (timeScale > 0 && (runtime.isAnimating || compositor?.isAnimating == true || windowFrameDriver.isMoving))
         }
-        surfaceMeter?.setPacing(isAnim ? .paced : .idle)
-        _ = surfaceMeter?.redraw(paced: displayLinkDriver.isRunning)
+        let needsNext = needsFrame()
+        let wakeAt = needsNext ? nil : runtime.windowWakeDeadline(covered: false)
+        let timerWantsFrame = paced && timeScale > 0 && wakeAt.map { $0 <= t + timeScale / displayLinkDriver.refreshHz } == true
+        let continuous = needsNext || timerWantsFrame
+        let canRest = wakeAt != nil && !continuous && paced && !runtime.nativeMaterials && nativeTrace == nil &&
+            compositor?.drawsOwnContent != true
+        let restingFrame = canRest ? SettledWindowFrame(renderFrame, scale: runtime.pixelScale) : nil
+        surfaceMeter?.redraw(paced: targetTimestamp != nil || displayLinkDriver.isDeadlineTick)
+        if displayLinkDriver.isDeadlineTick, let restingFrame, settledFrame == restingFrame {
+            reports?.unchanged(presentsAt: targetTimestamp)
+            pumpPlatformActions()
+            syncPlatformBridges(treeCommitted: !didInitialA11ySync || a11yFollowUp ||
+                                runtime.viewCommitCount != commitsBefore ||
+                                accessibilityHost.announcementChanged(runtime.a11yAnnouncement))
+            sleepUntilRuntimeWake()
+            surfaceMeter?.setPacing(displayLinkDriver.pacing)
+            return
+        }
+        settledFrame = nil
 
-        let synced = metalLayer.presentsWithTransaction && materialMode != .unsynced
-        if let drawable = metalLayer.nextDrawable(),
-           let drawCount = renderer.present(frame: renderFrame, drawable: drawable, compositor: compositor,
-                                            runtime: runtime, dt: dt, updateMilliseconds: updateMs, synchronized: synced) {
+        var tracedDrawable: UInt64?
+        let acquiredDrawable = metalLayer.nextDrawable()
+        let drawCount = acquiredDrawable.flatMap { drawable in
+            tracedDrawable = nativeTrace?.track(drawable)
+            return RuneMaterialHost.present(host: &materialHost, draws: renderFrame.materials, in: self, layer: metalLayer,
+                                     scale: metalLayer.contentsScale, mode: materialMode) { synced in
+                renderer.present(frame: renderFrame, drawable: drawable, compositor: compositor,
+                                 runtime: runtime, dt: dt, updateMilliseconds: updateMs, synchronized: synced)
+            }
+        }
+        if let drawCount {
+            let submitted = CACurrentMediaTime()
+            runtime.interactionSubmitted(at: submitted, target: targetTimestamp)
+            settledFrame = restingFrame
+            nativeTrace?.submitted(runtime, at: submitted, started: updateStart, target: targetTimestamp,
+                                   sequence: tracedDrawable, continuous: continuous)
+            displayLinkDriver.submitted(at: submitted)
+            launchDrawables.submitted(to: metalLayer, visible: window?.isVisible == true, idle: !continuous, at: submitted)
+            windowRest.step(.drew(now: ProcessInfo.processInfo.systemUptime, lowMemory: false))
             _ = surfaceMeter?.presented()
             if textIdleObserver == nil { textIdleObserver = AppleTextIdleObserver(runtime: runtime) }
             if !didFireReady {
@@ -842,13 +917,20 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
                 runOnReadyOnce()
             }
             reports?.presented(renderFrame, at: t, started: updateStart, updateMs: updateMs, drawCount: drawCount,
-                               committed: runtime.viewCommitCount != commitsBefore, runtime: runtime, compositor: compositor)
+                               committed: runtime.viewCommitCount != commitsBefore, runtime: runtime, compositor: compositor,
+                               target: targetTimestamp, refreshHz: displayLinkDriver.refreshHz, submitted: submitted)
+            if nativeTrace?.reachedLimit == true {
+                stopTimer()
+                // Leave the view on screen until Metal has reported its final drawables.
+                DispatchQueue.main.async {
+                    RuneStartup.started { try self.nativeTrace?.finish() }
+                    NSApplication.shared.terminate(nil)
+                }
+                return
+            }
         } else {
-            _ = surfaceMeter?.skipped()
+            if acquiredDrawable == nil { surfaceMeter?.failed(.timeout) }
             reports?.skipped()
-        }
-        if let stats = surfaceMeter?.currentStats() {
-            devStatsReceiver?(stats)
         }
         pumpPlatformActions()
         // The accessibility stamp: a commit, held words or an attaching reader, or words said since
@@ -858,11 +940,14 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
                 || accessibilityHost.announcementChanged(runtime.a11yAnnouncement)
         )
 
-        if isAnim {
+        // Frame observers and platform callbacks can change the runtime after the draw.
+        if continuous || needsFrame() {
             displayLinkDriver.start(in: self)
         } else {
             sleepUntilRuntimeWake()
         }
+        surfaceMeter?.setPacing(displayLinkDriver.pacing)
+        if let devStatsReceiver, let surfaceMeter { devStatsReceiver(surfaceMeter.currentStats()) }
     }
 
     internal func syncPlatformBridges(treeCommitted: Bool) {
@@ -877,7 +962,6 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             in: self
         )
         runtime.syncSecureInput(secureInputClaim, windowFocused: window?.isKeyWindow ?? false)
-        _ = runtime.spellCheckWhenSettled(watch: &spellWatch, at: nowSeconds())
 
         MacOSHostViewHelper.applyCursor(runtime.currentCursor(), previous: &lastAppliedCursor, in: self)
 
@@ -888,7 +972,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
                 accessibilityHost.onActivate = { [weak self] in self?.scheduleAccessibilityFollowUp() }
             }
             toolTipOwner.sync(regions: runtime.helpRegionsList(), on: self)
-            let snapshot = runtime.accessibilitySnapshot()
+            let snapshot = runtime.nativeAccessibilitySnapshot()
             let held = accessibilityHost.update(tree: snapshot, announcement: runtime.a11yAnnouncement, parentView: self, onSelectText: { [weak self] id, range in
                 MacOSHostViewHelper.dispatchAccessibilityRequest { [weak self] in
                     guard let self else { return }
@@ -958,14 +1042,14 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             return
         case .open, .show:
             if let pos = req.position {
-                window?.setFrameOrigin(NSPoint(x: CGFloat(pos.x), y: CGFloat(pos.y)))
+                MacOSWindowOrigin.setPosition(of: window, x: CGFloat(pos.x), y: CGFloat(pos.y))
             }
             if let place = req.place {
                 if let sz = place.size {
                     window?.setContentSize(NSSize(width: CGFloat(sz.x), height: CGFloat(sz.y)))
                 }
                 if let pos = place.position {
-                    window?.setFrameOrigin(NSPoint(x: CGFloat(pos.x), y: CGFloat(pos.y)))
+                    MacOSWindowOrigin.setPosition(of: window, x: CGFloat(pos.x), y: CGFloat(pos.y))
                 }
             }
             window?.orderFront(nil)
@@ -973,18 +1057,19 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             appShared?.setVisible(true)
         case .hide:
             window?.orderOut(nil)
+            windowRest.step(.unseen)
             windowHandle?.updateVisibility(false)
             appShared?.setVisible(false)
         case .none:
             if let pos = req.position {
-                window?.setFrameOrigin(NSPoint(x: CGFloat(pos.x), y: CGFloat(pos.y)))
+                MacOSWindowOrigin.setPosition(of: window, x: CGFloat(pos.x), y: CGFloat(pos.y))
             }
             if let place = req.place {
                 if let sz = place.size {
                     window?.setContentSize(NSSize(width: CGFloat(sz.x), height: CGFloat(sz.y)))
                 }
                 if let pos = place.position {
-                    window?.setFrameOrigin(NSPoint(x: CGFloat(pos.x), y: CGFloat(pos.y)))
+                    MacOSWindowOrigin.setPosition(of: window, x: CGFloat(pos.x), y: CGFloat(pos.y))
                 }
             }
         }
@@ -995,7 +1080,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         case .focus:
             window?.makeKeyAndOrderFront(nil)
         case .minimize:
-            window?.miniaturize(nil)
+            _ = runtime.minimizeStep(.asked)
         case .none:
             break
         }
@@ -1003,7 +1088,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     private func localPoint(for event: NSEvent) -> Vec2 {
         let p = convert(event.locationInWindow, from: nil)
-        return Vec2(Float(p.x), Float(p.y))
+        return runtime.inputPoint(fromWindow: Vec2(Float(p.x), Float(p.y)))
     }
 
     private func mods(for event: NSEvent) -> Mods {
@@ -1194,6 +1279,9 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        originWatch = MacOSWindowOriginWatch(window: window) { [weak runtime] origin in
+            if let runtime, runtime.updateMacOSOrigin(origin) { runtime.waker.wake() }
+        }
         if let window {
             metalLayer.isOpaque = window.isOpaque
             _ = fnKeyMonitor.start(on: window)
@@ -1372,7 +1460,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     private func dragPoint(from sender: NSDraggingInfo) -> Vec2 {
         let p = convert(sender.draggingLocation, from: nil)
-        return Vec2(Float(p.x), Float(p.y))
+        return runtime.inputPoint(fromWindow: Vec2(Float(p.x), Float(p.y)))
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -1413,6 +1501,28 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     }
 }
 
+extension Runtime {
+    /// Output from a handler or app update reaches the shell even when the window has no drawable.
+    @MainActor
+    func applyMacShellRequests(to window: NSWindow?, launcher: Bool) -> Bool {
+        if let title = windowTitle, window?.title != title { window?.title = title }
+        let minimize = shellTakeMinimize()
+        if quitRequested || relaunchRequested {
+            let after: QuitAfter = relaunchRequested ? .relaunch : .exit
+            _ = QuitLifecycle.send(.start(ending: false, after: after))
+            NSApplication.shared.terminate(nil)
+            return true
+        }
+        if closeWindowRequested {
+            clearShellRequests()
+            window?.performClose(nil)
+            return true
+        }
+        if minimize { RuneMacWindowConfig.minimize(window, launcher: launcher) }
+        return false
+    }
+}
+
 @MainActor
 private final class MacOSWindowlessDriver<State> {
     var isWindowShown: Bool
@@ -1422,6 +1532,8 @@ private final class MacOSWindowlessDriver<State> {
     private let runtime: Runtime<State>
     private let shortcutGuard: ShortcutGuard?
     private let onShowWindow: @MainActor () -> Void
+    private let applyHiddenShell: @MainActor () -> Bool
+    private let applyPendingFrame: @MainActor () -> Void
     private var timer: Timer?
 
     init(
@@ -1431,6 +1543,8 @@ private final class MacOSWindowlessDriver<State> {
         shared: AppShared<State>,
         runtime: Runtime<State>,
         shortcutGuard: ShortcutGuard? = nil,
+        applyHiddenShell: @escaping @MainActor () -> Bool,
+        applyPendingFrame: @escaping @MainActor () -> Void,
         onShowWindow: @escaping @MainActor () -> Void
     ) {
         self.isWindowShown = !initiallyHidden
@@ -1440,6 +1554,8 @@ private final class MacOSWindowlessDriver<State> {
         self.runtime = runtime
         self.shortcutGuard = shortcutGuard
         self.onShowWindow = onShowWindow
+        self.applyHiddenShell = applyHiddenShell
+        self.applyPendingFrame = applyPendingFrame
     }
 
     func start() {
@@ -1475,6 +1591,7 @@ private final class MacOSWindowlessDriver<State> {
             NSApplication.shared.terminate(nil)
             return
         }
+        if req.activation == .minimize { _ = runtime.minimizeStep(.asked) }
         switch req.window {
         case .open, .show:
             isWindowShown = true
@@ -1494,11 +1611,7 @@ private final class MacOSWindowlessDriver<State> {
                 runtime.applyTx(tx, at: now, markDirtyIfNotLiveOnly: false)
             }
         }
-        if runtime.quitRequested || runtime.relaunchRequested {
-            let after: QuitAfter = runtime.relaunchRequested ? .relaunch : .exit
-            _ = QuitLifecycle.send(.start(ending: false, after: after))
-            NSApplication.shared.terminate(nil)
-        }
+        if !applyHiddenShell(), runtime.hasPendingWindowFrame { applyPendingFrame() }
     }
 }
 #endif

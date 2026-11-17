@@ -30,9 +30,10 @@ if [[ $configuration == release ]]; then
     flags+=(-Xlinker --strip-all)
 fi
 exports=(
-    __main_void rune_web_enable rune_web_buffer
-    rune_web_event rune_web_field rune_web_clipboard rune_web_accessibility rune_web_idle_text
-    rune_web_frame rune_web_scene rune_web_enable_atlas_patches rune_web_cached_layers rune_web_ui_passes
+    __main_void rune_web_enable rune_web_config rune_web_window_title rune_web_window_height rune_web_page rune_web_full_window rune_web_reset_renderer rune_web_buffer rune_web_fonts_changed rune_web_spelling_changed
+    rune_web_next_wake rune_web_event rune_web_field rune_web_cursor rune_web_clipboard rune_web_popup rune_web_secondary_claim rune_web_accessibility rune_web_enable_accessibility_patches rune_web_flush_accessibility rune_web_idle_text
+    rune_web_cpu_frame rune_web_cpu_rect
+    rune_web_frame rune_web_scene rune_web_enable_atlas_patches rune_web_enable_image_pages rune_web_enable_glyph_pages rune_web_enable_cycle_patches rune_web_cached_layers rune_web_ui_passes
     rune_web_surface_submission rune_web_surface_complete
     rune_web_image_enable rune_web_image_next rune_web_image_apng rune_web_image_frame rune_web_image_finish
     rune_web_dispose

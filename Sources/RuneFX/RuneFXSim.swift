@@ -68,18 +68,15 @@ public struct FireSimPipelines: @unchecked Sendable {
                 on: device
             )
         }
-        func make(_ name: String) throws -> MTLComputePipelineState {
+        let names = ["curl", "forces", "divergence", "jacobi", "project", "advect"]
+        let states = try FxMetalCompiler.compile(names) { name in
             guard let fn = lib.makeFunction(name: name) else {
                 throw FxRendererError.shaderCompileFailed("Missing firesim kernel '\(name)'")
             }
             return try device.makeComputePipelineState(function: fn)
         }
-        self.curl = try make("curl")
-        self.forces = try make("forces")
-        self.divergence = try make("divergence")
-        self.jacobi = try make("jacobi")
-        self.project = try make("project")
-        self.advect = try make("advect")
+        (curl, forces, divergence, jacobi, project, advect) =
+            (states[0], states[1], states[2], states[3], states[4], states[5])
     }
 }
 #endif
@@ -158,7 +155,6 @@ private final class FireSimGrid: @unchecked Sendable {
     #if canImport(Metal)
     let textures: [MTLTexture]
     let scalars: [MTLTexture]
-    let uniformBuffer: MTLBuffer?
     #endif
     var currentIndex: Int = 0
     var simTime: Float? = nil
@@ -169,14 +165,12 @@ private final class FireSimGrid: @unchecked Sendable {
         claim: FireSimClaim,
         size: SIMD2<UInt32>,
         textures: [MTLTexture],
-        scalars: [MTLTexture],
-        uniformBuffer: MTLBuffer?
+        scalars: [MTLTexture]
     ) {
         self.claim = claim
         self.size = size
         self.textures = textures
         self.scalars = scalars
-        self.uniformBuffer = uniformBuffer
     }
     #else
     init(claim: FireSimClaim, size: SIMD2<UInt32>) {
@@ -304,13 +298,12 @@ public final class FireSim: @unchecked Sendable {
             grids[idx].claim = claim
         } else {
             #if canImport(Metal)
-            let (textures, scalars, uniformBuffer) = allocateResources(size: size)
+            let (textures, scalars) = allocateResources(size: size)
             grids.append(FireSimGrid(
                 claim: claim,
                 size: size,
                 textures: textures,
-                scalars: scalars,
-                uniformBuffer: uniformBuffer
+                scalars: scalars
             ))
             #else
             grids.append(FireSimGrid(claim: claim, size: size))
@@ -433,27 +426,21 @@ public final class FireSim: @unchecked Sendable {
     /// `project`, `advect`) for all planned grids onto `commandBuffer`.
     @discardableResult
     public func record(commandBuffer: MTLCommandBuffer, pipelines: FireSimPipelines) -> Bool {
+        record(commandBuffer: commandBuffer, pipelines: pipelines, pass: nil)
+    }
+
+    @discardableResult
+    public func record(commandBuffer: MTLCommandBuffer, pipelines: FireSimPipelines, pass: MTLComputePassDescriptor?) -> Bool {
         guard pending else { return false }
 
-        for g in grids {
-            guard case .planned(let plan) = g.phase, let uBuf = g.uniformBuffer else { continue }
-            let count = min(plan.steps, Self.maxSlots)
-            let ptr = uBuf.contents()
-            for k in 0..<count {
-                var u = plan.uniform
-                u.origin.z = plan.start.t0 + Float(k + 1) * Self.dt
-                u.origin.w = (plan.start.isReset && k == 0) ? 1.0 : 0.0
-                memcpy(ptr.advanced(by: k * Self.slotStride), &u, MemoryLayout<FireSimUniform>.stride)
-            }
-        }
-
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return false }
+        let compute = pass.map { commandBuffer.makeComputeCommandEncoder(descriptor: $0) } ?? commandBuffer.makeComputeCommandEncoder()
+        guard let encoder = compute else { return false }
         encoder.label = "fx firesim"
         let tpg = MTLSize(width: 8, height: 8, depth: 1)
 
         for g in grids {
             guard case .planned(let plan) = g.phase else { continue }
-            if g.textures.count == 2 && g.scalars.count == 4, let uBuf = g.uniformBuffer {
+            if g.textures.count == 2 && g.scalars.count == 4 {
                 let curlTex = g.scalars[0]
                 let divTex = g.scalars[1]
                 let p0Tex = g.scalars[2]
@@ -465,11 +452,13 @@ public final class FireSim: @unchecked Sendable {
                 )
                 let count = min(plan.steps, Self.maxSlots)
                 for k in 0..<count {
-                    let off = k * Self.slotStride
                     let x = g.textures[g.currentIndex]
                     let y = g.textures[g.currentIndex ^ 1]
 
-                    encoder.setBuffer(uBuf, offset: off, index: 0)
+                    var uniform = plan.uniform
+                    uniform.origin.z = plan.start.t0 + Float(k + 1) * Self.dt
+                    uniform.origin.w = plan.start.isReset && k == 0 ? 1 : 0
+                    encoder.setBytes(&uniform, length: MemoryLayout<FireSimUniform>.stride, index: 0)
 
                     encoder.setComputePipelineState(pipelines.curl)
                     encoder.setTexture(x, index: 0)
@@ -562,8 +551,8 @@ public final class FireSim: @unchecked Sendable {
         return true
     }
 
-    private func allocateResources(size: SIMD2<UInt32>) -> ([MTLTexture], [MTLTexture], MTLBuffer?) {
-        guard let device else { return ([], [], nil) }
+    private func allocateResources(size: SIMD2<UInt32>) -> ([MTLTexture], [MTLTexture]) {
+        guard let device else { return ([], []) }
         func makeTex(_ format: MTLPixelFormat, _ label: String) -> MTLTexture? {
             let desc = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: format,
@@ -583,14 +572,9 @@ public final class FireSim: @unchecked Sendable {
               let div = makeTex(.r32Float, "fx sim div"),
               let p0 = makeTex(.r32Float, "fx sim p0"),
               let p1 = makeTex(.r32Float, "fx sim p1") else {
-            return ([], [], nil)
+            return ([], [])
         }
-        let uBuf = device.makeBuffer(
-            length: Self.maxSlots * Self.slotStride,
-            options: .storageModeShared
-        )
-        uBuf?.label = "fx sim params"
-        return ([a, b], [curl, div, p0, p1], uBuf)
+        return ([a, b], [curl, div, p0, p1])
     }
     #endif
 }

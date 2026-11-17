@@ -1,4 +1,5 @@
 import Foundation
+import RuneMotion
 #if canImport(AppKit) && os(macOS)
 import AppKit
 #endif
@@ -12,6 +13,27 @@ public enum MouseScrollDelta: Sendable, Equatable {
     case line(x: Float, y: Float)
     /// Physical pixels on (x, y), positive moving content right and down.
     case pixel(x: Float, y: Float)
+}
+
+extension Runtime {
+    /// Delivers a desktop wheel in window points. Ctrl+wheel magnification uses
+    /// its native distance, and ordinary wheel handlers receive view points.
+    internal func desktopWheel(dx: Float, dy: Float, at point: Vec2, mods: Mods, now: Double) {
+        if mods.ctrl && pinchWheel(dy: dy, at: point, now: now) { return }
+        let zoom = zoom()
+        wheel(WheelEvent(dx: dx / zoom, dy: dy / zoom, precise: false, mods: mods), at: point, now: now)
+    }
+
+    /// Resolves Windows' per-device line/page setting in window points before page zoom.
+    internal func windowsWheelLinePoints(count: UInt32, ticks: Float, horizontal: Bool, shift: Bool, at point: Vec2) -> Float {
+        guard !horizontal && count == UInt32.max else { return Float(count) * (100 / 3) }
+        guard ticks != 0 else { return 0 }
+        let window = shift ? viewport.x : viewport.y
+        let scroller = scrollAtAxis(point.x, point.y, horizontal: shift)
+            .flatMap { nodeByPath[$0] }
+            .map { shift ? flatNodes[$0].localRect.width : flatNodes[$0].localRect.height }
+        return max(min(scroller ?? window, window) * zoom() * 0.875, 1 / abs(ticks))
+    }
 }
 
 /// Native wheel scroll distances matched to Chromium (`scroll/x.rs`, upstream #856).

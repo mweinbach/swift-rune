@@ -1,4 +1,5 @@
 import Foundation
+import RuneRef
 
 // MARK: - Motion Gate Runner, Allowlist, Report & Evidence (`motion_gate/gate.rs`, `check/evidence.rs`)
 
@@ -53,7 +54,9 @@ public struct MotionGateCell: Sendable {
     }
 }
 
-public struct MotionGateReport: Sendable {
+public struct MotionGateReport: Sendable, LocalizedError, CustomStringConvertible {
+    public var description: String { text }
+    public var errorDescription: String? { text }
     public var text: String
     public var summary: String
     public var failing: Int
@@ -71,18 +74,95 @@ public enum MotionGateGate {
     }
 
     public static func run(_ cells: [(String, Job)], filter: String = "") -> [MotionGateCell] {
-        let filtered = cells.enumerated().filter { filter.isEmpty || $0.element.0.contains(filter) }
-        return filtered.map { _, pair in
+        do {
+            return try run(cells, filter: filter, environment: ProcessInfo.processInfo.environment)
+        } catch {
+            preconditionFailure("Motion gate evidence: \(error)")
+        }
+    }
+
+    private static func run(
+        _ cells: [(String, Job)], filter: String, environment: [String: String]
+    ) throws -> [MotionGateCell] {
+        let jobs = cells.filter { filter.isEmpty || $0.0.contains(filter) }
+        let execute: @Sendable ((String, Job)) throws -> MotionGateCell = { pair in
             let (name, job) = pair
             let rec = job()
-            evidence(cell: name, rec: rec, out: ProcessInfo.processInfo.environment["MOTION_GATE_OUT"])
-            return MotionGateCell(
-                name: name,
-                findings: motionGateCheck(rec),
-                frames: rec.frames,
-                skipped: rec.frames < 10
-            )
+            try writeEvidence(cell: name, rec: rec, out: environment["MOTION_GATE_OUT"], environment: environment)
+            return MotionGateCell(name: name, findings: motionGateCheck(rec), frames: rec.frames, skipped: rec.frames < 10)
         }
+        #if os(WASI)
+        return try jobs.map(execute)
+        #else
+        let queue = JobQueue(jobs)
+        let group = DispatchGroup()
+        for _ in 0..<min(jobs.count, ProcessInfo.processInfo.activeProcessorCount, 12) {
+            group.enter()
+            let worker = Thread {
+                defer { group.leave() }
+                while let (index, job) = queue.take() {
+                    queue.finish(index, Result { try execute(job) })
+                }
+            }
+            worker.stackSize = 64 << 20
+            worker.start()
+        }
+        group.wait()
+        return try queue.results.map { try $0!.get() }
+        #endif
+    }
+
+    #if !os(WASI)
+    private final class JobQueue: @unchecked Sendable {
+        private let lock = NSLock()
+        private let jobs: [(String, Job)]
+        private var remaining: Int
+        private(set) var results: [Result<MotionGateCell, Error>?]
+
+        init(_ jobs: [(String, Job)]) {
+            self.jobs = jobs
+            remaining = jobs.count
+            results = Array(repeating: nil, count: jobs.count)
+        }
+
+        func take() -> (Int, (String, Job))? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard remaining > 0 else { return nil }
+            remaining -= 1
+            return (remaining, jobs[remaining])
+        }
+
+        func finish(_ index: Int, _ result: Result<MotionGateCell, Error>) {
+            lock.lock()
+            results[index] = result
+            lock.unlock()
+        }
+    }
+    #endif
+
+    /// Runs the selected cells and writes their report. A failed gate throws its completed report.
+    @discardableResult
+    public static func gate(_ cells: [(String, Job)], allow: [MotionGateAllow] = []) throws -> MotionGateReport {
+        try gateRows(cells, rows: allow.map { MotionGateAllowRow($0.kind, $0.element, $0.cell, $0.why) })
+    }
+
+    @discardableResult
+    public static func gateRows(
+        _ jobs: [(String, Job)], rows: [MotionGateAllowRow],
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> MotionGateReport {
+        let start = ProcessInfo.processInfo.systemUptime
+        let filter = environment["MOTION_GATE"] ?? ""
+        let cells = try run(jobs, filter: filter, environment: environment)
+        let report = reportWith(cells, rows: rows, listAllowed: environment["MOTION_GATE_ALLOWED"] != nil,
+                                whole: filter.isEmpty, secs: Float(ProcessInfo.processInfo.systemUptime - start))
+        if let path = environment["MOTION_GATE_OUT"] {
+            try Data(report.text.utf8).write(to: URL(fileURLWithPath: path), options: .runeOutput)
+        }
+        guard report.failing == 0 else { throw report }
+        RuneStandardIO.error(report.summary)
+        return report
     }
 
     public static func report(
@@ -160,7 +240,8 @@ public enum MotionGateGate {
 
         let uniqueFailed = Set(failedKinds)
         for r in MOTION_GATE_RULES where uniqueFailed.contains(r.kind) {
-            text += "  \(r.kind): \(r.means) (\(r.threshold))\n"
+            let threshold = r.threshold == r.threshold.rounded() ? String(Int(r.threshold)) : String(r.threshold)
+            text += "  \(r.kind): \(r.means) (\(threshold))\n"
         }
 
         return MotionGateReport(
@@ -173,17 +254,35 @@ public enum MotionGateGate {
     }
 
     public static func evidence(cell: String, rec: MotionGateRecording, out: String?) {
-        let env = ProcessInfo.processInfo.environment
-        if let spec = env["MOTION_GATE_DUMP"] {
-            let parts = spec.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-            if parts.count >= 2, (parts[0].isEmpty || parts[0] == cell) {
-                let from = parts.count > 2 ? (Int(parts[2]) ?? 0) : 0
-                let to = parts.count > 3 ? (Int(parts[3]) ?? Int.max) : Int.max
-                let dumped = MotionGateEvidence.dump(rec, filter: parts[1], from: from, to: to)
-                if let out {
-                    try? dumped.write(toFile: "\(out).dump", atomically: true, encoding: .utf8)
-                }
+        do {
+            try writeEvidence(cell: cell, rec: rec, out: out, environment: ProcessInfo.processInfo.environment)
+        } catch {
+            preconditionFailure("Motion gate evidence: \(error)")
+        }
+    }
+
+    static func writeEvidence(cell: String, rec: MotionGateRecording, out: String?, environment: [String: String]) throws {
+        func spec(_ key: String) -> [Substring]? {
+            guard let value = environment[key] else { return nil }
+            let parts = value.split(separator: "|", omittingEmptySubsequences: false)
+            guard parts.count >= 2, parts[0].isEmpty || parts[0] == cell else { return nil }
+            return parts
+        }
+        func index(_ text: Substring) -> Int? { UInt(text).flatMap(Int.init(exactly:)) }
+        if let parts = spec("MOTION_GATE_DUMP") {
+            let from = parts.count > 2 ? index(parts[2]) ?? 0 : 0
+            let to = parts.count > 3 ? index(parts[3]) ?? Int.max : Int.max
+            let dumped = MotionGateEvidence.dump(rec, filter: String(parts[1]), from: from, to: to)
+            if let out {
+                try Data(dumped.utf8).write(to: URL(fileURLWithPath: out + ".dump"), options: .runeOutput)
+            } else {
+                RuneStandardIO.error(dumped)
             }
+        }
+        if let parts = spec("MOTION_GATE_SHEET"), let at = index(parts[1]) {
+            let path = out ?? FileManager.default.temporaryDirectory.appendingPathComponent("motion-gate").path
+            let sheet = MotionGateEvidence.sheet(rec, at: at, focus: parts.count > 2 ? String(parts[2]) : "")
+            try sheet.pngData().write(to: URL(fileURLWithPath: path + ".sheet.png"), options: .runeOutput)
         }
     }
 }
@@ -216,14 +315,95 @@ public enum MotionGateEvidence {
                 let (k, s) = pair
                 let instMark = (k < rec.instant.count && rec.instant[k]) ? " INSTANT" : ""
                 let paintStr = (j < t.paint.count ? t.paint[j] : nil).map(paintLine) ?? ""
+                let flags = String(s.flags, radix: 2)
                 out += String(
-                    format: "  %4d [%7.1f %7.1f %6.1f %6.1f] vis [%6.1f %6.1f %6.1f %6.1f] op %.3f sc %.3f %02x%@%@\n",
+                    format: "  %4d [%7.1f %7.1f %6.1f %6.1f] vis [%6.1f %6.1f %6.1f %6.1f] op %.3f sc %.3f %@%@%@\n",
                     k, s.rect[0], s.rect[1], s.rect[2], s.rect[3],
                     s.vis[0], s.vis[1], s.vis[2], s.vis[3],
-                    s.op, s.scale, s.flags, instMark, paintStr
+                    s.op, s.scale, flags.count < 2 ? "0" + flags : flags, instMark, paintStr
                 )
             }
         }
         return out
+    }
+}
+
+extension MotionGateEvidence {
+    /// A quarter-scale strip around the finding, with visible bounds and the focused track's paint.
+    public static func sheet(_ rec: MotionGateRecording, at: Int, focus: String = "") -> Frame {
+        let width = max(0, Int(rec.size.0 * 0.25))
+        let height = max(0, Int(rec.size.1 * 0.25))
+        let center = max(0, at)
+        let start = min(rec.frames, max(0, center - 4))
+        let end = min(rec.frames, min(center, Int.max - 5) + 5)
+        let frames = start..<end
+        let hot = rec.tracks.filter { !focus.isEmpty && $0.path.contains(focus) }
+        let channels = (0..<MotionGatePaint.colorCount).filter { channel in
+            hot.contains { t in frames.contains { k in (t.paintAt(k)?.colors[channel].a ?? 0) > 0.02 } }
+        }
+        let stride = width + 6
+        let sheetWidth = frames.count * stride
+        let sheetHeight = height + 4 + channels.count * 12
+        var pixels = Array(repeating: SIMD4<UInt8>(16, 18, 22, 255), count: sheetWidth * sheetHeight)
+
+        func encoded(_ r: Float, _ g: Float, _ b: Float) -> SIMD4<UInt8> {
+            func byte(_ v: Float) -> UInt8 { UInt8((RefShader.linearToSRGB(v) * 255).rounded()) }
+            return SIMD4(byte(r), byte(g), byte(b), 255)
+        }
+        for (column, frame) in frames.enumerated() {
+            let x0 = column * stride
+            if frame < rec.grids.count, let grid = rec.grids[frame] {
+                for y in 0..<height {
+                    let cy = Int(Float(y * 4) / MotionGateGrid.cellSize)
+                    guard cy < grid.h else { continue }
+                    for x in 0..<width {
+                        let cx = Int(Float(x * 4) / MotionGateGrid.cellSize)
+                        guard cx < grid.w else { continue }
+                        let c = grid.color(cy * grid.w + cx)
+                        pixels[y * sheetWidth + x0 + x] = encoded(c.r, c.g, c.b)
+                    }
+                }
+            }
+            if frame == at {
+                for x in x0..<(x0 + width) { pixels[x] = SIMD4(255, 210, 80, 255) }
+            }
+            for track in rec.tracks {
+                guard let snap = track.at(frame) else { continue }
+                let x = snap.vis[0] * 0.25, y = snap.vis[1] * 0.25
+                let w = snap.vis[2] * 0.25, h = snap.vis[3] * 0.25
+                guard w >= 1, h >= 1 else { continue }
+                let focused = !focus.isEmpty && track.path.contains(focus)
+                let alpha = min(1, max(0, snap.op)) * (focused ? 1 : 0.5)
+                let ink = focused ? SIMD3<Float>(255, 70, 70) : SIMD3<Float>(200, 205, 215)
+                func plot(_ px: Float, _ py: Float) {
+                    guard px < Float(width), py < Float(height), width > 0, height > 0 else { return }
+                    let i = Int(max(0, py)) * sheetWidth + x0 + Int(max(0, px))
+                    for c in 0..<3 {
+                        pixels[i][c] = UInt8(Float(pixels[i][c]) * (1 - alpha) + ink[c] * alpha)
+                    }
+                }
+                for i in 0..<Int(w) {
+                    plot(x + Float(i), y)
+                    plot(x + Float(i), y + h - 1)
+                }
+                for i in 0..<Int(h) {
+                    plot(x, y + Float(i))
+                    plot(x + w - 1, y + Float(i))
+                }
+            }
+            guard let paint = hot.lazy.compactMap({ $0.paintAt(frame) }).first else { continue }
+            for (row, channel) in channels.enumerated() {
+                let top = height + 4 + row * 12
+                let color = MotionGatePaintUtils.premulColor(paint.colors[channel])
+                for y in 0..<10 {
+                    for x in 0..<min(width, 80) {
+                        let bg: Float = (x / 5 + y / 5).isMultiple(of: 2) ? 0 : 1
+                        let c = MotionGatePaintUtils.overPremul(color, SIMD4(bg, bg, bg, 1))
+                        pixels[(top + y) * sheetWidth + x0 + x] = encoded(c.x, c.y, c.z)
+                    }
+                }
+            }
+        }
+        return Frame(width: sheetWidth, height: sheetHeight, rgba: pixels.withUnsafeBytes { Array($0) })
     }
 }

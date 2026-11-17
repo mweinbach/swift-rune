@@ -50,13 +50,7 @@ extension Runtime {
             return nil
         }
         let edit = editLens.get(state)
-        let suppressedCaret: Int?
-        if watch.path != fp || watch.lastText != edit.text {
-            suppressedCaret = watch.observe(path: fp, text: edit.text, caret: edit.cursor, now: now)
-        } else {
-            _ = watch.tick(now: now)
-            suppressedCaret = SpellPause.waitingCaret(in: watch.state)
-        }
+        let suppressedCaret = watch.observe(path: fp, text: edit.text, selection: edit.selectedUTF8Range, now: now)
         guard watch.state == .settled, suppressedCaret == nil, flatNodes[idx].el.spellcheck else {
             return nil
         }

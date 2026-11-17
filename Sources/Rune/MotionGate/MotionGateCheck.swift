@@ -174,10 +174,10 @@ public struct MotionGateFinding: Sendable, CustomStringConvertible {
     }
 
     public var description: String {
-        let kPad = kind.padding(toLength: 16, withPad: " ", startingAt: 0)
-        let ePad = element.padding(toLength: 44, withPad: " ", startingAt: 0)
-        let fPad = "\(frame)".padding(toLength: 4, withPad: " ", startingAt: 0)
-        return "\(kPad) \(ePad) @\(fPad) \(detail)"
+        func padded(_ value: String, to width: Int) -> String {
+            value + String(repeating: " ", count: max(0, width - value.unicodeScalars.count))
+        }
+        return "\(padded(kind, to: 16)) \(padded(element, to: 44)) @\(padded(String(frame), to: 4)) \(detail)"
     }
 }
 
@@ -219,8 +219,11 @@ public final class MotionGateRecording: @unchecked Sendable {
     }
 
     public func setGrid(_ grid: MotionGateGrid?) {
-        while grids.count < max(0, frames - 1) {
-            grids.append(nil)
+        let index = max(0, frames - 1)
+        if grids.count > index {
+            grids.removeSubrange(index...)
+        } else if grids.count < index {
+            grids.append(contentsOf: repeatElement(nil, count: index - grids.count))
         }
         grids.append(grid)
     }
@@ -280,12 +283,12 @@ public final class MotionGateRecording: @unchecked Sendable {
 
             var flags: UInt8 = 0
             if e.exiting { flags |= MotionGateSnapFlags.exiting }
-            if m.scrolling { flags |= MotionGateSnapFlags.scrolling }
+            if e.scrolling || m.scrolling { flags |= MotionGateSnapFlags.scrolling }
             if e.inGrowingRow || e.revealing || m.inGrowingRow || m.revealing {
                 flags |= MotionGateSnapFlags.growing
             }
-            if m.liveIntent != 0 { flags |= MotionGateSnapFlags.live }
-            if m.virtualExtent { flags |= MotionGateSnapFlags.virtual }
+            if e.liveIntent != 0 || m.liveIntent != 0 { flags |= MotionGateSnapFlags.live }
+            if e.virtualExtent || m.virtualExtent { flags |= MotionGateSnapFlags.virtual }
             if e.role == .text { flags |= MotionGateSnapFlags.text }
             if ink[i] { flags |= MotionGateSnapFlags.ink }
 
@@ -316,7 +319,7 @@ public final class MotionGateRecording: @unchecked Sendable {
                     op: e.opacity,
                     scale: e.scale,
                     flags: flags,
-                    phase: m.loopPhase.map(Float.init) ?? .nan,
+                    phase: (e.loopPhase ?? m.loopPhase).map(Float.init) ?? .nan,
                     scrolled: m.carriedScrolled ?? e.scrolled
                 )
             ))
@@ -1600,11 +1603,14 @@ private enum MotionGateRegions {
 
     static func checkRegions(_ rec: MotionGateRecording, loops: Set<Int>, found: [MotionGateFinding]) -> [MotionGateFinding] {
         let n = rec.frames
-        guard let g0 = rec.grids.compactMap({ $0 }).first, rec.grids.count >= n, !rec.grids[..<n].contains(where: { $0 == nil }) else {
+        guard n > 0, rec.grids.count >= n, let g0 = rec.grids[0],
+              rec.grids.allSatisfy({ $0?.w == g0.w && $0?.h == g0.h }) else {
             return []
         }
         let (w, h) = (g0.w, g0.h)
         func grid(_ k: Int) -> MotionGateGrid { rec.grids[k]! }
+        let changedFrames = (1..<n).filter { grid($0) !== grid($0 - 1) }
+        guard !changedFrames.isEmpty else { return [] }
         var tune = MotionGatePainted.tune(hz: rec.hz)
         tune.still = 0.06
         func v(_ k: Int, _ i: Int) -> MotionGateSeries.V6 {
@@ -1615,8 +1621,8 @@ private enum MotionGateRegions {
         var hits: [Key: [(Int, MotionGateSeries.Event)]] = [:]
         let floorThresh = min(tune.flash, tune.snap)
         for i in 0..<(w * h) {
-            let changes = n > 1 && (1..<n).contains { k in
-                grid(k) !== grid(k - 1) && MotionGateSeries.dist(v(k, i), v(k - 1, i)) >= floorThresh
+            let changes = changedFrames.contains { k in
+                MotionGateSeries.dist(v(k, i), v(k - 1, i)) >= floorThresh
             }
             if !changes { continue }
             let vals: [MotionGateSeries.V6?] = (0..<n).map { k in k >= rec.start ? v(k, i) : nil }
@@ -1683,7 +1689,7 @@ private enum MotionGateRegions {
                 if explained(rec, found: found, kind: kind, k: k, rect: rect) { continue }
                 let worst = region.max { cells[$0]!.size < cells[$1]!.size }!
                 let e = cells[worst]!
-                func hex(_ j: Int) -> String { grid(j).color(worst).hexString() }
+                func hex(_ j: Int) -> String { grid(j).color(worst).hex() }
                 let colors = kind == "snap" ? "\(hex(k - 1)) → \(hex(k))" : "\(hex(e.span.0)) → \(hex(k)) → \(hex(e.span.1))"
                 let was = topTrack(rec, frame: k - 1, rect: rect)
                 let now = topTrack(rec, frame: k, rect: rect)

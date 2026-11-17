@@ -1,0 +1,105 @@
+<!doctype html>
+<meta charset="utf-8"><title>Rune independent image atlas pages</title>
+<canvas id="gl"></canvas><canvas id="gpu"></canvas><pre id="result">Running…</pre>
+<script type="module">
+import {RuneWebGL, loadRuneShaders} from '../../Sources/Rune/Resources/Web/rune-webgl.mjs';
+import {RuneWebGPU} from '../../Sources/Rune/Resources/Web/rune-webgpu.mjs';
+import {pagedPacket} from './image-page-scene.mjs';
+
+const width = 7, height = 1, span = 16384;
+const red = [255,0,0,255], green = [0,255,0,255], blue = [0,0,255,255];
+const white = [255,255,255,255], black = [0,0,0,255], yellow = [255,255,0,255];
+function instance(kind, x, page = 0, u = 0, v = 0) {
+    const p = new Float32Array(32);
+    p.set([x,0,1,1]); p.set([1,1,1,1],8); p.set([page,kind,0,1],16);
+    p.set([u,v,1,1],20); p.set([0,0,width,height],24);
+    return p;
+}
+const layer = instance(8,0); layer.set([0,0,width,height]); layer[19] = 0;
+const quads = [instance(7,0,0,span-1), layer, instance(7,1,1,0,span-1), instance(2,2),
+    instance(7,3,0,span-2), instance(9,0), instance(7,4,1.75,0,span-1),
+    instance(7,5,2), instance(7,6,12), instance(7,3,1,0,span-2)];
+const first = new Uint8Array(span*4), second = new Uint8Array(span*4);
+first.set(red,(span-1)*4); first.set(blue,(span-2)*4);
+second.set(green,(span-1)*4); second.set(yellow,(span-2)*4);
+const slots = [{width:span,height:1}, {width:1,height:span}, {width:0,height:0}];
+const scene = (pages, previous, sequence, glyphs) =>
+    pagedPacket({width,height,instances:quads,pages,previous,sequence,glyphs});
+const full = scene([{...slots[0],data:first},{...slots[1],data:second},slots[2]],0,1,[255]);
+const partial = scene([slots[0],{...slots[1],rect:[0,span-1,1,1],data:blue},slots[2]],1,2);
+const vacant = scene([slots[0],slots[2]],2,3);
+const refilledQuads = quads.map(quad => {
+    if (quad[17] !== 7 || Math.trunc(quad[16]) !== 1) return quad;
+    const copy = quad.slice();
+    copy.set([0,0,1,1],20);
+    return copy;
+});
+const refill = pagedPacket({width,height,instances:refilledQuads,pages:[slots[0],{width:1,height:1,data:white}],previous:3,sequence:4});
+const steps = [
+    [full,[red,green,white,yellow,green,black,black]],
+    [partial,[red,blue,white,yellow,blue,black,black]],
+    [partial,[red,blue,white,yellow,blue,black,black]],
+    [scene(slots,2,2),[red,blue,white,yellow,blue,black,black]],
+    [vacant,[red,black,white,blue,black,black,black]],
+    [refill,[red,white,white,white,white,black,black]]
+];
+function mask(x, page, sourceX = 0) {
+    const quad = instance(2, x, 0, sourceX);
+    quad[18] = page;
+    return quad;
+}
+const mixed = [mask(0,0), instance(7,1,1), layer, mask(2,1), mask(3,1,1),
+    instance(7,4,0), mask(5,2), instance(9,0), mask(6,13)];
+const imageSlots = [{width:1,height:1},{width:1,height:1}];
+const masks = [{width:1,height:1},{width:2,height:1},{width:0,height:0}];
+const maskScene = (glyphPages,pages,previous,sequence) =>
+    pagedPacket({width,height,instances:mixed,pages,previous,sequence,glyphPages});
+const initMasks = maskScene([{...masks[0],data:[255]},{...masks[1],data:[255,0]},masks[2]],
+    [{...imageSlots[0],data:green},{...imageSlots[1],data:yellow}],4,5);
+const patchMasks = maskScene([masks[0],{...masks[1],rect:[1,0,1,1],data:[255]},masks[2]], imageSlots,5,6);
+steps.push(
+    [initMasks,[white,yellow,white,black,green,black,white]],
+    [patchMasks,[white,yellow,white,white,green,black,white]],
+    [patchMasks,[white,yellow,white,white,green,black,white]],
+    [maskScene([masks[0],masks[2]],imageSlots,6,7),[white,yellow,black,black,green,white,white]]
+);
+async function pixels(driver) {
+    if (driver.gl) {
+        const result = new Uint8Array(width * height * 4);
+        driver.gl.bindFramebuffer(driver.gl.FRAMEBUFFER, null);
+        driver.gl.readPixels(0, 0, width, height, driver.gl.RGBA, driver.gl.UNSIGNED_BYTE, result);
+        return result;
+    }
+    const device = driver.device, texture = driver.context.getCurrentTexture();
+    const buffer = device.createBuffer({size:256,usage:GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST});
+    try {
+        const encoder = device.createCommandEncoder();
+        encoder.copyTextureToBuffer({texture}, {buffer,bytesPerRow:256}, [width,height]);
+        device.queue.submit([encoder.finish()]);
+        await buffer.mapAsync(GPUMapMode.READ);
+        const data = new Uint8Array(buffer.getMappedRange(), 0, width * height * 4).slice();
+        if (driver.format.startsWith('bgra')) for (let i=0; i<data.length; i+=4) [data[i], data[i+2]] = [data[i+2], data[i]];
+        return data;
+    } finally { buffer.destroy(); }
+}
+async function check(driver) {
+    try {
+        for (const [i,[bytes,wanted]] of steps.entries()) {
+            driver.draw(bytes.buffer,0,bytes.length);
+            const actual = await pixels(driver);
+            const expected = wanted.flat();
+            for (let j=0;j<expected.length;j++) if (actual[j] !== expected[j]) {
+                throw Error(driver.info.api+' frame '+i+' pixel '+Math.floor(j/4)+' got '+actual.slice(j & ~3,(j & ~3)+4)+' expected '+wanted[j>>2]);
+            }
+        }
+        return driver.info.renderer;
+    } finally { driver.dispose(); }
+}
+try {
+    const gl = document.getElementById('gl'), gpu = document.getElementById('gpu');
+    const glName = await check(new RuneWebGL(gl,await loadRuneShaders()));
+    const renderers = [glName];
+    if (new URL(location.href).searchParams.has('webgpu')) renderers.push(await check(await RuneWebGPU.create(gpu)));
+    document.getElementById('result').textContent = 'PASS '+(steps.length*renderers.length)+' RGBA readbacks '+renderers.join(' / ');
+} catch (error) {document.getElementById('result').textContent='FAIL '+error.stack;}
+</script>

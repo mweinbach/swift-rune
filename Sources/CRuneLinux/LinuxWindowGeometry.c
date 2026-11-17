@@ -23,7 +23,8 @@ static SDL_Window *native_window(RuneLinuxWindow *host, SDL_SysWMinfo *info) {
 }
 
 #ifdef SDL_VIDEO_DRIVER_X11
-static int x11_placement(SDL_Window *window, const SDL_SysWMinfo *info, RuneLinuxPlacement *out) {
+static int x11_placement(SDL_Window *window, const SDL_SysWMinfo *info, RuneLinuxPlacement *out,
+                         uint32_t *outer_width, uint32_t *outer_height) {
     Display *display = info->info.x11.display;
     Window client = info->info.x11.window, child;
     XWindowAttributes attrs;
@@ -31,8 +32,10 @@ static int x11_placement(SDL_Window *window, const SDL_SysWMinfo *info, RuneLinu
         !XTranslateCoordinates(display, client, attrs.root, 0, 0, &out->content_x, &out->content_y, &child))
         return 0;
 
-    int top = 0, left = 0;
-    SDL_GetWindowBordersSize(window, &top, &left, NULL, NULL);
+    int top = 0, left = 0, bottom = 0, right = 0;
+    SDL_GetWindowBordersSize(window, &top, &left, &bottom, &right);
+    int width = attrs.width + left + right;
+    int height = attrs.height + top + bottom;
     out->x = out->content_x - left;
     out->y = out->content_y - top;
     if (!top && !left) {
@@ -47,14 +50,20 @@ static int x11_placement(SDL_Window *window, const SDL_SysWMinfo *info, RuneLinu
         if (frame == client) {
             out->x -= attrs.border_width;
             out->y -= attrs.border_width;
+            width = attrs.width + 2 * attrs.border_width;
+            height = attrs.height + 2 * attrs.border_width;
         } else {
             XWindowAttributes outer;
             if (XGetWindowAttributes(display, frame, &outer)) {
                 out->x = outer.x;
                 out->y = outer.y;
+                width = outer.width + 2 * outer.border_width;
+                height = outer.height + 2 * outer.border_width;
             }
         }
     }
+    if (outer_width) *outer_width = (uint32_t)width;
+    if (outer_height) *outer_height = (uint32_t)height;
     out->width = (uint32_t)attrs.width;
     out->height = (uint32_t)attrs.height;
     Uint32 flags = SDL_GetWindowFlags(window);
@@ -313,24 +322,50 @@ void rune_linux_refresh_frame_input(SDL_Window *window, bool closing) {
 #endif
 }
 
-int rune_linux_placement(RuneLinuxWindow *host, RuneLinuxPlacement *out) {
+int rune_linux_frame_geometry(RuneLinuxWindow *host, RuneLinuxPlacement *out,
+                              uint32_t *outer_width, uint32_t *outer_height) {
     SDL_SysWMinfo info = {0};
     SDL_Window *window = native_window(host, &info);
     if (!window || !out) return 0;
     *out = (RuneLinuxPlacement){0};
 #ifdef SDL_VIDEO_DRIVER_X11
-    if (info.subsystem == SDL_SYSWM_X11) return x11_placement(window, &info, out);
+    if (info.subsystem == SDL_SYSWM_X11) return x11_placement(window, &info, out, outer_width, outer_height);
+#endif
+    return 0;
+}
+
+int rune_linux_placement(RuneLinuxWindow *host, RuneLinuxPlacement *out) {
+    return rune_linux_frame_geometry(host, out, NULL, NULL);
+}
+
+int rune_linux_content_origin(RuneLinuxWindow *host, int32_t *x, int32_t *y, int32_t *primary_x, int32_t *primary_y) {
+#ifdef SDL_VIDEO_DRIVER_X11
+    SDL_SysWMinfo info = {0};
+    SDL_Window *window = native_window(host, &info);
+    if (window && info.subsystem == SDL_SYSWM_X11) {
+        Display *display = info.info.x11.display;
+        XWindowAttributes attrs;
+        Window child;
+        if (!XGetWindowAttributes(display, info.info.x11.window, &attrs) ||
+            !XTranslateCoordinates(display, info.info.x11.window, attrs.root, 0, 0, x, y, &child)) return 0;
+        SDL_Rect primary = {0};
+        SDL_GetDisplayBounds(0, &primary);
+        *primary_x = primary.x;
+        *primary_y = primary.y;
+        return 1;
+    }
 #endif
     return 0;
 }
 
 void rune_linux_set_position(RuneLinuxWindow *host, int x, int y) {
     SDL_Window *window = SDL_GetWindowFromID(rune_linux_id(host));
-    RuneLinuxPlacement current;
-    if (rune_linux_placement(host, &current)) {
-        // The public position is the outer origin. SDL moves the content origin.
-        int64_t cx = (int64_t)x + current.content_x - current.x;
-        int64_t cy = (int64_t)y + current.content_y - current.y;
+    int top = 0, left = 0;
+    if (SDL_GetWindowBordersSize(window, &top, &left, NULL, NULL) == 0) {
+        // SDL's X11 backend subtracts its own cached border extents before the
+        // move. A reparenting WM can expose a frame to XQueryTree but no SDL extents.
+        int64_t cx = (int64_t)x + left;
+        int64_t cy = (int64_t)y + top;
         x = (int)SDL_clamp(cx, INT_MIN, INT_MAX);
         y = (int)SDL_clamp(cy, INT_MIN, INT_MAX);
     }

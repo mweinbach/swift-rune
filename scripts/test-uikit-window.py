@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Run the production RuneHello scene through UIKit and Metal on a Mac, in a hidden Catalyst window."""
+"""Run the production RuneHello scene through UIKit and Metal on a Mac, in a Catalyst window."""
 import os
 import platform
 import plistlib
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -33,7 +34,7 @@ def main():
         info = {
             "CFBundleIdentifier": "org.rune.tests.UIKitWindow", "CFBundleExecutable": executable.name,
             "CFBundleName": "RuneUIKitWindow", "CFBundlePackageType": "APPL",
-            "CFBundleShortVersionString": "1.0", "CFBundleVersion": "1", "LSUIElement": True,
+            "CFBundleShortVersionString": "1.0", "CFBundleVersion": "1",
             "LSMinimumSystemVersion": "14.0", "NSHighResolutionCapable": True, "UILaunchScreen": {},
             "UIApplicationSceneManifest": {
                 "UIApplicationSupportsMultipleScenes": False,
@@ -42,8 +43,20 @@ def main():
         }
         (contents / "Info.plist").write_bytes(plistlib.dumps(info))
         subprocess.run(["codesign", "--force", "--sign", "-", app], check=True)
-        # Launching a Catalyst scene requires a graphical macOS login, even when its window is hidden.
-        subprocess.run([executable], check=True, env={**os.environ, "RUNE_GPU_INFO": "1"}, timeout=60)
+        # An occluded background process receives skipped drawables. Launch a foreground scene to measure presentation.
+        result = Path(tmp) / "passed"
+        stdout, stderr = Path(tmp) / "stdout", Path(tmp) / "stderr"
+        launch = ["open", "-n", "-W", "--stdout", str(stdout), "--stderr", str(stderr),
+                  "--env", "RUNE_GPU_INFO=1", "--env", f"RUNE_UIKIT_TEST_RESULT={result}"]
+        if path := os.environ.get("RUNE_UIKIT_TEST_TRACE"):
+            launch.extend(["--env", f"RUNE_UIKIT_TEST_TRACE={path}"])
+        subprocess.run([*launch, str(app)], check=True, timeout=60)
+        if stdout.exists():
+            sys.stdout.write(stdout.read_text())
+        if stderr.exists():
+            sys.stderr.write(stderr.read_text())
+        if not result.is_file():
+            raise SystemExit("The Catalyst window probe did not complete")
 
 
 if __name__ == "__main__":

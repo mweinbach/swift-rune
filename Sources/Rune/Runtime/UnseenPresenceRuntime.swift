@@ -10,39 +10,10 @@ internal struct UnseenPresenceState: Sendable {
         var parentId: NodeId?
     }
 
-    var unseenIds: Set<NodeId> = []
-    var seenIds: Set<NodeId> = []
-    var seenAncestorIds: Set<NodeId> = []
-    var currentPaintSeenIds: Set<NodeId> = []
-    var currentPaintUnseenIds: Set<NodeId> = []
-    /// Nodes painted outside the window/clip on the last frame (geometry only, ignoring opacity).
-    var currentPaintOffscreenIds: Set<NodeId> = []
-    var currentPaintOnscreenIds: Set<NodeId> = []
     var prevMountedIds: Set<NodeId> = []
     var prevNodesById: [NodeId: PrevNodeSnapshot] = [:]
     var prevChildrenByParent: [NodeId: [NodeId]] = [:]
 
-    mutating func beginPaint() {
-        currentPaintSeenIds.removeAll(keepingCapacity: true)
-        currentPaintUnseenIds.removeAll(keepingCapacity: true)
-        currentPaintOffscreenIds.removeAll(keepingCapacity: true)
-        currentPaintOnscreenIds.removeAll(keepingCapacity: true)
-    }
-
-    mutating func recordPaintedNode(id: NodeId, inView: Bool, geometricallyInView: Bool? = nil) {
-        if inView {
-            currentPaintSeenIds.insert(id)
-            currentPaintUnseenIds.remove(id)
-        } else if !currentPaintSeenIds.contains(id) {
-            currentPaintUnseenIds.insert(id)
-        }
-        if geometricallyInView ?? inView {
-            currentPaintOnscreenIds.insert(id)
-            currentPaintOffscreenIds.remove(id)
-        } else if !currentPaintOnscreenIds.contains(id) {
-            currentPaintOffscreenIds.insert(id)
-        }
-    }
 }
 
 fileprivate let kitFilterKeysKey = "kitFilterKeys"
@@ -77,34 +48,99 @@ extension El {
 /// - offscreen/faded-out exiting nodes unmount instead of running invisible exits (`endUnseenExits`)
 /// - already-mounted unseen rows in a filtered list that replaced the viewport re-enter with a fade (`reenterUnseenRow`).
 internal struct KitUnseenPresenceState {
-    var hasBuilt: Bool = false
-    var frameSeenById: [NodeId: Bool] = [:]
-    var frameInhOpacityById: [NodeId: Float] = [:]
-    var frameDrawnById: [NodeId: MotionRect] = [:]
-    var frameStickyShiftById: [NodeId: Vec2] = [:]
+    struct PaintedNode {
+        var parent: NodeId?
+        var visible: Bool
+        var inView: Bool
+        var geometricallyInView: Bool
+        var inheritedOpacity: Float
+        var drawn: MotionRect
+        var stickyShift: Vec2
+
+        mutating func update(_ sample: Self) {
+            let saw = inView || sample.inView
+            let onScreen = geometricallyInView || sample.geometricallyInView
+            self = sample
+            inView = saw
+            geometricallyInView = onScreen
+        }
+    }
+
+    private(set) var frameById: [NodeId: PaintedNode] = [:]
+    private(set) var offscreenEntrances: [NodeId] = []
+    var hasBuilt = false
     var prevFilterStateById: [NodeId: (keys: [String], seenChildKeys: Set<String>)] = [:]
 
     mutating func beginFrame() {
-        frameSeenById.removeAll(keepingCapacity: true)
-        frameInhOpacityById.removeAll(keepingCapacity: true)
-        frameDrawnById.removeAll(keepingCapacity: true)
-        frameStickyShiftById.removeAll(keepingCapacity: true)
+        frameById.removeAll(keepingCapacity: true)
+        offscreenEntrances.removeAll(keepingCapacity: true)
     }
 
     mutating func recordFrameNode(
-        id: NodeId,
-        visible: Bool,
-        inhOpacity: Float,
-        drawn: MotionRect,
-        ownStickyShift: Vec2 = .zero
+        _ node: Presented, visible: Bool, inView: Bool, geometricallyInView: Bool,
+        inhOpacity: Float, drawn: MotionRect, ownStickyShift: Vec2
     ) {
         hasBuilt = true
-        frameSeenById[id] = visible
-        frameInhOpacityById[id] = inhOpacity
-        frameDrawnById[id] = drawn
-        if ownStickyShift != .zero {
-            frameStickyShiftById[id] = ownStickyShift
+        let sample = PaintedNode(parent: node.parent, visible: visible, inView: inView,
+                                 geometricallyInView: geometricallyInView, inheritedOpacity: inhOpacity,
+                                 drawn: drawn, stickyShift: ownStickyShift)
+        frameById[node.id, default: sample].update(sample)
+        if node.phase == .entering && !geometricallyInView { offscreenEntrances.append(node.id) }
+    }
+
+    /// Native paint already computed the transformed bounds and inherited clip. Filter bleed
+    /// counts when choosing a drawn anchor, while an entrance needs strictly positive coverage.
+    mutating func recordNativeFrameNode(
+        _ node: Presented, rect: MotionRect, drawn: MotionRect, scale: Vec2, turn: Turn?,
+        localClip: MotionRect?, screenClip: MotionRect, margin: Float,
+        bypassClip: Bool, opacity: Float, sticky: Vec2
+    ) {
+        var clip = localClip
+        if let reveal = node.revealClip { clip = clip.map { intersectRects($0, reveal) } ?? reveal }
+        if !node.mask.isNone {
+            let inset = node.mask.inset
+            let masked = MotionRect(left: rect.left + inset.left * scale.x, top: rect.top + inset.top * scale.y,
+                                    right: rect.right - inset.right * scale.x, bottom: rect.bottom - inset.bottom * scale.y)
+            clip = clip.map { intersectRects($0, masked) } ?? masked
         }
+
+        func overlaps(_ bounds: MotionRect, _ clip: MotionRect, _ margin: Float) -> Bool {
+            clip.width > 0 && clip.height > 0 && bounds.right >= clip.left - margin
+                && bounds.left <= clip.right + margin && bounds.bottom >= clip.top - margin
+                && bounds.top <= clip.bottom + margin
+        }
+
+        let visible = bypassClip || (overlaps(drawn, screenClip, margin)
+            && (clip.map { overlaps(rect, $0, margin) } ?? true))
+        let geometricallyInView: Bool
+        if bypassClip {
+            geometricallyInView = true
+        } else {
+            let local = clip.map { intersectRects(rect, $0) } ?? rect
+            let showing = intersectRects(turn?.bbox(local) ?? local, screenClip)
+            geometricallyInView = local.width > 0 && local.height > 0 && showing.width > 0.001 && showing.height > 0.001
+        }
+        recordFrameNode(node, visible: visible, inView: opacity >= (1.0 / 512.0) && geometricallyInView,
+                        geometricallyInView: geometricallyInView, inhOpacity: opacity,
+                        drawn: drawn, ownStickyShift: sticky)
+    }
+
+    mutating func updateCycleOpacity(_ id: NodeId, opacity: Float) {
+        guard let geometry = frameById[id]?.geometricallyInView else { return }
+        frameById[id]?.inheritedOpacity = opacity
+        frameById[id]?.inView = geometry && opacity >= (1.0 / 512.0)
+    }
+
+    /// Only a hidden exit needs to know whether a visible descendant is still on screen.
+    func visibleAncestors() -> Set<NodeId> {
+        var ancestors: Set<NodeId> = []
+        for node in frameById.values where node.inView {
+            var parent = node.parent
+            while let id = parent, ancestors.insert(id).inserted {
+                parent = frameById[id]?.parent
+            }
+        }
+        return ancestors
     }
 
     /// Marks ancestors of seen nodes as seen (`mark_ancestors`), matching `unseen_presence.rs`.
@@ -120,10 +156,10 @@ internal struct KitUnseenPresenceState {
     /// Per node of `prevNodes`: neither it nor anything under it drew in the last frame.
     func drewNothing<S>(nodes: [Runtime<S>.FlatNode]) -> [Bool] {
         guard hasBuilt, !nodes.isEmpty else { return [] }
-        var seen = nodes.map { frameSeenById[$0.nodeId] ?? false }
+        var seen = nodes.map { frameById[$0.nodeId]?.visible ?? false }
         markAncestors(nodes, &seen)
         return nodes.indices.map { i in
-            !seen[i] || (frameInhOpacityById[nodes[i].nodeId] ?? 1.0) < (1.0 / 512.0)
+            !seen[i] || (frameById[nodes[i].nodeId]?.inheritedOpacity ?? 1.0) < (1.0 / 512.0)
         }
     }
 
@@ -200,7 +236,7 @@ internal struct KitUnseenPresenceState {
 
             // A stuck ancestor draws where it's held, not where scrolling puts it: subtract last
             // frame's own sticky shift so it and its children stay inside the viewport clip.
-            let ownSticky = frameStickyShiftById[n.nodeId] ?? .zero
+            let ownSticky = frameById[n.nodeId]?.stickyShift ?? .zero
             let stickyMin = Vec2(parentShiftMin.x - ownSticky.x, parentShiftMin.y - ownSticky.y)
             let stickyMax = Vec2(parentShiftMax.x - ownSticky.x, parentShiftMax.y - ownSticky.y)
 
@@ -217,7 +253,7 @@ internal struct KitUnseenPresenceState {
             if let oldIdx = oldIndexById[n.nodeId],
                let oldNode = prevNodes.indices.contains(oldIdx) ? prevNodes[oldIdx] : nil,
                oldNode.targetRect.width > 0 || oldNode.targetRect.height > 0,
-               let drawn = frameDrawnById[n.nodeId] {
+               let drawn = frameById[n.nodeId]?.drawn {
                 swept = MotionRect(
                     left: min(drawn.left, r.left),
                     top: min(drawn.top, r.top),
@@ -311,9 +347,7 @@ internal struct KitUnseenPresenceState {
             }
         }
 
-        // Capture seen child row keys from the current `newNodes`? No — wait until `buildRefScene` updates `frameSeenById`,
-        // OR capture from `prevNodes`? On the next commit, `prevNodes` were the nodes drawn in `frameSeenById`!
-        // Refresh stored keys now, and compute `seenChildKeys` lazily on the next commit (or update in `recordPostBuildFilterSeen`).
+        // Painting the new rows supplies the seen keys for the next commit.
         for node in newNodes {
             guard let keys = node.el.kitFilterKeysValue else { continue }
             prevFilterStateById[node.nodeId] = (keys: keys, seenChildKeys: [])
@@ -334,7 +368,7 @@ internal struct KitUnseenPresenceState {
         return !prev.seenChildKeys.contains { newKeySet.contains($0) }
     }
 
-    /// Updates `seenChildKeys` for tracked filter containers after `buildRefScene` records `frameSeenById`.
+    /// Updates `seenChildKeys` for tracked filter containers after the new rows have painted.
     mutating func recordPostBuildFilterSeen<S>(nodes: [Runtime<S>.FlatNode]) {
         guard !prevFilterStateById.isEmpty else { return }
         for idx in nodes.indices {
@@ -346,8 +380,8 @@ internal struct KitUnseenPresenceState {
                 let child = nodes[j]
                 guard child.path.hasPrefix(prefix) else { break }
                 guard child.parentIndex == idx, let k = child.key else { continue }
-                let rowSaw = (frameSeenById[child.nodeId] ?? false)
-                    && ((frameInhOpacityById[child.nodeId] ?? 1.0) >= (1.0 / 512.0))
+                let rowSaw = (frameById[child.nodeId]?.visible ?? false)
+                    && ((frameById[child.nodeId]?.inheritedOpacity ?? 1.0) >= (1.0 / 512.0))
                 if rowSaw {
                     // Option row keys look like `"\(listKey)-option-\(optID)"`; strip prefix if present.
                     if let range = k.range(of: "-option-") {
@@ -387,11 +421,7 @@ extension Runtime {
         var didReenter = false
 
         // 1. `end_unseen_exits`: unseen nodes omitted in this commit have nothing visible to exit-fade.
-        for id in unseenPresence.unseenIds where !newIdSet.contains(id) {
-            if !unseenPresence.seenAncestorIds.contains(id), case .exiting = scene.phase(id) {
-                scene.unmount(id)
-            }
-        }
+        endUnseenExits(on: &scene)
 
         // Build per-parent child lists & parent origins for local-frame snapping / replaced-view detection.
         var childrenByParent: [NodeId: [NodeId]] = [:]
@@ -407,7 +437,7 @@ extension Runtime {
         var replacedParents: Set<NodeId> = []
         for (pid, prevKids) in unseenPresence.prevChildrenByParent {
             let hadSeenRemoved = prevKids.contains { kid in
-                unseenPresence.seenIds.contains(kid) && !newIdSet.contains(kid)
+                kitHooks.unseenPresence.frameById[kid]?.inView == true && !newIdSet.contains(kid)
             }
             if hadSeenRemoved {
                 replacedParents.insert(pid)
@@ -467,7 +497,7 @@ extension Runtime {
 
                 // 3. `unseen_before_and_after`: rows staying unseen snap their layout frame and visuals
                 // so offscreen reflow/colour changes do not animate invisibly (`unseen_presence.rs`).
-                if unseenPresence.unseenIds.contains(id) {
+                if kitHooks.unseenPresence.frameById[id]?.inView == false {
                     let parentOrigin = spec.parent.flatMap { specById[$0]?.rect.origin } ?? .zero
                     let localFrame = MotionRect(
                         left: spec.rect.left - parentOrigin.x,
@@ -488,7 +518,7 @@ extension Runtime {
             } else if !reducedMotion,
                       spec.transition != nil,
                       unseenPresence.prevMountedIds.contains(id),
-                      unseenPresence.unseenIds.contains(id),
+                      kitHooks.unseenPresence.frameById[id]?.inView == false,
                       let prevSnap = unseenPresence.prevNodesById[id] {
                 // 4. `reenter_unseen_row`: previously unseen row entering view on a replaced/filtered
                 // list (not merely scrolled into view) restarts its entrance fade from 0 -> 1.
@@ -509,47 +539,25 @@ extension Runtime {
         return didReenter
     }
 
-    internal func landUnseenEntrances(frameNodes: [Presented], on scene: inout Scene) {
-        unseenPresence.unseenIds = unseenPresence.currentPaintUnseenIds
-        unseenPresence.seenIds = unseenPresence.currentPaintSeenIds
-
-        var ancestors: Set<NodeId> = []
-        for id in unseenPresence.seenIds {
-            if let node = nodeById[id] {
-                var parent = node.parentIndex
-                while let pIdx = parent, pIdx < flatNodes.count {
-                    let pid = flatNodes[pIdx].nodeId
-                    if !ancestors.insert(pid).inserted { break }
-                    parent = flatNodes[pIdx].parentIndex
-                }
-            }
-        }
-        unseenPresence.seenAncestorIds = ancestors
-
-        // Entrances land only when they draw out of view (`land_unseen_entrances` checks geometry):
-        // an entrance still transparent at its start, or held by `enterDelay`, keeps animating.
-        for p in frameNodes where !p.isExiting {
-            if unseenPresence.currentPaintOffscreenIds.contains(p.id), scene.phase(p.id) == .entering {
-                scene.enterNow(p.id)
-            }
+    internal func landUnseenEntrances(on scene: inout Scene) {
+        for id in kitHooks.unseenPresence.offscreenEntrances
+        where kitHooks.unseenPresence.frameById[id]?.geometricallyInView == false && scene.phase(id) == .entering {
+            scene.enterNow(id)
         }
     }
 
-    /// Ends exits that drew nothing on the last frame (already faded or clipped out of view).
-    func endUnseenExits(on scene: inout Scene, activeFlightIds: Set<NodeId>) {
-        guard kitHooks.unseenPresence.hasBuilt else { return }
-        var toUnmount: [NodeId] = []
+    /// A hidden parent may still paint a visible child outside its bounds.
+    func endUnseenExits(on scene: inout Scene) {
+        guard kitHooks.unseenPresence.hasBuilt, !exitingSnapshots.isEmpty else { return }
+        var ancestors: Set<NodeId>?
         for id in exitingSnapshots.keys {
-            guard case .exiting = scene.phase(id) else { continue }
-            guard !activeFlightIds.contains(id) else { continue }
-            let saw = kitHooks.unseenPresence.frameSeenById[id] ?? false
-            let alpha = kitHooks.unseenPresence.frameInhOpacityById[id] ?? 1.0
-            if !saw || alpha < (1.0 / 512.0) {
-                toUnmount.append(id)
-            }
-        }
-        for id in toUnmount {
-            scene.unmount(id)
+            guard case .exiting = scene.phase(id),
+                  !activeFlightIds.contains(id), !launchedFlightIds.contains(id),
+                  !unclippedMatchedFlightIds.contains(id),
+                  let previous = kitHooks.unseenPresence.frameById[id],
+                  !previous.visible || previous.inheritedOpacity < (1.0 / 512.0) else { continue }
+            if ancestors == nil { ancestors = kitHooks.unseenPresence.visibleAncestors() }
+            if ancestors?.contains(id) == false { scene.unmount(id) }
         }
     }
 
@@ -629,18 +637,4 @@ extension Runtime {
         }
     }
 
-    /// Immediately unmounts any exiting node that drew nothing on the just-finished frame
-    /// (`unseen_presence.rs:end_unseen_exits`), skipping active matched flights.
-    internal func endUnseenExits(on scene: inout Scene) {
-        for id in unseenPresence.currentPaintUnseenIds {
-            guard case .exiting = scene.phase(id),
-                  !unseenPresence.seenAncestorIds.contains(id),
-                  !activeFlightIds.contains(id),
-                  !launchedFlightIds.contains(id),
-                  !unclippedMatchedFlightIds.contains(id) else {
-                continue
-            }
-            scene.unmount(id)
-        }
-    }
 }

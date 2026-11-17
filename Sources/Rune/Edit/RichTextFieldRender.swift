@@ -35,7 +35,7 @@ internal enum RichTextFieldRender {
         pxScale: Float,
         shapingScale: Float,
         rect: (SIMD4<Float>, Float, Color) -> Void,
-        glyph: (SIMD4<Float>, SIMD4<Float>, UInt16, Color) -> Void
+        glyph: (SIMD4<Float>, PositionedGlyph, Color) -> Void
     ) {
         guard blocks.contains(where: { $0 != .paragraph }) else { return }
 
@@ -142,7 +142,7 @@ internal enum RichTextFieldRender {
                 let top = scaleVec.y == 1 ? y.rounded() : y
                 for q in label.glyphs {
                     glyph(SIMD4(left + q.rect.x * sx, top + q.rect.y * sy, q.rect.z * sx, q.rect.w * sy),
-                          q.uv, q.atlasPage, ink)
+                          q, ink)
                 }
             default:
                 break

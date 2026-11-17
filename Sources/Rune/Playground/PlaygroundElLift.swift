@@ -10,7 +10,8 @@ extension El {
         set: @escaping (State) -> Void
     ) -> El<Parent> {
         var out = El<Parent>(direction: layout.direction)
-        out.keyId = keyId
+        out.storageKeyId = storageKeyId
+        if let authoredByteExactKey { out.authoredByteExactKey = authoredByteExactKey }
         out.role = role
         out.layout = layout
 
@@ -150,6 +151,7 @@ extension El {
         if let anchor { out.anchor = anchor }
         if let layoutAnim { out.layoutAnim = layoutAnim }
         if let styleSpring { out.styleSpring = styleSpring }
+        if let blurMotionOverride { out.blurMotionOverride = blurMotionOverride }
         if let transition { out.transition = transition }
         if enterDelay != 0 { out.enterDelay = enterDelay }
         if hasInstantChanges { out.hasInstantChanges = true }
@@ -271,6 +273,7 @@ extension El {
         lifted.onKey = wrapBool1(h.onKey)
         lifted.onPhysicalInput = wrapBool1(h.onPhysicalInput)
         lifted.onWheel = wrapBool1(h.onWheel)
+        if let fieldSingleLine { out.isSingleLineInput = fieldSingleLine }
         if let lens = h.editLens {
             hasHandler = true
             lifted.editLens = (

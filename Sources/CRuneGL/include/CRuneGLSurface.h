@@ -26,6 +26,15 @@ int rune_gl_configure_surfaces(RuneGL *r, const char *vertex, const char *fragme
 int rune_gl_surface_upload(RuneGL *r, uint64_t key, uint64_t version, int width,
                            int height, int format, const uint8_t *plane0, size_t bytes0,
                            const uint8_t *plane1, size_t bytes1, char *error, size_t capacity);
+/* The callback fills an allocated RGBA8 texture on the current context.
+ * Returns zero on unsupported interop so the caller can upload the original planes. */
+typedef int (*RuneGLSurfaceCopy)(void *source, uint32_t texture);
+int rune_gl_surface_copy_rgba(RuneGL *r, uint64_t key, uint64_t version, int width, int height,
+                              RuneGLSurfaceCopy copy, void *source, char *error, size_t capacity);
+/* The callback fills the luma R8 texture and half-size chroma RG8 texture together. */
+typedef int (*RuneGLPlaneCopy)(void *source, uint32_t luma, uint32_t chroma);
+int rune_gl_surface_copy_nv12(RuneGL *r, uint64_t key, uint64_t version, int width, int height,
+                              int format, RuneGLPlaneCopy copy, void *source, char *error, size_t capacity);
 /* Fence-based completion. A wait returns 1 for completion, 0 if polling a
  * pending fence, and -1 on an invalid/lost context. */
 void *rune_gl_surface_fence(RuneGL *r);

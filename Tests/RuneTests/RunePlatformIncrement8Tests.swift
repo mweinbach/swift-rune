@@ -640,6 +640,17 @@ struct RunePlatformIncrement8Tests {
         #expect(!driver.isMoving)
         #expect(Int(window.contentRect(forFrameRect: window.frame).width.rounded()) == 460)
         #expect(Int(window.contentRect(forFrameRect: window.frame).height.rounded()) == 300)
+
+        driver.applyRequest(
+            WindowFrameRequest(size: (640, 480), animate: true, spring: MotionTokens.DEFAULT),
+            window: window, now: 2, minSize: (200, 150), maxSize: nil, scale: 2
+        ) { _, _ in }
+        #expect(driver.step(window: window, now: 2.05, scale: 2) { _, _ in })
+        let frameAtGrab = window.frame
+        driver.userStartedResizing()
+        driver.landFrame(window: window)
+        #expect(!driver.step(window: window, now: 3, scale: 2) { _, _ in })
+        #expect(window.frame == frameAtGrab)
     }
     #endif
 

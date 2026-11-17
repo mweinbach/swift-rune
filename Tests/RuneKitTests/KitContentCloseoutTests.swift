@@ -174,14 +174,14 @@ struct KitContentCloseoutTests {
             .label("Lock")
             .build(k)
         #expect(defaultBtn.background == k.c.bgButtonNeutral)
-        #expect(defaultBtn.borderWidth == 1)
-        #expect(defaultBtn.borderColor == k.c.borderBase)
+        #expect(defaultBtn.borderWidth == 0)
+        #expect(defaultBtn.shadows == k.shadowLayers(k.elevation.buttonNeutral))
         #expect(defaultBtn.corners == .all(k.radius.md))
         #expect(defaultBtn.children.first?.keyId == "icon")
         #expect(defaultBtn.children.first?.isA11yHidden == true)
         #expect(defaultBtn.children.first?.iconPayload?.1 == 16)
-        #expect(defaultBtn.children.first?.textColor == k.c.iconBase)
-        #expect(defaultBtn.a11yDescription == nil)
+        #expect(defaultBtn.children.first?.textColor == k.c.textBase)
+        #expect(defaultBtn.a11yDescription == "")
 
         // 2. GhostMuted rest vs pressed vs expanded(true)
         let gmRest: El<S> = IconButton<S>(key: "gm-rest", svg: KitIcons.lock)
@@ -200,7 +200,7 @@ struct KitContentCloseoutTests {
             .build(k)
         #expect(gmRest.background == .transparent)
         #expect(gmRest.children.first?.textColor == k.c.iconMuted)
-        #expect(gmPressed.background == .transparent)
+        #expect(gmPressed.background == k.c.pressed)
         #expect(gmPressed.children.first?.textColor == k.c.iconBase)
         #expect(gmExpanded.background == k.c.pressed)
         #expect(gmExpanded.children.first?.textColor == k.c.iconBase)
@@ -283,6 +283,7 @@ struct KitContentCloseoutTests {
             }
             return nil
         }
+        #expect((findNode(a11y, id: "help-only")?.help ?? "").isEmpty)
         #expect(findNode(a11y, id: "help-only")?.keyboardShortcut == "\(command)O")
         #expect(findNode(a11y, id: "lbl-help")?.keyboardShortcut == "\(command)L")
         #expect(findNode(a11y, id: "cmd-btn")?.keyboardShortcut == "\(command)O")

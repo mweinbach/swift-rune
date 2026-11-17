@@ -331,6 +331,35 @@ struct TextClipboardImageParityTests {
         #expect(RuneCollation.compareNames("Alpha", "alpha") != .orderedSame)
     }
 
+    @Test("Collation preserves UTF-8 identity after ties and reads beyond embedded NULs")
+    func collationTotalOrder() {
+        let order = RuneCollation.nameOrder(languageTag: "en-US")
+        #expect(order("e\u{301}", "\u{e9}") == .orderedAscending)
+        #expect(order("\u{e9}", "e\u{301}") == .orderedDescending)
+        #expect(order("\u{e9}", "\u{e9}") == .orderedSame)
+        #expect(order("a\0z", "a\0a") == .orderedDescending)
+        #expect(order("", "a") == .orderedAscending)
+        #expect(RuneCollation.compareNamesNatural("f02", "f2") == .orderedSame)
+        #expect(RuneCollation.compareNamesNatural("f" + String(repeating: "9", count: 40),
+                                                  "f1" + String(repeating: "0", count: 40)) == .orderedAscending)
+    }
+
+    @Test("Filename sorting captures the interface locale for one sort")
+    func collationSelectedLanguage() {
+        let swedish = RuneCollation.nameOrder(languageTag: "sv-SE")
+        let german = RuneCollation.nameOrder(languageTag: "de-DE")
+        #if os(macOS) || os(Windows)
+        #expect(german("ä", "z") == .orderedAscending)
+        #else
+        #expect(german("ä", "z") == .orderedDescending)
+        #endif
+        #expect(swedish("ä", "z") == .orderedDescending)
+        #if os(Windows)
+        let unknown = RuneCollation.nameOrder(languageTag: "# invalid #")
+        #expect(unknown("ä", "z") == RuneCollation.compareNamesNatural("ä", "z"))
+        #endif
+    }
+
     // MARK: - Linear Light Mip Generator & Odd Edges
 
     @Test("LinearMipGenerator & MipStepper match linear premultiplied float reference across odd dimensions")

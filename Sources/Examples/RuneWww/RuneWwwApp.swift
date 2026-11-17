@@ -8,6 +8,10 @@ public enum WwwConstants {
     public static let brand: String = "/rune/"
     public static let rev: String = ProcessInfo.processInfo.environment["RUNE_REV"] ?? "dev"
     public static let copiedDuration: Double = 1.6
+
+    static var uptimeNanoseconds: UInt64 {
+        UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000_000)
+    }
 }
 
 public final class WwwImageBox: @unchecked Sendable {
@@ -25,7 +29,7 @@ public struct WwwState: Sendable {
     public var seen: Set<String> = []
     public var copiedUntil: Double?
     public var clockSeconds: Double = 0.0
-    public var clockTimestamp: UInt64 = DispatchTime.now().uptimeNanoseconds
+    public var clockTimestamp: UInt64 = WwwConstants.uptimeNanoseconds
     public var notFound: Bool
 
     public init(imageBox: WwwImageBox = WwwImageBox(), notFound: Bool? = nil) {
@@ -34,7 +38,8 @@ public struct WwwState: Sendable {
     }
 
     public func clockNow() -> Double {
-        let elapsedNs = DispatchTime.now().uptimeNanoseconds &- clockTimestamp
+        let current = WwwConstants.uptimeNanoseconds
+        let elapsedNs = current >= clockTimestamp ? current - clockTimestamp : 0
         return clockSeconds + Double(elapsedNs) / 1_000_000_000.0
     }
 
@@ -44,7 +49,7 @@ public struct WwwState: Sendable {
 
     public mutating func poll(at t: Double, tx: inout Tx) -> Bool {
         clockSeconds = t
-        clockTimestamp = DispatchTime.now().uptimeNanoseconds
+        clockTimestamp = WwwConstants.uptimeNanoseconds
 
         var changed = false
         var moving = false

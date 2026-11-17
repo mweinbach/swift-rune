@@ -215,13 +215,18 @@ public struct DuplicateKeyWarning: Sendable, Equatable {
 
 /// Validates and repairs per-parent duplicate sibling keys (`crates/rune/src/input/key_diagnostics.rs`).
 public enum KeyDiagnostics {
-    private static func uniqueSiblings<State>(_ children: [El<State>]) -> Bool {
+    static func uniqueSiblings<State>(_ children: [El<State>]) -> Bool {
+        guard children.count > 1 else { return true }
+        if children.count <= 8 {
+            for i in children.indices {
+                guard let key = children[i].storageKeyId else { continue }
+                for j in (i + 1)..<children.count where children[j].storageKeyId == key { return false }
+            }
+            return true
+        }
         var seen = Set<String>()
         for child in children {
-            guard let k = child.keyId, !k.isEmpty else { continue }
-            if !seen.insert(k).inserted {
-                return false
-            }
+            if let key = child.storageKeyId, !seen.insert(key).inserted { return false }
         }
         return true
     }
@@ -232,6 +237,9 @@ public enum KeyDiagnostics {
 
     /// Returns `true` when no parent in `root` has two sibling children sharing a key (`key_diagnostics::clean`).
     public static func clean<State>(_ root: El<State>) -> Bool {
+        if let owner = root.memoLayoutChildren, owner.matches(root.children) {
+            return !owner.traits.contains(.duplicateKeys) && !(checksSiblings(root) && owner.duplicateSiblings)
+        }
         if checksSiblings(root) && !uniqueSiblings(root.children) {
             return false
         }
@@ -245,6 +253,7 @@ public enum KeyDiagnostics {
 
     /// Collects per-parent duplicate sibling key diagnostics under `root` (`key_diagnostics::find` / `warnings`).
     public static func find<State>(in root: El<State>, path: String? = nil) -> [DuplicateKeyWarning] {
+        guard !clean(root) else { return [] }
         var out: [DuplicateKeyWarning] = []
         func walk(_ el: El<State>, path: String) {
             if checksSiblings(el) {
@@ -252,12 +261,13 @@ public enum KeyDiagnostics {
                 var dupPaths: [String: [String]] = [:]
                 var order: [String] = []
                 for (idx, child) in el.children.enumerated() {
-                    guard let k = child.keyId, !k.isEmpty else { continue }
-                    let childPath = "\(path)/\(k)"
+                    guard let k = child.storageKeyId else { continue }
+                    let authored = child.keyId ?? k
+                    let childPath = "\(path)/\(authored)"
                     if let first = firstIdx[k] {
                         if dupPaths[k] == nil {
                             order.append(k)
-                            dupPaths[k] = ["\(path)/\(k)#\(first)"]
+                            dupPaths[k] = ["\(path)/\(authored)#\(first)"]
                         }
                         dupPaths[k, default: []].append("\(childPath)#\(idx)")
                     } else {
@@ -266,8 +276,9 @@ public enum KeyDiagnostics {
                 }
                 for k in order {
                     let paths = dupPaths[k] ?? []
-                    let msg = "duplicate sibling key \"\(k)\" under \"\(path)\": give siblings unique keys"
-                    out.append(DuplicateKeyWarning(key: k, count: paths.count, paths: paths, message: msg))
+                    let authored = firstIdx[k].flatMap { el.children[$0].keyId } ?? k
+                    let msg = "duplicate sibling key \"\(authored)\" under \"\(path)\": give siblings unique keys"
+                    out.append(DuplicateKeyWarning(key: authored, count: paths.count, paths: paths, message: msg))
                 }
             }
             for (idx, child) in el.children.enumerated() where !clean(child) {
@@ -288,6 +299,12 @@ public enum KeyDiagnostics {
     /// (`key_diagnostics::rename_duplicates`). Returns `(index, oldKey)` for each renamed slot.
     @discardableResult
     public static func renameDuplicates(_ keys: inout [String]) -> [(index: Int, oldKey: String)] {
+        renameDuplicates(&keys, candidate: { "\($0)#dup\($1)" })
+    }
+
+    internal static func renameDuplicates(
+        _ keys: inout [String], candidate: (String, Int) -> String
+    ) -> [(index: Int, oldKey: String)] {
         var taken = Set(keys)
         guard taken.count != keys.count else { return [] }
         var kept = Set<String>()
@@ -299,16 +316,16 @@ public enum KeyDiagnostics {
                 continue
             }
             var n = nextSuffix[cur, default: 1]
-            var candidate = "\(cur)#dup\(n)"
-            while taken.contains(candidate) {
+            var name = candidate(cur, n)
+            while taken.contains(name) {
                 n += 1
-                candidate = "\(cur)#dup\(n)"
+                name = candidate(cur, n)
             }
             nextSuffix[cur] = n + 1
-            taken.insert(candidate)
-            kept.insert(candidate)
+            taken.insert(name)
+            kept.insert(name)
             renamed.append((i, cur))
-            keys[i] = candidate
+            keys[i] = name
         }
         return renamed
     }
@@ -316,31 +333,61 @@ public enum KeyDiagnostics {
     /// Repairs duplicate sibling keys across `root` (`key#dup1`, `key#dup2`, ...), returning both the repaired
     /// element tree and the diagnostics for duplicates found (`key_diagnostics::repair`).
     public static func repair<State>(_ root: El<State>) -> (tree: El<State>, warnings: [DuplicateKeyWarning]) {
-        let warns = find(in: root)
+        repair(root, at: nil) { _ in }
+    }
+
+    struct Rename {
+        let path: String
+        let originalKey: String
+        let originalStorage: String
+        let warning: String
+    }
+
+    static func repair<State>(_ root: El<State>, at mountedPath: String?, onRename: (Rename) -> Void)
+        -> (tree: El<State>, warnings: [DuplicateKeyWarning]) {
+        let warns = find(in: root, path: mountedPath)
         guard !warns.isEmpty else { return (root, []) }
-        func rewrite(_ el: El<State>) -> El<State> {
+        func rewrite(_ el: El<State>, path: String) -> El<State> {
             var copy = el
             if checksSiblings(copy) && !uniqueSiblings(copy.children) {
                 var keyedIndices: [Int] = []
                 var keyedStrings: [String] = []
+                var authoredByStorage: [String: String] = [:]
                 for (i, c) in copy.children.enumerated() {
-                    if let k = c.keyId, !k.isEmpty {
+                    if let k = c.storageKeyId {
                         keyedIndices.append(i)
                         keyedStrings.append(k)
+                        if let authored = c.authoredByteExactKey { authoredByStorage[k] = authored }
                     }
                 }
-                let changes = renameDuplicates(&keyedStrings)
-                for (localIdx, _) in changes {
+                let changes = renameDuplicates(&keyedStrings) { stored, suffix in
+                    guard let authored = authoredByStorage[stored] else { return "\(stored)#dup\(suffix)" }
+                    let exact = matchesAuthoredKey(VirtualRowKeyEncoding.storageKey(authored), stored)
+                    return VirtualRowKeyEncoding.storageKey("\(authored)#dup\(suffix)", byteExact: exact)
+                }
+                for (localIdx, originalStorage) in changes {
                     let childIdx = keyedIndices[localIdx]
-                    copy.children[childIdx].keyId = keyedStrings[localIdx]
+                    let original = copy.children[childIdx].keyId ?? originalStorage
+                    let stored = keyedStrings[localIdx]
+                    if copy.children[childIdx].authoredByteExactKey != nil {
+                        copy.children[childIdx].storageKeyId = stored
+                        copy.children[childIdx].authoredByteExactKey = VirtualRowKeyEncoding.authoredKey(stored)
+                    } else {
+                        copy.children[childIdx].keyId = stored
+                    }
+                    let repaired = copy.children[childIdx]
+                    onRename(Rename(path: "\(path)/@\(keyedStrings[localIdx])", originalKey: original, originalStorage: originalStorage,
+                                    warning: "Duplicate sibling key '\(original)' renamed to '\(repaired.keyId ?? keyedStrings[localIdx])' under \(path)"))
                 }
             }
-            if !copy.children.isEmpty {
-                copy.children = copy.children.map(rewrite)
+            for i in copy.children.indices where !clean(copy.children[i]) {
+                let child = copy.children[i]
+                let segment = child.storageKeyId.map { "@\($0)" } ?? String(i)
+                copy.children[i] = rewrite(child, path: "\(path)/\(segment)")
             }
             return copy
         }
-        return (rewrite(root), warns)
+        return (rewrite(root, path: mountedPath ?? root.storageKeyId.map { "/@\($0)" } ?? "/0"), warns)
     }
 
     /// Compatibility alias for `repair(_:)`.
@@ -352,26 +399,27 @@ public enum KeyDiagnostics {
 extension Runtime {
     /// Inspects the mounted flat tree for duplicate sibling keys under any non-virtualized parent.
     public func siblingKeyWarnings() -> [DuplicateKeyWarning] {
-        var byParent: [Int: [(idx: Int, key: String, path: String)]] = [:]
+        var byParent: [Int: [(storage: String, key: String, path: String)]] = [:]
         for idx in flatNodes.indices {
             let node = flatNodes[idx]
             guard let pIdx = node.parentIndex,
                   flatNodes[pIdx].el.virtualEstimate == nil,
-                  let k = node.key, !k.isEmpty else { continue }
-            byParent[pIdx, default: []].append((idx, k, node.path))
+                  let storage = renamedSiblingKeys[node.path]?.originalStorage ?? node.el.storageKeyId,
+                  let key = renamedSiblingKeys[node.path]?.originalKey ?? node.key else { continue }
+            byParent[pIdx, default: []].append((storage, key, node.path))
         }
         var out: [DuplicateKeyWarning] = []
         for pIdx in byParent.keys.sorted() {
             let children = byParent[pIdx] ?? []
             var groups: [String: [String]] = [:]
-            var order: [String] = []
+            var order: [(storage: String, key: String)] = []
             for c in children {
-                if groups[c.key] == nil { order.append(c.key) }
-                groups[c.key, default: []].append(c.path)
+                if groups[c.storage] == nil { order.append((c.storage, c.key)) }
+                groups[c.storage, default: []].append(c.path)
             }
             let pPath = flatNodes[pIdx].path
-            for k in order {
-                let paths = groups[k] ?? []
+            for (storage, k) in order {
+                let paths = groups[storage] ?? []
                 if paths.count > 1 {
                     let msg = "duplicate sibling key \"\(k)\" under \"\(pPath)\": give siblings unique keys"
                     out.append(DuplicateKeyWarning(key: k, count: paths.count, paths: paths, message: msg))

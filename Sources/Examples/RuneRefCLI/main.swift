@@ -350,7 +350,7 @@ enum RuneRefCLI {
         var hitKind: PrimitiveKind? = nil
         for (idx, prim) in scene.primitives.enumerated().reversed() {
             if prim.kind == .layerBegin || prim.kind == .layerEnd { continue }
-            let cov = RefShader.evaluatePrimitive(prim, fragCoord: frag, glyphs: scene.glyphs, images: scene.images, srgbBlend: scene.srgbBlend)
+            let cov = RefShader.evaluatePrimitive(prim, fragCoord: frag, glyphs: scene.glyphAtlas(forPage: prim.glyphPage), images: scene.imageAtlas(forPage: prim.imagePage), srgbBlend: scene.srgbBlend)
             if cov.w > 0 {
                 hitIndex = idx
                 hitKind = prim.kind

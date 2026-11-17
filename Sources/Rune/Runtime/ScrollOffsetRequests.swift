@@ -4,6 +4,21 @@ import RuneMotion
 // MARK: - App offset requests (`crates/rune/src/runtime/scroll/offset.rs`)
 
 extension Runtime {
+    /// `scroll_viewport_on`: a key or highlight selects the nearest viewport supporting
+    /// an axis the request names. Nested horizontal lists can sit inside a vertical scroll.
+    internal func scrollViewportForOffset(key: String, x: Float?, y: Float?) -> Int? {
+        var candidate = mountedScrollAnchor(key: key)?.index
+        while let index = candidate {
+            let node = flatNodes[index]
+            let axes = node.el.layout.scrollAxes
+            if (x != nil && axes.contains(.horizontal)) || (y != nil && axes.contains(.vertical)) {
+                return index
+            }
+            candidate = node.parentIndex
+        }
+        return nil
+    }
+
     /// Moves viewport `path` to `next`, clamped to its content: on `glide` (motion on and not a
     /// cut) the scroll track springs there, otherwise the offset lands at once. `animNow` is the
     /// animation clock the spring starts on.
@@ -27,7 +42,6 @@ extension Runtime {
             scrollOffsets[path] = clamped
             scrollGlidingPaths.remove(path)
             frameInstantScrollKey = path
-            clearScrollHandGliding(path: path)
         }
         if maxExt.y > 0.5 && abs(clamped.y - maxExt.y) <= 1.0 {
             wasPinnedToBottom.insert(path)
@@ -48,7 +62,7 @@ extension Runtime {
     /// own motion only. App requests arm the viewport's hover hold after a jump of more than
     /// 1e-3 (`st.nudge.arm(now)`). Keyboard paging releases that hold. Returns whether a jump moved it.
     @discardableResult
-    internal func applyScrollOffsetRequest(path: String, x reqX: Float?, y reqY: Float?, glide: Spring?, cut: Bool, animNow: Double, holdHover: Bool = true) -> Bool {
+    internal func applyScrollOffsetRequest(path: String, x reqX: Float?, y reqY: Float?, glide: Spring?, cut: Bool, animNow: Double, holdHover: Bool = true, recordJump: Bool = false) -> Bool {
         let axes = nodeByPath[path].map { flatNodes[$0].el.layout.scrollAxes } ?? .both
         let want: [Float?] = [
             axes.contains(.horizontal) ? reqX : nil,
@@ -83,6 +97,7 @@ extension Runtime {
         var land: [Float?] = [nil, nil]
         var glides: [(end: Float, v: Float, aim: Float)?] = [nil, nil]
         var moved = false
+        var jumped = false
         for a in 0..<2 {
             guard let w = want[a] else { continue }
             let to = max(0, w)
@@ -97,6 +112,7 @@ extension Runtime {
                 glides[a] = (end, ScrollAxisHelper.retargetV(spring: spring, offset: Double(start), v: v0, to: Double(end)), to)
             } else {
                 land[a] = end
+                jumped = true
                 // `apply_jumps`: a jump that moved its axis more than 1e-3 arms the hold.
                 if abs(end - was) > 1e-3 { moved = true }
             }
@@ -143,7 +159,6 @@ extension Runtime {
             if !othersMoving {
                 scrollGlidingPaths.remove(path)
                 scrollOffsetAims.removeValue(forKey: path)
-                clearScrollHandGliding(path: path)
             }
             frameInstantScrollKey = path
         }
@@ -156,6 +171,15 @@ extension Runtime {
             wasPinnedToBottom.insert(path)
         } else {
             wasPinnedToBottom.remove(path)
+        }
+        if recordJump && jumped {
+            if moved {
+                markScrollMovedByHand(path: path)
+            } else {
+                // A stationary jump on one axis can accompany a glide on the other. Rust
+                // consumes the jump's direct-movement latch during the next scroll step.
+                pendingScrollJumpPaths.insert(path)
+            }
         }
         if moved && holdHover {
             armScrollNudge(path: path, at: currentTime)

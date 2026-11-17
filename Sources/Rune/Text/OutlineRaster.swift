@@ -7,9 +7,13 @@ import CoreGraphics
 // MARK: - Outline Instance & Constants (rune::text::outline)
 
 /// A glyph drawn from its GPU/CPU quadratic outline record (`rune::text::outline::Outline`).
-public struct GlyphOutline: Sendable, Equatable {
+public struct GlyphOutline: Sendable, Hashable {
     /// Text weight multiplier aligning Windfoil's exact curve integration with CoreText flattening.
     public static let textWeight: Double = 0.93
+    static func dilation(ppem: Float, inkBucket: UInt8, ttHinted: Bool = false) -> Double {
+        let coefficient = 0.0058.addingProduct(Double(min(4, inkBucket)) * 0.25, 0.010000000000000002)
+        return min(Double(Float(0.3)), Double(ppem) * coefficient) * (ttHinted ? 0.5 : textWeight)
+    }
     /// Maximum rest-pixel offset applied by CoreGraphics hint transforms.
     public static let hintReach: Float = 1.5
 
@@ -478,6 +482,19 @@ public enum OutlineSupport: Sendable, Equatable {
     case unavailable
 }
 
+/// An immutable copy-on-write view of the packed glyph curves used by a frame.
+/// Records append within a generation. A renderer can upload just the rows
+/// touched since its previous snapshot, even when intermediate frames were skipped.
+public struct RenderOutlineAtlas: Sendable {
+    public let storeID: UUID
+    public let generation: UInt64
+    public let texels: [SIMD4<UInt32>]
+    public let usedTexels: Int
+    public let requestsLCD: Bool
+
+    public func makeStore() -> OutlineStore { OutlineStore(snapshot: self) }
+}
+
 public final class OutlineStore: @unchecked Sendable {
     public static let width: UInt32 = 1024
     public static let maxRows: UInt32 = 4096
@@ -531,6 +548,11 @@ public final class OutlineStore: @unchecked Sendable {
     private var hints: [[UInt32]: UInt32] = [:]
     private var dirty: (UInt32, UInt32)?
     private var full: Bool = false
+    #if os(Linux) || os(Windows) || os(Android)
+    var desktopCoverage = DesktopOutlineCoverageCache()
+    #endif
+    let storeID = UUID()
+    private(set) var generation: UInt64 = 0
     public private(set) var support: OutlineSupport = .untried
 
     public init() {
@@ -539,8 +561,16 @@ public final class OutlineStore: @unchecked Sendable {
     }
 
     public init(texels: [SIMD4<UInt32>]) {
-        self.texels = texels.isEmpty ? Array(repeating: .zero, count: Int(Self.width)) : texels
         self.used = max(1, texels.count)
+        let width = Int(Self.width)
+        let count = ((used + width - 1) / width) * width
+        self.texels = texels
+        self.texels.append(contentsOf: repeatElement(.zero, count: count - texels.count))
+    }
+
+    fileprivate init(snapshot: RenderOutlineAtlas) {
+        self.texels = snapshot.texels
+        self.used = snapshot.usedTexels
     }
 
     public func glyph(_ key: Key, build: () -> BuiltOutline?) -> Found {
@@ -573,6 +603,29 @@ public final class OutlineStore: @unchecked Sendable {
         guard let at = push(hintTexels, relative: false) else { return 0 }
         hints[bits] = at
         return at
+    }
+
+    /// A native text tile may contain overhanging neighbors or combining marks.
+    /// Its descriptor preserves shaping order and each source glyph's pixel crop.
+    func fill(for tile: DesktopOutlineTile) -> OutlineFillParams? {
+        guard tile.generation == generation, let first = tile.components.first else { return nil }
+        if tile.components.count == 1 {
+            var fill = first.fill
+            fill.pen += SIMD2(Float(first.rect.x), Float(first.rect.y))
+            return fill
+        }
+        guard tile.components.count <= 64 else { return nil }
+        var packed: [SIMD4<UInt32>] = [SIMD4(UInt32(tile.components.count), 0, 0, 0)]
+        packed.reserveCapacity(1 + tile.components.count * 3)
+        for part in tile.components {
+            let r = part.rect, f = part.fill
+            let pen = f.pen + SIMD2(Float(r.x), Float(r.y))
+            packed.append(SIMD4(UInt32(r.x), UInt32(r.y), UInt32(r.z), UInt32(r.w)))
+            packed.append(SIMD4(pen.x.bitPattern, pen.y.bitPattern, f.scale.bitPattern, f.radius.bitPattern))
+            packed.append(SIMD4(f.record, f.hint, f.coverage, 0))
+        }
+        guard let record = push(packed, relative: false) else { return nil }
+        return OutlineFillParams(record: record, scale: 1, pen: .zero, coverage: 4)
     }
 
     private func push(_ incoming: [SIMD4<UInt32>], relative: Bool) -> UInt32? {
@@ -610,6 +663,7 @@ public final class OutlineStore: @unchecked Sendable {
     @discardableResult
     public func beginFrame(pinned: Bool) -> Bool {
         guard full && !pinned else { return false }
+        generation &+= 1
         full = false
         used = 1
         glyphs.removeAll(keepingCapacity: true)
@@ -627,6 +681,12 @@ public final class OutlineStore: @unchecked Sendable {
     }
 
     public var hasRecords: Bool { used > 1 }
+
+    public func snapshot(requestsLCD: Bool = false) -> RenderOutlineAtlas? {
+        guard hasRecords || requestsLCD else { return nil }
+        return RenderOutlineAtlas(storeID: storeID, generation: generation,
+                                  texels: texels, usedTexels: used, requestsLCD: requestsLCD)
+    }
 
     public func setSupport(_ support: OutlineSupport) {
         self.support = support

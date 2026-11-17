@@ -1,0 +1,37 @@
+<!doctype html><div id="host" style="width:40px;height:30px"><canvas></canvas></div><pre id="result">Running</pre>
+<script type="module">
+import { mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+const host = document.querySelector('#host'), canvas = document.querySelector('canvas');
+const result = document.querySelector('#result'), memory = new WebAssembly.Memory({initial:1});
+const read = host.getBoundingClientRect.bind(host), decoder = new TextDecoder();
+let measurements = 0, frames = 0, size, app;
+host.getBoundingClientRect = () => { ++measurements; return read(); };
+const next = () => new Promise(resolve => requestAnimationFrame(resolve));
+try {
+    app = mountRuneBrowser(canvas, {exports:{
+        memory, rune_web_enable(){}, __main_void:()=>0, rune_web_buffer:()=>0, rune_web_field:()=>0,
+        rune_web_event(n) {
+            const event=JSON.parse(decoder.decode(new Uint8Array(memory.buffer,0,n)));
+            if(event.kind==='resize') size=[event.x,event.y];
+            return 1;
+        },
+        rune_web_frame() {
+            ++frames;
+            new Uint32Array(memory.buffer,0,3).set([1,1,0xff778899]);
+            return 12;
+        }
+    }},{resizeTo:host});
+    await app.ready;
+    for(let i=0;i<5;i++) await next();
+    const initialReads = measurements, initialFrames = frames;
+    for(let i=0;i<12;i++) await next();
+    if(frames-initialFrames<10 || measurements!==initialReads || String(size)!=='40,30') {
+        throw Error('Repeated frame submissions remeasured the page: '+[initialReads,measurements,initialFrames,frames,size]);
+    }
+    host.style.width='57px';
+    for(let i=0;i<10 && size[0]!==57;i++) await next();
+    if(String(size)!=='57,30' || measurements<=initialReads)throw Error('DOM resize did not reach Rune');
+    result.textContent='PASS repeated submissions avoid DOM layout measurements; actual element resize reaches Rune';
+} catch(error){result.textContent='FAIL '+error.stack;}
+finally{app?.dispose();}
+</script>

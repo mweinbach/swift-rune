@@ -236,14 +236,25 @@ public enum CaretVisualStepper: Sendable {
         let right = arrow == .right || arrow == .wordRight
         guard var index = line.neighbor(right: right) else { return (.edge, line.flow) }
         if arrow == .wordLeft || arrow == .wordRight {
-            let boundaries = Set(line.text.ranges(of: #/\b/#.wordBoundaryKind(.default)).map {
-                line.utf8Start + line.text.utf8.distance(from: line.text.startIndex, to: $0.lowerBound)
+            #if canImport(Darwin) || os(Linux) || os(Android)
+            let boundaries = NativeWordSegmentation.visualWordBreaks(in: line.text)
+            #else
+            let standard = Set(line.text.ranges(of: #/\b/#.wordBoundaryKind(.default)).map {
+                line.text.utf8.distance(from: line.text.startIndex, to: $0.lowerBound)
             })
+            #if os(WASI) && RUNE_BROWSER_TEXT
+            let boundaries = BrowserSegmentation.dictionaryBreaks(standard, in: line.text, words: true)
+            #elseif os(Windows)
+            let boundaries = WindowsWordSegmenter.visualWordBreaks(standard, in: line.text)
+            #else
+            let boundaries = standard
+            #endif
+            #endif
             let step = right ? 1 : -1
             while line.cells.indices.contains(index + step) {
                 let cell = line.cells[index]
                 let edge = right == cell.rtl ? cell.range.lowerBound : cell.range.upperBound
-                if boundaries.contains(edge) && !cell.space { break }
+                if boundaries.contains(edge - line.utf8Start) && !cell.space { break }
                 index += step
             }
         }
@@ -388,8 +399,8 @@ extension TextEdit {
         return uaxWordSegment(in: text[start..<end], forward: true)
     }
 
-    /// Use the same Unicode word boundaries as visual arrow navigation. A segment is a word
-    /// if it contains a letter or number, as in upstream `edit/caret_motion.rs`.
+    /// Logical motion uses UAX #29. A segment is a word if it contains a letter or number
+    /// (`edit/caret_motion.rs`), while a visual word follows the shaped line's dictionary.
     private func uaxWordSegment(in line: Substring, forward: Bool) -> (Int, Bool)? {
         let boundaries = line.ranges(of: #/\b/#.wordBoundaryKind(.default))
         guard let edge = (forward ? boundaries.dropFirst().first : boundaries.dropLast().last)?.lowerBound else { return nil }

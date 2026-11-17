@@ -385,7 +385,8 @@ extension Runtime {
             : nil
         var alonePath: String? = nil
         var sharedHoverKeys: Set<String> = []
-        for node in flatNodes {
+        for i in hoverGroupIndices {
+            let node = flatNodes[i]
             if node.effectiveInert { continue }
             let inside = GroupHoverContext.isPtrInside(
                 node,
@@ -421,10 +422,33 @@ extension Runtime {
         )
     }
 
+    internal func indexHoverParticipants() {
+        hoverTrackIndices.removeAll(keepingCapacity: true)
+        hoverGroupIndices.removeAll(keepingCapacity: true)
+        hasHoverChangeHandlers = false
+        hasAuthoredHoverCurves = false
+        for (i, node) in flatNodes.enumerated() {
+            let el = node.el
+            if (el.hoverBg?.a ?? 0) > 0 || el.isHoverGroup || el.hoverGroupShare != nil { hoverTrackIndices.append(i) }
+            if el.isHoverAlone || el.hoverGroupShare != nil { hoverGroupIndices.append(i) }
+            if el.handlers.onHoverChange != nil { hasHoverChangeHandlers = true }
+            if el.hoverWithinSpec != nil || el.hoverMotionSpec != nil { hasAuthoredHoverCurves = true }
+        }
+        hoverOrderMatchesPaint = flatNodes.count == builtHoverIds.count
+            && flatNodes.lazy.map(\.nodeId).elementsEqual(builtHoverIds)
+    }
+
+    internal func publishHoverOrder() {
+        guard !hoverOrderMatchesPaint else { return }
+        builtHoverIds = flatNodes.map(\.nodeId)
+        hoverOrderMatchesPaint = true
+    }
+
     internal func rebuildHoverCurves(for nodes: [FlatNode]) {
         inheritedHoverCurvesByPath.removeAll(keepingCapacity: true)
         anchorHoverWithinByKey.removeAll(keepingCapacity: true)
         hoverCurvesById.removeAll(keepingCapacity: true)
+        guard hasAuthoredHoverCurves else { return }
 
         var byKey: [String: Int] = [:]
         for (i, n) in nodes.enumerated() {
@@ -566,7 +590,7 @@ extension Runtime {
         // The hover tracks that would change (`hover_flip`): one carried by moving layout holds,
         // except a leave from an element turned inert (`Flip::now`).
         let ctx = hoverFlipContext()
-        for idx in flatNodes.indices where hasHoverTrack(idx) && !hoverIsExiting(idx) {
+        for idx in hoverTrackIndices where !hoverIsExiting(idx) {
             let on = hoverFlipOn(idx, ctx)
             let target: Float = on ? 1.0 : 0.0
             let now = !on && !hoverAllowed(idx)
@@ -690,11 +714,11 @@ extension Runtime {
         // Hit tests read the last build's drawn rects by node. When a commit moved the nodes
         // (or nothing has been built yet), they belong to other elements until the build
         // re-evaluates from fresh geometry (`update_interaction`'s `built_ids` check).
-        if !cut && !flatNodes.lazy.map(\.nodeId).elementsEqual(builtHoverIds) { return }
+        if !cut && !hoverOrderMatchesPaint { return }
         let ctx = hoverFlipContext()
         var unseen: [Bool]? = nil
-        for (i, node) in flatNodes.enumerated() {
-            guard hasHoverTrack(i), !hoverIsExiting(i) else { continue }
+        for i in hoverTrackIndices where !hoverIsExiting(i) {
+            let node = flatNodes[i]
             let nid = node.nodeId
             let trackId = Self.hoverTrackId(nid)
             let isLit = hoverFlipOn(i, ctx)
@@ -830,8 +854,7 @@ extension Runtime {
     }
 
     internal func computeHoverWithin() -> (inside: [String], entering: [Int])? {
-        let hasAny = !hoverWithinPaths.isEmpty || !hoverDelays.isEmpty
-            || flatNodes.contains { $0.el.handlers.onHoverChange != nil }
+        let hasAny = !hoverWithinPaths.isEmpty || !hoverDelays.isEmpty || hasHoverChangeHandlers
         guard hasAny else { return nil }
 
         var inside: [String] = []

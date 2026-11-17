@@ -50,7 +50,8 @@ struct RuneGLLayers {
     GLint mode, radius, horizontal, bounds, rect, clip, radii, fade, pose, srgb_blend, display_srgb;
     GLint frame_style, frame_clip, clip_widths, clip_offsets, clip_corners, hole;
     GLint target_rect, source_rect, clear_color;
-    int es, width, height, depth, gamma, checked_layer_format;
+    int backdrop_count;
+    int es, width, height, depth, gamma, checked_layer_format, scratch_used;
     GLint max_texture_size;
     GLenum format;
     Level *levels;
@@ -61,7 +62,7 @@ struct RuneGLLayers {
     size_t parked_count, used_depth, previous_depth;
     uint64_t parked_bytes;
     uint64_t scope_allocations;
-    int production_frame;
+    int production_frame, kept_production_blur;
     Target blur[2], spare, snapshot;
     RuneGLBlur *production_blur;
     RuneLayerCache *cache;
@@ -209,7 +210,32 @@ int rune_layers_additive(const RuneGLLayers *layers) {
 }
 
 void rune_layers_cache_budget(RuneGLLayers *layers, uint64_t bytes) { rune_cache_budget(layers->cache, bytes); }
+void rune_layers_window_rest(RuneGLLayers *layers, int all) {
+    rune_cache_rest(layers->cache);
+    trim_parked(layers, 0);
+    if (all) {
+        for (size_t i = 0; i < layers->capacity; ++i) release_target(layers, &layers->levels[i].target);
+        layers->used_depth = layers->previous_depth = 0;
+    }
+    if (all || !layers->scratch_used) {
+        release_target(layers, &layers->blur[0]);
+        release_target(layers, &layers->blur[1]);
+        release_target(layers, &layers->spare);
+        release_target(layers, &layers->snapshot);
+        rune_gl_blur_rest(layers->production_blur);
+    }
+}
+
 void rune_layers_cache_clear(RuneGLLayers *layers) { rune_cache_clear(layers->cache); }
+RuneGLLayerStorage rune_layers_storage(const RuneGLLayers *layers) {
+    uint64_t filters = rune_gl_blur_bytes(layers->production_blur) +
+                       target_bytes(layers->blur[0]) + target_bytes(layers->blur[1]);
+    uint64_t bytes = filters + rune_cache_stats(layers->cache).bytes + layers->parked_bytes +
+                     target_bytes(layers->spare) + target_bytes(layers->snapshot);
+    for (size_t i = 1; i < layers->capacity; ++i) bytes += target_bytes(layers->levels[i].target);
+    return (RuneGLLayerStorage){layers->plan_capacity, bytes, filters};
+}
+
 RuneGLLayerCacheStats rune_layers_cache_stats(RuneGLLayers *layers) {
     RuneGLLayerCacheStats stats = rune_cache_stats(layers->cache);
     stats.active_count = stats.count;
@@ -323,8 +349,8 @@ static void clear_target(RuneGLLayers *layers, Target target, float r, float g, 
 
 static void pass(RuneGLLayers *layers, int mode, GLuint dst, GLuint src, GLuint other);
 
-int rune_layers_frame(RuneGLLayers *layers, int width, int height, const float *clear,
-                      int srgb_blend, int production, GLuint atlas, char *error, size_t capacity) {
+int rune_layers_frame(RuneGLLayers *layers, int width, int height, int srgb_blend, int production,
+                      char *error, size_t capacity) {
     if (width <= 0 || height <= 0) return fail(error, capacity, "Empty Rune GL drawable");
     if (layers->width != width || layers->height != height) {
         release_targets(layers);
@@ -332,8 +358,10 @@ int rune_layers_frame(RuneGLLayers *layers, int width, int height, const float *
         layers->height = height;
     }
     layers->depth = 0;
+    layers->backdrop_count = 0;
     layers->plan_count = layers->plan_cursor = 0;
     layers->used_depth = 0;
+    layers->scratch_used = 0;
     layers->production_frame = production;
     layers->gamma = srgb_blend;
     if (layers->es && !layers->checked_layer_format) {
@@ -355,11 +383,15 @@ int rune_layers_frame(RuneGLLayers *layers, int width, int height, const float *
     GLenum root_format = production ? (srgb_blend ? GL_RGBA8 : GL_SRGB8_ALPHA8) : layers->format;
     if (!ensure_size(layers, &layers->levels[0].target, 0, 0, width, height, root_format, error, capacity)) return 0;
     layers->gl->Viewport(0, 0, width, height);
+    if (!layers->es && root_format == GL_SRGB8_ALPHA8) layers->gl->Enable(GL_FRAMEBUFFER_SRGB);
+    return 1;
+}
+
+void rune_layers_clear_root(RuneGLLayers *layers, const float *clear, GLuint atlas) {
     float a = fmaxf(0, fminf(clear[3], 1));
     float r = clear[0]*a, g = clear[1]*a, b = clear[2]*a;
     const RuneGLAPI *gl = layers->gl;
-    if (!layers->es && root_format == GL_SRGB8_ALPHA8) gl->Enable(GL_FRAMEBUFFER_SRGB);
-    if (!layers->es && root_format == GL_SRGB8_ALPHA8 &&
+    if (!layers->es && layers->levels[0].target.format == GL_SRGB8_ALPHA8 &&
         ((r > 0 && r < 1) || (g > 0 && g < 1) || (b > 0 && b < 1))) {
         // Desktop clear operations can bypass the attachment's sRGB conversion.
         // Draw its linear clear color with the same conversion as every UI fragment.
@@ -370,7 +402,6 @@ int rune_layers_frame(RuneGLLayers *layers, int width, int height, const float *
     } else {
         clear_target(layers, layers->levels[0].target, r, g, b, a);
     }
-    return 1;
 }
 
 // Both texture units are rebound on every pass. Leaving a destination texture
@@ -398,6 +429,7 @@ static int blur_target(RuneGLLayers *layers, GLuint source, const float *rect, f
     const RuneGLAPI *gl = layers->gl;
     *result = source;
     if (radius < 0.5f) return 1;
+    layers->scratch_used = 1;
     int r = (int)fminf(24, floorf(radius + 0.5f));
     // Keep coordinates in floating point until they have been clipped to the drawable.
     float x0 = fmaxf(0, floorf(rect[0]) - r);
@@ -427,20 +459,6 @@ static int blur_target(RuneGLLayers *layers, GLuint source, const float *rect, f
     }
     *result = source;
     return 1;
-}
-
-// COMPOSITE has no influence outside the clip. Include the antialiased edge.
-static void clip_composite(RuneGLLayers *layers, const float *p, const FrameStyle *style) {
-    Target dst = layers->levels[layers->depth].target;
-    const float *c = style->enabled ? style->clip : p + 24;
-    float right = style->enabled ? c[2] : c[0] + c[2];
-    float bottom = style->enabled ? c[3] : c[1] + c[3];
-    int x0 = (int)fminf(dst.width, fmaxf(0, floorf(c[0] - dst.x - 0.5f)));
-    int y0 = (int)fminf(dst.height, fmaxf(0, floorf(c[1] - dst.y - 0.5f)));
-    int x1 = (int)fmaxf(x0, fminf(dst.width, ceilf(right - dst.x + 0.5f)));
-    int y1 = (int)fmaxf(y0, fminf(dst.height, ceilf(bottom - dst.y + 0.5f)));
-    layers->gl->Scissor(x0, dst.height - y1, x1 - x0, y1 - y0);
-    layers->gl->Enable(GL_SCISSOR_TEST);
 }
 
 static void bind_effect(RuneGLLayers *layers, const float *p, const FrameStyle *style) {
@@ -547,6 +565,28 @@ static Edges rotated(Edges b, float angle, const float *pivot) {
     return result;
 }
 
+// COMPOSITE has no influence outside the clip. Include the antialiased edge.
+static void clip_composite(RuneGLLayers *layers, const float *p, const FrameStyle *style,
+                           const float *source) {
+    Target dst = layers->levels[layers->depth].target;
+    const float *c = style->enabled ? style->clip : p + 24;
+    float right = style->enabled ? c[2] : c[0] + c[2];
+    float bottom = style->enabled ? c[3] : c[1] + c[3];
+    Edges clip = {c[0], c[1], right, bottom};
+    if (source) {
+        // A retained tile may be much smaller than its enclosing viewport.
+        // Only covered samples can change the destination under source-over or additive blending.
+        Edges quad = {source[0], source[1], source[0] + source[2], source[1] + source[3]};
+        clip = intersect(clip, expand(rotated(quad, style->pose[2], style->pose), 1));
+    }
+    int x0 = (int)fminf(dst.width, fmaxf(0, floorf(clip.x0 - dst.x - 0.5f)));
+    int y0 = (int)fminf(dst.height, fmaxf(0, floorf(clip.y0 - dst.y - 0.5f)));
+    int x1 = (int)fmaxf(x0, fminf(dst.width, ceilf(clip.x1 - dst.x + 0.5f)));
+    int y1 = (int)fmaxf(y0, fminf(dst.height, ceilf(clip.y1 - dst.y + 0.5f)));
+    layers->gl->Scissor(x0, dst.height - y1, x1 - x0, y1 - y0);
+    layers->gl->Enable(GL_SCISSOR_TEST);
+}
+
 static float blur_support(const Level *level) {
     return level->primitive[19] < 0.05f ? 0 : ceilf(3 * fminf(64, level->primitive[19]));
 }
@@ -638,7 +678,7 @@ int rune_layers_cache_composite(RuneGLLayers *layers, const float *marker, const
     }
     bind_effect(layers, marker, &style);
     layers->gl->Uniform4fv(layers->source_rect, 1, destination);
-    clip_composite(layers, marker, &style);
+    clip_composite(layers, marker, &style, destination);
     pass(layers, COMPOSITE, parent->target.fbo, texture, 0);
     layers->gl->Disable(GL_SCISSOR_TEST);
     return 1;
@@ -681,9 +721,12 @@ int rune_layers_plan(RuneGLLayers *layers, const void *instances, size_t count, 
     if (width != layers->width || height != layers->height || layers->depth) {
         return fail(error, capacity, "Invalid Rune GL layer planning state");
     }
+    int needs_filter = 0;
     for (size_t i = 0; i < count; i++) {
         const float *p = (const float *)((const unsigned char *)instances + i*128);
+        if (p[17] == 13 && p[16] > 0) needs_filter = 1;
         if (p[17] == 8) {
+            if (p[18] >= 0.05f) needs_filter = 1;
             if (!reserve_level(layers, error, capacity)) return 0;
             if (layers->plan_count == layers->plan_capacity) {
                 if (layers->plan_capacity > SIZE_MAX / sizeof(LayerPlan) / 2) return fail(error, capacity, "Rune GL plan overflow");
@@ -712,6 +755,8 @@ int rune_layers_plan(RuneGLLayers *layers, const void *instances, size_t count, 
         }
     }
     if (layers->depth) return fail(error, capacity, "Unclosed Rune GL layer");
+    if (layers->kept_production_blur && !needs_filter) rune_gl_blur_rest(layers->production_blur);
+    layers->kept_production_blur = needs_filter;
     return 1;
 }
 
@@ -749,7 +794,14 @@ int rune_layers_frame_marker(RuneGLLayers *layers, int kind, const float *primit
                     rect[3] > layers->max_texture_size) {
                     return fail(error, capacity, "Rune GL isolated layer exceeds the supported render extent");
                 }
-                if (!ensure_size(layers, &next->target, (int)rect[0], (int)rect[1], (int)rect[2], (int)rect[3],
+                int width = (int)rect[2], height = (int)rect[3];
+                if (!layers->plans[next->plan_index].retain) {
+                    // A moving opacity group changes its crop by a pixel at a
+                    // time. Reuse the same 64px bucket throughout the motion.
+                    width = (int)fmin(layers->max_texture_size, ceil(width / 64.0) * 64);
+                    height = (int)fmin(layers->max_texture_size, ceil(height / 64.0) * 64);
+                }
+                if (!ensure_size(layers, &next->target, (int)rect[0], (int)rect[1], width, height,
                                  layers->format, error, capacity)) return 0;
             }
         } else {
@@ -775,14 +827,16 @@ int rune_layers_frame_marker(RuneGLLayers *layers, int kind, const float *primit
             }
         }
         bind_effect(layers, p, &child->style);
-        if (child->style.enabled && p[19] >= 0.05f) {
-            if (!layers->production_blur) return fail(error, capacity, "Missing RenderFrame blur shader");
+        if (child->style.enabled && p[19] >= 0.05f && layers->production_blur) {
             float local_rect[] = {planned_rect[0]-child->target.x, planned_rect[1]-child->target.y,
                                   planned_rect[2], planned_rect[3]};
+            layers->scratch_used = 1;
             if (!rune_gl_blur_draw(layers->production_blur, layers->format, child->target.width, child->target.height,
-                                   child->target.texture, local_rect, p[19], 0, child->style.additive,
+                                   child->target.texture, child->target.fbo, local_rect, p[19], 0, child->style.additive,
                                    &filtered, error, capacity)) return 0;
             bind_effect(layers, p, &child->style);
+        } else if (child->style.enabled) {
+            filtered = child->target.texture;
         } else if (!blur_target(layers, child->target.texture, p, p[19], &filtered, error, capacity)) return 0;
         layers->gl->Uniform4f(layers->source_rect, child->target.x, child->target.y, child->target.width, child->target.height);
         if (child->style.enabled) {
@@ -790,7 +844,7 @@ int rune_layers_frame_marker(RuneGLLayers *layers, int kind, const float *primit
             if (layers->plans[child->plan_index].retain) retain_layer(layers, child, planned_rect, filtered);
         }
         if (child->style.enabled || p[18] < 0.5f) {
-            clip_composite(layers, p, &child->style);
+            clip_composite(layers, p, &child->style, child->style.enabled ? planned_rect : NULL);
             pass(layers, COMPOSITE, parent->fbo, filtered, 0);
             layers->gl->Disable(GL_SCISSOR_TEST);
         } else {
@@ -802,18 +856,25 @@ int rune_layers_frame_marker(RuneGLLayers *layers, int kind, const float *primit
     }
     if (kind == 12) {
         FrameStyle style = unpack_style(kind, instance128);
-        if (style.enabled ? (primitive[16] <= 0 || style.pose[3] <= 0) : primitive[16] < 0.5f) return 1;
+        float opacity = style.enabled ? style.pose[3] : (primitive[11] == 0 && primitive[19] == 0 ? 1 : primitive[11]);
+        if (primitive[16] <= 0 || opacity <= 0 || layers->backdrop_count >= 4) return 1;
+        if (style.enabled && !layers->production_blur) return 1;
+        layers->backdrop_count++;
         Target *current = &layers->levels[layers->depth].target;
         GLuint filtered;
-        bind_effect(layers, primitive, &style);
-        if (style.enabled) {
-            if (!layers->production_blur) return fail(error, capacity, "Missing RenderFrame blur shader");
+        if (layers->production_blur) {
             float local_rect[] = {primitive[0]-current->x, primitive[1]-current->y, primitive[2], primitive[3]};
+            layers->scratch_used = 1;
             if (!rune_gl_blur_draw(layers->production_blur, layers->format, current->width, current->height,
-                                   current->texture, local_rect, primitive[16], 1, rune_layers_additive(layers),
+                                   current->texture, 0, local_rect, primitive[16], 1, rune_layers_additive(layers),
                                    &filtered, error, capacity)) return 0;
+        } else {
+            // The standalone C reference initializer predates the optional pyramid shader.
             bind_effect(layers, primitive, &style);
-        } else if (!blur_target(layers, current->texture, primitive, primitive[16], &filtered, error, capacity)) return 0;
+            if (!blur_target(layers, current->texture, primitive, primitive[16], &filtered, error, capacity)) return 0;
+        }
+        bind_effect(layers, primitive, &style);
+        if (!style.enabled) layers->gl->Uniform4f(layers->pose, 0, 0, 0, opacity);
         if (filtered == current->texture) {
             layers->gl->BindFramebuffer(GL_FRAMEBUFFER, current->fbo);
             return 1;
@@ -869,6 +930,7 @@ int rune_layers_effect_begin(RuneGLLayers *layers, const void *instance128, GLui
     *effect_fbo = 0;
     *backdrop_tex = 0;
     if (!clip[2] || !clip[3]) return 1;
+    layers->scratch_used = 1;
     if (!ensure_size(layers, &layers->spare, current.x, current.y, current.width, current.height,
                      current.format, error, capacity)) return 0;
     Target backdrop = current;
@@ -920,5 +982,15 @@ int rune_layers_present(RuneGLLayers *layers, unsigned framebuffer, char *error,
     }
     layers->previous_depth = layers->used_depth;
     if (!layers->used_depth) trim_parked(layers, RESTING_BYTES);
+    // A thousand layers can be transient. Keep an ordinary frame's planning
+    // storage warm when the burst ends, including a layerless damage frame.
+    size_t keep = layers->plan_count > 64 ? layers->plan_count : 64;
+    if (layers->plan_capacity / 2 > keep) {
+        LayerPlan *warm = realloc(layers->plans, keep * sizeof(*warm));
+        if (warm) {
+            layers->plans = warm;
+            layers->plan_capacity = keep;
+        }
+    }
     return 1;
 }

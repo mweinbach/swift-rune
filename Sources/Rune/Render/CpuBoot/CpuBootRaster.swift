@@ -1,4 +1,5 @@
 import Foundation
+import RuneRef
 #if canImport(simd)
 import simd
 #endif
@@ -45,27 +46,12 @@ public enum CpuBootRaster {
 
     @inline(__always)
     public static func f16(_ v: Float, _ rounding: HalfRounding) -> Float {
-        let b = v.bitPattern
-        if fabsf(v) >= 6.103_515_6e-5 {
-            let up: UInt32
-            switch rounding {
-            case .towardZero: up = 0
-            case .nearestEven: up = 0x0fff + ((b >> 13) & 1)
-            }
-            return Float(bitPattern: (b &+ up) & 0xffff_e000)
-        }
-        let m: Float = 16_777_216.0
-        switch rounding {
-        case .towardZero:
-            return truncf(v * m) / m
-        case .nearestEven:
-            return ((v * m + 12_582_912.0) - 12_582_912.0) / m
-        }
+        BackdropPyramid.half(v, nearestEven: rounding == .nearestEven)
     }
 
     @inline(__always)
     public static func f16x4(_ v: SIMD4<Float>, _ rounding: HalfRounding) -> SIMD4<Float> {
-        SIMD4<Float>(f16(v.x, rounding), f16(v.y, rounding), f16(v.z, rounding), f16(v.w, rounding))
+        BackdropPyramid.half4(v, nearestEven: rounding == .nearestEven)
     }
 
     private struct PowCache {
@@ -666,14 +652,14 @@ public enum CpuBootRaster {
 
         mutating func drawGlyph(_ i: RenderInstance, _ r: (UInt32, UInt32, UInt32, UInt32), _ clip: CpuBootShade.Clip) {
             if i.radii.w > 0.0 {
-                // Outline glyph rendering awaits OutlineStore on Swift; GPU handles if needed.
+                drawOutline(i, r, clip)
                 return
             }
             let pageIdx = Int(i.params.z)
             guard pageIdx >= 0 && pageIdx < scene.glyphPages.count else { return }
             let mask = scene.glyphPages[pageIdx]
-            let pw = scene.glyphPageWidth
-            let ph = scene.glyphPageHeight
+            let size = scene.glyphSize(at: pageIdx)
+            let pw = size.x, ph = size.y
             guard pw > 0 && ph > 0, mask.count >= pw * ph else { return }
 
             @inline(__always)
@@ -798,6 +784,50 @@ public enum CpuBootRaster {
                 }
             }
             stats.glyphPx += count
+        }
+
+        /// Direct Windfoil glyphs keep their outlines while a text run changes scale.
+        mutating func drawOutline(_ i: RenderInstance, _ r: (UInt32, UInt32, UInt32, UInt32), _ clip: CpuBootShade.Clip) {
+            guard let store = scene.outlines,
+                  let record = UInt32(exactly: i.border.x), let hint = UInt32(exactly: i.border.y) else { return }
+            let zoom = i.radii.w
+            let halfWidth = 0.5 / zoom
+            let across: Float = i.border.w == 3 ? 3 : 1
+            let rgb = i.border.w == 2 && scene.lcd && depth == 0
+            let exponent = i.params.w
+            func coverage(_ local: SIMD2<Float>) -> Float {
+                OutlineCover.coverage(store: store, record: record, hint: hint, local: local,
+                                      scale: i.radii.z, radius: i.border.z, halfWidth: halfWidth)
+            }
+            computeSegments(r, solid: nil, clip: clip)
+            var segmentIndex = 0
+            for y in r.1..<r.3 {
+                let py = Float(y) + 0.5
+                while segs[segmentIndex].y1 <= y { segmentIndex += 1 }
+                let segment = segs[segmentIndex]
+                for run in 0..<segment.vis.len {
+                    let (start, end) = segment.vis.runs[run]
+                    for x in start..<end {
+                        let px = Float(x) + 0.5
+                        let local = SIMD2((px - i.radii.x) / across / zoom, (i.radii.y - py) / zoom)
+                        let alpha = px >= segment.whole.0 && px <= segment.whole.1 ? 1 : clip.alpha(SIMD2(px, py))
+                        if rgb {
+                            let third = SIMD2(2 * halfWidth / 3, Float.zero)
+                            let red = coverage(local - third), green = coverage(local), blue = coverage(local + third)
+                            let mean = powf((red + green + blue) / 3, exponent)
+                            guard mean >= 1.0e-5 else { continue }
+                            let weights = SIMD3(powf(red, exponent), powf(green, exponent), powf(blue, exponent))
+                            let fill = i.fill * alpha
+                            surface.blendLCD(x, y, fill * SIMD4(weights, mean), weights * fill.w)
+                        } else {
+                            let value = coverage(local)
+                            guard value > 0 else { continue }
+                            stats.glyphPx += 1
+                            put(x, y, i.fill * powf(value, exponent) * alpha)
+                        }
+                    }
+                }
+            }
         }
 
         mutating func drawBackdrop(_ i: RenderInstance, r: (UInt32, UInt32, UInt32, UInt32), clip: CpuBootShade.Clip) {

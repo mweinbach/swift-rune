@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import Rune
 import RuneMotion
+import RuneRef
 #if canImport(simd)
 import simd
 #endif
@@ -865,7 +866,12 @@ struct MotionGatePaintParityTests {
         r.idle(0.5)
         r.step()
         r.update { x, _ in x = 60.0 }
-        r.stepN(240)
+        var aproned = false
+        for _ in 0..<240 {
+            r.step()
+            if rt.motionRasterGlyphs?.iconAprons.isEmpty == false { aproned = true }
+        }
+        #expect(aproned, "the icon glides off the pixel grid")
         let f = r.finish()
         #expect(!f.contains { $0.element.hasSuffix("(pixels)") })
     }
@@ -943,6 +949,67 @@ struct MotionGateSpringNoneParityTests {
     func anExplicitSpringNoneOnTheElementIsAnAuthoredInstantChange() {
         #expect(snaps(from: .own) { $0.warm = true } == [])
         #expect(snaps(from: .own) { $0.blurred = true } == [])
+    }
+
+    @Test func authoredModifiersComposeAndClearAtThePointTheyAreOverridden() throws {
+        let rt = Runtime(state: (), viewport: Vec2(80, 80), pixelScale: 1) { _, _ in
+            col().motionIntent(.overshoot).motionIntent([]).child(
+                el().key("ink").size(20, 30).bg(.white).motionIntent(.cut).motionIntent(.pulse)
+                    .motion(.none).motion(Spring(duration: 0.5, bounce: 0))
+            ).child(el().key("token").size(20, 30).bg(.white).motion(.none).tokenMotion(.none))
+        }
+        _ = rt.frame(at: 0)
+        let paints = rt.paints()
+        let ink = try #require(paints.first { $0.key.path.hasSuffix("@ink") }?.value)
+        let token = try #require(paints.first { $0.key.path.hasSuffix("@token") }?.value)
+        #expect(ink.intent == MotionIntent([.overshoot, .cut, .pulse]).rawValue)
+        #expect(ink.atOnce == 0)
+        #expect(token.atOnce == 0)
+    }
+
+    @Test func blurCurvesReachTheLayerWithTheRustPresentationAt60Hz() throws {
+        // Pinned Rune 842c28c2, sampled from its Runtime's layer instances and paint probes.
+        let frames = [1, 3, 6, 12, 24, 36, 48]
+        let expected: [[Float]] = [
+            [8, 8, 8, 8, 8, 8, 8],
+            [0.333333, 1, 2, 4, 8, 8, 8],
+            [0.230693, 1.487751, 3.724671, 6.568204, 7.891192, 7.993270, 8],
+            [0, 0, 0, 2, 6, 8, 8]
+        ]
+        for mode in expected.indices {
+            let rt = Runtime(state: false, viewport: Vec2(90, 80), pixelScale: 1) { changed, _ in
+                var child: El<Bool> = el().key("ink").absolute(x: 18, y: 20)
+                    .size(48, 32).bg(.white).blur(changed ? 8 : 0)
+                switch mode {
+                case 0: child = child.blurMotion(.none)
+                case 1: child = child.blurMotion(.linear(0.4))
+                case 2: child = child.blurMotion(Spring(duration: 0.4, bounce: 0))
+                default: child = child.blurMotion(Anim(curve: .linear(0.4), delay: 0.1))
+                }
+                return col().key("page").wFull().hFull()
+                    .motion(mode == 0 ? Spring(duration: 1, bounce: 0) : .none).child(child)
+            }
+            let run = MotionGateRun(rt, hz: 60)
+            run.idle(1)
+            run.step()
+            run.update { state, _ in state = true }
+            for k in 1...48 {
+                run.step()
+                guard let index = frames.firstIndex(of: k) else { continue }
+                let track = try #require(run.rec.tracks.first { $0.path.hasSuffix("@ink") })
+                let paint = try #require(track.paintAt(k))
+                let value = expected[mode][index]
+                #expect(abs(paint.sizes[MotionGatePaint.sBlur] - value) < 0.001, "mode \(mode) frame \(k)")
+                let sample = try #require(track.at(k))
+                #expect(sample.rect == [18, 20, 48, 32])
+                let out = try #require(rt.lastFrameOutput)
+                let layer = rt.buildRenderFrame(frameOut: out, now: rt.currentTime).instances.first {
+                    $0.params.y == KIND_LAYER && $0.params.z > 0.001
+                }
+                #expect(abs((layer?.params.z ?? 0) - value) < 0.001, "mode \(mode) frame \(k)")
+                if let layer { #expect(layer.rect == SIMD4(18, 20, 48, 32)) }
+            }
+        }
     }
 
     @Test("a_spring_none_inherited_from_a_parent_still_snaps")
@@ -1205,5 +1272,163 @@ struct MotionGateIntegrationParityTests {
             r.step()
         }
         #expect(glide.isEmpty, "Unexpected glide jumps: \(glide)")
+    }
+}
+
+@Suite("MotionGate report and image evidence")
+struct MotionGateEvidenceParityTests {
+    /// Inputs and expected RGB FNV-1a hashes from anomalyco/rune 842c28c2's sheet() and dump().
+    private static func recording() -> MotionGateRecording {
+        let rec = MotionGateRecording(size: (48, 32), hz: 60)
+        let focus = MotionGateTrack(path: "root/focus")
+        let other = MotionGateTrack(path: "root/other")
+        for k in 0..<11 {
+            let moving: [Float] = [4 * Float(k) - 2, 8, 17, 12]
+            let still: [Float] = [4, 0, 20, 12]
+            for (track, rect, op): (MotionGateTrack, [Float], Float) in [(focus, moving, 0.75), (other, still, 0.5)] {
+                track.frames.append((k, MotionGateSnap(rect: rect, vis: rect, op: op, scale: 1, flags: 133)))
+                var paint = MotionGatePaint(rank: 5, intent: 1)
+                paint.colors[0] = Color(r: 0.25, g: 0.5, b: 1, a: 0.5)
+                paint.colors[1] = k.isMultiple(of: 2) ? .white : .transparent
+                track.paint.append(paint)
+            }
+            let rgba = (0..<12).flatMap { (i: Int) -> [UInt8] in [UInt8((k * 23 + i * 13) % 256), 80, 100, 255] }
+            rec.frames += 1
+            rec.setGrid(MotionGateGrid.fromPixels(rgba, pw: 4, ph: 3, size: rec.size))
+            rec.instant.append(k == 4)
+        }
+        rec.tracks = [other, focus]
+        return rec
+    }
+
+    @Test func upstreamRGBAndDump() {
+        let rec = Self.recording()
+        let cases: [(Int, String, Int, Int, UInt64)] = [
+            (4, "focus", 162, 36, 0xf06b32532fa8eb7b),
+            (0, "", 90, 12, 0x0dcbed5fff1330b8),
+            (10, "missing", 90, 12, 0xf5d5a089bb7edb6f),
+            (20, "focus", 0, 12, 0xcbf29ce484222325)
+        ]
+        for (frame, path, width, height, expected) in cases {
+            let sheet = MotionGateEvidence.sheet(rec, at: frame, focus: path)
+            #expect(sheet.width == width)
+            #expect(sheet.height == height)
+            var hash: UInt64 = 0xcbf29ce484222325
+            for (i, byte) in sheet.rgba.enumerated() where i % 4 != 3 {
+                hash = (hash ^ UInt64(byte)) &* 0x100000001b3
+            }
+            #expect(hash == expected)
+        }
+        #expect(MotionGateEvidence.dump(rec, filter: "focus", from: 4, to: 5) ==
+                "root/focus\n     4 [   14.0     8.0   17.0   12.0] vis [  14.0    8.0   17.0   12.0] op 0.750 sc 1.000 10000101 INSTANT fill=#89bcff80 border=#ffffffff z=5 intent=0x1\n")
+    }
+
+    #if !os(WASI)
+    @Test func matchingJobsCanRunTogetherAndReturnInSubmissionOrder() {
+        guard ProcessInfo.processInfo.activeProcessorCount >= 2 else { return }
+        final class Rendezvous: @unchecked Sendable {
+            let condition = NSCondition()
+            var entered = 0
+            var overlapped = true
+
+            func meet() {
+                condition.lock()
+                defer { condition.unlock() }
+                entered += 1
+                condition.broadcast()
+                let deadline = Date().addingTimeInterval(5)
+                while entered < 2 {
+                    if !condition.wait(until: deadline) {
+                        overlapped = false
+                        break
+                    }
+                }
+            }
+        }
+        let rendezvous = Rendezvous()
+        let job: MotionGateGate.Job = {
+            rendezvous.meet()
+            return MotionGateRecording()
+        }
+        let results = MotionGateGate.run([("case-a", job), ("excluded", job), ("case-b", job)], filter: "case")
+        #expect(rendezvous.entered == 2)
+        #expect(rendezvous.overlapped)
+        #expect(results.map(\.name) == ["case-a", "case-b"])
+    }
+    #endif
+
+    @Test func bareInlineIconIsPaintedAndItsMovingApronIsRecorded() throws {
+        let icon = SVGIcon(viewBox: 16, body: #"<rect x="2" y="2" width="12" height="12" fill="currentColor"/>"#)
+        let tint = Color(r: 1, g: 0, b: 0, a: 1)
+        let rt = Runtime(state: Float(0), viewport: Vec2(240, 100), pixelScale: 1) { offset, _ in
+            col().child(rich("Status").inlineIcon(at: 0, icon, size: 16, color: tint)
+                .key("line").absolute(x: 30, y: 30).offset(offset, 0).motion(Spring(duration: 1, bounce: 0)))
+        }
+        let sampler = MotionGateSampler(runtime: rt, hz: 60)
+        let initial = rt.renderFrame(at: 0)
+        func isIcon(_ item: RenderInstance) -> Bool {
+            item.params.y == KIND_GLYPH && item.fill.x > 0.99 && item.fill.y == 0 && item.fill.z == 0
+        }
+        #expect(initial.instances.contains(where: isIcon))
+        rt.update(at: 0) { offset, _ in offset = 40 }
+        var sawApron = false
+        for k in 1...12 {
+            sampler.before(rt)
+            let frame = rt.renderFrame(at: Double(k) / 60)
+            let keys = rt.motionRasterGlyphs?.iconAprons ?? []
+            if frame.instances.contains(where: { isIcon($0) && keys.contains(MotionGateGrid.ApronKey($0)) }) {
+                sawApron = true
+            }
+            sampler.frame(rt, awake: rt.isAnimating, renderFrame: frame)
+        }
+        #expect(sawApron)
+    }
+
+    @Test func longNamesAndFrameNumbersSurviveTheReport() {
+        let path = String(repeating: "long-control/", count: 4) + "label"
+        let finding = MotionGateFinding(kind: "a-long-motion-rule", element: path, frame: 12345, detail: "jumped")
+        #expect(finding.description == "a-long-motion-rule \(path) @12345 jumped")
+    }
+
+    @Test func filteredJobsWriteTheirEvidenceAndFailWithTheSavedReport() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("report").path
+        let jobs: [(String, MotionGateGate.Job)] = [
+            ("run/short", { MotionGateRecording() }), ("skip", { MotionGateRecording() }), ("run/focus", {
+                let rec = Self.recording()
+                rec.hz = 6
+                rec.quietFrom = 0
+                rec.awake = Array(repeating: true, count: rec.frames)
+                return rec
+            })
+        ]
+        let rows = [MotionGateAllowRow("", "", "focus", "intentional fixture change"),
+                    MotionGateAllowRow("missing", "", "run", "unused during filtered runs")]
+        let env = ["MOTION_GATE": "run/", "MOTION_GATE_ALLOWED": "", "MOTION_GATE_OUT": path,
+                   "MOTION_GATE_DUMP": "run/focus|focus|4|5", "MOTION_GATE_SHEET": "run/focus|4|focus"]
+        do {
+            _ = try MotionGateGate.gateRows(jobs, rows: rows, environment: env)
+            Issue.record("A short setup should fail the gate")
+        } catch let report as MotionGateReport {
+            #expect(report.failing == 1)
+            #expect(report.allowed == 2)
+            #expect(report.unused == 0)
+            #expect(report.text.contains("SKIP run/short"))
+            // The pinned Rust report emits the two findings in frame order with these columns.
+            #expect(report.text.hasSuffix("""
+            SKIP run/short (its setup didn't apply)
+            allowed  wakes-after-end  frame                                        @6    asked for a frame 1.00 s after the motion ended  in run/focus  (intentional fixture change)
+            allowed  never-settles    root/focus                                   @8    still moving 4.00 pt/frame in the last 0.5 s  in run/focus  (intentional fixture change)
+
+            """))
+            #expect(try String(contentsOfFile: path, encoding: .utf8) == report.text)
+        }
+        #expect(try String(contentsOfFile: path + ".dump", encoding: .utf8) ==
+                MotionGateEvidence.dump(Self.recording(), filter: "focus", from: 4, to: 5))
+        #expect(try Frame.fromPNG(data: Data(contentsOf: URL(fileURLWithPath: path + ".sheet.png"))) ==
+                MotionGateEvidence.sheet(Self.recording(), at: 4, focus: "focus"))
+        #expect(MotionGateGate.run(jobs, filter: "run/").map(\.name) == ["run/short", "run/focus"])
     }
 }

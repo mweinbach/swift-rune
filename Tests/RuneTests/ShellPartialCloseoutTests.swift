@@ -363,8 +363,8 @@ struct ShellPartialCloseoutTests {
         #expect(overNine.shownProgress == .busy)
 
         // jump_list.rs
-        JumpListStore.resetForTests()
-        defer { JumpListStore.resetForTests() }
+        let store = JumpListStore()
+        var published: [JumpList] = []
         let jl = JumpList()
             .task(JumpItem(title: "New Window", argument: "--new-window", description: "Opens a window"))
             .category("Recent", items: [JumpItem(title: "Notes", argument: "notes.md")])
@@ -372,12 +372,13 @@ struct ShellPartialCloseoutTests {
         #expect(jl.tasks.count == 1)
         #expect(jl.categories.count == 1)
         #expect(jl.lead == "--open")
-        setJumpList(jl)
-        #expect(JumpListStore.committedListForTests() == jl)
-        JumpListStore.setHeadlessForTests(true)
+        store.submit(jl, headless: false) { published.append($0) }
+        store.submit(jl, headless: false) { published.append($0) }
+        #expect(store.current == jl)
         let jl2 = JumpList().lead("--other")
-        setJumpList(jl2)
-        #expect(JumpListStore.committedListForTests() == jl, "headless mode suppresses updates")
+        store.submit(jl2, headless: true) { published.append($0) }
+        #expect(store.current == jl, "headless mode suppresses updates")
+        #expect(published == [jl])
     }
 
     // MARK: - 5. RewindTape quantization, unattached RewindRecorder, maxBytes eviction

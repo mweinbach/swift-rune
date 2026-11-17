@@ -106,12 +106,15 @@ public enum TextBoxGeometry {
 }
 
 extension TextBoxGeometry {
-    /// A pen at `at` device px rounded to a quarter pixel: the whole pixel its quad starts on and
-    /// the quarter-pixel phase its mask is drawn at (`glyph_emit.rs`: `quarters = (at * 4).round();
-    /// fx = (quarters / 4).floor(); phase = quarters - fx * 4`).
+    /// Quantize a Skia pen to Parley's 1/256 px grid, then pick its nearest quarter pixel.
+    /// Windows and Windfoil both round ties upward, including negative positions.
     @inline(__always)
     public static func quarterPen(_ at: Float) -> (fx: Float, phase: UInt8) {
-        let quarters = (at * 4.0).rounded()
+        guard at.isFinite else { return (0, 0) }
+        // Beyond 2^23 a Float already represents whole pixels; scaling it can overflow.
+        if abs(at) >= 8_388_608 { return (at, 0) }
+        let aligned = (at * 256).rounded() / 256
+        let quarters = ((aligned + 0.125) * 4).rounded(.down)
         let fx = (quarters / 4.0).rounded(.down)
         return (fx, UInt8(quarters - fx * 4.0))
     }
@@ -129,6 +132,7 @@ internal struct GlyphPen {
     let binY: UInt8
     let smoothing: FontSmoothing
     let isColor: Bool
+    var yOffsetPx: Float = 0
 }
 #endif
 
@@ -172,13 +176,16 @@ extension TextBoxGeometry {
             fontSizePx: pen.sizePx,
             phaseX: phase,
             subpixelYBin: pen.binY,
-            smoothing: pen.smoothing
+            smoothing: pen.smoothing,
+            inkBucket: g.classicInk?.source.bucket ?? g.outlineGroup?.inkVariant?.bucket ?? 0
         ), entry.pixelSize.x > 0, entry.pixelSize.y > 0 else {
             return (originXPx + g.rect.x * s, g)
         }
         var out = g
         out.uv = entry.uv
         out.atlasPage = entry.page
+        out.classicInk = entry.classicInk
+        out.outlineGroup = entry.outlineGroup
         out.rect.z = Float(entry.pixelSize.x) / s
         out.rect.w = Float(entry.pixelSize.y) / s
         return (fx + entry.bearingPx.x, out)
@@ -187,12 +194,98 @@ extension TextBoxGeometry {
 }
 
 extension TextBoxGeometry {
+    /// Adjacent labels usually share the current zoom, so they can reuse resized CoreText faces.
+    struct ScaledLabelRasters {
+        private var last: ScaledGlyphRaster?
+
+        mutating func raster(scale: Float, still: Bool) -> ScaledGlyphRaster? {
+            if let last, last.factor == scale, last.still == still { return last }
+            guard let raster = ScaledGlyphRaster(scale: scale, still: still) else { return nil }
+            last = raster
+            return raster
+        }
+    }
+
+    /// Rasterize the original run's glyph IDs at a different ppem. The shaper's advances,
+    /// line breaks and baselines are in layout pixels; only `glyph_emit.rs` scales them.
+    final class ScaledGlyphRaster {
+        let factor: Float
+        let still: Bool
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        private var fonts: [CTFont: CTFont] = [:]
+        #endif
+
+        init?(scale: Float, still: Bool) {
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            guard scale.isFinite, scale > 0, abs(scale - 1) > 1e-5 else { return nil }
+            self.factor = scale
+            self.still = still
+            #else
+            return nil
+            #endif
+        }
+
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        func place(_ source: PositionedGlyph, pen: GlyphPen, baseline: Float, origin: SIMD2<Float>,
+                   screenScale: SIMD2<Float>, pixelScale: Float, atlas: GlyphAtlas)
+            -> (glyph: PositionedGlyph, rect: SIMD4<Float>)? {
+            let font: CTFont
+            if let known = fonts[pen.font] {
+                font = known
+            } else {
+                font = CTFontCreateCopyWithAttributes(pen.font, CGFloat(pen.sizePx * factor), nil, nil)
+                fonts[pen.font] = font
+            }
+            let rOrigin = still ? origin : .zero
+            let x = rOrigin.x + pen.xPx * factor
+            let y = ((rOrigin.y + baseline * factor).rounded() + pen.yOffsetPx * factor).rounded()
+            let ppem = pen.sizePx * factor
+            let at: SIMD2<Float>, size: SIMD2<Float>
+            var glyph: PositionedGlyph
+            if pen.isColor {
+                guard let entry = atlas.rasterizeColorGlyph(font: font, glyph: pen.glyph, fontSizePx: ppem) else { return nil }
+                at = SIMD2(x.rounded(), y) + entry.bearingPx
+                size = SIMD2(Float(entry.pixelSize.x), Float(entry.pixelSize.y))
+                glyph = PositionedGlyph(rect: .zero, colorGlyph: entry, color: source.color, utf8Offset: source.utf8Offset)
+            } else {
+                let placed = glyphPen(at: x, ppem: ppem, glide: 0, smoothing: pen.smoothing)
+                guard let entry = atlas.rasterizeGlyph(font: font, glyph: pen.glyph, fontSizePx: ppem,
+                                                      phaseX: placed.phase, smoothing: pen.smoothing,
+                                                      inkBucket: source.classicInk?.source.bucket ?? source.outlineGroup?.inkVariant?.bucket ?? 0),
+                      entry.pixelSize.x > 0, entry.pixelSize.y > 0 else { return nil }
+                at = SIMD2(placed.pixel, y) + entry.bearingPx
+                size = SIMD2(Float(entry.pixelSize.x), Float(entry.pixelSize.y))
+                glyph = source
+                glyph.uv = entry.uv
+                glyph.atlasPage = entry.page
+                glyph.classicInk = entry.classicInk
+                glyph.outlineGroup = entry.outlineGroup
+            }
+            let relative = at - rOrigin
+            glyph.rect = SIMD4(relative.x, relative.y, size.x, size.y) / (pixelScale * factor)
+            let zoom = screenScale / factor
+            let topLeft = origin + relative * zoom
+            return (glyph, SIMD4(topLeft.x, topLeft.y, size.x * zoom.x, size.y * zoom.y))
+        }
+        #endif
+    }
+
     /// Places a shaped quad on the same absolute baseline and pen for the CPU and Metal paint paths.
     static func paintGlyph(
         _ source: PositionedGlyph, index: Int, shaped: ShapedText,
         origin: SIMD2<Float>, scale: SIMD2<Float>, pixelScale: Float,
-        restsExact: Bool, baselines: [Float], line: inout Int, atlas: GlyphAtlas
+        restsExact: Bool, baselines: [Float], line: inout Int, atlas: GlyphAtlas, raster: ScaledGlyphRaster? = nil
     ) -> (glyph: PositionedGlyph, rect: SIMD4<Float>) {
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        if let raster, shaped.glyphPens.count == shaped.glyphs.count, shaped.glyphPens.indices.contains(index) {
+            while line + 1 < shaped.lineGlyphRanges.count && index >= shaped.lineGlyphRanges[line].upperBound { line += 1 }
+            if shaped.lineBaselinesPx.indices.contains(line),
+               let placed = raster.place(source, pen: shaped.glyphPens[index], baseline: shaped.lineBaselinesPx[line],
+                                         origin: origin, screenScale: scale, pixelScale: pixelScale, atlas: atlas) {
+                return placed
+            }
+        }
+        #endif
         var glyph = source
         var x = origin.x + glyph.rect.x * scale.x * pixelScale
         if restsExact {

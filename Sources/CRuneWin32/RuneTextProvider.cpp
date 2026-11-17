@@ -10,13 +10,13 @@
 namespace {
 using Span = std::pair<int, int>;
 
-HRESULT rangesArray(RuneUiaTextSource *source, const std::vector<Span> &spans, SAFEARRAY **out) {
+HRESULT rangesArray(RuneUiaTextSource *source, const RuneUiaTextContent &content, const std::vector<Span> &spans, SAFEARRAY **out) {
     *out = nullptr;
     SAFEARRAY *array = SafeArrayCreateVector(VT_UNKNOWN, 0, static_cast<ULONG>(spans.size()));
     if (!array) return E_OUTOFMEMORY;
     for (LONG i = 0; i < static_cast<LONG>(spans.size()); ++i) {
         ITextRangeProvider *range = nullptr;
-        HRESULT hr = runeCreateTextRange(source, spans[i].first, spans[i].second, &range);
+        HRESULT hr = runeCreateTextRange(source, content, spans[i].first, spans[i].second, &range);
         if (SUCCEEDED(hr)) {
             hr = SafeArrayPutElement(array, &i, range);
             range->Release();
@@ -53,7 +53,7 @@ public:
         RuneUiaTextSnapshot s;
         HRESULT hr = source->readText(s);
         if (FAILED(hr)) return hr;
-        return runeCreateTextRange(source, 0, static_cast<int>(s.content->text.size()), out);
+        return runeCreateTextRange(source, *s.content, 0, static_cast<int>(s.content->text.size()), out);
     }
     HRESULT STDMETHODCALLTYPE GetSelection(SAFEARRAY **out) override {
         if (!out) return E_POINTER;
@@ -61,15 +61,16 @@ public:
         RuneUiaTextSnapshot s;
         HRESULT hr = source->readText(s);
         if (FAILED(hr)) return hr;
-        if (!s.selectable) return rangesArray(source, {}, out);
-        return rangesArray(source, {{std::min(s.anchor, s.focus), std::max(s.anchor, s.focus)}}, out);
+        // Every published field model carries its selection, even when the editor
+        // withholds write access. Select() checks permission separately.
+        return rangesArray(source, *s.content, {{std::min(s.anchor, s.focus), std::max(s.anchor, s.focus)}}, out);
     }
     HRESULT STDMETHODCALLTYPE get_SupportedTextSelection(SupportedTextSelection *out) override {
         if (!out) return E_POINTER;
         RuneUiaTextSnapshot s;
         HRESULT hr = source->readText(s);
         if (FAILED(hr)) return hr;
-        *out = s.selectable ? SupportedTextSelection_Single : SupportedTextSelection_None;
+        *out = SupportedTextSelection_Single;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetCaretRange(BOOL *active, ITextRangeProvider **out) override {
@@ -80,7 +81,7 @@ public:
         HRESULT hr = source->readText(s);
         if (FAILED(hr)) return hr;
         *active = s.focused && s.selectable;
-        return runeCreateTextRange(source, s.focus, s.focus, out);
+        return runeCreateTextRange(source, *s.content, s.focus, s.focus, out);
     }
     HRESULT STDMETHODCALLTYPE GetVisibleRanges(SAFEARRAY **out) override {
         if (!out) return E_POINTER;
@@ -88,7 +89,7 @@ public:
         RuneUiaTextSnapshot s;
         HRESULT hr = source->readText(s);
         if (FAILED(hr)) return hr;
-        if (s.viewport.width <= 0 || s.viewport.height <= 0) return rangesArray(source, {}, out);
+        if (s.viewport.width <= 0 || s.viewport.height <= 0) return rangesArray(source, *s.content, {}, out);
         std::vector<Span> visible;
         for (const auto &cell : s.content->cells) {
             if (cell.height > 0 && cell.end >= cell.start) visible.emplace_back(cell.start, cell.end);
@@ -103,7 +104,7 @@ public:
                 ranges.push_back(span);
             }
         }
-        return rangesArray(source, ranges, out);
+        return rangesArray(source, *s.content, ranges, out);
     }
     HRESULT STDMETHODCALLTYPE RangeFromPoint(UiaPoint point, ITextRangeProvider **out) override {
         if (!out) return E_POINTER;
@@ -111,8 +112,11 @@ public:
         RuneUiaTextSnapshot s;
         HRESULT hr = source->readText(s);
         if (FAILED(hr)) return hr;
+        // Rune publishes only the value and selection for long, elided or incompletely
+        // shaped fields. Fully clipped shaped fields still have logical cells.
+        if (s.content->valueOnly) return runeCreateTextRange(source, *s.content, s.focus, s.focus, out);
         if (s.viewport.width <= 0 || s.viewport.height <= 0) return UIA_E_NOTSUPPORTED;
-        if (s.content->text.empty()) return runeCreateTextRange(source, 0, 0, out);
+        if (s.content->text.empty()) return runeCreateTextRange(source, *s.content, 0, 0, out);
         const double x = point.x - s.screenX, y = point.y - s.screenY;
         double closestLine = std::numeric_limits<double>::infinity();
         double closestCell = std::numeric_limits<double>::infinity();
@@ -130,7 +134,7 @@ public:
             insertion = trailing != bool(cell.rtl) ? cell.end : cell.start;
         }
         if (insertion < 0) return UIA_E_NOTSUPPORTED;
-        return runeCreateTextRange(source, insertion, insertion, out);
+        return runeCreateTextRange(source, *s.content, insertion, insertion, out);
     }
     HRESULT STDMETHODCALLTYPE RangeFromChild(IRawElementProviderSimple *, ITextRangeProvider **out) override {
         if (!out) return E_POINTER;

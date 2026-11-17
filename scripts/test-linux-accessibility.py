@@ -4,7 +4,8 @@
     dbus-run-session -- xvfb-run -a /usr/bin/python3 scripts/test-linux-accessibility.py \
         .build/debug/rune-hello .build/debug/rune-rich-clipboard .build/debug/rune-kit-rich-editor
 
-Both editor arguments are optional. The test needs at-spi2-core, python3-gi, gir1.2-atspi-2.0,
+The editor arguments are optional. A fourth binary, built from Tests/Support/WindowsTextAccessibility,
+exercises scrolling via the Component and Text interfaces. The test needs at-spi2-core, python3-gi, gir1.2-atspi-2.0,
 dbus, xvfb, xauth, and a working OpenGL driver (Mesa llvmpipe works inside Xvfb).
 """
 
@@ -200,9 +201,32 @@ def test_wrapped_editor(binary):
         print(f"AT-SPI Rune: soft wrap at scalar {split}, next line {after.y - before.y}px lower, paragraph preserved")
 
 
+def test_scroll_to_field(binary):
+    with launched(binary) as root:
+        def named(label):
+            return wait_for(lambda: next((node for node in descendants(root) if node.get_name() == label), None))
+
+        editor, document = named("Editor"), named("Long document")
+        def showing(node):
+            node.clear_cache()
+            return node.get_state_set().contains(Atspi.StateType.SHOWING)
+
+        assert showing(editor) and not showing(document)
+        assert not document.scroll_substring_to(-1, 3, Atspi.ScrollType.ANYWHERE)
+        assert document.scroll_to(Atspi.ScrollType.ANYWHERE)
+        wait_for(lambda: showing(document) and not showing(editor))
+        assert editor.scroll_substring_to(0, -1, Atspi.ScrollType.TOP_EDGE)
+        wait_for(lambda: showing(editor) and not showing(document))
+        bounds = editor.get_character_extents(0, Atspi.CoordType.WINDOW)
+        assert bounds.width > 0 and bounds.height > 0, "Revealed field lost its keyed-root text layout"
+        print("AT-SPI Rune: component and text range scrolled an offscreen field into view")
+
+
 if __name__ == "__main__":
     test_switch(sys.argv[1])
     if len(sys.argv) > 2:
         test_editor(sys.argv[2])
     if len(sys.argv) > 3:
         test_wrapped_editor(sys.argv[3])
+    if len(sys.argv) > 4:
+        test_scroll_to_field(sys.argv[4])

@@ -258,7 +258,9 @@ struct CxEnvAndSystemParityTests {
             .category("Recent", items: [JumpItem(title: "Doc", argument: "doc")])
         #expect(jl.tasks.count == 1)
         #expect(jl.categories.count == 1)
-        setJumpList(jl)
+        let store = JumpListStore()
+        #expect(!store.submit(jl, headless: true) { _ in })
+        #expect(store.current == nil)
     }
 
     @Test func appDirsSanitizeEnvOverrideAndRootCheck() {
@@ -692,9 +694,18 @@ struct CxEnvAndSystemParityTests {
     }
 
     @Test func frameProfileThreadCpuAndTakePhases() {
+        FrameProfiling.withRecording { checkFramePhaseTotals() }
+    }
+
+    private func checkFramePhaseTotals() {
         _ = takeFramePhases()
         let t0 = threadCpuMs()
-        #expect(t0 >= 0.0)
+        #if canImport(Darwin) || os(Linux) || os(Android) || os(Windows)
+        #expect(t0 > 0)
+        #expect((PerfWarn.threadCpuMs() ?? 0) >= t0)
+        #else
+        #expect(t0 >= 0)
+        #endif
         for phase in FramePhase.allCases {
             let weight = Double(phase.rawValue + 1)
             recordFramePhase(phase, wallMs: weight, cpuMs: weight / 4)
@@ -718,6 +729,40 @@ struct CxEnvAndSystemParityTests {
         }
         _ = rt.renderFrame(at: 0.1)
         #expect(takeFramePhases()[FramePhase.paint.rawValue] > 0.0)
+    }
+
+    @Test func automaticPhasesPayForRequestedMeasurements() throws {
+        enum Stop: Error { case done }
+        try FrameProfiling.withRecording(false) {
+            _ = takeFramePhases()
+            var calls = 0
+            func work() {
+                calls += 1
+                #if !os(WASI)
+                Thread.sleep(forTimeInterval: 0.001)
+                #endif
+            }
+            measureRuntimePhase(.view, work)
+            #expect(takeFramePhases().allSatisfy { $0 == 0 })
+            do {
+                try FrameProfiling.withRecording {
+                    #expect(FrameProfiling.isEnabled)
+                    measureRuntimePhase(.view, work)
+                    throw Stop.done
+                }
+            } catch Stop.done {}
+            #expect(!FrameProfiling.isEnabled)
+            let scoped = takeFramePhases()
+            measureFramePhase(.apply, work)
+            let explicit = takeFramePhases()
+            #if !os(WASI)
+            #expect(scoped[FramePhase.view.rawValue] > 0)
+            #expect(explicit[FramePhase.apply.rawValue] > 0)
+            #else
+            #expect(scoped.count == 2 * FRAME_PHASES && explicit.count == scoped.count)
+            #endif
+            #expect(calls == 3)
+        }
     }
 
     #if !os(WASI)

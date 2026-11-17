@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="result"></pre>
+<script type="module">
+import { createRuneTextImports } from '../../Sources/Rune/Resources/Web/rune-web-text.mjs';
+
+const memory = new WebAssembly.Memory({ initial: 1 });
+const bytes = new Uint8Array(memory.buffer);
+const view = new DataView(memory.buffer);
+const encoder = new TextEncoder();
+const resultAt = 1024;
+function checkWord(host, text, at, expected) {
+    const input = encoder.encode(text);
+    bytes.set(input);
+    host.word_range(0, input.length, at, resultAt);
+    const start = view.getInt32(resultAt, true), end = view.getInt32(resultAt + 4, true);
+    if (text.slice(start, end) !== expected || at < start || at >= end) {
+        throw Error('Unexpected word at ' + at + ': ' + JSON.stringify([start, end, text.slice(start, end)]));
+    }
+}
+function checkBreaks(host, text, initial, expected, words = false) {
+    const input = encoder.encode(text);
+    bytes.set(input);
+    const flags = new Uint8Array(memory.buffer, resultAt, (words ? input.length : text.length) + 1);
+    flags.fill(0);
+    for (const at of initial) flags[at] = 1;
+    if (words) host.dictionary_words(0, input.length, resultAt);
+    else host.dictionary_lines(0, input.length, resultAt);
+    const actual = Array.from(flags.keys()).filter(i => flags[i]);
+    if (actual.join() !== expected.join()) throw Error('Expected ' + expected + ' for ' + text + ', received ' + actual);
+}
+try {
+    const host = createRuneTextImports(() => memory);
+    const text = '👩🏽‍💻 ภาษาไทย 日本語 e\u0301\r\n';
+    for (const { index, segment } of new Intl.Segmenter('und', { granularity: 'word' }).segment(text)) {
+        checkWord(host, text, index, segment);
+    }
+    checkWord(host, text, text.indexOf('ไทย') + 1, 'ไทย');
+    for (const [language, run] of [['th', 'ภาษาไทยทดสอบ'], ['lo', 'ພາສາລາວ'],
+        ['my', 'မြန်မာဘာသာစကား'], ['km', 'ភាសាខ្មែរប្រទេសកម្ពុជា'], ['th', 'ภาษา\u200dไทย']]) {
+        const input = '😀 ' + run + ' 画字';
+        const start = 3;
+        const internal = [...new Intl.Segmenter(language, { granularity: 'word' }).segment(run)]
+            .filter(s => s.index > 0).map(s => start + s.index);
+        const outside = [2, start, start + run.length + 1, input.length - 1];
+        checkBreaks(host, input, [...outside, start + 1], [...outside, ...internal].sort((a, b) => a - b));
+    }
+    // Visual arrow movement uses byte offsets and dictionary words inside Han/Kana runs,
+    // while Chinese and Japanese keep their normal Unicode line break opportunities.
+    const lead = 'אב😀 ', cjk = '中华人民共和国カタカナー', mixed = lead + cjk + '!';
+    const byteAt = i => encoder.encode(mixed.slice(0, i)).length;
+    const wordCuts = [...new Intl.Segmenter('ja', { granularity: 'word' }).segment(cjk)]
+        .filter(s => s.index > 0).map(s => byteAt(lead.length + s.index));
+    const kept = [0, byteAt(lead.length), byteAt(lead.length + cjk.length), byteAt(mixed.length)];
+    checkBreaks(host, mixed, [...kept, byteAt(lead.length + 1)], [...kept, ...wordCuts].sort((a, b) => a - b), true);
+    checkBreaks(host, mixed, [0, lead.length + 1, mixed.length], [0, lead.length + 1, mixed.length]);
+    // An older browser has no interior dictionary boundaries. Ordinary line breaks survive.
+    const original = Intl.Segmenter;
+    try {
+        Intl.Segmenter = undefined;
+        const module = await import('../../Sources/Rune/Resources/Web/rune-web-text.mjs?without-segmenter');
+        const fallback = module.createRuneTextImports(() => memory);
+        checkWord(fallback, text, 12, text);
+        checkBreaks(fallback, 'a ภาษาไทย b', [2, 4, 6, 10], [2, 10]);
+        checkBreaks(fallback, mixed, [...kept, byteAt(lead.length + 1)], kept, true);
+    } finally { Intl.Segmenter = original; }
+    document.querySelector('#result').textContent = 'PASS browser dictionary segmentation';
+} catch (error) {
+    document.querySelector('#result').textContent = 'FAIL ' + error.stack;
+}
+</script>

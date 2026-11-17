@@ -1,0 +1,70 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune browser menus</title>
+<canvas tabindex="0"></canvas>
+<pre id="result">Running…</pre>
+<script type="module">
+import { mountRunePopup } from '../../Sources/Rune/Resources/Web/rune-web-popup.mjs';
+
+const canvas = document.querySelector('canvas');
+const answers = [];
+const field = document.createElement('textarea');
+document.body.append(field);
+const events = new AbortController();
+const popup = mountRunePopup(canvas, e => answers.push(e), {activeEditor: () => field}, events.signal);
+const point = {x: innerWidth - 1, y: innerHeight - 1, width: 240};
+const menu = {items: [{id:'x', title:'Executable', keyEquivalent:'mod+X'}, {separator:true},
+    {id:'disabled', title:'Disabled', enabled:false},
+    {submenu:'Options', menu:{items:[{id:'print', title:'Print'}, {id:'copy', title:'Copy', checked:true}]}},
+    {id:'y', title:'Yesterday'}]};
+function check(ok, text) { if (!ok) throw Error(text); }
+const active = () => document.activeElement;
+const key = k => active().dispatchEvent(new KeyboardEvent('keydown', {key:k, bubbles:true, cancelable:true}));
+function open(token, spec = menu) { popup.show({menu:spec, token, dark:true}, point); }
+const target = id => document.querySelector('[data-rune-menu-id="'+id+'"]');
+try {
+    open('one');
+    const top = document.querySelector('[data-rune-menu]');
+    const bounds = top.getBoundingClientRect();
+    check(bounds.width >= 240 && bounds.right <= innerWidth && bounds.bottom <= innerHeight, 'Positioning');
+    target('disabled').click();
+    check(answers.length === 0 && top.isConnected, 'Disabled pick');
+    top.focus();
+    key('ArrowUp');
+    check(active() === target('y'), 'Up from menu root must land on last enabled row. Focused ' + active().outerHTML.slice(0, 180));
+    key('Home'); key('ArrowDown'); key('ArrowRight');
+    check(active() === target('print'), 'Did not skip disabled or open submenu');
+    key('End');
+    check(active() === target('copy') && active().getAttribute('role') === 'menuitemcheckbox', 'Missing checked role or End');
+    key('Escape');
+    check(document.querySelectorAll('[data-rune-menu]').length === 1, 'Escape should leave the root open');
+    key('ArrowRight'); key('c'); key('Enter');
+    check(answers.length === 1 && answers[0].token === 'one' && answers[0].id === 'copy', 'Keyboard pick');
+    open('two');
+    document.body.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, button:0}));
+    check(answers.length === 2 && answers[1].token === 'two' && answers[1].id === null, 'Outside dismissal');
+    open('three'); open('four');
+    check(answers.length === 2, 'Replacing a menu emitted stale dismissal');
+    key('Tab');
+    check(answers.length === 3 && answers[2].token === 'four', 'Tab dismissal');
+    check(popup.arm({clientX:10,clientY:12,shiftKey:false},{kind:'app'}) === true, 'App claim');
+    const native = new MouseEvent('contextmenu', {bubbles:true,cancelable:true});
+    canvas.dispatchEvent(native);
+    check(native.defaultPrevented, 'Native menu shown for app claim');
+    check(!popup.arm({clientX:10,clientY:12,shiftKey:true},{kind:'app',selection:'three words'}),
+        'Shift did not prefer native menu');
+    check(document.getSelection().toString() === 'three words', 'Native selection context');
+    popup.arm({clientX:8,clientY:8,shiftKey:false},{kind:'text',text:'Rune',href:'https://example.test/rune'});
+    check(document.querySelector('a[data-rune-context]')?.href === 'https://example.test/rune', 'Native link menu target');
+    popup.arm({clientX:8,clientY:8,shiftKey:false},{kind:'text',text:'Ordinary text',href:'javascript:void(0)'});
+    check(!document.querySelector('a[data-rune-context]') && document.querySelector('[data-rune-context]').textContent === 'Ordinary text',
+        'Native text menu target');
+    check(!popup.arm({clientX:17,clientY:16,shiftKey:false},{kind:'field'}) && active() === field,
+        'Native editor context');
+    popup.dispose();
+    check(!document.querySelector('[data-rune-menu], [data-rune-context]') && field.style.pointerEvents === '',
+        'Teardown left menu or editor overrides');
+    document.querySelector('#result').textContent = 'PASS nested controls, viewport placement, keyboard, native selection and editor, cancellation';
+} catch(error) { document.querySelector('#result').textContent = 'FAIL ' + error.stack; }
+finally { events.abort(); popup.dispose(); }
+</script>

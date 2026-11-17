@@ -1,0 +1,49 @@
+<!doctype html>
+<canvas style="cursor: help"></canvas><pre id="result">Running</pre>
+<script type="module">
+import { mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+const result = document.querySelector('#result'), canvas = document.querySelector('canvas');
+const memory = new WebAssembly.Memory({initial:1});
+const bytes = new Uint8Array(memory.buffer), encoder = new TextEncoder();
+let update = {css:'pointer'}, paint = true, app;
+const next = () => new Promise(resolve => requestAnimationFrame(resolve));
+function check(ok, message) { if (!ok) throw Error(message); }
+async function move(value) { update = value; paint = true; await next(); }
+try {
+    app = mountRuneBrowser(canvas, {exports: {
+        memory, rune_web_enable() {}, __main_void: () => 0, rune_web_event: () => 0,
+        rune_web_field: () => 0, rune_web_buffer: () => 0,
+        rune_web_frame() {
+            if (!paint) return 0;
+            paint = false;
+            new Uint32Array(memory.buffer, 0, 3).set([1, 1, 0]);
+            return 12;
+        },
+        rune_web_cursor() {
+            if (!update) return 0;
+            const data = encoder.encode(JSON.stringify(update));
+            update = null;
+            bytes.set(data);
+            return data.length;
+        }
+    }});
+    await app.ready;
+    check(canvas.style.cursor === 'pointer', 'initial Rune cursor');
+    await move({id:1, css:'image-set(url("{url}") 2x) 0 0, auto',
+        png:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+kqS8AAAAASUVORK5CYII='});
+    const custom = canvas.style.cursor, url = custom.match(/blob:[^")]+/)?.[0];
+    check(url && (await fetch(url)).ok, 'browser did not receive a PNG URL');
+    await move({css:'text'});
+    check(canvas.style.cursor === 'text', 'cursor did not switch from image to text');
+    await move({id:1});
+    check(canvas.style.cursor === custom, 'cache hit allocated or changed cursor URL');
+    await move({evict:1, id:2, css:'default'});
+    check(canvas.style.cursor === 'default', 'invalid cursor did not reset to arrow');
+    let revoked = false;
+    try { await fetch(url); } catch { revoked = true; }
+    check(revoked, 'eviction kept the cursor URL alive');
+    app.dispose();
+    check(canvas.style.cursor === 'help', 'page cursor missing on detach');
+    result.textContent = 'PASS stock cursor, cached PNG hotspot, URL revocation and page cursor restoration';
+} catch (error) { app?.dispose(); result.textContent = 'FAIL ' + error.message; throw error; }
+</script>

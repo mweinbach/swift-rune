@@ -250,10 +250,10 @@ struct MotionRuntimeParityTests {
         }
     }
 
-    // MARK: - unseen_entrances.rs (2 tests)
+    // MARK: - unseen_entrances.rs (reference and native paint)
 
-    @Test("unseen_entrances: colours_out_of_sight_land_at_once")
-    func coloursOutOfSightLandAtOnce() throws {
+    @Test("unseen_entrances: colours_out_of_sight_land_at_once", arguments: [false, true])
+    func coloursOutOfSightLandAtOnce(native: Bool) throws {
         let rt = Runtime<UInt32>(state: 0, viewport: Vec2(300, 300), pixelScale: 2.0, systemDark: true) { n, _ in
             let fill: Color = (n % 2 == 1) ? .white : .transparent
             let rows: [El<UInt32>] = (0..<40).map { i in
@@ -263,10 +263,10 @@ struct MotionRuntimeParityTests {
                 col().key("scroll").wFull().h(100).scroll(stickBottom: false).child(col().children(rows))
             )
         }
-        _ = rt.frame(at: 0.0)
-        _ = rt.frame(at: 1.0 / 120.0)
+        drawPresenceFrame(rt, native: native, at: 0.0)
+        drawPresenceFrame(rt, native: native, at: 1.0 / 120.0)
         rt.update(at: 1.0 / 120.0) { n, _ in n = 1 }
-        _ = rt.frame(at: 2.0 / 120.0)
+        drawPresenceFrame(rt, native: native, at: 2.0 / 120.0)
         func isFading(_ key: String) -> Bool {
             let id = rt.flatNodes.first(where: { $0.key == key })!.nodeId
             return rt.scene.store.isAnimating(id, Props.FILL)
@@ -275,8 +275,8 @@ struct MotionRuntimeParityTests {
         #expect(!isFading("r30"), "a row out of sight lands it")
     }
 
-    @Test("unseen_entrances: what_mounts_out_of_sight_enters_at_once")
-    func whatMountsOutOfSightEntersAtOnce() {
+    @Test("unseen_entrances: what_mounts_out_of_sight_enters_at_once", arguments: [false, true])
+    func whatMountsOutOfSightEntersAtOnce(native: Bool) {
         let rt = Runtime<UInt32>(state: 0, viewport: Vec2(300, 300), pixelScale: 2.0, systemDark: true) { n, _ in
             let rows: [El<UInt32>] = (0..<40).map { i in
                 let digit: El<UInt32> = el().key("d\(i)-\(n)").size(10, 10).bg(.white).transition(.opacity)
@@ -286,14 +286,44 @@ struct MotionRuntimeParityTests {
                 col().key("scroll").wFull().h(100).scroll(stickBottom: false).child(col().children(rows))
             )
         }
-        _ = rt.frame(at: 0.0)
-        _ = rt.frame(at: 1.0 / 120.0)
+        drawPresenceFrame(rt, native: native, at: 0.0)
+        drawPresenceFrame(rt, native: native, at: 1.0 / 120.0)
         rt.update(at: 1.0 / 120.0) { n, _ in n = 1 }
-        _ = rt.frame(at: 2.0 / 120.0)
+        drawPresenceFrame(rt, native: native, at: 2.0 / 120.0)
         func opacity(_ key: String) -> Float? { rt.element(byKey: key)?.opacity }
         #expect(opacity("d0-1").map { $0 < 1.0 } == true, "a digit in sight fades in: \(String(describing: opacity("d0-1")))")
         #expect(opacity("d30-1") == 1.0, "a digit out of sight lands at once")
         #expect(opacity("d30-0") == nil, "and the one it replaced goes at once")
+    }
+
+    @Test("An offscreen parent exits only while a descendant is still visible",
+          arguments: [false, true], [false, true])
+    func offscreenParentExit(native: Bool, visibleChild: Bool) throws {
+        let rt = Runtime<Bool>(state: true, viewport: Vec2(120, 80), pixelScale: 1) { show, _ in
+            let root: El<Bool> = col().size(120, 80).clip()
+            guard show else { return root }
+            let child: El<Bool> = el().key("ink").size(24, 16)
+                .absolute(x: 0, y: visibleChild ? -160 : 0).bg(.white)
+            return root.child(col().key("parent").size(40, 16).offset(0, 160)
+                .transition(.opacity).child(child))
+        }
+        drawPresenceFrame(rt, native: native, at: 0)
+        drawPresenceFrame(rt, native: native, at: 0.01)
+        let ink = try #require(rt.element(byKey: "ink"))
+        #expect((ink.visible[3] > 0) == visibleChild)
+        rt.update(at: 0.01) { show, _ in show = false }
+        drawPresenceFrame(rt, native: native, at: 0.02)
+        if visibleChild {
+            let parent = try #require(rt.element(byKey: "parent"))
+            #expect(parent.exiting && parent.opacity > 0)
+        } else {
+            #expect(rt.element(byKey: "parent") == nil)
+        }
+    }
+
+    private func drawPresenceFrame<S>(_ rt: Runtime<S>, native: Bool, at time: Double) {
+        if native { _ = rt.renderFrame(at: time) }
+        else { _ = rt.frame(at: time) }
     }
 
     // MARK: - reveal_phase.rs (core runtime parity tests)

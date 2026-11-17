@@ -1,0 +1,65 @@
+<!doctype html>
+<meta charset="utf-8"><title>Rune WASI resident image pages</title>
+<style>* { margin:0 } #host { width:24px; height:8px } canvas { width:100%; height:100% }</style>
+<div id="host"><canvas></canvas></div><pre id="result">Loading Swift…</pre>
+<script type="module">
+import {instantiateRuneBrowser, mountRuneBrowser} from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+import {RuneCycleScene} from '../../Sources/Rune/Resources/Web/rune-web-cycles.mjs';
+import {WASI, ConsoleStdout, OpenFile, File} from '/__rune/shim/index.js';
+let app;
+const result = document.querySelector('#result'), canvas = document.querySelector('canvas');
+try {
+    const stdout = ConsoleStdout.lineBuffered(console.log);
+    const wasi = new WASI(['rune-image-page-probe'],[],[new OpenFile(new File([])), stdout, stdout]);
+    const {instance} = await instantiateRuneBrowser(fetch('/__rune/image-pages.wasm'),
+        {wasi_snapshot_preview1:wasi.wasiImport}, {fontDirectory:null});
+    wasi.initialize(instance);
+    const api = instance.exports, params = new URL(location.href).searchParams;
+    const backend = params.get('backend') ?? 'webgl2', legacy = params.has('legacy');
+    let pending, sequence;
+    const packets = new RuneCycleScene();
+    const frames = [], reader = new OffscreenCanvas(3, 1).getContext('2d',{willReadFrequently:true});
+    app = mountRuneBrowser(canvas,{exports:{...api,
+        rune_web_enable_image_pages: legacy ? undefined : api.rune_web_enable_image_pages,
+        rune_web_enable_glyph_pages: legacy ? undefined : api.rune_web_enable_glyph_pages,
+        rune_web_scene(time,force) {
+            const length = api.rune_web_scene(time,force);
+            if (length > 0) {
+                const s = packets.decode(api.memory.buffer,api.rune_web_buffer(),length,16384,sequence);
+                if (s.paged === legacy) throw Error('Unexpected Swift atlas page negotiation');
+                sequence = s.sequence;
+                const pages = [];
+                for (let i = 0; i < s.count; i++) if (s.instances[i*32+17] === 7) pages.push(s.instances[i*32+16]);
+                pending = {pages,uploads:s.imagePages.map(p => p.update?.data.byteLength ?? 0)};
+            }
+            return length;
+        },
+        rune_web_accessibility() {
+            if (pending) {
+                const {width,height} = canvas;
+                for (let i = 0; i < 3; i++) {
+                    reader.drawImage(canvas,Math.floor((i+0.5)*width/3),Math.floor(height/2),1,1,i,0,1,1);
+                }
+                frames.push({...pending, width,height, pixels:Array.from(reader.getImageData(0,0,3,1).data)});
+                pending = null;
+            }
+            return api.rune_web_accessibility();
+        }
+    }},{backend});
+    await app.ready;
+    const first = frames[0], red = [255,0,0,255], green = [0,255,0,255], blue = [0,0,255,255];
+    const equals = (a,b) => a?.length === b.length && a.every((v,i) => v === b[i]);
+    if (!first || !equals(first.pixels,[...red,...green,...red]) || first.pages.length !== 3 ||
+        first.pages[0] !== first.pages[2] || ((first.pages[0] === first.pages[1]) !== legacy) ||
+        first.uploads[first.pages[0]] < 1_025*4 || first.uploads[first.pages[1]] < 16) throw Error('Initial pages '+JSON.stringify(first));
+    canvas.dispatchEvent(new KeyboardEvent('keydown',{code:'Space',key:' ',bubbles:true}));
+    let changed;
+    for (let i = 0; !changed && i < 180; i++) {
+        await new Promise(requestAnimationFrame);
+        changed = frames.find(f => equals(f.pixels,[...red,...blue,...red]));
+    }
+    if (!changed || !equals(changed.pages,first.pages) || (!legacy && changed.uploads[first.pages[0]] !== 0) ||
+        changed.uploads[first.pages[1]] !== 16) throw Error('Streaming updates '+JSON.stringify(frames));
+    result.textContent='PASS '+JSON.stringify({backend,legacy,first,changed,renderer:app.renderer.renderer});
+} catch(error) {result.textContent='FAIL '+error.message+' '+error.stack;} finally {app?.dispose();}
+</script>

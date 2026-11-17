@@ -64,7 +64,7 @@ try {
         memory, rune_web_enable() {}, __main_void: () => 0, rune_web_scene: scene, rune_web_ui_passes: () => uiPasses,
         rune_web_frame() { throw Error('Unexpected CPU rasterization'); },
         rune_web_field: () => 0, rune_web_buffer: () => 0, rune_web_event: () => 0
-    } });
+    } }, { backend: 'webgl2' });
     const duringLoad = gl.getExtension('WEBGL_lose_context');
     if (duringLoad) {
         let ready = false;

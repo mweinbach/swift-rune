@@ -43,8 +43,10 @@ struct MacOSHostFrameTests {
         final class OwnContent: Compositor {
             func render(frame: CompositorFrame<Int>) {}
         }
+        var encoded: [FrameEncoded] = []
         let app = App(title: "Own content", size: Vec2(16, 16), state: 0) { _, _ in text("UI") }
             .compositor(OwnContent())
+            .onFrameEncoded { encoded.append($0) }
         let entry = AppWindowSpec(app: app).boxed().requireNativeHostEntry()
         let runtime = entry.createRuntime(pixelScale: 1, systemDark: false, reducedMotion: true, waker: Waker())
         let renderer = try MetalRenderer()
@@ -54,11 +56,96 @@ struct MacOSHostFrameTests {
         let drawable = try #require(layer.nextDrawable())
         var frame = RenderFrame(width: 16, height: 16)
         frame.width = Int.max
-        #expect(!entry.present(frame, drawable: drawable, renderer: renderer, runtimeObj: runtime,
-                               dt: 0, started: CACurrentMediaTime(), updateMs: 0, synchronized: false, committed: false))
-        frame.width = 16
         #expect(entry.present(frame, drawable: drawable, renderer: renderer, runtimeObj: runtime,
-                              dt: 0, started: CACurrentMediaTime(), updateMs: 0, synchronized: false, committed: false))
+                               dt: 0, started: CACurrentMediaTime(), updateMs: 0, synchronized: false, committed: false,
+                               target: nil, refreshHz: nil) == nil)
+        frame.width = 16
+        let started = CACurrentMediaTime()
+        let target = started + 0.008
+        let submitted = try #require(entry.present(frame, drawable: drawable, renderer: renderer, runtimeObj: runtime,
+                              dt: 0, started: started, updateMs: 0, synchronized: false, committed: false,
+                              target: target, refreshHz: 120))
+        let report = try #require(encoded.last)
+        #expect(report.at == submitted)
+        #expect(report.outcome == .drawn)
+        #expect(report.at >= started)
+        #expect(report.started == started)
+        #expect(report.refreshHz == 120)
+        #expect(report.presentsAt == target)
+    }
+
+    @MainActor
+    @Test func initialDrawableCountRestoresAfterVisibleIdleOrASecondOfMotion() {
+        let layer = CAMetalLayer()
+        layer.maximumDrawableCount = 3
+        var launch = MacOSLaunchDrawables()
+        launch.cap(layer)
+        #expect(layer.maximumDrawableCount == 2)
+        launch.submitted(to: layer, visible: false, idle: true, at: 2)
+        launch.submitted(to: layer, visible: true, idle: false, at: 10)
+        launch.submitted(to: layer, visible: true, idle: false, at: 10.999)
+        #expect(layer.maximumDrawableCount == 2)
+        launch.submitted(to: layer, visible: true, idle: false, at: 11)
+        #expect(layer.maximumDrawableCount == 3)
+        launch.cap(layer)
+        launch.submitted(to: layer, visible: true, idle: true, at: 20)
+        #expect(layer.maximumDrawableCount == 3)
+        layer.maximumDrawableCount = 2
+        launch.cap(layer)
+        launch.submitted(to: layer, visible: true, idle: true, at: 21)
+        #expect(layer.maximumDrawableCount == 2)
+    }
+
+    @Test func quietTimerComparesInstanceBitsScaleAndEveryAtlasPage() throws {
+        var frame = RenderFrame(width: 64, height: 64, instances: [RenderInstance()])
+        frame.instances[0].params.w = Float(bitPattern: 0x7fc0_0001)
+        frame.glyphPageRevisions = [10, 20]
+        frame.imagePageRevisions = [30, 40]
+        let first = try #require(SettledWindowFrame(frame, scale: 2))
+        #expect(first == SettledWindowFrame(frame, scale: 2))
+        #expect(first != SettledWindowFrame(frame, scale: 1))
+        var next = frame
+        next.instances[0].params.w = Float(bitPattern: 0x7fc0_0002)
+        #expect(first != SettledWindowFrame(next, scale: 2))
+        next = frame
+        next.glyphPageRevisions[1] += 1
+        #expect(first != SettledWindowFrame(next, scale: 2))
+        next = frame
+        next.imagePageRevisions[1] += 1
+        #expect(first != SettledWindowFrame(next, scale: 2))
+        next = frame
+        next.elidedLayers = [(index: 0, node: 3, signature: 4)]
+        #expect(SettledWindowFrame(next, scale: 2) == nil)
+    }
+
+    @MainActor
+    @Test func startupTimerBecomesADisplayLinkWhenTheViewAttaches() {
+        let view = NSView(frame: CGRect(x: 0, y: 0, width: 20, height: 20))
+        let driver = MacOSDisplayLinkDriver {}
+        driver.start(in: view)
+        #expect(driver.pacing == .unpaced)
+        let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        driver.start(in: view)
+        #expect(driver.pacing == .paced)
+        driver.stop()
+    }
+
+    @MainActor
+    @Test func reentrantRenderRequestsWakeOnceAfterTheCurrentFrame() async throws {
+        let view = NSView()
+        var wakes = 0
+        let driver = MacOSDisplayLinkDriver { wakes += 1 }
+        #expect(driver.beginFrame(in: view, paced: true) == .now)
+        for _ in 0..<20 {
+            #expect(driver.beginFrame(in: view, paced: true) == .wait)
+        }
+        #expect(wakes == 0)
+        driver.submitted()
+        driver.endFrame()
+        await withCheckedContinuation { resume in DispatchQueue.main.async { resume.resume() } }
+        #expect(wakes == 1)
+        driver.stop()
     }
 
     @MainActor

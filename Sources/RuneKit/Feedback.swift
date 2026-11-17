@@ -131,6 +131,7 @@ public struct Spinner<State> {
             .role(.progress)
             .label("Loading")
             .size(diameter, diameter)
+            .pixelSnap(false)
 
         for (idx, dot) in RadarGrid.dots.enumerated() {
             let side = dot.size * u
@@ -140,8 +141,8 @@ public struct Spinner<State> {
                 .size(side, side)
                 .rounded(side * 0.24)
                 .bg(ink)
-                .opacity(dot.stillOpacity)
-            box = box.child(dotEl)
+                .a11yHidden()
+            box = box.child(dot.cycle.map { dotEl.cycle($0) } ?? dotEl.opacity(dot.stillOpacity))
         }
         return box
     }
@@ -189,7 +190,8 @@ public struct Loader<State> {
             .label("Loading")
             .size(diameter, diameter)
             .child(icon(FeedbackAssets.ringIcon, size: diameter).key("\(key)-ring").color(ink).absolute(x: 0, y: 0).opacity(0.2))
-            .child(icon(FeedbackAssets.arcIcon, size: diameter).key("\(key)-arc").color(ink).absolute(x: 0, y: 0))
+            .child(icon(FeedbackAssets.arcIcon, size: diameter).key("\(key)-arc").color(ink)
+                .absolute(x: 0, y: 0).looping(Self.loopSpec))
     }
 }
 
@@ -218,7 +220,8 @@ public struct Progress<State> {
         if let v = value {
             let clamped = v.clamped(to: 0...1)
             let pct = Int((clamped * 100).rounded())
-            root = root.selected("\(pct)%")
+            root = root.rangeValue((Double(clamped) * 10_000).rounded() / 10_000, min: 0, max: 1)
+                .a11yValue("\(pct)%")
         }
         if labelText != nil || showsValue {
             var header: El<State> = row().key("\(key)-header").wFull().gap(8).itemsCenter()
@@ -230,7 +233,7 @@ public struct Progress<State> {
                 let pct = Int((value.clamped(to: 0...1) * 100).rounded())
                 header = header.child(text("\(pct)%").key("\(key)-value").font(k.ty.textSmall).color(c.textWeak))
             }
-            root = root.child(header)
+            root = root.child(header.a11yHidden())
         }
 
         let frac = value?.clamped(to: 0...1) ?? 0.25
@@ -248,10 +251,10 @@ public struct Progress<State> {
             .rounded(999)
             .bg(c.surfaceBase)
             .border(1.0, c.borderWeak)
-            .clip(true)
-            .child(fill)
+            .clipSoft(0)
+            .child(value == nil ? fill.looping(Self.indeterminateSlide) : fill)
 
-        return root.child(track)
+        return root.child(track.a11yHidden())
     }
 }
 
@@ -280,7 +283,8 @@ public struct ProgressCircle<State> {
         var root: El<State> = el()
             .key(key)
             .role(.progress)
-            .selected("\(pct)%")
+            .rangeValue((Double(clamped) * 10_000).rounded() / 10_000, min: 0, max: 1)
+            .a11yValue("\(pct)%")
             .size(diameter, diameter)
             .child(icon(FeedbackAssets.ringIcon, size: diameter).key("\(key)-ring").absolute(x: 0, y: 0).color(ink).opacity(0.2))
             .child(icon(Self.arcIcon(for: clamped), size: diameter).key("\(key)-arc").absolute(x: 0, y: 0).color(ink))

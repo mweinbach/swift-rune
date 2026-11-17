@@ -71,6 +71,13 @@ void rune_glib_watch_arm(RuneGLibWatch *watch) {
         capacity = count;
         fds = g_renew(GPollFD, fds, capacity);
     }
+    /* Some GSources arm a native read in prepare. In particular GDK's Wayland
+     * source calls wl_display_prepare_read_queue. Complete this nonblocking
+     * inspection before returning to code which may synchronously round-trip
+     * the same display (for example, mapping a second layer surface). No
+     * events have been polled by this thread and callbacks are not dispatched. */
+    for (int i = 0; i < count; ++i) fds[i].revents = 0;
+    if (g_main_context_check(context, priority, fds, count)) ready = TRUE;
     g_main_context_release(context);
     g_mutex_lock(&watch->lock);
     g_free(watch->fds);

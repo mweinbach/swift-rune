@@ -1,0 +1,127 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune field spelling</title>
+<style>* { margin: 0 } canvas { width: 640px; height: 112px }</style>
+<canvas></canvas><pre id="result">Loading the Swift spelling fixture…</pre>
+<script type="module">
+import { instantiateRuneBrowser, mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+import { verifyAppMenu } from './popup-actions.mjs';
+import { WASI, ConsoleStdout, OpenFile, File } from '/__rune/shim/index.js';
+
+const result = document.querySelector('#result'), canvas = document.querySelector('canvas');
+const backend = new URL(location.href).searchParams.get('backend') ?? 'cpu';
+const sample = new OffscreenCanvas(1, 1);
+const reader = sample.getContext('2d', { willReadFrequently: true });
+const reports = [], requests = [], warnings = [];
+let presentedField;
+const originalFetch = globalThis.fetch, originalWarn = console.warn;
+const nextFrame = () => new Promise(requestAnimationFrame);
+const check = (condition, message) => { if (!condition) throw Error(message); };
+async function until(test, description) {
+    for (const stop = performance.now() + 9000; performance.now() < stop;) {
+        const value = test();
+        if (value) return value;
+        await nextFrame();
+    }
+    const controls = [...document.querySelectorAll('input,textarea,[data-rune-menu-id]')].map(n =>
+        [n.tagName, n.getAttribute('aria-label'), n.value ?? n.dataset.runeMenuId]);
+    throw Error(description + '; controls: ' + JSON.stringify(controls) + '; recent Swift output: ' + JSON.stringify(reports.slice(-2)));
+}
+const bytes = new TextEncoder();
+function byteRange(text, word) {
+    const index = text.indexOf(word);
+    check(index >= 0, 'Missing test word ' + word);
+    const start = bytes.encode(text.slice(0, index)).length;
+    return [start, start + bytes.encode(word).length];
+}
+const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+function captureField() {
+    sample.width = canvas.width;
+    sample.height = Math.round(40 * canvas.height / 112);
+    reader.drawImage(canvas, 0, 0);
+    presentedField = reader.getImageData(0, 0, sample.width, sample.height);
+}
+// The emoji can contain red ink before spelling is ready. Compare the same field pixels.
+function newUnderlines(before) {
+    const { data, width, height } = presentedField;
+    const bands = [];
+    for (let x = 0; x < width; x++) {
+        let found = false;
+        for (let y = 0; y < height; y++) {
+            const i = (y * width + x) * 4;
+            const red = p => p[i] > 100 && p[i] - p[i + 1] > 60 && p[i] - p[i + 2] > 50;
+            if (red(data) && !red(before.data)) { found = true; break; }
+        }
+        if (found) {
+            const last = bands.at(-1);
+            if (last && x - last[1] < 6) last[1] = x;
+            else bands.push([x, x]);
+        }
+    }
+    return bands.filter(([left, right]) => right - left > 2);
+}
+async function chooseFromMenu(band, id, title) {
+    const bounds = canvas.getBoundingClientRect();
+    window.runeSpellPoint = { x: bounds.x + (band[0] + band[1]) / 2 * bounds.width / canvas.width,
+        y: bounds.y + 18 * bounds.height / 112 };
+    result.textContent = 'Open spelling menu for ' + id;
+    const item = await until(() => document.querySelector('[data-rune-menu] [data-rune-menu-id="' + id + '"]'),
+        'Missing ' + id + ' in ' + document.querySelector('[data-rune-menu]')?.innerText);
+    if (title) check(item.textContent.trim().startsWith(title), 'Unexpected ' + id + ' label: ' + item.textContent);
+    item.click();
+}
+let release, app;
+try {
+    const gate = new Promise(resolve => { release = resolve; });
+    globalThis.fetch = async (input, ...args) => {
+        const url = new URL(input.url ?? input, location.href);
+        if (url.pathname.startsWith('/Tests/Browser/spell/')) {
+            requests.push(url.pathname.split('/').at(-1));
+            await gate;
+        }
+        return originalFetch(input, ...args);
+    };
+    console.warn = (...args) => { warnings.push(args.map(String).join(' ')); originalWarn(...args); };
+    const stdout = ConsoleStdout.lineBuffered(line => { if (line.startsWith('{')) reports.push(JSON.parse(line)); });
+    const wasi = new WASI(['rune-spell-probe'], [], [new OpenFile(new File([])), stdout, stdout]);
+    const { instance } = await instantiateRuneBrowser(fetch('/__rune/spell.wasm'),
+        { wasi_snapshot_preview1: wasi.wasiImport }, { fontDirectory: null });
+    wasi.initialize(instance);
+    const api = instance.exports;
+    app = mountRuneBrowser(canvas, { exports: { ...api,
+        rune_web_accessibility() {
+            // A canvas drawing buffer may be discarded once the browser composites this frame.
+            captureField();
+            return api.rune_web_accessibility();
+        }
+    } }, { backend, resizeTo: null });
+    await app.ready;
+    const initial = await until(() => reports[0], 'No initial mounted Rune view');
+    check(equal(initial.ranges, []) && equal(initial.replacements, []), 'Marked a word before dictionaries arrived');
+    check(equal([...initial.languages].sort(), ['de', 'en-US', 'fr']), 'Wrong active languages');
+    const before = presentedField;
+    await until(() => [...document.querySelectorAll('[aria-label="Document"]')].some(field => field.value === initial.text),
+        'Missing mounted Rune editor');
+    await until(() => requests.length === 6, 'Lazy dictionary requests did not start');
+    release();
+    const checked = await until(() => reports.find(r => r.ranges.length === 2), 'Dictionary completion failed to recheck the field');
+    const expectedRanges = [byteRange(initial.text, 'teh'), byteRange(initial.text, 'züber')];
+    check(equal(checked.ranges, expectedRanges) && checked.replacements[0] === 'the',
+        'Incorrect multilingual or suggestion result: ' + JSON.stringify(checked));
+    const bands = await until(() => { const value = newUnderlines(before); return value.length === 2 && value; },
+        'Both misspellings should gain visible underlines');
+    await chooseFromMenu(bands[0], 'suggestion-0', 'the');
+    const replaced = await until(() => reports.find(r => r.text !== initial.text), 'Suggestion did not edit the field');
+    check(replaced.text === initial.text.replace('teh', 'the') && equal(replaced.ranges, [byteRange(replaced.text, 'züber')]),
+        'Suggestion changed the wrong UTF-8 range');
+    await chooseFromMenu(bands[1], 'learn-spelling');
+    await until(() => reports.find(r => r.text === replaced.text && r.ranges.length === 0), 'Learning did not recheck the editor');
+    await until(() => newUnderlines(before).length === 0, 'Learned and corrected words still painted underlines');
+    check(equal([...requests].sort(), ['de.aff', 'de.dic', 'en-US.aff', 'en-US.dic', 'fr.aff', 'fr.dic']),
+        'A dictionary was fetched repeatedly: ' + requests);
+    check(warnings.some(w => w.includes('fr')), 'Unavailable French dictionary was not reported');
+    await verifyAppMenu(canvas, result, reports, until);
+    result.textContent = 'PASS ' + JSON.stringify({ renderer: app.renderer, requests, ranges: expectedRanges, suggestion: 'the', learned: 'züber', bands });
+} catch (error) { result.textContent = 'FAIL ' + error.stack; }
+finally { release?.(); app?.dispose(); globalThis.fetch = originalFetch; console.warn = originalWarn; }
+</script>

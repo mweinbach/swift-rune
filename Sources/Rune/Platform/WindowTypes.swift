@@ -2,6 +2,7 @@ import Foundation
 import RuneMotion
 import RuneRef
 #if os(macOS)
+import AppKit
 import QuartzCore
 #endif
 
@@ -265,23 +266,38 @@ public struct WindowRestMachine: Equatable, Sendable {
 
 // MARK: - WindowHandle & Request Queue (window/handle.rs)
 
-/// Snapshot of a window's frame counters (`SurfaceStats`).
-public struct WindowSurfaceStats: Equatable, Sendable {
-    public var redraws: UInt64
-    public var presents: UInt64
-    public var failedDrawables: UInt64
-    public var loopTurns: UInt64
+/// Live frame statistics shared by the runtime and its native window handle.
+public typealias WindowSurfaceStats = SurfaceStats
 
-    public init(
-        redraws: UInt64 = 0,
-        presents: UInt64 = 0,
-        failedDrawables: UInt64 = 0,
-        loopTurns: UInt64 = 0
-    ) {
-        self.redraws = redraws
-        self.presents = presents
-        self.failedDrawables = failedDrawables
-        self.loopTurns = loopTurns
+public extension SurfaceStats {
+    // Preserve the original WindowSurfaceStats counter accessors.
+    var redraws: UInt64 {
+        get { totals.redraws }
+        set { totals.redraws = newValue }
+    }
+
+    var presents: UInt64 {
+        get { totals.presents }
+        set { totals.presents = newValue }
+    }
+
+    var failedDrawables: UInt64 {
+        get { totals.failedCount }
+        set {
+            guard newValue != totals.failedCount else { return }
+            totals.occluded = 0
+            totals.timeouts = 0
+            totals.outdated = newValue
+        }
+    }
+
+    var loopTurns: UInt64 {
+        get { totals.turns }
+        set { totals.turns = newValue }
+    }
+
+    init(redraws: UInt64 = 0, presents: UInt64 = 0, failedDrawables: UInt64 = 0, loopTurns: UInt64 = 0) {
+        self.init(totals: SurfaceCounts(redraws: redraws, presents: presents, outdated: failedDrawables, turns: loopTurns))
     }
 }
 
@@ -377,7 +393,7 @@ public protocol HostedWindowEntry: AnyObject {
     func runOpenUrlHook(runtimeObj: AnyObject, url: String)
     func fireOnCreated()
     func fireOnReady()
-    func trimIdleCaches(runtimeObj: AnyObject, all: Bool)
+    func trimIdleCaches(runtimeObj: AnyObject, at now: Double)
     func viewCommitCount(runtimeObj: AnyObject) -> Int
     func dispatchModifiers(runtimeObj: AnyObject, mods: Mods, at: Double)
     func hasFocusedTextInput(runtimeObj: AnyObject) -> Bool
@@ -417,20 +433,82 @@ extension HostedWindowEntry {
 internal protocol NativeHostedWindowEntry: HostedWindowEntry {
     func wakeDeadline(runtimeObj: AnyObject, covered: Bool) -> Double?
     #if os(macOS)
+    func resolvedWindowArgs(inheriting args: ToolingArgs) -> ToolingArgs
+    @MainActor func applyMacAppUpdates(runtimeObj: AnyObject, at now: Double, shortcuts: ShortcutGuard?,
+                                       dispatch: (WindowHandleRequest) -> Void)
+    @MainActor func applyMacShellRequests(runtimeObj: AnyObject, window: NSWindow?) -> Bool
+    func setWindowTitle(_ title: String, runtimeObj: AnyObject)
+    func updateWindowOrigin(runtimeObj: AnyObject, origin: MacOSWindowOrigin?)
+    func inputPoint(runtimeObj: AnyObject, fromWindow: Vec2) -> Vec2
+    func queueWindowHandleFrame(_ request: WindowFrameRequest, runtimeObj: AnyObject)
+    var surfaceStatsReceiver: ((SurfaceStats) -> Void)? { get }
+    func attachSurfaceMeter(_ meter: SurfaceMeter, runtimeObj: AnyObject)
+    func createAttachedOverlays() -> [AnyObject]
     @MainActor func makeTextIdleObserver(runtimeObj: AnyObject) -> AppleTextIdleObserver
+    var receivesOpenUrls: Bool { get }
     func cancelPreparedText(runtimeObj: AnyObject)
     func renderFrame(runtimeObj: AnyObject, renderer: MetalRenderer, at time: Double, nativeMaterials: Bool) -> RenderFrame
     var compositorAnimating: Bool { get }
+    var compositorDrawsOwnContent: Bool { get }
+    func windowHasFrameWork(runtimeObj: AnyObject) -> Bool
+    func unchanged(presentsAt: Double?)
     func present(_ frame: RenderFrame, drawable: CAMetalDrawable, renderer: MetalRenderer, runtimeObj: AnyObject,
-                 dt: Float, started: Double, updateMs: Double, synchronized: Bool, committed: Bool) -> Bool
+                 dt: Float, started: Double, updateMs: Double, synchronized: Bool, committed: Bool,
+                 target: Double?, refreshHz: Double?) -> Double?
     #endif
 }
 
 final class TypedHostedWindowEntry<State>: NativeHostedWindowEntry {
     let spec: AppWindowSpec<State>
     #if os(macOS)
+    func resolvedWindowArgs(inheriting args: ToolingArgs) -> ToolingArgs { spec.resolveArgs { args } }
+    @MainActor func applyMacAppUpdates(runtimeObj: AnyObject, at now: Double, shortcuts: ShortcutGuard?,
+                                       dispatch: (WindowHandleRequest) -> Void) {
+        guard let req = drainAppStateUpdates(runtimeObj: runtimeObj, at: now, shortcutGuard: shortcuts) else { return }
+        if req.quit {
+            _ = QuitLifecycle.send(.start(ending: false, after: req.relaunch ? .relaunch : .exit))
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        // We are already on this window's UI turn. A show or hide takes effect
+        // before the same update's Tx.minimize is taken by the shell below.
+        switch req.window {
+        case .open: dispatch(.open)
+        case .show: dispatch(.show)
+        case .hide: dispatch(.hide)
+        case .close: dispatch(.close); return
+        case .none: break
+        }
+        switch req.activation {
+        case .activate, .focus: dispatch(.focus)
+        case .minimize: _ = rt(runtimeObj).minimizeStep(.asked)
+        case .none: break
+        }
+    }
+    @MainActor func applyMacShellRequests(runtimeObj: AnyObject, window: NSWindow?) -> Bool {
+        rt(runtimeObj).applyMacShellRequests(to: window, launcher: macosWindow.launcher)
+    }
+    func setWindowTitle(_ title: String, runtimeObj: AnyObject) {
+        rt(runtimeObj).windowTitle = title
+    }
+    func queueWindowHandleFrame(_ request: WindowFrameRequest, runtimeObj: AnyObject) {
+        rt(runtimeObj).queueWindowHandleFrame(request)
+    }
     private let reports: FrameReports<State>?
+    var receivesOpenUrls: Bool { spec.onOpenUrl != nil }
     var compositorAnimating: Bool { spec.compositor?.isAnimating ?? false }
+    func updateWindowOrigin(runtimeObj: AnyObject, origin: MacOSWindowOrigin?) {
+        let runtime = rt(runtimeObj)
+        if runtime.updateMacOSOrigin(origin) { runtime.waker.wake() }
+    }
+    func inputPoint(runtimeObj: AnyObject, fromWindow point: Vec2) -> Vec2 {
+        rt(runtimeObj).inputPoint(fromWindow: point)
+    }
+    var compositorDrawsOwnContent: Bool { spec.compositor?.drawsOwnContent ?? false }
+    func windowHasFrameWork(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).windowHasFrameWork
+    }
+    func unchanged(presentsAt: Double?) { reports?.unchanged(presentsAt: presentsAt) }
     #endif
     let secondary: Bool
     let handle: WindowHandle
@@ -475,6 +553,7 @@ final class TypedHostedWindowEntry<State>: NativeHostedWindowEntry {
             view: spec.appSpec.view
         )
         rt.windowTitle = spec.appSpec.title
+        rt.recordEvents = false
         rt.urlOpener.headless = false
         rt.srgbBlend = spec.appSpec.srgbBlend
         rt.poll = spec.appSpec.poll
@@ -521,6 +600,14 @@ final class TypedHostedWindowEntry<State>: NativeHostedWindowEntry {
     }
 
     #if os(macOS)
+    var surfaceStatsReceiver: ((SurfaceStats) -> Void)? { spec.desktopBuilder?.devStatsReceiver }
+
+    func attachSurfaceMeter(_ meter: SurfaceMeter, runtimeObj: AnyObject) {
+        rt(runtimeObj).surfaceMeter = meter
+    }
+
+    func createAttachedOverlays() -> [AnyObject] { spec.desktopBuilder?.createAttachedOverlays() ?? [] }
+
     @MainActor func makeTextIdleObserver(runtimeObj: AnyObject) -> AppleTextIdleObserver {
         AppleTextIdleObserver(runtime: rt(runtimeObj))
     }
@@ -536,16 +623,20 @@ final class TypedHostedWindowEntry<State>: NativeHostedWindowEntry {
     }
 
     func present(_ frame: RenderFrame, drawable: CAMetalDrawable, renderer: MetalRenderer, runtimeObj: AnyObject,
-                 dt: Float, started: Double, updateMs: Double, synchronized: Bool, committed: Bool) -> Bool {
+                 dt: Float, started: Double, updateMs: Double, synchronized: Bool, committed: Bool,
+                 target: Double?, refreshHz: Double?) -> Double? {
         let runtime = rt(runtimeObj)
         guard let count = renderer.present(frame: frame, drawable: drawable, compositor: spec.compositor, runtime: runtime,
                                            dt: dt, updateMilliseconds: updateMs, synchronized: synchronized) else {
             reports?.skipped()
-            return false
+            return nil
         }
+        let submitted = CACurrentMediaTime()
+        runtime.interactionSubmitted(at: submitted, target: target)
         reports?.presented(frame, at: runtime.currentTime, started: started, updateMs: updateMs, drawCount: count,
-                           committed: committed, runtime: runtime, compositor: spec.compositor)
-        return true
+                           committed: committed, runtime: runtime, compositor: spec.compositor, target: target,
+                           refreshHz: refreshHz, submitted: submitted)
+        return submitted
     }
     #endif
 
@@ -578,7 +669,23 @@ final class TypedHostedWindowEntry<State>: NativeHostedWindowEntry {
     }
 
     func applyAppStateUpdates(runtimeObj: AnyObject, at now: Double, shortcutGuard: ShortcutGuard?) {
-        guard let appShared = spec.appShared else { return }
+        guard let req = drainAppStateUpdates(runtimeObj: runtimeObj, at: now, shortcutGuard: shortcutGuard) else { return }
+        switch req.window {
+        case .open: handle.open()
+        case .show: handle.show()
+        case .hide: handle.hide()
+        case .close: handle.close()
+        case .none: break
+        }
+        switch req.activation {
+        case .activate, .focus: handle.focus()
+        case .minimize: handle.minimize()
+        case .none: break
+        }
+    }
+
+    private func drainAppStateUpdates(runtimeObj: AnyObject, at now: Double, shortcutGuard: ShortcutGuard?) -> AppDrainedRequests<State>? {
+        guard let appShared = spec.appShared else { return nil }
         shortcutGuard?.drain()
         let req = if let shortcutGuard {
             shortcutGuard.withReceiving {
@@ -593,17 +700,7 @@ final class TypedHostedWindowEntry<State>: NativeHostedWindowEntry {
         if let place = req.place, let pos = place.position {
             handle.setPosition((Int32(pos.x.rounded()), Int32(pos.y.rounded())))
         }
-        switch req.window {
-        case .open: handle.open()
-        case .show: handle.show()
-        case .hide: handle.hide()
-        case .close: handle.close()
-        case .none: break
-        }
-        switch req.activation {
-        case .activate, .focus: handle.focus()
-        case .minimize, .none: break
-        }
+        return req
     }
 
     func markMenusRunning(_ running: Bool) {
@@ -791,7 +888,7 @@ final class TypedHostedWindowEntry<State>: NativeHostedWindowEntry {
     }
 
     func accessibilitySnapshot(runtimeObj: AnyObject) -> AccessibilityNode {
-        rt(runtimeObj).accessibilitySnapshot()
+        rt(runtimeObj).nativeAccessibilitySnapshot()
     }
 
     func accessibilityAnnouncement(runtimeObj: AnyObject) -> AccessibilityAnnouncement {
@@ -874,28 +971,26 @@ final class TypedHostedWindowEntry<State>: NativeHostedWindowEntry {
 
     func runOpenUrlHook(runtimeObj: AnyObject, url: String) {
         guard let onOpenUrl = spec.onOpenUrl else { return }
-        let r = rt(runtimeObj)
-        var tx = Tx()
-        onOpenUrl(&r.state, url, &tx)
-        if tx.quitRequested {
-            _ = QuitLifecycle.send(.start(ending: false, after: .exit))
+        rt(runtimeObj).update { state, tx in
+            onOpenUrl(&state, url, &tx)
         }
-        r.markNeedsCommit()
     }
 
     func fireOnCreated() {
         guard !didFireCreated else { return }
         didFireCreated = true
         spec.onCreated?(handle)
+        #if os(macOS) || os(Windows) || os(Linux)
+        spec.desktopBuilder?.onWindowHook?(handle)
+        #endif
     }
 
     func fireOnReady() {
         spec.onReady?(handle)
     }
 
-    func trimIdleCaches(runtimeObj: AnyObject, all: Bool) {
-        _ = all
-        rt(runtimeObj).rest(at: ProcessInfo.processInfo.systemUptime)
+    func trimIdleCaches(runtimeObj: AnyObject, at now: Double) {
+        rt(runtimeObj).rest(at: now)
     }
 
     func shortcutRegistry(runtimeObj: AnyObject) -> ShortcutRegistry? {
@@ -1053,6 +1148,7 @@ public enum RuneMultiWindow {
         args: ToolingArgs,
         options: RunOptions = RunOptions()
     ) throws -> HeadlessRunner.Output {
+        try args.checkCaptureArguments()
         let flat = flatten(windows)
         try validate(flat)
         let keys = flat.map(\.key)

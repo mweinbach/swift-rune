@@ -20,26 +20,32 @@ protocol DesktopWindowSession: AnyObject {
     var shared: AppShared<State> { get }
     var running: Bool { get }
     var firstFrame: Bool { get }
-    var requestedApplicationQuit: Bool { get }
+    var requestedApplicationQuit: Bool { get set }
     var failure: (any Error)? { get }
     func start()
     func finish()
     func applyHandle(_ request: WindowHandleRequest)
+    func applyReopenRequests()
     #if os(Linux)
     func turn(redraw: Bool) throws -> Int32
     func handleNativeEvent(_ event: RuneLinuxEvent)
     #else
     var closesWindowGroup: (() -> Bool)? { get set }
+    var startupWorkOwed: Bool { get }
+    func endRedrawTurn() -> Bool
+    func performStartupTurn()
+    func runSessionQuitHook()
+    func cancelSessionQuit()
+    func endSession()
     #endif
 }
 
 @MainActor
 private protocol DesktopWindowFactory {
-    func openDesktopWindow(parsed: ToolingArgs) throws -> any DesktopWindowSession
+    func openDesktopWindow(parsed: ToolingArgs) throws -> (any DesktopWindowSession, [AnyObject])
 }
 
-// Desktop shells start the application with URL arguments. A running Linux instance
-// can also receive forwarded arguments through the same process inbox.
+// Desktop shells and single-instance handoffs use the same process inbox.
 private final class DesktopURLGlue: IncomingURLGlue {
     func handledElsewhere() -> Bool { false }
     func install() -> Bool { true }
@@ -47,27 +53,57 @@ private final class DesktopURLGlue: IncomingURLGlue {
 }
 
 extension DesktopWindowSession {
+    fileprivate func titleRequest() -> @Sendable (String) -> Void {
+        let shared = self.shared
+        return { title in
+            shared.enqueueUpdateIf { _, tx in
+                tx.setTitle(title)
+                return false
+            }
+        }
+    }
+
+    func requestApplicationQuit(relaunch: Bool) {
+        requestedApplicationQuit = true
+        QuitLifecycle.send(.start(ending: false, after: relaunch ? .relaunch : .exit))
+    }
+
+    fileprivate func countSurfaceTurn(woke: Bool, waited: Bool) {
+        runtime.surfaceMeter?.turn(woke: woke, waited: waited)
+    }
+
     fileprivate var textIdleOwed: Bool { !firstFrame && runtime.textIdleOwed }
 
     fileprivate func prepareIdleText() {
         _ = runtime.textIdleTurn()
     }
 
-    fileprivate func listenForURLs(launch: [String]) -> IncomingURLInbox.Listening? {
+    fileprivate func runReopenHook(visible: Bool) -> Bool {
+        runtime.dispatchReopen(hasVisibleWindows: visible)
+    }
+
+    fileprivate func reopenCandidate(reopenable: Bool, minimized: Bool, main: Bool) -> DesktopReopenCandidate {
+        DesktopReopenCandidate(reopenable: reopenable && running, visible: shared.isVisible && !minimized,
+                               minimized: minimized, hiddenAt: shared.reopenHiddenAt, main: main)
+    }
+
+    fileprivate func listenForURLs() -> IncomingURLInbox.Listening? {
         guard let hook = runtime.onOpenUrl else { return nil }
         let shared = self.shared
         nonisolated(unsafe) let callback = hook
         let enqueue: IncomingURLInbox.ListenerSink = { url in
-            shared.enqueueUpdate { state, tx in callback(&state, url, &tx) }
+            shared.enqueueUpdate { state, tx in
+                callback(&state, url, &tx)
+                if InstanceLaunches.shared.launchesWaiting && shared.isVisible { InstanceLaunches.shared.served() }
+            }
         }
-        for url in launch { enqueue(url) }
         return IncomingURLInbox.shared.listen(glue: DesktopURLGlue(), sink: enqueue)
     }
 }
 
 extension TypedHostedWindowEntry: DesktopWindowFactory {
     @MainActor
-    fileprivate func openDesktopWindow(parsed: ToolingArgs) throws -> any DesktopWindowSession {
+    fileprivate func openDesktopWindow(parsed: ToolingArgs) throws -> (any DesktopWindowSession, [AnyObject]) {
         let source = spec.appSpec
         let args = spec.resolveArgs { parsed }
         var app = spec.desktopBuilder ?? App(windowSpec: source, shared: spec.appShared)
@@ -87,12 +123,19 @@ extension TypedHostedWindowEntry: DesktopWindowFactory {
         app.onKeyHook = source.onKey
         app.windowOptionsValue = spec.options
         app.chromeStyle = spec.chrome
+        app.customTitlebar = spec.titlebar
         app.openAs = spec.openAs
         app.isOpenInactive = spec.openInactive
         app.keepsRunning = spec.keepRunning || secondary
         app.isWindowless = spec.windowless
         app.isFitContentHeight = spec.fitContentHeight
-        app.onWindowHook = spec.onCreated ?? app.onWindowHook
+        if let created = spec.onCreated {
+            let window = app.onWindowHook
+            app.onWindowHook = { handle in
+                created(handle)
+                window?(handle)
+            }
+        }
         app.onReadyHook = spec.onReady
         app.onQuitHook = spec.onQuit
         app.onReopenHook = spec.onReopen
@@ -110,7 +153,7 @@ extension TypedHostedWindowEntry: DesktopWindowFactory {
             #endif
             session.runtime.onAppFileDrop = source.onFileDrop
             session.runtime.onFileDrop = source.onFileDropPhase
-            return session
+            return (session, app.createAttachedOverlays())
         } catch {
             AppMenuBridge.markRunning(shared, running: false)
             throw error
@@ -122,13 +165,28 @@ extension TypedHostedWindowEntry: DesktopWindowFactory {
 private final class WindowRequests: @unchecked Sendable {
     private let lock = NSLock()
     private let wake: @Sendable () -> Void
-    private var pending: [(Int, WindowHandleRequest)] = []
+    enum Event {
+        case window(Int, WindowHandleRequest)
+        case reopen
+    }
+    private var pending: [Event] = []
+    private var ended = false
     init(wake: @escaping @Sendable () -> Void) { self.wake = wake }
     func send(_ id: Int, _ request: WindowHandleRequest) {
-        lock.withLock { pending.append((id, request)) }
+        lock.withLock { pending.append(.window(id, request)) }
         wake()
     }
-    func drain() -> [(Int, WindowHandleRequest)] {
+    func reopen() -> Bool {
+        let accepts = lock.withLock {
+            guard !ended else { return false }
+            pending.append(.reopen)
+            return true
+        }
+        if accepts { wake() }
+        return accepts
+    }
+    func close() { lock.withLock { ended = true } }
+    func drain() -> [Event] {
         lock.withLock {
             let out = pending
             pending.removeAll(keepingCapacity: true)
@@ -143,6 +201,16 @@ private final class WindowsGroupWake: @unchecked Sendable {
     private let lock = NSLock()
     private var native: OpaquePointer?
     @MainActor var drain: (@MainActor () -> Void)?
+    @MainActor var onSession: (@MainActor (RuneWinSessionEvent) -> Void)?
+    @MainActor private var pendingSession: [RuneWinSessionEvent] = []
+    @MainActor private var deliveringSession = false
+
+    @MainActor func drainSession() {
+        guard !deliveringSession, let onSession else { return }
+        deliveringSession = true
+        defer { deliveringSession = false }
+        while !pendingSession.isEmpty { onSession(pendingSession.removeFirst()) }
+    }
 
     @MainActor init() throws {
         native = rune_win_group_wake_create(Unmanaged.passUnretained(self).toOpaque()) { context in
@@ -150,7 +218,18 @@ private final class WindowsGroupWake: @unchecked Sendable {
             let wake = Unmanaged<WindowsGroupWake>.fromOpaque(context).takeUnretainedValue()
             MainActor.assumeIsolated { wake.drain?() }
         }
-        guard native != nil else { throw DesktopWindowError("Windows could not create the event-loop wake window") }
+        guard let native else { throw DesktopWindowError("Windows could not create the event-loop wake window") }
+        rune_win_group_observe_session(native) { context, event, idle in
+            guard let context else { return }
+            let wake = Unmanaged<WindowsGroupWake>.fromOpaque(context).takeUnretainedValue()
+            MainActor.assumeIsolated {
+                if event != RuneWinSessionCancelled, QuitLifecycle.currentState == .running {
+                    QuitLifecycle.send(.start(ending: event == RuneWinSessionEnding, after: .exit))
+                }
+                wake.pendingSession.append(event)
+                if idle != 0 { wake.drainSession() }
+            }
+        }
     }
 
     func post() {
@@ -166,6 +245,7 @@ private final class WindowsGroupWake: @unchecked Sendable {
             return target
         }
         drain = nil
+        onSession = nil
         rune_win_group_wake_destroy(target)
     }
 }
@@ -177,10 +257,17 @@ enum DesktopWindowGroup {
     @MainActor private struct Slot {
         let key: String
         let secondary: Bool
+        let reopenable: Bool
         let session: any DesktopWindowSession
         let handle: WindowHandle
+        let overlays: [AnyObject]
         let access: DesktopWindowAccess
         var urls: IncomingURLInbox.Listening?
+
+        var reopenCandidate: DesktopReopenCandidate {
+            let minimized = access.placement()?.minimized == true
+            return session.reopenCandidate(reopenable: reopenable, minimized: minimized, main: !secondary)
+        }
         #if os(Linux)
         var id: UInt32 { rune_linux_id(session.window) }
         #endif
@@ -196,39 +283,112 @@ enum DesktopWindowGroup {
             return
         }
 
+        RelaunchController.waitForPrevious()
         #if os(Linux)
         let wakeType = rune_linux_group_begin()
         guard wakeType != 0 else { throw DesktopWindowError(String(cString: rune_linux_error())) }
         defer { rune_linux_group_end() }
+        LinuxOverlayPump.begin(wakeType)
         let wake: @Sendable () -> Void = { rune_linux_wake(0, wakeType) }
         var redraw = Set<UInt32>()
         var nativeSlots: [UInt32: Int] = [:]
         #else
+        rune_win_menu_scheme(RuneWinMenuFollowSystem)
         let groupWake = try WindowsGroupWake()
         let wake: @Sendable () -> Void = { groupWake.post() }
         #endif
 
+        InstanceLaunches.shared.started()
+        QuitLifecycle.beginWindowGroup()
+        IncomingURLInbox.shared.beginWindowGroup()
+        IncomingURLInbox.shared.prepare(glue: DesktopURLGlue())
+        IncomingURLInbox.shared.launched(SingleInstance.launchLinks(from: parsed.extraArgs))
+        DesktopOverlayRegistry.shared.start(wake: wake)
+        defer { DesktopOverlayRegistry.shared.finish() }
         let requests = WindowRequests(wake: wake)
         var slots = [Int: Slot]()
         var nextSlot = 0
-        var delivering: ArraySlice<(Int, WindowHandleRequest)> = []
+        var delivering: ArraySlice<WindowRequests.Event> = []
+        func reopenWindows() {
+            let ordered = slots.sorted { $0.key < $1.key }.map(\.value)
+            let visible = DesktopReopen.hasVisible(ordered.map(\.reopenCandidate))
+            var handled = false
+            for slot in ordered where slot.session.running {
+                if slot.session.runReopenHook(visible: visible) { handled = true }
+            }
+            if handled {
+                if visible && InstanceLaunches.shared.launchesWaiting { InstanceLaunches.shared.served() }
+                return
+            }
+            for slot in ordered where slot.session.running { slot.session.applyReopenRequests() }
+            // Apply window handle requests posted by the hooks before choosing a target.
+            for event in requests.drain() {
+                switch event {
+                case let .window(id, request): slots[id]?.session.applyHandle(request)
+                case .reopen: delivering.append(event)
+                }
+            }
+            guard !ordered.contains(where: { $0.session.requestedApplicationQuit }) else { return }
+            if let target = DesktopReopen.target(ordered.map(\.reopenCandidate)) {
+                ordered[target].session.applyHandle(.open)
+            }
+            #if os(Windows)
+            rune_win_instance_raise_front()
+            #endif
+        }
         func drainWindowRequests() {
             delivering.append(contentsOf: requests.drain())
-            while let (id, request) = delivering.popFirst() {
+            while let event = delivering.popFirst() {
                 // A native window operation can reenter the wake procedure.
-                let session = slots[id]?.session
-                session?.applyHandle(request)
+                switch event {
+                case let .window(id, request): slots[id]?.session.applyHandle(request)
+                case .reopen: reopenWindows()
+                }
             }
             delivering = []
             let active = slots.values
             for slot in active { slot.access.drain() }
         }
         #if os(Windows)
+        var sessionEnded = false
+        groupWake.onSession = { event in
+            if event == RuneWinSessionCancelled {
+                guard case .quitting = QuitLifecycle.currentState else { return }
+                QuitLifecycle.send(.cancel)
+                for slot in slots.values { slot.session.cancelSessionQuit() }
+                return
+            }
+            let effects = QuitLifecycle.send(.start(ending: event == RuneWinSessionEnding, after: .exit))
+            if effects.contains(.runHooks) {
+                for slot in slots.values { slot.session.runSessionQuitHook() }
+                QuitMarks.record("quit.hooks")
+                QuitLifecycle.send(.hooksRan)
+            }
+            if effects.contains(.closeAndExit) {
+                sessionEnded = true
+                for slot in slots.values { slot.session.endSession() }
+                QuitLifecycle.send(.windowsClosed)
+            }
+        }
         groupWake.drain = drainWindowRequests
         #endif
         RuneMultiWindow.setOpenWake(wake)
         ReadySignal.runStarts()
         defer {
+            requests.close()
+            #if os(Windows)
+            // Hooks and close callbacks already ran. Fast exit removes the windows before
+            // the last hook, skipping teardown of each renderer and its device.
+            if sessionEnded, let last = QuitLifecycle.activeFastExitHook() {
+                // Release worker threads waiting for a window query before the GUI queue goes away.
+                for slot in slots.values {
+                    slot.access.drain(closing: true)
+                    slot.handle.unbind()
+                }
+                QuitLifecycle.endFast(last)
+            }
+            #endif
+            InstanceLaunches.shared.ended()
             #if os(Windows)
             groupWake.close()
             #endif
@@ -240,21 +400,31 @@ enum DesktopWindowGroup {
                 slot.handle.unbind()
                 slot.session.finish()
             }
+            if QuitLifecycle.isQuitting {
+                QuitLifecycle.send(.hooksRan)
+                QuitLifecycle.finishOrderlyExit()
+            }
         }
 
-        var launchLinks = SingleInstance.launchLinks(from: parsed.extraArgs)
-        func open(_ spec: AnyWindowSpec) throws {
+        func open(_ spec: AnyWindowSpec, traced: Bool = false) throws {
             guard !spec.key.isEmpty else { throw MultiWindowError.emptyOrDuplicateKey(spec.key) }
             guard !slots.values.contains(where: { $0.key == spec.key }) else { return }
             guard let factory = spec.nativeHostEntry as? any DesktopWindowFactory else {
                 throw DesktopWindowError("Window \(spec.key) has no AppWindowSpec to host")
             }
             RuneMultiWindow.trackDesktopHandle(spec.handle)
-            let session = try factory.openDesktopWindow(parsed: parsed)
+            var windowArgs = parsed
+            if !traced {
+                windowArgs.tracePath = nil
+                windowArgs.frameCount = nil
+            }
+            let (session, overlays) = try factory.openDesktopWindow(parsed: windowArgs)
             let id = nextSlot
             nextSlot += 1
             let access = DesktopWindowAccess(window: session.window, wake: wake)
-            let slot = Slot(key: spec.key, secondary: spec.secondary, session: session, handle: spec.handle, access: access)
+            let panel = spec.nativeHostEntry?.macosWindow
+            let slot = Slot(key: spec.key, secondary: spec.secondary,
+                            reopenable: panel?.nonactivatingPanel != true && panel?.launcher != true, session: session, handle: spec.handle, overlays: overlays, access: access)
             slots[id] = slot
             #if os(Windows)
             if !options.accessory && !slot.secondary {
@@ -264,8 +434,13 @@ enum DesktopWindowGroup {
             }
             #endif
             if spec.nativeHostEntry?.options.clickThrough == true { try access.setClickThrough(true).get() }
+            let setTitle = session.titleRequest()
             spec.handle.bind(slot: id, dispatch: { slot, request in
-                if case .setClickThrough(let enabled) = request {
+                if case .setTitle(let title) = request {
+                    // Use the same ordered queue as Tx.setTitle so a handle change from
+                    // an event callback cannot overtake a later state update during the next turn.
+                    setTitle(title)
+                } else if case .setClickThrough(let enabled) = request {
                     // An unbound handle may already have queued a change to the initial hit-testing mode.
                     if case .failure(let error) = access.setClickThrough(enabled) {
                         FileHandle.standardError.write(Data("Rune click-through: \(error.localizedDescription)\n".utf8))
@@ -278,24 +453,31 @@ enum DesktopWindowGroup {
             redraw.insert(slot.id)
             nativeSlots[slot.id] = id
             #endif
+            slots[id]?.urls = session.listenForURLs()
             session.start()
-            if !slot.secondary, let listener = session.listenForURLs(launch: launchLinks) {
-                slots[id]?.urls = listener
-                launchLinks.removeAll()
-            }
         }
-        for spec in initial { try open(spec) }
-        launchLinks.removeAll()
+        let traceKey = parsed.windowName ?? initial.first?.key
+        for spec in initial { try open(spec, traced: spec.key == traceKey) }
+        SingleInstance.onRelaunch { [weak requests] in requests?.reopen() ?? false }
         IncomingURLInbox.shared.settle(glue: DesktopURLGlue())
 
+        var turnWoke = false
+        var turnWaited = false
         while true {
+            for slot in slots.values { slot.session.countSurfaceTurn(woke: turnWoke, waited: turnWaited) }
+            #if os(Windows)
+            groupWake.drainSession()
+            if sessionEnded { return }
+            #endif
             for pending in RuneMultiWindow.takeOpened() {
                 let batch = RuneMultiWindow.flatten([pending])
                 try RuneMultiWindow.validate(batch)
                 for spec in batch { try open(spec) }
             }
+            DesktopOverlayRegistry.shared.drain()
             drainWindowRequests()
             #if os(Linux)
+            LinuxOverlayPump.pump()
             var wait: Int32 = -1
             for slot in slots.values {
                 let next = try slot.session.turn(redraw: redraw.remove(slot.id) != nil)
@@ -303,7 +485,13 @@ enum DesktopWindowGroup {
             }
             #endif
             var primaryClosed = false
+            #if os(Windows)
+            var forcedPaint = false
+            #endif
             for (id, slot) in slots {
+                #if os(Windows)
+                if slot.session.endRedrawTurn() { forcedPaint = true }
+                #endif
                 if let failure = slot.session.failure { throw failure }
                 if slot.session.requestedApplicationQuit { return }
                 if !slot.session.running {
@@ -323,6 +511,10 @@ enum DesktopWindowGroup {
             if !options.accessory && (slots.isEmpty || primaryClosed && !slots.values.contains(where: { !$0.secondary })) {
                 return
             }
+            if InstanceLaunches.shared.launchesWaiting,
+               slots.values.contains(where: { let candidate = $0.reopenCandidate; return candidate.reopenable && candidate.visible }) {
+                InstanceLaunches.shared.served()
+            }
             let idleWindow = slots.values.first { $0.session.textIdleOwed }?.session
             #if os(Linux)
             // Bound each batch so sustained pointer motion cannot starve animation or another window.
@@ -331,6 +523,10 @@ enum DesktopWindowGroup {
             for index in 0..<64 {
                 var event = RuneLinuxEvent()
                 let result = rune_linux_next_event(wait, &event)
+                if index == 0 {
+                    turnWoke = result == 0
+                    turnWaited = result == 0 && wait > 0
+                }
                 guard result >= 0 else { throw DesktopWindowError(String(cString: rune_linux_error())) }
                 if result == 0 {
                     // A native event may have queued a redraw or state update. Give it the next turn.
@@ -346,10 +542,21 @@ enum DesktopWindowGroup {
                 wait = 0
             }
             #else
-            let result = rune_win_pump_or_idle(idleWindow != nil ? 1 : 0)
+            let startupWindow = slots.values.first { $0.session.startupWorkOwed }?.session
+            var painted: Int32 = 0
+            let result = rune_win_pump_turn(startupWindow != nil || idleWindow != nil ? 1 : 0, &painted)
+            turnWoke = result == RUNE_WIN_PUMP_IDLE || rune_win_turn_timer() != 0
+            turnWaited = rune_win_turn_timer() != 0
             if result < 0 { throw DesktopWindowError("GetMessageW failed") }
             if result == 0 { return }
-            if result == RUNE_WIN_PUMP_IDLE, let idleWindow, idleWindow.running { idleWindow.prepareIdleText() }
+            // An input event gets its paint first. A continuously animating window can still
+            // finish startup between presented frames when no keyboard or mouse input is waiting.
+            if let startupWindow, startupWindow.running, !startupWindow.requestedApplicationQuit,
+               rune_win_startup_may_run(painted != 0 || forcedPaint ? 1 : 0) != 0 {
+                startupWindow.performStartupTurn()
+            } else if startupWindow == nil, result == RUNE_WIN_PUMP_IDLE, let idleWindow, idleWindow.running {
+                idleWindow.prepareIdleText()
+            }
             #endif
         }
     }
@@ -359,20 +566,23 @@ enum DesktopWindowGroup {
 extension LinuxWindowSession: DesktopWindowSession {
     var shared: AppShared<State> { app.sharedHandle.shared }
     var failure: (any Error)? { nil }
-    func handleNativeEvent(_ event: RuneLinuxEvent) { handleEvent(event, at: now()) }
+    func handleNativeEvent(_ event: RuneLinuxEvent) {
+        runtime.surfaceMeter?.noteWaited()
+        handleEvent(event, at: now())
+    }
     func applyHandle(_ request: WindowHandleRequest) {
         switch request {
         case .close: requestClose(at: now())
-        case .minimize: rune_linux_minimize(window)
+        case .minimize: runtime.minimizeStep(.asked)
         case .open, .focus: rune_linux_focus(window)
         case .show: rune_linux_show(window)
         case .hide: rune_linux_hide(window)
         case let .setPosition(x, y): rune_linux_set_position(window, x, y)
-        case let .resize(w, h, _): rune_linux_set_size(window, nativeDimension(w), nativeDimension(h))
-        case .center: rune_linux_center(window)
+        case let .resize(w, h, animate): windowFrame.apply(WindowFrameRequest(size: (w, h), animate: animate), to: window)
+        case .center: windowFrame.apply(WindowFrameRequest(center: true), to: window)
         case .setTitle(let value):
             runtime.windowTitle = value
-            rune_linux_set_title(window, value)
+            applyTitle()
         case .setAlwaysOnTop(let on): rune_linux_topmost(window, on)
         case .flash(let on): rune_linux_flash(window, on)
         case .setClickThrough(let on): _ = rune_linux_click_through(window, on ? 1 : 0)

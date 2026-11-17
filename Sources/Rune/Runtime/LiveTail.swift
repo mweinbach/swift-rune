@@ -69,7 +69,7 @@ extension Runtime {
         var nodes: [LiveTailLayoutNode<State>] = []
         var byPath: [String: Int] = [:]
         typealias Item = (el: El<State>, result: LayoutEngine.ResultNode, path: String, parent: Int?, key: String?)
-        var pending: [Item] = [(root, solved, root.keyId.map { "/@\($0)" } ?? "/0", nil, root.keyId)]
+        var pending: [Item] = [(root, solved, root.storageKeyId.map { "/@\($0)" } ?? "/0", nil, root.storageKeyId)]
         while let item = pending.popLast() {
             let index = nodes.count
             let parent = item.parent.map { nodes[$0] }
@@ -86,7 +86,7 @@ extension Runtime {
             var children: [Item] = []
             for i in 0..<min(item.el.children.count, item.result.children.count) {
                 let child = item.el.children[i]
-                let (segment, key) = layoutPathSegment(keyId: child.keyId, siblingIndex: i, siblingKeysSeen: &siblings)
+                let (segment, key) = layoutPathSegment(keyId: child.storageKeyId, siblingIndex: i, siblingKeysSeen: &siblings)
                 children.append((child, item.result.children[i], item.path + "/" + segment, index, key))
             }
             pending.append(contentsOf: children.reversed())

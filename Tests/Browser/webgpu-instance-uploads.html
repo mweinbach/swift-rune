@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8"><title>Rune retained instance uploads</title><pre id="result">Running…</pre>
+<script type="module">
+import {RuneWebGL,loadRuneShaders} from '../../Sources/Rune/Resources/Web/rune-webgl.mjs';
+import {RuneWebGPU} from '../../Sources/Rune/Resources/Web/rune-webgpu.mjs';
+import {pagedPacket} from './image-page-scene.mjs';
+
+const columns = 32, rows = 32, size = 4, width = columns*size, height = rows*size;
+function cell(i) {
+    const p = new Float32Array(32);
+    const x = i % columns, y = Math.floor(i/columns);
+    p.set([x*size,y*size,size,size]); p.set([0,0.38,1,1],8);
+    p.set([0,0,0,1],16); p.set([0,0,1,1],20); p.set([0,0,width,height],24);
+    if (x % 3 === 0) {
+        p.set([1,1,1,1],8);
+        p.set([y % 2,7,0,1],16);
+    } else if (x % 3 === 1) p[17] = 2;
+    return p;
+}
+
+function trackWrites(driver) {
+    const writes = [];
+    if (driver.gl) {
+        const gl = driver.gl;
+        const write = gl.bufferSubData.bind(gl);
+        gl.bufferSubData = (target, offset, source, first, length) => {
+            if (gl.getParameter(gl.ARRAY_BUFFER_BINDING) === driver.instances) writes.push([offset, (length ?? source.length)*source.BYTES_PER_ELEMENT]);
+            return write(target,offset,source,first,length);
+        };
+    } else {
+        const queue = driver.device.queue;
+        const write = queue.writeBuffer.bind(queue);
+        queue.writeBuffer = (buffer, offset, source, first, length) => {
+            if (buffer === driver.instances) writes.push([offset, (length ?? source.length)*source.BYTES_PER_ELEMENT]);
+            return write(buffer,offset,source,first,length);
+        };
+    }
+    return writes;
+}
+
+async function verify(api) {
+    const shaders = api === 'WebGL' && await loadRuneShaders();
+    const create = canvas => api === 'WebGL' ? new RuneWebGL(canvas,shaders) : RuneWebGPU.create(canvas);
+    const canvas = document.createElement('canvas'), reference = document.createElement('canvas');
+    const driver = await create(canvas), oracle = await create(reference);
+    const writes = trackWrites(driver), summary = [];
+    const reader = new OffscreenCanvas(width,height).getContext('2d',{willReadFrequently:true});
+    const read = (d, view, packet) => {
+        d.draw(packet.buffer,0,packet.length);
+        reader.drawImage(view,0,0);
+        return reader.getImageData(0,0,width,height).data;
+    };
+    const cells = Array.from({length: columns*rows},(_,i) => cell(i));
+    const pages = [{width:1,height:1,data:[255,0,0,255]}, {width:1,height:1,data:[0,255,0,255]}];
+    const report = (name, expected, newRuns, pageList = pages) => {
+        const packet = pagedPacket({width,height,instances:cells,pages:pageList,glyphs:[255]});
+        const previous = driver.instanceUploads.runs;
+        writes.length = 0;
+        const actual = read(driver,canvas,packet);
+        // Without a prior snapshot the reference rewrites and re-batches the complete list.
+        oracle.instanceUploads.count = 0;
+        const want = read(oracle,reference,packet);
+        if (actual.some((v,i) => v !== want[i])) throw Error(api+' differing readback on '+name);
+        const words = expected.map(([from,end]) => [from*128,(end-from)*128]);
+        if (JSON.stringify(writes) !== JSON.stringify(words)) throw Error(api+' '+name+' writes '+JSON.stringify(writes));
+        if ((previous !== driver.instanceUploads.runs) !== newRuns) throw Error(api+' unexpected batch rebuild on '+name);
+        summary.push([name, writes.reduce((sum, [,n]) => sum+n,0)]);
+        return actual;
+    };
+    try {
+        const initial = report('initial',[[0,1024]],true);
+        const at = (frame,x,y) => Array.from(frame.slice(4*(width*y+x),4*(width*y+x)+4)).join(',');
+        if (at(initial,1,1) !== '255,0,0,255' || at(initial,1,5) !== '0,255,0,255') throw Error(api+' missing image rows');
+        report('unchanged',[],false);
+        const green = 97;
+        cells[green][8] = 1;
+        const changed = report('one cell',[[green,green+1]],false);
+        if (at(changed,5,13) === at(initial,5,13)) throw Error(api+' missing changed glyph color');
+        for (const i of [95,155,734,893]) cells[i][0] += 1;
+        report('separated cells',[[95,156],[734,735],[893,894]],false);
+        for (const p of cells) p[1] -= 1;
+        report('scroll all rows',[[0,1024]],false);
+        cells[0][16] = 1;
+        const rebound = report('page changed',[[0,1]],true);
+        if (at(rebound,1,1) !== '0,255,0,255') throw Error(api+' stale page mapping');
+        for (let i = 0; i < 6; i++) cells.push(cell(1024+i));
+        report('growth',[[0,1030]],true);
+        cells.length = 512;
+        report('shrink',[],true);
+        return {renderer:driver.info.renderer,instanceBytes:summary};
+    } finally { driver.dispose(); oracle.dispose(); }
+}
+try {
+    const gl = await verify('WebGL'), gpu = await verify('WebGPU');
+    document.querySelector('#result').textContent = 'PASS '+JSON.stringify({gl,gpu});
+} catch(e) { document.querySelector('#result').textContent = 'FAIL '+e.stack; }
+</script>

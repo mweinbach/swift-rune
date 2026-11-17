@@ -298,7 +298,9 @@ struct RuneWave2CoreTests {
             focusedKey: "btn"
         )
         #expect(a11yRoot != nil)
-        #expect(a11yRoot?.children.count == 1) // inert child omitted
+        #expect(a11yRoot?.children.count == 2)
+        #expect(a11yRoot?.children.last?.isDisabled == true)
+        #expect(a11yRoot?.children.last?.actions.isEmpty == true)
         let btnNode = a11yRoot?.children.first
         #expect(btnNode?.role == .button)
         #expect(btnNode?.label == "Increment")

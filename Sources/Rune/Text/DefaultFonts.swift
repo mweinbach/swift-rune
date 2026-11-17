@@ -16,6 +16,16 @@ public enum DefaultFonts {
     public static let sansFamily = "Inter"
     public static let monoFamily = "IBM Plex Mono"
 
+    // Rune's native default TextSystem chooses Inter for both configurable slots.
+    // The browser selects its bundled monospace face before any system fallback.
+    static var defaultMonoSlot: String {
+        #if os(WASI)
+        monoFamily
+        #else
+        sansFamily
+        #endif
+    }
+
     /// Asset filenames (without `.ttf`) bundled under `Resources/Fonts`.
     public static let bundledFontNames: [String] = [
         "Inter-Regular",

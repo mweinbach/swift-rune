@@ -71,6 +71,15 @@ public struct Primitive: Sendable, Equatable {
         PrimitiveKind(rawValue: Int(params.y.rounded())) ?? .roundedRect
     }
 
+    /// Image primitives carry the page in the same instance lane as the production renderer.
+    public var imagePage: Int { Int(exactly: params.x) ?? -1 }
+    public var glyphPage: Int { Int(exactly: params.x) ?? -1 }
+
+    /// Older captures predate the backdrop opacity field and use zeroed fill and scale.
+    package var backdropOpacity: Float {
+        fill.w == 0 && params.w == 0 ? 1 : fill.w
+    }
+
     // MARK: - Convenience Builders
 
     public static func roundedRect(
@@ -159,9 +168,10 @@ public struct Primitive: Sendable, Equatable {
         color: SIMD4<Float>,
         gamma: Float = 1.0,
         clip: SIMD4<Float>,
-        turn: Float = 0
+        turn: Float = 0,
+        page: Int = 0
     ) -> Primitive {
-        glyph(rect: rect, uv: uv, color: color, gamma: gamma, clip: clip, turn: turn, nativeSize: false)
+        glyph(rect: rect, uv: uv, color: color, gamma: gamma, clip: clip, turn: turn, nativeSize: false, page: page)
     }
 
     /// A native-size mask reads one atlas texel per device pixel. Rotation and ordinary
@@ -173,12 +183,13 @@ public struct Primitive: Sendable, Equatable {
         gamma: Float = 1.0,
         clip: SIMD4<Float>,
         turn: Float = 0,
-        nativeSize: Bool
+        nativeSize: Bool,
+        page: Int = 0
     ) -> Primitive {
         Primitive(
             rect: rect,
             fill: color,
-            params: SIMD4<Float>(0, Float(PrimitiveKind.glyph.rawValue), nativeSize ? 1 : 0, gamma),
+            params: SIMD4<Float>(Float(page), Float(PrimitiveKind.glyph.rawValue), nativeSize ? 1 : 0, gamma),
             uv: uv,
             clip: clip,
             turn: turn
@@ -192,14 +203,15 @@ public struct Primitive: Sendable, Equatable {
         tint: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1),
         clip: SIMD4<Float>,
         turn: Float = 0,
-        sourceTexelBounds: SIMD4<Float> = .zero
+        sourceTexelBounds: SIMD4<Float> = .zero,
+        page: Int = 0
     ) -> Primitive {
         Primitive(
             rect: rect,
             radii: radii,
             fill: tint,
             border: sourceTexelBounds,
-            params: SIMD4<Float>(0, Float(PrimitiveKind.image.rawValue), 0, 0),
+            params: SIMD4<Float>(Float(page), Float(PrimitiveKind.image.rawValue), 0, 0),
             uv: uv,
             clip: clip,
             turn: turn
@@ -386,6 +398,8 @@ public enum RefSceneError: Error, Sendable, Equatable, CustomStringConvertible {
     case invalidAtlasDimensions(width: Int, height: Int)
     case invalidGlyphAtlasSize(expected: Int, actual: Int)
     case invalidImageAtlasSize(expected: Int, actual: Int)
+    case invalidGlyphPage(index: Int)
+    case invalidImagePage(index: Int)
     case nonFinitePrimitive(index: Int)
     case unbalancedLayerEnd(index: Int)
     case layerStackOverflow(index: Int, maxDepth: Int)
@@ -403,6 +417,10 @@ public enum RefSceneError: Error, Sendable, Equatable, CustomStringConvertible {
             return "Glyph atlas byte count mismatch (expected \(exp), got \(act))"
         case let .invalidImageAtlasSize(exp, act):
             return "Image atlas byte count mismatch (expected \(exp), got \(act))"
+        case let .invalidGlyphPage(idx):
+            return "Glyph primitive at index \(idx) has an invalid page index"
+        case let .invalidImagePage(idx):
+            return "Image primitive at index \(idx) has an invalid page index"
         case let .nonFinitePrimitive(idx):
             return "Primitive at index \(idx) contains NaN or infinite float values"
         case let .unbalancedLayerEnd(idx):
@@ -426,7 +444,26 @@ public struct RefScene: Sendable, Equatable {
     public var srgbBlend: Bool
     public var clearColor: SIMD4<Float>
     public var glyphs: R8Atlas
+    public var glyphPages: [R8Atlas]
+    private static let transparentGlyph = R8Atlas()
+
+    public func glyphAtlas(forPage page: Int) -> R8Atlas {
+        guard !glyphPages.isEmpty else { return glyphs }
+        if glyphPages.indices.contains(page), !glyphPages[page].texels.isEmpty { return glyphPages[page] }
+        // An unavailable mask page binds the base glyph atlas, including inside isolated layers.
+        return glyphPages[0].texels.isEmpty ? Self.transparentGlyph : glyphPages[0]
+    }
+
     public var images: RGBA8Atlas
+    /// Page-indexed images. An empty table uses the original single-atlas field.
+    public var imagePages: [RGBA8Atlas]
+    private static let transparentImage = RGBA8Atlas()
+
+    public func imageAtlas(forPage page: Int) -> RGBA8Atlas {
+        guard !imagePages.isEmpty else { return page == 0 ? images : Self.transparentImage }
+        guard imagePages.indices.contains(page), !imagePages[page].texels.isEmpty else { return Self.transparentImage }
+        return imagePages[page]
+    }
     public var primitives: [Primitive]
 
     public init(
@@ -435,7 +472,9 @@ public struct RefScene: Sendable, Equatable {
         srgbBlend: Bool = false,
         clearColor: SIMD4<Float> = SIMD4<Float>(0, 0, 0, 1),
         glyphs: R8Atlas = R8Atlas(),
+        glyphPages: [R8Atlas] = [],
         images: RGBA8Atlas = RGBA8Atlas(),
+        imagePages: [RGBA8Atlas] = [],
         primitives: [Primitive] = []
     ) {
         self.width = width
@@ -443,7 +482,9 @@ public struct RefScene: Sendable, Equatable {
         self.srgbBlend = srgbBlend
         self.clearColor = clearColor
         self.glyphs = glyphs
+        self.glyphPages = glyphPages
         self.images = images
+        self.imagePages = imagePages
         self.primitives = primitives
     }
 
@@ -454,18 +495,27 @@ public struct RefScene: Sendable, Equatable {
         guard Self.isFinite(clearColor) else {
             throw .nonFiniteClearColor
         }
-        for (w, h) in [(glyphs.width, glyphs.height), (images.width, images.height)] {
+        func validateDimensions(_ w: Int, _ h: Int) throws(RefSceneError) {
             guard (1...16_384).contains(w), (1...16_384).contains(h) else {
                 throw .invalidAtlasDimensions(width: w, height: h)
             }
         }
-        let expectedGlyphs = glyphs.width * glyphs.height
-        if glyphs.texels.count != expectedGlyphs {
-            throw .invalidGlyphAtlasSize(expected: expectedGlyphs, actual: glyphs.texels.count)
+        for atlas in glyphPages.isEmpty ? [glyphs] : glyphPages {
+            try validateDimensions(atlas.width, atlas.height)
+            if !glyphPages.isEmpty && atlas.texels.isEmpty { continue }
+            let expected = atlas.width * atlas.height
+            guard atlas.texels.count == expected else {
+                throw .invalidGlyphAtlasSize(expected: expected, actual: atlas.texels.count)
+            }
         }
-        let expectedImages = images.width * images.height * 4
-        if images.texels.count != expectedImages {
-            throw .invalidImageAtlasSize(expected: expectedImages, actual: images.texels.count)
+        let atlases = imagePages.isEmpty ? [images] : imagePages
+        for atlas in atlases {
+            try validateDimensions(atlas.width, atlas.height)
+            if !imagePages.isEmpty && atlas.texels.isEmpty { continue }
+            let expected = atlas.width * atlas.height * 4
+            guard atlas.texels.count == expected else {
+                throw .invalidImageAtlasSize(expected: expected, actual: atlas.texels.count)
+            }
         }
         var depth = 0
         for (i, p) in primitives.enumerated() {
@@ -476,6 +526,10 @@ public struct RefScene: Sendable, Equatable {
                 throw .nonFinitePrimitive(index: i)
             }
             switch p.kind {
+            case .glyph where p.glyphPage < 0:
+                throw .invalidGlyphPage(index: i)
+            case .image where p.imagePage < 0:
+                throw .invalidImagePage(index: i)
             case .layerBegin:
                 depth += 1
                 if depth > Self.maxLayerDepth {

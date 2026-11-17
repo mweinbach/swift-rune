@@ -8,6 +8,7 @@ import RuneMotion
 
 /// Consolidated runtime state for Slice 2 parity features (kept out of `Runtime.swift` body).
 internal final class Slice2RuntimeState {
+    var autoscroll = MiddleAutoscroll()
     struct TouchFinger: Equatable {
         var id: UInt64
         var origin: Vec2

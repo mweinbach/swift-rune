@@ -1,5 +1,8 @@
 import Foundation
 import Testing
+#if os(macOS)
+import AppKit
+#endif
 @testable import RuneKit
 @testable import Rune
 @testable import RuneHighlights
@@ -134,6 +137,84 @@ struct SyntaxAndMermaidTests {
         let fallbackEl: El<Int> = kit.mermaidOrCode(source: invalid)
         let rt = Runtime<Int>(state: 0, viewport: Vec2(500, 300)) { _, _ in fallbackEl }
         #expect(!rt.frame(at: 0).primitives.isEmpty)
+    }
+
+    @MainActor
+    @Test("Mermaid cards, frameless drawings and Markdown expose the diagram kind and source")
+    func mermaidFigureAccessibility() throws {
+        let kit = Kit.neutral(dark: true)
+        let body = "flowchart LR\n  A[Start] --> B[Done]\n%% note\u{200B}"
+        let source = "\u{2009}\n\(body)\n\t "
+        let fence = "```mermaid\n\(source)\n```"
+        let card: El<Int> = try #require(kit.mermaid(source))
+        let drawing: MermaidDrawing<Int> = try #require(kit.mermaidDrawing(source))
+        let diagrams: [El<Int>] = [
+            card, drawing.el, kit.mermaidOrCode(source: source), kit.markdown(fence),
+            kit.markdown(fence, searchQuery: nil, streaming: true),
+            kit.markdown("```mermaid\n\(body)\nC[Incomplete", searchQuery: nil, streaming: true),
+        ]
+
+        func figures(in node: AccessibilityNode) -> [AccessibilityNode] {
+            (node.role == .figure ? [node] : []) + node.children.flatMap(figures)
+        }
+        for diagram in diagrams {
+            let runtime = Runtime<Int>(state: 0, viewport: Vec2(600, 400)) { _, _ in diagram }
+            _ = runtime.frame(at: 0)
+            let nodes = figures(in: runtime.accessibilitySnapshot())
+            #expect(nodes.count == 1)
+            let figure = try #require(nodes.first)
+            #expect(figure.label == "Flowchart")
+            #expect(figure.help == body)
+            #if os(macOS)
+            let native = AppKitAccessibilityMapper.buildElement(from: figure)
+            #expect(native.accessibilityRole() == .group)
+            #expect(native.accessibilityLabel() == "Flowchart")
+            #expect(native.accessibilityHelp() == body)
+            #endif
+        }
+
+        let fallback = Runtime<Int>(state: 0, viewport: Vec2(600, 400)) { _, _ in
+            kit.mermaidOrCode(source: "unsupported")
+        }
+        _ = fallback.frame(at: 0)
+        #expect(figures(in: fallback.accessibilitySnapshot()).isEmpty)
+        #expect(KitMermaid.kindLabel("  %%skip\nstateDiagram-v2-v2-beta-beta") == "State diagram")
+    }
+
+    @Test("Standalone and fenced Mermaid diagrams share the Markdown paint and hover regions")
+    func mermaidStyleAndHover() throws {
+        let source = "flowchart LR\n  A[Fetch data] --> B[Build the artifacts] --> C[Publish the results]"
+        let surface = Color(r: 0.3, g: 0.2, b: 0.1, a: 1)
+        let border = Color(r: 0.5, g: 0.6, b: 0.7, a: 1)
+        let paint = MarkdownStyle.neutral(dark: false)
+            .diagramSurface(fill: surface, border: border, subgraph: .white)
+        for enabled in [false, true] {
+            let style = paint.diagramHover(enabled ? .white : .transparent, neighbours: true)
+            let card: El<Int> = try #require(KitMermaid.render(source, style: style))
+            let wide: KitMermaid.Drawing<Int> = try #require(KitMermaid.drawing(source, style: style, maxWidth: 900))
+            let narrow: KitMermaid.Drawing<Int> = try #require(KitMermaid.drawing(source, style: style, maxWidth: 120))
+            #expect(card.role == .figure && wide.el.role == .figure)
+            #expect(card.background == surface && card.borderColor == border)
+            #expect(wide.surface == surface && wide.surfaceBorder == border)
+            #expect(narrow.size != wide.size)
+
+            let fence = "```mermaid\n\(source)\n"
+            let diagrams: [El<Int>] = [
+                card, wide.el, Markdown(fence + "```").render(style),
+                Markdown(fence + "```").streaming().render(style), Markdown(fence).streaming().render(style),
+            ]
+            for diagram in diagrams {
+                let runtime = Runtime<Int>(state: 0, viewport: Vec2(640, 480)) { _, _ in diagram }
+                _ = runtime.frame(at: 0)
+                #expect(runtime.elements().contains { $0.key?.hasPrefix("hover:") == true } == enabled)
+            }
+        }
+        let unsupported: KitMermaid.Drawing<Int>? = KitMermaid.drawing("unknown", style: paint, maxWidth: 600)
+        #expect(unsupported == nil)
+        #expect(KitMermaid.mayDraw("%% waiting") && !KitMermaid.mayDraw("unknown"))
+        #expect(KitMermaid.mayDraw("gantt") && !KitMermaid.supported("gantt"))
+        #expect(MarkdownFind.find("```mermaid\ngantt\n```", "gantt").count == 1)
+        #expect(MarkdownFind.find("```mermaid\n\(source)\n```", "flowchart").isEmpty)
     }
 
     @Test("src/syntax.rs #49 & #53: distinct highlighters keep separate caches, and spans match SyntaxTheme colors & weights")

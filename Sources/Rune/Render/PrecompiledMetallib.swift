@@ -102,6 +102,8 @@ public enum PrecompiledMetallib {
     public static var builtinEntries: [ShaderEntry] {
         [
             ShaderEntry(name: "shader", source: RenderShaders.shaderMSL, requiredFunction: "vs_springs"),
+            ShaderEntry(name: "shader_windfoil", source: RenderShaders.windfoilMSL(dualSource: false), requiredFunction: "fs_windfoil"),
+            ShaderEntry(name: "shader_windfoil_rgb", source: RenderShaders.windfoilMSL(dualSource: true), requiredFunction: "fs_windfoil"),
             ShaderEntry(name: "layer_blur", source: RenderShaders.layerBlurMSL, requiredFunction: "layer_blur_vs"),
             ShaderEntry(name: "backdrop_blur", source: RenderShaders.backdropBlurMSL, requiredFunction: "backdrop_blur_vs"),
             ShaderEntry(name: "backdrop_composite", source: RenderShaders.backdropCompositeMSL, requiredFunction: "backdrop_composite_vs"),

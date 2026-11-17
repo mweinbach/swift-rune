@@ -113,14 +113,16 @@ public struct Seq: Sendable, Equatable, Hashable {
 /// Small-buffer side-effect accumulator returned from pure state reducers (`rune::Effects<E>`).
 /// Stores 0, 1, or 2 effects inline without heap allocation.
 public struct Effects<E>: Sequence {
-    fileprivate enum Storage {
+    @usableFromInline
+    internal enum Storage {
         case zero
         case one(E)
         case two(E, E)
         case many([E])
     }
 
-    private var storage: Storage = .zero
+    @usableFromInline
+    internal var storage: Storage = .zero
 
     public init() {}
 
@@ -159,8 +161,7 @@ public struct Effects<E>: Sequence {
     }
 
     public var isEmpty: Bool {
-        if case .zero = storage { return true }
-        return false
+        count == 0
     }
 
     public var count: Int {
@@ -188,12 +189,46 @@ public struct Effects<E>: Sequence {
         return items
     }
 
-    public func makeIterator() -> IndexingIterator<[E]> {
-        array.makeIterator()
+    public struct Iterator: IteratorProtocol, Sequence {
+        @usableFromInline
+        internal let storage: Storage
+        @usableFromInline
+        internal var index = 0
+
+        @inlinable
+        internal init(_ storage: Storage) {
+            self.storage = storage
+        }
+
+        @inlinable
+        public mutating func next() -> E? {
+            let element: E
+            switch storage {
+            case .zero:
+                return nil
+            case .one(let first):
+                guard index == 0 else { return nil }
+                element = first
+            case .two(let first, let second):
+                guard index < 2 else { return nil }
+                element = index == 0 ? first : second
+            case .many(let elements):
+                guard index < elements.count else { return nil }
+                element = elements[index]
+            }
+            index += 1
+            return .some(element)
+        }
+    }
+
+    @inlinable
+    public func makeIterator() -> Iterator {
+        Iterator(storage)
     }
 }
 
 extension Effects.Storage: Sendable where E: Sendable {}
+extension Effects.Iterator: Sendable where E: Sendable {}
 extension Effects: Sendable where E: Sendable {}
 extension Effects: Equatable where E: Equatable {
     public static func == (lhs: Effects<E>, rhs: Effects<E>) -> Bool {

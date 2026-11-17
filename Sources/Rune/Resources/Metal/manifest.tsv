@@ -1,5 +1,7 @@
 # name	fnv64
-shader	deff3ed6dc8f7f07
+shader	9e0a8077d48c958b
+shader_windfoil	8fb40991e7e0f714
+shader_windfoil_rgb	b653ccbe5946bef4
 layer_blur	1de55b8be9ca2f09
 backdrop_blur	d9827e07ba3302c7
 backdrop_composite	e5b9c9103d77267d

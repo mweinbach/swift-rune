@@ -154,7 +154,10 @@ extension CommitBudget {
             let state = CommitBudget.threadState
             let outer = state.depth == 0
             state.depth += 1
-            if outer { state.times = [Double](repeating: 0, count: FRAME_PHASES) }
+            if outer {
+                FrameProfiling.observe(FrameProfiling.budget, true)
+                state.times = [Double](repeating: 0, count: FRAME_PHASES)
+            }
             return Commit(begun: (RuneExecutionContext.uptimeNanoseconds, outer))
         }
 
@@ -164,6 +167,7 @@ extension CommitBudget {
             guard let begun else { return }
             let state = CommitBudget.threadState
             state.depth = state.depth > 0 ? state.depth - 1 : 0
+            if begun.outer { FrameProfiling.observe(FrameProfiling.budget, false) }
             guard begun.outer, let budget = CommitBudget.currentBudgetMs() else { return }
             let hook = CommitBudget.testHook
             hook?.noteCause(why)

@@ -219,6 +219,17 @@ public struct LayoutAnim: Sendable, Hashable {
     }
 }
 
+/// Kept out of each node's inline storage because few elements override the blur curve.
+package final class BlurMotion: Sendable, Equatable {
+    package let animation: Anim<Blur>
+
+    package init(_ animation: Anim<Blur>) { self.animation = animation }
+
+    package static func == (lhs: BlurMotion, rhs: BlurMotion) -> Bool {
+        lhs === rhs || lhs.animation == rhs.animation
+    }
+}
+
 /// Declarative motion specification for a scene node.
 public struct NodeSpec: Sendable, Equatable {
     public var id: NodeId
@@ -243,6 +254,7 @@ public struct NodeSpec: Sendable, Equatable {
     public var opacityAnim: Anim<Float>?
     public var scaleAnim: Anim<Vec2>?
     public var rotateAnim: Anim<Float>?
+    package var blurMotion: BlurMotion?
     public var iconTurn: Float
     public var transition: Transition?
     public var snapMount: Bool
@@ -1941,7 +1953,9 @@ public struct Scene: Sendable {
                     } else {
                         set(spec.id, Props.CORNERS, spec.corners)
                     }
-                    if !cut, let sp = spec.styleSpring {
+                    if !cut, let blur = spec.blurMotion {
+                        animate(spec.id, Props.BLUR, to: Blur(spec.blur), anim: blur.animation)
+                    } else if !cut, let sp = spec.styleSpring {
                         animate(spec.id, Props.BLUR, to: Blur(spec.blur), anim: Anim(curve: Curve.from(sp)))
                     } else {
                         set(spec.id, Props.BLUR, Blur(spec.blur))

@@ -191,7 +191,12 @@ public enum PrettyLineBreaker {
             let inkEnd: Float
         }
         let ns = text as NSString
-        let natural = Set(lineBreakOpportunities(in: ns, from: 0, to: ns.length))
+        let standard = Set(lineBreakOpportunities(in: ns, from: 0, to: ns.length))
+        #if os(WASI) && RUNE_BROWSER_TEXT
+        let natural = BrowserSegmentation.dictionaryBreaks(standard, in: text, words: false)
+        #else
+        let natural = standard
+        #endif
         var edges = [Edge(index: text.startIndex, utf8: 0, utf16: 0, x: 0, inkEnd: 0)]
         for index in text.indices {
             let character = text[index]

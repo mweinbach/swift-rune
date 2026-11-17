@@ -92,22 +92,36 @@ private func intersectHitRects(_ a: MotionRect, _ b: MotionRect) -> MotionRect {
     return MotionRect(left: l, top: t, right: r, bottom: bot)
 }
 
+@inline(__always)
+func matchesAuthoredKey(_ key: String?, _ requested: String?) -> Bool {
+    guard let key, let requested else { return false }
+    return key.utf8.elementsEqual(requested.utf8)
+}
+
 /// Matches an element selector (`"knob"` or slash-path `"slider/knob"`) against a node's `path` and `key`,
 /// skipping unkeyed structural segments (`0`, `1`, `#0`, etc.) and optional `@` key prefixes.
 /// Parity with `crates/rune/src/flight.rs:103` `selects` and `elements.rs:534` `keyed_suffix`.
 func selectsElementSelector(_ selector: String, path: String, key: String?) -> Bool {
-    if !selector.contains("/") {
-        return key == selector
+    if matchesAuthoredKey(key, selector) { return true }
+    if !selector.utf8.contains(0x2f) {
+        return false
     }
-    if path == selector || path.hasSuffix("/\(selector)") || path.hasSuffix("/@\(selector)") {
-        return true
+    if path.utf8.elementsEqual(selector.utf8) { return true }
+    let encoded = path.utf8.contains(0x7e) && path.contains(VirtualRowKeyEncoding.marker)
+    if !encoded {
+        let suffix = selector.utf8
+        if path.utf8.suffix(suffix.count).elementsEqual(suffix) {
+            let prefix = path.utf8.dropLast(suffix.count)
+            if prefix.last == 0x2f || (prefix.last == 0x40 && prefix.dropLast().last == 0x2f) { return true }
+        }
     }
-    let wantParts = selector.split(separator: "/").map(String.init)
+    let wantParts = VirtualRowKeyEncoding.components(selector, omittingEmpty: false)
     guard !wantParts.isEmpty else { return false }
-    let keyedSegments = path.split(separator: "/").compactMap { raw -> String? in
+    let keyedSegments = VirtualRowKeyEncoding.components(path, omittingEmpty: false).compactMap { raw -> String? in
         let seg = String(raw)
         if seg.hasPrefix("@") {
-            return String(seg.dropFirst())
+            let component = seg.dropFirst()
+            return encoded ? VirtualRowKeyEncoding.authoredComponent(component) : String(component)
         }
         if !seg.isEmpty && seg.allSatisfy(\.isNumber) {
             return nil
@@ -115,8 +129,8 @@ func selectsElementSelector(_ selector: String, path: String, key: String?) -> B
         if seg.count > 1 && seg.hasPrefix("#") && seg.dropFirst().allSatisfy(\.isNumber) {
             return nil
         }
-        return seg
+        return encoded ? VirtualRowKeyEncoding.authoredComponent(raw) : seg
     }
     guard keyedSegments.count >= wantParts.count else { return false }
-    return Array(keyedSegments.suffix(wantParts.count)) == wantParts
+    return zip(keyedSegments.suffix(wantParts.count), wantParts).allSatisfy { $0.utf8.elementsEqual($1.utf8) }
 }

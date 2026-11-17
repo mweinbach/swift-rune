@@ -23,6 +23,8 @@ int rune_gl_window_snapshot(RuneGLResolve resolve, int32_t x, int32_t y, int32_t
  * configure the production and/or reference pipeline before drawing that ABI. */
 RuneGL *rune_gl_create_device(RuneGLResolve resolve, const char *fullscreen_source,
                               const char *layer_source, char *error, size_t error_size);
+int rune_gl_configure_reference_blur(RuneGL *renderer, const char *fullscreen_source, const char *fragment_source,
+                                     char *error, size_t error_capacity);
 int rune_gl_configure_reference(RuneGL *renderer, const char *vertex_source,
                                 const char *fragment_source, char *error, size_t error_size);
 
@@ -76,6 +78,7 @@ int rune_gl_render(RuneGL *renderer, int width, int height, const float *clear_r
 
 #include "RuneGLPass.h"
 #include "CRuneGLSurface.h"
+#include "CRuneGLCompletion.h"
 #include "RuneGLFrame.h"
 #include "RuneGLLayerCache.h"
 

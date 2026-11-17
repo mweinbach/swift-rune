@@ -654,14 +654,15 @@ extension TextSystem {
         emitGlyphs: Bool,
         keep: TextKeep = .cached,
         countAsRebreak: Bool = true,
-        request: ParagraphRequest?
+        request: ParagraphRequest?,
+        rasterWindow: TextRasterWindow? = nil
     ) -> TextLayoutBox {
         if let request, keep != .secret, spans?.isEmpty ?? true, pills.isEmpty, style.wrap == .wrap, style.maxLines == 0, text.utf8.contains(0x0a) {
             let laid = layoutParagraphs(text: text, style: style, maxWidth: maxWidth, pixelScale: pixelScale, request: request)
             let prepared = prepareHighlights(request.highlights, in: laid, field: request.field)
             return paragraphBox(prepared, text: text, style: style, pixelScale: pixelScale)
         }
-        return layoutKeyed(text: text, spans: spans, pills: pills, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs, keep: keep, countAsRebreak: countAsRebreak)
+        return layoutKeyed(text: text, spans: spans, pills: pills, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs, keep: keep, countAsRebreak: countAsRebreak, rasterWindow: rasterWindow)
     }
 
     /// The `TextLayoutBox` a node holds for `laid`.

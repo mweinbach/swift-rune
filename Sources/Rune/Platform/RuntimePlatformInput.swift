@@ -447,7 +447,7 @@ extension Runtime {
         let rest = Array(list.dropFirst())
         popupQueue = .showing(head: head, rest: rest)
         releasePointerForPopup(at: currentTime)
-        return .success(PopupShow(menu: head.menu, anchor: showAnchor))
+        return .success(PopupShow(menu: head.menu, anchor: showAnchor.scaled(by: zoom())))
     }
 
     /// Headless stand-in for host opening: opens next valid popup menu while automatically

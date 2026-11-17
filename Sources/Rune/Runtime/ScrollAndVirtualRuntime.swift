@@ -8,9 +8,11 @@ extension Runtime {
     /// owns an unmounted row (commit/flatten.rs::in_scope). Swift also accepts a full or keyed path.
     internal static func inScrollRevealScope(_ scope: String?, path: String) -> Bool {
         guard let scope else { return true }
-        if !scope.contains("/") {
-            let segment = "@\(scope)"
-            return path.split(separator: "/").contains { $0 == segment }
+        if !scope.utf8.contains(0x2f) {
+            return VirtualRowKeyEncoding.components(path).contains { segment in
+                guard segment.first == "@" else { return false }
+                return matchesAuthoredKey(VirtualRowKeyEncoding.authoredComponent(segment.dropFirst()), scope)
+            }
         }
         var ancestor = path[...]
         while !ancestor.isEmpty {
@@ -23,16 +25,17 @@ extension Runtime {
 
     /// A virtual row selector can name the row, a scoped row, or a descendant of the row.
     internal static func virtualRevealRow(_ key: String, in places: VirtualRowPlaces<String>, path: String) -> Int? {
-        if let index = places.index(of: key) { return index }
-        for slash in key.indices.reversed() where key[slash] == "/" {
-            let row = String(key[key.index(after: slash)...])
-            if let index = places.index(of: row),
-               selectsElementSelector(key, path: "\(path)/@\(row)", key: row) {
+        if let index = places.index(ofAuthoredKey: key) { return index }
+        if let target = places.row(containing: key, below: path) { return target.rowIndex }
+        for slash in key.utf8.indices.reversed() where key.utf8[slash] == 0x2f {
+            let row = String(key[key.utf8.index(after: slash)...])
+            if let index = places.index(ofAuthoredKey: row),
+               selectsElementSelector(key, path: "\(path)/@\(places.keys[index])", key: row) {
                 return index
             }
         }
-        for slash in key.indices where key[slash] == "/" {
-            if let index = places.index(of: String(key[..<slash])) { return index }
+        for slash in key.utf8.indices where key.utf8[slash] == 0x2f {
+            if let index = places.index(ofAuthoredKey: String(key[..<slash])) { return index }
         }
         return nil
     }
@@ -56,11 +59,13 @@ extension Runtime {
     internal struct CachedVirtualRow {
         var el: El<State>
         var memoIds: Set<String>
+        var containsVirtual: Bool
+        var reusableForRelayout: Bool
         var reads: [MemoRead] = []
         var trackedReads: TrackedReads = TrackedReads()
         var envHash: UInt64 = 0
 
-        func holds(against geometry: [String: MemoElementGeometry], envHash: UInt64) -> Bool {
+        func holds(against geometry: MemoGeometry, envHash: UInt64) -> Bool {
             self.envHash == envHash
                 && !trackedReads.changed()
                 && reads.allSatisfy { $0.matches(geometry) }
@@ -96,9 +101,12 @@ extension Runtime {
     }
 
     internal struct VirtualExpansionContext {
+        var lands = false
         var rowMappings: [(listPath: String, scrollPath: String, rowSegment: String, rowKey: String)] = []
         var listMeta: [VirtualListMeta] = []
         var anyVirtualList: Bool = false
+        var keyDiagnostics: [DuplicateKeyWarning] = []
+        var keyRenames: [KeyDiagnostics.Rename] = []
         var virtualInputs: [String: VirtualInputEntry] = [:]
         var builtVirtualRows: [String: [String: CachedVirtualRow]] = [:]
         var remountHitNestedVirtual: Bool = false
@@ -109,11 +117,12 @@ extension Runtime {
     private func virtualRowPlaces(
         _ rawKeys: [String],
         previous: VirtualRowPlaces<String>,
+        byteExactKeys: Bool = false,
         listPath: String,
         warnings: inout [String]
     ) -> VirtualRowPlaces<String> {
-        if rawKeys == previous.keys { return previous }
-        let places = VirtualRowPlaces(rawKeys)
+        if byteExactKeys == previous.byteExactKeys && rawKeys == previous.keys { return previous }
+        let places = VirtualRowPlaces(rawKeys, byteExactKeys: byteExactKeys)
         guard places.hasDuplicates else { return places }
         let friendlyPath = listPath
             .split(separator: "/")
@@ -121,10 +130,17 @@ extension Runtime {
             .filter { $0 != "0" }
             .joined(separator: "/")
         var repaired = rawKeys
-        for (index, key) in KeyDiagnostics.renameDuplicates(&repaired) {
-            warnings.append("duplicate virtual row key \"\(key)\" under \"\(friendlyPath)\" -> renamed to \"\(repaired[index])\"")
+        func authored(_ key: String) -> String {
+            VirtualRowKeyEncoding.authoredKey(key) ?? key
         }
-        return VirtualRowPlaces(repaired)
+        let duplicates = KeyDiagnostics.renameDuplicates(&repaired) { key, suffix in
+            let name = "\(authored(key))#dup\(suffix)"
+            return VirtualRowKeyEncoding.storageKey(name, byteExact: byteExactKeys)
+        }
+        for (index, key) in duplicates {
+            warnings.append("duplicate virtual row key \"\(authored(key))\" under \"\(friendlyPath)\" -> renamed to \"\(authored(repaired[index]))\"")
+        }
+        return VirtualRowPlaces(repaired, byteExactKeys: byteExactKeys)
     }
 
     internal struct GrowthCaptureResult {
@@ -155,8 +171,8 @@ extension Runtime {
         var tx = Tx()
         tx.preparationWindowID = runtimeId
         tx.clock = now
-        if let sel = currentTextSelection() {
-            tx.setCurrentTextSelection(sel)
+        if let selection = handlerTextSelection() {
+            tx.setCurrentTextSelection(selection)
         }
         tx.button = button
         tx.runtimeActions["focusVisible"] = focusVisible
@@ -212,6 +228,10 @@ extension Runtime {
             if cur.virtualEstimate != nil || cur.virtualRowsSource != nil {
                 return true
             }
+            if let memo = cur.memoLayoutChildren, memo.matches(cur.children) {
+                if memo.traits.contains(.virtual) { return true }
+                continue
+            }
             if !cur.children.isEmpty {
                 stack.append(contentsOf: cur.children)
             }
@@ -224,14 +244,15 @@ extension Runtime {
         in rootEl: El<State>,
         remountRowCache: [String: [String: CachedVirtualRow]]? = nil,
         rowReuseMode: VirtualRowReuseMode = .none,
-        memoGeometry: [String: MemoElementGeometry] = [:],
+        memoGeometry: @autoclosure () -> MemoGeometry = MemoGeometry(),
         memoEnvHash: UInt64 = MemoScope.activeEnvHash,
         memoPass: UInt64 = 0,
         isReorderPermitted: Bool = true,
+        lands: Bool = false,
         bypassBudget: Bool = false,
         forceAll: Bool = false
     ) -> (root: El<State>, context: VirtualExpansionContext) {
-        var ctx = VirtualExpansionContext()
+        var ctx = VirtualExpansionContext(lands: lands)
         activeVirtualPaths.removeAll(keepingCapacity: true)
         guard treeContainsVirtual(rootEl) else {
             return (rootEl, ctx)
@@ -256,10 +277,11 @@ extension Runtime {
             rowReuseMode: rowReuseMode,
             inReusableRegion: false,
             regionEnvHash: 0,
-            memoGeometry: memoGeometry,
+            memoGeometry: memoGeometry(),
             memoEnvHash: memoEnvHash,
             memoPass: memoPass,
             scrollEstHeight: nil,
+            availableHeight: fitHeight ? .infinity : viewport.y,
             isReorderPermitted: isReorderPermitted,
             bypassBudget: bypassBudget,
             forceAll: forceAll,
@@ -280,21 +302,27 @@ extension Runtime {
         rowReuseMode: VirtualRowReuseMode,
         inReusableRegion: Bool,
         regionEnvHash: UInt64,
-        memoGeometry: [String: MemoElementGeometry],
+        memoGeometry: MemoGeometry,
         memoEnvHash: UInt64,
         memoPass: UInt64,
         scrollEstHeight: Float?,
+        availableHeight: Float,
         isReorderPermitted: Bool,
         bypassBudget: Bool,
         forceAll: Bool,
         ctx: inout VirtualExpansionContext
     ) {
         let (segment, _) = layoutPathSegment(
-            keyId: el.keyId,
+            keyId: el.storageKeyId,
             siblingIndex: siblingIndex,
             siblingKeysSeen: &siblingKeysSeen
         )
-        let path = parentPath.isEmpty ? (el.keyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(segment)"
+        let path = parentPath.isEmpty ? (el.storageKeyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(segment)"
+
+        if el.virtualEstimate == nil, el.virtualRowsSource == nil,
+           let memo = el.memoLayoutChildren, memo.matches(el.children), !memo.traits.contains(.virtual) {
+            return
+        }
 
         let nodeInReusableRegion = el.memoRegionReused ? true : inReusableRegion
         let nodeRegionEnvHash = el.memoRegionReused ? el.memoRegionEnvHash : regionEnvHash
@@ -302,15 +330,13 @@ extension Runtime {
         var nextScrollPath = scrollPath
         var nextStickBottom = scrollStickBottom
         var nextScrollAnchor = scrollAnchor
+        let bound = virtualHeightBound(el.layout, available: availableHeight)
         var nextEstHeight = scrollEstHeight
         if !el.layout.scrollAxes.isEmpty {
             nextScrollPath = path
             nextStickBottom = el.layout.stickBottom
             nextScrollAnchor = el.scrollAnchorEnabled
-            var cap: Float? = nil
-            if case .points(let h) = el.layout.height { cap = h }
-            if case .points(let mh) = el.layout.maxHeight { cap = cap.map { min($0, mh) } ?? mh }
-            nextEstHeight = cap
+            nextEstHeight = bound.isFinite ? bound : nil
         }
 
         if el.virtualEstimate != nil || el.virtualRowsSource != nil {
@@ -328,6 +354,7 @@ extension Runtime {
                 memoEnvHash: memoEnvHash,
                 memoPass: memoPass,
                 scrollEstHeight: nextEstHeight,
+                availableHeight: bound,
                 isReorderPermitted: isReorderPermitted,
                 bypassBudget: bypassBudget,
                 forceAll: forceAll,
@@ -337,8 +364,10 @@ extension Runtime {
         }
 
         guard !el.children.isEmpty else { return }
+        let bounds = VirtualChildBounds.compute(style: el.layout, scrolls: !el.layout.scrollAxes.isEmpty, bound: bound, children: el.children)
         var childSeen: [String: Int] = [:]
         for idx in el.children.indices {
+            let childBound = bounds.of(el.children[idx])
             walkVirtualSubtrees(
                 &el.children[idx],
                 parentPath: path,
@@ -355,6 +384,7 @@ extension Runtime {
                 memoEnvHash: memoEnvHash,
                 memoPass: memoPass,
                 scrollEstHeight: nextEstHeight,
+                availableHeight: childBound,
                 isReorderPermitted: isReorderPermitted,
                 bypassBudget: bypassBudget,
                 forceAll: forceAll,
@@ -375,10 +405,11 @@ extension Runtime {
         rowReuseMode: VirtualRowReuseMode,
         inReusableRegion: Bool,
         regionEnvHash: UInt64,
-        memoGeometry: [String: MemoElementGeometry],
+        memoGeometry: MemoGeometry,
         memoEnvHash: UInt64,
         memoPass: UInt64,
         scrollEstHeight: Float?,
+        availableHeight: Float,
         isReorderPermitted: Bool,
         bypassBudget: Bool,
         forceAll: Bool,
@@ -396,32 +427,48 @@ extension Runtime {
         let keys: [String]
         if let src = el.virtualRowsSource {
             count = src.count
-            if let ver = el.virtualRowsVersionHash,
-               vState.lastKeysVersion == ver,
-               vState.lastKeys.count == count {
-                keys = vState.lastKeys
-            } else {
-                var builtKeys: [String] = []
-                builtKeys.reserveCapacity(count)
-                for i in 0..<count {
-                    builtKeys.append(src.key(state, i))
+            let version = el.virtualRowsVersionHash
+            // A remount uses the committed row source and unchanged state. A fresh view can also
+            // declare a key version, otherwise verify its keys even when the count stayed the same.
+            let sameKeySpace = src.byteExactKeys == vState.rowPlaces.byteExactKeys
+            let retainedKeys = sameKeySpace && vState.isIndexed && count == prevKeys.count
+                && (rowReuseMode == .remount || (version != nil && version == vState.lastKeysVersion))
+            if !retainedKeys {
+                var changedKeys: [String]? = sameKeySpace && count == prevKeys.count ? nil : []
+                changedKeys?.reserveCapacity(count)
+                for index in 0..<count {
+                    let authored = src.key(state, index)
+                    let key = VirtualRowKeyEncoding.storageKey(authored, byteExact: src.byteExactKeys)
+                    if changedKeys == nil {
+                        if key == prevKeys[index] { continue }
+                        changedKeys = Array(prevKeys.prefix(index))
+                        changedKeys?.reserveCapacity(count)
+                    }
+                    changedKeys?.append(key)
                 }
-                vState.replaceRowPlaces(virtualRowPlaces(builtKeys, previous: vState.rowPlaces, listPath: path, warnings: &ctx.warnings))
-                keys = vState.lastKeys
-                vState.lastKeysVersion = el.virtualRowsVersionHash
+                if let changedKeys {
+                    vState.replaceRowPlaces(virtualRowPlaces(changedKeys, previous: vState.rowPlaces, byteExactKeys: src.byteExactKeys, listPath: path, warnings: &ctx.warnings))
+                }
             }
+            // A layout retry may pair the prior list's keys with this commit's new measurements.
+            if vState.measuredByKey.places.keys != vState.lastKeys {
+                vState.replaceRowPlaces(vState.rowPlaces)
+            }
+            keys = vState.lastKeys
+            vState.lastKeysVersion = version
         } else {
             count = el.children.count
             var childKeys: [String] = []
             childKeys.reserveCapacity(count)
             for (idx, child) in el.children.enumerated() {
-                childKeys.append(child.keyId ?? "__vrow_\(idx)")
+                childKeys.append(child.storageKeyId ?? "__vrow_\(idx)")
             }
             vState.replaceRowPlaces(virtualRowPlaces(childKeys, previous: vState.rowPlaces, listPath: path, warnings: &ctx.warnings))
             keys = vState.lastKeys
             vState.lastKeysVersion = nil
         }
 
+        vState.measuredByKey.prepareOffsets(estimated: est, gap: vState.gap)
         let (prefix, total) = vState.computeOffsets(estimated: est)
         let vpPath = nextScrollPath ?? path
         let oldVpH = scrollViewportSizes[vpPath]?.y
@@ -437,7 +484,7 @@ extension Runtime {
             vpH = max(1, scrollEstHeight ?? viewport.y)
         }
         let isFirstMount = (scrollOffsets[vpPath] == nil && !wasPinnedToBottom.contains(vpPath))
-        let stickyPin = nextStickBottom && (isFirstMount || wasPinnedToBottom.contains(vpPath))
+        let stickyPin = nextStickBottom && (ctx.lands || isFirstMount || wasPinnedToBottom.contains(vpPath))
 
         let hasPendingRevealForViewport = pendingScrollReveals.contains { req in
             Self.inScrollRevealScope(req.scope, path: path)
@@ -457,7 +504,7 @@ extension Runtime {
         if held {
             // Only the viewport's own list follows its end; a nested list stands where it leaves it.
             if !vState.nested {
-                curOffsetY = max(0, total - vpH)
+                curOffsetY = max(0, vState.top + vState.extent(total: total) - vpH)
                 scrollOffsets[vpPath] = Vec2(scrollOffsets[vpPath]?.x ?? 0, curOffsetY)
             }
             wasPinnedToBottom.insert(vpPath)
@@ -474,7 +521,7 @@ extension Runtime {
            !directScrolledPaths.contains(vpPath),
            !hasPendingRevealForViewport,
            let anchorIdx = vState.rowPlaces.index(of: anchorKey) {
-            let expectedY = max(0, min(max(0, total - vpH), prefix[anchorIdx] + vState.lastAnchorLocalY))
+            let expectedY = max(0, min(max(0, vState.extent(total: total) - vpH), vState.padTop + prefix[anchorIdx] + vState.lastAnchorLocalY))
             if abs(expectedY - listOffsetY) > 0.25 {
                 curOffsetY = max(0, curOffsetY + expectedY - listOffsetY)
                 scrollOffsets[vpPath] = Vec2(scrollOffsets[vpPath]?.x ?? 0, curOffsetY)
@@ -485,7 +532,7 @@ extension Runtime {
         }
 
         var pinned: Set<Int> = []
-        if let fk = focusedKey, let fi = vState.rowPlaces.index(of: fk) {
+        if let fk = focusedKey, let fi = vState.rowPlaces.index(ofAuthoredKey: fk) {
             pinned.insert(fi)
         }
         let destination = pendingVirtualReveal(places: vState.rowPlaces, list: path)
@@ -536,10 +583,10 @@ extension Runtime {
         // its end, or nested and wholly above the viewport's top, anchors nothing.
         let vis = vState.visibleRange(offset: listOffsetY, viewport: vpH, prefix: prefix, count: count)
         if !vis.isEmpty && !listPinned && !vState.passed {
-            let ai = vis.lowerBound
+            let ai = vis.first { vState.measuredByKey.heights[$0] != nil } ?? vis.lowerBound
             vState.lastAnchorKey = keys[ai]
-            vState.lastAnchorLocalY = max(0, listOffsetY - prefix[ai])
-            vState.lastAnchorPrefixY = prefix[ai]
+            vState.lastAnchorPrefixY = vState.padTop + prefix[ai]
+            vState.lastAnchorLocalY = listOffsetY - vState.lastAnchorPrefixY
         } else if listPinned || vState.passed {
             vState.lastAnchorKey = nil
             vState.lastAnchorLocalY = 0
@@ -603,6 +650,10 @@ extension Runtime {
         )
         if rowReuseMode == .remount, let previous = virtualSelectionSources[path] {
             selectionSource.pinnedRows = previous.pinnedRows
+        } else {
+            // The replacement builders can acquire a resource owned by an offscreen
+            // row in the previous tree. Release that list's rows before invoking them.
+            virtualSelectionSources.removeValue(forKey: path)
         }
         ctx.selectionSources[path] = selectionSource
         func buildRow(_ source: VirtualRowSource<State>, at index: Int) -> CachedVirtualRow {
@@ -612,7 +663,12 @@ extension Runtime {
                 pass: memoPass, touchedIdsOut: touched
             ) { source.build(state, index) }
             self.memo.appendViewReads(touched.reads + touched.trackedReads.memoReads, pass: memoPass)
-            return CachedVirtualRow(el: row.key(keys[index]), memoIds: touched.ids,
+            var keyedRow = source.keyed(row, storageKey: keys[index])
+            if !keyedRow.children.isEmpty, keyedRow.memoLayoutChildren?.matches(keyedRow.children) != true {
+                keyedRow.memoLayoutChildren = MemoLayoutChildren(keyedRow.children)
+            }
+            return CachedVirtualRow(el: keyedRow, memoIds: touched.ids,
+                                    containsVirtual: treeContainsVirtual(keyedRow), reusableForRelayout: Self.isTreeReusableForRelayout(keyedRow),
                                     reads: touched.reads, trackedReads: touched.trackedReads, envHash: memoEnvHash)
         }
         func offscreenRow(_ index: Int) -> El<State>? {
@@ -629,25 +685,29 @@ extension Runtime {
                 }
             }
         }
-        var rowSeenKeys: [String: Int] = [:]
+        var nestedRows: [(index: Int, reused: Bool)] = []
+        var rowKeysBySegment = Dictionary<String, String>(minimumCapacity: mounted.count)
         for i in mounted {
             let rowKey = keys[i]
             var rowEl: El<State>
             var didReuseRow = false
+            let containsVirtual: Bool
             if isIndexed {
                 if canReuseRows,
                    let reused = remountRowCache?[path]?[rowKey],
-                   Self.isTreeReusableForRelayout(reused.el),
+                   reused.reusableForRelayout,
                    reused.holds(against: memoGeometry, envHash: memoEnvHash) {
                     self.memo.touchEntries(ids: reused.memoIds, pass: memoPass)
                     self.memo.appendViewReads(reused.reads + reused.trackedReads.memoReads, pass: memoPass)
                     reused.trackedReads.read()
                     rowEl = reused.el
+                    containsVirtual = reused.containsVirtual
                     didReuseRow = true
                     ctx.builtVirtualRows[path, default: [:]][rowKey] = reused
                 } else {
                     let row = buildRow(el.virtualRowsSource!, at: i)
-                    if rowReuseMode == .remount && treeContainsVirtual(row.el) {
+                    containsVirtual = row.containsVirtual
+                    if rowReuseMode == .remount && containsVirtual {
                         ctx.remountHitNestedVirtual = true
                         return
                     }
@@ -656,45 +716,58 @@ extension Runtime {
                 }
             } else {
                 rowEl = el.children[i]
-                if rowEl.keyId == nil || rowEl.keyId != rowKey {
-                    rowEl = rowEl.key(rowKey)
+                containsVirtual = treeContainsVirtual(rowEl)
+                if rowEl.storageKeyId != rowKey {
+                    rowEl.assignStoredKey(rowKey, authored: VirtualRowKeyEncoding.authoredKey(rowKey))
                 }
             }
-            var walkRowSeenKeys = rowSeenKeys
-            let (rowSeg, _) = layoutPathSegment(
-                keyId: rowEl.keyId,
-                siblingIndex: built.count,
-                siblingKeysSeen: &rowSeenKeys
-            )
-            ctx.rowMappings.append((listPath: path, scrollPath: vpPath, rowSegment: rowSeg, rowKey: keys[i]))
-            virtualLists[path]?.rowKeyBySegment[rowSeg] = keys[i]
-            walkVirtualSubtrees(
-                &rowEl,
-                parentPath: path,
-                siblingIndex: built.count,
-                siblingKeysSeen: &walkRowSeenKeys,
-                scrollPath: nextScrollPath,
-                scrollStickBottom: nextStickBottom,
-                scrollAnchor: nextScrollAnchor,
-                remountRowCache: remountRowCache,
-                rowReuseMode: rowReuseMode,
-                inReusableRegion: didReuseRow ? inReusableRegion : false,
-                regionEnvHash: didReuseRow ? regionEnvHash : 0,
-                memoGeometry: memoGeometry,
-                memoEnvHash: memoEnvHash,
-                memoPass: memoPass,
-                scrollEstHeight: scrollEstHeight,
-                isReorderPermitted: isReorderPermitted,
-                bypassBudget: bypassBudget,
-                forceAll: forceAll,
-                ctx: &ctx
-            )
-            if ctx.remountHitNestedVirtual { return }
+            // Every row now carries its resolved, unique key, including repaired duplicates.
+            let rowSeg = "@\(rowKey)"
+            if isIndexed && !KeyDiagnostics.clean(rowEl) {
+                let repaired = KeyDiagnostics.repair(rowEl, at: "\(path)/\(rowSeg)") { ctx.keyRenames.append($0) }
+                ctx.keyDiagnostics.append(contentsOf: repaired.warnings)
+                rowEl = repaired.tree
+            }
+            ctx.rowMappings.append((listPath: path, scrollPath: vpPath, rowSegment: rowSeg, rowKey: rowKey))
+            rowKeysBySegment[rowSeg] = rowKey
+            if containsVirtual { nestedRows.append((built.count, didReuseRow)) }
             built.append(rowEl)
         }
 
+        virtualLists[path]?.rowKeyBySegment = rowKeysBySegment
         if botSpacerH > 0 {
             built.append(Self.virtualSpacer(key: "__v_bot_spacer", height: botSpacerH))
+        }
+        if !nestedRows.isEmpty {
+            let bounds = VirtualChildBounds.compute(style: el.layout, scrolls: !el.layout.scrollAxes.isEmpty,
+                                                    bound: availableHeight, children: built)
+            var rowSeenKeys: [String: Int] = [:]
+            for nested in nestedRows {
+                let childBound = bounds.of(built[nested.index])
+                walkVirtualSubtrees(
+                    &built[nested.index],
+                    parentPath: path,
+                    siblingIndex: nested.index,
+                    siblingKeysSeen: &rowSeenKeys,
+                    scrollPath: nextScrollPath,
+                    scrollStickBottom: nextStickBottom,
+                    scrollAnchor: nextScrollAnchor,
+                    remountRowCache: remountRowCache,
+                    rowReuseMode: rowReuseMode,
+                    inReusableRegion: nested.reused ? inReusableRegion : false,
+                    regionEnvHash: nested.reused ? regionEnvHash : 0,
+                    memoGeometry: memoGeometry,
+                    memoEnvHash: memoEnvHash,
+                    memoPass: memoPass,
+                    scrollEstHeight: scrollEstHeight,
+                    availableHeight: childBound,
+                    isReorderPermitted: isReorderPermitted,
+                    bypassBudget: bypassBudget,
+                    forceAll: forceAll,
+                    ctx: &ctx
+                )
+                if ctx.remountHitNestedVirtual { return }
+            }
         }
         el.children = built
         el.virtualRowsSource = nil
@@ -759,16 +832,17 @@ extension Runtime {
         out: inout [String: VirtualInputEntry]
     ) {
         let (seg, resolvedKey) = layoutPathSegment(
-            keyId: el.keyId,
+            keyId: el.storageKeyId,
             siblingIndex: siblingIndex,
             siblingKeysSeen: &siblingKeysSeen
         )
         let path = "\(parentPath)/\(seg)"
+        let publicKey = el.authoredByteExactKey ?? resolvedKey ?? el.keyId
         if el.handlers.editLens != nil,
-           (path == targetPath || (targetKey != nil && (resolvedKey == targetKey || el.keyId == targetKey))) {
+           (path == targetPath || targetKey.map({ matchesAuthoredKey(publicKey, $0) }) == true) {
             out[path] = VirtualInputEntry(
                 path: path,
-                key: resolvedKey ?? el.keyId,
+                key: publicKey,
                 rowKey: rowKey,
                 el: el
             )
@@ -790,59 +864,7 @@ extension Runtime {
 
     // MARK: - GrowthStack & FoldGlide
 
-    internal func prepareGrowthStacksBeforeLayout(
-        in rootEl: El<State>,
-        cut: Bool,
-        snaps: Bool,
-        lands: Bool
-    ) -> El<State> {
-        let settleAll = cut || lands || reducedMotion
-        var activeStackPaths: Set<String> = []
-
-        @inline(never)
-        func walk(
-            _ el: El<State>,
-            parentPath: String,
-            siblingIndex: Int,
-            siblingKeysSeen: inout [String: Int]
-        ) -> El<State> {
-            let (seg, _) = layoutPathSegment(keyId: el.keyId, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
-            let path = parentPath.isEmpty ? (el.keyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
-
-            var out = el
-            if let spec = el.growthSpec, el.virtualEstimate == nil, el.virtualRowsSource == nil {
-                activeStackPaths.insert(path)
-                out = mergeGrowthStackContainer(out, path: path, spec: spec, settleAll: settleAll, snaps: snaps)
-            }
-
-            if !out.children.isEmpty {
-                var childSeen: [String: Int] = [:]
-                var nextChildren: [El<State>] = []
-                nextChildren.reserveCapacity(out.children.count)
-                for idx in out.children.indices {
-                    nextChildren.append(walk(out.children[idx], parentPath: path, siblingIndex: idx, siblingKeysSeen: &childSeen))
-                }
-                out.children = nextChildren
-            }
-            return out
-        }
-
-        var rootSeen: [String: Int] = [:]
-        let result = walk(rootEl, parentPath: "", siblingIndex: 0, siblingKeysSeen: &rootSeen)
-        if !kitHooks.growthStacks.isEmpty {
-            kitHooks.growthStacks = kitHooks.growthStacks.filter { activeStackPaths.contains($0.key) }
-        }
-        return result
-    }
-
-    @inline(never)
-    private func mergeGrowthStackContainer(
-        _ el: El<State>,
-        path: String,
-        spec: GrowthSpec,
-        settleAll: Bool,
-        snaps: Bool
-    ) -> El<State> {
+    private func recordGrowthStack(_ el: El<State>, path: String) {
         let prevStack = kitHooks.growthStacks[path]
         var nextStack = prevStack ?? KitGrowthStackState()
         nextStack.isNewStack = (prevStack == nil)
@@ -851,7 +873,7 @@ extension Runtime {
         var newChildSegs: [String] = []
         var childSeen: [String: Int] = [:]
         for (cIdx, child) in el.children.enumerated() {
-            let (cSeg, _) = layoutPathSegment(keyId: child.keyId, siblingIndex: cIdx, siblingKeysSeen: &childSeen)
+            let (cSeg, _) = layoutPathSegment(keyId: child.storageKeyId, siblingIndex: cIdx, siblingKeysSeen: &childSeen)
             let isSpacer = (child.keyId == "__v_top_spacer" || child.keyId == "__v_bot_spacer") || child.isKitVirtualSpacer
             if !isSpacer {
                 newChildSegs.append(cSeg)
@@ -861,7 +883,6 @@ extension Runtime {
         nextStack.order = newChildSegs
         nextStack.closing.removeAll()
         kitHooks.growthStacks[path] = nextStack
-        return el
     }
 
     internal func syncClosingGrowthFrames(on scene: inout Scene) {
@@ -900,8 +921,8 @@ extension Runtime {
         guard stuck > 0.5 else { return nil }
 
         func findHeader(el: El<State>, res: LayoutEngine.ResultNode, parentPath: String, siblingIndex: Int, siblingKeysSeen: inout [String: Int], parentY: Float, scale: Float) -> Float? {
-            let (seg, _) = layoutPathSegment(keyId: el.keyId, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
-            let p = parentPath.isEmpty ? (el.keyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
+            let (seg, _) = layoutPathSegment(keyId: el.storageKeyId, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
+            let p = parentPath.isEmpty ? (el.storageKeyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
             let myScale = scale * el.scale.y
             let myY = parentY + res.layout.localRect.y * scale
             if p == hold.path {
@@ -1012,10 +1033,17 @@ extension Runtime {
     ) -> (ownStackPath: String?, nextGrowth: GrowthSpec?, nextScrollPath: String?, childParentWorldY: Float, myScale: Float) {
         let myScale = inheritedScale * el.scale.y
         let myWorldY = parentWorldY + res.layout.localRect.y * inheritedScale
-        slice2State.unclampedBottomByPath[path] = myWorldY + res.layout.localRect.height * myScale
+        if scrollRequestsState.hasKeeps {
+            slice2State.unclampedBottomByPath[path] = myWorldY + res.layout.localRect.height * myScale
+        }
 
         var ownStackPath = parentStackPath
         if let spec = el.growthSpec {
+            if el.virtualEstimate == nil && el.virtualRowsSource == nil {
+                recordGrowthStack(el, path: path)
+            } else {
+                kitHooks.growthStacks.removeValue(forKey: path)
+            }
             if accum.seenStackPaths.insert(path).inserted { accum.seenStackOrder.append(path) }
             ownStackPath = path
             let stackWidth = res.layout.localRect.width
@@ -1103,7 +1131,7 @@ extension Runtime {
             }
 
             let liveWindow = parentStackPath.flatMap { slice2State.liveTailWindows[$0] }
-            let live = el.keyId.map { liveWindow?.visibleKeys.contains($0) == true && liveWindow?.quietMounts.contains($0) == false } ?? false
+            let live = el.storageKeyId.map { liveWindow?.visibleKeys.contains($0) == true && liveWindow?.quietMounts.contains($0) == false } ?? false
             let instantGrowth = settleAll || el.hasInstantChanges || (snaps && !streaming && !live)
             if var existing = growthRows[gKey] {
                 let prevTarget = existing.track.target
@@ -1241,6 +1269,7 @@ extension Runtime {
     internal func updateGrowthRowsPostLayout(
         rootResult: LayoutEngine.ResultNode,
         rootEl: El<State>,
+        hasGrowth: Bool,
         cut: Bool,
         snaps: Bool,
         lands: Bool,
@@ -1252,9 +1281,13 @@ extension Runtime {
         let settleAll = cut || lands || (reducedMotionOverride ?? reducedMotion)
         slice2State.unclampedBottomByPath.removeAll(keepingCapacity: true)
 
-        var rootSeen: [String: Int] = [:]
-        let _ = layoutPathSegment(keyId: rootEl.keyId, siblingIndex: 0, siblingKeysSeen: &rootSeen)
-        let rootPath = rootEl.keyId.map { "/@\($0)" } ?? "/0"
+        guard hasGrowth || !growthRows.isEmpty || !growthStacks.isEmpty ||
+              !kitHooks.growthStacks.isEmpty || scrollRequestsState.hasKeeps else {
+            if lastGrowthStepTime == nil { lastGrowthStepTime = now }
+            return accum.result
+        }
+
+        let rootPath = rootEl.storageKeyId.map { "/@\($0)" } ?? "/0"
         typealias WalkItem = (
             el: El<State>,
             res: LayoutEngine.ResultNode,
@@ -1291,6 +1324,11 @@ extension Runtime {
                 at: now,
                 accum: &accum
             )
+            // A row's own growth was just measured. Ordinary cached children have no tracks
+            // to measure unless a held sticky header needs their unclamped geometry.
+            if nextGrowth == nil, !scrollRequestsState.hasKeeps,
+               let children = item.el.memoLayoutChildren, children.matches(item.el.children),
+               children.traits.isDisjoint(with: [.growth, .virtual]) { continue }
             if !item.el.children.isEmpty && item.el.children.count == item.res.children.count {
                 var childSeen: [String: Int] = [:]
                 var childItems: [WalkItem] = []
@@ -1298,7 +1336,7 @@ extension Runtime {
                 for i in 0..<item.el.children.count {
                     let cEl = item.el.children[i]
                     let cRes = item.res.children[i]
-                    let (seg, _) = layoutPathSegment(keyId: cEl.keyId, siblingIndex: i, siblingKeysSeen: &childSeen)
+                    let (seg, _) = layoutPathSegment(keyId: cEl.storageKeyId, siblingIndex: i, siblingKeysSeen: &childSeen)
                     childItems.append((
                         el: cEl,
                         res: cRes,
@@ -1312,6 +1350,9 @@ extension Runtime {
                 }
                 dfsStack.append(contentsOf: childItems.reversed())
             }
+        }
+        if !kitHooks.growthStacks.isEmpty {
+            kitHooks.growthStacks = kitHooks.growthStacks.filter { accum.seenStackPaths.contains($0.key) }
         }
         var result = accum.result
         var seenGrowthKeys = accum.seenGrowthKeys
@@ -1327,17 +1368,18 @@ extension Runtime {
             let virtualList = virtualLists[sp]
             var order: [String] = []
             order.reserveCapacity(newIds.count + 4)
+            var remaining = newSet
             var shut: [String] = []
             var ni = 0
             for old in stack.order {
                 if newSet.contains(old) {
                     while ni < newIds.count && newIds[ni] != old {
-                        if !order.contains(newIds[ni]) {
+                        if remaining.remove(newIds[ni]) != nil {
                             order.append(newIds[ni])
                         }
                         ni += 1
                     }
-                    if !order.contains(old) {
+                    if remaining.remove(old) != nil {
                         order.append(old)
                     }
                     ni += 1
@@ -1347,9 +1389,9 @@ extension Runtime {
                     // Only a removed row that was actually drawn can hold a closing slot.
                     let holdsPlace = virtualList.map { list in
                         guard let previous = nodeByPath[oldPath].map({ flatNodes[$0] }),
-                              let key = previous.key, list.rowPlaces.index(of: key) == nil,
+                              let key = previous.key, list.rowPlaces.index(ofAuthoredKey: key) == nil,
                               presentedRectByPath[oldPath] != nil else { return false }
-                        return !unseenPresence.currentPaintUnseenIds.contains(previous.nodeId)
+                        return kitHooks.unseenPresence.frameById[previous.nodeId]?.inView != false
                     } ?? true
                     if let entry = growthRows[old],
                        entry.track.h > 0.01,
@@ -1371,7 +1413,7 @@ extension Runtime {
                 }
             }
             while ni < newIds.count {
-                if !order.contains(newIds[ni]) {
+                if remaining.remove(newIds[ni]) != nil {
                     order.append(newIds[ni])
                 }
                 ni += 1
@@ -1524,8 +1566,8 @@ extension Runtime {
 
     internal func applyGrowthConstraints(in rootEl: El<State>) -> El<State> {
         func walk(_ el: El<State>, parentPath: String, siblingIndex: Int, siblingKeysSeen: inout [String: Int], inGrowthSpec: GrowthSpec?) -> El<State> {
-            let (seg, _) = layoutPathSegment(keyId: el.keyId, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
-            let path = parentPath.isEmpty ? (el.keyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
+            let (seg, _) = layoutPathSegment(keyId: el.storageKeyId, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
+            let path = parentPath.isEmpty ? (el.storageKeyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
             var out = el
 
             let isVirtualSpacer = (el.keyId == "__v_top_spacer" || el.keyId == "__v_bot_spacer") || el.isKitVirtualSpacer
@@ -1863,11 +1905,21 @@ extension Runtime {
         guard expansion.anyVirtualList, !expansion.listMeta.isEmpty else { return false }
         let listPathSet = Set(expansion.listMeta.map(\.listPath))
         let scrollPathSet = Set(expansion.listMeta.map(\.scrollPath))
+        // Only the lists, their immediate row heights and their viewports affect virtual measurement.
+        // Avoid copying and visiting every descendant of every mounted row just to find those nodes.
+        var ancestorPaths = Set<String>()
+        for target in listPathSet.union(scrollPathSet) {
+            var parent = target[...]
+            while let separator = parent.lastIndex(of: "/") {
+                parent = parent[..<separator]
+                if !ancestorPaths.insert(String(parent)).inserted { break }
+            }
+        }
         var listWorldY: [String: Float] = [:]
         var scrollRects: [String: (y: Float, size: Vec2)] = [:]
         var rowHeightsByList: [String: [String: Float]] = [:]
 
-        let rootKey = expandedRoot.keyId
+        let rootKey = expandedRoot.storageKeyId
         let rootPath = rootKey.map { "/@\($0)" } ?? "/0"
         typealias WalkEntry = (el: El<State>, solved: LayoutEngine.ResultNode, path: String, worldY: Float)
         var stack: [WalkEntry] = [(expandedRoot, solvedRoot, rootPath, solvedRoot.layout.localRect.y)]
@@ -1881,7 +1933,7 @@ extension Runtime {
                 var segHeights: [String: Float] = [:]
                 var childSeen: [String: Int] = [:]
                 for (cIdx, childEl) in cur.el.children.enumerated() where cIdx < cur.solved.children.count {
-                    let (seg, _) = layoutPathSegment(keyId: childEl.keyId, siblingIndex: cIdx, siblingKeysSeen: &childSeen)
+                    let (seg, _) = layoutPathSegment(keyId: childEl.storageKeyId, siblingIndex: cIdx, siblingKeysSeen: &childSeen)
                     let ch = cur.solved.children[cIdx].layout.localRect.height
                     if ch > 0.5 {
                         segHeights[seg] = ch
@@ -1889,6 +1941,7 @@ extension Runtime {
                 }
                 rowHeightsByList[cur.path] = segHeights
             }
+            guard ancestorPaths.contains(cur.path) else { continue }
             var childSeen: [String: Int] = [:]
             let n = min(cur.el.children.count, cur.solved.children.count)
             var nextEntries: [WalkEntry] = []
@@ -1896,7 +1949,7 @@ extension Runtime {
             for cIdx in 0..<n {
                 let childEl = cur.el.children[cIdx]
                 let childSolved = cur.solved.children[cIdx]
-                let (seg, _) = layoutPathSegment(keyId: childEl.keyId, siblingIndex: cIdx, siblingKeysSeen: &childSeen)
+                let (seg, _) = layoutPathSegment(keyId: childEl.storageKeyId, siblingIndex: cIdx, siblingKeysSeen: &childSeen)
                 let wy = cur.worldY + childSolved.layout.localRect.y
                 nextEntries.append((childEl, childSolved, "\(cur.path)/\(seg)", wy))
             }
@@ -1913,8 +1966,10 @@ extension Runtime {
 
         var needsRetry = false
         for meta in expansion.listMeta {
-            guard let vState = virtualLists[meta.listPath],
+            guard var vState = virtualLists[meta.listPath],
                   let sInfo = scrollRects[meta.scrollPath] else { continue }
+            vState.measuredByKey.prepareOffsets(estimated: meta.estimate, gap: vState.gap)
+            virtualLists[meta.listPath] = vState
             scrollViewportSizes[meta.scrollPath] = sInfo.size
             let vpH = max(1, sInfo.size.y)
             let mounted = vState.lastMountedRange
@@ -1928,33 +1983,22 @@ extension Runtime {
             if destination == nil, !pinned,
                let anchorKey = vState.lastAnchorKey,
                !scrollRequestsState.owns(meta.scrollPath),
-               !directScrolledPaths.contains(meta.scrollPath),
                let anchorIdx = vState.rowPlaces.index(of: anchorKey) {
-                let prefixDelta = prefix[anchorIdx] - vState.lastAnchorPrefixY
+                let prefixDelta = vState.padTop + prefix[anchorIdx] - vState.lastAnchorPrefixY
                 if abs(prefixDelta) > 0.25 {
-                    rawOff = max(0, min(max(0, total - vpH), rawOff + prefixDelta))
+                    rawOff = max(0, min(max(0, topOffset + vState.extent(total: total) - vpH), rawOff + prefixDelta))
                     let curVec = scrollOffsets[meta.scrollPath] ?? .zero
                     let nextVec = Vec2(curVec.x, rawOff)
                     scrollOffsets[meta.scrollPath] = nextVec
                     scrollStore.snap(NodeId.hash("scroll:\(meta.scrollPath)"), Props.SCROLL, to: nextVec)
-                    virtualLists[meta.listPath]?.lastAnchorPrefixY = prefix[anchorIdx]
+                    virtualLists[meta.listPath]?.lastAnchorPrefixY = vState.padTop + prefix[anchorIdx]
                 }
             }
-            let maxOff = max(0, total + topOffset - vpH)
-            let actualOffset = max(0, min(max(0, total - vpH), max(0, min(rawOff, maxOff) - topOffset)))
+            let maxOff = max(0, vState.extent(total: total) - vpH)
+            let actualOffset = max(0, min(maxOff, rawOff - topOffset))
             let offset = vState.revealWindowOffset(row: destination, prefix: prefix, viewport: vpH, from: actualOffset)
-            let before = prefix[mounted.lowerBound]
-            let end = vState.rowEnd(mounted.upperBound, prefix: prefix)
-            let mountedH = max(0, end - before)
-            if pinned {
-                if mounted.lowerBound > 0 && mountedH < vpH - 0.5 {
-                    needsRetry = true
-                }
-            } else {
-                if (mounted.lowerBound > 0 && offset < meta.padTop + before - 0.5)
-                    || (mounted.upperBound < count && offset + vpH > meta.padTop + end + 0.5) {
-                    needsRetry = true
-                }
+            if vState.leavesVisibleGap(offset: offset, viewport: vpH, prefix: prefix, pinned: pinned) {
+                needsRetry = true
             }
             let (postWanted, postMissing) = vState.postMeasureWindowNeed(
                 offset: offset,
@@ -1973,7 +2017,6 @@ extension Runtime {
 
     internal func virtualListsNeedWindowUpdate() -> Bool {
         if activeVirtualPaths.isEmpty { return false }
-        if flatNodes.contains(where: { $0.el.layout.sticky != nil }) { return true }
         for listPath in activeVirtualPaths {
             guard let vState = virtualLists[listPath] else { return true }
             if vState.wantsMoreFrames { return true }
@@ -1984,14 +2027,11 @@ extension Runtime {
             let scrollPath = scrollIdx.map { flatNodes[$0].path } ?? listPath
             let vpH = max(1, scrollViewportSizes[scrollPath]?.y ?? viewport.y)
             let offsetY = scrollOffsets[scrollPath]?.y ?? 0
-            let (prefix, _) = vState.computeOffsets(estimated: est)
-            let mounted = vState.lastMountedRange
-            if mounted.isEmpty && !vState.lastKeys.isEmpty { return true }
-            let edge = vpH * RuntimeVirtualListState.nonIndexedEdgeMultiplier
-            let winTop = prefix[mounted.lowerBound]
-            let winBot = vState.rowEnd(mounted.upperBound, prefix: prefix)
-            if (mounted.lowerBound > 0 && offsetY < winTop + edge)
-                || (mounted.upperBound < vState.lastKeys.count && offsetY + vpH > winBot - edge) {
+            let (prefix, total) = vState.computeOffsets(estimated: est)
+            let stickBottom = scrollIdx.map { flatNodes[$0].el.layout.stickBottom } == true
+                && wasPinnedToBottom.contains(scrollPath)
+            let (offset, pinned) = vState.at(offsetY, pinned: stickBottom, total: total)
+            if vState.needsWindow(offset: offset, viewport: vpH, prefix: prefix, count: vState.lastKeys.count, pinned: pinned) {
                 return true
             }
         }
@@ -2031,10 +2071,10 @@ extension Runtime {
         let prevVis = vState.lastVisibleRange
         vState.lastVisibleRange = vis
         if !vis.isEmpty && !listPinned && !vState.passed {
-            let ai = vis.lowerBound
+            let ai = vis.first { vState.measuredByKey.heights[$0] != nil } ?? vis.lowerBound
             vState.lastAnchorKey = vState.lastKeys[ai]
-            vState.lastAnchorLocalY = max(0, listOffsetY - prefix[ai])
-            vState.lastAnchorPrefixY = prefix[ai]
+            vState.lastAnchorPrefixY = vState.padTop + prefix[ai]
+            vState.lastAnchorLocalY = listOffsetY - vState.lastAnchorPrefixY
         } else if listPinned || vState.passed {
             vState.lastAnchorKey = nil
             vState.lastAnchorLocalY = 0
@@ -2117,22 +2157,22 @@ extension Runtime {
             let nextY: Float
             if stickyPin {
                 // The viewport's own pin moves its offset; a nested list stands where it leaves it.
-                nextY = vAfter.nested ? oldY : max(0, totalAfter - vpH)
+                nextY = vAfter.nested ? oldY : max(0, vAfter.top + vAfter.extent(total: totalAfter) - vpH)
             } else if !oldPinned, !located.passed,
                       let aIdx = visBefore.isEmpty ? nil : visBefore.lowerBound,
                       aIdx < prefixBefore.count,
                       aIdx < prefixAfter.count {
-                let delta = prefixAfter[aIdx] - prefixBefore[aIdx]
-                let listY = max(0, min(max(0, totalAfter - vpH), oldListY + delta))
+                let delta = vAfter.padTop + prefixAfter[aIdx] - vBefore.padTop - prefixBefore[aIdx]
+                let listY = max(0, min(max(0, vAfter.extent(total: totalAfter) - vpH), oldListY + delta))
                 nextY = max(0, oldY + listY - oldListY)
                 vAfter.lastAnchorKey = vAfter.lastKeys[aIdx]
-                vAfter.lastAnchorLocalY = max(0, oldListY - prefixBefore[aIdx])
+                vAfter.lastAnchorLocalY = oldListY - (vBefore.padTop + prefixBefore[aIdx])
             } else {
                 nextY = oldY
             }
             let shifted = abs(nextY - oldY) > 0.05
             let (nextListY, nextPinned) = vAfter.locate(nextY, pinned: stickyPin, total: totalAfter)
-            let windowShort = vAfter.needsWindow(offset: nextListY, viewport: vpH, prefix: prefixAfter, count: vAfter.lastKeys.count, pinned: nextPinned)
+            let windowShort = vAfter.leavesVisibleGap(offset: nextListY, viewport: vpH, prefix: prefixAfter, pinned: nextPinned)
             // A list placed somewhere new windows where it now stands (its new `top`/`tail`).
             if shifted || windowShort {
                 updatedLists[listPath] = vAfter
@@ -2315,10 +2355,8 @@ extension Runtime {
         // `El.scrollAnchor`: anchor the first visible non-sticky row when viewport is scrolled off top.
         var anchorPaths: [String] = []
         if !flatNodes.isEmpty {
-            for sIdx in flatNodes.indices {
+            for sIdx in layoutObservers.scrollAnchors {
                 let sNode = flatNodes[sIdx]
-                guard sNode.el.scrollAnchorEnabled,
-                      sNode.el.layout.scrollAxes.contains(.vertical) else { continue }
                 let sPath = sNode.path
                 if activeVirtualPaths.contains(sPath) { continue }
                 if scrollRequestsState.owns(sPath) { continue }
@@ -2348,7 +2386,7 @@ extension Runtime {
                     let cNode = flatNodes[childIdx]
                     if activeVirtualPaths.contains(cNode.path) { break }
                     let r = drawnRect(cNode)
-                    let hasChildren = flatNodes.contains { $0.parentIndex == childIdx }
+                    let hasChildren = childIdx + 1 < flatNodes.count && flatNodes[childIdx + 1].parentIndex == childIdx
                     if r.top < vpRect.top - 0.5 && hasChildren {
                         parentIdx = childIdx
                         continue
@@ -2596,6 +2634,7 @@ extension Runtime {
                     frameOut.nodes[idx].rect = frameOut.nodes[idx].rect.offsetBy(
                         Vec2(-inheritedDelta.x, -inheritedDelta.y)
                     )
+                    frameOut.byId[p.id] = frameOut.nodes[idx]
                 }
             }
             if lastCommittedSpecs.count == flatNodes.count {
@@ -2705,7 +2744,7 @@ extension Runtime {
             while let parent = flatNodes[row].parentIndex {
                 let stack = flatNodes[parent]
                 if let list = virtualLists[stack.path], list.scrollPath == viewport.path,
-                   let key = flatNodes[row].key, let item = list.rowPlaces.index(of: key) {
+                   let key = flatNodes[row].key, let item = list.rowPlaces.index(ofAuthoredKey: key) {
                     let estimate = max(1, stack.el.virtualEstimate ?? 40)
                     let top = list.top + list.padTop + list.prefix(item, estimated: estimate)
                     return Double(top + rect.top - flatNodes[row].targetRect.top)
@@ -2746,14 +2785,13 @@ extension Runtime {
                         slice2State.scrollSlacks[path]?.follow = true
                     }
                 } else {
-                    clearScrollHandGliding(path: path)
                     let maxExt = scrollMaxExtents[path] ?? .zero
                     applyScrollOffset(path: path, next: Vec2(scrollOffsets[path]?.x ?? 0, maxExt.y), glide: cut ? nil : MotionTokens.GLIDE)
                 }
             }
         }
 
-        let reveals = pendingScrollReveals
+        var reveals = pendingScrollReveals
         pendingScrollReveals.removeAll(keepingCapacity: true)
         let bottoms = pendingScrollBottoms
         pendingScrollBottoms.removeAll(keepingCapacity: true)
@@ -2766,9 +2804,13 @@ extension Runtime {
         let followCaret = pendingCaretFollow
         pendingCaretFollow = false
         let destination = !bottoms.isEmpty || !pages.isEmpty || !offsets.isEmpty
-        if !reveals.isEmpty || destination || followCaret {
+        let landing = reveals.isEmpty && !destination && !followCaret && !virtualRevealLandings.isEmpty
+        if landing {
+            reveals = virtualRevealLandings
+        } else if !reveals.isEmpty || destination || followCaret {
             scrollRequestsState.stepCancel()
         }
+        virtualRevealLandings.removeAll(keepingCapacity: true)
 
         for req in reveals {
             let vIdx: Int
@@ -2870,7 +2912,7 @@ extension Runtime {
             }
 
             let eff = scrollRequestsState.stepPlace(
-                first: true,
+                first: !landing,
                 scope: req.scope,
                 key: req.key,
                 viewport: vPath,
@@ -2880,9 +2922,9 @@ extension Runtime {
                 to: destY
             )
             if case .move(let targetY) = eff {
-                clearScrollHandGliding(path: vPath)
-                applyScrollOffsetRequest(path: vPath, x: nil, y: Float(targetY),
-                                         glide: (req.animated && !snaps) ? MotionTokens.GLIDE : nil, cut: cut, animNow: now, holdHover: false)
+                let jumped = applyScrollOffsetRequest(path: vPath, x: nil, y: Float(targetY),
+                    glide: (req.animated && !snaps) ? MotionTokens.GLIDE : nil, cut: cut, animNow: now, holdHover: false)
+                if jumped && !activeVirtualPaths.isEmpty { virtualRevealLandings.append(req) }
             }
             if let (hxPath, nextX) = revealRowX(scope: req.scope, key: req.key) {
                 let curXScroll = scrollOffsets[hxPath] ?? .zero
@@ -2942,7 +2984,6 @@ extension Runtime {
                     from: Double(cur.y),
                     to: Double(maxExt.y)
                 )
-                clearScrollHandGliding(path: path)
                 applyScrollOffset(path: path, next: Vec2(cur.x, maxExt.y), glide: req.animated ? MotionTokens.GLIDE : nil)
             }
         }
@@ -2956,7 +2997,6 @@ extension Runtime {
                 let vpH = scrollViewportSizes[path]?.y ?? flatNodes[vIdx].targetRect.height
                 let nextY = cur.y + Float(req.pages) * max(1, vpH * 0.9)
                 markScrollMovedByHand(path: path)
-                clearScrollHandGliding(path: path)
                 applyScrollOffset(path: path, next: Vec2(cur.x, nextY), glide: nil)
                 if !activeVirtualPaths.isEmpty {
                     needsCommit = true
@@ -2966,7 +3006,7 @@ extension Runtime {
 
         /// `offset.rs::scroll_to_offsets` + `apply_jumps` (`ScrollOffsetRequests.swift`).
         func applyOffsetRequest(path: String, x: Float?, y: Float?, glide: Spring?) {
-            applyScrollOffsetRequest(path: path, x: x, y: y, glide: glide, cut: cut, animNow: now)
+            applyScrollOffsetRequest(path: path, x: x, y: y, glide: glide, cut: cut, animNow: now, recordJump: true)
         }
 
         for landing in offsets {
@@ -2992,13 +3032,10 @@ extension Runtime {
                 }
                 let vPath = flatNodes[vIdx].path
                 scrollKeyLandings.land(landing)
-                markScrollMovedByHand(path: vPath)
                 // `offset.rs:33-38`: an anchored request always jumps, vertically only.
                 applyOffsetRequest(path: vPath, x: nil, y: targetY, glide: nil)
-            } else if let vIdx = findScrollNode(bySelector: req.key) {
+            } else if let vIdx = scrollViewportForOffset(key: req.key, x: req.x, y: req.y) {
                 let path = flatNodes[vIdx].path
-                markScrollMovedByHand(path: path)
-                if req.glide != nil { markScrollHandGliding(path: path) }
                 // Only the axes the request names move (`offset.rs`: `r.x` / `r.y`).
                 applyOffsetRequest(path: path, x: req.x, y: req.y, glide: req.glide)
             }
@@ -3013,10 +3050,8 @@ extension Runtime {
 
     /// Delivers `onAtBottom`, `onFarFromBottom`, and `onScrollOffset` callbacks for current scroll offsets.
     internal func dispatchScrollCallbacks(at now: Double, cut: Bool = false) {
-        // Scroll callbacks: onAtBottom, onFarFromBottom, onScrollOffset
-        for i in flatNodes.indices {
+        for i in layoutObservers.scrollReports {
             let node = flatNodes[i]
-            guard !node.el.layout.scrollAxes.isEmpty else { continue }
             let path = node.path
             let cur = scrollOffsets[path] ?? .zero
             let maxExt = scrollMaxExtents[path] ?? .zero
@@ -3093,8 +3128,10 @@ extension Runtime {
         } else {
             drawn = vp
         }
+        // The watcher reports the logical offset plus the room being held under a growth stack.
+        let slack = slice2State.scrollSlacks[path]?.height ?? 0
         let pos = ScrollPos(
-            offset: cur,
+            offset: Vec2(cur.x, cur.y + slack),
             max: maxExt,
             viewport: vp,
             drawn: drawn,
@@ -3115,12 +3152,15 @@ extension Runtime {
                 }
                 applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onScroll")
             }
+        } else if node.el.handlers.onScrollOffset != nil {
+            // A clamped hand movement is consumed even when there is no new position to tell.
+            scrollMovedByHand.remove(path)
         }
     }
 
     internal func tellScrollOffsetsAfterSceneFrame(at now: Double, instant: Bool) {
-        for node in flatNodes where !node.el.layout.scrollAxes.isEmpty && (node.el.handlers.onScrollOffset != nil || node.el.handlers.onScroll != nil) {
-            dispatchScrollOffsetObserverIfChanged(for: node, at: now, instant: instant)
+        for i in layoutObservers.scrollReports {
+            dispatchScrollOffsetObserverIfChanged(for: flatNodes[i], at: now, instant: instant)
         }
     }
 
@@ -3149,7 +3189,7 @@ extension Runtime {
         ownLiveOffset: Vec2 = .zero
     ) -> (shift: Vec2, parentShiftMag: Float) {
         let node = nodes[idx]
-        let held = scrollRequestsState.keeps.compactMap(\.hold).first(where: { $0.path == node.path })
+        let held = scrollRequestsState.keeps.first(where: { $0.hold?.path == node.path })?.hold
         let effEdge: StickyEdge
         let effInset: Float
         let effTail: Bool
@@ -3321,36 +3361,17 @@ extension Runtime {
     internal func stepScrollSlacks(frameOut: FrameOutput, at now: Double) -> Bool {
         let dt: Float = slice2State.scrollLastSlackTickAt.map { Float(max(0, min(1, now - $0))) } ?? (1.0 / 60.0)
         slice2State.scrollLastSlackTickAt = now
-        guard !flatNodes.isEmpty else {
+        guard !layoutObservers.bottomViewports.isEmpty else {
             slice2State.scrollExtraYByPath.removeAll(keepingCapacity: true)
             return false
         }
 
-        var presentedById: [NodeId: MotionRect] = [:]
-        presentedById.reserveCapacity(frameOut.nodes.count)
-        for p in frameOut.nodes {
-            presentedById[p.id] = p.rect
-        }
-
         var anyMoving = false
-        for i in flatNodes.indices {
+        for i in layoutObservers.bottomViewports {
             let vNode = flatNodes[i]
-            guard vNode.el.layout.scrollAxes.contains(.vertical),
-                  vNode.el.layout.stickBottom else {
-                continue
-            }
             let path = vNode.path
             var slack = slice2State.scrollSlacks[path] ?? ScrollSlack.landed(window: (viewport.x, viewport.y))
             let pinned = wasPinnedToBottom.contains(path)
-
-            // Find growth-stack child (`scroll_stack`), else child with deepest bottom (`scroll_content`).
-            let directChildren = flatNodes.indices.filter { flatNodes[$0].parentIndex == i }
-            let stackChild = directChildren.first {
-                flatNodes[$0].el.growthSpec != nil || flatNodes[$0].el.foldGlideSpec != nil
-            }
-            let cIdxOpt = stackChild ?? directChildren.max { a, b in
-                flatNodes[a].targetRect.bottom < flatNodes[b].targetRect.bottom
-            }
 
             if !pinned && !slack.moving {
                 slack.edges = nil
@@ -3359,9 +3380,18 @@ extension Runtime {
                 continue
             }
 
+            // Find growth-stack child (`scroll_stack`), else child with deepest bottom (`scroll_content`).
+            let directChildren = layoutObservers.bottomChildren[i] ?? []
+            let stackChild = directChildren.first {
+                flatNodes[$0].el.growthSpec != nil || flatNodes[$0].el.foldGlideSpec != nil
+            }
+            let cIdxOpt = stackChild ?? directChildren.max { a, b in
+                flatNodes[a].targetRect.bottom < flatNodes[b].targetRect.bottom
+            }
+
             guard let cIdx = cIdxOpt,
-                  let viewRect = presentedById[vNode.nodeId],
-                  let cRect = presentedById[flatNodes[cIdx].nodeId] else {
+                  let viewRect = frameOut.byId[vNode.nodeId]?.rect,
+                  let cRect = frameOut.byId[flatNodes[cIdx].nodeId]?.rect else {
                 slack = ScrollSlack.landed(window: slack.window)
                 slice2State.scrollSlacks[path] = slack
                 slice2State.scrollExtraYByPath[path] = 0

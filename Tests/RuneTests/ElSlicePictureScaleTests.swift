@@ -541,6 +541,74 @@ struct ElSlicePictureScaleTests {
         #expect(box.moving && box.rect[1] < box.target[1])
     }
 
+    @Test("Pictures derive the automatic side after point and percentage limits resolve")
+    func constrainedPictureUsesItsClampedSide() throws {
+        let pixels = Pixels()
+        pixels.set(width: 44, height: 10, rgba: .init(repeating: 255, count: 44 * 10 * 4))
+        let rt = Runtime(state: pixels, viewport: Vec2(696, 600), pixelScale: 2) { p, _ in
+            col().wFull().itemsStart()
+                .child(el().key("percent-max").wFull().maxW(176).pixels(p))
+                .child(el().key("fixed-max").w(696).maxW(176).pixels(p))
+                .child(el().key("percent-min").wFrac(0.1).minW(176).pixels(p))
+                .child(el().key("fixed-min").w(60).minW(176).pixels(p))
+                .child(el().key("vertical").hFull().maxH(40).pixels(p))
+                .child(el().key("explicit").w(696).maxW(176).aspectRatio(2).pixels(p))
+                .child(el().key("padded-width").wFull().maxW(176).p(8).pixels(p))
+                .child(el().key("padded-height").hFull().maxH(40).p(8).pixels(p))
+        }
+        _ = rt.frame(at: 0)
+        let infos = rt.elements()
+        for (index, key) in ["percent-max", "fixed-max", "percent-min", "fixed-min", "vertical"].enumerated() {
+            let box = try #require(infos.first { $0.key == key })
+            #expect(box.target == [0, Float(index) * 40, 176, 40])
+        }
+        let explicit = try #require(infos.first { $0.key == "explicit" })
+        #expect(explicit.target == [0, 200, 176, 88])
+        let paddedWidth = try #require(infos.first { $0.key == "padded-width" })
+        let paddedHeight = try #require(infos.first { $0.key == "padded-height" })
+        #expect(paddedWidth.target == [0, 288, 176, 56])
+        #expect(paddedHeight.target == [0, 344, 192, 40])
+
+        pixels.set(width: 22, height: 10, rgba: .init(repeating: 255, count: 22 * 10 * 4))
+        _ = rt.frame(at: 1.0 / 120)
+        let updated = try #require(rt.elements().first { $0.key == "percent-max" })
+        #expect(updated.target == [0, 0, 176, 80])
+    }
+
+    @Test("Editable and plain text use the same intrinsic width in mixed-height rows")
+    func intrinsicFieldMeasuresLikeItsText() throws {
+        struct Fields {
+            var filled = TextEdit("xx")
+            var empty = TextEdit("")
+        }
+        for scale: Float in [1, 2] {
+            let rt = Runtime(state: Fields(), viewport: Vec2(696, 600), pixelScale: scale) { _, _ in
+                let small = TextStyle(size: 14, lineHeight: 20)
+                let large = TextStyle(size: 22, lineHeight: 30)
+                let line: El<Fields> = row().itemsEnd()
+                    .child(text("xx").font(small).key("plain"))
+                    .child(textInput(key: "filled", \.filled).font(small).singleLine())
+                    .child(text(" ").font(small).key("space"))
+                    .child(textInput(key: "empty", \.empty).font(small).singleLine())
+                    .child(text("xx").font(large).key("large"))
+                    .child(text("xx\nxx").font(small).key("multiline"))
+                return col().wFull().itemsStart().child(line)
+            }
+            _ = rt.frame(at: 0)
+            let nodes = rt.elements()
+            func rect(_ key: String) throws -> [Float] {
+                try #require(nodes.first { $0.key == key }).target
+            }
+            let plain = try rect("plain"), filled = try rect("filled")
+            let space = try rect("space"), empty = try rect("empty")
+            #expect(filled[2] == plain[2])
+            #expect(empty[2] == space[2])
+            #expect(filled[1] == 20 && empty[1] == 20)
+            #expect(try rect("large")[1] == 10)
+            #expect(try rect("multiline")[3] == 40)
+        }
+    }
+
     @Test("Picture set mid-frame keeps livePending armed and wakes another frame to size it")
     func pictureSetMidFrameWakesAnotherFrameToSizeIt() {
         final class WakeBox: @unchecked Sendable {

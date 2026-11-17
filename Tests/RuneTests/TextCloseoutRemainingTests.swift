@@ -46,11 +46,28 @@ struct TextCloseoutRemainingTests {
         #expect(TextLanguageRegistry.writingOfText("ㄅㄆㄇ") == .traditionalChinese)
         #expect(TextLanguageRegistry.writingOfText("hello") == nil)
 
-        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "ㄅㄆㄇ", chosen: "en-US") == "zh-Hant")
-        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "中文", chosen: "zh-TW") == "zh-Hant")
-        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "中文", chosen: "en-US") == "zh-Hans")
+        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "ㄅㄆㄇ", chosen: "en-US") == "zh-TW")
+        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "中文", chosen: "zh-TW") == "zh-TW")
+        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "中文", chosen: "en-US") == "zh-CN")
         #expect(TextLanguageRegistry.effectiveLanguageTag(for: "こんにちは", chosen: "zh-CN") == "ja")
+        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "こんにちは", chosen: "ja-JP") == "ja-JP")
+        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "안녕하세요", chosen: "ko-KR") == "ko-KR")
+        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "ㄅㄆㄇ", chosen: "zh-Hans-CN") == "zh-Hans-CN")
         #expect(TextLanguageRegistry.effectiveLanguageTag(for: "hello", chosen: "fr-FR") == "fr-FR")
+    }
+
+    @Test func languageTagsRetainScriptAndRegionAndRejectMalformedInput() {
+        let cases: [(String, String?)] = [
+            ("JA_jp", "ja-JP"), ("ZH_hant_tw", "zh-Hant-TW"), ("es-419", "es-419"),
+            ("en-us-u-hc-h12", "en-US"), ("de-1901", "de"), ("en-x-private", "en"),
+            ("iw", "iw"), ("jpn", "jpn"), ("qzz", "qzz"), ("", nil), ("# invalid #", nil),
+            ("zh-cmn", nil), ("en-419-US", nil), ("en-u", nil), ("en-u-x-aa", nil),
+            ("en, ja-JP", "en"), (" de-DE ; fr-FR", "de-DE")
+        ]
+        for (tag, expected) in cases {
+            #expect(TextLanguageRegistry.normalizeTag(tag) == expected)
+        }
+        #expect(TextLanguageRegistry.parseWriting(from: "en; zh_hant_TW")?.writing == .traditionalChinese)
     }
 
     @Test

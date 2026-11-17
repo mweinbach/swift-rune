@@ -100,16 +100,26 @@ public extension El {
         var copy = self
         copy.runtimeExtras["htmlRole"] = rawRole
         switch rawRole {
+        case "none", "presentation": copy.role = .presentation
         case "main": copy.role = .main
         case "region": copy.role = .region
+        case "navigation": copy.role = .navigation
+        case "banner": copy.role = .banner
+        case "complementary": copy.role = .complementary
+        case "contentinfo": copy.role = .contentInfo
+        case "form": copy.role = .form
+        case "search": copy.role = .search
         case "heading": copy.role = .heading
         case "listitem": copy.role = .listItem
         case "row": copy.role = .row
         case "columnheader": copy.role = .columnHeader
+        case "rowheader": copy.role = .rowHeader
+        case "cell": copy.role = .cell
         case "image", "img": copy.role = .image
         case "link": copy.role = .link
         case "button": copy.role = .button
-        default: break
+        case "alertdialog": copy.role = .dialog
+        default: if let role = ElementRole(rawValue: rawRole) { copy.role = role }
         }
         return copy
     }
@@ -293,8 +303,8 @@ public enum ToolingHTML {
         // The capture presets (`RUNE_CONTRAST`, `RUNE_INCREASE_CONTRAST`) as `tooling::runtime_for` applies them (#981).
         runtime.applyCapturePresets()
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
+        runtime.fitHeight = fitHeight
         if document { runtime.setPageMode(true) }
-        _ = fitHeight // preserved for API parity with WebAppConfig.fitContentHeight
 
         var taken: [(Float, [ExportNode])] = []
         taken.reserveCapacity(deduped.count)
@@ -357,6 +367,23 @@ public enum HTMLPageExporter {
         "[data-rune-static],[data-rune-static] *{box-sizing:border-box;display:flex;position:relative;margin:0;padding:0;min-width:0;border:0 solid transparent}[data-rune-static] a{color:inherit;text-decoration:none}[data-rune-static] .t>*{display:inline;position:static}[data-rune-static] img{display:block}:where([data-rune-static]) img{height:auto}[data-rune-static] svg{display:block;position:absolute;inset:0}"
 
     private static let rangePrefix = ["a", "b", "c", "d", "e", "f"]
+
+    private static func responsiveNumber(_ value: Float) -> String {
+        if value.isNaN { return "NaN" }
+        let raw = String(value.magnitude)
+        let sign = value.sign == .minus ? "-" : ""
+        if raw.hasSuffix(".0") { return sign + raw.dropLast(2) }
+        guard value.isFinite, var decimal = Decimal(string: raw, locale: Locale(identifier: "en_US_POSIX")) else {
+            return String(value)
+        }
+        // Rust prints the shortest plain decimal, choosing the greater magnitude on a tie.
+        // Swift's shortest representation chooses the even final digit.
+        let unit = Decimal(sign: .plus, exponent: decimal.exponent, significand: 1)
+        if Double((decimal + unit / 2).description) == Double(value.magnitude) {
+            decimal += unit
+        }
+        return sign + decimal.description
+    }
 
     private static func initialValue(for prop: String) -> String {
         switch prop {
@@ -456,7 +483,7 @@ public enum HTMLPageExporter {
             if k == 0 {
                 css += block
             } else if !block.isEmpty {
-                css += "@media (min-width:\(HTMLCSSExporter.num(capped[k].0))px){\(block)}"
+                css += "@media (min-width:\(responsiveNumber(capped[k].0))px){\(block)}"
             }
         }
 
@@ -489,18 +516,18 @@ public enum HTMLPageExporter {
         byPath: [[String: ExportNode]]
     ) -> String {
         func vw(_ k: Int) -> Float? {
-            guard widths[k].0 > 0, let found = byPath[k][node.path] else { return nil }
+            guard let found = byPath[k][node.path] else { return nil }
             return ceilf((found.width / widths[k].0) * 100.0)
         }
         var parts: [String] = []
         if widths.count > 1 {
             for k in (1..<widths.count).reversed() {
                 if let v = vw(k) {
-                    parts.append("(min-width:\(HTMLCSSExporter.num(widths[k].0))px) \(HTMLCSSExporter.num(v))vw")
+                    parts.append("(min-width:\(responsiveNumber(widths[k].0))px) \(responsiveNumber(v))vw")
                 }
             }
         }
-        parts.append("\(HTMLCSSExporter.num(vw(0) ?? 100.0))vw")
+        parts.append("\(responsiveNumber(vw(0) ?? 100.0))vw")
         return " sizes=\"\(parts.joined(separator: ","))\""
     }
 }
@@ -789,7 +816,7 @@ public enum HTMLCSSExporter {
     private static func familyCSS(_ family: FontFamily) -> String {
         switch family {
         case .systemUI: return "var(--rune-sans)"
-        case .monospace: return "var(--rune-mono)"
+        case .monospace, .systemMono: return "var(--rune-mono)"
         case .custom(let name): return "\"\(ToolingHTML.escape(name))\""
         }
     }
@@ -980,28 +1007,6 @@ public enum HTMLCSSExporter {
 
 // MARK: - Runtime HTML Export & Page Mode
 
-private final class HTMLPageModeRegistry: @unchecked Sendable {
-    static let shared = HTMLPageModeRegistry()
-    private let lock = NSLock()
-    private var pageModeIds: Set<ObjectIdentifier> = []
-
-    func set(_ id: ObjectIdentifier, enabled: Bool) {
-        lock.lock()
-        if enabled {
-            pageModeIds.insert(id)
-        } else {
-            pageModeIds.remove(id)
-        }
-        lock.unlock()
-    }
-
-    func contains(_ id: ObjectIdentifier) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return pageModeIds.contains(id)
-    }
-}
-
 private struct HTMLWalkEntry<State> {
     let el: El<State>
     let solved: LayoutEngine.ResultNode
@@ -1012,15 +1017,8 @@ private struct HTMLWalkEntry<State> {
 }
 
 public extension Runtime {
-    /// Marks this runtime as exporting a selectable web document page (mirrors `Runtime::page_mode()`).
-    func setPageMode(_ enabled: Bool = true) {
-        HTMLPageModeRegistry.shared.set(ObjectIdentifier(self), enabled: enabled)
-    }
-
-    /// True if `setPageMode(true)` was called for this runtime.
-    var isPageMode: Bool {
-        HTMLPageModeRegistry.shared.contains(ObjectIdentifier(self))
-    }
+    /// Enables natural document layout and browser text selection for static HTML export.
+    func setPageMode(_ enabled: Bool = true) { pageMode(enabled) }
 
     /// Exports the visible laid-out scene as static HTML `ExportNode`s at the runtime's current viewport.
     func exportHTMLNodes() -> [ExportNode] {
@@ -1052,7 +1050,8 @@ public extension Runtime {
             state: state,
             viewport: viewport,
             pixelScale: pixelScale,
-            textSystem: TextSystem()
+            textSystem: textSystem,
+            fitHeight: fitHeight
         )
 
         var out: [ExportNode] = []
@@ -1061,16 +1060,6 @@ public extension Runtime {
 
         func effectiveRole(_ el: El<State>) -> String {
             (el.runtimeExtras["htmlRole"] as? String) ?? el.role.rawValue
-        }
-
-        func takesPointer(_ el: El<State>, role: String) -> Bool {
-            let h = el.handlers
-            if h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil
-                || h.onSecondaryClick != nil || h.onMiddlePress != nil || h.onPointerDown != nil || h.onDrag != nil
-                || h.editLens != nil || el.a11yHref != nil {
-                return true
-            }
-            return ["button", "checkbox", "switch", "radio", "tab", "slider", "menuitem", "link", "textbox"].contains(role)
         }
 
         func containerTag(role: String) -> String? {
@@ -1085,23 +1074,17 @@ public extension Runtime {
             case "list": return "ul"
             case "listitem": return "li"
             case "figure": return "figure"
-            case "table", "row", "cell", "columnheader", "rowheader", "gridcell": return "div"
+            case "table", "row", "cell", "columnheader", "rowheader", "gridcell", "listbox", "dialog", "alertdialog": return "div"
             default: return nil
             }
         }
 
         func ariaRole(role: String) -> String? {
             switch role {
-            case "table", "row", "cell", "columnheader", "rowheader": return role
+            case "table", "row", "cell", "columnheader", "rowheader", "listbox", "dialog", "alertdialog": return role
             case "gridcell": return "cell"
             default: return nil
             }
-        }
-
-        func anchorId(_ key: String?) -> String? {
-            guard let key, let first = key.first, first.isASCII, first.isLetter else { return nil }
-            let ok = key.allSatisfy { ($0.isASCII && ($0.isLetter || $0.isNumber)) || $0 == "-" || $0 == "_" }
-            return ok ? key : nil
         }
 
         func visit(_ entry: HTMLWalkEntry<State>, depth: Int) {
@@ -1143,7 +1126,7 @@ public extension Runtime {
 
             var attrs = ""
             if ["a", "h1", "h2", "h3", "h4", "h5", "h6"].contains(tag) || containerTag(role: roleStr) != nil {
-                if let id = anchorId(el.keyId) {
+                if let id = webAnchorID(el.keyId) {
                     attrs += " id=\"\(id)\""
                 }
             }
@@ -1186,13 +1169,10 @@ public extension Runtime {
                 decls.append(ExportNode.Declaration("object-fit", fit.rawValue))
             }
 
-            let explicitSelectableRaw = el.runtimeExtras[El<State>.selectableExtraKey] as? Bool
-            let unselectable = (el.runtimeExtras["htmlUnselectable"] as? Bool) == true
-                || explicitSelectableRaw == false
             let explicitSelectable = el.isSelectable
             let mySelects: Bool
             if pageMode {
-                mySelects = (entry.parentSelects && !unselectable && !takesPointer(el, role: roleStr)) || explicitSelectable
+                mySelects = (entry.parentSelects && webPageTextSelects(el)) || explicitSelectable
                 if !mySelects && entry.parentSelects {
                     decls.append(ExportNode.Declaration("-webkit-user-select", "none"))
                     decls.append(ExportNode.Declaration("user-select", "none"))
@@ -1223,7 +1203,7 @@ public extension Runtime {
             for (idx, childEl) in el.children.enumerated() {
                 guard idx < entry.solved.children.count else { continue }
                 let childSolved = entry.solved.children[idx]
-                let childPath = childEl.keyId.map { "\(entry.path)/@\($0)" } ?? "\(entry.path)/\(idx)"
+                let childPath = childEl.storageKeyId.map { "\(entry.path)/@\($0)" } ?? "\(entry.path)/\(idx)"
                 visit(
                     HTMLWalkEntry(
                         el: childEl,
@@ -1238,7 +1218,7 @@ public extension Runtime {
             }
         }
 
-        let rootPath = rootEl.keyId.map { "/@\($0)" } ?? "/0"
+        let rootPath = rootEl.storageKeyId.map { "/@\($0)" } ?? "/0"
         visit(
             HTMLWalkEntry(
                 el: rootEl,

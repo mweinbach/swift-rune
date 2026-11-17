@@ -56,6 +56,35 @@ private enum BundleContactConfig {
     static let cols: Int = 4
 }
 
+private struct BundleMotionSummary {
+    struct ElementPeak {
+        var framesCount = 0
+        var maxDistance: Float = -1
+        var bestFrame = 0
+        var bestLabel = ""
+    }
+
+    var peaks: [UInt32: ElementPeak] = [:]
+    var jumps: [String] = []
+
+    mutating func record(_ changes: [RewindChange], frame: Int, time: Double) {
+        for change in changes {
+            if change.jump {
+                jumps.append(String(format: "- frame %d (%.2f s): %@", frame, time, change.label()))
+            }
+            var peak = peaks[change.id] ?? ElementPeak()
+            peak.framesCount += 1
+            let distance = change.distance
+            if distance > peak.maxDistance {
+                peak.maxDistance = distance
+                peak.bestFrame = frame
+                peak.bestLabel = change.label()
+            }
+            peaks[change.id] = peak
+        }
+    }
+}
+
 extension RewindClip {
     /// Writes `trace.jsonl`, `contact.png`, and `summary.md` for `range` into `dir`.
     @discardableResult
@@ -64,22 +93,23 @@ extension RewindClip {
         range: Range<Int>,
         note: String = ""
     ) throws -> RewindBundle {
-        let count = frames.count
+        let count = len
         let clampedEnd = max(min(range.upperBound, count), count > 0 ? 1 : 0)
-        let clampedStart = min(range.lowerBound, max(0, clampedEnd - 1))
+        let clampedStart = max(0, min(range.lowerBound, clampedEnd - 1))
         let clampedRange = clampedStart..<clampedEnd
 
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
-        let sliceChanges = clampedRange.map { changes(atFrame: $0) }
-        try writeTraceJSONL(to: dir.appendingPathComponent("trace.jsonl"), range: clampedRange)
+        let hz = (1 / frameIntervalSeconds()).rounded()
+        let motion = try writeTraceJSONL(to: dir.appendingPathComponent("trace.jsonl"), range: clampedRange, hz: hz)
         let tiles = pickTiles(in: clampedRange)
         try writeContactPNG(to: dir.appendingPathComponent("contact.png"), tiles: tiles)
 
         let summary = buildSummaryMarkdown(
             range: clampedRange,
             note: note,
-            changesByFrame: sliceChanges,
+            motion: motion,
+            hz: hz,
             tiles: tiles
         )
         try Data(summary.utf8).write(to: dir.appendingPathComponent("summary.md"))
@@ -87,86 +117,82 @@ extension RewindClip {
     }
 
     private func frameIntervalSeconds() -> Double {
-        guard frames.count >= 2 else { return 1.0 / 60.0 }
-        let dt = (frames.last!.timeSeconds - frames.first!.timeSeconds) / Double(frames.count - 1)
-        return max(1.0 / 240.0, dt)
+        guard len > 1 else { return 1.0 / 60.0 }
+        let intervals = (1..<len).map { absoluteTime($0) - absoluteTime($0 - 1) }.filter { $0 > 0 }.sorted()
+        return intervals.isEmpty ? 1.0 / 60.0 : intervals[intervals.count / 2]
     }
 
-    private func jsonEscape(_ s: String) -> String {
-        if let data = try? JSONSerialization.data(withJSONObject: [s], options: []),
-           let raw = String(data: data, encoding: .utf8),
-           raw.count >= 2 {
-            return String(raw.dropFirst().dropLast())
-        }
-        return "\"\(s)\""
+    private func jsonEscape(_ s: String) throws -> String {
+        String(decoding: try JSONEncoder().encode(s), as: UTF8.self)
     }
 
-    private func writeTraceJSONL(to url: URL, range: Range<Int>) throws {
-        var lines: [String] = []
-        let hz = (1.0 / frameIntervalSeconds()).rounded()
-        lines.append(
-            "{\"type\":\"header\",\"launch\":\"rune-rewind\",\"width\":\(viewport.x),\"height\":\(viewport.y),\"hz\":\(hz),\"scale\":1,\"platform\":\"rune\",\"units\":\"pt\",\"clock\":\"wall\"}"
-        )
-
-        guard !frames.isEmpty else {
-            try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: url)
-            return
+    private func writeTraceJSONL(to url: URL, range: Range<Int>, hz: Double) throws -> BundleMotionSummary {
+        try Data().write(to: url)
+        let handle = try FileHandle(forWritingTo: url)
+        func number<T: BinaryFloatingPoint>(_ value: T) -> String {
+            Int(exactly: value).map(String.init) ?? String(describing: value)
         }
-
+        let header = "{\"type\":\"header\",\"launch\":\"rune-rewind\",\"width\":\(number(viewport.x)),\"height\":\(number(viewport.y)),\"hz\":\(number(hz)),\"scale\":1,\"platform\":\"rune\",\"units\":\"pt\",\"clock\":\"wall\"}\n"
+        var output = Data(header.utf8)
+        var summary = BundleMotionSummary()
         var described = [Bool](repeating: false, count: names.count)
-        var last = [RewindElementSnapshot?](repeating: nil, count: names.count)
-        var state = [RewindElementSnapshot?](repeating: nil, count: names.count)
-        for (id, shot) in frameBefore(range.lowerBound) {
-            let idx = Int(id)
-            if idx < state.count { state[idx] = shot }
-        }
+        let startTime = time(range.lowerBound)
+        do {
+            try forEachFrameChanges(in: range) { k, changes in
+                summary.record(changes, frame: k, time: time(k))
+                var metas: [String] = []
+                var elems: [String] = []
+                var gone: [String] = []
 
-        let startT = frames[range.lowerBound].timeSeconds
-        for k in range {
-            var updatedState = [RewindElementSnapshot?](repeating: nil, count: names.count)
-            for (id, shot) in frame(k) {
-                let idx = Int(id)
-                if idx < updatedState.count { updatedState[idx] = shot }
-            }
-            state = updatedState
-
-            let tMs = (frames[k].timeSeconds - startT) * 1000.0
-            var line = String(format: "{\"t\":%.3f,\"n\":1", tMs)
-            var metas: [String] = []
-            var elems: [String] = []
-            var gone: [String] = []
-
-            for i in 0..<names.count {
-                if state[i] == last[i] { continue }
-                if let s = state[i] {
-                    if !described[i] {
-                        described[i] = true
-                        metas.append("{\"id\":\(i + 1),\"cls\":\"rune\",\"nm\":\(jsonEscape(names[i])),\"host\":\"rune\"}")
+                func emit(_ id: UInt32, rect: MotionRect, opacity: Float) throws {
+                    let index = Int(id)
+                    let traceID = index + 1
+                    if !described[index] {
+                        let label = try jsonEscape(name(id))
+                        metas.append("{\"id\":\(traceID),\"cls\":\"rune\",\"nm\":\(label),\"host\":\"rune\"}")
+                        described[index] = true
                     }
-                    let x = fmtNum(s.left)
-                    let y = fmtNum(s.top)
-                    let w = fmtNum(s.right - s.left)
-                    let h = fmtNum(s.bottom - s.top)
-                    let op = fmtNum(s.opacity)
-                    elems.append("[\(i + 1),\(x),\(y),\(w),\(h),\(op),0,0]")
-                } else {
-                    gone.append("\(i + 1)")
+                    elems.append("[\(traceID),\(fmtNum(rect.x)),\(fmtNum(rect.y)),\(fmtNum(rect.width)),\(fmtNum(rect.height)),\(fmtNum(opacity)),0,0]")
                 }
-                last[i] = state[i]
-            }
-            if !metas.isEmpty { line += ",\"m\":[\(metas.joined(separator: ","))]" }
-            if !elems.isEmpty { line += ",\"e\":[\(elems.joined(separator: ","))]" }
-            if !gone.isEmpty { line += ",\"g\":[\(gone.joined(separator: ","))]" }
-            line += "}"
-            lines.append(line)
-        }
 
-        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: url)
+                if k == range.lowerBound {
+                    // The first row is independently replayable even when the selection starts mid-clip.
+                    for (id, shot) in frame(k) {
+                        try emit(id, rect: shot.rect, opacity: shot.opacity)
+                    }
+                } else {
+                    for change in changes.sorted(by: { $0.id < $1.id }) {
+                        if let rect = change.toRect, let opacity = change.toOpacity {
+                            try emit(change.id, rect: rect, opacity: opacity)
+                        } else {
+                            gone.append(String(Int(change.id) + 1))
+                        }
+                    }
+                }
+
+                var line = String(format: "{\"t\":%.3f,\"n\":1", (time(k) - startTime) * 1000)
+                if !metas.isEmpty { line += ",\"m\":[\(metas.joined(separator: ","))]" }
+                if !elems.isEmpty { line += ",\"e\":[\(elems.joined(separator: ","))]" }
+                if !gone.isEmpty { line += ",\"g\":[\(gone.joined(separator: ","))]" }
+                line += "}\n"
+                output.append(contentsOf: line.utf8)
+                if output.count >= 64 * 1024 {
+                    try handle.write(contentsOf: output)
+                    output.removeAll(keepingCapacity: true)
+                }
+            }
+            if !output.isEmpty { try handle.write(contentsOf: output) }
+        } catch {
+            try? handle.close()
+            throw error
+        }
+        try handle.close()
+        return summary
     }
 
     private func fmtNum(_ v: Float) -> String {
-        if abs(v - v.rounded()) < 1e-4 {
-            return "\(Int(v.rounded()))"
+        if abs(v - v.rounded()) < 1e-4, let n = Int(exactly: v.rounded()) {
+            return String(n)
         }
         var s = String(format: "%.3f", v)
         while s.contains(".") && (s.hasSuffix("0") || s.hasSuffix(".")) {
@@ -182,8 +208,8 @@ extension RewindClip {
         rest.sort { activity($0) > activity($1) }
         let rem = max(0, BundleContactConfig.maxTiles - picked.count)
         picked.append(contentsOf: rest.prefix(rem))
-        if picked.isEmpty && !range.isEmpty {
-            picked.append(range.upperBound - 1)
+        if picked.isEmpty {
+            picked.append(max(0, range.upperBound - 1))
         }
         picked.sort()
         return picked
@@ -201,7 +227,7 @@ extension RewindClip {
         let height = rows * (tileH + gap) + gap
 
         var px = [UInt8](repeating: 0, count: width * height * 4)
-        for i in stride(from: 0, to: px.count, by: 4) {
+        for i in Swift.stride(from: 0, to: px.count, by: 4) {
             px[i] = 10
             px[i + 1] = 10
             px[i + 2] = 12
@@ -226,19 +252,21 @@ extension RewindClip {
         }
 
         func outlineRect(_ rect: MotionRect, clip: (Int, Int, Int, Int), rgb: (UInt8, UInt8, UInt8)) {
-            let rx0 = Int(rect.left.rounded())
-            let ry0 = Int(rect.top.rounded())
-            let rw = max(1, Int(rect.width.rounded()))
-            let rh = max(1, Int(rect.height.rounded()))
-            let cx0 = max(clip.0, rx0)
-            let cy0 = max(clip.1, ry0)
-            let cx1 = min(clip.0 + clip.2, rx0 + rw)
-            let cy1 = min(clip.1 + clip.3, ry0 + rh)
-            guard cx0 < cx1, cy0 < cy1 else { return }
-            fillRect(x: cx0, y: cy0, w: cx1 - cx0, h: 1, rgb: rgb)
-            fillRect(x: cx0, y: cy1 - 1, w: cx1 - cx0, h: 1, rgb: rgb)
-            fillRect(x: cx0, y: cy0, w: 1, h: cy1 - cy0, rgb: rgb)
-            fillRect(x: cx1 - 1, y: cy0, w: 1, h: cy1 - cy0, rgb: rgb)
+            let left = Float(clip.0)
+            let top = Float(clip.1)
+            let right = Float(clip.0 + clip.2)
+            let bottom = Float(clip.1 + clip.3)
+            let x0 = max(left, rect.left)
+            let y0 = max(top, rect.top)
+            let x1 = min(right - 1, rect.right)
+            let y1 = min(bottom - 1, rect.bottom)
+            guard x1 >= x0, y1 >= y0 else { return }
+            let ax = Int(x0.rounded()), ay = Int(y0.rounded())
+            let bx = Int(x1.rounded()), by = Int(y1.rounded())
+            if rect.top >= top { fillRect(x: ax, y: ay, w: bx - ax + 1, h: 1, rgb: rgb) }
+            if rect.bottom <= bottom { fillRect(x: ax, y: by, w: bx - ax + 1, h: 1, rgb: rgb) }
+            if rect.left >= left { fillRect(x: ax, y: ay, w: 1, h: by - ay + 1, rgb: rgb) }
+            if rect.right <= right { fillRect(x: bx, y: ay, w: 1, h: by - ay + 1, rgb: rgb) }
         }
 
         for (n, k) in tiles.enumerated() {
@@ -255,7 +283,7 @@ extension RewindClip {
                 )
             }
             for (_, s) in frame(k) {
-                let grey = UInt8((40.0 + 80.0 * s.opacity.clamped(to: 0...1)).rounded())
+                let grey = UInt8(40.0 + 80.0 * s.opacity.clamped(to: 0...1))
                 outlineRect(scaleRect(s.rect), clip: clip, rgb: (grey, grey, min(255, grey + 6)))
             }
             for c in changes(atFrame: k).reversed() {
@@ -282,7 +310,8 @@ extension RewindClip {
     private func buildSummaryMarkdown(
         range: Range<Int>,
         note: String,
-        changesByFrame: [[RewindChange]],
+        motion: BundleMotionSummary,
+        hz: Double,
         tiles: [Int]
     ) -> String {
         var s = "# Rewind clip\n\n"
@@ -291,54 +320,20 @@ extension RewindClip {
             let quoted = trimmedNote.replacingOccurrences(of: "\n", with: "\n> ")
             s += "> \(quoted)\n\n"
         }
-        let hz = Int((1.0 / frameIntervalSeconds()).rounded())
         let startIdx = range.lowerBound
         let endIdx = max(startIdx, range.upperBound - 1)
         s += String(
-            format: "Frames %d–%d of %d (%.2f s to %.2f s before the freeze, %d frames at %d Hz), window %@×%@ pt.\n\n",
-            startIdx, endIdx, frames.count, time(startIdx), time(endIdx), range.count, hz,
+            format: "Frames %d–%d of %d (%.2f s to %.2f s before the freeze, %d frames at %.0f Hz), window %@×%@ pt.\n\n",
+            startIdx, endIdx, len, time(startIdx), time(endIdx), range.count, hz,
             fmtNum(viewport.x), fmtNum(viewport.y)
         )
 
-        var jumpLines: [String] = []
-        struct ElementPeak {
-            var framesCount: Int
-            var maxDistance: Float
-            var bestFrame: Int
-            var bestLabel: String
-        }
-        var peaksById: [UInt32: ElementPeak] = [:]
-
-        for (k, cs) in zip(range, changesByFrame) {
-            for c in cs {
-                if c.jump {
-                    jumpLines.append(String(format: "- frame %d (%.2f s): %@", k, time(k), c.label()))
-                }
-                let dist = c.distance
-                if var existing = peaksById[c.id] {
-                    existing.framesCount += 1
-                    if dist > existing.maxDistance {
-                        existing.maxDistance = dist
-                        existing.bestFrame = k
-                        existing.bestLabel = c.label()
-                    }
-                    peaksById[c.id] = existing
-                } else {
-                    peaksById[c.id] = ElementPeak(
-                        framesCount: 1,
-                        maxDistance: dist,
-                        bestFrame: k,
-                        bestLabel: c.label()
-                    )
-                }
-            }
-        }
-        if !jumpLines.isEmpty {
+        if !motion.jumps.isEmpty {
             s += "## Jumps\n\nMoved much further in one frame than in the frames either side.\n\n"
-            s += jumpLines.joined(separator: "\n") + "\n\n"
+            s += motion.jumps.joined(separator: "\n") + "\n\n"
         }
 
-        let movedMost = peaksById
+        let movedMost = motion.peaks
             .sorted { lhs, rhs in
                 if lhs.value.maxDistance != rhs.value.maxDistance {
                     return lhs.value.maxDistance > rhs.value.maxDistance
@@ -463,7 +458,8 @@ extension RewindScrubber {
             }
 
         var markChildren: [El<State>] = []
-        for (id, shot) in clip.frame(k) where !changedIds.contains(id) {
+        let shown = clip.frame(k)
+        for (id, shot) in shown where !changedIds.contains(id) {
             let r = shot.rect
             markChildren.append(
                 el()
@@ -519,7 +515,7 @@ extension RewindScrubber {
         }
 
         if let pid = pickedId, !changedIds.contains(pid),
-           let match = clip.frame(k).first(where: { $0.id == pid }) {
+           let match = shown.first(where: { $0.id == pid }) {
             let r = match.snapshot.rect
             markChildren.append(
                 el()

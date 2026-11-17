@@ -49,6 +49,18 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         #elseif canImport(CRuneMedia)
         var decoder: DesktopMediaDecoder?
         var mediaTimer: DispatchSourceTimer?
+        #if os(Windows)
+        // Ordinary playback publishes at the next draw. One queued picture is enough
+        // to wake a visible window and bounds the work of clips that leave its viewport.
+        var pendingPicture: (frame: NativeSurfaceVideoFrame, time: Double, ready: ContinuousClock.Instant)?
+        var pendingVideoEnd: (time: Double, ready: ContinuousClock.Instant)?
+        var pictureDue: ContinuousClock.Instant?
+        var lastVideoPull: ContinuousClock.Instant?
+        var waitingForPull = false
+        var resumingVideo = false
+        var openRequested = false
+        var checkParkScheduled = false
+        #endif
         let frameWaker = WakerSlot()
         let transportLock = NSRecursiveLock()
         let mediaQueue = DispatchQueue(label: "Rune.media.playback", qos: .userInitiated)
@@ -387,6 +399,11 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
             inner.state = inner.request.playing ? .playing : .ready
         }
         inner.lastDecodedTime = nil
+        #if os(Windows) && canImport(CRuneMedia)
+        inner.pendingPicture = nil
+        inner.pendingVideoEnd = nil
+        inner.waitingForPull = false
+        #endif
         shouldDecodeHeadless = !MediaPlaybackGate.isEnabled && (inner.meta.kind == .video)
         inner.generation &+= 1
         inner.lock.unlock()
@@ -531,6 +548,9 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         guard MediaPlaybackGate.isEnabled else { return }
         inner.mediaQueue.async { [inner] in
             guard let surface = inner.surface, surface.currentFrame() == nil else { return }
+            #if os(Windows)
+            Self.openDesktop(inner)
+            #endif
             Self.synchronizeDesktop(inner, seek: nil)
         }
         #endif
@@ -663,11 +683,14 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         if !MediaPlaybackGate.isEnabled {
             advanceHeadlessInner(inner, surface: surface, to: clock)
         }
+        #if os(Windows) && canImport(CRuneMedia)
+        if MediaPlaybackGate.isEnabled, let surface { takeWindowsPicture(inner, surface: surface) }
+        #endif
 
-        return finalizePull(inner, surface: surface)
+        return finalizePull(inner, surface: surface, canWaitForWake: wake != nil)
     }
 
-    private static func finalizePull(_ inner: Inner, surface: NativeSurface?) -> VideoPullResult {
+    private static func finalizePull(_ inner: Inner, surface: NativeSurface?, canWaitForWake: Bool = false) -> VideoPullResult {
         var needPlaceholder = false
         inner.lock.lock()
         let active: Bool
@@ -684,11 +707,28 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
             active = inner.machine.settle.isWaiting
         }
         let gen = inner.generation &+ (surface?.generation ?? 0)
+        #if os(Windows) && canImport(CRuneMedia)
+        let live = MediaPlaybackGate.isEnabled
+        let playing = inner.state == .playing
+        let waitingForPicture = active && live && (playing || inner.state == .loading)
+        let due = waitingForPicture ? inner.pictureDue : nil
+        #endif
         inner.lock.unlock()
 
         if needPlaceholder, let surface {
             pushVideoPlaceholder(onto: surface)
         }
+        #if os(Windows) && canImport(CRuneMedia)
+        if waitingForPicture {
+            if playing, surface?.windowsVideoLayers?.isPresenting == true {
+                return VideoPullResult(active: false, generation: gen)
+            }
+            // Loading and already-due samples wake the UI after decode. A
+            // future sample can arm the host at its own presentation deadline.
+            let pending = due.flatMap { $0 > .now ? $0 : nil }
+            return VideoPullResult(active: pending != nil || !canWaitForWake, generation: gen, due: pending)
+        }
+        #endif
         return VideoPullResult(active: active, generation: gen, due: nil)
     }
 
@@ -808,6 +848,10 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         }
         #elseif canImport(CRuneMedia)
         if MediaPlaybackGate.isEnabled {
+            #if os(Windows)
+            // A window drawing the video (or an explicit preload) opens its live reader.
+            if kind == .video { return }
+            #endif
             // Native demuxer discovery may wait for a remote stream or device.
             inner.mediaQueue.async { [inner] in Self.openDesktop(inner) }
         } else if url.isFileURL {
@@ -1176,12 +1220,19 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         let (decoder, lastTime, generation) = inner.lock.withLock { (inner.decoder, inner.lastDecodedTime, inner.seekGen) }
         guard let decoder, decoder.meta.kind == .video else { return }
         do {
+            #if os(Windows)
+            // The still reader selects by the sample PTS with a half-frame tolerance,
+            // including variable-rate clips whose next PTS is off the nominal grid.
+            if lastTime == timeSeconds, surface.currentFrame() != nil { return }
+            let sample = max(0, timeSeconds)
+            #else
             if let lastTime, surface.currentFrame() != nil,
                floor(timeSeconds / decoder.meta.frameDuration) == floor(lastTime / decoder.meta.frameDuration) { return }
             let sample = decoder.meta.duration == nil
                 ? max(0, timeSeconds)
                 : decoder.meta.frameTime(for: decoder.meta.frameIndex(at: timeSeconds))
-            if let frame = try decoder.frame(at: sample) {
+            #endif
+            if let frame = try decoder.frame(at: sample, retaining: surface.currentFrame() == nil ? nil : lastTime) {
                 try publishDesktopFrame(frame, decoder: decoder, inner: inner, surface: surface, time: timeSeconds, seekGen: generation)
             }
         } catch {
@@ -1701,6 +1752,19 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         }
         for entry in pending {
             guard let inner = entry.inner else { continue }
+            #if os(Windows)
+            if inner.lock.withLock({ inner.meta.kind == .video }) {
+                // Keep its headless poster while the new host waits for a visible placement.
+                inner.mediaQueue.async {
+                    inner.transportLock.withLock {
+                        inner.lock.withLock {
+                            if inner.decoder?.headless == true { inner.decoder = nil }
+                        }
+                    }
+                }
+                continue
+            }
+            #endif
             inner.mediaQueue.async { openDesktop(inner) }
         }
     }
@@ -1718,6 +1782,14 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
                 let (time, wantsPoster) = commitLoadedMetadata(inner, meta: decoder.meta, orient: decoder.orient) {
                     inner.decoder = decoder
                 }
+                #if os(Windows)
+                if live && decoder.meta.kind == .video {
+                    inner.lock.withLock {
+                        if inner.lastVideoPull == nil { inner.lastVideoPull = .now }
+                    }
+                    scheduleWindowsPark(inner)
+                }
+                #endif
                 if live {
                     synchronizeDesktop(inner, seek: time > 0 ? time : nil)
                 } else if wantsPoster, let surface = inner.surface {
@@ -1739,10 +1811,36 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
                 var seek = requestedSeek
                 if let pending = inner.request.seek, pending.generation != inner.lastTurnSeekGen {
                     seek = pending.time
+                    #if os(Windows)
+                    if inner.decoder?.headless == false {
+                        inner.lastTurnSeekGen = pending.generation
+                        // Once applied, a subsequent reopen resumes at the displayed picture.
+                        inner.request.seek = nil
+                    }
+                    #else
                     inner.lastTurnSeekGen = pending.generation
+                    #endif
                 }
+                #if os(Windows)
+                if seek == nil, !inner.request.playing, inner.mediaTimer != nil, inner.meta.kind == .video,
+                   inner.request.muted || !inner.meta.hasSound || inner.request.volume == 0 {
+                    seek = inner.lastDecodedTime
+                }
+                if seek != nil || !inner.request.playing {
+                    inner.pendingPicture = nil
+                    inner.pendingVideoEnd = nil
+                    inner.waitingForPull = false
+                }
+                #endif
                 return (inner.decoder, inner.request, seek, inner.state.isFailed, inner.seekGen)
             }
+            #if os(Windows)
+            if !failed, seek != nil, decoder == nil, MediaPlaybackGate.isEnabled {
+                // A paused visible control can seek after its decoder was released.
+                openDesktop(inner)
+                return
+            }
+            #endif
             guard !failed, let decoder, !decoder.headless else { return }
             do {
                 try decoder.setTransport(request, seek: seek)
@@ -1756,7 +1854,13 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
                         // Audio-only applications also need EOS/loop callbacks when no view is drawing.
                         let timer = DispatchSource.makeTimerSource(queue: inner.mediaQueue)
                         let interval = decoder.meta.kind == .audio ? audioTickSeconds : decoder.meta.frameDuration
+                        #if os(Windows)
+                        if decoder.meta.kind == .audio {
+                            timer.schedule(deadline: .now(), repeating: interval)
+                        }
+                        #else
                         timer.schedule(deadline: .now(), repeating: min(0.1, max(1.0 / 120.0, interval)))
+                        #endif
                         timer.setEventHandler { [weak inner] in
                             if let inner { pollDesktop(inner) }
                         }
@@ -1766,6 +1870,13 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
                         inner.mediaTimer?.cancel()
                         inner.mediaTimer = nil
                     }
+                    #if os(Windows)
+                    inner.pictureDue = nil
+                    if request.playing && decoder.meta.kind == .video {
+                        // A seek or rate change invalidates the previously armed media deadline.
+                        inner.mediaTimer?.schedule(deadline: .now())
+                    }
+                    #endif
                 }
                 if !request.playing, decoder.meta.kind == .video, let surface = inner.surface,
                    seek != nil || surface.currentFrame() == nil,
@@ -1786,12 +1897,42 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
                 (inner.decoder, inner.request.playing && inner.state == .playing, inner.lastDecodedTime, inner.seekGen, inner.currentTime)
             }
             guard playing, let decoder, !decoder.headless else { return }
+            #if os(Windows)
+            let independentlyPlaying = inner.surface?.windowsVideoLayers?.isPresenting == true
+            let (needsPicture, audible) = inner.lock.withLock {
+                ((inner.pendingPicture == nil && inner.pendingVideoEnd == nil) || independentlyPlaying,
+                 inner.meta.hasSound && !inner.request.muted && inner.request.volume > 0)
+            }
+            if decoder.meta.kind == .video && !needsPicture && !audible { return }
+            #else
+            let needsPicture = true
+            #endif
             do {
                 let status = try decoder.status()
+                #if os(Windows)
+                if decoder.meta.kind == .video, status.ended, !independentlyPlaying, !audible {
+                    // An unseen muted clip stays at its displayed sample, even when that was the
+                    // last sample in the clip. Finish or loop on the draw that observes its end.
+                    let notify = inner.lock.withLock {
+                        guard inner.seekGen == generation, inner.request.playing, inner.pendingVideoEnd == nil else { return false }
+                        inner.pendingVideoEnd = (status.time, .now)
+                        inner.pictureDue = nil
+                        return true
+                    }
+                    if notify { inner.frameWaker.wake() }
+                    return
+                }
+                #endif
                 let next = inner.lock.withLock { () -> (restart: Bool, ended: Bool)? in
                     guard inner.seekGen == generation, inner.request.playing else { return nil }
                     let restart = inner.machine.observe(time: status.time, atEnd: status.ended)
+                    #if os(Windows)
+                    if decoder.meta.kind == .audio || audible || independentlyPlaying || inner.machine.ended {
+                        inner.currentTime = inner.machine.time
+                    }
+                    #else
                     inner.currentTime = inner.machine.time
+                    #endif
                     if inner.machine.ended {
                         inner.state = .ended
                         inner.request.playing = false
@@ -1805,11 +1946,26 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
                     if next.restart { synchronizeDesktop(inner, seek: 0) }
                     else if next.ended { settleStateWakerInner(inner) }
                     else if decoder.meta.kind == .audio, status.time != previousTime { inner.waker.wake() }
-                    else if let surface = inner.surface, decoder.meta.kind == .video,
-                            previous.map({ floor($0 / decoder.meta.frameDuration) }) != floor(status.time / decoder.meta.frameDuration),
+                    else if needsPicture, let surface = inner.surface, decoder.meta.kind == .video,
+                            decoder.isFrameDue(previousTime: previous, currentTime: status.time),
                             let frame = try decoder.frame(at: nil) {
                         try publishDesktopFrame(frame, decoder: decoder, inner: inner, surface: surface, time: status.time, seekGen: generation)
                     }
+                    #if os(Windows)
+                    if !next.ended, !next.restart, decoder.meta.kind == .video {
+                        let delay = decoder.nextVideoDelay()
+                        inner.lock.withLock {
+                            guard inner.seekGen == generation, inner.request.playing else { return }
+                            inner.pictureDue = .now.advanced(by: .seconds(delay))
+                            inner.waitingForPull = inner.pendingPicture != nil
+                            if !inner.waitingForPull {
+                                inner.mediaTimer?.schedule(deadline: .now() + delay)
+                            } else if audible {
+                                inner.mediaTimer?.schedule(deadline: .now() + audioTickSeconds)
+                            }
+                        }
+                    }
+                    #endif
                 }
             } catch {
                 failDesktop(inner, error)
@@ -1817,21 +1973,163 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         }
     }
 
-    private static func publishDesktopFrame(_ frame: ByteFrame, decoder: DesktopMediaDecoder,
+    private static func publishDesktopFrame(_ frame: DesktopMediaFrame, decoder: DesktopMediaDecoder,
                                             inner: Inner, surface: NativeSurface, time: Double, seekGen: UInt64) throws {
         try inner.transportLock.withLock {
+            #if os(Windows)
+            let shownTime = decoder.lastPictureTime ?? time
+            if !decoder.headless && surface.windowsVideoLayers?.wantsPictures != true {
+                let staged = inner.lock.withLock {
+                    guard inner.decoder === decoder, inner.seekGen == seekGen, inner.request.playing,
+                          !inner.resumingVideo, inner.pendingPicture == nil else { return false }
+                    let id = inner.nextFrameId
+                    inner.nextFrameId &+= 1
+                    let picture: NativeSurfaceVideoFrame
+                    switch frame {
+                    case .bytes(let bytes):
+                        picture = NativeSurfaceVideoFrame(id: id, size: (bytes.width, bytes.height), format: bytes.format,
+                                                          color: bytes.color, orient: decoder.orient, source: .bytes(bytes))
+                    case .texture(let texture):
+                        picture = NativeSurfaceVideoFrame(id: id, size: (texture.width, texture.height), format: texture.format,
+                                                          color: texture.color, orient: decoder.orient, source: .decoded(texture))
+                    }
+                    inner.pendingPicture = (picture, shownTime, .now)
+                    return true
+                }
+                if staged { inner.frameWaker.wake(); return }
+                if inner.lock.withLock({ inner.request.playing }) { return }
+            }
+            #else
+            let shownTime = time
+            #endif
             let id = inner.lock.withLock { () -> UInt64? in
                 guard inner.decoder === decoder, inner.seekGen == seekGen else { return nil }
-                inner.lastDecodedTime = time
+                inner.lastDecodedTime = shownTime
                 let id = inner.nextFrameId
                 inner.nextFrameId &+= 1
                 return id
             }
             guard let id else { return }
-            try surface.pushBytesOriented(frame, orient: decoder.orient, frameId: id)
-            if !decoder.headless { inner.frameWaker.wake() }
+            let independentlyPresented = try frame.publish(to: surface, orient: decoder.orient, id: id)
+            if !decoder.headless && !independentlyPresented { inner.frameWaker.wake() }
         }
     }
+
+    #if os(Windows)
+    private static func takeWindowsPicture(_ inner: Inner, surface: NativeSurface) {
+        let now = ContinuousClock.now
+        let independent = surface.windowsVideoLayers?.isPresenting == true
+        inner.lock.lock()
+        guard inner.meta.kind == .video, !inner.state.isFailed else { inner.lock.unlock(); return }
+        let lastPull = inner.lastVideoPull
+        inner.lastVideoPull = now
+        if inner.decoder == nil || inner.decoder?.headless == true {
+            let wantOpen = !inner.openRequested && (inner.request.playing || inner.lastDecodedTime == nil || inner.request.seek != nil)
+            if wantOpen { inner.openRequested = true }
+            inner.lock.unlock()
+            if wantOpen {
+                inner.mediaQueue.async { [weak inner] in
+                    guard let inner else { return }
+                    openDesktop(inner)
+                    inner.lock.withLock { inner.openRequested = false }
+                }
+            }
+            return
+        }
+        let pending = inner.pendingPicture
+        let end = inner.pendingVideoEnd
+        guard let ready = pending?.ready ?? end?.ready else { inner.lock.unlock(); return }
+        inner.pendingPicture = nil
+        inner.pendingVideoEnd = nil
+        let silent = inner.request.muted || !inner.meta.hasSound || inner.request.volume == 0
+        if inner.request.playing, silent, !independent, let shown = inner.lastDecodedTime,
+           let lastPull, lastPull.duration(to: now) > .milliseconds(250),
+           ready.duration(to: now) > .milliseconds(20) {
+            // The decoder clock ran while nobody drew this clip. Keep the picture
+            // already on glass and rebase the clock on its actual sample time.
+            inner.resumingVideo = true
+            let generation = inner.seekGen
+            inner.lock.unlock()
+            inner.mediaQueue.async { [weak inner] in
+                guard let inner else { return }
+                let resume = inner.lock.withLock {
+                    inner.resumingVideo = false
+                    return inner.seekGen == generation && inner.request.playing
+                }
+                if resume { synchronizeDesktop(inner, seek: shown) }
+            }
+            return
+        }
+        if let end {
+            let restart = inner.machine.observe(time: end.time, atEnd: true)
+            inner.currentTime = inner.machine.time
+            if inner.machine.ended {
+                inner.state = .ended
+                inner.request.playing = false
+                inner.mediaTimer?.cancel()
+                inner.mediaTimer = nil
+                inner.generation &+= 1
+            }
+            inner.lock.unlock()
+            if restart {
+                inner.mediaQueue.async { [weak inner] in
+                    if let inner { synchronizeDesktop(inner, seek: 0) }
+                }
+            } else { settleStateWakerInner(inner) }
+            return
+        }
+        guard let pending else { inner.lock.unlock(); return }
+        inner.lastDecodedTime = pending.time
+        inner.currentTime = pending.time
+        surface.replaceFrame(pending.frame, wake: false)
+        if inner.waitingForPull, inner.request.playing {
+            inner.waitingForPull = false
+            let wait = inner.pictureDue.map { max(.zero, now.duration(to: $0)) } ?? .zero
+            let parts = wait.components
+            let seconds = Double(parts.seconds) + Double(parts.attoseconds) * 1e-18
+            inner.mediaTimer?.schedule(deadline: .now() + seconds)
+        }
+        inner.lock.unlock()
+    }
+
+    private static func scheduleWindowsPark(_ inner: Inner) {
+        let delay: Double? = inner.lock.withLock {
+            guard !inner.checkParkScheduled, let last = inner.lastVideoPull else { return nil }
+            inner.checkParkScheduled = true
+            let age = last.duration(to: .now).components
+            return max(0.05, 3 - Double(age.seconds) - Double(age.attoseconds) * 1e-18)
+        }
+        guard let delay else { return }
+        inner.mediaQueue.asyncAfter(deadline: .now() + delay) { [weak inner] in
+            guard let inner else { return }
+            inner.transportLock.withLock {
+                let independent = inner.surface?.windowsVideoLayers?.isPresenting == true
+                inner.lock.lock()
+                inner.checkParkScheduled = false
+                guard let decoder = inner.decoder, !decoder.headless, decoder.meta.kind == .video else {
+                    inner.lock.unlock()
+                    return
+                }
+                let sounding = inner.request.playing && inner.meta.hasSound && !inner.request.muted && inner.request.volume > 0
+                if sounding || independent { inner.lastVideoPull = .now }
+                guard let last = inner.lastVideoPull, last.duration(to: .now) >= .seconds(3) else {
+                    inner.lock.unlock()
+                    scheduleWindowsPark(inner)
+                    return
+                }
+                inner.decoder = nil
+                inner.pendingPicture = nil
+                inner.pendingVideoEnd = nil
+                inner.pictureDue = nil
+                inner.waitingForPull = false
+                inner.mediaTimer?.cancel()
+                inner.mediaTimer = nil
+                inner.lock.unlock()
+                withExtendedLifetime(decoder) {}
+            }
+        }
+    }
+    #endif
 
     private static func failDesktop(_ inner: Inner, _ error: any Error) {
         let message = String(describing: error)

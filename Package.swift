@@ -178,7 +178,15 @@ let package = Package(
         .systemLibrary(name: "CGtk3", pkgConfig: "gtk+-3.0", providers: [
             .apt(["libgtk-3-dev"]), .yum(["gtk3-devel"])
         ]),
-        .target(name: "CRuneGL"),
+        .target(name: "CRuneGL", linkerSettings: [
+            .linkedLibrary("EGL", .when(platforms: [.linux, .android])),
+            .linkedLibrary("dl", .when(platforms: [.linux, .android])),
+            .linkedLibrary("pthread", .when(platforms: [.linux])),
+        ]),
+        .target(name: "CRuneGPUSelection", linkerSettings: [
+            .linkedLibrary("EGL", .when(platforms: [.linux])),
+            .linkedLibrary("wayland-client", .when(platforms: [.linux])),
+        ]),
         .target(name: "CRuneAndroid", linkerSettings: [
             .linkedLibrary("EGL", .when(platforms: [.android])),
             .linkedLibrary("GLESv3", .when(platforms: [.android])),
@@ -201,11 +209,14 @@ let package = Package(
             .linkedLibrary("advapi32", .when(platforms: [.windows])),
         ]),
         .target(name: "CRuneLinux", dependencies: [
+            .target(name: "CRuneGPUSelection", condition: .when(platforms: [.linux])),
             "CRuneNotify",
             .target(name: "CSDL2", condition: .when(platforms: [.linux])),
             .target(name: "CGtk3", condition: .when(platforms: [.linux])),
         ], linkerSettings: [
             .linkedLibrary("X11", .when(platforms: [.linux])),
+            .linkedLibrary("Xi", .when(platforms: [.linux])),
+            .linkedLibrary("EGL", .when(platforms: [.linux])),
             .linkedLibrary("X11-xcb", .when(platforms: [.linux])),
             .linkedLibrary("xcb", .when(platforms: [.linux])),
             .linkedLibrary("Xext", .when(platforms: [.linux])),
@@ -241,8 +252,10 @@ let package = Package(
             .linkedLibrary("dwrite", .when(platforms: [.windows])),
             .linkedLibrary("fontconfig", .when(platforms: [.linux])),
             .linkedLibrary("pangoft2-1.0", .when(platforms: [.linux])),
+            .linkedLibrary("freetype", .when(platforms: [.linux])),
         ]),
         .target(name: "CRuneOffscreenGL", dependencies: [
+            .target(name: "CRuneGPUSelection", condition: .when(platforms: [.linux])),
             "CRuneGL", .target(name: "CRuneWin32", condition: .when(platforms: [.windows]))
         ], linkerSettings: [
             .linkedFramework("OpenGL", .when(platforms: [.macOS])),
@@ -282,6 +295,7 @@ let package = Package(
             ],
             path: "Sources/Rune",
             resources: [
+                .copy("Resources/Cursors"),
                 .copy("Resources/Metal"),
                 .copy("Resources/GL"),
                 .copy("Resources/Fonts"),
@@ -935,9 +949,14 @@ let package = Package(
             path: "Tests/RuneTests",
             resources: [.copy("Fixtures")]
         ),
+        .target(
+            name: "LargeViewFixtures",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Tests/Support/LargeViews/Sources/LargeViewFixtures"
+        ),
         .testTarget(
             name: "RuneKitTests",
-            dependencies: ["RuneKit", "Rune", "RuneI18n", "RuneRef", "RuneHighlights", "RuneMermaid"],
+            dependencies: ["LargeViewFixtures", "RuneKit", "Rune", "RuneI18n", "RuneRef", "RuneHighlights", "RuneMermaid"],
             path: "Tests/RuneKitTests"
         ),
         .testTarget(
@@ -966,7 +985,8 @@ let package = Package(
                 .target(name: "CRuneGL", condition: .when(platforms: [.macOS, .linux, .windows])),
                 .target(name: "CRuneOffscreenGL", condition: .when(platforms: [.macOS, .linux, .windows]))
             ],
-            path: "Tests/RuneFXTests"
+            path: "Tests/RuneFXTests",
+            resources: [.copy("Fixtures/upstream-fx-packed.json")]
         ),
         .testTarget(
             name: "RuneLightTests",

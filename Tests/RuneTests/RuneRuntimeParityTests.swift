@@ -102,7 +102,7 @@ struct RuneRuntimeParityTests {
         #expect(abs(scene.primitives[2].fill.w - 1.0) < 1e-4)
     }
 
-    @Test("Scroll chaining, fling decay, pointerExit hover clear, and drag-suppress-click")
+    @Test("Scroll chaining, fling decay, pointerExit hover clear, and release inside after a drag")
     func scrollChainFlingHoverAndDrag() {
         struct S {
             var hovered = false
@@ -133,12 +133,12 @@ struct RuneRuntimeParityTests {
         rt.pointerExit(at: 0.15)
         #expect(rt.state.hovered == false)
 
-        // Dragging > 4pt on btn suppresses onClick
+        // A drag takes the press out of the double-click run. Releasing inside still fires onClick.
         rt.pointerDown(at: btnCenter, at: 0.2)
         rt.pointerMove(to: Vec2(btnCenter.x + 20, btnCenter.y), at: 0.25)
         rt.pointerUp(at: Vec2(btnCenter.x + 20, btnCenter.y), at: 0.3)
         #expect(rt.state.dragged == true)
-        #expect(rt.state.clicks == 0)
+        #expect(rt.state.clicks == 1)
 
         // Scroll inner to bottom, then extra scroll chains to outer!
         let innerRect = rt.element(byKey: "inner")!.rect

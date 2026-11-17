@@ -360,7 +360,7 @@ public final class MemoCache: @unchecked Sendable {
         let scope = MemoScope.current
         let scopedId = scope?.scopedId(for: rawId) ?? rawId
         let env = scope?.envHash ?? MemoScope.activeEnvHash
-        let curGeometry = scope?.geometry ?? [:]
+        let curGeometry = scope?.geometry ?? MemoGeometry()
 
         func attachMemoKey(_ el: El<State>) -> El<State> {
             guard !rawId.hasPrefix("cached:") else { return el }
@@ -419,7 +419,8 @@ public final class MemoCache: @unchecked Sendable {
         scope?.prefixStack.append(rawId)
         scope?.readFrames.append([])
         scope?.nestedFrames.append([])
-        let built = attachMemoKey(build())
+        var built = attachMemoKey(build())
+        if !built.children.isEmpty { built.memoLayoutChildren = MemoLayoutChildren(built.children) }
         TrackedRecorder.resume(savedTracked)
         let capturedReads = scope?.readFrames.popLast() ?? []
         let capturedNested = scope?.nestedFrames.popLast() ?? []
@@ -454,7 +455,7 @@ public final class MemoCache: @unchecked Sendable {
         let scope = MemoScope.current
         let scopedId = "region:\(scope?.scopedId(for: rawId) ?? rawId)"
         let env = scope?.envHash ?? MemoScope.activeEnvHash
-        let curGeometry = scope?.geometry ?? [:]
+        let curGeometry = scope?.geometry ?? MemoGeometry()
 
         // Same-pass duplicate region IDs bypass caching (`memo.rs:638,663-664`).
         if let scope, !scope.isVerificationDryRun {
@@ -515,6 +516,7 @@ public final class MemoCache: @unchecked Sendable {
         var built = build()
         if !rawId.hasPrefix("cached:") && built.keyId == nil { built = built.key(rawId) }
 
+        if !built.children.isEmpty { built.memoLayoutChildren = MemoLayoutChildren(built.children) }
         let trackedDeps = TrackedRecorder.pop()
         var capturedReads = scope?.readFrames.popLast() ?? []
         let capturedNested = scope?.nestedFrames.popLast() ?? []
@@ -577,7 +579,20 @@ public final class MemoCache: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// An unobserved frame does not need to assemble geometry for every mounted key.
+    internal func hasInvalidatedReads(computing geometry: () -> MemoGeometry) -> Bool {
+        let hasReads = lock.withLock {
+            (viewReadsPass == passCounter && !viewReads.isEmpty)
+                || entries.values.contains { $0.passBuilt == passCounter && !$0.reads.isEmpty }
+        }
+        return hasReads && hasInvalidatedReads(against: geometry())
+    }
+
     public func hasInvalidatedReads(against geometry: [String: MemoElementGeometry]) -> Bool {
+        hasInvalidatedReads(against: MemoGeometry(geometry))
+    }
+
+    private func hasInvalidatedReads(against geometry: MemoGeometry) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         if viewReadsPass == passCounter {
@@ -591,6 +606,20 @@ public final class MemoCache: @unchecked Sendable {
             }
         }
         return false
+    }
+
+    internal func observesTrackedCell(_ id: UInt32) -> Bool {
+        func readsCell(_ reads: [MemoRead]) -> Bool {
+            reads.contains { read in
+                guard case .tracked(let cellId, _) = read else { return false }
+                return cellId == id
+            }
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        return (viewReadsPass == passCounter && readsCell(viewReads)) || entries.values.contains {
+            $0.passBuilt == passCounter && readsCell($0.reads)
+        }
     }
 
     /// Drops all cached subtrees (e.g. on hot reload or theme change).
@@ -731,7 +760,6 @@ internal enum TrackedRecorder {
     }
 
     static func pushEmpty() {
-        MemoTrackedBridge.versionProvider = { TrackedIDGenerator.version(for: $0) }
         box.stack.append([:])
     }
 
@@ -757,7 +785,7 @@ internal enum TrackedRecorder {
     }
 }
 
-private enum TrackedIDGenerator {
+enum TrackedIDGenerator {
     static let lock = NSLock()
     nonisolated(unsafe) static var nextRawId: UInt32 = 1
     nonisolated(unsafe) static var versions: [UInt32: UInt64] = [:]
@@ -781,6 +809,24 @@ private enum TrackedIDGenerator {
         lock.lock()
         defer { lock.unlock() }
         return versions[id] ?? 0
+    }
+}
+
+/// Hover is a paint input unless a view or virtual row explicitly reads its key.
+internal final class HoverReadDependency {
+    private var signal: Tracked<Bool>?
+
+    func record() {
+        guard let scope = MemoScope.current else { return }
+        let tracked = signal ?? Tracked(false)
+        signal = tracked
+        scope.record(.tracked(cellId: tracked.id, version: tracked.version))
+    }
+
+    func changed(in cache: MemoCache) -> Bool {
+        guard let signal else { return false }
+        signal.touch()
+        return cache.observesTrackedCell(signal.id)
     }
 }
 
@@ -918,7 +964,6 @@ public func regionWith<State, Inputs: Equatable>(
     cache: MemoCache? = nil,
     build: () -> El<State>
 ) -> El<State> {
-    MemoTrackedBridge.versionProvider = { TrackedIDGenerator.version(for: $0) }
     let target = cache ?? MemoScope.activeCache ?? .shared
     return target.getOrBuildRegion(rawId: id, inputs: inputs, build: build).element
 }
@@ -1332,6 +1377,29 @@ public extension RuneCompositor {
 }
 
 extension Runtime {
+    internal func beginPaintGlyphFrame(pinnedMask: UInt32) {
+        // The reference painter also protects the previous frame's page working set. Those
+        // transient atlas reads do not hold curve IDs beyond a frame; flight captures do.
+        if textSystem.glyphAtlas.beginFrame(pinnedMask: pinnedMask | textFlightMaskPages, pinOutlines: !activeTextFlights.isEmpty) {
+            // UVs, direct outline IDs, and their deferred fill recipes refer to one store generation.
+            textSystem.forgetRasterState()
+            textSystem.clearLayoutCaches()
+            nodeTextLayouts.removeAll(keepingCapacity: true)
+            exitingTextLayouts.removeAll(keepingCapacity: true)
+        }
+    }
+
+    /// A flight keeps its captured source layout until landing. Its alpha pages must survive
+    /// shelf recycling; its outline records stay pinned even when its source only has color ink.
+    internal var textFlightMaskPages: UInt32 {
+        activeTextFlights.reduce(into: UInt32(0)) { mask, flight in
+            guard let layout = flight.sourceLayout else { return }
+            for glyph in layout.shaped.glyphs where glyph.colorGlyphIndex == nil {
+                mask |= 1 << min(UInt32(glyph.atlasPage), 31)
+            }
+        }
+    }
+
     /// Draws both glyph runs in viewport coordinates while a text flight crosses its ancestors' clips.
     internal func forEachTextFlightGlyph(
         at now: Double,

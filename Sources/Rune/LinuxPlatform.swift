@@ -400,14 +400,32 @@ public enum LinuxApp {
 
     @MainActor
     public static func run<State>(_ app: App<State>, parsed: ToolingArgs) throws {
-        let window = AppWindowSpec(app: app, key: "main", onCreated: app.onWindowHook)
+        let window = AppWindowSpec(app: app, key: "main")
         try DesktopWindowGroup.run([window.boxed()], options: app.runOptions, parsed: parsed)
     }
 
 }
 
+/// A PRIMARY read may complete after SDL has switched focus or closed a window.
+private final class LinuxPrimaryReplies: @unchecked Sendable {
+    private let lock = NSLock()
+    private var replies: [(String, String)] = []
+
+    func accept(_ text: String, for target: String) {
+        lock.withLock { replies.append((target, text)) }
+    }
+
+    func take() -> [(String, String)] {
+        lock.withLock {
+            defer { replies.removeAll(keepingCapacity: true) }
+            return replies
+        }
+    }
+}
+
 @MainActor
 final class LinuxWindowSession<State> {
+    let windowFrame: DesktopWindowFrame
     let window: OpaquePointer
     let renderer: PortableGLRenderer
     let started = ProcessInfo.processInfo.systemUptime
@@ -422,10 +440,14 @@ final class LinuxWindowSession<State> {
     private var menuPointer: Vec2?
     let handle: WindowHandle
     let waker: Waker
+    private let primaryReplies = LinuxPrimaryReplies()
     let accessibility: LinuxAccessibilityHost
     private let dragSource = LinuxDragSource()
     private let appearance: LinuxAppearanceObserver
     let reports: FrameReports<State>
+    private let nativeTrace: NativeWindowTrace?
+    private let surfaceMeter: SurfaceMeter
+    private var retryingSwap = false
     var windowX: Int32 = 0
     var windowY: Int32 = 0
     var cover = CoveredWindowDriver()
@@ -435,7 +457,7 @@ final class LinuxWindowSession<State> {
     var didNotifyReady = false
     var appliedCursor: Cursor?
     var nativeCursor: UnsafeMutableRawPointer?
-    var resting = false
+    private var windowRest = WindowRestMachine()
     var nextFrame: Double?
     var title: String
     var lastMods = Mods.none
@@ -444,11 +466,13 @@ final class LinuxWindowSession<State> {
     private var acceptsSDLDrop = true
 
     init(app: App<State>, parsed: ToolingArgs, handle passedHandle: WindowHandle? = nil) throws {
+        nativeTrace = try NativeWindowTrace(args: parsed, recordsDrawables: false)
         HeadlessRunner.registerFonts(app.fontData)
         let size = parsed.viewportOverride ?? app.size
         let opts = app.windowOptionsValue
         let appMin = app.minSize.map { ($0.x, $0.y) }
         let limits = opts.sizeLimits(appMin: app.isFitContentHeight ? opts.fitMinSize(appMin: appMin) : appMin)
+        windowFrame = DesktopWindowFrame(limits: limits)
         let visible = opts.visible && !app.isWindowless
         let options = RuneLinuxWindowOptions(
             width: nativeDimension(size.x), height: nativeDimension(size.y),
@@ -456,7 +480,8 @@ final class LinuxWindowSession<State> {
             maxWidth: limits.1.map { nativeDimension($0.0) } ?? 0,
             maxHeight: limits.1.map { nativeDimension($0.1) } ?? 0,
             resizable: opts.resizable, borderless: opts.borderless || app.chromeStyle.borderless,
-            alwaysOnTop: opts.alwaysOnTop, visible: false, maximized: app.openAs.isMaximized, fullScreen: app.openAs.isFullScreen)
+            alwaysOnTop: opts.alwaysOnTop, visible: false, maximized: app.openAs.isMaximized, fullScreen: app.openAs.isFullScreen,
+            floatOnOpen: app.isFloatOnOpen, physicalWidth: opts.physicalSize?.0 ?? 0, physicalHeight: opts.physicalSize?.1 ?? 0)
         GpuEvents.starting()
         guard let window = rune_linux_open(app.title, options) else {
             throw LinuxHostError("Opening an SDL2 OpenGL 3.3 window")
@@ -504,6 +529,7 @@ final class LinuxWindowSession<State> {
         menu.refresh()
         runtime.wallStart = timeScale == 1 ? started : nil
         runtime.useClipboard(.shared)
+        runtime.recordEvents = false
         runtime.urlOpener.headless = false
         runtime.readSystemContrastSettings()
         let queue = app.sharedHandle
@@ -512,6 +538,9 @@ final class LinuxWindowSession<State> {
                               onShow: { queue.show() }, onHide: { queue.hide() },
                               onSetTitle: { new in queue.update { _, tx in tx.setTitle(new) } },
                               onSetPosition: { queue.setPosition($0) }, onPlace: { queue.place($0) })
+        surfaceMeter = SurfaceMeter(name: handle.key)
+        handle.attachSurfaceMeter(surfaceMeter)
+        runtime.surfaceMeter = surfaceMeter
         handle.setWindowNumber(id)
         accessibility = LinuxAccessibilityHost(title: app.title, waker: waker, isVisible: visible)
         appearance = LinuxAppearanceObserver(followsScheme: parsed.darkOverride == nil && app.dark == nil,
@@ -520,8 +549,7 @@ final class LinuxWindowSession<State> {
         reports = FrameReports(onFrameEncoded: app.onFrameEncodedHook, onFrameDrawn: app.onFrameDrawnHook,
                                onInspectDrawn: app.onFrameInspectHook)
         app.sharedHandle.shared.setVisible(visible)
-        rune_linux_origin(window, &windowX, &windowY)
-        runtime.setWindowOrigin(Vec2(Float(windowX), Float(windowY)), at: 0)
+        syncWindowOrigin(at: 0)
         _ = cover.setOccluded(!visible, runtime: runtime, at: 0)
         runtime.fitHeight = app.isFitContentHeight
         runtime.playgroundHost = app.playgroundHost
@@ -549,6 +577,20 @@ final class LinuxWindowSession<State> {
         return (Vec2(Float(max(1, w)), Float(max(1, h))), w > 0 && pw > 0 ? Float(pw) / Float(w) : 1)
     }
 
+    private func syncWindowOrigin(at now: Double) {
+        var x: Int32 = 0, y: Int32 = 0, primaryX: Int32 = 0, primaryY: Int32 = 0
+        guard rune_linux_content_origin(window, &x, &y, &primaryX, &primaryY) != 0 else {
+            runtime.setWindowPixels(nil)
+            return
+        }
+        windowX = x
+        windowY = y
+        runtime.setWindowPixels((x, y))
+        let scale = Self.size(of: window).scale
+        let origin = Vec2(Float(Int64(x) - Int64(primaryX)) / scale, Float(Int64(y) - Int64(primaryY)) / scale)
+        runtime.setWindowOrigin(origin, at: now)
+    }
+
     func now() -> Double { (ProcessInfo.processInfo.systemUptime - started) * timeScale }
 
     func start() {
@@ -561,6 +603,7 @@ final class LinuxWindowSession<State> {
     func finish() {
         guard !finished else { return }
         finished = true
+        RuneStartup.started { try nativeTrace?.finish() }
         defer { runtime.cancelPreparedText() }
         dragSource.close(runtime: runtime, at: now())
         runtime.dispatchQuit(at: now())
@@ -583,6 +626,8 @@ final class LinuxWindowSession<State> {
         let queued = MainQueueDispatcher.shared.drain() > 0
         let t = now()
         DesktopServices.pumpLinuxHost()
+        let primary = primaryReplies.take()
+        for (target, text) in primary { runtime.queuePrimaryPaste(target: target, text: text) }
         LinuxWaylandFileDrops.take(windowID: rune_linux_id(window), runtime: runtime, at: t)
         dragSource.poll(runtime: runtime, at: t)
         let appearanceChanged = appearance.update(runtime)
@@ -595,41 +640,82 @@ final class LinuxWindowSession<State> {
         menu.refresh()
         apply(requests, at: t)
         guard running else { return 0 }
-        if redraw || queued || appearanceChanged || accessibilityChanged || runtime.isStale && cover.canDraw || nextFrame.map({ $0 <= t }) == true {
+        stepRest(.woke(now: ProcessInfo.processInfo.systemUptime), at: t)
+        if redraw || queued || !primary.isEmpty || appearanceChanged || accessibilityChanged || runtime.isStale && cover.canDraw || nextFrame.map({ $0 <= t }) == true {
             if cover.canDraw && !rune_linux_make_current(window) { throw LinuxHostError("Activating the SDL OpenGL context") }
             try draw(renderer, at: t)
+        }
+        if let text = runtime.clipboardRouting.primary.write {
+            runtime.clipboardRouting.primary.write = nil
+            DesktopServices.writePrimarySelection(text)
+        }
+        if let target = runtime.clipboardRouting.primary.paste {
+            runtime.clipboardRouting.primary.paste = nil
+            DesktopServices.readPrimarySelection { [primaryReplies, waker] text in
+                guard let text, !text.isEmpty else { return }
+                primaryReplies.accept(text, for: target)
+                waker.wake()
+            }
         }
         applyShell(at: t)
         // AppHandle, Live, native input, and AT-SPI wake SDL directly. Service external
         // Foundation main-queue work even if the window rests indefinitely.
-        let wait = nextFrame.map { max(0, min(100, (($0 - now()) / timeScale * 1000).rounded(.up))) } ?? 100
+        let frameWait = nextFrame.map { (($0 - now()) / timeScale * 1000).rounded(.up) } ?? 100
+        let restWait = windowRest.deadline.map { (($0 - ProcessInfo.processInfo.systemUptime) * 1000).rounded(.up) } ?? 100
+        var wait = max(0, min(100, frameWait, restWait))
+        if renderer.needsSurfaceCompletionPoll {
+            guard rune_linux_make_current(window) else { throw LinuxHostError("Polling the SDL OpenGL context") }
+            if renderer.pollSurfaceCompletions() { wait = min(4, wait) }
+        }
         if runtime.hasPopup && !popup.isOpen && cover.canDraw { return 0 }
         return dragSource.active ? min(8, Int32(wait)) : Int32(wait)
     }
 
     func draw(_ renderer: PortableGLRenderer, at now: Double) throws {
         if cover.canDraw {
+            let paced = rune_linux_present_paced(window)
+            surfaceMeter.redraw(paced: paced)
             let size = Self.size(of: window)
-            runtime.setViewport(size.logical, pixelScale: size.scale)
+            windowFrame.resized(size.logical, scale: size.scale, runtime: runtime)
             let start = ProcessInfo.processInfo.systemUptime
             let commitsBefore = runtime.viewCommitCount
+            nativeTrace?.begin(runtime, now: start, refreshHz: Double(rune_linux_refresh_hz(window)))
             let frame = renderer.frame(runtime, at: now)
             let updated = ProcessInfo.processInfo.systemUptime
             let drawCount = try renderer.draw(frame, compositor: app.compositorValue, runtime: runtime,
                                               at: now, updateMilliseconds: (updated - start) * 1000)
             dragSource.beginAfterDrawing(runtime: runtime, at: now, scale: size.scale,
                                          pixelWidth: frame.width, pixelHeight: frame.height)
-            rune_linux_present(window)
+            guard rune_linux_present(window) else {
+                let error = LinuxHostError("Presenting the SDL OpenGL window")
+                surfaceMeter.failed(.outdated)
+                reports.skipped()
+                if retryingSwap { throw error }
+                retryingSwap = true
+                let hz = rune_linux_refresh_hz(window)
+                nextFrame = now + timeScale / Double(hz > 0 ? hz : 60)
+                return
+            }
+            let submitted = ProcessInfo.processInfo.systemUptime
+            retryingSwap = false
+            runtime.interactionSubmitted(at: submitted)
+            nativeTrace?.submitted(runtime, at: submitted, started: start,
+                                   target: nil, sequence: nil, continuous: nextFrame != nil)
+            surfaceMeter.presented()
+            let active = runtime.isAnimating || app.compositorValue?.isAnimating == true
+            surfaceMeter.setPacing(active ? (paced ? .vsync : .unpaced) : .idle)
+            app.devStatsReceiver?(surfaceMeter.currentStats())
+            windowRest.step(.drew(now: submitted, lowMemory: false))
             if app.onFrameEncodedHook != nil || app.onFrameDrawnHook != nil {
-                let presented = ProcessInfo.processInfo.systemUptime
+                let refresh = rune_linux_refresh_hz(window)
                 reports.record(FrameEncoded(
-                    outcome: .drawn, frameMs: (presented - start) * 1000,
-                    updateMs: (updated - start) * 1000, encodeMs: (presented - updated) * 1000,
+                    outcome: .drawn, frameMs: (submitted - start) * 1000,
+                    updateMs: (updated - start) * 1000, encodeMs: (submitted - updated) * 1000,
                     committed: runtime.viewCommitCount != commitsBefore, primitives: frame.instances.count,
                     glyphs: frame.instances.reduce(0) { $0 + ($1.params.y == KIND_GLYPH ? 1 : 0) },
                     animating: runtime.isAnimating, compositorAnimating: app.compositorValue?.isAnimating ?? false,
-                    drawCount: drawCount, compositorSummary: app.compositorValue?.summary(), at: presented,
-                    window: handle.key, presentsAt: presented, started: start))
+                    drawCount: drawCount, compositorSummary: app.compositorValue?.summary(), at: submitted,
+                    window: handle.key, started: start, refreshHz: refresh > 0 ? Double(refresh) : nil))
                 if reports.hasPendingDrawn(at: now) {
                     _ = runtime.updateIf(at: now) { state, tx in reports.flush(state: &state, tx: &tx, at: now) }
                 }
@@ -642,12 +728,12 @@ final class LinuxWindowSession<State> {
             }
             syncCursor()
             if runtime.windowFocused, let area = runtime.imeCursorArea ?? runtime.imeArea, area.count == 4 {
-                rune_linux_set_ime_rect(Self.coordinate(area[0]), Self.coordinate(area[1]), nativeDimension(area[2]), nativeDimension(area[3]))
+                let rect = runtime.toWindow(area)
+                rune_linux_set_ime_rect(Self.coordinate(rect[0]), Self.coordinate(rect[1]), nativeDimension(rect[2]), nativeDimension(rect[3]))
             }
-            let animating = runtime.isAnimating || app.compositorValue?.isAnimating == true
-            if !animating && !resting { runtime.rest(at: now) }
-            resting = !animating
         } else {
+            surfaceMeter.setPacing(.idle)
+            surfaceMeter.skipped()
             _ = cover.step(runtime, at: now)
         }
         if !didNotifyReady {
@@ -656,10 +742,30 @@ final class LinuxWindowSession<State> {
             app.onReadyHook?(handle)
         }
         accessibility.update(runtime: runtime, windowX: windowX, windowY: windowY)
+        if nativeTrace?.reachedLimit == true {
+            try nativeTrace?.finish()
+            requestedApplicationQuit = true
+            return
+        }
         runtime.schedulePendingWakes(from: now)
         nextFrame = runtime.nextWakeDeadline(after: runtime.currentTime)
-        if cover.canDraw && (runtime.isAnimating || app.compositorValue?.isAnimating == true) {
-            nextFrame = min(nextFrame ?? .infinity, now + Runtime<State>.timerFrameInterval * timeScale)
+        if cover.canDraw && (runtime.isAnimating || app.compositorValue?.isAnimating == true || nativeTrace?.keepsDrawing == true) {
+            // A synchronized GL swap paces the active window. A second timer would cap
+            // high-refresh displays and can skip vblanks when a frame finishes late.
+            var deadline = now
+            if !rune_linux_present_paced(window) {
+                let refresh = rune_linux_refresh_hz(window)
+                deadline += timeScale / Double(refresh > 0 ? refresh : 60)
+            }
+            nextFrame = min(nextFrame ?? .infinity, deadline)
+        }
+    }
+
+    private func stepRest(_ event: WindowRestMachine.Event, at now: Double) {
+        guard let effect = windowRest.step(event).first else { return }
+        runtime.rest(at: now)
+        if rune_linux_make_current(window) {
+            renderer.giveBackForWindowRest(all: effect == .giveBackAll)
         }
     }
 
@@ -697,8 +803,19 @@ final class LinuxWindowSession<State> {
         rune_linux_free_cursor(old)
     }
 
+    func applyReopenRequests() {
+        let time = now()
+        let pending = shortcuts.withReceiving { app.sharedHandle.shared.applyStateUpdates(to: runtime, at: time) }
+        apply(pending, at: time)
+        if running { applyShell(at: time) }
+    }
+
     func apply(_ requests: AppDrainedRequests<State>, at now: Double) {
-        if requests.quit || requests.relaunch { requestedApplicationQuit = true; running = false; return }
+        if requests.quit || requests.relaunch {
+            requestApplicationQuit(relaunch: requests.relaunch || runtime.relaunchRequested)
+            running = false
+            return
+        }
         switch requests.window {
         case .open, .show: rune_linux_show(window)
         case .hide: rune_linux_hide(window)
@@ -714,40 +831,52 @@ final class LinuxWindowSession<State> {
         switch requests.activation {
         case .focus: rune_linux_focus(window)
         case .activate: rune_linux_activate(window, requests.openToken)
-        case .minimize: rune_linux_minimize(window)
+        case .minimize: runtime.minimizeStep(.asked)
         case .none: break
         }
     }
 
     func requestClose(at now: Double) {
+        runtime.ignoreMinimize()
         guard runtime.dispatchClose(at: now) else { return }
         if app.keepsRunning { rune_linux_hide(window) }
         else { running = false }
     }
 
-    func applyShell(at now: Double) {
+    func applyTitle() {
         if let new = runtime.windowTitle, new != title {
             title = new
             rune_linux_set_title(window, new)
         }
-        if runtime.quitRequested { requestedApplicationQuit = true; running = false; return }
+    }
+
+    func applyShell(at now: Double) {
+        applyTitle()
+        let minimize = runtime.shellTakeMinimize()
+        if runtime.quitRequested {
+            requestApplicationQuit(relaunch: runtime.relaunchRequested)
+            running = false
+            return
+        }
         if runtime.closeWindowRequested {
             runtime.clearShellRequests()
             requestClose(at: now)
-        } else if runtime.minimizeRequested || runtime.toggleMaximizedRequested || runtime.toggleFullScreenRequested {
-            if runtime.minimizeRequested && app.windowOptionsValue.minimizable { rune_linux_minimize(window) }
+        } else if minimize && app.windowOptionsValue.minimizable {
+            rune_linux_minimize(window)
+        }
+        if runtime.toggleMaximizedRequested || runtime.toggleFullScreenRequested {
             if runtime.toggleMaximizedRequested { rune_linux_toggle_maximized(window) }
             if runtime.toggleFullScreenRequested { rune_linux_toggle_fullscreen(window) }
-            runtime.clearShellRequests()
+            runtime.toggleMaximizedRequested = false
+            runtime.toggleFullScreenRequested = false
         }
         if let request = runtime.takeWindowFrameRequest() {
-            if let (w, h) = request.size { rune_linux_set_size(window, nativeDimension(w), nativeDimension(h)) }
-            if request.center { rune_linux_center(window) }
+            windowFrame.apply(request, to: window)
         }
     }
 
     func handleEvent(_ event: RuneLinuxEvent, at now: Double) {
-        let point = Vec2(event.x, event.y)
+        let point = runtime.inputPoint(fromWindow: Vec2(event.x, event.y))
         let mods = Mods(shift: event.modifiers & UInt32(RuneLinuxShift) != 0,
                         ctrl: event.modifiers & UInt32(RuneLinuxControl) != 0,
                         alt: event.modifiers & UInt32(RuneLinuxAlt) != 0,
@@ -791,7 +920,7 @@ final class LinuxWindowSession<State> {
         case RuneLinuxWheel:
             let (dx, dy) = WheelDistance.wheelDelta(.line(x: event.dx, y: event.dy), scale: 1,
                                                    shift: mods.shift, linePoints: WheelDistance.linePoints)
-            runtime.wheel(WheelEvent(dx: dx, dy: dy, precise: false, mods: mods), at: point, now: now)
+            runtime.desktopWheel(dx: dx, dy: dy, at: point, mods: mods, now: now)
         case RuneLinuxFocus:
             runtime.dispatchFocus(event.active, at: now)
             if !event.active {
@@ -802,14 +931,14 @@ final class LinuxWindowSession<State> {
                 popup.cancelAll(at: now)
             }
         case RuneLinuxVisibility:
+            if !event.active { surfaceMeter.setPacing(.idle) }
             if !event.active { popup.cancelAll(at: now) }
             app.sharedHandle.shared.setVisible(event.active)
             accessibility.setVisible(event.active)
             _ = cover.setOccluded(!event.active, runtime: runtime, at: now)
-        case RuneLinuxMoved:
-            windowX = Self.coordinate(point.x)
-            windowY = Self.coordinate(point.y)
-            runtime.setWindowOrigin(point, at: now)
+            if !event.active { stepRest(.unseen, at: now) }
+        case RuneLinuxMoved, RuneLinuxResized:
+            syncWindowOrigin(at: now)
         case RuneLinuxClose:
             if app.windowOptionsValue.closable { requestClose(at: now) }
         case RuneLinuxQuit: requestClose(at: now)

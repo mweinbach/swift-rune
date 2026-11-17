@@ -22,7 +22,9 @@ extension LinuxContextMenu {
         body.layout.pinTop = nil
         body.layout.pinBottom = nil
         let window = col().wFull().child(body)
-        guard let show, !levels.isEmpty else { return window }
+        guard var show, !levels.isEmpty else { return window }
+        // This menu is laid out inside Rune's zoomed view. Native hosts place it in window points.
+        show.anchor = show.anchor.scaled(by: 1 / (runtime?.zoom() ?? 1))
 
         let version = generation
         let scrim: El<State> = el().pin(top: 0, right: 0, bottom: 0, left: 0)

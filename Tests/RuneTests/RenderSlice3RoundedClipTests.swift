@@ -624,11 +624,11 @@ struct RenderSlice3RoundedClipTests {
 
     #endif
 
-    #if canImport(Metal)
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
     // 11d. #139d (`rounded_clip_tests.rs:434`)
     @Test("per_corner_continuous_card_clips_image_child_and_nested_layers")
     func perCornerContinuousCardClipsImageChildAndNestedLayers() throws {
-        let renderer = try MetalRenderer()
+        let renderer = try OffscreenGPURenderer()
         let cardImg = Pixels()
         var cardRgba: [UInt8] = []
         cardRgba.reserveCapacity(80 * 56 * 4)
@@ -691,7 +691,17 @@ struct RenderSlice3RoundedClipTests {
                 rt.clearColor = Color(r: 0, g: 0, b: 0, a: 0)
                 rt.srgbBlend = true
                 let rf = rt.renderFrame(at: 0.0)
-                let rgba = try drawRaw(renderer: renderer, frame: rf)
+                #if canImport(Metal)
+                let rgba = try drawRaw(renderer: renderer.metal, frame: rf)
+                #else
+                // Offscreen capture returns straight RGBA. Compare the stored
+                // premultiplied colors here, including the antialiased borders.
+                var rgba = try renderer.renderOffscreen(rf).rgba
+                for i in stride(from: 0, to: rgba.count, by: 4) {
+                    let alpha = Int(rgba[i + 3])
+                    for channel in i..<(i + 3) { rgba[channel] = UInt8((Int(rgba[channel]) * alpha + 127) / 255) }
+                }
+                #endif
                 if mode == 1 {
                     #expect(renderer.layerStats().extraPasses == 0, "mixed continuous clip stays on the direct path")
                 } else if mode == 2 {

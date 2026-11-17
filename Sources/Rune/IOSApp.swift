@@ -72,6 +72,7 @@ public enum IOSApp {
             reducedMotion: parsed.reducedMotion || UIAccessibility.isReduceMotionEnabled,
             sceneName: parsed.sceneName
         )
+        runtime.recordEvents = false
         runtime.urlOpener.headless = false
         runtime.readSystemContrastSettings()
         let controller = try RuneIOSViewController(
@@ -81,6 +82,7 @@ public enum IOSApp {
             backend: parsed.forceCPU ? .software : app.gpuBackendPreference
         )
         controller.configure(app)
+        try controller.runeView.configureTrace(parsed)
         return controller
     }
 }
@@ -99,16 +101,28 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
     fileprivate var beforeFrame: ((Double) -> Void)?
     fileprivate var firstFrame: (() -> Void)?
     fileprivate var reports: FrameReports<State>?
+    private var nativeTrace: NativeWindowTrace?
     fileprivate var compositor: AnyCompositor<State>?
     fileprivate var receiveStats: ((SurfaceStats) -> Void)?
+    fileprivate var loopActivity: AppleSurfaceLoopObserver?
     private var previousFrameTime: Double?
-    private var atRest = false
+    fileprivate var lastSubmission: CFTimeInterval?
+    private var rendering = false
+    fileprivate lazy var windowRest = AppleWindowRest { [weak self] all in
+        guard let self else { return }
+        runtime.rest(at: nowSeconds())
+        #if canImport(Metal)
+        metalRenderer?.giveBackForWindowRest(all: all)
+        #endif
+    }
     private var textIdleObserver: AppleTextIdleObserver?
     fileprivate var frameRequested = false
     private var editing = false
     private var announcementCount: UInt32 = 0
     private var accessibilityCommit: Int?
     private var accessibleElements: [AccessibilityIdentity: RuneUIAccessibilityElement] = [:]
+    private var voiceOverFocusCommit: UInt64?
+    private weak var lastVoiceOverFocus: RuneUIAccessibilityElement?
     private var cpuContent: CALayer?
 
     #if canImport(Metal)
@@ -133,7 +147,7 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
         self.runtime = runtime
         self.timeScale = timeScale
         self.respectSystemAppearance = respectSystemAppearance
-        self.startTime = ProcessInfo.processInfo.systemUptime
+        self.startTime = CACurrentMediaTime()
         #if canImport(Metal)
         try GpuBackendPolicy.checkWindowBackend(backend)
         if GpuBackendPolicy.windowBackend(backend) == .software {
@@ -210,7 +224,11 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
 
     public override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window == nil { textIdleObserver = nil }
+        if window == nil {
+            finishTrace()
+            textIdleObserver = nil
+            windowRest.step(.unseen)
+        }
     }
 
     public var hasText: Bool {
@@ -247,6 +265,7 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
         let scale = Float(max(1.0, traitCollection.displayScale))
         let size = Vec2(Float(bounds.width), Float(bounds.height))
         if size.x > 0 && size.y > 0 {
+            updateSafeArea()
             runtime.stepViewport(size, pixelScale: scale)
             cpuContent?.frame = bounds
             contentScaleFactor = CGFloat(scale)
@@ -263,9 +282,24 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
         }
     }
 
+    private func updateSafeArea() {
+        let insets = safeAreaInsets
+        var bottom = insets.bottom
+        #if os(iOS)
+        // The default guide tracks a docked keyboard and returns to the bottom safe area when hidden.
+        let keyboard = keyboardLayoutGuide.layoutFrame
+        if !keyboard.isEmpty, bounds.intersects(keyboard) {
+            bottom = max(bottom, bounds.maxY - max(bounds.minY, keyboard.minY))
+        }
+        #endif
+        if runtime.setSafeAreaInsets(SIMD4(Float(insets.top), Float(insets.right), Float(bottom), Float(insets.left))) {
+            invalidateFrame()
+        }
+    }
+
     public override func safeAreaInsetsDidChange() {
         super.safeAreaInsetsDidChange()
-        invalidateFrame()
+        updateSafeArea()
     }
 
     public func syncAppearance() {
@@ -275,34 +309,79 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
     }
 
     public func renderTick() {
+        renderTick(target: nil, refreshHz: nil)
+    }
+
+    fileprivate func configureTrace(_ args: ToolingArgs) throws {
+        #if canImport(Metal) && canImport(QuartzCore) && !targetEnvironment(simulator)
+        let recordsDrawables = metalRenderer != nil
+        #else
+        let recordsDrawables = false
+        #endif
+        nativeTrace = try NativeWindowTrace(args: args, recordsDrawables: recordsDrawables)
+    }
+
+    fileprivate func finishTrace(enteringBackground: Bool = false) {
+        guard let trace = nativeTrace else { return }
+        nativeTrace = nil
+        trace.stopSampling()
+        if enteringBackground {
+            do { try trace.finish(waitForPresents: 0) }
+            catch { RuneStandardIO.error("Could not finish Rune trace: \(error)\n") }
+        } else {
+            Task { @MainActor in
+                do { try await trace.finishAfterDisplay() }
+                catch { RuneStandardIO.error("Could not finish Rune trace: \(error)\n") }
+            }
+        }
+    }
+
+    private var screenRefreshHz: Double {
+        #if os(visionOS)
+        return 60
+        #else
+        return Double(window?.windowScene?.screen.maximumFramesPerSecond ?? 60)
+        #endif
+    }
+
+    fileprivate func renderTick(target: CFTimeInterval?, refreshHz: Double?) {
         guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
+        guard !rendering else { frameRequested = true; return }
+        rendering = true
+        defer { rendering = false }
         frameRequested = false
         _ = MainQueueDispatcher.shared.drain()
-        let t = nowSeconds()
+        let start = CACurrentMediaTime()
+        nativeTrace?.begin(runtime, now: start, refreshHz: refreshHz ?? screenRefreshHz)
+        var tracedDrawable: UInt64?
+        let t = max(previousFrameTime ?? 0, elapsed(at: max(start, target ?? start)))
         beforeFrame?(t)
         let dt = Float(max(0, t - (previousFrameTime ?? t)))
-        let start = CACurrentMediaTime()
+        let needsFrameReport = reports?.onFrameEncoded != nil || reports?.onFrameDrawn != nil
+        if let refreshHz { reports?.setRefresh(refreshHz) }
         let commits = runtime.viewCommitCount
         var updateEnd: Double
         var primitives: Int
         var glyphs: Int
         var draws = 1
-        _ = runtime.surfaceMeter?.redraw(paced: true)
+        let submitted: CFTimeInterval
+        _ = runtime.surfaceMeter?.redraw(paced: target != nil)
 
         #if canImport(Metal) && canImport(QuartzCore)
         if let gpu = metalRenderer, let metalLayer = layer as? CAMetalLayer {
             let format: MTLPixelFormat = runtime.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
             if metalLayer.pixelFormat != format { metalLayer.pixelFormat = format }
-            guard let drawable = metalLayer.nextDrawable(), let commands = gpu.commandQueue.makeCommandBuffer() else {
+            let acquiredDrawable = metalLayer.nextDrawable()
+            guard let drawable = acquiredDrawable, let commands = gpu.commandQueue.makeCommandBuffer() else {
                 reports?.skipped()
-                _ = runtime.surfaceMeter?.skipped()
+                if acquiredDrawable == nil { runtime.surfaceMeter?.failed(.timeout) }
                 frameFinished?(true)
                 return
             }
             let frame = gpu.frame(runtime, at: t)
             updateEnd = CACurrentMediaTime()
             primitives = frame.instances.count
-            glyphs = reports == nil ? 0 : frame.instances.reduce(0) { $0 + ($1.params.y == KIND_GLYPH ? 1 : 0) }
+            glyphs = !needsFrameReport ? 0 : frame.instances.reduce(0) { $0 + ($1.params.y == KIND_GLYPH ? 1 : 0) }
             do {
                 if let compositor {
                     draws = try gpu.encodeCompositor(compositor, frame: frame, into: drawable.texture,
@@ -314,13 +393,16 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
             } catch {
                 RuneStandardIO.error("Could not present Rune frame: \(error)\n")
                 reports?.skipped()
-                _ = runtime.surfaceMeter?.skipped()
                 frameFinished?(runtime.isAnimating)
                 return
             }
             gpu.renderEngine.gpuLoss.attach(to: commands)
+            #if !targetEnvironment(simulator)
+            tracedDrawable = nativeTrace?.track(drawable)
+            #endif
             commands.present(drawable)
             commands.commit()
+            submitted = CACurrentMediaTime()
             GpuEvents.presented()
         } else {
             let scene = runtime.frame(at: t)
@@ -328,21 +410,36 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
             guard let surfaces = try? NativeSurfaceReference.capture(runtime.surfaces, srgbBlend: scene.srgbBlend),
                   let frame = try? RuneRef.render(scene, surfaces: surfaces), let image = makeCGImage(from: frame) else {
                 reports?.skipped()
-                _ = runtime.surfaceMeter?.skipped()
                 frameFinished?(false)
                 return
             }
             (cpuContent ?? layer).contents = image
+            submitted = CACurrentMediaTime()
             primitives = scene.primitives.count
-            glyphs = reports == nil ? 0 : scene.primitives.reduce(0) { $0 + ($1.kind == .glyph ? 1 : 0) }
+            glyphs = !needsFrameReport ? 0 : scene.primitives.reduce(0) { $0 + ($1.kind == .glyph ? 1 : 0) }
         }
         #else
         return
         #endif
 
+        runtime.interactionSubmitted(at: submitted, target: target)
+        nativeTrace?.submitted(runtime, at: submitted, started: start, target: target,
+                               sequence: tracedDrawable, continuous: runtime.isAnimating || compositor?.isAnimating == true)
+        if nativeTrace?.reachedLimit == true { finishTrace() }
+        runtime.surfaceMeter?.presented()
+        lastSubmission = submitted
         previousFrameTime = t
         // Scrolling and animated layout can move an accessible control without a new view commit.
         accessibilityCommit = nil
+        if voiceOverFocusCommit != runtime.commitCount, window?.isKeyWindow == true, UIAccessibility.isVoiceOverRunning {
+            voiceOverFocusCommit = runtime.commitCount
+            refreshAccessibilityElements()
+            let focus = accessibleElements.values.first(where: \.isRuneFocused)
+            if let focus, focus !== lastVoiceOverFocus {
+                UIAccessibility.post(notification: .layoutChanged, argument: focus)
+            }
+            lastVoiceOverFocus = focus
+        }
         let wantsKeyboard = runtime.hasImeTarget || runtime.hasSecureFocus
         if isSecureTextEntry != runtime.hasSecureFocus {
             isSecureTextEntry = runtime.hasSecureFocus
@@ -368,45 +465,48 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
             ReadySignal.ready()
             firstFrame?()
         }
-        let active = runtime.isAnimating || compositor?.isAnimating == true
-        if !active && !atRest { runtime.rest(at: t) }
-        atRest = !active
-        if let reports {
-            let end = CACurrentMediaTime()
+        let active = runtime.isAnimating || compositor?.isAnimating == true || nativeTrace?.keepsDrawing == true
+        windowRest.step(.drew(now: ProcessInfo.processInfo.systemUptime, lowMemory: false))
+        if let reports, needsFrameReport {
             reports.record(FrameEncoded(
-                outcome: .drawn, frameMs: (end - start) * 1000, updateMs: (updateEnd - start) * 1000,
-                encodeMs: (end - updateEnd) * 1000, committed: commits != runtime.viewCommitCount,
+                outcome: .drawn, frameMs: (submitted - start) * 1000, updateMs: (updateEnd - start) * 1000,
+                encodeMs: (submitted - updateEnd) * 1000, committed: commits != runtime.viewCommitCount,
                 primitives: primitives, glyphs: glyphs, animating: runtime.isAnimating,
                 compositorAnimating: compositor?.isAnimating ?? false, drawCount: draws,
-                compositorSummary: compositor?.summary(), at: t
+                compositorSummary: compositor?.summary(), at: submitted, presentsAt: target,
+                started: start, refreshHz: refreshHz
             ))
-            _ = runtime.updateIf(at: t) { state, tx in reports.flush(state: &state, tx: &tx, at: t) }
-            reports.inspect(runtime)
+            if reports.hasPendingDrawn(at: t) {
+                _ = runtime.updateIf(at: t) { state, tx in reports.flush(state: &state, tx: &tx, at: t) }
+            }
         }
+        reports?.inspect(runtime)
         if let meter = runtime.surfaceMeter {
             meter.setPacing(active ? .paced : .idle)
-            _ = meter.presented()
             receiveStats?(meter.currentStats())
         }
-        frameFinished?(active || runtime.isStale)
+        frameFinished?(active || runtime.isStale || frameRequested)
     }
 
     public override var accessibilityElements: [Any]? {
         get {
-            if accessibilityCommit != runtime.viewCommitCount {
-                accessibilityCommit = runtime.viewCommitCount
-                super.accessibilityElements = UIKitAccessibilityMapper.updateElements(
-                    from: runtime.accessibilitySnapshot(), container: self, cache: &accessibleElements
-                ) { [weak self] id, action in
-                    Task { @MainActor in
-                        guard let self else { return }
-                        if self.runtime.accessibilityAction(id, action, at: self.nowSeconds()) { self.invalidateFrame() }
-                    }
-                }
-            }
+            refreshAccessibilityElements()
             return super.accessibilityElements
         }
         set { super.accessibilityElements = newValue }
+    }
+
+    private func refreshAccessibilityElements() {
+        guard accessibilityCommit != runtime.viewCommitCount else { return }
+        accessibilityCommit = runtime.viewCommitCount
+        super.accessibilityElements = UIKitAccessibilityMapper.updateElements(
+            from: runtime.nativeAccessibilitySnapshot(), container: self, cache: &accessibleElements
+        ) { [weak self] id, action in
+            Task { @MainActor in
+                guard let self else { return }
+                if self.runtime.accessibilityAction(id, action, at: self.nowSeconds()) { self.invalidateFrame() }
+            }
+        }
     }
 
     private func makeCGImage(from frame: Frame) -> CGImage? {
@@ -429,8 +529,12 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
         )
     }
 
+    fileprivate func elapsed(at hostTime: CFTimeInterval) -> Double {
+        (hostTime - startTime) * timeScale
+    }
+
     fileprivate func nowSeconds() -> Double {
-        (ProcessInfo.processInfo.systemUptime - startTime) * timeScale
+        max(previousFrameTime ?? 0, elapsed(at: CACurrentMediaTime()))
     }
 
     private func point(for touch: UITouch) -> Vec2 {
@@ -632,6 +736,11 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
 public final class RuneIOSViewController<State>: UIViewController {
     public let runeView: RuneIOSView<State>
     private var displayLink: CADisplayLink?
+    #if !os(visionOS)
+    private weak var linkedScreen: UIScreen?
+    #endif
+    private var framePeriod = 1.0 / 60.0
+    private var lastTarget: CFTimeInterval?
 
     public init(
         runtime: Runtime<State>,
@@ -663,7 +772,8 @@ public final class RuneIOSViewController<State>: UIViewController {
     private var appShared: AppShared<State>?
     private var onWindow: ((WindowHandle) -> Void)?
     private var windowHandle: WindowHandle?
-    private var observingScene: UIScene?
+    private weak var observingScene: UIWindowScene?
+    private var appeared = false
 
     fileprivate func configure(_ app: App<State>) {
         appShared = app.sharedHandle.shared
@@ -673,12 +783,12 @@ public final class RuneIOSViewController<State>: UIViewController {
             runeView.reports = FrameReports(onFrameEncoded: app.onFrameEncodedHook,
                                            onFrameDrawn: app.onFrameDrawnHook, onInspectDrawn: app.onFrameInspectHook)
         }
-        if let receiver = app.devStatsReceiver {
-            runeView.runtime.surfaceMeter = SurfaceMeter(name: app.title)
-            runeView.receiveStats = receiver
-        }
+        let meter = SurfaceMeter(name: app.title)
+        runeView.runtime.surfaceMeter = meter
+        runeView.loopActivity = AppleSurfaceLoopObserver(meter: meter)
+        runeView.receiveStats = app.devStatsReceiver
         runeView.firstFrame = { [weak self] in
-            guard let handle = self?.windowHandle else { return }
+            guard let handle = self?.windowHandle, !handle.isReady else { return }
             handle.setReady(true)
             app.onReadyHook?(handle)
         }
@@ -686,6 +796,7 @@ public final class RuneIOSViewController<State>: UIViewController {
 
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        appeared = true
         if windowHandle == nil {
             let handle = WindowHandle(
                 title: title ?? "Rune",
@@ -693,8 +804,10 @@ public final class RuneIOSViewController<State>: UIViewController {
                 onFocus: { [weak self] in Task { @MainActor in self?.view.window?.makeKey() } },
                 onSetTitle: { [weak self] title in Task { @MainActor in self?.title = title } }
             )
+            if let meter = runeView.runtime.surfaceMeter { handle.attachSurfaceMeter(meter) }
             windowHandle = handle
             onWindow?(handle)
+            if runeView.didSignalReady { runeView.firstFrame?() }
         }
         runeView.requestFrame = { [weak self] in self?.wake() }
         runeView.frameFinished = { [weak self] active in self?.scheduleNextFrame(active: active) }
@@ -702,33 +815,23 @@ public final class RuneIOSViewController<State>: UIViewController {
         runeView.runtime.waker.setCallback { [weak self] in
             Task { @MainActor in self?.wake() }
         }
-        if let scene = view.window?.windowScene {
-            observingScene = scene
-            let center = NotificationCenter.default
-            center.addObserver(self, selector: #selector(sceneActivated), name: UIScene.didActivateNotification, object: scene)
-            center.addObserver(self, selector: #selector(sceneDeactivated), name: UIScene.willDeactivateNotification, object: scene)
-            center.addObserver(self, selector: #selector(sceneHidden), name: UIScene.didEnterBackgroundNotification, object: scene)
-        }
-        updateVisibility(observingScene?.activationState != .background)
         startDisplayLink()
+        updateVisibility(observingScene?.activationState != .background)
+        runeView.runtime.dispatchFocus(view.window?.isKeyWindow == true, at: runeView.nowSeconds())
+    }
+
+    public override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if appeared { startDisplayLink() }
     }
 
     public override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        appeared = false
         runeView.cancelActiveContact()
         runeView.runtime.dispatchFocus(false, at: runeView.nowSeconds())
         updateVisibility(false)
-        if let scene = observingScene {
-            let center = NotificationCenter.default
-            for name in [UIScene.didActivateNotification, UIScene.willDeactivateNotification, UIScene.didEnterBackgroundNotification] {
-                center.removeObserver(self, name: name, object: scene)
-            }
-            observingScene = nil
-        }
-        scheduledWake?.invalidate()
-        scheduledWake = nil
-        displayLink?.invalidate()
-        displayLink = nil
+        observe(nil)
     }
 
     public override func viewDidDisappear(_ animated: Bool) {
@@ -760,7 +863,9 @@ public final class RuneIOSViewController<State>: UIViewController {
     }
 
     private func updateVisibility(_ visible: Bool) {
+        if !visible { runeView.runtime.surfaceMeter?.setPacing(.idle) }
         runeView.runtime.setLiveVisible(visible, at: runeView.nowSeconds())
+        if !visible { runeView.windowRest.step(.unseen) }
         appShared?.setVisible(visible)
     }
 
@@ -780,23 +885,99 @@ public final class RuneIOSViewController<State>: UIViewController {
 
     @objc private func sceneHidden() {
         updateVisibility(false)
+        runeView.finishTrace(enteringBackground: true)
+    }
+
+    private func observe(_ scene: UIWindowScene?) {
+        guard scene !== observingScene || (scene == nil && displayLink != nil) else { return }
+        let center = NotificationCenter.default
+        if let previous = observingScene {
+            for name in [UIScene.didActivateNotification, UIScene.willDeactivateNotification, UIScene.didEnterBackgroundNotification] {
+                center.removeObserver(self, name: name, object: previous)
+            }
+        }
+        #if !os(visionOS)
+        center.removeObserver(self, name: UIScreen.modeDidChangeNotification, object: nil)
+        #endif
+        displayLink?.invalidate()
+        displayLink = nil
+        scheduledWake?.invalidate()
+        scheduledWake = nil
+        observingScene = scene
+        if let scene {
+            #if !os(visionOS)
+            center.addObserver(self, selector: #selector(screenModeChanged(_:)), name: UIScreen.modeDidChangeNotification, object: nil)
+            #endif
+            center.addObserver(self, selector: #selector(sceneActivated), name: UIScene.didActivateNotification, object: scene)
+            center.addObserver(self, selector: #selector(sceneDeactivated), name: UIScene.willDeactivateNotification, object: scene)
+            center.addObserver(self, selector: #selector(sceneHidden), name: UIScene.didEnterBackgroundNotification, object: scene)
+        }
     }
 
     private func startDisplayLink() {
-        guard displayLink == nil else { return }
-        let link = CADisplayLink(target: self, selector: #selector(onDisplayLink(_:)))
-        if let scene = observingScene { link.isPaused = scene.activationState != .foregroundActive }
-        link.add(to: .main, forMode: .common)
+        guard appeared else { return }
+        let scene = view.window?.windowScene
+        observe(scene)
+        guard let scene else { return }
+        #if !os(visionOS)
+        let screen = scene.screen
+        if displayLink != nil && linkedScreen === screen { return }
+        linkedScreen = screen
+        #else
+        if displayLink != nil { return }
+        #endif
+        let paused = scene.activationState != .foregroundActive || (displayLink?.isPaused ?? false)
+        displayLink?.invalidate()
+        let selector = #selector(onDisplayLink(_:))
+        let bound: CADisplayLink?
+        if #available(iOS 27, tvOS 27, macCatalyst 27, visionOS 27, *) {
+            bound = scene.displayLink(target: self, selector: selector)
+        } else {
+            #if os(visionOS)
+            bound = nil
+            #else
+            bound = screen.displayLink(withTarget: self, selector: selector)
+            #endif
+        }
+        let link = bound ?? CADisplayLink(target: self, selector: selector)
+        #if !os(visionOS)
+        preferMaximumRefreshRate(on: link, screen: screen)
+        #endif
         displayLink = link
-        runeView.runtime.dispatchFocus(view.window?.isKeyWindow == true, at: runeView.nowSeconds())
+        link.isPaused = paused
+        link.add(to: .main, forMode: .common)
     }
 
+    #if !os(visionOS)
+    @objc private func screenModeChanged(_ notification: Notification) {
+        guard let screen = notification.object as? UIScreen, screen === linkedScreen, let displayLink else { return }
+        preferMaximumRefreshRate(on: displayLink, screen: screen)
+    }
+
+    private func preferMaximumRefreshRate(on link: CADisplayLink, screen: UIScreen) {
+        let rate = Float(screen.maximumFramesPerSecond)
+        if rate > 0 {
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: min(30, rate), maximum: rate, preferred: rate)
+            framePeriod = 1 / Double(rate)
+        }
+    }
+    #endif
+
     private func wake() {
-        if let scene = observingScene, scene.activationState != .foregroundActive { return }
+        guard appeared, let scene = view.window?.windowScene, scene.activationState == .foregroundActive else { return }
+        startDisplayLink()
+        guard let displayLink else { return }
         runeView.frameRequested = true
         scheduledWake?.invalidate()
         scheduledWake = nil
-        displayLink?.isPaused = false
+        let wasPaused = displayLink.isPaused
+        displayLink.isPaused = false
+        // Input after a long idle can submit immediately without queuing behind the last drawable.
+        let now = CACurrentMediaTime()
+        if wasPaused, DisplayLinkPacer.rested(lastPresent: runeView.lastSubmission, lastTarget: lastTarget,
+                                               now: now, period: framePeriod) {
+            runeView.renderTick(target: nil, refreshHz: 1 / framePeriod)
+        }
     }
 
     private func scheduleNextFrame(active: Bool) {
@@ -805,7 +986,7 @@ public final class RuneIOSViewController<State>: UIViewController {
         scheduledWake = nil
         displayLink.isPaused = !active
         guard !active, runeView.timeScale > 0 else { return }
-        let now = runeView.nowSeconds()
+        let now = runeView.elapsed(at: CACurrentMediaTime())
         let runtime = runeView.runtime
         guard let due = runtime.nextWakeDeadline(after: runtime.currentTime) else { return }
         let delay = max(0, (due - now) / runeView.timeScale)
@@ -814,10 +995,19 @@ public final class RuneIOSViewController<State>: UIViewController {
         RunLoop.main.add(timer, forMode: .common)
     }
 
-    @objc private func deadlineReached() { wake() }
+    @objc private func deadlineReached() {
+        runeView.runtime.surfaceMeter?.noteDeadlineWake()
+        wake()
+    }
 
     @objc private func onDisplayLink(_ sender: CADisplayLink) {
-        runeView.renderTick()
+        startDisplayLink()
+        guard sender === displayLink, !sender.isPaused, observingScene?.activationState == .foregroundActive else { return }
+        let target = sender.targetTimestamp
+        let period = target - sender.timestamp
+        if period.isFinite && period > 0 { framePeriod = period }
+        lastTarget = target.isFinite && target > 0 ? target : nil
+        runeView.renderTick(target: lastTarget, refreshHz: 1 / framePeriod)
     }
 }
 #endif

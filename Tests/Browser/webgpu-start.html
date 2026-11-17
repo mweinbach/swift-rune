@@ -1,0 +1,104 @@
+<!doctype html>
+<canvas width="6" height="4" style="opacity:.8"></canvas><pre id="result">Running</pre>
+<script type="module">
+import { mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+const result = document.querySelector('#result'), canvas = document.querySelector('canvas');
+const native = navigator.gpu;
+let app;
+function check(ok, message) { if (!ok) throw Error(message); }
+function fixture() {
+    const memory = new WebAssembly.Memory({initial: 1});
+    const words = new Uint32Array(memory.buffer), floats = new Float32Array(memory.buffer);
+    const bytes = new Uint8Array(memory.buffer);
+    let dirty = true, drawn = false;
+    const state = {cpu:0, gpu:0, force:0, color:44, resets:0};
+    const reader = new OffscreenCanvas(6,4).getContext('2d', {willReadFrequently:true});
+    return {state, exports:{
+        memory, rune_web_enable() {}, __main_void: () => 0, rune_web_buffer: () => 0, rune_web_field: () => 0,
+        rune_web_next_wake: () => dirty ? 0 : Infinity,
+        rune_web_full_window: () => 1, rune_web_reset_renderer() { dirty = true; ++state.resets; },
+        rune_web_event(n) {
+            const message = JSON.parse(new TextDecoder().decode(bytes.subarray(0,n)));
+            if (message.kind === 'key') { state.color = 132; dirty = true; }
+            return 1;
+        },
+        rune_web_frame() {
+            if (!dirty) return 0;
+            dirty = false;
+            words.set([6,4]);
+            for (let i=0; i<24; ++i) bytes.set([state.color,25,35,255], 8 + i*4);
+            ++state.cpu;
+            return 104;
+        },
+        rune_web_scene(_time, force) {
+            if (!force && !dirty) return 0;
+            dirty = false;
+            words.set([0x32475352,6,4,7,0,1,1,1,1]);
+            floats.set([state.color/255,25/255,35/255,1],9);
+            words[13] = 0;
+            bytes.fill(0,56,61);
+            ++state.gpu;
+            state.force += force;
+            drawn = true;
+            return 61;
+        },
+        rune_web_accessibility() {
+            if (drawn) {
+                drawn = false;
+                reader.drawImage(canvas,0,0);
+                state.pixel = [...reader.getImageData(1,1,1,1).data];
+            }
+            return 0;
+        }
+    }};
+}
+const nextFrame = () => new Promise(resolve => requestAnimationFrame(resolve));
+async function waitFor(pred) {
+    const start = performance.now();
+    while (!pred()) { if (performance.now() - start > 5000) throw Error('Timed out awaiting CPU frame'); await nextFrame(); }
+}
+try {
+    const reactor = fixture();
+    let release;
+    const gate = new Promise(resolve => {release = resolve;});
+    let requests = 0;
+    Object.defineProperty(navigator, 'gpu', {configurable:true,value:{
+        async requestAdapter() { ++requests; await gate; return native.requestAdapter(); },
+        getPreferredCanvasFormat: () => native.getPreferredCanvasFormat()
+    }});
+    app = mountRuneBrowser(canvas, reactor, {resizeTo:null});
+    await waitFor(() => reactor.state.cpu && requests);
+    const under = canvas.previousSibling, context = under.getContext('2d');
+    check(app.renderer.api === 'Canvas 2D' && context.getImageData(0,0,1,1).data[0] === 44, 'First present waited for adapter');
+    canvas.dispatchEvent(new KeyboardEvent('keydown', {code:'KeyP',key:'p',bubbles:true}));
+    await waitFor(() => reactor.state.cpu === 2);
+    check(context.getImageData(0,0,1,1).data[0] === 132, 'CPU page missed input while compiling');
+    release();
+    await app.ready;
+    check(app.renderer.api === 'WebGPU' && reactor.state.force === 1 && reactor.state.pixel.join(',') === '132,25,35,255',
+        'First submitted GPU frame lost CPU input or the full-scene repaint');
+    check(!under.isConnected && under.width === 0 && canvas.style.opacity === '0.8', 'Underlay lifetime or page opacity');
+    app.dispose();
+    globalThis.RUNE_CPU_FIRST = 'only';
+    const cpu = fixture();
+    app = mountRuneBrowser(canvas, cpu, {resizeTo:null});
+    await app.ready;
+    check(app.renderer.api === 'Canvas 2D' && cpu.state.cpu === 1 && requests === 1, 'CPU-only policy acquired GPU');
+    app.dispose();
+    check(canvas.style.opacity === '0.8', 'CPU-only disposal did not restore page');
+    delete globalThis.RUNE_CPU_FIRST;
+    const failed = fixture();
+    failed.exports.rune_web_scene = () => { throw Error('First GPU frame rejected'); };
+    app = mountRuneBrowser(canvas,failed,{resizeTo:null});
+    await app.ready;
+    check(app.renderer.api === 'Canvas 2D', 'failed first GPU frame removed CPU renderer');
+    const beforeFailureKey = failed.state.cpu;
+    canvas.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyP',key:'p',bubbles:true}));
+    await waitFor(() => failed.state.cpu > beforeFailureKey);
+    check(canvas.previousSibling.getContext('2d').getImageData(0,0,1,1).data[0] === 132,
+        'CPU fallback did not present input after first GPU frame failed');
+    app.dispose();
+    result.textContent = 'PASS immediate CPU pixels, live input under delayed adapter, queue-fenced GPU handoff, CPU-only override, and recovery from first GPU draw failure';
+} catch (error) { result.textContent = 'FAIL ' + error.stack; }
+finally { app?.dispose(); delete navigator.gpu; delete globalThis.RUNE_CPU_FIRST; }
+</script>

@@ -188,7 +188,7 @@ struct EditHistoryChangesParityTests {
         #expect(e.text == pasted)
         e.paste("a\r\nb")
         #expect(e.text == pasted + "a\nb")
-        var single = TextEdit("")
+        var single = TextEdit("", multiline: false)
         single.paste("x\ny")
         #expect(single.text == "xy")
     }
@@ -266,7 +266,7 @@ struct EditHistoryChangesParityTests {
     func pasteKeepsSingleLineFieldsOnOneLine() {
         var secure = TextEdit("")
         secure.isSecure = true
-        var single = TextEdit("")
+        var single = TextEdit("", multiline: false)
         var multi = TextEdit("", multiline: true)
         secure.paste("a\tb\r\nc\u{2028}d")
         single.paste("a\tb\r\nc\u{2028}d")
@@ -276,5 +276,42 @@ struct EditHistoryChangesParityTests {
         #expect(multi.text == "a\tb\nc\u{2028}d")
         _ = single.applyIme(.commit("x\ny"))
         #expect(single.text == "abcdxy")
+    }
+
+    @Test("Standalone edits preserve authored paragraphs and choose a line mode when secured")
+    func authoredParagraphsAndLineMode() {
+        let document = "café\n\nאב\n"
+        var plain = TextEdit(document)
+        #expect(plain.text == document)
+        #expect(plain.multiline)
+        #expect(plain.blocks == [.paragraph, .paragraph, .paragraph, .paragraph])
+        #expect(plain.anchor == document.utf8.count)
+        #expect(plain.cursor == plain.anchor)
+        plain.paste("tail\r\nend")
+        #expect(plain.text == document + "tail\nend")
+
+        plain.isSecure = true
+        #expect(!plain.multiline)
+        #expect(plain.blocks.isEmpty)
+        plain.replaceText(document)
+        #expect(plain.text == document)
+        #expect(plain.displayString == String(repeating: "•", count: document.unicodeScalars.count))
+        #expect(plain.isPristine)
+        plain.isSecure = false
+        #expect(plain.multiline)
+
+        var single = TextEdit("a\nb", multiline: false)
+        #expect(single.text == "a b")
+        single.replaceText(document)
+        #expect(single.text == document)
+        single.paste("x\ny")
+        #expect(single.text == document + "xy")
+
+        var multi = TextEdit(document, multiline: true)
+        multi.isSecure = true
+        #expect(multi.multiline)
+        #expect(multi.displayString == TextEdit.multilineSecureMask)
+        multi.clear()
+        #expect(multi.displayString.isEmpty)
     }
 }

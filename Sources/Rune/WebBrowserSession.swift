@@ -6,11 +6,13 @@ import RuneRef
 final class WebBrowserSession {
     private struct Event: Decodable {
         var kind: String
+        var id, token: String?
         var clipboard: WebClipboardContent?
         var key, code, pointerType, text, expected: String?
         var button: PointerButton?
         var base, anchor, focus: Int?
         var x, y, dx, dy, scale: Float?
+        var insets: [Float]?
         var repeated: Bool?
         var deltaMode: UInt32?
         var dark, reducedMotion, contrast, hover, coarse: Bool?
@@ -26,19 +28,57 @@ final class WebBrowserSession {
 
     private var fieldUpdate: FieldUpdate?
     private var drawAfterInput = true
+    private(set) var cpuCanvas: WebCPUCanvas?
+    private let paintCPU: (Double, WebCPUCanvas?, Bool) throws -> WebCPUCanvas
     private var gpuTracker: ResidentLayerTracker?
     private let route: (Event, Double) -> Bool
-    private let shouldPaint: (Double) -> Bool
+    private let paintDelay: (Double) -> Double
     private let textIdleReady: () -> Bool
     private let textIdleTurn: () -> Bool
     let cancelPreparedText: () -> Void
+    let waker: Waker
+    let spellingChanged: () -> Void
+    let fontsChanged: () -> Void
     private let paint: (Double) throws -> Frame
-    private let paintGPU: (Double) throws -> RenderFrame
+    private let paintGPU: (Double, Bool) throws -> RenderFrame
+    let cycles: () -> (paint: CyclePaint?, sampled: Bool)
+    let config: WebAppConfig
+    let takeWindowTitle: () -> String?
+    let takeWindowHeight: () -> Float?
+    let pageMetrics: () -> SIMD3<Float>
+    let fullWindow: Bool
     let uiPasses: () -> Int
+    let takeCursor: () -> Data?
+    let takePopup: () -> Data?
+    let cancelPopups: () -> Void
+    let secondaryClaim: () -> Data?
     let takeClipboard: () -> Data?
+    let deferredAccessibility: () -> Int
+    let enableAccessibilityPatches: () -> Void
     let takeAccessibility: () -> Data?
 
     init<State>(_ host: WebAppHost<State>) {
+        waker = host.runtime.waker
+        let config = host.config
+        self.config = config
+        var lastTitle: String?
+        takeWindowTitle = {
+            guard let title = host.runtime.windowTitle, title != lastTitle else { return nil }
+            lastTitle = title
+            return title
+        }
+        var firstFit = config.fitContentHeight && !config.webDocument
+        takeWindowHeight = {
+            let runtime = host.runtime
+            let request = runtime.hasPendingWindowFrame ? runtime.takeWindowFrameRequest() : nil
+            guard !config.webDocument else { return nil }
+            defer { firstFit = false }
+            if let height = request?.size?.1 { return height }
+            // The browser has supplied the embedded canvas width before the first draw.
+            return firstFit ? runtime.contentHeight() : nil
+        }
+        pageMetrics = { SIMD3(host.runtime.pageHeight, host.runtime.pageOffset, host.runtime.focusedPath == nil ? 0 : 1) }
+        fullWindow = !config.webDocument && (config.canvasId == nil || (config.fullViewport && !config.fitContentHeight))
         uiPasses = { host.uiPasses }
         textIdleReady = {
             let runtime = host.runtime
@@ -47,13 +87,31 @@ final class WebBrowserSession {
         }
         textIdleTurn = { host.runtime.textIdleTurn() }
         cancelPreparedText = { host.runtime.cancelPreparedText() }
+        spellingChanged = { host.runtime.markNeedsCommit() }
+        fontsChanged = {
+            FontFamiliesRegistry.bumpEpoch()
+            host.runtime.invalidateFontFamilyLayout(at: host.runtime.currentTime)
+        }
+        let popup = WebPopupSession(host)
+        takePopup = popup.take
+        secondaryClaim = popup.secondaryClaim
+        cancelPopups = { host.runtime.cancelPopups() }
         let clipboard = WebClipboardSession(host)
         takeClipboard = clipboard.takeRequests
+        var cursor = WebCursorProjection()
+        takeCursor = { cursor.update(host.runtime.currentCursor()) }
         let accessibility = WebAccessibilityProjection()
+        deferredAccessibility = { accessibility.deferredPull(host.runtime) }
+        enableAccessibilityPatches = accessibility.enablePatches
         takeAccessibility = { accessibility.update(host.runtime) }
         route = { event, now in
             let key = event.key ?? ""
             switch event.kind {
+            case "menu":
+                return popup.answer(event.id, token: event.token)
+            case "secondaryBrowser":
+                host.runtime.secondaryAbandon()
+                return false
             case "clipboardCopy", "clipboardCut":
                 return clipboard.copySelection(forCut: event.kind == "clipboardCut")
             case "clipboardCommitCut":
@@ -71,7 +129,8 @@ final class WebBrowserSession {
             case "accessibility":
                 guard let action = event.action, let path = event.key else { return false }
                 let value = event.number.map(AccessibilityActionValue.number) ?? event.text.map(AccessibilityActionValue.text)
-                let handled = host.runtime.accessibilityAction(path, action, value: value, at: now)
+                let handled = WebAccessibilityDocument(host.runtime)?.performLinkAction(path, action: action, at: now)
+                    ?? host.runtime.accessibilityAction(path, action, value: value, at: now)
                 if handled { host.syncField(activate: true) }
                 return handled
             case "key", "keyup":
@@ -108,20 +167,46 @@ final class WebBrowserSession {
                       let hover = event.hover, let coarse = event.coarse else { return false }
                 host.updatePreferences(dark: dark, reducedMotion: motion, increasedContrast: contrast, hover: hover, coarse: coarse)
                 return true
+            case "pageScroll":
+                guard host.config.webDocument, let y = event.y else { return false }
+                let runtime = host.runtime
+                let oldWindow = runtime.pageWindow.start
+                let moved = runtime.setPageScroll(y, at: now)
+                let delta = runtime.pageWindow.start - oldWindow
+                let pointer = runtime.pointerPosition
+                if delta != 0, !runtime.isTouching, pointer.x >= 0, pointer.y >= 0, pointer.y < runtime.viewport.y {
+                    runtime.pointerMove(to: Vec2(pointer.x, pointer.y + delta), at: now)
+                }
+                return moved
+            case "pageScrollX":
+                guard host.config.webDocument, let path = event.key, let x = event.x else { return false }
+                let moved = host.runtime.setPageScrollX(path, x: x)
+                if moved, let offset = host.runtime.scrollOffsets[path], abs(offset.x - x) < 0.5 {
+                    accessibility.acknowledgeDocumentScroll(path, x: offset.x)
+                }
+                return moved
             case "resize":
                 guard let width = event.x, let height = event.y, let scale = event.scale,
                       width > 0, height > 0, scale >= 0.5,
                       width * scale <= 16384, height * scale <= 16384 else { return false }
-                return host.resize(cssSize: (width, height),
+                let resized = host.resize(cssSize: (width, height),
                                    reportedPixels: (UInt32((width * scale).rounded()), UInt32((height * scale).rounded())),
                                    scale: scale)
+                var insetsChanged = false
+                if let insets = event.insets, insets.count == 4 {
+                    insetsChanged = host.runtime.setSafeAreaInsets(SIMD4(insets[0], insets[1], insets[2], insets[3]))
+                }
+                if host.config.webDocument, let view = event.dy {
+                    return host.runtime.setPageBand(host.runtime.viewport.y, view: view) || resized || insetsChanged
+                }
+                return resized || insetsChanged
             case "wheel":
                 guard let x = event.x, let y = event.y, let dx = event.dx, let dy = event.dy,
                       let mode = WebMath.WheelDeltaMode(rawValue: event.deltaMode ?? 0) else { return false }
                 let delta = WebMath.normalizeWheelDelta(Vec2(dx, dy), mode: mode, pageHeightPx: host.runtime.viewport.y)
                 // Native scrolling uses positive deltas towards the top of the content.
                 if event.ctrl == true { return false } // Browser pinch-zoom.
-                if host.config.webDocument && abs(delta.y) >= abs(delta.x) { return false }
+                if (host.config.webDocument || host.config.fitContentHeight) && abs(delta.y) >= abs(delta.x) { return false }
                 let mods = Mods(shift: event.shift == true, ctrl: false, alt: event.alt == true,
                                 cmd: event.cmd == true, logo: event.cmd == true)
                 host.runtime.hostInput(.wheel) {
@@ -148,13 +233,30 @@ final class WebBrowserSession {
             default: return false
             }
         }
-        shouldPaint = { now in
+        paintDelay = { now in
             let rt = host.runtime
-            return host.compositor?.isAnimating == true || MainQueueDispatcher.shared.pendingCount > 0 || rt.hasPendingCommit || rt.isAnimating || rt.livePending ||
-                rt.poll != nil || (rt.nextWakeDeadline(after: rt.currentTime).map { $0 <= now } ?? false)
+            if host.compositor?.isAnimating == true || MainQueueDispatcher.shared.pendingCount > 0 ||
+                rt.hasPendingCommit || rt.isAnimating || rt.livePending { return 0 }
+            let due = rt.wakeDeadline() ?? .infinity
+            let delay = max(0, due - now)
+            if delay <= CyclePaint.displayTolerance, host.recordedCyclePaint != nil,
+               due == rt.activePaintedLoopWake, (rt.pollWakeDeadline() ?? .infinity) > due {
+                return 0
+            }
+            return delay
+        }
+        paintCPU = { now, previous, force in
+            let atlas = host.runtime.textSystem.glyphAtlas
+            let canvas = previous ?? WebCPUCanvas(glyphAtlas: atlas)
+            let start = atlas.outlineFillStats.elapsedNs
+            let frame = try host.renderGPUFrame(at: now)
+            try canvas.paint(frame, smoothing: host.runtime.fontSmoothing, compositor: host.compositor != nil,
+                             force: force, fillNs: atlas.outlineFillStats.elapsedNs &- start)
+            return canvas
         }
         paint = { try host.renderFrame(at: $0) }
-        paintGPU = { try host.renderGPUFrame(at: $0) }
+        paintGPU = { try host.renderGPUFrame(at: $0, allowCycle: $1) }
+        cycles = { (host.recordedCyclePaint, host.sampledCycleFrame) }
         currentField = { host.fieldMirror }
         host.onFieldChange = { [weak self] field, activate in
             self?.fieldUpdate = FieldUpdate(field: field, activate: activate)
@@ -164,6 +266,8 @@ final class WebBrowserSession {
     private let currentField: () -> WebFieldMirror?
 
     func requestPaint() { drawAfterInput = true }
+
+    func nextDelay(at now: Double) -> Double { drawAfterInput ? 0 : paintDelay(now) }
 
     func idleText(perform: Bool) -> Bool {
         guard !drawAfterInput, textIdleReady() else { return false }
@@ -178,7 +282,9 @@ final class WebBrowserSession {
         if event.kind == "edit" || event.kind == "selection" || event.kind == "insert", fieldUpdate == nil {
             fieldUpdate = FieldUpdate(field: currentField(), activate: false)
         }
-        drawAfterInput = true
+        if handled || (event.kind != "pageScroll" && event.kind != "pageScrollX" && event.kind != "wheel") {
+            drawAfterInput = true
+        }
         return handled
     }
 
@@ -189,12 +295,14 @@ final class WebBrowserSession {
     }
 
     func renderFrame(at now: Double, force: Bool = false) throws -> RenderFrame? {
-        guard force || drawAfterInput || shouldPaint(now) else { return nil }
+        guard force || drawAfterInput || paintDelay(now) <= 0 else { return nil }
+        cpuCanvas = nil
+        let allowCycle = !force && !drawAfterInput
         drawAfterInput = false
         // The WebGL context can be restored between frames. Rebuild any subtree the old
         // texture cache had allowed the runtime to omit.
         if force { discardGPUCache() }
-        let frame = try paintGPU(now).preparedForGL()
+        let frame = try paintGPU(now, allowCycle)
         if gpuTracker !== frame.residentTracker {
             discardGPUCache()
             gpuTracker = frame.residentTracker
@@ -203,8 +311,22 @@ final class WebBrowserSession {
         return frame
     }
 
+    func cpuFrame(at now: Double, force: Bool) throws -> WebCPUCanvas? {
+        guard force || drawAfterInput || paintDelay(now) <= 0 else { return nil }
+        drawAfterInput = false
+        discardGPUCache()
+        cpuCanvas = try paintCPU(now, cpuCanvas, force)
+        return cpuCanvas
+    }
+
     func publishCachedLayers(_ entries: [UInt64: UInt64]) {
         gpuTracker?.publish(entries, from: self)
+    }
+
+    func resetRenderer() {
+        discardGPUCache()
+        cpuCanvas = nil
+        requestPaint()
     }
 
     func discardGPUCache() {
@@ -213,7 +335,7 @@ final class WebBrowserSession {
     }
 
     func frame(at now: Double) throws -> Frame? {
-        guard drawAfterInput || shouldPaint(now) else { return nil }
+        guard drawAfterInput || paintDelay(now) <= 0 else { return nil }
         drawAfterInput = false
         return try paint(now)
     }
@@ -227,14 +349,12 @@ enum RuneWebReactor {
     static var session: WebBrowserSession?
     static var buffer: UnsafeMutableRawPointer?
     static var capacity = 0
-    static var lastGlyphGeneration: UInt64?
-    static var lastImageRevision: UInt64?
-    static var lastAtlasSizes: SIMD4<Int>?
     static var surfaceCache = WebSurfacePacket.Cache()
     static var atlasPatches = false
-    static var atlasSequence: UInt32 = 0
-    static var previousGlyphs: [UInt8]?
-    static var previousImages: [UInt8]?
+    static var atlasHistory = WebAtlasHistory()
+    static var cyclePatches = false
+    static var supportsImagePages = false
+    static var supportsGlyphPages = false
 
     static func report(_ error: any Error) -> Int {
         let reason = Data(String(describing: error).utf8)
@@ -264,6 +384,76 @@ func runeWebEnable() {
 @MainActor @_cdecl("rune_web_enable_atlas_patches")
 func runeWebEnableAtlasPatches() { RuneWebReactor.atlasPatches = true }
 
+@MainActor @_cdecl("rune_web_enable_cycle_patches")
+func runeWebEnableCyclePatches() { RuneWebReactor.cyclePatches = true }
+
+/// Negotiates page-local glyph UVs and independently retained R8 textures in RSG3.
+@MainActor @_cdecl("rune_web_enable_glyph_pages")
+func runeWebEnableGlyphPages() {
+    RuneWebReactor.supportsGlyphPages = true
+    RuneWebReactor.supportsImagePages = true
+    RuneWebReactor.atlasPatches = true
+}
+
+/// Enables the independent image textures in the RSG3 scene format.
+@MainActor @_cdecl("rune_web_enable_image_pages")
+func runeWebEnableImagePages() {
+    RuneWebReactor.supportsImagePages = true
+    RuneWebReactor.atlasPatches = true
+}
+
+/// A selected Hunspell dictionary finished fetching; previously unmarked fields recheck.
+@MainActor @_cdecl("rune_web_spelling_changed")
+func runeWebSpellingChanged() { RuneWebReactor.session?.spellingChanged() }
+
+@MainActor @_cdecl("rune_web_fonts_changed")
+func runeWebFontsChanged() {
+    RuneWebReactor.session?.fontsChanged()
+    RuneWebReactor.session?.requestPaint()
+}
+
+@MainActor @_cdecl("rune_web_config")
+func runeWebConfig() -> Int {
+    guard let config = RuneWebReactor.session?.config, let data = try? JSONEncoder().encode(config),
+          let bytes = RuneWebReactor.reserve(data.count) else { return 0 }
+    data.copyBytes(to: bytes.assumingMemoryBound(to: UInt8.self), count: data.count)
+    return data.count
+}
+
+/// Returns a changed UTF-8 title length, including an empty title, or -1 when unchanged.
+@MainActor @_cdecl("rune_web_window_title")
+func runeWebWindowTitle() -> Int {
+    guard let title = RuneWebReactor.session?.takeWindowTitle() else { return -1 }
+    let data = Data(title.utf8)
+    if !data.isEmpty {
+        guard let bytes = RuneWebReactor.reserve(data.count) else { return -1 }
+        data.copyBytes(to: bytes.assumingMemoryBound(to: UInt8.self), count: data.count)
+    }
+    return data.count
+}
+
+/// CSS height requested by the app, or -1 if the browser has no resize to apply.
+@MainActor @_cdecl("rune_web_window_height")
+func runeWebWindowHeight() -> Float { RuneWebReactor.session?.takeWindowHeight() ?? -1 }
+
+/// Document height, rendered band offset and whether a Rune control owns keyboard navigation.
+@MainActor @_cdecl("rune_web_page")
+func runeWebPage() -> Int {
+    guard let session = RuneWebReactor.session, session.config.webDocument, let bytes = RuneWebReactor.reserve(12) else { return 0 }
+    let metrics = session.pageMetrics()
+    for i in 0..<3 { bytes.storeBytes(of: metrics[i], toByteOffset: i * 4, as: Float.self) }
+    return 12
+}
+
+@MainActor @_cdecl("rune_web_full_window")
+func runeWebFullWindow() -> Int32 { RuneWebReactor.session?.fullWindow == true ? 1 : 0 }
+
+/// Switching back to the CPU requires repainting subtrees the lost GPU had cached.
+@MainActor @_cdecl("rune_web_reset_renderer")
+func runeWebResetRenderer() {
+    RuneWebReactor.session?.resetRenderer()
+}
+
 @MainActor @_cdecl("rune_web_buffer")
 func runeWebBuffer(_ length: Int) -> UnsafeMutableRawPointer? { RuneWebReactor.reserve(length) }
 
@@ -282,11 +472,53 @@ func runeWebField() -> Int {
     return data.count
 }
 
+@MainActor @_cdecl("rune_web_cursor")
+func runeWebCursor() -> Int {
+    guard let data = RuneWebReactor.session?.takeCursor(), let bytes = RuneWebReactor.reserve(data.count) else { return 0 }
+    data.copyBytes(to: bytes.assumingMemoryBound(to: UInt8.self), count: data.count)
+    return data.count
+}
+
+@MainActor @_cdecl("rune_web_popup")
+func runeWebPopup() -> Int {
+    guard let data = RuneWebReactor.session?.takePopup(), let bytes = RuneWebReactor.reserve(data.count) else { return 0 }
+    data.copyBytes(to: bytes.assumingMemoryBound(to: UInt8.self), count: data.count)
+    return data.count
+}
+
+@MainActor @_cdecl("rune_web_secondary_claim")
+func runeWebSecondaryClaim() -> Int {
+    guard let data = RuneWebReactor.session?.secondaryClaim(), let bytes = RuneWebReactor.reserve(data.count) else { return 0 }
+    data.copyBytes(to: bytes.assumingMemoryBound(to: UInt8.self), count: data.count)
+    return data.count
+}
+
 @MainActor @_cdecl("rune_web_clipboard")
 func runeWebClipboard() -> Int {
     guard let data = RuneWebReactor.session?.takeClipboard(), let bytes = RuneWebReactor.reserve(data.count) else { return 0 }
     data.copyBytes(to: bytes.assumingMemoryBound(to: UInt8.self), count: data.count)
     return data.count
+}
+
+/// Incremental CPU-first windows pull the rectangles and then copy each in bounded strips.
+/// Older hosts can continue to request a complete reference frame via rune_web_frame.
+@MainActor @_cdecl("rune_web_cpu_frame")
+func runeWebCPUFrame(_ time: Double, _ force: Int32) -> Int {
+    WASIEventLoop.poll()
+    guard let session = RuneWebReactor.session else { return -1 }
+    do {
+        guard let canvas = try session.cpuFrame(at: time, force: force != 0) else { return 0 }
+        guard let output = RuneWebReactor.reserve(canvas.byteCount) else { return -1 }
+        canvas.writeHeader(to: output)
+        return canvas.byteCount
+    } catch {
+        return RuneWebReactor.report(error)
+    }
+}
+
+@MainActor @_cdecl("rune_web_cpu_rect")
+func runeWebCPURect(_ index: Int, _ row: Int, _ count: Int) -> Int {
+    RuneWebReactor.session?.cpuCanvas?.copyRGBA(rect: index, row: row, count: count, reserve: RuneWebReactor.reserve) ?? 0
 }
 
 @MainActor @_cdecl("rune_web_frame")
@@ -308,6 +540,12 @@ func runeWebFrame(_ time: Double) -> Int {
     }
 }
 
+/// Seconds until another display frame is needed. Infinity lets the browser sleep until woken.
+@MainActor @_cdecl("rune_web_next_wake")
+func runeWebNextWake(_ now: Double) -> Double {
+    min(WASIEventLoop.nextDelay(), RuneWebReactor.session?.nextDelay(at: now) ?? .infinity)
+}
+
 /// The DOM host queries after presentation and performs one pass at browser idle priority.
 @MainActor @_cdecl("rune_web_idle_text")
 func runeWebIdleText(_ perform: Int32) -> Int32 {
@@ -320,42 +558,31 @@ func runeWebScene(_ time: Double, _ force: Int32) -> Int {
     WASIEventLoop.poll()
     guard let session = RuneWebReactor.session else { return -1 }
     do {
-        guard let scene = try session.renderFrame(at: time, force: force != 0) else { return 0 }
-        let sizes = SIMD4(scene.glyphs.width, scene.glyphs.height, scene.images.width, scene.images.height)
-        let previous = RuneWebReactor.lastAtlasSizes
-        let fullGlyphs = force != 0 || sizes.x != previous?.x || sizes.y != previous?.y
-        let fullImages = force != 0 || sizes.z != previous?.z || sizes.w != previous?.w
-        let changedGlyphs = scene.glyphGeneration != RuneWebReactor.lastGlyphGeneration
-        let changedImages = scene.imageRevision != RuneWebReactor.lastImageRevision
-        var glyphUpdate: WebAtlasUpdate = fullGlyphs || changedGlyphs ? .full : .none
-        var imageUpdate: WebAtlasUpdate = fullImages || changedImages ? .full : .none
-        var sequence: SIMD2<UInt32>?
-        if RuneWebReactor.atlasPatches {
-            if !fullGlyphs {
-                glyphUpdate = .update(width: sizes.x, height: sizes.y, channels: 1, texels: scene.glyphs.texels,
-                                      previous: RuneWebReactor.previousGlyphs, changed: changedGlyphs)
-            }
-            if !fullImages {
-                let patch = scene.imagePatch
-                let edges = patch?.fromRevision == RuneWebReactor.lastImageRevision ? patch?.edges : nil
-                imageUpdate = .update(width: sizes.z, height: sizes.w, channels: 4, texels: scene.images.texels,
-                                      previous: RuneWebReactor.previousImages, changed: changedImages, knownEdges: edges)
-            }
-            let base = RuneWebReactor.atlasSequence
-            sequence = SIMD2(base, glyphUpdate == .none && imageUpdate == .none ? base : base &+ 1)
+        guard var scene = try session.renderFrame(at: time, force: force != 0) else { return 0 }
+        if !RuneWebReactor.supportsGlyphPages && !scene.baseGlyphPages.isEmpty {
+            scene = try scene.flattenedGlyphPages()
         }
-        guard let packet = try WebScenePacket(scene: scene, glyphUpdate: glyphUpdate, imageUpdate: imageUpdate, sequence: sequence,
+        if !RuneWebReactor.supportsImagePages && !scene.imagePages.isEmpty {
+            scene = try scene.packedForLegacyWebPacket()
+        }
+        let cycles = RuneWebReactor.cyclePatches ? session.cycles() : (paint: nil, sampled: false)
+        if cycles.sampled, let paint = cycles.paint {
+            let length = WebCyclePacket.size(slotCount: paint.slots.count)
+            guard let buffer = RuneWebReactor.reserve(length) else { return -1 }
+            WebCyclePacket.write(scene: scene, paint: paint, to: buffer)
+            return length
+        }
+        let transfer = RuneWebReactor.atlasHistory.prepare(scene, force: force != 0, patches: RuneWebReactor.atlasPatches)
+        guard let packet = try WebScenePacket(scene: scene, glyphUpdate: transfer.glyph, imageUpdate: transfer.image,
+                sequence: transfer.sequence, pageUpdates: transfer.images, glyphTransfers: transfer.glyphs,
                 surfaceCache: force != 0 ? .init() : RuneWebReactor.surfaceCache),
-              let buffer = RuneWebReactor.reserve(packet.byteCount) else { return -1 }
+              let buffer = RuneWebReactor.reserve(packet.byteCount + (cycles.paint == nil ? 0 : 4)) else { return -1 }
         packet.write(to: buffer)
         RuneWebReactor.surfaceCache = packet.surfaces.next
-        RuneWebReactor.lastGlyphGeneration = scene.glyphGeneration
-        RuneWebReactor.lastImageRevision = scene.imageRevision
-        RuneWebReactor.lastAtlasSizes = sizes
-        if let sequence {
-            RuneWebReactor.previousGlyphs = scene.glyphs.texels
-            RuneWebReactor.previousImages = scene.images.texels
-            RuneWebReactor.atlasSequence = sequence.y
+        RuneWebReactor.atlasHistory.record(scene, transfer)
+        if let paint = cycles.paint {
+            WebCyclePacket.markFullPaint(buffer, byteCount: packet.byteCount, serial: paint.serial)
+            return packet.byteCount + 4
         }
         return packet.byteCount
     } catch {
@@ -385,6 +612,8 @@ func runeWebCachedLayers(_ count: Int) {
 
 @MainActor @_cdecl("rune_web_dispose")
 func runeWebDispose() {
+    RuneWebReactor.session?.waker.setCallback {}
+    RuneWebReactor.session?.cancelPopups()
     RuneWebReactor.session?.cancelPreparedText()
     RuneWebReactor.session?.discardGPUCache()
     BrowserImageCodec.reset()
@@ -393,13 +622,11 @@ func runeWebDispose() {
     WASIEventLoop.reset()
     RuneWebReactor.session = nil
     RuneWebReactor.enabled = false
-    RuneWebReactor.lastGlyphGeneration = nil
-    RuneWebReactor.lastImageRevision = nil
-    RuneWebReactor.lastAtlasSizes = nil
-    RuneWebReactor.previousGlyphs = nil
-    RuneWebReactor.previousImages = nil
-    RuneWebReactor.atlasSequence = 0
     RuneWebReactor.atlasPatches = false
+    RuneWebReactor.atlasHistory = .init()
+    RuneWebReactor.supportsImagePages = false
+    RuneWebReactor.supportsGlyphPages = false
+    RuneWebReactor.cyclePatches = false
     RuneWebReactor.surfaceCache = .init()
     RuneWebReactor.buffer?.deallocate()
     RuneWebReactor.buffer = nil

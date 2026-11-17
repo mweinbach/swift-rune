@@ -29,7 +29,7 @@ struct RuntimeAtlasGrowthTests {
         let column = sprite(width: 3, height: 503, marker: 2)
         let bannerEdges = packer.insert(banner)
         let columnEdges = packer.insert(column)
-        var strips: [SIMD4<Float>] = []
+        var strips: [ImageAtlasRegion] = []
         for marker in UInt8(3)..<15 {
             strips.append(packer.insert(sprite(width: 503, height: 3, marker: marker)))
         }
@@ -38,10 +38,10 @@ struct RuntimeAtlasGrowthTests {
         #expect(packer.atlas.width * packer.atlas.height <= 1024 * 1024)
         #expect(packer.insert(banner) == bannerEdges)
         #expect(packer.insert(column) == columnEdges)
-        #expect(center(packer.atlas, bannerEdges) == [1, 196, 21, 47])
-        #expect(center(packer.atlas, columnEdges) == [2, 196, 21, 47])
+        #expect(center(packer.atlas(at: bannerEdges.page), bannerEdges.edges) == [1, 196, 21, 47])
+        #expect(center(packer.atlas(at: columnEdges.page), columnEdges.edges) == [2, 196, 21, 47])
         for (i, edges) in strips.enumerated() {
-            #expect(center(packer.atlas, edges) == [UInt8(i + 3), 196, 21, 47])
+            #expect(center(packer.atlas(at: edges.page), edges.edges) == [UInt8(i + 3), 196, 21, 47])
         }
     }
 
@@ -49,9 +49,9 @@ struct RuntimeAtlasGrowthTests {
         for size in [SIMD2(16_384, 1), SIMD2(1, 16_384)] {
             var packer = Runtime<Int>.ImageAtlasPacker()
             let edges = packer.insert(sprite(width: size.x, height: size.y, marker: 185))
-            #expect(Int(edges.z - edges.x) == size.x && Int(edges.w - edges.y) == size.y)
+            #expect(Int(edges.edges.z - edges.edges.x) == size.x && Int(edges.edges.w - edges.edges.y) == size.y)
             #expect(packer.atlas.width <= 16_384 && packer.atlas.height <= 16_384)
-            #expect(center(packer.atlas, edges) == [185, 196, 21, 47])
+            #expect(center(packer.atlas(at: edges.page), edges.edges) == [185, 196, 21, 47])
         }
     }
 
@@ -86,7 +86,7 @@ struct RuntimeAtlasGrowthTests {
             }
             #expect(center(frame.images, instance: sprites[0]) == [226, 196, 21, 47])
             #expect(center(frame.images, instance: sprites[1]) == [phase, 196, 21, 47])
-            #expect(frame.images.width <= 128 && frame.images.height <= 128)
+            #expect(frame.images.width == 1024 && frame.images.height == 128)
         }
         // A submitted frame holds the atlas bytes and positions it was built with.
         #expect(center(first.images, instance: firstSprites[1]) == [0, 196, 21, 47])
@@ -100,13 +100,13 @@ struct RuntimeAtlasGrowthTests {
             let height = 40 + phase / 32
             packer.beginPaint()
             let edges = packer.insert(sprite(width: width, height: height, marker: UInt8(phase)))
-            #expect(center(packer.atlas, edges) == [UInt8(phase), 196, 21, 47])
-            #expect(packer.atlas.width * packer.atlas.height <= 256 * 256)
+            #expect(center(packer.atlas(at: edges.page), edges.edges) == [UInt8(phase), 196, 21, 47])
+            #expect(packer.atlas.width == 1024 && packer.atlas.height <= 256)
             packer.finishPixelPaint()
         }
     }
 
-    @Test func previousBitmapCanReappearAfterAnotherDrawReusesItsSlot() {
+    @Test func prependingANewBitmapKeepsPreviousImagesInTheirSlots() {
         var packer = Runtime<Int>.ImageAtlasPacker()
         let first = sprite(width: 12, height: 9, marker: 62)
         let changed = sprite(width: 12, height: 9, marker: 164)
@@ -118,11 +118,11 @@ struct RuntimeAtlasGrowthTests {
         packer.beginPaint()
         let replacement = packer.insert(changed)
         let reappearing = packer.insert(first)
-        #expect(replacement == original)
-        #expect(replacement != reappearing)
-        #expect(center(packer.atlas, replacement) == [164, 196, 21, 47])
-        #expect(center(packer.atlas, reappearing) == [62, 196, 21, 47])
-        #expect(center(previous, original) == [62, 196, 21, 47])
+        #expect(reappearing == original)
+        #expect(replacement != original)
+        #expect(center(packer.atlas(at: replacement.page), replacement.edges) == [164, 196, 21, 47])
+        #expect(center(packer.atlas(at: reappearing.page), reappearing.edges) == [62, 196, 21, 47])
+        #expect(center(previous, original.edges) == [62, 196, 21, 47])
     }
 
     @Test func foldedOpacityGroupKeepsTheImageSourceSize() throws {

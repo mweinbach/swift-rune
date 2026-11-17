@@ -1,0 +1,156 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Swift Rune large-view scroll benchmark</title>
+<style>* { margin: 0 } canvas { display: block; width: 800px; height: 500px }</style>
+<canvas></canvas><pre id="result">Starting…</pre>
+<script type="module">
+import { instantiateRuneBrowser, mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+import { WASI, ConsoleStdout, OpenFile, File } from '/__rune/shim/index.js';
+
+const params = new URL(location.href).searchParams;
+const view = params.get('view'), accessibility = params.get('accessibility');
+const canvas = document.querySelector('canvas'), result = document.getElementById('result');
+const nextFrame = () => new Promise(requestAnimationFrame);
+const now = () => performance.now();
+const warmup = 10, wheelTurns = 120;
+function distribution(samples) {
+    const values = samples.filter(Number.isFinite).sort((a, b) => a - b);
+    const at = p => Number(values[Math.floor((values.length - 1) * p)].toFixed(2));
+    return values.length ? { n: values.length, p50: at(.5), p95: at(.95), p99: at(.99) } : null;
+}
+
+let app, restoreSubmit;
+try {
+    if (view !== 'table' && view !== 'tree') throw Error('Choose the table or tree product');
+    const wasi = new WASI(['rune-kit-' + view, ...(view === 'tree' ? ['--big'] : [])], ['RUNE_PLAYGROUND=0'],
+        [new OpenFile(new File([])), ConsoleStdout.lineBuffered(console.log), ConsoleStdout.lineBuffered(console.error)]);
+    const { instance } = await instantiateRuneBrowser(fetch('/__rune/' + view + '.wasm'), { wasi_snapshot_preview1: wasi.wasiImport });
+    wasi.initialize(instance);
+    const api = instance.exports;
+    const frames = [], snapshots = [], intervals = [], inputs = [], flushes = [];
+    let fontsReady;
+    const fullFonts = api.rune_web_fonts_changed && new Promise(resolve => { fontsReady = resolve; });
+    let capture = true, scenePending = false, measuring = false, current;
+    function snapshot() {
+        const context = new OffscreenCanvas(canvas.width, canvas.height).getContext('2d');
+        context.drawImage(canvas, 0, 0);
+        return context.getImageData(0, 0, canvas.width, canvas.height).data;
+    }
+    const write = GPUQueue.prototype.writeBuffer;
+    GPUQueue.prototype.writeBuffer = function (buffer, offset, source, first, length) {
+        const value = write.apply(this, arguments);
+        if (current && buffer.label === 'Rune instances') {
+            current.instanceUploadBytes += (length ?? source.length) * source.BYTES_PER_ELEMENT;
+            current.instanceWrites++;
+        }
+        return value;
+    };
+    const submit = GPUQueue.prototype.submit;
+    GPUQueue.prototype.submit = function (...args) {
+        const value = submit.apply(this, args);
+        if (current && current.throughSubmit === undefined) current.throughSubmit = now() - current.start;
+        if (capture && scenePending) { snapshots.push(snapshot()); capture = false; }
+        scenePending = false;
+        return value;
+    };
+    restoreSubmit = () => {
+        GPUQueue.prototype.submit = submit;
+        GPUQueue.prototype.writeBuffer = write;
+    };
+    if (accessibility && !api.rune_web_enable_accessibility_patches) throw Error('The reactor needs accessibility patch support for this comparison');
+    app = mountRuneBrowser(canvas, { exports: { ...api,
+        rune_web_enable_accessibility_patches: accessibility === 'full' ? undefined : api.rune_web_enable_accessibility_patches,
+        rune_web_fonts_changed: fontsReady && (() => {
+            api.rune_web_fonts_changed();
+            if (fontsReady) {
+                snapshots.length = 0;
+                capture = true;
+                fontsReady();
+                fontsReady = null;
+            }
+        }),
+        rune_web_frame() { throw Error('Unexpected CPU rasterization'); },
+        rune_web_scene(...args) {
+            const start = now();
+            const length = api.rune_web_scene(...args);
+            scenePending = length > 0;
+            current = null;
+            if (length > 0 && measuring) {
+                const endScene = now();
+                const words = new Uint32Array(api.memory.buffer, api.rune_web_buffer(0), 5);
+                current = { start, scene: endScene - start, instances: words[4], bytes: length, instanceWrites: 0, instanceUploadBytes: 0 };
+                frames.push(current);
+            }
+            return length;
+        },
+        rune_web_accessibility() {
+            const start = now();
+            const length = api.rune_web_accessibility();
+            if (current) {
+                current.accessibility = now() - start;
+                current.accessibilityBytes = Math.max(0, length);
+            }
+            return length;
+        },
+        rune_web_flush_accessibility: api.rune_web_flush_accessibility && (() => {
+            const start = now();
+            const size = api.rune_web_flush_accessibility();
+            flushes.push({ time: now() - start, bytes: Math.max(0, size) });
+            return size;
+        })
+    } }, { backend: 'webgpu', resizeTo: canvas });
+    await app.ready;
+    // Benchmark steady scrolling after these stock apps switch to their complete bundled fonts.
+    result.textContent = 'Waiting for the bundled fonts…';
+    await fullFonts;
+    for (let i = 0; i < 30 && !snapshots.length; i++) await nextFrame();
+    if (app.renderer.api !== 'WebGPU' || !snapshots.length) throw Error('Initial GPU frame was missing');
+    let previous;
+    for (let i = 0; i < wheelTurns; i++) {
+        await nextFrame();
+        const start = now();
+        if (i === warmup) measuring = true;
+        if (i > warmup) intervals.push(start - previous);
+        previous = start;
+        canvas.dispatchEvent(new WheelEvent('wheel', { clientX: view === 'tree' ? 120 : 300, clientY: 230,
+            deltaY: 17, deltaMode: 0, bubbles: true, cancelable: true }));
+        if (measuring) inputs.push(now() - start);
+    }
+    capture = true;
+    for (let i = 0; i < 10 && capture; i++) await nextFrame();
+    measuring = false;
+    if (snapshots.length !== 2 || snapshots[0].length !== snapshots[1].length || frames.length < 80) {
+        throw Error('Scroll measurement did not present enough frames');
+    }
+    let changedPixels = 0;
+    for (let i = 0; i < snapshots[0].length; i += 4) {
+        if ([0, 1, 2].some(c => snapshots[0][i + c] !== snapshots[1][i + c])) changedPixels++;
+    }
+    if (changedPixels < 100) throw Error('Scrolling did not move the visible content');
+    // Include the accessibility update deferred until scrolling settles, outside the timed interval.
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const nodes = [...document.querySelectorAll('[data-rune-target]')].map(node => {
+        const box = node.getBoundingClientRect();
+        return [node.dataset.runeTarget, node.getAttribute('role'), node.getAttribute('aria-label'),
+            node.childElementCount ? '' : node.textContent, node.getAttribute('aria-checked'), node.getAttribute('aria-selected'),
+            ...[box.x, box.y, box.width, box.height].map(Math.round)];
+    });
+    if (!nodes.length) throw Error('The scrolled view did not expose any accessibility targets');
+    const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(nodes)));
+    const accessibilityHash = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('');
+    const metric = name => distribution(frames.map(frame => frame[name]));
+    result.textContent = 'PASS ' + JSON.stringify({ view, accessibility, renderer: app.renderer, viewport: [canvas.width, canvas.height],
+        wheelTurns, warmup, changedPixels, inputMs: distribution(inputs), sceneMs: metric('scene'),
+        throughSubmitMs: metric('throughSubmit'), accessibilityMs: metric('accessibility'),
+        accessibilityBytes: metric('accessibilityBytes'),
+        measuredAccessibilityBytes: frames.reduce((sum, frame) => sum + (frame.accessibilityBytes ?? 0), 0),
+        flushes: flushes.length, totalFlushBytes: flushes.reduce((sum, flush) => sum + flush.bytes, 0),
+        flushMs: distribution(flushes.map(f => f.time)), flushBytes: distribution(flushes.map(f => f.bytes)),
+        accessibleNodes: nodes.length, accessibilityHash, instances: metric('instances'), packetBytes: metric('bytes'),
+        instanceUploadBytes: metric('instanceUploadBytes'), instanceWrites: metric('instanceWrites'),
+        totalInstanceBytes: frames.reduce((sum,f) => sum + f.instanceUploadBytes, 0),
+        fullInstanceBytes: frames.reduce((sum,f) => sum + f.instances * 128, 0),
+        frameIntervalMs: distribution(intervals), scrollFPS: Number((1000 * intervals.length / intervals.reduce((a,b) => a+b, 0)).toFixed(2)) });
+} catch (error) { result.textContent = 'FAIL ' + error.stack; }
+finally { restoreSubmit?.(); app?.dispose(); }
+</script>

@@ -105,7 +105,7 @@ extension Runtime {
     /// `Tx::focus`'s target (`sync_requested_focus`): the first shown element keyed `key`, or the
     /// first shown focusable element inside it.
     internal func focusWhenShownTarget(_ key: String) -> Int? {
-        guard let anchor = flatNodes.indices.first(where: { flatNodes[$0].key == key && focusAskShown($0) }) else {
+        guard let anchor = flatNodes.indices.first(where: { matchesAuthoredKey(flatNodes[$0].key, key) && focusAskShown($0) }) else {
             return nil
         }
         let root = flatNodes[anchor].path

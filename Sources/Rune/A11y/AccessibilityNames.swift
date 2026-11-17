@@ -68,7 +68,7 @@ internal struct AccessibilityNameSource {
     ) -> Int? {
         func find(in scope: Int) -> Int? {
             for child in children(scope) {
-                if child != index, keyAt(child) == key { return child }
+                if child != index, matchesAuthoredKey(keyAt(child), key) { return child }
                 if let found = find(in: child) { return found }
             }
             return nil

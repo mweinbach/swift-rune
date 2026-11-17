@@ -526,12 +526,17 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         return images.read(uint2(t));
     }
 
+    #ifdef RUNE_WINDFOIL
+    static inline float4 rune_fragment(RenderOut i, constant RenderGlobals &g,
+        texture2d<float> atlas, texture2d<float> images, texture2d<uint> outlines, thread float4 &lcd_cov) {
+    #else
     fragment float4 fs(
         RenderOut i [[stage_in]],
         constant RenderGlobals &g [[buffer(1)]],
         texture2d<float> atlas [[texture(0)]],
         texture2d<float> images [[texture(1)]]
     ) {
+    #endif
         if (i.params.y > 7.5 && i.params.y < 8.5) {
             float2 screen = i.pos.xy + g.projection.xy;
             float2 p = screen - i.rect.xy;
@@ -691,6 +696,13 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
             int2 atlasDims = int2(atlas.get_width(), atlas.get_height());
             int2 maxCoord = max(atlasDims - int2(1), int2(0));
             float cov;
+            #ifdef RUNE_WINDFOIL
+            if (i.radii.w > 0.0) {
+                cov = outline_glyph(i.radii, i.border, screen, outlines, lcd_cov);
+            } else if (i.radii.x > 0.5 && i.uv.z == 0.0 && !rotated) {
+                cov = lcd_mask(i.rect, i.uv, screen, atlas, lcd_cov);
+            } else
+            #endif
             if (i.uv.z > 0.0 || rotated) {
                 float2 p = select(screen, i.p, rotated);
                 float2 span = select(i.rect.zw, i.uv.zw, i.uv.z > 0.0);
@@ -722,7 +734,39 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         }
         return source;
     }
+    #ifdef RUNE_WINDFOIL
+    #ifdef RUNE_DUAL_SOURCE
+    struct RuneDualColor {
+        float4 color [[color(0), index(0)]];
+        float4 blend [[color(0), index(1)]];
+    };
+    fragment RuneDualColor fs_windfoil(
+    #else
+    fragment float4 fs_windfoil(
+    #endif
+        RenderOut i [[stage_in]], constant RenderGlobals &g [[buffer(1)]],
+        texture2d<float> atlas [[texture(0)]], texture2d<float> images [[texture(1)]],
+        texture2d<uint> outlines [[texture(2)]]) {
+        float4 lcd_cov = float4(0.0);
+        float4 c = rune_fragment(i, g, atlas, images, outlines, lcd_cov);
+        #ifdef RUNE_DUAL_SOURCE
+        if (lcd_cov.w == 0.0) { return RuneDualColor{c, float4(c.a)}; }
+        float e = i.params.w;
+        float mean = pow((lcd_cov.r + lcd_cov.g + lcd_cov.b) / 3.0, e);
+        if (mean < 1.0e-5) { return RuneDualColor{float4(0.0), float4(0.0)}; }
+        float3 k = pow(lcd_cov.rgb, float3(e)) / mean;
+        return RuneDualColor{float4(c.rgb * k, c.a), float4(c.a * k, c.a)};
+        #else
+        return c;
+        #endif
+    }
+    #endif
     """
+
+    internal static func windfoilMSL(dualSource: Bool) -> String {
+        let defines = dualSource ? "#define RUNE_WINDFOIL 1\n#define RUNE_DUAL_SOURCE 1\n" : "#define RUNE_WINDFOIL 1\n"
+        return defines + outlineMSL + "\n" + shaderMSL
+    }
 
     /// Faithful MSL translation of `backdrop_blur.wgsl`.
     public static let backdropBlurMSL: String = """
@@ -1203,12 +1247,35 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         return (c.x + c.y + c.z) / 3.0;
     }
 
+    // A native shaping cluster can contain multiple overlapping glyphs. Its resting R8 tile
+    // uses the same per-glyph byte rounding and source-over as the native mask compositor.
+    static inline float outline_tile(uint rec, float2 p, texture2d<uint> outlines) {
+        uint count = min(outline_texel(rec, outlines).x, 64u);
+        uint dest = 0u;
+        for (uint i = 0u; i < count && dest < 255u; ++i) {
+            uint base = rec + 1u + 3u * i;
+            uint4 bounds = outline_texel(base, outlines);
+            float2 lo = float2(bounds.xy);
+            if (any(p < lo) || any(p >= lo + float2(bounds.zw))) { continue; }
+            float4 placement = as_type<float4>(outline_texel(base + 1u, outlines));
+            uint4 glyph = outline_texel(base + 2u, outlines);
+            float2 local = float2(p.x - placement.x, placement.y - p.y);
+            float coverage = glyph.z == 1u
+                ? outline_slug(glyph.x, glyph.y, local, placement.z, placement.w, 0.5, outlines)
+                : outline_coverage(glyph.x, glyph.y, local, placement.z, placement.w, 0.5, 0.5, outlines);
+            uint a = uint(rint(saturate(coverage) * 255.0));
+            dest = a + (dest * (255u - a) + 127u) / 255u;
+        }
+        return float(dest) / 255.0;
+    }
+
     static inline float outline_glyph(float4 radii, float4 border, float2 screen, texture2d<uint> outlines, thread float4 &lcd_cov) {
         float z = radii.w;
         uint rec = uint(border.x);
         uint hint = uint(border.y);
         float hw = 0.5 / z;
         uint mode = uint(border.w + 0.5);
+        if (mode == 4u) { return outline_tile(rec, screen - radii.xy, outlines); }
         float across = select(1.0, 3.0, mode == 3u);
         float2 local = float2((screen.x - radii.x) / across, radii.y - screen.y) / z;
         if (mode == 1u) { return outline_slug(rec, hint, local, radii.z, border.z, hw, outlines); }

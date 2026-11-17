@@ -1,6 +1,9 @@
 #if canImport(CRuneOffscreenGL)
 import CRuneGL
 import CRuneOffscreenGL
+#if os(Windows)
+import CRuneWin32
+#endif
 import RuneRef
 
 /// A private GL context and resizable RGBA8 target for synchronous frame capture.
@@ -51,6 +54,9 @@ public final class OffscreenGLContext {
         guard rune_gl_surface_wait(renderer, fence, 1) == 1 else {
             throw OffscreenRenderError.capture("The offscreen GL frame did not complete")
         }
+        #if os(Windows)
+        rune_win_gl_completion_poll_current()
+        #endif
         return submitted
     }
 
@@ -78,6 +84,9 @@ public final class OffscreenGLContext {
                 }
             }
         }
+        #if os(Windows)
+        rune_win_gl_completion_poll_current()
+        #endif
         return Frame(width: width, height: height, rgba: rgba)
     }
 

@@ -10,7 +10,7 @@ enum TaffyBridge {
         let fn: (Float?) -> Vec2
     }
 
-    enum ScrollXChild {
+    enum ScrollXChild: Equatable {
         case single(vertical: Bool)
         case many(vertical: Bool)
     }
@@ -367,32 +367,22 @@ enum TaffyBridge {
 
     // MARK: - Scroll Content Extent Helper
 
-    static func computeContentSize(
-        ownLayout: RuneTaffy.Layout,
-        ownStyle: RuneTaffy.TaffyStyle,
-        children: [(layout: RuneTaffy.Layout, style: RuneTaffy.TaffyStyle, content: Vec2)]
-    ) -> Vec2 {
-        var maxX = max(ownLayout.size.width, ownLayout.contentSize.width)
-        var maxY = max(ownLayout.size.height, ownLayout.contentSize.height)
-        let padRight = ownLayout.padding.right + ownLayout.border.right
-        let padBottom = ownLayout.padding.bottom + ownLayout.border.bottom
-        for child in children {
-            if child.style.display == .none || child.style.position == .absolute || child.style.position == .fixed {
-                continue
-            }
-            let cx = child.layout.location.x
-            let cy = child.layout.location.y
-            let clipsX = child.style.overflow.x != .visible
-            let clipsY = child.style.overflow.y != .visible
-            let childW = clipsX ? child.layout.size.width : max(child.layout.size.width, child.content.x)
-            let childH = clipsY ? child.layout.size.height : max(child.layout.size.height, child.content.y)
-            let rightEdge = cx + childW + child.layout.margin.right + padRight
-            let bottomEdge = cy + childH + child.layout.margin.bottom + padBottom
-            maxX = max(maxX, rightEdge)
-            maxY = max(maxY, bottomEdge)
+    struct ContentExtent {
+        private(set) var size: Vec2
+        private let trailingInset: Vec2
+
+        init(_ own: RuneTaffy.Layout) {
+            size = Vec2(max(own.size.width, own.contentSize.width), max(own.size.height, own.contentSize.height))
+            trailingInset = Vec2(own.padding.right + own.border.right, own.padding.bottom + own.border.bottom)
         }
-        _ = ownStyle
-        return Vec2(maxX, maxY)
+
+        mutating func include(_ child: RuneTaffy.Layout, style: RuneTaffy.TaffyStyle, content: Vec2) {
+            guard style.display != .none, style.position != .absolute, style.position != .fixed else { return }
+            let width = style.overflow.x == .visible ? max(child.size.width, content.x) : child.size.width
+            let height = style.overflow.y == .visible ? max(child.size.height, content.y) : child.size.height
+            size.x = max(size.x, child.location.x + width + child.margin.right + trailingInset.x)
+            size.y = max(size.y, child.location.y + height + child.margin.bottom + trailingInset.y)
+        }
     }
 
     // MARK: - Single-Shot LayoutEngine.compute
@@ -495,29 +485,18 @@ enum TaffyBridge {
             try? tree.computeLayout(rootId, availableSpace: available)
         }
 
-        func extract(_ node: LayoutInputNode, _ id: RuneTaffy.NodeId) -> LayoutEngine.ResultNode {
-            let taffyLayout = (try? tree.unroundedLayout(id)) ?? RuneTaffy.Layout.zero
-            let taffyStyle = nodeStyles[id] ?? RuneTaffy.TaffyStyle()
+        func extract(_ node: LayoutInputNode, _ id: RuneTaffy.NodeId, _ taffyLayout: RuneTaffy.Layout) -> LayoutEngine.ResultNode {
             let childIds = (try? tree.children(id)) ?? []
 
             var childResults: [LayoutEngine.ResultNode] = []
             childResults.reserveCapacity(childIds.count)
-            var childLayoutsForContent: [(layout: RuneTaffy.Layout, style: RuneTaffy.TaffyStyle, content: Vec2)] = []
-            childLayoutsForContent.reserveCapacity(childIds.count)
-
+            var content = ContentExtent(taffyLayout)
             for (i, cid) in childIds.enumerated() where i < node.children.count {
-                let childRes = extract(node.children[i], cid)
-                childResults.append(childRes)
-                let cLayout = (try? tree.unroundedLayout(cid)) ?? RuneTaffy.Layout.zero
-                let cStyle = nodeStyles[cid] ?? RuneTaffy.TaffyStyle()
-                childLayoutsForContent.append((cLayout, cStyle, childRes.layout.contentSize))
+                let childLayout = (try? tree.unroundedLayout(cid)) ?? .zero
+                let child = extract(node.children[i], cid, childLayout)
+                childResults.append(child)
+                content.include(childLayout, style: nodeStyles[cid] ?? RuneTaffy.TaffyStyle(), content: child.layout.contentSize)
             }
-
-            let content = computeContentSize(
-                ownLayout: taffyLayout,
-                ownStyle: taffyStyle,
-                children: childLayoutsForContent
-            )
 
             return LayoutEngine.ResultNode(
                 layout: ComputedLayout(
@@ -528,12 +507,12 @@ enum TaffyBridge {
                         taffyLayout.size.height
                     ),
                     localSize: Vec2(taffyLayout.size.width, taffyLayout.size.height),
-                    contentSize: content
+                    contentSize: content.size
                 ),
                 children: childResults
             )
         }
 
-        return extract(root, rootId)
+        return extract(root, rootId, (try? tree.unroundedLayout(rootId)) ?? .zero)
     }
 }

@@ -8,6 +8,7 @@ import Glibc
 import Musl
 #elseif canImport(WinSDK)
 import WinSDK
+import CRuneWin32
 #endif
 
 #if os(macOS)
@@ -21,7 +22,7 @@ public enum QuitLifecycle {
     nonisolated(unsafe) private static var state: QuitState = .running
     nonisolated(unsafe) private static var fastExitHookFn: (@Sendable () -> Void)?
     nonisolated(unsafe) private static var orderly: Bool = false
-    nonisolated(unsafe) private static var watchStarted: Bool = false
+    nonisolated(unsafe) private static var quitGeneration: UInt64 = 0
     nonisolated(unsafe) private static var quitHooks: [ObjectIdentifier: @Sendable () -> Void] = [:]
 
     /// Registers a `last` closure to run before fast exit (`rune::fast_exit`).
@@ -60,13 +61,21 @@ public enum QuitLifecycle {
         return state
     }
 
+    #if os(Windows) || os(Linux)
+    internal static func beginWindowGroup() {
+        lock.withLock {
+            if state == .done { state = .running }
+        }
+    }
+    #endif
+
     /// Resets quit lifecycle state for isolated unit tests.
     internal static func resetForTesting() {
         lock.lock()
         state = .running
         fastExitHookFn = nil
         orderly = false
-        watchStarted = false
+        quitGeneration &+= 1
         quitHooks.removeAll()
         lock.unlock()
     }
@@ -81,16 +90,16 @@ public enum QuitLifecycle {
             return false
         }()
         state = next
-        let shouldWatch = startedQuit && !watchStarted
-        if shouldWatch { watchStarted = true }
+        #if !os(WASI)
+        if startedQuit { quitGeneration &+= 1 }
+        let generation = quitGeneration
+        #endif
         lock.unlock()
 
         if startedQuit {
             QuitMarks.record("quit.start")
             #if !os(WASI)
-            if shouldWatch {
-                startWatchThread()
-            }
+            startWatchThread(generation: generation)
             #endif
         }
         return effects
@@ -123,13 +132,13 @@ public enum QuitLifecycle {
     }
 
     #if !os(WASI)
-    private static func startWatchThread() {
+    private static func startWatchThread(generation: UInt64) {
         let startedAt = Date()
         Thread.detachNewThread {
             while true {
                 Thread.sleep(forTimeInterval: 3.0)
                 lock.lock()
-                let done = (state == .done)
+                let done = generation != quitGeneration || state == .done || state == .running
                 lock.unlock()
                 if done { break }
                 let ms = Int(max(0.0, Date().timeIntervalSince(startedAt) * 1000.0))
@@ -152,11 +161,20 @@ public enum QuitLifecycle {
 
     /// Fast exit path once hooks have run and the loop is ending (`quit::end_fast`).
     public static func endFast(_ last: @Sendable () -> Void) -> Never {
+        #if os(Windows)
+        rune_win_destroy_quit_windows()
+        #endif
         ReadySignal.clear()
+        #if os(Windows)
+        WindowsSystemTray.removeAll()
+        #endif
         let effects = send(.exited)
         if effects.contains(.relaunch) {
             RelaunchController.spawn()
         }
+        #if os(Windows)
+        InstanceLaunches.shared.ended()
+        #endif
         QuitMarks.record("quit.last")
         last()
         endProcess()
@@ -212,23 +230,19 @@ public enum RelaunchController {
     public static let handedEnvVar = "RUNE_INSTANCE_HANDED"
     public static let maxWaitSeconds: Double = 10.0
 
-    private static let waitLock = NSLock()
-    nonisolated(unsafe) private static var waitedForPrevious = false
-
-    /// Blocks up to 10s if launched with `RUNE_RELAUNCH_AFTER=<pid>`.
-    public static func waitForPrevious() {
-        waitLock.lock()
-        let alreadyWaited = waitedForPrevious
-        waitedForPrevious = true
-        waitLock.unlock()
-        guard !alreadyWaited else { return }
-
+    private static let waitedForPrevious: Void = {
         guard
             let raw = ProcessInfo.processInfo.environment[afterEnvVar],
             let pid = UInt32(raw),
+            pid > 0,
             pid != UInt32(max(0, ProcessInfo.processInfo.processIdentifier))
         else { return }
         wait(pid: pid)
+    }()
+
+    /// Blocks up to 10s if launched with `RUNE_RELAUNCH_AFTER=<pid>`.
+    public static func waitForPrevious() {
+        _ = waitedForPrevious
     }
 
     public static func spawn(arguments: [String] = Array(CommandLine.arguments.dropFirst())) {
@@ -241,19 +255,44 @@ public enum RelaunchController {
         #endif
     }
 
+    internal static var handedFrom: UInt32? {
+        guard let raw = ProcessInfo.processInfo.environment[handedEnvVar], let pid = UInt32(raw), pid > 0,
+              pid != UInt32(bitPattern: ProcessInfo.processInfo.processIdentifier) else { return nil }
+        return pid
+    }
+
+    internal static func spawnHanded(arguments: [String]) {
+        #if os(Windows) || os(Linux)
+        do {
+            try start(arguments: arguments, waitVar: handedEnvVar)
+        } catch {
+            RuneStandardIO.error("rune: could not restart for a pending launch: \(error)\n")
+        }
+        #endif
+    }
+
     public static func isProcessAlive(_ pid: UInt32) -> Bool {
         #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
-        return kill(pid_t(pid), 0) == 0
+        guard let process = pid_t(exactly: pid), process > 0 else { return false }
+        return kill(process, 0) == 0 || errno == EPERM
+        #elseif os(Windows)
+        return rune_win_instance_process_alive(pid) != 0
         #else
         return false
         #endif
     }
 
     private static func wait(pid: UInt32) {
+        #if os(Windows)
+        guard let process = OpenProcess(DWORD(SYNCHRONIZE), false, pid) else { return }
+        defer { CloseHandle(process) }
+        _ = WaitForSingleObject(process, DWORD(maxWaitSeconds * 1000))
+        #else
         let deadline = Date().addingTimeInterval(maxWaitSeconds)
         while isProcessAlive(pid) && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.025)
         }
+        #endif
     }
 
     #if os(macOS)

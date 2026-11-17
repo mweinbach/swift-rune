@@ -19,26 +19,33 @@ public struct Env: Sendable, Equatable {
     }
 }
 
-enum CommitGenerationStore {
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var counter: UInt64 = 0
+/// Storage owned by the current native event thread or WebAssembly reactor.
+package func runeExecutionLocal<Value: AnyObject>(forKey key: String, create: () -> Value) -> Value {
+    let locals = RuneExecutionContext.locals
+    if let existing = locals[key] as? Value { return existing }
+    let value = create()
+    locals[key] = value
+    return value
+}
 
-    static func current() -> UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
-        return counter
+enum CommitGenerationStore {
+    private final class State { var counter: UInt64 = 0 }
+
+    private static var state: State {
+        runeExecutionLocal(forKey: "rune.commitGeneration", create: State.init)
     }
+
+    static func current() -> UInt64 { state.counter }
 
     @discardableResult
     static func increment() -> UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
-        counter &+= 1
-        return counter
+        let current = state
+        current.counter &+= 1
+        return current.counter
     }
 }
 
-/// How many view commits have started across runtimes (`rune::commit_generation`).
+/// How many view commits have started on this thread (`rune::commit_generation`).
 public func commitGeneration() -> UInt64 {
     CommitGenerationStore.current()
 }
@@ -170,6 +177,7 @@ struct CxEnvironmentState {
     var systemIncreasedContrast: Bool = false
     var systemScrollBars: SystemScrollBars = .default
     var systemReducedMotion: Bool = false
+    var safeAreaInsets: SIMD4<Float> = .zero
     var primaryPointer: PrimaryPointer = .hover
     var reducedMotionOverride: Bool? = nil
     var timeScale: Float = 1.0
@@ -206,6 +214,7 @@ struct RuntimeShellSettings {
     var systemContrast: SystemContrast? = nil
     var systemIncreasedContrast: Bool = false
     var scrollBarsState: SystemScrollBars = .default
+    var safeAreaInsets: SIMD4<Float> = .zero
     var primaryPointer: PrimaryPointer = .hover
     var fullKeyboardAccess: Bool = true
     var caretReadByView: Bool = false
@@ -266,7 +275,7 @@ extension Cx {
             reducedMotion: reducedMotion,
             windowFocused: windowFocused,
             focusedKey: focusedKey,
-            hoveredKey: hoveredKey,
+            hoveredKey: snapshotHoveredKey,
             pressedKey: pressedKey,
             waker: waker,
             helpLook: helpLook,
@@ -277,6 +286,7 @@ extension Cx {
             layoutRectLookup: layoutRectLookup,
             layoutCollector: layoutCollector
         )
+        out.hoverReadDependency = hoverReadDependency
         out.envState = envState
         out.envState.markedTexts = []
         out.envState.reads = CxReadsLog(copying: envState.reads)
@@ -392,9 +402,10 @@ extension Cx {
         envState.systemAccent.focus(dark: systemDark)
     }
 
-    /// Browser safe-area insets `[top, right, bottom, left]` (`Cx::safe_area`, zero on native).
+    /// Safe-area insets in host points, ordered top, right, bottom, left (`Cx::safe_area`).
     public func safeArea() -> [Float] {
-        [0.0, 0.0, 0.0, 0.0]
+        let insets = envState.safeAreaInsets
+        return [insets.x, insets.y, insets.z, insets.w]
     }
 
     /// The primary pointer can't hover: a browser's `(hover: none)`, a phone's or tablet's touch
@@ -547,6 +558,17 @@ extension Runtime {
         cxSettings.hostReducedMotion
     }
 
+    /// Updates the unobscured area of this window in logical host points.
+    @discardableResult
+    public func setSafeAreaInsets(_ insets: SIMD4<Float>) -> Bool {
+        var next = insets
+        for i in 0..<4 where !next[i].isFinite || next[i] < 0 { next[i] = 0 }
+        guard next != cxSettings.safeAreaInsets else { return false }
+        cxSettings.safeAreaInsets = next
+        markNeedsCommit()
+        return true
+    }
+
     /// Updates the host's primary pointer capability (re-runs the view when changed).
     @discardableResult
     public func setPrimaryPointer(_ pointer: PrimaryPointer) -> Bool {
@@ -646,6 +668,12 @@ extension Runtime {
 
     /// Device pixels per view point (`Runtime::input_scale`, `windowScale * zoom`).
     public func inputScale() -> Float { pixelScale }
+
+    /// Converts a native window point to coordinates for hit testing and input callbacks.
+    internal func inputPoint(fromWindow point: Vec2) -> Vec2 {
+        let scale = zoom()
+        return Vec2(point.x / scale, point.y / scale)
+    }
 
     /// Converts a rect from zoomed view points into window points (`Runtime::to_window`).
     public func toWindow(_ rect: [Float]) -> [Float] {

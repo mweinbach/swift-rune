@@ -34,6 +34,10 @@ internal enum FaceWeightsRegistry {
     private final class Storage: @unchecked Sendable {
         let lock = NSLock()
         var declared: [FaceWeights] = []
+        #if canImport(CoreText)
+        var descriptorsEpoch: UInt64 = 0
+        var descriptors: [String: [Face]] = [:]
+        #endif
     }
     private static let storage = Storage()
 
@@ -78,54 +82,97 @@ internal enum FaceWeightsRegistry {
         return matched.weight
     }
 
-    /// Reads the `OS/2` table `usWeightClass` (offset `4..<6`, big-endian `UInt16`) if present.
-    internal static func os2WeightClass(of font: CTFont) -> UInt16? {
-        guard let data = CTFontCopyTable(font, CTFontTableTag(kCTFontTableOS2), CTFontTableOptions(rawValue: 0)) as Data?,
-              data.count >= 6 else {
-            return nil
-        }
-        let hi = UInt16(data[data.startIndex + 4])
-        let lo = UInt16(data[data.startIndex + 5])
-        return (hi << 8) | lo
+    private static let weightAxis = NSNumber(value: UInt32(0x77676874)) // wght
+
+    private struct Face {
+        let descriptor: CTFontDescriptor
+        let weight: Float
+        let width: Int
+        let italic: Bool
+        let variableWeight: ClosedRange<Float>?
     }
 
-    /// Picks a descriptor inside `familyName` whose `OS/2` weight class or trait weight matches `targetWeight` cleanly.
+    private static func faces(in family: String) -> [Face] {
+        let epoch = FontFamiliesRegistry.settingsEpoch
+        storage.lock.lock()
+        if storage.descriptorsEpoch != epoch {
+            storage.descriptors.removeAll(keepingCapacity: true)
+            storage.descriptorsEpoch = epoch
+        }
+        let cached = storage.descriptors[family]
+        storage.lock.unlock()
+        if let cached { return cached }
+
+        let query = CTFontDescriptorCreateWithAttributes([kCTFontFamilyNameAttribute: family] as CFDictionary)
+        let mandatory = NSSet(object: kCTFontFamilyNameAttribute) as CFSet
+        let descriptors = CTFontDescriptorCreateMatchingFontDescriptors(query, mandatory) as? [CTFontDescriptor] ?? []
+        let result = descriptors.map { descriptor in
+            let font = CTFontCreateWithFontDescriptor(descriptor, 12, nil)
+            let os2 = CTFontCopyTable(font, CTFontTableTag(kCTFontTableOS2), []) as Data?
+            func word(at offset: Int) -> Int? {
+                guard let os2, offset + 1 < os2.count else { return nil }
+                return Int(os2[offset]) << 8 | Int(os2[offset + 1])
+            }
+            let traits = CTFontCopyTraits(font) as NSDictionary
+            let traitWeight = (traits[kCTFontWeightTrait] as? NSNumber)?.floatValue ?? 0
+            let axes = CTFontCopyVariationAxes(font) as? [[CFString: Any]] ?? []
+            let weightRange = axes.first { ($0[kCTFontVariationAxisIdentifierKey] as? NSNumber) == weightAxis }
+                .flatMap { axis -> ClosedRange<Float>? in
+                    guard let low = (axis[kCTFontVariationAxisMinimumValueKey] as? NSNumber)?.floatValue,
+                          let high = (axis[kCTFontVariationAxisMaximumValueKey] as? NSNumber)?.floatValue,
+                          low <= high else { return nil }
+                    return low...high
+                }
+            return Face(descriptor: descriptor, weight: word(at: 4).map(Float.init) ?? (400 + traitWeight * 500),
+                        width: word(at: 6) ?? 5, italic: CTFontGetSymbolicTraits(font).contains(.traitItalic),
+                        variableWeight: weightRange)
+        }
+        storage.lock.lock()
+        if storage.descriptorsEpoch == epoch { storage.descriptors[family] = result }
+        storage.lock.unlock()
+        return result
+    }
+
+    // CSS Fonts' directional search, used by fontique. Between 400 and 500,
+    // first look upward through 500, then below the target, then above 500.
+    private static func weightRank(_ weight: Float, for target: Float) -> (Int, Float) {
+        if (400...500).contains(target) {
+            if weight >= target && weight <= 500 { return (0, weight - target) }
+            if weight < target { return (1, target - weight) }
+            return (2, weight - 500)
+        }
+        let preferred = target < 400 ? weight <= target : weight >= target
+        return (preferred ? 0 : 1, abs(weight - target))
+    }
+
+    /// CSS matches width and style before weight. Let CoreText synthesize a slant when none exists.
     internal static func matchingFace(
         inFamily familyName: String,
         targetCSSWeight: Float,
         italic: Bool,
         sizePx: CGFloat
     ) -> CTFont? {
-        let queryAttrs: [CFString: Any] = [kCTFontFamilyNameAttribute: familyName]
-        let queryDesc = CTFontDescriptorCreateWithAttributes(queryAttrs as CFDictionary)
-        guard let descs = CTFontDescriptorCreateMatchingFontDescriptors(queryDesc, nil) as? [CTFontDescriptor],
-              !descs.isEmpty else {
-            return nil
+        let family = faces(in: familyName)
+        // For a normal-width request CSS prefers progressively narrower faces before wider ones.
+        let preferredWidth = family.map(\.width).min { a, b in
+            (a > 5 ? 1 : 0, abs(a - 5)) < (b > 5 ? 1 : 0, abs(b - 5))
         }
-        var bestFont: CTFont? = nil
-        var bestScore = Float.infinity
-        for desc in descs {
-            let traits = CTFontDescriptorCopyAttribute(desc, kCTFontTraitsAttribute) as? [CFString: Any]
-            let symbolicRaw = (traits?[kCTFontSymbolicTrait] as? NSNumber)?.uint32Value ?? 0
-            let isItalicFace = (CTFontSymbolicTraits(rawValue: symbolicRaw).contains(.traitItalic))
-            let slantPenalty: Float = (isItalicFace == italic) ? 0 : 10_000
-            let candidate = CTFontCreateWithFontDescriptor(desc, sizePx, nil)
-            let faceWeight: Float
-            if let os2 = os2WeightClass(of: candidate) {
-                faceWeight = Float(os2)
-            } else if let traitWeight = (traits?[kCTFontWeightTrait] as? NSNumber)?.doubleValue {
-                // Fallback inverse approximation of CoreText weight trait (-0.8..0.62) -> (100..900).
-                faceWeight = Float(400.0 + traitWeight * 500.0)
-            } else {
-                faceWeight = 400.0
-            }
-            let diff = abs(faceWeight - targetCSSWeight) + slantPenalty
-            if diff < bestScore {
-                bestScore = diff
-                bestFont = candidate
+        var best: (Face, Float)?
+        var bestRank = (Int.max, Float.infinity)
+        for face in family where face.width == preferredWidth && face.italic == italic {
+            let weight = face.variableWeight.map { min(max(targetCSSWeight, $0.lowerBound), $0.upperBound) } ?? face.weight
+            let rank = weightRank(weight, for: targetCSSWeight)
+            if rank < bestRank {
+                bestRank = rank
+                best = (face, weight)
             }
         }
-        return bestFont
+        guard let (face, weight) = best else { return nil }
+        var descriptor = face.descriptor
+        if face.variableWeight != nil {
+            descriptor = CTFontDescriptorCreateCopyWithVariation(descriptor, weightAxis, CGFloat(weight))
+        }
+        return CTFontCreateWithFontDescriptor(descriptor, sizePx, nil)
     }
     #endif
 }

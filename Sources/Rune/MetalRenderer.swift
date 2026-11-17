@@ -26,9 +26,6 @@ public final class MetalRenderer {
     private let pipelineCompositeAddLinear: MTLRenderPipelineState
     private let pipelineCompositeAddGamma: MTLRenderPipelineState
     private let pipelineCompositeAddFloat: MTLRenderPipelineState
-    private let pipelineBackdropLinear: MTLRenderPipelineState
-    private let pipelineBackdropGamma: MTLRenderPipelineState
-    private let pipelineBackdropFloat: MTLRenderPipelineState
     private let computeSpringsPipeline: MTLComputePipelineState
     private let samplerLinear: MTLSamplerState
 
@@ -53,10 +50,13 @@ public final class MetalRenderer {
         var vp: SIMD4<Float>
     }
 
-    private var glyphTexture: MTLTexture?
-    private var glyphTexSize: SIMD2<Int> = .zero
-    private var imageTexture: MTLTexture?
-    private var imageTexSize: SIMD2<Int> = .zero
+    private struct AtlasTexture {
+        var texels: [UInt8]
+        var texture: MTLTexture
+    }
+
+    private var referenceGlyphPages: [AtlasTexture] = []
+    private var referenceImagePages: [AtlasTexture] = []
     private var surfaceRenderer: SurfaceRenderer?
     internal let renderEngine: RenderFrameEngine
 
@@ -90,7 +90,7 @@ public final class MetalRenderer {
     }
 
     public init(device: MTLDevice? = nil) throws {
-        guard let dev = device ?? MTLCreateSystemDefaultDevice(),
+        guard let dev = device ?? MetalAdapterPicker.select(),
               let queue = dev.makeCommandQueue() else {
             throw RendererError.metalUnavailable
         }
@@ -114,7 +114,6 @@ public final class MetalRenderer {
               let fsVertFn = library.makeFunction(name: "rune_fullscreen_vertex"),
               let blurFragFn = library.makeFunction(name: "rune_blur_fragment"),
               let compFragFn = library.makeFunction(name: "rune_layer_composite_fragment"),
-              let bdropFragFn = library.makeFunction(name: "rune_backdrop_fragment"),
               let springsComputeFn = library.makeFunction(name: "rune_springs_compute") else {
             throw RendererError.shaderCompileFailed("Missing shader entry points")
         }
@@ -156,9 +155,6 @@ public final class MetalRenderer {
         self.pipelineCompositeAddGamma = try buildPipeline(vert: fsVertFn, frag: compFragFn, pixelFormat: .bgra8Unorm, additive: true)
         self.pipelineCompositeAddFloat = try buildPipeline(vert: fsVertFn, frag: compFragFn, pixelFormat: .rgba16Float, additive: true)
 
-        self.pipelineBackdropLinear = try buildPipeline(vert: fsVertFn, frag: bdropFragFn, pixelFormat: .bgra8Unorm_srgb, blend: false)
-        self.pipelineBackdropGamma = try buildPipeline(vert: fsVertFn, frag: bdropFragFn, pixelFormat: .bgra8Unorm, blend: false)
-        self.pipelineBackdropFloat = try buildPipeline(vert: fsVertFn, frag: bdropFragFn, pixelFormat: .rgba16Float, blend: false)
 
         self.computeSpringsPipeline = try dev.makeComputePipelineState(function: springsComputeFn)
 
@@ -283,61 +279,55 @@ public final class MetalRenderer {
 
     private func validate(_ scene: RefScene) throws {
         try MetalTextureLimits.validate(width: scene.width, height: scene.height, resource: "render target", on: device)
-        try MetalTextureLimits.validate(width: scene.glyphs.width, height: scene.glyphs.height, resource: "glyph atlas", on: device)
-        try MetalTextureLimits.validate(width: scene.images.width, height: scene.images.height, resource: "image atlas", on: device)
         try scene.validate()
+        for page in 0..<max(1, scene.glyphPages.count) {
+            let atlas = scene.glyphAtlas(forPage: page)
+            try MetalTextureLimits.validate(width: atlas.width, height: atlas.height, resource: "glyph atlas page \(page)", on: device)
+        }
+        for page in 0..<max(1, scene.imagePages.count) {
+            let atlas = scene.imageAtlas(forPage: page)
+            try MetalTextureLimits.validate(width: atlas.width, height: atlas.height, resource: "image atlas page \(page)", on: device)
+        }
     }
 
-    private func uploadAtlases(glyphs: R8Atlas, images: RGBA8Atlas, srgbImages: Bool) throws {
-        if glyphTexture == nil || glyphTexSize.x != glyphs.width || glyphTexSize.y != glyphs.height {
-            let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .r8Unorm,
-                width: glyphs.width,
-                height: glyphs.height,
-                mipmapped: false
-            )
-            desc.usage = [.shaderRead]
-            guard let texture = device.makeTexture(descriptor: desc) else {
-                throw RendererError.textureAllocationFailed(resource: "glyph atlas", width: glyphs.width, height: glyphs.height)
-            }
-            glyphTexture = texture
-            glyphTexSize = SIMD2<Int>(glyphs.width, glyphs.height)
+    /// A frame may be encoded before an earlier submission completes. Never overwrite a texture
+    /// still referenced by that frame. Unchanged immutable page storage shares its Metal texture.
+    private func atlasTexture(width: Int, height: Int, texels: [UInt8], format: MTLPixelFormat,
+                              resource: String, previous: AtlasTexture?) throws -> AtlasTexture {
+        if let previous, previous.texture.width == width, previous.texture.height == height,
+           previous.texture.pixelFormat == format,
+           texels.withUnsafeBufferPointer({ current in
+               previous.texels.withUnsafeBufferPointer { $0.baseAddress == current.baseAddress }
+           }) {
+            return previous
         }
-        glyphs.texels.withUnsafeBytes { raw in
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: width, height: height, mipmapped: false)
+        desc.usage = [.shaderRead]
+        guard let texture = device.makeTexture(descriptor: desc) else {
+            throw RendererError.textureAllocationFailed(resource: resource, width: width, height: height)
+        }
+        texels.withUnsafeBytes { raw in
             if let base = raw.baseAddress {
-                glyphTexture?.replace(
-                    region: MTLRegionMake2D(0, 0, glyphs.width, glyphs.height),
-                    mipmapLevel: 0,
-                    withBytes: base,
-                    bytesPerRow: glyphs.width
-                )
+                texture.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0,
+                                withBytes: base, bytesPerRow: width * (format == .r8Unorm ? 1 : 4))
             }
         }
+        return AtlasTexture(texels: texels, texture: texture)
+    }
 
-        let desiredImgFormat: MTLPixelFormat = srgbImages ? .rgba8Unorm_srgb : .rgba8Unorm
-        if imageTexture == nil || imageTexSize.x != images.width || imageTexSize.y != images.height || imageTexture?.pixelFormat != desiredImgFormat {
-            let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: desiredImgFormat,
-                width: images.width,
-                height: images.height,
-                mipmapped: false
-            )
-            desc.usage = [.shaderRead]
-            guard let texture = device.makeTexture(descriptor: desc) else {
-                throw RendererError.textureAllocationFailed(resource: "image atlas", width: images.width, height: images.height)
-            }
-            imageTexture = texture
-            imageTexSize = SIMD2<Int>(images.width, images.height)
+    private func uploadAtlases(_ scene: RefScene) throws {
+        referenceGlyphPages = try (0..<max(1, scene.glyphPages.count)).map { index in
+            let atlas = scene.glyphAtlas(forPage: index)
+            let previous = referenceGlyphPages.indices.contains(index) ? referenceGlyphPages[index] : nil
+            return try atlasTexture(width: atlas.width, height: atlas.height, texels: atlas.texels,
+                                    format: .r8Unorm, resource: "glyph atlas page \(index)", previous: previous)
         }
-        images.texels.withUnsafeBytes { raw in
-            if let base = raw.baseAddress {
-                imageTexture?.replace(
-                    region: MTLRegionMake2D(0, 0, images.width, images.height),
-                    mipmapLevel: 0,
-                    withBytes: base,
-                    bytesPerRow: images.width * 4
-                )
-            }
+        let format: MTLPixelFormat = scene.srgbBlend ? .rgba8Unorm : .rgba8Unorm_srgb
+        referenceImagePages = try (0..<max(1, scene.imagePages.count)).map { index in
+            let atlas = scene.imageAtlas(forPage: index)
+            let previous = referenceImagePages.indices.contains(index) ? referenceImagePages[index] : nil
+            return try atlasTexture(width: atlas.width, height: atlas.height, texels: atlas.texels,
+                                    format: format, resource: "image atlas page \(index)", previous: previous)
         }
     }
 
@@ -419,7 +409,7 @@ public final class MetalRenderer {
     }
 
     private func encodeMainPass(scene: RefScene, surfaces: [SurfaceDraw] = [], into target: MTLTexture, commandBuffer: MTLCommandBuffer) throws {
-        try uploadAtlases(glyphs: scene.glyphs, images: scene.images, srgbImages: !scene.srgbBlend)
+        try uploadAtlases(scene)
 
         let w = scene.width
         let h = scene.height
@@ -446,6 +436,7 @@ public final class MetalRenderer {
             }
         }
         var surfaceCursor = 0
+        var backdropCount = 0
 
         struct TargetLevel {
             var texture: MTLTexture
@@ -477,10 +468,33 @@ public final class MetalRenderer {
                         enc.setVertexBuffer(primBuf, offset: 0, index: 0)
                         enc.setVertexBytes(&vp, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
                         enc.setFragmentBuffer(primBuf, offset: 0, index: 0)
-                        enc.setFragmentTexture(glyphTexture, index: 0)
-                        enc.setFragmentTexture(imageTexture, index: 1)
                         enc.setFragmentSamplerState(samplerLinear, index: 0)
-                        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: level.pending.count)
+                        var glyphPage = 0
+                        var imagePage = 0
+                        var start = 0
+                        func drawRun(through end: Int) {
+                            guard end > start else { return }
+                            enc.setFragmentTexture(referenceGlyphPages[glyphPage].texture, index: 0)
+                            enc.setFragmentTexture(referenceImagePages[imagePage].texture, index: 1)
+                            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4,
+                                               instanceCount: end - start, baseInstance: start)
+                        }
+                        for (index, prim) in level.pending.enumerated() {
+                            let requestedGlyph = prim.kind == .glyph ? prim.glyphPage : glyphPage
+                            let glyph = referenceGlyphPages.indices.contains(requestedGlyph) ? requestedGlyph : 0
+                            let image = prim.kind == .image ? prim.imagePage : imagePage
+                            guard glyph != glyphPage || image != imagePage else { continue }
+                            drawRun(through: index)
+                            if referenceImagePages.indices.contains(image) {
+                                start = index
+                                glyphPage = glyph
+                                imagePage = image
+                            } else {
+                                // A missing page is transparent; intervening flat-color draws still use the last bindings.
+                                start = index + 1
+                            }
+                        }
+                        drawRun(through: level.pending.count)
                     }
                 }
                 enc.endEncoding()
@@ -575,40 +589,19 @@ public final class MetalRenderer {
                 }
 
             case .backdropBlur:
+                guard prim.params.x > 0, prim.backdropOpacity > 0, backdropCount < MAX_BACKDROP_BLURS else { continue }
+                backdropCount += 1
                 flush(&stack[stack.count - 1])
-                let dstTex = stack[stack.count - 1].texture
-                let blurRad = max(1.0, prim.params.x)
-                let snapTex = try makeFloatTexture(width: w, height: h, resource: "backdrop")
-                let fullBounds = SIMD4<Float>(0, 0, Float(w - 1), Float(h - 1))
-                runBoxBlurPass(source: dstTex, dest: snapTex, bounds: fullBounds, dirX: 1, dirY: 0, radius: 0, viewport: viewport, commandBuffer: commandBuffer)
-                let blurredTex = try blurLayerTexture(snapTex, width: w, height: h, radius: blurRad, rectBounds: prim.rect, viewport: viewport, commandBuffer: commandBuffer)
-
-                let bPipe: MTLRenderPipelineState
-                switch dstTex.pixelFormat {
-                case .bgra8Unorm: bPipe = pipelineBackdropGamma
-                case .rgba16Float: bPipe = pipelineBackdropFloat
-                default: bPipe = pipelineBackdropLinear
-                }
-                let pass = MTLRenderPassDescriptor()
-                pass.colorAttachments[0].texture = dstTex
-                pass.colorAttachments[0].loadAction = .load
-                pass.colorAttachments[0].storeAction = .store
-                if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: pass) {
-                    enc.setRenderPipelineState(bPipe)
-                    var vp = viewport
-                    var u = LayerCompositeUniforms(
-                        rect: prim.rect,
-                        clip: prim.clip,
-                        radii: prim.radii,
-                        extra: SIMD4<Float>(1.0, 0, 1.0, 0),
-                        vp: SIMD4<Float>(viewport.x, viewport.y, 0, 0)
-                    )
-                    enc.setVertexBytes(&vp, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
-                    enc.setFragmentBytes(&u, length: MemoryLayout<LayerCompositeUniforms>.stride, index: 0)
-                    enc.setFragmentTexture(snapTex, index: 0)
-                    enc.setFragmentTexture(blurredTex, index: 1)
-                    enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-                    enc.endEncoding()
+                let texture = stack[stack.count - 1].texture
+                var instance = RenderInstance(rect: prim.rect, radii: prim.radii, fill: SIMD4(0, 0, 0, prim.backdropOpacity),
+                                              params: SIMD4(prim.params.x, KIND_BACKDROP_BLUR, 0, prim.params.w),
+                                              clip: SIMD4(prim.clip.x, prim.clip.y, prim.clip.x + prim.clip.z, prim.clip.y + prim.clip.w))
+                var globals = RenderGlobals(viewport: viewport)
+                renderEngine.backdropBlur.encode(device: device, commandBuffer: commandBuffer, source: texture,
+                                                 target: texture, targetFormat: texture.pixelFormat,
+                                                 instance: instance, originOffset: .zero) { encoder in
+                    encoder.setVertexBytes(&instance, length: MemoryLayout<RenderInstance>.stride, index: 0)
+                    encoder.setVertexBytes(&globals, length: MemoryLayout<RenderGlobals>.stride, index: 1)
                 }
 
             default:

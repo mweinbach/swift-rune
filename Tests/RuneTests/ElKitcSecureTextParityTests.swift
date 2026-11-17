@@ -38,6 +38,7 @@ struct ElKitcSecureTextParityTests {
         let scene0 = rtHidden.frame(at: 0.0)
         let dotsCount0 = scene0.primitives.filter { $0.kind == .glyph }.count
         #expect(dotsCount0 == 7)
+        #expect(rtHidden.exitingSnapshots.isEmpty)
 
         rtHidden.update { s, _ in
             s.pw.clear()
@@ -50,6 +51,12 @@ struct ElKitcSecureTextParityTests {
         #expect(pwNode?.el.handlers.editLens == nil)
         #expect(sceneExitHidden.primitives.filter { $0.kind == .glyph }.count == dotsCount0)
         #expect(!String(describing: rtHidden.elements()).contains("hunter2"))
+        rtHidden.markNeedsCommit()
+        _ = rtHidden.frame(at: 2.0 / 60.0)
+        #expect(rtHidden.exitingSnapshots.values.first(where: { $0.key == "pw" })?.el.plainText == String(repeating: "•", count: 7))
+        rtHidden.update { s, _ in s.open = true }
+        _ = rtHidden.frame(at: 3.0 / 60.0)
+        #expect(rtHidden.exitingSnapshots.isEmpty)
 
         // Case B: Revealed field conceals to bullets on the very first exit frame.
         var pwRev = TextEdit("hunter2", multiline: false)

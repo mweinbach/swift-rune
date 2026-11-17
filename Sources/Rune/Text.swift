@@ -2,6 +2,11 @@ import Foundation
 #if canImport(CoreText)
 import CoreText
 #endif
+#if os(macOS)
+import class AppKit.NSFont
+#elseif canImport(UIKit)
+import class UIKit.UIFont
+#endif
 #if canImport(CoreGraphics)
 import CoreGraphics
 #endif
@@ -14,43 +19,114 @@ import simd
 public enum FontFamily: Sendable, Hashable, Codable {
     case systemUI
     case monospace
+    /// The platform's monospaced UI face, followed by the app's mono slot.
+    case systemMono
     case custom(String)
 
-    public static let systemMono: FontFamily = .monospace
     public static func named(_ name: String) -> FontFamily { .custom(name) }
+
+    package var isMonospace: Bool { self == .monospace || self == .systemMono }
 
     /// A named stack falls back to the app's sans slot, just as Rune's paragraph shaper does.
     internal func stack(sans: String, mono: String) -> String {
-        let sans = sans.isEmpty ? DefaultFonts.sansFamily : sans
+        let sans = Self.expandingSystemMono(in: sans.isEmpty ? DefaultFonts.sansFamily : sans, fallback: DefaultFonts.sansFamily)
         switch self {
         case .systemUI: return sans
-        case .monospace: return mono.isEmpty ? DefaultFonts.monoFamily : mono
+        case .monospace, .systemMono:
+            let slot = Self.expandingSystemMono(in: mono.isEmpty ? DefaultFonts.defaultMonoSlot : mono, fallback: sans)
+            if self == .systemMono && !Self.systemMonoFamilies.isEmpty {
+                return (Self.systemMonoFamilies + [slot]).joined(separator: ", ")
+            }
+            return slot
         case .custom(let names): return names.isEmpty || names == sans ? sans : names + ", " + sans
         }
     }
 
     /// CoreText looks up individual names. Pango accepts an unquoted, comma-separated list.
     internal static func candidates(in stack: String) -> [String] {
+        if !stack.utf8.contains(where: { byte in
+            byte == UInt8(ascii: ",") || byte == UInt8(ascii: "\"") || byte == UInt8(ascii: "'") || byte == UInt8(ascii: "\\")
+        }) {
+            let name = stack.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? [] : [name]
+        }
         var result: [String] = []
+        forEachFamily(in: stack) { name, _ in result.append(name) }
+        return result
+    }
+
+    /// Preserve quoted family names when expanding the CSS generic in an app's font slot.
+    static func expandingSystemMono(in stack: String, fallback: String, system: [String] = systemMonoFamilies) -> String {
+        guard stack.utf8.contains(UInt8(ascii: "-")), stack.range(of: "ui-monospace", options: .caseInsensitive) != nil else { return stack }
+        var result: [String] = []
+        var expanded = false
+        var hasNamed = false
+        forEachFamily(in: stack) { _, token in
+            let raw = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            if raw.caseInsensitiveCompare("ui-monospace") == .orderedSame {
+                result.append(contentsOf: system)
+                expanded = true
+                hasNamed = hasNamed || !system.isEmpty
+            } else {
+                result.append(raw)
+                hasNamed = hasNamed || !cssGenericFamilies.contains(raw.lowercased())
+            }
+        }
+        guard expanded else { return stack }
+        if !hasNamed { result.append(fallback) }
+        return result.joined(separator: ", ")
+    }
+
+    private static let cssGenericFamilies: Set<String> = [
+        "serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui",
+        "ui-serif", "ui-sans-serif", "ui-rounded", "emoji", "math", "fangsong",
+    ]
+
+    private static let systemMonoFamilies: [String] = {
+        #if canImport(CoreText)
+        [".SF NS Mono", "Menlo"]
+        #elseif os(Windows)
+        ["Cascadia Mono", "Consolas", "Courier New"]
+        #elseif os(Linux)
+        // Pango resolves the user's fontconfig monospace alias in process.
+        ["monospace", "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Ubuntu Mono"]
+        #else
+        // Upstream uses the app's slot on targets without an installed system font collection.
+        []
+        #endif
+    }()
+
+    private static func forEachFamily(in stack: String, _ visit: (String, Substring) -> Void) {
         var name = ""
         var quote: Character?
-        var characters = stack.makeIterator()
-        while let character = characters.next() {
-            if character == "\\", let escaped = characters.next() {
-                name.append(escaped)
+        var start = stack.startIndex
+        var cursor = start
+        func flush(until end: String.Index) {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { visit(trimmed, stack[start..<end]) }
+            name.removeAll(keepingCapacity: true)
+        }
+        while cursor < stack.endIndex {
+            let position = cursor
+            let character = stack[cursor]
+            stack.formIndex(after: &cursor)
+            if character == "," && quote == nil {
+                flush(until: position)
+                start = cursor
+                continue
+            }
+            if character == "\\", cursor < stack.endIndex {
+                name.append(stack[cursor])
+                stack.formIndex(after: &cursor)
             } else if let delimiter = quote {
                 if character == delimiter { quote = nil } else { name.append(character) }
             } else if (character == "'" || character == "\"") && name.allSatisfy(\.isWhitespace) {
                 quote = character
-            } else if character == "," {
-                result.append(name.trimmingCharacters(in: .whitespacesAndNewlines))
-                name = ""
             } else {
                 name.append(character)
             }
         }
-        result.append(name.trimmingCharacters(in: .whitespacesAndNewlines))
-        return result.filter { !$0.isEmpty }
+        flush(until: stack.endIndex)
     }
 }
 
@@ -215,6 +291,18 @@ public struct TextStyle: Sendable, Hashable, Codable {
         var copy = self
         copy.features = features
         return copy
+    }
+
+    /// Code keeps a cell per character even in fonts with programming ligatures.
+    internal func shapingFeatures(monospace: Bool) -> String {
+        guard monospace else { return features }
+        let unligated = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
+        guard !features.isEmpty else { return unligated }
+        let others = features.split(separator: ",").filter { item in
+            let tag = item.split { $0.isWhitespace || $0 == "=" || $0 == "'" || $0 == "\"" }.first
+            return tag != "liga" && tag != "clig" && tag != "calt" && tag != "dlig"
+        }
+        return others.isEmpty ? unligated : others.joined(separator: ",") + ", " + unligated
     }
 
     public func opticalSize(_ size: Float) -> TextStyle {
@@ -414,6 +502,34 @@ public struct PositionedGlyph: Sendable, Equatable {
     public var utf8Offset: Int
     /// Alpha atlas page index (`GlyphAtlas.pageData(_:)`, `atlas.rs:168`).
     public var atlasPage: UInt16
+    /// Vertical ink displacement baked into the native desktop glide mask, in device pixels.
+    var maskShiftY: Float = 0
+    var outlineGroup: TextOutlineGroup?
+    #if canImport(CoreText) && canImport(CoreGraphics)
+    var classicInk: AppleClassicGlyph.Ink?
+    #elseif os(Linux) || os(Windows) || os(Android)
+    var desktopInk: DesktopGlyphInk?
+    #endif
+    var usesInkDilation: Bool {
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        classicInk != nil || outlineGroup?.inkVariant != nil
+        #elseif os(Linux) || os(Windows) || os(Android)
+        desktopInk != nil
+        #else
+        false
+        #endif
+    }
+    #if os(Windows)
+    // Native tile shared by adjacent graphemes. Its gamma table depends on paint-time ink.
+    var windowsMask: WindowsGlyphMask?
+    #endif
+    internal var hasLCDMask: Bool {
+        #if os(Windows)
+        return windowsMask?.rgb != nil
+        #else
+        return false
+        #endif
+    }
 
     public init(
         rect: SIMD4<Float>,
@@ -439,9 +555,13 @@ public struct PositionedGlyph: Sendable, Equatable {
     }
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
+        #if os(Windows)
+        guard lhs.windowsMask?.bounds == rhs.windowsMask?.bounds, lhs.hasLCDMask == rhs.hasLCDMask else { return false }
+        #endif
         guard lhs.rect == rhs.rect, lhs.uv == rhs.uv, lhs.color == rhs.color,
               lhs.colorGlyphIndex == rhs.colorGlyphIndex, lhs.utf8Offset == rhs.utf8Offset,
-              lhs.atlasPage == rhs.atlasPage else { return false }
+              lhs.atlasPage == rhs.atlasPage, lhs.maskShiftY == rhs.maskShiftY else { return false }
+        guard lhs.outlineGroup == rhs.outlineGroup else { return false }
         return lhs.colorGlyphIndex != nil || lhs.colorBitmap === rhs.colorBitmap
             || lhs.retainedColorGlyph == rhs.retainedColorGlyph
     }
@@ -744,6 +864,29 @@ public final class GlyphAtlas: @unchecked Sendable {
         public var page: UInt16
         /// Pixel origin `(x, y)` within `page` (`atlas.rs:34`).
         public var pixelOrigin: SIMD2<Int>
+        var outlineGroup: TextOutlineGroup?
+        #if canImport(CRuneDesktopText) && !canImport(CoreText)
+        var desktopTile: DesktopOutlineTile?
+
+        // Deferred coverage metadata belongs to the renderer. Public placement
+        // equality stays the same for an eagerly rasterized and a GPU-filled entry.
+        public static func == (lhs: Entry, rhs: Entry) -> Bool {
+            lhs.uv == rhs.uv && lhs.pixelSize == rhs.pixelSize && lhs.bearingPx == rhs.bearingPx &&
+                lhs.page == rhs.page && lhs.pixelOrigin == rhs.pixelOrigin && lhs.outlineGroup == rhs.outlineGroup
+        }
+
+        public func hash(into hasher: inout Hasher) {
+            hasher.combine(uv)
+            hasher.combine(pixelSize)
+            hasher.combine(bearingPx)
+            hasher.combine(page)
+            hasher.combine(pixelOrigin)
+            hasher.combine(outlineGroup)
+        }
+        #endif
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        var classicInk: AppleClassicGlyph.Ink?
+        #endif
 
         public init(
             uv: SIMD4<Float>,
@@ -872,6 +1015,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         var subpixelBin: UInt8
         var subpixelYBin: UInt8
         var smoothing: FontSmoothing
+        var inkBucket: UInt8
     }
 
     #endif
@@ -884,6 +1028,9 @@ public final class GlyphAtlas: @unchecked Sendable {
     }
 
     private enum PortableGlyphKey: Hashable {
+        #if os(Windows)
+        case windowsMask(sourcePage: UInt16, tile: SIMD4<Int32>, bucket: UInt8, lcd: Bool)
+        #endif
         case bitmap(scalar: UInt32, sizePx10: Int, bold: Bool, italic: Bool, smoothing: FontSmoothing)
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
         case desktop(DesktopMaskKey)
@@ -898,8 +1045,97 @@ public final class GlyphAtlas: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    public private(set) var atlas: R8Atlas
+    #if canImport(CoreText) && canImport(CoreGraphics)
+    private lazy var classicGlyphs = AppleClassicGlyph()
+    #endif
+    private let outlineLock = NSLock()
+    // Created under outlineLock, so classic text does not allocate an outline texture row.
+    private var outlineStorage: TextOutlineStorage?
+    private var outlines: TextOutlineStorage {
+        if let outlineStorage { return outlineStorage }
+        let storage = TextOutlineStorage()
+        outlineStorage = storage
+        return storage
+    }
+    private var fillStats = TextOutlineFillStats()
+    internal var outlineFillStats: TextOutlineFillStats { lock.withLock { fillStats } }
+    private weak var cpuMaskPool: CpuBootPool?
+
+    internal func fillMasks(on pool: CpuBootPool?) {
+        lock.withLock { cpuMaskPool = pool }
+    }
+
+    internal func withOutlineStore<R>(_ body: (OutlineStore) -> R) -> R {
+        outlineLock.withLock { body(outlines.store) }
+    }
+
+    private var pageZero: R8Atlas
+    public var atlas: R8Atlas {
+        lock.withLock { maskPagePlanLocked(0)?.cpuAtlas() ?? pageZero }
+    }
+    /// Cache entries depend on the most recent recycle among the shelves their glyphs sample.
+    internal func pageSignature(usedPages: UInt8) -> (size: SIMD2<Int>, epoch: UInt64) {
+        lock.withLock {
+            var epoch = outlineResetEpoch
+            for (page, reset) in maskPageEpochs where usedPages & (1 << page) != 0 {
+                epoch = max(epoch, reset)
+            }
+            return (SIMD2(pageZero.width, pageZero.height), epoch)
+        }
+    }
+
+    internal var pagePixelSize: SIMD2<Int> { SIMD2(targetWidth, targetHeight) }
+
+    // The CPU boot painter or an attached GPU may reserve masks for a later fill.
+    private var rendererDefersOutlineMasks = false
+    private var deferOutlineMasks: Bool { rendererDefersOutlineMasks || cpuMaskPool != nil }
+    internal var defersOutlineMasks: Bool {
+        get { lock.withLock { rendererDefersOutlineMasks } }
+        set { lock.withLock { rendererDefersOutlineMasks = newValue } }
+    }
+    private var lcdOutlineMasks: [TextOutlineMaskKey: Entry] = [:]
+    private var outlineMaskFills: [QueuedOutlineFill] = []
+    private var savedMaskPlan: (generation: UInt64, plan: OutlineMaskPlan)?
+    private var savedPagePlans: (generation: UInt64, plans: [OutlineMaskPlan?])?
+    private var baseGeneration: UInt64 = 1
+    private var outlineResetEpoch: UInt64 = 0
+    private var maskPageEpochs: [Int: UInt64] = [:]
+
     public private(set) var generation: UInt64 = 1
+    private struct PageChange {
+        var revision: UInt64 = 1
+        var rawRevision: UInt64 = 1
+        var patch: GlyphAtlasPatch?
+        var rawPatch: GlyphAtlasPatch?
+        var published = false
+        var rawPublished = false
+
+        mutating func write(_ rect: SIMD4<Int>, generation: UInt64, raw: Bool) {
+            if published || patch == nil {
+                patch = GlyphAtlasPatch(fromRevision: revision, edges: rect)
+                published = false
+            } else {
+                patch?.include(rect)
+            }
+            revision = generation
+            if raw {
+                if rawPublished || rawPatch == nil {
+                    rawPatch = GlyphAtlasPatch(fromRevision: rawRevision, edges: rect)
+                    rawPublished = false
+                } else {
+                    rawPatch?.include(rect)
+                }
+                rawRevision = generation
+            }
+        }
+    }
+    private var pageChanges: [Int: PageChange] = [:]
+
+    /// The base bitmap changes separately from masks queued for a GPU fill.
+    internal func rawGlyphRevisionLocked(page: Int) -> UInt64 {
+        pageChanges[page]?.rawRevision ?? 1
+    }
+
     private var combinedSnapshot: (generation: UInt64, atlas: R8Atlas)?
     public let maxCachedEntries: Int
     public let maxColorGlyphBytes: Int
@@ -946,7 +1182,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         let h = max(1, height)
         self.targetWidth = w
         self.targetHeight = h
-        self.atlas = R8Atlas(width: 1, height: 1)
+        self.pageZero = R8Atlas(width: 1, height: 1)
         self.page0Shelf = ShelfState(width: w, height: h, age: 1)
         self.maxCachedEntries = max(1, maxCachedEntries)
         self.maxColorGlyphBytes = max(0, colorGlyphBudget)
@@ -963,20 +1199,157 @@ public final class GlyphAtlas: @unchecked Sendable {
     public func pageData(_ page: Int) -> [UInt8]? {
         lock.lock()
         defer { lock.unlock() }
+        guard page >= 0 && page <= overflowPages.count else { return nil }
+        if let plan = maskPagePlanLocked(page) { return plan.cpuAtlas().texels }
         if page == 0 {
-            return backingAllocated ? atlas.texels : []
+            return backingAllocated ? pageZero.texels : []
         }
         guard page >= 1 && page <= overflowPages.count else { return nil }
         return overflowPages[page - 1].atlas.texels
     }
 
+    private var publishedPages: PageSnapshot?
+
+    internal struct PageSnapshot {
+        let bases: [R8Atlas]
+        let fills: [OutlineMaskPlan?]
+        let revisions: [UInt64]
+        let rawRevisions: [UInt64]
+        let patches: [GlyphAtlasPatch?]
+        let rawPatches: [GlyphAtlasPatch?]
+        let generation: UInt64
+    }
+
+    /// Page-local CPU rasters. Vertically stacked snapshots remain available via compositedAtlas().
+    public var atlases: [R8Atlas] {
+        lock.withLock {
+            let bases = [pageZero] + overflowPages.map(\.atlas)
+            let plans = maskPagePlansLocked(bases: bases)
+            guard !plans.isEmpty else { return bases }
+            return bases.enumerated().map { index, base in plans[index]?.cpuAtlas() ?? base }
+        }
+    }
+
+    internal func framePages() -> PageSnapshot {
+        lock.withLock {
+            if !outlineMaskFills.isEmpty, let cpuMaskPool {
+                fillQueuedMasksLocked(on: cpuMaskPool)
+            }
+            if let publishedPages, publishedPages.generation == generation { return publishedPages }
+            let bases = [pageZero] + overflowPages.map(\.atlas)
+            var revisions: [UInt64] = [], rawRevisions: [UInt64] = [], patches: [GlyphAtlasPatch?] = []
+            var rawPatches: [GlyphAtlasPatch?] = []
+            for i in bases.indices {
+                var change = pageChanges[i] ?? PageChange()
+                revisions.append(change.revision)
+                rawRevisions.append(change.rawRevision)
+                patches.append(change.patch)
+                rawPatches.append(change.rawPatch)
+                if !change.published || !change.rawPublished {
+                    change.published = true
+                    change.rawPublished = true
+                    pageChanges[i] = change
+                }
+            }
+            let snapshot = PageSnapshot(bases: bases, fills: maskPagePlansLocked(bases: bases),
+                                revisions: revisions, rawRevisions: rawRevisions, patches: patches, rawPatches: rawPatches, generation: generation)
+            publishedPages = snapshot
+            return snapshot
+        }
+    }
+
+    /// Publishes the CPU-painted rows to the next GPU upload and retires their fill recipes.
+    private func fillQueuedMasksLocked(on pool: CpuBootPool) {
+        let start = RuneExecutionContext.uptimeNanoseconds
+        let pageJobs = outlineMaskFills.map { item in
+            var job = item
+            job.rect.y %= UInt32(targetHeight)
+            return job
+        }
+        let filled = withOutlineStore { pool.fillMasks(pageJobs, store: $0) }
+        let covered = RuneExecutionContext.uptimeNanoseconds
+        generation &+= 1
+        baseGeneration = generation
+        savedMaskPlan = nil
+        savedPagePlans = nil
+        publishedPages = nil
+        combinedSnapshot = nil
+        for (job, bytes) in zip(outlineMaskFills, filled.masks) {
+            let r = job.rect
+            let page = Int(r.y) / targetHeight
+            let x = Int(r.x), y = Int(r.y) % targetHeight, w = Int(r.z), h = Int(r.w)
+            if page == 0 {
+                blitWithGutter(into: &pageZero.texels, pageWidth: targetWidth, dstX: x, dstY: y,
+                               bw: w, bh: h, bitmap: bytes)
+                page0Dirty = page0Dirty.map { (min($0.0, y - 1), max($0.1, y + h + 1)) } ?? (y - 1, y + h + 1)
+            } else {
+                blitWithGutter(into: &overflowPages[page - 1].atlas.texels, pageWidth: targetWidth,
+                               dstX: x, dstY: y, bw: w, bh: h, bitmap: bytes)
+                let dirty = overflowPages[page - 1].dirty
+                overflowPages[page - 1].dirty = dirty.map { (min($0.0, y - 1), max($0.1, y + h + 1)) } ?? (y - 1, y + h + 1)
+            }
+            pageChanges[page, default: PageChange()].write(
+                SIMD4(x - 1, y - 1, x + w + 1, y + h + 1), generation: generation, raw: true)
+        }
+        fillStats.masks &+= UInt64(outlineMaskFills.count)
+        fillStats.texels &+= filled.texels
+        fillStats.coverNs &+= covered - start
+        fillStats.copyNs &+= RuneExecutionContext.uptimeNanoseconds - covered
+        outlineMaskFills.removeAll(keepingCapacity: true)
+    }
+
     /// Returns a single `R8Atlas` containing all active pages stacked vertically (`width x (height * pageCount)`).
     /// When only page 0 exists, returns `atlas` directly with zero copy.
     public func compositedAtlas() -> R8Atlas {
-        lock.lock()
-        defer { lock.unlock() }
+        lock.withLock { maskPlanLocked()?.cpuAtlas() ?? compositedBaseLocked() }
+    }
+
+    private func maskPlanLocked(base: R8Atlas? = nil) -> OutlineMaskPlan? {
+        guard !outlineMaskFills.isEmpty else { return nil }
+        if let cached = savedMaskPlan, cached.generation == generation { return cached.plan }
+        guard let curves = withOutlineStore({ $0.snapshot() }) else { return nil }
+        let single = overflowPages.isEmpty
+        let plan = OutlineMaskPlan(base: base ?? compositedBaseLocked(), curves: curves,
+                                   fills: outlineMaskFills, baseGeneration: single ? rawGlyphRevisionLocked(page: 0) : baseGeneration,
+                                   epoch: single ? maskEpochLocked(page: 0) : resetsCount)
+        savedMaskPlan = (generation, plan)
+        return plan
+    }
+
+    private func maskPagePlanLocked(_ page: Int) -> OutlineMaskPlan? {
+        guard !outlineMaskFills.isEmpty else { return nil }
+        if overflowPages.isEmpty { return maskPlanLocked(base: pageZero) }
+        let plans = maskPagePlansLocked(bases: [pageZero] + overflowPages.map(\.atlas))
+        return plans.indices.contains(page) ? plans[page] : nil
+    }
+
+    private func maskPagePlansLocked(bases: [R8Atlas]) -> [OutlineMaskPlan?] {
+        guard !outlineMaskFills.isEmpty else { return [] }
+        if bases.count == 1 { return [maskPlanLocked(base: bases[0])] }
+        if let saved = savedPagePlans, saved.generation == generation { return saved.plans }
+        guard let curves = withOutlineStore({ $0.snapshot() }) else { return [] }
+        var perPage = Array(repeating: [QueuedOutlineFill](), count: bases.count)
+        for var item in outlineMaskFills {
+            let page = Int(item.rect.y) / targetHeight
+            item.rect.y -= UInt32(page * targetHeight)
+            perPage[page].append(item)
+        }
+        let plans: [OutlineMaskPlan?] = bases.indices.map { page in
+            guard !perPage[page].isEmpty else { return nil }
+            return OutlineMaskPlan(base: bases[page], curves: curves, fills: perPage[page],
+                                   baseGeneration: rawGlyphRevisionLocked(page: page), epoch: maskEpochLocked(page: page))
+        }
+        savedPagePlans = (generation, plans)
+        return plans
+    }
+
+    private func maskEpochLocked(page: Int) -> UInt64 {
+        max(outlineResetEpoch, maskPageEpochs[page] ?? 0)
+    }
+
+    private func compositedBaseLocked() -> R8Atlas {
         if overflowPages.isEmpty {
-            return atlas
+            return pageZero
         }
         if let combinedSnapshot, combinedSnapshot.generation == generation {
             return combinedSnapshot.atlas
@@ -986,15 +1359,15 @@ public final class GlyphAtlas: @unchecked Sendable {
         let pageH = max(1, targetHeight)
         let pageBytes = pageW * pageH
         var combined = [UInt8](repeating: 0, count: pageBytes * total)
-        if backingAllocated && atlas.width == pageW && atlas.height == pageH && atlas.texels.count == pageBytes {
-            combined.replaceSubrange(0..<pageBytes, with: atlas.texels)
-        } else if backingAllocated && !atlas.texels.isEmpty {
-            let copyRows = min(pageH, atlas.height)
-            let copyCols = min(pageW, atlas.width)
+        if backingAllocated && pageZero.width == pageW && pageZero.height == pageH && pageZero.texels.count == pageBytes {
+            combined.replaceSubrange(0..<pageBytes, with: pageZero.texels)
+        } else if backingAllocated && !pageZero.texels.isEmpty {
+            let copyRows = min(pageH, pageZero.height)
+            let copyCols = min(pageW, pageZero.width)
             for row in 0..<copyRows {
-                let srcStart = row * atlas.width
+                let srcStart = row * pageZero.width
                 let dstStart = row * pageW
-                combined.replaceSubrange(dstStart..<(dstStart + copyCols), with: atlas.texels[srcStart..<(srcStart + copyCols)])
+                combined.replaceSubrange(dstStart..<(dstStart + copyCols), with: pageZero.texels[srcStart..<(srcStart + copyCols)])
             }
         }
         for i in overflowPages.indices {
@@ -1057,6 +1430,11 @@ public final class GlyphAtlas: @unchecked Sendable {
             overflowPages[i].dirty = overflowPages[i].shelf.usedRows()
         }
         generation &+= 1
+        baseGeneration = generation
+        for page in 0...overflowPages.count {
+            let atlas = page == 0 ? pageZero : overflowPages[page - 1].atlas
+            pageChanges[page, default: PageChange()].write(SIMD4(0, 0, atlas.width, atlas.height), generation: generation, raw: true)
+        }
     }
 
     /// Marks `page` as used in the current frame (`atlas.rs:299`).
@@ -1075,8 +1453,33 @@ public final class GlyphAtlas: @unchecked Sendable {
 
     /// Advances the frame boundary across pages, reclaiming idle or overflow pages not in `pinnedMask` (`atlas.rs:324`).
     public func beginFrame(pinnedMask: UInt32 = 0) {
+        beginFrame(pinnedMask: pinnedMask, pinOutlines: pinnedMask != 0)
+    }
+
+    @discardableResult
+    internal func beginFrame(pinnedMask: UInt32, pinOutlines: Bool) -> Bool {
         lock.lock()
         defer { lock.unlock() }
+        let recycledOutlines = outlineLock.withLock { outlineStorage?.store.beginFrame(pinned: pinOutlines) == true }
+        if recycledOutlines {
+            // Captured frames own their immutable curves and atlas-fill plans. New layouts must
+            // resolve every old outline-backed placement, even when its page was not recycled.
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            glyphCache = glyphCache.filter { $0.value.entry.outlineGroup == nil }
+            #endif
+            #if canImport(CRuneDesktopText) && !canImport(CoreText)
+            portableGlyphCache = portableGlyphCache.filter { $0.value.entry.desktopTile == nil }
+            #endif
+            lcdOutlineMasks.removeAll(keepingCapacity: true)
+            outlineMaskFills.removeAll(keepingCapacity: true)
+            savedMaskPlan = nil
+            savedPagePlans = nil
+            clock &+= 1
+            resetsCount &+= 1
+            outlineResetEpoch = resetsCount
+            generation &+= 1
+            baseGeneration = generation
+        }
         frameSequence &+= 1
         let total = 1 + overflowPages.count
         var totalLive: UInt64 = 0
@@ -1104,6 +1507,8 @@ public final class GlyphAtlas: @unchecked Sendable {
                     break
                 }
                 overflowPages.removeLast()
+                publishedPages = nil
+                pageChanges.removeValue(forKey: last)
                 combinedSnapshot = nil
             }
         }
@@ -1118,6 +1523,7 @@ public final class GlyphAtlas: @unchecked Sendable {
                 touchLocked(page: UInt16(p), texels: 0)
             }
         }
+        return recycledOutlines
     }
 
     /// Drops glyph and icon cache entries older than 1 frame (`GlyphCache::drop_orphans`, `#905`).
@@ -1173,7 +1579,7 @@ public final class GlyphAtlas: @unchecked Sendable {
     public var allocatedBackingBytes: Int {
         lock.lock()
         defer { lock.unlock() }
-        return backingAllocated ? atlas.texels.count : 0
+        return backingAllocated ? pageZero.texels.count : 0
     }
 
     /// Total cached entries across R8 glyph/icon and RGBA color-glyph tables.
@@ -1261,11 +1667,17 @@ public final class GlyphAtlas: @unchecked Sendable {
     /// Native shapers rasterize a run in one tile. Each grapheme's ink may occupy a different
     /// vertical interval, independent of how tall its neighbors made the shared tile.
     internal func desktopCoveredRows(of entry: Entry, columns: Range<Int>) -> Range<Int>? {
+        if let tile = entry.desktopTile {
+            return withOutlineStore { store in
+                guard tile.generation == store.generation else { return nil }
+                return tile.coveredRows(columns: columns, store: store)
+            }
+        }
         lock.lock()
         defer { lock.unlock() }
         let page = Int(entry.page)
         guard page <= overflowPages.count else { return nil }
-        let source = page == 0 ? atlas : overflowPages[page - 1].atlas
+        let source = page == 0 ? pageZero : overflowPages[page - 1].atlas
         let x = entry.pixelOrigin.x + columns.lowerBound
         let y = entry.pixelOrigin.y
         let rows = 0..<entry.pixelSize.y
@@ -1288,7 +1700,8 @@ public final class GlyphAtlas: @unchecked Sendable {
         return storeColorGlyph(key: key, size: SIMD2(width, height), bearing: .zero, pixels: pixels)
     }
 
-    internal func desktopMask(key: DesktopMaskKey?, width: Int, height: Int, bitmap: () -> [UInt8]?) -> Entry? {
+    internal func desktopMask(key: DesktopMaskKey?, width: Int, height: Int,
+                              deferredTile: () -> DesktopOutlineTile? = { nil }, bitmap: () -> [UInt8]?) -> Entry? {
         let cacheKey = key.map(PortableGlyphKey.desktop)
         lock.lock()
         defer { lock.unlock() }
@@ -1300,10 +1713,23 @@ public final class GlyphAtlas: @unchecked Sendable {
             touchLocked(page: cached.entry.page, texels: UInt32(width * height))
             return cached.entry
         }
-        guard let coverage = bitmap(),
-              let placed = allocateAndBlit(width: width, height: height, bitmap: coverage) else { return nil }
-        let entry = Entry(uv: placed.uv, pixelSize: SIMD2(width, height), bearingPx: .zero,
+        let tile = deferOutlineMasks ? deferredTile() : nil
+        let fill = tile.flatMap { tile in withOutlineStore { $0.fill(for: tile) } }
+        let coverage: [UInt8]?
+        if fill != nil {
+            coverage = nil
+        } else {
+            guard let pixels = bitmap() else { return nil }
+            coverage = pixels
+        }
+        guard let placed = allocateAndBlit(width: width, height: height, bitmap: coverage) else { return nil }
+        var entry = Entry(uv: placed.uv, pixelSize: SIMD2(width, height), bearingPx: .zero,
                           page: placed.page, pixelOrigin: placed.origin)
+        if let fill {
+            entry.desktopTile = tile
+            let crop = tile?.components.count == 1 ? tile?.components.first?.rect : nil
+            queueMaskLocked(entry, fill: fill, crop: crop)
+        }
         if let cacheKey {
             accessCounter &+= 1
             portableGlyphCache[cacheKey] = (entry, accessCounter, frameSequence)
@@ -1434,18 +1860,24 @@ public final class GlyphAtlas: @unchecked Sendable {
         fontSizePx: Float,
         phaseX: UInt8 = 0,
         subpixelYBin: UInt8 = 0,
-        smoothing: FontSmoothing = .systemDefault
+        smoothing: FontSmoothing = .systemDefault,
+        inkBucket requestedBucket: UInt8 = 0
     ) -> Entry? {
         let binY = subpixelYBin & 3
         let subShift = Float(phaseX) / TextCoreTextMatch.phases
         let shiftY = Float(binY) * 0.25
+        let mode = smoothing == .systemDefault ? FontSmoothing.platformDefault : smoothing
+        let classic = mode == .on || mode == .off
+        let dilate = classic && mode.pipeline.dilate
+        let inkBucket = smoothing == .windfoil || dilate ? Self.dilationBucket(requestedBucket, ppem: fontSizePx) : 0
         let key = GlyphKey(
             fontHash: CFHash(font),
             glyphID: glyph,
             sizePx10: Int((fontSizePx * 10.0).rounded()),
             subpixelBin: phaseX,
             subpixelYBin: binY,
-            smoothing: smoothing
+            smoothing: smoothing,
+            inkBucket: inkBucket
         )
         lock.lock()
         if var cached = glyphCache[key] {
@@ -1458,6 +1890,80 @@ public final class GlyphAtlas: @unchecked Sendable {
             return cached.entry
         }
         lock.unlock()
+
+        if phaseX != 0, smoothing.isOutlineMode,
+           outlineLock.withLock({ outlines.usesWholePen(font: font, ppem: fontSizePx, smoothing: smoothing) }) {
+            // Windfoil's whole pens share one mask for all x phases; the upper half moves
+            // its quad one pixel. Use the same placement when CoreText supplies the mask.
+            guard var placed = rasterizeGlyph(font: font, glyph: glyph, fontSizePx: fontSizePx,
+                                              phaseX: 0, subpixelYBin: binY, smoothing: smoothing,
+                                              inkBucket: inkBucket) else { return nil }
+            if placed.pixelSize.x > 0 && Float(phaseX) >= TextCoreTextMatch.phases / 2 {
+                placed.bearingPx.x += 1
+            }
+            lock.withLock {
+                if let group = placed.outlineGroup, group.generation != withOutlineStore({ $0.generation }) { return }
+                accessCounter &+= 1
+                glyphCache[key] = (placed, accessCounter, frameSequence)
+                evictLRUIfNeededLocked()
+            }
+            return placed
+        }
+
+        if classic, let mask = outlineLock.withLock({
+            classicGlyphs.mask(font: font, glyph: glyph, ppem: fontSizePx, phase: subShift, shiftY: shiftY,
+                               pipeline: mode.pipeline, bucket: inkBucket, maximumSide: Self.atlasSize)
+        }) {
+            return lock.withLock {
+                if let cached = glyphCache[key] { return cached.entry }
+                var entry = Entry(uv: .zero, pixelSize: .zero, bearingPx: .zero)
+                if mask.bytes.contains(where: { $0 != 0 }) {
+                    guard let placed = allocateAndBlit(width: mask.width, height: mask.height, bitmap: mask.bytes) else { return nil }
+                    entry = Entry(uv: placed.uv, pixelSize: SIMD2(mask.width, mask.height), bearingPx: mask.bearing,
+                                  page: placed.page, pixelOrigin: placed.origin)
+                    if dilate {
+                        let source = TextOutlineGroup.InkVariant(font: font, glyph: glyph, ppem: fontSizePx,
+                            phase: phaseX, yPhase: binY, bucket: inkBucket, bearing: mask.bearing)
+                        entry.classicInk = .init(source: source, size: SIMD2(Float(mask.width), Float(mask.height)), smoothing: mode)
+                    }
+                }
+                accessCounter &+= 1
+                glyphCache[key] = (entry, accessCounter, frameSequence)
+                evictLRUIfNeededLocked()
+                return entry
+            }
+        }
+
+        let deferred = smoothing.isOutlineMode && lock.withLock { deferOutlineMasks }
+        if smoothing.isOutlineMode, let mask = outlineLock.withLock({
+            outlines.mask(font: font, glyph: glyph, ppem: fontSizePx, smoothing: smoothing,
+                          phase: subShift, shiftY: shiftY, inkBucket: inkBucket,
+                          maximumSide: Self.atlasSize, deferred: deferred)
+        }) {
+            if let entry: Entry = lock.withLock({
+                if let cached = glyphCache[key] { return cached.entry }
+                guard mask.group.generation == withOutlineStore({ $0.generation }) else { return nil }
+                let start = RuneExecutionContext.uptimeNanoseconds
+                guard let placed = allocateAndBlit(width: mask.width, height: mask.height, bitmap: mask.bytes) else {
+                    return nil
+                }
+                var entry = Entry(uv: placed.uv, pixelSize: SIMD2(mask.width, mask.height),
+                                  bearingPx: mask.bearing, page: placed.page, pixelOrigin: placed.origin)
+                entry.outlineGroup = mask.group
+                if mask.bytes == nil {
+                    queueMaskLocked(entry, fill: mask.fill)
+                } else {
+                    fillStats.masks &+= 1
+                    fillStats.texels &+= UInt64(mask.width * mask.height)
+                    fillStats.coverNs &+= mask.coverNs
+                    fillStats.copyNs &+= RuneExecutionContext.uptimeNanoseconds - start
+                }
+                accessCounter &+= 1
+                glyphCache[key] = (entry, accessCounter, frameSequence)
+                evictLRUIfNeededLocked()
+                return entry
+            }) { return entry }
+        }
 
         var g = glyph
         var bbox = CGRect.zero
@@ -1638,14 +2144,25 @@ public final class GlyphAtlas: @unchecked Sendable {
     }
 
     private func evictPageLocked(_ page: Int) {
+        if !outlineMaskFills.isEmpty {
+            outlineMaskFills.removeAll { Int($0.rect.y) / targetHeight == page }
+            savedMaskPlan = nil
+        }
         let p16 = UInt16(page)
+        if !lcdOutlineMasks.isEmpty { lcdOutlineMasks = lcdOutlineMasks.filter { $0.value.page != p16 } }
         #if canImport(CoreText) && canImport(CoreGraphics)
         glyphCache = glyphCache.filter { $0.value.entry.page != p16 }
         #endif
-        portableGlyphCache = portableGlyphCache.filter { $0.value.entry.page != p16 }
+        portableGlyphCache = portableGlyphCache.filter { key, cached in
+            #if os(Windows)
+            if case .windowsMask(let sourcePage, _, _, _) = key, sourcePage == p16 { return false }
+            #endif
+            return cached.entry.page != p16
+        }
         iconCache = iconCache.filter { $0.value.entry.page != p16 }
         clock &+= 1
         resetsCount &+= 1
+        maskPageEpochs[page] = resetsCount
         let age = clock
         if page == 0 {
             page0Dirty = nil
@@ -1655,14 +2172,65 @@ public final class GlyphAtlas: @unchecked Sendable {
             overflowPages[page - 1].shelf.reset(age: age)
         }
         generation &+= 1
+        baseGeneration = generation
+        // Drop previous patch ancestry when a shelf starts over.
+        pageChanges[page] = PageChange(revision: generation, rawRevision: generation)
     }
 
     private func ensureBackingLocked() {
         if !backingAllocated {
-            atlas = R8Atlas(width: targetWidth, height: targetHeight)
+            pageZero = R8Atlas(width: targetWidth, height: targetHeight)
             backingAllocated = true
         }
     }
+
+    #if os(Windows)
+    /// Several glyph quads can sample one native tile. Correct the whole tile
+    /// once per ink bucket so filtered glyphs still sample their actual neighbors.
+    fileprivate func windowsMask(_ tile: SIMD4<Int32>, sourcePage: UInt16, bucket: UInt8, lcd: WindowsGlyphMask? = nil) -> Entry? {
+        lock.lock()
+        defer { lock.unlock() }
+        let key = PortableGlyphKey.windowsMask(sourcePage: sourcePage, tile: tile, bucket: bucket, lcd: lcd != nil)
+        if var cached = portableGlyphCache[key] {
+            accessCounter &+= 1
+            cached.lastUsed = accessCounter
+            cached.lastFrame = frameSequence
+            portableGlyphCache[key] = cached
+            touchLocked(page: cached.entry.page, texels: 0)
+            return cached.entry
+        }
+        let page = Int(sourcePage)
+        guard page <= overflowPages.count else { return nil }
+        let x = Int(tile.x), y = Int(tile.y), w = Int(tile.z), h = Int(tile.w)
+        let table = WindowsTextGamma.tables[Int(bucket)]
+        let packedWidth = w * (lcd == nil ? 1 : 3)
+        guard packedWidth + 2 <= targetWidth else { return nil }
+        var pixels: [UInt8]
+        if let lcd {
+            guard var rgb = lcd.rgb?(), rgb.count == packedWidth * h else { return nil }
+            for i in rgb.indices { rgb[i] = table[Int(rgb[i])] }
+            pixels = rgb
+        } else {
+            pixels = []
+            pixels.reserveCapacity(w * h)
+            let source = page == 0 ? pageZero : overflowPages[page - 1].atlas
+            guard x >= 0, y >= 0, w > 0, h > 0, x + w <= source.width,
+                  (y + h - 1) * source.width + x + w <= source.texels.count else { return nil }
+            for row in y..<(y + h) {
+                let start = row * source.width + x
+                for c in source.texels[start..<(start + w)] { pixels.append(table[Int(c)]) }
+            }
+        }
+        touchLocked(page: sourcePage, texels: 0)
+        guard let placed = allocateAndBlit(width: packedWidth, height: h, bitmap: pixels) else { return nil }
+        let entry = Entry(uv: placed.uv, pixelSize: SIMD2(packedWidth, h), bearingPx: .zero,
+                          page: placed.page, pixelOrigin: placed.origin)
+        accessCounter &+= 1
+        portableGlyphCache[key] = (entry, accessCounter, frameSequence)
+        evictLRUIfNeededLocked()
+        return entry
+    }
+    #endif
 
     private func placeLocked(width bw: Int, height bh: Int) -> (page: Int, x: Int, y: Int)? {
         guard bw > 0, bh > 0, bw + 2 <= targetWidth, bh + 2 <= targetHeight else {
@@ -1740,24 +2308,27 @@ public final class GlyphAtlas: @unchecked Sendable {
         return nil
     }
 
-    private func allocateAndBlit(width bw: Int, height bh: Int, bitmap: [UInt8]) -> (uv: SIMD4<Float>, page: UInt16, origin: SIMD2<Int>)? {
+    private func allocateAndBlit(width bw: Int, height bh: Int, bitmap: [UInt8]?) -> (uv: SIMD4<Float>, page: UInt16, origin: SIMD2<Int>)? {
         guard let (page, dstX, dstY) = placeLocked(width: bw, height: bh) else {
             return nil
         }
 
+        publishedPages = nil
+        savedMaskPlan = nil
+        savedPagePlans = nil
         let pageW: Int
         let pageH: Int
         if page == 0 {
-            pageW = atlas.width
-            pageH = atlas.height
-            blitWithGutter(into: &atlas.texels, pageWidth: pageW, dstX: dstX, dstY: dstY, bw: bw, bh: bh, bitmap: bitmap)
+            pageW = pageZero.width
+            pageH = pageZero.height
+            if let bitmap { blitWithGutter(into: &pageZero.texels, pageWidth: pageW, dstX: dstX, dstY: dstY, bw: bw, bh: bh, bitmap: bitmap) }
             let d = (dstY - 1, dstY + bh + 1)
             page0Dirty = page0Dirty.map { (min($0.0, d.0), max($0.1, d.1)) } ?? d
         } else {
             let idx = page - 1
             pageW = overflowPages[idx].atlas.width
             pageH = overflowPages[idx].atlas.height
-            blitWithGutter(into: &overflowPages[idx].atlas.texels, pageWidth: pageW, dstX: dstX, dstY: dstY, bw: bw, bh: bh, bitmap: bitmap)
+            if let bitmap { blitWithGutter(into: &overflowPages[idx].atlas.texels, pageWidth: pageW, dstX: dstX, dstY: dstY, bw: bw, bh: bh, bitmap: bitmap) }
             let d = (dstY - 1, dstY + bh + 1)
             overflowPages[idx].dirty = overflowPages[idx].dirty.map { (min($0.0, d.0), max($0.1, d.1)) } ?? d
         }
@@ -1765,6 +2336,10 @@ public final class GlyphAtlas: @unchecked Sendable {
         rasterizedCount &+= 1
         touchLocked(page: UInt16(page), texels: UInt32(bw * bh))
         generation &+= 1
+        if bitmap != nil { baseGeneration = generation }
+        pageChanges[page, default: PageChange()].write(
+            SIMD4(dstX - 1, dstY - 1, dstX + bw + 1, dstY + bh + 1), generation: generation, raw: bitmap != nil
+        )
 
         let invW = 1.0 / Float(pageW)
         let invH = 1.0 / Float(pageH)
@@ -1775,6 +2350,80 @@ public final class GlyphAtlas: @unchecked Sendable {
             Float(dstY + bh) * invH
         )
         return (uv, UInt16(page), SIMD2<Int>(dstX, dstY))
+    }
+
+    private func queueMaskLocked(_ entry: Entry, fill: OutlineFillParams, crop: SIMD4<Int>? = nil) {
+        let y = Int(entry.page) * targetHeight + entry.pixelOrigin.y
+        let rect = SIMD4(UInt32(entry.pixelOrigin.x), UInt32(y), UInt32(entry.pixelSize.x), UInt32(entry.pixelSize.y))
+        var job = QueuedOutlineFill(rect: rect, fill: fill)
+        job.crop = crop
+        outlineMaskFills.append(job)
+    }
+
+    /// Places a gray or RGB coverage recipe. CPU users get a complete bitmap
+    /// immediately; an attached GPU can rasterize the same mask when first read.
+    internal func placeOutlineMask(width: Int, height: Int, fill: OutlineFillParams) -> Entry? {
+        guard width > 0 && height > 0 && width <= targetWidth - 2 && height <= targetHeight - 2 else { return nil }
+        let deferred = lock.withLock { deferOutlineMasks }
+        let start = deferred ? 0 : RuneExecutionContext.uptimeNanoseconds
+        let bytes: [UInt8]? = deferred ? nil : withOutlineStore { store in
+            OutlineMaskFiller.fillMask(store: store, fill: fill, atX: 0, atY: 0,
+                                       width: UInt32(width), height: UInt32(height))
+        }
+        return lock.withLock {
+            let copyStart = deferred ? 0 : RuneExecutionContext.uptimeNanoseconds
+            guard let placed = allocateAndBlit(width: width, height: height, bitmap: bytes) else { return nil }
+            let entry = Entry(uv: placed.uv, pixelSize: SIMD2(width, height), bearingPx: .zero,
+                              page: placed.page, pixelOrigin: placed.origin)
+            if deferred {
+                queueMaskLocked(entry, fill: fill)
+            } else {
+                fillStats.masks &+= 1
+                fillStats.texels &+= UInt64(width * height)
+                fillStats.coverNs &+= copyStart - start
+                fillStats.copyNs &+= RuneExecutionContext.uptimeNanoseconds - copyStart
+            }
+            return entry
+        }
+    }
+    /// Each displayed RGB pixel samples three adjacent R8 texels. Warm draws keep the
+    /// tripled-width tile until its page or outline generation is recycled.
+    internal func lcdMask(for group: TextOutlineGroup) -> Entry? {
+        guard group.glyphs.count == 1, let part = group.glyphs.first,
+              part.outline.coverage == 2, part.rect == SIMD4(0, 0, group.size.x, group.size.y),
+              let w = Int(exactly: group.size.x), let h = Int(exactly: group.size.y),
+              w > 0, w <= (targetWidth - 2) / 3, h > 0, h <= targetHeight - 2 else { return nil }
+        let o = part.outline
+        let key = TextOutlineMaskKey(generation: group.generation, record: o.record, hint: o.hint, size: SIMD2(w, h),
+                                     pen: o.pen, scale: o.scale, radius: o.radius)
+        return lock.withLock {
+            if let hit = lcdOutlineMasks[key] {
+                touchLocked(page: hit.page, texels: UInt32(w * h * 3))
+                return hit
+            }
+            let fill = OutlineFillParams(record: o.record, hint: o.hint, scale: o.scale, radius: o.radius,
+                                         pen: SIMD2(3 * o.pen.x, o.pen.y), coverage: 3)
+            let start = RuneExecutionContext.uptimeNanoseconds
+            let mask: (valid: Bool, bytes: [UInt8]?) = withOutlineStore { store in
+                guard store.generation == group.generation else { return (false, nil) }
+                return (true, deferOutlineMasks ? nil : OutlineMaskFiller.fillMask(store: store, fill: fill, atX: 0, atY: 0,
+                                        width: UInt32(w * 3), height: UInt32(h)))
+            }
+            let covered = RuneExecutionContext.uptimeNanoseconds
+            guard mask.valid, let placed = allocateAndBlit(width: w * 3, height: h, bitmap: mask.bytes) else { return nil }
+            let entry = Entry(uv: placed.uv, pixelSize: SIMD2(w * 3, h), bearingPx: .zero,
+                              page: placed.page, pixelOrigin: placed.origin)
+            if mask.bytes == nil {
+                queueMaskLocked(entry, fill: fill)
+            } else {
+                fillStats.masks &+= 1
+                fillStats.texels &+= UInt64(w * h * 3)
+                fillStats.coverNs &+= covered - start
+                fillStats.copyNs &+= RuneExecutionContext.uptimeNanoseconds - covered
+            }
+            lcdOutlineMasks[key] = entry
+            return entry
+        }
     }
 
     /// Directly packs an arbitrary R8 mask onto the shelf pages (matching `Atlas::put` in `atlas.rs:429`).
@@ -2227,7 +2876,7 @@ public final class TextSystem: @unchecked Sendable {
     private struct FontKey: Hashable {
         var family: FontFamily
         var sizePx10: Int
-        var weight10: Int
+        var weight: Float
         var italic: Bool
         var fontScopeEpoch: UInt64
         var variations: String
@@ -2270,11 +2919,11 @@ public final class TextSystem: @unchecked Sendable {
     }
 
     private struct ShapeKey: Hashable {
-        var text: String
+        var text: TextUTF8Key
         var spans: [TextSpan]?
         var style: TextStyle
         var maxWidthHalfPt: Int
-        var scale100: Int
+        var scaleBits: UInt32
         var pillsHash: UInt64
         var fontEpoch: UInt64
         var langEpoch: UInt64
@@ -2592,6 +3241,9 @@ public final class TextSystem: @unchecked Sendable {
 
     private let lock = NSLock()
     public let glyphAtlas: GlyphAtlas
+    /// Installed while constructing a frame for a renderer that can bind quadratic glyph records.
+    internal var outlineRendererSupport: ((Bool) -> (outlines: Bool, lcd: Bool))?
+    internal var outlinePaths = OutlinePaths()
     public let glyphCache = GlyphReplayCache()
     public let colorIcons = ColorIconRasterizer()
     private var languageTagOverride: String?
@@ -2608,7 +3260,7 @@ public final class TextSystem: @unchecked Sendable {
     private var measureCache: [MeasureKey: (size: Vec2, usedGeneration: UInt64)] = [:]
 
     private struct TypesetterKey: Hashable {
-        var text: String
+        var text: TextUTF8Key
         var spans: [TextSpan]?
         var pills: [PillChip]
         var shapingStyle: TextStyle
@@ -2617,7 +3269,7 @@ public final class TextSystem: @unchecked Sendable {
         var fontEpoch: UInt64
 
         init(text: String, spans: [TextSpan]?, pills: [PillChip], style: TextStyle, scale: Float, languageTag: String?, fontEpoch: UInt64) {
-            self.text = text
+            self.text = TextUTF8Key(text)
             self.spans = spans
             self.pills = pills
             var normalized = style
@@ -3231,6 +3883,50 @@ public final class TextSystem: @unchecked Sendable {
         glyph.retainedColorGlyph ?? glyph.colorGlyphIndex.flatMap(glyphAtlas.colorGlyph)
     }
 
+    /// The coverage atlas sample to paint for a shaped glyph in straight RGBA.
+    /// Set `encoded` when the RGB channels already use the sRGB transfer function.
+    public func glyphMask(for glyph: PositionedGlyph, ink: SIMD4<Float>, encoded: Bool) -> (uv: SIMD4<Float>, page: UInt16, gamma: Float) {
+        #if os(Windows)
+        if let tile = glyph.windowsMask?.bounds {
+            let bucket = WindowsTextGamma.bucket(ink, encoded: encoded)
+            if let corrected = glyphAtlas.windowsMask(tile, sourcePage: glyph.atlasPage, bucket: bucket) {
+                let dx = Float(corrected.pixelOrigin.x - Int(tile.x)) / Float(glyphAtlas.pagePixelSize.x)
+                let dy = Float(corrected.pixelOrigin.y - Int(tile.y)) / Float(glyphAtlas.pagePixelSize.y)
+                return (glyph.uv + SIMD4(dx, dy, dx, dy), corrected.page, 1)
+            }
+            return (glyph.uv, glyph.atlasPage, 1)
+        }
+        #endif
+        let premultiplied = SIMD4(ink.x * ink.w, ink.y * ink.w, ink.z * ink.w, ink.w)
+        return (glyph.uv, glyph.atlasPage, coverageExponent(premultiplied))
+    }
+
+    internal func glyphMask(for glyph: PositionedGlyph, premultipliedInk ink: SIMD4<Float>, encoded: Bool) -> (uv: SIMD4<Float>, page: UInt16, gamma: Float) {
+        #if os(Windows)
+        if glyph.windowsMask != nil && ink.w > 0 {
+            return glyphMask(for: glyph, ink: SIMD4(ink.x / ink.w, ink.y / ink.w, ink.z / ink.w, ink.w), encoded: encoded)
+        }
+        #endif
+        return (glyph.uv, glyph.atlasPage, coverageExponent(ink))
+    }
+
+    /// The GPU uses three adjacent R8 texels per pixel only for native-size quads.
+    internal func lcdMask(for glyph: PositionedGlyph, rect: SIMD4<Float>, ink: SIMD4<Float>, encoded: Bool) -> (uv: SIMD4<Float>, page: UInt16)? {
+        #if os(Windows)
+        guard let source = glyph.windowsMask, source.rgb != nil else { return nil }
+        let tile = source.bounds
+        let width = Float(glyphAtlas.pagePixelSize.x), height = Float(glyphAtlas.pagePixelSize.y)
+        guard abs((glyph.uv.z - glyph.uv.x) * width - rect.z) <= 0.5,
+              abs((glyph.uv.w - glyph.uv.y) * height - rect.w) <= 0.5,
+              let entry = glyphAtlas.windowsMask(tile, sourcePage: glyph.atlasPage, bucket: WindowsTextGamma.bucket(ink, encoded: encoded), lcd: source) else { return nil }
+        let dx = Float(entry.pixelOrigin.x - 3 * Int(tile.x)) / width
+        let dy = Float(entry.pixelOrigin.y - Int(tile.y)) / height
+        return (glyph.uv * SIMD4(3, 1, 3, 1) + SIMD4(dx, dy, dx, dy), entry.page)
+        #else
+        return nil
+        #endif
+    }
+
     /// CSS font family lists backing `.systemUI` (`sans`) and `.monospace` (`mono`).
     public func families() -> (sans: String, mono: String) {
         let active = activeFamilies()
@@ -3310,6 +4006,16 @@ public final class TextSystem: @unchecked Sendable {
 
     private static func firstMatchingFont(in families: [String], sizePx: CGFloat) -> CTFont? {
         for name in families {
+            // The hidden SF Mono name resolves to a substitute through CTFontCreateWithName.
+            if name == ".SF NS Mono" {
+                #if os(macOS)
+                return NSFont.monospacedSystemFont(ofSize: sizePx, weight: .regular) as CTFont
+                #elseif canImport(UIKit)
+                return UIFont.monospacedSystemFont(ofSize: sizePx, weight: .regular) as CTFont
+                #else
+                continue
+                #endif
+            }
             // Apple's public name for San Francisco resolves to a private family and PostScript name.
             if name.caseInsensitiveCompare("System Font") == .orderedSame {
                 return CTFontCreateWithName("System Font" as CFString, sizePx, nil)
@@ -3382,7 +4088,7 @@ public final class TextSystem: @unchecked Sendable {
         let key = FontKey(
             family: style.family,
             sizePx10: Int((sizePx * 10.0).rounded()),
-            weight10: Int(style.weight.rounded()),
+            weight: style.weight,
             italic: style.italic,
             fontScopeEpoch: families.epoch,
             variations: style.variations,
@@ -3407,20 +4113,22 @@ public final class TextSystem: @unchecked Sendable {
 
         let stack = style.family.stack(sans: families.sans, mono: families.mono)
         let candidates = FontFamily.candidates(in: stack)
-        let mono = style.family == .monospace
+        let mono = style.family.isMonospace
         let baseFont = Self.firstMatchingFont(in: candidates, sizePx: CGFloat(sizePx))
             ?? CTFontCreateUIFontForLanguage(mono ? .userFixedPitch : .system, CGFloat(sizePx), nil)
             ?? CTFontCreateWithName((mono ? "Menlo-Regular" : "SFProText-Regular") as CFString, CGFloat(sizePx), nil)
 
         let familyName = CTFontCopyFamilyName(baseFont) as String
-        let featureSettings = Self.parseOpenTypeFeatures(style.features)
+        let featureSettings = Self.parseOpenTypeFeatures(style.shapingFeatures(monospace: mono))
         let variationSettings = Self.parseFontVariations(style.variations)
         let declaredFaces = FaceWeightsRegistry.snapshot()
         let weighted: CTFont
-        if let declared = FaceWeightsRegistry.declaredFace(in: declaredFaces, family: familyName, requestedWeight: style.weight),
-           let faceMatch = FaceWeightsRegistry.matchingFace(
+        let targetWeight = FaceWeightsRegistry.effectiveCSSWeight(
+            familyName: familyName, requestedWeight: style.weight, faces: declaredFaces
+        )
+        if let faceMatch = FaceWeightsRegistry.matchingFace(
                inFamily: familyName,
-               targetCSSWeight: declared.weight,
+               targetCSSWeight: targetWeight,
                italic: style.italic,
                sizePx: CGFloat(sizePx)
            ) {
@@ -3430,7 +4138,8 @@ public final class TextSystem: @unchecked Sendable {
                     extraAttrs[kCTFontFeatureSettingsAttribute] = featureSettings as CFArray
                 }
                 if !variationSettings.isEmpty {
-                    extraAttrs[kCTFontVariationAttribute] = variationSettings as CFDictionary
+                    let selectedAxes = CTFontCopyVariation(faceMatch) as? [NSNumber: Double] ?? [:]
+                    extraAttrs[kCTFontVariationAttribute] = selectedAxes.merging(variationSettings) { _, author in author } as CFDictionary
                 }
                 let desc = CTFontDescriptorCreateCopyWithAttributes(
                     CTFontCopyFontDescriptor(faceMatch),
@@ -3622,7 +4331,7 @@ public final class TextSystem: @unchecked Sendable {
         pretty: Bool = false,
         bypassCache: Bool = false
     ) -> ShapedText {
-        measureFramePhase(.text) {
+        measureRuntimePhase(.text) {
             shapeImpl(
                 text: text,
                 spans: spans,
@@ -3661,9 +4370,20 @@ public final class TextSystem: @unchecked Sendable {
         glidePx: Vec2 = .zero,
         keep: TextKeep = .cached,
         countAsRebreak: Bool = true,
-        pretty: Bool = false
+        pretty: Bool = false,
+        rasterWindow: TextRasterWindow? = nil
     ) -> TextLayoutBox {
-        measureFramePhase(.text) {
+        if emitGlyphs, let rasterWindow, keep != .secret, !Self.needsElision(style, maxWidth: maxWidth) {
+            let measure = layoutKeyed(text: text, spans: spans, pills: pills, style: style,
+                                      maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false,
+                                      countAsRebreak: countAsRebreak, pretty: pretty)
+            if let prepared = measure.prepared, measure.shaped.lineCount > 1,
+               rasterWindow.lowerY > 0 || rasterWindow.upperY < measure.shaped.size.y {
+                return paintInWindow(measure, prepared: prepared, window: rasterWindow, glide: glidePx)
+            }
+            if measure.hasGlyphs, glidePx == .zero { return measure }
+        }
+        return measureRuntimePhase(.text) {
             let scale = max(pixelScale, 1.0)
             let authText = spans.map { $0.map(\.text).joined() } ?? text
             let effectiveMaxW = maxWidth
@@ -3873,7 +4593,7 @@ public final class TextSystem: @unchecked Sendable {
     /// (`line_break::rebreak` of a kept paragraph, `paragraphs.rs`); nil when it holds none.
     internal func rebreakOwned(_ box: TextLayoutBox, maxWidth: Float?, emitGlyphs: Bool) -> TextLayoutBox? {
         guard let prepared = box.prepared, box.shapeKey.usesSmoothing(smoothing) else { return nil }
-        let shaped = measureFramePhase(.text) {
+        let shaped = measureRuntimePhase(.text) {
             breakLines(prepared: prepared, maxWidth: maxWidth, emitGlyphs: emitGlyphs, glidePx: .zero, pretty: box.shapeKey.pretty)
         }
         lock.withLock { _rebrokenCount += 1 }
@@ -3906,7 +4626,7 @@ public final class TextSystem: @unchecked Sendable {
         bypassCache: Bool = false,
         pretty: Bool = false
     ) -> ShapedText {
-        measureFramePhase(.text) {
+        measureRuntimePhase(.text) {
             shapeImpl(
                 text: text,
                 spans: spans,
@@ -3975,20 +4695,20 @@ public final class TextSystem: @unchecked Sendable {
             && style.wrap == .wrap
             && style.align != .justified
 
-        let sKey = ShapeKey(
-            text: authText,
+        let sKey = canCacheShape ? ShapeKey(
+            text: TextUTF8Key(authText),
             spans: spans,
             style: style,
             maxWidthHalfPt: maxWKey,
-            scale100: scaleKey,
+            scaleBits: scale.bitPattern,
             pillsHash: pHash,
             fontEpoch: fEpoch,
             langEpoch: lEpoch,
             emitGlyphs: emitGlyphs,
             pretty: effectivePretty
-        )
+        ) : nil
 
-        if canCacheShape {
+        if let sKey {
             lock.lock()
             if var cached = shapeCache[sKey],
                cached.pages.isEmpty || glyphAtlas.retainPages(cached.pages, since: cached.atlasResets) {
@@ -4055,7 +4775,7 @@ public final class TextSystem: @unchecked Sendable {
 
         lock.lock()
         _shapeCount &+= 1
-        if canCacheShape {
+        if let sKey {
             if shapeCache.count > 2048 {
                 shapeCache.removeAll(keepingCapacity: true)
             }
@@ -4437,7 +5157,7 @@ public final class TextSystem: @unchecked Sendable {
         // `inline_fit::mono_fits`: the smaller spaces that stand for inline code's CSS padding have
         // no box in a browser, so theirs is cut to fit the strut (never growing the line); only for
         // proportional text holding code (`mono_style` turns the strut cut off).
-        let cutsCodePadding = style.family != .monospace && (spans?.contains(where: { $0.monospace }) ?? false)
+        let cutsCodePadding = !style.family.isMonospace && (spans?.contains(where: { $0.monospace }) ?? false)
         var spanTabInfo: [(u16Range: Range<Int>, spacePx: CGFloat, isMonospace: Bool)] = []
         if let spans {
             var authU16Cursor = 0
@@ -4531,8 +5251,8 @@ public final class TextSystem: @unchecked Sendable {
             var inMonoSpan = false
             for scalar in shapedText.unicodeScalars {
                 let activeSpan = spanTabInfo.first(where: { $0.u16Range.contains(u16Pos) })
-                let isMono = (style.family == .monospace) || (activeSpan?.isMonospace == true)
-                if style.family != .monospace {
+                let isMono = (style.family.isMonospace) || (activeSpan?.isMonospace == true)
+                if !style.family.isMonospace {
                     if !isMono {
                         inMonoSpan = false
                         monoCol = 0
@@ -4605,7 +5325,8 @@ public final class TextSystem: @unchecked Sendable {
         emitGlyphs: Bool,
         glidePx: Vec2,
         styleOverride: TextStyle? = nil,
-        pretty: Bool = false
+        pretty: Bool = false,
+        emitDecorations: Bool = false
     ) -> ShapedText {
         let authText = prepared.authText
         let shapedText = prepared.shapedText
@@ -4615,14 +5336,12 @@ public final class TextSystem: @unchecked Sendable {
         let lhPx = lhPt * scale
         var markerMap = prepared.markerMap
         let preparedPills = prepared.preparedPills
-        let spanPalette = prepared.spanPalette
         let decoratedRanges = prepared.decoratedRanges
         let baseFont = prepared.baseFont
         let baseAscentPx = prepared.baseAscentPx
         let baseDescentPx = prepared.baseDescentPx
         let attrStr = prepared.attrStr
         let typesetter = prepared.typesetter
-        let spanColorKey = "RuneColorIndex" as CFString
         let pillMarkerKey = "RunePillMarker" as CFString
         let shapedNS = shapedText as NSString
         let fullLen = CFAttributedStringGetLength(attrStr)
@@ -4809,7 +5528,7 @@ public final class TextSystem: @unchecked Sendable {
                    style.align != .justified,
                    style.maxLines == 0,
                    style.elide == .end,
-                   style.family != .monospace,
+                   !style.family.isMonospace,
                    !paraIsRTL,
                    paraLines.count >= 2 {
                     let greedyInfos: [PrettyLineBreaker.GreedyLineInfo] = paraLines.map { entry in
@@ -4929,17 +5648,7 @@ public final class TextSystem: @unchecked Sendable {
 
         // CoreText clusters use UTF-16 indices in the string containing pill markers.
         // Carry authored bytes to paint so bidi runs and ligatures take their mark's ink.
-        var byteAtUTF16: [Int] = []
-        if emitGlyphs, authText.utf8.count != authText.utf16.count {
-            var byte = 0
-            byteAtUTF16.reserveCapacity(authText.utf16.count + 1)
-            for scalar in authText.unicodeScalars {
-                byteAtUTF16.append(byte)
-                if scalar.utf16.count == 2 { byteAtUTF16.append(byte) }
-                byte += scalar.utf8.count
-            }
-            byteAtUTF16.append(byte)
-        }
+        let byteAtUTF16 = emitGlyphs ? authoredByteOffsets(prepared) : []
         var glyphsOut: [PositionedGlyph] = []
         var underlinesOut: [SIMD4<Float>] = []
         var underlineLineEnds: [Float] = []
@@ -5015,7 +5724,7 @@ public final class TextSystem: @unchecked Sendable {
                 authUTF8Start: item.authUTF8Start
             ))
 
-            if emitGlyphs && !decoratedRanges.isEmpty && item.u16End > item.u16Start {
+            if (emitGlyphs || emitDecorations) && !decoratedRanges.isEmpty && item.u16End > item.u16Start {
                 // Span backgrounds per glyph run (`decorations.rs`, `#983`): inline code's box is its
                 // font's content area, other spans balance on the cap height, whole device px;
                 // touching runs with one background merge into a rect as tall as the widest run.
@@ -5252,87 +5961,9 @@ public final class TextSystem: @unchecked Sendable {
             }
 
             if emitGlyphs {
-            for run in runs {
-                let attrs = CTRunGetAttributes(run) as NSDictionary
-                if attrs[kCTRunDelegateAttributeName] != nil || attrs[pillMarkerKey] != nil {
-                    continue
-                }
-                let glyphCount = CTRunGetGlyphCount(run)
-                if glyphCount == 0 { continue }
-                let runFont = (attrs[kCTFontAttributeName] as! CTFont)
-                let runFontSizePx = Float(CTFontGetSize(runFont))
-                let runIsColor = GlyphAtlas.isColorFont(runFont)
-                let runColor: Color? = (attrs[spanColorKey] as? Int).flatMap { idx in
-                    (0..<spanPalette.count).contains(idx) ? spanPalette[idx] : nil
-                }
-
-                var glyphs = Array<CGGlyph>(repeating: 0, count: glyphCount)
-                var positions = Array<CGPoint>(repeating: .zero, count: glyphCount)
-                var indices = Array<CFIndex>(repeating: 0, count: glyphCount)
-                CTRunGetStringIndices(run, CFRangeMake(0, glyphCount), &indices)
-                CTRunGetGlyphs(run, CFRangeMake(0, glyphCount), &glyphs)
-                CTRunGetPositions(run, CFRangeMake(0, glyphCount), &positions)
-
-                for i in 0..<glyphCount {
-                    let authoredIndex = max(0, markerMap.authU16(forShapedU16: indices[i]))
-                    let byte = byteAtUTF16.isEmpty ? authoredIndex : byteAtUTF16[min(authoredIndex, byteAtUTF16.count - 1)]
-                    let gxPx = alignOffsetPx + Float(positions[i].x)
-                    let gyPx = baselineYPx - Float(positions[i].y)
-                    if runIsColor, let colorEntry = glyphAtlas.rasterizeColorGlyph(
-                        font: runFont,
-                        glyph: glyphs[i],
-                        fontSizePx: runFontSizePx
-                    ), colorEntry.pixelSize.x > 0 && colorEntry.pixelSize.y > 0 {
-                        let quadXPx = roundf(gxPx) + colorEntry.bearingPx.x
-                        let quadYPx = roundf(gyPx) + colorEntry.bearingPx.y
-                        glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx, glideX: 0, binY: 0, smoothing: style.fontSmoothing, isColor: true))
-                        glyphsOut.append(PositionedGlyph(
-                            rect: SIMD4<Float>(
-                                quadXPx * invS,
-                                quadYPx * invS,
-                                Float(colorEntry.pixelSize.x) * invS,
-                                Float(colorEntry.pixelSize.y) * invS
-                            ),
-                            colorGlyph: colorEntry,
-                            color: runColor,
-                            utf8Offset: byte
-                        ))
-                        continue
-                    }
-
-                    let pen = TextBoxGeometry.glyphPen(at: gxPx, ppem: runFontSizePx, glide: glidePx.x, smoothing: style.fontSmoothing)
-                    let phases = Float(GlyphAtlas.glidePhases)
-                    let y = gyPx.rounded() * phases + (glidePx.y * phases).rounded()
-                    let quadYPx = floorf(y / phases)
-                    let binYArg = UInt8(y - quadYPx * phases)
-                    guard let entry = glyphAtlas.rasterizeGlyph(
-                        font: runFont,
-                        glyph: glyphs[i],
-                        fontSizePx: runFontSizePx,
-                        phaseX: pen.phase,
-                        subpixelYBin: binYArg,
-                        smoothing: style.fontSmoothing
-                    ), entry.pixelSize.x > 0 && entry.pixelSize.y > 0 else {
-                        continue
-                    }
-
-                    let quadXPx = pen.pixel + entry.bearingPx.x
-                    let finalQuadYPx = quadYPx + entry.bearingPx.y
-                    glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx, glideX: glidePx.x, binY: binYArg, smoothing: style.fontSmoothing, isColor: false))
-                    glyphsOut.append(PositionedGlyph(
-                        rect: SIMD4<Float>(
-                            quadXPx * invS,
-                            finalQuadYPx * invS,
-                            Float(entry.pixelSize.x) * invS,
-                            Float(entry.pixelSize.y) * invS
-                        ),
-                        uv: entry.uv,
-                        color: runColor,
-                        atlasPage: entry.page,
-                        utf8Offset: byte
-                    ))
-                }
-            }
+                emitLineGlyphs(runs, prepared: prepared, markerMap: markerMap, byteAtUTF16: byteAtUTF16,
+                               style: style, alignOffsetPx: alignOffsetPx, baselineYPx: baselineYPx,
+                               glidePx: glidePx, glyphsOut: &glyphsOut, glyphPensOut: &glyphPensOut)
             }
             lineGlyphRanges.append(lineStartGlyphIdx..<glyphsOut.count)
         }
@@ -5373,6 +6004,184 @@ public final class TextSystem: @unchecked Sendable {
         shapedOut.underlineLineEndsPt = underlineLineEnds
         shapedOut.glyphPens = glyphPensOut.count == glyphsOut.count ? glyphPensOut : []
         return shapedOut
+    }
+
+    private func authoredByteOffsets(_ prepared: TextPreparedShape) -> [Int] {
+        if let offsets = lock.withLock({ prepared.utf8AtUTF16 }) { return offsets }
+        let text = prepared.authText
+        var offsets: [Int] = []
+        if text.utf8.count != text.utf16.count {
+            offsets.reserveCapacity(text.utf16.count + 1)
+            var byte = 0
+            for scalar in text.unicodeScalars {
+                offsets.append(byte)
+                if scalar.utf16.count == 2 { offsets.append(byte) }
+                byte += scalar.utf8.count
+            }
+            offsets.append(byte)
+        }
+        lock.withLock { prepared.utf8AtUTF16 = offsets }
+        return offsets
+    }
+
+    private func emitLineGlyphs(
+        _ runs: [CTRun], prepared: TextPreparedShape, markerMap: ShapedText.MarkerMap,
+        byteAtUTF16: [Int], style: TextStyle, alignOffsetPx: Float, baselineYPx: Float,
+        glidePx: Vec2, glyphsOut: inout [PositionedGlyph], glyphPensOut: inout [GlyphPen]
+    ) {
+        let spanPalette = prepared.spanPalette
+        let spanColorKey = "RuneColorIndex" as CFString
+        let pillMarkerKey = "RunePillMarker" as CFString
+        let invS = 1 / prepared.scale
+        for run in runs {
+            let attrs = CTRunGetAttributes(run) as NSDictionary
+            if attrs[kCTRunDelegateAttributeName] != nil || attrs[pillMarkerKey] != nil {
+                continue
+            }
+            let glyphCount = CTRunGetGlyphCount(run)
+            if glyphCount == 0 { continue }
+            let runFont = (attrs[kCTFontAttributeName] as! CTFont)
+            let runFontSizePx = Float(CTFontGetSize(runFont))
+            let runIsColor = GlyphAtlas.isColorFont(runFont)
+            let runColor: Color? = (attrs[spanColorKey] as? Int).flatMap { idx in
+                (0..<spanPalette.count).contains(idx) ? spanPalette[idx] : nil
+            }
+
+            let runInk: UInt8
+            if style.fontSmoothing == .on || style.fontSmoothing == .windfoil {
+                runInk = runColor.flatMap { GlyphAtlas.inkBucket(SIMD4($0.r, $0.g, $0.b, $0.a), encoded: false) } ?? GlyphAtlas.baseInkBucket
+            } else {
+                runInk = 0
+            }
+
+            var glyphs = Array<CGGlyph>(repeating: 0, count: glyphCount)
+            var positions = Array<CGPoint>(repeating: .zero, count: glyphCount)
+            var indices = Array<CFIndex>(repeating: 0, count: glyphCount)
+            CTRunGetStringIndices(run, CFRangeMake(0, glyphCount), &indices)
+            CTRunGetGlyphs(run, CFRangeMake(0, glyphCount), &glyphs)
+            CTRunGetPositions(run, CFRangeMake(0, glyphCount), &positions)
+
+            for i in 0..<glyphCount {
+                let authoredIndex = max(0, markerMap.authU16(forShapedU16: indices[i]))
+                let byte = byteAtUTF16.isEmpty ? authoredIndex : byteAtUTF16[min(authoredIndex, byteAtUTF16.count - 1)]
+                let gxPx = alignOffsetPx + Float(positions[i].x)
+                let gyPx = baselineYPx - Float(positions[i].y)
+                if runIsColor, let colorEntry = glyphAtlas.rasterizeColorGlyph(
+                    font: runFont,
+                    glyph: glyphs[i],
+                    fontSizePx: runFontSizePx
+                ), colorEntry.pixelSize.x > 0 && colorEntry.pixelSize.y > 0 {
+                    let quadXPx = roundf(gxPx) + colorEntry.bearingPx.x
+                    let quadYPx = roundf(gyPx) + colorEntry.bearingPx.y
+                    glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx, glideX: 0, binY: 0, smoothing: style.fontSmoothing, isColor: true, yOffsetPx: -Float(positions[i].y)))
+                    glyphsOut.append(PositionedGlyph(
+                        rect: SIMD4<Float>(
+                            quadXPx * invS,
+                            quadYPx * invS,
+                            Float(colorEntry.pixelSize.x) * invS,
+                            Float(colorEntry.pixelSize.y) * invS
+                        ),
+                        colorGlyph: colorEntry,
+                        color: runColor,
+                        utf8Offset: byte
+                    ))
+                    continue
+                }
+
+                let pen = TextBoxGeometry.glyphPen(at: gxPx, ppem: runFontSizePx, glide: glidePx.x, smoothing: style.fontSmoothing)
+                let phases = Float(GlyphAtlas.glidePhases)
+                let y = gyPx.rounded() * phases + (glidePx.y * phases).rounded()
+                let quadYPx = floorf(y / phases)
+                let binYArg = UInt8(y - quadYPx * phases)
+                guard let entry = glyphAtlas.rasterizeGlyph(
+                    font: runFont,
+                    glyph: glyphs[i],
+                    fontSizePx: runFontSizePx,
+                    phaseX: pen.phase,
+                    subpixelYBin: binYArg,
+                    smoothing: style.fontSmoothing,
+                    inkBucket: runInk
+                ), entry.pixelSize.x > 0 && entry.pixelSize.y > 0 else {
+                    continue
+                }
+
+                let quadXPx = pen.pixel + entry.bearingPx.x
+                let finalQuadYPx = quadYPx + entry.bearingPx.y
+                glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx, glideX: glidePx.x, binY: binYArg, smoothing: style.fontSmoothing, isColor: false, yOffsetPx: -Float(positions[i].y)))
+                var positioned = PositionedGlyph(
+                    rect: SIMD4<Float>(
+                        quadXPx * invS,
+                        finalQuadYPx * invS,
+                        Float(entry.pixelSize.x) * invS,
+                        Float(entry.pixelSize.y) * invS
+                    ),
+                    uv: entry.uv,
+                    color: runColor,
+                    atlasPage: entry.page,
+                    utf8Offset: byte
+                )
+                positioned.classicInk = entry.classicInk
+                positioned.outlineGroup = entry.outlineGroup
+                glyphsOut.append(positioned)
+            }
+        }
+    }
+
+    /// Reuses the measured layout and retained CTLines while a large document scrolls.
+    /// Only lines whose ink can reach the clip acquire atlas entries.
+    private func paintInWindow(_ measured: TextLayoutBox, prepared: TextPreparedShape,
+                               window: TextRasterWindow, glide: Vec2) -> TextLayoutBox {
+        let resets = glyphAtlas.resets
+        let previous = lock.withLock { measured.windowPaint }
+        let matchingWidth = previous?.box.maxWidth == measured.maxWidth
+        if let previous, matchingWidth, previous.window == window, previous.glide == glide,
+           glyphAtlas.retainPages(previous.box.desktopPages, since: previous.resets) {
+            return previous.box
+        }
+        let byteAtUTF16 = authoredByteOffsets(prepared)
+        let box = measured.clone()
+        if !prepared.decoratedRanges.isEmpty && !measured.hasGlyphs {
+            if let prior = previous?.box.shaped, matchingWidth {
+                box.shaped.underlines = prior.underlines
+                box.shaped.underlineLineEndsPt = prior.underlineLineEndsPt
+                box.shaped.strikethroughs = prior.strikethroughs
+                box.shaped.backgrounds = prior.backgrounds
+            } else {
+                box.shaped = breakLines(prepared: prepared, maxWidth: measured.maxWidth, emitGlyphs: false,
+                                        glidePx: glide, pretty: measured.shapeKey.pretty, emitDecorations: true)
+            }
+        }
+        var glyphs: [PositionedGlyph] = []
+        var pens: [GlyphPen] = []
+        let layout = box.shaped
+        // Empty ranges before/after the window retain original line numbers for caret/outline paint.
+        var ranges = Array(repeating: 0..<0, count: layout.lineStrings.count)
+        let band = window.expanded(for: measured.style, spans: measured.spans, scale: prepared.scale)
+        let rows = band.lines(in: layout)
+        for row in rows {
+            let rec = layout.lineStrings[row]
+            let start = glyphs.count
+            if let line = rec.ctLine {
+                emitLineGlyphs(CTLineGetGlyphRuns(line) as? [CTRun] ?? [],
+                               prepared: prepared, markerMap: layout.markerMap, byteAtUTF16: byteAtUTF16,
+                               style: prepared.style, alignOffsetPx: rec.originX * prepared.scale,
+                               baselineYPx: layout.lineBaselinesPx[row], glidePx: glide,
+                               glyphsOut: &glyphs, glyphPensOut: &pens)
+            }
+            ranges[row] = start..<glyphs.count
+        }
+        if rows.upperBound < ranges.count {
+            let end = glyphs.count
+            ranges.replaceSubrange(rows.upperBound..., with: repeatElement(end..<end, count: ranges.count - rows.upperBound))
+        }
+        box.shaped.glyphs = glyphs
+        box.shaped.glyphPens = pens
+        box.shaped.lineGlyphRanges = ranges
+        box.hasGlyphs = true
+        box.rasterWindow = window
+        box.desktopPages = Set(glyphs.map(\.atlasPage))
+        lock.withLock { measured.windowPaint = (window, glide, resets, box) }
+        return box
     }
 
     /// Where a line's glyph runs end (line px): the furthest right edge of a run that draws glyphs,
@@ -5639,9 +6448,10 @@ public final class TextSystem: @unchecked Sendable {
         glidePx: Vec2 = .zero,
         keep: TextKeep = .cached,
         countAsRebreak: Bool = true,
-        pretty: Bool = false
+        pretty: Bool = false,
+        rasterWindow: TextRasterWindow? = nil
     ) -> TextLayoutBox {
-        measureFramePhase(.text) {
+        measureRuntimePhase(.text) {
             let scale = max(pixelScale, 1.0)
             let authText = spans.map { $0.map(\.text).joined() } ?? text
             let effectiveMaxW = maxWidth
@@ -5657,6 +6467,16 @@ public final class TextSystem: @unchecked Sendable {
                 pretty: pretty,
                 defaultSmoothing: smoothing
             )
+            if emitGlyphs, let window = rasterWindow, keep != .secret, !authText.isEmpty,
+               !Self.needsElision(style, maxWidth: maxWidth) {
+                let measured = cachedLayoutBox(for: shapeKey, matchingWidth: maxWidth)
+                    ?? layoutKeyed(text: text, spans: spans, pills: pills, style: style, maxWidth: maxWidth,
+                                   pixelScale: scale, emitGlyphs: false, keep: keep,
+                                   countAsRebreak: countAsRebreak, pretty: pretty)
+                if measured.shaped.lineCount > 1, window.lowerY > 0 || window.upperY < measured.shaped.size.y {
+                    return paintPortableWindow(measured, in: window, keep: keep, glidePx: glidePx)
+                }
+            }
             var storageKey = shapeKey
             if keep == .cached, glidePx == .zero, !authText.isEmpty {
                 let cached = lock.withLock { () -> TextLayoutBox? in
@@ -5701,8 +6521,51 @@ public final class TextSystem: @unchecked Sendable {
         }
     }
 
+    private func paintPortableWindow(_ measured: TextLayoutBox, in window: TextRasterWindow,
+                                     keep: TextKeep, glidePx: Vec2) -> TextLayoutBox {
+        if let cached = lock.withLock({ measured.windowPaint }),
+           cached.window == window, cached.glide == glidePx,
+           glyphAtlas.retainPages(cached.box.desktopPages, since: cached.resets) {
+            return cached.box
+        }
+        let key = measured.shapeKey
+        let scale = measured.pixelScale
+        let prefetch = window.expanded(for: key.style, spans: key.spans, scale: scale)
+        let box: TextLayoutBox
+        #if canImport(CRuneDesktopText) && !canImport(CoreText)
+        let prepared = measured.shaped.desktopParagraph ?? lock.withLock { preparedShapeCache[key] }
+        var native = lock.withLock { measured.desktopRasterLayout }
+        if native == nil, let prepared, key.spans == nil, key.pills.isEmpty, key.style.align != .justified {
+            native = DesktopRasterLayout(shaped: measured.shaped, paragraph: prepared)
+            lock.withLock { measured.desktopRasterLayout = native }
+        }
+        if let native {
+            let shaped = native.paint(measured.shaped, in: prefetch, scale: scale, glide: glidePx, atlas: glyphAtlas)
+            box = TextLayoutBox(shapeKey: key, authText: key.authText, spans: key.spans, pills: key.pills,
+                                style: key.style, pixelScale: scale, maxWidth: measured.maxWidth,
+                                shaped: shaped, hasGlyphs: true, prepared: nil)
+        } else {
+            box = breakPortable(key, maxWidth: measured.maxWidth, scale: scale, emitGlyphs: true,
+                                keep: keep, glidePx: glidePx, previousBreak: prepared, rasterWindow: prefetch)
+        }
+        #else
+        box = breakPortable(key, maxWidth: measured.maxWidth, scale: scale, emitGlyphs: true,
+                            keep: keep, glidePx: glidePx, rasterWindow: prefetch)
+        #endif
+        let resets = glyphAtlas.resets
+        box.rasterWindow = window
+        box.desktopPages = Set(box.shaped.glyphs.map(\.atlasPage))
+        box.desktopAtlasResets = resets
+        lock.withLock {
+            measured.lastUsedCommit = layoutCommitSeq
+            measured.windowPaint = (window, glidePx, resets, box)
+        }
+        return box
+    }
+
     private func breakPortable(_ key: TextShapeKey, maxWidth: Float?, scale: Float, emitGlyphs: Bool,
-                               keep: TextKeep, glidePx: Vec2 = .zero, previousBreak: ShapedText.DesktopParagraph? = nil) -> TextLayoutBox {
+                               keep: TextKeep, glidePx: Vec2 = .zero, previousBreak: ShapedText.DesktopParagraph? = nil,
+                               rasterWindow: TextRasterWindow? = nil) -> TextLayoutBox {
         let shaped: ShapedText
         if Self.needsElision(key.style, maxWidth: maxWidth) {
             shaped = shapeImpl(text: key.authText, spans: key.spans, pills: key.pills, style: key.rasterStyle,
@@ -5712,7 +6575,7 @@ public final class TextSystem: @unchecked Sendable {
             shaped = shapePortable(text: key.authText, spans: key.spans, pills: key.pills, style: key.rasterStyle,
                                    maxWidth: maxWidth, pixelScale: scale, emitGlyphs: emitGlyphs,
                                    bypassCache: keep == .secret, nativeFonts: true, pretty: key.pretty,
-                                   retain: keep, previousBreak: previousBreak, glidePx: glidePx)
+                                   retain: keep, previousBreak: previousBreak, glidePx: glidePx, rasterWindow: rasterWindow)
         }
         let box = TextLayoutBox(shapeKey: key, authText: key.authText, spans: key.spans, pills: key.pills,
                                 style: key.style, pixelScale: scale, maxWidth: maxWidth, shaped: shaped,
@@ -5728,7 +6591,7 @@ public final class TextSystem: @unchecked Sendable {
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
         guard box.shaped.desktopParagraph != nil, box.shapeKey.usesSmoothing(smoothing), box.shapeKey.fontEpoch == currentFontEpoch,
               box.shapeKey.languageTag == language else { return nil }
-        let next = measureFramePhase(.text) {
+        let next = measureRuntimePhase(.text) {
             breakPortable(box.shapeKey, maxWidth: maxWidth, scale: box.pixelScale, emitGlyphs: emitGlyphs,
                           keep: .owned, previousBreak: box.shaped.desktopParagraph)
         }
@@ -5889,7 +6752,8 @@ public final class TextSystem: @unchecked Sendable {
         pretty: Bool = false,
         retain: TextKeep? = nil,
         previousBreak: ShapedText.DesktopParagraph? = nil,
-        glidePx: Vec2 = .zero
+        glidePx: Vec2 = .zero,
+        rasterWindow: TextRasterWindow? = nil
     ) -> ShapedText {
         let _ = bypassCache
         let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
@@ -5996,9 +6860,9 @@ public final class TextSystem: @unchecked Sendable {
 
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
         let nativeFamilies = families()
-        let cutsCodePadding = style.family != .monospace && spanEntries.contains { $0.span.monospace }
+        let cutsCodePadding = !style.family.isMonospace && spanEntries.contains { $0.span.monospace }
         let hasDecorations = spanEntries.contains { $0.span.background != nil || $0.span.underline || $0.span.strikethrough }
-        let tabs = DesktopTabStops(fullText) { style.family == .monospace || spanAt(utf8Offset: $0)?.monospace == true }
+        let tabs = DesktopTabStops(fullText) { style.family.isMonospace || spanAt(utf8Offset: $0)?.monospace == true }
         var nativeWidths: [Int: DesktopTextLine.Cell] = [:]
         var paragraphLayouts: [Int: (text: String, line: DesktopTextLine)] = [:]
         func desktopLine(_ text: String, start: Int, rtl: Bool? = nil,
@@ -6023,7 +6887,7 @@ public final class TextSystem: @unchecked Sendable {
             }
             #endif
             let match = spanAt(utf8Offset: utf8Offset)
-            let isMono = match?.monospace == true || style.family == .monospace
+            let isMono = match?.monospace == true || style.family.isMonospace
             let fontSz = match?.size ?? style.size
             let count = ch.unicodeScalars.count
             let scalarSum = ch.unicodeScalars.reduce(Float(0)) { acc, scalar in
@@ -6059,7 +6923,7 @@ public final class TextSystem: @unchecked Sendable {
                 lines.append((cursorUTF8, "", 0, isRTL, true, insets))
             } else if style.wrap == .wrap, let maxW = availableWidth {
                 let usePretty = pretty && !isRTL && style.align != .justified && style.maxLines == 0
-                    && style.family != .monospace && !containsStrongRTL(para)
+                    && !style.family.isMonospace && !containsStrongRTL(para)
                 let wrapped = PrettyLineBreaker.wrap(para, width: maxW, fontSize: style.size,
                                                      wrapAnywhere: style.wrapAnywhere, pretty: usePretty,
                                                      utf8Start: cursorUTF8, pillRanges: pillRanges) { ch, local in
@@ -6246,7 +7110,7 @@ public final class TextSystem: @unchecked Sendable {
         var lineRecords: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
         var bidiCells: [Int: [PortableCaretCell]] = [:]
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
-        let restingText = emitGlyphs ? DesktopRestingText(glide: glidePx, cache: !bypassCache) : nil
+        let restingText = emitGlyphs ? DesktopRestingText(glide: glidePx, cache: !bypassCache, rasterWindow: rasterWindow) : nil
         #endif
         var lineGlyphRanges: [Range<Int>] = []
 
@@ -6319,6 +7183,7 @@ public final class TextSystem: @unchecked Sendable {
             #if canImport(CRuneDesktopText) && !canImport(CoreText)
             let native = extraPerSpace > 0
                 ? desktopLine(item.text, start: item.utf8Start, rtl: item.isRTL, stretch: stretch) : desktopLines[idx]
+            let paintNative = emitGlyphs && (native?.hasVisibleInk(in: rasterWindow, baselinePx: baselinePx, glide: glidePx) ?? false)
             var nativeColors: [Int: Color] = [:]
             nativeWidths = native?.cells ?? [:]
             if emitGlyphs, let native, hasDecorations {
@@ -6433,14 +7298,19 @@ public final class TextSystem: @unchecked Sendable {
 
                 if emitGlyphs {
                     #if canImport(CRuneDesktopText) && !canImport(CoreText)
-                    if let native, let nativeCell {
+                    if paintNative, let native, let nativeCell {
                         if let spanColor { nativeColors[chStart] = spanColor }
                         glyphs += native.glyphs(for: nativeCell, originX: originX,
                             baselineY: baselinePx * invS, color: spanColor,
-                            atlas: glyphAtlas, cache: !bypassCache, glidePx: glidePx)
+                            atlas: glyphAtlas, cache: !bypassCache, glidePx: glidePx, rasterWindow: rasterWindow)
                     }
                     #endif
-                    if needsBitmapFont {
+                    let paintBitmap = needsBitmapFont && (rasterWindow.map { band in
+                        let (height, bearing) = PortableGlyphFont.bitmapHeightAndBearing(fontSizePx: fontSz * scale)
+                        let top = (baselinePx + bearing) * invS
+                        return band.intersects(top, top + Float(height) * invS)
+                    } ?? true)
+                    if paintBitmap {
                         for scalar in ch.unicodeScalars where scalar.value > 0x20 {
                             let entry = glyphAtlas.rasterizePortableGlyph(
                                 scalar: scalar,
@@ -6493,7 +7363,7 @@ public final class TextSystem: @unchecked Sendable {
             }
             lineRecords.append((item.utf8Start, item.text, originY, originX, charOffsets))
             #if canImport(CRuneDesktopText) && !canImport(CoreText)
-            if let native, let restingText {
+            if paintNative, let native, let restingText {
                 restingText.add(.init(native: native, originX: originX, baselineY: baselinePx * invS, colors: nativeColors), at: idx)
             }
             #endif
@@ -6591,7 +7461,7 @@ public final class TextSystem: @unchecked Sendable {
         let shaped = shapePortable(text: text, spans: nil, style: style, maxWidth: nil, pixelScale: k, emitGlyphs: false)
         let lineH = style.resolvedLineHeight * k
         let baselineOffset = lineH * 0.78
-        let isMono = style.family == .monospace
+        let isMono = style.family.isMonospace
         let isBold = style.weight >= 600.0
         var acc = TextInkAccumulator()
         for rec in shaped.portableLines {

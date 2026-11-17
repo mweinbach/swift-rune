@@ -6,6 +6,123 @@ import RuneMotion
 
 @Suite("RuneKit Controls & Feedback Upstream Parity Tests")
 struct ControlsAndFeedbackTests {
+    @Test("Button forced states, variants, activation and AppKit size metrics")
+    func buttonStatesAndMetrics() throws {
+        let k = Kit.neutral(dark: false)
+        let base = Button<Int>(key: "save", "Save").onPress { state, _ in state += 1 }
+        let rest = base.build(k)
+        #expect(Button<Int>("No handler").build(k).handlers.onClick == nil)
+        #expect(rest.layout.height == .points(24))
+        #expect(rest.hoverBg == k.c.hover)
+        #expect(rest.pressBg == kitPressOver(k.c.hover, k.c.pressed))
+        for (size, height, pad, radius, glyph) in [
+            (ControlSize.mini, Float(16), Float(8), k.radius.sm, Float(12)),
+            (.small, 20, 10, k.radius.sm, 14), (.regular, 24, 12, k.radius.md, 16),
+            (.large, 28, 14, k.radius.lg, 16), (.extraLarge, 36, 18, k.radius.xl, 16)
+        ] {
+            let sized = base.size(size).leadingIcon(k.glyph.copy).build(k)
+            #expect(sized.layout.height == .points(height))
+            #expect(sized.layout.padding.left == pad)
+            #expect(sized.corners == .all(radius))
+            #expect(sized.children.first?.iconPayload?.1 == glyph)
+        }
+        let ghost = base.variant(.ghostMuted)
+        let hover = ghost.state(.hover).build(k)
+        let pressed = ghost.state(.pressed).build(k)
+        #expect(hover.background == k.c.hover)
+        #expect(pressed.background == k.c.pressed)
+        #expect(hover.hoverBg == nil && pressed.pressBg == nil)
+        #expect(ghost.expanded(true).build(k).children.last?.textColor == k.c.textBase)
+        let focus = base.disabled().state(.focus).build(k)
+        #expect(focus.focusable)
+        #expect(focus.focusRingOffset == 2.5)
+        #expect(focus.hoverBg == nil)
+        let disabled = base.state(.disabled).disabled(false).build(k).key("off")
+        let loading = base.variant(.loading).build(k).key("busy")
+        #expect(loading.background == k.c.layer02)
+        #expect(loading.shadows.first?.spread == 0.5)
+        #expect(base.variant(.outline).build(k).shadows.first?.spread == 1)
+        #expect(base.variant(.warning).build(k).children.last?.textColor == k.c.warning.fg)
+        #expect(base.variant(.ghostFaint).build(k).children.last?.textColor == k.c.textFaint)
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(400, 300)) { _, _ in
+            col().child(focus).child(disabled).child(loading)
+        }
+        _ = rt.frame(at: 0)
+        #expect(rt.accessibilityAction("save", .press, at: 0.1))
+        for id in ["off", "busy"] {
+            let e = try #require(rt.element(byKey: id))
+            #expect(e.disabled && !e.focusable)
+            #expect(!rt.accessibilityAction(id, .press, at: 0.2))
+            let center = Vec2(e.rect[0] + e.rect[2] / 2, e.rect[1] + e.rect[3] / 2)
+            rt.pointerDown(at: center, at: 0.3)
+            rt.pointerUp(at: center, at: 0.4)
+        }
+        #expect(rt.state == 1)
+    }
+
+    @Test("Toggles and radio groups expose one named control, checked state, descriptions and positions")
+    func controlAccessibilityAndSelection() throws {
+        let k = Kit.neutral(dark: false)
+        let mixed = Checkbox<Int>(checked: false).indeterminate().build(k)
+        let mark = try #require(mixed.children.first?.children.first?.iconPayload)
+        #expect(mark.0 == k.glyph.check && mark.1 == 10)
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(500, 400)) { index, _ in
+            col().child(Checkbox<Int>(checked: false).indeterminate(true).label("Sync")
+                .description("Pending").build(k, key: "sync"))
+                .child(Switch<Int>(checked: true).label("Radio").hideLabel().disabled(true).build(k, key: "switch"))
+                .child(RadioGroup<Int>().label("Plan").description("Choose a plan")
+                    .item(RadioItem(label: "Free", checked: true).description("Basic"))
+                    .build(k, key: "plan"))
+                .child(SegmentedControl<Int>(labels: ["List", "Grid", "Other"], selected: index)
+                    .label("View").segmentState(2, .disabled)
+                    .onPick { value, pick, _ in value = pick }.build(k, key: "view"))
+        }
+        _ = rt.frame(at: 0)
+        func flatten(_ node: AccessibilityNode) -> [AccessibilityNode] { [node] + node.children.flatMap(flatten) }
+        let nodes = flatten(rt.accessibilitySnapshot())
+        func node(_ label: String) throws -> AccessibilityNode {
+            let matches = nodes.filter { $0.label == label }
+            #expect(matches.count == 1, "Duplicate \(label) nodes: \(matches.map(\.id))")
+            return try #require(matches.first)
+        }
+        let sync = try node("Sync")
+        #expect(sync.toggled == .mixed && sync.help == "Pending" && sync.children.isEmpty)
+        let radio = try node("Radio")
+        #expect(radio.toggled == .trueState && radio.isDisabled && radio.children.isEmpty)
+        let plan = try node("Plan")
+        #expect(plan.role == .radiogroup && plan.help == "Choose a plan")
+        let free = try node("Free")
+        #expect(free.role == .radio && free.toggled == .trueState && free.help == "Basic")
+        #expect(free.positionInSet == 0 && free.sizeOfSet == 1 && free.children.isEmpty)
+        #expect(try node("View").role == .radiogroup)
+        let grid = try node("Grid")
+        #expect(grid.role == .radio && grid.toggled == .falseState && grid.children.isEmpty)
+        #expect(grid.positionInSet == 1 && grid.sizeOfSet == 3)
+        #expect(try node("Other").isDisabled)
+        #expect(rt.accessibilityAction("view-segment1", .press, at: 0.1))
+        #expect(rt.state == 1)
+        _ = rt.frame(at: 0.2)
+        #expect(rt.element(byKey: "view-segment1")?.checked == .trueState)
+        #expect(!rt.accessibilityAction("view-segment2", .press, at: 0.3))
+    }
+
+    @Test("An explicit state can re-enable an accordion or disclosure trigger")
+    func disclosureStateOverridesDisabled() throws {
+        let k = Kit.neutral(dark: false)
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(500, 400)) { _, _ in
+            col().child(Collapsible<Int>("Expand").disabled().state(.rest)
+                    .onToggle { $0 += 1 }.build(k))
+                .child(Accordion<Int>().item(AccordionSection<Int>("Details").disabled().state(.hover)
+                    .onToggle { $0 += 2 }).build(k))
+        }
+        _ = rt.frame(at: 0)
+        for label in ["Expand", "Details"] {
+            let trigger = try #require(rt.elements().first { $0.role == .button && $0.label == label })
+            #expect(rt.accessibilityAction(trigger.path, .press, at: 0.1))
+        }
+        #expect(rt.state == 3)
+    }
+
     @Test("Switch compact sizes, web/standard modes, hover/pressed thumb stretch, hidden label, and toggle")
     func switchModesSizesAndToggle() {
         struct State {

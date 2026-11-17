@@ -1,5 +1,6 @@
 #if defined(__ANDROID__)
 #include "RuneDesktopText.h"
+#include <android/api-level.h>
 #include <android/log.h>
 #include <android/native_activity.h>
 #include <jni.h>
@@ -15,7 +16,7 @@
 static JavaVM *vm;
 static jclass bridge;
 static jmethodID constructor, configure, get_metrics, get_cell, get_caret, get_mask;
-static jmethodID get_has_color;
+static jmethodID get_has_color, extract_ink, get_outline, get_regions, get_single, get_unplaced;
 static jmethodID register_file, register_bytes;
 static pthread_mutex_t init_lock = PTHREAD_MUTEX_INITIALIZER;
 static atomic_bool ready;
@@ -71,6 +72,20 @@ void rune_android_text_attach(void *raw) {
     METHOD(get_caret, "caret", "(I)F");
     METHOD(get_mask, "mask", "(IIIIZ)[B");
     METHOD(get_has_color, "hasColor", "()Z");
+    // An application may still package the previous Java bridge. Its full-line
+    // rendering and caret geometry remain usable while its DEX is upgraded.
+    extract_ink = (*e)->GetMethodID(e, local, "extractInk", "(II)Ldev/rune/RuneText;");
+    if (!extract_ink) clear_exception(e);
+    if (android_get_device_api_level() >= 31) {
+        get_outline = (*e)->GetMethodID(e, local, "outlineCommands", "()[F");
+        if (!get_outline) clear_exception(e);
+        get_regions = (*e)->GetMethodID(e, local, "outlineRegions", "()[I");
+        if (!get_regions) clear_exception(e);
+        get_single = (*e)->GetMethodID(e, local, "outlineSingle", "(I)[J");
+        if (!get_single) clear_exception(e);
+        get_unplaced = (*e)->GetMethodID(e, local, "outlineUnplaced", "(I)[F");
+        if (!get_unplaced) clear_exception(e);
+    }
     STATIC(register_file, "registerFile", "([B)Z");
     STATIC(register_bytes, "registerBytes", "([B)Z");
     jmethodID initialize;
@@ -94,6 +109,10 @@ done:
 }
 
 int32_t rune_android_bundled_fonts_ready(void) { return atomic_load(&bundled_fonts); }
+
+int32_t rune_android_text_outlines_available(void) {
+    return atomic_load_explicit(&ready, memory_order_acquire) && get_outline && get_regions && extract_ink;
+}
 
 typedef struct { JNIEnv *env; int attached; } Call;
 static Call begin_call(void) {
@@ -213,7 +232,7 @@ fail:
 
 void rune_desktop_line_configure(RuneDesktopLine *line, const char *language,
                                  const char *features, const char *variations) {
-    if (!line) return;
+    if (!line || line->length < 0) return;
     Call c = begin_call();
     JNIEnv *e = c.env;
     if (!e) return;
@@ -228,6 +247,138 @@ void rune_desktop_line_configure(RuneDesktopLine *line, const char *language,
     if (!clear_exception(e)) refresh_metrics(e, line);
 done:
     end_call(c);
+}
+
+RuneDesktopLine *rune_desktop_line_extract_ink(const RuneDesktopLine *line, int32_t start, int32_t end) {
+    if (!line || start < 0 || end < start || end > line->length ||
+        line->indices[start] < 0 || line->indices[end] < 0) return NULL;
+    Call call = begin_call();
+    JNIEnv *e = call.env;
+    if (!e || !extract_ink) {
+        end_call(call);
+        return NULL;
+    }
+    jobject local = (*e)->CallObjectMethod(e, line->layout, extract_ink, line->indices[start], line->indices[end]);
+    RuneDesktopLine *view = NULL;
+    if (local && !clear_exception(e)) {
+        view = calloc(1, sizeof(*view));
+        if (view) {
+            view->length = -1;  // Owned ink view, without its own caret index table.
+            view->layout = (*e)->NewGlobalRef(e, local);
+            if (!view->layout || !refresh_metrics(e, view)) {
+                if (view->layout) (*e)->DeleteGlobalRef(e, view->layout);
+                free(view);
+                view = NULL;
+            }
+        }
+    }
+    end_call(call);
+    return view;
+}
+
+static int emit_outline(JNIEnv *e, jfloatArray records, RuneOutlineEmit emit, void *context) {
+    if (!records || clear_exception(e)) return 0;
+    jsize size = (*e)->GetArrayLength(e, records);
+    if (size % 7 != 0) return 0;
+    // Copy a bounded chunk per JNI call, releasing the Java heap during the receiver callback.
+    for (jsize offset = 0; offset < size;) {
+        jfloat block[7 * 64];
+        jsize count = size - offset;
+        if (count > (jsize)(sizeof(block) / sizeof(*block))) count = (jsize)(sizeof(block) / sizeof(*block));
+        (*e)->GetFloatArrayRegion(e, records, offset, count, block);
+        if (clear_exception(e)) return 0;
+        for (jsize i = 0; i < count; i += 7) {
+            const jfloat *p = block + i;
+            if (!(p[0] >= 0 && p[0] <= 4) || truncf(p[0]) != p[0]) return 0;
+            emit(context, (int32_t)p[0], p[1], p[2], p[3], p[4], p[5], p[6]);
+        }
+        offset += count;
+    }
+    return 1;
+}
+
+int32_t rune_desktop_line_outline(const RuneDesktopLine *ink, RuneOutlineEmit emit, void *context) {
+    if (!ink || ink->length >= 0 || !emit || !rune_android_text_outlines_available()) return 0;
+    Call call = begin_call();
+    JNIEnv *e = call.env;
+    if (!e) return 0;
+    jfloatArray records = (jfloatArray)(*e)->CallObjectMethod(e, ink->layout, get_outline);
+    int ok = emit_outline(e, records, emit, context);
+    end_call(call);
+    return ok;
+}
+
+int32_t rune_desktop_line_outline_unplaced(const RuneDesktopLine *line, int32_t owner, RuneOutlineEmit emit, void *context) {
+    if (!line || owner < 0 || owner >= line->length || line->indices[owner] < 0 ||
+        !emit || !rune_android_text_outlines_available() || !get_unplaced) return 0;
+    Call call = begin_call();
+    JNIEnv *e = call.env;
+    if (!e) return 0;
+    jfloatArray records = (jfloatArray)(*e)->CallObjectMethod(e, line->layout, get_unplaced, line->indices[owner]);
+    int ok = emit_outline(e, records, emit, context);
+    end_call(call);
+    return ok;
+}
+
+int32_t rune_desktop_line_outline_single(const RuneDesktopLine *line, int32_t owner,
+        uint64_t *font_id, uint32_t *glyph, float *pen_x, float *pen_y) {
+    if (!line || owner < 0 || owner >= line->length || line->indices[owner] < 0 ||
+        !font_id || !glyph || !pen_x || !pen_y || !rune_android_text_outlines_available() || !get_single || !get_unplaced) return 0;
+    Call call = begin_call();
+    JNIEnv *e = call.env;
+    if (!e) return 0;
+    int ok = 0;
+    jlongArray record = (jlongArray)(*e)->CallObjectMethod(e, line->layout, get_single, line->indices[owner]);
+    if (!record || clear_exception(e)) goto done;
+    jsize size = (*e)->GetArrayLength(e, record);
+    if (size != 3 && size != 4) goto done;
+    jlong fields[4] = {0, 0, 0, 1};  // The previous Java bridge omitted the face flags.
+    (*e)->GetLongArrayRegion(e, record, 0, size, fields);
+    if (clear_exception(e) || fields[0] <= 0 || fields[1] < 0 || fields[1] > UINT32_MAX) goto done;
+    uint32_t x = (uint32_t)((uint64_t)fields[2] >> 32), y = (uint32_t)fields[2];
+    memcpy(pen_x, &x, sizeof(x));
+    memcpy(pen_y, &y, sizeof(y));
+    *font_id = (uint64_t)fields[0];
+    *glyph = (uint32_t)fields[1];
+    ok = (fields[3] & 2) ? 3 : 1;
+done:
+    end_call(call);
+    return ok;
+}
+
+int32_t rune_desktop_line_outline_regions(const RuneDesktopLine *line, RuneOutlineRegion emit, void *context) {
+    if (!line || line->length < 0 || !emit || !rune_android_text_outlines_available()) return 0;
+    Call call = begin_call();
+    JNIEnv *e = call.env;
+    if (!e) return 0;
+    int ok = 0;
+    jintArray records = (jintArray)(*e)->CallObjectMethod(e, line->layout, get_regions);
+    if (!records || clear_exception(e)) goto done;
+    jsize size = (*e)->GetArrayLength(e, records);
+    if (size % 5 != 0) goto done;
+    // Java emits logical owners in ascending UTF-16 order. The UTF-8 map is walked once.
+    int32_t byte = 0;
+    for (jsize offset = 0; offset < size;) {
+        jint block[5 * 64];
+        jsize count = size - offset;
+        if (count > (jsize)(sizeof(block) / sizeof(*block))) count = (jsize)(sizeof(block) / sizeof(*block));
+        (*e)->GetIntArrayRegion(e, records, offset, count, block);
+        if (clear_exception(e)) goto done;
+        for (jsize i = 0; i < count; i += 5) {
+            jint owner = block[i];
+            while (byte < line->length && line->indices[byte] < owner) byte++;
+            if (owner < 0 || byte >= line->length || line->indices[byte] != owner) goto done;
+            float bounds[4];
+            memcpy(bounds, block + i + 1, sizeof(bounds));
+            emit(context, byte, bounds[0], bounds[1], bounds[2], bounds[3]);
+            byte++;
+        }
+        offset += count;
+    }
+    ok = 1;
+done:
+    end_call(call);
+    return ok;
 }
 
 void rune_desktop_line_destroy(RuneDesktopLine *line) {

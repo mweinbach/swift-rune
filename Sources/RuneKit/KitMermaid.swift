@@ -4,17 +4,26 @@ import RuneMermaid
 
 /// Kit-styled Mermaid diagram integration (`rune_kit::mermaid`) powered by `RuneMermaid`.
 public enum KitMermaid {
+    public typealias DiagramStyle = MermaidTheme
+    public typealias Drawing<State> = MermaidDrawing<State>
+    public typealias Hover = MermaidHover
+
     /// Re-export of `RuneMermaid`'s searchable prepared layout (`rune_kit::mermaid::DrawingModel`).
     public typealias DrawingModel = MermaidDrawingModel
 
-    /// Whether `source` starts with a Mermaid diagram type supported by `RuneMermaid`.
+    /// Whether `source` parses as a supported Mermaid diagram.
     public static func supported(_ source: String) -> Bool {
         supportedMermaid(source)
     }
 
+    /// Whether a partial source may grow into a supported diagram.
+    public static func mayDraw(_ source: String) -> Bool {
+        mayDrawMermaid(source)
+    }
+
     /// Whether `source` parses as a valid Mermaid diagram.
     public static func canRender(_ source: String) -> Bool {
-        canRenderMermaid(source)
+        supported(source)
     }
 
     /// Prepare the drawn label runs for a viewer that searches and highlights a diagram
@@ -25,6 +34,40 @@ public enum KitMermaid {
         var full = style.mermaidTheme()
         full.maxWidth = maxWidth
         return prepareDrawing(source, style: full, hover: hover(paint), color: paint.hover)
+    }
+
+    /// Renders a diagram card using the same paint and interaction as a Markdown fence.
+    public static func render<State>(_ source: String, style: MarkdownStyle) -> El<State>? {
+        diagram(source, style: style, streaming: false, open: false)
+    }
+
+    static func diagram<State>(_ source: String, style: MarkdownStyle, streaming: Bool, open: Bool) -> El<State>? {
+        let theme = style.mermaidTheme()
+        let interaction = (hover(style.diagram), style.diagram.hover)
+        let card: El<State>?
+        if !streaming {
+            card = renderMermaid(source, theme: theme, hover: interaction)
+        } else if open {
+            card = renderMermaidStreaming(source, theme: theme, hover: interaction)
+        } else {
+            card = renderMermaidStreamed(source, theme: theme, hover: interaction)
+        }
+        return card.map { figure($0, source: source) }
+    }
+
+    /// Renders a frameless diagram with the Markdown paint at the viewer's width.
+    public static func drawing<State>(_ source: String, style: MarkdownStyle, maxWidth: Float) -> Drawing<State>? {
+        var theme = style.mermaidTheme()
+        theme.maxWidth = maxWidth
+        return drawing(source, theme: theme, hover: (hover(style.diagram), style.diagram.hover))
+    }
+
+    fileprivate static func drawing<State>(_ source: String, theme: MermaidTheme, hover: (MermaidHover, Color)) -> Drawing<State>? {
+        guard var drawing: Drawing<State> = renderMermaidDrawing(source, theme: theme, hover: hover) else {
+            return nil
+        }
+        drawing.el = figure(drawing.el, source: source)
+        return drawing
     }
 
     /// What hovering a node lights up for `paint` (`rune_kit::mermaid::hover`): nothing when the
@@ -39,15 +82,19 @@ public enum KitMermaid {
 
     /// Human-readable accessible label for the diagram kind in `source`.
     public static func kindLabel(_ source: String) -> String {
-        let first = source
-            .split(whereSeparator: \.isWhitespace)
-            .map(String.init)
-            .first(where: { !$0.hasPrefix("%%") }) ?? ""
-        var normalized = first
-        if normalized.hasSuffix("-beta") {
+        var remaining = source.unicodeScalars[...]
+        var word: Substring.UnicodeScalarView
+        repeat {
+            remaining = remaining.drop(while: \.properties.isWhitespace)
+            word = remaining.prefix { !$0.properties.isWhitespace }
+            remaining = remaining[word.endIndex...]
+        } while word.starts(with: "%%".unicodeScalars)
+
+        var normalized = String(word)
+        while normalized.hasSuffix("-beta") {
             normalized.removeLast("-beta".count)
         }
-        if normalized.hasSuffix("-v2") {
+        while normalized.hasSuffix("-v2") {
             normalized.removeLast("-v2".count)
         }
         switch normalized {
@@ -70,6 +117,14 @@ public enum KitMermaid {
         default:
             return normalized.hasPrefix("C4") ? "C4 diagram" : "Diagram"
         }
+    }
+
+    /// Shared by standalone diagrams, frameless drawings, and Markdown fences.
+    fileprivate static func figure<State>(_ element: El<State>, source: String) -> El<State> {
+        let scalars = source.unicodeScalars.drop(while: \.properties.isWhitespace)
+        let last = scalars.lastIndex { !$0.properties.isWhitespace }
+        let description = last.map { String(scalars[...$0]) } ?? ""
+        return element.role(.figure).label(kindLabel(source)).description(description)
     }
 }
 
@@ -106,9 +161,7 @@ extension Kit {
         guard let card: El<State> = renderMermaid(source, theme: theme, hover: hover) else {
             return nil
         }
-        return card
-            .label(KitMermaid.kindLabel(source))
-            .description(source.trimmingCharacters(in: .whitespacesAndNewlines))
+        return KitMermaid.figure(card, source: source)
     }
 
     /// Renders a frameless `MermaidDrawing` styled with `Kit` tokens for lightbox or custom containers.
@@ -120,7 +173,7 @@ extension Kit {
     ) -> MermaidDrawing<State>? {
         let theme = mermaidTheme(maxWidth: maxWidth, minScale: minScale)
         let hover: (MermaidHover, Color) = (hoverNeighbours ? .neighbours : .edges, alpha(c.textBase, 0.9))
-        return renderMermaidDrawing(source, theme: theme, hover: hover)
+        return KitMermaid.drawing(source, theme: theme, hover: hover)
     }
 
     /// Renders a Mermaid diagram when valid, or falls back to a syntax-highlighted code block.

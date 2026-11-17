@@ -97,52 +97,69 @@ public struct LocalTime: Sendable, Equatable, Hashable {
 
 // MARK: - JumpList Setting (`crates/rune/src/jump_list.rs`)
 
-enum JumpListStore {
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var lastCommitted: JumpList?
-    nonisolated(unsafe) private static var headlessOverride: Bool = false
+#if os(macOS)
+@MainActor
+protocol RuneDockJumpReceiver: AnyObject {
+    func openDockArgument(_ argument: String)
+}
+#endif
 
-    static func setHeadlessForTests(_ headless: Bool) {
-        lock.lock()
-        headlessOverride = headless
-        lock.unlock()
-    }
+final class JumpListStore: @unchecked Sendable {
+    static let shared = JumpListStore()
+    private let lock = NSLock()
+    private var lastSubmitted: JumpList?
 
-    static func committedListForTests() -> JumpList? {
+    var current: JumpList? {
         lock.lock()
         defer { lock.unlock() }
-        return lastCommitted
+        return lastSubmitted
     }
 
-    static func apply(_ list: JumpList) {
+    @discardableResult
+    func submit(_ list: JumpList, headless: Bool, enqueue: (JumpList) -> Void) -> Bool {
         lock.lock()
-        let skip = headlessOverride || lastCommitted == list
-        if !headlessOverride {
-            lastCommitted = list
-        }
-        lock.unlock()
-        guard !skip else { return }
-        #if os(macOS)
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                guard NSApplication.shared.delegate != nil else { return }
-                RuneNativeMenuHost.shared.setJumpMenu(list) { _ in }
+        defer { lock.unlock() }
+        guard !headless, list != lastSubmitted else { return false }
+        lastSubmitted = list
+        enqueue(list)
+        return true
+    }
+
+    #if os(macOS)
+    @MainActor
+    static func installDockMenuIfReady() {
+        guard let list = shared.current, NSApplication.shared.delegate != nil else { return }
+        RuneNativeMenuHost.shared.setJumpMenu(list) { argument in
+            if let receiver = NSApplication.shared.delegate as? RuneDockJumpReceiver {
+                receiver.openDockArgument(argument)
+            } else {
+                IncomingURLInbox.shared.receive(argument)
             }
         }
-        #endif
     }
-
-    static func resetForTests() {
-        lock.lock()
-        lastCommitted = nil
-        headlessOverride = false
-        lock.unlock()
-    }
+    #endif
 }
 
-/// Replaces the app's jump list (`rune::jump_list::set_jump_list`). Deduplicates equal lists and no-ops in headless runs.
+/// Replaces the app's jump list (`rune::jump_list::set_jump_list`).
+/// On Windows, set the process's AppUserModelID first if the app uses an explicit identity.
+/// Rune submits the Windows list from a background thread. Dock menu selections on macOS call the app's
+/// `onOpenUrl` hook with the item's argument. Equal lists and headless runs skip publication.
 public func setJumpList(_ list: JumpList) {
-    JumpListStore.apply(list)
+    let changed = JumpListStore.shared.submit(list, headless: ToolingProcessArgs.isHeadless()) { list in
+        #if os(Windows)
+        WindowsJumpListWorker.shared.submit(list)
+        #endif
+    }
+    #if os(macOS)
+    guard changed else { return }
+    if Thread.isMainThread {
+        MainActor.assumeIsolated { JumpListStore.installDockMenuIfReady() }
+    } else {
+        Task { @MainActor in JumpListStore.installDockMenuIfReady() }
+    }
+    #else
+    _ = changed
+    #endif
 }
 
 // MARK: - SceneClock (`crates/rune/src/lib.rs`)

@@ -43,8 +43,14 @@ try {
     const expected = ['image-initial false false false shared=true', 'image-ready 0 8x4', 'image-ready 1 5x3',
         'image-ready 2 5x3', 'image-async-encoded 4x2', 'image-async-url 2x1', 'image-async-cache 2x1 entries=2 hits=1',
         'image-async-apng 3x1 frames=4 plays=2 rgba=true timing=true'];
+    const imagesReady = () => expected.slice(1, 4).every(line => logs.includes(line));
     app = mountRuneBrowser(canvas, { exports: { ...api,
         rune_web_frame() { throw Error('Unexpected CPU draw'); },
+        rune_web_next_wake() {
+            // Drive the chosen GIF sample times and the two terminal no-op checks on this fixture's clock.
+            if (imagesReady() && (step < times.length || idle < 2)) return 0;
+            return api.rune_web_next_wake?.(time) ?? 0;
+        },
         rune_web_image_apng(...request) {
             apngRequests++;
             return api.rune_web_image_apng(...request);
@@ -58,7 +64,7 @@ try {
             return api.rune_web_image_frame(id, width, height, duration);
         },
         rune_web_scene(_now, force) {
-            const ready = expected.slice(1, 4).every(line => logs.includes(line));
+            const ready = imagesReady();
             time = ready ? times[Math.min(step++, times.length - 1)] : 0;
             const length = api.rune_web_scene(time, force);
             if (length === 0 && time >= 1.90) idle++;
@@ -76,7 +82,7 @@ try {
             }
             return length;
         }
-    } }, { resizeTo: null }); // Render 1:1 texels at the app's 24×8 size on every display.
+    } }, { backend: 'webgl2', resizeTo: null }); // Render 1:1 texels at the app's 24×8 size on every display.
     await app.ready;
     for (const deadline = performance.now() + 15000; performance.now() < deadline; ) {
         if (idle >= 2 && expected.every(line => logs.includes(line))) break;

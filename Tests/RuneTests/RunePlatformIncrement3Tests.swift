@@ -461,6 +461,22 @@ struct RunePlatformIncrement3Tests {
 
     // MARK: - overlay/tests.rs & OverlayHandle parity
 
+    @Test("App delivers attached overlay handles in order with independently typed state")
+    func typedOverlayReceivers() {
+        let parent = App<Int>("Host", init: { 0 }, view: { _, _ in el() })
+        let first = OverlaySpec<Int>(name: "first", size: Vec2(10, 10), makeState: { 1 }, view: { _, _ in el() })
+        let child = OverlaySpec<String>(name: "child", size: Vec2(12, 10), makeState: { "child" }, view: { _, _ in el() })
+        var seen: [String] = []
+        var app = parent.overlay(first) { h in seen.append(h.readState { String($0) }) }
+            .overlay(ConfiguredOverlay(spec: child)) { h in seen.append(h.readState { $0 }) }
+        app.overlayReceivers.append((first, { h in seen.append(h.name) }))
+        let retained = app.createAttachedOverlays()
+        #expect(seen == ["1", "child", "first"])
+        #expect(retained.count == 3)
+        #expect((retained[1] as? OverlayHandle<String>)?.name == "child")
+    }
+
+
     @Test
     func fadeOutDrawsExitUntilDeadlineAndImmediateHideStopsAtOnce() {
         let spec = OverlaySpec(
@@ -682,6 +698,16 @@ struct RunePlatformIncrement3Tests {
         rt.pointerMove(to: Vec2(120, 20), at: 0.01)
         rt.frame(at: 0.02)
         #expect(rt.state.moves == 1)
+    }
+
+    @Test("Native overlay hit regions follow page zoom in window points")
+    func zoomedOverlayInputRegion() {
+        let rt = Runtime(state: 0, viewport: Vec2(200, 160)) { _, cx in
+            cx.zoom(2)
+            return col().wFull().hFull().child(el().absolute(x: 10, y: 12).w(20).h(15).hit())
+        }
+        _ = rt.frame(at: 0)
+        #expect(rt.overlayInteractiveRegions() == [.fromXYWH(20, 24, 40, 30)])
     }
 
     @Test("OverlayHold captures press off-region and expires lost releases on grace deadline")

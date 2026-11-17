@@ -24,6 +24,8 @@ struct RuneA11yWindow {
     GHashTable *nodes;
     GQueue requests;
     RuneGLibWatch *watch;
+    RuneA11yWake action_wake;
+    void *wake_context;
     int x, y;
     gboolean visible;
     guint generation;
@@ -131,17 +133,21 @@ static guint64 states_for(RuneA11yProperties p, AtkRole role) {
 
 static AtkRole at_role(const char *role) {
     static const struct { const char *name; AtkRole role; } map[] = {
-        {"group", ATK_ROLE_GROUPING}, {"text", ATK_ROLE_STATIC}, {"button", ATK_ROLE_PUSH_BUTTON},
+        {"group", ATK_ROLE_GROUPING}, {"scroll-view", ATK_ROLE_PANEL}, {"text", ATK_ROLE_STATIC}, {"button", ATK_ROLE_PUSH_BUTTON},
         {"checkbox", ATK_ROLE_CHECK_BOX}, {"switch", ATK_ROLE_TOGGLE_BUTTON}, {"radio", ATK_ROLE_RADIO_BUTTON},
         {"tab", ATK_ROLE_PAGE_TAB}, {"textbox", ATK_ROLE_ENTRY}, {"slider", ATK_ROLE_SLIDER},
         {"progressbar", ATK_ROLE_PROGRESS_BAR}, {"listitem", ATK_ROLE_LIST_ITEM}, {"heading", ATK_ROLE_HEADING},
-        {"dialog", ATK_ROLE_DIALOG}, {"menubar", ATK_ROLE_MENU_BAR}, {"menu", ATK_ROLE_MENU}, {"menuitem", ATK_ROLE_MENU_ITEM},
-        {"img", ATK_ROLE_IMAGE}, {"icon", ATK_ROLE_ICON}, {"separator", ATK_ROLE_SEPARATOR},
+        {"dialog", ATK_ROLE_DIALOG}, {"alertdialog", ATK_ROLE_ALERT},
+        {"menubar", ATK_ROLE_MENU_BAR}, {"menu", ATK_ROLE_MENU}, {"menuitem", ATK_ROLE_MENU_ITEM},
+        {"img", ATK_ROLE_IMAGE}, {"figure", ATK_ROLE_PANEL}, {"icon", ATK_ROLE_ICON}, {"separator", ATK_ROLE_SEPARATOR},
         {"combobox", ATK_ROLE_COMBO_BOX}, {"listbox", ATK_ROLE_LIST_BOX}, {"option", ATK_ROLE_LIST_ITEM},
         {"tree", ATK_ROLE_TREE}, {"treeitem", ATK_ROLE_TREE_ITEM}, {"grid", ATK_ROLE_TABLE},
-        {"row", ATK_ROLE_TABLE_ROW}, {"gridcell", ATK_ROLE_TABLE_CELL}, {"columnheader", ATK_ROLE_COLUMN_HEADER},
+        {"row", ATK_ROLE_TABLE_ROW}, {"gridcell", ATK_ROLE_TABLE_CELL}, {"cell", ATK_ROLE_TABLE_CELL},
+        {"columnheader", ATK_ROLE_COLUMN_HEADER}, {"rowheader", ATK_ROLE_ROW_HEADER},
         {"radiogroup", ATK_ROLE_GROUPING}, {"tablist", ATK_ROLE_PAGE_TAB_LIST}, {"tooltip", ATK_ROLE_TOOL_TIP},
-        {"alert", ATK_ROLE_ALERT}, {"region", ATK_ROLE_SECTION}, {"main", ATK_ROLE_LANDMARK},
+        {"alert", ATK_ROLE_ALERT}, {"region", ATK_ROLE_LANDMARK}, {"main", ATK_ROLE_LANDMARK},
+        {"navigation", ATK_ROLE_LANDMARK}, {"banner", ATK_ROLE_LANDMARK}, {"complementary", ATK_ROLE_LANDMARK},
+        {"contentinfo", ATK_ROLE_LANDMARK}, {"form", ATK_ROLE_FORM}, {"search", ATK_ROLE_LANDMARK},
         {"link", ATK_ROLE_LINK}, {"toolbar", ATK_ROLE_TOOL_BAR}, {"splitter", ATK_ROLE_SPLIT_PANE},
         {"status", ATK_ROLE_STATUSBAR}, {"list", ATK_ROLE_LIST}, {"menu-item-check-box", ATK_ROLE_CHECK_MENU_ITEM},
         {"menu-item-radio", ATK_ROLE_RADIO_MENU_ITEM}, {"password-input", ATK_ROLE_PASSWORD_TEXT}, {"multiline-text-input", ATK_ROLE_TEXT},
@@ -207,7 +213,7 @@ static void place_child(RuneAccessible *parent, RuneAccessible *child, int index
 
 static gboolean queue_request(RuneAccessible *node, int kind, const char *text, double number, int start, int end) {
     if (!node->window || !node->window->visible || !node->target || !(node->properties.actions & kind) ||
-        (node->properties.state & RUNE_AX_DISABLED)) return FALSE;
+        ((node->properties.state & RUNE_AX_DISABLED) && kind != RUNE_AX_SCROLL_INTO_VIEW)) return FALSE;
     ActionRequest *request = g_new0(ActionRequest, 1);
     request->target = g_strdup(node->target);
     request->kind = kind;
@@ -215,6 +221,7 @@ static gboolean queue_request(RuneAccessible *node, int kind, const char *text, 
     request->number = number;
     request->start = start; request->end = end;
     g_queue_push_tail(&node->window->requests, request);
+    if (node->window->action_wake) node->window->action_wake(node->window->wake_context);
     return TRUE;
 }
 static gboolean queue_action(RuneAccessible *node, int kind, const char *text, double number) {
@@ -265,9 +272,18 @@ static AtkObject *at_point(AtkComponent *comp, gint x, gint y, AtkCoordType coor
     return NULL;
 }
 static gboolean grab_focus(AtkComponent *comp) { return queue_action((RuneAccessible *)comp, RUNE_AX_FOCUS, NULL, 0); }
+#if ATK_CHECK_VERSION(2, 30, 0)
+static gboolean scroll_to(AtkComponent *comp, AtkScrollType type) {
+    (void)type;
+    return queue_action((RuneAccessible *)comp, RUNE_AX_SCROLL_INTO_VIEW, NULL, 0);
+}
+#endif
 static void component_iface(AtkComponentIface *iface) {
     iface->get_extents = extents; iface->contains = contains;
     iface->ref_accessible_at_point = at_point; iface->grab_focus = grab_focus;
+#if ATK_CHECK_VERSION(2, 30, 0)
+    iface->scroll_to = scroll_to;
+#endif
 }
 
 static const char *const action_names[] = {"press", "focus", "increment", "decrement"};
@@ -438,12 +454,24 @@ static gboolean set_caret(AtkText *obj, int offset) { return select_text(obj, of
 static gboolean remove_selection(AtkText *obj, int index) {
     return index == 0 && selection_count(obj) && set_caret(obj, caret_offset(obj));
 }
+#if ATK_CHECK_VERSION(2, 32, 0)
+static gboolean scroll_substring_to(AtkText *obj, int start, int end, AtkScrollType type) {
+    int count = character_count(obj);
+    if (end == -1) end = count;
+    if (start < 0 || start > end || end > count) return FALSE;
+    // Rune resolves a text run's scroll request to the element that owns the run.
+    return scroll_to(ATK_COMPONENT(obj), type);
+}
+#endif
 static void text_iface(AtkTextIface *iface) {
     iface->get_text = get_text; iface->get_character_count = character_count;
     iface->get_character_at_offset = character_at;
     iface->get_character_extents = character_extents;
     iface->get_range_extents = range_extents;
     iface->get_offset_at_point = offset_at_point;
+#if ATK_CHECK_VERSION(2, 32, 0)
+    iface->scroll_substring_to = scroll_substring_to;
+#endif
     iface->get_string_at_offset = string_at_offset;
     iface->get_caret_offset = caret_offset; iface->set_caret_offset = set_caret;
     iface->get_n_selections = selection_count; iface->get_selection = get_selection;
@@ -489,7 +517,7 @@ static AtkObject *get_root(void) { return ATK_OBJECT(application); }
 static const char *get_toolkit(void) { return "Rune"; }
 static const char *get_version(void) { return "1"; }
 
-RuneA11yWindow *rune_ax_open(const char *title, int visible, RuneA11yWake wake, void *context) {
+static RuneA11yWindow *open_window(const char *title, int visible, RuneA11yWake wake, void *context, gboolean overlay) {
     if (!wake || (!g_getenv("DBUS_SESSION_BUS_ADDRESS") && !g_getenv("AT_SPI_BUS_ADDRESS") && !g_getenv("DISPLAY"))) return NULL;
     if (!application) {
         AtkUtilClass *util = g_type_class_ref(ATK_TYPE_UTIL);
@@ -511,15 +539,22 @@ RuneA11yWindow *rune_ax_open(const char *title, int visible, RuneA11yWake wake, 
         g_type_class_unref(util);
     }
     RuneA11yWindow *window = g_new0(RuneA11yWindow, 1);
-    window->watch = rune_glib_watch_new(wake, context);
-    if (!window->watch) { g_free(window); return NULL; }
+    if (overlay) {
+        /* The GTK overlay already owns a host-loop descriptor watch. Wake its
+         * Rune handle only when an AT-SPI request needs the runtime to act. */
+        window->action_wake = wake;
+        window->wake_context = context;
+    } else {
+        window->watch = rune_glib_watch_new(wake, context);
+        if (!window->watch) { g_free(window); return NULL; }
+    }
     window->nodes = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
     window->frame = g_object_new(rune_window_accessible_get_type(), NULL);
     window->frame->window = window;
     atk_object_set_role(ATK_OBJECT(window->frame), ATK_ROLE_FRAME);
     atk_object_set_name(ATK_OBJECT(window->frame), title);
     rune_ax_visible(window, visible);
-    rune_glib_watch_arm(window->watch);
+    if (window->watch) rune_glib_watch_arm(window->watch);
     return window;
 }
 
@@ -540,6 +575,12 @@ void rune_ax_toolkit_window(void *accessible, int visible) {
     }
 }
 
+RuneA11yWindow *rune_ax_open(const char *title, int visible, RuneA11yWake wake, void *context) {
+    return open_window(title, visible, wake, context, FALSE);
+}
+RuneA11yWindow *rune_ax_open_overlay(const char *title, int visible, RuneA11yWake wake, void *context) {
+    return open_window(title, visible, wake, context, TRUE);
+}
 void rune_ax_visible(RuneA11yWindow *window, int visible) {
     if (!window || window->visible == (visible != 0)) return;
     window->visible = visible != 0;
@@ -559,12 +600,16 @@ void rune_ax_visible(RuneA11yWindow *window, int visible) {
 void rune_ax_pump(RuneA11yWindow *window, RuneA11yAction consume, void *context) {
     if (!window) return;
     for (int i = 0; i < 32 && g_main_context_iteration(NULL, FALSE); ++i) {}
+    rune_ax_take_requests(window, consume, context);
+}
+void rune_ax_take_requests(RuneA11yWindow *window, RuneA11yAction consume, void *context) {
+    if (!window) return;
     ActionRequest *req;
     while ((req = g_queue_pop_head(&window->requests))) {
         consume(context, req->target, req->kind, req->text, req->number, req->start, req->end);
         free_request(req);
     }
-    rune_glib_watch_arm(window->watch);
+    if (window->watch) rune_glib_watch_arm(window->watch);
 }
 
 void rune_ax_begin(RuneA11yWindow *w, const char *title, int x, int y, int width, int height, int focused) {
@@ -689,7 +734,7 @@ void rune_ax_announce(RuneA11yWindow *w, const char *text, int assertive) {
 
 void rune_ax_close(RuneA11yWindow *w) {
     if (!w) return;
-    rune_glib_watch_free(w->watch);
+    if (w->watch) rune_glib_watch_free(w->watch);
     ++w->generation;
     rune_ax_end(w);
     rune_ax_visible(w, FALSE);

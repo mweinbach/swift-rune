@@ -301,8 +301,20 @@ struct Slice4InputWave1BTests {
 
         // 1. a_live_window_records_no_input_markers_unless_tracing
         do {
-            let rt = makeRt()
-            rt.recordEvents = false
+            let spec = AppSpec<Int>(title: "Input markers", size: Vec2(100, 100), state: 0) { _, _ in
+                el().key("tap").w(40).h(40).onClick { $0 += 1 }
+            }
+            let host = WebAppHost(spec: spec)
+            let rt = host.runtime
+            _ = rt.frame(at: 0)
+            #expect(!rt.recordEvents)
+            var formatted = 0
+            func marker() -> String {
+                formatted += 1
+                return "marker"
+            }
+            rt.logInputEvent(marker())
+            #expect(formatted == 0)
             var t = 0.01
             tap(rt, t: &t)
             #expect(rt.state == 1)
@@ -311,6 +323,10 @@ struct Slice4InputWave1BTests {
             tap(rt, t: &t)
             #expect(rt.state == 2)
             #expect(pressMarkers(rt) == 1)
+            rt.traceChannelsActive = false
+            rt.recordEvents = true
+            rt.logInputEvent(marker())
+            #expect(formatted == 1 && rt.events.last == "marker")
         }
 
         // 2. unread_input_markers_stay_bounded

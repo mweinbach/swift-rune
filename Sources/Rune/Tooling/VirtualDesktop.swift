@@ -815,7 +815,13 @@ public enum DesktopInputKind: Equatable, Sendable {
     case down(PointerButton = .primary, Mods = .none)
     case up(PointerButton = .primary, Mods = .none)
     case leave
+    case scroll(dx: Float, dy: Float)
     case wheel(dx: Float, dy: Float, mods: Mods = .none)
+    case wheelEvent(WheelEvent)
+    case magnify(MagnifyEvent)
+    case rotate(RotateEvent)
+    case smartMagnify
+    case fling(vx: Float, vy: Float)
     case keyDown(KeyEvent)
     case fileDrop(FileDropPhase)
 
@@ -835,7 +841,11 @@ public enum DesktopInputKind: Equatable, Sendable {
         case .down: return "Down"
         case .up: return "Up"
         case .leave: return "Leave"
-        case .wheel: return "Wheel"
+        case .scroll, .wheel, .wheelEvent: return "Wheel"
+        case .magnify: return "Magnify"
+        case .rotate: return "Rotate"
+        case .smartMagnify: return "SmartMagnify"
+        case .fling: return "Fling"
         case .keyDown: return "Key"
         case .fileDrop: return "Files"
         }
@@ -980,12 +990,16 @@ public final class DesktopWindow<State>: DesktopMember, DesktopCaptureWindow {
             rt.setSystemDark(dark)
         }
         rt.setViewport(logicalSize, pixelScale: validScale)
+        #if os(Windows)
+        rt.setHeadlessWindowsTitlebar(spec.titlebar, borderless: spec.options.borderless || spec.chrome.borderless)
+        #else
         let resolvedChrome = spec.titlebar?.macChrome(spec.chrome) ?? spec.chrome
         if resolvedChrome.fullSizeContent && !(spec.options.borderless || spec.chrome.borderless) {
             rt.cxSettings.titlebarInset = resolvedChrome.titlebarInset()
         } else {
             rt.cxSettings.titlebarInset = 0.0
         }
+        #endif
         if let onClose { rt.onClose = onClose }
         if let specReopen = spec.onReopen { rt.onReopen = specReopen }
         if let onFocus { rt.onFocus = onFocus }
@@ -1180,8 +1194,20 @@ public final class DesktopWindow<State>: DesktopMember, DesktopCaptureWindow {
             runtime.pointerUp(at: p, button: btn, mods: mods, at: currentTime)
         case .leave:
             runtime.pointerExit(at: currentTime)
+        case let .scroll(dx, dy):
+            runtime.wheelXY(p.x, p.y, dx, dy, now: currentTime)
         case .wheel(let dx, let dy, let mods):
             runtime.wheel(WheelEvent(dx: dx, dy: dy, mods: mods), at: p, now: currentTime)
+        case .wheelEvent(let event):
+            runtime.wheel(event, at: p, now: currentTime)
+        case .magnify(let event):
+            runtime.magnify(event, at: p, now: currentTime)
+        case .rotate(let event):
+            runtime.rotate(event, at: p, now: currentTime)
+        case .smartMagnify:
+            runtime.smartMagnify(at: p, now: currentTime)
+        case let .fling(vx, vy):
+            runtime.fling(vx: vx, vy: vy, at: p, now: currentTime)
         case .keyDown(let ev):
             _ = runtime.keyDown(ev, at: currentTime)
         case .fileDrop(let phase):
@@ -1602,43 +1628,51 @@ public final class VirtualDesk {
         desk.catchUp(desktop: desktop, t: 0.0)
 
         var stepIdx = 0
-        var lastPointerPt: (Float, Float) = (0, 0)
-        func resolvePoint(_ pos: ScriptStep.Position) -> (Float, Float) {
-            switch pos {
+        var lastDown: (Float, Float) = (0, 0)
+        func resolvePoint(_ step: ScriptStep) throws -> (Float, Float) {
+            switch step.position {
             case .xy(let x, let y):
-                lastPointerPt = (x, y)
-                return lastPointerPt
+                return (x, y)
             case .key(let k):
-                if let pt = desk.find(key: k) {
-                    lastPointerPt = pt
-                    return pt
+                guard let pt = desk.find(key: k) else {
+                    throw ToolingError.invalidArgument("script: no element with key \"\(k)\" in a visible window")
                 }
-                return lastPointerPt
+                return pt
+            case .relative where step.action.usesCurrentPointer:
+                return desk.pointerLocation() ?? (0, 0)
             case .relative(let dx, let dy):
-                return (lastPointerPt.0 + dx, lastPointerPt.1 + dy)
+                return (lastDown.0 + dx, lastDown.1 + dy)
             }
         }
 
-        func applyStep(_ step: ScriptStep, at t: Double) {
+        func applyStep(_ step: ScriptStep, at t: Double) throws {
             desk.drain(desktop: desktop, t: t)
+            let pt = try resolvePoint(step)
             switch step.action {
             case .move:
-                let pt = resolvePoint(step.position)
                 desk.pointerInput(kind: .move, at: pt)
             case .down(let button, let mods):
-                let pt = resolvePoint(step.position)
+                lastDown = pt
                 desk.pointerInput(kind: .down(button, mods), at: pt)
             case .up(let button, let mods):
-                let pt = resolvePoint(step.position)
                 desk.pointerInput(kind: .up(button, mods), at: pt)
+            case let .scroll(dx, dy):
+                desk.pointerInput(kind: .scroll(dx: dx, dy: dy), at: pt)
             case .wheel(let w):
-                let pt = resolvePoint(step.position)
-                desk.pointerInput(kind: .wheel(dx: w.dx, dy: w.dy, mods: w.mods), at: pt)
+                desk.pointerInput(kind: .wheelEvent(w), at: pt)
+            case .magnify(let event):
+                desk.pointerInput(kind: .magnify(event), at: pt)
+            case .rotate(let event):
+                desk.pointerInput(kind: .rotate(event), at: pt)
+            case .smartMagnify:
+                desk.pointerInput(kind: .smartMagnify, at: pt)
+            case let .fling(vx, vy):
+                desk.pointerInput(kind: .fling(vx: vx, vy: vy), at: pt)
             case .keyDown(let ev), .keyRepeat(let ev):
                 if let k = desk.focus.focusedIndex {
                     desk.members[k].input(.keyDown(ev), at: (0, 0))
                 }
-            case .keyUp, .physical, .physicalKey, .shortcut, .paste, .ime, .magnify, .fling,
+            case .keyUp, .physical, .physicalKey, .shortcut, .paste, .ime,
                  .resize, .resizeDelta, .mark, .openUrl, .popupPick, .fileDialogAnswer:
                 break
             case .windowFocus(let focused):
@@ -1646,13 +1680,10 @@ public final class VirtualDesk {
             case .reopen:
                 desk.reopen(accessory: options.accessory, desktop: desktop, t: t)
             case .dragFiles(let urls):
-                let pt = resolvePoint(step.position)
                 desk.fileInput(phase: .entered(urls.map { DroppedFile(url: $0) }, at: Vec2(pt.0, pt.1)), at: pt)
             case .dropFiles(let urls):
-                let pt = resolvePoint(step.position)
                 desk.fileInput(phase: .dropped(urls.map { DroppedFile(url: $0) }, at: Vec2(pt.0, pt.1)), at: pt)
             case .dragFilesLeave:
-                let pt = resolvePoint(step.position)
                 desk.fileInput(phase: .exited, at: pt)
             }
             desk.drain(desktop: desktop, t: t)
@@ -1674,7 +1705,7 @@ public final class VirtualDesk {
             }
             desk.drain(desktop: desktop, t: t)
             while stepIdx < sortedSteps.count && sortedSteps[stepIdx].t <= t + 1e-9 {
-                applyStep(sortedSteps[stepIdx], at: t)
+                try applyStep(sortedSteps[stepIdx], at: t)
                 stepIdx += 1
             }
             for m in members where m.visible {

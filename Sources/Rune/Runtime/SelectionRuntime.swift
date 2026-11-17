@@ -72,18 +72,17 @@ internal struct RuntimeSelectionState {
         clickCount = 0
     }
 
-    mutating func notePrimaryPress(path: String, at pos: Vec2, now: Double) -> Int {
-        let dt = now - lastClickTime
-        let dist = hypotf(pos.x - lastClickPos.x, pos.y - lastClickPos.y)
-        if path == lastClickPath && dt <= 0.35 && dist <= 4.0 {
-            clickCount += 1
+    mutating func notePrimaryPress(path: String, at pos: Vec2, now: Double, interval: Double) -> Int {
+        if path == lastClickPath && PressRun.follows(then: lastClickTime, was: lastClickPos,
+                                                    now: now, point: pos, interval: interval) {
+            clickCount = min(clickCount + 1, 3)
         } else {
             clickCount = 1
         }
         lastClickPath = path
         lastClickTime = now
         lastClickPos = pos
-        return min(3, max(1, clickCount))
+        return clickCount
     }
 }
 
@@ -184,7 +183,8 @@ public extension Runtime {
             for j in p..<flatNodes.count {
                 if !isDescendant(j, p) { break }
                 let jNode = flatNodes[j]
-                guard let fullText = selectableNodeText(jNode), !fullText.isEmpty else { continue }
+                guard !jNode.effectiveInert, let content = jNode.el.selectableContent, !content.displayed.isEmpty else { continue }
+                let fullText = content.displayed
                 if let g = group {
                     guard let sIdx = snaps.firstIndex(where: { $0.path == jNode.path }),
                           SelectAllResolver.groupPath(forNodeAt: sIdx, in: snaps) == g else {
@@ -203,10 +203,10 @@ public extension Runtime {
                 }
                 let byteRange = rangeByPath[jNode.path] ?? 0..<0
                 let len = fullText.utf8.count
-                let uncopied = jNode.el.uncopiedRanges
+                let uncopied = content.uncopied
                 let slice: String = byteRange.isEmpty
                     ? ""
-                    : CopyJoin.copySlice(in: fullText, range: byteRange, uncopied: uncopied)
+                    : CopyJoin.copySlice(in: fullText, range: byteRange, uncopied: uncopied, source: content.source)
                 let trimmed = SelectionMath.trimUncopied(uncopied, range: (0, len))
                 let whole = !byteRange.isEmpty
                     && len > 0
@@ -219,7 +219,7 @@ public extension Runtime {
                     len: len,
                     whole: whole,
                     text: slice,
-                    content: fullText
+                    content: content.source == nil && uncopied.isEmpty ? slice : CopyJoin.copySlice(in: fullText, range: byteRange, uncopied: [])
                 ))
             }
             let providerSel = TextSelection(texts: pieces, text: sel.text, backward: sel.backward)
@@ -253,14 +253,29 @@ public extension Runtime {
         }
         guard !selectedRanges.isEmpty else { return nil }
 
+        let selected = Set(selectedRanges.map(\.nodeIndex))
         let htmlNodes: [CopyHTMLBuilder.NodeSnapshot] = flatNodes.enumerated().map { idx, node in
+            // The marker immediately after a list item can be hidden and nonselectable.
+            // Other unselected nodes contribute only their ancestry and semantic role.
+            guard selected.contains(idx) else {
+                let marker = idx > 0 && flatNodes[idx - 1].el.role.rawValue.lowercased() == "listitem"
+                    && !node.el.isSecure && node.el.handlers.editLens == nil
+                let text: String? = marker
+                    ? (node.el.liveText?.get() ?? node.el.plainText ?? node.el.richSpans?.map(\.text).joined())
+                    : nil
+                return CopyHTMLBuilder.NodeSnapshot(parentIndex: node.parentIndex, roleRaw: node.el.role.rawValue,
+                                                    a11yLevel: node.el.a11yLevel, text: text)
+            }
+            let content = node.el.selectableContent
+            let source = content?.source
+            func displayed(_ bytes: Range<Int>) -> Range<Int> { source?.displayedRange(forSourceUTF8Range: bytes) ?? bytes }
             var spans: [CopyHTMLBuilder.SpanRun] = []
             if let richSpans = node.el.richSpans, !richSpans.isEmpty {
                 var byteCursor = 0
                 for sp in richSpans {
                     let nextCursor = byteCursor + sp.text.utf8.count
                     spans.append(CopyHTMLBuilder.SpanRun(
-                        byteRange: byteCursor..<nextCursor,
+                        byteRange: displayed(byteCursor..<nextCursor),
                         weight: sp.weight,
                         italic: sp.italic,
                         monospace: sp.monospace,
@@ -269,20 +284,22 @@ public extension Runtime {
                     byteCursor = nextCursor
                 }
             }
-            let links = node.el.textLinks.map { CopyHTMLBuilder.LinkRun(byteRange: $0.byteRange, id: $0.id) }
+            let links = node.el.textLinks.map { CopyHTMLBuilder.LinkRun(byteRange: displayed($0.byteRange), id: $0.id) }
             return CopyHTMLBuilder.NodeSnapshot(
                 parentIndex: node.parentIndex,
                 roleRaw: node.el.role.rawValue,
                 a11yLevel: node.el.a11yLevel,
                 a11yHidden: node.el.isA11yHidden,
                 rect: laidOutRect(forIndex: idx, in: flatNodes),
-                text: selectableNodeText(node),
+                text: content?.displayed,
+                source: source,
                 baseWeight: node.el.textStyle.weight,
                 baseItalic: node.el.textStyle.italic,
-                baseMonospace: node.el.textStyle.family == .monospace,
+                baseMonospace: node.el.textStyle.family.isMonospace,
                 spans: spans,
                 links: links,
-                uncopied: node.el.uncopiedRanges
+                strikes: node.el.elStrikes.map { displayed($0.byteRange) },
+                uncopied: content?.uncopied ?? []
             )
         }
         return CopyHTMLBuilder.build(nodes: htmlNodes, ranges: selectedRanges)
@@ -304,23 +321,14 @@ private enum VirtualEndpointPos {
 
 internal extension Runtime {
     func selectableNodeText(_ node: FlatNode) -> String? {
-        guard !node.effectiveInert,
-              !node.el.isSecure,
-              node.el.handlers.editLens == nil,
-              node.el.isSelectable else {
-            return nil
-        }
-        if let live = node.el.liveText?.get() { return live }
-        if let plain = node.el.plainText { return plain }
-        if let spans = node.el.richSpans { return spans.map(\.text).joined() }
-        return nil
+        node.effectiveInert ? nil : node.el.selectableContent?.displayed
     }
 
     func selectableSnapshots() -> [SelectableNodeSnapshot] {
         var out: [SelectableNodeSnapshot] = []
         out.reserveCapacity(flatNodes.count)
         for node in flatNodes {
-            let text = selectableNodeText(node) ?? ""
+            let content = node.effectiveInert ? nil : node.el.selectableContent
             let isSel = !node.effectiveInert && !node.el.isSecure && node.el.handlers.editLens == nil && node.el.isSelectable
             let copyBreaks = node.el.copyBreaksPair
             out.append(SelectableNodeSnapshot(
@@ -330,9 +338,10 @@ internal extension Runtime {
                 isSelectable: isSel,
                 isSelectionGroup: !node.effectiveInert && node.el.isSelectionGroup,
                 isFocusedTextInput: node.path == focusedPath && node.el.handlers.editLens != nil,
-                text: text,
+                text: content?.displayed ?? "",
                 rect: presentedRectByPath[node.path] ?? node.targetRect,
-                uncopied: node.el.uncopiedRanges,
+                source: content?.source,
+                uncopied: content?.uncopied ?? [],
                 copyBreakBefore: copyBreaks.before,
                 copyBreakAfter: copyBreaks.after,
                 copyPrefix: node.el.copyPrefixString
@@ -359,15 +368,18 @@ internal extension Runtime {
                 // During a commit, pinned and entering rows read the same memo geometry.
                 built = buildIndexed(rowSource)
             } else {
-                built = MemoScope.enterVirtualRow(
-                    cache: MemoCache(), envHash: lastViewMemoEnvHash, geometry: [:], pass: 1
-                ) { rowSource.build(state, rowIndex) }.key(rowKey)
+                let row = MemoScope.enterVirtualRow(
+                    cache: MemoCache(), envHash: lastViewMemoEnvHash, pass: 1
+                ) { rowSource.build(state, rowIndex) }
+                built = rowSource.keyed(row, storageKey: rowKey)
             }
             if pinned { src.pinnedRows.rows[cacheKey] = built }
             return built
         }
         guard rowIndex < src.storedChildren.count else { return nil }
-        return src.storedChildren[rowIndex].key(rowKey)
+        var row = src.storedChildren[rowIndex]
+        row.assignStoredKey(rowKey, authored: VirtualRowKeyEncoding.authoredKey(rowKey))
+        return row
     }
 
     func collectOffscreenRowSnapshots(
@@ -405,12 +417,8 @@ internal extension Runtime {
     ) {
         let inert = parentInert || el.isInert
         let isSel = !inert && !el.isSecure && el.handlers.editLens == nil && el.isSelectable
-        let text: String
-        if isSel {
-            text = el.liveText?.get() ?? el.plainText ?? el.richSpans?.map(\.text).joined() ?? ""
-        } else {
-            text = ""
-        }
+        let content = isSel ? el.selectableContent : nil
+        let text = content?.displayed ?? ""
         let rect = MotionRect.fromXYWH(inRowContainer ? nextCellX : 0, cursorY, 80, 10)
         if isSel && !text.isEmpty {
             if inRowContainer {
@@ -429,7 +437,8 @@ internal extension Runtime {
             isFocusedTextInput: false,
             text: text,
             rect: rect,
-            uncopied: el.uncopiedRanges,
+            source: content?.source,
+            uncopied: content?.uncopied ?? [],
             copyBreakBefore: copyBreaks.before,
             copyBreakAfter: copyBreaks.after,
             copyPrefix: el.copyPrefixString
@@ -439,7 +448,7 @@ internal extension Runtime {
         var childSeen: [String: Int] = [:]
         for idx in el.children.indices {
             let (seg, _) = layoutPathSegment(
-                keyId: el.children[idx].keyId,
+                keyId: el.children[idx].storageKeyId,
                 siblingIndex: idx,
                 siblingKeysSeen: &childSeen
             )
@@ -663,11 +672,10 @@ internal extension Runtime {
     }
 
     func selectableHitOffset(node: FlatNode, windowPos: Vec2, preferLayoutRects: Bool = false) -> Int {
-        let displayText = selectableNodeText(node) ?? ""
-        guard !displayText.isEmpty else { return 0 }
+        guard !node.effectiveInert, let rawText = node.el.selectableAuthoredText, !rawText.isEmpty else { return 0 }
         let rect = preferLayoutRects ? node.targetRect : (presentedRectByPath[node.path] ?? node.targetRect)
         let sc = preferLayoutRects ? Vec2(1, 1) : (presentedScaleByPath[node.path] ?? Vec2(1, 1))
-        let resolvedText = ElDisplayResolver.resolveText(el: node.el, rawText: displayText, isSecure: false)
+        let resolvedText = ElDisplayResolver.resolveText(el: node.el, rawText: rawText, isSecure: false)
         // A text wraps at its layout width, `w * scale + FIT_SLACK` device px, as it laid out and
         // paints (`relayout::lay_out_text`, #948).
         let layoutInnerW = max(0, node.targetRect.width - node.el.layout.padding.left - node.el.layout.padding.right)
@@ -684,7 +692,7 @@ internal extension Runtime {
         let localY = (unturned.y - (rect.y + node.el.layout.padding.top * sc.y)) / max(1e-4, sc.y)
         let drawnRaw = textSystem.hitTestUTF8Offset(in: shaped, localX: localX, localY: localY, pixelScale: pixelScale)
         let raw = shaped.elided?.contentOffset(forDrawn: drawnRaw) ?? drawnRaw
-        return SelectionMath.floorCharBoundary(in: displayText, offset: raw)
+        return SelectionMath.floorCharBoundary(in: resolvedText.displayedText, offset: raw)
     }
 
     private func isTopSelectableInputTarget(_ node: FlatNode) -> Bool {
@@ -763,7 +771,7 @@ internal extension Runtime {
         }
 
         let offset = selectableHitOffset(node: sNode, windowPos: pos)
-        let clicks = selectionState.notePrimaryPress(path: sNode.path, at: pos, now: now)
+        let clicks = selectionState.notePrimaryPress(path: sNode.path, at: pos, now: now, interval: doubleClickInterval)
         let snaps = selectableSnapshots()
         let sSnapIdx = snaps.firstIndex(where: { $0.path == sNode.path })
         let sGroup = sSnapIdx.flatMap { SelectAllResolver.groupPath(forNodeAt: $0, in: snaps) }
@@ -806,7 +814,7 @@ internal extension Runtime {
         }
 
         let unit = SelectionUnit.forClickCount(clicks)
-        let origin = SelectionMath.unitRange(in: content, at: offset, unit: unit, uncopied: sNode.el.uncopiedRanges)
+        let origin = SelectionMath.unitRange(in: content, at: offset, unit: unit, uncopied: sNode.el.selectableContent?.uncopied ?? [])
         let initialSel = ActiveSelection(
             path: sNode.path,
             content: content,
@@ -842,7 +850,7 @@ internal extension Runtime {
         let activeRange = currentTextSelection()?.texts.first(where: { $0.path == sNode.path })?.range
         let outsideCurrent = activeRange.map { offset < $0.lowerBound || offset >= $0.upperBound } ?? true
         if outsideCurrent {
-            let word = SelectionMath.unitRange(in: content, at: offset, unit: .word, uncopied: sNode.el.uncopiedRanges)
+            let word = SelectionMath.unitRange(in: content, at: offset, unit: .word, uncopied: sNode.el.selectableContent?.uncopied ?? [])
             selectionState.clearClicks()
             selectionState.isDraggingSelection = false
             selectionState.edgeScroll.stop()
@@ -936,7 +944,7 @@ internal extension Runtime {
             in: targetContent,
             at: rawOffset,
             unit: unit,
-            uncopied: flatNodes[targetIdx].el.uncopiedRanges
+            uncopied: flatNodes[targetIdx].el.selectableContent?.uncopied ?? []
         )
         let reachesAnchor = anchorMountedIdx == targetIdx
         let ends: (anchor: Int, focus: Int)
@@ -1078,13 +1086,11 @@ internal extension Runtime {
 
     func computeActiveSelectionRangesByPath() -> [String: Range<Int>] {
         guard selectionState.coordinator.phase.selection != nil,
-              let sel = selectionState.coordinator.currentSelection(in: selectableSnapshotsWithVirtuals(endsOnly: true)) else {
-            return [:]
-        }
+              let current = selectionState.coordinator.currentRanges(in: selectableSnapshotsWithVirtuals(endsOnly: true)) else { return [:] }
         var map: [String: Range<Int>] = [:]
-        map.reserveCapacity(sel.texts.count)
-        for item in sel.texts where !item.range.isEmpty {
-            map[item.path] = item.range
+        map.reserveCapacity(current.ranges.count)
+        for (node, range) in current.ranges {
+            map[node.path] = range
         }
         return map
     }
@@ -1100,10 +1106,8 @@ internal extension Runtime {
         pxScale: Float,
         localAlpha: Float,
         shaped: ShapedText,
-        devClip: SIMD4<Float>,
-        useLayer: Bool,
-        effRotate: Float,
-        into primitives: inout [Primitive]
+        emitMark: (SIMD4<Float>, SIMD4<Float>) -> Void,
+        emitHighlight: (SIMD4<Float>, SIMD4<Float>, Float, Float) -> Void
     ) -> SelectablePaintInk? {
         guard !isExiting,
               !el.isSecure,
@@ -1111,12 +1115,9 @@ internal extension Runtime {
             return nil
         }
 
-        let style = resolvedSelectionStyle(for: snap)
-        let picked = style?.pick(active: windowFocused)
-        let fallbackHl = windowFocused
-            ? (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28))
-            : (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28)).scaleAlpha(0.55)
-        let rot = useLayer ? 0 : effRotate
+        func drawnRange(_ displayed: Range<Int>) -> Range<Int> {
+            shaped.elided?.selectionRange(displayed) ?? displayed
+        }
 
         // Custom marked ranges declared via `Cx.markTexts` paint square per-line boxes (`text_marks.rs`).
         if !selectionState.lastCommittedMarkedTexts.isEmpty,
@@ -1125,15 +1126,17 @@ internal extension Runtime {
             let markColor = (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28))
                 .scaleAlpha(localAlpha)
                 .simd4(srgb: srgbBlend)
-            let utf8 = Array(content.utf8)
+            let utf8 = content.utf8
             for mark in selectionState.lastCommittedMarkedTexts where mark.path == snap.path && !mark.range.isEmpty {
                 let lo = mark.range.lowerBound
                 let hi = mark.range.upperBound
                 guard lo >= 0, hi <= utf8.count, lo < hi,
                       SelectionMath.floorCharBoundary(in: content, offset: lo) == lo,
                       SelectionMath.floorCharBoundary(in: content, offset: hi) == hi else { continue }
-                let sub = String(decoding: utf8[lo..<hi], as: UTF8.self)
-                guard sub == mark.text else { continue }
+                let start = utf8.index(utf8.startIndex, offsetBy: lo)
+                let bytes = utf8[start..<utf8.index(start, offsetBy: hi - lo)]
+                guard bytes.elementsEqual(mark.text.utf8) else { continue }
+                let sub = mark.text
                 var lineStart = lo
                 for line in sub.split(separator: "\n", omittingEmptySubsequences: false) {
                     let trimmedLen = line.hasSuffix("\r") ? line.utf8.count - 1 : line.utf8.count
@@ -1141,23 +1144,14 @@ internal extension Runtime {
                     if lineStart < lineEnd {
                         let markRects = textSystem.selectionRects(
                             in: shaped,
-                            utf8Range: lineStart..<lineEnd,
+                            utf8Range: drawnRange(lineStart..<lineEnd),
                             pixelScale: pxScale
                         )
                         for r in markRects {
-                            primitives.append(.roundedRect(
-                                // Its edges on the device grid wherever the text's origin falls (`text_marks::pixel_rect`, #935).
-                                rect: TextBoxGeometry.pixelRect(
-                                    origin: SIMD2<Float>(textOriginX, textOriginY),
-                                    box: r,
-                                    k: SIMD2<Float>(scaleVec.x, scaleVec.y),
-                                    pxScale: pxScale
-                                ),
-                                radii: .zero,
-                                fill: markColor,
-                                clip: devClip,
-                                turn: rot
-                            ))
+                            emitMark(TextBoxGeometry.pixelRect(
+                                origin: SIMD2(textOriginX, textOriginY), box: r,
+                                k: SIMD2(scaleVec.x, scaleVec.y), pxScale: pxScale
+                            ), markColor)
                         }
                     }
                     lineStart += line.utf8.count + 1
@@ -1170,29 +1164,21 @@ internal extension Runtime {
               !range.isEmpty else {
             return nil
         }
-        let drawnRange = shaped.elided?.selectionRange(range) ?? range
-        let lineRects = textSystem.selectionRects(in: shaped, utf8Range: drawnRange, pixelScale: pxScale)
+        let lineRects = textSystem.selectionRects(in: shaped, utf8Range: drawnRange(range), pixelScale: pxScale)
         guard !lineRects.isEmpty else { return nil }
+        let style = resolvedSelectionStyle(for: snap)
+        let picked = style?.pick(active: windowFocused)
+        let fallbackHl = windowFocused
+            ? (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28))
+            : (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28)).scaleAlpha(0.55)
         let hlColor = (picked?.highlight ?? fallbackHl).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
         let radiusPx = 2.0 * pxScale * scaleVec.x
         let reachPx = 40.0 * pxScale * scaleVec.x
         for r in lineRects {
-            SelectionRunExtender.appendHighlight(
-                into: &primitives,
-                // Its edges on the device grid wherever the text's origin falls (`text_marks::pixel_rect`, #935).
-                rect: TextBoxGeometry.pixelRect(
-                    origin: SIMD2<Float>(textOriginX, textOriginY),
-                    box: r,
-                    k: SIMD2<Float>(scaleVec.x, scaleVec.y),
-                    pxScale: pxScale
-                ),
-                fill: hlColor,
-                radius: radiusPx,
-                clip: devClip,
-                fade: .zero,
-                turn: rot,
-                reach: reachPx
-            )
+            emitHighlight(TextBoxGeometry.pixelRect(
+                origin: SIMD2(textOriginX, textOriginY), box: r,
+                k: SIMD2(scaleVec.x, scaleVec.y), pxScale: pxScale
+            ), hlColor, radiusPx, reachPx)
         }
         if let ink = picked?.ink {
             return SelectablePaintInk(ink: ink, rects: lineRects)
@@ -1236,9 +1222,8 @@ internal extension Runtime {
             let node = nodes[j]
             let el = node.el
             guard !node.effectiveInert, !el.isSecure, el.handlers.editLens == nil else { continue }
-            let text = el.liveText?.get() ?? el.plainText ?? el.richSpans?.map(\.text).joined() ?? ""
-            guard !text.isEmpty else { continue }
-            let len = text.utf8.count
+            guard let content = el.selectableContent, !content.displayed.isEmpty else { continue }
+            let len = content.displayed.utf8.count
             let lo = max(0, min(len, item.range.lowerBound))
             let hi = max(lo, min(len, item.range.upperBound))
             guard lo < hi else { continue }
@@ -1246,18 +1231,13 @@ internal extension Runtime {
             let rect = laidOutRect(forIndex: j, in: nodes)
             let pad = el.layout.padding
             let innerW = max(0, rect.width - pad.left - pad.right)
-            let shaped = textSystem.shape(
-                text: text,
-                spans: el.richSpans,
-                pills: el.pillChips,
-                style: el.textStyle,
-                maxWidth: innerW + 0.5,
-                pixelScale: pixelScale,
-                emitGlyphs: false
-            )
+            let resolved = ElDisplayResolver.resolveText(el: el, rawText: content.source?.authored ?? content.displayed, isSecure: false)
+            let shaped = resolved.shape(using: textSystem, maxWidth: TextBoxGeometry.wrapWidth(innerW, scale: pixelScale),
+                                        pixelScale: pixelScale, emitGlyphs: false)
+            let drawn = shaped.elided?.selectionRange(lo..<hi) ?? (lo..<hi)
             let originX = rect.left + pad.left
             let originY = rect.top + pad.top
-            for r in textSystem.selectionRects(in: shaped, utf8Range: lo..<hi, pixelScale: pixelScale) {
+            for r in textSystem.selectionRects(in: shaped, utf8Range: drawn, pixelScale: pixelScale) {
                 boxes.append([originX + r.x, originY + r.y, r.z, r.w])
             }
         }
@@ -1285,8 +1265,15 @@ internal extension Runtime {
         pruneTextSelection()
     }
 
+    func handlerTextSelection() -> TextSelection? {
+        selectionState.coordinator.snapshot(
+            commit: viewCommitCount, focusedPath: focusedPath, collect: currentTextSelection
+        )
+    }
+
     func dispatchSelectionChanges(at now: Double) {
-        guard !selectionState.isDispatchingSelectionChanges else { return }
+        guard !selectionState.isDispatchingSelectionChanges,
+              selectionState.coordinator.needsWatcherCheck(commit: viewCommitCount, focusedPath: focusedPath) else { return }
         selectionState.isDispatchingSelectionChanges = true
         // `on_selection_change` is an observer: its change is DIRTY, never the user's INPUT
         // (`frame.rs` `selection_changes()`), even inside an input entry point.
@@ -1305,19 +1292,11 @@ internal extension Runtime {
         selectionState.lastDispatchedDragging = isDragging
         // Nobody listens and nobody heard a selection: nothing to tell.
         if watchers.isEmpty && selectionState.coordinator.heardByPath.isEmpty { return }
-        let snaps = selectableSnapshotsWithVirtuals()
-
-        var changes = selectionState.coordinator.collectSelectionChanges(elements: watchers, nodes: snaps)
-        if wasDragging && !isDragging, let active = selectionState.coordinator.currentSelection(in: snaps) {
-            let selectedPaths = Set(active.texts.map(\.path))
-            let alreadyFired = Set(changes.map(\.path))
-            for (path, _) in watchers where !alreadyFired.contains(path) {
-                if selectedPaths.contains(where: { $0 == path || $0.hasPrefix(path + "/") }) {
-                    changes.append((path, SelectionChange(selection: active, was: true, isDragging: false)))
-                }
-            }
-        }
-        guard !changes.isEmpty else { return }
+        let selectedPaths = Set(computeActiveSelectionRangesByPath().keys)
+        let changes = selectionState.coordinator.collectSelectionChanges(
+            elements: watchers, selectedPaths: selectedPaths, released: wasDragging && !isDragging,
+            selection: handlerTextSelection
+        )
         for (path, change) in changes {
             guard let idx = nodeByPath[path], idx < flatNodes.count else { continue }
             var tx = makeTx(at: now)

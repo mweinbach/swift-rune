@@ -116,6 +116,20 @@ extension App {
         return copy
     }
 
+    /// On the web, mount into this canvas from the embedding document.
+    public func canvasId(_ id: String) -> App<State> {
+        var copy = self
+        copy.webCanvasID = id
+        return copy
+    }
+
+    /// Size the selected canvas to the browser window. Content-height and document modes take precedence.
+    public func fullViewport(_ enabled: Bool = true) -> App<State> {
+        var copy = self
+        copy.usesFullViewport = enabled
+        return copy
+    }
+
     /// Opts the web target into document flow height sizing (`App::web_document`).
     public func webDocument(_ enabled: Bool = true) -> App<State> {
         var copy = self
@@ -123,26 +137,45 @@ extension App {
         return copy
     }
 
-    /// Registers a lazy web font URL to load before text renders (`App::font_url`).
+    /// Loads a web font before the first frame, or reads a local font file on native platforms.
     public func fontUrl(_ url: String) -> App<State> {
-        var copy = self
-        copy.fontURLStrings.append(url)
-        return copy
+        fontUrls([url])
     }
 
-    /// Registers multiple web font URLs (`App::font_url`).
+    /// Loads multiple font URLs in declaration order.
     public func fontUrls(_ urls: [String]) -> App<State> {
         var copy = self
         copy.fontURLStrings.append(contentsOf: urls)
+        #if !os(WASI)
+        for url in urls {
+            if case let .success(path) = ImageCache.filePath(for: url),
+               let data = try? Data(contentsOf: URL(fileURLWithPath: path)), !data.isEmpty {
+                copy.fontData.append(data)
+            }
+        }
+        #endif
         return copy
+    }
+
+    /// Loads a face after the browser presents its first frame. Native apps read local fonts immediately.
+    public func fontUrlLater(_ url: String) -> App<State> {
+        #if os(WASI)
+        var copy = self
+        copy.lateFontURLStrings.append(url)
+        return copy
+        #else
+        return fontUrl(url)
+        #endif
     }
 
     /// Returns the resolved `WebAppConfig` reflecting `webDocument`, `fitContentHeight`, and `fontUrl`.
     public var webAppConfig: WebAppConfig {
         WebAppConfig(
+            canvasId: webCanvasID, fullViewport: usesFullViewport,
             webDocument: isWebDocument,
             fitContentHeight: isFitContentHeight || isWebDocument,
-            fontUrls: fontURLStrings
+            fontUrls: fontURLStrings,
+            lateFontUrls: lateFontURLStrings
         )
     }
 }

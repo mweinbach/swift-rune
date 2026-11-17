@@ -1,4 +1,7 @@
 import Foundation
+import Rune
+
+typealias KitSourceKey = TextUTF8Key
 
 /// A cache bounded by bytes, not entries (`rune_kit::budget::Budget`).
 /// Entries used in the last two commit generations are retained; past the byte limit,
@@ -16,17 +19,28 @@ public final class BudgetCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     private var currentBytes: Int = 0
     private let limit: Int
     private var clock: UInt64 = 0
-    private var generation: UInt64 = 0
+    private let entryLimit: Int
+    private let frameGeneration: @Sendable () -> UInt64
+    // A lower bound avoids scanning an entire over-budget screen on every insertion.
+    private var oldestCommit: UInt64 = .max
+    private var manualGeneration: UInt64?
+    private var generation: UInt64 { manualGeneration ?? frameGeneration() }
 
-    public init(limitBytes: Int) {
+    public convenience init(limitBytes: Int) {
+        self.init(limitBytes: limitBytes, entryLimit: .max, frameGeneration: Rune.commitGeneration)
+    }
+
+    init(limitBytes: Int, entryLimit: Int, frameGeneration: @escaping @Sendable () -> UInt64) {
+        self.entryLimit = max(1, entryLimit)
+        self.frameGeneration = frameGeneration
         self.limit = max(0, limitBytes)
     }
 
-    /// Advances the commit generation counter (call once per frame/commit).
+    /// Selects a manual commit clock for callers managing their own frame lifecycle.
     public func advanceCommit() {
         lock.lock()
         defer { lock.unlock() }
-        generation &+= 1
+        manualGeneration = generation &+ 1
     }
 
     /// Current commit generation.
@@ -58,6 +72,7 @@ public final class BudgetCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         clock &+= 1
         slot.used = clock
         slot.commit = generation
+        oldestCommit = min(oldestCommit, slot.commit)
         map[key] = slot
         return slot.value
     }
@@ -74,9 +89,20 @@ public final class BudgetCache<Key: Hashable & Sendable, Value: Sendable>: @unch
     public func remove(_ key: Key) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard let old = map.removeValue(forKey: key) else { return false }
-        currentBytes = max(0, currentBytes - old.bytes)
-        return true
+        return takeLocked(key) != nil
+    }
+
+    /// Transfers the cached value so a growing document can reuse its array storage.
+    func take(_ key: Key) -> Value? {
+        lock.lock()
+        defer { lock.unlock() }
+        return takeLocked(key)
+    }
+
+    private func takeLocked(_ key: Key) -> Value? {
+        guard let old = map.removeValue(forKey: key) else { return nil }
+        currentBytes -= old.bytes
+        return old.value
     }
 
     /// Whether `key` was used in the current commit generation.
@@ -98,7 +124,8 @@ public final class BudgetCache<Key: Hashable & Sendable, Value: Sendable>: @unch
             currentBytes = max(0, currentBytes - old.bytes)
         }
         currentBytes += cost
-        if currentBytes > limit {
+        oldestCommit = min(oldestCommit, slot.commit)
+        if currentBytes > limit || map.count > entryLimit {
             evictLocked()
         }
     }
@@ -108,12 +135,14 @@ public final class BudgetCache<Key: Hashable & Sendable, Value: Sendable>: @unch
         defer { lock.unlock() }
         map.removeAll()
         currentBytes = 0
+        oldestCommit = .max
     }
 
     private func evictLocked() {
         let now = generation
+        if now > 0 && oldestCommit >= now - 1 { return }
         func isKept(_ slot: Slot) -> Bool {
-            now > 0 && slot.commit + 1 >= now
+            now > 0 && slot.commit >= now - 1
         }
 
         let oldSlots = map.values
@@ -121,16 +150,19 @@ public final class BudgetCache<Key: Hashable & Sendable, Value: Sendable>: @unch
             .map { ($0.used, $0.bytes) }
             .sorted { $0.0 < $1.0 }
 
-        let target = (limit / 4) * 3
+        let target = currentBytes > limit ? (limit / 4) * 3 : currentBytes
+        var remaining = map.count
         var bytes = currentBytes
         var lastEvictedStamp: UInt64?
 
         for (used, b) in oldSlots {
-            if bytes <= target { break }
+            if bytes <= target && remaining <= entryLimit { break }
+            remaining -= 1
             bytes = max(0, bytes - b)
             lastEvictedStamp = used
         }
 
+        defer { oldestCommit = map.values.lazy.map(\.commit).min() ?? .max }
         guard let cutoff = lastEvictedStamp else { return }
         map = map.filter { _, slot in
             isKept(slot) || slot.used > cutoff

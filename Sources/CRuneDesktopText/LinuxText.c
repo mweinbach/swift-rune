@@ -4,6 +4,11 @@
 #include <pango/pangofc-fontmap.h>
 #include <fontconfig/fontconfig.h>
 #include <hb-ot.h>
+#include <cairo-ft.h>
+#include <ft2build.h>
+#include FT_GASP_H
+#include FT_OUTLINE_H
+#include FT_TRUETYPE_TABLES_H
 #include <math.h>
 #include <string.h>
 
@@ -15,7 +20,17 @@ typedef struct {
     uint16_t level, previous_level;  // encoded as bidi embedding level + 1
 } RuneGraphemeEdge;
 
+typedef struct {
+    int owner, visual, x, baseline, first, count;
+    PangoFont *font;
+    PangoGlyphString *glyphs;
+} InkCluster;
+
 struct RuneDesktopLine {
+    GMutex index_lock;
+    GArray *cluster_index;
+    GPtrArray *indexed_runs;
+    GArray *owned_clusters;
     RuneGraphemeEdge *grapheme_edges;
     PangoLayout *layout;
     RuneDesktopLineMetrics metrics;
@@ -152,6 +167,8 @@ static void measure_face(PangoFont *font, RuneDesktopLineMetrics *metrics) {
 }
 
 static void measure_line(RuneDesktopLine *result) {
+    g_clear_pointer(&result->cluster_index, g_array_unref);
+    g_clear_pointer(&result->indexed_runs, g_ptr_array_unref);
     index_grapheme_edges(result);
     PangoRectangle ink, logical;
     pango_layout_get_pixel_extents(result->layout, &ink, NULL);
@@ -244,6 +261,7 @@ RuneDesktopLine *rune_desktop_line_create(const char *utf8, int32_t length,
     g_free(sanitized);
 
     RuneDesktopLine *result = g_new0(RuneDesktopLine, 1);
+    g_mutex_init(&result->index_lock);
     result->layout = layout;
     result->length = length;
     measure_line(result);
@@ -252,7 +270,8 @@ RuneDesktopLine *rune_desktop_line_create(const char *utf8, int32_t length,
 
 void rune_desktop_line_configure(RuneDesktopLine *line, const char *language,
     const char *features, const char *variations) {
-    if (!line) return;
+    if (!line || !line->layout) return;
+    g_mutex_lock(&line->index_lock);
     PangoAttrList *attrs = pango_attr_list_new();
     if (language && *language)
         pango_attr_list_insert(attrs, pango_attr_language_new(pango_language_from_string(language)));
@@ -265,11 +284,16 @@ void rune_desktop_line_configure(RuneDesktopLine *line, const char *language,
     pango_layout_set_font_description(line->layout, font);
     pango_font_description_free(font);
     measure_line(line);
+    g_mutex_unlock(&line->index_lock);
 }
 
 void rune_desktop_line_destroy(RuneDesktopLine *line) {
     if (!line) return;
-    g_object_unref(line->layout);
+    if (line->layout) g_mutex_clear(&line->index_lock);
+    g_clear_object(&line->layout);
+    g_clear_pointer(&line->cluster_index, g_array_unref);
+    g_clear_pointer(&line->indexed_runs, g_ptr_array_unref);
+    g_clear_pointer(&line->owned_clusters, g_array_unref);
     g_free(line->grapheme_edges);
     g_free(line);
 }
@@ -279,7 +303,7 @@ RuneDesktopLineMetrics rune_desktop_line_metrics(const RuneDesktopLine *line) {
 }
 
 float rune_desktop_line_caret(const RuneDesktopLine *line, int32_t byte_offset) {
-    if (!line) return 0;
+    if (!line || !line->layout) return 0;
     byte_offset = CLAMP(byte_offset, 0, line->length);
     const char *utf8 = pango_layout_get_text(line->layout);
     while (byte_offset > 0 && byte_offset < line->length &&
@@ -337,7 +361,483 @@ int32_t rune_desktop_line_has_color(const RuneDesktopLine *line) {
     return line && line->has_color;
 }
 
+static gint cluster_order(gconstpointer a, gconstpointer b) {
+    const InkCluster *lhs = a, *rhs = b;
+    return lhs->owner != rhs->owner ? lhs->owner - rhs->owner : lhs->visual - rhs->visual;
+}
+
+// log_clusters maps visual glyph order back to the first UTF-8 byte of each
+// shaping cluster. Index once, since callers can request each grapheme separately.
+static GArray *index_clusters(RuneDesktopLine *line) {
+    GArray *index = g_array_new(FALSE, FALSE, sizeof(InkCluster));
+    line->indexed_runs = g_ptr_array_new_with_free_func((GDestroyNotify)pango_glyph_item_free);
+    PangoLayoutIter *iter = pango_layout_get_iter(line->layout);
+    do {
+        PangoLayoutRun *run = pango_layout_iter_get_run_readonly(iter);
+        if (!run) continue;
+        PangoRectangle logical;
+        pango_layout_iter_get_run_extents(iter, NULL, &logical);
+#if PANGO_VERSION_CHECK(1, 50, 0)
+        const int baseline = pango_layout_iter_get_run_baseline(iter);
+#else
+        const int baseline = pango_layout_iter_get_baseline(iter);
+#endif
+        // Pango can invalidate its layout runs when fonts change. Share immutable
+        // snapshots with extracted views so they can outlive a reconfigured line.
+        run = pango_glyph_item_copy(run);
+        g_ptr_array_add(line->indexed_runs, run);
+        PangoGlyphString *glyphs = run->glyphs;
+        int pen = logical.x;
+        for (int first = 0; first < glyphs->num_glyphs;) {
+            const int offset = glyphs->log_clusters[first];
+            const int x = pen;
+            int end = first;
+            do { pen += glyphs->glyphs[end++].geometry.width; }
+            while (end < glyphs->num_glyphs && glyphs->log_clusters[end] == offset);
+            InkCluster cluster = {run->item->offset + offset, (int)index->len,
+                x, baseline, first, end - first, run->item->analysis.font, glyphs};
+            g_array_append_val(index, cluster);
+            first = end;
+        }
+    } while (pango_layout_iter_next_run(iter));
+    pango_layout_iter_free(iter);
+    g_array_sort(index, cluster_order);
+    return index;
+}
+
+static gint visual_order(gconstpointer a, gconstpointer b) {
+    return ((const InkCluster *)a)->visual - ((const InkCluster *)b)->visual;
+}
+
+static PangoGlyphString cluster_glyphs(const InkCluster *c) {
+    PangoGlyphString slice = *c->glyphs;
+    slice.glyphs += c->first;
+    slice.log_clusters += c->first;
+    slice.num_glyphs = c->count;
+    return slice;
+}
+
+G_LOCK_DEFINE_STATIC(outline_fonts);
+static uint64_t outline_font_serial;
+
+// An ID belongs to this PangoFont instance, including its size, variation and
+// synthetic transform. A new font at a recycled address receives a new ID.
+typedef struct { uint64_t id; gboolean cjk; } OutlineFont;
+
+static OutlineFont outline_font(PangoFont *font) {
+    const GQuark key = g_quark_from_static_string("rune-outline-font-id");
+    G_LOCK(outline_fonts);
+    OutlineFont *entry = g_object_get_qdata(G_OBJECT(font), key);
+    if (!entry) {
+        entry = g_new0(OutlineFont, 1);
+        entry->id = ++outline_font_serial;
+#if PANGO_VERSION_CHECK(1, 44, 0)
+        // The pinned painter classifies Han, kana and Hangul by OS/2 ulUnicodeRange2.
+        hb_face_t *face = hb_font_get_face(pango_font_get_hb_font(font));
+        hb_blob_t *os2 = hb_face_reference_table(face, HB_TAG('O','S','/','2'));
+        unsigned length;
+        const guint8 *data = (const guint8 *)hb_blob_get_data(os2, &length);
+        if (length >= 50) {
+            const guint32 bits = (guint32)data[46] << 24 | (guint32)data[47] << 16 |
+                (guint32)data[48] << 8 | data[49];
+            entry->cjk = (bits & ((1u << 17) | (1u << 24) | (1u << 27))) != 0;
+        }
+        hb_blob_destroy(os2);
+#endif
+        g_object_set_qdata_full(G_OBJECT(font), key, entry, g_free);
+    }
+    const OutlineFont result = *entry;
+    G_UNLOCK(outline_fonts);
+    return result;
+}
+
+// Caller holds index_lock for the lifetime of the returned cluster pointer.
+static const InkCluster *single_outline_cluster(RuneDesktopLine *line, int32_t owner) {
+    if (!line->cluster_index) line->cluster_index = index_clusters(line);
+    GArray *index = line->cluster_index;
+    guint lo = 0, hi = index->len;
+    while (lo < hi) {
+        guint mid = lo + (hi - lo) / 2;
+        if (g_array_index(index, InkCluster, mid).owner < owner) lo = mid + 1;
+        else hi = mid;
+    }
+    const InkCluster *c = lo < index->len ? &g_array_index(index, InkCluster, lo) : NULL;
+    const gboolean single = c && c->owner == owner && c->count == 1 &&
+        (lo + 1 == index->len || g_array_index(index, InkCluster, lo + 1).owner != owner);
+    return single ? c : NULL;
+}
+
+int32_t rune_desktop_line_outline_single(const RuneDesktopLine *source, int32_t owner,
+        uint64_t *font_id, uint32_t *glyph, float *pen_x, float *pen_y) {
+    if (!source || !source->layout || !font_id || !glyph || !pen_x || !pen_y) return 0;
+    RuneDesktopLine *line = (RuneDesktopLine *)source;
+    g_mutex_lock(&line->index_lock);
+    const InkCluster *c = single_outline_cluster(line, owner);
+    int result = 0;
+    if (c) {
+        const PangoGlyphInfo *info = &c->glyphs->glyphs[c->first];
+        const OutlineFont entry = outline_font(c->font);
+        *font_id = entry.id;
+        result = entry.cjk ? 3 : 1;
+        *glyph = info->glyph;
+        *pen_x = (c->x + info->geometry.x_offset) / (float)PANGO_SCALE;
+        *pen_y = (c->baseline + info->geometry.y_offset) / (float)PANGO_SCALE;
+    }
+    g_mutex_unlock(&line->index_lock);
+    return result;
+}
+
+int32_t rune_desktop_line_outline_regions(const RuneDesktopLine *source, RuneOutlineRegion emit, void *context) {
+    if (!source || !source->layout || !emit) return 0;
+    RuneDesktopLine *line = (RuneDesktopLine *)source;
+    g_mutex_lock(&line->index_lock);
+    if (!line->cluster_index) line->cluster_index = index_clusters(line);
+    GArray *index = line->cluster_index;
+    // Use the same bounds as extract_ink without allocating a separate raster view
+    // for every grapheme when a large line first animates.
+    for (guint i = 0; i < index->len;) {
+        const int owner = g_array_index(index, InkCluster, i).owner;
+        int left = G_MAXINT, top = G_MAXINT, right = G_MININT, bottom = G_MININT;
+        do {
+            const InkCluster *c = &g_array_index(index, InkCluster, i++);
+            PangoGlyphString glyphs = cluster_glyphs(c);
+            PangoRectangle b;
+            pango_glyph_string_extents(&glyphs, c->font, &b, NULL);
+            if (b.width > 0 && b.height > 0) {
+                b.x += c->x;
+                b.y += c->baseline;
+                pango_extents_to_pixels(&b, NULL);
+                left = MIN(left, b.x); top = MIN(top, b.y);
+                right = MAX(right, b.x + b.width); bottom = MAX(bottom, b.y + b.height);
+            }
+        } while (i < index->len && g_array_index(index, InkCluster, i).owner == owner);
+        if (left < right && top < bottom) emit(context, owner, left - 2, top - 2, right + 2, bottom + 2);
+    }
+    g_mutex_unlock(&line->index_lock);
+    return 1;
+}
+
+static gboolean emit_cairo_outline(cairo_t *cr, RuneOutlineEmit emit, void *context, gboolean empty_ok) {
+    cairo_path_t *path = cairo_copy_path(cr);
+    gboolean ok = path->status == CAIRO_STATUS_SUCCESS;
+    gboolean has_edges = FALSE;
+    for (int i = 0; ok && i < path->num_data;) {
+        const cairo_path_data_t *p = &path->data[i];
+        switch (p->header.type) {
+        case CAIRO_PATH_MOVE_TO:
+            emit(context, 0, p[1].point.x, p[1].point.y, 0, 0, 0, 0);
+            break;
+        case CAIRO_PATH_LINE_TO:
+            emit(context, 1, p[1].point.x, p[1].point.y, 0, 0, 0, 0);
+            has_edges = TRUE;
+            break;
+        case CAIRO_PATH_CURVE_TO:
+            emit(context, 3, p[1].point.x, p[1].point.y, p[2].point.x, p[2].point.y,
+                 p[3].point.x, p[3].point.y);
+            has_edges = TRUE;
+            break;
+        case CAIRO_PATH_CLOSE_PATH:
+            emit(context, 4, 0, 0, 0, 0, 0, 0);
+            break;
+        }
+        i += p->header.length;
+    }
+    cairo_path_destroy(path);
+    return ok && (has_edges || empty_ok);
+}
+
+int32_t rune_desktop_line_outline(const RuneDesktopLine *ink, RuneOutlineEmit emit, void *context) {
+    if (!ink || !ink->owned_clusters || !emit || ink->has_color) return 0;
+    if (!ink->owned_clusters->len) return 1;
+    cairo_surface_t *surface = cairo_recording_surface_create(CAIRO_CONTENT_ALPHA, NULL);
+    cairo_t *cr = cairo_create(surface);
+    for (guint i = 0; i < ink->owned_clusters->len; ++i) {
+        const InkCluster *c = &g_array_index(ink->owned_clusters, InkCluster, i);
+        PangoGlyphString glyphs = cluster_glyphs(c);
+        cairo_move_to(cr, c->x / (double)PANGO_SCALE, c->baseline / (double)PANGO_SCALE);
+        pango_cairo_glyph_string_path(cr, c->font, &glyphs);
+    }
+    const gboolean empty = ink->metrics.ink_width == 0 || ink->metrics.ink_height == 0;
+    const gboolean ok = emit_cairo_outline(cr, emit, context, empty);
+    cairo_destroy(cr);
+    cairo_surface_destroy(surface);
+    return ok;
+}
+
+int32_t rune_desktop_line_outline_unplaced(const RuneDesktopLine *source, int32_t owner,
+        RuneOutlineEmit emit, void *context) {
+    if (!source || !source->layout || !emit) return 0;
+    RuneDesktopLine *line = (RuneDesktopLine *)source;
+    PangoFont *font = NULL;
+    PangoGlyphInfo info;
+    g_mutex_lock(&line->index_lock);
+    const InkCluster *c = single_outline_cluster(line, owner);
+    if (c) {
+        info = c->glyphs->glyphs[c->first];
+#if PANGO_VERSION_CHECK(1, 50, 0)
+        if (!info.attr.is_color)
+#endif
+            font = g_object_ref(c->font);
+    }
+    g_mutex_unlock(&line->index_lock);
+    if (!font) return 0;
+
+    // Shaping already supplies the native glyph ID and its separately exposed pen.
+    // Export once at zero, even if later labels land at other fractional positions.
+    info.geometry.x_offset = info.geometry.y_offset = 0;
+    int cluster_byte = 0;
+    PangoGlyphString glyphs = {0};
+    glyphs.num_glyphs = 1;
+    glyphs.glyphs = &info;
+    glyphs.log_clusters = &cluster_byte;
+    cairo_surface_t *surface = cairo_recording_surface_create(CAIRO_CONTENT_ALPHA, NULL);
+    cairo_t *cr = cairo_create(surface);
+    cairo_move_to(cr, 0, 0);
+    pango_cairo_glyph_string_path(cr, font, &glyphs);
+    const gboolean ok = emit_cairo_outline(cr, emit, context, FALSE);
+    cairo_destroy(cr);
+    cairo_surface_destroy(surface);
+    g_object_unref(font);
+    return ok;
+}
+
+// Use the scaled face Pango selected for this real glyph. Cairo activates its
+// FreeType size, variation coordinates and transform before granting the lock.
+typedef struct {
+    RuneOutlineEmit emit;
+    void *context;
+    float x, y;
+    gboolean open;
+} FittedSink;
+
+static int fitted_move(const FT_Vector *p, void *user) {
+    FittedSink *s = user;
+    if (s->open) s->emit(s->context, 4, 0, 0, 0, 0, 0, 0);
+    s->emit(s->context, 0, s->x + p->x / 64.f, s->y - p->y / 64.f, 0, 0, 0, 0);
+    s->open = TRUE;
+    return 0;
+}
+static int fitted_line(const FT_Vector *p, void *user) {
+    FittedSink *s = user;
+    s->emit(s->context, 1, s->x + p->x / 64.f, s->y - p->y / 64.f, 0, 0, 0, 0);
+    return 0;
+}
+static int fitted_quad(const FT_Vector *c, const FT_Vector *p, void *user) {
+    FittedSink *s = user;
+    s->emit(s->context, 2, s->x + c->x / 64.f, s->y - c->y / 64.f,
+            s->x + p->x / 64.f, s->y - p->y / 64.f, 0, 0);
+    return 0;
+}
+static int fitted_cubic(const FT_Vector *a, const FT_Vector *b, const FT_Vector *p, void *user) {
+    FittedSink *s = user;
+    s->emit(s->context, 3, s->x + a->x / 64.f, s->y - a->y / 64.f,
+            s->x + b->x / 64.f, s->y - b->y / 64.f, s->x + p->x / 64.f, s->y - p->y / 64.f);
+    return 0;
+}
+
+static int fitted_glyph(PangoFont *font, PangoGlyph glyph, float ppem,
+        int look, float x, float y, RuneOutlineEmit emit, void *context) {
+    if (glyph == PANGO_GLYPH_EMPTY) return 1;
+    if ((glyph & PANGO_GLYPH_UNKNOWN_FLAG) || !PANGO_IS_CAIRO_FONT(font)) return 0;
+    cairo_scaled_font_t *scaled = pango_cairo_font_get_scaled_font(PANGO_CAIRO_FONT(font));
+    if (!scaled || cairo_scaled_font_get_type(scaled) != CAIRO_FONT_TYPE_FT) return 0;
+    cairo_font_face_t *cairo_face = cairo_scaled_font_get_font_face(scaled);
+    if (cairo_ft_font_face_get_synthesize(cairo_face)) return 0;
+    const gboolean cjk = outline_font(font).cjk;
+    FT_Face face = cairo_ft_scaled_font_lock_face(scaled);
+    if (!face) return 0;
+    int ok = 0;
+    if (FT_IS_SCALABLE(face) && !FT_HAS_COLOR(face)) {
+        FT_Int32 flags = FT_LOAD_NO_BITMAP;
+        if (look == RUNE_LINUX_HINT_AUTO) {
+            flags |= FT_LOAD_FORCE_AUTOHINT | FT_LOAD_TARGET_LIGHT;
+        } else if (cjk && ppem <= 24) {
+            flags |= FT_LOAD_NO_AUTOHINT | FT_LOAD_TARGET_MONO;
+        } else {
+            FT_ULong program = 0;
+            const int gasp = FT_Get_Gasp(face, (FT_UInt)lroundf(ppem));
+            const gboolean vertical = look == RUNE_LINUX_HINT_CHROMIUM &&
+                !FT_Load_Sfnt_Table(face, FT_MAKE_TAG('f','p','g','m'), 0, NULL, &program) && program &&
+                (gasp == FT_GASP_NO_TABLE || (gasp & (FT_GASP_DO_GRIDFIT | FT_GASP_SYMMETRIC_GRIDFIT)));
+            flags |= vertical ? FT_LOAD_NO_AUTOHINT | FT_LOAD_TARGET_NORMAL : FT_LOAD_NO_HINTING;
+        }
+        if (!FT_Load_Glyph(face, glyph, flags) && face->glyph->format == FT_GLYPH_FORMAT_OUTLINE) {
+            FittedSink sink = {emit, context, x, y, FALSE};
+            const FT_Outline_Funcs funcs = {fitted_move, fitted_line, fitted_quad, fitted_cubic, 0, 0};
+            ok = !FT_Outline_Decompose(&face->glyph->outline, &funcs, &sink);
+            if (sink.open) emit(context, 4, 0, 0, 0, 0, 0, 0);
+        }
+    }
+    cairo_ft_scaled_font_unlock_face(scaled);
+    return ok;
+}
+
+int32_t rune_linux_line_outline_fitted(const RuneDesktopLine *source, int32_t owner,
+        float ppem, int32_t look, RuneOutlineEmit emit, void *context) {
+    if (!source || !emit || !isfinite(ppem) || ppem <= 0 || look < 0 || look > RUNE_LINUX_HINT_AUTO) return 0;
+    if (owner >= 0) {
+        if (!source->layout) return 0;
+        RuneDesktopLine *line = (RuneDesktopLine *)source;
+        g_mutex_lock(&line->index_lock);
+        const InkCluster *c = single_outline_cluster(line, owner);
+        PangoFont *font = c ? g_object_ref(c->font) : NULL;
+        PangoGlyph glyph = c ? c->glyphs->glyphs[c->first].glyph : PANGO_GLYPH_EMPTY;
+        g_mutex_unlock(&line->index_lock);
+        if (!font) return 0;
+        const int result = fitted_glyph(font, glyph, ppem, look, 0, 0, emit, context);
+        g_object_unref(font);
+        return result;
+    }
+    if (!source->owned_clusters || source->has_color) return 0;
+    for (guint i = 0; i < source->owned_clusters->len; ++i) {
+        const InkCluster *c = &g_array_index(source->owned_clusters, InkCluster, i);
+        int pen = c->x;
+        for (int g = c->first; g < c->first + c->count; ++g) {
+            const PangoGlyphInfo *info = &c->glyphs->glyphs[g];
+            const float x = (pen + info->geometry.x_offset) / (float)PANGO_SCALE;
+            const float y = (c->baseline + info->geometry.y_offset) / (float)PANGO_SCALE;
+            if (!fitted_glyph(c->font, info->glyph, ppem, look, x, y, emit, context)) return 0;
+            pen += info->geometry.width;
+        }
+    }
+    return 1;
+}
+
+typedef struct { int valid; double values[5]; } AppleHintMetrics;
+
+static gboolean post_top(FT_Face face, const char *name, double *top) {
+    const FT_UInt gid = FT_Get_Name_Index(face, (FT_String *)name);
+    if (!gid || FT_Load_Glyph(face, gid, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP |
+            FT_LOAD_IGNORE_TRANSFORM) || face->glyph->format != FT_GLYPH_FORMAT_OUTLINE ||
+            face->glyph->outline.n_points <= 0) return FALSE;
+    FT_BBox bounds;
+    FT_Outline_Get_CBox(&face->glyph->outline, &bounds);
+    *top = bounds.yMax;
+    return TRUE;
+}
+
+int32_t rune_desktop_line_apple_hint_metrics(const RuneDesktopLine *source, int32_t owner, double metrics[5]) {
+    if (!source || !source->layout || !metrics || owner < 0) return 0;
+    RuneDesktopLine *line = (RuneDesktopLine *)source;
+    g_mutex_lock(&line->index_lock);
+    const InkCluster *c = single_outline_cluster(line, owner);
+    PangoFont *font = c ? g_object_ref(c->font) : NULL;
+    g_mutex_unlock(&line->index_lock);
+    if (!font) return 0;
+    const GQuark key = g_quark_from_static_string("rune-apple-outline-metrics");
+    G_LOCK(outline_fonts);
+    AppleHintMetrics *m = g_object_get_qdata(G_OBJECT(font), key);
+    if (!m) {
+        m = g_new0(AppleHintMetrics, 1);
+        cairo_scaled_font_t *scaled = PANGO_IS_CAIRO_FONT(font) ?
+            pango_cairo_font_get_scaled_font(PANGO_CAIRO_FONT(font)) : NULL;
+        if (scaled && cairo_scaled_font_get_type(scaled) == CAIRO_FONT_TYPE_FT &&
+                !cairo_ft_font_face_get_synthesize(cairo_scaled_font_get_font_face(scaled))) {
+            FT_Face face = cairo_ft_scaled_font_lock_face(scaled);
+            if (face) {
+                FT_ULong length = 0;
+                if (face->units_per_EM > 0 && FT_HAS_GLYPH_NAMES(face) &&
+                        !FT_Load_Sfnt_Table(face, FT_MAKE_TAG('g','l','y','f'), 0, NULL, &length) && length &&
+                        post_top(face, "o", &m->values[1]) && post_top(face, "X", &m->values[2])) {
+                    m->values[0] = face->units_per_EM;
+                    m->values[3] = face->bbox.yMax;
+                    const char *name = FT_Get_Postscript_Name(face);
+                    m->values[4] = name && !strncmp(name, ".SFNS", 5) ? 79 :
+                        (name && !strcmp(name, "Helvetica") ? 85 : 0);
+                    m->valid = 1;
+                }
+                cairo_ft_scaled_font_unlock_face(scaled);
+            }
+        }
+        g_object_set_qdata_full(G_OBJECT(font), key, m, g_free);
+    }
+    const int valid = m->valid;
+    if (valid) memcpy(metrics, m->values, sizeof(m->values));
+    G_UNLOCK(outline_fonts);
+    g_object_unref(font);
+    return valid;
+}
+
+RuneDesktopLine *rune_desktop_line_extract_ink(const RuneDesktopLine *source, int32_t start, int32_t end) {
+    if (!source || !source->layout || start < 0 || end < start || end > source->length) return NULL;
+    RuneDesktopLine *line = (RuneDesktopLine *)source;
+    g_mutex_lock(&line->index_lock);
+    if (!line->cluster_index) line->cluster_index = index_clusters(line);
+    GArray *index = line->cluster_index;
+    guint lo = 0, hi = index->len;
+    while (lo < hi) {
+        guint mid = lo + (hi - lo) / 2;
+        if (g_array_index(index, InkCluster, mid).owner < start) lo = mid + 1;
+        else hi = mid;
+    }
+    RuneDesktopLine *ink = g_new0(RuneDesktopLine, 1);
+    ink->metrics = line->metrics;
+    ink->owned_clusters = g_array_new(FALSE, FALSE, sizeof(InkCluster));
+    ink->indexed_runs = g_ptr_array_ref(line->indexed_runs);
+    int left = G_MAXINT, top = G_MAXINT, right = G_MININT, bottom = G_MININT;
+    for (; lo < index->len; ++lo) {
+        InkCluster c = g_array_index(index, InkCluster, lo);
+        if (c.owner >= end) break;
+        g_array_append_val(ink->owned_clusters, c);
+        PangoGlyphString glyphs = cluster_glyphs(&c);
+#if PANGO_VERSION_CHECK(1, 50, 0)
+        for (int i = 0; i < c.count; ++i) ink->has_color |= glyphs.glyphs[i].attr.is_color;
+#endif
+        PangoRectangle bounds;
+        pango_glyph_string_extents(&glyphs, c.font, &bounds, NULL);
+        if (bounds.width <= 0 || bounds.height <= 0) continue;
+        bounds.x += c.x;
+        bounds.y += c.baseline;
+        pango_extents_to_pixels(&bounds, NULL);
+        left = MIN(left, bounds.x);
+        top = MIN(top, bounds.y);
+        right = MAX(right, bounds.x + bounds.width);
+        bottom = MAX(bottom, bounds.y + bounds.height);
+    }
+    // A grapheme may span several visually reordered clusters or fallback fonts.
+    if (ink->owned_clusters->len > 1) g_array_sort(ink->owned_clusters, visual_order);
+    // Match the antialiasing guard used by measure_line.
+    ink->metrics.ink_x = left < right ? left - 2 : 0;
+    ink->metrics.ink_y = top < bottom ? top - 2 : 0;
+    ink->metrics.ink_width = left < right ? right - left + 4 : 0;
+    ink->metrics.ink_height = top < bottom ? bottom - top + 4 : 0;
+    g_mutex_unlock(&line->index_lock);
+    return ink;
+}
+
+static void paint_glyphs(cairo_t *cr, PangoFont *font, PangoGlyphString *glyphs,
+                         int pen, int baseline, gboolean color) {
+    for (int first = 0; first < glyphs->num_glyphs;) {
+        int end = glyphs->num_glyphs, advance = 0;
+        gboolean is_color = FALSE;
+#if PANGO_VERSION_CHECK(1, 50, 0)
+        is_color = glyphs->glyphs[first].attr.is_color;
+        end = first;
+        do { advance += glyphs->glyphs[end++].geometry.width; }
+        while (end < glyphs->num_glyphs && glyphs->glyphs[end].attr.is_color == is_color);
+#endif
+        if (is_color == color) {
+            PangoGlyphString slice = *glyphs;
+            slice.num_glyphs = end - first;
+            slice.glyphs += first;
+            slice.log_clusters += first;
+            cairo_move_to(cr, pen / (double)PANGO_SCALE, baseline / (double)PANGO_SCALE);
+            pango_cairo_show_glyph_string(cr, font, &slice);
+        }
+        pen += advance;
+        first = end;
+    }
+}
+
 static void paint_glyph_plane(cairo_t *cr, const RuneDesktopLine *line, gboolean color) {
+    if (line->owned_clusters) {
+        for (guint i = 0; i < line->owned_clusters->len; ++i) {
+            const InkCluster *c = &g_array_index(line->owned_clusters, InkCluster, i);
+            PangoGlyphString glyphs = cluster_glyphs(c);
+            paint_glyphs(cr, c->font, &glyphs, c->x, c->baseline, color);
+        }
+        return;
+    }
     if (!line->has_color) {
         if (!color) {
             cairo_move_to(cr, 0, 0);
@@ -352,29 +852,8 @@ static void paint_glyph_plane(cairo_t *cr, const RuneDesktopLine *line, gboolean
         if (!run) continue;
         PangoRectangle logical;
         pango_layout_iter_get_run_extents(iter, NULL, &logical);
-        const int baseline = pango_layout_iter_get_run_baseline(iter);
-        int pen = logical.x;
-        const PangoGlyphString *glyphs = run->glyphs;
-        // A fallback run can contain both palette glyphs and tintable outlines.
-        // Keep each slice's shaped offsets and advance across the other plane's ink.
-        for (int first = 0; first < glyphs->num_glyphs;) {
-            const gboolean is_color = glyphs->glyphs[first].attr.is_color;
-            int end = first, advance = 0;
-            do {
-                advance += glyphs->glyphs[end].geometry.width;
-                ++end;
-            } while (end < glyphs->num_glyphs && glyphs->glyphs[end].attr.is_color == is_color);
-            if (is_color == color) {
-                PangoGlyphString slice = *glyphs;
-                slice.num_glyphs = end - first;
-                slice.glyphs += first;
-                slice.log_clusters += first;
-                cairo_move_to(cr, pen / (double)PANGO_SCALE, baseline / (double)PANGO_SCALE);
-                pango_cairo_show_glyph_string(cr, run->item->analysis.font, &slice);
-            }
-            pen += advance;
-            first = end;
-        }
+        paint_glyphs(cr, run->item->analysis.font, run->glyphs, logical.x,
+                     pango_layout_iter_get_run_baseline(iter), color);
     } while (pango_layout_iter_next_run(iter));
     pango_layout_iter_free(iter);
 #endif

@@ -47,11 +47,11 @@ public enum ImageZoomMath {
     public static let step: Float = Float(2.0).squareRoot()
 
     public static func maxScale(fitRatio: Float) -> Float {
-        max(maxNaturalZoom / max(fitRatio, 0.0001), 1.0)
+        max(1.0, maxNaturalZoom / fitRatio)
     }
 
     public static func detailScale(fitRatio: Float) -> Float {
-        let actual = 1.0 / max(fitRatio, 0.0001)
+        let actual = 1.0 / fitRatio
         return actual >= 1.5 ? actual : 2.0
     }
 
@@ -60,7 +60,7 @@ public enum ImageZoomMath {
     }
 
     public static func clampAxis(offset: Float, size: Float, viewport: Float) -> Float {
-        let limit = max((size - viewport) / 2.0, 0.0)
+        let limit = max(0.0, (size - viewport) / 2.0)
         return offset.clamped(to: -limit...limit) + 0.0
     }
 
@@ -78,8 +78,8 @@ public enum ImageZoomMath {
         anchor: Vec2,
         bounds: ZoomBounds
     ) -> ZoomView {
-        let next = scale.clamped(to: 1.0...max(bounds.maxScale, 1.0))
-        let ratio = next / max(view.scale, 0.0001)
+        let next = scale.clamped(to: 1.0...max(1.0, bounds.maxScale))
+        let ratio = next / view.scale
         return clampView(
             ZoomView(
                 scale: next,
@@ -342,7 +342,9 @@ public struct ImageZoomState: Sendable, Equatable {
 
     /// Zoom as a whole percentage of the image's natural size (`image_zoom::ImageZoom::level`).
     public var level: UInt32 {
-        UInt32((currentView.scale * max(fitRatio, Float.leastNormalMagnitude) * 100.0).rounded())
+        let percent = (currentView.scale * max(Float.ulpOfOne, fitRatio) * 100).rounded()
+        guard percent > 0 else { return 0 }
+        return percent >= Float(UInt32.max) ? .max : UInt32(percent)
     }
 
     public var isZoomed: Bool { view.scale > 1.0 }
@@ -1100,8 +1102,8 @@ public struct StageZoom: Sendable, Equatable {
     }
 
     public var isZoomed: Bool { zoom > 1.0 }
-    public func minZoom() -> Float { min(0.25, 1.0 / max(fit, Float.leastNormalMagnitude)) }
-    public func maxZoom() -> Float { max(8.0, 1.0 / max(fit, Float.leastNormalMagnitude)) }
+    public func minZoom() -> Float { min(0.25, 1.0 / fit) }
+    public func maxZoom() -> Float { max(8.0, 1.0 / fit) }
 
     private func bound(_ offset: Float, naturalAxis: Float) -> Float {
         let limit = max(naturalAxis * fit * (zoom - 1.0) * 0.5, 0.0)
@@ -1125,7 +1127,7 @@ public struct StageZoom: Sendable, Equatable {
 
     public mutating func zoomAt(_ nextZoom: Float, at: Vec2, tx: inout Tx) {
         let next = min(max(nextZoom, minZoom()), maxZoom())
-        let ratio = next / max(zoom, Float.leastNormalMagnitude)
+        let ratio = next / zoom
         let ax = at.x - size.x * 0.5
         let ay = at.y - size.y * 0.5
         setZoom(next, pan: Vec2(ax - (ax - pan.x) * ratio, ay - (ay - pan.y) * ratio), tx: &tx)
@@ -1243,7 +1245,7 @@ public struct Stage<State> {
                         s[keyPath: kp].reset(tx: &tx)
                     } else {
                         let fit = s[keyPath: kp].fit
-                        s[keyPath: kp].zoomAt(1.0 / max(fit, Float.leastNormalMagnitude), at: at, tx: &tx)
+                        s[keyPath: kp].zoomAt(1.0 / fit, at: at, tx: &tx)
                     }
                 }
             }

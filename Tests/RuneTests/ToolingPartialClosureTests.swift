@@ -1213,7 +1213,9 @@ struct ToolingPartialClosureTests {
                 source.push((seq: k + 1, atNs: atNs))
             }
             try trace.finish()
-            return try String(contentsOf: path, encoding: .utf8)
+            let text = try String(contentsOf: path, encoding: .utf8)
+            #expect(trace.presentSummary == TracePresentSummary.ofTrace(text))
+            return text
         }
 
         let plain = try runTrace(name: "plain", timed: false)

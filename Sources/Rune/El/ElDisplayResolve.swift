@@ -96,7 +96,8 @@ internal struct ElResolvedText {
         pixelScale: Float,
         emitGlyphs: Bool,
         glidePx: Vec2 = .zero,
-        bypassCache: Bool? = nil
+        bypassCache: Bool? = nil,
+        rasterWindow: TextRasterWindow? = nil
     ) -> ShapedText {
         if bypassCache != true,
            let box = textSystem.preparedOverflowLayout(self, width: maxWidth, scale: pixelScale) {
@@ -118,6 +119,12 @@ internal struct ElResolvedText {
         } else if effectiveStyle.wrap == .noWrap && effectiveStyle.maxLines == 0 {
             shapeMaxW = nil
             effectivePretty = false
+        }
+        if let rasterWindow, emitGlyphs, !(bypassCache ?? isSecure) {
+            return textSystem.layoutKeyed(text: displayedText, spans: spans, pills: pills,
+                                          style: effectiveStyle, maxWidth: shapeMaxW, pixelScale: pixelScale,
+                                          emitGlyphs: true, glidePx: glidePx, pretty: effectivePretty,
+                                          rasterWindow: rasterWindow).shaped
         }
         return textSystem.shape(
             text: displayedText,
@@ -180,6 +187,7 @@ internal enum ElDisplayResolver {
 
     static func preResolveInputPills<State>(el: inout El<State>, edit inputEdit: TextEdit) {
         var edit = inputEdit
+        edit.applyFieldLineMode(singleLine: el.fieldSingleLine)
         if el.isSecure {
             edit.isSecure = true
             if el.isRevealed { edit.isRevealed = true }
@@ -219,12 +227,13 @@ internal enum ElDisplayResolver {
         fallbackDirection: TextFlow? = nil
     ) -> ElResolvedInput {
         var edit = inputEdit
+        edit.applyFieldLineMode(singleLine: el.fieldSingleLine)
         if el.isSecure {
             edit.isSecure = true
             if let rev = el.revealedOverride { edit.isRevealed = rev }
         }
         let richStyle = el.richStyleSpec ?? RichStyle()
-        let isSingle = el.isSingleLineInput
+        let isSingle = !edit.multiline
         var inputStyle = el.textStyle
         inputStyle.maxLines = 0
         if inputStyle.wrap == .ellipsis {

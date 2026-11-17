@@ -1,9 +1,7 @@
 import Foundation
 
-#if os(Linux)
-import Glibc
-#elseif canImport(Darwin)
-import Darwin
+#if os(Windows)
+import CRuneWin32
 #endif
 
 /// Platform adapter for incoming OS get-URL events (`open_url::Glue`).
@@ -57,6 +55,20 @@ public final class IncomingURLInbox: @unchecked Sendable {
 
     /// Shared process inbox.
     public static let shared = IncomingURLInbox()
+
+    /// Begins another desktop event loop while preserving links buffered for its first window.
+    func beginWindowGroup() {
+        lock.withLock {
+            switch funnel {
+            case .closed:
+                funnel = .unprepared(kept: [])
+            case .listening(let listeners) where listeners.isEmpty:
+                funnel = .unprepared(kept: [])
+            default:
+                break
+            }
+        }
+    }
 
     /// Before the event loop starts: installs `glue` and buffers links until a window listens,
     /// unless something else already handles URLs (`handledElsewhere()`).
@@ -199,8 +211,6 @@ public enum SingleInstance {
     public static let maxMessageBytes: Int = 1 << 20
 
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var claimedSocketPath: String? = nil
-    nonisolated(unsafe) private static var listeningFD: Int32 = -1
     nonisolated(unsafe) private static var relaunchHandler: (@Sendable () -> Bool)? = nil
 
     /// Returns true if `arg` looks like a `scheme://...` link (scheme >= 2 chars, starting with ASCII letter).
@@ -221,13 +231,14 @@ public enum SingleInstance {
         return args.filter(isLink(_:))
     }
 
-    /// Encodes `arguments` in the upstream `rune-instance 2\0` frame format (`magic + u32_le(len) + nul-joined`).
+    /// Encodes the upstream frame. An oversized argument list cannot be handed off.
     public static func encodeHandoffMessage(arguments: [String]) -> [UInt8] {
         let body = Array(arguments.joined(separator: "\0").utf8)
-        let len = UInt32(min(body.count, maxMessageBytes)).littleEndian
+        guard body.count <= maxMessageBytes else { return [] }
+        let len = UInt32(body.count).littleEndian
         var msg = magicPrefix
         withUnsafeBytes(of: len) { msg.append(contentsOf: $0) }
-        msg.append(contentsOf: body.prefix(maxMessageBytes))
+        msg.append(contentsOf: body)
         return msg
     }
 
@@ -267,29 +278,42 @@ public enum SingleInstance {
 
     /// Handles arguments forwarded from a secondary launch.
     public static func handleForwardedArguments(_ args: [String]) {
+        #if os(Windows) || os(Linux)
+        InstanceLaunches.shared.receive(args, deliver: deliverForwardedArguments)
+        #else
+        _ = deliverForwardedArguments(args)
+        #endif
+    }
+
+    private static func deliverForwardedArguments(_ args: [String]) -> Bool {
         let links = args.filter(isLink(_:))
         if links.isEmpty {
             lock.lock()
             let fn = relaunchHandler
             lock.unlock()
-            _ = fn?()
+            return fn?() ?? false
         } else {
             for link in links {
                 IncomingURLInbox.shared.receive(link)
             }
+            return true
         }
     }
 
     /// Claims the app's single-instance slot (`id`).
     ///
     /// On macOS/iOS, the OS maintains single-process URL/reopen delivery, so this returns `true`.
-    /// On Linux, claims a Unix domain socket under `$XDG_RUNTIME_DIR` (or `baseDirectory` when provided).
+    /// Linux uses a Unix socket in `$XDG_RUNTIME_DIR` or `baseDirectory`. Windows uses a
+    /// named pipe scoped to the current user and logon session.
     public static func claim(
         id: String,
         arguments: [String]? = nil,
         baseDirectory: String? = nil,
         forceUnixSocket: Bool = false
     ) -> Bool {
+        #if os(Windows) || os(Linux)
+        RelaunchController.waitForPrevious()
+        #endif
         #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
         if !forceUnixSocket {
             return true
@@ -297,211 +321,40 @@ public enum SingleInstance {
         #endif
 
         #if os(Linux) || os(macOS)
-        return claimUnixSocket(
+        return UnixInstance.claim(
             id: id,
             arguments: arguments ?? Array(CommandLine.arguments.dropFirst()),
             baseDirectory: baseDirectory
         )
+        #elseif os(Windows)
+        let packet = encodeHandoffMessage(arguments: arguments ?? Array(CommandLine.arguments.dropFirst()))
+        // The native name keeps 256 Unicode scalars including its session and SID prefix.
+        return Array(id.utf16.prefix(512)).withUnsafeBufferPointer { name in
+            packet.withUnsafeBufferPointer { bytes in
+                rune_win_instance_claim(
+                    name.baseAddress, name.count, bytes.baseAddress, UInt32(bytes.count),
+                    RelaunchController.handedFrom ?? 0,
+                    { QuitLifecycle.isQuitting || InstanceLaunches.shared.loopExited ? 1 : 0 },
+                    { body, count in
+                        let data = UnsafeBufferPointer(start: body, count: Int(count))
+                        guard let text = String(bytes: data, encoding: .utf8) else { return }
+                        SingleInstance.handleForwardedArguments(text.split(separator: "\0").map(String.init))
+                    }
+                ) != 0
+            }
+        }
         #else
         return true
         #endif
     }
 
-    /// Releases any claimed single-instance Unix socket and lock file (`release_instance`).
+    /// Releases the process's claimed socket or named pipe (`release_instance`).
     public static func release() {
         #if os(Linux) || os(macOS)
-        lock.lock()
-        let listenFD = listeningFD
-        let sockPath = claimedSocketPath
-        listeningFD = -1
-        claimedSocketPath = nil
-        lock.unlock()
-
-        if listenFD >= 0 {
-            _ = close(listenFD)
-        }
-        if let sockPath {
-            unlink(sockPath)
-            unlink(sockPath + ".lock")
-        }
+        UnixInstance.release()
+        #elseif os(Windows)
+        rune_win_instance_release()
         #endif
     }
 
-    #if os(Linux) || os(macOS)
-    private static func socketDirectory(override: String?) -> String {
-        if let override, !override.isEmpty {
-            return override
-        }
-        if let xdg = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"], !xdg.isEmpty {
-            return xdg
-        }
-        return NSTemporaryDirectory()
-    }
-
-    private static func sanitizedID(_ id: String) -> String {
-        String(id.map { ch in
-            (ch.isASCII && (ch.isLetter || ch.isNumber || ch == "." || ch == "-" || ch == "_")) ? ch : "_"
-        })
-    }
-
-    private static func claimUnixSocket(id: String, arguments: [String], baseDirectory: String?) -> Bool {
-        let dir = socketDirectory(override: baseDirectory)
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        let sockPath = (dir as NSString).appendingPathComponent("rune-instance-\(sanitizedID(id)).sock")
-        let lockPath = sockPath + ".lock"
-
-        let lfd = open(lockPath, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-        if lfd >= 0 {
-            _ = flock(lfd, LOCK_EX)
-        }
-        defer {
-            if lfd >= 0 {
-                _ = flock(lfd, LOCK_UN)
-                _ = close(lfd)
-            }
-        }
-
-        // First try connecting to an existing active listener.
-        if tryForwardToExisting(socketPath: sockPath, arguments: arguments) {
-            return false
-        }
-
-        // Clean stale socket if left behind by a crashed process.
-        unlink(sockPath)
-
-        #if os(Linux)
-        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
-        #else
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        #endif
-        guard fd >= 0 else { return true }
-
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let maxPathLen = MemoryLayout.size(ofValue: addr.sun_path)
-        let pathBytes = Array(sockPath.utf8)
-        guard pathBytes.count < maxPathLen else {
-            _ = close(fd)
-            return true
-        }
-        withUnsafeMutableBytes(of: &addr.sun_path) { buf in
-            buf.initializeMemory(as: UInt8.self, repeating: 0)
-            for (i, b) in pathBytes.enumerated() {
-                buf[i] = b
-            }
-        }
-
-        let bindRes = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                bind(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard bindRes == 0, listen(fd, 16) == 0 else {
-            _ = close(fd)
-            return true
-        }
-
-        lock.lock()
-        claimedSocketPath = sockPath
-        listeningFD = fd
-        lock.unlock()
-
-        Thread.detachNewThread {
-            acceptLoop(listenFD: fd)
-        }
-        return true
-    }
-
-    private static func tryForwardToExisting(socketPath: String, arguments: [String]) -> Bool {
-        #if os(Linux)
-        let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
-        #else
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        #endif
-        guard fd >= 0 else { return false }
-        defer { _ = close(fd) }
-
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let maxPathLen = MemoryLayout.size(ofValue: addr.sun_path)
-        let pathBytes = Array(socketPath.utf8)
-        guard pathBytes.count < maxPathLen else { return false }
-        withUnsafeMutableBytes(of: &addr.sun_path) { buf in
-            buf.initializeMemory(as: UInt8.self, repeating: 0)
-            for (i, b) in pathBytes.enumerated() {
-                buf[i] = b
-            }
-        }
-
-        let connRes = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard connRes == 0 else { return false }
-
-        let payload = encodeHandoffMessage(arguments: arguments)
-        let wrote = payload.withUnsafeBytes { raw -> Bool in
-            guard let base = raw.baseAddress else { return false }
-            var offset = 0
-            while offset < payload.count {
-                let n = send(fd, base.advanced(by: offset), payload.count - offset, 0)
-                if n <= 0 { return false }
-                offset += n
-            }
-            return true
-        }
-        guard wrote else { return false }
-
-        var tv = timeval(tv_sec: 0, tv_usec: 100_000)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        var ack: UInt8 = 0
-        let got = recv(fd, &ack, 1, 0)
-        return got == 1 && ack == acceptedByte
-    }
-
-    private static func acceptLoop(listenFD: Int32) {
-        while true {
-            var clientAddr = sockaddr()
-            var clientLen = socklen_t(MemoryLayout<sockaddr>.size)
-            let client = accept(listenFD, &clientAddr, &clientLen)
-            if client < 0 {
-                if errno == EINTR { continue }
-                break
-            }
-            readAndDispatch(clientFD: client)
-            _ = close(client)
-        }
-    }
-
-    private static func readAndDispatch(clientFD: Int32) {
-        func readExact(_ count: Int) -> [UInt8]? {
-            var buf = [UInt8](repeating: 0, count: count)
-            var offset = 0
-            while offset < count {
-                let n = buf.withUnsafeMutableBytes { raw in
-                    recv(clientFD, raw.baseAddress!.advanced(by: offset), count - offset, 0)
-                }
-                if n <= 0 { return nil }
-                offset += n
-            }
-            return buf
-        }
-
-        guard let header = readExact(magicPrefix.count), header == magicPrefix else { return }
-        guard let lenBytes = readExact(4) else { return }
-        let bodyLen = Int(
-            UInt32(lenBytes[0])
-                | (UInt32(lenBytes[1]) << 8)
-                | (UInt32(lenBytes[2]) << 16)
-                | (UInt32(lenBytes[3]) << 24)
-        )
-        guard bodyLen <= maxMessageBytes else { return }
-        let body = bodyLen > 0 ? (readExact(bodyLen) ?? []) : []
-        let args = decodeHandoffArguments(body) ?? []
-        var ack = acceptedByte
-        _ = send(clientFD, &ack, 1, 0)
-        handleForwardedArguments(args)
-    }
-    #endif
 }

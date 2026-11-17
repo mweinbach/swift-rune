@@ -23,7 +23,7 @@ public struct AppImeState: Sendable {
             composition = pre.text.isEmpty ? .idle : .composing(pre.text)
         case .commit:
             composition = .idle
-        case .enabled, .disabled, .cancel, .deleteSurrounding:
+        case .enabled, .disabled, .select, .cancel, .deleteSurrounding:
             break
         }
     }
@@ -65,7 +65,7 @@ extension Runtime {
             switch event {
             case .preedit(let pre): return !pre.text.isEmpty
             case .commit(let s): return !s.isEmpty
-            case .enabled, .disabled, .cancel, .deleteSurrounding: return false
+            case .enabled, .disabled, .select, .cancel, .deleteSurrounding: return false
             }
         }()
         let appOnly: Bool = {
@@ -86,6 +86,8 @@ extension Runtime {
             ran = applyImeToFocusedField(.preedit(pre.text, cursorUTF8: pre.cursorUTF8, clauses: pre.clauses), at: t)
         case .commit(let s):
             ran = applyImeToFocusedField(.commit(s), at: t)
+        case .select(let range):
+            ran = applyImeToFocusedField(.select(range), at: t)
         case .cancel:
             ran = applyImeToFocusedField(.preedit("", cursorUTF8: nil, clauses: []), at: t)
         case .deleteSurrounding:

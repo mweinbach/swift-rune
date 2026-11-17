@@ -1,5 +1,6 @@
 import Foundation
 import Rune
+import RuneMotion
 import Testing
 
 @Suite("Desktop window groups")
@@ -18,6 +19,41 @@ struct DesktopWindowGroupTests {
         var completed = false
         var placement: WindowPlacement?
         var clickThroughError: String?
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["RUNE_TEST_NATIVE_WINDOWS"] == "1"))
+    @MainActor func programmaticResizePreservesContentMotionInTheNativeWindow() throws {
+        let app = App(title: "Rune resize motion", size: Vec2(300, 220), state: false) { grown, _ in
+            col().sizeFull()
+                .child(el().key("box").size(50, grown ? 160 : 40).bg(.white)
+                    .animateLayout(Spring.smooth(duration: 5)))
+        }.windowOptions(WindowOptions(minSize: Vec2(150, 120), maxSize: Vec2(360, 280), borderless: true))
+        let appHandle = app.handle()
+        var window: WindowHandle?
+        var requestedFromTx = false
+        var resizedHeights: [Float] = []
+        let spec = AppWindowSpec.fromApp("resize", app).onReady { handle in
+            window = handle
+            appHandle.update { grown, _ in grown = true }
+        }.onFrameDrawn { runtime in
+            guard let height = runtime.element(byKey: "box")?.rect[3], let window else { return }
+            if !requestedFromTx && height > 40 {
+                requestedFromTx = true
+                appHandle.update { _, tx in tx.resizeWindow((480, 320)) }
+            } else if requestedFromTx && resizedHeights.isEmpty && runtime.viewport == Vec2(360, 280) {
+                resizedHeights.append(height)
+                window.resize((340, 260))
+            } else if resizedHeights.count == 1 && runtime.viewport == Vec2(340, 260) {
+                resizedHeights.append(height)
+                appHandle.quit()
+            }
+        }
+        let watchdog = DispatchWorkItem { appHandle.quit() }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 15, execute: watchdog)
+        defer { watchdog.cancel() }
+        try RuneMultiWindow.runWindows([spec.boxed()], arguments: [])
+        #expect(resizedHeights.count == 2)
+        #expect(resizedHeights.allSatisfy { $0 > 40 && $0 < 160 })
     }
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["RUNE_TEST_NATIVE_WINDOWS"] == "1"))
@@ -66,6 +102,27 @@ struct DesktopWindowGroupTests {
         #expect(background.display?.0.0 == placement.display?.0.0)
     }
 
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["RUNE_TEST_NATIVE_WINDOWS"] == "1"))
+    @MainActor func startupLinksReachTheFirstWindowThatListens() throws {
+        let app = App(title: "Rune main", size: Vec2(120, 80), state: 0) { _, _ in el().sizeFull() }
+        let receiver = AppWindowSpec(key: "links", app: AppSpec(size: Vec2(120, 80), state: 0) { _, _ in
+            el().sizeFull()
+        })
+        let links = ["rune-check://first", "rune-check://second"]
+        var received: [String] = []
+        let listener = receiver.onOpenUrl { _, url, tx in
+            received.append(url)
+            if url == links.last { tx.quit() }
+        }
+        let (group, _) = AppWindowSpec.fromApp("main", app).window(listener)
+        let control = app.handle()
+        let timeout = DispatchWorkItem { control.quit() }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 15, execute: timeout)
+        defer { timeout.cancel() }
+        try RuneMultiWindow.runWindows([group.boxed()], arguments: links)
+        #expect(received == links)
+    }
+
     // This test needs a window server and owns the process-wide event queue.
     @Test(.enabled(if: ProcessInfo.processInfo.environment["RUNE_TEST_NATIVE_WINDOWS"] == "1"))
     @MainActor func staticAndDynamicWindowsPresentOnOneNativeLoop() throws {
@@ -73,9 +130,15 @@ struct DesktopWindowGroupTests {
         let forwarded = "rune-test://notification/forwarded"
         var received: [String] = []
         var secondaryLinks: [String] = []
+        var reopened: [String] = []
         let primary = App(title: "Rune Group Primary", size: Vec2(160, 100), state: 0) { _, _ in
             el().sizeFull().bg(Color(r: 1, g: 0, b: 0, a: 1))
-        }.onOpenUrl { _, url, _ in received.append(url) }
+        }.onOpenUrl { _, url, _ in received.append(url) }.onReopen { _, visible, tx in
+            #expect(visible)
+            reopened.append("primary")
+            tx.quit()
+            return true
+        }
         let appHandle = primary.handle()
         var ready = Set<String>()
         var reusedHandle = false
@@ -83,13 +146,15 @@ struct DesktopWindowGroupTests {
             ready.insert(handle.key)
             if ready.count == 3 {
                 SingleInstance.handleForwardedArguments([forwarded])
-                // Process the forwarded hook before quitting the shared event loop.
-                appHandle.update { _, _ in appHandle.quit() }
+                appHandle.update { _, _ in SingleInstance.handleForwardedArguments([]) }
             }
         }
         let dynamic = AppWindowSpec(key: "dynamic", app: AppSpec(size: Vec2(120, 80), state: 1) { _, _ in
             el().sizeFull().bg(Color(r: 0, g: 0, b: 1, a: 1))
-        }).onOpenUrl { _, url, _ in secondaryLinks.append(url) }.onReady(presented)
+        }).onOpenUrl { _, url, _ in secondaryLinks.append(url) }.onReopen { _, _, _ in
+            reopened.append("dynamic")
+            return false
+        }.onReady(presented)
         let main = AppWindowSpec.fromApp("primary", primary).onReady { handle in
             presented(handle)
             let first = RuneMultiWindow.openWindow(dynamic)
@@ -97,7 +162,10 @@ struct DesktopWindowGroupTests {
         }
         let child = AppWindowSpec(key: "inspector", app: AppSpec(size: Vec2(160, 80), state: "inspector") { _, _ in
             el().sizeFull().bg(Color(r: 0, g: 1, b: 0, a: 1))
-        }).onOpenUrl { _, url, _ in secondaryLinks.append(url) }.onReady(presented)
+        }).onOpenUrl { _, url, _ in secondaryLinks.append(url) }.onReopen { _, _, _ in
+            reopened.append("inspector")
+            return false
+        }.onReady(presented)
         let (root, handle) = main.window(child)
         // Also exercise an external handle which posted a request before native initialization.
         handle.setTitle("Rune Group Inspector")
@@ -113,6 +181,7 @@ struct DesktopWindowGroupTests {
         #expect(!handle.isReady)
         #expect(received == cold + [forwarded])
         #expect(secondaryLinks.isEmpty)
+        #expect(reopened == ["primary", "inspector", "dynamic"])
     }
     #endif
 }

@@ -24,7 +24,8 @@ enum LinuxWaylandFileDrops {
             }
             if !paths.isEmpty {
                 let files = paths.map { DroppedFile(url: $0) }
-                accepted = runtime.receiveFileDrop(.dropped(files, at: Vec2(x, y)), at: now)
+                let point = runtime.inputPoint(fromWindow: Vec2(x, y))
+                accepted = runtime.receiveFileDrop(.dropped(files, at: point), at: now)
             }
         }
     }

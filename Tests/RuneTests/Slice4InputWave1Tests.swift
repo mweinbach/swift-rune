@@ -4,6 +4,41 @@ import Testing
 
 @Suite("Slice 4 Input Wave 1 Parity Tests (PressRun, KeyReleases, ModifierKeys, AppIme)")
 struct Slice4InputWave1Tests {
+    @Test("IME reconversion routes a UTF-8 range to the custom editor or the focused field")
+    @MainActor
+    func imeReconversionRoutesToOwningEditor() throws {
+        struct Editor {
+            var field = TextEdit("A日本B")
+            var events: [Ime] = []
+        }
+        let runtime = Runtime(state: Editor(), viewport: Vec2(200, 100)) { _, _ in
+            col().child(el().key("caret").size(2, 20).imeCursor())
+                .child(textInput(key: "field", \Editor.field).size(160, 24))
+        }
+        runtime.onIme = { state, event, _ in state.events.append(event); return true }
+        _ = runtime.frame(at: 0)
+
+        let range = 1..<7
+        #expect(runtime.dispatchImeEvent(.select(range), at: 0.01))
+        #expect(runtime.state.events == [.select(range)])
+        #expect(runtime.dispatchImeEvent(.preedit("にほん", cursorUTF8: nil, clauses: []), at: 0.02))
+        #expect(runtime.dispatchImeEvent(.commit("日本"), at: 0.03))
+        #expect(runtime.state.events == [.select(range), .preedit(ImePreedit(text: "にほん")), .commit("日本")])
+
+        runtime.update(at: 0.04) { _, tx in tx.focus("field") }
+        _ = runtime.frame(at: 0.04)
+        let eventsBeforeFieldSelection = runtime.state.events
+        #expect(runtime.dispatchImeEvent(.select(range), at: 0.05))
+        #expect(runtime.state.field.selectedText == "日本")
+        #expect(runtime.state.events == eventsBeforeFieldSelection)
+        let script = try HeadlessRunner.parseScript(jsonData: Data(#"[{"t":0,"type":"ime","select":[1,4]}]"#.utf8))
+        let step = try #require(script.first)
+        #expect(step.action == .ime(.select(1..<4)))
+        if case .ime(let selection) = step.action {
+            #expect(runtime.ime(selection, at: 0.06))
+            #expect(runtime.state.field.selectedText == "日")
+        }
+    }
 
     // MARK: - PressRun (`press_run_tests.rs`)
 
@@ -626,6 +661,7 @@ struct Slice4InputWave1Tests {
                 case .disabled: s.log.append("Disabled")
                 case .preedit(let p): s.log.append("Preedit(\(p.text))")
                 case .commit(let t): s.log.append("Commit(\(t))")
+                case .select(let range): s.log.append("Select(\(range))")
                 case .cancel: s.log.append("Cancel")
                 case .deleteSurrounding: s.log.append("DeleteSurrounding")
                 }
@@ -700,6 +736,7 @@ struct Slice4InputWave1Tests {
                 switch ev {
                 case .preedit(let p): s.log.append("Preedit(\(p.text))")
                 case .commit(let t): s.log.append("Commit(\(t))")
+                case .select(let range): s.log.append("Select(\(range))")
                 case .enabled: s.log.append("Enabled")
                 case .disabled: s.log.append("Disabled")
                 case .cancel: s.log.append("Cancel")

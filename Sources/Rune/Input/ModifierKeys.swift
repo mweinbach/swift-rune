@@ -242,6 +242,8 @@ extension Runtime {
         at now: Double = 0
     ) -> Bool {
         currentTime = now
+        if case .key(_, _, true, _) = event, slice2State.autoscroll.key() { return true }
+        if case .focusLost = event { slice2State.autoscroll.cancel() }
         if case .focusLost = event, flatNodes.isEmpty {
             inputMachines.currentMods = .none
             inputMachines.focusMachine.suppressedRepeatPhysicalKeys.removeAll()

@@ -188,16 +188,25 @@ public struct GrowthSpec: Sendable, Hashable {
 
 internal final class VirtualRowSource<State> {
     let count: Int
+    let byteExactKeys: Bool
     let key: (State, Int) -> String
     let build: (State, Int) -> El<State>
 
     init(
         count: Int,
+        byteExactKeys: Bool = false,
         key: @escaping (State, Int) -> String,
         build: @escaping (State, Int) -> El<State>
     ) {
         self.count = max(0, count)
+        self.byteExactKeys = byteExactKeys
         self.key = key
         self.build = build
+    }
+
+    func keyed(_ row: El<State>, storageKey: String) -> El<State> {
+        var keyed = row
+        keyed.assignStoredKey(storageKey, authored: VirtualRowKeyEncoding.authoredKey(storageKey))
+        return keyed
     }
 }

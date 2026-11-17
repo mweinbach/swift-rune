@@ -42,6 +42,8 @@ internal final class RenderFrameEngine {
     let backdropBlur: BackdropBlurPass
     let layersPool: LayersPool = LayersPool()
     let uploader: AtlasUploader = AtlasUploader()
+    let maskFill = MetalOutlineAtlasFill()
+    let outlineText: MetalOutlineText
     let breakers: PipelineBreakers = PipelineBreakers()
     let gpuLoss: GpuDeviceTracker
 
@@ -53,6 +55,7 @@ internal final class RenderFrameEngine {
     var springBindings: GPUSpringBindings?
     var springTimeSeconds: Double = 0
     var backdrops: [BackdropEntry] = []
+    var backdropUsed = false
     var currentFormat: MTLPixelFormat = .bgra8Unorm_srgb
     var hasExplicitFormat: Bool = false
     var extraFormats: [MTLPixelFormat] = []
@@ -65,6 +68,7 @@ internal final class RenderFrameEngine {
 
     init(device: MTLDevice) throws {
         self.device = device
+        self.outlineText = MetalOutlineText(device: device)
         self.gpuLoss = GpuDeviceTracker(device: device)
         let lib: MTLLibrary
         do {
@@ -100,24 +104,26 @@ internal final class RenderFrameEngine {
         }
     }
 
-    private static func makePipeline(
+    static func makePipeline(
         device: MTLDevice,
         vert: MTLFunction,
         frag: MTLFunction,
         format: MTLPixelFormat,
-        additive: Bool
+        additive: Bool,
+        dualSource: Bool = false,
+        replacing: Bool = false
     ) throws -> MTLRenderPipelineState {
         let desc = MTLRenderPipelineDescriptor()
         desc.vertexFunction = vert
         desc.fragmentFunction = frag
         let att = desc.colorAttachments[0]!
         att.pixelFormat = format
-        att.isBlendingEnabled = true
+        att.isBlendingEnabled = !replacing
         att.rgbBlendOperation = .add
         att.alphaBlendOperation = .add
         att.sourceRGBBlendFactor = .one
         att.sourceAlphaBlendFactor = .one
-        att.destinationRGBBlendFactor = additive ? .one : .oneMinusSourceAlpha
+        att.destinationRGBBlendFactor = additive ? .one : (dualSource ? .oneMinusSource1Color : .oneMinusSourceAlpha)
         att.destinationAlphaBlendFactor = additive ? .one : .oneMinusSourceAlpha
         return try device.makeRenderPipelineState(descriptor: desc)
     }
@@ -255,6 +261,13 @@ internal final class RenderFrameEngine {
         }
     }
 
+    func outlineSupport(format: MTLPixelFormat, lcd: Bool) -> (outlines: Bool, lcd: Bool) {
+        guard springBindings == nil,
+              outlineText.pipeline(vertex: uberVert, format: format, additive: false, dualSource: false) != nil
+        else { return (false, false) }
+        return (true, lcd && outlineText.pipeline(vertex: uberVert, format: format, additive: false, dualSource: true) != nil)
+    }
+
     private struct TargetScope {
         let texture: MTLTexture
         let format: MTLPixelFormat
@@ -349,6 +362,18 @@ internal final class RenderFrameEngine {
         return nil
     }
 
+    private func glyphPages(for frame: RenderFrame) throws -> (textures: [MTLTexture], fill: MTLRenderPipelineState?) {
+        let hasPlans = frame.maskFills != nil || !frame.glyphPageFills.isEmpty
+        if hasPlans && !frame.usesGlyphAtlasMasks {
+            // Only the direct outline shader runs while moving. The first mask-sampling
+            // frame can still replay all placements from its own immutable plan.
+            return ([try uploader.missingImageTexture(device: device)], nil)
+        }
+        let fill = hasPlans ? outlineText.pipeline(vertex: uberVert, format: .r8Unorm, additive: false,
+                                                    dualSource: false, replacing: true) : nil
+        return (try uploader.syncGlyphPages(device: device, frame: frame, deferred: fill != nil), fill)
+    }
+
     func prepare(frame: RenderFrame, viewport: (Int, Int)) -> Result<Void, Error> {
         if let error = selectCache(for: frame, viewport: viewport) { return .failure(error) }
         let vw = max(1, viewport.0)
@@ -357,21 +382,21 @@ internal final class RenderFrameEngine {
         if !hasExplicitFormat {
             currentFormat = frame.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
         }
-        guard uploader.syncGlyphAtlas(device: device, atlas: frame.glyphs, generation: frame.glyphGeneration) != nil else {
-            return .failure(MetalRenderer.RendererError.textureAllocationFailed(
-                resource: "Glyph atlas", width: frame.glyphs.width, height: frame.glyphs.height
-            ))
-        }
+        let preparedGlyphs: [MTLTexture]
+        do {
+            preparedGlyphs = try glyphPages(for: frame).textures
+        } catch { return .failure(error) }
         let preparedPages: [MTLTexture]
         do {
             preparedPages = try uploader.requiredImagePages(
-                device: device, pages: frame.imagePages, fallback: frame.images, revision: frame.imageRevision, patch: frame.imagePatch
+                device: device, pages: frame.imagePages, fallback: frame.images, revision: frame.imageRevision,
+                patch: frame.imagePatch, pageRevisions: frame.imagePageRevisions, pagePatches: frame.imagePagePatches
             )
         } catch {
             return .failure(error)
         }
         _ = uploader.ensureInstanceBuffer(device: device, instances: frame.instances)
-        uploader.prepareBatches(instances: frame.instances, glyphPageCount: 1, imagePageCount: max(1, preparedPages.count))
+        uploader.prepareBatches(instances: frame.instances, glyphPageCount: preparedGlyphs.count, imagePageCount: max(1, preparedPages.count))
 
         prepareLayersForFrame(frame: frame, viewport: (vw, vh))
 
@@ -429,6 +454,7 @@ internal final class RenderFrameEngine {
         if !hasPlan(for: frame, viewport: (targetW, targetH)) {
             prepareLayersForFrame(frame: frame, viewport: (targetW, targetH))
         }
+        if range == nil || range?.lowerBound == 0 { backdropUsed = false }
         layersPool.recordUse(of: commandBuffer)
         defer {
             layersPool.endFrame()
@@ -437,26 +463,55 @@ internal final class RenderFrameEngine {
             }
         }
 
-        guard let glyphTex = uploader.syncGlyphAtlas(device: device, atlas: frame.glyphs, generation: frame.glyphGeneration) else {
-            return .failure(MetalRenderer.RendererError.textureAllocationFailed(
-                resource: "Glyph atlas", width: frame.glyphs.width, height: frame.glyphs.height
-            ))
-        }
+        let glyphPages: [MTLTexture]
         let imagePages: [MTLTexture]
+        let curves: MTLTexture?
         do {
+            let plans = frame.glyphPageFills.isEmpty ? frame.maskFills.map { [$0] } ?? [] : frame.glyphPageFills
+            let prepared = try self.glyphPages(for: frame)
+            glyphPages = prepared.textures
+            if let fillPipeline = prepared.fill, let first = plans.lazy.compactMap({ $0 }).first {
+                // Resting masks keep the immutable curves used when their placements were
+                // allocated, even if an application subsequently replaces the frame's direct outlines.
+                let records = try outlineText.sync(first.curves, readBy: commandBuffer)
+                let standIn = try uploader.missingImageTexture(device: device)
+                for (page, plan) in plans.enumerated() {
+                    if let plan {
+                        try maskFill.encode(plan, page: page, into: glyphPages[page], curves: records,
+                                            standIn: standIn, pipeline: fillPipeline, command: commandBuffer,
+                                            baseChange: uploader.glyphPageChange(index: page))
+                    }
+                }
+                curves = try frame.outlines.map { direct in
+                    if direct.storeID == first.curves.storeID && direct.generation == first.curves.generation &&
+                        direct.usedTexels <= first.curves.usedTexels { return records }
+                    return try outlineText.sync(direct, readBy: commandBuffer)
+                }
+            } else {
+                curves = try frame.outlines.map { try outlineText.sync($0, readBy: commandBuffer) }
+            }
             imagePages = try uploader.requiredImagePages(
-                device: device, pages: frame.imagePages, fallback: frame.images, revision: frame.imageRevision, patch: frame.imagePatch
+                device: device, pages: frame.imagePages, fallback: frame.images, revision: frame.imageRevision,
+                patch: frame.imagePatch, pageRevisions: frame.imagePageRevisions, pagePatches: frame.imagePagePatches
             )
         } catch {
             return .failure(error)
         }
+        let glyphTex = glyphPages[0]
         uploader.atlasesRead(by: commandBuffer)
         let imageTex = imagePages.first ?? uploader.imageTexture
         let instances = frame.instances
         guard let instanceBuffer = uploader.ensureInstanceBuffer(device: device, instances: instances, readBy: commandBuffer) else {
             return .failure(MetalRenderer.RendererError.metalUnavailable)
         }
-        uploader.prepareBatches(instances: instances, glyphPageCount: 1, imagePageCount: max(1, imagePages.count))
+        uploader.prepareBatches(instances: instances, glyphPageCount: glyphPages.count, imagePageCount: max(1, imagePages.count))
+
+        let missingPage: MTLTexture?
+        do {
+            missingPage = try uploader.usesMissingImagePage ? uploader.missingImageTexture(device: device) : nil
+        } catch {
+            return .failure(error)
+        }
 
         if let r = range {
             let clamped = r.clamped(to: 0..<instances.count)
@@ -525,7 +580,19 @@ internal final class RenderFrameEngine {
         }
         var layerScopeStack: [LayerScopeKind] = []
         var scissorStack: [MTLScissorRect?] = [nil]
+        var outlineError: Error?
 
+        // Each scope takes the next range in painter order. Start at the first run that
+        // overlaps a partial draw, then advance once per binding change across all scopes.
+        let imageRuns = uploader.imageBatches
+        var runCursor = 0
+        if sliceRange.lowerBound > 0 {
+            var upper = imageRuns.count
+            while runCursor < upper {
+                let mid = runCursor + (upper - runCursor) / 2
+                if imageRuns[mid].0.upperBound <= sliceRange.lowerBound { runCursor = mid + 1 } else { upper = mid }
+            }
+        }
         func encodeBatch(start: Int, end: Int, scope: inout TargetScope) {
             let count = end - start
             guard count > 0 else {
@@ -552,24 +619,44 @@ internal final class RenderFrameEngine {
             if let sc = scissorStack.last ?? nil {
                 enc.setScissorRect(sc)
             }
-            let pipe = pipelineFor(format: scope.format, additive: scope.additive, springs: springsActive)
-            enc.setRenderPipelineState(pipe)
+            if let curves {
+                let lcd = frame.outlines?.requestsLCD == true && !scope.isLayer && !scope.additive && frame.clearColor.w == 1
+                let dual = lcd ? outlineText.pipeline(vertex: uberVert, format: scope.format, additive: false, dualSource: true) : nil
+                guard !springsActive,
+                      let pipe = dual ?? outlineText.pipeline(vertex: uberVert, format: scope.format,
+                                                             additive: scope.additive, dualSource: false) else {
+                    enc.endEncoding()
+                    outlineError = MetalRenderer.RendererError.shaderCompileFailed("Windfoil is unavailable for this render target")
+                    return
+                }
+                enc.setRenderPipelineState(pipe)
+                enc.setFragmentTexture(curves, index: 2)
+                outlineText.recordDraw(dualSource: dual != nil)
+            } else {
+                enc.setRenderPipelineState(pipelineFor(format: scope.format, additive: scope.additive, springs: springsActive))
+            }
 
             var g = globals
             g.projection = scope.projection
             enc.setVertexBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
             enc.setFragmentBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
             enc.setFragmentTexture(glyphTex, index: 0)
-            if imagePages.count > 1 && !uploader.imageBatches.isEmpty {
-                for (batchRange, bind) in uploader.imageBatches {
+            if !imageRuns.isEmpty && (imagePages.count > 1 || glyphPages.count > 1 || missingPage != nil) {
+                while runCursor < imageRuns.count && imageRuns[runCursor].0.upperBound <= start { runCursor += 1 }
+                var next = runCursor
+                while next < imageRuns.count && imageRuns[next].0.lowerBound < end {
+                    let (batchRange, bind) = imageRuns[next]
                     let lo = max(start, batchRange.lowerBound)
                     let hi = min(end, batchRange.upperBound)
-                    if lo >= hi { continue }
+                    next += 1
                     let boundTex: MTLTexture?
                     switch bind {
                     case .image(let p):
-                        boundTex = p < imagePages.count ? imagePages[p] : imageTex
-                    case .glyph:
+                        enc.setFragmentTexture(glyphTex, index: 0)
+                        boundTex = p < imagePages.count ? imagePages[p] : missingPage
+                    case .glyph(let p):
+                        let index = p + 1 // RenderBatchBind indexes Rust's overflow pages, excluding page zero.
+                        enc.setFragmentTexture(glyphPages.indices.contains(index) ? glyphPages[index] : glyphTex, index: 0)
                         boundTex = imageTex
                     }
                     if let bt = boundTex { enc.setFragmentTexture(bt, index: 1) }
@@ -929,6 +1016,7 @@ internal final class RenderFrameEngine {
                 if wantsBackdrop && canCopyBackdrop {
                     let vw = max(1, Int(globals.viewport.x))
                     let vh = max(1, Int(globals.viewport.y))
+                    backdropUsed = true
                     if let snap = ensureBackdrop(format: cur.format, size: (vw, vh)) {
                         if cur.isLayer {
                             let clearPass = MTLRenderPassDescriptor()
@@ -1021,6 +1109,7 @@ internal final class RenderFrameEngine {
                     let cur = stack[stack.count - 1]
                     var layerGlobals = globals
                     layerGlobals.projection = cur.projection
+                    backdropUsed = true
                     backdropBlur.encode(
                         device: device,
                         commandBuffer: commandBuffer,
@@ -1045,6 +1134,7 @@ internal final class RenderFrameEngine {
         // Flush remaining batch & trailing surfaces on the root target
         flushPendingUpTo(sliceRange.upperBound)
         flushSurfacesBefore(sliceRange.upperBound)
+        if let outlineError { return .failure(outlineError) }
         if !frame.surfaces.isEmpty {
             surfaceRenderer?.trackSubmission(commandBuffer: commandBuffer)
         }
@@ -1119,6 +1209,17 @@ extension MetalRenderer {
     /// Builds a frame using the cached layer textures available on this renderer.
     public func frame<State>(_ runtime: Runtime<State>, at time: Double) -> RenderFrame {
         renderEngine.layersPool.registerTracker(runtime.residentCacheTracker)
+        let atlas = runtime.textSystem.glyphAtlas
+        let previousDeferred = atlas.defersOutlineMasks
+        atlas.defersOutlineMasks = true
+        defer { atlas.defersOutlineMasks = previousDeferred }
+        let previous = runtime.textSystem.outlineRendererSupport
+        let format = renderEngine.hasExplicitFormat ? renderEngine.currentFormat :
+            (runtime.srgbBlend ? MTLPixelFormat.bgra8Unorm : .bgra8Unorm_srgb)
+        runtime.textSystem.outlineRendererSupport = { [renderEngine] lcd in
+            renderEngine.outlineSupport(format: format, lcd: lcd)
+        }
+        defer { runtime.textSystem.outlineRendererSupport = previous }
         return runtime.renderFrame(at: time)
     }
 
@@ -1276,6 +1377,24 @@ extension MetalRenderer {
         renderEngine.setFormat(format)
     }
 
+    func giveBackForWindowRest(all: Bool) {
+        renderEngine.layersPool.giveBackForWindowRest(all: all)
+        renderEngine.layersPreparedState = nil
+        if all || !renderEngine.backdropUsed {
+            renderEngine.backdropBlur.giveBack()
+            renderEngine.backdrops.removeAll()
+        }
+        if all {
+            if let completion = commandQueue.makeCommandBuffer() {
+                completion.commit()
+                completion.waitUntilCompleted()
+            }
+            renderEngine.uploader.trimUploads()
+            renderEngine.maskFill.forget()
+            renderEngine.outlineText.giveBack()
+        }
+    }
+
     /// `#819` GPU memory give-back on window rest / occlusion.
     public func giveBack(all: Bool = false, residentCaches: Bool = false) {
         renderEngine.layersPool.giveBack(all: all, residentCaches: residentCaches)
@@ -1285,6 +1404,8 @@ extension MetalRenderer {
         renderEngine.extraFormats.removeAll()
         if all {
             renderEngine.uploader.trimUploads()
+            renderEngine.maskFill.forget()
+            renderEngine.outlineText.giveBack()
         }
     }
 

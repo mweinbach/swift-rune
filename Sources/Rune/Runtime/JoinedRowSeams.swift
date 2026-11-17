@@ -46,11 +46,11 @@ struct JoinedRowSeam {
 
 extension Runtime {
     func presentedGrowthElement(_ node: FlatNode) -> El<State> {
+        guard slice2State.joinedRowsWithoutRevealMask.contains(node.nodeId),
+              let reveal = node.el.growthReveal else { return node.el }
         var el = node.el
-        if let reveal = el.growthReveal, slice2State.joinedRowsWithoutRevealMask.contains(node.nodeId) {
-            el.layout.clipOverflow = reveal.authoredClip
-            el.clipFade = reveal.authoredFade
-        }
+        el.layout.clipOverflow = reveal.authoredClip
+        el.clipFade = reveal.authoredFade
         return el
     }
 
@@ -172,7 +172,7 @@ extension Runtime {
 
     /// The node's own growth translation, from layout projection and this frame's slide/seam adjustments.
     func growthSnapOffsetY(for node: FlatNode) -> Float {
-        node.cold.growthRowProjectionY + node.cold.growthContentShiftY + (slice2State.frameGrowthSnapOffsetsY[node.nodeId] ?? 0)
+        node.growthRowProjectionY + node.growthContentShiftY + (slice2State.frameGrowthSnapOffsetsY[node.nodeId] ?? 0)
     }
 
     /// Offsets are local to a row; the scene publishes world coordinates for every descendant.

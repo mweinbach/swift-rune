@@ -598,7 +598,7 @@ extension TextSystem {
         spanRadius: Float = TextDecorations.spanRadius,
         roundedBaselines: [Float] = [],
         glideOffPx: SIMD2<Float> = .zero,
-        insertImage: (RGBA8Atlas) -> SIMD4<Float>,
+        insertImage: (RGBA8Atlas) -> ImageAtlasRegion,
         glyphPage: (Int, UInt16) -> Void = { _, _ in },
         into primitives: inout [Primitive]
     ) {
@@ -656,15 +656,16 @@ extension TextSystem {
         for inline in shaped.inlineIcons {
             let devRect = place.origin(inline.rect)
             if let img = inline.image {
-                let uv = insertImage(img)
+                let region = insertImage(img)
                 let tint = Color.white.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                 primitives.append(.image(
                     rect: devRect,
                     radii: SIMD4<Float>(repeating: inline.cornerRadius * pxScale),
-                    uv: uv,
+                    uv: region.edges,
                     tint: tint,
                     clip: devClip,
-                    turn: rot
+                    turn: rot,
+                    page: region.page
                 ))
             } else if let svg = inline.icon {
                 let pxSize = max(4, Int((min(inline.rect.z, inline.rect.w) * pxScale).rounded()))

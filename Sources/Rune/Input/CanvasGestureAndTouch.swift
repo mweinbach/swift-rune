@@ -92,7 +92,6 @@ extension Runtime {
     internal func dispatchLockedWheel(_ event: WheelEvent, at pos: Vec2?, now: Double) {
         releaseHoverHold()
         let targetPos = pos ?? pointerPosition
-        if let pos { pointerPosition = pos }
 
         if event.phase == .began {
             wheelBegan(now: now)
@@ -274,7 +273,7 @@ extension Runtime {
         inputMachines.wheelLock.ranVertical(path: path, at: now, x: point.x, y: point.y, dy: dy, moved: moved, continued: held != nil)
     }
 
-    private func applyManualScroll(path: String, to cur: Vec2, at now: Double) {
+    internal func applyManualScroll(path: String, to cur: Vec2, at now: Double) {
         let nid = NodeId.hash("scroll:" + path)
         scrollOffsets[path] = cur
         // Upstream `pointer.rs::wheel` / `scroll/x.rs::wheel_scroll_for`: a wheel that moved the
@@ -344,7 +343,7 @@ extension Runtime {
             secondaryUp(at: pos, mods: mods, at: now)
         case .middle, .back, .forward:
             let holdingButton = (activeDrag?.button == button) || (inputMachines.pressedButton == button)
-            if holdingButton {
+            if holdingButton || slice2State.autoscroll.willTakeRelease(button) || (button == .middle && primaryPointerHeld) {
                 pointerUp(at: pos, button: button, mods: mods, at: now)
             }
         }

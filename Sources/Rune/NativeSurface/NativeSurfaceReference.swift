@@ -21,7 +21,21 @@ internal enum NativeSurfaceReference {
                 source = existing
             } else {
                 guard let snapshot = draw.surface.renderSnapshot() else { continue }
-                let sampler = try SurfacePlaneSampler(frame: snapshot.frame, srgbBlend: srgbBlend)
+                let sampler: SurfacePlaneSampler
+                do {
+                    sampler = try SurfacePlaneSampler(frame: snapshot.frame, srgbBlend: srgbBlend)
+                } catch {
+                    #if os(Windows)
+                    if case .shared = snapshot.frame.source {
+                        draw.surface.setLastError(String(describing: error))
+                        continue
+                    }
+                    #endif
+                    throw error
+                }
+                #if os(Windows)
+                if case .shared = snapshot.frame.source { draw.surface.setLastError(nil) }
+                #endif
                 source = Source(frame: snapshot.frame, mirrored: snapshot.mirrored, sampler: sampler)
                 sources[key] = source
             }

@@ -60,13 +60,15 @@ public enum ControlSize: Sendable, Hashable {
 
 /// Source-over composite matching `rune_kit::over`.
 internal func kitOver(_ top: Color, _ bottom: Color) -> Color {
-    let a = top.a + bottom.a * (1.0 - top.a)
-    guard a > 0 else { return .transparent }
-    let inv = 1.0 - top.a
-    let r = (top.r * top.a + bottom.r * bottom.a * inv) / a
-    let g = (top.g * top.a + bottom.g * bottom.a * inv) / a
-    let b = (top.b * top.a + bottom.b * bottom.a * inv) / a
-    return Color(r: r, g: g, b: b, a: a)
+    if top.a == 0 { return bottom.a == 0 ? .transparent : bottom }
+    if bottom.a == 0 || top.a == 1 { return top }
+    let srgb = Tok.blendsSrgb()
+    let rgba = srgb
+        ? Color.over(top.premulSRGB(), bottom.premulSRGB())
+        : Color.over(top.premul(), bottom.premul())
+    guard rgba.w > 0 else { return .transparent }
+    let rgb = rgba / rgba.w
+    return srgb ? .srgb(rgb.x, rgb.y, rgb.z, rgba.w) : Color(r: rgb.x, g: rgb.y, b: rgb.z, a: rgba.w)
 }
 
 /// Press overlay that composites cleanly over `hover` (`rune_kit::press_over`).
@@ -125,16 +127,16 @@ public struct Switch<State> {
         case (false, false): compactControl(k, key: key)
         }
         if disabled && !isStandard {
-            control = control.opacity(0.5)
+            control = control.layerOpacity(0.5)
         }
         if visualState == .focus && !isStandard {
-            control = control.border(2.0, c.borderFocus)
+            control = control.outline(width: 2, offset: 1, color: c.borderFocus)
         }
 
         var root: El<State> = row()
             .key(key)
             .role(.switchControl)
-            .selected(checked ? "true" : "false")
+            .checked(checked)
             .gap(8)
             .itemsCenter()
 
@@ -143,17 +145,17 @@ public struct Switch<State> {
             if !hidesLabel {
                 let font = isStandard ? k.ty.textSmall.lh(16) : k.ty.small.lh(16)
                 let col = isStandard ? c.stdText : c.textFaint
-                root = root.child(text(labelText).key("\(key)-label").font(font).color(col))
+                root = root.child(text(labelText).key("\(key)-label").font(font).color(col).a11yHidden())
             }
         }
         if let descriptionText {
             root = root
-                .help(descriptionText)
-                .child(text(descriptionText).key("\(key)-description").font(k.ty.textXsmall.lh(15.6)).color(c.stdText))
+                .description(descriptionText)
+                .child(text(descriptionText).key("\(key)-description").font(k.ty.textXsmall.lh(15.6)).color(c.stdText).a11yHidden())
         }
 
         control = control.key("\(key)-control")
-        root = root.child(control).focusable(!disabled).inert(disabled)
+        root = root.child(control.focusRing(2, offset: 1, c.borderFocus).a11yHidden()).focusable(!disabled).disabled(disabled)
         if !disabled {
             root = root.focusRing(c.borderFocus, offset: 1.0)
             if let onPress {
@@ -304,8 +306,6 @@ public struct Checkbox<State> {
         }
         let glyphEl: El<State> = if let customIcon {
             Rune.icon(customIcon, size: 14)
-        } else if isIndeterminate {
-            Rune.icon(KitIcons.minus, size: 10)
         } else {
             Rune.icon(k.glyph.check, size: 10)
         }
@@ -326,22 +326,22 @@ public struct Checkbox<State> {
         var root: El<State> = row()
             .key(key)
             .role(.checkbox)
-            .selected(isIndeterminate ? "mixed" : (checked ? "true" : "false"))
             .gap(12)
             .itemsCenter()
-            .child(control)
+            .child(control.focusRing(1, offset: 0, c.borderActive).a11yHidden())
             .focusable(!disabled)
-            .inert(disabled)
+            .disabled(disabled)
+        root = isIndeterminate ? root.checkedMixed() : root.checked(checked)
         if !disabled {
             root = root.focusRing(c.borderActive, offset: 1.0)
         }
 
         if let descriptionText {
-            root = root.help(descriptionText)
+            root = root.description(descriptionText)
         }
         if let labelText {
             root = root.label(labelText)
-            var content: El<State> = col().key("\(key)-content")
+            var content: El<State> = col().key("\(key)-content").a11yHidden()
             if !hidesLabel {
                 content = content.child(text(labelText).key("\(key)-label").font(k.ty.textSmall.lh(24)).color(c.stdText))
             }
@@ -432,10 +432,10 @@ public struct RadioItem<State> {
             control = control.hover(c.hover)
         }
         if disabled {
-            control = control.opacity(0.5)
+            control = control.layerOpacity(0.5)
         }
         if visualState == .focus {
-            control = control.border(2.0, c.borderFocus)
+            control = control.outline(width: 2, offset: 1, color: c.borderFocus)
         }
 
         let labelColor = disabled ? c.textMuted : c.textBase
@@ -452,19 +452,19 @@ public struct RadioItem<State> {
             .key(key)
             .role(.radio)
             .label(labelText)
-            .selected(checked ? "true" : "false")
-            .itemSelected(checked)
+            .checked(checked)
+            .focusSelected(checked)
             .gap(8)
             .itemsStart()
-            .child(el().key("\(key)-stack").size(16, 20).child(control))
-            .child(words)
+            .child(el().key("\(key)-stack").size(16, 20).child(control.focusRing(2, offset: 1, c.borderFocus)).a11yHidden())
+            .child(words.a11yHidden())
             .focusable(!disabled)
-            .inert(disabled)
+            .disabled(disabled)
         if !disabled {
             root = root.focusRing(c.borderFocus, offset: 1.0)
         }
         if let descriptionText {
-            root = root.help(descriptionText)
+            root = root.description(descriptionText)
         }
         if !disabled, let onPress {
             root = root.onClick(onPress)
@@ -494,25 +494,25 @@ public struct RadioGroup<State> {
         let c = k.c
         var root: El<State> = col()
             .key(key)
-            .role(.group)
+            .role(.radiogroup)
             .focusGroup(true)
             .gap(8)
-            .inert(isDisabled)
+            .disabled(isDisabled)
         if let labelText {
             root = root
                 .label(labelText)
-                .child(text(labelText).key("\(key)-label").font(k.ty.small.lh(11)).color(c.textFaint))
+                .child(text(labelText).key("\(key)-label").font(k.ty.small.lh(11)).color(c.textFaint).a11yHidden())
         }
         if let descriptionText {
             root = root
-                .help(descriptionText)
-                .child(text(descriptionText).key("\(key)-description").font(k.ty.small.lh(13.2)).color(c.textFaint))
+                .description(descriptionText)
+                .child(text(descriptionText).key("\(key)-description").font(k.ty.small.lh(13.2)).color(c.textFaint).a11yHidden())
         }
         var itemsCol: El<State> = col().key("\(key)-items").gap(12)
         for (idx, var item) in radioItems.enumerated() {
             if isDisabled { item = item.disabled(true) }
             item.isInvalid = isInvalid
-            itemsCol = itemsCol.child(item.build(k, key: "\(key)-item\(idx)"))
+            itemsCol = itemsCol.child(item.build(k, key: "\(key)-item\(idx)").positionInSet(idx + 1, size: radioItems.count))
         }
         return root.child(itemsCol)
     }
@@ -547,6 +547,7 @@ public struct SegmentedControl<State> {
     public func fit() -> Self { var c = self; c.widthMode = .fit; return c }
     public func segmentState(_ index: Int, _ s: ControlVisualState) -> Self {
         var c = self
+        guard index >= 0 && index < labels.count else { return self }
         if c.states.count <= index {
             c.states.append(contentsOf: repeatElement(.rest, count: index + 1 - c.states.count))
         }
@@ -565,7 +566,7 @@ public struct SegmentedControl<State> {
         let font = k.ty.ui.lh(13)
         var root: El<State> = row()
             .key(key)
-            .role(.group)
+            .role(.radiogroup)
             .focusGroup(true)
             .h(28)
             .itemsCenter()
@@ -588,7 +589,7 @@ public struct SegmentedControl<State> {
             .rounded(6)
             .bg(c.bgBase)
             .shadows([Shadow(x: 0, y: 0, blur: 0, spread: 0.5, color: c.borderStrong)])
-            .animateLayout(k.motion.control)
+            .animateLayout(k.motion.control).a11yHidden()
 
         if let sel = selectedIndex {
             switch widthMode {
@@ -607,19 +608,21 @@ public struct SegmentedControl<State> {
             let on = selectedIndex == i
             let ink = (on || st == .hover) ? c.textBase : c.textMuted
             let hovers = (st == .rest && !on && onPickHandler != nil)
-            let labelEl: El<State> = text(l)
+            var labelEl: El<State> = text(l)
                 .key("\(key)-label\(i)")
                 .font(font)
                 .color(ink)
-                .ellipsis()
+                .ellipsis().a11yHidden()
+            if hovers { labelEl = labelEl.groupColor(c.textBase) }
             var seg: El<State> = row()
                 .key("\(key)-segment\(i)")
-                .role(.tab)
+                .role(.radio)
                 .focusable(st != .disabled)
-                .itemSelected(on)
-                .selected(on ? "true" : "false")
-                .focusRing(c.borderFocus, offset: 1.0)
-                .inert(st == .disabled)
+                .focusSelected(on)
+                .checked(on)
+                .positionInSet(i + 1, size: n)
+                .focusRing(2, offset: 1, c.borderFocus)
+                .disabled(st == .disabled)
                 .label(l)
                 .grow(1)
                 .shrink(1)
@@ -638,8 +641,8 @@ public struct SegmentedControl<State> {
                     .shadows([Shadow(x: 0, y: 0, blur: 0, spread: 0.5, color: c.borderStrong)])
             }
             switch st {
-            case .focus: seg = seg.border(2.0, c.borderFocus)
-            case .disabled: seg = seg.opacity(0.45)
+            case .focus: seg = seg.outline(width: 2, offset: 1, color: c.borderFocus)
+            case .disabled: seg = seg.layerOpacity(0.45)
             case .hover where !on: seg = seg.bg(c.hover)
             default: break
             }
@@ -662,6 +665,13 @@ public enum ButtonVariant: Sendable, Hashable {
     case ghost
     case ghostMuted
     case danger
+    case warning
+    case outline
+    case ghostFaint
+    case loading
+
+    public static var contrast: Self { .primary }
+    public static var submit: Self { .accent }
 }
 
 extension Kit {
@@ -670,95 +680,18 @@ extension Kit {
         key: String,
         _ labelText: String,
         variant: ButtonVariant = .neutral,
-        size: ControlSize = .md,
+        size: ControlSize = .regular,
         leadingIcon: SVGIcon? = nil,
         trailingIcon: SVGIcon? = nil,
         disabled: Bool = false,
+        visualState: ControlVisualState = .rest,
         onClick: @escaping (inout State, inout Tx) -> Void
     ) -> El<State> {
-        let bgCol: Color
-        let fgCol: Color
-        let hoverCol: Color
-        let pressCol: Color
-        let borderCol: Color
-        let borderW: Float
-        let elev: [Shadow]
-
-        switch variant {
-        case .primary:
-            bgCol = c.bgContrast
-            fgCol = c.textContrast
-            hoverCol = c.contrastHover
-            pressCol = c.contrastPressed
-            borderCol = .transparent
-            borderW = 0
-            elev = elevation.buttonContrast
-        case .accent:
-            bgCol = c.bgAccent
-            fgCol = c.submitFg
-            hoverCol = c.submitHover
-            pressCol = c.contrastPressed
-            borderCol = .transparent
-            borderW = 0
-            elev = elevation.buttonContrast
-        case .neutral:
-            bgCol = c.bgButtonNeutral
-            fgCol = c.textBase
-            hoverCol = c.hover
-            pressCol = c.pressed
-            borderCol = c.borderBase
-            borderW = 1
-            elev = elevation.buttonNeutral
-        case .ghost, .ghostMuted:
-            bgCol = .transparent
-            fgCol = c.textBase
-            hoverCol = c.hover
-            pressCol = c.pressed
-            borderCol = .transparent
-            borderW = 0
-            elev = []
-        case .danger:
-            bgCol = c.danger.bg
-            fgCol = c.danger.fg
-            hoverCol = c.danger.fg.alpha(0.10)
-            pressCol = c.danger.fg.alpha(0.18)
-            borderCol = c.danger.border
-            borderW = 1
-            elev = []
-        }
-
-        let fontStyle = (size == .sm || size == .mini || size == .small) ? ty.smallMedium : ty.uiMedium
-        var node: El<State> = row()
-            .key(key)
-            .role(.button)
-            .label(labelText)
-            .h(size.height)
-            .px(size.horizontalPadding)
-            .gap(6)
-            .center()
-            .rounded(radius.md)
-            .bg(bgCol)
-            .border(borderW, borderCol)
-            .shadows(shadowLayers(elev))
-            .animate(motion.control)
-
-        if let svg = leadingIcon {
-            node = node.child(icon(svg, size: 14).color(fgCol))
-        }
-        node = node.child(text(labelText).font(fontStyle).color(fgCol).noWrap())
-        if let svg = trailingIcon {
-            node = node.child(icon(svg, size: 14).color(fgCol))
-        }
-
-        if disabled {
-            return node.opacity(0.45).inert(true)
-        }
-        return node
-            .hover(hoverCol)
-            .press(pressCol)
-            .pressScale(0.97)
-            .focusRing(c.borderFocus)
-            .onClick(onClick)
+        actionButton(
+            key: key, label: .text(labelText), variant: variant, size: size,
+            leadingIcon: leadingIcon, trailingIcon: trailingIcon, disabled: disabled,
+            visualState: visualState, onClick: onClick
+        )
     }
 
     /// Compact square icon button (`Kit::icon_button`).
@@ -766,73 +699,23 @@ extension Kit {
         key: String,
         svg: SVGIcon,
         label labelText: String,
-        size: ControlSize = .md,
-        variant: ButtonVariant = .ghost,
+        size: ControlSize = .regular,
+        variant: ButtonVariant = .neutral,
         disabled: Bool = false,
         visualState: ControlVisualState = .rest,
         expanded: Bool? = nil,
         omitHelp: Bool = false,
-        onClick: @escaping (inout State, inout Tx) -> Void
+        onClick: ((inout State, inout Tx) -> Void)?
     ) -> El<State> {
-        let bgCol: Color
-        let fgCol: Color
-        let hoverCol: Color
-        let pressCol: Color
-        let borderCol: Color
-        let borderW: Float
-        let elev: [Shadow]
-
-        let activeOn = !disabled && (visualState == .pressed || expanded == true)
-
-        switch variant {
-        case .primary:
-            bgCol = c.bgContrast
-            fgCol = c.textContrast
-            hoverCol = c.contrastHover
-            pressCol = c.contrastPressed
-            borderCol = .transparent
-            borderW = 0
-            elev = elevation.buttonContrast
-        case .accent:
-            bgCol = c.bgAccent
-            fgCol = c.submitFg
-            hoverCol = c.submitHover
-            pressCol = c.contrastPressed
-            borderCol = .transparent
-            borderW = 0
-            elev = elevation.buttonContrast
-        case .neutral:
-            bgCol = c.bgButtonNeutral
-            fgCol = c.iconBase
-            hoverCol = c.hover
-            pressCol = c.pressed
-            borderCol = c.borderBase
-            borderW = 1
-            elev = elevation.buttonNeutral
-        case .ghost:
-            bgCol = (expanded == true && !disabled) ? c.pressed : .transparent
-            fgCol = c.iconBase
-            hoverCol = c.hover
-            pressCol = c.pressed
-            borderCol = .transparent
-            borderW = 0
-            elev = []
-        case .ghostMuted:
-            bgCol = (expanded == true && !disabled) ? c.pressed : .transparent
-            fgCol = activeOn ? c.iconBase : c.iconMuted
-            hoverCol = c.hover
-            pressCol = c.pressed
-            borderCol = .transparent
-            borderW = 0
-            elev = []
-        case .danger:
-            bgCol = c.danger.bg
-            fgCol = c.danger.fg
-            hoverCol = c.danger.fg.alpha(0.10)
-            pressCol = c.danger.fg.alpha(0.18)
-            borderCol = c.danger.border
-            borderW = 1
-            elev = []
+        let state: ControlVisualState = disabled ? .disabled : visualState
+        var skin = buttonSkin(variant == .primary ? .accent : variant)
+        if variant == .primary || variant == .accent {
+            skin.icon = c.submitIcon
+        } else if variant == .ghostMuted && (state == .pressed || expanded == true) {
+            skin.icon = c.iconBase
+        }
+        if expanded == true && variant.isGhost {
+            skin.fill = skin.pressed
         }
 
         let (cornerRadius, glyphSize): (Float, Float) = switch size {
@@ -856,21 +739,8 @@ extension Kit {
             .square(size.height)
             .center()
             .rounded(cornerRadius)
-            .bg(bgCol)
-            .border(borderW, borderCol)
-            .shadows(shadowLayers(elev))
-            .animate(motion.control)
-            .child(icon(svg, size: glyphSize).key("icon").color(fgCol).a11yHidden())
-
-        if disabled {
-            return node.opacity(0.45).inert(true)
-        }
-        return node
-            .hover(hoverCol)
-            .press(pressCol)
-            .pressScale(0.95)
-            .focusRing(c.borderFocus)
-            .onClick(onClick)
+            .child(icon(svg, size: glyphSize).key("icon").color(skin.icon).a11yHidden())
+        return paintButton(node, skin: skin, state: state, variant: variant, onClick: onClick)
     }
 
     /// Animated toggle switch (`Kit::switch`).
@@ -901,18 +771,18 @@ extension Kit {
         var track: El<State> = el()
             .key(key)
             .role(.switchControl)
-            .selected(isOn ? "true" : "false")
+            .checked(isOn)
             .size(trackW, trackH)
             .pill()
             .bg(trackFill)
             .animate(motion.control)
-            .child(knob)
+            .child(knob.a11yHidden())
 
         if let labelText {
             track = track.label(labelText)
         }
         if disabled {
-            return track.opacity(0.45).inert(true)
+            return track.opacity(0.45).disabled()
         }
         return track
             .pressScale(0.96)
@@ -961,19 +831,19 @@ extension Kit {
         var wrapper: El<State> = row()
             .key(key)
             .role(.checkbox)
-            .selected(indeterminate ? "mixed" : (checked ? "true" : "false"))
             .itemsCenter()
             .gap(8)
-            .child(box)
+            .child(box.a11yHidden())
+        wrapper = indeterminate ? wrapper.checkedMixed() : wrapper.checked(checked)
 
         if let labelText {
             wrapper = wrapper
                 .label(labelText)
-                .child(text(labelText).font(ty.ui).color(c.textBase))
+                .child(text(labelText).font(ty.ui).color(c.textBase).a11yHidden())
         }
 
         if disabled {
-            return wrapper.opacity(0.45).inert(true)
+            return wrapper.opacity(0.45).disabled()
         }
         return wrapper
             .focusRing(c.borderFocus)
@@ -989,10 +859,11 @@ extension Kit {
     ) -> El<State> {
         var container: El<State> = col()
             .key(key)
+            .role(.radiogroup)
             .gap(8)
             .focusGroup(true)
 
-        for opt in options {
+        for (index, opt) in options.enumerated() {
             let isSel = (opt.id == selected)
             var circle: El<State> = row()
                 .square(18)
@@ -1017,12 +888,13 @@ extension Kit {
                 .key("\(key)-\(opt.id)")
                 .role(.radio)
                 .label(opt.label)
-                .selected(isSel ? "true" : "false")
-                .itemSelected(isSel)
+                .focusSelected(isSel)
+                .checked(isSel)
+                .positionInSet(index + 1, size: options.count)
                 .itemsCenter()
                 .gap(8)
-                .child(circle)
-                .child(text(opt.label).font(ty.ui).color(c.textBase))
+                .child(circle.a11yHidden())
+                .child(text(opt.label).font(ty.ui).color(c.textBase).a11yHidden())
                 .focusable(true)
                 .focusRing(c.borderFocus)
                 .onClick { state, _ in onSelect(&state, opt.id) }
@@ -1041,6 +913,7 @@ extension Kit {
     ) -> El<State> {
         var bar: El<State> = row()
             .key(key)
+            .role(.radiogroup)
             .p(3)
             .gap(2)
             .rounded(radius.lg)
@@ -1048,13 +921,15 @@ extension Kit {
             .border(1.0, c.borderMuted)
             .focusGroup(true)
 
-        for opt in options {
+        for (index, opt) in options.enumerated() {
             let isSel = (opt.id == selected)
             var seg: El<State> = row()
                 .key("\(key)-\(opt.id)")
-                .role(.tab)
+                .role(.radio)
                 .label(opt.label)
-                .itemSelected(isSel)
+                .focusSelected(isSel)
+                .checked(isSel)
+                .positionInSet(index + 1, size: options.count)
                 .grow(1)
                 .h(26)
                 .px(12)
@@ -1066,6 +941,7 @@ extension Kit {
                 seg = seg.child(
                     el()
                         .key("\(key)-active-pill")
+                        .a11yHidden()
                         .pin(top: 0, right: 0, bottom: 0, left: 0)
                         .rounded(radius.md)
                         .bg(c.surfaceRaised)
@@ -1080,7 +956,7 @@ extension Kit {
                         .font(isSel ? ty.uiMedium : ty.ui)
                         .color(isSel ? c.textBase : c.textMuted)
                         .noWrap()
-                        .z(1)
+                        .z(1).a11yHidden()
                 )
                 .focusRing(c.borderFocus)
                 .onClick { state, _ in onSelect(&state, opt.id) }

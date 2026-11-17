@@ -35,7 +35,7 @@ typedef struct {
     EGLDisplay display;
     EGLContext context;
     EGLSurface surface;
-    int wake_fd, timer_fd, idle_fd, resumed, scheduled, frame_requested;
+    int wake_fd, timer_fd, idle_fd, gpu_fd, resumed, scheduled, frame_requested;
     int32_t last_mouse_buttons;
     int presented;
 } Host;
@@ -179,6 +179,39 @@ static void schedule_text_idle(Host *h) {
         rune_android_wake(h->idle_fd);
 }
 
+static void schedule_gpu_poll(Host *h) {
+    // Only drivers without EGL fence sync need another looper turn. This
+    // timer is independent of the application's next frame deadline.
+    struct itimerspec timer = {.it_value = {.tv_nsec = 4000000}};
+    timerfd_settime(h->gpu_fd, 0, &timer, NULL);
+}
+
+static int on_gpu_poll(int fd, int events, void *data) {
+    if (!(events & ALOOPER_EVENT_INPUT)) return 0;
+    uint64_t ignored;
+    while (read(fd, &ignored, sizeof(ignored)) < 0 && errno == EINTR) {}
+    Host *h = data;
+    if (!h->state || h->surface == EGL_NO_SURFACE || !h->callbacks.poll_gpu(h->state, 0)) return 1;
+    EGLDisplay previous_display = eglGetCurrentDisplay();
+    EGLContext previous_context = eglGetCurrentContext();
+    EGLSurface previous_draw = eglGetCurrentSurface(EGL_DRAW);
+    EGLSurface previous_read = eglGetCurrentSurface(EGL_READ);
+    int switch_context = previous_context != h->context || previous_draw != h->surface || previous_read != h->surface;
+    if (switch_context && !eglMakeCurrent(h->display, h->surface, h->surface, h->context)) {
+        release_surface(h);
+        if (h->resumed && create_surface(h)) schedule_frame(h);
+        return 1;
+    }
+    if (h->callbacks.poll_gpu(h->state, 1)) schedule_gpu_poll(h);
+    if (switch_context) {
+        if (previous_context == EGL_NO_CONTEXT)
+            eglMakeCurrent(h->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        else
+            eglMakeCurrent(previous_display, previous_draw, previous_read, previous_context);
+    }
+    return 1;
+}
+
 // CoreFoundation uses this libdispatch descriptor to drain DispatchQueue.main.
 // Android owns the main loop, so register the same descriptor with its ALooper.
 // The registration lives with the process main queue, including between activities.
@@ -256,6 +289,7 @@ static void draw(Host *h) {
     timerfd_settime(h->timer_fd, 0, &timer, NULL);
     if (delay == 0)
         post_vsync(h);
+    if (h->callbacks.poll_gpu && h->callbacks.poll_gpu(h->state, 1)) schedule_gpu_poll(h);
     schedule_text_idle(h);
 }
 
@@ -502,9 +536,11 @@ static void destroy(ANativeActivity *a) {
     ALooper_removeFd(h->looper, h->wake_fd);
     ALooper_removeFd(h->looper, h->timer_fd);
     ALooper_removeFd(h->looper, h->idle_fd);
+    ALooper_removeFd(h->looper, h->gpu_fd);
     close(h->wake_fd);
     close(h->timer_fd);
     close(h->idle_fd);
+    close(h->gpu_fd);
     AConfiguration_delete(h->configuration);
     h->callbacks.destroy(h->state);
     h->state = NULL;
@@ -530,11 +566,13 @@ int32_t rune_android_attach(void *raw, void *state, RuneAndroidCallbacks callbac
     h->wake_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     h->timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
     h->idle_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    h->gpu_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
     int writer = h->wake_fd >= 0 ? fcntl(h->wake_fd, F_DUPFD_CLOEXEC, 0) : -1;
-    if (!h->choreographer || !h->configuration || h->wake_fd < 0 || h->timer_fd < 0 || h->idle_fd < 0 || writer < 0 ||
+    if (!h->choreographer || !h->configuration || h->wake_fd < 0 || h->timer_fd < 0 || h->idle_fd < 0 || h->gpu_fd < 0 || writer < 0 ||
         ALooper_addFd(h->looper, h->wake_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_wake, h) < 0 ||
         ALooper_addFd(h->looper, h->timer_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_wake, h) < 0 ||
-        ALooper_addFd(h->looper, h->idle_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_text_idle, h) < 0) {
+        ALooper_addFd(h->looper, h->idle_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_text_idle, h) < 0 ||
+        ALooper_addFd(h->looper, h->gpu_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_gpu_poll, h) < 0) {
         if (h->configuration)
             AConfiguration_delete(h->configuration);
         if (h->wake_fd >= 0) {
@@ -548,6 +586,10 @@ int32_t rune_android_attach(void *raw, void *state, RuneAndroidCallbacks callbac
         if (h->idle_fd >= 0) {
             ALooper_removeFd(h->looper, h->idle_fd);
             close(h->idle_fd);
+        }
+        if (h->gpu_fd >= 0) {
+            ALooper_removeFd(h->looper, h->gpu_fd);
+            close(h->gpu_fd);
         }
         if (writer >= 0)
             close(writer);

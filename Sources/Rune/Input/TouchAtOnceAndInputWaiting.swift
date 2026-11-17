@@ -106,8 +106,8 @@ extension Runtime {
     /// nearest ancestor that handles a press or takes focus. A move that changes it to an element
     /// queues `Action::Hover` (`hover.rs::apply_hovered`); a hover colour alone is no target, so
     /// moving onto one queues nothing.
-    internal func primaryTargetPath() -> String? {
-        let pos = pointerPosition
+    internal func primaryTargetPath(at point: Vec2? = nil) -> String? {
+        let pos = point ?? pointerPosition
         guard pos.x > -9000, pos.y > -9000 else { return nil }
         guard let top = hitTest(at: pos, predicate: { self.takesPrimaryInput($0) })?.node else { return nil }
         if !top.el.isSelectable || hasPrimaryHandler(top) || !top.el.textLinks.isEmpty { return top.path }

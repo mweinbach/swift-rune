@@ -1,8 +1,5 @@
 import Foundation
 import Rune
-#if canImport(Darwin) && canImport(CoreFoundation)
-import CoreFoundation
-#endif
 
 /// A node of a file tree: a folder (`isDirectory`) or a file carrying optional metadata (`rune_kit::tree::FileNode`).
 public struct FileNode<Data: Sendable>: Sendable {
@@ -36,7 +33,12 @@ public struct FileNode<Data: Sendable>: Sendable {
     }
 }
 
-extension FileNode: Equatable where Data: Equatable {}
+extension FileNode: Equatable where Data: Equatable {
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.name.utf8.elementsEqual(rhs.name.utf8) && lhs.path.utf8.elementsEqual(rhs.path.utf8) &&
+            lhs.isDirectory == rhs.isDirectory && lhs.data == rhs.data
+    }
+}
 
 /// Builds `TreeModel<FileNode<Data>>` (and legacy `TreeItem<String>`) trees from slash-separated file paths
 /// (`rune_kit::tree::FileTree`).
@@ -74,12 +76,11 @@ public struct FileTreeBuilder: Sendable {
 
     /// Returns the appropriate `KitIcons` glyph for a file name by extension (`rsplit_once('.')`: dotless names return `KitIcons.file`).
     public static func fileIcon(for name: String) -> SVGIcon {
-        let ext: String
-        if let dot = name.lastIndex(of: ".") {
-            ext = String(name[name.index(after: dot)...]).lowercased()
-        } else {
-            ext = ""
-        }
+        let bytes = name.utf8
+        guard let dot = bytes.lastIndex(of: 0x2e) else { return KitIcons.file }
+        let suffix = bytes[bytes.index(after: dot)...]
+        guard suffix.allSatisfy({ $0 < 128 }) else { return KitIcons.file }
+        let ext = String(decoding: suffix, as: UTF8.self).lowercased()
         switch ext {
         case "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "swift", "c", "h", "cc", "cpp",
              "hpp", "m", "mm", "java", "kt", "rb", "php", "cs", "zig", "lua", "sh", "bash", "zsh",
@@ -100,108 +101,27 @@ public struct FileTreeBuilder: Sendable {
     /// OS collator with numeric ordering and case/width insensitivity, falling back to exact
     /// UTF-8 code-unit order so the comparison is total (`"A"` < `"a"`).
     public static func naturalCompare(_ a: String, _ b: String) -> ComparisonResult {
-        let primary = collate(a, b)
-        if primary != .orderedSame {
-            return primary
-        }
-        let ab = a.utf8
-        let bb = b.utf8
-        if ab.elementsEqual(bb) {
-            return .orderedSame
-        }
-        return ab.lexicographicallyPrecedes(bb) ? .orderedAscending : .orderedDescending
+        nameOrder()(a, b)
     }
 
-    private static func collate(_ a: String, _ b: String) -> ComparisonResult {
-        #if canImport(Darwin) && canImport(CoreFoundation)
-        let flags: CFStringCompareFlags = [
-            .compareCaseInsensitive,
-            .compareNumerically,
-            .compareLocalized,
-            .compareWidthInsensitive,
-        ]
-        let cfA = a as CFString
-        let cfB = b as CFString
-        let result = CFStringCompareWithOptionsAndLocale(
-            cfA,
-            cfB,
-            CFRange(location: 0, length: CFStringGetLength(cfA)),
-            flags,
-            CFLocaleCopyCurrent()
-        )
-        switch result {
-        case .compareLessThan: return .orderedAscending
-        case .compareGreaterThan: return .orderedDescending
-        case .compareEqualTo: return .orderedSame
-        @unknown default: return naturalASCIIFallback(a, b)
-        }
-        #elseif canImport(FoundationInternationalization) || os(Windows)
-        return a.compare(b, options: [.caseInsensitive, .numeric, .widthInsensitive], range: nil, locale: .current)
-        #else
-        return naturalASCIIFallback(a, b)
-        #endif
-    }
-
-    private static func naturalASCIIFallback(_ a: String, _ b: String) -> ComparisonResult {
-        var x = a.unicodeScalars.makeIterator()
-        var y = b.unicodeScalars.makeIterator()
-        var nx = x.next()
-        var ny = y.next()
-
-        func isDigit(_ s: Unicode.Scalar) -> Bool { s.value >= 0x30 && s.value <= 0x39 }
-
-        while let cx = nx, let cy = ny {
-            if isDigit(cx) && isDigit(cy) {
-                var sx = ""
-                var curX: Unicode.Scalar? = cx
-                while let d = curX, isDigit(d) {
-                    sx.unicodeScalars.append(d)
-                    curX = x.next()
-                }
-                nx = curX
-
-                var sy = ""
-                var curY: Unicode.Scalar? = cy
-                while let d = curY, isDigit(d) {
-                    sy.unicodeScalars.append(d)
-                    curY = y.next()
-                }
-                ny = curY
-
-                let mx = sx.drop { $0 == "0" }
-                let my = sy.drop { $0 == "0" }
-                if mx.count != my.count {
-                    return mx.count < my.count ? .orderedAscending : .orderedDescending
-                }
-                if mx != my {
-                    return mx < my ? .orderedAscending : .orderedDescending
-                }
-            } else {
-                let lx = String(cx).lowercased()
-                let ly = String(cy).lowercased()
-                if lx != ly {
-                    return lx < ly ? .orderedAscending : .orderedDescending
-                }
-                nx = x.next()
-                ny = y.next()
-            }
-        }
-        if nx == nil && ny == nil { return .orderedSame }
-        return nx == nil ? .orderedAscending : .orderedDescending
+    /// A sort uses one snapshot of the interface language for every sibling comparison.
+    private static func nameOrder() -> (String, String) -> ComparisonResult {
+        RuneCollation.nameOrder(languageTag: TextLanguageRegistry.currentLanguageTag())
     }
 
     private final class DirBox<D> {
-        var dirNames: [String] = []
-        var dirs: [String: DirBox<D>] = [:]
+        var orderedDirs: [(name: String, dir: DirBox<D>)] = []
+        var dirsByName: [KitSourceKey: DirBox<D>] = [:]
         var files: [(String, D)] = []
 
         func dir(_ name: String) -> DirBox<D> {
-            if let existing = dirs[name] {
+            let key = KitSourceKey(name)
+            if let existing = dirsByName[key] {
                 return existing
             }
             let created = DirBox<D>()
-            dirNames.append(name)
-            dirs[name] = created
+            orderedDirs.append((name, created))
+            dirsByName[key] = created
             return created
         }
     }
@@ -209,15 +129,13 @@ public struct FileTreeBuilder: Sendable {
     private static func buildTrie<D>(_ files: [(String, D)]) -> DirBox<D> {
         let root = DirBox<D>()
         for (rawPath, data) in files {
-            let trimmed = rawPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard !trimmed.isEmpty else { continue }
-            var parts = trimmed.split(separator: "/").map(String.init).filter { !$0.isEmpty }
-            guard let fileName = parts.popLast() else { continue }
+            let parts = rawPath.utf8.split(separator: 0x2f)
+            guard let fileName = parts.last else { continue }
             var cursor = root
-            for dirName in parts {
-                cursor = cursor.dir(dirName)
+            for dirName in parts.dropLast() {
+                cursor = cursor.dir(String(decoding: dirName, as: UTF8.self))
             }
-            cursor.files.append((fileName, data))
+            cursor.files.append((String(decoding: fileName, as: UTF8.self), data))
         }
         return root
     }
@@ -228,17 +146,15 @@ public struct FileTreeBuilder: Sendable {
         var model = TreeModel<FileNode<Data>>(key: key)
 
         func emit(_ box: DirBox<Data>, parent: String?, prefix: String) {
-            for dirName in box.dirNames {
-                guard let subBox = box.dirs[dirName] else { continue }
+            for (dirName, subBox) in box.orderedDirs {
                 var name = dirName
                 var path = prefix.isEmpty ? dirName : "\(prefix)/\(dirName)"
                 var current = subBox
-                while compactFolders && current.files.isEmpty && current.dirNames.count == 1,
-                      let childName = current.dirNames.first,
-                      let childBox = current.dirs[childName] {
-                    name = "\(name)/\(childName)"
-                    path = "\(path)/\(childName)"
-                    current = childBox
+                while compactFolders && current.files.isEmpty && current.orderedDirs.count == 1,
+                      let child = current.orderedDirs.first {
+                    name = "\(name)/\(child.name)"
+                    path = "\(path)/\(child.name)"
+                    current = child.dir
                 }
                 model.insert(
                     parent: parent,
@@ -260,11 +176,12 @@ public struct FileTreeBuilder: Sendable {
 
         emit(root, parent: nil, prefix: "")
         let df = directoriesFirst
+        let compare = Self.nameOrder()
         model.sortBy { a, b in
             if df && a.isDirectory != b.isDirectory {
                 return a.isDirectory
             }
-            return Self.naturalCompare(a.name, b.name) == .orderedAscending
+            return compare(a.name, b.name) == .orderedAscending
         }
         return model
     }
@@ -272,39 +189,38 @@ public struct FileTreeBuilder: Sendable {
     /// Builds sorted legacy `TreeItem<String>` roots from `(path, data)` pairs.
     public func buildTreeItems<Data: Sendable>(_ files: [(path: String, data: Data)]) -> [TreeItem<String>] {
         let root = Self.buildTrie(files.map { ($0.path, $0.data) })
+        let compare = Self.nameOrder()
 
         func emit(_ box: DirBox<Data>, prefix: String) -> [TreeItem<String>] {
             var dirItems: [TreeItem<String>] = []
-            var folderPaths: Set<String> = []
-            for dirName in box.dirNames {
-                guard let subBox = box.dirs[dirName] else { continue }
+            var folderPaths: Set<KitSourceKey> = []
+            for (dirName, subBox) in box.orderedDirs {
                 var label = dirName
                 var path = prefix.isEmpty ? dirName : "\(prefix)/\(dirName)"
                 var current = subBox
-                while compactFolders && current.files.isEmpty && current.dirNames.count == 1,
-                      let childName = current.dirNames.first,
-                      let childBox = current.dirs[childName] {
-                    label = "\(label)/\(childName)"
-                    path = "\(path)/\(childName)"
-                    current = childBox
+                while compactFolders && current.files.isEmpty && current.orderedDirs.count == 1,
+                      let child = current.orderedDirs.first {
+                    label = "\(label)/\(child.name)"
+                    path = "\(path)/\(child.name)"
+                    current = child.dir
                 }
-                folderPaths.insert(path)
+                folderPaths.insert(KitSourceKey(path))
                 let children = emit(current, prefix: path)
                 dirItems.append(TreeItem(id: path, label: label, isFolder: true, children: children))
             }
 
             let fileItems: [TreeItem<String>] = box.files.compactMap { fileName, _ in
                 let path = prefix.isEmpty ? fileName : "\(prefix)/\(fileName)"
-                if folderPaths.contains(path) { return nil }
+                if folderPaths.contains(KitSourceKey(path)) { return nil }
                 return TreeItem(id: path, label: fileName, isFolder: false, children: [])
             }
 
             if directoriesFirst {
-                let sortedDirs = dirItems.sorted { Self.naturalCompare($0.label, $1.label) == .orderedAscending }
-                let sortedFiles = fileItems.sorted { Self.naturalCompare($0.label, $1.label) == .orderedAscending }
+                let sortedDirs = dirItems.sorted { compare($0.label, $1.label) == .orderedAscending }
+                let sortedFiles = fileItems.sorted { compare($0.label, $1.label) == .orderedAscending }
                 return sortedDirs + sortedFiles
             } else {
-                return (dirItems + fileItems).sorted { Self.naturalCompare($0.label, $1.label) == .orderedAscending }
+                return (dirItems + fileItems).sorted { compare($0.label, $1.label) == .orderedAscending }
             }
         }
 

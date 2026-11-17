@@ -173,7 +173,8 @@ void main() {
             outColor = blurred * coverage + sharp * (1.0 - blurred.a * coverage);
         } else {
             float coverage = clamp(0.5 - boxDistance(local, halfSize), 0.0, 1.0) * clipCoverage(frag);
-            outColor = mix(sharp, blurred, coverage);
+            coverage *= uPose.w;
+            outColor = blurred * coverage + sharp * (1.0 - blurred.a * coverage);
         }
     } else if (uMode == 4) {
         outColor = min(vec4(1.0), texelFetch(uBlurred, px, 0) + layer(px, frag, size));

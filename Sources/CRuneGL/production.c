@@ -8,12 +8,12 @@ struct RuneGLProduction {
     const RuneGLAPI *gl;
     GLuint program, vao;
     GLint viewport, origin, srgb_blend, in_layer;
-    GLint spring_first, spring_time;
+    GLint spring_first, spring_time, atlas_fill;
 };
 
 enum { frame_stride = 128, frame_slots = 8 };
 
-RuneGLProduction *rune_production_create(const RuneGLAPI *gl, int es, const char *vs,
+RuneGLProduction *rune_production_create(const RuneGLAPI *gl, int es, int variant, const char *vs,
                                          const char *fs, char *error, size_t capacity) {
     RuneGLProduction *p = calloc(1, sizeof(*p));
     if (!p) {
@@ -21,7 +21,7 @@ RuneGLProduction *rune_production_create(const RuneGLAPI *gl, int es, const char
         return NULL;
     }
     p->gl = gl;
-    p->program = rune_gl_program(gl, es, vs, fs, error, capacity);
+    p->program = rune_gl_program_variant(gl, es, variant, vs, fs, error, capacity);
     if (!p->program) {
         free(p);
         return NULL;
@@ -40,6 +40,16 @@ RuneGLProduction *rune_production_create(const RuneGLAPI *gl, int es, const char
     }
     gl->Uniform1i(glyph, 0);
     gl->Uniform1i(image, 1);
+    p->atlas_fill = gl->GetUniformLocation(p->program, "uAtlasFill");
+    if (variant) {
+        GLint outlines = gl->GetUniformLocation(p->program, "uOutlines");
+        if (outlines < 0 || p->atlas_fill < 0) {
+            if (error && capacity) snprintf(error, capacity, "Rune outline shader has no integer outline store");
+            rune_production_destroy(p);
+            return NULL;
+        }
+        gl->Uniform1i(outlines, 4);
+    }
     p->spring_first = gl->GetUniformLocation(p->program, "uSpringFirst");
     if (p->spring_first >= 0) {
         p->spring_time = gl->GetUniformLocation(p->program, "uSpringTime");
@@ -71,7 +81,7 @@ void rune_production_destroy(RuneGLProduction *p) {
 
 void rune_production_batch(RuneGLProduction *p, GLuint buffer, int width, int height,
                            int origin_x, int origin_y, size_t first, size_t count,
-                           int srgb_blend, int in_layer, const RuneGLFrameSprings *springs) {
+                           int srgb_blend, int in_layer, int atlas_fill, const RuneGLFrameSprings *springs) {
     if (!count) return;
     const RuneGLAPI *gl = p->gl;
     gl->UseProgram(p->program);
@@ -89,6 +99,7 @@ void rune_production_batch(RuneGLProduction *p, GLuint buffer, int width, int he
     gl->Uniform2f(p->origin, (float)origin_x, (float)origin_y);
     gl->Uniform1i(p->srgb_blend, srgb_blend);
     gl->Uniform1i(p->in_layer, in_layer);
+    if (p->atlas_fill >= 0) gl->Uniform1i(p->atlas_fill, atlas_fill);
     if (p->spring_first >= 0) {
         int active = springs->tracks && springs->ids;
         gl->Uniform1i(p->spring_first, active ? (GLint)first : -1);

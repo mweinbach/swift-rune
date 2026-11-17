@@ -212,16 +212,10 @@ internal struct RuntimeVirtualListState: Sendable {
         return at
     }
 
-    private func stride(at index: Int, estimated: Float) -> Float {
-        let height = measuredByKey.heights[index] ?? estimated
-        return height + (index + 1 < measuredByKey.heights.count ? gap : 0)
-    }
-
     /// The top of row `end`, or the list's extent when all rows are included (`VirtualList::prefix`).
     func prefix(_ end: Int, estimated: Float) -> Float {
-        let count = min(lastKeys.count, max(0, end))
-        let fallback = max(1, estimated)
-        return (0..<count).reduce(0) { $0 + stride(at: $1, estimated: fallback) }
+        let prefix = measuredByKey.offsets(estimated: max(1, estimated), gap: gap)
+        return prefix[min(prefix.count - 1, max(0, end))]
     }
 
     func rowHeight(forKey key: String, estimated: Float) -> Float {
@@ -229,16 +223,8 @@ internal struct RuntimeVirtualListState: Sendable {
     }
 
     func computeOffsets(estimated: Float) -> (prefix: [Float], total: Float) {
-        var prefix: [Float] = []
-        prefix.reserveCapacity(lastKeys.count + 1)
-        var y: Float = 0
-        prefix.append(0)
-        let fallback = max(1, estimated)
-        for index in measuredByKey.heights.indices {
-            y += stride(at: index, estimated: fallback)
-            prefix.append(y)
-        }
-        return (prefix, y)
+        let prefix = measuredByKey.offsets(estimated: max(1, estimated), gap: gap)
+        return (prefix, prefix.last ?? 0)
     }
 
     /// The bottom of the last included row, before the gap to the next row.
@@ -255,57 +241,54 @@ internal struct RuntimeVirtualListState: Sendable {
 
     func revealWindowOffset(row: Int?, prefix: [Float], viewport: Float, from offset: Float) -> Float {
         guard let row else { return offset }
-        let bottom = rowEnd(row + 1, prefix: prefix)
-        guard prefix[row] > offset + viewport || bottom < offset else { return offset }
-        return max(0, prefix[row] - max(0, viewport - (bottom - prefix[row])) * 0.5)
+        let top = padTop + prefix[row]
+        let bottom = padTop + rowEnd(row + 1, prefix: prefix)
+        guard top > offset + viewport || bottom < offset else { return offset }
+        return max(0, top - max(0, viewport - (bottom - top)) * 0.5)
     }
 
     func visibleRange(offset: Float, viewport: Float, prefix: [Float], count: Int) -> Range<Int> {
         guard count > 0, viewport > 0 else { return 0..<0 }
-        let lo = max(0, offset)
-        let hi = lo + viewport
-        var start = count
-        var end = 0
-        for i in 0..<count {
-            let r0 = prefix[i]
-            let r1 = rowEnd(i + 1, prefix: prefix)
-            if r1 > lo && r0 < hi {
-                start = min(start, i)
-                end = max(end, i + 1)
-            }
-        }
-        return start < end ? start..<end : 0..<0
+        let maxOffset = max(0, extent(total: prefix.last ?? 0) - viewport)
+        let lo = min(maxOffset, max(0, offset)) - padTop
+        return intersectingRows(from: lo, to: lo + viewport, prefix: prefix, count: count)
     }
 
-    private func overscanBounds(
+    /// The half-open interval excludes a row ending at the top and a row starting at the bottom.
+    private func intersectingRows(from lo: Float, to hi: Float, prefix: [Float], count: Int) -> Range<Int> {
+        var start = 0
+        var end = count
+        while start < end {
+            let mid = start + (end - start) / 2
+            if rowEnd(mid + 1, prefix: prefix) <= lo { start = mid + 1 } else { end = mid }
+        }
+        let first = start
+        end = count
+        while start < end {
+            let mid = start + (end - start) / 2
+            if prefix[mid] < hi { start = mid + 1 } else { end = mid }
+        }
+        return first..<start
+    }
+
+    func overscanBounds(
         offset: Float,
         viewport: Float,
         prefix: [Float],
         count: Int,
         pinned: Bool
     ) -> (effOffset: Float, targetLo: Int, targetHi: Int, edgeLo: Float, edgeHi: Float) {
-        let maxOffset = max(0, (prefix.last ?? 0) - viewport)
+        let maxOffset = max(0, extent(total: prefix.last ?? 0) - viewport)
         let effOffset = pinned ? maxOffset : min(max(0, offset), maxOffset)
-        let lo = max(0, effOffset - viewport * Self.overscanMultiplier)
-        let hi = effOffset + viewport * (1.0 + Self.overscanMultiplier)
+        let lo = effOffset - viewport * Self.overscanMultiplier - padTop
+        let hi = effOffset + viewport * (1.0 + Self.overscanMultiplier) - padTop
 
-        var targetLo = count
-        var targetHi = 0
-        for i in 0..<count {
-            let r0 = prefix[i]
-            let r1 = rowEnd(i + 1, prefix: prefix)
-            if r1 > lo && r0 < hi {
-                targetLo = min(targetLo, i)
-                targetHi = max(targetHi, i + 1)
-            }
-        }
-        if targetLo >= targetHi {
-            targetLo = 0
-            targetHi = min(count, 1)
-        }
+        let rows = intersectingRows(from: lo, to: hi, prefix: prefix, count: count)
+        var targetLo = rows.lowerBound
+        let targetHi = rows.upperBound
         if pinned { targetLo = min(targetLo, max(0, targetHi - Self.pinnedRows)) }
-        let edgeLo = max(0, effOffset - viewport * Self.indexedEdgeMultiplier)
-        let edgeHi = effOffset + viewport * (1.0 + Self.indexedEdgeMultiplier)
+        let edgeLo = effOffset - viewport * Self.indexedEdgeMultiplier - padTop
+        let edgeHi = effOffset + viewport * (1.0 + Self.indexedEdgeMultiplier) - padTop
         return (effOffset, targetLo, targetHi, edgeLo, edgeHi)
     }
 
@@ -358,60 +341,39 @@ internal struct RuntimeVirtualListState: Sendable {
             }
         }
 
-        guard indexed && !pinned && !bypassBudget else {
+        guard targetLo < targetHi, indexed && !pinned && !bypassBudget else {
             return (targetLo..<targetHi, false, 0)
         }
 
         // Budget off-screen fills on indexed virtualRows to `0.5 * viewport` per edge per frame
         // when jumping/mounting fresh ranges so huge jumps spread cleanly across frames.
         let visRange = visibleRange(offset: effOffset, viewport: viewport, prefix: prefix, count: count)
-        let visLo = visRange.isEmpty ? targetLo : visRange.lowerBound
-        let visHi = visRange.isEmpty ? targetHi : visRange.upperBound
-
-        let prevLo = lastMountedRange.lowerBound
-        let prevHi = lastMountedRange.upperBound
-        let hadPrior = !lastMountedRange.isEmpty
-
-        let chosenLo: Int
-        let chosenHi: Int
-        if !hadPrior || lastMountedRange.overlaps(targetLo..<targetHi) == false {
-            // Initial mount or jump: mount visible + up to 0.5*viewport budget per side.
-            let budget = viewport * Self.indexedBudgetMultiplier
-            var loIdx = visLo
-            while loIdx > targetLo && (prefix[visLo] - prefix[loIdx - 1]) <= budget {
-                loIdx -= 1
+        let first = max(targetLo, visRange.lowerBound)
+        let last = min(targetHi, max(first, visRange.upperBound))
+        let shown = Set(lastMountedSnapshot?.mountedKeys ?? [])
+        let budget = viewport * Self.indexedBudgetMultiplier
+        var spent: Float = 0
+        var chosenLo = first
+        while chosenLo > targetLo {
+            let i = chosenLo - 1
+            if !shown.contains(lastKeys[i]) {
+                if spent >= budget { break }
+                spent += rowEnd(i + 1, prefix: prefix) - prefix[i] + gap
             }
-            var hiIdx = visHi
-            while hiIdx < targetHi && (prefix[hiIdx] - prefix[visHi]) <= budget {
-                hiIdx += 1
+            chosenLo = i
+        }
+        spent = 0
+        var chosenHi = last
+        while chosenHi < targetHi {
+            if !shown.contains(lastKeys[chosenHi]) {
+                if spent >= budget { break }
+                spent += rowEnd(chosenHi + 1, prefix: prefix) - prefix[chosenHi] + gap
             }
-            var cLo = loIdx
-            var cHi = hiIdx
-            for idx in pinnedIndices where idx >= targetLo && idx < targetHi {
-                cLo = min(cLo, idx)
-                cHi = max(cHi, idx + 1)
-            }
-            chosenLo = cLo
-            chosenHi = cHi
-        } else {
-            let budget = viewport * Self.indexedBudgetMultiplier
-            var loIdx = min(visLo, max(targetLo, prevLo))
-            while loIdx > targetLo && (max(prevLo, visLo) > loIdx ? (prefix[min(prevLo, visLo)] - prefix[loIdx - 1]) : 0) <= budget {
-                loIdx -= 1
-                if (prefix[prevLo] - prefix[loIdx]) >= budget { break }
-            }
-            var hiIdx = max(visHi, min(targetHi, prevHi))
-            while hiIdx < targetHi && (prefix[hiIdx] - prefix[max(prevHi, visHi)]) < budget {
-                hiIdx += 1
-            }
-            var cLo = min(loIdx, visLo)
-            var cHi = max(hiIdx, visHi)
-            for idx in pinnedIndices where idx >= targetLo && idx < targetHi {
-                cLo = min(cLo, idx)
-                cHi = max(cHi, idx + 1)
-            }
-            chosenLo = cLo
-            chosenHi = cHi
+            chosenHi += 1
+        }
+        for index in pinnedIndices where index >= targetLo && index < targetHi {
+            chosenLo = min(chosenLo, index)
+            chosenHi = max(chosenHi, index + 1)
         }
 
         let need = windowNeed(
@@ -426,6 +388,17 @@ internal struct RuntimeVirtualListState: Sendable {
             pinned: pinned
         )
         return (chosenLo..<chosenHi, need.wantedMore, need.missing)
+    }
+
+    /// A measurement retry must fill visible pixels now. Overscan fills on its own frame budget.
+    func leavesVisibleGap(offset: Float, viewport: Float, prefix: [Float], pinned: Bool) -> Bool {
+        let start = lastMountedRange.lowerBound
+        let end = lastMountedRange.upperBound
+        let before = prefix[start]
+        let bottom = rowEnd(end, prefix: prefix)
+        if pinned { return start > 0 && bottom - before < viewport - 0.5 }
+        return (start > 0 && offset < padTop + before - 0.5) ||
+            (end < lastKeys.count && offset + viewport > padTop + bottom + 0.5)
     }
 
     func postMeasureWindowNeed(

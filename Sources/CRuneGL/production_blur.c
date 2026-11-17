@@ -60,12 +60,29 @@ static void release_target(const RuneGLAPI *gl, BlurTarget *t) {
     *t = (BlurTarget){0};
 }
 
-void rune_gl_blur_destroy(RuneGLBlur *b) {
+static uint64_t target_bytes(BlurTarget t) {
+    return (uint64_t)t.width * (uint64_t)t.height * (t.format == GL_RGBA16F ? 8u : 4u);
+}
+
+uint64_t rune_gl_blur_bytes(const RuneGLBlur *b) {
+    if (!b) return 0;
+    uint64_t bytes = target_bytes(b->output) + target_bytes(b->scratch[0]) + target_bytes(b->scratch[1]);
+    for (int i = 0; i < MIP_COUNT; ++i) bytes += target_bytes(b->down[i]);
+    for (int i = 0; i < MIP_COUNT - 1; ++i) bytes += target_bytes(b->up[i]);
+    return bytes;
+}
+
+void rune_gl_blur_rest(RuneGLBlur *b) {
     if (!b) return;
     for (int i = 0; i < 2; ++i) release_target(b->gl, &b->scratch[i]);
     for (int i = 0; i < MIP_COUNT; ++i) release_target(b->gl, &b->down[i]);
     for (int i = 0; i < MIP_COUNT-1; ++i) release_target(b->gl, &b->up[i]);
     release_target(b->gl, &b->output);
+}
+
+void rune_gl_blur_destroy(RuneGLBlur *b) {
+    if (!b) return;
+    rune_gl_blur_rest(b);
     b->gl->DeleteVertexArrays(1, &b->vao);
     b->gl->DeleteProgram(b->program);
     free(b);
@@ -140,10 +157,9 @@ static int bucket(int n) { return ((n + BUCKET-1) / BUCKET) * BUCKET; }
 
 /* Only reconstruct the region that the compositor will sample. Clearing before
  * applying the scissor prevents prior contents from leaking into a rotated group. */
-static void resolve(RuneGLBlur *b, int mode, GLuint source,
+static void resolve(RuneGLBlur *b, const BlurTarget *dst, int mode, GLuint source,
                     float left, float top, float right, float bottom) {
     const RuneGLAPI *gl = b->gl;
-    const BlurTarget *dst = &b->output;
     int x0 = (int)fminf(dst->width, fmaxf(0, floorf(left)));
     int y0 = (int)fminf(dst->height, fmaxf(0, floorf(top)));
     int x1 = (int)fmaxf(x0, fminf(dst->width, ceilf(right)));
@@ -157,9 +173,10 @@ static void resolve(RuneGLBlur *b, int mode, GLuint source,
     gl->Disable(GL_SCISSOR_TEST);
 }
 
-static int layer_blur(RuneGLBlur *b, GLenum format, int width, int height, GLuint source,
+static int layer_blur(RuneGLBlur *b, GLenum format, const BlurTarget *dst, GLuint source,
                       const float *rect, float sigma, int additive, char *error, size_t capacity) {
     const RuneGLAPI *gl = b->gl;
+    int width = dst->width, height = dst->height;
     sigma = fminf(sigma, 64);
     // Bound the area of a caller-supplied isolated layer to its influence on
     // this framebuffer before converting the coordinates to allocation sizes.
@@ -168,7 +185,7 @@ static int layer_blur(RuneGLBlur *b, GLenum format, int width, int height, GLuin
     float right = fminf(width+halo, ceilf(rect[0]+rect[2]));
     float bottom = fminf(height+halo, ceilf(rect[1]+rect[3]));
     if (right <= x || bottom <= y) {
-        gl->BindFramebuffer(GL_FRAMEBUFFER, b->output.fbo);
+        gl->BindFramebuffer(GL_FRAMEBUFFER, dst->fbo);
         gl->ClearColor(0, 0, 0, 0);
         gl->Clear(GL_COLOR_BUFFER_BIT);
         return 1;
@@ -177,8 +194,11 @@ static int layer_blur(RuneGLBlur *b, GLenum format, int width, int height, GLuin
     float reduction = fminf(8.0f, fmaxf(sigma/3.0f, 1.0f));
     int rw = (int)ceilf(w/reduction), rh = (int)ceilf(h/reduction);
     float sx = (float)w/rw, sy = (float)h/rh;
-    if (!resize_target(b, &b->scratch[0], rw, rh, format, error, capacity) ||
-        !resize_target(b, &b->scratch[1], rw, rh, format, error, capacity)) return 0;
+    // At full resolution the horizontal pass finishes reading the layer.
+    // Write the vertical pass back to that surface, keeping one scratch texture.
+    int in_place = rw == width && rh == height && sx == 1 && sy == 1 && x == 0 && y == 0;
+    if (!resize_target(b, &b->scratch[1], rw, rh, format, error, capacity)) return 0;
+    if (!in_place && !resize_target(b, &b->scratch[0], rw, rh, format, error, capacity)) return 0;
     gl->Uniform1i(b->additive, additive);
     gl->Uniform4f(b->domain, x, y, (float)w, (float)h);
     if (rw != w || rh != h) {
@@ -191,9 +211,13 @@ static int layer_blur(RuneGLBlur *b, GLenum format, int width, int height, GLuin
     draw(b, GAUSSIAN, &b->scratch[1], source, 0);
     set_kernel(b, sigma, sy, 1);
     gl->Uniform4f(b->domain, 0, 0, (float)rw, (float)rh);
+    if (in_place) {
+        resolve(b, dst, GAUSSIAN, b->scratch[1].texture, x, y, right, bottom);
+        return 1;
+    }
     draw(b, GAUSSIAN, &b->scratch[0], b->scratch[1].texture, 0);
     gl->Uniform4f(b->map, 1/sx, 1/sy, -x/sx, -y/sy);
-    resolve(b, RESAMPLE, b->scratch[0].texture, x, y, right, bottom);
+    resolve(b, dst, RESAMPLE, b->scratch[0].texture, x, y, right, bottom);
     return 1;
 }
 
@@ -234,12 +258,12 @@ static int backdrop_blur(RuneGLBlur *b, GLenum format, int width, int height, GL
         coarse = b->up[i].texture;
     }
     gl->Uniform4f(b->map, (float)width/ex, (float)height/ey, -x/ex, -y/ey);
-    resolve(b, RESOLVE, coarse, rect[0]-1, rect[1]-1, rect[0]+rect[2]+1, rect[1]+rect[3]+1);
+    resolve(b, &b->output, RESOLVE, coarse, rect[0]-1, rect[1]-1, rect[0]+rect[2]+1, rect[1]+rect[3]+1);
     return 1;
 }
 
 int rune_gl_blur_draw(RuneGLBlur *b, GLenum format, int width, int height, GLuint source,
-                      const float *rect, float sigma, int backdrop, int additive, GLuint *result,
+                      GLuint layer_fbo, const float *rect, float sigma, int backdrop, int additive, GLuint *result,
                       char *error, size_t capacity) {
     if (!b || !rect || !result || width < 1 || height < 1 || width > 16384 || height > 16384)
         return fail(error, capacity, "Invalid Rune production blur target");
@@ -247,13 +271,14 @@ int rune_gl_blur_draw(RuneGLBlur *b, GLenum format, int width, int height, GLuin
     if (sigma <= (backdrop ? 0.0f : 0.05f)) return 1;
     if (backdrop && (rect[0]+rect[2] <= 0 || rect[1]+rect[3] <= 0 ||
                      rect[0] >= width || rect[1] >= height)) return 1;
-    if (!resize_target(b, &b->output, width, height, format, error, capacity)) return 0;
+    if (backdrop && !resize_target(b, &b->output, width, height, format, error, capacity)) return 0;
     b->gl->UseProgram(b->program);
     b->gl->BindVertexArray(b->vao);
     b->gl->Disable(GL_BLEND);
     b->gl->Disable(GL_SCISSOR_TEST);
+    const BlurTarget layer = {source, layer_fbo, format, width, height};
     int ok = backdrop ? backdrop_blur(b, format, width, height, source, rect, sigma, error, capacity)
-                      : layer_blur(b, format, width, height, source, rect, sigma, additive, error, capacity);
-    if (ok) *result = b->output.texture;
+                      : layer_blur(b, format, &layer, source, rect, sigma, additive, error, capacity);
+    if (ok && backdrop) *result = b->output.texture;
     return ok;
 }

@@ -43,7 +43,7 @@ public struct HighlightStream: Sendable {
 
     /// Returns `true` when `source` extends the previously committed prefix.
     public func continues(_ source: String) -> Bool {
-        !committedText.isEmpty && source.hasPrefix(committedText)
+        !committedText.isEmpty && source.utf8.starts(with: committedText.utf8)
     }
 
     /// Highlights `source`, carrying lexer state over completed lines when `source` extends them.

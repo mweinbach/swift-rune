@@ -9,13 +9,40 @@ extern "C" {
 // All coordinates are device pixels, x increases right and y increases down.
 // The logical origin of the line is its top left, including for RTL text.
 typedef struct RuneDesktopLine RuneDesktopLine;
+#if defined(_WIN32)
+// Windows' system ICU dictionaries load off the frame thread. Word ends are
+// UTF-16 offsets. A negative count leaves the caller's rule-based fallback active.
+void rune_windows_segmenter_start(void);
+void rune_windows_segmenter_presented(void);
+int32_t rune_windows_word_ends(const uint16_t *text, int32_t units, int32_t *ends);
+int32_t rune_windows_visual_word_breaks(const uint16_t *text, int32_t units, uint8_t *flags);
+RuneDesktopLine *rune_windows_line_create(const char *utf8, int32_t length, const char *family,
+    float size_px, int32_t weight, int32_t italic, int32_t mono, int32_t direction, int32_t chromium_mask);
+// Packed RGB coverage, with the same geometry as rune_desktop_line_mask.
+int32_t rune_windows_line_lcd(const RuneDesktopLine *line, int32_t x, int32_t y,
+    int32_t width, int32_t height, uint8_t *rgb);
+#endif
 #if defined(__wasi__)
 // Browser raster platform: 0 other/standalone, 1 desktop Mac, 2 iOS/iPadOS, 3 Windows.
 int32_t rune_browser_text_platform(void);
+void rune_browser_host_wake(double delay_seconds);
+#if defined(RUNE_BROWSER_TEXT)
+// Synchronous browser spell request. READ consumes the sized response.
+int32_t rune_browser_spell_request(int32_t op, const uint8_t *input, int32_t length);
+void rune_browser_spell_read(uint8_t *output, int32_t length);
+void rune_browser_font_url(const char *url, int32_t late);
+// Browser dictionary segmentation. Text is UTF-8, the query and its result use UTF-16.
+void rune_browser_word_range(const uint8_t *text, int32_t length, int32_t position, int32_t bounds[2]);
+// Refines the UAX #14 break flags (one per UTF-16 boundary) inside dictionary-script runs.
+void rune_browser_dictionary_lines(const uint8_t *text, int32_t length, uint8_t *breaks);
+// Refines UAX #29 word flags (one per UTF-8 boundary) for visual caret movement.
+void rune_browser_dictionary_words(const uint8_t *text, int32_t length, uint8_t *breaks);
+#endif
 #endif
 #if defined(__ANDROID__)
 void rune_android_text_attach(void *native_activity);
 int32_t rune_android_bundled_fonts_ready(void);
+int32_t rune_android_text_outlines_available(void);
 #endif
 // Adds a font to this process's text backend. The caller may release the byte
 // buffer immediately. File registrations require the file to remain available.
@@ -38,6 +65,44 @@ void rune_desktop_line_configure(RuneDesktopLine *line, const char *language,
     const char *features, const char *variations);
 void rune_desktop_line_destroy(RuneDesktopLine *line);
 RuneDesktopLineMetrics rune_desktop_line_metrics(const RuneDesktopLine *line);
+// Raster-only view of glyphs whose shaping cluster starts in the given UTF-8 range.
+// Coordinates and baseline are those of the source line. A continuation returns a
+// valid view with empty ink. Release the view with rune_desktop_line_destroy.
+RuneDesktopLine *rune_desktop_line_extract_ink(const RuneDesktopLine *line, int32_t start, int32_t end);
+#if defined(_WIN32) || defined(__linux__) || defined(__ANDROID__)
+// A cluster view's shaped contours in the original line's device coordinates (y down).
+// Commands are move, line, quadratic, cubic, and close (0...4). A valid empty view
+// succeeds without emitting a contour. Color or unrepresentable ink uses the raster path.
+typedef void (*RuneOutlineEmit)(void *context, int32_t command,
+    float x1, float y1, float x2, float y2, float x3, float y3);
+int32_t rune_desktop_line_outline(const RuneDesktopLine *ink, RuneOutlineEmit emit, void *context);
+// Visits original shaped clusters with conservative device-pixel ink bounds. The byte
+// offset names the original line's UTF-8 cluster owner. Zero requests per-range lookup.
+typedef void (*RuneOutlineRegion)(void *context, int32_t utf8_owner,
+    float left, float top, float right, float bottom);
+int32_t rune_desktop_line_outline_regions(const RuneDesktopLine *line, RuneOutlineRegion emit, void *context);
+// Stable identity and true pen of a single shaped glyph, for sharing curves
+// between independently shaped strings. Returns zero for multi-glyph clusters.
+// Bit 0 indicates success. Bit 1 identifies a face with the OS/2 CJK ranges.
+int32_t rune_desktop_line_outline_single(const RuneDesktopLine *line, int32_t owner,
+    uint64_t *font_id, uint32_t *glyph, float *pen_x, float *pen_y);
+// The same single glyph at pen (0, 0) in device pixels, including the shaped
+// font's size, axes and transforms. Position with the pen from outline_single.
+int32_t rune_desktop_line_outline_unplaced(const RuneDesktopLine *line, int32_t owner,
+    RuneOutlineEmit emit, void *context);
+#if defined(__linux__) && !defined(__ANDROID__)
+enum { RUNE_LINUX_HINT_DESIGN = 0, RUNE_LINUX_HINT_CHROMIUM = 1, RUNE_LINUX_HINT_AUTO = 2 };
+// Shape-derived FreeType curves. A nonnegative owner requests intrinsic geometry
+// from the original line. A negative owner exports an entire extracted ink view.
+int32_t rune_linux_line_outline_fitted(const RuneDesktopLine *line, int32_t owner,
+    float ppem, int32_t look, RuneOutlineEmit emit, void *context);
+#endif
+#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+// Unscaled design metrics for Rune's 7–18 ppem CoreGraphics-style Y transform.
+// The named glyphs are resolved via post, never via Unicode or OS/2 heights.
+int32_t rune_desktop_line_apple_hint_metrics(const RuneDesktopLine *line, int32_t owner, double metrics[5]);
+#endif
+#endif
 float rune_desktop_line_caret(const RuneDesktopLine *line, int32_t byte_offset);
 // Visual left edge and positive advance of [byte_offset, byte_end), a grapheme.
 // Returns +1 for LTR, -1 for RTL or 0 for an empty range.

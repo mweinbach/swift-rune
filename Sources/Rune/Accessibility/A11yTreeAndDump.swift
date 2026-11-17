@@ -264,7 +264,7 @@ public final class AccessibilityTreeState {
         h.combine(node.sizeOfSet)
         h.combine(node.keyboardShortcut)
         h.combine(node.url)
-        h.combine(node.activeDescendant)
+        h.combine(node.activeDescendantKey)
         h.combine(node.sortAscending)
         h.combine(node.isDisabled)
         h.combine(node.isReadOnly)
@@ -314,6 +314,7 @@ public enum AccessibilityDump {
             dict["name"] = name
         }
         if forBrowser {
+            node.webDocument?.write(to: &dict)
             dict["path"] = node.runtimePath ?? syntheticPath ?? node.id
             if node.isBusy { dict["busy"] = true }
             if node.isFocusable { dict["focusable"] = true }
@@ -400,7 +401,7 @@ public enum AccessibilityDump {
     private static func namedByContainerContent(_ role: ElementRole) -> Bool {
         switch role {
         case .button, .checkbox, .link, .menuItem, .menuItemCheckbox, .menuItemRadio, .radio, .switchControl, .tab,
-             .listItem, .option, .treeItem, .row, .gridCell, .columnHeader, .heading, .alert, .status:
+             .listItem, .option, .treeItem, .row, .gridCell, .cell, .rowHeader, .columnHeader, .heading, .alert, .status:
             return true
         default:
             return false

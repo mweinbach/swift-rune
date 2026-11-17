@@ -119,7 +119,7 @@ struct UpText3ParityTests {
     @Test("#991: at 2x the inline Plex span grows the 13 px Inter line, as at 1x (Chromium's quantized boxes)")
     func defaultFacesInlineCodeLineBox() throws {
         #expect(DefaultFonts.registerIfNeeded())
-        let ts = TextSystem()
+        let ts = interPlexMetricFixture()
         ts.smoothing = .on
         let sans = TextStyle(size: 13, weight: 400)
         var mono = sans

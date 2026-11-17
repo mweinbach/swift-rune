@@ -179,6 +179,62 @@ struct WindowWakeFullParityTests {
         #expect(rt.wakeDeadline() == nil)
     }
 
+    #if os(macOS) || os(Windows) || os(Linux)
+    @Test("A window specification and its app receive the same live handle in creation order")
+    func windowAndSpecCallbacksReceiveOneSharedHandle() {
+        var calls: [String] = []
+        let supplied = WindowHandle(key: "inspector")
+        let app = App(state: ()) { _, _ in el() }
+            .onWindow { handle in
+                #expect(handle === supplied)
+                calls.append("app")
+            }
+        let spec = AppWindowSpec(app: app, key: supplied.key, onCreated: { handle in
+            #expect(handle === supplied)
+            calls.append("spec")
+        })
+        let entry = TypedHostedWindowEntry(spec: spec, handle: supplied, secondary: true)
+        entry.fireOnCreated()
+        entry.fireOnCreated()
+        #expect(calls == ["spec", "app"])
+    }
+    #endif
+
+    @Test("Window handles expose live per-surface counters and keep their final snapshot on unbind")
+    func windowHandleStatsFollowItsOwnMeter() {
+        let main = WindowHandle(key: "main")
+        let inspector = WindowHandle(key: "inspector")
+        let start = ProcessInfo.processInfo.systemUptime - SurfaceStats.staleSeconds - 2
+        let meter = SurfaceMeter(name: main.key, now: start)
+        let other = SurfaceMeter(name: inspector.key)
+        main.attachSurfaceMeter(meter)
+        inspector.attachSurfaceMeter(other)
+
+        meter.setPacing(.vsync)
+        meter.turn(woke: true, waited: true, now: start)
+        meter.redraw(paced: false, now: start)
+        meter.presented(now: start)
+        meter.skipped(now: start)
+        meter.failed(.timeout, now: start)
+        meter.tick(now: start + 1)
+        #expect(meter.currentStats().rates.presents == 1)
+        let published = main.surfaceStats
+        #expect(published.totals == SurfaceCounts(redraws: 1, presents: 1, skipped: 1, timeouts: 1, turns: 1, wakes: 1))
+        #expect(published.name == main.key && published.pacing == .vsync)
+        #expect(published.redraws == 1 && published.presents == 1 && published.failedDrawables == 1 && published.loopTurns == 1)
+        #expect(published.rates == SurfaceCounts())
+        #expect(inspector.surfaceStats.totals == SurfaceCounts())
+
+        main.unbind()
+        meter.presented(now: start + 2)
+        #expect(main.surfaceStats.presents == 1)
+        let replacement = SurfaceMeter(name: main.key)
+        main.attachSurfaceMeter(replacement)
+        #expect(main.surfaceStats.presents == 0)
+        replacement.presented()
+        #expect(main.surfaceStats.presents == 1)
+    }
+
     @Test("frame.rs:312 - Runtime.surfaceStats returns nil headless and live counts when SurfaceMeter is bound")
     func runtimeSurfaceStatsParity() {
         let rt = Runtime<Int>(

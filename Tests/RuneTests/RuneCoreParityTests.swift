@@ -47,6 +47,28 @@ struct RuneCoreParityTests {
         #expect(pushed.array == ["a", "b", "c"])
     }
 
+    @Test("Effects iterators snapshot inline and expanded storage, including nil payloads")
+    func effectsIteratorSnapshots() {
+        var effects = Effects<Int?>.two(nil, 7)
+        var pair = effects.makeIterator()
+        effects.push(9)
+        var expanded = effects.makeIterator()
+        let copy = expanded
+        _ = effects.drain()
+
+        #expect(pair.next() == .some(nil))
+        #expect(pair.next() == .some(7))
+        #expect(pair.next() == nil)
+        #expect(expanded.next() == .some(nil))
+        #expect(Array(expanded) == [7, 9])
+        #expect(Array(copy) == [nil, 7, 9])
+
+        effects.storage = .many([])
+        #expect(effects.isEmpty)
+        #expect(effects.count == 0)
+        #expect(Array(effects).isEmpty)
+    }
+
     // MARK: - Shape Parity
 
     @Test("Shape: concave L-shape triangulation preserves area and exact boundary aaMask")

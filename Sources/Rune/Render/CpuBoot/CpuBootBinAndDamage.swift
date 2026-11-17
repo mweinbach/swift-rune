@@ -435,11 +435,12 @@ public enum CpuBootDamage {
         public let bounds: SIMD4<Int32>
         public let flat: SIMD4<Int32> // whole-pixel rect painted in one flat colour
         public let solid: Bool
+        fileprivate let flatColor: UInt64
     }
 
     @inline(__always)
     private static func mixHash(_ h: UInt64, _ word: UInt32) -> UInt64 {
-        ((h << 5) | (h >> 59)) ^ UInt64(word) &* 0x517c_c1b7_2722_0a95
+        (((h << 5) | (h >> 59)) ^ UInt64(word)) &* 0x517c_c1b7_2722_0a95
     }
 
     public static func hashWords(of inst: RenderInstance) -> UInt64 {
@@ -455,8 +456,20 @@ public enum CpuBootDamage {
     }
 
     public static func hashInstance(_ scene: CpuBootScene, bins: CpuBootBin.Bins, index: Int) -> InstanceHash {
+        var atlas = CpuBootAtlasDamage()
+        _ = atlas.update(scene)
+        return hashInstance(scene, bins: bins, index: index, atlas: &atlas)
+    }
+
+    static func hashInstance(_ scene: CpuBootScene, bins: CpuBootBin.Bins, index: Int,
+                             atlas: inout CpuBootAtlasDamage) -> InstanceHash {
         let inst = scene.instances[index]
         var h = hashWords(of: inst)
+        if inst.params.y == KIND_IMAGE || inst.params.y == KIND_GLYPH {
+            let texels = atlas.sample(inst)
+            h = mixHash(mixHash(h, UInt32(truncatingIfNeeded: texels)), UInt32(truncatingIfNeeded: texels >> 32))
+            if inst.params.y == KIND_GLYPH { h = mixHash(h, UInt32(truncatingIfNeeded: scene.atlasResets)) }
+        }
         if let p = bins.scope[UInt32(index)] {
             let l = bins.layers[Int(p)]
             h = mixHash(h, UInt32(truncatingIfNeeded: l.bounds.x))
@@ -468,14 +481,16 @@ public enum CpuBootDamage {
         let b = bins.bounds[index]
         var flat = SIMD4<Int32>.zero
         var solid = false
+        var flatColor: UInt64 = 0
         if inst.params.y == KIND_RECT, let s = CpuBootBin.interior(inst) {
             let clip = CpuBootShade.Clip.of(inst)
             let (top, bot) = s.bands()
             let inset = clip.inset()
+            let clipBands = clip.radii.map { CpuBootBin.Solid(edges: clip.rect, radii: $0, inset: 0.5).bands() }
             let fx0 = ceilf(max(s.edges.x + s.inset, clip.rect.x + inset.x) - 0.5)
-            let fy0 = ceilf(max(s.edges.y + top, clip.rect.y + inset.y) - 0.5)
+            let fy0 = ceilf(max(s.edges.y + top, clip.rect.y + max(inset.y, clipBands?.0 ?? 0)) - 0.5)
             let fx1 = floorf(min(s.edges.z - s.inset, clip.rect.z - inset.z) - 0.5) + 1.0
-            let fy1 = floorf(min(s.edges.w - bot, clip.rect.w - inset.w) - 0.5) + 1.0
+            let fy1 = floorf(min(s.edges.w - bot, clip.rect.w - max(inset.w, clipBands?.1 ?? 0)) - 0.5) + 1.0
             let ix0 = max(b.x, Int32(fx0))
             let iy0 = max(b.y, Int32(fy0))
             let ix1 = min(b.z, Int32(fx1))
@@ -483,9 +498,11 @@ public enum CpuBootDamage {
             if ix1 > ix0 && iy1 > iy0 {
                 flat = SIMD4<Int32>(ix0, iy0, ix1, iy1)
                 solid = inst.fill.w >= 1.0 && bins.within[index] == CpuBootBin.topLayer
+                flatColor = mixHash(mixHash(mixHash(mixHash(0x5a5a, inst.fill.x.bitPattern),
+                                                     inst.fill.y.bitPattern), inst.fill.z.bitPattern), inst.fill.w.bitPattern)
             }
         }
-        return InstanceHash(full: h, bounds: b, flat: flat, solid: solid)
+        return InstanceHash(full: h, bounds: b, flat: flat, solid: solid, flatColor: flatColor)
     }
 
     public static func rehashTile(scene: CpuBootScene, bins: CpuBootBin.Bins, each: [InstanceHash], tile: Int) -> UInt64 {
@@ -495,61 +512,121 @@ public enum CpuBootDamage {
         let ry0 = Int32(ty * CpuBootBin.tileH)
         let rx1 = Int32(min((tx + 1) * CpuBootBin.tileW, UInt32(scene.size.0)))
         let ry1 = Int32(min((ty + 1) * CpuBootBin.tileH, UInt32(scene.size.1)))
-        var h: UInt64 = 0
+        var h = mixHash(mixHash(0, scene.clear.x.bitPattern), scene.clear.y.bitPattern)
+        h = mixHash(mixHash(h, scene.clear.z.bitPattern), scene.clear.w.bitPattern)
+        // Binning already discarded every draw behind a fully covering opaque box.
+        if bins.covered[tile] { h = 0 }
+        h = mixHash(h, bins.quiet[tile] ? 1 : 0)
         for n in bins.tile(tile) {
             let ih = each[Int(n)]
-            if ih.solid && ih.flat.x <= rx0 && ih.flat.y <= ry0 && ih.flat.z >= rx1 && ih.flat.w >= ry1 {
-                h = 0
-            }
-            h = ((h << 7 | h >> 57) ^ ih.full) &* 0x517c_c1b7_2722_0a95
+            let flat = ih.flat.x <= rx0 && ih.flat.y <= ry0 && ih.flat.z >= rx1 && ih.flat.w >= ry1
+            let token = flat ? ih.flatColor : ih.full
+            h = ((h << 7 | h >> 57) ^ token) &* 0x517c_c1b7_2722_0a95
         }
         return h
     }
 
     public static func rects(dirtyTiles: [UInt32], cols: UInt32, size: (Int, Int), maxRects: Int) -> [[UInt32]] {
-        guard !dirtyTiles.isEmpty else { return [] }
-        var list: [[UInt32]] = dirtyTiles.map { t in
-            let tx = t % cols
-            let ty = t / cols
-            return [
-                tx * CpuBootBin.tileW,
-                ty * CpuBootBin.tileH,
-                min((tx + 1) * CpuBootBin.tileW, UInt32(size.0)),
-                min((ty + 1) * CpuBootBin.tileH, UInt32(size.1)),
-            ]
+        guard !dirtyTiles.isEmpty, cols > 0, maxRects > 0 else { return [] }
+        var runs: [[UInt32]] = []
+        var index = 0
+        while index < dirtyTiles.count {
+            let first = dirtyTiles[index]
+            let row = first / cols
+            var last = first
+            index += 1
+            while index < dirtyTiles.count, dirtyTiles[index] == last + 1, dirtyTiles[index] / cols == row {
+                last += 1
+                index += 1
+            }
+            let x0 = (first % cols) * CpuBootBin.tileW
+            let x1 = min((last % cols + 1) * CpuBootBin.tileW, UInt32(size.0))
+            let y0 = row * CpuBootBin.tileH
+            let y1 = min((row + 1) * CpuBootBin.tileH, UInt32(size.1))
+            if let previous = runs.lastIndex(where: { $0[0] == x0 && $0[2] == x1 && $0[3] == y0 }) {
+                runs[previous][3] = y1
+            } else {
+                runs.append([x0, y0, x1, y1])
+            }
         }
-        while list.count > maxRects {
-            var bestI = 0
-            var bestJ = 1
-            var bestWaste = UInt64.max
-            for i in 0..<list.count {
-                for j in (i + 1)..<list.count {
-                    let u = [
-                        min(list[i][0], list[j][0]),
-                        min(list[i][1], list[j][1]),
-                        max(list[i][2], list[j][2]),
-                        max(list[i][3], list[j][3]),
-                    ]
-                    let uArea = UInt64(u[2] - u[0]) * UInt64(u[3] - u[1])
-                    let aArea = UInt64(list[i][2] - list[i][0]) * UInt64(list[i][3] - list[i][1])
-                    let bArea = UInt64(list[j][2] - list[j][0]) * UInt64(list[j][3] - list[j][1])
-                    let waste = uArea &- (aArea + bArea)
-                    if waste < bestWaste {
-                        bestWaste = waste
-                        bestI = i
-                        bestJ = j
+        merge(&runs, maxRects: maxRects)
+        return runs
+    }
+
+    /// A retained scroll moves pixels outside the freshly rasterized tiles; the canvas needs them too.
+    static func add(_ rect: [UInt32], to rects: inout [[UInt32]], maxRects: Int) {
+        rects.append(rect)
+        merge(&rects, maxRects: maxRects)
+    }
+
+    private struct Nearest {
+        var index: Int = .max
+        var cost: UInt64 = .max
+
+        mutating func consider(_ candidate: Int, cost: UInt64) {
+            if cost < self.cost || (cost == self.cost && candidate < index) {
+                index = candidate
+                self.cost = cost
+            }
+        }
+    }
+
+    private typealias Bounds = SIMD4<UInt32>
+
+    private static func enclosing(_ a: Bounds, _ b: Bounds) -> Bounds {
+        Bounds(min(a.x, b.x), min(a.y, b.y), max(a.z, b.z), max(a.w, b.w))
+    }
+
+    private static func area(_ b: Bounds) -> UInt64 {
+        UInt64(b.z - b.x) * UInt64(b.w - b.y)
+    }
+
+    private static func waste(_ a: Bounds, _ b: Bounds) -> UInt64 {
+        let combined = area(enclosing(a, b))
+        let covered = area(a) + area(b)
+        return combined > covered ? combined - covered : 0
+    }
+
+    private static func nearest(after i: Int, in bounds: [Bounds]) -> Nearest {
+        var result = Nearest()
+        for j in (i + 1)..<bounds.count {
+            result.consider(j, cost: waste(bounds[i], bounds[j]))
+            if result.cost == 0 { break }
+        }
+        return result
+    }
+
+    /// Preserve Rust's least-waste pair and tie order without rescanning every possible
+    /// pair after each merge. Only two slots change: the union and the moved last rectangle.
+    private static func merge(_ rects: inout [[UInt32]], maxRects: Int) {
+        guard rects.count > maxRects else { return }
+        var boxes = rects.map { Bounds($0[0], $0[1], $0[2], $0[3]) }
+        var candidates = boxes.indices.map { nearest(after: $0, in: boxes) }
+        while boxes.count > maxRects {
+            var first = 0
+            for i in 1..<(boxes.count - 1) where candidates[i].cost < candidates[first].cost {
+                first = i
+                if candidates[i].cost == 0 { break }
+            }
+            let second = candidates[first].index, last = boxes.count - 1
+            boxes[first] = enclosing(boxes[first], boxes[second])
+            boxes.swapAt(second, last)
+            boxes.removeLast()
+            candidates.removeLast()
+            for i in boxes.indices {
+                let old = candidates[i].index
+                if i == first || i == second || old == first || old == second || old == last {
+                    candidates[i] = nearest(after: i, in: boxes)
+                } else {
+                    if i < first {
+                        candidates[i].consider(first, cost: waste(boxes[i], boxes[first]))
+                    }
+                    if i < second && second < boxes.count {
+                        candidates[i].consider(second, cost: waste(boxes[i], boxes[second]))
                     }
                 }
             }
-            let merged = [
-                min(list[bestI][0], list[bestJ][0]),
-                min(list[bestI][1], list[bestJ][1]),
-                max(list[bestI][2], list[bestJ][2]),
-                max(list[bestI][3], list[bestJ][3]),
-            ]
-            list[bestI] = merged
-            list.remove(at: bestJ)
         }
-        return list
+        rects = boxes.map { [$0.x, $0.y, $0.z, $0.w] }
     }
 }

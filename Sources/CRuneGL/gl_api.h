@@ -30,6 +30,9 @@ typedef char GLchar;
 #define GL_ZERO 0
 #define GL_ONE 1
 #define GL_NO_ERROR 0
+#define GL_EXTENSIONS 0x1F03
+#define GL_NUM_EXTENSIONS 0x821D
+#define GL_MAX_DUAL_SOURCE_DRAW_BUFFERS 0x88FC
 #define GL_VENDOR 0x1F00
 #define GL_RENDERER 0x1F01
 #define GL_VERSION 0x1F02
@@ -60,6 +63,10 @@ typedef char GLchar;
 #define GL_R8 0x8229
 #define GL_RGBA8 0x8058
 #define GL_SRGB8_ALPHA8 0x8C43
+#define GL_RGBA32UI 0x8D70
+#define GL_RGBA_INTEGER 0x8D99
+#define GL_UNSIGNED_INT 0x1405
+#define GL_ONE_MINUS_SRC1_COLOR 0x88FA
 #define GL_RGBA16F 0x881A
 #define GL_UNPACK_ALIGNMENT 0x0CF5
 #define GL_UNPACK_ROW_LENGTH 0x0CF2
@@ -103,5 +110,7 @@ const RuneGLAPI *rune_gl_current_api(const RuneGL *renderer);
 /* Compiles and links shader bodies with a matching GLSL / GLSL ES prefix. */
 GLuint rune_gl_program(const RuneGLAPI *gl, int es, const char *vertex,
                        const char *fragment, char *error, size_t capacity);
+GLuint rune_gl_program_variant(const RuneGLAPI *gl, int es, int variant, const char *vertex,
+                               const char *fragment, char *error, size_t capacity);
 
 #endif

@@ -20,7 +20,7 @@ public let KIND_BACKDROP_BLUR: Float = 13
 
 public let CONTINUOUS_K: Float = 1.52866483
 public let NO_CLIP = SIMD4<Float>(-1e6, -1e6, 1e6, 1e6)
-public let MAX_BACKDROP_BLURS: Int = 4
+public let MAX_BACKDROP_BLURS: Int = BackdropPyramid.maxRecords
 public let DEFAULT_LAYER_CACHE_BUDGET: UInt64 = 64 * 1024 * 1024
 
 /// How far a corner of `radius` reaches along each edge (`render::corner_extent`).
@@ -703,6 +703,8 @@ internal struct ImageAtlasPatch: Sendable {
     }
 }
 
+internal typealias GlyphAtlasPatch = ImageAtlasPatch
+
 /// Complete device-pixel frame built by `Runtime.renderFrame(at:)` matching upstream `render::Instance`.
 public struct RenderFrame: Sendable {
     /// Captures whose children the painter omitted in favor of a resident texture.
@@ -712,17 +714,81 @@ public struct RenderFrame: Sendable {
     public var height: Int
     public var srgbBlend: Bool
     public var clearColor: SIMD4<Float>
-    public var glyphs: R8Atlas
-    public var glyphGeneration: UInt64
+    internal private(set) var baseGlyphAtlas: R8Atlas
+    internal var maskFills: OutlineMaskPlan?
+    internal private(set) var baseGlyphPages: [R8Atlas] = []
+    internal var glyphPageFills: [OutlineMaskPlan?] = []
+    internal var glyphPageRevisions: [UInt64] = []
+    internal var rawGlyphPageRevisions: [UInt64] = []
+    internal var rawGlyphPagePatches: [GlyphAtlasPatch?] = []
+    internal var glyphPagePatches: [GlyphAtlasPatch?] = []
+
+    private mutating func invalidateGlyphReceipts() {
+        glyphPageRevisions = []
+        rawGlyphPageRevisions = []
+        rawGlyphPagePatches = []
+        glyphPagePatches = []
+    }
+
+    /// Separate glyph mask textures in painter page order, including page zero when paged.
+    public var glyphPages: [R8Atlas] {
+        get {
+            guard !glyphPageFills.isEmpty else { return baseGlyphPages }
+            return baseGlyphPages.enumerated().map { i, base in
+                glyphPageFills.indices.contains(i) ? glyphPageFills[i]?.cpuAtlas() ?? base : base
+            }
+        }
+        set {
+            baseGlyphPages = newValue
+            maskFills = nil
+            glyphPageFills = []
+            invalidateGlyphReceipts()
+        }
+    }
+    /// The primary mask texture. Each glyph instance selects a texture in `glyphPages`
+    /// with `params.z` and uses page-local texel coordinates. Call `flattenedGlyphPages()`
+    /// to obtain a matching single texture and rebased draw list for a legacy renderer.
+    public var glyphs: R8Atlas {
+        get { maskFills?.cpuAtlas() ?? glyphPageFills.first.flatMap { $0 }?.cpuAtlas() ?? baseGlyphPages.first ?? baseGlyphAtlas }
+        set {
+            baseGlyphAtlas = newValue
+            if !baseGlyphPages.isEmpty { baseGlyphPages[0] = newValue }
+            maskFills = nil
+            if !glyphPageFills.isEmpty { glyphPageFills[0] = nil }
+            invalidateGlyphReceipts()
+        }
+    }
+    public var glyphGeneration: UInt64 { didSet { invalidateGlyphReceipts() } }
+    /// Vector glyph curves for Windfoil and the optional RGB coverage pass.
+    public var outlines: RenderOutlineAtlas?
     internal var imagePatch: ImageAtlasPatch?
+    // Only the runtime can vouch for a partial upload. Editing a public frame invalidates its receipts.
+    internal var imagePageRevisions: [UInt64] = []
+    internal var imagePagePatches: [ImageAtlasPatch?] = []
+    private mutating func invalidateImagePatches() {
+        imagePatch = nil
+        imagePageRevisions = []
+        imagePagePatches = []
+    }
+
     public var images: RGBA8Atlas {
-        didSet { imagePatch = nil }
+        didSet { invalidateImagePatches() }
     }
-    public var imagePages: [RGBA8Atlas]
+    public var imagePages: [RGBA8Atlas] {
+        didSet { invalidateImagePatches() }
+    }
     public var imageRevision: UInt64 {
-        didSet { imagePatch = nil }
+        didSet { invalidateImagePatches() }
     }
-    public var instances: [RenderInstance]
+    // The runtime records whether a direct-text frame can leave pending atlas jobs for its
+    // next resting draw. Public instance edits require checking the replacement draw list.
+    internal var knownGlyphMaskUse: Bool?
+    internal var usesGlyphAtlasMasks: Bool {
+        knownGlyphMaskUse ?? instances.contains { $0.params.y == KIND_GLYPH && $0.radii.w == 0 }
+    }
+    public var instances: [RenderInstance] {
+        didSet { knownGlyphMaskUse = nil }
+    }
     public var marks: [UInt32]
     public var surfaces: [SurfaceDraw]
     public var materials: [MaterialDraw]
@@ -734,7 +800,9 @@ public struct RenderFrame: Sendable {
         srgbBlend: Bool = false,
         clearColor: SIMD4<Float> = SIMD4<Float>(0, 0, 0, 1),
         glyphs: R8Atlas = R8Atlas(),
+        glyphPages: [R8Atlas] = [],
         glyphGeneration: UInt64 = 1,
+        outlines: RenderOutlineAtlas? = nil,
         images: RGBA8Atlas = RGBA8Atlas(),
         imagePages: [RGBA8Atlas] = [],
         imageRevision: UInt64 = 1,
@@ -748,8 +816,10 @@ public struct RenderFrame: Sendable {
         self.height = max(1, height)
         self.srgbBlend = srgbBlend
         self.clearColor = clearColor
-        self.glyphs = glyphs
+        self.baseGlyphAtlas = glyphs
+        self.baseGlyphPages = glyphPages
         self.glyphGeneration = glyphGeneration
+        self.outlines = outlines
         self.images = images
         self.imagePages = imagePages
         self.imageRevision = imageRevision

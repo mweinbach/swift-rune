@@ -11,6 +11,7 @@ public struct SelectableNodeSnapshot: Sendable, Equatable {
     public var isSelectionGroup: Bool
     public var isFocusedTextInput: Bool
     public var text: String
+    internal var source: TextCaseMapping?
     public var rect: MotionRect
     public var uncopied: [Range<Int>]
     public var copyBreakBefore: UInt8
@@ -26,6 +27,7 @@ public struct SelectableNodeSnapshot: Sendable, Equatable {
         isFocusedTextInput: Bool = false,
         text: String = "",
         rect: MotionRect = .zero,
+        source: TextCaseMapping? = nil,
         uncopied: [Range<Int>] = [],
         copyBreakBefore: UInt8 = 1,
         copyBreakAfter: UInt8 = 1,
@@ -38,6 +40,7 @@ public struct SelectableNodeSnapshot: Sendable, Equatable {
         self.isSelectionGroup = isSelectionGroup
         self.isFocusedTextInput = isFocusedTextInput
         self.text = text
+        self.source = source
         self.rect = rect
         self.uncopied = uncopied
         self.copyBreakBefore = copyBreakBefore
@@ -159,7 +162,7 @@ public enum SelectAllResolver {
         let entries: [CopyJoin.Entry] = texts.compactMap { node in
             let utf8Count = node.text.utf8.count
             guard utf8Count > 0 else { return nil }
-            let slice = CopyJoin.copySlice(in: node.text, range: 0..<utf8Count, uncopied: node.uncopied)
+            guard let slice = CopyJoin.validCopySlice(in: node.text, range: 0..<utf8Count, uncopied: node.uncopied, source: node.source) else { return nil }
             return CopyJoin.Entry(
                 rect: node.rect,
                 pieceText: slice,

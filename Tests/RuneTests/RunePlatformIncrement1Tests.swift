@@ -361,4 +361,51 @@ struct RunePlatformIncrement1Tests {
         #expect(obj?["pid"] as? Int == 42)
         #expect(obj?["ready_ms"] as? Int == 12)
     }
+
+    #if !os(Windows) && !os(WASI)
+    @Test("ReadySignal preserves existing directory permissions and creates private directories")
+    func readySignalDirectoryPermissions() throws {
+        let fm = FileManager.default
+        let directory = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fm.removeItem(at: directory) }
+        try fm.createDirectory(at: directory, withIntermediateDirectories: false)
+        try fm.setAttributes([.posixPermissions: 0o750], ofItemAtPath: directory.path)
+
+        let payload = ReadySignal.SignalPayload(pid: 42, bundleId: "rune", readyMs: 1)
+        let child = directory.appendingPathComponent("new").appendingPathComponent("signals")
+        _ = try #require(payload.write(in: directory))
+        _ = try #require(payload.write(in: child))
+        for (dir, expected) in [(directory, 0o750), (child.deletingLastPathComponent(), 0o700), (child, 0o700)] {
+            #expect(try fm.attributesOfItem(atPath: dir.path)[.posixPermissions] as? Int == expected)
+        }
+    }
+    #endif
+
+    @Test("ReadySignal readers observe complete payloads during concurrent replacement")
+    func readySignalAtomicReplacement() async throws {
+        let fm = FileManager.default
+        let directory = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fm.removeItem(at: directory) }
+        let payloads = [UInt64(1), UInt64(9_999)].map {
+            ReadySignal.SignalPayload(pid: 42, bundleId: "rune", readyMs: $0)
+        }
+        let target = try #require(payloads[0].write(in: directory))
+        let valid = Set(payloads.map { Data(($0.jsonLine() + "\n").utf8) })
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for payload in payloads {
+                group.addTask {
+                    for _ in 0..<48 {
+                        _ = try #require(payload.write(in: directory) == target)
+                    }
+                }
+            }
+            group.addTask {
+                for _ in 0..<512 {
+                    let bytes = try Data(contentsOf: target)
+                    _ = try #require(valid.contains(bytes))
+                }
+            }
+            try await group.waitForAll()
+        }
+    }
 }

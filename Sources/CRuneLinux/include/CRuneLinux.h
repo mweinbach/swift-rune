@@ -9,6 +9,8 @@ int rune_linux_displays(void *context, RuneLinuxDisplayVisitor visit);
 typedef struct {
     int width, height, minWidth, minHeight, maxWidth, maxHeight;
     bool resizable, borderless, alwaysOnTop, visible, maximized, fullScreen;
+    bool floatOnOpen;
+    uint32_t physicalWidth, physicalHeight;
 } RuneLinuxWindowOptions;
 
 typedef enum {
@@ -38,7 +40,10 @@ const char *rune_linux_error(void);
 void rune_linux_close(RuneLinuxWindow *host);
 void *rune_linux_gl_proc(const char *name);
 bool rune_linux_make_current(RuneLinuxWindow *host);
-void rune_linux_present(RuneLinuxWindow *host);
+void rune_linux_register_gl_reset(void (*reset)(void));
+bool rune_linux_present(RuneLinuxWindow *host);
+bool rune_linux_present_paced(const RuneLinuxWindow *host);
+int32_t rune_linux_refresh_hz(RuneLinuxWindow *host);
 uint32_t rune_linux_id(RuneLinuxWindow *host);
 uint32_t rune_linux_wake_type(RuneLinuxWindow *host);
 void rune_linux_wake(uint32_t id, uint32_t type);
@@ -50,6 +55,9 @@ typedef struct {
 } RuneLinuxPlacement;
 // X11 exposes global physical coordinates. Wayland's xdg-shell does not.
 int rune_linux_placement(RuneLinuxWindow *host, RuneLinuxPlacement *out);
+int rune_linux_frame_geometry(RuneLinuxWindow *host, RuneLinuxPlacement *out,
+                              uint32_t *outer_width, uint32_t *outer_height);
+int rune_linux_content_origin(RuneLinuxWindow *host, int32_t *x, int32_t *y, int32_t *primary_x, int32_t *primary_y);
 int rune_linux_click_through(RuneLinuxWindow *host, int on);
 void rune_linux_set_title(RuneLinuxWindow *host, const char *title);
 void rune_linux_set_size(RuneLinuxWindow *host, int w, int h);
@@ -91,3 +99,5 @@ typedef struct {
 RuneLinuxAppearance *rune_linux_appearance_open(void);
 bool rune_linux_appearance_take(RuneLinuxAppearance *state, RuneLinuxPreferences *result);
 void rune_linux_appearance_close(RuneLinuxAppearance *state);
+
+#include "RuneLinuxOverlay.h"

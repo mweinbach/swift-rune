@@ -56,45 +56,29 @@ public enum TextLanguageRegistry {
 
     /// Parses the first CJK language tag from a comma/semicolon-separated BCP-47 list (e.g. `"ja,en-US"` or `"zh-Hant-TW"`).
     public static func parseWriting(from tags: String) -> (writing: TextWriting, tag: String)? {
-        for raw in tags.split(whereSeparator: { $0 == "," || $0 == ";" }) {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            let lower = trimmed.lowercased().replacingOccurrences(of: "_", with: "-")
-            let subtags = lower.split(separator: "-").map(String.init)
-            guard let primary = subtags.first else { continue }
-            switch primary {
-            case "ja", "jpn":
-                return (.japanese, "ja")
-            case "ko", "kor":
-                return (.korean, "ko")
-            case "zh", "zho", "yue":
-                if subtags.contains("hk") || subtags.contains("mo") || primary == "yue" {
-                    return (.hongKongChinese, "zh-HK")
-                }
-                if subtags.contains("hant") || subtags.contains("tw") {
-                    return (.traditionalChinese, "zh-Hant")
-                }
-                return (.simplifiedChinese, "zh-Hans")
-            default:
-                continue
-            }
-        }
-        return nil
+        guard let tag = preferredTag(tags, preferCJK: true), let writing = writing(for: tag) else { return nil }
+        return (writing, writing.bcp47Tag)
     }
 
-    /// Sets the process-wide preferred language tags (`rune::text::set_language`).
-    /// Returns `true` when the active writing/tag changed.
+    private static func writing(for tag: String) -> TextWriting? {
+        let subtags = tag.split(separator: "-")
+        switch subtags.first {
+        case "ja", "jpn": return .japanese
+        case "ko", "kor": return .korean
+        case "zh", "zho", "yue":
+            if subtags.first == "yue" || subtags.contains("HK") || subtags.contains("MO") { return .hongKongChinese }
+            if subtags.contains("Hant") || subtags.contains("TW") { return .traditionalChinese }
+            return .simplifiedChinese
+        default: return nil
+        }
+    }
+
+    /// Sets the process-wide language, preferring the first CJK entry when given a preference list.
+    /// An invalid individual tag clears the selection as in `rune::text::set_language`.
     @discardableResult
     public static func setLanguage(_ tags: String) -> Bool {
-        let parsed = parseWriting(from: tags)
-        let nextWriting = parsed?.writing
-        let nextTag = parsed?.tag ?? {
-            let first = tags
-                .split(whereSeparator: { $0 == "," || $0 == ";" })
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .first { !$0.isEmpty }
-            return first
-        }()
+        let nextTag = preferredTag(tags, preferCJK: true)
+        let nextWriting = nextTag.flatMap(writing)
 
         state.lock.lock()
         defer { state.lock.unlock() }
@@ -153,7 +137,7 @@ public enum TextLanguageRegistry {
                 break
             }
             if (0x3100...0x312F).contains(v) || (0x31A0...0x31BF).contains(v) {
-                scriptTag = "zh-Hant"
+                scriptTag = "zh-TW"
                 break
             }
             if (0x3400...0x4DBF).contains(v) || (0x4E00...0x9FFF).contains(v) || (0xF900...0xFAFF).contains(v) || (0x20000...0x3FFFF).contains(v) {
@@ -169,30 +153,67 @@ public enum TextLanguageRegistry {
             return scriptTag
         }
         if sawHan && !(chosenPrimary == "ja" || chosenPrimary == "ko" || chosenPrimary == "zh") {
-            return "zh-Hans"
+            return "zh-CN"
         }
         return normalizedChosen
     }
 
-    /// Normalizes a single BCP-47 language tag (returns `nil` for empty/unparseable tags).
+    /// Returns the canonical language, script and region. Variants and extensions are validated and discarded.
     public static func normalizeTag(_ raw: String?) -> String? {
-        guard let raw else { return nil }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let first = String(trimmed.split(whereSeparator: { $0 == "," || $0 == ";" }).first ?? "").trimmingCharacters(in: .whitespaces)
-        guard !first.isEmpty, first.unicodeScalars.allSatisfy({
-            ($0.value >= 0x41 && $0.value <= 0x5A)
-            || ($0.value >= 0x61 && $0.value <= 0x7A)
-            || ($0.value >= 0x30 && $0.value <= 0x39)
-            || $0 == "-" || $0 == "_"
-        }) else {
-            return nil
+        raw.flatMap { preferredTag($0, preferCJK: false) }
+    }
+
+    private static func preferredTag(_ tags: String, preferCJK: Bool) -> String? {
+        guard tags.utf8.contains(where: { $0 == 44 || $0 == 59 }) else { return parseTag(tags) }
+        var first: String?
+        for part in tags.split(whereSeparator: { $0 == "," || $0 == ";" }) {
+            guard let tag = parseTag(part.trimmingCharacters(in: .whitespacesAndNewlines)) else { continue }
+            if !preferCJK || writing(for: tag) != nil { return tag }
+            if first == nil { first = tag }
         }
-        let canonical = first.replacingOccurrences(of: "_", with: "-")
-        if let parsed = parseWriting(from: canonical) {
-            return parsed.tag
+        return first
+    }
+
+    /// Parses the language[-Script][-REGION] representation used by upstream's parlance::Language.
+    private static func parseTag(_ raw: String) -> String? {
+        func letter(_ b: UInt8) -> Bool { (65...90).contains(b) || (97...122).contains(b) }
+        func digit(_ b: UInt8) -> Bool { (48...57).contains(b) }
+        let parts = raw.utf8.split(whereSeparator: { $0 == 45 || $0 == 95 })
+        guard let language = parts.first, (2...3).contains(language.count), language.allSatisfy(letter) else { return nil }
+        var tag = String(decoding: language, as: UTF8.self).lowercased()
+        var i = 1
+        if i < parts.count, parts[i].count == 4, parts[i].allSatisfy(letter) {
+            let script = String(decoding: parts[i], as: UTF8.self)
+            tag += "-" + script.prefix(1).uppercased() + script.dropFirst().lowercased()
+            i += 1
         }
-        return canonical
+        if i < parts.count {
+            let region = parts[i]
+            if (region.count == 2 && region.allSatisfy(letter)) || (region.count == 3 && region.allSatisfy(digit)) {
+                tag += "-" + String(decoding: region, as: UTF8.self).uppercased()
+                i += 1
+            }
+        }
+
+        var inExtension = false
+        var inPrivateUse = false
+        var needsPayload = false
+        for part in parts.dropFirst(i) {
+            guard part.count <= 8, part.allSatisfy({ letter($0) || digit($0) }) else { return nil }
+            if inPrivateUse {
+                needsPayload = false
+            } else if part.count == 1 {
+                guard !needsPayload else { return nil }
+                inPrivateUse = part.first == 88 || part.first == 120
+                inExtension = true
+                needsPayload = true
+            } else if inExtension {
+                needsPayload = false
+            } else if part.count < 5 && !(part.count == 4 && part.first.map(digit) == true) {
+                return nil
+            }
+        }
+        return needsPayload ? nil : tag
     }
 
     private static func primarySubtag(_ tag: String) -> String {

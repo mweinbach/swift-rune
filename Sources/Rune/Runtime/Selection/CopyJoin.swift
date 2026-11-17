@@ -38,14 +38,28 @@ public enum CopyJoin {
 
     /// Strips any `uncopied` UTF-8 byte spans overlapping `range` in `text`
     /// (`crates/rune/src/el/text_spec.rs:306-318`).
-    public static func copySlice(in text: String, range: Range<Int>, uncopied: [Range<Int>]) -> String {
+    public static func copySlice(in text: String, range: Range<Int>, uncopied: [Range<Int>], source: TextCaseMapping? = nil) -> String {
+        validCopySlice(in: text, range: range, uncopied: uncopied, source: source) ?? ""
+    }
+
+    /// A malformed excluded byte edge invalidates the piece, so joining text must also skip its line break.
+    internal static func validCopySlice(in text: String, range: Range<Int>, uncopied: [Range<Int>], source: TextCaseMapping?) -> String? {
         let len = text.utf8.count
         let a = max(0, min(len, SelectionMath.floorCharBoundary(in: text, offset: range.lowerBound)))
         let b = max(a, min(len, SelectionMath.floorCharBoundary(in: text, offset: range.upperBound)))
         guard a < b else { return "" }
-        let bytes = Array(text.utf8)
+        let bytes = (source?.authored ?? text).utf8
+        func slice(_ lo: Int, _ hi: Int) -> String.UTF8View.SubSequence {
+            let start = source?.sourceOffset(forDisplayedUTF8Offset: lo) ?? lo
+            let end = source?.sourceOffset(forDisplayedUTF8Offset: hi, up: true) ?? hi
+            let from = bytes.index(bytes.startIndex, offsetBy: start)
+            return bytes[from..<bytes.index(from, offsetBy: end - start)]
+        }
         if uncopied.isEmpty {
-            return String(decoding: bytes[a..<b], as: UTF8.self)
+            return String(decoding: slice(a, b), as: UTF8.self)
+        }
+        func isCutBoundary(_ offset: Int) -> Bool {
+            source != nil || SelectionMath.floorCharBoundary(in: text, offset: offset) == offset
         }
         var outBytes: [UInt8] = []
         outBytes.reserveCapacity(b - a)
@@ -56,13 +70,15 @@ public enum CopyJoin {
             if u.lowerBound > cursor {
                 let hi = min(u.lowerBound, b)
                 if cursor < hi {
-                    outBytes.append(contentsOf: bytes[cursor..<hi])
+                    guard isCutBoundary(cursor), isCutBoundary(hi) else { return nil }
+                    outBytes.append(contentsOf: slice(cursor, hi))
                 }
             }
             cursor = max(cursor, min(u.upperBound, b))
         }
         if cursor < b {
-            outBytes.append(contentsOf: bytes[cursor..<b])
+            guard isCutBoundary(cursor) else { return nil }
+            outBytes.append(contentsOf: slice(cursor, b))
         }
         return String(decoding: outBytes, as: UTF8.self)
     }
@@ -180,9 +196,56 @@ public enum CopyJoin {
 /// `SelectAll`, copy formatting (`El.selectionCopy` + `CopyJoin`), and `El.onSelectionChange`
 /// coalescing (`crates/rune/src/runtime/selection/selectable.rs`).
 public final class SelectionCoordinator {
-    public internal(set) var phase: SelectionPhase = .empty
+    public internal(set) var phase: SelectionPhase = .empty {
+        didSet {
+            if case .empty = phase { cachedSnapshot = nil }
+        }
+    }
     public internal(set) var pick = SelectAllPick()
     internal private(set) var heardByPath: [String: TextSelection] = [:]
+
+    private struct SnapshotBasis: Equatable {
+        let commit: Int
+        let path: String?
+        let anchor: Int
+        let focus: Int
+        let farPath: String?
+        let dragging: Bool
+        let focusedPath: String?
+    }
+
+    private var cachedSnapshot: (basis: SnapshotBasis, selection: TextSelection?)?
+    private var lastWatcherBasis: SnapshotBasis?
+
+    private func snapshotBasis(commit: Int, focusedPath: String?) -> SnapshotBasis {
+        let active = phase.selection
+        return SnapshotBasis(commit: commit, path: active?.path, anchor: active?.anchor ?? 0,
+                             focus: active?.focus ?? 0, farPath: active?.far?.path,
+                             dragging: phase.isDragging, focusedPath: focusedPath)
+    }
+
+    internal func needsWatcherCheck(commit: Int, focusedPath: String?) -> Bool {
+        let basis = snapshotBasis(commit: commit, focusedPath: focusedPath)
+        guard lastWatcherBasis != basis else { return false }
+        lastWatcherBasis = basis
+        return true
+    }
+
+    /// Handlers reading the same committed selection share the collected rows and UTF-8 text.
+    internal func snapshot(
+        commit: Int,
+        focusedPath: String?,
+        collect: () -> TextSelection?
+    ) -> TextSelection? {
+        guard phase.selection != nil else { return nil }
+        let basis = snapshotBasis(commit: commit, focusedPath: focusedPath)
+        if let snapshot = cachedSnapshot, snapshot.basis == basis {
+            return snapshot.selection
+        }
+        let selection = collect()
+        cachedSnapshot = (basis, selection)
+        return selection
+    }
 
     /// Moves what the watcher at `old` heard to `new` (`sel_heard.by_path` re-keyed when the
     /// selection's text is rebound to a moved keyed path).
@@ -206,27 +269,29 @@ public final class SelectionCoordinator {
         selectedTexts.reserveCapacity(nonEmpty.count)
         joinEntries.reserveCapacity(nonEmpty.count)
         for (node, rawRange) in nonEmpty {
-            let utf8 = Array(node.text.utf8)
+            let len = node.text.utf8.count
             let lo = SelectionMath.floorCharBoundary(in: node.text, offset: rawRange.lowerBound)
             let hi = max(lo, SelectionMath.floorCharBoundary(in: node.text, offset: rawRange.upperBound))
             guard lo < hi else { continue }
-            let slice = CopyJoin.copySlice(in: node.text, range: lo..<hi, uncopied: node.uncopied)
-            let trimmed = SelectionMath.trimUncopied(node.uncopied, range: (0, utf8.count))
-            let whole = !utf8.isEmpty && lo <= trimmed.0 && hi >= trimmed.1
+            let copied = CopyJoin.validCopySlice(in: node.text, range: lo..<hi, uncopied: node.uncopied, source: node.source)
+            let slice = copied ?? ""
+            let trimmed = SelectionMath.trimUncopied(node.uncopied, range: (0, len))
+            let whole = len > 0 && lo <= trimmed.0 && hi >= trimmed.1
             let fromStart = lo <= trimmed.0
             let item = SelectedText(
                 path: node.path,
                 key: node.key,
                 range: lo..<hi,
-                len: utf8.count,
+                len: len,
                 whole: whole,
                 text: slice,
-                content: node.text
+                content: node.source == nil && node.uncopied.isEmpty ? slice : CopyJoin.copySlice(in: node.text, range: lo..<hi, uncopied: [])
             )
             selectedTexts.append(item)
+            guard let copied else { continue }
             joinEntries.append(CopyJoin.Entry(
                 rect: node.rect,
-                pieceText: slice,
+                pieceText: copied,
                 fromStart: fromStart,
                 copyBreakBefore: node.copyBreakBefore,
                 copyBreakAfter: node.copyBreakAfter,
@@ -360,6 +425,12 @@ public final class SelectionCoordinator {
 
     /// Computes active `TextSelection` for the current `phase` against mounted `nodes`.
     public func currentSelection(in nodes: [SelectableNodeSnapshot]) -> TextSelection? {
+        guard let current = currentRanges(in: nodes) else { return nil }
+        return buildSelection(ranges: current.ranges, backward: current.backward)
+    }
+
+    /// Paint uses these ranges directly, without constructing clipboard text or copying the selected bytes.
+    internal func currentRanges(in nodes: [SelectableNodeSnapshot]) -> (ranges: [(SelectableNodeSnapshot, Range<Int>)], backward: Bool)? {
         guard let sel = phase.selection else { return nil }
         guard let anchorIdx = nodes.firstIndex(where: { $0.path == sel.path && $0.isSelectable }) else {
             return nil
@@ -387,12 +458,12 @@ public final class SelectionCoordinator {
                     ranges.append((n, lo..<hi))
                 }
             }
-            return buildSelection(ranges: ranges, backward: !forward)
+            return ranges.isEmpty ? nil : (ranges, !forward)
         }
         let a = SelectionMath.floorCharBoundary(in: nodes[anchorIdx].text, offset: min(sel.anchor, sel.focus))
         let b = SelectionMath.floorCharBoundary(in: nodes[anchorIdx].text, offset: max(sel.anchor, sel.focus))
         guard a < b else { return nil }
-        return buildSelection(ranges: [(nodes[anchorIdx], a..<b)], backward: sel.focus < sel.anchor)
+        return ([(nodes[anchorIdx], a..<b)], sel.focus < sel.anchor)
     }
 
     private static func sameSemanticSelection(_ a: TextSelection?, _ b: TextSelection?) -> Bool {
@@ -428,14 +499,28 @@ public final class SelectionCoordinator {
     ) -> [(path: String, change: SelectionChange)] {
         let active = currentSelection(in: nodes)
         let selectedPaths = Set(active?.texts.map(\.path) ?? [])
+        return collectSelectionChanges(elements: elements, selectedPaths: selectedPaths,
+                                       released: false, selection: { active })
+    }
+
+    internal func collectSelectionChanges<State>(
+        elements: [(path: String, el: El<State>)],
+        selectedPaths: Set<String>,
+        released: Bool,
+        selection: () -> TextSelection?
+    ) -> [(path: String, change: SelectionChange)] {
+        let affected = Set(elements.compactMap { path, el in
+            el.hasSelectionChangeHandler && selectedPaths.contains(where: { $0 == path || $0.hasPrefix(path + "/") })
+                ? path : nil
+        })
+        let active = affected.isEmpty ? nil : selection()
         var nextHeard: [String: TextSelection] = [:]
         var out: [(path: String, change: SelectionChange)] = []
         var remaining = heardByPath
         var resolved: [(path: String, nowSel: TextSelection?, prevSel: TextSelection?)] = []
 
         for (path, el) in elements where el.hasSelectionChangeHandler {
-            let hitsSubtree = selectedPaths.contains(where: { $0 == path || $0.hasPrefix(path + "/") })
-            let nowSel = hitsSubtree ? active : nil
+            let nowSel = affected.contains(path) ? active : nil
             let exactOrKeyed = remaining.removeValue(forKey: path) ?? {
                 if let oldKey = remaining.keys.first(where: { SelectionMath.sameKeyedPath($0, path) }) {
                     return remaining.removeValue(forKey: oldKey)
@@ -451,7 +536,7 @@ public final class SelectionCoordinator {
                let fallbackKey = remaining.keys.first(where: { Self.sameSemanticSelection(remaining[$0], nowSel) }) {
                 prevSel = remaining.removeValue(forKey: fallbackKey)
             }
-            if !Self.sameSemanticSelection(prevSel, nowSel) {
+            if !Self.sameSemanticSelection(prevSel, nowSel) || (released && nowSel != nil) {
                 out.append((
                     path,
                     SelectionChange(selection: nowSel, was: prevSel != nil, isDragging: phase.isDragging)

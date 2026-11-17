@@ -28,46 +28,40 @@ public enum MarkdownBidi {
         firstStrongDirection(in: text) ?? .ltr
     }
 
-    /// Returns first strong direction in `text`, or `nil` if neutral.
+    /// The first strong character outside Unicode directional isolates in this paragraph.
     public static func firstStrongDirection(in text: String) -> MarkdownDirection? {
-        for scalar in text.unicodeScalars {
-            if isStrongRTL(scalar.value) { return .rtl }
-            if isStrongLTR(scalar.value) { return .ltr }
+        switch Direction.of(text) {
+        case .ltr: return .ltr
+        case .rtl: return .rtl
+        default: return nil
         }
-        return nil
     }
 
-    /// Detects inline direction skipping isolated code spans (`\u{2066}...\u{2069}`) first,
-    /// falling back to the full text only if non-code text is neutral.
+    /// Code chips, addresses and technical tokens keep their own reading order.
+    /// An inline containing only those units inherits the surrounding direction.
     public static func inlineDirection(_ inline: MarkdownInline) -> MarkdownDirection? {
-        let outside = stripIsolatedCode(inline.text)
-        if let dir = firstStrongDirection(in: outside) {
-            return dir
-        }
-        return firstStrongDirection(in: inline.text)
+        inline.bidi.direction
     }
 
-    /// Detects the first strong direction across a sequence of `MarkdownDocBlock` values.
     public static func blocksDirection(_ blocks: [MarkdownDocBlock]) -> MarkdownDirection? {
-        for b in blocks {
-            switch b {
-            case let .para(inl), let .heading(_, inl):
-                if let d = inlineDirection(inl) { return d }
-            case let .quote(inner):
-                if let d = blocksDirection(inner) { return d }
-            case let .list(_, items):
-                for item in items {
-                    if let d = blocksDirection(item) { return d }
-                }
-            case let .table(t):
-                if let d = tableDirection(t) { return d }
-            case let .image(_, alt, _):
-                if let d = firstStrongDirection(in: alt) { return d }
-            case .code, .diff, .mermaid, .rule:
-                continue
-            }
+        for block in blocks {
+            if let direction = blockDirection(block) { return direction }
         }
         return nil
+    }
+
+    fileprivate static func blockDirection(_ block: MarkdownDocBlock) -> MarkdownDirection? {
+        switch block {
+        case let .para(inline), let .heading(_, inline): return inlineDirection(inline)
+        case let .quote(inner): return blocksDirection(inner)
+        case let .list(_, items):
+            for item in items {
+                if let direction = blocksDirection(item) { return direction }
+            }
+            return nil
+        case let .table(table): return tableDirection(table)
+        case .image, .code, .diff, .mermaid, .rule: return nil
+        }
     }
 
     /// Detects table base direction from its header cells, then body cells.
@@ -85,109 +79,157 @@ public enum MarkdownBidi {
 
     /// Isolates strong opposite-direction embedded prose runs outside isolated code spans.
     public static func isolateEmbeddedRuns(_ text: String, base: MarkdownDirection?) -> String {
-        guard let base else { return text }
-        var out = ""
-        out.reserveCapacity(text.count + 8)
-        let opposite = (base == .ltr) ? MarkdownDirection.rtl : .ltr
-        var inIsolate = 0
-        var run = ""
-
-        func flushRun() {
-            guard !run.isEmpty else { return }
-            if firstStrongDirection(in: run) == opposite {
-                out.append(opposite == .rtl ? rli : lri)
-                out.append(run)
-                out.append(pdi)
-            } else {
-                out.append(run)
-            }
-            run.removeAll(keepingCapacity: true)
-        }
-
-        for scalar in text.unicodeScalars {
-            if scalar.value == 0x2066 || scalar.value == 0x2067 {
-                flushRun()
-                inIsolate += 1
-                out.unicodeScalars.append(scalar)
-                continue
-            }
-            if scalar.value == 0x2069 && inIsolate > 0 {
-                flushRun()
-                inIsolate -= 1
-                out.unicodeScalars.append(scalar)
-                continue
-            }
-            if inIsolate > 0 {
-                out.unicodeScalars.append(scalar)
-                continue
-            }
-            if isStrongRTL(scalar.value) {
-                if let d = firstStrongDirection(in: run), d != .rtl {
-                    flushRun()
-                }
-                run.unicodeScalars.append(scalar)
-            } else if isStrongLTR(scalar.value) {
-                if let d = firstStrongDirection(in: run), d != .ltr {
-                    flushRun()
-                }
-                run.unicodeScalars.append(scalar)
-            } else {
-                run.unicodeScalars.append(scalar)
-            }
-        }
-        flushRun()
-        return out
-    }
-
-    private static func stripIsolatedCode(_ text: String) -> String {
-        var out = ""
+        guard let base, !text.isEmpty else { return text }
+        let opposite: Direction = base == .ltr ? .rtl : .ltr
+        let scalars = text.unicodeScalars
+        var output = ""
+        var copied = scalars.startIndex
+        var runStart = copied
+        var runDirection: Direction?
         var depth = 0
-        for s in text.unicodeScalars {
-            if s.value == 0x2066 {
+
+        func finishRun(at end: String.Index) {
+            if runDirection == opposite {
+                output.unicodeScalars.append(contentsOf: scalars[copied..<runStart])
+                output += opposite == .rtl ? rli : lri
+                output.unicodeScalars.append(contentsOf: scalars[runStart..<end])
+                output += pdi
+                copied = end
+            }
+            runStart = end
+            runDirection = nil
+        }
+
+        var index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            let next = scalars.index(after: index)
+            switch scalar.value {
+            case 0x2066...0x2068:
+                if depth == 0 { finishRun(at: index) }
                 depth += 1
-                continue
-            }
-            if s.value == 0x2069 && depth > 0 {
+            case 0x2069 where depth > 0:
                 depth -= 1
-                continue
+                if depth == 0 { runStart = next }
+            default:
+                if depth == 0, let direction = Direction.ofStrongScalar(scalar) {
+                    if let runDirection, runDirection != direction { finishRun(at: index) }
+                    runDirection = direction
+                }
             }
-            if depth == 0 {
-                out.unicodeScalars.append(s)
+            index = next
+        }
+        finishRun(at: scalars.endIndex)
+        if output.isEmpty { return text }
+        output.unicodeScalars.append(contentsOf: scalars[copied...])
+        return output
+    }
+}
+
+/// Derived from one parsed inline, in the same UTF-8 coordinates as its styles and links.
+fileprivate struct MarkdownInlineBidi: Sendable {
+    let units: [Range<Int>]
+    let direction: MarkdownDirection?
+
+    init(_ inline: MarkdownInline) {
+        let text = inline.text
+        let bytes = text.utf8
+        func valid(_ start: Int, _ end: Int) -> Bool {
+            start >= 0 && start < end && end <= bytes.count &&
+                isUTF8Boundary(text, start) && isUTF8Boundary(text, end)
+        }
+        func string(_ range: Range<Int>) -> String {
+            if range.count == bytes.count { return text }
+            let start = bytes.index(bytes.startIndex, offsetBy: range.lowerBound)
+            let end = bytes.index(start, offsetBy: range.count)
+            return String(decoding: bytes[start..<end], as: UTF8.self)
+        }
+
+        var marked: [Range<Int>] = []
+        let code = inline.spans.compactMap { span -> Range<Int>? in
+            guard span.style == .code || span.style == .codePad, valid(span.start, span.end) else { return nil }
+            return span.start..<span.end
+        }.sorted { $0.lowerBound < $1.lowerBound }
+        for range in code {
+            if let last = marked.last, range.lowerBound <= last.upperBound {
+                marked[marked.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
+            } else {
+                marked.append(range)
             }
         }
-        return out
-    }
 
-    private static func isStrongRTL(_ v: UInt32) -> Bool {
-        switch v {
-        case 0x0590...0x05FF,
-             0x0600...0x06FF,
-             0x0700...0x074F,
-             0x0750...0x077F,
-             0x0780...0x07BF,
-             0x07C0...0x07FF,
-             0x0800...0x085F,
-             0x08A0...0x08FF,
-             0x200F,
-             0xFB1D...0xFDFF,
-             0xFE70...0xFEFF,
-             0x10800...0x10FFF,
-             0x1E800...0x1EFFF:
-            true
-        default:
-            false
+        var addresses: [Range<Int>] = []
+        var ordered = true
+        for link in inline.links where valid(link.start, link.end) {
+            let range = link.start..<link.end
+            let shown = string(range).trimmingCharacters(in: .whitespacesAndNewlines)
+            if shown.utf8.elementsEqual(link.url.utf8) || ["http://", "https://", "www.", "file://", "mailto:"].contains(where: shown.hasPrefix) {
+                if let previous = addresses.last, previous.upperBound > range.lowerBound { ordered = false }
+                addresses.append(range)
+            }
         }
+        if ordered {
+            marked = Self.merging(marked, with: addresses)
+        } else {
+            // Manually constructed inlines can supply overlapping or out-of-order links.
+            // The first link wins when no code chip already owns its bytes.
+            for range in addresses where !marked.contains(where: { $0.overlaps(range) }) { marked.append(range) }
+            marked.sort { $0.lowerBound < $1.lowerBound }
+        }
+        units = Self.merging(marked, with: TextBidiUnits.ltrUnits(in: text))
+        var at = 0
+        for range in units {
+            if at < range.lowerBound, let found = MarkdownBidi.firstStrongDirection(in: string(at..<range.lowerBound)) {
+                direction = found
+                return
+            }
+            at = range.upperBound
+        }
+        direction = at < bytes.count ? MarkdownBidi.firstStrongDirection(in: string(at..<bytes.count)) : nil
     }
 
-    private static func isStrongLTR(_ v: UInt32) -> Bool {
-        if (0x0041...0x005A).contains(v) || (0x0061...0x007A).contains(v) { return true }
-        if (0x00C0...0x02AF).contains(v) { return true }
-        if (0x0370...0x058F).contains(v) { return true }
-        if (0x0900...0x1FFF).contains(v) { return true }
-        if v == 0x200E { return true }
-        if (0x2C00...0xD7AF).contains(v) { return true }
-        if (0xF900...0xFAFF).contains(v) { return true }
-        return false
+    /// Both inputs are disjoint and in source order. Explicit code and links win
+    /// when a lower-priority lexer token overlaps them.
+    private static func merging(_ primary: [Range<Int>], with candidates: [Range<Int>]) -> [Range<Int>] {
+        if primary.isEmpty { return candidates }
+        if candidates.isEmpty { return primary }
+        var combined: [Range<Int>] = []
+        combined.reserveCapacity(primary.count + candidates.count)
+        var next = 0
+        for range in candidates {
+            while next < primary.count && primary[next].upperBound <= range.lowerBound {
+                combined.append(primary[next])
+                next += 1
+            }
+            if next == primary.count || range.upperBound <= primary[next].lowerBound {
+                combined.append(range)
+            }
+        }
+        combined.append(contentsOf: primary[next...])
+        return combined
+    }
+
+    func isolate<State>(_ element: El<State>) -> El<State> {
+        guard !units.isEmpty else { return element }
+        var result = element
+        // The freshly built rich element has precisely this inline's text. Install the
+        // validated, ordered ranges together so each unit needn't rejoin the rich spans.
+        result.isolatesSpec = units.map { ($0, Direction.ltr) }
+        return result
+    }
+}
+
+private extension El {
+    mutating func setMarkdownDirection(_ direction: MarkdownDirection?) {
+        guard let direction else { return }
+        let resolved = direction == .rtl ? Direction.rtl : .ltr
+        if explicitDir != resolved { explicitDir = resolved }
+    }
+
+    consuming func markdownDirection(_ direction: MarkdownDirection?) -> Self {
+        var result = self
+        result.setMarkdownDirection(direction)
+        return result
     }
 }
 
@@ -430,9 +472,22 @@ public struct MarkdownInline: Sendable, Equatable, Hashable {
     public static let openPad = "\u{202f}\u{202f}\u{2066}"
     public static let closePad = "\u{2069}\u{202f}\u{202f}"
 
-    public var text: String
-    public var spans: [MarkdownStyleSpan]
-    public var links: [MarkdownLinkSpan]
+    public var text: String { didSet { preparedBidi = nil } }
+    public var spans: [MarkdownStyleSpan] { didSet { preparedBidi = nil } }
+    public var links: [MarkdownLinkSpan] { didSet { preparedBidi = nil } }
+
+    fileprivate var preparedBidi: MarkdownInlineBidi?
+    fileprivate var bidi: MarkdownInlineBidi { preparedBidi ?? MarkdownInlineBidi(self) }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.text == rhs.text && lhs.spans == rhs.spans && lhs.links == rhs.links
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(text)
+        hasher.combine(spans)
+        hasher.combine(links)
+    }
 
     public init(text: String = "", spans: [MarkdownStyleSpan] = [], links: [MarkdownLinkSpan] = []) {
         self.text = text
@@ -1233,61 +1288,75 @@ public enum MarkdownPlain {
 
 // MARK: - Cache (`rune_kit::markdown::cache`)
 
+private func markdownMayDefineReferences(in bytes: Substring.UTF8View) -> Bool {
+    var bracket = false
+    for byte in bytes {
+        if bracket && byte == 0x3A { return true }
+        bracket = byte == 0x5D
+    }
+    return false
+}
+
 /// Thread-safe LRU cache for parsed Markdown documents with incremental cut reuse (`rune_kit::markdown::cache`).
 public final class MarkdownDocCache: @unchecked Sendable {
-    public static let shared = MarkdownDocCache(capacity: 256, budgetBytes: 16 << 20)
-    public static let sharedStream = MarkdownDocCache(capacity: 256, budgetBytes: 4 << 20)
+    public static var shared: MarkdownDocCache {
+        runeExecutionLocal(forKey: "rune.kit.markdown", create: { MarkdownDocCache() })
+    }
 
-    private struct Entry {
-        var source: String
-        var autolink: Bool
-        var doc: MarkdownParsedDoc
-        var bytes: Int
-        var stamp: UInt64
+    public static var sharedStream: MarkdownDocCache {
+        runeExecutionLocal(forKey: "rune.kit.streamingMarkdown", create: { MarkdownDocCache(budgetBytes: 4 << 20) })
+    }
+
+    private struct Mode: Hashable, Sendable {
+        let autolink: Bool
+        let streaming: Bool
+    }
+
+    private struct Key: Hashable, Sendable {
+        let text: KitSourceKey
+        let mode: Mode
     }
 
     private let lock = NSLock()
-    private let capacity: Int
-    private let budgetBytes: Int
-    private var entries: [Entry] = []
-    private var lastSourceByAutolink: [Bool: String] = [:]
-    private var clock: UInt64 = 0
-    private var totalBytes: Int = 0
-    public private(set) var fullParseCount: Int = 0
-    public private(set) var incrementalExtendCount: Int = 0
-
-    public init(capacity: Int = 256, budgetBytes: Int = 16 << 20) {
-        self.capacity = max(1, capacity)
-        self.budgetBytes = max(1024, budgetBytes)
+    private let docs: BudgetCache<Key, MarkdownParsedDoc>
+    private struct Previous {
+        let key: Key
+        let mayDefineReferences: Bool
     }
 
-    public var currentEntryCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return entries.count
+    private var last: [Mode: Previous] = [:]
+    private var fullParses = 0
+    private var extensions = 0
+
+    public convenience init(capacity: Int = .max, budgetBytes: Int = 16 << 20) {
+        self.init(capacity: capacity, budgetBytes: budgetBytes, frameGeneration: Rune.commitGeneration)
     }
 
-    public var estimatedBytes: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return totalBytes
+    init(capacity: Int = .max, budgetBytes: Int, frameGeneration: @escaping @Sendable () -> UInt64) {
+        docs = BudgetCache(limitBytes: budgetBytes, entryLimit: capacity, frameGeneration: frameGeneration)
     }
+
+    public var currentEntryCount: Int { docs.count }
+    public var estimatedBytes: Int { docs.bytes }
+    public var fullParseCount: Int { lock.withLock { fullParses } }
+    public var incrementalExtendCount: Int { lock.withLock { extensions } }
 
     public func reset() {
-        lock.lock()
-        defer { lock.unlock() }
-        entries.removeAll()
-        lastSourceByAutolink.removeAll()
-        clock = 0
-        totalBytes = 0
-        fullParseCount = 0
-        incrementalExtendCount = 0
+        lock.withLock {
+            docs.clear()
+            last.removeAll()
+            fullParses = 0
+            extensions = 0
+        }
     }
 
-    public func peek(_ source: String, autolink: Bool = true) -> MarkdownParsedDoc? {
-        lock.lock()
-        defer { lock.unlock() }
-        return entries.first(where: { $0.autolink == autolink && $0.source == source })?.doc
+    public func peek(_ source: String, autolink: Bool = true, streaming: Bool? = nil) -> MarkdownParsedDoc? {
+        let text = KitSourceKey(source)
+        if let streaming {
+            return docs.peek(Key(text: text, mode: Mode(autolink: autolink, streaming: streaming)))
+        }
+        return docs.peek(Key(text: text, mode: Mode(autolink: autolink, streaming: false)))
+            ?? docs.peek(Key(text: text, mode: Mode(autolink: autolink, streaming: true)))
     }
 
     public func streamCached(_ source: String, autolink: Bool = true) -> MarkdownParsedDoc {
@@ -1299,110 +1368,67 @@ public final class MarkdownDocCache: @unchecked Sendable {
     }
 
     private func cached(_ source: String, autolink: Bool, streaming: Bool) -> MarkdownParsedDoc {
+        let mode = Mode(autolink: autolink, streaming: streaming)
+        let key = Key(text: KitSourceKey(source), mode: mode)
         lock.lock()
-        clock += 1
-        let now = clock
-        if let idx = entries.firstIndex(where: { $0.autolink == autolink && $0.source == source }) {
-            entries[idx].stamp = now
-            let hit = entries[idx].doc
-            lock.unlock()
-            return hit
-        }
+        defer { lock.unlock() }
+        if let hit = docs.get(key) { return hit }
 
-        // Incremental prefix cut reuse when streaming appends onto an existing cached prefix
-        var incremental: MarkdownParsedDoc?
-        var grownFrom: String? = nil
-        if let lastSrc = lastSourceByAutolink[autolink],
-           source.utf8.count > lastSrc.utf8.count,
-           source.hasPrefix(lastSrc),
-           let lastIdx = entries.firstIndex(where: { $0.autolink == autolink && $0.source == lastSrc }) {
-            grownFrom = lastSrc
-            let base = entries[lastIdx].doc
-            let baseLen = entries[lastIdx].source.utf8.count
-            incremental = Self.incrementalExtend(base: base, baseLen: baseLen, source: source, autolink: autolink, streaming: streaming)
-        } else if let bestIdx = entries.indices
-            .filter({ entries[$0].autolink == autolink && source.utf8.count > entries[$0].source.utf8.count && source.hasPrefix(entries[$0].source) })
-            .max(by: { entries[$0].source.utf8.count < entries[$1].source.utf8.count }) {
-            let base = entries[bestIdx].doc
-            let baseLen = entries[bestIdx].source.utf8.count
-            incremental = Self.incrementalExtend(base: base, baseLen: baseLen, source: source, autolink: autolink, streaming: streaming)
+        let parse = streaming ? MarkdownTailStream.parseStreaming : MarkdownParser.parseDocument
+        let grown = last[mode].flatMap { candidate in
+            let old = candidate.key.text
+            return source.utf8.count > old.source.utf8.count && key.text.starts(with: old) ? candidate : nil
         }
-        let didExtend = incremental != nil
-        lock.unlock()
-
+        // A reference definition can affect already-parsed links. Check the new bytes
+        // and the one overlapping byte so an append split between "]" and ":" counts.
+        let oldLength = grown?.key.text.source.utf8.count ?? 0
+        let checkFrom = max(0, oldLength - 1)
+        let bytes = source.utf8
+        let checkAt = bytes.index(bytes.startIndex, offsetBy: checkFrom)
+        let mayDefineReferences = grown?.mayDefineReferences == true || markdownMayDefineReferences(in: bytes[checkAt...])
         let parsed: MarkdownParsedDoc
-        if let incremental {
-            parsed = incremental
-        } else if streaming {
-            var tail = MarkdownTailStream(autolink: autolink)
-            tail.reset(source)
-            parsed = tail.document(streaming: true)
+        if let grown, var base = docs.usedNow(grown.key) ? docs.peek(grown.key) : docs.take(grown.key),
+           !mayDefineReferences,
+           Self.incrementalExtend(base: &base, baseLen: oldLength, source: source, autolink: autolink, parse: parse) {
+            parsed = base
+            extensions += 1
         } else {
-            parsed = MarkdownParser.parseDocument(source, autolink: autolink)
+            parsed = parse(source, autolink)
+            fullParses += 1
         }
-
-        let entryBytes = 2 * source.utf8.count + 64 * parsed.cuts.count + 128
-
-        lock.lock()
-        if didExtend {
-            incrementalExtendCount += 1
-        } else {
-            fullParseCount += 1
-        }
-        if let grownFrom,
-           let deadIdx = entries.firstIndex(where: { $0.autolink == autolink && $0.source == grownFrom }) {
-            totalBytes -= entries[deadIdx].bytes
-            entries.remove(at: deadIdx)
-        }
-        clock += 1
-        let putStamp = clock
-        while (entries.count >= capacity || (totalBytes + entryBytes > budgetBytes && !entries.isEmpty)),
-              let evict = entries.indices.min(by: { entries[$0].stamp < entries[$1].stamp }) {
-            totalBytes -= entries[evict].bytes
-            entries.remove(at: evict)
-        }
-        entries.append(Entry(source: source, autolink: autolink, doc: parsed, bytes: entryBytes, stamp: putStamp))
-        totalBytes += entryBytes
-        lastSourceByAutolink[autolink] = source
-        lock.unlock()
+        docs.insert(key, value: parsed, bytes: 2 * source.utf8.count + 64 * parsed.cuts.count + 128)
+        last[mode] = Previous(key: key, mayDefineReferences: mayDefineReferences)
         return parsed
     }
 
-    private static func incrementalExtend(base: MarkdownParsedDoc, baseLen: Int, source: String, autolink: Bool, streaming: Bool = false) -> MarkdownParsedDoc? {
-        guard !streaming else { return nil }
-        // Keep everything strictly before the last safe cut that starts on a finished line;
-        // a reference link definition (`[id]: url`) can invalidate links anywhere in the document.
-        guard !source.contains("]:") else { return nil }
-        guard let cutIdx = base.cuts.lastIndex(where: { cut in
-            guard cut.at > 0,
-                  cut.at <= baseLen,
-                  cut.blocks < base.blocks.count,
-                  let prefixTail = utf8Slice(source, range: cut.at..<baseLen) else {
-                return false
-            }
-            return prefixTail.contains("\n")
-        }) else {
-            return nil
-        }
+    private static func incrementalExtend(
+        base: inout MarkdownParsedDoc, baseLen: Int, source: String, autolink: Bool,
+        parse: (String, Bool) -> MarkdownParsedDoc
+    ) -> Bool {
+        // A new reference definition changes links throughout the document. Only the
+        // final block starting on a completed raw line is safe to rebuild independently.
+        let bytes = source.utf8
+        let oldEnd = bytes.index(bytes.startIndex, offsetBy: baseLen)
+        guard let lastNewline = bytes[..<oldEnd].lastIndex(of: 0x0A) else { return false }
+        let newlineOffset = bytes.distance(from: bytes.startIndex, to: lastNewline)
+        guard let cutIdx = base.cuts.lastIndex(where: { $0.at <= newlineOffset }) else { return false }
         let cut = base.cuts[cutIdx]
-        guard cut.at < source.utf8.count,
-              let tailStr = utf8Slice(source, range: cut.at..<source.utf8.count) else {
-            return nil
-        }
-        let tail = MarkdownParser.parseDocument(tailStr, autolink: autolink)
-        var out = MarkdownParsedDoc()
-        out.blocks = Array(base.blocks.prefix(cut.blocks)) + tail.blocks
-        out.sources = Array(base.sources.prefix(cut.sources)) + tail.sources
-        let shiftedTailTasks = tail.tasks.map { task in
+        guard cut.at > 0, cut.blocks < base.blocks.count,
+              let tailStr = utf8Slice(source, range: cut.at..<bytes.count) else { return false }
+        let tail = parse(tailStr, autolink)
+        // Reuse the old arrays when the grown prefix was the sole owner. Array COW
+        // keeps earlier snapshots and documents also drawn in this commit intact.
+        base.blocks.replaceSubrange(cut.blocks..., with: tail.blocks)
+        base.sources.replaceSubrange(cut.sources..., with: tail.sources)
+        base.tasks.replaceSubrange(cut.tasks..., with: tail.tasks.map { task in
             task.map { MarkdownTaskState(checked: $0.checked, markerOffset: $0.markerOffset + cut.at) }
-        }
-        out.tasks = Array(base.tasks.prefix(cut.tasks)) + shiftedTailTasks
-        out.blockStarts = Array(base.blockStarts.prefix(cut.blocks)) + tail.blockStarts.map { $0 + cut.at }
-        out.maps = Array(base.maps.prefix(cut.blocks)) + tail.maps.map { $0.shiftedSrc(cut.at) }
-        out.cuts = Array(base.cuts.prefix(cutIdx)) + tail.cuts.map {
+        })
+        base.blockStarts.replaceSubrange(cut.blocks..., with: tail.blockStarts.map { $0 + cut.at })
+        base.maps.replaceSubrange(cut.blocks..., with: tail.maps.map { $0.shiftedSrc(cut.at) })
+        base.cuts.replaceSubrange(cutIdx..., with: tail.cuts.map {
             MarkdownCut(at: $0.at + cut.at, blocks: $0.blocks + cut.blocks, sources: $0.sources + cut.sources, tasks: $0.tasks + cut.tasks)
-        }
-        return out
+        })
+        return true
     }
 }
 
@@ -1526,23 +1552,26 @@ public struct MarkdownTailStream: Sendable, Equatable {
     }
 
     public func document(streaming: Bool = true) -> MarkdownParsedDoc {
-        let rawDoc = MarkdownDocCache.shared.docCached(source, autolink: autolink)
-        if !streaming {
-            return rawDoc
-        }
-        if MarkdownStream.unclosedFence(in: source) != nil {
-            return rawDoc
-        }
+        streaming
+            ? MarkdownDocCache.sharedStream.streamCached(source, autolink: autolink)
+            : MarkdownDocCache.shared.docCached(source, autolink: autolink)
+    }
+
+    static func parseStreaming(_ source: String, autolink: Bool) -> MarkdownParsedDoc {
+        let (rawDoc, tail) = MarkdownParser.documentWithTail(source, autolink: autolink)
+        if case .code = tail { return rawDoc }
         let end = Self.heldTableEndByte(in: source, parseLastBlock: { rawDoc.blocks.last }) ?? source.utf8.count
         let work = (end == source.utf8.count) ? source : (utf8Slice(source, range: 0..<end) ?? source)
-        guard let patch = Self.closeTail(work) else {
-            return (end == source.utf8.count) ? rawDoc : MarkdownDocCache.shared.docCached(work, autolink: autolink)
+        guard case let .inline(start, scope) = tail, start < end,
+              let run = utf8Slice(source, range: start..<end),
+              let patch = Self.scanRun(run, base: start, scope: scope) else {
+            return (end == source.utf8.count) ? rawDoc : MarkdownParser.parseDocument(work, autolink: autolink)
         }
         if !patch.closers.isEmpty {
             let rawKept = utf8Slice(work, range: 0..<patch.cut) ?? work
             let kept = rawKept.trimmingTrailingWhitespaceOnly()
             let view = kept + patch.closers
-            var doc = MarkdownDocCache.shared.docCached(view, autolink: autolink)
+            var doc = MarkdownParser.parseDocument(view, autolink: autolink)
             let added = kept.utf8.count..<view.utf8.count
             let anyMarkerShown = (patch.markers + [added]).contains { r in
                 doc.maps.contains { Self.blockMap($0, shows: r) }
@@ -1555,13 +1584,13 @@ public struct MarkdownTailStream: Sendable, Equatable {
             }
         }
         let cutSrc = utf8Slice(work, range: 0..<patch.cut) ?? work
-        let cutDoc = MarkdownDocCache.shared.docCached(cutSrc, autolink: autolink)
+        let cutDoc = MarkdownParser.parseDocument(cutSrc, autolink: autolink)
         let rawCols = Self.tableColumns(in: rawDoc)
         if Self.tableColumns(in: cutDoc) >= rawCols {
             return cutDoc
         }
         // Leaving markers out of a header's last cell (`| a | *`) drops that column; keep it empty.
-        let paddedDoc = MarkdownDocCache.shared.docCached(cutSrc + "|", autolink: autolink)
+        let paddedDoc = MarkdownParser.parseDocument(cutSrc + "|", autolink: autolink)
         return Self.tableColumns(in: paddedDoc) >= rawCols ? paddedDoc : rawDoc
     }
 
@@ -1589,7 +1618,11 @@ public struct MarkdownTailStream: Sendable, Equatable {
     }
 
     static func heldTableEndByte(in source: String, parseLastBlock: () -> MarkdownDocBlock?) -> Int? {
-        let b = Array(source.utf8)
+        var source = source
+        return source.withUTF8 { heldTableEndByte(in: $0, parseLastBlock: parseLastBlock) }
+    }
+
+    private static func heldTableEndByte(in b: UnsafeBufferPointer<UInt8>, parseLastBlock: () -> MarkdownDocBlock?) -> Int? {
         let bodyEnd = (b.last == 0x0A) ? (b.count - 1) : b.count
         let open = (bodyEnd == b.count)
         func lineStart(before end: Int) -> Int {
@@ -1601,11 +1634,10 @@ public struct MarkdownTailStream: Sendable, Equatable {
             String(decoding: b[start..<end], as: UTF8.self)
         }
         func isPiped(_ s: String) -> Bool {
-            s.drop(while: { $0 == " " || $0 == "\t" }).hasPrefix("|")
+            s.drop(while: \.isWhitespace).hasPrefix("|")
         }
         func isDelim(_ s: String) -> Bool {
-            let trimmed = s.trimmingCharacters(in: .whitespaces)
-            return !trimmed.isEmpty && trimmed.allSatisfy { "|:- ".contains($0) }
+            s.trimmingCharacters(in: .whitespacesAndNewlines).allSatisfy { "|:- ".contains($0) }
         }
         func headerStart(at lineAt: Int) -> Int? {
             guard lineAt >= 1 else { return nil }
@@ -1660,28 +1692,38 @@ public struct MarkdownTailStream: Sendable, Equatable {
         }
         let runBytes = Array(bytes[base...])
         guard let runStr = String(bytes: runBytes, encoding: .utf8) else { return nil }
-        return scanRun(runStr, runBytes: runBytes, base: base)
+        return scanRun(runStr, base: base, scope: .paragraph)
     }
 
-    private static func scanRun(_ run: String, runBytes b: [UInt8], base: Int) -> Patch? {
+    private static func scanRun(_ run: String, base: Int, scope: MarkdownTailScope) -> Patch? {
+        if scope == .paragraph,
+           run.split(separator: "\n", omittingEmptySubsequences: false).dropLast().contains(where: { $0.allSatisfy(\.isWhitespace) }) {
+            return nil
+        }
+        let b = Array(run.utf8)
         var stack: [OpenDelimiter] = []
         var code: (at: Int, n: Int)?
         var cut = b.count
         var i = 0
 
         func charBefore(_ offset: Int) -> Character? {
-            guard offset > 0, let prefix = String(bytes: b[..<offset], encoding: .utf8) else { return nil }
-            return prefix.last
+            guard offset > 0 else { return nil }
+            let index = run.utf8.index(run.utf8.startIndex, offsetBy: offset)
+            return Character(run.unicodeScalars[run.unicodeScalars.index(before: index)])
         }
         func charAt(_ offset: Int) -> Character? {
-            guard offset < b.count, let suffix = String(bytes: b[offset...], encoding: .utf8) else { return nil }
-            return suffix.first
+            guard offset < b.count, b[offset] & 0xC0 != 0x80 else { return nil }
+            let index = run.utf8.index(run.utf8.startIndex, offsetBy: offset)
+            return Character(run.unicodeScalars[index])
         }
 
         while i < b.count {
             switch b[i] {
             case 0x5C: // '\\'
                 i += 2
+            case 0x0A where scope != .paragraph, 0x7C where scope == .cell:
+                stack.removeAll(keepingCapacity: true)
+                i += 1
             case 0x60: // '`'
                 let n = runLen(b, i)
                 if let closeIdx = closingTicks(b, from: i + n, n: n) {
@@ -1713,17 +1755,13 @@ public struct MarkdownTailStream: Sendable, Equatable {
                     } else {
                         stack.removeSubrange((p + 1)...)
                         var destCh: UInt8 = 0x28
-                        if let wsIdx = afterParen.firstIndex(where: { $0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D }) {
-                            var t = wsIdx + 1
-                            while t < b.count && (b[t] == 0x20 || b[t] == 0x09 || b[t] == 0x0A || b[t] == 0x0D) {
-                                t += 1
-                            }
-                            if t < b.count && (b[t] == 0x22 || b[t] == 0x27) {
-                                let q = b[t]
-                                if !(b.count - t > 1 && b.last == q) {
-                                    destCh = q
-                                }
-                            }
+                        let destination = String(decoding: afterParen, as: UTF8.self)
+                        let title = destination.firstIndex(where: \.isWhitespace).map {
+                            destination[$0...].drop(while: \.isWhitespace)
+                        }
+                        if let title, let quote = title.utf8.first, quote == 0x22 || quote == 0x27,
+                           !(title.utf8.count > 1 && title.utf8.last == quote) {
+                            destCh = quote
                         }
                         stack[p].ch = destCh
                         i = b.count
@@ -1732,7 +1770,7 @@ public struct MarkdownTailStream: Sendable, Equatable {
                     stack.remove(at: p)
                     i += 1
                 }
-            case 0x68 where urlAt(runBytes: b, at: i), 0x77 where urlAt(runBytes: b, at: i): // 'h', 'w' bare URL
+            case 0x68 where urlAt(runBytes: b, at: i, before: charBefore(i)), 0x77 where urlAt(runBytes: b, at: i, before: charBefore(i)): // 'h', 'w' bare URL
                 var k = i
                 while k < b.count {
                     if let c = charAt(k), c.isWhitespace { break }
@@ -1781,19 +1819,19 @@ public struct MarkdownTailStream: Sendable, Equatable {
 
         if let (at, n) = code {
             var trimmed = cut
-            while trimmed > at + n && (b[trimmed - 1] == 0x60 || b[trimmed - 1] == 0x20 || b[trimmed - 1] == 0x09) {
-                trimmed -= 1
-            }
+            while trimmed > 0 && b[trimmed - 1] == 0x60 { trimmed -= 1 }
+            while trimmed > 0, let char = charBefore(trimmed), char.isWhitespace { trimmed -= char.utf8.count }
             if trimmed <= at + n {
                 cut = at
                 code = nil
             } else {
                 cut = trimmed
             }
-        } else {
+        }
+        if code == nil {
             while let last = stack.last {
                 let start = min(cut, last.at + last.count)
-                let slice = String(bytes: b[start..<cut], encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let slice = String(decoding: b[start..<cut], as: UTF8.self).trimmingTrailingWhitespaceOnly()
                 if slice.isEmpty || (last.ch == 0x5B && last.count == 1 && (slice == "x" || slice == "X")) {
                     cut = last.at
                     stack.removeLast()
@@ -1815,13 +1853,9 @@ public struct MarkdownTailStream: Sendable, Equatable {
         for o in stack.reversed() {
             switch o.ch {
             case 0x5B:
-                closers.append("](#)")
+                closers.append("]()")
             case 0x28:
-                let tailSlice = b[min(cut, o.at)..<cut]
-                let hasEmptyDest = tailSlice.lastIndex(of: 0x28).map { parenIdx in
-                    tailSlice[(parenIdx + 1)...].allSatisfy { $0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D }
-                } ?? false
-                closers.append(hasEmptyDest ? "#)" : ")")
+                closers.append(")")
             case 0x22, 0x27:
                 closers.append(String(UnicodeScalar(o.ch)))
                 closers.append(")")
@@ -1834,13 +1868,13 @@ public struct MarkdownTailStream: Sendable, Equatable {
         return Patch(cut: base + cut, closers: closers, markers: markers, inCode: code != nil)
     }
 
-    private static func urlAt(runBytes b: [UInt8], at i: Int) -> Bool {
+    private static func urlAt(runBytes b: [UInt8], at i: Int, before: Character?) -> Bool {
         let rest = b[i...]
-        let matchesPrefix = rest.starts(with: Array("https://".utf8))
-            || rest.starts(with: Array("http://".utf8))
-            || rest.starts(with: Array("www.".utf8))
+        let matchesPrefix = rest.starts(with: "https://".utf8)
+            || rest.starts(with: "http://".utf8)
+            || rest.starts(with: "www.".utf8)
         guard matchesPrefix else { return false }
-        guard i > 0, let prev = String(bytes: b[..<i], encoding: .utf8)?.last else { return true }
+        guard let prev = before else { return true }
         return prev.isWhitespace || "(<[".contains(prev)
     }
 
@@ -1904,6 +1938,7 @@ public struct MarkdownTailStream: Sendable, Equatable {
                 return l.start < hi ? MarkdownLinkSpan(start: l.start, end: hi, url: l.url) : nil
             }
             map.truncateOut(cut)
+            inl.preparedBidi = MarkdownInlineBidi(inl)
         }
         func walk(_ block: inout MarkdownDocBlock, _ map: inout MarkdownBlockMap) {
             switch (block, map) {
@@ -1953,6 +1988,13 @@ public struct MarkdownTailStream: Sendable, Equatable {
 // MARK: - Parser (`rune_kit::markdown::parser` + `interrupt`)
 
 /// Streaming-friendly CommonMark + GFM Table + Task List + Footnote + Syntax Highlighting parser (`rune_kit::markdown::parser`).
+fileprivate enum MarkdownTailScope { case paragraph, line, cell }
+
+fileprivate enum MarkdownParseTail {
+    case none, code
+    case inline(Int, MarkdownTailScope)
+}
+
 public enum MarkdownParser {
     /// Structured inline token (legacy API upgraded to retain `url`!).
     public struct InlineToken: Sendable, Equatable {
@@ -1990,9 +2032,18 @@ public enum MarkdownParser {
     }
 
     public static func parseDocument(_ source: String, autolink: Bool = true) -> MarkdownParsedDoc {
-        let defs = collectLinkDefinitions(in: source)
-        var parser = DocumentParser(source: source, baseOffset: 0, definitions: defs, autolink: autolink)
-        return parser.parseRoot()
+        documentWithTail(source, autolink: autolink).0
+    }
+
+    fileprivate static func documentWithTail(_ source: String, autolink: Bool) -> (MarkdownParsedDoc, MarkdownParseTail) {
+        let lines = splitLineSlices(source)
+        var parser = DocumentParser(source: source, baseOffset: 0, autolink: autolink)
+        let first = parser.parseRoot(lines: lines)
+        // A later definition can resolve an earlier link or lift an earlier image into a block.
+        guard let firstBlock = first.blockStarts.first, let lastDefinition = parser.lastNewDefinition,
+              firstBlock < lastDefinition else { return (first, parser.tail) }
+        let resolved = parser.parseRoot(lines: lines)
+        return (resolved, parser.tail)
     }
 
     private struct LinkDefinition {
@@ -2025,49 +2076,66 @@ public enum MarkdownParser {
         return out
     }
 
-    private static func collectLinkDefinitions(in source: String) -> [String: LinkDefinition] {
-        var defs: [String: LinkDefinition] = [:]
-        let lines = splitLineSlices(source)
-        for line in lines {
-            guard let raw = utf8Slice(source, range: line.contentRange) else { continue }
-            let trimmed = raw.trimmingCharacters(in: .whitespaces)
-            guard trimmed.hasPrefix("["),
-                  let closeBracket = trimmed.dropFirst().firstIndex(of: "]") else { continue }
-            let id = String(trimmed[trimmed.index(after: trimmed.startIndex)..<closeBracket])
-                .trimmingCharacters(in: .whitespaces)
-                .lowercased()
-            let afterBracket = trimmed[trimmed.index(after: closeBracket)...]
-            guard afterBracket.hasPrefix(":"), !id.isEmpty else { continue }
-            var destPart = afterBracket.dropFirst().trimmingCharacters(in: .whitespaces)
-            var url = ""
-            var title = ""
-            if destPart.hasPrefix("<"), let gt = destPart.dropFirst().firstIndex(of: ">") {
-                url = String(destPart[destPart.index(after: destPart.startIndex)..<gt])
-                destPart = destPart[destPart.index(after: gt)...].trimmingCharacters(in: .whitespaces)
+    private static func collectLinkDefinitions(in source: String) -> [KitSourceKey: LinkDefinition] {
+        guard markdownMayDefineReferences(in: source.utf8[...]) else { return [:] }
+        var parser = DocumentParser(source: source, baseOffset: 0, autolink: false)
+        _ = parser.parseRoot(lines: splitLineSlices(source))
+        return parser.definitions
+    }
+
+    /// Raw blocks inside a list or quote require the container prefix on every line.
+    private struct ContainerHTMLTail {
+        private var active: MarkdownHTML.BlockEnd?
+        private var fence: (char: Character, count: Int)?
+        private var paragraph = false
+        private(set) var followsHTML = false
+
+        mutating func append(_ line: String) {
+            if let fence {
+                if isFenceCloser(line, fenceChar: fence.char, minLen: fence.count) { self.fence = nil }
+                return
+            }
+            if let active {
+                if case .blankLine = active, line.utf8.allSatisfy({ $0 == 9 || $0 == 32 }) {
+                    self.active = nil
+                } else {
+                    if case let .marker(marker) = active, line.contains(marker) { self.active = nil }
+                    return
+                }
+            }
+            if let start = MarkdownHTML.blockStart(in: line, interruptsParagraph: paragraph) {
+                active = start
+                if case let .marker(marker) = start, line.contains(marker) { active = nil }
+                followsHTML = true
+                paragraph = false
             } else {
-                let parts = destPart.split(maxSplits: 1, whereSeparator: \.isWhitespace)
-                url = parts.first.map(String.init) ?? ""
-                destPart = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : ""
-            }
-            if (destPart.hasPrefix("\"") && destPart.hasSuffix("\"") && destPart.count >= 2) ||
-                (destPart.hasPrefix("'") && destPart.hasSuffix("'") && destPart.count >= 2) {
-                title = String(destPart.dropFirst().dropLast())
-            }
-            if !url.isEmpty && defs[id] == nil {
-                defs[id] = LinkDefinition(url: url, title: title)
+                followsHTML = false
+                let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+                if let first = trimmed.first, first == "`" || first == "~", let header = parseFenceHeader(line) {
+                    fence = (header.char, header.count)
+                    paragraph = false
+                } else if trimmed.first == "#",
+                          parseATXHeading(source: line, lineRange: 0..<line.utf8.count) != nil {
+                    paragraph = false
+                } else if let first = trimmed.first, first == "-" || first == "*" || first == "_" {
+                    paragraph = !isHorizontalRule(String(trimmed))
+                } else {
+                    paragraph = !trimmed.isEmpty
+                }
             }
         }
-        return defs
     }
 
     private struct DocumentParser {
         let source: String
         let baseOffset: Int
-        let definitions: [String: LinkDefinition]
+        var definitions: [KitSourceKey: LinkDefinition] = [:]
+        var lastNewDefinition: Int?
+        var mayDefineReferences: Bool?
         let autolink: Bool
+        var tail: MarkdownParseTail = .none
 
-        mutating func parseRoot() -> MarkdownParsedDoc {
-            let lines = splitLineSlices(source)
+        mutating func parseRoot(lines: [LineSlice]) -> MarkdownParsedDoc {
             var doc = MarkdownParsedDoc()
             parseBlockSequence(
                 lines: lines,
@@ -2090,6 +2158,31 @@ public enum MarkdownParser {
             return doc
         }
 
+        private mutating func referenceDefinition(firstLine: String, lines: [LineSlice], at start: Int) -> MarkdownReference? {
+            if mayDefineReferences == nil { mayDefineReferences = markdownMayDefineReferences(in: source.utf8[...]) }
+            guard mayDefineReferences == true else { return nil }
+            return MarkdownReference.scan(firstLine: firstLine) { relative in
+                let index = start + relative
+                guard index < lines.count, let line = utf8Slice(source, range: lines[index].contentRange) else { return nil }
+                // Four spaces after a definition's opening line permit a destination or
+                // title even when the same text at the margin would begin a new block.
+                if indentWidth(line) >= 4 { return line }
+                let text = line.trimmingCharacters(in: .whitespaces)
+                guard let first = text.first, first != ">",
+                      !isHorizontalRule(text), !isFenceHeaderBool(line),
+                      parseATXHeading(source: line, lineRange: 0..<line.utf8.count) == nil,
+                      MarkdownHTML.blockStart(in: line, interruptsParagraph: true) == nil else { return nil }
+                if (first == "-" || first == "=") && text.allSatisfy({ $0 == first }) { return nil }
+                if let item = parseListMarker(line), !item.ordered || item.start == 1,
+                   !line.utf8.dropFirst(item.contentOffsetBytes).allSatisfy({ $0 == 32 || $0 == 9 }) { return nil }
+                if first == "|", index + 1 < lines.count,
+                   let delimiter = utf8Slice(source, range: lines[index + 1].contentRange),
+                   let align = parseTableDelimiterAlignments(delimiter),
+                   align.count == splitTableRow(text, baseOffset: 0).count { return nil }
+                return line
+            }
+        }
+
         private mutating func parseBlockSequence(
             lines: [LineSlice],
             into blocks: inout [MarkdownDocBlock],
@@ -2109,9 +2202,16 @@ public enum MarkdownParser {
                     continue
                 }
 
-                // Skip standalone reference link definitions `[id]: url`
-                if isReferenceDefinitionLine(trimmed) {
-                    i += 1
+                // A reference is defined at a block start, including inside a list item or quote.
+                if trimmed.hasPrefix("["), indentWidth(raw) < 4,
+                   let reference = referenceDefinition(firstLine: raw, lines: lines, at: i) {
+                    let key = KitSourceKey(reference.key)
+                    if definitions[key] == nil {
+                        definitions[key] = LinkDefinition(url: unescapeMarkdown(reference.rawDestination),
+                                                          title: reference.rawTitle.map(unescapeMarkdown) ?? "")
+                        lastNewDefinition = lines[i].contentRange.lowerBound
+                    }
+                    i += reference.lineCount
                     continue
                 }
 
@@ -2125,8 +2225,22 @@ public enum MarkdownParser {
                     ))
                 }
 
+                if let end = MarkdownHTML.blockStart(in: raw) {
+                    tail = .code
+                    var line = raw
+                    while true {
+                        i += 1
+                        if case let .marker(marker) = end, line.contains(marker) { break }
+                        guard i < lines.count else { break }
+                        line = utf8Slice(source, range: lines[i].contentRange) ?? ""
+                        if case .blankLine = end, line.utf8.allSatisfy({ $0 == 32 || $0 == 9 }) { break }
+                    }
+                    continue
+                }
+
                 // 1. Fenced code block (``` or ~~~)
                 if let fence = parseFenceHeader(raw) {
+                    tail = .code
                     var codeRanges: [Range<Int>] = []
                     var j = i + 1
                     var closed = false
@@ -2160,6 +2274,7 @@ public enum MarkdownParser {
 
                 // 2. Thematic break (---, ***, ___) — must precede heading/list check
                 if isHorizontalRule(trimmed) {
+                    tail = .none
                     appendBlock(.rule, map: .none, start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
                     i += 1
                     continue
@@ -2167,6 +2282,7 @@ public enum MarkdownParser {
 
                 // 3. ATX Heading (# ... ######)
                 if let (level, headingContentRange) = parseATXHeading(source: source, lineRange: lines[i].contentRange) {
+                    tail = .inline(blockStartByte, .line)
                     let headingStr = utf8Slice(source, range: headingContentRange) ?? ""
                     let (inl, spanMap, _) = parseInline(
                         headingStr,
@@ -2182,6 +2298,7 @@ public enum MarkdownParser {
 
                 // 4. Indented code block (4 spaces or leading tab)
                 if isIndentedCodeLine(raw) {
+                    tail = .code
                     var ranges: [Range<Int>] = []
                     var j = i
                     while j < lines.count {
@@ -2217,6 +2334,7 @@ public enum MarkdownParser {
                 // 5. Blockquote (> ...)
                 if trimmed.hasPrefix(">") {
                     var innerLines: [LineSlice] = []
+                    var html = ContainerHTMLTail()
                     var j = i
                     while j < lines.count {
                         let lStr = utf8Slice(source, range: lines[j].contentRange) ?? ""
@@ -2226,11 +2344,13 @@ public enum MarkdownParser {
                             var dropBytes = leadSpaces + 1 // '>'
                             if lTrim.dropFirst().first == " " { dropBytes += 1 }
                             let cStart = min(lines[j].contentRange.upperBound, lines[j].contentRange.lowerBound + dropBytes)
-                            innerLines.append(LineSlice(contentRange: cStart..<lines[j].contentRange.upperBound, lineEnd: lines[j].lineEnd))
+                            let slice = LineSlice(contentRange: cStart..<lines[j].contentRange.upperBound, lineEnd: lines[j].lineEnd)
+                            html.append(utf8Slice(source, range: slice.contentRange) ?? "")
+                            innerLines.append(slice)
                             j += 1
                         } else if lStr.trimmingCharacters(in: .whitespaces).isEmpty {
                             break
-                        } else if !innerLines.isEmpty && !isFenceHeaderBool(lStr) && !isHorizontalRule(lStr.trimmingCharacters(in: .whitespaces)) && parseATXHeading(source: source, lineRange: lines[j].contentRange) == nil && parseListMarker(lStr) == nil {
+                        } else if !innerLines.isEmpty && !html.followsHTML && MarkdownHTML.blockStart(in: lStr, interruptsParagraph: true) == nil && !isFenceHeaderBool(lStr) && !isHorizontalRule(lStr.trimmingCharacters(in: .whitespaces)) && parseATXHeading(source: source, lineRange: lines[j].contentRange) == nil && parseListMarker(lStr) == nil {
                             // Lazy continuation line
                             innerLines.append(lines[j])
                             j += 1
@@ -2253,6 +2373,7 @@ public enum MarkdownParser {
                     let isOrdered = firstMarker.ordered
                     let startNum = firstMarker.start
                     var itemSlices: [[LineSlice]] = []
+                    var html = ContainerHTMLTail()
                     var itemTasks: [MarkdownTaskState?] = []
                     var j = i
 
@@ -2271,6 +2392,7 @@ public enum MarkdownParser {
                                     continue
                                 }
                                 if indentWidth(peekStr) >= firstMarker.contentIndent {
+                                    html.append("")
                                     itemSlices[itemSlices.count - 1].append(lines[j])
                                     j += 1
                                     continue
@@ -2289,16 +2411,21 @@ public enum MarkdownParser {
                                 cStart += task.dropBytes
                             }
                             itemTasks.append(taskState)
-                            itemSlices.append([LineSlice(contentRange: min(cStart, lines[j].contentRange.upperBound)..<lines[j].contentRange.upperBound, lineEnd: lines[j].lineEnd)])
+                            let slice = LineSlice(contentRange: min(cStart, lines[j].contentRange.upperBound)..<lines[j].contentRange.upperBound, lineEnd: lines[j].lineEnd)
+                            html = ContainerHTMLTail()
+                            html.append(utf8Slice(source, range: slice.contentRange) ?? "")
+                            itemSlices.append([slice])
                             j += 1
                         } else if !itemSlices.isEmpty {
                             let ind = indentWidth(lStr)
                             if ind >= firstMarker.contentIndent {
                                 let stripped = stripLeadingIndent(lStr, targetCols: firstMarker.contentIndent)
                                 let cStart = lines[j].contentRange.lowerBound + stripped
-                                itemSlices[itemSlices.count - 1].append(LineSlice(contentRange: min(cStart, lines[j].contentRange.upperBound)..<lines[j].contentRange.upperBound, lineEnd: lines[j].lineEnd))
+                                let slice = LineSlice(contentRange: min(cStart, lines[j].contentRange.upperBound)..<lines[j].contentRange.upperBound, lineEnd: lines[j].lineEnd)
+                                html.append(utf8Slice(source, range: slice.contentRange) ?? "")
+                                itemSlices[itemSlices.count - 1].append(slice)
                                 j += 1
-                            } else if parseListMarker(lStr) == nil && !isHorizontalRule(lStr.trimmingCharacters(in: .whitespaces)) && parseATXHeading(source: source, lineRange: lines[j].contentRange) == nil && !isFenceHeaderBool(lStr) && !lStr.trimmingCharacters(in: .whitespaces).hasPrefix(">") {
+                            } else if !html.followsHTML && MarkdownHTML.blockStart(in: lStr, interruptsParagraph: true) == nil && parseListMarker(lStr) == nil && !isHorizontalRule(lStr.trimmingCharacters(in: .whitespaces)) && parseATXHeading(source: source, lineRange: lines[j].contentRange) == nil && !isFenceHeaderBool(lStr) && !lStr.trimmingCharacters(in: .whitespaces).hasPrefix(">") {
                                 // Lazy paragraph continuation inside list item
                                 itemSlices[itemSlices.count - 1].append(lines[j])
                                 j += 1
@@ -2313,6 +2440,7 @@ public enum MarkdownParser {
                     var renderedItems: [[MarkdownDocBlock]] = []
                     var itemMaps: [[MarkdownBlockMap]] = []
                     for (idx, subLines) in itemSlices.enumerated() {
+                        if let start = subLines.first?.contentRange.lowerBound { tail = .inline(start, .paragraph) }
                         tasks.append(itemTasks[idx])
                         var ib: [MarkdownDocBlock] = []
                         var im: [MarkdownBlockMap] = []
@@ -2334,9 +2462,11 @@ public enum MarkdownParser {
                    raw.contains("|") {
                     let headCells = splitTableRow(raw, baseOffset: baseOffset + lines[i].contentRange.lowerBound)
                     if headCells.count == aligns.count || (!headCells.isEmpty && raw.trimmingCharacters(in: .whitespaces).hasPrefix("|")) {
+                        tail = .none
                         var headInlines: [MarkdownInline] = []
                         var headMaps: [MarkdownSpanMap] = []
                         for cell in headCells {
+                            tail = .inline(cell.offset, .cell)
                             let (inl, sm, _) = parseInline(cell.text, baseOffset: cell.offset, autolink: autolink, definitions: definitions, trimTrailingCodePad: true)
                             headInlines.append(inl)
                             headMaps.append(sm)
@@ -2356,6 +2486,7 @@ public enum MarkdownParser {
                             var rInl: [MarkdownInline] = []
                             var rMap: [MarkdownSpanMap] = []
                             for cell in cells {
+                                tail = .inline(cell.offset, .cell)
                                 let (inl, sm, _) = parseInline(cell.text, baseOffset: cell.offset, autolink: autolink, definitions: definitions, trimTrailingCodePad: true)
                                 rInl.append(inl)
                                 rMap.append(sm)
@@ -2375,6 +2506,7 @@ public enum MarkdownParser {
                 if i + 1 < lines.count {
                     let nextTrim = (utf8Slice(source, range: lines[i + 1].contentRange) ?? "").trimmingCharacters(in: .whitespaces)
                     if !nextTrim.isEmpty && (nextTrim.allSatisfy { $0 == "=" } || nextTrim.allSatisfy { $0 == "-" }) {
+                        tail = .inline(blockStartByte, .line)
                         let lvl = nextTrim.first == "=" ? 1 : 2
                         let pStr = raw.trimmingCharacters(in: .whitespaces)
                         let leadOff = raw.utf8.count - String(raw.drop(while: \.isWhitespace)).utf8.count
@@ -2386,13 +2518,14 @@ public enum MarkdownParser {
                 }
 
                 // 9. Paragraph (joining soft lines, breaking on container starts or interrupt-numbered continuations, lifting standalone images on root)
+                tail = .inline(blockStartByte, .paragraph)
                 var paraRanges: [Range<Int>] = [lines[i].contentRange]
                 var j = i + 1
                 while j < lines.count {
                     let nextRaw = utf8Slice(source, range: lines[j].contentRange) ?? ""
                     let nextTrim = nextRaw.trimmingCharacters(in: .whitespaces)
                     if nextTrim.isEmpty ||
-                        isReferenceDefinitionLine(nextTrim) ||
+                        MarkdownHTML.blockStart(in: nextRaw, interruptsParagraph: true) != nil ||
                         isFenceHeaderBool(nextRaw) ||
                         isHorizontalRule(nextTrim) ||
                         parseATXHeading(source: source, lineRange: lines[j].contentRange) != nil ||
@@ -2467,6 +2600,7 @@ public enum MarkdownParser {
         ) {
             // Reconstruct combined text + exact byte mapping from line slices while handling hard breaks (`  \n` / `\\\n`)
             var joined = ""
+            var softBreaks: Set<Int> = []
             var srcSegments: [(src: Range<Int>, out: Range<Int>)] = []
             for (idx, lr) in lineRanges.enumerated() {
                 var lineStr = utf8Slice(source, range: lr) ?? ""
@@ -2492,6 +2626,7 @@ public enum MarkdownParser {
                 }
                 if idx + 1 < lineRanges.count {
                     let brStart = joined.utf8.count
+                    if !hardBreak { softBreaks.insert(brStart) }
                     joined.append(hardBreak ? "\n" : " ")
                     let brEnd = joined.utf8.count
                     let nlByte = baseOffset + lr.upperBound
@@ -2503,6 +2638,7 @@ public enum MarkdownParser {
                 joined,
                 baseOffset: baseOffset + blockStart,
                 customSrcMap: srcSegments,
+                softBreaks: softBreaks,
                 autolink: autolink,
                 definitions: definitions,
                 trimTrailingCodePad: true,
@@ -2549,8 +2685,9 @@ public enum MarkdownParser {
         _ input: String,
         baseOffset: Int,
         customSrcMap: [(src: Range<Int>, out: Range<Int>)]? = nil,
+        softBreaks: Set<Int> = [],
         autolink: Bool,
-        definitions: [String: LinkDefinition],
+        definitions: [KitSourceKey: LinkDefinition],
         trimTrailingCodePad: Bool,
         collectLiftableImages: Bool = false
     ) -> (MarkdownInline, MarkdownSpanMap, [LiftedImage]) {
@@ -2620,6 +2757,10 @@ public enum MarkdownParser {
             var i = lo
             while i < hi {
                 let b = bytes[i]
+                if b == 32, text.isEmpty, softBreaks.contains(i) {
+                    i += 1
+                    continue
+                }
 
                 // 1. Backslash escape
                 if b == 0x5C && i + 1 < hi {
@@ -2705,7 +2846,7 @@ public enum MarkdownParser {
                     let lStart = text.utf8.count
                     parseRange(i + 1, linkMatch.closeBracket, linkDepth: linkDepth + 1, emDepth: emDepth)
                     let lEnd = text.utf8.count
-                    if lStart < lEnd && !linkMatch.url.isEmpty {
+                    if lStart < lEnd {
                         spans.append(MarkdownStyleSpan(start: lStart, end: lEnd, style: .link))
                         links.append(MarkdownLinkSpan(start: lStart, end: lEnd, url: linkMatch.url))
                     }
@@ -2713,26 +2854,19 @@ public enum MarkdownParser {
                     continue
                 }
 
-                // 5. Angle-bracket autolink `<https://...>` / `<mailto:...>` / `<a@b.c>`
-                if b == 0x3C, let gt = bytes[(i + 1)..<hi].firstIndex(of: 0x3E),
-                   let inner = String(bytes: bytes[(i + 1)..<gt], encoding: .utf8),
-                   !inner.contains(where: \.isWhitespace) {
-                    let lowerInner = inner.lowercased()
-                    if lowerInner.hasPrefix("https://") || lowerInner.hasPrefix("http://") || lowerInner.hasPrefix("mailto:") {
-                        let outStart = text.utf8.count
-                        appendRaw(inner, srcLo: i + 1, srcHi: gt)
-                        let outEnd = text.utf8.count
-                        spans.append(MarkdownStyleSpan(start: outStart, end: outEnd, style: .link))
-                        links.append(MarkdownLinkSpan(start: outStart, end: outEnd, url: inner))
-                        i = gt + 1
+                if b == 0x3C {
+                    let rest = bytes[i..<hi]
+                    if let end = MarkdownHTML.autolinkEnd(rest) {
+                        let destination = String(decoding: bytes[(i + 1)..<(end - 1)], as: UTF8.self)
+                        let start = text.utf8.count
+                        appendRaw(destination, srcLo: i + 1, srcHi: end - 1)
+                        spans.append(MarkdownStyleSpan(start: start, end: text.utf8.count, style: .link))
+                        links.append(MarkdownLinkSpan(start: start, end: text.utf8.count, url: destination))
+                        i = end
                         continue
-                    } else if inner.contains("@") && inner.contains(".") {
-                        let outStart = text.utf8.count
-                        appendRaw(inner, srcLo: i + 1, srcHi: gt)
-                        let outEnd = text.utf8.count
-                        spans.append(MarkdownStyleSpan(start: outStart, end: outEnd, style: .link))
-                        links.append(MarkdownLinkSpan(start: outStart, end: outEnd, url: "mailto:\(inner)"))
-                        i = gt + 1
+                    }
+                    if let end = MarkdownHTML.inlineEnd(rest) {
+                        i = end
                         continue
                     }
                 }
@@ -2811,6 +2945,7 @@ public enum MarkdownParser {
         if autolink {
             applyGFMAutolinks(to: &inline, excluding: excludedAutolinkRanges)
         }
+        inline.preparedBidi = MarkdownInlineBidi(inline)
         return (inline, map, lifted)
     }
 
@@ -2887,6 +3022,7 @@ public enum MarkdownParser {
         if trimCodePad {
             trimEndingCodePadding(&out, map: &subMap)
         }
+        out.preparedBidi = MarkdownInlineBidi(out)
         return (out, subMap)
     }
 
@@ -2917,11 +3053,15 @@ public enum MarkdownParser {
         bytes: [UInt8],
         openBracket: Int,
         limit: Int,
-        definitions: [String: LinkDefinition]
+        definitions: [KitSourceKey: LinkDefinition]
     ) -> BracketLinkMatch? {
         var i = openBracket + 1
         var depth = 1
         while i < limit {
+            if bytes[i] == 0x3C, let end = MarkdownHTML.inlineEnd(bytes[i..<limit]) {
+                i = end
+                continue
+            }
             if bytes[i] == 0x5C && i + 1 < limit { i += 2; continue }
             if bytes[i] == 0x60 {
                 var ticks = 0
@@ -2969,7 +3109,7 @@ public enum MarkdownParser {
                     }
                     p += 1
                 }
-                url = unescapeASCII(String(bytes: bytes[uStart..<p], encoding: .utf8) ?? "")
+                url = unescapeMarkdown(String(bytes: bytes[uStart..<p], encoding: .utf8) ?? "")
             }
             while p < limit && (bytes[p] == 0x20 || bytes[p] == 0x09 || bytes[p] == 0x0A) { p += 1 }
             if p < limit && (bytes[p] == 0x22 || bytes[p] == 0x27) { // title
@@ -2990,23 +3130,28 @@ public enum MarkdownParser {
             return BracketLinkMatch(closeBracket: closeBracket, url: url, title: title, afterClose: p + 1)
         }
 
-        // 2) Full reference `[label][id]`
+        guard !definitions.isEmpty else { return nil }
+        // Full and collapsed references. A well-formed second label suppresses the
+        // shortcut even when its destination is missing.
+        let label = String(decoding: bytes[(openBracket + 1)..<closeBracket], as: UTF8.self)
         if closeBracket + 1 < limit && bytes[closeBracket + 1] == 0x5B {
-            if let refEnd = bytes[(closeBracket + 2)..<limit].firstIndex(of: 0x5D) {
-                let rawId = String(bytes: bytes[(closeBracket + 2)..<refEnd], encoding: .utf8) ?? ""
-                let labelStr = String(bytes: bytes[(openBracket + 1)..<closeBracket], encoding: .utf8) ?? ""
-                let key = (rawId.isEmpty ? labelStr : rawId).trimmingCharacters(in: .whitespaces).lowercased()
-                if let def = definitions[key] {
-                    return BracketLinkMatch(closeBracket: closeBracket, url: def.url, title: def.title, afterClose: refEnd + 1)
+            let start = closeBracket + 2
+            var end = start
+            while end < limit {
+                if bytes[end] == 0x5C && end + 1 < limit && isASCIIPunctuation(bytes[end + 1]) { end += 2; continue }
+                if bytes[end] == 0x5B || bytes[end] == 0x5D { break }
+                end += 1
+            }
+            if end < limit && bytes[end] == 0x5D {
+                let raw = end == start ? label : String(decoding: bytes[start..<end], as: UTF8.self)
+                if let key = MarkdownReference.key(raw) {
+                    guard let def = definitions[KitSourceKey(key)] else { return nil }
+                    return BracketLinkMatch(closeBracket: closeBracket, url: def.url, title: def.title, afterClose: end + 1)
                 }
             }
         }
 
-        // 3) Shortcut reference `[id]`
-        let labelKey = (String(bytes: bytes[(openBracket + 1)..<closeBracket], encoding: .utf8) ?? "")
-            .trimmingCharacters(in: .whitespaces)
-            .lowercased()
-        if let def = definitions[labelKey] {
+        if let key = MarkdownReference.key(label), let def = definitions[KitSourceKey(key)] {
             return BracketLinkMatch(closeBracket: closeBracket, url: def.url, title: def.title, afterClose: closeBracket + 1)
         }
         return nil
@@ -3030,6 +3175,10 @@ public enum MarkdownParser {
     private static func findClosingDouble(_ bytes: [UInt8], char: UInt8, from start: Int, limit: Int) -> Int? {
         var i = start
         while i + 1 < limit {
+            if bytes[i] == 0x3C, let end = MarkdownHTML.inlineEnd(bytes[i..<limit]) {
+                i = end
+                continue
+            }
             if bytes[i] == 0x5C && i + 1 < limit { i += 2; continue }
             if bytes[i] == 0x60 {
                 var ticks = 0
@@ -3054,6 +3203,10 @@ public enum MarkdownParser {
     private static func findClosingTriple(_ bytes: [UInt8], char: UInt8, from start: Int, limit: Int) -> Int? {
         var i = start
         while i + 2 < limit {
+            if bytes[i] == 0x3C, let end = MarkdownHTML.inlineEnd(bytes[i..<limit]) {
+                i = end
+                continue
+            }
             if bytes[i] == 0x5C && i + 1 < limit { i += 2; continue }
             if bytes[i] == char && bytes[i + 1] == char && bytes[i + 2] == char { return i }
             i += 1
@@ -3072,6 +3225,10 @@ public enum MarkdownParser {
     private static func findClosingSingle(_ bytes: [UInt8], char: UInt8, from start: Int, limit: Int) -> Int? {
         var i = start
         while i < limit {
+            if bytes[i] == 0x3C, let end = MarkdownHTML.inlineEnd(bytes[i..<limit]) {
+                i = end
+                continue
+            }
             if bytes[i] == 0x5C && i + 1 < limit { i += 2; continue }
             if bytes[i] == 0x60 {
                 var ticks = 0
@@ -3138,26 +3295,25 @@ public enum MarkdownParser {
         }
     }
 
-    private static func unescapeASCII(_ s: String) -> String {
-        var out = ""
-        var iter = s.unicodeScalars.makeIterator()
-        while let sc = iter.next() {
-            if sc == "\\" {
-                if let next = iter.next() {
-                    if next.value < 128 && isASCIIPunctuation(UInt8(next.value)) {
-                        out.unicodeScalars.append(next)
-                    } else {
-                        out.append("\\")
-                        out.unicodeScalars.append(next)
-                    }
-                } else {
-                    out.append("\\")
-                }
+    private static func unescapeMarkdown(_ raw: String) -> String {
+        guard raw.utf8.contains(92) || raw.utf8.contains(38) else { return raw }
+        let bytes = Array(raw.utf8)
+        var out: [UInt8] = []
+        out.reserveCapacity(bytes.count)
+        var i = 0
+        while i < bytes.count {
+            if bytes[i] == 92, i + 1 < bytes.count, isASCIIPunctuation(bytes[i + 1]) {
+                out.append(bytes[i + 1])
+                i += 2
+            } else if bytes[i] == 38, let (text, next) = decodeHTMLEntity(bytes, at: i, limit: bytes.count) {
+                out.append(contentsOf: text.utf8)
+                i = next
             } else {
-                out.unicodeScalars.append(sc)
+                out.append(bytes[i])
+                i += 1
             }
         }
-        return out
+        return String(decoding: out, as: UTF8.self)
     }
 
     private static func isASCIIPunctuation(_ b: UInt8) -> Bool {
@@ -3186,6 +3342,11 @@ public enum MarkdownParser {
         maps: inout [MarkdownBlockMap],
         starts: inout [Int]
     ) {
+        switch b {
+        case let .para(inline), let .heading(_, inline):
+            if inline.text.isEmpty { return }
+        default: break
+        }
         blocks.append(b)
         maps.append(map)
         starts.append(start)
@@ -3222,13 +3383,6 @@ public enum MarkdownParser {
             }
         }
         return (text, map)
-    }
-
-    private static func isReferenceDefinitionLine(_ trimmed: String) -> Bool {
-        guard trimmed.hasPrefix("["), let close = trimmed.dropFirst().firstIndex(of: "]") else { return false }
-        let after = trimmed[trimmed.index(after: close)...]
-        guard after.hasPrefix(":") else { return false }
-        return !after.dropFirst().trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     private static func parseFenceHeader(_ raw: String) -> (char: Character, count: Int, lang: String?)? {
@@ -3386,7 +3540,7 @@ public enum MarkdownParser {
         _ src: String,
         baseOffset: Int,
         autolink: Bool,
-        definitions: [String: LinkDefinition]
+        definitions: [KitSourceKey: LinkDefinition]
     ) -> (MarkdownTableAST, MarkdownBlockMap)? {
         let rawLines = src.trimmingTrailingWhitespaceOnly().split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard !rawLines.isEmpty, rawLines.count <= 2 else { return nil }
@@ -4623,7 +4777,7 @@ public struct Markdown: Sendable {
     }
 
     public func style(_ style: MarkdownStyle) -> Markdown { var c = self; c.customStyle = style; return c }
-    public func reveal(_ seconds: Float) -> Markdown { var c = self; c.revealDelay = seconds; return c }
+    public func reveal(_ seconds: Float) -> Markdown { var c = self; c.revealDelay = max(0, seconds); return c }
     public func streaming(_ on: Bool = true) -> Markdown { var c = self; c.isStreaming = on; return c }
     public func blockKeys(_ keys: [(offset: Int, key: String)]) -> Markdown { var c = self; c.callerBlockKeys = keys; return c }
     public func highlights(_ items: [(ranges: [Range<Int>], style: MarkdownHighlight)]) -> Markdown { var c = self; c.highlightsList.append(contentsOf: items); return c }
@@ -4635,6 +4789,12 @@ public struct Markdown: Sendable {
     public func dirTentative(_ dir: MarkdownDirection?) -> Markdown { var c = self; c.tentativeDirection = dir; return c }
     public func scrollWide(_ on: Bool = true) -> Markdown { var c = self; c.isScrollWide = on; return c }
     public func tasksReadOnly(_ on: Bool = true) -> Markdown { var c = self; c.areTasksReadOnly = on; return c }
+    public func highlight(
+        file: StaticString = #fileID, line: UInt = #line, column: UInt = #column,
+        _ fn: @escaping @Sendable (String?, String) -> [SyntaxHighlight]
+    ) -> Markdown {
+        highlighter(SyntaxHighlighter(file: file, line: line, column: column, fn))
+    }
     public func highlighter(_ hl: SyntaxHighlighter) -> Markdown { var c = self; c.syntaxHighlighter = hl; return c }
     public func codeLink(match: @escaping @Sendable (String) -> String?, color: Color) -> Markdown {
         var c = self
@@ -4692,14 +4852,9 @@ public struct Markdown: Sendable {
 
     // Pure document operations (no State needed)
     public func document() -> MarkdownParsedDoc {
-        if isAutolinkEnabled {
-            return isStreaming
-                ? MarkdownDocCache.sharedStream.streamCached(source, autolink: true)
-                : MarkdownDocCache.shared.docCached(source, autolink: true)
-        }
-        var s = MarkdownTailStream(autolink: false)
-        s.reset(source)
-        return s.document(streaming: isStreaming)
+        isStreaming
+            ? MarkdownDocCache.sharedStream.streamCached(source, autolink: isAutolinkEnabled)
+            : MarkdownDocCache.shared.docCached(source, autolink: isAutolinkEnabled)
     }
 
     public func blocks() -> [MarkdownDocBlock] {
@@ -4732,32 +4887,27 @@ public struct Markdown: Sendable {
         blockKeys: [String],
         selection: TextSelection
     ) -> String? {
+        var byKey: [String: Int] = [:]
+        for (index, key) in blockKeys.enumerated() where !key.isEmpty && byKey[key] == nil {
+            byKey[key] = index
+        }
         func blockIndex(for path: String) -> Int? {
-            var best: (index: Int, start: String.Index, length: Int)? = nil
-            func consider(_ i: Int, key k: String, at start: String.Index) {
-                let isBetter: Bool
-                if let cur = best {
-                    isBetter = start < cur.start || (start == cur.start && k.count > cur.length)
-                } else {
-                    isBetter = true
+            // Caller keys may include slashes. Prefer the earliest matching path
+            // component and then the longest key, including Rune's keyed "@" paths.
+            var start = path.startIndex
+            while start < path.endIndex {
+                var end = path.endIndex
+                while start < end {
+                    let candidate = path[start..<end]
+                    if let index = byKey[String(candidate)] { return index }
+                    if candidate.first == "@", let index = byKey[String(candidate.dropFirst())] { return index }
+                    guard let slash = candidate.lastIndex(of: "/") else { break }
+                    end = slash
                 }
-                if isBetter {
-                    best = (i, start, k.count)
-                }
+                guard let next = path[start...].firstIndex(of: "/") else { break }
+                start = path.index(after: next)
             }
-            for (i, k) in blockKeys.enumerated() where !k.isEmpty {
-                for candidate in [k, "@\(k)"] {
-                    if path == candidate || path.hasPrefix("\(candidate)/") {
-                        consider(i, key: k, at: path.startIndex)
-                    } else if let r = path.range(of: "/\(candidate)/") {
-                        consider(i, key: k, at: path.index(after: r.lowerBound))
-                    } else if path.hasSuffix("/\(candidate)") {
-                        let start = path.index(path.endIndex, offsetBy: -candidate.count)
-                        consider(i, key: k, at: start)
-                    }
-                }
-            }
-            return best?.index
+            return nil
         }
 
         var touched: (first: Int, last: Int)? = nil
@@ -4820,7 +4970,7 @@ public struct MarkdownView<State>: Sendable {
     }
 
     public func style(_ style: MarkdownStyle) -> Self { var c = self; c.config.customStyle = style; return c }
-    public func reveal(_ seconds: Float) -> Self { var c = self; c.config.revealDelay = seconds; return c }
+    public func reveal(_ seconds: Float) -> Self { var c = self; c.config.revealDelay = max(0, seconds); return c }
     public func streaming(_ on: Bool = true) -> Self { var c = self; c.config.isStreaming = on; return c }
     public func blockKeys(_ keys: [(offset: Int, key: String)]) -> Self { var c = self; c.config.callerBlockKeys = keys; return c }
     public func highlights(_ items: [(ranges: [Range<Int>], style: MarkdownHighlight)]) -> Self { var c = self; c.config.highlightsList.append(contentsOf: items); return c }
@@ -4831,6 +4981,12 @@ public struct MarkdownView<State>: Sendable {
     public func dirTentative(_ dir: MarkdownDirection?) -> Self { var c = self; c.config.tentativeDirection = dir; return c }
     public func scrollWide(_ on: Bool = true) -> Self { var c = self; c.config.isScrollWide = on; return c }
     public func tasksReadOnly(_ on: Bool = true) -> Self { var c = self; c.config.areTasksReadOnly = on; return c }
+    public func highlight(
+        file: StaticString = #fileID, line: UInt = #line, column: UInt = #column,
+        _ fn: @escaping @Sendable (String?, String) -> [SyntaxHighlight]
+    ) -> Self {
+        highlighter(SyntaxHighlighter(file: file, line: line, column: column, fn))
+    }
     public func highlighter(_ hl: SyntaxHighlighter) -> Self { var c = self; c.config.syntaxHighlighter = hl; return c }
     public func codeLink(match: @escaping @Sendable (String) -> String?, color: Color) -> Self {
         var c = self; c.config = c.config.codeLink(match: match, color: color); return c
@@ -4908,7 +5064,7 @@ public struct MarkdownView<State>: Sendable {
         guard canCache else { return nil }
 
         var h = Hasher()
-        h.combine(config.source)
+        h.combine(KitSourceKey(config.source))
         h.combine(style)
         for item in config.callerBlockKeys {
             h.combine(item.offset)
@@ -4938,9 +5094,9 @@ public struct MarkdownView<State>: Sendable {
 
     private func matchBlockKeys(starts: [Int], callerKeys: [(offset: Int, key: String)]) -> [String] {
         guard !callerKeys.isEmpty else { return [] }
-        return starts.map { s in
-            callerKeys.first(where: { $0.offset == s })?.key ?? ""
-        }
+        var byOffset: [Int: String] = [:]
+        for (offset, key) in callerKeys where byOffset[offset] == nil { byOffset[offset] = key }
+        return starts.map { byOffset[$0] ?? "" }
     }
 }
 
@@ -4992,6 +5148,7 @@ private final class MarkdownRenderer<State> {
 
     func renderRoot(keys: [String]) -> El<State> {
         let root = blocksIn(doc.blocks, maps: doc.maps, keys: keys, topLevel: true, inItem: false)
+            .markdownDirection(MarkdownBidi.blocksDirection(doc.blocks) ?? view.config.tentativeDirection)
             .selectionGroup(view.config.isSelectable)
         guard view.config.isSelectable && view.config.copySourceMode else {
             return root
@@ -5011,25 +5168,22 @@ private final class MarkdownRenderer<State> {
     }
 
     private func renderedKeys(count: Int, keys: [String]) -> [String] {
-        var used: [String] = []
-        var out: [String] = []
-        for i in 0..<count {
-            if i < keys.count, !keys[i].isEmpty, !used.contains(keys[i]) {
-                used.append(keys[i])
-                out.append(keys[i])
-            } else {
-                var cand = "b\(i)"
-                var n = 0
-                let rest = i + 1 < keys.count ? Array(keys[(i + 1)...]) : []
-                while used.contains(cand) || rest.contains(cand) {
-                    cand = "b\(n)"
-                    n += 1
-                }
-                used.append(cand)
-                out.append(cand)
+        guard !keys.isEmpty else { return (0..<count).map { "b\($0)" } }
+        let reserved = Set(keys)
+        var used: Set<String> = []
+        var nextFree = 0
+        return (0..<count).map { index in
+            if index < keys.count, !keys[index].isEmpty, used.insert(keys[index]).inserted {
+                return keys[index]
             }
+            var key = "b\(index)"
+            while used.contains(key) || reserved.contains(key) {
+                key = "b\(nextFree)"
+                nextFree += 1
+            }
+            used.insert(key)
+            return key
         }
-        return out
     }
 
     private func margins(_ b: MarkdownDocBlock) -> (top: Float, bottom: Float) {
@@ -5084,6 +5238,7 @@ private final class MarkdownRenderer<State> {
         inItem: Bool
     ) -> El<State> {
         var c: El<State> = col().wFull()
+        c.children.reserveCapacity(blocks.count)
         var prevMb: Float = 0
         var afterHeading = false
         let names = renderedKeys(count: blocks.count, keys: keys)
@@ -5118,14 +5273,18 @@ private final class MarkdownRenderer<State> {
                 flow.lead = nil
             }
 
-            let ownDir = MarkdownBidi.blocksDirection([b])
+            let ownDir = MarkdownBidi.blockDirection(b)
             let resolvedDir = ownDir ?? lastDir
             if let ownDir { lastDir = ownDir }
 
-            var drawn = renderBlock(b, map: map, dir: resolvedDir)
+            var drawn = renderBlock(b, map: map, dir: ownDir)
+            switch b {
+            case .para, .heading, .quote, .list, .table: drawn.setMarkdownDirection(resolvedDir)
+            default: break
+            }
             drawn = drawn.key(key)
             if top > 0 { drawn = drawn.mt(top) }
-            c = c.child(drawn)
+            c.children.append(drawn)
             prevMb = mb
             if case .heading = b { afterHeading = true } else { afterHeading = false }
         }
@@ -5138,13 +5297,13 @@ private final class MarkdownRenderer<State> {
 
         switch b {
         case let .para(inl):
-            return renderPara(inl, map: inlMap, font: s.body, color: flow.ink ?? s.text, dir: dir)
+            return renderPara(inl, map: inlMap, font: s.body, color: flow.ink ?? s.text)
 
         case let .heading(lvl, inl):
             let clamped = min(max(lvl, 1), 4) - 1
             let hFont = s.headings[clamped]
             let hColor = lvl >= 4 ? s.muted : s.text
-            return renderPara(inl, map: inlMap, font: hFont, color: hColor, dir: dir)
+            return renderPara(inl, map: inlMap, font: hFont, color: hColor)
                 .headingLevel(lvl)
 
         case let .code(code):
@@ -5180,7 +5339,7 @@ private final class MarkdownRenderer<State> {
             let innerMaps = map.quoteMaps ?? []
             let drawn = blocksIn(inner, maps: innerMaps, keys: [], topLevel: false, inItem: false)
             flow = savedFlow
-            return quoteFrame(drawn, blocks: inner, taskIndex: savedTaskIdx)
+            return quoteFrame(drawn, blocks: inner, taskIndex: savedTaskIdx, dir: dir)
 
         case let .image(src, alt, title):
             return renderImage(src: src, alt: alt, title: title)
@@ -5190,12 +5349,13 @@ private final class MarkdownRenderer<State> {
         }
     }
 
-    private func quoteFrame(_ drawn: El<State>, blocks: [MarkdownDocBlock], taskIndex: Int) -> El<State> {
+    private func quoteFrame(_ drawn: El<State>, blocks: [MarkdownDocBlock], taskIndex: Int, dir: MarkdownDirection?) -> El<State> {
         let qEl: El<State> = row()
             .role(.blockquote)
             .wFull()
             .child(el().w(s.quote.width).hFull().rounded(min(s.quote.width / 2.0, 1.0)).bg(s.quoteRule))
             .child(drawn.grow(1).shrink(1).pl(s.quote.pad))
+            .markdownDirection(dir)
         if let qFrame = view.quoteFrameHandler {
             var tIdx = taskIndex
             let plain = MarkdownPlain.render(blocks: blocks, tasks: doc.tasks, nextTask: &tIdx)
@@ -5236,6 +5396,7 @@ private final class MarkdownRenderer<State> {
 
     private func buildTextSpans(_ rawInl: MarkdownInline, font: TextStyle, baseColor: Color) -> [TextSpan] {
         let inl = withCodeLinks(rawInl)
+        if inl.spans.isEmpty && inl.links.isEmpty { return [TextSpan(inl.text, color: baseColor)] }
         let bytes = Array(inl.text.utf8)
         guard !bytes.isEmpty else { return [TextSpan("", color: baseColor)] }
 
@@ -5341,7 +5502,8 @@ private final class MarkdownRenderer<State> {
     /// prettily too (#941): the block that grows keeps `text-wrap-style: pretty`, as a page does,
     /// so a word moves, if it does, as the text that moves it arrives, not when the stream ends.
     private func withReveal(_ node: El<State>) -> El<State> {
-        node
+        if view.config.revealDelay >= 0 { return node.reveal(view.config.revealDelay) }
+        return view.config.isStreaming ? node.reveal(0) : node
     }
 
     private func makeTextHighlights(for renderedText: String, map: MarkdownSpanMap?) -> [TextHighlight] {
@@ -5411,11 +5573,13 @@ private final class MarkdownRenderer<State> {
         return nil
     }
 
-    private func wireLinks(_ node: El<State>, inl: MarkdownInline) -> El<State> {
-        guard !inl.links.isEmpty else { return node }
+    private func wireLinks(_ node: inout El<State>, inl: MarkdownInline) {
+        guard !inl.links.isEmpty else { return }
         let interactive = view.onLinkHandler != nil || view.onLinkSecondaryHandler != nil || view.config.linkHelpFn != nil || view.config.linkLookFn != nil || view.config.linkPaintFn != nil || view.config.linkRingFn != nil || s.linkHover != nil
-        guard interactive else { return node }
-        var out = node
+        guard interactive else { return }
+        // selectInline only decorates rich-text leaves created by this renderer.
+        var links = node.textLinks
+        links.reserveCapacity(links.count + inl.links.count)
         for link in inl.links {
             let look = resolvedLinkStyle(link.url)
             let hoverInk = look?.hoverColor ?? s.linkHover
@@ -5428,33 +5592,28 @@ private final class MarkdownRenderer<State> {
             if let hoverBg = look?.hoverBg {
                 paint = paint.bg(hoverBg)
             }
-            if underlineOn {
-                paint = paint.underline(true)
-            } else {
-                paint = paint.underline(false)
-            }
+            paint = paint.underline(underlineOn)
             if let ringTuple {
                 paint = paint.ring(ringTuple.0, width: ringTuple.1)
             }
             let help = view.config.linkHelpFn?(link.url)
-            out = out.link(TextLink(link.start..<link.end, id: link.url, hover: paint, help: help))
+            links.append(TextLink(link.start..<link.end, id: link.url, hover: paint, help: help))
         }
+        node.textLinks = links
+        node.focusable = true
         if let onLink = view.onLinkHandler {
-            out = out.onLink { state, linkID, tx in
-                onLink(&state, linkID, &tx)
-            }
+            node.handlers.onLink = onLink
         }
         if let onSec = view.onLinkSecondaryHandler {
-            out = out.onLinkSecondary { state, linkID, press, tx in
-                onSec(&state, linkID, press, &tx)
-            }
+            node.handlers.onLinkSecondary = onSec
         }
-        return out
     }
 
-    private func selectInline(_ node: El<State>, inl: MarkdownInline, map: MarkdownSpanMap?) -> El<State> {
-        var out = node.textHighlights(makeTextHighlights(for: inl.text, map: map))
-        out = applySelect(wireLinks(applyLinkIcons(out, inl: inl), inl: inl))
+    private func selectInline(_ node: consuming El<State>, inl: MarkdownInline, map: MarkdownSpanMap?) -> El<State> {
+        var out = applyLinkIcons(node, inl: inl)
+        out.textHighlights = makeTextHighlights(for: inl.text, map: map)
+        wireLinks(&out, inl: inl)
+        out = applySelect(out)
         if view.config.isSelectable {
             for sp in inl.spans where sp.style == .codePad {
                 out = out.uncopied(sp.start..<sp.end)
@@ -5463,13 +5622,10 @@ private final class MarkdownRenderer<State> {
         return out
     }
 
-    private func renderPara(_ rawInl: MarkdownInline, map: MarkdownSpanMap?, font: TextStyle, color: Color, dir: MarkdownDirection?) -> El<State> {
+    private func renderPara(_ rawInl: MarkdownInline, map: MarkdownSpanMap?, font: TextStyle, color: Color) -> El<State> {
         let inl = withCodeLinks(rawInl)
         let spans = buildTextSpans(inl, font: font, baseColor: color)
-        var elNode: El<State> = withReveal(rich(spans).font(font).color(color).wrap(.wrap)).wFull()
-        if let dir {
-            elNode = elNode.textAlign(dir.textAlign)
-        }
+        var elNode: El<State> = rawInl.bidi.isolate(withReveal(rich(spans).font(font).color(color).wrap(.wrap)).wFull())
         if let lead = flow.lead {
             elNode = elNode.copyPrefix(String(repeating: " ", count: lead.cols) + lead.lead.marker).copyBreaks(lead.before, 1)
         } else {
@@ -5479,7 +5635,7 @@ private final class MarkdownRenderer<State> {
     }
 
     private func tabbedRich(_ code: String, spans: [TextSpan], highlights: [TextHighlight], style: TextStyle, color: Color) -> El<State> {
-        if !code.contains("\t") || style.family == .monospace {
+        if !code.contains("\t") || style.family.isMonospace {
             return rich(spans).font(style).color(color).wrap(.wrap).textHighlights(highlights)
         }
         // Expand tabs visually to 4-column stops while keeping tab characters and uncopied spaces for selection copy
@@ -5590,6 +5746,7 @@ private final class MarkdownRenderer<State> {
         let richCode = withReveal(tabbedRich(code, spans: spans, highlights: hls, style: s.codeBlock, color: ink)).copyBreaks(2, 2)
         let frame: El<State> = col()
             .role(.code)
+            .dir(.ltr)
             .wFull()
             .rounded(6)
             .bg(fill)
@@ -5608,7 +5765,7 @@ private final class MarkdownRenderer<State> {
 
     private func renderDiff(_ src: String, map: MarkdownSpanMap?) -> El<State> {
         let hls = makeTextHighlights(for: src, map: map)
-        var c: El<State> = col().role(.code).wFull().py(s.codeBlockPad[1]).rounded(6).bg(s.codeBlockFill).border(0.5, s.codeBlockBorder).borderLayout()
+        var c: El<State> = col().role(.code).dir(.ltr).wFull().py(s.codeBlockPad[1]).rounded(6).bg(s.codeBlockFill).border(0.5, s.codeBlockBorder).borderLayout()
         var offset = 0
         let rawLines = src.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let last = max(0, rawLines.count - 1)
@@ -5657,14 +5814,8 @@ private final class MarkdownRenderer<State> {
     private func renderMermaidBlock(_ src: String, source: MarkdownCodeSource?, map: MarkdownSpanMap?, index: Int) -> El<State> {
         let open = source?.open ?? false
         let lines = open ? (utf8Slice(src, range: 0..<min(source?.colouredBytes ?? src.utf8.count, src.utf8.count)) ?? src) : src
-        let theme = s.mermaidTheme()
-        let hover: (MermaidHover, Color) = (s.diagram.hoverNeighbours ? .neighbours : .edges, s.diagram.hover)
-        let diagram: El<State>? = view.config.isStreaming
-            ? (open ? renderMermaidStreaming(lines, theme: theme, hover: hover) : renderMermaidStreamed(lines, theme: theme, hover: hover))
-            : renderMermaid(lines, theme: theme, hover: hover)
-        if let d = diagram {
-            let trimmed = lines.trimmingCharacters(in: .whitespacesAndNewlines)
-            let labeled = d.label(KitMermaid.kindLabel(lines)).description(trimmed).key("card")
+        if let diagram: El<State> = KitMermaid.diagram(lines, style: s, streaming: view.config.isStreaming, open: open) {
+            let labeled = diagram.key("card")
             let framed = view.diagramFrameHandler?(labeled, MarkdownDiagramFrameContext(index: index, source: lines, open: open)) ?? labeled
             return col().wFull().transition(.none).child(framed)
         }
@@ -5735,7 +5886,7 @@ private final class MarkdownRenderer<State> {
                     .child(blocksIn(item, maps: imap, keys: [], topLevel: false, inItem: true).grow(1).shrink(1))
             }
             flow = saved
-            c = c.child(topGap > 0 ? rowEl.mt(topGap) : rowEl)
+            c.children.append(topGap > 0 ? rowEl.mt(topGap) : rowEl)
         }
         return c
     }
@@ -5888,14 +6039,15 @@ private final class MarkdownRenderer<State> {
             let inl = withCodeLinks(rawInl)
             let m = j < maps.count ? maps[j] : nil
             var align = (s.tableAlign && j < table.align.count) ? table.align[j] : .start
-            let dir = MarkdownBidi.inlineDirection(inl)
+            let bidi = rawInl.bidi
+            let dir = bidi.direction
             if let dir, dir != tableDir {
                 if align == .start { align = .end }
                 else if align == .end { align = .start }
             }
             let spans = buildTextSpans(inl, font: font, baseColor: color)
             let rawContent: El<State> = withReveal(rich(spans).font(font).color(color).textAlign(align.textAlign).wrap(view.config.isScrollWide ? .noWrap : .wrap)).wFull()
-            let content = selectInline(rawContent, inl: inl, map: m)
+            let content = selectInline(bidi.isolate(rawContent).markdownDirection(dir), inl: inl, map: m)
             var cell: El<State> = col().key("c\(j)").role(cellRole)
             if let fixed = widths, j < fixed.count {
                 cell = cell.w(fixed[j])

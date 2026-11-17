@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import LargeViewFixtures
 @testable import RuneKit
 @testable import Rune
 
@@ -138,30 +139,6 @@ struct TextInputAndBenchParityTests {
 
     // MARK: - 4. crates/rune-kit/tests/table.rs:298
 
-    private struct BenchFile {
-        var id: String
-        var name: String
-        var size: UInt64
-    }
-
-    private struct BenchTableApp {
-        var files: [BenchFile]
-        var table: TableState
-        var sorts: [(String, SortDir)] = []
-        var opened: [String] = []
-
-        init(n: Int, multi: Bool) {
-            self.files = (0..<n).map { i in
-                BenchFile(
-                    id: "f\(i)",
-                    name: "file \(i) with a name long enough to cut short.rs",
-                    size: UInt64((i * 7919) % 100_000)
-                )
-            }
-            self.table = TableState().multiSelect(multi)
-        }
-    }
-
     private static func percentile(_ values: inout [Double], _ p: Double) -> Double {
         guard !values.isEmpty else { return 0.0 }
         values.sort()
@@ -171,47 +148,14 @@ struct TextInputAndBenchParityTests {
 
     @Test("Table 100,000 rows scroll, rebuild, sort, and column resize performance (tests/table.rs:298)")
     func tableTime() throws {
-        let kit = Kit.neutral(dark: true)
         let ms: (ContinuousClock.Instant) -> Double = { start in
             let d = ContinuousClock.now - start
             return Double(d.components.seconds) * 1e3 + Double(d.components.attoseconds) * 1e-15
         }
 
-        let app = BenchTableApp(n: 100_000, multi: true)
+        let app = LargeTableState()
         let t0 = ContinuousClock.now
-        let rt = Runtime(state: app, viewport: Vec2(900, 900), pixelScale: 2.0, systemDark: true) { s, cx in
-            col().size(900.0, 900.0).child(
-                TableView<BenchTableApp>(
-                    \.table,
-                    len: { $0.files.count },
-                    rowID: { $0.files[$1].id }
-                )
-                .name("Files")
-                .column(TableCol("name", "Name").flex(1.0).min(120.0).sortable())
-                .column(TableCol("size", "Size").width(100.0).min(60.0).max(180.0).align(.end).sortable())
-                .column(TableCol("kind", "Kind").width(80.0).resizable(false))
-                .cell { s, i, colId in
-                    switch colId {
-                    case "name": return .text(s.files[i].name)
-                    case "size": return .text("\(s.files[i].size)").mono()
-                    default: return .text("Rust").muted()
-                    }
-                }
-                .onSort { s, colId, dir, _ in
-                    s.sorts.append((colId, dir))
-                    if colId == "size" {
-                        s.files.sort {
-                            if dir == .ascending { return $0.size < $1.size }
-                            return $0.size > $1.size
-                        }
-                    }
-                }
-                .onOpen { s, id, _ in s.opened.append(id) }
-                .zebra(true)
-                .build(s, cx: cx, kit: kit)
-                .h(900.0)
-            )
-        }
+        let rt = LargeViewFixtures.table(app)
         rt.frame(at: 0.0)
         let firstMs = ms(t0)
 
@@ -231,8 +175,13 @@ struct TextInputAndBenchParityTests {
                 withCommit.append(dt)
             }
         }
-        let builtRows = rt.elements().filter { !$0.exiting && $0.role == .row }.count
-        #expect((10..<120).contains(builtRows))
+        let rows = rt.elements().filter { !$0.exiting && $0.role == .row && $0.key != "header" }
+        let visible = rows.filter { $0.visible[3] > 0 }
+        #expect(visible.compactMap(\.key) == (1028...1059).map { "f\($0)" })
+        #expect(visible.first?.visible == [0, 30, 900, 12])
+        #expect(visible.last?.visible == [0, 882, 900, 18])
+        // The indexed list keeps up to two viewport heights of overscan on either side.
+        #expect((visible.count...(5 * visible.count + 2)).contains(rows.count))
         #expect(rt.viewCommitCount >= c0)
 
         let commitsBeforeRebuild = rt.viewCommitCount
@@ -288,48 +237,20 @@ struct TextInputAndBenchParityTests {
 
     // MARK: - 5. crates/rune-kit/tests/tree.rs:350
 
-    private struct BenchTreeApp {
-        var files: TreeModel<FileNode<(UInt32, UInt32)>>
-        var picked: [String] = []
-        var opened: [String] = []
-    }
-
     @Test("Tree 50,000 files build, scroll, reveal last, and filter performance (tests/tree.rs:350)")
     func treeTime() throws {
-        let kit = Kit.neutral(dark: true)
         let ms: (ContinuousClock.Instant) -> Double = { start in
             let d = ContinuousClock.now - start
             return Double(d.components.seconds) * 1e3 + Double(d.components.attoseconds) * 1e-15
         }
 
         let tm = ContinuousClock.now
-        var paths: [(String, (UInt32, UInt32))] = []
-        paths.reserveCapacity(50_000)
-        for d in 0..<500 {
-            for f in 0..<100 {
-                paths.append(("pkg\(d)/file\(f).rs", (1, 0)))
-            }
-        }
-        var model = FileTree().build(paths)
-        model.expandAll()
+        let model = LargeViewFixtures.treeModel()
         let modelMs = ms(tm)
         #expect(model.visibleCount == 50_500)
 
         let t0 = ContinuousClock.now
-        let rt = Runtime(state: BenchTreeApp(files: model), viewport: Vec2(360, 900), pixelScale: 2.0, systemDark: true) { state, cx in
-            col().size(360.0, 900.0).child(
-                Tree(\BenchTreeApp.files, label: { $0.name })
-                    .name("Files")
-                    .row { node, row in
-                        TreeRowItem.file(node, row: row)
-                            .changes(added: node.data?.0 ?? 0, removed: 0)
-                    }
-                    .onSelect { s, id, _ in s.picked.append(id) }
-                    .onOpen { s, id, _ in s.opened.append(id) }
-                    .build(state, cx: cx, kit: kit)
-                    .h(900.0)
-            )
-        }
+        let rt = LargeViewFixtures.tree(model)
         rt.frame(at: 0.0)
         let firstMs = ms(t0)
 
@@ -342,8 +263,14 @@ struct TextInputAndBenchParityTests {
             rt.frame(at: now)
             frames.append(ms(tf))
         }
-        let builtRows = rt.elements().filter { ($0.level ?? 0) >= 1 && !$0.exiting && $0.label != nil }.count
-        #expect((10..<120).contains(builtRows))
+        let rows = rt.elements().filter { !$0.exiting && $0.role == .treeItem }
+        let visible = rows.filter { $0.visible[3] > 0 }
+        #expect(visible.compactMap(\.key) == (1200...1237).compactMap { model.visibleID(at: $0) })
+        #expect(visible.first?.key == "pkg11/file88.rs")
+        #expect(visible.first?.visible == [0, 0, 360, 24])
+        #expect(visible.last?.key == "pkg12/file24.rs")
+        #expect(visible.last?.visible == [0, 888, 360, 12])
+        #expect((visible.count...(5 * visible.count + 2)).contains(rows.count))
 
         let te = ContinuousClock.now
         rt.update { s, tx in

@@ -559,7 +559,7 @@ struct WidgetA11yParityTests {
 
         let rowInfo = info(rt, "f1")
         #expect(rowInfo?.role == .row)
-        #expect(rowInfo?.label == "beta.rs 2 KB")
+        #expect(rowInfo?.label == nil)
         #expect(rowInfo?.itemSelected == true)
         #expect(info(rt, "f0")?.itemSelected == false)
 
@@ -574,13 +574,22 @@ struct WidgetA11yParityTests {
                 #expect(resizer?.role == .splitter)
                 #expect(resizer?.a11yLabel == "Resize Name")
             }
-            if let f1El = findEl(root, key: "f1") {
-                #expect(f1El.a11yPosInSet?.position == 2)
-                #expect(f1El.a11yPosInSet?.size == 4)
-                #expect(findEl(f1El, key: "size")?.role == .gridCell)
-                #expect(findEl(f1El, key: "size")?.a11yLabel == "2 KB")
-            }
         }
+        func row(_ node: AccessibilityNode) -> AccessibilityNode? {
+            if node.role == .row && node.id == "f1" { return node }
+            for child in node.children {
+                if let found = row(child) { return found }
+            }
+            return nil
+        }
+        let selected = try #require(row(rt.accessibilitySnapshot()))
+        #expect(selected.label == "beta.rs 2 KB")
+        #expect(selected.positionInSet == 1)
+        #expect(selected.sizeOfSet == 4)
+        let sizeCell = try #require(selected.children.first { $0.id == "size" })
+        #expect(sizeCell.role == .gridCell)
+        #expect(sizeCell.label == "2 KB")
+        #expect(sizeCell.children.contains { $0.role == .text && $0.label == "2 KB" })
 
         // Assistive click on sortable header sorts ascending, click row selects, focus + Up + Enter opens cursor row
         #expect(rt.accessibilityAction("name", .press, at: 0.02))

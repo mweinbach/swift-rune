@@ -73,14 +73,16 @@ static void upload(const RuneGLAPI *gl, GLuint texture, GLenum channels, GLint s
 
 int rune_surfaces_upload(RuneGLSurfaces *s, uint64_t key, uint64_t version, int width,
                          int height, int format, const uint8_t *plane0, size_t bytes0,
-                         const uint8_t *plane1, size_t bytes1, char *error, size_t capacity) {
-    if (!s || !plane0 || width <= 0 || height <= 0 || width > 16384 || height > 16384 ||
+                         const uint8_t *plane1, size_t bytes1, RuneGLSurfaceCopy copy, RuneGLPlaneCopy copy_planes, void *source,
+                         char *error, size_t capacity) {
+    if (!s || (!plane0 && !copy && !copy_planes) || width <= 0 || height <= 0 || width > 16384 || height > 16384 ||
         width > s->max_texture_size || height > s->max_texture_size || format < 0 || format > 3)
         return fail(error, capacity, "invalid native surface format or dimensions for this device");
     int nv12 = format == 1 || format == 2;
     size_t pixels = (size_t)width * (size_t)height;
-    if (bytes0 != pixels * (nv12 ? 1u : 4u) || (nv12 && ((width | height) & 1)) ||
-        bytes1 != (nv12 ? pixels / 2 : 0) || (nv12 && !plane1))
+    if (nv12 && ((width | height) & 1)) return fail(error, capacity, "NV12 requires even dimensions");
+    if (!copy && !copy_planes && (bytes0 != pixels * (nv12 ? 1u : 4u) ||
+        bytes1 != (nv12 ? pixels / 2 : 0) || (nv12 && !plane1)))
         return fail(error, capacity, "invalid native surface plane byte counts");
     SurfaceImage *entry = image_for(s, key);
     if (entry && entry->width == width && entry->height == height && entry->format == format && entry->version == version) return 1;
@@ -100,9 +102,11 @@ int rune_surfaces_upload(RuneGLSurfaces *s, uint64_t key, uint64_t version, int 
     gl->PixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
     gl->PixelStorei(GL_UNPACK_SKIP_ROWS, 0);
     gl->ActiveTexture(GL_TEXTURE0);
-    upload(gl, entry->textures[0], nv12 ? GL_RED : GL_RGBA, nv12 ? GL_R8 : GL_RGBA8, width, height, plane0, reuse);
-    if (nv12) upload(gl, entry->textures[1], RUNE_GL_RG, RUNE_GL_RG8, width / 2, height / 2, plane1, reuse);
-    if (gl->GetError() != GL_NO_ERROR) {
+    if ((!copy && !copy_planes) || !reuse) upload(gl, entry->textures[0], nv12 ? GL_RED : GL_RGBA, nv12 ? GL_R8 : GL_RGBA8, width, height, plane0, reuse);
+    if (nv12 && (!copy_planes || !reuse)) upload(gl, entry->textures[1], RUNE_GL_RG, RUNE_GL_RG8, width / 2, height / 2, plane1, reuse);
+    int copied = copy_planes ? copy_planes(source, entry->textures[0], entry->textures[1])
+                             : !copy || copy(source, entry->textures[0]);
+    if (gl->GetError() != GL_NO_ERROR || !copied) {
         entry->width = 0; // force reallocating both planes on retry
         return fail(error, capacity, "native surface texture upload failed");
     }
@@ -122,6 +126,9 @@ int rune_surfaces_draw(RuneGLSurfaces *s, int width, int height, int origin_x, i
     const RuneGLAPI *gl = s->gl;
     gl->UseProgram(s->program);
     gl->Uniform4fv(s->uniforms, 13, draw->uniforms[0]);
+    // GPU-copied BGRA textures expose canonical RGBA samples, unlike byte-backed BGRA uploads.
+    if (entry->format == 3 && draw->uniforms[7][0] == 0)
+        gl->Uniform4f(s->uniforms + 7, 3, draw->uniforms[7][1], draw->uniforms[7][2], draw->uniforms[7][3]);
     gl->Uniform4f(s->uniforms, (float)width, (float)height, (float)origin_x, (float)origin_y);
     gl->BindVertexArray(s->vao);
     gl->Enable(GL_BLEND);

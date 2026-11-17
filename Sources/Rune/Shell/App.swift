@@ -81,6 +81,10 @@ public final class AppShared<State>: @unchecked Sendable {
     private let lock = NSLock()
     private var waker: Waker
     private var visibleFlag: Bool
+    #if os(Windows) || os(Linux)
+    private var lastHiddenAt: UInt64?
+    internal var reopenHiddenAt: UInt64? { lock.withLock { lastHiddenAt } }
+    #endif
     private var errorMessage: String?
     private var pending = AppDrainedRequests<State>()
     public let shortcuts = ShortcutHub<State>()
@@ -117,6 +121,9 @@ public final class AppShared<State>: @unchecked Sendable {
 
     public func setVisible(_ visible: Bool) {
         lock.lock()
+        #if os(Windows) || os(Linux)
+        if visibleFlag && !visible { lastHiddenAt = DesktopReopen.stamp() }
+        #endif
         visibleFlag = visible
         lock.unlock()
     }
@@ -334,7 +341,6 @@ public final class AppShared<State>: @unchecked Sendable {
         lock.unlock()
 
         if batchMinimizeOrder > out.lastCancelOrder {
-            runtime.minimizeRequested = true
             _ = runtime.minimizeStep(.asked)
         }
         return out
@@ -449,7 +455,7 @@ public struct AppWindowSpec<State> {
     internal var frameDrawnUpdate: ((inout State, FrameEncoded, inout Tx) -> Void)?
     #endif
     private let runAction: (@MainActor ([String]?) throws -> Void)?
-    #if os(Windows) || os(Linux)
+    #if os(Windows) || os(Linux) || os(macOS)
     internal let desktopBuilder: App<State>?
     #endif
 
@@ -462,7 +468,7 @@ public struct AppWindowSpec<State> {
         onCreated: ((WindowHandle) -> Void)? = nil
     ) {
         self.key = key ?? app.title
-        #if os(Windows) || os(Linux)
+        #if os(Windows) || os(Linux) || os(macOS)
         self.desktopBuilder = app
         #endif
         self.appSpec = app.intoSpec()
@@ -507,7 +513,7 @@ public struct AppWindowSpec<State> {
 
     public init(key: String, app: AppSpec<State>) {
         self.key = key
-        #if os(Windows) || os(Linux)
+        #if os(Windows) || os(Linux) || os(macOS)
         self.desktopBuilder = nil
         #endif
         self.appSpec = app
@@ -794,7 +800,22 @@ public struct App<State> {
     public var fontData: [Data] = []
     public var fontFamilies: [String] = []
     public var menuItems: [NativeMenuItem<State>] = []
-    public var overlayReceivers: [(OverlaySpec<State>, (OverlayHandle<State>) -> Void)] = []
+    private enum AttachedOverlay {
+        case spec(OverlaySpec<State>, (OverlayHandle<State>) -> Void)
+        case configured(() -> AnyObject)
+    }
+    private var attachedOverlays: [AttachedOverlay] = []
+    public var overlayReceivers: [(OverlaySpec<State>, (OverlayHandle<State>) -> Void)] {
+        get { attachedOverlays.compactMap { if case let .spec(spec, receive) = $0 { (spec, receive) } else { nil } } }
+        set {
+            var incoming = newValue[...]
+            attachedOverlays = attachedOverlays.compactMap { attachment in
+                guard case .spec = attachment else { return attachment }
+                return incoming.popFirst().map { .spec($0.0, $0.1) }
+            }
+            attachedOverlays.append(contentsOf: incoming.map { .spec($0.0, $0.1) })
+        }
+    }
     public var windowFactory: ((String) -> AnyWindowSpec?)? = nil
     public var childWindows: [AnyWindowSpec] = []
     public var compositorValue: AnyCompositor<State>? = nil
@@ -822,8 +843,11 @@ public struct App<State> {
     public var devStatsReceiver: ((SurfaceStats) -> Void)? = nil
     public var globalShortcuts: [AppGlobalShortcutEntry<State>] = []
     public var allowUnmodifiedShortcutsEnabled: Bool = false
+    public var webCanvasID: String?
+    public var usesFullViewport = false
     public var isWebDocument: Bool = false
     public var fontURLStrings: [String] = []
+    public var lateFontURLStrings: [String] = []
 
     public let sharedHandle: AppHandle<State>
 
@@ -1062,8 +1086,34 @@ public struct App<State> {
         receiver: @escaping (OverlayHandle<State>) -> Void
     ) -> App<State> {
         var copy = self
-        copy.overlayReceivers.append((spec, receiver))
+        copy.attachedOverlays.append(.spec(spec, receiver))
         return copy
+    }
+
+    public func overlay<Child>(_ spec: OverlaySpec<Child>, receiver: @escaping (OverlayHandle<Child>) -> Void) -> Self {
+        overlay(ConfiguredOverlay(spec: spec), receiver: receiver)
+    }
+
+    public func overlay<Child>(_ spec: ConfiguredOverlay<Child>, receiver: @escaping (OverlayHandle<Child>) -> Void) -> Self {
+        var copy = self
+        copy.attachedOverlays.append(.configured {
+            let handle = OverlayHandle(configured: spec)
+            receiver(handle)
+            return handle
+        })
+        return copy
+    }
+
+    func createAttachedOverlays() -> [AnyObject] {
+        attachedOverlays.map {
+            switch $0 {
+            case let .spec(spec, receive):
+                let handle = OverlayHandle(spec: spec)
+                receive(handle)
+                return handle
+            case let .configured(create): return create()
+            }
+        }
     }
 
     public func window(_ factory: @escaping (String) -> AnyWindowSpec?) -> App<State> {
@@ -1361,12 +1411,16 @@ public struct App<State> {
         // `tooling::runtime_for` (which `App::headless_runtime` builds through): the capture
         // presets, never the machine's own settings, so runs stay reproducible (#981).
         runtime.applyCapturePresets(processEnvironment)
+        #if os(Windows)
+        runtime.setHeadlessWindowsTitlebar(customTitlebar, borderless: windowOptionsValue.borderless || chromeStyle.borderless)
+        #else
         let resolvedChrome = customTitlebar?.macChrome(chromeStyle) ?? chromeStyle
         if resolvedChrome.fullSizeContent && !(windowOptionsValue.borderless || chromeStyle.borderless) {
             runtime.cxSettings.titlebarInset = resolvedChrome.titlebarInset()
         } else {
             runtime.cxSettings.titlebarInset = 0.0
         }
+        #endif
         if let pg = playgroundHost {
             runtime.playgroundHost = pg
             _ = try? PlaygroundAttach.attach(

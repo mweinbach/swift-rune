@@ -90,13 +90,19 @@ enum LayoutFeedback: Equatable, Sendable {
     }
 }
 
-private final class LayoutPredicateBox {}
+final class LayoutPredicateBox {
+    let holds: ([Float], [Float]) -> Bool
+
+    init(_ holds: @escaping ([Float], [Float]) -> Bool) {
+        self.holds = holds
+    }
+}
 
 /// Predicate checking whether a `layoutWith` transform gives two rects the same value.
 struct LayoutSame: @unchecked Sendable {
     enum Kind: @unchecked Sendable {
         case token(AnyHashable, ([Float], [Float]) -> Bool)
-        case shared(ObjectIdentifier, ([Float], [Float]) -> Bool)
+        case shared(LayoutPredicateBox)
     }
 
     let kind: Kind
@@ -109,13 +115,13 @@ struct LayoutSame: @unchecked Sendable {
         if let token {
             return LayoutSame(kind: .token(token, eq))
         }
-        return LayoutSame(kind: .shared(ObjectIdentifier(LayoutPredicateBox()), eq))
+        return LayoutSame(kind: .shared(LayoutPredicateBox(eq)))
     }
 
     func holds(_ a: [Float], _ b: [Float]) -> Bool {
         switch kind {
-        case let .token(_, fn), let .shared(_, fn):
-            return fn(a, b)
+        case let .token(_, fn): return fn(a, b)
+        case let .shared(predicate): return predicate.holds(a, b)
         }
     }
 
@@ -123,8 +129,8 @@ struct LayoutSame: @unchecked Sendable {
         switch (kind, other.kind) {
         case let (.token(a, _), .token(b, _)):
             return a == b
-        case let (.shared(a, _), .shared(b, _)):
-            return a == b
+        case let (.shared(a), .shared(b)):
+            return a === b
         default:
             return false
         }
@@ -197,13 +203,25 @@ struct LayoutSeenState {
 struct LayoutKeyIndex {
     private var byLeafKey: [String: [Int]] = [:]
     private var byHighlightKey: [String: [Int]] = [:]
-    private var builtStamp: UInt64 = 0
-    private var seenStamp: UInt64 = 0
-    private var isBuilt: Bool = false
+    /// A prune or a replacement can provide different nodes in the same layout generation.
+    private struct NodesID: Equatable {
+        let stamp: UInt64
+        let count: Int
+        let address: UInt
+
+        init<N>(_ nodes: [N], stamp: UInt64) {
+            self.stamp = stamp
+            count = nodes.count
+            address = nodes.withUnsafeBufferPointer { UInt(bitPattern: $0.baseAddress) }
+        }
+    }
+
+    private var built: NodesID?
+    private var seen: NodesID?
 
     mutating func invalidate() {
-        isBuilt = false
-        seenStamp = 0
+        built = nil
+        seen = nil
     }
 
     mutating func prepare<N>(
@@ -213,16 +231,16 @@ struct LayoutKeyIndex {
         keyOf: (N) -> String?,
         highlightKeysOf: ((N) -> [String])? = nil
     ) {
-        if (!isBuilt || builtStamp != stamp) && (lookups > LayoutReadConstants.scanReads || (seenStamp == stamp && stamp != 0)) {
+        let id = NodesID(nodes, stamp: stamp)
+        if built != id && (lookups > LayoutReadConstants.scanReads || seen == id) {
             build(nodes: nodes, keyOf: keyOf, highlightKeysOf: highlightKeysOf)
-            builtStamp = stamp
-            isBuilt = true
+            built = id
         }
-        seenStamp = stamp
+        seen = id
     }
 
-    func indexIfValid(stamp: UInt64) -> LayoutKeyIndex? {
-        (isBuilt && builtStamp == stamp) ? self : nil
+    func indexIfValid<N>(nodes: [N], stamp: UInt64) -> LayoutKeyIndex? {
+        built == NodesID(nodes, stamp: stamp) ? self : nil
     }
 
     mutating func build<N>(
@@ -230,6 +248,7 @@ struct LayoutKeyIndex {
         keyOf: (N) -> String?,
         highlightKeysOf: ((N) -> [String])? = nil
     ) {
+        built = nil
         byLeafKey.removeAll(keepingCapacity: true)
         byHighlightKey.removeAll(keepingCapacity: true)
         for (i, node) in nodes.enumerated() {
@@ -248,34 +267,47 @@ struct LayoutKeyIndex {
         }
     }
 
-    static func selects<N>(
-        selector: String,
-        nodeIndex: Int,
-        nodes: [N],
-        keyOf: (N) -> String?,
-        parentOf: (N) -> Int?
-    ) -> Bool {
-        guard let nodeKey = keyOf(nodes[nodeIndex]) else { return false }
-        if !selector.contains("/") {
-            return selector == nodeKey
+    /// The selector itself and each suffix after a slash may be the complete key.
+    /// A slash can belong to a key, an ancestor scope, or both in different branches.
+    private static func forEachTail(of selector: String, _ visit: (String) -> Void) {
+        visit(selector)
+        let bytes = selector.utf8
+        for slash in bytes.indices where bytes[slash] == 0x2f {
+            let next = bytes.index(after: slash)
+            visit(String(decoding: bytes[next...], as: UTF8.self))
         }
-        let parts = selector.split(separator: "/", omittingEmptySubsequences: false)
-        guard let leaf = parts.last, nodeKey == leaf else { return false }
-        var curParent = parentOf(nodes[nodeIndex])
-        for seg in parts.dropLast().reversed() {
-            while let p = curParent, keyOf(nodes[p]) == nil {
-                curParent = parentOf(nodes[p])
-            }
-            guard let p = curParent, let pKey = keyOf(nodes[p]), pKey == seg else {
-                return false
-            }
-            curParent = parentOf(nodes[p])
-        }
-        return true
     }
 
-    /// Mirrors `crate::flight::selects_under(selector, path, highlightKey)`: checks whether `selector`
-    /// selects a highlight keyed `highlightKey` on `nodes[nodeIndex]` under its keyed ancestors.
+    /// Rune compares the nearest keyed path components above a complete element or highlight
+    /// key. A scoped selector may begin partway through an ancestor whose key contains slashes.
+    private static func matches<N>(
+        selector: String, key: String, ancestor: Int?, nodes: [N],
+        keyOf: (N) -> String?, parentOf: (N) -> Int?
+    ) -> Bool {
+        if selector.utf8.elementsEqual(key.utf8) { return true }
+        let bytes = selector.utf8
+        guard bytes.count > key.utf8.count, bytes.suffix(key.utf8.count).elementsEqual(key.utf8) else {
+            return false
+        }
+        let prefix = bytes.dropLast(key.utf8.count)
+        guard prefix.last == 0x2f else { return false }
+        var scope = prefix.dropLast().split(separator: 0x2f, omittingEmptySubsequences: false).reversed().makeIterator()
+        var wanted = scope.next()
+        var ancestor = ancestor
+        while let i = ancestor {
+            if let ancestorKey = keyOf(nodes[i]) {
+                for part in ancestorKey.utf8.split(separator: 0x2f, omittingEmptySubsequences: false).reversed()
+                    where part.first != 0x23 {
+                    guard let component = wanted, component.elementsEqual(part) else { return false }
+                    wanted = scope.next()
+                    if wanted == nil { return true }
+                }
+            }
+            ancestor = parentOf(nodes[i])
+        }
+        return false
+    }
+
     static func selectsUnder<N>(
         selector: String,
         nodeIndex: Int,
@@ -284,22 +316,7 @@ struct LayoutKeyIndex {
         parentOf: (N) -> Int?,
         highlightKey: String
     ) -> Bool {
-        if !selector.contains("/") {
-            return selector == highlightKey
-        }
-        let parts = selector.split(separator: "/", omittingEmptySubsequences: false)
-        guard let leaf = parts.last, leaf == highlightKey else { return false }
-        var cur: Int? = nodeIndex
-        for seg in parts.dropLast().reversed() {
-            while let p = cur, keyOf(nodes[p]) == nil {
-                cur = parentOf(nodes[p])
-            }
-            guard let p = cur, let pKey = keyOf(nodes[p]), pKey == seg else {
-                return false
-            }
-            cur = parentOf(nodes[p])
-        }
-        return true
+        matches(selector: selector, key: highlightKey, ancestor: nodeIndex, nodes: nodes, keyOf: keyOf, parentOf: parentOf)
     }
 
     static func markedCandidates<N>(
@@ -308,13 +325,20 @@ struct LayoutKeyIndex {
         nodes: [N]
     ) -> [Int]? {
         guard let index else { return nil }
-        let leaf: String
-        if let slash = selector.lastIndex(of: "/") {
-            leaf = String(selector[selector.index(after: slash)...])
-        } else {
-            leaf = selector
+        if !selector.utf8.contains(0x2f) {
+            let found = index.byHighlightKey[selector] ?? []
+            return (found.last ?? -1) < nodes.count ? found : Array(found.prefix { $0 < nodes.count })
         }
-        return (index.byHighlightKey[leaf] ?? []).filter { $0 < nodes.count }
+        var found: [Int] = []
+        forEachTail(of: selector) { key in
+            if let candidates = index.byHighlightKey[key] { found.append(contentsOf: candidates) }
+        }
+        found.sort()
+        var previous: Int?
+        return found.filter { candidate in
+            defer { previous = candidate }
+            return candidate < nodes.count && candidate != previous
+        }
     }
 
     static func firstMatch<N>(
@@ -324,27 +348,31 @@ struct LayoutKeyIndex {
         keyOf: (N) -> String?,
         parentOf: (N) -> Int?
     ) -> Int? {
-        guard !selector.isEmpty else { return nil }
-        let leaf: String
-        if let slash = selector.lastIndex(of: "/") {
-            leaf = String(selector[selector.index(after: slash)...])
-        } else {
-            leaf = selector
+        func selects(_ i: Int) -> Bool {
+            guard let key = keyOf(nodes[i]) else { return false }
+            return matches(selector: selector, key: key, ancestor: parentOf(nodes[i]),
+                           nodes: nodes, keyOf: keyOf, parentOf: parentOf)
         }
-        if let index, let candidates = index.byLeafKey[leaf] {
-            for i in candidates where i < nodes.count {
-                if selects(selector: selector, nodeIndex: i, nodes: nodes, keyOf: keyOf, parentOf: parentOf) {
-                    return i
+        guard let index else {
+            if !selector.utf8.contains(0x2f) {
+                return nodes.firstIndex { node in
+                    keyOf(node)?.utf8.elementsEqual(selector.utf8) == true
                 }
             }
-            return nil
+            return nodes.indices.first(where: selects)
         }
-        for i in nodes.indices {
-            if keyOf(nodes[i]) == leaf && selects(selector: selector, nodeIndex: i, nodes: nodes, keyOf: keyOf, parentOf: parentOf) {
-                return i
+        var first: Int?
+        forEachTail(of: selector) { key in
+            guard let candidates = index.byLeafKey[key] else { return }
+            for i in candidates {
+                if i >= (first ?? nodes.count) { break }
+                if selects(i) {
+                    first = i
+                    break
+                }
             }
         }
-        return nil
+        return first
     }
 }
 

@@ -4,6 +4,9 @@ precision highp sampler2D;
 #endif
 uniform vec2 uViewport;
 uniform vec2 uOrigin;
+#ifdef RUNE_OUTLINES
+uniform int uAtlasFill;
+#endif
 uniform int uSRGBBlend;
 uniform int uInLayer;
 uniform sampler2D uGlyphAtlas;
@@ -17,7 +20,12 @@ flat in vec4 vParams;
 flat in vec4 vUV;
 flat in vec4 vClip;
 flat in uvec4 vFade;
+#ifdef RUNE_OUTLINE_LCD
+layout(location = 0, index = 0) out vec4 outColor;
+layout(location = 0, index = 1) out vec4 outBlend;
+#else
 out vec4 outColor;
+#endif
 
 const float CONTINUOUS_K = 1.52866483;
 
@@ -312,12 +320,18 @@ float box_cov(vec2 p, vec2 halfSize, vec4 radii) {
 
 void main() {
     float kind = vParams.y;
+#ifdef RUNE_OUTLINES
+    vec4 lcdCoverage = vec4(0.0);
+#endif
     if (kind > 11.5) discard;
     vec2 halfSize = vRect.zw * 0.5;
     vec2 center = vRect.xy + halfSize;
     vec4 col = vec4(0.0);
     vec2 clip_p = vec2(gl_FragCoord.x, uViewport.y - gl_FragCoord.y) + uOrigin;
 
+#ifdef RUNE_OUTLINES
+    if (uAtlasFill != 0) clip_p.y = gl_FragCoord.y;
+#endif
     if (kind < 0.5) {
         float d = sd_rounded(vPoint - center, halfSize, vRadii);
         float soft = max(vParams.z, 0.5);
@@ -431,6 +445,20 @@ void main() {
         ivec2 atlasDims = textureSize(uGlyphAtlas, 0);
         ivec2 maxCoord = max(atlasDims - ivec2(1), ivec2(0));
         float cov;
+#ifdef RUNE_OUTLINES
+        if (vRadii.w > 0.0) {
+            cov = outline_glyph(vRadii, vBorder, glyphPoint, lcdCoverage);
+        } else if (vRadii.x == 1.0) {
+            ivec2 offset = ivec2(floor(glyphPoint - vRect.xy));
+            ivec2 texel = ivec2(vUV.xy) + ivec2(3 * offset.x, offset.y);
+            vec3 channels = vec3(
+                texelFetch(uGlyphAtlas, clamp(texel, ivec2(0), maxCoord), 0).r,
+                texelFetch(uGlyphAtlas, clamp(texel + ivec2(1, 0), ivec2(0), maxCoord), 0).r,
+                texelFetch(uGlyphAtlas, clamp(texel + ivec2(2, 0), ivec2(0), maxCoord), 0).r);
+            lcdCoverage = vec4(channels, 1.0);
+            cov = (channels.x + channels.y + channels.z) / 3.0;
+        } else
+#endif
         if (vUV.z > 0.0 || rotated) {
             vec2 p = glyphPoint;
             vec2 span = (vUV.z > 0.0 ? vUV.zw : vRect.zw);
@@ -463,4 +491,18 @@ void main() {
     // The window's UNorm target saturates fragment output before blending.
     // Preserve floating-point range inside isolated layers.
     outColor = uInLayer == 0 ? clamp(source, 0.0, 1.0) : source;
+#ifdef RUNE_OUTLINE_LCD
+    outBlend = vec4(outColor.a);
+    if (lcdCoverage.w != 0.0) {
+        float mean = pow((lcdCoverage.r + lcdCoverage.g + lcdCoverage.b) / 3.0, vParams.w);
+        if (mean < 1e-5) {
+            outColor = vec4(0.0);
+            outBlend = vec4(0.0);
+        } else {
+            vec3 factors = pow(lcdCoverage.rgb, vec3(vParams.w)) / mean;
+            outBlend.rgb = outColor.a * factors;
+            outColor.rgb *= factors;
+        }
+    }
+#endif
 }

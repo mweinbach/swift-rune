@@ -8,6 +8,8 @@ typedef struct RuneGLLayers RuneGLLayers;
 
 void rune_layers_cache_budget(RuneGLLayers *layers, uint64_t bytes);
 void rune_layers_cache_clear(RuneGLLayers *layers);
+void rune_layers_window_rest(RuneGLLayers *layers, int all);
+RuneGLLayerStorage rune_layers_storage(const RuneGLLayers *layers);
 RuneGLLayerCacheStats rune_layers_cache_stats(RuneGLLayers *layers);
 int rune_layers_cache_contains(RuneGLLayers *layers, RuneGLCachedLayer id);
 size_t rune_layers_cache_entries(RuneGLLayers *layers, RuneGLCachedLayer *out, size_t capacity);
@@ -19,8 +21,9 @@ RuneGLLayers *rune_layers_create(const RuneGLAPI *gl, int es, const char *vertex
 void rune_layers_destroy(RuneGLLayers *layers);
 int rune_layers_configure_blur(RuneGLLayers *layers, const char *vertex, const char *fragment,
                                char *error, size_t capacity);
-int rune_layers_frame(RuneGLLayers *layers, int width, int height, const float *clear,
-                      int srgb_blend, int production, GLuint atlas, char *error, size_t capacity);
+int rune_layers_frame(RuneGLLayers *layers, int width, int height, int srgb_blend, int production,
+                      char *error, size_t capacity);
+void rune_layers_clear_root(RuneGLLayers *layers, const float *clear, GLuint atlas);
 int rune_layers_marker(RuneGLLayers *layers, int kind, const float *primitive,
                        char *error, size_t capacity);
 int rune_layers_frame_marker(RuneGLLayers *layers, int kind, const float *adapted36,

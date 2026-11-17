@@ -30,20 +30,77 @@ static int mark(const char *name) {
     return file && fclose(file) == 0;
 }
 
+static void primary_reply(void *context, const uint8_t *bytes, size_t count) {
+    const char expected[] = "other\0selection\n\xe7\x8c\xab";
+    int valid = bytes && count == sizeof(expected) - 1 && !memcmp(bytes, expected, count);
+    if (SDL_getenv("RUNE_TEST_PRIMARY_MISSING")) valid = !bytes && !count;
+    SDL_AtomicSet(context, valid ? 1 : -1);
+}
+
+/* The other process uses xclip or wl-clipboard, never Rune. */
+static int primary_exchange(SDL_Window *window) {
+    int focused = 0, read_pending = 0;
+    SDL_atomic_t reply = {0};
+    int64_t revision = -1;
+    Uint64 deadline = SDL_GetTicks64() + 15000;
+    while (SDL_GetTicks64() < deadline) {
+        rune_desktop_linux_pump();
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (!focused && SDL_GetKeyboardFocus() == window) {
+                REQUIRE(mark("primary.focus"));
+                focused = 1;
+            }
+            if (event.type != SDL_KEYDOWN || revision >= 0) continue;
+            RuneMimeData *payload = rune_mime_create();
+            REQUIRE(rune_mime_add(payload, plain, (const uint8_t *)text, strlen(text)));
+            revision = rune_clipboard_write(payload, 1);
+            rune_mime_free(payload);
+            REQUIRE(revision >= 0);
+            const uint8_t value[] = "Rune\0selection\n\xf0\x9f\xa6\x8a";
+            rune_linux_primary_write(value, sizeof(value) - 1);
+            REQUIRE(mark("primary.write"));
+        }
+        if (!read_pending && access("external.write", F_OK) == 0) {
+            read_pending = 1;
+            rune_linux_primary_read(primary_reply, &reply);
+            REQUIRE(mark("primary.requested"));
+        }
+        int answered = SDL_AtomicGet(&reply);
+        if (answered) {
+            REQUIRE(answered == 1);
+            REQUIRE(revision == rune_clipboard_revision());
+            REQUIRE(rune_clipboard_clear(revision));
+            return 0;
+        }
+        SDL_Delay(4);
+    }
+    fprintf(stderr, "PRIMARY transfer timed out\n");
+    return 1;
+}
+
 int main(int argc, char **argv) {
-    REQUIRE(argc == 2 && (!strcmp(argv[1], "owner") || !strcmp(argv[1], "reader")));
+    REQUIRE(argc == 2 && (!strcmp(argv[1], "owner") || !strcmp(argv[1], "reader") || !strcmp(argv[1], "primary")));
     int owner = !strcmp(argv[1], "owner");
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "SDL video initialization failed: %s\n", SDL_GetError());
         return 1;
     }
-    REQUIRE(!strcmp(SDL_GetCurrentVideoDriver(), "wayland"));
+    REQUIRE(!strcmp(SDL_GetCurrentVideoDriver(), "wayland") ||
+            (!strcmp(argv[1], "primary") && !strcmp(SDL_GetCurrentVideoDriver(), "x11")));
     SDL_Window *window = SDL_CreateWindow(argv[1], 0, 0, 200, 120, SDL_WINDOW_HIDDEN);
     REQUIRE(window);
     rune_desktop_linux_connect(SDL_GetWindowID(window));
     SDL_ShowWindow(window);
     SDL_Surface *surface = SDL_GetWindowSurface(window);
     REQUIRE(surface && SDL_FillRect(surface, NULL, 0x224466) == 0 && SDL_UpdateWindowSurface(window) == 0);
+    if (!strcmp(argv[1], "primary")) {
+        int result = primary_exchange(window);
+        rune_desktop_linux_disconnect();
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return result;
+    }
 
     int64_t revision = -1;
     int focused = 0, finished = 0;

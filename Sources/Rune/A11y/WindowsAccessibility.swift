@@ -54,6 +54,7 @@ internal final class WindowsAccessibilityHost {
             switch kind {
             case Int32(RUNE_UIA_PRESS.rawValue): action = .press; value = nil
             case Int32(RUNE_UIA_FOCUS.rawValue): action = .focus; value = nil
+            case Int32(RUNE_UIA_SCROLL_INTO_VIEW.rawValue): action = .scrollIntoView; value = nil
             case Int32(RUNE_UIA_SET_TEXT.rawValue):
                 guard let text else { continue }
                 action = .setValue; value = .text(String(cString: text))
@@ -83,7 +84,7 @@ internal final class WindowsAccessibilityHost {
         guard lastCommit != runtime.commitCount || announcement.count != announcementCount || rune_uia_active(host) != 0 else { return }
         lastCommit = runtime.commitCount
         announcementCount = announcement.count
-        var tree = runtime.accessibilitySnapshot()
+        var tree = runtime.nativeAccessibilitySnapshot()
         tree.children.append(AccessibilityTreeState.announcerNode(announcement, holdWords: false))
         let scale = Double(runtime.pixelScale)
         let viewport = MotionRect.fromXYWH(0, 0, runtime.viewport.x, runtime.viewport.y)
@@ -126,6 +127,8 @@ internal final class WindowsAccessibilityHost {
             native.read_only = node.isReadOnly ? 1 : 0
             native.pressable = node.actions.contains(.press) ? 1 : 0
             native.settable = node.actions.contains(.setValue) ? 1 : 0
+            native.scroll_item = node.actions.contains(.scrollIntoView) ? 1 : 0
+            native.modal = node.isModal ? 1 : 0
             native.toggle = Self.toggleState(node)
             if node.role == .radio {
                 native.selected = node.isSelected || node.toggled == .trueState || node.value == "true" ? 1 : 0
@@ -156,16 +159,20 @@ internal final class WindowsAccessibilityHost {
                let target = node.runtimePath {
                 let utf16 = Array(value.utf16)
                 if utf16.count < Int(Int32.max) {
-                    var offsets: [Int32] = [0]
-                    var offset: Int32 = 0
-                    for character in value {
-                        offset += Int32(character.utf16.count)
-                        offsets.append(offset)
-                    }
                     let anchor = Int32(clamping: ImeUTF16Bridge.utf16Offset(in: value, fromUTF8Offset: selection[1]))
                     let focus = Int32(clamping: ImeUTF16Bridge.utf16Offset(in: value, fromUTF8Offset: selection[3]))
-                    rune_uia_text_model(host, number, anchor, focus, utf16, Int32(utf16.count), offsets, Int32(offsets.count))
-                    runtime.publishWindowsTextGeometry(target: target, host: host, id: number, clip: rect)
+                    if let cells = runtime.windowsTextGeometry(target: target, clip: rect) {
+                        var offsets: [Int32] = [0]
+                        var offset: Int32 = 0
+                        for character in value {
+                            offset += Int32(character.utf16.count)
+                            offsets.append(offset)
+                        }
+                        rune_uia_text_model(host, number, anchor, focus, utf16, Int32(utf16.count), offsets, Int32(offsets.count))
+                        rune_uia_text_geometry(host, number, cells, Int32(cells.count), windowsAccessibilityWordBreaks)
+                    } else {
+                        rune_uia_text_model(host, number, anchor, focus, utf16, Int32(utf16.count), nil, 0)
+                    }
                 }
             }
             var occurrences: [String: Int] = [:]

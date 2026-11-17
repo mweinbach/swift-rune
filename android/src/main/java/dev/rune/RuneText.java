@@ -10,16 +10,25 @@ import android.graphics.Path;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
+import android.graphics.fonts.FontStyle;
+import android.graphics.fonts.FontVariationAxis;
+import android.graphics.fonts.Font;
+import android.graphics.text.PositionedGlyphs;
+import android.graphics.text.TextRunShaper;
 import android.os.Build;
 import android.os.Environment;
 import android.os.LocaleList;
 import android.icu.lang.UCharacter;
 import android.icu.lang.UProperty;
+import android.icu.text.Bidi;
+import android.icu.text.BidiRun;
 import android.text.Layout;
+import android.text.PrecomputedText;
 import android.text.StaticLayout;
 import android.text.TextDirectionHeuristic;
 import android.text.TextDirectionHeuristics;
 import android.text.TextPaint;
+import android.util.LruCache;
 import android.util.Xml;
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
@@ -35,8 +44,10 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Android line shaping and rasterization for the Rune R8 atlas. Called by the NDK bridge. */
 public final class RuneText {
@@ -46,6 +57,7 @@ public final class RuneText {
     private static boolean bundledFontsReady;
     private final String text;
     private final TextPaint paint;
+    private final String automaticWeightAxis;
     private final int direction;
     private StaticLayout layout;
     private float origin;
@@ -53,6 +65,10 @@ public final class RuneText {
     private final float[] metrics = new float[10];
     private final boolean mayHaveColor;
     private Tile lastTile;
+    private ArrayList<DirectionalRun> inkRuns;
+    private char[] inkChars;
+    private ArrayList<InkSpan> inkSpans;
+    private NativeGlyphBounds inkBounds;
 
     public static synchronized boolean initialize(Context context) {
         cacheDirectory = context.getCacheDir();
@@ -83,7 +99,8 @@ public final class RuneText {
     private static void addFace(Face incoming) {
         for (int i = 0; i < faces.size(); i++) {
             Face old = faces.get(i);
-            if (old.name.equalsIgnoreCase(incoming.name) && old.weight == incoming.weight && old.italic == incoming.italic) {
+            if (old.name.equalsIgnoreCase(incoming.name) && old.weight == incoming.weight && old.italic == incoming.italic &&
+                old.minWeight == incoming.minWeight && old.maxWeight == incoming.maxWeight) {
                 faces.set(i, incoming);
                 return;
             }
@@ -185,19 +202,34 @@ public final class RuneText {
         return canonical == null ? null : Typeface.create(canonical, Typeface.NORMAL);
     }
 
+    // CSS Fonts orders these groups before considering distance within each group.
+    private static int weightGroup(float candidate, int target) {
+        if (target < 400) return candidate <= target ? 0 : 1;
+        if (target > 500) return candidate >= target ? 0 : 1;
+        if (candidate >= target && candidate <= 500) return 0;
+        return candidate < target ? 1 : 2;
+    }
+
+    private static boolean betterMatch(Face candidate, Face best, int weight, boolean italic) {
+        if (candidate.italic != best.italic) return candidate.italic == italic;
+        float proposed = candidate.matchWeight(weight), current = best.matchWeight(weight);
+        int a = weightGroup(proposed, weight), b = weightGroup(current, weight);
+        if (a != b) return a < b;
+        return Math.abs(proposed - weight) < Math.abs(current - weight);
+    }
+
     private static synchronized Face selectFace(String stack, int weight, boolean italic, boolean mono) {
         for (String name : familyList(stack)) {
             if (name.isEmpty()) continue;
             Face best = null;
-            int distance = Integer.MAX_VALUE;
             for (Face face : faces) {
                 if (!face.name.equalsIgnoreCase(name)) continue;
-                int score = Math.abs(face.weight - weight) + (face.italic != italic ? 1000 : 0);
-                if (score < distance) { best = face; distance = score; }
+                if (best == null || betterMatch(face, best, weight, italic)) best = face;
             }
             if (best != null) {
                 if (best.italic == italic) return best;
-                return new Face(best.name, weight, italic, styled(best.typeface, weight, italic), best.hasColor);
+                return new Face(best.name, best.weight, italic, styled(best.typeface, weight, italic), best.hasColor,
+                                best.minWeight, best.maxWeight);
             }
             Typeface nativeFace = systemTypeface(name);
             if (nativeFace != null)
@@ -214,10 +246,19 @@ public final class RuneText {
         final boolean italic;
         final Typeface typeface;
         final boolean hasColor;
+        final float minWeight, maxWeight;
 
         Face(String name, int weight, boolean italic, Typeface typeface, boolean hasColor) {
-            this.name = name; this.weight = weight; this.italic = italic; this.typeface = typeface; this.hasColor = hasColor;
+            this(name, weight, italic, typeface, hasColor, weight, weight);
         }
+
+        Face(String name, int weight, boolean italic, Typeface typeface, boolean hasColor,
+             float minWeight, float maxWeight) {
+            this.name = name; this.weight = weight; this.italic = italic; this.typeface = typeface; this.hasColor = hasColor;
+            this.minWeight = minWeight; this.maxWeight = maxWeight;
+        }
+
+        float matchWeight(int target) { return Math.max(minWeight, Math.min(maxWeight, target)); }
 
         static ByteBuffer table(ByteBuffer font, int tag) {
             // Android's default face in a TrueType collection is index zero. Table
@@ -266,6 +307,19 @@ public final class RuneText {
                 boolean italic = os2 == null || os2.limit() < 64 ? typeface.isItalic() : (os2.getShort(62) & 1) != 0;
                 boolean color = table(font, 0x434f4c52) != null || table(font, 0x43424454) != null ||
                     table(font, 0x73626978) != null || table(font, 0x53564720) != null;
+                ByteBuffer fvar = Build.VERSION.SDK_INT >= 26 ? table(font, 0x66766172) : null;
+                if (fvar != null && fvar.remaining() >= 16 && fvar.getInt(0) == 0x10000) {
+                    int start = fvar.getShort(4) & 0xffff, axes = fvar.getShort(8) & 0xffff, stride = fvar.getShort(10) & 0xffff;
+                    if (start >= 16 && stride >= 20 && start <= fvar.limit() && axes <= (fvar.limit() - start) / stride) {
+                        for (int i = 0; i < axes; i++) {
+                            int at = start + i * stride;
+                            if (fvar.getInt(at) != 0x77676874) continue;
+                            float min = fvar.getInt(at + 4) / 65536f, max = fvar.getInt(at + 12) / 65536f;
+                            if (min >= 1 && max <= 1000 && min < max)
+                                return new Face(family, weight, italic, typeface, color, min, max);
+                        }
+                    }
+                }
                 return new Face(family, weight, italic, typeface, color);
             } catch (IndexOutOfBoundsException | IllegalArgumentException e) {
                 return null;
@@ -283,6 +337,9 @@ public final class RuneText {
         String familyName = new String(family, StandardCharsets.UTF_8);
         Face selected = selectFace(familyName, Math.max(1, Math.min(1000, weight)), italic, mono);
         paint.setTypeface(selected.typeface);
+        automaticWeightAxis = selected.minWeight == selected.maxWeight ? "" : "'wght' " + selected.matchWeight(weight);
+        if (Build.VERSION.SDK_INT >= 26 && !automaticWeightAxis.isEmpty())
+            paint.setFontVariationSettings(automaticWeightAxis);
         mayHaveColor = selected.hasColor || needsColorProbe(text);
         shape();
     }
@@ -310,14 +367,23 @@ public final class RuneText {
     }
 
     public void configure(String language, String features, String variations) {
+        if (inkSpans != null) return;
         if (!language.isEmpty()) paint.setTextLocales(LocaleList.forLanguageTags(language));
         if (!features.isEmpty()) paint.setFontFeatureSettings(settings(features));
-        if (Build.VERSION.SDK_INT >= 26 && !variations.isEmpty()) paint.setFontVariationSettings(settings(variations));
+        if (Build.VERSION.SDK_INT >= 26 && !variations.isEmpty()) {
+            String axes = settings(variations);
+            if (!automaticWeightAxis.isEmpty() && !axes.contains("'wght'"))
+                axes = axes.isEmpty() ? automaticWeightAxis : axes + "," + automaticWeightAxis;
+            paint.setFontVariationSettings(axes);
+        }
         shape();
     }
 
     private void shape() {
         lastTile = null;
+        inkRuns = null;
+        inkChars = null;
+        inkBounds = null;
         TextDirectionHeuristic heuristic = direction == 1 ? TextDirectionHeuristics.LTR :
             direction == 2 ? TextDirectionHeuristics.RTL : TextDirectionHeuristics.FIRSTSTRONG_LTR;
         // Rune wraps at grapheme boundaries. Android positions and shapes each resulting line.
@@ -395,14 +461,473 @@ public final class RuneText {
         return ((long)Float.floatToRawIntBits(left) << 32) | (Float.floatToRawIntBits(advance) & 0xffffffffL);
     }
 
+    // getTextRunAdvances assigns a shaped cluster's width to its first logical
+    // UTF-16 index, including in RTL runs. Caret widths can subdivide the same
+    // ligature. Keep the shaping indices separate from the selection geometry.
+    private static final class DirectionalRun {
+        final int start, end;
+        final boolean rtl;
+        float left;
+        float[] edges;
+        CapturedGlyphs glyphs;
+        DirectionalRun(int start, int end, boolean rtl) {
+            this.start = start;
+            this.end = end;
+            this.rtl = rtl;
+        }
+        void measure(RuneText line) {
+            if (edges != null) return;
+            left = Float.intBitsToFloat((int)(line.cell(start, end) >>> 32));
+            int count = end - start;
+            edges = new float[count + 1];
+            if (Build.VERSION.SDK_INT >= 29) {
+                line.paint.getTextRunAdvances(line.inkChars, start, count, start, count, rtl, edges, 1);
+            } else {
+                float[] widths = new float[count];
+                line.paint.getTextWidths(line.inkChars, start, count, widths);
+                System.arraycopy(widths, 0, edges, 1, count);
+            }
+            for (int i = 1; i <= count; i++) edges[i] += edges[i - 1];
+            glyphs = Build.VERSION.SDK_INT >= 31 ? CapturedGlyphs.capture(line, this) : null;
+        }
+
+        int nextOwner(int index) {
+            while (index > start && index < end && edges[index - start + 1] == edges[index - start]) index++;
+            return index;
+        }
+    }
+
+    // A contextual substitution or a GPOS pair can change even when the cluster
+    // itself survives re-shaping. Draw the original IDs at the original positions.
+    private static final class CapturedGlyphs {
+        final PositionedGlyphs shaped;
+        final int[] ids, fences;
+        final float[] positions;
+        final byte[] synthetic;
+
+        private CapturedGlyphs(PositionedGlyphs shaped, int[] fences, Typeface typeface) {
+            this.shaped = shaped;
+            this.fences = fences;
+            int count = shaped.glyphCount();
+            ids = new int[count];
+            positions = new float[2 * count];
+            synthetic = new byte[count];
+            for (int i = 0; i < count; i++) {
+                ids[i] = shaped.getGlyphId(i);
+                positions[2 * i] = shaped.getGlyphX(i);
+                positions[2 * i + 1] = shaped.getGlyphY(i);
+                boolean bold, italic;
+                if (Build.VERSION.SDK_INT >= 35) {
+                    bold = shaped.getFakeBold(i);
+                    italic = shaped.getFakeItalic(i);
+                } else {
+                    FontStyle actual = shaped.getFont(i).getStyle();
+                    bold = typeface.getWeight() >= 600 && typeface.getWeight() - actual.getWeight() >= 200;
+                    italic = typeface.isItalic() && actual.getSlant() == FontStyle.FONT_SLANT_UPRIGHT;
+                }
+                synthetic[i] = (byte)((bold ? 1 : 0) | (italic ? 2 : 0));
+            }
+        }
+
+        static CapturedGlyphs capture(RuneText line, DirectionalRun run) {
+            int length = run.end - run.start;
+            PositionedGlyphs shaped = TextRunShaper.shapeTextRun(
+                line.text, run.start, length, run.start, length, run.left, line.metrics[1], run.rtl, line.paint);
+            int count = shaped.glyphCount(), clusters = 0;
+            for (int at = run.start; at < run.end; at = run.nextOwner(at + 1)) clusters++;
+            int[] fences = new int[length + 1];
+            int used = 0;
+            // Every positive-advance cluster contains at least one glyph.
+            boolean onePerCluster = run.edges[1] != 0 && clusters == count;
+            for (int at = run.start; at < run.end;) {
+                int next = run.nextOwner(at + 1), n = 1;
+                if (!onePerCluster) {
+                    PositionedGlyphs probe = TextRunShaper.shapeTextRun(
+                        line.text, at, next - at, run.start, length, 0, 0, run.rtl, line.paint);
+                    n = probe.glyphCount();
+                    if (n > count - used) return null;
+                    int first = run.rtl ? count - used - n : used;
+                    for (int j = 0; j < n; j++) {
+                        if (probe.getGlyphId(j) != shaped.getGlyphId(first + j) ||
+                            !probe.getFont(j).equals(shaped.getFont(first + j))) return null;
+                    }
+                }
+                used += n;
+                // A range ending inside the cluster already includes its owner.
+                Arrays.fill(fences, at - run.start + 1, next - run.start + 1, used);
+                at = next;
+            }
+            return used == count ? new CapturedGlyphs(shaped, fences, line.paint.getTypeface()) : null;
+        }
+
+        private int edge(InkSpan span, boolean first) {
+            return edge(span.run, span.start, span.end, first);
+        }
+
+        private int edge(DirectionalRun run, int start, int end, boolean first) {
+            int a = fences[start - run.start], b = fences[end - run.start];
+            return run.rtl ? ids.length - (first ? b : a) : (first ? a : b);
+        }
+
+        private int single(DirectionalRun run, int owner) {
+            if (owner != run.nextOwner(owner)) return -1;
+            int next = run.nextOwner(owner + 1);
+            int i = edge(run, owner, next, true);
+            return edge(run, owner, next, false) == i + 1 ? i : -1;
+        }
+
+        private static void applyStyle(Paint paint, int synthetic) {
+            paint.setFakeBoldText((synthetic & 1) != 0);
+            paint.setTextSkewX((synthetic & 2) != 0 ? -0.25f : 0f);
+        }
+
+        void bounds(DirectionalRun run, int start, int end, Paint paint, RectF result, RectF glyph) {
+            int limit = edge(run, start, end, false);
+            for (int i = edge(run, start, end, true); i < limit; i++) {
+                applyStyle(paint, synthetic[i]);
+                shaped.getFont(i).getGlyphBounds(ids[i], paint, glyph);
+                glyph.offset(positions[2 * i], positions[2 * i + 1]);
+                result.union(glyph);
+            }
+            applyStyle(paint, 0);
+        }
+
+        void draw(Canvas canvas, InkSpan span, Paint paint) {
+            int limit = edge(span, false);
+            for (int i = edge(span, true); i < limit;) {
+                Font font = shaped.getFont(i);
+                int end = i + 1;
+                while (end < limit && synthetic[i] == synthetic[end] && font.equals(shaped.getFont(end))) end++;
+                applyStyle(paint, synthetic[i]);
+                canvas.drawGlyphs(ids, i, positions, i * 2, end - i, font, paint);
+                i = end;
+            }
+            applyStyle(paint, 0);
+        }
+    }
+
+    private static final class InkSpan {
+        final DirectionalRun run;
+        final int start, end;
+        final float x;
+        InkSpan(DirectionalRun run, int start, int end) {
+            this.run = run;
+            this.start = start;
+            this.end = end;
+            x = run.left + (run.rtl ? run.edges[run.end - run.start] - run.edges[end - run.start]
+                                    : run.edges[start - run.start]);
+        }
+    }
+
+    private RuneText(RuneText parent, ArrayList<InkSpan> spans) {
+        text = parent.text;
+        automaticWeightAxis = parent.automaticWeightAxis;
+        direction = parent.direction;
+        paint = new TextPaint(parent.paint);
+        mayHaveColor = parent.mayHaveColor;
+        inkSpans = spans;
+        System.arraycopy(parent.metrics, 0, metrics, 0, metrics.length);
+        Rect bounds = new Rect();
+        if (!spans.isEmpty()) {
+            if (Build.VERSION.SDK_INT >= 28) {
+                RectF positioned = new RectF(), glyph = new RectF();
+                for (InkSpan span : spans) {
+                    if (span.run.glyphs != null) span.run.glyphs.bounds(span.run, span.start, span.end, paint, positioned, glyph);
+                    else {
+                        if (parent.inkBounds == null) parent.inkBounds = new NativeGlyphBounds(parent);
+                        parent.inkBounds.collect(span, metrics[1], positioned);
+                    }
+                }
+                if (!positioned.isEmpty()) {
+                    positioned.roundOut(bounds);
+                    bounds.inset(-1, -1);
+                }
+            } else {
+                // Older Androids expose rasterization and advances but no glyph
+                // bounds. Scan bounded tiles so long lines never need a line bitmap.
+                int left = (int)metrics[3], top = (int)metrics[4];
+                int right = left + (int)metrics[5], bottom = top + (int)metrics[6];
+                for (int y = top; y < bottom; y += 64) for (int x = left; x < right; x += 256) {
+                    int w = Math.min(256, right - x), h = Math.min(64, bottom - y);
+                    int[] pixels = raster(x, y, w, h, Color.WHITE);
+                    for (int i = 0; i < pixels.length; i++) if ((pixels[i] >>> 24) != 0) {
+                        int px = x + i % w, py = y + i / w;
+                        bounds.union(px, py, px + 1, py + 1);
+                    }
+                }
+            }
+        }
+        metrics[3] = bounds.left; metrics[4] = bounds.top;
+        metrics[5] = bounds.width(); metrics[6] = bounds.height();
+    }
+
+    private static final class NativeGlyphBounds {
+        final PrecomputedText paragraph;
+        NativeGlyphBounds(RuneText line) {
+            PrecomputedText.Params params = new PrecomputedText.Params.Builder(line.paint)
+                .setTextDirection(line.layout.getParagraphDirection(0) < 0 ? TextDirectionHeuristics.RTL : TextDirectionHeuristics.LTR)
+                .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
+                .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
+                .build();
+            paragraph = PrecomputedText.create(line.text, params);
+        }
+        void collect(InkSpan span, float baseline, RectF result) {
+            Rect local = new Rect();
+            paragraph.getBounds(span.start, span.end, local);
+            RectF positioned = new RectF(local);
+            positioned.offset(span.x, baseline);
+            result.union(positioned);
+        }
+    }
+
+    private void prepareInkRuns() {
+        if (inkRuns != null) return;
+        ArrayList<DirectionalRun> runs = new ArrayList<>();
+        inkChars = text.toCharArray();
+        Bidi bidi = new Bidi(text, layout.getParagraphDirection(0) < 0
+            ? Bidi.DIRECTION_RIGHT_TO_LEFT : Bidi.DIRECTION_LEFT_TO_RIGHT);
+        int visibleEnd = layout.getLineEnd(0);
+        for (int offset = 0; offset < visibleEnd; ) {
+            BidiRun run = bidi.getLogicalRun(offset);
+            int limit = Math.min(run.getLimit(), visibleEnd);
+            // Minikin shapes words on either side of U+0020 independently.
+            // Capture them lazily so animating one word in a long label only
+            // allocates native glyph positions for that word. StaticLayout
+            // advances tabs to tab stops and never paints their ink.
+            int startOfText = offset;
+            for (int i = offset; i < limit; i++) {
+                char separator = inkChars[i];
+                if (separator != ' ' && separator != '\t' && separator != '\n') continue;
+                if (startOfText < i) runs.add(new DirectionalRun(startOfText, i, run.isOddRun()));
+                if (separator == ' ') runs.add(new DirectionalRun(i, i + 1, run.isOddRun()));
+                startOfText = i + 1;
+            }
+            if (startOfText < limit) runs.add(new DirectionalRun(startOfText, limit, run.isOddRun()));
+            offset = limit;
+        }
+        inkRuns = runs;
+    }
+
+    /** Retains the full directional context while selecting by logical cluster owner. */
+    public synchronized RuneText extractInk(int start, int end) {
+        if (inkSpans != null || start < 0 || start > end || end > text.length()) return null;
+        prepareInkRuns();
+        ArrayList<InkSpan> spans = new ArrayList<>();
+        for (int i = firstInkRun(start); i < inkRuns.size(); i++) {
+            DirectionalRun run = inkRuns.get(i);
+            if (run.start >= end) break;
+            run.measure(this);
+            int first = run.nextOwner(Math.max(start, run.start));
+            int limit = run.nextOwner(Math.min(end, run.end));
+            if (first < limit) spans.add(new InkSpan(run, first, limit));
+        }
+        return new RuneText(this, spans);
+    }
+
+    private int firstInkRun(int owner) {
+        int lo = 0, hi = inkRuns.size();
+        while (lo < hi) {
+            int mid = lo + (hi - lo) / 2;
+            if (inkRuns.get(mid).end <= owner) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+
+    private DirectionalRun ownerRun(int owner) {
+        if (Build.VERSION.SDK_INT < 31 || inkSpans != null || owner < 0 || owner >= text.length()) return null;
+        prepareInkRuns();
+        int index = firstInkRun(owner);
+        if (index == inkRuns.size()) return null;
+        DirectionalRun run = inkRuns.get(index);
+        if (owner < run.start) return null;
+        run.measure(this);
+        return run.glyphs != null ? run : null;
+    }
+
+    /** Shares a single source glyph's packed GPU curves across independently shaped layouts. */
+    public synchronized long[] outlineSingle(int owner) {
+        DirectionalRun run = ownerRun(owner);
+        if (run == null) return null;
+        CapturedGlyphs ink = run.glyphs;
+        int i = ink.single(run, owner);
+        if (i < 0) return null;
+        NativeOutlines.Face face = NativeOutlines.eligibleFace(ink, i);
+        if (face == null) return null;
+        long style = face.style(paint, (ink.synthetic[i] & 2) != 0);
+        return new long[] {style, ink.ids[i], ((long)Float.floatToRawIntBits(ink.positions[2 * i]) << 32)
+            | (Float.floatToRawIntBits(ink.positions[2 * i + 1]) & 0xffffffffL), face.paths.cjk ? 3 : 1};
+    }
+
+    public synchronized float[] outlineUnplaced(int owner) {
+        DirectionalRun run = ownerRun(owner);
+        if (run == null) return null;
+        CapturedGlyphs ink = run.glyphs;
+        int i = ink.single(run, owner);
+        if (i < 0) return null;
+        NativeOutlines.Face face = NativeOutlines.eligibleFace(ink, i);
+        if (face == null) return null;
+        float[] path = face.paths.glyph(ink.ids[i]);
+        if (path == null || path.length > 7 * 65536) return null;
+        float[] result = new float[path.length];
+        NativeOutlines.writePath(result, 0, path, face.paths, paint, ink.synthetic[i], 0, 0);
+        return result;
+    }
+
+    public synchronized double[] appleHintMetrics(int owner) {
+        DirectionalRun run = ownerRun(owner);
+        if (run == null) return null;
+        CapturedGlyphs ink = run.glyphs;
+        int i = ink.single(run, owner);
+        if (i < 0 || ink.synthetic[i] != 0) return null;
+        NativeOutlines.Face face = NativeOutlines.eligibleFace(ink, i);
+        return face == null ? null : face.paths.appleHintMetrics();
+    }
+
+    /** Curves of the original native glyph IDs. The line origin is top left and y increases down. */
+    public synchronized float[] outlineCommands() {
+        if (Build.VERSION.SDK_INT < 31 || inkSpans == null) return null;
+        return NativeOutlines.commands(inkSpans, paint);
+    }
+
+    /** Each record carries a UTF-16 cluster owner followed by the raw float bits of its ink bounds. */
+    public synchronized int[] outlineRegions() {
+        if (Build.VERSION.SDK_INT < 31 || inkSpans != null) return null;
+        prepareInkRuns();
+        int[] regions = new int[80];
+        int used = 0;
+        RectF bounds = new RectF(), glyph = new RectF();
+        for (DirectionalRun run : inkRuns) {
+            run.measure(this);
+            if (run.glyphs == null) return null;
+            for (int owner = run.start; owner < run.end;) {
+                int next = run.nextOwner(owner + 1);
+                bounds.setEmpty();
+                run.glyphs.bounds(run, owner, next, paint, bounds, glyph);
+                if (!bounds.isEmpty()) {
+                    // Skia rounds these native glyph bounds for the mask. Include its filter gutter.
+                    if (used > regions.length - 5) {
+                        if (regions.length > Integer.MAX_VALUE / 2) return null;
+                        regions = Arrays.copyOf(regions, regions.length * 2);
+                    }
+                    regions[used++] = owner;
+                    regions[used++] = Float.floatToRawIntBits((float)Math.floor(bounds.left) - 1);
+                    regions[used++] = Float.floatToRawIntBits((float)Math.floor(bounds.top) - 1);
+                    regions[used++] = Float.floatToRawIntBits((float)Math.ceil(bounds.right) + 1);
+                    regions[used++] = Float.floatToRawIntBits((float)Math.ceil(bounds.bottom) + 1);
+                }
+                owner = next;
+            }
+        }
+        return Arrays.copyOf(regions, used);
+    }
+
+    // Kept in an API-31-only class so older Android releases can load the R8 bridge.
+    private static final class NativeOutlines {
+        private static final AtomicLong nextStyle = new AtomicLong(1);
+        private static final class Face {
+            final RuneGlyphPaths paths;
+            // Unique IDs survive cache eviction. Existing frames can still reference their packed curves.
+            final LruCache<Long, Long> styles = new LruCache<Long, Long>(32) {
+                @Override protected Long create(Long key) { return nextStyle.getAndAdd(2); }
+            };
+            Face(Font font) {
+                RuneGlyphPaths source = RuneGlyphPaths.open(font.getBuffer(), font.getTtcIndex(), false);
+                FontVariationAxis[] axes = font.getAxes();
+                if (source != null && axes != null) {
+                    for (FontVariationAxis axis : axes) {
+                        if (!source.matchesAxis(axis.getTag(), axis.getStyleValue())) { source = null; break; }
+                    }
+                }
+                paths = source;
+            }
+
+            long style(Paint paint, boolean italic) {
+                long key = ((long)Float.floatToRawIntBits(paint.getTextSize()) << 32)
+                    | (Float.floatToRawIntBits(paint.getTextScaleX()) & 0xffffffffL);
+                return styles.get(key) + (italic ? 1 : 0);
+            }
+        }
+        private static final LruCache<Font, Face> faces = new LruCache<Font, Face>(12) {
+            @Override protected Face create(Font font) { return new Face(font); }
+        };
+
+        private static Face eligibleFace(CapturedGlyphs ink, int i) {
+            // Synthetic bold modifies the contour, so use Android's native glyph mask.
+            if ((ink.synthetic[i] & 1) != 0) return null;
+            Face face = faces.get(ink.shaped.getFont(i));
+            if (face.paths == null) return null;
+            if (Build.VERSION.SDK_INT >= 35) {
+                float weight = ink.shaped.getWeightOverride(i);
+                float italic = ink.shaped.getItalicOverride(i);
+                if ((weight != PositionedGlyphs.NO_OVERRIDE && !face.paths.matchesAxis("wght", weight)) ||
+                    (italic != PositionedGlyphs.NO_OVERRIDE && !face.paths.matchesAxis("ital", italic))) return null;
+            } else if (face.paths.variable) {
+                // The native per-glyph axis overrides became public in API 35.
+                return null;
+            }
+            return face;
+        }
+
+        private static void writePath(float[] target, int at, float[] path, RuneGlyphPaths face,
+                                      Paint paint, byte synthetic, float x, float y) {
+            float sy = paint.getTextSize() / face.unitsPerEm;
+            float sx = sy * paint.getTextScaleX();
+            float skew = (synthetic & 2) == 0 ? 0 : -0.25f;
+            for (int k = 0; k < path.length; k += 7, at += 7) {
+                int verb = (int)path[k];
+                target[at] = verb;
+                int pairs = verb == 4 ? 0 : (verb == 2 ? 2 : (verb == 3 ? 3 : 1));
+                for (int j = 0; j < pairs; j++) {
+                    float dy = -sy * path[k + 2 + 2 * j];
+                    target[at + 1 + 2 * j] = x + sx * path[k + 1 + 2 * j] + skew * dy;
+                    target[at + 2 + 2 * j] = y + dy;
+                }
+            }
+        }
+
+        static float[] commands(ArrayList<InkSpan> spans, Paint paint) {
+            float[] result = new float[0];
+            int used = 0;
+            for (InkSpan span : spans) {
+                CapturedGlyphs ink = span.run.glyphs;
+                if (ink == null) return null;
+                int end = ink.edge(span, false);
+                for (int i = ink.edge(span, true); i < end; i++) {
+                    Face face = eligibleFace(ink, i);
+                    if (face == null) return null;
+                    float[] path = face.paths.glyph(ink.ids[i]);
+                    // A huge cluster is still drawable through the native raster path.
+                    if (path == null || path.length > 7 * 65536 - used) return null;
+                    if (used + path.length > result.length) {
+                        result = Arrays.copyOf(result, Math.max(used + path.length, Math.max(56, result.length * 2)));
+                    }
+                    writePath(result, used, path, face.paths, paint, ink.synthetic[i],
+                              ink.positions[i * 2], ink.positions[i * 2 + 1]);
+                    used += path.length;
+                }
+            }
+            return Arrays.copyOf(result, used);
+        }
+    }
+
     /** Draws only the requested atlas tile, retaining the contextual glyph forms of the full line. */
     private int[] raster(int x, int y, int width, int height, int color) {
         Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         try {
             paint.setColor(color);
             Canvas canvas = new Canvas(bitmap);
-            canvas.translate(-x - origin, -y);
-            layout.draw(canvas);
+            if (inkSpans == null) {
+                canvas.translate(-x - origin, -y);
+                layout.draw(canvas);
+            } else {
+                canvas.translate(-x, -y);
+                for (InkSpan span : inkSpans) {
+                    if (span.run.glyphs != null) span.run.glyphs.draw(canvas, span, paint);
+                    else canvas.drawTextRun(text, span.start, span.end, span.run.start, span.run.end,
+                                            span.x, metrics[1], span.run.rtl, paint);
+                }
+            }
             int[] rgba = new int[width * height];
             bitmap.getPixels(rgba, 0, width, 0, 0, width, height);
             return rgba;

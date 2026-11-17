@@ -183,7 +183,7 @@ public final class WarmGpuCoordinator: @unchecked Sendable {
         if emitEvents {
             GpuEvents.starting()
         }
-        guard let dev = preferredDevice ?? MTLCreateSystemDefaultDevice(),
+        guard let dev = preferredDevice ?? MetalAdapterPicker.select(),
               let queue = dev.makeCommandQueue() else {
             return nil
         }

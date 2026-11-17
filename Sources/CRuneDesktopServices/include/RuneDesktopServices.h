@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "RuneDesktopHotkeys.h"
 #include "RuneDesktopSpell.h"
+#include "RuneLinuxTray.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,6 +33,12 @@ void rune_desktop_linux_connect(uint32_t window_id);
 int rune_desktop_linux_right_alt_is_altgr(uint32_t window_id);
 void rune_desktop_linux_pump(void);
 void rune_desktop_linux_disconnect(void);
+/* Host-thread operations on X11 PRIMARY or the Wayland seat's primary selection.
+   A read replies exactly once, possibly on a worker. The bytes are borrowed
+   during the callback only. Missing/empty selections supply NULL. */
+typedef void (*RunePrimaryReply)(void *context, const uint8_t *bytes, size_t count);
+void rune_linux_primary_write(const uint8_t *bytes, size_t count);
+void rune_linux_primary_read(RunePrimaryReply reply, void *context);
 typedef struct RuneLinuxDrag RuneLinuxDrag;
 typedef struct {
     const uint8_t *rgba; /* Straight-alpha sRGB pixels, top row first. */

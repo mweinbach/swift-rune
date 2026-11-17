@@ -4,6 +4,8 @@ import Foundation
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif os(Windows)
+import CRuneWin32
 #endif
 
 // MARK: - Commit Budget (tooling/perf_warn/budget.rs)
@@ -274,14 +276,20 @@ public final class IdleMeter {
     }
 
     public func ends(clock: Double, animating: Bool, drawn: DrawnSnapshot, windowName: String? = nil) {
+        observeFrame(clock: clock, animating: animating, drawn: drawn, windowName: windowName)
+    }
+
+    func observeFrame(clock: Double, animating: Bool, drawn snapshot: @autoclosure () -> DrawnSnapshot, windowName: String?) {
         guard let start = currentStart else { return }
         currentStart = nil
         let wasPolled = polledFlag
         polledFlag = false
 
-        let quiet = start.quiet && !drawn.opaque
-        let sameDraw: Bool? = quiet ? lastQuiet.map { $0.key == drawn.surfaceKey && $0.instances == drawn.instances } : nil
-        if quiet {
+        let drawn = start.quiet ? snapshot() : nil
+        let quiet = drawn.map { !$0.opaque } ?? false
+        var sameDraw: Bool?
+        if quiet, let drawn {
+            sameDraw = lastQuiet.map { $0.key == drawn.surfaceKey && $0.instances == drawn.instances }
             lastQuiet = (drawn.instances, drawn.surfaceKey)
         } else {
             lastQuiet = nil
@@ -491,12 +499,24 @@ public enum PerfWarn {
         if let override = testEnabledOverride {
             return override
         }
-        return ProcessInfo.processInfo.environment["RUNE_PERF_WARN"] != "0"
+        return testLog != nil || configuredWarnings
     }
+
+    private static let configuredWarnings: Bool = {
+        let setting = ProcessInfo.processInfo.environment["RUNE_PERF_WARN"]
+        #if DEBUG
+        return setting != "0"
+        #else
+        return setting == "1"
+        #endif
+    }()
 
     /// Returns the calling thread's user + system CPU time in milliseconds, when available.
     public static func threadCpuMs() -> Double? {
-        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(Linux)
+        #if os(Windows)
+        let ms = rune_win_thread_cpu_ms()
+        return ms >= 0 ? ms : nil
+        #elseif canImport(Darwin) || os(Linux) || os(Android)
         return Rune.threadCpuMs()
         #else
         return nil

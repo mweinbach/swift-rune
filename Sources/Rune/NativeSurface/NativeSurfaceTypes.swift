@@ -398,6 +398,12 @@ public struct ByteFrame: Sendable, Equatable {
 /// Source backing a `NativeSurfaceVideoFrame`.
 public enum FrameSource: Sendable {
     case bytes(ByteFrame)
+    #if os(Windows)
+    case shared(WindowsSharedFrame)
+    #if canImport(CRuneMedia)
+    case decoded(WindowsDecodedPicture)
+    #endif
+    #endif
     #if canImport(CoreVideo) && canImport(IOSurface) && canImport(Metal)
     case pixelBuffer(CoreVideoPixelBuffer)
     #endif
@@ -567,6 +573,9 @@ public final class NativeSurface: @unchecked Sendable {
         var observer: FrameObserver?
         var legacyFrame: NativeSurfaceFrame?
         var video: SurfaceVideoAttachment?
+        #if os(Windows) && canImport(CRuneMedia)
+        var videoLayers: WindowsVideoPublication?
+        #endif
         var error: String?
         var timing: FrameTiming?
         var submitted: UInt64 = 0
@@ -618,6 +627,19 @@ public final class NativeSurface: @unchecked Sendable {
         return state.video
     }
 
+    #if os(Windows) && canImport(CRuneMedia)
+    internal var windowsVideoLayers: WindowsVideoPublication? { state.lock.withLock { state.videoLayers } }
+
+    internal func registerWindowsVideoLayers() -> WindowsVideoPublication {
+        state.lock.withLock {
+            if let existing = state.videoLayers { return existing }
+            let publication = WindowsVideoPublication()
+            state.videoLayers = publication
+            return publication
+        }
+    }
+    #endif
+
     public func videoSnapshot() -> VideoSnapshot? {
         videoAttachment?.snapshot()
     }
@@ -650,6 +672,9 @@ public final class NativeSurface: @unchecked Sendable {
         waker = changed ? state.waker : nil
         state.lock.unlock()
         waker?()
+        #if os(Windows) && canImport(CRuneMedia)
+        if changed { windowsVideoLayers?.requestRedraw() }
+        #endif
     }
 
     public func currentFrame() -> NativeSurfaceVideoFrame? {
@@ -726,6 +751,9 @@ public final class NativeSurface: @unchecked Sendable {
         old = state.observer
         state.observer = callback
         state.lock.unlock()
+        #if os(Windows) && canImport(CRuneMedia)
+        if (old == nil) != (callback == nil) { windowsVideoLayers?.requestRedraw() }
+        #endif
         withExtendedLifetime(old) {}
         old = nil
     }
@@ -798,7 +826,7 @@ public final class NativeSurface: @unchecked Sendable {
         waker?()
     }
 
-    internal func replaceFrame(_ newFrame: NativeSurfaceVideoFrame) {
+    internal func replaceFrame(_ newFrame: NativeSurfaceVideoFrame, wake: Bool = true) {
         var oldFrame: NativeSurfaceVideoFrame?
         let waker: (@Sendable () -> Void)?
         state.lock.lock()
@@ -806,7 +834,7 @@ public final class NativeSurface: @unchecked Sendable {
         state.current = newFrame
         state.generation &+= 1
         state.frameRevision = state.generation
-        waker = state.waker
+        waker = wake ? state.waker : nil
         state.lock.unlock()
         withExtendedLifetime(oldFrame) {}
         oldFrame = nil
@@ -817,7 +845,9 @@ public final class NativeSurface: @unchecked Sendable {
     public func report(_ timing: FrameTiming) {
         let obs: FrameObserver?
         state.lock.lock()
-        state.timing = timing
+        if state.timing.map({ $0.submittedAt <= timing.submittedAt }) ?? true {
+            state.timing = timing
+        }
         if timing.completedAt == nil {
             state.submitted &+= 1
         } else {

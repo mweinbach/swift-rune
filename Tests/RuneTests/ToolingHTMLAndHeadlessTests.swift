@@ -98,6 +98,32 @@ struct ToolingHTMLAndHeadlessTests {
         #expect(fileHTML.contains("Hello &amp; Welcome"))
     }
 
+    @Test("web/export: media queries and image sizes preserve fractional viewport thresholds")
+    func responsiveViewportPrecision() {
+        let cases: [(Float, String)] = [
+            (.leastNonzeroMagnitude, "0." + String(repeating: "0", count: 44) + "1"),
+            (350.125, "350.125"),
+            (Float(350.125).nextUp, "350.12503"),
+            (45_956.5625, "45956.563"),
+            (204_318.125, "204318.13"),
+            (.greatestFiniteMagnitude, "34028235" + String(repeating: "0", count: 31)),
+        ]
+        for (width, expected) in cases {
+            let image = ExportNode(path: "image", depth: 0, tag: "img", attrs: " srcset=\"photo 2x\"",
+                                   decls: [.init("display", "block")], width: width, text: false)
+            var base = image
+            base.decls = []
+            base.width = max(.leastNonzeroMagnitude, width / 2)
+            let page = HTMLPageExporter.page([(base.width, [base]), (width, [image])])
+            #expect(page.css.contains("@media (min-width:\(expected)px)"))
+            #expect(page.body.contains("sizes=\"(min-width:\(expected)px) 100vw,100vw\""))
+        }
+
+        let image = ExportNode(path: "image", depth: 0, tag: "img", attrs: " srcset=\"photo 2x\"",
+                               width: 1_234_567, text: false)
+        #expect(HTMLPageExporter.page([(1, [image])]).body.contains("sizes=\"123456700vw\""))
+    }
+
     @Test("web/export: inline spans, rich spans, and links export cleanly")
     func webExportTextRichAndLinks() throws {
         // 1. Inline spans inside rich keep a single <p> and no per-span <div/span> layout boxes
@@ -481,6 +507,9 @@ struct ToolingHTMLAndHeadlessTests {
 
         let badDecoded = SingleInstance.decodeHandoffMessage([0xFF, 0xFF, 0xFF, 0xFF])
         #expect(badDecoded == nil)
+        let oversized = "rune://" + String(repeating: "x", count: SingleInstance.maxMessageBytes)
+        #expect(SingleInstance.encodeHandoffMessage(arguments: [oversized]).isEmpty)
+        #expect(SingleInstance.decodeHandoffMessage(Array(encoded.dropLast())) == nil)
 
         #if os(macOS) || os(Linux)
         // Use a short directory under /tmp so the Unix domain socket path stays < 104 bytes on macOS

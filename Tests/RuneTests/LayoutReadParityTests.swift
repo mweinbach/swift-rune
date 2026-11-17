@@ -1429,7 +1429,11 @@ struct LayoutReadParityTests {
         rt.invalidate(at: 0.1)
         _ = rt.frame(at: 0.1)
 
+        #if DEBUG
         #expect(LayoutDiagnostics.hasWarned(matching: "collapsed-scroll"))
+        #else
+        #expect(!LayoutDiagnostics.hasWarned(matching: "collapsed-scroll"))
+        #endif
         let collapsed = findInfo(rt, key: "collapsed-scroll")
         #expect(collapsed != nil)
         #expect(abs((collapsed?.rect[3] ?? -1) - 0.0) < 0.5)

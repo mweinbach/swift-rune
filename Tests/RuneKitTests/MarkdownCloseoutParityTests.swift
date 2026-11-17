@@ -123,7 +123,7 @@ struct MarkdownCloseoutParityTests {
         #expect(cache.estimatedBytes > 0)
 
         // #10 & #13: growing stream drops earlier prefix entries cleanly & non-streaming growth uses incremental cut reuse
-        let sc = MarkdownDocCache(capacity: 32, budgetBytes: 2 << 20)
+        let sc = MarkdownDocCache(capacity: 32, budgetBytes: 2 << 20, frameGeneration: { 0 })
         _ = sc.streamCached("First paragraph.\n\n")
         _ = sc.streamCached("First paragraph.\n\nSecond paragraph.\n\n")
         let d3 = sc.streamCached("First paragraph.\n\nSecond paragraph.\n\nThird.")
@@ -136,7 +136,7 @@ struct MarkdownCloseoutParityTests {
         #expect(sc.currentEntryCount == 0 && sc.estimatedBytes == 0 && sc.fullParseCount == 0)
 
         // Budget eviction honors budgetBytes cap
-        let tight = MarkdownDocCache(capacity: 64, budgetBytes: 1024)
+        let tight = MarkdownDocCache(capacity: 64, budgetBytes: 1024, frameGeneration: { 0 })
         for i in 0..<20 {
             _ = tight.docCached(String(repeating: "Word \(i) ", count: 40))
         }
@@ -231,6 +231,226 @@ struct MarkdownCloseoutParityTests {
         #expect(links.count == 2)
         #expect(links.first(where: { $0.key == "https://alpha.example" })?.help == "Tooltip for https://alpha.example")
         #expect(links.first(where: { $0.key == "https://beta.example" })?.help == "Tooltip for https://beta.example")
+    }
+
+    @Test("Streaming appends reparse the last block and preserve source coordinates")
+    func streamedCacheMatchesFreshParse() {
+        let cache = MarkdownDocCache(budgetBytes: 4 << 20, frameGeneration: { 0 })
+        let complete = """
+        Intro with **bold
+        across lines** and `code`.
+
+        | File | Change |
+        |---|---|
+        | a.rs | **x** |
+
+        - [ ] an _item
+        - [x] more
+
+        ```swift
+        let café = 42
+        ```
+
+        > a quoted **edit**
+
+        last *words
+        """
+        var prefix = ""
+        for scalar in complete.unicodeScalars {
+            prefix.unicodeScalars.append(scalar)
+            let result = cache.streamCached(prefix)
+            let fresh = MarkdownTailStream.parseStreaming(prefix, autolink: true)
+            #expect(result == fresh, "Incremental and whole parses differ at \(prefix.debugDescription)")
+        }
+        #expect(cache.incrementalExtendCount > complete.utf8.count / 2)
+        let extended = complete + " with [a link"
+        let replaced = String(extended.dropLast(9)) + "changed **tail"
+        _ = cache.streamCached(extended)
+        let wholeBefore = cache.fullParseCount
+        let edited = cache.streamCached(replaced)
+        #expect(edited == MarkdownTailStream.parseStreaming(replaced, autolink: true))
+        #expect(cache.fullParseCount == wholeBefore + 1)
+
+        let ref = "# Title\n\n[ref]\n\n[ref]"
+        _ = cache.streamCached(ref)
+        let resolved = cache.streamCached(ref + ": https://example.com")
+        #expect(resolved == MarkdownParser.parseDocument(ref + ": https://example.com"))
+        #expect(cache.streamCached("**open") != cache.docCached("**open"))
+    }
+
+    @Test("Streaming markers carry the pinned Rust link destinations and line scope")
+    func streamingMarkerSnapshots() throws {
+        func firstInline(_ source: String) throws -> MarkdownInline {
+            let first = try #require(Markdown(source).streaming().blocks().first)
+            switch first {
+            case let .para(inl), let .heading(_, inl): return inl
+            default: throw CocoaError(.coderValueNotFound)
+            }
+        }
+        let open = try firstInline("see [ x")
+        #expect(open.text == "see  x")
+        #expect(open.links == [MarkdownLinkSpan(start: 4, end: 6, url: "")])
+        #expect(try firstInline("see [x").text == "see")
+        #expect(try firstInline("a `aa \u{2003}").text == "a " + MarkdownInline.openPad + "aa")
+        #expect(try firstInline("# a **b\n").text == "a **b")
+        let cut = try firstInline("a [label](foo \"Ti")
+        #expect(cut.links == [MarkdownLinkSpan(start: 2, end: 7, url: "foo")])
+    }
+
+    #if !os(WASI)
+    @MainActor
+    @Test("A new event thread starts with independent document caches and commit generations")
+    func eventThreadCacheOwnership() async {
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(8, 8)) { _, _ in el() }
+        _ = rt.frame(at: 0)
+        let current = MarkdownDocCache.shared
+        #expect(commitGeneration() > 0)
+        let (generation, other): (UInt64, MarkdownDocCache) = await withCheckedContinuation { continuation in
+            Thread.detachNewThread {
+                continuation.resume(returning: (commitGeneration(), MarkdownDocCache.shared))
+            }
+        }
+        #expect(generation == 0)
+        #expect(other !== current)
+    }
+    #endif
+
+    @Test("Long streams keep settled blocks and preserve retained snapshots")
+    func longStreamKeepsSnapshots() {
+        let cache = MarkdownDocCache(budgetBytes: 4 << 20, frameGeneration: { 0 })
+        let chunk = "Paragraph with **bold**, café and an [issue](https://example.com).\n\n"
+        let initial = String(repeating: chunk, count: 768)
+        let original = cache.streamCached(initial)
+        var source = initial
+        for _ in 0..<64 {
+            source += chunk
+            _ = cache.streamCached(source)
+        }
+        #expect(cache.fullParseCount == 1)
+        #expect(cache.incrementalExtendCount == 64)
+        #expect(cache.currentEntryCount == 1)
+        #expect(cache.streamCached(source) == MarkdownTailStream.parseStreaming(source, autolink: true))
+        #expect(original == MarkdownTailStream.parseStreaming(initial, autolink: true))
+    }
+
+    @MainActor
+    @Test("Live Markdown survives cache pressure across runtime commits")
+    func liveDocumentsAndStreamSnapshots() {
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(8, 8)) { _, _ in el() }
+        var time = 0.0
+        func commit() {
+            rt.invalidate()
+            time += 0.01
+            _ = rt.frame(at: time)
+        }
+        let cache = MarkdownDocCache(budgetBytes: 128)
+        commit()
+        let old = "# Intro\n\nold snapshot.\n"
+        _ = cache.streamCached(old)
+        let new = old + "\nNew **text"
+        _ = cache.streamCached(new)
+        #expect(cache.peek(old, streaming: true) != nil)
+        let documents = (0..<300).map { "Document \($0)" }
+        for text in documents { _ = cache.docCached(text) }
+        let parses = cache.fullParseCount
+        #expect(cache.currentEntryCount == documents.count + 2)
+        commit()
+        for text in documents { _ = cache.docCached(text) }
+        #expect(cache.fullParseCount == parses)
+        _ = cache.streamCached(new + " arrives")
+        #expect(cache.peek(new, streaming: true) == nil)
+        #expect(cache.peek(old, streaming: true) != nil)
+        commit()
+        _ = cache.docCached("Another document")
+        #expect(cache.peek(old, streaming: true) == nil)
+        #expect(cache.peek(documents[0]) != nil)
+    }
+
+    @MainActor
+    @Test("Rebuilding Markdown runs a custom highlighter once per fenced block")
+    func reusedCustomHighlighter() {
+        final class Calls: @unchecked Sendable { var count = 0 }
+        let calls = Calls()
+        let style = MarkdownStyle.neutral(dark: true)
+        let rt = Runtime(state: 0, viewport: Vec2(400, 400)) { _, _ in
+            Markdown("```py\nx = 1\n```\n\n```go\nvar y = 2\n```").highlight { _, _ in
+                calls.count += 1
+                return []
+            }.render(style)
+        }
+        for i in 0..<4 {
+            rt.invalidate()
+            _ = rt.frame(at: Double(i) / 60)
+        }
+        #expect(calls.count == 2)
+    }
+
+    @MainActor
+    @Test("Streaming Markdown drives runtime word reveal on new text")
+    func markdownRevealReachesRuntime() {
+        let style = MarkdownStyle.neutral(dark: true)
+        let initial: El<Int> = Markdown("First word").render(style)
+        #expect(initial.children.first?.textReveal == -1)
+        let stream: El<Int> = Markdown("First word").streaming().render(style)
+        #expect(stream.children.first?.textReveal == 0)
+        let rt = Runtime(state: "First word", viewport: Vec2(300, 80)) { source, _ in
+            Markdown(source).streaming().reveal(0.2).render(style)
+        }
+        _ = rt.frame(at: 0)
+        rt.update(at: 0.01) { source, _ in source += " appended" }
+        let first = rt.frame(at: 0.01)
+        #expect(rt.isAnimating)
+        let settled = rt.frame(at: 1)
+        func glyphAlpha(_ scene: RefScene) -> Float {
+            scene.primitives.filter { $0.kind == .glyph }.reduce(0) { $0 + $1.fill.w }
+        }
+        #expect(glyphAlpha(settled) > glyphAlpha(first))
+    }
+
+    @Test("Code block rows preserve multiline lexer ranges")
+    func multilineCodeRows() {
+        let kit = Kit.neutral(dark: true)
+        let color = Color(r: 0.4, g: 0.5, b: 0.7)
+        let highlighter = SyntaxHighlighter { _, code in
+            guard code == "x /*two\nlines*/ y" else { return [] }
+            return [SyntaxHighlight(range: 2..<15, paint: .color(color))]
+        }
+        let built: El<Int> = kit.codeBlock(code: "x /*two\r\nlines*/ y", showLineNumbers: false, highlighter: highlighter)
+        let rows = built.children[1].children
+        let colored = rows.map { row in row.children.last?.richSpans?.filter { $0.color == color }.map(\.text).joined() }
+        #expect(colored == ["/*two", "lines*/"])
+    }
+
+    @Test("Syntax decoration ranges use the enclosing code offset in bytes")
+    func syntaxRangeOffset() {
+        let theme = SyntaxTheme.neutral(dark: true).withWeight(.keyword, 640.75)
+        let color = Color(r: 0.1, g: 0.2, b: 0.3)
+        let spans = theme.spans([
+            SyntaxHighlight(range: 0..<3, paint: .kind(.keyword)),
+            SyntaxHighlight(range: 4..<6, paint: .color(color)),
+        ], offset: 7)
+        #expect(spans.map(\.byteRange) == [7..<10, 11..<13])
+        #expect(spans.map(\.weight) == [640, nil])
+        #expect(spans.map(\.color) == [theme.color(for: .keyword), color])
+    }
+
+    @Test("Markdown and syntax offsets distinguish canonically equivalent UTF-8")
+    func cachedUTF8Offsets() {
+        let cache = MarkdownDocCache(budgetBytes: 4096)
+        let precomposed = "é\n\n- [ ] Task"
+        let decomposed = "e\u{301}\n\n- [ ] Task"
+        let first = cache.docCached(precomposed)
+        let second = cache.docCached(decomposed)
+        #expect(second == MarkdownParser.parseDocument(decomposed))
+        #expect(first.tasks != second.tasks)
+
+        let custom = SyntaxHighlighter { _, text in
+            [SyntaxHighlight(range: 0..<text.utf8.count, paint: .kind(.string))]
+        }
+        #expect(custom.highlight(language: nil, code: "é").first?.range == 0..<2)
+        #expect(custom.highlight(language: nil, code: "e\u{301}").first?.range == 0..<3)
+        let scalar = SyntaxHighlighter { _, _ in [SyntaxHighlight(range: 0..<1, paint: .kind(.string))] }
+        #expect(scalar.highlight(language: nil, code: "e\u{301}").first?.range == 0..<1)
     }
 
     // MARK: - Comprehensive S2 Builder Parity (tests/markdown.rs #64, Markdown, MarkdownStyle, MarkdownHighlight, LinkIcons, SyntaxTheme, ImageZoom, Actions)

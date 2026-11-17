@@ -105,12 +105,103 @@ struct TreeAndSearchTests {
         #expect(FileTree.fileIcon(for: "main.go") == KitIcons.fileCode)
         #expect(FileTree.fileIcon(for: ".env") == KitIcons.fileText)
         #expect(FileTree.fileIcon(for: "logo.png") == KitIcons.fileImage)
+        #expect(FileTree.fileIcon(for: "source.KT") == KitIcons.file)
 
         let model = FileTree().build([("a", 1), ("a/b", 2)])
         #expect(model.count == 2)
         #expect(model.get("a")?.isDirectory == true)
         #expect(model.get("a")?.data == nil)
         #expect(model.get("a/b")?.isDirectory == false)
+    }
+
+    @Test("Tree lookup, filtering, and selection preserve the original UTF-8 ID")
+    func distinctUnicodeTreeIDs() {
+        let composed = "\u{e9}"
+        let decomposed = "e\u{301}"
+        let first = composed + "/child"
+        let second = decomposed + "/child"
+        func bytes(_ id: String) -> [UInt8] { Array(id.utf8) }
+
+        var model = TreeModel<Int>(multiSelect: true)
+        let firstRoot = model.insert(parent: nil, id: composed, data: 1)
+        #expect(firstRoot)
+        #expect(!model.contains(decomposed))
+        let missingParent = model.insert(parent: decomposed, id: second, data: 20)
+        #expect(!missingParent)
+        model.insert(parent: nil, id: decomposed, data: 2)
+        model.insert(parent: composed, id: first, data: 10)
+        model.insert(parent: decomposed, id: second, data: 20)
+        let duplicate = model.insert(parent: nil, id: composed, data: 3)
+        #expect(!duplicate)
+        model.update(second) { $0 += 1 }
+        #expect(model.get(first) == 10 && model.get(second) == 21)
+        #expect(model.parent(of: second).map(bytes) == bytes(decomposed))
+        #expect(model.children(of: composed).map(bytes) == [bytes(first)])
+        model.setExpanded(decomposed, true)
+        #expect(model.visibleRow(of: first) == nil)
+        #expect(model.visibleRow(of: second) == 2)
+        #expect(model.visibleID(at: 2).map(bytes) == bytes(second))
+        model.select(first)
+        model.setSelected(second, true)
+        #expect(model.selectedIDs.map(bytes) == [bytes(first), bytes(second)])
+        #expect(model.cursorID.map(bytes) == bytes(second))
+        model.filter { $0 == 10 }
+        #expect(model.visibleCount == 2 && model.visibleRow(of: first) == 1)
+        #expect(model.isMatch(first) && !model.isMatch(second))
+        #expect(model.visibleRow(of: second) == nil && model.cursorID == nil)
+        var tx = Tx()
+        #expect(model.reveal(second, tx: &tx))
+        #expect(model.row(at: 3)?.row.id.utf8.elementsEqual(second.utf8) == true)
+        #expect(!model.isSelected(first) && model.isSelected(second))
+        #expect(model.handleKey(KeyEvent(key: .enter), label: String.init, tx: &tx) == .open(second))
+        #expect(Set([TreeKey.open(first), .open(second)]).count == 2)
+        #expect(TreeRow(id: first, depth: 1) != TreeRow(id: second, depth: 1))
+    }
+
+    @Test("File trees preserve byte-distinct paths, duplicate precedence, and slash boundaries")
+    func distinctUnicodeFilePaths() {
+        let composed = "\u{e9}"
+        let decomposed = "e\u{301}"
+        let leadingMark = "\u{301}notes"
+        let paths = [(composed + "/a", 1), (decomposed + "/a", 2), (composed + "/a", 3),
+                     ("//marks//" + leadingMark + "/", 4), ("mixed/" + composed + "/b", 5),
+                     ("mixed/" + decomposed, 6)]
+        let builder = FileTree(compactFolders: false)
+        var model = builder.build(paths)
+        model.expandAll()
+        #expect(model.visibleCount == 10)
+        #expect(model.get(composed + "/a")?.data == 1)
+        #expect(model.get(decomposed + "/a")?.data == 2)
+        #expect(model.get("marks/" + leadingMark)?.name.utf8.elementsEqual(leadingMark.utf8) == true)
+        #expect(model.depth(of: "marks/" + leadingMark) == 1)
+        #expect(model.get("mixed/" + composed)?.isDirectory == true)
+        #expect(model.get("mixed/" + decomposed)?.data == 6)
+        #expect(FileNode<Int>(name: "x", path: composed, isDirectory: true)
+                    != FileNode<Int>(name: "x", path: decomposed, isDirectory: true))
+        let mixed = builder.buildTreeItems(paths).first { $0.id == "mixed" }
+        #expect(mixed?.children.map { Array($0.id.utf8) } ==
+                [Array(("mixed/" + composed).utf8), Array(("mixed/" + decomposed).utf8)])
+        let compacted = FileTree().build([(composed + "/dir/a", 1), (decomposed + "/dir/b", 2)])
+        #expect(compacted.visibleCount == 2)
+        #expect(compacted.children(of: composed + "/dir").map { Array($0.utf8) } == [Array((composed + "/dir/a").utf8)])
+        #expect(compacted.children(of: decomposed + "/dir").map { Array($0.utf8) } == [Array((decomposed + "/dir/b").utf8)])
+    }
+
+    @Test("Legacy string tree expansion and selection use the spelling the caller supplied")
+    func legacyTreeProjectsStoredUnicodeIDs() {
+        let composed = "\u{e9}"
+        let decomposed = "e\u{301}"
+        let view: El<Int> = Kit.neutral(dark: true).fileTree(
+            key: "files", paths: [composed + "/a", decomposed + "/b"],
+            expanded: [composed], selected: decomposed, onToggle: { _, _ in }, onSelect: { _, _ in }
+        )
+        func row(_ id: String) -> El<Int>? {
+            view.children.first { $0.keyId?.utf8.elementsEqual(("files-" + id).utf8) == true }
+        }
+        #expect(view.children.count == 3)
+        #expect(row(composed)?.a11yExpanded == true && row(composed)?.itemSelected == false)
+        #expect(row(decomposed)?.a11yExpanded == false && row(decomposed)?.itemSelected == true)
+        #expect(row(composed + "/a") != nil && row(decomposed + "/b") == nil)
     }
 
     // MARK: - Tree integration tests (crates/rune-kit/tests/tree.rs)
@@ -316,6 +407,8 @@ struct TreeAndSearchTests {
         press(rt, .end)
         press(rt, .enter)
         #expect(rt.state.opened == ["README.md"])
+        _ = rt.keyDown(KeyEvent(key: .enter), isRepeat: true, at: 0.1)
+        #expect(rt.state.opened == ["README.md"])
         press(rt, .home)
         press(rt, .enter)
         #expect(rt.state.files.isExpanded("assets"))
@@ -331,6 +424,47 @@ struct TreeAndSearchTests {
         #expect(rt.state.files.cursorID == "README.md")
         press(rt, .text("c"))
         #expect(rt.state.files.cursorID == "README.md")
+        _ = rt.keyDown(KeyEvent(key: .text("c")), at: 2)
+        #expect(rt.state.files.cursorID == "Cargo.toml")
+    }
+
+    @Test("Tree pages use its nested viewport and equal-count reorders update virtual keys")
+    func nestedViewportAndReorderedRows() {
+        struct State {
+            var files = TreeModel<Int>(key: "files")
+            var treeHeight: Float = 96
+        }
+        var state = State()
+        for i in 0..<200 { state.files.insert(parent: nil, id: String(i), data: i) }
+        let kit = Kit.neutral(dark: true)
+        var active: String?
+        let rt = Runtime(state: state, viewport: Vec2(320, 600), systemDark: true) { state, cx in
+            let tree = Tree(\State.files, label: { String($0) }).build(state, cx: cx, kit: kit)
+            active = tree.a11yActiveDescendant
+            return col().size(320, 600).child(tree.h(state.treeHeight))
+        }
+        rt.frame(at: 0)
+        #expect(rt.state.files.viewport == 96)
+        _ = rt.keyDown(KeyEvent(key: .tab), at: 0)
+        _ = rt.keyDown(KeyEvent(key: .home), at: 0)
+        _ = rt.keyDown(KeyEvent(key: .pageDown), at: 0)
+        rt.frame(at: 0)
+        #expect(active == "3")
+        rt.update { state, _ in state.treeHeight = 168 }
+        rt.frame(at: 0)
+        #expect(rt.state.files.viewport == 168)
+        _ = rt.keyDown(KeyEvent(key: .pageDown), at: 0)
+        rt.frame(at: 0)
+        #expect(active == "9")
+
+        rt.update { state, _ in state.files.sortBy(>) }
+        _ = rt.keyDown(KeyEvent(key: .home), at: 0)
+        for i in 1...40 { rt.frame(at: Double(i) / 60) }
+        #expect(active == "199")
+        let row = rt.element(byKey: "199")
+        #expect(row?.itemSelected == true)
+        #expect(row?.visible[3] == 24)
+        #expect(row?.visible[1] == 0)
     }
 
     @Test("Rows carry level, expanded state, and selection")
@@ -401,6 +535,14 @@ struct TreeAndSearchTests {
 
         press(rt, .command("a"), mods: primary)
         #expect(rt.state.files.selectedIDs.count == rt.state.files.visibleCount)
+        press(rt, .home)
+        press(rt, .command("a"), mods: Mods(alt: true))
+        #expect(rt.state.files.selectedIDs == ["assets"])
+        press(rt, .command("a"))
+        #expect(rt.state.files.selectedIDs.count == rt.state.files.visibleCount)
+        press(rt, .home)
+        press(rt, .text("a"), mods: primary)
+        #expect(rt.state.files.selectedIDs.count == rt.state.files.visibleCount)
     }
 
     @Test("50,000 rows build only visible window")
@@ -470,7 +612,7 @@ struct TreeAndSearchTests {
     @Test("TreeRowItem renders highlight, changes, badge, dot, and chevronOnlyFolders")
     func treeRowItemBuilders() {
         let kit = Kit.neutral(dark: true)
-        let style = TreeStyle.fromKit(kit).chevronOnlyFolders(true)
+        let style = TreeStyle.fromKit(kit).chevronOnlyFolders(true).guidesOnHover(0.5).fadeLongLabels(24)
         let node = FileNode(name: "README.md", path: "README.md", isDirectory: false, data: (3, 1))
         let row = TreeRow(id: "README.md", depth: 1, expanded: nil, selected: true, cursor: true, matched: true, multi: true)
 
@@ -484,6 +626,24 @@ struct TreeAndSearchTests {
             .trailing(text("extra"))
             .build(kit: kit, row: row, style: style)
             .key("row")
+
+        let guide = itemEl.children.first { $0.keyId == "guide0" }
+        #expect(guide?.isA11yHidden == true)
+        #expect(guide?.groupOpacity?.rest == 0)
+        #expect(guide?.groupOpacity?.hovered == 0.5)
+        let label = itemEl.children.first { $0.keyId == "label" }
+        #expect(label?.truncateFadeEm == 24 / style.labelFont.size)
+        #expect(label?.isHelpWhenTruncated == true)
+        #expect(label?.richSpans?.first?.pad == 1)
+        let counts = itemEl.children.first { $0.keyId == "changes" }
+        #expect(counts?.children.first?.textStyle.features == "'tnum' 1")
+
+        let folder = TreeRowItem<Int>("İstanbul").highlight("istanbul")
+            .build(kit: kit, row: row.expanded(false), style: style)
+        let glyph = folder.children.first { $0.keyId == "chevron" }?.children.first
+        #expect(glyph?.iconRotation == -Float.pi * 0.5)
+        #expect(glyph?.mirrorInRtl == true)
+        #expect(folder.children.first { $0.keyId == "label" }?.richSpans == nil)
 
         let rt = Runtime(state: 0, viewport: Vec2(320, 60), systemDark: true) { _, _ in
             itemEl
@@ -526,5 +686,115 @@ struct TreeAndSearchTests {
         let outcome = m.handleKey(KeyEvent(key: .pageDown), label: { $0.name }, tx: &tx)
         #expect(outcome == .handled)
         #expect(m.cursorID == m.visibleID(at: 0))
+    }
+
+    @Test("Byte-distinct file IDs retain their rows, callbacks and accessibility targets through a reorder and reveal")
+    func byteDistinctTreeRows() throws {
+        let composed = "src/\u{e9}.rs"
+        let decomposed = "src/e\u{301}.rs"
+        let literal = "src/~utf8~c3a92e7273"
+        func bytes(_ value: String?) -> [UInt8]? { value.map { Array($0.utf8) } }
+        struct State {
+            var files = TreeModel<Int>(key: "files")
+            var picks: [String] = []
+        }
+        var state = State()
+        let addedFirst = state.files.insert(parent: nil, id: composed, data: 0)
+        let addedSecond = state.files.insert(parent: nil, id: decomposed, data: 201)
+        let addedLiteral = state.files.insert(parent: nil, id: literal, data: 202)
+        #expect(addedFirst && addedSecond && addedLiteral)
+        for i in 1...200 { state.files.insert(parent: nil, id: "row-\(i)", data: i) }
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime(state: state, viewport: Vec2(320, 96)) { state, cx in
+            Tree(\State.files, label: { "File \($0)" })
+                .onSelect { state, id, _ in state.picks.append(id) }
+                .build(state, cx: cx, kit: kit)
+                .size(320, 96)
+        }
+        rt.frame(at: 0)
+        let first = try #require(rt.element(byKey: composed))
+        let second = try #require(rt.element(byKey: decomposed))
+        #expect(bytes(first.key) == bytes(composed))
+        #expect(bytes(second.key) == bytes(decomposed))
+        #expect(first.label == "File 0")
+        #expect(second.label == "File 201")
+        #expect(rt.element(byKey: literal)?.label == "File 202")
+        #expect(first.rect == [0, 0, 320, 24])
+        #expect(second.rect == [0, 24, 320, 24])
+
+        #expect(rt.accessibilityAction("files", .focus, at: 0.01))
+        #expect(rt.keyDown(KeyEvent(key: .home), at: 0.02))
+        #expect(rt.keyDown(KeyEvent(key: .arrowDown), at: 0.03))
+        rt.frame(at: 0.04)
+        #expect(rt.state.picks.map { Array($0.utf8) } == [Array(composed.utf8), Array(decomposed.utf8)])
+        #expect(rt.element(byKey: composed)?.itemSelected == false)
+        #expect(rt.element(byKey: decomposed)?.itemSelected == true)
+        let active = rt.accessibilitySnapshot().activeDescendant
+        #expect(bytes(active) == bytes(decomposed))
+
+        #expect(rt.accessibilityAction(composed, .press, at: 0.1))
+        rt.frame(at: 0.11)
+        #expect(bytes(rt.state.files.cursorID) == bytes(composed))
+        #expect(rt.accessibilityAction(decomposed, .press, at: 0.12))
+        rt.frame(at: 0.13)
+        #expect(bytes(rt.state.files.cursorID) == bytes(decomposed))
+        #expect(rt.accessibilityAction(literal, .press, at: 0.131))
+        rt.frame(at: 0.132)
+        #expect(bytes(rt.state.files.cursorID) == bytes(literal))
+        let point = Vec2(first.rect[0] + 70, first.rect[1] + 12)
+        rt.pointerDown(at: point, at: 0.14)
+        rt.pointerUp(at: point, at: 0.15)
+        rt.frame(at: 0.16)
+        #expect(bytes(rt.state.files.cursorID) == bytes(composed))
+
+        rt.update(at: 0.2) { state, _ in state.files.sortBy(<) }
+        rt.frame(at: 0.21)
+        #expect(rt.element(byKey: decomposed)?.exiting != false)
+        rt.update(at: 0.3) { state, tx in
+            let found = state.files.reveal(decomposed, tx: &tx)
+            #expect(found)
+        }
+        for i in 1...60 { rt.frame(at: 0.3 + Double(i) / 60) }
+        let revealed = try #require(rt.element(byKey: decomposed))
+        #expect(bytes(revealed.key) == bytes(decomposed))
+        #expect(revealed.visible == [0, 72, 320, 24])
+        #expect(revealed.itemSelected)
+        #expect(rt.element(byKey: composed) == nil)
+    }
+
+    @Test("Sibling trees with different UTF-8 scope names reveal their own rows")
+    func byteDistinctTreeScopes() throws {
+        let left = "files-\u{e9}"
+        let right = "files-e\u{301}"
+        func model(_ key: String) -> TreeModel<Int> {
+            var model = TreeModel<Int>(key: key)
+            for i in 0..<200 { model.insert(parent: nil, id: "row-\(i)", data: i) }
+            return model
+        }
+        struct State {
+            var left: TreeModel<Int>
+            var right: TreeModel<Int>
+        }
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime(state: State(left: model(left), right: model(right)), viewport: Vec2(320, 96)) { state, cx in
+            row()
+                .child(Tree(\State.left, label: String.init).build(state, cx: cx, kit: kit).size(160, 96))
+                .child(Tree(\State.right, label: String.init).build(state, cx: cx, kit: kit).size(160, 96))
+                .size(320, 96)
+        }
+        rt.frame(at: 0)
+        let leftRoot = try #require(rt.element(byKey: left))
+        let rightRoot = try #require(rt.element(byKey: right))
+        #expect(leftRoot.path != rightRoot.path)
+        #expect(leftRoot.rect[0] == 0 && rightRoot.rect[0] == 160)
+        rt.update(at: 0.1) { state, tx in
+            let found = state.right.reveal("row-199", tx: &tx)
+            #expect(found)
+        }
+        for i in 1...60 { rt.frame(at: 0.1 + Double(i) / 60) }
+        let rows = rt.elements().filter { $0.visible[3] > 0 && !$0.exiting }
+        #expect(rows.contains { $0.key == "row-0" && $0.rect[0] == 0 })
+        #expect(rows.contains { $0.key == "row-199" && $0.rect[0] == 160 && $0.itemSelected })
+        #expect(!rows.contains { $0.key == "row-199" && $0.rect[0] == 0 })
     }
 }

@@ -7,7 +7,7 @@ struct ExtendedDiagramsTests {
     private let light = MermaidTheme.neutral(dark: false)
     private let dark = MermaidTheme.neutral(dark: true)
 
-    @Test("supportedMermaid and mayDrawMermaid recognize all 17 diagram families")
+    @Test("mayDrawMermaid recognizes diagram headers and supportedMermaid requires a parsed diagram")
     func supportedAndMayDrawAllFamilies() {
         let headers = [
             "flowchart TD",
@@ -34,9 +34,10 @@ struct ExtendedDiagramsTests {
             "C4Deployment",
         ]
         for h in headers {
-            #expect(supportedMermaid(h), "Expected supportedMermaid(\(h)) == true")
             #expect(mayDrawMermaid(h), "Expected mayDrawMermaid(\(h)) == true")
         }
+        #expect(!supportedMermaid("gantt"))
+        #expect(supportedMermaid("graph TD\nA-->B"))
         #expect(mayDrawMermaid("%% comment\n"))
         #expect(!supportedMermaid("kanban\n  todo"))
         #expect(!mayDrawMermaid("kanban\n  todo"))

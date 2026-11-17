@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune browser frame and WASI clocks</title>
+<canvas></canvas>
+<pre id="result">Running…</pre>
+<script type="module">
+import { mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+import { withRunePageClock } from '../../Sources/Rune/Resources/Web/rune-page-clock.mjs';
+
+const result = document.querySelector('#result');
+const canvas = document.querySelector('canvas');
+const memory = new WebAssembly.Memory({ initial: 1 });
+const descriptor = Object.getOwnPropertyDescriptor(window, 'performance');
+const raf = window.requestAnimationFrame;
+const cancel = window.cancelAnimationFrame;
+let nextFrame, browser;
+const seen = { frame: [], input: [] };
+function equal(actual, expected) {
+    if (actual !== expected) throw Error(`Expected ${expected}, got ${actual}`);
+}
+function clockAt(time) {
+    Object.defineProperty(window, 'performance', { value: { now: () => time }, configurable: true });
+}
+
+try {
+    window.requestAnimationFrame = callback => { nextFrame = callback; return 1; };
+    window.cancelAnimationFrame = () => { nextFrame = null; };
+    clockAt(3500);
+    browser = mountRuneBrowser(canvas, { exports: {
+        memory, __main_void: () => 0, rune_web_enable() {}, rune_web_buffer: () => 0, rune_web_field: () => 0,
+        rune_web_frame(time) { seen.frame.push(time); return 0; },
+        rune_web_event(length, time) { seen.input.push(time); return 1; }
+    } });
+    const host = withRunePageClock({ clock_time_get: () => 76 }, () => memory);
+    const address = 128;
+    function wasiNow() {
+        equal(host.clock_time_get(1, 1n, address), 0);
+        return new DataView(memory.buffer).getBigUint64(address, true);
+    }
+    equal(wasiNow(), 3500000000n);
+    for (const [source, seconds] of [[2000, 0], [2016, 0.016], [2016, 0.016],
+        [NaN, 0.016], [Infinity, 0.016], [3016, 1.016]]) {
+        clockAt(source);
+        nextFrame();
+        canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'k' }));
+        equal(seen.frame.at(-1), seconds);
+        equal(seen.input.at(-1), seconds);
+        equal(wasiNow(), BigInt(Math.round((3500 + seconds * 1000) * 1e6)));
+    }
+    Object.defineProperty(window, 'performance', { value: undefined, configurable: true });
+    equal(wasiNow(), 4516000000n);
+    clockAt(4);
+    equal(wasiNow(), 4516000000n);
+    clockAt(5);
+    equal(wasiNow(), 4517000000n);
+    equal(host.clock_time_get(0, 1n, address), 76);
+    equal(host.clock_time_get(1, 1n, 65532), 21);
+    clockAt(2 ** 64);
+    equal(wasiNow(), 0xffffffffffffffffn);
+    result.textContent = 'PASS';
+} catch (error) {
+    result.textContent = 'FAIL ' + error.message;
+    throw error;
+} finally {
+    browser?.dispose();
+    window.requestAnimationFrame = raf;
+    window.cancelAnimationFrame = cancel;
+    if (descriptor) Object.defineProperty(window, 'performance', descriptor);
+    else delete window.performance;
+}
+</script>

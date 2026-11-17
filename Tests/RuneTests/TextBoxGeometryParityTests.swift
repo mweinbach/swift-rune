@@ -1,6 +1,9 @@
 import Foundation
 import Testing
 @testable import Rune
+#if canImport(CoreGraphics) && canImport(CoreText)
+import CoreText
+#endif
 
 /// Text box geometry: 64th-of-a-pixel widths (#934), fit slack (#948), the exact resting origin
 /// (#935) and text under an offset / underline edges (#963).
@@ -264,6 +267,32 @@ struct TextBoxGeometryParityTests {
     }
 
     #if canImport(CoreGraphics) && canImport(CoreText)
+    @Test("hinted Latin and small CJK share a phase-zero mask and move its bearing at half a pixel")
+    func wholePenMasksAndBearings() throws {
+        let latin = CTFontCreateWithName("HelveticaNeue" as CFString, 13, nil)
+        let cjk = CTFontCreateForString(latin, "水" as CFString, CFRange(location: 0, length: 1))
+        func entries(_ font: CTFont, character: UniChar, mode: FontSmoothing) throws -> [GlyphAtlas.Entry] {
+            var ch = character
+            var glyph = CGGlyph()
+            try #require(CTFontGetGlyphsForCharacters(font, &ch, &glyph, 1))
+            let atlas = GlyphAtlas(width: 128, height: 128)
+            return try [UInt8(0), 15, 30, 45].map { phase in
+                try #require(atlas.rasterizeGlyph(font: font, glyph: glyph, fontSizePx: Float(CTFontGetSize(font)),
+                                                   phaseX: phase, smoothing: mode))
+            }
+        }
+        for set in [try entries(latin, character: 0x48, mode: .hinted),
+                    try entries(cjk, character: 0x6c34, mode: .windfoilChromium)] {
+            #expect(set.allSatisfy { $0.pixelOrigin == set[0].pixelOrigin && $0.page == set[0].page })
+            #expect(set.map(\.bearingPx.x) == [0, 0, 1, 1].map { set[0].bearingPx.x + $0 })
+        }
+        for set in [try entries(latin, character: 0x48, mode: .hintedGpu),
+                    try entries(cjk, character: 0x6c34, mode: .hintedGpu),
+                    try entries(CTFontCreateCopyWithAttributes(cjk, 25, nil, nil), character: 0x6c34, mode: .windfoilChromium)] {
+            #expect(Set(set.map(\.pixelOrigin)).count == 4)
+        }
+    }
+
     @Test("CoreGraphics pens quantize by size before a glide moves them")
     func glyphPlacementUsesNativePhases() {
         let edge = TextBoxGeometry.glyphPen(at: 8.49, ppem: 26, glide: 0, smoothing: .on)
@@ -285,6 +314,8 @@ struct TextBoxGeometryParityTests {
         #expect(TextBoxGeometry.quarterPen(3.3125) == (3.0, 1))
         #expect(TextBoxGeometry.quarterPen(3.125) == (3.0, 1))
         #expect(TextBoxGeometry.quarterPen(-0.3) == (-1.0, 3))
+        #expect(TextBoxGeometry.quarterPen(-0.125) == (0, 0))
+        #expect(TextBoxGeometry.quarterPen(329.37353515625) == (329, 2))
     }
 
     /// A text laid out from a fractional exact place: every glyph quad starts on a whole device

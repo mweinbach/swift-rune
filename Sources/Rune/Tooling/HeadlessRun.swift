@@ -178,7 +178,11 @@ public enum HeadlessScriptEvent: Sendable, Equatable {
     case popupMenu(String?)
     case fileDialog(String?)
     case paste(String)
+    case scroll(dx: Float, dy: Float)
     case wheel(dx: Float, dy: Float, mods: Mods = .none)
+    case magnify(MagnifyEvent)
+    case rotate(RotateEvent)
+    case smartMagnify
     case fling(vx: Float, vy: Float)
     case resize(Vec2)
     case focus(Bool)

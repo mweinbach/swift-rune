@@ -16,6 +16,9 @@ public enum MaterialMode: String, Sendable, Equatable, Codable {
     case unsynced
     case fallback
 
+    /// The application runner reads its launch configuration once.
+    static let launchMode = fromEnv()
+
     /// Parses `RUNE_SYSTEM_MATERIAL` (`auto` | `native` | `legacy` | `unsynced` | `fallback` | `off`).
     public static func fromEnv(_ env: [String: String] = ProcessInfo.processInfo.environment) -> MaterialMode {
         guard let raw = env["RUNE_SYSTEM_MATERIAL"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
@@ -157,18 +160,26 @@ public enum MaterialMath {
         liveResize: Bool = false,
         previousIds: [UInt64] = []
     ) -> MaterialAssignment {
+        assignSlots(draws, mode: mode, liveResize: liveResize, owners: previousIds.map(Optional.some), materials: [])
+    }
+
+    fileprivate static func assignSlots(
+        _ draws: [MaterialDraw], mode: MaterialMode, liveResize: Bool,
+        owners: [UInt64?], materials: [SystemMaterial?]
+    ) -> MaterialAssignment {
+        let hasActive = owners.contains { $0 != nil }
         guard !draws.isEmpty else {
             return MaterialAssignment(
                 nativeSlots: [],
                 fallbackDraws: [],
-                presentFlag: previousIds.isEmpty ? .skipped : .immediate
+                presentFlag: hasActive ? .immediate : .skipped
             )
         }
         if mode == .fallback {
             return MaterialAssignment(
                 nativeSlots: [],
                 fallbackDraws: draws,
-                presentFlag: previousIds.isEmpty ? .skipped : .immediate
+                presentFlag: hasActive ? .immediate : .skipped
             )
         }
 
@@ -177,14 +188,11 @@ public enum MaterialMath {
         var usedSlots = Set<Int>()
         var remaining: [MaterialDraw] = []
 
-        for draw in draws {
-            guard draw.rect.width > 0.5 && draw.rect.height > 0.5 && draw.opacity > 0.001 else {
-                continue
-            }
-            if let prevSlot = previousIds.firstIndex(of: draw.id),
-               prevSlot < MAX_NATIVE_MATERIALS,
-               !usedSlots.contains(prevSlot)
-            {
+        let visible = draws.filter { $0.rect.width > 0 && $0.rect.height > 0 && $0.opacity > 0.001 }
+        for draw in visible.prefix(MAX_NATIVE_MATERIALS) {
+            if let prevSlot = owners.indices.prefix(MAX_NATIVE_MATERIALS).first(where: { i in
+                owners[i] == draw.id && (materials.isEmpty || materials[i] == draw.material) && !usedSlots.contains(i)
+            }) {
                 usedSlots.insert(prevSlot)
                 let r = clampRadius(draw.radius, width: Float(draw.rect.width), height: Float(draw.rect.height))
                 chosen.append(.init(slotIndex: prevSlot, draw: draw, clampedRadius: r))
@@ -193,19 +201,20 @@ public enum MaterialMath {
             }
         }
 
-        var fallback: [MaterialDraw] = []
+        let fallback = Array(visible.dropFirst(MAX_NATIVE_MATERIALS))
         for draw in remaining {
-            if let freeSlot = (0..<MAX_NATIVE_MATERIALS).first(where: { !usedSlots.contains($0) }) {
+            let available = (0..<MAX_NATIVE_MATERIALS).filter { !usedSlots.contains($0) }
+            if let freeSlot = available.first(where: { !materials.isEmpty && materials[$0] == draw.material })
+                ?? available.first(where: { !materials.isEmpty && materials[$0] == nil })
+                ?? available.first {
                 usedSlots.insert(freeSlot)
                 let r = clampRadius(draw.radius, width: Float(draw.rect.width), height: Float(draw.rect.height))
                 chosen.append(.init(slotIndex: freeSlot, draw: draw, clampedRadius: r))
-            } else {
-                fallback.append(draw)
             }
         }
 
         chosen.sort { $0.slotIndex < $1.slotIndex }
-        let flag: PresentFlag = chosen.isEmpty && previousIds.isEmpty
+        let flag: PresentFlag = chosen.isEmpty && !hasActive
             ? .skipped
             : (liveResize ? .synchronized : .immediate)
         return MaterialAssignment(nativeSlots: chosen, fallbackDraws: fallback, presentFlag: flag)
@@ -217,8 +226,8 @@ import AppKit
 @preconcurrency import ObjectiveC
 import QuartzCore
 
-/// Watches `NSWindow.didEndLiveResizeNotification` and `NSWindow.didMoveNotification` to drive
-/// `CAMetalLayer.presentsWithTransaction` via `PresentSyncFlag` (`system_material/macos.rs`).
+/// Ends live-resize presentation on AppKit's notification. Frame motion is held
+/// until its last step has drawn, including steps that move the window's origin.
 @MainActor
 public final class MaterialPresentWatcher {
     public var flag: PresentSyncFlag
@@ -257,16 +266,7 @@ public final class MaterialPresentWatcher {
                 _ = self?.setLive(false)
             }
         }
-        let moved = center.addObserver(
-            forName: NSWindow.didMoveNotification,
-            object: window,
-            queue: nil
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                _ = self?.setMoving(false)
-            }
-        }
-        tokens = [liveEnd, moved]
+        tokens = [liveEnd]
     }
 
     public func detach() {
@@ -305,24 +305,26 @@ public final class MaterialPresentWatcher {
     }
 }
 
+@MainActor
+private final class RuneMetalContentView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit === self ? nil : hit
+    }
+}
+
 /// Flipped, hit-test-transparent `NSView` container hosting native `NSVisualEffectView` / `NSGlassEffectView` slots
 /// behind the transparent Metal surface (`system_material/macos.rs`).
 @MainActor
 public final class RuneMaterialHost: NSView {
-    private enum SlotKind {
-        case glass
-        case visualEffect
-    }
-
     private struct SlotEntry {
-        var kind: SlotKind
-        var view: NSView
+        let material: SystemMaterial
+        let view: NSView
+        var draw: MaterialDraw?
     }
 
     private var slots: [SlotEntry?] = Array(repeating: nil, count: MAX_NATIVE_MATERIALS)
-    private var spareGlass: [NSView] = []
-    private var spareVisual: [NSView] = []
-    private var currentIds: [UInt64] = []
+    private var spares: [SystemMaterial: NSView] = [:]
     private var isLiveResizing: Bool = false
     private weak var observedWindow: NSWindow?
     private weak var attachedMetalLayer: CAMetalLayer?
@@ -349,6 +351,50 @@ public final class RuneMaterialHost: NSView {
         NotificationCenter.default.removeObserver(self)
     }
 
+    /// Transparent windows stack native backdrops and the Metal view as siblings.
+    /// A subview of a Metal-backed content view would composite above its drawable.
+    internal static func install(_ metalView: NSView, in window: NSWindow) {
+        guard !window.isOpaque else {
+            window.contentView = metalView
+            return
+        }
+        let content = RuneMetalContentView(frame: metalView.frame)
+        content.wantsLayer = true
+        window.contentView = content
+        metalView.frame = content.bounds
+        metalView.autoresizingMask = [.width, .height]
+        content.addSubview(metalView)
+    }
+
+    /// Keep AppKit geometry and Metal pixels in the same transaction while a
+    /// window spring or a live resize changes its frame, even on opaque windows.
+    internal static func syncWindowFrame(moving: Bool, live: Bool, host: RuneMaterialHost?, layer: CAMetalLayer) {
+        let unsynced = MaterialMode.launchMode == .unsynced
+        _ = host?.syncWatcher.setMoving(moving, unsynced: unsynced)
+        let synced = !unsynced && (moving || live || host?.syncWatcher.flag.isSynced == true)
+        if layer.presentsWithTransaction != synced { layer.presentsWithTransaction = synced }
+    }
+
+    /// AppKit geometry and the corresponding Metal drawable become visible in one transaction.
+    internal static func present<T>(
+        host: inout RuneMaterialHost?, draws: [MaterialDraw], in view: NSView,
+        layer: CAMetalLayer, scale: CGFloat, mode: MaterialMode, _ draw: (Bool) -> T
+    ) -> T {
+        if host == nil && draws.isEmpty { return draw(layer.presentsWithTransaction && mode != .unsynced) }
+        let native = view.window?.isOpaque == false && mode != .fallback
+        if host == nil && native && !draws.isEmpty { host = RuneMaterialHost(frame: view.bounds) }
+        guard let host else { return draw(layer.presentsWithTransaction && mode != .unsynced) }
+        if mode == .unsynced {
+            host.update(draws: draws, in: view, layer: layer, scale: scale, mode: mode)
+            return draw(false)
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        host.update(draws: draws, in: view, layer: layer, scale: scale, mode: mode)
+        return draw(layer.presentsWithTransaction)
+    }
+
     internal func update(draws: [MaterialDraw], in view: NSView, layer: CAMetalLayer, scale: CGFloat, mode: MaterialMode) {
         guard let window = view.window else { return }
         setLiveResizing(view.inLiveResize, mode: mode)
@@ -366,7 +412,7 @@ public final class RuneMaterialHost: NSView {
             removeFromSuperview()
             frame = contentView.bounds
             autoresizingMask = [.width, .height]
-            contentView.addSubview(self, positioned: .below, relativeTo: metalView)
+            contentView.addSubview(self, positioned: .below, relativeTo: metalView.superview === contentView ? metalView : nil)
         }
         attachedMetalLayer = metalLayer
         metalLayer?.zPosition = 1.0
@@ -401,12 +447,16 @@ public final class RuneMaterialHost: NSView {
         scale: CGFloat = 1.0,
         mode: MaterialMode = MaterialMode.fromEnv()
     ) -> MaterialAssignment {
-        let pointDraws = draws.map { $0.points(scale: Float(scale)) }
+        let pointDraws = draws.map {
+            var draw = $0.points(scale: Float(scale))
+            if draw.material == .glass && (mode == .legacy || !Self.hasGlassClass) { draw.material = .popover }
+            return draw
+        }
         let assignment = MaterialMath.assignSlots(
             pointDraws,
             mode: mode,
             liveResize: isLiveResizing,
-            previousIds: currentIds
+            owners: slots.map { $0?.draw?.id }, materials: slots.map { $0?.material }
         )
         let unsynced = (mode == .unsynced)
         _ = syncWatcher.setMaterials(!assignment.nativeSlots.isEmpty, unsynced: unsynced)
@@ -420,130 +470,74 @@ public final class RuneMaterialHost: NSView {
         defer { CATransaction.commit() }
         attachedMetalLayer?.zPosition = 1.0
 
-        var activeSlotSet = Set<Int>()
-        var nextIds = [UInt64](repeating: 0, count: MAX_NATIVE_MATERIALS)
-
+        var active = Set<Int>()
         for binding in assignment.nativeSlots {
             let idx = binding.slotIndex
-            guard idx >= 0 && idx < MAX_NATIVE_MATERIALS else { continue }
-            activeSlotSet.insert(idx)
-            nextIds[idx] = binding.draw.id
-
-            let desiredKind: SlotKind = (binding.draw.material == .glass && mode != .legacy && Self.hasGlassClass)
-                ? .glass
-                : .visualEffect
-            let view = ensureSlot(at: idx, kind: desiredKind)
-            view.isHidden = false
-            view.frame = NSRect(
-                x: CGFloat(binding.draw.rect.x),
-                y: CGFloat(binding.draw.rect.y),
-                width: CGFloat(binding.draw.rect.width),
-                height: CGFloat(binding.draw.rect.height)
-            )
-            view.alphaValue = CGFloat(min(max(binding.draw.opacity, 0.0), 1.0))
-
-            if desiredKind == .glass {
-                Self.setGlassCornerRadius(view, radius: CGFloat(binding.clampedRadius))
-                if let layer = view.layer {
-                    layer.cornerCurve = .continuous
-                }
-            } else if let vev = view as? NSVisualEffectView {
-                vev.material = Self.nsMaterial(for: binding.draw.material)
-                vev.blendingMode = binding.draw.blending == .withinWindow ? .withinWindow : .behindWindow
-                vev.state = .active
-                if let layer = vev.layer {
-                    layer.cornerRadius = CGFloat(binding.clampedRadius)
-                    layer.cornerCurve = binding.draw.continuous ? .continuous : .circular
-                    layer.masksToBounds = binding.clampedRadius > 0
-                }
+            let draw = binding.draw
+            active.insert(idx)
+            if let old = slots[idx], old.material != draw.material {
+                old.view.alphaValue = 0
+                keepSpare(old.view, material: old.material)
+                slots[idx] = nil
             }
-            view.layoutSubtreeIfNeeded()
-            view.displayIfNeeded()
+            if slots[idx] == nil {
+                let view = spares.removeValue(forKey: draw.material) ?? makeView(material: draw.material)
+                if view.superview !== self { addSubview(view) }
+                slots[idx] = SlotEntry(material: draw.material, view: view, draw: nil)
+            }
+            guard var slot = slots[idx] else { continue }
+            let view = slot.view
+            if slot.draw?.opacity != draw.opacity { view.alphaValue = CGFloat(draw.opacity.clamped(to: 0...1)) }
+            if slot.draw?.rect != draw.rect || slot.draw?.radius != draw.radius ||
+                slot.draw?.continuous != draw.continuous || slot.draw?.blending != draw.blending {
+                view.frame = NSRect(x: CGFloat(draw.rect.x), y: CGFloat(draw.rect.y),
+                                    width: CGFloat(draw.rect.width), height: CGFloat(draw.rect.height))
+                if draw.material == .glass {
+                    Self.setGlassCornerRadius(view, radius: CGFloat(binding.clampedRadius))
+                } else if let effect = view as? NSVisualEffectView {
+                    effect.blendingMode = draw.nsBlendingMode
+                    effect.layer?.cornerRadius = CGFloat(binding.clampedRadius)
+                    effect.layer?.cornerCurve = draw.continuous ? .continuous : .circular
+                    effect.layer?.masksToBounds = binding.clampedRadius > 0
+                }
+                view.layoutSubtreeIfNeeded()
+                view.displayIfNeeded()
+            }
+            slot.draw = draw
+            slots[idx] = slot
         }
 
-        // Hide inactive slots with `alphaValue = 0.0` rather than `isHidden = true` so Core Animation keeps slots warm.
-        for idx in 0..<MAX_NATIVE_MATERIALS where !activeSlotSet.contains(idx) {
-            if let entry = slots[idx] {
-                entry.view.alphaValue = 0.0
+        for i in slots.indices where !active.contains(i) {
+            if let slot = slots[i] {
+                if slot.draw != nil { slot.view.alphaValue = 0 }
+                keepSpare(slot.view, material: slot.material)
+                slots[i] = nil
             }
         }
-        trimSpares()
-        currentIds = nextIds.filter { $0 != 0 }
         return assignment
     }
 
     public func hideAll(mode: MaterialMode = MaterialMode.fromEnv()) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        for entry in slots {
-            entry?.view.alphaValue = 0.0
-        }
-        CATransaction.commit()
-        currentIds.removeAll()
-        _ = syncWatcher.setMaterials(false, unsynced: mode == .unsynced)
+        guard slots.contains(where: { $0 != nil }) else { return }
+        _ = apply([], mode: mode)
     }
 
-    private func ensureSlot(at index: Int, kind: SlotKind) -> NSView {
-        if let existing = slots[index] {
-            if existing.kind == kind {
-                return existing.view
-            }
-            existing.view.alphaValue = 0.0
-            recycleView(existing.view, kind: existing.kind)
-        }
-        let view = dequeueOrMakeView(kind: kind)
-        if view.superview !== self {
-            addSubview(view)
-            view.displayIfNeeded()
-        }
-        slots[index] = SlotEntry(kind: kind, view: view)
-        return view
+    private func keepSpare(_ view: NSView, material: SystemMaterial) {
+        if let old = spares.updateValue(view, forKey: material), old !== view { old.removeFromSuperview() }
     }
 
-    private func dequeueOrMakeView(kind: SlotKind) -> NSView {
-        switch kind {
-        case .glass:
-            if let reused = spareGlass.popLast() {
-                return reused
-            }
-            if let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
-                let view = glassClass.init(frame: .zero)
-                view.wantsLayer = true
-                Self.setGlassStyle(view, style: 0)
-                return view
-            }
-            fallthrough
-        case .visualEffect:
-            if let reused = spareVisual.popLast() {
-                return reused
-            }
-            let vev = NSVisualEffectView(frame: .zero)
-            vev.wantsLayer = true
-            vev.material = .hudWindow
-            vev.blendingMode = .behindWindow
-            vev.state = .active
-            return vev
+    private func makeView(material: SystemMaterial) -> NSView {
+        if material == .glass, let type = NSClassFromString("NSGlassEffectView") as? NSView.Type {
+            let view = type.init(frame: .zero)
+            view.wantsLayer = true
+            Self.setGlassStyle(view, style: 0)
+            return view
         }
-    }
-
-    private func recycleView(_ view: NSView, kind: SlotKind) {
-        switch kind {
-        case .glass:
-            spareGlass.append(view)
-        case .visualEffect:
-            spareVisual.append(view)
-        }
-    }
-
-    private func trimSpares() {
-        while spareGlass.count > 1 {
-            let dead = spareGlass.removeFirst()
-            dead.removeFromSuperview()
-        }
-        while spareVisual.count > 1 {
-            let dead = spareVisual.removeFirst()
-            dead.removeFromSuperview()
-        }
+        let effect = NSVisualEffectView(frame: .zero)
+        effect.wantsLayer = true
+        effect.material = Self.nsMaterial(for: material)
+        effect.state = .active
+        return effect
     }
 
     private static var hasGlassClass: Bool {

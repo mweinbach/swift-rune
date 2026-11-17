@@ -617,8 +617,8 @@ internal func drawHelpTooltip<State>(
             let gc = (g.color ?? inkColor).scaleAlpha(alpha).simd4(srgb: srgbBlend)
             let rect = SIMD4<Float>(scaledOrigin.x + g.rect.x * s * k, scaledOrigin.y + g.rect.y * s * k,
                                     g.rect.z * s * k, g.rect.w * s * k)
-            let primitive = runtime.referenceTextPrimitive(g, rect: rect, ink: gc, clip: fullClip)
-            if primitive.kind == .glyph { recordGlyphPage(primitives.count, g.atlasPage) }
+            let (primitive, page) = runtime.referenceTextPrimitive(g, rect: rect, ink: gc, clip: fullClip)
+            if primitive.kind == .glyph { recordGlyphPage(primitives.count, page) }
             primitives.append(primitive)
         }
     }

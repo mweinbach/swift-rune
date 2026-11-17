@@ -503,7 +503,7 @@ extension Runtime {
         if moved {
             finishPreeditIfNeeded(forPath: focusedPath, at: now)
         }
-        focusedPath = nextNode.path
+        assignFocusPath(nextNode.path, keyboard: true)
         focusedKey = nextNode.key
         inputMachines.focusMachine.highlightHidden = false
         inputMachines.focusMachine.highlightedPath = nextNode.path

@@ -228,7 +228,7 @@ struct ParagraphsFlowParityTests {
         plain.textStyle.byParagraphStart = .rtl
         #expect(resolved("123", plain).style.byParagraphStart == .rtl)
         // A one-line field, a secure one, or a placeholder stays one text.
-        let line = textInput(key: "l", \S.line).font(Self.style).dirByParagraph()
+        let line = textInput(key: "l", \S.line).font(Self.style).dirByParagraph().singleLine()
         #expect(ElDisplayResolver.resolveInput(el: line, edit: TextEdit("a\nb"), innerWidth: 300).style.byParagraphStart == nil)
         var secure = TextEdit("a\nb", multiline: true)
         secure.isSecure = true

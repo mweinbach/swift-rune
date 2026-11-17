@@ -16,10 +16,10 @@ extension RenderFrame {
         }
     }()
 
-    /// Checks memory passed to the GL driver. The runtime already stores glyph pages in one atlas.
-    /// For callers supplying separate image pages, pack them and rebase texel origins, preserving
-    /// the instance count used by surface insertion points and effect marks.
-    func preparedForGL() throws -> RenderFrame {
+    /// Validates the ABI and reports whether any instance samples a missing image page.
+    /// A native frame that only uses the primary atlas can skip per-draw page selection entirely.
+    @discardableResult
+    func validateForGL() throws -> Bool {
         guard Self.matchesGLVertexLayout else {
             throw RenderFrameInputError("Rune RenderInstance is incompatible with the GL vertex layout")
         }
@@ -30,13 +30,22 @@ extension RenderFrame {
         guard materials.isEmpty else {
             throw RenderFrameInputError("Native window materials require a platform material host")
         }
-        try Self.validateAtlas(width: glyphs.width, height: glyphs.height, channels: 1, bytes: glyphs.texels.count)
-        let pages = imagePages.isEmpty ? [images] : imagePages
-        for page in pages {
+        if baseGlyphPages.isEmpty {
+            try Self.validateAtlas(width: baseGlyphAtlas.width, height: baseGlyphAtlas.height, channels: 1, bytes: baseGlyphAtlas.texels.count)
+        }
+        for page in baseGlyphPages where !page.texels.isEmpty {
+            try Self.validateAtlas(width: page.width, height: page.height, channels: 1, bytes: page.texels.count)
+        }
+        if imagePages.isEmpty {
+            try Self.validateAtlas(width: images.width, height: images.height, channels: 4, bytes: images.texels.count)
+        }
+        for page in imagePages where !page.texels.isEmpty {
             try Self.validateAtlas(width: page.width, height: page.height, channels: 4, bytes: page.texels.count)
         }
 
         var depth = 0
+        var needsImageFallback = false
+        let imagePageCount = Float(max(1, imagePages.count))
         for (index, item) in instances.enumerated() {
             // Effect payloads are four opaque bit patterns; applications can store any UInt32.
             let validUV = item.params.y == KIND_EFFECT || Self.finite(item.uv)
@@ -44,6 +53,8 @@ extension RenderFrame {
                   Self.finite(item.border), Self.finite(item.params), validUV,
                   Self.finite(item.clip) else { throw RefSceneError.nonFinitePrimitive(index: index) }
             switch item.params.y {
+            case KIND_IMAGE:
+                if item.params.x >= imagePageCount { needsImageFallback = true }
             case KIND_LAYER:
                 depth += 1
             case KIND_LAYER_END:
@@ -57,8 +68,17 @@ extension RenderFrame {
             }
         }
         guard depth == 0 else { throw RefSceneError.unclosedLayers(remaining: depth) }
+        return needsImageFallback
+    }
 
-        guard !imagePages.isEmpty else { return self }
+    /// The original browser packet represents a single texture. Native GL binds each page
+    /// independently and never enters this packing path.
+    func packedForLegacyWebPacket() throws -> RenderFrame {
+        let needsImageFallback = try validateForGL()
+        guard !imagePages.isEmpty || needsImageFallback else { return self }
+        var pages = imagePages.isEmpty ? [images] : imagePages.map { $0.texels.isEmpty ? RGBA8Atlas() : $0 }
+        let pageCount = pages.count
+        if needsImageFallback { pages.append(RGBA8Atlas()) }
         var frame = self
         frame.imagePages = []
         if pages.count == 1 {
@@ -99,7 +119,8 @@ extension RenderFrame {
         }
         frame.images = RGBA8Atlas(width: atlasWidth, height: atlasHeight, texels: pixels)
         for index in frame.instances.indices where frame.instances[index].params.y == KIND_IMAGE {
-            let page = Int(min(max(frame.instances[index].params.x.rounded(), 0), Float(pages.count - 1)))
+            let requested = frame.instances[index].params.x
+            let page = requested >= Float(pageCount) ? pageCount : Int(max(0, requested))
             let dx = Float(offsets[page].x)
             let dy = Float(offsets[page].y)
             frame.instances[index].uv.x += dx

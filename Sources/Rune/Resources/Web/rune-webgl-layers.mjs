@@ -98,6 +98,12 @@ function includeInstance(scope, p, base, kind) {
         Math.min(f(f(x + w) + grow), p[base + 26]), Math.min(f(f(y + h) + grow), p[base + 27]));
 }
 
+export function primitiveBounds(instances, index) {
+    const scope = {edges: [0, 0, 0, 0]};
+    includeInstance(scope, instances, index * 32, instances[index * 32 + 17]);
+    return scope.edges;
+}
+
 function finishScope(scope, viewport) {
     const clip = scope.free ? scope.frame : intersection(scope.clip, scope.limit);
     let visible = expanded(intersection(scope.edges, clip), scope.grow);

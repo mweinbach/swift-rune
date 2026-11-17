@@ -1,0 +1,29 @@
+<!doctype html><meta charset="utf-8"><style>*{margin:0}pre{position:fixed;inset:0 auto auto 0}</style>
+<style data-rune-static>[data-rune-static] {display:block}</style>
+<article data-rune-static style="height:3500px;padding-top:450px"><h2 id="chapter">Static chapter</h2></article>
+<canvas></canvas><pre id="result">Running</pre>
+<script type="module">
+import {selectRuneCanvas} from '../../Sources/Rune/Resources/Web/rune-web-page.mjs';
+const pre=document.querySelector('pre'), root=document.querySelector('article'), canvas=document.querySelector('canvas');
+const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+let mount;
+try {
+    mount=selectRuneCanvas(canvas,{webDocument:true});
+    mount.page.sync(3600,0,0);
+    const live=document.createElement('h2');live.id='chapter';live.style.cssText='position:absolute;top:495px';
+    canvas.after(live);
+    scrollTo(0,400);
+    const before=root.querySelector('h2').getBoundingClientRect().top;
+    window.dispatchEvent(new Event('touchstart'));
+    mount.page.presented();
+    await wait(300);
+    if(root.inert) throw Error('static article was hidden while reading touch was held');
+    window.dispatchEvent(new Event('touchend'));
+    for(let i=0;i<50 && !root.inert;++i) await wait(20);
+    if(!root.inert || root.querySelector('[id]') || document.getElementById('chapter')!==live) throw Error('duplicate static anchor or accessible article');
+    if(Math.abs(live.getBoundingClientRect().top-before)>2)throw Error('static-to-live handoff moved the reader');
+    mount.dispose();mount=null;
+    if(root.inert || root.querySelector('h2').id!=='chapter') throw Error('static export not restored on detach');
+    pre.textContent='PASS preserves pre-rendered article, touch momentum and section reading position through live handoff';
+} catch(error){pre.textContent='FAIL '+error.stack;} finally{mount?.dispose();}
+</script>

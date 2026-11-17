@@ -60,9 +60,13 @@ public struct VirtualChildBounds: Sendable, Equatable {
         if !column || children.count < 2 {
             return VirtualChildBounds(outer: bound, inner: inner, fixed: 0, column: false)
         }
-        let inFlowCount = children.filter { inFlow($0.layout) }.count
+        var inFlowCount = 0
+        var fixedSum: Float = 0
+        for child in children {
+            if inFlow(child.layout) { inFlowCount += 1 }
+            fixedSum += fixedHeight(child.layout)
+        }
         let gaps = max(0, style.rowGap) * Float(max(0, inFlowCount - 1))
-        let fixedSum = children.reduce(Float(0)) { $0 + fixedHeight($1.layout) }
         return VirtualChildBounds(outer: bound, inner: inner - gaps, fixed: fixedSum, column: column)
     }
 
@@ -447,6 +451,7 @@ public struct VirtualOffscreenText: Sendable, Equatable {
     public var key: String?
     public var groupPath: String?
     public var content: String
+    internal var source: TextCaseMapping?
     public var uncopied: [Range<Int>]
     public var copyBreakBefore: UInt8
     public var copyBreakAfter: UInt8
@@ -465,6 +470,7 @@ public struct VirtualOffscreenText: Sendable, Equatable {
         key: String?,
         groupPath: String?,
         content: String,
+        source: TextCaseMapping? = nil,
         uncopied: [Range<Int>] = [],
         copyBreakBefore: UInt8 = 1,
         copyBreakAfter: UInt8 = 1,
@@ -480,6 +486,7 @@ public struct VirtualOffscreenText: Sendable, Equatable {
         self.key = key
         self.groupPath = groupPath
         self.content = content
+        self.source = source
         self.uncopied = uncopied
         self.copyBreakBefore = copyBreakBefore
         self.copyBreakAfter = copyBreakAfter
@@ -1045,11 +1052,8 @@ public enum VirtualSelectionCollector {
             && (el.layout.direction == .row || el.layout.direction == .rowReverse)
         var hadChildText = false
 
-        if !inert,
-           el.handlers.editLens == nil,
-           !el.isSecure,
-           el.isSelectable,
-           let content = (el.liveText?.get() ?? el.plainText ?? el.richSpans?.map(\.text).joined()) {
+        if !inert, let selection = el.selectableContent {
+            let content = selection.displayed
             let breaks = el.copyBreaksPair
             texts.append(VirtualOffscreenText(
                 listPath: listPath,
@@ -1061,7 +1065,8 @@ public enum VirtualSelectionCollector {
                 key: el.keyId,
                 groupPath: group,
                 content: content,
-                uncopied: el.uncopiedRanges,
+                source: selection.source,
+                uncopied: selection.uncopied,
                 copyBreakBefore: breaks.before,
                 copyBreakAfter: breaks.after,
                 copyPrefix: el.copyPrefixString,
@@ -1072,8 +1077,8 @@ public enum VirtualSelectionCollector {
         }
 
         for (i, child) in el.children.enumerated() {
-            let childPath = virtualNodePath(path, key: child.keyId, index: i)
-            let childRel = virtualNodePath(relPath, key: child.keyId, index: i)
+            let childPath = virtualNodePath(path, key: child.storageKeyId, index: i)
+            let childRel = virtualNodePath(relPath, key: child.storageKeyId, index: i)
             let beforeLen = texts.count
             walkRowEl(
                 el: child,
@@ -1116,19 +1121,14 @@ public enum VirtualSelectionCollector {
             path = t.path
         }
 
-        let utf8 = Array(t.content.utf8)
-        let len = utf8.count
+        let len = t.content.utf8.count
         let (fullA, fullB): (Int, Int) = t.uncopied.isEmpty
             ? (0, len)
             : SelectionMath.trimUncopied(t.uncopied, range: (0, len))
         let whole = !range.isEmpty && len > 0 && range.lowerBound <= fullA && range.upperBound >= fullB
-        let text = CopyJoin.copySlice(in: t.content, range: range, uncopied: t.uncopied)
-        let contentSlice: String
-        if range.lowerBound >= 0, range.upperBound <= len, range.lowerBound < range.upperBound {
-            contentSlice = String(bytes: utf8[range], encoding: .utf8) ?? ""
-        } else {
-            contentSlice = ""
-        }
+        let text = CopyJoin.copySlice(in: t.content, range: range, uncopied: t.uncopied, source: t.source)
+        let contentSlice = t.source == nil && t.uncopied.isEmpty
+            ? text : CopyJoin.copySlice(in: t.content, range: range, uncopied: [])
         return SelectedText(
             path: path,
             key: t.key,
@@ -2549,19 +2549,14 @@ public enum VirtualSelectionCollector {
         } else {
             path = node.path
         }
-        let utf8 = Array(node.text.utf8)
-        let len = utf8.count
+        let len = node.text.utf8.count
         let (fullA, fullB): (Int, Int) = node.uncopied.isEmpty
             ? (0, len)
             : SelectionMath.trimUncopied(node.uncopied, range: (0, len))
         let whole = !range.isEmpty && len > 0 && range.lowerBound <= fullA && range.upperBound >= fullB
-        let text = CopyJoin.copySlice(in: node.text, range: range, uncopied: node.uncopied)
-        let contentSlice: String
-        if range.lowerBound >= 0, range.upperBound <= len, range.lowerBound < range.upperBound {
-            contentSlice = String(bytes: utf8[range], encoding: .utf8) ?? ""
-        } else {
-            contentSlice = ""
-        }
+        let text = CopyJoin.copySlice(in: node.text, range: range, uncopied: node.uncopied, source: node.source)
+        let contentSlice = node.source == nil && node.uncopied.isEmpty
+            ? text : CopyJoin.copySlice(in: node.text, range: range, uncopied: [])
         return SelectedText(
             path: path,
             key: node.key,

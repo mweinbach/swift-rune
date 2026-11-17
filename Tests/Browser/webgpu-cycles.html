@@ -1,0 +1,99 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune resting GPU cycles</title>
+<pre id="result">Running…</pre>
+<script type="module">
+import { RuneWebGL, loadRuneShaders } from '../../Sources/Rune/Resources/Web/rune-webgl.mjs';
+import { RuneWebGPU } from '../../Sources/Rune/Resources/Web/rune-webgpu.mjs';
+import { pagedPacket } from './image-page-scene.mjs';
+
+const width = 96, height = 48, count = 1003, slot = 501, serial = 99;
+function rect(instance, box, ink) {
+    instance.set(box);
+    instance.set(ink, 8);
+    instance[18] = 0.5;
+    instance[19] = 1;
+    instance.set([0, 0, width, height], 24);
+}
+
+function full(a, paged = false, overlappingLayer = false) {
+    // Two overlapping overlays on either side of the moving instance in painter order.
+    const bytes = new ArrayBuffer(56 + count * 128 + 1 + 4 + 4);
+    new Uint32Array(bytes, 0, 14).set([0x32475352,width,height,71,count,1,1,1,1,0,0,0,0x3f800000,0]);
+    const instances = new Float32Array(bytes, 56, count * 32);
+    for (let i = 0; i < count; ++i) {
+        const x = i % 2 === 0 ? 70 : 72;
+        rect(instances.subarray(i * 32), [x, i % height, 1, 1], [0.1,0.3,0.6,1]);
+    }
+    rect(instances.subarray(500 * 32), [10,10,20,20], [0,0.5,0.2,1]);
+    rect(instances.subarray(slot * 32), [20,12,18,8], [a,0.2*a,0,a]);
+    instances[slot * 32 + 19] = a;
+    rect(instances.subarray(502 * 32), [22,14,10,8], [0,0,0.5,0.5]);
+    const layer = overlappingLayer ? [22,12,20,14] : [70,5,20,14];
+    const begin = instances.subarray(800 * 32, 801 * 32);
+    rect(begin, layer, [0,0,0,1]);
+    begin.set([0,8,0,0], 16);
+    rect(instances.subarray(801 * 32), layer, [0,0.4,0,0.5]);
+    const end = instances.subarray(802 * 32, 803 * 32);
+    end.fill(0);
+    end[17] = 9;
+    if (paged) {
+        const page = n => ({width: 1, height: 1, data: new Uint8Array(n).fill(255)});
+        const packet = pagedPacket({width, height, pages: [page(4), page(4)], glyphPages: [page(1), page(1)],
+            instances: Array.from({length: count}, (_, i) => instances.subarray(i * 32, i * 32 + 32))});
+        const framed = new Uint8Array(packet.length + 4);
+        framed.set(packet);
+        const header = new DataView(framed.buffer);
+        header.setUint32(12, header.getUint32(12, true) | 64, true);
+        header.setUint32(packet.length, serial, true);
+        return framed.buffer;
+    }
+    new DataView(bytes).setUint32(bytes.byteLength - 4, serial, true);
+    return bytes;
+}
+function patch(a) {
+    const bytes = new ArrayBuffer(48);
+    new Uint32Array(bytes).set([0x31435352,width,height,serial,count,1,slot]);
+    new Float32Array(bytes, 28).set([a,0.2*a,0,a,a]);
+    return bytes;
+}
+
+async function check(backend) {
+    const canvas = document.createElement('canvas');
+    const driver = backend === 'WebGPU' ? await RuneWebGPU.create(canvas) : new RuneWebGL(canvas, await loadRuneShaders());
+    const reader = new OffscreenCanvas(width,height).getContext('2d', {willReadFrequently: true});
+    function capture(bytes) {
+        driver.draw(bytes, 0, bytes.byteLength);
+        reader.drawImage(canvas,0,0);
+        return reader.getImageData(0,0,width,height).data;
+    }
+    try {
+        for (const paged of [false, true]) {
+            const before = capture(full(0.2, paged));
+            const after = capture(patch(0.75));
+            if (!driver.cycleScene.plan?.length || driver.cycleScene.plan[0].runs.some(([lo,hi]) => hi-lo >= count))
+                throw Error(backend + ' submitted the full scene for the damaged rectangle');
+            if (after.every((v,i) => v === before[i])) throw Error(backend + ' spinner stayed still');
+            const fresh = capture(full(0.75, paged));
+            if (after.some((v,i) => v !== fresh[i])) throw Error(backend + ' damaged redraw differed from ordinary paint');
+            capture(full(0.2, paged, true));
+            const composite = capture(patch(0.6));
+            const layered = capture(full(0.6, paged, true));
+            if (composite.some((v,i) => v !== layered[i])) throw Error(backend + ' overlapping layer differed from ordinary paint');
+        }
+        const invalid = patch(0.5);
+        new DataView(invalid).setUint32(12, serial + 1, true);
+        try { capture(invalid); } catch (error) {
+            if (error.message.includes('matching Rune cycle paint')) return driver.info.renderer;
+            throw error;
+        }
+        throw Error(backend + ' accepted a stale cycle update');
+    } finally { driver.dispose(); }
+}
+try {
+    const webgl = await check('WebGL');
+    const webgpu = await check('WebGPU');
+    result.textContent = 'PASS ' + JSON.stringify({webgl, webgpu, instances: count,
+        fullBytes: full(1).byteLength, patchBytes: patch(1).byteLength});
+} catch (error) { result.textContent = 'FAIL ' + error.stack; }
+</script>

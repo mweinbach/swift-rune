@@ -9,6 +9,7 @@ public struct SelectedText: Equatable, Hashable, Sendable {
     public var len: Int
     public var whole: Bool
     public var text: String
+    /// The selected UTF-8 bytes as drawn, including spans excluded from copying.
     public var content: String
 
     public init(
@@ -29,8 +30,8 @@ public struct SelectedText: Equatable, Hashable, Sendable {
         self.content = content
     }
 
-    /// True when the selected byte slice is empty (`SelectedText::is_empty`).
-    public var isEmpty: Bool { range.isEmpty }
+    /// True when the text element contains no bytes (`SelectedText::is_empty`).
+    public var isEmpty: Bool { len == 0 }
 
     /// True when at least one byte is selected in this text (`SelectedText::is_selected`).
     public var isSelected: Bool { !range.isEmpty }
@@ -40,7 +41,7 @@ public struct SelectedText: Equatable, Hashable, Sendable {
 
     /// Builds a persistent `SelectionMark` for rendering custom CSS-like highlight boxes later.
     public func mark() -> SelectionMark {
-        SelectionMark(path: path, range: range, text: text)
+        SelectionMark(path: path, range: range, text: content)
     }
 }
 

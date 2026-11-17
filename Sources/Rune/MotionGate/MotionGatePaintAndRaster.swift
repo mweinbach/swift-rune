@@ -300,7 +300,7 @@ public enum MotionGatePaintUtils {
 
     public static func value(_ p: MotionGatePaint, channel: String) -> String {
         if let c = swatch(p, channel: channel) {
-            return c.hexString()
+            return c.hex()
         }
         switch channel {
         case "radius": return String(format: "%.1f", p.sizes[MotionGatePaint.sRadius])
@@ -486,6 +486,11 @@ public enum MotionGateSeries {
 }
 
 // MARK: - Coarse Window Grid & CPU Raster (`motion_gate/check/raster.rs`)
+
+struct MotionGateRasterGlyphs: Equatable {
+    var iconAprons: Set<MotionGateGrid.ApronKey> = []
+    var shifts: [MotionGateGrid.ApronKey: Float] = [:]
+}
 
 public final class MotionGateGrid: @unchecked Sendable {
     public static let cellSize: Float = 12.0

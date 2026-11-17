@@ -805,7 +805,7 @@ public final class VideoPlayer: @unchecked Sendable {
             guard let decoder = lock.withLock({ desktopDecoder }), timeSeconds.isFinite else { return nil }
             let seconds = max(0, min(timeSeconds, decoder.meta.duration ?? timeSeconds))
             do {
-                guard let frame = try decoder.frame(at: seconds) else { return nil }
+                guard case .bytes(let frame)? = try decoder.frame(at: seconds) else { return nil }
                 let index = UInt64(clamping: decoder.meta.frameIndex(at: seconds))
                 return Self.uprightFrame(frame, orientation: decoder.orient, time: seconds, index: index)
             } catch {
@@ -822,7 +822,7 @@ public final class VideoPlayer: @unchecked Sendable {
     private func openDesktopDecoder(_ url: URL) {
         do {
             let asset = try DesktopMediaSource(request: MediaRequest(source: .url(url)))
-            let decoder = try DesktopMediaDecoder(source: asset, kind: .video, headless: true)
+            let decoder = try DesktopMediaDecoder(source: asset, kind: .video, headless: true, packedRGB: true)
             guard let (width, height) = decoder.meta.size else {
                 lock.withLock { _state = .failed("Media has no playable video track") }
                 return

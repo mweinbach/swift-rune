@@ -27,14 +27,18 @@ public final class RuneHostProbe extends Instrumentation {
         Activity host = null;
         int status = Activity.RESULT_CANCELED;
         try {
-            getUiAutomation(1); // FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES (API 24).
-            AccessibilityServiceInfo service = getUiAutomation(1).getServiceInfo();
-            service.flags |= AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS;
-            getUiAutomation(1).setServiceInfo(service);
-            Intent launch = getTargetContext().getPackageManager().getLaunchIntentForPackage(getTargetContext().getPackageName());
-            host = startActivitySync(launch);
+            boolean outlines = "outlines".equals(args.getString("mode"));
+            if (!outlines) {
+                getUiAutomation(1); // FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES (API 24).
+                AccessibilityServiceInfo service = getUiAutomation(1).getServiceInfo();
+                service.flags |= AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS;
+                getUiAutomation(1).setServiceInfo(service);
+                Intent launch = getTargetContext().getPackageManager().getLaunchIntentForPackage(getTargetContext().getPackageName());
+                host = startActivitySync(launch);
+            }
             if ("text".equals(args.getString("mode")))
                 Class.forName("dev.rune.probe.RuneTextProbe").getDeclaredMethod("run", Activity.class).invoke(null, host);
+            else if (outlines) result.putString("outlines", RuneOutlineProbe.run(getTargetContext()));
             else if ("images".equals(args.getString("mode")))
                 Class.forName("dev.rune.probe.RuneImageProbe").getDeclaredMethod("run", ClassLoader.class).invoke(null, host.getClassLoader());
             else if ("editor".equals(args.getString("mode"))) testEditor(host);

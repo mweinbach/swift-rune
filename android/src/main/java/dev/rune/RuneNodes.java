@@ -137,7 +137,10 @@ final class RuneNodes extends AccessibilityNodeProvider {
             if (Build.VERSION.SDK_INT >= 26 && !d.isNull("help")) info.setHintText(d.optString("help"));
         } else if (role.equals("text") || role.equals("label") || role.equals("heading")) info.setText(name);
         else if (!name.isEmpty()) info.setContentDescription(name);
-        if (Build.VERSION.SDK_INT >= 28) info.setHeading(role.equals("heading"));
+        if (Build.VERSION.SDK_INT >= 28) {
+            info.setHeading(role.equals("heading"));
+            if (!name.isEmpty() && (role.equals("dialog") || role.equals("alertdialog"))) info.setPaneTitle(name);
+        }
         if (!d.isNull("checked")) {
             info.setCheckable(true);
             info.setChecked("true".equals(d.optString("checked")));
@@ -279,6 +282,9 @@ final class RuneNodes extends AccessibilityNodeProvider {
         case "progressbar": return "android.widget.ProgressBar";
         case "img": case "icon": return "android.widget.ImageView";
         case "list": case "listbox": return "android.widget.ListView";
+        case "scroll-view": return "android.widget.ScrollView";
+        case "dialog": return "android.app.Dialog";
+        case "alertdialog": return "android.app.AlertDialog";
         case "text": case "label": case "heading": case "link": return "android.widget.TextView";
         default: return "android.view.View";
         }

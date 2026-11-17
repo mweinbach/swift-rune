@@ -1,0 +1,80 @@
+<!doctype html>
+<canvas width="320" height="180"></canvas><pre id="result">Starting</pre>
+<script type="module">
+import { mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+
+const canvas = document.querySelector('canvas');
+const result = document.getElementById('result');
+const check = (value, why) => { if (!value) throw Error(why); };
+let app;
+try {
+    globalThis.RUNE_CPU_FIRST = 'only';
+    globalThis.__runeCpuFrames = [];
+    const memory = new WebAssembly.Memory({initial: 1});
+    let index = 0, timeToDraw = true, stage = 0, strips = 0;
+    const frames = [
+        {width:320, height:180, rects:[[0,0,320,180]], color:[27,41,255,255]},
+        {width:320, height:180, rects:[[0,0,64,32]], color:[77,255,26,255]},
+        {width:384, height:196, rects:[], deferred:true},
+        {width:320, height:180, rects:[]},
+        {width:512, height:200, rects:[[0,0,512,200]], color:[244,31,8,255]},
+    ];
+    const exports = {
+        memory, rune_web_enable(){}, __main_void:()=>0, rune_web_full_window:()=>1,
+        rune_web_next_wake: () => timeToDraw ? 0 : Infinity,
+        rune_web_frame(){ throw Error('Unexpected full-RGBA fallback'); }, rune_web_scene(){ throw Error('Unexpected GPU'); },
+        rune_web_buffer:()=>0, rune_web_field:()=>0,
+        rune_web_event(n) {
+            const event = JSON.parse(new TextDecoder().decode(new Uint8Array(memory.buffer, 0, n)));
+            if (event.kind === 'key') { ++index; timeToDraw = true; }
+            return 1;
+        },
+        rune_web_cpu_frame() {
+            if (!timeToDraw) return 0;
+            timeToDraw = false;
+            const {width,height,rects,deferred} = frames[index];
+            const words = new Uint32Array(memory.buffer);
+            words.set([width,height,rects.length,Number(Boolean(deferred)),0,0,0,0,...rects.flat()]);
+            ++stage;
+            const edgesEnd = 32 + rects.length*16;
+            // Exercise the first descriptor revision and the trailing mask-fill timing.
+            if (index === 0) return edgesEnd;
+            new DataView(memory.buffer).setFloat64(edgesEnd, 11.5, true);
+            return edgesEnd + 8;
+        },
+        rune_web_cpu_rect(i,row,rows) {
+            const {rects,color} = frames[index], r = rects[i], w = r[2]-r[0];
+            check(row >= 0 && rows > 0 && row+rows <= r[3]-r[1] && 4*w*rows <= 65536, 'strip crossed rect');
+            if (++strips === 2) memory.grow(1);
+            const bytes = new Uint8Array(memory.buffer, 0, w*rows*4);
+            for (let j=0; j<bytes.length; j+=4) bytes.set(color,j);
+            return bytes.length;
+        },
+    };
+    app = mountRuneBrowser(canvas, {exports}, {resizeTo:null});
+    await app.ready;
+    const underlay = canvas.previousElementSibling, ctx = underlay.getContext('2d');
+    const pixel = (x,y) => [...ctx.getImageData(x,y,1,1).data].join(',');
+    const step = async () => {
+        const before = stage;
+        canvas.dispatchEvent(new KeyboardEvent('keydown', {code:'ArrowRight',key:'ArrowRight',bubbles:true}));
+        for (let i=0;i<100 && before===stage;++i) await new Promise(requestAnimationFrame);
+        check(stage === before+1, 'CPU reactor did not respond to mounted input');
+    };
+    check(pixel(150,150) === '27,41,255,255', 'Full frame');
+    await step();
+    check(pixel(5,5) === '77,255,26,255' && pixel(150,150) === '27,41,255,255', 'Partial damage');
+    await step();
+    check(underlay.width===320 && underlay.height===180 && pixel(5,5) === '77,255,26,255'
+        && pixel(150,150) === '27,41,255,255', 'Deferred GPU-only resize cleared the last CPU image');
+    await step();
+    check(pixel(5,5) === '77,255,26,255', 'Empty damage');
+    await step();
+    check(underlay.width===512 && underlay.height===200 && pixel(509,198)==='244,31,8,255','Resize');
+    const counts = globalThis.__runeCpuFrames.map(row => row[5]);
+    check(counts.join(',') === '57600,2048,0,102400', 'Uploaded pixels ' + counts);
+    check(globalThis.__runeCpuFrames.map(row=>row[0]).join(',') === '0,11.5,11.5,11.5', 'Mask fill timings');
+    result.textContent = 'PASS ' + JSON.stringify({frames:stage, uploadedPixels:counts, strips});
+} catch (error) { result.textContent = 'FAIL ' + error.stack; }
+finally { app?.dispose(); delete globalThis.RUNE_CPU_FIRST; delete globalThis.__runeCpuFrames; }
+</script>

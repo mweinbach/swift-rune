@@ -116,7 +116,7 @@ public struct CpuBootTarget: Sendable {
 
 /// Per-frame timing and pixel statistics returned by `CpuBoot.paint` (`cpu_boot::Report`).
 public struct CpuBootReport: Sendable, Equatable {
-    public var threads: Int = 1
+    public var threads: Int = 0
     public var binNs: UInt64 = 0
     public var rasterNs: UInt64 = 0
     public var totalNs: UInt64 = 0
@@ -136,10 +136,32 @@ public struct CpuBootReport: Sendable, Equatable {
 /// Complete scene snapshot accepted by the CPU fallback rasterizer (`cpu_boot::Scene`).
 public struct CpuBootScene: Sendable {
     public var instances: [RenderInstance]
-    public var glyphPages: [[UInt8]]
-    public var glyphPageWidth: Int
-    public var glyphPageHeight: Int
-    public var images: [CpuBootImage]
+    public var glyphPages: [[UInt8]] {
+        didSet {
+            glyphRevisions = []
+            glyphPatches = []
+        }
+    }
+    private var glyphSizes: [SIMD2<Int>] = []
+    internal var glyphRevisions: [UInt64] = []
+    internal var glyphPatches: [GlyphAtlasPatch?] = []
+    internal func glyphSize(at page: Int) -> SIMD2<Int> {
+        glyphSizes.indices.contains(page) ? glyphSizes[page] : SIMD2(glyphPageWidth, glyphPageHeight)
+    }
+    public var glyphPageWidth: Int {
+        didSet { glyphSizes = [] }
+    }
+    public var glyphPageHeight: Int {
+        didSet { glyphSizes = [] }
+    }
+    public var images: [CpuBootImage] {
+        didSet {
+            imageRevisions = []
+            imagePatches = []
+        }
+    }
+    internal var imageRevisions: [UInt64] = []
+    internal var imagePatches: [ImageAtlasPatch?] = []
     public var size: (Int, Int)
     public var clear: SIMD4<Float>
     public var lcd: Bool
@@ -147,8 +169,23 @@ public struct CpuBootScene: Sendable {
     public var nativeSurfaces: Bool
     public var compositor: Bool
     public var smoothing: FontSmoothing?
-    public var outlines: OutlineStore?
+    public var outlines: OutlineStore? {
+        didSet { frameOutlineVersion = nil }
+    }
+    internal struct OutlineVersion: Equatable, Sendable {
+        let id: UUID
+        let generation: UInt64
+        init(_ snapshot: RenderOutlineAtlas) {
+            id = snapshot.storeID
+            generation = snapshot.generation
+        }
+    }
+    private var frameOutlineVersion: OutlineVersion?
+    internal var outlineVersion: OutlineVersion? {
+        frameOutlineVersion ?? outlines?.snapshot().map(OutlineVersion.init)
+    }
     public var atlasResets: Int
+    internal var glyphGeneration: UInt64?
     public var half: HalfRounding
 
     public init(
@@ -188,34 +225,47 @@ public struct CpuBootScene: Sendable {
     /// Adapts a `RenderFrame` for CPU fallback rasterization.
     public init(
         frame: RenderFrame,
-        lcd: Bool = false,
+        lcd: Bool? = nil,
         compositor: Bool = false,
         smoothing: FontSmoothing? = nil,
         outlines: OutlineStore? = nil,
         atlasResets: Int = 0,
         half: HalfRounding = .towardZero
     ) {
-        let gPages = frame.glyphs.texels.isEmpty ? [] : [frame.glyphs.texels]
-        let iPages = frame.images.texels.isEmpty
-            ? []
-            : [CpuBootImage(width: frame.images.width, height: frame.images.height, data: frame.images.texels)]
+        let glyphPages = frame.glyphPages
+        let glyphs = glyphPages.first ?? frame.glyphs
+        let unusedGlyph = glyphPages.isEmpty && glyphs.width == 1 && glyphs.height == 1 && glyphs.texels == [0]
+            && !frame.instances.contains { $0.params.y == KIND_GLYPH }
+        let gPages = glyphPages.isEmpty ? (glyphs.texels.isEmpty || unusedGlyph ? [] : [glyphs.texels])
+                                        : glyphPages.map(\.texels)
+        let images = frame.imagePages.isEmpty ? [frame.images] : frame.imagePages
+        let unusedImage = frame.imagePages.isEmpty && frame.images.width == 1 && frame.images.height == 1
+            && frame.images.texels == [0, 0, 0, 0] && !frame.instances.contains { $0.params.y == KIND_IMAGE }
+        let iPages = unusedImage ? [] : images.map { CpuBootImage(width: $0.width, height: $0.height, data: $0.texels) }
         self.init(
             instances: frame.instances,
             glyphPages: gPages,
-            glyphPageWidth: frame.glyphs.width,
-            glyphPageHeight: frame.glyphs.height,
+            glyphPageWidth: glyphs.width,
+            glyphPageHeight: glyphs.height,
             images: iPages,
             size: (frame.width, frame.height),
             clear: frame.clearColor,
-            lcd: lcd,
+            lcd: lcd ?? frame.outlines?.requestsLCD ?? false,
             srgbBlend: frame.srgbBlend,
             nativeSurfaces: !frame.surfaces.isEmpty,
             compositor: compositor,
             smoothing: smoothing,
-            outlines: outlines,
+            outlines: outlines ?? frame.outlines?.makeStore(),
             atlasResets: atlasResets,
             half: half
         )
+        if outlines == nil { frameOutlineVersion = frame.outlines.map(OutlineVersion.init) }
+        self.glyphGeneration = frame.glyphGeneration
+        glyphSizes = glyphPages.map { SIMD2($0.width, $0.height) }
+        glyphRevisions = frame.glyphPageRevisions
+        glyphPatches = frame.glyphPagePatches
+        imageRevisions = frame.imagePageRevisions
+        imagePatches = frame.imagePagePatches
     }
 
     /// Returns why the scene must be drawn by the GPU, or `nil` when CPU boot can rasterize it accurately (`cpu_boot.rs`).
@@ -264,7 +314,10 @@ public struct CpuBootPainted: Sendable, Equatable {
     public var dirtyTiles: Int
     public var tiles: Int
     public var rects: [[UInt32]]
+    /// Vertical pixel displacement and the first affected row.
     public var scrolled: (Int32, Int)?
+    /// Half-open device pixel rectangle whose retained rows moved.
+    public internal(set) var scrolledRect: [UInt32]? = nil
     public var hashNs: UInt64
     public var planNs: UInt64
     public var moveNs: UInt64
@@ -276,6 +329,7 @@ public struct CpuBootPainted: Sendable, Equatable {
             && lhs.rects == rhs.rects
             && lhs.scrolled?.0 == rhs.scrolled?.0
             && lhs.scrolled?.1 == rhs.scrolled?.1
+            && lhs.scrolledRect == rhs.scrolledRect
             && lhs.hashNs == rhs.hashNs
             && lhs.planNs == rhs.planNs
             && lhs.moveNs == rhs.moveNs

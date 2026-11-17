@@ -619,11 +619,10 @@ struct RenderSlice3LayerTests {
         #expect(rt.commitCount == commits)
     }
 
-    #if canImport(Metal)
-    // 11. #46 (`layer_tests.rs:433`)
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
+    // 11. #46 (layer_tests.rs:433)
     @Test("isolated_layers_preserve_image_video_spring_and_list_order")
     func isolatedLayersPreserveImageVideoSpringAndListOrder() throws {
-        let renderer = try MetalRenderer()
         let bounds = SIMD4<Float>(4, 4, 24, 8)
         var content = groupInstances(bounds, opacity: 0.5, color: SIMD4<Float>(1, 0, 0, 1))
 
@@ -676,7 +675,6 @@ struct RenderSlice3LayerTests {
         ]
         var ids = [UInt32](repeating: 0, count: combined.count)
         ids[4] = 1 // glyph at absolute index 4, translated from x=9 to x=10
-        renderer.withSprings(nodes: nodes, ids: ids, timeSeconds: 0.0)
 
         let surface = NativeSurface()
         let bf = try ByteFrame(width: 2, height: 2, format: .bgra, color: .srgb, planes: [Data([255, 0, 0, 255] + [255, 0, 0, 255] + [255, 0, 0, 255] + [255, 0, 0, 255])])
@@ -706,10 +704,6 @@ struct RenderSlice3LayerTests {
             instances: combined,
             surfaces: [surfDraw]
         )
-        renderer.prepare(frame: frame, viewport: (32, 16))
-        let ranges = [0..<prefix.count, prefix.count..<combined.count]
-        let out = try drawRaw(renderer: renderer, frame: frame, pixelFormat: .rgba8Unorm, ranges: ranges)
-
         let checks: [(Int, Int, [UInt8])] = [
             (0, 0, [255, 255, 255, 255]),
             (9, 6, [128, 0, 0, 128]),
@@ -717,9 +711,31 @@ struct RenderSlice3LayerTests {
             (15, 6, [0, 128, 0, 128]),
             (22, 6, [0, 0, 128, 128]),
         ]
+        #if canImport(Metal)
+        let renderer = try MetalRenderer()
+        renderer.withSprings(nodes: nodes, ids: ids, timeSeconds: 0.0)
+        renderer.prepare(frame: frame, viewport: (32, 16))
+        let ranges = [0..<prefix.count, prefix.count..<combined.count]
+        let out = try drawRaw(renderer: renderer, frame: frame, pixelFormat: .rgba8Unorm, ranges: ranges)
         for (x, y, want) in checks {
             near(out[(y * 32 + x) * 4..<(y * 32 + x + 1) * 4], want, label: "(\(x),\(y))")
         }
+        #endif
+        #if canImport(CRuneOffscreenGL)
+        let gl = try GLSpringFrameRenderer()
+        defer { gl.close() }
+        try gl.withSprings(nodes: nodes, ids: ids, timeSeconds: 0)
+        let pixels = try gl.renderOffscreen(frame)
+        #expect(try gl.renderOffscreen(frame) == pixels)
+        for (x, y, want) in checks {
+            let stored = pixels.pixel(x: x, y: y)
+            for channel in 0..<3 {
+                let linear = RefShader.srgbToLinear(Float(stored[channel]) / 255)
+                #expect(abs(Int((linear * Float(stored.w)).rounded()) - Int(want[channel])) <= 1)
+            }
+            #expect(abs(Int(stored.w) - Int(want[3])) <= 1)
+        }
+        #endif
     }
     #endif
 

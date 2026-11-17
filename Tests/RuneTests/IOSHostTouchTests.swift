@@ -8,6 +8,29 @@ import RuneMotion
 
 @MainActor
 struct IOSHostTouchTests {
+    @Test("UIKit follows the active tree row while Rune keeps keyboard focus on the tree")
+    func activeTreeRowFocus() throws {
+        let runtime = Runtime(state: "first", viewport: Vec2(160, 80)) { cursor, _ in
+            col().key("files").role(.tree).focusable().activeDescendant(cursor).children([
+                el().key("first").role(.treeItem).label("First file").size(100, 24),
+                el().key("second").role(.treeItem).label("Second file").size(100, 24),
+            ])
+        }
+        let view = try RuneIOSView(frame: .zero, runtime: runtime)
+        _ = runtime.frame(at: 0)
+        #expect(runtime.accessibilityAction("files", .focus, at: 0.1))
+        _ = runtime.frame(at: 0.1)
+        let firstList = try #require(view.accessibilityElements as? [RuneUIAccessibilityElement])
+        let first = try #require(firstList.first { $0.isRuneFocused })
+        #expect(first.nodeId == "first")
+        runtime.update(at: 0.2) { state, _ in state = "second" }
+        _ = runtime.frame(at: 0.2)
+        let next = try #require(view.accessibilityElements as? [RuneUIAccessibilityElement])
+        #expect(next.filter(\.isRuneFocused).map(\.nodeId) == ["second"])
+        #expect(!first.isRuneFocused)
+        #expect(runtime.focusedKey == "files")
+    }
+
     @Test("All UIKit hosts use the Command key for primary shortcuts")
     func primaryKeyboardModifier() {
         #expect(KeyPlatform.current == .mac)

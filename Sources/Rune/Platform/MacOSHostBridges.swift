@@ -226,7 +226,17 @@ public final class MacOSDisplayLinkDriver: NSObject {
     private var displayLink: CADisplayLink?
     private var fallbackTimer: Timer?
     private var deadlineTimer: Timer?
+    private var screenObserver: NSObjectProtocol?
+    private var powerObserver: NSObjectProtocol?
+    private var pacer = DisplayLinkPacer()
+    private var lowPowerCap = false
+    private weak var lastScreen: NSScreen?
+    private var rendering = false
+    private(set) var isDeadlineTick = false
+    private var requestedDuringFrame = false
     private let onTick: @MainActor () -> Void
+
+    var deadlineWoke: (() -> Void)?
 
     public init(onTick: @escaping @MainActor () -> Void) {
         self.onTick = onTick
@@ -237,32 +247,116 @@ public final class MacOSDisplayLinkDriver: NSObject {
         displayLink != nil || fallbackTimer != nil
     }
 
+    var pacing: Pacing { displayLink != nil ? .paced : fallbackTimer != nil ? .unpaced : .idle }
+
+    var refreshHz: Double { 1 / pacer.framePeriod }
+
+    /// Claims one opportunity for all redraw sources, including input and runtime wakes.
+    /// A first frame after rest can draw immediately. When a frame is already in flight
+    /// AppKit may reenter the view, for instance while applying its window size.
+    func beginFrame(in view: NSView, paced: Bool) -> DisplayLinkOpportunity {
+        guard !rendering else {
+            requestedDuringFrame = true
+            return .wait
+        }
+        if !isRunning, let screen = view.window?.screen, lastScreen !== screen {
+            updateRate(for: screen)
+        }
+        if fallbackTimer != nil, view.window != nil { start(in: view) }
+        let opportunity = paced ? pacer.nextFrame(now: CACurrentMediaTime()) : .now
+        guard opportunity != .wait else {
+            start(in: view)
+            return .wait
+        }
+        rendering = true
+        return opportunity
+    }
+
+    func submitted(at timestamp: CFTimeInterval = CACurrentMediaTime()) {
+        pacer.presented(at: timestamp)
+    }
+
+    func endFrame() {
+        rendering = false
+        if requestedDuringFrame {
+            requestedDuringFrame = false
+            DispatchQueue.main.async { [weak self] in self?.onTick() }
+        }
+    }
+
     public func start(in view: NSView) {
         deadlineTimer?.invalidate()
         deadlineTimer = nil
+        if let fallbackTimer, view.window != nil {
+            // An animated app can request its first frame before AppKit attaches its host view.
+            fallbackTimer.invalidate()
+            self.fallbackTimer = nil
+        }
         guard !isRunning else { return }
-        if view.window != nil {
+        pacer.start()
+        if let window = view.window {
             let link = view.displayLink(target: self, selector: #selector(handleDisplayLink(_:)))
-            link.add(to: .main, forMode: .common)
             displayLink = link
+            configure(link: link, screen: window.screen)
+            let center = NotificationCenter.default
+            screenObserver = center.addObserver(forName: NSWindow.didChangeScreenNotification, object: window,
+                                                queue: .main) { [weak self, weak window] _ in
+                MainActor.assumeIsolated { self?.screenChanged(window) }
+            }
+            powerObserver = center.addObserver(forName: .NSProcessInfoPowerStateDidChange, object: nil,
+                                               queue: .main) { [weak self, weak window] _ in
+                MainActor.assumeIsolated { self?.screenChanged(window) }
+            }
+            link.add(to: .main, forMode: .common)
             return
         }
-        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.onTick()
+        let interval = pacer.framePeriod
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.deadlineWoke?()
+                self.pacer.enqueueTick(target: CACurrentMediaTime() + interval)
+                self.onTick()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         fallbackTimer = timer
     }
 
+    private func screenChanged(_ window: NSWindow?) {
+        if let displayLink { configure(link: displayLink, screen: window?.screen) }
+    }
+
+    @discardableResult
+    private func updateRate(for screen: NSScreen?) -> Float {
+        lastScreen = screen
+        let display = screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        lowPowerCap = display.map { CGDisplayIsBuiltin($0.uint32Value) != 0 } == true &&
+            ProcessInfo.processInfo.isLowPowerModeEnabled
+        let advertised = screen?.maximumFramesPerSecond ?? 0
+        let nativeRate = advertised > 0 ? advertised : 60
+        let rate = Float(lowPowerCap ? min(60, nativeRate) : nativeRate)
+        pacer.framePeriod = 1 / Double(rate)
+        return rate
+    }
+
+    private func configure(link: CADisplayLink, screen: NSScreen?) {
+        let rate = updateRate(for: screen)
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: min(60, rate), maximum: rate, preferred: rate)
+    }
+
     public func stop() {
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+        if let powerObserver { NotificationCenter.default.removeObserver(powerObserver) }
+        screenObserver = nil
+        powerObserver = nil
         displayLink?.invalidate()
         displayLink = nil
         fallbackTimer?.invalidate()
         fallbackTimer = nil
         deadlineTimer?.invalidate()
         deadlineTimer = nil
+        pacer.stop()
     }
 
     /// Sleeps between discrete frames on a host clock measured in `timeScale` seconds per real second.
@@ -272,8 +366,12 @@ public final class MacOSDisplayLinkDriver: NSObject {
         let delay = max(0, (deadline - now) / timeScale)
         let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.deadlineTimer = nil
-                self?.onTick()
+                guard let self else { return }
+                self.deadlineTimer = nil
+                self.isDeadlineTick = true
+                defer { self.isDeadlineTick = false }
+                self.deadlineWoke?()
+                self.onTick()
             }
         }
         deadlineTimer = timer
@@ -281,7 +379,11 @@ public final class MacOSDisplayLinkDriver: NSObject {
     }
 
     @objc private func handleDisplayLink(_ sender: CADisplayLink) {
-        _ = sender
+        let period = sender.targetTimestamp - sender.timestamp
+        if period.isFinite && period > 0 {
+            pacer.framePeriod = lowPowerCap ? max(period, 1.0 / 60) : period
+        }
+        pacer.enqueueTick(target: sender.targetTimestamp)
         onTick()
     }
 }
@@ -515,6 +617,11 @@ public final class MacOSWindowFrameDriver {
         WindowFrameMove.takeJump(&frameMove, viewport: (viewport.x, viewport.y))
     }
 
+    /// AppKit's live resize takes over at the window's current size.
+    func userStartedResizing() {
+        _ = WindowFrameMove.takeMoving(&frameMove)
+    }
+
     public static func currentTopDownFrame(of window: NSWindow) -> [Float] {
         let f = window.frame
         let primaryH = Float(NSScreen.screens.first?.frame.height ?? window.screen?.frame.height ?? f.maxY)
@@ -631,6 +738,29 @@ public final class MacOSWindowFrameDriver {
         guard let anim = WindowFrameMove.takeMoving(&frameMove) else { return }
         let nsRect = Self.cocoaFrame(fromTopDown: anim.to, on: window)
         window.setFrame(nsRect, display: true)
+    }
+}
+
+/// A new window can fill two drawable slots before WindowServer shows it.
+@MainActor
+struct MacOSLaunchDrawables {
+    private var steadyCount: Int?
+    private var firstVisibleSubmit: CFTimeInterval?
+
+    mutating func cap(_ layer: CAMetalLayer) {
+        if layer.maximumDrawableCount > 2 {
+            steadyCount = layer.maximumDrawableCount
+            layer.maximumDrawableCount = 2
+        }
+    }
+
+    mutating func submitted(to layer: CAMetalLayer, visible: Bool, idle: Bool, at now: CFTimeInterval) {
+        guard visible, let steadyCount else { return }
+        let first = firstVisibleSubmit ?? now
+        firstVisibleSubmit = first
+        guard idle || now - first >= 1 else { return }
+        layer.maximumDrawableCount = steadyCount
+        self.steadyCount = nil
     }
 }
 

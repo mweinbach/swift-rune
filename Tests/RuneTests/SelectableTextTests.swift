@@ -5,6 +5,34 @@ import Foundation
 @Suite("El & Runtime Item 4: SelectionStyle, Selection API, SelectAll & CopyJoin")
 struct SelectableTextTests {
 
+    #if canImport(Darwin) || os(Linux) || os(Android)
+    @Test func dictionaryWordsUseRuneUTF8Offsets() {
+        // Boundaries from the pinned ICU4X WordSegmenter::new_dictionary.
+        let words = ["👩🏽‍💻", " ", "ภาษา", "ไทย", " ", "日本語", " ", "e\u{301}", " ", "五月", "天",
+                     " ", "中华", "人民", "共和国", " ", "မြန်မာဘာသာ", "စကား", " ", "ພາສາ", "ລາວ",
+                     " ", "ភាសាខ្មែរ", "ប្រទេស", "កម្ពុជា", " ", "3.14", "  ", "l’heure", "!"]
+        let text = words.joined()
+        var byte = 0
+        for word in words {
+            let end = byte + word.utf8.count
+            for offset in byte..<end {
+                let range = SelectionMath.unitRange(in: text, at: offset, unit: .word)
+                #expect(range == (byte, end))
+            }
+            byte = end
+        }
+        #expect(SelectionMath.unitRange(in: text, at: byte, unit: .word) == (byte - 1, byte))
+    }
+
+    @Test func visualWordArrowUsesTheDictionaryInAMixedDirectionLine() {
+        let text = "中华人民共和国 אב"
+        let layout = TextSystem().shape(text: text, style: TextStyle(size: 18), maxWidth: nil,
+                                        pixelScale: 1, emitGlyphs: false)
+        let to = CaretVisualStepper.visualIn(layout, at: 0, side: .downstream, arrow: .wordRight, hidden: false)
+        #expect(to?.0 == .at("中华".utf8.count, .upstream))
+    }
+    #endif
+
     @Test("SelectionStyle presets, builders, pick(active:) and El modifiers")
     func selectionStyleAndElModifiers() {
         let chrom = SelectionStyle.chromium

@@ -5,6 +5,61 @@ import Testing
 
 @Suite("RuneKit Markdown Parity Tests")
 struct MarkdownParityTests {
+    @Test("Raw HTML blocks interrupt and end with the same boundaries as pulldown-cmark")
+    func rawHTMLBlockBoundaries() {
+        let hidden = [
+            "<pre>\n# not a heading\n\n</pre> hidden too\n",
+            "<script>inline</script>\n",
+            "<!-- hidden\n\n--> hidden too\n",
+            "<?a\n?> hidden too\n",
+            "<!partial\n> hidden too\n",
+            "<![CDATA[\n]]> hidden too\n",
+            "<DIV class=\nbody\n</DIV>\n\n",
+        ]
+        let expected = [MarkdownDocBlock.para(MarkdownInline(text: "Intro")), .para(MarkdownInline(text: "Tail"))]
+        for block in hidden {
+            let source = "Intro\n" + block + "Tail"
+            for doc in [MarkdownParser.parseDocument(source), Markdown(source).streaming().document()] {
+                #expect(doc.blocks == expected, "\(block)")
+                #expect(doc.blockStarts == [0, source.utf8.count - 4])
+            }
+        }
+        let tail = MarkdownDocBlock.para(MarkdownInline(text: "Tail"))
+        #expect(MarkdownParser.parseAST("<custom-x a='>'/>\nhidden\n\nTail") == [tail])
+        #expect(MarkdownParser.parseAST("Intro\n<custom-x>\nbody\n\nTail") == [.para(MarkdownInline(text: "Intro  body")), tail])
+        #expect(MarkdownParser.parseAST("> <div>\nTail") == [.quote([]), tail])
+        #expect(MarkdownParser.parseAST("- <div>\nTail") == [.list(start: nil, items: [[]]), tail])
+        #expect(MarkdownParser.parseAST("# <i></i>").isEmpty)
+        #expect(MarkdownParser.parseAST("<i></i>\nTail") == [tail])
+        #expect(MarkdownParser.parseAST("> # T\n> <x>\nTail") == [.quote([.heading(level: 1, MarkdownInline(text: "T"))]), tail])
+        let quoted = MarkdownParser.parseAST("> ```\n> <div>\n> ```\n> word\ncontinued")
+        #expect(quoted == [.quote([.code("<div>"), .para(MarkdownInline(text: "word continued"))])])
+
+        #expect(Markdown("Intro\n\n<div>\n**open").streaming().document().blocks == [expected[0]])
+    }
+
+    @Test("Inline raw tags preserve disjoint UTF-8 source ranges and explicit autolinks")
+    func rawHTMLInlineSourceAndLinks() throws {
+        let source = "A <i data='>'>é</i> zz <ftp://a/b> <a@host>"
+        for doc in [MarkdownParser.parseDocument(source), Markdown(source).streaming().document()] {
+            let block = try #require(doc.blocks.first)
+            guard case let .para(inline) = block, case let .inline(map) = doc.maps.first else {
+                Issue.record("Expected a mapped paragraph")
+                return
+            }
+            #expect(inline.text == "A é zz ftp://a/b a@host")
+            #expect(inline.links == [
+                MarkdownLinkSpan(start: 8, end: 17, url: "ftp://a/b"),
+                MarkdownLinkSpan(start: 18, end: 24, url: "a@host"),
+            ])
+            #expect(map.segments.map(\.src) == [0..<2, 14..<16, 20..<24, 25..<34, 35..<36, 37..<43])
+            #expect(map.segments.map(\.out) == [0..<2, 2..<4, 4..<8, 8..<17, 17..<18, 18..<24])
+        }
+        #expect(Markdown("x <!--a--> y <?t?> z <![CDATA[**q**]]> u <!D x> v").plainText() == "x  y  z  u  v")
+        #expect(Markdown("x \\<i> and `<b>`").plainText() == "x <i> and <b>")
+        #expect(Markdown("pre <x a==bad> post").plainText() == "pre <x a==bad> post")
+    }
+
     @Test("MarkdownStream stabilizes unclosed fences and inline code spans")
     func markdownStreamStabilization() {
         var stream = MarkdownStream()

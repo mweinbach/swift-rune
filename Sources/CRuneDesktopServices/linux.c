@@ -18,6 +18,8 @@ static GThread *owner_thread;
 static unsigned hosts;
 static int initialized, available;
 static GtkClipboard *board;
+static GtkClipboard *primary;
+static GBytes *primary_owned;
 static struct RuneWaylandBoard *wayland;
 int rune_desktop_linux_right_alt_is_altgr(uint32_t window_id) {
     if (wayland) return rune_wayland_board_altgr(wayland);
@@ -78,8 +80,10 @@ static int SDLCALL watch_clipboard(void *unused, SDL_Event *event) {
 static void initialize(void) {
     if (initialized) return;
     initialized = 1;
-    /* Xwayland can broker rich MIME between the SDL seat and GTK. */
-    gdk_set_allowed_backends("x11,wayland");
+    /* The clipboard and layer-shell host share the SDL seat. Selecting XWayland
+       first here would hide the native layer-shell global on Wayland desktops. */
+    const char *driver = SDL_GetCurrentVideoDriver();
+    gdk_set_allowed_backends(driver && !strcmp(driver, "wayland") ? "wayland,x11" : "x11,wayland");
     /* AT-SPI may already be active through Rune. GTK installs emission
        hooks for GtkWidget signals during startup; register the class first. */
     gpointer widget_class = g_type_class_ref(GTK_TYPE_WIDGET);
@@ -119,6 +123,105 @@ void rune_desktop_linux_pump(void) {
     rune_wayland_board_pump(wayland);
     if (available) for (int i = 0; i < 32 && g_main_context_iteration(NULL, FALSE); ++i) {}
 }
+
+/* GtkClipboard routes request_contents asynchronously on the display's event
+   loop. This board never participates in regular clipboard revisions or secret
+   expiry. SDL's Wayland window uses its own primary-selection device instead. */
+static GtkClipboard *x11_primary(void) {
+    const char *driver = SDL_GetCurrentVideoDriver();
+    if (!driver || strcmp(driver, "x11")) return NULL;
+    if (primary) return primary;
+    initialize();
+    if (!available) return NULL;
+    GdkDisplay *display = gdk_display_get_default();
+    if (!GDK_IS_X11_DISPLAY(display)) {
+        const char *name = g_getenv("DISPLAY");
+        display = name ? gdk_display_open(name) : NULL;
+    }
+    if (display && GDK_IS_X11_DISPLAY(display))
+        primary = gtk_clipboard_get_for_display(display, GDK_SELECTION_PRIMARY);
+    return primary;
+}
+static void primary_get(GtkClipboard *clipboard, GtkSelectionData *selection, guint index, gpointer data) {
+    (void)clipboard;
+    gsize size;
+    const guchar *bytes = g_bytes_get_data(data, &size);
+    if (index == 0) gtk_selection_data_set(selection, gtk_selection_data_get_target(selection), 8, bytes, (int)size);
+    else gtk_selection_data_set_text(selection, (const char *)bytes, (int)size);
+}
+static void primary_lost(GtkClipboard *clipboard, gpointer data) {
+    (void)clipboard;
+    if (primary_owned == data) primary_owned = NULL;
+    g_bytes_unref(data);
+}
+void rune_linux_primary_write(const uint8_t *bytes, size_t count) {
+    if (!bytes || !count || count > RUNE_CLIPBOARD_LIMIT) return;
+    if (wayland) { rune_wayland_board_write_primary(wayland, bytes, count); return; }
+    if (!x11_primary()) return;
+    static const GtkTargetEntry targets[] = {
+        {"UTF8_STRING", 0, 0}, {RUNE_PLAIN, 0, 0}, {"text/plain", 0, 0},
+        {"COMPOUND_TEXT", 0, 1}, {"TEXT", 0, 1}, {"STRING", 0, 1}
+    };
+    GBytes *value = g_bytes_new(bytes, count);
+    if (gtk_clipboard_set_with_data(primary, targets, G_N_ELEMENTS(targets), primary_get, primary_lost, value))
+        primary_owned = value;
+    else g_bytes_unref(value);
+}
+struct XPrimaryRead { RunePrimaryReply reply; void *context; unsigned format; };
+static GQueue primary_reads = G_QUEUE_INIT;
+static guintptr primary_id;
+static const char *const primary_formats[] = {"UTF8_STRING", RUNE_PLAIN, "text/plain"};
+static void request_primary_format(void);
+static void finish_primary(const uint8_t *bytes, size_t count) {
+    struct XPrimaryRead *request = g_queue_pop_head(&primary_reads);
+    ++primary_id;
+    gboolean queued = !g_queue_is_empty(&primary_reads);
+    request->reply(request->context, bytes, count);
+    g_free(request);
+    if (queued) request_primary_format();
+}
+static void primary_legacy_text(GtkClipboard *clipboard, const gchar *text, gpointer data) {
+    (void)clipboard;
+    if (GPOINTER_TO_SIZE(data) != primary_id) return;
+    size_t count = text ? strlen(text) : 0;
+    int usable = count > 0 && count <= RUNE_CLIPBOARD_LIMIT;
+    finish_primary(usable ? (const uint8_t *)text : NULL, usable ? count : 0);
+}
+static void primary_text(GtkClipboard *clipboard, GtkSelectionData *selection, gpointer data) {
+    (void)clipboard;
+    if (GPOINTER_TO_SIZE(data) != primary_id) return;
+    int length;
+    const guchar *bytes = gtk_selection_data_get_data_with_length(selection, &length);
+    if (length < 0) {
+        struct XPrimaryRead *request = g_queue_peek_head(&primary_reads);
+        ++request->format;
+        request_primary_format();
+        return;
+    }
+    int usable = bytes && length > 0 && (size_t)length <= RUNE_CLIPBOARD_LIMIT;
+    finish_primary(usable ? bytes : NULL, usable ? (size_t)length : 0);
+}
+static void request_primary_format(void) {
+    struct XPrimaryRead *request = g_queue_peek_head(&primary_reads);
+    if (!request) return;
+    gpointer id = GSIZE_TO_POINTER(primary_id);
+    if (request->format < G_N_ELEMENTS(primary_formats)) {
+        GdkAtom target = gdk_atom_intern_static_string(primary_formats[request->format]);
+        gtk_clipboard_request_contents(primary, target, primary_text, id);
+    } else {
+        /* GTK can convert legacy X11 STRING/COMPOUND_TEXT owners to UTF-8. */
+        gtk_clipboard_request_text(primary, primary_legacy_text, id);
+    }
+}
+void rune_linux_primary_read(RunePrimaryReply reply, void *context) {
+    if (!reply) return;
+    if (wayland) { rune_wayland_board_read_primary(wayland, reply, context); return; }
+    if (!x11_primary()) { reply(context, NULL, 0); return; }
+    struct XPrimaryRead *request = g_new(struct XPrimaryRead, 1);
+    *request = (struct XPrimaryRead){reply, context, 0};
+    g_queue_push_tail(&primary_reads, request);
+    if (primary_reads.length == 1) request_primary_format();
+}
 void rune_desktop_linux_disconnect(void) {
     g_mutex_lock(&service_lock);
     if (hosts) --hosts;
@@ -127,6 +230,20 @@ void rune_desktop_linux_disconnect(void) {
     /* Requests accepted before the last window closed must finish. */
     dispatch_pending();
     if (last) {
+        ++primary_id; /* A later GTK reply must never target a reopened host. */
+        struct XPrimaryRead *request;
+        while ((request = g_queue_pop_head(&primary_reads))) {
+            request->reply(request->context, NULL, 0);
+            g_free(request);
+        }
+        if (primary_owned) {
+            GdkDisplay *display = gtk_clipboard_get_display(primary);
+            gdk_x11_display_grab(display);
+            if (gdk_selection_owner_get_for_display(display, GDK_SELECTION_PRIMARY))
+                gtk_clipboard_clear(primary);
+            gdk_x11_display_ungrab(display);
+            gdk_display_flush(display);
+        }
         rune_wayland_board_close(wayland);
         wayland = NULL;
         if (board && owned) {

@@ -1,53 +1,7 @@
 import { makeProgram } from './rune-webgl.mjs';
 import { RuneWebBlur } from './rune-webgl-blur.mjs';
+import { LayerCache } from './rune-gpu-layer-cache.mjs';
 import { planLayerRects } from './rune-webgl-layers.mjs';
-
-const surfaceHeaderBytes = 40;
-const surfaceUniformBytes = 13 * 16;
-const surfaceRecordBytes = surfaceHeaderBytes + surfaceUniformBytes;
-
-// The preceding R8 image can end on any byte. Only aligned packet views can be
-// handed directly to WebGL as Float32Array; plane data never needs realignment.
-export function decodeWebSurfaces(memory, offset, end, count) {
-    if (end > memory.byteLength || offset > end || count > (end - offset) / surfaceRecordBytes) {
-        throw new Error('Invalid Rune surface packet length');
-    }
-    const view = new DataView(memory);
-    const draws = [];
-    for (let i = 0; i < count; i++) {
-        if (end - offset < surfaceRecordBytes) throw new Error('Truncated Rune surface descriptor');
-        const word = index => view.getUint32(offset + index * 4, true);
-        const id = index => (BigInt(word(index + 1)) << 32n) | BigInt(word(index));
-        const before = word(0), key = id(1), revision = id(3);
-        const width = word(5), height = word(6), format = word(7);
-        const firstLength = word(8), secondLength = word(9);
-        const packed = format === 0 || format === 3;
-        if (width < 1 || height < 1 || width > 16384 || height > 16384 || format > 3
-            || (!packed && ((width | height) & 1))) throw new Error('Invalid Rune surface dimensions or format');
-        if (firstLength || secondLength) {
-            const pixels = width * height;
-            if (firstLength !== pixels * (packed ? 4 : 1) || secondLength !== (packed ? 0 : pixels / 2)) {
-                throw new Error('Invalid Rune surface plane dimensions');
-            }
-        }
-        if (firstLength + secondLength > end - offset - surfaceRecordBytes) {
-            throw new Error('Truncated Rune surface planes');
-        }
-        if (i > 0 && before < draws[i - 1].before) throw new Error('Unordered Rune surface draws');
-        const start = offset + surfaceHeaderBytes;
-        const uniforms = start % 4 === 0
-            ? new Float32Array(memory, start, 52)
-            : new Float32Array(new Uint8Array(memory, start, surfaceUniformBytes).slice().buffer);
-        offset += surfaceRecordBytes;
-        const primary = new Uint8Array(memory, offset, firstLength);
-        offset += firstLength;
-        const chroma = new Uint8Array(memory, offset, secondLength);
-        offset += secondLength;
-        draws.push({ before, key, revision, width, height, format, uniforms, primary, chroma });
-    }
-    if (offset !== end) throw new Error('Trailing data after Rune surface draws');
-    return draws;
-}
 
 function halfFloat(bits) {
     const exponent = (bits >>> 10) & 31, mantissa = bits & 1023;
@@ -81,115 +35,21 @@ function bindMarker(gl, layer, marker, isGroup) {
     gl.uniform4f(u.uPose, marker[14], marker[15], marker[13], marker[11]);
 }
 
-function keyLanes(lanes, start) {
-    let value = 0n;
-    for (let i = 3; i >= 0; --i) {
-        const lane = Math.min(65535, Math.max(0, Math.round(lanes[start + i])));
-        value = (value << 16n) | BigInt(lane);
+function captureLayer(driver, source, x, y, w, h) {
+    let target = source;
+    if (source.width !== w || source.height !== h) {
+        target = driver.target(x, y, w, h);
+        const gl = driver.gl;
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, source.fbo);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.fbo);
+        const left = x - source.x, bottom = source.height - (y - source.y) - h;
+        gl.blitFramebuffer(left, bottom, left + w, bottom + h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     }
-    return value;
-}
-
-function cacheRect(marker) {
-    const x = Math.floor(marker[0]), y = Math.floor(marker[1]);
-    return [x, y, Math.ceil(marker[0] + marker[2]) - x, Math.ceil(marker[1] + marker[3]) - y];
-}
-
-// Map iteration is least- to most-recently used. A texture referenced anywhere in
-// this frame must survive admissions: the reactor may already have omitted its draws.
-class LayerCache {
-    constructor(driver) {
-        this.driver = driver;
-        this.entries = new Map();
-        this.budget = 64 * 1024 * 1024;
-        this.bytes = 0;
-        this.hits = 0;
-        this.dirty = true;
-    }
-
-    begin(instances) {
-        this.pinned = new Set();
-        if (!this.entries.size) return;
-        for (let i = 0; i < instances.length; i += 32) {
-            if (instances[i + 17] !== 8 || instances[i + 19] < 0.5) continue;
-            const entry = this.entries.get(keyLanes(instances, i + 4));
-            if (entry && entry.signature === keyLanes(instances, i + 20)) this.pinned.add(entry);
-        }
-    }
-
-    lookup(marker) {
-        const key = keyLanes(marker, 4), entry = this.entries.get(key);
-        if (!entry || entry.signature !== keyLanes(marker, 20)) return null;
-        this.entries.delete(key);
-        this.entries.set(key, entry);
-        ++this.hits;
-        // A moving or scaled layer samples the original texture at its current bounds.
-        const [x, y, width, height] = cacheRect(marker);
-        return { texture: entry.target.texture, x, y, width, height };
-    }
-
-    store(marker, source) {
-        const [x, y, w, h] = cacheRect(marker);
-        if (w < 1 || h < 1 || w > 4096 || h > 4096
-            || x < source.x || y < source.y || x + w > source.x + source.width || y + h > source.y + source.height) return;
-        const bytes = w * h * (this.driver.floatTargets ? 8 : 4);
-        if (bytes > this.budget) return;
-        const key = keyLanes(marker, 4), signature = keyLanes(marker, 20);
-        const old = this.entries.get(key);
-        if (old) {
-            if (this.pinned.has(old)) return;
-            this.evict(key, old);
-        }
-        for (const [id, entry] of this.entries) {
-            if (this.bytes + bytes <= this.budget) break;
-            if (!this.pinned.has(entry)) this.evict(id, entry);
-        }
-        if (this.bytes + bytes > this.budget) return;
-        let target = source;
-        if (source.width !== w || source.height !== h) {
-            target = this.driver.target(x, y, w, h);
-            const gl = this.driver.gl;
-            gl.bindFramebuffer(gl.READ_FRAMEBUFFER, source.fbo);
-            gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.fbo);
-            const left = x - source.x, bottom = source.height - (y - source.y) - h;
-            gl.blitFramebuffer(left, bottom, left + w, bottom + h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-        }
-        // Transfer the pooled target to the cache; it may outlive a canvas resize.
-        const pooled = this.driver.targets.indexOf(target);
-        if (pooled < 0) throw new Error('Retained Rune layer does not own a render target');
-        this.driver.targets.splice(pooled, 1);
-        const entry = { signature, target, bytes };
-        this.entries.set(key, entry);
-        this.pinned.add(entry);
-        this.bytes += bytes;
-        this.dirty = true;
-    }
-
-    evict(key, entry) {
-        this.driver.gl.deleteTexture(entry.target.texture);
-        this.driver.gl.deleteFramebuffer(entry.target.fbo);
-        this.entries.delete(key);
-        this.bytes -= entry.bytes;
-        this.dirty = true;
-    }
-
-    clear() {
-        for (const [key, entry] of this.entries) this.evict(key, entry);
-    }
-
-    takeChanges(full) {
-        if (!full && !this.dirty) return null;
-        const words = new Uint32Array(this.entries.size * 4);
-        let i = 0;
-        for (const [key, { signature }] of this.entries) {
-            for (const value of [key, signature]) {
-                words[i++] = Number(value & 0xffffffffn);
-                words[i++] = Number(value >> 32n);
-            }
-        }
-        this.dirty = false;
-        return words;
-    }
+    // Transfer the pooled target to the cache; it may outlive a canvas resize.
+    const pooled = driver.targets.indexOf(target);
+    if (pooled < 0) throw new Error('Retained Rune layer does not own a render target');
+    driver.targets.splice(pooled, 1);
+    return target;
 }
 
 export class RuneWebFrameRenderer {
@@ -198,7 +58,12 @@ export class RuneWebFrameRenderer {
         this.gl = driver.gl;
         this.images = new Map();
         this.sources = sources;
-        this.cache = new LayerCache(driver);
+        this.cache = new LayerCache(driver.floatTargets ? 8 : 4,
+            (...args) => captureLayer(driver, ...args),
+            target => {
+                this.gl.deleteTexture(target.texture);
+                this.gl.deleteFramebuffer(target.fbo);
+            });
         this.timings = [];
     }
 
@@ -425,7 +290,7 @@ export class RuneWebFrameRenderer {
         let first = 0, surface = 0, backdrops = 0, effectIndex = 0;
         const flush = end => {
             const level = stack.at(-1);
-            if (level.target) driver.drawInstances(first, end - first, level.target, stack.length - 1, level.additive);
+            if (level.target) driver.drawInstances(instances, first, end - first, level.target, stack.length - 1, level.additive);
             first = end;
         };
         try {

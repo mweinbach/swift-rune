@@ -101,7 +101,7 @@ internal final class TxClipboardRead {
 /// Queued clipboard replies, run in event order by the next frame (`Action::Paste`, `Action::ClipboardRead`).
 internal enum ClipboardReply {
     /// A paste and, for a reply to a request, the target it was asked for (`Some(target)`).
-    case paste(ClipboardContent, target: String??)
+    case paste(ClipboardContent, target: String??, primary: Bool = false)
     case read(UInt64, ClipboardContent)
 }
 
@@ -117,6 +117,7 @@ internal struct ClipboardRoutingState {
     /// for what no input caused (`Queued::at`); the frame runs it under that stamp.
     var replies: [(reply: ClipboardReply, at: Double?)] = []
     var copies = ClipboardCopyState()
+    var primary = PrimarySelection()
 }
 
 extension Tx {
@@ -285,11 +286,11 @@ extension Runtime {
             // Each runs under the stamp of the input that queued it (`frame.rs`: `scope(at)`).
             InputTime.withArrival(at) {
                 switch reply {
-                case .paste(let content, let target):
+                case .paste(let content, let target, let primary):
                     // `Action::Paste` is routed input: the poll's change splits from it, and what
                     // it changes is INPUT.
                     let inputMark = beginInputDispatch(at: now, routed: true)
-                    runPasteReply(content, target: target, at: now)
+                    runPasteReply(content, target: target, primary: primary, at: now)
                     endInputDispatch(inputMark, queuedAction: true)
                 case .read(let id, let content):
                     // `Action::ClipboardRead` is no input (`ActionQueue::push`): its change is
@@ -318,10 +319,15 @@ extension Runtime {
     /// A paste into the focused field, else the window's paste handler. A reply asked for one
     /// target is dropped once the target changed (`Action::Paste`).
     @discardableResult
-    private func runPasteReply(_ content: ClipboardContent, target: String??, at now: Double) -> Bool {
+    private func runPasteReply(_ content: ClipboardContent, target: String??, primary: Bool = false, at now: Double) -> Bool {
         if case .some(let asked) = target, asked != pasteTarget { return false }
-        clipboard = content
-        richClipboard = RichClipboardPayload(content: content)
+        if primary {
+            guard let path = focusedPath, let el = focusedInputElement(at: path), el.hasEditAccess,
+                  !el.isSecure, let lens = el.handlers.editLens, !lens.get(state).isSecure else { return false }
+        } else {
+            clipboard = content
+            richClipboard = RichClipboardPayload(content: content)
+        }
 
         if let fPath = focusedPath, let fEl = focusedInputElement(at: fPath), let editLens = fEl.handlers.editLens {
             let before = editLens.get(state)

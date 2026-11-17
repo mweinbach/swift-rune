@@ -9,6 +9,25 @@ import RuneMotion
 internal let textFillBudget: Double = 0.0015
 
 extension Runtime {
+    /// Shape the waiting paragraphs that this paint can see before it reads caret, selection,
+    /// or glyph geometry. Other paragraphs keep their exact estimated height for the budgeted fill.
+    internal func prepareVisibleParagraphs(in box: TextLayoutBox, field: NodeId, window: TextRasterWindow?) -> TextLayoutBox {
+        guard let layout = box.paragraphs, layout.waiting else { return box }
+        if let window, window.lowerY >= window.upperY { return box }
+        let band = window?.expanded(for: box.style, spans: box.spans, scale: layout.scale)
+        let rows = (max(0, (band?.lowerY ?? 0) * layout.scale),
+                    min(layout.height, band.map { $0.upperY * layout.scale } ?? layout.height))
+        guard rows.0 < rows.1,
+              let (filled, moved) = textSystem.fillParagraphs(layout, budget: .infinity, rows: rows, reach: 0, field: field.rawValue)
+        else { return box }
+        let result = textSystem.paragraphBox(filled, text: box.authText, style: box.style, pixelScale: box.pixelScale)
+        if nodeTextLayouts[field]?.box.paragraphs === layout {
+            nodeTextLayouts[field] = RetainedLayoutCoordinator.TextLayoutRecord(box: result, isInput: true)
+        }
+        if moved { needsCommit = true }
+        return result
+    }
+
     /// Shapes waiting paragraphs of each field for up to `textFillBudget`, the rows it drew last
     /// first. True while some still wait, so another frame comes (`fill_text`).
     internal func fillText() -> Bool {
@@ -27,7 +46,10 @@ extension Runtime {
             guard let p = rec.box.paragraphs, p.waiting else { continue }
             let rows = textRows[id] ?? (0, 0)
             let r = reach.map { max(rows.1 - rows.0, 0) * $0 + 1 } ?? Float.infinity
-            guard let (built, moved) = textSystem.fillParagraphs(p, budget: budget, rows: rows, reach: r, field: id.rawValue) else { continue }
+            guard let (built, moved) = textSystem.fillParagraphs(p, budget: budget, rows: rows, reach: r, field: id.rawValue) else {
+                more = true
+                continue
+            }
             more = more || built.waiting
             let box = textSystem.paragraphBox(built, text: rec.box.authText, style: rec.box.style, pixelScale: rec.box.pixelScale)
             nodeTextLayouts[id] = RetainedLayoutCoordinator.TextLayoutRecord(box: box, isInput: true)

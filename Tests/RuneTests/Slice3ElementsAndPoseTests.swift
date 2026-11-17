@@ -8,6 +8,30 @@ struct Slice3ElementsAndPoseTests {
         var words: Bool = false
     }
 
+    private func paint<S>(_ rt: Runtime<S>, native: Bool, at time: Double) {
+        if native { _ = rt.renderFrame(at: time) }
+        else { _ = rt.frame(at: time) }
+    }
+
+    @Test("A forward anchor cycle shares every member's motion flags")
+    func cycleSharesAncestorMotionOnce() {
+        let rt = Runtime(state: false, viewport: Vec2(100, 100)) { _, _ -> El<Bool> in el() }
+        var infos = ["child", "a", "b"].map(ElementInfo.stub)
+        func pose(_ name: String, anchor: String) -> RawPoseNodeData {
+            RawPoseNodeData(nodeId: NodeId.hash(name), anchorKey: anchor, rotation: 0, scale: 1, shadows: [],
+                           ownMoving: name == "a", ownScrolling: name == "b", ownGrowingRow: name == "a",
+                           ownLiveIntent: name == "b" ? 32 : 0, ownMotionLive: name == "b",
+                           instantHoverGroupRule: false, loopPhase: nil, virtualExtent: false, revealing: false)
+        }
+        let raw = [infos[0].path: pose("child", anchor: "b"), infos[1].path: pose("a", anchor: "b"),
+                   infos[2].path: pose("b", anchor: "a")]
+        rt.finalizeElementTreeSnapshots(infos: &infos, rawPoseByPath: raw, landingHolds: [])
+        for info in infos {
+            #expect(info.moving && info.scrolling && info.inGrowingRow)
+            #expect(info.liveIntent == 32)
+        }
+    }
+
     private func makeTestIcon() -> SVGIcon {
         SVGIcon(viewBox: 24, body: "<circle cx=\"12\" cy=\"12\" r=\"8\"/>")
     }
@@ -44,8 +68,8 @@ struct Slice3ElementsAndPoseTests {
 
     // MARK: - tests/motion_elements.rs
 
-    @Test("motion_elements_match_elements_through_a_scroll")
-    func motionElementsMatchElementsThroughAScroll() {
+    @Test("motion_elements_match_elements_through_a_scroll", arguments: [false, true])
+    func motionElementsMatchElementsThroughAScroll(native: Bool) {
         let rt = Runtime<ScrollMotionState>(
             state: ScrollMotionState(words: false),
             viewport: Vec2(600, 900),
@@ -67,13 +91,13 @@ struct Slice3ElementsAndPoseTests {
         }
         var out: [MotionElement] = []
         var t = 0.0
-        _ = rt.frame(at: t)
+        paint(rt, native: native, at: t)
         agree(rt, &out)
         rt.wheel(WheelEvent(dy: -120), at: Vec2(100, 200), now: t)
         var scrolled = false
         for _ in 0..<30 {
             t += 1.0 / 60.0
-            _ = rt.frame(at: t)
+            paint(rt, native: native, at: t)
             agree(rt, &out)
             scrolled = scrolled || out.contains { $0.isFlag(MotionElement.SCROLLING) }
         }
@@ -86,7 +110,7 @@ struct Slice3ElementsAndPoseTests {
         rt.update(at: t) { s, _ in s.words = true }
         for _ in 0..<30 {
             t += 1.0 / 60.0
-            _ = rt.frame(at: t)
+            paint(rt, native: native, at: t)
             agree(rt, &out)
         }
         let after = row("words")
@@ -136,8 +160,8 @@ struct Slice3ElementsAndPoseTests {
         #expect(rt.elements().allSatisfy { !$0.scrolling })
     }
 
-    @Test("secure_text_hashes_to_zero")
-    func secureTextHashesToZero() {
+    @Test("secure_text_hashes_to_zero", arguments: [false, true])
+    func secureTextHashesToZero(native: Bool) {
         struct Empty {}
         let rt = Runtime<Empty>(
             state: Empty(),
@@ -149,7 +173,7 @@ struct Slice3ElementsAndPoseTests {
                 .child(text("hunter2").key("plain"))
                 .child(text("hunter2").key("secret").secure(true))
         }
-        _ = rt.frame(at: 0)
+        paint(rt, native: native, at: 0)
         var out: [MotionElement] = []
         rt.motionElements(&out)
         func hash(_ k: String) -> UInt64 {
@@ -157,6 +181,49 @@ struct Slice3ElementsAndPoseTests {
         }
         #expect(hash("plain") != 0)
         #expect(hash("secret") == 0)
+    }
+
+    @Test("Native frame inspection preserves tree order, transformed bounds and logical opacity")
+    func nativeInspectionMatchesReferenceAcrossPaintModes() throws {
+        let glow = Live(Color.white)
+        let rt = Runtime<Bool>(state: false, viewport: Vec2(200, 200), pixelScale: 1) { on, _ in
+            col().key("root").size(160, 160).opacity(on ? 1 : 0.5)
+                .child(el().key("lifted").size(70, 40).raise().rotate(0.3).origin(0, 1)
+                    .shadow(y: 1, blur: 4, color: .black).liveShadow(glow.binding)
+                    .child(el().key("inner").size(20, 10).opacity(0.5)))
+                .child(el().key("tail").size(30, 10))
+                .child(el().key("hidden").opacity(0).size(30, 15)
+                    .child(el().key("hiddenChild").size(8, 8)))
+        }
+        _ = rt.frame(at: 0)
+        #expect(rt.nativeInspection?.materialized == false)
+        #expect(rt.presentedPose("lifted")?.shadows.first?.color == .white)
+        #expect(rt.nativeInspection?.materialized == false)
+        let reference = rt.motionElements()
+        let pose = try #require(rt.presentedPose("lifted"))
+        #expect(pose.shadows.first?.color == .white)
+        _ = rt.renderFrame(at: 0)
+        #expect(rt.nativeInspection?.materialized == false)
+        #expect(rt.presented("inner")?.opacity == 0.25)
+        #expect(rt.presented("hiddenChild")?.opacity == 0)
+        #expect(rt.presentedPose("lifted") == pose)
+        #expect(rt.nativeInspection?.materialized == false)
+        let native = rt.motionElements()
+        #expect(native.map(\.id) == reference.map(\.id))
+        #expect(native.map(\.parent) == reference.map(\.parent))
+        #expect(native.map(\.rect) == reference.map(\.rect))
+        #expect(native.map(\.visible) == reference.map(\.visible))
+        #expect(native.map(\.opacity) == reference.map(\.opacity))
+        #expect(native.map(\.flags) == reference.map(\.flags))
+        #expect(rt.presentedPose("lifted") == pose)
+        rt.update(at: 0) { on, tx in
+            on = true
+            tx.instant()
+        }
+        _ = rt.renderFrame(at: 1)
+        #expect(rt.presented("inner")?.opacity == 0.5)
+        _ = rt.frame(at: 2)
+        #expect(rt.presented("inner")?.opacity == 0.5)
     }
 
     // MARK: - tests/pose_hit.rs Pose & shadow/rotation/iconTurn/loop moving parity
@@ -169,10 +236,10 @@ struct Slice3ElementsAndPoseTests {
         rt.element(byKey: key)!.moving
     }
 
-    private func settle<S>(_ rt: Runtime<S>, t: inout Double) {
+    private func settle<S>(_ rt: Runtime<S>, t: inout Double, native: Bool = false) {
         for _ in 0..<150 {
             t += 1.0 / 60.0
-            _ = rt.frame(at: t)
+            paint(rt, native: native, at: t)
         }
     }
 
@@ -297,8 +364,8 @@ struct Slice3ElementsAndPoseTests {
         #expect(!rt.presentedPose("a")!.moving)
     }
 
-    @Test("pose_and_element_moving_agree_for_loops_and_an_anchors_shadow")
-    func poseAndElementMovingAgreeForLoopsAndAnchorsShadow() {
+    @Test("pose_and_element_moving_agree_for_loops_and_an_anchors_shadow", arguments: [false, true])
+    func poseAndElementMovingAgreeForLoopsAndAnchorsShadow(native: Bool) {
         let rt = Runtime<Bool>(
             state: false,
             viewport: Vec2(200, 200),
@@ -316,14 +383,14 @@ struct Slice3ElementsAndPoseTests {
                 .child(el().key("loop").size(20, 20).looping(LoopSpec.rotation(period: 1.0)))
         }
         var t = 0.0
-        _ = rt.frame(at: t)
+        paint(rt, native: native, at: t)
         rt.update(at: t) { on, _ in on = true }
         t += 1.0 / 60.0
-        _ = rt.frame(at: t)
+        paint(rt, native: native, at: t)
         #expect(isMoving(rt, "popup"))
         #expect(rt.presentedPose("popup")!.moving)
 
-        settle(rt, t: &t)
+        settle(rt, t: &t, native: native)
         #expect(!isMoving(rt, "popup"))
         #expect(!rt.presentedPose("popup")!.moving)
         #expect(isMoving(rt, "loop"))
@@ -395,8 +462,8 @@ struct Slice3ElementsAndPoseTests {
         #expect(!rt.isAnimating)
     }
 
-    @Test("virtual_element_flag_requires_no_rich_or_live_text")
-    func virtualFlagRequiresNoRichOrLiveText() {
+    @Test("virtual_element_flag_requires_no_rich_or_live_text", arguments: [false, true])
+    func virtualFlagRequiresNoRichOrLiveText(native: Bool) {
         let live = LiveText("live")
         let rt = Runtime<Int>(
             state: 0,
@@ -435,7 +502,7 @@ struct Slice3ElementsAndPoseTests {
                     )
             )
         }
-        _ = rt.frame(at: 0.0)
+        paint(rt, native: native, at: 0.0)
         var out: [MotionElement] = []
         rt.motionElements(&out)
         let vrEl = out.first { rt.elementPath($0.id)?.key == "vr" }!

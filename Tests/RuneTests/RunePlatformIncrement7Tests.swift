@@ -297,6 +297,7 @@ struct RunePlatformIncrement7Tests {
                 .children([
                     textInput(key: "input", \S.edit)
                         .w(180).h(40)
+                        .spellcheck(true)
                 ])
         }
         _ = rt.frame(at: 0.0)
@@ -374,9 +375,10 @@ struct RunePlatformIncrement7Tests {
         #expect(rt.state.rotateDegrees[0].1 == .ended)
         #expect(rt.state.smartMagnifyPts == [Vec2(100, 120)])
 
-        // 4. syncPlatformBridges updates spellWatch and keeps detached secureInputClaim inactive
+        // Painting watches the focused field. A detached host keeps secure input inactive.
+        _ = rt.frame(at: 0.2)
         hostView.syncPlatformBridges(treeCommitted: true)
-        #expect(hostView.spellWatch.path == "/@root/@input")
+        #expect(rt.fieldSpelling.watch?.path == "/@root/@input")
         #expect(hostView.secureInputClaim.isActive == false)
     }
     #endif

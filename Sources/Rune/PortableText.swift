@@ -160,6 +160,11 @@ public enum PortableGlyphFont {
         return out
     }
 
+    static func bitmapHeightAndBearing(fontSizePx: Float) -> (height: Int, bearingY: Float) {
+        let height = max(4, Int(ceil(fontSizePx * 1.15)))
+        return (height, -Float(height) * 0.78)
+    }
+
     /// Bilinearly scales an 8x16 glyph bitmap to `(targetW, targetH)` R8 coverage.
     public static func rasterizeScaled(
         scalar: UnicodeScalar,
@@ -167,7 +172,7 @@ public enum PortableGlyphFont {
         bold: Bool = false,
         italic: Bool = false
     ) -> (width: Int, height: Int, bearingY: Float, bitmap: [UInt8]) {
-        let targetH = max(4, Int(ceil(fontSizePx * 1.15)))
+        let (targetH, bearingY) = bitmapHeightAndBearing(fontSizePx: fontSizePx)
         let targetW = max(3, Int(ceil(Float(targetH) * 0.52)))
         let src = bitmap8x16(for: scalar, bold: bold, italic: italic)
         var dst = [UInt8](repeating: 0, count: targetW * targetH)
@@ -195,7 +200,6 @@ public enum PortableGlyphFont {
                 dst[dy * targetW + dx] = UInt8(max(0, min(255, Int(val.rounded()))))
             }
         }
-        let bearingY = -Float(targetH) * 0.78
         return (targetW, targetH, bearingY, dst)
     }
 }

@@ -1,0 +1,86 @@
+<!doctype html>
+<style>* { margin:0 } #host { width:320px; height:200px } canvas { width:100%; height:100% }</style>
+<div id="host"><canvas></canvas></div><pre id="result">Starting compiled Swift CPU painter</pre>
+<script type="module">
+import { instantiateRuneBrowser, mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+import { makeCPUFrameTransfer } from '../../Sources/Rune/Resources/Web/rune-web-cpu-start.mjs';
+
+const host = document.querySelector('#host'), canvas = host.firstElementChild, result = document.getElementById('result');
+let app, error;
+const check = (v, message) => { if (!v) throw Error(message); };
+async function waitFor(checkState) {
+    for (let i=0;i<300;++i) {
+        if (error) throw error;
+        if (checkState()) return;
+        await new Promise(requestAnimationFrame);
+    }
+    throw Error('Timed out awaiting Swift CPU presentation');
+}
+try {
+    globalThis.RUNE_CPU_FIRST = 'only';
+    const { WASI, ConsoleStdout, OpenFile, File } = await import('/__rune/shim/index.js');
+    const wasi = new WASI(['rune-hello'], [], [new OpenFile(new File([])),
+        ConsoleStdout.lineBuffered(console.log), ConsoleStdout.lineBuffered(console.error)]);
+    const { instance } = await instantiateRuneBrowser(fetch('/__rune/app.wasm'), {wasi_snapshot_preview1:wasi.wasiImport});
+    wasi.initialize(instance);
+    const api = instance.exports, records = [];
+    check(api.rune_web_cpu_frame && api.rune_web_cpu_rect, 'Rebuild this reactor with CPU damage exports');
+    let pending, time;
+    const reference = new OffscreenCanvas(1,1), context = reference.getContext('2d', {willReadFrequently:true});
+    const transfer = makeCPUFrameTransfer(api);
+    app = mountRuneBrowser(canvas, {exports: {
+        ...api,
+        rune_web_frame() { throw Error('Used legacy reference rasterizer'); },
+        rune_web_scene() { throw Error('Unexpected GPU presentation'); },
+        rune_web_cpu_frame(t, force) {
+            time = t;
+            const length = api.rune_web_cpu_frame(t,force);
+            if (length > 0) {
+                const ptr = api.rune_web_buffer(0), h = new Uint32Array(api.memory.buffer,ptr,length/4);
+                check(h[3] === 0, 'The basic Hello UI required the GPU');
+                let pixels = 0;
+                for(let i=0;i<h[2];++i) {
+                    const r=8+i*4;
+                    pixels += (h[r+2]-h[r])*(h[r+3]-h[r+1]);
+                }
+                pending={width:h[0],height:h[1],rects:h[2],pixels};
+            }
+            return length;
+        },
+        rune_web_accessibility() {
+            // Compare the actual presented canvas with a full CPU redraw at the identical animation clock.
+            if (pending) {
+                try {
+                    const {width,height} = pending;
+                    if (reference.width !== width) reference.width = width;
+                    if (reference.height !== height) reference.height = height;
+                    const full = api.rune_web_cpu_frame(time,1);
+                    check(full >= 48, 'Forced full redraw returned no damage');
+                    transfer(context,api.rune_web_buffer(0),full);
+                    const under = canvas.previousElementSibling;
+                    const shown = under.getContext('2d').getImageData(0,0,width,height).data;
+                    const expected = context.getImageData(0,0,width,height).data;
+                    for (let i=0; i<shown.length; ++i) {
+                        if (shown[i] !== expected[i]) throw Error('Retained CPU canvas mismatch at byte ' + i);
+                    }
+                    records.push(pending);
+                } catch(e) {error=e;}
+                pending=null;
+            }
+            return api.rune_web_accessibility();
+        }
+    }}, {resizeTo:host});
+    await app.ready;
+    await waitFor(() => document.querySelector('[role="switch"]') && records.length > 0);
+    check(records[0].pixels === records[0].width*records[0].height, 'Incomplete first frame');
+    document.querySelector('[role="switch"]').click();
+    await waitFor(() => document.querySelector('[role="switch"]').getAttribute('aria-checked')==='true'
+        && records.some(r => r.pixels>0 && r.pixels<r.width*r.height));
+    host.style.width='416px';
+    host.style.height='240px';
+    await waitFor(() => records.some(r=>r.width===Math.round(416*devicePixelRatio) && r.height===Math.round(240*devicePixelRatio)
+        && r.pixels===r.width*r.height));
+    result.textContent = 'PASS ' + JSON.stringify({records,matched:'complete RGBA bytes for every presented frame'});
+} catch(e) {result.textContent='FAIL '+e.stack;}
+finally {app?.dispose(); delete globalThis.RUNE_CPU_FIRST;}
+</script>

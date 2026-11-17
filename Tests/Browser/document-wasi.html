@@ -1,0 +1,36 @@
+<!doctype html><meta charset="utf-8">
+<style>* {margin:0} #result{position:fixed;inset:0 auto auto 0;pointer-events:none}</style>
+<canvas id="site"></canvas><pre id="result">Starting Swift rune-www…</pre>
+<script type="module">
+import {instantiateRuneBrowser,mountRuneBrowser} from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+import {WASI, ConsoleStdout, OpenFile, File} from '/__rune/shim/index.js';
+const result=document.querySelector('#result'),canvas=document.getElementById('site');
+const wasi=new WASI(['rune-www'],[],[new OpenFile(new File([])),ConsoleStdout.lineBuffered(console.log),ConsoleStdout.lineBuffered(console.error)]);
+const wait = () => new Promise(resolve=>requestAnimationFrame(resolve));
+let app;
+function check(ok,message) { if(!ok) throw Error(message); }
+async function until(p) { for(let i=0;i<100;++i){ if(p()) return; await wait(); } throw Error('Page did not reach expected geometry'); }
+try {
+    const {instance}=await instantiateRuneBrowser(fetch('/__rune/www.wasm'),{wasi_snapshot_preview1:wasi.wasiImport});
+    wasi.initialize(instance);
+    const api=instance.exports;
+    const backend=new URL(location.href).searchParams.get('backend')??'webgl2';
+    app=mountRuneBrowser(canvas,instance,{backend});
+    await app.ready;
+    const wrapper=canvas.closest('[data-rune-band]');
+    const geometry=()=>{ if(api.rune_web_page()!==12)throw Error('Missing document metadata');
+        return [...new Float32Array(api.memory.buffer,api.rune_web_buffer(0),3)]; };
+    const [height,firstTop]=geometry(), band=canvas.clientHeight;
+    check(firstTop===0 && height>band+600 && Math.abs(height-wrapper.offsetHeight)<1,'Swift document height must exceed the rendered band');
+    check(band===innerHeight+512 && canvas.height===Math.round(band*devicePixelRatio),'Swift rune-www band backing geometry/DPR');
+    const startItems=Array.from(wrapper.querySelectorAll('[role=heading],h1,h2,h3')).map(n=>n.textContent);
+    scrollTo(0,100);await wait();await wait();
+    check(geometry()[1]===0 && canvas.getBoundingClientRect().top===-100,'browser must move inside the skirt without moving the rendered band');
+    scrollTo(0,850);await until(()=>geometry()[1]>0 && canvas.style.transform.includes('translate3d'));
+    const [,top]=geometry(),final=canvas.getBoundingClientRect().top;
+    check(Math.abs(top-594)<2 && Math.abs(final+256)<2,'Swift and DOM offsets after native scrolling');
+    check(wrapper.offsetHeight>=height-1 && window.scrollY===850,'browser lost the scroll position on recenter');
+    result.textContent='PASS '+JSON.stringify({renderer:app.renderer.api,height,band,deviceScale:devicePixelRatio,firstTop,top,screenTop:final,headings:startItems.length});
+} catch(error){result.textContent='FAIL '+error.stack;}
+finally{app?.dispose();}
+</script>

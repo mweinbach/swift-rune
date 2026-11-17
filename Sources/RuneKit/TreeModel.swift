@@ -9,6 +9,24 @@ public enum TreeKey: Sendable, Equatable, Hashable {
     case handled
     /// Enter or Space on a leaf node: the app should open this id.
     case open(String)
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        switch (lhs, rhs) {
+        case (.ignored, .ignored), (.handled, .handled): return true
+        case let (.open(a), .open(b)): return a.utf8.elementsEqual(b.utf8)
+        default: return false
+        }
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        switch self {
+        case .ignored: hasher.combine(0)
+        case .handled: hasher.combine(1)
+        case .open(let id):
+            hasher.combine(2)
+            hasher.combine(KitSourceKey(id))
+        }
+    }
 }
 
 /// A visible row's state as `Tree` draws it (`rune_kit::tree::TreeRow`).
@@ -54,6 +72,12 @@ public struct TreeRow: Sendable, Equatable {
         copy.selected = on
         return copy
     }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id.utf8.elementsEqual(rhs.id.utf8) && lhs.depth == rhs.depth &&
+            lhs.expanded == rhs.expanded && lhs.selected == rhs.selected && lhs.cursor == rhs.cursor &&
+            lhs.matched == rhs.matched && lhs.multi == rhs.multi
+    }
 }
 
 /// Virtualised outline model owning nodes, open/closed folders, selection, filter, and keyboard cursor
@@ -66,7 +90,6 @@ public struct TreeModel<T: Sendable>: Sendable {
         var children: [Int]
         var depth: UInt32
         var open: Bool
-        var selected: Bool
     }
 
     private enum Shown: Sendable, Equatable {
@@ -82,6 +105,7 @@ public struct TreeModel<T: Sendable>: Sendable {
     }
 
     private struct Visible: Sendable {
+        let version = UUID()
         var rows: [Int] = []
         var rowOf: [Int] = []
     }
@@ -129,27 +153,19 @@ public struct TreeModel<T: Sendable>: Sendable {
     private static var typePause: Double { 1.0 }
 
     private var nodes: [Node] = []
-    private var index: [String: Int] = [:]
+    private var index: [KitSourceKey: Int] = [:]
     private var roots: [Int] = []
     private var cursorIndex: Int?
     private var anchorIndex: Int?
+    private var selectedIndices: Set<Int> = []
     private var multi: Bool = false
     private var activeFilter: Filter?
     private var cache = CacheBox()
     private var typeAhead: TypeAhead = .idle
-    internal final class ScrollSync: @unchecked Sendable {
-        var cxScrollY: Float = 0.0
-        var pendingTarget: Bool = false
-        var viewportH: Float = 0.0
-        var rowHeight: Float = 24.0
-    }
-
     public var key: String = "tree"
     public var viewport: Float = 0.0
     public var rowHeight: Float = 24.0
     public var rtl: Bool = false
-    internal private(set) var trackedScrollY: Float = 0.0
-    internal let scrollSync = ScrollSync()
 
     public init(key: String = "tree", multiSelect: Bool = false) {
         self.key = key
@@ -184,12 +200,13 @@ public struct TreeModel<T: Sendable>: Sendable {
     /// Returns `false` if `id` already exists or `parent` is missing.
     @discardableResult
     public mutating func insert(parent: String?, id: String, data: T) -> Bool {
-        if index[id] != nil {
+        let exactID = KitSourceKey(id)
+        if index[exactID] != nil {
             return false
         }
         let parentIdx: Int?
         if let parent {
-            guard let p = index[parent] else { return false }
+            guard let p = index[KitSourceKey(parent)] else { return false }
             parentIdx = p
         } else {
             parentIdx = nil
@@ -202,8 +219,8 @@ public struct TreeModel<T: Sendable>: Sendable {
         } else {
             roots.append(i)
         }
-        index[id] = i
-        nodes.append(Node(id: id, data: data, parent: parentIdx, children: [], depth: depth, open: false, selected: false))
+        index[exactID] = i
+        nodes.append(Node(id: id, data: data, parent: parentIdx, children: [], depth: depth, open: false))
         if activeFilter != nil {
             activeFilter?.shown.append(.hidden)
             activeFilter?.closed.append(false)
@@ -227,27 +244,27 @@ public struct TreeModel<T: Sendable>: Sendable {
     public var isEmpty: Bool { nodes.isEmpty }
 
     public func contains(_ id: String) -> Bool {
-        index[id] != nil
+        index[KitSourceKey(id)] != nil
     }
 
     public func get(_ id: String) -> T? {
-        index[id].map { nodes[$0].data }
+        index[KitSourceKey(id)].map { nodes[$0].data }
     }
 
     public mutating func update(_ id: String, _ body: (inout T) -> Void) {
-        guard let i = index[id] else { return }
+        guard let i = index[KitSourceKey(id)] else { return }
         body(&nodes[i].data)
     }
 
     public func parent(of id: String) -> String? {
-        guard let i = index[id], let p = nodes[i].parent else { return nil }
+        guard let i = index[KitSourceKey(id)], let p = nodes[i].parent else { return nil }
         return nodes[p].id
     }
 
     public func children(of id: String?) -> [String] {
         let list: [Int]
         if let id {
-            guard let i = index[id] else { return [] }
+            guard let i = index[KitSourceKey(id)] else { return [] }
             list = nodes[i].children
         } else {
             list = roots
@@ -256,16 +273,16 @@ public struct TreeModel<T: Sendable>: Sendable {
     }
 
     public func hasChildren(_ id: String) -> Bool {
-        guard let i = index[id] else { return false }
+        guard let i = index[KitSourceKey(id)] else { return false }
         return !nodes[i].children.isEmpty
     }
 
     public func depth(of id: String) -> UInt32? {
-        index[id].map { nodes[$0].depth }
+        index[KitSourceKey(id)].map { nodes[$0].depth }
     }
 
     public func subtree(of id: String) -> [T] {
-        guard let start = index[id] else { return [] }
+        guard let start = index[KitSourceKey(id)] else { return [] }
         var result: [T] = []
         var stack: [Int] = [start]
         while let i = stack.popLast() {
@@ -299,7 +316,7 @@ public struct TreeModel<T: Sendable>: Sendable {
     // MARK: - Open Folders
 
     public func isExpanded(_ id: String) -> Bool {
-        guard let i = index[id] else { return false }
+        guard let i = index[KitSourceKey(id)] else { return false }
         return isOpen(i)
     }
 
@@ -318,7 +335,7 @@ public struct TreeModel<T: Sendable>: Sendable {
         }
         if !open {
             if let c = cursorIndex, isUnder(c, ancestor: i) {
-                if !multi && nodes[c].selected {
+                if !multi && selectedIndices.contains(c) {
                     selectOnly(i)
                 } else {
                     cursorIndex = i
@@ -341,12 +358,12 @@ public struct TreeModel<T: Sendable>: Sendable {
     }
 
     public mutating func setExpanded(_ id: String, _ open: Bool) {
-        guard let i = index[id] else { return }
+        guard let i = index[KitSourceKey(id)] else { return }
         setOpen(i, open)
     }
 
     public mutating func toggle(_ id: String) {
-        guard let i = index[id] else { return }
+        guard let i = index[KitSourceKey(id)] else { return }
         setOpen(i, !isOpen(i))
     }
 
@@ -363,7 +380,7 @@ public struct TreeModel<T: Sendable>: Sendable {
     }
 
     public mutating func expandTo(_ id: String) {
-        guard let i = index[id] else { return }
+        guard let i = index[KitSourceKey(id)] else { return }
         if activeFilter != nil {
             if activeFilter?.shown[i] == .hidden {
                 activeFilter?.shown[i] = .match
@@ -389,10 +406,14 @@ public struct TreeModel<T: Sendable>: Sendable {
 
     /// Selected ids in tree order.
     public var selectedIDs: [String] {
+        if selectedIndices.count <= 1 {
+            return selectedIndices.map { nodes[$0].id }
+        }
         var out: [String] = []
+        out.reserveCapacity(selectedIndices.count)
         var stack: [Int] = Array(roots.reversed())
         while let i = stack.popLast() {
-            if nodes[i].selected {
+            if selectedIndices.contains(i) {
                 out.append(nodes[i].id)
             }
             stack.append(contentsOf: nodes[i].children.reversed())
@@ -401,7 +422,7 @@ public struct TreeModel<T: Sendable>: Sendable {
     }
 
     public func isSelected(_ id: String) -> Bool {
-        index[id].map { nodes[$0].selected } ?? false
+        index[KitSourceKey(id)].map(selectedIndices.contains) ?? false
     }
 
     public var cursorID: String? {
@@ -415,35 +436,32 @@ public struct TreeModel<T: Sendable>: Sendable {
     public func cursor() -> String? { cursorID }
 
     public mutating func clearSelection() {
-        for i in nodes.indices {
-            nodes[i].selected = false
-        }
+        selectedIndices.removeAll()
     }
 
     public mutating func select(_ id: String) {
-        guard let i = index[id] else { return }
+        guard let i = index[KitSourceKey(id)] else { return }
         selectOnly(i)
     }
 
     private mutating func selectOnly(_ i: Int) {
-        clearSelection()
-        nodes[i].selected = true
+        selectedIndices = [i]
         cursorIndex = i
         anchorIndex = i
     }
 
     public mutating func setSelected(_ id: String, _ on: Bool) {
-        guard let i = index[id] else { return }
+        guard let i = index[KitSourceKey(id)] else { return }
         if !multi {
             clearSelection()
         }
-        nodes[i].selected = on
+        if on { selectedIndices.insert(i) } else { selectedIndices.remove(i) }
         cursorIndex = i
         anchorIndex = i
     }
 
     public mutating func selectRange(to id: String) {
-        guard let i = index[id] else { return }
+        guard let i = index[KitSourceKey(id)] else { return }
         if !multi {
             selectOnly(i)
             return
@@ -458,24 +476,20 @@ public struct TreeModel<T: Sendable>: Sendable {
         }
         let lo = min(a, b)
         let hi = max(a, b)
-        let range = Array(vis.rows[lo...hi])
-        clearSelection()
-        for j in range {
-            nodes[j].selected = true
-        }
+        selectedIndices = Set(vis.rows[lo...hi])
         cursorIndex = i
     }
 
     /// Handles a row click with modifier keys. Returns `true` if it was a plain click.
     @discardableResult
     public mutating func click(_ id: String, mods: Mods = .none) -> Bool {
-        guard let i = index[id] else { return false }
+        guard let i = index[KitSourceKey(id)] else { return false }
         if multi && mods.shift {
             selectRange(to: id)
             return false
         }
         if multi && mods.primaryCommand {
-            nodes[i].selected.toggle()
+            if !selectedIndices.insert(i).inserted { selectedIndices.remove(i) }
             cursorIndex = i
             anchorIndex = i
             return false
@@ -490,18 +504,7 @@ public struct TreeModel<T: Sendable>: Sendable {
         guard contains(id) else { return false }
         expandTo(id)
         select(id)
-        if let row = visibleRow(of: id) {
-            let rh = max(1.0, rowHeight > 0 ? rowHeight : scrollSync.rowHeight)
-            let vp = viewport > 0 ? viewport : (scrollSync.viewportH > 0 ? scrollSync.viewportH : 240.0)
-            let prevY = scrollSync.pendingTarget ? trackedScrollY : scrollSync.cxScrollY
-            let rowTop = Float(row) * rh
-            let centeredY = max(0.0, rowTop - max(0.0, vp - rh) * 0.5)
-            trackedScrollY = centeredY
-            if abs(centeredY - prevY) > 1e-4 {
-                scrollSync.pendingTarget = true
-            }
-            tx.scrollTo("\(key)-viewport", offset: Vec2(0, centeredY), animated: false)
-        }
+        tx.scrollIntoViewIn(key, id)
         return true
     }
 
@@ -544,7 +547,7 @@ public struct TreeModel<T: Sendable>: Sendable {
     public var isFiltering: Bool { activeFilter != nil }
 
     public func isMatch(_ id: String) -> Bool {
-        guard let i = index[id] else { return false }
+        guard let i = index[KitSourceKey(id)] else { return false }
         return activeFilter.map { $0.shown[i] == .match } ?? true
     }
 
@@ -574,6 +577,9 @@ public struct TreeModel<T: Sendable>: Sendable {
         nodes[i].children.contains { isShown($0) }
     }
 
+    /// The row-key sequence only changes when the flattened visible index is rebuilt.
+    internal var visibleOrderVersion: UUID { visibleRows().version }
+
     public var visibleCount: Int {
         visibleRows().rows.count
     }
@@ -585,7 +591,7 @@ public struct TreeModel<T: Sendable>: Sendable {
     }
 
     public func visibleRow(of id: String) -> Int? {
-        guard let i = index[id] else { return nil }
+        guard let i = index[KitSourceKey(id)] else { return nil }
         let r = visibleRows().rowOf[i]
         return r == Int.max ? nil : r
     }
@@ -599,7 +605,7 @@ public struct TreeModel<T: Sendable>: Sendable {
             id: n.id,
             depth: n.depth,
             expanded: isOpenable(i) ? isOpen(i) : nil,
-            selected: n.selected,
+            selected: selectedIndices.contains(i),
             cursor: cursorIndex == i,
             matched: activeFilter.map { $0.shown[i] == .match } ?? false,
             multi: multi
@@ -622,11 +628,11 @@ public struct TreeModel<T: Sendable>: Sendable {
         _ ev: KeyEvent,
         label: (T) -> String,
         tx: inout Tx,
-        clock: Double = 0.0,
+        clock: Double? = nil,
         keyRepeat: Bool = false
     ) -> TreeKey {
         let m = ev.mods
-        let selectAll = multi && m.primaryCommand && m.primaryAlone && ev.isCommand("a")
+        let selectAll = multi && m.primaryAlone && (ev.key == .command("a") || (m.primaryCommand && ev.isCommand("a")))
         if !selectAll && (m.cmd || m.ctrl || m.alt || m.logo) {
             return .ignored
         }
@@ -636,9 +642,7 @@ public struct TreeModel<T: Sendable>: Sendable {
             return .ignored
         }
         if selectAll {
-            for i in vis.rows {
-                nodes[i].selected = true
-            }
+            selectedIndices.formUnion(vis.rows)
             return .handled
         }
         let at: Int? = cursorIndex.flatMap { c in
@@ -696,11 +700,11 @@ public struct TreeModel<T: Sendable>: Sendable {
                 return .handled
             }
         case .enter, .space:
-            return activate(at: at, keyRepeat: keyRepeat)
+            return activate(at: at, keyRepeat: keyRepeat || tx.keyRepeat())
         case .text(let t) where t == " ":
-            return activate(at: at, keyRepeat: keyRepeat)
+            return activate(at: at, keyRepeat: keyRepeat || tx.keyRepeat())
         case .text(let t) where !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
-            let prefix = typeAhead.step(t, now: clock)
+            let prefix = typeAhead.step(t, now: clock ?? tx.clock)
             if let r = typeSelect(prefix: prefix, label: label) {
                 return go(row: r, extend: false, tx: &tx)
             }
@@ -732,30 +736,14 @@ public struct TreeModel<T: Sendable>: Sendable {
         let vis = visibleRows()
         let i = vis.rows[row]
         moveTo(i, extend: extend)
-        let rh = max(1.0, rowHeight > 0 ? rowHeight : scrollSync.rowHeight)
-        let vp = viewport > 0 ? viewport : (scrollSync.viewportH > 0 ? scrollSync.viewportH : 240.0)
-        if !scrollSync.pendingTarget {
-            trackedScrollY = scrollSync.cxScrollY
-        }
-        let prevY = trackedScrollY
-        let rowTop = Float(row) * rh
-        let rowBottom = rowTop + rh
-        if rowTop < trackedScrollY {
-            trackedScrollY = rowTop
-        } else if rowBottom > trackedScrollY + vp {
-            trackedScrollY = max(0.0, rowBottom - vp)
-        }
-        if abs(trackedScrollY - prevY) > 1e-4 {
-            scrollSync.pendingTarget = true
-        }
-        tx.scrollTo("\(key)-viewport", offset: Vec2(0, trackedScrollY), animated: false)
+        tx.scrollIntoViewIn(key, nodes[i].id)
         return .handled
     }
 
     /// Returns the visible row index that type-select jumps to for `prefix`.
     public func typeSelect(prefix: String, label: (T) -> String) -> Int? {
-        guard let first = prefix.first else { return nil }
-        let cycle = prefix.allSatisfy { $0 == first }
+        guard let first = prefix.unicodeScalars.first else { return nil }
+        let cycle = prefix.unicodeScalars.allSatisfy { $0 == first }
         let needle = cycle ? String(first) : prefix
         let vis = visibleRows()
         let len = vis.rows.count
@@ -771,7 +759,7 @@ public struct TreeModel<T: Sendable>: Sendable {
         }
         for k in 0..<len {
             let r = (start + k) % len
-            if label(nodes[vis.rows[r]].data).lowercased().hasPrefix(needle) {
+            if label(nodes[vis.rows[r]].data).lowercased().utf8.starts(with: needle.utf8) {
                 return r
             }
         }

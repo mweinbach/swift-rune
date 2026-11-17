@@ -38,6 +38,7 @@ public enum TableColumnWidth: Sendable, Equatable {
 /// A column descriptor for `TableView` (`rune_kit::table::TableColumn`).
 public struct TableCol: Sendable {
     public let id: String
+    fileprivate let sourceKey: KitSourceKey
     public let title: String
     public var width: TableColumnWidth
     public var min: Float
@@ -48,6 +49,7 @@ public struct TableCol: Sendable {
 
     public init(_ id: String, _ title: String) {
         self.id = id
+        self.sourceKey = KitSourceKey(id)
         self.title = title
         self.width = .flex(1.0)
         self.min = 48.0
@@ -166,23 +168,66 @@ enum TableKeyOutcome {
     case open(Int)
 }
 
-/// Persistent interaction state for `TableView` (`rune_kit::table::TableState`).
 final class TableScrollSync: @unchecked Sendable {
     var cxScrollY: Float = 0.0
     var pendingTarget: Bool = false
-    var viewportH: Float = 0.0
-    var rowHeight: Float = 28.0
 }
 
+/// Column IDs keep their authored bytes. The dictionary projection supports existing Swift callers.
+private struct TableColumnWidths: Sendable {
+    var values: [KitSourceKey: Float] = [:]
+
+    var dictionary: [String: Float] {
+        get {
+            var result: [String: Float] = [:]
+            for (id, width) in values {
+                if let i = result.index(forKey: id.source) {
+                    guard id.source.utf8.lexicographicallyPrecedes(result.keys[i].utf8) else { continue }
+                    result.remove(at: i)
+                }
+                result[id.source] = width
+            }
+            return result
+        }
+        set { values = Dictionary(uniqueKeysWithValues: newValue.map { (KitSourceKey($0.key), $0.value) }) }
+        _modify {
+            var visible = dictionary
+            // Keep unrepresentable spellings when an older client edits one dictionary entry.
+            for id in visible.keys { values.removeValue(forKey: KitSourceKey(id)) }
+            defer {
+                if !values.isEmpty { values = values.filter { visible[$0.key.source] != nil } }
+                for (id, width) in visible { values[KitSourceKey(id)] = width }
+            }
+            yield &visible
+        }
+    }
+}
+
+/// Persistent interaction state for `TableView` (`rune_kit::table::TableState`).
 public struct TableState: Sendable {
     public var key: String = "table"
     public var multi: Bool = false
     public private(set) var sortColumn: String?
     public private(set) var sortDir: SortDir = .ascending
-    public var widths: [String: Float] = [:]
-    public var laidOut: [String: Float] = [:]
+    private var explicitWidths = TableColumnWidths()
+    private var measuredWidths = TableColumnWidths()
+    /// Swift dictionary projection. Use `columnWidth` and `setColumnWidth` for byte-exact column IDs.
+    public var widths: [String: Float] {
+        get { explicitWidths.dictionary }
+        set { explicitWidths.dictionary = newValue }
+        _modify { yield &explicitWidths.dictionary }
+    }
+    /// Most recently measured widths, with one entry per Swift dictionary key.
+    public var laidOut: [String: Float] {
+        get { measuredWidths.dictionary }
+        set { measuredWidths.dictionary = newValue }
+        _modify { yield &measuredWidths.dictionary }
+    }
     public var resize: Grip<ColumnDrag> = .idle
+    /// The Swift Set projection contains one representative of equivalent spellings.
     public private(set) var selected: Set<String> = []
+    private var selectionVariants: [String: Set<KitSourceKey>] = [:]
+    private var variantCount: Int = 0
     public private(set) var cursor: String?
     public private(set) var anchor: String?
     private var cursorHint: Int = 0
@@ -223,65 +268,122 @@ public struct TableState: Sendable {
     }
 
     public func nextSort(_ column: String) -> SortDir {
-        if sortColumn == column {
-            return sortDir.flip()
-        }
-        return .ascending
+        isSortColumn(column) ? sortDir.flip() : .ascending
+    }
+
+    fileprivate func isSortColumn(_ column: String) -> Bool {
+        guard let sortColumn else { return false }
+        return KitSourceKey.equalBytes(sortColumn, column)
     }
 
     public func columnWidth(_ column: String) -> Float? {
-        widths[column]
+        columnWidth(KitSourceKey(column))
     }
 
+    fileprivate func columnWidth(_ column: KitSourceKey) -> Float? { explicitWidths.values[column] }
+
     public mutating func setColumnWidth(_ column: String, _ w: Float) {
-        widths[column] = w
+        explicitWidths.values[KitSourceKey(column)] = w
     }
 
     public mutating func resetColumnWidth(_ column: String) {
-        widths.removeValue(forKey: column)
+        explicitWidths.values.removeValue(forKey: KitSourceKey(column))
     }
 
+    /// Set projection of the selection. `exactSelectedIDs` retains every authored spelling.
     public var selectedIDs: Set<String> { selected }
-    public var selectedCount: Int { selected.count }
+    /// Every selected ID in unspecified order, including distinct UTF-8 spellings.
+    public var exactSelectedIDs: [String] {
+        var ids = Array(selected)
+        ids.reserveCapacity(selectedCount)
+        for variants in selectionVariants.values {
+            ids.append(contentsOf: variants.map(\.source))
+        }
+        return ids
+    }
+    public var selectedCount: Int { selected.count + variantCount }
+
+    fileprivate mutating func recordColumnWidth(_ width: Float, for id: KitSourceKey) -> Float? {
+        measuredWidths.values.updateValue(width, forKey: id)
+    }
+
+    fileprivate func measuredColumnWidth(_ id: KitSourceKey) -> Float? { measuredWidths.values[id] }
 
     public func isSelected(_ id: String) -> Bool {
-        selected.contains(id)
+        guard let i = selected.firstIndex(of: id) else { return false }
+        if KitSourceKey.equalBytes(selected[i], id) { return true }
+        return selectionVariants[id]?.contains(KitSourceKey(id)) == true
     }
 
     public mutating func select(_ id: String) {
         selected = [id]
+        selectionVariants.removeAll()
+        variantCount = 0
         cursor = id
         anchor = id
     }
 
     public mutating func clearSelection() {
-        selected.removeAll()
+        selected.removeAll(keepingCapacity: true)
+        selectionVariants.removeAll(keepingCapacity: true)
+        variantCount = 0
     }
 
-    /// Selects `id` and scrolls `rowIndex` (when known) into view in the table viewport.
-    /// Full id-only `tx.scrollIntoViewIn(key, id)` awaits `@el` core runtime support.
+    private mutating func addSelection(_ id: String) {
+        let (inserted, representative) = selected.insert(id)
+        guard !inserted, !KitSourceKey.equalBytes(representative, id) else { return }
+        if selectionVariants[id, default: []].insert(KitSourceKey(id)).inserted { variantCount += 1 }
+    }
+
+    private mutating func selectRows(_ rows: ClosedRange<Int>, idAt: (Int) -> String) {
+        clearSelection()
+        selected.reserveCapacity(rows.count)
+        for row in rows { addSelection(idAt(row)) }
+    }
+
+    private mutating func toggleSelection(_ id: String) {
+        guard let i = selected.firstIndex(of: id) else {
+            selected.insert(id)
+            return
+        }
+        if KitSourceKey.equalBytes(selected[i], id) {
+            selected.remove(at: i)
+            if let replacement = selectionVariants[id]?.popFirst() {
+                selected.insert(replacement.source)
+                variantCount -= 1
+            }
+        } else {
+            let key = KitSourceKey(id)
+            if selectionVariants[id]?.remove(key) != nil {
+                variantCount -= 1
+            } else {
+                selectionVariants[id, default: []].insert(key)
+                variantCount += 1
+            }
+        }
+        if selectionVariants[id]?.isEmpty == true { selectionVariants[id] = nil }
+    }
+
+    /// Selects the row and asks this table's virtual list to reveal its stable ID.
     public mutating func reveal(_ id: String, rowIndex: Int? = nil, tx: inout Tx) {
         select(id)
         if let rowIndex {
-            scrollToRow(rowIndex, tx: &tx)
+            cursorHint = rowIndex
+            anchorHint = rowIndex
+            trackReveal(rowIndex)
         }
+        tx.scrollIntoViewIn(key, id)
     }
 
-    /// Selects `id` and resolves its row index via `idAt` to scroll the viewport via `tx`.
     public mutating func reveal(_ id: String, len: Int, idAt: (Int) -> String, tx: inout Tx) {
-        select(id)
-        if let idx = (0..<len).first(where: { idAt($0) == id }) {
-            cursorHint = idx
-            anchorHint = idx
-            scrollToRow(idx, tx: &tx)
-        }
+        reveal(id, rowIndex: findAt(id, hint: cursorHint, len: len, idAt: idAt), tx: &tx)
     }
 
     private func findAt(_ id: String, hint: Int, len: Int, idAt: (Int) -> String) -> Int? {
-        if hint >= 0 && hint < len && idAt(hint) == id {
+        if hint >= 0 && hint < len && KitSourceKey.equalBytes(idAt(hint), id) {
             return hint
         }
-        return (0..<len).first { idAt($0) == id }
+        return (0..<len).first { KitSourceKey.equalBytes(idAt($0), id) }
     }
 
     private mutating func cursorRow(len: Int, idAt: (Int) -> String) -> Int? {
@@ -308,11 +410,7 @@ public struct TableState: Sendable {
         cursorHint = i
         anchorHint = i
         if multi && mods.primaryCommand {
-            if selected.contains(id) {
-                selected.remove(id)
-            } else {
-                selected.insert(id)
-            }
+            toggleSelection(id)
             cursor = id
             anchor = id
             return
@@ -331,14 +429,14 @@ public struct TableState: Sendable {
         }
         let lo = min(aIdx, i)
         let hi = max(aIdx, i)
-        selected = Set((lo...hi).map(idAt))
+        selectRows(lo...hi, idAt: idAt)
         cursor = idAt(i)
         cursorHint = i
     }
 
-    private mutating func scrollToRow(_ row: Int, tx: inout Tx) {
-        let rh = rowHeight > 0 ? rowHeight : max(1.0, scrollSync.rowHeight)
-        let vp = viewport > 0 ? viewport : (scrollSync.viewportH > 0 ? scrollSync.viewportH : 270.0)
+    private mutating func trackReveal(_ row: Int) {
+        let rh = max(1.0, rowHeight)
+        let vp = viewport > 0 ? viewport : 270.0
         if !scrollSync.pendingTarget {
             trackedScrollY = scrollSync.cxScrollY
         }
@@ -353,7 +451,6 @@ public struct TableState: Sendable {
         if abs(trackedScrollY - prevY) > 1e-4 {
             scrollSync.pendingTarget = true
         }
-        tx.scrollTo("\(key)-viewport", offset: Vec2(0, trackedScrollY), animated: false)
     }
 
     mutating func handleKey(_ ev: KeyEvent, len: Int, idAt: (Int) -> String, tx: inout Tx, keyRepeat: Bool = false) -> TableKeyOutcome {
@@ -361,8 +458,8 @@ public struct TableState: Sendable {
         if len == 0 {
             return .ignored
         }
-        if multi && m.primaryCommand && m.primaryAlone && ev.isCommand("a") {
-            selected = Set((0..<len).map(idAt))
+        if multi && m.primaryAlone && (m.primaryCommand || ev.key == .command("a")) && ev.isCommand("a") {
+            selectRows(0...(len - 1), idAt: idAt)
             return .handled
         }
         if m.cmd || m.ctrl || m.alt || m.logo {
@@ -370,8 +467,7 @@ public struct TableState: Sendable {
         }
 
         let at = cursorRow(len: len, idAt: idAt)
-        let vp = viewport > 0 ? viewport : 270.0
-        let page = max(1, Int(floor(vp / max(1.0, rowHeight))) - 1)
+        let page = max(1, Int(floor(viewport / max(1.0, rowHeight))) - 1)
 
         let target: Int
         switch ev.key {
@@ -390,7 +486,7 @@ public struct TableState: Sendable {
         case .enter:
             guard let r = at else { return .ignored }
             return keyRepeat ? .handled : .open(r)
-        case .escape where multi && selected.count > 1:
+        case .escape where multi && selectedCount > 1:
             if let r = at {
                 cursorHint = r
                 anchorHint = r
@@ -404,15 +500,18 @@ public struct TableState: Sendable {
         }
 
         let before = cursor
+        let targetID = idAt(target)
         if m.shift && multi {
             extend(to: target, len: len, idAt: idAt)
         } else {
             cursorHint = target
             anchorHint = target
-            select(idAt(target))
+            select(targetID)
         }
-        scrollToRow(target, tx: &tx)
-        return cursor != before ? .moved : .handled
+        trackReveal(target)
+        tx.scrollIntoViewIn(key, targetID)
+        if let before, KitSourceKey.equalBytes(before, targetID) { return .handled }
+        return .moved
     }
 
     /// Computes resolved column widths given the container width.
@@ -422,7 +521,7 @@ public struct TableState: Sendable {
         var flexSum: Float = 0
 
         for (i, c) in columns.enumerated() {
-            if let w = widths[c.id] {
+            if let w = explicitWidths.values[c.sourceKey] {
                 let cw = c.clamp(w)
                 result[i] = cw
                 fixedSum += cw
@@ -440,7 +539,7 @@ public struct TableState: Sendable {
 
         let remaining = max(0, totalWidth - fixedSum)
         if flexSum > 0 {
-            for (i, c) in columns.enumerated() where widths[c.id] == nil {
+            for (i, c) in columns.enumerated() where explicitWidths.values[c.sourceKey] == nil {
                 if case .flex(let weight) = c.width {
                     let share = remaining * (max(0, weight) / flexSum)
                     result[i] = c.clamp(share)
@@ -468,18 +567,17 @@ public struct TableStyle: Sendable, Equatable {
 
     public static func fromKit(_ k: Kit) -> TableStyle {
         let c = k.c
-        let rule = c.borderWeak.a > 0 ? c.borderWeak : c.borderMuted
         return TableStyle(
             rowHeight: 28.0,
             headerHeight: 30.0,
             cellPad: 10.0,
             font: k.ty.textSmall,
-            mono: k.ty.mono,
+            mono: k.ty.mono.features("'tnum' 1"),
             headerFont: k.ty.textSmallMedium,
             text: c.textBase,
             muted: c.textMuted,
             headerText: c.textMuted,
-            rule: rule,
+            rule: c.borderWeak,
             selected: k.alpha(c.textAccent, k.dark ? 0.24 : 0.2),
             stripe: k.alpha(c.textBase, k.dark ? 0.035 : 0.03)
         )
@@ -580,18 +678,9 @@ public struct TableView<State> {
         let tableKey = st.key
         let viewportKey = "\(tableKey)-viewport"
 
-        let totalW = availableWidth ?? ((cx?.viewport.x ?? 0) > 0 ? cx!.viewport.x : 500.0)
-        let viewportH: Float = if st.viewport > 0 {
-            st.viewport
-        } else if let vp = cx?.viewport.y, vp > 0 {
-            max(1.0, vp - style.headerHeight)
-        } else {
-            270.0
-        }
-
-        let resolvedWidths = st.resolvedColumnWidths(columns: columns, totalWidth: totalW)
+        let resolvedWidths = availableWidth.map { st.resolvedColumnWidths(columns: columns, totalWidth: $0) }
         let sizes: [TableColumnWidth] = columns.map { col in
-            st.columnWidth(col.id).map { .fixed(col.clamp($0)) } ?? col.width
+            st.columnWidth(col.sourceKey).map { .fixed(col.clamp($0)) } ?? col.width
         }
 
         let header = buildHeader(
@@ -602,34 +691,14 @@ public struct TableView<State> {
             style: style
         )
 
-        let cxScrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
-        if !st.scrollSync.pendingTarget {
-            st.scrollSync.cxScrollY = cxScrollY
-        }
-        let rh = max(1.0, style.rowHeight)
-        st.scrollSync.viewportH = viewportH
-        st.scrollSync.rowHeight = rh
-        let scrollY = st.scrollSync.pendingTarget ? st.trackedScrollY : cxScrollY
-
-        let overscan: Float = 200.0
-        let start = count > 0 ? max(0, Int(floor((scrollY - overscan) / rh))) : 0
-        let end = count > 0 ? min(count, Int(ceil((scrollY + viewportH + overscan) / rh))) : 0
-        let safeStart = min(start, end)
-
-        let beforeH = Float(safeStart) * rh
-        let afterH = Float(max(0, count - end)) * rh
-
-        var rowsCol: El<State> = col()
-            .key("\(tableKey)-rows")
-            .wFull()
-            .shrink(0.0)
-
-        if beforeH > 0 {
-            rowsCol = rowsCol.child(el().key("\(tableKey)-before").wFull().h(beforeH).shrink(0.0))
-        }
-
-        for i in safeStart..<end {
-            let id = rowID(s, i)
+        let upd = update
+        let countFn = len
+        let idFn = rowID
+        let selHandler = onSelectHandler
+        let openHandler = onOpenHandler
+        let buildRow: (State, Int) -> El<State> = { s, i in
+            let id = self.rowID(s, i)
+            let st = self.get(s)
             let selected = st.isSelected(id)
             var r: El<State> = row()
                 .key(id)
@@ -642,42 +711,27 @@ public struct TableView<State> {
                 .itemsCenter()
 
             if selected {
-                r = r.bg(style.selected)
-            } else if isZebra && i % 2 == 1 {
+                r = r.focusSelected().bg(style.selected)
+            } else if self.isZebra && i % 2 == 1 {
                 r = r.bg(style.stripe).hover(style.stripe.mix(with: style.selected, t: 0.5))
             } else {
                 r = r.hover(style.stripe.mix(with: style.selected, t: 0.5))
             }
 
-            if st.multi && st.cursor == id {
-                r = r.border(1.0, k.c.borderFocus)
+            if st.multi, let cursor = st.cursor, KitSourceKey.equalBytes(cursor, id) {
+                r = r.outline(width: 1.0, offset: -1.0, color: k.c.borderFocus)
             }
 
-            var rowWords: [String] = []
-            for (j, colDef) in columns.enumerated() {
-                let cellContent = cellBuilder?(s, i, colDef.id) ?? .text("")
-                if case .text(let txt) = cellContent.content, !txt.isEmpty {
-                    rowWords.append(txt)
-                }
-                let colW = resolvedWidths[j]
-                let cellEl = buildCell(
+            for (j, colDef) in self.columns.enumerated() {
+                let cellContent = self.cellBuilder?(s, i, colDef.id) ?? .text("")
+                let cellEl = self.buildCell(
                     colDef,
                     widthSpec: sizes[j],
-                    resolvedWidth: colW,
                     cell: cellContent,
                     style: style
-                ).key(colDef.id)
+                ).key(colDef.id, byteExact: true)
                 r = r.child(cellEl)
             }
-            if !rowWords.isEmpty {
-                r = r.label(rowWords.joined(separator: " "))
-            }
-
-            let upd = update
-            let countFn = len
-            let idFn = rowID
-            let selHandler = onSelectHandler
-            let openHandler = onOpenHandler
 
             r = r.onClickPress { state, press, tx in
                 tx.focus(tableKey)
@@ -699,34 +753,38 @@ public struct TableView<State> {
                     openHandler(&state, id, &tx)
                 }
             }
-            rowsCol = rowsCol.child(r)
+            return r
         }
 
-        if afterH > 0 {
-            rowsCol = rowsCol.child(el().key("\(tableKey)-after").wFull().h(afterH).shrink(0.0))
-        }
+        let rowsCol: El<State> = col()
+            .key("\(tableKey)-rows", byteExact: true)
+            .wFull()
+            .shrink(0)
+            .growth(.default)
+            .virtualRows(count: count, estimatedRowHeight: style.rowHeight, byteExactKeys: true, key: rowID, build: buildRow)
 
         let scrollSync = st.scrollSync
         let viewport: El<State> = col()
-            .key(viewportKey)
+            .key(viewportKey, byteExact: true)
             .wFull()
             .grow(1.0)
             .minH(0.0)
             .scrollY()
+            .onLayoutTx { state, rect, tx in
+                upd(&state) { st in
+                    if st.viewport == rect[3] && st.rowHeight == style.rowHeight { tx.liveOnly() }
+                    st.viewport = rect[3]
+                    st.rowHeight = style.rowHeight
+                }
+            }
             .chainScrollOffset { pos in
                 scrollSync.cxScrollY = pos.offset.y
                 scrollSync.pendingTarget = false
             }
             .child(rowsCol)
 
-        let upd = update
-        let countFn = len
-        let idFn = rowID
-        let selHandler = onSelectHandler
-        let openHandler = onOpenHandler
-
         var rootEl: El<State> = col()
-            .key(tableKey)
+            .key(tableKey, byteExact: true)
             .role(.grid)
             .focusable(true)
             .wFull()
@@ -740,9 +798,8 @@ public struct TableView<State> {
                 var handled = false
                 let snapshot = state
                 upd(&state) { st in
-                    st.viewport = viewportH
-                    st.rowHeight = rh
-                    let outcome = st.handleKey(ev, len: n, idAt: { idFn(snapshot, $0) }, tx: &tx)
+                    let repeating = tx.keyRepeat()
+                    let outcome = st.handleKey(ev, len: n, idAt: { idFn(snapshot, $0) }, tx: &tx, keyRepeat: repeating)
                     switch outcome {
                     case .ignored:
                         handled = false
@@ -800,15 +857,12 @@ public struct TableView<State> {
     private func buildCell(
         _ c: TableCol,
         widthSpec: TableColumnWidth,
-        resolvedWidth: Float,
         cell: TableCell<State>,
         style: TableStyle
     ) -> El<State> {
         let inner: El<State>
-        var cellLabel: String? = nil
         switch cell.content {
         case .text(let t):
-            if !t.isEmpty { cellLabel = t }
             let color = cell.color ?? (cell.isMuted ? style.muted : style.text)
             let font = cell.isMono ? style.mono : style.font
             let textAlign: TextAlign = switch c.align {
@@ -816,32 +870,21 @@ public struct TableView<State> {
             case .center: .center
             case .end: .trailing
             }
-            var tEl: El<State> = text(t)
+            inner = text(t)
                 .font(font.aligned(textAlign))
                 .color(color)
-                .ellipsis()
-                .shrink(1.0)
-                .minW(0.0)
-                .a11yHidden()
-            let availW = max(0, resolvedWidth - style.cellPad * 2.0)
-            let measured = TextMeasure.measure(t, style: font)
-            if measured.x > availW + 0.5 {
-                tEl = tEl.help(t)
-            }
-            inner = tEl
+                .truncate()
+                .helpWhenTruncated(t)
         case .element(let e):
             inner = e
         }
 
-        var base: El<State> = row()
+        let base: El<State> = row()
             .role(.gridCell)
             .hFull()
             .px(style.cellPad)
             .itemsCenter()
             .clip(true)
-        if let cellLabel {
-            base = base.label(cellLabel)
-        }
         return justify(sized(base, c, widthSpec), c.align).child(inner)
     }
 
@@ -849,12 +892,12 @@ public struct TableView<State> {
         kit k: Kit,
         state: TableState,
         sizes: [TableColumnWidth],
-        resolvedWidths: [Float],
+        resolvedWidths: [Float]?,
         style: TableStyle
     ) -> El<State> {
         var h: El<State> = row()
             .key("header")
-            .role(.group)
+            .role(.row)
             .wFull()
             .h(style.headerHeight)
             .shrink(0.0)
@@ -869,19 +912,18 @@ public struct TableView<State> {
 
         let last = max(0, columns.count - 1)
         for (j, colDef) in columns.enumerated() {
-            let sortedDir = (state.sortColumn == colDef.id) ? state.sortDir : nil
+            let sortedDir = state.isSortColumn(colDef.id) ? state.sortDir : nil
             let titleText: El<State> = text(colDef.title)
                 .key("title")
                 .font(style.headerFont)
+                .helpWhenTruncated(colDef.title)
                 .color(sortedDir != nil ? style.text : style.headerText)
-                .ellipsis()
-                .shrink(1.0)
-                .minW(0.0)
+                .truncate()
                 .a11yHidden()
 
-            var inner: El<State> = row().key("inner").gap(2.0).itemsCenter().minW(0.0).shrink(1.0).child(titleText)
+            var inner: El<State> = row().key("inner").a11yHidden().gap(2.0).itemsCenter().minW(0.0).shrink(1.0).child(titleText)
             if let d = sortedDir {
-                let glyph = d == .ascending ? KitIcons.chevronUp : KitIcons.chevronDown
+                let glyph = d == .ascending ? k.glyph.chevronUp : k.glyph.chevronDown
                 inner = inner.child(icon(glyph, size: 14.0).key("sort").color(style.text).a11yHidden())
             }
 
@@ -898,20 +940,22 @@ public struct TableView<State> {
                 ),
                 colDef.align
             )
-            .key(colDef.id)
+            .key(colDef.id, byteExact: true)
+            .onLayoutTx { s, rect, tx in
+                update(&s) { st in
+                    if st.recordColumnWidth(rect[2], for: colDef.sourceKey) == rect[2] { tx.liveOnly() }
+                }
+            }
             .child(inner)
 
-            if let d = sortedDir {
-                cell = cell
-                    .sorted(d == .ascending)
-                    .help(d == .ascending ? "ascending" : "descending")
-            }
+            if let d = sortedDir { cell = cell.sorted(d == .ascending) }
 
             if colDef.sortable {
                 let id = colDef.id
                 let upd = update
                 let sortCb = onSortHandler
                 cell = cell
+                    .cursor(.pointer)
                     .hover(k.c.hover)
                     .onClick { s, tx in
                         var chosenDir: SortDir = .ascending
@@ -928,7 +972,7 @@ public struct TableView<State> {
                 cell = cell.child(
                     buildResizeHandle(
                         column: colDef,
-                        defaultWidth: resolvedWidths[j],
+                        defaultWidth: resolvedWidths?[j] ?? colDef.min,
                         rule: style.rule,
                         isLast: j == last
                     )
@@ -940,6 +984,7 @@ public struct TableView<State> {
                         .pin(top: 8.0, right: 0.0, bottom: 8.0)
                         .w(1.0)
                         .bg(style.rule)
+                        .a11yHidden()
                 )
             }
 
@@ -964,16 +1009,17 @@ public struct TableView<State> {
             .a11yHidden()
 
         return row()
-            .key("\(colId)-resize")
+            .key("\(colId)-resize", byteExact: true)
             .role(.splitter)
+            .cursor(.resizeColumn)
             .label("Resize \(c.title)")
             .pin(top: 6.0, right: -4.0, bottom: 6.0)
             .w(9.0)
             .justifyCenter()
             .onPointerDown { s, press, _ in
                 upd(&s) { st in
-                    let restore = st.columnWidth(colId)
-                    let from = restore ?? st.laidOut[colId] ?? defaultWidth
+                    let restore = st.columnWidth(c.sourceKey)
+                    let from = restore ?? st.measuredColumnWidth(c.sourceKey) ?? defaultWidth
                     st.resize.press(ColumnDrag(restore: restore, from: from), at: press.window)
                 }
             }
@@ -982,8 +1028,8 @@ public struct TableView<State> {
                     if let active = st.resize.moved(to: drag.window) {
                         st.setColumnWidth(colId, c.clamp(active.from + drag.delta.x))
                     } else {
-                        let restore = st.columnWidth(colId)
-                        let from = restore ?? st.laidOut[colId] ?? defaultWidth
+                        let restore = st.columnWidth(c.sourceKey)
+                        let from = restore ?? st.measuredColumnWidth(c.sourceKey) ?? defaultWidth
                         let start = Vec2(x: drag.window.x - drag.delta.x, y: drag.window.y - drag.delta.y)
                         st.resize.press(ColumnDrag(restore: restore, from: from), at: start)
                         st.setColumnWidth(colId, c.clamp(from + drag.delta.x))

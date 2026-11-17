@@ -62,6 +62,7 @@ internal struct OffscreenSelectable {
     /// The text is the first of a later child of a flex row that holds text before it, so copying
     /// sets it off with a tab, as a table row's next cell (`OffscreenText::tab_before`).
     var tabBefore: Bool = false
+    var source: TextCaseMapping? = nil
     /// How copying takes it (`TextSpec` `cold.uncopied`, `copy_breaks`, `copy_prefix`).
     var uncopied: [Range<Int>] = []
     var copyBreakBefore: UInt8 = 1
@@ -130,12 +131,13 @@ internal extension Runtime {
     /// The part of selectable text `node` that is selected, as copying would take it
     /// (`elements.rs` `ElementInfo::selected`: `range_in` -> `TextSpec::copy_slice`).
     func selectableSelectedSlice(_ node: FlatNode, range: Range<Int>?) -> String? {
-        guard let range, let text = selectableNodeText(node) else { return nil }
+        guard let range, !node.effectiveInert, let content = node.el.selectableContent else { return nil }
+        let text = content.displayed
         let len = text.utf8.count
         let lo = min(max(0, range.lowerBound), len)
         let hi = min(max(lo, range.upperBound), len)
         guard lo < hi else { return nil }
-        return CopyJoin.copySlice(in: text, range: lo..<hi, uncopied: node.el.uncopiedRanges)
+        return CopyJoin.copySlice(in: text, range: lo..<hi, uncopied: content.uncopied, source: content.source)
     }
 
     // MARK: - Virtual rows
@@ -170,13 +172,12 @@ internal extension Runtime {
             let isRow = el.layout.displayMode == .flex && !el.layout.displayNone
                 && (el.layout.direction == .row || el.layout.direction == .rowReverse)
             var hadChildText = false
-            let hasText = el.liveText != nil || el.plainText != nil || el.richSpans != nil
-            if !inert && el.handlers.editLens == nil && hasText && el.isSelectable && !el.isSecure {
-                let text = el.liveText?.get() ?? el.plainText ?? el.richSpans?.map(\.text).joined() ?? ""
+            if !inert, let content = el.selectableContent {
+                let text = content.displayed
                 let breaks = el.copyBreaksPair
                 out.append(OffscreenSelectable(
                     path: path, relPath: rel, key: el.keyId, text: text, group: group, orderInRow: order,
-                    uncopied: el.uncopiedRanges, copyBreakBefore: breaks.before, copyBreakAfter: breaks.after,
+                    source: content.source, uncopied: content.uncopied, copyBreakBefore: breaks.before, copyBreakAfter: breaks.after,
                     copyPrefix: el.copyPrefixString
                 ))
                 order += 1
@@ -184,7 +185,7 @@ internal extension Runtime {
             }
             var seen: [String: Int] = [:]
             for idx in el.children.indices {
-                let (childSeg, _) = layoutPathSegment(keyId: el.children[idx].keyId, siblingIndex: idx, siblingKeysSeen: &seen)
+                let (childSeg, _) = layoutPathSegment(keyId: el.children[idx].storageKeyId, siblingIndex: idx, siblingKeysSeen: &seen)
                 let beforeLen = out.count
                 walk(
                     el.children[idx],

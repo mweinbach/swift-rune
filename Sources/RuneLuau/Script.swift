@@ -181,7 +181,6 @@ public final class Script: @unchecked Sendable {
     private let shared = SharedScriptState()
     private var prewarmedBase: (vm: LuauVM, vmID: UInt64, sched: LuauTaskScheduler, signals: SignalRegistry, fireFn: LuauValue)?
     private var warnedMessages: Set<String> = []
-    private var virtualListStates: [String: VirtualListState] = [:]
     private var rowKeyCaches: [String: (ver: UInt64, map: [Int: String])] = [:]
     private var visibleRowRanges: [String: (Int, Int)] = [:]
     private var trackedScrollKeysBySurface: [String: [String]] = [:]
@@ -278,6 +277,11 @@ public final class Script: @unchecked Sendable {
     public func surface<State>(_ cx: Cx<State>, name: String) -> El<State> {
         let dark = cx.systemDark
         let id = "\(prefix)\(name)"
+        if MemoScope.activeCacheObject != nil {
+            return Rune.memo(id, deps: mix(version, salt)) {
+                renderUncached(name: name, dark: dark, State.self).key(id)
+            }
+        }
         let tracked = trackedScrollKeysBySurface[name] ?? []
         var scrollHasher = Hasher()
         scrollHasher.combine(cx.viewport.x.bitPattern)
@@ -673,11 +677,14 @@ public final class Script: @unchecked Sendable {
         _metrics.rows += 1
     }
 
-    internal func virtualListState(forKey key: String) -> VirtualListState {
-        if let existing = virtualListStates[key] { return existing }
-        let s = VirtualListState()
-        virtualListStates[key] = s
-        return s
+    internal func resolveRowKey(_ fn: LuauValue, index: Int) throws -> String {
+        guard let vm else { return String(index) }
+        let value = try runTimed { try vm.call(value: fn, args: [.number(Double(index + 1))]).first ?? .nil }
+        switch value {
+        case .string(let key): return key
+        case .number: return value.displayString
+        default: return String(index)
+        }
     }
 
     internal func cachedRowKey(for listKey: String, version: UInt64, index: Int) -> String? {
@@ -686,12 +693,10 @@ public final class Script: @unchecked Sendable {
     }
 
     internal func storeRowKey(_ key: String, for listKey: String, version: UInt64, index: Int) {
-        if var entry = rowKeyCaches[listKey], entry.ver == version {
-            entry.map[index] = key
-            rowKeyCaches[listKey] = entry
-        } else {
-            rowKeyCaches[listKey] = (ver: version, map: [index: key])
+        if rowKeyCaches[listKey]?.ver != version {
+            rowKeyCaches[listKey] = (ver: version, map: [:])
         }
+        rowKeyCaches[listKey]?.map[index] = key
     }
 
     internal func recordVisibleRowsChange(for listKey: String, first: Int, last: Int) -> Bool {

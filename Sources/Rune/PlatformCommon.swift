@@ -24,7 +24,7 @@ import UIKit
 
 // MARK: - Unified Cross-Platform RuneApp Entry Point
 
-/// Reports startup errors by printing to stderr and exiting `1` on native targets (`tooling::started`).
+/// Reports invalid CLI arguments with status 2 and other native startup failures with status 1.
 public enum RuneStartup {
     @discardableResult
     internal static func handleResult(
@@ -48,8 +48,13 @@ public enum RuneStartup {
             #if os(WASI)
             fatalError("\(error)")
             #else
-            writeStderr("\(error)")
-            exitProcess(1)
+            if case let ToolingError.invalidArgument(message) = error {
+                writeStderr(message)
+                exitProcess(2)
+            } else {
+                writeStderr("\(error)")
+                exitProcess(1)
+            }
             return false
             #endif
         }
@@ -144,7 +149,7 @@ public enum RuneApp {
         #endif
     }
 
-    /// Runs `spec`, printing startup errors to stderr and exiting `1` on native targets (`tooling::started`).
+    /// Runs `spec` and reports failures through `RuneStartup`.
     @MainActor
     public static func runOrExit<State>(_ spec: AppSpec<State>, arguments: [String]? = nil) {
         RuneStartup.started {
@@ -152,7 +157,7 @@ public enum RuneApp {
         }
     }
 
-    /// Runs `app`, printing startup errors to stderr and exiting `1` on native targets (`tooling::started`).
+    /// Runs `app` and reports failures through `RuneStartup`.
     @MainActor
     public static func runOrExit<State>(_ app: App<State>, arguments: [String]? = nil) {
         RuneStartup.started {
@@ -595,6 +600,9 @@ public final class MainQueueDispatcher: @unchecked Sendable {
         lock.lock()
         pending.append(work)
         lock.unlock()
+        #if os(WASI)
+        WASIEventLoop.wake(after: 0)
+        #endif
     }
 
     public func drain() -> Int {
@@ -927,22 +935,27 @@ public enum ReadySignal {
         public func write(in directory: URL?) -> URL? {
             guard let dir = directory, !dir.path.isEmpty else { return nil }
             do {
+                #if os(Windows) || os(WASI)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                #if !os(Windows) && !os(WASI)
-                try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o700)], ofItemAtPath: dir.path)
+                #else
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+                                                        attributes: [.posixPermissions: 0o700])
                 #endif
                 let cleanBundle = bundleId
                     .replacingOccurrences(of: "/", with: "_")
                     .replacingOccurrences(of: "\\", with: "_")
                 let fileName = "\(cleanBundle).\(pid)"
                 let target = dir.appendingPathComponent(fileName)
-                let temp = dir.appendingPathComponent(".\(fileName).tmp")
                 let line = jsonLine() + "\n"
-                try Data(line.utf8).write(to: temp)
-                if FileManager.default.fileExists(atPath: target.path) {
-                    try? FileManager.default.removeItem(at: target)
-                }
-                try FileManager.default.moveItem(at: temp, to: target)
+                #if os(WASI)
+                // WASI has no global temporary directory. Stage the file in the same preopened directory.
+                let staged = dir.appendingPathComponent(".rune-ready-" + UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: staged) }
+                try Data(line.utf8).write(to: staged, options: .withoutOverwriting)
+                guard rename(staged.path, target.path) == 0 else { return nil }
+                #else
+                try Data(line.utf8).write(to: target, options: .atomic)
+                #endif
                 return target
             } catch {
                 return nil

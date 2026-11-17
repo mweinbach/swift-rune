@@ -236,6 +236,7 @@ public struct TreeRowItem<State> {
             .role(.treeItem)
             .label(labelText)
             .itemSelected(r.selected)
+            .focusSelected(r.selected)
             .wFull()
             .h(style.rowHeight)
             .shrink(0.0)
@@ -259,25 +260,23 @@ public struct TreeRowItem<State> {
         if let badgeText {
             said.append(badgeText)
         }
-        if !said.isEmpty {
-            let desc = said.joined(separator: ", ")
-            e = e.description(desc).help(desc)
-        }
+        e = e.description(said.joined(separator: ", "))
 
         e = r.selected ? e.bg(style.selected) : e.hover(style.hover)
         if r.cursor && r.multi {
-            e = e.border(1.0, c.borderFocus)
+            e = e.outline(width: 1.0, offset: -1.0, color: c.borderFocus)
         }
 
         if style.guides {
             for level in 0..<r.depth {
                 let x = pad + Float(level) * style.indent + chevronW * 0.5 - 0.5
-                let guideColor = style.guidesHover.map { style.guide.alpha($0) } ?? style.guide
-                let guide: El<State> = el()
+                var guide: El<State> = el()
                     .key("guide\(level)")
                     .pin(top: 0.0, bottom: 0.0, left: x)
                     .w(1.0)
-                    .bg(guideColor)
+                    .bg(style.guide)
+                    .a11yHidden()
+                if let opacity = style.guidesHover { guide = guide.groupOpacity(0, opacity) }
                 e = e.child(guide)
             }
         }
@@ -287,10 +286,11 @@ public struct TreeRowItem<State> {
         let chevronBox: El<State> = el().key("chevron").size(chevronW, chevronW).itemsCenter().justifyCenter().a11yHidden()
         if let open = r.expanded {
             let chevronColor = r.selected ? style.chevronSelected : style.chevronRest
-            let chevronGlyph: El<State> = Rune.icon(style.chevron ?? KitIcons.chevronDown, size: 16.0)
+            let chevronGlyph: El<State> = Rune.icon(style.chevron ?? k.glyph.chevronDown, size: 16.0)
                 .key("glyph")
                 .color(chevronColor)
-                .rotate(open ? 0.0 : -.pi * 0.5)
+                .iconRotation(open ? 0.0 : -.pi * 0.5)
+                .mirrorInRtl()
                 .animate(k.motion.control)
                 .offset(0.0, style.chevronNudge)
             e = e.child(chevronBox.child(chevronGlyph))
@@ -322,7 +322,8 @@ public struct TreeRowItem<State> {
                 match,
                 color: c.textBase,
                 background: k.alpha(c.textAccent, 0.22),
-                weight: 650.0
+                weight: 650.0,
+                pad: 1.0
             ))
             if !suffix.isEmpty {
                 spans.append(TextSpan(suffix, color: labelColor))
@@ -332,21 +333,23 @@ public struct TreeRowItem<State> {
             labelEl = text(labelText)
         }
 
-        e = e.child(
-            labelEl
-                .key("label")
-                .font(labelFont)
-                .color(labelColor)
-                .grow(1.0)
-                .shrink(1.0)
-                .minW(0.0)
-                .ellipsis()
-                .a11yHidden()
-        )
+        var label = labelEl
+            .key("label")
+            .font(labelFont)
+            .color(labelColor)
+            .grow(1.0)
+            .shrink(1.0)
+            .minW(0.0)
+        if let width = style.labelFade {
+            label = label.truncateFadeWidth(width / max(1, labelFont.size))
+        } else {
+            label = label.truncate()
+        }
+        e = e.child(label.helpWhenTruncated(labelText).a11yHidden())
 
         if let (add, del) = changesPair {
             var counts: El<State> = row().key("changes").gap(4.0).itemsCenter().a11yHidden()
-            let f = k.ty.textXsmall
+            let f = k.ty.textXsmall.features("'tnum' 1")
             if add > 0 {
                 counts = counts.child(text("+\(add)").key("added").font(f).color(c.success.icon))
             }
@@ -369,7 +372,14 @@ public struct TreeRowItem<State> {
     }
 
     private static func findCI(_ s: String, _ q: String) -> Range<String.Index>? {
-        s.range(of: q, options: [.caseInsensitive])
+        let folded = s.lowercased()
+        guard folded.utf8.count == s.utf8.count else { return s.range(of: q, options: .literal) }
+        guard let range = folded.range(of: q.lowercased(), options: .literal) else { return nil }
+        let bytes = s.utf8
+        let start = bytes.index(bytes.startIndex, offsetBy: folded.utf8.distance(from: folded.startIndex, to: range.lowerBound))
+        let end = bytes.index(start, offsetBy: folded.utf8.distance(from: range.lowerBound, to: range.upperBound))
+        guard let lo = start.samePosition(in: s), let hi = end.samePosition(in: s) else { return nil }
+        return lo..<hi
     }
 }
 
@@ -442,103 +452,65 @@ public struct Tree<State, T: Sendable> {
 
     public func build(_ state: State, cx: Cx<State>? = nil, kit k: Kit) -> El<State> {
         let style = styleOverride ?? TreeStyle.fromKit(k)
+        let get = self.get
         let model = get(state)
         let count = model.visibleCount
         let treeKey = model.key
-        let viewportKey = "\(treeKey)-viewport"
-
-        let cxScrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
-        if !model.scrollSync.pendingTarget {
-            model.scrollSync.cxScrollY = cxScrollY
-        }
-        let viewportH: Float = if model.viewport > 0 {
-            model.viewport
-        } else if let vp = cx?.viewport.y, vp > 0 {
-            vp
-        } else {
-            240.0
-        }
         let rh = max(1.0, style.rowHeight)
-        model.scrollSync.viewportH = viewportH
-        model.scrollSync.rowHeight = rh
-        let scrollY = model.scrollSync.pendingTarget ? model.trackedScrollY : cxScrollY
-        let overscan: Float = 200.0
-        let start = count > 0 ? max(0, Int(floor((scrollY - overscan) / rh))) : 0
-        let end = count > 0 ? min(count, Int(ceil((scrollY + viewportH + overscan) / rh))) : 0
-        let safeStart = min(start, end)
+        let upd = update
+        let makeItem = rowBuilder
+        let rowLabel = label
+        let selectRow = onSelectHandler
+        let openRow = onOpenHandler
 
-        let beforeHeight = Float(safeStart) * rh
-        let afterHeight = Float(max(0, count - end)) * rh
-
-        var rowsCol: El<State> = col()
-            .key("\(treeKey)-rows")
+        let rows: El<State> = col()
+            .key("\(treeKey)-rows", byteExact: true)
             .wFull()
-            .shrink(0.0)
-
-        if beforeHeight > 0 {
-            rowsCol = rowsCol.child(
-                el().key("\(treeKey)-before").wFull().h(beforeHeight).shrink(0)
-            )
-        }
-
-        for idx in safeStart..<end {
-            guard let (data, r) = model.row(at: idx) else { continue }
-            let item = rowBuilder?(data, r) ?? TreeRowItem(label(data))
-            let id = r.id
-            let openable = r.expanded != nil
-            let sel = onSelectHandler
-            let open = onOpenHandler
-            let upd = update
-
-            var rowEl = item.build(kit: k, row: r, style: style)
-                .key(id)
-                .onClickPress { s, press, tx in
-                    tx.focus(treeKey)
-                    upd(&s) { m in
-                        let plain = m.click(id, mods: press.mods)
-                        if openable && plain {
-                            m.toggle(id)
+            .growth()
+            .virtualRows(count: count, estimatedRowHeight: rh, byteExactKeys: true, key: { state, index in
+                get(state).visibleID(at: index) ?? ""
+            }, build: { state, index in
+                guard let (data, row) = get(state).row(at: index) else { return el() }
+                let item = makeItem?(data, row) ?? TreeRowItem(rowLabel(data))
+                let id = row.id
+                let isFolder = row.expanded != nil
+                var element = item.build(kit: k, row: row, style: style)
+                    .key(id)
+                    .onClickPress { state, press, tx in
+                        tx.focus(treeKey)
+                        upd(&state) { model in
+                            let plain = model.click(id, mods: press.mods)
+                            if isFolder && plain { model.toggle(id) }
                         }
+                        selectRow?(&state, id, &tx)
                     }
-                    sel?(&s, id, &tx)
+                    .focusable(false)
+                if !isFolder, let openRow {
+                    element = element.onDoubleClick { state, tx in openRow(&state, id, &tx) }
                 }
-                .focusable(false)
+                return element
+            })
+            .virtualRowsVersion(model.visibleOrderVersion)
 
-            if !openable, let open {
-                rowEl = rowEl.onDoubleClick { s, tx in
-                    open(&s, id, &tx)
-                }
-            }
-            rowsCol = rowsCol.child(rowEl)
-        }
-
-        if afterHeight > 0 {
-            rowsCol = rowsCol.child(
-                el().key("\(treeKey)-after").wFull().h(afterHeight).shrink(0)
-            )
-        }
-
-        let scrollSync = model.scrollSync
         let viewport = col()
-            .key(viewportKey)
+            .key("\(treeKey)-viewport", byteExact: true)
             .wFull()
             .grow(1.0)
             .minH(0.0)
             .scrollY()
-            .chainScrollOffset { pos in
-                scrollSync.cxScrollY = pos.offset.y
-                scrollSync.pendingTarget = false
+            .onLayoutTx { state, rect, tx in
+                upd(&state) { model in
+                    if model.viewport == rect[3] && model.rowHeight == rh { tx.liveOnly() }
+                    model.viewport = rect[3]
+                    model.rowHeight = rh
+                }
             }
-            .child(rowsCol)
+            .child(rows)
 
-        let upd = update
-        let lbl = label
-        let sel = onSelectHandler
-        let open = onOpenHandler
         let isRtl = rtl
 
         var root: El<State> = col()
-            .key(treeKey)
+            .key(treeKey, byteExact: true)
             .role(.tree)
             .focusable(true)
             .wFull()
@@ -549,29 +521,27 @@ public struct Tree<State, T: Sendable> {
                 var outcome: TreeKey = .ignored
                 upd(&s) { m in
                     m.setRightToLeft(isRtl)
-                    m.viewport = viewportH
-                    m.rowHeight = rh
                     before = m.cursorID
-                    outcome = m.handleKey(ev, label: lbl, tx: &tx)
+                    outcome = m.handleKey(ev, label: rowLabel, tx: &tx)
                     after = m.cursorID
                 }
                 switch outcome {
                 case .ignored:
                     return false
                 case .handled:
-                    if let after, after != before {
-                        sel?(&s, after, &tx)
+                    if let after, before?.utf8.elementsEqual(after.utf8) != true {
+                        selectRow?(&s, after, &tx)
                     }
                     return true
                 case .open(let id):
-                    open?(&s, id, &tx)
+                    openRow?(&s, id, &tx)
                     return true
                 }
             }
 
-        if let a11yName {
-            root = root.label(a11yName)
-        }
+        if let a11yName { root = root.label(a11yName) }
+        if let cursor = model.cursorID { root = root.activeDescendant(cursor) }
+        if style.guidesHover != nil { root = root.hoverGroup() }
         return root
     }
 }

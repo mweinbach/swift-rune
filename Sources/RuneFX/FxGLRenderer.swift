@@ -36,6 +36,7 @@ public final class FxGLRenderer {
     private var pyramidViewport = SIMD2<UInt32>.zero
 
     private var fireSimulation: FxGLFireSimulation?
+    private var scratchGraph = FxRenderPassGraph()
 
     public let adapter: String
     public var options: FxOptions
@@ -263,9 +264,10 @@ public final class FxGLRenderer {
 
     public func prepare(viewport: SIMD2<UInt32>, layers: [FxLayer], scale: Float = 1,
                         slots: [FxSlot]? = nil, hasBackdrop: Bool = false) -> FxRenderPassGraph {
-        FxRenderPassGraph.build(viewport: viewport, scale: scale, layers: layers, slots: slots,
-                                srgbBlend: options.srgbBlend, hasBackdrop: hasBackdrop,
-                                fireSim: fireSimulation?.planner)
+        scratchGraph.rebuild(viewport: viewport, scale: scale, layers: layers, slots: slots,
+                             srgbBlend: options.srgbBlend, hasBackdrop: hasBackdrop,
+                             fireSim: fireSimulation?.planner)
+        return scratchGraph
     }
 
     /// Draws in graph order into a caller-owned framebuffer. Pass an original layer index
@@ -363,6 +365,8 @@ public final class FxGLRenderer {
     public func close() {
         guard let device else { return }
         setFireSim(false)
+        scratchGraph = FxRenderPassGraph()
+        tableData = nil
         discardPyramid()
         for program in programs.values { rune_gl_pass_delete_program(device, program) }
         programs.removeAll()

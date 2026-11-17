@@ -761,6 +761,16 @@ struct InteractionPerfParityWaveETests {
 
     // MARK: - interaction/tests.rs (Runtime wiring + Exporter)
 
+    @Test("Native interaction diagnostics retain a bounded recent history")
+    func boundedInteractionReports() {
+        let previous = InteractionTracker.testRollups
+        defer { InteractionTracker.testRollups = previous }
+        InteractionTracker.testRollups = (1...65).map { (rolls: [], fromNs: UInt64($0), toNs: UInt64($0)) }
+        #expect(InteractionTracker.testRollups.count == 60)
+        #expect(InteractionTracker.testRollups.first?.fromNs == 6)
+        #expect(InteractionTracker.testRollups.last?.toNs == 65)
+    }
+
     @Test("interaction/tests.rs: Runtime fast click updates rollup without emitting slow report")
     func runtimeFastClickRecordsRollupOnly() {
         Self.resetAll()
@@ -783,6 +793,34 @@ struct InteractionPerfParityWaveETests {
         #expect(rollup?.rolls.first?.action == "on_press")
         #expect(rollup?.rolls.first?.count == 1)
         #expect(rollup?.rolls.first?.slow == 0)
+    }
+
+    @Test("GPU frames keep interaction build, native submission and display target times distinct")
+    func gpuInteractionFinishesAtNativeSubmission() throws {
+        Self.resetAll()
+        defer { Self.resetAll() }
+        InteractionGate.forceOnForTesting = true
+        let rt = Runtime(state: 0, viewport: Vec2(200, 100), pixelScale: 1) { _, _ in
+            el().key("action").size(80, 40).bg(.white).onClick { value, _ in value += 1 }
+        }
+        _ = rt.renderFrame(at: 0)
+        rt.pointerDown(at: Vec2(20, 20), at: 0.016)
+        rt.pointerUp(at: Vec2(20, 20), at: 0.020)
+        _ = rt.renderFrame(at: 0.032)
+        guard case .built(let built) = rt.interactionTracker.currentFrameState else {
+            Issue.record("The GPU frame completed without recording the click")
+            return
+        }
+        #expect(rt.state == 1)
+        #expect(built.shaped == 0)
+        let submitted = Double(RuneExecutionContext.uptimeNanoseconds) / 1_000_000_000
+        let target = submitted + 0.050
+        rt.interactionSubmitted(at: submitted, target: target)
+        let report = try #require(InteractionTracker.testSlowReports.last)
+        #expect(report.action == "on_press")
+        #expect(report.builtNs <= report.submittedNs)
+        #expect(report.submittedNs == UInt64((submitted * 1_000_000_000).rounded()))
+        #expect(report.presentNs == UInt64((target * 1_000_000_000).rounded()))
     }
 
     @Test("interaction/tests.rs: Runtime IME edit emits key_edit and captures phases when slow")

@@ -1,0 +1,212 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune WebGPU layers, Gaussian filters, backdrops, and native surfaces</title>
+<canvas></canvas><pre id="result">Running…</pre>
+<script type="module">
+import { RuneWebGPU } from '../../Sources/Rune/Resources/Web/rune-webgpu.mjs';
+import * as blur from './blur-scenes.mjs';
+import { pagedPacket } from './image-page-scene.mjs';
+import { width, height, clip, instance, surface, packet } from './surface-scenes.mjs';
+
+let renderer, createHookPipeline, timed = 0, captures = 0, rejected = false, effects = 0;
+const completions = [];
+const result = document.querySelector('#result');
+const finish = { submitted: () => ++timed, completed: (...args) => completions.push(args) };
+
+function hook(site) {
+    if (!site.backdrop || site.index || site.mark !== 0x1234abcd || site.data[0] !== 13) throw Error('Incorrect WebGPU effect site');
+    effects++;
+    // Sample the actual painter-site backdrop and write beyond the clip. The compositor
+    // must limit the committed rectangle and discard every write from a rejected hook.
+    const module = site.device.createShaderModule({code: `
+        @group(0) @binding(0) var image: texture_2d<f32>;
+        @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+            let p = vec2f(f32((i<<1u)&2u), f32(i&2u));
+            return vec4f(p*2.0-1.0,0.0,1.0);
+        }
+        @fragment fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
+            return textureLoad(image, vec2i(p.xy) + vec2i(${site.origin[0]},${site.origin[1]}),0).brga;
+        }`});
+    const pipeline = createHookPipeline({ layout:'auto', vertex:{module, entryPoint:'vs'},
+        fragment:{module, entryPoint:'fs', targets:[{format:site.format}]} });
+    const pass = site.encoder.beginRenderPass({colorAttachments:[{view:site.view, loadOp:'load', storeOp:'store'}]});
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, site.device.createBindGroup({layout:pipeline.getBindGroupLayout(0), entries:[{binding:0, resource:site.backdrop}]}));
+    pass.draw(3);
+    pass.end();
+    return !rejected;
+}
+
+async function check(probes) {
+    const device = renderer.device;
+    const texture = renderer.context.getCurrentTexture();
+    const pitch = Math.ceil(texture.width * 4 / 256) * 256;
+    const buffer = device.createBuffer({size:pitch * texture.height, usage:GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST});
+    const encoder = device.createCommandEncoder();
+    encoder.copyTextureToBuffer({texture}, {buffer,bytesPerRow:pitch}, [texture.width,texture.height]);
+    device.queue.submit([encoder.finish()]);
+    await buffer.mapAsync(GPUMapMode.READ);
+    const pixel = new Uint8Array(buffer.getMappedRange());
+    const bgra = renderer.format.startsWith('bgra');
+    for (const [x,y,expected] of probes) {
+        const i = pitch*y + 4*x;
+        const actual = [pixel[i+(bgra?2:0)], pixel[i+1], pixel[i+(bgra?0:2)], pixel[i+3]];
+        if (actual.some((v,c) => Math.abs(v-expected[c]) > 2)) {
+            throw Error('Frame ' + captures + ' pixel ' + [x,y] + ' = ' + actual + ', expected ' + expected);
+        }
+    }
+    buffer.unmap();
+    buffer.destroy();
+    captures++;
+}
+
+function rgbProbes(coords, rgb) { return coords.map(([x,y],i) => [x,y,[...rgb.slice(i*3,i*3+3),255]]); }
+
+function paint(instances, surfaces = [], clear = [0,0,0,0], srgbBlend = true) {
+    const buffer = new ArrayBuffer(56 + instances.length*128 + surfaces.reduce((size,s) => size+s.length,0));
+    const header = new Uint32Array(buffer,0,14);
+    header.set([0x32475352,width,height,Number(srgbBlend),instances.length,1,1,1,1]);
+    header[13] = surfaces.length;
+    new Float32Array(buffer,36,4).set(clear);
+    let offset = 56;
+    for (const item of instances) {
+        new Float32Array(buffer,offset,32).set(item);
+        offset += 128;
+    }
+    for (const data of surfaces) {
+        new Uint8Array(buffer,offset,data.length).set(data);
+        offset += data.length;
+    }
+    renderer.draw(buffer,0,buffer.byteLength);
+    renderer.frameRenderer.submitSurfaceTiming();
+}
+
+try {
+    renderer = await RuneWebGPU.create(document.querySelector('canvas'), { drawGPUEffect:hook, surfaceTiming:finish });
+    renderer.device.pushErrorScope('validation');
+    createHookPipeline = renderer.device.createRenderPipeline.bind(renderer.device);
+    // The test-owned effect above can compile its own shader; Rune's first use of any
+    // layer, surface, or filter must be ready before the interactive frame begins.
+    renderer.device.createRenderPipeline = () => { throw Error('Synchronous pipeline compilation during draw'); };
+    for (const test of blur.cases) for (const [i,sigma] of blur.sigmas.entries()) {
+        blur.draw(renderer, blur.scene(test.backdrop, sigma));
+        await check(rgbProbes(test.probes, test.rgb[i]));
+    }
+    const edge = [[0,27],[1,10],[8,47],[31,34]];
+    blur.draw(renderer, blur.nestedScene(0.37));
+    await check(rgbProbes(edge, [49,34,36,62,24,19,55,46,50,21,96,125]));
+    blur.draw(renderer, blur.nestedScene(-0.9));
+    await check(rgbProbes(edge, [5,10,15,5,10,15,62,24,19,34,102,129]));
+    for (let frame = 0; frame < 3; ++frame) {
+        const bytes = packet(frame);
+        renderer.draw(bytes.buffer,0,bytes.length);
+        renderer.frameRenderer.submitSurfaceTiming();
+        await check([[5,6,frame === 2 ? [128,128,0,255] : [128,64,64,255]], [9,6,[255,128,128,255]],
+            [2,2,[255,0,0,255]], [21,4,frame === 2 ? [127,128,0,255] : [127,0,128,255]], [28,12,[128,128,128,255]]]);
+    }
+    const tile = [2,2,6,6],other = [20,2,6,6];
+    const first = surface(0,77,1,tile,3,Array(4).fill([255,0,0,255]).flat());
+    const next = surface(0,77,2,other,3,Array(4).fill([0,0,255,255]).flat());
+    paint([], [first,next]);
+    await check([[3,3,[255,0,0,255]],[21,3,[0,0,255,255]]]);
+    const mirrored = surface(0,81,1,[2,2,2,2],3,[255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255]);
+    const upright = new Float32Array(mirrored.buffer,40,52);
+    upright[32] = upright[35] = 1;
+    const limited = surface(0,82,1,[8,2,2,2],1,[16,235,16,235],[128,128]);
+    new Float32Array(limited.buffer,40,52)[32] = 1;
+    const bt601 = surface(0,83,1,[14,2,2,2],1,[81,81,81,81],[90,240]);
+    new Float32Array(bt601.buffer,40,52)[29] = 0;
+    paint([], [mirrored,limited,bt601]);
+    await check([[2,2,[0,255,0,255]], [3,2,[255,0,0,255]], [3,3,[0,0,255,255]],
+        [8,2,[0,0,0,255]], [9,2,[255,255,255,255]], [14,2,[254,0,0,255]]]);
+    const end = instance(9,clip,[]);
+    const green = instance(0,tile,[0,1,0,1]);
+    const red = instance(0,tile,[1,0,0,1]);
+    const cached = instance(8,tile,[0,0,0,1]);
+    cached[19] = 1;
+    cached.set([0xabcd,2,3,4],4);
+    cached.set([7,8,9,10],20);
+    paint([cached,green,end]);
+    await check([[3,3,[0,255,0,255]]]);
+    const resident = renderer.frameRenderer.takeCachedLayers(true);
+    if (String(resident) !== String([0x2abcd,0x40003,0x80007,0xa0009])) throw Error('Missing retained layer: '+resident);
+    cached.set(other);
+    paint([cached,end]);
+    await check([[3,3,[0,0,0,0]],[21,3,[0,255,0,255]]]);
+    if (renderer.frameRenderer.cache.hits !== 1 || renderer.frameRenderer.takeCachedLayers() !== null) throw Error('Unstable retained cache');
+    const group = instance(8,[1,1,14,10],[0,0,0,1]);
+    const effect = instance(12,[2,2,8,7],[0,0,0,1],[3,3,7,7]);
+    effect.set([0xabcd,0x1234],12);
+    effect.set([1,12,0,1,13],16);
+    for (const reject of [false,true]) {
+        rejected = reject;
+        paint([...Array(12).fill(group),red,effect,...Array(12).fill(end)]);
+        await check([[2,4,[255,0,0,255]], [4,4,reject ? [255,0,0,255] : [0,255,0,255]], [7,4,[255,0,0,255]]]);
+    }
+    // An sRGB render view of the opaque presentation texture must stay copy-compatible
+    // with the hook's isolated texture when its output is committed back to the root.
+    rejected = false;
+    paint([effect], [], [1,0,0,1], false);
+    await check([[2,4,[255,0,0,255]],[4,4,[0,255,0,255]]]);
+    // A burst must report every native frame, even when JS never yields between submissions.
+    const repeats = 16;
+    const repeat = surface(0,97,1,tile,3,Array(4).fill([255,0,0,255]).flat());
+    const same = surface(0,97,1,tile,3,[]);
+    for (let i = 0; i < repeats; i++) paint([], [i ? same : repeat]);
+    await check([[3,3,[255,0,0,255]]]);
+    const total = 5 + repeats;
+    const until = performance.now() + 3000;
+    while (completions.length < total && performance.now() < until) await new Promise(resolve => setTimeout(resolve,4));
+    const crop = [2,2,2,2];
+    const bank = instance(8,crop,[0,0,0,1]);
+    bank[19] = 1; bank[4] = 91; bank[20] = 1;
+    const tex = instance(7,crop,[1,1,1,1]);
+    tex.set([1,7,0,1],16); tex.set([0,0,1,1],20);
+    function paged(items, pages, previous, sequence, glyphs = null) {
+        const bytes = pagedPacket({width,height,instances:items,pages,previous,sequence,glyphs});
+        renderer.draw(bytes.buffer,0,bytes.length);
+    }
+    const page = data => ({width:1,height:1,data});
+    const keep = page();
+    paged([bank,tex,end],[page([255,0,0,255]),page([0,255,0,255])],0,1,[255]);
+    await check([[3,3,[0,255,0,255]]]);
+    // Later page needs a full upload. Reject before editing page zero or publishing the revision.
+    const patch = {width:1,height:1,rect:[0,0,1,1],data:[0,0,255,255]};
+    let failed = false;
+    try { paged([tex],[patch,{width:2,height:1}],1,2); }
+    catch (error) { failed = error.message.includes('Missing full'); }
+    if (!failed) throw Error('Accepted incomplete resized image page');
+    bank[0] = 20; tex[16] = 0;
+    paged([tex,bank,end],[keep,keep],1,2);
+    await check([[3,3,[255,0,0,255]],[21,3,[0,255,0,255]]]);
+    paged([tex,bank,end],[patch,keep],2,3);
+    await check([[3,3,[0,0,255,255]],[21,3,[0,255,0,255]]]);
+    const mask = instance(2,[4,4,1,1],[1,1,1,1]);
+    mask[18] = 1;
+    mask[19] = 1; // Normal glyph coverage exponent.
+    const textLayer = instance(8,[4,4,1,1],[0,0,0,1]);
+    textLayer[19] = 1; textLayer[4] = 92; textLayer[20] = 1;
+    function glyphFrame(items, glyphPages, previous, sequence) {
+        const bytes = pagedPacket({width,height,instances:items,pages:[keep,keep],previous,sequence,glyphPages});
+        renderer.draw(bytes.buffer,0,bytes.length);
+    }
+    glyphFrame([textLayer,mask,end], [page([0]),page([255])], 3, 4);
+    await check([[4,4,[255,255,255,255]]]);
+    textLayer[0] = 20;
+    glyphFrame([textLayer,end,mask], [keep,{...keep,rect:[0,0,1,1],data:[0]}], 4, 5);
+    await check([[20,4,[255,255,255,255]],[4,4,[0,0,0,255]]]);
+    const validation = await renderer.device.popErrorScope();
+    if (validation) throw Error(validation.message);
+    if (effects !== 3 || timed !== total || completions.length !== total || completions.some((v,i) => v[0] !== i+1 || !v[1])) {
+        throw Error('Incorrect effect or native-surface completion count: '+[effects,timed,JSON.stringify(completions)]);
+    }
+    result.textContent = 'PASS ' + JSON.stringify({ captures, nativeSurfaceFrames: timed, gpu:renderer.info });
+} catch (error) {
+    let message = error.stack?.includes(error.message) ? error.stack : error.message + '\n' + error.stack;
+    if (renderer) {
+        const validation = await renderer.device.popErrorScope().catch(() => null);
+        if (validation) message += '\n' + validation.message;
+    }
+    result.textContent = 'FAIL ' + message;
+} finally { renderer?.dispose(); }
+</script>

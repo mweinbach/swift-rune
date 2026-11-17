@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import RuneRef
 @testable import Rune
 @testable import RuneMotion
 
@@ -76,6 +77,25 @@ struct RewindFullParityTests {
         #expect(rt.rewind() == nil)
         #expect(rt.state.rewind.frameCount == 0)
         #expect(rt.state.rewind.estimatedBytes == 0)
+    }
+
+    @Test("Runtime rewind includes visible traced and keyed elements in both paint paths", arguments: [false, true])
+    func paintedRewindUsesVisibleTraceNames(native: Bool) throws {
+        let recorder = RewindRecorder(windowSeconds: 5)
+        let rt = Runtime<Void>(state: (), viewport: Vec2(100, 100), pixelScale: 1) { _, _ in
+            col().wFull().hFull().opacity(0.5)
+                .child(el().size(10, 10).traceName("traceOnly"))
+                .child(el().key("authored").size(10, 10).traceName("preferred").opacity(0.5))
+                .child(el().key("rewindUserKey").size(10, 10))
+                .child(el().key("outside").absolute(x: 120, y: 120).size(5, 5))
+        }
+        rt.update { _, tx in tx.recordRewind(recorder) }
+        if native { _ = rt.renderFrame(at: 0) } else { _ = rt.frame(at: 0) }
+        let frame = try #require(recorder.freeze().frames.last)
+        #expect(Set(frame.elements.map(\.key)) == ["traceOnly", "preferred", "rewindUserKey"])
+        let preferred = try #require(frame.elements.first { $0.key == "preferred" })
+        #expect(preferred.rect.xywh == rt.presented("authored")?.rect)
+        #expect(preferred.opacity == 0.25)
     }
 
     // 2. a_poll_can_attach_the_recorder
@@ -289,6 +309,57 @@ struct RewindFullParityTests {
         #expect(summary == bundle.summary)
         #expect(summary.contains("> the title hops"))
         #expect(summary.contains("## Jumps") && summary.contains("title ↓7.5 pt"))
+    }
+
+    @Test("A selected bundle replays distinct nodes that share a trace name")
+    func bundlePreservesDuplicateTraceNames() throws {
+        let recorder = Rewind()
+        recorder.setViewport(Vec2(320, 120))
+        func mark(_ node: UInt64, at x: Float) -> RewindElementSnapshot {
+            RewindElementSnapshot(key: "same", rect: .fromXYWH(x, 10, 12, 10), opacity: 1, nodeID: node)
+        }
+        recorder.recordFrame(at: 0, elements: [mark(91, at: 10), mark(42, at: 50)])
+        recorder.recordFrame(at: 0.02, elements: [mark(42, at: 50), mark(91, at: 20)])
+        recorder.recordFrame(at: 0.04, elements: [mark(42, at: 60)])
+        recorder.recordFrame(at: 0.14, elements: [mark(91, at: 30), mark(42, at: 60)])
+        recorder.recordFrame(at: 0.16, elements: [mark(91, at: 30), mark(42, at: 60)])
+
+        let clip = try RewindClip.importJSON(recorder.freeze().exportJSON())
+        let scrub = Scrub()
+        scrub.show(clip)
+        scrub.selectionStartFrame = 1
+        scrub.selectionEndFrame = 3
+        scrub.setNote("two labels")
+        let sent = try #require(scrub.sent())
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rune-rewind-identity-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let bundle = try sent.write(to: dir)
+
+        let trace = try String(contentsOf: dir.appendingPathComponent("trace.jsonl"), encoding: .utf8)
+        let lines = try trace.split(separator: "\n").map { line in
+            try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+        }
+        #expect(lines.count == 4)
+        let header = try #require(lines.first)
+        #expect(header["hz"] as? Double == 50)
+        let frame = try #require(lines.dropFirst().first)
+        let meta = try #require(frame["m"] as? [[String: Any]])
+        #expect(meta.compactMap { $0["id"] as? Int } == [1, 2])
+        #expect(meta.compactMap { $0["nm"] as? String } == ["same", "same"])
+        #expect(frame["e"] as? [[Int]] == [[1,20,10,12,10,1,0,0], [2,50,10,12,10,1,0,0]])
+        let moved = try #require(lines.dropFirst(2).first)
+        #expect(moved["e"] as? [[Int]] == [[2,60,10,12,10,1,0,0]])
+        #expect(moved["g"] as? [Int] == [1])
+        let returned = try #require(lines.dropFirst(3).first)
+        #expect(returned["e"] as? [[Int]] == [[1,30,10,12,10,1,0,0]])
+        #expect(returned["m"] == nil)
+        #expect(bundle.summary.contains("same →10 pt at frame 1 (changed in 3 frames)"))
+        #expect(bundle.summary.contains("same →10 pt at frame 2 (changed in 1 frames)"))
+
+        // RGBA produced by pinned Rust's rewind/bundle.rs for these five tape frames and this selection.
+        let png = try PortablePNG.decode(Data(contentsOf: dir.appendingPathComponent("contact.png")))
+        let hash = png.rgba.reduce(UInt64(0xcbf29ce484222325)) { ($0 ^ UInt64($1)) &* 0x100000001b3 }
+        #expect(hash == 0x3c9148002e89f7ad)
     }
 
     // 13. opening_over_an_open_scrubber_resumes_the_recorder_it_froze

@@ -1,11 +1,38 @@
 #if os(macOS) && canImport(AppKit)
 import AppKit
+import Metal
 import Testing
 @testable import Rune
 
 @MainActor
 @Suite("Native field identity")
 struct A11yFieldIdentityTests {
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil))
+    func activeRowChangesAppKitFocusWhileTheTreeKeepsKeyboardFocus() throws {
+        _ = NSApplication.shared
+        let runtime = Runtime(state: "first", viewport: Vec2(160, 80)) { cursor, _ in
+            col().key("files").role(.tree).focusable().activeDescendant(cursor).children([
+                el().key("first").role(.treeItem).label("First file").size(100, 24),
+                el().key("second").role(.treeItem).label("Second file").size(100, 24),
+            ])
+        }
+        let view = RuneMetalHostView(frame: NSRect(x: 0, y: 0, width: 160, height: 80),
+                                     runtime: runtime, renderer: try MetalRenderer(),
+                                     timeScale: 1, respectSystemAppearance: false)
+        _ = runtime.frame(at: 0)
+        #expect(runtime.accessibilityAction("files", .focus, at: 0.1))
+        _ = runtime.frame(at: 0.1)
+        view.syncPlatformBridges(treeCommitted: true)
+        let first = try #require(view.accessibilityFocusedUIElement as? RuneNSAccessibilityElement)
+        #expect(first.accessibilityIdentifier() == "first")
+        runtime.update(at: 0.2) { cursor, _ in cursor = "second" }
+        _ = runtime.frame(at: 0.2)
+        view.syncPlatformBridges(treeCommitted: true)
+        let second = try #require(view.accessibilityFocusedUIElement as? RuneNSAccessibilityElement)
+        #expect(second.accessibilityIdentifier() == "second")
+        #expect(runtime.focusedKey == "files")
+    }
+
     @Test func fieldsWithMatchingKeysRouteToTheirOwnEditor() throws {
         struct Form { var first = TextEdit("first"); var second = TextEdit("second") }
         let runtime = Runtime(state: Form(), viewport: Vec2(300, 160), systemDark: false) { _, _ in

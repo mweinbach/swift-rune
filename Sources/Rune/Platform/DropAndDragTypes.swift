@@ -286,6 +286,13 @@ public enum PopupMenuError: Error, Sendable, Equatable, CustomStringConvertible 
 public enum PopupShowAnchor: Sendable, Equatable {
     case rect(MotionRect)
     case point(Float, Float)
+
+    func scaled(by factor: Float) -> Self {
+        switch self {
+        case .rect(let rect): .rect(rect.scaled(by: factor))
+        case .point(let x, let y): .point(x * factor, y * factor)
+        }
+    }
 }
 
 /// Native host payload taken once from `Runtime.takePopup()`.

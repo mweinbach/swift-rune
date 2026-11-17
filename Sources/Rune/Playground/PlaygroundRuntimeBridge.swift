@@ -316,31 +316,17 @@ extension Runtime {
     }
 
     public static func isPlaygroundStageKey(_ key: String?) -> Bool {
-        guard let key else { return false }
-        if key == "playground-stage" { return true }
         let prefix = "playground-stage-"
-        guard key.hasPrefix(prefix) else { return false }
-        let suffix = key.dropFirst(prefix.count)
-        return !suffix.isEmpty && suffix.allSatisfy(\.isASCII) && UInt64(suffix) != nil
+        guard let key, key.hasPrefix(prefix) else { return false }
+        return UInt32(key.dropFirst(prefix.count)) != nil
     }
 
     internal static func stageElementIndex(in all: [ElementInfo], key: String) -> Int? {
-        for (i, info) in all.enumerated() where !info.moving {
-            let matchesName = (info.key == key || info.path == key)
-            guard matchesName else { continue }
-            if isInsideStage(index: i, in: all) {
-                return i
-            }
+        all.indices.first { i in
+            let item = all[i]
+            return !item.exiting && (item.key == key || item.path == key)
+                && isInsideStage(index: i, in: all)
         }
-        // Fallback: include moving elements if non-moving didn't match
-        for (i, info) in all.enumerated() {
-            let matchesName = (info.key == key || info.path == key)
-            guard matchesName else { continue }
-            if isInsideStage(index: i, in: all) {
-                return i
-            }
-        }
-        return nil
     }
 
     private static func isInsideStage(index: Int, in all: [ElementInfo]) -> Bool {

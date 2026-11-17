@@ -219,16 +219,9 @@ enum MermaidParser {
     }
 }
 
-/// Whether `source` starts with a Mermaid diagram type that `RuneMermaid` renders.
+/// Whether `source` parses as a supported diagram (`rune_mermaid::supported`).
 public func supportedMermaid(_ source: String) -> Bool {
-    let (cleaned, _) = MermaidParser.stripFrontMatterAndDirectives(source)
-    for line in cleaned.split(separator: "\n") {
-        let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        if t.isEmpty || t.hasPrefix("%%") { continue }
-        let (headWord, _) = MermaidParser.splitHeader(t)
-        return MermaidParser.isSupportedKind(headWord)
-    }
-    return false
+    MermaidParser.parse(source) != nil
 }
 
 /// Whether `source`, the complete lines of a diagram still arriving, may draw once more arrive.
@@ -245,7 +238,7 @@ public func mayDrawMermaid(_ source: String) -> Bool {
 
 /// Whether `source` parses cleanly as a supported Mermaid diagram.
 public func canRenderMermaid(_ source: String) -> Bool {
-    MermaidParser.parse(source) != nil
+    supportedMermaid(source)
 }
 
 func resolvedHover(_ hover: (MermaidHover, Color)?, theme: MermaidTheme) -> (MermaidHover, Color)? {

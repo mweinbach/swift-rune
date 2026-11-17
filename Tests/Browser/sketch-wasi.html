@@ -1,0 +1,50 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Swift Rune cursor projection</title>
+<style>* { margin: 0 } canvas { width: 560px; height: 420px; cursor: crosshair }</style>
+<canvas></canvas><pre id="result">Starting Swift Sketch…</pre>
+<script type="module">
+import { instantiateRuneBrowser, mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+import { WASI, ConsoleStdout, OpenFile, File } from '/__rune/shim/index.js';
+
+const canvas = document.querySelector('canvas'), result = document.getElementById('result');
+const cursor = () => getComputedStyle(canvas).cursor;
+async function move(x, y, label, expected) {
+    window.runeMove = { x, y };
+    result.textContent = 'Move pointer ' + label;
+    for (let i = 0; i < 300; i++) {
+        await new Promise(requestAnimationFrame);
+        if (expected(cursor())) return cursor();
+    }
+    throw Error(label + ' cursor remained ' + cursor());
+}
+
+let app;
+try {
+    const wasi = new WASI(['rune-sketch'], [], [new OpenFile(new File([])),
+        ConsoleStdout.lineBuffered(console.log), ConsoleStdout.lineBuffered(console.error)]);
+    const { instance } = await instantiateRuneBrowser(fetch('/__rune/sketch.wasm'), { wasi_snapshot_preview1: wasi.wasiImport });
+    wasi.initialize(instance);
+    app = mountRuneBrowser(canvas, instance);
+    await app.ready;
+    const renderer = app.renderer;
+    const center = await move(280, 210, 'into paper', css => css.includes('blob:'));
+    const url = center.match(/url\("(blob:[^"]+)"\)/)?.[1];
+    if (!url || !/2(?:dppx|x)\) 2 30, auto/.test(center)) throw Error('Unexpected Pencil cursor: ' + center);
+    const png = await (await fetch(url)).blob();
+    const image = await createImageBitmap(png);
+    if (image.width !== 64 || image.height !== 64 || png.type !== 'image/png') throw Error('Invalid cursor image');
+    image.close();
+    await move(2, 2, 'to margin', css => css === 'default');
+    await move(280, 210, 'back into paper', css => css === center);
+    app.dispose();
+    if (cursor() !== 'crosshair') throw Error('Disposal failed to restore the canvas cursor');
+    let revoked = false;
+    try { await fetch(url); } catch { revoked = true; }
+    if (!revoked) throw Error('Cursor URL outlived its app');
+    result.textContent = 'PASS ' + JSON.stringify({ renderer, pngBytes: png.size, hotspot: [2, 30], reused: true, revoked });
+} catch (error) {
+    app?.dispose();
+    result.textContent = 'FAIL ' + error.stack;
+}
+</script>

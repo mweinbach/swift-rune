@@ -3,6 +3,7 @@
 #include "layers.h"
 #include "gl_surface.h"
 #include "production.h"
+#include "frame_damage.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -18,21 +19,34 @@ typedef struct {
     GLenum internal_format;
 } Atlas;
 
+typedef struct {
+    Atlas *extra;
+    size_t count;
+} AtlasPages;
+
 struct RuneGL {
     RuneGLAPI gl;
     RuneGLLayers *layers;
     RuneGLSurfaces *surfaces;
-    RuneGLProduction *production;
+    RuneGLProduction *production, *outline_program, *lcd_program;
+    GLuint outline_texture;
+    int outline_rows, use_outlines, use_lcd, opaque_root;
+    GLuint glyph_fill_target, glyph_fill_buffer;
     RuneGLFrameSprings springs;
     RuneGLEffectHook effect_hook;
     void *effect_user;
     GLuint program, vao, instance_buffer;
     size_t spring_instance_count;
     int reuse_spring_instances;
+    RuneDamageHistory damage;
+    int damage_enabled, last_damage;
+    int32_t last_rects[16];
     GLint viewport_uniform;
     GLint max_texture_size;
     int es, drawing;
     Atlas glyphs, images;
+    GLuint empty_image;
+    AtlasPages glyph_pages, image_pages;
 };
 
 static int fail(char *error, size_t size, const char *message) {
@@ -63,14 +77,14 @@ int rune_gl_load_api(RuneGLAPI *gl, RuneGLResolve resolve, char *error, size_t s
 }
 
 static GLuint compile_shader(const RuneGLAPI *gl, GLenum stage, const char *prefix,
-                             const char *source, char *error, size_t size) {
+                             const char *defines, const char *source, char *error, size_t size) {
     GLuint shader = gl->CreateShader(stage);
     if (!shader) {
         fail(error, size, "GL could not allocate a shader");
         return 0;
     }
-    const GLchar *parts[] = { prefix, source };
-    gl->ShaderSource(shader, 2, parts, NULL);
+    const GLchar *parts[] = { prefix, defines, source };
+    gl->ShaderSource(shader, 3, parts, NULL);
     gl->CompileShader(shader);
     GLint success = 0;
     gl->GetShaderiv(shader, GL_COMPILE_STATUS, &success);
@@ -87,11 +101,19 @@ static GLuint compile_shader(const RuneGLAPI *gl, GLenum stage, const char *pref
 
 GLuint rune_gl_program(const RuneGLAPI *gl, int es, const char *vertex,
                        const char *fragment, char *error, size_t size) {
-    const char *prefix = es ? "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"
-                            : "#version 330 core\n";
-    GLuint vs = compile_shader(gl, GL_VERTEX_SHADER, prefix, vertex, error, size);
+    return rune_gl_program_variant(gl, es, 0, vertex, fragment, error, size);
+}
+
+GLuint rune_gl_program_variant(const RuneGLAPI *gl, int es, int variant, const char *vertex,
+                               const char *fragment, char *error, size_t size) {
+    const char *classic = es ? "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"
+                             : "#version 330 core\n";
+    const char *dual = es ? "#version 300 es\n#extension GL_EXT_blend_func_extended : require\n"
+                            "precision highp float;\nprecision highp int;\nprecision highp sampler2D;\n#define RUNE_OUTLINE_LCD 1\n"
+                          : "#version 330 core\n#define RUNE_OUTLINE_LCD 1\n";
+    GLuint vs = compile_shader(gl, GL_VERTEX_SHADER, classic, variant ? "#define RUNE_OUTLINE_VERTEX 1\n" : "", vertex, error, size);
     if (!vs) return 0;
-    GLuint fs = compile_shader(gl, GL_FRAGMENT_SHADER, prefix, fragment, error, size);
+    GLuint fs = compile_shader(gl, GL_FRAGMENT_SHADER, variant == 2 ? dual : classic, "", fragment, error, size);
     if (!fs) {
         gl->DeleteShader(vs);
         return 0;
@@ -144,6 +166,7 @@ RuneGL *rune_gl_create_device(RuneGLResolve resolve, const char *fullscreen, con
         fail(error, size, "Unable to allocate GL renderer");
         return NULL;
     }
+    r->last_damage = -1;
     RuneGLAPI *gl = &r->gl;
     if (!rune_gl_load_api(gl, resolve, error, size)) {
         free(r);
@@ -173,6 +196,12 @@ RuneGL *rune_gl_create_device(RuneGLResolve resolve, const char *fullscreen, con
 failure:
     rune_gl_destroy(r);
     return NULL;
+}
+
+int rune_gl_configure_reference_blur(RuneGL *r, const char *fullscreen, const char *fragment,
+                                     char *error, size_t size) {
+    if (!r || r->drawing || !fullscreen || !fragment) return fail(error, size, "Invalid Rune backdrop blur configuration");
+    return rune_layers_configure_blur(r->layers, fullscreen, fragment, error, size);
 }
 
 int rune_gl_configure_reference(RuneGL *r, const char *vertex, const char *fragment,
@@ -259,23 +288,93 @@ int rune_gl_surface_upload(RuneGL *r, uint64_t key, uint64_t version, int width,
     if (!r || !r->surfaces) return fail(error, size, "Rune surface shaders are not configured");
     if (r->drawing) return fail(error, size, "Cannot replace Rune surface contents during a frame");
     return rune_surfaces_upload(r->surfaces, key, version, width, height, format, plane0, bytes0,
-                                plane1, bytes1, error, size);
+                                plane1, bytes1, NULL, NULL, NULL, error, size);
+}
+
+int rune_gl_surface_copy_rgba(RuneGL *r, uint64_t key, uint64_t version, int width, int height,
+                              RuneGLSurfaceCopy copy, void *source, char *error, size_t size) {
+    if (!r || !r->surfaces || r->drawing || !copy || !source)
+        return fail(error, size, "Cannot import a native texture during a frame or without a configured surface renderer");
+    return rune_surfaces_upload(r->surfaces, key, version, width, height, 3, NULL, 0, NULL, 0, copy, NULL, source, error, size);
+}
+
+int rune_gl_surface_copy_nv12(RuneGL *r, uint64_t key, uint64_t version, int width, int height,
+                              int format, RuneGLPlaneCopy copy, void *source, char *error, size_t size) {
+    if (!r || !r->surfaces || r->drawing || !copy || !source || (format != 1 && format != 2))
+        return fail(error, size, "Invalid planar surface import");
+    return rune_surfaces_upload(r->surfaces, key, version, width, height, format, NULL, 0, NULL, 0,
+                                NULL, copy, source, error, size);
 }
 
 int rune_gl_configure_frame(RuneGL *r, const char *vertex, const char *fragment,
                             const char *fullscreen, const char *blur, char *error, size_t size) {
     if (!r || !vertex || !fragment || !fullscreen || !blur) return fail(error, size, "Missing Rune frame shader");
     if (r->drawing) return fail(error, size, "Cannot replace Rune frame shaders during a frame");
-    RuneGLProduction *production = rune_production_create(&r->gl, r->es, vertex, fragment, error, size);
+    RuneGLProduction *production = rune_production_create(&r->gl, r->es, 0, vertex, fragment, error, size);
     if (!production) return 0;
-    if (!rune_layers_configure_blur(r->layers, fullscreen, blur, error, size)) {
-        rune_production_destroy(production);
-        return 0;
-    }
+    int blur_ready = rune_layers_configure_blur(r->layers, fullscreen, blur, error, size);
     if (r->production) rune_production_destroy(r->production);
     r->production = production;
+    rune_gl_enable_frame_damage(r, 0);
+    return blur_ready ? 1 : 2;
+}
+
+int rune_gl_outline_eligible(const RuneGL *r) {
+    return r && !r->drawing && !r->springs.tracks;
+}
+
+static int supports_dual_source(const RuneGL *r) {
+    if (r->es) {
+        GLint count = 0;
+        r->gl.GetIntegerv(GL_NUM_EXTENSIONS, &count);
+        int found = 0;
+        for (GLint i = 0; i < count; ++i) {
+            const char *name = (const char *)r->gl.GetStringi(GL_EXTENSIONS, (GLuint)i);
+            if (name && strcmp(name, "GL_EXT_blend_func_extended") == 0) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) return 0;
+    }
+    GLint buffers = 0;
+    r->gl.GetIntegerv(GL_MAX_DUAL_SOURCE_DRAW_BUFFERS, &buffers);
+    return buffers > 0;
+}
+
+int rune_gl_configure_outline(RuneGL *r, const char *vertex, const char *fragment, int lcd,
+                              char *error, size_t size) {
+    if (!r || r->drawing || !vertex || !fragment) return fail(error, size, "Invalid Rune outline pipeline");
+    if (lcd && !supports_dual_source(r)) return fail(error, size, "Dual-source text blending is unavailable");
+    RuneGLProduction *p = rune_production_create(&r->gl, r->es, lcd ? 2 : 1, vertex, fragment, error, size);
+    if (!p) return 0;
+    RuneGLProduction **slot = lcd ? &r->lcd_program : &r->outline_program;
+    rune_production_destroy(*slot);
+    *slot = p;
+    r->damage.valid = 0;
     return 1;
 }
+
+void rune_gl_select_outline(RuneGL *r, int active, int lcd) {
+    if (!r || r->drawing) return;
+    int outlines = active && r->outline_program && r->outline_texture;
+    int dual = outlines && lcd && r->lcd_program;
+    if (r->use_outlines != outlines || r->use_lcd != dual) r->damage.valid = 0;
+    r->use_outlines = outlines;
+    r->use_lcd = dual;
+}
+
+void rune_gl_enable_frame_damage(RuneGL *r, int enable) {
+    if (!r || r->drawing) return;
+    const char *whole = getenv("RUNE_WHOLE_FRAMES");
+    r->damage_enabled = enable && !(whole && strcmp(whole, "1") == 0);
+    if (!r->damage_enabled) rune_damage_release(&r->damage);
+    r->last_damage = -1;
+}
+
+const int32_t *rune_gl_last_damage_rects(const RuneGL *r) { return r ? r->last_rects : NULL; }
+
+int rune_gl_last_frame_damage(const RuneGL *r) { return r ? r->last_damage : -1; }
 
 void rune_gl_frame_springs(RuneGL *r, uint32_t tracks, uint32_t ids, float seconds, float fraction) {
     if (r) r->springs = (RuneGLFrameSprings){ tracks, ids, seconds, fraction };
@@ -283,7 +382,13 @@ void rune_gl_frame_springs(RuneGL *r, uint32_t tracks, uint32_t ids, float secon
 
 void rune_gl_destroy(RuneGL *r) {
     if (!r) return;
+    rune_damage_release(&r->damage);
     if (r->production) rune_production_destroy(r->production);
+    rune_production_destroy(r->outline_program);
+    rune_production_destroy(r->lcd_program);
+    if (r->glyph_fill_target) r->gl.DeleteFramebuffers(1, &r->glyph_fill_target);
+    if (r->glyph_fill_buffer) r->gl.DeleteBuffers(1, &r->glyph_fill_buffer);
+    if (r->outline_texture) r->gl.DeleteTextures(1, &r->outline_texture);
     if (r->surfaces) rune_surfaces_destroy(r->surfaces);
     if (r->layers) rune_layers_destroy(r->layers);
     if (r->program) r->gl.DeleteProgram(r->program);
@@ -291,6 +396,15 @@ void rune_gl_destroy(RuneGL *r) {
     if (r->instance_buffer) r->gl.DeleteBuffers(1, &r->instance_buffer);
     if (r->glyphs.texture) r->gl.DeleteTextures(1, &r->glyphs.texture);
     if (r->images.texture) r->gl.DeleteTextures(1, &r->images.texture);
+    AtlasPages *tables[] = { &r->glyph_pages, &r->image_pages };
+    for (size_t i = 0; i < 2; i++) {
+        for (size_t page = 1; page < tables[i]->count; page++) {
+            GLuint tex = tables[i]->extra[page - 1].texture;
+            if (tex) r->gl.DeleteTextures(1, &tex);
+        }
+        free(tables[i]->extra);
+    }
+    if (r->empty_image) r->gl.DeleteTextures(1, &r->empty_image);
     free(r);
 }
 
@@ -319,8 +433,18 @@ void rune_gl_layer_cache_budget(RuneGL *r, uint64_t bytes) {
     rune_layers_cache_budget(r->layers, bytes);
 }
 
+void rune_gl_window_rest(RuneGL *r, int all) {
+    rune_damage_release(&r->damage);
+    rune_layers_window_rest(r->layers, all);
+    if (all) r->gl.Finish();
+}
+
 void rune_gl_layer_cache_clear(RuneGL *r) {
     rune_layers_cache_clear(r->layers);
+}
+
+RuneGLLayerStorage rune_gl_layer_storage(const RuneGL *r) {
+    return r ? rune_layers_storage(r->layers) : (RuneGLLayerStorage){0};
 }
 
 RuneGLLayerCacheStats rune_gl_layer_cache_stats(RuneGL *r) {
@@ -343,13 +467,66 @@ static void prepare_unpack(const RuneGLAPI *gl, int row_length) {
     gl->PixelStorei(GL_UNPACK_SKIP_ROWS, 0);
 }
 
-int rune_gl_patch_atlas(RuneGL *r, int channels, int width, int height,
-                        const uint8_t *previous, const uint8_t *next, char *error, size_t size) {
-    if (!r || !previous || !next || (channels != 1 && channels != 4)) {
-        return fail(error, size, "Invalid Rune atlas patch");
+int rune_gl_upload_outline_rows(RuneGL *r, int rows, int first, const uint32_t *texels,
+                                char *error, size_t size) {
+    if (!r || r->drawing || !texels || rows < 1 || rows > 4096 || first < 0 || first >= rows ||
+        rows > r->max_texture_size || 1024 > r->max_texture_size)
+        return fail(error, size, "Invalid Rune outline storage dimensions");
+    const RuneGLAPI *gl = &r->gl;
+    gl->ActiveTexture(GL_TEXTURE0 + 4);
+    gl->BindSampler(4, 0);
+    if (!r->outline_texture) gl->GenTextures(1, &r->outline_texture);
+    gl->BindTexture(GL_TEXTURE_2D, r->outline_texture);
+    prepare_unpack(gl, 0);
+    if (rows > r->outline_rows) {
+        int capacity = 1;
+        while (capacity < rows) capacity *= 2;
+        if (capacity > r->max_texture_size) capacity = rows;
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        gl->TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32UI, 1024, capacity, 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, NULL);
+        if (!check_gl(gl, "Allocating Rune outline texture", error, size)) return 0;
+        r->outline_rows = capacity;
+        first = 0;
     }
-    if (r->drawing) return fail(error, size, "Cannot update a Rune atlas during a frame");
-    const Atlas *atlas = channels == 1 ? &r->glyphs : &r->images;
+    gl->TexSubImage2D(GL_TEXTURE_2D, 0, 0, first, 1024, rows - first, GL_RGBA_INTEGER, GL_UNSIGNED_INT,
+                      texels + (size_t)first * 1024 * 4);
+    r->damage.valid = 0;
+    return check_gl(gl, "Updating Rune outline texture", error, size);
+}
+
+static int upload_region(RuneGL *r, const Atlas *atlas, int channels, int x0, int y0, int x1, int y1,
+                         const uint8_t *next, char *error, size_t size) {
+    r->damage.valid = 0;
+    const RuneGLAPI *gl = &r->gl;
+    gl->ActiveTexture(channels == 1 ? GL_TEXTURE0 : GL_TEXTURE1);
+    gl->BindTexture(GL_TEXTURE_2D, atlas->texture);
+    prepare_unpack(gl, atlas->width);
+    size_t start = ((size_t)y0 * atlas->width + x0) * channels;
+    gl->TexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, x1 - x0, y1 - y0,
+                      channels == 1 ? GL_RED : GL_RGBA, GL_UNSIGNED_BYTE, next + start);
+    gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    return check_gl(gl, "Updating Rune atlas region", error, size);
+}
+
+int rune_gl_patch_atlas_region(RuneGL *r, int channels, size_t page, int width, int height,
+                               int x0, int y0, int x1, int y1, const uint8_t *pixels, char *error, size_t size) {
+    if (!r || r->drawing || !pixels || (channels != 1 && channels != 4))
+        return fail(error, size, "Invalid Rune atlas page patch or renderer state");
+    const AtlasPages *table = channels == 1 ? &r->glyph_pages : &r->image_pages;
+    if (page && page >= table->count) return fail(error, size, "Atlas patch names a missing page");
+    const Atlas *base = channels == 1 ? &r->glyphs : &r->images;
+    const Atlas *atlas = page ? &table->extra[page - 1] : base;
+    if (!atlas->texture || width != atlas->width || height != atlas->height ||
+        x0 < 0 || y0 < 0 || x1 > width || y1 > height || x0 >= x1 || y0 >= y1)
+        return fail(error, size, "Rune image patch is outside the resident page");
+    return upload_region(r, atlas, channels, x0, y0, x1, y1, pixels, error, size);
+}
+
+static int patch_atlas(RuneGL *r, const Atlas *atlas, int channels, int width, int height,
+                       const uint8_t *previous, const uint8_t *next, char *error, size_t size) {
     if (width <= 0 || height <= 0 || atlas->width != width || atlas->height != height) {
         return fail(error, size, "Rune atlas patch dimensions do not match the resident texture");
     }
@@ -377,15 +554,14 @@ int rune_gl_patch_atlas(RuneGL *r, int channels, int width, int height,
         x1 = x;
     }
     if (y1 == 0) return 1;
-    const RuneGLAPI *gl = &r->gl;
-    gl->ActiveTexture(channels == 1 ? GL_TEXTURE0 : GL_TEXTURE1);
-    gl->BindTexture(GL_TEXTURE_2D, atlas->texture);
-    prepare_unpack(gl, width);
-    size_t start = (size_t)y0 * stride + (size_t)x0 * channels;
-    gl->TexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, x1 - x0, y1 - y0,
-                      channels == 1 ? GL_RED : GL_RGBA, GL_UNSIGNED_BYTE, next + start);
-    gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    return check_gl(gl, "Updating Rune atlas region", error, size);
+    return upload_region(r, atlas, channels, x0, y0, x1, y1, next, error, size);
+}
+
+int rune_gl_patch_atlas(RuneGL *r, int channels, int width, int height,
+                        const uint8_t *previous, const uint8_t *next, char *error, size_t size) {
+    if (!r || r->drawing || !previous || !next || (channels != 1 && channels != 4))
+        return fail(error, size, "Invalid Rune atlas patch or renderer state");
+    return patch_atlas(r, channels == 1 ? &r->glyphs : &r->images, channels, width, height, previous, next, error, size);
 }
 
 static int set_atlas(const RuneGLAPI *gl, Atlas *atlas, GLenum unit,
@@ -410,14 +586,138 @@ static int set_atlas(const RuneGLAPI *gl, Atlas *atlas, GLenum unit,
     return 1;
 }
 
-static void draw_batch(RuneGL *r, int production, int width, int height, int srgb_blend,
+static int empty_texture(RuneGL *r, char *error, size_t size) {
+    if (!r->empty_image) {
+        Atlas blank = {0};
+        uint8_t clear[4] = {0};
+        prepare_unpack(&r->gl, 0);
+        set_atlas_params(&r->gl, &blank);
+        if (!set_atlas(&r->gl, &blank, GL_TEXTURE1, 1, 1, GL_SRGB8_ALPHA8, GL_RGBA, clear, error, size)) {
+            r->gl.DeleteTextures(1, &blank.texture);
+            return 0;
+        }
+        r->empty_image = blank.texture;
+    }
+    return 1;
+}
+
+int rune_gl_atlas_page_count(RuneGL *r, int channels, size_t count, char *error, size_t size) {
+    if (!r || r->drawing || (channels != 1 && channels != 4) || count > (size_t)INT_MAX || count > SIZE_MAX / sizeof(Atlas))
+        return fail(error, size, "Invalid Rune atlas page count or renderer state");
+    AtlasPages *table = channels == 1 ? &r->glyph_pages : &r->image_pages;
+    size_t old = table->count;
+    if (old == count) return 1;
+    if (count && channels == 4 && !empty_texture(r, error, size)) return 0;
+    if (count > 1 && count > old) {
+        Atlas *pages = realloc(table->extra, (count - 1) * sizeof(*pages));
+        if (!pages) return fail(error, size, "Could not allocate Rune atlas page slots");
+        size_t first = old > 1 ? old - 1 : 0;
+        memset(pages + first, 0, (count - 1 - first) * sizeof(*pages));
+        table->extra = pages;
+    } else {
+        for (size_t page = count > 1 ? count : 1; page < old; ++page) {
+            if (table->extra[page - 1].texture)
+                r->gl.DeleteTextures(1, &table->extra[page - 1].texture);
+        }
+        if (count <= 1) {
+            free(table->extra);
+            table->extra = NULL;
+        }
+    }
+    r->damage.valid = 0;
+    table->count = count;
+    return 1;
+}
+
+int rune_gl_upload_atlas_page(RuneGL *r, int channels, size_t page, int width, int height, int srgb,
+                              const uint8_t *previous, const uint8_t *pixels,
+                              char *error, size_t size) {
+    if (!r || r->drawing || (channels != 1 && channels != 4))
+        return fail(error, size, "Invalid Rune atlas page slot or renderer state");
+    AtlasPages *table = channels == 1 ? &r->glyph_pages : &r->image_pages;
+    if (!page || page >= table->count) return fail(error, size, "Invalid Rune atlas page slot");
+    Atlas *atlas = &table->extra[page - 1];
+    if (!pixels) {
+        if (atlas->texture) {
+            r->gl.DeleteTextures(1, &atlas->texture);
+            *atlas = (Atlas){0};
+            r->damage.valid = 0;
+        }
+        return 1;
+    }
+    if (width <= 0 || height <= 0 || width > r->max_texture_size || height > r->max_texture_size)
+        return fail(error, size, "Rune atlas page exceeds texture limits");
+    GLenum internal = channels == 1 ? GL_R8 : (srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8);
+    if (previous && atlas->width == width && atlas->height == height && atlas->internal_format == internal)
+        return patch_atlas(r, atlas, channels, width, height, previous, pixels, error, size);
+    if (!atlas->texture) set_atlas_params(&r->gl, atlas);
+    r->damage.valid = 0;
+    prepare_unpack(&r->gl, 0);
+    return set_atlas(&r->gl, atlas, channels == 1 ? GL_TEXTURE0 : GL_TEXTURE1, width, height, internal,
+                     channels == 1 ? GL_RED : GL_RGBA, pixels, error, size);
+}
+
+int rune_gl_fill_outline_masks(RuneGL *r, size_t page, int width, int height, const uint8_t *base,
+                               const void *instances, size_t count, char *error, size_t size) {
+    if (!rune_gl_outline_eligible(r) || !r->outline_program || !r->outline_texture ||
+        (page && page >= r->glyph_pages.count) || width < 1 || height < 1 ||
+        width > r->max_texture_size || height > r->max_texture_size ||
+        count > INT_MAX || count > PTRDIFF_MAX / 128 || (!instances && count))
+        return fail(error, size, "Invalid Rune GPU glyph mask fill");
+    const RuneGLAPI *gl = &r->gl;
+    Atlas *atlas = page ? &r->glyph_pages.extra[page - 1] : &r->glyphs;
+    // A deferred page can be created by its first fill before any CPU atlas upload.
+    if (!atlas->texture) set_atlas_params(gl, atlas);
+    prepare_unpack(gl, 0);
+    if (!set_atlas(gl, atlas, GL_TEXTURE0, width, height, GL_R8, GL_RED, base, error, size)) return 0;
+    if (base) r->damage.valid = 0;
+    if (!count) return 1;
+    if (!empty_texture(r, error, size)) return 0;
+    GLint destination;
+    gl->GetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &destination);
+    if (!r->glyph_fill_target) gl->GenFramebuffers(1, &r->glyph_fill_target);
+    gl->BindFramebuffer(GL_DRAW_FRAMEBUFFER, r->glyph_fill_target);
+    gl->FramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, atlas->texture, 0);
+    if (gl->CheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        gl->BindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)destination);
+        return fail(error, size, "The GPU cannot draw into Rune's R8 glyph atlas");
+    }
+    // Neither float sampler may refer to the R8 attachment, even when the shader
+    // dynamically selects the integer outline store instead.
+    for (GLuint unit = 0; unit < 2; ++unit) {
+        gl->ActiveTexture(GL_TEXTURE0 + unit);
+        gl->BindSampler(unit, 0);
+        gl->BindTexture(GL_TEXTURE_2D, r->empty_image);
+    }
+    gl->ActiveTexture(GL_TEXTURE0 + 4);
+    gl->BindSampler(4, 0);
+    gl->BindTexture(GL_TEXTURE_2D, r->outline_texture);
+    gl->Disable(GL_DEPTH_TEST);
+    gl->Disable(GL_STENCIL_TEST);
+    gl->Disable(GL_CULL_FACE);
+    gl->Disable(GL_SCISSOR_TEST);
+    gl->Disable(GL_RASTERIZER_DISCARD);
+    gl->Disable(GL_BLEND);
+    gl->ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    gl->Viewport(0, 0, width, height);
+    if (!r->glyph_fill_buffer) gl->GenBuffers(1, &r->glyph_fill_buffer);
+    gl->BindBuffer(GL_ARRAY_BUFFER, r->glyph_fill_buffer);
+    gl->BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(count * 128), instances, GL_STREAM_DRAW);
+    rune_production_batch(r->outline_program, r->glyph_fill_buffer, width, height, 0, 0,
+                          0, count, 0, 0, 1, &r->springs);
+    gl->BindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)destination);
+    r->damage.valid = 0;
+    return check_gl(gl, "Filling Rune GPU glyph masks", error, size);
+}
+
+static void draw_bound_batch(RuneGL *r, GLuint glyph_texture, GLuint image_texture, int production, int width, int height, int srgb_blend,
                        int in_layer, size_t start, size_t count) {
     if (!count) return;
     const RuneGLAPI *gl = &r->gl;
     gl->ActiveTexture(GL_TEXTURE0);
-    gl->BindTexture(GL_TEXTURE_2D, r->glyphs.texture);
+    gl->BindTexture(GL_TEXTURE_2D, glyph_texture);
     gl->ActiveTexture(GL_TEXTURE1);
-    gl->BindTexture(GL_TEXTURE_2D, r->images.texture);
+    gl->BindTexture(GL_TEXTURE_2D, image_texture);
     gl->Enable(GL_BLEND);
     gl->BlendEquation(GL_FUNC_ADD);
     gl->BlendFunc(GL_ONE, (production && rune_layers_additive(r->layers)) ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
@@ -425,8 +725,18 @@ static void draw_batch(RuneGL *r, int production, int width, int height, int srg
         int x, y;
         rune_layers_target_geometry(r->layers, &x, &y, &width, &height);
         gl->Viewport(0, 0, width, height);
-        rune_production_batch(r->production, r->instance_buffer, width, height, x, y, start, count,
-                              srgb_blend, in_layer, &r->springs);
+        RuneGLProduction *program = r->production;
+        if (r->use_outlines && !r->springs.tracks) {
+            int dual = r->use_lcd && r->opaque_root && !in_layer && !rune_layers_additive(r->layers);
+            program = dual ? r->lcd_program : r->outline_program;
+            if (dual) gl->BlendFunc(GL_ONE, GL_ONE_MINUS_SRC1_COLOR);
+            gl->ActiveTexture(GL_TEXTURE0 + 4);
+            gl->BindSampler(4, 0);
+            gl->BindTexture(GL_TEXTURE_2D, r->outline_texture);
+            gl->ActiveTexture(GL_TEXTURE1);
+        }
+        rune_production_batch(program, r->instance_buffer, width, height, x, y, start, count,
+                              srgb_blend, in_layer, 0, &r->springs);
         return;
     }
     gl->UseProgram(r->program);
@@ -438,6 +748,39 @@ static void draw_batch(RuneGL *r, int production, int width, int height, int srg
         gl->VertexAttribPointer(slot, 4, GL_FLOAT, GL_FALSE, PRIMITIVE_BYTES, (const void *)offset);
     }
     gl->DrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)count);
+}
+
+/* Glyphs and images use page-local texels and independent bindings. Keep intervening
+ * primitives in their original painter order until one of the bindings changes. */
+static void draw_batch(RuneGL *r, const void *instances, int production, int width, int height, int srgb_blend,
+                       int in_layer, size_t start, size_t count) {
+    if (!count) return;
+    GLuint glyph = r->glyphs.texture, image = r->images.texture;
+    size_t first = start, end = start + count;
+    if (r->image_pages.count || r->glyph_pages.count) {
+        const size_t stride = production ? 128 : PRIMITIVE_BYTES;
+        for (size_t i = start; i < end; ++i) {
+            const float *instance = (const float *)((const uint8_t *)instances + i * stride);
+            const int is_glyph = instance[17] == 2;
+            if (!is_glyph && instance[17] != 7) continue;
+            const AtlasPages *table = is_glyph ? &r->glyph_pages : &r->image_pages;
+            if (!table->count) continue;
+            float page = instance[is_glyph && production ? 18 : 16];
+            GLuint base = is_glyph ? r->glyphs.texture : r->images.texture;
+            GLuint wanted = is_glyph || page < 1.0f ? base : r->empty_image;
+            if (page >= 1.0f && (double)page < (double)table->count) {
+                GLuint resident = table->extra[(size_t)page - 1].texture;
+                if (resident) wanted = resident;
+            }
+            GLuint *bound = is_glyph ? &glyph : &image;
+            if (*bound == wanted) continue;
+            if (i != first)
+                draw_bound_batch(r, glyph, image, production, width, height, srgb_blend, in_layer, first, i - first);
+            first = i;
+            *bound = wanted;
+        }
+    }
+    draw_bound_batch(r, glyph, image, production, width, height, srgb_blend, in_layer, first, end - first);
 }
 
 /* A hidden or cached group skips all children, including its native surfaces. */
@@ -473,6 +816,7 @@ static int render(RuneGL *r, int production, int width, int height, const float 
         return fail(error, size, "Frame or atlas dimensions exceed GL texture limits");
     }
 
+    r->opaque_root = clear[3] >= 1.0f;
     const RuneGLAPI *gl = &r->gl;
     GLint destination = 0, read_framebuffer = 0;
     gl->GetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &destination);
@@ -488,6 +832,7 @@ static int render(RuneGL *r, int production, int width, int height, const float 
     gl->ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     if (!r->es) gl->Disable(GL_FRAMEBUFFER_SRGB);
     prepare_unpack(gl, 0);
+    if (glyphs || images) r->damage.valid = 0;
     if (!set_atlas(gl, &r->glyphs, GL_TEXTURE0, gw, gh, GL_R8, GL_RED, glyphs, error, size) ||
         !set_atlas(gl, &r->images, GL_TEXTURE1, iw, ih, (!production && srgb_blend) ? GL_RGBA8 : GL_SRGB8_ALPHA8,
                    GL_RGBA, images, error, size)) return 0;
@@ -496,11 +841,34 @@ static int render(RuneGL *r, int production, int width, int height, const float 
     int retained = spring_frame && r->reuse_spring_instances && count == r->spring_instance_count;
     r->reuse_spring_instances = 0;
     r->spring_instance_count = 0;
-    if (count && !retained) gl->BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(count * stride), instances, GL_STREAM_DRAW);
+    RuneDamageRect rects[4];
+    int damage = -1;
+    if (production && r->damage_enabled && !draw_count && !spring_frame && !r->effect_hook)
+        damage = rune_damage_plan(&r->damage, instances, count, width, height, clear, srgb_blend, rects);
+    else
+        r->damage.valid = 0;
+    if (count && !retained && damage != 0) gl->BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(count * stride), instances, GL_STREAM_DRAW);
     r->drawing = 1;
-    int success = rune_layers_frame(r->layers, width, height, clear, srgb_blend, production, r->glyphs.texture, error, size);
+    int success = rune_layers_frame(r->layers, width, height, srgb_blend, production, error, size);
     if (!success) goto done;
 
+    if (damage >= 0) {
+        rune_layers_cache_begin(r->layers);
+        gl->Enable(GL_SCISSOR_TEST);
+        for (int i = 0; i < damage; i++) {
+            RuneDamageRect rect = rects[i];
+            gl->Scissor(rect.left, height - rect.bottom, rect.right - rect.left, rect.bottom - rect.top);
+            rune_layers_clear_root(r->layers, clear, r->glyphs.texture);
+            RuneDamageRange ranges[8];
+            int used = rune_damage_ranges(&r->damage, rect, ranges);
+            for (int j = 0; j < used; ++j) {
+                draw_batch(r, instances, 1, width, height, srgb_blend, 0, ranges[j].first, ranges[j].count);
+            }
+        }
+        gl->Disable(GL_SCISSOR_TEST);
+        goto present;
+    }
+    rune_layers_clear_root(r->layers, clear, r->glyphs.texture);
     if (production) {
         success = rune_layers_plan(r->layers, instances, count, width, height, error, size);
         if (!success) goto done;
@@ -515,7 +883,7 @@ static int render(RuneGL *r, int production, int width, int height, const float 
         /* The Metal host flushes any remaining surface at end-of-frame, including
          * callers using UINT32_MAX as the final insertion point. */
         if (surface < draw_count && (i == count || draws[surface].before_instance <= i)) {
-            draw_batch(r, production, width, height, srgb_blend, depth > 0, first, i - first);
+            draw_batch(r, instances, production, width, height, srgb_blend, depth > 0, first, i - first);
             first = i;
             int origin_x = 0, origin_y = 0, w = width, h = height;
             if (production) rune_layers_target_geometry(r->layers, &origin_x, &origin_y, &w, &h);
@@ -543,7 +911,7 @@ static int render(RuneGL *r, int production, int width, int height, const float 
             if (k != 8 && k != 9 && k != 12 && k != 13) continue;
             kind = (int)k;
         }
-        draw_batch(r, production, width, height, srgb_blend, depth > 0, first, i - first);
+        draw_batch(r, instances, production, width, height, srgb_blend, depth > 0, first, i - first);
         if (production && kind == 8 && (rune_layers_should_skip(r->layers, instance) ||
                                         rune_layers_cache_composite(r->layers, marker, instance))) {
             size_t end = matching_layer_end(instances, i, count);
@@ -581,11 +949,18 @@ static int render(RuneGL *r, int production, int width, int height, const float 
         if (kind == 9) depth--;
         first = i + 1;
     }
-    draw_batch(r, production, width, height, srgb_blend, depth > 0, first, count - first);
+    draw_batch(r, instances, production, width, height, srgb_blend, depth > 0, first, count - first);
+present:
     success = rune_layers_present(r->layers, (GLuint)destination, error, size);
     if (success) success = check_gl(gl, "Drawing Rune frame", error, size);
     if (success) rune_surfaces_prune(r->surfaces, draws, draw_count);
 done:
+    r->last_damage = success ? damage : -1;
+    for (int i = 0; i < r->last_damage; ++i) {
+        int32_t *out = r->last_rects + i * 4;
+        out[0] = rects[i].left; out[1] = rects[i].top; out[2] = rects[i].right; out[3] = rects[i].bottom;
+    }
+    if (!success) r->damage.valid = 0;
     if (spring_frame && success) r->spring_instance_count = count;
     if (production && !success) {
         rune_layers_cache_clear(r->layers);

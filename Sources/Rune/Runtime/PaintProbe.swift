@@ -100,7 +100,7 @@ extension Runtime {
             paint.instant = (parent?.instant ?? false) || el.hasInstantChanges || el.runtimeExtras[MotionGateExtraKey.instantChanges] as? Bool == true
             paint.atOnce = MotionGatePaintUtils.atOnceBits(
                 motion: el.runtimeExtras[MotionGateExtraKey.ownMotionNone] as? Bool ?? false,
-                blur: el.runtimeExtras[MotionGateExtraKey.ownBlurNone] as? Bool
+                blur: el.blurMotionOverride.map { $0.animation.curve == .instant }
             )
             paints[key] = paint
         }

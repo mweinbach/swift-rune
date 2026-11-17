@@ -35,12 +35,6 @@ bool validUnit(TextUnit unit) {
     return unit >= TextUnit_Character && unit <= TextUnit_Document;
 }
 
-// Snap retained offsets to available Rune insertion points after an edit.
-int snap(const std::vector<int> &graphemes, int offset) {
-    auto next = std::upper_bound(graphemes.begin(), graphemes.end(), offset);
-    return next == graphemes.begin() ? 0 : *(next - 1);
-}
-
 void appendBoundary(std::vector<int> &bounds, int value) {
     if (bounds.back() != value) bounds.push_back(value);
 }
@@ -49,46 +43,69 @@ bool lineBreak(wchar_t ch) {
     return ch == L'\r' || ch == L'\n' || ch == 0x0085 || ch == 0x2028 || ch == 0x2029;
 }
 
-std::vector<int> unitBoundaries(const RuneUiaTextContent &data, TextUnit unit) {
-    const auto &graphemes = data.graphemes;
-    const int length = static_cast<int>(data.text.size());
+bool unicodeSpace(wchar_t ch) {
+    return (ch >= 0x0009 && ch <= 0x000D) || ch == 0x0020 || ch == 0x0085 || ch == 0x00A0 ||
+           ch == 0x1680 || (ch >= 0x2000 && ch <= 0x200A) || ch == 0x2028 || ch == 0x2029 ||
+           ch == 0x202F || ch == 0x205F || ch == 0x3000;
+}
+
+std::vector<int> wordBoundaries(const RuneUiaTextContent &data) {
+    const auto &text = data.text;
     std::vector<int> bounds{0};
-    if (unit == TextUnit_Format || unit == TextUnit_Word) {
-        // Rune fields have a single format. UIA promotes unsupported Format to Word.
-        // UIA word units include trailing whitespace.
-        std::vector<WORD> classes(length);
-        if (length) GetStringTypeW(CT_CTYPE1, data.text.data(), length, classes.data());
-        int previous = -1;
-        for (size_t i = 0; i + 1 < graphemes.size(); ++i) {
-            const int offset = graphemes[i];
-            const WORD flags = classes[offset];
-            const int kind = flags & C1_SPACE ? 0 : (flags & C1_PUNCT ? 1 : 2);
-            if (kind != 0 && kind != previous) appendBoundary(bounds, offset);
-            previous = kind;
+    std::vector<uint8_t> flags;
+    if (data.wordBreaks && !text.empty()) {
+        flags.resize(text.size());
+        data.wordBreaks(reinterpret_cast<const uint16_t *>(text.data()), static_cast<int32_t>(text.size()), flags.data());
+    }
+    size_t line = 0;
+    for (size_t i = 1; i + 1 < data.characters.size(); ++i) {
+        const int at = data.characters[i];
+        if (flags.empty()) {
+            if (unicodeSpace(text[at - 1]) && !unicodeSpace(text[at])) bounds.push_back(at);
+            continue;
         }
-    } else if (unit == TextUnit_Line || unit == TextUnit_Paragraph) {
-        for (size_t i = 0; i + 1 < graphemes.size(); ++i) {
-            if (lineBreak(data.text[graphemes[i]])) appendBoundary(bounds, graphemes[i + 1]);
-        }
-        if (unit == TextUnit_Line) {
-            // Cells within a visual line can arrive in right-to-left order. The
-            // smallest logical offset on that line is its start in the document.
-            int previousLine = -1, lineStart = 0;
-            for (const auto &cell : data.cells) {
-                if (cell.line != previousLine) {
-                    if (previousLine > 0) bounds.push_back(lineStart);
-                    previousLine = cell.line;
-                    lineStart = cell.start;
-                } else {
-                    lineStart = std::min(lineStart, static_cast<int>(cell.start));
-                }
-            }
-            if (previousLine > 0) bounds.push_back(lineStart);
-            std::sort(bounds.begin(), bounds.end());
-            bounds.erase(std::unique(bounds.begin(), bounds.end()), bounds.end());
+        while (line + 1 < data.lineStarts.size() && data.lineStarts[line + 1] <= static_cast<int>(i)) ++line;
+        const size_t inLine = i - data.lineStarts[line];
+        // Rune's shaped runs store interior word breaks as u8 character indices.
+        // A hard paragraph starts a word unit. Soft wraps alone do not split a word.
+        if ((inLine == 0 && text[at - 1] == L'\n') ||
+            (inLine > 0 && inLine < 256 && text[at] != L'\n' && flags[at])) {
+            bounds.push_back(at);
         }
     }
-    // Unpaginated fields promote Page to Document.
+    appendBoundary(bounds, static_cast<int>(text.size()));
+    return bounds;
+}
+
+const std::vector<int> &unitBoundaries(const RuneUiaTextContent &data, TextUnit unit, std::vector<int> &bounds) {
+    const auto &characters = data.characters;
+    const int length = static_cast<int>(data.text.size());
+    if (unit == TextUnit_Character) return characters;
+    if (unit == TextUnit_Word) {
+        std::call_once(data.wordsReady, [&] { data.words = wordBoundaries(data); });
+        return data.words;
+    }
+    bounds.push_back(0);
+    if (data.valueOnly) {
+        // Rune's long_text adapter uses whitespace-delimited words and LF-delimited
+        // lines. Format and Page expand to Document in the absence of text runs.
+        if (unit == TextUnit_Line || unit == TextUnit_Paragraph) {
+            for (size_t i = 1; i + 1 < characters.size(); ++i) {
+                const int at = characters[i];
+                if (data.text[at - 1] == L'\n') bounds.push_back(at);
+            }
+        }
+        appendBoundary(bounds, length);
+        return bounds;
+    }
+    if (unit == TextUnit_Line && !data.cells.empty()) {
+        for (int line : data.lineStarts) appendBoundary(bounds, characters[line]);
+    } else if (unit == TextUnit_Line || unit == TextUnit_Paragraph) {
+        for (size_t i = 0; i + 1 < characters.size(); ++i) {
+            if (lineBreak(data.text[characters[i]])) appendBoundary(bounds, characters[i + 1]);
+        }
+    }
+    // Rune publishes one text format and no pages, so Format and Page cover the document.
     appendBoundary(bounds, length);
     return bounds;
 }
@@ -176,21 +193,73 @@ struct RuneRangeAccess : IUnknown {
                                                 const RuneUiaTextContent &content, Span &out) = 0;
 };
 
+// AccessKit retains an endpoint as (text run ID, character index). Rune emits one
+// run per visual line. Its value-only fields instead retain a byte index in the value.
+struct TextPosition {
+    int line;
+    uint64_t index;
+
+    static TextPosition capture(const RuneUiaTextContent &data, int offset, bool preferPreviousLine) {
+        auto after = std::upper_bound(data.characters.begin(), data.characters.end(), offset);
+        const int character = static_cast<int>(after - data.characters.begin()) - 1;
+        if (data.valueOnly) {
+            const size_t block = static_cast<size_t>(character) / data.scalarBlock;
+            uint64_t bytes = data.byteBlocks[block];
+            for (size_t i = block * data.scalarBlock; i < static_cast<size_t>(character); ++i)
+                bytes += data.utf8Width(data.text[data.characters[i]]);
+            return {-1, bytes};
+        }
+        auto nextLine = preferPreviousLine && character > 0
+            ? std::lower_bound(data.lineStarts.begin(), data.lineStarts.end(), character)
+            : std::upper_bound(data.lineStarts.begin(), data.lineStarts.end(), character);
+        const int line = std::max(0, static_cast<int>(nextLine - data.lineStarts.begin()) - 1);
+        return {line, static_cast<uint64_t>(character - data.lineStarts[line])};
+    }
+
+    int resolve(const RuneUiaTextContent &data) {
+        const int last = static_cast<int>(data.characters.size()) - 1;
+        if ((line < 0) != data.valueOnly) return -1;
+        if (data.valueOnly) {
+            auto after = std::upper_bound(data.byteBlocks.begin(), data.byteBlocks.end(), index);
+            const size_t block = static_cast<size_t>(after - data.byteBlocks.begin() - 1);
+            int i = static_cast<int>(block * data.scalarBlock);
+            uint64_t bytes = data.byteBlocks[block];
+            while (i < last) {
+                auto next = bytes + data.utf8Width(data.text[data.characters[i]]);
+                if (next > index) break;
+                bytes = next;
+                ++i;
+            }
+            index = bytes; // A shorter or changed value clamps to a current scalar boundary.
+            return data.characters[i];
+        }
+        if (line >= static_cast<int>(data.lineStarts.size())) return -1;
+        const int first = data.lineStarts[line];
+        const int end = line + 1 < static_cast<int>(data.lineStarts.size()) ? data.lineStarts[line + 1] : last;
+        if (index > static_cast<uint64_t>(end - first)) return -1;
+        return data.characters[first + static_cast<int>(index)];
+    }
+};
+
 class TextRange final : public ITextRangeProvider, public RuneRangeAccess {
     std::atomic<ULONG> refs{1};
     RuneUiaTextSource *source;
     std::mutex lock;
-    Span endpoints;
+    TextPosition start{}, end{};
 
-    Span current(const RuneUiaTextContent &content) const {
-        return {snap(content.graphemes, endpoints.start), snap(content.graphemes, endpoints.end)};
+    void set(const RuneUiaTextContent &content, Span range) {
+        start = TextPosition::capture(content, range.start, false);
+        end = range.start == range.end ? start : TextPosition::capture(content, range.end, true);
+    }
+    HRESULT current(const RuneUiaTextContent &content, Span &range) {
+        range = {start.resolve(content), end.resolve(content)};
+        return range.start >= 0 && range.end >= range.start ? S_OK : UIA_E_ELEMENTNOTAVAILABLE;
     }
     HRESULT read(RuneUiaTextSnapshot &snapshot, Span &range) {
         HRESULT hr = source->readText(snapshot);
         if (FAILED(hr)) return hr;
         std::lock_guard<std::mutex> guard(lock);
-        range = current(*snapshot.content);
-        return S_OK;
+        return current(*snapshot.content, range);
     }
     HRESULT targetSpan(ITextRangeProvider *target, const RuneUiaTextContent &content, Span &span) {
         if (!target) return E_INVALIDARG;
@@ -208,7 +277,8 @@ class TextRange final : public ITextRangeProvider, public RuneRangeAccess {
     }
 
 public:
-    TextRange(RuneUiaTextSource *owner, Span span) : source(owner), endpoints(span) {
+    TextRange(RuneUiaTextSource *owner, const RuneUiaTextContent &content, Span range) : source(owner) {
+        set(content, range);
         source->textOwner()->AddRef();
     }
     ~TextRange() { source->textOwner()->Release(); }
@@ -234,8 +304,7 @@ public:
                                         const RuneUiaTextContent &content, Span &out) override {
         if (!source->sameText(owner)) return E_INVALIDARG;
         std::lock_guard<std::mutex> guard(lock);
-        out = current(content);
-        return S_OK;
+        return current(content, out);
     }
     HRESULT STDMETHODCALLTYPE Clone(ITextRangeProvider **out) override {
         if (!out) return E_POINTER;
@@ -243,7 +312,7 @@ public:
         RuneUiaTextSnapshot snapshot;
         Span range;
         HRESULT hr = read(snapshot, range);
-        return FAILED(hr) ? hr : runeCreateTextRange(source, range.start, range.end, out);
+        return FAILED(hr) ? hr : runeCreateTextRange(source, *snapshot.content, range.start, range.end, out);
     }
     HRESULT STDMETHODCALLTYPE Compare(ITextRangeProvider *target, BOOL *out) override {
         if (!out) return E_POINTER;
@@ -279,12 +348,26 @@ public:
         if (FAILED(hr)) return hr;
         const auto &data = *snapshot.content;
         std::vector<int> larger;
-        if (unit != TextUnit_Character) larger = unitBoundaries(data, unit);
-        const auto &bounds = unit == TextUnit_Character ? data.graphemes : larger;
+        const auto &bounds = unitBoundaries(data, unit, larger);
         std::lock_guard<std::mutex> guard(lock);
-        if (bounds.size() < 2) { endpoints = {0, 0}; return S_OK; }
-        const int i = enclosingIndex(bounds, current(data).start);
-        endpoints = {bounds[i], bounds[i + 1]};
+        // Narrator recovers a stale run by expanding it back to this field's document.
+        if (unit == TextUnit_Document && !data.valueOnly && start.line >= 0) {
+            set(data, {0, static_cast<int>(data.text.size())});
+            return S_OK;
+        }
+        Span range;
+        hr = current(data, range);
+        if (FAILED(hr)) return hr;
+        if (bounds.size() < 2) { set(data, {0, 0}); return S_OK; }
+        if (range.start == static_cast<int>(data.text.size())) {
+            if (unit == TextUnit_Character) return S_OK;
+            if (data.valueOnly && (unit == TextUnit_Line || unit == TextUnit_Paragraph) && data.text.back() == L'\n') {
+                set(data, {range.start, range.start});
+                return S_OK;
+            }
+        }
+        const int i = enclosingIndex(bounds, range.start);
+        set(data, {bounds[i], bounds[i + 1]});
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE FindAttribute(TEXTATTRIBUTEID id, VARIANT value, BOOL,
@@ -298,7 +381,7 @@ public:
         if (id != UIA_IsReadOnlyAttributeId) return S_OK;
         if (value.vt != VT_BOOL) return E_INVALIDARG;
         if ((value.boolVal != VARIANT_FALSE) != snapshot.readOnly) return S_OK;
-        return runeCreateTextRange(source, range.start, range.end, out);
+        return runeCreateTextRange(source, *snapshot.content, range.start, range.end, out);
     }
     HRESULT STDMETHODCALLTYPE FindText(BSTR text, BOOL backward, BOOL ignoreCase, ITextRangeProvider **out) override {
         if (!out) return E_POINTER;
@@ -314,15 +397,15 @@ public:
         const auto &data = *snapshot.content;
         // Compare ordinal UTF-16 at real insertion points. A match cannot leave a
         // client with half of an emoji, surrogate pair, or combining sequence.
-        auto first = std::lower_bound(data.graphemes.begin(), data.graphemes.end(), range.start);
-        auto last = std::upper_bound(first, data.graphemes.end(), range.end - n);
+        auto first = std::lower_bound(data.characters.begin(), data.characters.end(), range.start);
+        auto last = std::upper_bound(first, data.characters.end(), range.end - n);
         while (first != last) {
             const int at = backward ? *--last : *first++;
             bool match = ignoreCase
                 ? CompareStringOrdinal(data.text.data() + at, n, text, n, TRUE) == CSTR_EQUAL
                 : data.text.compare(at, n, text, needle) == 0;
-            if (match && std::binary_search(data.graphemes.begin(), data.graphemes.end(), at + n))
-                return runeCreateTextRange(source, at, at + n, out);
+            if (match && std::binary_search(data.characters.begin(), data.characters.end(), at + n))
+                return runeCreateTextRange(source, data, at, at + n, out);
         }
         return S_OK;
     }
@@ -330,11 +413,33 @@ public:
         if (!out) return E_POINTER;
         VariantInit(out);
         RuneUiaTextSnapshot snapshot;
-        HRESULT hr = source->readText(snapshot);
+        Span range;
+        HRESULT hr = read(snapshot, range);
         if (FAILED(hr)) return hr;
         if (id == UIA_IsReadOnlyAttributeId) {
             out->vt = VT_BOOL;
             out->boolVal = snapshot.readOnly ? VARIANT_TRUE : VARIANT_FALSE;
+            return S_OK;
+        }
+        if (id == UIA_CaretPositionAttributeId) {
+            CaretPosition position = CaretPosition_Unknown;
+            if (range.start == range.end) {
+                const auto &data = *snapshot.content;
+                const int offset = range.start, length = static_cast<int>(data.text.size());
+                const auto newline = [&](wchar_t ch) { return data.valueOnly ? ch == L'\n' : lineBreak(ch); };
+                if (offset == 0 || newline(data.text[offset - 1])) {
+                    position = CaretPosition_BeginningOfLine;
+                } else if (offset == length || newline(data.text[offset])) {
+                    position = CaretPosition_EndOfLine;
+                } else if (!data.valueOnly) {
+                    auto at = std::lower_bound(data.characters.begin(), data.characters.end(), offset);
+                    if (std::binary_search(data.lineStarts.begin(), data.lineStarts.end(), static_cast<int>(at - data.characters.begin()))) {
+                        position = CaretPosition_BeginningOfLine;
+                    }
+                }
+            }
+            out->vt = VT_I4;
+            out->lVal = position;
             return S_OK;
         }
         hr = UiaGetReservedNotSupportedValue(&out->punkVal);
@@ -370,8 +475,15 @@ public:
         const auto &text = snapshot.content->text;
         int count = range.end - range.start;
         if (maxLength >= 0 && count > maxLength) {
-            count = maxLength;
-            if (count > 0 && IS_HIGH_SURROGATE(text[range.start + count - 1])) --count;
+            if (snapshot.content->valueOnly) {
+                const auto &characters = snapshot.content->characters;
+                auto start = std::lower_bound(characters.begin(), characters.end(), range.start);
+                auto end = std::lower_bound(start, characters.end(), range.end);
+                if (end - start > maxLength) count = start[maxLength] - range.start;
+            } else {
+                count = maxLength;
+                if (count > 0 && IS_HIGH_SURROGATE(text[range.start + count - 1])) --count;
+            }
         }
         *out = SysAllocStringLen(text.data() + range.start, static_cast<UINT>(count));
         return *out ? S_OK : E_OUTOFMEMORY;
@@ -385,19 +497,21 @@ public:
         if (FAILED(hr) || count == 0) return hr;
         const auto &data = *snapshot.content;
         std::vector<int> larger;
-        if (unit != TextUnit_Character) larger = unitBoundaries(data, unit);
-        const auto &bounds = unit == TextUnit_Character ? data.graphemes : larger;
+        const auto &bounds = unitBoundaries(data, unit, larger);
         std::lock_guard<std::mutex> guard(lock);
-        const Span range = current(data);
+        Span range;
+        hr = current(data, range);
+        if (FAILED(hr)) return hr;
         if (bounds.size() < 2) return S_OK;
         if (range.start == range.end) {
             const int offset = advanceEndpoint(bounds, range.start, count, *moved);
-            endpoints = {offset, offset};
+            set(data, {offset, offset});
         } else {
             const int from = enclosingIndex(bounds, range.start);
-            const int to = shiftedIndex(from, count, static_cast<int>(bounds.size()) - 2);
+            const int last = static_cast<int>(bounds.size()) - 1;
+            const int to = shiftedIndex(from, count, last);
             *moved = to - from;
-            if (*moved) endpoints = {bounds[to], bounds[to + 1]};
+            if (*moved) set(data, {bounds[to], bounds[to == last ? to : to + 1]});
         }
         return S_OK;
     }
@@ -411,12 +525,14 @@ public:
         if (FAILED(hr) || count == 0) return hr;
         const auto &data = *snapshot.content;
         std::vector<int> larger;
-        if (unit != TextUnit_Character) larger = unitBoundaries(data, unit);
-        const auto &bounds = unit == TextUnit_Character ? data.graphemes : larger;
+        const auto &bounds = unitBoundaries(data, unit, larger);
         std::lock_guard<std::mutex> guard(lock);
-        endpoints = current(data);
-        const int offset = advanceEndpoint(bounds, endpoints.endpoint(side), count, *moved);
-        endpoints.setEndpoint(side, offset);
+        Span range;
+        hr = current(data, range);
+        if (FAILED(hr)) return hr;
+        const int offset = advanceEndpoint(bounds, range.endpoint(side), count, *moved);
+        range.setEndpoint(side, offset);
+        set(data, range);
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE MoveEndpointByRange(TextPatternRangeEndpoint side, ITextRangeProvider *target,
@@ -429,8 +545,11 @@ public:
         hr = targetSpan(target, *snapshot.content, other);
         if (FAILED(hr)) return hr;
         std::lock_guard<std::mutex> guard(lock);
-        endpoints = current(*snapshot.content);
-        endpoints.setEndpoint(side, other.endpoint(targetSide));
+        Span range;
+        hr = current(*snapshot.content, range);
+        if (FAILED(hr)) return hr;
+        range.setEndpoint(side, other.endpoint(targetSide));
+        set(*snapshot.content, range);
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Select() override {
@@ -443,7 +562,12 @@ public:
     }
     HRESULT STDMETHODCALLTYPE AddToSelection() override { return unsupported(UIA_E_INVALIDOPERATION); }
     HRESULT STDMETHODCALLTYPE RemoveFromSelection() override { return unsupported(UIA_E_INVALIDOPERATION); }
-    HRESULT STDMETHODCALLTYPE ScrollIntoView(BOOL) override { return unsupported(UIA_E_NOTSUPPORTED); }
+    HRESULT STDMETHODCALLTYPE ScrollIntoView(BOOL) override {
+        RuneUiaTextSnapshot snapshot;
+        Span range;
+        HRESULT hr = read(snapshot, range);
+        return FAILED(hr) ? hr : source->scrollTextIntoView();
+    }
     HRESULT STDMETHODCALLTYPE GetChildren(SAFEARRAY **out) override {
         if (!out) return E_POINTER;
         *out = nullptr;
@@ -456,11 +580,11 @@ public:
 };
 } // namespace
 
-HRESULT runeCreateTextRange(RuneUiaTextSource *source, int start, int end, ITextRangeProvider **out) {
+HRESULT runeCreateTextRange(RuneUiaTextSource *source, const RuneUiaTextContent &content, int start, int end, ITextRangeProvider **out) {
     if (!out) return E_POINTER;
     *out = nullptr;
     if (!source || start < 0 || end < start) return E_INVALIDARG;
-    *out = new (std::nothrow) TextRange(source, {start, end});
+    *out = new (std::nothrow) TextRange(source, content, {start, end});
     return *out ? S_OK : E_OUTOFMEMORY;
 }
 #endif

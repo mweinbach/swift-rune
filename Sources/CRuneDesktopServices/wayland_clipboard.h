@@ -8,6 +8,8 @@ void rune_wayland_board_pump(struct RuneWaylandBoard *);
 int rune_wayland_board_altgr(struct RuneWaylandBoard *);
 int64_t rune_wayland_board_write(struct RuneWaylandBoard *, const RuneMimeData *, int concealed);
 void rune_wayland_board_read(struct RuneWaylandBoard *, RuneMimeData *);
+void rune_wayland_board_write_primary(struct RuneWaylandBoard *, const uint8_t *, size_t);
+void rune_wayland_board_read_primary(struct RuneWaylandBoard *, RunePrimaryReply, void *);
 int64_t rune_wayland_board_revision(struct RuneWaylandBoard *);
 int rune_wayland_board_clear(struct RuneWaylandBoard *, int64_t expected);
 #endif

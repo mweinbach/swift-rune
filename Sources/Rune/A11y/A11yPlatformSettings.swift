@@ -35,15 +35,16 @@ public enum AccessibilityRoleRules {
         }
     }
 
-    /// AccessKit names an ordinary button, link, checkbox, radio or menu item through its children.
-    /// Rune supplies the descendant-derived name for the remaining leaf controls.
+    /// Roles Rune names from descendant text when the app supplies no label (`roles::named_from_content`).
     internal static func controlName(
         given: String?, role: ElementRole, isDefaultButton: Bool, secure: Bool, words: @autoclosure () -> String?
     ) -> String? {
         if let given { return given }
         guard !secure else { return nil }
         switch role {
-        case .button where isDefaultButton, .switchControl, .tab, .option, .menuItemCheckbox, .menuItemRadio:
+        case .button where isDefaultButton, .listItem, .option, .treeItem, .tab, .switchControl,
+             .row, .cell, .gridCell, .columnHeader, .rowHeader, .tooltip, .status, .heading, .alert,
+             .menuItemCheckbox, .menuItemRadio:
             return words()
         default:
             return nil
@@ -63,12 +64,48 @@ public enum AccessibilityRoleRules {
         hasPrimary && !ownsKeys
     }
 
-    /// `roles::group`: a plain box (`.group`) that is not modal is a button when the keyboard can
-    /// press it (`cx.pressable && cx.focusable`, `roles.rs`); any other declared role stands.
-    /// A key-owning group is not pressable, so it stays a group even when it steers by drag.
+    /// The exposed role after applying the optional roles from Rune's `a11y/roles.rs`.
+    /// A keyboard-reachable decorative element still has a focus target.
+    internal static func projectedRole(
+        _ role: ElementRole, keyed: Bool, labelled: @autoclosure () -> Bool,
+        pressable: @autoclosure () -> Bool, takesFocus: Bool,
+        keyboardTarget: Bool, input: Bool, modal: Bool, scrolls: Bool,
+        hasText: @autoclosure () -> Bool, hasImage: @autoclosure () -> Bool,
+        terminal: @autoclosure () -> Bool = false
+    ) -> ElementRole? {
+        if input { return .textInput }
+        switch role {
+        case .group:
+            if modal { return .dialog }
+            if takesFocus && pressable() { return .button }
+            if scrolls { return .scrollView }
+            if hasText() { return .text }
+            if keyed || labelled() { return hasImage() ? .image : .group }
+            if terminal() { return .group }
+        case .icon:
+            if keyed || labelled() { return .image }
+        case .separator:
+            if pressable() { return .splitter }
+        case .presentation:
+            break
+        default:
+            return role
+        }
+        return keyboardTarget ? .group : nil
+    }
+
+    internal static func projectedRole<State>(for el: El<State>, takesFocus: Bool, keyboardTarget: Bool) -> ElementRole? {
+        projectedRole(el.role, keyed: el.keyId != nil, labelled: AccessibilityNameSource.nonblank(el.a11yLabel) != nil,
+                      pressable: el.a11yPressable, takesFocus: takesFocus, keyboardTarget: keyboardTarget,
+                      input: el.handlers.editLens != nil, modal: el.isModal, scrolls: !el.layout.scrollAxes.isEmpty,
+                      hasText: AccessibilityNameSource.nonblank(el.plainText) != nil ||
+                        el.richSpans?.contains { AccessibilityNameSource.nonblank($0.text) != nil } == true,
+                      hasImage: el.pixelsPayload != nil || el.imagePayload != nil || el.surfacePayload != nil,
+                      terminal: el.terminalGridPayload != nil)
+    }
+
     public static func role<State>(for el: El<State>, focusable: Bool) -> ElementRole {
-        if el.role == .group && !el.isModal && el.a11yPressable && focusable { return .button }
-        return el.role
+        projectedRole(for: el, takesFocus: focusable, keyboardTarget: focusable) ?? .group
     }
 }
 

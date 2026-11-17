@@ -191,27 +191,23 @@ struct MetalImageAtlasUploadTests {
         #expect(try colors(renderer.renderOffscreen(both)) == [blue, white, red])
         #expect(try uploadedEdges(renderer) == union)
 
-        // Mark one unused padding texel inside the previous update. Its survival
-        // distinguishes a true no-op from uploading that same rectangle again.
-        let firstSlot = leftEdges.x < rightEdges.x ? leftEdges : rightEdges
-        let padding = MTLRegionMake2D(firstSlot.z, firstSlot.y, 1, 1)
-        let marker: [UInt8] = [18, 52, 86, 255]
-        texture.replace(region: padding, mipmapLevel: 0, withBytes: marker, bytesPerRow: 4)
+        let previousBytes = renderer.uploader.imageUploadBytes
         let repeatFrame = runtime.renderFrame(at: 3)
         #expect(repeatFrame.imageRevision == both.imageRevision)
         #expect(try colors(renderer.renderOffscreen(repeatFrame)) == [blue, white, red])
-        var unchanged = [UInt8](repeating: 0, count: 4)
-        texture.getBytes(&unchanged, bytesPerRow: 4, from: padding, mipmapLevel: 0)
-        #expect(unchanged == marker)
+        #expect(renderer.uploader.imageUploadBytes == previousBytes)
         #expect(renderer.uploader.imageTexture === texture)
 
         let wide = initial.images.width + 2
         left.set(width: UInt32(wide), height: 2, rgba: [UInt8](repeating: 255, count: wide * 2 * 4))
         let grown = runtime.renderFrame(at: 4)
-        #expect(grown.images.width > initial.images.width)
+        let sprite = try #require(grown.instances.first { $0.params.y == KIND_IMAGE && $0.rect.x == 0 })
+        let index = Int(sprite.params.x)
+        let page = grown.imagePages.isEmpty ? grown.images : grown.imagePages[index]
+        #expect(page.width >= wide)
         #expect(try colors(renderer.renderOffscreen(grown)) == [white, white, red])
-        #expect(try uploadedEdges(renderer) == SIMD4(0, 0, grown.images.width, grown.images.height))
-        #expect(renderer.uploader.imageTexture !== texture)
+        #expect(try uploadedEdges(renderer) == SIMD4(0, 0, page.width, page.height))
+        #expect(renderer.uploader.imageTextures[index] !== texture)
     }
 
     @Test func skippedOlderAndForeignSnapshotsRestoreTheWholeTexture() throws {
@@ -268,6 +264,86 @@ struct MetalImageAtlasUploadTests {
         let pristine = runtime.renderFrame(at: 2)
         #expect(try colors(renderer.renderOffscreen(pristine)) == [blue, white, blue])
         #expect(try uploadedEdges(renderer) == all)
+    }
+
+    @Test func revisedPagesUploadOnlyTheirOwnChangesAndKeepEncodedReaders() throws {
+        let renderer = try MetalRenderer()
+        let device = renderer.device
+        func page(_ color: SIMD4<UInt8>) -> RGBA8Atlas {
+            RGBA8Atlas(width: 3, height: 2, texels: (0..<6).flatMap { _ in [color.x, color.y, color.z, color.w] })
+        }
+        func instance(_ index: Int, left: Int) -> RenderInstance {
+            RenderInstance(rect: SIMD4(Float(left), 0, 4, 4), fill: .one,
+                           params: SIMD4(Float(index), KIND_IMAGE, 0, 0),
+                           uv: SIMD4(1, 0, 1, 1), clip: NO_CLIP)
+        }
+        let redPage = page(red)
+        let bluePage = page(blue)
+        var first = RenderFrame(width: 12, height: 4, imagePages: [redPage, bluePage], imageRevision: 2,
+                                instances: [instance(1, left: 0), instance(0, left: 4), instance(1, left: 8)])
+        first.imagePageRevisions = [1, 2]
+        first.imagePagePatches = [nil, nil]
+        #expect(try colors(renderer.renderOffscreen(first)) == [blue, red, blue])
+        let initial = renderer.uploader.imageTextures
+        let initialBytes = renderer.uploader.imageUploadBytes
+        #expect(initialBytes == 48)
+
+        var live = first
+        live.imageRevision = 3
+        live.imagePages[1].texels.replaceSubrange(4..<8, with: [0, 255, 0, 255])
+        live.imagePageRevisions = [1, 3]
+        live.imagePagePatches = [nil, .init(fromRevision: 2, edges: SIMD4(1, 0, 2, 1))]
+        #expect(try colors(renderer.renderOffscreen(live)) == [green, red, green])
+        #expect(renderer.uploader.imageUploadBytes == initialBytes + 4)
+        #expect(renderer.uploader.imageTextures[0] === initial[0])
+        #expect(renderer.uploader.imageTextures[1] === initial[1])
+        _ = try renderer.renderOffscreen(live)
+        #expect(renderer.uploader.imageUploadBytes == initialBytes + 4)
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm_srgb, width: 12, height: 4, mipmapped: false)
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .shared
+        let target = try #require(device.makeTexture(descriptor: descriptor))
+        let reader = try #require(renderer.commandQueue.makeCommandBuffer())
+        _ = renderer.drawRange(frame: live, into: target, commandBuffer: reader)
+        var next = live
+        next.imageRevision = 4
+        next.imagePages[1] = page(white)
+        next.imagePageRevisions = [1, 4]
+        next.imagePagePatches = [nil, .init(fromRevision: 3, edges: SIMD4(0, 0, 3, 2))]
+        try renderer.prepare(frame: next, viewport: (12, 4)).get()
+        #expect(renderer.uploader.imageTextures[0] === initial[0])
+        #expect(renderer.uploader.imageTextures[1] !== initial[1])
+        reader.commit()
+        reader.waitUntilCompleted()
+        if let error = reader.error { throw error }
+        var held = [UInt8](repeating: 0, count: 4)
+        target.getBytes(&held, bytesPerRow: 4, from: MTLRegionMake2D(2, 2, 1, 1), mipmapLevel: 0)
+        #expect(held == [0, 255, 0, 255])
+        #expect(try colors(renderer.renderOffscreen(next)) == [white, red, white])
+
+        let beforeRestore = renderer.uploader.imageUploadBytes
+        #expect(try colors(renderer.renderOffscreen(first)) == [blue, red, blue])
+        #expect(renderer.uploader.imageUploadBytes == beforeRestore + 24)
+        var manual = first
+        manual.imagePages[0] = page(white)
+        #expect(try colors(renderer.renderOffscreen(manual)) == [blue, white, blue])
+        manual.imagePages[0] = page(green)
+        #expect(try colors(renderer.renderOffscreen(manual)) == [blue, green, blue])
+        manual.imagePages[1].texels = []
+        let black = SIMD4<UInt8>(0, 0, 0, 255)
+        #expect(try colors(renderer.renderOffscreen(manual)) == [black, green, black])
+        manual.imagePages.removeLast()
+        #expect(try colors(renderer.renderOffscreen(manual)) == [black, green, black])
+    }
+
+    @Test func newImagePageRebindsAnUnchangedInstanceList() {
+        let uploader = AtlasUploader()
+        let image = RenderInstance(rect: SIMD4(0, 0, 4, 4), fill: .one, params: SIMD4(1, KIND_IMAGE, 0, 0))
+        uploader.prepareBatches(instances: [image], imagePageCount: 1)
+        #expect(uploader.imageBatches.first?.1 == .image(1) && uploader.usesMissingImagePage)
+        uploader.prepareBatches(instances: [image], imagePageCount: 2)
+        #expect(uploader.imageBatches.first?.1 == .image(1) && !uploader.usesMissingImagePage)
     }
 
     @Test func preparingTheNextFramePreservesAnUncommittedDraw() throws {

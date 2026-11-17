@@ -5,6 +5,15 @@ import Foundation
 import Testing
 @testable import Rune
 
+/// `font_families.rs` and the Chromium line-box oracle configure the slots explicitly.
+func interPlexMetricFixture() -> TextSystem {
+    let system = TextSystem()
+    withFontFamilies(sans: "", mono: "") {
+        system.setFamilies(sans: "Inter", mono: "IBM Plex Mono")
+    }
+    return system
+}
+
 /// up-text-2: upstream `c2476f2d` (#933 pretty wrap for pills and `wrap_anywhere`),
 /// `6ece36ad` (#983 inline code's line box and chip) and `e1263a8a` (#954 `AppleFontSmoothing` 0).
 @Suite("Up-text-2 parity: pretty pills/wrapAnywhere (#933), inline code box (#983), AppleFontSmoothing (#954)", .serialized)
@@ -177,7 +186,7 @@ struct UpText2ParityTests {
     @Test("#983: a 13/16 cell with Plex Mono code is 17 tall at 1x and 2x, 16 at 1.25x, 1.5x and 1.875x")
     func inlineCodeGrowsItsLine() throws {
         #expect(DefaultFonts.registerIfNeeded())
-        let ts = TextSystem()
+        let ts = interPlexMetricFixture()
         let style = TextStyle(size: 13, weight: 400, lineHeight: 16)
         #if canImport(CoreText)
         let sans = ts.resolveCTFont(style: style, pixelScale: 1)
@@ -221,7 +230,7 @@ struct UpText2ParityTests {
     @Test("#983: markdown's 0.9-sized code keeps a 13/16 line at 16 at 1x (Parley: 16.4 layout, line box 0..16)")
     func sizedInlineCodeKeepsItsLine() throws {
         #expect(DefaultFonts.registerIfNeeded())
-        let ts = TextSystem()
+        let ts = interPlexMetricFixture()
         let style = TextStyle(size: 13, weight: 400, lineHeight: 16)
         let spans = Self.codeSpans(13 * 0.9)
         let text = spans.map(\.text).joined()
@@ -256,7 +265,7 @@ struct UpText2ParityTests {
     @Test("#983: every run in a font of its own grows its line as Parley's does, in a monospace paragraph too")
     func spanBoxesGrowLinesBeyondCode() throws {
         #expect(DefaultFonts.registerIfNeeded())
-        let ts = TextSystem()
+        let ts = interPlexMetricFixture()
         // `parley` probe: 13/16 text with a 16 px run (line FontSizeRelative(16/13)): layout 19.692308
         // px at 1x (line box 0..20, baseline 15), 39.384617 px at 2x, for Plex Mono in a Plex Mono
         // paragraph and for Inter in an Inter paragraph alike.

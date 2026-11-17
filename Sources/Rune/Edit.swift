@@ -549,7 +549,26 @@ public struct TextEdit: Sendable, Equatable {
     public private(set) var cursor: Int
     /// Selection anchor in UTF-8 bytes (`anchor == cursor` when collapsed).
     public private(set) var anchor: Int
-    public var multiline: Bool
+    // A standalone plain edit accepts paragraphs. A standalone password defaults to one line.
+    // Keep the author's choice when the view changes its bound field mode.
+    private var authoredMultiline: Bool?
+    private var fieldMultiline: Bool?
+    public var multiline: Bool {
+        get { fieldMultiline ?? authoredMultiline ?? !isSecure }
+        set {
+            authoredMultiline = newValue
+            fieldMultiline = nil
+        }
+    }
+
+    /// A text input accepts paragraphs unless its builder or model chose a line mode.
+    @discardableResult
+    internal mutating func applyFieldLineMode(singleLine: Bool?) -> Bool {
+        let next = singleLine.map { !$0 } ?? authoredMultiline ?? true
+        guard fieldMultiline != next else { return false }
+        fieldMultiline = next
+        return true
+    }
     public var isSecure: Bool = false {
         didSet {
             if isSecure && !oldValue {
@@ -626,7 +645,8 @@ public struct TextEdit: Sendable, Equatable {
         lhs.text == rhs.text &&
         lhs.cursor == rhs.cursor &&
         lhs.anchor == rhs.anchor &&
-        lhs.multiline == rhs.multiline &&
+        lhs.authoredMultiline == rhs.authoredMultiline &&
+        lhs.fieldMultiline == rhs.fieldMultiline &&
         lhs.isSecure == rhs.isSecure &&
         lhs.isRevealed == rhs.isRevealed &&
         lhs.marks == rhs.marks &&
@@ -639,15 +659,18 @@ public struct TextEdit: Sendable, Equatable {
         lhs.preeditClauses == rhs.preeditClauses
     }
 
-    public init(_ initial: String = "", multiline: Bool = false) {
-        let cleaned = multiline ? initial : initial.replacingOccurrences(of: "\n", with: " ")
-        self.text = cleaned
-        let end = cleaned.utf8.count
+    public init(_ initial: String = "") {
+        self.text = initial
+        let end = initial.utf8.count
         self.cursor = end
         self.anchor = end
-        self.multiline = multiline
-        let lineCount = 1 + cleaned.utf8.reduce(0) { $0 + ($1 == 0x0A ? 1 : 0) }
+        let lineCount = 1 + initial.utf8.reduce(0) { $0 + ($1 == 0x0A ? 1 : 0) }
         self.blocks = Array(repeating: .paragraph, count: lineCount)
+    }
+
+    public init(_ initial: String = "", multiline: Bool) {
+        self.init(multiline ? initial : initial.replacingOccurrences(of: "\n", with: " "))
+        self.multiline = multiline
     }
 
     public var hasSelection: Bool { cursor != anchor }
@@ -666,15 +689,19 @@ public struct TextEdit: Sendable, Equatable {
 
     /// Replaces the entire text and places the caret at the end.
     public mutating func setText(_ newText: String, recordUndo: Bool = false) {
+        let value = multiline ? newText : newText.replacingOccurrences(of: "\n", with: " ")
+        replaceContents(value, recordUndo: recordUndo)
+    }
+
+    private mutating func replaceContents(_ value: String, recordUndo: Bool) {
         let before = recordUndo ? captureUndoBaseline() : nil
-        let cleaned = multiline ? newText : newText.replacingOccurrences(of: "\n", with: " ")
-        text = cleaned
-        let end = cleaned.utf8.count
+        text = value
+        let end = value.utf8.count
         cursor = end
         anchor = end
         marks.removeAll()
         richMarks.removeAll()
-        let lineCount = isSecure ? 0 : 1 + cleaned.utf8.reduce(0) { $0 + ($1 == 0x0A ? 1 : 0) }
+        let lineCount = isSecure ? 0 : 1 + value.utf8.reduce(0) { $0 + ($1 == 0x0A ? 1 : 0) }
         blocks = Array(repeating: .paragraph, count: lineCount)
         softBreaks.removeAll()
         typingStyle = .inherited
@@ -688,7 +715,7 @@ public struct TextEdit: Sendable, Equatable {
 
     /// Replaces the entire draft and discards undo/redo history while re-arming `isPristine` and preserving secure mode (`edit.rs:470`, `TextEdit::replace_text`).
     public mutating func replaceText(_ newText: String) {
-        setText(newText, recordUndo: false)
+        replaceContents(newText, recordUndo: false)
         clearHistory()
         editedTag = false
     }
@@ -1865,7 +1892,7 @@ public struct TextEdit: Sendable, Equatable {
     public var displayString: String {
         guard isSecure && !isRevealed else { return text }
         if multiline {
-            return Self.multilineSecureMask
+            return text.isEmpty ? "" : Self.multilineSecureMask
         }
         return String(repeating: "•", count: text.unicodeScalars.count)
     }

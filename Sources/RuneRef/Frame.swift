@@ -215,6 +215,7 @@ public enum RuneRef {
         )
         var rootBuffer = Array(repeating: clearPremul, count: pixelCount)
         var layerStack: [LayerTarget] = []
+        var backdropCount = 0
 
         @inline(__always)
         func compositeOver(_ dst: SIMD4<Float>, _ src: SIMD4<Float>, additive: Bool = false) -> SIMD4<Float> {
@@ -358,16 +359,13 @@ public enum RuneRef {
                 }
 
             case .backdropBlur:
-                let radius = max(0, prim.params.x)
-                if radius >= 0.5 {
-                    if layerStack.isEmpty {
-                        let blurred = boxBlur(rootBuffer, width: w, height: h, radius: radius, bounds: prim.rect)
-                        compositeBackdropBlur(&rootBuffer, blurred: blurred, prim: prim, width: w, height: h)
-                    } else {
-                        let top = layerStack.count - 1
-                        let blurred = boxBlur(layerStack[top].buffer, width: w, height: h, radius: radius, bounds: prim.rect)
-                        compositeBackdropBlur(&layerStack[top].buffer, blurred: blurred, prim: prim, width: w, height: h)
-                    }
+                guard prim.params.x > 0, prim.backdropOpacity > 0, backdropCount < BackdropPyramid.maxRecords else { continue }
+                backdropCount += 1
+                if layerStack.isEmpty {
+                    compositeBackdropBlur(&rootBuffer, prim: prim, width: w, height: h)
+                } else {
+                    let top = layerStack.count - 1
+                    compositeBackdropBlur(&layerStack[top].buffer, prim: prim, width: w, height: h)
                 }
 
             case .effectSlot:
@@ -395,6 +393,8 @@ public enum RuneRef {
                 let maxY = min(h - 1, min(Int(ceilf(prim.clip.y + prim.clip.w + 1)), Int(ceilf(cy + halfExtentY))))
                 if minX > maxX || minY > maxY { continue }
 
+                let glyphAtlas = prim.kind == .glyph ? scene.glyphAtlas(forPage: prim.glyphPage) : scene.glyphs
+                let imageAtlas = prim.kind == .image ? scene.imageAtlas(forPage: prim.imagePage) : scene.images
                 for py in minY...maxY {
                     let rowBase = py * w
                     let fragY = Float(py) + 0.5
@@ -403,8 +403,8 @@ public enum RuneRef {
                         let src = RefShader.evaluatePrimitive(
                             prim,
                             fragCoord: frag,
-                            glyphs: scene.glyphs,
-                            images: scene.images,
+                            glyphs: glyphAtlas,
+                            images: imageAtlas,
                             srgbBlend: scene.srgbBlend
                         )
                         if src.w <= 0 { continue }
@@ -505,8 +505,8 @@ public enum RuneRef {
                 let sample = RefShader.evaluatePrimitive(
                     prim,
                     fragCoord: frag,
-                    glyphs: scene.glyphs,
-                    images: scene.images,
+                    glyphs: prim.kind == .glyph ? scene.glyphAtlas(forPage: prim.glyphPage) : scene.glyphs,
+                    images: prim.kind == .image ? scene.imageAtlas(forPage: prim.imagePage) : scene.images,
                     srgbBlend: scene.srgbBlend
                 )
                 if sample.w > 0 {
@@ -602,26 +602,32 @@ public enum RuneRef {
 
     private static func compositeBackdropBlur(
         _ dst: inout [SIMD4<Float>],
-        blurred: [SIMD4<Float>],
         prim: Primitive,
         width: Int,
         height: Int
     ) {
-        let minX = max(0, Int(floorf(max(prim.rect.x, prim.clip.x))))
-        let minY = max(0, Int(floorf(max(prim.rect.y, prim.clip.y))))
-        let maxX = min(width - 1, Int(ceilf(min(prim.rect.x + prim.rect.z, prim.clip.x + prim.clip.z))))
-        let maxY = min(height - 1, Int(ceilf(min(prim.rect.y + prim.rect.w, prim.clip.y + prim.clip.w))))
-        if minX > maxX || minY > maxY { return }
+        let viewport = (UInt32(width), UInt32(height))
+        guard prim.params.x > 0, prim.backdropOpacity > 0,
+              let plan = BackdropPyramid.plan(rect: prim.rect, sigma: prim.params.x, viewport: viewport) else { return }
+        let x0 = max(0, min(Float(width), floorf(max(prim.rect.x, prim.clip.x))))
+        let y0 = max(0, min(Float(height), floorf(max(prim.rect.y, prim.clip.y))))
+        let x1 = min(Float(width), ceilf(min(prim.rect.x + prim.rect.z, prim.clip.x + prim.clip.z)))
+        let y1 = min(Float(height), ceilf(min(prim.rect.y + prim.rect.w, prim.clip.y + prim.clip.w)))
+        guard x1 > x0, y1 > y0 else { return }
+        let blurred = BackdropPyramid.blur(record: plan, viewport: viewport, nearestEven: false, run: { $0() }) { [pixels = dst] x, y in
+            pixels[Int(y) * width + Int(x)]
+        }
         let center = SIMD2<Float>(prim.rect.x + prim.rect.z * 0.5, prim.rect.y + prim.rect.w * 0.5)
         let halfSize = SIMD2<Float>(prim.rect.z * 0.5, prim.rect.w * 0.5)
-        for y in minY...maxY {
-            for x in minX...maxX {
+        for y in Int(y0)..<Int(y1) {
+            for x in Int(x0)..<Int(x1) {
                 let frag = SIMD2<Float>(Float(x) + 0.5, Float(y) + 0.5)
                 let sd = RefShader.sdBox(frag - center, halfSize: halfSize, radii: prim.radii)
-                let cov = RefShader.boxCoverage(sd) * RefShader.clipCoverage(pixelCenter: frag, clip: prim.clip)
+                let cov = RefShader.boxCoverage(sd) * RefShader.clipCoverage(pixelCenter: frag, clip: prim.clip) * prim.backdropOpacity
                 if cov > 0 {
                     let idx = y * width + x
-                    dst[idx] = dst[idx] * (1.0 - cov) + blurred[idx] * cov
+                    let src = blurred.sample(at: frag) * cov
+                    dst[idx] = src + dst[idx] * (1.0 - src.w)
                 }
             }
         }

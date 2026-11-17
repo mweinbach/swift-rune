@@ -74,6 +74,44 @@ public struct MemoElementGeometry: Sendable, Equatable {
     }
 }
 
+/// Shared by the memo builders and dependency checks in a single synchronous layout pass.
+final class MemoGeometry {
+    enum Query: Hashable {
+        case layout(String)
+        case window(String)
+        case caret(String)
+    }
+
+    private let resolve: (Query) -> MotionRect?
+    private let selection: () -> [[Float]]?
+    private var answers: [Query: MotionRect?] = [:]
+    private lazy var selectionAnswer = selection()
+
+    init(resolve: @escaping (Query) -> MotionRect?, selection: @escaping () -> [[Float]]?) {
+        self.resolve = resolve
+        self.selection = selection
+    }
+
+    convenience init(_ geometry: [String: MemoElementGeometry] = [:]) {
+        self.init(resolve: { query in
+            switch query {
+            case .layout(let key): return geometry[key]?.rect
+            case .window(let key): return geometry[key]?.windowRect
+            case .caret(let key): return geometry[key]?.caretRect
+            }
+        }, selection: { geometry[MemoScope.selectionRectsKey]?.selectionBoxes })
+    }
+
+    subscript(_ query: Query) -> MotionRect? {
+        if let answer = answers[query] { return answer }
+        let answer = resolve(query)
+        answers.updateValue(answer, forKey: query)
+        return answer
+    }
+
+    var selectionBoxes: [[Float]]? { selectionAnswer }
+}
+
 /// Dynamic dependency recorded inside a `memo` or `region` build (`rune::memo::Read`).
 public enum MemoRead: Sendable, Equatable {
     case layout(key: String, rect: MotionRect?)
@@ -100,24 +138,28 @@ public enum MemoRead: Sendable, Equatable {
     }
 
     public func matches(_ geometry: [String: MemoElementGeometry]) -> Bool {
+        matches(MemoGeometry(geometry))
+    }
+
+    func matches(_ geometry: MemoGeometry) -> Bool {
         switch self {
         case .layout(let key, let prev):
-            return Self.rectsMatch(prev, geometry[key]?.rect, tolerance: 0.5)
+            return Self.rectsMatch(prev, geometry[.layout(key)], tolerance: 0.5)
         case .layoutWith(let key, _, let matchesRect):
-            return matchesRect(geometry[key]?.rect)
+            return matchesRect(geometry[.layout(key)])
         case .windowLayout(let key, let prev):
-            return Self.rectsMatch(prev, geometry[key]?.windowRect, tolerance: 0.5)
+            return Self.rectsMatch(prev, geometry[.window(key)], tolerance: 0.5)
         case .windowLayoutWith(let key, _, let matchesRect):
-            return matchesRect(geometry[key]?.windowRect)
+            return matchesRect(geometry[.window(key)])
         case .layoutSize(let key, let prev):
-            return prev == geometry[key]?.rect.size
+            return prev == geometry[.layout(key)]?.size
         case .caret(let key, let prev):
-            return prev == geometry[key]?.caretRect
+            return prev == geometry[.caret(key)]
         case .selectionRects(let boxes):
-            let next = geometry[MemoScope.selectionRectsKey]?.selectionBoxes ?? []
+            let next = geometry.selectionBoxes ?? []
             return !SelectionRectsMath.boxesMoved(boxes, next)
         case .tracked(let cellId, let recordedVer):
-            return MemoTrackedBridge.version(for: cellId) == recordedVer
+            return TrackedIDGenerator.version(for: cellId) == recordedVer
         }
     }
 
@@ -147,15 +189,6 @@ public enum MemoRead: Sendable, Equatable {
         case let (.tracked(c1, _), .tracked(c2, _)): return c1 == c2
         default: return false
         }
-    }
-}
-
-enum MemoTrackedBridge {
-    nonisolated(unsafe) static var versionProvider: ((UInt32) -> UInt64)?
-    nonisolated(unsafe) static var activeStackCount: (() -> Int)?
-
-    static func version(for cellId: UInt32) -> UInt64 {
-        versionProvider?(cellId) ?? 0
     }
 }
 
@@ -224,7 +257,7 @@ enum MemoRegionWarningsStore {
 final class MemoBuildScope: @unchecked Sendable {
     let cache: MemoCache
     let envHash: UInt64
-    let geometry: [String: MemoElementGeometry]
+    let geometry: MemoGeometry
     let pass: UInt64
     var prefixStack: [String] = []
     var seenScopedIds: Set<String> = []
@@ -236,7 +269,7 @@ final class MemoBuildScope: @unchecked Sendable {
     var regionWarnings: [String] = []
     var isVerificationDryRun: Bool = false
 
-    init(cache: MemoCache, envHash: UInt64, geometry: [String: MemoElementGeometry], pass: UInt64) {
+    init(cache: MemoCache, envHash: UInt64, geometry: MemoGeometry, pass: UInt64) {
         self.cache = cache
         self.envHash = envHash
         self.geometry = geometry
@@ -283,7 +316,8 @@ public enum MemoScope {
         chromeInsets: [Float] = [0, 0, 0, 0],
         scrollerOverlay: Bool = true,
         hoverNone: Bool = false,
-        touchControls: Bool = false
+        touchControls: Bool = false,
+        safeAreaInsets: SIMD4<Float> = .zero
     ) -> UInt64 {
         var h = Hasher()
         h.combine(systemDark)
@@ -296,6 +330,7 @@ public enum MemoScope {
         h.combine(scrollerOverlay)
         h.combine(hoverNone)
         h.combine(touchControls)
+        h.combine(safeAreaInsets)
         return UInt64(bitPattern: Int64(h.finalize()))
     }
 
@@ -322,7 +357,7 @@ public enum MemoScope {
         _ body: () throws -> R
     ) rethrows -> R {
         let pass = cache.advancePass()
-        let scope = MemoBuildScope(cache: cache, envHash: envHash, geometry: geometry, pass: pass)
+        let scope = MemoBuildScope(cache: cache, envHash: envHash, geometry: MemoGeometry(geometry), pass: pass)
         defer {
             cache.setViewReads(scope.topLevelReads, pass: pass)
             lastWarningsLock.lock()
@@ -335,7 +370,7 @@ public enum MemoScope {
     static func enterCollectingTouched<R>(
         cache: MemoCache,
         envHash: UInt64,
-        geometry: [String: MemoElementGeometry] = [:],
+        geometry: MemoGeometry = MemoGeometry(),
         touchedIdsOut: TouchedIdsBox,
         _ body: () throws -> R
     ) rethrows -> R {
@@ -355,7 +390,7 @@ public enum MemoScope {
     static func enterVirtualRow<R>(
         cache: MemoCache,
         envHash: UInt64,
-        geometry: [String: MemoElementGeometry] = [:],
+        geometry: MemoGeometry = MemoGeometry(),
         pass: UInt64,
         touchedIdsOut: TouchedIdsBox? = nil,
         _ body: () throws -> R
@@ -379,19 +414,19 @@ public enum MemoScope {
     }
 
     static func readLayout(_ key: String) -> [Float]? {
-        let rect = current?.geometry[key]?.rect
+        let rect = current?.geometry[.layout(key)]
         current?.record(.layout(key: key, rect: rect))
         return rect.map { [$0.left, $0.top, $0.width, $0.height] }
     }
 
     static func readWindowLayout(_ key: String) -> [Float]? {
-        let rect = current?.geometry[key]?.windowRect
+        let rect = current?.geometry[.window(key)]
         current?.record(.windowLayout(key: key, rect: rect))
         return rect.map { [$0.left, $0.top, $0.width, $0.height] }
     }
 
     static func peekLayoutRect(_ key: String, window: Bool) -> [Float]? {
-        let rect = window ? current?.geometry[key]?.windowRect : current?.geometry[key]?.rect
+        let rect = window ? current?.geometry[.window(key)] : current?.geometry[.layout(key)]
         return rect.map { [$0.left, $0.top, $0.width, $0.height] }
     }
 
@@ -422,7 +457,7 @@ public enum MemoScope {
         _ transform: @escaping @Sendable ([Float]) -> T,
         into reads: inout [MemoRead]
     ) -> T? {
-        let rect = current?.geometry[key]?.rect
+        let rect = current?.geometry[.layout(key)]
         let initial = rect.map { transform([$0.left, $0.top, $0.width, $0.height]) }
         let tag = MemoReadTag.next()
         let entry: MemoRead = .layoutWith(key: key, tag: tag) { nextRect in
@@ -447,7 +482,7 @@ public enum MemoScope {
         _ transform: @escaping @Sendable ([Float]) -> T,
         into reads: inout [MemoRead]
     ) -> T? {
-        let rect = current?.geometry[key]?.windowRect
+        let rect = current?.geometry[.window(key)]
         let initial = rect.map { transform([$0.left, $0.top, $0.width, $0.height]) }
         let tag = MemoReadTag.next()
         let entry: MemoRead = .windowLayoutWith(key: key, tag: tag) { nextRect in
@@ -468,13 +503,13 @@ public enum MemoScope {
     }
 
     static func readLayoutSize(_ key: String) -> [Float]? {
-        let size = current?.geometry[key]?.rect.size
+        let size = current?.geometry[.layout(key)]?.size
         current?.record(.layoutSize(key: key, size: size))
         return size.map { [$0.x, $0.y] }
     }
 
     static func readCaret(_ key: String) -> [Float]? {
-        let rect = current?.geometry[key]?.caretRect
+        let rect = current?.geometry[.caret(key)]
         current?.record(.caret(key: key, rect: rect))
         return rect.map { [$0.left, $0.top, $0.width, $0.height] }
     }
@@ -482,7 +517,7 @@ public enum MemoScope {
     static let selectionRectsKey = "\u{1}selection"
 
     static func readSelectionRects(fallback: [[Float]]) -> [[Float]] {
-        let boxes = current?.geometry[selectionRectsKey]?.selectionBoxes ?? fallback
+        let boxes = current?.geometry.selectionBoxes ?? fallback
         current?.record(.selectionRects(boxes: boxes))
         return boxes
     }

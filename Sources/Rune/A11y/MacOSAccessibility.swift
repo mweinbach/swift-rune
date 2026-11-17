@@ -6,6 +6,57 @@ import AppKit
 
 // MARK: - Cross-Platform Runtime Accessibility Projection & Action Dispatch
 
+/// Physical parentage remains available for geometry and labelled-by references. During
+/// projection a presentational container passes its descendants to the semantic parent,
+/// while skipping a hidden container discards its entire subtree.
+private struct AccessibilityTreeEdges {
+    enum Projection {
+        case node(ElementRole)
+        case descendants(scrolls: Bool)
+        case hidden
+    }
+
+    var roots: [Int] = []
+    var children: [Int: [Int]] = [:]
+
+    init(count: Int, parent: (Int) -> Int?) {
+        for index in 0..<count {
+            if let p = parent(index), p != index, (0..<count).contains(p) {
+                children[p, default: []].append(index)
+            } else {
+                roots.append(index)
+            }
+        }
+    }
+
+    static func hasAncestorOrSelf(_ index: Int, count: Int, parent: (Int) -> Int?, matching: (Int) -> Bool) -> Bool {
+        var i: Int? = index
+        for _ in 0..<count {
+            guard let j = i, (0..<count).contains(j) else { break }
+            if matching(j) { return true }
+            i = parent(j)
+        }
+        return false
+    }
+
+    func project(_ indices: [Int], insideScroll: Bool, projection: (Int) -> Projection,
+                 build: (Int, Bool, ElementRole) -> AccessibilityNode) -> [AccessibilityNode] {
+        var nodes: [AccessibilityNode] = []
+        nodes.reserveCapacity(indices.count)
+        func append(_ indices: [Int], insideScroll: Bool) {
+            for i in indices {
+                switch projection(i) {
+                case let .node(role): nodes.append(build(i, insideScroll, role))
+                case let .descendants(scrolls): append(children[i] ?? [], insideScroll: insideScroll || scrolls)
+                case .hidden: continue
+                }
+            }
+        }
+        append(indices, insideScroll: insideScroll)
+        return nodes
+    }
+}
+
 public extension AccessibilityTreeBuilder {
     /// Projects a flattened `[ElementInfo]` array from `Runtime.elements()` into a nested `AccessibilityNode` tree.
     /// Secure text fields (`securePaths.contains(path)` or `role == .textInput && text == nil`) never leak `value`.
@@ -15,27 +66,40 @@ public extension AccessibilityTreeBuilder {
         viewport: Vec2,
         securePaths: Set<String> = []
     ) -> AccessibilityNode {
-        var childrenByParent: [Int: [Int]] = [:]
-        var roots: [Int] = []
-        for (idx, info) in elements.enumerated() where !info.inert {
-            if let parent = info.parentIndex, parent >= 0, parent < elements.count, !elements[parent].inert {
-                childrenByParent[parent, default: []].append(idx)
-            } else {
-                roots.append(idx)
-            }
+        let edges = AccessibilityTreeEdges(count: elements.count) { elements[$0].parentIndex }
+        func projection(_ i: Int) -> AccessibilityTreeEdges.Projection {
+            let info = elements[i]
+            if info.a11yHidden || info.exiting || info.opacity <= 0.01 { return .hidden }
+            if info.a11yInput?.modalMember == false && !info.modalAncestor { return .hidden }
+            let input = info.a11yInput
+            let takesFocus = info.focusable && !info.disabled
+            let keyboardTarget = takesFocus && !info.inert &&
+                (info.role != .presentation || input?.explicitFocus == true)
+            let role = AccessibilityRoleRules.projectedRole(info.role, keyed: info.key != nil,
+                labelled: AccessibilityNameSource.nonblank(info.label) != nil, pressable: input?.rolePressable == true,
+                takesFocus: takesFocus, keyboardTarget: keyboardTarget, input: input?.isInput == true,
+                modal: input?.isModal == true, scrolls: input?.scrolls == true,
+                hasText: AccessibilityNameSource.nonblank(info.text) != nil, hasImage: input?.hasImage == true,
+                terminal: input?.hasTerminalGrid == true)
+            guard let role else { return .descendants(scrolls: input?.scrolls == true) }
+            return .node(role)
         }
 
         func words(_ index: Int) -> String? {
             AccessibilityNameSource.words(of: index, source: { AccessibilityNameSource(elements[$0], securePaths: securePaths) },
-                                           children: { childrenByParent[$0] ?? [] })
+                                           children: { edges.children[$0] ?? [] })
         }
 
-        func build(_ idx: Int) -> AccessibilityNode {
+        func build(_ idx: Int, insideScroll: Bool, semanticRole: ElementRole) -> AccessibilityNode {
             let info = elements[idx]
             let isSecure = info.secure || securePaths.contains(info.path) || (info.role == .textInput && info.text == nil)
             // As the live tree's `a11yNodeActions` (`a11y/node.rs:222-240`, under `actionable`).
             let input = info.a11yInput
-            let enabled = !info.disabled && !info.inert
+            let outsideModal = input?.modalMember == false
+            let inert = outsideModal
+                ? AccessibilityTreeEdges.hasAncestorOrSelf(idx, count: elements.count, parent: { elements[$0].parentIndex }, matching: { elements[$0].a11yInput?.explicitInert == true })
+                : info.inert
+            let enabled = !info.disabled && !inert && !outsideModal
             var actions: [AccessibilityAction] = []
             if enabled {
                 if [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox, .menuItemRadio].contains(info.role) ||
@@ -59,17 +123,19 @@ public extension AccessibilityTreeBuilder {
                 AccessibilityTreeBuilder.appendAction(.setValue, to: &actions)
             }
 
+            if insideScroll { actions.append(.scrollIntoView) }
             let rect = info.rect.count >= 4
                 ? MotionRect.fromXYWH(info.rect[0], info.rect[1], info.rect[2], info.rect[3])
                 : .zero
 
             let projectedValue: String? = isSecure ? nil : info.text
-            let relatedName = input?.labelledBy.flatMap { key in
-                AccessibilityNameSource.relatedIndex(key, from: idx, parent: { elements[$0].parentIndex },
-                                                     children: { childrenByParent[$0] ?? [] }, keyAt: { elements[$0].key })
-            }.flatMap(words)
-            let givenName = AccessibilityNameSource.nonblank(info.label) ?? relatedName
-            let role: ElementRole = input?.isDefaultButton == true ? .button : info.role
+            func relatedWords(_ key: String?) -> String? {
+                guard let key else { return nil }
+                return AccessibilityNameSource.relatedIndex(key, from: idx, parent: { elements[$0].parentIndex },
+                    children: { edges.children[$0] ?? [] }, keyAt: { elements[$0].key }).flatMap(words)
+            }
+            let givenName = AccessibilityNameSource.nonblank(info.label) ?? relatedWords(input?.labelledBy)
+            let role = semanticRole
             let controlName = AccessibilityRoleRules.controlName(
                 given: givenName, role: role, isDefaultButton: input?.isDefaultButton == true, secure: isSecure,
                 words: words(idx)
@@ -82,32 +148,37 @@ public extension AccessibilityTreeBuilder {
 
             var projected = AccessibilityNode(
                 id: nodeId,
-                role: info.role == .textInput && (isSecure || input?.multiline == true)
+                role: input?.isInput == true || (info.role == .textInput && (isSecure || input?.multiline == true))
                     ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: input?.multiline == true)
                     : role,
                 label: projectedLabel,
                 value: projectedValue,
-                help: info.help,
+                help: input?.description ?? relatedWords(input?.describedBy) ?? info.help,
                 frame: rect,
-                isFocused: focusedPath.map { info.path == $0 } ?? info.focused,
-                isFocusable: !info.disabled && !info.inert && info.focusable,
+                isFocused: enabled && (focusedPath.map { info.path == $0 } ?? info.focused),
+                isFocusable: enabled && info.focusable,
                 isSelected: info.itemSelected,
                 isExpanded: info.expanded,
                 level: info.level.map { max(0, $0 - 1) },
-                isDisabled: info.disabled,
-                isModal: info.role == .dialog,
+                isDisabled: info.disabled || inert,
+                isModal: input?.isModal == true,
                 isSecure: isSecure,
                 actions: actions,
-                children: controlChildren((childrenByParent[idx] ?? []).map(build), role: role, name: isSecure ? nil : controlName)
+                children: controlChildren(edges.project(edges.children[idx] ?? [], insideScroll: insideScroll || input?.scrolls == true, projection: projection, build: build),
+                                          role: role, name: isSecure ? nil : controlName)
             )
             projected.runtimePath = info.path
             projected.keepsControlContent = input?.keepsControlContent == true
             return projected
         }
 
-        let builtRoots = roots.map(build)
+        let builtRoots = edges.project(edges.roots, insideScroll: false, projection: projection, build: build)
         if builtRoots.count == 1 {
-            return builtRoots[0]
+            let root = builtRoots[0]
+            let implicitWindow = edges.roots.count == 1 && edges.roots.first.map {
+                elements[$0].role == .group && elements[$0].path != root.runtimePath
+            } == true
+            if !implicitWindow { return root }
         }
         return AccessibilityNode(
             id: "root",
@@ -132,7 +203,7 @@ public extension AccessibilityTreeBuilder {
 
         var announcements: [AccessibilityAnnouncement] = []
         AccessibilityIdentity.walk(current) { node, id in
-            let modal = node.role == .dialog || node.isModal
+            let modal = node.role == .dialog || node.role == .alertDialog || node.isModal
             guard !node.isSecure, modal || node.liveRegion != nil else { return }
             let words = [node.label, node.value].compactMap { $0 }.joined(separator: " ")
             guard !words.isEmpty else { return }
@@ -162,42 +233,36 @@ public extension Runtime {
             )
         }
 
-        // Build visible accessibility tree parent/child edges, while preserving full `flatNodes`
-        // for `labelledBy` / `describedBy` scoping (`a11y/node.rs:260-282`).
-        var childrenByParent: [Int: [Int]] = [:]
-        var allChildrenByParent: [Int: [Int]] = [:]
-        var roots: [Int] = []
-        for (idx, node) in flatNodes.enumerated() {
-            if let pIdx = node.parentIndex, pIdx >= 0, pIdx < flatNodes.count {
-                allChildrenByParent[pIdx, default: []].append(idx)
-            }
-            let isVirtualSpacer = (node.key == "__v_top_spacer" || node.key == "__v_bot_spacer")
-            if node.effectiveInert || node.el.isA11yHidden || isVirtualSpacer { continue }
-            if let pIdx = node.parentIndex,
-               pIdx >= 0,
-               pIdx < flatNodes.count,
-               !flatNodes[pIdx].effectiveInert,
-               !flatNodes[pIdx].el.isA11yHidden {
-                childrenByParent[pIdx, default: []].append(idx)
-            } else {
-                roots.append(idx)
-            }
+        let edges = AccessibilityTreeEdges(count: flatNodes.count) { flatNodes[$0].parentIndex }
+        func projection(_ i: Int) -> AccessibilityTreeEdges.Projection {
+            let node = flatNodes[i]
+            let el = node.el
+            if el.isA11yHidden || el.opacity <= 0.01 || scene.isExiting(node.nodeId) ||
+                node.key == "__v_top_spacer" || node.key == "__v_bot_spacer" { return .hidden }
+            if activeModalPath != nil && !modalMemberPaths.contains(node.path) && !modalAncestorPaths.contains(node.path) { return .hidden }
+            let takesFocus = nodeTakesFocus(el)
+            let keyboardTarget = takesFocus && !node.effectiveInert && (el.role != .presentation || el.explicitlyFocusable)
+            guard let role = AccessibilityRoleRules.projectedRole(for: el, takesFocus: takesFocus, keyboardTarget: keyboardTarget)
+            else { return .descendants(scrolls: !el.layout.scrollAxes.isEmpty) }
+            return .node(role)
         }
 
         func a11yKeyed(from idx: Int, key: String) -> Int? {
             let match = AccessibilityNameSource.relatedIndex(key, from: idx, parent: { flatNodes[$0].parentIndex },
-                                                             children: { allChildrenByParent[$0] ?? [] }, keyAt: { flatNodes[$0].key })
-            return match.flatMap { flatNodes[$0].effectiveInert ? nil : $0 }
+                                                             children: { edges.children[$0] ?? [] }, keyAt: { flatNodes[$0].key })
+            guard let match, !AccessibilityTreeEdges.hasAncestorOrSelf(match, count: flatNodes.count,
+                parent: { flatNodes[$0].parentIndex }, matching: { scene.isExiting(flatNodes[$0].nodeId) }) else { return nil }
+            return match
         }
 
         func a11yWords(_ idx: Int) -> String? {
             AccessibilityNameSource.words(of: idx, source: { index in
                 AccessibilityNameSource(flatNodes[index].el, securePath: securePaths.contains(flatNodes[index].path))
-            }, children: { allChildrenByParent[$0] ?? [] })
+            }, children: { edges.children[$0] ?? [] })
         }
 
         let selectableRoles: Set<ElementRole> = [.listItem, .option, .tab, .treeItem, .gridCell, .row]
-        func build(_ idx: Int) -> AccessibilityNode {
+        func build(_ idx: Int, insideScroll: Bool, semanticRole: ElementRole) -> AccessibilityNode {
             let node = flatNodes[idx]
             let el = node.el
             var editIsSecure = el.isSecure
@@ -206,9 +271,10 @@ public extension Runtime {
             var editChars: Int? = nil
             var editSel: [Int]? = nil
             // `RoleCtx::multiline`: a field that is not single-line (`a11y/node.rs:31`).
-            let editMultiline = el.isMultilineField
+            var editMultiline = el.isMultilineField
             if let editLens = el.handlers.editLens {
                 let edit = editLens.get(state)
+                editMultiline = edit.multiline
                 editIsSecure = editIsSecure || edit.isSecure
                 if !editIsSecure {
                     editText = edit.text
@@ -222,8 +288,13 @@ public extension Runtime {
             let rect = presentedRectByPath[node.path] ?? node.targetRect
             let nodeId = node.key ?? node.path
 
+            let outsideModal = activeModalPath != nil && !modalMemberPaths.contains(node.path)
+            let inert = outsideModal
+                ? AccessibilityTreeEdges.hasAncestorOrSelf(idx, count: flatNodes.count, parent: { flatNodes[$0].parentIndex }, matching: { flatNodes[$0].el.isInert })
+                : node.effectiveInert
             let enabled = !el.a11yDisabled && !node.effectiveInert
-            let actions = a11yNodeActions(node)
+            var actions = a11yNodeActions(node)
+            if insideScroll { actions.append(.scrollIntoView) }
 
             // Field selection indices refer to the editor's model, including when the element
             // also has a general-purpose value override.
@@ -238,9 +309,9 @@ public extension Runtime {
             let sOff = hasScroll ? (scrollOffsets[node.path] ?? .zero) : nil
             let sMax = hasScroll ? scrollMaxExtents[node.path] : nil
 
-            let resolvedRole: ElementRole = el.role == .textInput && (isSecure || editMultiline)
+            let resolvedRole: ElementRole = el.handlers.editLens != nil || (el.role == .textInput && (isSecure || editMultiline))
                 ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: editMultiline)
-                : AccessibilityRoleRules.role(for: el, focusable: nodeTakesFocus(el) && !node.effectiveInert)
+                : semanticRole
             let givenName = AccessibilityNameSource.nonblank(el.a11yLabel) ?? labelledByText
             let controlName = AccessibilityRoleRules.controlName(
                 given: givenName, role: resolvedRole, isDefaultButton: el.isDefaultButton, secure: isSecure,
@@ -248,7 +319,7 @@ public extension Runtime {
             )
             let resolvedLabel = controlName ?? (isSecure ? "Password" : (el.role == .textInput ? nil : richPlain))
             let hasLinks = hasActiveTextLinks(el)
-            var builtChildren = (childrenByParent[idx] ?? []).map(build)
+            var builtChildren = edges.project(edges.children[idx] ?? [], insideScroll: insideScroll || hasScroll, projection: projection, build: build)
             if let grid = el.terminalGridPayload {
                 let projected = AccessibilityTreeBuilder.projectTerminalGrid(grid, nodeId: nodeId, bounds: rect)
                 builtChildren.append(contentsOf: projected.children)
@@ -289,11 +360,8 @@ public extension Runtime {
                 guard let pIdx = node.parentIndex, pIdx >= 0, pIdx < flatNodes.count,
                       let vList = virtualLists[flatNodes[pIdx].path] else { return nil }
                 let rowSeg = node.path.split(separator: "/").last.map(String.init) ?? ""
-                guard let rowKey = vList.rowKeyBySegment[rowSeg] ?? node.key else { return nil }
-                for k in vList.lastMountedRange where k >= 0 && k < vList.lastKeys.count {
-                    if vList.lastKeys[k] == rowKey { return k }
-                }
-                return vList.lastKeys.firstIndex(of: rowKey)
+                if let rowKey = vList.rowKeyBySegment[rowSeg] { return vList.rowPlaces.index(of: rowKey) }
+                return node.key.flatMap { vList.rowPlaces.index(ofAuthoredKey: $0) }
             }()
             let resolvedSizeOfSet: Int? = {
                 if let explicit = el.a11yPosInSet?.size { return explicit }
@@ -326,7 +394,7 @@ public extension Runtime {
                 url: el.a11yHref,
                 activeDescendant: el.a11yActiveDescendant,
                 sortAscending: el.a11ySorted,
-                isDisabled: el.a11yDisabled,
+                isDisabled: el.a11yDisabled || inert,
                 isReadOnly: el.a11yReadOnly,
                 isInvalid: el.a11yInvalid,
                 isBusy: el.a11yBusy,
@@ -338,7 +406,7 @@ public extension Runtime {
                 scrollYMax: sMax?.y,
                 textSelection: isSecure ? nil : editSel,
                 characterCount: isSecure ? nil : editChars,
-                isModal: el.isModal || el.role == .dialog,
+                isModal: el.isModal,
                 isSecure: isSecure,
                 actions: actions,
                 children: AccessibilityTreeBuilder.controlChildren(builtChildren, role: resolvedRole, name: isSecure ? nil : controlName)
@@ -359,9 +427,13 @@ public extension Runtime {
             return projected
         }
 
-        let builtRoots = roots.map(build)
+        let builtRoots = edges.project(edges.roots, insideScroll: false, projection: projection, build: build)
         if builtRoots.count == 1 {
-            return builtRoots[0]
+            let root = builtRoots[0]
+            let implicitWindow = edges.roots.count == 1 && edges.roots.first.map {
+                flatNodes[$0].el.role == .group && flatNodes[$0].path != root.runtimePath
+            } == true
+            if !implicitWindow { return root }
         }
         return AccessibilityNode(
             id: "root",
@@ -395,6 +467,14 @@ public extension Runtime {
         action: AccessibilityAction,
         at now: Double
     ) -> Bool {
+        if action == .scrollIntoView {
+            guard let index = a11yTargetIndex(id), a11yAllowed(index) else { return false }
+            var tx = makeTx(at: now)
+            tx.scrollIntoView(flatNodes[index].path)
+            applyTx(tx, at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
+            return true
+        }
         if action == .setValue {
             // A new value needs the request's data (`ActionData::Value` / `NumericValue`).
             return performAccessibilitySetValue(id, value: nil, at: now)
@@ -403,7 +483,7 @@ public extension Runtime {
         // a disabled control advertises nothing and takes no action.
         let all = elements()
         let flatIdx = a11yTargetIndex(id)
-        let target = all.first(where: { $0.path == id }) ?? all.first(where: { $0.key == id })
+        let target = all.first(where: { $0.path == id }) ?? all.first(where: { matchesAuthoredKey($0.key, id) })
         if let flatIdx {
             let flat = flatNodes[flatIdx]
             guard a11yAllowed(flatIdx), a11yTakes(action, on: flat) else {
@@ -452,7 +532,7 @@ public extension Runtime {
             pressDown(at: center, at: now, mouse: false)
             pointerUp(at: center, button: .primary, mods: Mods(), at: now)
             return true
-        case .setValue:
+        case .setValue, .scrollIntoView:
             return false
         case .increment, .decrement:
             guard let flatIdx, let onStep = flatNodes[flatIdx].el.handlers.onStep else {
@@ -593,7 +673,9 @@ public final class MacOSAccessibilityHost {
             return elem
         }
 
-        let roots = tree.id == "root" && tree.role == .group && tree.label == nil ? tree.children : [tree]
+        let windowGroup = tree.id == "root" && tree.role == .group && tree.label == nil &&
+            !tree.isFocusable && !tree.isFocused && !tree.isDisabled && tree.actions.isEmpty
+        let roots = windowGroup ? tree.children : [tree]
         rootElements = convertChildren(roots, parent: parentView, scope: nil)
         // The window's own live region, which draws nothing: the root's last child.
         announcerElement = announcer.map { convertNode($0, parent: parentView, id: .scoped(parent: nil, id: $0.id, occurrence: 0)) }

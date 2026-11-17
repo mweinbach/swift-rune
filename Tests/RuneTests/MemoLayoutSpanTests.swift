@@ -1,0 +1,139 @@
+import Testing
+@testable import Rune
+import RuneMotion
+
+@Suite("Retained memo layout")
+struct MemoLayoutSpanTests {
+    private struct State {
+        var tick = 0
+        var move = false
+        var edit = TextEdit("old")
+    }
+
+    /// A recursive card tree with text at every leaf. Its parent may move or resize it.
+    private func card(_ depth: Int, _ id: Int) -> El<State> {
+        if depth == 0 { return text("Label \(id)").key("label").font(TextStyle(size: 12)) }
+        var branch: El<State> = col().wFull()
+        for index in 0..<3 { branch = branch.child(card(depth - 1, id * 3 + index).key("item-\(index)")) }
+        return branch
+    }
+
+    private func sameGeometry(_ a: LayoutEngine.ResultNode, _ b: LayoutEngine.ResultNode) -> Bool {
+        a.layout.localRect == b.layout.localRect && a.layout.contentSize == b.layout.contentSize &&
+            a.children.count == b.children.count && zip(a.children, b.children).allSatisfy(sameGeometry)
+    }
+
+    @Test("Unchanged descendants transfer their slots across resize and reparent, and keep current text layouts")
+    func transferAcrossLayoutPasses() {
+        let cache = MemoCache()
+        let layout = RetainedLayoutCoordinator()
+        let oracle = RetainedLayoutCoordinator()
+        let textSystem = TextSystem()
+        let state = State()
+        let size = Vec2(540, 480)
+        var expectedChildren = 0
+        func tree(_ step: Int, memoized: Bool) -> El<State> {
+            var cards: El<State> = col().key("cards").w(step >= 2 ? 90 : 150)
+            for id in 0..<9 {
+                let key = "card-\(id)"
+                let body = memoized ? cache.getOrBuild(id: key, deps: id) { card(4, id) }.element : card(4, id).key(key)
+                cards = cards.child(body)
+            }
+            let lead: El<State> = el().key("lead").h(Float(10 + step))
+            if step == 3 {
+                return col().key("new-root").child(lead).child(col().key("parent").child(cards))
+            }
+            return col().key("root").child(lead).child(cards)
+        }
+        for step in 0...3 {
+            let texts = RetainedLayoutCoordinator.TextLayoutCollector()
+            let expectedTexts = RetainedLayoutCoordinator.TextLayoutCollector()
+            let result = layout.compute(root: tree(step, memoized: true), state: state, viewport: size,
+                                        pixelScale: 1, textSystem: textSystem, textLayouts: texts)
+            let expected = oracle.compute(root: tree(step, memoized: false), state: state, viewport: size,
+                                          pixelScale: 1, textSystem: textSystem, textLayouts: expectedTexts)
+            #expect(sameGeometry(result, expected))
+            #expect(texts.liveIds == expectedTexts.liveIds)
+            #expect(Set(texts.map.keys) == Set(expectedTexts.map.keys))
+            #expect(texts.map.count == 729)
+            if step == 0 { expectedChildren = texts.liveIds.count - 3 - 9 }
+            else { #expect(layout.reusedMemoNodeCount == expectedChildren) }
+        }
+    }
+
+    @Test("A rebuilt parent memo retains nested spans through ancestor moves")
+    func changedOuterMemoReusesInnerDescendants() {
+        let cache = MemoCache()
+        let layout = RetainedLayoutCoordinator()
+        let textSystem = TextSystem()
+        for step in 0..<5 {
+            let version = [0, 0, 1, 1, 2][step]
+            let outer = cache.getOrBuild(id: "outer", deps: version) { () -> El<State> in
+                let inner = cache.getOrBuild(id: "inner", deps: 0) { card(3, 1) }.element
+                return col().child(inner).child(text("counter \(version)"))
+            }.element
+            let root: El<State> = step >= 3 ? col().child(text("moved")).child(row().child(outer)) : col().child(outer)
+            _ = layout.compute(root: root, state: State(), viewport: Vec2(180, 180), pixelScale: 1, textSystem: textSystem)
+            if step == 2 || step == 4 { #expect(layout.reusedMemoNodeCount == 39) }
+            if step == 1 || step == 3 { #expect(layout.reusedMemoNodeCount == 41) }
+        }
+    }
+
+    @Test("Only geometrically unchanged memo passes reuse the solved tree")
+    func unrelatedCommitSkipsExtraction() {
+        let cache = MemoCache()
+        let layout = RetainedLayoutCoordinator()
+        let textSystem = TextSystem()
+        let body = cache.getOrBuild(id: "panel", deps: 1) { () -> El<State> in
+            row().child(el().key("left").size(30, 10)).child(el().key("right").size(20, 10))
+        }.element
+        func solve(_ el: El<State>, width: Float = 92) -> LayoutEngine.ResultNode {
+            layout.compute(root: el, state: State(), viewport: Vec2(width, 60), pixelScale: 1, textSystem: textSystem)
+        }
+        let first = solve(body)
+        let repainted = solve(body.bg(.white))
+        #expect(layout.reusedMemoGeometry)
+        #expect(sameGeometry(repainted, first))
+        let resized = solve(body, width: 130)
+        #expect(!layout.reusedMemoGeometry)
+        #expect(resized.layout.localRect.width == 130)
+        let mirrored = solve(body.dir(.rtl), width: 130)
+        #expect(!layout.reusedMemoGeometry)
+        #expect(mirrored.children[0].layout.localRect.x > resized.children[0].layout.localRect.x)
+        _ = solve(body, width: 130)
+        #expect(!layout.reusedMemoGeometry)
+    }
+
+    @Test("Mutable children and state-backed inputs invalidate a memo layout span")
+    func changedChildrenAndInputFallback() {
+        let cache = MemoCache()
+        let layout = RetainedLayoutCoordinator()
+        let textSystem = TextSystem()
+        func body() -> El<State> {
+            cache.getOrBuild(id: "panel", deps: 0) { () -> El<State> in
+                col().child(text("one")).child(text("two"))
+            }.element
+        }
+        func solve(_ el: El<State>, _ state: State) -> LayoutEngine.ResultNode {
+            layout.compute(root: el, state: state, viewport: Vec2(150, 150), pixelScale: 1, textSystem: textSystem)
+        }
+        let state = State()
+        _ = solve(body(), state)
+        _ = solve(body(), state)
+        #expect(layout.reusedMemoNodeCount == 2)
+        var changed = body()
+        changed.children[0] = el().size(42, 20)
+        let result = solve(changed, state)
+        #expect(result.children[0].layout.localRect.width == 42)
+        #expect(layout.reusedMemoNodeCount == 0)
+
+        let withEdit = cache.getOrBuild(id: "mutable", deps: 0) { () -> El<State> in
+            col().child(textInput(key: "editor", \State.edit)).child(text("fixed"))
+        }.element
+        _ = solve(withEdit, state)
+        var updated = state
+        updated.edit = TextEdit("changed")
+        _ = solve(withEdit, updated)
+        #expect(layout.reusedMemoNodeCount == 0)
+    }
+}

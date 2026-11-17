@@ -25,6 +25,57 @@ struct DirectionAndRtlParityTests {
         #expect(Direction.of("123\u{2029}שלום") == nil)
     }
 
+    @Test("First strong direction uses Unicode bidi classes across scripts and planes")
+    func unicodeBidiClasses() {
+        for scalar in ["\u{05BE}", "\u{061B}", "\u{061F}", "\u{0640}"] {
+            #expect(Direction.of(scalar) == .rtl)
+            #expect(containsStrongRTL(scalar))
+        }
+        for scalar in ["\u{2160}", "\u{10400}", "\u{11F02}", "\u{1F1E6}"] {
+            #expect(Direction.of(scalar) == .ltr)
+        }
+        for scalar in ["\u{0301}", "\u{060E}", "\u{180E}", "\u{FEFF}"] {
+            #expect(Direction.of(scalar) == nil)
+            #expect(!containsStrongRTL(scalar))
+        }
+        #expect(Direction.of("\u{0301}\u{FEFF}\u{05BE}A") == .rtl)
+        let paragraphs = "\u{2068}\u{061F}\u{2029}\u{10400}"
+        #expect(Direction.of(paragraphs) == nil)
+        #expect(firstStrongDirection(in: paragraphs, acrossParagraphs: true) == .ltr)
+    }
+
+    @Test("A plaintext field resolves its element direction from prose outside displayed mention pills")
+    func plaintextFieldSkipsMentions() throws {
+        let field = textInput(key: "field", \TextEdit.self).w(150).dirByParagraph().placeholder("عربي")
+        func draft(mention: String, prose: String) -> TextEdit {
+            var edit = TextEdit("", multiline: true).rich()
+            edit.insertPill(id: "file", label: mention)
+            edit.insert(prose)
+            return edit
+        }
+        let rtl = draft(mention: "@src/é.swift", prose: "\n123\nمرحبا")
+        #expect(firstStrongDirection(in: field, state: rtl) == .rtl)
+        #expect(firstStrongDirection(in: field, state: draft(mention: "@שלום", prose: " English")) == .ltr)
+        #expect(firstStrongDirection(in: field, state: draft(mention: "@alice", prose: " 123")) == nil)
+        #expect(firstStrongDirection(in: field, state: TextEdit("")) == nil)
+
+        var composing = draft(mention: "@שלום", prose: "")
+        composing.setCursor(utf8Offset: 0)
+        composing.setPreedit("123 ")
+        #expect(firstStrongDirection(in: field, state: composing) == nil)
+        composing.setPreedit("é ")
+        #expect(firstStrongDirection(in: field, state: composing) == .ltr)
+
+        let rt = Runtime(state: rtl, viewport: Vec2(400, 100)) { _, _ in
+            row().size(400, 100).dir(.auto).child(field).child(el().key("marker").size(20, 20))
+        }
+        _ = rt.frame(at: 0)
+        let elements = rt.elements()
+        let fieldX = try #require(elements.first { $0.key == "field" }?.rect.first)
+        let markerX = try #require(elements.first { $0.key == "marker" }?.rect.first)
+        #expect(fieldX > markerX)
+    }
+
     @Test("dir(.ltr/.rtl/.auto) layout mirroring, islands, and unmirrored()")
     func dirSubtreeAndUnmirrored() {
         let rt = Runtime<EmptyState>(state: EmptyState(), viewport: Vec2(200, 120)) { _, _ in

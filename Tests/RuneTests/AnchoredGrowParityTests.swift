@@ -264,7 +264,7 @@ struct AnchoredGrowParityTests {
             t += 1.0 / 120.0
             present(at: t)
             let c = rt.element(byKey: "composer")!.rect
-            let p = rt.element(byKey: "pill")!.rect
+            let p = rt.presented("pill")!.rect
             let info = rt.elements().first { $0.key == "pill" }!
             #expect(info.rect == p, "frame \(frame): elements() agrees with presented")
             #expect(

@@ -10,9 +10,6 @@ import QuartzCore
 
 /// Real-window + overlay AppKit backdrop material (`NSVisualEffectView` / `NSGlassEffectView`) probe
 /// mirroring `crates/rune/examples/material_check.rs`.
-///
-/// NOTE: `Sources/Rune` does not yet wire `App.overlay(_:receiver:)` into `MacOSApp`, so `PREWARMED`
-/// and `FADING` `OverlayHandle`s are created directly alongside the window on `@MainActor`.
 @main
 public enum RuneMaterialCheckApp {
     public struct State: Sendable {

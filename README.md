@@ -14,7 +14,7 @@ Every `RuneApp` supports headless execution (`--snap`, `--tree`, `--script`, `--
 | `RuneRef` | `RuneRef` | `crates/rune-ref` | CPU reference rasterizer (`RuneRef.render`) implementing the exact uber-shader primitive set (`Primitive`, `RefScene`, `R8Atlas`, `RGBA8Atlas`), `Frame` PNG encode/decode, pixel-level `RuneRef.diff` (`Difference`, `PixelBlame`), and `rune-ref` CLI (`generate`, `check` GPU-vs-CPU differential parity). |
 | `RuneI18n` | `RuneI18n` | `crates/rune-i18n` | BCP-47 `LocaleInfo` parsing, RTL detection, script-aware `negotiateLocale`, system locale detection, CLDR `PluralCategory` rules, number/list formatting, `Template` (`{{name}}` interpolation), JSON `Catalog.fromJSON`, and `I18n` runtime lookup. |
 | `RuneTaffy` | `RuneTaffy` | `crates/rune-taffy` | Standalone CSS Flexbox, CSS Grid, Block, and Absolute layout engine (`LayoutEngine`, `TaffyStyle`, `MeasureFunc`, `LayoutCache`, dirty propagation, `roundLayout`). |
-| `Rune` | `Rune` | `crates/rune` | Declarative `El<State>` view tree (`row`, `col`, `el`, `text`, `liveText`, `rich`, `icon`, `image`, `canvas`, `textInput`), `Tok` / `JsonTheme` OKLCH design tokens, `LayoutEngine` (flexbox, CSS Grid, block, virtualized growth stacks), `TextEdit` Unicode grapheme editor & `Keybind`, `Shape` / `VectorPath` ear-clipped polygons & strokes, `Live<T>` / `Binding<T>` / `Tween<T>`, `Machine` (`Attempt`, `Seq`, `Effects`), Metal, OpenGL, OpenGL ES and WebGL 2 rendering, a portable CPU reference renderer, and native and browser app hosts, accessibility bridge, rich clipboard, file dialogs, spellcheck, and `HeadlessRunner`. |
+| `Rune` | `Rune` | `crates/rune` | Declarative `El<State>` view tree (`row`, `col`, `el`, `text`, `liveText`, `rich`, `icon`, `image`, `canvas`, `textInput`), `Tok` / `JsonTheme` OKLCH design tokens, `LayoutEngine` (flexbox, CSS Grid, block, virtualized growth stacks), `TextEdit` Unicode grapheme editor & `Keybind`, `Shape` / `VectorPath` ear-clipped polygons & strokes, `Live<T>` / `Binding<T>` / `Tween<T>`, `Machine` (`Attempt`, `Seq`, `Effects`), Metal, OpenGL, OpenGL ES, WebGPU and WebGL 2 rendering, a portable CPU reference renderer, and native and browser app hosts, accessibility bridge, rich clipboard, file dialogs, spellcheck, and `HeadlessRunner`. |
 | `RuneKit` | `RuneKit` | `crates/rune-kit` | Themable component library built on `Kit.fromPalette(PaletteSeed)` with WCAG contrast enforcement: `button`, `iconButton`, `switchControl`, `checkbox`, `radioGroup`, `segmentedControl`, `slider`, `textInputField`, `textArea`, `field`, `badge`, `divider`, `card`, `progress`, `progressCircle`, `collapsible`, `accordion`, `combobox`, `select`, `dialog`, `toast` / `ToastStack`, `Tooltip`, `Popover`, `HoverCard`, `ContextMenu` / `Menu`, `PopupList`, `RollingText`, `ScrollBar`, `Search`, `ShortcutRecorder`, `ImageZoom`, `Shell` (`Sidebar`, `TabStrip`, `WindowTitlebar`, `PaneState`, `splitView`, `toolbar`), `tree`, `table`, streaming `MarkdownParser` / `markdown`, `Kit.syntax` (`RuneHighlights`), `Kit.mermaid` (`RuneMermaid`), and `FileDiff` / `diffView`. |
 | `RuneNotify` | `RuneNotify` | `crates/rune-notify` | System notifications through Apple UserNotifications, Windows WinRT toasts, and the freedesktop notification service on Linux. Supports replacement, removal, actions and clicks, and a deterministic test backend. |
 | `RuneMac` | `RuneMac` | `crates/rune-mac` | macOS `NSWindow` frame persistence/autosave, multi-display clamping, fullscreen, relaunch, and notification helpers. |
@@ -176,9 +176,9 @@ xcrun swift run rune-ref check
 
 ### Cross-Platform Architecture & Builds
 
-The same Swift view and runtime drive the Hello switch on desktop, Android, and the web. On the desktop, Rune draws its own controls in a native window and exposes their roles, values, and actions to the operating system’s accessibility service. The GPU draws instanced primitives and samples glyph and image atlases. Windows and Linux use OpenGL 3.3 core, Android uses OpenGL ES 3, browsers use WebGL 2, and Apple windows use Metal.
+The same Swift view and runtime drive the Hello switch on desktop, Android, and the web. On the desktop, Rune draws its own controls in a native window and exposes their roles, values, and actions to the operating system’s accessibility service. The GPU draws instanced primitives and samples glyph and image atlases. Windows and Linux use OpenGL 3.3 core, Android uses OpenGL ES 3, browsers use WebGPU or WebGL 2, and Apple windows use Metal.
 
-Applications can supply packed pixel surfaces and custom GPU effects. Direct3D texture sharing, native Vulkan and WebGPU integration require additional backends. The upstream map tracks remaining implementation differences at module level. [Upstream module map](.agents/skills/upstream-rune-sync/references/upstream-map.json)
+Applications can supply packed pixel surfaces and custom GPU effects. Direct3D texture sharing and native Vulkan integration require additional desktop backends. The upstream map tracks remaining implementation differences at module level. [Upstream module map](.agents/skills/upstream-rune-sync/references/upstream-map.json)
 
 On macOS, Windows, and X11, `WindowHandle.placement()` reports the window's position and content bounds in physical pixels. Wayland gives the compositor control of global placement, so this call returns `nil` there. For a click-through overlay on Wayland, use a borderless window so the input region covers the whole visible surface.
 
@@ -191,14 +191,16 @@ For a custom native GPU pass, attach a `Compositor` with `App.compositor(_:)` an
 | **Windows** | Win32 window and input, WGL / OpenGL 3.3 core, DirectWrite | `swift run rune-hello` in a Swift 6.4 Windows developer environment |
 | **Linux** | SDL2 on Wayland or X11, OpenGL 3.3 core, Pango / Cairo text, AT-SPI | `swift run rune-hello` in a graphical session |
 | **Android** | NativeActivity, ANativeWindow, EGL / OpenGL ES 3, Choreographer | [Build the ARM64 library and install the APK](examples/android/README.md) |
-| **WebAssembly** (`wasm32-unknown-wasip1`) | `WebPlatform.swift` (WASI reactor, DOM input, WebGL 2 instanced renderer) | `./scripts/build-web.sh <wasip1-sdk> rune-hello` |
+| **WebAssembly** (`wasm32-unknown-wasip1`) | `WebPlatform.swift` (WASI reactor, DOM input, instanced WebGPU and WebGL 2 renderers) | `./scripts/build-web.sh <wasip1-sdk> rune-hello` |
 
 On Ubuntu, install the native development packages before building.
 
 ```sh
-sudo apt install pkg-config libsdl2-dev libegl-dev libgles-dev libgl1-mesa-dri libpango1.0-dev libgtk-3-dev libatk-bridge2.0-dev libx11-dev libx11-xcb-dev libxcb1-dev libxext-dev libxkbcommon-dev libwayland-dev libwebp-dev liblcms2-dev libgstreamer-plugins-base1.0-dev
+sudo apt install pkg-config libsdl2-dev libegl-dev libgles-dev libgl1-mesa-dri libpango1.0-dev libgtk-3-dev libgtk-layer-shell0 libxi-dev libatk-bridge2.0-dev libx11-dev libx11-xcb-dev libxcb1-dev libxext-dev libxkbcommon-dev libwayland-dev libwebp-dev liblcms2-dev libgstreamer-plugins-base1.0-dev
 RUNE_GPU_INFO=1 swift run rune-hello
 ```
+
+On Linux, `OverlayHandle` uses a transparent OpenGL surface on composited X11 or a native layer surface on Wayland compositors that advertise `zwlr_layer_shell_v1`. The Wayland host uses `libgtk-layer-shell.so.0`, provided by Ubuntu’s `libgtk-layer-shell0` package. On compositors without layer-shell, an overlay with `.keyPolicy = .none` can use XWayland for a pass-through surface. An interactive XWayland overlay also requires `.xwaylandInput(true)`. Check the handle’s `availability` and `failure` after showing it.
 
 The default `DesktopMedia` package trait enables playback and recording. Linux uses GStreamer. Windows uses Media Foundation for playback and AAC encoding and WASAPI for microphone input. On Ubuntu, install `gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good`, and `gstreamer1.0-libav` for AAC and H.264 playback. Install `gstreamer1.0-pulseaudio` for PulseAudio or PipeWire-Pulse output and microphone input, or `gstreamer1.0-alsa` for ALSA output. Recording M4A also needs an AAC encoder and MP4 muxer. For a UI-only build, use `swift build --disable-default-traits --product rune-hello`.
 
@@ -227,7 +229,9 @@ Windows notifications require an app identity. Call `RuneNotify.registerWithResu
 
 To exercise lighting in an interactive app, run `swift run rune-light-live --scene chat`. To render one effects frame to a file, run `swift run rune-fx-gallery --still glow --snap glow.png`. On Windows, the UI Automation smoke test clicks the Hello switch, resizes the window and checks its accessible state. [Windows switch test](scripts/windows-uia-smoke.ps1) · [Windows text accessibility test](Tests/Support/WindowsTextAccessibility/Run.ps1)
 
-To embed Rune in a UIKit app, set `window.rootViewController = try IOSApp.makeViewController(app)` in the scene delegate. The Catalyst smoke test drives this controller through a real UIKit window. [UIKit window test](scripts/test-uikit-window.py)
+To embed Rune in a UIKit app, set `window.rootViewController = try IOSApp.makeViewController(app)` in the scene delegate. On ProMotion iPhones, set the Boolean `CADisableMinimumFrameDurationOnPhone` to `YES` in the host app’s Info.plist to enable requests above 60 Hz. The Catalyst smoke test drives this controller through a real UIKit window. [UIKit window test](scripts/test-uikit-window.py)
+
+To capture a UIKit window, pass `ToolingArgs.parse(["--native", "--trace", path, "--frames", "120"])` as the controller’s `parsed` argument. Choose a writable file in the app container. The trace records display-link targets and, on Metal devices and Mac Catalyst, drawable presentation times. Capture ends at the frame limit, window detachment, or backgrounding.
 
 The Android example includes a NativeActivity manifest and a packaging script for Swift runtime libraries, resources, and Java input and accessibility bridges. [Build and run the Android app](examples/android/README.md)
 
@@ -258,16 +262,34 @@ console.log(app.renderer);
 
 The reactor built by `scripts/build-web.sh` imports `rune_text` for browser font shaping, mixed-direction caret positions and grayscale glyph masks. Pass `{ fontDirectory: null }` as the third argument to `instantiateRuneBrowser` to use fonts supplied by the page and system. A standalone WASI command built with regular `swift build` uses Rune’s bitmap fallback.
 
+A resting browser app releases its animation-frame callback. Use `tx.wakeAfter(seconds)` to schedule the next poll, or call `waker.wake()` on the `Waker` supplied to `.setup` when external state changes. Swift tasks, input and resize events wake the app automatically. Continuous motion follows the display refresh rate.
+
+To check spelling in a browser text field, add `.spellcheck()` to the field and pass `{ spellDictionaries: ["en-US", "de"] }` as the third argument to `instantiateRuneBrowser`. A Swift browser app can also call `SpellChecker.shared.setWebDictionaries(["en-US", "de"])`. Serve each Hunspell pair beside the page, for example `spell/en-US.aff` and `spell/en-US.dic`. Rune fetches the selected dictionaries and its bundled Spellbook engine when a field first checks text. `SpellChecker.shared.setLanguages(["de", "en-US"])` selects both languages explicitly. The field accepts words found in either dictionary, and learning a word applies throughout the mounted app.
+
+The first browser frame uses the bundled Inter subsets in `Fonts/web/first/` and the original IBM Plex Mono. After presentation, Rune fetches all three full Inter weights from `Fonts/web/` and updates mounted windows together. An app that registers its own Inter keeps that family. Use `.fontUrl(...)` for a face the first frame needs, or `.fontUrlLater(...)` to fetch it after presentation. Both accept page-relative TrueType or OpenType URLs and read local font files on native platforms.
+
+An app that uses `.webDocument()` lays out at its natural document height. The browser scrolls a band of rendered pixels with a 256-point skirt on each side. Rune repositions and redraws the band as the visible region approaches an edge. Use `.canvasId("article")` and call `mountRuneBrowser(null, instance)` to mount into that named canvas. Calling `.fullViewport()` on a named canvas makes it fill the browser window.
+
 Use `ImageCache.load(data)` for encoded image bytes or `ImageCache.url("assets/logo.webp", sizePt: 32, scale: 2)` for a URL relative to the page. Both return a handle whose `.pixels` can be drawn immediately. Rune repaints when decoding finishes. The browser fetches remote assets under the page’s CORS rules. Rune uses compatible WebCodecs decoders and can composite animated GIF and WebP frames through browser image APIs when WebCodecs is unavailable. On the single-threaded browser reactor, use the cache’s `wake` callback or check `isReady` on a later frame before calling synchronous `wait()`.
 
-The default browser renderer sends packed Rune instances to WebGL 2. It uploads complete atlases on first draw and after context restoration, then sends changed glyph and image rectangles as the UI updates. `app.ready` resolves after the first draw. `app.renderer` reports the actual adapter when the browser exposes its identity. The canvas follows its CSS size and device pixel ratio. Pass `{ resizeTo: element }` to size it from a containing element. For the reference rasterizer, request `{ backend: "cpu" }` on a fresh canvas. The focused editor uses a native textarea or password field for keyboard, IME, and assistive input.
+A full-window app paints on a temporary CPU canvas while WebGPU starts and continues accepting input. The first completed GPU frame replaces it. Set `globalThis.RUNE_CPU_FIRST = "off"` to start on the GPU or `"only"` to keep a full-window app on the CPU. The browser sends packed Rune instances to WebGPU when it can acquire a device and compile the pipelines. It falls back to WebGL 2 during startup. Both backends upload complete atlases on first draw and after device or context restoration, then send changed glyph and image rectangles as the UI updates. Pass `{ backend: "webgpu" }` or `{ backend: "webgl2" }` to require one API. Custom effects supplied through `drawEffect` use WebGL, and `drawGPUEffect` receives the WebGPU command encoder. The canvas emits `runepresent` on its first draw, including an early CPU frame. `app.ready` resolves once backend startup finishes. `app.renderer` reports the actual adapter when the browser exposes its identity. The canvas follows its CSS size and device pixel ratio. Pass `{ resizeTo: element }` to size it from a containing element. For the reference rasterizer, request `{ backend: "cpu" }` on a fresh canvas. The focused editor uses a native textarea or password field for keyboard, IME, and assistive input.
 
-A Swift `App.compositor` can animate, hide the UI, or request multiple `drawUI()` passes. To implement an authored effect in a browser, supply a synchronous `drawEffect(pass)` mount option. Rune calls it in painter order for visible `.effect(...)` slots. `pass.mark` identifies the slot. The callback can draw with `pass.gl` into `pass.framebuffer` using top-left device-pixel `rect`, `clip`, and target `origin`. A slot that requests a backdrop receives the earlier content as `pass.backdrop`. The framebuffer and snapshot texture are borrowed for that call.
+A Swift `App.compositor` can animate, hide the UI, or request multiple `drawUI()` passes. To implement an authored effect in a browser, supply a synchronous `drawEffect(pass)` or `drawGPUEffect(pass)` mount option. A WebGPU effect receives the device, command encoder and target texture view. Rune calls it in painter order for visible `.effect(...)` slots. `pass.mark` identifies the slot. The callback can draw with `pass.gl` into `pass.framebuffer` using top-left device-pixel `rect`, `clip`, and target `origin`. A slot that requests a backdrop receives the earlier content as `pass.backdrop`. The framebuffer and snapshot texture are borrowed for that call.
 
 Run the browser regression suite with Node 22 or later and Chrome or Chromium. To include the compiled Swift app, pass the WASI product and the `dist` directory of a locally installed `@bjorn3/browser_wasi_shim`. The runner opens an isolated browser profile, clicks the Lights switch, checks its accessibility state, reads back GPU pixels, and resizes the canvas.
 
 ```sh
-node Tests/Browser/run.mjs --wasm /path/to/rune-hello.wasm --wasi-shim /path/to/node_modules/@bjorn3/browser_wasi_shim/dist
+node Tests/Browser/run.mjs --webgpu --wasm /path/to/rune-hello.wasm --wasi-shim /path/to/node_modules/@bjorn3/browser_wasi_shim/dist
+```
+
+For the font asset checks, run `python3 Tests/Browser/font-assets.py` with fontTools installed and HarfBuzz’s `hb-shape` on the path. The checks compare character maps, advances, unhinted outlines and contextual shaping across the native, first-cut and full web Inter files.
+
+To measure scrolling in the 100,000-row table and 50,000-node tree, build the release WASI products `rune-kit-table` and `rune-kit-tree`. The fixture measures frame intervals and Swift scene, accessibility and GPU submission times through the normal browser mount.
+
+```sh
+node Tests/Browser/run.mjs --fixture large-view-wasi --webgpu --compare-accessibility --device-scale 1 \
+  --table-wasm /path/to/rune-kit-table.wasm --tree-wasm /path/to/rune-kit-tree.wasm \
+  --wasi-shim /path/to/node_modules/@bjorn3/browser_wasi_shim/dist
 ```
 
 To check asynchronous Swift image loading, GIF playback, APNG composition and WebGL image pixels, build the small test app and pass its reactor to the same runner.
@@ -275,7 +297,19 @@ To check asynchronous Swift image loading, GIF playback, APNG composition and We
 ```sh
 ./scripts/build-web.sh swift-6.4.2-RELEASE_wasm rune-image-probe --package-path Tests/Browser/ImageApp
 node Tests/Browser/run.mjs --fixture image-wasi --image-wasm /path/to/rune-image-probe.wasm --wasi-shim /path/to/node_modules/@bjorn3/browser_wasi_shim/dist
+
+./scripts/build-web.sh swift-6.4.2-RELEASE_wasm rune-image-page-probe --package-path Tests/Browser/ImageApp
+node Tests/Browser/run.mjs --fixture image-pages-wasi --webgpu --image-page-wasm /path/to/rune-image-page-probe.wasm --wasi-shim /path/to/node_modules/@bjorn3/browser_wasi_shim/dist
+
+./scripts/build-web.sh swift-6.4.2-RELEASE_wasm rune-spell-probe --package-path Tests/Browser/SpellApp
+node Tests/Browser/run.mjs --fixture spell-wasi --spell-wasm /path/to/rune-spell-probe.wasm --wasi-shim /path/to/node_modules/@bjorn3/browser_wasi_shim/dist
 ```
+
+### Tracing a desktop window
+
+Run `swift run -c release rune-hello --native --trace frames.jsonl --frames 120` to capture 120 submissions and close the window. Omit `--frames` to capture an interactive session until the window closes. For a multi-window app, add `--window KEY` to select the window to trace.
+
+Each JSONL frame records the elapsed milliseconds at CPU submission in `t`. On macOS, `target_ms` records the display-link target when available. A numeric `present_ms` is Metal’s drawable presentation time, and `null` means Metal reported that the drawable was skipped. Windows and Linux record submissions at the native present call. Their desktop traces omit drawable presentation times.
 
 ### Headless Rendering & Inspection
 
@@ -288,6 +322,9 @@ xcrun swift run rune-hello --list-scenes
 # Render a PNG snapshot of a named scene
 xcrun swift run rune-hello --snap /tmp/hello-on.png --scene on --dark
 
+# Compare CPU and GPU drawing at 100 ms and record damage for each frame
+xcrun swift run rune-hello --snap /tmp/hello.png --at 0.1 --cpu-boot /tmp/rune-cpu-boot
+
 # Dump the laid-out element tree to JSON
 xcrun swift run rune-hello --tree /tmp/hello-tree.json
 
@@ -295,7 +332,11 @@ xcrun swift run rune-hello --tree /tmp/hello-tree.json
 xcrun swift run rune-todo --script script.json --frames /tmp/frames --fps 60
 ```
 
+The CPU capture directory contains `draw.bin` for replay, `cpu.png`, `gpu.png`, and `frames.jsonl` with timing and damaged tiles for every frame. The terminal reports the number of differing pixels. `--cpu-boot-threads N` selects the CPU painter’s worker count (six by default).
+
 Supported flags: `--snap <path>`, `--tree <path>`, `--scene <name>`, `--list-scenes`, `--script <json|path>`, `--frames <dir>`, `--strip <path>`, `--fps <n>`, `--scale <n>`, `--time-scale <n>`, `--duration <sec>`, `--at <sec>`, `--start <sec>`, `--crop <x,y,w,h>`, `--every <n>`, `--theme <name>`, `--size <WxH>`, `--dark` / `--light`, `--reduced-motion`, `--cpu` (use the CPU reference renderer), and `--gpu` (require a working GPU backend).
+
+Frame-phase profiling measures view, commit, layout, text, paint and apply time on the rendering thread. Set `RUNE_FRAME_PROFILE=1` before launch to measure the first frame, or wrap a synchronous workload in `FrameProfiling.withRecording { ... }`. Read and clear the six wall-time values and six CPU-time values with `takeFramePhases()`. Its first call also enables measurements for subsequent frames on that thread. Tracing enables automatic phase timing. Explicit `measureFramePhase` calls always measure their closure. Debug builds enable idle and callback stall warnings by default. Set `RUNE_PERF_WARN=1` to inspect them in a release build.
 
 ## Upstream Parity & Sync Workflow (`rune-parity` & `.agents/skills/upstream-rune-sync`)
 

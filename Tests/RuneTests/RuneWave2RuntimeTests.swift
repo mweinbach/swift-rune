@@ -48,6 +48,21 @@ final class RuneWave2RuntimeTests: XCTestCase {
         XCTAssertFalse(sanitized.contains("javascript:"))
     }
 
+    func testSessionLockClearsOnlyTheCurrentSecret() {
+        let board = Clipboard(kind: .memory)
+        let original = board.writeSecret("original")
+        let replacement = board.writeSecret("replacement")
+        XCTAssertTrue(board.clearCurrentSecret())
+        XCTAssertEqual(original.state, .replaced)
+        XCTAssertEqual(replacement.state, .cleared)
+        XCTAssertFalse(board.clearCurrentSecret())
+        let new = board.writeSecret("new")
+        board.writeText("keep")
+        XCTAssertFalse(board.clearCurrentSecret())
+        XCTAssertEqual(new.state, .replaced)
+        XCTAssertEqual(board.readRich().content.text, "keep")
+    }
+
     func testSecretClipboardLifecycle() {
         let cb = Clipboard(kind: .memory)
         let secret = cb.writeSecret("super-secret-token")
@@ -181,6 +196,10 @@ final class RuneWave2RuntimeTests: XCTestCase {
             log.append($0)
         }
         tray.showHeadless()
+        tray.setTooltip("Three tasks")
+        tray.setMenu([.separator, .action(id: "quit", label: "Quit")])
+        XCTAssertEqual(tray.spec.tooltip, "Three tasks")
+        XCTAssertEqual(tray.spec.menu, [.separator, .action(id: "quit", label: "Quit")])
         tray.simulateEvent(.activate(token: nil))
         tray.simulateEvent(.menu("quit"))
         XCTAssertEqual(log.events, [.activate(token: nil), .menu("quit")])

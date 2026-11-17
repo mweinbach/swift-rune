@@ -40,14 +40,18 @@ enum BrowserImageCodec {
     nonisolated(unsafe) private static var head = 0
     nonisolated(unsafe) private static var decoding = 0
 
+    static var canStart: Bool { enabled && decoding < IMAGE_DECODERS && head < queue.count }
+
     static func submit(_ source: Source, name: String, limit: Int? = nil, completion: @escaping Completion) {
         repeat { sequence &+= 1 } while sequence == 0 || requests[sequence] != nil
         requests[sequence] = Request(source, name: name, limit: limit, completion: completion)
+        let hadReadyWork = canStart
         queue.append(sequence)
+        if !hadReadyWork && canStart { WASIEventLoop.wake(after: 0) }
     }
 
     @MainActor static func next() -> Int {
-        guard enabled, decoding < IMAGE_DECODERS, head < queue.count else { return 0 }
+        guard canStart else { return 0 }
         let id = queue[head]
         head += 1
         if head == queue.count {
@@ -118,6 +122,7 @@ enum BrowserImageCodec {
         decoding -= 1
         job.completion(result)
         RuneWebReactor.session?.requestPaint()
+        WASIEventLoop.wake(after: 0)
     }
 
     static func reset() {

@@ -35,6 +35,26 @@ enum DesktopServices {
     }
     static func pumpLinuxHost() { rune_desktop_linux_pump() }
     static func disconnectLinuxHost() { rune_desktop_linux_disconnect() }
+
+    static func writePrimarySelection(_ text: String) {
+        var value = text
+        value.withUTF8 { rune_linux_primary_write($0.baseAddress, $0.count) }
+    }
+
+    private final class PrimaryRead {
+        let complete: @Sendable (String?) -> Void
+        init(_ complete: @escaping @Sendable (String?) -> Void) { self.complete = complete }
+    }
+
+    static func readPrimarySelection(_ completion: @escaping @Sendable (String?) -> Void) {
+        let pending = Unmanaged.passRetained(PrimaryRead(completion))
+        rune_linux_primary_read({ context, bytes, count in
+            guard let context else { return }
+            let request = Unmanaged<PrimaryRead>.fromOpaque(context).takeRetainedValue()
+            let text = bytes.flatMap { String(bytes: UnsafeBufferPointer(start: $0, count: count), encoding: .utf8) }
+            request.complete(text)
+        }, pending.toOpaque())
+    }
     #endif
 
     private static let plain = "text/plain;charset=utf-8"

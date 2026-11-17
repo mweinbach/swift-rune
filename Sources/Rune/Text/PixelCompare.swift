@@ -114,7 +114,7 @@ public struct PixelCompareCase: Sendable, Equatable {
     public var fontRole: String {
         switch (family, weight >= 700.0) {
         case (.custom(PixelCompare.systemFontName), _): return "system"
-        case (.monospace, _): return "mono"
+        case (.systemMono, _): return "mono"
         case (_, true): return "bold"
         default: return "regular"
         }
@@ -430,15 +430,18 @@ public final class PixelCompareHarness {
             )
             let atlasW = atlas.atlas.width
             let atlasH = atlas.atlas.height
-            let texels = atlas.atlas.texels
             let oxPx = c.origin.x * scale
             let oyPx = c.origin.y * scale
 
-            for glyph in shaped.glyphs {
-                let dstX0 = Int((oxPx + glyph.rect.x * scale).rounded())
-                let dstY0 = Int((oyPx + glyph.rect.y * scale).rounded())
-                let gw = max(0, Int((glyph.rect.z * scale).rounded()))
-                let gh = max(0, Int((glyph.rect.w * scale).rounded()))
+            let sheetInk = SIMD4(fg.r, fg.g, fg.b, 1)
+            for source in shaped.glyphs {
+                let (glyph, rect) = source.usesInkDilation
+                    ? atlas.outlineInk(source, rect: source.rect, ink: sheetInk, encoded: true)
+                    : (source, source.rect)
+                let dstX0 = Int((oxPx + rect.x * scale).rounded())
+                let dstY0 = Int((oyPx + rect.y * scale).rounded())
+                let gw = max(0, Int((rect.z * scale).rounded()))
+                let gh = max(0, Int((rect.w * scale).rounded()))
                 guard gw > 0, gh > 0 else { continue }
 
                 if let ce = textSystem.colorGlyph(for: glyph) {
@@ -460,8 +463,10 @@ public final class PixelCompareHarness {
                     continue
                 }
 
-                let srcX0 = Int((glyph.uv.x * Float(atlasW)).rounded())
-                let srcY0 = Int((glyph.uv.y * Float(atlasH)).rounded())
+                let sample = textSystem.glyphMask(for: glyph, ink: sheetInk, encoded: true)
+                guard let texels = atlas.pageData(Int(sample.page)) else { continue }
+                let srcX0 = Int((sample.uv.x * Float(atlasW)).rounded())
+                let srcY0 = Int((sample.uv.y * Float(atlasH)).rounded())
                 for row in 0..<gh {
                     let sy = srcY0 + row
                     let dy = dstY0 + row
@@ -616,7 +621,7 @@ public enum PixelCompare {
             family = .custom(systemFontName)
             rows = [("sf regular", 400.0, 16.0), ("sf bold", 700.0, 16.0), ("sf bold", 700.0, 28.0), ("sf bold", 700.0, 32.0)]
         case .mono:
-            family = .monospace
+            family = .systemMono
             rows = [11.0, 12.0, 13.0, 13.5, 14.0, 16.0].map { ("mono", 400.0, $0) }
         }
 
@@ -644,7 +649,7 @@ public enum PixelCompare {
     }
 
     public static func paragraphCase(family: FontFamily, top: Float) -> PixelCompareCase {
-        if family == .monospace {
+        if family == .systemMono {
             return PixelCompareCase(
                 name: "mono paragraph 13.5/22",
                 family: family,

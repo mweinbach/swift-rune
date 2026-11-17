@@ -1,5 +1,6 @@
 #if (os(macOS) || os(Linux) || os(Windows)) && canImport(CRuneOffscreenGL)
 import Foundation
+import Dispatch
 import RuneRef
 import RuneMotion
 import Testing
@@ -35,7 +36,10 @@ struct PortableGLSurfaceTests {
         let colors = Data([0, 0, 255, 255, 0, 255, 0, 255])
         try surface.pushBytes(ByteFrame(width: 2, height: 1, format: .bgra, color: .srgb, planes: [colors]), frameId: 7)
         surface.setMirrored(true)
-        surface.setObserver { _ in }
+        let completion = DispatchSemaphore(value: 0)
+        surface.setObserver { timing in
+            if timing.completedAt != nil { completion.signal() }
+        }
         let rect = SIMD4<Float>(0, 0, 6, 6)
         let draw = SurfaceDraw(surface: surface.placed(SurfacePlace(anchor: (.center, .center), unscaled: true)),
                                fit: .fit, beforeInstance: 1, rect: rect, clip: rect)
@@ -54,6 +58,7 @@ struct PortableGLSurfaceTests {
             #expect(abs(Int(green.y) - 128) <= 1 && green.x == 0 && green.z == 0)
             #expect(frame.pixel(x: 3, y: 3) == SIMD4(0,0,255,255))
             #expect(frame.pixel(x: 2, y: 2) == SIMD4(0,0,0,255))
+            #expect(completion.wait(timeout: .now() + 5) == .success)
             #expect(surface.counts().0 == 1 && surface.counts().1 == 1)
             #expect(surface.timing()?.frameId == 7 && surface.timing()?.completedAt != nil)
         }
