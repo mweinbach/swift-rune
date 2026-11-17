@@ -48,6 +48,26 @@ private struct FlightCoverTransform {
     var scale: Float
 }
 
+internal enum PaintScaleMotion: Int, Comparable {
+    case still = 0
+    case live = 1
+    case moving = 2
+
+    static func < (lhs: PaintScaleMotion, rhs: PaintScaleMotion) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+
+    func raster(sc: Float, rest: Float) -> Float {
+        let k: Float
+        switch self {
+        case .still: k = sc
+        case .live: k = powf(2.0, (log2(max(1e-4, sc)) * 4.0).rounded() * 0.25)
+        case .moving: k = rest
+        }
+        return (k >= 1.0 / 16.0 && k <= 4.0) ? k : 1.0
+    }
+}
+
 internal struct PresentedTransform {
     var dx: Float = 0
     var dy: Float = 0
@@ -403,26 +423,6 @@ public final class Runtime<State> {
         var nearestPressFrac: Float = 0.0
         var parentStickyShift: Vec2
         var parentStickyMag: Float
-    }
-
-    internal enum PaintScaleMotion: Int, Comparable {
-        case still = 0
-        case live = 1
-        case moving = 2
-
-        static func < (lhs: PaintScaleMotion, rhs: PaintScaleMotion) -> Bool {
-            lhs.rawValue < rhs.rawValue
-        }
-
-        func raster(sc: Float, rest: Float) -> Float {
-            let k: Float
-            switch self {
-            case .still: k = sc
-            case .live: k = powf(2.0, (log2(max(1e-4, sc)) * 4.0).rounded() * 0.25)
-            case .moving: k = rest
-            }
-            return (k >= 1.0 / 16.0 && k <= 4.0) ? k : 1.0
-        }
     }
 
     internal struct DragSession {

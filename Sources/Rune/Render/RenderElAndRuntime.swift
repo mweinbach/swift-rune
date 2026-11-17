@@ -611,6 +611,57 @@ private struct RenderClipState {
     var withoutScrollOrigin: SIMD4<Float> = NO_CLIP
 }
 
+private typealias PaintHeader = (
+    continueSubtree: Bool,
+    subtreeDynamic: Bool,
+    effOpacity: Float,
+    effBlur: Float,
+    rectPx: SIMD4<Float>,
+    radiiPx: SIMD4<Float>,
+    nextInert: Bool,
+    nextChildClip: RenderClipState,
+    nextChildTransform: PresentedTransform,
+    isDissolveScope: Bool,
+    needsLayer: Bool,
+    outerLayerStarts: [Int],
+    cacheEligible: Bool,
+    elementIndex: Int,
+    layerStartIdx: Int,
+    surfaceStartIdx: Int,
+    glyphFixupStartIdx: Int,
+    imageFixupStartIdx: Int,
+    scaleMotion: PaintScaleMotion,
+    activeClip: SIMD4<Float>,
+    activeFade: SIMD4<UInt32>,
+    effScale: Float,
+    nodePaintHash: UInt64,
+    elideCache: (sig: UInt64, relBounds: SIMD4<Float>, k: Float)?
+)
+
+private struct PaintContext {
+    let clip: RenderClipState
+    let inert: Bool
+    let opacity: Float
+    let enclosingOpacity: Float
+    let transform: PresentedTransform
+    let dissolve: Bool
+    let scaleMotion: PaintScaleMotion
+    let element: Int?
+    let allowRaised: Bool
+    let inCache: Bool
+    let rotated: Bool
+}
+
+private struct PaintBranch {
+    let slot: Int
+    let header: PaintHeader
+    let context: PaintContext
+    let children: ArraySlice<Int>
+    var nextChild: Int
+    let savedMark: UInt32
+    var dynamic: Bool
+}
+
 /// A composited layer can reset the renderer's clip and opacity for its inner draws.
 /// Pointer geometry keeps the logical clip, turn, and opacity through that layer.
 private struct RenderHitScope {
@@ -958,7 +1009,7 @@ extension Runtime {
         let materialMode = MaterialMode.launchMode
         let useNativeMaterials = nativeMaterials && materialMode != .fallback
         var savedNodeStates: [NodeId: SavedRaisedNodeState] = [:]
-        var collectedRaisedNodes: [(node: FlatNode, offset: Int)] = []
+        var collectedRaisedNodes: [(slot: Int, offset: Int)] = []
         var raisedRanges: [(offset: Int, indices: Range<Int>)] = []
 
         func subtreeContains(_ node: FlatNode, where predicate: (FlatNode) -> Bool) -> Bool {
@@ -1188,34 +1239,6 @@ extension Runtime {
             ))
             marks.append(0)
         }
-
-        typealias PaintHeader = (
-            continueSubtree: Bool,
-            subtreeDynamic: Bool,
-            effOpacity: Float,
-            effBlur: Float,
-            effRect: MotionRect,
-            rectPx: SIMD4<Float>,
-            radiiPx: SIMD4<Float>,
-            nextInert: Bool,
-            nextChildClip: RenderClipState,
-            nextChildTransform: PresentedTransform,
-            isDissolveScope: Bool,
-            needsLayer: Bool,
-            outerLayerStarts: [Int],
-            cacheEligible: Bool,
-            elementIndex: Int,
-            layerStartIdx: Int,
-            surfaceStartIdx: Int,
-            glyphFixupStartIdx: Int,
-            imageFixupStartIdx: Int,
-            scaleMotion: PaintScaleMotion,
-            activeClip: SIMD4<Float>,
-            activeFade: SIMD4<UInt32>,
-            effScale: Float,
-            nodePaintHash: UInt64,
-            elideCache: (sig: UInt64, relBounds: SIMD4<Float>, k: Float)?
-        )
 
         #if DEBUG
         // Leave the unoptimized geometry stack frame before invoking the font rasterizer.
@@ -1723,7 +1746,7 @@ extension Runtime {
                el.surfacePayload == nil, el.pixelsPayload == nil, el.role != .textInput,
                editLens == nil, !hasActiveTextLinks(el), !el.isSecure,
                el.runtimeExtras[RenderExtrasKey.cacheEnabled] == nil, activeTextFlights.isEmpty {
-                return (false, subtreeDynamic, effOpacity, effBlur, effRect, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil)
+                return (false, subtreeDynamic, effOpacity, effBlur, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil)
             }
             if effOpacity <= 0.001 && (!isExiting || parentOpacity == 0) {
                 if publishHitGeometry && !topology.children(of: node).isEmpty {
@@ -1736,7 +1759,7 @@ extension Runtime {
                         } ?? effRect
                     }
                 }
-                return (false, subtreeDynamic, effOpacity, effBlur, effRect, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil)
+                return (false, subtreeDynamic, effOpacity, effBlur, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil)
             }
 
             let exactEdgesPx = PixelSnap.edgesPx(effRect, scale: scale)
@@ -3467,7 +3490,7 @@ extension Runtime {
                 finishPaint()
             }
 
-            return (true, subtreeDynamic, paintEffOpacity, effBlur, effRect, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, outerLayerStarts, cacheEligible, myElementIndex, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx, nodeScaleMotion, activeClip, activeFade, effScale, nodePaintHash, elideCache)
+            return (true, subtreeDynamic, paintEffOpacity, effBlur, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, outerLayerStarts, cacheEligible, myElementIndex, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx, nodeScaleMotion, activeClip, activeFade, effScale, nodePaintHash, elideCache)
         }
 
         @inline(never)
@@ -3626,15 +3649,6 @@ extension Runtime {
             }
         }
 
-        typealias PaintContext = (
-            clip: RenderClipState, inert: Bool, opacity: Float, enclosingOpacity: Float,
-            transform: PresentedTransform, dissolve: Bool, scaleMotion: PaintScaleMotion, element: Int?,
-            allowRaised: Bool, inCache: Bool, rotated: Bool
-        )
-        typealias PaintBranch = (
-            node: FlatNode, header: PaintHeader, context: PaintContext, children: ArraySlice<Int>,
-            nextChild: Int, savedMark: UInt32, dynamic: Bool
-        )
         var branches: [PaintBranch] = []
 
         func finishNode(_ node: FlatNode, _ h: PaintHeader, dynamic subtreeDynamic: Bool) {
@@ -3663,7 +3677,7 @@ extension Runtime {
 
         @discardableResult
         func paintSubtree(
-            _ node: FlatNode,
+            _ rootSlot: Int,
             parentClip: RenderClipState,
             inheritedInert: Bool,
             parentOpacity: Float,
@@ -3676,17 +3690,20 @@ extension Runtime {
             parentInCache: Bool = false,
             parentIsRotated: Bool = false
         ) -> Bool {
-            var next: (FlatNode, PaintContext)? = (
-                node, (parentClip, inheritedInert, parentOpacity, enclosingLayerOpacity, inheritedTransform,
-                       parentIsDissolve, parentScaleMotion, parentElementIndex, allowRaised, parentInCache, parentIsRotated)
+            var nextSlot: Int? = rootSlot
+            var context = PaintContext(
+                clip: parentClip, inert: inheritedInert, opacity: parentOpacity, enclosingOpacity: enclosingLayerOpacity,
+                transform: inheritedTransform, dissolve: parentIsDissolve, scaleMotion: parentScaleMotion,
+                element: parentElementIndex, allowRaised: allowRaised, inCache: parentInCache, rotated: parentIsRotated
             )
             var dynamic = false
-            // Keep the ancestor state on the heap. Native UI and Swift task threads can have
-            // small stacks, and a text leaf may need to shape a paragraph before unwinding.
-            while let (node, context) = next {
-                next = nil
+            // Slots address both mounted and exiting nodes throughout this paint. Retain only
+            // traversal state on the heap so deep trees also fit native UI thread stacks.
+            while let slot = nextSlot {
+                nextSlot = nil
+                let node = renderNode(slot)
                 if hasRaised && !context.allowRaised && node.el.isRaised {
-                    collectedRaisedNodes.append((node, newElements.count))
+                    collectedRaisedNodes.append((slot, newElements.count))
                     dynamic = true
                 } else {
                     let savedMark = currentInheritedMark
@@ -3706,15 +3723,17 @@ extension Runtime {
                     let children = topology.children(of: node)
                     if (h.continueSubtree || publishHitGeometry), let first = children.first {
                         let turn = (presentedById[node.nodeId]?.rotate ?? node.el.rotate) + (loopSamples[node.nodeId]?.rotation ?? 0)
-                        let childContext: PaintContext = (
-                            h.nextChildClip, h.nextInert, h.continueSubtree ? (h.needsLayer ? 1 : h.effOpacity).clamped(to: 0...1) : 0,
-                            h.needsLayer ? context.enclosingOpacity * h.effOpacity : context.enclosingOpacity,
-                            h.nextChildTransform, h.isDissolveScope, h.scaleMotion, h.elementIndex,
-                            context.allowRaised || !h.continueSubtree, context.inCache || h.cacheEligible,
-                            context.rotated || abs(turn) > 1e-4
+                        context = PaintContext(
+                            clip: h.nextChildClip, inert: h.nextInert,
+                            opacity: h.continueSubtree ? (h.needsLayer ? 1 : h.effOpacity).clamped(to: 0...1) : 0,
+                            enclosingOpacity: h.needsLayer ? context.enclosingOpacity * h.effOpacity : context.enclosingOpacity,
+                            transform: h.nextChildTransform, dissolve: h.isDissolveScope, scaleMotion: h.scaleMotion,
+                            element: h.elementIndex, allowRaised: context.allowRaised || !h.continueSubtree,
+                            inCache: context.inCache || h.cacheEligible, rotated: context.rotated || abs(turn) > 1e-4
                         )
-                        branches.append((node, h, childContext, children, children.startIndex + 1, savedMark, h.subtreeDynamic))
-                        next = (renderNode(first), childContext)
+                        branches.append(PaintBranch(slot: slot, header: h, context: context, children: children,
+                                                    nextChild: children.startIndex + 1, savedMark: savedMark, dynamic: h.subtreeDynamic))
+                        nextSlot = first
                         continue
                     }
                     dynamic = h.subtreeDynamic
@@ -3729,12 +3748,13 @@ extension Runtime {
                     if index < branches[i].children.endIndex {
                         let child = branches[i].children[index]
                         branches[i].nextChild = index + 1
-                        next = (renderNode(child), branches[i].context)
+                        nextSlot = child
+                        context = branches[i].context
                         break
                     }
                     let parent = branches.removeLast()
                     dynamic = parent.dynamic
-                    finishNode(parent.node, parent.header, dynamic: dynamic)
+                    finishNode(renderNode(parent.slot), parent.header, dynamic: dynamic)
                     currentInheritedMark = parent.savedMark
                 }
             }
@@ -3743,9 +3763,10 @@ extension Runtime {
 
         clearPressRestingHits()
         for root in topology.roots {
-            paintSubtree(renderNode(root), parentClip: rootClip, inheritedInert: false, parentOpacity: 1.0, allowRaised: false)
+            paintSubtree(root, parentClip: rootClip, inheritedInert: false, parentOpacity: 1.0, allowRaised: false)
         }
-        for (raisedNode, offset) in collectedRaisedNodes {
+        for (slot, offset) in collectedRaisedNodes {
+            let raisedNode = renderNode(slot)
             let start = newElements.count
             var chain: [NodeId] = []
             var cursor = presentedById[raisedNode.nodeId]?.parent
@@ -3798,7 +3819,7 @@ extension Runtime {
                     withoutScrollOrigin: pst.withoutScrollOrigin
                 )
                 paintSubtree(
-                    raisedNode,
+                    slot,
                     parentClip: raisedParentClip,
                     inheritedInert: pst.nextInert,
                     parentOpacity: pst.effOpacity,
@@ -3810,7 +3831,7 @@ extension Runtime {
                     allowRaised: true
                 )
             } else {
-                paintSubtree(raisedNode, parentClip: rootClip, inheritedInert: false, parentOpacity: 1.0, allowRaised: true)
+                paintSubtree(slot, parentClip: rootClip, inheritedInert: false, parentOpacity: 1.0, allowRaised: true)
             }
             if publishHitGeometry { raisedRanges.append((offset, start..<newElements.count)) }
             for (sIdx, sfIdx) in reopenedLayers.reversed() {
