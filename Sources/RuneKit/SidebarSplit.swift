@@ -573,10 +573,18 @@ public struct SidebarRow<State> {
 
     public func build(_ k: Kit) -> El<State> {
         let height = heightOverride ?? (subtitleText == nil ? SidebarConstants.rowHeight : SidebarConstants.twoLineRowHeight)
+        var content = rowContainer(k, height: height)
+        content = content.child(textBlock(k))
+        addStatusAndActions(to: &content, kit: k)
+        if !isDisabled {
+            applyInteractions(to: &content, kit: k, height: height)
+        }
+        return content
+    }
+
+    private func rowContainer(_ k: Kit, height: Float) -> El<State> {
         let padLeft = SidebarConstants.inset + Float(indentLevel) * SidebarConstants.indent
         let bg: Color = (selected || active) ? k.c.surfaceRaised : .transparent
-        let fg: Color = isDisabled ? k.c.textFaint : ((selected || active) ? k.c.textBase : k.c.textMuted)
-        let subColor = subtitleColorOverride ?? k.c.textFaint
 
         let descParts: [String] = {
             var parts: [String] = []
@@ -629,6 +637,12 @@ public struct SidebarRow<State> {
         } else if let iconSpec {
             content = content.child(Rune.icon(iconSpec.svg, size: 15).color(iconSpec.color ?? k.c.iconMuted).a11yHidden())
         }
+        return content
+    }
+
+    private func textBlock(_ k: Kit) -> El<State> {
+        let fg: Color = isDisabled ? k.c.textFaint : ((selected || active) ? k.c.textBase : k.c.textMuted)
+        let subColor = subtitleColorOverride ?? k.c.textFaint
 
         let resolvedTitleStyle = titleStyleOverride ?? ((subtitleText != nil || selected) ? k.ty.uiMedium : k.ty.ui)
         let resolvedSubtitleStyle = subtitleStyleOverride ?? k.ty.small
@@ -667,8 +681,10 @@ public struct SidebarRow<State> {
         if let subtitleText, !subtitleText.isEmpty {
             textBlock = textBlock.child(text(subtitleText).key("\(keyId)-subtitle").font(resolvedSubtitleStyle).color(subColor).ellipsis().a11yHidden())
         }
-        content = content.child(textBlock)
+        return textBlock
+    }
 
+    private func addStatusAndActions(to content: inout El<State>, kit k: Kit) {
         switch rowStatus {
         case .none:
             break
@@ -700,48 +716,47 @@ public struct SidebarRow<State> {
                 )
             )
         }
+    }
 
-        if !isDisabled {
-            if !selected && !active {
-                content = content.hover(k.c.surfaceHover)
+    private func applyInteractions(to content: inout El<State>, kit k: Kit, height: Float) {
+        if !selected && !active {
+            content = content.hover(k.c.surfaceHover)
+        }
+        if renameConfig == nil, let onClickFn {
+            if selectOnlyFlag {
+                content = content.onClick(onClickFn).focusable(false).preserveFocusOnPress(true).focusSelected(selected)
+            } else {
+                content = content.focusable().focusRing(k.c.borderFocus).onClick(onClickFn)
             }
-            if renameConfig == nil, let onClickFn {
-                if selectOnlyFlag {
-                    content = content.onClick(onClickFn).focusable(false).preserveFocusOnPress(true).focusSelected(selected)
-                } else {
-                    content = content.focusable().focusRing(k.c.borderFocus).onClick(onClickFn)
-                }
-            } else if selectOnlyFlag {
-                content = content.focusable(false).preserveFocusOnPress(true).focusSelected(selected && renameConfig == nil)
-            } else if renameConfig != nil {
-                content = content.focusable(false).focusSelected(false)
+        } else if selectOnlyFlag {
+            content = content.focusable(false).preserveFocusOnPress(true).focusSelected(selected && renameConfig == nil)
+        } else if renameConfig != nil {
+            content = content.focusable(false).focusSelected(false)
+        }
+        if renameConfig == nil, let onDoubleClickFn, !selectOnlyFlag {
+            content = content.onDoubleClick(onDoubleClickFn)
+        }
+        if let drag = dragReorderHandlers, !selectOnlyFlag {
+            if drag.isHeld {
+                content = content.onPointerMoveLocal(drag.onPointerMove)
             }
-            if renameConfig == nil, let onDoubleClickFn, !selectOnlyFlag {
-                content = content.onDoubleClick(onDoubleClickFn)
+            content = content
+                .onPointerDown(drag.onDown)
+                .onDrag { st, ev, tx in
+                    drag.onDrag(&st, ev, height, &tx)
+                }
+                .onDragEnd(drag.onEnd)
+            if drag.offsetY != 0 {
+                content = content.offset(0, drag.offsetY)
             }
-            if let drag = dragReorderHandlers, !selectOnlyFlag {
-                if drag.isHeld {
-                    content = content.onPointerMoveLocal(drag.onPointerMove)
-                }
-                content = content
-                    .onPointerDown(drag.onDown)
-                    .onDrag { st, ev, tx in
-                        drag.onDrag(&st, ev, height, &tx)
-                    }
-                    .onDragEnd(drag.onEnd)
-                if drag.offsetY != 0 {
-                    content = content.offset(0, drag.offsetY)
-                }
-                if drag.isDragging {
-                    content = content.z(20).instantChanges().shadows(k.shadowLayers(k.elevation.raised))
-                } else {
-                    content = content.motion(k.motion.control)
-                }
+            if drag.isDragging {
+                content = content.z(20).instantChanges().shadows(k.shadowLayers(k.elevation.raised))
             } else {
                 content = content.motion(k.motion.control)
             }
+        } else {
+            content = content.motion(k.motion.control)
         }
-        return content
     }
 }
 
