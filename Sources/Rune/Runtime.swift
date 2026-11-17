@@ -12252,7 +12252,6 @@ public final class Runtime<State> {
             a11yAnnouncement.say(ann.text, politeness: ann.politeness)
         }
         processTxSlice2Actions(&mutableTx, at: now)
-        flushPendingSentKeys(at: now)
         // A latched focus ask schedules a commit (`latch_requests`: `focus_to` sets `dirty`), so a
         // `Tx.focusWhenShown` from a poll or handler that changed nothing still resolves.
         let latchedFocusWhenShown = tx.requestedFocusKey != nil && tx.focusAskedWhenShown

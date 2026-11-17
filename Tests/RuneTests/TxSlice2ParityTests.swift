@@ -289,6 +289,7 @@ struct TxSlice2ParityTests {
         // Dispatch Enter on "first"; sendKey(.tab) queues synthetic Tab and moves focus to "second"
         let handled = rt.keyDown(KeyEvent(key: .enter), at: 0.032)
         #expect(handled == true)
+        _ = rt.frame(at: 0.032)
         #expect(rt.state.keyLog == ["first:enter"])
         #expect(rt.state.sawByKeys == [true, true])
         #expect(rt.focusedKey == "second")
