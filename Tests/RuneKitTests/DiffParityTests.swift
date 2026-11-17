@@ -1367,7 +1367,7 @@ struct DiffParityTests {
 
     @Test("tests/diff.rs: 4000-line/40-note virtualization (#176), gutter drag/plus/Escape (#178, #180), sticky header/actions/resize (#179), stuck gutter (#181), labels & 3-file nav (#182), PerfWarn (#184-#185)")
     @MainActor
-    func diffRuntimeVirtualDragStickyAndPerfWarnParity() {
+    func diffRuntimeVirtualDragStickyAndPerfWarnParity() throws {
         struct AppState: Sendable {
             var diff: DiffState
             var selections: [DiffLineRange?] = []
@@ -1430,9 +1430,11 @@ struct DiffParityTests {
             _ = vRT.frame(at: vt)
         }
         for _ in 0..<120 { vt += 1.0 / 120.0; _ = vRT.frame(at: vt) }
-        if let vBody = vRT.element(byKey: "dv-body"), let row0 = vRT.element(byKey: "dv-row-0") {
-            #expect(abs(row0.rect[1] - vBody.rect[1]) < 2.0)
-        }
+        let topBody = try #require(vRT.element(byKey: "dv-body"))
+        let topHeader = try #require(vRT.element(byKey: "dv-header"))
+        let firstRow = try #require(vRT.element(byKey: "dv-row-0"))
+        #expect(abs(topHeader.rect[1] - topBody.rect[1]) < 2.0)
+        #expect(abs(firstRow.rect[1] - (topHeader.rect[1] + topHeader.rect[3])) < 2.0)
 
         // 2. #178 & #180: line numbers select, drag 3->5, '+' comments selection vs single line, Escape clears & cancels drag
         let (selOld, selNew) = makeNumbered(20, every: 5)
@@ -1981,6 +1983,85 @@ struct DiffParityTests {
         rt.update(at: t) { state, _ in state.setMode(.unified) }
         settle()
         #expect(try rect("df0.c2")[3] == unwrapped)
+    }
+
+    @Test("A single interactive diff scrolls its file header and reuses its sticky actions")
+    @MainActor
+    func singleFileScrollableHeader() throws {
+        struct Host: Sendable {
+            var diff: DiffState
+            var clicks = 0
+        }
+        let lines = (1...180).map { $0 == 8 ? String(repeating: "wide ", count: 100) : "line \($0)" }
+        let patch = ["--- a/test.rs", "+++ b/test.rs", "@@ -1,180 +1,180 @@"] + lines.map { " " + $0 }
+        let file = try #require(FileDiff.parseUnified(patch.joined(separator: "\n")).first)
+        let rt = Runtime(state: Host(diff: DiffState(diff: file)), viewport: Vec2(800, 320)) { s, cx in
+            DiffView<Host>(key: "df", kit: .neutral(dark: false), get: { $0.diff }, set: { $0.diff = $1 })
+                .headerActions { _, _ in
+                    El<Host>(direction: .row).key("review-file").w(32).h(24).onClick { $0.clicks += 1 }
+                }
+                .build(state: s, cx: cx)
+        }
+        var t = 0.0
+        func settle() {
+            for _ in 0..<5 { t += 1.0 / 120; _ = rt.renderFrame(at: t) }
+        }
+        func scroll(_ x: Float, _ y: Float) {
+            rt.update(at: t) { _, tx in tx.scrollTo("df-body", offset: Vec2(x, y), animated: false) }
+            settle()
+        }
+        settle()
+        scroll(48, 11)
+        #expect(try #require(rt.element(byKey: "df-header")).rect[1] == -11)
+        scroll(180, 900)
+        let sticky = try #require(rt.element(byKey: "df-header"))
+        #expect(sticky.rect[0] == 0 && sticky.rect[1] == 0)
+        #expect(rt.elements().filter { !$0.exiting && $0.key == "df-header" }.count == 1)
+        func click(_ key: String) throws {
+            let frame = try #require(rt.element(byKey: key)).visible
+            let point = Vec2(frame[0] + frame[2] / 2, frame[1] + frame[3] / 2)
+            rt.pointerDown(at: point, at: t)
+            rt.pointerUp(at: point, at: t + 0.001)
+            settle()
+        }
+        try click("review-file")
+        #expect(rt.state.clicks == 1)
+
+        rt.update(at: t) { s, tx in s.diff.scrollToLine(0, at: .init(side: .new, line: 130), keyPrefix: "df", tx: &tx) }
+        settle()
+        let target = try #require(rt.element(byKey: "df-df0.c130"))
+        let clearance = ceil(sticky.rect[3] / DiffLayout.lineHeight) * DiffLayout.lineHeight
+        #expect(target.rect[1] == clearance)
+
+        rt.update(at: t) { s, _ in s.diff.setMode(.split) }
+        settle()
+        #expect(try #require(rt.element(byKey: "df-header")).rect[0] == 0)
+        try click("df-fold")
+        #expect(rt.element(byKey: "df-body") == nil)
+        try click("df-fold")
+        #expect(rt.state.diff.expanded && rt.scrollOffset(forKey: "df-body").y == 0)
+    }
+
+    @Test("Diff navigation before the first frame respects header visibility")
+    @MainActor
+    func navigateBeforeFirstFrame() throws {
+        let lines = (1...260).map { " line \($0)" }
+        let patch = ["--- a/test.rs", "+++ b/test.rs", "@@ -1,260 +1,260 @@"] + lines
+        let file = try #require(FileDiff.parseUnified(patch.joined(separator: "\n")).first)
+        for showHeader in [true, false] {
+            let rt = Runtime(state: DiffState(diff: file), viewport: Vec2(600, 400)) { state, cx in
+                DiffView<DiffState>(key: "df", kit: .neutral(dark: false), get: { $0 }, set: { $0 = $1 })
+                    .showHeader(showHeader)
+                    .build(state: state, cx: cx)
+            }
+            rt.update(at: 0) { state, tx in
+                state.scrollToLine(0, at: .init(side: .new, line: 165), keyPrefix: "df", tx: &tx)
+            }
+            for tick in 0..<8 { _ = rt.renderFrame(at: Double(tick) / 120) }
+            let row = try #require(rt.element(byKey: "df-df0.c165"))
+            let clearance = ceil(DiffLayout.headerHeight / DiffLayout.lineHeight) * DiffLayout.lineHeight
+            #expect(row.rect[1] == (showHeader ? clearance : 0))
+        }
     }
 
     @Test("Large multi-file diffs mount the viewport and jump by stable document keys")

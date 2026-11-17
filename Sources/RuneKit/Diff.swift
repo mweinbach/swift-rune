@@ -1775,6 +1775,27 @@ fileprivate struct DiffRowIndex: Sendable {
     var withoutHeaders: [Entry] = []
     var hunks: [Int] = []
 
+    // Reveal a whole number of preceding model rows, as in Rune's reveal_below_header.
+    func anchorBelowHeader(for row: Int) -> Int {
+        var top = row
+        var room: Float = 0
+        while top > 0 && room < DiffLayout.headerHeight {
+            if case .header = entries[top].kind { break }
+            top -= 1
+            room += estimatedHeight(at: top)
+        }
+        return top
+    }
+
+    func estimatedHeight(at row: Int) -> Float {
+        let entry = entries[row]
+        switch entry.kind {
+        case .header: return DiffLayout.headerHeight
+        case .empty, .binary: return DiffLayout.noteHeight
+        case .line(let local): return sections[entry.file].rows[local].baseHeight
+        }
+    }
+
     init(_ state: DiffState) {
         var estimatedTop: Float = 0
         let annotations = Dictionary(grouping: state.annotations, by: { $0.file })
@@ -1908,7 +1929,7 @@ public struct DiffState: Sendable, Equatable {
     fileprivate var hasInlineHeaders = true
     fileprivate var selectionFile = 0
     fileprivate var selectionBeforePress: DiffLineRange?
-    private var navigationRow: Int?
+    fileprivate var navigationRow: Int?
     private var ui: [DiffFileUI]
     private var copyTracker = DiffCopyTracker()
 
@@ -2166,11 +2187,13 @@ public struct DiffState: Sendable, Equatable {
         return max(0, lo - 1)
     }
 
+    private var hasScrollableHeader: Bool { hasInlineHeaders && (firstVisibleRow != nil || files.count > 1) }
+
     public mutating func scrollToFile(_ file: Int, keyPrefix: String = "diff", tx: inout Tx) {
         guard files.indices.contains(file) else { return }
         let index = rowIndex
         var row = index.sections[file].first
-        if !hasInlineHeaders || files.count <= 1 {
+        if !hasScrollableHeader {
             let firstBody = row + 1
             if index.entries.indices.contains(firstBody), index.entries[firstBody].file == file {
                 row = firstBody
@@ -2199,10 +2222,18 @@ public struct DiffState: Sendable, Equatable {
     }
 
     private mutating func reveal(_ row: Int, belowHeader: Bool, keyPrefix: String, tx: inout Tx) {
-        let entry = rowIndex.entries[row]
-        let offset = belowHeader && hasInlineHeaders && files.count > 1 ? DiffLayout.headerHeight : 0
-        tx.scrollKeyTo("\(keyPrefix)-\(entry.key)", at: offset)
-        visibleFile = entry.file
+        let index = rowIndex
+        var top = row
+        var offset: Float = 0
+        if belowHeader && hasScrollableHeader {
+            if files.count == 1 {
+                top = index.anchorBelowHeader(for: row)
+            } else {
+                offset = DiffLayout.headerHeight
+            }
+        }
+        tx.scrollKeyTo("\(keyPrefix)-\(index.entries[top].key)", at: offset)
+        visibleFile = index.entries[row].file
         navigationRow = row
     }
 
@@ -2213,12 +2244,7 @@ public struct DiffState: Sendable, Equatable {
             var height: Float = 0
             let index = rowIndex
             while row + 1 < index.entries.count && height < DiffLayout.headerHeight {
-                let entry = index.entries[row]
-                switch entry.kind {
-                case .header: height += DiffLayout.headerHeight
-                case .empty, .binary: height += DiffLayout.noteHeight
-                case .line(let i): height += index.sections[entry.file].rows[i].baseHeight
-                }
+                height += index.estimatedHeight(at: row)
                 row += 1
             }
         }
@@ -2754,13 +2780,15 @@ public struct DiffView<State>: Sendable {
 
         let index = st.rowIndex
         let multiple = st.files.count > 1
-        let inlineHeaders = multiple && look.showHeader
+        let singleInteractiveHeader = st.files.count == 1 && hostState != nil && !st.collapsed(file: 0) && look.showHeader
+        let inlineHeaders = singleInteractiveHeader || (multiple && look.showHeader)
+        let fixedHeader = !multiple && !inlineHeaders && look.showHeader
         let entries = inlineHeaders ? index.entries : index.withoutHeaders
         let contentWidth = st.wraps ? 0 : st.contentWidth(index: index, tabSize: look.tabSize)
         let bodyKey = "\(key)-body"
         let width = cx.layoutWith(bodyKey, token: "diff-width") { $0[2] } ?? max(0, cx.viewport.x - 2)
 
-        if !multiple && look.showHeader {
+        if fixedHeader {
             container = container.child(buildHeader(hostState: hostState, fileIndex: 0, state: st, diff: st.diff,
                                                     addColor: addColor, delColor: delColor))
         }
@@ -2849,15 +2877,29 @@ public struct DiffView<State>: Sendable {
         var body = El<State>(direction: .column).key(bodyKey).wFull()
         body = st.wraps ? body.scrollY() : body.scrollXY()
         if look.viewportHeight > 0 {
-            body = body.maxH(look.viewportHeight)
+            // A custom height capped the body below a single-file header.
+            body = body.maxH(look.viewportHeight + (singleInteractiveHeader ? DiffLayout.headerHeight : 0))
         } else if cx.viewport.y > 0 {
-            let header = !multiple && look.showHeader ? DiffLayout.headerHeight : 0
-            body = body.maxH(max(0, cx.viewport.y - header - 2)).shrink(1)
+            let header = fixedHeader ? DiffLayout.headerHeight : 0
+            body = body.maxH(singleInteractiveHeader ? cx.viewport.y : max(0, cx.viewport.y - header - 2)).shrink(1)
         }
         body = body.child(list)
+        // A request made before the first frame cannot know whether this view will draw a header.
+        // Apply its header-aware anchor when the scroll viewport first reports its geometry.
+        if singleInteractiveHeader, st.firstVisibleRow == nil, let row = st.navigationRow, index.entries.indices.contains(row) {
+            var firstAnchor: String? = "\(key)-\(index.entries[index.anchorBelowHeader(for: row)].key)"
+            body = body.onScroll { _, _, tx in
+                guard let anchor = firstAnchor else { tx.liveOnly(); return }
+                firstAnchor = nil
+                tx.scrollKeyTo(anchor, at: 0)
+            }
+        }
         if inlineHeaders, let file = st.stickyFile, st.files.indices.contains(file) {
             let header = buildHeader(hostState: hostState, fileIndex: file, state: st, diff: st.files[file],
                                      addColor: addColor, delColor: delColor, fixedWidth: width > 0 ? width : nil)
+            if singleInteractiveHeader {
+                return container.child(body).child(header.absolute(x: 0, y: 0).wFull())
+            }
             let overlay = El<State>(direction: .column).absolute(x: 0, y: 0)
                 .w(max(width, contentWidth)).stickyTop()
                 .child(header.stickyLeft())
@@ -2987,9 +3029,14 @@ public struct DiffView<State>: Sendable {
             .gap(6)
             .child(icon(collapsed ? KitIcons.chevronRight : KitIcons.chevronDown, size: 14).color(k.c.textMuted))
             .child(text(foldSummaryText).font(k.ty.uiMedium).color(k.c.textBase))
-            .onClick { [get, set] s in
+            .onClick { [get, set, key] (s: inout State, tx: inout Tx) in
                 var d = get(s)
+                let sticky = d.stickyFile == fileIndex
                 d.setCollapsed(file: fileIndex, !d.collapsed(file: fileIndex))
+                if sticky {
+                    if d.files.count == 1 { tx.scrollTo("\(key)-body", offset: .zero, animated: false) }
+                    d.scrollToFile(fileIndex, keyPrefix: key, tx: &tx)
+                }
                 set(&s, d)
             }
 
