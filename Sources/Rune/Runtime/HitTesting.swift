@@ -43,6 +43,10 @@ struct HitGeometry: Sendable {
     var isExiting: Bool
     var hasVisualBlocker: Bool
     var isInteractiveBlocker: Bool
+    /// The drawn screen clip of this node's parent, in view points (`screen_clip_of_parent`):
+    /// the inherited paint clip, or under a turn the outer clip cut to the turned local clip's
+    /// bounding box; `nil` is `NO_CLIP`.
+    var parentScreenClip: MotionRect? = nil
 
     /// Half-open containment `[left, right) x [top, bottom)` matching `pointer_hit.rs:77`.
     @inline(__always)

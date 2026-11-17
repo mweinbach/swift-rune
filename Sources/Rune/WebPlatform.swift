@@ -194,7 +194,8 @@ public final class WebAppHost<State> {
         self.runtime.poll = spec.poll
         self.runtime.onAppFileDrop = spec.onFileDrop
         self.runtime.onFileDrop = spec.onFileDropPhase
-        self.runtime.setSystemContrast(SystemPreferences.current().contrast)
+        // The capture presets as `tooling::runtime_for` applies them (#981); a browser has no machine settings to read here.
+        self.runtime.applyCapturePresets()
     }
 
     @discardableResult

@@ -4,6 +4,9 @@ import RuneMermaid
 
 /// Kit-styled Mermaid diagram integration (`rune_kit::mermaid`) powered by `RuneMermaid`.
 public enum KitMermaid {
+    /// Re-export of `RuneMermaid`'s searchable prepared layout (`rune_kit::mermaid::DrawingModel`).
+    public typealias DrawingModel = MermaidDrawingModel
+
     /// Whether `source` starts with a Mermaid diagram type supported by `RuneMermaid`.
     public static func supported(_ source: String) -> Bool {
         supportedMermaid(source)
@@ -12,6 +15,26 @@ public enum KitMermaid {
     /// Whether `source` parses as a valid Mermaid diagram.
     public static func canRender(_ source: String) -> Bool {
         canRenderMermaid(source)
+    }
+
+    /// Prepare the drawn label runs for a viewer that searches and highlights a diagram
+    /// (`rune_kit::mermaid::prepare`): `style`'s diagram paint laid out for a card `maxWidth`
+    /// points wide, with the same hover as the diagram card.
+    public static func prepare(_ source: String, style: MarkdownStyle, maxWidth: Float) -> MermaidDrawingModel? {
+        let paint = style.diagram
+        var full = style.mermaidTheme()
+        full.maxWidth = maxWidth
+        return prepareDrawing(source, style: full, hover: hover(paint), color: paint.hover)
+    }
+
+    /// What hovering a node lights up for `paint` (`rune_kit::mermaid::hover`): nothing when the
+    /// hover colour is fully transparent, else its edges, or its neighbours too.
+    static func hover(_ paint: MarkdownDiagramPaint) -> MermaidHover {
+        switch (paint.hover.a > 0.0, paint.hoverNeighbours) {
+        case (false, _): return .off
+        case (true, false): return .edges
+        case (true, true): return .neighbours
+        }
     }
 
     /// Human-readable accessible label for the diagram kind in `source`.

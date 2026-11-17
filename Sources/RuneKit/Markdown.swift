@@ -803,10 +803,18 @@ public struct MarkdownHighlight: Sendable, Equatable, Hashable {
 
 /// Rendered-text search mapping visible characters back to UTF-8 byte ranges in Markdown source (`rune_kit::markdown::find`).
 public enum MarkdownFind {
-    private struct Seg {
+    /// One piece of a block's visible text and the source bytes it shows (`find.rs` `Seg`).
+    struct Seg: Sendable, Hashable {
         var src: Range<Int>
         var out: Range<Int>
         var linear: Bool
+    }
+
+    /// A block's visible text, its UTF-8 bytes, and the segments mapping it back to the source.
+    struct Visible: Sendable, Hashable {
+        var text: String
+        var bytes: [UInt8]
+        var segs: [Seg]
     }
 
     public static func normalizeRanges(_ ranges: [Range<Int>]) -> [Range<Int>] {
@@ -854,6 +862,51 @@ public enum MarkdownFind {
         }
     }
 
+    /// `rune_kit::markdown::find`: matches of `query` in `src`'s rendered text, from the cached parse.
+    public static func find(_ src: String, _ query: String, _ caseSensitivity: MarkdownCase = .insensitive) -> [[Range<Int>]] {
+        guard !src.isEmpty, !query.isEmpty else { return [] }
+        return findAll(in: src, doc: MarkdownDocCache.shared.docCached(src, autolink: true), query: query, caseSensitivity: caseSensitivity)
+    }
+
+    /// Calls `f` with each searchable text of `blocks` and its map back to the source, in
+    /// document order (`find.rs` `each_text`): paragraphs, headings, image alt text, code and
+    /// diff blocks, Mermaid sources a diagram doesn't draw, table head and body cells, and the
+    /// blocks of list items and quotes.
+    static func eachText(blocks: [MarkdownDocBlock], maps: [MarkdownBlockMap], _ f: (String, MarkdownSpanMap) -> Void) {
+        for (i, b) in blocks.enumerated() {
+            let map = i < maps.count ? maps[i] : .none
+            switch (b, map) {
+            case let (.para(inl), .inline(m)), let (.heading(_, inl), .inline(m)):
+                f(inl.text, m)
+            case let (.image(_, alt, _), .inline(m)):
+                f(alt, m)
+            case let (.code(code), .code(m)), let (.diff(code), .code(m)):
+                f(code, m)
+            case let (.mermaid(code), .code(m)):
+                if KitMermaid.supported(code) { continue }
+                f(code, m)
+            case let (.table(t), .table(head, rows)):
+                for (j, cell) in t.head.enumerated() where j < head.count {
+                    f(cell.text, head[j])
+                }
+                for (ri, row) in t.rows.enumerated() where ri < rows.count {
+                    let rmaps = rows[ri]
+                    for (j, cell) in row.enumerated() where j < rmaps.count {
+                        f(cell.text, rmaps[j])
+                    }
+                }
+            case let (.list(_, items), .list(itemMaps)):
+                for (idx, item) in items.enumerated() where idx < itemMaps.count {
+                    eachText(blocks: item, maps: itemMaps[idx], f)
+                }
+            case let (.quote(inner), .quote(innerMaps)):
+                eachText(blocks: inner, maps: innerMaps, f)
+            default:
+                continue
+            }
+        }
+    }
+
     private static func findInBlocks(
         srcBytes: [UInt8],
         blocks: [MarkdownDocBlock],
@@ -862,50 +915,17 @@ public enum MarkdownFind {
         caseSensitivity: MarkdownCase,
         out: inout [[Range<Int>]]
     ) {
-        for (i, b) in blocks.enumerated() {
-            let map = i < maps.count ? maps[i] : .none
-            switch (b, map) {
-            case let (.para(inl), .inline(m)), let (.heading(_, inl), .inline(m)):
-                findInText(srcBytes: srcBytes, text: inl.text, map: m, query: query, caseSensitivity: caseSensitivity, out: &out)
-            case let (.image(_, alt, _), .inline(m)):
-                findInText(srcBytes: srcBytes, text: alt, map: m, query: query, caseSensitivity: caseSensitivity, out: &out)
-            case let (.code(code), .code(m)), let (.diff(code), .code(m)):
-                findInText(srcBytes: srcBytes, text: code, map: m, query: query, caseSensitivity: caseSensitivity, out: &out)
-            case let (.mermaid(code), .code(m)):
-                if KitMermaid.supported(code) { continue }
-                findInText(srcBytes: srcBytes, text: code, map: m, query: query, caseSensitivity: caseSensitivity, out: &out)
-            case let (.table(t), .table(head, rows)):
-                for (j, cell) in t.head.enumerated() where j < head.count {
-                    findInText(srcBytes: srcBytes, text: cell.text, map: head[j], query: query, caseSensitivity: caseSensitivity, out: &out)
-                }
-                for (ri, row) in t.rows.enumerated() where ri < rows.count {
-                    let rmaps = rows[ri]
-                    for (j, cell) in row.enumerated() where j < rmaps.count {
-                        findInText(srcBytes: srcBytes, text: cell.text, map: rmaps[j], query: query, caseSensitivity: caseSensitivity, out: &out)
-                    }
-                }
-            case let (.list(_, items), .list(itemMaps)):
-                for (idx, item) in items.enumerated() {
-                    let imap = idx < itemMaps.count ? itemMaps[idx] : []
-                    findInBlocks(srcBytes: srcBytes, blocks: item, maps: imap, query: query, caseSensitivity: caseSensitivity, out: &out)
-                }
-            case let (.quote(inner), .quote(innerMaps)):
-                findInBlocks(srcBytes: srcBytes, blocks: inner, maps: innerMaps, query: query, caseSensitivity: caseSensitivity, out: &out)
-            default:
-                continue
+        eachText(blocks: blocks, maps: maps) { text, map in
+            if let vis = visible(srcBytes: srcBytes, text: text, map: map) {
+                findInVisible(srcBytes: srcBytes, vis: vis, query: query, caseSensitivity: caseSensitivity, out: &out)
             }
         }
     }
 
-    private static func findInText(
-        srcBytes: [UInt8],
-        text: String,
-        map: MarkdownSpanMap,
-        query: String,
-        caseSensitivity: MarkdownCase,
-        out: inout [[Range<Int>]]
-    ) {
-        guard !text.isEmpty, !map.segments.isEmpty else { return }
+    /// A text's visible characters and the segments mapping them to the source: the text itself
+    /// when its map covers it end to end, else the pieces the map names, joined (`find.rs` `visible`).
+    static func visible(srcBytes: [UInt8], text: String, map: MarkdownSpanMap) -> Visible? {
+        guard !text.isEmpty, !map.segments.isEmpty else { return nil }
 
         let textBytes = Array(text.utf8)
         let contiguous = map.segments[0].out.lowerBound == 0 &&
@@ -942,8 +962,21 @@ public enum MarkdownFind {
                 segs[idx].linear = isLinearSeg(srcBytes: srcBytes, visBytes: visBytes, sSeg: segs[idx].src, oSeg: segs[idx].out)
             }
         }
-        guard !vis.isEmpty else { return }
+        guard !vis.isEmpty else { return nil }
+        return Visible(text: vis, bytes: visBytes, segs: segs)
+    }
 
+    /// Matches of `query` in one block's visible text, mapped back to source ranges (`find.rs` `find_in_visible`).
+    static func findInVisible(
+        srcBytes: [UInt8],
+        vis visible: Visible,
+        query: String,
+        caseSensitivity: MarkdownCase,
+        out: inout [[Range<Int>]]
+    ) {
+        let vis = visible.text
+        let visBytes = visible.bytes
+        let segs = visible.segs
         var segIdx = 0
         switch caseSensitivity {
         case .sensitive:
@@ -1064,7 +1097,7 @@ public enum MarkdownFind {
         byte <= 0 || byte >= bytes.count || (bytes[byte] & 0xC0) != 0x80
     }
 
-    private static func mapVisRange(srcBytes: [UInt8], segs: [Seg], segIdx: inout Int, vRange: Range<Int>) -> [Range<Int>] {
+    static func mapVisRange(srcBytes: [UInt8], segs: [Seg], segIdx: inout Int, vRange: Range<Int>) -> [Range<Int>] {
         while segIdx < segs.count && segs[segIdx].out.upperBound <= vRange.lowerBound {
             segIdx += 1
         }
@@ -4415,6 +4448,7 @@ public struct MarkdownStyle: Sendable, Equatable, Hashable {
         t.clusterFill = diagram.clusterFill
         t.noteFill = diagram.noteFill
         t.noteBorder = diagram.noteBorder
+        t.font = diagram.font
         t.maxWidth = diagram.maxWidth
         return t
     }
@@ -4946,7 +4980,6 @@ private final class MarkdownRenderer<State> {
         var ink: Color? = nil
         var cols: Int = 0
         var lead: (cols: Int, lead: Lead, before: UInt8)? = nil
-        var growing: Bool = false
     }
 
     init(view: MarkdownView<State>, style: MarkdownStyle, doc: MarkdownParsedDoc) {
@@ -5078,7 +5111,6 @@ private final class MarkdownRenderer<State> {
 
             if topLevel {
                 currentBlockKey = key
-                flow.growing = (view.config.isStreaming && i + 1 == blocks.count)
             }
             if i > 0 {
                 flow.lead = nil
@@ -5295,8 +5327,11 @@ private final class MarkdownRenderer<State> {
         return spans
     }
 
+    /// A block's text as drawn (`render.rs` `with_reveal`). A source still streaming in wraps
+    /// prettily too (#941): the block that grows keeps `text-wrap-style: pretty`, as a page does,
+    /// so a word moves, if it does, as the text that moves it arrives, not when the stream ends.
     private func withReveal(_ node: El<State>) -> El<State> {
-        flow.growing ? node.wrapGreedy() : node
+        node
     }
 
     private func makeTextHighlights(for renderedText: String, map: MarkdownSpanMap?) -> [TextHighlight] {
@@ -5869,16 +5904,18 @@ private final class MarkdownRenderer<State> {
                 for j in 0..<min(n, row.count) {
                     let inl = row[j]
                     if inl.text.isEmpty { continue }
-                    let clean = MarkdownInline.unpadded(inl.text)
+                    let spans = buildTextSpans(inl, font: font, baseColor: s.text)
+                    // Unrounded, as a browser's table layout sums them; a hair over, so a cell at
+                    // its column's natural width never wraps its last word (`table.rs` widths,
+                    // `rune::text::content_widths`: min-content and max-content of the cell).
                     MarkdownRendererShared.measureLock.lock()
-                    let fullSize = MarkdownRendererShared.measureSystem.measure(clean, style: font, maxWidth: nil, pixelScale: 1)
-                    let maxWord = clean.split(whereSeparator: \.isWhitespace)
-                        .map { MarkdownRendererShared.measureSystem.measure(String($0), style: font, maxWidth: nil, pixelScale: 1).x }
-                        .max() ?? fullSize.x
+                    let minW = MarkdownRendererShared.measureSystem.shape(text: inl.text, spans: spans, style: font, maxWidth: 0, pixelScale: 1, emitGlyphs: false).size.x
+                    let maxW = MarkdownRendererShared.measureSystem.shape(text: inl.text, spans: spans, style: font, maxWidth: nil, pixelScale: 1, emitGlyphs: false).size.x
                     MarkdownRendererShared.measureLock.unlock()
-                    let padExtra: Float = inl.spans.contains(where: { $0.style == .code }) ? s.inlineCodePad : 0
-                    natural[j] = max(natural[j], fullSize.x + padExtra + 0.01)
-                    fit[j] = max(fit[j], maxWord + padExtra + 0.01)
+                    let hits = MarkdownTableCodePad.hits(inl)
+                    let pad: (Bool) -> Float = { $0 ? self.s.inlineCodePad : 0 }
+                    natural[j] = max(natural[j], maxW + pad(hits.last) + 0.01)
+                    fit[j] = max(fit[j], minW + pad(hits.word) + 0.01)
                 }
             }
             let mins = fit.map { min($0, s.tableMinColumn) }

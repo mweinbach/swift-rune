@@ -8,6 +8,15 @@ import CoreText
 /// re-breaks a wrapped proportional paragraph whose greedy last line holds one short word
 /// (`advance - trailingWs < maxWidth / 3` and no isolate / break opportunity inside its trimmed range)
 /// across its last `4` lines while keeping the exact greedy line count.
+///
+/// `#933`: pills (a link's icon, a mention's chip) wrap prettily too, as their inline boxes do in
+/// Chromium: each box is a cluster at its position, taking its width (never a space), and a break
+/// opportunity at a box's position breaks before the box. `wrapAnywhere` text is scored too, but a
+/// paragraph with a word broken inside to fit (Parley's `BreakReason::Emergency`) keeps its greedy
+/// lines, as Blink turns the score breaker off once a line overflows (`RetryAfterOverflow`).
+///
+/// `#1023`: a paragraph with a line that holds no text, only an inline box, keeps its greedy
+/// breaks (nothing can slice such a line).
 public enum PrettyLineBreaker {
     /// Maximum trailing lines of a paragraph considered by `ScoreLineBreaker::Optimize`.
     private static let maxLines = 4
@@ -37,21 +46,34 @@ public enum PrettyLineBreaker {
         var ctLine: CTLine
         var strIndexBase: Int
         #endif
+        /// A word broken inside to fit (`wrapAnywhere`'s overflow-wrap): Parley's `BreakReason::Emergency`.
+        var isEmergency: Bool = false
     }
 
     /// Returns per-line width caps (in device px) for the prefix lines of `lines[first..<n-1]`
     /// that must break earlier to pull a lone short word down onto the final line, or `nil` if
-    /// greedy breaks stand.
+    /// greedy breaks stand. `boxU16` holds the shaped positions of inline boxes (pill/icon
+    /// placeholders): they take room in a line but give no break opportunities of their own.
     internal static func prettyLineCaps(
         lines: [GreedyLineInfo],
         in shapedNS: NSString,
         fontSizePt: Float,
         scale: Float,
-        maxWidthPx: Float
+        maxWidthPx: Float,
+        boxU16: Set<Int> = []
     ) -> [Int: CGFloat]? {
         let n = lines.count
-        guard n >= 2, !lines.contains(where: { $0.hasRTLRun }) else { return nil }
+        // `#1023`: a line that holds no text (only an inline box) reports an empty range at
+        // `usize::MAX` in Parley: nothing here can slice such a line, so keep the greedy breaks.
+        // The shaped text here carries each box as a placeholder unit, so a line whose units are
+        // all box positions is that line.
+        guard n >= 2,
+              lines.allSatisfy({ isSliceable($0, in: shapedNS, boxU16: boxU16) }),
+              !lines.contains(where: { $0.hasRTLRun }) else { return nil }
         guard scale > 0, maxWidthPx > 0 else { return nil }
+        // A word broken inside to fit (`wrap_anywhere`'s overflow-wrap) keeps the greedy lines: Blink
+        // turns the score breaker off once a line overflows and breaks again (`RetryAfterOverflow`).
+        if lines.contains(where: { $0.isEmergency }) { return nil }
 
         let last = lines[n - 1]
         // `ShouldOptimize`: last line shorter than a third of the line width.
@@ -73,7 +95,7 @@ public enum PrettyLineBreaker {
         guard spanEnd > spanStart else { return nil }
 
         let lastWordsEnd = trimmedU16End(in: shapedNS, start: last.u16Start, end: last.u16End)
-        let breaks = lineBreakOpportunities(in: shapedNS, from: spanStart, to: spanEnd)
+        let breaks = lineBreakOpportunities(in: shapedNS, from: spanStart, to: spanEnd, boxU16: boxU16)
         // Only optimize when the last line has no internal break opportunity (a single word/unit).
         if breaks.contains(where: { $0 > last.u16Start && $0 < lastWordsEnd }) {
             return nil
@@ -151,6 +173,17 @@ public enum PrettyLineBreaker {
         #endif
     }
 
+    /// Upstream's `sliceable` (`#1023`): a line's range is a valid slice of the text
+    /// (`start <= end && end <= text.len`) and the line holds text, not only inline boxes (Parley
+    /// gives a box-only line an empty range at `usize::MAX`, which fails the bounds check).
+    internal static func isSliceable(_ line: GreedyLineInfo, in shapedNS: NSString, boxU16: Set<Int>) -> Bool {
+        guard line.u16Start >= 0, line.u16Start <= line.u16End, line.u16End <= shapedNS.length else { return false }
+        if line.u16End > line.u16Start, (line.u16Start..<line.u16End).allSatisfy({ boxU16.contains($0) }) {
+            return false
+        }
+        return true
+    }
+
     /// Optimal line breaks using Blink's DP (`ComputeScores` / `ComputeBreakPoints`).
     private static func optimal(cands: [Candidate], fit: Float, linePenalty: Float) -> [Int] {
         var scores: [(score: Float, prev: Int, lines: Int)] = [(0, 0, 0)]
@@ -213,8 +246,33 @@ public enum PrettyLineBreaker {
         return cursor
     }
 
-    private static func lineBreakOpportunities(in nsStr: NSString, from start: Int, to end: Int) -> [Int] {
+    /// Line break opportunities of `nsStr[start..<end]` (shaped UTF-16 positions, exclusive of both
+    /// ends). Inline boxes at `boxU16` are left out of the text the segmenter sees (upstream segments
+    /// the text, where boxes have no characters), and a break lands on the first cluster at its
+    /// position (`clusters.partition_point(|c| c.0 < b)`): before any box there, which then starts
+    /// the next line.
+    internal static func lineBreakOpportunities(in nsStr: NSString, from start: Int, to end: Int, boxU16: Set<Int> = []) -> [Int] {
         guard end > start else { return [] }
+        let inSpan = boxU16.filter { $0 >= start && $0 < end }
+        if !inSpan.isEmpty {
+            // Text without its boxes, and each kept unit's shaped position.
+            var units: [unichar] = []
+            var shapedAt: [Int] = []
+            units.reserveCapacity(end - start)
+            shapedAt.reserveCapacity(end - start)
+            for i in start..<end where !inSpan.contains(i) {
+                units.append(nsStr.character(at: i))
+                shapedAt.append(i)
+            }
+            guard !units.isEmpty else { return [] }
+            let stripped = NSString(characters: units, length: units.count)
+            return lineBreakOpportunities(in: stripped, from: 0, to: units.count).compactMap { k -> Int? in
+                // Break before stripped unit `k`: right after the unit before it, ahead of any box.
+                guard k > 0, k <= shapedAt.count else { return nil }
+                let at = shapedAt[k - 1] + 1
+                return (at > start && at < end) ? at : nil
+            }
+        }
         let slice = nsStr.substring(with: NSRange(location: start, length: end - start))
         let sliceNS = slice as NSString
         guard sliceNS.length > 0 else { return [] }

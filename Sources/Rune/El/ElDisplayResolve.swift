@@ -206,6 +206,7 @@ internal enum ElDisplayResolver {
         el: El<State>,
         edit inputEdit: TextEdit,
         innerWidth: Float? = nil,
+        pxScale: Float? = nil,
         fallbackDirection: TextFlow? = nil
     ) -> ElResolvedInput {
         var edit = inputEdit
@@ -235,7 +236,9 @@ internal enum ElDisplayResolver {
             inputStyle.direction = fallbackDirection
         }
 
-        let shapeMaxW: Float? = (inputStyle.direction == .rtl || (!isSingle && inputStyle.wrap != .noWrap)) ? innerWidth : nil
+        // A wrapping field wraps at `w * scale + FIT_SLACK` device px, as every text lays out (#948).
+        let wrapsAt: Float? = pxScale.flatMap { TextBoxGeometry.wrapWidth(innerWidth, scale: $0) } ?? innerWidth
+        let shapeMaxW: Float? = (!isSingle && inputStyle.wrap != .noWrap) ? wrapsAt : (inputStyle.direction == .rtl ? innerWidth : nil)
         let isSecureHidden = edit.isSecure && !edit.isRevealed
         if isSecureHidden {
             inputStyle.wrap = .noWrap
@@ -263,7 +266,7 @@ internal enum ElDisplayResolver {
                 isRich: false,
                 isSecure: edit.isSecure,
                 richStyle: richStyle,
-                maxWidthForShape: (placeholderStyle.direction == .rtl || (!isSingle && placeholderStyle.wrap != .noWrap)) ? innerWidth : nil
+                maxWidthForShape: (!isSingle && placeholderStyle.wrap != .noWrap) ? wrapsAt : (placeholderStyle.direction == .rtl ? innerWidth : nil)
             )
         }
 
@@ -430,7 +433,6 @@ internal enum ElDisplayResolver {
         let isPretty = TextSystem.prettyWrap &&
             !el.isWrapGreedy &&
             !isHiddenSecure &&
-            !style.wrapAnywhere &&
             style.align != .justified &&
             style.maxLines == 0 &&
             style.wrap == .wrap &&

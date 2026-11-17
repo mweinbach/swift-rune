@@ -1,5 +1,8 @@
 import Foundation
 import Testing
+#if canImport(CoreText)
+import CoreText
+#endif
 @testable import RuneKit
 @testable import Rune
 @testable import RuneMotion
@@ -199,6 +202,41 @@ struct RollingTextRuntimeParityTests {
         let rolled = try spanWidth(rt, key: "pair")
         let plain = try #require(rt.element(byKey: "plain")).rect[2]
         #expect(abs(rolled - plain) <= 0.25)
+    }
+
+    // crates/rune-kit/tests/rolling_text.rs:184 (#963)
+    @Test("a_rolled_label_is_as_wide_as_the_same_string_set_as_one_text (tests/rolling_text.rs:184)")
+    func aRolledLabelIsAsWideAsTheSameStringSetAsOneText() throws {
+        struct PairState: Sendable { var text: String; var font: TextStyle }
+        let kit = Kit.neutral(dark: true)
+        // As upstream's `pair()` loads them: Inter and IBM Plex Mono, by name (both ship in Rune's
+        // resources), so the 13/128 check runs on Plex's glyphs.
+        #expect(DefaultFonts.registerIfNeeded())
+        let plex = TextStyle(size: 11, weight: 400).mono().family(.named(DefaultFonts.monoFamily))
+        let inter = TextStyle(size: 13, weight: 400).family(.named(DefaultFonts.sansFamily))
+        let probe = TextSystem()
+        #expect((CTFontCopyFamilyName(probe.resolveCTFont(style: plex, pixelScale: 2)) as String) == "IBM Plex Mono")
+        #expect((CTFontCopyFamilyName(probe.resolveCTFont(style: inter, pixelScale: 2)) as String) == "Inter")
+        for (label, font) in [("Copy password", plex), ("Copy password", inter), ("AVATAR Tokyo, WAVE", inter)] {
+            let store = RollingTextStore()
+            let rt = Runtime(state: PairState(text: label, font: font), viewport: Vec2(600, 120), pixelScale: 2.0, systemDark: true) { s, _ in
+                col().p(20)
+                    .child(row().child(RollingText<PairState>(key: "pair", value: s.text, font: s.font, kit: kit, store: store).build()))
+                    .child(row().child(Rune.text(s.text).font(s.font).key("plain")))
+            }
+            _ = rt.frame(at: 0.0)
+            let rolled = try spanWidth(rt, key: "pair")
+            let plain = try #require(rt.element(byKey: "plain")).rect[2]
+            // What each glyph took when it was measured on its own, rounded up to a 64th of a device
+            // pixel (#934; it was a whole pixel, which made Plex's 13 glyphs 4 pt wider).
+            let separate: Float = label.map { g in
+                rt.textSystem.measure(String(g), style: font, maxWidth: nil, pixelScale: 2.0).x
+            }.reduce(0, +)
+            #expect(abs(rolled - plain) <= 0.25, "\(label): rolled \(rolled) vs one text \(plain) (0.5 device px)")
+            if font.size == 11.0 {
+                #expect(abs(separate - plain) <= 13.0 / 128.0, "Plex's glyphs alone add up to the text: \(separate) vs \(plain)")
+            }
+        }
     }
 
     // 4. crates/rune-kit/tests/rolling_text.rs:224

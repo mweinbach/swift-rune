@@ -124,7 +124,7 @@ public enum RuneApp {
         #elseif canImport(UIKit) && !os(watchOS)
         try IOSApp.run(app.intoSpec(), parsed: parsed)
         #elseif os(Windows)
-        try Win32App.run(app.intoSpec(), parsed: parsed)
+        try Win32App.run(app.intoSpec(), parsed: parsed, openInactive: app.isOpenInactive)
         #elseif os(Linux)
         try LinuxApp.run(app.intoSpec(), parsed: parsed)
         #elseif os(Android)

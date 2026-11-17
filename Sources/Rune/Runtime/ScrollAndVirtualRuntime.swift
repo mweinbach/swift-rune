@@ -331,25 +331,42 @@ extension Runtime {
             req.scope == nil || req.scope == vpPath || req.scope == path
                 || req.scope.map { selectsElementSelector($0, path: vpPath, key: vpScrollKey) } == true
         }
+        // A list in a row of another list windows against that list's viewport too (`nested`).
+        vState.nested = Self.virtualListIsNested(path: path, scrollPath: vpPath, lists: activeVirtualPaths)
+        vState.scrollPath = vpPath
+        vState.viewport = vpH
+        vState.padTop = el.layout.padding.top
+        vState.padBottom = el.layout.padding.bottom
         var curOffsetY = scrollOffsets[vpPath]?.y ?? 0
         let scrolledSinceCommit = vState.lastCommittedOffsetY.map { abs($0 - curOffsetY) > 0.25 } ?? false
-        if stickyPin {
-            curOffsetY = max(0, total - vpH)
-            scrollOffsets[vpPath] = Vec2(scrollOffsets[vpPath]?.x ?? 0, curOffsetY)
+        // The viewport's own pin moves its offset; the list windows where that leaves it.
+        let held = stickyPin
+        if held {
+            // Only the viewport's own list follows its end; a nested list stands where it leaves it.
+            if !vState.nested {
+                curOffsetY = max(0, total - vpH)
+                scrollOffsets[vpPath] = Vec2(scrollOffsets[vpPath]?.x ?? 0, curOffsetY)
+            }
             wasPinnedToBottom.insert(vpPath)
-        } else if curOffsetY > 0.5,
-                  !scrolledSinceCommit,
-                  let anchorKey = vState.lastAnchorKey,
-                  !scrollRequestsState.owns(vpPath),
-                  !directScrolledPaths.contains(vpPath),
-                  !hasPendingRevealForViewport,
-                  let anchorIdx = keys.firstIndex(of: anchorKey) {
-            let expectedY = prefix[anchorIdx] + vState.lastAnchorLocalY
-            if abs(expectedY - curOffsetY) > 0.25 {
-                curOffsetY = max(0, min(max(0, total - vpH), expectedY))
+        }
+        var (listOffsetY, listPinned) = vState.locate(curOffsetY, pinned: held, total: total)
+        if !held,
+           !listPinned,
+           !vState.passed,
+           curOffsetY > 0.5,
+           !scrolledSinceCommit,
+           let anchorKey = vState.lastAnchorKey,
+           !scrollRequestsState.owns(vpPath),
+           !directScrolledPaths.contains(vpPath),
+           !hasPendingRevealForViewport,
+           let anchorIdx = keys.firstIndex(of: anchorKey) {
+            let expectedY = max(0, min(max(0, total - vpH), prefix[anchorIdx] + vState.lastAnchorLocalY))
+            if abs(expectedY - listOffsetY) > 0.25 {
+                curOffsetY = max(0, curOffsetY + expectedY - listOffsetY)
                 scrollOffsets[vpPath] = Vec2(scrollOffsets[vpPath]?.x ?? 0, curOffsetY)
                 let nid = NodeId.hash("scroll:\(vpPath)")
                 scrollStore.snap(nid, Props.SCROLL, to: scrollOffsets[vpPath] ?? .zero)
+                (listOffsetY, listPinned) = vState.locate(curOffsetY, pinned: held, total: total)
             }
         }
 
@@ -386,23 +403,24 @@ extension Runtime {
             missing = 0
         } else {
             (mounted, wantedMore, missing) = vState.overscanWindow(
-                offset: curOffsetY,
+                offset: listOffsetY,
                 viewport: vpH,
                 prefix: prefix,
                 count: count,
                 indexed: isIndexed,
                 pinnedIndices: pinned,
-                pinned: stickyPin
+                pinned: listPinned
             )
         }
 
-        // Track first visible anchor row for prepend/resize scroll preservation.
-        let vis = vState.visibleRange(offset: curOffsetY, viewport: vpH, prefix: prefix, count: count)
-        if !vis.isEmpty && !stickyPin {
+        // Track first visible anchor row for prepend/resize scroll preservation. A list pinned to
+        // its end, or nested and wholly above the viewport's top, anchors nothing.
+        let vis = vState.visibleRange(offset: listOffsetY, viewport: vpH, prefix: prefix, count: count)
+        if !vis.isEmpty && !listPinned && !vState.passed {
             let ai = vis.lowerBound
             vState.lastAnchorKey = keys[ai]
-            vState.lastAnchorLocalY = max(0, curOffsetY - prefix[ai])
-        } else if stickyPin {
+            vState.lastAnchorLocalY = max(0, listOffsetY - prefix[ai])
+        } else if listPinned || vState.passed {
             vState.lastAnchorKey = nil
             vState.lastAnchorLocalY = 0
         }
@@ -918,7 +936,7 @@ extension Runtime {
                             )
                             let lag = TextLineMetrics.streamHeightLag(
                                 lineCount: shaped.lineCount,
-                                lineHeightPx: shaped.lineHeight * scale,
+                                lineHeightPx: shaped.lineMetricHeightPt(shaped.lineCount - 1) * scale,
                                 lineAdvancePx: shaped.lastLineAdvancePx,
                                 hangingAdvancePx: shaped.hangingAdvancePx,
                                 widthPx: innerW * scale,
@@ -1661,20 +1679,33 @@ extension Runtime {
             let scrollPath = scrollIdx.map { flatNodes[$0].path } ?? listPath
             let vpH = max(1, scrollViewportSizes[scrollPath]?.y ?? viewport.y)
             let offsetY = scrollOffsets[scrollPath]?.y ?? 0
-            let (prefix, _) = vState.computeOffsets(keys: vState.lastKeys, estimated: est)
-            let vis = vState.visibleRange(offset: offsetY, viewport: vpH, prefix: prefix, count: vState.lastKeys.count)
+            let (prefix, total) = vState.computeOffsets(keys: vState.lastKeys, estimated: est)
+            // Where the laid-out list stands in its viewport's content (`top`, `tail`).
+            let placedBefore = (vState.top, vState.tail)
+            if let lIdx = nodeByPath[listPath], let sIdx = scrollIdx {
+                Self.measureVirtualPlacement(&vState, listIdx: lIdx, scrollIdx: sIdx, nodes: flatNodes)
+            }
+            vState.viewport = vpH
+            let stickyPin = nodeByPath[scrollPath].map { flatNodes[$0].el.layout.stickBottom } == true
+                && wasPinnedToBottom.contains(scrollPath)
+            let (listOffsetY, listPinned) = vState.locate(offsetY, pinned: stickyPin, total: total)
+            let vis = vState.visibleRange(offset: listOffsetY, viewport: vpH, prefix: prefix, count: vState.lastKeys.count)
 
             let prevVis = vState.lastVisibleRange
             vState.lastVisibleRange = vis
-            let stickyPin = nodeByPath[scrollPath].map { flatNodes[$0].el.layout.stickBottom } == true
-                && wasPinnedToBottom.contains(scrollPath)
-            if !vis.isEmpty && !stickyPin {
+            if !vis.isEmpty && !listPinned && !vState.passed {
                 let ai = vis.lowerBound
                 vState.lastAnchorKey = vState.lastKeys[ai]
-                vState.lastAnchorLocalY = max(0, offsetY - prefix[ai])
-            } else if stickyPin {
+                vState.lastAnchorLocalY = max(0, listOffsetY - prefix[ai])
+            } else if listPinned || vState.passed {
                 vState.lastAnchorKey = nil
                 vState.lastAnchorLocalY = 0
+            }
+            // A list placed somewhere new in its viewport (a section opening above it, a nested
+            // list's first layout) windows where it now stands.
+            if abs(vState.top - placedBefore.0) > 0.5 || abs(vState.tail - placedBefore.1) > 0.5,
+               vState.needsWindow(offset: listOffsetY, viewport: vpH, prefix: prefix, count: vState.lastKeys.count, pinned: listPinned) {
+                needsCommit = true
             }
             if vState.measuredByKey.count > RuntimeVirtualListState.maxCachedKeys {
                 let keepSet = Set(vState.lastKeys)
@@ -1750,31 +1781,42 @@ extension Runtime {
             let vpH = scrollIdx.map { max(1, pass.nodes[$0].targetRect.height) } ?? max(1, viewport.y)
             let stickyPin = scrollIdx.map { pass.nodes[$0].el.layout.stickBottom } == true
                 && savedWasPinned.contains(scrollPath)
-            let (prefixBefore, _) = vBefore.computeOffsets(keys: vBefore.lastKeys, estimated: est)
+            let (prefixBefore, totalBefore) = vBefore.computeOffsets(keys: vBefore.lastKeys, estimated: est)
             let oldY = savedScrollOffsets[scrollPath]?.y ?? 0
-            let visBefore = vBefore.visibleRange(offset: oldY, viewport: vpH, prefix: prefixBefore, count: vBefore.lastKeys.count)
+            var located = vBefore
+            let (oldListY, oldPinned) = located.locate(oldY, pinned: stickyPin, total: totalBefore)
+            let visBefore = vBefore.visibleRange(offset: oldListY, viewport: vpH, prefix: prefixBefore, count: vBefore.lastKeys.count)
 
             if let measured = heightsByList[listPath] {
                 for (rk, h) in measured {
                     vAfter.measuredByKey[rk] = h
                 }
             }
+            // Where the list now stands in its viewport's content (`top`, `tail`, as laid out).
+            if let lIdx = pass.byPath[listPath], let sIdx = scrollIdx {
+                Self.measureVirtualPlacement(&vAfter, listIdx: lIdx, scrollIdx: sIdx, nodes: pass.nodes)
+            }
             let (prefixAfter, totalAfter) = vAfter.computeOffsets(keys: vAfter.lastKeys, estimated: est)
             let nextY: Float
             if stickyPin {
-                nextY = max(0, totalAfter - vpH)
-            } else if let aIdx = visBefore.isEmpty ? nil : visBefore.lowerBound,
+                // The viewport's own pin moves its offset; a nested list stands where it leaves it.
+                nextY = vAfter.nested ? oldY : max(0, totalAfter - vpH)
+            } else if !oldPinned, !located.passed,
+                      let aIdx = visBefore.isEmpty ? nil : visBefore.lowerBound,
                       aIdx < prefixBefore.count,
                       aIdx < prefixAfter.count {
                 let delta = prefixAfter[aIdx] - prefixBefore[aIdx]
-                nextY = max(0, min(max(0, totalAfter - vpH), oldY + delta))
+                let listY = max(0, min(max(0, totalAfter - vpH), oldListY + delta))
+                nextY = max(0, oldY + listY - oldListY)
                 vAfter.lastAnchorKey = vAfter.lastKeys[aIdx]
-                vAfter.lastAnchorLocalY = max(0, oldY - prefixBefore[aIdx])
+                vAfter.lastAnchorLocalY = max(0, oldListY - prefixBefore[aIdx])
             } else {
                 nextY = oldY
             }
             let shifted = abs(nextY - oldY) > 0.05
-            let windowShort = vAfter.needsWindow(offset: nextY, viewport: vpH, prefix: prefixAfter, count: vAfter.lastKeys.count, pinned: stickyPin)
+            let (nextListY, nextPinned) = vAfter.locate(nextY, pinned: stickyPin, total: totalAfter)
+            let windowShort = vAfter.needsWindow(offset: nextListY, viewport: vpH, prefix: prefixAfter, count: vAfter.lastKeys.count, pinned: nextPinned)
+            // A list placed somewhere new windows where it now stands (its new `top`/`tail`).
             if shifted || windowShort {
                 updatedLists[listPath] = vAfter
                 if shifted {
@@ -1816,15 +1858,17 @@ extension Runtime {
             let vpH = max(1, scrollViewportSizes[scrollPath]?.y ?? viewport.y)
             let est = max(1, (nodeByPath[listPath].flatMap { flatNodes[$0].el.virtualEstimate }) ?? 40)
             let count = vState.lastKeys.count
-            let (prefix, _) = vState.computeOffsets(keys: vState.lastKeys, estimated: est)
+            let (prefix, total) = vState.computeOffsets(keys: vState.lastKeys, estimated: est)
             let stickyPin = scrollIdx.map { flatNodes[$0].el.layout.stickBottom } == true
                 && wasPinnedToBottom.contains(scrollPath)
+            // The list's own offset within its window (`window_offset`: `VirtualList::at`).
+            let (listOffsetY, listPinned) = vState.at(curScroll.y, pinned: stickyPin, total: total)
             let (listWanted, listMissing) = vState.fillDemand(
-                offset: curScroll.y,
+                offset: listOffsetY,
                 viewport: vpH,
                 prefix: prefix,
                 count: count,
-                pinned: stickyPin
+                pinned: listPinned
             )
             vState.wantsMoreFrames = listWanted
             vState.missingOverscanRows = listMissing
@@ -2253,7 +2297,8 @@ extension Runtime {
         pendingScrollBottoms.removeAll(keepingCapacity: true)
         let pages = pendingScrollPages
         pendingScrollPages.removeAll(keepingCapacity: true)
-        let offsets = pendingScrollOffsets
+        // Jumps a landing re-commit places again come first; this commit's own requests follow.
+        let offsets = scrollKeyLandings.take(pendingScrollOffsets)
         pendingScrollOffsets.removeAll(keepingCapacity: true)
 
         let followCaret = pendingCaretFollow
@@ -2425,18 +2470,31 @@ extension Runtime {
             }
         }
 
-        for req in offsets {
+        for landing in offsets {
+            let req = landing.request
             if req.anchor {
-                guard let tIdx = flatNodes.firstIndex(where: { selectsElementSelector(req.key, path: $0.path, key: $0.key) }),
-                      let vIdx = findScrollViewportIndex(forNode: tIdx, scopeKey: nil, verticalOnly: true) else {
+                let at = req.y ?? 0
+                let vIdx: Int
+                let targetY: Float
+                if let tIdx = flatNodes.firstIndex(where: { selectsElementSelector(req.key, path: $0.path, key: $0.key) }) {
+                    guard let found = findScrollViewportIndex(forNode: tIdx, scopeKey: nil, verticalOnly: true) else {
+                        continue
+                    }
+                    vIdx = found
+                    let vpRect = flatNodes[vIdx].targetRect
+                    let tRect = flatNodes[tIdx].targetRect
+                    targetY = (scrollOffsets[flatNodes[vIdx].path] ?? .zero).y + (tRect.top - vpRect.top) - at
+                } else if let row = virtualRowAnchorOffset(key: req.key, at: at) {
+                    // A virtual row not mounted yet stands where its list's estimates put it: the
+                    // jump there mounts it, and a landing re-commit places it again from its layout.
+                    vIdx = row.viewport
+                    targetY = row.offset
+                } else {
                     continue
                 }
                 let vPath = flatNodes[vIdx].path
                 let cur = scrollOffsets[vPath] ?? .zero
-                let vpRect = flatNodes[vIdx].targetRect
-                let tRect = flatNodes[tIdx].targetRect
-                let at = req.y ?? 0
-                let targetY = cur.y + (tRect.top - vpRect.top) - at
+                scrollKeyLandings.land(landing)
                 markScrollMovedByHand(path: vPath)
                 if req.glide != nil {
                     markScrollHandGliding(path: vPath)

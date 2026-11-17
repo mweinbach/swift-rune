@@ -634,6 +634,8 @@ public final class PlaygroundHost<State> {
                         story.view(s, self.controls, &cx)
                     }
                 )
+                // The capture presets (`RUNE_CONTRAST`, `RUNE_INCREASE_CONTRAST`) as `tooling::runtime_for` applies them (#981).
+                rt.applyCapturePresets()
                 _ = rt.frame(at: 0)
                 let rootRect = rt.elements().first?.rect ?? [0, 0, 0, 0]
                 let rw = rootRect.count >= 4 ? rootRect[2] : 0
