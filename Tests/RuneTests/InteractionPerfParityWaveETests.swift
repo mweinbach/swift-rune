@@ -771,8 +771,17 @@ struct InteractionPerfParityWaveETests {
         #expect(InteractionTracker.testRollups.last?.toNs == 65)
     }
 
+    // These fixtures enable profiling for the whole process and assert on its shared report history.
     @Test("interaction/tests.rs: Runtime fast click updates rollup without emitting slow report")
-    func runtimeFastClickRecordsRollupOnly() {
+    func runtimeFastClickRecordsRollupOnly() async {
+        #if os(macOS) || os(Linux) || os(Windows)
+        await #expect(processExitsWith: .success) { Self.checkFastClickRecordsRollupOnly() }
+        #else
+        Self.checkFastClickRecordsRollupOnly()
+        #endif
+    }
+
+    private static func checkFastClickRecordsRollupOnly() {
         Self.resetAll()
         defer { Self.resetAll() }
         InteractionGate.forceOnForTesting = true
@@ -796,7 +805,15 @@ struct InteractionPerfParityWaveETests {
     }
 
     @Test("GPU frames keep interaction build, native submission and display target times distinct")
-    func gpuInteractionFinishesAtNativeSubmission() throws {
+    func gpuInteractionFinishesAtNativeSubmission() async throws {
+        #if os(macOS) || os(Linux) || os(Windows)
+        await #expect(processExitsWith: .success) { try Self.checkGPUInteractionFinishesAtNativeSubmission() }
+        #else
+        try Self.checkGPUInteractionFinishesAtNativeSubmission()
+        #endif
+    }
+
+    private static func checkGPUInteractionFinishesAtNativeSubmission() throws {
         Self.resetAll()
         defer { Self.resetAll() }
         InteractionGate.forceOnForTesting = true
@@ -824,7 +841,15 @@ struct InteractionPerfParityWaveETests {
     }
 
     @Test("interaction/tests.rs: Runtime IME edit emits key_edit and captures phases when slow")
-    func runtimeKeyEditAndSlowFrameThroughRuntime() {
+    func runtimeKeyEditAndSlowFrameThroughRuntime() async {
+        #if os(macOS) || os(Linux) || os(Windows)
+        await #expect(processExitsWith: .success) { Self.checkKeyEditAndSlowFrameThroughRuntime() }
+        #else
+        Self.checkKeyEditAndSlowFrameThroughRuntime()
+        #endif
+    }
+
+    private static func checkKeyEditAndSlowFrameThroughRuntime() {
         Self.resetAll()
         defer { Self.resetAll() }
         InteractionGate.forceOnForTesting = true
@@ -848,7 +873,7 @@ struct InteractionPerfParityWaveETests {
 
         #expect(rt.state.edit.text == "hi!")
         #expect(InteractionTracker.testSlowReports.count == 1)
-        let rep = InteractionTracker.testSlowReports[0]
+        guard let rep = InteractionTracker.testSlowReports.first else { return }
         #expect(rep.action == "key_edit")
         #expect(rep.commits >= 1)
         #expect(rep.phases.reduce(0, +) > 0.0)

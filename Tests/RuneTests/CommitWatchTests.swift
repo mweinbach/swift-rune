@@ -339,7 +339,15 @@ struct CommitWatchTests {
     // MARK: - interaction/tests.rs:125 (`a_slow_click_names_its_page_and_control`)
 
     @Test("interaction/tests.rs:125 - a slow click's report counts its commits and their `input` cause")
-    func slowClickReportCarriesInputCause() {
+    func slowClickReportCarriesInputCause() async {
+        #if os(macOS) || os(Linux) || os(Windows)
+        await #expect(processExitsWith: .success) { Self().checkSlowClickReportCarriesInputCause() }
+        #else
+        checkSlowClickReportCarriesInputCause()
+        #endif
+    }
+
+    private func checkSlowClickReportCarriesInputCause() {
         PerfWarn.resetForTesting()
         InteractionTracker.resetForTesting()
         defer {
