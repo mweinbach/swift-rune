@@ -723,7 +723,7 @@ public struct Knobs: Sendable, Equatable {
     public func save(to url: URL) throws {
         let data = try exportJSON(prettyPrinted: true)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: url, options: .atomic)
+        try data.write(to: url, options: .runeOutput)
     }
 
     public mutating func load(from url: URL) throws {
