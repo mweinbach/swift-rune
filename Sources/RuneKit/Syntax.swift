@@ -567,7 +567,7 @@ extension Kit {
                     lineHighlights.append(SyntaxHighlight(range: (start - lineStart)..<(end - lineStart), paint: highlight.paint))
                 }
             }
-            let spans = resolvedTheme.spans(for: String(lineText), highlights: lineHighlights, defaultColor: c.textBase, monospace: true)
+            let spans = resolvedTheme.spans(for: String(lineText), highlights: lineHighlights, defaultColor: c.textBase, monospace: false)
             lineStart = lineEnd + 1
 
             var lineRow: El<State> = row()

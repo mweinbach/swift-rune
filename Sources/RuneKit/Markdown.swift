@@ -5702,16 +5702,16 @@ private final class MarkdownRenderer<State> {
     private func renderCode(_ code: String, source: MarkdownCodeSource?, map: MarkdownSpanMap?) -> El<State> {
         let lang = source?.language
         let langLower = lang?.lowercased()
-        let isShell = langLower.map { MarkdownRendererShared.shells.contains($0) } ?? false
+        let shell = langLower.flatMap { MarkdownRendererShared.shells.contains($0) ? s.shell : nil }
         let isPlain = langLower.map { MarkdownRendererShared.plainLangs.contains($0) } ?? true
 
         let fill: Color
         let border: Color
         let ink: Color
-        if let sh = s.shell, isShell {
-            fill = sh.fill
-            border = sh.border
-            ink = sh.text
+        if let shell {
+            fill = shell.fill
+            border = shell.border
+            ink = shell.text
         } else if isPlain {
             fill = s.codeBlockFill
             border = s.codeBlockBorder
@@ -5730,16 +5730,16 @@ private final class MarkdownRenderer<State> {
         }
 
         var spans: [TextSpan]
-        if s.highlight && !isShell && (!view.config.syntaxHighlighter.isBuiltin || (lang.map { Syntax.known($0) } ?? false)) {
+        if s.highlight && shell == nil && (!view.config.syntaxHighlighter.isBuiltin || (lang.map { Syntax.known($0) } ?? false)) {
             let colouredCount = syntaxPrefix.utf8.count
             let highlights = view.config.syntaxHighlighter.highlight(language: lang, code: syntaxPrefix)
-            spans = s.syntax.spans(for: syntaxPrefix, highlights: highlights, defaultColor: ink)
+            spans = s.syntax.spans(for: syntaxPrefix, highlights: highlights, defaultColor: ink, monospace: false)
             if colouredCount < code.utf8.count,
                let tail = utf8Slice(code, range: colouredCount..<code.utf8.count), !tail.isEmpty {
-                spans.append(TextSpan(tail, color: ink, monospace: true))
+                spans.append(TextSpan(tail, color: ink))
             }
         } else {
-            spans = [TextSpan(code.isEmpty ? " " : code, color: ink, monospace: true)]
+            spans = [TextSpan(code.isEmpty ? " " : code, color: ink)]
         }
 
         let hls = makeTextHighlights(for: code, map: map)
@@ -5798,7 +5798,7 @@ private final class MarkdownRenderer<State> {
                 color = s.text
             }
             let shown = line.isEmpty ? " " : line
-            let spans = [TextSpan(shown, color: color, monospace: true)]
+            let spans = [TextSpan(shown, color: color)]
             let lineNode = applySelect(
                 withReveal(tabbedRich(shown, spans: spans, highlights: lineHLs, style: s.codeBlock, color: color))
                     .wFull()

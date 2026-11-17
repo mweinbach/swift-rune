@@ -1452,7 +1452,7 @@ struct MarkdownFullParityTests {
     }
 
     @Test("src/markdown/tests.rs & blocks_and_highlights: syntax highlights (#1-#6), glyph-invariant TextSystem (#7), whole/stream/ref cache (#9, #11), link span ordering (#12), strike (#115)")
-    func markdownCoreParserMetricsAndMaps() {
+    func markdownCoreParserMetricsAndMaps() throws {
         // #1: known languages are coloured and others stay plain
         let darkKit = Kit.neutral(dark: true)
         let darkStyle = MarkdownStyle.fromKit(darkKit)
@@ -1488,7 +1488,7 @@ struct MarkdownFullParityTests {
             let numTexts = tsNode.spans.filter { approxColor($0.color, darkStyle.syntax.color(for: .number)) }.map(\.text)
             #expect(kwTexts == ["const "])
             #expect(numTexts == ["1"])
-            #expect(tsNode.spans.allSatisfy { $0.color != nil && $0.weight == nil && !$0.italic && $0.monospace })
+            #expect(tsNode.spans.allSatisfy { $0.color != nil && $0.weight == nil && !$0.italic && !$0.monospace })
         }
         let plainInk = darkStyle.plainCodeText ?? darkStyle.codeText ?? darkStyle.text
         for plainCode in ["+[-]", "indented", "none"] {
@@ -1644,38 +1644,51 @@ struct MarkdownFullParityTests {
         #expect(runRec.runs == 2)
 
         // #7: highlighting never moves a glyph across widths [nil, 900, 420, 260] (full & streaming)
-        let ts = TextSystem()
-        let glyphCases: [(String, String)] = [
-            ("tsx", "export function Card({ title }: { title: string }) {\n  return <div className=\"card\">{title.toUpperCase()}</div>; // done\n}"),
-            ("rust", "fn main() { let v: Vec<u8> = vec![1, 2, 3]; println!(\"{v:?} → ok\"); }"),
-            ("sh", "FOO=1 npm run build --if-present && echo \"$HOME/${X}\" | tee out.txt # café"),
-            ("yaml", "name: rune\nlist: [a, 1, {b: c}]\nscript: |\n  echo hi"),
-        ]
-        for (lang, code) in glyphCases {
-            let fullSpans = darkStyle.syntax.spans(for: code, highlights: Syntax.builtin(language: lang, code: code), defaultColor: darkStyle.codeText)
-            #expect(!fullSpans.isEmpty)
-            let cutRaw = code.firstIndex(of: "\n").map { code.distance(from: code.startIndex, to: $0) + 4 } ?? (code.utf8.count / 2)
-            let utf8View = code.utf8
-            var cutIdx = utf8View.index(utf8View.startIndex, offsetBy: min(cutRaw, utf8View.count))
-            while cutIdx < utf8View.endIndex && cutIdx.samePosition(in: code) == nil {
-                cutIdx = utf8View.index(after: cutIdx)
+        try withFontFamilies(sans: DefaultFonts.sansFamily, mono: DefaultFonts.monoFamily) {
+            let ts = TextSystem()
+            let glyphCases: [(String, String)] = [
+                ("tsx", "export function Card({ title }: { title: string }) {\n  return <div className=\"card\">{title.toUpperCase()}</div>; // done\n}"),
+                ("rust", "fn main() { let v: Vec<u8> = vec![1, 2, 3]; println!(\"{v:?} → ok\"); }"),
+                ("sh", "FOO=1 npm run build --if-present && echo \"$HOME/${X}\" | tee out.txt # café"),
+                ("yaml", "name: rune\nlist: [a, 1, {b: c}]\nscript: |\n  echo hi"),
+            ]
+            for (lang, code) in glyphCases {
+                let closed: El<Int> = Markdown("```\(lang)\n\(code)\n```").render(darkStyle)
+                let closedNode = try #require(collectRichNodes(closed).first { $0.plain == code })
+                #expect(Set(closedNode.spans.compactMap(\.color)).count > 1)
+                let bytes = code.utf8
+                let cut = bytes.firstIndex(of: 10).map { bytes.distance(from: bytes.startIndex, to: $0) + 4 } ?? bytes.count / 2
+                var end = bytes.index(bytes.startIndex, offsetBy: cut)
+                while end.samePosition(in: code.unicodeScalars) == nil { bytes.formIndex(after: &end) }
+                let partial = String(decoding: bytes[..<end], as: UTF8.self)
+                let open: El<Int> = Markdown("```\(lang)\n\(partial)").streaming().render(darkStyle)
+                let prefix = try #require(collectRichNodes(open).first { $0.plain == partial })
+                let streamSpans = prefix.spans + [TextSpan(String(decoding: bytes[end...], as: UTF8.self))]
+                for width in [nil, Float(900), Float(420), Float(260)] as [Float?] {
+                    let plain = ts.shape(text: code, spans: nil, style: darkStyle.codeBlock, maxWidth: width, pixelScale: 2.0, emitGlyphs: true)
+                    let full = ts.shape(text: code, spans: closedNode.spans, style: darkStyle.codeBlock, maxWidth: width, pixelScale: 2.0, emitGlyphs: true)
+                    let stream = ts.shape(text: code, spans: streamSpans, style: darkStyle.codeBlock, maxWidth: width, pixelScale: 2.0, emitGlyphs: true)
+                    for candidate in [full, stream] {
+                        #expect(plain.glyphs.map(\.rect) == candidate.glyphs.map(\.rect))
+                        #expect(plain.glyphs.map(\.uv) == candidate.glyphs.map(\.uv))
+                        #expect(plain.glyphs.map(\.atlasPage) == candidate.glyphs.map(\.atlasPage))
+                        #expect(plain.glyphs.map(\.utf8Offset) == candidate.glyphs.map(\.utf8Offset))
+                    }
+                }
             }
-            let partial = String(code[..<cutIdx])
-            let streamPrefixLen = partial.lastIndex(of: "\n").map { String(partial[..<$0]).utf8.count } ?? 0
-            let streamSlice = utf8Slice(code, 0..<streamPrefixLen)
-            let streamSpans = darkStyle.syntax.spans(
-                for: streamSlice,
-                highlights: Syntax.builtin(language: lang, code: streamSlice),
-                defaultColor: darkStyle.codeText
-            ) + (streamPrefixLen < code.utf8.count ? [TextSpan(utf8Slice(code, streamPrefixLen..<code.utf8.count), color: darkStyle.codeText, monospace: true)] : [])
+        }
 
-            for width in [nil, Float(900), Float(420), Float(260)] as [Float?] {
-                let plain = ts.shape(text: code, spans: nil, style: darkStyle.codeBlock, maxWidth: width, pixelScale: 2.0, emitGlyphs: true)
-                let full = ts.shape(text: code, spans: fullSpans, style: darkStyle.codeBlock, maxWidth: width, pixelScale: 2.0, emitGlyphs: true)
-                let stream = ts.shape(text: code, spans: streamSpans, style: darkStyle.codeBlock, maxWidth: width, pixelScale: 2.0, emitGlyphs: true)
-                #expect(plain.glyphs.map { [$0.rect, $0.uv] } == full.glyphs.map { [$0.rect, $0.uv] })
-                #expect(plain.glyphs.map { [$0.rect, $0.uv] } == stream.glyphs.map { [$0.rect, $0.uv] })
-            }
+        let namedFontSystem = TextSystem()
+        let font = TextStyle(size: 20, family: .custom(DefaultFonts.monoFamily))
+        let namedCode: El<Int> = Markdown("```rust\nlet WWWWiii = 1\n```\n\n```text\nWWWWiii\n```\n\n```diff\n+WWWWiii\n```")
+            .render(darkStyle.codeBlockFont(font))
+        let leaves = collectRichNodes(namedCode).filter { $0.plain.contains("WWWWiii") }
+        #expect(leaves.count == 3)
+        for leaf in leaves {
+            #expect(leaf.spans.allSatisfy { !$0.monospace })
+            let plain = namedFontSystem.shape(text: leaf.plain, style: font, maxWidth: nil, pixelScale: 1)
+            let decorated = namedFontSystem.shape(text: leaf.plain, spans: leaf.spans, style: font, maxWidth: nil, pixelScale: 1)
+            #expect(decorated.glyphs.map(\.rect) == plain.glyphs.map(\.rect))
         }
 
         // #9: streaming byte-by-byte through MarkdownDocCache matches whole-document parse

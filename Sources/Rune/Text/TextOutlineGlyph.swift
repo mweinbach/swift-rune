@@ -181,7 +181,8 @@ final class TextOutlineStorage {
 extension GlyphAtlas {
     /// CoreGraphics weight depends on the ink's linear luminance, including for two uses of the
     /// same cached shaped line in different colours. Resolve this last part at paint time.
-    @TaskLocal static var baseInkBucket: UInt8 = 0
+    // An absent palette uses neutral masks, as in glyphs_for_layout before set_glyph_inks.
+    @TaskLocal static var baseInkBucket: UInt8?
 
     /// On a cache miss the shaper can prepare the requested ink immediately. The paint
     /// resolver still handles later colour changes, selections, and highlighted spans.

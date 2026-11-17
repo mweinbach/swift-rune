@@ -215,7 +215,7 @@ internal final class ParagraphLayout: @unchecked Sendable {
         let revision = revision ?? textSystem.rasterRevision
         let p = lock.withLock { records[k] }
         guard p.shaped, !p.layout.authText.isEmpty else { return [] }
-        if p.layout.hasGlyphs && p.glyphRevision == revision {
+        if p.layout.hasGlyphs && p.glyphRevision == revision && p.layout.shaped.canReplayGlyphInks {
             #if canImport(CoreText) && canImport(CoreGraphics)
             return p.layout.shaped.glyphs
             #else

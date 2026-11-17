@@ -4,6 +4,35 @@ import Testing
 #if canImport(CoreText) && canImport(CoreGraphics)
 @Suite("Retained glyph pen placements")
 struct TextPlacementReuseTests {
+    @Test("A raw text layout keeps neutral masks after the renderer supplies explicit glyph inks")
+    func coreTextPaintScopesRespectNeutralGlyphGeometry() throws {
+        for mode in [FontSmoothing.on, .windfoil] where mode.pipeline.dilate {
+            for keyed in [false, true] {
+                let system = TextSystem()
+                let style = TextStyle(size: 18, family: .monospace).smoothing(mode)
+                let spans = [TextSpan("T", color: .white), TextSpan("T", color: .black)]
+                func glyphs(_ spans: [TextSpan]?) -> [PositionedGlyph] {
+                    if keyed {
+                        return system.layoutKeyed(text: "TT", spans: spans, style: style, maxWidth: nil,
+                                                  pixelScale: 1, emitGlyphs: true).shaped.glyphs
+                    }
+                    return system.shape(text: "TT", spans: spans, style: style, maxWidth: nil, pixelScale: 1).glyphs
+                }
+                let painted = GlyphAtlas.withBaseInk(.black, mode: mode) { glyphs(spans) }
+                let plain = glyphs(nil)
+                let neutral = glyphs(spans)
+                try #require(painted.count == 2 && plain.count == 2 && neutral.count == 2)
+                #expect(painted[0].uv != plain[0].uv)
+                #expect(painted[1].uv == plain[1].uv)
+                #expect(neutral.map(\.uv) == plain.map(\.uv))
+                #expect(neutral.map(\.rect) == plain.map(\.rect))
+                #expect(neutral.map(\.color) == [.white, .black])
+                let (white, rect) = system.glyphAtlas.outlineInk(neutral[0], rect: neutral[0].rect, bucket: 4)
+                #expect(white.uv == painted[0].uv && rect == painted[0].rect)
+            }
+        }
+    }
+
     @Test("A translated fractional pen reuses its mask until its shelf is recycled")
     func translated() throws {
         let system = TextSystem()
