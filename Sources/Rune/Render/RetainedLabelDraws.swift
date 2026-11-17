@@ -4,15 +4,44 @@ internal typealias GlyphUVFixup = (
 )
 
 /// Rasterized, fully visible label runs can move by whole device pixels without changing mask placement.
-/// Shaping and hit geometry still run before this point. The source glyph storage is retained so
-/// replacing text, its font or a shaped raster window necessarily changes the identity check.
+/// Shaping and hit geometry still run before this point. Retain the source buffers so changing
+/// the glyphs or their exact resting pens invalidates a replay through copy-on-write.
 internal struct RetainedLabelDraws {
     struct Draw {
         var instance: RenderInstance
         var page: UInt16
     }
 
-    var source: [PositionedGlyph]
+    struct Source {
+        private let glyphs: [PositionedGlyph]
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        private let pens: [GlyphPen]
+        private let placements: TextBoxGeometry.GlyphPlacements?
+        #endif
+
+        init(_ shape: ShapedText) {
+            glyphs = shape.glyphs
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            pens = shape.glyphPens
+            placements = shape.glyphPlacements
+            #endif
+        }
+
+        func matches(_ shape: ShapedText) -> Bool {
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            guard placements === shape.glyphPlacements, sameStorage(pens, shape.glyphPens) else { return false }
+            #endif
+            return sameStorage(glyphs, shape.glyphs)
+        }
+
+        private func sameStorage<T>(_ a: [T], _ b: [T]) -> Bool {
+            a.count == b.count && a.withUnsafeBufferPointer { lhs in
+                b.withUnsafeBufferPointer { $0.baseAddress == lhs.baseAddress }
+            }
+        }
+    }
+
+    var source: Source
     var origin: SIMD2<Float>
     var bounds: SIMD4<Float>
     var ink: SIMD4<Float>
@@ -27,14 +56,12 @@ internal struct RetainedLabelDraws {
     var draws: [Draw]
 
     func replay(
-        glyphs: [PositionedGlyph], at origin: SIMD2<Float>, clip: SIMD4<Float>, fade: SIMD4<UInt32>,
+        shaped: ShapedText, at origin: SIMD2<Float>, clip: SIMD4<Float>, fade: SIMD4<UInt32>,
         visible: SIMD4<Float>, ink: SIMD4<Float>, opacity: Float, baseline: Float?, scale: Float, smoothing: FontSmoothing, srgb: Bool,
         atlas: GlyphAtlas, into instances: inout [RenderInstance], marks: inout [UInt32], fixups: inout [GlyphUVFixup]
     ) -> Bool {
         guard self.ink == ink, self.opacity == opacity, self.baseline == baseline, self.scale == scale, self.smoothing == smoothing, self.srgb == srgb,
-              source.count == glyphs.count, source.withUnsafeBufferPointer({ previous in
-                  glyphs.withUnsafeBufferPointer { $0.baseAddress == previous.baseAddress }
-              }) else { return false }
+              source.matches(shaped) else { return false }
         let dx = origin.x - self.origin.x, dy = origin.y - self.origin.y
         guard dx == 0, origin.y >= 0, self.origin.y >= 0, dy.rounded() == dy,
               origin.y - origin.y.rounded(.down) == self.origin.y - self.origin.y.rounded(.down),

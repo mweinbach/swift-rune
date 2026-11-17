@@ -3381,7 +3381,7 @@ extension Runtime {
                 let visible = SIMD4<Float>(glyphClipEdges.x, shownY0, glyphClipEdges.z, shownY1)
                 let retained = canRetain ? labelDraws[nid] : nil
                 let reused = retained?.replay(
-                    glyphs: labelGlyphs, at: restOrigin, clip: glyphClipEdges, fade: glyphFade, visible: visible,
+                    shaped: shaped, at: restOrigin, clip: glyphClipEdges, fade: glyphFade, visible: visible,
                     ink: runInk, opacity: localOpacity, baseline: shaped.lineBaselinesPx.first, scale: scale, smoothing: inkMode, srgb: srgbBlend, atlas: textSystem.glyphAtlas,
                     into: &instances, marks: &marks, fixups: &glyphFixups
                 ) == true
@@ -3439,7 +3439,7 @@ extension Runtime {
                             pages.insert(fixup.page)
                         }
                         nextLabelDraws[nid] = RetainedLabelDraws(
-                            source: labelGlyphs, origin: restOrigin, bounds: runBounds, ink: runInk, opacity: localOpacity, baseline: shaped.lineBaselinesPx.first, scale: scale,
+                            source: .init(shaped), origin: restOrigin, bounds: runBounds, ink: runInk, opacity: localOpacity, baseline: shaped.lineBaselinesPx.first, scale: scale,
                             smoothing: inkMode, srgb: srgbBlend, pages: pages, resets: textSystem.glyphAtlas.resets, draws: draws
                         )
                     }
