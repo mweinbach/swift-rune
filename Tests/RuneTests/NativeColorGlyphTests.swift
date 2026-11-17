@@ -15,7 +15,15 @@ struct NativeColorGlyphTests {
     #endif
 
     @Test(.enabled(if: supportsColor, "Requires a native color emoji font"))
-    func mixedInkSurvivesAtlasEviction() throws {
+    func mixedInkSurvivesAtlasEviction() async throws {
+        #if os(Linux)
+        await #expect(processExitsWith: .success) { try Self.checkMixedInkSurvivesAtlasEviction() }
+        #else
+        try Self.checkMixedInkSurvivesAtlasEviction()
+        #endif
+    }
+
+    private static func checkMixedInkSurvivesAtlasEviction() throws {
         #if os(Linux)
         HeadlessRunner.registerFonts([try Data(contentsOf: URL(fileURLWithPath: Self.emojiFont))])
         #endif

@@ -28,7 +28,15 @@ struct ColorGlyphPaintTests {
     }
 
     #if canImport(CoreText) || os(Linux) || os(Windows)
-    @Test func mixedLinePreservesEmojiColorsAndTextTint() throws {
+    @Test func mixedLinePreservesEmojiColorsAndTextTint() async throws {
+        #if os(Linux) || os(Windows)
+        await #expect(processExitsWith: .success) { try Self.checkMixedLinePreservesEmojiColorsAndTextTint() }
+        #else
+        try Self.checkMixedLinePreservesEmojiColorsAndTextTint()
+        #endif
+    }
+
+    private static func checkMixedLinePreservesEmojiColorsAndTextTint() throws {
         let font = TextSystem()
         #if !canImport(CoreText)
         let fontPath = ProcessInfo.processInfo.environment["RUNE_COLOR_EMOJI_FONT"]

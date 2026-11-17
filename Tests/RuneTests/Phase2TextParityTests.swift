@@ -116,7 +116,6 @@ struct Phase2TextParityTests {
 
     @Test("#882 & #919: prettyWrap eliminates orphan last words, preserves line count, and keeps trailing isolates greedy")
     func prettyWrapAndIsolateGuard() throws {
-        defer { TextSystem.setPrettyWrap(false) }
 
         let ts = TextSystem()
         let style = TextStyle(size: 14, weight: 400).wrapped()
@@ -127,7 +126,6 @@ struct Phase2TextParityTests {
         let lastGreedyWords = (greedy.textTestLines.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
         #expect(lastGreedyWords.count == 1)
 
-        TextSystem.setPrettyWrap(true)
         let pretty = ts.shape(text: paragraph, style: style, maxWidth: width, pixelScale: 1.0, emitGlyphs: false, pretty: true)
         #expect(pretty.lineCount == greedy.lineCount)
         let lastPrettyWords = (pretty.textTestLines.last?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
@@ -153,7 +151,16 @@ struct Phase2TextParityTests {
 
     @Test("#882: El.wrapGreedy opts text elements out of global setPrettyWrap(true)")
     @MainActor
-    func elWrapGreedyOptOut() throws {
+    func elWrapGreedyOptOut() async throws {
+        #if os(macOS) || os(Linux) || os(Windows)
+        await #expect(processExitsWith: .success) { try await Self.checkElWrapGreedyOptOut() }
+        #else
+        try Self.checkElWrapGreedyOptOut()
+        #endif
+    }
+
+    @MainActor
+    private static func checkElWrapGreedyOptOut() throws {
         defer { TextSystem.setPrettyWrap(false) }
 
         let ts = TextSystem()
@@ -381,7 +388,15 @@ struct Phase2TextParityTests {
     // MARK: - #853: FaceWeights declared weight ranges & TextSystem.setFaceWeights
 
     @Test("#853: TextSystem.setFaceWeights steers font weight matching across declared ranges")
-    func faceWeightsRangeMatching() {
+    func faceWeightsRangeMatching() async {
+        #if os(macOS) || os(Linux) || os(Windows)
+        await #expect(processExitsWith: .success) { Self.checkFaceWeightsRangeMatching() }
+        #else
+        Self.checkFaceWeightsRangeMatching()
+        #endif
+    }
+
+    private static func checkFaceWeightsRangeMatching() {
         let previous = TextSystem.faceWeights
         defer { TextSystem.setFaceWeights(previous) }
 

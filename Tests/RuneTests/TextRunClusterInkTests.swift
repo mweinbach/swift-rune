@@ -60,7 +60,15 @@ struct TextRunClusterInkTests {
         ?? "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
     @Test(.enabled(if: FileManager.default.fileExists(atPath: fontPath), "Requires DejaVu Sans"))
-    func preparedAndColdRunsOwnCompleteLigaturesAndCombiningMarks() throws {
+    func preparedAndColdRunsOwnCompleteLigaturesAndCombiningMarks() async throws {
+        #if os(macOS) || os(Linux) || os(Windows)
+        await #expect(processExitsWith: .success) { try Self.checkPreparedAndColdRunsOwnCompleteLigaturesAndCombiningMarks() }
+        #else
+        try Self.checkPreparedAndColdRunsOwnCompleteLigaturesAndCombiningMarks()
+        #endif
+    }
+
+    private static func checkPreparedAndColdRunsOwnCompleteLigaturesAndCombiningMarks() throws {
         HeadlessRunner.registerFonts([try Data(contentsOf: URL(fileURLWithPath: Self.fontPath))])
         let style = TextStyle(size: 24, family: .custom("DejaVu Sans"))
         let cases: [(String, Set<Int>)] = [
@@ -94,7 +102,15 @@ struct TextRunClusterInkTests {
     }
     #if canImport(CRuneDesktopText) && !canImport(CoreText)
     @Test(.enabled(if: FileManager.default.fileExists(atPath: fontPath), "Requires DejaVu Sans"))
-    func isolatedGlyphsPreserveTheWholeNativeMask() throws {
+    func isolatedGlyphsPreserveTheWholeNativeMask() async throws {
+        #if os(Linux) || os(Windows)
+        await #expect(processExitsWith: .success) { try Self.checkIsolatedGlyphsPreserveTheWholeNativeMask() }
+        #else
+        try Self.checkIsolatedGlyphsPreserveTheWholeNativeMask()
+        #endif
+    }
+
+    private static func checkIsolatedGlyphsPreserveTheWholeNativeMask() throws {
         HeadlessRunner.registerFonts([try Data(contentsOf: URL(fileURLWithPath: Self.fontPath))])
         for text in ["ffi", "لا", "لَا", "אֱ"] {
             let length = Int32(text.utf8.count)

@@ -43,7 +43,6 @@ struct UpText2ParityTests {
 
     @Test("#933: a paragraph with a pill wraps prettily (TextSpec.pretty no longer needs plain text)")
     func prettyWrapsParagraphsWithPills() throws {
-        defer { TextSystem.setPrettyWrap(false) }
         let ts = TextSystem()
         let style = TextStyle(size: 14, weight: 400).wrapped()
         let label = "typography"
@@ -54,7 +53,6 @@ struct UpText2ParityTests {
 
         let greedy = ts.shape(text: Self.paragraph, pills: pills, style: style, maxWidth: width, pixelScale: 1.0, emitGlyphs: false, pretty: false)
         #expect(Self.lastWords(greedy).count == 1)
-        TextSystem.setPrettyWrap(true)
         let pretty = ts.shape(text: Self.paragraph, pills: pills, style: style, maxWidth: width, pixelScale: 1.0, emitGlyphs: false, pretty: true)
         #expect(pretty.lineCount == greedy.lineCount, "pretty keeps the greedy line count")
         #expect(Self.lastWords(pretty).count >= 2, "the pill paragraph pulls a word down: \(pretty.textTestLines.map(\.text))")
@@ -64,7 +62,16 @@ struct UpText2ParityTests {
 
     @Test("#933: wrapAnywhere text wraps prettily when no word breaks inside, and El text resolves pretty")
     @MainActor
-    func prettyWrapsWrapAnywhereText() throws {
+    func prettyWrapsWrapAnywhereText() async throws {
+        #if os(macOS) || os(Linux) || os(Windows)
+        await #expect(processExitsWith: .success) { try await Self.checkPrettyWrapsWrapAnywhereText() }
+        #else
+        try Self.checkPrettyWrapsWrapAnywhereText()
+        #endif
+    }
+
+    @MainActor
+    private static func checkPrettyWrapsWrapAnywhereText() throws {
         defer { TextSystem.setPrettyWrap(false) }
         let ts = TextSystem()
         let style = TextStyle(size: 14, weight: 400).wrapped().wrapAnywhere()
@@ -90,12 +97,10 @@ struct UpText2ParityTests {
 
     @Test("#933: a wrapAnywhere paragraph with a word broken inside to fit keeps its greedy lines (RetryAfterOverflow)")
     func emergencyBreakKeepsGreedyLines() throws {
-        defer { TextSystem.setPrettyWrap(false) }
         let ts = TextSystem()
         let style = TextStyle(size: 14, weight: 400).wrapped().wrapAnywhere()
         let text = "Paste Abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz into the box and see it end on a lone word."
         var checked = 0
-        TextSystem.setPrettyWrap(true)
         for wInt in stride(from: 90, through: 300, by: 2) {
             let w = Float(wInt)
             let greedy = ts.shape(text: text, style: style, maxWidth: w, pixelScale: 1.0, emitGlyphs: false, pretty: false)

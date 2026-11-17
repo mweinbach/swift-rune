@@ -102,7 +102,15 @@ struct DefaultFontsParityTests {
 
     #if canImport(CoreText) || os(Linux)
     @Test("fractional CSS weights reach a variable face and an authored wght coordinate takes precedence")
-    func variableWeightsAndExplicitAxes() throws {
+    func variableWeightsAndExplicitAxes() async throws {
+        #if os(macOS) || os(Linux) || os(Windows)
+        await #expect(processExitsWith: .success) { try Self.checkVariableWeightsAndExplicitAxes() }
+        #else
+        try Self.checkVariableWeightsAndExplicitAxes()
+        #endif
+    }
+
+    private static func checkVariableWeightsAndExplicitAxes() throws {
         let url = try #require(Bundle.module.url(forResource: "RuneFractionalWeight", withExtension: "ttf", subdirectory: "Fixtures"))
         HeadlessRunner.registerFonts([try Data(contentsOf: url)])
         let system = TextSystem()

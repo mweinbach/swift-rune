@@ -83,7 +83,6 @@ struct UpText3ParityTests {
 
     @Test("#1023: paragraphs with pills still wrap prettily when every line holds text")
     func pillParagraphStillWrapsPrettily() throws {
-        defer { TextSystem.setPrettyWrap(false) }
         #expect(DefaultFonts.registerIfNeeded())
         let ts = TextSystem()
         let style = TextStyle(size: 14, weight: 400).wrapped()
@@ -92,7 +91,6 @@ struct UpText3ParityTests {
         let lo = Self.paragraph.utf8.distance(from: Self.paragraph.startIndex, to: start.lowerBound)
         let pills = [PillChip(lo..<(lo + label.utf8.count))]
         var checked = 0
-        TextSystem.setPrettyWrap(true)
         for wInt in stride(from: 130, through: 360, by: 2) {
             let w = Float(wInt)
             let greedy = ts.shape(text: Self.paragraph, pills: pills, style: style, maxWidth: w, pixelScale: 1.0, emitGlyphs: false, pretty: false)
