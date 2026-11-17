@@ -5574,6 +5574,14 @@ public final class Runtime<State> {
             inputMachines.focusMachine.resetForModalClose()
         }
 
+        // A focused text link exposes its own id as focusedKey. Reconcile the owning
+        // text element by its key, then restore the link within it after the layout commit.
+        let focusedOwnerKey: String?
+        if focusedLinkIndex != nil, let path = focusedPath {
+            focusedOwnerKey = prevNodes.first(where: { $0.path == path })?.key
+        } else {
+            focusedOwnerKey = focusedKey
+        }
         var nextIdx: Int? = nil
         if txBlur, let shown = whenShown {
             // A blur lands before the commit; `sync_requested_focus` runs after the latched blur,
@@ -5610,13 +5618,13 @@ public final class Runtime<State> {
         } else if let fp = focusedPath,
                   let idx = nodeByPath[fp],
                   canFocusIndex(idx),
-                  focusedKey == nil || flatNodes[idx].key == focusedKey {
+                  focusedOwnerKey == nil || flatNodes[idx].key == focusedOwnerKey {
             nextIdx = idx
         } else if let fp = focusedPath,
                   virtualInputs[fp] != nil {
             // Keep offscreen focused virtual row in `virtualInputs` instead of matching a newly scrolled-in row sharing `focusedKey`.
             nextIdx = nil
-        } else if let fk = focusedKey,
+        } else if let fk = focusedOwnerKey,
                   let idx = flatNodes.firstIndex(where: { $0.key == fk && canFocusIndex($0.index) }) {
             nextIdx = idx
         }
