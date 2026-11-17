@@ -596,6 +596,7 @@ extension TextSystem {
         roundedBaselines: [Float] = [],
         glideOffPx: SIMD2<Float> = .zero,
         insertImage: (RGBA8Atlas) -> SIMD4<Float>,
+        glyphPage: (Int, UInt16) -> Void = { _, _ in },
         into primitives: inout [Primitive]
     ) {
         let place = TextDecorationPlacement(
@@ -637,6 +638,7 @@ extension TextSystem {
                 let pxSize = max(4, Int((min(ir.z, ir.w) * pxScale).rounded()))
                 let entry = glyphAtlas.rasterizeIcon(svg, pixelSize: pxSize)
                 let tint = (chip.iconColor ?? defaultTextColor).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                glyphPage(primitives.count, entry.page)
                 primitives.append(.glyph(
                     rect: place.origin(ir),
                     uv: entry.uv,
@@ -665,6 +667,7 @@ extension TextSystem {
                 let pxSize = max(4, Int((min(inline.rect.z, inline.rect.w) * pxScale).rounded()))
                 let entry = glyphAtlas.rasterizeIcon(svg, pixelSize: pxSize)
                 let tint = (inline.color ?? defaultTextColor).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                glyphPage(primitives.count, entry.page)
                 primitives.append(.glyph(
                     rect: devRect,
                     uv: entry.uv,

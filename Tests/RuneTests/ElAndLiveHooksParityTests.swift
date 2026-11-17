@@ -125,6 +125,114 @@ struct ElAndLiveHooksParityTests {
         #expect(!rt.livePending)
     }
 
+    @Test("A publication during frame poll leaves a wake for the following frame")
+    func publicationDuringPollSurvivesLatch() {
+        let live = Live<Float>(1)
+        let rt = Runtime(state: false, viewport: Vec2(32, 32)) { _, _ in
+            el().key("card").size(32, 32).liveOpacity(live.binding)
+        }
+        _ = rt.frame(at: 0)
+        rt.poll = { published, _, _ in
+            if !published {
+                published = true
+                live.set(0.25)
+            }
+            return false
+        }
+        _ = rt.frame(at: 0.1)
+        #expect(rt.livePending)
+        #expect(rt.element(byKey: "card")?.opacity == 0.25)
+        _ = rt.frame(at: 0.2)
+        #expect(!rt.livePending)
+    }
+
+    @Test("A different source at the same element and property samples its initial color")
+    func replacingLiveColorSourceWithSameSequence() {
+        let rt = Runtime(state: Live<Color>(.black), viewport: Vec2(12, 12)) { paint, _ in
+            el().key("card").size(12, 12).liveFill(paint.binding)
+        }
+        _ = rt.renderFrame(at: 0)
+        rt.update(at: 0.1) { paint, _ in paint = Live(.white) }
+        _ = rt.renderFrame(at: 0.1)
+        #expect(rt.element(byKey: "card")?.fill == .white)
+    }
+
+    @Test("Falling live opacity uses its release spring")
+    func fallingLiveOpacityUsesRestSpring() {
+        let alpha = Live<Float>(1)
+        let rt = Runtime(state: (), viewport: Vec2(20, 20)) { _, _ in
+            el().key("card").size(20, 20).liveOpacity(alpha.smooth(Spring(duration: 1)).rest(.none))
+        }
+        _ = rt.frame(at: 0)
+        alpha.set(0.25)
+        _ = rt.frame(at: 0.01)
+        #expect(rt.element(byKey: "card")?.opacity == 0.25)
+        alpha.set(1)
+        _ = rt.frame(at: 0.02)
+        let opacity = rt.element(byKey: "card")?.opacity ?? 0
+        #expect(opacity >= 0.25 && opacity < 1)
+    }
+
+    @Test("Hidden pixel streams carry their pending wake across waker replacement")
+    func hiddenPixelsKeepWakeOnReplacement() {
+        let pixels = Pixels()
+        let rt = Runtime(state: (), viewport: Vec2(12, 12)) { _, _ in
+            el().size(12, 12).pixels(pixels)
+        }
+        _ = rt.frame(at: 0)
+        rt.setLiveVisible(false)
+        pixels.set(width: 1, height: 1, rgba: [255, 0, 0, 255])
+        #expect(!rt.takeParityLivePending())
+        let counter = ManagedCounter()
+        rt.setLiveWaker { counter.increment() }
+        #expect(counter.value == 0)
+        rt.setLiveVisible(true)
+        #expect(counter.value == 1)
+        #expect(rt.takeParityLivePending())
+        #expect(!rt.livePending)
+    }
+
+    @Test("Animated exits retain children once when mounted nodes reuse their prior indices")
+    func exitingSubtreeKeepsItsPresentedParent() throws {
+        let rt = Runtime(state: true, viewport: Vec2(120, 100)) { showing, _ in
+            let root: El<Bool> = col().size(120, 100)
+            if showing {
+                return root.child(col().key("departing").size(40, 40).transition(.opacity)
+                    .child(el().key("before").size(10, 10).bg(.white)))
+            }
+            return root.child(col().key("arriving").size(40, 40)
+                .child(el().key("after").size(10, 10).bg(.black)))
+        }
+        _ = rt.renderFrame(at: 0)
+        rt.update(at: 0.1) { showing, _ in showing = false }
+        _ = rt.renderFrame(at: 0.1)
+        let elements = rt.elements()
+        for (key, parent, exiting) in [("before", "departing", true), ("after", "arriving", false)] {
+            let matches = elements.filter { $0.key == key }
+            #expect(matches.count == 1)
+            let child = try #require(matches.first)
+            #expect(child.exiting == exiting)
+            let parentIndex = try #require(child.parentIndex)
+            #expect(elements[parentIndex].key == parent)
+        }
+    }
+
+    @Test("Streaming pixels inside a cached subtree stay drawable on each publication")
+    func cachedPixelSourceDrawsNewContents() {
+        let pixels = Pixels()
+        pixels.set(width: 1, height: 1, rgba: [255, 0, 0, 255])
+        let rt = Runtime(state: (), viewport: Vec2(16, 16)) { _, _ in
+            el().size(16, 16).cache().child(el().size(16, 16).pixels(pixels))
+        }
+        let frames: [[UInt8]] = [[0, 255, 0, 255], [0, 0, 255, 255]]
+        for (frame, value) in frames.enumerated() {
+            pixels.set(width: 1, height: 1, rgba: value)
+            let instances = rt.renderFrame(at: Double(frame) / 60).instances
+            #expect(instances.contains { $0.params.y == KIND_IMAGE })
+            #expect(!instances.contains { $0.params.y == KIND_LAYER && $0.params.w == 1 })
+        }
+    }
+
     @Test("ParityLayoutAnimation propagates horizontal layout inside growth rows and suppresses initial child fade")
     func animateLayoutGrowthRowRules() {
         let (r0InRow, r0ChildInRow) = ParityLayoutAnimation.resolveRowLayout(

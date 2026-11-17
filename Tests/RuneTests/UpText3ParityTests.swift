@@ -198,16 +198,14 @@ struct UpText3ParityTests {
             // The glyphs sit on the shared baseline: Parley's `top + over`, the strut's quantized
             // reach plus the code's growth (25 + 1 = 26 device px at 2x), never above the plain
             // line's. At 1x the code only grows the line under the baseline, so its pixels don't move.
-            let asc = Float(CTFontGetAscent(ts.resolveCTFont(style: sans, pixelScale: scale)))
-            let desc = Float(CTFontGetDescent(ts.resolveCTFont(style: sans, pixelScale: scale)))
-            let plainBase = ((lh - (asc + desc)) * 0.5 + asc).rounded()
             let strutOver = InlineCodeBox.quantizedBox(ascentPx: 13 * scale * 0.96875, descentPx: 13 * scale * 0.2412, lineHeightPx: lh).over
-            let codeBase = over > 0 ? max(plainBase, strutOver + over) : plainBase
+            #expect(plain.lineBaselinesPx == [strutOver])
+            #expect(code.lineBaselinesPx == [strutOver + over])
             if scale == 2 { #expect(strutOver + over == 26) }
             let plainY = plain.glyphs.prefix(5).map { $0.rect.y * scale }
             let codeY = code.glyphs.prefix(5).map { $0.rect.y * scale }
             #expect(plainY.count == 5 && codeY.count == 5)
-            #expect(zip(codeY, plainY).allSatisfy { abs($0 - $1 - (codeBase - plainBase)) < 1e-3 }, "\(scale)x: \(codeY) vs \(plainY)")
+            #expect(zip(codeY, plainY).allSatisfy { abs($0 - $1 - over) < 1e-3 }, "\(scale)x: \(codeY) vs \(plainY)")
             if scale == 1 { #expect(codeY == plainY, "1x pixels don't change") }
 
             // A Plex Mono paragraph's mono span is its own font: no growth.

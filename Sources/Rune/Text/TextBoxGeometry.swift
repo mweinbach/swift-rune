@@ -84,20 +84,9 @@ public enum TextBoxGeometry {
         return SIMD4<Float>(x0, y0, x1 - x0, y1 - y0)
     }
 
-    /// Per line, where its baseline lands (device px) when the text lays out from `originYPx`
-    /// (device px, possibly fractional): rounded half up at its absolute place, as Skia rounds a
-    /// text blob (`content.rs` #935: "its glyphs then round as Skia rounds them, the baseline half
-    /// up"). The shaped baselines were rounded from a whole-pixel origin, so each line keeps its
-    /// exact fraction (`ShapedText.lineBaselineFracsPx`) to round from here. Empty when the shaped
-    /// text carries no baselines.
+    /// Round each shaped baseline where it lands from the text's fractional absolute origin (#935).
     public static func roundedBaselines(originYPx: Float, shaped: ShapedText) -> [Float] {
-        let n = min(shaped.lineBaselinesPx.count, shaped.lineBaselineFracsPx.count)
-        guard n > 0 else { return [] }
-        var out = [Float](repeating: 0, count: n)
-        for i in 0..<n {
-            out[i] = PixelSnap.roundHalfUp(originYPx + shaped.lineBaselinesPx[i] + shaped.lineBaselineFracsPx[i])
-        }
-        return out
+        shaped.lineBaselinesPx.map { PixelSnap.roundHalfUp(originYPx + $0) }
     }
 
     /// A glyph quad's top (device px) on line `line`, `localTopPx` its top in the shaped text
@@ -129,17 +118,32 @@ internal struct GlyphPen {
     let glyph: CGGlyph
     let sizePx: Float
     let xPx: Float
+    let glideX: Float
     let binY: UInt8
     let smoothing: FontSmoothing
     let isColor: Bool
 }
 
 extension TextBoxGeometry {
+    /// Snap the resting pen as CoreGraphics or Skia does, then apply movement in quarters.
+    /// Keep the phase in sixtieths, which represents all of CoreGraphics' quantisation steps.
+    static func glyphPen(at x: Float, ppem: Float, glide: Float, smoothing: FontSmoothing) -> (pixel: Float, phase: UInt8) {
+        let rest: (pixel: Float, phase: UInt8)
+        if smoothing.isOutlineMode || smoothing == .directWrite || smoothing == .clearType {
+            let (pixel, phase) = quarterPen(x)
+            rest = (pixel, phase * 15)
+        } else {
+            rest = TextCoreTextMatch.glyphX(x, ppem: ppem)
+        }
+        let phases = TextCoreTextMatch.phases
+        let delta = Float(rest.phase) + (glide * 4).rounded() * (phases / 4)
+        let whole = floorf(delta / phases)
+        return (rest.pixel + whole, UInt8(delta - whole * phases))
+    }
+
     /// Glyph `g` (shaped at `shapeScale`) of a text laid out from `originXPx` (device px, possibly
-    /// fractional): its pen rounds to a quarter pixel where it lands, its quad starts on that whole
-    /// pixel and its mask is the one drawn at the leftover quarter (`glyph_emit.rs:286-288`). Colour
-    /// glyphs round to a whole pixel. Returns the quad's left edge in device px and the glyph with
-    /// its mask's `uv`, size and page.
+    /// fractional). The quad starts on a whole pixel and its mask carries the phase selected by
+    /// the rasterizer. Colour glyphs always round to a whole pixel.
     static func placedGlyph(
         _ g: PositionedGlyph,
         pen: GlyphPen,
@@ -152,12 +156,12 @@ extension TextBoxGeometry {
             let bearing = g.rect.x * s - pen.xPx.rounded()
             return (at.rounded() + bearing, g)
         }
-        let (fx, phase) = quarterPen(at)
+        let (fx, phase) = glyphPen(at: at, ppem: pen.sizePx, glide: pen.glideX, smoothing: pen.smoothing)
         guard let entry = atlas.rasterizeGlyph(
             font: pen.font,
             glyph: pen.glyph,
             fontSizePx: pen.sizePx,
-            subpixelX: Float(phase) * 0.25,
+            phaseX: phase,
             subpixelYBin: pen.binY,
             smoothing: pen.smoothing
         ), entry.pixelSize.x > 0, entry.pixelSize.y > 0 else {
@@ -168,16 +172,37 @@ extension TextBoxGeometry {
         out.atlasPage = entry.page
         out.rect.z = Float(entry.pixelSize.x) / s
         out.rect.w = Float(entry.pixelSize.y) / s
-        // `bearingPx.x` is `minX - phase / 4`: the quad starts on `fx + minX`, a whole pixel.
-        return (fx + Float(phase) * 0.25 + entry.bearingPx.x, out)
+        return (fx + entry.bearingPx.x, out)
     }
 }
 #endif
 
 extension TextBoxGeometry {
+    /// Places a shaped quad on the same absolute baseline and pen for the CPU and Metal paint paths.
+    static func paintGlyph(
+        _ source: PositionedGlyph, index: Int, shaped: ShapedText,
+        origin: SIMD2<Float>, scale: SIMD2<Float>, pixelScale: Float,
+        restsExact: Bool, baselines: [Float], line: inout Int, atlas: GlyphAtlas
+    ) -> (glyph: PositionedGlyph, rect: SIMD4<Float>) {
+        var glyph = source
+        var x = origin.x + glyph.rect.x * scale.x * pixelScale
+        if restsExact {
+            (x, glyph) = restingGlyph(glyph, index: index, shaped: shaped, originXPx: origin.x, pxScale: pixelScale, atlas: atlas)
+        }
+        var y = origin.y + glyph.rect.y * scale.y * pixelScale
+        if !baselines.isEmpty {
+            let ranges = shaped.lineGlyphRanges
+            while line + 1 < ranges.count && index >= ranges[line].upperBound { line += 1 }
+            if line < baselines.count {
+                y = glyphTop(localTopPx: glyph.rect.y * pixelScale, line: line, roundedBaselines: baselines, shaped: shaped)
+            }
+        }
+        return (glyph, SIMD4<Float>(x, y, glyph.rect.z * scale.x * pixelScale, glyph.rect.w * scale.y * pixelScale))
+    }
+
     /// Glyph `index` of `shaped` (shaped at `pxScale`) for a text laid out from `originXPx` (device
-    /// px): its quad's left edge in device px and the glyph to draw, its pen rounded to a quarter
-    /// pixel where it lands (`placedGlyph`). Without its pens (a text that isn't CoreText-shaped) it
+    /// px): its quad's left edge and the mask drawn for its absolute pen phase (`placedGlyph`).
+    /// Without its pens (a text that isn't CoreText-shaped) it
     /// keeps the shaped quad.
     static func restingGlyph(
         _ g: PositionedGlyph,

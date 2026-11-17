@@ -256,12 +256,10 @@ internal final class ParagraphLayout: @unchecked Sendable {
         // Each line's baseline (device px from the field's top) and its exact fraction, as one
         // layout records them (#935); kept only when every line has one.
         var baselines: [Float] = []
-        var baselineFracs: [Float] = []
         var baselinesKnown = true
         func baseline(_ s: ShapedText, _ i: Int, _ yPx: Float) {
-            guard baselinesKnown, i < s.lineBaselinesPx.count, i < s.lineBaselineFracsPx.count else { baselinesKnown = false; return }
+            guard baselinesKnown, i < s.lineBaselinesPx.count else { baselinesKnown = false; return }
             baselines.append(yPx + s.lineBaselinesPx[i])
-            baselineFracs.append(s.lineBaselineFracsPx[i])
         }
         #if canImport(CoreText) && canImport(CoreGraphics)
         var lines: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)] = []
@@ -343,7 +341,6 @@ internal final class ParagraphLayout: @unchecked Sendable {
         out.grownLineHeightsPt = boxHeights
         out.grownLineMetricHeightsPt = metricHeights
         out.lineBaselinesPx = baselinesKnown ? baselines : []
-        out.lineBaselineFracsPx = baselinesKnown ? baselineFracs : []
         out.underlineLineEndsPt = []
         #if canImport(CoreText) && canImport(CoreGraphics)
         out.glyphPens = []

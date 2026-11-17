@@ -136,8 +136,7 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         let ascPx = Float(CTFontGetAscent(baseFont))
         let descPx = Float(CTFontGetDescent(baseFont))
         let lhPx = style.resolvedLineHeight * scale
-        let halfLeadingPx = (lhPx - (ascPx + descPx)) * 0.5
-        self.baselineYPx = (halfLeadingPx + ascPx).rounded()
+        self.baselineYPx = InlineCodeBox.quantizedBox(ascentPx: ascPx, descentPx: descPx, lineHeightPx: lhPx).over
 
         var xs: [Float] = []
         xs.reserveCapacity(chars.count + 1)
@@ -351,8 +350,7 @@ internal final class TextRunCellLayout: @unchecked Sendable {
                 ))
                 continue
             }
-            let floorX = floorf(gxPx)
-            let subX = gxPx - floorX
+            let pen = TextBoxGeometry.glyphPen(at: gxPx, ppem: cg.fontSizePx, glide: 0, smoothing: style.fontSmoothing)
             let floorY = floorf(gyPx)
             let subY = gyPx - floorY
             let binY = UInt8((Int((subY * 4.0).rounded())) % 4)
@@ -360,13 +358,13 @@ internal final class TextRunCellLayout: @unchecked Sendable {
                 font: cg.font,
                 glyph: cg.glyph,
                 fontSizePx: cg.fontSizePx,
-                subpixelX: subX,
+                phaseX: pen.phase,
                 subpixelYBin: binY,
                 smoothing: style.fontSmoothing
             ), entry.pixelSize.x > 0 && entry.pixelSize.y > 0 else {
                 continue
             }
-            let quadXPx = floorX + entry.bearingPx.x
+            let quadXPx = pen.pixel + entry.bearingPx.x
             let quadYPx = floorY + entry.bearingPx.y
             glyphsOut.append(PositionedGlyph(
                 rect: SIMD4<Float>(

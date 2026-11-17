@@ -86,6 +86,7 @@ struct ElAndTxParityTests {
                 .bg(.black)
                 .border(1, .black)
                 .shadow(Shadow(x: 0, y: 2, blur: 4, color: .black))
+                .shadow(Shadow(x: 0, y: 0, blur: 3, color: .black, inset: true))
                 .linearGradient(top: .black, bottom: .black)
                 .liveBorder(Binding(live: s.edge))
                 .liveShadow(Binding(live: s.glow))
@@ -97,6 +98,7 @@ struct ElAndTxParityTests {
                         .liveTextColor(Binding(live: s.ink))
                 )
         }
+        rt.srgbBlend = false
         _ = rt.frame(at: 0)
         let initialCommits = rt.viewCommitCount
         let inkBefore = rt.elements().first(where: { $0.key == "ink" })?.textColor
@@ -118,7 +120,19 @@ struct ElAndTxParityTests {
         if let inkAfter {
             #expect(abs(inkAfter.r - Self.red.r) < 1e-4 && abs(inkAfter.g - Self.red.g) < 1e-4 && abs(inkAfter.b - Self.red.b) < 1e-4 && abs(inkAfter.a - Self.red.a) < 1e-4)
         }
-        #expect(!scene.primitives.isEmpty)
+        let red = SIMD4<Float>(1, 0, 0, 1)
+        let green = SIMD4<Float>(0, 1, 0, 1)
+        let blue = SIMD4<Float>(0, 0, 1, 1)
+        let black = SIMD4<Float>(0, 0, 0, 1)
+        #expect(scene.primitives.contains { $0.kind == .dropShadow && $0.fill == blue })
+        #expect(scene.primitives.contains { $0.kind == .insetShadow && $0.fill == black })
+        let gpu = rt.renderFrame(at: 2.0 / 60.0).instances
+        #expect(gpu.contains { $0.params.y == KIND_GLYPH && $0.fill == red })
+        #expect(gpu.contains { $0.params.y == KIND_RECT && $0.border == green })
+        #expect(gpu.contains { $0.params.y == KIND_SHADOW && $0.fill == blue })
+        #expect(gpu.contains { $0.params.y == KIND_INSET && $0.fill == black })
+        #expect(gpu.contains { $0.params.y == KIND_GRADIENT && $0.fill == red && $0.uv == green })
+        #expect(rt.viewCommitCount == initialCommits)
     }
 
     @Test("focusFill paints focus fill color when keyboard-focused")

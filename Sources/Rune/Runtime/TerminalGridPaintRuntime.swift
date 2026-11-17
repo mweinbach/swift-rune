@@ -63,7 +63,7 @@ extension Runtime {
         usedGlyphMask: inout UInt32,
         glyphCount: inout Int
     ) {
-        let s = max(pixelScale, 1.0)
+        let s = max(pixelScale, 0.5)
         let srgb = srgbBlend
         let cw = grid.cellSize.x
         let ch = grid.cellSize.y
@@ -101,6 +101,12 @@ extension Runtime {
             SIMD4<Float>(max(a.x, b.x), max(a.y, b.y), min(a.z, b.z), min(a.w, b.w))
         }
 
+        var environment = Hasher()
+        environment.combine(runtimeId)
+        environment.combine(textSystem.currentFontEpoch)
+        environment.combine(textSystem.language)
+        environment.combine(textSystem.smoothing)
+        environment.combine(textSystem.rasterRevision)
         for (k, row) in grid.rows.enumerated() {
             let y0 = pxGrid(originPtY + Float(k) * ch)
             let y1 = pxGrid(originPtY + Float(k + 1) * ch)
@@ -111,7 +117,11 @@ extension Runtime {
             let x1 = pxGrid(originPtX + cols * cw)
             let rowR = edgeRect(x0, y0, x1, y1)
 
-            let contentHash = row.contentFingerprint
+            // The row holds shaped glyph UVs. A new atlas or a recycled page requires reshaping.
+            var shapeKey = environment
+            shapeKey.combine(row.contentFingerprint)
+            shapeKey.combine(textSystem.glyphAtlas.placementClock)
+            let contentHash = UInt64(bitPattern: Int64(shapeKey.finalize()))
             var hasher = Hasher()
             hasher.combine(contentHash)
             hasher.combine(rowR.x.bitPattern)
@@ -204,6 +214,8 @@ extension Runtime {
                 baseColor: Color,
                 glyphClip: SIMD4<Float>
             ) {
+                let origin = SIMD2<Float>(textOrigX * s, textOrigY * s)
+                let baselines = TextBoxGeometry.roundedBaselines(originYPx: origin.y, shaped: shaped)
                 textSystem.emitTextDecorationsAndPills(
                     shaped: shaped,
                     textOriginX: textOrigX,
@@ -215,20 +227,37 @@ extension Runtime {
                     srgbBlend: srgb,
                     devClip: devClip,
                     rot: rot,
-                    insertImage: { _ in .zero },
+                    roundedBaselines: baselines,
+                    insertImage: { self.imagePacker.insert($0) },
+                    glyphPage: { index, page in
+                        glyphPageEntries.append((index, page))
+                        usedGlyphMask |= UInt32(1) << min(UInt32(page), 31)
+                    },
                     into: &primitives
                 )
-                for g in shaped.glyphs {
-                    let gx0 = (textOrigX + g.rect.x) * s
-                    let gy0 = (textOrigY + g.rect.y) * s
-                    let gw = g.rect.z * s
-                    let gh = g.rect.w * s
+                // Image UVs belong to the current image atlas. Reinsert them on each draw.
+                if !shaped.inlineIcons.isEmpty || !shaped.pillChips.isEmpty { cacheable = false }
+                var line = 0
+                for (index, glyph) in shaped.glyphs.enumerated() {
+                    let (g, rect) = TextBoxGeometry.paintGlyph(
+                        glyph, index: index, shaped: shaped, origin: origin, scale: SIMD2(repeating: 1),
+                        pixelScale: s, restsExact: true, baselines: baselines, line: &line, atlas: textSystem.glyphAtlas
+                    )
+                    let gx0 = rect.x, gy0 = rect.y, gw = rect.z, gh = rect.w
                     if gy0 > devClip.w || gy0 + gh < devClip.y || gx0 > devClip.z || gx0 + gw < devClip.x {
                         continue
                     }
                     let gc = (g.color ?? baseColor).scaleAlpha(localAlpha).simd4(srgb: srgb)
-                    if g.colorGlyphIndex != nil {
+                    if let index = g.colorGlyphIndex, let entry = textSystem.colorGlyph(index) {
+                        let atlas = RGBA8Atlas(width: entry.pixelSize.x, height: entry.pixelSize.y, texels: Array(entry.rgba))
+                        primitives.append(.image(
+                            rect: SIMD4<Float>(gx0, gy0, gw, gh), radii: .zero,
+                            uv: imagePacker.insert(atlas), tint: SIMD4<Float>(1, 1, 1, localAlpha),
+                            clip: glyphClip, turn: rot
+                        ))
+                        glyphCount += 1
                         cacheable = false
+                        continue
                     } else {
                         let texels = UInt32(max(0, gw * gh))
                         if let existingIdx = touchedPages.firstIndex(where: { $0.0 == g.atlasPage }) {
@@ -260,13 +289,28 @@ extension Runtime {
             let exactW = x1 - x0
             let overflows = lineFullPx > widthPt * s + 0.5 && lineFullPx > max(rowR.z - rowR.x, exactW) + 0.5
             var bounds = rowR
+            let rtl = laid.line.forcedDirection.map { $0 == .rtl } ?? laid.line.primaryIsRTL
             if !overflows {
-                bounds.z = max(bounds.z, bounds.x + max(exactW, lineFullPx))
+                if rtl {
+                    bounds.x = min(bounds.x, bounds.z - max(exactW, lineFullPx))
+                } else {
+                    bounds.z = max(bounds.z, bounds.x + max(exactW, lineFullPx))
+                }
+            }
+            // Wrapped lines already align within widthPt in the shaper.
+            var lineX = rowR.x
+            if row.style.wrap == .noWrap {
+                let extra = rowR.z - rowR.x - TextBoxGeometry.textWidth(lineFullPx)
+                switch row.style.align {
+                case .center: lineX += extra * 0.5
+                case .leading, .justified: if rtl { lineX += extra }
+                case .trailing: if !rtl { lineX += extra }
+                }
             }
             let textClip = intersectClip(devClip, bounds)
             emitShapedText(
                 laid.line,
-                originPtX: rowR.x / s,
+                originPtX: lineX / s,
                 originPtY: rowR.y / s,
                 baseColor: defaultColor,
                 glyphClip: textClip
@@ -312,6 +356,7 @@ extension Runtime {
                         let strokeW = width * s
                         let roundCap = (cap == .round)
                         let n = points.count
+                        guard n >= 2 else { continue }
                         let count = closed ? n : (n - 1)
                         for i in 0..<count {
                             let p0 = points[i]
@@ -340,6 +385,55 @@ extension Runtime {
                     glyphCount: glyphCount - startGlyphCount
                 ))
             }
+        }
+    }
+
+    /// Encode the same snapped rows, shaped text and decorations used by the reference paint path.
+    internal func paintTerminalGridInstances(
+        _ grid: TerminalGrid, snappedRect: SIMD4<Float>, exactRect: SIMD4<Float>,
+        clip: SIMD4<Float>, fade: SIMD4<UInt32>,
+        opacity: Float, defaultColor: Color,
+        into instances: inout [RenderInstance], marks: inout [UInt32],
+        glyphFixups: inout [(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16, forceScaled: Bool)],
+        imageFixups: inout [(index: Int, normUV: SIMD4<Float>, imgW: Float, imgH: Float)]
+    ) {
+        var primitives: [Primitive] = []
+        var glyphPages: [(index: Int, page: UInt16)] = []
+        var mask: UInt32 = 0
+        var count = 0
+        paintTerminalGrid(grid, devRect: snappedRect, exactRectPx: exactRect, devClip: clip,
+                          localAlpha: opacity, defaultColor: defaultColor, effRotate: 0, useLayer: false,
+                          primitives: &primitives, glyphPageEntries: &glyphPages, usedGlyphMask: &mask, glyphCount: &count)
+        let pages = Dictionary(uniqueKeysWithValues: glyphPages.map { ($0.index, $0.page) })
+        func premultiply(_ c: SIMD4<Float>) -> SIMD4<Float> {
+            SIMD4<Float>(c.x * c.w, c.y * c.w, c.z * c.w, c.w)
+        }
+        for (index, p) in primitives.enumerated() {
+            var i = RenderInstance(rect: p.rect, radii: p.radii, fill: premultiply(p.fill), border: premultiply(p.border),
+                                   params: SIMD4<Float>(p.params.x, KIND_RECT, 0, 1), uv: p.uv, clip: p.clip, fade: fade)
+            switch p.kind {
+            case .roundedRect:
+                break
+            case .glyph:
+                i.params = SIMD4<Float>(0, KIND_GLYPH, 0, 1)
+                glyphFixups.append((instances.count, p.uv, p.rect.z, p.rect.w, pages[index] ?? 0, false))
+            case .image:
+                i.params = SIMD4<Float>(0, KIND_IMAGE, 0, 1)
+                imageFixups.append((instances.count, p.uv, p.rect.z, p.rect.w))
+            case .segment:
+                i.radii = p.uv
+                i.params = SIMD4<Float>(max(0.25, p.params.x * 0.5), KIND_SEGMENT, p.params.z, 1)
+                i.uv = .zero
+            case .triangle:
+                i.radii = p.uv
+                i.params = SIMD4<Float>(p.params.x, KIND_TRIANGLE, 0, 1)
+                i.uv = SIMD4<Float>(p.fadeOrigin.x, p.fadeOrigin.y, 0, 0)
+            default:
+                assertionFailure("Unexpected terminal row primitive")
+                continue
+            }
+            instances.append(i)
+            marks.append(0)
         }
     }
 }
