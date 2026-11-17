@@ -40,7 +40,7 @@ extension Runtime {
 
     /// The window lost the pointer or focus: a gesture in progress won't report its end here
     /// (`Runtime::wheel_lost`).
-    internal func wheelLost() {
+    public func wheelLost() {
         inputMachines.wheelLock.lost(pending: wheelPending)
     }
 }

@@ -3,14 +3,6 @@ import RuneMotion
 
 // MARK: - Slice 2 Runtime State & Wiring (Scroll Core, WheelLock, Touch, Nudge, PixelHold, ScrollMode, Tx Actions)
 
-/// Host touch phase (`crates/rune/src/runtime/input/touch.rs::TouchPhase`).
-public enum TouchPhase: Sendable, Equatable {
-    case started
-    case moved
-    case ended
-    case cancelled
-}
-
 /// Consolidated runtime state for Slice 2 parity features (kept out of `Runtime.swift` body).
 internal final class Slice2RuntimeState {
     struct TouchFinger: Equatable {
@@ -41,7 +33,6 @@ internal final class Slice2RuntimeState {
         }
     }
 
-    var wheelLock = WheelLock()
     var touchScroll: TouchScroll? = nil
     var touchFinger: TouchFinger? = nil
     var touchOverscrollX: [String: Float] = [:]
@@ -206,28 +197,17 @@ extension Runtime {
 
     /// Delivers a 2D wheel/trackpad delta `(dx, dy)` in points (`Runtime::wheel_xy`).
     public func wheelXY(_ x: Float, _ y: Float, dx: Float, dy: Float, at now: Double? = nil) {
-        guard dx != 0 || dy != 0 else { return }
-        let clock = now ?? currentClockForScrollInput()
-        performWheelEvent(WheelEvent(dx: dx, dy: dy, precise: true, phase: .changed, mods: .none), at: Vec2(x, y), now: clock)
+        wheelXY(x, y, dx, dy, now: now ?? currentClockForScrollInput())
     }
 
     /// Marks the beginning of a trackpad wheel gesture (`Runtime::wheel_began`).
     public func wheelBegan(at now: Double? = nil) {
         let clock = now ?? currentClockForScrollInput()
-        let gesture = slice2State.wheelLock.gesture
-        let active = slice2State.wheelLock.runGesture == gesture && slice2State.wheelLock.owner != .unpicked
-        slice2State.wheelLock.began(now: clock, active: active, queued: false, anyQueued: false)
+        wheelBegan(now: clock)
     }
 
-    /// Marks the end/cancel of a trackpad wheel gesture (`Runtime::wheel_ended`).
     public func wheelEnded(at now: Double? = nil) {
-        let clock = now ?? currentClockForScrollInput()
-        slice2State.wheelLock.endedAt(clock)
-    }
-
-    /// Marks lost pointer/focus so a wheel gesture in progress resets cleanly (`Runtime::wheel_lost`).
-    public func wheelLost() {
-        slice2State.wheelLock.lost(queued: false)
+        wheelEnded(now: now ?? currentClockForScrollInput())
     }
 
     /// Converts a platform `MouseScrollDelta` into points using display scale & Shift turning, then dispatches wheel scrolling.
@@ -240,206 +220,19 @@ extension Runtime {
         now: Double? = nil
     ) {
         let effScale = max(1.0, scale ?? self.pixelScale)
-        let (dx, dy) = wheelDelta(delta, scale: effScale, shift: shift && WheelLock.shiftTurnsWheel)
+        let (dx, dy) = wheelDelta(delta, scale: effScale, shift: shift && WheelDistance.shiftTurnsWheel)
         let evPhase = phase ?? .changed
         let mods = Mods(shift: shift)
         let clock = now ?? currentClockForScrollInput()
-        performWheelEvent(WheelEvent(dx: dx, dy: dy, precise: {
-            if case .pixelDelta = delta { return true }
+        dispatchLockedWheel(WheelEvent(dx: dx, dy: dy, precise: {
+            if case .pixel = delta { return true }
             return false
         }(), phase: evPhase, mods: mods), at: pos, now: clock)
     }
 
     /// Starts an inertial fling along `(vx, vy)` on whichever axis `wheelXY` would pick (`Runtime::fling_xy`).
     public func flingXY(vx: Float, vy: Float, at pos: Vec2, now: Double? = nil) {
-        let clock = now ?? currentClockForScrollInput()
-        if abs(vx) <= abs(vy) || scrollNodeAt(pos, horizontal: true) == nil {
-            fling(vx: 0, vy: vy, at: pos, now: clock)
-            return
-        }
-        releaseHoverHold()
-        dismissHelp(at: clock)
-        guard let idx = scrollNodeAt(pos, horizontal: true) else { return }
-        let path = flatNodes[idx].path
-        let nid = NodeId.hash("scroll:" + path)
-        let cur = scrollOffsets[path] ?? .zero
-        scrollGlidingPaths.remove(path)
-        directScrolledPaths.insert(path)
-        scrollRequestsState.stepCancel()
-        scrollStore.snap(nid, Props.SCROLL, to: cur)
-        let towardX = scrollFlow(at: idx) == .rtl ? vx : -vx
-        _ = scrollStore.fling(nid, Props.SCROLL, from: cur, velocity: Velocity(Vec2(towardX, 0)), decay: .IOS_NORMAL, at: cxSettings.scaledTime(at: clock))
-        slice2State.scrollHorizontalVelocities[path] = towardX
-        updateScrollMode(forPath: path, event: .coast(moving: vx != 0))
-        if vx != 0 {
-            cancelPressedOnScrollIfNeeded(scrollNodeIndex: idx, at: clock)
-        }
-    }
-
-    internal func performWheelEvent(_ event: WheelEvent, at pos: Vec2? = nil, now: Double) {
-        releaseHoverHold()
-        dismissHelp(at: now)
-        let targetPos = pos ?? pointerPosition
-        if let pos { pointerPosition = pos }
-
-        switch event.phase {
-        case .began:
-            wheelBegan(at: now)
-        case .ended, .cancelled:
-            if event.dx != 0 || event.dy != 0 {
-                break
-            }
-            wheelEnded(at: now)
-            return
-        case .changed:
-            break
-        }
-
-        if event.dx == 0 && event.dy == 0 {
-            if event.phase == .ended || event.phase == .cancelled {
-                wheelEnded(at: now)
-            }
-            return
-        }
-
-        slice2State.wheelLock.delta(now: now, dx: event.dx, dy: event.dy, queued: false)
-        slice2State.wheelLock.syncGesture(slice2State.wheelLock.gesture)
-
-        // Custom `onWheel` handler runs first with Tx input context.
-        if let (customNode, _) = hitTest(at: targetPos, predicate: { $0.el.handlers.onWheel != nil }) {
-            var tx = makeTx(at: now)
-            tx.runtimeActions[Tx.modsKey] = event.mods
-            let taken = customNode.el.handlers.onWheel?(&state, event, &tx) == true
-            Tx.took(taken, &tx)
-            if taken {
-                slice2State.wheelLock.owner = .handler(customNode.path)
-                applyTx(tx, at: now)
-                if event.phase == .ended || event.phase == .cancelled {
-                    wheelEnded(at: now)
-                }
-                return
-            }
-        }
-
-        let horizontal: Bool
-        if let kept = slice2State.wheelLock.keepsAxis(dx: event.dx, dy: event.dy) {
-            horizontal = kept
-        } else {
-            let across: NodeId? = (abs(event.dx) > abs(event.dy))
-                ? scrollNodeAt(targetPos, horizontal: true).map { flatNodes[$0].nodeId }
-                : nil
-            horizontal = slice2State.wheelLock.repick(across: across)
-        }
-
-        if horizontal {
-            if event.dx != 0 {
-                performWheelHorizontal(dx: event.dx, at: targetPos, now: now)
-            }
-        } else {
-            if event.dy != 0 {
-                performWheelVertical(dy: event.dy, at: targetPos, now: now)
-            }
-        }
-
-        if event.phase == .ended || event.phase == .cancelled {
-            wheelEnded(at: now)
-        }
-    }
-
-    private func performWheelHorizontal(dx: Float, at targetPos: Vec2, now: Double) {
-        let latchedIdx: Int? = {
-            if case .horizontal(let latchedId) = slice2State.wheelLock.owner,
-               let idx = flatNodes.firstIndex(where: { $0.nodeId == latchedId }),
-               !flatNodes[idx].effectiveInert,
-               flatNodes[idx].el.layout.scrollAxes.contains(.horizontal) {
-                return idx
-            }
-            return nil
-        }()
-        guard let startIdx = latchedIdx ?? scrollNodeAt(targetPos, horizontal: true) else { return }
-
-        var walkIdx: Int? = startIdx
-        while let i = walkIdx {
-            let scrollNode = flatNodes[i]
-            if !scrollNode.effectiveInert && scrollNode.el.layout.scrollAxes.contains(.horizontal) {
-                let path = scrollNode.path
-                let maxExt = scrollMaxExtents[path] ?? .zero
-                let prev = scrollOffsets[path] ?? .zero
-                var cur = prev
-                let delta = scrollFlow(at: i) == .rtl ? dx : -dx
-                cur.x = (cur.x + delta).clamped(to: 0...maxExt.x)
-                if cur != prev {
-                    logEvent(String(format: "wheel-x %.1f", dx))
-                    commitWheelScrollDelta(path: path, scrollNodeIndex: i, next: cur, at: now)
-                    return
-                }
-            }
-            walkIdx = flatNodes[i].parentIndex
-        }
-    }
-
-    private func performWheelVertical(dy: Float, at targetPos: Vec2, now: Double) {
-        guard let hitNode = scrollNodeAt(targetPos, horizontal: false).map({ flatNodes[$0] }) else { return }
-        var walkIdx: Int? = hitNode.index
-        while let i = walkIdx {
-            let scrollNode = flatNodes[i]
-            if !scrollNode.effectiveInert && scrollNode.el.layout.scrollAxes.contains(.vertical) {
-                let path = scrollNode.path
-                let maxExt = scrollMaxExtents[path] ?? .zero
-                let prev = scrollOffsets[path] ?? .zero
-                var cur = prev
-                cur.y = (cur.y - dy).clamped(to: 0...maxExt.y)
-                if maxExt.y - cur.y <= 2.0 {
-                    wasPinnedToBottom.insert(path)
-                } else {
-                    wasPinnedToBottom.remove(path)
-                }
-                if cur != prev {
-                    logEvent(String(format: "wheel %.1f", dy))
-                    commitWheelScrollDelta(path: path, scrollNodeIndex: i, next: cur, at: now)
-                    return
-                }
-            }
-            walkIdx = flatNodes[i].parentIndex
-        }
-    }
-
-    private func commitWheelScrollDelta(path: String, scrollNodeIndex: Int, next: Vec2, at now: Double) {
-        let nid = NodeId.hash("scroll:" + path)
-        scrollOffsets[path] = next
-        frameMovedScrollPaths.insert(path)
-        scrollStore.snap(nid, Props.SCROLL, to: next)
-        scrollGlidingPaths.remove(path)
-        directScrolledPaths.insert(path)
-        markScrollMovedByHand(path: path)
-        slice2State.touchOverscrollX.removeValue(forKey: path)
-        slice2State.touchOverscrollY.removeValue(forKey: path)
-        updateScrollMode(forPath: path, event: .moved)
-        scrollRequestsState.stepCancel()
-        scrollMovedSinceLastFrame = true
-        cancelPressedOnScrollIfNeeded(scrollNodeIndex: scrollNodeIndex, at: now)
-        if scrollRequiresCommit {
-            pendingCommitKind = pendingCommitKind.instant()
-            dirtyCommit(at: now, external: false)
-        } else {
-            updateScrollPositions(at: now)
-        }
-    }
-
-    // MARK: - Touch Scrolling (`runtime/input/touch.rs`, `runtime/scroll/touch.rs`)
-
-    /// Unified touch entry point (`Runtime::touch`).
-    public func touch(id: UInt64, phase: TouchPhase, at pos: Vec2, time: Double) {
-        switch phase {
-        case .started:
-            touchDown(id: id, at: pos, time: time)
-        case .moved:
-            touchMove(id: id, at: pos, time: time)
-        case .ended:
-            touchUp(id: id, at: pos, time: time, cancelled: false)
-        case .cancelled:
-            touchUp(id: id, at: pos, time: time, cancelled: true)
-        }
+        fling(vx: vx, vy: vy, at: pos, now: now ?? currentClockForScrollInput())
     }
 
     /// Convenience alias for touch start (`Runtime::touch_down`).
@@ -455,8 +248,6 @@ extension Runtime {
         let vertical: (NodeId, Double)? = vNode.map { n in
             (n.nodeId, Double((scrollOffsets[n.path]?.y ?? 0)))
         }
-        applyTouchEffects(TouchScrollMachine.step(&slice2State.touchScroll, .down(across: across, vertical: vertical)), at: time)
-
         pointerMove(to: pos, at: time)
         pointerDown(at: pos, at: time)
         slice2State.touchFinger = Slice2RuntimeState.TouchFinger(
@@ -465,7 +256,11 @@ extension Runtime {
             last: 0,
             at: time,
             velocity: 0,
-            mode: .pending(scroll: vNode?.nodeId)
+        let dragImmediately = pressDragsAtOnce()
+        if !dragImmediately {
+            applyTouchEffects(TouchScrollMachine.step(&slice2State.touchScroll, .down(across: across, vertical: vertical)), at: time)
+        }
+            mode: dragImmediately ? .drag : .pending(scroll: vNode?.nodeId)
         )
     }
 
@@ -528,7 +323,7 @@ extension Runtime {
         applyTouchEffects(TouchScrollMachine.step(&slice2State.touchScroll, .up(id: finger.mode.scroll, velocity: velocity)), at: time)
 
         if cancelled {
-            cancelPointerSession(at: time)
+            cancelPointer(at: time)
             return
         }
         if case .drag = finger.mode {
@@ -537,7 +332,7 @@ extension Runtime {
         let releasePos = isPan ? finger.origin : pos
         pointerUp(at: releasePos, at: time)
         // Upstream leaves no hover under a lifted finger.
-        clearHoverAfterTouch(at: time)
+        pointerLeave(at: time)
     }
 
     /// Convenience alias for touch cancellation (`Runtime::touch_up(..., cancelled: true)`).
@@ -619,11 +414,8 @@ extension Runtime {
                 directScrolledPaths.insert(path)
                 scrollRequestsState.stepCancel()
                 scrollMovedSinceLastFrame = true
-                // Cancel any pending tap press because pan won.
-                if pressedPath != nil {
-                    pressedPath = nil
-                    pressedKey = nil
-                }
+                cancelPressForTouchPan()
+                markScrollMovedByHand(path: path)
                 updateScrollPositionsWithoutClampingTouch(at: now)
             case .hold(let id, _, _):
                 if let path = nodePath(forId: id) {
@@ -690,36 +482,6 @@ extension Runtime {
         let el = flatNodes[idx].el
         let dragsOut = el.handlers.dragOut != nil || el.attachedDragOutItem != nil
         return el.handlers.onDrag != nil && !dragsOut
-    }
-
-    private func cancelPointerSession(at now: Double) {
-        pressedPath = nil
-        pressedKey = nil
-        armedDragOut = nil
-        if let drag = activeDrag {
-            activeDrag = nil
-            if !drag.isTextSelectionDrag, let idx = nodeByPath[drag.path], let onEnd = flatNodes[idx].el.handlers.onDragEnd {
-                var tx = makeTx(at: now, button: drag.button)
-                onEnd(&state, true, &tx)
-                applyTx(tx, at: now)
-            }
-        }
-        clearHoverAfterTouch(at: now)
-    }
-
-    private func clearHoverAfterTouch(at now: Double) {
-        pointerPosition = Vec2(-10000, -10000)
-        if let old = hoveredPath, let oldIdx = nodeByPath[old], let cb = flatNodes[oldIdx].el.handlers.onHover {
-            hoveredPath = nil
-            hoveredKey = nil
-            var tx = makeTx(at: now)
-            cb(&state, false, &tx)
-            applyTx(tx, at: now, liveOnlyLabel: "onHover")
-        } else {
-            hoveredPath = nil
-            hoveredKey = nil
-        }
-        hoveredLink = nil
     }
 
     private func updateScrollPositionsWithoutClampingTouch(at now: Double) {
@@ -904,36 +666,15 @@ extension Runtime {
             tx.keyBaseValue = kb
             tx.runtimeActions[Tx.keyBaseKey] = kb
         }
-        tx.runtimeActions[Tx.modsKey] = slice2State.currentMods
         let resolvedTime = slice2State.currentInputTime ?? tx.eventInputTime ?? now
         tx.eventInputTime = resolvedTime
         tx.runtimeActions[Tx.inputTimeKey] = resolvedTime
-        if let fk = focusedKey {
-            tx.runtimeActions[Tx.focusedKey] = fk
-        }
         if slice2State.dragRepeatFiringNow {
             tx.runtimeActions["dragRepeat"] = true
         }
     }
 
-    internal func processTxSlice2Actions(_ tx: inout Tx, at now: Double, depth: Int = 0) {
-        if !tx.erasedPickReads.isEmpty && depth < 4 {
-            let reads = tx.erasedPickReads
-            tx.runtimeActions.removeValue(forKey: Tx.pickReadsKey)
-            for req in reads {
-                let picked: Picked? = req.within.map {
-                    elementAtInWith($0, x: req.x, y: req.y, pick: req.pick)
-                } ?? elementAtWith(req.x, req.y, pick: req.pick)
-                var boxed: Any = state
-                var followUp = makeTx(at: now)
-                req.call(&boxed, picked, &followUp)
-                if let typed = boxed as? State {
-                    state = typed
-                }
-                applyTx(followUp, at: now, external: false)
-            }
-        }
-
+    internal func processTxSlice2Actions(_ tx: inout Tx, at now: Double) {
         if tx.blurFocusRequested {
             slice2State.pendingTxFocusVisible = nil
         } else if tx.requestedFocusKey != nil {
@@ -972,9 +713,7 @@ extension Runtime {
     // MARK: - Private Utilities
 
     private func scrollNodeAt(_ pos: Vec2, horizontal: Bool) -> Int? {
-        hitTest(at: pos, ignoreBlockers: true, predicate: { node in
-            horizontal ? node.el.layout.scrollAxes.contains(.horizontal) : node.el.layout.scrollAxes.contains(.vertical)
-        })?.node.index
+        scrollContainerAt(at: pos, axis: horizontal ? .horizontal : .vertical).flatMap { nodeByPath[$0] }
     }
 
     private func nodePath(forId id: NodeId) -> String? {
@@ -982,10 +721,7 @@ extension Runtime {
     }
 
     private func scrollFlow(at nodeIndex: Int) -> ScrollAxisHelper.Flow {
-        if flatNodes[nodeIndex].flow == .rtl {
-            return .rtl
-        }
-        return flatNodes[nodeIndex].el.runtimeExtras["slice2.flow"] as? ScrollAxisHelper.Flow ?? .ltr
+        flatNodes[nodeIndex].flow == .rtl ? .rtl : .ltr
     }
 
     private func currentClockForScrollInput() -> Double {
@@ -1142,8 +878,6 @@ extension Runtime {
 extension El {
     /// Sets horizontal scroll flow direction (`ltr` or `rtl`) (`El::flow` / `types.rs::AxisScroll`).
     public func flow(_ direction: ScrollAxisHelper.Flow) -> Self {
-        var copy = self
-        copy.runtimeExtras["slice2.flow"] = direction
-        return copy
+        dir(direction == .rtl ? .rtl : .ltr)
     }
 }

@@ -336,7 +336,7 @@ struct TxSlice2ParityTests {
                             s.repeats.append(tx.keyRepeat())
                             s.phys.append(tx.physicalKey())
                             s.bases.append(tx.keyBase())
-                            s.modsSeen.append(tx.mods())
+                            s.modsSeen.append(tx.mods)
                             s.times.append(tx.inputTime())
                             s.focusedSeen.append(tx.focused())
                             return true
@@ -347,7 +347,7 @@ struct TxSlice2ParityTests {
                         .onDrag { s, _, tx in
                             let rep = tx.dragRepeat()
                             s.dragRepeatFlags.append(rep)
-                            s.dragMods.append(tx.mods())
+                            s.dragMods.append(tx.mods)
                             tx.dragRepeatAfter(.milliseconds(rep ? 50 : 200))
                         }
                 )

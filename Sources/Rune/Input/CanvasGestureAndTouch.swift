@@ -3,39 +3,6 @@ import RuneMotion
 
 // Wheel lock types (`WheelOwner`, `WheelRun`, `WheelPhaseState`, `WheelLock`) live in `WheelLock.swift`.
 
-// MARK: - Touch State (`input/touch.rs`)
-
-internal enum TouchMode: Equatable {
-    case pending(scrollPath: String?)
-    case drag
-    case pan(scrollPath: String, horizontal: Bool, originOffset: Float)
-
-    var isPan: Bool {
-        if case .pan = self { return true }
-        return false
-    }
-
-    var isHorizontal: Bool {
-        if case .pan(_, let h, _) = self { return h }
-        return false
-    }
-}
-
-internal struct TouchFinger {
-    var id: UInt64
-    var origin: Vec2
-    var lastAlong: Float
-    var lastAt: Double
-    var velocity: Float
-    var mode: TouchMode
-}
-
-internal struct TouchInputState {
-    static let touchSlop: Float = 8.0
-    static let flingHold: Double = 0.1
-    var finger: TouchFinger? = nil
-}
-
 // MARK: - Runtime Canvas Gesture, Wheel Lock & Touch
 
 extension Runtime {
@@ -89,7 +56,7 @@ extension Runtime {
         return nil
     }
 
-    private func subtreeExiting(_ idx: Int) -> Bool {
+    internal func subtreeExiting(_ idx: Int) -> Bool {
         var cur: Int? = idx
         while let i = cur, flatNodes.indices.contains(i) {
             if case .exiting = scene.phase(flatNodes[i].nodeId) { return true }
@@ -300,6 +267,9 @@ extension Runtime {
             cancelPressedOnScrollIfNeeded(scrollNodeIndex: scrollIdx, at: now)
         }
         frameMovedScrollPaths.insert(path)
+        slice2State.touchOverscrollX.removeValue(forKey: path)
+        slice2State.touchOverscrollY.removeValue(forKey: path)
+        updateScrollMode(forPath: path, event: .moved)
         scrollStore.snap(nid, Props.SCROLL, to: cur)
         scrollGlidingPaths.remove(path)
         markScrollMovedByHand(path: path)
@@ -368,7 +338,7 @@ extension Runtime {
 
     /// Whether a touch finger is currently held (`Runtime::touching`).
     public func touching() -> Bool {
-        inputMachines.touchState.finger != nil
+        isTouching
     }
 
     /// Delivers a touchscreen/pen event, arbitrating tap vs element drag vs scrollable pan & fling (`input/touch.rs`).
@@ -385,133 +355,9 @@ extension Runtime {
         }
     }
 
-    private func touchDown(id: UInt64, at pos: Vec2, time: Double) {
-        guard inputMachines.touchState.finger == nil else { return }
-        let verticalScroll = scrollContainerAt(at: pos, axis: .vertical)
-        if let vPath = verticalScroll {
-            let nid = NodeId.hash("scroll:" + vPath)
-            let cur = scrollOffsets[vPath] ?? .zero
-            scrollStore.snap(nid, Props.SCROLL, to: cur)
-        }
-        pointerMove(to: pos, at: time)
-        pointerDown(at: pos, at: time)
-        // `El.touchDragsAtOnce`: a drag from the first move, with no slop and nothing holding
-        // the viewport under it (`touch.rs::touch_down`).
-        if pressDragsAtOnce() {
-            inputMachines.touchState.finger = TouchFinger(
-                id: id,
-                origin: pos,
-                lastAlong: 0,
-                lastAt: time,
-                velocity: 0,
-                mode: .drag
-            )
-            return
-        }
-        inputMachines.touchState.finger = TouchFinger(
-            id: id,
-            origin: pos,
-            lastAlong: 0,
-            lastAt: time,
-            velocity: 0,
-            mode: .pending(scrollPath: verticalScroll)
-        )
-    }
-
-    private func touchMove(id: UInt64, at pos: Vec2, time: Double) {
-        guard var finger = inputMachines.touchState.finger, finger.id == id else { return }
-        let dx = pos.x - finger.origin.x
-        let dy = pos.y - finger.origin.y
-        if case .pending(let verticalScroll) = finger.mode, hypot(dx, dy) > TouchInputState.touchSlop {
-            let dragsElement: Bool = {
-                guard let p = pressedPath, let idx = nodeByPath[p] else { return false }
-                let node = flatNodes[idx]
-                return node.el.handlers.onDrag != nil && node.el.handlers.dragOut == nil && node.el.attachedDragOutItem == nil
-            }()
-            if dragsElement {
-                finger.mode = .drag
-            } else {
-                let horizPath = abs(dx) > abs(dy) ? scrollContainerAt(at: finger.origin, axis: .horizontal) : nil
-                if let hPath = horizPath {
-                    let originOffset = (scrollOffsets[hPath] ?? .zero).x
-                    finger.mode = .pan(scrollPath: hPath, horizontal: true, originOffset: originOffset)
-                    cancelPressForTouchPan()
-                } else if let vPath = verticalScroll ?? scrollContainerAt(at: finger.origin, axis: .vertical) {
-                    let originOffset = (scrollOffsets[vPath] ?? .zero).y
-                    finger.mode = .pan(scrollPath: vPath, horizontal: false, originOffset: originOffset)
-                    cancelPressForTouchPan()
-                } else {
-                    finger.mode = .drag
-                }
-            }
-        }
-
-        let along = finger.mode.isHorizontal ? dx : dy
-        let dt = time - finger.lastAt
-        if dt > 0 {
-            finger.velocity = (along - finger.lastAlong) / Float(dt)
-        }
-        finger.lastAlong = along
-        finger.lastAt = time
-        inputMachines.touchState.finger = finger
-
-        switch finger.mode {
-        case .pan(let scrollPath, let horizontal, let originOffset):
-            let maxExt = scrollMaxExtents[scrollPath] ?? .zero
-            var cur = scrollOffsets[scrollPath] ?? .zero
-            if horizontal {
-                cur.x = (originOffset - along).clamped(to: 0...maxExt.x)
-            } else {
-                cur.y = (originOffset - along).clamped(to: 0...maxExt.y)
-            }
-            applyManualScroll(path: scrollPath, to: cur, at: time)
-        case .drag:
-            pointerMove(to: pos, at: time)
-        case .pending:
-            break
-        }
-    }
-
-    private func touchUp(id: UInt64, at pos: Vec2, time: Double, cancelled: Bool) {
-        guard let finger = inputMachines.touchState.finger, finger.id == id else { return }
-        inputMachines.touchState.finger = nil
-
-        if cancelled {
-            cancelPointer(at: time)
-            return
-        }
-
-        let isPan: Bool
-        let velocity: Float
-        if case .pan(let scrollPath, let horizontal, _) = finger.mode {
-            isPan = true
-            velocity = (time - finger.lastAt < TouchInputState.flingHold) ? finger.velocity : 0
-            if abs(velocity) > 1.0 {
-                let nid = NodeId.hash("scroll:" + scrollPath)
-                let cur = scrollOffsets[scrollPath] ?? .zero
-                scrollGlidingPaths.remove(scrollPath)
-                directScrolledPaths.insert(scrollPath)
-                markScrollMovedByHand(path: scrollPath)
-                scrollRequestsState.stepCancel()
-                scrollStore.snap(nid, Props.SCROLL, to: cur)
-                let vel = horizontal ? Velocity(Vec2(-velocity, 0)) : Velocity(Vec2(0, -velocity))
-                _ = scrollStore.fling(nid, Props.SCROLL, from: cur, velocity: vel, decay: .IOS_NORMAL, at: cxSettings.scaledTime(at: time))
-            }
-        } else {
-            isPan = false
-            velocity = 0
-            _ = velocity
-        }
-
-        if finger.mode == .drag {
-            pointerMove(to: pos, at: time)
-        }
-        pointerUp(at: isPan ? finger.origin : pos, at: time)
-        pointerLeave(at: time)
-    }
-
-    private func cancelPressForTouchPan() {
+    internal func cancelPressForTouchPan() {
         pressedPath = nil
+        pressedKey = nil
         inputMachines.pressedButton = .primary
         activeDrag = nil
         armedDragOut = nil
