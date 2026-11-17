@@ -475,7 +475,6 @@ internal extension Runtime {
         var newSubscriptions: [LiveSubscription] = []
         var seenTokens = Set<ObjectIdentifier>()
         var bindings = Set<LiveKey>()
-        var tweens = Set<UInt64>()
         var sampled = false
 
         func subscribeNode(_ node: FlatNode, exiting: Bool) {
@@ -488,8 +487,8 @@ internal extension Runtime {
             }
             for b in node.el.liveBindings {
                 bindings.insert(LiveKey(path: node.path, target: b.target))
-                if b.source.linearSpec != nil { tweens.insert(b.source.id) }
                 if exiting { continue }
+                if b.source.linearSpec != nil { attachLiveTween(b.source) }
                 let oid = ObjectIdentifier(b.source)
                 if seenTokens.insert(oid).inserted {
                     newSubscriptions.append(b.source.subscribe(liveLane.waker))
@@ -512,7 +511,7 @@ internal extension Runtime {
         let retained = Set(newSubscriptions.map(ObjectIdentifier.init))
         for old in liveSubscriptions where !retained.contains(ObjectIdentifier(old)) { old.isActive = false }
         liveSubscriptions = newSubscriptions
-        pruneLiveBindingTracks(keeping: bindings, tweens: tweens)
+        pruneLiveBindingTracks(keeping: bindings)
         liveLane.subscribed(sampled)
         if liveSubscriptions.isEmpty { _ = liveLane.take() }
     }

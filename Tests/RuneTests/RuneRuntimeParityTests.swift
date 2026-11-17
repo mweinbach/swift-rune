@@ -165,6 +165,23 @@ struct RuneRuntimeParityTests {
         #expect(rt.element(byKey: "outer")!.scrolled[1] < 50)
     }
 
+    @Test("Tweens start on first attachment and follow elapsed time at a reduced view time scale")
+    func linearTweenUsesRuntimeClock() throws {
+        let tween = Tween<Float>.linear(from: 1, to: 0, duration: 10)
+        let rt = Runtime<Bool>(state: false, viewport: Vec2(100, 100)) { show, cx in
+            cx.timeScale(0.25)
+            let root = El<Bool>().size(100, 100)
+            return show ? root.child(el().key("timer").size(20, 20).liveOpacity(tween.binding)) : root
+        }
+        _ = rt.frame(at: 0)
+        _ = rt.frame(at: 8)
+        rt.update(at: 10) { show, tx in show = true; tx.settle() }
+        _ = rt.frame(at: 10)
+        #expect(try #require(rt.element(byKey: "timer")).opacity == 1)
+        _ = rt.frame(at: 12.5)
+        #expect(try #require(rt.element(byKey: "timer")).opacity == 0.75)
+    }
+
     @Test("Live pulse, Tween.linear, LiveText, ToolingArgs, and JsonTheme.num")
     func liveTweenToolingAndExports() throws {
         let tween = Tween<Float>.linear(from: 0.0, to: 1.0, duration: 1.0)

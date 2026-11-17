@@ -1199,7 +1199,7 @@ extension Runtime {
                 || scene.store.isUnheldAnimating(nid, Props.PRESS_SCALE)
             let ownLiveScaleMoving = el.liveBindings.contains { b in
                 b.target == .scale
-                    && (liveStore.isMoving(NodeId.hash("live:\(node.path):\(b.target)"), Props.SCALE) || isLinearTweenActive(b.source, at: now))
+                    && (liveStore.isMoving(NodeId.hash("live:\(node.path):\(b.target)"), Props.SCALE) || isLinearTweenActive(b.source))
             }
             let effectiveParentScaleMotion = max(parentScaleMotion, anchorScaleMotion)
             let isOwnAnimatedScale = ownScaleSpringMoving || ownLiveScaleMoving || effectiveParentScaleMotion == .moving
