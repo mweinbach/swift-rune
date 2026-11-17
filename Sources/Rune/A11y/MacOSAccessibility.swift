@@ -616,9 +616,12 @@ public final class MacOSAccessibilityHost {
         onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)? = nil,
         onAction: @escaping @Sendable (String, AccessibilityAction) -> Void
     ) -> Bool {
-        var spoken: [(text: String, politeness: LiveRegionPoliteness)] = AccessibilityTreeBuilder
-            .liveAnnouncements(previous: previousTree, current: tree)
-            .compactMap { a in a.spokenText.map { ($0, a.politeness) } }
+        // A reader that just attached starts from this tree; existing live regions are its baseline.
+        var spoken: [(text: String, politeness: LiveRegionPoliteness)] = []
+        if previousTree != nil || !isActivated {
+            spoken = AccessibilityTreeBuilder.liveAnnouncements(previous: previousTree, current: tree)
+                .compactMap { a in a.spokenText.map { ($0, a.politeness) } }
+        }
         previousTree = tree
         var announcer: AccessibilityNode? = nil
         if let announcement {
@@ -647,12 +650,12 @@ public final class MacOSAccessibilityHost {
         }
         func convertNode(_ node: AccessibilityNode, parent: AnyObject, id: AccessibilityIdentity) -> RuneNSAccessibilityElement {
             if node.isFocused && focusedNodeId == nil { focusedNodeId = id }
-            let old = elementById[id] as? RuneAXTextField
-            let previous = old?.snapshot
+            let old = elementById[id]
+            let previous = (old as? RuneAXTextField)?.snapshot
             let elem = AppKitAccessibilityMapper.makeElement(node, parent: parent, onAction: onAction,
                                                             onSelectText: onSelectText, onSetValue: onSetValue,
                                                             reusing: old, viewToScreen: viewToScreen)
-            if let previous, let field = old, elem === field {
+            if let previous, let field = old as? RuneAXTextField, elem === field {
                 let current = field.snapshot
                 if previous.anchor != current.anchor || previous.focus != current.focus {
                     changedSelections.append(field)
@@ -686,7 +689,7 @@ public final class MacOSAccessibilityHost {
         announcerElement = announcer.map { convertNode($0, parent: parentView, id: .scoped(parent: nil, id: $0.id, occurrence: 0)) }
         if let announcerElement { rootElements.append(announcerElement) }
         for (id, element) in elementById where map[id] !== element {
-            (element as? RuneAXTextField)?.invalidate()
+            element.invalidate()
         }
         elementById = map
         for field in changedSelections {

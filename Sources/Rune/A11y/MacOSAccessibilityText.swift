@@ -103,13 +103,10 @@ internal final class RuneAXTextField: RuneNSAccessibilityElement {
     }
 
     /// Readers may retain the old element when its field is removed or becomes a password.
-    func invalidate() {
+    override func invalidate() {
         replaceSnapshot(Snapshot(text: "", anchor: 0, focus: 0, layout: nil,
                                  viewToScreen: .identity, target: nodeId, select: nil))
-        update(node: AccessibilityNode(id: nodeId, role: .textInput), parent: nil,
-               onAction: nil, onSetValue: nil)
-        setAccessibilityChildren([])
-        setAccessibilityElement(false)
+        super.invalidate()
     }
 
     override func accessibilityValue() -> Any? { snapshot.text }

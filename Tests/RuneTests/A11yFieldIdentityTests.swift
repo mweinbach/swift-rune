@@ -78,6 +78,45 @@ struct A11yFieldIdentityTests {
         #expect(runtime.viewCommitCount == 1)
     }
 
+    @Test func ordinaryControlHandlesStayValidAcrossUpdatesAndRetireOnRemoval() throws {
+        let host = MacOSAccessibilityHost()
+        let view = NSView()
+        @MainActor final class Presses { var history = [String]() }
+        let presses = Presses()
+        func update(_ children: [AccessibilityNode], tag: String) {
+            host.update(tree: AccessibilityNode(id: "root", role: .group, children: children),
+                        parentView: view, onAction: { key, _ in MainActor.assumeIsolated { presses.history.append(tag + key) } })
+        }
+        func button(_ value: String?) -> AccessibilityNode {
+            AccessibilityNode(id: "save", role: .button, label: "Save", value: value, actions: [.press])
+        }
+        host.activate()
+        update([button("Before")], tag: "old-")
+        let retained = try #require(host.accessibilityChildren().first as? RuneNSAccessibilityElement)
+        update([button(nil)], tag: "new-")
+        #expect(host.accessibilityChildren().first as? RuneNSAccessibilityElement === retained)
+        #expect(retained.accessibilityValue() == nil)
+        #expect(retained.accessibilityPerformPress())
+        #expect(presses.history == ["new-save"])
+        update([], tag: "removed-")
+        #expect(!retained.accessibilityPerformPress())
+        #expect(!retained.isAccessibilityElement())
+    }
+
+    @Test func aLateReaderStartsFromExistingLiveRegionsAndHearsSubsequentChanges() {
+        let host = MacOSAccessibilityHost()
+        let view = NSView()
+        func update(_ label: String) {
+            let status = AccessibilityNode(id: "status", role: .status, label: label, liveRegion: .polite)
+            host.update(tree: status, parentView: view, onAction: { _, _ in })
+        }
+        host.activate()
+        update("Already saved")
+        #expect(host.lastSpoken.isEmpty)
+        update("Saved again")
+        #expect(host.lastSpoken.map(\.text) == ["Saved again\u{200B}"])
+    }
+
     @Test func fieldsWithMatchingKeysRouteToTheirOwnEditor() throws {
         struct Form { var first = TextEdit("first"); var second = TextEdit("second") }
         let runtime = Runtime(state: Form(), viewport: Vec2(300, 160), systemDark: false) { _, _ in

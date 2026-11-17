@@ -607,7 +607,7 @@ public enum AppKitAccessibilityMapper {
         onAction: (@Sendable (String, AccessibilityAction) -> Void)?,
         onSelectText: (@Sendable (String, Range<Int>) -> Void)?,
         onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)?,
-        reusing existingField: RuneAXTextField? = nil,
+        reusing existing: RuneNSAccessibilityElement? = nil,
         viewToScreen: @autoclosure () -> CGAffineTransform = .identity
     ) -> RuneNSAccessibilityElement {
         if !node.isSecure, node.role == .textInput || node.role == .multilineTextInput,
@@ -617,13 +617,17 @@ public enum AppKitAccessibilityMapper {
                                                     layout: node.fieldLayout, viewToScreen: viewToScreen(),
                                                     target: node.runtimePath ?? node.id,
                                                     select: node.actions.contains(.setValue) ? onSelectText : nil)
-            if let field = existingField {
+            if let field = existing as? RuneAXTextField, field.nodeId.utf8.elementsEqual(node.id.utf8) {
                 field.replaceSnapshot(snapshot)
                 field.update(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
                 return field
             }
             return RuneAXTextField(node: node, parent: parent, snapshot: snapshot,
                                    onAction: onAction, onSetValue: onSetValue)
+        }
+        if let existing, !(existing is RuneAXTextField), existing.nodeId.utf8.elementsEqual(node.id.utf8) {
+            existing.update(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
+            return existing
         }
         return RuneNSAccessibilityElement(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
     }
@@ -678,8 +682,8 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
             // A heading's value is its level, as WebKit and Chromium give VoiceOver
             // (`vendor/accesskit_macos.patch`, #975), checked before the text value.
             super.setAccessibilityValue(NSNumber(value: AccessibilityHeading.macLevelValue(level: node.level)))
-        } else if !node.isSecure, !(self is RuneAXTextField), let value = node.value {
-            super.setAccessibilityValue(value)
+        } else if !(self is RuneAXTextField) {
+            super.setAccessibilityValue(node.isSecure ? nil : node.value)
         }
         setAccessibilityHelp(node.help)
         setAccessibilityFrame(CGRect(
@@ -693,6 +697,13 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
         if node.isExpanded != nil || isAccessibilityExpanded() {
             setAccessibilityExpanded(node.isExpanded ?? false)
         }
+    }
+
+    /// A client may keep its handle after the underlying node is gone.
+    internal func invalidate() {
+        update(node: AccessibilityNode(id: nodeId, role: .presentation), parent: nil, onAction: nil, onSetValue: nil)
+        setAccessibilityChildren([])
+        setAccessibilityElement(false)
     }
 
     private func perform(_ action: AccessibilityAction) -> Bool {
