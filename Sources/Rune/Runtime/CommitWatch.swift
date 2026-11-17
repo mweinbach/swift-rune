@@ -82,3 +82,17 @@ extension Runtime {
             | (hasScrollCallbacks() ? CommitWhy.dirty : 0)
     }
 }
+
+extension Runtime {
+    /// Whether the window's focus change shows: a selection takes its active or inactive pair
+    /// (`El::selection_style`), a focused field's or a selectable text's non-empty selection
+    /// (frame.rs:77-81, `window_focus` sets `dirty` only then).
+    internal var windowFocusRepaintsSelection: Bool {
+        if let fp = focusedPath, let el = focusedInputElement(at: fp),
+           el.handlers.editLens != nil, el.resolvedSelectionStyle != nil {
+            return true
+        }
+        guard selectionState.coordinator.phase.selection != nil else { return false }
+        return currentTextSelection().map { !$0.isEmpty } ?? false
+    }
+}

@@ -106,6 +106,8 @@ extension Runtime {
             // A jump is at once, and so are the rows it mounts: none fades in where it lands.
             pendingCommitKind = pendingCommitKind.instant()
             needsCommit = true
+            // The jump moved a virtual window (`virtual_window_changed`, frame.rs:672): `VIRTUAL`.
+            commitWhyPending |= CommitWhy.virtual
         }
     }
 }

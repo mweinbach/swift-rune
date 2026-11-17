@@ -156,7 +156,10 @@ extension Runtime {
         return ""
     }
 
-    internal func finishPreeditIfNeeded(forPath path: String?, at now: Double) {
+    /// A field left mid-composition keeps what it showed (`set_focus` → `finish_field_composition`,
+    /// focus.rs:247-255). `why`: the focus move's cause, `INPUT` when a press or key moved it
+    /// (the action is input), `DIRTY` when the commit's focus sync did.
+    internal func finishPreeditIfNeeded(forPath path: String?, at now: Double, why: UInt16 = CommitWhy.input) {
         guard let path else { return }
         guard let idx = nodeByPath[path],
               let editLens = flatNodes[idx].el.handlers.editLens else {
@@ -169,12 +172,11 @@ extension Runtime {
             if flatNodes[idx].el.layoutAnim == nil { tx.instant() }
             flatNodes[idx].el.handlers.onTextChange?(&state, edit.text, &tx)
             _ = flatNodes[idx].el.handlers.onInputChange?(&state, edit.text, &tx)
-            applyTx(tx, at: now, markDirtyIfNotLiveOnly: false)
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: false, why: why)
             _ = dispatchIme(.commit(activePreedit), at: now)
             imeReset = true
             needsCommit = true
-            // `Action::FinishIme` runs as a handler (frame.rs:598, `INPUT`).
-            commitWhyPending |= CommitWhy.input
+            commitWhyPending |= why
         }
     }
 

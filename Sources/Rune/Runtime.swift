@@ -600,7 +600,9 @@ public final class Runtime<State> {
     public var nativeMaterials: Bool = false
     public var windowFocused: Bool = true {
         didSet {
-            if windowFocused != oldValue {
+            // frame.rs:77-81: a focus change marks the state dirty only when a selection takes
+            // its active or inactive pair (`windowFocusRepaintsSelection`).
+            if windowFocused != oldValue, windowFocusRepaintsSelection {
                 needsCommit = true
                 commitWhyPending |= CommitWhy.dirty
                 stateUnchangedSinceBuild = false
@@ -1887,6 +1889,9 @@ public final class Runtime<State> {
                     recommits += 1
                 } while needsCommit && scrollKeyLandings.awaiting && recommits < ScrollKeyLanding.maxRounds
                 needsCommit = false
+                // What the follow-up commits left pending is dropped with them (upstream commits
+                // it next frame): no cause outlives the commit it was for.
+                commitWhyPending = 0
                 hasExternalDirtyCommit = false
                 popupNeedsLayout = false
             }
@@ -2530,11 +2535,14 @@ public final class Runtime<State> {
         if cx.envState.zoom != cxSettings.zoomState.k {
             cxSettings.zoomState.k = cx.envState.zoom
             let (zVp, zScale) = cxSettings.zoomState.view()
+            // The commit underway applies the view's zoom: no commit, and no cause, is left.
+            let why = commitWhyPending
             cxSettings.isApplyingZoom = true
             viewport = zVp
             pixelScale = zScale
             cxSettings.isApplyingZoom = false
             needsCommit = false
+            commitWhyPending = why
             if allowZoomSettle {
                 return nil
             }
@@ -3787,10 +3795,13 @@ public final class Runtime<State> {
             }
         }
         if let effRM = pass.effectiveReducedMotion, effRM != self.reducedMotion {
+            // The commit underway already built with it: no commit, and no cause, is left.
+            let why = commitWhyPending
             isApplyingEffectiveReducedMotion = true
             self.reducedMotion = effRM
             isApplyingEffectiveReducedMotion = false
             self.needsCommit = false
+            commitWhyPending = why
         }
         // Keep seen layout rects aligned with final pass keys
         var finalSeen: [String: [Float]?] = [:]
@@ -4007,7 +4018,8 @@ public final class Runtime<State> {
         syncFollows()
         if let prevPath = prevFocusedPath, prevPath != focusedPath {
             let prevNode = prevFlatNodesSnapshot.first(where: { $0.path == prevPath })
-            handleKitFocusTransition(prevNode: prevNode, newPath: focusedPath, at: now)
+            // Focus moved by the commit, not by input: `DIRTY`.
+            handleKitFocusTransition(prevNode: prevNode, newPath: focusedPath, at: now, why: CommitWhy.dirty)
         }
         settleKitHoverDelays(at: pointerPosition, now: now)
         reconcilePlaygroundAfterCommit(at: now)
@@ -5349,7 +5361,8 @@ public final class Runtime<State> {
             }
         }
         if prevFocusedPath != nextPath {
-            finishPreeditIfNeeded(forPath: prevFocusedPath, at: currentTime)
+            // Focus moved by the commit (`sync_requested_focus`), not by input: `DIRTY`.
+            finishPreeditIfNeeded(forPath: prevFocusedPath, at: currentTime, why: CommitWhy.dirty)
             imeReset = true
             hoveredHighlightActive = false
         }
@@ -11367,7 +11380,7 @@ public final class Runtime<State> {
             blurDroppedFocus = (focusedPath != nil || focusedKey != nil)
             if let prevFp = focusedPath {
                 let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
-                handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
+                handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now, why: why == 0 ? CommitWhy.dirty : why)
                 webFocusTabStartPath = prevFp
             }
             // `Tx::blur` = `Set { None }` + `Dropped` + `Settled`: Tab starts after it, nothing hands on,
@@ -11387,7 +11400,7 @@ public final class Runtime<State> {
             let matchedNode = flatNodes.first(where: { $0.key == fk })
             if let prevFp = focusedPath, matchedNode?.path != prevFp {
                 let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
-                handleKitFocusTransition(prevNode: prevNode, newPath: matchedNode?.path, at: now)
+                handleKitFocusTransition(prevNode: prevNode, newPath: matchedNode?.path, at: now, why: why == 0 ? CommitWhy.dirty : why)
             }
             pendingTxBlurRequested = false
             pendingTxFocusKey = fk
@@ -11692,10 +11705,12 @@ public final class Runtime<State> {
             }
             _ = perfWatch.idle.polled(changed)
             let shouldDirty = changed || tx.isForceCommitRequested
-            if shouldDirty {
+            // frame.rs:530-533: `POLL` (and the meter's poll) only when the poll said it changed
+            // the model; a commit it asked for without that is a request like any other (`DIRTY`).
+            if changed {
                 perfWatch.meter.poll()
             }
-            applyTx(tx, at: now, markDirtyIfNotLiveOnly: shouldDirty, why: shouldDirty ? CommitWhy.poll : 0)
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: shouldDirty, why: changed ? CommitWhy.poll : (shouldDirty ? CommitWhy.dirty : 0))
             return changed
         }
     }
@@ -11966,6 +11981,9 @@ public final class Runtime<State> {
         guard windowFocused != focused else { return }
         let t = now ?? currentTime
         let prevStale = needsCommit
+        let prevWhy = commitWhyPending
+        // frame.rs:77-81: only a selection's active/inactive pair makes the change itself dirty.
+        let repaints = windowFocusRepaintsSelection
         let wasBlurred = !windowFocused
         if focused && wasBlurred {
             hoverPaused = false
@@ -11994,7 +12012,7 @@ public final class Runtime<State> {
                 if !focused {
                     resetInputMachinesOnBlur()
                     if cancelPointerForFocusLoss(at: t) { cancelOrHoverDirty = true }
-                    finishComposition(at: t)
+                    if finishComposition(at: t) { cancelOrHoverDirty = true }
                     endHoverDelays(at: t)
                     _ = endKitHoverDelays(at: t)
                     hoverPaused = true
@@ -12008,7 +12026,8 @@ public final class Runtime<State> {
         if !focused {
             resetInputMachinesOnBlur()
             if cancelPointerForFocusLoss(at: t) { cancelOrHoverDirty = true }
-            finishComposition(at: t)
+            // A finished composition ran (`Action::FinishIme`): its change commits.
+            if finishComposition(at: t) { cancelOrHoverDirty = true }
             let hadDelayedHover = !hoverDelays.isEmpty
             endHoverDelays(at: t)
             if hadDelayedHover { cancelOrHoverDirty = true }
@@ -12021,8 +12040,11 @@ public final class Runtime<State> {
             handledFocus = true
             if !kitFocus.allLiveOnly { cancelOrHoverDirty = true }
         }
-        if !handledFocus && !cancelOrHoverDirty {
+        if !handledFocus && !cancelOrHoverDirty && !repaints {
+            // Nothing ran and nothing is dirty (frame.rs:90-92 queues no `WindowFocus`): the
+            // commit and its causes stay as they were.
             needsCommit = prevStale
+            commitWhyPending = prevWhy
         }
     }
 
@@ -12091,7 +12113,8 @@ public final class Runtime<State> {
     }
 
     /// Commits any open preedit composition on focus loss or window deactivation (`Runtime::finish_composition`).
-    public func finishComposition(at now: Double? = nil) {
+    @discardableResult
+    public func finishComposition(at now: Double? = nil) -> Bool {
         let t = now ?? currentTime
         // `Action::FinishIme` is routed (frame.rs:573): a change an earlier handler or the state
         // left commits before it, so the composition finishes on the tree that shows it. Before
@@ -12103,20 +12126,22 @@ public final class Runtime<State> {
         // window's focus loss that asks for it carries no arrival time): its change commits for
         // `DIRTY` (frame.rs: `why |= if input { INPUT } else { DIRTY }`).
         if finishAppImeComposition(at: t, why: CommitWhy.dirty) {
-            return
+            return true
         }
         guard let fp = focusedPath,
               let el = focusedInputElement(at: fp),
               let editLens = el.handlers.editLens else {
             _ = dispatchIme(.cancel, at: t)
-            return
+            return false
         }
         let prevEdit = editLens.get(state)
         var edit = prevEdit
         if let activePreedit = edit.preedit?.text, edit.finishPreedit() {
             deliverInputEdit(el: el, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: t, why: CommitWhy.dirty)
             _ = dispatchIme(.commit(activePreedit), at: t)
+            return true
         }
+        return false
     }
 
     /// Applies an AppKit/OS `ImeEvent` to the focused `TextEdit` and forwards to `onIme` (`Runtime::ime`).

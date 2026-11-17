@@ -60,6 +60,34 @@ struct CommitWatchCauseSitesTests {
         #expect(finished.allSatisfy { $0 & CommitWhy.input == 0 }, "FinishIme isn't input: \(got.map(CommitWhy.names))")
     }
 
+    private struct Two {
+        var a = TextEdit("x")
+        var b = TextEdit("")
+    }
+
+    @Test("focus.rs:247-255 - a composition a commit's focus move finishes commits for `dirty`, not `input`")
+    func commitFocusMoveFinishesCompositionForDirty() {
+        let rt = Runtime<Two>(state: Two(), viewport: Vec2(200, 120), pixelScale: 1.0) { _, _ in
+            col()
+                .child(textInput(key: "a", \Two.a).w(180).h(40))
+                .child(textInput(key: "b", \Two.b).w(180).h(40))
+        }
+        _ = rt.frame(at: 0.0)
+        _ = rt.keyDown(KeyEvent(key: .tab), at: 0.010)
+        _ = rt.frame(at: 0.016)
+        #expect(rt.focusedKey == "a")
+        _ = rt.ime(.preedit(ImePreedit(text: "yz", cursorUTF8: 0..<2)), at: 0.020)
+        _ = rt.frame(at: 0.032)
+        let got = causes {
+            rt.update(at: 0.040) { _, tx in tx.focus("b") }
+            for i in 0..<3 { _ = rt.frame(at: 0.048 + Double(i) * 0.016) }
+        }
+        #expect(rt.focusedKey == "b")
+        #expect(rt.state.a.text == "xyz" && rt.state.a.preedit == nil, "\(rt.state.a.text)")
+        #expect(!got.isEmpty && got.allSatisfy { $0 != 0 }, "\(got.map(CommitWhy.names))")
+        #expect(got.allSatisfy { $0 & CommitWhy.input == 0 }, "no input moved the focus: \(got.map(CommitWhy.names))")
+    }
+
     // MARK: - Input that runs handlers outside applyTx: links, field menu, file steps
 
     private struct Clicks {
@@ -196,5 +224,197 @@ struct CommitWatchCauseSitesTests {
         rt.dragFilesLeave(at: 0.04)
         #expect(rt.state.hover == ["inner true", "inner false"], "a leave aims at nothing: \(rt.state.hover)")
         #expect(!rt.fileStepsHeld)
+    }
+    // MARK: - Window focus (frame.rs:67-103 `window_focus`)
+
+    private struct Plain { var n = 0 }
+
+    private func plainApp() -> Runtime<Plain> {
+        Runtime<Plain>(state: Plain(), viewport: Vec2(200, 200), pixelScale: 1.0) { s, _ in
+            col().size(200, 200)
+                .child(el().key("box").size(60, 40).onClick { st in st.n += 1 })
+                .child(text("\(s.n)").key("count"))
+        }
+    }
+
+    @Test("frame.rs:77-92 - a focus change nothing shows or hears commits nothing and leaves no cause")
+    func plainFocusChangeCommitsNothing() {
+        let rt = plainApp()
+        _ = rt.frame(at: 0.0)
+        _ = rt.frame(at: 1.0 / 60.0)
+        rt.commitWhy = 0
+        let commits = rt.commitCount
+        let got = causes {
+            rt.dispatchFocus(false, at: 2.0 / 60.0)
+            #expect(rt.commitCount == commits, "the blur's FinishIme has nothing ran or dirty to route past")
+            #expect(!rt.needsCommit && rt.commitWhyPending == 0, "\(CommitWhy.names(rt.commitWhyPending))")
+            _ = rt.frame(at: 3.0 / 60.0)
+            rt.dispatchFocus(true, at: 4.0 / 60.0)
+            #expect(!rt.needsCommit && rt.commitWhyPending == 0, "\(CommitWhy.names(rt.commitWhyPending))")
+            _ = rt.frame(at: 5.0 / 60.0)
+        }
+        #expect(got.isEmpty, "\(got.map(CommitWhy.names))")
+        #expect(rt.commitCount == commits)
+        #expect(rt.commitWhy == 0)
+
+        // No stale cause turns a relayout into a route commit (frame.rs:563).
+        rt.viewport = Vec2(300, 200)
+        _ = rt.keyDown(KeyEvent(key: .arrowRight), at: 6.0 / 60.0)
+        #expect(rt.commitCount == commits, "a pending relayout doesn't commit before the key")
+        #expect(rt.commitWhy == 0, "\(CommitWhy.names(rt.commitWhy))")
+        _ = rt.frame(at: 6.0 / 60.0)
+        #expect(rt.commitWhy & CommitWhy.relayout != 0, "\(CommitWhy.names(rt.commitWhy))")
+        #expect(rt.commitWhy & (CommitWhy.dirty | CommitWhy.route) == 0, "\(CommitWhy.names(rt.commitWhy))")
+    }
+
+    private struct Sel { var n = 0 }
+
+    @Test("frame.rs:77-81 - a focus change commits for `dirty` when a selection takes its inactive pair")
+    func focusChangeWithSelectionCommitsForDirty() {
+        let rt = Runtime<Sel>(state: Sel(), viewport: Vec2(320, 120), pixelScale: 1.0) { _, _ in
+            col().w(320).h(120)
+                .child(text("painted text").key("t").w(200).h(24).selectable())
+        }
+        _ = rt.frame(at: 0.0)
+        rt.update { _, tx in tx.selectText("t", range: 0..<7) }
+        _ = rt.frame(at: 0.05)
+        _ = rt.frame(at: 0.06)
+        rt.commitWhy = 0
+        let commits = rt.commitCount
+        let got = causes {
+            rt.dispatchFocus(false, at: 0.07)
+            _ = rt.frame(at: 0.08)
+        }
+        #expect(rt.commitCount > commits, "the selection's inactive pair shows")
+        #expect(!got.isEmpty && got.allSatisfy { $0 != 0 }, "\(got.map(CommitWhy.names))")
+        #expect(got.contains { $0 & CommitWhy.dirty != 0 }, "\(got.map(CommitWhy.names))")
+        #expect(got.allSatisfy { $0 & CommitWhy.input == 0 }, "\(got.map(CommitWhy.names))")
+    }
+
+    // MARK: - Virtual windows (frame.rs:672 `virtual_window_changed` -> `VIRTUAL`)
+
+    private struct V {}
+
+    @Test("frame.rs:672,696 - a scrollKeyTo landing and a nested list placed anew commit for `virtual`")
+    func virtualWindowMovesCommitForVirtual() {
+        // A virtual list estimating 20pt rows that lay out at 30pt (VirtualNestingParityTests).
+        let transcript = Runtime<V>(state: V(), viewport: Vec2(240, 300), pixelScale: 1.0) { _, _ in
+            col().key("scroll").size(240, 300).scrollY(stickBottom: false).child(
+                col().key("list").w(240).virtualRows(
+                    count: 1000, estimatedRowHeight: 20, key: { _, i in "r\(i)" },
+                    build: { _, _ in el().size(240, 30) }
+                )
+            )
+        }
+        _ = transcript.frame(at: 0)
+        _ = transcript.frame(at: 1.0 / 60.0)
+        let landed = causes {
+            transcript.update(at: 0.02) { _, tx in tx.scrollKeyTo("r600", at: 12) }
+            _ = transcript.frame(at: 0.03)
+        }
+        #expect(transcript.element(byKey: "r600") != nil)
+        #expect(landed.count >= 2, "\(landed.map(CommitWhy.names))")
+        #expect(landed.allSatisfy { $0 != 0 }, "\(landed.map(CommitWhy.names))")
+        #expect(landed.dropFirst().contains { $0 & CommitWhy.virtual != 0 }, "\(landed.map(CommitWhy.names))")
+
+        // A nested list whose section the viewport's end places (VirtualNestingParityTests).
+        let timeline = Runtime<V>(state: V(), viewport: Vec2(240, 300), pixelScale: 1.0) { _, _ in
+            col().key("scroll").size(240, 300).scrollY(stickBottom: true).child(
+                col().key("outer").w(240).virtualRows(
+                    count: 5, estimatedRowHeight: 100, key: { _, i in "o\(i)" },
+                    build: { _, i in
+                        guard i == 2 else { return el().size(240, 100) }
+                        return col().w(240)
+                            .child(el().key("header").size(240, 4000))
+                            .child(col().key("inner").w(240).virtualRows(
+                                count: 1000, estimatedRowHeight: 20, key: { _, j in "i\(j)" },
+                                build: { _, _ in el().size(240, 20) }
+                            ))
+                    }
+                )
+            )
+        }
+        var t = 0.0
+        let placed = causes {
+            for _ in 0..<12 {
+                _ = timeline.frame(at: t)
+                t += 1.0 / 60.0
+            }
+        }
+        #expect(timeline.element(byKey: "i999") != nil)
+        #expect(placed.allSatisfy { $0 != 0 }, "\(placed.map(CommitWhy.names))")
+        #expect(placed.contains { $0 & CommitWhy.virtual != 0 }, "\(placed.map(CommitWhy.names))")
+    }
+
+    private struct Section { var open = false }
+
+    @Test("frame.rs:672 - a list placed somewhere new in its viewport asks the next commit for `virtual`")
+    func listPlacedAnewAsksForVirtual() throws {
+        let rt = Runtime<Section>(state: Section(open: true), viewport: Vec2(240, 300), pixelScale: 1.0) { s, _ in
+            col().key("scroll").size(240, 300).scrollY(stickBottom: false).child(
+                col().w(240)
+                    .child(el().key("section").size(240, s.open ? 250 : 0))
+                    .child(col().key("list").w(240).virtualRows(
+                        count: 1000, estimatedRowHeight: 20, key: { _, i in "r\(i)" },
+                        build: { _, _ in el().size(240, 20) }
+                    ))
+            )
+        }
+        _ = rt.frame(at: 0)
+        _ = rt.frame(at: 1.0 / 60.0)
+        let listPath = try #require(rt.activeVirtualPaths.first)
+        // The last commit placed the list at the content's top (before the section opened above
+        // it), and the viewport now stands where that window doesn't reach.
+        rt.virtualLists[listPath]?.top = 0
+        for path in rt.scrollOffsets.keys { rt.scrollOffsets[path] = Vec2(0, 9000) }
+        rt.commitWhyPending = 0
+        rt.needsCommit = false
+        rt.recordVirtualMeasurementsAndCallbacks(expansion: Runtime<Section>.VirtualExpansionContext(), at: 0.05)
+        #expect((rt.virtualLists[listPath]?.top ?? 0) > 200, "placed under the section")
+        #expect(rt.needsCommit)
+        #expect(rt.commitWhyPending & CommitWhy.virtual != 0, "\(CommitWhy.names(rt.commitWhyPending))")
+    }
+
+    @Test("frame.rs:672 - a scrollKeyTo landing that moved a window asks the next commit for `virtual`")
+    func scrollKeyLandingAsksForVirtual() {
+        let rt = Runtime<V>(state: V(), viewport: Vec2(240, 300), pixelScale: 1.0) { _, _ in
+            col().key("scroll").size(240, 300).scrollY(stickBottom: false).child(
+                col().key("list").w(240).virtualRows(
+                    count: 1000, estimatedRowHeight: 20, key: { _, i in "r\(i)" },
+                    build: { _, _ in el().size(240, 30) }
+                )
+            )
+        }
+        _ = rt.frame(at: 0)
+        _ = rt.frame(at: 1.0 / 60.0)
+        // The viewport stands far from the window the last commit built: a window must move.
+        for path in rt.scrollOffsets.keys { rt.scrollOffsets[path] = Vec2(0, 9000) }
+        #expect(rt.anyVirtualListNeedsWindow())
+        let req = ScrollOffsetRequest(key: "r450", y: 0, anchor: true)
+        let taken = rt.scrollKeyLandings.take([req])
+        rt.scrollKeyLandings.land(taken[0])
+        rt.commitWhyPending = 0
+        rt.finishScrollKeyLandings(anyVirtualList: true)
+        #expect(rt.needsCommit)
+        #expect(rt.commitWhyPending & CommitWhy.virtual != 0, "\(CommitWhy.names(rt.commitWhyPending))")
+    }
+
+    // MARK: - Poll (frame.rs:530-533)
+
+    @Test("frame.rs:530 - a poll that changed nothing but asked for a commit commits for `dirty`, not `poll`")
+    func pollAskingACommitIsntPoll() {
+        let rt = plainApp()
+        _ = rt.frame(at: 0.0)
+        _ = rt.frame(at: 1.0 / 60.0)
+        rt.poll = { _, _, tx in tx.commit(); return false }
+        let got = causes { _ = rt.frame(at: 2.0 / 60.0) }
+        rt.poll = nil
+        #expect(!got.isEmpty && got.allSatisfy { $0 != 0 }, "\(got.map(CommitWhy.names))")
+        #expect(got.allSatisfy { $0 & CommitWhy.poll == 0 }, "\(got.map(CommitWhy.names))")
+        #expect(got.contains { $0 & CommitWhy.dirty != 0 }, "\(got.map(CommitWhy.names))")
+        rt.poll = { st, _, _ in st.n += 1; return true }
+        let changed = causes { _ = rt.frame(at: 3.0 / 60.0) }
+        rt.poll = nil
+        #expect(changed.contains { $0 & CommitWhy.poll != 0 }, "\(changed.map(CommitWhy.names))")
     }
 }

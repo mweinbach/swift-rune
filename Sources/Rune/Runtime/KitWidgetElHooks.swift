@@ -375,8 +375,9 @@ extension Runtime {
         return best
     }
 
-    /// Commits open composition and delivers `.focusLost` when focus leaves `prevNode`.
-    internal func handleKitFocusTransition(prevNode: FlatNode?, newPath: String?, at now: Double) {
+    /// Commits open composition and delivers `.focusLost` when focus leaves `prevNode`. `why`: the
+    /// focus move's cause, `INPUT` when a press or key moved it, else the handler's or commit's.
+    internal func handleKitFocusTransition(prevNode: FlatNode?, newPath: String?, at now: Double, why: UInt16 = CommitWhy.input) {
         guard let prevNode, prevNode.path != newPath else { return }
         if !kitHooks.isDispatchingFocusLost {
             kitHooks.isDispatchingFocusLost = true
@@ -389,9 +390,9 @@ extension Runtime {
                     if let onChange = prevNode.el.handlers.onTextChange {
                         var tx = makeTx(at: now)
                         onChange(&state, edit.text, &tx)
-                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, why: why)
                     }
-                    dirtyCommit(at: now, why: CommitWhy.input)
+                    dirtyCommit(at: now, why: why)
                 }
             }
             if let onPhys = prevNode.el.handlers.onPhysicalInput {
@@ -399,7 +400,7 @@ extension Runtime {
                 let handled = onPhys(&state, .focusLost, &tx)
                 Tx.took(handled, &tx)
                 if handled || !tx.liveOnlyRequested {
-                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, why: why)
                 }
             }
         }

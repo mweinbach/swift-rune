@@ -1708,6 +1708,8 @@ extension Runtime {
             if abs(vState.top - placedBefore.0) > 0.5 || abs(vState.tail - placedBefore.1) > 0.5,
                vState.needsWindow(offset: listOffsetY, viewport: vpH, prefix: prefix, count: vState.lastKeys.count, pinned: listPinned) {
                 needsCommit = true
+                // The window shifts (`virtual_window_changed`, frame.rs:672): `VIRTUAL`.
+                commitWhyPending |= CommitWhy.virtual
             }
             if vState.measuredByKey.count > RuntimeVirtualListState.maxCachedKeys {
                 let keepSet = Set(vState.lastKeys)

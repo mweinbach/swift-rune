@@ -1740,6 +1740,7 @@ internal extension Runtime {
             ($0.anchor, $0.focus, $0.far?.path)
         }
         let prevNeedsCommit = needsCommit
+        let prevWhy = commitWhyPending
         _ = handleSelectablePointerMove(to: pointerPosition, mods: .none, at: now, preferLayoutRects: true)
         let after = selectionState.coordinator.phase.selection.map {
             ($0.anchor, $0.focus, $0.far?.path)
@@ -1752,6 +1753,7 @@ internal extension Runtime {
         }
         if !changed {
             needsCommit = prevNeedsCommit
+            commitWhyPending = prevWhy
         }
         return changed
     }
