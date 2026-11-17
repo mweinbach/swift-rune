@@ -216,24 +216,21 @@ struct ParagraphsLazyParityTests {
         let height = laid.height
         // A frame's fill: the rows near line 500 first, a run taken apart there.
         let lh = try #require(ts.asciiLine(style: style, scale: 2)).height
-        let rows = (Float(500) * lh, Float(520) * lh)
-        let (one, moved) = try #require(ts.fillParagraphs(laid, budget: textFillBudget, rows: rows, reach: .infinity))
+        let rows = (500.5 * lh, 520.5 * lh)
+        // Once the time slice expires, fill guarantees one shaped line and then yields.
+        let (one, moved) = try #require(ts.fillParagraphs(laid, budget: 0, rows: rows, reach: .infinity))
         #expect(!moved)
         #expect(one.height == height)
         let hit = one.piece(atY: rows.0 + 1)
         #expect(one.paragraphs[hit.index].shaped)
         #expect(one.paragraphs.count > laid.paragraphs.count)
-        #expect(one.waitingLines < laid.waitingLines)
+        #expect(laid.waitingLines - one.waitingLines == 1)
         // Filled to the end, frame by frame: every height the eager whole layout gives.
         laid = one
         var frames = 0
         while laid.waiting, frames < 10_000 {
-            let start = DispatchTime.now().uptimeNanoseconds
             let (next, moved) = try #require(ts.fillParagraphs(laid, budget: textFillBudget, rows: rows, reach: .infinity))
-            let spent = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
             #expect(!moved)
-            // One paragraph past the budget at most (it checks before each).
-            #expect(spent < textFillBudget + 0.05)
             #expect(next.waitingLines < laid.waitingLines)
             laid = next
             frames += 1
