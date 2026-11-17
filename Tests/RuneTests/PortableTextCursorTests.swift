@@ -133,13 +133,10 @@ struct PortableTextCursorTests {
             ["a\t", "b\t  ", "c"],
             ["    "]
         ]
-        #if canImport(CoreText)
-        // Adding the hanging space to a CoreText line keeps the original fitted advance.
         let word = system.shape(text: "word", style: font, maxWidth: nil, pixelScale: 1, emitGlyphs: false)
         let text = String(repeating: "word ", count: 40)
         let narrow = system.shape(text: text, style: font, maxWidth: 1, pixelScale: 1, emitGlyphs: false)
         #expect(abs(narrow.size.x - word.size.x) <= 1.0 / 64.0)
-        #endif
         for lines in examples {
             let text = lines.joined()
             for width: Float in [0, 1] {
@@ -153,6 +150,44 @@ struct PortableTextCursorTests {
                     byte = end
                 }
             }
+        }
+    }
+
+    @Test func portableLineWidthsHangSpacesAtSoftBreaksAndOnlyOverflowAtHardBreaks() {
+        let system = TextSystem()
+        let font = TextStyle(size: 13, lineHeight: 20, family: .monospace, wrap: .wrap)
+        for scale: Float in [1, 2] {
+            func shape(_ text: String, _ width: Float?, pills: [PillChip] = []) -> ShapedText {
+                system.shapePortable(text: text, pills: pills, style: font, maxWidth: width,
+                                     pixelScale: scale, emitGlyphs: false, nativeFonts: true)
+            }
+            let word = shape("word", nil).lastLineAdvancePx
+            let full = shape("word   ", nil).lastLineAdvancePx
+            let room = (word + full) / (2 * scale)
+            let wrapped = shape("word   word   \nword   ", room)
+            #expect(wrapped.lineCount == 3)
+            #expect(wrapped.size.x == TextBoxGeometry.boxWidth(maxLineWidthPt: room, scale: scale))
+            for (i, metrics) in wrapped.lineAdvancesPx.enumerated() {
+                #expect(abs(metrics.widthPx - full) < 0.02)
+                let expected = i == 0 ? full - word : full - room * scale
+                #expect(abs(metrics.trailingWsPx - expected) < 0.02)
+            }
+            #expect(shape("   ", 0).size.x == 0)
+            #expect(shape("word   ", nil).hangingAdvancePx == 0)
+            #expect(shape("word\u{00a0}", 0).hangingAdvancePx == 0)
+            let boxed = shape("word ", 0, pills: [PillChip(0..<5)])
+            #expect(boxed.hangingAdvancePx == 0)
+            #expect(boxed.size.x >= boxed.lastLineAdvancePx / scale - 0.001)
+
+            // The visible word centers in the available space while its final caret
+            // still includes all three spaces on the soft-wrapped line.
+            var centered = font
+            centered.align = .center
+            let aligned = system.shapePortable(text: "word   word", style: centered, maxWidth: room,
+                                               pixelScale: scale, emitGlyphs: false, nativeFonts: true)
+            let first = aligned.portableLines[0]
+            #expect(abs(first.originX * scale - (room * scale - word) / 2) < 0.02)
+            #expect(abs((first.charOffsets.last ?? 0) * scale - full) < 0.02)
         }
     }
 

@@ -7200,9 +7200,14 @@ public final class TextSystem: @unchecked Sendable {
         let grownExtraPt: Float = 0
         #endif
 
-        // A text box is as wide as its widest line to a 64th of a device pixel (`text_width`, #934).
-        let maxLineW = TextBoxGeometry.boxWidth(maxLineWidthPt: lines.reduce(Float(0)) { max($0, $1.insets.x + $1.width) }, scale: scale)
-        let containerWidth = maxWidth.map { max($0, maxLineW) } ?? maxLineW
+        let alignmentWidth: Float
+        if let maxWidth, style.wrap == .wrap || style.hasBlockInsets {
+            alignmentWidth = maxWidth
+        } else {
+            let widest = lines.reduce(Float(0)) { max($0, $1.insets.x + $1.width) }
+            alignmentWidth = max(maxWidth ?? 0, TextBoxGeometry.boxWidth(maxLineWidthPt: widest, scale: scale))
+        }
+        var fittedWidth: Float = 0
         let totalH = Self.specLineHeight(lineCount: max(1, lines.count), lineHeightPt: lineH, scale: scale,
                                          exact: style.exactLines, extraPt: grownExtraPt)
 
@@ -7235,17 +7240,13 @@ public final class TextSystem: @unchecked Sendable {
             baselinesPx.append(baselinePx)
             let baselineOffset = baselinePx * invS - originY
             let insetRight = maxWidth == nil ? 0 : item.insets.y
-            let alignmentWidth = !style.hasBlockInsets ? containerWidth : (maxWidth ?? maxLineW)
             let availableWidth = max(0, alignmentWidth - item.insets.x - insetRight)
             var hanging: Float = 0
             let lineEnd = item.utf8Start + item.text.utf8.count
             var visibleEnd = lineEnd
             var spaces = 0
-            var extraPerSpace: Float = 0
-            var justifiedOffset = item.isRTL ? max(0, availableWidth - item.width) : 0
             func expands(_ character: Character) -> Bool { character == " " || character == "\u{00A0}" }
-            if style.wrap == .wrap, let maxWidth,
-               style.align == .justified || (!validPills.isEmpty && !item.isParaLast) {
+            if style.wrap == .wrap, maxWidth != nil {
                 #if canImport(CRuneDesktopText) && !canImport(CoreText)
                 nativeWidths = desktopLines[idx]?.cells ?? [:]
                 #endif
@@ -7266,25 +7267,34 @@ public final class TextSystem: @unchecked Sendable {
                     end = previous
                     if leadExtra(atUTF8: start) > 0 { break }
                 }
-                if style.align == .justified {
-                    if !item.isParaLast { spaces = item.text[..<end].count(where: expands) }
-                    let free = max(0, maxWidth - item.insets.x - insetRight) - item.width + hanging
-                    if spaces > 0 { extraPerSpace = max(0, free) / Float(spaces) }
-                    if item.isRTL { justifiedOffset = (extraPerSpace > 0 ? 0 : free) - hanging }
+                if item.isParaLast {
+                    // Before a hard break or the end of the text, only the overflowing
+                    // part of preserved whitespace hangs. Soft breaks hang it in full.
+                    hanging = min(hanging, max(0, item.width - availableWidth))
+                } else if style.align == .justified {
+                    spaces = item.text[..<end].count(where: expands)
                 }
             }
+            let fitted = item.width - hanging
+            fittedWidth = max(fittedWidth, item.insets.x + fitted)
+            let free = availableWidth - fitted
+            let extraPerSpace = spaces > 0 ? max(0, free) / Float(spaces) : 0
             func stretch(_ ch: Character, at byte: Int) -> Float {
                 guard extraPerSpace > 0, byte < visibleEnd else { return 0 }
                 return expands(ch) ? extraPerSpace : 0
             }
             let flushOffset: Float
-            switch style.align {
-            case .leading: flushOffset = item.isRTL ? max(0, availableWidth - item.width) : 0
-            case .center: flushOffset = max(0, (availableWidth - item.width) * 0.5)
-            case .trailing: flushOffset = item.isRTL ? 0 : max(0, availableWidth - item.width)
-            case .justified: flushOffset = justifiedOffset
+            if free <= 0 {
+                flushOffset = item.isRTL ? free : 0
+            } else {
+                switch style.align {
+                case .leading: flushOffset = item.isRTL ? free : 0
+                case .center: flushOffset = free * 0.5
+                case .trailing: flushOffset = item.isRTL ? 0 : free
+                case .justified: flushOffset = item.isRTL && extraPerSpace == 0 ? free : 0
+                }
             }
-            let originX = item.insets.x + flushOffset
+            let originX = item.insets.x + flushOffset - (item.isRTL ? hanging : 0)
 
             #if canImport(CRuneDesktopText) && !canImport(CoreText)
             let native = extraPerSpace > 0
@@ -7318,7 +7328,6 @@ public final class TextSystem: @unchecked Sendable {
             #endif
             var charOffsets: [Float] = [0]
             var penX: Float = 0
-            var trailingWsPt: Float = 0
             var bytePos = item.utf8Start
             var pillBounds: [Int: (left: Float, right: Float, iconX: Float?)] = [:]
 
@@ -7338,7 +7347,6 @@ public final class TextSystem: @unchecked Sendable {
                 let spanColor = spanMatch?.color
                 let fontSz = spanMatch?.size ?? style.size
                 let chW = charAdvance(ch, atUTF8: chStart) + stretch(ch, at: chStart)
-                if ch == " " || ch == "\t" { trailingWsPt += chW } else { trailingWsPt = 0 }
 
                 #if canImport(CRuneDesktopText) && !canImport(CoreText)
                 let nativeCell = native?.cells[chStart]
@@ -7475,14 +7483,13 @@ public final class TextSystem: @unchecked Sendable {
             #endif
             lineGlyphRanges.append(lineStartGlyphIdx..<glyphs.count)
             let advance = item.width + extraPerSpace * Float(spaces)
-            let trailing = style.align == .justified && style.wrap == .wrap && maxWidth != nil ? hanging : trailingWsPt
-            lineAdvancesPx.append((advance * scale, trailing * scale))
+            lineAdvancesPx.append((advance * scale, hanging * scale))
         }
 
         let backgrounds = Self.mergeContiguousBackgrounds(rawBackgrounds)
         let last = lineAdvancesPx.last ?? (widthPx: 0, trailingWsPx: 0)
         var shaped = ShapedText(
-            size: Vec2(maxLineW, totalH),
+            size: Vec2(TextBoxGeometry.boxWidth(maxLineWidthPt: fittedWidth, scale: scale), totalH),
             lineCount: lines.count,
             lineHeight: lineH,
             glyphs: glyphs,
