@@ -981,8 +981,22 @@ public struct ElementHandlers<State> {
     public var onStep: ((inout State, Int, inout Tx) -> Void)?
     public var onStepLimit: ((inout State, Bool, inout Tx) -> Void)?
 
-    public var onAtBottom: ((inout State, Bool) -> Void)?
-    public var onFarFromBottom: (min: Float, frameKey: String?, handler: (inout State, Bool) -> Void)?
+    internal var atBottomReport: ((inout State, Bool) -> Bool)?
+    internal var farFromBottomReport: (min: Float, frameKey: String?, handler: (inout State, Bool) -> Bool)?
+
+    public var onAtBottom: ((inout State, Bool) -> Void)? {
+        get { atBottomReport.map { report in { state, at in _ = report(&state, at) } } }
+        set { atBottomReport = newValue.map { handler in { state, at in handler(&state, at); return true } } }
+    }
+
+    public var onFarFromBottom: (min: Float, frameKey: String?, handler: (inout State, Bool) -> Void)? {
+        get { farFromBottomReport.map { spec in
+            (spec.min, spec.frameKey, { state, far in _ = spec.handler(&state, far) })
+        } }
+        set { farFromBottomReport = newValue.map { spec in
+            (spec.min, spec.frameKey, { state, far in spec.handler(&state, far); return true })
+        } }
+    }
     public var onScrollOffset: ((ScrollPos) -> Void)?
     public var onScroll: ((inout State, ScrollPos, inout Tx) -> Void)?
     public var onScrollOffsetToken: UInt64 = 0
@@ -1932,20 +1946,36 @@ public struct El<State> {
     }
 
     public func onAtBottom(_ handler: @escaping (inout State, Bool) -> Void) -> Self {
+        onAtBottomIf { state, at in
+            handler(&state, at)
+            return true
+        }
+    }
+
+    /// Receives the initial and subsequent changed bottom reports. Return true to rebuild the view.
+    public func onAtBottomIf(_ report: @escaping (inout State, Bool) -> Bool) -> Self {
         var copy = self
-        copy.handlers.onAtBottom = handler
+        copy.handlers.atBottomReport = report
         return copy
     }
 
     public func onFarFromBottom(_ min: Float, _ handler: @escaping (inout State, Bool) -> Void) -> Self {
-        var copy = self
-        copy.handlers.onFarFromBottom = (min, nil, handler)
-        return copy
+        onFarFromBottomIf(min) { state, far in
+            handler(&state, far)
+            return true
+        }
     }
 
     public func onFarFromBottomUnder(_ min: Float, frame: String, _ handler: @escaping (inout State, Bool) -> Void) -> Self {
+        onFarFromBottomIf(min, frame: frame) { state, far in
+            handler(&state, far)
+            return true
+        }
+    }
+
+    public func onFarFromBottomIf(_ min: Float, frame: String? = nil, _ report: @escaping (inout State, Bool) -> Bool) -> Self {
         var copy = self
-        copy.handlers.onFarFromBottom = (min, frame, handler)
+        copy.handlers.farFromBottomReport = (min, frame, report)
         return copy
     }
 

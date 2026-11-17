@@ -2535,42 +2535,48 @@ extension Runtime {
             let vp = scrollViewportSizes[path] ?? Vec2(node.targetRect.width, node.targetRect.height)
             let distFromBottom = max(0, maxExt.y - cur.y)
 
-            if let onAtBottom = node.el.handlers.onAtBottom {
+            if let onAtBottom = node.el.handlers.atBottomReport {
                 let isAtBottom = distFromBottom <= 1.0
                 if atBottomStates[path] != isAtBottom {
                     atBottomStates[path] = isAtBottom
-                    if let scope = turnScope {
-                        scope(&state) { s in onAtBottom(&s, isAtBottom) }
-                    } else {
-                        onAtBottom(&state, isAtBottom)
-                    }
-                    needsCommit = true
+                    dispatchScrollEndReport(onAtBottom, value: isAtBottom)
                 }
             }
 
-            if let farSpec = node.el.handlers.onFarFromBottom {
-                let farDist: Float
-                if let frameKey = farSpec.frameKey,
-                   let fIdx = flatNodes.firstIndex(where: { selectsElementSelector(frameKey, path: $0.path, key: $0.key) }) {
-                    let frameRect = flatNodes[fIdx].targetRect
-                    farDist = max(0, maxExt.y - cur.y - (vp.y - frameRect.height))
-                } else {
-                    farDist = distFromBottom
+            if let farSpec = node.el.handlers.farFromBottomReport {
+                var thresholdHeight = vp.y
+                if let frameKey = farSpec.frameKey {
+                    var ancestor = node.parentIndex
+                    while let index = ancestor {
+                        let parent = flatNodes[index]
+                        if parent.key == frameKey {
+                            thresholdHeight = parent.targetRect.height
+                            break
+                        }
+                        ancestor = parent.parentIndex
+                    }
                 }
-                let isFar = farDist >= farSpec.min
+                let isFar = distFromBottom > max(farSpec.min, thresholdHeight)
                 if farFromBottomStates[path] != isFar {
                     farFromBottomStates[path] = isFar
-                    if let scope = turnScope {
-                        scope(&state) { s in farSpec.handler(&s, isFar) }
-                    } else {
-                        farSpec.handler(&state, isFar)
-                    }
-                    needsCommit = true
+                    dispatchScrollEndReport(farSpec.handler, value: isFar)
                 }
             }
 
             dispatchScrollOffsetObserverIfChanged(for: node, at: cxSettings.scaledTime(at: now), instant: currentCommitInstant)
         }
+    }
+
+    private func dispatchScrollEndReport(_ report: (inout State, Bool) -> Bool, value: Bool) {
+        let changed: Bool
+        if let scope = turnScope {
+            var scopedResult = false
+            scope(&state) { scopedResult = report(&$0, value) }
+            changed = scopedResult
+        } else {
+            changed = report(&state, value)
+        }
+        if changed { needsCommit = true }
     }
 
     internal func dispatchScrollOffsetObserverIfChanged(

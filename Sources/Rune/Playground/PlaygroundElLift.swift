@@ -294,20 +294,22 @@ extension El {
         lifted.onSpellcheck = wrap1(h.onSpellcheck)
         lifted.onSpellcheckLanguages = wrap1(h.onSpellcheckLanguages)
         lifted.modalDismiss = wrap(h.modalDismiss)
-        if let onAtBottom = h.onAtBottom {
+        if let report = h.atBottomReport {
             hasHandler = true
-            lifted.onAtBottom = { _, atBottom in
-                guard isValid(), var child = get() else { return }
-                onAtBottom(&child, atBottom)
+            lifted.atBottomReport = { _, at in
+                guard isValid(), var child = get() else { return false }
+                let changed = report(&child, at)
                 set(child)
+                return changed
             }
         }
-        if let far = h.onFarFromBottom {
+        if let far = h.farFromBottomReport {
             hasHandler = true
-            lifted.onFarFromBottom = (min: far.min, frameKey: far.frameKey, handler: { _, isFar in
-                guard isValid(), var child = get() else { return }
-                far.handler(&child, isFar)
+            lifted.farFromBottomReport = (min: far.min, frameKey: far.frameKey, handler: { _, isFar in
+                guard isValid(), var child = get() else { return false }
+                let changed = far.handler(&child, isFar)
                 set(child)
+                return changed
             })
         }
         if let onScrollOffset = h.onScrollOffset {

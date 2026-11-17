@@ -176,6 +176,43 @@ struct ElInc4ParityTests {
         #expect(abs(feather.width + 10) < 0.01 && feather.offset == 0)
     }
 
+    @Test("A stationary viewport can acknowledge both first scroll-end reports without a view rebuild")
+    func scrollEndReportsCanDeclineCommit() {
+        struct Observations {
+            var atBottom: [Bool] = []
+            var far: [Bool] = []
+        }
+        let rt = Runtime<Observations>(
+            state: Observations(), viewport: Vec2(200, 100), pixelScale: 1, systemDark: true
+        ) { _, _ in
+            col().size(200, 100).key("list").scrollY(stickBottom: false)
+                .onAtBottomIf { state, at in
+                    state.atBottom.append(at)
+                    return false
+                }
+                .onFarFromBottomIf(20) { state, far in
+                    state.far.append(far)
+                    return false
+                }
+                .child(el().size(200, 200).shrink(0))
+        }
+        _ = rt.frame(at: 0)
+        let commits = rt.commitCount
+        _ = rt.frame(at: 1.0 / 60)
+        #expect(rt.state.atBottom == [false])
+        // Precisely one viewport away is still inside the far-report boundary.
+        #expect(rt.state.far == [false])
+        #expect(rt.commitCount == commits)
+        rt.update(at: 0.1) { _, tx in
+            tx.scrollToInstant("list", x: 0, y: 100)
+            tx.liveOnly()
+        }
+        _ = rt.frame(at: 0.2)
+        #expect(rt.state.atBottom == [false, true])
+        #expect(rt.state.far == [false])
+        #expect(rt.commitCount == commits)
+    }
+
     @Test("scroll: scrollIntoView, scrollCenter, scrollToBottomInstant, followEdge, and wheel cancellation")
     func runtimeScrollRequestsAndCallbacks() {
         struct S {
