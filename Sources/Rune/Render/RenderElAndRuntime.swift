@@ -2333,15 +2333,14 @@ extension Runtime {
                 let textCol = resolvedInput.showingPlaceholder
                     ? (el.placeholderColor ?? defaultTextColor.alpha(0.45))
                     : defaultTextColor
-                let shaped = textSystem.shape(
-                    text: resolvedInput.renderedString,
-                    spans: resolvedInput.spans,
-                    pills: resolvedInput.pills,
-                    style: resolvedInput.style,
-                    maxWidth: resolvedInput.maxWidthForShape,
-                    pixelScale: rasterScale * scale,
-                    emitGlyphs: !resolvedInput.renderedString.isEmpty
+                let inputBox = textSystem.layoutInput(
+                    text: resolvedInput.renderedString, spans: resolvedInput.spans, pills: resolvedInput.pills,
+                    style: resolvedInput.style, maxWidth: resolvedInput.maxWidthForShape,
+                    pixelScale: rasterScale * scale, emitGlyphs: !resolvedInput.renderedString.isEmpty,
+                    keep: resolvedInput.isSecure ? .secret : .cached,
+                    request: Self.paragraphRequest(field: nid, el: el, edit: edit, resolved: resolvedInput)
                 )
+                let shaped = inputBox.shaped
                 let inputClipEdges = intersectClipRects(activeClip, boundsClipPx)
                 let forceScaled = nodeScaleMotion != .still
                     || abs(sc.x - rasterScale) > 1e-4
@@ -2359,12 +2358,38 @@ extension Runtime {
                     fade: activeFade,
                     forceScaled: forceScaled
                 )
-                for gq in shaped.glyphs {
+                let fieldMarks = resolvedInput.showingPlaceholder || resolvedInput.isSecure ? [] : el.textHighlights ?? []
+                for quad in TextHighlightPainter.fieldQuads(
+                    marks: fieldMarks, box: inputBox, system: textSystem,
+                    origin: Vec2(textLeft, textTop), transform: sc, pixelScale: scale
+                ) {
+                    instances.append(RenderInstance(
+                        rect: quad.rect, radii: SIMD4(repeating: quad.cornerRadius),
+                        fill: premulSIMD4(quad.bg, opacity: localOpacity, srgb: srgbBlend),
+                        border: quad.ring.map { premulSIMD4($0.color, opacity: localOpacity, srgb: srgbBlend) } ?? .zero,
+                        params: SIMD4(quad.ring?.width ?? 0, KIND_RECT, 0, 1),
+                        uv: .zero, clip: inputClipEdges, fade: activeFade
+                    ))
+                    marks.append(0)
+                }
+                let inputGlyphs: [PositionedGlyph]
+                if let paragraphs = inputBox.paragraphs {
+                    let top = (inputClipEdges.y / scale - textTop) * paragraphs.scale / max(sc.y, 1e-4)
+                    let bottom = (inputClipEdges.w / scale - textTop) * paragraphs.scale / max(sc.y, 1e-4)
+                    let allRows = parentIsRotated || abs(el.rotate) > 1e-4
+                    let rows = allRows ? (-Float.infinity, Float.infinity) : (top, bottom)
+                    if paragraphs.waiting { textRows[nid] = rows }
+                    inputGlyphs = paragraphs.glyphs(top: rows.0, bottom: rows.1, using: textSystem)
+                } else {
+                    inputGlyphs = shaped.glyphs
+                }
+                for gq in inputGlyphs {
                     let gx = (textLeft + gq.rect.x * sc.x) * scale
                     let gy = (textTop + gq.rect.y * sc.y) * scale
                     let gw = max(1.0, gq.rect.z * sc.x * scale)
                     let gh = max(1.0, gq.rect.w * sc.y * scale)
-                    let gcol = premulSIMD4(gq.color ?? textCol, opacity: localOpacity, srgb: srgbBlend)
+                    let ink = fieldMarks.last { $0.fg != nil && $0.byteRange.contains(gq.utf8Offset) }?.fg ?? gq.color ?? textCol
+                    let gcol = premulSIMD4(ink, opacity: localOpacity, srgb: srgbBlend)
                     let idx = instances.count
                     instances.append(RenderInstance(
                         rect: SIMD4<Float>(gx, gy, gw, gh),

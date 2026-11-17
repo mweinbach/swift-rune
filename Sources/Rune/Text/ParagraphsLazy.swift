@@ -185,6 +185,35 @@ extension TextSystem {
         return measured
     }
 
+    /// Resolve a find result before layout reads or paint ask for its boxes. A waiting
+    /// record can cover hundreds of lines, so fill the intersecting rows within each run.
+    internal func prepareHighlights(_ marks: [TextHighlight], in initial: ParagraphLayout, field: UInt64) -> ParagraphLayout {
+        var laid = initial
+        for mark in marks {
+            guard let lazy = laid.lazy else { break }
+            let start = max(0, mark.byteRange.lowerBound)
+            let end = min(lazy.content.count, mark.byteRange.upperBound)
+            guard start < end else { continue }
+            let from = partitionPoint(laid.paragraphs) { $0.end < start }
+            let intersecting = laid.paragraphs[from...].prefix { $0.start < end }
+            guard let first = intersecting.first(where: { !$0.shaped }),
+                  let last = intersecting.last(where: { !$0.shaped }) else { continue }
+            func row(in paragraph: Paragraph, at byte: Int) -> Float {
+                let offset = min(max(byte, paragraph.start), paragraph.end)
+                let lines = countNewlines(lazy.content, paragraph.start, offset)
+                return paragraph.y + (Float(lines) + 0.5) * lazy.ascii.height
+            }
+            let rows = (row(in: first, at: start), row(in: last, at: end - 1))
+            if let (filled, moved) = fillParagraphs(laid, budget: .infinity, rows: rows, reach: 0, field: field) {
+                laid = filled
+                if moved, let (exact, _) = fillParagraphs(laid, budget: .infinity, rows: rows, reach: .infinity, field: field) {
+                    laid = exact
+                }
+            }
+        }
+        return laid
+    }
+
     /// Shapes waiting paragraphs of `laid` for up to `budget` seconds, those meeting device rows
     /// `rows` first, then the nearest, none further than `reach` from them: the layout with them
     /// shaped (cached in its place), and whether a height moved (it shouldn't: a waiting height

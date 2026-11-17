@@ -555,6 +555,45 @@ public struct HighlightQuad: Sendable, Equatable {
 }
 
 public enum TextHighlightPainter {
+    /// Clip each mark to the bytes of its paragraph. Its quads are returned in device
+    /// pixels at the field's drawn origin, including its transform and raster scale.
+    internal static func fieldQuads(
+        marks: [TextHighlight], box: TextLayoutBox, system: TextSystem,
+        origin: Vec2, transform: Vec2, pixelScale: Float
+    ) -> [HighlightQuad] {
+        guard !marks.isEmpty else { return [] }
+        let scale = box.pixelScale
+        var result: [HighlightQuad] = []
+        func append(_ marks: [TextHighlight], from layout: TextLayoutBox, at y: Float) {
+            for var q in quads(highlights: marks, in: layout.authText, shaped: layout.shaped, textSystem: system, pixelScale: scale) {
+                q.rect.x = (origin.x + transform.x * q.rect.x / scale) * pixelScale
+                q.rect.y = (origin.y + transform.y * (q.rect.y + y) / scale) * pixelScale
+                q.rect.z *= transform.x * pixelScale / scale
+                q.rect.w *= transform.y * pixelScale / scale
+                q.cornerRadius *= transform.x * pixelScale / scale
+                q.ring?.width *= transform.x * pixelScale / scale
+                result.append(q)
+            }
+        }
+        if let paragraphs = box.paragraphs {
+            for mark in marks {
+                let range = mark.byteRange
+                let first = partitionPoint(paragraphs.paragraphs) { $0.end <= range.lowerBound }
+                for p in paragraphs.paragraphs[first...].prefix(while: { $0.start < range.upperBound }) where p.shaped {
+                    let start = max(range.lowerBound, p.start)
+                    let end = min(range.upperBound, p.end)
+                    guard start < end else { continue }
+                    var local = mark
+                    local.byteRange = (start - p.start)..<(end - p.start)
+                    append([local], from: p.layout, at: p.y)
+                }
+            }
+        } else {
+            append(marks, from: box, at: 0)
+        }
+        return result
+    }
+
     public static func quads(
         highlights: [TextHighlight],
         in text: String,
