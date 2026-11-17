@@ -58,6 +58,51 @@ struct Slice4EdgeParityWave3BTests {
         #expect(delRt.focusedKey != "row-0")
     }
 
+    @Test("A focused scroll view takes arrows by a line and Space by a page")
+    func focusedScrollerKeys() {
+        let rt = Runtime(state: false, viewport: Vec2(200, 200), pixelScale: 1.0) { pressable, _ in
+            let rows: [El<Bool>] = (0..<20).map { el().key("r\($0)").size(200, 40) }
+            var scroll: El<Bool> = col().key("scroll").size(200, 200)
+                .scroll(ScrollSpec(stickBottom: false)).focusable()
+                .child(col().key("list").wFull().children(rows))
+            if pressable { scroll = scroll.onClick { state in state = false } }
+            return col().size(200, 200).child(scroll)
+        }
+        _ = rt.frame(at: 0)
+        rt.pointerDown(at: Vec2(100, 100), at: 0.01)
+        rt.pointerUp(at: Vec2(100, 100), at: 0.02)
+        _ = rt.frame(at: 0.05)
+        #expect(rt.focusedKey == "scroll")
+
+        func press(_ key: Key, mods: Mods = .none, repeat held: Bool = false, at time: Double) -> Bool {
+            let handled = rt.keyDown(KeyEvent(key: key, mods: mods), isRepeat: held, at: time)
+            _ = rt.frame(at: time)
+            return handled
+        }
+        func top() -> Float? { rt.presented("r0")?.rect[1] }
+        #expect(press(.arrowDown, at: 0.1))
+        #expect(top() == -40)
+        #expect(!press(.arrowDown, mods: Mods(shift: true), at: 0.15))
+        #expect(!press(.space, mods: Mods(alt: true), at: 0.16))
+        #expect(top() == -40)
+        #expect(press(.text(" "), at: 0.2))
+        #expect(top() == -220)
+        #expect(press(.space, mods: Mods(shift: true), at: 0.3))
+        #expect(top() == -40)
+        #expect(press(.arrowUp, at: 0.4))
+        #expect(top() == 0)
+        #expect(press(.pageDown, at: 0.5))
+        #expect(top() == -180)
+        #expect(press(.space, repeat: true, at: 0.6))
+        #expect(top() == -360)
+
+        rt.update(at: 0.7) { state, _ in state = true }
+        _ = rt.frame(at: 0.7)
+        #expect(press(.space, at: 0.8))
+        #expect(!rt.state)
+        #expect(top() == -360)
+    }
+
     @Test("input_clipboard.rs:5,39,250: PageUp/Down scrolls focused input viewport & scrolled-out virtual list; image/files paste routing")
     func pageKeysInputScrollAndRichImageFilesClipboardParity() throws {
         // 1. PageDown/PageUp reaches focused single-line input onInputKey & pages scroll view by 90% viewport.

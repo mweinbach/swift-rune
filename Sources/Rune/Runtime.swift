@@ -10890,7 +10890,9 @@ public final class Runtime<State> {
 
             // Space/Enter/ContextMenu activates focused text links first, then buttons/rows (`takesReturn`).
             let isSpaceKey = (ev.key == .space || ev.key == .text(" "))
-            if ev.mods == .none && (isSpaceKey || ev.key == .enter) && !isRepeat {
+            let pressesOnSpace = isSpaceKey && (fNode.el.handlers.onClick != nil ||
+                fNode.el.handlers.onClickPress != nil || !isPageableScroller(fIdx))
+            if ev.mods == .none && (pressesOnSpace || ev.key == .enter) && !isRepeat {
                 if activateFocusedLink(at: now) {
                     return true
                 }
@@ -10933,7 +10935,7 @@ public final class Runtime<State> {
                 fNode.el.role == .link || fNode.el.role == .row ||
                 fNode.el.role == .gridCell || fNode.el.focusHighlightColor != nil
             if fNode.el.handlers.editLens == nil && ev.mods == .none &&
-               (isSpaceKey || (ev.key == .enter && (takesReturn || defaultButtonNode() == nil))) {
+               (pressesOnSpace || (ev.key == .enter && (takesReturn || defaultButtonNode() == nil))) {
                 if isRepeat { return true }
                 if let onClick = fNode.el.handlers.onClick {
                     var tx = makeTx(at: now)
@@ -11059,53 +11061,55 @@ public final class Runtime<State> {
         return false
     }
 
-    /// Pages the focused, hovered, or first overflowing vertical scroll container on PageUp/PageDown/Home/End (`keys.rs:116-155`).
+    private func isPageableScroller(_ idx: Int) -> Bool {
+        let node = flatNodes[idx]
+        guard node.el.layout.scrollAxes.contains(.vertical),
+              !node.effectiveInert,
+              (scrollMaxExtents[node.path]?.y ?? 0) > 0.5 else { return false }
+        if case .exiting = scene.phase(node.nodeId) { return false }
+        return true
+    }
+
+    /// Unclaimed arrows and Space scroll a focused scroller. Page keys can also target a
+    /// focused descendant, the scroll view under the pointer, or another overflowing view.
     private func pageScroll(_ ev: KeyEvent, at now: Double) -> Bool {
+        guard !ev.mods.cmd, !ev.mods.alt, !ev.mods.ctrl else { return false }
+        let targetIdx: Int
+        let focusedScrollerKey: Bool
         switch ev.key {
+        case .arrowUp, .arrowDown, .space, .text(" "):
+            guard !ev.mods.shift || ev.key == .space || ev.key == .text(" "),
+                  let path = focusedPath, let idx = nodeByPath[path],
+                  isPageableScroller(idx) else { return false }
+            targetIdx = idx
+            focusedScrollerKey = true
         case .pageUp, .pageDown, .home, .end:
-            break
+            let staged = playgroundLive?.pressing == true
+            func pageable(_ idx: Int) -> Bool {
+                isPageableScroller(idx) && (!staged || isNodeUnder(idx, predicate: { Self.isPlaygroundStageKey($0) }))
+            }
+            func around(_ idx: Int) -> Int? {
+                var cur: Int? = idx
+                while let i = cur {
+                    if pageable(i) { return i }
+                    cur = flatNodes[i].parentIndex
+                }
+                return nil
+            }
+
+            // A virtualized field can keep focus after its own node has been unmounted.
+            var focusedIdx: Int?
+            var path = focusedPath
+            while let candidate = path {
+                if let idx = nodeByPath[candidate] { focusedIdx = idx; break }
+                path = candidate.lastIndex(of: "/").map { String(candidate[..<$0]) }
+            }
+            let hoveredIdx = scrollAt(pointerPosition.x, pointerPosition.y).flatMap { nodeByPath[$0] }
+            guard let idx = focusedIdx.flatMap(around) ?? hoveredIdx.flatMap(around)
+                ?? flatNodes.indices.first(where: pageable) else { return false }
+            targetIdx = idx
+            focusedScrollerKey = false
         default:
-            return false
-        }
-        if ev.mods.cmd || ev.mods.alt || ev.mods.ctrl { return false }
-
-        let staged = playgroundLive?.pressing == true
-        func pageable(_ idx: Int) -> Bool {
-            guard flatNodes.indices.contains(idx) else { return false }
-            let node = flatNodes[idx]
-            guard node.el.layout.scrollAxes.contains(.vertical),
-                  !node.effectiveInert,
-                  (scrollMaxExtents[node.path]?.y ?? 0) > 0.5 else {
-                return false
-            }
-            if case .exiting = scene.phase(node.nodeId) { return false }
-            if staged && !isNodeUnder(idx, predicate: { Self.isPlaygroundStageKey($0) }) {
-                return false
-            }
-            return true
-        }
-        func around(_ startIdx: Int) -> Int? {
-            var cur: Int? = startIdx
-            while let i = cur, flatNodes.indices.contains(i) {
-                if pageable(i) { return i }
-                cur = flatNodes[i].parentIndex
-            }
-            return nil
-        }
-
-        let focusedIdx: Int? = {
-            guard var path = focusedPath else { return nil }
-            while true {
-                if let idx = nodeByPath[path] { return idx }
-                guard let slash = path.lastIndex(of: "/") else { return nil }
-                path = String(path[..<slash])
-            }
-        }()
-        // `keys.rs` `page_scroll`: `self.pointer.and_then(|(x, y)| self.scroll_at(x, y))`.
-        let hoveredIdx = scrollAt(pointerPosition.x, pointerPosition.y).flatMap { nodeByPath[$0] }
-        guard let targetIdx = focusedIdx.flatMap(around)
-            ?? hoveredIdx.flatMap(around)
-            ?? flatNodes.indices.first(where: pageable) else {
             return false
         }
 
@@ -11117,6 +11121,9 @@ public final class Runtime<State> {
         var cur = scrollOffsets[path] ?? .zero
         let targetY: Float
         switch ev.key {
+        case .arrowUp: targetY = cur.y - 40
+        case .arrowDown: targetY = cur.y + 40
+        case .space, .text(" "): targetY = ev.mods.shift ? cur.y - page : cur.y + page
         case .pageUp: targetY = cur.y - page
         case .pageDown: targetY = cur.y + page
         case .home: targetY = 0
@@ -11134,7 +11141,7 @@ public final class Runtime<State> {
         if node.el.layout.stickBottom {
             if maxY - cur.y <= 2.0 { wasPinnedToBottom.insert(path) } else { wasPinnedToBottom.remove(path) }
         }
-        logInputEvent("page \(ev.key)")
+        logInputEvent("\(focusedScrollerKey ? "scroll" : "page") \(ev.key)")
         dirtyCommit(at: now, why: CommitWhy.input)
         return true
     }
