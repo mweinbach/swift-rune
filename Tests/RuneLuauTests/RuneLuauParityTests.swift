@@ -196,6 +196,40 @@ struct RuneLuauParityTests {
         #expect(try silent.query("metrics").get("last").asInt64 == 0)
     }
 
+    @Test("Deferred rows retain their own handlers and run with the configured VM budget")
+    func deferredRowCallbacks() throws {
+        var options = ScriptOptions()
+        options.instructionLimit = 2_500
+        options.timeLimit = .seconds(10)
+        let script = Script(name: "row-callbacks", sources: Sources.single("""
+            local ui = require("@rune/ui")
+            local callbacks = {}
+            return {
+                render = function(view)
+                    return ui.virtualList({
+                        count = 3, estimatedRowHeight = 24, h = 120, version = string.char(255),
+                        renderRow = function(i)
+                            local callback = function() return i end
+                            callbacks[i] = view:Handler(callback)
+                            if i == 3 then
+                                local total = 0
+                                for n = 1, 8000 do total += n end
+                                return ui.text(tostring(total))
+                            end
+                            return ui.text("row " .. i)
+                        end,
+                    })
+                end,
+                picks = function() return callbacks[1]() .. "/" .. callbacks[2]() end,
+            }
+            """), options: options)
+        let runtime = Runtime(state: LuauTestState(), viewport: Vec2(160, 120)) { _, cx in script.view(cx) }
+        _ = runtime.frame(at: 0)
+        #expect(try script.query("picks").asString == "1/2")
+        #expect(script.log.contains { $0.level == .error && $0.message.contains("watchdog") })
+        #expect(runtime.elements().contains { $0.text == "row 2" })
+    }
+
     @Test("P0: children accept false/number, reject true/reuse/stale elements")
     func childrenValidationAndReuse() throws {
         let script = Script(

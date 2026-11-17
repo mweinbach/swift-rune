@@ -681,8 +681,7 @@ public final class Script: @unchecked Sendable {
         guard let vm else { return String(index) }
         let value = try runTimed { try vm.call(value: fn, args: [.number(Double(index + 1))]).first ?? .nil }
         switch value {
-        case .string(let key): return key
-        case .number: return value.displayString
+        case .string, .byteString, .number: return value.displayString
         default: return String(index)
         }
     }
@@ -898,7 +897,7 @@ public final class Script: @unchecked Sendable {
         }
     }
 
-    private func runTimed<R>(_ body: () throws -> R) rethrows -> R {
+    internal func runTimed<R>(_ body: () throws -> R) rethrows -> R {
         guard let vm else { return try body() }
         return try runTimed(on: vm, body)
     }

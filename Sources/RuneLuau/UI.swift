@@ -459,9 +459,6 @@ internal final class LuauUIBridgeContext: @unchecked Sendable {
     let uiTable: LuauTable
     let viewTable: LuauTable
     fileprivate let templates = LuauUIBridge.Templates()
-    var handlerSlots: [LuauValue] = []
-    var handlerWrappers: [LuauValue] = []
-    var handlerCursor: Int = 0
 
     init(uiTable: LuauTable, viewTable: LuauTable) {
         self.uiTable = uiTable
@@ -719,7 +716,9 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
                     return Rune.memo(rowID, deps: rowVersion) {
                         let rowEnv = self.env.forRow()
                         return LuauUIBridge.withSession(vm: vm, stateType: State.self, env: rowEnv) { _ in
-                            self.renderRow(vm: vm, index: i, callback: renderRow, fallback: rowErrorFn).key(rowID)
+                            script.runTimed {
+                                self.renderRow(vm: vm, index: i, callback: renderRow, fallback: rowErrorFn).key(rowID)
+                            }
                         }
                     }
                 }) ?? Rune.el()
@@ -939,7 +938,7 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
         }
         let verArg = args[2]
         switch verArg {
-        case .nil, .bool, .number, .string:
+        case .nil, .bool, .number, .string, .byteString:
             break
         default:
             throw LuauRuntimeError(value: .string("view:Memo version cannot be a \(verArg.typeName)"))
@@ -1043,32 +1042,8 @@ internal enum LuauUIBridge {
             }
             return .values([try session.viewMemo(vm: vm, args: args)])
         }))
-        view.rawSet("Handler", value: .nativeFunction(LuauNativeFunction(name: "view:Handler") { vm, _, args in
-            let fn = args.count > 1 ? args[1] : .nil
-            guard case .closure = fn else {
-                if case .nativeFunction = fn {
-                    return .values([fn])
-                }
-                throw LuauRuntimeError(value: .string("view:Handler needs a function"))
-            }
-            guard let ctx = vm.getAppData(LuauUIBridgeContext.self) else {
-                return .values([fn])
-            }
-            let idx = ctx.handlerCursor
-            ctx.handlerCursor += 1
-            if idx < ctx.handlerSlots.count {
-                ctx.handlerSlots[idx] = fn
-                return .values([ctx.handlerWrappers[idx]])
-            }
-            ctx.handlerSlots.append(fn)
-            let wrapper = LuauValue.nativeFunction(LuauNativeFunction(name: "view.handlerWrapper") { vm, _, callArgs in
-                guard let ctx = vm.getAppData(LuauUIBridgeContext.self), idx < ctx.handlerSlots.count else {
-                    return .values([])
-                }
-                return .values(try vm.call(value: ctx.handlerSlots[idx], args: callArgs))
-            })
-            ctx.handlerWrappers.append(wrapper)
-            return .values([wrapper])
+        view.rawSet("Handler", value: .nativeFunction(LuauNativeFunction(name: "view:Handler") { _, _, args in
+            .values([args.count > 1 ? args[1] : .nil])
         }))
 
         let ctx = LuauUIBridgeContext(uiTable: ui, viewTable: view)
@@ -1085,14 +1060,11 @@ internal enum LuauUIBridge {
         let ctx = vm.getAppData(LuauUIBridgeContext.self) ?? installStatic(into: vm, hostNodes: [])
         let prevSession = ctx.activeSession
         let prevDark = ctx.viewTable.rawGet("dark")
-        let prevCursor = ctx.handlerCursor
         ctx.activeSession = UIRenderSession<State>(env: env, templates: ctx.templates)
         ctx.viewTable.rawSet("dark", value: .bool(env.dark))
-        ctx.handlerCursor = 0
         defer {
             ctx.activeSession = prevSession
             ctx.viewTable.rawSet("dark", value: prevDark)
-            ctx.handlerCursor = prevCursor
         }
         return try body(ctx.viewTable)
     }
@@ -1827,10 +1799,17 @@ internal enum LuauUIBridge {
         case .nil: h.combine(UInt8(0))
         case .bool(let b): h.combine(UInt8(1)); h.combine(b)
         case .number(let n): h.combine(UInt8(2)); h.combine(n.bitPattern)
-        case .string(let s):
+        case .string, .byteString:
+            // Rune's property reader treats a non-UTF-8 Luau string as empty.
+            let string: String
+            if case .byteString(let bytes) = val {
+                string = String(bytes: bytes, encoding: .utf8) ?? ""
+            } else {
+                string = val.asString ?? ""
+            }
             h.combine(UInt8(3))
-            h.combine(s.utf8.count)
-            for byte in s.utf8 { h.combine(byte) }
+            h.combine(string.utf8.count)
+            for byte in string.utf8 { h.combine(byte) }
         default:
             throw LuauRuntimeError(value: .string("a memo version must be nil, a boolean, a number or a string, got \(val.typeName)"))
         }
