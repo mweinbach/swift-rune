@@ -956,6 +956,14 @@ struct InteractionPerfParityWaveETests {
         let obj = try #require(parsed as? [String: Any])
         let resourceSpans = try #require(obj["resourceSpans"] as? [[String: Any]])
         #expect(resourceSpans.count == 1)
+        let resource = try #require(resourceSpans[0]["resource"] as? [String: Any])
+        let attributes = try #require(resource["attributes"] as? [[String: Any]])
+        let pid = attributes.first { $0["key"] as? String == "process.pid" }?["value"] as? [String: String]
+        #if os(WASI)
+        #expect(pid == nil)
+        #else
+        #expect(pid?["intValue"] == String(ProcessInfo.processInfo.processIdentifier))
+        #endif
         let scopeSpans = try #require(resourceSpans[0]["scopeSpans"] as? [[String: Any]])
         let outSpans = try #require(scopeSpans[0]["spans"] as? [[String: Any]])
         #expect(outSpans.count >= 3)

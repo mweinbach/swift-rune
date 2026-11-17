@@ -1325,15 +1325,15 @@ public enum InteractionExporter {
     }
 
     public static func encodeOTLPBody(serviceName: String = "rune-app", spans: [[String: Any]]) throws -> String {
-        let resource: [String: Any] = [
-            "attributes": [
-                kv("service.name", string: serviceName),
-                kv("process.pid", int: Int64(ProcessInfo.processInfo.processIdentifier)),
-            ]
-        ]
+        let service = kv("service.name", string: serviceName)
+        #if os(WASI)
+        let attributes = [service]
+        #else
+        let attributes = [service, kv("process.pid", int: Int64(ProcessInfo.processInfo.processIdentifier))]
+        #endif
         let payload: [String: Any] = [
             "resourceSpans": [[
-                "resource": resource,
+                "resource": ["attributes": attributes],
                 "scopeSpans": [[
                     "scope": ["name": "rune.interaction"],
                     "spans": spans,

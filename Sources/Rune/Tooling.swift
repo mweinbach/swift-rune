@@ -1780,7 +1780,9 @@ public enum HeadlessRunner {
             var lastDown = Vec2.zero
             var frameIndex = 0
             let dumpStride = max(1, args.stripEvery ?? 1)
+            #if !os(WASI)
             let wallStart = Date()
+            #endif
 
             if let dumpDir {
                 try FileManager.default.createDirectory(atPath: dumpDir, withIntermediateDirectories: true)
