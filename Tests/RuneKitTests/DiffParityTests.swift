@@ -1108,17 +1108,20 @@ struct DiffParityTests {
 
         // Split mode: annotation sits directly under the split pair row and on the right half
         rt.update(at: 0.02) { s, _ in s.diff.setMode(.split) }
-        _ = rt.frame(at: 0.03)
+        _ = rt.frame(at: 0.02)
         let sRows = rt.state.diff.rows(file: 0)
         let sPairIdx = sRows.firstIndex(where: { if case let .splitPair(_, n, _, _) = $0 { return n.newNumber == 10 }; return false })!
         let sRow = rt.element(byKey: "dv-srow-\(sPairIdx)")
         let sC1 = rt.element(byKey: "dv-note-c1")
-        #expect(sRow != nil && sC1 != nil)
-        if let sRow, let sC1 {
+        let sC2 = rt.element(byKey: "dv-note-c2")
+        #expect(sRow != nil && sC1 != nil && sC2 != nil)
+        if let sRow, let sC1, let sC2 {
             #expect(abs(sC1.rect[1] - (sRow.rect[1] + sRow.rect[3])) < 0.5)
-            // note container fills row width, with right-half child inside (`subview at x >= 449`)
-            let rightHalf = rt.elements().first(where: { $0.path.hasPrefix(sC1.path + "/") && $0.rect[0] >= 445.0 })
-            #expect(rightHalf != nil)
+            #expect(abs(sC2.rect[1] - (sC1.rect[1] + sC1.rect[3])) < 0.5)
+            for note in [sC1, sC2] {
+                #expect(abs(note.rect[0] - (sRow.rect[0] + sRow.rect[2] / 2)) < 0.5)
+                #expect(abs(note.rect[2] - sRow.rect[2] / 2) < 0.5)
+            }
             if let sn = rt.element(byKey: "dv-sn-\(sPairIdx)") {
                 let pt = Vec2(sn.rect[0] + sn.rect[2] * 0.5, sn.rect[1] + sn.rect[3] * 0.5)
                 rt.pointerDown(at: pt, at: 0.04)

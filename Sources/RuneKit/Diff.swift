@@ -3020,9 +3020,13 @@ public struct DiffView<State>: Sendable {
 
         if mode == .split {
             let emptyHalf = { El<State>(direction: .column).wFrac(0.5).minW(0) }
-            let noteHalf = El<State>(direction: .column).wFrac(0.5).minW(0).child(noteBody)
-            return El<State>(direction: .row)
+            let noteHalf = El<State>(direction: .column)
                 .key("\(prefix)-note-\(ann.id)")
+                .wFrac(0.5)
+                .minW(0)
+                .child(noteBody)
+            return El<State>(direction: .row)
+                .key("\(prefix)-split-\(ann.side.rawValue)-\(ann.line)-note-\(ann.id)")
                 .wFull()
                 .itemsStart()
                 .child(ann.side == .old ? noteHalf : emptyHalf())
