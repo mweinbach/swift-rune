@@ -12,7 +12,12 @@
         {
           "upstream": "src/a11y/actions.rs",
           "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Sources/Rune/A11y/A11ySetValue.swift",
+            "Tests/RuneTests/A11ySetValueParityTests.swift",
+            "Tests/RuneKitTests/WidgetA11yParityTests.swift",
+            "Tests/RuneTests/A11yReaderParityTests.swift",
+            "Tests/RuneTests/A11yFieldIdentityTests.swift"
           ],
           "status": "ported"
         },
@@ -28,10 +33,18 @@
           "swift": [
             "Sources/Rune/A11y/MacOSAccessibility.swift",
             "Sources/Rune/AccessibilityAndInput.swift",
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/A11y/MacOSAccessibilityText.swift",
+            "Sources/Rune/Platform/MacOSHostBridges.swift",
+            "Sources/Rune/Platform/WindowHostingMacOS.swift",
+            "Tests/RuneTests/A11yReaderParityTests.swift",
+            "Sources/Rune/A11y/A11yFieldLayout.swift",
+            "Tests/RuneTests/A11yShapedFieldTests.swift",
+            "Tests/RuneTests/A11yFieldSnapshotTests.swift",
+            "Tests/RuneTests/A11yRegionIdentityTests.swift"
           ],
           "status": "ported",
-          "note": "Ported MacOSAccessibilityHost (VoiceOver tree, focus changes, liveRegion & dialog announcements) and wired into MacOSApp.swift (381ca84 / eef55dc)"
+          "note": "Both macOS hosts expose the accessibility tree and complete UTF-16 text ranges, route selection to fields and allow off-main self queries (#1040, #1058)."
         },
         {
           "upstream": "src/a11y/mod.rs",
@@ -54,7 +67,11 @@
           "upstream": "src/a11y/roles.rs",
           "swift": [
             "Sources/Rune/AccessibilityAndInput.swift",
-            "Sources/Rune/El.swift"
+            "Sources/Rune/El.swift",
+            "Sources/Rune/A11y/A11ySetValue.swift",
+            "Tests/RuneTests/A11ySetValueParityTests.swift",
+            "Sources/Rune/A11y/A11yPlatformSettings.swift",
+            "Tests/RuneTests/A11yReaderParityTests.swift"
           ],
           "status": "ported"
         },
@@ -63,7 +80,9 @@
           "swift": [
             "Tests/RuneTests/TextEditInputParityTests.swift",
             "Tests/RuneTests/TextCloseoutRemainingTests.swift",
-            "Tests/RuneTests/TextUnblockAllTests.swift"
+            "Tests/RuneTests/TextUnblockAllTests.swift",
+            "Tests/RuneTests/A11yReaderParityTests.swift",
+            "Tests/RuneTests/A11yShapedFieldTests.swift"
           ],
           "status": "ported",
           "note": "Full tree/diff/dump/secure-redaction/liveRegion announcement parity tests ported"
@@ -72,7 +91,11 @@
           "upstream": "src/a11y/text.rs",
           "swift": [
             "Sources/Rune/AccessibilityAndInput.swift",
-            "Sources/Rune/A11y/MacOSAccessibility.swift"
+            "Sources/Rune/A11y/MacOSAccessibility.swift",
+            "Sources/Rune/A11y/MacOSAccessibilityText.swift",
+            "Tests/RuneTests/A11yReaderParityTests.swift",
+            "Sources/Rune/A11y/A11yFieldLayout.swift",
+            "Tests/RuneTests/A11yShapedFieldTests.swift"
           ],
           "status": "ported"
         },
@@ -80,9 +103,14 @@
           "upstream": "src/a11y/tree.rs",
           "swift": [
             "Sources/Rune/Accessibility/A11yTreeAndDump.swift",
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Sources/Rune/A11y/MacOSAccessibility.swift",
+            "Tests/RuneTests/A11yReaderParityTests.swift",
+            "Sources/Rune/A11y/AccessibilityNames.swift",
+            "Tests/RuneTests/A11yControlNameTests.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "Named controls suppress redundant spoken child labels (#1099)."
         },
         {
           "upstream": "src/a11y/unix.rs",
@@ -92,9 +120,11 @@
         },
         {
           "upstream": "src/a11y/windows.rs",
-          "swift": [],
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ],
           "status": "n/a",
-          "note": "Windows UIA platform target excluded on Apple platforms"
+          "note": "The Swift Win32 host provides no native UI Automation text provider. The upstream vendor changes for long accessible fields apply to that adapter."
         },
         {
           "upstream": "src/app.rs",
@@ -108,10 +138,12 @@
         {
           "upstream": "src/app/web.rs",
           "swift": [
-            "Sources/Rune/WebPlatform.swift"
+            "Sources/Rune/WebPlatform.swift",
+            "Sources/Rune/WebBrowserSession.swift",
+            "Sources/Rune/Resources/Web/rune-web.mjs"
           ],
-          "status": "n/a",
-          "note": "Web platform target; minimal stub only in WebPlatform.swift"
+          "status": "partial",
+          "note": "The browser reactor connects Rune input and CPU canvas rendering to the embedding page."
         },
         {
           "upstream": "src/backdrop_blur.wgsl",
@@ -129,21 +161,30 @@
         },
         {
           "upstream": "src/builtin_native.metallib",
-          "swift": [],
+          "swift": [
+            "Sources/Rune/Render/PrecompiledMetallib.swift",
+            "Sources/Rune/Resources/Metal/manifest.tsv"
+          ],
           "status": "n/a",
-          "note": "Precompiled upstream metallib; Swift compiles shaders directly"
+          "note": "Rust shader archive. Swift packages its own MSL libraries for macOS, iOS, and the simulator and validates them against a source hash."
         },
         {
           "upstream": "src/builtin_native_ios.metallib",
-          "swift": [],
+          "swift": [
+            "Sources/Rune/Render/PrecompiledMetallib.swift",
+            "Sources/Rune/Resources/Metal/manifest.tsv"
+          ],
           "status": "n/a",
-          "note": "Precompiled upstream metallib; Swift compiles shaders directly"
+          "note": "Rust shader archive. Swift packages its own MSL libraries for macOS, iOS, and the simulator and validates them against a source hash."
         },
         {
           "upstream": "src/builtin_native_ios_sim.metallib",
-          "swift": [],
+          "swift": [
+            "Sources/Rune/Render/PrecompiledMetallib.swift",
+            "Sources/Rune/Resources/Metal/manifest.tsv"
+          ],
           "status": "n/a",
-          "note": "Precompiled upstream metallib; Swift compiles shaders directly"
+          "note": "Rust shader archive. Swift packages its own MSL libraries for macOS, iOS, and the simulator and validates them against a source hash."
         },
         {
           "upstream": "src/clip.wgsl",
@@ -514,7 +555,8 @@
         {
           "upstream": "src/el/growth.rs",
           "swift": [
-            "Sources/Rune/El.swift"
+            "Sources/Rune/El.swift",
+            "Sources/Rune/Runtime/JoinedRowSeams.swift"
           ],
           "status": "partial"
         },
@@ -528,9 +570,13 @@
         {
           "upstream": "src/el/handlers.rs",
           "swift": [
-            "Sources/Rune/El.swift"
+            "Sources/Rune/El.swift",
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Input/CanvasGestureAndTouch.swift",
+            "Tests/RuneLuauTests/RuneLuauParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "pressOnDown dispatches on primary mouse down and retains touch and keyboard activation timing (#1102)."
         },
         {
           "upstream": "src/el/help.rs",
@@ -615,7 +661,8 @@
           "swift": [
             "Sources/Rune/El.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "The cold element data retains the outside list marker font metrics until layout knows the device scale (#1035)."
         },
         {
           "upstream": "src/el/ride_trailing.rs",
@@ -627,9 +674,12 @@
         {
           "upstream": "src/el/scroll.rs",
           "swift": [
-            "Sources/Rune/El.swift"
+            "Sources/Rune/El.swift",
+            "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift",
+            "Tests/RuneTests/ElInc4ParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Conditional scroll-end handlers can decline a view rebuild on initial and changed reports (#1054)."
         },
         {
           "upstream": "src/el/selection_style.rs",
@@ -662,43 +712,59 @@
         {
           "upstream": "src/el/tx.rs",
           "swift": [
-            "Sources/Rune/El.swift"
+            "Sources/Rune/El.swift",
+            "Sources/Rune/El/TxCommit.swift",
+            "Sources/Rune/Runtime/LiveTail.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/el/tx/keys.rs",
           "swift": [
-            "Sources/Rune/El.swift"
+            "Sources/Rune/El.swift",
+            "Sources/Rune/El/TxSlice2Extensions.swift",
+            "Tests/RuneTests/TxSlice2ParityTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/el/tx/press.rs",
           "swift": [
-            "Sources/Rune/El.swift"
+            "Sources/Rune/El.swift",
+            "Sources/Rune/El/TxSlice2Extensions.swift",
+            "Tests/RuneTests/TxSlice2ParityTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/el/tx/scroll.rs",
           "swift": [
-            "Sources/Rune/El.swift"
+            "Sources/Rune/El.swift",
+            "Sources/Rune/El/TxSlice2Extensions.swift",
+            "Tests/RuneTests/ScrollRuntimeSlice2ParityTests.swift",
+            "Tests/RuneTests/VirtualNestingParityTests.swift",
+            "Sources/Rune/Runtime/LiveTail.swift",
+            "Tests/RuneTests/LiveTailParityTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/el/tx/tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TxSlice2ParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Exercises commit intent sequences and two-handler merges."
         },
         {
           "upstream": "src/el/virtual_list.rs",
           "swift": [
-            "Sources/Rune/El.swift"
+            "Sources/Rune/El.swift",
+            "Sources/Rune/VirtualList.swift",
+            "Tests/RuneTests/VirtualRowPlacesTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Row indices retain keys in order, resolve hash collisions by equality, and preserve measurements across key replacement (#1031)."
         },
         {
           "upstream": "src/el/virtual_rows.rs",
@@ -752,7 +818,11 @@
         {
           "upstream": "src/frame.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/CommitWatch.swift",
+            "Sources/Rune/Runtime/FocusWhenShownAndPollSplit.swift",
+            "Tests/RuneTests/CommitWatchCauseSitesTests.swift",
+            "Tests/RuneTests/PollInputSplitParityTests.swift"
           ],
           "status": "partial"
         },
@@ -1219,7 +1289,8 @@
           "upstream": "src/input/key_diagnostics.rs",
           "swift": [
             "Sources/Rune/Input/PointerObserverAndDiagnostics.swift",
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Tests/RuneTests/VirtualRowPlacesTests.swift"
           ],
           "status": "ported",
           "note": "KeyDiagnostics.find(in:) wired in Runtime.commitTreePass -> Runtime.lastKeyDiagnostics (PointerObserverAndDiagnostics.swift + Runtime.swift + TextAuditCloseoutTests.swift)"
@@ -1336,9 +1407,12 @@
         },
         {
           "upstream": "src/live_only_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/LiveOnlyAndGrowthWalkParityTests.swift",
+            "Tests/RuneTests/Slice3TruncateLivePaintTests.swift"
+          ],
+          "status": "partial",
+          "note": "Physical key/release routing, retained actions and debug checks run in focused Swift fixtures."
         },
         {
           "upstream": "src/machine.rs",
@@ -1382,9 +1456,13 @@
         },
         {
           "upstream": "src/motion_gate/check.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "motion_gate not ported"
+          "swift": [
+            "Sources/Rune/MotionGate/MotionGateCheck.swift",
+            "Tests/RuneTests/MotionGateParityTests.swift",
+            "Tests/RuneTests/LiveTailParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Checks recordings for unexpected geometry and paint changes. Growth markers apply to descendants during pinned live-row delivery."
         },
         {
           "upstream": "src/motion_gate/check/commits.rs",
@@ -1460,9 +1538,14 @@
         },
         {
           "upstream": "src/motion_gate/mod.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "motion_gate not ported"
+          "swift": [
+            "Sources/Rune/MotionGate/MotionGateRunner.swift",
+            "Tests/RuneTests/MotionGateParityTests.swift",
+            "Tests/RuneTests/MotionGateExtendedParityTests.swift",
+            "Sources/Rune/Runtime/PaintProbe.swift"
+          ],
+          "status": "partial",
+          "note": "The Swift runner samples runtime geometry and painted properties on the virtual frame clock."
         },
         {
           "upstream": "src/motion_gate/paint_tests.rs",
@@ -1478,9 +1561,12 @@
         },
         {
           "upstream": "src/motion_gate/tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "motion_gate not ported"
+          "swift": [
+            "Tests/RuneTests/MotionGateParityTests.swift",
+            "Tests/RuneTests/MotionGateExtendedParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Runtime recordings distinguish animated layout from explicit teleports, exercise paint changes, and verify allowlists."
         },
         {
           "upstream": "src/native_menu/default_macos.rs",
@@ -2009,16 +2095,23 @@
         {
           "upstream": "src/platform/web.rs",
           "swift": [
-            "Sources/Rune/WebPlatform.swift"
+            "Sources/Rune/WebPlatform.swift",
+            "Tests/RuneTests/A11yReaderParityTests.swift",
+            "Sources/Rune/WebBrowserSession.swift"
           ],
-          "status": "n/a",
-          "note": "Web platform target; minimal stub only in WebPlatform.swift"
+          "status": "partial",
+          "note": "The browser session routes input into WebAppHost and presents CPU-rendered RuneRef frames on a canvas."
         },
         {
           "upstream": "src/platform/web/bridge.js",
-          "swift": [],
-          "status": "n/a",
-          "note": "Web JS bridge excluded"
+          "swift": [
+            "Sources/Rune/WebPlatform.swift",
+            "Sources/Rune/Resources/Web/rune-web.mjs",
+            "Sources/Rune/WebBrowserSession.swift",
+            "Tests/Browser/field-mirror.html"
+          ],
+          "status": "partial",
+          "note": "The shipped DOM adapter mirrors textareas and password inputs, selection, composition, and keyboard focus alongside the canvas (#1099)."
         },
         {
           "upstream": "src/platform/web/cpu_canvas.rs",
@@ -2053,10 +2146,13 @@
         {
           "upstream": "src/platform/web/input.rs",
           "swift": [
-            "Sources/Rune/WebPlatform.swift"
+            "Sources/Rune/WebPlatform.swift",
+            "Tests/RuneTests/A11yReaderParityTests.swift",
+            "Sources/Rune/WebFieldEvents.swift",
+            "Tests/RuneTests/WebFieldEventsTests.swift"
           ],
-          "status": "n/a",
-          "note": "Web platform target; minimal stub only in WebPlatform.swift"
+          "status": "partial",
+          "note": "Web fields exchange complete-line context, UTF-16 selection and edits through the host (#1099)."
         },
         {
           "upstream": "src/platform/web/page.rs",
@@ -2558,9 +2654,11 @@
         {
           "upstream": "src/render.rs",
           "swift": [
-            "Sources/Rune/MetalRenderer.swift"
+            "Sources/Rune/MetalRenderer.swift",
+            "Sources/Rune/Win32Platform.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Metal renderer on Apple platforms. The DX12 view-heap limit (#1044) applies to the upstream Windows GPU backend; Win32App presents RuneRef frames with GDI."
         },
         {
           "upstream": "src/render/backdrop_blur.rs",
@@ -2603,7 +2701,9 @@
         {
           "upstream": "src/render/cpu_boot.rs",
           "swift": [
-            "Sources/Rune/MetalRenderer.swift"
+            "Sources/Rune/MetalRenderer.swift",
+            "Sources/Rune/Render/CpuBoot/CpuBootBlend.swift",
+            "Tests/RuneTests/CpuBootParityTests.swift"
           ],
           "status": "partial"
         },
@@ -2617,7 +2717,9 @@
         {
           "upstream": "src/render/cpu_boot/bin.rs",
           "swift": [
-            "Sources/Rune/MetalRenderer.swift"
+            "Sources/Rune/MetalRenderer.swift",
+            "Sources/Rune/Render/CpuBoot/CpuBootBinAndDamage.swift",
+            "Tests/RuneTests/CpuBootParityTests.swift"
           ],
           "status": "partial"
         },
@@ -2849,16 +2951,22 @@
         {
           "upstream": "src/render/uber/metallib_hash.rs",
           "swift": [
-            "Sources/Rune/MetalRenderer.swift"
+            "Sources/Rune/Render/PrecompiledMetallib.swift",
+            "Sources/Rune/Resources/Metal/manifest.tsv",
+            "Tests/RuneTests/PrecompiledMetallibTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Swift records source hashes per MSL library and checks the manifest when loading bundled shaders."
         },
         {
           "upstream": "src/render/uber/windfoil_hash.rs",
           "swift": [
-            "Sources/Rune/MetalRenderer.swift"
+            "Sources/Rune/Render/PrecompiledMetallib.swift",
+            "Sources/Rune/Resources/Metal/manifest.tsv",
+            "Tests/RuneTests/PrecompiledMetallibTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Swift records source hashes per MSL library and checks the manifest when loading bundled shaders."
         },
         {
           "upstream": "src/render/uber_wgsl.rs",
@@ -2870,7 +2978,10 @@
         {
           "upstream": "src/render/upload.rs",
           "swift": [
-            "Sources/Rune/MetalRenderer.swift"
+            "Sources/Rune/MetalRenderer.swift",
+            "Sources/Rune/Render/MetalRendererEngine.swift",
+            "Sources/Rune/Render/RenderShaders.swift",
+            "Tests/RuneTests/CpuBootParityTests.swift"
           ],
           "status": "partial"
         },
@@ -2984,15 +3095,17 @@
         },
         {
           "upstream": "src/runtime/anchor_zoom_motion_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/AnchorZoomParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/runtime/anchor_zoom_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/AnchorZoomParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/runtime/anchored_grow_tests.rs",
@@ -3022,7 +3135,9 @@
         {
           "upstream": "src/runtime/commit/apply.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Live.swift",
+            "Tests/RuneTests/ElAndLiveHooksParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3034,9 +3149,22 @@
           "status": "partial"
         },
         {
+          "upstream": "src/runtime/commit/device.rs",
+          "swift": [
+            "Sources/Rune/Layout/TaffyBridge.swift",
+            "Sources/Rune/Layout/RuntimeLayout.swift",
+            "Sources/Rune/Layout/ElLayoutExtensions.swift",
+            "Tests/RuneTests/LayoutParityTests.swift",
+            "Tests/RuneKitTests/MarkdownCloseoutParityTests.swift"
+          ],
+          "status": "ported",
+          "note": "Layout snaps borders and calculates outside list disc geometry at the device pixel scale (#1035)."
+        },
+        {
           "upstream": "src/runtime/commit/flatten.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Layout/RuntimeLayout.swift"
           ],
           "status": "partial"
         },
@@ -3071,7 +3199,10 @@
         {
           "upstream": "src/runtime/commit/relayout.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Layout/RuntimeLayout.swift",
+            "Sources/Rune/Runtime/TextFill.swift",
+            "Tests/RuneTests/ParagraphsFindParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3147,9 +3278,11 @@
         },
         {
           "upstream": "src/runtime/grid_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/PaintGridAndBandsParityTests.swift"
+          ],
+          "status": "ported",
+          "note": "Checks identical instances on an unchanged grid and matching placements after a row update against a fresh runtime."
         },
         {
           "upstream": "src/runtime/hot_state.rs",
@@ -3160,9 +3293,10 @@
         },
         {
           "upstream": "src/runtime/hover_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/HoverRuntimeParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/runtime/input/action.rs",
@@ -3209,7 +3343,10 @@
         {
           "upstream": "src/runtime/input/focus.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/FocusWhenShownAndPollSplit.swift",
+            "Tests/RuneTests/FocusWhenShownParityTests.swift",
+            "Tests/RuneTests/Slice4EdgeParityWave3BTests.swift"
           ],
           "status": "partial"
         },
@@ -3251,7 +3388,9 @@
         {
           "upstream": "src/runtime/input/hover.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime/Inc5InputWatchRuntime.swift",
+            "Sources/Rune/Runtime/HoverHold.swift",
+            "Tests/RuneTests/HoverRuntimeParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3284,9 +3423,11 @@
         {
           "upstream": "src/runtime/input/keys.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Tests/RuneTests/Slice4EdgeParityWave3BTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "A focused scroll view takes line steps on Up/Down and page steps on Space/Shift+Space (#1086)."
         },
         {
           "upstream": "src/runtime/input/modal_focus.rs",
@@ -3312,7 +3453,9 @@
         {
           "upstream": "src/runtime/input/pointer.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Input/PointerHitParity.swift",
+            "Tests/RuneTests/PointerHitParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3372,9 +3515,11 @@
         },
         {
           "upstream": "src/runtime/input_click_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/PointerHitParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Exercises Shift+click extending a selection from its anchor."
         },
         {
           "upstream": "src/runtime/interaction.rs",
@@ -3417,9 +3562,11 @@
         },
         {
           "upstream": "src/runtime/live_check_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/Slice3TruncateLivePaintTests.swift"
+          ],
+          "status": "partial",
+          "note": "Covers hover attribution, retained exits, virtualized rows and property-specific warnings, including secure text."
         },
         {
           "upstream": "src/runtime/live_colors_tests.rs",
@@ -3497,22 +3644,30 @@
         {
           "upstream": "src/runtime/motion/live_check.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Tooling/LiveOnlyCheck.swift",
+            "Tests/RuneTests/Slice3TruncateLivePaintTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Checks compare view changes, redact secure text and identify the changed text property."
         },
         {
           "upstream": "src/runtime/motion/live_latch.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/LiveLatch.swift",
+            "Sources/Rune/Live.swift",
+            "Tests/RuneTests/ElAndLiveHooksParityTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/runtime/motion/live_latch_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/ElAndLiveHooksParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Runtime tests cover coalesced updates and publication during frame sampling. Rust also checks visibility transitions and exhaustive short event sequences."
         },
         {
           "upstream": "src/runtime/motion/loop_clock.rs",
@@ -3579,16 +3734,24 @@
         {
           "upstream": "src/runtime/paint/bands.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Render/PaintBands.swift",
+            "Sources/Rune/Render/RenderElAndRuntime.swift",
+            "Tests/RuneTests/BandsParityTests.swift",
+            "Tests/RuneTests/PaintGridAndBandsParityTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/runtime/paint/blend.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Render/RenderShaders.swift",
+            "Sources/Rune/Render/CpuBoot/CpuBootBlend.swift",
+            "Tests/RuneTests/CpuBootParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Byte UI targets round the covered source for translucent flat fills and grayscale glyphs before blending (#1043, #1050)."
         },
         {
           "upstream": "src/runtime/paint/border.rs",
@@ -3607,7 +3770,9 @@
         {
           "upstream": "src/runtime/paint/cache_layer.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Render/RenderElAndRuntime.swift",
+            "Tests/RuneTests/ElAndTxParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3620,7 +3785,9 @@
         {
           "upstream": "src/runtime/paint/content.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Render/RenderElAndRuntime.swift",
+            "Tests/RuneTests/ParagraphsFindParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3634,14 +3801,19 @@
         {
           "upstream": "src/runtime/paint/grid.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/TerminalGridPaintRuntime.swift",
+            "Tests/RuneTests/PaintGridAndBandsParityTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/runtime/paint/helpers.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Edit/RichTextFieldRender.swift",
+            "Sources/Rune/Render/RenderElAndRuntime.swift",
+            "Tests/RuneTests/RichBlockDecorationParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3655,7 +3827,9 @@
         {
           "upstream": "src/runtime/paint/raster_check.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/RasterCheck.swift",
+            "Tests/RuneTests/PaintGridAndBandsParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3704,7 +3878,10 @@
         {
           "upstream": "src/runtime/paint_probe.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/PaintProbe.swift",
+            "Sources/Rune/MotionGate/MotionGateRunner.swift",
+            "Tests/RuneTests/LiveColorsParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3735,9 +3912,13 @@
         },
         {
           "upstream": "src/runtime/row_reorder_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/VirtualAndGrowthSlice2ParityTests.swift",
+            "Tests/RuneTests/VirtualMachinesParityTests.swift",
+            "Tests/RuneTests/ScrollAndStickySlice2ParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Exercises growth-row reordering, reduced motion, stable focus and virtual row slides."
         },
         {
           "upstream": "src/runtime/scroll/anchor.rs",
@@ -3749,7 +3930,8 @@
         {
           "upstream": "src/runtime/scroll/bottom.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Tests/RuneTests/ScrollAndStickySlice2ParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3777,35 +3959,48 @@
         {
           "upstream": "src/runtime/scroll/nudge.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime/HoverHold.swift",
+            "Tests/RuneTests/HoverRuntimeParityTests.swift",
+            "Sources/Rune/Runtime/ScrollStateMachines.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/runtime/scroll/nudge_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/HoverRuntimeParityTests.swift",
+            "Tests/RuneTests/ScrollStateMachinesParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/runtime/scroll/offset.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime/ScrollOffsetRequests.swift",
+            "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift",
+            "Tests/RuneTests/ScrollHoverParityTests.swift",
+            "Tests/RuneTests/ScrollRuntimeSlice2ParityTests.swift",
+            "Sources/Rune/Runtime/VirtualNesting.swift",
+            "Tests/RuneTests/VirtualNestingParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "A scoped scroll request mounts the virtual row and then lands its named descendant (#1078)."
         },
         {
           "upstream": "src/runtime/scroll/requests.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/ScrollRequests.swift",
+            "Tests/RuneTests/ScrollStateMachinesParityTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/runtime/scroll/requests_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/ScrollStateMachinesParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/runtime/scroll/reveal.rs",
@@ -3817,7 +4012,10 @@
         {
           "upstream": "src/runtime/scroll/sticky.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Tests/RuneTests/ScrollAndStickySlice2ParityTests.swift",
+            "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift",
+            "Tests/RuneTests/ElInc4ParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3871,7 +4069,8 @@
         {
           "upstream": "src/runtime/selection/copy_join.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime/Selection/CopyJoin.swift",
+            "Tests/RuneTests/VirtualSelectionParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3891,9 +4090,12 @@
         {
           "upstream": "src/runtime/selection/links.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Text/RichTextAndColorIcons.swift",
+            "Tests/RuneTests/ParagraphsFindParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Editable find matches preserve their source byte range through reveal and hit testing (#1057)."
         },
         {
           "upstream": "src/runtime/selection/phase.rs",
@@ -3912,7 +4114,9 @@
         {
           "upstream": "src/runtime/selection/select_all.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime/Selection/SelectAll.swift",
+            "Sources/Rune/Runtime/Selection/VirtualSelectAll.swift",
+            "Tests/RuneTests/VirtualSelectionParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3995,9 +4199,11 @@
         },
         {
           "upstream": "src/runtime/tests/fold_glide.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/VirtualAndGrowthSlice2ParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Exercises the fold spring, interruption and clipping."
         },
         {
           "upstream": "src/runtime/tests/glyph_replay.rs",
@@ -4007,9 +4213,11 @@
         },
         {
           "upstream": "src/runtime/tests/group_opacity.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/ElSliceGroupOpacityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Exercises keyboard focus within a hover group and group opacity changes."
         },
         {
           "upstream": "src/runtime/tests/id_pruning.rs",
@@ -4019,9 +4227,11 @@
         },
         {
           "upstream": "src/runtime/tests/input_clipboard.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/Slice4EdgeParityWave3BTests.swift"
+          ],
+          "status": "partial",
+          "note": "Covers focused scroller arrow/space and page-key routing, virtualized inputs and image/file clipboard routing."
         },
         {
           "upstream": "src/runtime/tests/layout_hover.rs",
@@ -4049,9 +4259,11 @@
         },
         {
           "upstream": "src/runtime/tests/matched_scroll.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/VirtualAndGrowthSlice2ParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Exercises matched content flying home to a scrolled cell."
         },
         {
           "upstream": "src/runtime/tests/mod.rs",
@@ -4085,9 +4297,11 @@
         },
         {
           "upstream": "src/runtime/tests/pointer_hit.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/PointerHitParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Exercises pointer observation, hit-testing, secondary press routing and double press."
         },
         {
           "upstream": "src/runtime/tests/press_moving.rs",
@@ -4127,39 +4341,54 @@
         },
         {
           "upstream": "src/runtime/tests/scroll_carried.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/ScrollRuntimeSlice2ParityTests.swift",
+            "Tests/RuneTests/ScrollAndStickySlice2ParityTests.swift"
+          ],
+          "status": "ported",
+          "note": "The transformed scroll fixture checks inner zoom, outer zoom and rotation every frame through the final 300/480-point displacement."
         },
         {
           "upstream": "src/runtime/tests/scroll_children.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/ScrollRuntimeSlice2ParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Exercises direct children, paging and revealing a virtual row taller than its viewport."
         },
         {
           "upstream": "src/runtime/tests/scroll_growth.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/VirtualAndGrowthSlice2ParityTests.swift",
+            "Tests/RuneTests/ScrollAndStickySlice2ParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Exercises pinned growth, streaming updates and manual unpinning."
         },
         {
           "upstream": "src/runtime/tests/scroll_hover.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/ScrollHoverParityTests.swift",
+            "Tests/RuneTests/HoverRuntimeParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/runtime/tests/scroll_retarget.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/ScrollRuntimeSlice2ParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Exercises spring retargeting mid-flight."
         },
         {
           "upstream": "src/runtime/tests/scroll_spring.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/ScrollRuntimeSlice2ParityTests.swift",
+            "Tests/RuneTests/ScrollAndStickySlice2ParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Exercises default and custom spring targets."
         },
         {
           "upstream": "src/runtime/tests/secure_text.rs",
@@ -4181,9 +4410,10 @@
         },
         {
           "upstream": "src/runtime/tests/selection_phase_virtual.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/SelectionPhaseVirtualParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/runtime/tests/shimmer.rs",
@@ -4280,55 +4510,110 @@
         {
           "upstream": "src/runtime/virtual/fill.rs",
           "swift": [
-            "Sources/Rune/VirtualList.swift"
+            "Sources/Rune/VirtualList.swift",
+            "Sources/Rune/Runtime/VirtualFill.swift",
+            "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift",
+            "Tests/RuneTests/VirtualMachinesParityTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/runtime/virtual/fill_resume_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Added in a6b50375"
+          "swift": [
+            "Tests/RuneTests/VirtualAndGrowthSlice2ParityTests.swift",
+            "Tests/RuneTests/ScrollAndStickySlice2ParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Exercises jumps and progressive measurement of thin rows within the fill budget."
         },
         {
           "upstream": "src/runtime/virtual/fill_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/VirtualMachinesParityTests.swift"
+          ],
+          "status": "ported",
+          "note": "Includes the independent twelve-frame counter oracle and the 36,001-tick trace with twenty abandoned deadlines."
+        },
+        {
+          "upstream": "src/runtime/virtual/handoff.rs",
+          "swift": [
+            "Sources/Rune/Runtime/TailHandoff.swift",
+            "Sources/Rune/Runtime/LiveTail.swift",
+            "Tests/RuneTests/TailHandoffParityTests.swift"
+          ],
+          "status": "ported",
+          "note": "A newly delivered row borrows room from the adjacent panel, with both edges following its growth (#1100)."
+        },
+        {
+          "upstream": "src/runtime/virtual/live_tail_tests.rs",
+          "swift": [
+            "Tests/RuneTests/LiveTailParityTests.swift",
+            "Tests/RuneTests/TailHandoffParityTests.swift",
+            "Tests/RuneTests/JoinedRowSeamTests.swift"
+          ],
+          "status": "ported",
+          "note": "Covers delivery, geometry-only changes, width holds, policy controls, adjacent face/corner retargeting and covered polls. The ink, unpinned and panel-handoff recordings run at 120 Hz."
         },
         {
           "upstream": "src/runtime/virtual/pins.rs",
           "swift": [
-            "Sources/Rune/VirtualList.swift"
+            "Sources/Rune/VirtualList.swift",
+            "Sources/Rune/Runtime/VirtualPinsAndSelection.swift",
+            "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift",
+            "Tests/RuneTests/PreparedRowRemountTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/runtime/virtual/pins_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/VirtualMachinesParityTests.swift",
+            "Tests/RuneTests/PreparedRowRemountTests.swift"
+          ],
+          "status": "ported",
+          "note": "Checks five-event pin histories with indexed and stored builder interruptions, provider retention, and nested prepared remount fallback driven by runtime scrolling."
         },
         {
           "upstream": "src/runtime/virtual/row_reorder.rs",
           "swift": [
-            "Sources/Rune/VirtualList.swift"
+            "Sources/Rune/VirtualList.swift",
+            "Sources/Rune/Runtime/LiveTail.swift",
+            "Sources/Rune/Runtime/JoinedRowSeams.swift",
+            "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift",
+            "Tests/RuneTests/LiveTailParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Pinned-tail eligibility, motion, ink and shared row boundaries have dedicated live-tail fixtures (#1085, #1098)."
+        },
+        {
+          "upstream": "src/runtime/virtual/row_reorder/joined.rs",
+          "swift": [
+            "Sources/Rune/Runtime/JoinedRowSeams.swift",
+            "Tests/RuneTests/JoinedRowSeamTests.swift"
+          ],
+          "status": "ported",
+          "note": "Previously visible faces share their drawn and interactive boundary through reordering in the reference and native render paths (#1098)."
         },
         {
           "upstream": "src/runtime/virtual/selection.rs",
           "swift": [
-            "Sources/Rune/VirtualList.swift"
+            "Sources/Rune/Runtime/Selection/VirtualSelectionEnds.swift",
+            "Sources/Rune/Runtime/Selection/VirtualSelectRequest.swift",
+            "Tests/RuneTests/VirtualSelectionEndsParityTests.swift",
+            "Tests/RuneTests/VirtualSelectionParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Resolves selection holders, focus and code-driven requests by stable row identity."
         },
         {
           "upstream": "src/runtime/virtual/selection_collect.rs",
           "swift": [
-            "Sources/Rune/VirtualList.swift"
+            "Sources/Rune/Runtime/Selection/VirtualSelectionCollect.swift",
+            "Sources/Rune/Runtime/Selection/CopyJoin.swift",
+            "Tests/RuneTests/VirtualSelectionParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Collects bounded mounted and offscreen virtual selections and joins copied rows."
         },
         {
           "upstream": "src/runtime/virtual/window.rs",
@@ -4339,15 +4624,18 @@
         },
         {
           "upstream": "src/runtime/virtual_selection_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/VirtualSelectionParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/runtime/virtual_store_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/VirtualAndGrowthSlice2ParityTests.swift"
+          ],
+          "status": "partial",
+          "note": "Covers release of an offscreen row when replacing a virtual list. Rust additionally checks the resource lifetime inside each replacement builder."
         },
         {
           "upstream": "src/runtime/visible.rs",
@@ -4418,7 +4706,9 @@
         {
           "upstream": "src/runtime/web/runtime.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/WebPlatform.swift",
+            "Tests/RuneTests/A11yReaderParityTests.swift"
           ],
           "status": "partial"
         },
@@ -4451,9 +4741,13 @@
         {
           "upstream": "src/shader.wgsl",
           "swift": [
-            "Sources/Rune/MetalRenderer.swift"
+            "Sources/Rune/MetalRenderer.swift",
+            "Sources/Rune/Render/RenderShaders.swift",
+            "Sources/Rune/Render/CpuBoot/CpuBootBlend.swift",
+            "Tests/RuneTests/CpuBootParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Byte UI targets round the covered source for translucent flat fills and grayscale glyphs before blending (#1043, #1050)."
         },
         {
           "upstream": "src/shape.rs",
@@ -4901,7 +5195,9 @@
           "upstream": "src/text/line_break.rs",
           "swift": [
             "Sources/Rune/Text.swift",
-            "Sources/Rune/PortableText.swift"
+            "Sources/Rune/PortableText.swift",
+            "Sources/Rune/El/ElDisplayResolve.swift",
+            "Tests/RuneTests/RichBlockIndentParityTests.swift"
           ],
           "status": "ported"
         },
@@ -5303,9 +5599,11 @@
         {
           "upstream": "src/tooling/headless.rs",
           "swift": [
-            "Sources/Rune/Tooling.swift"
+            "Sources/Rune/Tooling.swift",
+            "Tests/RuneExamplesTests/ExampleParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Headless captures replay input against the virtual frame clock."
         },
         {
           "upstream": "src/tooling/headless_run.rs",
@@ -5605,27 +5903,39 @@
         },
         {
           "upstream": "src/uber.metallib",
-          "swift": [],
+          "swift": [
+            "Sources/Rune/Render/PrecompiledMetallib.swift",
+            "Sources/Rune/Resources/Metal/manifest.tsv"
+          ],
           "status": "n/a",
-          "note": "Precompiled upstream metallib; Swift compiles shaders directly"
+          "note": "Rust shader archive. Swift packages its own MSL libraries for macOS, iOS, and the simulator and validates them against a source hash."
         },
         {
           "upstream": "src/uber_native.metallib",
-          "swift": [],
+          "swift": [
+            "Sources/Rune/Render/PrecompiledMetallib.swift",
+            "Sources/Rune/Resources/Metal/manifest.tsv"
+          ],
           "status": "n/a",
-          "note": "Precompiled upstream metallib; Swift compiles shaders directly"
+          "note": "Rust shader archive. Swift packages its own MSL libraries for macOS, iOS, and the simulator and validates them against a source hash."
         },
         {
           "upstream": "src/uber_windfoil.metallib",
-          "swift": [],
+          "swift": [
+            "Sources/Rune/Render/PrecompiledMetallib.swift",
+            "Sources/Rune/Resources/Metal/manifest.tsv"
+          ],
           "status": "n/a",
-          "note": "Precompiled upstream metallib; Swift compiles shaders directly"
+          "note": "Rust shader archive. Swift packages its own MSL libraries for macOS, iOS, and the simulator and validates them against a source hash."
         },
         {
           "upstream": "src/uber_windfoil_native.metallib",
-          "swift": [],
+          "swift": [
+            "Sources/Rune/Render/PrecompiledMetallib.swift",
+            "Sources/Rune/Resources/Metal/manifest.tsv"
+          ],
           "status": "n/a",
-          "note": "Precompiled upstream metallib; Swift compiles shaders directly"
+          "note": "Rust shader archive. Swift packages its own MSL libraries for macOS, iOS, and the simulator and validates them against a source hash."
         },
         {
           "upstream": "src/video/foreign.rs",
@@ -5814,9 +6124,12 @@
         },
         {
           "upstream": "src/window/covered_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/WindowLifecycleParityTests.swift",
+            "Tests/RuneTests/CoveredWindowHostParityTests.swift"
+          ],
+          "status": "ported",
+          "note": "Covers hidden polls, frozen in-flight presentation with zero commits while covered, and immediate settlement on uncover."
         },
         {
           "upstream": "src/window/cpu_frame.rs",
@@ -6242,10 +6555,12 @@
         {
           "upstream": "src/text/paragraphs/lazy.rs",
           "swift": [
-            "Sources/Rune/Text/ParagraphsLazy.swift"
+            "Sources/Rune/Text/ParagraphsLazy.swift",
+            "Tests/RuneTests/ParagraphsLazyParityTests.swift",
+            "Tests/RuneTests/ParagraphsFindParityTests.swift"
           ],
-          "status": "ported",
-          "note": "Lazy long paste: AsciiLine, LAZY_MIN/EAGER_END/EAGER_START, runs <=512 lines, split_run, fill_paragraphs (165f87a4 #957, 2371240d #990); Tests/RuneTests/ParagraphsLazyParityTests.swift"
+          "status": "partial",
+          "note": "CoreText packs lazy ASCII paragraphs and shapes them within the frame budget. Packed runs preserve source byte offsets for find/reveal (#957, #990, #1057). The portable text backend lays paragraphs out eagerly."
         },
         {
           "upstream": "src/runtime/text_fill.rs",
@@ -6286,6 +6601,14 @@
           "note": "NOT REQUIRED: paint subtree copy cache, byte-identical output (f3461ea8 #952, 8fc71fbf #984, 214d22d7 r441)"
         },
         {
+          "upstream": "src/runtime/paint/cycle.rs",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ],
+          "status": "n/a",
+          "note": "WebGPU spinner-only damage and retained instance uploads (#1033). The CPU path renders the complete frame."
+        },
+        {
           "upstream": "src/clipboard/primary.rs",
           "swift": [],
           "status": "n/a",
@@ -6305,9 +6628,19 @@
         },
         {
           "upstream": "src/platform/web/pipelines.rs",
-          "swift": [],
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ],
           "status": "n/a",
-          "note": "Web only (7608d836 #977)"
+          "note": "Rust bridge to WebGPU asynchronous pipeline compilation. WebAppHost renders through the CPU reference rasterizer."
+        },
+        {
+          "upstream": "src/platform/web/pipelines.js",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ],
+          "status": "n/a",
+          "note": "WebGPU asynchronous pipeline compilation (#977). WebAppHost renders through the CPU reference rasterizer."
         },
         {
           "upstream": "src/platform/win32/segmenter.rs",
@@ -6317,9 +6650,12 @@
         },
         {
           "upstream": "src/render/damaged.rs",
-          "swift": [],
+          "swift": [
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/WebPlatform.swift"
+          ],
           "status": "n/a",
-          "note": "Windows-only (delta-2/3 NOT REQUIRED); macOS/iOS use the Metal path (e1d5cd48 #852 partial frames)"
+          "note": "Rust retains a GPU render target for Windows damage and WebGPU spinner redraws (#1033). The Swift Windows host presents RuneRef frames with GDI StretchDIBits and WebAppHost renders through RuneRef."
         },
         {
           "upstream": "src/render/uber/pass_dxbc_hash.rs",
@@ -6360,10 +6696,10 @@
           "note": "Windows-only (delta-2/3 NOT REQUIRED); macOS/iOS use the Metal path (b459621c #844 frame slot)"
         }
       ],
-      "note": "Core engine (~50% symbol parity); missing motion_gate (17), gpu/metal (n/a Metal.framework), win32/linux/android/web stubs",
+      "note": "Core native runtime, layout, input, rendering and platform hosts. Module mappings track file-level coverage; symbol counts below are from the earlier reports.",
       "parity": {
-        "files": "380 ported, 355 partial, 53 missing, 76 n/a",
-        "pubSymbols": "2385/4714 (51%)",
+        "files": "175 ported, 476 partial, 173 missing, 100 n/a",
+        "pubSymbols": "2385/4714 (historical inventory in the referenced reports)",
         "report": "core.md, core-text.md, core-render.md, core-platform.md"
       },
       "swiftOnly": [
@@ -6710,9 +7046,11 @@
         {
           "upstream": "src/markdown/render.rs",
           "swift": [
-            "Sources/RuneKit/Markdown.swift"
+            "Sources/RuneKit/Markdown.swift",
+            "Tests/RuneKitTests/MarkdownCloseoutParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Markdown outside list markers use font metrics and commit scale (#1035)."
         },
         {
           "upstream": "src/markdown/stream.rs",
@@ -6923,10 +7261,11 @@
           "swift": [
             "Sources/RuneKit/Shell.swift",
             "Sources/RuneKit/TabStrip.swift",
-            "Sources/RuneKit/TabStripLazy.swift"
+            "Sources/RuneKit/TabStripLazy.swift",
+            "Tests/RuneKitTests/ShellAndTabStripTests.swift"
           ],
           "status": "partial",
-          "note": "TabSlot/BAND_PAST/lazy_tabs band (80022c59 #1020, up-kit-2) ported; tests TabStripLazyTests"
+          "note": "Lazy tab bands (#1020), tab selection on press, and live-only release after selection (#1051, #1061)."
         },
         {
           "upstream": "src/shell/tab_strip/auto_scroll.rs",
@@ -6945,9 +7284,12 @@
         {
           "upstream": "src/shell/tab_strip/tab.rs",
           "swift": [
-            "Sources/RuneKit/Shell.swift"
+            "Sources/RuneKit/Shell.swift",
+            "Sources/RuneKit/TabStrip.swift",
+            "Tests/RuneKitTests/ShellAndTabStripTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "The live tab selects on primary down, supports squeezed inactive tabs, and keeps release live-only (#1051, #1061)."
         },
         {
           "upstream": "src/shell/tab_strip/tests.rs",
@@ -8745,7 +9087,9 @@
         {
           "upstream": "src/ui/host.rs",
           "swift": [
-            "Sources/RuneLuau/UI.swift"
+            "Sources/RuneLuau/UI.swift",
+            "Sources/RuneLuau/RuneLuau.swift",
+            "Tests/RuneLuauTests/RuneLuauParityTests.swift"
           ],
           "status": "ported"
         },
@@ -8766,7 +9110,9 @@
         {
           "upstream": "src/ui/props.rs",
           "swift": [
-            "Sources/RuneLuau/UI.swift"
+            "Sources/RuneLuau/UI.swift",
+            "Sources/RuneLuau/RuneLuau.swift",
+            "Tests/RuneLuauTests/RuneLuauParityTests.swift"
           ],
           "status": "partial",
           "note": "All props decoded/wired except fadeOut (El.truncateFade), container dir (El.dir), and split hoverMotion (El.hoverMotion) awaiting Rune El APIs"
