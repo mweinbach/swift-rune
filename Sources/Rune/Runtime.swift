@@ -3418,7 +3418,6 @@ public final class Runtime<State> {
                 )
             }
             guard matches.contains(true) else { continue }
-            if ownerIdx == nil { ownerIdx = i }
             let baseRect = scrolled ? n.targetRect : n.unscrolledRect
             for (k, r) in highlightBoxes(node: n, boxRect: baseRect) where matches[k] {
                 if let u = union {
@@ -3429,6 +3428,7 @@ public final class Runtime<State> {
                         bottom: max(u.bottom, r.bottom)
                     )
                 } else {
+                    ownerIdx = i
                     union = r
                 }
             }
