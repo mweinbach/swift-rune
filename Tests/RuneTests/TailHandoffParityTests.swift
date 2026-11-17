@@ -47,15 +47,29 @@ struct TailHandoffParityTests {
             let row = try #require(rt.growthRows["growth:\(arrival.path)"])
             let room = try #require(rt.element(byKey: "room")).rect
             let viewport = try #require(rt.element(byKey: "viewport")).rect
+            let working = try #require(rt.element(byKey: "working")).rect
             if i == 60 {
                 #expect(room[3] > 0 && room[3] < 40)
             }
             #expect(abs(room[3] - 40 * (1 - row.track.h / 64)) < 1.0 / 64.0)
             #expect(abs(viewport[1] + viewport[3] - room[1]) < 1.0 / 64.0)
+            #expect(abs(working[1] + working[3] - room[1]) < 1.0 / 64.0)
             #expect(abs(room[1] + room[3] - 180) < 1.0 / 64.0)
         }
         #expect(try #require(rt.element(byKey: "room")).rect[3] == 0)
         #expect(rt.scrollAtBottom(forKey: "viewport") == true)
+    }
+
+    @Test("A delivered row and its panel pass the 120 Hz motion gate")
+    func roomHandoffMotionGate() {
+        let run = MotionGateRun(runtime(), hz: 120)
+        run.idle(0.45)
+        run.step()
+        run.play(1.05)
+        run.quiet()
+        run.stepN(4)
+        let findings = motionGateCheck(run.rec)
+        #expect(findings.isEmpty)
     }
 
     @Test("A retained whole row relinquishes its footer at the incoming row's rate")

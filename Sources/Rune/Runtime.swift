@@ -7125,7 +7125,7 @@ public final class Runtime<State> {
                         // into window space using ancestor scales and turns (`elements.rs:195-202,273-276`).
                         let s = newScaleByPath[pNode.path] ?? Vec2(1, 1)
                         var dx = off.x * s.x
-                        var dy = off.y * s.y
+                        var dy = (off.y + (slice2State.scrollExtraYByPath[pNode.path] ?? 0)) * s.y
                         if let t = newTurnByPath[pNode.path] {
                             let rx = t.a * dx + t.b * dy
                             let ry = t.c * dx + t.d * dy
@@ -7141,7 +7141,8 @@ public final class Runtime<State> {
             }()
             let scrolled: Vec2 = {
                 if !el.layout.scrollAxes.isEmpty {
-                    return scrollOffsets[snap.path] ?? .zero
+                    let offset = scrollOffsets[snap.path] ?? .zero
+                    return Vec2(offset.x, offset.y + (slice2State.scrollExtraYByPath[snap.path] ?? 0))
                 }
                 return carriedScrolled
             }()
