@@ -37,21 +37,12 @@ internal func computeBlockLayout(
         height: style.overflow.x == .scroll ? style.scrollbarWidth : 0
     )
 
-    let minSize = Size(
-        width: style.minSize.width.maybeResolve(parentSize.width).map { $0 + adj.width },
-        height: style.minSize.height.maybeResolve(parentSize.height).map { $0 + adj.height }
-    )
-    let maxSize = Size(
-        width: style.maxSize.width.maybeResolve(parentSize.width).map { $0 + adj.width },
-        height: style.maxSize.height.maybeResolve(parentSize.height).map { $0 + adj.height }
-    )
+    let minSize = style.resolveMinSize(parent: parentSize, adjustment: adj)
+    let maxSize = style.resolveMaxSize(parent: parentSize, adjustment: adj)
 
     let styleSize: Size<Float?>
     if input.sizingMode == .inherentSize {
-        styleSize = Size(
-            width: style.size.width.maybeResolve(parentSize.width).map { $0 + adj.width },
-            height: style.size.height.maybeResolve(parentSize.height).map { $0 + adj.height }
-        )
+        styleSize = style.resolveSize(parent: parentSize, adjustment: adj)
     } else {
         styleSize = .none
     }
@@ -127,18 +118,9 @@ internal func computeBlockLayout(
         let cPb = cPad.sumAxes + cBorder.sumAxes
         let cAdj = cStyle.contentBoxAdjustment(paddingBorderSum: cPb)
 
-        let cSize = Size(
-            width: cStyle.size.width.maybeResolve(innerParentSize.width).map { $0 + cAdj.width },
-            height: cStyle.size.height.maybeResolve(innerParentSize.height).map { $0 + cAdj.height }
-        )
-        let cMin = Size(
-            width: cStyle.minSize.width.maybeResolve(innerParentSize.width).map { $0 + cAdj.width },
-            height: cStyle.minSize.height.maybeResolve(innerParentSize.height).map { $0 + cAdj.height }
-        )
-        let cMax = Size(
-            width: cStyle.maxSize.width.maybeResolve(innerParentSize.width).map { $0 + cAdj.width },
-            height: cStyle.maxSize.height.maybeResolve(innerParentSize.height).map { $0 + cAdj.height }
-        )
+        let cSize = cStyle.resolveSize(parent: innerParentSize, adjustment: cAdj)
+        let cMin = cStyle.resolveMinSize(parent: innerParentSize, adjustment: cAdj)
+        let cMax = cStyle.resolveMaxSize(parent: innerParentSize, adjustment: cAdj)
         let cMargin = cStyle.resolvedMargin(parentWidth: innerParentSize.width)
 
         items.append(BlockItem(

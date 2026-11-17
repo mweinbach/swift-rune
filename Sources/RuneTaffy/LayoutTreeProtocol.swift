@@ -193,14 +193,8 @@ internal func computeLeafLayout(
         height: style.overflow.x == .scroll ? style.scrollbarWidth : 0
     )
 
-    let resolvedMin = Size(
-        width: style.minSize.width.maybeResolve(parentSize.width).map { $0 + adj.width },
-        height: style.minSize.height.maybeResolve(parentSize.height).map { $0 + adj.height }
-    )
-    let resolvedMax = Size(
-        width: style.maxSize.width.maybeResolve(parentSize.width).map { $0 + adj.width },
-        height: style.maxSize.height.maybeResolve(parentSize.height).map { $0 + adj.height }
-    )
+    let resolvedMin = style.resolveMinSize(parent: parentSize, adjustment: adj)
+    let resolvedMax = style.resolveMaxSize(parent: parentSize, adjustment: adj)
 
     var known = input.knownDimensions
     if input.sizingMode == .inherentSize {
@@ -227,8 +221,8 @@ internal func computeLeafLayout(
     let topMargin = input.verticalMarginsAreCollapsible.start ? CollapsibleMarginSet.fromMargin(margin.top) : .zero
     let bottomMargin = input.verticalMarginsAreCollapsible.end ? CollapsibleMarginSet.fromMargin(margin.bottom) : .zero
 
-    // If both dimensions are already known, return immediately without calling measure
-    if let w = known.width, let h = known.height {
+    // The real layout pass still needs intrinsic content and the measured text baseline.
+    if input.runMode == .computeSize, let w = known.width, let h = known.height {
         let clampedSize = Size(
             width: maybeClamp(Swift.max(w, pbSum.width + scrollbarSize.width), min: resolvedMin.width, max: resolvedMax.width),
             height: maybeClamp(Swift.max(h, pbSum.height + scrollbarSize.height), min: resolvedMin.height, max: resolvedMax.height)

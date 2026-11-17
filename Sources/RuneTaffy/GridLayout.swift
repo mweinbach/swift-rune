@@ -95,21 +95,12 @@ internal func computeGridLayout(
     )
     let innerPB = Size(width: contentBoxInset.horizontalSum, height: contentBoxInset.verticalSum)
 
-    let minSize = Size(
-        width: style.minSize.width.maybeResolve(parentSize.width).map { $0 + adj.width },
-        height: style.minSize.height.maybeResolve(parentSize.height).map { $0 + adj.height }
-    )
-    let maxSize = Size(
-        width: style.maxSize.width.maybeResolve(parentSize.width).map { $0 + adj.width },
-        height: style.maxSize.height.maybeResolve(parentSize.height).map { $0 + adj.height }
-    )
+    let minSize = style.resolveMinSize(parent: parentSize, adjustment: adj)
+    let maxSize = style.resolveMaxSize(parent: parentSize, adjustment: adj)
 
     let styleSize: Size<Float?>
     if input.sizingMode == .inherentSize {
-        styleSize = Size(
-            width: style.size.width.maybeResolve(parentSize.width).map { $0 + adj.width },
-            height: style.size.height.maybeResolve(parentSize.height).map { $0 + adj.height }
-        )
+        styleSize = style.resolveSize(parent: parentSize, adjustment: adj)
     } else {
         styleSize = .none
     }

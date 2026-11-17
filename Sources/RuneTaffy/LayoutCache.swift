@@ -331,194 +331,242 @@ private func cacheMode(_ input: LayoutInput) -> UInt8 {
     return inherent | ((c.start ? UInt8(1) : 0) << 1) | ((c.end ? UInt8(1) : 0) << 2)
 }
 
-private struct CompactMeasureEntry: Sendable, Equatable {
-    var kdAvailableSpace: UInt64
-    var parentSize: UInt64
-    var kdDef: UInt8
-    var size: Size<Float>
+private struct CompactMeasureEntry: Sendable {
+    var kdAvailableSpace: UInt64 = 0
+    var parentSize: UInt64 = 0
+    var size = Size<Float>.zero
 
-    static let zero = CompactMeasureEntry(kdAvailableSpace: 0, parentSize: 0, kdDef: 0, size: .zero)
+    @inline(__always)
+    func matchesSize(_ key: CacheKey) -> Bool {
+        kdAvailableSpace == key.kdAvailableSpace
+            && CacheKey.xAxisParentSize(parentSize) == CacheKey.xAxisParentSize(key.parentSize)
+            && CacheKey.sizeIsValidFor(entryParentSize: parentSize, queryParentSize: key.parentSize)
+    }
+}
+
+/// Matches the upstream cache's 32-bit metadata word. The valid bits distinguish empty
+/// inline slots from real zero-valued keys; no slot needs a separate Optional tag.
+private struct CacheMetadata: Sendable {
+    private var bits: UInt32 = 0
+
+    var isEmpty: Bool { bits & 0x3FF == 0 }
+    var measureMask: UInt32 { bits & 0x1FF }
+    var hasFinal: Bool { bits & (1 << 9) != 0 }
+    var mode: UInt8 { UInt8((bits >> 23) & 7) }
+    var next: Int { Int((bits >> 19) & 15) }
+
+    mutating func clear(keepingMode mode: UInt8) { bits = UInt32(mode) << 23 }
+
+    func definiteness(at shift: Int) -> UInt8 { UInt8((bits >> shift) & 3) }
+    mutating func setDefiniteness(at shift: Int, _ value: UInt8) {
+        bits = (bits & ~(3 << shift)) | (UInt32(value) << shift)
+    }
+
+    mutating func markFinal(_ definiteness: UInt8) {
+        bits |= 1 << 9
+        setDefiniteness(at: 30, definiteness)
+    }
+
+    mutating func touch(_ slot: Int) { bits |= 1 << (10 + slot) }
+
+    mutating func claimMeasure() -> Int {
+        var slot = next
+        while bits & (1 << (10 + slot)) != 0 {
+            bits &= ~(1 << (10 + slot))
+            slot = (slot + 1) % 9
+        }
+        bits |= 1 << slot
+        touch(slot)
+        bits = (bits & ~(15 << 19)) | (UInt32((slot + 1) % 9) << 19)
+        return slot
+    }
 }
 
 private struct CompactFinalEntry: Sendable {
-    var kdAvailableSpace: UInt64
-    var parentSize: UInt64
-    var kdDef: UInt8
-    var output: LayoutOutput
+    var kdAvailableSpace: UInt64 = 0
+    var parentSize: UInt64 = 0
+    var size = Size<Float>.zero
+    var contentSize = Size<Float>.zero
+    var firstBaselineY = Float.nan
+    var metadata = CacheMetadata()
 }
 
-/// Per-node layout cache with 1 final-layout slot and 9 measure slots using second-chance clock eviction
-/// (matching `taffy::Cache` / `rune_taffy::CompactCache` 0.15 keying semantics).
+private struct ColdFinalOutput: Sendable {
+    let firstBaselineX: Float?
+    let nanBaselineY: Float?
+    let topMargin: CollapsibleMarginSet
+    let bottomMargin: CollapsibleMarginSet
+    let marginsCanCollapseThrough: Bool
+
+    init?(_ output: LayoutOutput) {
+        let y = output.firstBaselines.y
+        guard output.firstBaselines.x != nil || y?.isNaN == true || output.topMargin != .zero
+            || output.bottomMargin != .zero || output.marginsCanCollapseThrough else { return nil }
+        firstBaselineX = output.firstBaselines.x
+        nanBaselineY = y?.isNaN == true ? y : nil
+        topMargin = output.topMargin
+        bottomMargin = output.bottomMargin
+        marginsCanCollapseThrough = output.marginsCanCollapseThrough
+    }
+}
+
+private struct CacheOverflow: Sendable {
+    var measures: [CompactMeasureEntry] = []
+    var definiteness: UInt16 = 0
+    var final: ColdFinalOutput?
+}
+
+/// Nine second-chance measure slots and one final layout. Two measures and the common final
+/// output fit inline in 96 bytes on 64-bit hosts. Additional measures and uncommon final
+/// fields allocate on demand; copying a cache preserves independent value semantics.
 public struct Cache: Sendable {
     private static let cacheSize = 9
     private static let inlineMeasures = 2
-    private static let overflowMeasures = cacheSize - inlineMeasures
 
-    private var finalLayoutEntry: CompactFinalEntry?
-    private var inlineMeasure0: CompactMeasureEntry?
-    private var inlineMeasure1: CompactMeasureEntry?
-    private var overflowMeasures: [CompactMeasureEntry?]?
-    private var recentMask: UInt16 = 0
-    private var nextEntry: Int = 0
-    private var modeBits: UInt8 = 0
-    private var validFinal: Bool = false
-    private var validMeasureMask: UInt16 = 0
+    private var final = CompactFinalEntry()
+    private var measure0 = CompactMeasureEntry()
+    private var measure1 = CompactMeasureEntry()
+    private var overflow: [CacheOverflow] = []
 
     public init() {}
-
-    public var isEmpty: Bool {
-        !validFinal && validMeasureMask == 0
-    }
+    public var isEmpty: Bool { final.metadata.isEmpty }
 
     public func heapBytes() -> Int {
-        overflowMeasures == nil ? 0 : MemoryLayout<CompactMeasureEntry?>.stride * Self.overflowMeasures
+        guard !overflow.isEmpty else { return 0 }
+        return MemoryLayout<CacheOverflow>.stride
+            + overflow[0].measures.capacity * MemoryLayout<CompactMeasureEntry>.stride
     }
 
-    @inline(__always)
-    private func measureSlot(_ index: Int) -> CompactMeasureEntry? {
+    private mutating func ensureOverflow() {
+        if overflow.isEmpty { overflow = [CacheOverflow()] }
+    }
+
+    private func measure(_ index: Int) -> CompactMeasureEntry {
         switch index {
-        case 0: return inlineMeasure0
-        case 1: return inlineMeasure1
-        default: return overflowMeasures?[index - Self.inlineMeasures]
+        case 0: return measure0
+        case 1: return measure1
+        default: return overflow[0].measures[index - Self.inlineMeasures]
         }
     }
 
-    @inline(__always)
-    private mutating func setMeasureSlot(_ index: Int, _ entry: CompactMeasureEntry) {
-        switch index {
-        case 0: inlineMeasure0 = entry
-        case 1: inlineMeasure1 = entry
-        default:
-            if overflowMeasures == nil {
-                overflowMeasures = Array(repeating: nil, count: Self.overflowMeasures)
+    private func measureDefiniteness(_ index: Int) -> UInt8 {
+        if index < Self.inlineMeasures { return final.metadata.definiteness(at: 26 + index * 2) }
+        return UInt8((overflow[0].definiteness >> ((index - Self.inlineMeasures) * 2)) & 3)
+    }
+
+    private mutating func setMeasure(_ index: Int, key: CacheKey, size: Size<Float>) {
+        let entry = CompactMeasureEntry(kdAvailableSpace: key.kdAvailableSpace, parentSize: key.parentSize, size: size)
+        if index < Self.inlineMeasures {
+            if index == 0 { measure0 = entry } else { measure1 = entry }
+            final.metadata.setDefiniteness(at: 26 + index * 2, key.kdDef)
+        } else {
+            ensureOverflow()
+            if overflow[0].measures.isEmpty {
+                overflow[0].measures = Array(repeating: CompactMeasureEntry(), count: Self.cacheSize - Self.inlineMeasures)
             }
-            overflowMeasures?[index - Self.inlineMeasures] = entry
+            let offset = index - Self.inlineMeasures
+            overflow[0].measures[offset] = entry
+            let shift = offset * 2
+            overflow[0].definiteness = (overflow[0].definiteness & ~(3 << shift)) | (UInt16(key.kdDef) << shift)
         }
     }
 
     public mutating func get(_ input: LayoutInput) -> LayoutOutput? {
-        if isEmpty || modeBits != cacheMode(input) {
-            return nil
-        }
+        guard !isEmpty, final.metadata.mode == cacheMode(input) else { return nil }
         let key = CacheKey.fromInput(input)
         switch input.runMode {
         case .performLayout:
-            guard validFinal, let entry = finalLayoutEntry else { return nil }
-            if entry.kdAvailableSpace == key.kdAvailableSpace
-                && entry.parentSize == key.parentSize
-                && entry.kdDef == key.kdDef
-            {
-                return entry.output
+            guard final.metadata.hasFinal, final.kdAvailableSpace == key.kdAvailableSpace,
+                  final.parentSize == key.parentSize, final.metadata.definiteness(at: 30) == key.kdDef else { return nil }
+            if overflow.isEmpty {
+                return LayoutOutput(size: final.size, contentSize: final.contentSize,
+                                    firstBaselines: Point(x: nil, y: final.firstBaselineY.isNaN ? nil : final.firstBaselineY))
             }
-            return nil
-
+            let cold = overflow[0].final
+            let y = final.firstBaselineY.isNaN ? cold?.nanBaselineY : final.firstBaselineY
+            return LayoutOutput(size: final.size, contentSize: final.contentSize,
+                                firstBaselines: Point(x: cold?.firstBaselineX, y: y),
+                                topMargin: cold?.topMargin ?? .zero, bottomMargin: cold?.bottomMargin ?? .zero,
+                                marginsCanCollapseThrough: cold?.marginsCanCollapseThrough ?? false)
         case .computeSize:
-            if validMeasureMask == 0 { return nil }
-            let limit = overflowMeasures == nil ? Self.inlineMeasures : Self.cacheSize
-            for index in 0..<limit {
-                let bit = UInt16(1) << index
-                if (validMeasureMask & bit) == 0 { continue }
-                guard let entry = measureSlot(index) else { continue }
-                if entry.kdAvailableSpace == key.kdAvailableSpace
-                    && entry.kdDef == key.kdDef
-                    && CacheKey.xAxisParentSize(entry.parentSize) == CacheKey.xAxisParentSize(key.parentSize)
-                    && CacheKey.sizeIsValidFor(entryParentSize: entry.parentSize, queryParentSize: key.parentSize)
-                {
-                    recentMask |= bit
-                    return LayoutOutput.fromOuterSize(entry.size)
+            let valid = final.metadata.measureMask
+            if valid & 1 != 0, measure0.matchesSize(key), final.metadata.definiteness(at: 26) == key.kdDef {
+                final.metadata.touch(0)
+                return .fromOuterSize(measure0.size)
+            }
+            if valid & 2 != 0, measure1.matchesSize(key), final.metadata.definiteness(at: 28) == key.kdDef {
+                final.metadata.touch(1)
+                return .fromOuterSize(measure1.size)
+            }
+            var mask = valid & ~3
+            while mask != 0 {
+                let slot = mask.trailingZeroBitCount
+                let entry = measure(slot)
+                if entry.matchesSize(key), measureDefiniteness(slot) == key.kdDef {
+                    final.metadata.touch(slot)
+                    return .fromOuterSize(entry.size)
                 }
+                mask &= mask - 1
             }
             return nil
-
         case .performHiddenLayout:
             return nil
         }
     }
 
     public mutating func store(_ input: LayoutInput, output: LayoutOutput) {
-        if input.runMode == .performHiddenLayout {
-            return
-        }
+        guard input.runMode != .performHiddenLayout else { return }
         let mode = cacheMode(input)
-        if modeBits != mode {
-            _ = clear()
-            modeBits = mode
-        }
+        if final.metadata.mode != mode { clear(mode: mode) }
         let key = CacheKey.fromInput(input)
         switch input.runMode {
         case .performLayout:
-            validFinal = true
-            finalLayoutEntry = CompactFinalEntry(
-                kdAvailableSpace: key.kdAvailableSpace,
-                parentSize: key.parentSize,
-                kdDef: key.kdDef,
-                output: output
-            )
-
+            final.metadata.markFinal(key.kdDef)
+            final.kdAvailableSpace = key.kdAvailableSpace
+            final.parentSize = key.parentSize
+            final.size = output.size
+            final.contentSize = output.contentSize
+            final.firstBaselineY = output.firstBaselines.y ?? .nan
+            if let cold = ColdFinalOutput(output) {
+                ensureOverflow()
+                overflow[0].final = cold
+            } else if !overflow.isEmpty {
+                overflow[0].final = nil
+            }
         case .computeSize:
-            if output.marginsCanCollapseThrough
-                || output.topMargin != .zero
-                || output.bottomMargin != .zero
-            {
-                return
-            }
-            if validMeasureMask != 0 {
-                let limit = overflowMeasures == nil ? Self.inlineMeasures : Self.cacheSize
-                for index in 0..<limit {
-                    let bit = UInt16(1) << index
-                    if (validMeasureMask & bit) == 0 { continue }
-                    guard var entry = measureSlot(index) else { continue }
-                    if entry.kdAvailableSpace == key.kdAvailableSpace
-                        && entry.parentSize == key.parentSize
-                        && entry.kdDef == key.kdDef
-                    {
-                        entry.size = output.size
-                        setMeasureSlot(index, entry)
-                        recentMask |= bit
-                        return
-                    }
+            guard !output.marginsCanCollapseThrough, output.topMargin == .zero, output.bottomMargin == .zero else { return }
+            var mask = final.metadata.measureMask
+            while mask != 0 {
+                let slot = mask.trailingZeroBitCount
+                let entry = measure(slot)
+                if entry.kdAvailableSpace == key.kdAvailableSpace, entry.parentSize == key.parentSize,
+                   measureDefiniteness(slot) == key.kdDef {
+                    setMeasure(slot, key: key, size: output.size)
+                    final.metadata.touch(slot)
+                    return
                 }
+                mask &= mask - 1
             }
-
-            // Second-chance clock eviction
-            var next = nextEntry
-            while (recentMask & (UInt16(1) << next)) != 0 {
-                recentMask &= ~(UInt16(1) << next)
-                next = (next + 1) % Self.cacheSize
-            }
-            let entryBit = UInt16(1) << next
-            validMeasureMask |= entryBit
-            recentMask |= entryBit
-            setMeasureSlot(
-                next,
-                CompactMeasureEntry(
-                    kdAvailableSpace: key.kdAvailableSpace,
-                    parentSize: key.parentSize,
-                    kdDef: key.kdDef,
-                    size: output.size
-                )
-            )
-            nextEntry = (next + 1) % Self.cacheSize
-
+            let slot = final.metadata.claimMeasure()
+            setMeasure(slot, key: key, size: output.size)
         case .performHiddenLayout:
             break
         }
     }
 
+    private mutating func clear(mode: UInt8) {
+        final.metadata.clear(keepingMode: mode)
+        if !overflow.isEmpty {
+            overflow[0].definiteness = 0
+            overflow[0].final = nil
+        }
+    }
+
     @discardableResult
     public mutating func clear() -> ClearState {
-        if isEmpty {
-            return .alreadyEmpty
-        }
-        // Keep `modeBits` intact across clears (D-T6), matching upstream `taffy::Cache::clear`.
-        validFinal = false
-        validMeasureMask = 0
-        recentMask = 0
-        nextEntry = 0
-        finalLayoutEntry = nil
-        inlineMeasure0 = nil
-        inlineMeasure1 = nil
-        overflowMeasures = nil
+        guard !isEmpty else { return .alreadyEmpty }
+        // Retain allocated overflow slots across layout invalidation, matching rune-taffy.
+        clear(mode: final.metadata.mode)
         return .cleared
     }
 }

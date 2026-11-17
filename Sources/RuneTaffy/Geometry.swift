@@ -458,7 +458,7 @@ public enum LengthPercentageAuto: Sendable, Equatable, Hashable {
 
 // MARK: - Style Enums
 
-public enum Display: Sendable, Equatable, Hashable {
+public enum Display: UInt8, Sendable, Equatable, Hashable {
     case flex
     case grid
     case block
@@ -466,7 +466,7 @@ public enum Display: Sendable, Equatable, Hashable {
     case none
 }
 
-public enum Position: Sendable, Equatable, Hashable {
+public enum Position: UInt8, Sendable, Equatable, Hashable {
     case `static`
     case relative
     case absolute
@@ -479,7 +479,7 @@ public enum BoxSizing: Sendable, Equatable, Hashable {
     case contentBox
 }
 
-public enum Overflow: Sendable, Equatable, Hashable {
+public enum Overflow: UInt8, Sendable, Equatable, Hashable {
     case visible
     case clip
     case hidden
@@ -503,7 +503,7 @@ public enum TextAlign: Sendable, Equatable, Hashable {
     case center
 }
 
-public enum FlexDirection: Sendable, Equatable, Hashable {
+public enum FlexDirection: UInt8, Sendable, Equatable, Hashable {
     case row
     case column
     case rowReverse
@@ -535,7 +535,7 @@ public enum FlexDirection: Sendable, Equatable, Hashable {
     }
 }
 
-public enum FlexWrap: Sendable, Equatable, Hashable {
+public enum FlexWrap: UInt8, Sendable, Equatable, Hashable {
     case noWrap
     case wrap
     case wrapReverse
@@ -547,7 +547,7 @@ public enum AlignmentSafety: Sendable, Equatable, Hashable {
     case safe
 }
 
-public enum AlignItems: Sendable, Equatable, Hashable {
+public enum AlignItems: UInt8, Sendable, Equatable, Hashable {
     case normal
     case start
     case end
@@ -564,7 +564,7 @@ public typealias AlignSelf = AlignItems
 public typealias JustifyItems = AlignItems
 public typealias JustifySelf = AlignItems
 
-public enum AlignContent: Sendable, Equatable, Hashable {
+public enum AlignContent: UInt8, Sendable, Equatable, Hashable {
     case normal
     case start
     case end

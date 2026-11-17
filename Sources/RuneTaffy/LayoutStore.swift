@@ -81,8 +81,6 @@ private struct RetainedSlot: Sendable {
     var style: TaffyStyle = .default
     var cache: Cache = Cache()
     var unroundedLayout: Layout = .zero
-    var finalLayout: Layout = .zero
-    var boxLayout: BoxLayout = .zero
     var measure: UInt64 = 0
     var hasContext: Bool = false
     var mutated: Bool = false
@@ -101,6 +99,8 @@ public struct LayoutStore: Sendable {
     private var currChildren: [UInt32] = []
     private var childScratch: [UInt32] = []
     private var mutatedSlots: [UInt32] = []
+    // Rune presents unrounded geometry; allocate overrides only for callers requesting pixel rounding.
+    private var roundedLayouts: [UInt32: Layout] = [:]
     private var prevLive: Int = 0
     private var visitedExisting: Int = 0
 
@@ -175,6 +175,7 @@ public struct LayoutStore: Sendable {
         }
         for (_, newKey, slot, nodeIndex) in batch {
             if let stale = byKey.removeValue(forKey: newKey) {
+                roundedLayouts.removeValue(forKey: stale)
                 slots[Int(stale)] = RetainedSlot()
                 free.append(stale)
                 if prevLive > 0 {
@@ -250,8 +251,6 @@ public struct LayoutStore: Sendable {
                 style: style,
                 cache: Cache(),
                 unroundedLayout: .zero,
-                finalLayout: .zero,
-                boxLayout: .zero,
                 measure: measure ?? 0,
                 hasContext: measure != nil,
                 mutated: true,
@@ -279,6 +278,7 @@ public struct LayoutStore: Sendable {
         var toRemove: [UInt64] = []
         for (k, s) in byKey {
             if nodeIdx[Int(s)] == unmountedIdx {
+                roundedLayouts.removeValue(forKey: s)
                 slots[Int(s)] = RetainedSlot()
                 free.append(s)
                 toRemove.append(k)
@@ -331,6 +331,10 @@ public struct LayoutStore: Sendable {
             newNodeIdx.append(me)
         }
 
+        if !roundedLayouts.isEmpty {
+            roundedLayouts = Dictionary(uniqueKeysWithValues: roundedLayouts.map { (remapTable[Int($0.key)], $0.value) })
+        }
+
         let rootIdx = Int(root.rawValue)
         if rootIdx < remapTable.count {
             let mapped = remapTable[rootIdx]
@@ -379,11 +383,12 @@ public struct LayoutStore: Sendable {
     }
 
     public func boxLayout(_ id: SlotId) -> BoxLayout {
-        slots[Int(id.rawValue)].boxLayout
+        BoxLayout.from(slots[Int(id.rawValue)].unroundedLayout)
     }
 
     public func layout(_ id: SlotId) -> Layout {
-        slots[Int(id.rawValue)].finalLayout
+        if !roundedLayouts.isEmpty, let rounded = roundedLayouts[id.rawValue] { return rounded }
+        return slots[Int(id.rawValue)].unroundedLayout
     }
 
     public func mountedNodeIndex(key: UInt64) -> Int? {
@@ -439,26 +444,29 @@ public struct LayoutStore: Sendable {
         measureLeaf: @escaping @Sendable (LayoutInput, Int?, TaffyStyle) -> LayoutOutput
     ) {
         let adapter = LayoutStoreAdapter(
-            slots: slots,
             nodeIdx: nodeIdx,
             currChildren: currChildren,
             measureLeaf: measureLeaf
         )
+        // Give the layout pass unique storage while it writes caches and solved rectangles.
+        swap(&slots, &adapter.slots)
+        swap(&roundedLayouts, &adapter.roundedLayouts)
         let rootNode = root.toNodeId
         computeRootLayout(tree: adapter, root: rootNode, availableSpace: availableSpace)
         if rounding {
             roundLayout(tree: adapter, root: rootNode)
-        } else {
-            copyUnrounded(adapter: adapter, node: rootNode)
+        } else if !adapter.roundedLayouts.isEmpty {
+            clearRounding(adapter: adapter, node: rootNode)
         }
-        slots = adapter.slots
+        swap(&roundedLayouts, &adapter.roundedLayouts)
+        swap(&slots, &adapter.slots)
     }
 
-    private func copyUnrounded(adapter: LayoutStoreAdapter, node: NodeId) {
-        adapter.setFinalLayout(node, adapter.unroundedLayout(node))
+    private func clearRounding(adapter: LayoutStoreAdapter, node: NodeId) {
+        adapter.roundedLayouts.removeValue(forKey: UInt32(node.index))
         let count = adapter.childCount(node)
         for i in 0..<count {
-            copyUnrounded(adapter: adapter, node: adapter.childId(node, at: i))
+            clearRounding(adapter: adapter, node: adapter.childId(node, at: i))
         }
     }
 
@@ -475,7 +483,7 @@ public struct LayoutStore: Sendable {
             coldStyleBytes += slot.style.heapBytes()
             coldCacheBytes += slot.cache.heapBytes()
         }
-        let coldAuxBytes = 0
+        let coldAuxBytes = roundedLayouts.capacity * (MemoryLayout<UInt32>.stride + MemoryLayout<Layout>.stride)
         let total = inlineBufferBytes + coldStyleBytes + coldCacheBytes + coldAuxBytes
         return StorageStats(
             liveNodes: byKey.count,
@@ -492,21 +500,24 @@ public struct LayoutStore: Sendable {
     }
 }
 
+#if BaselineTaffy
+public typealias LayoutEngine = BaselineLayoutStore
+#else
 public typealias LayoutEngine = LayoutStore
+#endif
 
 private final class LayoutStoreAdapter: LayoutTree {
-    var slots: [RetainedSlot]
+    var slots: [RetainedSlot] = []
+    var roundedLayouts: [UInt32: Layout] = [:]
     let nodeIdx: [UInt32]
     let currChildren: [UInt32]
     let measureLeaf: @Sendable (LayoutInput, Int?, TaffyStyle) -> LayoutOutput
 
     init(
-        slots: [RetainedSlot],
         nodeIdx: [UInt32],
         currChildren: [UInt32],
         measureLeaf: @Sendable @escaping (LayoutInput, Int?, TaffyStyle) -> LayoutOutput
     ) {
-        self.slots = slots
         self.nodeIdx = nodeIdx
         self.currChildren = currChildren
         self.measureLeaf = measureLeaf
@@ -531,11 +542,10 @@ private final class LayoutStoreAdapter: LayoutTree {
 
     func setUnroundedLayout(_ node: NodeId, _ layout: Layout) {
         slots[node.index].unroundedLayout = layout
-        slots[node.index].boxLayout = BoxLayout.from(layout)
     }
 
     func setFinalLayout(_ node: NodeId, _ layout: Layout) {
-        slots[node.index].finalLayout = layout
+        roundedLayouts[UInt32(node.index)] = layout
     }
 
     func cacheGet(_ node: NodeId, _ input: LayoutInput) -> LayoutOutput? {

@@ -15,7 +15,7 @@ private struct TreeNodeData: Sendable {
     var style: TaffyStyle
     var cache: Cache
     var unroundedLayout: Layout
-    var finalLayout: Layout
+    var roundedLayout: Layout?
     var parent: NodeId?
     var children: [NodeId]
     var measure: MeasureFunc?
@@ -26,7 +26,7 @@ private struct TreeNodeData: Sendable {
         self.style = .default
         self.cache = Cache()
         self.unroundedLayout = .zero
-        self.finalLayout = .zero
+        self.roundedLayout = nil
         self.parent = nil
         self.children = []
         self.measure = nil
@@ -39,6 +39,7 @@ public struct TaffyTree: Sendable {
     private var nodes: [TreeNodeData] = []
     private var freeIndices: [Int] = []
     private var liveNodeCount: Int = 0
+    private var roundedCount = 0
     public var roundingEnabled: Bool = true
 
     public init(capacity: Int = 16) {
@@ -108,7 +109,7 @@ public struct TaffyTree: Sendable {
             nodes[idx].style = style
             nodes[idx].cache.clear()
             nodes[idx].unroundedLayout = .zero
-            nodes[idx].finalLayout = .zero
+            nodes[idx].roundedLayout = nil
             nodes[idx].parent = nil
             nodes[idx].children = children
             nodes[idx].measure = measure
@@ -145,12 +146,10 @@ public struct TaffyTree: Sendable {
             }
         }
 
-        nodes[idx].occupied = false
-        nodes[idx].generation &+= 1
-        nodes[idx].children.removeAll(keepingCapacity: false)
-        nodes[idx].measure = nil
-        nodes[idx].parent = nil
-        nodes[idx].cache.clear()
+        if nodes[idx].roundedLayout != nil { roundedCount -= 1 }
+        // Vacated generational slots must release the former node's cold style,
+        // children, measurement closure and cache overflow while retaining capacity.
+        nodes[idx] = TreeNodeData(generation: nodes[idx].generation &+ 1)
         freeIndices.append(idx)
         liveNodeCount -= 1
         return node
@@ -160,6 +159,7 @@ public struct TaffyTree: Sendable {
         nodes.removeAll(keepingCapacity: true)
         freeIndices.removeAll(keepingCapacity: true)
         liveNodeCount = 0
+        roundedCount = 0
     }
 
     // MARK: - Hierarchy Mutations
@@ -331,28 +331,42 @@ public struct TaffyTree: Sendable {
         _ root: NodeId,
         availableSpace: Size<AvailableSpace>
     ) throws {
+        try computeLayout(root, availableSpace: availableSpace, measureLeaf: nil)
+    }
+
+    internal mutating func computeLayout(
+        _ root: NodeId, availableSpace: Size<AvailableSpace>,
+        measureLeaf: (@Sendable (NodeId, LayoutInput, TaffyStyle) -> LayoutOutput)?
+    ) throws {
         guard validIndex(root) != nil else { throw TaffyError.invalidInputNode(root) }
-        let adapter = TaffyTreeAdapter(nodes: nodes)
+        let adapter = TaffyTreeAdapter(measureLeaf: measureLeaf)
+        swap(&nodes, &adapter.nodes)
+        adapter.roundedCount = roundedCount
         computeRootLayout(tree: adapter, root: root, availableSpace: availableSpace)
         if roundingEnabled {
             roundLayout(tree: adapter, root: root)
-        } else {
-            copyUnroundedToFinal(adapter: adapter, node: root)
+        } else if adapter.roundedCount > 0 {
+            clearRounding(adapter: adapter, node: root)
         }
-        nodes = adapter.nodes
+        roundedCount = adapter.roundedCount
+        swap(&nodes, &adapter.nodes)
     }
 
-    private func copyUnroundedToFinal(adapter: TaffyTreeAdapter, node: NodeId) {
-        adapter.setFinalLayout(node, adapter.unroundedLayout(node))
+    private func clearRounding(adapter: TaffyTreeAdapter, node: NodeId) {
+        if adapter.nodes[node.index].roundedLayout != nil {
+            adapter.nodes[node.index].roundedLayout = nil
+            adapter.roundedCount -= 1
+        }
         let count = adapter.childCount(node)
         for i in 0..<count {
-            copyUnroundedToFinal(adapter: adapter, node: adapter.childId(node, at: i))
+            clearRounding(adapter: adapter, node: adapter.childId(node, at: i))
         }
     }
 
     public func layout(_ node: NodeId) throws -> Layout {
         guard let idx = validIndex(node) else { throw TaffyError.invalidInputNode(node) }
-        return roundingEnabled ? nodes[idx].finalLayout : nodes[idx].unroundedLayout
+        if roundingEnabled, let rounded = nodes[idx].roundedLayout { return rounded }
+        return nodes[idx].unroundedLayout
     }
 
     public func unroundedLayout(_ node: NodeId) throws -> Layout {
@@ -369,7 +383,7 @@ public struct TaffyTree: Sendable {
     private func appendTreeString(node: NodeId, depth: Int, into out: inout String) {
         guard let idx = validIndex(node) else { return }
         let indent = String(repeating: "  ", count: depth)
-        let l = roundingEnabled ? nodes[idx].finalLayout : nodes[idx].unroundedLayout
+        let l = roundingEnabled ? (nodes[idx].roundedLayout ?? nodes[idx].unroundedLayout) : nodes[idx].unroundedLayout
         let s = nodes[idx].style
         out += "\(indent)Node(\(node.index):\(node.generation)) [\(s.display)] x:\(l.location.x) y:\(l.location.y) w:\(l.size.width) h:\(l.size.height)\n"
         for child in nodes[idx].children {
@@ -379,10 +393,12 @@ public struct TaffyTree: Sendable {
 }
 
 private final class TaffyTreeAdapter: LayoutTree {
-    var nodes: [TreeNodeData]
+    var nodes: [TreeNodeData] = []
+    var roundedCount = 0
+    let measureLeaf: (@Sendable (NodeId, LayoutInput, TaffyStyle) -> LayoutOutput)?
 
-    init(nodes: [TreeNodeData]) {
-        self.nodes = nodes
+    init(measureLeaf: (@Sendable (NodeId, LayoutInput, TaffyStyle) -> LayoutOutput)?) {
+        self.measureLeaf = measureLeaf
     }
 
     func childCount(_ node: NodeId) -> Int {
@@ -406,7 +422,8 @@ private final class TaffyTreeAdapter: LayoutTree {
     }
 
     func setFinalLayout(_ node: NodeId, _ layout: Layout) {
-        nodes[node.index].finalLayout = layout
+        if nodes[node.index].roundedLayout == nil { roundedCount += 1 }
+        nodes[node.index].roundedLayout = layout
     }
 
     func cacheGet(_ node: NodeId, _ input: LayoutInput) -> LayoutOutput? {
@@ -419,10 +436,30 @@ private final class TaffyTreeAdapter: LayoutTree {
 
     func measureLeafNode(_ node: NodeId, _ input: LayoutInput) -> LayoutOutput {
         let slot = nodes[node.index]
+        if let measureLeaf { return measureLeaf(node, input, slot.style) }
         if let measure = slot.measure {
             let size = measure(input.knownDimensions, input.availableSpace, slot.style)
             return LayoutOutput.fromOuterSize(size)
         }
         return LayoutOutput.fromOuterSize(.zero)
+    }
+}
+
+extension TaffyTree {
+    /// Retained Swift node, child, style and cache buffers for the reference backend.
+    public func storageStats() -> StorageStats {
+        let stride = MemoryLayout<TreeNodeData>.stride
+        let buffer = nodes.capacity * stride + freeIndices.capacity * MemoryLayout<Int>.stride
+        var children = 0
+        var styles = 0
+        var caches = 0
+        for node in nodes {
+            children += node.children.capacity * MemoryLayout<NodeId>.stride
+            styles += node.style.heapBytes()
+            caches += node.cache.heapBytes()
+        }
+        return StorageStats(liveNodes: liveNodeCount, slotCapacity: nodes.capacity, sparseCapacity: nodes.capacity,
+            bytesPerSlot: stride, inlineBufferBytes: buffer, childHeapBytes: children,
+            coldStyleBytes: styles, coldCacheBytes: caches, totalRetainedBytes: buffer + children + styles + caches)
     }
 }

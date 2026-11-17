@@ -131,6 +131,7 @@ let package = Package(
     ],
     traits: [
         .default(enabledTraits: ["DesktopMedia"]),
+        .trait(name: "BaselineTaffy", description: "Use the reference TaffyTree backend for layout comparisons."),
         .trait(name: "DesktopMedia", description: "Play desktop audio and video and record microphone audio on Linux and Windows.")
     ],
     targets: [
