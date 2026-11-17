@@ -327,6 +327,7 @@ struct TxSlice2ParityTests {
             var times: [Double?] = []
             var focusedSeen: [String?] = []
             var dragRepeatFlags: [Bool] = []
+            var dragPhases: [DragPhase] = []
             var dragMods: [Mods] = []
         }
         let rt = Runtime<S>(state: S(), viewport: Vec2(200, 100), pixelScale: 1.0) { _, _ in
@@ -345,11 +346,14 @@ struct TxSlice2ParityTests {
                 )
                 .child(
                     el().key("stepper").size(120, 40)
-                        .onDrag { s, _, tx in
+                        .onDrag { s, drag, tx in
                             let rep = tx.dragRepeat()
+                            s.dragPhases.append(drag.phase)
                             s.dragRepeatFlags.append(rep)
                             s.dragMods.append(tx.mods)
-                            tx.dragRepeatAfter(.milliseconds(rep ? 50 : 200))
+                            if drag.phase == .down || rep {
+                                tx.dragRepeatAfter(.milliseconds(rep ? 50 : 200))
+                            }
                         }
                 )
         }
@@ -392,7 +396,8 @@ struct TxSlice2ParityTests {
         // Releasing clears activeDrag and armed drag repeat.
         rt.pointerUp(at: Vec2(20, 60), at: 2.26)
         _ = rt.frame(at: 2.35)
-        #expect(rt.state.dragRepeatFlags == [false, true, true])
+        #expect(rt.state.dragPhases == [.down, .move, .move, .up])
+        #expect(rt.state.dragRepeatFlags == [false, true, true, false])
         #expect(rt.kitHooks.pressRepeat.attempt == nil)
         #expect(rt.nextWakeDeadline(after: 2.35) == nil)
     }
