@@ -11956,7 +11956,6 @@ public final class Runtime<State> {
             a11yAnnouncement.say(ann.text, politeness: ann.politeness)
         }
         processTxSlice2Actions(&mutableTx, at: now)
-        flushPendingSentKeys(at: now)
         let hasCommitRequests = nonOffsetCommitRequests || (!canFastApplyOffsets && !tx.scrollOffsetRequests.isEmpty) || blurDroppedFocus
         if tx.liveOnlyRequested {
             livePendingDirty = true
