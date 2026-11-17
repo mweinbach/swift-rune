@@ -1196,6 +1196,7 @@ public final class Runtime<State> {
         case screenLayout
         case drawnLayout
         case visible
+        case visibleRows
     }
     private struct PendingLayoutAction {
         var kind: LayoutQueueKind
@@ -1203,6 +1204,7 @@ public final class Runtime<State> {
         var rect: [Float]
         var visible: Bool
         var external: Bool
+        var rows: Range<Int> = 0..<0
     }
     public private(set) var windowOrigin: Vec2 = .zero
     private var windowPixels: (Int32, Int32)?
@@ -1221,6 +1223,7 @@ public final class Runtime<State> {
         var drawn: [Int] = []
         var drawnRect: [Int] = []
         var visible: [Int] = []
+        var visibleRows: [Int] = []
         var scrollReports: [Int] = []
         var scrollAnchors: [Int] = []
         var bottomViewports: [Int] = []
@@ -1785,6 +1788,7 @@ public final class Runtime<State> {
         _ = reportDrawn()
         _ = reportVisible()
         let (postFeedback, postExternal) = drainLayoutActions(at: now)
+        let reportedRows = reportVirtualVisibleRows()
         pendingLayoutFeedbackRan = pendingLayoutFeedbackRan || postFeedback
         pendingExternalLayoutActionRan = pendingExternalLayoutActionRan || postExternal
         let scaleSettleMoving = hasMovingScaleSettle
@@ -1794,7 +1798,7 @@ public final class Runtime<State> {
             animSources &= ~AnimSource.scaleSettle
         }
         if fillText() { animSources |= AnimSource.textFill }
-        isAnimating = animSources != 0 || ((pixelSnapGlides.isEasing || wroteDrawn || scaleSettleMoving) && cxSettings.viewTimeScale > 0.0)
+        isAnimating = reportedRows || animSources != 0 || ((pixelSnapGlides.isEasing || wroteDrawn || scaleSettleMoving) && cxSettings.viewTimeScale > 0.0)
         if !isAnimating {
             animSources = 0
         }
@@ -1975,6 +1979,7 @@ public final class Runtime<State> {
         pollPlaygroundIfNeeded(at: now)
         applyPlaygroundIfNeeded(at: now)
         flushPendingPasteRequests(at: now)
+        _ = reportVirtualVisibleRows()
         let (drainedFeedback, drainedExternal) = drainLayoutActions(at: now)
         let ranLayoutFeedback = pendingLayoutFeedbackRan || drainedFeedback
         let ranExternalLayoutAction = pendingExternalLayoutActionRan || drainedExternal
@@ -4476,6 +4481,7 @@ public final class Runtime<State> {
             if handlers.onDrawnLayout != nil { observers.drawn.append(i) }
             if handlers.drawnRectUpdate != nil { observers.drawnRect.append(i) }
             if handlers.onVisible != nil { observers.visible.append(i) }
+            if handlers.onVisibleRows != nil { observers.visibleRows.append(i) }
             if !node.el.layout.scrollAxes.isEmpty {
                 if handlers.onScrollOffset != nil || handlers.onScroll != nil
                     || handlers.atBottomReport != nil || handlers.farFromBottomReport != nil {
@@ -5282,7 +5288,11 @@ public final class Runtime<State> {
         if applyUnseenPresenceAfterCommit(specs: specs, cut: commitCut, to: &scene) {
             isAnimating = true
         }
-        updateVirtualVisibleRowsOnScroll(at: now)
+        // A measurement retry spends its overscan budget against the last applied window.
+        for list in pass.virtualExpansion.listMeta {
+            virtualLists[list.listPath]?.lastMountedSnapshot = list.mounted
+        }
+        updateVirtualVisibleRowsOnScroll()
         stepVirtualFillAfterCommit(now: now)
         if pass.virtualExpansion.anyVirtualList && !changedScrollDeltas.isEmpty && anyVirtualListNeedsWindow() {
             needsCommit = true
@@ -5616,7 +5626,7 @@ public final class Runtime<State> {
             }
         }
         dispatchScrollCallbacks(at: now)
-        updateVirtualVisibleRowsOnScroll(at: now)
+        updateVirtualVisibleRowsOnScroll()
         directScrolledPaths.removeAll(keepingCapacity: true)
     }
 
@@ -5647,6 +5657,10 @@ public final class Runtime<State> {
                     dispatchScoped(&tx) { s, t in cb(&s, action.rect, &t) }
                     dispatched = true
                 }
+            case .visibleRows:
+                if let cb = handlers.onVisibleRows {
+                    dispatchScoped(&tx) { s, _ in dispatched = cb(&s, action.rows) }
+                }
             case .visible:
                 if let cb = handlers.onVisible {
                     dispatchScoped(&tx) { s, t in cb(&s, action.visible, &t) }
@@ -5663,6 +5677,7 @@ public final class Runtime<State> {
                 case .screenLayout: handlerName = "on_screen_layout"
                 case .drawnLayout: handlerName = "on_drawn_layout"
                 case .visible: handlerName = "on_visible"
+                case .visibleRows: handlerName = "on_visible_rows"
                 }
                 perfWatch.meter.handler(name: handlerName, path: action.nodePath)
                 if action.external {
@@ -5681,6 +5696,28 @@ public final class Runtime<State> {
         } else {
             body(&state, &tx)
         }
+    }
+
+    /// Coalesce scroll input before the commit, then queue any range changed by the new layout.
+    private func reportVirtualVisibleRows() -> Bool {
+        var queued = false
+        for index in layoutObservers.visibleRows {
+            let path = flatNodes[index].path
+            guard !subtreeExiting(index), let list = virtualLists[path] else { continue }
+            let (prefix, total) = list.computeOffsets(estimated: flatNodes[index].el.virtualEstimate ?? 40)
+            let scroll = scrollOffsets[list.scrollPath]?.y ?? 0
+            let pinned = wasPinnedToBottom.contains(list.scrollPath)
+                && nodeByPath[list.scrollPath].map { flatNodes[$0].el.layout.stickBottom } == true
+            let at = list.at(scroll, pinned: pinned, total: total)
+            let range = list.visibleRange(offset: at.offset, viewport: list.viewport,
+                                          prefix: prefix, count: list.lastKeys.count, pinned: at.pinned)
+            guard list.reportedVisibleRange != range else { continue }
+            virtualLists[path]?.reportedVisibleRange = range
+            enqueueLayoutAction(PendingLayoutAction(kind: .visibleRows, nodePath: path,
+                rect: [], visible: false, external: false, rows: range))
+            queued = true
+        }
+        return queued
     }
 
     private func enqueueLayoutAction(_ action: PendingLayoutAction) {

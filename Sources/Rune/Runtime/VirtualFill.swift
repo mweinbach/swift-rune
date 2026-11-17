@@ -154,7 +154,7 @@ internal struct RuntimeVirtualListState: Sendable {
     }
     var lastKeysVersion: UInt64? = nil
     var lastMountedRange: Range<Int> = 0..<0
-    var lastVisibleRange: Range<Int>? = nil
+    var reportedVisibleRange: Range<Int>?
     var lastSelectedKey: String? = nil
     var lastAnchorKey: String? = nil
     var lastAnchorLocalY: Float = 0
@@ -247,10 +247,10 @@ internal struct RuntimeVirtualListState: Sendable {
         return max(0, top - max(0, viewport - (bottom - top)) * 0.5)
     }
 
-    func visibleRange(offset: Float, viewport: Float, prefix: [Float], count: Int) -> Range<Int> {
+    func visibleRange(offset: Float, viewport: Float, prefix: [Float], count: Int, pinned: Bool = false) -> Range<Int> {
         guard count > 0, viewport > 0 else { return 0..<0 }
         let maxOffset = max(0, extent(total: prefix.last ?? 0) - viewport)
-        let lo = min(maxOffset, max(0, offset)) - padTop
+        let lo = (pinned ? maxOffset : min(maxOffset, max(0, offset))) - padTop
         return intersectingRows(from: lo, to: lo + viewport, prefix: prefix, count: count)
     }
 

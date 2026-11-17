@@ -494,8 +494,10 @@ struct ElInc4ParityTests {
             viewport: Vec2(300, 200),
             pixelScale: 1.0,
             systemDark: true
-        ) { s, _ in
-            col().key("scroll").size(300, 200).scrollY().child(
+        ) { s, cx in
+            // A view reading its own viewport takes a second measure pass on the first commit.
+            let width = cx.layoutWith("scroll", token: "width") { $0[2] } ?? 300
+            return col().key("scroll").size(width, 200).scrollY().child(
                 col().key("rows").wFull()
                     .virtualRows(count: s.keys.count, estimatedRowHeight: 20, key: { st, i in st.keys[i] }) { st, i in
                         tracker.builtIndices.append(i)
@@ -511,7 +513,12 @@ struct ElInc4ParityTests {
         _ = rt.frame(at: 0.0)
         // Only overscan window around 0..10 (200pt / 20pt + 2x overscan = <= 50 rows) builds out of 1000!
         #expect(!tracker.builtIndices.isEmpty && tracker.builtIndices.count < 80)
-        #expect(tracker.visibleRanges.last == 0..<10)
+        #expect(rt.virtualLists.values.first?.lastMountedRange == 0..<15)
+        #expect(tracker.visibleRanges.isEmpty)
+        #expect(rt.isAnimating)
+        _ = rt.frame(at: 0.01)
+        #expect(rt.virtualLists.values.first?.lastMountedRange == 0..<20)
+        #expect(tracker.visibleRanges == [0..<10])
 
         // Scroll to y = 200 (anchor row is row-10)
         rt.update(at: 0.05) { _, tx in

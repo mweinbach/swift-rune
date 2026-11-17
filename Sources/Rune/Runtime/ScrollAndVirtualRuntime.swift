@@ -98,6 +98,7 @@ extension Runtime {
         let stickBottom: Bool
         let padTop: Float
         let indexed: Bool
+        let mounted: RuntimeVirtualListState.VirtualMountedSnapshot
     }
 
     internal struct VirtualExpansionContext {
@@ -570,15 +571,6 @@ extension Runtime {
                 forceAll: forceAll
             )
         }
-        ctx.listMeta.append(VirtualListMeta(
-            listPath: path,
-            scrollPath: vpPath,
-            estimate: est,
-            stickBottom: nextStickBottom,
-            padTop: el.layout.padding.top,
-            indexed: isIndexed
-        ))
-
         // Track first visible anchor row for prepend/resize scroll preservation. A list pinned to
         // its end, or nested and wholly above the viewport's top, anchors nothing.
         let vis = vState.visibleRange(offset: listOffsetY, viewport: vpH, prefix: prefix, count: count)
@@ -619,8 +611,15 @@ extension Runtime {
             padBottom: el.layout.padding.bottom
         )
         let priorSnapshotMatches = (vState.lastMountedSnapshot == currentMountedSnapshot)
-        vState.lastMountedSnapshot = currentMountedSnapshot
-        virtualLists[path]?.lastMountedSnapshot = currentMountedSnapshot
+        ctx.listMeta.append(VirtualListMeta(
+            listPath: path,
+            scrollPath: vpPath,
+            estimate: est,
+            stickBottom: nextStickBottom,
+            padTop: el.layout.padding.top,
+            indexed: isIndexed,
+            mounted: currentMountedSnapshot
+        ))
 
         let hasFocusedRow = !pinned.isEmpty || (focusedPath?.hasPrefix(path + "/") == true)
         let hasSelectionPin = hasUnmountedVirtualSelectionPin(listPath: path, places: vState.rowPlaces, mounted: mounted)
@@ -2038,16 +2037,13 @@ extension Runtime {
         return false
     }
 
-    internal func updateVirtualVisibleRowsOnScroll(at now: Double) {
+    internal func updateVirtualVisibleRowsOnScroll() {
         for listPath in activeVirtualPaths {
-            syncVirtualVisibleRange(for: listPath, at: now)
+            syncVirtualVisibleRange(for: listPath)
         }
     }
 
-    private func syncVirtualVisibleRange(
-        for listPath: String,
-        at now: Double
-    ) {
+    private func syncVirtualVisibleRange(for listPath: String) {
         guard var vState = virtualLists[listPath] else { return }
         let est = max(1, (nodeByPath[listPath].flatMap { flatNodes[$0].el.virtualEstimate }) ?? 40)
         let scrollIdx = nodeByPath[listPath].flatMap {
@@ -2068,8 +2064,6 @@ extension Runtime {
         let (listOffsetY, listPinned) = vState.locate(offsetY, pinned: stickyPin, total: total)
         let vis = vState.visibleRange(offset: listOffsetY, viewport: vpH, prefix: prefix, count: vState.lastKeys.count)
 
-        let prevVis = vState.lastVisibleRange
-        vState.lastVisibleRange = vis
         if !vis.isEmpty && !listPinned && !vState.passed {
             let ai = vis.first { vState.measuredByKey.heights[$0] != nil } ?? vis.lowerBound
             vState.lastAnchorKey = vState.lastKeys[ai]
@@ -2088,23 +2082,6 @@ extension Runtime {
         }
         vState.lastCommittedOffsetY = offsetY
         virtualLists[listPath] = vState
-
-        if prevVis != vis,
-           let lIdx = nodeByPath[listPath],
-           let onVis = flatNodes[lIdx].el.handlers.onVisibleRows {
-            let tx = makeTx(at: now)
-            let changed: Bool
-            if let scope = turnScope {
-                var res = false
-                scope(&state) { s in res = onVis(&s, vis) }
-                changed = res
-            } else {
-                changed = onVis(&state, vis)
-            }
-            if changed {
-                applyTx(tx, at: now, markDirtyIfNotLiveOnly: true)
-            }
-        }
     }
 
     /// Re-anchors and expands active virtual lists after a full measure pass when newly measured
