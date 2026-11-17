@@ -1,0 +1,89 @@
+<!doctype html>
+<meta charset="utf-8">
+<!-- Serve the repository root with python3 -m http.server, then open /Tests/Browser/field-mirror.html. -->
+<title>Rune browser field mirror</title>
+<canvas id="canvas" tabindex="0"></canvas>
+<button id="outside">Outside Rune</button>
+<pre id="result">Running…</pre>
+<script type="module">
+import { mountRuneFields } from "../../Sources/Rune/Resources/Web/rune-web.mjs";
+
+const canvas = document.querySelector("#canvas");
+const outside = document.querySelector("#outside");
+const result = document.querySelector("#result");
+const events = [];
+const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+function expect(condition, message) {
+    if (!condition) throw new Error(message);
+}
+function lastEvent(kind) {
+    const event = events.findLast(event => event.kind === kind);
+    expect(event, "Missing " + kind + " event");
+    return event;
+}
+
+let fields;
+try {
+    outside.focus();
+    fields = mountRuneFields(canvas, event => events.push(event));
+    const text = "opening line\n" + "中🦦 long line ".repeat(150) + "\nlast line";
+    const start = text.indexOf("🦦");
+    const mirror = { key: "draft", base: 117, text, anchor: start, focus: start, secure: false };
+    fields.sync(mirror);
+    expect(document.activeElement === outside, "Passive sync moved external focus");
+
+    fields.sync(mirror, true);
+    const editor = document.activeElement;
+    expect(editor instanceof HTMLTextAreaElement, "Activation did not focus the native textarea");
+    expect(editor.wrap === "off" && editor.value === text, "Native textarea did not preserve the hard lines");
+    await tick();
+    events.length = 0;
+    editor.setSelectionRange(start, start + "🦦".length, "backward");
+    await tick();
+    const selection = lastEvent("selection");
+    expect(selection.key === mirror.key && selection.base === mirror.base && selection.expected === text,
+        "Selection used the wrong source window");
+    expect(selection.anchor === start + 2 && selection.focus === start, "Backward emoji selection lost its UTF-16 direction");
+
+    events.length = 0;
+    expect(document.execCommand("insertText", false, "£"), "Browser declined the native insert");
+    await tick();
+    const edit = lastEvent("edit");
+    const edited = text.slice(0, start) + "£" + text.slice(start + 2);
+    expect(edit.expected === text && edit.text === edited && edit.key === mirror.key && edit.base === mirror.base,
+        "Native edit did not replace the selected text in the correct window");
+    expect(edit.anchor === start + 1 && edit.focus === start + 1, "Caret after native edit is wrong");
+
+    outside.focus();
+    fields.sync({ ...mirror, text: edited, anchor: edit.anchor, focus: edit.focus });
+    expect(document.activeElement === outside, "A later passive frame stole external focus");
+    fields.sync(null);
+    expect(document.activeElement === outside, "Clearing the field stole external focus");
+
+    const secure = { key: "password", base: 0, text: "", anchor: 0, focus: 0, secure: true };
+    fields.sync(secure, true);
+    const password = document.activeElement;
+    expect(password instanceof HTMLInputElement && password.type === "password", "Secure activation did not focus the password input");
+    expect(password.value === "", "Secure content persisted in the native password field");
+    events.length = 0;
+    expect(document.execCommand("insertText", false, "private"), "Browser declined password text input");
+    await tick();
+    const insert = lastEvent("insert");
+    expect(insert.key === secure.key && insert.text === "private", "Secure insert did not reach its field");
+    expect(password.value === "" && !events.some(event => event.kind === "edit"), "Secure content entered the ordinary mirror");
+
+    fields.sync(null);
+    expect(document.activeElement === canvas, "Clearing the active Rune field did not return focus to the canvas");
+    fields.dispose();
+    expect(!editor.isConnected && !password.isConnected, "Rune left native field nodes mounted after disposal");
+    events.length = 0;
+    editor.dispatchEvent(new InputEvent("input", { bubbles: true, data: "after teardown" }));
+    await tick();
+    expect(events.length === 0, "A disposed field still sent an event");
+    result.textContent = "PASS";
+} catch (error) {
+    fields?.dispose();
+    result.textContent = "FAIL " + error.message;
+    throw error;
+}
+</script>
