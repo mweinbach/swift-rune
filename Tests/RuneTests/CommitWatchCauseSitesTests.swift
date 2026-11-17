@@ -459,7 +459,7 @@ struct CommitWatchCauseSitesTests {
         for path in rt.scrollOffsets.keys { rt.scrollOffsets[path] = Vec2(0, 9000) }
         rt.commitWhyPending = 0
         rt.needsCommit = false
-        rt.recordVirtualMeasurementsAndCallbacks(expansion: Runtime<Section>.VirtualExpansionContext(), at: 0.05)
+        rt.updateVirtualVisibleRowsOnScroll(at: 0.05)
         #expect((rt.virtualLists[listPath]?.top ?? 0) > 200, "placed under the section")
         #expect(rt.needsCommit)
         #expect(rt.commitWhyPending & CommitWhy.virtual != 0, "\(CommitWhy.names(rt.commitWhyPending))")
