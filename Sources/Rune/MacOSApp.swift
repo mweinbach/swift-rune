@@ -1238,8 +1238,9 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     @discardableResult
     func dispatchKeyEvent(_ ev: KeyEvent, isRepeat: Bool = false, from nsEvent: NSEvent? = nil) -> Bool {
-        let handled = arrived(.keyPress, nsEvent) { MacOSClipboardSync.dispatchKeyWithSync(ev, runtime: runtime, at: nowSeconds()) }
-        _ = isRepeat
+        let handled = arrived(.keyPress, nsEvent) {
+            MacOSClipboardSync.dispatchKeyWithSync(ev, runtime: runtime, isRepeat: isRepeat, at: nowSeconds())
+        }
         renderTick()
         return handled
     }

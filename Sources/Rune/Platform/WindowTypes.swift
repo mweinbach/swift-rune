@@ -353,7 +353,7 @@ public protocol HostedWindowEntry: AnyObject {
     func pointerUp(runtimeObj: AnyObject, at: Vec2, button: PointerButton, mods: Mods, at: Double)
     func wheel(runtimeObj: AnyObject, event: WheelEvent, at: Vec2, now: Double)
     func keyDown(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool
-    @MainActor func keyDownWithClipboardSync(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool
+    @MainActor func keyDownWithClipboardSync(runtimeObj: AnyObject, event: KeyEvent, isRepeat: Bool, at: Double) -> Bool
     func fileDrop(runtimeObj: AnyObject, event: FileDropPhase, at: Double)
     func acceptsDrop(runtimeObj: AnyObject, urls: [URL], at: Vec2) -> Bool
     func takePopup(runtimeObj: AnyObject) -> Result<PopupShow, PopupMenuError>?
@@ -648,11 +648,11 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     }
 
     @MainActor
-    func keyDownWithClipboardSync(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool {
+    func keyDownWithClipboardSync(runtimeObj: AnyObject, event: KeyEvent, isRepeat: Bool, at: Double) -> Bool {
         #if os(macOS)
-        return MacOSClipboardSync.dispatchKeyWithSync(event, runtime: rt(runtimeObj), at: at)
+        return MacOSClipboardSync.dispatchKeyWithSync(event, runtime: rt(runtimeObj), isRepeat: isRepeat, at: at)
         #else
-        return rt(runtimeObj).keyDown(event, at: at)
+        return rt(runtimeObj).keyDown(event, isRepeat: isRepeat, at: at)
         #endif
     }
 

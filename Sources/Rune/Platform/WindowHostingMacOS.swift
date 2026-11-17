@@ -1160,7 +1160,9 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             }
         }
         guard let kev = MacOSKeyMapper.makeKeyEvent(from: event, optionAsAlt: optionAsAlt) else { return }
-        arrived(.keyPress, event) { _ = entry.keyDownWithClipboardSync(runtimeObj: runtime, event: kev, at: nowSeconds()) }
+        arrived(.keyPress, event) {
+            _ = entry.keyDownWithClipboardSync(runtimeObj: runtime, event: kev, isRepeat: event.isARepeat, at: nowSeconds())
+        }
         requestRender()
     }
 
