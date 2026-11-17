@@ -39,9 +39,9 @@ struct HelpTooltipParityTests {
         let rt: Runtime<S>
         var t: Double = 0.0
 
-        init() {
+        init(inset: Float = 0.0) {
             // `Env::new(true, 2.0)`: system dark, scale 2.
-            rt = Runtime<S>(state: S(), viewport: Vec2(400.0, 300.0), pixelScale: 2.0, systemDark: true) { s, cx in
+            rt = Runtime<S>(state: S(inset: inset), viewport: Vec2(400.0, 300.0), pixelScale: 2.0, systemDark: true) { s, cx in
                 HelpTooltipParityTests.view(s, &cx)
             }
             rt.frame(at: 0.0)
@@ -206,11 +206,8 @@ struct HelpTooltipParityTests {
     // element's drawn box every frame).
     @Test("follows its element when not clamped to the window margin")
     func followsItsElementUnclamped() throws {
-        let h = Harness()
+        let h = Harness(inset: 150)
         let rt = h.rt
-        rt.state.inset = 150.0
-        rt.invalidate(at: h.t)
-        h.frame(1.0 / 60.0)
         h.hover("copy")
         h.frame(1.0)
         let r0 = try #require(rt.helpTooltip()).rect
@@ -220,11 +217,16 @@ struct HelpTooltipParityTests {
 
         rt.state.inset = 156.0
         rt.invalidate(at: h.t)
-        h.frame(1.0 / 60.0)
-        let r1 = try #require(rt.helpTooltip(), "still shown").rect
-        let e1 = h.find("copy")
-        #expect(abs(e1.rect[0] - (e0.rect[0] + 6.0)) < 0.01, "element moved: \(e0.rect) -> \(e1.rect)")
-        #expect(abs(r1[0] - (r0[0] + 6.0)) < 1.0, "\(r0) -> \(r1)")
-        #expect(r1[1] == r0[1] && r1[2] == r0[2] && r1[3] == r0[3])
+        for _ in 0..<4 { h.frame(1.0 / 60.0) }
+        let moving = try #require(rt.helpTooltip(), "shown during the move").rect
+        let dx = h.find("copy").rect[0] - e0.rect[0]
+        #expect(dx > 0 && dx < 6)
+        #expect(abs((moving[0] - r0[0]) - dx) < 1.0, "the tooltip tracks the drawn element")
+
+        h.frame(1.0)
+        let landed = try #require(rt.helpTooltip(), "shown after landing").rect
+        #expect(abs(h.find("copy").rect[0] - (e0.rect[0] + 6.0)) < 0.01)
+        #expect(abs(landed[0] - (r0[0] + 6.0)) < 1.0)
+        #expect(landed[1] == r0[1] && landed[2] == r0[2] && landed[3] == r0[3])
     }
 }
