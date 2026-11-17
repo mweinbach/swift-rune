@@ -3128,6 +3128,10 @@ public final class Runtime<State> {
                     && abs(curTarget.width - localTarget.width) < 0.1
                     && abs(curTarget.height - localTarget.height) < 0.1
             }
+            let rowGrowthKey = el.foldGlideSpec != nil ? "fold:\(path)" : "growth:\(path)"
+            let hasGrowthSlide = growthRows[rowGrowthKey]?.contentSlide != nil
+            let isRunningFlight = !hasGrowthSlide && (activeFlightIds.contains(nid) || launchedFlightIds.contains(nid))
+            let followsWindow = pendingResizeRelayout && !isRunningFlight && !scene.store.isAnimating(nid, Props.FRAME)
             var layoutAnimSpec: LayoutAnim?
             let isStackContainer = (el.growthSpec != nil) || (el.virtualEstimate != nil)
             let (selfInRow, childInRow) = ParityLayoutAnimation.resolveRowLayout(
@@ -3136,7 +3140,7 @@ public final class Runtime<State> {
                 hasAnimateLayout: el.layoutAnim != nil,
                 isStackContainer: isStackContainer
             )
-            if commitCut || reducedMotion || pixelsAspectSnapIds.remove(nid) != nil {
+            if commitCut || reducedMotion || pixelsAspectSnapIds.remove(nid) != nil || followsWindow {
                 layoutAnimSpec = nil
             } else if selfInstantLayoutOrStyle {
                 layoutAnimSpec = (keepsFlights && isRunningSameSceneFrame()) ? .instant : nil
@@ -3155,19 +3159,20 @@ public final class Runtime<State> {
                 layoutAnimSpec = (el.layoutAnim != nil || selfInRow == .horizontal) ? resolved : nil
             } else if selfInRow == .snaps {
                 layoutAnimSpec = el.layoutAnim != nil ? .instant : nil
+            } else if el.layoutAnim == nil, commitMotion == nil, !isRunningFlight, el.virtualEstimate == nil {
+                // Ordinary layout changes spring on the inherited element motion.
+                // Virtual containers, explicit transactions and flights own their placement.
+                layoutAnimSpec = LayoutAnim(spring: nodeStyleSpring ?? MotionTokens.DEFAULT)
             } else {
                 layoutAnimSpec = el.layoutAnim
             }
-            if !selfInstantLayoutOrStyle, layoutAnimSpec == nil, let cm = commitMotion {
+            if !selfInstantLayoutOrStyle, !followsWindow, layoutAnimSpec == nil, let cm = commitMotion {
                 layoutAnimSpec = LayoutAnim(x: cm.anim, y: cm.anim)
             }
-            let rowGrowthKey = el.foldGlideSpec != nil ? "fold:\(path)" : "growth:\(path)"
-            let hasGrowthSlide = growthRows[rowGrowthKey]?.contentSlide != nil
-            let isRunningFlight = !hasGrowthSlide && (activeFlightIds.contains(nid) || launchedFlightIds.contains(nid))
             if layoutAnimSpec == nil && !commitCut && !reducedMotion && !commitKind.lands && isRunningFlight {
                 layoutAnimSpec = LayoutAnim(spring: el.flightSpring ?? el.styleSpring ?? MotionTokens.SETTLE, travel: .screen)
             }
-            if el.isWidthLeads && !selfInstantLayoutOrStyle {
+            if el.isWidthLeads && !selfInstantLayoutOrStyle && !followsWindow {
                 if let la = layoutAnimSpec {
                     layoutAnimSpec = la.widthLeads()
                 } else {
