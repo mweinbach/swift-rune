@@ -2199,7 +2199,6 @@ public final class Runtime<State> {
         let rawAnimating = tracksAnimating
             || scrollStore.isAnimating
             || isTouchScrollActive
-            || !slice2State.scrollNudges.isEmpty
             || liveStore.isAnimating
             || liveActive
             || growthMoving
@@ -2216,7 +2215,7 @@ public final class Runtime<State> {
         var sources: UInt32 = 0
         if tracksAnimating || tooltipFading(at: now) { sources |= AnimSource.tracks }
         if growthMoving || slackMoving || growthRows.values.contains(where: { $0.track.moving }) || growthStacks.values.contains(where: { !$0.pendingHeights.isEmpty || !$0.closing.isEmpty || !$0.runs.isEmpty }) || kitHooks.growthStacks.values.contains(where: { !$0.closing.isEmpty }) { sources |= AnimSource.growth }
-        if scrollStore.isAnimating || isTouchScrollActive || !slice2State.scrollNudges.isEmpty || hasActiveSelectableEdgeScroll { sources |= AnimSource.scroll }
+        if scrollStore.isAnimating || isTouchScrollActive || hasActiveSelectableEdgeScroll { sources |= AnimSource.scroll }
         if activeWordReveals { sources |= AnimSource.reveal }
         if liveStore.isAnimating || liveActive { sources |= AnimSource.live }
         if virtualFill.isFilling { sources |= AnimSource.virtualFill }
@@ -3137,7 +3136,7 @@ public final class Runtime<State> {
                             scrollStore.snap(nid, Props.SCROLL, to: Vec2(curScroll.x, maxSY))
                         }
                         if jumped {
-                            armScrollNudge(forPath: path, at: now)
+                            armScrollNudge(path: path, at: now)
                         }
                         wasPinnedToBottom.insert(path)
                     }

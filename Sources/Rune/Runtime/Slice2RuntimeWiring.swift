@@ -54,7 +54,6 @@ internal final class Slice2RuntimeState {
     var growthGrownByScrollPath: [String: Float] = [:]
     var scrollLastSlackTickAt: Double? = nil
     var scrollWatches: [String: ScrollWatch.Watch] = [:]
-    var scrollNudges: [String: ScrollNudge] = [:]
     var pixelHolds: [String: PixelHold] = [:]
     var scrollHorizontalVelocities: [String: Float] = [:]
     var growthStackOrders: [NodeId: [NodeId]] = [:]
@@ -154,35 +153,12 @@ extension Runtime {
 
     // MARK: - Hover Nudge (`ScrollNudge`) Wiring
 
-    internal func armScrollNudge(forPath path: String, at now: Double) {
-        var nudge = slice2State.scrollNudges[path] ?? ScrollNudge()
-        _ = nudge.arm(now: now)
-        slice2State.scrollNudges[path] = nudge
-    }
-
-    internal func stepScrollNudges(at now: Double) {
-        guard !slice2State.scrollNudges.isEmpty else { return }
-        var expired: [String] = []
-        for path in slice2State.scrollNudges.keys {
-            var nudge = slice2State.scrollNudges[path]!
-            nudge.tick(now: now)
-            if nudge.due() == nil {
-                expired.append(path)
-            } else {
-                slice2State.scrollNudges[path] = nudge
-            }
-        }
-        for path in expired {
-            slice2State.scrollNudges.removeValue(forKey: path)
-        }
-    }
-
     internal func isHoverHeldByNudge(at now: Double) -> Bool {
-        slice2State.scrollNudges.values.contains { $0.holdAt(now: now) }
+        scrollNudges.values.contains { $0.holdAt(now: now) }
     }
 
     internal func cancelActiveScrollHolds(forPath path: String) {
-        slice2State.scrollNudges.removeValue(forKey: path)
+        scrollNudges.removeValue(forKey: path)
     }
 
     // MARK: - PixelHold & ScrollMode Helpers

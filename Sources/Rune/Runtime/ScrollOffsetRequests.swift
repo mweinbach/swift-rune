@@ -4,10 +4,6 @@ import RuneMotion
 // MARK: - App offset requests (`crates/rune/src/runtime/scroll/offset.rs`)
 
 extension Runtime {
-    /// How many viewports out a long glide starts: farther, it cuts to there first and glides
-    /// the rest (`scroll/bottom.rs::GLIDE_REACH`, read by `offset.rs::scroll_to_offsets`).
-    internal static var scrollGlideReach: Double { 2.0 }
-
     /// Moves viewport `path` to `next`, clamped to its content: on `glide` (motion on and not a
     /// cut) the scroll track springs there, otherwise the offset lands at once. `animNow` is the
     /// animation clock the spring starts on.
@@ -94,11 +90,11 @@ extension Runtime {
             let was = comp(before, a)
             if let spring, abs(end - was) > 0.5 {
                 // A long trip cuts to a couple of viewports out first (`offset.rs:49-53,63-66`).
-                let reach = Float(Self.scrollGlideReach) * comp(view, a)
+                let reach = Float(ScrollSlack.glideReach) * comp(view, a)
                 let start = min(max(was, end - reach), end + reach)
                 let v0 = gliding && laneMoving(a) ? comp(velocity, a) : 0
                 land[a] = start
-                glides[a] = (end, ScrollGlide.retargetV(spring, offset: Double(start), v: v0, to: Double(end)), to)
+                glides[a] = (end, ScrollAxisHelper.retargetV(spring: offset: Double(start), v: v0, to: Double(end)), to)
             } else {
                 land[a] = end
                 // `apply_jumps`: a jump that moved its axis more than 1e-3 arms the hold.
@@ -267,37 +263,5 @@ internal enum ScrollGlide {
     /// A glide `d` points from its end at `v` points a second lands there (`glide_axis`).
     static func lands(d: Float, v: Float) -> Bool {
         abs(d) < land && abs(v) < 40.0 * land
-    }
-
-    /// The speed a running glide at `offset` keeps when it's sent to `to` on `spring`: all of it,
-    /// unless that would carry it past `to` and back (a critically damped spring heading for its
-    /// end faster than ω times the distance left overshoots), so a glide sent somewhere nearer
-    /// stops there on one path instead of bouncing (`offset.rs::retarget_v`).
-    static func retargetV(_ spring: Spring, offset: Double, v: Float, to: Double) -> Float {
-        let d = Float(offset - to)
-        let most = spring.omega * abs(d)
-        if v * d < 0.0 && abs(v) > most {
-            // `-d.signum() * most`; `v * d < 0` rules out d == 0.
-            return d > 0 ? -most : most
-        }
-        return v
-    }
-
-    /// Steps a glide on one axis toward `to` on `spring`. Returns whether it is still moving
-    /// (`offset.rs::glide_axis`).
-    @discardableResult
-    static func glideAxis(_ spring: Spring, offset: inout Double, glide: inout Float?, to: Double, dt: Float) -> Bool {
-        guard let v = glide else { return false }
-        // Sample the displacement, not the absolute offset: f32 loses sub-point precision far down.
-        let (d, nv) = spring.sample(from: Float(offset - to), velocity: v, target: 0.0, at: dt)
-        // Lands under a tenth of a point out, so the last step is no bigger than the ones before it.
-        if lands(d: d, v: nv) {
-            offset = to
-            glide = nil
-            return false
-        }
-        offset = to + Double(d)
-        glide = nv
-        return true
     }
 }

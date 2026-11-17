@@ -43,6 +43,26 @@ struct ScrollHoverParityTests {
         return (rt, t)
     }
 
+    @Test("a pinned viewport carries hover until its bottom slack finishes stepping")
+    func bottomSlackCarriesHover() throws {
+        let (rt, t) = Self.hovering()
+        let path = try #require(rt.flatNodes.first(where: { $0.key == "scroll" })?.path)
+        var slack = ScrollSlack.landed(window: (200, 200))
+        slack.track.h = 12
+        rt.slice2State.scrollSlacks[path] = slack
+        #expect(rt.scrollCarries(path: path, at: t))
+        #expect(rt.anyScrollCarries(at: t))
+        #expect(!rt.scrollCarries(path: "other", at: t))
+
+        slack.track.h = 0
+        slack.stepped = true
+        rt.slice2State.scrollSlacks[path] = slack
+        #expect(rt.scrollCarries(path: path, at: t))
+        slack.stepped = false
+        rt.slice2State.scrollSlacks[path] = slack
+        #expect(!rt.anyScrollCarries(at: t))
+    }
+
     /// No viewport glides (`rt.scrolls.values().all(|s| s.glide().is_none())`).
     static func noGlide<S>(_ rt: Runtime<S>) -> Bool { rt.scrollGlidingPaths.isEmpty }
 
@@ -429,7 +449,7 @@ struct ScrollHoverParityTests {
     /// viewports cuts to two viewports out first, then glides the rest.
     @Test("a long glide cuts to two viewports out first")
     func aLongGlideCutsToTwoViewportsOutFirst() {
-        #expect(Runtime<Int>.scrollGlideReach == 2.0)
+        #expect(ScrollSlack.glideReach == 2.0)
         var (rt, path, t) = Self.planeRuntime()
         rt.update(at: t) { _, tx in tx.scrollTo("plane", x: 0.0, y: 3000.0) }
         t += Self.dt

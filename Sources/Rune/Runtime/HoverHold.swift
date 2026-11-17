@@ -47,113 +47,19 @@ internal struct HoverHold: Sendable, Equatable {
     }
 }
 
-// MARK: - Instant scroll hover hold (`crates/rune/src/runtime/scroll/nudge.rs`)
-
-/// An app's instant scroll (`Tx.scrollToInstant` and the like) holds hover under a still
-/// pointer: content moved with nothing under the pointer moving, so hover waits out the hold
-/// instead of lighting each row an app's own, frame-by-frame glide carries past. The hold is a
-/// time on the clock, so it lasts as long on a 30 Hz display as on a 120 Hz one: the frame the
-/// scroll lands in holds, and hover resolves once at the pointer when the hold is over. A held
-/// nudge draws nothing in between: it asks for one frame at its due time, the frame that ends
-/// it (`nudge.rs::Nudge`).
-internal struct ScrollNudge: Sendable, Equatable {
-    /// How long an instant scroll holds hover: the two frames at 60 Hz its frame countdown took
-    /// (`NUDGE_HOLD`).
-    internal static let nudgeHold: Double = 2.0 / 60.0
-
-    /// A deadline comparison's slack, so a frame that lands on the due time ends the hold (`SLACK`).
-    static let slack: Double = 1e-6
-
-    /// Where the hold stands (`nudge.rs::Hold`).
-    internal enum Hold: Sendable, Equatable {
-        /// Nothing holds hover.
-        case free
-        /// An instant scroll landed, and hover holds until this clock time, as `attempt`.
-        case held(attempt: AttemptToken, due: Double)
-    }
-
-    /// `nudge.rs::Event`.
-    internal enum Event: Sendable, Equatable {
-        /// An app's instant scroll landed at this clock time.
-        case arm(now: Double)
-        /// A frame at `now`, carrying the `attempt` its arm asked for: the hold ends only if that
-        /// is still the armed one.
-        case due(attempt: AttemptToken, now: Double)
-    }
-
-    /// `nudge.rs::Effect`.
-    internal enum Effect: Sendable, Equatable {
-        /// Wake at this clock time, when the hold is due.
-        case wakeAt(Double)
-    }
-
-    internal var seq: Seq
-    internal var state: Hold
-
-    internal init(seq: Seq = Seq(), state: Hold = .free) {
-        self.seq = seq
-        self.state = state
-    }
-
-    /// `nudge.rs::step`.
-    @discardableResult
-    internal static func step(seq: inout Seq, state: inout Hold, event: Event) -> Effects<Effect> {
-        switch event {
-        case .arm(let now):
-            let attempt = seq.nextAttempt()
-            let due = now + nudgeHold
-            state = .held(attempt: attempt, due: due)
-            return .one(.wakeAt(due))
-        case .due(let attempt, let now):
-            if case .held(let armed, let due) = state, armed == attempt, due <= now + slack {
-                state = .free
-            }
-            return .none
-        }
-    }
-
-    /// An instant scroll landed at `now` from the clock: hover holds, and this asks for the wake
-    /// that brings the frame the hold ends on.
-    @discardableResult
-    internal mutating func arm(now: Double) -> Effects<Effect> {
-        Self.step(seq: &seq, state: &state, event: .arm(now: now))
-    }
-
-    /// A frame at `now`, the one its wake asked for: a hold that came due ends.
-    internal mutating func tick(now: Double) {
-        if case .held(let attempt, _) = state {
-            Self.step(seq: &seq, state: &state, event: .due(attempt: attempt, now: now))
-        }
-    }
-
-    /// Hover holds at `now`.
-    internal func holdAt(now: Double) -> Bool {
-        if case .held(_, let due) = state { return now + Self.slack < due }
-        return false
-    }
-
-    /// The clock time a pending hold ends.
-    internal func due() -> Double? {
-        if case .held(_, let due) = state { return due }
-        return nil
-    }
-}
-
 extension Runtime {
     // MARK: Scroll carries & nudges (`hover.rs::scroll_carries`, `offset.rs::step_nudges`)
 
-    /// Viewport `path` moves content under a still pointer on its own at `now`: a glide, or an
-    /// app's instant scrolls frame after frame (a glide it steps itself) (`hover.rs::scroll_carries`).
-    /// Known gap: upstream also counts stick-bottom slack letting rows down (`s.slack.moving()`),
-    /// which depends on `scroll/bottom.rs::Slack`; the Swift port has no slack track yet, so
-    /// this term is missing until `Slack` is ported.
+    /// A glide, an instant scroll or stick-bottom slack carries content under a still pointer.
     internal func scrollCarries(path: String, at now: Double) -> Bool {
-        scrollGlidingPaths.contains(path) || (scrollNudges[path]?.holdAt(now: now) ?? false)
+        scrollGlidingPaths.contains(path)
+            || scrollNudges[path]?.holdAt(now: now) == true
+            || slice2State.scrollSlacks[path]?.moving == true
     }
 
-    /// Any viewport carries content on its own at `now` (the scroll half of `layout_moving`).
     internal func anyScrollCarries(at now: Double) -> Bool {
-        !scrollGlidingPaths.isEmpty || scrollNudges.values.contains { $0.holdAt(now: now) }
+        !scrollGlidingPaths.isEmpty || isHoverHeldByNudge(at: now)
+            || slice2State.scrollSlacks.values.contains(where: \.moving)
     }
 
     /// An app's instant scroll moved viewport `path` at `now` (`offset.rs::apply_jumps`): hover
