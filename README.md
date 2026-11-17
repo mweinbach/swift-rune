@@ -210,6 +210,8 @@ dbus-run-session -- xvfb-run -a python3 scripts/test-linux-window.py .build/debu
 dbus-run-session -- xvfb-run -a python3 scripts/test-linux-window.py --wayland .build/debug/rune-hello
 ```
 
+On Ubuntu with Swift 6.4.2, SwiftPM's native build system builds the full manifest and generates the Linux test runner. For a focused GPU check, run `swift test --build-system native --filter PortableGLRendererTests`. Run `swift test --build-system native` for the full suite.
+
 On Windows, install the Swift toolchain, Visual C++ build tools, Windows SDK, and a display driver with OpenGL 3.3 support. Run the example from PowerShell. [Swift for Windows installation guide](https://www.swift.org/install/windows/manual/)
 
 ```powershell

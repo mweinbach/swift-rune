@@ -9,8 +9,10 @@ import Testing
 struct MetalLayerCacheHandoffTests {
     private func panel(image tile: RGBA8Atlas? = nil) -> Runtime<Void> {
         let runtime = Runtime<Void>(state: (), viewport: Vec2(32, 16), pixelScale: 1) { _, _ in
-            let content: El<Void> = tile.map { image($0) } ?? el().bg(Color(r: 0, g: 1, b: 0, a: 1))
-            return el().sizeFull().child(content.key("panel").size(16, 12).cache())
+            let panel: El<Void> = el().key("panel").size(16, 12).cache().bg(Color(r: 0, g: 1, b: 0, a: 1))
+            let root = row().sizeFull().child(panel)
+            guard let tile else { return root }
+            return root.child(image(tile).key("image").size(16, 12).cache())
         }
         runtime.clearColor = .black
         return runtime
@@ -57,14 +59,16 @@ struct MetalLayerCacheHandoffTests {
 
     @Test("Identical layer keys and signatures in separate runtimes have independent residency")
     func changeRuntime() throws {
-        // These runtimes assign the same coordinates and revision to different texels.
+        // The solid panel has the same signature across runtimes. The neighboring
+        // image occupies the same atlas rectangle but has its own content version.
         let first = panel(image: RGBA8Atlas(width: 1, height: 1, texels: [255, 0, 0, 255]))
-        let second = panel(image: RGBA8Atlas(width: 1, height: 1, texels: [0, 255, 0, 255]))
+        let second = panel(image: RGBA8Atlas(width: 1, height: 1, texels: [0, 0, 255, 255]))
         let renderer = try MetalRenderer()
         let baseline = try renderer.renderOffscreen(renderer.frame(first, at: 0))
-        #expect(baseline.pixel(x: 8, y: 6) == SIMD4(255, 0, 0, 255))
+        #expect(baseline.pixel(x: 8, y: 6) == SIMD4(0, 255, 0, 255))
+        #expect(baseline.pixel(x: 24, y: 6) == SIMD4(255, 0, 0, 255))
         let firstCached = renderer.frame(first, at: 0.1)
-        let firstKey = try #require(firstCached.elidedLayers.first)
+        try #require(firstCached.elidedLayers.count == 2)
 
         let next = renderer.frame(second, at: 0.2)
         #expect(next.elidedLayers.isEmpty)
@@ -72,9 +76,14 @@ struct MetalLayerCacheHandoffTests {
         let hits = renderer.layerStats().hits
         let rendered = try renderer.renderOffscreen(next)
         #expect(rendered.pixel(x: 8, y: 6) == SIMD4(0, 255, 0, 255))
+        #expect(rendered.pixel(x: 24, y: 6) == SIMD4(0, 0, 255, 255))
         #expect(renderer.layerStats().hits == hits)
-        let secondKey = try #require(renderer.frame(second, at: 0.3).elidedLayers.first)
-        #expect(firstKey.node == secondKey.node && firstKey.signature == secondKey.signature)
+        let secondCached = renderer.frame(second, at: 0.3)
+        try #require(secondCached.elidedLayers.count == 2)
+        let firstPanel = firstCached.elidedLayers[0], secondPanel = secondCached.elidedLayers[0]
+        #expect(firstPanel.node == secondPanel.node && firstPanel.signature == secondPanel.signature)
+        let firstImage = firstCached.elidedLayers[1], secondImage = secondCached.elidedLayers[1]
+        #expect(firstImage.node == secondImage.node && firstImage.signature != secondImage.signature)
         try expectMissingLayer(firstCached, on: renderer)
         let rebuilt = renderer.frame(first, at: 0.4)
         #expect(rebuilt.elidedLayers.isEmpty)
