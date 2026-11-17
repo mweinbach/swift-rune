@@ -16,7 +16,7 @@ struct MarkdownCloseoutParityTests {
         for scale: Float in [1, 2] {
             rt.setViewport(Vec2(280, 120), pixelScale: scale)
             _ = rt.frame(at: Double(scale))
-            let node = try #require(rt.flatNodes.first { $0.el.layout.outsideListDiscFont != nil })
+            let node = try #require(rt.flatNodes.first { $0.el.outsideListDiscFont != nil })
             let parent = rt.flatNodes[try #require(node.parentIndex)]
             let r = node.targetRect
             #expect(r.width > 0 && r.width == r.height)

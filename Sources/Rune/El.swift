@@ -1086,6 +1086,7 @@ final class ElColdData<State> {
     var placeholder: String? = nil
     var placeholderColor: Color? = nil
     var placeholderFontBox: AnyObject? = nil
+    var outsideListDiscFontBox: AnyObject? = nil
     var wrapGreedy: Bool = false
     var caretColor: Color? = nil
     var selectionColor: Color? = nil
@@ -1254,6 +1255,7 @@ final class ElColdData<State> {
         c.placeholder = placeholder
         c.placeholderColor = placeholderColor
         c.placeholderFontBox = placeholderFontBox
+        c.outsideListDiscFontBox = outsideListDiscFontBox
         c.wrapGreedy = wrapGreedy
         c.caretColor = caretColor
         c.selectionColor = selectionColor
@@ -1402,13 +1404,17 @@ public struct El<State> {
     public var liveText: LiveText? { get { _cold?.data.liveText } set { ensureCold().data.liveText = newValue } }
     public var placeholder: String? { get { _cold?.data.placeholder } set { ensureCold().data.placeholder = newValue } }
     public var placeholderColor: Color? { get { _cold?.data.placeholderColor } set { ensureCold().data.placeholderColor = newValue } }
-    private final class PlaceholderFontBox: @unchecked Sendable {
+    private final class FontStyleBox: @unchecked Sendable {
         let style: TextStyle
         init(_ style: TextStyle) { self.style = style }
     }
     public var placeholderFont: TextStyle? {
-        get { (_cold?.data.placeholderFontBox as? PlaceholderFontBox)?.style }
-        set { ensureCold().data.placeholderFontBox = newValue.map(PlaceholderFontBox.init) }
+        get { (_cold?.data.placeholderFontBox as? FontStyleBox)?.style }
+        set { ensureCold().data.placeholderFontBox = newValue.map(FontStyleBox.init) }
+    }
+    internal var outsideListDiscFont: TextStyle? {
+        get { (_cold?.data.outsideListDiscFontBox as? FontStyleBox)?.style }
+        set { ensureCold().data.outsideListDiscFontBox = newValue.map(FontStyleBox.init) }
     }
     public var isWrapGreedy: Bool { get { _cold?.data.wrapGreedy ?? false } set { ensureCold().data.wrapGreedy = newValue } }
     public var caretColor: Color? { get { _cold?.data.caretColor } set { ensureCold().data.caretColor = newValue } }
