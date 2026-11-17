@@ -1105,7 +1105,7 @@ public final class Runtime<State> {
     internal var nativePaintTopology: NativePaintTopology?
     internal var spareFlatNodes: [FlatNode] = []
     internal var replayedFlatMemoNodes: Int { flatMemoPaths.values.reduce(0) { $0 + $1.replayedNodes } }
-    private var flatMemoPaths: [String: FlatMemoPaths<State>] = [:]
+    private var flatMemoPaths: [NodeId: FlatMemoPaths<State>] = [:]
     internal var nodeByPath: [String: Int] = [:]
     internal var nodeIndexById: [NodeId: Int] = [:]
 
@@ -3112,7 +3112,7 @@ public final class Runtime<State> {
         var loopSpecs: [(id: NodeId, spec: LoopSpec)] = []
         var ancestorInstants: [Bool] = []
         var warnings = renames.map(\.warning)
-        var nextMemoPaths: [String: FlatMemoPaths<State>] = [:]
+        var nextMemoPaths: [NodeId: FlatMemoPaths<State>] = [:]
         var flatCaptures: [FlatMemoCapture<State>] = []
         let flatFrame = FlatMemoFrame(commit: commitKind, cut: commitCut, motion: commitMotion,
             colorSpring: commitColorSpring, reducedMotion: reducedMotion, scale: pixelScale,
@@ -3205,13 +3205,16 @@ public final class Runtime<State> {
             var memoPaths = item.memoPaths
             if memoPaths == nil, childCount > 0, let owner = el.memoLayoutChildren,
                owner.matches(el.children), owner.traits.isDisjoint(with: [.virtual, .growth, .inputPills]) {
-                if let old = flatMemoPaths[path], old.owner === owner {
+                // Screen travel can move a node independently of its path. Its children's
+                // identities still start at the authored path, including its exact UTF-8.
+                let pathId = el.layoutAnim?.travel == .screen ? NodeId.hash(path) : nid
+                if let old = flatMemoPaths[pathId], old.owner === owner {
                     memoPaths = old
                 } else {
                     memoPaths = FlatMemoPaths(owner)
                 }
                 memoPaths?.replayedNodes = 0
-                nextMemoPaths[path] = memoPaths
+                nextMemoPaths[pathId] = memoPaths
             }
             let memoSlot = item.memoPaths == nil ? 0 : item.memoSlot
             let childPaths = childCount == 0 ? FlatChildPaths() :

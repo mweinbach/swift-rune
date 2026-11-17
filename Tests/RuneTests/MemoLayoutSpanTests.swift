@@ -40,6 +40,48 @@ struct MemoLayoutSpanTests {
         #expect(texts.liveIds == labels.union([NodeId.hash("/@café/root"), NodeId.hash("screen:@panel")]))
     }
 
+    @Test("A memo moved between byte-distinct Unicode paths transfers its current text identities")
+    func canonicallyEquivalentPathsRekeyRetainedText() {
+        let layout = RetainedLayoutCoordinator()
+        let textSystem = TextSystem()
+        let cache = MemoCache()
+        let panel = cache.getOrBuild(id: "panel", deps: 0) { () -> El<State> in
+            let inner = cache.getOrBuild(id: "inner", deps: 0) { () -> El<State> in
+                col().child(text("label").key("label"))
+            }.element
+            return col().child(inner)
+        }.element
+        for (root, wrapper) in [("é", "á"), ("e\u{301}", "á"), ("e\u{301}", "a\u{301}"), ("é", "á")] {
+            let tree: El<State> = col().key(root).child(col().key(wrapper).child(panel))
+            let texts = RetainedLayoutCoordinator.TextLayoutCollector()
+            _ = layout.compute(root: tree, state: State(), viewport: Vec2(180, 90),
+                               pixelScale: 1, textSystem: textSystem, textLayouts: texts)
+            let label = NodeId.hash("/@\(root)/@\(wrapper)/@panel/@inner/@label")
+            #expect(Set(texts.map.keys) == [label])
+            #expect(texts.liveIds.contains(label))
+        }
+    }
+
+    @Test("Runtime elements report the current bytes after a memo changes ancestors")
+    func movedMemoReportsCurrentElementPath() throws {
+        let cache = MemoCache()
+        let panel = cache.getOrBuild(id: "panel", deps: 0) { () -> El<Int> in
+            col().child(text("label").key("label"))
+        }.element
+        let roots = ["é", "e\u{301}", "é"]
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(180, 90), pixelScale: 1) { step, _ in
+            col().key(roots[step]).child(panel)
+        }
+        for step in roots.indices {
+            let t = Double(step) / 30
+            rt.update(at: t) { state, _ in state = step }
+            _ = rt.frame(at: t)
+            let label = try #require(rt.elements().first { !$0.exiting && $0.key == "label" })
+            let path = "/@\(roots[step])/@panel/@label"
+            #expect(label.path.utf8.elementsEqual(path.utf8))
+        }
+    }
+
     @Test("Unchanged descendants transfer their slots across resize and reparent, and keep current text layouts")
     func transferAcrossLayoutPasses() {
         let cache = MemoCache()

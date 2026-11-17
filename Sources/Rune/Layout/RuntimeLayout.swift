@@ -83,7 +83,6 @@ final class RetainedLayoutCoordinator {
     private struct MemoSpan {
         var record: MemoRecord
         var root: SyncPrepared { record.root }
-        var keyedRootPath: String?
         var nodes: ArraySlice<PreparedNode>
         var leaves: ArraySlice<TextLeafFallback>
         var overflow: ArraySlice<OverflowLeaf>
@@ -597,8 +596,8 @@ final class RetainedLayoutCoordinator {
             else { return false }
             let oldStart = span.root.myIndex
             let shift = p.myIndex - oldStart
-            let moved = span.root.path != p.path
-            let changedIds = moved || span.keyedRootPath != keyedRootPath
+            let moved = span.root.storePathId != p.storePathId
+            let changedIds = moved || span.root.runtimePathId != p.runtimePathId
             func newPath(_ node: PreparedNode) -> String {
                 p.path + node.path.dropFirst(span.root.path.count)
             }
@@ -670,7 +669,7 @@ final class RetainedLayoutCoordinator {
             for (index, record) in records.enumerated() {
                 guard let id = record.identity else { continue }
                 nextMemoSpans[ObjectIdentifier(id)] = MemoSpan(
-                    record: record, keyedRootPath: keyedRootPath, nodes: nodes[local(record.nodes, group.nodes.lowerBound)],
+                    record: record, nodes: nodes[local(record.nodes, group.nodes.lowerBound)],
                     leaves: leaves[local(record.leaves, group.leaves.lowerBound)],
                     overflow: overflow[local(record.overflow, group.overflow.lowerBound)],
                     nested: records[record.nestedStart..<index], isGroupRoot: index == records.count - 1
@@ -690,8 +689,17 @@ final class RetainedLayoutCoordinator {
             for var record in span.nested {
                 record.nodes = moved(record.nodes, shift)
                 record.root.myIndex += shift
-                record.root.path = flat[record.root.myIndex].path
-                record.root.keyHash = flat[record.root.myIndex].storeKey
+                let node = flat[record.root.myIndex]
+                record.root.path = node.path
+                record.root.keyHash = node.storeKey
+                if node.screenIdentity {
+                    record.root.storePathId = RuneMotion.NodeId.hash(node.path)
+                    let runtimePath = keyedRootPath.map { $0 + node.path.dropFirst(storeRootPath.count) } ?? node.path
+                    record.root.runtimePathId = RuneMotion.NodeId.hash(runtimePath)
+                } else {
+                    record.root.storePathId = RuneMotion.NodeId(node.storeKey)
+                    record.root.runtimePathId = node.runtimeId
+                }
                 record.leaves = moved(record.leaves, leafShift)
                 record.overflow = moved(record.overflow, overflowShift)
                 record.nestedStart += recordShift
@@ -727,8 +735,8 @@ final class RetainedLayoutCoordinator {
             if let memoKey, let span = memoSpans[memoKey], span.record.identity === identity,
                reuseChildren(span, p) {
                 let (slot, dirty) = syncFinish(p, childMark: childMark, childrenDirty: false)
-                if !wasRecording, span.isGroupRoot, p.path == span.root.path,
-                   keyedRootPath == span.keyedRootPath, span.nodes.first?.slot == slot {
+                if !wasRecording, span.isGroupRoot, p.storePathId == span.root.storePathId,
+                   p.runtimePathId == span.root.runtimePathId, span.nodes.first?.slot == slot {
                     nextMemoSpans[memoKey] = span
                     for inner in span.nested {
                         if let id = inner.identity {
