@@ -193,6 +193,9 @@ struct SelectableTextTests {
         #expect(!SelectionMath.sameKeyedPath("#0/@msg-4/0", "#0/@msg-5/0"))
         #expect(SelectionMath.kept(then: "alpha beta", now: "alpha beta gamma", upto: 5))
         #expect(!SelectionMath.kept(then: "alpha beta", now: "axpha beta", upto: 5))
+        #expect(!SelectionMath.kept(then: "é", now: "e\u{0301} added", upto: 0))
+        #expect(!SelectionMath.kept(then: "é", now: "è", upto: 1))
+        #expect(SelectionMath.kept(then: "e\u{0301}", now: "e\u{0300}", upto: 1))
 
         // Mid-UTF-8 clamping snaps to floorCharBoundary (never splits multi-byte codepoints into U+FFFD)
         let utf8Nodes = [

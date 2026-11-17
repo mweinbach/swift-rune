@@ -401,6 +401,31 @@ struct VirtualSelectionParityTests {
         #expect(h.findPath("/@r45/@body")?.selected == "Message body")
     }
 
+    @Test("offscreen selection uses the full, resolved virtual row key")
+    func offscreenSelectionUsesResolvedRowKey() {
+        let h = Harness(Timeline(count: Self.rows)) { state, _ in
+            col().wFull().hFull().scroll(stickBottom: false).child(
+                col().key("timeline").wFull().selectionGroup(true).virtualRows(
+                    state.count,
+                    Self.rowH,
+                    key: { _, i in
+                        if i == 44 || i == 45 { return "repeated" }
+                        if i == 46 { return "group/item" }
+                        return "r\(i)"
+                    },
+                    build: Self.buildTimelineRow
+                )
+            )
+        }
+        for (row, key) in [(45, "repeated#dup1"), (46, "group/item")] {
+            #expect(!h.range.contains(row))
+            h.rt.update(at: h.t) { _, tx in tx.selectText("\(key)/head", range: 0..<13) }
+            h.tick()
+            #expect(h.rt.selectedText() == "Row \(row) header")
+            #expect(h.rt.selectionState.coordinator.phase.selection?.anchorEnd?.rowKey == key)
+        }
+    }
+
     // MARK: - virtual_selection_tests.rs:338
 
     @Test("offscreen_collection_is_bounded_in_rows_and_bytes")

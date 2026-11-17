@@ -127,12 +127,11 @@ public enum SelectionMath {
     /// Appended text (e.g. streaming output) keeps an active selection intact.
     public static func kept(then: String, now: String, upto: Int) -> Bool {
         if upto <= 0 {
-            return now.hasPrefix(then)
+            return now.utf8.starts(with: then.utf8)
         }
-        let tBytes = then.utf8
-        let nBytes = now.utf8
-        guard tBytes.count >= upto, nBytes.count >= upto else { return false }
-        return tBytes.prefix(upto).elementsEqual(nBytes.prefix(upto))
+        guard floorCharBoundary(in: then, offset: upto) == upto,
+              floorCharBoundary(in: now, offset: upto) == upto else { return false }
+        return then.utf8.prefix(upto).elementsEqual(now.utf8.prefix(upto))
     }
 
     /// Deterministic 64-bit fingerprint of selectable nodes strictly between `anchorIdx` and `farIdx`.

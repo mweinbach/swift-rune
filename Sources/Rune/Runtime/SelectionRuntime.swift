@@ -474,31 +474,18 @@ internal extension Runtime {
     func virtualRowIndex(forPath targetPath: String, in src: VirtualSelectionSource) -> (rowIndex: Int, rowSegment: String)? {
         guard targetPath.hasPrefix(src.listPath + "/") else { return nil }
         let rest = targetPath.dropFirst(src.listPath.count + 1)
-        let firstSeg = String(rest.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
-        guard !firstSeg.isEmpty else { return nil }
-        if firstSeg.hasPrefix("@") {
-            let withoutAt = String(firstSeg.dropFirst())
-            let rawKey: String
-            let dupOrdinal: Int
-            if let dupRange = withoutAt.range(of: "#dup", options: .backwards),
-               let parsed = Int(withoutAt[dupRange.upperBound...]) {
-                rawKey = String(withoutAt[..<dupRange.lowerBound])
-                dupOrdinal = parsed
-            } else {
-                rawKey = withoutAt
-                dupOrdinal = 0
+        if rest.first == "@" {
+            // Expansion already resolved duplicate keys. A row key can also contain slashes.
+            var key = rest.dropFirst()
+            while true {
+                if let idx = src.keys.firstIndex(of: String(key)) { return (idx, "@\(key)") }
+                guard let slash = key.lastIndex(of: "/") else { return nil }
+                key = key[..<slash]
             }
-            var seen = 0
-            for (idx, k) in src.keys.enumerated() where k == rawKey {
-                if seen == dupOrdinal {
-                    return (idx, firstSeg)
-                }
-                seen += 1
-            }
-        } else if let idx = Int(firstSeg), idx >= 0, idx < src.keys.count {
-            return (idx, firstSeg)
         }
-        return nil
+        let firstSeg = rest.prefix { $0 != "/" }
+        guard let idx = Int(firstSeg), src.keys.indices.contains(idx) else { return nil }
+        return (idx, String(firstSeg))
     }
 
     struct VirtualTreeOrder: Comparable, Equatable {
