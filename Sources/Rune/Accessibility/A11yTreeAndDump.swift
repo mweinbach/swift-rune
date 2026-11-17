@@ -89,6 +89,7 @@ public struct AccessibilityTreeUpdate: Equatable, Sendable {
     public var windowTitle: String
     public var isFullTree: Bool
     public var updatedNodes: [AccessibilityNode]
+    /// Authored IDs that left the tree, or the exact runtime path of a removed namesake.
     public var removedIDs: [String]
     public var changes: AccessibilityChanges
 
@@ -107,13 +108,44 @@ public struct AccessibilityTreeUpdate: Equatable, Sendable {
     }
 }
 
+/// Cache identity for a mounted node, or for an explicitly constructed tree without runtime paths.
+internal enum AccessibilityIdentity: Hashable {
+    case runtime(String)
+    indirect case scoped(parent: Self?, id: String, occurrence: Int)
+
+    init(_ node: AccessibilityNode, parent: Self?, occurrences: inout [String: Int]) {
+        if let path = node.runtimePath {
+            self = .runtime(path)
+        } else {
+            let occurrence = occurrences[node.id, default: 0]
+            occurrences[node.id] = occurrence + 1
+            self = .scoped(parent: parent, id: node.id, occurrence: occurrence)
+        }
+    }
+
+    static func walk(_ root: AccessibilityNode, _ visit: (AccessibilityNode, Self) -> Void) {
+        func walkNode(_ node: AccessibilityNode, parent: Self?, occurrences: inout [String: Int]) {
+            let id = Self(node, parent: parent, occurrences: &occurrences)
+            visit(node, id)
+            var children: [String: Int] = [:]
+            for child in node.children { walkNode(child, parent: id, occurrences: &children) }
+        }
+        var roots: [String: Int] = [:]
+        walkNode(root, parent: nil, occurrences: &roots)
+    }
+}
+
 /// Tracks previously emitted accessibility fingerprints so idle frames cost zero allocations (`A11yTree`).
 public final class AccessibilityTreeState {
     /// `Tx::announce`'s live region, the root's last child (`a11y/tree.rs` `ANNOUNCER`).
     public static let announcerID = "__rune_announcer"
 
-    private var previousFingerprints: [String: UInt64] = [:]
-    private var previousFrames: [String: MotionRect] = [:]
+    private struct CachedNode {
+        let id: String
+        let fingerprint: UInt64
+        let frame: MotionRect
+    }
+    private var previous: [AccessibilityIdentity: CachedNode] = [:]
     private var needsFullTree: Bool = true
     /// The last whole tree held back the announcer's words: an adapter raises no events for the
     /// tree it starts from, so words said as a reader attached (a request arriving as it starts)
@@ -128,8 +160,7 @@ public final class AccessibilityTreeState {
     }
 
     public func reset() {
-        previousFingerprints.removeAll()
-        previousFrames.removeAll()
+        previous.removeAll()
         needsFullTree = true
         held = false
         lastChanges = AccessibilityChanges()
@@ -165,69 +196,54 @@ public final class AccessibilityTreeState {
             root.children.append(Self.announcerNode(announcement, holdWords: hold))
         }
 
-        var flat: [AccessibilityNode] = []
-        flatten(root, into: &flat)
-
-        var nextFP: [String: UInt64] = [:]
-        var nextFrames: [String: MotionRect] = [:]
+        var next: [AccessibilityIdentity: CachedNode] = [:]
         var updated: [AccessibilityNode] = []
-        var structureChanged = false
+        var structureChanged = full
         var moved = false
-
-        for node in flat {
+        AccessibilityIdentity.walk(root) { node, identity in
             let fp = fingerprint(node)
-            nextFP[node.id] = fp
-            nextFrames[node.id] = node.frame
-            let carriesHeldWords = wasHeld && (node.id == root.id || node.id == Self.announcerID)
-            if full || carriesHeldWords {
+            let prior = previous[identity]
+            let carriesHeldWords = wasHeld && (next.isEmpty || node.id == Self.announcerID)
+            next[identity] = CachedNode(id: node.id, fingerprint: fp, frame: node.frame)
+            if full || carriesHeldWords || prior?.fingerprint != fp {
                 updated.append(node)
-                if !full, let pb = previousFrames[node.id], pb != node.frame {
-                    moved = true
+                if !full, let prior, prior.frame != node.frame { moved = true }
+            }
+            if prior == nil { structureChanged = true }
+        }
+
+        let missing = previous.filter { next[$0.key] == nil }
+        var removed = Set<String>()
+        if !missing.isEmpty {
+            structureChanged = true
+            let remaining = Set(next.values.map(\.id))
+            let counts = Dictionary(previous.values.map { ($0.id, 1) }, uniquingKeysWith: +)
+            for (identity, old) in missing {
+                // A surviving namesake must remain addressable. A runtime node also has its
+                // precise path; manually constructed trees expose the supplied IDs alone.
+                if case .runtime(let path) = identity, remaining.contains(old.id) || counts[old.id, default: 0] > 1 {
+                    removed.insert(path)
+                } else if !remaining.contains(old.id) {
+                    removed.insert(old.id)
                 }
-            } else if let prev = previousFingerprints[node.id] {
-                if prev != fp {
-                    updated.append(node)
-                    if let pb = previousFrames[node.id], pb != node.frame {
-                        moved = true
-                    }
-                }
-            } else {
-                updated.append(node)
-                structureChanged = true
             }
         }
 
-        let removed = previousFingerprints.keys.filter { nextFP[$0] == nil }.sorted()
-        if !removed.isEmpty {
-            structureChanged = true
-        }
-        if full && !flat.isEmpty {
-            structureChanged = true
-        }
-
-        previousFingerprints = nextFP
-        previousFrames = nextFrames
+        previous = next
         needsFullTree = false
         held = hold
         lastChanges = AccessibilityChanges(structure: structureChanged, moved: moved)
 
-        if !full && updated.isEmpty && removed.isEmpty {
+        if !full && updated.isEmpty && missing.isEmpty {
             return nil
         }
         return AccessibilityTreeUpdate(
             windowTitle: windowTitle,
             isFullTree: full,
             updatedNodes: updated,
-            removedIDs: removed,
+            removedIDs: removed.sorted(),
             changes: lastChanges
         )
-    }
-
-    private func flatten(_ node: AccessibilityNode, into out: inout [AccessibilityNode]) {
-        out.append(node)
-        for child in node.children {
-            flatten(child, into: &out)
-        }
     }
 
     private func fingerprint(_ node: AccessibilityNode) -> UInt64 {
@@ -267,7 +283,7 @@ public final class AccessibilityTreeState {
         h.combine(node.isSecure)
         h.combine(node.frame)
         h.combine(node.actions)
-        h.combine(node.children.map(\.id))
+        for child in node.children { h.combine(child.runtimePath ?? child.id) }
         return UInt64(bitPattern: Int64(h.finalize()))
     }
 }
