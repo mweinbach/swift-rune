@@ -223,7 +223,7 @@ extension Runtime {
             (n.nodeId, Double((scrollOffsets[n.path]?.y ?? 0)))
         }
         pointerMove(to: pos, at: time)
-        pointerDown(at: pos, at: time)
+        pressDown(at: pos, at: time, mouse: false)
         let dragImmediately = pressDragsAtOnce()
         if !dragImmediately {
             applyTouchEffects(TouchScrollMachine.step(&slice2State.touchScroll, .down(across: across, vertical: vertical)), at: time)
@@ -477,61 +477,17 @@ extension Runtime {
     // MARK: - Highlight & Virtual Target Lookup
 
     internal func resolveTextHighlightRevealTarget(scope: String?, key: String) -> (nodeIndex: Int, rect: MotionRect)? {
-        for (i, node) in flatNodes.enumerated() {
-            if let scope {
-                let inScope = node.parentIndex.map { pIdx in
-                    let pPath = flatNodes[pIdx].path
-                    return selectsElementSelector(scope, path: pPath, key: flatNodes[pIdx].key) || pPath.contains("/@\(scope)")
-                } ?? false
-                if !inScope { continue }
+        highlightTargetWithNode(selector: key) { index in
+            guard !self.subtreeExiting(index) else { return false }
+            guard let scope else { return true }
+            var parent = self.flatNodes[index].parentIndex
+            while let i = parent {
+                let node = self.flatNodes[i]
+                if selectsElementSelector(scope, path: node.path, key: node.key) { return true }
+                parent = node.parentIndex
             }
-            guard let hls = node.el.textHighlights,
-                  let hl = hls.first(where: { $0.key == key }),
-                  let txt = node.el.liveText?.get() ?? node.el.plainText, !txt.isEmpty,
-                  let shaped = shapedText(for: node) else {
-                continue
-            }
-            let quads = TextHighlightPainter.quads(
-                highlights: [hl],
-                in: txt,
-                shaped: shaped,
-                textSystem: textSystem,
-                pixelScale: 1.0,
-                origin: .zero
-            )
-            guard let q = quads.first else { continue }
-            var unionX0 = q.rect.x
-            var unionY0 = q.rect.y
-            var unionX1 = q.rect.x + q.rect.z
-            var unionY1 = q.rect.y + q.rect.w
-            for more in quads.dropFirst() {
-                unionX0 = min(unionX0, more.rect.x)
-                unionY0 = min(unionY0, more.rect.y)
-                unionX1 = max(unionX1, more.rect.x + more.rect.z)
-                unionY1 = max(unionY1, more.rect.y + more.rect.w)
-            }
-            let padLeft = node.el.layout.padding.left
-            let padTop = node.el.layout.padding.top
-            let originX = node.targetRect.x + padLeft
-            let originY = node.targetRect.y + padTop
-            return (i, MotionRect.fromXYWH(originX + unionX0, originY + unionY0, max(0, unionX1 - unionX0), max(0, unionY1 - unionY0)))
+            return false
         }
-        return nil
-    }
-
-    internal func shapedText(for node: FlatNode) -> ShapedText? {
-        guard let txt = node.el.liveText?.get() ?? node.el.plainText, !txt.isEmpty else { return nil }
-        let padW = node.el.layout.padding.left + node.el.layout.padding.right
-        let maxW = max(1.0, node.targetRect.width - padW)
-        return textSystem.shape(
-            text: txt,
-            spans: node.el.richSpans,
-            pills: node.el.pillChips,
-            style: node.el.textStyle,
-            maxWidth: maxW,
-            pixelScale: 1.0,
-            emitGlyphs: false
-        )
     }
 
     internal func resolveVirtualRowBounds(forKey key: String, scope: String?) -> (vIdx: Int, itemTop: Double, itemH: Double, itemLeft: Double, itemW: Double, cur: Vec2)? {

@@ -466,6 +466,10 @@ extension Runtime {
             || req.scope == path {
             if let ri = keys.firstIndex(where: { Self.virtualRowMatchesSelector(rowKey: $0, virtualPath: path, selector: req.key) }) {
                 pinned.insert(ri)
+                // Measure a distant reveal's row and its nested target before placing it.
+                if !vState.lastMountedRange.contains(ri) {
+                    windowOffsetY = max(0, prefix[ri] - (vpH - (prefix[ri + 1] - prefix[ri])) * 0.5)
+                }
             }
         }
         for rev in scrollRequestsState.reveals where rev.viewport == vpPath {
