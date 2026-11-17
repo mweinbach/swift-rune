@@ -1912,24 +1912,8 @@ extension Runtime {
 
     // MARK: - Post-Commit Virtual Measurements & onVisibleRows
 
-    internal func recordVirtualMeasurementsAndCallbacks(
-        expansion: VirtualExpansionContext,
-        at now: Double
-    ) {
-        for mapping in expansion.rowMappings {
-            let rowPath = "\(mapping.listPath)/\(mapping.rowSegment)"
-            guard let rIdx = nodeByPath[rowPath] else { continue }
-            let h = flatNodes[rIdx].targetRect.height
-            if h > 0.5 && virtualLists[mapping.listPath]?.measuredByKey[mapping.rowKey] != h {
-                virtualLists[mapping.listPath]?.measuredByKey[mapping.rowKey] = h
-            }
-        }
-
-        for listPath in activeVirtualPaths {
-            syncVirtualVisibleRange(for: listPath, at: now)
-        }
-    }
-
+    /// Keep the virtual window anchored to natural row heights throughout a growth animation.
+    /// The solved layout contains those heights before growth constrains the presented rows.
     internal func measureVirtualsFromSolved(
         expandedRoot: El<State>,
         solvedRoot: LayoutEngine.ResultNode,
@@ -2153,16 +2137,6 @@ extension Runtime {
         savedGrowthRows: [String: RuntimeGrowthEntry]
     ) -> Bool {
         guard pass.virtualExpansion.anyVirtualList else { return false }
-        var heightsByList: [String: [String: Float]] = [:]
-        for mapping in pass.virtualExpansion.rowMappings {
-            let rowPath = "\(mapping.listPath)/\(mapping.rowSegment)"
-            guard let rIdx = pass.byPath[rowPath] else { continue }
-            let h = pass.nodes[rIdx].targetRect.height
-            if h > 0.5 {
-                heightsByList[mapping.listPath, default: [:]][mapping.rowKey] = h
-            }
-        }
-
         var updatedLists: [String: RuntimeVirtualListState] = [:]
         var updatedScrollYs: [String: Float] = [:]
         for listPath in activeVirtualPaths {
@@ -2194,11 +2168,6 @@ extension Runtime {
             let (oldListY, oldPinned) = located.locate(oldY, pinned: stickyPin, total: totalBefore)
             let visBefore = vBefore.visibleRange(offset: oldListY, viewport: vpH, prefix: prefixBefore, count: vBefore.lastKeys.count)
 
-            if let measured = heightsByList[listPath] {
-                for (rk, h) in measured {
-                    vAfter.measuredByKey[rk] = h
-                }
-            }
             // Where the list now stands in its viewport's content (`top`, `tail`, as laid out).
             if let lIdx = pass.byPath[listPath], let sIdx = scrollIdx {
                 Self.measureVirtualPlacement(&vAfter, listIdx: lIdx, scrollIdx: sIdx, nodes: pass.nodes)
