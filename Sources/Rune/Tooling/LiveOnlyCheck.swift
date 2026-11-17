@@ -11,7 +11,11 @@ internal struct LiveOnlyNodePrint {
     var opacity: Float
     var corners: Corners
     var text: String?
+    var isLiveText: Bool
+    var isSecureText: Bool
     var textColor: Color?
+    var textSize: Float
+    var textWeight: Float
 }
 
 /// First structural or visual property difference observed between two commits.
@@ -79,21 +83,19 @@ private extension LiveOnlyNodePrint {
     }
 
     static func formatColor(_ c: Color?) -> String {
-        guard let c else { return "(live)" }
-        let byte = { (x: Float) -> Int in Int((max(0.0, min(1.0, x)) * 255.0).rounded()) }
-        return String(format: "#%02x%02x%02x%02x", byte(c.r), byte(c.g), byte(c.b), byte(c.a))
+        c?.hex() ?? "(live)"
     }
 
     static func formatPoints(_ xs: [Float]) -> String {
         "[" + xs.map { String(format: "%.1f", $0) }.joined(separator: ", ") + "]"
     }
 
-    static func formatTextSnippet(_ s: String?) -> String {
-        guard let s else { return "no text" }
-        if s.count <= 40 {
-            return "\"\(s)\""
-        }
-        return "\"\(String(s.prefix(40)))…\""
+    var textSnippet: String {
+        guard let text else { return "no text" }
+        if isSecureText { return "[redacted]" }
+        if isLiveText { return "(live)" }
+        let prefix = text.unicodeScalars.prefix(40)
+        return String(reflecting: String(prefix) + (prefix.endIndex == text.unicodeScalars.endIndex ? "" : "…"))
     }
 
     func difference(against now: LiveOnlyNodePrint) -> LiveOnlyDifference? {
@@ -120,8 +122,8 @@ private extension LiveOnlyNodePrint {
                 path: path,
                 what: "border",
                 values: (
-                    "\(Self.formatColor(borderColor)) \(String(format: "%.1f", borderWidth))",
-                    "\(Self.formatColor(now.borderColor)) \(String(format: "%.1f", now.borderWidth))"
+                    "\(Self.formatColor(borderColor)) \(String(format: "%.1f", borderWidth))pt",
+                    "\(Self.formatColor(now.borderColor)) \(String(format: "%.1f", now.borderWidth))pt"
                 )
             )
         }
@@ -129,7 +131,7 @@ private extension LiveOnlyNodePrint {
             return LiveOnlyDifference(
                 path: path,
                 what: "opacity",
-                values: (String(format: "%.2f", opacity), String(format: "%.2f", now.opacity))
+                values: (String(format: "%.3f", opacity), String(format: "%.3f", now.opacity))
             )
         }
         let aRad = [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft]
@@ -141,11 +143,24 @@ private extension LiveOnlyNodePrint {
                 values: (Self.formatPoints(aRad), Self.formatPoints(bRad))
             )
         }
-        if text != now.text || !Self.bitsEqual(Self.colorBits(textColor), Self.colorBits(now.textColor)) {
+        if isLiveText != now.isLiveText || (text == nil) != (now.text == nil)
+            || (!isLiveText && !(text ?? "").utf8.elementsEqual((now.text ?? "").utf8)) {
+            return LiveOnlyDifference(path: path, what: "text", values: (textSnippet, now.textSnippet))
+        }
+        guard text != nil else { return nil }
+        if !Self.bitsEqual(Self.colorBits(textColor), Self.colorBits(now.textColor)) {
             return LiveOnlyDifference(
-                path: path,
-                what: "text",
-                values: (Self.formatTextSnippet(text), Self.formatTextSnippet(now.text))
+                path: path, what: "text colour",
+                values: (Self.formatColor(textColor), Self.formatColor(now.textColor))
+            )
+        }
+        if textSize.bitPattern != now.textSize.bitPattern || textWeight.bitPattern != now.textWeight.bitPattern {
+            return LiveOnlyDifference(
+                path: path, what: "text style",
+                values: (
+                    String(format: "%.1fpt weight %g", textSize, textWeight),
+                    String(format: "%.1fpt weight %g", now.textSize, now.textWeight)
+                )
             )
         }
         return nil
@@ -188,7 +203,11 @@ extension Runtime {
                 opacity: el.opacity,
                 corners: el.corners,
                 text: textVal,
-                textColor: hasLiveTextColor ? nil : el.textColor
+                isLiveText: el.liveText != nil,
+                isSecureText: el.isSecure || (el.handlers.editLens?.get(state).isSecure ?? false),
+                textColor: hasLiveTextColor ? .transparent : el.textColor,
+                textSize: el.textStyle.size,
+                textWeight: el.textStyle.weight
             )
         }
         return LiveOnlyViewPrint(nodes: entries)
