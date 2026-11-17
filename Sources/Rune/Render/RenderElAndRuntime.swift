@@ -791,6 +791,8 @@ extension Runtime {
         let topology = prepareNativePaintTopology(frameOut, byID: presentedById, holds: hasHolds)
         let hasSticky = topology.hasSticky
         let hasRaised = topology.hasRaised
+        let hasAnimatedTracks = scene.store.activeLen != 0
+        let canPaintFocusRing = focusedPath != nil || cxSettings.viewDefaults.forceFocusRings
         func renderNode(_ slot: Int) -> FlatNode { slot >= 0 ? flatNodes[slot] : topology.exits[~slot] }
         let renderNodes = topology.order.lazy.map(renderNode)
         var beforeSticky: [NodeId: MotionRect] = [:]
@@ -819,8 +821,8 @@ extension Runtime {
         var newPresentedRects = Dictionary<String, MotionRect>(minimumCapacity: frameOut.nodes.count)
         var newPresentedScales = Dictionary<String, Vec2>(minimumCapacity: frameOut.nodes.count)
         var newPresentedScaleMotionById = Dictionary<NodeId, PaintScaleMotion>(minimumCapacity: frameOut.nodes.count)
-        var newDrawnRectByPath = Dictionary<String, MotionRect>(minimumCapacity: frameOut.nodes.count)
-        var newRectSpringingById = Dictionary<NodeId, Bool>(minimumCapacity: frameOut.nodes.count)
+        var drawnOverrides: [String: MotionRect] = [:]
+        var newRectSpringingById: [NodeId: Bool] = [:]
         let selectableRanges = computeActiveSelectionRangesByPath()
         let markedPaths = Set(selectionState.lastCommittedMarkedTexts.map(\.path))
         var instances: [RenderInstance] = []
@@ -828,6 +830,9 @@ extension Runtime {
         var marks: [UInt32] = []
         var newSurfaces: [SurfaceDraw] = []
         var surfaceVideo = SurfaceVideoPaint()
+        let zeroScroll: [Float] = [0, 0]
+        var lastCarried = Vec2.zero
+        var lastCarriedPair = zeroScroll
         var currentInheritedMark: UInt32 = 0
         var materials: [MaterialDraw] = []
         var backdropBlurCount = 0
@@ -850,11 +855,13 @@ extension Runtime {
             }
         }
 
+        let hoverStore = liveStore
+        let hasLiveTracks = hoverStore.trackLen > 0
         var groupHoverChecker: GroupHoverContext?
         func resolveNodeHoverFrac(_ n: FlatNode, inert: Bool) -> Float {
             let nid = n.nodeId
             if inert || exitingIds.contains(nid) { return 0.0 }
-            if let tracked = liveStore.get(Runtime.hoverTrackId(nid), Runtime.hoverProp) {
+            if hasLiveTracks, let tracked = hoverStore.get(Runtime.hoverTrackId(nid), Runtime.hoverProp) {
                 return tracked.clamped(to: 0...1)
             }
             // Synced hover without a track rests at 0 (`paint/tracks.rs::ready_from_rest`).
@@ -1211,19 +1218,9 @@ extension Runtime {
         )
 
         #if DEBUG
+        // Leave the unoptimized geometry stack frame before invoking the font rasterizer.
         var pendingTextPaint: (() -> Void)?
         #endif
-
-        @inline(__always)
-        func emitTextPaint(_ paint: @escaping () -> Void) {
-            #if DEBUG
-            // Unoptimized geometry preparation reserves a large stack frame. Release
-            // that frame before entering the font rasterizer on a Swift worker.
-            pendingTextPaint = paint
-            #else
-            paint()
-            #endif
-        }
 
         @inline(never)
         func paintNodeHeader(
@@ -1240,9 +1237,11 @@ extension Runtime {
             parentIsRotated: Bool = false
         ) -> PaintHeader {
             let nid = node.nodeId
-            var el = presentedGrowthElement(node)
+            let presented = presentedById[nid]
             let loop = loopSamples[nid]
-            el.rotate = (presentedById[nid]?.rotate ?? el.rotate) + (loop?.rotation ?? 0)
+            var authored = presentedGrowthElement(node)
+            authored.rotate = (presented?.rotate ?? authored.rotate) + (loop?.rotation ?? 0)
+            let el = authored
             var parentClip = inheritedClip
             if let edge = el.stickyConfig?.edge {
                 let slot: Int
@@ -1289,7 +1288,6 @@ extension Runtime {
                 else if b.target == .rect, let r = liveStore.get(lnid, Props.RECT) { liveRect = r }
             }
 
-            let presented = presentedById[nid]
             let presentedBorder = presented?.border.map(Color.init)
             let baseRect = liveRect ?? presented?.rect ?? node.targetRect
             let pinh: PresentedTransform
@@ -1389,9 +1387,12 @@ extension Runtime {
             } else {
                 effRect = shifted
             }
-            let parentShift = presented?.parent.flatMap { id in
-                (mountedNode(id) ?? exitingSnapshots[id]).flatMap { stuckShiftsByPath[$0.path] }
-            } ?? .zero
+            let parentShift: Vec2
+            if !stuckShiftsByPath.isEmpty, let id = presented?.parent, let parent = mountedNode(id) ?? exitingSnapshots[id] {
+                parentShift = stuckShiftsByPath[parent.path] ?? .zero
+            } else {
+                parentShift = .zero
+            }
             var stickyShift = parentShift
             if hasSticky {
                 beforeSticky[nid] = effRect
@@ -1450,13 +1451,16 @@ extension Runtime {
             newPresentedScales[node.path] = sc
 
             let isExiting = exitingIds.contains(nid)
-            let parentSpringing = presented?.parent.flatMap { newRectSpringingById[$0] } ?? false
+            let parentSpringing = !newRectSpringingById.isEmpty && presented?.parent.flatMap { newRectSpringingById[$0] } == true
             let ownSpatialMoving =
                 paintMotion.spatial.contains(nid) ||
                 (!el.layout.scrollAxes.isEmpty && scrollStore.isMoving(NodeId.hash("scroll:" + node.path), Props.SCROLL))
             if !isExiting {
-                newDrawnRectByPath[node.path] = Self.rotatedDrawnRect(effRect, turn: el.rotate)
-                newRectSpringingById[nid] = parentSpringing || ownSpatialMoving
+                let drawn = Self.rotatedDrawnRect(effRect, turn: el.rotate)
+                if !exitingIds.isEmpty || drawn != effRect {
+                    drawnOverrides[node.path] = drawn
+                }
+                if parentSpringing || ownSpatialMoving { newRectSpringingById[nid] = true }
             }
             let hoverFrac = needsInteractionPrepass ? (nodeHoverFracById[nid] ?? 0) : resolveNodeHoverFrac(node, inert: effInert)
             let flatFocusWithin = el.focusWithinFlat && !effInert && !isExiting && isFocusWithin(node.path)
@@ -1468,7 +1472,7 @@ extension Runtime {
 
             // At rest the authored fill preserves exact saturated channel endpoints.
             let animatedFill = presented?.fill.flatMap { fill in
-                (presented?.isExiting == true || scene.store.isAnimating(nid, Props.FILL)) ? Color(fill) : nil
+                (presented?.isExiting == true || (hasAnimatedTracks && scene.store.isAnimating(nid, Props.FILL))) ? Color(fill) : nil
             }
             var effBg = liveFill ?? animatedFill ?? el.background
             if pressed, let pbg = el.pressBg {
@@ -1560,7 +1564,8 @@ extension Runtime {
                 reportedScroll = Vec2(offset.x, offset.y + (slice2State.scrollExtraYByPath[node.path] ?? 0))
             }
             let shadows = resolvedShadows(for: nid, authored: el.shadows)
-            let edit = isExiting ? nil : el.handlers.editLens?.get(state)
+            let editLens = el.hasEditLens ? el.handlers.editLens : nil
+            let edit = isExiting ? nil : editLens?.get(state)
             let secure = el.isSecure || edit?.isSecure == true
             let words = secure ? nil : (edit?.text ?? el.plainText)
             let moving = presented?.isMoving == true
@@ -1589,15 +1594,22 @@ extension Runtime {
                 }
             }
             if moving { hasInheritedFlags = true }
+            // Most descendants share one scroll translation, and an unclipped box has one
+            // geometry for both inspection fields. Preserve the public arrays by sharing storage.
+            if carried != lastCarried {
+                lastCarried = carried
+                lastCarriedPair = carried == .zero ? zeroScroll : [carried.x, carried.y]
+            }
+            let rect = infoRect.xywh
             newElements.append(ElementInfo(
                 path: node.path,
                 key: node.key,
                 parentIndex: parentElementIndex,
                 role: el.role,
-                rect: infoRect.xywh,
-                target: [node.targetRect.x, node.targetRect.y, node.targetRect.width, node.targetRect.height],
+                rect: rect,
+                target: node.targetRect == infoRect ? rect : node.targetRect.xywh,
                 committedLayoutTarget: node.committedLayoutTarget,
-                visible: infoVisible.xywh,
+                visible: infoVisible == infoRect ? rect : infoVisible.xywh,
                 opacity: infoOpacity,
                 scale: sc.x,
                 blur: effBlur,
@@ -1619,8 +1631,8 @@ extension Runtime {
                 exiting: isExiting,
                 hover: isExiting ? 0 : (hoverFrac > 0 ? hoverFrac : (hovered ? 1 : 0)),
                 press: pressed ? 1 : 0,
-                scrolled: [reportedScroll.x, reportedScroll.y],
-                carriedScrolled: [carried.x, carried.y],
+                scrolled: reportedScroll == carried ? lastCarriedPair : [reportedScroll.x, reportedScroll.y],
+                carriedScrolled: lastCarriedPair,
                 caret: nil,
                 secure: secure,
                 disabled: el.a11yDisabled,
@@ -1709,7 +1721,7 @@ extension Runtime {
             }
             if clipMisses || clippedSingleLine || clippedBox, topology.children(of: node).isEmpty, !parentInCache, !parentIsRotated,
                el.surfacePayload == nil, el.pixelsPayload == nil, el.role != .textInput,
-               el.handlers.editLens == nil, !hasActiveTextLinks(el), !el.isSecure,
+               editLens == nil, !hasActiveTextLinks(el), !el.isSecure,
                el.runtimeExtras[RenderExtrasKey.cacheEnabled] == nil, activeTextFlights.isEmpty {
                 return (false, subtreeDynamic, effOpacity, effBlur, effRect, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil)
             }
@@ -1917,7 +1929,7 @@ extension Runtime {
                 // Text, images and nested content continue through content-signature validation.
                 let plainLeaf = !hasChildren && el.role == .group && el.plainText == nil && el.richSpans == nil
                     && el.iconPayload == nil && el.imagePayload == nil && el.terminalGridPayload == nil
-                    && el.handlers.editLens == nil && el.runtimeExtras.count == 1
+                    && editLens == nil && el.runtimeExtras.count == 1
                 let sameRaster = sameCommit && !scaleDiff && isResident && !entry.isLivePhase && plainLeaf
                 if (sameRaster || scaleSettling) && entry.paintHash == nodePaintHash && !hasLiveTextInSubtree(node) {
                     elideCache = (
@@ -3387,7 +3399,8 @@ extension Runtime {
                 }
             }
             func finishPaint() {
-                let focusOverlay = !hasActiveTextLinks(el) ? resolvedFocusRingOverlay(
+                let outline = el.elOutline
+                let focusOverlay = outline != nil && !hasActiveTextLinks(el) ? resolvedFocusRingOverlay(
                     el: el,
                     snapIndex: node.index,
                     snapPath: node.path,
@@ -3400,7 +3413,7 @@ extension Runtime {
                     devRadii: radiiPx,
                     pxScale: scale
                 ) : nil
-                if focusOverlay == nil, let ol = el.elOutline, localOpacity > 0.0005 {
+                if let ol = outline, focusOverlay == nil, localOpacity > 0.0005 {
                     let avgScale = effRect.width > 0.001 ? (rectPx.z / (effRect.width * scale)) : 1.0
                     if let og = ShellSliceRenderHelpers.resolvedOutlineGeometry(
                         outline: ol,
@@ -3429,17 +3442,27 @@ extension Runtime {
                 }
             }
 
-            if let editLens = el.handlers.editLens {
+            if let editLens {
                 let value = editLens.get(state)
-                emitTextPaint {
+                #if DEBUG
+                pendingTextPaint = {
                     paintField(value)
                     finishPaint()
                 }
+                #else
+                paintField(value)
+                finishPaint()
+                #endif
             } else if (el.plainText?.isEmpty == false) || (el.richSpans?.isEmpty == false) || el.advanceInRun != nil {
-                emitTextPaint {
+                #if DEBUG
+                pendingTextPaint = {
                     paintLabel()
                     finishPaint()
                 }
+                #else
+                paintLabel()
+                finishPaint()
+                #endif
             } else {
                 finishPaint()
             }
@@ -3615,7 +3638,7 @@ extension Runtime {
         var branches: [PaintBranch] = []
 
         func finishNode(_ node: FlatNode, _ h: PaintHeader, dynamic subtreeDynamic: Bool) {
-            guard h.continueSubtree else { return }
+            guard h.continueSubtree && (canPaintFocusRing || h.needsLayer || !h.outerLayerStarts.isEmpty) else { return }
             paintNodeFooter(
                 node,
                 activeClip: h.activeClip,
@@ -3662,7 +3685,7 @@ extension Runtime {
             // small stacks, and a text leaf may need to shape a paragraph before unwinding.
             while let (node, context) = next {
                 next = nil
-                if !context.allowRaised && node.el.isRaised {
+                if hasRaised && !context.allowRaised && node.el.isRaised {
                     collectedRaisedNodes.append((node, newElements.count))
                     dynamic = true
                 } else {
@@ -3795,6 +3818,12 @@ extension Runtime {
             }
         }
 
+        // Reuse all presented boxes when rotation leaves the bounds numerically unchanged.
+        // Exits can have the same path as their replacement, so retain only the live boxes there.
+        var newDrawnRectByPath = exitingIds.isEmpty ? newPresentedRects : drawnOverrides
+        if exitingIds.isEmpty {
+            for (path, drawn) in drawnOverrides { newDrawnRectByPath[path] = drawn }
+        }
         measureTextFlightDestinations(in: newDrawnRectByPath, at: now)
 
         forEachTextFlightGlyph(at: now) { glyph, rect, ink, clip in

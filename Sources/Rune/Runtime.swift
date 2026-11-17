@@ -3178,7 +3178,16 @@ public final class Runtime<State> {
             )
         ]
 
-        while let item = walkStack.popLast() {
+        // A virtual row can enter a client VM while this pass measures its layout.
+        // Reserve the per-node flattening workspace only after those builders return.
+        while let item = walkStack.popLast() { appendMeasuredNode(item) }
+
+        #if DEBUG
+        @inline(never)
+        #else
+        @inline(__always)
+        #endif
+        func appendMeasuredNode(_ item: WalkItem) {
             var el = item.element.value
             let effectiveParentFlow: Flow = el.isUnmirrored ? .ltr : item.parentFlow
             let (nodeFlow, mirrorDir) = stepDirection(parent: effectiveParentFlow, el: el, state: state)
@@ -3729,7 +3738,7 @@ public final class Runtime<State> {
                 specs[specs.count - 1].blurMotion = blurMotion
             }
 
-            guard childCount > 0 else { continue }
+            guard childCount > 0 else { return }
             let growthSlideY: Float = {
                 guard let gEntry = growth,
                       gEntry.track.moving,
@@ -3771,7 +3780,7 @@ public final class Runtime<State> {
                         clip: childClip, fades: childClipFades, enclosing: item.enclosingScrollIndex,
                         vertical: item.enclosingVScrollIndex, horizontal: item.enclosingHScrollIndex)
                     memoPaths.replayedNodes = span.nodes.count
-                    continue
+                    return
                 }
                 flatCaptures.append(FlatMemoCapture(owner: memoPaths, root: myIndex,
                                                     children: childLayouts, context: context))

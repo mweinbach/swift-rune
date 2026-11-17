@@ -87,21 +87,24 @@ extension Runtime {
 
     internal func makeCarriedScrollCache() -> [Vec2?] {
         guard !scrollOffsets.isEmpty, launchScrollById.isEmpty, !hasActiveExitingNodes else { return [] }
+        // A stale offset can outlive the element which introduced its scrolling axes.
+        // Preserve its ancestry semantics until the next commit clears it.
+        for path in scrollOffsets.keys {
+            guard let i = nodeByPath[path], !flatNodes[i].el.layout.scrollAxes.isEmpty else { return [] }
+        }
         return Array(repeating: nil, count: flatNodes.count)
     }
 
     internal func carriedScroll(for node: FlatNode, scales: [String: Vec2], cache: inout [Vec2?],
                                 turn: (String) -> Turn?) -> Vec2 {
-        // Below an ordinary parent the ancestor offsets, scale and turn are identical.
-        // A scrolling parent starts a new sum in the original inner-to-outer order.
+        // Descendants of the same nearest scroll viewport have the same inner-to-outer sum,
+        // including the presentation scale and turn of every enclosing viewport.
         if !cache.isEmpty, flatNodes.indices.contains(node.index), flatNodes[node.index].nodeId == node.nodeId {
-            if let i = node.parentIndex, let carried = cache[i], scrollOffsets[flatNodes[i].path] == nil {
-                cache[node.index] = carried
-                return carried
-            }
-            let carried = uncachedCarriedScroll(for: node, scales: scales, turn: turn)
-            cache[node.index] = carried
-            return carried
+            guard let viewport = node.enclosingScrollIndex else { return .zero }
+            if let value = cache[viewport] { return value }
+            let value = uncachedCarriedScroll(for: node, scales: scales, turn: turn)
+            cache[viewport] = value
+            return value
         }
         return uncachedCarriedScroll(for: node, scales: scales, turn: turn)
     }

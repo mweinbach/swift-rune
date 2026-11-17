@@ -13,20 +13,17 @@ enum RuneKitTreeApp {
     }
 
     struct Change: Sendable, Equatable {
-        var added: Int
-        var removed: Int
+        var added: UInt32
+        var removed: UInt32
         var status: Status
     }
 
     struct State: Sendable {
-        var entries: [(path: String, change: Change)]
-        var byPath: [String: Change]
-        var expanded: Set<String>
-        var selected: String?
+        var files: TreeModel<FileNode<Change>>
         var query: TextEdit = TextEdit("")
     }
 
-    static let repoEntries: [(String, Int, Int, Status)] = [
+    static let repoEntries: [(String, UInt32, UInt32, Status)] = [
         ("crates/rune/src/el.rs", 48, 0, .modified),
         ("crates/rune/src/focus.rs", 2, 1, .modified),
         ("crates/rune/src/runtime.rs", 43, 2, .modified),
@@ -56,7 +53,7 @@ enum RuneKitTreeApp {
             out.reserveCapacity(50_000)
             for d in 0..<500 {
                 for f in 0..<100 {
-                    let i = d * 100 + f
+                    let i = UInt32(d * 100 + f)
                     out.append((
                         String(format: "pkg%03d/src/module%d.rs", d, f),
                         Change(added: i % 37, removed: i % 11, status: .modified)
@@ -68,96 +65,63 @@ enum RuneKitTreeApp {
             entries = repoEntries.map { ($0.0, Change(added: $0.1, removed: $0.2, status: $0.3)) }
         }
 
-        var byPath: [String: Change] = [:]
-        for entry in entries {
-            byPath[entry.path] = entry.change
-        }
-
-        var expanded: Set<String> = []
+        var files = FileTree().build(entries)
+        files.expandAll()
         if !big {
-            let roots = FileTreeBuilder(compactFolders: true).buildTreeItems(entries.map { ($0.path, $0.change) })
-            func collectDirs(_ items: [TreeItem<String>]) {
-                for item in items where item.isFolder {
-                    if item.id != "demo/kit" {
-                        expanded.insert(item.id)
-                    }
-                    collectDirs(item.children)
-                }
-            }
-            collectDirs(roots)
+            files.setExpanded("demo/kit", false)
+            files.select("crates/rune-kit/src/tree.rs")
         }
-
-        return State(
-            entries: entries,
-            byPath: byPath,
-            expanded: expanded,
-            selected: big ? nil : "crates/rune-kit/src/tree.rs",
-            query: TextEdit("")
-        )
+        return State(files: files)
     }
 
-    static func totals(for id: String, state: State) -> (isFolder: Bool, added: Int, removed: Int) {
-        if let ch = state.byPath[id] {
-            return (false, ch.added, ch.removed)
+    static func totals(for id: String, state: State) -> (isFolder: Bool, added: UInt32, removed: UInt32) {
+        let totals = state.files.subtree(of: id).reduce(into: (added: UInt32(0), removed: UInt32(0))) { sum, node in
+            if let change = node.data {
+                sum.added += change.added
+                sum.removed += change.removed
+            }
         }
-        let prefix = id.hasSuffix("/") ? id : "\(id)/"
-        var added = 0
-        var removed = 0
-        for (path, ch) in state.byPath where path.hasPrefix(prefix) {
-            added += ch.added
-            removed += ch.removed
-        }
-        return (true, added, removed)
+        return (state.files.get(id)?.isDirectory == true, totals.added, totals.removed)
     }
 
     static func view(_ s: State, _ cx: inout Cx<State>) -> El<State> {
         let k = Kit.neutral(dark: cx.systemDark)
-        let q = s.query.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let filtered = q.isEmpty
-            ? s.entries
-            : s.entries.filter {
-                let name = ($0.path as NSString).lastPathComponent.lowercased()
-                return name.contains(q)
-            }
-
-        var effectiveExpanded = s.expanded
-        let roots = FileTreeBuilder(compactFolders: true).buildTreeItems(filtered.map { ($0.path, $0.change) })
-        if !q.isEmpty {
-            func expandMatches(_ items: [TreeItem<String>]) {
-                for item in items where item.isFolder {
-                    effectiveExpanded.insert(item.id)
-                    expandMatches(item.children)
+        let query = s.query.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let treeEl = Tree(\State.files, label: { $0.name })
+            .name("Changed files")
+            .row { node, row in
+                var item = TreeRowItem<State>.file(node, row: row).highlight(query)
+                guard let change = node.data else { return item }
+                let color: Color, letter: String
+                switch change.status {
+                case .added:
+                    (color, letter) = (k.c.success.icon, "A")
+                case .modified:
+                    (color, letter) = (k.c.warning.icon, "M")
+                case .deleted:
+                    (color, letter) = (k.c.danger.icon, "D")
+                    item = item.labelColor(k.c.textFaint)
                 }
+                return item.changes(added: change.added, removed: change.removed)
+                    .trailing(text(letter).key("status").font(k.ty.textXsmallMedium).color(color).w(10))
             }
-            expandMatches(roots)
-        }
+            .build(s, cx: cx, kit: k)
+            .grow(1)
+            .minH(0)
 
-        let treeEl: El<State> = k.tree(
-            key: "files",
-            roots: roots,
-            expanded: effectiveExpanded,
-            selected: s.selected,
-            onToggleExpand: { state, id in
-                if state.expanded.contains(id) {
-                    state.expanded.remove(id)
+        let filter = TextInput(\State.query)
+            .placeholder("Filter files")
+            .leadingIcon(KitIcons.search)
+            .clearButton()
+            .onChange { state, value, _ in
+                let q = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if q.isEmpty {
+                    state.files.clearFilter()
                 } else {
-                    state.expanded.insert(id)
+                    state.files.filter { $0.name.lowercased().contains(q) }
                 }
-            },
-            onSelect: { state, id in
-                state.selected = id
             }
-        )
-        .grow(1)
-        .minH(0)
-        .scrollY()
-
-        let filter: El<State> = k.textInputField(
-            key: "filter",
-            \State.query,
-            placeholder: "Filter files",
-            leadingIcon: KitIcons.search
-        )
+            .build(k)
 
         let sidebar: El<State> = col()
             .key("sidebar")
@@ -170,7 +134,7 @@ enum RuneKitTreeApp {
             .child(treeEl)
 
         let detailContent: El<State>
-        if let id = s.selected {
+        if let id = s.files.cursorID {
             let info = totals(for: id, state: s)
             detailContent = col()
                 .gap(6)

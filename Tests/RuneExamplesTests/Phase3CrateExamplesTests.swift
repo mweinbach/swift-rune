@@ -58,7 +58,7 @@ struct Phase3CrateExamplesTests {
             args: ToolingArgs()
         )
         let normalTree = String(decoding: normal.treeJSON, as: UTF8.self)
-        #expect(normalTree.contains("files-crates\\/rune-kit\\/src\\/tree.rs"))
+        #expect(normalTree.contains("Changed files"))
         #expect(normalTree.contains("File · +1140 −0"))
 
         let normalState = RuneKitTreeApp.initialState(big: false)
@@ -67,7 +67,14 @@ struct Phase3CrateExamplesTests {
         #expect(folderTotals.added > 2000)
 
         let big = RuneKitTreeApp.initialState(big: true)
-        #expect(big.entries.count == 50_000)
+        #expect(normalState.files.cursorID == "crates/rune-kit/src/tree.rs")
+        #expect(normalState.files.visibleRow(of: "demo/kit/tree-dark.png") == nil)
+        #expect(big.files.visibleCount == 50_500)
+        #expect(big.files.visibleID(at: 0) == "pkg000/src")
+        #expect(big.files.visibleID(at: 1) == "pkg000/src/module0.rs")
+        #expect(big.files.visibleID(at: 25_250) == "pkg250/src")
+        #expect(big.files.visibleID(at: 50_499) == "pkg499/src/module99.rs")
+        #expect(big.files.get("pkg499/src/module99.rs")?.data?.removed == 49_999 % 11)
     }
 
     @Test("rune-scroll-keys updates selection and scrolls viewport on Up/Down")

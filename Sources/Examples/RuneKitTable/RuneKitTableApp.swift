@@ -42,8 +42,8 @@ public func initialTableExampleState(count: Int = 100_000) -> TableExampleState 
         rows.append(
             Artifact(
                 id: "a\(i)",
-                name: "\(crates[Int(r % 8)]) \(units[Int((r >> 3) % 6)]) #\(i)",
-                target: targets[Int((r >> 7) % 5)],
+                name: "\(crates[Int(r % 8)]) \(units[Int(UInt(truncatingIfNeeded: r >> 3) % 6)]) #\(i)",
+                target: targets[Int(UInt(truncatingIfNeeded: r >> 7) % 5)],
                 size: (r >> 11) % 48_000_000 + 4_096,
                 ms: UInt32((r >> 37) % 90_000),
                 cached: (r >> 59) % 3 != 0

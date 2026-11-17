@@ -461,7 +461,7 @@ public struct AnimationStore: Sendable {
     public var isAnimating: Bool { running }
 
     public var trackLen: Int {
-        tMeta.reduce(0) { $0 + ($1.alive ? 1 : 0) }
+        index.count
     }
 
     // MARK: - Typed Public API

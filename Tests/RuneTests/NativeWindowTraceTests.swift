@@ -57,14 +57,12 @@ struct NativeWindowTraceTests {
         _ = runtime.frame(at: 0)
         trace.submitted(runtime, at: 10.01, started: 10, target: nil, sequence: nil, continuous: true)
         // Both the header and the first frame must be accessible before another draw or teardown.
-        let clock = ContinuousClock()
-        let deadline = clock.now + .seconds(3)
-        var text = ""
-        repeat {
-            text = try String(contentsOf: path, encoding: .utf8)
-            if text.split(separator: "\n").count == 2 { break }
+        var text = try String(contentsOf: path, encoding: .utf8)
+        for _ in 0..<1_500 {
+            if text.split(separator: "\n").count >= 2 { break }
             try await Task.sleep(for: .milliseconds(2))
-        } while clock.now < deadline
+            text = try String(contentsOf: path, encoding: .utf8)
+        }
         #expect(text.split(separator: "\n").count == 2)
         #expect(!trace.reachedLimit && trace.keepsDrawing)
         trace.submitted(runtime, at: 10.02, started: 10.015, target: nil, sequence: nil, continuous: true)

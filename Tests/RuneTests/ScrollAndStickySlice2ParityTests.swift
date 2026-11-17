@@ -70,6 +70,42 @@ struct ScrollAndStickySlice2ParityTests {
         }
     }
 
+    @Test("Nested scroll presentation shares each viewport's transformed offsets")
+    func carriedScrollMatchesNestedViewportTransforms() throws {
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(220, 180)) { _, _ in
+            let leaf: El<Int> = el().key("leaf").size(150, 50)
+            let inner: El<Int> = col().key("inner").size(160, 60).scroll(stickBottom: false)
+                .children([leaf, el().key("sibling").size(180, 45)])
+            return col().key("outer").size(200, 140).scroll(stickBottom: false)
+                .children([inner, el().key("other").size(190, 150)])
+        }
+        _ = rt.renderFrame(at: 0)
+        let outer = try #require(rt.element(byKey: "outer")?.path)
+        let inner = try #require(rt.element(byKey: "inner")?.path)
+        let leaf = try #require(rt.element(byKey: "leaf")?.path)
+        rt.scrollOffsets[outer] = Vec2(2.25, 7.75)
+        rt.scrollOffsets[inner] = Vec2(9.5, 1.5)
+        rt.slice2State.scrollExtraYByPath[outer] = 0.75
+        let scales = [outer: Vec2(0.75, 1.333), inner: Vec2(1.25, 0.66)]
+        let turns = [outer: Turn.about(Vec2(2, 3), radians: 0.17), inner: Turn.about(Vec2(7, 11), radians: -0.28)]
+
+        func compare(_ nodes: [Runtime<Int>.FlatNode]) {
+            var cached = rt.makeCarriedScrollCache()
+            var fresh: [Vec2?] = []
+            for node in nodes {
+                let actual = rt.carriedScroll(for: node, scales: scales, cache: &cached) { turns[$0] }
+                let expected = rt.carriedScroll(for: node, scales: scales, cache: &fresh) { turns[$0] }
+                #expect(actual == expected)
+            }
+        }
+        compare(rt.flatNodes)
+        compare(rt.flatNodes.reversed())
+
+        rt.scrollOffsets[leaf] = Vec2(4, 12)
+        #expect(rt.makeCarriedScrollCache().isEmpty)
+        compare(rt.flatNodes)
+    }
+
     // MARK: - stick_fit.rs
 
     @Test("stick_fit: rows_stay_put_across_the_fit_overflow_boundary", arguments: [false, true])

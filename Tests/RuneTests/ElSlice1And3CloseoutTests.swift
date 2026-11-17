@@ -24,8 +24,9 @@ struct ElSlice1And3CloseoutTests {
     func retainedTranslatedLabelDraws() throws {
         func app() -> Runtime<Int> {
             let rt = Runtime<Int>(state: 0, viewport: Vec2(360, 220), pixelScale: 1) { version, _ in
+                // A font with a negative left bearing needs room for its complete mask.
                 let rows: [El<Int>] = (0..<20).map { i in
-                    text("row \(i) value \(version)").key("r\(i)").size(280, 24)
+                    text("row \(i) value \(version)").key("r\(i)").size(280, 24).pl(8)
                 }
                 return col().key("scroll").size(360, 220).scroll(ScrollSpec(stickBottom: false)).children(rows)
             }

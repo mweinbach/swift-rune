@@ -133,6 +133,9 @@ struct Phase3KitUnblockedTests {
         #expect(s.table.sortDir == .ascending)
         #expect(s.table.selectedCount == 1)
         #expect(s.table.selected == [s.rows[2].id])
+        let sample = try #require(s.rows.first { $0.id == "a1" })
+        #expect(sample.name == (UInt.bitWidth == 32 ? "rune test #1" : "rune lib #1"))
+        #expect(sample.target == (UInt.bitWidth == 32 ? "x86_64-unknown-linux-gnu" : "aarch64-apple-ios"))
 
         let out = try HeadlessRunner.run(RuneKitTableApp.makeSpec(), args: ToolingArgs.parse([]))
         let parsed = try parseTree(out.treeJSON)
