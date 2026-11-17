@@ -3363,8 +3363,7 @@ extension Runtime {
 
             guard let cIdx = cIdxOpt,
                   let viewRect = presentedById[vNode.nodeId],
-                  let cRect = presentedById[flatNodes[cIdx].nodeId],
-                  let spec = flatNodes[cIdx].el.growthSpec else {
+                  let cRect = presentedById[flatNodes[cIdx].nodeId] else {
                 slack = ScrollSlack.landed(window: slack.window)
                 slice2State.scrollSlacks[path] = slack
                 slice2State.scrollExtraYByPath[path] = 0
@@ -3402,14 +3401,11 @@ extension Runtime {
             slice2State.scrollHeldByPath[path] = abs(effOffset - bottomOff) < 0.5
 
             let grown = slice2State.growthGrownByScrollPath.removeValue(forKey: path) ?? 0
-            let cPrefix = cNode.path + "/"
-            let growing = slice2State.growthRowPathByKey.contains { (gKey, rp) in
-                rp.hasPrefix(cPrefix) && (growthRows[gKey]?.track).map { $0.target > $0.h + (1.0 / 128.0) } == true
-            }
-
-            if reducedMotion {
-                slack = ScrollSlack.landed(window: slack.window)
-            } else {
+            if let spec = cNode.el.growthSpec, !reducedMotion {
+                let cPrefix = cNode.path + "/"
+                let growing = slice2State.growthRowPathByKey.contains { (gKey, rp) in
+                    rp.hasPrefix(cPrefix) && (growthRows[gKey]?.track).map { $0.target > $0.h + (1.0 / 128.0) } == true
+                }
                 let prevSlackH = slack.track.h
                 let top = viewRect.top
                 let bottom = viewRect.bottom
@@ -3431,6 +3427,8 @@ extension Runtime {
                 }
                 slack.settle(growing: growing, now: now, dt: dt, spec: spec)
                 slack.stepped = abs(slack.track.h - prevSlackH) > 1e-5
+            } else {
+                slack = ScrollSlack.landed(window: slack.window)
             }
 
             slice2State.scrollSlacks[path] = slack

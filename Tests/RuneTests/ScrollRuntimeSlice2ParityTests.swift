@@ -394,8 +394,8 @@ struct ScrollRuntimeSlice2ParityTests {
         #expect(abs((last.rect[1] + last.rect[3]) - 600) < 0.5)
     }
 
-    @Test("tests/stick_resize.rs & stick_fit.rs: viewport resize and fit/overflow boundary")
-    func stickResizeAndFitOverflow() {
+    @Test("tests/stick_resize.rs: plain rows stay on a resizing viewport's presented bottom", arguments: [false, true])
+    func stickResizeAndFitOverflow(nativeRenderer: Bool) {
         struct State { var banner: Bool = false; var rows: Int = 40 }
         let rt = Runtime<State>(state: State(), viewport: Vec2(300, 400), pixelScale: 1.0) { s, _ in
             col()
@@ -414,24 +414,34 @@ struct ScrollRuntimeSlice2ParityTests {
                         })
                 )
         }
-        _ = rt.frame(at: 0.0)
-        #expect(rt.scrollAtBottom(forKey: "scroll") == true)
+        func checkBottom(at time: Double) {
+            if nativeRenderer {
+                _ = rt.renderFrame(at: time)
+            } else {
+                _ = rt.frame(at: time)
+            }
+            let scroll = rt.element(byKey: "scroll")!
+            let last = rt.element(byKey: "r39")!
+            let gap = scroll.rect[1] + scroll.rect[3] - last.rect[1] - last.rect[3]
+            #expect(abs(gap) < 0.6, "frame at \(time), native renderer \(nativeRenderer)")
+            #expect(rt.scrollAtBottom(forKey: "scroll") == true)
+        }
 
-        // Banner opens -> viewport shrinks -> still pinned to bottom
+        checkBottom(at: 0)
         rt.update(at: 0.02) { s, _ in s.banner = true }
-        _ = rt.frame(at: 0.03)
-        let scroll1 = rt.element(byKey: "scroll")!
-        let last1 = rt.element(byKey: "r39")!
-        #expect(abs((last1.rect[1] + last1.rect[3]) - (scroll1.rect[1] + scroll1.rect[3])) < 0.6)
-        #expect(rt.scrollAtBottom(forKey: "scroll") == true)
-
-        // Banner closes -> viewport grows taller -> still pinned to bottom!
+        checkBottom(at: 0.03)
         rt.update(at: 0.04) { s, _ in s.banner = false }
-        _ = rt.frame(at: 0.05)
-        let scroll2 = rt.element(byKey: "scroll")!
-        let last2 = rt.element(byKey: "r39")!
-        #expect(abs((last2.rect[1] + last2.rect[3]) - (scroll2.rect[1] + scroll2.rect[3])) < 0.6)
-        #expect(rt.scrollAtBottom(forKey: "scroll") == true)
+        checkBottom(at: 0.05)
+
+        // Let each resize finish and check the row through the entire spring.
+        var time = 0.05
+        for show in [true, false] {
+            rt.update(at: time) { s, _ in s.banner = show }
+            for _ in 0..<120 {
+                time += 1.0 / 120.0
+                checkBottom(at: time)
+            }
+        }
     }
 
     @Test("tests/scroll_edge_fade.rs: half-strength 7.5pt ramp & scrollMargin keyboard reveal stop clear of fade")
