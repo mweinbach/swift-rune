@@ -2064,7 +2064,14 @@ struct DiffParityTests {
         #expect(rt.state.clicks == 1)
 
         rt.update(at: t) { s, tx in s.diff.scrollToLine(0, at: .init(side: .new, line: 130), keyPrefix: "df", tx: &tx) }
-        settle()
+        var mounted: [Int] = []
+        for _ in 0..<5 {
+            t += 1.0 / 120
+            _ = rt.renderFrame(at: t)
+            mounted.append(rt.elements().filter { !$0.exiting && $0.key?.hasPrefix("df-df0.") == true }.count)
+        }
+        // The 16-row viewport lands immediately and fills one viewport of overscan per frame.
+        #expect(mounted == [32, 48, 64, 80, 80])
         let target = try #require(rt.element(byKey: "df-df0.c130"))
         let clearance = ceil(sticky.rect[3] / DiffLayout.lineHeight) * DiffLayout.lineHeight
         #expect(target.rect[1] == clearance)

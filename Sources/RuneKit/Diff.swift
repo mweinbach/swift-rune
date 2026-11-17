@@ -2222,16 +2222,15 @@ public struct DiffState: Sendable, Equatable {
 
     private mutating func reveal(_ row: Int, belowHeader: Bool, keyPrefix: String, tx: inout Tx) {
         let index = rowIndex
-        var top = row
-        var offset: Float = 0
-        if belowHeader && hasScrollableHeader {
-            if files.count == 1 {
-                top = index.anchorBelowHeader(for: row)
-            } else {
-                offset = DiffLayout.headerHeight
-            }
+        if hasScrollableHeader, files.count == 1 {
+            // `DiffState::reveal_at_top` approaches from below so the target lands at the top.
+            if let last = index.entries.last { tx.scrollIntoView("\(keyPrefix)-\(last.key)") }
+            let top = belowHeader ? index.anchorBelowHeader(for: row) : row
+            tx.scrollIntoView("\(keyPrefix)-\(index.entries[top].key)")
+        } else {
+            let offset = belowHeader && hasScrollableHeader ? DiffLayout.headerHeight : 0
+            tx.scrollKeyTo("\(keyPrefix)-\(index.entries[row].key)", at: offset)
         }
-        tx.scrollKeyTo("\(keyPrefix)-\(index.entries[top].key)", at: offset)
         visibleFile = index.entries[row].file
         navigationRow = row
     }

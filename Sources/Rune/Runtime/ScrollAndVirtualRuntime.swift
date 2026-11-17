@@ -40,14 +40,18 @@ extension Runtime {
         return nil
     }
 
-    /// During layout, measure a distant destination in its own window before the viewport moves.
+    /// Measure a single distant destination before the viewport moves. Multiple distinct targets
+    /// must be revealed in order before choosing which window gets the offscreen row budget.
     private func pendingVirtualReveal(
         places: VirtualRowPlaces<String>, list: String
     ) -> Int? {
-        guard !pendingScrollReveals.isEmpty else { return nil }
-        return pendingScrollReveals.lazy.filter { request in
-            Self.inScrollRevealScope(request.scope, path: list)
-        }.compactMap { Self.virtualRevealRow($0.key, in: places, path: list) }.last
+        var destination: Int?
+        for request in pendingScrollReveals where Self.inScrollRevealScope(request.scope, path: list) {
+            guard let row = Self.virtualRevealRow(request.key, in: places, path: list) else { continue }
+            if let destination, row != destination { return nil }
+            destination = row
+        }
+        return destination
     }
 
     internal enum VirtualRowReuseMode: Equatable, Sendable {
