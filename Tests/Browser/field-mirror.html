@@ -28,13 +28,14 @@ try {
     fields = mountRuneFields(canvas, event => events.push(event));
     const text = "opening line\n" + "中🦦 long line ".repeat(150) + "\nlast line";
     const start = text.indexOf("🦦");
-    const mirror = { key: "draft", base: 117, text, anchor: start, focus: start, secure: false };
+    const mirror = { key: "draft", label: "Message", base: 117, text, anchor: start, focus: start, secure: false };
     fields.sync(mirror);
     expect(document.activeElement === outside, "Passive sync moved external focus");
 
     fields.sync(mirror, true);
     const editor = document.activeElement;
     expect(editor instanceof HTMLTextAreaElement, "Activation did not focus the native textarea");
+    expect(editor.getAttribute("aria-label") === "Message", "Native textarea lost its authored accessible name");
     expect(editor.wrap === "off" && editor.value === text, "Native textarea did not preserve the hard lines");
     await tick();
     events.length = 0;
