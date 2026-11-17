@@ -50,6 +50,8 @@ try {
         const first = host.caret(probe, 1);
         host.caret(probe, 2);
         check(first > 0 && reads === 1, 'Caret queries did not share the span origin');
+        check(!measuredSpan.checkVisibility({ opacityProperty: true, visibilityProperty: true }),
+            'An internal text measurement span would paint over the app');
         measuredSpan.style.transform = 'translateX(31px)';
         host.configure(probe, 0, 0, 0, 0, 0, 0, 0, 40);
         check(reads === 1 && Math.abs(host.caret(probe, 1) - first) < 0.01 && reads === 2,

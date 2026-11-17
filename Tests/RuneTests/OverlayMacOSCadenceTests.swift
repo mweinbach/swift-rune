@@ -7,9 +7,11 @@ import Testing
 @MainActor
 @Suite(.serialized)
 struct OverlayMacOSCadenceTests {
-    private func wait(until predicate: () -> Bool, timeout: Double = 3) async throws -> Bool {
-        let deadline = Date(timeIntervalSinceNow: timeout)
-        while !predicate(), Date() < deadline {
+    private func wait(until predicate: () -> Bool) async throws -> Bool {
+        // Other AppKit tests can occupy the main actor for several seconds. Give
+        // the pending run-loop callback a chance after that work returns.
+        for _ in 0..<600 {
+            if predicate() { return true }
             try await Task.sleep(for: .milliseconds(5))
         }
         return predicate()
@@ -17,15 +19,17 @@ struct OverlayMacOSCadenceTests {
 
     @Test func pollAwaitsDeadlineWithoutCreatingAHiddenPanel() async throws {
         let options = OverlayOptions(input: .none)
-        let overlay = OverlaySpec<Bool>(
-            name: "Hidden timer", size: Vec2(16, 16), options: options, makeState: { false },
+        let overlay = OverlaySpec<ContinuousClock.Instant?>(
+            name: "Hidden timer", size: Vec2(16, 16), options: options, makeState: { nil },
             view: { _, _ in el() }
-        ).configured(options).poll { fired, _, _ in fired = true; return false }.makeHandle()
+        ).configured(options).poll { firedAt, _, _ in firedAt = .now; return false }.makeHandle()
+        let earliestPoll = ContinuousClock.now + .milliseconds(50)
         _ = overlay.updateIf { _, tx in tx.wakeAfter(0.05); return false }
-        #expect(try await wait { overlay.readState { $0 } })
-        overlay.update { $0 = false }
+        try #require(try await wait { overlay.readState { $0 != nil } })
+        #expect(try #require(overlay.readState { $0 }) >= earliestPoll)
+        overlay.update { $0 = nil }
         overlay.runtime.waker.wake()
-        #expect(try await wait { overlay.readState { $0 } })
+        #expect(try await wait { overlay.readState { $0 != nil } })
         #expect(overlay.windowNumber == nil)
         #expect(overlay.surfaceStats.frameCount == 0)
     }

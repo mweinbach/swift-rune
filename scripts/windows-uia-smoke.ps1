@@ -91,7 +91,7 @@ try {
     if ($null -eq $switch) { throw 'Timed out waiting for the switch in the native UI Automation tree.' }
     $info = $switch.Current
     if ($info.Name -ne 'Lights' -or $info.FrameworkId -ne 'Rune' -or
-        $info.ControlType -ne [System.Windows.Automation.ControlType]::CheckBox -or
+        $info.ControlType -ne [System.Windows.Automation.ControlType]::Button -or
         -not $info.IsKeyboardFocusable -or -not $info.IsEnabled -or
         $info.BoundingRectangle.Width -le 0 -or $info.BoundingRectangle.Height -le 0) {
         throw "Unexpected switch properties. Name=$($info.Name), framework=$($info.FrameworkId), type=$($info.ControlType), bounds=$($info.BoundingRectangle)"

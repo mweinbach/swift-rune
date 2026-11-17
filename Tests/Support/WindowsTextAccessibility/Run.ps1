@@ -1,6 +1,7 @@
 # Run in a Visual Studio developer PowerShell on a Windows desktop with Swift installed.
 # Prebuilt executables may also be supplied, including native ARM64 builds.
-param([string]$Executable, [string]$Client)
+# -Selection runs the selection, scroll-item, and native callback fixture.
+param([string]$Executable, [string]$Client, [switch]$Selection)
 $ErrorActionPreference = 'Stop'
 
 if (-not $Executable) {
@@ -32,6 +33,7 @@ try {
     $start.CreateNoWindow = $true
     $start.RedirectStandardError = $true
     $start.EnvironmentVariables['RUNE_OPEN_INACTIVE'] = '1'
+    if ($Selection) { $start.EnvironmentVariables['RUNE_SELECTION_FIXTURE'] = '1' }
     $app = [System.Diagnostics.Process]::Start($start)
     $appErrors = $app.StandardError.ReadToEndAsync()
 
@@ -42,6 +44,7 @@ try {
     $clientStart.CreateNoWindow = $true
     $clientStart.RedirectStandardOutput = $true
     $clientStart.RedirectStandardError = $true
+    if ($Selection) { $clientStart.EnvironmentVariables['RUNE_SELECTION_FIXTURE'] = '1' }
     $probe = [System.Diagnostics.Process]::Start($clientStart)
     $output = $probe.StandardOutput.ReadToEndAsync()
     $errors = $probe.StandardError.ReadToEndAsync()

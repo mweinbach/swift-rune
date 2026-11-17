@@ -8,32 +8,29 @@ struct UnseenPresenceParityTests {
         var rows: [String]
     }
 
-    private func makeListRuntime(rows: [String]) -> Runtime<ListState> {
+    private func makeListRuntime(rows: [String], tracksFilterKeys: Bool = false) -> Runtime<ListState> {
         Runtime<ListState>(
             state: ListState(rows: rows),
             viewport: Vec2(240, 200),
             pixelScale: 1.0,
             systemDark: true
         ) { st, _ in
-            col()
-                .p(10)
-                .child(
-                    col()
-                        .key("list")
-                        .w(200)
-                        .h(60)
-                        .clip(true)
-                        .scrollY()
-                        .children(st.rows.map { id in
-                            row()
-                                .key(id)
-                                .wFull()
-                                .h(30)
-                                .shrink(0)
-                                .bg(Tok.accent(0, dark: true))
-                                .transition(Transition.opacity)
-                        })
-                )
+            let list: El<ListState> = col()
+                .key("list")
+                .w(200)
+                .h(60)
+                .clip(true)
+                .scrollY()
+                .children(st.rows.map { id in
+                    row()
+                        .key(id)
+                        .wFull()
+                        .h(30)
+                        .shrink(0)
+                        .bg(Tok.accent(0, dark: true))
+                        .transition(Transition.opacity)
+                })
+            return col().p(10).child(tracksFilterKeys ? list.kitFilterKeys(st.rows) : list)
         }
     }
 
@@ -52,14 +49,22 @@ struct UnseenPresenceParityTests {
         #expect(offscreenRow.opacity == 1.0)
     }
 
-    @Test("Unseen row re-fades on list replacement (reenterUnseenRow) but stays opaque when scrolled into view")
-    func reenterUnseenRowFadesOnFilterReplacementNotOnScroll() throws {
-        let rt = makeListRuntime(rows: (0..<8).map { "r\($0)" })
+    @Test("Unseen row re-fades on list replacement but stays opaque when scrolled into view", arguments: [false, true], [false, true])
+    func reenterUnseenRowFadesOnFilterReplacementNotOnScroll(native: Bool, tracksFilterKeys: Bool) throws {
+        let rt = makeListRuntime(rows: (0..<8).map { "r\($0)" }, tracksFilterKeys: tracksFilterKeys)
+
+        func draw(at time: Double) {
+            if native {
+                _ = rt.renderFrame(at: time)
+            } else {
+                _ = rt.frame(at: time)
+            }
+        }
 
         var t = 0.0
         for _ in 0..<45 {
             t += 1.0 / 60.0
-            _ = rt.frame(at: t)
+            draw(at: t)
         }
 
         // 1. Scroll down so previously clipped `r4` enters view: must stay opaque (no reenter fade).
@@ -67,7 +72,7 @@ struct UnseenPresenceParityTests {
             tx.scrollTo("list", offset: Vec2(0, 120), animated: false)
         }
         t += 1.0 / 120.0
-        _ = rt.frame(at: t)
+        draw(at: t)
         let scrolledIn = try #require(rt.elements().first { $0.key == "r4" })
         #expect(scrolledIn.opacity == 1.0)
 
@@ -77,7 +82,7 @@ struct UnseenPresenceParityTests {
         }
         for _ in 0..<20 {
             t += 1.0 / 60.0
-            _ = rt.frame(at: t)
+            draw(at: t)
         }
         let unseenR7 = try #require(rt.elements().first { $0.key == "r7" })
         #expect(unseenR7.opacity == 1.0)
@@ -87,13 +92,13 @@ struct UnseenPresenceParityTests {
             st.rows = ["r7"]
         }
         t += 1.0 / 120.0
-        _ = rt.frame(at: t)
+        draw(at: t)
         let movedUp = try #require(rt.elements().first { $0.key == "r7" })
         #expect(movedUp.opacity < 0.2)
 
         for _ in 0..<45 {
             t += 1.0 / 60.0
-            _ = rt.frame(at: t)
+            draw(at: t)
         }
         let settled = try #require(rt.elements().first { $0.key == "r7" })
         #expect(settled.opacity > 0.99)

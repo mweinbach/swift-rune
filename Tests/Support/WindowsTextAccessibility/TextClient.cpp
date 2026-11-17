@@ -86,6 +86,8 @@ static void waitFor(Predicate predicate, const char *message, DWORD milliseconds
     }
 }
 
+#include "SelectionChecks.hpp"
+
 static std::wstring read(IUIAutomationTextRange *range, int maximumLength = -1) {
     StringResult result;
     check(range->GetText(maximumLength, &result.value), "GetText");
@@ -467,14 +469,18 @@ static void checkDialogPatterns(IUIAutomation *uia, IUIAutomationElement *window
 }
 
 static void run(DWORD pid) {
-    auto report = [](const char *stage) {
-        if (std::getenv("RUNE_UIA_TEST_TRACE")) std::fprintf(stderr, "UIA passed: %s\n", stage);
+    const bool trace = GetEnvironmentVariableW(L"RUNE_UIA_TEST_TRACE", nullptr, 0) != 0;
+    auto report = [trace](const char *stage) {
+        if (trace) std::fprintf(stderr, "UIA passed: %s\n", stage);
     };
     ComPtr<IUIAutomation> uia;
     check(CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&uia)),
           "Create UI Automation client");
     TargetWindow target{pid};
     ComPtr<IUIAutomationElement> window, editor, password, document;
+    wchar_t selectionMode[2]{};
+    const bool selectionFixture = GetEnvironmentVariableW(L"RUNE_SELECTION_FIXTURE", selectionMode, 2) == 1 &&
+                                  selectionMode[0] == L'1';
     waitFor([&] {
         if (!target.hwnd) EnumWindows(findWindow, reinterpret_cast<LPARAM>(&target));
         if (!target.hwnd) return false;
@@ -482,11 +488,16 @@ static void run(DWORD pid) {
         if (waitingForProvider(hr)) return false;
         check(hr, "Resolving Rune window");
         if (!window.Get()) return false;
+        if (selectionFixture) return field(uia.Get(), window.Get(), L"tabs", true).Get() != nullptr;
         editor = field(uia.Get(), window.Get(), L"editor", true);
         password = field(uia.Get(), window.Get(), L"password", true);
         document = field(uia.Get(), window.Get(), L"document", true);
         return editor.Get() && password.Get() && document.Get();
-    }, "The Swift fixture did not publish its text fields", 120000);
+    }, "The Swift fixture did not publish its controls", 120000);
+    if (selectionFixture) {
+        selectionTests::run(uia.Get(), window.Get());
+        return;
+    }
     checkEditor(editor.Get());
     checkPassword(password.Get());
     report("Unicode editing, caret, glyph geometry and password protection");

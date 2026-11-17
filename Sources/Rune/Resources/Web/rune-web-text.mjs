@@ -611,7 +611,8 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
                 root = doc.createElement('div');
                 root.setAttribute('aria-hidden', 'true');
                 root.inert = true;
-                root.style.cssText = 'all:initial;position:fixed;left:0;top:0;visibility:hidden;pointer-events:none;contain:layout style;';
+                // Shaping spans reset inherited styles. Keep their layout measurable while hiding the whole subtree.
+                root.style.cssText = 'all:initial;position:fixed;left:0;top:0;visibility:hidden;opacity:0;pointer-events:none;contain:layout style;';
                 defaultContext = doc.createElement('canvas').getContext('2d', { willReadFrequently: true });
             }
             if (!defaultContext) return 0;

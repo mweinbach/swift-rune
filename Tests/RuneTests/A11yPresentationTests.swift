@@ -276,6 +276,23 @@ struct A11yPresentationTests {
         #endif
     }
 
+    @Test func treeGridKeepsAuthoredRowsAndName() throws {
+        let view: El<Int> = col().key("files").role(.treeGrid).label("Files").child(
+            row().key("folder").role(.row).child(text("Projects").key("name").role(.gridCell))
+        )
+        for root in try projections(view, state: 0) {
+            #expect(root.role.rawValue == "treegrid")
+            #expect(root.label == "Files")
+            let row = try #require(root.children.first)
+            #expect(row.role == .row)
+            #expect(row.children.first?.role == .gridCell)
+            #if os(macOS)
+            let native = RuneNSAccessibilityElement(node: root, parent: nil, onAction: nil)
+            #expect(native.accessibilityRole() == .table)
+            #endif
+        }
+    }
+
     @Test func landmarksExposeTheirStandardNames() throws {
         let roles: [ElementRole] = [.main, .navigation, .banner, .complementary, .contentInfo, .form, .search, .region]
         let names = ["main", "navigation", "banner", "complementary", "contentinfo", "form", "search", "region"]

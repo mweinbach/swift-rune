@@ -654,6 +654,37 @@ struct TextAudit958ParityTests {
         #expect(cleanFixes.isEmpty)
     }
 
+    @Test("Deep duplicate-key diagnostics retain preorder warnings and repaired mounted paths")
+    func deepDuplicateKeyDiagnostics() {
+        var tree: El<Void> = col().key("group")
+            .child(col().key("row").child(el().key("x")).child(el().key("x")))
+            .child(col().key("row").child(el().key("y")).child(el().key("y")))
+            .child(el().key("row#dup1"))
+        let levels = (0..<96).map { "level-\($0)" }
+        for level in levels { tree = col().key(level).child(tree) }
+
+        let result = KeyDiagnostics.find(in: tree)
+        let group = (levels.reversed() + ["group"]).joined(separator: "/")
+        #expect(result.map(\.key) == ["row", "x", "y"])
+        #expect(result.map(\.paths) == [
+            ["\(group)/row#0", "\(group)/row#1"],
+            ["\(group)/row/x#0", "\(group)/row/x#1"],
+            ["\(group)/row/y#0", "\(group)/row/y#1"]
+        ])
+
+        var renamed: [String] = []
+        let repaired = KeyDiagnostics.repair(tree, at: "/@mounted") { renamed.append($0.path) }
+        let directory = (["@mounted"] + levels.dropLast().reversed().map { "@\($0)" } + ["@group"])
+            .joined(separator: "/")
+        #expect(renamed == [
+            "/\(directory)/@row#dup2",
+            "/\(directory)/@row/@x#dup1",
+            "/\(directory)/@row#dup2/@y#dup1"
+        ])
+        #expect(KeyDiagnostics.clean(repaired.tree))
+        #expect(!KeyDiagnostics.clean(tree))
+    }
+
     // MARK: - L921 & L928: MacOSCarbonKeyMap Fn-drop masks & ShortcutEngine bare chord guard
 
     @Test("L921 & L928 (shortcuts/macos.rs:223 & service.rs:431): macOS NSEvent masks & bare chord refusal")

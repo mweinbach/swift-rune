@@ -10,10 +10,7 @@ internal struct UnseenPresenceState: Sendable {
         var parentId: NodeId?
     }
 
-    var prevMountedIds: Set<NodeId> = []
     var prevNodesById: [NodeId: PrevNodeSnapshot] = [:]
-    var prevChildrenByParent: [NodeId: [NodeId]] = [:]
-
 }
 
 fileprivate let kitFilterKeysKey = "kitFilterKeys"
@@ -176,24 +173,19 @@ internal struct KitUnseenPresenceState {
         let nothing = drewNothing(nodes: prevNodes)
         guard !nothing.isEmpty else { return ([], []) }
 
-        var seenPrevById: [NodeId: Bool] = [:]
-        seenPrevById.reserveCapacity(prevNodes.count)
         var oldIndexById: [NodeId: Int] = [:]
         oldIndexById.reserveCapacity(prevNodes.count)
         var unseenPrevIds: Set<NodeId> = []
         for i in prevNodes.indices {
             let nid = prevNodes[i].nodeId
             oldIndexById[nid] = i
-            let wasSeen = !nothing[i]
-            seenPrevById[nid] = wasSeen
-            if !wasSeen {
+            if nothing[i] {
                 unseenPrevIds.insert(nid)
             }
         }
 
         let mounts = newNodes.count > prevNodes.count
-        let allPrevSeen = !unseenPrevIds.isEmpty ? false : true
-        if allPrevSeen && !mounts {
+        if unseenPrevIds.isEmpty && !mounts {
             return ([], unseenPrevIds)
         }
 
@@ -236,7 +228,8 @@ internal struct KitUnseenPresenceState {
 
             // A stuck ancestor draws where it's held, not where scrolling puts it: subtract last
             // frame's own sticky shift so it and its children stay inside the viewport clip.
-            let ownSticky = frameById[n.nodeId]?.stickyShift ?? .zero
+            let previousPaint = frameById[n.nodeId]
+            let ownSticky = previousPaint?.stickyShift ?? .zero
             let stickyMin = Vec2(parentShiftMin.x - ownSticky.x, parentShiftMin.y - ownSticky.y)
             let stickyMax = Vec2(parentShiftMax.x - ownSticky.x, parentShiftMax.y - ownSticky.y)
 
@@ -251,9 +244,8 @@ internal struct KitUnseenPresenceState {
             )
             let swept: MotionRect
             if let oldIdx = oldIndexById[n.nodeId],
-               let oldNode = prevNodes.indices.contains(oldIdx) ? prevNodes[oldIdx] : nil,
-               oldNode.targetRect.width > 0 || oldNode.targetRect.height > 0,
-               let drawn = frameById[n.nodeId]?.drawn {
+               prevNodes[oldIdx].targetRect.width > 0 || prevNodes[oldIdx].targetRect.height > 0,
+               let drawn = previousPaint?.drawn {
                 swept = MotionRect(
                     left: min(drawn.left, r.left),
                     top: min(drawn.top, r.top),
@@ -316,47 +308,25 @@ internal struct KitUnseenPresenceState {
         markAncestors(newNodes, &after)
 
         let unseenNew: [Bool] = newNodes.indices.map { i in
-            let nid = newNodes[i].nodeId
-            let wasSeen = seenPrevById[nid] ?? false
-            return !after[i] && !wasSeen
+            !after[i] && (oldIndexById[newNodes[i].nodeId].map { nothing[$0] } ?? true)
         }
         return (unseenNew, unseenPrevIds)
     }
 
     /// Detects list containers whose key set changed and dropped all previously seen row keys (`replaced_view`),
     /// returning the set of row container `NodeId`s that replaced what the reader saw.
-    mutating func updateFilterReplacedContainers<S>(
-        prevNodes: [Runtime<S>.FlatNode],
-        newNodes: [Runtime<S>.FlatNode],
-        unseenPrevIds: Set<NodeId>
-    ) -> Set<NodeId> {
+    mutating func updateFilterReplacedContainers<S>(newNodes: [Runtime<S>.FlatNode]) -> Set<NodeId> {
         var replaced: Set<NodeId> = []
-        var activeContainerIds: Set<NodeId> = []
-
+        var next: [NodeId: (keys: [String], seenChildKeys: Set<String>)] = [:]
         for node in newNodes {
             guard let keys = node.el.kitFilterKeysValue, !keys.isEmpty else { continue }
-            activeContainerIds.insert(node.nodeId)
-            let newKeySet = Set(keys)
-            if let prev = prevFilterStateById[node.nodeId] {
-                if prev.keys != keys {
-                    let anySeenStayed = prev.seenChildKeys.contains { newKeySet.contains($0) }
-                    if !anySeenStayed {
-                        replaced.insert(node.nodeId)
-                    }
-                }
+            if isFilterReplaced(containerId: node.nodeId, newKeys: keys) {
+                replaced.insert(node.nodeId)
             }
+            // Painting supplies the set of visible keys for the next commit.
+            next[node.nodeId] = (keys, [])
         }
-
-        // Painting the new rows supplies the seen keys for the next commit.
-        for node in newNodes {
-            guard let keys = node.el.kitFilterKeysValue else { continue }
-            prevFilterStateById[node.nodeId] = (keys: keys, seenChildKeys: [])
-        }
-        if !prevFilterStateById.isEmpty {
-            prevFilterStateById = prevFilterStateById.filter { activeContainerIds.contains($0.key) }
-        }
-        _ = prevNodes
-        _ = unseenPrevIds
+        prevFilterStateById = next
         return replaced
     }
 
@@ -417,52 +387,33 @@ extension Runtime {
     ) -> Bool {
         guard specs.count == flatNodes.count else { return false }
 
-        let newIdSet = Set(specs.map(\.id))
         var didReenter = false
 
         // 1. `end_unseen_exits`: unseen nodes omitted in this commit have nothing visible to exit-fade.
         endUnseenExits(on: &scene)
 
-        // Build per-parent child lists & parent origins for local-frame snapping / replaced-view detection.
-        var childrenByParent: [NodeId: [NodeId]] = [:]
-        var specById: [NodeId: NodeSpec] = Dictionary(minimumCapacity: specs.count)
-        for spec in specs {
-            specById[spec.id] = spec
-            if let pid = spec.parent {
-                childrenByParent[pid, default: []].append(spec.id)
-            }
-        }
-
-        // Compute which parents had previously-seen children removed/replaced (`replacedView`).
+        // A container was replaced if a previously visible child disappeared. The snapshot
+        // records its motion parent, which can differ from its layout parent during flights.
         var replacedParents: Set<NodeId> = []
-        for (pid, prevKids) in unseenPresence.prevChildrenByParent {
-            let hadSeenRemoved = prevKids.contains { kid in
-                kitHooks.unseenPresence.frameById[kid]?.inView == true && !newIdSet.contains(kid)
-            }
-            if hadSeenRemoved {
-                replacedParents.insert(pid)
+        if !cut && !reducedMotion {
+            for (id, previous) in kitHooks.unseenPresence.frameById
+            where previous.inView && nodeIndexById[id] == nil {
+                if let parent = unseenPresence.prevNodesById[id]?.parentId {
+                    replacedParents.insert(parent)
+                }
             }
         }
 
         let winRect = MotionRect(left: 0, top: 0, right: viewport.x, bottom: viewport.y)
         var nextPrevNodes: [NodeId: UnseenPresenceState.PrevNodeSnapshot] = Dictionary(minimumCapacity: specs.count)
-        var cumSticky = [Vec2](repeating: .zero, count: flatNodes.count)
+        let hasHolds = scrollRequestsState.keeps.contains { $0.hold != nil }
+        let hasSticky = !cut && (hasHolds || flatNodes.contains { $0.isSticky })
+        var cumSticky = hasSticky ? [Vec2](repeating: .zero, count: flatNodes.count) : []
 
         for i in flatNodes.indices {
             let node = flatNodes[i]
             let spec = specs[i]
             let id = spec.id
-            let parentSticky = (node.el.anchor != nil && !node.isSticky)
-                ? .zero
-                : (node.parentIndex.map { cumSticky[$0] } ?? .zero)
-            let mySticky = computeStickyShift(
-                nodeIndex: i,
-                parentStickyShift: parentSticky,
-                nodes: flatNodes,
-                rectOf: \.targetRect
-            ).shift
-            cumSticky[i] = mySticky
-
             let scrollNodeIdx = !node.el.layout.scrollAxes.isEmpty
                 ? i
                 : (node.enclosingVScrollIndex ?? node.enclosingHScrollIndex)
@@ -481,13 +432,24 @@ extension Runtime {
 
             guard !cut else { continue }
 
+            var mySticky = Vec2.zero
+            if hasSticky {
+                let sticky = node.isSticky
+                let parentShift = node.el.anchor != nil && !sticky
+                    ? .zero : (node.parentIndex.map { cumSticky[$0] } ?? .zero)
+                mySticky = sticky || hasHolds
+                    ? computeStickyShift(nodeIndex: i, parentStickyShift: parentShift,
+                                         nodes: flatNodes, rectOf: { $0.targetRect }).shift
+                    : parentShift
+                cumSticky[i] = mySticky
+            }
             let clip = intersectRects(node.clipRect, spec.rect.offsetBy(mySticky))
             let winClip = intersectRects(clip, winRect)
             let inViewNow = node.el.isolatedLayer || (winClip.width > 0.001 && winClip.height > 0.001)
 
             if !inViewNow {
                 // 2. `enters_unseen`: newly mounted nodes clipped out of view land immediately at rest.
-                if !unseenPresence.prevMountedIds.contains(id),
+                if unseenPresence.prevNodesById[id] == nil,
                    scene.phase(id) == .entering,
                    let trans = node.el.transition,
                    trans.insertion.pointOffset == .zero,
@@ -498,7 +460,7 @@ extension Runtime {
                 // 3. `unseen_before_and_after`: rows staying unseen snap their layout frame and visuals
                 // so offscreen reflow/colour changes do not animate invisibly (`unseen_presence.rs`).
                 if kitHooks.unseenPresence.frameById[id]?.inView == false {
-                    let parentOrigin = spec.parent.flatMap { specById[$0]?.rect.origin } ?? .zero
+                    let parentOrigin = spec.parent.flatMap { nodeIndexById[$0] }.map { specs[$0].rect.origin } ?? .zero
                     let localFrame = MotionRect(
                         left: spec.rect.left - parentOrigin.x,
                         top: spec.rect.top - parentOrigin.y,
@@ -517,7 +479,6 @@ extension Runtime {
                 }
             } else if !reducedMotion,
                       spec.transition != nil,
-                      unseenPresence.prevMountedIds.contains(id),
                       kitHooks.unseenPresence.frameById[id]?.inView == false,
                       let prevSnap = unseenPresence.prevNodesById[id] {
                 // 4. `reenter_unseen_row`: previously unseen row entering view on a replaced/filtered
@@ -533,9 +494,7 @@ extension Runtime {
             }
         }
 
-        unseenPresence.prevMountedIds = newIdSet
         unseenPresence.prevNodesById = nextPrevNodes
-        unseenPresence.prevChildrenByParent = childrenByParent
         return didReenter
     }
 
@@ -585,11 +544,7 @@ extension Runtime {
             wasPinnedToBottom: wasPinnedToBottom,
             viewport: viewport
         )
-        let replacedContainers = kitHooks.unseenPresence.updateFilterReplacedContainers(
-            prevNodes: prevNodes,
-            newNodes: flatNodes,
-            unseenPrevIds: unseenPrevIds
-        )
+        let replacedContainers = kitHooks.unseenPresence.updateFilterReplacedContainers(newNodes: flatNodes)
 
         if unseenNew.count == flatNodes.count {
             for i in flatNodes.indices {

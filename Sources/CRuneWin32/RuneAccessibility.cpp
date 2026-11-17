@@ -30,12 +30,29 @@ struct Node {
     int toggle = -1, live = 0, selected = -1, expanded = -1;
     int level = 0, position = 0, size = 0;
     double minimum = 0, maximum = 0, number = 0, step = 0;
-    int nearestSelector = -1, selectionContainer = -1;
-    std::vector<int> children, selectableItems;
+    int selectionContainer = -1;
+    std::vector<int> children;
     int anchor = 0, caret = 0;
     std::shared_ptr<RuneUiaTextContent> field;
     const std::wstring &valueText() const { return field ? field->text : value; }
     bool isDialog() const { return role == L"dialog" || role == L"alertdialog"; }
+    bool isSelector() const {
+        return role == L"combobox" || role == L"grid" || role == L"listbox" ||
+               role == L"menu" || role == L"menubar" || role == L"radiogroup" ||
+               role == L"tablist" || role == L"toolbar" || role == L"tree" || role == L"treegrid";
+    }
+    bool isRadio() const { return role == L"radio" || role == L"menu-item-radio"; }
+    bool supportsSelectionItem() const {
+        if (isRadio()) return toggle == ToggleState_Off || toggle == ToggleState_On;
+        return role == L"gridcell" || (selected >= 0 &&
+            (role == L"listitem" || role == L"option" || role == L"tab" || role == L"treeitem"));
+    }
+    bool isSelected() const { return isRadio() ? toggle == ToggleState_On : selected == 1; }
+    // AccessKit's container traversal stops at item-like descendants. Cells and rows are transparent here.
+    bool isItemLike() const {
+        return isRadio() || role == L"listitem" || role == L"menuitem" || role == L"tab" ||
+               role == L"menu-item-check-box" || role == L"treeitem" || role == L"option";
+    }
     int headingLevel() const { return role == L"heading" ? HeadingLevel1 + std::min(level > 0 ? level : 2, 9) - 1 : 0; }
     const wchar_t *customLandmark() const {
         if (role == L"banner") return L"banner";
@@ -102,26 +119,27 @@ int controlType(const std::string &role) {
         {"scroll-view", UIA_PaneControlTypeId},
         {"text", UIA_TextControlTypeId}, {"heading", UIA_TextControlTypeId},
         {"button", UIA_ButtonControlTypeId}, {"checkbox", UIA_CheckBoxControlTypeId},
-        {"switch", UIA_CheckBoxControlTypeId}, {"radio", UIA_RadioButtonControlTypeId},
+        {"switch", UIA_ButtonControlTypeId}, {"radio", UIA_RadioButtonControlTypeId},
         {"tab", UIA_TabItemControlTypeId}, {"tablist", UIA_TabControlTypeId},
         {"textbox", UIA_EditControlTypeId}, {"password-input", UIA_EditControlTypeId},
         {"multiline-text-input", UIA_EditControlTypeId}, {"slider", UIA_SliderControlTypeId},
         {"progressbar", UIA_ProgressBarControlTypeId}, {"listitem", UIA_ListItemControlTypeId},
         {"option", UIA_ListItemControlTypeId}, {"list", UIA_ListControlTypeId},
         {"listbox", UIA_ListControlTypeId}, {"dialog", UIA_WindowControlTypeId},
-        {"alertdialog", UIA_WindowControlTypeId},
+        {"alertdialog", UIA_WindowControlTypeId}, {"alert", UIA_TextControlTypeId},
         {"menubar", UIA_MenuBarControlTypeId}, {"menu", UIA_MenuControlTypeId}, {"menuitem", UIA_MenuItemControlTypeId},
-        {"menu-item-check-box", UIA_MenuItemControlTypeId}, {"menu-item-radio", UIA_MenuItemControlTypeId}, {"img", UIA_ImageControlTypeId},
+        {"menu-item-check-box", UIA_CheckBoxControlTypeId}, {"menu-item-radio", UIA_RadioButtonControlTypeId}, {"img", UIA_ImageControlTypeId},
         {"icon", UIA_ImageControlTypeId}, {"separator", UIA_SeparatorControlTypeId},
         {"combobox", UIA_ComboBoxControlTypeId}, {"tree", UIA_TreeControlTypeId},
         {"treeitem", UIA_TreeItemControlTypeId}, {"grid", UIA_DataGridControlTypeId},
+        {"treegrid", UIA_DataGridControlTypeId},
         {"row", UIA_DataItemControlTypeId}, {"gridcell", UIA_DataItemControlTypeId},
         {"cell", UIA_DataItemControlTypeId}, {"rowheader", UIA_DataItemControlTypeId},
         {"columnheader", UIA_DataItemControlTypeId}, {"tooltip", UIA_ToolTipControlTypeId},
         {"link", UIA_HyperlinkControlTypeId}, {"toolbar", UIA_ToolBarControlTypeId},
-        {"splitter", UIA_ThumbControlTypeId}, {"status", UIA_StatusBarControlTypeId},
+        {"splitter", UIA_SeparatorControlTypeId}, {"status", UIA_StatusBarControlTypeId},
         {"table", UIA_TableControlTypeId}, {"mark", UIA_TextControlTypeId},
-        {"code", UIA_TextControlTypeId}, {"blockquote", UIA_TextControlTypeId}
+        {"code", UIA_TextControlTypeId}, {"blockquote", UIA_GroupControlTypeId}
     };
     const auto found = types.find(role);
     return found == types.end() ? UIA_GroupControlTypeId : found->second;
@@ -162,11 +180,12 @@ HRESULT intProperty(VARIANT *out, int value) {
 bool supports(const Node &n, PATTERNID pattern) {
     if (pattern == UIA_WindowPatternId) return n.isDialog();
     if (pattern == UIA_ScrollItemPatternId) return n.scrollItem;
-    if (pattern == UIA_InvokePatternId) return n.pressable && n.toggle < 0 && n.selectionContainer < 0;
-    if (pattern == UIA_TogglePatternId) return n.toggle >= 0 && n.selectionContainer < 0;
+    if (pattern == UIA_InvokePatternId) return n.pressable && n.toggle < 0 && n.selected < 0 && n.expanded < 0 &&
+        n.control != UIA_EditControlTypeId && n.role != L"treeitem" && n.role != L"combobox";
+    if (pattern == UIA_TogglePatternId) return n.toggle >= 0 && !n.supportsSelectionItem();
     if (pattern == UIA_ExpandCollapsePatternId) return n.expanded >= 0 && n.pressable;
-    if (pattern == UIA_SelectionPatternId) return !n.selectableItems.empty();
-    if (pattern == UIA_SelectionItemPatternId) return n.selectionContainer >= 0;
+    if (pattern == UIA_SelectionPatternId) return n.isSelector();
+    if (pattern == UIA_SelectionItemPatternId) return n.supportsSelectionItem();
     if (pattern == UIA_TextPatternId || pattern == UIA_TextPattern2Id) return n.field && !n.secure;
     if (pattern == UIA_ValuePatternId) return n.control == UIA_EditControlTypeId;
     if (pattern == UIA_RangeValuePatternId) return n.hasRange;
@@ -243,6 +262,11 @@ public:
         case UIA_ControlTypePropertyId: return intProperty(out, n.control);
         case UIA_IsDialogPropertyId: return boolProperty(out, n.isDialog());
         case UIA_WindowIsModalPropertyId: return n.isDialog() ? boolProperty(out, n.modal) : S_OK;
+        case UIA_SelectionItemIsSelectedPropertyId: return n.supportsSelectionItem() ? boolProperty(out, n.isSelected()) : S_OK;
+        case UIA_SelectionIsSelectionRequiredPropertyId:
+        case UIA_SelectionCanSelectMultiplePropertyId: return n.isSelector() ? boolProperty(out, false) : S_OK;
+        case UIA_OrientationPropertyId: return intProperty(out, n.role == L"tablist" ? OrientationType_Horizontal :
+            n.role == L"listbox" ? OrientationType_Vertical : OrientationType_None);
         case UIA_NamePropertyId: return stringProperty(out, n.name);
         case UIA_AutomationIdPropertyId: return stringProperty(out, n.key);
         case UIA_HelpTextPropertyId: return stringProperty(out, n.help);
@@ -361,8 +385,7 @@ public:
     HRESULT STDMETHODCALLTYPE GetRuntimeId(SAFEARRAY **out) override {
         if (!out) return E_POINTER;
         *out = nullptr;
-        Snapshot s(*window, id);
-        if (!s.node) return UIA_E_ELEMENTNOTAVAILABLE;
+        // UIA also asks for the identity of an item in a removal event after the new tree is published.
         if (id == 0) return S_OK; // The window supplies the root identifier.
         SAFEARRAY *array = SafeArrayCreateVector(VT_I4, 0, 2);
         if (!array) return E_OUTOFMEMORY;
@@ -435,6 +458,7 @@ public:
         const Node &n = found->second;
         if (n.disabled && kind != RUNE_UIA_SCROLL_INTO_VIEW) return UIA_E_ELEMENTNOTENABLED;
         if (pattern && !supports(n, pattern)) return UIA_E_NOTSUPPORTED;
+        if (kind == RUNE_UIA_SELECT && n.isSelected() == (number != 0)) return S_OK;
         if (kind == RUNE_UIA_PRESS && !n.pressable) return UIA_E_NOTSUPPORTED;
         if (kind == RUNE_UIA_FOCUS && !n.focusable) return UIA_E_NOTSUPPORTED;
         if ((kind == RUNE_UIA_SET_TEXT || kind == RUNE_UIA_SET_NUMBER) && (!n.settable || n.readOnly)) return UIA_E_NOTSUPPORTED;
@@ -475,8 +499,15 @@ public:
         if (!s.node) return UIA_E_ELEMENTNOTAVAILABLE;
         if (!supports(*s.node, UIA_SelectionPatternId)) return UIA_E_NOTSUPPORTED;
         std::vector<int> selected;
-        for (int item : s.node->selectableItems) {
-            if (s.tree->nodes.at(item).selected == 1) selected.push_back(item);
+        std::vector<int> pending(s.node->children.rbegin(), s.node->children.rend());
+        while (!pending.empty()) {
+            const Node &item = s.tree->nodes.at(pending.back());
+            pending.pop_back();
+            if (item.isItemLike()) {
+                if (item.selected == 1) selected.push_back(item.id);
+            } else {
+                pending.insert(pending.end(), item.children.rbegin(), item.children.rend());
+            }
         }
         SAFEARRAY *items = SafeArrayCreateVector(VT_UNKNOWN, 0, static_cast<ULONG>(selected.size()));
         if (!items) return E_OUTOFMEMORY;
@@ -491,19 +522,20 @@ public:
     }
     HRESULT STDMETHODCALLTYPE get_CanSelectMultiple(BOOL *out) override {
         if (!out) return E_POINTER;
+        Snapshot s(*window, id);
+        if (!s.node) return UIA_E_ELEMENTNOTAVAILABLE;
         *out = FALSE;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE get_IsSelectionRequired(BOOL *out) override {
-        if (!out) return E_POINTER;
-        *out = TRUE;
-        return S_OK;
+        // Rune does not set either AccessKit container flag.
+        return get_CanSelectMultiple(out);
     }
     HRESULT STDMETHODCALLTYPE get_IsSelected(BOOL *out) override {
         if (!out) return E_POINTER;
         Snapshot s(*window, id);
         if (!s.node) return UIA_E_ELEMENTNOTAVAILABLE;
-        *out = s.node->selected == 1;
+        *out = s.node->isSelected();
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE get_SelectionContainer(IRawElementProviderSimple **out) override {
@@ -511,30 +543,13 @@ public:
         *out = nullptr;
         Snapshot s(*window, id);
         if (!s.node) return UIA_E_ELEMENTNOTAVAILABLE;
-        if (s.node->selectionContainer >= 0) *out = new Provider(window, s.node->selectionContainer);
+        if (s.node->selectionContainer < 0) return E_FAIL;
+        *out = new Provider(window, s.node->selectionContainer);
         return S_OK;
     }
-    HRESULT select(bool adding) {
-        Snapshot s(*window, id);
-        if (!s.node) return UIA_E_ELEMENTNOTAVAILABLE;
-        if (s.node->disabled) return UIA_E_ELEMENTNOTENABLED;
-        if (s.node->selectionContainer < 0 || !s.node->pressable) return UIA_E_NOTSUPPORTED;
-        if (s.node->selected == 1) return S_OK;
-        if (adding) {
-            for (int item : s.tree->nodes.at(s.node->selectionContainer).selectableItems) {
-                if (s.tree->nodes.at(item).selected == 1) return UIA_E_INVALIDOPERATION;
-            }
-        }
-        return enqueue(RUNE_UIA_SELECT, UIA_SelectionItemPatternId);
-    }
-    HRESULT STDMETHODCALLTYPE Select() override { return select(false); }
-    HRESULT STDMETHODCALLTYPE AddToSelection() override { return select(true); }
-    HRESULT STDMETHODCALLTYPE RemoveFromSelection() override {
-        Snapshot s(*window, id);
-        if (!s.node) return UIA_E_ELEMENTNOTAVAILABLE;
-        if (s.node->disabled) return UIA_E_ELEMENTNOTENABLED;
-        return s.node->selected == 1 ? UIA_E_INVALIDOPERATION : S_OK;
-    }
+    HRESULT STDMETHODCALLTYPE Select() override { return enqueue(RUNE_UIA_SELECT, UIA_SelectionItemPatternId, L"", 1); }
+    HRESULT STDMETHODCALLTYPE AddToSelection() override { return Select(); }
+    HRESULT STDMETHODCALLTYPE RemoveFromSelection() override { return enqueue(RUNE_UIA_SELECT, UIA_SelectionItemPatternId); }
     HRESULT STDMETHODCALLTYPE get_ToggleState(ToggleState *out) override {
         if (!out) return E_POINTER;
         Snapshot s(*window, id); if (!s.node) return UIA_E_ELEMENTNOTAVAILABLE;
@@ -652,13 +667,69 @@ void raiseProperty(Provider *provider, PROPERTYID id, VARIANT before, VARIANT af
     VariantClear(&before);
     VariantClear(&after);
 }
+struct SelectionChanges {
+    std::vector<int> added, removed;
+};
+using SelectionChangesByContainer = std::unordered_map<int, SelectionChanges>;
+
+void raiseSelectionChanges(const std::shared_ptr<Window> &window, const Tree &after,
+                           const SelectionChangesByContainer &changes) {
+    auto raiseItem = [&](int id, bool selected, EVENTID event) {
+        Provider *item = new Provider(window, id);
+        if (event) UiaRaiseAutomationEvent(item, event);
+        VARIANT before{}, now{};
+        boolProperty(&before, !selected); boolProperty(&now, selected);
+        raiseProperty(item, UIA_SelectionItemIsSelectedPropertyId, before, now);
+        item->Release();
+    };
+    for (const auto &group : changes) {
+        const auto found = after.nodes.find(group.first);
+        if (found == after.nodes.end()) continue;
+        const Node &node = found->second;
+        const auto &items = group.second;
+        if (node.isSelector()) {
+            // AccessKit coalesces by the raw selected state of direct, exposed children.
+            // Checked radios have a SelectionItem state, but no raw selected state.
+            int onlySelected = -1;
+            for (const int child : node.children) {
+                if (after.nodes.at(child).selected != 1) continue;
+                if (onlySelected >= 0) { onlySelected = -1; break; }
+                onlySelected = child;
+            }
+            if (onlySelected >= 0) {
+                raiseItem(onlySelected, true, UIA_SelectionItem_ElementSelectedEventId);
+                for (const int removed : items.removed) raiseItem(removed, false, 0);
+                continue;
+            }
+            if (items.added.size() + items.removed.size() > 20) {
+                Provider *container = new Provider(window, node.id);
+                UiaRaiseAutomationEvent(container, UIA_Selection_InvalidatedEventId);
+                container->Release();
+                continue;
+            }
+        }
+        // Rune does not set AccessKit's multiselectable flag on its containers.
+        for (const int added : items.added) raiseItem(added, true, UIA_SelectionItem_ElementSelectedEventId);
+        for (const int removed : items.removed) raiseItem(removed, false, UIA_SelectionItem_ElementRemovedFromSelectionEventId);
+    }
+}
+
 void raiseChanges(const std::shared_ptr<Window> &window, const Tree &before, const Tree &after, bool focusChanged, bool uiaListening) {
     bool structureChanged = before.nodes.size() != after.nodes.size();
     bool moved = false;
+    size_t addedNodes = 0;
+    SelectionChangesByContainer selections;
+    auto recordSelection = [&](const Node &item, bool selected) {
+        auto &changes = selections[item.selectionContainer >= 0 ? item.selectionContainer : item.id];
+        (selected ? changes.added : changes.removed).push_back(item.id);
+    };
     for (const auto &pair : after.nodes) {
         const auto prior = before.nodes.find(pair.first);
         if (prior == before.nodes.end()) {
             structureChanged = true;
+            ++addedNodes;
+            if (uiaListening && pair.second.supportsSelectionItem() && pair.second.isSelected())
+                recordSelection(pair.second, true);
             continue;
         }
         const Node &old = prior->second, &node = pair.second;
@@ -682,11 +753,14 @@ void raiseChanges(const std::shared_ptr<Window> &window, const Tree &before, con
         const bool changedProtection = old.secure != node.secure;
         const bool changedTextPattern = bool(old.field) != bool(node.field);
         const bool changedRange = node.hasRange && old.number != node.number;
-        const bool changedToggle = node.toggle >= 0 && node.toggle != old.toggle;
-        const bool changedSelection = node.selectionContainer >= 0 && old.selected != node.selected;
+        const bool changedToggle = node.toggle != old.toggle && supports(old, UIA_TogglePatternId) && supports(node, UIA_TogglePatternId);
+        if ((changedRole || old.selected != node.selected || old.toggle != node.toggle) &&
+            node.supportsSelectionItem() && old.isSelected() != node.isSelected()) {
+            recordSelection(node, node.isSelected());
+        }
         const bool changedExpansion = node.expanded >= 0 && old.expanded != node.expanded;
         const bool changedEnabled = node.disabled != old.disabled;
-        if (!(changedName || changedValue || changedRange || changedToggle || changedSelection || changedExpansion ||
+        if (!(changedName || changedValue || changedRange || changedToggle || changedExpansion ||
               changedEnabled || changedTextSelection || changedProtection || changedTextPattern ||
               changedHeading || changedLandmark || changedLandmarkName || changedDialog || changedModal)) continue;
         Provider *p = new Provider(window, node.id);
@@ -758,12 +832,6 @@ void raiseChanges(const std::shared_ptr<Window> &window, const Tree &before, con
             boolProperty(&a, !old.disabled); boolProperty(&b, !node.disabled);
             raiseProperty(p, UIA_IsEnabledPropertyId, a, b);
         }
-        if (changedSelection) {
-            VARIANT a{}, b{};
-            boolProperty(&a, old.selected == 1); boolProperty(&b, node.selected == 1);
-            raiseProperty(p, UIA_SelectionItemIsSelectedPropertyId, a, b);
-            if (node.selected == 1) UiaRaiseAutomationEvent(p, UIA_SelectionItem_ElementSelectedEventId);
-        }
         if (changedExpansion) {
             VARIANT a{}, b{};
             intProperty(&a, old.expanded ? ExpandCollapseState_Expanded : ExpandCollapseState_Collapsed);
@@ -800,6 +868,14 @@ void raiseChanges(const std::shared_ptr<Window> &window, const Tree &before, con
             p->Release();
         }
     }
+    if (uiaListening && after.nodes.size() - addedNodes < before.nodes.size()) {
+        // Like AccessKit's node_removed callback, record every removed SelectionItem.
+        for (const auto &entry : before.nodes) {
+            if (after.nodes.count(entry.first) == 0 && entry.second.supportsSelectionItem())
+                recordSelection(entry.second, false);
+        }
+    }
+    if (!selections.empty()) raiseSelectionChanges(window, after, selections);
 }
 } // namespace
 
@@ -856,19 +932,7 @@ void rune_uia_add(RuneUiaHost *host, RuneUiaNode info, const char *key, const ch
     n.step = info.step; n.number = info.number;
     n.rect = {info.x, info.y, info.width, info.height};
     if (info.focused) tree.focused = n.id;
-    n.nearestSelector = parent->second.nearestSelector;
-    if (n.role == L"tablist" || n.role == L"radiogroup") {
-        n.nearestSelector = n.id;
-    } else if (n.nearestSelector >= 0) {
-        Node &selector = tree.nodes.at(n.nearestSelector);
-        // Tab strips and radio groups have a well-defined single-selection contract.
-        // Rune list/grid/tree controls can implement app-defined multi-selection.
-        if ((selector.role == L"tablist" && n.role == L"tab") ||
-            (selector.role == L"radiogroup" && n.role == L"radio")) {
-            n.selectionContainer = selector.id;
-            selector.selectableItems.push_back(n.id);
-        }
-    }
+    n.selectionContainer = parent->second.isSelector() ? parent->first : parent->second.selectionContainer;
     parent->second.children.push_back(n.id);
     tree.nodes.emplace(n.id, std::move(n));
 }

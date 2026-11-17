@@ -237,13 +237,25 @@ public enum KeyDiagnostics {
 
     /// Returns `true` when no parent in `root` has two sibling children sharing a key (`key_diagnostics::clean`).
     public static func clean<State>(_ root: El<State>) -> Bool {
-        if let owner = root.memoLayoutChildren, owner.matches(root.children) {
-            return !owner.traits.contains(.duplicateKeys) && !(checksSiblings(root) && owner.duplicateSiblings)
+        var node = root
+        var siblings: [ArraySlice<El<State>>] = []
+        while true {
+            if let owner = node.memoLayoutChildren, owner.matches(node.children) {
+                if owner.traits.contains(.duplicateKeys) || (checksSiblings(node) && owner.duplicateSiblings) {
+                    return false
+                }
+            } else {
+                if checksSiblings(node) && !uniqueSiblings(node.children) { return false }
+                if let first = node.children.first {
+                    if node.children.count > 1 { siblings.append(node.children.dropFirst()) }
+                    node = first
+                    continue
+                }
+            }
+            guard var rest = siblings.popLast() else { return true }
+            node = rest.removeFirst()
+            if !rest.isEmpty { siblings.append(rest) }
         }
-        if checksSiblings(root) && !uniqueSiblings(root.children) {
-            return false
-        }
-        return root.children.allSatisfy(clean)
     }
 
     /// Alias for `clean(_:)`.
@@ -255,7 +267,8 @@ public enum KeyDiagnostics {
     public static func find<State>(in root: El<State>, path: String? = nil) -> [DuplicateKeyWarning] {
         guard !clean(root) else { return [] }
         var out: [DuplicateKeyWarning] = []
-        func walk(_ el: El<State>, path: String) {
+        var pending = [(root, path ?? root.keyId ?? "#0")]
+        while let (el, path) = pending.popLast() {
             if checksSiblings(el) {
                 var firstIdx: [String: Int] = [:]
                 var dupPaths: [String: [String]] = [:]
@@ -281,12 +294,14 @@ public enum KeyDiagnostics {
                     out.append(DuplicateKeyWarning(key: authored, count: paths.count, paths: paths, message: msg))
                 }
             }
-            for (idx, child) in el.children.enumerated() where !clean(child) {
-                let seg = child.keyId ?? "#\(idx)"
-                walk(child, path: "\(path)/\(seg)")
+            for idx in el.children.indices.reversed() {
+                let child = el.children[idx]
+                if !clean(child) {
+                    let segment = child.keyId ?? "#\(idx)"
+                    pending.append((child, "\(path)/\(segment)"))
+                }
             }
         }
-        walk(root, path: path ?? (root.keyId ?? "#0"))
         return out
     }
 
@@ -347,8 +362,7 @@ public enum KeyDiagnostics {
         -> (tree: El<State>, warnings: [DuplicateKeyWarning]) {
         let warns = find(in: root, path: mountedPath)
         guard !warns.isEmpty else { return (root, []) }
-        func rewrite(_ el: El<State>, path: String) -> El<State> {
-            var copy = el
+        func repairChildren(_ copy: inout El<State>, path: String) {
             if checksSiblings(copy) && !uniqueSiblings(copy.children) {
                 var keyedIndices: [Int] = []
                 var keyedStrings: [String] = []
@@ -380,14 +394,27 @@ public enum KeyDiagnostics {
                                     warning: "Duplicate sibling key '\(original)' renamed to '\(repaired.keyId ?? keyedStrings[localIdx])' under \(path)"))
                 }
             }
-            for i in copy.children.indices where !clean(copy.children[i]) {
-                let child = copy.children[i]
-                let segment = child.storageKeyId.map { "@\($0)" } ?? String(i)
-                copy.children[i] = rewrite(child, path: "\(path)/\(segment)")
-            }
-            return copy
         }
-        return (rewrite(root, path: mountedPath ?? root.storageKeyId.map { "/@\($0)" } ?? "/0"), warns)
+
+        var node = root
+        var path = mountedPath ?? root.storageKeyId.map { "/@\($0)" } ?? "/0"
+        var nextChild = 0
+        var parents: [(node: El<State>, path: String, child: Int)] = []
+        while true {
+            if nextChild == 0 { repairChildren(&node, path: path) }
+            if let i = (nextChild..<node.children.count).first(where: { !clean(node.children[$0]) }) {
+                parents.append((node, path, i))
+                node = node.children[i]
+                path += "/" + (node.storageKeyId.map { "@\($0)" } ?? String(i))
+                nextChild = 0
+            } else {
+                guard var parent = parents.popLast() else { return (node, warns) }
+                parent.node.children[parent.child] = node
+                node = parent.node
+                path = parent.path
+                nextChild = parent.child + 1
+            }
+        }
     }
 
     /// Compatibility alias for `repair(_:)`.

@@ -143,7 +143,7 @@ static AtkRole at_role(const char *role) {
         {"menubar", ATK_ROLE_MENU_BAR}, {"menu", ATK_ROLE_MENU}, {"menuitem", ATK_ROLE_MENU_ITEM},
         {"img", ATK_ROLE_IMAGE}, {"figure", ATK_ROLE_PANEL}, {"icon", ATK_ROLE_ICON}, {"separator", ATK_ROLE_SEPARATOR},
         {"combobox", ATK_ROLE_COMBO_BOX}, {"listbox", ATK_ROLE_LIST_BOX}, {"option", ATK_ROLE_LIST_ITEM},
-        {"tree", ATK_ROLE_TREE}, {"treeitem", ATK_ROLE_TREE_ITEM}, {"grid", ATK_ROLE_TABLE},
+        {"tree", ATK_ROLE_TREE}, {"treeitem", ATK_ROLE_TREE_ITEM}, {"grid", ATK_ROLE_TABLE}, {"treegrid", ATK_ROLE_TREE_TABLE},
         {"row", ATK_ROLE_TABLE_ROW}, {"gridcell", ATK_ROLE_TABLE_CELL}, {"cell", ATK_ROLE_TABLE_CELL},
         {"columnheader", ATK_ROLE_COLUMN_HEADER}, {"rowheader", ATK_ROLE_ROW_HEADER},
         {"radiogroup", ATK_ROLE_GROUPING}, {"tablist", ATK_ROLE_PAGE_TAB_LIST}, {"tooltip", ATK_ROLE_TOOL_TIP},

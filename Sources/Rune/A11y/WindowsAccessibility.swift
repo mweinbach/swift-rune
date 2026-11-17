@@ -67,7 +67,14 @@ internal final class WindowsAccessibilityHost {
             case Int32(RUNE_UIA_SELECT.rawValue):
                 guard let index = runtime.a11yTargetIndex(target) else { continue }
                 let item = runtime.flatNodes[index].el
-                guard !item.itemSelected && item.a11yChecked != .trueState && item.a11ySelected != "true" else { continue }
+                let selected = item.itemSelected || item.isFocusSelected
+                let current: Bool
+                switch item.role {
+                case .radio: current = item.a11yChecked.map { $0 == .trueState } ?? selected
+                case .menuItemRadio: current = item.a11yChecked == .trueState
+                default: current = selected
+                }
+                guard current != (number != 0) else { continue }
                 action = .press; value = nil
             default: continue
             }
@@ -130,10 +137,21 @@ internal final class WindowsAccessibilityHost {
             native.scroll_item = node.actions.contains(.scrollIntoView) ? 1 : 0
             native.modal = node.isModal ? 1 : 0
             native.toggle = Self.toggleState(node)
-            if node.role == .radio {
-                native.selected = node.isSelected || node.toggled == .trueState || node.value == "true" ? 1 : 0
-            } else {
-                native.selected = node.selectedState.map { $0 ? 1 : 0 } ?? -1
+            native.selected = -1
+            switch node.role {
+            case .radio, .listItem, .option, .tab, .treeItem, .gridCell, .row:
+                if let path = node.runtimePath, let index = runtime.nodeByPath[path] {
+                    let item = runtime.flatNodes[index]
+                    let selected = item.el.itemSelected || item.el.isFocusSelected
+                    if node.role == .radio {
+                        if native.toggle < 0 { native.toggle = selected ? 1 : 0 }
+                    } else if selected {
+                        native.selected = 1
+                    } else if let parent = item.parentIndex, runtime.findFocusGroupAncestor(of: parent) != nil {
+                        native.selected = 0
+                    }
+                }
+            default: break
             }
             native.expanded = node.isExpanded.map { $0 ? 1 : 0 } ?? -1
             native.level = oneBased(node.level)
@@ -196,7 +214,7 @@ internal final class WindowsAccessibilityHost {
         case .mixed: return 2
         case nil:
             switch node.role {
-            case .checkbox, .switchControl, .menuItemCheckbox:
+            case .checkbox, .switchControl:
                 // Rune also exposes the legacy selected("true"/"false") binding as a value.
                 return node.value == "mixed" ? 2 : (node.value == "true" || node.isSelected ? 1 : 0)
             default: return -1

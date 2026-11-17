@@ -551,7 +551,7 @@ public enum AppKitAccessibilityMapper {
         case .option: return .menuItem
         case .tree: return .outline
         case .treeItem: return .row
-        case .grid: return .table
+        case .grid, .treeGrid: return .table
         case .row: return .row
         case .cell, .gridCell, .rowHeader, .columnHeader: return .cell
         case .radiogroup: return .radioGroup
@@ -750,7 +750,7 @@ public enum UIKitAccessibilityMapper {
         case .image, .icon: return .image
         case .checkbox, .switchControl, .radio, .tab: return .button
         case .combobox, .option, .link: return .button
-        case .listbox, .tree, .treeItem, .grid, .row, .cell, .gridCell, .rowHeader, .columnHeader, .radiogroup, .tabList, .tooltip, .alert, .region, .main, .mark, .code, .blockquote, .table:
+        case .listbox, .tree, .treeItem, .grid, .treeGrid, .row, .cell, .gridCell, .rowHeader, .columnHeader, .radiogroup, .tabList, .tooltip, .alert, .region, .main, .mark, .code, .blockquote, .table:
             return .staticText
         }
     }

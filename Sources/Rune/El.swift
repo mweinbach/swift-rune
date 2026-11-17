@@ -944,6 +944,7 @@ public enum ElementRole: String, Sendable, Hashable, Codable {
     case tree = "tree"
     case treeItem = "treeitem"
     case grid = "grid"
+    case treeGrid = "treegrid"
     case row = "row"
     case gridCell = "gridcell"
     case cell = "cell"
