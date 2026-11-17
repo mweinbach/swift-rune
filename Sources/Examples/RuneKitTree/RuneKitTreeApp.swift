@@ -109,7 +109,7 @@ enum RuneKitTreeApp {
             .grow(1)
             .minH(0)
 
-        let filter = TextInput(\State.query)
+        let filter = TextInput(key: "filter", \State.query)
             .placeholder("Filter files")
             .leadingIcon(KitIcons.search)
             .clearButton()
