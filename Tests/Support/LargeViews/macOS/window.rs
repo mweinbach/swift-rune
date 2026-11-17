@@ -3,7 +3,7 @@ use std::{cell::RefCell, ffi::{CString, c_char, c_void}, rc::Rc, time::Instant};
 
 unsafe extern "C" {
     fn scroll_bench_observe_presentations(path: *const c_char) -> bool;
-    fn rust_wheel();
+    fn rust_wheel(delta: f64);
     fn rust_wheels_submitted() -> u32;
     fn rust_finish(callback: unsafe extern "C" fn(*mut c_void), context: *mut c_void);
 }
@@ -37,13 +37,23 @@ fn main() {
         let step = unsafe { rust_wheels_submitted() };
         if finished || step < requested { return; }
         if [0, 1, 24, 60, 300, 600].contains(&step) {
-            let rows: Vec<_> = rt.elements().into_iter().filter(|e| !e.exiting && e.role == ROW_ROLE).collect();
+            let elements = rt.elements();
+            let pinned_bottom = if IS_DIFF {
+                elements.iter().find(|e| !e.exiting && e.key.as_deref() == Some("sticky"))
+                    .map_or(0., |e| e.visible[1] + e.visible[3])
+            } else { 0. };
+            let rows: Vec<_> = elements.iter().filter(|e| !e.exiting && is_data_row(e)).collect();
+            let offset = if IS_DIFF {
+                Some(rows.first().expect("missing virtual Diff row").scrolled[1])
+            } else { None };
             let mut visible: Vec<_> = rows.iter().filter(|e| {
                 e.key.as_deref() != Some("header") && e.visible[2] > 0. && e.visible[3] > 0.
+                    && e.visible[1] + e.visible[3] > pinned_bottom
             }).collect();
             visible.sort_by(|a, b| a.visible[1].total_cmp(&b.visible[1]));
             checkpoints.push(serde_json::json!({
                 "wheel": step, "mounted": rows.len(), "nativeInstances": rt.instances.len(),
+                "scrollY": offset,
                 "visible": visible.iter().map(|e| serde_json::json!([e.key, e.visible])).collect::<Vec<_>>(),
             }));
         }
@@ -54,7 +64,7 @@ fn main() {
             unsafe { rust_finish(quit, Box::into_raw(Box::new(handle.clone())).cast()); }
         } else {
             requested += 1;
-            unsafe { rust_wheel(); }
+            unsafe { rust_wheel(WHEEL_DY); }
         }
     }).run();
 }

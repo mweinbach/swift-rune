@@ -8,6 +8,7 @@
 // Exercise the app's own Winit NSView without moving the user's pointer or posting system events.
 @interface ScrollFixtureEvent : NSObject
 @property NSPoint point;
+@property CGFloat wheelDelta;
 @end
 
 @implementation ScrollFixtureEvent
@@ -15,9 +16,9 @@
 - (NSEventModifierFlags)modifierFlags { return 0; }
 - (NSEventType)type { return NSEventTypeScrollWheel; }
 - (CGFloat)scrollingDeltaX { return 0; }
-- (CGFloat)scrollingDeltaY { return -48; }
+- (CGFloat)scrollingDeltaY { return self.wheelDelta; }
 - (CGFloat)deltaX { return 0; }
-- (CGFloat)deltaY { return -48; }
+- (CGFloat)deltaY { return self.wheelDelta; }
 - (BOOL)hasPreciseScrollingDeltas { return YES; }
 - (BOOL)isDirectionInvertedFromDevice { return NO; }
 - (NSEventPhase)phase { return NSEventPhaseChanged; }
@@ -66,7 +67,7 @@ static NSView *winitView(NSView *view) {
     return nil;
 }
 
-void rust_wheel(void) {
+void rust_wheel(double delta) {
     // Let the first window appear before measuring its first wheel.
     int delay = submitted ? 1 : 200;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
@@ -79,6 +80,7 @@ void rust_wheel(void) {
         }
         if (!target) { fputs("Could not find the benchmark's Winit view\n", stderr); exit(1); }
         ScrollFixtureEvent *event = [ScrollFixtureEvent new];
+        event.wheelDelta = delta;
         event.point = [target convertPoint:NSMakePoint(NSMidX(target.bounds), NSMidY(target.bounds)) toView:nil];
         [target scrollWheel:(NSEvent *)event];
         submitted++;
