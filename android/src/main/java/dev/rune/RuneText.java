@@ -11,6 +11,7 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.os.Build;
+import android.os.Environment;
 import android.os.LocaleList;
 import android.icu.lang.UCharacter;
 import android.icu.lang.UProperty;
@@ -19,6 +20,9 @@ import android.text.StaticLayout;
 import android.text.TextDirectionHeuristic;
 import android.text.TextDirectionHeuristics;
 import android.text.TextPaint;
+import android.util.Xml;
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -31,11 +35,13 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Locale;
 
 /** Android line shaping and rasterization for the Rune R8 atlas. Called by the NDK bridge. */
 public final class RuneText {
     private static final ArrayList<Face> faces = new ArrayList<>();
+    private static HashMap<String, String> systemNames;
     private static File cacheDirectory;
     private static boolean bundledFontsReady;
     private final String text;
@@ -117,21 +123,88 @@ public final class RuneText {
         }
     }
 
-    private static synchronized Typeface typeface(String family, int weight, boolean italic, boolean mono) {
-        Face best = null;
-        int distance = Integer.MAX_VALUE;
-        for (Face face : faces) {
-            if (!face.name.equalsIgnoreCase(family)) continue;
-            int score = Math.abs(face.weight - weight) + (face.italic != italic ? 1000 : 0);
-            if (score < distance) { best = face; distance = score; }
-        }
-        if (best != null && best.italic == italic) return best.typeface;
-        Typeface base = best != null ? best.typeface : Typeface.create(
-            family.isEmpty() || (mono && family.equals("IBM Plex Mono")) ? (mono ? "monospace" : "sans-serif") : family,
-            Typeface.NORMAL);
+    private static Typeface styled(Typeface base, int weight, boolean italic) {
         if (Build.VERSION.SDK_INT >= 28) return Typeface.create(base, weight, italic);
         int style = (weight >= 600 ? Typeface.BOLD : 0) | (italic ? Typeface.ITALIC : 0);
         return Typeface.create(base, style);
+    }
+
+    private static ArrayList<String> familyList(String stack) {
+        ArrayList<String> names = new ArrayList<>();
+        StringBuilder name = new StringBuilder();
+        char quote = 0;
+        for (int i = 0; i < stack.length(); i++) {
+            char c = stack.charAt(i);
+            if (c == '\\' && i + 1 < stack.length()) name.append(stack.charAt(++i));
+            else if (quote != 0) { if (c == quote) quote = 0; else name.append(c); }
+            else if (c == '\'' || c == '"') quote = c;
+            else if (c == ',') { names.add(name.toString().trim()); name.setLength(0); }
+            else name.append(c);
+        }
+        names.add(name.toString().trim());
+        return names;
+    }
+
+    private static void readSystemNames(File file, HashMap<String, String> names) {
+        try (FileInputStream stream = new FileInputStream(file)) {
+            XmlPullParser parser = Xml.newPullParser();
+            parser.setInput(stream, null);
+            for (int event = parser.next(); event != XmlPullParser.END_DOCUMENT; event = parser.next()) {
+                if (event != XmlPullParser.START_TAG) continue;
+                String tag = parser.getName();
+                if (!tag.equals("alias") && !tag.equals("family") && !tag.equals("family-list")) continue;
+                String name = parser.getAttributeValue(null, "name");
+                if (name != null) names.put(name.toLowerCase(Locale.ROOT), name);
+            }
+        } catch (IOException | SecurityException | XmlPullParserException ignored) {
+            // OEMs may omit the customization file or use a different vendor font configuration.
+        }
+    }
+
+    private static Typeface systemTypeface(String name) {
+        String key = name.toLowerCase(Locale.ROOT);
+        if (key.equals("system-ui") || key.equals("ui-sans-serif") || key.equals("sans-serif")) return Typeface.SANS_SERIF;
+        if (key.equals("ui-monospace")) return Typeface.MONOSPACE;
+        if (key.equals("ui-serif")) return Typeface.SERIF;
+        Typeface result = Typeface.create(name, Typeface.NORMAL);
+        if (!result.equals(Typeface.DEFAULT)) return result;
+        if (!key.equals(name)) {
+            result = Typeface.create(key, Typeface.NORMAL);
+            if (!result.equals(Typeface.DEFAULT)) return result;
+        }
+        // Typeface.create returns the same object for both an unknown name and a valid
+        // alias of the default face. Consult Android's named families only for that case.
+        if (systemNames == null) {
+            HashMap<String, String> names = new HashMap<>();
+            readSystemNames(new File(Environment.getRootDirectory(), "etc/fonts.xml"), names);
+            String product = System.getenv("ANDROID_PRODUCT_ROOT");
+            readSystemNames(new File(product == null ? "/product" : product, "etc/fonts_customization.xml"), names);
+            systemNames = names;
+        }
+        String canonical = systemNames.get(key);
+        return canonical == null ? null : Typeface.create(canonical, Typeface.NORMAL);
+    }
+
+    private static synchronized Face selectFace(String stack, int weight, boolean italic, boolean mono) {
+        for (String name : familyList(stack)) {
+            if (name.isEmpty()) continue;
+            Face best = null;
+            int distance = Integer.MAX_VALUE;
+            for (Face face : faces) {
+                if (!face.name.equalsIgnoreCase(name)) continue;
+                int score = Math.abs(face.weight - weight) + (face.italic != italic ? 1000 : 0);
+                if (score < distance) { best = face; distance = score; }
+            }
+            if (best != null) {
+                if (best.italic == italic) return best;
+                return new Face(best.name, weight, italic, styled(best.typeface, weight, italic), best.hasColor);
+            }
+            Typeface nativeFace = systemTypeface(name);
+            if (nativeFace != null)
+                return new Face(name, weight, italic, styled(nativeFace, weight, italic), false);
+        }
+        Typeface fallback = mono ? Typeface.MONOSPACE : Typeface.DEFAULT;
+        return new Face("", weight, italic, styled(fallback, weight, italic), false);
     }
 
     // Family/subfamily names are inside the font and need not match its filename.
@@ -208,13 +281,13 @@ public final class RuneText {
         paint.setTextSize(size);
         paint.setColor(Color.WHITE);
         String familyName = new String(family, StandardCharsets.UTF_8);
-        paint.setTypeface(typeface(familyName, Math.max(1, Math.min(1000, weight)), italic, mono));
-        mayHaveColor = needsColorProbe(text, familyName);
+        Face selected = selectFace(familyName, Math.max(1, Math.min(1000, weight)), italic, mono);
+        paint.setTypeface(selected.typeface);
+        mayHaveColor = selected.hasColor || needsColorProbe(text);
         shape();
     }
 
-    private static synchronized boolean needsColorProbe(String text, String familyName) {
-        for (Face f : faces) if (f.hasColor && f.name.equalsIgnoreCase(familyName)) return true;
+    private static boolean needsColorProbe(String text) {
         for (int i = 0; i < text.length(); ) {
             int cp = text.codePointAt(i);
             if (cp == 0x20e3 || cp == 0xfe0f ||

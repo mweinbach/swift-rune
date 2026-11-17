@@ -6,13 +6,40 @@ const pendingFonts = new WeakMap();
 const bundledFonts = new WeakMap();
 const fontSources = new WeakMap();
 let aliasCount = 0;
+const genericFamilies = new Set(['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
+    'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded', 'emoji', 'math', 'fangsong']);
 
 function rememberFont(doc, bytes, info) {
     let families = fontSources.get(doc);
     if (!families) fontSources.set(doc, families = new Map());
-    let faces = families.get(info.family);
-    if (!faces) families.set(info.family, faces = new Map());
+    const key = info.family.toLowerCase();
+    let faces = families.get(key);
+    if (!faces) families.set(key, faces = new Map());
     faces.set(info.weight + info.style, { bytes, ...info });
+}
+
+// Preserve quoted commas and escaped characters when walking the authored stack.
+// CSSOM normalizes multi-word names, quotes, and generic families for Canvas.
+function familyStack(style, raw, fallback) {
+    const tokens = raw.match(/(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\\.|[^"',\\])+/gu) ?? [];
+    const families = [];
+    for (const token of tokens) {
+        const value = token.trim();
+        if (!value) continue;
+        style.fontFamily = '';
+        style.fontFamily = value;
+        let css = style.fontFamily || CSS.escape(value);
+        if (/^(?:inherit|initial|unset|revert|revert-layer)$/i.test(css)) css = JSON.stringify(value);
+        const name = css.startsWith('"') ? css.slice(1, -1) : css;
+        const key = name.replace(/\\(?:([0-9a-f]{1,6})\s?|(.))/giu, (_, hex, escaped) => {
+            if (!hex) return escaped;
+            const point = parseInt(hex, 16);
+            return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : '\ufffd';
+        }).toLowerCase();
+        families.push({ css, key: !css.startsWith('"') && genericFamilies.has(key) ? null : key });
+    }
+    if (families.at(-1)?.css !== fallback) families.push({ css: fallback, key: null });
+    return families;
 }
 
 // Swift AppSpec supplies font bytes. FontFace requires an explicit CSS family; obtain
@@ -79,13 +106,15 @@ export function createRuneTextImports(getMemory, doc = globalThis.document) {
     const view = () => new DataView(memory());
     const string = (ptr, n) => utf8.decode(new Uint8Array(memory(), ptr >>> 0, n));
 
-    function releaseAlias(line) {
-        if (!line?.alias) return;
-        if (--line.alias.users === 0) {
-            doc.fonts.delete(line.alias.face);
-            aliases.delete(line.alias.key);
+    function releaseAliases(line) {
+        if (!line) return;
+        for (const alias of line.aliases) {
+            if (--alias.users === 0) {
+                doc.fonts.delete(alias.face);
+                aliases.delete(alias.key);
+            }
         }
-        line.alias = null;
+        line.aliases.length = 0;
     }
 
     function measure(line, ptr, size) {
@@ -189,10 +218,9 @@ export function createRuneTextImports(getMemory, doc = globalThis.document) {
             const element = doc.createElement('span');
             const text = string(ptr, count);
             const family = string(familyPtr, familyLen);
-            // CSS.escape yields one CSS identifier, including spaces or punctuation in family names.
-            const fallback = mono ? 'monospace' : 'sans-serif';
-            const list = family ? CSS.escape(family) + ', ' + fallback : fallback;
-            const font = (italic ? 'italic ' : '') + weight + ' ' + size + 'px ' + list;
+            const families = familyStack(element.style, family, mono ? 'monospace' : 'sans-serif');
+            const prefix = (italic ? 'italic ' : '') + weight + ' ' + size + 'px ';
+            const font = prefix + families.map(f => f.css).join(', ');
             element.style.cssText = 'all:initial;display:block;width:max-content;white-space:pre;font-kerning:normal;text-size-adjust:none;';
             element.style.font = font;
             element.dir = direction === 2 ? 'rtl' : direction === 1 ? 'ltr' : 'auto';
@@ -226,8 +254,8 @@ export function createRuneTextImports(getMemory, doc = globalThis.document) {
                 units += scalar.length;
             }
             offsets[count] = units;
-            const hasColor = colorFamilies.has(family) || /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(text);
-            const line = { text, font, baseFont: font, family, size, weight, italic, fallback, kerning: 'normal',
+            const hasColor = families.some(f => colorFamilies.has(f.key)) || /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(text);
+            const line = { text, font, baseFont: font, prefix, families, aliases: [], weight, italic, kerning: 'normal',
                 element, offsets, chunks, chunkAt, hasColor, range: doc.createRange(), carets: new Map(),
                 direction: doc.defaultView.getComputedStyle(element).direction };
             measure(line, metrics, metricsSize);
@@ -238,7 +266,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document) {
         },
         configure(id, ptr, size, featurePtr, featureLen, axisPtr, axisLen, metrics, metricsSize) {
             const line = runs.get(id);
-            releaseAlias(line);
+            releaseAliases(line);
             line.font = line.baseFont;
             line.element.style.font = line.font;
             line.element.lang = string(ptr, size);
@@ -246,15 +274,20 @@ export function createRuneTextImports(getMemory, doc = globalThis.document) {
             line.kerning = features.split(',').some(s => s.startsWith('kern=') && Number(s.slice(5)) === 0) ? 'none' : 'normal';
             line.element.style.fontKerning = line.kerning;
             if (features || axes) {
-                const faces = fontSources.get(doc)?.get(line.family);
-                if (faces) {
+                const stack = [];
+                for (const family of line.families) {
+                    const faces = fontSources.get(doc)?.get(family.key);
+                    if (!faces) {
+                        stack.push(family.css);
+                        continue;
+                    }
                     // Canvas has no per-draw arbitrary OpenType settings. A private
                     // FontFace using the original bytes supplies them to Canvas and DOM.
                     const entries = [...faces.values()];
                     const distance = face => Math.abs(Number(face.weight) - line.weight) +
                         ((face.style === 'italic') === Boolean(line.italic) ? 0 : 1000);
                     const src = entries.reduce((a, b) => distance(a) <= distance(b) ? a : b);
-                    const key = JSON.stringify([line.family, src.weight, src.style, features, axes]);
+                    const key = JSON.stringify([family.key, src.weight, src.style, features, axes]);
                     let alias = aliases.get(key);
                     if (!alias) {
                         const settings = (value, integer) => value.split(',').filter(Boolean).map(item => {
@@ -271,19 +304,20 @@ export function createRuneTextImports(getMemory, doc = globalThis.document) {
                         }
                     }
                     if (alias) {
-                        line.alias = alias;
                         ++alias.users;
-                        line.font = (line.italic ? 'italic ' : '') + line.weight + ' ' + line.size + 'px ' +
-                            alias.family + ', ' + CSS.escape(line.family) + ', ' + line.fallback;
-                        line.element.style.font = line.font;
+                        line.aliases.push(alias);
+                        stack.push(alias.family);
                     }
+                    stack.push(family.css);
                 }
+                line.font = line.prefix + stack.join(', ');
+                line.element.style.font = line.font;
             }
             measure(line, metrics, metricsSize);
         },
         release(id) {
             const line = runs.get(id);
-            releaseAlias(line);
+            releaseAliases(line);
             line?.element.remove();
             runs.delete(id);
             if (!runs.size) root?.remove();
@@ -326,7 +360,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document) {
             try {
                 const face = new FontFace(info.family, bytes, { weight: info.weight, style: info.style });
                 if (face.status === 'error') return 0;
-                if (info.color) colorFamilies.add(info.family);
+                if (info.color) colorFamilies.add(info.family.toLowerCase());
                 rememberFont(doc, bytes, info);
                 doc.fonts.add(face);
                 const key = getMemory();

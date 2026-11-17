@@ -7,12 +7,34 @@ import Testing
 
 @Suite("Portable GPU lighting timings")
 struct RuneLightTimingTests {
-    @Test func queuedSamplesTrackStagesAcrossGeometryCacheHits() throws {
+    // Ask the driver directly so a failure inside Rune's timing implementation fails the test.
+    private static func driverHasTimerCounters() throws -> Bool {
+        let context = try OffscreenGLContext()
+        defer { context.close() }
+        if OffscreenGLContext.isGLES {
+            typealias GetString = @convention(c) (UInt32) -> UnsafePointer<CChar>?
+            let getString = unsafeBitCast(try #require(OffscreenGLContext.resolve("glGetString")), to: GetString.self)
+            let names = try #require(getString(0x1F03)) // GL_EXTENSIONS
+            guard String(cString: names).split(separator: " ").contains("GL_EXT_disjoint_timer_query") else { return false }
+        }
+        typealias GetQuery = @convention(c) (UInt32, UInt32, UnsafeMutablePointer<Int32>) -> Void
+        let symbol = OffscreenGLContext.isGLES ? "glGetQueryivEXT" : "glGetQueryiv"
+        let getQuery = unsafeBitCast(try #require(OffscreenGLContext.resolve(symbol)), to: GetQuery.self)
+        var timestampBits: Int32 = 0
+        var elapsedBits: Int32 = 0
+        let counterBits: UInt32 = 0x8864 // GL_QUERY_COUNTER_BITS
+        getQuery(0x8E28, counterBits, &timestampBits) // GL_TIMESTAMP
+        getQuery(0x88BF, counterBits, &elapsedBits) // GL_TIME_ELAPSED
+        return timestampBits > 0 || elapsedBits > 0
+    }
+
+    @Test(.enabled(if: try driverHasTimerCounters(), "The GL driver has no timer counters"))
+    func queuedSamplesTrackStagesAcrossGeometryCacheHits() throws {
         let context = try OffscreenGLContext()
         defer { context.close() }
         let renderer = try LightGLRenderer(resolve: OffscreenGLContext.resolve)
         defer { renderer.close() }
-        guard renderer.enableTimings(resolve: OffscreenGLContext.resolve) else { return }
+        try #require(renderer.enableTimings(resolve: OffscreenGLContext.resolve))
 
         var error = [CChar](repeating: 0, count: 256)
         let capacity = error.count

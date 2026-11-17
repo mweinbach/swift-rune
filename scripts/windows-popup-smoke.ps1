@@ -85,6 +85,21 @@ public static class RunePopupSmoke {
         return found;
     }
 
+    public static IntPtr WindowForMenu(uint process, IntPtr menu) {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows(delegate(IntPtr window, IntPtr unused) {
+            uint id; GetWindowThreadProcessId(window, out id);
+            if (id != process || !IsWindowVisible(window)) return true;
+            var name = new StringBuilder(80);
+            GetClassName(window, name, name.Capacity);
+            if (name.ToString() != "#32768") return true;
+            var info = new MenuBarInfo { Size = Marshal.SizeOf(typeof(MenuBarInfo)) };
+            if (!GetMenuBarInfo(window, -4, 0, ref info) || info.Menu != menu) return true;
+            found = window; return false;
+        }, IntPtr.Zero);
+        return found;
+    }
+
     public static string Label(IntPtr menu, uint index) {
         var text = new StringBuilder(256);
         GetMenuString(menu, index, text, text.Capacity, 0x400);
@@ -179,6 +194,33 @@ function Wait-Status([string]$last) {
     }
 }
 
+function Popup-Window([IntPtr]$menu) {
+    Await-Result 'native popup HWND' { [RunePopupSmoke]::WindowForMenu($app.Id, $menu) }
+}
+
+function Activate-Row([IntPtr]$menu, [string]$title, [switch]$Expand) {
+    $target = Popup-Window $menu
+    $menuRoot = [Windows.Automation.AutomationElement]::FromHandle($target)
+    $name = New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty, $title)
+    $item = $menuRoot.FindFirst([Windows.Automation.TreeScope]::Descendants, $name)
+    if (!$item) {
+        $labels = ($menuRoot.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name }) -join ', '
+        throw "Native popup UIA item '$title' missing. Descendants: $labels"
+    }
+    $pattern = $null
+    if ($Expand -and $item.TryGetCurrentPattern([Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$pattern)) {
+        $pattern.Expand()
+        Write-Output "Expanded native '$title' with UIA."
+    } elseif ($item.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+        $pattern.Invoke()
+        Write-Output "Invoked native '$title' with UIA."
+    } else {
+        $legacy = $item.GetCurrentPattern([Windows.Automation.LegacyIAccessiblePattern]::Pattern)
+        $legacy.DoDefaultAction()
+        Write-Output "Performed the native default action on '$title' with UIA."
+    }
+}
+
 function Wait-Menu([string]$first) {
     Await-Result "visible native menu starting with '$first'" { [RunePopupSmoke]::Find($app.Id, '#32768', $first) }
 }
@@ -204,6 +246,7 @@ function Stop-Example {
     $app.Dispose()
 }
 
+$failures = New-Object 'Collections.Generic.List[string]'
 if ($Executable) {
     $app = Start-Example $Executable
     $window = [IntPtr]::Zero
@@ -228,18 +271,15 @@ if ($Executable) {
         $first = [RunePopupSmoke]::ItemBounds($context, 0)
         $rowHeight = $first.Bottom - $first.Top
         Assert-True ([Math]::Abs($first.Top - $y) -le $rowHeight -and [Math]::Abs($first.Left - $x) -le $rowHeight) 'Pointer anchor missed the click'
-        [RunePopupSmoke]::Key($window, 0x23) # End, Right: open the Share submenu.
-        [RunePopupSmoke]::Key($window, 0x27)
-        $nested = Wait-Menu 'Mail'
-        Assert-True ($nested -eq $share) 'Unexpected submenu opened'
-        [RunePopupSmoke]::Key($window, 0x23)
-        [RunePopupSmoke]::Key($window, 0x0d)
+        Activate-Row $context 'Share' -Expand
+        $null = Await-Result 'open Share submenu' { [RunePopupSmoke]::WindowForMenu($app.Id, $share) }
+        Activate-Row $share 'Messages'
         Wait-Status 'messages'
         Write-Output 'Nested command selected through its native menu.'
 
         [RunePopupSmoke]::Click($window, $x, $y, $true)
         $context = Wait-Menu 'Copy'
-        [RunePopupSmoke]::ControlC($window, $context)
+        [RunePopupSmoke]::ControlC((Popup-Window $context), $context)
         Wait-Status 'copy'
 
         # Focus the authored canvas through normal pointer handling before sending VK_APPS to its window.
@@ -249,7 +289,7 @@ if ($Executable) {
         $first = [RunePopupSmoke]::ItemBounds($context, 0)
         $area = $canvas.Current.BoundingRectangle
         Assert-True ([Math]::Abs($first.Left - $area.Left) -le $rowHeight -and [Math]::Abs($first.Top - $area.Bottom) -le $rowHeight) 'Keyboard menu should anchor to the focused control'
-        [RunePopupSmoke]::Key($window, 0x1b)
+        [RunePopupSmoke]::Key((Popup-Window $context), 0x1b)
         Wait-Status '(dismissed)'
         Write-Output 'Keyboard context-menu anchor and Escape dismissal verified.'
 
@@ -257,25 +297,16 @@ if ($Executable) {
         [RunePopupSmoke]::Click($window, [int]($area.X + $area.Width / 2), [int]($area.Y + $area.Height / 2), $false)
         $picker = Wait-Menu 'System'
         Assert-True (([RunePopupSmoke]::State($picker, 0) -band 8) -ne 0) 'System should be checked'
-        $menuWindow = [RunePopupSmoke]::Find($app.Id, '#32768', '')
-        $menuRoot = [Windows.Automation.AutomationElement]::FromHandle($menuWindow)
-        $name = New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty, 'Dark')
-        $choice = $menuRoot.FindFirst([Windows.Automation.TreeScope]::Descendants, $name)
-        $invoke = $null
-        if ($choice -and $choice.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
-            $invoke.Invoke()
-            Write-Output 'Invoked the native Dark picker row via UI Automation.'
-        } else {
-            [RunePopupSmoke]::Key($window, 0x23)
-            [RunePopupSmoke]::Key($window, 0x0d)
-            Write-Output 'Selected Dark with the keyboard. The native row did not expose UIA InvokePattern.'
-        }
+        Activate-Row $picker 'Dark'
         $null = Await-Result 'picker closing' { [RunePopupSmoke]::Find($app.Id, '#32768', 'System') -eq [IntPtr]::Zero }
         [RunePopupSmoke]::Click($window, [int]($area.X + $area.Width / 2), [int]($area.Y + $area.Height / 2), $false)
         $picker = Wait-Menu 'System'
         Assert-True (([RunePopupSmoke]::State($picker, 2) -band 8) -ne 0 -and ([RunePopupSmoke]::State($picker, 0) -band 8) -eq 0) 'Dark should be checked after selection'
-        [RunePopupSmoke]::Key($window, 0x1b)
+        [RunePopupSmoke]::Key((Popup-Window $picker), 0x1b)
         Write-Output 'PASS Windows popup menus: pointer and keyboard anchors, Ctrl+C, disabled Paste, separator, Share > Messages, Escape dismissal, and persistent picker selection.'
+    } catch {
+        Write-Output $_.Exception.Message
+        $failures.Add($_.Exception.Message)
     } finally {
         Stop-Example
     }
@@ -296,17 +327,19 @@ if ($RichClipboardExecutable) {
         [RunePopupSmoke]::Key($window, 0x5d)
         $fieldMenu = Wait-Menu 'Cut'
         Assert-True ([RunePopupSmoke]::Label($fieldMenu, 3) -ceq 'Select All') 'Missing field Select All command'
-        [RunePopupSmoke]::Key($window, 0x23)
-        [RunePopupSmoke]::Key($window, 0x0d)
+        Activate-Row $fieldMenu 'Select All'
         $text = $field.GetCurrentPattern([Windows.Automation.TextPattern]::Pattern)
         $null = Await-Result 'selected field text' { $text.GetSelection()[0].GetText(-1) -ceq 'Popup probe' }
         [RunePopupSmoke]::Key($window, 0x5d)
         $fieldMenu = Wait-Menu 'Cut'
         Assert-True (([RunePopupSmoke]::State($fieldMenu, 0) -band 3) -eq 0) 'Cut should be enabled for the selection'
-        [RunePopupSmoke]::Key($window, 0x1b)
+        [RunePopupSmoke]::Key((Popup-Window $fieldMenu), 0x1b)
         $null = Await-Result 'field menu dismissal' { [RunePopupSmoke]::Find($app.Id, '#32768', 'Cut') -eq [IntPtr]::Zero }
         Assert-True ($edit.Current.Value -ceq 'Popup probe') 'Escape changed the editable value'
         Write-Output 'PASS Windows field popup: keyboard opening, native Select All, UIA Text selection, enabled Cut and Escape.'
+    } catch {
+        Write-Output $_.Exception.Message
+        $failures.Add($_.Exception.Message)
     } finally {
         Stop-Example
     }
@@ -326,20 +359,20 @@ if ($SpellingExecutable) {
         $y = [int]($area.Y + $area.Height / 2)
         [RunePopupSmoke]::Click($window, $x, $y, $true)
         $menu = Await-Result 'native en-US suggestion spelling' { [RunePopupSmoke]::MenuContaining($app.Id, 'spelling') }
-        [RunePopupSmoke]::Key($window, 0x1b)
+        [RunePopupSmoke]::Key((Popup-Window $menu), 0x1b)
         $null = Await-Result 'spelling menu dismissal' { [RunePopupSmoke]::MenuContaining($app.Id, 'spelling') -eq [IntPtr]::Zero }
         Assert-True ($edit.Current.Value -ceq 'speling') 'Escape changed the misspelled word'
         [RunePopupSmoke]::Click($window, $x, $y, $true)
         $menu = Await-Result 'reopened spelling suggestions' { [RunePopupSmoke]::MenuContaining($app.Id, 'spelling') }
-        [RunePopupSmoke]::Key($window, 0x24) # Home highlights the first spelling suggestion.
-        for ($i = 0; $i -lt [RunePopupSmoke]::GetMenuItemCount($menu); $i++) {
-            if ([RunePopupSmoke]::Label($menu, $i) -ceq 'spelling') { break }
-            [RunePopupSmoke]::Key($window, 0x28)
-        }
-        [RunePopupSmoke]::Key($window, 0x0d)
+        Activate-Row $menu 'spelling'
         $null = Await-Result 'corrected text via UI Automation' { $edit.Current.Value -ceq 'spelling' }
         Write-Output 'PASS Windows en-US spelling suggestion: Escape preserved speling, and choosing spelling corrected the field value.'
+    } catch {
+        Write-Output $_.Exception.Message
+        $failures.Add($_.Exception.Message)
     } finally {
         Stop-Example
     }
 }
+
+if ($failures.Count) { throw ($failures -join [Environment]::NewLine) }

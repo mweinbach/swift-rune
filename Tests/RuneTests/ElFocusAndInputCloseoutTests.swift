@@ -715,9 +715,20 @@ struct ElFocusAndInputCloseoutTests {
         #expect(rt.state.spellToggleLog == [false])
         #expect(rt.state.focusTargetAfter)
 
-        // Shift+F10 also opens FieldMenu; selecting "language-de-DE" updates SpellChecker languages & invokes onSpellcheckLanguages.
-        #expect(rt.keyDown(KeyEvent(key: .f(10), mods: Mods(shift: true)), at: 0.09))
-        _ = rt.frame(at: 0.095)
+        // The language submenu is disabled while spellchecking is off.
+        let menuKey = KeyEvent(key: .f(10), mods: Mods(shift: true))
+        #expect(rt.keyDown(menuKey, at: 0.085))
+        _ = rt.frame(at: 0.09)
+        #expect(rt.openPopupHeadless() != nil)
+        #expect(throws: PopupMenuError.disabled("language-de-DE")) { try rt.resolvePopup("language-de-DE") }
+        #expect(rt.state.languageLog.isEmpty)
+        try rt.resolvePopup("spellcheck")
+        _ = rt.frame(at: 0.093)
+        #expect(rt.state.spellToggleLog == [false, true])
+
+        // Reopening the menu now allows the language change and delivers the authored callback.
+        #expect(rt.keyDown(menuKey, at: 0.095))
+        _ = rt.frame(at: 0.097)
         #expect(rt.openPopupHeadless() != nil)
         try rt.resolvePopup("language-de-DE")
         _ = rt.frame(at: 0.10)

@@ -137,7 +137,7 @@ public struct OraclePrimitive: Codable, Sendable, Equatable {
             return SIMD4<Float>(min(1, c[0] / a), min(1, c[1] / a), min(1, c[2] / a), a)
         }
         let kind = params.count > 1 ? params[1] : 0
-        let rectVec = SIMD4<Float>(rect[0], rect[1], rect[2], rect[3])
+        var rectVec = SIMD4<Float>(rect[0], rect[1], rect[2], rect[3])
         var radiiOut = SIMD4<Float>(radii[0], radii[1], radii[2], radii[3])
         var fillOut = unpremul(fill)
         var borderOut = unpremul(border)
@@ -154,9 +154,10 @@ public struct OraclePrimitive: Codable, Sendable, Equatable {
 
         switch Int(kind.rounded()) {
         case 1:
-            // OraclePrimitive dropShadow: rect = shadow bbox, params[2] = sigma, uv = cutout hole
+            // Oracle stores the caster. The reference primitive stores a padded drawing quad and the caster separately.
             borderOut = rectVec
             paramsOut = SIMD4<Float>(params[2] * 2.0, 1.0, 0.0, 0.0)
+            rectVec = Primitive.dropShadow(rect: borderOut, color: fillOut, blur: paramsOut.x, clip: clipRect).rect
             uvOut = .zero
         case 2:
             // OraclePrimitive glyph: uv = [u0, v0, uw, vh] in texels, params[0] = turn, params[3] = gamma

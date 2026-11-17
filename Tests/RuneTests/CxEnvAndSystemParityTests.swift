@@ -717,6 +717,8 @@ struct CxEnvAndSystemParityTests {
         for phase in FramePhase.allCases {
             #expect(framePhases[phase.rawValue] > 0.0)
         }
+        _ = rt.renderFrame(at: 0.1)
+        #expect(takeFramePhases()[FramePhase.paint.rawValue] > 0.0)
     }
 
     @Test func appSharedMemoLayoutWithCompositorAndTextStyleParity() {

@@ -847,6 +847,7 @@ struct PixelSnapParityTests {
     func nativeGlyphGlideReadback() throws {
         let gpu = try OffscreenGPURenderer()
         let rt = makeGlideRuntime(spring: 0.3, title: "Quiet harbor glides offshore")
+        rt.fontSmoothing = .windfoil // Unit coverage gamma matches the upstream text_glide.rs atlas measurement.
         _ = rt.renderFrame(at: 0)
         rt.update(at: 0) { card, _ in card.at = SIMD2(2, 2) }
         var minOffset = SIMD2<Float>(repeating: .greatestFiniteMagnitude)

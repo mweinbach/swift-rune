@@ -64,6 +64,8 @@ public final class LayerHost<State> {
     #if canImport(Metal) && canImport(QuartzCore)
     public let layer: CAMetalLayer?
     private let renderer: MetalRenderer?
+    /// The error from the most recent failed Metal submission. Cleared by a successful submission.
+    public private(set) var lastPresentationError: Error?
     #endif
 
     private var compositorHook: ((Runtime<State>, Double) -> RefScene?)?
@@ -197,11 +199,17 @@ public final class LayerHost<State> {
             #if canImport(Metal) && canImport(QuartzCore)
             if let layer {
                 guard let renderer, let drawable = layer.nextDrawable() else { return false }
+                let result: Result<Void, Error>
                 if let customScene {
-                    renderer.render(scene: customScene, to: drawable)
+                    result = renderer.render(scene: customScene, to: drawable)
                 } else {
-                    renderer.draw(frame: renderer.frame(runtime, at: now), to: drawable)
+                    result = renderer.draw(frame: renderer.frame(runtime, at: now), to: drawable)
                 }
+                if case let .failure(error) = result {
+                    lastPresentationError = error
+                    return false
+                }
+                lastPresentationError = nil
                 return true
             }
             #endif

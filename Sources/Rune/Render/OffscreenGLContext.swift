@@ -1,4 +1,5 @@
 #if canImport(CRuneOffscreenGL)
+import CRuneGL
 import CRuneOffscreenGL
 import RuneRef
 
@@ -29,14 +30,33 @@ public final class OffscreenGLContext {
         }
     }
 
-    /// Draw into the bound color attachment, then read its pixels in Rune's top-down row order.
-    public func withFramebuffer(width: Int, height: Int, _ draw: () throws -> Void) throws -> Frame {
+    @discardableResult
+    func bindFramebuffer(width: Int, height: Int) throws -> OpaquePointer {
         guard width > 0, width <= 16384, height > 0, height <= 16384 else {
             throw RefSceneError.invalidDimensions(width: width, height: height)
         }
         guard let handle, rune_offscreen_gl_bind(handle, Int32(width), Int32(height)) != 0 else {
             throw OffscreenRenderError.capture("Cannot bind offscreen GL framebuffer of size \(width)x\(height)")
         }
+        return handle
+    }
+
+    /// Flushes the preceding draw, timestamps submission, then waits for that GPU work to finish.
+    func finishSubmission(_ renderer: OpaquePointer?) throws -> ContinuousClock.Instant {
+        guard let renderer, let fence = rune_gl_submit_fence(renderer) else {
+            throw OffscreenRenderError.capture("Cannot submit an offscreen GL fence")
+        }
+        let submitted = ContinuousClock.now
+        defer { rune_gl_surface_fence_free(renderer, fence) }
+        guard rune_gl_surface_wait(renderer, fence, 1) == 1 else {
+            throw OffscreenRenderError.capture("The offscreen GL frame did not complete")
+        }
+        return submitted
+    }
+
+    /// Draw into the bound color attachment, then read its pixels in Rune's top-down row order.
+    public func withFramebuffer(width: Int, height: Int, _ draw: () throws -> Void) throws -> Frame {
+        let handle = try bindFramebuffer(width: width, height: height)
         try draw()
         let stride = width * 4
         let rgba = try [UInt8](unsafeUninitializedCapacity: stride * height) { pixels, count in

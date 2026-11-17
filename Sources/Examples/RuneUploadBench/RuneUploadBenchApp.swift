@@ -19,6 +19,8 @@ public enum RuneUploadBenchApp {
     public struct SceneResult: Sendable, Equatable {
         public let scene: String
         public let cpuUs: Double
+        /// Instruction metrics are zero when the host does not supply retired-instruction counters.
+        public let hasInstructionCounts: Bool
         public let kinstr: Double
         public let frameUs: Double
         public let encodeKinstr: Double
@@ -43,7 +45,7 @@ public enum RuneUploadBenchApp {
         }
     }
 
-    private static func kinstr() -> Double {
+    private static func kinstr() -> Double? {
         #if os(macOS)
         var info = rusage_info_v4()
         let rc = withUnsafeMutablePointer(to: &info) { ptr in
@@ -51,9 +53,9 @@ public enum RuneUploadBenchApp {
                 proc_pid_rusage(getpid(), RUSAGE_INFO_V4, rebound)
             }
         }
-        return rc == 0 ? Double(info.ri_instructions) / 1e3 : 0
+        return rc == 0 ? Double(info.ri_instructions) / 1e3 : nil
         #else
-        return 0
+        return nil
         #endif
     }
 
@@ -72,6 +74,12 @@ public enum RuneUploadBenchApp {
         warmup: Int = defaultWarmup,
         count: Int = defaultCount
     ) throws -> (results: [SceneResult], output: String) {
+        guard frames >= 0, warmup >= 0, frames <= Int.max - warmup,
+              count >= 0, count <= min(Int(Int32.max), Int.max / MemoryLayout<RenderInstance>.stride) else {
+            throw NSError(domain: "RuneUploadBench", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid frame, warmup, or instance count"
+            ])
+        }
         #if canImport(Metal)
         let renderer = try MetalRenderer()
         let desc = MTLTextureDescriptor.texture2DDescriptor(
@@ -84,7 +92,13 @@ public enum RuneUploadBenchApp {
         guard let targetTex = renderer.device.makeTexture(descriptor: desc) else {
             throw NSError(domain: "RuneUploadBench", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate offscreen Metal texture"])
         }
+        #elseif os(Linux) || os(Windows)
+        let renderer = try OffscreenGPURenderer()
+        #else
+        return ([], "upload_bench: No offscreen GPU backend on this platform")
+        #endif
 
+        #if canImport(Metal) || os(Linux) || os(Windows)
         var results: [SceneResult] = []
         var lines: [String] = []
         for (name, scroll) in [("steady", false), ("scroll", true)] {
@@ -98,45 +112,64 @@ public enum RuneUploadBenchApp {
                 let instances = buildScene(frame: i, scroll: scroll, count: count)
                 let rf = RenderFrame(width: size.width, height: size.height, instances: instances)
                 let t0 = ContinuousClock.now
+                #if canImport(Metal)
                 let k0 = kinstr()
-                guard let cb = renderer.commandQueue.makeCommandBuffer() else { continue }
-                renderer.drawRange(frame: rf, into: targetTex, commandBuffer: cb)
+                guard let cb = renderer.commandQueue.makeCommandBuffer() else {
+                    throw NSError(domain: "RuneUploadBench", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "Cannot create an offscreen Metal command buffer"
+                    ])
+                }
+                try renderer.drawRange(frame: rf, into: targetTex, commandBuffer: cb).get()
                 let k1 = kinstr()
                 cb.commit()
                 let k2 = kinstr()
-                let recordedUs = us(t0.duration(to: .now))
-                let recordedK = k2 - k0
+                let submitted = ContinuousClock.now
                 cb.waitUntilCompleted()
+                if let error = cb.error { throw error }
+                #else
+                let submitted = try renderer.submitOffscreen(rf)
+                #endif
                 if i >= warmup {
-                    cpu.append(recordedUs)
-                    instructions.append(recordedK)
+                    cpu.append(us(t0.duration(to: submitted)))
                     frameTimes.append(us(t0.duration(to: .now)))
-                    encodePhases.append(k1 - k0)
-                    submitPhases.append(k2 - k1)
+                    #if canImport(Metal)
+                    if let k0, let k1, let k2 {
+                        instructions.append(k2 - k0)
+                        encodePhases.append(k1 - k0)
+                        submitPhases.append(k2 - k1)
+                    }
+                    #endif
                 }
             }
 
             let res = SceneResult(
                 scene: name,
                 cpuUs: median(cpu),
+                hasInstructionCounts: !instructions.isEmpty,
                 kinstr: median(instructions),
                 frameUs: median(frameTimes),
                 encodeKinstr: median(encodePhases),
                 submitKinstr: median(submitPhases)
             )
             results.append(res)
-            lines.append(String(
-                format: "scene=%@ cpu_us=%.1f kinstr=%.1f frame_us=%.1f",
-                res.scene, res.cpuUs, res.kinstr, res.frameUs
-            ))
-            lines.append(String(
-                format: "  phases kinstr: encode=%.1f submit=%.1f",
-                res.encodeKinstr, res.submitKinstr
-            ))
+            if res.hasInstructionCounts {
+                lines.append(String(
+                    format: "scene=%@ cpu_us=%.1f kinstr=%.1f frame_us=%.1f",
+                    res.scene, res.cpuUs, res.kinstr, res.frameUs
+                ))
+                lines.append(String(
+                    format: "  phases kinstr: encode=%.1f submit=%.1f",
+                    res.encodeKinstr, res.submitKinstr
+                ))
+            } else {
+                lines.append(String(
+                    format: "scene=%@ cpu_us=%.1f kinstr=unavailable frame_us=%.1f",
+                    res.scene, res.cpuUs, res.frameUs
+                ))
+                lines.append("  instances=\(count) instance_bytes=\(count * MemoryLayout<RenderInstance>.stride)")
+            }
         }
         return (results, lines.joined(separator: "\n"))
-        #else
-        return ([], "upload_bench: Metal unavailable on this platform")
         #endif
     }
 

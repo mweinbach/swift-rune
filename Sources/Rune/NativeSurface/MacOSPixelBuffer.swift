@@ -215,11 +215,13 @@ internal final class RetainedPlaneToken: @unchecked Sendable {
 
 /// Zero-copy `CVMetalTextureCache` importer for `CoreVideoPixelBuffer` -> Metal textures (`macos::Importer`).
 public final class CVPixelBufferImporter: @unchecked Sendable {
+    private let device: MTLDevice
     private let cache: CVMetalTextureCache
     private let lock = NSLock()
     private var _livePlanes: Int = 0
 
     public init(device: MTLDevice) throws {
+        self.device = device
         var cacheOut: CVMetalTextureCache?
         let status = CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &cacheOut)
         guard status == kCVReturnSuccess, let cacheOut else {
@@ -277,6 +279,7 @@ public final class CVPixelBufferImporter: @unchecked Sendable {
         height: Int,
         planeIndex: Int
     ) throws -> (cvTex: CVMetalTexture, mtlTex: MTLTexture) {
+        try MetalTextureLimits.validate(width: width, height: height, resource: "CoreVideo plane", on: device)
         var cvTexOut: CVMetalTexture?
         let status = CVMetalTextureCacheCreateTextureFromImage(
             kCFAllocatorDefault,

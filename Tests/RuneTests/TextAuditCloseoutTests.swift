@@ -76,6 +76,16 @@ struct TextAuditCloseoutTests {
         #expect(codeEdit.text.dropFirst(back) == "format.ts")
         #expect(codeEdit.prevWord(back) == "src/".utf8.count)
 
+        let prefix = "👩🏽‍💻\r\n"
+        for token in ["l’heure", "3.14", "A\u{308}.b", "1,250"] {
+            let value = TextEdit(prefix + token + " / next")
+            let start = prefix.utf8.count
+            let end = start + token.utf8.count
+            #expect(value.prevWord(end) == start)
+            #expect(value.nextWord(0, platform: .mac) == end)
+            #expect(value.nextWord(start, platform: .linux) == end + 3)
+        }
+
         let persian = TextEdit("می\u{200C}شود next")
         let persianWordBytes = "می\u{200C}شود".utf8.count
         #expect(persian.nextWord(0, platform: .mac) == persianWordBytes)

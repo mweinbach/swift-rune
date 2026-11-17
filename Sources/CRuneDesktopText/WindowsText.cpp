@@ -10,7 +10,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <cwchar>
 #include <cwctype>
 #include <memory>
 #include <mutex>
@@ -38,6 +37,33 @@ std::unique_ptr<WCHAR[]> toWide(const char *utf8, int length, int &units) {
         return nullptr;
     wide[units] = 0;
     return wide;
+}
+
+// Decode one CSS family in place. Commas inside a quoted or escaped name
+// belong to that family, including when the name is absent from the system.
+WCHAR *nextFamily(WCHAR *&cursor) {
+    while (std::iswspace(*cursor)) ++cursor;
+    WCHAR *name = cursor, *out = name;
+    WCHAR quote = 0;
+    while (*cursor) {
+        WCHAR c = *cursor++;
+        if (c == L'\\' && *cursor) {
+            *out++ = *cursor++;
+        } else if (quote) {
+            if (c == quote) quote = 0;
+            else *out++ = c;
+        } else if (out == name && (c == L'\'' || c == L'"')) {
+            quote = c;
+        } else if (c == L',') {
+            break;
+        } else {
+            *out++ = c;
+        }
+    }
+    while (out > name && std::iswspace(out[-1])) --out;
+    *out = 0;
+    while (std::iswspace(*name)) ++name;
+    return name;
 }
 
 // Keep the process-private collection separate from the system collection.
@@ -271,8 +297,8 @@ public:
     }
 };
 struct UnitEdges {
-    float leading = 0, trailing = 0;
-    UINT32 level = UINT32_MAX;
+    float leading, trailing;
+    UINT32 level;
 };
 
 // DirectWrite exposes the visual origin and embedding level of each text range
@@ -290,32 +316,39 @@ std::unique_ptr<UnitEdges[]> buildHitCache(IDWriteTextLayout *layout, UINT32 len
     if (!clusters || !ranges || !edges ||
         FAILED(layout->GetClusterMetrics(clusters.get(), clusterCount, &clusterCount)) ||
         FAILED(layout->HitTestTextRange(0, length, 0, 0, ranges.get(), rangeCount, &rangeCount))) return nullptr;
-    // Store advances temporarily in trailing until the ranges provide positions.
-    UINT32 unit = 0;
-    for (UINT32 i = 0; i < clusterCount; ++i) {
-        const auto &c = clusters[i];
-        if (!c.length || c.length > length - unit) return nullptr;
-        for (UINT32 j = 0; j < c.length; ++j)
-            edges[unit++].trailing = c.width / c.length;
-    }
-    if (unit != length) return nullptr;
+    std::sort(ranges.get(), ranges.get() + rangeCount, [](const auto &a, const auto &b) {
+        return a.textPosition < b.textPosition;
+    });
+    UINT32 unit = 0, cluster = 0;
     for (UINT32 i = 0; i < rangeCount; ++i) {
         const auto &range = ranges[i];
-        if (range.textPosition > length || range.length > length - range.textPosition) return nullptr;
-        bool rtl = (range.bidiLevel & 1) != 0;
-        double cursor = rtl ? double(range.left) + range.width : range.left;
-        for (UINT32 j = 0; j < range.length; ++j) {
-            auto &cell = edges[range.textPosition + j];
-            if (cell.level != UINT32_MAX) return nullptr;
-            float advance = cell.trailing;
-            cell.leading = float(cursor);
-            cursor += rtl ? -advance : advance;
-            cell.trailing = float(cursor);
-            cell.level = range.bidiLevel;
+        if (range.textPosition != unit || range.length > length - unit) return nullptr;
+        const UINT32 end = unit + range.length;
+        const bool rtl = (range.bidiLevel & 1) != 0;
+        const float origin = rtl ? range.left + range.width : range.left;
+        // DirectWrite sums cluster advances in FLOAT relative to the start of
+        // each run, then adds or subtracts that offset from its visual origin.
+        float pen = 0;
+        while (unit < end) {
+            if (cluster == clusterCount) return nullptr;
+            const auto &c = clusters[cluster++];
+            if (!c.length || c.length > end - unit) return nullptr;
+            const float startX = rtl ? origin - pen : origin + pen;
+            pen += c.width;
+            const float endX = rtl ? origin - pen : origin + pen;
+            float previous = startX;
+            for (UINT32 j = 1; j <= c.length; ++j) {
+                float next = endX;
+                if (j < c.length) {
+                    const float part = float(j) / c.length;
+                    next = rtl ? endX + c.width * (1 - part) : startX + c.width * part;
+                }
+                edges[unit++] = {previous, next, range.bidiLevel};
+                previous = next;
+            }
         }
     }
-    for (UINT32 i = 0; i < length; ++i)
-        if (edges[i].level == UINT32_MAX) return nullptr;
+    if (unit != length || cluster != clusterCount) return nullptr;
     return edges;
 }
 } // namespace
@@ -425,17 +458,9 @@ RuneDesktopLine *rune_desktop_line_create(const char *utf8, int32_t length, cons
         requested = toWide(family, -1, familyUnits);
         ComPtr<IDWriteFontCollection> fonts;
         textFactory()->GetSystemFontCollection(fonts.GetAddressOf());
-        for (WCHAR *name = requested.get(); name && *name;) {
-            WCHAR *next = std::wcschr(name, L',');
-            if (next) *next++ = 0;
-            while (std::iswspace(*name)) ++name;
-            WCHAR *end = name + std::wcslen(name);
-            while (end > name && std::iswspace(end[-1])) --end;
-            if (end-name >= 2 && (*name == L'\'' || *name == L'"') && end[-1] == *name) {
-                ++name;
-                --end;
-            }
-            *end = 0;
+        for (WCHAR *cursor = requested.get(); cursor && *cursor;) {
+            WCHAR *name = nextFamily(cursor);
+            if (!*name) continue;
             appCollection = appFonts().find(name);
             UINT32 index = 0;
             BOOL exists = FALSE;
@@ -443,7 +468,6 @@ RuneDesktopLine *rune_desktop_line_create(const char *utf8, int32_t length, cons
                 face = name;
                 break;
             }
-            name = next;
         }
     }
     WCHAR locale[LOCALE_NAME_MAX_LENGTH] = {};

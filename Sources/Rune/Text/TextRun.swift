@@ -338,6 +338,7 @@ internal final class TextRunCellLayout: @unchecked Sendable {
                               colors: [:], sourceByteOffset: byteOffset), at: 0)
             var slice = shaped
             slice.lineGlyphRanges = [0..<glyphsOut.count]
+            slice.lineBaselinesPx = [desktop.baseline * s]
             slice.desktopRestingText = resting
             return slice
         }
@@ -367,8 +368,14 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         if let desktop, let cell = desktop.cells[byteOffset] {
             // This API already returns world-space points. Fold its absolute origin into the
             // pen here, so callers can draw the resulting quads without another translation.
-            return desktop.glyphs(for: cell, originX: originPt.x, baselineY: originPt.y + desktop.baseline,
-                color: nil, atlas: textSystem.glyphAtlas, cache: true, restingXPx: 0)
+            var glyphs = desktop.glyphs(for: cell, originX: originPt.x, baselineY: 0,
+                color: nil, atlas: textSystem.glyphAtlas, cache: true, restingXPx: 0, isolateCell: true)
+            let baselinePx = PixelSnap.roundHalfUp((originPt.y + desktop.baseline) * pixelScale)
+            for index in glyphs.indices {
+                let row = PixelSnap.roundHalfUp(glyphs[index].rect.y * pixelScale)
+                glyphs[index].rect.y = (baselinePx + row) / pixelScale
+            }
+            return glyphs
         }
         #endif
         let startXPt = originPt.x + xsPx[gi] / pixelScale

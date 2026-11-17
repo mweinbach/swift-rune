@@ -130,6 +130,7 @@ internal struct GlyphPen {
     let smoothing: FontSmoothing
     let isColor: Bool
 }
+#endif
 
 extension TextBoxGeometry {
     /// Snap the resting pen as CoreGraphics or Skia does, then apply movement in quarters.
@@ -148,6 +149,7 @@ extension TextBoxGeometry {
         return (rest.pixel + whole, UInt8(delta - whole * phases))
     }
 
+    #if canImport(CoreText) && canImport(CoreGraphics)
     /// Glyph `g` (shaped at `shapeScale`) of a text laid out from `originXPx` (device px, possibly
     /// fractional). The quad starts on a whole pixel and its mask carries the phase selected by
     /// the rasterizer. Colour glyphs always round to a whole pixel.
@@ -181,8 +183,8 @@ extension TextBoxGeometry {
         out.rect.w = Float(entry.pixelSize.y) / s
         return (fx + entry.bearingPx.x, out)
     }
+    #endif
 }
-#endif
 
 extension TextBoxGeometry {
     /// Places a shaped quad on the same absolute baseline and pen for the CPU and Metal paint paths.

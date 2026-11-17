@@ -73,12 +73,14 @@ public final class MetalRenderer {
         case metalUnavailable
         case shaderCompileFailed(String)
         case missingCachedLayer(UInt64)
+        case textureAllocationFailed(resource: String, width: Int, height: Int)
 
         public var description: String {
             switch self {
             case .metalUnavailable: return "No Metal device is available on this machine"
             case .shaderCompileFailed(let msg): return "Metal shader compilation failed: \(msg)"
             case .missingCachedLayer(let node): return "Rune layer \(node) is unavailable. Rebuild the frame on its drawing renderer."
+            case let .textureAllocationFailed(resource, width, height): return "Metal could not allocate the \(width)×\(height) \(resource)"
             }
         }
     }
@@ -199,7 +201,7 @@ public final class MetalRenderer {
     /// Renders `scene` on the Metal GPU into an offscreen texture and reads back an RGBA8 `Frame`
     /// (for headless `--snap` PNG output and GPU-vs-`RuneRef` equivalence tests!).
     public func renderOffscreen(_ scene: RefScene, surfaces: [SurfaceDraw] = []) throws -> Frame {
-        try scene.validate()
+        try validate(scene)
 
         let w = scene.width
         let h = scene.height
@@ -212,14 +214,15 @@ public final class MetalRenderer {
         )
         texDesc.usage = [.renderTarget, .shaderRead]
         texDesc.storageMode = .shared
-        guard let targetTex = device.makeTexture(descriptor: texDesc),
-              let cmdBuf = commandQueue.makeCommandBuffer() else {
-            throw RendererError.metalUnavailable
+        guard let targetTex = device.makeTexture(descriptor: texDesc) else {
+            throw RendererError.textureAllocationFailed(resource: "render target", width: w, height: h)
         }
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { throw RendererError.metalUnavailable }
 
-        encodeMainPass(scene: scene, surfaces: surfaces, into: targetTex, commandBuffer: cmdBuf)
+        try encodeMainPass(scene: scene, surfaces: surfaces, into: targetTex, commandBuffer: cmdBuf)
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
+        if let error = cmdBuf.error { throw error }
 
         // Read back BGRA8 bytes and swizzle to RGBA8
         var bgra = Array<UInt8>(repeating: 0, count: w * h * 4)
@@ -262,20 +265,30 @@ public final class MetalRenderer {
     }
 
     /// Renders `scene` directly into a `CAMetalDrawable` for 60/120Hz native window presentation.
-    public func render(scene: RefScene, surfaces: [SurfaceDraw] = [], to drawable: CAMetalDrawable) {
-        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
-        encodeMainPass(scene: scene, surfaces: surfaces, into: drawable.texture, commandBuffer: cmdBuf)
-        cmdBuf.present(drawable)
-        cmdBuf.commit()
+    @discardableResult
+    public func render(scene: RefScene, surfaces: [SurfaceDraw] = [], to drawable: CAMetalDrawable) -> Result<Void, Error> {
+        Result {
+            guard let cmdBuf = commandQueue.makeCommandBuffer() else { throw RendererError.metalUnavailable }
+            try encode(scene: scene, surfaces: surfaces, into: drawable.texture, commandBuffer: cmdBuf)
+            cmdBuf.present(drawable)
+            cmdBuf.commit()
+        }
     }
 
     /// Encodes `scene` into an arbitrary caller-owned `MTLTexture` using `commandBuffer` without committing.
     public func encode(scene: RefScene, surfaces: [SurfaceDraw] = [], into target: MTLTexture, commandBuffer: MTLCommandBuffer) throws {
-        try scene.validate()
-        encodeMainPass(scene: scene, surfaces: surfaces, into: target, commandBuffer: commandBuffer)
+        try validate(scene)
+        try encodeMainPass(scene: scene, surfaces: surfaces, into: target, commandBuffer: commandBuffer)
     }
 
-    private func uploadAtlases(glyphs: R8Atlas, images: RGBA8Atlas, srgbImages: Bool) {
+    private func validate(_ scene: RefScene) throws {
+        try MetalTextureLimits.validate(width: scene.width, height: scene.height, resource: "render target", on: device)
+        try MetalTextureLimits.validate(width: scene.glyphs.width, height: scene.glyphs.height, resource: "glyph atlas", on: device)
+        try MetalTextureLimits.validate(width: scene.images.width, height: scene.images.height, resource: "image atlas", on: device)
+        try scene.validate()
+    }
+
+    private func uploadAtlases(glyphs: R8Atlas, images: RGBA8Atlas, srgbImages: Bool) throws {
         if glyphTexture == nil || glyphTexSize.x != glyphs.width || glyphTexSize.y != glyphs.height {
             let desc = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .r8Unorm,
@@ -284,7 +297,10 @@ public final class MetalRenderer {
                 mipmapped: false
             )
             desc.usage = [.shaderRead]
-            glyphTexture = device.makeTexture(descriptor: desc)
+            guard let texture = device.makeTexture(descriptor: desc) else {
+                throw RendererError.textureAllocationFailed(resource: "glyph atlas", width: glyphs.width, height: glyphs.height)
+            }
+            glyphTexture = texture
             glyphTexSize = SIMD2<Int>(glyphs.width, glyphs.height)
         }
         glyphs.texels.withUnsafeBytes { raw in
@@ -307,7 +323,10 @@ public final class MetalRenderer {
                 mipmapped: false
             )
             desc.usage = [.shaderRead]
-            imageTexture = device.makeTexture(descriptor: desc)
+            guard let texture = device.makeTexture(descriptor: desc) else {
+                throw RendererError.textureAllocationFailed(resource: "image atlas", width: images.width, height: images.height)
+            }
+            imageTexture = texture
             imageTexSize = SIMD2<Int>(images.width, images.height)
         }
         images.texels.withUnsafeBytes { raw in
@@ -322,16 +341,19 @@ public final class MetalRenderer {
         }
     }
 
-    private func makeFloatTexture(width: Int, height: Int) -> MTLTexture? {
+    private func makeFloatTexture(width: Int, height: Int, resource: String) throws -> MTLTexture {
         let desc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba16Float,
-            width: max(1, width),
-            height: max(1, height),
+            width: width,
+            height: height,
             mipmapped: false
         )
         desc.usage = [.renderTarget, .shaderRead]
         desc.storageMode = .private
-        return device.makeTexture(descriptor: desc)
+        guard let texture = device.makeTexture(descriptor: desc) else {
+            throw RendererError.textureAllocationFailed(resource: resource, width: width, height: height)
+        }
+        return texture
     }
 
     private func runBoxBlurPass(
@@ -370,7 +392,7 @@ public final class MetalRenderer {
         rectBounds: SIMD4<Float>,
         viewport: SIMD2<Float>,
         commandBuffer: MTLCommandBuffer
-    ) -> MTLTexture {
+    ) throws -> MTLTexture {
         let r = min(24, max(1, Int(radius.rounded())))
         let minX = Float(max(0, Int(floorf(rectBounds.x)) - r))
         let minY = Float(max(0, Int(floorf(rectBounds.y)) - r))
@@ -378,10 +400,8 @@ public final class MetalRenderer {
         let maxY = Float(min(height - 1, Int(ceilf(rectBounds.y + rectBounds.w)) + r))
         if minX > maxX || minY > maxY { return inputTex }
 
-        guard let scratch = makeFloatTexture(width: width, height: height),
-              let ping = makeFloatTexture(width: width, height: height) else {
-            return inputTex
-        }
+        let scratch = try makeFloatTexture(width: width, height: height, resource: "blur intermediate")
+        let ping = try makeFloatTexture(width: width, height: height, resource: "blur result")
         let b = SIMD4<Float>(minX, minY, maxX, maxY)
         // Copy full frame first with radius 0 into `ping`, then run 2 separable H+V box blur iterations
         let fullBounds = SIMD4<Float>(0, 0, Float(width - 1), Float(height - 1))
@@ -393,12 +413,13 @@ public final class MetalRenderer {
         return ping
     }
 
-    internal func renderScene(_ scene: RefScene, surfaces: [SurfaceDraw] = [], into target: MTLTexture, commandBuffer: MTLCommandBuffer) {
-        encodeMainPass(scene: scene, surfaces: surfaces, into: target, commandBuffer: commandBuffer)
+    @discardableResult
+    internal func renderScene(_ scene: RefScene, surfaces: [SurfaceDraw] = [], into target: MTLTexture, commandBuffer: MTLCommandBuffer) -> Result<Void, Error> {
+        Result { try encode(scene: scene, surfaces: surfaces, into: target, commandBuffer: commandBuffer) }
     }
 
-    private func encodeMainPass(scene: RefScene, surfaces: [SurfaceDraw] = [], into target: MTLTexture, commandBuffer: MTLCommandBuffer) {
-        uploadAtlases(glyphs: scene.glyphs, images: scene.images, srgbImages: !scene.srgbBlend)
+    private func encodeMainPass(scene: RefScene, surfaces: [SurfaceDraw] = [], into target: MTLTexture, commandBuffer: MTLCommandBuffer) throws {
+        try uploadAtlases(glyphs: scene.glyphs, images: scene.images, srgbImages: !scene.srgbBlend)
 
         let w = scene.width
         let h = scene.height
@@ -418,7 +439,7 @@ public final class MetalRenderer {
             }
             if let sr = surfaceRenderer {
                 sr.srgbBlend = scene.srgbBlend
-                sr.prepare(draws: surfaces, viewport: (UInt32(max(1, w)), UInt32(max(1, h))))
+                try sr.prepare(draws: surfaces, viewport: (UInt32(w), UInt32(h))).get()
                 if !sr.isEmpty {
                     activeSurfRenderer = sr
                 }
@@ -496,17 +517,16 @@ public final class MetalRenderer {
             switch prim.kind {
             case .layerBegin:
                 flush(&stack[stack.count - 1])
-                if let layerTex = makeFloatTexture(width: w, height: h) {
-                    stack.append(
-                        TargetLevel(
-                            texture: layerTex,
-                            clearColor: MTLClearColorMake(0, 0, 0, 0),
-                            cleared: false,
-                            pending: [],
-                            layerPrim: prim
-                        )
+                let layerTex = try makeFloatTexture(width: w, height: h, resource: "layer")
+                stack.append(
+                    TargetLevel(
+                        texture: layerTex,
+                        clearColor: MTLClearColorMake(0, 0, 0, 0),
+                        cleared: false,
+                        pending: [],
+                        layerPrim: prim
                     )
-                }
+                )
 
             case .layerEnd:
                 guard stack.count > 1 else { continue }
@@ -516,7 +536,7 @@ public final class MetalRenderer {
                 var srcTex = finished.texture
                 let blurRad = max(0, lp.params.w)
                 if blurRad >= 0.5 {
-                    srcTex = blurLayerTexture(srcTex, width: w, height: h, radius: blurRad, rectBounds: lp.rect, viewport: viewport, commandBuffer: commandBuffer)
+                    srcTex = try blurLayerTexture(srcTex, width: w, height: h, radius: blurRad, rectBounds: lp.rect, viewport: viewport, commandBuffer: commandBuffer)
                 }
 
                 // Ensure destination target is cleared before compositing
@@ -558,10 +578,10 @@ public final class MetalRenderer {
                 flush(&stack[stack.count - 1])
                 let dstTex = stack[stack.count - 1].texture
                 let blurRad = max(1.0, prim.params.x)
-                guard let snapTex = makeFloatTexture(width: w, height: h) else { continue }
+                let snapTex = try makeFloatTexture(width: w, height: h, resource: "backdrop")
                 let fullBounds = SIMD4<Float>(0, 0, Float(w - 1), Float(h - 1))
                 runBoxBlurPass(source: dstTex, dest: snapTex, bounds: fullBounds, dirX: 1, dirY: 0, radius: 0, viewport: viewport, commandBuffer: commandBuffer)
-                let blurredTex = blurLayerTexture(snapTex, width: w, height: h, radius: blurRad, rectBounds: prim.rect, viewport: viewport, commandBuffer: commandBuffer)
+                let blurredTex = try blurLayerTexture(snapTex, width: w, height: h, radius: blurRad, rectBounds: prim.rect, viewport: viewport, commandBuffer: commandBuffer)
 
                 let bPipe: MTLRenderPipelineState
                 switch dstTex.pixelFormat {

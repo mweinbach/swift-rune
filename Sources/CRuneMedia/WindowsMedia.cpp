@@ -109,14 +109,10 @@ HRESULT prepareReader(RuneMedia &m, bool audioOnly) {
     if (!video)
         return selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_AUDIO_STREAM, MFMediaType_Audio, MFAudioFormat_PCM);
 
-    UINT32 numerator = 0, denominator = 0, rotation = 0;
+    UINT32 numerator = 0, denominator = 0;
     if (SUCCEEDED(MFGetAttributeRatio(video.Get(), MF_MT_FRAME_RATE, &numerator, &denominator))
         && numerator && denominator)
         m.info.frame_duration = static_cast<double>(denominator) / numerator;
-    // MF describes the counterclockwise rotation already present in the stored image.
-    // Correcting it requires the same number of degrees clockwise.
-    if (SUCCEEDED(video->GetUINT32(MF_MT_VIDEO_ROTATION, &rotation)) && rotation < 360 && rotation % 90 == 0)
-        m.info.rotation_clockwise = static_cast<int>(rotation);
     hr = m.reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
     if (SUCCEEDED(hr)) hr = m.reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
     if (SUCCEEDED(hr)) hr = selectFormat(m.reader.Get(), MF_SOURCE_READER_FIRST_VIDEO_STREAM,
@@ -126,6 +122,10 @@ HRESULT prepareReader(RuneMedia &m, bool audioOnly) {
     hr = m.reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &decoded);
     if (SUCCEEDED(hr)) hr = MFGetAttributeSize(decoded.Get(), MF_MT_FRAME_SIZE, &m.info.width, &m.info.height);
     if (FAILED(hr)) return hr;
+    // The video processor can rotate the pixels while converting them to RGB32.
+    // Apply only the correction that still belongs to its negotiated output.
+    const UINT32 rotation = MFGetAttributeUINT32(decoded.Get(), MF_MT_VIDEO_ROTATION, 0);
+    if (rotation < 360 && rotation % 90 == 0) m.info.rotation_clockwise = static_cast<int>(rotation);
     if (!m.info.width || !m.info.height || m.info.width > 16384 || m.info.height > 16384) return MF_E_INVALIDMEDIATYPE;
     UINT32 rawStride = 0;
     if (SUCCEEDED(decoded->GetUINT32(MF_MT_DEFAULT_STRIDE, &rawStride)))

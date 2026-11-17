@@ -1,7 +1,5 @@
 #if os(Linux) || os(Windows)
-#if os(Linux)
 import CRuneDesktopText
-#endif
 import Testing
 @testable import Rune
 
@@ -42,6 +40,37 @@ struct DesktopTextRenderingTests {
         #expect(text.hitTestUTF8Offset(in: shaped, localX: end.x, localY: 0, pixelScale: 2) == string.utf8.count)
         #expect(shaped.glyphs.contains { $0.utf8Offset > 1 })
     }
+
+    #if os(Windows)
+    @Test func longDirectWriteCellsFollowNativeAdvances() throws {
+        try #require(DefaultFonts.registerIfNeeded())
+        for (character, rtl) in [("A", false), ("א", true)] {
+            let string = String(repeating: character, count: 8_000)
+            let byteCount = Int32(string.utf8.count)
+            let em: Float = rtl ? 19.7 : 20
+            let line = try #require(rune_desktop_line_create(string, byteCount, "Inter", em, 400, 0, 0, 0))
+            defer { rune_desktop_line_destroy(line) }
+            let width = rune_desktop_line_metrics(line).advance
+            let stride = Int32(character.utf8.count)
+            var sum = 0.0
+            var start: Int32 = 0
+            while start < byteCount {
+                var left: Float = 0, advance: Float = 0
+                _ = rune_desktop_line_cell(line, start, start + stride, &left, &advance)
+                sum += Double(advance)
+                start += stride
+            }
+            #expect(abs(sum - Double(width)) < 0.02)
+            if rtl {
+                let prefix = String(repeating: character, count: 4_000)
+                let half = try #require(rune_desktop_line_create(prefix, byteCount / 2, "Inter", em, 400, 0, 0, 0))
+                defer { rune_desktop_line_destroy(half) }
+                let caret = rune_desktop_line_caret(line, byteCount / 2)
+                #expect(abs(caret - (width - rune_desktop_line_metrics(half).advance)) < 0.02)
+            }
+        }
+    }
+    #endif
 
     @Test func longLinesRetainLigatureAndCombiningMarkCaretPositions() {
         let text = TextSystem()

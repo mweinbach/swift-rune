@@ -755,7 +755,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "RuneGpuSprings",
-            dependencies: ["Rune", "RuneMotion"],
+            dependencies: [
+                "Rune", "RuneMotion",
+                .target(name: "CRuneGL", condition: .when(platforms: [.linux, .windows]))
+            ],
             path: "Sources/Examples/RuneGpuSprings"
         ),
         .executableTarget(

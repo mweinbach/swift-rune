@@ -29,6 +29,8 @@ int rune_gl_surface_upload(RuneGL *r, uint64_t key, uint64_t version, int width,
 /* Fence-based completion. A wait returns 1 for completion, 0 if polling a
  * pending fence, and -1 on an invalid/lost context. */
 void *rune_gl_surface_fence(RuneGL *r);
+/* Flush all preceding commands to the device before returning the fence. */
+void *rune_gl_submit_fence(RuneGL *r);
 int rune_gl_surface_wait(RuneGL *r, void *fence, int wait);
 void rune_gl_surface_fence_free(RuneGL *r, void *fence);
 int rune_gl_render_surfaces(RuneGL *r, int width, int height, const float *clear_rgba,

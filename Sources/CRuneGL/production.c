@@ -8,6 +8,7 @@ struct RuneGLProduction {
     const RuneGLAPI *gl;
     GLuint program, vao;
     GLint viewport, origin, srgb_blend, in_layer;
+    GLint spring_first, spring_time;
 };
 
 enum { frame_stride = 128, frame_slots = 8 };
@@ -39,6 +40,19 @@ RuneGLProduction *rune_production_create(const RuneGLAPI *gl, int es, const char
     }
     gl->Uniform1i(glyph, 0);
     gl->Uniform1i(image, 1);
+    p->spring_first = gl->GetUniformLocation(p->program, "uSpringFirst");
+    if (p->spring_first >= 0) {
+        p->spring_time = gl->GetUniformLocation(p->program, "uSpringTime");
+        GLint tracks = gl->GetUniformLocation(p->program, "uSpringTracks");
+        GLint ids = gl->GetUniformLocation(p->program, "uSpringIDs");
+        if (p->spring_time < 0 || tracks < 0 || ids < 0) {
+            if (error && capacity) snprintf(error, capacity, "Rune GL spring shader interface mismatch");
+            rune_production_destroy(p);
+            return NULL;
+        }
+        gl->Uniform1i(tracks, 2);
+        gl->Uniform1i(ids, 3);
+    }
     gl->GenVertexArrays(1, &p->vao);
     gl->BindVertexArray(p->vao);
     for (GLuint i = 0; i < frame_slots; ++i) {
@@ -57,7 +71,7 @@ void rune_production_destroy(RuneGLProduction *p) {
 
 void rune_production_batch(RuneGLProduction *p, GLuint buffer, int width, int height,
                            int origin_x, int origin_y, size_t first, size_t count,
-                           int srgb_blend, int in_layer) {
+                           int srgb_blend, int in_layer, const RuneGLFrameSprings *springs) {
     if (!count) return;
     const RuneGLAPI *gl = p->gl;
     gl->UseProgram(p->program);
@@ -75,6 +89,20 @@ void rune_production_batch(RuneGLProduction *p, GLuint buffer, int width, int he
     gl->Uniform2f(p->origin, (float)origin_x, (float)origin_y);
     gl->Uniform1i(p->srgb_blend, srgb_blend);
     gl->Uniform1i(p->in_layer, in_layer);
+    if (p->spring_first >= 0) {
+        int active = springs->tracks && springs->ids;
+        gl->Uniform1i(p->spring_first, active ? (GLint)first : -1);
+        if (active) {
+            gl->Uniform2f(p->spring_time, springs->seconds, springs->fraction);
+            gl->ActiveTexture(GL_TEXTURE0 + 2);
+            gl->BindSampler(2, 0);
+            gl->BindTexture(GL_TEXTURE_2D, springs->tracks);
+            gl->ActiveTexture(GL_TEXTURE0 + 3);
+            gl->BindSampler(3, 0);
+            gl->BindTexture(GL_TEXTURE_2D, springs->ids);
+            gl->ActiveTexture(GL_TEXTURE1); /* draw_batch leaves the image atlas active. */
+        }
+    }
     gl->DrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)count);
 }
 

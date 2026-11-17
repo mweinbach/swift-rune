@@ -2066,8 +2066,7 @@ public final class AtlasUploader {
     }
     private var glyphReaders: [AtlasReader] = []
     private var imageReaders: [AtlasReader] = []
-    private var imagePageSizes: [SIMD2<Int>] = []
-    private var imagePageRevisions: [UInt64] = []
+    private var imagePagesRevision: UInt64?
 
     /// Each runtime counts revisions locally. A new runtime may supply different pixels
     /// at the same revision while outstanding commands still use the previous textures.
@@ -2078,8 +2077,7 @@ public final class AtlasUploader {
         glyphTexture = nil
         imageTexture = nil
         imageTextures.removeAll()
-        imagePageSizes.removeAll()
-        imagePageRevisions.removeAll()
+        imagePagesRevision = nil
         glyphReaders.removeAll()
         imageReaders.removeAll()
         lastImageUploadRegion = nil
@@ -2275,103 +2273,70 @@ public final class AtlasUploader {
         fallback: RGBA8Atlas,
         revision: UInt64 = 1
     ) -> [MTLTexture] {
-        syncImagePages(device: device, pages: pages, fallback: fallback, revision: revision, patch: nil)
+        (try? requiredImagePages(device: device, pages: pages, fallback: fallback, revision: revision, patch: nil)) ?? []
     }
 
     private static func validImageAtlas(_ atlas: RGBA8Atlas, on device: MTLDevice) -> Bool {
-        MetalTextureLimits.contains(width: atlas.width, height: atlas.height, on: device)
-            && atlas.texels.count == atlas.width * atlas.height * 4
+        (try? MetalTextureLimits.validateImage(atlas, resource: "Image atlas", on: device)) != nil
     }
 
-    func syncImagePages(
+    func requiredImagePages(
         device: MTLDevice, pages: [RGBA8Atlas], fallback: RGBA8Atlas, revision: UInt64, patch: ImageAtlasPatch?
-    ) -> [MTLTexture] {
-        guard !pages.isEmpty else {
-            if let tex = syncImageAtlas(device: device, atlas: fallback, revision: revision, patch: patch) {
-                imageTextures = [tex]
-                return [tex]
-            }
-            return []
+    ) throws -> [MTLTexture] {
+        let atlases = pages.isEmpty ? [fallback] : pages
+        for (index, atlas) in atlases.enumerated() {
+            let resource = pages.isEmpty ? "Image atlas" : "Image atlas page \(index)"
+            try MetalTextureLimits.validateImage(atlas, resource: resource, on: device)
         }
-        // Reject a malformed set as a unit, before replacing a previously published page.
-        guard pages.allSatisfy({ Self.validImageAtlas($0, on: device) }) else { return [] }
-        let pagesInUse = imageReaders.contains(where: \.pending)
-        var out: [MTLTexture] = []
-        out.reserveCapacity(pages.count)
-        if imagePageSizes.count != pages.count {
-            imagePageSizes = Array(repeating: .zero, count: pages.count)
-            imagePageRevisions = Array(repeating: 0, count: pages.count)
-        }
-        var rebuiltTextures = imageTextures
-        if rebuiltTextures.count > pages.count {
-            rebuiltTextures.removeSubrange(pages.count..<rebuiltTextures.count)
-        }
-        for (idx, page) in pages.enumerated() {
-            if idx == 0 {
-                if let tex = syncImageAtlas(device: device, atlas: page, revision: revision) {
-                    if rebuiltTextures.isEmpty {
-                        rebuiltTextures.append(tex)
-                    } else {
-                        rebuiltTextures[0] = tex
-                    }
-                    imagePageSizes[0] = SIMD2<Int>(page.width, page.height)
-                    imagePageRevisions[0] = revision
-                    out.append(tex)
+
+        // Allocate every secondary page before overwriting any texture from the previous set.
+        let revisionChanged = imagePagesRevision != revision
+        let preserveReaders = revisionChanged && imageReaders.contains(where: \.pending)
+        var secondary: [(texture: MTLTexture, upload: Bool)] = []
+        for index in atlases.indices.dropFirst() {
+            let page = atlases[index]
+            if imageTextures.indices.contains(index) {
+                let texture = imageTextures[index]
+                if texture.device.registryID == device.registryID, texture.width == page.width,
+                   texture.height == page.height, !preserveReaders {
+                    secondary.append((texture, revisionChanged))
+                    continue
                 }
-                continue
             }
-            let existing: MTLTexture? = idx < rebuiltTextures.count ? rebuiltTextures[idx] : nil
-            let needsCreate = existing?.device.registryID != device.registryID
-                || imagePageSizes[idx] != SIMD2(page.width, page.height)
-                || (pagesInUse && imagePageRevisions[idx] != revision)
-            let tex: MTLTexture?
-            if needsCreate {
-                let desc = MTLTextureDescriptor.texture2DDescriptor(
-                    pixelFormat: .rgba8Unorm_srgb,
-                    width: page.width,
-                    height: page.height,
-                    mipmapped: false
-                )
-                desc.usage = [.shaderRead]
-                #if os(macOS)
-                desc.storageMode = .managed
-                #else
-                desc.storageMode = .shared
-                #endif
-                let created = device.makeTexture(descriptor: desc)
-                created?.label = "rune.atlas.images.\(idx)"
-                tex = created
-                if let created {
-                    if idx < rebuiltTextures.count {
-                        rebuiltTextures[idx] = created
-                    } else {
-                        rebuiltTextures.append(created)
-                    }
-                }
-                imagePageSizes[idx] = SIMD2<Int>(page.width, page.height)
-                imagePageRevisions[idx] = 0
-            } else {
-                tex = existing
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm_srgb, width: page.width, height: page.height, mipmapped: false
+            )
+            desc.usage = [.shaderRead]
+            #if os(macOS)
+            desc.storageMode = .managed
+            #else
+            desc.storageMode = .shared
+            #endif
+            guard let texture = device.makeTexture(descriptor: desc) else {
+                throw MetalRenderer.RendererError.textureAllocationFailed(resource: "Image atlas page \(index)", width: page.width, height: page.height)
             }
-            if let tex {
-                if (needsCreate || imagePageRevisions[idx] != revision) && !page.texels.isEmpty {
-                    page.texels.withUnsafeBytes { raw in
-                        if let base = raw.baseAddress {
-                            tex.replace(
-                                region: MTLRegionMake2D(0, 0, page.width, page.height),
-                                mipmapLevel: 0,
-                                withBytes: base,
-                                bytesPerRow: page.width * 4
-                            )
-                        }
-                    }
-                    imagePageRevisions[idx] = revision
+            texture.label = "rune.atlas.images.\(index)"
+            secondary.append((texture, true))
+        }
+
+        let first = atlases[0]
+        guard let firstTexture = syncImageAtlas(device: device, atlas: first, revision: revision, patch: pages.isEmpty ? patch : nil) else {
+            let resource = pages.isEmpty ? "Image atlas" : "Image atlas page 0"
+            throw MetalRenderer.RendererError.textureAllocationFailed(resource: resource, width: first.width, height: first.height)
+        }
+        for (page, pending) in zip(atlases.dropFirst(), secondary) where pending.upload {
+            page.texels.withUnsafeBytes { raw in
+                if let base = raw.baseAddress {
+                    pending.texture.replace(
+                        region: MTLRegionMake2D(0, 0, page.width, page.height), mipmapLevel: 0,
+                        withBytes: base, bytesPerRow: page.width * 4
+                    )
                 }
-                out.append(tex)
             }
         }
-        imageTextures = out
-        return out
+        imageTextures = [firstTexture] + secondary.map(\.texture)
+        imagePagesRevision = revision
+        return imageTextures
     }
 
     /// Shrinks oversized staging buffers back down (`#819` GPU give-back).

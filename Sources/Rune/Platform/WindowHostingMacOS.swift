@@ -683,6 +683,7 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
         shortcutBridge?.clear()
         shortcutBridge = nil
         entry.markMenusRunning(false)
+        entry.handle.updateVisibility(false)
         entry.handle.unbind()
         host?.handlePrimaryClosed(slot: slotIndex)
     }
@@ -923,7 +924,8 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         let materialMode = MaterialMode.fromEnv()
         let nativeMaterials = window?.isOpaque == false && materialMode != .fallback
         let started = CACurrentMediaTime()
-        let renderFrame = entry.renderFrame(runtimeObj: runtime, renderer: renderer, at: t, nativeMaterials: nativeMaterials)
+        var renderFrame = entry.renderFrame(runtimeObj: runtime, renderer: renderer, at: t, nativeMaterials: nativeMaterials)
+        if !metalLayer.isOpaque { renderFrame.clearColor = .zero }
         let updateMs = (CACurrentMediaTime() - started) * 1000
         let format: MTLPixelFormat = renderFrame.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
         if metalLayer.pixelFormat != format { metalLayer.pixelFormat = format }
@@ -1219,6 +1221,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if let window {
+            metalLayer.isOpaque = window.isOpaque
             _ = fnKeyMonitor.start(on: window)
         } else {
             stopTimer()
@@ -1532,7 +1535,7 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             to: window,
             options: specEntry.macosWindow,
             transparent: specEntry.options.transparent,
-            borderless: specEntry.options.borderless
+            borderless: specEntry.options.borderless || specEntry.chrome.borderless
         )
         RuneDragRegions.ownWindowDragging(window: window, chrome: specEntry.chrome)
         slot.trafficLightSpot = RuneTrafficLights.Spot(window: window)
@@ -1586,6 +1589,7 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             }
         )
 
+        specEntry.handle.updateVisibility(specEntry.options.visible)
         specEntry.fireOnCreated()
 
         if specEntry.options.visible {
@@ -1634,6 +1638,7 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             }
         case .open, .show:
             slot.isHiddenOrClosed = false
+            slot.entry.handle.updateVisibility(true)
             if win.isMiniaturized { win.deminiaturize(nil) }
             if request == .open && !slot.entry.macosWindow.nonactivatingPanel {
                 win.makeKeyAndOrderFront(nil)
@@ -1643,6 +1648,7 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             slot.view.requestRender()
         case .hide:
             slot.isHiddenOrClosed = true
+            slot.entry.handle.updateVisibility(false)
             win.orderOut(nil)
             slot.stepRest(.unseen)
         case .close:

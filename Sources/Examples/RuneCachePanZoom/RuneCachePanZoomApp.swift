@@ -1,9 +1,6 @@
 import Foundation
 import Rune
 import RunePerf
-#if canImport(Metal)
-import Metal
-#endif
 
 /// Parity port of `crates/rune/examples/cache_pan_zoom.rs`:
 /// Headless benchmark for `El.cache()`: 25 text-heavy cards under live pan and zoom.
@@ -152,20 +149,15 @@ public enum RuneCachePanZoomApp {
         cards: Int = 25,
         frames: Int = 60
     ) throws -> (lines: [MetricLine], output: String) {
-        #if canImport(Metal)
-        let renderer = try MetalRenderer()
-        let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm_srgb,
-            width: Int(size.x * 2),
-            height: Int(size.y * 2),
-            mipmapped: false
-        )
-        desc.usage = [.renderTarget, .shaderRead]
-        guard let targetTex = renderer.device.makeTexture(descriptor: desc) else {
-            throw NSError(domain: "RuneCachePanZoom", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate offscreen Metal texture"])
+        #if canImport(Metal) || os(Linux) || os(Windows)
+        guard samples > 0, cards >= 0, frames >= 0 else {
+            throw NSError(domain: "RuneCachePanZoom", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Samples must be positive and card and frame counts must be nonnegative"
+            ])
         }
+        let renderer = try OffscreenGPURenderer()
 
-        func runSample(cached: Bool, testCase: String) -> [Double] {
+        func runSample(cached: Bool, testCase: String) throws -> [Double] {
             let ts = TextSystem()
             for sz: Float in [10, 11, 13] {
                 _ = ts.shape(text: "Warm benchmark fonts 0123456789", style: TextStyle(size: sz, weight: 400), maxWidth: nil, pixelScale: 2.0, emitGlyphs: false)
@@ -176,23 +168,13 @@ public enum RuneCachePanZoomApp {
             let rt = Runtime(state: state, viewport: size, pixelScale: 2.0, systemDark: true, textSystem: ts, view: view)
 
             var now = 0.0
-            let f0 = rt.renderFrame(at: now)
-            if let cb = renderer.commandQueue.makeCommandBuffer() {
-                renderer.drawRange(frame: f0, into: targetTex, commandBuffer: cb)
-                cb.commit()
-                cb.waitUntilCompleted()
-            }
+            try renderer.submitOffscreen(renderer.frame(rt, at: now))
             for _ in 0..<60 {
                 now += 1.0 / 120.0
                 _ = rt.frame(at: now)
                 if !rt.isAnimating { break }
             }
-            let warmFrame = rt.renderFrame(at: now)
-            if let cb = renderer.commandQueue.makeCommandBuffer() {
-                renderer.drawRange(frame: warmFrame, into: targetTex, commandBuffer: cb)
-                cb.commit()
-                cb.waitUntilCompleted()
-            }
+            try renderer.submitOffscreen(renderer.frame(rt, at: now))
 
             var totalCpu = 0.0
             var totalPaint = 0.0
@@ -214,7 +196,7 @@ public enum RuneCachePanZoomApp {
                 _ = takeFramePhases()
                 let alloc0 = ProcessCountingAllocator.shared.threadAllocations()
                 let cpu0 = threadCpuMs()
-                let rf = rt.renderFrame(at: now)
+                let rf = try renderer.frame(rt, at: now)
                 let cpu = max(0, threadCpuMs() - cpu0)
                 let allocs = Double(max(0, Int64(ProcessCountingAllocator.shared.threadAllocations()) - Int64(alloc0)))
                 let phases = takeFramePhases()
@@ -222,14 +204,9 @@ public enum RuneCachePanZoomApp {
                 let paint = phases.count > cpuPaintIndex ? phases[cpuPaintIndex] : 0
 
                 let encStart = ContinuousClock.now
-                let committedCB = renderer.commandQueue.makeCommandBuffer()
-                if let cb = committedCB {
-                    renderer.drawRange(frame: rf, into: targetTex, commandBuffer: cb)
-                    cb.commit()
-                }
-                let encDur = encStart.duration(to: .now)
+                let submittedAt = try renderer.submitOffscreen(rf)
+                let encDur = encStart.duration(to: submittedAt)
                 let encodeMs = Double(encDur.components.seconds) * 1000.0 + Double(encDur.components.attoseconds) / 1e15
-                committedCB?.waitUntilCompleted()
 
                 let stats = renderer.layerStats()
                 totalCpu += cpu
@@ -260,7 +237,7 @@ public enum RuneCachePanZoomApp {
             for testCase in ["pan", "pan_zoom"] {
                 var rows: [[Double]] = []
                 for s in 0...samples {
-                    let r = runSample(cached: cached, testCase: testCase)
+                    let r = try runSample(cached: cached, testCase: testCase)
                     if s > 0 { rows.append(r) }
                 }
                 for (m, name) in metrics.enumerated() {
@@ -277,7 +254,7 @@ public enum RuneCachePanZoomApp {
         }
         return (lines, textLines.joined(separator: "\n"))
         #else
-        return ([], "cache_pan_zoom: Metal unavailable on this platform")
+        return ([], "cache_pan_zoom: offscreen GPU rendering unavailable on this platform")
         #endif
     }
 

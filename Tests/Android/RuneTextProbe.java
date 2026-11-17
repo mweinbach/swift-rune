@@ -14,9 +14,22 @@ public final class RuneTextProbe {
         if (!value) throw new AssertionError(message);
     }
 
+    private static float width(Class<?> type, String family) throws Exception {
+        Object line = type.getConstructor(byte[].class, byte[].class, float.class, int.class,
+            boolean.class, boolean.class, int.class).newInstance("iiiWW Latin".getBytes(StandardCharsets.UTF_8),
+                family.getBytes(StandardCharsets.UTF_8), 28.25f, 400, false, false, 0);
+        return ((float[])type.getMethod("metrics").invoke(line))[0];
+    }
+
     public static void run(Activity activity) throws Exception {
         Class<?> type = activity.getClassLoader().loadClass("dev.rune.RuneText");
         require((Boolean)type.getMethod("initialize", Context.class).invoke(null, activity), "Missing bundled fonts");
+        float inter = width(type, "Inter"), mono = width(type, "IBM Plex Mono"), serif = width(type, "serif");
+        require(inter != mono && serif != mono, "Family fixture must distinguish the fallback faces");
+        require(width(type, "Absent Rune Font, Inter, serif") == inter, "Missing family should fall through to Inter");
+        require(width(type, "\"IBM Plex Mono\", Inter") == mono, "First registered family should win");
+        require(width(type, "Absent Rune Font, serif, Inter") == serif, "System face should keep its place in the stack");
+        require(width(type, "sans-serif, IBM Plex Mono") == width(type, "sans-serif"), "Explicit system default should win");
         String text = "AV office e\u0301漢 😄 אב مرحبا";
         Object line = type.getConstructor(byte[].class, byte[].class, float.class, int.class,
                 boolean.class, boolean.class, int.class).newInstance(text.getBytes(StandardCharsets.UTF_8),

@@ -165,6 +165,14 @@ void *rune_gl_surface_fence(RuneGL *r) {
     return gl ? gl->FenceSync(0x9117 /* GL_SYNC_GPU_COMMANDS_COMPLETE */, 0) : NULL;
 }
 
+void *rune_gl_submit_fence(RuneGL *r) {
+    const RuneGLAPI *gl = rune_gl_current_api(r);
+    void *fence = rune_gl_surface_fence(r);
+    if (!fence) return NULL;
+    gl->Flush();
+    return fence;
+}
+
 int rune_gl_surface_wait(RuneGL *r, void *fence, int wait) {
     const RuneGLAPI *gl = rune_gl_current_api(r);
     if (!gl || !fence) return -1;

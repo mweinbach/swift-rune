@@ -398,7 +398,9 @@ struct RuneKitTests {
 
         let kit = Kit.neutral(dark: true)
         let pySpans = MarkdownParser.highlightCode("# comment\ndef f(): return 1", language: "python", kit: kit)
-        #expect(pySpans.contains(where: { $0.text.contains("# comment") && $0.italic }))
+        let comment = pySpans.first { $0.text.contains("# comment") }
+        #expect(comment?.color == SyntaxTheme.fromKit(kit).color(for: .comment))
+        #expect(comment?.italic == false)
 
         let matches = MarkdownParser.findMatches(in: md, query: "bullet")
         #expect(matches.count == 2)

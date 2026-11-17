@@ -1,5 +1,8 @@
 import Foundation
 import RuneMotion
+#if os(Windows)
+import WinSDK
+#endif
 
 // MARK: - Frame Outcome, Encoded & Reports (frame/encoded.rs)
 
@@ -677,6 +680,14 @@ public func threadCpuMs() -> Double {
     var ts = timespec()
     guard clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 else { return 0.0 }
     return Double(ts.tv_sec) * 1000.0 + Double(ts.tv_nsec) / 1_000_000.0
+    #elseif os(Windows)
+    var creation = FILETIME(), exit = FILETIME(), kernel = FILETIME(), user = FILETIME()
+    guard GetThreadTimes(GetCurrentThread(), &creation, &exit, &kernel, &user) else { return 0.0 }
+    func milliseconds(_ time: FILETIME) -> Double {
+        let ticks = UInt64(time.dwHighDateTime) << 32 | UInt64(time.dwLowDateTime)
+        return Double(ticks) / 10_000.0
+    }
+    return milliseconds(kernel) + milliseconds(user)
     #else
     return 0.0
     #endif
@@ -1298,7 +1309,7 @@ public final class WindowHandle: @unchecked Sendable {
                 onFocus()
             case .minimize:
                 onMinimize()
-            case .show:
+            case .open, .show:
                 onShow()
             case .hide:
                 onHide()
@@ -1444,9 +1455,7 @@ public final class WindowHandle: @unchecked Sendable {
     public func open() { send(.open) }
 
     public func close() {
-        lock.lock()
-        visibleFlag = false
-        lock.unlock()
+        updateVisibility(false)
         send(.close)
     }
 
@@ -1456,10 +1465,14 @@ public final class WindowHandle: @unchecked Sendable {
     public func hide() { setVisible(false) }
 
     public func setVisible(_ visible: Bool) {
+        updateVisibility(visible)
+        send(visible ? .show : .hide)
+    }
+
+    internal func updateVisibility(_ visible: Bool) {
         lock.lock()
         visibleFlag = visible
         lock.unlock()
-        send(visible ? .show : .hide)
     }
 
     public func setPosition(_ point: Vec2) {

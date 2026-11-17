@@ -26,12 +26,21 @@ struct DesktopFont: Hashable {
     init(style: TextStyle, span: TextSpan?, families: (sans: String, mono: String), language: String?, scale: Float) {
         settingsEpoch = FontFamiliesRegistry.settingsEpoch
         mono = span?.monospace == true || style.family == .monospace
-        if mono { family = families.mono.isEmpty ? DefaultFonts.monoFamily : families.mono }
-        else if case .custom(let name) = style.family { family = name }
-        else { family = families.sans.isEmpty ? DefaultFonts.sansFamily : families.sans }
+        let requested = mono ? FontFamily.monospace : style.family
+        let stack = requested.stack(sans: families.sans, mono: families.mono)
+        let candidates = FontFamily.candidates(in: stack)
+        #if os(Linux)
+        // Pango separates families on every comma. Skip an unrepresentable literal
+        // name so its fragments cannot match unrelated installed faces.
+        family = candidates.filter { !$0.contains(",") }.joined(separator: ", ")
+        #else
+        family = stack
+        #endif
         sizePx = (span?.size ?? style.size) * scale
         let requestedWeight = span?.weight ?? style.weight
-        let declared = FaceWeightsRegistry.declaredFace(in: TextSystem.faceWeights, family: family, requestedWeight: requestedWeight)
+        let declared = candidates.first.flatMap {
+            FaceWeightsRegistry.declaredFace(in: TextSystem.faceWeights, family: $0, requestedWeight: requestedWeight)
+        }
         let matchedWeight = declared?.weight ?? requestedWeight
         weight = Int32(matchedWeight.isFinite ? min(900, max(100, matchedWeight)) : 400)
         italic = span?.italic == true || style.italic
@@ -63,6 +72,7 @@ struct DesktopMaskKey: Hashable {
     let y: Int
     let textHash: Int
     var phase = SIMD2<Int>.zero
+    var sourceColumns: Range<Int>? = nil
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(textHash)
@@ -70,6 +80,7 @@ struct DesktopMaskKey: Hashable {
         hasher.combine(x)
         hasher.combine(y)
         hasher.combine(phase)
+        hasher.combine(sourceColumns)
     }
 }
 
@@ -79,22 +90,40 @@ private struct DesktopGlyphGlide {
     let whole: SIMD2<Int>
     let phase: SIMD2<Int>
 
-    init(_ offset: Vec2) {
+    init(_ offset: Vec2, horizontalPhase: UInt8 = 0) {
         let quarters = SIMD2(Int(exactly: (offset.x * 4).rounded()) ?? 0,
                              Int(exactly: (offset.y * 4).rounded()) ?? 0)
-        whole = quarters &>> 2
-        phase = quarters & 3
+        let x = (quarters.x & 3) * 15 + Int(horizontalPhase)
+        whole = SIMD2((quarters.x >> 2) + x / 60, quarters.y >> 2)
+        phase = SIMD2(x % 60, quarters.y & 3)
     }
 
     /// The source includes its neighbor on the left and/or top. Adjacent output tiles use
     /// the same samples on their shared edge, including when a ligature spans two cells.
-    static func translate(_ input: [UInt8], width: Int, height: Int, channels: Int, phase: SIMD2<Int>) -> [UInt8] {
-        guard phase != .zero else { return input }
+    static func translate(_ source: [UInt8], width: Int, height: Int, channels: Int, phase: SIMD2<Int>,
+                          x: Int, sourceColumns: Range<Int>?) -> [UInt8] {
+        guard phase != .zero else { return source }
         let dx = phase.x == 0 ? 0 : channels
         let sourceStride = width * channels + dx
         let dy = phase.y == 0 ? 0 : sourceStride
-        let weights = ((4 - phase.x) * (4 - phase.y), phase.x * (4 - phase.y),
-                       (4 - phase.x) * phase.y, phase.x * phase.y)
+        // An independently painted grapheme can sit inside a ligature. Discard its
+        // neighbor's columns before filtering, including on the first and last tiles.
+        var input = source
+        if let sourceColumns {
+            let left = x - (phase.x == 0 ? 0 : 1)
+            let start = max(0, min(sourceStride, (sourceColumns.lowerBound - left) * channels))
+            let end = max(0, min(sourceStride, (sourceColumns.upperBound - left) * channels))
+            if start > 0 || end < sourceStride {
+                for row in stride(from: 0, to: input.count, by: sourceStride) {
+                    for i in 0..<start { input[row + i] = 0 }
+                    for i in end..<sourceStride { input[row + i] = 0 }
+                }
+            }
+        }
+        // Sixtieths horizontally cover both the classic ppem-dependent pen and Skia
+        // quarters. The moving vertical baseline uses four steps in either mode.
+        let weights = ((60 - phase.x) * (4 - phase.y), phase.x * (4 - phase.y),
+                       (60 - phase.x) * phase.y, phase.x * phase.y)
         var output = [UInt8](repeating: 0, count: width * height * channels)
         for y in 0..<height {
             var src = y * sourceStride + dy + dx
@@ -102,12 +131,36 @@ private struct DesktopGlyphGlide {
             for _ in 0..<(width * channels) {
                 let sum = Int(input[src]) * weights.0 + Int(input[src - dx]) * weights.1
                     + Int(input[src - dy]) * weights.2 + Int(input[src - dx - dy]) * weights.3
-                output[dst] = UInt8((sum + 8) / 16)
+                output[dst] = UInt8((sum + 120) / 240)
                 src += 1
                 dst += 1
             }
         }
         return output
+    }
+}
+
+/// Tab stops are counted in the authored paragraph, before wrapping or inserting pill markers.
+struct DesktopTabStops {
+    fileprivate let columns: [Int: Int]
+
+    init(_ text: String, start: Int = 0, monospace: (Int) -> Bool) {
+        var widths: [Int: Int] = [:]
+        if text.utf8.contains(9) {
+            var column = 0, byte = start
+            for scalar in text.unicodeScalars {
+                let mono = monospace(byte)
+                if scalar == "\t" {
+                    let width = mono ? 4 - column % 4 : 1
+                    widths[byte] = width
+                    column = mono ? column + width : 0
+                } else {
+                    column = mono && !CharacterSet.newlines.contains(scalar) ? column + 1 : 0
+                }
+                byte += scalar.utf8.count
+            }
+        }
+        columns = widths
     }
 }
 
@@ -152,14 +205,46 @@ private final class DesktopTextRun {
     let native: OpaquePointer
     let metrics: RuneDesktopLineMetrics
     let hasColor: Bool
-    private var lastColorTile: (rect: SIMD4<Int>, phase: SIMD2<Int>, planes: InkPlanes)?
+    private let tabPadding: [(offset: Int, cumulative: Int)]
+    private typealias ColorTile = (rect: SIMD4<Int>, phase: SIMD2<Int>, sourceColumns: Range<Int>?, planes: InkPlanes)
+    // Mixed text can use one shifted grayscale tile and one whole-pixel emoji tile
+    // for every cell in the same run. Keep both until the run moves to a new tile.
+    private var lastColorTile: ColorTile?
+    private var previousColorTile: ColorTile?
 
     var boxMetrics: (ascentPx: Float, descentPx: Float) {
         if metrics.font_ascent > 0 { return (metrics.font_ascent, metrics.font_descent) }
         return (metrics.ascent, metrics.descent)
     }
 
-    init?(text: String, font: DesktopFont) {
+    init?(text authored: String, font: DesktopFont, start: Int = 0,
+          marked: TextSystem.MarkedPillText? = nil, tabs: DesktopTabStops? = nil) {
+        var text = marked?.text ?? authored
+        var padding: [(offset: Int, cumulative: Int)] = []
+        if let tabs, !tabs.columns.isEmpty, authored.utf8.contains(9) {
+            // All font backends shape the same spaces. Map native positions back to the
+            // single authored byte so clicking, selecting and copying still see one tab.
+            let source = text.utf8
+            var expanded: [UInt8] = []
+            expanded.reserveCapacity(source.count)
+            var cursor = source.startIndex, cursorOffset = 0, added = 0
+            for (i, value) in authored.utf8.enumerated() where value == 9 {
+                let offset = marked?.byteOffset(i) ?? i
+                let index = source.index(cursor, offsetBy: offset - cursorOffset)
+                expanded.append(contentsOf: source[cursor..<index])
+                let width = tabs.columns[start + i] ?? 1
+                expanded.append(contentsOf: repeatElement(UInt8(32), count: width))
+                if width > 1 {
+                    added += width - 1
+                    padding.append((offset, added))
+                }
+                cursor = source.index(after: index)
+                cursorOffset = offset + 1
+            }
+            expanded.append(contentsOf: source[cursor...])
+            text = String(decoding: expanded, as: UTF8.self)
+        }
+        tabPadding = padding
         guard let length = Int32(exactly: text.utf8.count), font.sizePx.isFinite,
               let line = rune_desktop_line_create(text, length, font.family, font.sizePx,
                 font.weight, font.italic ? 1 : 0, font.mono ? 1 : 0, font.direction) else { return nil }
@@ -176,20 +261,34 @@ private final class DesktopTextRun {
 
     deinit { rune_desktop_line_destroy(native) }
 
-    func mask(x: Int, y: Int, width: Int, height: Int, phase: SIMD2<Int> = .zero) -> [UInt8]? {
+    func nativeByte(_ byte: Int) -> Int32 {
+        guard !tabPadding.isEmpty else { return Int32(byte) }
+        let count = partitionPoint(tabPadding) { $0.offset < byte }
+        return Int32(byte + (count == 0 ? 0 : tabPadding[count - 1].cumulative))
+    }
+
+    func mask(x: Int, y: Int, width: Int, height: Int, phase: SIMD2<Int> = .zero, sourceColumns: Range<Int>? = nil) -> [UInt8]? {
         renderLock.lock()
         defer { renderLock.unlock() }
         let dx = phase.x == 0 ? 0 : 1, dy = phase.y == 0 ? 0 : 1
         var pixels = [UInt8](repeating: 0, count: (width + dx) * (height + dy))
         guard rune_desktop_line_mask(native, Int32(x - dx), Int32(y - dy), Int32(width + dx), Int32(height + dy), &pixels) != 0 else { return nil }
-        return DesktopGlyphGlide.translate(pixels, width: width, height: height, channels: 1, phase: phase)
+        return DesktopGlyphGlide.translate(pixels, width: width, height: height, channels: 1, phase: phase,
+                                           x: x, sourceColumns: sourceColumns)
     }
 
-    func inkPlanes(x: Int, y: Int, width: Int, height: Int, phase: SIMD2<Int> = .zero) -> InkPlanes? {
+    func inkPlanes(x: Int, y: Int, width: Int, height: Int, phase: SIMD2<Int> = .zero, sourceColumns: Range<Int>? = nil) -> InkPlanes? {
         guard hasColor else { return nil }
         return renderLock.withLock {
             let rect = SIMD4(x, y, width, height)
-            if let cached = lastColorTile, cached.rect == rect, cached.phase == phase { return cached.planes }
+            if let cached = lastColorTile, cached.rect == rect, cached.phase == phase, cached.sourceColumns == sourceColumns {
+                return cached.planes
+            }
+            if let cached = previousColorTile, cached.rect == rect, cached.phase == phase, cached.sourceColumns == sourceColumns {
+                previousColorTile = lastColorTile
+                lastColorTile = cached
+                return cached.planes
+            }
             let dx = phase.x == 0 ? 0 : 1, dy = phase.y == 0 ? 0 : 1
             let w = Int32(width + dx), h = Int32(height + dy), left = Int32(x - dx), top = Int32(y - dy)
             var mask = [UInt8](repeating: 0, count: Int(w) * Int(h))
@@ -202,10 +301,11 @@ private final class DesktopTextRun {
                 let alpha = Int(color[pixel + 3])
                 for i in pixel..<(pixel + 3) { color[i] = UInt8((Int(color[i]) * alpha + 127) / 255) }
             }
-            let planes = InkPlanes(mask: DesktopGlyphGlide.translate(mask, width: width, height: height, channels: 1, phase: phase),
-                                   color: DesktopGlyphGlide.translate(color, width: width, height: height, channels: 4, phase: phase),
+            let planes = InkPlanes(mask: DesktopGlyphGlide.translate(mask, width: width, height: height, channels: 1, phase: phase, x: x, sourceColumns: sourceColumns),
+                                   color: DesktopGlyphGlide.translate(color, width: width, height: height, channels: 4, phase: phase, x: x, sourceColumns: sourceColumns),
                                    width: width, height: height)
-            lastColorTile = (rect, phase, planes)
+            previousColorTile = lastColorTile
+            lastColorTile = (rect, phase, sourceColumns, planes)
             return planes
         }
     }
@@ -243,7 +343,7 @@ final class DesktopTextLine {
         let isRTL: Bool
         let endCaret: Float
         fileprivate let run: DesktopTextRun
-        fileprivate let localLeft: Float
+        fileprivate let localLeft, localRight: Float
     }
 
     let cells: [Int: Cell]
@@ -260,14 +360,16 @@ final class DesktopTextLine {
     // into the persistent atlas lookup. TextRun's persistent cell path uses cache == true.
     private var transientTiles: [DesktopMaskKey: GlyphAtlas.Entry] = [:]
     private let scale: Float
+    private let smoothing: FontSmoothing
 
     init?(text: String, start: Int, style: TextStyle, families: (sans: String, mono: String), language: String?, scale: Float,
           faceBoxes: DesktopFaceBoxes = DesktopFaceBoxes(), cutsCodePadding: Bool = false,
-          pillRanges: [Range<Int>] = [], span: (Int) -> TextSpan?,
+          pillRanges: [Range<Int>] = [], tabs: DesktopTabStops? = nil, span: (Int) -> TextSpan?,
           stretch: (Character, Int) -> Float = { _, _ in 0 },
           extra: (Int, Int) -> (leading: Float, trailing: Float) = { _, _ in (0, 0) }) {
         guard !text.isEmpty else { return nil }
         self.scale = scale
+        self.smoothing = style.fontSmoothing
         DefaultFonts.registerIfNeeded()
         // Keep spans with equal font settings together. Decoration and color boundaries
         // can then divide the same shaped ligature without changing its advance.
@@ -275,6 +377,7 @@ final class DesktopTextLine {
         var byte = start
         var lastSpan: TextSpan?
         let baseFont = DesktopFont(style: style, span: nil, families: families, language: language, scale: scale)
+        let tabs = tabs ?? DesktopTabStops(text, start: start) { style.family == .monospace || span($0)?.monospace == true }
         var font = baseFont
         let lineHeightPx = style.resolvedLineHeight * scale
         var inlineHeightPx: Float?
@@ -309,12 +412,12 @@ final class DesktopTextLine {
         let isolateLabels = style.byParagraphStart != nil
         let marked = TextSystem.MarkedPillText(text, start: start, ranges: pillRanges, isolateLabels: isolateLabels, padding: extra)
         let hasMarkers = !(marked?.markers.isEmpty ?? true)
-        let bidi = groups.count > 1 || hasMarkers ? DesktopTextRun(text: marked?.text ?? text, font: baseFont) : nil
+        let bidi = groups.count > 1 || hasMarkers ? DesktopTextRun(text: text, font: baseFont, start: start, marked: marked, tabs: tabs) : nil
         if hasMarkers && bidi == nil { return nil }
         struct PlacedCell {
             let character: Character
             let byte, end: Int
-            let left, advance, refLeft, refWidth, caret, endCaret: Float
+            let left, right, advance, refLeft, refWidth, caret, endCaret: Float
             let run: DesktopTextRun
             let isRTL: Bool
         }
@@ -328,7 +431,7 @@ final class DesktopTextLine {
             } else {
                 groupIsolates = nil
             }
-            guard let run = DesktopTextRun(text: groupIsolates?.text ?? group.text, font: group.font) else { return nil }
+            guard let run = DesktopTextRun(text: group.text, font: group.font, start: group.start, marked: groupIsolates, tabs: tabs) else { return nil }
             if let inlineHeightPx = group.inlineHeightPx {
                 let metrics = faceBoxes.box(for: group.font) ?? run.boxMetrics
                 boxes.append((metrics.ascentPx, metrics.descentPx, inlineHeightPx))
@@ -339,18 +442,22 @@ final class DesktopTextLine {
                 let byte = group.start + local
                 var left: Float = 0, advance: Float = 0
                 let localByte = groupIsolates?.byteOffset(local) ?? local
-                var direction = rune_desktop_line_cell(run.native, Int32(localByte), Int32(localByte + ch.utf8.count), &left, &advance)
+                var direction = rune_desktop_line_cell(run.native, run.nativeByte(localByte), run.nativeByte(localByte + ch.utf8.count), &left, &advance)
+                let right = left + advance
                 var refLeft = left, refWidth = advance
+                if ch == "\t", let count = tabs.columns[byte] {
+                    advance += Float(count - 1) * style.letterSpacing * scale
+                }
                 let reference = bidi ?? run
                 let refByte = bidi == nil ? localByte : marked?.byteOffset(byte - start) ?? (byte - start)
-                let refEnd = refByte + ch.utf8.count
+                let refStart = reference.nativeByte(refByte), refEnd = reference.nativeByte(refByte + ch.utf8.count)
                 if bidi != nil {
-                    direction = rune_desktop_line_cell(reference.native, Int32(refByte), Int32(refEnd), &refLeft, &refWidth)
+                    direction = rune_desktop_line_cell(reference.native, refStart, refEnd, &refLeft, &refWidth)
                 }
                 visual.append(PlacedCell(character: ch, byte: byte, end: group.start + end,
-                    left: left, advance: advance, refLeft: refLeft, refWidth: refWidth,
-                    caret: rune_desktop_line_caret(reference.native, Int32(refByte)),
-                    endCaret: rune_desktop_line_caret(reference.native, Int32(refEnd)), run: run, isRTL: direction < 0))
+                    left: left, right: right, advance: advance, refLeft: refLeft, refWidth: refWidth,
+                    caret: rune_desktop_line_caret(reference.native, refStart),
+                    endCaret: rune_desktop_line_caret(reference.native, refEnd), run: run, isRTL: direction < 0))
                 local = end
             }
         }
@@ -374,8 +481,8 @@ final class DesktopTextLine {
         if let bidi, let marked {
             for marker in marked.markers {
                 var left: Float = 0, width: Float = 0
-                let direction = rune_desktop_line_cell(bidi.native, Int32(marker.shapedByte),
-                    Int32(marker.shapedByte + 3), &left, &width)
+                let direction = rune_desktop_line_cell(bidi.native, bidi.nativeByte(marker.shapedByte),
+                    bidi.nativeByte(marker.shapedByte + 3), &left, &width)
                 marks.append((marker, left, width, direction < 0))
             }
             marks.sort { $0.left < $1.left }
@@ -415,7 +522,7 @@ final class DesktopTextLine {
             result[cell.byte] = Cell(character: cell.character, byte: cell.byte, byteEnd: cell.end,
                 advance: cell.advance / scale, left: left, right: right, caret: edges[edge(cell.caret)] ?? left, isRTL: cell.isRTL,
                 endCaret: edges[edge(cell.endCaret)] ?? (left + cell.advance / scale),
-                run: cell.run, localLeft: cell.left)
+                run: cell.run, localLeft: cell.left, localRight: cell.right)
         }
         cells = result
         width = widthPt
@@ -480,21 +587,32 @@ final class DesktopTextLine {
     }
 
     // Each coverage pixel belongs to precisely one grapheme, including shared ligatures.
-    private func visitTiles(for cell: Cell, size: SIMD2<Int>, phase: SIMD2<Int> = .zero, _ body: (Tile) -> Void) {
+    private func visitTiles(for cell: Cell, size: SIMD2<Int>, phase: SIMD2<Int> = .zero, isolateCell: Bool = false, _ body: (Tile) -> Void) {
         let run = cell.run, m = run.metrics
         let inkLeft = Int(m.ink_x), inkTop = Int(m.ink_y)
         guard m.ink_width > 0, m.ink_height > 0 else { return }
-        let inkRight = inkLeft + Int(m.ink_width) + (phase.x == 0 ? 0 : 1)
+        let nativeRight = inkLeft + Int(m.ink_width)
+        let inkRight = nativeRight + (phase.x == 0 ? 0 : 1)
         let inkBottom = inkTop + Int(m.ink_height) + (phase.y == 0 ? 0 : 1)
         let x0 = cell.localLeft < 0.01 ? inkLeft : max(inkLeft, Int(cell.localLeft.rounded()))
-        let end = cell.localLeft + cell.advance * scale
-        let x1 = end > m.advance - 0.01 ? inkRight : min(inkRight, Int(end.rounded()))
+        let end = cell.localRight
+        let lastCell = end > m.advance - 0.01
+        var x1 = lastCell ? inkRight : min(inkRight, Int(end.rounded()))
+        var sourceColumns: Range<Int>?
+        if isolateCell && phase.x != 0 {
+            let right = lastCell ? nativeRight : min(nativeRight, Int(end.rounded()))
+            guard x0 < right else { return }
+            sourceColumns = x0..<right
+            x1 = right + 1
+        }
         guard x0 < x1, inkTop < inkBottom else { return }
-        let firstTile = inkLeft + (x0 - inkLeft) / size.x * size.x
+        let firstTile = sourceColumns != nil ? x0 : inkLeft + (x0 - inkLeft) / size.x * size.x
+        let tileRight = sourceColumns != nil ? x1 : inkRight
         for x in stride(from: firstTile, to: x1, by: size.x) {
-            let w = min(size.x, inkRight - x)
+            let w = min(size.x, tileRight - x)
             for y in stride(from: inkTop, to: inkBottom, by: size.y) {
-                let key = DesktopMaskKey(text: run.text, font: run.font, x: x, y: y, textHash: run.textHash, phase: phase)
+                let key = DesktopMaskKey(text: run.text, font: run.font, x: x, y: y, textHash: run.textHash,
+                                         phase: phase, sourceColumns: sourceColumns)
                 body(Tile(key: key, width: w, height: min(size.y, inkBottom - y),
                           left: max(x0, x), right: min(x1, x + w)))
             }
@@ -509,32 +627,34 @@ final class DesktopTextLine {
 
     func glyphs(for cell: Cell, originX: Float, baselineY: Float, color: Color?,
                 atlas: GlyphAtlas, cache: Bool, glidePx: Vec2 = .zero,
-                restingXPx: Float? = nil, utf8Offset: Int? = nil) -> [PositionedGlyph] {
+                restingXPx: Float? = nil, utf8Offset: Int? = nil, isolateCell: Bool = false) -> [PositionedGlyph] {
         var quads: [PositionedGlyph] = []
         let localX = runOriginPx(for: cell, originX: originX)
         var maskX = localX, colorX = localX
-        var maskOffset = glidePx
+        let colorGlide = DesktopGlyphGlide(glidePx)
+        var maskGlide = colorGlide
         if let restingXPx {
             let absolute = restingXPx + localX
-            let (pixel, phase) = TextBoxGeometry.quarterPen(absolute)
+            let (pixel, phase) = TextBoxGeometry.glyphPen(at: absolute, ppem: cell.run.font.sizePx, glide: glidePx.x, smoothing: smoothing)
             maskX = pixel - restingXPx
-            maskOffset.x += Float(phase) * 0.25
+            maskGlide = DesktopGlyphGlide(Vec2(0, glidePx.y), horizontalPhase: phase)
             colorX = absolute.rounded() - restingXPx
         }
-        let maskGlide = DesktopGlyphGlide(maskOffset), colorGlide = DesktopGlyphGlide(glidePx)
         func emit(_ glide: DesktopGlyphGlide, x: Float, mask: Bool, colorInk: Bool) {
-            visitTiles(for: cell, size: atlas.desktopTileSize, phase: glide.phase) { tile in
+            visitTiles(for: cell, size: atlas.desktopTileSize, phase: glide.phase, isolateCell: isolateCell) { tile in
                 let key = tile.key
                 let rect = SIMD4((x + Float(tile.left + glide.whole.x)) / scale,
                     baselineY + (Float(key.y + glide.whole.y) - cell.run.metrics.ascent) / scale,
                     Float(tile.right - tile.left) / scale, Float(tile.height) / scale)
-                let planes = cell.run.inkPlanes(x: key.x, y: key.y, width: tile.width, height: tile.height, phase: glide.phase)
+                let planes = cell.run.inkPlanes(x: key.x, y: key.y, width: tile.width, height: tile.height,
+                                                phase: glide.phase, sourceColumns: key.sourceColumns)
                 let columns = (tile.left - key.x)..<(tile.right - key.x)
                 let drawMask = mask && (planes?.hasMask(in: columns) ?? true)
                 let existing = cache ? nil : transientTiles[key]
                 if drawMask, let entry = existing ?? atlas.desktopMask(key: cache ? key : nil,
                     width: tile.width, height: tile.height, bitmap: {
-                        planes?.mask ?? cell.run.mask(x: key.x, y: key.y, width: tile.width, height: tile.height, phase: glide.phase)
+                        planes?.mask ?? cell.run.mask(x: key.x, y: key.y, width: tile.width, height: tile.height,
+                                                      phase: glide.phase, sourceColumns: key.sourceColumns)
                     }) {
                     if !cache { transientTiles[key] = entry }
                     if let rows = atlas.desktopCoveredRows(of: entry, columns: columns) {
@@ -549,7 +669,8 @@ final class DesktopTextLine {
                     }
                 }
                 if colorInk, let planes {
-                    let cropKey = DesktopMaskKey(text: key.text, font: key.font, x: tile.left, y: key.y, textHash: key.textHash, phase: glide.phase)
+                    let cropKey = DesktopMaskKey(text: key.text, font: key.font, x: tile.left, y: key.y, textHash: key.textHash,
+                                                 phase: glide.phase, sourceColumns: key.sourceColumns)
                     if let bitmap = atlas.desktopColor(key: cache ? cropKey : nil, width: columns.count, height: tile.height,
                                                        bitmap: { planes.colorBitmap(in: columns) }) {
                         quads.append(PositionedGlyph(rect: rect, colorGlyph: bitmap, color: color, utf8Offset: utf8Offset ?? cell.byte))
@@ -606,6 +727,7 @@ final class DesktopRestingText {
 
     private var lines: [Int: Line] = [:]
     private var hasFractionalRun = false
+    private var minRunX = Float.infinity, maxRunX = -Float.infinity
     private let glide: Vec2
     private let cache: Bool
     private let lock = NSLock()
@@ -616,22 +738,38 @@ final class DesktopRestingText {
         self.cache = cache
     }
 
+    var retainedGlyphBytes: Int {
+        lock.withLock { (last?.glyphs.count ?? 0) * MemoryLayout<PositionedGlyph>.stride }
+    }
+
     func add(_ line: Line, at index: Int) {
         lines[index] = line
-        guard !hasFractionalRun else { return }
-        func isFractional(_ cell: DesktopTextLine.Cell) -> Bool {
+        func record(_ cell: DesktopTextLine.Cell) {
             let pen = line.native.runOriginPx(for: cell, originX: line.originX)
-            return abs(pen - pen.rounded()) > 1e-5
+            minRunX = min(minRunX, pen)
+            maxRunX = max(maxRunX, pen)
+            if abs(pen - pen.rounded()) > 1e-5 { hasFractionalRun = true }
         }
         if let offset = line.sourceByteOffset, let cell = line.native.cells[offset] {
-            hasFractionalRun = isFractional(cell)
+            record(cell)
         } else {
-            hasFractionalRun = line.native.cells.values.contains(where: isFractional)
+            for cell in line.native.cells.values { record(cell) }
         }
     }
 
-    func place(_ shaped: inout ShapedText, at x: Float, atlas: GlyphAtlas) -> Bool {
-        guard !lines.isEmpty, x.isFinite, x != x.rounded() || hasFractionalRun else { return false }
+    func place(_ shaped: inout ShapedText, at origin: Float, atlas: GlyphAtlas) -> Bool {
+        guard !lines.isEmpty, origin.isFinite, origin != origin.rounded() || hasFractionalRun else { return false }
+        // Labels a whole number of pixels apart share the same local quads. Preserve the
+        // sign of every pen for ties, which Rune rounds away from zero.
+        let fraction = origin - floorf(origin)
+        let x: Float
+        if origin + minRunX >= 0 {
+            x = fraction + max(0, ceilf(-minRunX))
+        } else if origin + maxRunX < 0 {
+            x = fraction - max(1, ceilf(maxRunX) + 1)
+        } else {
+            x = origin
+        }
         return lock.withLock {
             if let last, last.x == x, atlas.retainPages(last.pages, since: last.resets) {
                 shaped.glyphs = last.glyphs
@@ -650,7 +788,7 @@ final class DesktopRestingText {
                         if let cell = line.native.cells[sourceByte] {
                             glyphs += line.native.glyphs(for: cell, originX: line.originX, baselineY: line.baselineY,
                                 color: line.colors[byte], atlas: atlas, cache: cache, glidePx: glide,
-                                restingXPx: x, utf8Offset: byte)
+                                restingXPx: x, utf8Offset: byte, isolateCell: line.sourceByteOffset != nil)
                         }
                         byte += character.utf8.count
                     }

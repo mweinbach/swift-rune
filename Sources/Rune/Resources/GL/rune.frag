@@ -210,7 +210,8 @@ float ringArc(vec2 p, vec2 halfSize, float radius) {
     if (p.y >= straight.y && abs(p.x) <= straight.x) return top + 2.0 * arc + side + (straight.x - p.x);
     if (p.x < -straight.x && p.y > straight.y) return 2.0 * top + 2.0 * arc + side + atan(-p.x - straight.x, p.y - straight.y) * r;
     if (p.x <= -straight.x && abs(p.y) <= straight.y) return 2.0 * top + 3.0 * arc + side + (straight.y - p.y);
-    return 2.0 * top + 3.0 * arc + 2.0 * side + atan(-p.y - straight.y, -p.x - straight.x) * r;
+    float angle = clamp(atan(-p.y - straight.y, -p.x - straight.x), 0.0, quarterTurn);
+    return 2.0 * top + 3.0 * arc + 2.0 * side + angle * r;
 }
 
 float dashedRing(vec2 p, vec2 halfSize, float outerCoverage) {

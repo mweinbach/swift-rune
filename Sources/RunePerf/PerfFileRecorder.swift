@@ -429,12 +429,6 @@ final class PerfRotatingLog {
         try? handle?.close()
     }
 
-    func resetHandleForTest() {
-        try? handle?.close()
-        handle = nil
-        currentSize = 0
-    }
-
     func append(jsonObject: [String: Any]) throws {
         var line = try JSONSerialization.data(withJSONObject: jsonObject, options: [.sortedKeys])
         line.append(0x0A)

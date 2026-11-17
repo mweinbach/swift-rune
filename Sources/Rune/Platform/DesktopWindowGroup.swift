@@ -27,6 +27,8 @@ protocol DesktopWindowSession: AnyObject {
     #if os(Linux)
     func turn(redraw: Bool) throws -> Int32
     func handleNativeEvent(_ event: RuneLinuxEvent)
+    #else
+    var closesWindowGroup: (() -> Bool)? { get set }
     #endif
 }
 
@@ -128,6 +130,40 @@ private final class WindowRequests: @unchecked Sendable {
     }
 }
 
+#if os(Windows)
+/// A window procedure can service worker requests while a native menu owns the event loop.
+private final class WindowsGroupWake: @unchecked Sendable {
+    private let lock = NSLock()
+    private var native: OpaquePointer?
+    @MainActor var drain: (@MainActor () -> Void)?
+
+    @MainActor init() throws {
+        native = rune_win_group_wake_create(Unmanaged.passUnretained(self).toOpaque()) { context in
+            guard let context else { return }
+            let wake = Unmanaged<WindowsGroupWake>.fromOpaque(context).takeUnretainedValue()
+            MainActor.assumeIsolated { wake.drain?() }
+        }
+        guard native != nil else { throw DesktopWindowError("Windows could not create the event-loop wake window") }
+    }
+
+    func post() {
+        lock.withLock {
+            if let native { rune_win_group_wake_post(native) }
+        }
+    }
+
+    @MainActor func close() {
+        let target = lock.withLock {
+            let target = native
+            native = nil
+            return target
+        }
+        drain = nil
+        rune_win_group_wake_destroy(target)
+    }
+}
+#endif
+
 /// All windows in the application, including windows opened by a callback, share one native event queue.
 @MainActor
 enum DesktopWindowGroup {
@@ -161,16 +197,34 @@ enum DesktopWindowGroup {
         var redraw = Set<UInt32>()
         var nativeSlots: [UInt32: Int] = [:]
         #else
-        let threadID = rune_win_thread()
-        let wake: @Sendable () -> Void = { rune_win_wake_thread(threadID) }
+        let groupWake = try WindowsGroupWake()
+        let wake: @Sendable () -> Void = { groupWake.post() }
         #endif
 
         let requests = WindowRequests(wake: wake)
         var slots = [Int: Slot]()
         var nextSlot = 0
+        var delivering: ArraySlice<(Int, WindowHandleRequest)> = []
+        func drainWindowRequests() {
+            delivering.append(contentsOf: requests.drain())
+            while let (id, request) = delivering.popFirst() {
+                // A native window operation can reenter the wake procedure.
+                let session = slots[id]?.session
+                session?.applyHandle(request)
+            }
+            delivering = []
+            let active = slots.values
+            for slot in active { slot.access.drain() }
+        }
+        #if os(Windows)
+        groupWake.drain = drainWindowRequests
+        #endif
         RuneMultiWindow.setOpenWake(wake)
         ReadySignal.runStarts()
         defer {
+            #if os(Windows)
+            groupWake.close()
+            #endif
             ReadySignal.clear()
             RuneMultiWindow.setOpenWake(nil)
             for slot in slots.values {
@@ -195,6 +249,13 @@ enum DesktopWindowGroup {
             let access = DesktopWindowAccess(window: session.window, wake: wake)
             let slot = Slot(key: spec.key, secondary: spec.secondary, session: session, handle: spec.handle, access: access)
             slots[id] = slot
+            #if os(Windows)
+            if !options.accessory && !slot.secondary {
+                session.closesWindowGroup = {
+                    !slots.contains { otherID, other in otherID != id && !other.secondary && other.session.running }
+                }
+            }
+            #endif
             if spec.nativeHostEntry?.options.clickThrough == true { try access.setClickThrough(true).get() }
             spec.handle.bind(slot: id, dispatch: { slot, request in
                 if case .setClickThrough(let enabled) = request {
@@ -226,8 +287,7 @@ enum DesktopWindowGroup {
                 try RuneMultiWindow.validate(batch)
                 for spec in batch { try open(spec) }
             }
-            for (id, request) in requests.drain() { slots[id]?.session.applyHandle(request) }
-            for slot in slots.values { slot.access.drain() }
+            drainWindowRequests()
             #if os(Linux)
             var wait: Int32 = -1
             for slot in slots.values {
@@ -245,12 +305,12 @@ enum DesktopWindowGroup {
                     nativeSlots.removeValue(forKey: slot.id)
                     redraw.remove(slot.id)
                     #endif
+                    slots.removeValue(forKey: id)
                     RuneMultiWindow.releaseDesktopHandle(slot.handle)
                     slot.access.drain(closing: true)
                     slot.urls?.cancel()
                     slot.handle.unbind()
                     slot.session.finish()
-                    slots.removeValue(forKey: id)
                 }
             }
             if !options.accessory && (slots.isEmpty || primaryClosed && !slots.values.contains(where: { !$0.secondary })) {

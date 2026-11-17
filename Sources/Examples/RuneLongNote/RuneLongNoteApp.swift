@@ -322,8 +322,10 @@ public enum RuneLongNoteApp {
         _ = rt.keyDown(KeyEvent(key: key, mods: .none), at: now)
     }
 
-    private static func cmd(_ rt: Runtime<State>, _ key: Key, at now: Double) {
-        _ = rt.keyDown(KeyEvent(key: key, mods: Mods(cmd: true)), at: now)
+    private static func primaryShortcut(_ rt: Runtime<State>, _ key: Key, at now: Double) {
+        let command = KeyPlatform.current == .mac
+        let mods = Mods(ctrl: !command, cmd: command, logo: command)
+        _ = rt.keyDown(KeyEvent(key: key, mods: mods), at: now)
     }
 
     public static func runReport(
@@ -498,7 +500,7 @@ public enum RuneLongNoteApp {
                         rt.paste(ClipboardContent(String(format: "%03d%@", i, paste)), at: t)
                     })
                     undos.append(timed(p.rt, now: &p.now) { rt, t in
-                        cmd(rt, .command("z"), at: t)
+                        primaryShortcut(rt, .command("z"), at: t)
                     })
                 }
                 precondition(docLength(p.rt.state) == text.utf8.count + 1, "every paste undone")
@@ -517,7 +519,7 @@ public enum RuneLongNoteApp {
                 var steps = 0
                 while true {
                     let before = docLength(p.rt.state)
-                    cmd(p.rt, .command("z"), at: p.now)
+                    primaryShortcut(p.rt, .command("z"), at: p.now)
                     p.now += 1.0 / 120.0
                     _ = p.rt.frame(at: p.now)
                     if docLength(p.rt.state) == before { break }
@@ -574,7 +576,8 @@ public enum RuneLongNoteApp {
                     var p = makeRuntime(text: text, caret: 0, blocks: false)
                     settle(p.rt, now: &p.now)
                     rows.append(timed(p.rt, now: &p.now) { rt, t in
-                        cmd(rt, .arrowDown, at: t)
+                        let endOfDocument: Key = KeyPlatform.current == .mac ? .arrowDown : .end
+                        primaryShortcut(rt, endOfDocument, at: t)
                     })
                     settle(p.rt, now: &p.now)
                     visible = visible && (p.rt.state.note.cursor == p.rt.state.note.text.utf8.count) && (caretInView(p.rt) != nil)

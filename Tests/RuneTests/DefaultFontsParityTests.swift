@@ -45,6 +45,24 @@ struct DefaultFontsParityTests {
     }
     #endif
 
+    @Test("named font stacks prefer available faces and fall back to the active sans family")
+    func namedFontsFallBackToTheActiveSansFamily() {
+        withFontFamilies(sans: DefaultFonts.monoFamily, mono: DefaultFonts.monoFamily) {
+            let text = TextSystem()
+            let missing = "Rune Unavailable Typeface"
+            func width(_ family: FontFamily) -> Float {
+                text.measure("iiii W0", style: TextStyle(size: 18, family: family),
+                             maxWidth: nil, pixelScale: 2).x
+            }
+            let sans = width(.systemUI)
+            let inter = width(.named(DefaultFonts.sansFamily))
+            #expect(width(.named(missing)) == sans)
+            #expect(inter != sans)
+            #expect(width(.named("\(missing), 'Inter', \"IBM Plex Mono\"")) == inter)
+            #expect(width(.named("'\(missing), Inter'")) == sans)
+        }
+    }
+
     @Test("default fonts shape representative Latin/Unicode/code strings deterministically")
     func defaultFontsShapeDeterministically() throws {
         let texts = [

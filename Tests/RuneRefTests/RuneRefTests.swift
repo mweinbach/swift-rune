@@ -5,6 +5,33 @@ import Testing
 
 @Suite("RuneRef & Metal Differential Tests")
 struct RuneRefTests {
+    @Test("An Oracle shadow keeps visible blur outside its caster when replayed")
+    func oracleShadowBounds() throws {
+        let caster = SIMD4<Float>(12, 12, 12, 12)
+        let shadow = OraclePrimitive(
+            node: 1, source: "shadow", rect: [12, 12, 12, 12], radii: [0, 0, 0, 0],
+            fill: [1, 1, 1, 1], border: [0, 0, 0, 0], params: [0, 1, 3, 0],
+            uv: [0, 0, 0, 0], clip: oracleNoClip, fade: [0, 0, 0, 0]
+        ).toInstance()
+        #expect(shadow.border == caster)
+        let frame = try RuneRef.render(RefScene(width: 36, height: 36, clearColor: .zero, primitives: [shadow]))
+        #expect(frame.pixel(x: 9, y: 18).w > 0)
+    }
+
+    #if canImport(Metal) || canImport(CRuneOffscreenGL)
+    @Test("Dashed rings agree on pixels inside the rounded perimeter")
+    func dashedCornerPixels() throws {
+        let renderer = try OffscreenGPURenderer()
+        for seed: UInt64 in [11, 13] {
+            let scene = RefGenerator.dashed(seed: seed, count: 8)
+            let pixels = try renderer.renderOffscreen(scene)
+            let diff = RuneRef.compare(scene: scene, expected: try RuneRef.render(scene), actual: pixels,
+                                       channelTolerance: 2, maxFailingPixels: 0)
+            #expect(diff.passed, "seed \(seed): \(diff)")
+        }
+    }
+    #endif
+
     @Test("RefScene validation catches malformed dimensions, NaNs, and unbalanced layers")
     func sceneValidationErrors() {
         #expect(throws: RefSceneError.invalidDimensions(width: 0, height: 100)) {

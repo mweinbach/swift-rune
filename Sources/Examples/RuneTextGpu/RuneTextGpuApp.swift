@@ -90,9 +90,7 @@ public enum RuneTextGpuApp {
         scales: [Float] = [1.0, 1.06, 1.3, 1.6, powf(2.0, 0.25), sqrtf(2.0)]
     ) throws -> SnapSummary {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        #if canImport(Metal)
-        let renderer = try MetalRenderer()
-        #endif
+        let renderer = try OffscreenGPURenderer()
         var written = 0
         var totalGlyphs = 0
         let size = Vec2(520, 300)
@@ -106,46 +104,38 @@ public enum RuneTextGpuApp {
             } else if classic {
                 rt.fontSmoothing = .classic
             }
-            #if canImport(Metal)
             if gpuPrewarm {
                 // `gpu` (`args[5]`): pre-warm renderer before frame 0, matching `text_gpu.rs:88-90`.
                 let w = max(1, Int(size.x * scale))
                 let h = max(1, Int(size.y * scale))
                 _ = try renderer.renderOffscreen(RenderFrame(width: w, height: h, clearColor: .zero, instances: []))
             }
-            #endif
             let zoom = state.zoom
             let tag = dark ? "dark" : "light"
 
             var now = 0.0
             let restFrame = rt.renderFrame(at: now)
             totalGlyphs += restFrame.instances.filter { $0.params.y == KIND_GLYPH }.count
-            #if canImport(Metal)
             let restImg = try renderer.renderOffscreen(restFrame)
             try restImg.writePNG(to: directory.appendingPathComponent("rest-\(tag).png"))
             written += 1
-            #endif
 
             for (i, k) in scales.enumerated() {
                 zoom.set(k)
                 now += dt
                 let moving = rt.renderFrame(at: now)
-                #if canImport(Metal)
                 let movingImg = try renderer.renderOffscreen(moving)
                 try movingImg.writePNG(to: directory.appendingPathComponent("zoom\(i)-moving-\(tag).png"))
                 written += 1
-                #endif
 
                 for _ in 0..<40 {
                     now += dt
                     _ = rt.frame(at: now)
                 }
                 let resting = rt.renderFrame(at: now)
-                #if canImport(Metal)
                 let restingImg = try renderer.renderOffscreen(resting)
                 try restingImg.writePNG(to: directory.appendingPathComponent("zoom\(i)-rest-\(tag).png"))
                 written += 1
-                #endif
             }
         }
         return SnapSummary(writtenFiles: written, totalGlyphs: totalGlyphs)
@@ -176,6 +166,8 @@ public enum RuneTextGpuApp {
         guard let targetTex = renderer.device.makeTexture(descriptor: desc) else {
             throw NSError(domain: "RuneTextGpu", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate offscreen Metal texture"])
         }
+        #else
+        let renderer = try OffscreenGPURenderer()
         #endif
 
         let lineCount = (mode == "empty") ? 0 : 48
@@ -194,16 +186,18 @@ public enum RuneTextGpuApp {
         }
         let glyphs = latest.instances.filter { $0.params.y == KIND_GLYPH }.count
 
-        func measureCase(_ name: String, step: (Int) -> Void) -> PerfMetric {
+        func measureCase(_ name: String, step: (Int) -> Void) throws -> PerfMetric {
             var samples: [Double] = []
             var lastOutlines = 0
             for f in 0..<frames {
                 step(f)
                 now += dt
-                let t0 = ContinuousClock.now
-                let rf = rt.renderFrame(at: now)
-                var elapsed = ms(t0.duration(to: .now))
                 #if canImport(Metal)
+                let t0 = ContinuousClock.now
+                #endif
+                let rf = rt.renderFrame(at: now)
+                #if canImport(Metal)
+                var elapsed = ms(t0.duration(to: .now))
                 if let cb = renderer.commandQueue.makeCommandBuffer() {
                     renderer.drawRange(frame: rf, into: targetTex, commandBuffer: cb)
                     cb.commit()
@@ -212,6 +206,10 @@ public enum RuneTextGpuApp {
                         elapsed = (cb.gpuEndTime - cb.gpuStartTime) * 1000.0
                     }
                 }
+                #else
+                let submitStart = ContinuousClock.now
+                try renderer.submitOffscreen(rf)
+                let elapsed = ms(submitStart.duration(to: .now))
                 #endif
                 lastOutlines = outlinedCount(rf)
                 if f >= warmup {
@@ -228,18 +226,23 @@ public enum RuneTextGpuApp {
             )
         }
 
-        let still = measureCase("still") { _ in }
-        let scroll = measureCase("scroll") { f in
+        let still = try measureCase("still") { _ in }
+        let scroll = try measureCase("scroll") { f in
             rt.update(at: now) { s, _ in s.scroll = Float(f % 60) * 3.0 }
         }
         rt.update(at: now) { s, _ in s.scroll = 0.0 }
-        let zooming = measureCase("zoom") { f in
+        let zooming = try measureCase("zoom") { f in
             zoom.set(1.0 + 0.25 * abs(sinf(Float(f) * 0.05)))
         }
 
         let metrics = [still, scroll, zooming]
         let lines = metrics.map { m in
-            String(format: "METRIC case=%@ scale=%.2f mode=%@ median_ms=%.4f p90_ms=%.4f outline_glyphs=%d", m.name, scale, mode ?? "default", m.medianMs, m.p90Ms, m.outlineGlyphs)
+            let line = String(format: "METRIC case=%@ scale=%.2f mode=%@ median_ms=%.4f p90_ms=%.4f outline_glyphs=%d", m.name, scale, mode ?? "default", m.medianMs, m.p90Ms, m.outlineGlyphs)
+            #if canImport(Metal)
+            return line
+            #else
+            return line + " timing=submit_to_completion"
+            #endif
         }
         return (glyphs, metrics, lines.joined(separator: "\n"))
     }

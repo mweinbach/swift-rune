@@ -73,10 +73,16 @@ struct Phase3PinchAndCoretextTests {
             reference: .unsmoothed,
             outDir: tmp.appendingPathComponent("out").path
         )
+        #if canImport(CoreText) && canImport(CoreGraphics)
         let table = try RuneCoretextCompareApp.execute(outOpts, useLiveReferenceOnMacOS: true)
         #expect(table.contains("SF Mono: Rune off (sRGB blending) vs CoreText with smoothing off"))
         #expect(FileManager.default.fileExists(atPath: tmp.appendingPathComponent("out/rune-light-1.0x.png").path))
         #expect(FileManager.default.fileExists(atPath: tmp.appendingPathComponent("out/heat-light-2.0x.png").path))
+        #else
+        #expect(throws: PixelCompareError.self) {
+            try RuneCoretextCompareApp.execute(outOpts, useLiveReferenceOnMacOS: true)
+        }
+        #endif
 
         let exportDir = tmp.appendingPathComponent("export")
         let exported = try RuneCoretextCompareApp.runExport(to: exportDir)

@@ -150,6 +150,7 @@ public enum MacOSApp {
         let windowHandle = WindowHandle(
             title: appBuilder.title,
             isVisible: !initiallyHidden,
+            position: opts.position.map { Vec2(Float($0.0), Float($0.1)) },
             onClose: { [weak window] in Task { @MainActor in window?.close() } },
             onMinimize: { [weak window] in Task { @MainActor in window?.miniaturize(nil) } },
             onFocus: { [weak window] in Task { @MainActor in window?.makeKeyAndOrderFront(nil) } },
@@ -217,6 +218,7 @@ public enum MacOSApp {
             shortcutGuard: shortcutGuard,
             onShowWindow: { [weak window, weak hostView] in
                 guard let window, let hostView else { return }
+                windowHandle.updateVisibility(true)
                 if openInactive {
                     // Unfocused (`App::open_inactive`, `RUNE_OPEN_INACTIVE`): ordered front without
                     // becoming key or activating the app (`platform/macos.rs` `show_without_focus`).
@@ -272,6 +274,7 @@ public enum MacOSApp {
             onClose: {
                 hostView.stopTimer()
                 hostView.cancelActiveModals()
+                windowHandle.updateVisibility(false)
                 appBuilder.sharedHandle.shared.setVisible(false)
                 if !(appBuilder.keepsRunning || appBuilder.isWindowless) && NSApplication.shared.windows.filter(\.isVisible).count <= 1 {
                     let after: QuitAfter = runtime.relaunchRequested ? .relaunch : .exit
@@ -771,7 +774,8 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
         let commitsBefore = runtime.viewCommitCount
         let updateStart = CACurrentMediaTime()
-        let renderFrame = renderer.frame(runtime, at: t)
+        var renderFrame = renderer.frame(runtime, at: t)
+        if !metalLayer.isOpaque { renderFrame.clearColor = .zero }
         let updateMs = (CACurrentMediaTime() - updateStart) * 1000.0
         // A new `Cx::set_titlebar` / `Cx::titlebar_height` moves the traffic lights and the band
         // (`window/lifecycle.rs` `take_titlebar_changed`); changed insets re-run the view next.
@@ -953,9 +957,11 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
                 }
             }
             window?.orderFront(nil)
+            windowHandle?.updateVisibility(true)
             appShared?.setVisible(true)
         case .hide:
             window?.orderOut(nil)
+            windowHandle?.updateVisibility(false)
             appShared?.setVisible(false)
         case .none:
             if let pos = req.position {
@@ -1177,6 +1183,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if let window {
+            metalLayer.isOpaque = window.isOpaque
             _ = fnKeyMonitor.start(on: window)
         } else {
             stopTimer()
@@ -1424,6 +1431,7 @@ private final class MacOSWindowlessDriver<State> {
 
     func start() {
         pump()
+        guard !isWindowShown else { return }
         let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.pump()

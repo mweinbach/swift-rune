@@ -3,10 +3,13 @@ import Rune
 import RuneMotion
 #if canImport(Metal)
 import Metal
+private typealias SpringFrameRenderer = MetalRenderer
+#elseif os(Linux) || os(Windows)
+private typealias SpringFrameRenderer = GLSpringFrameRenderer
 #endif
 
 /// Parity port of `crates/rune/examples/gpu_springs.rs`:
-/// Headless differential spring check (CPU closed-form vs Metal compute + vertex stage),
+/// Headless differential spring check (CPU closed form vs GPU vertex shader),
 /// retained-frame CPU vs GPU-spring benchmark, and 8-primitive pixel equivalence check.
 @main
 public enum RuneGpuSpringsApp {
@@ -45,6 +48,13 @@ public enum RuneGpuSpringsApp {
     }
 
     public static func runDifferential(iterations: Int = 4096) throws -> DifferentialSummary {
+        guard iterations >= 0, iterations <= Int.max / 20 else {
+            throw NSError(domain: "RuneGpuSprings", code: 5, userInfo: [NSLocalizedDescriptionKey: "Invalid spring sample count"])
+        }
+        if iterations == 0 {
+            return DifferentialSummary(samples: 0, retargets: 0, maxPositionError: 0, maxOpacityError: 0,
+                                       maxVelocityRelativeError: 0, maxVelocityAbsoluteError: 0, failures: 0)
+        }
         var seed: UInt64 = 71
         let bounces: [Float] = [0.0, 0.00005, 0.0002, -0.0002, -0.9, -0.4, 0.16, 0.8, 0.99]
 
@@ -261,43 +271,33 @@ public enum RuneGpuSpringsApp {
         cb.waitUntilCompleted()
 
         let gpuPtr = readBuf.contents().bindMemory(to: SIMD4<Float>.self, capacity: queries.count)
+        let samples = Array(UnsafeBufferPointer(start: gpuPtr, count: queries.count))
+        #elseif os(Linux) || os(Windows)
+        let samples = try sampleGLSpringTracks(tracks)
+        #else
+        let samples = tracks.map { item in
+            let sampled = item.track.sample(at: item.now)
+            return SIMD4(sampled.position, sampled.velocity, min(max(sampled.position, 0), 1), 1)
+        }
+        #endif
+
         for (idx, item) in tracks.enumerated() {
-            let got = gpuPtr[idx]
+            let got = samples[idx]
             let err = abs(item.expectedPos - got.x)
             let limit: Float = item.opacity ? 0.0001 : 0.01
             if !got.x.isFinite || !got.y.isFinite || !got.z.isFinite || err > limit {
                 failures += 1
             }
-            let velErr = abs(item.expectedVel - got.y) / max(abs(item.expectedVel), 1.0)
-            maxVelAbs = max(maxVelAbs, abs(item.expectedVel - got.y))
+            let velocityError = abs(item.expectedVel - got.y)
+            maxVelAbs = max(maxVelAbs, velocityError)
+            maxVelRel = max(maxVelRel, velocityError / max(abs(item.expectedVel), 1.0))
             if item.opacity {
-                let clampedExp = min(max(item.expectedPos, 0), 1)
-                maxOpacity = max(maxOpacity, abs(clampedExp - got.z))
+                let clamped = min(max(item.expectedPos, 0), 1)
+                maxOpacity = max(maxOpacity, abs(clamped - got.z))
             } else {
                 maxPosition = max(maxPosition, err)
             }
-            maxVelRel = max(maxVelRel, velErr)
         }
-        #else
-        for item in tracks {
-            let sampled = item.track.sample(at: item.now)
-            let err = abs(item.expectedPos - sampled.position)
-            let limit: Float = item.opacity ? 0.0001 : 0.01
-            if !sampled.position.isFinite || !sampled.velocity.isFinite || err > limit {
-                failures += 1
-            }
-            let velErr = abs(item.expectedVel - sampled.velocity) / max(abs(item.expectedVel), 1.0)
-            maxVelAbs = max(maxVelAbs, abs(item.expectedVel - sampled.velocity))
-            if item.opacity {
-                let clampedExp = min(max(item.expectedPos, 0), 1)
-                let clampedGot = min(max(sampled.position, 0), 1)
-                maxOpacity = max(maxOpacity, abs(clampedExp - clampedGot))
-            } else {
-                maxPosition = max(maxPosition, err)
-            }
-            maxVelRel = max(maxVelRel, velErr)
-        }
-        #endif
 
         return DifferentialSummary(
             samples: tracks.count,
@@ -315,6 +315,10 @@ public enum RuneGpuSpringsApp {
         runs: Int = 8,
         frames: Int = 120
     ) throws -> [BenchSummary] {
+        #if canImport(Metal) || os(Linux) || os(Windows)
+        guard counts.allSatisfy({ UInt32(exactly: $0) != nil }), runs >= 0, frames >= 0 else {
+            throw NSError(domain: "RuneGpuSprings", code: 5, userInfo: [NSLocalizedDescriptionKey: "Invalid spring benchmark dimensions"])
+        }
         #if canImport(Metal)
         let renderer = try MetalRenderer()
         let desc = MTLTextureDescriptor.texture2DDescriptor(
@@ -327,6 +331,8 @@ public enum RuneGpuSpringsApp {
         guard let targetTex = renderer.device.makeTexture(descriptor: desc) else {
             throw NSError(domain: "RuneGpuSprings", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate offscreen Metal texture"])
         }
+
+        #endif
 
         let xProp = Prop<Float>.custom(64, .spatial, name: "gpuSprings.x")
         let yProp = Prop<Float>.custom(65, .spatial, name: "gpuSprings.y")
@@ -359,6 +365,7 @@ public enum RuneGpuSpringsApp {
                 store.animate(id, aProp, to: 0.9, anim: .spring(fade))
                 tracks.append((tx, ty, ta))
             }
+            let initialStore = store
 
             let base: [RenderInstance] = (0..<n).map { i in
                 RenderInstance(
@@ -374,21 +381,32 @@ public enum RuneGpuSpringsApp {
             }
             var instances = base
 
-            let cpuRenderer = try MetalRenderer()
-            let gpuRenderer = try MetalRenderer()
-            gpuRenderer.withSprings(nodes: nodes, ids: ids, timeSeconds: 0.0)
+            let cpuRenderer = try SpringFrameRenderer()
+            #if !canImport(Metal)
+            defer { cpuRenderer.close() }
+            #endif
+            let gpuRenderer = try SpringFrameRenderer()
+            #if canImport(Metal)
+            gpuRenderer.withSprings(nodes: nodes, ids: ids, timeSeconds: 0)
+            #else
+            defer { gpuRenderer.close() }
+            if !nodes.isEmpty {
+                try gpuRenderer.withSprings(nodes: nodes, ids: ids, timeSeconds: 0)
+            }
+            #endif
 
             var cpuRunMedians: [Double] = []
             var gpuRunMedians: [Double] = []
             for run in 0..<runs {
                 for k in 0..<2 {
                     let path = (k + run) % 2
+                    if path == 0 { store = initialStore }
                     var stepUs: [Double] = []
                     for f in 0..<frames {
                         let now = Double(f) / 120.0
                         let t0 = ContinuousClock.now
                         let frame: RenderFrame
-                        let activeRenderer: MetalRenderer
+                        let activeRenderer: SpringFrameRenderer
                         if path == 0 {
                             store.tickAt(now)
                             for i in 0..<n {
@@ -408,6 +426,7 @@ public enum RuneGpuSpringsApp {
                             frame = RenderFrame(width: 512, height: 512, clearColor: .zero, instances: base)
                             activeRenderer = gpuRenderer
                         }
+                        #if canImport(Metal)
                         if let cb = activeRenderer.commandQueue.makeCommandBuffer() {
                             activeRenderer.drawRange(frame: frame, into: targetTex, commandBuffer: cb)
                             cb.commit()
@@ -416,6 +435,10 @@ public enum RuneGpuSpringsApp {
                         } else {
                             stepUs.append(us(t0.duration(to: .now)))
                         }
+                        #else
+                        let submittedAt = try activeRenderer.submitOffscreen(frame)
+                        stepUs.append(us(t0.duration(to: submittedAt)))
+                        #endif
                     }
                     if run > 0 || runs == 1 {
                         if path == 0 {
@@ -430,9 +453,11 @@ public enum RuneGpuSpringsApp {
             var maxDelta: UInt8 = 0
             for now in [0.0, 0.07, 0.31, 0.99] {
                 for i in 0..<n {
-                    let x = s.sample(from: 0, velocity: 0, target: 3.0 + Float(i % 7), at: Float(now)).position
-                    let y = s.sample(from: 0, velocity: 0, target: 2.0, at: Float(now)).position
-                    let a = min(max(fade.sample(from: 0.2, velocity: 0, target: 0.9, at: Float(now)).position, 0), 1)
+                    // Match the vertex inputs' split time and exact settle deadline on the CPU.
+                    let node = nodes[i]
+                    let x = node.x.sample(at: now).position
+                    let y = node.y.sample(at: now).position
+                    let a = min(max(node.opacity.sample(at: now).position, 0), 1)
                     var inst = base[i]
                     inst.rect.x += x
                     inst.rect.y += y
@@ -452,11 +477,11 @@ public enum RuneGpuSpringsApp {
             let animatingEnd = gpuRenderer.springsAnimating(at: 120.0)
             if n == 1 {
                 let staticNode = GPUSpringNode(x: .constant(0), y: .constant(0), opacity: .constant(1))
+                #if canImport(Metal)
                 gpuRenderer.updateSpringNode(index: 0, node: staticNode)
-                if gpuRenderer.springsAnimating(at: 0.5) {
-                    // Fallback until RenderPasses.GPUSpringBindings.updateNode recomputes `settleAt` across all nodes (#473).
-                    gpuRenderer.withSprings(nodes: [staticNode], ids: [0])
-                }
+                #else
+                try gpuRenderer.withSprings(nodes: [staticNode], ids: [0], timeSeconds: 0)
+                #endif
                 precondition(!gpuRenderer.springsAnimating(at: 0.5), "Replacing the last moving node must cancel its wake deadline")
             }
 
@@ -476,9 +501,15 @@ public enum RuneGpuSpringsApp {
     }
 
     public static func runPrimitivePixels() throws -> (kindsChecked: Int, maxDelta: UInt8) {
-        #if canImport(Metal)
-        let cpu = try MetalRenderer()
-        let fast = try MetalRenderer()
+        #if canImport(Metal) || os(Linux) || os(Windows)
+        let cpu = try SpringFrameRenderer()
+        #if !canImport(Metal)
+        defer { cpu.close() }
+        #endif
+        let fast = try SpringFrameRenderer()
+        #if !canImport(Metal)
+        defer { fast.close() }
+        #endif
         let s = Spring(duration: 0.4, bounce: 0.16)
         let fade = Spring(duration: 0.4, bounce: 0.0)
         let node = GPUSpringNode(
@@ -486,7 +517,11 @@ public enum RuneGpuSpringsApp {
             y: GPUSpringTrack(spring: s, initial: 0, velocity: 0, goal: 3.0, startSeconds: 0, epsilon: 0.001),
             opacity: GPUSpringTrack(spring: fade, initial: 0.2, velocity: 0, goal: 0.9, startSeconds: 0, epsilon: 0.00001)
         )
+        #if canImport(Metal)
         fast.withSprings(nodes: [node], ids: Array(repeating: UInt32(0), count: 8), timeSeconds: 0)
+        #else
+        try fast.withSprings(nodes: [node], ids: Array(repeating: UInt32(0), count: 8), timeSeconds: 0)
+        #endif
 
         var r8 = R8Atlas(width: 64, height: 64)
         r8.texels[0] = 255
@@ -540,9 +575,9 @@ public enum RuneGpuSpringsApp {
 
         var maxDelta: UInt8 = 0
         for now in [0.0, 0.07, 0.31, 0.99] {
-            let dx = s.sample(from: 0, velocity: 0, target: 6.0, at: Float(now)).position
-            let dy = s.sample(from: 0, velocity: 0, target: 3.0, at: Float(now)).position
-            let alpha = min(max(fade.sample(from: 0.2, velocity: 0, target: 0.9, at: Float(now)).position, 0), 1)
+            let dx = node.x.sample(at: now).position
+            let dy = node.y.sample(at: now).position
+            let alpha = min(max(node.opacity.sample(at: now).position, 0), 1)
             var expected = base
             for kind in 0..<8 {
                 expected[kind].rect.x += dx

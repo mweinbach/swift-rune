@@ -5,6 +5,7 @@
 #include "RuneAccessibility.h"
 #include "RuneMenus.h"
 #include "RuneWinPopup.h"
+#include "RuneWinGroupWake.h"
 #include "RuneDragSource.h"
 
 #ifdef __cplusplus

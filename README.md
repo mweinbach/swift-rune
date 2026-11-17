@@ -180,6 +180,8 @@ The same Swift view and runtime drive the Hello switch on desktop, Android, and 
 
 Applications can supply packed pixel surfaces and custom GPU effects. Direct3D texture sharing, native Vulkan and WebGPU integration require additional backends. The upstream map tracks remaining implementation differences at module level. [Upstream module map](.agents/skills/upstream-rune-sync/references/upstream-map.json)
 
+On macOS, Windows, and X11, `WindowHandle.placement()` reports the window's position and content bounds in physical pixels. Wayland gives the compositor control of global placement, so this call returns `nil` there. For a click-through overlay on Wayland, use a borderless window so the input region covers the whole visible surface.
+
 For a custom native GPU pass, attach a `Compositor` with `App.compositor(_:)` and mark its position in the view with `.effect(mark)`. Inside `render(frame:)`, `try frame.drawUI(withEffects:)` invokes your hook at each visible slot, before Rune paints later siblings. The hook receives the slot’s mark and device-pixel bounds, plus a Metal encoder on Apple or an OpenGL framebuffer and function resolver on Windows, Linux, and Android. Use `.effectBackdrop(true)` to sample earlier content. The target and backdrop belong to the current callback.
 
 | Platform | Backend / Shell (`Sources/Rune/`) | Build Command |
@@ -188,19 +190,19 @@ For a custom native GPU pass, attach a `Compositor` with `App.compositor(_:)` an
 | **iOS / iPadOS / tvOS / visionOS** (iOS 17+, tvOS 17+, visionOS 1+) | `IOSApp.swift` (`UIKit` / `CADisplayLink` / `Metal`) | `xcrun swift build --sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" --triple arm64-apple-ios17.0-simulator --target RuneKit` |
 | **Windows** | Win32 window and input, WGL / OpenGL 3.3 core, DirectWrite | `swift run rune-hello` in a Swift 6.4 Windows developer environment |
 | **Linux** | SDL2 on Wayland or X11, OpenGL 3.3 core, Pango / Cairo text, AT-SPI | `swift run rune-hello` in a graphical session |
-| **Android** | NativeActivity, ANativeWindow, EGL / OpenGL ES 3, Choreographer | `swift build --swift-sdk <android-sdk> --product RuneHelloAndroid` |
+| **Android** | NativeActivity, ANativeWindow, EGL / OpenGL ES 3, Choreographer | [Build the ARM64 library and install the APK](examples/android/README.md) |
 | **WebAssembly** (`wasm32-unknown-wasip1`) | `WebPlatform.swift` (WASI reactor, DOM input, WebGL 2 instanced renderer) | `./scripts/build-web.sh <wasip1-sdk> rune-hello` |
 
 On Ubuntu, install the native development packages before building.
 
 ```sh
-sudo apt install pkg-config libsdl2-dev libegl-dev libgles-dev libgl1-mesa-dri libpango1.0-dev libgtk-3-dev libatk-bridge2.0-dev libx11-dev libx11-xcb-dev libxcb1-dev libxext-dev libwayland-dev libwebp-dev liblcms2-dev libgstreamer-plugins-base1.0-dev
+sudo apt install pkg-config libsdl2-dev libegl-dev libgles-dev libgl1-mesa-dri libpango1.0-dev libgtk-3-dev libatk-bridge2.0-dev libx11-dev libx11-xcb-dev libxcb1-dev libxext-dev libxkbcommon-dev libwayland-dev libwebp-dev liblcms2-dev libgstreamer-plugins-base1.0-dev
 RUNE_GPU_INFO=1 swift run rune-hello
 ```
 
 The default `DesktopMedia` package trait enables playback and recording. Linux uses GStreamer. Windows uses Media Foundation for playback and AAC encoding and WASAPI for microphone input. On Ubuntu, install `gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good`, and `gstreamer1.0-libav` for AAC and H.264 playback. Install `gstreamer1.0-pulseaudio` for PulseAudio or PipeWire-Pulse output and microphone input, or `gstreamer1.0-alsa` for ALSA output. Recording M4A also needs an AAC encoder and MP4 muxer. For a UI-only build, use `swift build --disable-default-traits --product rune-hello`.
 
-The Linux window smoke test checks the displayed label and switch pixels before and after input and resize. It runs in an isolated X11 display, or inside Weston with `--wayland`. It requires `xvfb`, `xauth`, `xdotool`, `imagemagick`, `python3-xlib`, and a D-Bus session. Install `fonts-noto-color-emoji` for system color emoji. For system spelling suggestions, install `libenchant-2-2` and a dictionary such as `hunspell-en-us`.
+The Linux window smoke test checks the displayed label and switch pixels before and after input and resize. It requires `xvfb`, `xauth`, `xdotool`, `imagemagick`, `python3-xlib`, and a D-Bus session. Install `weston` for the Wayland test. Install `fonts-noto-color-emoji` for system color emoji. For system spelling suggestions, install `libenchant-2-2` and a dictionary such as `hunspell-en-us`.
 
 ```sh
 swift build --product rune-hello
@@ -296,7 +298,7 @@ Supported flags: `--snap <path>`, `--tree <path>`, `--scene <name>`, `--list-sce
 `swift-rune` tracks upstream `anomalyco/rune` parity using the `.upstream-sync.json` state file, the `.agents/skills/upstream-rune-sync` skill and its module map, and the `rune-parity` CLI.
 
 ```bash
-# 1. Verify every upstream crate, .rs/.wgsl file, theme, and example is mapped and present in Swift
+# 1. Check map coverage and the Swift paths referenced by the map
 xcrun swift run rune-parity status --upstream /path/to/rune
 
 # 2. Inspect upstream git commits since .upstream-sync.json and generate a Swift porting plan
@@ -312,7 +314,7 @@ xcrun swift run rune-parity compare-renders --rust-png /tmp/rust.png --swift-png
 xcrun swift run rune-parity record-sync --upstream /path/to/rune
 ```
 
-All `rune-parity` subcommands support `--json` for machine-readable output and exit non-zero on unmapped files, missing Swift paths, or visual/layout regressions.
+All `rune-parity` subcommands support `--json`. The `status` command checks that upstream files have a map entry and that referenced Swift paths exist. Entries marked `partial` or `missing` describe outstanding porting work. The `diff-commits` command reports mapped and unmapped changes. The `compare-renders` command exits nonzero when its visual or layout checks fail.
 
 ## License
 

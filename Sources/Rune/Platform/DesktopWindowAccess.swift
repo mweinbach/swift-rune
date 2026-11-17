@@ -72,7 +72,9 @@ final class DesktopWindowAccess: @unchecked Sendable {
             condition.broadcast()
             condition.unlock()
         }
+        condition.unlock()
         wake()
+        condition.lock()
         while answer == nil { condition.wait() }
         defer { condition.unlock() }
         return answer!

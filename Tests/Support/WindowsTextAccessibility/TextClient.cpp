@@ -147,6 +147,19 @@ static void checkEditor(IUIAutomationElement *editor) {
     Range document;
     check(pattern->get_DocumentRange(&document), "DocumentRange");
     require(document.Get() && read(document.Get()) == text, "Unexpected document text");
+    ComPtr<IUIAutomationTextRangeArray> visible;
+    check(pattern->GetVisibleRanges(&visible), "GetVisibleRanges");
+    require(visible.Get() != nullptr, "Missing visible ranges");
+    int visibleCount = 0;
+    check(visible->get_Length(&visibleCount), "Visible range count");
+    std::wstring visibleText;
+    for (int i = 0; i < visibleCount; ++i) {
+        Range range;
+        check(visible->GetElement(i, &range), "Visible range");
+        require(range.Get() != nullptr, "Missing visible range");
+        visibleText += read(range.Get());
+    }
+    require(visibleText == text, "Visible ranges do not cover the complete Unicode field");
 
     const auto start = TextPatternRangeEndpoint_Start, end = TextPatternRangeEndpoint_End;
     Range reversed = selection(pattern.Get()), initialCaret;
@@ -233,7 +246,7 @@ static void run(DWORD pid) {
     }, "The Swift fixture did not publish its text fields", 120000);
     checkEditor(editor.Get());
     checkPassword(password.Get());
-    std::puts("Rune UIA verified Unicode document/value, grapheme movement, screen hit testing, backward/forward selection, caret and password redaction.");
+    std::puts("Rune UIA verified Unicode document/value and visible ranges, grapheme movement, screen hit testing, backward/forward selection, caret and password redaction.");
 }
 
 int main(int argc, char **argv) {

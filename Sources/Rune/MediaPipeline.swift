@@ -840,7 +840,7 @@ public final class VideoPlayer: @unchecked Sendable {
         }
     }
 
-    /// The decoder supplies tightly packed BGRA in stored orientation. The public
+    /// The decoder supplies tightly packed BGRA and its remaining rotation. The public
     /// VideoPixelFrame contract uses upright RGBA, as does AVAssetImageGenerator.
     private static func uprightFrame(_ frame: ByteFrame, orientation o: Orient,
                                      time: Double, index: UInt64) -> VideoPixelFrame {

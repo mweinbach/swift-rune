@@ -12,9 +12,9 @@ extern "C" {
 typedef struct RuneMedia RuneMedia;
 
 typedef struct RuneMediaInfo {
-    uint32_t width, height; /* stored dimensions; zero for audio-only */
+    uint32_t width, height; /* decoded buffer dimensions; zero for audio-only */
     int has_audio;
-    int rotation_clockwise; /* clockwise degrees to display the stored image upright */
+    int rotation_clockwise; /* remaining clockwise degrees to display decoded pixels upright */
     double duration; /* seconds, negative if unknown */
     double frame_duration; /* seconds, zero if unknown */
 } RuneMediaInfo;
@@ -28,7 +28,8 @@ RuneMedia *rune_media_open(const char *uri, int audio_only, int headless,
                            RuneMediaInfo *info, char *error, size_t capacity);
 void rune_media_close(RuneMedia *media);
 
-/* Copy tightly packed, top-down BGRA8 in original stored orientation into pixels.
+/* Copy tightly packed, top-down BGRA8 into pixels. The native decoder may
+ * already have applied all or part of the encoded track's display rotation.
  * Seconds >= 0 selects a frame by timestamp; negative retrieves the current
  * playing or paused sample without issuing an additional seek.
  * Return 1 for a frame, 0 if no frame is ready, -1 on failure. */

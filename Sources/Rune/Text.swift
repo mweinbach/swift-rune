@@ -18,6 +18,40 @@ public enum FontFamily: Sendable, Hashable, Codable {
 
     public static let systemMono: FontFamily = .monospace
     public static func named(_ name: String) -> FontFamily { .custom(name) }
+
+    /// A named stack falls back to the app's sans slot, just as Rune's paragraph shaper does.
+    internal func stack(sans: String, mono: String) -> String {
+        let sans = sans.isEmpty ? DefaultFonts.sansFamily : sans
+        switch self {
+        case .systemUI: return sans
+        case .monospace: return mono.isEmpty ? DefaultFonts.monoFamily : mono
+        case .custom(let names): return names.isEmpty || names == sans ? sans : names + ", " + sans
+        }
+    }
+
+    /// CoreText looks up individual names. Pango accepts an unquoted, comma-separated list.
+    internal static func candidates(in stack: String) -> [String] {
+        var result: [String] = []
+        var name = ""
+        var quote: Character?
+        var characters = stack.makeIterator()
+        while let character = characters.next() {
+            if character == "\\", let escaped = characters.next() {
+                name.append(escaped)
+            } else if let delimiter = quote {
+                if character == delimiter { quote = nil } else { name.append(character) }
+            } else if (character == "'" || character == "\"") && name.allSatisfy(\.isWhitespace) {
+                quote = character
+            } else if character == "," {
+                result.append(name.trimmingCharacters(in: .whitespacesAndNewlines))
+                name = ""
+            } else {
+                name.append(character)
+            }
+        }
+        result.append(name.trimmingCharacters(in: .whitespacesAndNewlines))
+        return result.filter { !$0.isEmpty }
+    }
 }
 
 /// Optical sizing mode for variable/CoreText fonts (`rune::tok::OpticalSize`).
@@ -3096,14 +3130,17 @@ public final class TextSystem: @unchecked Sendable {
         return 0.62
     }
 
-    private static func firstMatchingFont(in cssList: String, sizePx: CGFloat) -> CTFont? {
-        for raw in cssList.split(separator: ",") {
-            let name = raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"'")))
-            guard !name.isEmpty else { continue }
+    private static func firstMatchingFont(in families: [String], sizePx: CGFloat) -> CTFont? {
+        for name in families {
+            // Apple's public name for San Francisco resolves to a private family and PostScript name.
+            if name.caseInsensitiveCompare("System Font") == .orderedSame {
+                return CTFontCreateWithName("System Font" as CFString, sizePx, nil)
+            }
             let font = CTFontCreateWithName(name as CFString, sizePx, nil)
             let resolvedName = CTFontCopyFamilyName(font) as String
             if resolvedName.caseInsensitiveCompare(name) == .orderedSame ||
-                (CTFontCopyPostScriptName(font) as String).caseInsensitiveCompare(name) == .orderedSame {
+                (CTFontCopyPostScriptName(font) as String).caseInsensitiveCompare(name) == .orderedSame ||
+                (CTFontCopyFullName(font) as String).caseInsensitiveCompare(name) == .orderedSame {
                 return font
             }
         }
@@ -3190,21 +3227,12 @@ public final class TextSystem: @unchecked Sendable {
 
         DefaultFonts.registerIfNeeded()
 
-        let baseFont: CTFont
-        switch style.family {
-        case .systemUI:
-            let effectiveSans = families.sans.isEmpty ? DefaultFonts.sansFamily : families.sans
-            baseFont = Self.firstMatchingFont(in: effectiveSans, sizePx: CGFloat(sizePx))
-                ?? CTFontCreateUIFontForLanguage(.system, CGFloat(sizePx), nil)
-                ?? CTFontCreateWithName("SFProText-Regular" as CFString, CGFloat(sizePx), nil)
-        case .monospace:
-            let effectiveMono = families.mono.isEmpty ? DefaultFonts.monoFamily : families.mono
-            baseFont = Self.firstMatchingFont(in: effectiveMono, sizePx: CGFloat(sizePx))
-                ?? CTFontCreateUIFontForLanguage(.userFixedPitch, CGFloat(sizePx), nil)
-                ?? CTFontCreateWithName("Menlo-Regular" as CFString, CGFloat(sizePx), nil)
-        case .custom(let name):
-            baseFont = CTFontCreateWithName(name as CFString, CGFloat(sizePx), nil)
-        }
+        let stack = style.family.stack(sans: families.sans, mono: families.mono)
+        let candidates = FontFamily.candidates(in: stack)
+        let mono = style.family == .monospace
+        let baseFont = Self.firstMatchingFont(in: candidates, sizePx: CGFloat(sizePx))
+            ?? CTFontCreateUIFontForLanguage(mono ? .userFixedPitch : .system, CGFloat(sizePx), nil)
+            ?? CTFontCreateWithName((mono ? "Menlo-Regular" : "SFProText-Regular") as CFString, CGFloat(sizePx), nil)
 
         let familyName = CTFontCopyFamilyName(baseFont) as String
         let featureSettings = Self.parseOpenTypeFeatures(style.features)
@@ -5785,6 +5813,7 @@ public final class TextSystem: @unchecked Sendable {
         let nativeFamilies = families()
         let cutsCodePadding = style.family != .monospace && spanEntries.contains { $0.span.monospace }
         let hasDecorations = spanEntries.contains { $0.span.background != nil || $0.span.underline || $0.span.strikethrough }
+        let tabs = DesktopTabStops(fullText) { style.family == .monospace || spanAt(utf8Offset: $0)?.monospace == true }
         var nativeWidths: [Int: DesktopTextLine.Cell] = [:]
         var paragraphLayouts: [Int: (text: String, line: DesktopTextLine)] = [:]
         func desktopLine(_ text: String, start: Int, rtl: Bool? = nil,
@@ -5793,7 +5822,7 @@ public final class TextSystem: @unchecked Sendable {
             var lineStyle = style
             if let rtl { lineStyle.direction = rtl ? .rtl : .ltr }
             return DesktopTextLine(text: text, start: start, style: lineStyle, families: nativeFamilies, language: language,
-                scale: scale, faceBoxes: faceBoxes, cutsCodePadding: cutsCodePadding, pillRanges: pillRanges,
+                scale: scale, faceBoxes: faceBoxes, cutsCodePadding: cutsCodePadding, pillRanges: pillRanges, tabs: tabs,
                 span: { spanAt(utf8Offset: $0) }, stretch: stretch, extra: { byte, end in
                     (leadExtra(atUTF8: byte), trailExtra(endingAtUTF8: end))
                 })

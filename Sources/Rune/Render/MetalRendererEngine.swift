@@ -329,13 +329,16 @@ internal final class RenderFrameEngine {
         }
     }
 
-    func selectCache(for frame: RenderFrame, viewport: (Int, Int)? = nil, command: MTLCommandBuffer? = nil) -> MetalRenderer.RendererError? {
+    func selectCache(for frame: RenderFrame, viewport: (Int, Int)? = nil, command: MTLCommandBuffer? = nil) -> (any Error)? {
+        do {
+            try MetalTextureLimits.validate(frame, viewport: viewport, on: device)
+        } catch { return error }
         let ordered = layersPool.canUseTextures(in: command)
-        if !ordered, let first = frame.elidedLayers.first { return .missingCachedLayer(first.node) }
+        if !ordered, let first = frame.elidedLayers.first { return MetalRenderer.RendererError.missingCachedLayer(first.node) }
         // A prepared plan can retire a cache belonging to a clipped-out layer. Its visible
         // layers have already been validated and remain usable while the plan is current.
         if !frame.elidedLayers.isEmpty, !hasPlan(for: frame, viewport: viewport ?? (frame.width, frame.height)),
-           let missing = layersPool.missingLayer(in: frame) { return .missingCachedLayer(missing) }
+           let missing = layersPool.missingLayer(in: frame) { return MetalRenderer.RendererError.missingCachedLayer(missing) }
         layersPool.registerTracker(frame.residentTracker)
         uploader.selectRuntime(frame.residentTracker)
         if !ordered {
@@ -346,22 +349,27 @@ internal final class RenderFrameEngine {
         return nil
     }
 
-    func prepare(frame: RenderFrame, viewport: (Int, Int)) {
-        guard selectCache(for: frame, viewport: viewport) == nil else { return }
+    func prepare(frame: RenderFrame, viewport: (Int, Int)) -> Result<Void, Error> {
+        if let error = selectCache(for: frame, viewport: viewport) { return .failure(error) }
         let vw = max(1, viewport.0)
         let vh = max(1, viewport.1)
         lastViewportSize = (vw, vh)
         if !hasExplicitFormat {
             currentFormat = frame.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
         }
-        _ = uploader.syncGlyphAtlas(device: device, atlas: frame.glyphs, generation: frame.glyphGeneration)
-        let preparedPages = uploader.syncImagePages(
-            device: device,
-            pages: frame.imagePages,
-            fallback: frame.images,
-            revision: frame.imageRevision,
-            patch: frame.imagePatch
-        )
+        guard uploader.syncGlyphAtlas(device: device, atlas: frame.glyphs, generation: frame.glyphGeneration) != nil else {
+            return .failure(MetalRenderer.RendererError.textureAllocationFailed(
+                resource: "Glyph atlas", width: frame.glyphs.width, height: frame.glyphs.height
+            ))
+        }
+        let preparedPages: [MTLTexture]
+        do {
+            preparedPages = try uploader.requiredImagePages(
+                device: device, pages: frame.imagePages, fallback: frame.images, revision: frame.imageRevision, patch: frame.imagePatch
+            )
+        } catch {
+            return .failure(error)
+        }
         _ = uploader.ensureInstanceBuffer(device: device, instances: frame.instances)
         uploader.prepareBatches(instances: frame.instances, glyphPageCount: 1, imagePageCount: max(1, preparedPages.count))
 
@@ -387,6 +395,7 @@ internal final class RenderFrameEngine {
                 ensureBackdrop(format: .rgba16Float, size: (vw, vh))
             }
         }
+        return .success(())
     }
 
     func setFormat(_ format: MTLPixelFormat) {
@@ -411,10 +420,10 @@ internal final class RenderFrameEngine {
         backdropHook: EffectBackdropHook?,
         range: Range<Int>? = nil,
         defaultUI: Bool = false
-    ) {
+    ) -> Result<Void, Error> {
         let targetW = max(1, target.width)
         let targetH = max(1, target.height)
-        guard selectCache(for: frame, viewport: (targetW, targetH), command: commandBuffer) == nil else { return }
+        if let error = selectCache(for: frame, viewport: (targetW, targetH), command: commandBuffer) { return .failure(error) }
         lastViewportSize = (targetW, targetH)
         let viewport = SIMD2<Float>(Float(targetW), Float(targetH))
         if !hasPlan(for: frame, viewport: (targetW, targetH)) {
@@ -428,26 +437,31 @@ internal final class RenderFrameEngine {
             }
         }
 
-        let glyphTex = uploader.syncGlyphAtlas(device: device, atlas: frame.glyphs, generation: frame.glyphGeneration)
-        let imagePages = uploader.syncImagePages(
-            device: device,
-            pages: frame.imagePages,
-            fallback: frame.images,
-            revision: frame.imageRevision,
-            patch: frame.imagePatch
-        )
+        guard let glyphTex = uploader.syncGlyphAtlas(device: device, atlas: frame.glyphs, generation: frame.glyphGeneration) else {
+            return .failure(MetalRenderer.RendererError.textureAllocationFailed(
+                resource: "Glyph atlas", width: frame.glyphs.width, height: frame.glyphs.height
+            ))
+        }
+        let imagePages: [MTLTexture]
+        do {
+            imagePages = try uploader.requiredImagePages(
+                device: device, pages: frame.imagePages, fallback: frame.images, revision: frame.imageRevision, patch: frame.imagePatch
+            )
+        } catch {
+            return .failure(error)
+        }
         uploader.atlasesRead(by: commandBuffer)
         let imageTex = imagePages.first ?? uploader.imageTexture
         let instances = frame.instances
         guard let instanceBuffer = uploader.ensureInstanceBuffer(device: device, instances: instances, readBy: commandBuffer) else {
-            return
+            return .failure(MetalRenderer.RendererError.metalUnavailable)
         }
         uploader.prepareBatches(instances: instances, glyphPageCount: 1, imagePageCount: max(1, imagePages.count))
 
         if let r = range {
             let clamped = r.clamped(to: 0..<instances.count)
             if clamped.isEmpty && r.upperBound != instances.count {
-                return
+                return .success(())
             }
         }
         let sliceRange = range?.clamped(to: 0..<instances.count) ?? (0..<instances.count)
@@ -469,7 +483,8 @@ internal final class RenderFrameEngine {
         if let sr = surfaceRenderer {
             sr.srgbBlend = frame.srgbBlend
             if !frame.surfaces.isEmpty {
-                sr.prepare(draws: frame.surfaces, viewport: (UInt32(targetW), UInt32(targetH)))
+                let result = sr.prepare(draws: frame.surfaces, viewport: (UInt32(targetW), UInt32(targetH)))
+                if case .failure(let error) = result { return .failure(error) }
             }
         }
 
@@ -544,7 +559,7 @@ internal final class RenderFrameEngine {
             g.projection = scope.projection
             enc.setVertexBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
             enc.setFragmentBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
-            if let gt = glyphTex { enc.setFragmentTexture(gt, index: 0) }
+            enc.setFragmentTexture(glyphTex, index: 0)
             if imagePages.count > 1 && !uploader.imageBatches.isEmpty {
                 for (batchRange, bind) in uploader.imageBatches {
                     let lo = max(start, batchRange.lowerBound)
@@ -661,7 +676,7 @@ internal final class RenderFrameEngine {
                 enc.setVertexBytes(&compositeInst, length: MemoryLayout<RenderInstance>.stride, index: 0)
                 enc.setVertexBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
                 enc.setFragmentBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
-                if let gt = glyphTex { enc.setFragmentTexture(gt, index: 0) }
+                enc.setFragmentTexture(glyphTex, index: 0)
                 enc.setFragmentTexture(source, index: 1)
                 enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                 enc.endEncoding()
@@ -1033,12 +1048,13 @@ internal final class RenderFrameEngine {
         if !frame.surfaces.isEmpty {
             surfaceRenderer?.trackSubmission(commandBuffer: commandBuffer)
         }
+        return .success(())
     }
 
     func renderOffscreen(
         _ frame: RenderFrame,
         commandQueue: MTLCommandQueue,
-        encode: (MTLTexture, MTLCommandBuffer) -> Void
+        encode: (MTLTexture, MTLCommandBuffer) throws -> Void
     ) throws -> Frame {
         if let error = selectCache(for: frame) { throw error }
         let w = max(1, frame.width)
@@ -1052,12 +1068,14 @@ internal final class RenderFrameEngine {
         )
         texDesc.usage = [.renderTarget, .shaderRead]
         texDesc.storageMode = .shared
-        guard let targetTex = device.makeTexture(descriptor: texDesc),
-              let cmdBuf = commandQueue.makeCommandBuffer() else {
+        guard let targetTex = device.makeTexture(descriptor: texDesc) else {
+            throw MetalRenderer.RendererError.textureAllocationFailed(resource: "Render target", width: w, height: h)
+        }
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else {
             throw MetalRenderer.RendererError.metalUnavailable
         }
 
-        encode(targetTex, cmdBuf)
+        try encode(targetTex, cmdBuf)
         gpuLoss.attach(to: cmdBuf)
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
@@ -1105,17 +1123,19 @@ extension MetalRenderer {
     }
 
     /// Renders an upstream-parity `RenderFrame` into a `CAMetalDrawable` and presents it.
+    @discardableResult
     public func draw(
         frame: RenderFrame,
         to drawable: CAMetalDrawable,
         hook: EffectHook? = nil,
         backdropHook: EffectBackdropHook? = nil,
         synchronized: Bool = false
-    ) {
+    ) -> Result<Void, Error> {
         let viewport = (drawable.texture.width, drawable.texture.height)
-        guard renderEngine.selectCache(for: frame, viewport: viewport) == nil,
-              let cmdBuf = commandQueue.makeCommandBuffer() else { return }
-        encodeUI(frame: frame, into: drawable.texture, commandBuffer: cmdBuf, hook: hook, backdropHook: backdropHook)
+        if let error = renderEngine.selectCache(for: frame, viewport: viewport) { return .failure(error) }
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return .failure(RendererError.metalUnavailable) }
+        let encoded = encodeUI(frame: frame, into: drawable.texture, commandBuffer: cmdBuf, hook: hook, backdropHook: backdropHook)
+        if case .failure = encoded { return encoded }
         renderEngine.gpuLoss.attach(to: cmdBuf)
         if synchronized {
             cmdBuf.commit()
@@ -1126,16 +1146,18 @@ extension MetalRenderer {
             cmdBuf.commit()
         }
         GpuEvents.presented()
+        return .success(())
     }
 
     /// Draws the default UI into its known root target, including a compositor's drawUI callback.
+    @discardableResult
     internal func encodeUI(
         frame: RenderFrame,
         into target: MTLTexture,
         commandBuffer: MTLCommandBuffer,
         hook: EffectHook? = nil,
         backdropHook: EffectBackdropHook? = nil
-    ) {
+    ) -> Result<Void, Error> {
         renderEngine.draw(
             frame: frame, into: target, commandBuffer: commandBuffer,
             surfaceRenderer: acquireSurfaceRenderer(pixelFormat: target.pixelFormat),
@@ -1144,14 +1166,15 @@ extension MetalRenderer {
     }
 
     /// Encodes a `RenderFrame` into `target` without committing (matches `render::Renderer::draw_range`).
+    @discardableResult
     public func drawRange(
         frame: RenderFrame,
         into target: MTLTexture,
         commandBuffer: MTLCommandBuffer,
         range: Range<Int>? = nil
-    ) {
+    ) -> Result<Void, Error> {
         let sr = acquireSurfaceRenderer(pixelFormat: target.pixelFormat)
-        renderEngine.draw(
+        return renderEngine.draw(
             frame: frame,
             into: target,
             commandBuffer: commandBuffer,
@@ -1163,15 +1186,16 @@ extension MetalRenderer {
     }
 
     /// Encodes a `RenderFrame` with an `EffectHook` callback (`render::Renderer::draw_range_with`).
+    @discardableResult
     public func drawRangeWith(
         frame: RenderFrame,
         into target: MTLTexture,
         commandBuffer: MTLCommandBuffer,
         range: Range<Int>? = nil,
         hook: EffectHook?
-    ) {
+    ) -> Result<Void, Error> {
         let sr = acquireSurfaceRenderer(pixelFormat: target.pixelFormat)
-        renderEngine.draw(
+        return renderEngine.draw(
             frame: frame,
             into: target,
             commandBuffer: commandBuffer,
@@ -1183,14 +1207,15 @@ extension MetalRenderer {
     }
 
     /// Encodes a `RenderFrame` with a two-phase `EffectBackdropHook` (`render::Renderer::draw_with_backdrop`).
+    @discardableResult
     public func drawWithBackdrop(
         frame: RenderFrame,
         into target: MTLTexture,
         commandBuffer: MTLCommandBuffer,
         hook: EffectBackdropHook?
-    ) {
+    ) -> Result<Void, Error> {
         let sr = acquireSurfaceRenderer(pixelFormat: target.pixelFormat)
-        renderEngine.draw(
+        return renderEngine.draw(
             frame: frame,
             into: target,
             commandBuffer: commandBuffer,
@@ -1207,7 +1232,7 @@ extension MetalRenderer {
         backdropHook: EffectBackdropHook? = nil
     ) throws -> Frame {
         try renderEngine.renderOffscreen(frame, commandQueue: commandQueue) { target, commands in
-            encodeUI(frame: frame, into: target, commandBuffer: commands, hook: hook, backdropHook: backdropHook)
+            try encodeUI(frame: frame, into: target, commandBuffer: commands, hook: hook, backdropHook: backdropHook).get()
         }
     }
 
@@ -1242,7 +1267,8 @@ extension MetalRenderer {
         renderEngine.backdrops.map(\.texture)
     }
 
-    public func prepare(frame: RenderFrame, viewport: (Int, Int)) {
+    @discardableResult
+    public func prepare(frame: RenderFrame, viewport: (Int, Int)) -> Result<Void, Error> {
         renderEngine.prepare(frame: frame, viewport: viewport)
     }
 

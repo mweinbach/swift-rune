@@ -291,12 +291,20 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
             updateEnd = CACurrentMediaTime()
             primitives = frame.instances.count
             glyphs = reports == nil ? 0 : frame.instances.reduce(0) { $0 + ($1.params.y == KIND_GLYPH ? 1 : 0) }
-            if let compositor {
-                draws = gpu.encodeCompositor(compositor, frame: frame, into: drawable.texture,
-                                             commandBuffer: commands, runtime: runtime, dt: dt,
-                                             updateMilliseconds: (updateEnd - start) * 1000)
-            } else {
-                gpu.encodeUI(frame: frame, into: drawable.texture, commandBuffer: commands)
+            do {
+                if let compositor {
+                    draws = try gpu.encodeCompositor(compositor, frame: frame, into: drawable.texture,
+                                                     commandBuffer: commands, runtime: runtime, dt: dt,
+                                                     updateMilliseconds: (updateEnd - start) * 1000)
+                } else {
+                    try gpu.encodeUI(frame: frame, into: drawable.texture, commandBuffer: commands).get()
+                }
+            } catch {
+                RuneStandardIO.error("Could not present Rune frame: \(error)\n")
+                reports?.skipped()
+                _ = runtime.surfaceMeter?.skipped()
+                frameFinished?(runtime.isAnimating)
+                return
             }
             gpu.renderEngine.gpuLoss.attach(to: commands)
             commands.present(drawable)

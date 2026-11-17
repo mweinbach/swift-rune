@@ -136,6 +136,21 @@ struct RunePlatformIncrement2Tests {
             window.close()
         }
     }
+
+    @MainActor @Test("AppKit applies panel, chrome and input options before showing a window")
+    func appKitAppliesWindowOptions() {
+        _ = NSApplication.shared
+        let options = WindowOptions(resizable: false, closable: false, minimizable: false, transparent: true,
+                                    hasShadow: false, alwaysOnTop: true, clickThrough: true, visible: false)
+        let macos = MacWindowOptions(hidesTitle: true, movableByWindowBackground: true, nonactivatingPanel: true)
+        let window = RuneMacWindowConfig.makeWindow(title: "Panel", size: Vec2(640, 500), minSize: nil,
+            chrome: .standard, titlebar: nil, options: options, macos: macos, openAs: .normal)
+        defer { window.close() }
+        #expect(window is NSPanel && !window.isVisible)
+        #expect(window.styleMask.intersection([.closable, .miniaturizable, .resizable]).isEmpty)
+        #expect(window.ignoresMouseEvents && !window.isOpaque && !window.hasShadow)
+        #expect(window.level == .floating && window.titleVisibility == .hidden && window.isMovableByWindowBackground)
+    }
     #endif
 
     @Test("WindowOptions: overlay preset targets display bounds")

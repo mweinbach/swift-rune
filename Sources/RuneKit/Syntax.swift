@@ -475,8 +475,7 @@ public struct SyntaxTheme: Sendable, Equatable, Hashable {
                 let text = sliceUTF8(code, from: start, to: end)
                 if !text.isEmpty {
                     let w: Float? = if case .kind(let k) = h.paint { weight(for: k) } else { nil }
-                    let isItalic: Bool = if case .kind(.comment) = h.paint { true } else { false }
-                    result.append(TextSpan(text, color: paint(h.paint), weight: w, italic: isItalic, monospace: monospace))
+                    result.append(TextSpan(text, color: paint(h.paint), weight: w, monospace: monospace))
                 }
             }
             cursor = end

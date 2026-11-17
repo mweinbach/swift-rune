@@ -6,18 +6,30 @@ extension MetalRenderer {
     /// Presents the default UI or the window's compositor, in the same transaction as native material changes.
     func present<State>(frame: RenderFrame, drawable: CAMetalDrawable, compositor: AnyCompositor<State>?,
                         runtime: Runtime<State>, dt: Float, updateMilliseconds: Double, synchronized: Bool) -> Int {
-        guard renderEngine.selectCache(for: frame, viewport: (drawable.texture.width, drawable.texture.height)) == nil else { return 0 }
+        if let error = renderEngine.selectCache(for: frame, viewport: (drawable.texture.width, drawable.texture.height)) {
+            RuneStandardIO.error("Could not present Rune frame: \(error)\n")
+            return 0
+        }
         if synchronized {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
         }
         defer { if synchronized { CATransaction.commit() } }
         guard let compositor, let buffer = commandQueue.makeCommandBuffer() else {
-            draw(frame: frame, to: drawable, synchronized: synchronized)
+            if case let .failure(error) = draw(frame: frame, to: drawable, synchronized: synchronized) {
+                RuneStandardIO.error("Could not present Rune frame: \(error)\n")
+                return 0
+            }
             return 1
         }
-        let count = encodeCompositor(compositor, frame: frame, into: drawable.texture, commandBuffer: buffer,
-                                     runtime: runtime, dt: dt, updateMilliseconds: updateMilliseconds)
+        let count: Int
+        do {
+            count = try encodeCompositor(compositor, frame: frame, into: drawable.texture, commandBuffer: buffer,
+                                         runtime: runtime, dt: dt, updateMilliseconds: updateMilliseconds)
+        } catch {
+            RuneStandardIO.error("Could not present Rune frame: \(error)\n")
+            return 0
+        }
         if synchronized {
             buffer.commit()
             buffer.waitUntilScheduled()
@@ -32,20 +44,28 @@ extension MetalRenderer {
     /// Encodes a custom compositor into a window drawable or an offscreen capture texture.
     func encodeCompositor<State>(_ compositor: AnyCompositor<State>, frame: RenderFrame,
                                  into texture: MTLTexture, commandBuffer: MTLCommandBuffer,
-                                 runtime: Runtime<State>, dt: Float, updateMilliseconds: Double) -> Int {
+                                 runtime: Runtime<State>, dt: Float, updateMilliseconds: Double) throws -> Int {
+        var drawError: (any Error)?
+        func drawUI(hook: EffectHook? = nil) {
+            guard drawError == nil else { return }
+            if case let .failure(error) = encodeUI(frame: frame, into: texture, commandBuffer: commandBuffer, hook: hook) {
+                drawError = error
+            }
+        }
         let context = CompositorFrame(
             deviceKey: DeviceKey(rawValue: device.registryID), pixelSize: (texture.width, texture.height),
             dt: dt, updateMilliseconds: updateMilliseconds, srgbBlend: frame.srgbBlend, runtime: runtime,
             device: device, commandQueue: commandQueue, commandBuffer: commandBuffer, targetTexture: texture,
             pixelFormat: texture.pixelFormat, renderer: self,
-            drawUI: { self.encodeUI(frame: frame, into: texture, commandBuffer: commandBuffer) }
+            drawUI: { drawUI() }
         )
         context.installMetalEffects { hook in
-            self.encodeUI(frame: frame, into: texture, commandBuffer: commandBuffer, hook: hook)
+            drawUI(hook: hook)
         }
         defer { context.endFrame() }
         compositor.render(frame: context)
         if !compositor.drawsOwnContent && context.uiDrawCount == 0 { context.drawUI() }
+        if let drawError { throw drawError }
         return context.uiDrawCount
     }
 }

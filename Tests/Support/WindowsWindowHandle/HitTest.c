@@ -11,7 +11,8 @@
 #include <stdio.h>
 #include "CRuneWin32.h"
 
-static const int x = 131, y = 147, width = 100, height = 78;
+static const int width = 100, height = 78;
+static int x, y;
 static HWND below;
 
 static DWORD WINAPI background_window(void *ready) {
@@ -22,7 +23,7 @@ static DWORD WINAPI background_window(void *ready) {
         below = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, target.lpszClassName, L"Rune input target",
                                 WS_POPUP, x, y, width, height, NULL, NULL, target.hInstance, NULL);
     }
-    if (below) SetWindowPos(below, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    if (below) SetWindowPos(below, HWND_NOTOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     SetEvent(ready);
     MSG message;
     while (below && GetMessageW(&message, NULL, 0, 0) > 0) DispatchMessageW(&message);
@@ -32,23 +33,37 @@ static DWORD WINAPI background_window(void *ready) {
 
 static int present_and_hit(RuneWinWindow *window, int color, POINT point, HWND expected) {
     if (!rune_win_make_current(window)) return 0;
-    glClearColor(color == 0, color == 1, color == 2, 1);
-    glClear(GL_COLOR_BUFFER_BIT);
-    unsigned char pixel[4] = {0};
-    glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
-    if (glGetError() || pixel[color] != 255 || !rune_win_swap(window)) return 0;
-    DwmFlush();
-    HDC screen = GetDC(NULL);
-    COLORREF visible = GetPixel(screen, point.x, point.y);
-    ReleaseDC(NULL, screen);
-    int hit = WindowFromPoint(point) == expected;
-    int shown = visible == RGB(color == 0 ? 255 : 0, color == 1 ? 255 : 0, color == 2 ? 255 : 0);
+    COLORREF target = RGB(color == 0 ? 255 : 0, color == 1 ? 255 : 0, color == 2 ? 255 : 0);
+    int hit = 0, shown = 0;
+    ULONGLONG deadline = GetTickCount64() + 2500;
+    do {
+        MSG message;
+        while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE)) DispatchMessageW(&message);
+        glClearColor(color == 0, color == 1, color == 2, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        unsigned char pixel[4] = {0};
+        glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+        if (glGetError() || pixel[color] != 255 || !rune_win_swap(window)) return 0;
+        DwmFlush();
+        hit = WindowFromPoint(point) == expected;
+        if (hit) {
+            HDC screen = GetDC(NULL);
+            shown = GetPixel(screen, point.x, point.y) == target;
+            ReleaseDC(NULL, screen);
+        }
+        if (hit && shown) break;
+        Sleep(16);
+    } while (GetTickCount64() < deadline);
     printf("frame %d: target %s, composed pixel %s\n", color, hit ? "correct" : "wrong", shown ? "correct" : "wrong");
     return hit && shown;
 }
 
 int main(void) {
     SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    RECT workspace;
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &workspace, 0)) return 1;
+    x = workspace.left + (workspace.right - workspace.left - width) * 3 / 4;
+    y = workspace.top + (workspace.bottom - workspace.top - height) * 3 / 4;
     HANDLE ready = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!ready) return 1;
     DWORD thread_id;
@@ -63,6 +78,7 @@ int main(void) {
         rune_win_configure(window, options);
         HWND overlay = rune_win_hwnd(window);
         SetWindowPos(overlay, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SetWindowPos(below, overlay, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
         POINT point = {x + 33, y + 33};
         passed = present_and_hit(window, 0, point, overlay)
               && rune_win_click_through(window, 1) && present_and_hit(window, 1, point, below)

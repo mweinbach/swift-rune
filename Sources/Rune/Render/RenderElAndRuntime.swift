@@ -442,7 +442,7 @@ private func hashCachedLayerContent(
     blurPx: Float,
     srgbBlend: Bool,
     glyphAtlasSize: (Int, Int),
-    imageAtlasSize: (Int, Int),
+    imageVersion: (SIMD4<Float>) -> UInt64,
     userKey: UInt64?
 ) -> UInt64 {
     var h: UInt64 = 0xCBF2_9CE4_8422_2325
@@ -454,8 +454,6 @@ private func hashCachedLayerContent(
     fnvMix(&h, srgbBlend ? 1 : 0)
     fnvMix(&h, UInt64(glyphAtlasSize.0))
     fnvMix(&h, UInt64(glyphAtlasSize.1))
-    fnvMix(&h, UInt64(imageAtlasSize.0))
-    fnvMix(&h, UInt64(imageAtlasSize.1))
     if let uk = userKey {
         fnvMix(&h, 1)
         fnvMix(&h, uk)
@@ -482,6 +480,10 @@ private func hashCachedLayerContent(
             fnvMixFloat4(&h, SIMD4<Float>(inst.uv.x - origin.x, inst.uv.y - origin.y, inst.uv.z, inst.uv.w))
         } else {
             fnvMixFloat4(&h, inst.uv)
+        }
+        if kind == KIND_IMAGE {
+            // Cropped images retain their complete allocation in the border field.
+            fnvMix(&h, imageVersion(inst.border == .zero ? inst.uv : inst.border))
         }
         if inst.clip == NO_CLIP {
             fnvMix(&h, 0xDEAD_BEEF)
@@ -660,10 +662,15 @@ extension Runtime {
             Theme.withBlend(srgbBlend) {
                 let timer = beginFrameTimers(at: now)
                 var (frameOut, animNow) = stepToFrameOutputScaled(at: now, skipFramePoll: timer.alreadyPolled)
-                var rf = buildRenderFrame(frameOut: frameOut, now: animNow, publishHitGeometry: true)
+                func paint() -> RenderFrame {
+                    measureFramePhase(.paint) {
+                        buildRenderFrame(frameOut: frameOut, now: animNow, publishHitGeometry: true)
+                    }
+                }
+                var rf = paint()
                 for _ in 0..<3 {
                     if !followKeeps(frameOut: &frameOut, at: animNow) { break }
-                    rf = buildRenderFrame(frameOut: frameOut, now: animNow, publishHitGeometry: true)
+                    rf = paint()
                 }
                 finishKeeps(cut: false)
                 if (hasMovingScaleSettle || pixelSnapGlides.isEasing) && cxSettings.viewTimeScale > 0.0 {
@@ -756,6 +763,18 @@ extension Runtime {
         // Publish normalized glyph pages and image texel edges in the renderer's origin/size ABI.
         var glyphFixups: [(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16, forceScaled: Bool)] = []
         var imageFixups: [(index: Int, texelEdges: SIMD4<Float>, imgW: Float, imgH: Float)] = []
+
+        func closeLayer(start: Int, surfaceStart: Int) {
+            let count = instances.count
+            foldEndLayer(instances: &instances, surfaces: &newSurfaces, marks: &marks,
+                         start: start, surfaceStart: surfaceStart)
+            // Folding a single draw removes its preceding layer marker.
+            // Keep the pending atlas conversion attached to the surviving draw.
+            if instances.count < count && count == start + 2 {
+                if glyphFixups.last?.index == start + 1 { glyphFixups[glyphFixups.count - 1].index = start }
+                if imageFixups.last?.index == start + 1 { imageFixups[imageFixups.count - 1].index = start }
+            }
+        }
 
         var childrenByParent: [NodeId: [FlatNode]] = [:]
         var roots: [FlatNode] = []
@@ -3017,7 +3036,7 @@ extension Runtime {
                             blurPx: effBlur * scale,
                             srgbBlend: srgbBlend,
                             glyphAtlasSize: (textSystem.glyphAtlas.atlas.width, textSystem.glyphAtlas.atlas.height),
-                            imageAtlasSize: (imagePacker.atlas.width, imagePacker.atlas.height),
+                            imageVersion: imagePacker.version(at:),
                             userKey: el.runtimeExtras[RenderExtrasKey.cacheKey] as? UInt64
                         )
                         var bx0 = rectPx.x
@@ -3068,22 +3087,10 @@ extension Runtime {
                         }
                     }
                 }
-                foldEndLayer(
-                    instances: &instances,
-                    surfaces: &newSurfaces,
-                    marks: &marks,
-                    start: innerLayerIdx,
-                    surfaceStart: surfaceStartIdx
-                )
+                closeLayer(start: innerLayerIdx, surfaceStart: surfaceStartIdx)
             }
             for outerStart in outerLayerStarts.reversed() {
-                foldEndLayer(
-                    instances: &instances,
-                    surfaces: &newSurfaces,
-                    marks: &marks,
-                    start: outerStart,
-                    surfaceStart: surfaceStartIdx
-                )
+                closeLayer(start: outerStart, surfaceStart: surfaceStartIdx)
             }
         }
 
@@ -3238,13 +3245,7 @@ extension Runtime {
                 paintSubtree(raisedNode, parentClip: rootClip, inheritedInert: false, parentOpacity: 1.0, allowRaised: true)
             }
             for (sIdx, sfIdx) in reopenedLayers.reversed() {
-                foldEndLayer(
-                    instances: &instances,
-                    surfaces: &newSurfaces,
-                    marks: &marks,
-                    start: sIdx,
-                    surfaceStart: sfIdx
-                )
+                closeLayer(start: sIdx, surfaceStart: sfIdx)
             }
         }
 

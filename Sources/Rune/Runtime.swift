@@ -529,6 +529,9 @@ public final class Runtime<State> {
         }
 
         private var cache: [BitmapKey: SIMD4<Float>] = [:]
+        private var placedBitmaps: Set<BitmapKey> = []
+        private var previousBySize: [SIMD2<Int>: [BitmapKey]] = [:]
+        private var indexPreviousBitmaps = false
         private struct PixelSlot {
             var edges: SIMD4<Float>
             var generation: UInt64
@@ -541,6 +544,20 @@ public final class Runtime<State> {
         private var pixelSlots: [PixelKey: PixelSlot] = [:]
         private var freeSlots: [SIMD2<Int>: [SIMD4<Float>]] = [:]
         private var placedSlots: Set<PixelKey> = []
+        private var allocatedArea = 0
+        private var freeArea = 0
+        private var compactBeforePaint = false
+        private var contentVersions: [SIMD2<Int>: UInt64] = [:]
+
+        mutating func beginPaint() {
+            // Previous RenderFrames retain their own backing pixels. Repack between paints
+            // when changing image dimensions leave mostly unusable rectangles behind.
+            if compactBeforePaint { self = Self() }
+        }
+
+        func version(at edges: SIMD4<Float>) -> UInt64 {
+            contentVersions[SIMD2(Int(edges.x), Int(edges.y))] ?? 0
+        }
 
         /// Streaming pixels and decoded animations overwrite their own atlas rectangle.
         mutating func insert(_ sample: PixelsPresentation, for id: UInt64, drawnSize: SIMD2<Float>) -> SIMD4<Float> {
@@ -557,8 +574,8 @@ public final class Runtime<State> {
                 if slot.generation == sample.generation && slot.frame == sample.frameIndex { return slot.edges }
                 edges = slot.edges
             } else {
-                if let old = pixelSlots[key] { freeSlots[dimensions(old.edges), default: []].append(old.edges) }
-                edges = freeSlots[size]?.popLast() ?? allocate(width: w, height: h)
+                if let old = pixelSlots[key] { recycle(old.edges) }
+                edges = allocate(width: w, height: h)
             }
             var bytes = mip.map { Array($0.rgba) } ?? sample.rgba
             if mip != nil || sample.premultiplied {
@@ -582,24 +599,48 @@ public final class Runtime<State> {
             SIMD2(Int(edges.z - edges.x), Int(edges.w - edges.y))
         }
 
+        private mutating func recycle(_ edges: SIMD4<Float>) {
+            let size = dimensions(edges)
+            freeSlots[size, default: []].append(edges)
+            freeArea += size.x * size.y
+        }
+
         mutating func finishPixelPaint() {
             if placedSlots.count < pixelSlots.count {
                 for (key, slot) in pixelSlots where !placedSlots.contains(key) {
-                    freeSlots[dimensions(slot.edges), default: []].append(slot.edges)
+                    recycle(slot.edges)
                     pixelSlots.removeValue(forKey: key)
                 }
             }
             placedSlots.removeAll(keepingCapacity: true)
+            if placedBitmaps.count < cache.count {
+                for (key, edges) in cache where !placedBitmaps.contains(key) {
+                    recycle(edges)
+                    cache.removeValue(forKey: key)
+                }
+            }
+            placedBitmaps.removeAll(keepingCapacity: true)
+            previousBySize.removeAll(keepingCapacity: true)
+            indexPreviousBitmaps = !cache.isEmpty
+            let liveArea = allocatedArea - freeArea
+            compactBeforePaint = freeArea > max(64 * 64, 2 * liveArea)
         }
 
         mutating func insert(_ img: RGBA8Atlas) -> SIMD4<Float> {
+            guard img.width > 0, img.height > 0, img.texels.count / 4 / img.height >= img.width else {
+                return SIMD4<Float>(0, 0, 1, 1)
+            }
             let key = BitmapKey.image(img.width, img.height, img.texels)
+            placedBitmaps.insert(key)
             if let cached = cache[key] { return cached }
             return place(img.texels, width: img.width, height: img.height, key: key)
         }
 
         mutating func insert(_ glyph: GlyphAtlas.ColorGlyphEntry) -> SIMD4<Float> {
+            guard glyph.pixelSize.x > 0, glyph.pixelSize.y > 0, glyph.rgba.count % 4 == 0,
+                  glyph.rgba.count / 4 / glyph.pixelSize.y >= glyph.pixelSize.x else { return SIMD4<Float>(0, 0, 1, 1) }
             let key = BitmapKey.colorGlyph(glyph.pixelSize.x, glyph.pixelSize.y, glyph.rgba)
+            placedBitmaps.insert(key)
             if let cached = cache[key] { return cached }
             // Font rasterizers supply premultiplied sRGB. Both Rune image shaders consume straight sRGB.
             var pixels = Array(glyph.rgba)
@@ -622,19 +663,63 @@ public final class Runtime<State> {
         }
 
         private mutating func allocate(width bw: Int, height bh: Int) -> SIMD4<Float> {
-            if shelfX + bw + 1 > atlas.width && bw + 2 <= atlas.width {
-                shelfX = 1
+            let size = SIMD2(bw, bh)
+            if let recycled = freeSlots[size]?.popLast() {
+                freeArea -= bw * bh
+                if freeSlots[size]?.isEmpty == true { freeSlots.removeValue(forKey: size) }
+                return recycled
+            }
+            // Earlier frames own immutable snapshots. A previous bitmap of this size
+            // can be replaced until the current frame references it. If requested later,
+            // its caller supplies the original bytes and receives a fresh placement.
+            if indexPreviousBitmaps {
+                for (key, edges) in cache where !placedBitmaps.contains(key) {
+                    previousBySize[dimensions(edges), default: []].append(key)
+                }
+                indexPreviousBitmaps = false
+            }
+            while let old = previousBySize[size]?.popLast() {
+                if !placedBitmaps.contains(old), let edges = cache.removeValue(forKey: old) { return edges }
+            }
+            allocatedArea += bw * bh
+            let maxSide = 16_384
+            // The shaders clamp to each slot's own edge. Full-width or full-height
+            // user images can therefore occupy the texture's exterior texels.
+            let gutterX = bw >= maxSide - 1 ? 0 : 1
+            let gutterY = bh >= maxSide - 1 ? 0 : 1
+            if shelfX == 1 { shelfX = gutterX }
+            if shelfY == 1 { shelfY = gutterY }
+            let endX = shelfX + bw + gutterX
+            // Before starting a new shelf, a narrow, tall atlas can use more width.
+            // Otherwise a wider incoming bitmap starts at the left edge of its shelf.
+            let widenShelf = atlas.width < atlas.height && endX <= maxSide
+                && endX <= max(atlas.width * 2, bw + 2) && shelfY + shelfH + bh + 2 > atlas.height
+            if shelfX > gutterX && endX > atlas.width && !widenShelf {
+                shelfX = gutterX
                 shelfY += shelfH + 1
                 shelfH = 0
             }
-            if shelfX + bw + 1 > atlas.width || shelfY + bh + 1 > atlas.height {
-                let newW = max(atlas.width * 2, shelfX + bw + 1)
-                let newH = max(atlas.height * 2, shelfY + bh + 1)
+            let requiredW = shelfX + bw + gutterX
+            let requiredH = shelfY + bh + gutterY
+            if requiredW > atlas.width || requiredH > atlas.height {
+                func grow(_ current: Int, toFit required: Int) -> Int {
+                    guard required > current else { return current }
+                    // Round repeated growth to powers of two. A large first upload can
+                    // jump directly to its required extent, including the border.
+                    let step = 1 << (Int.bitWidth - min(current, maxSide - 1).leadingZeroBitCount)
+                    return max(required, step)
+                }
+                let newW = grow(atlas.width, toFit: requiredW)
+                let newH = grow(atlas.height, toFit: requiredH)
                 var grown = RGBA8Atlas(width: newW, height: newH)
-                for r in 0..<atlas.height {
-                    let srcOff = r * atlas.width * 4
-                    let dstOff = r * newW * 4
-                    grown.texels.replaceSubrange(dstOff..<(dstOff + atlas.width * 4), with: atlas.texels[srcOff..<(srcOff + atlas.width * 4)])
+                let oldStride = atlas.width * 4
+                atlas.texels.withUnsafeBytes { src in
+                    grown.texels.withUnsafeMutableBytes { dst in
+                        guard let from = src.baseAddress, let to = dst.baseAddress else { return }
+                        for row in 0..<atlas.height {
+                            (to + row * newW * 4).copyMemory(from: from + row * oldStride, byteCount: oldStride)
+                        }
+                    }
                 }
                 atlas = grown
                 revision &+= 1
@@ -648,10 +733,15 @@ public final class Runtime<State> {
         }
 
         private mutating func write(_ pixels: [UInt8], width: Int, height: Int, at edges: SIMD4<Float>) {
-            for row in 0..<height {
-                let src = row * width * 4
-                let dst = ((Int(edges.y) + row) * atlas.width + Int(edges.x)) * 4
-                atlas.texels.replaceSubrange(dst..<(dst + width * 4), with: pixels[src..<(src + width * 4)])
+            let rowBytes = width * 4, atlasStride = atlas.width * 4
+            let offset = Int(edges.y) * atlasStride + Int(edges.x) * 4
+            pixels.withUnsafeBytes { src in
+                atlas.texels.withUnsafeMutableBytes { dst in
+                    guard let from = src.baseAddress, let to = dst.baseAddress else { return }
+                    for row in 0..<height {
+                        (to + offset + row * atlasStride).copyMemory(from: from + row * rowBytes, byteCount: rowBytes)
+                    }
+                }
             }
             let rect = SIMD4<Int>(edges)
             if patchPublished || patch == nil {
@@ -661,6 +751,7 @@ public final class Runtime<State> {
                 patch?.include(rect)
             }
             revision &+= 1
+            contentVersions[SIMD2(Int(edges.x), Int(edges.y))] = revision
         }
     }
 
@@ -679,6 +770,7 @@ public final class Runtime<State> {
     }
 
     internal func beginPixelPaint() {
+        imagePacker.beginPaint()
         shownPixelIDs.removeAll(keepingCapacity: true)
         nextImageWake = nil
     }
@@ -6680,8 +6772,18 @@ public final class Runtime<State> {
         }
         let targetAuth = spans.map { $0.map(\.text).joined() } ?? text
         let targetScale = max(pxScale, 1.0)
+        func retainGlyphs(_ box: TextLayoutBox) -> Bool {
+            guard box.hasGlyphs else { return false }
+            #if canImport(CRuneDesktopText) && !canImport(CoreText)
+            if let resets = box.desktopAtlasResets, !textSystem.glyphAtlas.retainPages(box.desktopPages, since: resets) {
+                textSystem.glyphCache.forget(shapeKey: box.shapeKey)
+                return false
+            }
+            #endif
+            return true
+        }
         if isExiting, let exiting = exitingTextLayouts[snapId]?.box {
-            if glidePx == .zero, exiting.hasGlyphs, exiting.shapeKey.usesSmoothing(textSystem.smoothing) {
+            if glidePx == .zero, exiting.shapeKey.usesSmoothing(textSystem.smoothing), retainGlyphs(exiting) {
                 return exiting
             }
             let filled = textSystem.layoutKeyed(
@@ -6724,7 +6826,7 @@ public final class Runtime<State> {
                         return box
                     }
                 }
-                if live.hasGlyphs {
+                if retainGlyphs(live) {
                     return live
                 }
                 let filled = textSystem.layoutKeyed(
@@ -8721,7 +8823,8 @@ public final class Runtime<State> {
                                 key: GlyphReplayKey(shapeKey: inputBox.shapeKey, maxWidth: inputBox.maxWidth, glidePx: glidePx),
                                 keep: resolvedInput.isSecure ? .secret : (glidePx == .zero ? .cached : .owned),
                                 bandTopPt: inBandTop,
-                                bandBottomPt: inBandBot
+                                bandBottomPt: inBandBot,
+                                sinceAtlasResets: textSystem.glyphAtlas.resets
                             ) {
                                 (shaped.glyphs, shaped.lineGlyphRanges, shaped.bandLineHeight)
                             }
@@ -9060,7 +9163,8 @@ public final class Runtime<State> {
                                 key: GlyphReplayKey(shapeKey: labelBox.shapeKey, maxWidth: labelBox.maxWidth, glidePx: glidePx),
                                 keep: resolvedText.isSecure ? .secret : (glidePx == .zero && !placedNativeGlyphs ? .cached : .owned),
                                 bandTopPt: lblBandTop,
-                                bandBottomPt: lblBandBot
+                                bandBottomPt: lblBandBot,
+                                sinceAtlasResets: textSystem.glyphAtlas.resets
                             ) {
                                 (shaped.glyphs, shaped.lineGlyphRanges, shaped.bandLineHeight)
                             }

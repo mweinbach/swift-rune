@@ -23,9 +23,12 @@ struct RuneGL {
     RuneGLLayers *layers;
     RuneGLSurfaces *surfaces;
     RuneGLProduction *production;
+    RuneGLFrameSprings springs;
     RuneGLEffectHook effect_hook;
     void *effect_user;
     GLuint program, vao, instance_buffer;
+    size_t spring_instance_count;
+    int reuse_spring_instances;
     GLint viewport_uniform;
     GLint max_texture_size;
     int es, drawing;
@@ -274,6 +277,10 @@ int rune_gl_configure_frame(RuneGL *r, const char *vertex, const char *fragment,
     return 1;
 }
 
+void rune_gl_frame_springs(RuneGL *r, uint32_t tracks, uint32_t ids, float seconds, float fraction) {
+    if (r) r->springs = (RuneGLFrameSprings){ tracks, ids, seconds, fraction };
+}
+
 void rune_gl_destroy(RuneGL *r) {
     if (!r) return;
     if (r->production) rune_production_destroy(r->production);
@@ -419,7 +426,7 @@ static void draw_batch(RuneGL *r, int production, int width, int height, int srg
         rune_layers_target_geometry(r->layers, &x, &y, &width, &height);
         gl->Viewport(0, 0, width, height);
         rune_production_batch(r->production, r->instance_buffer, width, height, x, y, start, count,
-                              srgb_blend, in_layer);
+                              srgb_blend, in_layer, &r->springs);
         return;
     }
     gl->UseProgram(r->program);
@@ -442,6 +449,10 @@ static size_t matching_layer_end(const void *instances, size_t begin, size_t cou
         if (instance[17] == 9 && --depth == 0) return i;
     }
     return count;
+}
+
+void rune_gl_reuse_spring_instances(RuneGL *r, int same_storage) {
+    if (r) r->reuse_spring_instances = same_storage;
 }
 
 static int render(RuneGL *r, int production, int width, int height, const float *clear, int srgb_blend,
@@ -481,7 +492,11 @@ static int render(RuneGL *r, int production, int width, int height, const float 
         !set_atlas(gl, &r->images, GL_TEXTURE1, iw, ih, (!production && srgb_blend) ? GL_RGBA8 : GL_SRGB8_ALPHA8,
                    GL_RGBA, images, error, size)) return 0;
     gl->BindBuffer(GL_ARRAY_BUFFER, r->instance_buffer);
-    if (count) gl->BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(count * stride), instances, GL_STREAM_DRAW);
+    int spring_frame = production && r->springs.tracks && r->springs.ids;
+    int retained = spring_frame && r->reuse_spring_instances && count == r->spring_instance_count;
+    r->reuse_spring_instances = 0;
+    r->spring_instance_count = 0;
+    if (count && !retained) gl->BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(count * stride), instances, GL_STREAM_DRAW);
     r->drawing = 1;
     int success = rune_layers_frame(r->layers, width, height, clear, srgb_blend, production, r->glyphs.texture, error, size);
     if (!success) goto done;
@@ -571,6 +586,7 @@ static int render(RuneGL *r, int production, int width, int height, const float 
     if (success) success = check_gl(gl, "Drawing Rune frame", error, size);
     if (success) rune_surfaces_prune(r->surfaces, draws, draw_count);
 done:
+    if (spring_frame && success) r->spring_instance_count = count;
     if (production && !success) {
         rune_layers_cache_clear(r->layers);
         if (!r->es) gl->Disable(GL_FRAMEBUFFER_SRGB);

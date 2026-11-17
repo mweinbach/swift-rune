@@ -172,7 +172,8 @@ public final class SurfaceRenderer: @unchecked Sendable {
     }
 
     /// Latches the current picture for each surface draw and prepares GPU textures + uniforms.
-    public func prepare(draws inputDraws: [SurfaceDraw], viewport: (UInt32, UInt32)) {
+    @discardableResult
+    public func prepare(draws inputDraws: [SurfaceDraw], viewport: (UInt32, UInt32)) -> Result<Void, MetalTextureSizeError> {
         let activeKeys = Set(inputDraws.map { $0.surface.key })
         cache = cache.filter { activeKeys.contains($0.key) }
 
@@ -200,6 +201,10 @@ public final class SurfaceRenderer: @unchecked Sendable {
                 } catch {
                     d.surface.setLastError("\(error)")
                     cache.removeValue(forKey: cacheKey)
+                    if let sizeError = error as? MetalTextureSizeError {
+                        self.draws = []
+                        return .failure(sizeError)
+                    }
                     continue
                 }
             }
@@ -256,6 +261,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
         }
 
         self.draws = prepared
+        return .success(())
     }
 
     /// Encodes surface draw `index` into an already-open Metal render command encoder.
@@ -405,10 +411,11 @@ public final class SurfaceRenderer: @unchecked Sendable {
     }
 
     private func uploadTexture(width: Int, height: Int, pixelFormat: MTLPixelFormat, bytesPerRow: Int, data: Data) throws -> MTLTexture {
+        try MetalTextureLimits.validate(width: width, height: height, resource: "surface plane", on: device)
         let desc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: pixelFormat,
-            width: max(1, width),
-            height: max(1, height),
+            width: width,
+            height: height,
             mipmapped: false
         )
         desc.usage = [.shaderRead]

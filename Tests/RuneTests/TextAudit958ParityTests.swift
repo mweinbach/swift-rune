@@ -329,8 +329,11 @@ struct TextAudit958ParityTests {
         #expect(ts.shapedBuildCount == 2)
     }
 
+    #endif
+
     // MARK: - L811: Monospace 4-col tab stops, mono span tabs, and proportional tabs
 
+    #if canImport(CoreText) || os(Linux) || os(Windows) || os(Android) || RUNE_BROWSER_TEXT
     @Test("L811 (text/tests.rs:89): mono tabs fill 4-col stops, mono spans reset per line, proportional tab == 1 space")
     func monoAndProportionalTabStops() {
         let ts = TextSystem()
@@ -376,6 +379,20 @@ struct TextAudit958ParityTests {
         let propTab = ts.measure("a\tb", style: sans, maxWidth: nil, pixelScale: 1.0).x
         let propSpace = ts.measure("a b", style: sans, maxWidth: nil, pixelScale: 1.0).x
         #expect(abs(propTab - propSpace) < 0.25)
+
+        for tracking: Float in [-0.75, 1.5] {
+            let style = TextStyle(size: 14, letterSpacing: tracking, family: .monospace)
+            let tab = ts.measure("e\u{301}\tA", style: style, maxWidth: nil, pixelScale: 2).x
+            let spaces = ts.measure("e\u{301}  A", style: style, maxWidth: nil, pixelScale: 2).x
+            #expect(abs(tab - spaces) < 0.25)
+        }
+        let tabbed = ts.shape(text: "é\tA", style: mono, maxWidth: nil, pixelScale: 2)
+        let expanded = ts.shape(text: "é   A", style: mono, maxWidth: nil, pixelScale: 2)
+        let afterTab = "é\t".utf8.count
+        let caret = ts.caretRect(in: tabbed, utf8Offset: afterTab, pixelScale: 2)
+        let target = ts.caretRect(in: expanded, utf8Offset: "é   ".utf8.count, pixelScale: 2)
+        #expect(abs(caret.x - target.x) < 0.25)
+        #expect(ts.hitTestUTF8Offset(in: tabbed, localX: caret.x, localY: caret.y, pixelScale: 2) == afterTab)
     }
     #endif
 

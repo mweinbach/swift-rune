@@ -122,10 +122,12 @@
             "Sources/CRuneLinuxA11y/Accessibility.c",
             "scripts/test-linux-accessibility.py",
             "Sources/CRuneDesktopServices/GtkAccessibility.c",
-            "Sources/CRuneDesktopServices/linux.c"
+            "Sources/CRuneDesktopServices/linux.c",
+            "Sources/Rune/A11y/AccessibilityTextGeometry.swift",
+            "Tests/RuneTests/WindowsTextGeometryTests.swift"
           ],
           "status": "partial",
-          "note": "Linux publishes the Rune semantic tree and actions through AT-SPI. Its ATK root also attaches and removes mapped GTK native windows, including the file chooser."
+          "note": "Linux publishes the semantic tree and actions through AT-SPI and attaches GTK windows, including the file chooser, to the application root. AT-SPI character bounds and point-to-offset queries share Rune's shaped text geometry with UI Automation, using Unicode scalar offsets and logical window coordinates. The AT-SPI client fixture exercises wrapped lines, Unicode selection and caret placement."
         },
         {
           "upstream": "src/a11y/windows.rs",
@@ -139,10 +141,12 @@
             "Sources/CRuneWin32/RuneTextRange.cpp",
             "Tests/Support/WindowsTextAccessibility/Fixture/main.swift",
             "Tests/Support/WindowsTextAccessibility/TextClient.cpp",
-            "Tests/Support/WindowsTextAccessibility/Run.ps1"
+            "Tests/Support/WindowsTextAccessibility/Run.ps1",
+            "Sources/Rune/A11y/WindowsTextGeometry.swift",
+            "Tests/RuneTests/WindowsTextGeometryTests.swift"
           ],
           "status": "partial",
-          "note": "UI Automation exposes the fragment tree, control patterns, TextPattern and TextPattern2. The native text client exercises document, visible, selection, caret and point ranges against a Swift editor fixture. RangeFromAnnotation and ScrollIntoView remain unsupported."
+          "note": "UI Automation TextPattern and TextPattern2 expose document, visible and single-selection ranges, the active caret and hit testing in shaped text. The native Swift fixture covers backward selection, emoji and combining sequences, range bounds and password redaction. Rich formatting and annotations, multiple selections, range-directed scrolling and durable range anchors across edits remain open."
         },
         {
           "upstream": "src/app.rs",
@@ -5680,9 +5684,12 @@
         {
           "upstream": "src/text/run.rs",
           "swift": [
-            "Sources/Rune/Text/TextParityHelpers.swift"
+            "Sources/Rune/Text/TextRun.swift",
+            "Sources/Rune/Text/TextParityHelpers.swift",
+            "Tests/RuneTests/PortableRunPenTests.swift"
           ],
-          "status": "ported"
+          "status": "partial",
+          "note": "Full labels preserve native ligatures. For glyphsIn with a range covering a single grapheme in an Arabic lam-alef ligature, Swift returns the ink inside that grapheme's slice. Rust assigns the whole glyph to the leading byte."
         },
         {
           "upstream": "src/text/span.rs",

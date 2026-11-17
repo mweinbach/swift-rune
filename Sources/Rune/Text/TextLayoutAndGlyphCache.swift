@@ -254,9 +254,14 @@ public final class TextLayoutBox: @unchecked Sendable {
     internal var paragraphs: ParagraphLayout? = nil
 
     public var estimatedBytes: Int {
-        (prepared?.estimatedBytes ?? max(128, authText.utf8.count * 16))
+        let layoutBytes = (prepared?.estimatedBytes ?? max(128, authText.utf8.count * 16))
             + shaped.glyphs.count * MemoryLayout<PositionedGlyph>.stride
             + shaped.lineCount * 48
+        #if canImport(CRuneDesktopText) && !canImport(CoreText)
+        return layoutBytes + (shaped.desktopRestingText?.retainedGlyphBytes ?? 0)
+        #else
+        return layoutBytes
+        #endif
     }
 
     internal init(
@@ -346,6 +351,7 @@ public final class GlyphReplayCache: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [GlyphReplayKey: Entry] = [:]
     private var frameSeq: UInt64 = 0
+    private var atlasResets: UInt64 = 0
     private var _flattened: Int = 0
     private var _totalBytes: Int = 0
 
@@ -407,6 +413,18 @@ public final class GlyphReplayCache: @unchecked Sendable {
         bandBottomPt: Float,
         build: () -> (glyphs: [PositionedGlyph], lineGlyphRanges: [Range<Int>], lineHeight: Float)
     ) -> ArraySlice<PositionedGlyph> {
+        glyphsInBandCached(key: key, keep: keep, bandTopPt: bandTopPt, bandBottomPt: bandBottomPt,
+                           sinceAtlasResets: nil, build: build)
+    }
+
+    internal func glyphsInBandCached(
+        key: GlyphReplayKey,
+        keep: TextKeep,
+        bandTopPt: Float,
+        bandBottomPt: Float,
+        sinceAtlasResets resets: UInt64?,
+        build: () -> (glyphs: [PositionedGlyph], lineGlyphRanges: [Range<Int>], lineHeight: Float)
+    ) -> ArraySlice<PositionedGlyph> {
         guard keep == .cached else {
             let built = build()
             return Self.sliceInBand(
@@ -419,7 +437,14 @@ public final class GlyphReplayCache: @unchecked Sendable {
         }
 
         lock.lock()
-        if var hit = entries[key] {
+        let generation = resets ?? atlasResets
+        if generation > atlasResets {
+            // The atlas can recycle a page between two draws of the same shape.
+            entries.removeAll(keepingCapacity: true)
+            _totalBytes = 0
+            atlasResets = generation
+        }
+        if generation == atlasResets, var hit = entries[key] {
             hit.lastUsedFrame = frameSeq
             entries[key] = hit
             lock.unlock()
@@ -439,7 +464,7 @@ public final class GlyphReplayCache: @unchecked Sendable {
 
         if bytes <= Self.entryBytes {
             lock.lock()
-            if entries[key] == nil {
+            if generation == atlasResets, entries[key] == nil {
                 while (entries.count >= Self.maxEntries || _totalBytes + bytes > Self.maxBytes),
                       let oldest = entries.min(by: { $0.value.lastUsedFrame < $1.value.lastUsedFrame })?.key {
                     if let removed = entries.removeValue(forKey: oldest) {

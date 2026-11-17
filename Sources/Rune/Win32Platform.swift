@@ -351,6 +351,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
     private let wake: Win32Wake
     private var finished = false
     private(set) var requestedApplicationQuit = false
+    var closesWindowGroup: (() -> Bool)?
     var running: Bool { rune_win_running(window) > 0 }
     private var dpi = Win32DpiScale.baseDPI
     private var keyboard = Win32Keyboard()
@@ -405,6 +406,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
     func finish() {
         guard !finished else { return }
         finished = true
+        closesWindowGroup = nil
         popups.close()
         rune_win_drag_cancel(rune_win_hwnd(window))
         shortcuts.close()
@@ -608,6 +610,8 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
                 rune_win_show(window, 0)
                 return 0
             }
+            // A sibling window can own the native menu loop when the last primary closes.
+            if closesWindowGroup?() == true { rune_win_exit(window) }
             return 1
         case RUNE_WIN_MOVE, RUNE_WIN_DOWN, RUNE_WIN_UP, RUNE_WIN_LEAVE, RUNE_WIN_CAPTURE_LOST:
             let message: Win32Message

@@ -426,11 +426,13 @@ void main() {
     } else {
         vec2 screen = clip_p;
         bool rotated = vParams.x != 0.0;
+        vec2 glyphPoint = rotated ? vPoint : screen;
+        if (any(lessThan(glyphPoint, vRect.xy)) || any(greaterThanEqual(glyphPoint, vRect.xy + vRect.zw))) discard;
         ivec2 atlasDims = textureSize(uGlyphAtlas, 0);
         ivec2 maxCoord = max(atlasDims - ivec2(1), ivec2(0));
         float cov;
         if (vUV.z > 0.0 || rotated) {
-            vec2 p = (rotated ? vPoint : screen);
+            vec2 p = glyphPoint;
             vec2 span = (vUV.z > 0.0 ? vUV.zw : vRect.zw);
             vec2 local = (p - vRect.xy) * span / max(vRect.zw, vec2(1e-5)) - vec2(0.5);
             ivec2 uv = ivec2(vUV.xy + floor(local));

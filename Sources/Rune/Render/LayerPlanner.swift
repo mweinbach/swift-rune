@@ -198,8 +198,11 @@ public enum LayerPlannerConstants {
     }
 
     public static func bucketOf(_ bounds: SIMD4<Float>) -> (bucket: SIMD2<UInt32>, width: UInt32, height: UInt32) {
-        let w = UInt32(max(0.0, bounds.z))
-        let h = UInt32(max(0.0, bounds.w))
+        // A huge world-space cache can be clipped to a small visible layer. Saturate
+        // at the largest representable 64-pixel bucket until the planner clips it.
+        let largestBucket = Double(UInt32.max - 63)
+        let w = UInt32(min(Double(max(0, bounds.z)), largestBucket))
+        let h = UInt32(min(Double(max(0, bounds.w)), largestBucket))
         let bw = ((w + 63) / 64) * 64
         let bh = ((h + 63) / 64) * 64
         return (SIMD2<UInt32>(bw, bh), w, h)
@@ -386,7 +389,7 @@ public struct LayerPlanner: @unchecked Sendable {
             guard let cache = layer.cache else { continue }
             guard let at = kept.position(pools: pools, { $0.cache?.0 == cache.0 && $0.cache?.1 == cache.1 }) else { continue }
             let bytes = kept.held(at, pools: pools).bytes
-            let over = active + bytes > budget
+            let over = bytes > budget - active
             if over && layer.begin + 1 < layer.end { continue }
             if !over { active += bytes }
             dispositions[index] = .cached(rect: rect, cache: over ? nil : cache)
@@ -418,9 +421,9 @@ public struct LayerPlanner: @unchecked Sendable {
             var cache: (UInt64, UInt64)? = nil
             if let reqCache = layer.cache {
                 let previous = kept.position(pools: pools, { $0.cache?.0 == reqCache.0 })
-                let needed = UInt64(b.bucket.x) * UInt64(b.bucket.y) * bpp
-                if b.bucket.x <= maxDim && b.bucket.y <= maxDim && active + needed <= budget {
-                    active += needed
+                let pixels = UInt64(b.bucket.x) * UInt64(b.bucket.y)
+                if b.bucket.x <= maxDim && b.bucket.y <= maxDim && pixels <= (budget - active) / bpp {
+                    active += pixels * bpp
                     cache = reqCache
                     if let at = previous {
                         parkSlot(index, pools: pools)

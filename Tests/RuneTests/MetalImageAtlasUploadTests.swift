@@ -44,6 +44,124 @@ struct MetalImageAtlasUploadTests {
                      region.origin.x + region.size.width, region.origin.y + region.size.height)
     }
 
+    private func malformedSizes(limit: Int, channels: Int) -> [(width: Int, height: Int, bytes: Int)] {
+        [(0, 2, 0), (2, -1, 0), (Int.max, 2, 1),
+         (limit + 1, 1, (limit + 1) * channels), (1, limit + 1, (limit + 1) * channels),
+         (2, 2, 4 * channels - 1), (2, 2, 4 * channels + 1)]
+    }
+
+    private func textureBytes(_ texture: MTLTexture, channels: Int) -> [UInt8] {
+        let stride = texture.width * channels
+        var result = [UInt8](repeating: 0, count: stride * texture.height)
+        texture.getBytes(&result, bytesPerRow: stride,
+                         from: MTLRegionMake2D(0, 0, texture.width, texture.height), mipmapLevel: 0)
+        return result
+    }
+
+    @Test func malformedManualAtlasesPreserveTheLastValidUpload() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let uploader = AtlasUploader()
+        let limit = MetalTextureLimits.max2D(on: device)
+        let validGlyph = R8Atlas(width: 2, height: 1, texels: [90, 220])
+        let glyph = try #require(uploader.syncGlyphAtlas(device: device, atlas: validGlyph, generation: 0))
+        #expect(textureBytes(glyph, channels: 1) == validGlyph.texels)
+        for size in malformedSizes(limit: limit, channels: 1) {
+            var invalid = R8Atlas(texels: [UInt8](repeating: 91, count: size.bytes))
+            invalid.width = size.width
+            invalid.height = size.height
+            #expect(uploader.syncGlyphAtlas(device: device, atlas: invalid, generation: 1) == nil,
+                    "R8 input \(size)")
+            #expect(uploader.glyphTexture === glyph)
+            #expect(uploader.glyphGeneration == 0)
+            #expect(uploader.glyphSize == SIMD2(2, 1))
+        }
+        #expect(textureBytes(glyph, channels: 1) == validGlyph.texels)
+
+        let validImage = RGBA8Atlas(texels: [51, 120, 4, 180])
+        let image = try #require(uploader.syncImageAtlas(device: device, atlas: validImage, revision: 0))
+        #expect(textureBytes(image, channels: 4) == validImage.texels)
+        for size in malformedSizes(limit: limit, channels: 4) {
+            var invalid = RGBA8Atlas(texels: [UInt8](repeating: 51, count: size.bytes))
+            invalid.width = size.width
+            invalid.height = size.height
+            #expect(uploader.syncImageAtlas(device: device, atlas: invalid, revision: 1) == nil,
+                    "RGBA input \(size)")
+            #expect(uploader.imageTexture === image)
+            #expect(uploader.imageRevision == 0)
+            #expect(uploader.imageSize == SIMD2(1, 1))
+        }
+        #expect(textureBytes(image, channels: 4) == validImage.texels)
+    }
+
+    @Test func invalidSecondPageLeavesTheOriginalPageSetAndRevisionIntact() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let uploader = AtlasUploader()
+        let red = RGBA8Atlas(texels: [255, 0, 0, 255])
+        let blue = RGBA8Atlas(texels: [0, 0, 255, 255])
+        let green = RGBA8Atlas(texels: [0, 255, 0, 255])
+        let pages = uploader.syncImagePages(device: device, pages: [red, blue], fallback: .init(), revision: 0)
+        try #require(pages.count == 2)
+        #expect(textureBytes(pages[0], channels: 4) == red.texels)
+        #expect(textureBytes(pages[1], channels: 4) == blue.texels)
+        let limit = MetalTextureLimits.max2D(on: device)
+        for size in malformedSizes(limit: limit, channels: 4) {
+            var invalid = RGBA8Atlas(texels: [UInt8](repeating: 0, count: size.bytes))
+            invalid.width = size.width
+            invalid.height = size.height
+            let rejected = uploader.syncImagePages(device: device, pages: [green, invalid], fallback: .init(), revision: 1)
+            #expect(rejected.isEmpty, "second page \(size)")
+            #expect(uploader.imageRevision == 0)
+            #expect(uploader.imageTexture === pages[0])
+            try #require(uploader.imageTextures.count == 2)
+            #expect(uploader.imageTextures[0] === pages[0])
+            #expect(uploader.imageTextures[1] === pages[1])
+        }
+        #expect(textureBytes(pages[0], channels: 4) == red.texels)
+        #expect(textureBytes(pages[1], channels: 4) == blue.texels)
+
+        let malformedFallback = RGBA8Atlas(width: 2, height: 2, texels: [0, 0, 0, 0])
+        #expect(uploader.syncImagePages(device: device, pages: [], fallback: malformedFallback, revision: 1).isEmpty)
+        #expect(uploader.imageRevision == 0)
+        try #require(uploader.imageTextures.count == 2)
+        #expect(uploader.imageTextures[0] === pages[0])
+        #expect(uploader.imageTextures[1] === pages[1])
+
+        let updated = uploader.syncImagePages(device: device, pages: [green, red], fallback: .init(), revision: 1)
+        try #require(updated.count == 2)
+        #expect(textureBytes(updated[0], channels: 4) == green.texels)
+        #expect(textureBytes(updated[1], channels: 4) == red.texels)
+        #expect(uploader.imageRevision == 1)
+    }
+
+    @Test func transparentFallbackAtlasesUploadAtRevisionZero() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let uploader = AtlasUploader()
+        let glyph = try #require(uploader.syncGlyphAtlas(device: device, atlas: R8Atlas(texels: []), generation: 0))
+        #expect(textureBytes(glyph, channels: 1) == [0])
+        let fallback = uploader.syncImagePages(device: device, pages: [], fallback: RGBA8Atlas(), revision: 0)
+        try #require(fallback.count == 1)
+        #expect(textureBytes(fallback[0], channels: 4) == [0, 0, 0, 0])
+    }
+
+    @Test func oversizedCachedLayerAllocatesOnlyItsVisibleRegion() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let pool = LayersPool()
+        let viewport = SIMD2<Float>(36, 19)
+        let bounds = SIMD4<Float>(0, 0, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+        var begin = RenderInstance.beginLayer(bounds: bounds, clip: NO_CLIP, spec: .init(opacity: 0.5))
+        begin.params.w = 1
+        begin.radii = packU64ToFloat4(7)
+        begin.uv = packU64ToFloat4(11)
+        let content = RenderInstance(rect: SIMD4(0, 0, viewport.x, viewport.y), fill: .one)
+        pool.prepareLayers(device: device, instances: [begin, content, .endLayer()], viewport: viewport)
+        #expect(pool.planner.dispositions == [.render(rect: SIMD4(0, 0, viewport.x, viewport.y), cache: nil)])
+        let target = try #require(pool.targetEntry(at: 0))
+        #expect(target.contentSize == viewport)
+        #expect(target.slot.texture.width <= LayerPoolLimits.maxDimension)
+        #expect(target.slot.texture.height <= LayerPoolLimits.maxDimension)
+        #expect(pool.stats().cachedLayers == 0)
+    }
+
     @Test func streamedRectanglesShareAnUploadAndLeaveNeighborsIntact() throws {
         let left = Pixels(), right = Pixels()
         fill(left, with: red)

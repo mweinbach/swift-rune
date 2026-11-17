@@ -21,16 +21,22 @@ try {
         const bridge = createRuneTextImports(() => memory, { defaultView: { navigator } });
         check(bridge.platform() === kind, 'Wrong native text raster platform');
     }
-    const font = new Uint8Array(await (await fetch('../../Sources/Rune/Resources/Fonts/Inter-Regular.ttf')).arrayBuffer());
-    bytes.set(font, 0);
-    check(host.font(0, font.length) === 1, 'App font registration failed');
+    for (const file of ['Inter-Regular', 'IBMPlexMono-Regular']) {
+        const font = new Uint8Array(await (await fetch('../../Sources/Rune/Resources/Fonts/' + file + '.ttf')).arrayBuffer());
+        bytes.set(font, 0);
+        check(host.font(0, font.length) === 1, 'App font registration failed');
+        if (file === 'IBMPlexMono-Regular') {
+            const existing = new FontFace('Rune Page Font', font);
+            document.fonts.add(await existing.load());
+        }
+    }
     await runeTextFontsReady(memory);
-    const family = utf8.encode('Inter');
-    bytes.set(family, 256);
-    function shape(text, direction = 0, features = '') {
+    function shape(text, direction = 0, features = '', stack = 'Inter') {
         const input = utf8.encode(text);
+        const stackBytes = utf8.encode(stack);
+        bytes.set(stackBytes, 256);
         bytes.set(input, 512);
-        const id = host.create(512, input.length, 256, family.length, 36, 400, 0, 0, direction, 0, 40);
+        const id = host.create(512, input.length, 256, stackBytes.length, 36, 400, 0, 0, direction, 0, 40);
         check(id, 'No browser text engine');
         try {
             if (features) {
@@ -78,10 +84,21 @@ try {
     const kern = shape('AV').advance;
     check(kern < shape('A').advance + shape('V').advance, 'Kerning lost');
     check(shape('AV', 0, 'kern=0.0').advance > kern, 'Authored OpenType settings were lost');
+    // A generic or installed family before an authored font must stay first even
+    // when OpenType settings cause us to create a private alias for that font.
+    const stacked = (stack, features = '') => shape('0AV', 0, features, stack).mask.join();
+    check(stacked('"Missing, Face", iNTeR, monospace') === stacked('Inter'), 'Registered stack fallback');
+    check(stacked('Missing, IBM Plex Mono, Inter') === stacked('"IBM Plex Mono"'), 'Multi-word stack fallback');
+    check(stacked('Inter','zero=1') !== stacked('Inter'), 'Fixture face lacks the slashed-zero alternate');
+    check(stacked('Missing, Inter', 'zero=1') === stacked('Inter', 'zero=1'), 'Fallback lost its feature alias');
+    check(stacked('monospace, Inter', 'zero=1') === stacked('monospace'), 'Feature alias displaced generic monospace');
+    check(stacked('Rune Page Font, Inter', 'zero=1') === stacked('Rune Page Font'), 'Feature alias displaced an existing browser face');
     const emoji = shape('😀');
     check(emoji.colorPixels > 40 && emoji.ink === 0, 'Intrinsic emoji color leaked into the tintable mask');
     const paragraph = 'Rune אבג 日本語 e\u0301 '.repeat(125);
     const encoded = utf8.encode(paragraph);
+    const family = utf8.encode('Inter');
+    bytes.set(family, 256);
     bytes.set(encoded, 512);
     const long = host.create(512, encoded.length, 256, family.length, 16, 400, 0, 0, 0, 0, 40);
     try {

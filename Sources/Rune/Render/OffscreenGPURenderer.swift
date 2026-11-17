@@ -1,5 +1,8 @@
 import Foundation
 import RuneRef
+#if canImport(Metal)
+import Metal
+#endif
 
 enum OffscreenRenderError: Error, CustomStringConvertible {
     case unavailable(String)
@@ -19,6 +22,7 @@ public final class OffscreenGPURenderer {
     let deviceKey: DeviceKey
     #if canImport(Metal)
     let metal: MetalRenderer
+    private var submissionTarget: MTLTexture?
     #elseif canImport(CRuneOffscreenGL)
     private let context: OffscreenGLContext
     let gl: PortableGLRenderer
@@ -126,12 +130,48 @@ public final class OffscreenGPURenderer {
         #endif
     }
 
+    /// Draws into a reusable target and waits for completion without reading pixels.
+    /// The returned instant marks command submission, before the completion wait.
+    @discardableResult
+    package func submitOffscreen(_ frame: RenderFrame) throws -> ContinuousClock.Instant {
+        #if canImport(Metal)
+        guard frame.width > 0, frame.height > 0, frame.width <= 16_384, frame.height <= 16_384 else {
+            throw RefSceneError.invalidDimensions(width: frame.width, height: frame.height)
+        }
+        let format: MTLPixelFormat = frame.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
+        if submissionTarget?.width != frame.width || submissionTarget?.height != frame.height
+            || submissionTarget?.pixelFormat != format {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: format, width: frame.width, height: frame.height, mipmapped: false
+            )
+            descriptor.usage = [.renderTarget, .shaderRead]
+            descriptor.storageMode = .private
+            submissionTarget = metal.device.makeTexture(descriptor: descriptor)
+        }
+        guard let target = submissionTarget, let commands = metal.commandQueue.makeCommandBuffer() else {
+            throw OffscreenRenderError.capture("Cannot allocate the offscreen Metal target or command buffer")
+        }
+        try metal.drawRange(frame: frame, into: target, commandBuffer: commands).get()
+        commands.commit()
+        let submitted = ContinuousClock.now
+        commands.waitUntilCompleted()
+        if let error = commands.error { throw error }
+        return submitted
+        #elseif canImport(CRuneOffscreenGL)
+        try context.bindFramebuffer(width: frame.width, height: frame.height)
+        try gl.draw(frame)
+        return try context.finishSubmission(gl.handle)
+        #else
+        throw OffscreenRenderError.unavailable("This platform has no offscreen GPU renderer")
+        #endif
+    }
+
     func renderOffscreen<State>(_ frame: RenderFrame, compositor: AnyCompositor<State>,
                                 runtime: Runtime<State>, at time: Double, dt: Float) throws -> (Frame, Int) {
         #if canImport(Metal)
         var count = 0
         let pixels = try metal.renderEngine.renderOffscreen(frame, commandQueue: metal.commandQueue) { target, commands in
-            count = metal.encodeCompositor(compositor, frame: frame, into: target, commandBuffer: commands,
+            count = try metal.encodeCompositor(compositor, frame: frame, into: target, commandBuffer: commands,
                                            runtime: runtime, dt: dt, updateMilliseconds: 0)
         }
         return (pixels, count)

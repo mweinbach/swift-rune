@@ -2,9 +2,6 @@ import Foundation
 #if canImport(CoreText)
 import CoreText
 #endif
-#if canImport(Darwin) && canImport(CoreFoundation)
-import CoreFoundation
-#endif
 
 // MARK: - Direction Keys (crates/rune/src/edit/direction_keys.rs)
 
@@ -369,158 +366,35 @@ extension TextEdit {
             .min() ?? end
     }
 
-    /// Word-boundary segment ending at `j` (within its line), matching UAX #29 + ZWNJ preservation.
+    /// A hard line break is its own segment, including a two-byte CRLF.
     private func uaxWordSegmentBefore(_ j: Int) -> (start: Int, isWord: Bool)? {
-        guard j > 0 else { return nil }
-        let bytes = Array(text.utf8)
-        let clampedJ = min(j, bytes.count)
-        let lineStartByte = bytes[..<clampedJ].lastIndex(of: 0x0A).map { $0 + 1 } ?? 0
-        if lineStartByte == clampedJ {
-            return (prevGraphemeOffset(clampedJ), false)
+        let end = stringIndex(forUTF8Offset: j)
+        guard end > text.startIndex else { return nil }
+        let previous = text.index(before: end)
+        if text[previous].isNewline {
+            return (text.utf8.distance(from: text.startIndex, to: previous), false)
         }
-        let segments = uaxWordSegments(inUTF8Range: lineStartByte..<clampedJ)
-        return segments.last.map { ($0.start, $0.isWord) }
+        let start = text[..<end].lastIndex(where: \.isNewline).map { text.index(after: $0) } ?? text.startIndex
+        return uaxWordSegment(in: text[start..<end], forward: false)
     }
 
-    /// Word-boundary segment starting at `j` (within its line), matching UAX #29 + ZWNJ preservation.
     private func uaxWordSegmentAfter(_ j: Int) -> (end: Int, isWord: Bool)? {
-        let len = text.utf8.count
-        guard j < len else { return nil }
-        let bytes = Array(text.utf8)
-        let lineEndByte = bytes[j...].firstIndex(of: 0x0A) ?? len
-        if lineEndByte == j {
-            return (nextGraphemeOffset(j), false)
+        let start = stringIndex(forUTF8Offset: j)
+        guard start < text.endIndex else { return nil }
+        if text[start].isNewline {
+            return (text.utf8.distance(from: text.startIndex, to: text.index(after: start)), false)
         }
-        let segments = uaxWordSegments(inUTF8Range: j..<lineEndByte)
-        return segments.first.map { ($0.1, $0.2) }
+        let end = text[start...].firstIndex(where: \.isNewline) ?? text.endIndex
+        return uaxWordSegment(in: text[start..<end], forward: true)
     }
 
-    private func prevGraphemeOffset(_ offset: Int) -> Int {
-        guard offset > 0 else { return 0 }
-        let idx = stringIndex(forUTF8Offset: offset)
-        let prev = text.index(before: idx)
-        return text.utf8.distance(from: text.utf8.startIndex, to: prev.samePosition(in: text.utf8)!)
-    }
-
-    private func nextGraphemeOffset(_ offset: Int) -> Int {
-        guard offset < text.utf8.count else { return text.utf8.count }
-        let idx = stringIndex(forUTF8Offset: offset)
-        let next = text.index(after: idx)
-        return text.utf8.distance(from: text.utf8.startIndex, to: next.samePosition(in: text.utf8)!)
-    }
-
-    private func uaxWordSegments(inUTF8Range range: Range<Int>) -> [(start: Int, end: Int, isWord: Bool)] {
-        let lo = stringIndex(forUTF8Offset: range.lowerBound)
-        let hi = stringIndex(forUTF8Offset: range.upperBound)
-        let slice = String(text[lo..<hi])
-        var rawSegments: [(start: Int, end: Int, isWord: Bool)] = []
-
-        #if canImport(Darwin) && canImport(CoreFoundation)
-        let cfStr = slice as CFString
-        let cfLen = CFStringGetLength(cfStr)
-        let tok = CFStringTokenizerCreate(
-            kCFAllocatorDefault,
-            cfStr,
-            CFRangeMake(0, cfLen),
-            kCFStringTokenizerUnitWordBoundary,
-            nil
-        )
-        var cursorU16 = 0
-        while CFStringTokenizerAdvanceToNextToken(tok) != [] {
-            let tr = CFStringTokenizerGetCurrentTokenRange(tok)
-            guard tr.location != kCFNotFound && tr.length > 0 else { break }
-            let tokenStartU16 = max(cursorU16, tr.location)
-            let tokenEndU16 = min(cfLen, tr.location + tr.length)
-            if tokenStartU16 > cursorU16 {
-                appendGapSegment(slice: slice, u16Lo: cursorU16, u16Hi: tokenStartU16, baseUTF8: range.lowerBound, into: &rawSegments)
-            }
-            appendTokenSegment(slice: slice, u16Lo: tokenStartU16, u16Hi: tokenEndU16, baseUTF8: range.lowerBound, into: &rawSegments)
-            cursorU16 = tokenEndU16
-        }
-        if cursorU16 < cfLen {
-            appendGapSegment(slice: slice, u16Lo: cursorU16, u16Hi: cfLen, baseUTF8: range.lowerBound, into: &rawSegments)
-        }
-        #else
-        var idx = slice.startIndex
-        while idx < slice.endIndex {
-            let startIdx = idx
-            let firstIsWord = slice[idx].unicodeScalars.contains { $0.properties.isAlphabetic || $0.properties.numericType != nil || $0 == "_" }
-            idx = slice.index(after: idx)
-            if firstIsWord {
-                while idx < slice.endIndex {
-                    let ch = slice[idx]
-                    let w = ch.unicodeScalars.contains { $0.properties.isAlphabetic || $0.properties.numericType != nil || $0 == "_" || $0.value == 0x200C }
-                    if !w { break }
-                    idx = slice.index(after: idx)
-                }
-            }
-            let sOff = range.lowerBound + slice.utf8.distance(from: slice.utf8.startIndex, to: startIdx.samePosition(in: slice.utf8)!)
-            let eOff = range.lowerBound + slice.utf8.distance(from: slice.utf8.startIndex, to: idx.samePosition(in: slice.utf8)!)
-            rawSegments.append((sOff, eOff, firstIsWord))
-        }
-        #endif
-
-        // UAX #29 WB4 keeps ZWNJ (\u{200C}) attached within Persian/Arabic words like "می‌شود".
-        var merged: [(start: Int, end: Int, isWord: Bool)] = []
-        var k = 0
-        while k < rawSegments.count {
-            let seg = rawSegments[k]
-            if seg.isWord, k + 2 < rawSegments.count {
-                let mid = rawSegments[k + 1]
-                let nxt = rawSegments[k + 2]
-                if nxt.isWord && isSingleZWNJ(utf8Range: mid.start..<mid.end) {
-                    merged.append((seg.start, nxt.end, true))
-                    k += 3
-                    continue
-                }
-            }
-            // Merge if trailing seg was coalesced in loop: check against `merged.last` when ZWNJ bridged.
-            if let last = merged.last, last.isWord, !seg.isWord,
-               isSingleZWNJ(utf8Range: seg.start..<seg.end),
-               k + 1 < rawSegments.count, rawSegments[k + 1].isWord {
-                merged[merged.count - 1].end = rawSegments[k + 1].end
-                k += 2
-                continue
-            }
-            merged.append(seg)
-            k += 1
-        }
-        return merged
-    }
-
-    private func isSingleZWNJ(utf8Range: Range<Int>) -> Bool {
-        guard utf8Range.count == 3 else { return false }
-        let lo = stringIndex(forUTF8Offset: utf8Range.lowerBound)
-        let hi = stringIndex(forUTF8Offset: utf8Range.upperBound)
-        return text[lo..<hi] == "\u{200C}"
-    }
-
-    private func appendGapSegment(
-        slice: String,
-        u16Lo: Int,
-        u16Hi: Int,
-        baseUTF8: Int,
-        into out: inout [(start: Int, end: Int, isWord: Bool)]
-    ) {
-        appendTokenSegment(slice: slice, u16Lo: u16Lo, u16Hi: u16Hi, baseUTF8: baseUTF8, into: &out)
-    }
-
-    private func appendTokenSegment(
-        slice: String,
-        u16Lo: Int,
-        u16Hi: Int,
-        baseUTF8: Int,
-        into out: inout [(start: Int, end: Int, isWord: Bool)]
-    ) {
-        guard u16Hi > u16Lo else { return }
-        let s16 = slice.utf16.index(slice.utf16.startIndex, offsetBy: u16Lo)
-        let e16 = slice.utf16.index(slice.utf16.startIndex, offsetBy: u16Hi)
-        let sIdx = s16.samePosition(in: slice) ?? slice.startIndex
-        let eIdx = e16.samePosition(in: slice) ?? slice.endIndex
-        guard eIdx > sIdx else { return }
-        let sUTF8 = baseUTF8 + slice.utf8.distance(from: slice.utf8.startIndex, to: sIdx.samePosition(in: slice.utf8)!)
-        let eUTF8 = baseUTF8 + slice.utf8.distance(from: slice.utf8.startIndex, to: eIdx.samePosition(in: slice.utf8)!)
-        let isWord = slice[sIdx..<eIdx].unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
-        out.append((sUTF8, eUTF8, isWord))
+    /// Use the same Unicode word boundaries as visual arrow navigation. A segment is a word
+    /// if it contains a letter or number, as in upstream `edit/caret_motion.rs`.
+    private func uaxWordSegment(in line: Substring, forward: Bool) -> (Int, Bool)? {
+        let boundaries = line.ranges(of: #/\b/#.wordBoundaryKind(.default))
+        guard let edge = (forward ? boundaries.dropFirst().first : boundaries.dropLast().last)?.lowerBound else { return nil }
+        let segment = forward ? line[..<edge] : line[edge...]
+        let isWord = segment.unicodeScalars.contains { $0.properties.isAlphabetic || $0.properties.numericType != nil }
+        return (text.utf8.distance(from: text.startIndex, to: edge), isWord)
     }
 }

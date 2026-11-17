@@ -172,8 +172,8 @@ struct ContentExamplesParityTests {
     @Test("rune-upload-bench measures steady and scroll 2000-instance GPU upload frames")
     func uploadBenchSmoke() throws {
         let report = try RuneUploadBenchApp.runReport(frames: 8, warmup: 2, count: 400)
-        #expect(report.results.count == 2)
-        #expect(report.results.allSatisfy { $0.cpuUs > 0 && $0.frameUs >= $0.cpuUs * 0.5 })
+        #expect(report.results.map(\.scene) == ["steady", "scroll"])
+        #expect(report.results.allSatisfy { $0.cpuUs > 0 && $0.frameUs >= $0.cpuUs })
         #expect(report.output.contains("scene=steady"))
         #expect(report.output.contains("scene=scroll"))
     }
@@ -243,8 +243,13 @@ struct ContentExamplesParityTests {
         let snap = try RuneTextGpuApp.runSnap(directory: tmp, scale: 1.0, classic: true, gpuPrewarm: true, scales: [1.0, 1.3])
         #expect(snap.writtenFiles == 10)
         #expect(snap.totalGlyphs > 0)
-        #expect(FileManager.default.fileExists(atPath: tmp.appendingPathComponent("rest-light.png").path))
-        #expect(FileManager.default.fileExists(atPath: tmp.appendingPathComponent("zoom1-moving-dark.png").path))
+        let light = try Frame.fromPNG(data: Data(contentsOf: tmp.appendingPathComponent("rest-light.png")))
+        let dark = try Frame.fromPNG(data: Data(contentsOf: tmp.appendingPathComponent("zoom1-moving-dark.png")))
+        #expect(light.width == 520 && light.height == 300)
+        #expect(dark.width == light.width && dark.height == light.height)
+        #expect(light.pixel(x: 0, y: 0).x > 230 && dark.pixel(x: 0, y: 0).x < 40)
+        #expect(stride(from: 0, to: light.rgba.count, by: 4).contains { light.rgba[$0] < 120 })
+        #expect(stride(from: 0, to: dark.rgba.count, by: 4).contains { dark.rgba[$0] > 150 })
 
         let perf = try RuneTextGpuApp.runPerf(scale: 1.5, frames: 6, warmup: 2)
         #expect(perf.glyphs > 0)

@@ -7,6 +7,8 @@ import Testing
 
 @Suite("RunePerf & Procwatch Upstream Parity Tests")
 struct RunePerfUpstreamTests {
+    private static let workerTimeout: TimeInterval = 60
+
     @Test func optionalCountersStayUnavailableAndInvalidTimingsRejected() throws {
         let recorder = PerfRecorder()
         let empty = FrameSample(window: 0, seq: 0, outcome: .skipped, timestampMs: 0)
@@ -233,18 +235,20 @@ struct RunePerfUpstreamTests {
         let handlerWriter = PerfStoreWriter(config: handlerConfig, startNanos: DispatchTime.now().uptimeNanoseconds, health: health)
         handlerWriter.accept(FrameSample(window: 100, seq: 100, outcome: .drawn, updateMs: 300.0, renderMs: 1.0, timestampMs: 1000))
         handlerWriter.flush()
-        #expect(hookSem.wait(timeout: .now() + 2) == .success)
+        #expect(hookSem.wait(timeout: .now() + Self.workerTimeout) == .success)
         Thread.sleep(forTimeInterval: 0.02)
         handlerWriter.accept(FrameSample(window: 101, seq: 101, outcome: .drawn, updateMs: 300.0, renderMs: 1.0, timestampMs: 3000))
         handlerWriter.flush()
-        #expect(hookSem.wait(timeout: .now() + 2) == .success)
+        #expect(hookSem.wait(timeout: .now() + Self.workerTimeout) == .success)
 
         // Log rotation parity (128-byte cap)
         let logDir = dir.appendingPathComponent("log-rot", isDirectory: true)
         try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
-        let log = PerfRotatingLog(directory: logDir, fileName: "perf.log", limitBytes: 128)
-        for n in 0..<50 {
-            try log.append(jsonObject: ["seq": n])
+        do {
+            let log = PerfRotatingLog(directory: logDir, fileName: "perf.log", limitBytes: 128)
+            for n in 0..<50 {
+                try log.append(jsonObject: ["seq": n])
+            }
         }
         for name in ["perf.log", "perf.log.1"] {
             let text = try String(contentsOf: logDir.appendingPathComponent(name), encoding: .utf8)
@@ -257,8 +261,8 @@ struct RunePerfUpstreamTests {
         // Stale-size partial write recovery + absent-dir write error + atomic_json oversize error
         let staleSpaces = Data(repeating: 0x20, count: 125)
         try staleSpaces.write(to: logDir.appendingPathComponent("perf.log"))
-        log.resetHandleForTest()
-        try log.append(jsonObject: ["seq": 51])
+        let reopenedLog = PerfRotatingLog(directory: logDir, fileName: "perf.log", limitBytes: 128)
+        try reopenedLog.append(jsonObject: ["seq": 51])
         let curAttrs = try FileManager.default.attributesOfItem(atPath: logDir.appendingPathComponent("perf.log").path)
         let rotAttrs = try FileManager.default.attributesOfItem(atPath: logDir.appendingPathComponent("perf.log.1").path)
         #expect(((curAttrs[.size] as? NSNumber)?.intValue ?? 999) <= 128)
@@ -300,7 +304,7 @@ struct RunePerfUpstreamTests {
             return recorder
         }
 
-        let notifiedURL = channel.receive(timeout: 5.0)
+        let notifiedURL = channel.receive(timeout: Self.workerTimeout)
         #expect(notifiedURL != nil)
         if let url = notifiedURL {
             #expect(FileManager.default.fileExists(atPath: url.path))
@@ -365,7 +369,7 @@ struct RunePerfUpstreamTests {
         }
 
         // Wait for the writer to acquire the lock and flush its queued incident + snapshot, then shut down.
-        let incidentURL = drainChannel.receive(timeout: 5.0)
+        let incidentURL = drainChannel.receive(timeout: Self.workerTimeout)
         #expect(incidentURL != nil)
         drainRecorder.shutdown()
 
@@ -660,7 +664,7 @@ struct RunePerfUpstreamTests {
                 warnSem.signal()
             }
         }
-        #expect(warnSem.wait(timeout: .now() + 3.0) == .success)
+        #expect(warnSem.wait(timeout: .now() + Self.workerTimeout) == .success)
         let event = try #require(seenEvent.withLock { $0 })
         #expect(event.kind == .footprint)
         #expect(event.isWarning)

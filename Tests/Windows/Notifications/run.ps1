@@ -15,7 +15,8 @@ $appId = 'Rune.Test.' + $nonce
 $scheme = 'rune-test-' + $nonce
 $identityKey = "HKCU:\Software\Classes\AppUserModelId\$appId"
 $protocolKey = "HKCU:\Software\Classes\$scheme"
-if ((Test-Path $identityKey) -or (Test-Path $protocolKey)) { throw 'Fixture identity collision' }
+$settingsKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\$appId"
+if ((Test-Path $identityKey) -or (Test-Path $protocolKey) -or (Test-Path $settingsKey)) { throw 'Fixture identity collision' }
 [Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime] > $null
 $history = [Windows.UI.Notifications.ToastNotificationManager]::History
 function Wait-History([int]$count, [string]$title) {
@@ -31,33 +32,17 @@ function Wait-History([int]$count, [string]$title) {
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "Unexpected notification history for $count / '$title'. Found $($toasts.Count)."
 }
-try {
-    & $Executable first $appId $scheme
-    if ($LASTEXITCODE) { throw 'Swift registration or initial post failed' }
-    if ((Get-ItemProperty $identityKey).DisplayName -ne 'Rune Toast Test') { throw 'Registration missing' }
-    $command = (Get-Item "$protocolKey\shell\open\command").GetValue('')
-    if (!$command.Contains('"%1"') -or !$command.Contains((Get-Item $Executable).FullName)) { throw 'Activation command mismatch' }
-    Wait-History 1 First
-    & $Executable replace $appId $scheme
-    if ($LASTEXITCODE) { throw 'Swift replacement failed' }
-    Wait-History 1 Updated
-    & $Executable remove $appId $scheme
-    if ($LASTEXITCODE) { throw 'Swift removal failed' }
-    Wait-History 0 ''
-    Write-Output 'Windows toast registration, protocol URI, history replacement, reply XML and removal passed.'
-} finally {
-    try { $history.Clear($appId) } finally {
-        if (Test-Path $protocolKey) { Remove-Item -LiteralPath $protocolKey -Recurse -Force }
-        if (Test-Path $identityKey) { Remove-Item -LiteralPath $identityKey -Recurse -Force }
-    }
-}
-
 # The optional native client is Probe.cpp under ../NotificationActivation.
 if ($ActivationClient) {
     foreach ($mode in 'serve', 'wait') {
         $clsid = [guid]::NewGuid().ToString('B')
         $ready = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N') + '.ready')
-        $proc = Start-Process -FilePath $Executable -ArgumentList "$mode $clsid `"$ready`"" -PassThru -WindowStyle Hidden
+        $start = New-Object Diagnostics.ProcessStartInfo
+        $start.FileName = $Executable
+        $start.Arguments = "$mode $clsid `"$ready`""
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $proc = [Diagnostics.Process]::Start($start)
         try {
             $deadline = [DateTime]::UtcNow.AddSeconds(15)
             while (!(Test-Path $ready) -and !$proc.HasExited -and [DateTime]::UtcNow -lt $deadline) {
@@ -74,5 +59,36 @@ if ($ActivationClient) {
             $proc.Dispose()
             if (Test-Path $ready) { Remove-Item -LiteralPath $ready -Force }
         }
+    }
+}
+
+try {
+    & $Executable first $appId $scheme
+    if ($LASTEXITCODE) { throw 'Swift registration or initial post failed' }
+    if ((Get-ItemProperty $identityKey).DisplayName -ne 'Rune Toast Test') { throw 'Registration missing' }
+    Wait-History 1 First
+    Write-Output 'Initial Windows toast and reply input verified in OS history.'
+    & $Executable replace $appId $scheme
+    if ($LASTEXITCODE) { throw 'Swift replacement failed' }
+    Wait-History 1 Updated
+    Write-Output 'Windows replacement verified in OS history.'
+    & $Executable remove $appId $scheme
+    if ($LASTEXITCODE) { throw 'Swift removal failed' }
+    Wait-History 0 ''
+    $command = (Get-Item "$protocolKey\shell\open\command").GetValue('')
+    $activation = [regex]::Match($command, '^"([^"]+)" "%1"$')
+    if (!$activation.Success) { throw "Invalid protocol activation command '$command'" }
+    # Windows may start the process with its 8.3 path while PowerShell resolves the long path.
+    $target = $activation.Groups[1].Value
+    if (!(Test-Path -LiteralPath $target -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $target).Hash -ne (Get-FileHash -LiteralPath $Executable).Hash) {
+        throw "Protocol command '$command' did not point to '$Executable'"
+    }
+    Write-Output 'Windows toast registration, protocol URI, history replacement, reply XML and removal passed.'
+} finally {
+    try { $history.Clear($appId) } finally {
+        if (Test-Path $protocolKey) { Remove-Item -LiteralPath $protocolKey -Recurse -Force }
+        if (Test-Path $identityKey) { Remove-Item -LiteralPath $identityKey -Recurse -Force }
+        if (Test-Path $settingsKey) { Remove-Item -LiteralPath $settingsKey -Recurse -Force }
     }
 }
