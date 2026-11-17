@@ -7045,7 +7045,8 @@ public final class TextSystem: @unchecked Sendable {
                                                      wrapAnywhere: style.wrapAnywhere, pretty: usePretty,
                                                      utf8Start: cursorUTF8, pillRanges: pillRanges) { ch, local in
                     let byte = cursorUTF8 + local
-                    return leadExtra(atUTF8: byte) + charAdvance(ch, atUTF8: byte) + trailExtra(endingAtUTF8: byte + ch.utf8.count)
+                    return (charAdvance(ch, atUTF8: byte), leadExtra(atUTF8: byte),
+                            trailExtra(endingAtUTF8: byte + ch.utf8.count))
                 }
                 for (i, line) in wrapped.enumerated() {
                     lines.append((cursorUTF8 + line.start, line.text, line.width, isRTL, i == wrapped.count - 1, insets))

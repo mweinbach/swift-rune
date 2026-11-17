@@ -176,12 +176,12 @@ public enum PrettyLineBreaker {
         return caps.isEmpty ? nil : caps
     }
 
-    /// Wraps one portable shaped paragraph at Unicode break opportunities. Advances arrive in
-    /// logical points and include inline boxes. Emergency breaks may only fall between graphemes.
+    /// Wraps one portable shaped paragraph at Unicode break opportunities. Advances and inline
+    /// boxes are in logical points. Emergency breaks may only fall between graphemes.
     internal static func wrap(
         _ text: String, width: Float, fontSize: Float, wrapAnywhere: Bool, pretty: Bool,
         utf8Start: Int = 0, pillRanges: [Range<Int>] = [],
-        advance: (Character, Int) -> Float
+        measure: (Character, Int) -> (advance: Float, leadingBox: Float, trailingBox: Float)
     ) -> [(start: Int, text: String, width: Float)] {
         struct Edge {
             let index: String.Index
@@ -189,6 +189,7 @@ public enum PrettyLineBreaker {
             let utf16: Int
             let x: Float
             let inkEnd: Float
+            let hangs: Bool
         }
         let ns = text as NSString
         let standard = Set(lineBreakOpportunities(in: ns, from: 0, to: ns.length))
@@ -197,14 +198,19 @@ public enum PrettyLineBreaker {
         #else
         let natural = standard
         #endif
-        var edges = [Edge(index: text.startIndex, utf8: 0, utf16: 0, x: 0, inkEnd: 0)]
+        var edges = [Edge(index: text.startIndex, utf8: 0, utf16: 0, x: 0, inkEnd: 0, hangs: false)]
         for index in text.indices {
             let character = text[index]
             let start = edges[edges.count - 1]
-            let x = start.x + advance(character, start.utf8)
+            let cell = measure(character, start.utf8)
+            let x = start.x + cell.leadingBox + cell.advance + cell.trailingBox
+            let hangingSpace = character == " " || character == "\t" || character == "\u{3000}"
+            let hangs = hangingSpace && cell.trailingBox == 0
+            let fullyHangs = hangs && cell.leadingBox == 0
+            let visibleEdge = hangs ? start.x + cell.leadingBox : x
             edges.append(Edge(index: text.index(after: index), utf8: start.utf8 + character.utf8.count,
                               utf16: start.utf16 + character.utf16.count, x: x,
-                              inkEnd: character.isWhitespace ? start.inkEnd : x))
+                              inkEnd: fullyHangs ? start.inkEnd : visibleEdge, hangs: fullyHangs))
         }
 
         let end = edges.count - 1
@@ -216,17 +222,22 @@ public enum PrettyLineBreaker {
             var lo = 0
             while lo < end {
                 let available = caps[ranges.count].map(Float.init) ?? width
-                var hi = lo + 1
-                var lastFit: Int?
-                while hi <= end {
-                    if edges[hi].inkEnd - edges[lo].x > available + epsilon {
-                        if let lastFit { hi = lastFit }
-                        else if wrapAnywhere { hi = max(lo + 1, hi - 1) }
-                        else { while !canBreak(hi) { hi += 1 } }
+                var hi = lo
+                var regularBreak: Int?
+                var emergencyBreak: Int?
+                while hi < end {
+                    // Parley records a break before this grapheme only after some
+                    // advance. A zero-width prefix stays with the following text.
+                    if edges[hi].x != edges[lo].x {
+                        if canBreak(hi) { regularBreak = hi }
+                        else if wrapAnywhere { emergencyBreak = hi }
+                    }
+                    let next = edges[hi + 1]
+                    if !next.hangs, next.inkEnd - edges[lo].x > available + epsilon,
+                       let boundary = regularBreak ?? emergencyBreak {
+                        hi = boundary
                         break
                     }
-                    if canBreak(hi) { lastFit = hi }
-                    if hi == end { break }
                     hi += 1
                 }
                 // Start the chip on a fresh line when the proposed break splits its label.

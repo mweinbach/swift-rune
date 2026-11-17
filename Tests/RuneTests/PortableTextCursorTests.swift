@@ -205,6 +205,18 @@ struct PortableTextCursorTests {
         #expect(PrettyLineBreaker.lineBreakOpportunities(in: ns, from: 0, to: ns.length) == [4, 6, 7])
     }
 
+    @Test func emergencyBreakAcceptsAnOverwideGraphemeAndItsHangingSpaces() {
+        func lines(_ text: String, width: Float, boxAt: Int? = nil) -> [String] {
+            PrettyLineBreaker.wrap(text, width: width, fontSize: 10, wrapAnywhere: true, pretty: false) { ch, byte in
+                let advance: Float = ch == "\u{200b}" ? 0 : 10
+                return (advance, byte == boxAt ? 5 : 0, 0)
+            }.map(\.text)
+        }
+        #expect(lines("ab   \u{200b}c\t d", width: 1) == ["a", "b   ", "\u{200b}c\t ", "d"])
+        #expect(lines("ab\u{00a0}cd", width: 20) == ["ab", "\u{00a0}c", "d"])
+        #expect(lines("a b", width: 1, boxAt: 1) == ["a", " ", "b"])
+    }
+
     @Test func prettyWrappingRebalancesTheLastWordWithoutAddingLines() throws {
         let system = TextSystem()
         let style = TextStyle(size: 14, wrap: .wrap)
