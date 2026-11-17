@@ -2576,11 +2576,14 @@ extension Runtime {
             let viewportPath = reveal.viewport
             let prefix = viewportPath + "/"
             guard let view = presentedRectByPath[viewportPath],
-                  let target = lastElements.first(where: {
-                      !$0.exiting && $0.path.hasPrefix(prefix)
-                          && selectsElementSelector(reveal.key, path: $0.path, key: $0.key)
+                  let index = lastElements.indices.first(where: { index in
+                      let element = lastElements[index]
+                      return !element.exiting && element.path.hasPrefix(prefix)
+                          && LayoutKeyIndex.selects(selector: reveal.key, nodeIndex: index, nodes: lastElements,
+                                                    keyOf: { $0.key }, parentOf: { $0.parentIndex })
                   }),
                   let offset = scrollOffsets[viewportPath] else { continue }
+            let target = lastElements[index]
             let scale = presentedScaleByPath[viewportPath]?.y ?? 1
             guard scale > 1e-4 else { continue }
             let top = (target.rect[1] - view.top) / scale
@@ -2662,7 +2665,7 @@ extension Runtime {
                         return true
                     }
                     if slice2State.scrollSlacks[vPath]?.moving == true
-                        || (needsCommit && virtualLists.values.contains { $0.scrollPath == vPath && $0.wantsMoreFrames }) {
+                        || (needsCommit && virtualLists.values.contains { $0.scrollPath == vPath }) {
                         return true
                     }
                     let prefix = vPath + "/"
