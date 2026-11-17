@@ -236,6 +236,10 @@ internal enum ElDisplayResolver {
             inputStyle.direction = fallbackDirection
         }
 
+        // On the element it holds its resolved flow for `dirByParagraph`; the shaped style says
+        // whether the field lays out by paragraph (`applyByParagraph`).
+        let plaintextStart = el.textStyle.byParagraphStart
+        inputStyle.byParagraphStart = nil
         // A wrapping field wraps at `w * scale + FIT_SLACK` device px, as every text lays out (#948).
         let wrapsAt: Float? = pxScale.flatMap { TextBoxGeometry.wrapWidth(innerWidth, scale: $0) } ?? innerWidth
         let shapeMaxW: Float? = (!isSingle && inputStyle.wrap != .noWrap) ? wrapsAt : (inputStyle.direction == .rtl ? innerWidth : nil)
@@ -250,6 +254,8 @@ internal enum ElDisplayResolver {
             var placeholderStyle = el.placeholderFont ?? inputStyle
             placeholderStyle.maxLines = 0
             placeholderStyle.wrap = inputStyle.wrap
+            // A placeholder is laid out in its own direction, as one text.
+            placeholderStyle.byParagraphStart = nil
             if let fDir = edit.forcedDir {
                 placeholderStyle.direction = fDir
             } else if placeholderStyle.direction == nil, let fallbackDirection {
@@ -273,6 +279,7 @@ internal enum ElDisplayResolver {
         let decorations = el.inputDecorations
         let isRich = !isSecureHidden && (edit.isRichEnabled || !decorations.isEmpty || el.pillColorsSpec != nil || el.pillIconLookup != nil || el.pillStyleLookup != nil || el.richStyleSpec != nil)
         if !isRich {
+            Self.applyByParagraph(&inputStyle, plaintextStart: plaintextStart, el: el, edit: edit, isSingle: isSingle, display: rawDisplay)
             return ElResolvedInput(
                 displayString: rawDisplay,
                 renderedString: rawDisplay,
@@ -325,6 +332,7 @@ internal enum ElDisplayResolver {
             }
         }
 
+        Self.applyByParagraph(&inputStyle, plaintextStart: plaintextStart, el: el, edit: edit, isSingle: isSingle, display: specs.displayText)
         let flatSpans: [TextSpan]? = combinedSpans.isEmpty
             ? nil
             : RichSpanFlattener.flatten(combinedSpans, in: specs.displayText, base: inputStyle)
@@ -342,6 +350,28 @@ internal enum ElDisplayResolver {
             maxWidthForShape: shapeMaxW,
             blocks: specs.blocks
         )
+    }
+
+    /// `TextSpec::by_paragraph` / `paragraphs_flow` / `plaintext_flow` for a field's shaped style:
+    /// a wrapped multi-line field (not secure) lays out by paragraph when its text holds more than
+    /// one paragraph, or always under `El.dirByParagraph` (`TextDir::Plaintext`). Then every
+    /// paragraph reads the way the element does, else the whole text's first strong character
+    /// does, as one layout of it would; under `dirByParagraph` (unless the edit forces a
+    /// direction, `TextDir::Fixed`) each reads its own way, starting from the element's flow
+    /// (`plaintextStart`, left to right when nothing above sets one).
+    static func applyByParagraph<State>(_ style: inout TextStyle, plaintextStart: TextFlow?, el: El<State>, edit: TextEdit, isSingle: Bool, display: String) {
+        style.byParagraphStart = nil
+        let plaintext = el.textDirByParagraph && edit.forcedDir == nil
+        guard !isSingle, edit.multiline, !edit.isSecure, style.wrap == .wrap, style.maxLines == 0,
+              plaintext || display.utf8.contains(0x0a) else { return }
+        if plaintext {
+            style.direction = nil
+            style.byParagraphStart = plaintextStart ?? .ltr
+        } else {
+            let flow = style.direction ?? (Direction.of(display) == .rtl ? .rtl : .ltr)
+            style.direction = flow
+            style.byParagraphStart = flow
+        }
     }
 
     static func resolveText<State>(

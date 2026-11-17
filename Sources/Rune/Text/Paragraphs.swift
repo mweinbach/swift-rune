@@ -69,6 +69,20 @@ internal struct Paragraph {
     var run: Bool
 }
 
+/// One paragraph of a by-paragraph field over its stacked lines (`ShapedText.paragraphSpans`):
+/// its content bytes, which of the stacked lines are its, and how its line break highlights.
+internal struct ParagraphLineSpan: Sendable, Hashable {
+    var start: Int
+    var end: Int
+    var firstLine: Int
+    var lineCount: Int
+    var rtl: Bool
+    /// Its layout holds its lines (not blank, not waiting for a fill).
+    var shaped: Bool
+
+    var isBlank: Bool { start == end }
+}
+
 /// A plain text's content and the key inputs that aren't per paragraph, so an edit keys only the
 /// paragraphs it touched and takes the others' keys as they were.
 internal struct ParagraphKeyed {
@@ -228,6 +242,16 @@ internal final class ParagraphLayout: @unchecked Sendable {
         var boxHeights: [Float] = []
         var metricHeights: [Float] = []
         var advances: [(widthPx: Float, trailingWsPx: Float)] = []
+        // Each line's baseline (device px from the field's top) and its exact fraction, as one
+        // layout records them (#935); kept only when every line has one.
+        var baselines: [Float] = []
+        var baselineFracs: [Float] = []
+        var baselinesKnown = true
+        func baseline(_ s: ShapedText, _ i: Int, _ yPx: Float) {
+            guard baselinesKnown, i < s.lineBaselinesPx.count, i < s.lineBaselineFracsPx.count else { baselinesKnown = false; return }
+            baselines.append(yPx + s.lineBaselinesPx[i])
+            baselineFracs.append(s.lineBaselineFracsPx[i])
+        }
         #if canImport(CoreText) && canImport(CoreGraphics)
         var lines: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)] = []
         var markerLines: [ShapedText.MarkerMap.LineRange] = []
@@ -247,8 +271,12 @@ internal final class ParagraphLayout: @unchecked Sendable {
             let attr = CFAttributedStringCreate(kCFAllocatorDefault, "" as CFString, [kCTFontAttributeName: font] as CFDictionary)!
             return CTLineCreateWithAttributedString(attr)
         }()
+        var spans: [ParagraphLineSpan] = []
+        spans.reserveCapacity(paragraphs.count)
         for p in paragraphs {
             advanceU16(to: p.start)
+            let firstLine = lines.count
+            defer { spans.append(ParagraphLineSpan(start: p.start, end: p.end, firstLine: firstLine, lineCount: lines.count - firstLine, rtl: p.flow == .rtl, shaped: p.shaped && p.start < p.end && !p.layout.shaped.lineStrings.isEmpty)) }
             let yPt = p.y * invS
             let s = p.layout.shaped
             if !p.shaped || p.start == p.end || s.lineStrings.isEmpty {
@@ -262,6 +290,8 @@ internal final class ParagraphLayout: @unchecked Sendable {
                 boxHeights.append(p.height * invS)
                 metricHeights.append(p.height * invS)
                 advances.append((p.widths.y, 0))
+                // A stand-in line sits on an empty line's baseline, as upstream's empty layout does.
+                baseline(p.shaped ? p.layout.shaped : (lazy?.ascii.empty.shaped ?? p.layout.shaped), 0, p.y)
                 continue
             }
             for (i, rec) in s.lineStrings.enumerated() {
@@ -277,9 +307,19 @@ internal final class ParagraphLayout: @unchecked Sendable {
                 boxHeights.append(s.lineBoxHeightPt(i))
                 metricHeights.append(s.lineMetricHeightPt(i))
                 advances.append(i < s.lineAdvancesPx.count ? s.lineAdvancesPx[i] : (0, 0))
+                baseline(s, i, p.y)
             }
         }
         out.lineStrings = lines
+        out.paragraphSpans = spans
+        out.lineIsRTL = spans.flatMap { Array(repeating: $0.rtl, count: $0.lineCount) }
+        // `newline`: a quarter of the primary font's ascent and descent, at the field's size.
+        if let font = baseFont {
+            let f = font as! CTFont
+            out.paragraphNewlinePt = 0.25 * Float(CTFontGetAscent(f) + abs(CTFontGetDescent(f))) * invS
+        } else {
+            out.paragraphNewlinePt = 0.25 * style.size
+        }
         var mm = ShapedText.MarkerMap()
         mm.authText = out.drawnText
         mm.lines = markerLines
@@ -291,6 +331,12 @@ internal final class ParagraphLayout: @unchecked Sendable {
         out.grownLineTopsPt = tops
         out.grownLineHeightsPt = boxHeights
         out.grownLineMetricHeightsPt = metricHeights
+        out.lineBaselinesPx = baselinesKnown ? baselines : []
+        out.lineBaselineFracsPx = baselinesKnown ? baselineFracs : []
+        out.underlineLineEndsPt = []
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        out.glyphPens = []
+        #endif
         if let last = paragraphs.last {
             let s = last.layout.shaped
             out.lastLineAdvancePx = last.shaped ? s.lastLineAdvancePx : last.widths.y
@@ -301,7 +347,8 @@ internal final class ParagraphLayout: @unchecked Sendable {
         // `TextFlow::spec_height`: its paragraphs' height, at least a line, snapped as one layout's.
         let hPx = max(height, lhPt * scale)
         let snapped = style.exactLines ? (hPx * 64).rounded() / 64 : ceilf(hPx)
-        out.size = Vec2(ceilf(fullWidth * invS * 2.0) * 0.5, snapped * invS)
+        // As wide as its widest line to a 64th of a device pixel, as one layout is (`text_width`, #934).
+        out.size = Vec2(TextBoxGeometry.textWidth(fullWidth) * invS, snapped * invS)
         return out
     }
 }
@@ -887,3 +934,55 @@ extension TextSystem {
     }
     #endif
 }
+
+#if canImport(CoreText) && canImport(CoreGraphics)
+extension TextSystem {
+    /// Boxes covering content bytes `utf8Range` of a by-paragraph field (`TextFlow::range_boxes`):
+    /// each paragraph boxes the bytes it holds as its own layout does, and a selected line break
+    /// between paragraphs shows at the end of the line it ends, `paragraphNewlinePt` wide, on the
+    /// side its paragraph ends (the left of a right-to-left one).
+    internal func paragraphSelectionRects(in shaped: ShapedText, utf8Range: Range<Int>, pixelScale: Float) -> [SIMD4<Float>] {
+        let ps = shaped.paragraphSpans
+        let (a, b) = (utf8Range.lowerBound, utf8Range.upperBound)
+        var out: [SIMD4<Float>] = []
+        guard a < b else { return out }
+        let ws = shaped.paragraphNewlinePt
+        let invS = 1.0 / (pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0)
+        var k = partitionPoint(ps) { $0.end < a }
+        while k < ps.count, ps[k].start <= b {
+            let p = ps[k]
+            let first = out.count
+            let lines = p.firstLine..<(p.firstLine + p.lineCount)
+            // `Piece::clip`: the bytes it holds, when the range meets its words.
+            if p.shaped, a < p.end, p.start < b {
+                out.append(contentsOf: selectionRects(in: shaped, lines: lines, utf8Range: max(a, p.start)..<min(b, p.end), pixelScale: pixelScale))
+            }
+            if k + 1 < ps.count, a <= p.end, p.end < b, let last = lines.last {
+                let rec = shaped.lineStrings[last]
+                let top = rec.originY
+                let height = shaped.lineBoxHeightPt(last)
+                // Its last line's start and end; a blank (or waiting) paragraph's caret edge.
+                let start = rec.originX
+                let end = p.shaped ? start + (last < shaped.lineAdvancesPx.count ? shaped.lineAdvancesPx[last].widthPx : 0) * invS : start
+                let onLine = (first..<out.count).filter { abs(out[$0].y - top) < 0.01 }
+                if p.rtl {
+                    if let i = onLine.min(by: { out[$0].x < out[$1].x }) {
+                        out[i].x -= ws
+                        out[i].z += ws
+                    } else {
+                        out.append(SIMD4(start - ws, top, ws, height))
+                    }
+                } else {
+                    if let i = onLine.max(by: { out[$0].x + out[$0].z < out[$1].x + out[$1].z }) {
+                        out[i].z += ws
+                    } else {
+                        out.append(SIMD4(end, top, ws, height))
+                    }
+                }
+            }
+            k += 1
+        }
+        return out
+    }
+}
+#endif

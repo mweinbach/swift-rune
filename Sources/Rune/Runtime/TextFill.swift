@@ -61,24 +61,16 @@ extension Runtime {
     }
 
     /// The paragraph request for a field's layout (`TextSpec::by_paragraph` /
-    /// `paragraphs_flow` / `plaintext_flow`): nil when it lays out as one text.
+    /// `paragraphs_flow` / `plaintext_flow`, resolved into its style by
+    /// `ElDisplayResolver.applyByParagraph`): nil when it lays out as one text. A field with
+    /// spans, pills or blocks other than paragraphs keeps one CoreText layout, whose paragraphs
+    /// read the same ways (`TextStyle.byParagraphStart`), pills isolated.
     internal static func paragraphRequest(field: NodeId, el: El<State>, edit: TextEdit, resolved: ElResolvedInput) -> ParagraphRequest? {
-        guard !resolved.showingPlaceholder, !resolved.isSingleLine, !resolved.isSecure, edit.multiline,
-              resolved.style.wrap == .wrap, resolved.style.maxLines == 0,
+        guard !resolved.showingPlaceholder, !resolved.isSecure, let start = resolved.style.byParagraphStart,
               resolved.spans?.isEmpty ?? true, resolved.pills.isEmpty,
               // A rich field shows a block per line, `.paragraph` when it has none: plain while
               // every block is a paragraph (`paragraphs.rs` `plain`).
               resolved.blocks.allSatisfy({ $0 == .paragraph }) else { return nil }
-        let plaintext = el.textDirByParagraph && edit.forcedDir == nil
-        guard plaintext || resolved.renderedString.utf8.contains(0x0a) else { return nil }
-        let forced: TextFlow?
-        if plaintext {
-            forced = nil
-        } else if let d = resolved.style.direction {
-            forced = d
-        } else {
-            forced = Direction.of(resolved.renderedString) == .rtl ? .rtl : .ltr
-        }
-        return ParagraphRequest(field: field.rawValue, forced: forced, startFlow: resolved.style.direction ?? .ltr)
+        return ParagraphRequest(field: field.rawValue, forced: resolved.style.direction, startFlow: start)
     }
 }

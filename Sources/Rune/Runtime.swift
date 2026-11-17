@@ -2790,6 +2790,9 @@ public final class Runtime<State> {
             }
             if nodeDirected && !el.textDirByParagraph {
                 el.textStyle.direction = nodeFlow.textFlow
+            } else if nodeDirected && el.handlers.editLens != nil {
+                // A `dirByParagraph` field's paragraphs start from the element's flow (`TextDir::Plaintext`).
+                el.textStyle.byParagraphStart = nodeFlow.textFlow
             }
             if !el.isolatesSpec.isEmpty {
                 el = el.applyingIsolates()

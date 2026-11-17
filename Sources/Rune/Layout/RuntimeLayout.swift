@@ -412,7 +412,12 @@ final class RetainedLayoutCoordinator {
                 pin: pin
             ))
 
-            let (measureFn, measureHash, isRedacted) = makeMeasure(el: el, nodeId: runtimeNodeId, flatIndex: myIndex, forcedTextFlow: forcedTextFlow)
+            var measured = el
+            if nodeDirected && el.textDirByParagraph && el.handlers.editLens != nil {
+                // A `dirByParagraph` field's paragraphs start from the element's flow (`TextDir::Plaintext`).
+                measured.textStyle.byParagraphStart = nodeFlow.textFlow
+            }
+            let (measureFn, measureHash, isRedacted) = makeMeasure(el: measured, nodeId: runtimeNodeId, flatIndex: myIndex, forcedTextFlow: forcedTextFlow)
             flat[myIndex].measureFn = measureFn
 
             return SyncPrepared(

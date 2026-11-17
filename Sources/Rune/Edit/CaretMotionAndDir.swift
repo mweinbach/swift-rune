@@ -96,6 +96,8 @@ public enum CaretMotion: Sendable, Equatable {
     public static func of(_ shaped: ShapedText, hidden: Bool) -> CaretMotion {
         if hidden { return .logical }
         if shaped.forcedDirection == .rtl { return .visual }
+        // A paragraph laid out right to left (`layout.is_rtl()`).
+        if shaped.lineIsRTL.contains(true) { return .visual }
         #if canImport(CoreText) && canImport(CoreGraphics)
         for rec in shaped.lineStrings {
             if TextSystem.isRTLParagraph(rec.text) {
@@ -173,7 +175,10 @@ public enum CaretVisualStepper: Sendable {
         }
         let lineIdx = lineIndex(in: shaped, utf8Offset: utf8Offset, side: side)
         let rec = shaped.lineStrings[lineIdx]
-        let paraFlow: TextFlow = shaped.forcedDirection ?? (TextSystem.isRTLParagraph(rec.text) ? .rtl : .ltr)
+        // The way its paragraph lays out, as shaping resolved it (a neutral `dirByParagraph`
+        // paragraph takes the one before it's); else as its words read.
+        let paraFlow: TextFlow = shaped.forcedDirection
+            ?? (lineIdx < shaped.lineIsRTL.count ? (shaped.lineIsRTL[lineIdx] ? .rtl : .ltr) : (TextSystem.isRTLParagraph(rec.text) ? .rtl : .ltr))
         guard let ctLine = rec.ctLine else {
             return (.edge, paraFlow)
         }
