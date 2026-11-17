@@ -635,6 +635,8 @@ public struct SidebarRow<State> {
         let titleEl: El<State>
         if let renameConfig {
             var input: El<State> = Rune.textInput(key: renameConfig.inputKey, renameConfig.keyPath)
+                // Named after the row it edits, so a reader says the row's label (r436).
+                .label(titleText)
                 .noWrap()
                 .wFull()
                 .focusSelected(true)

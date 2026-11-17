@@ -212,13 +212,12 @@ extension Runtime {
         case "copy":
             if let node { _ = applyFocusedTextEditKey(KeyEvent(key: .command("c"), mods: mods), el: node.el, layout: nil, at: now) }
         case "paste":
-            let content = boundClipboard?.readRich(sanitizeUntrustedHTML: true).content ?? clipboard
             if let node, focusedPath == node.path || nodeByPath[targetPath] != nil {
                 if focusedPath != targetPath {
                     focusedPath = targetPath
                     focusedKey = node.key
                 }
-                _ = deliverPaste(content, at: now)
+                _ = pasteClipboardNow(at: now)
             }
         case "select-all":
             if let node { _ = applyFocusedTextEditKey(KeyEvent(key: .command("a"), mods: mods), el: node.el, layout: nil, at: now) }

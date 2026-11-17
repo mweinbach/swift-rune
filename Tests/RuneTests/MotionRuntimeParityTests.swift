@@ -733,6 +733,45 @@ struct MotionRuntimeParityTests {
         }
     }
 
+    @Test("springs: time_scale_zero_freezes_its_subtree_while_the_rest_moves")
+    func timeScaleZeroFreezesItsSubtreeWhileTheRestMoves() throws {
+        let rt = Lab(outer: 1.0, inner: 0.0).runtime()
+        var t = 0.0
+        rt.update(at: t) { s, _ in
+            s.outside = 0.0
+            s.inside = 0.0
+        }
+        for _ in 0..<12 {
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+        }
+        let outside = try #require(rt.element(byKey: "outside")?.opacity)
+        #expect(outside < 0.9, "outside fades: \(outside)")
+        #expect(rt.element(byKey: "inside")?.opacity == 1.0, "inside holds exactly")
+    }
+
+    @Test("springs: half_time_scale_reaches_the_same_point_at_twice_the_time")
+    func halfTimeScaleReachesTheSamePointAtTwiceTheTime() throws {
+        let rt = Lab(outer: 1.0, inner: 0.5).runtime()
+        var t = 0.0
+        rt.update(at: t) { s, _ in
+            s.outside = 0.0
+            s.inside = 0.0
+        }
+        for _ in 0..<10 {
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+        }
+        let reference = try #require(rt.element(byKey: "outside")?.opacity)
+        #expect(reference > 0.05 && reference < 0.95, "mid-flight: \(reference)")
+        for _ in 0..<10 {
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+        }
+        let inside = try #require(rt.element(byKey: "inside")?.opacity)
+        #expect(abs(inside - reference) < 1e-4, "\(inside) at 2t vs \(reference) at t")
+    }
+
     @Test("springs: nested_time_scales_multiply")
     func nestedTimeScalesMultiply() throws {
         let rt = Lab(outer: 0.5, inner: 0.5).runtime()

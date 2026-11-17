@@ -336,12 +336,16 @@ public protocol HostedWindowEntry: AnyObject {
     )
     func helpRegionsList(runtimeObj: AnyObject) -> [(MotionRect, String)]
     func setFocused(runtimeObj: AnyObject, focused: Bool)
+    /// The system's accessibility display options changed: re-read reduced motion, contrast and Increase Contrast.
+    func readSystemAccessibilitySettings(runtimeObj: AnyObject, forceReducedMotion: Bool)
     func setSystemDark(runtimeObj: AnyObject, dark: Bool)
     func windowTitle(runtimeObj: AnyObject) -> String?
     func quitRequested(runtimeObj: AnyObject) -> Bool
     func relaunchRequested(runtimeObj: AnyObject) -> Bool
     func isAnimating(runtimeObj: AnyObject) -> Bool
     func pointerMove(runtimeObj: AnyObject, to: Vec2, mods: Mods, at: Double)
+    /// Dispatches platform input `body` in the scope holding when it arrived (`Runtime.hostInput`).
+    func hostInput(runtimeObj: AnyObject, kind: HostInputKind, eventTimestamp: Double?, _ body: () -> Void)
     func pointerExit(runtimeObj: AnyObject, at: Double)
     func pointerDown(runtimeObj: AnyObject, at: Vec2, button: PointerButton, mods: Mods, at: Double)
     func pointerUp(runtimeObj: AnyObject, at: Vec2, button: PointerButton, mods: Mods, at: Double)
@@ -357,6 +361,8 @@ public protocol HostedWindowEntry: AnyObject {
     func answerFileDialog(runtimeObj: AnyObject, id: UInt64, result: FileDialogResult)
     func cancelFileDialogs(runtimeObj: AnyObject, at: Double)
     func takeDragOutStart(runtimeObj: AnyObject) -> DragOutStart?
+    @MainActor func syncWindowChrome(runtimeObj: AnyObject, window: AnyObject)
+    func takeTitlebarChanged(runtimeObj: AnyObject) -> Bool
     func finishDragOut(runtimeObj: AnyObject, outcome: DragOutcome, at: Double)
     func copyTitlebarDragHits(runtimeObj: AnyObject, point: Vec2) -> Bool
     func runQuitHook(runtimeObj: AnyObject)
@@ -377,6 +383,10 @@ public protocol HostedWindowEntry: AnyObject {
     @discardableResult func dispatchImeEvent(runtimeObj: AnyObject, event: ImeEvent, at: Double) -> Bool
     func currentCursor(runtimeObj: AnyObject) -> Cursor
     func accessibilitySnapshot(runtimeObj: AnyObject) -> AccessibilityNode
+    /// `Tx::announce`'s window live region (`Runtime.a11yAnnouncement`).
+    func accessibilityAnnouncement(runtimeObj: AnyObject) -> AccessibilityAnnouncement
+    /// Keeps the runtime dirty while the accessibility adapter holds words back (#980).
+    func markAccessibilityDirty(runtimeObj: AnyObject)
     @discardableResult func performAccessibilityAction(runtimeObj: AnyObject, id: String, action: AccessibilityAction, at: Double) -> Bool
     func shortcutRegistry(runtimeObj: AnyObject) -> ShortcutRegistry?
     var hasAppGlobalShortcuts: Bool { get }
@@ -430,7 +440,7 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         rt.onFileDrop = spec.appSpec.onFileDropPhase
         rt.nativeHelp = true
         rt.fitHeight = spec.fitContentHeight
-        rt.setSystemContrast(SystemPreferences.current().contrast)
+        rt.readSystemContrastSettings()
         spec.configureRuntime?(rt)
         spec.appShared?.setWaker(waker)
         if rt.fitHeight {
@@ -575,9 +585,10 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     func setFocused(runtimeObj: AnyObject, focused: Bool) {
         let r = rt(runtimeObj)
         r.dispatchFocus(focused)
-        if focused {
-            r.setSystemContrast(SystemPreferences.current().contrast)
-        }
+    }
+
+    func readSystemAccessibilitySettings(runtimeObj: AnyObject, forceReducedMotion: Bool) {
+        rt(runtimeObj).readSystemAccessibilitySettings(forceReducedMotion: forceReducedMotion)
     }
 
     func setSystemDark(runtimeObj: AnyObject, dark: Bool) {
@@ -602,6 +613,10 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
 
     func pointerMove(runtimeObj: AnyObject, to: Vec2, mods: Mods, at: Double) {
         rt(runtimeObj).pointerMove(to: to, mods: mods, at: at)
+    }
+
+    func hostInput(runtimeObj: AnyObject, kind: HostInputKind, eventTimestamp: Double?, _ body: () -> Void) {
+        rt(runtimeObj).hostInput(kind, eventTimestamp: eventTimestamp, body)
     }
 
     func pointerExit(runtimeObj: AnyObject, at: Double) {
@@ -710,6 +725,14 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         rt(runtimeObj).accessibilitySnapshot()
     }
 
+    func accessibilityAnnouncement(runtimeObj: AnyObject) -> AccessibilityAnnouncement {
+        rt(runtimeObj).a11yAnnouncement
+    }
+
+    func markAccessibilityDirty(runtimeObj: AnyObject) {
+        rt(runtimeObj).markNeedsCommit()
+    }
+
     @discardableResult
     func performAccessibilityAction(runtimeObj: AnyObject, id: String, action: AccessibilityAction, at time: Double) -> Bool {
         rt(runtimeObj).performAccessibilityAction(id, action: action, at: time)
@@ -721,6 +744,22 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
 
     func takeDragOutStart(runtimeObj: AnyObject) -> DragOutStart? {
         rt(runtimeObj).takeDragOutStart()
+    }
+
+    /// `window/chrome.rs::sync_chrome` for this window's `chrome` and `titlebar` (an `NSWindow`
+    /// on macOS; nothing elsewhere).
+    @MainActor func syncWindowChrome(runtimeObj: AnyObject, window: AnyObject) {
+        #if os(macOS)
+        // A borderless window has no titlebar (`window.rs`: `app.titlebar.filter(|_| !borderless)`).
+        let titlebar = spec.options.borderless ? nil : spec.titlebar
+        rt(runtimeObj).syncWindowChrome(windowObject: window, chrome: spec.chrome, titlebar: titlebar)
+        #else
+        let _ = (runtimeObj, window)
+        #endif
+    }
+
+    func takeTitlebarChanged(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).takeTitlebarChanged()
     }
 
     func finishDragOut(runtimeObj: AnyObject, outcome: DragOutcome, at: Double) {

@@ -781,6 +781,8 @@ public struct TextInput<State> {
     public var editKeyPath: WritableKeyPath<State, TextEdit>
     public var placeholderText: String = ""
     public var labelText: String?
+    /// The editor's accessible description (`TextInput::description`); `nil` leaves it unset.
+    public var descriptionText: String?
     public var isPlain: Bool = false
     public var trailingEl: El<State>?
     public var hasCopyButton: Bool = false
@@ -816,6 +818,12 @@ public struct TextInput<State> {
 
     public func label(_ l: String) -> TextInput<State> {
         var copy = self; copy.labelText = l; return copy
+    }
+
+    /// Help or a validation error for the inner editor, separate from its name
+    /// (`TextInput::description`, #1015): read by assistive technology as the editor's description.
+    public func description(_ text: String) -> TextInput<State> {
+        var copy = self; copy.descriptionText = text; return copy
     }
 
     public func plain(_ on: Bool = true) -> TextInput<State> {
@@ -972,11 +980,15 @@ public struct TextInput<State> {
             .focusRing(0, offset: 0, .transparent)
         field = richModifiers.apply(to: field, kit: k)
 
-        if let labelText {
+        // `name_field`: the name is the label if it's not empty, else the placeholder if that isn't,
+        // and the description always goes on the editor (`description.unwrap_or_default()`), so
+        // an editor given none has an empty one rather than one from elsewhere.
+        if let labelText, !labelText.isEmpty {
             field = field.label(labelText)
         } else if !placeholderText.isEmpty {
             field = field.label(placeholderText)
         }
+        field = field.description(descriptionText ?? "")
         if let activeDescendantKey {
             field = field.activeDescendant(activeDescendantKey)
         }

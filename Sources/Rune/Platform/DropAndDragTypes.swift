@@ -68,14 +68,23 @@ public struct DropSpec<State> {
 
 /// Pending outbound OS drag request emitted by `Runtime` when pointer movement crosses the
 /// element's drag threshold or `Tx.dragOut(_:)` fires.
+///
+/// `takeDragOutStart()` hands it over in window points (the view's times its zoom); the
+/// runtime keeps it in view points until then (`drag_out::DragOutStart`).
 public struct DragOutStart: Sendable, Equatable {
     public var item: DragItem
+    /// The element's visible drawn rect, cut to its scroll clip.
+    public var rect: MotionRect
+    /// The element's whole drawn rect, before scroll clipping.
     public var bounds: MotionRect
+    /// Where the pointer went down.
     public var press: Vec2
     public var key: String?
 
-    public init(item: DragItem, bounds: MotionRect, press: Vec2, key: String? = nil) {
+    /// `rect` defaults to `bounds` (an element no scroll clips).
+    public init(item: DragItem, rect: MotionRect? = nil, bounds: MotionRect, press: Vec2, key: String? = nil) {
         self.item = item
+        self.rect = rect ?? bounds
         self.bounds = bounds
         self.press = press
         self.key = key

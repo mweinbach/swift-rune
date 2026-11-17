@@ -54,10 +54,14 @@ public enum TextDecorations {
     /// Corner radius in points for rounded inline span backgrounds (`decorations::SPAN_RADIUS`).
     public static let spanRadius: Float = 4.0
 
-    /// Whole device-pixel left and right underline edges (`underline::underline_edges`).
-    /// Adjacent touching runs share edges, and a run reaching `lineEndPx` extends cleanly to box ceiling.
+    /// An underline's left and right edges (device px) under layout x `startX..endX` of a line whose
+    /// glyph runs end at `lineEndPx`, its text starting at `originX` (`underline::underline_edges`).
+    /// Both are on whole pixels, so runs that touch share an edge, and one that ends its line runs
+    /// on to where it ends, rounded as the next text box's start rounds (a text box is as wide as
+    /// its text to a 64th of a pixel and starts at its exact place): a link split into a text
+    /// element a word meets the next word's line with no gap or overlap at the space (#963).
     public static func underlineEdges(lineEndPx: Float, originX: Float, startX: Float, endX: Float) -> (Float, Float) {
-        let right = (endX >= lineEndPx - 0.01) ? (endX - 1e-3).rounded(.up) : endX.rounded()
+        let right = (endX >= lineEndPx - 0.01) ? endX : endX.rounded()
         return ((originX + startX.rounded()).rounded(), (originX + right).rounded())
     }
 
@@ -288,7 +292,8 @@ extension TextSystem {
             entries.append(RunLayout.GraphemeEntry(utf8Offset: utf8Cursor, xPx: xPx))
             utf8Cursor += ch.utf8.count
         }
-        let endPx = (shaped.size.x * s - 1e-3).rounded(.up)
+        // The run ends at its width in 64ths of a pixel, as a text box does (`text_width`, #934).
+        let endPx = TextBoxGeometry.textWidth(shaped.size.x * s)
         entries.append(RunLayout.GraphemeEntry(utf8Offset: run.text.utf8.count, xPx: max(0, endPx)))
         let cellLayout = cachedRunCellLayout(run, style: single, pixelScale: s)
         return RunLayout(text: run.text, scale: s, graphemes: entries, totalWidthPx: max(0, endPx), cellLayout: cellLayout)
@@ -434,8 +439,11 @@ extension FontSmoothing {
         return self
     }
 
+    /// The CoreGraphics stages glyphs rasterise with: all of them for `.on`, all but the dilation
+    /// for `.off`. On macOS `.on` draws as `.off` when the user turned smoothing off
+    /// (`AppleFontSmoothing` 0), as AppKit and SwiftUI then do (`#954`).
     public var pipeline: ApplePipeline {
-        isEnabled ? .smoothed : .unsmoothed
+        pipeline(smoothingAllowedByUser: AppleFontSmoothingPreference.smoothingAllowedByUser)
     }
 
     public func support(
@@ -534,7 +542,8 @@ public enum TextMeasure {
             pixelScale: 1.0,
             emitGlyphs: false
         )
-        return Vec2(ceilf(shaped.size.x), shaped.size.y)
+        // Widths round up to a 64th of a point, as Chromium keeps a text run's width (`text_width`, #934).
+        return Vec2(TextBoxGeometry.textWidth(shaped.size.x), shaped.size.y)
     }
 
     public static func contentWidths(_ text: String, spans: [TextSpan] = [], style: TextStyle) -> (min: Float, max: Float) {

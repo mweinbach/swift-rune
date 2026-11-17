@@ -528,6 +528,20 @@ struct MarkdownCloseoutParityTests {
             #expect(abs(w1 - w0) < 0.01)
         }
 
+        // Tabular figures (on by default) give every digit one width and leave other text alone
+        // (`tests/markdown.rs:367-375`).
+        for family in [FontFamily.systemUI, FontFamily.named("System Font")] {
+            let plain = TextStyle(size: 14, weight: 400).family(family)
+            let tnum = plain.features("'tnum' 1")
+            let w = { (t: String, f: TextStyle) -> Float in TextMeasure.measure(t, style: f).x }
+            #expect(w("1111", tnum) == w("0000", tnum), "\(family)")
+            #expect(w("1111", plain) != w("0000", plain), "\(family)'s default figures are proportional")
+            // Words only: Inter's tabular set also covers the space and the comma, as Chromium
+            // measures it ("draft cursor, updatedAt" at 14 px: 153.0625 plain, 153.296875 with 'tnum'),
+            // which widths rounded up to whole points hid until #934.
+            #expect(w("draftCursorUpdatedAt", tnum) == w("draftCursorUpdatedAt", plain), "\(family)")
+        }
+
         // #77, #82, #96: narrow container stops columns; scrollWide keeps narrow table compact & lets fullWidth scroll wide
         let clipRT = runTable("| Heading One | Heading Two | Heading Three |\n|---|---|---|\n| supercalifragilistic | expialidocious | antidisestablishmentarianism |", width: 220, style: cardStyle)
         #expect((clipRT.element(byKey: "tb")?.rect[2] ?? 0) <= 220.5)

@@ -286,6 +286,8 @@ public struct Tx {
     public internal(set) var byKeysAtEvent: Bool = false
     public internal(set) var assistiveTechnologyActive: Bool = false
     public internal(set) var eventInputTime: Double? = nil
+    /// `Tx.inputWaiting` (`Tx::input_waiting`): set only on the poll transaction.
+    internal var isInputWaiting: Bool = false
     public internal(set) var sentKeys: [KeyEvent] = []
     public internal(set) var toggleMaximizedRequested: Bool = false
     public internal(set) var toggleFullScreenRequested: Bool = false
@@ -293,6 +295,8 @@ public struct Tx {
     public internal(set) var shortcutActivationToken: String? = nil
     internal var minimizeOrder: UInt64? = nil
     internal var pickReads: [TxPickRead] = []
+    /// `Tx.readClipboard` callbacks (`Tx::clipboard_reads`).
+    internal var clipboardReads: [TxClipboardRead] = []
     internal var runtimeActions: [String: Any] = [:]
 
     public init() {}
@@ -432,6 +436,7 @@ public struct Tx {
     /// Copies text to the system / headless clipboard.
     public mutating func copyText(_ text: String) {
         clipboardWrite = ClipboardContent(text)
+        runtimeActions[txSecretCopyKey] = nil
     }
 
     /// Requests a paste delivery into the focused editor or `onPaste`/`onPasteContent` handler (`Tx::request_paste`).
@@ -518,6 +523,9 @@ public struct Tx {
     }
 
     /// Moves the vertical scroll viewport around `key` so its top sits `at` points below the viewport top.
+    /// Instant; any momentum or glide stops. A virtual row that isn't mounted lands too: the jump
+    /// goes where its list's estimates put it, which mounts it, and is placed again from its layout
+    /// before the frame draws, the rows it mounts there showing at once.
     public mutating func scrollKeyTo(_ key: String, at: Float) {
         scrollOffsetRequests.append(ScrollOffsetRequest(key: key, x: nil, y: at, glide: nil, anchor: true))
     }
@@ -538,7 +546,14 @@ public struct Tx {
         textFlights.append(contentsOf: one.textFlights)
         launches.append(contentsOf: one.launches)
         unclippedFlightsRequested = unclippedFlightsRequested || one.unclippedFlightsRequested
-        if let cb = one.clipboardWrite { clipboardWrite = cb }
+        if let cb = one.clipboardWrite {
+            clipboardWrite = cb
+            runtimeActions[txSecretCopyKey] = nil
+        }
+        if one.runtimeActions[txSecretCopyKey] != nil {
+            clipboardWrite = nil
+            runtimeActions["richClipboardWrite"] = nil
+        }
         pasteRequested = pasteRequested || one.pasteRequested
         if let title = one.windowTitle { windowTitle = title }
         quitRequested = quitRequested || one.quitRequested
@@ -557,6 +572,7 @@ public struct Tx {
             minimizeOrder = max(minimizeOrder ?? 0, otherMinimizeOrder)
         }
         pickReads.append(contentsOf: one.pickReads)
+        clipboardReads.append(contentsOf: one.clipboardReads)
         traceEvents.append(contentsOf: one.traceEvents)
         traceChannels.append(contentsOf: one.traceChannels)
         if let ann = one.announcement { announcement = ann }
@@ -941,6 +957,8 @@ public struct ElementHandlers<State> {
     public var drop: DropSpec<State>?
     public var dragOut: ((State) -> DragItem?)?
     public var dragThreshold: Float?
+    /// `El.touchDragsAtOnce` (`Handlers::touch_at_once`).
+    public var touchAtOnce: Bool = false
     public var onDragStart: ((inout State, inout Tx) -> Void)?
     public var onDragOutEnd: ((inout State, DragOutcome, inout Tx) -> Void)?
     public var onKey: ((inout State, KeyEvent, inout Tx) -> Bool)?

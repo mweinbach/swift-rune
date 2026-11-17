@@ -52,6 +52,10 @@ public enum PixelSnap {
         public var contain: SIMD2<Float> = .zero
         /// `El.motionSnaps` here or above: a moving box snaps where it is each frame.
         public var steps: Bool = false
+        /// An `El.offset` here or above comes to rest away from zero: a translation, as a CSS
+        /// transform is, which moves a text with its box rather than laying it out again from its
+        /// exact place (`TextBoxGeometry.leafExactOff` is zero under it, `Inherit::shifted`, #963).
+        public var shifted: Bool = false
         /// Nearest scaled layer above or here (1-based index into current frame's layers, `0` = none).
         public var layer: UInt32 = 0
         /// Parent's edges for centring. `nil` when parent paints nothing or doesn't share rigid translation / plain grid.

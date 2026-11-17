@@ -290,6 +290,8 @@ public enum ToolingHTML {
             onKey: spec.onKey,
             view: spec.view
         )
+        // The capture presets (`RUNE_CONTRAST`, `RUNE_INCREASE_CONTRAST`) as `tooling::runtime_for` applies them (#981).
+        runtime.applyCapturePresets()
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         if document { runtime.setPageMode(true) }
         _ = fitHeight // preserved for API parity with WebAppConfig.fitContentHeight
