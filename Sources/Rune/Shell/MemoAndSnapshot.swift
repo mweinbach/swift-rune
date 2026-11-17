@@ -627,9 +627,10 @@ extension Runtime {
         markNeedsCommit()
     }
 
-    /// Forces a view rebuild on the next `frame(at:)` (`Runtime::invalidate`).
+    /// Marks the tree dirty at the current clock. The next frame advances any new layout tracks
+    /// through its elapsed time, as in Rust’s `invalidate()` followed by `frame(dt)`.
     public func invalidate() {
-        markNeedsCommit()
+        invalidate(at: currentTime)
     }
 
     /// Updates dark/light mode (`Runtime::set_system_dark`).
