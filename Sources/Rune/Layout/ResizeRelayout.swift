@@ -200,6 +200,7 @@ extension Runtime {
         let measuredCaret = textSystem.caretRect(
             in: shaped,
             utf8Offset: edit.cursor,
+            upstream: edit.caretAffinity == .upstream,
             pixelScale: pixelScale
         )
         let rect: [Float] = [

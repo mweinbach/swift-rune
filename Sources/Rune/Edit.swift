@@ -932,6 +932,16 @@ public struct TextEdit: Sendable, Equatable {
         setCursor(utf8Offset: nextPos, extendSelection: extend)
     }
 
+    private mutating func moveVerticalKey(down: Bool, extend: Bool, layout: ShapedText?, textSystem: TextSystem?, pixelScale: Float) {
+        if let layout {
+            moveLine(delta: down ? 1 : -1, in: layout, textSystem: textSystem ?? TextSystem(), pixelScale: pixelScale, extend: extend)
+        } else if down {
+            moveDown(extend: extend)
+        } else {
+            moveUp(extend: extend)
+        }
+    }
+
     public mutating func moveUp(extend: Bool = false) {
         guard multiline else {
             setCursor(utf8Offset: 0, extendSelection: extend)
@@ -1536,8 +1546,12 @@ public struct TextEdit: Sendable, Equatable {
         handleKey(ev, layout: nil)
     }
 
-    /// Processes a keyboard `KeyEvent` with optional shaped bidi `layout` for visual arrow stepping (`edit/input.rs:339`).
+    /// Processes a keyboard event using the field's shaped lines for visual navigation.
     public mutating func handleKey(_ ev: KeyEvent, layout: ShapedText?) -> EditOutcome {
+        handleKey(ev, layout: layout, textSystem: nil, pixelScale: 1)
+    }
+
+    internal mutating func handleKey(_ ev: KeyEvent, layout: ShapedText?, textSystem: TextSystem?, pixelScale: Float) -> EditOutcome {
         didRequestBlur = false
         let shift = ev.mods.shift
         let alt = ev.mods.alt
@@ -1566,8 +1580,8 @@ public struct TextEdit: Sendable, Equatable {
                 case "e": moveRight(extend: shift, toLineBoundary: true)
                 case "b": moveLeft(extend: shift)
                 case "f": moveRight(extend: shift)
-                case "p": moveUp(extend: shift)
-                default: moveDown(extend: shift)
+                default:
+                    moveVerticalKey(down: ctrlLetter == "n", extend: shift, layout: layout, textSystem: textSystem, pixelScale: pixelScale)
                 }
                 return .navigation
             case "d":
@@ -1726,16 +1740,13 @@ public struct TextEdit: Sendable, Equatable {
             }
             return .navigation
 
-        case .arrowUp:
-            moveUp(extend: shift)
-            return .navigation
-
-        case .arrowDown:
-            if !shift && !alt && !ev.mods.ctrl && atEndOfTrailingBlock() {
+        case .arrowUp, .arrowDown:
+            let down = ev.key == .arrowDown
+            if down && !shift && !alt && !ev.mods.ctrl && atEndOfTrailingBlock() {
                 leaveTrailingBlock()
                 return .modified
             }
-            moveDown(extend: shift)
+            moveVerticalKey(down: down, extend: shift, layout: layout, textSystem: textSystem, pixelScale: pixelScale)
             return .navigation
 
         case .home:

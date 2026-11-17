@@ -562,11 +562,8 @@ public enum RuneLongNoteApp {
                 }
                 hiddenCarets += hidden
                 lines.append(String(format: "CARET size=%dk case=down moves=%d hidden=%d worst_jump_pt=%.1f", kb, rows.count, hidden, worstJump))
-                if hidden > 0 || worstJump > 2.0 * lineHeight {
-                    FileHandle.standardError.write(Data(
-                        "long_note warning: down size=\(kb)k hidden=\(hidden) worst_jump_pt=\(worstJump) (blocked on Runtime follow_caret auto-scroll).\n".utf8
-                    ))
-                }
+                precondition(hidden == 0, "down: caret left the viewport")
+                precondition(worstJump <= 2 * lineHeight, "down: the viewport jumped \(worstJump) points in one press")
                 recordCase(kb, "down", rows)
             }
 

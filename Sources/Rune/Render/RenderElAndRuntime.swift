@@ -2462,8 +2462,11 @@ extension Runtime {
             // 11. Text (`editLens` textInput / `plainText` / `richSpans` / `advanceIn`)
             let isTextFlightTarget = activeTextFlights.contains { $0.targetNodeId == nid }
             if let editLens = el.handlers.editLens {
-                let edit = editLens.get(state)
-                let textLeft = effRect.x + el.layout.padding.left * sc.x
+                var edit = editLens.get(state)
+                if el.isSecure {
+                    edit.isSecure = true
+                    if let revealed = el.revealedOverride { edit.isRevealed = revealed }
+                }
                 let textTop = effRect.y + el.layout.padding.top * sc.y
                 let innerW = max(0, (effRect.width - (el.layout.padding.left + el.layout.padding.right) * sc.x) / max(1e-4, sc.x))
                 let resolvedInput = ElDisplayResolver.resolveInput(
@@ -2484,6 +2487,11 @@ extension Runtime {
                     request: Self.paragraphRequest(field: nid, el: el, edit: edit, resolved: resolvedInput)
                 )
                 let shaped = inputBox.shaped
+                let scrollX = computeSingleLineScroll(
+                    path: node.path, edit: edit, shaped: shaped, isFocused: focused,
+                    showingPlaceholder: resolvedInput.showingPlaceholder, innerWidthPt: innerW, pixelScale: inputBox.pixelScale
+                )
+                let textLeft = effRect.x + (el.layout.padding.left - scrollX) * sc.x
                 let inputClipEdges = intersectClipRects(activeClip, boundsClipPx)
                 let forceScaled = nodeScaleMotion != .still
                     || abs(sc.x - rasterScale) > 1e-4
@@ -2574,6 +2582,24 @@ extension Runtime {
                     ))
                     marks.append(0)
                     glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage, forceScaled))
+                }
+                if focused {
+                    let offset = displayCaretByteOffset(for: edit, showingPlaceholder: resolvedInput.showingPlaceholder)
+                    let caret = textSystem.caretRect(in: shaped, utf8Offset: offset, upstream: edit.caretAffinity == .upstream, pixelScale: inputBox.pixelScale)
+                    let x = textLeft + caret.x * sc.x
+                    let y = textTop + caret.y * sc.y
+                    let width = caret.z * sc.x
+                    let height = caret.w * sc.y
+                    newElements[myElementIndex].caret = [x, y, width, height]
+                    if windowFocused {
+                        let color = el.caretColor ?? Tok.accent(0, dark: systemDark)
+                        instances.append(RenderInstance(
+                            rect: SIMD4(x * scale, y * scale, max(2, width * scale), height * scale),
+                            radii: SIMD4(repeating: scale), fill: premulSIMD4(color, opacity: localOpacity, srgb: srgbBlend),
+                            border: .zero, params: SIMD4(0, KIND_RECT, 0, 1), uv: .zero, clip: inputClipEdges, fade: activeFade
+                        ))
+                        marks.append(0)
+                    }
                 }
             } else if (el.plainText?.isEmpty == false) || (el.richSpans?.isEmpty == false) || el.advanceInRun != nil {
                 let resolvedText = ElDisplayResolver.resolveText(
