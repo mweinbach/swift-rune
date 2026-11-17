@@ -395,6 +395,19 @@ extension Runtime {
         }
         pointerMove(to: pos, at: time)
         pointerDown(at: pos, at: time)
+        // `El.touchDragsAtOnce`: a drag from the first move, with no slop and nothing holding
+        // the viewport under it (`touch.rs::touch_down`).
+        if pressDragsAtOnce() {
+            inputMachines.touchState.finger = TouchFinger(
+                id: id,
+                origin: pos,
+                lastAlong: 0,
+                lastAt: time,
+                velocity: 0,
+                mode: .drag
+            )
+            return
+        }
         inputMachines.touchState.finger = TouchFinger(
             id: id,
             origin: pos,

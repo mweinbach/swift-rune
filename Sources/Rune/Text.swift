@@ -493,6 +493,9 @@ public struct ShapedText: @unchecked Sendable {
     public var inlineIcons: [InlineIconQuad] = []
     #if canImport(CoreText) && canImport(CoreGraphics)
     internal var lineStrings: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)] = []
+    /// Per glyph in `glyphs`, its face and exact pen, so paint can choose its quarter-pixel phase
+    /// again where a text laid out from a fractional origin lands (`glyph_emit.rs`, #935).
+    internal var glyphPens: [GlyphPen] = []
     #endif
     fileprivate var portableLines: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
     internal var markerMap: MarkerMap = MarkerMap()
@@ -550,6 +553,14 @@ public struct ShapedText: @unchecked Sendable {
     internal var bandLineHeight: Float {
         grownLineTopsPt.isEmpty ? lineHeight : 0
     }
+    /// Per line, its baseline (shaping px from the layout's top, rounded) and how far the exact
+    /// baseline sits from it (`exact - rounded`), so paint can round it once at its absolute
+    /// place (`TextBoxGeometry.roundedBaselines`, #935).
+    internal var lineBaselinesPx: [Float] = []
+    internal var lineBaselineFracsPx: [Float] = []
+    /// Per underline in `underlines`, where its line's glyph runs end (points, alignment in), so
+    /// paint can end a run that ends its line where it ends (`underline::underline_edges`).
+    internal var underlineLineEndsPt: [Float] = []
 
     internal func lineAdvancePx(at index: Int) -> Float {
         guard index >= 0, index < lineAdvancesPx.count else { return 0 }
@@ -4502,6 +4513,8 @@ public final class TextSystem: @unchecked Sendable {
 
         var glyphsOut: [PositionedGlyph] = []
         var underlinesOut: [SIMD4<Float>] = []
+        var underlineLineEnds: [Float] = []
+        var glyphPensOut: [GlyphPen] = []
         var strikethroughsOut: [SIMD4<Float>] = []
         var rawBackgroundsOut: [(SIMD4<Float>, Color)] = []
         var pillChipsOut: [ShapedText.PillChipQuad] = []
@@ -4518,16 +4531,25 @@ public final class TextSystem: @unchecked Sendable {
         let strokeThicknessPt = max(1.0, style.size * 0.07)
         let pm = PillMetrics(size: style.size)
 
+        var lineBaselines: [Float] = []
+        var lineBaselineFracs: [Float] = []
+        lineBaselines.reserveCapacity(visualLines.count)
+        lineBaselineFracs.reserveCapacity(visualLines.count)
         for (lineIdx, item) in visualLines.enumerated() {
             let lineStartGlyphIdx = glyphsOut.count
             let lineTopPx = lineIdx < grownBoxes.count ? grownBoxes[lineIdx].topPx : Float(lineIdx) * lhPx
             let growOverPx = lineIdx < lineGrowthPx.count ? lineGrowthPx[lineIdx].over : 0
-            let strutBaselinePx = (lineTopPx + halfLeadingPx + ascentPx).rounded()
+            let exactStrutBaselinePx = lineTopPx + halfLeadingPx + ascentPx
+            let strutBaselinePx = exactStrutBaselinePx.rounded()
             // A line a box grew above the strut sits its baseline at that box's reach (Parley's
             // `top + over`), never above the strut's own baseline.
-            let baselineYPx = growOverPx > 0
-                ? max(strutBaselinePx, lineTopPx + strutParleyOverPx + growOverPx)
-                : strutBaselinePx
+            let grownBaselinePx = lineTopPx + strutParleyOverPx + growOverPx
+            let grownWins = growOverPx > 0 && grownBaselinePx > strutBaselinePx
+            let baselineYPx = grownWins ? grownBaselinePx : strutBaselinePx
+            // Its baseline and how far its exact one sits from it, so paint can round it once where
+            // a text laid out from its exact place lands (`content.rs`, #935).
+            lineBaselines.append(baselineYPx)
+            lineBaselineFracs.append(grownWins ? 0 : exactStrutBaselinePx - baselineYPx)
             let alignOffsetPx: Float
             switch style.align {
             case .leading:
@@ -4624,6 +4646,7 @@ public final class TextSystem: @unchecked Sendable {
                         rawBackgroundsOut.append((m.rect * invS, m.color))
                     }
                 }
+                var lineGlyphEndPx: Float? = nil
                 for dec in decoratedRanges where dec.underline || dec.strikethrough {
                     let lo = max(item.u16Start, dec.u16Range.lowerBound)
                     let hi = min(item.u16End, dec.u16Range.upperBound)
@@ -4636,6 +4659,10 @@ public final class TextSystem: @unchecked Sendable {
                     if dec.underline {
                         let uy = baselineYPx * invS + max(1.0, style.size * 0.12)
                         underlinesOut.append(SIMD4<Float>(xPt, uy, wPt, strokeThicknessPt))
+                        // Where its line's glyph runs end (points, alignment in), for `underline_edges`:
+                        // inline boxes (pills, inline icons) don't count (`underline.rs:12-15`).
+                        if lineGlyphEndPx == nil { lineGlyphEndPx = Self.glyphRunsEndPx(item.ctLine) }
+                        underlineLineEnds.append((alignOffsetPx + (lineGlyphEndPx ?? item.widthPx)) * invS)
                     }
                     if dec.strikethrough {
                         let sy = baselineYPx * invS - ascentPt * 0.35
@@ -4841,6 +4868,7 @@ public final class TextSystem: @unchecked Sendable {
                     ), colorEntry.pixelSize.x > 0 && colorEntry.pixelSize.y > 0 {
                         let quadXPx = roundf(gxPx) + colorEntry.bearingPx.x
                         let quadYPx = roundf(gyPx) + colorEntry.bearingPx.y
+                        glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx, binY: 0, smoothing: style.fontSmoothing, isColor: true))
                         glyphsOut.append(PositionedGlyph(
                             rect: SIMD4<Float>(
                                 quadXPx * invS,
@@ -4894,6 +4922,7 @@ public final class TextSystem: @unchecked Sendable {
 
                     quadXPx = posXPx + entry.bearingPx.x
                     let finalQuadYPx = quadYPx + entry.bearingPx.y
+                    glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: posXPx, binY: binYArg, smoothing: style.fontSmoothing, isColor: false))
                     glyphsOut.append(PositionedGlyph(
                         rect: SIMD4<Float>(
                             quadXPx * invS,
@@ -4914,7 +4943,8 @@ public final class TextSystem: @unchecked Sendable {
         markerMap.lines = lineMarkerRanges
         let backgroundsOut = Self.mergeContiguousBackgrounds(rawBackgroundsOut)
         let totalHeightPt = Self.specLineHeight(lineCount: max(1, visualLines.count), lineHeightPt: lhPt, scale: scale, exact: style.exactLines, extraPt: grownExtraPx * invS)
-        let totalWidthPt = ceilf(maxLineWidthPx / scale * 2.0) * 0.5
+        // A text box is as wide as its widest line to a 64th of a device pixel (`text_width`, #934).
+        let totalWidthPt = TextBoxGeometry.textWidth(maxLineWidthPx) / scale
         var shapedOut = ShapedText(
             size: Vec2(totalWidthPt, totalHeightPt),
             lineCount: max(1, visualLines.count),
@@ -4941,7 +4971,29 @@ public final class TextSystem: @unchecked Sendable {
         shapedOut.grownLineTopsPt = grownBoxes.map { $0.topPx * invS }
         shapedOut.grownLineHeightsPt = grownBoxes.map { ($0.bottomPx - $0.topPx) * invS }
         shapedOut.grownLineMetricHeightsPt = grownLineHeightsPx.map { $0 * invS }
+        shapedOut.lineBaselinesPx = lineBaselines
+        shapedOut.underlineLineEndsPt = underlineLineEnds
+        shapedOut.glyphPens = glyphPensOut.count == glyphsOut.count ? glyphPensOut : []
+        shapedOut.lineBaselineFracsPx = lineBaselineFracs
         return shapedOut
+    }
+
+    /// Where a line's glyph runs end (line px): the furthest right edge of a run that draws glyphs,
+    /// run delegates (pills, inline icons) left out, as `underline_edges` takes `GlyphRun`s only.
+    private static func glyphRunsEndPx(_ line: CTLine) -> Float {
+        let runs = CTLineGetGlyphRuns(line) as? [CTRun] ?? []
+        var end: Float = 0
+        for run in runs {
+            let attrs = CTRunGetAttributes(run) as NSDictionary
+            if attrs[kCTRunDelegateAttributeName] != nil || attrs["RunePillMarker" as CFString] != nil { continue }
+            let n = CTRunGetGlyphCount(run)
+            guard n > 0 else { continue }
+            var pos = CGPoint.zero
+            CTRunGetPositions(run, CFRangeMake(0, 1), &pos)
+            let w = Float(CTRunGetTypographicBounds(run, CFRangeMake(0, n), nil, nil, nil))
+            end = max(end, Float(pos.x) + w)
+        }
+        return end
     }
 
     private static func globalShapedU16Index(in shaped: ShapedText, lineIdx: Int, authUTF8: Int, ctLine: CTLine) -> Int {
@@ -5672,7 +5724,8 @@ public final class TextSystem: @unchecked Sendable {
             portableTruncated = true
         }
 
-        let maxLineW = lines.map(\.width).max() ?? 0
+        // A text box is as wide as its widest line to a 64th of a device pixel (`text_width`, #934).
+        let maxLineW = TextBoxGeometry.boxWidth(maxLineWidthPt: lines.map(\.width).max() ?? 0, scale: scale)
         let totalW = maxWidth.map { style.align == .leading ? max(maxLineW, min($0, maxLineW)) : max($0, maxLineW) } ?? maxLineW
         let totalH = Self.specLineHeight(lineCount: max(1, lines.count), lineHeightPt: lineH, scale: scale, exact: style.exactLines)
 

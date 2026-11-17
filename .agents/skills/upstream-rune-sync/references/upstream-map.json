@@ -4541,17 +4541,19 @@
         {
           "upstream": "src/shortcuts/service/machine_tests.rs",
           "swift": [
-            "Tests/RuneTests/TextEditInputParityTests.swift"
+            "Tests/RuneTests/TextEditInputParityTests.swift",
+            "Tests/RuneTests/ShortcutOverlapWalkTests.swift"
           ],
           "status": "ported"
         },
         {
           "upstream": "src/shortcuts/service/routing_tests.rs",
           "swift": [
-            "Tests/RuneTests/TextEditInputParityTests.swift"
+            "Tests/RuneTests/TextEditInputParityTests.swift",
+            "Tests/RuneTests/ShortcutRoutingWalkTests.swift"
           ],
-          "status": "partial",
-          "note": "Routing tests ported; r410 host-generation close/drain walks (cbc94615, b55879bb) on unmerged branch wf/up-input-1"
+          "status": "ported",
+          "note": "Routing tests ported; r410 host-generation close/drain walks (cbc94615, b55879bb) in ShortcutRoutingWalkTests (up-input-1)"
         },
         {
           "upstream": "src/shortcuts/service/teardown_tests.rs",
@@ -6230,10 +6232,11 @@
         {
           "upstream": "src/shortcuts/service/generation_tests.rs",
           "swift": [
-            "Tests/RuneTests/Phase2ShellParityTests.swift"
+            "Tests/RuneTests/Phase2ShellParityTests.swift",
+            "Tests/RuneTests/ShortcutOverlapWalkTests.swift"
           ],
-          "status": "partial",
-          "note": "r155/r216 generation tests ported (gap2/shell); r410 additions (cbc94615, b55879bb: STALE_CLOSE_KEEPS, Stage::newest, closes_own) are on unmerged branch wf/up-input-1"
+          "status": "ported",
+          "note": "r155/r216 generation tests ported (gap2/shell); r410 host-generation walks (cbc94615, b55879bb: STALE_CLOSE_KEEPS, Stage::newest, closes_own) in ShortcutOverlapWalkTests/ShortcutRoutingWalkTests (up-input-1)"
         },
         {
           "upstream": "src/text/paragraphs/lazy.rs",

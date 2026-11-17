@@ -1339,6 +1339,9 @@ public enum HeadlessRunner {
         runtime.onAppFileDrop = spec.onFileDrop
         runtime.onFileDrop = spec.onFileDropPhase
         runtime.shortcutRegistry = shortcutRegistry
+        // The capture presets (`RUNE_CONTRAST`, `RUNE_INCREASE_CONTRAST`), never the machine's own
+        // settings, so a headless snap shows an app in a contrast theme or under Increase Contrast (#981).
+        runtime.applyCapturePresets()
         if args.tracePath != nil {
             runtime.traceChannels = [:]
         }

@@ -148,7 +148,8 @@ internal final class TextRunCellLayout: @unchecked Sendable {
             xs.append(snapped)
             prevX = snapped
         }
-        xs.append(ceilf(max(0, fullWPx - 1e-3)))
+        // The run ends at its width in 64ths of a pixel, as a text box does (`text_width`, #934).
+        xs.append(TextBoxGeometry.textWidth(fullWPx))
         self.xsPx = xs
 
         var captured: [CapturedGlyph] = []
@@ -199,7 +200,7 @@ internal final class TextRunCellLayout: @unchecked Sendable {
             let adv = scalarSum + (ch.unicodeScalars.isEmpty ? 0 : style.letterSpacing)
             penPt += adv
         }
-        xs.append(ceilf(max(0, penPt * scale - 1e-3)))
+        xs.append(TextBoxGeometry.textWidth(penPt * scale))
         self.xsPx = xs
         self.portableChars = pChars
         #endif

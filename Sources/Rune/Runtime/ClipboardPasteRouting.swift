@@ -111,7 +111,9 @@ internal struct ClipboardRoutingState {
     var readRequests: [UInt64] = []
     var clipboardReads: [(id: UInt64, read: TxClipboardRead.Fn)] = []
     var nextClipboardRead: UInt64 = 0
-    var replies: [ClipboardReply] = []
+    /// Each reply with the arrival time of the input being dispatched when it was queued, `nil`
+    /// for what no input caused (`Queued::at`); the frame runs it under that stamp.
+    var replies: [(reply: ClipboardReply, at: Double?)] = []
     var copies = ClipboardCopyState()
 }
 
@@ -176,23 +178,23 @@ extension Runtime {
 
     /// Pastes `text` as the next frame's first input, wherever paste goes now (`Runtime::paste`).
     public func paste(_ text: String) {
-        clipboardRouting.replies.append(.paste(ClipboardContent(text), target: nil))
+        clipboardRouting.replies.append((.paste(ClipboardContent(text), target: nil), InputTime.arrival()))
     }
 
     /// `paste(_:)` with several forms, as from another app: its HTML is sanitised (`paste_content`).
     public func pasteContent(_ content: ClipboardContent) {
-        clipboardRouting.replies.append(.paste(content.untrusted(), target: nil))
+        clipboardRouting.replies.append((.paste(content.untrusted(), target: nil), InputTime.arrival()))
     }
 
     /// A clipboard reply for a paste asked for `target`. The next frame drops it if the paste
     /// target changed meanwhile (`paste_result`).
     public func pasteResult(target: String?, _ content: ClipboardContent) {
-        clipboardRouting.replies.append(.paste(content, target: .some(target)))
+        clipboardRouting.replies.append((.paste(content, target: .some(target)), InputTime.arrival()))
     }
 
     /// A clipboard reply for `Tx.readClipboard` read `id` (`read_result`).
     internal func readResult(id: UInt64, _ content: ClipboardContent) {
-        clipboardRouting.replies.append(.read(id, content))
+        clipboardRouting.replies.append((.read(id, content), InputTime.arrival()))
     }
 
     /// Reads waiting for the clipboard (`Runtime::read_requests`).
@@ -272,12 +274,15 @@ extension Runtime {
         guard !clipboardRouting.replies.isEmpty else { return }
         let replies = clipboardRouting.replies
         clipboardRouting.replies.removeAll()
-        for reply in replies {
-            switch reply {
-            case .paste(let content, let target):
-                runPasteReply(content, target: target, at: now)
-            case .read(let id, let content):
-                runClipboardRead(id: id, content, at: now)
+        for (reply, at) in replies {
+            // Each runs under the stamp of the input that queued it (`frame.rs`: `scope(at)`).
+            InputTime.withArrival(at) {
+                switch reply {
+                case .paste(let content, let target):
+                    runPasteReply(content, target: target, at: now)
+                case .read(let id, let content):
+                    runClipboardRead(id: id, content, at: now)
+                }
             }
         }
     }

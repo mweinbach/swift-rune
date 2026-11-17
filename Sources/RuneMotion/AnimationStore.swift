@@ -1223,7 +1223,10 @@ public struct AnimationStore: Sendable {
             let target = targets[i]
             let vel: Float?
             if let lv = laneVelocities {
-                vel = lv[i]
+                // NaN means "no velocity of its own" (inherit), as `Pending.velocity` does: a
+                // per-lane call can then restart some lanes with a velocity and leave the rest,
+                // whose target it repeats, untouched.
+                vel = lv[i].isNaN ? nil : lv[i]
             } else {
                 switch velocityRule {
                 case .inherit: vel = nil

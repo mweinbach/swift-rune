@@ -167,6 +167,7 @@ struct CxEnvironmentState {
     var titlebar: TitlebarSet = TitlebarSet()
     var systemAccent: SystemAccent = .default
     var systemContrast: SystemContrast? = nil
+    var systemIncreasedContrast: Bool = false
     var systemScrollBars: SystemScrollBars = .default
     var systemReducedMotion: Bool = false
     var primaryPointer: PrimaryPointer = .hover
@@ -203,6 +204,7 @@ struct RuntimeShellSettings {
     var titlebarOverride: TitlebarSet = TitlebarSet()
     var systemAccent: SystemAccent = .default
     var systemContrast: SystemContrast? = nil
+    var systemIncreasedContrast: Bool = false
     var scrollBarsState: SystemScrollBars = .default
     var primaryPointer: PrimaryPointer = .hover
     var fullKeyboardAccess: Bool = true
@@ -413,6 +415,12 @@ extension Cx {
     public func systemContrast() -> SystemContrast? {
         envState.systemContrast
     }
+    /// Whether the system asks for more contrast: macOS's Increase Contrast, or a Windows contrast
+    /// theme (when `systemContrast()` is also there). A view can draw its stronger edges for it
+    /// while keeping its own colours. A change re-runs the view (`Cx::system_increased_contrast`).
+    public func systemIncreasedContrast() -> Bool {
+        envState.systemIncreasedContrast
+    }
 
     /// Host OS reduced-motion preference independent of per-commit override (`Cx::system_reduced_motion`).
     public func systemReducedMotion() -> Bool {
@@ -512,6 +520,18 @@ extension Runtime {
     }
 
     public func systemContrast() -> SystemContrast? { cxSettings.systemContrast }
+
+    /// What `Cx.systemIncreasedContrast()` reports (`Runtime::set_system_increased_contrast`).
+    /// Native windows set it from the system as they open, gain focus, and when its display
+    /// options change; headless runs keep false unless `RUNE_INCREASE_CONTRAST=1` (#980/#981).
+    public func setSystemIncreasedContrast(_ on: Bool) {
+        if on != cxSettings.systemIncreasedContrast {
+            cxSettings.systemIncreasedContrast = on
+            markNeedsCommit()
+        }
+    }
+
+    public func systemIncreasedContrast() -> Bool { cxSettings.systemIncreasedContrast }
 
     /// Sets the host OS reduced-motion preference (`Runtime::set_system_reduced_motion`).
     public func setSystemReducedMotion(_ reduced: Bool) {

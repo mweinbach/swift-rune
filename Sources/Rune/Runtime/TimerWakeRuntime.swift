@@ -37,7 +37,10 @@ extension Runtime {
 
     /// Earliest scheduled wake on the unscaled app clock (`Runtime::logical_wake_deadline`).
     internal func logicalWakeDeadline() -> Double? {
-        [wakeDeadlines.first, nextLoopWakeDeadline(after: currentTime)].compactMap { $0 }.min()
+        // An instant scroll's hold draws nothing until it ends: wake for the one frame that
+        // resolves hover then (`frame.rs` `wake_for_clock(hold_wake)`).
+        [wakeDeadlines.first, nextLoopWakeDeadline(after: currentTime), scrollNudgeWakeDeadline(after: currentTime)]
+            .compactMap { $0 }.min()
     }
 
     /// Next due timer deadline scheduled by `Tx.wakeAfter` (`Runtime::poll_wake_deadline`).

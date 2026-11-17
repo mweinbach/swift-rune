@@ -922,6 +922,8 @@ public final class Runtime<State> {
         }
     }
     public internal(set) var lastAnnouncement: (text: String, politeness: LiveRegionPoliteness)? = nil
+    /// `Tx::announce`'s window live region (`Runtime::announcement`): words, politeness, count, when.
+    public internal(set) var a11yAnnouncement = AccessibilityAnnouncement()
     public internal(set) var toggleMaximizedRequested: Bool = false
     public internal(set) var toggleFullScreenRequested: Bool = false
     public internal(set) var imeCursorArea: [Float]? = nil
@@ -930,6 +932,10 @@ public final class Runtime<State> {
     public internal(set) var noWindowDragRects: [MotionRect] = []
     internal var activeByKeys: Bool = false
     internal var pendingSentKeys: [KeyEvent] = []
+    /// Arrival stamps of host-dispatched input and queued sent keys (`Tx.inputWaiting`).
+    internal var queuedInputArrivals = QueuedInputArrivals()
+    /// How many handler transactions have been applied, so `hostInput` can tell input that ran a handler.
+    internal var inputHandlerRuns: UInt64 = 0
     private struct MatchedSeenSnapshot {
         var id: NodeId
         var path: String
@@ -1007,12 +1013,15 @@ public final class Runtime<State> {
     internal var pressedKeyFocusPath: String? = nil
     internal var lastPixelsSizeByPath: [String: (UInt32, UInt32)] = [:]
     internal var pixelsAspectSnapIds: Set<NodeId> = []
-    internal enum HoverHoldState: Equatable {
-        case free
-        case held
-        case released
-    }
-    internal var hoverHoldState: HoverHoldState = .free
+    /// `hover.rs::HoverHold` (`Runtime/HoverHold.swift`).
+    internal var hoverHold = HoverHold()
+    /// Per scroll viewport path: the hover hold an app's instant scroll armed (`ScrollState::nudge`).
+    internal var scrollNudges: [String: ScrollNudge] = [:]
+    /// Per scroll viewport path: where an offset request's glides were sent (`ScrollOffsetRequests.swift`).
+    internal var scrollOffsetAims: [String: ScrollOffsetAims] = [:]
+    /// The node ids the last build drew, in order (`Runtime::built_ids`): hover tracks retarget
+    /// only against geometry built for these nodes.
+    internal var builtHoverIds: [NodeId] = []
     internal var hoverWithinPaths: [String] = []
     internal var hoverDelays = HoverDelays()
     internal var hoverPaused: Bool = false
@@ -1420,6 +1429,9 @@ public final class Runtime<State> {
         if let hoverDue = hoverDelays.nextDue(), hoverDue > now {
             best = best.map { min($0, hoverDue) } ?? hoverDue
         }
+        if let nudgeDue = scrollNudgeWakeDeadline(after: now) {
+            best = best.map { min($0, nudgeDue) } ?? nudgeDue
+        }
         if let loopWake = nextLoopWakeDeadline(after: now) {
             best = best.map { min($0, loopWake) } ?? loopWake
         }
@@ -1767,6 +1779,9 @@ public final class Runtime<State> {
         skipFramePoll: Bool = false
     ) -> (animNow: Double, prevAnimNow: Double, growthMoving: Bool) {
         currentTime = now
+        // Each queued action runs with its own input's arrival time; nothing else has one (`frame.rs`).
+        let outerArrival = InputTime.swapArrival(nil)
+        defer { InputTime.swapArrival(outerArrival) }
         if !MediaPlaybackGate.isEnabled {
             HeadlessClock.set(now)
             Recorder.headlessFrame(clock: now)
@@ -1778,6 +1793,7 @@ public final class Runtime<State> {
         if !skipFramePoll {
             _ = runPoll(at: now)
         }
+        frameTookDispatchedInput()
         flushPlatformFrameWork(at: now)
         pollPlaygroundIfNeeded(at: now)
         applyPlaygroundIfNeeded(at: now)
@@ -1926,6 +1942,7 @@ public final class Runtime<State> {
         syncMotionLoopClock(to: now, animNow: animNow)
 
         // Sample inertial scroll decay tracks and re-position scrolled rects without running views
+        followScrollOffsetAims(animNow: animNow)
         scrollStore.sample(at: animNow)
         if scrollStore.isAnimating {
             var anyScrollMoved = false
@@ -1933,17 +1950,15 @@ public final class Runtime<State> {
                 let nid = NodeId.hash("scroll:" + path)
                 if var cur = scrollStore.get(nid, Props.SCROLL) {
                     var wasGliding = false
-                    if scrollGlidingPaths.contains(path),
-                       scrollStore.isMoving(nid, Props.SCROLL),
-                       let target = scrollStore.target(nid, Props.SCROLL),
-                       let vel = scrollStore.velocity(nid, Props.SCROLL),
-                       abs(target.x - cur.x) < 0.1 && abs(vel.x) < 4.0,
-                       abs(target.y - cur.y) < 0.1 && abs(vel.y) < 4.0 {
-                        // Upstream offset.rs:183 (`LAND = 0.1`, `|v| < 40 * LAND`) lands scroll glides at exact target.
-                        cur = target
-                        scrollStore.snap(nid, Props.SCROLL, to: target)
-                        scrollGlidingPaths.remove(path)
-                        wasGliding = true
+                    if scrollGlidingPaths.contains(path), let landed = landScrollGlideLanes(path: path) {
+                        // Upstream `offset.rs::glide_axis` (`LAND = 0.1`, `|v| < 40 * LAND`) lands
+                        // each axis of a glide at its exact end on its own.
+                        cur = landed.value
+                        if landed.over {
+                            scrollGlidingPaths.remove(path)
+                            scrollOffsetAims.removeValue(forKey: path)
+                            wasGliding = true
+                        }
                     }
                     let clamped = Vec2(
                         cur.x.clamped(to: 0...maxExt.x),
@@ -2489,6 +2504,7 @@ public final class Runtime<State> {
         cx.envState.chrome = chromeInsets()
         cx.envState.systemAccent = cxSettings.systemAccent
         cx.envState.systemContrast = cxSettings.systemContrast
+        cx.envState.systemIncreasedContrast = cxSettings.systemIncreasedContrast
         cx.envState.systemScrollBars = cxSettings.scrollBarsState
         cx.envState.systemReducedMotion = cxSettings.hostReducedMotion
         cx.envState.primaryPointer = cxSettings.primaryPointer
@@ -4033,7 +4049,7 @@ public final class Runtime<State> {
         }
         rebuildHoverCurves(for: pass.nodes)
         if cut || viewCommitCount == 1 {
-            hoverHoldState = .free
+            hoverHold = HoverHold()
             syncHoverTracks(at: lastScaledAnimNow, cut: true, held: false)
         }
 
@@ -6570,6 +6586,8 @@ public final class Runtime<State> {
                 if let tracked = liveStore.get(Self.hoverTrackId(p.id), Self.hoverProp) {
                     return tracked.clamped(to: 0...1)
                 }
+                // Synced hover without a track rests at 0 (`paint/tracks.rs::ready_from_rest`).
+                if lastHoverTargetById[p.id] != nil { return 0.0 }
                 if el.isHoverGroup || el.hoverGroupShare != nil {
                     return (!p.isExiting && isGroupHovered(snap)) ? 1.0 : 0.0
                 }
@@ -6688,6 +6706,11 @@ public final class Runtime<State> {
                     parent: inh.snap.parent
                 )
             }
+            // An `El.offset` here or above: its text moves with its box (`Inherit::shifted`, #963).
+            let snapShifted = inh.snap.shifted || el.offset.x != 0 || el.offset.y != 0
+            // Its exact resting place against its snapped one, inside its containment's own rounding
+            // (`LeafBox::exact_off`, #935).
+            let textExactOffPx = TextBoxGeometry.leafExactOff(rest: snapRest, rigid: rigidPx, containPx: inh.snap.contain * pxScale, shifted: snapShifted)
 
             var caretOut: [Float]? = nil
             var textTruncated = false
@@ -7495,8 +7518,19 @@ public final class Runtime<State> {
                 emitTerminalGridSection()
 
                 // 8. Text / Rich Text / TextInput
-                let snappedOriginX = snappedEdgesPx[0] / pxScale
-                let snappedOriginY = snappedEdgesPx[1] / pxScale
+                // Text lays out from its box's place moved by how far its exact resting box sits from its
+                // snapped one (inside its paint containment), as Blink paints a text fragment from its exact
+                // place; a gliding box carries its rest's offset, so a glide's last frame places glyphs as the
+                // resting frame after it. A field keeps its snapped box, which its caret and selection share
+                // (`content.rs`, #935).
+                let textRestsExact = TextBoxGeometry.restsExact(
+                    isInput: editValue != nil,
+                    scaleStill: nodeScaleMotion == .still && abs(textRasterScale - 1.0) < 1e-5,
+                    scale: SIMD2<Float>(scaleVec.x, scaleVec.y)
+                )
+                let textShiftPx: SIMD2<Float> = textRestsExact ? textExactOffPx : .zero
+                let snappedOriginX = (snappedEdgesPx[0] + textShiftPx.x) / pxScale
+                let snappedOriginY = (snappedEdgesPx[1] + textShiftPx.y) / pxScale
                 let padL = el.layout.padding.left * scaleVec.x
                 let padT = el.layout.padding.top * scaleVec.y
                 let innerW = max(0, (snappedEdgesPx[2] - snappedEdgesPx[0]) / pxScale - (el.layout.padding.left + el.layout.padding.right) * scaleVec.x)
@@ -7523,10 +7557,12 @@ public final class Runtime<State> {
                     // temporary its own slot, and the deep text-shaping path below overflowed the
                     // 512 KB test-thread stack.
                     @inline(never) func emitEditInputSection(_ edit: TextEdit) {
+                        // A field lays out again at its layout width, as it measured (`relayout::lay_out_text`, #948).
                         let resolvedInput = ElDisplayResolver.resolveInput(
                             el: el,
                             edit: edit,
-                            innerWidth: innerW / max(1e-4, scaleVec.x)
+                            innerWidth: max(0, snap.targetRect.width - el.layout.padding.left - el.layout.padding.right),
+                            pxScale: pxScale
                         )
                         let showingPlaceholder = resolvedInput.showingPlaceholder
                         let renderedStr = resolvedInput.renderedString
@@ -7621,11 +7657,12 @@ public final class Runtime<State> {
                             if !lineRects.isEmpty {
                                 for r in lineRects {
                                     primitives.append(.roundedRect(
-                                        rect: SIMD4<Float>(
-                                            (inputRestOriginX + r.x) * pxScale,
-                                            (restOriginY + r.y) * pxScale,
-                                            max(2.0, r.z) * pxScale,
-                                            r.w * pxScale
+                                        // Its edges on the device grid (`selectable::push_field_selection` -> `text_marks::pixel_rect`, #935).
+                                        rect: TextBoxGeometry.pixelRect(
+                                            origin: SIMD2<Float>(inputRestOriginX, restOriginY),
+                                            box: SIMD4<Float>(r.x, r.y, max(2.0, r.z), r.w),
+                                            k: SIMD2<Float>(1, 1),
+                                            pxScale: pxScale
                                         ),
                                         radii: SIMD4<Float>(repeating: 2.0 * pxScale),
                                         fill: selCol,
@@ -7784,9 +7821,9 @@ public final class Runtime<State> {
                         resolvedText.displayedText = paintedLabelValue
                     }
                     let isClampedOrEllipsis = resolvedText.style.maxLines > 0 || resolvedText.style.wrap == .ellipsis
-                    let wrapWidth = isClampedOrEllipsis
-                        ? (innerW / max(1e-4, scaleVec.x))
-                        : ((innerW / max(1e-4, scaleVec.x)) + 0.5)
+                    // A wrapping text lays out again at its layout width, `w * scale + FIT_SLACK` device px, as it
+                    // measured (`relayout::lay_out_text`, #948).
+                    let wrapWidth = TextBoxGeometry.wrapWidth(max(0, snap.targetRect.width - el.layout.padding.left - el.layout.padding.right), scale: textRasterScale * pxScale)!
                     let labelBox: TextLayoutBox?
                     let shaped: ShapedText
                     if resolvedText.truncateFade || resolvedText.advanceRun != nil || isClampedOrEllipsis {
@@ -7885,6 +7922,11 @@ public final class Runtime<State> {
                         helpHits: &newHelpHits,
                         interactiveHits: &newInteractiveHits
                     )
+                    // Laid out from its exact place, its baselines round once where they land, as Skia
+                    // rounds a text blob; its decorations round against them (`content.rs`, #935).
+                    let roundedBaselines: [Float] = textRestsExact
+                        ? TextBoxGeometry.roundedBaselines(originYPx: restOriginY * pxScale, shaped: shaped)
+                        : []
                     textSystem.emitTextDecorationsAndPills(
                         shaped: shaped,
                         textOriginX: textOriginX,
@@ -7897,6 +7939,8 @@ public final class Runtime<State> {
                         devClip: devClip,
                         rot: useLayer ? 0 : effRotate,
                         spanRadius: el.elSpanRadius,
+                        roundedBaselines: roundedBaselines,
+                        glideOffPx: SIMD2<Float>(glideOffPx.x, glideOffPx.y),
                         insertImage: { imagePacker.insert($0) },
                         into: &primitives
                     )
@@ -8046,19 +8090,34 @@ public final class Runtime<State> {
                         } else {
                             glyphsToEmit = shaped.glyphs[...]
                         }
-                        for g in glyphsToEmit {
-                            let gy = (restOriginY + g.rect.y * scaleVec.y) * pxScale
+                        var baselineLine = 0
+                        for gi in glyphsToEmit.indices {
+                            var g = glyphsToEmit[gi]
+                            let inkGlyph = g
+                            var gx = (restOriginX + g.rect.x * scaleVec.x) * pxScale
+                            if textRestsExact {
+                                // Its pen rounds to a quarter pixel where it lands (`glyph_emit.rs`, #935).
+                                (gx, g) = TextBoxGeometry.restingGlyph(g, index: gi, shaped: shaped, originXPx: restOriginX * pxScale, pxScale: pxScale, atlas: textSystem.glyphAtlas)
+                            }
+                            var gy = (restOriginY + g.rect.y * scaleVec.y) * pxScale
+                            if !roundedBaselines.isEmpty {
+                                let ranges = shaped.lineGlyphRanges
+                                while baselineLine + 1 < ranges.count && gi >= ranges[baselineLine].upperBound { baselineLine += 1 }
+                                if baselineLine < roundedBaselines.count {
+                                    gy = TextBoxGeometry.glyphTop(localTopPx: g.rect.y * pxScale, line: baselineLine, roundedBaselines: roundedBaselines, shaped: shaped)
+                                }
+                            }
                             let gh = g.rect.w * scaleVec.y * pxScale
                             if !textRotated && (gy + gh < textVisMinY || gy > textVisMaxY) { continue }
-                            let wordAlpha = wordFadeMask?.alpha(for: g) ?? 1.0
+                            let wordAlpha = wordFadeMask?.alpha(for: inkGlyph) ?? 1.0
                             let effGlyphAlpha = glyphAlpha * wordAlpha
                             if effGlyphAlpha <= 0.0005 { continue }
                             let baseGlyphColor = g.color.map { applyPressColor(effPressColor, to: $0, frac: effPressFrac) } ?? defaultTextColor
-                            let gc = (selPaintInk?.color(for: g) ?? linkInkColor(for: g, ranges: highlightInks) ?? linkInkColor(for: g, ranges: linkInks) ?? baseGlyphColor).scaleAlpha(effGlyphAlpha).simd4(srgb: srgbBlend)
+                            let gc = (selPaintInk?.color(for: inkGlyph) ?? linkInkColor(for: inkGlyph, ranges: highlightInks) ?? linkInkColor(for: inkGlyph, ranges: linkInks) ?? baseGlyphColor).scaleAlpha(effGlyphAlpha).simd4(srgb: srgbBlend)
                             let primIdx = primitives.count
                             var prim = attachFade(.glyph(
                                 rect: SIMD4<Float>(
-                                    (restOriginX + g.rect.x * scaleVec.x) * pxScale,
+                                    gx,
                                     gy,
                                     g.rect.z * scaleVec.x * pxScale,
                                     gh
@@ -8490,6 +8549,7 @@ public final class Runtime<State> {
                 childSnap.rigid = childRigid
                 childSnap.contain = childContain
                 childSnap.steps = steps
+                childSnap.shifted = snapShifted
                 childSnap.layer = snapLayer
                 let paintsFrame = PixelSnap.frames(el, effectiveFill: fillColor, effectiveBorder: borderColor)
                 childSnap.parent = (childRigid == inh.snap.rigid && paintsFrame) ? snapRest : nil
@@ -8843,7 +8903,10 @@ public final class Runtime<State> {
         paintOrderPaths = newPaintOrder
         drawnRectByPath = newDrawnRectByPath
         rectSpringingById = newRectSpringingById
-        if scrollOffsets != lastHoverScrollOffsets || frameHadCommitted || hoverHoldState == .held || layoutMoving() {
+        builtHoverIds = flatNodes.map(\.nodeId)
+        // A hold draws nothing while it waits: its wake asks for the one frame that ends it.
+        stepScrollNudges(at: currentTime)
+        if scrollOffsets != lastHoverScrollOffsets || frameHadCommitted || hoverHold.held || layoutMoving() {
             lastHoverScrollOffsets = scrollOffsets
             if activeDrag == nil,
                pointerPosition.x >= 0,
@@ -8858,7 +8921,7 @@ public final class Runtime<State> {
                     cut: false,
                     dispatchPolicy: .onHoldRelease
                 )
-                if hoverHoldState != .held && pressedPath == nil {
+                if !hoverHold.held && pressedPath == nil {
                     let newPath = hoveredPath
                     let linkChanged = (hoveredLink != prevHoverLink)
                     if newPath != prevHoverPath {
@@ -9239,7 +9302,7 @@ public final class Runtime<State> {
     }
 
     public func pointerExit(at now: Double) {
-        hoverHoldState = .free
+        hoverHold = HoverHold()
         pointerPosition = Vec2(-10000, -10000)
         if hoveredLink != nil {
             hoveredLink = nil
@@ -9275,9 +9338,16 @@ public final class Runtime<State> {
         applyHoverWithin([], held: false, at: now)
     }
 
+    /// `hover.rs::update_interaction`'s `down`: the element is allowed (`focus.rs::allowed`: not
+    /// inert, not behind a modal) and holds the captured press (the primary press, else the
+    /// secondary capture) with the pointer inside, or a middle/secondary button's tint over it.
     internal func isNodePressedVisually(path: String, effectiveInert: Bool, restingContains: Bool? = nil) -> Bool {
         guard !effectiveInert else { return false }
-        if pressedPath == path && pressedPointerInside {
+        if activeModalPath != nil && !modalMemberPaths.contains(path) { return false }
+        if let pressed = pressedPath {
+            if pressed == path && pressedPointerInside { return true }
+        } else if case .held(let captured, _, _) = inputMachines.secondaryCapture, captured == path,
+                  restingContains ?? pressRestingContains(path: path, at: pointerPosition) {
             return true
         }
         if pressedTint?.path == path {
@@ -9534,7 +9604,7 @@ public final class Runtime<State> {
         }()
         let linkChanged = (newHoveredLink != hoveredLink)
 
-        if hoverHoldState != .held && pressedPath == nil {
+        if !hoverHold.held && pressedPath == nil {
             if linkChanged {
                 hoveredLink = newHoveredLink
             }
@@ -10581,7 +10651,7 @@ public final class Runtime<State> {
                 if !edit.isSecure && (ev.key == .arrowLeft || ev.key == .arrowRight) {
                     let pad = fNode.el.layout.padding
                     let innerW = max(0, fNode.targetRect.width - pad.left - pad.right)
-                    let resolvedInput = ElDisplayResolver.resolveInput(el: fNode.el, edit: edit, innerWidth: innerW)
+                    let resolvedInput = ElDisplayResolver.resolveInput(el: fNode.el, edit: edit, innerWidth: innerW, pxScale: pixelScale)
                     editLayout = textSystem.shape(
                         text: resolvedInput.renderedString,
                         spans: resolvedInput.spans,
@@ -11252,6 +11322,7 @@ public final class Runtime<State> {
         why: UInt16 = CommitWhy.input,
         runPicks: Bool = true
     ) {
+        inputHandlerRuns &+= 1
         var resolvedTx = tx
         if runPicks {
             runPickReads(&resolvedTx)
@@ -11467,33 +11538,24 @@ public final class Runtime<State> {
             && !flatNodes.isEmpty
             && (!scrollRequiresCommit || allowFastLiveScroll)
         if canFastApplyOffsets {
+            // The same per-request path a committing frame takes (`offset.rs::scroll_to_offsets`
+            // + `apply_jumps`): glide or jump per axis, the long-trip cut, and the hover hold a
+            // moving jump arms.
             var anySnapped = false
+            let animNow = cxSettings.scaledTime(at: now)
             for req in tx.scrollOffsetRequests {
                 guard let match = flatNodes.first(where: { !$0.el.layout.scrollAxes.isEmpty && selectsElementSelector(req.key, path: $0.path, key: $0.key) }) else {
                     continue
                 }
                 let path = match.path
-                let maxExt = scrollMaxExtents[path] ?? .zero
                 let cur = scrollOffsets[path] ?? .zero
-                let clamped = Vec2(
-                    max(0, min(maxExt.x, req.x ?? cur.x)),
-                    max(0, min(maxExt.y, req.y ?? cur.y))
-                )
-                let nid = NodeId.hash("scroll:" + path)
-                if let glide = req.glide, !reducedMotion {
-                    if scrollStore.get(nid, Props.SCROLL) == nil {
-                        scrollStore.snap(nid, Props.SCROLL, to: cur)
-                    }
-                    scrollStore.set(nid, Props.SCROLL, to: clamped, anim: .spring(glide), at: cxSettings.scaledTime(at: now))
-                    scrollGlidingPaths.insert(path)
-                } else {
-                    scrollStore.snap(nid, Props.SCROLL, to: clamped)
-                    scrollOffsets[path] = clamped
+                markScrollMovedByHand(path: path)
+                if req.glide != nil { markScrollHandGliding(path: path) }
+                applyScrollOffsetRequest(path: path, x: req.x, y: req.y, glide: req.glide, cut: false, animNow: animNow)
+                if scrollOffsets[path] != cur {
                     frameMovedScrollPaths.insert(path)
-                    scrollGlidingPaths.remove(path)
                     anySnapped = true
                 }
-                markScrollMovedByHand(path: path)
                 scrollMovedSinceLastFrame = true
             }
             if anySnapped {
@@ -11552,6 +11614,7 @@ public final class Runtime<State> {
         latchClipboardRequests(tx)
         if !tx.sentKeys.isEmpty {
             pendingSentKeys.append(contentsOf: tx.sentKeys)
+            queuedInputArrivals.sentKeys.append(contentsOf: repeatElement(InputTime.arrival(), count: tx.sentKeys.count))
         }
         if tx.toggleMaximizedRequested {
             toggleMaximizedRequested = true
@@ -11561,6 +11624,7 @@ public final class Runtime<State> {
         }
         if let ann = tx.announcement {
             lastAnnouncement = ann
+            a11yAnnouncement.say(ann.text, politeness: ann.politeness)
         }
         let hasCommitRequests = nonOffsetCommitRequests || (!canFastApplyOffsets && !tx.scrollOffsetRequests.isEmpty) || blurDroppedFocus
         if tx.liveOnlyRequested {
@@ -11692,6 +11756,7 @@ public final class Runtime<State> {
         RuntimeIdScope.$current.withValue(runtimeId) {
             guard let pollFn = poll else { return false }
             var tx = makeTx(at: now)
+            tx.isInputWaiting = queuedInputWaiting
             let changed: Bool = PerfWarn.Stall.timed("poll") {
                 if let scope = turnScope {
                     var res = false
@@ -12254,6 +12319,9 @@ public final class Runtime<State> {
         var curIdx: Int?
         if let tp = pressedPath, let idx = nodeByPath[tp], !flatNodes[idx].effectiveInert {
             curIdx = idx
+        } else if let held = heldHover(), let idx = held {
+            // Moving layout holds hover: the cursor stays with what the pointer was over.
+            curIdx = idx
         } else if let hp = hoveredPath, let idx = hoverLive(hp) {
             curIdx = idx
         } else if let hit = hitTest(at: pointerPosition, predicate: { _ in true }) {
@@ -12427,9 +12495,14 @@ public final class Runtime<State> {
     internal func flushPendingSentKeys(at now: Double) {
         guard !pendingSentKeys.isEmpty else { return }
         let queued = pendingSentKeys
+        let stamps = queuedInputArrivals.sentKeys
         pendingSentKeys.removeAll()
-        for ev in queued {
-            _ = keyDown(ev, isRepeat: false, at: now)
+        queuedInputArrivals.sentKeys.removeAll()
+        for (i, ev) in queued.enumerated() {
+            // Each runs under the stamp of the input that sent it, so what it sends keeps it.
+            InputTime.withArrival(i < stamps.count ? stamps[i] : nil) {
+                _ = keyDown(ev, isRepeat: false, at: now)
+            }
         }
     }
 
@@ -12784,7 +12857,8 @@ public final class Runtime<State> {
         let resolvedInput = ElDisplayResolver.resolveInput(
             el: node.el,
             edit: resolvedEdit,
-            innerWidth: innerW / max(0.01, sc.x)
+            innerWidth: innerW / max(0.01, sc.x),
+            pxScale: pixelScale
         )
         let shaped = textSystem.shape(
             text: resolvedInput.renderedString,
@@ -12969,6 +13043,18 @@ public final class Runtime<State> {
         if !inViewport {
             over = .away
             underHit = nil
+        } else if heldHover() != nil {
+            // While moving layout holds hover, the tooltip keeps its element, and nothing sliding
+            // under the pointer starts a wait (`help.rs::help_over`).
+            if let kept = helpState.tipState.target, hoverLive(kept.path) != nil {
+                // Kept whenever the element is live, drawn into this frame's hits or not (a glide
+                // may carry it out of view); the tip draws from its hit when there is one.
+                over = .help(kept)
+                underHit = helpState.hits.last(where: { $0.path == kept.path && $0.linkIndex == kept.link })
+            } else {
+                over = .nothing
+                underHit = nil
+            }
         } else if let u = helpUnder(point: pointerPosition) {
             let target = HelpTarget(path: u.hit.path, link: u.hit.linkIndex)
             if activeDrag != nil && helpState.tipState.target != target {

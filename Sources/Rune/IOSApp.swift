@@ -56,7 +56,7 @@ public enum IOSApp {
         runtime.poll = spec.poll
         runtime.onAppFileDrop = spec.onFileDrop
         runtime.onFileDrop = spec.onFileDropPhase
-        runtime.setSystemContrast(SystemPreferences.current().contrast)
+        runtime.readSystemContrastSettings()
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
 
         return try RuneIOSViewController(
@@ -145,15 +145,17 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
 
     public func insertText(_ text: String) {
         let now = nowSeconds()
-        for scalar in text {
-            let key: Key = (scalar == "\n" || scalar == "\r") ? .enter : (scalar == "\t" ? .tab : .text(String(scalar)))
-            _ = runtime.keyDown(KeyEvent(key: key), at: now)
+        runtime.hostInput(.keyPress) {
+            for scalar in text {
+                let key: Key = (scalar == "\n" || scalar == "\r") ? .enter : (scalar == "\t" ? .tab : .text(String(scalar)))
+                _ = runtime.keyDown(KeyEvent(key: key), at: now)
+            }
         }
         renderTick()
     }
 
     public func deleteBackward() {
-        _ = runtime.keyDown(KeyEvent(key: .backspace), at: nowSeconds())
+        _ = runtime.hostInput(.keyPress) { runtime.keyDown(KeyEvent(key: .backspace), at: nowSeconds()) }
         renderTick()
     }
 
@@ -251,8 +253,16 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
         touchFiredLongPress = false
         touchHoldWorkItem?.cancel()
         let now = nowSeconds()
-        runtime.pointerMove(to: p, mods: .none, at: now)
-        runtime.pointerDown(at: p, button: .primary, mods: .none, at: now)
+        runtime.hostInput(.pointer, eventTimestamp: touch.timestamp) {
+            runtime.pointerMove(to: p, mods: .none, at: now)
+            runtime.pointerDown(at: p, button: .primary, mods: .none, at: now)
+        }
+        // `El.touchDragsAtOnce`: the finger drags from where it lands, and no long press cuts it.
+        if runtime.pressDragsAtOnce() {
+            touchHoldWorkItem = nil
+            renderTick()
+            return
+        }
         let work = DispatchWorkItem { [weak self, weak touch] in
             guard let self, let touch, self.activeTouch === touch,
                   !self.touchMovedBeyondSlop, !self.touchFiredLongPress else { return }
@@ -277,7 +287,7 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
             touchHoldWorkItem = nil
         }
         if touchFiredLongPress { return }
-        runtime.pointerMove(to: p, mods: .none, at: nowSeconds())
+        runtime.hostInput(.pointer, eventTimestamp: active.timestamp) { runtime.pointerMove(to: p, mods: .none, at: nowSeconds()) }
         renderTick()
     }
 
@@ -290,10 +300,12 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
         activeTouch = nil
         touchFiredLongPress = false
         let now = nowSeconds()
-        if firedMenu {
-            runtime.pointerExit(at: now)
-        } else {
-            runtime.pointerUp(at: p, button: .primary, mods: .none, at: now)
+        runtime.hostInput(.pointer, eventTimestamp: active.timestamp) {
+            if firedMenu {
+                runtime.pointerExit(at: now)
+            } else {
+                runtime.pointerUp(at: p, button: .primary, mods: .none, at: now)
+            }
         }
         renderTick()
     }
@@ -306,23 +318,27 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
         activeTouch = nil
         touchFiredLongPress = false
         let now = nowSeconds()
-        if !firedMenu {
-            runtime.cancelPointerForTouchHold(at: now)
+        runtime.hostInput(.pointer, eventTimestamp: active.timestamp) {
+            if !firedMenu {
+                runtime.cancelPointerForTouchHold(at: now)
+            }
+            runtime.pointerExit(at: now)
         }
-        runtime.pointerExit(at: now)
         renderTick()
     }
 
     @objc private func handleHover(_ recognizer: UIHoverGestureRecognizer) {
         let p = recognizer.location(in: self)
         let pos = Vec2(Float(p.x), Float(p.y))
-        switch recognizer.state {
-        case .began, .changed:
-            runtime.pointerMove(to: pos, mods: .none, at: nowSeconds())
-        case .ended, .cancelled:
-            runtime.pointerExit(at: nowSeconds())
-        default:
-            break
+        runtime.hostInput(.pointer) {
+            switch recognizer.state {
+            case .began, .changed:
+                runtime.pointerMove(to: pos, mods: .none, at: nowSeconds())
+            case .ended, .cancelled:
+                runtime.pointerExit(at: nowSeconds())
+            default:
+                break
+            }
         }
         renderTick()
     }
@@ -332,7 +348,7 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
         recognizer.setTranslation(.zero, in: self)
         let p = recognizer.location(in: self)
         let pos = Vec2(Float(p.x), Float(p.y))
-        runtime.pointerMove(to: pos, mods: .none, at: nowSeconds())
+        runtime.hostInput(.pointer) { runtime.pointerMove(to: pos, mods: .none, at: nowSeconds()) }
         _ = delta
         renderTick()
     }
@@ -350,7 +366,7 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
                 logo: false
             )
             if let mapped = Self.mapUIKey(uiKey) {
-                if runtime.keyDown(KeyEvent(key: mapped, mods: mods), at: now) {
+                if runtime.hostInput(.keyPress, eventTimestamp: event?.timestamp, { runtime.keyDown(KeyEvent(key: mapped, mods: mods), at: now) }) {
                     handled = true
                 }
             }

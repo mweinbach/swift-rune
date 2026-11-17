@@ -286,6 +286,8 @@ public struct Tx {
     public internal(set) var byKeysAtEvent: Bool = false
     public internal(set) var assistiveTechnologyActive: Bool = false
     public internal(set) var eventInputTime: Double? = nil
+    /// `Tx.inputWaiting` (`Tx::input_waiting`): set only on the poll transaction.
+    internal var isInputWaiting: Bool = false
     public internal(set) var sentKeys: [KeyEvent] = []
     public internal(set) var toggleMaximizedRequested: Bool = false
     public internal(set) var toggleFullScreenRequested: Bool = false
@@ -955,6 +957,8 @@ public struct ElementHandlers<State> {
     public var drop: DropSpec<State>?
     public var dragOut: ((State) -> DragItem?)?
     public var dragThreshold: Float?
+    /// `El.touchDragsAtOnce` (`Handlers::touch_at_once`).
+    public var touchAtOnce: Bool = false
     public var onDragStart: ((inout State, inout Tx) -> Void)?
     public var onDragOutEnd: ((inout State, DragOutcome, inout Tx) -> Void)?
     public var onKey: ((inout State, KeyEvent, inout Tx) -> Bool)?

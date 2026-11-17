@@ -84,7 +84,8 @@ extension El {
 
     // MARK: - Hover & Layering
 
-    /// `hoverGroup()`, which follows keyboard focus as well (`El::hover_group_focus`).
+    /// `hoverGroup()`, which follows keyboard focus as well now (`El::hover_group_focus`, an alias
+    /// of `hoverGroup` since upstream 4e215eac #726).
     public func hoverGroupFocus() -> Self {
         var copy = hoverGroup()
         copy.runtimeExtras[RenderExtrasKey.hoverGroupFocus] = true
