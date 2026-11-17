@@ -5,29 +5,66 @@ import RuneKit
 
 @Suite("OpenCode Icons Parity Tests")
 struct OpenCodeIconsTests {
-    @Test func coreIconsAndNewIconsCountsAndLookups() {
-        #expect(OpenCodeIcons.allData.count == 170)
-        #expect(OpenCodeIcons.all.count == 170)
-        for data in OpenCodeIcons.allData {
-            #expect(data.viewBox > 0 && !data.body.isEmpty)
-            #expect(OpenCodeIcons.data(named: data.name) != nil)
-            #expect(OpenCodeIcons.byName(data.name) == data.svgIcon)
+    @Test func orderedCatalogMatchesUpstreamArtwork() {
+        let catalog = OpenCodeIcons.allData
+        #expect(catalog.count == 166)
+        #expect(Set(catalog.map(\.name)).count == catalog.count)
+        #expect(OpenCodeIcons.all == catalog.map(\.svgIcon))
+
+        // FNV-1a over Rust ALL at 935b2ff9, including both NUL terminators and little-endian f32.
+        var hash: UInt64 = 0xcbf29ce484222325
+        func consume(_ byte: UInt8) {
+            hash = (hash ^ UInt64(byte)) &* 0x100000001b3
         }
-        #expect(OpenCodeIcons.data(named: "chevron-down") != nil)
-        #expect(OpenCodeIcons.byName("chevron-down") != nil)
+        for icon in catalog {
+            #expect(OpenCodeIcons.data(named: icon.name) == icon)
+            #expect(OpenCodeIcons.byName(icon.name) == icon.svgIcon)
+            #expect(icon.svgIcon.viewBox == icon.viewBox && icon.svgIcon.body == icon.body)
+            icon.name.utf8.forEach(consume)
+            consume(0)
+            for shift in stride(from: 0, to: 32, by: 8) {
+                consume(UInt8(truncatingIfNeeded: icon.viewBox.bitPattern >> shift))
+            }
+            icon.body.utf8.forEach(consume)
+            consume(0)
+        }
+        #expect(hash == 0x2d90912952d75258)
+        #expect(OpenCodeIcons.byName("outline-maximize") == OpenCodeIcons.outlineMaximize)
         #expect(OpenCodeIcons.byName("does-not-exist") == nil)
+        #expect(!OpenCodeIcons.chevronDown.paths.isEmpty && !OpenCodeIcons.close.paths.isEmpty)
+    }
 
-        // Existing compatibility aliases still resolve
-        #expect(!OpenCodeIcons.chevronDown.paths.isEmpty)
-        #expect(!OpenCodeIcons.close.paths.isEmpty)
-
-        #expect(OpenCodeNewIcons.all.count == 71)
-        for data in OpenCodeNewIcons.allData {
-            #expect(data.viewBox > 0 && !data.body.isEmpty)
-            #expect(OpenCodeNewIcons.byName(data.name) == data.svgIcon)
+    @Test func aliasesPreserveTheirNamesAndRenderTheirTargets() throws {
+        let pairs = [
+            ("circle-xmark", OpenCodeIcons.closeData),
+            ("outline-browser-annotate", OpenCodeIcons.selectElementData),
+            ("arrow-undo-down", OpenCodeIcons.enterData),
+            ("file-tree", OpenCodeIcons.folderData),
+            ("dash", OpenCodeIcons.minusData),
+        ]
+        for (name, target) in pairs {
+            let alias = try #require(OpenCodeIcons.data(named: name))
+            #expect(alias.name == name && alias != target)
+            #expect(alias.viewBox == target.viewBox && alias.body == target.body)
+            #expect(OpenCodeIcons.byName(name) == target.svgIcon)
+            let pixels = GlyphAtlas.rasterizeIconBitmap(alias.svgIcon, pixelSize: 24)
+            #expect(pixels.contains { $0 > 0 })
+            #expect(pixels == GlyphAtlas.rasterizeIconBitmap(target.svgIcon, pixelSize: 24))
         }
-        #expect(OpenCodeNewIcons.byName("folder") != nil)
-        #expect(OpenCodeNewIcons.byName("missing-icon") == nil)
+        #expect(OpenCodeIcons.circleXmarkData.name == "circle-xmark")
+        #expect(OpenCodeIcons.circleXmark != OpenCodeIcons.circleX)
+        #expect(OpenCodeNewIcons.plus == OpenCodeIcons.plus)
+        #expect(OpenCodeNewIcons.newIcon(OpenCodeIcons.checkSmall)?.name == "check")
+        #expect(OpenCodeNewIcons.newIcon(SVGIcon(paths: [])) == nil)
+    }
+
+    @Test func boldCardVariantsRemainAvailableOutsideTheGallery() {
+        let variants = [OpenCodeIcons.circleBanSignBoldData, OpenCodeIcons.circleCheckBoldData,
+                        OpenCodeIcons.helpBoldData, OpenCodeIcons.warningBoldData, OpenCodeIcons.dashBoldData]
+        for variant in variants {
+            #expect(variant.body.contains(#"stroke-width="1.5""#))
+            #expect(!OpenCodeIcons.allData.contains(variant))
+        }
     }
 
     @Test func appAndProviderIconsResolve() {
@@ -119,7 +156,7 @@ struct OpenCodeIconsTests {
         }
     }
 
-    @Test func multiColorIconsCarryBodyAndRasterizeAndNewIconResolvesByValue() {
+    @Test func multiColorIconsCarryBodyAndRasterize() {
         let rustIcon = OpenCodeFileIcons.file("main.rs")
         let vscodeIcon = OpenCodeAppIcons.named("vscode")
         let ai302Icon = OpenCodeProviderIcons.named("302ai")
@@ -142,9 +179,6 @@ struct OpenCodeIconsTests {
             #expect((img?.mips.first?.rgba.contains(where: { $0 != 0 }) ?? false))
         }
 
-        #expect(OpenCodeNewIcons.newIcon(OpenCodeIcons.check)?.svgIcon == OpenCodeNewIcons.check)
-        #expect(OpenCodeNewIcons.newIcon(OpenCodeNewIcons.check)?.name == "check")
-        #expect(OpenCodeNewIcons.newIcon(OpenCodeIcons.flask) == nil)
         #expect(OpenCodeIcons.copy.body != nil)
         #expect(OpenCodeTreeIcons.file("Sources/main.swift").icon.body != nil)
     }

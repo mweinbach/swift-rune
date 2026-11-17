@@ -1,7 +1,6 @@
-import Foundation
 import Rune
 
-/// Full upstream SVG icon payload (`name`, `viewBox`, raw SVG `body`, plus `SVGIcon`).
+/// The catalog name and vector artwork of an OpenCode icon.
 public struct OpenCodeIconData: Sendable, Hashable {
     public let name: String
     public let viewBox: Float
@@ -14,472 +13,1000 @@ public struct OpenCodeIconData: Sendable, Hashable {
         self.body = body
         self.svgIcon = svgIcon
     }
+
+    fileprivate init(_ name: String, viewBox: Float, paths: [String], strokeWidth: Float?, body: String) {
+        self.init(name: name, viewBox: viewBox, body: body,
+                  svgIcon: SVGIcon(viewBox: viewBox, paths: paths, strokeWidth: strokeWidth, body: body))
+    }
+
+    fileprivate init(_ name: String, sharing target: OpenCodeIconData) {
+        self.init(name: name, viewBox: target.viewBox, body: target.body, svgIcon: target.svgIcon)
+    }
 }
 
-extension OpenCodeIcons {
-    public static let outlineListChangelog = SVGIcon(viewBox: 16.0, paths: [#"M3 14.5V15H4V14.5H3.5H3ZM4 1.5V1H3V1.5H3.5H4ZM8.5 1.5V1H8V1.5H8.5ZM14.5 1.5H15V1H14.5V1.5ZM14.5 6.5V7H15V6.5H14.5ZM8.5 6.5H8V7H8.5V6.5ZM8.5 9.5V9H8V9.5H8.5ZM14.5 9.5H15V9H14.5V9.5ZM14.5 14.5V15H15V14.5H14.5ZM8.5 14.5H8V15H8.5V14.5ZM3.5 6H4V1.5H3.5H3V6H3.5ZM8.5 1.5V2H14.5V1.5V1H8.5V1.5ZM14.5 1.5H14V6.5H14.5H15V1.5H14.5ZM14.5 6.5V6H8.5V6.5V7H14.5V6.5ZM8.5 6.5H9V1.5H8.5H8V6.5H8.5ZM8.5 9.5V10H14.5V9.5V9H8.5V9.5ZM14.5 9.5H14V14.5H14.5H15V9.5H14.5ZM14.5 14.5V14H8.5V14.5V15H14.5V14.5ZM8.5 14.5H9V9.5H8.5H8V14.5H8.5ZM3.5 10V10.5C4.8807 10.5 6 9.38075 6 8H5.5H5C5 8.82845 4.32843 9.5 3.5 9.5V10ZM5.5 8H6C6 6.61925 4.8807 5.5 3.5 5.5V6V6.5C4.32843 6.5 5 7.17155 5 8H5.5ZM3.5 6V5.5C2.1193 5.5 1 6.61925 1 8H1.5H2C2 7.17155 2.67157 6.5 3.5 6.5V6ZM1.5 8H1C1 9.38075 2.1193 10.5 3.5 10.5V10V9.5C2.67157 9.5 2 8.82845 2 8H1.5ZM3.5 14.5H4V10H3.5H3V14.5H3.5Z"#], strokeWidth: nil, body: #"<path d="M3 14.5V15H4V14.5H3.5H3ZM4 1.5V1H3V1.5H3.5H4ZM8.5 1.5V1H8V1.5H8.5ZM14.5 1.5H15V1H14.5V1.5ZM14.5 6.5V7H15V6.5H14.5ZM8.5 6.5H8V7H8.5V6.5ZM8.5 9.5V9H8V9.5H8.5ZM14.5 9.5H15V9H14.5V9.5ZM14.5 14.5V15H15V14.5H14.5ZM8.5 14.5H8V15H8.5V14.5ZM3.5 6H4V1.5H3.5H3V6H3.5ZM8.5 1.5V2H14.5V1.5V1H8.5V1.5ZM14.5 1.5H14V6.5H14.5H15V1.5H14.5ZM14.5 6.5V6H8.5V6.5V7H14.5V6.5ZM8.5 6.5H9V1.5H8.5H8V6.5H8.5ZM8.5 9.5V10H14.5V9.5V9H8.5V9.5ZM14.5 9.5H14V14.5H14.5H15V9.5H14.5ZM14.5 14.5V14H8.5V14.5V15H14.5V14.5ZM8.5 14.5H9V9.5H8.5H8V14.5H8.5ZM3.5 10V10.5C4.8807 10.5 6 9.38075 6 8H5.5H5C5 8.82845 4.32843 9.5 3.5 9.5V10ZM5.5 8H6C6 6.61925 4.8807 5.5 3.5 5.5V6V6.5C4.32843 6.5 5 7.17155 5 8H5.5ZM3.5 6V5.5C2.1193 5.5 1 6.61925 1 8H1.5H2C2 7.17155 2.67157 6.5 3.5 6.5V6ZM1.5 8H1C1 9.38075 2.1193 10.5 3.5 10.5V10V9.5C2.67157 9.5 2 8.82845 2 8H1.5ZM3.5 14.5H4V10H3.5H3V14.5H3.5Z" fill="currentColor"/>"#)
-    public static let outlineListChangelogData = OpenCodeIconData(name: #"outline-list-changelog"#, viewBox: 16.0, body: #"<path d="M3 14.5V15H4V14.5H3.5H3ZM4 1.5V1H3V1.5H3.5H4ZM8.5 1.5V1H8V1.5H8.5ZM14.5 1.5H15V1H14.5V1.5ZM14.5 6.5V7H15V6.5H14.5ZM8.5 6.5H8V7H8.5V6.5ZM8.5 9.5V9H8V9.5H8.5ZM14.5 9.5H15V9H14.5V9.5ZM14.5 14.5V15H15V14.5H14.5ZM8.5 14.5H8V15H8.5V14.5ZM3.5 6H4V1.5H3.5H3V6H3.5ZM8.5 1.5V2H14.5V1.5V1H8.5V1.5ZM14.5 1.5H14V6.5H14.5H15V1.5H14.5ZM14.5 6.5V6H8.5V6.5V7H14.5V6.5ZM8.5 6.5H9V1.5H8.5H8V6.5H8.5ZM8.5 9.5V10H14.5V9.5V9H8.5V9.5ZM14.5 9.5H14V14.5H14.5H15V9.5H14.5ZM14.5 14.5V14H8.5V14.5V15H14.5V14.5ZM8.5 14.5H9V9.5H8.5H8V14.5H8.5ZM3.5 10V10.5C4.8807 10.5 6 9.38075 6 8H5.5H5C5 8.82845 4.32843 9.5 3.5 9.5V10ZM5.5 8H6C6 6.61925 4.8807 5.5 3.5 5.5V6V6.5C4.32843 6.5 5 7.17155 5 8H5.5ZM3.5 6V5.5C2.1193 5.5 1 6.61925 1 8H1.5H2C2 7.17155 2.67157 6.5 3.5 6.5V6ZM1.5 8H1C1 9.38075 2.1193 10.5 3.5 10.5V10V9.5C2.67157 9.5 2 8.82845 2 8H1.5ZM3.5 14.5H4V10H3.5H3V14.5H3.5Z" fill="currentColor"/>"#, svgIcon: outlineListChangelog)
-    public static let outlinePair = SVGIcon(viewBox: 16.0, paths: [#"M4.5 10V13.5H11.5V10"#, #"M3.5 4.5V2.5H5.5V4.5"#, #"M10.5 4.5V2.5H12.5V4.5"#, #"M9.5 4.5H13.5V10.5H9.5V4.5Z"#, #"M2.5 4.5H6.5V10.5H2.5V4.5Z"#], strokeWidth: 1.5, body: #"<path d="M4.5 10V13.5H11.5V10" stroke="currentColor"/><path d="M3.5 4.5V2.5H5.5V4.5" stroke-linecap="square" stroke="currentColor"/><path d="M10.5 4.5V2.5H12.5V4.5" stroke-linecap="square" stroke="currentColor"/><path d="M9.5 4.5H13.5V10.5H9.5V4.5Z" stroke-linecap="square" stroke="currentColor"/><path d="M2.5 4.5H6.5V10.5H2.5V4.5Z" stroke-linecap="square" stroke="currentColor"/>"#)
-    public static let outlinePairData = OpenCodeIconData(name: #"outline-pair"#, viewBox: 16.0, body: #"<path d="M4.5 10V13.5H11.5V10" stroke="currentColor"/><path d="M3.5 4.5V2.5H5.5V4.5" stroke-linecap="square" stroke="currentColor"/><path d="M10.5 4.5V2.5H12.5V4.5" stroke-linecap="square" stroke="currentColor"/><path d="M9.5 4.5H13.5V10.5H9.5V4.5Z" stroke-linecap="square" stroke="currentColor"/><path d="M2.5 4.5H6.5V10.5H2.5V4.5Z" stroke-linecap="square" stroke="currentColor"/>"#, svgIcon: outlinePair)
-    public static let lock = SVGIcon(viewBox: 16.0, paths: [#"M5 7V5a3 3 0 0 1 6 0v2M8 10v1"#], strokeWidth: 1.5, body: #"<rect x="3.5" y="7" width="9" height="7" rx="1" stroke="currentColor"/><path d="M5 7V5a3 3 0 0 1 6 0v2M8 10v1" stroke="currentColor" stroke-linecap="round"/>"#)
-    public static let lockData = OpenCodeIconData(name: #"lock"#, viewBox: 16.0, body: #"<rect x="3.5" y="7" width="9" height="7" rx="1" stroke="currentColor"/><path d="M5 7V5a3 3 0 0 1 6 0v2M8 10v1" stroke="currentColor" stroke-linecap="round"/>"#, svgIcon: lock)
-    public static let globe = SVGIcon(viewBox: 16.0, paths: [#"M2 8h12"#], strokeWidth: 1.5, body: #"<circle cx="8" cy="8" r="6" stroke="currentColor"/><ellipse cx="8" cy="8" rx="2.5" ry="6" stroke="currentColor"/><path d="M2 8h12" stroke="currentColor"/>"#)
-    public static let globeData = OpenCodeIconData(name: #"globe"#, viewBox: 16.0, body: #"<circle cx="8" cy="8" r="6" stroke="currentColor"/><ellipse cx="8" cy="8" rx="2.5" ry="6" stroke="currentColor"/><path d="M2 8h12" stroke="currentColor"/>"#, svgIcon: globe)
-    public static let selectElement = SVGIcon(viewBox: 16.0, paths: [#"M12.5 6.5V2.5C12.5 1.94772 12.0523 1.5 11.5 1.5H2.5C1.94772 1.5 1.5 1.94772 1.5 2.5V11.5C1.5 12.0523 1.94772 12.5 2.5 12.5H6.5"#, #"M7.5 7.5L14.5 10.1L11.1 11.1L10.1 14.5L7.5 7.5Z"#], strokeWidth: 1.5, body: #"<path d="M12.5 6.5V2.5C12.5 1.94772 12.0523 1.5 11.5 1.5H2.5C1.94772 1.5 1.5 1.94772 1.5 2.5V11.5C1.5 12.0523 1.94772 12.5 2.5 12.5H6.5" stroke="currentColor" stroke-linecap="round"/><path d="M7.5 7.5L14.5 10.1L11.1 11.1L10.1 14.5L7.5 7.5Z" stroke="currentColor" stroke-linejoin="round"/>"#)
-    public static let selectElementData = OpenCodeIconData(name: #"select-element"#, viewBox: 16.0, body: #"<path d="M12.5 6.5V2.5C12.5 1.94772 12.0523 1.5 11.5 1.5H2.5C1.94772 1.5 1.5 1.94772 1.5 2.5V11.5C1.5 12.0523 1.94772 12.5 2.5 12.5H6.5" stroke="currentColor" stroke-linecap="round"/><path d="M7.5 7.5L14.5 10.1L11.1 11.1L10.1 14.5L7.5 7.5Z" stroke="currentColor" stroke-linejoin="round"/>"#, svgIcon: selectElement)
-    public static let flask = SVGIcon(viewBox: 16.0, paths: [#"M5.5 2H10.5M6 2V6L2.5 12C2 13 2.5 14 3.5 14H12.5C13.5 14 14 13 13.5 12L10 6V2M4.25 9H11.75"#], strokeWidth: 1.5, body: #"<path d="M5.5 2H10.5M6 2V6L2.5 12C2 13 2.5 14 3.5 14H12.5C13.5 14 14 13 13.5 12L10 6V2M4.25 9H11.75" stroke="currentColor" stroke-linecap="square" stroke-linejoin="round"/>"#)
-    public static let flaskData = OpenCodeIconData(name: #"flask"#, viewBox: 16.0, body: #"<path d="M5.5 2H10.5M6 2V6L2.5 12C2 13 2.5 14 3.5 14H12.5C13.5 14 14 13 13.5 12L10 6V2M4.25 9H11.75" stroke="currentColor" stroke-linecap="square" stroke-linejoin="round"/>"#, svgIcon: flask)
-    public static let edit = SVGIcon(viewBox: 16.0, paths: [#"M13.5556 8.21529V13.5556H2.44446L2.44446 2.44445H7.78474M6.00002 8.16216V10H7.83786L14 3.83784L12.1622 2L6.00002 8.16216Z"#], strokeWidth: 1.5, body: #"<path d="M13.5556 8.21529V13.5556H2.44446L2.44446 2.44445H7.78474M6.00002 8.16216V10H7.83786L14 3.83784L12.1622 2L6.00002 8.16216Z" stroke="currentColor"/>"#)
-    public static let editData = OpenCodeIconData(name: #"edit"#, viewBox: 16.0, body: #"<path d="M13.5556 8.21529V13.5556H2.44446L2.44446 2.44445H7.78474M6.00002 8.16216V10H7.83786L14 3.83784L12.1622 2L6.00002 8.16216Z" stroke="currentColor"/>"#, svgIcon: edit)
-    public static let folderAddLeft = SVGIcon(viewBox: 16.0, paths: [#"M7.5 13.3333H1.5V2H6.83333L8.83333 4H14.8333V6M10.1667 11.3333H15.5M12.8333 8.66667V14"#], strokeWidth: 1.5, body: #"<path d="M7.5 13.3333H1.5V2H6.83333L8.83333 4H14.8333V6M10.1667 11.3333H15.5M12.8333 8.66667V14" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/>"#)
-    public static let folderAddLeftData = OpenCodeIconData(name: #"folder-add-left"#, viewBox: 16.0, body: #"<path d="M7.5 13.3333H1.5V2H6.83333L8.83333 4H14.8333V6M10.1667 11.3333H15.5M12.8333 8.66667V14" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/>"#, svgIcon: folderAddLeft)
-    public static let folder = SVGIcon(viewBox: 16.0, paths: [#"M1.33337 2V13.3333H14.6667V4H8.66671L6.66671 2H1.33337Z"#], strokeWidth: 1.5, body: #"<path d="M1.33337 2V13.3333H14.6667V4H8.66671L6.66671 2H1.33337Z" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/>"#)
-    public static let folderData = OpenCodeIconData(name: #"folder"#, viewBox: 16.0, body: #"<path d="M1.33337 2V13.3333H14.6667V4H8.66671L6.66671 2H1.33337Z" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/>"#, svgIcon: folder)
-    public static let branch = SVGIcon(viewBox: 16.0, paths: [#"M5.118 5.686V10.314M5.118 5.686C5.97 5.686 6.661 4.995 6.661 4.143C6.661 3.291 5.97 2.6 5.118 2.6C4.266 2.6 3.575 3.291 3.575 4.143C3.575 4.995 4.266 5.686 5.118 5.686ZM5.118 10.314C4.266 10.314 3.575 11.005 3.575 11.857C3.575 12.709 4.266 13.4 5.118 13.4C5.97 13.4 6.661 12.709 6.661 11.857M5.118 10.314C5.97 10.314 6.661 11.005 6.661 11.857M10.882 5.686C11.734 5.686 12.425 4.995 12.425 4.143C12.425 3.291 11.734 2.6 10.882 2.6C10.03 2.6 9.339 3.291 9.339 4.143C9.339 4.995 10.03 5.686 10.882 5.686ZM10.882 5.686V9.457C10.882 10.783 9.807 11.857 8.482 11.857H6.661"#], strokeWidth: 1.5, body: #"<path d="M5.118 5.686V10.314M5.118 5.686C5.97 5.686 6.661 4.995 6.661 4.143C6.661 3.291 5.97 2.6 5.118 2.6C4.266 2.6 3.575 3.291 3.575 4.143C3.575 4.995 4.266 5.686 5.118 5.686ZM5.118 10.314C4.266 10.314 3.575 11.005 3.575 11.857C3.575 12.709 4.266 13.4 5.118 13.4C5.97 13.4 6.661 12.709 6.661 11.857M5.118 10.314C5.97 10.314 6.661 11.005 6.661 11.857M10.882 5.686C11.734 5.686 12.425 4.995 12.425 4.143C12.425 3.291 11.734 2.6 10.882 2.6C10.03 2.6 9.339 3.291 9.339 4.143C9.339 4.995 10.03 5.686 10.882 5.686ZM10.882 5.686V9.457C10.882 10.783 9.807 11.857 8.482 11.857H6.661" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#)
-    public static let branchData = OpenCodeIconData(name: #"branch"#, viewBox: 16.0, body: #"<path d="M5.118 5.686V10.314M5.118 5.686C5.97 5.686 6.661 4.995 6.661 4.143C6.661 3.291 5.97 2.6 5.118 2.6C4.266 2.6 3.575 3.291 3.575 4.143C3.575 4.995 4.266 5.686 5.118 5.686ZM5.118 10.314C4.266 10.314 3.575 11.005 3.575 11.857C3.575 12.709 4.266 13.4 5.118 13.4C5.97 13.4 6.661 12.709 6.661 11.857M5.118 10.314C5.97 10.314 6.661 11.005 6.661 11.857M10.882 5.686C11.734 5.686 12.425 4.995 12.425 4.143C12.425 3.291 11.734 2.6 10.882 2.6C10.03 2.6 9.339 3.291 9.339 4.143C9.339 4.995 10.03 5.686 10.882 5.686ZM10.882 5.686V9.457C10.882 10.783 9.807 11.857 8.482 11.857H6.661" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#, svgIcon: branch)
-    public static let branchOut = SVGIcon(viewBox: 16.0, paths: [#"M10.4225 3.35355L12.9024 5.83344L10.4225 8.31333"#, #"M1 12.2852H4.23042C4.89912 12.2852 5.52359 11.951 5.89452 11.3946L9.00783 6.72462C8.37877 6.16823 10.0032 5.83402 10.6719 5.83402H12.9024"#, #"M8.5 12.2852H14"#], strokeWidth: 1.5, body: #"<path d="M10.4225 3.35355L12.9024 5.83344L10.4225 8.31333" stroke="currentColor"/><path d="M1 12.2852H4.23042C4.89912 12.2852 5.52359 11.951 5.89452 11.3946L9.00783 6.72462C8.37877 6.16823 10.0032 5.83402 10.6719 5.83402H12.9024" stroke="currentColor"/><path d="M8.5 12.2852H14" stroke="currentColor" stroke-linejoin="round"/>"#)
-    public static let branchOutData = OpenCodeIconData(name: #"branch-out"#, viewBox: 16.0, body: #"<path d="M10.4225 3.35355L12.9024 5.83344L10.4225 8.31333" stroke="currentColor"/><path d="M1 12.2852H4.23042C4.89912 12.2852 5.52359 11.951 5.89452 11.3946L9.00783 6.72462C8.37877 6.16823 10.0032 5.83402 10.6719 5.83402H12.9024" stroke="currentColor"/><path d="M8.5 12.2852H14" stroke="currentColor" stroke-linejoin="round"/>"#, svgIcon: branchOut)
-    public static let gridPlus = SVGIcon(viewBox: 16.0, paths: [#"M13.9948 11.668H9.32812M11.6641 9.33203V13.9987M6.66667 9.33203V13.9987H2V9.33203H6.66667ZM6.66667 2V6.66667H2V2H6.66667ZM13.9948 2V6.66667H9.32812V2H13.9948Z"#], strokeWidth: 1.5, body: #"<path d="M13.9948 11.668H9.32812M11.6641 9.33203V13.9987M6.66667 9.33203V13.9987H2V9.33203H6.66667ZM6.66667 2V6.66667H2V2H6.66667ZM13.9948 2V6.66667H9.32812V2H13.9948Z" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/>"#)
-    public static let gridPlusData = OpenCodeIconData(name: #"grid-plus"#, viewBox: 16.0, body: #"<path d="M13.9948 11.668H9.32812M11.6641 9.33203V13.9987M6.66667 9.33203V13.9987H2V9.33203H6.66667ZM6.66667 2V6.66667H2V2H6.66667ZM13.9948 2V6.66667H9.32812V2H13.9948Z" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/>"#, svgIcon: gridPlus)
-    public static let help = SVGIcon(viewBox: 16.0, paths: [#"M6.33345 6.33349V5.00015H9.66679V7.00015L8.00015 8.00015V9.66679M8.27485 11.6819H7.71897M14.4446 8.00011C14.4446 11.5593 11.5593 14.4446 8.00011 14.4446C4.44094 14.4446 1.55566 11.5593 1.55566 8.00011C1.55566 4.44094 4.44094 1.55566 8.00011 1.55566C11.5593 1.55566 14.4446 4.44094 14.4446 8.00011Z"#], strokeWidth: 1.5, body: #"<path d="M6.33345 6.33349V5.00015H9.66679V7.00015L8.00015 8.00015V9.66679M8.27485 11.6819H7.71897M14.4446 8.00011C14.4446 11.5593 11.5593 14.4446 8.00011 14.4446C4.44094 14.4446 1.55566 11.5593 1.55566 8.00011C1.55566 4.44094 4.44094 1.55566 8.00011 1.55566C11.5593 1.55566 14.4446 4.44094 14.4446 8.00011Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let helpData = OpenCodeIconData(name: #"help"#, viewBox: 16.0, body: #"<path d="M6.33345 6.33349V5.00015H9.66679V7.00015L8.00015 8.00015V9.66679M8.27485 11.6819H7.71897M14.4446 8.00011C14.4446 11.5593 11.5593 14.4446 8.00011 14.4446C4.44094 14.4446 1.55566 11.5593 1.55566 8.00011C1.55566 4.44094 4.44094 1.55566 8.00011 1.55566C11.5593 1.55566 14.4446 4.44094 14.4446 8.00011Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: help)
-    public static let helpBold = SVGIcon(viewBox: 16.0, paths: [#"M6.33345 6.33349V5.00015H9.66679V7.00015L8.00015 8.00015V9.66679M8.27485 11.6819H7.71897M14.4446 8.00011C14.4446 11.5593 11.5593 14.4446 8.00011 14.4446C4.44094 14.4446 1.55566 11.5593 1.55566 8.00011C1.55566 4.44094 4.44094 1.55566 8.00011 1.55566C11.5593 1.55566 14.4446 4.44094 14.4446 8.00011Z"#], strokeWidth: 1.5, body: #"<path d="M6.33345 6.33349V5.00015H9.66679V7.00015L8.00015 8.00015V9.66679M8.27485 11.6819H7.71897M14.4446 8.00011C14.4446 11.5593 11.5593 14.4446 8.00011 14.4446C4.44094 14.4446 1.55566 11.5593 1.55566 8.00011C1.55566 4.44094 4.44094 1.55566 8.00011 1.55566C11.5593 1.55566 14.4446 4.44094 14.4446 8.00011Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"/>"#)
-    public static let helpBoldData = OpenCodeIconData(name: #"help-bold"#, viewBox: 16.0, body: #"<path d="M6.33345 6.33349V5.00015H9.66679V7.00015L8.00015 8.00015V9.66679M8.27485 11.6819H7.71897M14.4446 8.00011C14.4446 11.5593 11.5593 14.4446 8.00011 14.4446C4.44094 14.4446 1.55566 11.5593 1.55566 8.00011C1.55566 4.44094 4.44094 1.55566 8.00011 1.55566C11.5593 1.55566 14.4446 4.44094 14.4446 8.00011Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"/>"#, svgIcon: helpBold)
-    public static let info = SVGIcon(viewBox: 16.0, paths: [#"M12 12H0V0H12V12ZM1 1V11H11V1H1ZM6.5791 4.81641V9.37207H5.5791V5.81641H4.46777V4.81641H6.5791ZM6.85645 2.62891V3.62891H5.30078V2.62891H6.85645Z"#], strokeWidth: nil, body: #"<g transform="translate(2 2)"><path d="M12 12H0V0H12V12ZM1 1V11H11V1H1ZM6.5791 4.81641V9.37207H5.5791V5.81641H4.46777V4.81641H6.5791ZM6.85645 2.62891V3.62891H5.30078V2.62891H6.85645Z" fill="currentColor"/></g>"#)
-    public static let infoData = OpenCodeIconData(name: #"info"#, viewBox: 16.0, body: #"<g transform="translate(2 2)"><path d="M12 12H0V0H12V12ZM1 1V11H11V1H1ZM6.5791 4.81641V9.37207H5.5791V5.81641H4.46777V4.81641H6.5791ZM6.85645 2.62891V3.62891H5.30078V2.62891H6.85645Z" fill="currentColor"/></g>"#, svgIcon: info)
-    public static let circleExclamation = SVGIcon(viewBox: 16.0, paths: [#"M8.75 11.75H7.25V10.25H8.75V11.75Z"#, #"M8.75 9.25H7.25V4.25H8.75V9.25Z"#, #"M8 1C9.93286 1 11.684 1.7836 12.9502 3.0498C14.2164 4.31601 15 6.06714 15 8C15 11.866 11.866 15 8 15C6.06714 15 4.31601 14.2164 3.0498 12.9502C1.7836 11.684 1 9.93286 1 8C1 4.13401 4.13401 1 8 1ZM8 2C4.68629 2 2 4.68629 2 8C2 9.65699 2.67148 11.1559 3.75781 12.2422C4.84415 13.3285 6.34301 14 8 14C11.3137 14 14 11.3137 14 8C14 6.34301 13.3285 4.84415 12.2422 3.75781C11.1559 2.67148 9.65699 2 8 2Z"#], strokeWidth: nil, body: #"<path d="M8.75 11.75H7.25V10.25H8.75V11.75Z" fill="currentColor"/><path d="M8.75 9.25H7.25V4.25H8.75V9.25Z" fill="currentColor"/><path fill-rule="evenodd" clip-rule="evenodd" d="M8 1C9.93286 1 11.684 1.7836 12.9502 3.0498C14.2164 4.31601 15 6.06714 15 8C15 11.866 11.866 15 8 15C6.06714 15 4.31601 14.2164 3.0498 12.9502C1.7836 11.684 1 9.93286 1 8C1 4.13401 4.13401 1 8 1ZM8 2C4.68629 2 2 4.68629 2 8C2 9.65699 2.67148 11.1559 3.75781 12.2422C4.84415 13.3285 6.34301 14 8 14C11.3137 14 14 11.3137 14 8C14 6.34301 13.3285 4.84415 12.2422 3.75781C11.1559 2.67148 9.65699 2 8 2Z" fill="currentColor"/>"#)
-    public static let circleExclamationData = OpenCodeIconData(name: #"circle-exclamation"#, viewBox: 16.0, body: #"<path d="M8.75 11.75H7.25V10.25H8.75V11.75Z" fill="currentColor"/><path d="M8.75 9.25H7.25V4.25H8.75V9.25Z" fill="currentColor"/><path fill-rule="evenodd" clip-rule="evenodd" d="M8 1C9.93286 1 11.684 1.7836 12.9502 3.0498C14.2164 4.31601 15 6.06714 15 8C15 11.866 11.866 15 8 15C6.06714 15 4.31601 14.2164 3.0498 12.9502C1.7836 11.684 1 9.93286 1 8C1 4.13401 4.13401 1 8 1ZM8 2C4.68629 2 2 4.68629 2 8C2 9.65699 2.67148 11.1559 3.75781 12.2422C4.84415 13.3285 6.34301 14 8 14C11.3137 14 14 11.3137 14 8C14 6.34301 13.3285 4.84415 12.2422 3.75781C11.1559 2.67148 9.65699 2 8 2Z" fill="currentColor"/>"#, svgIcon: circleExclamation)
-    public static let circleXmark = SVGIcon(viewBox: 16.0, paths: [#"M1.33334 8.00016C1.33334 4.31826 4.31811 1.3335 8.00001 1.3335C11.6819 1.3335 14.6667 4.31826 14.6667 8.00016C14.6667 11.6821 11.6819 14.6668 8.00001 14.6668C4.31811 14.6668 1.33334 11.6821 1.33334 8.00016ZM6.00001 5.29306L5.2929 6.00016L7.2929 8.00016L5.2929 10.0002L6.00001 10.7073L8.00001 8.70727L10 10.7073L10.7071 10.0002L8.70712 8.00016L10.7071 6.00016L10 5.29306L8.00001 7.29306L6.00001 5.29306Z"#], strokeWidth: nil, body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M1.33334 8.00016C1.33334 4.31826 4.31811 1.3335 8.00001 1.3335C11.6819 1.3335 14.6667 4.31826 14.6667 8.00016C14.6667 11.6821 11.6819 14.6668 8.00001 14.6668C4.31811 14.6668 1.33334 11.6821 1.33334 8.00016ZM6.00001 5.29306L5.2929 6.00016L7.2929 8.00016L5.2929 10.0002L6.00001 10.7073L8.00001 8.70727L10 10.7073L10.7071 10.0002L8.70712 8.00016L10.7071 6.00016L10 5.29306L8.00001 7.29306L6.00001 5.29306Z" fill="currentColor"/>"#)
-    public static let circleXmarkData = OpenCodeIconData(name: #"circle-xmark"#, viewBox: 16.0, body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M1.33334 8.00016C1.33334 4.31826 4.31811 1.3335 8.00001 1.3335C11.6819 1.3335 14.6667 4.31826 14.6667 8.00016C14.6667 11.6821 11.6819 14.6668 8.00001 14.6668C4.31811 14.6668 1.33334 11.6821 1.33334 8.00016ZM6.00001 5.29306L5.2929 6.00016L7.2929 8.00016L5.2929 10.0002L6.00001 10.7073L8.00001 8.70727L10 10.7073L10.7071 10.0002L8.70712 8.00016L10.7071 6.00016L10 5.29306L8.00001 7.29306L6.00001 5.29306Z" fill="currentColor"/>"#, svgIcon: circleXmark)
-    public static let status = SVGIcon(viewBox: 20.0, paths: [#"M2 10V18H18V10M2 10V2H18V10M2 10H18M5 6H9M5 14H9"#], strokeWidth: 1.5, body: #"<path d="M2 10V18H18V10M2 10V2H18V10M2 10H18M5 6H9M5 14H9" stroke="currentColor"/>"#)
-    public static let statusData = OpenCodeIconData(name: #"status"#, viewBox: 20.0, body: #"<path d="M2 10V18H18V10M2 10V2H18V10M2 10H18M5 6H9M5 14H9" stroke="currentColor"/>"#, svgIcon: status)
-    public static let statusActive = SVGIcon(viewBox: 20.0, paths: [#"M18 2H2V10H18V2Z"#, #"M2 18H18V10H2V18Z"#, #"M2 10V18H18V10M2 10V2H18V10M2 10H18M5 6H9M5 14H9"#], strokeWidth: 1.5, body: #"<path d="M18 2H2V10H18V2Z" fill="currentColor" fill-opacity="0.1"/><path d="M2 18H18V10H2V18Z" fill="currentColor" fill-opacity="0.1"/><path d="M2 10V18H18V10M2 10V2H18V10M2 10H18M5 6H9M5 14H9" stroke="currentColor"/>"#)
-    public static let statusActiveData = OpenCodeIconData(name: #"status-active"#, viewBox: 20.0, body: #"<path d="M18 2H2V10H18V2Z" fill="currentColor" fill-opacity="0.1"/><path d="M2 18H18V10H2V18Z" fill="currentColor" fill-opacity="0.1"/><path d="M2 10V18H18V10M2 10V2H18V10M2 10H18M5 6H9M5 14H9" stroke="currentColor"/>"#, svgIcon: statusActive)
-    public static let magnifyingGlassData = OpenCodeIconData(name: #"magnifying-glass"#, viewBox: 16.0, body: #"<path d="M14 14L10.3454 10.3454M6.88889 11.7778C9.58889 11.7778 11.7778 9.58889 11.7778 6.88889C11.7778 4.18889 9.58889 2 6.88889 2C4.18889 2 2 4.18889 2 6.88889C2 9.58889 4.18889 11.7778 6.88889 11.7778Z" stroke="currentColor"/>"#, svgIcon: magnifyingGlass)
-    public static let outlineMagnifierMinus = SVGIcon(viewBox: 16.0, paths: [#"M14 14L11 11M4.66667 7.33333H10M12.6667 7.33333C12.6667 10.2789 10.2789 12.6667 7.33333 12.6667C4.38781 12.6667 2 10.2789 2 7.33333C2 4.38781 4.38781 2 7.33333 2C10.2789 2 12.6667 4.38781 12.6667 7.33333Z"#], strokeWidth: 1.5, body: #"<path d="M14 14L11 11M4.66667 7.33333H10M12.6667 7.33333C12.6667 10.2789 10.2789 12.6667 7.33333 12.6667C4.38781 12.6667 2 10.2789 2 7.33333C2 4.38781 4.38781 2 7.33333 2C10.2789 2 12.6667 4.38781 12.6667 7.33333Z" stroke-miterlimit="10" stroke-linecap="square" stroke="currentColor"/>"#)
-    public static let outlineMagnifierMinusData = OpenCodeIconData(name: #"outline-magnifier-minus"#, viewBox: 16.0, body: #"<path d="M14 14L11 11M4.66667 7.33333H10M12.6667 7.33333C12.6667 10.2789 10.2789 12.6667 7.33333 12.6667C4.38781 12.6667 2 10.2789 2 7.33333C2 4.38781 4.38781 2 7.33333 2C10.2789 2 12.6667 4.38781 12.6667 7.33333Z" stroke-miterlimit="10" stroke-linecap="square" stroke="currentColor"/>"#, svgIcon: outlineMagnifierMinus)
-    public static let outlineMagnifierPlus = SVGIcon(viewBox: 16.0, paths: [#"M14 14L11 11M4.66667 7.33333H10M7.33333 4.66667V10M12.6667 7.33333C12.6667 10.2789 10.2789 12.6667 7.33333 12.6667C4.38781 12.6667 2 10.2789 2 7.33333C2 4.38781 4.38781 2 7.33333 2C10.2789 2 12.6667 4.38781 12.6667 7.33333Z"#], strokeWidth: 1.5, body: #"<path d="M14 14L11 11M4.66667 7.33333H10M7.33333 4.66667V10M12.6667 7.33333C12.6667 10.2789 10.2789 12.6667 7.33333 12.6667C4.38781 12.6667 2 10.2789 2 7.33333C2 4.38781 4.38781 2 7.33333 2C10.2789 2 12.6667 4.38781 12.6667 7.33333Z" stroke-miterlimit="10" stroke-linecap="square" stroke="currentColor"/>"#)
-    public static let outlineMagnifierPlusData = OpenCodeIconData(name: #"outline-magnifier-plus"#, viewBox: 16.0, body: #"<path d="M14 14L11 11M4.66667 7.33333H10M7.33333 4.66667V10M12.6667 7.33333C12.6667 10.2789 10.2789 12.6667 7.33333 12.6667C4.38781 12.6667 2 10.2789 2 7.33333C2 4.38781 4.38781 2 7.33333 2C10.2789 2 12.6667 4.38781 12.6667 7.33333Z" stroke-miterlimit="10" stroke-linecap="square" stroke="currentColor"/>"#, svgIcon: outlineMagnifierPlus)
-    public static let menu = SVGIcon(viewBox: 16.0, paths: [#"M2 8H14M2 4.664H14M2 11.336H14"#], strokeWidth: 1.5, body: #"<path d="M2 8H14M2 4.664H14M2 11.336H14" stroke="currentColor"/>"#)
-    public static let menuData = OpenCodeIconData(name: #"menu"#, viewBox: 16.0, body: #"<path d="M2 8H14M2 4.664H14M2 11.336H14" stroke="currentColor"/>"#, svgIcon: menu)
-    public static let minus = SVGIcon(viewBox: 16.0, paths: [#"M2.88867 8H13.1109"#], strokeWidth: 1.5, body: #"<path d="M2.88867 8H13.1109" stroke="currentColor" stroke-linejoin="round"/>"#)
-    public static let minusData = OpenCodeIconData(name: #"minus"#, viewBox: 16.0, body: #"<path d="M2.88867 8H13.1109" stroke="currentColor" stroke-linejoin="round"/>"#, svgIcon: minus)
-    public static let plus = SVGIcon(viewBox: 16.0, paths: [#"M8 2.88867V13.1109"#, #"M2.88867 8H13.1109"#], strokeWidth: 1.5, body: #"<path d="M8 2.88867V13.1109" stroke="currentColor" stroke-linejoin="round"/><path d="M2.88867 8H13.1109" stroke="currentColor" stroke-linejoin="round"/>"#)
-    public static let plusData = OpenCodeIconData(name: #"plus"#, viewBox: 16.0, body: #"<path d="M8 2.88867V13.1109" stroke="currentColor" stroke-linejoin="round"/><path d="M2.88867 8H13.1109" stroke="currentColor" stroke-linejoin="round"/>"#, svgIcon: plus)
-    public static let settingsGear = SVGIcon(viewBox: 16.0, paths: [#"M7.99998 1.3335L14 4.66683V11.3335L7.99998 14.6668L2 11.3335V4.66683L7.99998 1.3335Z"#, #"M9.99998 8.00016C9.99998 9.10476 9.10458 10.0002 7.99998 10.0002C6.89538 10.0002 5.99998 9.10476 5.99998 8.00016C5.99998 6.89556 6.89538 6.00016 7.99998 6.00016C9.10458 6.00016 9.99998 6.89556 9.99998 8.00016Z"#], strokeWidth: 1.5, body: #"<path d="M7.99998 1.3335L14 4.66683V11.3335L7.99998 14.6668L2 11.3335V4.66683L7.99998 1.3335Z" stroke="currentColor"/><path d="M9.99998 8.00016C9.99998 9.10476 9.10458 10.0002 7.99998 10.0002C6.89538 10.0002 5.99998 9.10476 5.99998 8.00016C5.99998 6.89556 6.89538 6.00016 7.99998 6.00016C9.10458 6.00016 9.99998 6.89556 9.99998 8.00016Z" stroke="currentColor"/>"#)
-    public static let settingsGearData = OpenCodeIconData(name: #"settings-gear"#, viewBox: 16.0, body: #"<path d="M7.99998 1.3335L14 4.66683V11.3335L7.99998 14.6668L2 11.3335V4.66683L7.99998 1.3335Z" stroke="currentColor"/><path d="M9.99998 8.00016C9.99998 9.10476 9.10458 10.0002 7.99998 10.0002C6.89538 10.0002 5.99998 9.10476 5.99998 8.00016C5.99998 6.89556 6.89538 6.00016 7.99998 6.00016C9.10458 6.00016 9.99998 6.89556 9.99998 8.00016Z" stroke="currentColor"/>"#, svgIcon: settingsGear)
-    public static let chevronDown = SVGIcon(viewBox: 16.0, paths: [#"M5 6.5L8 9.5L11 6.5"#], strokeWidth: 1.5, body: #"<path d="M5 6.5L8 9.5L11 6.5" stroke="currentColor"/>"#)
-    public static let chevronDownData = OpenCodeIconData(name: #"chevron-down"#, viewBox: 16.0, body: #"<path d="M5 6.5L8 9.5L11 6.5" stroke="currentColor"/>"#, svgIcon: chevronDown)
-    public static let collapse = SVGIcon(viewBox: 16.0, paths: [#"M8 1V6M11 3L8 6L5 3"#, #"M8 15V10M11 13L8 10L5 13"#, #"M4 8H6"#, #"M7 8H9"#, #"M10 8H12"#], strokeWidth: 1.5, body: #"<path d="M8 1V6M11 3L8 6L5 3" stroke="currentColor"/><path d="M8 15V10M11 13L8 10L5 13" stroke="currentColor"/><path d="M4 8H6" stroke="currentColor"/><path d="M7 8H9" stroke="currentColor"/><path d="M10 8H12" stroke="currentColor"/>"#)
-    public static let collapseData = OpenCodeIconData(name: #"collapse"#, viewBox: 16.0, body: #"<path d="M8 1V6M11 3L8 6L5 3" stroke="currentColor"/><path d="M8 15V10M11 13L8 10L5 13" stroke="currentColor"/><path d="M4 8H6" stroke="currentColor"/><path d="M7 8H9" stroke="currentColor"/><path d="M10 8H12" stroke="currentColor"/>"#, svgIcon: collapse)
-    public static let check = SVGIcon(viewBox: 16.0, paths: [#"M3.53613 8.17857L6.39328 11.75L12.4647 4.25"#], strokeWidth: 1.5, body: #"<path d="M3.53613 8.17857L6.39328 11.75L12.4647 4.25" stroke="currentColor"/>"#)
-    public static let checkData = OpenCodeIconData(name: #"check"#, viewBox: 16.0, body: #"<path d="M3.53613 8.17857L6.39328 11.75L12.4647 4.25" stroke="currentColor"/>"#, svgIcon: check)
-    public static let monitor = SVGIcon(viewBox: 16.0, paths: [#"M4.05559 9.38889H0.500007C0.500007 9.38889 0.500017 8.59298 0.500017 7.61112V2.27778C0.500017 1.29594 0.500102 0.5 0.500102 0.5H13.3889C13.3889 0.5 13.3889 1.29594 13.3889 2.27778V7.61112C13.3889 8.59298 13.3889 9.38889 13.3889 9.38889H9.83336M4.05559 9.38889V11.6111H6.94448H9.83336V9.38889M4.05559 9.38889H9.83336"#], strokeWidth: 1.5, body: #"<path d="M4.05559 9.38889H0.500007C0.500007 9.38889 0.500017 8.59298 0.500017 7.61112V2.27778C0.500017 1.29594 0.500102 0.5 0.500102 0.5H13.3889C13.3889 0.5 13.3889 1.29594 13.3889 2.27778V7.61112C13.3889 8.59298 13.3889 9.38889 13.3889 9.38889H9.83336M4.05559 9.38889V11.6111H6.94448H9.83336V9.38889M4.05559 9.38889H9.83336" transform="translate(1.05556 1.94444)" stroke="currentColor"/>"#)
-    public static let monitorData = OpenCodeIconData(name: #"monitor"#, viewBox: 16.0, body: #"<path d="M4.05559 9.38889H0.500007C0.500007 9.38889 0.500017 8.59298 0.500017 7.61112V2.27778C0.500017 1.29594 0.500102 0.5 0.500102 0.5H13.3889C13.3889 0.5 13.3889 1.29594 13.3889 2.27778V7.61112C13.3889 8.59298 13.3889 9.38889 13.3889 9.38889H9.83336M4.05559 9.38889V11.6111H6.94448H9.83336V9.38889M4.05559 9.38889H9.83336" transform="translate(1.05556 1.94444)" stroke="currentColor"/>"#, svgIcon: monitor)
-    public static let workspaceNew = SVGIcon(viewBox: 16.0, paths: [#"M2 10.7578V14.0011H5.24324M13.9991 5.24324V2H10.7559M13.9991 10.7578V14.0011H10.7559M2 5.24324V2H5.24324"#, #"M8 4.5V11.5M4.5 8H11.5"#], strokeWidth: 1.5, body: #"<path d="M2 10.7578V14.0011H5.24324M13.9991 5.24324V2H10.7559M13.9991 10.7578V14.0011H10.7559M2 5.24324V2H5.24324" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/><path d="M8 4.5V11.5M4.5 8H11.5" stroke="currentColor" stroke-linejoin="round"/>"#)
-    public static let workspaceNewData = OpenCodeIconData(name: #"workspace-new"#, viewBox: 16.0, body: #"<path d="M2 10.7578V14.0011H5.24324M13.9991 5.24324V2H10.7559M13.9991 10.7578V14.0011H10.7559M2 5.24324V2H5.24324" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/><path d="M8 4.5V11.5M4.5 8H11.5" stroke="currentColor" stroke-linejoin="round"/>"#, svgIcon: workspaceNew)
-    public static let workspaceIsolated = SVGIcon(viewBox: 16.0, paths: [#"M10.5 10.5V5.5H5.5V10.5H10.5Z"#], strokeWidth: 1.5, body: #"<path d="M10.5 10.5V5.5H5.5V10.5H10.5Z" fill="currentColor"/><rect x="2.5" y="2.5" width="11" height="11" stroke="currentColor"/>"#)
-    public static let workspaceIsolatedData = OpenCodeIconData(name: #"workspace-isolated"#, viewBox: 16.0, body: #"<path d="M10.5 10.5V5.5H5.5V10.5H10.5Z" fill="currentColor"/><rect x="2.5" y="2.5" width="11" height="11" stroke="currentColor"/>"#, svgIcon: workspaceIsolated)
-    public static let workspace = SVGIcon(viewBox: 16.0, paths: [#"M2 10.668V14.0013H10.6667M13.9974 10.6667V2H2.66406M13.9974 10.668V14.0013H10.6641M2 10V2H5.33333"#, #"M10.6693 10.6654V5.33203H5.33594V10.6654H10.6693Z"#], strokeWidth: 1.5, body: #"<path d="M2 10.668V14.0013H10.6667M13.9974 10.6667V2H2.66406M13.9974 10.668V14.0013H10.6641M2 10V2H5.33333" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/><path d="M10.6693 10.6654V5.33203H5.33594V10.6654H10.6693Z" fill="currentColor"/>"#)
-    public static let workspaceData = OpenCodeIconData(name: #"workspace"#, viewBox: 16.0, body: #"<path d="M2 10.668V14.0013H10.6667M13.9974 10.6667V2H2.66406M13.9974 10.668V14.0013H10.6641M2 10V2H5.33333" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/><path d="M10.6693 10.6654V5.33203H5.33594V10.6654H10.6693Z" fill="currentColor"/>"#, svgIcon: workspace)
-    public static let outlineWorktree = SVGIcon(viewBox: 16.0, paths: [#"M12 3.11133L14.3885 5.49977L12 7.88822M14.5 5.49972H10.058L5.13456 11.8139M14.5 11.6606L8.5 11.6606M5.50012 11.6597H1.5"#], strokeWidth: 1.5, body: #"<path d="M12 3.11133L14.3885 5.49977L12 7.88822M14.5 5.49972H10.058L5.13456 11.8139M14.5 11.6606L8.5 11.6606M5.50012 11.6597H1.5" stroke="currentColor"/>"#)
-    public static let outlineWorktreeData = OpenCodeIconData(name: #"outline-worktree"#, viewBox: 16.0, body: #"<path d="M12 3.11133L14.3885 5.49977L12 7.88822M14.5 5.49972H10.058L5.13456 11.8139M14.5 11.6606L8.5 11.6606M5.50012 11.6597H1.5" stroke="currentColor"/>"#, svgIcon: outlineWorktree)
-    public static let outlineTrash = SVGIcon(viewBox: 16.0, paths: [#"M5.5 4.5H2.5L4 14.5H12L13.5 4.5H10.5M5.5 4.5V1.5H10.5V4.5M5.5 4.5H10.5M6.5 11.5L6 7M9.5 11.5L10 7"#], strokeWidth: 1.5, body: #"<path d="M5.5 4.5H2.5L4 14.5H12L13.5 4.5H10.5M5.5 4.5V1.5H10.5V4.5M5.5 4.5H10.5M6.5 11.5L6 7M9.5 11.5L10 7" stroke="currentColor"/>"#)
-    public static let outlineTrashData = OpenCodeIconData(name: #"outline-trash"#, viewBox: 16.0, body: #"<path d="M5.5 4.5H2.5L4 14.5H12L13.5 4.5H10.5M5.5 4.5V1.5H10.5V4.5M5.5 4.5H10.5M6.5 11.5L6 7M9.5 11.5L10 7" stroke="currentColor"/>"#, svgIcon: outlineTrash)
-    public static let closeData = OpenCodeIconData(name: #"close"#, viewBox: 20.0, body: #"<path d="M14.4446 5.55566L5.55566 14.4446M5.55566 5.55566L14.4446 14.4446" stroke="currentColor" stroke-linejoin="round"/>"#, svgIcon: close)
-    public static let xmarkSmallData = OpenCodeIconData(name: #"xmark-small"#, viewBox: 16.0, body: #"<path d="M4.25 11.75L11.75 4.25M11.75 11.75L4.25 4.25" stroke="currentColor"/>"#, svgIcon: xmarkSmall)
-    public static let outlineXmark = SVGIcon(viewBox: 16.0, paths: [#"M4.99487 5.70186L7.29297 7.99995L4.99487 10.2981L5.70198 11.0052L8.00008 8.70706L10.2982 11.0052L11.0053 10.2981L8.70718 7.99995L11.0053 5.70186L10.2982 4.99475L8.00008 7.29285L5.70198 4.99475L4.99487 5.70186Z"#], strokeWidth: nil, body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M4.99487 5.70186L7.29297 7.99995L4.99487 10.2981L5.70198 11.0052L8.00008 8.70706L10.2982 11.0052L11.0053 10.2981L8.70718 7.99995L11.0053 5.70186L10.2982 4.99475L8.00008 7.29285L5.70198 4.99475L4.99487 5.70186Z" fill="currentColor"/>"#)
-    public static let outlineXmarkData = OpenCodeIconData(name: #"outline-xmark"#, viewBox: 16.0, body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M4.99487 5.70186L7.29297 7.99995L4.99487 10.2981L5.70198 11.0052L8.00008 8.70706L10.2982 11.0052L11.0053 10.2981L8.70718 7.99995L11.0053 5.70186L10.2982 4.99475L8.00008 7.29285L5.70198 4.99475L4.99487 5.70186Z" fill="currentColor"/>"#, svgIcon: outlineXmark)
-    public static let outlineChevronDown = SVGIcon(viewBox: 16.0, paths: [#"M5 6.5L8 9.5L11 6.5"#], strokeWidth: 1.5, body: #"<path d="M5 6.5L8 9.5L11 6.5" stroke="currentColor"/>"#)
-    public static let outlineChevronDownData = OpenCodeIconData(name: #"outline-chevron-down"#, viewBox: 16.0, body: #"<path d="M5 6.5L8 9.5L11 6.5" stroke="currentColor"/>"#, svgIcon: outlineChevronDown)
-    public static let outlineChevronRight = SVGIcon(viewBox: 16.0, paths: [#"M6.5 11L9.5 8L6.5 5"#], strokeWidth: 1.5, body: #"<path d="M6.5 11L9.5 8L6.5 5" stroke="currentColor"/>"#)
-    public static let outlineChevronRightData = OpenCodeIconData(name: #"outline-chevron-right"#, viewBox: 16.0, body: #"<path d="M6.5 11L9.5 8L6.5 5" stroke="currentColor"/>"#, svgIcon: outlineChevronRight)
-    public static let outlineDots = SVGIcon(viewBox: 16.0, paths: [#"M2.5 7.5H3.5V8.5H2.5V7.5Z"#, #"M7.5 7.5H8.5V8.5H7.5V7.5Z"#, #"M12.5 7.5H13.5V8.5H12.5V7.5Z"#], strokeWidth: 1.5, body: #"<path d="M2.5 7.5H3.5V8.5H2.5V7.5Z" stroke="currentColor"/><path d="M7.5 7.5H8.5V8.5H7.5V7.5Z" stroke="currentColor"/><path d="M12.5 7.5H13.5V8.5H12.5V7.5Z" stroke="currentColor"/>"#)
-    public static let outlineDotsData = OpenCodeIconData(name: #"outline-dots"#, viewBox: 16.0, body: #"<path d="M2.5 7.5H3.5V8.5H2.5V7.5Z" stroke="currentColor"/><path d="M7.5 7.5H8.5V8.5H7.5V7.5Z" stroke="currentColor"/><path d="M12.5 7.5H13.5V8.5H12.5V7.5Z" stroke="currentColor"/>"#, svgIcon: outlineDots)
-    public static let expand = SVGIcon(viewBox: 16.0, paths: [#"M8.25 6.17773V1.17773M11.25 4.17773L8.25 1.17773L5.25 4.17773"#, #"M8.25 9.17773V14.1777M11.25 11.1777L8.25 14.1777L5.25 11.1777"#, #"M4.25 7.67773H12.25"#], strokeWidth: 1.5, body: #"<path d="M8.25 6.17773V1.17773M11.25 4.17773L8.25 1.17773L5.25 4.17773" stroke="currentColor"/><path d="M8.25 9.17773V14.1777M11.25 11.1777L8.25 14.1777L5.25 11.1777" stroke="currentColor"/><path d="M4.25 7.67773H12.25" stroke="currentColor"/>"#)
-    public static let expandData = OpenCodeIconData(name: #"expand"#, viewBox: 16.0, body: #"<path d="M8.25 6.17773V1.17773M11.25 4.17773L8.25 1.17773L5.25 4.17773" stroke="currentColor"/><path d="M8.25 9.17773V14.1777M11.25 11.1777L8.25 14.1777L5.25 11.1777" stroke="currentColor"/><path d="M4.25 7.67773H12.25" stroke="currentColor"/>"#, svgIcon: expand)
-    public static let outlineExpand = SVGIcon(viewBox: 24.0, paths: [#"M4.58301 10.4163V15.4163H9.58301M10.4163 4.58301H15.4163V9.58301"#], strokeWidth: 1.25, body: #"<g transform="scale(1.2)" stroke="currentColor" stroke-width="1.25"><path d="M4.58301 10.4163V15.4163H9.58301M10.4163 4.58301H15.4163V9.58301" stroke="currentColor" stroke-linecap="square"/></g>"#)
-    public static let outlineExpandData = OpenCodeIconData(name: #"outline-expand"#, viewBox: 24.0, body: #"<g transform="scale(1.2)" stroke="currentColor" stroke-width="1.25"><path d="M4.58301 10.4163V15.4163H9.58301M10.4163 4.58301H15.4163V9.58301" stroke="currentColor" stroke-linecap="square"/></g>"#, svgIcon: outlineExpand)
-    public static let filetree = SVGIcon(viewBox: 16.0, paths: [#"M2.5 1.5V12.2484H6.75M2.5 4.74838H6.75"#], strokeWidth: 1.5, body: #"<path d="M2.5 1.5V12.2484H6.75M2.5 4.74838H6.75" stroke="currentColor"/><rect x="8.5" y="3.2168" width="6" height="3" fill="none" stroke="currentColor"/><rect x="8.5" y="10.75" width="6" height="3" fill="none" stroke="currentColor"/>"#)
-    public static let filetreeData = OpenCodeIconData(name: #"filetree"#, viewBox: 16.0, body: #"<path d="M2.5 1.5V12.2484H6.75M2.5 4.74838H6.75" stroke="currentColor"/><rect x="8.5" y="3.2168" width="6" height="3" fill="none" stroke="currentColor"/><rect x="8.5" y="10.75" width="6" height="3" fill="none" stroke="currentColor"/>"#, svgIcon: filetree)
-    public static let split = SVGIcon(viewBox: 16.0, paths: [#"M1 14H15L15 2H1V14Z"#], strokeWidth: 1.5, body: #"<path d="M1 14H15L15 2H1V14Z" stroke="currentColor"/><rect x="3" y="4" width="4" height="8" fill="currentColor" fill-opacity="0.5"/><rect x="9" y="4" width="4" height="8" fill="currentColor" fill-opacity="0.5"/>"#)
-    public static let splitData = OpenCodeIconData(name: #"split"#, viewBox: 16.0, body: #"<path d="M1 14H15L15 2H1V14Z" stroke="currentColor"/><rect x="3" y="4" width="4" height="8" fill="currentColor" fill-opacity="0.5"/><rect x="9" y="4" width="4" height="8" fill="currentColor" fill-opacity="0.5"/>"#, svgIcon: split)
-    public static let unified = SVGIcon(viewBox: 16.0, paths: [#"M3.00001 4.00045L12.9998 4L13 6.99955L3 7L3.00001 4.00045Z"#, #"M3.0001 9H13L12.9999 12H3L3.0001 9Z"#, #"M1 14H15L15 2H1V14Z"#], strokeWidth: 1.5, body: #"<path d="M3.00001 4.00045L12.9998 4L13 6.99955L3 7L3.00001 4.00045Z" fill="currentColor" fill-opacity="0.5"/><path d="M3.0001 9H13L12.9999 12H3L3.0001 9Z" fill="currentColor" fill-opacity="0.5"/><path d="M1 14H15L15 2H1V14Z" stroke="currentColor"/>"#)
-    public static let unifiedData = OpenCodeIconData(name: #"unified"#, viewBox: 16.0, body: #"<path d="M3.00001 4.00045L12.9998 4L13 6.99955L3 7L3.00001 4.00045Z" fill="currentColor" fill-opacity="0.5"/><path d="M3.0001 9H13L12.9999 12H3L3.0001 9Z" fill="currentColor" fill-opacity="0.5"/><path d="M1 14H15L15 2H1V14Z" stroke="currentColor"/>"#, svgIcon: unified)
-    public static let review = SVGIcon(viewBox: 20.0, paths: [#"M7 14.5H13M7 7.99512H10.0049M10.0049 7.99512H13M10.0049 7.99512V5M10.0049 7.99512V11M18 18V2L2 2L2 18H18Z"#], strokeWidth: 1.5, body: #"<path d="M7 14.5H13M7 7.99512H10.0049M10.0049 7.99512H13M10.0049 7.99512V5M10.0049 7.99512V11M18 18V2L2 2L2 18H18Z" stroke="currentColor"/>"#)
-    public static let reviewData = OpenCodeIconData(name: #"review"#, viewBox: 20.0, body: #"<path d="M7 14.5H13M7 7.99512H10.0049M10.0049 7.99512H13M10.0049 7.99512V5M10.0049 7.99512V11M18 18V2L2 2L2 18H18Z" stroke="currentColor"/>"#, svgIcon: review)
-    public static let windowAnalytics = SVGIcon(viewBox: 16.0, paths: [#"M14.5 9.8333V13.5H1.5V2.5H7.1667M9.5 2.5V7.5H14.5V2.5H9.5Z"#], strokeWidth: 1.5, body: #"<path d="M14.5 9.8333V13.5H1.5V2.5H7.1667M9.5 2.5V7.5H14.5V2.5H9.5Z" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/>"#)
-    public static let windowAnalyticsData = OpenCodeIconData(name: #"window-analytics"#, viewBox: 16.0, body: #"<path d="M14.5 9.8333V13.5H1.5V2.5H7.1667M9.5 2.5V7.5H14.5V2.5H9.5Z" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/>"#, svgIcon: windowAnalytics)
-    public static let graduationCap = SVGIcon(viewBox: 16.0, paths: [#"M12.3327 7.50065V11.0007L7.99935 13.6673L3.66602 11.0007V7.50065M14.3327 9.83398V6.16732M7.99935 2.33398L1.66602 6.00065L7.99935 10.0007L14.3327 6.00065L7.99935 2.33398Z"#], strokeWidth: 1.5, body: #"<path d="M12.3327 7.50065V11.0007L7.99935 13.6673L3.66602 11.0007V7.50065M14.3327 9.83398V6.16732M7.99935 2.33398L1.66602 6.00065L7.99935 10.0007L14.3327 6.00065L7.99935 2.33398Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let graduationCapData = OpenCodeIconData(name: #"graduation-cap"#, viewBox: 16.0, body: #"<path d="M12.3327 7.50065V11.0007L7.99935 13.6673L3.66602 11.0007V7.50065M14.3327 9.83398V6.16732M7.99935 2.33398L1.66602 6.00065L7.99935 10.0007L14.3327 6.00065L7.99935 2.33398Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: graduationCap)
-    public static let codeSlash = SVGIcon(viewBox: 16.0, paths: [#"M10.0812 2.10803L6.55974 14.0809L5.92016 13.8928L9.44161 1.91992L10.0812 2.10803ZM4.13793 4.97275L1.44666 8.00045L4.13793 11.0281L3.63966 11.471L0.554688 8.00045L3.63966 4.52984L4.13793 4.97275ZM12.3617 4.52984L15.4467 8.00045L12.3617 11.471L11.8634 11.0281L14.5547 8.00045L11.8634 4.97275L12.3617 4.52984Z"#], strokeWidth: nil, body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M10.0812 2.10803L6.55974 14.0809L5.92016 13.8928L9.44161 1.91992L10.0812 2.10803ZM4.13793 4.97275L1.44666 8.00045L4.13793 11.0281L3.63966 11.471L0.554688 8.00045L3.63966 4.52984L4.13793 4.97275ZM12.3617 4.52984L15.4467 8.00045L12.3617 11.471L11.8634 11.0281L14.5547 8.00045L11.8634 4.97275L12.3617 4.52984Z" fill="currentColor"/>"#)
-    public static let codeSlashData = OpenCodeIconData(name: #"code-slash"#, viewBox: 16.0, body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M10.0812 2.10803L6.55974 14.0809L5.92016 13.8928L9.44161 1.91992L10.0812 2.10803ZM4.13793 4.97275L1.44666 8.00045L4.13793 11.0281L3.63966 11.471L0.554688 8.00045L3.63966 4.52984L4.13793 4.97275ZM12.3617 4.52984L15.4467 8.00045L12.3617 11.471L11.8634 11.0281L14.5547 8.00045L11.8634 4.97275L12.3617 4.52984Z" fill="currentColor"/>"#, svgIcon: codeSlash)
-    public static let outlineCodeBrackets = SVGIcon(viewBox: 16.0, paths: [#"M5 4L1 8L5 12M11 4L15 8L11 12M9 1L7 15"#], strokeWidth: 1.5, body: #"<path d="M5 4L1 8L5 12M11 4L15 8L11 12M9 1L7 15" stroke="currentColor"/>"#)
-    public static let outlineCodeBracketsData = OpenCodeIconData(name: #"outline-code-brackets"#, viewBox: 16.0, body: #"<path d="M5 4L1 8L5 12M11 4L15 8L11 12M9 1L7 15" stroke="currentColor"/>"#, svgIcon: outlineCodeBrackets)
-    public static let trash = SVGIcon(viewBox: 20.0, paths: [#"M4.58342 17.9134L4.58369 17.4134L4.22787 17.5384L4.22766 18.0384H4.58342V17.9134ZM15.4167 17.9134V18.0384H15.7725L15.7723 17.5384L15.4167 17.9134ZM2.08342 3.95508V3.45508H1.58342V3.95508H2.08342V4.45508V3.95508ZM17.9167 4.45508V4.95508H18.4167V4.45508H17.9167V3.95508V4.45508ZM4.16677 4.58008L3.66701 4.5996L4.22816 17.5379L4.72792 17.4934L5.22767 17.4489L4.66652 4.54055L4.16677 4.58008ZM4.58342 18.0384V17.9134H15.4167V18.0384V18.5384H4.58342V18.0384ZM15.4167 17.9134L15.8332 17.5379L16.2498 4.5996L15.7501 4.58008L15.2503 4.56055L14.8337 17.4989L15.4167 17.9134ZM15.8334 4.58008V4.08008H4.16677V4.58008V5.08008H15.8334V4.58008ZM2.08342 4.45508V4.95508H4.16677V4.58008V4.08008H2.08342V4.45508ZM15.8334 4.58008V5.08008H17.9167V4.45508V3.95508H15.8334V4.58008ZM6.83951 4.35149L7.432 4.55047C7.79251 3.47701 8.80699 2.70508 10.0001 2.70508V2.20508V1.70508C8.25392 1.70508 6.77335 2.83539 6.24702 4.15251L6.83951 4.35149ZM10.0001 2.20508V2.70508C11.1932 2.70508 12.2077 3.47701 12.5682 4.55047L13.1607 4.35149L13.7532 4.15251C13.2269 2.83539 11.7463 1.70508 10.0001 1.70508V2.20508Z"#], strokeWidth: nil, body: #"<path d="M4.58342 17.9134L4.58369 17.4134L4.22787 17.5384L4.22766 18.0384H4.58342V17.9134ZM15.4167 17.9134V18.0384H15.7725L15.7723 17.5384L15.4167 17.9134ZM2.08342 3.95508V3.45508H1.58342V3.95508H2.08342V4.45508V3.95508ZM17.9167 4.45508V4.95508H18.4167V4.45508H17.9167V3.95508V4.45508ZM4.16677 4.58008L3.66701 4.5996L4.22816 17.5379L4.72792 17.4934L5.22767 17.4489L4.66652 4.54055L4.16677 4.58008ZM4.58342 18.0384V17.9134H15.4167V18.0384V18.5384H4.58342V18.0384ZM15.4167 17.9134L15.8332 17.5379L16.2498 4.5996L15.7501 4.58008L15.2503 4.56055L14.8337 17.4989L15.4167 17.9134ZM15.8334 4.58008V4.08008H4.16677V4.58008V5.08008H15.8334V4.58008ZM2.08342 4.45508V4.95508H4.16677V4.58008V4.08008H2.08342V4.45508ZM15.8334 4.58008V5.08008H17.9167V4.45508V3.95508H15.8334V4.58008ZM6.83951 4.35149L7.432 4.55047C7.79251 3.47701 8.80699 2.70508 10.0001 2.70508V2.20508V1.70508C8.25392 1.70508 6.77335 2.83539 6.24702 4.15251L6.83951 4.35149ZM10.0001 2.20508V2.70508C11.1932 2.70508 12.2077 3.47701 12.5682 4.55047L13.1607 4.35149L13.7532 4.15251C13.2269 2.83539 11.7463 1.70508 10.0001 1.70508V2.20508Z" fill="currentColor"/>"#)
-    public static let trashData = OpenCodeIconData(name: #"trash"#, viewBox: 20.0, body: #"<path d="M4.58342 17.9134L4.58369 17.4134L4.22787 17.5384L4.22766 18.0384H4.58342V17.9134ZM15.4167 17.9134V18.0384H15.7725L15.7723 17.5384L15.4167 17.9134ZM2.08342 3.95508V3.45508H1.58342V3.95508H2.08342V4.45508V3.95508ZM17.9167 4.45508V4.95508H18.4167V4.45508H17.9167V3.95508V4.45508ZM4.16677 4.58008L3.66701 4.5996L4.22816 17.5379L4.72792 17.4934L5.22767 17.4489L4.66652 4.54055L4.16677 4.58008ZM4.58342 18.0384V17.9134H15.4167V18.0384V18.5384H4.58342V18.0384ZM15.4167 17.9134L15.8332 17.5379L16.2498 4.5996L15.7501 4.58008L15.2503 4.56055L14.8337 17.4989L15.4167 17.9134ZM15.8334 4.58008V4.08008H4.16677V4.58008V5.08008H15.8334V4.58008ZM2.08342 4.45508V4.95508H4.16677V4.58008V4.08008H2.08342V4.45508ZM15.8334 4.58008V5.08008H17.9167V4.45508V3.95508H15.8334V4.58008ZM6.83951 4.35149L7.432 4.55047C7.79251 3.47701 8.80699 2.70508 10.0001 2.70508V2.20508V1.70508C8.25392 1.70508 6.77335 2.83539 6.24702 4.15251L6.83951 4.35149ZM10.0001 2.20508V2.70508C11.1932 2.70508 12.2077 3.47701 12.5682 4.55047L13.1607 4.35149L13.7532 4.15251C13.2269 2.83539 11.7463 1.70508 10.0001 1.70508V2.20508Z" fill="currentColor"/>"#, svgIcon: trash)
-    public static let outlineSliders = SVGIcon(viewBox: 16.0, paths: [#"M11.7779 4.66675H14.4446M11.7779 4.66675C11.7779 5.77132 10.8825 6.66675 9.77789 6.66675C8.67332 6.66675 7.77789 5.77132 7.77789 4.66675M11.7779 4.66675C11.7779 3.56218 10.8825 2.66675 9.77789 2.66675C8.67332 2.66675 7.77789 3.56218 7.77789 4.66675M1.55566 4.66675H7.77789M4.22233 11.3334H1.55566M4.22233 11.3334C4.22233 12.438 5.11776 13.3334 6.22233 13.3334C7.3269 13.3334 8.22233 12.438 8.22233 11.3334M4.22233 11.3334C4.22233 10.2288 5.11776 9.33341 6.22233 9.33341C7.3269 9.33341 8.22233 10.2288 8.22233 11.3334M14.4446 11.3334H8.22233"#], strokeWidth: 1.5, body: #"<path d="M11.7779 4.66675H14.4446M11.7779 4.66675C11.7779 5.77132 10.8825 6.66675 9.77789 6.66675C8.67332 6.66675 7.77789 5.77132 7.77789 4.66675M11.7779 4.66675C11.7779 3.56218 10.8825 2.66675 9.77789 2.66675C8.67332 2.66675 7.77789 3.56218 7.77789 4.66675M1.55566 4.66675H7.77789M4.22233 11.3334H1.55566M4.22233 11.3334C4.22233 12.438 5.11776 13.3334 6.22233 13.3334C7.3269 13.3334 8.22233 12.438 8.22233 11.3334M4.22233 11.3334C4.22233 10.2288 5.11776 9.33341 6.22233 9.33341C7.3269 9.33341 8.22233 10.2288 8.22233 11.3334M14.4446 11.3334H8.22233" stroke="currentColor"/>"#)
-    public static let outlineSlidersData = OpenCodeIconData(name: #"outline-sliders"#, viewBox: 16.0, body: #"<path d="M11.7779 4.66675H14.4446M11.7779 4.66675C11.7779 5.77132 10.8825 6.66675 9.77789 6.66675C8.67332 6.66675 7.77789 5.77132 7.77789 4.66675M11.7779 4.66675C11.7779 3.56218 10.8825 2.66675 9.77789 2.66675C8.67332 2.66675 7.77789 3.56218 7.77789 4.66675M1.55566 4.66675H7.77789M4.22233 11.3334H1.55566M4.22233 11.3334C4.22233 12.438 5.11776 13.3334 6.22233 13.3334C7.3269 13.3334 8.22233 12.438 8.22233 11.3334M4.22233 11.3334C4.22233 10.2288 5.11776 9.33341 6.22233 9.33341C7.3269 9.33341 8.22233 10.2288 8.22233 11.3334M14.4446 11.3334H8.22233" stroke="currentColor"/>"#, svgIcon: outlineSliders)
-    public static let outlineCopy = SVGIcon(viewBox: 16.0, paths: [#"M9.5 3.5V1.5H1.5V10.5H4.5M6.5 14.5V5.5H14.5V14.5H6.5Z"#], strokeWidth: 1.5, body: #"<path d="M9.5 3.5V1.5H1.5V10.5H4.5M6.5 14.5V5.5H14.5V14.5H6.5Z" stroke="currentColor"/>"#)
-    public static let outlineCopyData = OpenCodeIconData(name: #"outline-copy"#, viewBox: 16.0, body: #"<path d="M9.5 3.5V1.5H1.5V10.5H4.5M6.5 14.5V5.5H14.5V14.5H6.5Z" stroke="currentColor"/>"#, svgIcon: outlineCopy)
-    public static let outlineQuote = SVGIcon(viewBox: 16.0, paths: [#"M9.5 8.49927C10.8333 8.49927 12.1667 8.49927 13.5 8.49927C13.5 9.74927 13.5 11.2493 13.5 12.4993C12.1667 12.4993 10.8333 12.4993 9.5 12.4993V7C9.5 5 10.5 3.5 13 3.5001"#, #"M2.5 8.49927C3.83333 8.49927 5.16667 8.49927 6.5 8.49927C6.5 9.74927 6.5 11.2493 6.5 12.4993C5.16667 12.4993 3.83333 12.4993 2.5 12.4993V7C2.5 5 3.5 3.5 6 3.5001"#], strokeWidth: 1.5, body: #"<path d="M9.5 8.49927C10.8333 8.49927 12.1667 8.49927 13.5 8.49927C13.5 9.74927 13.5 11.2493 13.5 12.4993C12.1667 12.4993 10.8333 12.4993 9.5 12.4993V7C9.5 5 10.5 3.5 13 3.5001" stroke="currentColor"/><path d="M2.5 8.49927C3.83333 8.49927 5.16667 8.49927 6.5 8.49927C6.5 9.74927 6.5 11.2493 6.5 12.4993C5.16667 12.4993 3.83333 12.4993 2.5 12.4993V7C2.5 5 3.5 3.5 6 3.5001" stroke="currentColor"/>"#)
-    public static let outlineQuoteData = OpenCodeIconData(name: #"outline-quote"#, viewBox: 16.0, body: #"<path d="M9.5 8.49927C10.8333 8.49927 12.1667 8.49927 13.5 8.49927C13.5 9.74927 13.5 11.2493 13.5 12.4993C12.1667 12.4993 10.8333 12.4993 9.5 12.4993V7C9.5 5 10.5 3.5 13 3.5001" stroke="currentColor"/><path d="M2.5 8.49927C3.83333 8.49927 5.16667 8.49927 6.5 8.49927C6.5 9.74927 6.5 11.2493 6.5 12.4993C5.16667 12.4993 3.83333 12.4993 2.5 12.4993V7C2.5 5 3.5 3.5 6 3.5001" stroke="currentColor"/>"#, svgIcon: outlineQuote)
-    public static let outlineArrowLeft = SVGIcon(viewBox: 16.0, paths: [#"M2.44442 7.99999H13.5555M6.22221 4.22222L2.44442 7.99999L6.22221 11.7778"#], strokeWidth: 1.5, body: #"<path d="M2.44442 7.99999H13.5555M6.22221 4.22222L2.44442 7.99999L6.22221 11.7778" stroke="currentColor"/>"#)
-    public static let outlineArrowLeftData = OpenCodeIconData(name: #"outline-arrow-left"#, viewBox: 16.0, body: #"<path d="M2.44442 7.99999H13.5555M6.22221 4.22222L2.44442 7.99999L6.22221 11.7778" stroke="currentColor"/>"#, svgIcon: outlineArrowLeft)
-    public static let outlineArrowRight = SVGIcon(viewBox: 16.0, paths: [#"M13.5555 7.99999H2.4444M9.77773 11.7778L13.5555 7.99999L9.77773 4.22222"#], strokeWidth: 1.5, body: #"<path d="M13.5555 7.99999H2.4444M9.77773 11.7778L13.5555 7.99999L9.77773 4.22222" stroke="currentColor"/>"#)
-    public static let outlineArrowRightData = OpenCodeIconData(name: #"outline-arrow-right"#, viewBox: 16.0, body: #"<path d="M13.5555 7.99999H2.4444M9.77773 11.7778L13.5555 7.99999L9.77773 4.22222" stroke="currentColor"/>"#, svgIcon: outlineArrowRight)
-    public static let outlineArrowUpRight = SVGIcon(viewBox: 16.0, paths: [#"M12.5 3.5L3.5 12.5M12.5 9.62L12.5 3.5L6.38 3.5"#], strokeWidth: 1.5, body: #"<path d="M12.5 3.5L3.5 12.5M12.5 9.62L12.5 3.5L6.38 3.5" stroke="currentColor"/>"#)
-    public static let outlineArrowUpRightData = OpenCodeIconData(name: #"outline-arrow-up-right"#, viewBox: 16.0, body: #"<path d="M12.5 3.5L3.5 12.5M12.5 9.62L12.5 3.5L6.38 3.5" stroke="currentColor"/>"#, svgIcon: outlineArrowUpRight)
-    public static let outlineRotateClockwise = SVGIcon(viewBox: 16.0, paths: [#"M14.1992 8C14.1992 9.18669 13.8473 10.3467 13.188 11.3334C12.5288 12.3201 11.5917 13.0892 10.4953 13.5433C9.39897 13.9974 8.19257 14.1162 7.02868 13.8847C5.86479 13.6532 4.7957 13.0818 3.95658 12.2426C3.11747 11.4035 2.54602 10.3344 2.31451 9.17054C2.083 8.00666 2.20182 6.80026 2.65594 5.7039C3.11007 4.60754 3.87911 3.67047 4.8658 3.01118C5.85249 2.35189 7.01253 2 8.19922 2C9.87922 2 11.4859 2.66667 12.6926 3.82667L14.1992 5.33333M10.866 5.33333L14.1992 5.33333L14.1993 2"#], strokeWidth: 1.5, body: #"<path d="M14.1992 8C14.1992 9.18669 13.8473 10.3467 13.188 11.3334C12.5288 12.3201 11.5917 13.0892 10.4953 13.5433C9.39897 13.9974 8.19257 14.1162 7.02868 13.8847C5.86479 13.6532 4.7957 13.0818 3.95658 12.2426C3.11747 11.4035 2.54602 10.3344 2.31451 9.17054C2.083 8.00666 2.20182 6.80026 2.65594 5.7039C3.11007 4.60754 3.87911 3.67047 4.8658 3.01118C5.85249 2.35189 7.01253 2 8.19922 2C9.87922 2 11.4859 2.66667 12.6926 3.82667L14.1992 5.33333M10.866 5.33333L14.1992 5.33333L14.1993 2" stroke="currentColor" stroke-linecap="square" stroke-linejoin="round"/>"#)
-    public static let outlineRotateClockwiseData = OpenCodeIconData(name: #"outline-rotate-clockwise"#, viewBox: 16.0, body: #"<path d="M14.1992 8C14.1992 9.18669 13.8473 10.3467 13.188 11.3334C12.5288 12.3201 11.5917 13.0892 10.4953 13.5433C9.39897 13.9974 8.19257 14.1162 7.02868 13.8847C5.86479 13.6532 4.7957 13.0818 3.95658 12.2426C3.11747 11.4035 2.54602 10.3344 2.31451 9.17054C2.083 8.00666 2.20182 6.80026 2.65594 5.7039C3.11007 4.60754 3.87911 3.67047 4.8658 3.01118C5.85249 2.35189 7.01253 2 8.19922 2C9.87922 2 11.4859 2.66667 12.6926 3.82667L14.1992 5.33333M10.866 5.33333L14.1992 5.33333L14.1993 2" stroke="currentColor" stroke-linecap="square" stroke-linejoin="round"/>"#, svgIcon: outlineRotateClockwise)
-    public static let outlineGlobe = SVGIcon(viewBox: 16.0, paths: [#"M8.00001 14.4445C9.47277 14.4445 10.6667 11.5592 10.6667 8.00001C10.6667 4.44085 9.47277 1.55557 8.00001 1.55557M8.00001 14.4445C6.52725 14.4445 5.33335 11.5592 5.33335 8.00001C5.33335 4.44085 6.52725 1.55557 8.00001 1.55557M8.00001 14.4445C11.5592 14.4445 14.4444 11.5592 14.4444 8C14.4444 4.44083 11.5592 1.55557 8.00001 1.55557M8.00001 14.4445C4.44085 14.4445 1.55556 11.5592 1.55556 8C1.55556 4.44083 4.44085 1.55557 8.00001 1.55557M1.87203 6.00001H14.128M2.03555 10.4445H13.9644"#], strokeWidth: 1.5, body: #"<path d="M8.00001 14.4445C9.47277 14.4445 10.6667 11.5592 10.6667 8.00001C10.6667 4.44085 9.47277 1.55557 8.00001 1.55557M8.00001 14.4445C6.52725 14.4445 5.33335 11.5592 5.33335 8.00001C5.33335 4.44085 6.52725 1.55557 8.00001 1.55557M8.00001 14.4445C11.5592 14.4445 14.4444 11.5592 14.4444 8C14.4444 4.44083 11.5592 1.55557 8.00001 1.55557M8.00001 14.4445C4.44085 14.4445 1.55556 11.5592 1.55556 8C1.55556 4.44083 4.44085 1.55557 8.00001 1.55557M1.87203 6.00001H14.128M2.03555 10.4445H13.9644" stroke="currentColor"/>"#)
-    public static let outlineGlobeData = OpenCodeIconData(name: #"outline-globe"#, viewBox: 16.0, body: #"<path d="M8.00001 14.4445C9.47277 14.4445 10.6667 11.5592 10.6667 8.00001C10.6667 4.44085 9.47277 1.55557 8.00001 1.55557M8.00001 14.4445C6.52725 14.4445 5.33335 11.5592 5.33335 8.00001C5.33335 4.44085 6.52725 1.55557 8.00001 1.55557M8.00001 14.4445C11.5592 14.4445 14.4444 11.5592 14.4444 8C14.4444 4.44083 11.5592 1.55557 8.00001 1.55557M8.00001 14.4445C4.44085 14.4445 1.55556 11.5592 1.55556 8C1.55556 4.44083 4.44085 1.55557 8.00001 1.55557M1.87203 6.00001H14.128M2.03555 10.4445H13.9644" stroke="currentColor"/>"#, svgIcon: outlineGlobe)
-    public static let outlineGlobePlus = SVGIcon(viewBox: 16.0, paths: [#"M7 12.6667C5.71133 12.6667 4.66667 10.1296 4.66667 7C4.66667 3.87039 5.71133 1.33333 7 1.33333C8.2426 1.33333 9.25833 3.69221 9.32933 6.66667"#, #"M12.6667 6.66667H1.33333"#, #"M12.6667 7.72825V7C12.6667 3.87039 10.1296 1.33333 7 1.33333C3.8704 1.33333 1.33333 3.87039 1.33333 7C1.33333 10.1296 3.8704 12.6667 7 12.6667H7.58694"#, #"M9.5 11.5H13.5M11.5 9.5V13.5"#], strokeWidth: 1.5, body: #"<path d="M7 12.6667C5.71133 12.6667 4.66667 10.1296 4.66667 7C4.66667 3.87039 5.71133 1.33333 7 1.33333C8.2426 1.33333 9.25833 3.69221 9.32933 6.66667" stroke="currentColor" stroke-miterlimit="10"/><path d="M12.6667 6.66667H1.33333" stroke="currentColor"/><path d="M12.6667 7.72825V7C12.6667 3.87039 10.1296 1.33333 7 1.33333C3.8704 1.33333 1.33333 3.87039 1.33333 7C1.33333 10.1296 3.8704 12.6667 7 12.6667H7.58694" stroke="currentColor" stroke-miterlimit="10"/><path d="M9.5 11.5H13.5M11.5 9.5V13.5" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/>"#)
-    public static let outlineGlobePlusData = OpenCodeIconData(name: #"outline-globe-plus"#, viewBox: 16.0, body: #"<path d="M7 12.6667C5.71133 12.6667 4.66667 10.1296 4.66667 7C4.66667 3.87039 5.71133 1.33333 7 1.33333C8.2426 1.33333 9.25833 3.69221 9.32933 6.66667" stroke="currentColor" stroke-miterlimit="10"/><path d="M12.6667 6.66667H1.33333" stroke="currentColor"/><path d="M12.6667 7.72825V7C12.6667 3.87039 10.1296 1.33333 7 1.33333C3.8704 1.33333 1.33333 3.87039 1.33333 7C1.33333 10.1296 3.8704 12.6667 7 12.6667H7.58694" stroke="currentColor" stroke-miterlimit="10"/><path d="M9.5 11.5H13.5M11.5 9.5V13.5" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/>"#, svgIcon: outlineGlobePlus)
-    public static let outlineCookie = SVGIcon(viewBox: 16.0, paths: [#"M14 8.5A6 6 0 1 1 7.5 2a2 2 0 0 0 2.5 2.5 2 2 0 0 0 2.5 2.5c.4.6.9 1.1 1.5 1.5Z"#, #"M5.5 6.5h.01M5.5 10h.01M8.5 9h.01M10.5 11.5h.01"#], strokeWidth: 1.5, body: #"<path d="M14 8.5A6 6 0 1 1 7.5 2a2 2 0 0 0 2.5 2.5 2 2 0 0 0 2.5 2.5c.4.6.9 1.1 1.5 1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M5.5 6.5h.01M5.5 10h.01M8.5 9h.01M10.5 11.5h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#)
-    public static let outlineCookieData = OpenCodeIconData(name: #"outline-cookie"#, viewBox: 16.0, body: #"<path d="M14 8.5A6 6 0 1 1 7.5 2a2 2 0 0 0 2.5 2.5 2 2 0 0 0 2.5 2.5c.4.6.9 1.1 1.5 1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M5.5 6.5h.01M5.5 10h.01M8.5 9h.01M10.5 11.5h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#, svgIcon: outlineCookie)
-    public static let outlineBrowserAnnotate = SVGIcon(viewBox: 16.0, paths: [#"M10.6667 2H14V5.33333M2 5.33333V2H5.33333M2 10.6667V14H5.33333"#, #"M11.8571 11.8572L14 14M6.50008 6.50033L14.0001 9.00033L9.00008 14.0003L6.50008 6.50033Z"#], strokeWidth: 1.5, body: #"<path d="M10.6667 2H14V5.33333M2 5.33333V2H5.33333M2 10.6667V14H5.33333" stroke="currentColor" stroke-linecap="square"/><path d="M11.8571 11.8572L14 14M6.50008 6.50033L14.0001 9.00033L9.00008 14.0003L6.50008 6.50033Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let outlineBrowserAnnotateData = OpenCodeIconData(name: #"outline-browser-annotate"#, viewBox: 16.0, body: #"<path d="M10.6667 2H14V5.33333M2 5.33333V2H5.33333M2 10.6667V14H5.33333" stroke="currentColor" stroke-linecap="square"/><path d="M11.8571 11.8572L14 14M6.50008 6.50033L14.0001 9.00033L9.00008 14.0003L6.50008 6.50033Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: outlineBrowserAnnotate)
-    public static let arrowUpRight = SVGIcon(viewBox: 16.0, paths: [#"M11 9.56V5H6.44M11 5L5 11"#], strokeWidth: 1.5, body: #"<path d="M11 9.56V5H6.44M11 5L5 11" stroke="currentColor"/>"#)
-    public static let arrowUpRightData = OpenCodeIconData(name: #"arrow-up-right"#, viewBox: 16.0, body: #"<path d="M11 9.56V5H6.44M11 5L5 11" stroke="currentColor"/>"#, svgIcon: arrowUpRight)
-    public static let outlineSquareArrow = SVGIcon(viewBox: 16.0, paths: [#"M13.5555 6.66656V2.44434H9.33326M13.5555 2.44434L7.99993 7.99989M13.5555 9.33324V13.5555C13.5555 13.5555 12.7599 13.5555 11.7777 13.5555H2.44438C2.44438 13.5555 2.44438 12.7599 2.44438 11.7777V4.22213C2.44438 3.2399 2.44434 2.44435 2.44434 2.44435H6.66661"#], strokeWidth: 1.5, body: #"<path d="M13.5555 6.66656V2.44434H9.33326M13.5555 2.44434L7.99993 7.99989M13.5555 9.33324V13.5555C13.5555 13.5555 12.7599 13.5555 11.7777 13.5555H2.44438C2.44438 13.5555 2.44438 12.7599 2.44438 11.7777V4.22213C2.44438 3.2399 2.44434 2.44435 2.44434 2.44435H6.66661" stroke="currentColor"/>"#)
-    public static let outlineSquareArrowData = OpenCodeIconData(name: #"outline-square-arrow"#, viewBox: 16.0, body: #"<path d="M13.5555 6.66656V2.44434H9.33326M13.5555 2.44434L7.99993 7.99989M13.5555 9.33324V13.5555C13.5555 13.5555 12.7599 13.5555 11.7777 13.5555H2.44438C2.44438 13.5555 2.44438 12.7599 2.44438 11.7777V4.22213C2.44438 3.2399 2.44434 2.44435 2.44434 2.44435H6.66661" stroke="currentColor"/>"#, svgIcon: outlineSquareArrow)
-    public static let outlineArrowToCornerTopRight = SVGIcon(viewBox: 16.0, paths: [#"M2 8.5V2H14V14H8M5 5.66667H10.3333V11M3.66797 12.333L9.94292 6.05806"#], strokeWidth: 1.5, body: #"<path d="M2 8.5V2H14V14H8M5 5.66667H10.3333V11M3.66797 12.333L9.94292 6.05806" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let outlineArrowToCornerTopRightData = OpenCodeIconData(name: #"outline-arrow-to-corner-top-right"#, viewBox: 16.0, body: #"<path d="M2 8.5V2H14V14H8M5 5.66667H10.3333V11M3.66797 12.333L9.94292 6.05806" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: outlineArrowToCornerTopRight)
-    public static let outlineHexagonalWarning = SVGIcon(viewBox: 16.0, paths: [#"M10.6667 1.33325H5.33272L1.33334 5.33325L1.33342 10.6917L5.3327 14.691L10.6667 14.6909L14.6911 10.6917V5.33255L10.6667 1.33325Z"#, #"M8 10.6667H8.00667"#, #"M8 7.99992V5.33325"#], strokeWidth: 1.5, body: #"<path d="M10.6667 1.33325H5.33272L1.33334 5.33325L1.33342 10.6917L5.3327 14.691L10.6667 14.6909L14.6911 10.6917V5.33255L10.6667 1.33325Z" stroke="currentColor"/><path d="M8 10.6667H8.00667" stroke="currentColor" stroke-linecap="square"/><path d="M8 7.99992V5.33325" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let outlineHexagonalWarningData = OpenCodeIconData(name: #"outline-hexagonal-warning"#, viewBox: 16.0, body: #"<path d="M10.6667 1.33325H5.33272L1.33334 5.33325L1.33342 10.6917L5.3327 14.691L10.6667 14.6909L14.6911 10.6917V5.33255L10.6667 1.33325Z" stroke="currentColor"/><path d="M8 10.6667H8.00667" stroke="currentColor" stroke-linecap="square"/><path d="M8 7.99992V5.33325" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: outlineHexagonalWarning)
-    public static let outlineShare = SVGIcon(viewBox: 16.0, paths: [#"M13.5554 10.4445V13.5556C13.5554 13.5556 12.7599 13.5556 11.7777 13.5556H4.22211C3.23989 13.5556 2.44434 13.5556 2.44434 13.5556V10.4445M4.88878 5.55557L7.99989 2.44446L11.111 5.55557M7.99989 2.44446L7.99989 9.11112"#], strokeWidth: 1.5, body: #"<path d="M13.5554 10.4445V13.5556C13.5554 13.5556 12.7599 13.5556 11.7777 13.5556H4.22211C3.23989 13.5556 2.44434 13.5556 2.44434 13.5556V10.4445M4.88878 5.55557L7.99989 2.44446L11.111 5.55557M7.99989 2.44446L7.99989 9.11112" stroke="currentColor"/>"#)
-    public static let outlineShareData = OpenCodeIconData(name: #"outline-share"#, viewBox: 16.0, body: #"<path d="M13.5554 10.4445V13.5556C13.5554 13.5556 12.7599 13.5556 11.7777 13.5556H4.22211C3.23989 13.5556 2.44434 13.5556 2.44434 13.5556V10.4445M4.88878 5.55557L7.99989 2.44446L11.111 5.55557M7.99989 2.44446L7.99989 9.11112" stroke="currentColor"/>"#, svgIcon: outlineShare)
-    public static let outlineEye = SVGIcon(viewBox: 20.0, paths: [#"M2.5 10s3.33-5.42 7.5-5.42S17.5 10 17.5 10s-3.33 5.42-7.5 5.42S2.5 10 2.5 10Z"#], strokeWidth: 1.5, body: #"<path d="M2.5 10s3.33-5.42 7.5-5.42S17.5 10 17.5 10s-3.33 5.42-7.5 5.42S2.5 10 2.5 10Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/><circle cx="10" cy="10" r="2.5" stroke="currentColor"/>"#)
-    public static let outlineEyeData = OpenCodeIconData(name: #"outline-eye"#, viewBox: 20.0, body: #"<path d="M2.5 10s3.33-5.42 7.5-5.42S17.5 10 17.5 10s-3.33 5.42-7.5 5.42S2.5 10 2.5 10Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/><circle cx="10" cy="10" r="2.5" stroke="currentColor"/>"#, svgIcon: outlineEye)
-    public static let outlineEyeSlash = SVGIcon(viewBox: 20.0, paths: [#"M2.5 10s3.33-5.42 7.5-5.42S17.5 10 17.5 10s-3.33 5.42-7.5 5.42S2.5 10 2.5 10Z"#, #"M3 3 17 17"#], strokeWidth: 1.5, body: #"<path d="M2.5 10s3.33-5.42 7.5-5.42S17.5 10 17.5 10s-3.33 5.42-7.5 5.42S2.5 10 2.5 10Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/><circle cx="10" cy="10" r="2.5" stroke="currentColor"/><path d="M3 3 17 17" stroke="currentColor" stroke-linecap="round"/>"#)
-    public static let outlineEyeSlashData = OpenCodeIconData(name: #"outline-eye-slash"#, viewBox: 20.0, body: #"<path d="M2.5 10s3.33-5.42 7.5-5.42S17.5 10 17.5 10s-3.33 5.42-7.5 5.42S2.5 10 2.5 10Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/><circle cx="10" cy="10" r="2.5" stroke="currentColor"/><path d="M3 3 17 17" stroke="currentColor" stroke-linecap="round"/>"#, svgIcon: outlineEyeSlash)
-    public static let refresh = SVGIcon(viewBox: 20.0, paths: [#"M16.25 7.5A6.5 6.5 0 1 0 16.5 11M16.25 3.5v4h-4"#], strokeWidth: 1.5, body: #"<path d="M16.25 7.5A6.5 6.5 0 1 0 16.5 11M16.25 3.5v4h-4" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#)
-    public static let refreshData = OpenCodeIconData(name: #"refresh"#, viewBox: 20.0, body: #"<path d="M16.25 7.5A6.5 6.5 0 1 0 16.5 11M16.25 3.5v4h-4" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#, svgIcon: refresh)
-    public static let reset = SVGIcon(viewBox: 16.0, paths: [#"M2.5 6.5H12.5C13.0523 6.5 13.5 6.94772 13.5 7.5V10.5C13.5 11.0523 13.0523 11.5 12.5 11.5H8.5M5.5 9.5L2.5 6.5L5.5 3.5"#], strokeWidth: 1.5, body: #"<path d="M2.5 6.5H12.5C13.0523 6.5 13.5 6.94772 13.5 7.5V10.5C13.5 11.0523 13.0523 11.5 12.5 11.5H8.5M5.5 9.5L2.5 6.5L5.5 3.5" stroke="currentColor"/>"#)
-    public static let resetData = OpenCodeIconData(name: #"reset"#, viewBox: 16.0, body: #"<path d="M2.5 6.5H12.5C13.0523 6.5 13.5 6.94772 13.5 7.5V10.5C13.5 11.0523 13.0523 11.5 12.5 11.5H8.5M5.5 9.5L2.5 6.5L5.5 3.5" stroke="currentColor"/>"#, svgIcon: reset)
-    public static let outlineUndo = SVGIcon(viewBox: 16.0, paths: [#"M2 10L4.25193 7.76999C7.29213 4.7594 12.4119 5.77372 14.0747 9.71606"#, #"M2 6V10H6"#], strokeWidth: 1.5, body: #"<path d="M2 10L4.25193 7.76999C7.29213 4.7594 12.4119 5.77372 14.0747 9.71606" stroke="currentColor"/><path d="M2 6V10H6" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let outlineUndoData = OpenCodeIconData(name: #"outline-undo"#, viewBox: 16.0, body: #"<path d="M2 10L4.25193 7.76999C7.29213 4.7594 12.4119 5.77372 14.0747 9.71606" stroke="currentColor"/><path d="M2 6V10H6" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: outlineUndo)
-    public static let outlineReset = SVGIcon(viewBox: 16.0, paths: [#"M2.5 6.5H12.5C13.0523 6.5 13.5 6.94772 13.5 7.5V10.5C13.5 11.0523 13.0523 11.5 12.5 11.5H8.5M5.5 9.5L2.5 6.5L5.5 3.5"#], strokeWidth: 1.5, body: #"<path d="M2.5 6.5H12.5C13.0523 6.5 13.5 6.94772 13.5 7.5V10.5C13.5 11.0523 13.0523 11.5 12.5 11.5H8.5M5.5 9.5L2.5 6.5L5.5 3.5" stroke="currentColor"/>"#)
-    public static let outlineResetData = OpenCodeIconData(name: #"outline-reset"#, viewBox: 16.0, body: #"<path d="M2.5 6.5H12.5C13.0523 6.5 13.5 6.94772 13.5 7.5V10.5C13.5 11.0523 13.0523 11.5 12.5 11.5H8.5M5.5 9.5L2.5 6.5L5.5 3.5" stroke="currentColor"/>"#, svgIcon: outlineReset)
-    public static let fillTriangleDownData = OpenCodeIconData(name: #"fill-triangle-down"#, viewBox: 16.0, body: #"<path d="M5.37624 6.75194C5.18184 6.41861 5.42224 6 5.80814 6H10.1921C10.578 6 10.8184 6.41861 10.624 6.75194L8.43203 10.5096C8.23909 10.8404 7.76119 10.8404 7.56825 10.5096L5.37624 6.75194Z" fill="currentColor"/>"#, svgIcon: fillTriangleDown)
-    public static let waveform = SVGIcon(viewBox: 16.0, paths: [#"M2 7V9M4.5 5V11M7 2.5V13.5M9.5 4.5V11.5M12 6V10M14.5 7.25V8.75"#], strokeWidth: 1.5, body: #"<path d="M2 7V9M4.5 5V11M7 2.5V13.5M9.5 4.5V11.5M12 6V10M14.5 7.25V8.75" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#)
-    public static let waveformData = OpenCodeIconData(name: #"waveform"#, viewBox: 16.0, body: #"<path d="M2 7V9M4.5 5V11M7 2.5V13.5M9.5 4.5V11.5M12 6V10M14.5 7.25V8.75" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#, svgIcon: waveform)
-    public static let outlineSteer = SVGIcon(viewBox: 16.0, paths: [#"M8 14C11.3137 14 14 11.3137 14 8C14 4.68634 11.3137 2 8 2C4.68626 2 2 4.68634 2 8C2 11.3137 4.68626 14 8 14Z"#, #"M8 3.86328V12.1391C10.2854 12.1391 12.1379 10.2863 12.1379 8.00121C12.1379 5.71608 10.2854 3.86328 8 3.86328Z"#], strokeWidth: 1.5, body: #"<path d="M8 14C11.3137 14 14 11.3137 14 8C14 4.68634 11.3137 2 8 2C4.68626 2 2 4.68634 2 8C2 11.3137 4.68626 14 8 14Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M8 3.86328V12.1391C10.2854 12.1391 12.1379 10.2863 12.1379 8.00121C12.1379 5.71608 10.2854 3.86328 8 3.86328Z" fill="currentColor"/>"#)
-    public static let outlineSteerData = OpenCodeIconData(name: #"outline-steer"#, viewBox: 16.0, body: #"<path d="M8 14C11.3137 14 14 11.3137 14 8C14 4.68634 11.3137 2 8 2C4.68626 2 2 4.68634 2 8C2 11.3137 4.68626 14 8 14Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M8 3.86328V12.1391C10.2854 12.1391 12.1379 10.2863 12.1379 8.00121C12.1379 5.71608 10.2854 3.86328 8 3.86328Z" fill="currentColor"/>"#, svgIcon: outlineSteer)
-    public static let outlineWaveAudio = SVGIcon(viewBox: 16.0, paths: [#"M14.5 8.01193V8"#, #"M1.5 8.00607V7.99414"#, #"M3.66699 10.5141V5.48438"#, #"M10.167 10.5141V5.48438"#, #"M8 11.6004V4.39844"#, #"M12.333 9.20144V6.80078"#, #"M5.83301 13.5323V2.4668"#], strokeWidth: 1.5, body: #"<path d="M14.5 8.01193V8" stroke-linecap="square" stroke="currentColor"/><path d="M1.5 8.00607V7.99414" stroke-linecap="square" stroke="currentColor"/><path d="M3.66699 10.5141V5.48438" stroke-linecap="square" stroke="currentColor"/><path d="M10.167 10.5141V5.48438" stroke-linecap="square" stroke="currentColor"/><path d="M8 11.6004V4.39844" stroke-linecap="square" stroke="currentColor"/><path d="M12.333 9.20144V6.80078" stroke-linecap="square" stroke="currentColor"/><path d="M5.83301 13.5323V2.4668" stroke-linecap="square" stroke="currentColor"/>"#)
-    public static let outlineWaveAudioData = OpenCodeIconData(name: #"outline-wave-audio"#, viewBox: 16.0, body: #"<path d="M14.5 8.01193V8" stroke-linecap="square" stroke="currentColor"/><path d="M1.5 8.00607V7.99414" stroke-linecap="square" stroke="currentColor"/><path d="M3.66699 10.5141V5.48438" stroke-linecap="square" stroke="currentColor"/><path d="M10.167 10.5141V5.48438" stroke-linecap="square" stroke="currentColor"/><path d="M8 11.6004V4.39844" stroke-linecap="square" stroke="currentColor"/><path d="M12.333 9.20144V6.80078" stroke-linecap="square" stroke="currentColor"/><path d="M5.83301 13.5323V2.4668" stroke-linecap="square" stroke="currentColor"/>"#, svgIcon: outlineWaveAudio)
-    public static let comment = SVGIcon(viewBox: 16.0, paths: [#"M13.5 2.5H2.5V13.5H4.5L5.5 11.5H13.5V2.5Z"#], strokeWidth: 1.5, body: #"<path d="M13.5 2.5H2.5V13.5H4.5L5.5 11.5H13.5V2.5Z" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/>"#)
-    public static let commentData = OpenCodeIconData(name: #"comment"#, viewBox: 16.0, body: #"<path d="M13.5 2.5H2.5V13.5H4.5L5.5 11.5H13.5V2.5Z" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/>"#, svgIcon: comment)
-    public static let archive = SVGIcon(viewBox: 16.0, paths: [#"M13.1112 13.5555V14.0555H13.6112V13.5555H13.1112ZM2.889 13.5555H2.389L2.389 14.0555H2.889V13.5555ZM3.38901 5.55546L3.38901 5.05546L2.38901 5.05546L2.38901 5.55546L2.88901 5.55546L3.38901 5.55546ZM14.4446 2.44434H14.9446V1.94434L14.4446 1.94434L14.4446 2.44434ZM14.4446 5.55545L14.4446 6.05545L14.9446 6.05545V5.55545H14.4446ZM1.55566 5.55546L1.05566 5.55545L1.05566 6.05546L1.55566 6.05546L1.55566 5.55546ZM1.5557 2.44436L1.5557 1.94436L1.05571 1.94436L1.0557 2.44435L1.5557 2.44436ZM13.1112 5.55546H12.6112V13.5555H13.1112H13.6112V5.55546H13.1112ZM2.889 13.5555H3.389L3.38901 5.55546L2.88901 5.55546L2.38901 5.55546L2.389 13.5555H2.889ZM14.4446 2.44434H13.9446V5.55545H14.4446H14.9446V2.44434H14.4446ZM1.55566 5.55546L2.05566 5.55547L2.0557 2.44436L1.5557 2.44436L1.0557 2.44435L1.05566 5.55545L1.55566 5.55546ZM6.22234 8.22213V8.72213H9.7779V8.22213V7.72213H6.22234V8.22213ZM13.1112 13.5555V13.0555H2.889V13.5555V14.0555H13.1112V13.5555ZM1.5557 2.44436L1.5557 2.94436L14.4446 2.94434L14.4446 2.44434L14.4446 1.94434L1.5557 1.94436L1.5557 2.44436ZM14.4446 5.55545L14.4446 5.05545L1.55566 5.05546L1.55566 5.55546L1.55566 6.05546L14.4446 6.05545L14.4446 5.55545Z"#], strokeWidth: nil, body: #"<path d="M13.1112 13.5555V14.0555H13.6112V13.5555H13.1112ZM2.889 13.5555H2.389L2.389 14.0555H2.889V13.5555ZM3.38901 5.55546L3.38901 5.05546L2.38901 5.05546L2.38901 5.55546L2.88901 5.55546L3.38901 5.55546ZM14.4446 2.44434H14.9446V1.94434L14.4446 1.94434L14.4446 2.44434ZM14.4446 5.55545L14.4446 6.05545L14.9446 6.05545V5.55545H14.4446ZM1.55566 5.55546L1.05566 5.55545L1.05566 6.05546L1.55566 6.05546L1.55566 5.55546ZM1.5557 2.44436L1.5557 1.94436L1.05571 1.94436L1.0557 2.44435L1.5557 2.44436ZM13.1112 5.55546H12.6112V13.5555H13.1112H13.6112V5.55546H13.1112ZM2.889 13.5555H3.389L3.38901 5.55546L2.88901 5.55546L2.38901 5.55546L2.389 13.5555H2.889ZM14.4446 2.44434H13.9446V5.55545H14.4446H14.9446V2.44434H14.4446ZM1.55566 5.55546L2.05566 5.55547L2.0557 2.44436L1.5557 2.44436L1.0557 2.44435L1.05566 5.55545L1.55566 5.55546ZM6.22234 8.22213V8.72213H9.7779V8.22213V7.72213H6.22234V8.22213ZM13.1112 13.5555V13.0555H2.889V13.5555V14.0555H13.1112V13.5555ZM1.5557 2.44436L1.5557 2.94436L14.4446 2.94434L14.4446 2.44434L14.4446 1.94434L1.5557 1.94436L1.5557 2.44436ZM14.4446 5.55545L14.4446 5.05545L1.55566 5.05546L1.55566 5.55546L1.55566 6.05546L14.4446 6.05545L14.4446 5.55545Z" fill="currentColor"/>"#)
-    public static let archiveData = OpenCodeIconData(name: #"archive"#, viewBox: 16.0, body: #"<path d="M13.1112 13.5555V14.0555H13.6112V13.5555H13.1112ZM2.889 13.5555H2.389L2.389 14.0555H2.889V13.5555ZM3.38901 5.55546L3.38901 5.05546L2.38901 5.05546L2.38901 5.55546L2.88901 5.55546L3.38901 5.55546ZM14.4446 2.44434H14.9446V1.94434L14.4446 1.94434L14.4446 2.44434ZM14.4446 5.55545L14.4446 6.05545L14.9446 6.05545V5.55545H14.4446ZM1.55566 5.55546L1.05566 5.55545L1.05566 6.05546L1.55566 6.05546L1.55566 5.55546ZM1.5557 2.44436L1.5557 1.94436L1.05571 1.94436L1.0557 2.44435L1.5557 2.44436ZM13.1112 5.55546H12.6112V13.5555H13.1112H13.6112V5.55546H13.1112ZM2.889 13.5555H3.389L3.38901 5.55546L2.88901 5.55546L2.38901 5.55546L2.389 13.5555H2.889ZM14.4446 2.44434H13.9446V5.55545H14.4446H14.9446V2.44434H14.4446ZM1.55566 5.55546L2.05566 5.55547L2.0557 2.44436L1.5557 2.44436L1.0557 2.44435L1.05566 5.55545L1.55566 5.55546ZM6.22234 8.22213V8.72213H9.7779V8.22213V7.72213H6.22234V8.22213ZM13.1112 13.5555V13.0555H2.889V13.5555V14.0555H13.1112V13.5555ZM1.5557 2.44436L1.5557 2.94436L14.4446 2.94434L14.4446 2.44434L14.4446 1.94434L1.5557 1.94436L1.5557 2.44436ZM14.4446 5.55545L14.4446 5.05545L1.55566 5.05546L1.55566 5.55546L1.55566 6.05546L14.4446 6.05545L14.4446 5.55545Z" fill="currentColor"/>"#, svgIcon: archive)
-    public static let outlineText = SVGIcon(viewBox: 14.0, paths: [#"M6.99997 11.5938V2.40625M6.99997 11.5938H9.04164M6.99997 11.5938H4.95831M6.99997 2.40625H2.40622V4.95833M6.99997 2.40625H11.5937V4.95833"#], strokeWidth: 1.5, body: #"<path d="M6.99997 11.5938V2.40625M6.99997 11.5938H9.04164M6.99997 11.5938H4.95831M6.99997 2.40625H2.40622V4.95833M6.99997 2.40625H11.5937V4.95833" stroke="currentColor"/>"#)
-    public static let outlineTextData = OpenCodeIconData(name: #"outline-text"#, viewBox: 14.0, body: #"<path d="M6.99997 11.5938V2.40625M6.99997 11.5938H9.04164M6.99997 11.5938H4.95831M6.99997 2.40625H2.40622V4.95833M6.99997 2.40625H11.5937V4.95833" stroke="currentColor"/>"#, svgIcon: outlineText)
-    public static let outlinePhoto = SVGIcon(viewBox: 14.0, paths: [#"M11.6666 11.6666L8.16663 8.16663L6.99997 9.33332L4.66663 6.99998L2.1583 9.50832M2.04163 2.04165H11.9583V11.9583H2.04163V2.04165ZM9.33332 5.24998C9.33332 5.81377 8.87629 6.27081 8.31244 6.27081C7.74866 6.27081 7.29163 5.81377 7.29163 5.24998C7.29163 4.68619 7.74866 4.22915 8.31244 4.22915C8.87629 4.22915 9.33332 4.68619 9.33332 5.24998Z"#], strokeWidth: 1.5, body: #"<path d="M11.6666 11.6666L8.16663 8.16663L6.99997 9.33332L4.66663 6.99998L2.1583 9.50832M2.04163 2.04165H11.9583V11.9583H2.04163V2.04165ZM9.33332 5.24998C9.33332 5.81377 8.87629 6.27081 8.31244 6.27081C7.74866 6.27081 7.29163 5.81377 7.29163 5.24998C7.29163 4.68619 7.74866 4.22915 8.31244 4.22915C8.87629 4.22915 9.33332 4.68619 9.33332 5.24998Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let outlinePhotoData = OpenCodeIconData(name: #"outline-photo"#, viewBox: 14.0, body: #"<path d="M11.6666 11.6666L8.16663 8.16663L6.99997 9.33332L4.66663 6.99998L2.1583 9.50832M2.04163 2.04165H11.9583V11.9583H2.04163V2.04165ZM9.33332 5.24998C9.33332 5.81377 8.87629 6.27081 8.31244 6.27081C7.74866 6.27081 7.29163 5.81377 7.29163 5.24998C7.29163 4.68619 7.74866 4.22915 8.31244 4.22915C8.87629 4.22915 9.33332 4.68619 9.33332 5.24998Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: outlinePhoto)
-    public static let fileDocument = SVGIcon(viewBox: 14.0, paths: [#"M7.58331 2.33333V5.25H10.5M2.91664 1.75H7.58331L11.0833 5.25V12.25H2.91664V1.75Z"#], strokeWidth: 1.5, body: #"<path d="M7.58331 2.33333V5.25H10.5M2.91664 1.75H7.58331L11.0833 5.25V12.25H2.91664V1.75Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let fileDocumentData = OpenCodeIconData(name: #"file-document"#, viewBox: 14.0, body: #"<path d="M7.58331 2.33333V5.25H10.5M2.91664 1.75H7.58331L11.0833 5.25V12.25H2.91664V1.75Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: fileDocument)
-    public static let outlineAudio = SVGIcon(viewBox: 14.0, paths: [#"M2.29546 5.62775V8.37207M5.4318 1.96875V12.0312M8.56815 4.40801V9.59173M11.7045 5.62775V8.37207"#], strokeWidth: 1.5, body: #"<path d="M2.29546 5.62775V8.37207M5.4318 1.96875V12.0312M8.56815 4.40801V9.59173M11.7045 5.62775V8.37207" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let outlineAudioData = OpenCodeIconData(name: #"outline-audio"#, viewBox: 14.0, body: #"<path d="M2.29546 5.62775V8.37207M5.4318 1.96875V12.0312M8.56815 4.40801V9.59173M11.7045 5.62775V8.37207" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: outlineAudio)
-    public static let outlineVideo = SVGIcon(viewBox: 14.0, paths: [#"M10.7412 7L3.99997 11.333V2.66602L10.7412 7Z"#], strokeWidth: 1.5, body: #"<path d="M10.7412 7L3.99997 11.333V2.66602L10.7412 7Z" stroke="currentColor"/>"#)
-    public static let outlineVideoData = OpenCodeIconData(name: #"outline-video"#, viewBox: 14.0, body: #"<path d="M10.7412 7L3.99997 11.333V2.66602L10.7412 7Z" stroke="currentColor"/>"#, svgIcon: outlineVideo)
-    public static let outlineBrain = SVGIcon(viewBox: 14.0, paths: [#"M6.99997 3.5C6.99997 2.53322 7.7832 1.75 8.74997 1.75C9.71675 1.75 10.5 2.53322 10.5 3.5C10.5 3.57233 10.4875 3.64156 10.479 3.71156C11.4706 3.80022 12.25 4.62389 12.25 5.63889C12.25 6.43222 11.7732 7.11278 11.0919 7.41456C11.55 7.68522 11.8611 8.17911 11.8611 8.75C11.8611 9.54956 11.2552 10.2006 10.479 10.2884C10.4875 10.3584 10.5 10.4277 10.5 10.5C10.5 11.4668 9.71675 12.25 8.74997 12.25C7.7832 12.25 6.99997 11.4668 6.99997 10.5M6.99997 3.5C6.99997 2.53322 6.21675 1.75 5.24997 1.75C4.2832 1.75 3.49997 2.53322 3.49997 3.5C3.49997 3.57233 3.51241 3.64156 3.52097 3.71156C2.5293 3.80022 1.74997 4.62389 1.74997 5.63889C1.74997 6.43222 2.22675 7.11278 2.90808 7.41456C2.44997 7.68522 2.13886 8.17911 2.13886 8.75C2.13886 9.54956 2.74474 10.2006 3.52097 10.2884C3.51241 10.3584 3.49997 10.4277 3.49997 10.5C3.49997 11.4668 4.2832 12.25 5.24997 12.25C6.21675 12.25 6.99997 11.4668 6.99997 10.5M6.99997 3.5V10.5M4.27773 7.58334H3.6944C3.41362 7.58334 3.14607 7.52345 2.90496 7.4169M11.095 7.4169C10.8539 7.52345 10.5863 7.58334 10.3055 7.58334H9.7222"#], strokeWidth: 1.5, body: #"<path d="M6.99997 3.5C6.99997 2.53322 7.7832 1.75 8.74997 1.75C9.71675 1.75 10.5 2.53322 10.5 3.5C10.5 3.57233 10.4875 3.64156 10.479 3.71156C11.4706 3.80022 12.25 4.62389 12.25 5.63889C12.25 6.43222 11.7732 7.11278 11.0919 7.41456C11.55 7.68522 11.8611 8.17911 11.8611 8.75C11.8611 9.54956 11.2552 10.2006 10.479 10.2884C10.4875 10.3584 10.5 10.4277 10.5 10.5C10.5 11.4668 9.71675 12.25 8.74997 12.25C7.7832 12.25 6.99997 11.4668 6.99997 10.5M6.99997 3.5C6.99997 2.53322 6.21675 1.75 5.24997 1.75C4.2832 1.75 3.49997 2.53322 3.49997 3.5C3.49997 3.57233 3.51241 3.64156 3.52097 3.71156C2.5293 3.80022 1.74997 4.62389 1.74997 5.63889C1.74997 6.43222 2.22675 7.11278 2.90808 7.41456C2.44997 7.68522 2.13886 8.17911 2.13886 8.75C2.13886 9.54956 2.74474 10.2006 3.52097 10.2884C3.51241 10.3584 3.49997 10.4277 3.49997 10.5C3.49997 11.4668 4.2832 12.25 5.24997 12.25C6.21675 12.25 6.99997 11.4668 6.99997 10.5M6.99997 3.5V10.5M4.27773 7.58334H3.6944C3.41362 7.58334 3.14607 7.52345 2.90496 7.4169M11.095 7.4169C10.8539 7.52345 10.5863 7.58334 10.3055 7.58334H9.7222" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let outlineBrainData = OpenCodeIconData(name: #"outline-brain"#, viewBox: 14.0, body: #"<path d="M6.99997 3.5C6.99997 2.53322 7.7832 1.75 8.74997 1.75C9.71675 1.75 10.5 2.53322 10.5 3.5C10.5 3.57233 10.4875 3.64156 10.479 3.71156C11.4706 3.80022 12.25 4.62389 12.25 5.63889C12.25 6.43222 11.7732 7.11278 11.0919 7.41456C11.55 7.68522 11.8611 8.17911 11.8611 8.75C11.8611 9.54956 11.2552 10.2006 10.479 10.2884C10.4875 10.3584 10.5 10.4277 10.5 10.5C10.5 11.4668 9.71675 12.25 8.74997 12.25C7.7832 12.25 6.99997 11.4668 6.99997 10.5M6.99997 3.5C6.99997 2.53322 6.21675 1.75 5.24997 1.75C4.2832 1.75 3.49997 2.53322 3.49997 3.5C3.49997 3.57233 3.51241 3.64156 3.52097 3.71156C2.5293 3.80022 1.74997 4.62389 1.74997 5.63889C1.74997 6.43222 2.22675 7.11278 2.90808 7.41456C2.44997 7.68522 2.13886 8.17911 2.13886 8.75C2.13886 9.54956 2.74474 10.2006 3.52097 10.2884C3.51241 10.3584 3.49997 10.4277 3.49997 10.5C3.49997 11.4668 4.2832 12.25 5.24997 12.25C6.21675 12.25 6.99997 11.4668 6.99997 10.5M6.99997 3.5V10.5M4.27773 7.58334H3.6944C3.41362 7.58334 3.14607 7.52345 2.90496 7.4169M11.095 7.4169C10.8539 7.52345 10.5863 7.58334 10.3055 7.58334H9.7222" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: outlineBrain)
-    public static let outlineConsole = SVGIcon(viewBox: 14.0, paths: [#"M2.13889 11.0833L6.22222 7L2.13889 2.91667M7.38888 11.0834H11.8611"#], strokeWidth: 1.5, body: #"<path d="M2.13889 11.0833L6.22222 7L2.13889 2.91667M7.38888 11.0834H11.8611" stroke="currentColor"/>"#)
-    public static let outlineConsoleData = OpenCodeIconData(name: #"outline-console"#, viewBox: 14.0, body: #"<path d="M2.13889 11.0833L6.22222 7L2.13889 2.91667M7.38888 11.0834H11.8611" stroke="currentColor"/>"#, svgIcon: outlineConsole)
-    public static let alignRight = SVGIcon(viewBox: 20.0, paths: [#"M12.292 6.04167L16.2503 9.99998L12.292 13.9583M2.91699 9.99998H15.6253M17.0837 3.75V16.25"#], strokeWidth: 1.5, body: #"<path d="M12.292 6.04167L16.2503 9.99998L12.292 13.9583M2.91699 9.99998H15.6253M17.0837 3.75V16.25" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let alignRightData = OpenCodeIconData(name: #"align-right"#, viewBox: 20.0, body: #"<path d="M12.292 6.04167L16.2503 9.99998L12.292 13.9583M2.91699 9.99998H15.6253M17.0837 3.75V16.25" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: alignRight)
-    public static let arrowUp = SVGIcon(viewBox: 20.0, paths: [#"M9.99991 2.24121L16.0921 8.33343L15.2083 9.21731L10.6249 4.63397V17.5001H9.37492V4.63398L4.7916 9.21731L3.90771 8.33343L9.99991 2.24121Z"#], strokeWidth: nil, body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M9.99991 2.24121L16.0921 8.33343L15.2083 9.21731L10.6249 4.63397V17.5001H9.37492V4.63398L4.7916 9.21731L3.90771 8.33343L9.99991 2.24121Z" fill="currentColor"/>"#)
-    public static let arrowUpData = OpenCodeIconData(name: #"arrow-up"#, viewBox: 20.0, body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M9.99991 2.24121L16.0921 8.33343L15.2083 9.21731L10.6249 4.63397V17.5001H9.37492V4.63398L4.7916 9.21731L3.90771 8.33343L9.99991 2.24121Z" fill="currentColor"/>"#, svgIcon: arrowUp)
-    public static let arrowLeft = SVGIcon(viewBox: 20.0, paths: [#"M8.33464 4.58398L2.91797 10.0007L8.33464 15.4173M3.33464 10.0007H17.0846"#], strokeWidth: 1.5, body: #"<path d="M8.33464 4.58398L2.91797 10.0007L8.33464 15.4173M3.33464 10.0007H17.0846" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let arrowLeftData = OpenCodeIconData(name: #"arrow-left"#, viewBox: 20.0, body: #"<path d="M8.33464 4.58398L2.91797 10.0007L8.33464 15.4173M3.33464 10.0007H17.0846" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: arrowLeft)
-    public static let arrowRight = SVGIcon(viewBox: 20.0, paths: [#"M11.6654 4.58398L17.082 10.0007L11.6654 15.4173M16.6654 10.0007H2.91536"#], strokeWidth: 1.5, body: #"<path d="M11.6654 4.58398L17.082 10.0007L11.6654 15.4173M16.6654 10.0007H2.91536" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let arrowRightData = OpenCodeIconData(name: #"arrow-right"#, viewBox: 20.0, body: #"<path d="M11.6654 4.58398L17.082 10.0007L11.6654 15.4173M16.6654 10.0007H2.91536" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: arrowRight)
-    public static let bubble5 = SVGIcon(viewBox: 20.0, paths: [#"M18.3327 9.99935C18.3327 5.57227 15.0919 2.91602 9.99935 2.91602C4.90676 2.91602 1.66602 5.57227 1.66602 9.99935C1.66602 11.1487 2.45505 13.1006 2.57637 13.3939C2.58707 13.4197 2.59766 13.4434 2.60729 13.4697C2.69121 13.6987 3.04209 14.9354 1.66602 16.7674C3.51787 17.6528 5.48453 16.1973 5.48453 16.1973C6.84518 16.9193 8.46417 17.0827 9.99935 17.0827C15.0919 17.0827 18.3327 14.4264 18.3327 9.99935Z"#], strokeWidth: 1.5, body: #"<path d="M18.3327 9.99935C18.3327 5.57227 15.0919 2.91602 9.99935 2.91602C4.90676 2.91602 1.66602 5.57227 1.66602 9.99935C1.66602 11.1487 2.45505 13.1006 2.57637 13.3939C2.58707 13.4197 2.59766 13.4434 2.60729 13.4697C2.69121 13.6987 3.04209 14.9354 1.66602 16.7674C3.51787 17.6528 5.48453 16.1973 5.48453 16.1973C6.84518 16.9193 8.46417 17.0827 9.99935 17.0827C15.0919 17.0827 18.3327 14.4264 18.3327 9.99935Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let bubble5Data = OpenCodeIconData(name: #"bubble-5"#, viewBox: 20.0, body: #"<path d="M18.3327 9.99935C18.3327 5.57227 15.0919 2.91602 9.99935 2.91602C4.90676 2.91602 1.66602 5.57227 1.66602 9.99935C1.66602 11.1487 2.45505 13.1006 2.57637 13.3939C2.58707 13.4197 2.59766 13.4434 2.60729 13.4697C2.69121 13.6987 3.04209 14.9354 1.66602 16.7674C3.51787 17.6528 5.48453 16.1973 5.48453 16.1973C6.84518 16.9193 8.46417 17.0827 9.99935 17.0827C15.0919 17.0827 18.3327 14.4264 18.3327 9.99935Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: bubble5)
-    public static let prompt = SVGIcon(viewBox: 20.0, paths: [#"M14.5841 12.0807H17.9193V2.91406H5.6276V6.2474M14.5859 6.2474H2.08594V15.4141H5.0026V17.4974L8.7526 15.4141H14.5859V6.2474Z"#], strokeWidth: 1.5, body: #"<path d="M14.5841 12.0807H17.9193V2.91406H5.6276V6.2474M14.5859 6.2474H2.08594V15.4141H5.0026V17.4974L8.7526 15.4141H14.5859V6.2474Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let promptData = OpenCodeIconData(name: #"prompt"#, viewBox: 20.0, body: #"<path d="M14.5841 12.0807H17.9193V2.91406H5.6276V6.2474M14.5859 6.2474H2.08594V15.4141H5.0026V17.4974L8.7526 15.4141H14.5859V6.2474Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: prompt)
-    public static let brain = SVGIcon(viewBox: 20.0, paths: [#"M13.332 8.7487C11.4911 8.7487 9.9987 7.25631 9.9987 5.41536M6.66536 11.2487C8.50631 11.2487 9.9987 12.7411 9.9987 14.582M9.9987 2.78209L9.9987 17.0658M16.004 15.0475C17.1255 14.5876 17.9154 13.4849 17.9154 12.1978C17.9154 11.3363 17.5615 10.5575 16.9913 9.9987C17.5615 9.43991 17.9154 8.66108 17.9154 7.79962C17.9154 6.21199 16.7136 4.90504 15.1702 4.73878C14.7858 3.21216 13.4039 2.08203 11.758 2.08203C11.1171 2.08203 10.5162 2.25337 9.9987 2.55275C9.48117 2.25337 8.88032 2.08203 8.23944 2.08203C6.59353 2.08203 5.21157 3.21216 4.82722 4.73878C3.28377 4.90504 2.08203 6.21199 2.08203 7.79962C2.08203 8.66108 2.43585 9.43991 3.00609 9.9987C2.43585 10.5575 2.08203 11.3363 2.08203 12.1978C2.08203 13.4849 2.87191 14.5876 3.99339 15.0475C4.46688 16.7033 5.9917 17.9154 7.79962 17.9154C8.61335 17.9154 9.36972 17.6698 9.9987 17.2488C10.6277 17.6698 11.384 17.9154 12.1978 17.9154C14.0057 17.9154 15.5305 16.7033 16.004 15.0475Z"#], strokeWidth: 1.5, body: #"<path d="M13.332 8.7487C11.4911 8.7487 9.9987 7.25631 9.9987 5.41536M6.66536 11.2487C8.50631 11.2487 9.9987 12.7411 9.9987 14.582M9.9987 2.78209L9.9987 17.0658M16.004 15.0475C17.1255 14.5876 17.9154 13.4849 17.9154 12.1978C17.9154 11.3363 17.5615 10.5575 16.9913 9.9987C17.5615 9.43991 17.9154 8.66108 17.9154 7.79962C17.9154 6.21199 16.7136 4.90504 15.1702 4.73878C14.7858 3.21216 13.4039 2.08203 11.758 2.08203C11.1171 2.08203 10.5162 2.25337 9.9987 2.55275C9.48117 2.25337 8.88032 2.08203 8.23944 2.08203C6.59353 2.08203 5.21157 3.21216 4.82722 4.73878C3.28377 4.90504 2.08203 6.21199 2.08203 7.79962C2.08203 8.66108 2.43585 9.43991 3.00609 9.9987C2.43585 10.5575 2.08203 11.3363 2.08203 12.1978C2.08203 13.4849 2.87191 14.5876 3.99339 15.0475C4.46688 16.7033 5.9917 17.9154 7.79962 17.9154C8.61335 17.9154 9.36972 17.6698 9.9987 17.2488C10.6277 17.6698 11.384 17.9154 12.1978 17.9154C14.0057 17.9154 15.5305 16.7033 16.004 15.0475Z" stroke="currentColor"/>"#)
-    public static let brainData = OpenCodeIconData(name: #"brain"#, viewBox: 20.0, body: #"<path d="M13.332 8.7487C11.4911 8.7487 9.9987 7.25631 9.9987 5.41536M6.66536 11.2487C8.50631 11.2487 9.9987 12.7411 9.9987 14.582M9.9987 2.78209L9.9987 17.0658M16.004 15.0475C17.1255 14.5876 17.9154 13.4849 17.9154 12.1978C17.9154 11.3363 17.5615 10.5575 16.9913 9.9987C17.5615 9.43991 17.9154 8.66108 17.9154 7.79962C17.9154 6.21199 16.7136 4.90504 15.1702 4.73878C14.7858 3.21216 13.4039 2.08203 11.758 2.08203C11.1171 2.08203 10.5162 2.25337 9.9987 2.55275C9.48117 2.25337 8.88032 2.08203 8.23944 2.08203C6.59353 2.08203 5.21157 3.21216 4.82722 4.73878C3.28377 4.90504 2.08203 6.21199 2.08203 7.79962C2.08203 8.66108 2.43585 9.43991 3.00609 9.9987C2.43585 10.5575 2.08203 11.3363 2.08203 12.1978C2.08203 13.4849 2.87191 14.5876 3.99339 15.0475C4.46688 16.7033 5.9917 17.9154 7.79962 17.9154C8.61335 17.9154 9.36972 17.6698 9.9987 17.2488C10.6277 17.6698 11.384 17.9154 12.1978 17.9154C14.0057 17.9154 15.5305 16.7033 16.004 15.0475Z" stroke="currentColor"/>"#, svgIcon: brain)
-    public static let fork = SVGIcon(viewBox: 20.0, paths: [#"M2.91602 7.91406L2.91602 2.91406H7.91602M12.0827 2.91406H17.0827L17.0827 7.91406M9.99935 9.9974L9.99935 17.0807M9.99935 9.9974L3.33268 3.33073M9.99935 9.9974L16.666 3.33073"#], strokeWidth: 1.5, body: #"<path d="M2.91602 7.91406L2.91602 2.91406H7.91602M12.0827 2.91406H17.0827L17.0827 7.91406M9.99935 9.9974L9.99935 17.0807M9.99935 9.9974L3.33268 3.33073M9.99935 9.9974L16.666 3.33073" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let forkData = OpenCodeIconData(name: #"fork"#, viewBox: 20.0, body: #"<path d="M2.91602 7.91406L2.91602 2.91406H7.91602M12.0827 2.91406H17.0827L17.0827 7.91406M9.99935 9.9974L9.99935 17.0807M9.99935 9.9974L3.33268 3.33073M9.99935 9.9974L16.666 3.33073" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: fork)
-    public static let bulletList = SVGIcon(viewBox: 20.0, paths: [#"M9.58329 13.7497H17.0833M9.58329 6.24967H17.0833M6.24996 6.24967C6.24996 7.17015 5.50377 7.91634 4.58329 7.91634C3.66282 7.91634 2.91663 7.17015 2.91663 6.24967C2.91663 5.3292 3.66282 4.58301 4.58329 4.58301C5.50377 4.58301 6.24996 5.3292 6.24996 6.24967ZM6.24996 13.7497C6.24996 14.6701 5.50377 15.4163 4.58329 15.4163C3.66282 15.4163 2.91663 14.6701 2.91663 13.7497C2.91663 12.8292 3.66282 12.083 4.58329 12.083C5.50377 12.083 6.24996 12.8292 6.24996 13.7497Z"#], strokeWidth: 1.5, body: #"<path d="M9.58329 13.7497H17.0833M9.58329 6.24967H17.0833M6.24996 6.24967C6.24996 7.17015 5.50377 7.91634 4.58329 7.91634C3.66282 7.91634 2.91663 7.17015 2.91663 6.24967C2.91663 5.3292 3.66282 4.58301 4.58329 4.58301C5.50377 4.58301 6.24996 5.3292 6.24996 6.24967ZM6.24996 13.7497C6.24996 14.6701 5.50377 15.4163 4.58329 15.4163C3.66282 15.4163 2.91663 14.6701 2.91663 13.7497C2.91663 12.8292 3.66282 12.083 4.58329 12.083C5.50377 12.083 6.24996 12.8292 6.24996 13.7497Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let bulletListData = OpenCodeIconData(name: #"bullet-list"#, viewBox: 20.0, body: #"<path d="M9.58329 13.7497H17.0833M9.58329 6.24967H17.0833M6.24996 6.24967C6.24996 7.17015 5.50377 7.91634 4.58329 7.91634C3.66282 7.91634 2.91663 7.17015 2.91663 6.24967C2.91663 5.3292 3.66282 4.58301 4.58329 4.58301C5.50377 4.58301 6.24996 5.3292 6.24996 6.24967ZM6.24996 13.7497C6.24996 14.6701 5.50377 15.4163 4.58329 15.4163C3.66282 15.4163 2.91663 14.6701 2.91663 13.7497C2.91663 12.8292 3.66282 12.083 4.58329 12.083C5.50377 12.083 6.24996 12.8292 6.24996 13.7497Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: bulletList)
-    public static let checkSmall = SVGIcon(viewBox: 20.0, paths: [#"M6.5 11.4412L8.97059 13.5L13.5 6.5"#], strokeWidth: 1.5, body: #"<path d="M6.5 11.4412L8.97059 13.5L13.5 6.5" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let checkSmallData = OpenCodeIconData(name: #"check-small"#, viewBox: 20.0, body: #"<path d="M6.5 11.4412L8.97059 13.5L13.5 6.5" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: checkSmall)
-    public static let chevronLeft = SVGIcon(viewBox: 20.0, paths: [#"M12 15L7 10L12 5"#], strokeWidth: 1.5, body: #"<path d="M12 15L7 10L12 5" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let chevronLeftData = OpenCodeIconData(name: #"chevron-left"#, viewBox: 20.0, body: #"<path d="M12 15L7 10L12 5" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: chevronLeft)
-    public static let chevronRight = SVGIcon(viewBox: 20.0, paths: [#"M8 15L13 10L8 5"#], strokeWidth: 1.5, body: #"<path d="M8 15L13 10L8 5" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let chevronRightData = OpenCodeIconData(name: #"chevron-right"#, viewBox: 20.0, body: #"<path d="M8 15L13 10L8 5" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: chevronRight)
-    public static let chevronGrabberVertical = SVGIcon(viewBox: 20.0, paths: [#"M6.66675 12.4998L10.0001 15.8332L13.3334 12.4998M6.66675 7.49984L10.0001 4.1665L13.3334 7.49984"#], strokeWidth: 1.5, body: #"<path d="M6.66675 12.4998L10.0001 15.8332L13.3334 12.4998M6.66675 7.49984L10.0001 4.1665L13.3334 7.49984" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let chevronGrabberVerticalData = OpenCodeIconData(name: #"chevron-grabber-vertical"#, viewBox: 20.0, body: #"<path d="M6.66675 12.4998L10.0001 15.8332L13.3334 12.4998M6.66675 7.49984L10.0001 4.1665L13.3334 7.49984" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: chevronGrabberVertical)
-    public static let chevronDoubleRight = SVGIcon(viewBox: 20.0, paths: [#"M11.6654 13.3346L14.9987 10.0013L11.6654 6.66797M5.83203 13.3346L9.16536 10.0013L5.83203 6.66797"#], strokeWidth: 1.5, body: #"<path d="M11.6654 13.3346L14.9987 10.0013L11.6654 6.66797M5.83203 13.3346L9.16536 10.0013L5.83203 6.66797" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let chevronDoubleRightData = OpenCodeIconData(name: #"chevron-double-right"#, viewBox: 20.0, body: #"<path d="M11.6654 13.3346L14.9987 10.0013L11.6654 6.66797M5.83203 13.3346L9.16536 10.0013L5.83203 6.66797" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: chevronDoubleRight)
-    public static let circleXData = OpenCodeIconData(name: #"circle-x"#, viewBox: 20.0, body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M1.6665 10.0003C1.6665 5.39795 5.39746 1.66699 9.99984 1.66699C14.6022 1.66699 18.3332 5.39795 18.3332 10.0003C18.3332 14.6027 14.6022 18.3337 9.99984 18.3337C5.39746 18.3337 1.6665 14.6027 1.6665 10.0003ZM7.49984 6.91107L6.91058 7.50033L9.41058 10.0003L6.91058 12.5003L7.49984 13.0896L9.99984 10.5896L12.4998 13.0896L13.0891 12.5003L10.5891 10.0003L13.0891 7.50033L12.4998 6.91107L9.99984 9.41107L7.49984 6.91107Z" fill="currentColor"/>"#, svgIcon: circleX)
-    public static let closeSmall = SVGIcon(viewBox: 20.0, paths: [#"M6 6L14 14M14 6L6 14"#], strokeWidth: 1.5, body: #"<path d="M6 6L14 14M14 6L6 14" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let closeSmallData = OpenCodeIconData(name: #"close-small"#, viewBox: 20.0, body: #"<path d="M6 6L14 14M14 6L6 14" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: closeSmall)
-    public static let checklist = SVGIcon(viewBox: 20.0, paths: [#"M9.58342 13.7498H17.0834M9.58342 6.24984H17.0834M2.91675 6.6665L4.58341 7.9165L7.08341 4.1665M2.91675 14.1665L4.58341 15.4165L7.08341 11.6665"#], strokeWidth: 1.5, body: #"<path d="M9.58342 13.7498H17.0834M9.58342 6.24984H17.0834M2.91675 6.6665L4.58341 7.9165L7.08341 4.1665M2.91675 14.1665L4.58341 15.4165L7.08341 11.6665" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let checklistData = OpenCodeIconData(name: #"checklist"#, viewBox: 20.0, body: #"<path d="M9.58342 13.7498H17.0834M9.58342 6.24984H17.0834M2.91675 6.6665L4.58341 7.9165L7.08341 4.1665M2.91675 14.1665L4.58341 15.4165L7.08341 11.6665" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: checklist)
-    public static let console = SVGIcon(viewBox: 20.0, paths: [#"M3.75 5.4165L8.33333 9.99984L3.75 14.5832M10.4167 14.5832H16.25"#], strokeWidth: 1.5, body: #"<path d="M3.75 5.4165L8.33333 9.99984L3.75 14.5832M10.4167 14.5832H16.25" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let consoleData = OpenCodeIconData(name: #"console"#, viewBox: 20.0, body: #"<path d="M3.75 5.4165L8.33333 9.99984L3.75 14.5832M10.4167 14.5832H16.25" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: console)
-    public static let terminal = SVGIcon(viewBox: 20.0, paths: [#"M6.5 8L8.64286 10L6.5 12M10.9286 12H13.5M2 18H18V2H2V18Z"#], strokeWidth: 1.5, body: #"<path d="M6.5 8L8.64286 10L6.5 12M10.9286 12H13.5M2 18H18V2H2V18Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let terminalData = OpenCodeIconData(name: #"terminal"#, viewBox: 20.0, body: #"<path d="M6.5 8L8.64286 10L6.5 12M10.9286 12H13.5M2 18H18V2H2V18Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: terminal)
-    public static let terminalActive = SVGIcon(viewBox: 20.0, paths: [#"M2 18H18V2H2V18Z"#, #"M6.5 8L8.64286 10L6.5 12M10.9286 12H13.5M2 18H18V2H2V18Z"#], strokeWidth: 1.5, body: #"<path d="M2 18H18V2H2V18Z" fill="currentColor" fill-opacity="0.1"/> <path d="M6.5 8L8.64286 10L6.5 12M10.9286 12H13.5M2 18H18V2H2V18Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let terminalActiveData = OpenCodeIconData(name: #"terminal-active"#, viewBox: 20.0, body: #"<path d="M2 18H18V2H2V18Z" fill="currentColor" fill-opacity="0.1"/> <path d="M6.5 8L8.64286 10L6.5 12M10.9286 12H13.5M2 18H18V2H2V18Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: terminalActive)
-    public static let reviewActive = SVGIcon(viewBox: 20.0, paths: [#"M18 18V2L2 2L2 18H18Z"#, #"M7 14.5H13M7 7.99512H10.0049M10.0049 7.99512H13M10.0049 7.99512V5M10.0049 7.99512V11M18 18V2L2 2L2 18H18Z"#], strokeWidth: 1.5, body: #"<path d="M18 18V2L2 2L2 18H18Z" fill="currentColor" fill-opacity="0.1"/> <path d="M7 14.5H13M7 7.99512H10.0049M10.0049 7.99512H13M10.0049 7.99512V5M10.0049 7.99512V11M18 18V2L2 2L2 18H18Z" stroke="currentColor"/>"#)
-    public static let reviewActiveData = OpenCodeIconData(name: #"review-active"#, viewBox: 20.0, body: #"<path d="M18 18V2L2 2L2 18H18Z" fill="currentColor" fill-opacity="0.1"/> <path d="M7 14.5H13M7 7.99512H10.0049M10.0049 7.99512H13M10.0049 7.99512V5M10.0049 7.99512V11M18 18V2L2 2L2 18H18Z" stroke="currentColor"/>"#, svgIcon: reviewActive)
-    public static let code = SVGIcon(viewBox: 20.0, paths: [#"M8.7513 7.5013L6.2513 10.0013L8.7513 12.5013M11.2513 7.5013L13.7513 10.0013L11.2513 12.5013M2.91797 2.91797H17.0846V17.0846H2.91797V2.91797Z"#], strokeWidth: 1.5, body: #"<path d="M8.7513 7.5013L6.2513 10.0013L8.7513 12.5013M11.2513 7.5013L13.7513 10.0013L11.2513 12.5013M2.91797 2.91797H17.0846V17.0846H2.91797V2.91797Z" stroke="currentColor"/>"#)
-    public static let codeData = OpenCodeIconData(name: #"code"#, viewBox: 20.0, body: #"<path d="M8.7513 7.5013L6.2513 10.0013L8.7513 12.5013M11.2513 7.5013L13.7513 10.0013L11.2513 12.5013M2.91797 2.91797H17.0846V17.0846H2.91797V2.91797Z" stroke="currentColor"/>"#, svgIcon: code)
-    public static let codeLines = SVGIcon(viewBox: 20.0, paths: [#"M2.08325 3.75H11.2499M14.5833 3.75H17.9166M2.08325 10L7.08325 10M10.4166 10L17.9166 10M2.08325 16.25L8.74992 16.25M12.0833 16.25L17.9166 16.25"#], strokeWidth: 1.5, body: #"<path d="M2.08325 3.75H11.2499M14.5833 3.75H17.9166M2.08325 10L7.08325 10M10.4166 10L17.9166 10M2.08325 16.25L8.74992 16.25M12.0833 16.25L17.9166 16.25" stroke="currentColor" stroke-linecap="square" stroke-linejoin="round"/>"#)
-    public static let codeLinesData = OpenCodeIconData(name: #"code-lines"#, viewBox: 20.0, body: #"<path d="M2.08325 3.75H11.2499M14.5833 3.75H17.9166M2.08325 10L7.08325 10M10.4166 10L17.9166 10M2.08325 16.25L8.74992 16.25M12.0833 16.25L17.9166 16.25" stroke="currentColor" stroke-linecap="square" stroke-linejoin="round"/>"#, svgIcon: codeLines)
-    public static let circleBanSign = SVGIcon(viewBox: 20.0, paths: [#"M15.3675 4.63087L4.55742 15.441M17.9163 9.9987C17.9163 14.371 14.3719 17.9154 9.99967 17.9154C7.81355 17.9154 5.83438 17.0293 4.40175 15.5966C2.96911 14.164 2.08301 12.1848 2.08301 9.9987C2.08301 5.62644 5.62742 2.08203 9.99967 2.08203C12.1858 2.08203 14.165 2.96813 15.5976 4.40077C17.0302 5.8334 17.9163 7.81257 17.9163 9.9987Z"#], strokeWidth: 1.5, body: #"<path d="M15.3675 4.63087L4.55742 15.441M17.9163 9.9987C17.9163 14.371 14.3719 17.9154 9.99967 17.9154C7.81355 17.9154 5.83438 17.0293 4.40175 15.5966C2.96911 14.164 2.08301 12.1848 2.08301 9.9987C2.08301 5.62644 5.62742 2.08203 9.99967 2.08203C12.1858 2.08203 14.165 2.96813 15.5976 4.40077C17.0302 5.8334 17.9163 7.81257 17.9163 9.9987Z" stroke="currentColor" stroke-linecap="round"/>"#)
-    public static let circleBanSignData = OpenCodeIconData(name: #"circle-ban-sign"#, viewBox: 20.0, body: #"<path d="M15.3675 4.63087L4.55742 15.441M17.9163 9.9987C17.9163 14.371 14.3719 17.9154 9.99967 17.9154C7.81355 17.9154 5.83438 17.0293 4.40175 15.5966C2.96911 14.164 2.08301 12.1848 2.08301 9.9987C2.08301 5.62644 5.62742 2.08203 9.99967 2.08203C12.1858 2.08203 14.165 2.96813 15.5976 4.40077C17.0302 5.8334 17.9163 7.81257 17.9163 9.9987Z" stroke="currentColor" stroke-linecap="round"/>"#, svgIcon: circleBanSign)
-    public static let circleBanSignBold = SVGIcon(viewBox: 20.0, paths: [#"M15.3675 4.63087L4.55742 15.441M17.9163 9.9987C17.9163 14.371 14.3719 17.9154 9.99967 17.9154C7.81355 17.9154 5.83438 17.0293 4.40175 15.5966C2.96911 14.164 2.08301 12.1848 2.08301 9.9987C2.08301 5.62644 5.62742 2.08203 9.99967 2.08203C12.1858 2.08203 14.165 2.96813 15.5976 4.40077C17.0302 5.8334 17.9163 7.81257 17.9163 9.9987Z"#], strokeWidth: 1.5, body: #"<path d="M15.3675 4.63087L4.55742 15.441M17.9163 9.9987C17.9163 14.371 14.3719 17.9154 9.99967 17.9154C7.81355 17.9154 5.83438 17.0293 4.40175 15.5966C2.96911 14.164 2.08301 12.1848 2.08301 9.9987C2.08301 5.62644 5.62742 2.08203 9.99967 2.08203C12.1858 2.08203 14.165 2.96813 15.5976 4.40077C17.0302 5.8334 17.9163 7.81257 17.9163 9.9987Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#)
-    public static let circleBanSignBoldData = OpenCodeIconData(name: #"circle-ban-sign-bold"#, viewBox: 20.0, body: #"<path d="M15.3675 4.63087L4.55742 15.441M17.9163 9.9987C17.9163 14.371 14.3719 17.9154 9.99967 17.9154C7.81355 17.9154 5.83438 17.0293 4.40175 15.5966C2.96911 14.164 2.08301 12.1848 2.08301 9.9987C2.08301 5.62644 5.62742 2.08203 9.99967 2.08203C12.1858 2.08203 14.165 2.96813 15.5976 4.40077C17.0302 5.8334 17.9163 7.81257 17.9163 9.9987Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#, svgIcon: circleBanSignBold)
-    public static let editSmall2 = SVGIcon(viewBox: 20.0, paths: [#"M17.0834 17.0833V17.5833H17.5834V17.0833H17.0834ZM2.91675 17.0833H2.41675V17.5833H2.91675V17.0833ZM2.91675 2.91659V2.41659H2.41675V2.91659H2.91675ZM9.58341 3.41659H10.0834V2.41659H9.58341V2.91659V3.41659ZM17.5834 10.4166V9.91659H16.5834V10.4166H17.0834H17.5834ZM10.4167 7.08325L10.0632 6.7297L9.91675 6.87615V7.08325H10.4167ZM10.4167 9.58325H9.91675V10.0833H10.4167V9.58325ZM12.9167 9.58325V10.0833H13.1239L13.2703 9.93681L12.9167 9.58325ZM15.4167 2.08325L15.7703 1.7297L15.4167 1.37615L15.0632 1.7297L15.4167 2.08325ZM17.9167 4.58325L18.2703 4.93681L18.6239 4.58325L18.2703 4.2297L17.9167 4.58325ZM17.0834 17.0833V16.5833H2.91675V17.0833V17.5833H17.0834V17.0833ZM2.91675 17.0833H3.41675V2.91659H2.91675H2.41675V17.0833H2.91675ZM2.91675 2.91659V3.41659H9.58341V2.91659V2.41659H2.91675V2.91659ZM17.0834 10.4166H16.5834V17.0833H17.0834H17.5834V10.4166H17.0834ZM10.4167 7.08325H9.91675V9.58325H10.4167H10.9167V7.08325H10.4167ZM10.4167 9.58325V10.0833H12.9167V9.58325V9.08325H10.4167V9.58325ZM10.4167 7.08325L10.7703 7.43681L15.7703 2.43681L15.4167 2.08325L15.0632 1.7297L10.0632 6.7297L10.4167 7.08325ZM15.4167 2.08325L15.0632 2.43681L17.5632 4.93681L17.9167 4.58325L18.2703 4.2297L15.7703 1.7297L15.4167 2.08325ZM17.9167 4.58325L17.5632 4.2297L12.5632 9.2297L12.9167 9.58325L13.2703 9.93681L18.2703 4.93681L17.9167 4.58325Z"#], strokeWidth: nil, body: #"<path d="M17.0834 17.0833V17.5833H17.5834V17.0833H17.0834ZM2.91675 17.0833H2.41675V17.5833H2.91675V17.0833ZM2.91675 2.91659V2.41659H2.41675V2.91659H2.91675ZM9.58341 3.41659H10.0834V2.41659H9.58341V2.91659V3.41659ZM17.5834 10.4166V9.91659H16.5834V10.4166H17.0834H17.5834ZM10.4167 7.08325L10.0632 6.7297L9.91675 6.87615V7.08325H10.4167ZM10.4167 9.58325H9.91675V10.0833H10.4167V9.58325ZM12.9167 9.58325V10.0833H13.1239L13.2703 9.93681L12.9167 9.58325ZM15.4167 2.08325L15.7703 1.7297L15.4167 1.37615L15.0632 1.7297L15.4167 2.08325ZM17.9167 4.58325L18.2703 4.93681L18.6239 4.58325L18.2703 4.2297L17.9167 4.58325ZM17.0834 17.0833V16.5833H2.91675V17.0833V17.5833H17.0834V17.0833ZM2.91675 17.0833H3.41675V2.91659H2.91675H2.41675V17.0833H2.91675ZM2.91675 2.91659V3.41659H9.58341V2.91659V2.41659H2.91675V2.91659ZM17.0834 10.4166H16.5834V17.0833H17.0834H17.5834V10.4166H17.0834ZM10.4167 7.08325H9.91675V9.58325H10.4167H10.9167V7.08325H10.4167ZM10.4167 9.58325V10.0833H12.9167V9.58325V9.08325H10.4167V9.58325ZM10.4167 7.08325L10.7703 7.43681L15.7703 2.43681L15.4167 2.08325L15.0632 1.7297L10.0632 6.7297L10.4167 7.08325ZM15.4167 2.08325L15.0632 2.43681L17.5632 4.93681L17.9167 4.58325L18.2703 4.2297L15.7703 1.7297L15.4167 2.08325ZM17.9167 4.58325L17.5632 4.2297L12.5632 9.2297L12.9167 9.58325L13.2703 9.93681L18.2703 4.93681L17.9167 4.58325Z" fill="currentColor"/>"#)
-    public static let editSmall2Data = OpenCodeIconData(name: #"edit-small-2"#, viewBox: 20.0, body: #"<path d="M17.0834 17.0833V17.5833H17.5834V17.0833H17.0834ZM2.91675 17.0833H2.41675V17.5833H2.91675V17.0833ZM2.91675 2.91659V2.41659H2.41675V2.91659H2.91675ZM9.58341 3.41659H10.0834V2.41659H9.58341V2.91659V3.41659ZM17.5834 10.4166V9.91659H16.5834V10.4166H17.0834H17.5834ZM10.4167 7.08325L10.0632 6.7297L9.91675 6.87615V7.08325H10.4167ZM10.4167 9.58325H9.91675V10.0833H10.4167V9.58325ZM12.9167 9.58325V10.0833H13.1239L13.2703 9.93681L12.9167 9.58325ZM15.4167 2.08325L15.7703 1.7297L15.4167 1.37615L15.0632 1.7297L15.4167 2.08325ZM17.9167 4.58325L18.2703 4.93681L18.6239 4.58325L18.2703 4.2297L17.9167 4.58325ZM17.0834 17.0833V16.5833H2.91675V17.0833V17.5833H17.0834V17.0833ZM2.91675 17.0833H3.41675V2.91659H2.91675H2.41675V17.0833H2.91675ZM2.91675 2.91659V3.41659H9.58341V2.91659V2.41659H2.91675V2.91659ZM17.0834 10.4166H16.5834V17.0833H17.0834H17.5834V10.4166H17.0834ZM10.4167 7.08325H9.91675V9.58325H10.4167H10.9167V7.08325H10.4167ZM10.4167 9.58325V10.0833H12.9167V9.58325V9.08325H10.4167V9.58325ZM10.4167 7.08325L10.7703 7.43681L15.7703 2.43681L15.4167 2.08325L15.0632 1.7297L10.0632 6.7297L10.4167 7.08325ZM15.4167 2.08325L15.0632 2.43681L17.5632 4.93681L17.9167 4.58325L18.2703 4.2297L15.7703 1.7297L15.4167 2.08325ZM17.9167 4.58325L17.5632 4.2297L12.5632 9.2297L12.9167 9.58325L13.2703 9.93681L18.2703 4.93681L17.9167 4.58325Z" fill="currentColor"/>"#, svgIcon: editSmall2)
-    public static let eye = SVGIcon(viewBox: 20.0, paths: [#"M10 4.58325C5.83333 4.58325 2.5 9.99992 2.5 9.99992C2.5 9.99992 5.83333 15.4166 10 15.4166C14.1667 15.4166 17.5 9.99992 17.5 9.99992C17.5 9.99992 14.1667 4.58325 10 4.58325Z"#], strokeWidth: 1.5, body: #"<path d="M10 4.58325C5.83333 4.58325 2.5 9.99992 2.5 9.99992C2.5 9.99992 5.83333 15.4166 10 15.4166C14.1667 15.4166 17.5 9.99992 17.5 9.99992C17.5 9.99992 14.1667 4.58325 10 4.58325Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/><circle cx="10" cy="10" r="2.5" stroke="currentColor"/>"#)
-    public static let eyeData = OpenCodeIconData(name: #"eye"#, viewBox: 20.0, body: #"<path d="M10 4.58325C5.83333 4.58325 2.5 9.99992 2.5 9.99992C2.5 9.99992 5.83333 15.4166 10 15.4166C14.1667 15.4166 17.5 9.99992 17.5 9.99992C17.5 9.99992 14.1667 4.58325 10 4.58325Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/><circle cx="10" cy="10" r="2.5" stroke="currentColor"/>"#, svgIcon: eye)
-    public static let enter = SVGIcon(viewBox: 20.0, paths: [#"M5.83333 15.8334L2.5 12.5L5.83333 9.16671M3.33333 12.5H17.9167V4.58337H10"#], strokeWidth: 1.5, body: #"<path d="M5.83333 15.8334L2.5 12.5L5.83333 9.16671M3.33333 12.5H17.9167V4.58337H10" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let enterData = OpenCodeIconData(name: #"enter"#, viewBox: 20.0, body: #"<path d="M5.83333 15.8334L2.5 12.5L5.83333 9.16671M3.33333 12.5H17.9167V4.58337H10" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: enter)
-    public static let fileTree = SVGIcon(viewBox: 20.0, paths: [#"M18 18V5H9.5L7.5 2H2L2 18H5M18 18H5M18 18V8.5H5V18"#], strokeWidth: 1.5, body: #"<path d="M18 18V5H9.5L7.5 2H2L2 18H5M18 18H5M18 18V8.5H5V18" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let fileTreeData = OpenCodeIconData(name: #"file-tree"#, viewBox: 20.0, body: #"<path d="M18 18V5H9.5L7.5 2H2L2 18H5M18 18H5M18 18V8.5H5V18" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: fileTree)
-    public static let fileTreeActive = SVGIcon(viewBox: 20.0, paths: [#"M2 2L2 18H5L6.5 8.5H18V5H9.5L7.5 2H2Z"#, #"M5 18H18L19.5 8.5H18M5 18H2L2 2H7.5L9.5 5H18V8.5M5 18L6.5 8.5H18"#], strokeWidth: 1.5, body: #"<path d="M2 2L2 18H5L6.5 8.5H18V5H9.5L7.5 2H2Z" fill="currentColor" fill-opacity="0.1"/> <path d="M5 18H18L19.5 8.5H18M5 18H2L2 2H7.5L9.5 5H18V8.5M5 18L6.5 8.5H18" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let fileTreeActiveData = OpenCodeIconData(name: #"file-tree-active"#, viewBox: 20.0, body: #"<path d="M2 2L2 18H5L6.5 8.5H18V5H9.5L7.5 2H2Z" fill="currentColor" fill-opacity="0.1"/> <path d="M5 18H18L19.5 8.5H18M5 18H2L2 2H7.5L9.5 5H18V8.5M5 18L6.5 8.5H18" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: fileTreeActive)
-    public static let plusSmall = SVGIcon(viewBox: 20.0, paths: [#"M9.99984 5.41699V10.0003M9.99984 10.0003V14.5837M9.99984 10.0003H5.4165M9.99984 10.0003H14.5832"#], strokeWidth: 1.5, body: #"<path d="M9.99984 5.41699V10.0003M9.99984 10.0003V14.5837M9.99984 10.0003H5.4165M9.99984 10.0003H14.5832" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let plusSmallData = OpenCodeIconData(name: #"plus-small"#, viewBox: 20.0, body: #"<path d="M9.99984 5.41699V10.0003M9.99984 10.0003V14.5837M9.99984 10.0003H5.4165M9.99984 10.0003H14.5832" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: plusSmall)
-    public static let newSession = SVGIcon(viewBox: 20.0, paths: [#"M12 2H2V18H18V8M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z"#], strokeWidth: 1.5, body: #"<path d="M12 2H2V18H18V8M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z" stroke="currentColor"/>"#)
-    public static let newSessionData = OpenCodeIconData(name: #"new-session"#, viewBox: 20.0, body: #"<path d="M12 2H2V18H18V8M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z" stroke="currentColor"/>"#, svgIcon: newSession)
-    public static let newSessionActive = SVGIcon(viewBox: 20.0, paths: [#"M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z"#, #"M12 2H2V18H18V8M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z"#], strokeWidth: 1.5, body: #"<path d="M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z" fill="currentColor" fill-opacity="0.1"/> <path d="M12 2H2V18H18V8M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z" stroke="currentColor"/>"#)
-    public static let newSessionActiveData = OpenCodeIconData(name: #"new-session-active"#, viewBox: 20.0, body: #"<path d="M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z" fill="currentColor" fill-opacity="0.1"/> <path d="M12 2H2V18H18V8M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z" stroke="currentColor"/>"#, svgIcon: newSessionActive)
-    public static let pencilLine = SVGIcon(viewBox: 20.0, paths: [#"M9.58301 17.9166H17.9163M17.9163 5.83325L14.1663 2.08325L2.08301 14.1666V17.9166H5.83301L17.9163 5.83325Z"#], strokeWidth: 1.5, body: #"<path d="M9.58301 17.9166H17.9163M17.9163 5.83325L14.1663 2.08325L2.08301 14.1666V17.9166H5.83301L17.9163 5.83325Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let pencilLineData = OpenCodeIconData(name: #"pencil-line"#, viewBox: 20.0, body: #"<path d="M9.58301 17.9166H17.9163M17.9163 5.83325L14.1663 2.08325L2.08301 14.1666V17.9166H5.83301L17.9163 5.83325Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: pencilLine)
-    public static let mcp = SVGIcon(viewBox: 20.0, paths: [#"M0.972656 9.37176L9.5214 1.60019C10.7018 0.527151 12.6155 0.527151 13.7957 1.60019C14.9761 2.67321 14.9761 4.41295 13.7957 5.48599L7.3397 11.3552"#, #"M7.42871 11.2747L13.7957 5.48643C14.9761 4.41338 16.8898 4.41338 18.0702 5.48643L18.1147 5.52688C19.2951 6.59993 19.2951 8.33966 18.1147 9.4127L10.3831 16.4414C9.98966 16.7991 9.98966 17.379 10.3831 17.7366L11.9707 19.1799"#, #"M11.6587 3.54346L5.33619 9.29119C4.15584 10.3642 4.15584 12.1039 5.33619 13.177C6.51649 14.25 8.43019 14.25 9.61054 13.177L15.9331 7.42923"#], strokeWidth: 1.5, body: #"<g><path d="M0.972656 9.37176L9.5214 1.60019C10.7018 0.527151 12.6155 0.527151 13.7957 1.60019C14.9761 2.67321 14.9761 4.41295 13.7957 5.48599L7.3397 11.3552" stroke="currentColor" stroke-linecap="round"/><path d="M7.42871 11.2747L13.7957 5.48643C14.9761 4.41338 16.8898 4.41338 18.0702 5.48643L18.1147 5.52688C19.2951 6.59993 19.2951 8.33966 18.1147 9.4127L10.3831 16.4414C9.98966 16.7991 9.98966 17.379 10.3831 17.7366L11.9707 19.1799" stroke="currentColor" stroke-linecap="round"/><path d="M11.6587 3.54346L5.33619 9.29119C4.15584 10.3642 4.15584 12.1039 5.33619 13.177C6.51649 14.25 8.43019 14.25 9.61054 13.177L15.9331 7.42923" stroke="currentColor" stroke-linecap="round"/></g>"#)
-    public static let mcpData = OpenCodeIconData(name: #"mcp"#, viewBox: 20.0, body: #"<g><path d="M0.972656 9.37176L9.5214 1.60019C10.7018 0.527151 12.6155 0.527151 13.7957 1.60019C14.9761 2.67321 14.9761 4.41295 13.7957 5.48599L7.3397 11.3552" stroke="currentColor" stroke-linecap="round"/><path d="M7.42871 11.2747L13.7957 5.48643C14.9761 4.41338 16.8898 4.41338 18.0702 5.48643L18.1147 5.52688C19.2951 6.59993 19.2951 8.33966 18.1147 9.4127L10.3831 16.4414C9.98966 16.7991 9.98966 17.379 10.3831 17.7366L11.9707 19.1799" stroke="currentColor" stroke-linecap="round"/><path d="M11.6587 3.54346L5.33619 9.29119C4.15584 10.3642 4.15584 12.1039 5.33619 13.177C6.51649 14.25 8.43019 14.25 9.61054 13.177L15.9331 7.42923" stroke="currentColor" stroke-linecap="round"/></g>"#, svgIcon: mcp)
-    public static let glasses = SVGIcon(viewBox: 20.0, paths: [#"M0.416626 7.91667H1.66663M19.5833 7.91667H18.3333M11.866 7.57987C11.3165 7.26398 10.6793 7.08333 9.99996 7.08333C9.32061 7.08333 8.68344 7.26398 8.13389 7.57987M8.74996 10C8.74996 12.0711 7.07103 13.75 4.99996 13.75C2.92889 13.75 1.24996 12.0711 1.24996 10C1.24996 7.92893 2.92889 6.25 4.99996 6.25C7.07103 6.25 8.74996 7.92893 8.74996 10ZM18.75 10C18.75 12.0711 17.071 13.75 15 13.75C12.9289 13.75 11.25 12.0711 11.25 10C11.25 7.92893 12.9289 6.25 15 6.25C17.071 6.25 18.75 7.92893 18.75 10Z"#], strokeWidth: 1.5, body: #"<path d="M0.416626 7.91667H1.66663M19.5833 7.91667H18.3333M11.866 7.57987C11.3165 7.26398 10.6793 7.08333 9.99996 7.08333C9.32061 7.08333 8.68344 7.26398 8.13389 7.57987M8.74996 10C8.74996 12.0711 7.07103 13.75 4.99996 13.75C2.92889 13.75 1.24996 12.0711 1.24996 10C1.24996 7.92893 2.92889 6.25 4.99996 6.25C7.07103 6.25 8.74996 7.92893 8.74996 10ZM18.75 10C18.75 12.0711 17.071 13.75 15 13.75C12.9289 13.75 11.25 12.0711 11.25 10C11.25 7.92893 12.9289 6.25 15 6.25C17.071 6.25 18.75 7.92893 18.75 10Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let glassesData = OpenCodeIconData(name: #"glasses"#, viewBox: 20.0, body: #"<path d="M0.416626 7.91667H1.66663M19.5833 7.91667H18.3333M11.866 7.57987C11.3165 7.26398 10.6793 7.08333 9.99996 7.08333C9.32061 7.08333 8.68344 7.26398 8.13389 7.57987M8.74996 10C8.74996 12.0711 7.07103 13.75 4.99996 13.75C2.92889 13.75 1.24996 12.0711 1.24996 10C1.24996 7.92893 2.92889 6.25 4.99996 6.25C7.07103 6.25 8.74996 7.92893 8.74996 10ZM18.75 10C18.75 12.0711 17.071 13.75 15 13.75C12.9289 13.75 11.25 12.0711 11.25 10C11.25 7.92893 12.9289 6.25 15 6.25C17.071 6.25 18.75 7.92893 18.75 10Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: glasses)
-    public static let magnifyingGlassMenu = SVGIcon(viewBox: 20.0, paths: [#"M2.08325 10.0002H4.58325M2.08325 5.41683H5.41659M2.08325 14.5835H5.41659M16.4583 13.9585L18.7499 16.2502M17.9166 10.0002C17.9166 12.9917 15.4915 15.4168 12.4999 15.4168C9.50838 15.4168 7.08325 12.9917 7.08325 10.0002C7.08325 7.00862 9.50838 4.5835 12.4999 4.5835C15.4915 4.5835 17.9166 7.00862 17.9166 10.0002Z"#], strokeWidth: 1.5, body: #"<path d="M2.08325 10.0002H4.58325M2.08325 5.41683H5.41659M2.08325 14.5835H5.41659M16.4583 13.9585L18.7499 16.2502M17.9166 10.0002C17.9166 12.9917 15.4915 15.4168 12.4999 15.4168C9.50838 15.4168 7.08325 12.9917 7.08325 10.0002C7.08325 7.00862 9.50838 4.5835 12.4999 4.5835C15.4915 4.5835 17.9166 7.00862 17.9166 10.0002Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let magnifyingGlassMenuData = OpenCodeIconData(name: #"magnifying-glass-menu"#, viewBox: 20.0, body: #"<path d="M2.08325 10.0002H4.58325M2.08325 5.41683H5.41659M2.08325 14.5835H5.41659M16.4583 13.9585L18.7499 16.2502M17.9166 10.0002C17.9166 12.9917 15.4915 15.4168 12.4999 15.4168C9.50838 15.4168 7.08325 12.9917 7.08325 10.0002C7.08325 7.00862 9.50838 4.5835 12.4999 4.5835C15.4915 4.5835 17.9166 7.00862 17.9166 10.0002Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: magnifyingGlassMenu)
-    public static let windowCursor = SVGIcon(viewBox: 20.0, paths: [#"M17.5 10.4167V3.75H2.5V17.0833H10.4166M17.9166 13.5897L11.6666 11.6667L13.5897 17.9167L15.032 15.0321L17.9166 13.5897Z"#, #"M5.41675 6.125C5.71576 6.12518 5.95777 6.36795 5.95777 6.66699C5.95759 6.96589 5.71565 7.20783 5.41675 7.20801C5.11771 7.20801 4.87494 6.966 4.87476 6.66699C4.87476 6.36784 5.1176 6.125 5.41675 6.125ZM8.33276 6.125C8.63191 6.125 8.87476 6.36784 8.87476 6.66699C8.87458 6.966 8.63181 7.20801 8.33276 7.20801C8.03386 7.20783 7.79192 6.96589 7.79175 6.66699C7.79175 6.36795 8.03376 6.12518 8.33276 6.125ZM11.2498 6.125C11.5489 6.125 11.7917 6.36784 11.7917 6.66699C11.7916 6.966 11.5488 7.20801 11.2498 7.20801C10.9507 7.20801 10.7079 6.966 10.7078 6.66699C10.7078 6.36784 10.9506 6.125 11.2498 6.125Z"#], strokeWidth: 0.25, body: #"<path d="M17.5 10.4167V3.75H2.5V17.0833H10.4166M17.9166 13.5897L11.6666 11.6667L13.5897 17.9167L15.032 15.0321L17.9166 13.5897Z" stroke="currentColor" stroke-linecap="square"/><path d="M5.41675 6.125C5.71576 6.12518 5.95777 6.36795 5.95777 6.66699C5.95759 6.96589 5.71565 7.20783 5.41675 7.20801C5.11771 7.20801 4.87494 6.966 4.87476 6.66699C4.87476 6.36784 5.1176 6.125 5.41675 6.125ZM8.33276 6.125C8.63191 6.125 8.87476 6.36784 8.87476 6.66699C8.87458 6.966 8.63181 7.20801 8.33276 7.20801C8.03386 7.20783 7.79192 6.96589 7.79175 6.66699C7.79175 6.36795 8.03376 6.12518 8.33276 6.125ZM11.2498 6.125C11.5489 6.125 11.7917 6.36784 11.7917 6.66699C11.7916 6.966 11.5488 7.20801 11.2498 7.20801C10.9507 7.20801 10.7079 6.966 10.7078 6.66699C10.7078 6.36784 10.9506 6.125 11.2498 6.125Z" fill="currentColor" stroke="currentColor" stroke-width="0.25" stroke-linecap="square"/>"#)
-    public static let windowCursorData = OpenCodeIconData(name: #"window-cursor"#, viewBox: 20.0, body: #"<path d="M17.5 10.4167V3.75H2.5V17.0833H10.4166M17.9166 13.5897L11.6666 11.6667L13.5897 17.9167L15.032 15.0321L17.9166 13.5897Z" stroke="currentColor" stroke-linecap="square"/><path d="M5.41675 6.125C5.71576 6.12518 5.95777 6.36795 5.95777 6.66699C5.95759 6.96589 5.71565 7.20783 5.41675 7.20801C5.11771 7.20801 4.87494 6.966 4.87476 6.66699C4.87476 6.36784 5.1176 6.125 5.41675 6.125ZM8.33276 6.125C8.63191 6.125 8.87476 6.36784 8.87476 6.66699C8.87458 6.966 8.63181 7.20801 8.33276 7.20801C8.03386 7.20783 7.79192 6.96589 7.79175 6.66699C7.79175 6.36795 8.03376 6.12518 8.33276 6.125ZM11.2498 6.125C11.5489 6.125 11.7917 6.36784 11.7917 6.66699C11.7916 6.966 11.5488 7.20801 11.2498 7.20801C10.9507 7.20801 10.7079 6.966 10.7078 6.66699C10.7078 6.36784 10.9506 6.125 11.2498 6.125Z" fill="currentColor" stroke="currentColor" stroke-width="0.25" stroke-linecap="square"/>"#, svgIcon: windowCursor)
-    public static let task = SVGIcon(viewBox: 20.0, paths: [#"M9.99992 2.0835V17.9168M7.08325 3.75016H2.08325V16.2502H7.08325M12.9166 16.2502H17.9166V3.75016H12.9166"#], strokeWidth: 1.5, body: #"<path d="M9.99992 2.0835V17.9168M7.08325 3.75016H2.08325V16.2502H7.08325M12.9166 16.2502H17.9166V3.75016H12.9166" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let taskData = OpenCodeIconData(name: #"task"#, viewBox: 20.0, body: #"<path d="M9.99992 2.0835V17.9168M7.08325 3.75016H2.08325V16.2502H7.08325M12.9166 16.2502H17.9166V3.75016H12.9166" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: task)
-    public static let stop = SVGIcon(viewBox: 20.0, paths: [], strokeWidth: nil, body: #"<rect x="5" y="5" width="10" height="10" fill="currentColor"/>"#)
-    public static let stopData = OpenCodeIconData(name: #"stop"#, viewBox: 20.0, body: #"<rect x="5" y="5" width="10" height="10" fill="currentColor"/>"#, svgIcon: stop)
-    public static let sidebar = SVGIcon(viewBox: 20.0, paths: [#"M7.86667 2H5.2H2V18H5.2H7.86667M7.86667 2H18V18H7.86667M7.86667 2V18"#], strokeWidth: 1.5, body: #"<path d="M7.86667 2H5.2H2V18H5.2H7.86667M7.86667 2H18V18H7.86667M7.86667 2V18" stroke="currentColor"/>"#)
-    public static let sidebarData = OpenCodeIconData(name: #"sidebar"#, viewBox: 20.0, body: #"<path d="M7.86667 2H5.2H2V18H5.2H7.86667M7.86667 2H18V18H7.86667M7.86667 2V18" stroke="currentColor"/>"#, svgIcon: sidebar)
-    public static let sidebarActive = SVGIcon(viewBox: 20.0, paths: [#"M2 2V18H5.2H7.86667V2H5.2H2Z"#, #"M7.86667 2H5.2H2V18H5.2H7.86667M7.86667 2H18V18H7.86667M7.86667 2V18"#], strokeWidth: 1.5, body: #"<path d="M2 2V18H5.2H7.86667V2H5.2H2Z" fill="currentColor" fill-opacity="0.1"/> <path d="M7.86667 2H5.2H2V18H5.2H7.86667M7.86667 2H18V18H7.86667M7.86667 2V18" stroke="currentColor"/>"#)
-    public static let sidebarActiveData = OpenCodeIconData(name: #"sidebar-active"#, viewBox: 20.0, body: #"<path d="M2 2V18H5.2H7.86667V2H5.2H2Z" fill="currentColor" fill-opacity="0.1"/> <path d="M7.86667 2H5.2H2V18H5.2H7.86667M7.86667 2H18V18H7.86667M7.86667 2V18" stroke="currentColor"/>"#, svgIcon: sidebarActive)
-    public static let layoutLeft = SVGIcon(viewBox: 20.0, paths: [#"M2.91675 2.91699L2.91675 2.41699L2.41675 2.41699L2.41675 2.91699L2.91675 2.91699ZM17.0834 2.91699L17.5834 2.91699L17.5834 2.41699L17.0834 2.41699L17.0834 2.91699ZM17.0834 17.0837L17.0834 17.5837L17.5834 17.5837L17.5834 17.0837L17.0834 17.0837ZM2.91675 17.0837L2.41675 17.0837L2.41675 17.5837L2.91675 17.5837L2.91675 17.0837ZM7.41674 17.0837L7.41674 17.5837L8.41674 17.5837L8.41674 17.0837L7.91674 17.0837L7.41674 17.0837ZM8.41674 2.91699L8.41674 2.41699L7.41674 2.41699L7.41674 2.91699L7.91674 2.91699L8.41674 2.91699ZM2.91675 2.91699L2.91675 3.41699L17.0834 3.41699L17.0834 2.91699L17.0834 2.41699L2.91675 2.41699L2.91675 2.91699ZM17.0834 2.91699L16.5834 2.91699L16.5834 17.0837L17.0834 17.0837L17.5834 17.0837L17.5834 2.91699L17.0834 2.91699ZM17.0834 17.0837L17.0834 16.5837L2.91675 16.5837L2.91675 17.0837L2.91675 17.5837L17.0834 17.5837L17.0834 17.0837ZM2.91675 17.0837L3.41675 17.0837L3.41675 2.91699L2.91675 2.91699L2.41675 2.91699L2.41675 17.0837L2.91675 17.0837ZM7.91674 17.0837L8.41674 17.0837L8.41674 2.91699L7.91674 2.91699L7.41674 2.91699L7.41674 17.0837L7.91674 17.0837Z"#], strokeWidth: nil, body: #"<path d="M2.91675 2.91699L2.91675 2.41699L2.41675 2.41699L2.41675 2.91699L2.91675 2.91699ZM17.0834 2.91699L17.5834 2.91699L17.5834 2.41699L17.0834 2.41699L17.0834 2.91699ZM17.0834 17.0837L17.0834 17.5837L17.5834 17.5837L17.5834 17.0837L17.0834 17.0837ZM2.91675 17.0837L2.41675 17.0837L2.41675 17.5837L2.91675 17.5837L2.91675 17.0837ZM7.41674 17.0837L7.41674 17.5837L8.41674 17.5837L8.41674 17.0837L7.91674 17.0837L7.41674 17.0837ZM8.41674 2.91699L8.41674 2.41699L7.41674 2.41699L7.41674 2.91699L7.91674 2.91699L8.41674 2.91699ZM2.91675 2.91699L2.91675 3.41699L17.0834 3.41699L17.0834 2.91699L17.0834 2.41699L2.91675 2.41699L2.91675 2.91699ZM17.0834 2.91699L16.5834 2.91699L16.5834 17.0837L17.0834 17.0837L17.5834 17.0837L17.5834 2.91699L17.0834 2.91699ZM17.0834 17.0837L17.0834 16.5837L2.91675 16.5837L2.91675 17.0837L2.91675 17.5837L17.0834 17.5837L17.0834 17.0837ZM2.91675 17.0837L3.41675 17.0837L3.41675 2.91699L2.91675 2.91699L2.41675 2.91699L2.41675 17.0837L2.91675 17.0837ZM7.91674 17.0837L8.41674 17.0837L8.41674 2.91699L7.91674 2.91699L7.41674 2.91699L7.41674 17.0837L7.91674 17.0837Z" fill="currentColor"/>"#)
-    public static let layoutLeftData = OpenCodeIconData(name: #"layout-left"#, viewBox: 20.0, body: #"<path d="M2.91675 2.91699L2.91675 2.41699L2.41675 2.41699L2.41675 2.91699L2.91675 2.91699ZM17.0834 2.91699L17.5834 2.91699L17.5834 2.41699L17.0834 2.41699L17.0834 2.91699ZM17.0834 17.0837L17.0834 17.5837L17.5834 17.5837L17.5834 17.0837L17.0834 17.0837ZM2.91675 17.0837L2.41675 17.0837L2.41675 17.5837L2.91675 17.5837L2.91675 17.0837ZM7.41674 17.0837L7.41674 17.5837L8.41674 17.5837L8.41674 17.0837L7.91674 17.0837L7.41674 17.0837ZM8.41674 2.91699L8.41674 2.41699L7.41674 2.41699L7.41674 2.91699L7.91674 2.91699L8.41674 2.91699ZM2.91675 2.91699L2.91675 3.41699L17.0834 3.41699L17.0834 2.91699L17.0834 2.41699L2.91675 2.41699L2.91675 2.91699ZM17.0834 2.91699L16.5834 2.91699L16.5834 17.0837L17.0834 17.0837L17.5834 17.0837L17.5834 2.91699L17.0834 2.91699ZM17.0834 17.0837L17.0834 16.5837L2.91675 16.5837L2.91675 17.0837L2.91675 17.5837L17.0834 17.5837L17.0834 17.0837ZM2.91675 17.0837L3.41675 17.0837L3.41675 2.91699L2.91675 2.91699L2.41675 2.91699L2.41675 17.0837L2.91675 17.0837ZM7.91674 17.0837L8.41674 17.0837L8.41674 2.91699L7.91674 2.91699L7.41674 2.91699L7.41674 17.0837L7.91674 17.0837Z" fill="currentColor"/>"#, svgIcon: layoutLeft)
-    public static let layoutLeftPartial = SVGIcon(viewBox: 20.0, paths: [#"M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z"#, #"M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602"#], strokeWidth: 1.5, body: #"<path d="M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z" fill="currentColor" fill-opacity="16%" /><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let layoutLeftPartialData = OpenCodeIconData(name: #"layout-left-partial"#, viewBox: 20.0, body: #"<path d="M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z" fill="currentColor" fill-opacity="16%" /><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: layoutLeftPartial)
-    public static let layoutLeftFull = SVGIcon(viewBox: 20.0, paths: [#"M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z"#, #"M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602"#], strokeWidth: 1.5, body: #"<path d="M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z" fill="currentColor"/><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let layoutLeftFullData = OpenCodeIconData(name: #"layout-left-full"#, viewBox: 20.0, body: #"<path d="M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z" fill="currentColor"/><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: layoutLeftFull)
-    public static let layoutRight = SVGIcon(viewBox: 20.0, paths: [#"M2.91675 2.91699L2.91675 2.41699L2.41675 2.41699L2.41675 2.91699L2.91675 2.91699ZM17.0834 2.91699L17.5834 2.91699L17.5834 2.41699L17.0834 2.41699L17.0834 2.91699ZM17.0834 17.0837L17.0834 17.5837L17.5834 17.5837L17.5834 17.0837L17.0834 17.0837ZM2.91675 17.0837L2.41675 17.0837L2.41675 17.5837L2.91675 17.5837L2.91675 17.0837ZM7.41674 17.0837L7.41674 17.5837L8.41674 17.5837L8.41674 17.0837L7.91674 17.0837L7.41674 17.0837ZM8.41674 2.91699L8.41674 2.41699L7.41674 2.41699L7.41674 2.91699L7.91674 2.91699L8.41674 2.91699ZM2.91675 2.91699L2.91675 3.41699L17.0834 3.41699L17.0834 2.91699L17.0834 2.41699L2.91675 2.41699L2.91675 2.91699ZM17.0834 2.91699L16.5834 2.91699L16.5834 17.0837L17.0834 17.0837L17.5834 17.0837L17.5834 2.91699L17.0834 2.91699ZM17.0834 17.0837L17.0834 16.5837L2.91675 16.5837L2.91675 17.0837L2.91675 17.5837L17.0834 17.5837L17.0834 17.0837ZM2.91675 17.0837L3.41675 17.0837L3.41675 2.91699L2.91675 2.91699L2.41675 2.91699L2.41675 17.0837L2.91675 17.0837ZM7.91674 17.0837L8.41674 17.0837L8.41674 2.91699L7.91674 2.91699L7.41674 2.91699L7.41674 17.0837L7.91674 17.0837Z"#], strokeWidth: nil, body: #"<g transform="matrix(-1 0 0 1 20 0)"><path d="M2.91675 2.91699L2.91675 2.41699L2.41675 2.41699L2.41675 2.91699L2.91675 2.91699ZM17.0834 2.91699L17.5834 2.91699L17.5834 2.41699L17.0834 2.41699L17.0834 2.91699ZM17.0834 17.0837L17.0834 17.5837L17.5834 17.5837L17.5834 17.0837L17.0834 17.0837ZM2.91675 17.0837L2.41675 17.0837L2.41675 17.5837L2.91675 17.5837L2.91675 17.0837ZM7.41674 17.0837L7.41674 17.5837L8.41674 17.5837L8.41674 17.0837L7.91674 17.0837L7.41674 17.0837ZM8.41674 2.91699L8.41674 2.41699L7.41674 2.41699L7.41674 2.91699L7.91674 2.91699L8.41674 2.91699ZM2.91675 2.91699L2.91675 3.41699L17.0834 3.41699L17.0834 2.91699L17.0834 2.41699L2.91675 2.41699L2.91675 2.91699ZM17.0834 2.91699L16.5834 2.91699L16.5834 17.0837L17.0834 17.0837L17.5834 17.0837L17.5834 2.91699L17.0834 2.91699ZM17.0834 17.0837L17.0834 16.5837L2.91675 16.5837L2.91675 17.0837L2.91675 17.5837L17.0834 17.5837L17.0834 17.0837ZM2.91675 17.0837L3.41675 17.0837L3.41675 2.91699L2.91675 2.91699L2.41675 2.91699L2.41675 17.0837L2.91675 17.0837ZM7.91674 17.0837L8.41674 17.0837L8.41674 2.91699L7.91674 2.91699L7.41674 2.91699L7.41674 17.0837L7.91674 17.0837Z" fill="currentColor"/></g>"#)
-    public static let layoutRightData = OpenCodeIconData(name: #"layout-right"#, viewBox: 20.0, body: #"<g transform="matrix(-1 0 0 1 20 0)"><path d="M2.91675 2.91699L2.91675 2.41699L2.41675 2.41699L2.41675 2.91699L2.91675 2.91699ZM17.0834 2.91699L17.5834 2.91699L17.5834 2.41699L17.0834 2.41699L17.0834 2.91699ZM17.0834 17.0837L17.0834 17.5837L17.5834 17.5837L17.5834 17.0837L17.0834 17.0837ZM2.91675 17.0837L2.41675 17.0837L2.41675 17.5837L2.91675 17.5837L2.91675 17.0837ZM7.41674 17.0837L7.41674 17.5837L8.41674 17.5837L8.41674 17.0837L7.91674 17.0837L7.41674 17.0837ZM8.41674 2.91699L8.41674 2.41699L7.41674 2.41699L7.41674 2.91699L7.91674 2.91699L8.41674 2.91699ZM2.91675 2.91699L2.91675 3.41699L17.0834 3.41699L17.0834 2.91699L17.0834 2.41699L2.91675 2.41699L2.91675 2.91699ZM17.0834 2.91699L16.5834 2.91699L16.5834 17.0837L17.0834 17.0837L17.5834 17.0837L17.5834 2.91699L17.0834 2.91699ZM17.0834 17.0837L17.0834 16.5837L2.91675 16.5837L2.91675 17.0837L2.91675 17.5837L17.0834 17.5837L17.0834 17.0837ZM2.91675 17.0837L3.41675 17.0837L3.41675 2.91699L2.91675 2.91699L2.41675 2.91699L2.41675 17.0837L2.91675 17.0837ZM7.91674 17.0837L8.41674 17.0837L8.41674 2.91699L7.91674 2.91699L7.41674 2.91699L7.41674 17.0837L7.91674 17.0837Z" fill="currentColor"/></g>"#, svgIcon: layoutRight)
-    public static let layoutRightPartial = SVGIcon(viewBox: 20.0, paths: [#"M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z"#, #"M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602"#], strokeWidth: 1.5, body: #"<g transform="matrix(-1 0 0 1 20 0)"><path d="M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z" fill="currentColor" fill-opacity="16%" /><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602" stroke="currentColor" stroke-linecap="square"/></g>"#)
-    public static let layoutRightPartialData = OpenCodeIconData(name: #"layout-right-partial"#, viewBox: 20.0, body: #"<g transform="matrix(-1 0 0 1 20 0)"><path d="M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z" fill="currentColor" fill-opacity="16%" /><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602" stroke="currentColor" stroke-linecap="square"/></g>"#, svgIcon: layoutRightPartial)
-    public static let layoutRightFull = SVGIcon(viewBox: 20.0, paths: [#"M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z"#, #"M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602"#], strokeWidth: 1.5, body: #"<g transform="matrix(-1 0 0 1 20 0)"><path d="M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z" fill="currentColor"/><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602" stroke="currentColor" stroke-linecap="square"/></g>"#)
-    public static let layoutRightFullData = OpenCodeIconData(name: #"layout-right-full"#, viewBox: 20.0, body: #"<g transform="matrix(-1 0 0 1 20 0)"><path d="M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z" fill="currentColor"/><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602" stroke="currentColor" stroke-linecap="square"/></g>"#, svgIcon: layoutRightFull)
-    public static let squareArrowTopRight = SVGIcon(viewBox: 20.0, paths: [#"M7.91675 2.9165H2.91675V17.0832H17.0834V12.0832M12.0834 2.9165H17.0834V7.9165M9.58342 10.4165L16.6667 3.33317"#], strokeWidth: 1.5, body: #"<path d="M7.91675 2.9165H2.91675V17.0832H17.0834V12.0832M12.0834 2.9165H17.0834V7.9165M9.58342 10.4165L16.6667 3.33317" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let squareArrowTopRightData = OpenCodeIconData(name: #"square-arrow-top-right"#, viewBox: 20.0, body: #"<path d="M7.91675 2.9165H2.91675V17.0832H17.0834V12.0832M12.0834 2.9165H17.0834V7.9165M9.58342 10.4165L16.6667 3.33317" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: squareArrowTopRight)
-    public static let openFile = SVGIcon(viewBox: 20.0, paths: [#"M7.91602 2.91406H2.91602V17.0807H17.0827V12.0807M12.0827 2.91406H17.0827V7.91406M9.58268 10.4141L16.666 3.33073"#], strokeWidth: 1.5, body: #"<path d="M7.91602 2.91406H2.91602V17.0807H17.0827V12.0807M12.0827 2.91406H17.0827V7.91406M9.58268 10.4141L16.666 3.33073" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let openFileData = OpenCodeIconData(name: #"open-file"#, viewBox: 20.0, body: #"<path d="M7.91602 2.91406H2.91602V17.0807H17.0827V12.0807M12.0827 2.91406H17.0827V7.91406M9.58268 10.4141L16.666 3.33073" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: openFile)
-    public static let speechBubble = SVGIcon(viewBox: 20.0, paths: [#"M18.3334 10.0003C18.3334 5.57324 15.0927 2.91699 10.0001 2.91699C4.90749 2.91699 1.66675 5.57324 1.66675 10.0003C1.66675 11.1497 2.45578 13.1016 2.5771 13.3949C2.5878 13.4207 2.59839 13.4444 2.60802 13.4706C2.69194 13.6996 3.04282 14.9364 1.66675 16.7684C3.5186 17.6538 5.48526 16.1982 5.48526 16.1982C6.84592 16.9202 8.46491 17.0837 10.0001 17.0837C15.0927 17.0837 18.3334 14.4274 18.3334 10.0003Z"#], strokeWidth: 1.5, body: #"<path d="M18.3334 10.0003C18.3334 5.57324 15.0927 2.91699 10.0001 2.91699C4.90749 2.91699 1.66675 5.57324 1.66675 10.0003C1.66675 11.1497 2.45578 13.1016 2.5771 13.3949C2.5878 13.4207 2.59839 13.4444 2.60802 13.4706C2.69194 13.6996 3.04282 14.9364 1.66675 16.7684C3.5186 17.6538 5.48526 16.1982 5.48526 16.1982C6.84592 16.9202 8.46491 17.0837 10.0001 17.0837C15.0927 17.0837 18.3334 14.4274 18.3334 10.0003Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let speechBubbleData = OpenCodeIconData(name: #"speech-bubble"#, viewBox: 20.0, body: #"<path d="M18.3334 10.0003C18.3334 5.57324 15.0927 2.91699 10.0001 2.91699C4.90749 2.91699 1.66675 5.57324 1.66675 10.0003C1.66675 11.1497 2.45578 13.1016 2.5771 13.3949C2.5878 13.4207 2.59839 13.4444 2.60802 13.4706C2.69194 13.6996 3.04282 14.9364 1.66675 16.7684C3.5186 17.6538 5.48526 16.1982 5.48526 16.1982C6.84592 16.9202 8.46491 17.0837 10.0001 17.0837C15.0927 17.0837 18.3334 14.4274 18.3334 10.0003Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: speechBubble)
-    public static let github = SVGIcon(viewBox: 20.0, paths: [#"M10.0001 1.62549C14.6042 1.62549 18.3334 5.35465 18.3334 9.95882C18.333 11.7049 17.785 13.4068 16.7666 14.8251C15.7482 16.2434 14.3107 17.3066 12.6563 17.8651C12.2397 17.9484 12.0834 17.688 12.0834 17.4692C12.0834 17.188 12.0938 16.2922 12.0938 15.1776C12.0938 14.3963 11.8334 13.8963 11.5313 13.6359C13.3855 13.4276 15.3334 12.7192 15.3334 9.52132C15.3334 8.60465 15.0105 7.86507 14.4792 7.28174C14.5626 7.0734 14.8542 6.21924 14.3959 5.0734C14.3959 5.0734 13.698 4.84424 12.1042 5.92757C11.4376 5.74007 10.7292 5.64632 10.0209 5.64632C9.31258 5.64632 8.60425 5.74007 7.93758 5.92757C6.34383 4.85465 5.64592 5.0734 5.64592 5.0734C5.18758 6.21924 5.47925 7.0734 5.56258 7.28174C5.03133 7.86507 4.70842 8.61507 4.70842 9.52132C4.70842 12.7088 6.64592 13.4276 8.50008 13.6359C8.2605 13.8442 8.04175 14.2088 7.96883 14.7505C7.48967 14.9692 6.29175 15.3234 5.54175 14.063C5.3855 13.813 4.91675 13.1984 4.2605 13.2088C3.56258 13.2192 3.97925 13.6047 4.27092 13.7609C4.62508 13.9588 5.03133 14.6984 5.12508 14.938C5.29175 15.4067 5.83342 16.3026 7.92717 15.9172C7.92717 16.6151 7.93758 17.2713 7.93758 17.4692C7.93758 17.688 7.78133 17.938 7.36467 17.8651C5.70491 17.3126 4.26126 16.2515 3.23851 14.8324C2.21576 13.4133 1.66583 11.7081 1.66675 9.95882C1.66675 5.35465 5.39592 1.62549 10.0001 1.62549Z"#], strokeWidth: nil, body: #"<path d="M10.0001 1.62549C14.6042 1.62549 18.3334 5.35465 18.3334 9.95882C18.333 11.7049 17.785 13.4068 16.7666 14.8251C15.7482 16.2434 14.3107 17.3066 12.6563 17.8651C12.2397 17.9484 12.0834 17.688 12.0834 17.4692C12.0834 17.188 12.0938 16.2922 12.0938 15.1776C12.0938 14.3963 11.8334 13.8963 11.5313 13.6359C13.3855 13.4276 15.3334 12.7192 15.3334 9.52132C15.3334 8.60465 15.0105 7.86507 14.4792 7.28174C14.5626 7.0734 14.8542 6.21924 14.3959 5.0734C14.3959 5.0734 13.698 4.84424 12.1042 5.92757C11.4376 5.74007 10.7292 5.64632 10.0209 5.64632C9.31258 5.64632 8.60425 5.74007 7.93758 5.92757C6.34383 4.85465 5.64592 5.0734 5.64592 5.0734C5.18758 6.21924 5.47925 7.0734 5.56258 7.28174C5.03133 7.86507 4.70842 8.61507 4.70842 9.52132C4.70842 12.7088 6.64592 13.4276 8.50008 13.6359C8.2605 13.8442 8.04175 14.2088 7.96883 14.7505C7.48967 14.9692 6.29175 15.3234 5.54175 14.063C5.3855 13.813 4.91675 13.1984 4.2605 13.2088C3.56258 13.2192 3.97925 13.6047 4.27092 13.7609C4.62508 13.9588 5.03133 14.6984 5.12508 14.938C5.29175 15.4067 5.83342 16.3026 7.92717 15.9172C7.92717 16.6151 7.93758 17.2713 7.93758 17.4692C7.93758 17.688 7.78133 17.938 7.36467 17.8651C5.70491 17.3126 4.26126 16.2515 3.23851 14.8324C2.21576 13.4133 1.66583 11.7081 1.66675 9.95882C1.66675 5.35465 5.39592 1.62549 10.0001 1.62549Z" fill="currentColor"/>"#)
-    public static let githubData = OpenCodeIconData(name: #"github"#, viewBox: 20.0, body: #"<path d="M10.0001 1.62549C14.6042 1.62549 18.3334 5.35465 18.3334 9.95882C18.333 11.7049 17.785 13.4068 16.7666 14.8251C15.7482 16.2434 14.3107 17.3066 12.6563 17.8651C12.2397 17.9484 12.0834 17.688 12.0834 17.4692C12.0834 17.188 12.0938 16.2922 12.0938 15.1776C12.0938 14.3963 11.8334 13.8963 11.5313 13.6359C13.3855 13.4276 15.3334 12.7192 15.3334 9.52132C15.3334 8.60465 15.0105 7.86507 14.4792 7.28174C14.5626 7.0734 14.8542 6.21924 14.3959 5.0734C14.3959 5.0734 13.698 4.84424 12.1042 5.92757C11.4376 5.74007 10.7292 5.64632 10.0209 5.64632C9.31258 5.64632 8.60425 5.74007 7.93758 5.92757C6.34383 4.85465 5.64592 5.0734 5.64592 5.0734C5.18758 6.21924 5.47925 7.0734 5.56258 7.28174C5.03133 7.86507 4.70842 8.61507 4.70842 9.52132C4.70842 12.7088 6.64592 13.4276 8.50008 13.6359C8.2605 13.8442 8.04175 14.2088 7.96883 14.7505C7.48967 14.9692 6.29175 15.3234 5.54175 14.063C5.3855 13.813 4.91675 13.1984 4.2605 13.2088C3.56258 13.2192 3.97925 13.6047 4.27092 13.7609C4.62508 13.9588 5.03133 14.6984 5.12508 14.938C5.29175 15.4067 5.83342 16.3026 7.92717 15.9172C7.92717 16.6151 7.93758 17.2713 7.93758 17.4692C7.93758 17.688 7.78133 17.938 7.36467 17.8651C5.70491 17.3126 4.26126 16.2515 3.23851 14.8324C2.21576 13.4133 1.66583 11.7081 1.66675 9.95882C1.66675 5.35465 5.39592 1.62549 10.0001 1.62549Z" fill="currentColor"/>"#, svgIcon: github)
-    public static let discord = SVGIcon(viewBox: 20.0, paths: [#"M16.0742 4.45014C14.9244 3.92097 13.7106 3.54556 12.4638 3.3335C12.2932 3.64011 12.1388 3.95557 12.0013 4.27856C10.6732 4.07738 9.32261 4.07738 7.99451 4.27856C7.85694 3.9556 7.70257 3.64014 7.53203 3.3335C6.28441 3.54735 5.06981 3.92365 3.91889 4.45291C1.63401 7.85128 1.01462 11.1652 1.32431 14.4322C2.6624 15.426 4.16009 16.1819 5.7523 16.6668C6.11082 16.1821 6.42806 15.6678 6.70066 15.1295C6.18289 14.9351 5.68315 14.6953 5.20723 14.4128C5.33249 14.3215 5.45499 14.2274 5.57336 14.136C6.95819 14.7907 8.46965 15.1302 9.99997 15.1302C11.5303 15.1302 13.0418 14.7907 14.4266 14.136C14.5463 14.2343 14.6688 14.3284 14.7927 14.4128C14.3159 14.6957 13.8152 14.9361 13.2965 15.1309C13.5688 15.669 13.8861 16.1828 14.2449 16.6668C15.8385 16.1838 17.3373 15.4283 18.6756 14.4335C19.039 10.645 18.0549 7.36145 16.0742 4.45014ZM7.09294 12.423C6.22992 12.423 5.51693 11.6357 5.51693 10.6671C5.51693 9.69852 6.20514 8.90427 7.09019 8.90427C7.97524 8.90427 8.68272 9.69852 8.66758 10.6671C8.65244 11.6357 7.97248 12.423 7.09294 12.423ZM12.907 12.423C12.0426 12.423 11.3324 11.6357 11.3324 10.6671C11.3324 9.69852 12.0206 8.90427 12.907 8.90427C13.7934 8.90427 14.4954 9.69852 14.4803 10.6671C14.4651 11.6357 13.7865 12.423 12.907 12.423Z"#], strokeWidth: nil, body: #"<path d="M16.0742 4.45014C14.9244 3.92097 13.7106 3.54556 12.4638 3.3335C12.2932 3.64011 12.1388 3.95557 12.0013 4.27856C10.6732 4.07738 9.32261 4.07738 7.99451 4.27856C7.85694 3.9556 7.70257 3.64014 7.53203 3.3335C6.28441 3.54735 5.06981 3.92365 3.91889 4.45291C1.63401 7.85128 1.01462 11.1652 1.32431 14.4322C2.6624 15.426 4.16009 16.1819 5.7523 16.6668C6.11082 16.1821 6.42806 15.6678 6.70066 15.1295C6.18289 14.9351 5.68315 14.6953 5.20723 14.4128C5.33249 14.3215 5.45499 14.2274 5.57336 14.136C6.95819 14.7907 8.46965 15.1302 9.99997 15.1302C11.5303 15.1302 13.0418 14.7907 14.4266 14.136C14.5463 14.2343 14.6688 14.3284 14.7927 14.4128C14.3159 14.6957 13.8152 14.9361 13.2965 15.1309C13.5688 15.669 13.8861 16.1828 14.2449 16.6668C15.8385 16.1838 17.3373 15.4283 18.6756 14.4335C19.039 10.645 18.0549 7.36145 16.0742 4.45014ZM7.09294 12.423C6.22992 12.423 5.51693 11.6357 5.51693 10.6671C5.51693 9.69852 6.20514 8.90427 7.09019 8.90427C7.97524 8.90427 8.68272 9.69852 8.66758 10.6671C8.65244 11.6357 7.97248 12.423 7.09294 12.423ZM12.907 12.423C12.0426 12.423 11.3324 11.6357 11.3324 10.6671C11.3324 9.69852 12.0206 8.90427 12.907 8.90427C13.7934 8.90427 14.4954 9.69852 14.4803 10.6671C14.4651 11.6357 13.7865 12.423 12.907 12.423Z" fill="currentColor"/>"#)
-    public static let discordData = OpenCodeIconData(name: #"discord"#, viewBox: 20.0, body: #"<path d="M16.0742 4.45014C14.9244 3.92097 13.7106 3.54556 12.4638 3.3335C12.2932 3.64011 12.1388 3.95557 12.0013 4.27856C10.6732 4.07738 9.32261 4.07738 7.99451 4.27856C7.85694 3.9556 7.70257 3.64014 7.53203 3.3335C6.28441 3.54735 5.06981 3.92365 3.91889 4.45291C1.63401 7.85128 1.01462 11.1652 1.32431 14.4322C2.6624 15.426 4.16009 16.1819 5.7523 16.6668C6.11082 16.1821 6.42806 15.6678 6.70066 15.1295C6.18289 14.9351 5.68315 14.6953 5.20723 14.4128C5.33249 14.3215 5.45499 14.2274 5.57336 14.136C6.95819 14.7907 8.46965 15.1302 9.99997 15.1302C11.5303 15.1302 13.0418 14.7907 14.4266 14.136C14.5463 14.2343 14.6688 14.3284 14.7927 14.4128C14.3159 14.6957 13.8152 14.9361 13.2965 15.1309C13.5688 15.669 13.8861 16.1828 14.2449 16.6668C15.8385 16.1838 17.3373 15.4283 18.6756 14.4335C19.039 10.645 18.0549 7.36145 16.0742 4.45014ZM7.09294 12.423C6.22992 12.423 5.51693 11.6357 5.51693 10.6671C5.51693 9.69852 6.20514 8.90427 7.09019 8.90427C7.97524 8.90427 8.68272 9.69852 8.66758 10.6671C8.65244 11.6357 7.97248 12.423 7.09294 12.423ZM12.907 12.423C12.0426 12.423 11.3324 11.6357 11.3324 10.6671C11.3324 9.69852 12.0206 8.90427 12.907 8.90427C13.7934 8.90427 14.4954 9.69852 14.4803 10.6671C14.4651 11.6357 13.7865 12.423 12.907 12.423Z" fill="currentColor"/>"#, svgIcon: discord)
-    public static let layoutBottom = SVGIcon(viewBox: 20.0, paths: [#"M2.91699 17.0832L2.41699 17.0832L2.41699 17.5832L2.91699 17.5832L2.91699 17.0832ZM2.91699 2.91653L2.91699 2.41653L2.41699 2.41653L2.41699 2.91653L2.91699 2.91653ZM17.0837 2.91653L17.5837 2.91653L17.5837 2.41653L17.0837 2.41653L17.0837 2.91653ZM17.0837 17.0832L17.5837 17.0832L17.5837 17.5832L17.0837 17.5832L17.0837 17.0832ZM17.0837 12.5827L17.5837 12.5827L17.5837 11.5827L17.0837 11.5827L17.0837 12.0827L17.0837 12.5827ZM2.91699 11.5827L2.41699 11.5827L2.41699 12.5827L2.91699 12.5827L2.91699 12.0827L2.91699 11.5827ZM2.91699 17.0832L3.41699 17.0832L3.41699 2.91653L2.91699 2.91653L2.41699 2.91653L2.41699 17.0832L2.91699 17.0832ZM2.91699 2.91653L2.91699 3.41653L17.0837 3.41653L17.0837 2.91653L17.0837 2.41653L2.91699 2.41653L2.91699 2.91653ZM17.0837 2.91653L16.5837 2.91653L16.5837 17.0832L17.0837 17.0832L17.5837 17.0832L17.5837 2.91653L17.0837 2.91653ZM17.0837 17.0832L17.0837 16.5832L2.91699 16.5832L2.91699 17.0832L2.91699 17.5832L17.0837 17.5832L17.0837 17.0832ZM17.0837 12.0827L17.0837 11.5827L2.91699 11.5827L2.91699 12.0827L2.91699 12.5827L17.0837 12.5827L17.0837 12.0827Z"#], strokeWidth: nil, body: #"<path d="M2.91699 17.0832L2.41699 17.0832L2.41699 17.5832L2.91699 17.5832L2.91699 17.0832ZM2.91699 2.91653L2.91699 2.41653L2.41699 2.41653L2.41699 2.91653L2.91699 2.91653ZM17.0837 2.91653L17.5837 2.91653L17.5837 2.41653L17.0837 2.41653L17.0837 2.91653ZM17.0837 17.0832L17.5837 17.0832L17.5837 17.5832L17.0837 17.5832L17.0837 17.0832ZM17.0837 12.5827L17.5837 12.5827L17.5837 11.5827L17.0837 11.5827L17.0837 12.0827L17.0837 12.5827ZM2.91699 11.5827L2.41699 11.5827L2.41699 12.5827L2.91699 12.5827L2.91699 12.0827L2.91699 11.5827ZM2.91699 17.0832L3.41699 17.0832L3.41699 2.91653L2.91699 2.91653L2.41699 2.91653L2.41699 17.0832L2.91699 17.0832ZM2.91699 2.91653L2.91699 3.41653L17.0837 3.41653L17.0837 2.91653L17.0837 2.41653L2.91699 2.41653L2.91699 2.91653ZM17.0837 2.91653L16.5837 2.91653L16.5837 17.0832L17.0837 17.0832L17.5837 17.0832L17.5837 2.91653L17.0837 2.91653ZM17.0837 17.0832L17.0837 16.5832L2.91699 16.5832L2.91699 17.0832L2.91699 17.5832L17.0837 17.5832L17.0837 17.0832ZM17.0837 12.0827L17.0837 11.5827L2.91699 11.5827L2.91699 12.0827L2.91699 12.5827L17.0837 12.5827L17.0837 12.0827Z" fill="currentColor"/>"#)
-    public static let layoutBottomData = OpenCodeIconData(name: #"layout-bottom"#, viewBox: 20.0, body: #"<path d="M2.91699 17.0832L2.41699 17.0832L2.41699 17.5832L2.91699 17.5832L2.91699 17.0832ZM2.91699 2.91653L2.91699 2.41653L2.41699 2.41653L2.41699 2.91653L2.91699 2.91653ZM17.0837 2.91653L17.5837 2.91653L17.5837 2.41653L17.0837 2.41653L17.0837 2.91653ZM17.0837 17.0832L17.5837 17.0832L17.5837 17.5832L17.0837 17.5832L17.0837 17.0832ZM17.0837 12.5827L17.5837 12.5827L17.5837 11.5827L17.0837 11.5827L17.0837 12.0827L17.0837 12.5827ZM2.91699 11.5827L2.41699 11.5827L2.41699 12.5827L2.91699 12.5827L2.91699 12.0827L2.91699 11.5827ZM2.91699 17.0832L3.41699 17.0832L3.41699 2.91653L2.91699 2.91653L2.41699 2.91653L2.41699 17.0832L2.91699 17.0832ZM2.91699 2.91653L2.91699 3.41653L17.0837 3.41653L17.0837 2.91653L17.0837 2.41653L2.91699 2.41653L2.91699 2.91653ZM17.0837 2.91653L16.5837 2.91653L16.5837 17.0832L17.0837 17.0832L17.5837 17.0832L17.5837 2.91653L17.0837 2.91653ZM17.0837 17.0832L17.0837 16.5832L2.91699 16.5832L2.91699 17.0832L2.91699 17.5832L17.0837 17.5832L17.0837 17.0832ZM17.0837 12.0827L17.0837 11.5827L2.91699 11.5827L2.91699 12.0827L2.91699 12.5827L17.0837 12.5827L17.0837 12.0827Z" fill="currentColor"/>"#, svgIcon: layoutBottom)
-    public static let layoutBottomPartial = SVGIcon(viewBox: 20.0, paths: [#"M2.91732 12.0827L17.084 12.0827L17.084 17.0827H2.91732L2.91732 12.0827Z"#, #"M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M17.084 2.91602L17.084 17.0827M17.084 17.0827L2.91732 17.0827M2.91732 12.0827L17.084 12.0827"#], strokeWidth: 1.5, body: #"<path d="M2.91732 12.0827L17.084 12.0827L17.084 17.0827H2.91732L2.91732 12.0827Z" fill="currentColor" fill-opacity="16%" /><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M17.084 2.91602L17.084 17.0827M17.084 17.0827L2.91732 17.0827M2.91732 12.0827L17.084 12.0827" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let layoutBottomPartialData = OpenCodeIconData(name: #"layout-bottom-partial"#, viewBox: 20.0, body: #"<path d="M2.91732 12.0827L17.084 12.0827L17.084 17.0827H2.91732L2.91732 12.0827Z" fill="currentColor" fill-opacity="16%" /><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M17.084 2.91602L17.084 17.0827M17.084 17.0827L2.91732 17.0827M2.91732 12.0827L17.084 12.0827" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: layoutBottomPartial)
-    public static let layoutBottomFull = SVGIcon(viewBox: 20.0, paths: [#"M2.91732 12.0827L17.084 12.0827L17.084 17.0827H2.91732L2.91732 12.0827Z"#, #"M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M17.084 2.91602L17.084 17.0827M17.084 17.0827L2.91732 17.0827M2.91732 12.0827L17.084 12.0827"#], strokeWidth: 1.5, body: #"<path d="M2.91732 12.0827L17.084 12.0827L17.084 17.0827H2.91732L2.91732 12.0827Z" fill="currentColor"/><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M17.084 2.91602L17.084 17.0827M17.084 17.0827L2.91732 17.0827M2.91732 12.0827L17.084 12.0827" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let layoutBottomFullData = OpenCodeIconData(name: #"layout-bottom-full"#, viewBox: 20.0, body: #"<path d="M2.91732 12.0827L17.084 12.0827L17.084 17.0827H2.91732L2.91732 12.0827Z" fill="currentColor"/><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M17.084 2.91602L17.084 17.0827M17.084 17.0827L2.91732 17.0827M2.91732 12.0827L17.084 12.0827" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: layoutBottomFull)
-    public static let dotGrid = SVGIcon(viewBox: 20.0, paths: [#"M2.08398 9.16602H3.75065V10.8327H2.08398V9.16602Z"#, #"M10.834 9.16602H9.16732V10.8327H10.834V9.16602Z"#, #"M16.2507 9.16602H17.9173V10.8327H16.2507V9.16602Z"#, #"M2.08398 9.16602H3.75065V10.8327H2.08398V9.16602Z"#, #"M10.834 9.16602H9.16732V10.8327H10.834V9.16602Z"#, #"M16.2507 9.16602H17.9173V10.8327H16.2507V9.16602Z"#], strokeWidth: 1.5, body: #"<path d="M2.08398 9.16602H3.75065V10.8327H2.08398V9.16602Z" fill="currentColor"/><path d="M10.834 9.16602H9.16732V10.8327H10.834V9.16602Z" fill="currentColor"/><path d="M16.2507 9.16602H17.9173V10.8327H16.2507V9.16602Z" fill="currentColor"/><path d="M2.08398 9.16602H3.75065V10.8327H2.08398V9.16602Z" stroke="currentColor"/><path d="M10.834 9.16602H9.16732V10.8327H10.834V9.16602Z" stroke="currentColor"/><path d="M16.2507 9.16602H17.9173V10.8327H16.2507V9.16602Z" stroke="currentColor"/>"#)
-    public static let dotGridData = OpenCodeIconData(name: #"dot-grid"#, viewBox: 20.0, body: #"<path d="M2.08398 9.16602H3.75065V10.8327H2.08398V9.16602Z" fill="currentColor"/><path d="M10.834 9.16602H9.16732V10.8327H10.834V9.16602Z" fill="currentColor"/><path d="M16.2507 9.16602H17.9173V10.8327H16.2507V9.16602Z" fill="currentColor"/><path d="M2.08398 9.16602H3.75065V10.8327H2.08398V9.16602Z" stroke="currentColor"/><path d="M10.834 9.16602H9.16732V10.8327H10.834V9.16602Z" stroke="currentColor"/><path d="M16.2507 9.16602H17.9173V10.8327H16.2507V9.16602Z" stroke="currentColor"/>"#, svgIcon: dotGrid)
-    public static let circleCheck = SVGIcon(viewBox: 20.0, paths: [#"M12.4987 7.91732L8.7487 12.5007L7.08203 10.834M17.9154 10.0007C17.9154 14.3729 14.371 17.9173 9.9987 17.9173C5.62644 17.9173 2.08203 14.3729 2.08203 10.0007C2.08203 5.6284 5.62644 2.08398 9.9987 2.08398C14.371 2.08398 17.9154 5.6284 17.9154 10.0007Z"#], strokeWidth: 1.5, body: #"<path d="M12.4987 7.91732L8.7487 12.5007L7.08203 10.834M17.9154 10.0007C17.9154 14.3729 14.371 17.9173 9.9987 17.9173C5.62644 17.9173 2.08203 14.3729 2.08203 10.0007C2.08203 5.6284 5.62644 2.08398 9.9987 2.08398C14.371 2.08398 17.9154 5.6284 17.9154 10.0007Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let circleCheckData = OpenCodeIconData(name: #"circle-check"#, viewBox: 20.0, body: #"<path d="M12.4987 7.91732L8.7487 12.5007L7.08203 10.834M17.9154 10.0007C17.9154 14.3729 14.371 17.9173 9.9987 17.9173C5.62644 17.9173 2.08203 14.3729 2.08203 10.0007C2.08203 5.6284 5.62644 2.08398 9.9987 2.08398C14.371 2.08398 17.9154 5.6284 17.9154 10.0007Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: circleCheck)
-    public static let circleCheckBold = SVGIcon(viewBox: 20.0, paths: [#"M12.4987 7.91732L8.7487 12.5007L7.08203 10.834M17.9154 10.0007C17.9154 14.3729 14.371 17.9173 9.9987 17.9173C5.62644 17.9173 2.08203 14.3729 2.08203 10.0007C2.08203 5.6284 5.62644 2.08398 9.9987 2.08398C14.371 2.08398 17.9154 5.6284 17.9154 10.0007Z"#], strokeWidth: 1.5, body: #"<path d="M12.4987 7.91732L8.7487 12.5007L7.08203 10.834M17.9154 10.0007C17.9154 14.3729 14.371 17.9173 9.9987 17.9173C5.62644 17.9173 2.08203 14.3729 2.08203 10.0007C2.08203 5.6284 5.62644 2.08398 9.9987 2.08398C14.371 2.08398 17.9154 5.6284 17.9154 10.0007Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"/>"#)
-    public static let circleCheckBoldData = OpenCodeIconData(name: #"circle-check-bold"#, viewBox: 20.0, body: #"<path d="M12.4987 7.91732L8.7487 12.5007L7.08203 10.834M17.9154 10.0007C17.9154 14.3729 14.371 17.9173 9.9987 17.9173C5.62644 17.9173 2.08203 14.3729 2.08203 10.0007C2.08203 5.6284 5.62644 2.08398 9.9987 2.08398C14.371 2.08398 17.9154 5.6284 17.9154 10.0007Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"/>"#, svgIcon: circleCheckBold)
-    public static let copyData = OpenCodeIconData(name: #"copy"#, viewBox: 20.0, body: #"<path d="M6.2513 6.24935V2.91602H17.0846V13.7493H13.7513M13.7513 6.24935V17.0827H2.91797V6.24935H13.7513Z" stroke="currentColor" stroke-linecap="round"/>"#, svgIcon: copy)
-    public static let photo = SVGIcon(viewBox: 20.0, paths: [#"M16.6665 16.6666L11.6665 11.6666L9.99984 13.3333L6.6665 9.99996L3.08317 13.5833M2.9165 2.91663H17.0832V17.0833H2.9165V2.91663ZM13.3332 7.49996C13.3332 8.30537 12.6803 8.95829 11.8748 8.95829C11.0694 8.95829 10.4165 8.30537 10.4165 7.49996C10.4165 6.69454 11.0694 6.04163 11.8748 6.04163C12.6803 6.04163 13.3332 6.69454 13.3332 7.49996Z"#], strokeWidth: 1.5, body: #"<path d="M16.6665 16.6666L11.6665 11.6666L9.99984 13.3333L6.6665 9.99996L3.08317 13.5833M2.9165 2.91663H17.0832V17.0833H2.9165V2.91663ZM13.3332 7.49996C13.3332 8.30537 12.6803 8.95829 11.8748 8.95829C11.0694 8.95829 10.4165 8.30537 10.4165 7.49996C10.4165 6.69454 11.0694 6.04163 11.8748 6.04163C12.6803 6.04163 13.3332 6.69454 13.3332 7.49996Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let photoData = OpenCodeIconData(name: #"photo"#, viewBox: 20.0, body: #"<path d="M16.6665 16.6666L11.6665 11.6666L9.99984 13.3333L6.6665 9.99996L3.08317 13.5833M2.9165 2.91663H17.0832V17.0833H2.9165V2.91663ZM13.3332 7.49996C13.3332 8.30537 12.6803 8.95829 11.8748 8.95829C11.0694 8.95829 10.4165 8.30537 10.4165 7.49996C10.4165 6.69454 11.0694 6.04163 11.8748 6.04163C12.6803 6.04163 13.3332 6.69454 13.3332 7.49996Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: photo)
-    public static let share = SVGIcon(viewBox: 20.0, paths: [#"M10.0013 12.0846L10.0013 3.33464M13.7513 6.66797L10.0013 2.91797L6.2513 6.66797M17.0846 10.418V17.0846H2.91797V10.418"#], strokeWidth: 1.5, body: #"<path d="M10.0013 12.0846L10.0013 3.33464M13.7513 6.66797L10.0013 2.91797L6.2513 6.66797M17.0846 10.418V17.0846H2.91797V10.418" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let shareData = OpenCodeIconData(name: #"share"#, viewBox: 20.0, body: #"<path d="M10.0013 12.0846L10.0013 3.33464M13.7513 6.66797L10.0013 2.91797L6.2513 6.66797M17.0846 10.418V17.0846H2.91797V10.418" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: share)
-    public static let shield = SVGIcon(viewBox: 20.0, paths: [#"M7.49935 9.3737L9.16602 11.0404L12.4994 7.70703M9.99935 2.08203L17.0827 4.3737V9.92565C17.0827 14.0694 13.3327 16.2487 9.99935 18.047C6.66602 16.2487 2.91602 14.0694 2.91602 9.92565V4.3737L9.99935 2.08203Z"#], strokeWidth: 1.5, body: #"<path d="M7.49935 9.3737L9.16602 11.0404L12.4994 7.70703M9.99935 2.08203L17.0827 4.3737V9.92565C17.0827 14.0694 13.3327 16.2487 9.99935 18.047C6.66602 16.2487 2.91602 14.0694 2.91602 9.92565V4.3737L9.99935 2.08203Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let shieldData = OpenCodeIconData(name: #"shield"#, viewBox: 20.0, body: #"<path d="M7.49935 9.3737L9.16602 11.0404L12.4994 7.70703M9.99935 2.08203L17.0827 4.3737V9.92565C17.0827 14.0694 13.3327 16.2487 9.99935 18.047C6.66602 16.2487 2.91602 14.0694 2.91602 9.92565V4.3737L9.99935 2.08203Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: shield)
-    public static let download = SVGIcon(viewBox: 20.0, paths: [#"M13.9583 10.6257L10 14.584L6.04167 10.6257M10 2.08398V13.959M16.25 17.9173H3.75"#], strokeWidth: 1.5, body: #"<path d="M13.9583 10.6257L10 14.584L6.04167 10.6257M10 2.08398V13.959M16.25 17.9173H3.75" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let downloadData = OpenCodeIconData(name: #"download"#, viewBox: 20.0, body: #"<path d="M13.9583 10.6257L10 14.584L6.04167 10.6257M10 2.08398V13.959M16.25 17.9173H3.75" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: download)
-    public static let server = SVGIcon(viewBox: 20.0, paths: [], strokeWidth: 1.5, body: #"<rect x="3.35547" y="1.92969" width="13.2857" height="16.1429" stroke="currentColor"/><rect x="3.35547" y="11.9297" width="13.2857" height="6.14286" stroke="currentColor"/><rect x="12.8555" y="14.2852" width="1.42857" height="1.42857" fill="currentColor"/><rect x="10" y="14.2852" width="1.42857" height="1.42857" fill="currentColor"/>"#)
-    public static let serverData = OpenCodeIconData(name: #"server"#, viewBox: 20.0, body: #"<rect x="3.35547" y="1.92969" width="13.2857" height="16.1429" stroke="currentColor"/><rect x="3.35547" y="11.9297" width="13.2857" height="6.14286" stroke="currentColor"/><rect x="12.8555" y="14.2852" width="1.42857" height="1.42857" fill="currentColor"/><rect x="10" y="14.2852" width="1.42857" height="1.42857" fill="currentColor"/>"#, svgIcon: server)
-    public static let dash = SVGIcon(viewBox: 20.0, paths: [], strokeWidth: nil, body: #"<rect x="5" y="9.5" width="10" height="1" fill="currentColor"/>"#)
-    public static let dashData = OpenCodeIconData(name: #"dash"#, viewBox: 20.0, body: #"<rect x="5" y="9.5" width="10" height="1" fill="currentColor"/>"#, svgIcon: dash)
-    public static let dashBold = SVGIcon(viewBox: 20.0, paths: [], strokeWidth: nil, body: #"<rect x="5" y="9.5" width="10" height="1" fill="currentColor"/>"#)
-    public static let dashBoldData = OpenCodeIconData(name: #"dash-bold"#, viewBox: 20.0, body: #"<rect x="5" y="9.5" width="10" height="1" fill="currentColor"/>"#, svgIcon: dashBold)
-    public static let cloudUpload = SVGIcon(viewBox: 20.0, paths: [#"M12.0833 16.25H15C17.0711 16.25 18.75 14.5711 18.75 12.5C18.75 10.5649 17.2843 8.97217 15.4025 8.77133C15.2 6.13103 12.8586 4.08333 10 4.08333C7.71532 4.08333 5.76101 5.49781 4.96501 7.49881C2.84892 7.90461 1.25 9.76559 1.25 11.6667C1.25 13.9813 3.30203 16.25 5.83333 16.25H7.91667M10 16.25V10.4167M12.0833 11.875L10 9.79167L7.91667 11.875"#], strokeWidth: 1.5, body: #"<path d="M12.0833 16.25H15C17.0711 16.25 18.75 14.5711 18.75 12.5C18.75 10.5649 17.2843 8.97217 15.4025 8.77133C15.2 6.13103 12.8586 4.08333 10 4.08333C7.71532 4.08333 5.76101 5.49781 4.96501 7.49881C2.84892 7.90461 1.25 9.76559 1.25 11.6667C1.25 13.9813 3.30203 16.25 5.83333 16.25H7.91667M10 16.25V10.4167M12.0833 11.875L10 9.79167L7.91667 11.875" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let cloudUploadData = OpenCodeIconData(name: #"cloud-upload"#, viewBox: 20.0, body: #"<path d="M12.0833 16.25H15C17.0711 16.25 18.75 14.5711 18.75 12.5C18.75 10.5649 17.2843 8.97217 15.4025 8.77133C15.2 6.13103 12.8586 4.08333 10 4.08333C7.71532 4.08333 5.76101 5.49781 4.96501 7.49881C2.84892 7.90461 1.25 9.76559 1.25 11.6667C1.25 13.9813 3.30203 16.25 5.83333 16.25H7.91667M10 16.25V10.4167M12.0833 11.875L10 9.79167L7.91667 11.875" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: cloudUpload)
-    public static let sliders = SVGIcon(viewBox: 16.0, paths: [#"M11.7778 4.66797H14.4444M11.7778 4.66797C11.7778 5.77254 10.8823 6.66797 9.77776 6.66797C8.67319 6.66797 7.77776 5.77254 7.77776 4.66797M11.7778 4.66797C11.7778 3.5634 10.8823 2.66797 9.77776 2.66797C8.67319 2.66797 7.77776 3.5634 7.77776 4.66797M1.55554 4.66797H7.77776M4.22221 11.3346H1.55554M4.22221 11.3346C4.22221 12.4392 5.11764 13.3346 6.22221 13.3346C7.32678 13.3346 8.22221 12.4392 8.22221 11.3346M4.22221 11.3346C4.22221 10.2301 5.11764 9.33464 6.22221 9.33464C7.32678 9.33464 8.22221 10.2301 8.22221 11.3346M14.4444 11.3346H8.22221"#], strokeWidth: 1.5, body: #"<path d="M11.7778 4.66797H14.4444M11.7778 4.66797C11.7778 5.77254 10.8823 6.66797 9.77776 6.66797C8.67319 6.66797 7.77776 5.77254 7.77776 4.66797M11.7778 4.66797C11.7778 3.5634 10.8823 2.66797 9.77776 2.66797C8.67319 2.66797 7.77776 3.5634 7.77776 4.66797M1.55554 4.66797H7.77776M4.22221 11.3346H1.55554M4.22221 11.3346C4.22221 12.4392 5.11764 13.3346 6.22221 13.3346C7.32678 13.3346 8.22221 12.4392 8.22221 11.3346M4.22221 11.3346C4.22221 10.2301 5.11764 9.33464 6.22221 9.33464C7.32678 9.33464 8.22221 10.2301 8.22221 11.3346M14.4444 11.3346H8.22221" stroke="currentColor"/>"#)
-    public static let slidersData = OpenCodeIconData(name: #"sliders"#, viewBox: 16.0, body: #"<path d="M11.7778 4.66797H14.4444M11.7778 4.66797C11.7778 5.77254 10.8823 6.66797 9.77776 6.66797C8.67319 6.66797 7.77776 5.77254 7.77776 4.66797M11.7778 4.66797C11.7778 3.5634 10.8823 2.66797 9.77776 2.66797C8.67319 2.66797 7.77776 3.5634 7.77776 4.66797M1.55554 4.66797H7.77776M4.22221 11.3346H1.55554M4.22221 11.3346C4.22221 12.4392 5.11764 13.3346 6.22221 13.3346C7.32678 13.3346 8.22221 12.4392 8.22221 11.3346M4.22221 11.3346C4.22221 10.2301 5.11764 9.33464 6.22221 9.33464C7.32678 9.33464 8.22221 10.2301 8.22221 11.3346M14.4444 11.3346H8.22221" stroke="currentColor"/>"#, svgIcon: sliders)
-    public static let keyboard = SVGIcon(viewBox: 20.0, paths: [#"M5.125 7.375V4.375H14.875V2.875M8.3125 13.9375H11.6875M8.125 13.9375H11.875M2.125 7.375H17.875V17.125H2.125V7.375ZM5.5 10.375H5.125V10.75H5.5V10.375ZM8.5 10.375H8.125V10.75H8.5V10.375ZM11.875 10.375H11.5V10.75H11.875V10.375ZM14.875 10.375H14.5V10.75H14.875V10.375ZM14.875 13.75H14.5V14.125H14.875V13.75ZM5.5 13.75H5.125V14.125H5.5V13.75Z"#], strokeWidth: 1.5, body: #"<path d="M5.125 7.375V4.375H14.875V2.875M8.3125 13.9375H11.6875M8.125 13.9375H11.875M2.125 7.375H17.875V17.125H2.125V7.375ZM5.5 10.375H5.125V10.75H5.5V10.375ZM8.5 10.375H8.125V10.75H8.5V10.375ZM11.875 10.375H11.5V10.75H11.875V10.375ZM14.875 10.375H14.5V10.75H14.875V10.375ZM14.875 13.75H14.5V14.125H14.875V13.75ZM5.5 13.75H5.125V14.125H5.5V13.75Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let keyboardData = OpenCodeIconData(name: #"keyboard"#, viewBox: 20.0, body: #"<path d="M5.125 7.375V4.375H14.875V2.875M8.3125 13.9375H11.6875M8.125 13.9375H11.875M2.125 7.375H17.875V17.125H2.125V7.375ZM5.5 10.375H5.125V10.75H5.5V10.375ZM8.5 10.375H8.125V10.75H8.5V10.375ZM11.875 10.375H11.5V10.75H11.875V10.375ZM14.875 10.375H14.5V10.75H14.875V10.375ZM14.875 13.75H14.5V14.125H14.875V13.75ZM5.5 13.75H5.125V14.125H5.5V13.75Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: keyboard)
-    public static let selector = SVGIcon(viewBox: 20.0, paths: [#"M6.66626 12.5033L9.99959 15.8366L13.3329 12.5033M6.66626 7.50326L9.99959 4.16992L13.3329 7.50326"#], strokeWidth: 1.5, body: #"<path d="M6.66626 12.5033L9.99959 15.8366L13.3329 12.5033M6.66626 7.50326L9.99959 4.16992L13.3329 7.50326" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let selectorData = OpenCodeIconData(name: #"selector"#, viewBox: 20.0, body: #"<path d="M6.66626 12.5033L9.99959 15.8366L13.3329 12.5033M6.66626 7.50326L9.99959 4.16992L13.3329 7.50326" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: selector)
-    public static let arrowDownToLine = SVGIcon(viewBox: 20.0, paths: [#"M15.2083 11.6667L10 16.875L4.79167 11.6667M10 16.25V3.125"#], strokeWidth: 1.25, body: #"<path d="M15.2083 11.6667L10 16.875L4.79167 11.6667M10 16.25V3.125" stroke="currentColor" stroke-width="1.25" stroke-linecap="square"/>"#)
-    public static let arrowDownToLineData = OpenCodeIconData(name: #"arrow-down-to-line"#, viewBox: 20.0, body: #"<path d="M15.2083 11.6667L10 16.875L4.79167 11.6667M10 16.25V3.125" stroke="currentColor" stroke-width="1.25" stroke-linecap="square"/>"#, svgIcon: arrowDownToLine)
-    public static let warning = SVGIcon(viewBox: 20.0, paths: [#"M10 7.91667V11.6667M10 13.7417V13.75M10 2.5L1.875 16.25H18.125L10 2.5Z"#], strokeWidth: 1.5, body: #"<path d="M10 7.91667V11.6667M10 13.7417V13.75M10 2.5L1.875 16.25H18.125L10 2.5Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let warningData = OpenCodeIconData(name: #"warning"#, viewBox: 20.0, body: #"<path d="M10 7.91667V11.6667M10 13.7417V13.75M10 2.5L1.875 16.25H18.125L10 2.5Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: warning)
-    public static let warningBold = SVGIcon(viewBox: 20.0, paths: [#"M10 7.91667V11.6667M10 13.7417V13.75M10 2.5L1.875 16.25H18.125L10 2.5Z"#], strokeWidth: 1.5, body: #"<path d="M10 7.91667V11.6667M10 13.7417V13.75M10 2.5L1.875 16.25H18.125L10 2.5Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"/>"#)
-    public static let warningBoldData = OpenCodeIconData(name: #"warning-bold"#, viewBox: 20.0, body: #"<path d="M10 7.91667V11.6667M10 13.7417V13.75M10 2.5L1.875 16.25H18.125L10 2.5Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"/>"#, svgIcon: warningBold)
-    public static let link = SVGIcon(viewBox: 20.0, paths: [#"M2.08334 12.0833L1.72979 11.7298L1.37624 12.0833L1.72979 12.4369L2.08334 12.0833ZM7.91668 17.9167L7.56312 18.2702L7.91668 18.6238L8.27023 18.2702L7.91668 17.9167ZM17.9167 7.91666L18.2702 8.27022L18.6238 7.91666L18.2702 7.56311L17.9167 7.91666ZM12.0833 2.08333L12.4369 1.72977L12.0833 1.37622L11.7298 1.72977L12.0833 2.08333ZM8.39646 5.06311L8.0429 5.41666L8.75001 6.12377L9.10356 5.77021L8.75001 5.41666L8.39646 5.06311ZM5.77023 9.10355L6.12378 8.74999L5.41668 8.04289L5.06312 8.39644L5.41668 8.74999L5.77023 9.10355ZM14.2298 10.8964L13.8762 11.25L14.5833 11.9571L14.9369 11.6035L14.5833 11.25L14.2298 10.8964ZM11.6036 14.9369L11.9571 14.5833L11.25 13.8762L10.8965 14.2298L11.25 14.5833L11.6036 14.9369ZM7.14646 12.1464L6.7929 12.5L7.50001 13.2071L7.85356 12.8535L7.50001 12.5L7.14646 12.1464ZM12.8536 7.85355L13.2071 7.49999L12.5 6.79289L12.1465 7.14644L12.5 7.49999L12.8536 7.85355ZM2.08334 12.0833L1.72979 12.4369L7.56312 18.2702L7.91668 17.9167L8.27023 17.5631L2.4369 11.7298L2.08334 12.0833ZM17.9167 7.91666L18.2702 7.56311L12.4369 1.72977L12.0833 2.08333L11.7298 2.43688L17.5631 8.27022L17.9167 7.91666ZM12.0833 2.08333L11.7298 1.72977L8.39646 5.06311L8.75001 5.41666L9.10356 5.77021L12.4369 2.43688L12.0833 2.08333ZM5.41668 8.74999L5.06312 8.39644L1.72979 11.7298L2.08334 12.0833L2.4369 12.4369L5.77023 9.10355L5.41668 8.74999ZM14.5833 11.25L14.9369 11.6035L18.2702 8.27022L17.9167 7.91666L17.5631 7.56311L14.2298 10.8964L14.5833 11.25ZM7.91668 17.9167L8.27023 18.2702L11.6036 14.9369L11.25 14.5833L10.8965 14.2298L7.56312 17.5631L7.91668 17.9167ZM7.50001 12.5L7.85356 12.8535L12.8536 7.85355L12.5 7.49999L12.1465 7.14644L7.14646 12.1464L7.50001 12.5Z"#], strokeWidth: nil, body: #"<path d="M2.08334 12.0833L1.72979 11.7298L1.37624 12.0833L1.72979 12.4369L2.08334 12.0833ZM7.91668 17.9167L7.56312 18.2702L7.91668 18.6238L8.27023 18.2702L7.91668 17.9167ZM17.9167 7.91666L18.2702 8.27022L18.6238 7.91666L18.2702 7.56311L17.9167 7.91666ZM12.0833 2.08333L12.4369 1.72977L12.0833 1.37622L11.7298 1.72977L12.0833 2.08333ZM8.39646 5.06311L8.0429 5.41666L8.75001 6.12377L9.10356 5.77021L8.75001 5.41666L8.39646 5.06311ZM5.77023 9.10355L6.12378 8.74999L5.41668 8.04289L5.06312 8.39644L5.41668 8.74999L5.77023 9.10355ZM14.2298 10.8964L13.8762 11.25L14.5833 11.9571L14.9369 11.6035L14.5833 11.25L14.2298 10.8964ZM11.6036 14.9369L11.9571 14.5833L11.25 13.8762L10.8965 14.2298L11.25 14.5833L11.6036 14.9369ZM7.14646 12.1464L6.7929 12.5L7.50001 13.2071L7.85356 12.8535L7.50001 12.5L7.14646 12.1464ZM12.8536 7.85355L13.2071 7.49999L12.5 6.79289L12.1465 7.14644L12.5 7.49999L12.8536 7.85355ZM2.08334 12.0833L1.72979 12.4369L7.56312 18.2702L7.91668 17.9167L8.27023 17.5631L2.4369 11.7298L2.08334 12.0833ZM17.9167 7.91666L18.2702 7.56311L12.4369 1.72977L12.0833 2.08333L11.7298 2.43688L17.5631 8.27022L17.9167 7.91666ZM12.0833 2.08333L11.7298 1.72977L8.39646 5.06311L8.75001 5.41666L9.10356 5.77021L12.4369 2.43688L12.0833 2.08333ZM5.41668 8.74999L5.06312 8.39644L1.72979 11.7298L2.08334 12.0833L2.4369 12.4369L5.77023 9.10355L5.41668 8.74999ZM14.5833 11.25L14.9369 11.6035L18.2702 8.27022L17.9167 7.91666L17.5631 7.56311L14.2298 10.8964L14.5833 11.25ZM7.91668 17.9167L8.27023 18.2702L11.6036 14.9369L11.25 14.5833L10.8965 14.2298L7.56312 17.5631L7.91668 17.9167ZM7.50001 12.5L7.85356 12.8535L12.8536 7.85355L12.5 7.49999L12.1465 7.14644L7.14646 12.1464L7.50001 12.5Z" fill="currentColor"/>"#)
-    public static let linkData = OpenCodeIconData(name: #"link"#, viewBox: 20.0, body: #"<path d="M2.08334 12.0833L1.72979 11.7298L1.37624 12.0833L1.72979 12.4369L2.08334 12.0833ZM7.91668 17.9167L7.56312 18.2702L7.91668 18.6238L8.27023 18.2702L7.91668 17.9167ZM17.9167 7.91666L18.2702 8.27022L18.6238 7.91666L18.2702 7.56311L17.9167 7.91666ZM12.0833 2.08333L12.4369 1.72977L12.0833 1.37622L11.7298 1.72977L12.0833 2.08333ZM8.39646 5.06311L8.0429 5.41666L8.75001 6.12377L9.10356 5.77021L8.75001 5.41666L8.39646 5.06311ZM5.77023 9.10355L6.12378 8.74999L5.41668 8.04289L5.06312 8.39644L5.41668 8.74999L5.77023 9.10355ZM14.2298 10.8964L13.8762 11.25L14.5833 11.9571L14.9369 11.6035L14.5833 11.25L14.2298 10.8964ZM11.6036 14.9369L11.9571 14.5833L11.25 13.8762L10.8965 14.2298L11.25 14.5833L11.6036 14.9369ZM7.14646 12.1464L6.7929 12.5L7.50001 13.2071L7.85356 12.8535L7.50001 12.5L7.14646 12.1464ZM12.8536 7.85355L13.2071 7.49999L12.5 6.79289L12.1465 7.14644L12.5 7.49999L12.8536 7.85355ZM2.08334 12.0833L1.72979 12.4369L7.56312 18.2702L7.91668 17.9167L8.27023 17.5631L2.4369 11.7298L2.08334 12.0833ZM17.9167 7.91666L18.2702 7.56311L12.4369 1.72977L12.0833 2.08333L11.7298 2.43688L17.5631 8.27022L17.9167 7.91666ZM12.0833 2.08333L11.7298 1.72977L8.39646 5.06311L8.75001 5.41666L9.10356 5.77021L12.4369 2.43688L12.0833 2.08333ZM5.41668 8.74999L5.06312 8.39644L1.72979 11.7298L2.08334 12.0833L2.4369 12.4369L5.77023 9.10355L5.41668 8.74999ZM14.5833 11.25L14.9369 11.6035L18.2702 8.27022L17.9167 7.91666L17.5631 7.56311L14.2298 10.8964L14.5833 11.25ZM7.91668 17.9167L8.27023 18.2702L11.6036 14.9369L11.25 14.5833L10.8965 14.2298L7.56312 17.5631L7.91668 17.9167ZM7.50001 12.5L7.85356 12.8535L12.8536 7.85355L12.5 7.49999L12.1465 7.14644L7.14646 12.1464L7.50001 12.5Z" fill="currentColor"/>"#, svgIcon: link)
-    public static let providers = SVGIcon(viewBox: 16.0, paths: [#"M5.11115 3.33252H10.8889M5.11115 3.33252L3.33337 3.33254V12.6658H5.11115M5.11115 3.33252L5.11108 1.55469M10.8889 3.33252L12.6667 3.33252V12.6658H10.8889M10.8889 3.33252L10.8889 1.55469M10.8889 12.6658H5.11115M10.8889 12.6658L10.8889 14.4435M5.11115 12.6658L5.11108 14.4435M8 1.55469V3.33247M14.4444 7.99915H12.6666M14.4444 5.11023H12.6666M14.4444 10.8881H12.6666M8 14.4435V12.6658M1.55554 7.99915H3.33332M1.55554 10.8881H3.33332M1.55554 5.11023H3.33332M6 9.99915V5.99915H10V9.99915H6Z"#], strokeWidth: 1.5, body: #"<path d="M5.11115 3.33252H10.8889M5.11115 3.33252L3.33337 3.33254V12.6658H5.11115M5.11115 3.33252L5.11108 1.55469M10.8889 3.33252L12.6667 3.33252V12.6658H10.8889M10.8889 3.33252L10.8889 1.55469M10.8889 12.6658H5.11115M10.8889 12.6658L10.8889 14.4435M5.11115 12.6658L5.11108 14.4435M8 1.55469V3.33247M14.4444 7.99915H12.6666M14.4444 5.11023H12.6666M14.4444 10.8881H12.6666M8 14.4435V12.6658M1.55554 7.99915H3.33332M1.55554 10.8881H3.33332M1.55554 5.11023H3.33332M6 9.99915V5.99915H10V9.99915H6Z" stroke="currentColor"/>"#)
-    public static let providersData = OpenCodeIconData(name: #"providers"#, viewBox: 16.0, body: #"<path d="M5.11115 3.33252H10.8889M5.11115 3.33252L3.33337 3.33254V12.6658H5.11115M5.11115 3.33252L5.11108 1.55469M10.8889 3.33252L12.6667 3.33252V12.6658H10.8889M10.8889 3.33252L10.8889 1.55469M10.8889 12.6658H5.11115M10.8889 12.6658L10.8889 14.4435M5.11115 12.6658L5.11108 14.4435M8 1.55469V3.33247M14.4444 7.99915H12.6666M14.4444 5.11023H12.6666M14.4444 10.8881H12.6666M8 14.4435V12.6658M1.55554 7.99915H3.33332M1.55554 10.8881H3.33332M1.55554 5.11023H3.33332M6 9.99915V5.99915H10V9.99915H6Z" stroke="currentColor"/>"#, svgIcon: providers)
-    public static let models = SVGIcon(viewBox: 16.0, paths: [#"M14 8C9.83336 8 8 9.83336 8 14C8 9.83336 6.16666 8 2 8C6.16666 8 8 6.16666 8 2C8 6.16666 9.83336 8 14 8Z"#], strokeWidth: 1.5, body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M14 8C9.83336 8 8 9.83336 8 14C8 9.83336 6.16666 8 2 8C6.16666 8 8 6.16666 8 2C8 6.16666 9.83336 8 14 8Z" stroke="currentColor"/>"#)
-    public static let modelsData = OpenCodeIconData(name: #"models"#, viewBox: 16.0, body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M14 8C9.83336 8 8 9.83336 8 14C8 9.83336 6.16666 8 2 8C6.16666 8 8 6.16666 8 2C8 6.16666 9.83336 8 14 8Z" stroke="currentColor"/>"#, svgIcon: models)
-    public static let appearance = SVGIcon(viewBox: 16.0, paths: [#"M2.00012 13.9997L13.9998 2"#, #"M2.00012 8.35278L8.3529 2"#, #"M2.00012 2.70586L2.70599 2"#, #"M7.64722 14.0012L14 7.64844"#, #"M13.2935 13.9988L13.9993 13.293"#], strokeWidth: 1.5, body: #"<path d="M2.00012 13.9997L13.9998 2" stroke="currentColor" stroke-linecap="square"/><path d="M2.00012 8.35278L8.3529 2" stroke="currentColor" stroke-linecap="square"/><path d="M2.00012 2.70586L2.70599 2" stroke="currentColor" stroke-linecap="square"/><path d="M7.64722 14.0012L14 7.64844" stroke="currentColor" stroke-linecap="square"/><path d="M13.2935 13.9988L13.9993 13.293" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let appearanceData = OpenCodeIconData(name: #"appearance"#, viewBox: 16.0, body: #"<path d="M2.00012 13.9997L13.9998 2" stroke="currentColor" stroke-linecap="square"/><path d="M2.00012 8.35278L8.3529 2" stroke="currentColor" stroke-linecap="square"/><path d="M2.00012 2.70586L2.70599 2" stroke="currentColor" stroke-linecap="square"/><path d="M7.64722 14.0012L14 7.64844" stroke="currentColor" stroke-linecap="square"/><path d="M13.2935 13.9988L13.9993 13.293" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: appearance)
-    public static let notifications = SVGIcon(viewBox: 16.0, paths: [#"M14.8889 6.77778V9.11112C14.8889 10.093 14.8889 10.8889 14.8889 10.8889H11.3334M5.55558 10.8889H2C2 10.8889 2.00001 10.093 2.00001 9.11112V3.77778C2.00001 2.79594 2.00009 2 2.00009 2H9.44531M5.55558 10.8889V13.1111H8.44447H11.3334V10.8889M5.55558 10.8889H11.3334"#, #"M13 5C14.1046 5 15 4.10457 15 3C15 1.89543 14.1046 1 13 1C11.8954 1 11 1.89543 11 3C11 4.10457 11.8954 5 13 5Z"#], strokeWidth: 1.5, body: #"<path d="M14.8889 6.77778V9.11112C14.8889 10.093 14.8889 10.8889 14.8889 10.8889H11.3334M5.55558 10.8889H2C2 10.8889 2.00001 10.093 2.00001 9.11112V3.77778C2.00001 2.79594 2.00009 2 2.00009 2H9.44531M5.55558 10.8889V13.1111H8.44447H11.3334V10.8889M5.55558 10.8889H11.3334" stroke="currentColor"/><path d="M13 5C14.1046 5 15 4.10457 15 3C15 1.89543 14.1046 1 13 1C11.8954 1 11 1.89543 11 3C11 4.10457 11.8954 5 13 5Z" stroke="currentColor"/>"#)
-    public static let notificationsData = OpenCodeIconData(name: #"notifications"#, viewBox: 16.0, body: #"<path d="M14.8889 6.77778V9.11112C14.8889 10.093 14.8889 10.8889 14.8889 10.8889H11.3334M5.55558 10.8889H2C2 10.8889 2.00001 10.093 2.00001 9.11112V3.77778C2.00001 2.79594 2.00009 2 2.00009 2H9.44531M5.55558 10.8889V13.1111H8.44447H11.3334V10.8889M5.55558 10.8889H11.3334" stroke="currentColor"/><path d="M13 5C14.1046 5 15 4.10457 15 3C15 1.89543 14.1046 1 13 1C11.8954 1 11 1.89543 11 3C11 4.10457 11.8954 5 13 5Z" stroke="currentColor"/>"#, svgIcon: notifications)
-    public static let extensions = SVGIcon(viewBox: 16.0, paths: [#"M8 6.75047V9.25047M10.668 6.75047V9.25047M5.33398 6.75047V9.25047M1.33398 2.44531V13.5553H14.6673V2.44531H1.33398Z"#], strokeWidth: 1.5, body: #"<path d="M8 6.75047V9.25047M10.668 6.75047V9.25047M5.33398 6.75047V9.25047M1.33398 2.44531V13.5553H14.6673V2.44531H1.33398Z" stroke="currentColor" stroke-linecap="square"/>"#)
-    public static let extensionsData = OpenCodeIconData(name: #"extensions"#, viewBox: 16.0, body: #"<path d="M8 6.75047V9.25047M10.668 6.75047V9.25047M5.33398 6.75047V9.25047M1.33398 2.44531V13.5553H14.6673V2.44531H1.33398Z" stroke="currentColor" stroke-linecap="square"/>"#, svgIcon: extensions)
-    public static let cube = SVGIcon(viewBox: 20.0, paths: [#"M10 2.5L16.5 6.25V13.75L10 17.5L3.5 13.75V6.25L10 2.5Z"#, #"M10 10L16.5 6.25M10 10V17.5M10 10L3.5 6.25"#], strokeWidth: 1.5, body: #"<path d="M10 2.5L16.5 6.25V13.75L10 17.5L3.5 13.75V6.25L10 2.5Z" stroke="currentColor"/><path d="M10 10L16.5 6.25M10 10V17.5M10 10L3.5 6.25" stroke="currentColor"/>"#)
-    public static let cubeData = OpenCodeIconData(name: #"cube"#, viewBox: 20.0, body: #"<path d="M10 2.5L16.5 6.25V13.75L10 17.5L3.5 13.75V6.25L10 2.5Z" stroke="currentColor"/><path d="M10 10L16.5 6.25M10 10V17.5M10 10L3.5 6.25" stroke="currentColor"/>"#, svgIcon: cube)
-    public static let postSkill = SVGIcon(viewBox: 20.0, paths: [#"M5.5 7.5H10.5M5.5 10.5H14.5"#], strokeWidth: 1.5, body: #"<rect x="2.5" y="3.5" width="15" height="13" rx="1.5" stroke="currentColor"/><path d="M5.5 7.5H10.5M5.5 10.5H14.5" stroke="currentColor"/>"#)
-    public static let postSkillData = OpenCodeIconData(name: #"post-skill"#, viewBox: 20.0, body: #"<rect x="2.5" y="3.5" width="15" height="13" rx="1.5" stroke="currentColor"/><path d="M5.5 7.5H10.5M5.5 10.5H14.5" stroke="currentColor"/>"#, svgIcon: postSkill)
-    public static let arrowUndoDown = SVGIcon(viewBox: 16.0, paths: [#"M4.08333 11.0859L1.75 8.7526L4.08333 6.41927M2.33333 8.7526L12.5417 8.7526L12.5417 3.21094L7 3.21094"#], strokeWidth: 1, body: #"<path d="M4.08333 11.0859L1.75 8.7526L4.08333 6.41927M2.33333 8.7526L12.5417 8.7526L12.5417 3.21094L7 3.21094" stroke="currentColor" stroke-width="1" stroke-linecap="square"/>"#)
-    public static let arrowUndoDownData = OpenCodeIconData(name: #"arrow-undo-down"#, viewBox: 16.0, body: #"<path d="M4.08333 11.0859L1.75 8.7526L4.08333 6.41927M2.33333 8.7526L12.5417 8.7526L12.5417 3.21094L7 3.21094" stroke="currentColor" stroke-width="1" stroke-linecap="square"/>"#, svgIcon: arrowUndoDown)
+/// OpenCode's icon catalog in the order declared by `themes/opencode/src/icons.rs`.
+public enum OpenCodeIcons {
+    public static let alignRightData = OpenCodeIconData(
+        "align-right", viewBox: 20.0, paths: [#"M12.292 6.04167L16.2503 9.99998L12.292 13.9583M2.91699 9.99998H15.6253M17.0837 3.75V16.25"#], strokeWidth: 1,
+        body: #"<path d="M12.292 6.04167L16.2503 9.99998L12.292 13.9583M2.91699 9.99998H15.6253M17.0837 3.75V16.25" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let alignRight = alignRightData.svgIcon
+
+    public static let arrowUpData = OpenCodeIconData(
+        "arrow-up", viewBox: 16.0, paths: [#"M8 12.5V3.5M11.5 7L8 3.5L4.5 7"#], strokeWidth: 1,
+        body: #"<path d="M8 12.5V3.5M11.5 7L8 3.5L4.5 7" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let arrowUp = arrowUpData.svgIcon
+
+    public static let arrowLeftData = OpenCodeIconData(
+        "arrow-left", viewBox: 16.0, paths: [#"M8 12.5V3.5M11.5 7L8 3.5L4.5 7"#], strokeWidth: 1,
+        body: #"<g transform="rotate(270 8 8)"><path d="M8 12.5V3.5M11.5 7L8 3.5L4.5 7" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/></g>"#
+    )
+    public static let arrowLeft = arrowLeftData.svgIcon
+
+    public static let arrowRightData = OpenCodeIconData(
+        "arrow-right", viewBox: 16.0, paths: [#"M8 12.5V3.5M11.5 7L8 3.5L4.5 7"#], strokeWidth: 1,
+        body: #"<g transform="rotate(90 8 8)"><path d="M8 12.5V3.5M11.5 7L8 3.5L4.5 7" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/></g>"#
+    )
+    public static let arrowRight = arrowRightData.svgIcon
+
+    public static let archiveData = OpenCodeIconData(
+        "archive", viewBox: 16.0, paths: [#"M2.5 5.5V13.5H13.5V5.5M2.5 5.5H1.5V2.5H14.5V5.5H13.5M2.5 5.5H13.5M6.5 7.5H9.5"#], strokeWidth: 1,
+        body: #"<path d="M2.5 5.5V13.5H13.5V5.5M2.5 5.5H1.5V2.5H14.5V5.5H13.5M2.5 5.5H13.5M6.5 7.5H9.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let archive = archiveData.svgIcon
+
+    public static let promptData = OpenCodeIconData(
+        "prompt", viewBox: 20.0, paths: [#"M14.5841 12.0807H17.9193V2.91406H5.6276V6.2474M14.5859 6.2474H2.08594V15.4141H5.0026V17.4974L8.7526 15.4141H14.5859V6.2474Z"#], strokeWidth: 1,
+        body: #"<path d="M14.5841 12.0807H17.9193V2.91406H5.6276V6.2474M14.5859 6.2474H2.08594V15.4141H5.0026V17.4974L8.7526 15.4141H14.5859V6.2474Z" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let prompt = promptData.svgIcon
+
+    public static let brainData = OpenCodeIconData(
+        "brain", viewBox: 20.0, paths: [#"M13.332 8.7487C11.4911 8.7487 9.9987 7.25631 9.9987 5.41536M6.66536 11.2487C8.50631 11.2487 9.9987 12.7411 9.9987 14.582M9.9987 2.78209L9.9987 17.0658M16.004 15.0475C17.1255 14.5876 17.9154 13.4849 17.9154 12.1978C17.9154 11.3363 17.5615 10.5575 16.9913 9.9987C17.5615 9.43991 17.9154 8.66108 17.9154 7.79962C17.9154 6.21199 16.7136 4.90504 15.1702 4.73878C14.7858 3.21216 13.4039 2.08203 11.758 2.08203C11.1171 2.08203 10.5162 2.25337 9.9987 2.55275C9.48117 2.25337 8.88032 2.08203 8.23944 2.08203C6.59353 2.08203 5.21157 3.21216 4.82722 4.73878C3.28377 4.90504 2.08203 6.21199 2.08203 7.79962C2.08203 8.66108 2.43585 9.43991 3.00609 9.9987C2.43585 10.5575 2.08203 11.3363 2.08203 12.1978C2.08203 13.4849 2.87191 14.5876 3.99339 15.0475C4.46688 16.7033 5.9917 17.9154 7.79962 17.9154C8.61335 17.9154 9.36972 17.6698 9.9987 17.2488C10.6277 17.6698 11.384 17.9154 12.1978 17.9154C14.0057 17.9154 15.5305 16.7033 16.004 15.0475Z"#], strokeWidth: 1,
+        body: #"<path d="M13.332 8.7487C11.4911 8.7487 9.9987 7.25631 9.9987 5.41536M6.66536 11.2487C8.50631 11.2487 9.9987 12.7411 9.9987 14.582M9.9987 2.78209L9.9987 17.0658M16.004 15.0475C17.1255 14.5876 17.9154 13.4849 17.9154 12.1978C17.9154 11.3363 17.5615 10.5575 16.9913 9.9987C17.5615 9.43991 17.9154 8.66108 17.9154 7.79962C17.9154 6.21199 16.7136 4.90504 15.1702 4.73878C14.7858 3.21216 13.4039 2.08203 11.758 2.08203C11.1171 2.08203 10.5162 2.25337 9.9987 2.55275C9.48117 2.25337 8.88032 2.08203 8.23944 2.08203C6.59353 2.08203 5.21157 3.21216 4.82722 4.73878C3.28377 4.90504 2.08203 6.21199 2.08203 7.79962C2.08203 8.66108 2.43585 9.43991 3.00609 9.9987C2.43585 10.5575 2.08203 11.3363 2.08203 12.1978C2.08203 13.4849 2.87191 14.5876 3.99339 15.0475C4.46688 16.7033 5.9917 17.9154 7.79962 17.9154C8.61335 17.9154 9.36972 17.6698 9.9987 17.2488C10.6277 17.6698 11.384 17.9154 12.1978 17.9154C14.0057 17.9154 15.5305 16.7033 16.004 15.0475Z" stroke="currentColor"/>"#
+    )
+    public static let brain = brainData.svgIcon
+
+    public static let forkData = OpenCodeIconData(
+        "fork", viewBox: 16.0, paths: [#"M8.39211 13.5L8.39211 8.10506C8.39211 8.03787 8.36505 7.9735 8.31705 7.92648L2.77783 2.50007M6.77783 2.50007L2.77783 2.50007L2.77783 6.50007M13.5002 6.50007L13.5002 2.50007L9.5002 2.50007M13.5002 2.50007L10 6"#], strokeWidth: 1,
+        body: #"<path d="M8.39211 13.5L8.39211 8.10506C8.39211 8.03787 8.36505 7.9735 8.31705 7.92648L2.77783 2.50007M6.77783 2.50007L2.77783 2.50007L2.77783 6.50007M13.5002 6.50007L13.5002 2.50007L9.5002 2.50007M13.5002 2.50007L10 6" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let fork = forkData.svgIcon
+
+    public static let workspaceIsolatedData = OpenCodeIconData(
+        "workspace-isolated", viewBox: 16.0, paths: [#"M10.5 10.5V5.5H5.5V10.5H10.5Z"#], strokeWidth: 1,
+        body: #"<path d="M10.5 10.5V5.5H5.5V10.5H10.5Z" fill="currentColor"/><rect x="2.5" y="2.5" width="11" height="11" stroke="currentColor"/>"#
+    )
+    public static let workspaceIsolated = workspaceIsolatedData.svgIcon
+
+    public static let bulletListData = OpenCodeIconData(
+        "bullet-list", viewBox: 16.0, paths: [#"M8.5 4.5H14.5M8.5 11.5H14.5M1.5 2.5V6.5H5.5V2.5H1.5ZM1.5 9.5V13.5H5.5V9.5H1.5Z"#], strokeWidth: 1,
+        body: #"<path d="M8.5 4.5H14.5M8.5 11.5H14.5M1.5 2.5V6.5H5.5V2.5H1.5ZM1.5 9.5V13.5H5.5V9.5H1.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let bulletList = bulletListData.svgIcon
+
+    public static let chevronDownData = OpenCodeIconData(
+        "chevron-down", viewBox: 16.0, paths: [#"M4.5 9.5L8 6.5L11.5 9.5"#], strokeWidth: 1,
+        body: #"<g transform="rotate(180 8 8)"><path d="M4.5 9.5L8 6.5L11.5 9.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/></g>"#
+    )
+    public static let chevronDown = chevronDownData.svgIcon
+
+    public static let chevronLeftData = OpenCodeIconData(
+        "chevron-left", viewBox: 16.0, paths: [#"M4.5 9.5L8 6.5L11.5 9.5"#], strokeWidth: 1,
+        body: #"<g transform="rotate(270 8 8)"><path d="M4.5 9.5L8 6.5L11.5 9.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/></g>"#
+    )
+    public static let chevronLeft = chevronLeftData.svgIcon
+
+    public static let chevronRightData = OpenCodeIconData(
+        "chevron-right", viewBox: 16.0, paths: [#"M4.5 9.5L8 6.5L11.5 9.5"#], strokeWidth: 1,
+        body: #"<g transform="rotate(90 8 8)"><path d="M4.5 9.5L8 6.5L11.5 9.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/></g>"#
+    )
+    public static let chevronRight = chevronRightData.svgIcon
+
+    public static let chevronGrabberVerticalData = OpenCodeIconData(
+        "chevron-grabber-vertical", viewBox: 16.0, paths: [#"M5 6L8 3.5L11 6M5 10L8 12.5L11 10"#], strokeWidth: 1,
+        body: #"<path d="M5 6L8 3.5L11 6M5 10L8 12.5L11 10" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let chevronGrabberVertical = chevronGrabberVerticalData.svgIcon
+
+    public static let chevronDoubleRightData = OpenCodeIconData(
+        "chevron-double-right", viewBox: 20.0, paths: [#"M11.6654 13.3346L14.9987 10.0013L11.6654 6.66797M5.83203 13.3346L9.16536 10.0013L5.83203 6.66797"#], strokeWidth: 1,
+        body: #"<path d="M11.6654 13.3346L14.9987 10.0013L11.6654 6.66797M5.83203 13.3346L9.16536 10.0013L5.83203 6.66797" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let chevronDoubleRight = chevronDoubleRightData.svgIcon
+
+    public static let circleXData = OpenCodeIconData(
+        "circle-x", viewBox: 20.0, paths: [#"M1.6665 10.0003C1.6665 5.39795 5.39746 1.66699 9.99984 1.66699C14.6022 1.66699 18.3332 5.39795 18.3332 10.0003C18.3332 14.6027 14.6022 18.3337 9.99984 18.3337C5.39746 18.3337 1.6665 14.6027 1.6665 10.0003ZM7.49984 6.91107L6.91058 7.50033L9.41058 10.0003L6.91058 12.5003L7.49984 13.0896L9.99984 10.5896L12.4998 13.0896L13.0891 12.5003L10.5891 10.0003L13.0891 7.50033L12.4998 6.91107L9.99984 9.41107L7.49984 6.91107Z"#], strokeWidth: nil,
+        body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M1.6665 10.0003C1.6665 5.39795 5.39746 1.66699 9.99984 1.66699C14.6022 1.66699 18.3332 5.39795 18.3332 10.0003C18.3332 14.6027 14.6022 18.3337 9.99984 18.3337C5.39746 18.3337 1.6665 14.6027 1.6665 10.0003ZM7.49984 6.91107L6.91058 7.50033L9.41058 10.0003L6.91058 12.5003L7.49984 13.0896L9.99984 10.5896L12.4998 13.0896L13.0891 12.5003L10.5891 10.0003L13.0891 7.50033L12.4998 6.91107L9.99984 9.41107L7.49984 6.91107Z" fill="currentColor"/>"#
+    )
+    public static let circleX = circleXData.svgIcon
+
+    public static let closeData = OpenCodeIconData(
+        "close", viewBox: 16.0, paths: [#"M4.5 11.5L8 8M8 8L11.5 4.5M8 8L4.5 4.5M8 8L11.5 11.5"#], strokeWidth: 1,
+        body: #"<path d="M4.5 11.5L8 8M8 8L11.5 4.5M8 8L4.5 4.5M8 8L11.5 11.5" stroke-linecap="round" stroke="currentColor"/>"#
+    )
+    public static let close = closeData.svgIcon
+
+    public static let checklistData = OpenCodeIconData(
+        "checklist", viewBox: 20.0, paths: [#"M9.58342 13.7498H17.0834M9.58342 6.24984H17.0834M2.91675 6.6665L4.58341 7.9165L7.08341 4.1665M2.91675 14.1665L4.58341 15.4165L7.08341 11.6665"#], strokeWidth: 1,
+        body: #"<path d="M9.58342 13.7498H17.0834M9.58342 6.24984H17.0834M2.91675 6.6665L4.58341 7.9165L7.08341 4.1665M2.91675 14.1665L4.58341 15.4165L7.08341 11.6665" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let checklist = checklistData.svgIcon
+
+    public static let terminalData = OpenCodeIconData(
+        "terminal", viewBox: 16.0, paths: [#"M4.5 11.5L7.5 8.5L4.5 5.5M11.5 11.5H8.5"#, #"M1.5 14.25V1.75C1.5 1.61193 1.61193 1.5 1.75 1.5H14.25C14.3881 1.5 14.5 1.61193 14.5 1.75V14.25C14.5 14.3881 14.3881 14.5 14.25 14.5H1.75C1.61193 14.5 1.5 14.3881 1.5 14.25Z"#], strokeWidth: 1,
+        body: #"<path d="M4.5 11.5L7.5 8.5L4.5 5.5M11.5 11.5H8.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M1.5 14.25V1.75C1.5 1.61193 1.61193 1.5 1.75 1.5H14.25C14.3881 1.5 14.5 1.61193 14.5 1.75V14.25C14.5 14.3881 14.3881 14.5 14.25 14.5H1.75C1.61193 14.5 1.5 14.3881 1.5 14.25Z" stroke-linecap="round" stroke="currentColor"/>"#
+    )
+    public static let terminal = terminalData.svgIcon
+
+    public static let terminalActiveData = OpenCodeIconData(
+        "terminal-active", viewBox: 20.0, paths: [#"M2 18H18V2H2V18Z"#, #"M6.5 8L8.64286 10L6.5 12M10.9286 12H13.5M2 18H18V2H2V18Z"#], strokeWidth: 1,
+        body: "<path d=\"M2 18H18V2H2V18Z\" fill=\"currentColor\" fill-opacity=\"0.1\"/>\n<path d=\"M6.5 8L8.64286 10L6.5 12M10.9286 12H13.5M2 18H18V2H2V18Z\" stroke=\"currentColor\" stroke-linecap=\"square\"/>"
+    )
+    public static let terminalActive = terminalActiveData.svgIcon
+
+    public static let reviewData = OpenCodeIconData(
+        "review", viewBox: 16.0, paths: [#"M4.5 6.5H8M8 6.5H11.5M8 6.5V3M8 6.5V10"#, #"M4.5 12.5H11.5"#], strokeWidth: 1,
+        body: #"<path d="M4.5 6.5H8M8 6.5H11.5M8 6.5V3M8 6.5V10" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M4.5 12.5H11.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let review = reviewData.svgIcon
+
+    public static let reviewActiveData = OpenCodeIconData(
+        "review-active", viewBox: 20.0, paths: [#"M18 18V2L2 2L2 18H18Z"#, #"M7 14.5H13M7 7.99512H10.0049M10.0049 7.99512H13M10.0049 7.99512V5M10.0049 7.99512V11M18 18V2L2 2L2 18H18Z"#], strokeWidth: 1,
+        body: "<path d=\"M18 18V2L2 2L2 18H18Z\" fill=\"currentColor\" fill-opacity=\"0.1\"/>\n<path d=\"M7 14.5H13M7 7.99512H10.0049M10.0049 7.99512H13M10.0049 7.99512V5M10.0049 7.99512V11M18 18V2L2 2L2 18H18Z\" stroke=\"currentColor\"/>"
+    )
+    public static let reviewActive = reviewActiveData.svgIcon
+
+    public static let expandData = OpenCodeIconData(
+        "expand", viewBox: 16.0, paths: [#"M10.5 4.5L8 2L5.5 4.5M10.5 11.5L8 14L5.5 11.5"#, #"M2.5 8H13.5"#], strokeWidth: 1,
+        body: #"<path d="M10.5 4.5L8 2L5.5 4.5M10.5 11.5L8 14L5.5 11.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M2.5 8H13.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let expand = expandData.svgIcon
+
+    public static let collapseData = OpenCodeIconData(
+        "collapse", viewBox: 16.0, paths: [#"M5.5 2.5L8 5L10.5 2.5M5.5 13.5L8 11L10.5 13.5"#, #"M2.5 8H13.5"#], strokeWidth: 1,
+        body: #"<path d="M5.5 2.5L8 5L10.5 2.5M5.5 13.5L8 11L10.5 13.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M2.5 8H13.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let collapse = collapseData.svgIcon
+
+    public static let codeData = OpenCodeIconData(
+        "code", viewBox: 16.0, paths: [#"M4.5 4.5L1.5 8L4.5 11.5M11.5 4.5L14.5 8L11.5 11.5"#, #"M6.5 13.5L9.5 2.5"#], strokeWidth: 1,
+        body: #"<path d="M4.5 4.5L1.5 8L4.5 11.5M11.5 4.5L14.5 8L11.5 11.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M6.5 13.5L9.5 2.5" stroke-linecap="round" stroke="currentColor"/>"#
+    )
+    public static let code = codeData.svgIcon
+
+    public static let codeLinesData = OpenCodeIconData(
+        "code-lines", viewBox: 20.0, paths: [#"M2.08325 3.75H11.2499M14.5833 3.75H17.9166M2.08325 10L7.08325 10M10.4166 10L17.9166 10M2.08325 16.25L8.74992 16.25M12.0833 16.25L17.9166 16.25"#], strokeWidth: 1,
+        body: #"<path d="M2.08325 3.75H11.2499M14.5833 3.75H17.9166M2.08325 10L7.08325 10M10.4166 10L17.9166 10M2.08325 16.25L8.74992 16.25M12.0833 16.25L17.9166 16.25" stroke="currentColor" stroke-linecap="square" stroke-linejoin="round"/>"#
+    )
+    public static let codeLines = codeLinesData.svgIcon
+
+    public static let circleBanSignData = OpenCodeIconData(
+        "circle-ban-sign", viewBox: 16.0, paths: [#"M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z"#, #"M3.5 12.5L12.5 3.5"#], strokeWidth: 1,
+        body: #"<path d="M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z" stroke="currentColor"/><path d="M3.5 12.5L12.5 3.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let circleBanSign = circleBanSignData.svgIcon
+
+    public static let circleBanSignBoldData = OpenCodeIconData(
+        "circle-ban-sign-bold", viewBox: 16.0, paths: [#"M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z"#, #"M3.5 12.5L12.5 3.5"#], strokeWidth: 1.5,
+        body: #"<path d="M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z" stroke="currentColor" stroke-width="1.5"/><path d="M3.5 12.5L12.5 3.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor" stroke-width="1.5"/>"#
+    )
+    public static let circleBanSignBold = circleBanSignBoldData.svgIcon
+
+    public static let editSmall2Data = OpenCodeIconData(
+        "edit-small-2", viewBox: 20.0, paths: [#"M17.0834 17.0833V17.5833H17.5834V17.0833H17.0834ZM2.91675 17.0833H2.41675V17.5833H2.91675V17.0833ZM2.91675 2.91659V2.41659H2.41675V2.91659H2.91675ZM9.58341 3.41659H10.0834V2.41659H9.58341V2.91659V3.41659ZM17.5834 10.4166V9.91659H16.5834V10.4166H17.0834H17.5834ZM10.4167 7.08325L10.0632 6.7297L9.91675 6.87615V7.08325H10.4167ZM10.4167 9.58325H9.91675V10.0833H10.4167V9.58325ZM12.9167 9.58325V10.0833H13.1239L13.2703 9.93681L12.9167 9.58325ZM15.4167 2.08325L15.7703 1.7297L15.4167 1.37615L15.0632 1.7297L15.4167 2.08325ZM17.9167 4.58325L18.2703 4.93681L18.6239 4.58325L18.2703 4.2297L17.9167 4.58325ZM17.0834 17.0833V16.5833H2.91675V17.0833V17.5833H17.0834V17.0833ZM2.91675 17.0833H3.41675V2.91659H2.91675H2.41675V17.0833H2.91675ZM2.91675 2.91659V3.41659H9.58341V2.91659V2.41659H2.91675V2.91659ZM17.0834 10.4166H16.5834V17.0833H17.0834H17.5834V10.4166H17.0834ZM10.4167 7.08325H9.91675V9.58325H10.4167H10.9167V7.08325H10.4167ZM10.4167 9.58325V10.0833H12.9167V9.58325V9.08325H10.4167V9.58325ZM10.4167 7.08325L10.7703 7.43681L15.7703 2.43681L15.4167 2.08325L15.0632 1.7297L10.0632 6.7297L10.4167 7.08325ZM15.4167 2.08325L15.0632 2.43681L17.5632 4.93681L17.9167 4.58325L18.2703 4.2297L15.7703 1.7297L15.4167 2.08325ZM17.9167 4.58325L17.5632 4.2297L12.5632 9.2297L12.9167 9.58325L13.2703 9.93681L18.2703 4.93681L17.9167 4.58325Z"#], strokeWidth: nil,
+        body: #"<path d="M17.0834 17.0833V17.5833H17.5834V17.0833H17.0834ZM2.91675 17.0833H2.41675V17.5833H2.91675V17.0833ZM2.91675 2.91659V2.41659H2.41675V2.91659H2.91675ZM9.58341 3.41659H10.0834V2.41659H9.58341V2.91659V3.41659ZM17.5834 10.4166V9.91659H16.5834V10.4166H17.0834H17.5834ZM10.4167 7.08325L10.0632 6.7297L9.91675 6.87615V7.08325H10.4167ZM10.4167 9.58325H9.91675V10.0833H10.4167V9.58325ZM12.9167 9.58325V10.0833H13.1239L13.2703 9.93681L12.9167 9.58325ZM15.4167 2.08325L15.7703 1.7297L15.4167 1.37615L15.0632 1.7297L15.4167 2.08325ZM17.9167 4.58325L18.2703 4.93681L18.6239 4.58325L18.2703 4.2297L17.9167 4.58325ZM17.0834 17.0833V16.5833H2.91675V17.0833V17.5833H17.0834V17.0833ZM2.91675 17.0833H3.41675V2.91659H2.91675H2.41675V17.0833H2.91675ZM2.91675 2.91659V3.41659H9.58341V2.91659V2.41659H2.91675V2.91659ZM17.0834 10.4166H16.5834V17.0833H17.0834H17.5834V10.4166H17.0834ZM10.4167 7.08325H9.91675V9.58325H10.4167H10.9167V7.08325H10.4167ZM10.4167 9.58325V10.0833H12.9167V9.58325V9.08325H10.4167V9.58325ZM10.4167 7.08325L10.7703 7.43681L15.7703 2.43681L15.4167 2.08325L15.0632 1.7297L10.0632 6.7297L10.4167 7.08325ZM15.4167 2.08325L15.0632 2.43681L17.5632 4.93681L17.9167 4.58325L18.2703 4.2297L15.7703 1.7297L15.4167 2.08325ZM17.9167 4.58325L17.5632 4.2297L12.5632 9.2297L12.9167 9.58325L13.2703 9.93681L18.2703 4.93681L17.9167 4.58325Z" fill="currentColor"/>"#
+    )
+    public static let editSmall2 = editSmall2Data.svgIcon
+
+    public static let eyeData = OpenCodeIconData(
+        "eye", viewBox: 16.0, paths: [#"M1.5 8C2.5 6.5 4.5 4 8 4C11.5 4 13.5 6.5 14.5 8C13.5 9.5 11.5 12 8 12C4.5 12 2.5 9.5 1.5 8Z"#, #"M9.5 8C9.5 8.82843 8.82843 9.5 8 9.5C7.17157 9.5 6.5 8.82843 6.5 8C6.5 7.17157 7.17157 6.5 8 6.5C8.82843 6.5 9.5 7.17157 9.5 8Z"#], strokeWidth: 1,
+        body: #"<path d="M1.5 8C2.5 6.5 4.5 4 8 4C11.5 4 13.5 6.5 14.5 8C13.5 9.5 11.5 12 8 12C4.5 12 2.5 9.5 1.5 8Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M9.5 8C9.5 8.82843 8.82843 9.5 8 9.5C7.17157 9.5 6.5 8.82843 6.5 8C6.5 7.17157 7.17157 6.5 8 6.5C8.82843 6.5 9.5 7.17157 9.5 8Z" fill="currentColor"/>"#
+    )
+    public static let eye = eyeData.svgIcon
+
+    public static let enterData = OpenCodeIconData(
+        "enter", viewBox: 16.0, paths: [#"M2.5 9.5H12.5C13.0523 9.5 13.5 9.05228 13.5 8.5V5.5C13.5 4.94772 13.0523 4.5 12.5 4.5H8.5M5.5 12.5L2.5 9.5L5.5 6.5"#], strokeWidth: 1,
+        body: #"<path d="M2.5 9.5H12.5C13.0523 9.5 13.5 9.05228 13.5 8.5V5.5C13.5 4.94772 13.0523 4.5 12.5 4.5H8.5M5.5 12.5L2.5 9.5L5.5 6.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let enter = enterData.svgIcon
+
+    public static let folderData = OpenCodeIconData(
+        "folder", viewBox: 16.0, paths: [#"M1.5 13.5V2.5H5.5L8.5 5.5H14.5V13.5H1.5Z"#], strokeWidth: 1,
+        body: #"<path d="M1.5 13.5V2.5H5.5L8.5 5.5H14.5V13.5H1.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let folder = folderData.svgIcon
+
+    public static let fileTreeActiveData = OpenCodeIconData(
+        "file-tree-active", viewBox: 20.0, paths: [#"M2 2L2 18H5L6.5 8.5H18V5H9.5L7.5 2H2Z"#, #"M5 18H18L19.5 8.5H18M5 18H2L2 2H7.5L9.5 5H18V8.5M5 18L6.5 8.5H18"#], strokeWidth: 1,
+        body: "<path d=\"M2 2L2 18H5L6.5 8.5H18V5H9.5L7.5 2H2Z\" fill=\"currentColor\" fill-opacity=\"0.1\"/>\n<path d=\"M5 18H18L19.5 8.5H18M5 18H2L2 2H7.5L9.5 5H18V8.5M5 18L6.5 8.5H18\" stroke=\"currentColor\" stroke-linecap=\"square\"/>"
+    )
+    public static let fileTreeActive = fileTreeActiveData.svgIcon
+
+    public static let magnifyingGlassData = OpenCodeIconData(
+        "magnifying-glass", viewBox: 16.0, paths: [#"M11.5 7C11.5 9.48528 9.48528 11.5 7 11.5C4.51472 11.5 2.5 9.48528 2.5 7C2.5 4.51472 4.51472 2.5 7 2.5C9.48528 2.5 11.5 4.51472 11.5 7Z"#, #"M13.5 13.5L10.5 10.5"#], strokeWidth: 1,
+        body: #"<path d="M11.5 7C11.5 9.48528 9.48528 11.5 7 11.5C4.51472 11.5 2.5 9.48528 2.5 7C2.5 4.51472 4.51472 2.5 7 2.5C9.48528 2.5 11.5 4.51472 11.5 7Z" stroke="currentColor"/><path d="M13.5 13.5L10.5 10.5" stroke-linecap="round" stroke="currentColor"/>"#
+    )
+    public static let magnifyingGlass = magnifyingGlassData.svgIcon
+
+    public static let plusData = OpenCodeIconData(
+        "plus", viewBox: 16.0, paths: [#"M8 2.5V8M8 8V13.5M8 8H2.5M8 8H13.5"#], strokeWidth: 1,
+        body: #"<path d="M8 2.5V8M8 8V13.5M8 8H2.5M8 8H13.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let plus = plusData.svgIcon
+
+    public static let newSessionData = OpenCodeIconData(
+        "new-session", viewBox: 20.0, paths: [#"M12 2H2V18H18V8M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z"#], strokeWidth: 1,
+        body: #"<path d="M12 2H2V18H18V8M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z" stroke="currentColor"/>"#
+    )
+    public static let newSession = newSessionData.svgIcon
+
+    public static let newSessionActiveData = OpenCodeIconData(
+        "new-session-active", viewBox: 20.0, paths: [#"M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z"#, #"M12 2H2V18H18V8M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z"#], strokeWidth: 1,
+        body: "<path d=\"M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z\" fill=\"currentColor\" fill-opacity=\"0.1\"/>\n<path d=\"M12 2H2V18H18V8M6 11.3818V14H8.61818L18 4.61818L15.3818 2L6 11.3818Z\" stroke=\"currentColor\"/>"
+    )
+    public static let newSessionActive = newSessionActiveData.svgIcon
+
+    public static let pencilLineData = OpenCodeIconData(
+        "pencil-line", viewBox: 20.0, paths: [#"M9.58301 17.9166H17.9163M17.9163 5.83325L14.1663 2.08325L2.08301 14.1666V17.9166H5.83301L17.9163 5.83325Z"#], strokeWidth: 1,
+        body: #"<path d="M9.58301 17.9166H17.9163M17.9163 5.83325L14.1663 2.08325L2.08301 14.1666V17.9166H5.83301L17.9163 5.83325Z" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let pencilLine = pencilLineData.svgIcon
+
+    public static let mcpData = OpenCodeIconData(
+        "mcp", viewBox: 20.0, paths: [#"M0.972656 9.37176L9.5214 1.60019C10.7018 0.527151 12.6155 0.527151 13.7957 1.60019C14.9761 2.67321 14.9761 4.41295 13.7957 5.48599L7.3397 11.3552"#, #"M7.42871 11.2747L13.7957 5.48643C14.9761 4.41338 16.8898 4.41338 18.0702 5.48643L18.1147 5.52688C19.2951 6.59993 19.2951 8.33966 18.1147 9.4127L10.3831 16.4414C9.98966 16.7991 9.98966 17.379 10.3831 17.7366L11.9707 19.1799"#, #"M11.6587 3.54346L5.33619 9.29119C4.15584 10.3642 4.15584 12.1039 5.33619 13.177C6.51649 14.25 8.43019 14.25 9.61054 13.177L15.9331 7.42923"#], strokeWidth: 1,
+        body: #"<g><path d="M0.972656 9.37176L9.5214 1.60019C10.7018 0.527151 12.6155 0.527151 13.7957 1.60019C14.9761 2.67321 14.9761 4.41295 13.7957 5.48599L7.3397 11.3552" stroke="currentColor" stroke-linecap="round"/><path d="M7.42871 11.2747L13.7957 5.48643C14.9761 4.41338 16.8898 4.41338 18.0702 5.48643L18.1147 5.52688C19.2951 6.59993 19.2951 8.33966 18.1147 9.4127L10.3831 16.4414C9.98966 16.7991 9.98966 17.379 10.3831 17.7366L11.9707 19.1799" stroke="currentColor" stroke-linecap="round"/><path d="M11.6587 3.54346L5.33619 9.29119C4.15584 10.3642 4.15584 12.1039 5.33619 13.177C6.51649 14.25 8.43019 14.25 9.61054 13.177L15.9331 7.42923" stroke="currentColor" stroke-linecap="round"/></g>"#
+    )
+    public static let mcp = mcpData.svgIcon
+
+    public static let glassesData = OpenCodeIconData(
+        "glasses", viewBox: 20.0, paths: [#"M0.416626 7.91667H1.66663M19.5833 7.91667H18.3333M11.866 7.57987C11.3165 7.26398 10.6793 7.08333 9.99996 7.08333C9.32061 7.08333 8.68344 7.26398 8.13389 7.57987M8.74996 10C8.74996 12.0711 7.07103 13.75 4.99996 13.75C2.92889 13.75 1.24996 12.0711 1.24996 10C1.24996 7.92893 2.92889 6.25 4.99996 6.25C7.07103 6.25 8.74996 7.92893 8.74996 10ZM18.75 10C18.75 12.0711 17.071 13.75 15 13.75C12.9289 13.75 11.25 12.0711 11.25 10C11.25 7.92893 12.9289 6.25 15 6.25C17.071 6.25 18.75 7.92893 18.75 10Z"#], strokeWidth: 1,
+        body: #"<path d="M0.416626 7.91667H1.66663M19.5833 7.91667H18.3333M11.866 7.57987C11.3165 7.26398 10.6793 7.08333 9.99996 7.08333C9.32061 7.08333 8.68344 7.26398 8.13389 7.57987M8.74996 10C8.74996 12.0711 7.07103 13.75 4.99996 13.75C2.92889 13.75 1.24996 12.0711 1.24996 10C1.24996 7.92893 2.92889 6.25 4.99996 6.25C7.07103 6.25 8.74996 7.92893 8.74996 10ZM18.75 10C18.75 12.0711 17.071 13.75 15 13.75C12.9289 13.75 11.25 12.0711 11.25 10C11.25 7.92893 12.9289 6.25 15 6.25C17.071 6.25 18.75 7.92893 18.75 10Z" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let glasses = glassesData.svgIcon
+
+    public static let magnifyingGlassMenuData = OpenCodeIconData(
+        "magnifying-glass-menu", viewBox: 20.0, paths: [#"M2.08325 10.0002H4.58325M2.08325 5.41683H5.41659M2.08325 14.5835H5.41659M16.4583 13.9585L18.7499 16.2502M17.9166 10.0002C17.9166 12.9917 15.4915 15.4168 12.4999 15.4168C9.50838 15.4168 7.08325 12.9917 7.08325 10.0002C7.08325 7.00862 9.50838 4.5835 12.4999 4.5835C15.4915 4.5835 17.9166 7.00862 17.9166 10.0002Z"#], strokeWidth: 1,
+        body: #"<path d="M2.08325 10.0002H4.58325M2.08325 5.41683H5.41659M2.08325 14.5835H5.41659M16.4583 13.9585L18.7499 16.2502M17.9166 10.0002C17.9166 12.9917 15.4915 15.4168 12.4999 15.4168C9.50838 15.4168 7.08325 12.9917 7.08325 10.0002C7.08325 7.00862 9.50838 4.5835 12.4999 4.5835C15.4915 4.5835 17.9166 7.00862 17.9166 10.0002Z" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let magnifyingGlassMenu = magnifyingGlassMenuData.svgIcon
+
+    public static let taskData = OpenCodeIconData(
+        "task", viewBox: 20.0, paths: [#"M9.99992 2.0835V17.9168M7.08325 3.75016H2.08325V16.2502H7.08325M12.9166 16.2502H17.9166V3.75016H12.9166"#], strokeWidth: 1,
+        body: #"<path d="M9.99992 2.0835V17.9168M7.08325 3.75016H2.08325V16.2502H7.08325M12.9166 16.2502H17.9166V3.75016H12.9166" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let task = taskData.svgIcon
+
+    public static let stopData = OpenCodeIconData(
+        "stop", viewBox: 16.0, paths: [#"M13 3H3V13H13V3Z"#], strokeWidth: nil,
+        body: #"<path d="M13 3H3V13H13V3Z" fill="currentColor"/>"#
+    )
+    public static let stop = stopData.svgIcon
+
+    public static let statusData = OpenCodeIconData(
+        "status", viewBox: 20.0, paths: [#"M2 10V18H18V10M2 10V2H18V10M2 10H18M5 6H9M5 14H9"#], strokeWidth: 1,
+        body: #"<path d="M2 10V18H18V10M2 10V2H18V10M2 10H18M5 6H9M5 14H9" stroke="currentColor"/>"#
+    )
+    public static let status = statusData.svgIcon
+
+    public static let statusActiveData = OpenCodeIconData(
+        "status-active", viewBox: 20.0, paths: [#"M18 2H2V10H18V2Z"#, #"M2 18H18V10H2V18Z"#, #"M2 10V18H18V10M2 10V2H18V10M2 10H18M5 6H9M5 14H9"#], strokeWidth: 1,
+        body: #"<path d="M18 2H2V10H18V2Z" fill="currentColor" fill-opacity="0.1"/><path d="M2 18H18V10H2V18Z" fill="currentColor" fill-opacity="0.1"/><path d="M2 10V18H18V10M2 10V2H18V10M2 10H18M5 6H9M5 14H9" stroke="currentColor"/>"#
+    )
+    public static let statusActive = statusActiveData.svgIcon
+
+    public static let sidebarData = OpenCodeIconData(
+        "sidebar", viewBox: 20.0, paths: [#"M7.86667 2H5.2H2V18H5.2H7.86667M7.86667 2H18V18H7.86667M7.86667 2V18"#], strokeWidth: 1,
+        body: #"<path d="M7.86667 2H5.2H2V18H5.2H7.86667M7.86667 2H18V18H7.86667M7.86667 2V18" stroke="currentColor"/>"#
+    )
+    public static let sidebar = sidebarData.svgIcon
+
+    public static let sidebarActiveData = OpenCodeIconData(
+        "sidebar-active", viewBox: 20.0, paths: [#"M2 2V18H5.2H7.86667V2H5.2H2Z"#, #"M7.86667 2H5.2H2V18H5.2H7.86667M7.86667 2H18V18H7.86667M7.86667 2V18"#], strokeWidth: 1,
+        body: "<path d=\"M2 2V18H5.2H7.86667V2H5.2H2Z\" fill=\"currentColor\" fill-opacity=\"0.1\"/>\n<path d=\"M7.86667 2H5.2H2V18H5.2H7.86667M7.86667 2H18V18H7.86667M7.86667 2V18\" stroke=\"currentColor\"/>"
+    )
+    public static let sidebarActive = sidebarActiveData.svgIcon
+
+    public static let layoutLeftData = OpenCodeIconData(
+        "layout-left", viewBox: 20.0, paths: [#"M2.91675 2.91699L2.91675 2.41699L2.41675 2.41699L2.41675 2.91699L2.91675 2.91699ZM17.0834 2.91699L17.5834 2.91699L17.5834 2.41699L17.0834 2.41699L17.0834 2.91699ZM17.0834 17.0837L17.0834 17.5837L17.5834 17.5837L17.5834 17.0837L17.0834 17.0837ZM2.91675 17.0837L2.41675 17.0837L2.41675 17.5837L2.91675 17.5837L2.91675 17.0837ZM7.41674 17.0837L7.41674 17.5837L8.41674 17.5837L8.41674 17.0837L7.91674 17.0837L7.41674 17.0837ZM8.41674 2.91699L8.41674 2.41699L7.41674 2.41699L7.41674 2.91699L7.91674 2.91699L8.41674 2.91699ZM2.91675 2.91699L2.91675 3.41699L17.0834 3.41699L17.0834 2.91699L17.0834 2.41699L2.91675 2.41699L2.91675 2.91699ZM17.0834 2.91699L16.5834 2.91699L16.5834 17.0837L17.0834 17.0837L17.5834 17.0837L17.5834 2.91699L17.0834 2.91699ZM17.0834 17.0837L17.0834 16.5837L2.91675 16.5837L2.91675 17.0837L2.91675 17.5837L17.0834 17.5837L17.0834 17.0837ZM2.91675 17.0837L3.41675 17.0837L3.41675 2.91699L2.91675 2.91699L2.41675 2.91699L2.41675 17.0837L2.91675 17.0837ZM7.91674 17.0837L8.41674 17.0837L8.41674 2.91699L7.91674 2.91699L7.41674 2.91699L7.41674 17.0837L7.91674 17.0837Z"#], strokeWidth: nil,
+        body: #"<path d="M2.91675 2.91699L2.91675 2.41699L2.41675 2.41699L2.41675 2.91699L2.91675 2.91699ZM17.0834 2.91699L17.5834 2.91699L17.5834 2.41699L17.0834 2.41699L17.0834 2.91699ZM17.0834 17.0837L17.0834 17.5837L17.5834 17.5837L17.5834 17.0837L17.0834 17.0837ZM2.91675 17.0837L2.41675 17.0837L2.41675 17.5837L2.91675 17.5837L2.91675 17.0837ZM7.41674 17.0837L7.41674 17.5837L8.41674 17.5837L8.41674 17.0837L7.91674 17.0837L7.41674 17.0837ZM8.41674 2.91699L8.41674 2.41699L7.41674 2.41699L7.41674 2.91699L7.91674 2.91699L8.41674 2.91699ZM2.91675 2.91699L2.91675 3.41699L17.0834 3.41699L17.0834 2.91699L17.0834 2.41699L2.91675 2.41699L2.91675 2.91699ZM17.0834 2.91699L16.5834 2.91699L16.5834 17.0837L17.0834 17.0837L17.5834 17.0837L17.5834 2.91699L17.0834 2.91699ZM17.0834 17.0837L17.0834 16.5837L2.91675 16.5837L2.91675 17.0837L2.91675 17.5837L17.0834 17.5837L17.0834 17.0837ZM2.91675 17.0837L3.41675 17.0837L3.41675 2.91699L2.91675 2.91699L2.41675 2.91699L2.41675 17.0837L2.91675 17.0837ZM7.91674 17.0837L8.41674 17.0837L8.41674 2.91699L7.91674 2.91699L7.41674 2.91699L7.41674 17.0837L7.91674 17.0837Z" fill="currentColor"/>"#
+    )
+    public static let layoutLeft = layoutLeftData.svgIcon
+
+    public static let layoutLeftPartialData = OpenCodeIconData(
+        "layout-left-partial", viewBox: 20.0, paths: [#"M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z"#, #"M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602"#], strokeWidth: 1,
+        body: #"<path d="M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z" fill="currentColor" fill-opacity="16%" /><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let layoutLeftPartial = layoutLeftPartialData.svgIcon
+
+    public static let layoutLeftFullData = OpenCodeIconData(
+        "layout-left-full", viewBox: 20.0, paths: [#"M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z"#, #"M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602"#], strokeWidth: 1,
+        body: #"<path d="M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z" fill="currentColor"/><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let layoutLeftFull = layoutLeftFullData.svgIcon
+
+    public static let layoutRightData = OpenCodeIconData(
+        "layout-right", viewBox: 20.0, paths: [#"M2.91675 2.91699L2.91675 2.41699L2.41675 2.41699L2.41675 2.91699L2.91675 2.91699ZM17.0834 2.91699L17.5834 2.91699L17.5834 2.41699L17.0834 2.41699L17.0834 2.91699ZM17.0834 17.0837L17.0834 17.5837L17.5834 17.5837L17.5834 17.0837L17.0834 17.0837ZM2.91675 17.0837L2.41675 17.0837L2.41675 17.5837L2.91675 17.5837L2.91675 17.0837ZM7.41674 17.0837L7.41674 17.5837L8.41674 17.5837L8.41674 17.0837L7.91674 17.0837L7.41674 17.0837ZM8.41674 2.91699L8.41674 2.41699L7.41674 2.41699L7.41674 2.91699L7.91674 2.91699L8.41674 2.91699ZM2.91675 2.91699L2.91675 3.41699L17.0834 3.41699L17.0834 2.91699L17.0834 2.41699L2.91675 2.41699L2.91675 2.91699ZM17.0834 2.91699L16.5834 2.91699L16.5834 17.0837L17.0834 17.0837L17.5834 17.0837L17.5834 2.91699L17.0834 2.91699ZM17.0834 17.0837L17.0834 16.5837L2.91675 16.5837L2.91675 17.0837L2.91675 17.5837L17.0834 17.5837L17.0834 17.0837ZM2.91675 17.0837L3.41675 17.0837L3.41675 2.91699L2.91675 2.91699L2.41675 2.91699L2.41675 17.0837L2.91675 17.0837ZM7.91674 17.0837L8.41674 17.0837L8.41674 2.91699L7.91674 2.91699L7.41674 2.91699L7.41674 17.0837L7.91674 17.0837Z"#], strokeWidth: nil,
+        body: #"<g transform="matrix(-1 0 0 1 20 0)"><path d="M2.91675 2.91699L2.91675 2.41699L2.41675 2.41699L2.41675 2.91699L2.91675 2.91699ZM17.0834 2.91699L17.5834 2.91699L17.5834 2.41699L17.0834 2.41699L17.0834 2.91699ZM17.0834 17.0837L17.0834 17.5837L17.5834 17.5837L17.5834 17.0837L17.0834 17.0837ZM2.91675 17.0837L2.41675 17.0837L2.41675 17.5837L2.91675 17.5837L2.91675 17.0837ZM7.41674 17.0837L7.41674 17.5837L8.41674 17.5837L8.41674 17.0837L7.91674 17.0837L7.41674 17.0837ZM8.41674 2.91699L8.41674 2.41699L7.41674 2.41699L7.41674 2.91699L7.91674 2.91699L8.41674 2.91699ZM2.91675 2.91699L2.91675 3.41699L17.0834 3.41699L17.0834 2.91699L17.0834 2.41699L2.91675 2.41699L2.91675 2.91699ZM17.0834 2.91699L16.5834 2.91699L16.5834 17.0837L17.0834 17.0837L17.5834 17.0837L17.5834 2.91699L17.0834 2.91699ZM17.0834 17.0837L17.0834 16.5837L2.91675 16.5837L2.91675 17.0837L2.91675 17.5837L17.0834 17.5837L17.0834 17.0837ZM2.91675 17.0837L3.41675 17.0837L3.41675 2.91699L2.91675 2.91699L2.41675 2.91699L2.41675 17.0837L2.91675 17.0837ZM7.91674 17.0837L8.41674 17.0837L8.41674 2.91699L7.91674 2.91699L7.41674 2.91699L7.41674 17.0837L7.91674 17.0837Z" fill="currentColor"/></g>"#
+    )
+    public static let layoutRight = layoutRightData.svgIcon
+
+    public static let layoutRightPartialData = OpenCodeIconData(
+        "layout-right-partial", viewBox: 20.0, paths: [#"M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z"#, #"M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602"#], strokeWidth: 1,
+        body: #"<g transform="matrix(-1 0 0 1 20 0)"><path d="M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z" fill="currentColor" fill-opacity="16%" /><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602" stroke="currentColor" stroke-linecap="square"/></g>"#
+    )
+    public static let layoutRightPartial = layoutRightPartialData.svgIcon
+
+    public static let layoutRightFullData = OpenCodeIconData(
+        "layout-right-full", viewBox: 20.0, paths: [#"M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z"#, #"M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602"#], strokeWidth: 1,
+        body: #"<g transform="matrix(-1 0 0 1 20 0)"><path d="M2.91732 2.91602L7.91732 2.91602L7.91732 17.0827H2.91732L2.91732 2.91602Z" fill="currentColor"/><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M2.91732 2.91602L7.91732 2.91602M17.084 2.91602L17.084 17.0827M17.084 2.91602L7.91732 2.91602M17.084 17.0827L2.91732 17.0827M17.084 17.0827L7.91732 17.0827M2.91732 17.0827H7.91732M7.91732 17.0827L7.91732 2.91602" stroke="currentColor" stroke-linecap="square"/></g>"#
+    )
+    public static let layoutRightFull = layoutRightFullData.svgIcon
+
+    public static let openFileData = OpenCodeIconData(
+        "open-file", viewBox: 20.0, paths: [#"M7.91602 2.91406H2.91602V17.0807H17.0827V12.0807M12.0827 2.91406H17.0827V7.91406M9.58268 10.4141L16.666 3.33073"#], strokeWidth: 1,
+        body: #"<path d="M7.91602 2.91406H2.91602V17.0807H17.0827V12.0807M12.0827 2.91406H17.0827V7.91406M9.58268 10.4141L16.666 3.33073" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let openFile = openFileData.svgIcon
+
+    public static let commentData = OpenCodeIconData(
+        "comment", viewBox: 16.0, paths: [#"M1.5 2.5V10.5H5.5L8 13.5L10.5 10.5H14.5V2.5H1.5Z"#], strokeWidth: 1,
+        body: #"<path d="M1.5 2.5V10.5H5.5L8 13.5L10.5 10.5H14.5V2.5H1.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let comment = commentData.svgIcon
+
+    public static let folderAddLeftData = OpenCodeIconData(
+        "folder-add-left", viewBox: 16.0, paths: [#"M7.5 13.5H1.5V2.5H5.5L8.5 5.5H14.5V6.5"#, #"M9.5 11.5H12.5M12.5 11.5H15.5M12.5 11.5V8.5M12.5 11.5V14.5"#], strokeWidth: 1,
+        body: #"<path d="M7.5 13.5H1.5V2.5H5.5L8.5 5.5H14.5V6.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M9.5 11.5H12.5M12.5 11.5H15.5M12.5 11.5V8.5M12.5 11.5V14.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let folderAddLeft = folderAddLeftData.svgIcon
+
+    public static let githubData = OpenCodeIconData(
+        "github", viewBox: 20.0, paths: [#"M10.0001 1.62549C14.6042 1.62549 18.3334 5.35465 18.3334 9.95882C18.333 11.7049 17.785 13.4068 16.7666 14.8251C15.7482 16.2434 14.3107 17.3066 12.6563 17.8651C12.2397 17.9484 12.0834 17.688 12.0834 17.4692C12.0834 17.188 12.0938 16.2922 12.0938 15.1776C12.0938 14.3963 11.8334 13.8963 11.5313 13.6359C13.3855 13.4276 15.3334 12.7192 15.3334 9.52132C15.3334 8.60465 15.0105 7.86507 14.4792 7.28174C14.5626 7.0734 14.8542 6.21924 14.3959 5.0734C14.3959 5.0734 13.698 4.84424 12.1042 5.92757C11.4376 5.74007 10.7292 5.64632 10.0209 5.64632C9.31258 5.64632 8.60425 5.74007 7.93758 5.92757C6.34383 4.85465 5.64592 5.0734 5.64592 5.0734C5.18758 6.21924 5.47925 7.0734 5.56258 7.28174C5.03133 7.86507 4.70842 8.61507 4.70842 9.52132C4.70842 12.7088 6.64592 13.4276 8.50008 13.6359C8.2605 13.8442 8.04175 14.2088 7.96883 14.7505C7.48967 14.9692 6.29175 15.3234 5.54175 14.063C5.3855 13.813 4.91675 13.1984 4.2605 13.2088C3.56258 13.2192 3.97925 13.6047 4.27092 13.7609C4.62508 13.9588 5.03133 14.6984 5.12508 14.938C5.29175 15.4067 5.83342 16.3026 7.92717 15.9172C7.92717 16.6151 7.93758 17.2713 7.93758 17.4692C7.93758 17.688 7.78133 17.938 7.36467 17.8651C5.70491 17.3126 4.26126 16.2515 3.23851 14.8324C2.21576 13.4133 1.66583 11.7081 1.66675 9.95882C1.66675 5.35465 5.39592 1.62549 10.0001 1.62549Z"#], strokeWidth: nil,
+        body: #"<path d="M10.0001 1.62549C14.6042 1.62549 18.3334 5.35465 18.3334 9.95882C18.333 11.7049 17.785 13.4068 16.7666 14.8251C15.7482 16.2434 14.3107 17.3066 12.6563 17.8651C12.2397 17.9484 12.0834 17.688 12.0834 17.4692C12.0834 17.188 12.0938 16.2922 12.0938 15.1776C12.0938 14.3963 11.8334 13.8963 11.5313 13.6359C13.3855 13.4276 15.3334 12.7192 15.3334 9.52132C15.3334 8.60465 15.0105 7.86507 14.4792 7.28174C14.5626 7.0734 14.8542 6.21924 14.3959 5.0734C14.3959 5.0734 13.698 4.84424 12.1042 5.92757C11.4376 5.74007 10.7292 5.64632 10.0209 5.64632C9.31258 5.64632 8.60425 5.74007 7.93758 5.92757C6.34383 4.85465 5.64592 5.0734 5.64592 5.0734C5.18758 6.21924 5.47925 7.0734 5.56258 7.28174C5.03133 7.86507 4.70842 8.61507 4.70842 9.52132C4.70842 12.7088 6.64592 13.4276 8.50008 13.6359C8.2605 13.8442 8.04175 14.2088 7.96883 14.7505C7.48967 14.9692 6.29175 15.3234 5.54175 14.063C5.3855 13.813 4.91675 13.1984 4.2605 13.2088C3.56258 13.2192 3.97925 13.6047 4.27092 13.7609C4.62508 13.9588 5.03133 14.6984 5.12508 14.938C5.29175 15.4067 5.83342 16.3026 7.92717 15.9172C7.92717 16.6151 7.93758 17.2713 7.93758 17.4692C7.93758 17.688 7.78133 17.938 7.36467 17.8651C5.70491 17.3126 4.26126 16.2515 3.23851 14.8324C2.21576 13.4133 1.66583 11.7081 1.66675 9.95882C1.66675 5.35465 5.39592 1.62549 10.0001 1.62549Z" fill="currentColor"/>"#
+    )
+    public static let github = githubData.svgIcon
+
+    public static let discordData = OpenCodeIconData(
+        "discord", viewBox: 20.0, paths: [#"M16.0742 4.45014C14.9244 3.92097 13.7106 3.54556 12.4638 3.3335C12.2932 3.64011 12.1388 3.95557 12.0013 4.27856C10.6732 4.07738 9.32261 4.07738 7.99451 4.27856C7.85694 3.9556 7.70257 3.64014 7.53203 3.3335C6.28441 3.54735 5.06981 3.92365 3.91889 4.45291C1.63401 7.85128 1.01462 11.1652 1.32431 14.4322C2.6624 15.426 4.16009 16.1819 5.7523 16.6668C6.11082 16.1821 6.42806 15.6678 6.70066 15.1295C6.18289 14.9351 5.68315 14.6953 5.20723 14.4128C5.33249 14.3215 5.45499 14.2274 5.57336 14.136C6.95819 14.7907 8.46965 15.1302 9.99997 15.1302C11.5303 15.1302 13.0418 14.7907 14.4266 14.136C14.5463 14.2343 14.6688 14.3284 14.7927 14.4128C14.3159 14.6957 13.8152 14.9361 13.2965 15.1309C13.5688 15.669 13.8861 16.1828 14.2449 16.6668C15.8385 16.1838 17.3373 15.4283 18.6756 14.4335C19.039 10.645 18.0549 7.36145 16.0742 4.45014ZM7.09294 12.423C6.22992 12.423 5.51693 11.6357 5.51693 10.6671C5.51693 9.69852 6.20514 8.90427 7.09019 8.90427C7.97524 8.90427 8.68272 9.69852 8.66758 10.6671C8.65244 11.6357 7.97248 12.423 7.09294 12.423ZM12.907 12.423C12.0426 12.423 11.3324 11.6357 11.3324 10.6671C11.3324 9.69852 12.0206 8.90427 12.907 8.90427C13.7934 8.90427 14.4954 9.69852 14.4803 10.6671C14.4651 11.6357 13.7865 12.423 12.907 12.423Z"#], strokeWidth: nil,
+        body: #"<path d="M16.0742 4.45014C14.9244 3.92097 13.7106 3.54556 12.4638 3.3335C12.2932 3.64011 12.1388 3.95557 12.0013 4.27856C10.6732 4.07738 9.32261 4.07738 7.99451 4.27856C7.85694 3.9556 7.70257 3.64014 7.53203 3.3335C6.28441 3.54735 5.06981 3.92365 3.91889 4.45291C1.63401 7.85128 1.01462 11.1652 1.32431 14.4322C2.6624 15.426 4.16009 16.1819 5.7523 16.6668C6.11082 16.1821 6.42806 15.6678 6.70066 15.1295C6.18289 14.9351 5.68315 14.6953 5.20723 14.4128C5.33249 14.3215 5.45499 14.2274 5.57336 14.136C6.95819 14.7907 8.46965 15.1302 9.99997 15.1302C11.5303 15.1302 13.0418 14.7907 14.4266 14.136C14.5463 14.2343 14.6688 14.3284 14.7927 14.4128C14.3159 14.6957 13.8152 14.9361 13.2965 15.1309C13.5688 15.669 13.8861 16.1828 14.2449 16.6668C15.8385 16.1838 17.3373 15.4283 18.6756 14.4335C19.039 10.645 18.0549 7.36145 16.0742 4.45014ZM7.09294 12.423C6.22992 12.423 5.51693 11.6357 5.51693 10.6671C5.51693 9.69852 6.20514 8.90427 7.09019 8.90427C7.97524 8.90427 8.68272 9.69852 8.66758 10.6671C8.65244 11.6357 7.97248 12.423 7.09294 12.423ZM12.907 12.423C12.0426 12.423 11.3324 11.6357 11.3324 10.6671C11.3324 9.69852 12.0206 8.90427 12.907 8.90427C13.7934 8.90427 14.4954 9.69852 14.4803 10.6671C14.4651 11.6357 13.7865 12.423 12.907 12.423Z" fill="currentColor"/>"#
+    )
+    public static let discord = discordData.svgIcon
+
+    public static let layoutBottomData = OpenCodeIconData(
+        "layout-bottom", viewBox: 20.0, paths: [#"M2.91699 17.0832L2.41699 17.0832L2.41699 17.5832L2.91699 17.5832L2.91699 17.0832ZM2.91699 2.91653L2.91699 2.41653L2.41699 2.41653L2.41699 2.91653L2.91699 2.91653ZM17.0837 2.91653L17.5837 2.91653L17.5837 2.41653L17.0837 2.41653L17.0837 2.91653ZM17.0837 17.0832L17.5837 17.0832L17.5837 17.5832L17.0837 17.5832L17.0837 17.0832ZM17.0837 12.5827L17.5837 12.5827L17.5837 11.5827L17.0837 11.5827L17.0837 12.0827L17.0837 12.5827ZM2.91699 11.5827L2.41699 11.5827L2.41699 12.5827L2.91699 12.5827L2.91699 12.0827L2.91699 11.5827ZM2.91699 17.0832L3.41699 17.0832L3.41699 2.91653L2.91699 2.91653L2.41699 2.91653L2.41699 17.0832L2.91699 17.0832ZM2.91699 2.91653L2.91699 3.41653L17.0837 3.41653L17.0837 2.91653L17.0837 2.41653L2.91699 2.41653L2.91699 2.91653ZM17.0837 2.91653L16.5837 2.91653L16.5837 17.0832L17.0837 17.0832L17.5837 17.0832L17.5837 2.91653L17.0837 2.91653ZM17.0837 17.0832L17.0837 16.5832L2.91699 16.5832L2.91699 17.0832L2.91699 17.5832L17.0837 17.5832L17.0837 17.0832ZM17.0837 12.0827L17.0837 11.5827L2.91699 11.5827L2.91699 12.0827L2.91699 12.5827L17.0837 12.5827L17.0837 12.0827Z"#], strokeWidth: nil,
+        body: #"<path d="M2.91699 17.0832L2.41699 17.0832L2.41699 17.5832L2.91699 17.5832L2.91699 17.0832ZM2.91699 2.91653L2.91699 2.41653L2.41699 2.41653L2.41699 2.91653L2.91699 2.91653ZM17.0837 2.91653L17.5837 2.91653L17.5837 2.41653L17.0837 2.41653L17.0837 2.91653ZM17.0837 17.0832L17.5837 17.0832L17.5837 17.5832L17.0837 17.5832L17.0837 17.0832ZM17.0837 12.5827L17.5837 12.5827L17.5837 11.5827L17.0837 11.5827L17.0837 12.0827L17.0837 12.5827ZM2.91699 11.5827L2.41699 11.5827L2.41699 12.5827L2.91699 12.5827L2.91699 12.0827L2.91699 11.5827ZM2.91699 17.0832L3.41699 17.0832L3.41699 2.91653L2.91699 2.91653L2.41699 2.91653L2.41699 17.0832L2.91699 17.0832ZM2.91699 2.91653L2.91699 3.41653L17.0837 3.41653L17.0837 2.91653L17.0837 2.41653L2.91699 2.41653L2.91699 2.91653ZM17.0837 2.91653L16.5837 2.91653L16.5837 17.0832L17.0837 17.0832L17.5837 17.0832L17.5837 2.91653L17.0837 2.91653ZM17.0837 17.0832L17.0837 16.5832L2.91699 16.5832L2.91699 17.0832L2.91699 17.5832L17.0837 17.5832L17.0837 17.0832ZM17.0837 12.0827L17.0837 11.5827L2.91699 11.5827L2.91699 12.0827L2.91699 12.5827L17.0837 12.5827L17.0837 12.0827Z" fill="currentColor"/>"#
+    )
+    public static let layoutBottom = layoutBottomData.svgIcon
+
+    public static let layoutBottomPartialData = OpenCodeIconData(
+        "layout-bottom-partial", viewBox: 20.0, paths: [#"M2.91732 12.0827L17.084 12.0827L17.084 17.0827H2.91732L2.91732 12.0827Z"#, #"M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M17.084 2.91602L17.084 17.0827M17.084 17.0827L2.91732 17.0827M2.91732 12.0827L17.084 12.0827"#], strokeWidth: 1,
+        body: #"<path d="M2.91732 12.0827L17.084 12.0827L17.084 17.0827H2.91732L2.91732 12.0827Z" fill="currentColor" fill-opacity="16%" /><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M17.084 2.91602L17.084 17.0827M17.084 17.0827L2.91732 17.0827M2.91732 12.0827L17.084 12.0827" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let layoutBottomPartial = layoutBottomPartialData.svgIcon
+
+    public static let layoutBottomFullData = OpenCodeIconData(
+        "layout-bottom-full", viewBox: 20.0, paths: [#"M2.91732 12.0827L17.084 12.0827L17.084 17.0827H2.91732L2.91732 12.0827Z"#, #"M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M17.084 2.91602L17.084 17.0827M17.084 17.0827L2.91732 17.0827M2.91732 12.0827L17.084 12.0827"#], strokeWidth: 1,
+        body: #"<path d="M2.91732 12.0827L17.084 12.0827L17.084 17.0827H2.91732L2.91732 12.0827Z" fill="currentColor"/><path d="M2.91732 2.91602L17.084 2.91602M2.91732 2.91602L2.91732 17.0827M17.084 2.91602L17.084 17.0827M17.084 17.0827L2.91732 17.0827M2.91732 12.0827L17.084 12.0827" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let layoutBottomFull = layoutBottomFullData.svgIcon
+
+    public static let dotGridData = OpenCodeIconData(
+        "dot-grid", viewBox: 20.0, paths: [#"M2.08398 9.16602H3.75065V10.8327H2.08398V9.16602Z"#, #"M10.834 9.16602H9.16732V10.8327H10.834V9.16602Z"#, #"M16.2507 9.16602H17.9173V10.8327H16.2507V9.16602Z"#, #"M2.08398 9.16602H3.75065V10.8327H2.08398V9.16602Z"#, #"M10.834 9.16602H9.16732V10.8327H10.834V9.16602Z"#, #"M16.2507 9.16602H17.9173V10.8327H16.2507V9.16602Z"#], strokeWidth: 1,
+        body: #"<path d="M2.08398 9.16602H3.75065V10.8327H2.08398V9.16602Z" fill="currentColor"/><path d="M10.834 9.16602H9.16732V10.8327H10.834V9.16602Z" fill="currentColor"/><path d="M16.2507 9.16602H17.9173V10.8327H16.2507V9.16602Z" fill="currentColor"/><path d="M2.08398 9.16602H3.75065V10.8327H2.08398V9.16602Z" stroke="currentColor"/><path d="M10.834 9.16602H9.16732V10.8327H10.834V9.16602Z" stroke="currentColor"/><path d="M16.2507 9.16602H17.9173V10.8327H16.2507V9.16602Z" stroke="currentColor"/>"#
+    )
+    public static let dotGrid = dotGridData.svgIcon
+
+    public static let circleCheckData = OpenCodeIconData(
+        "circle-check", viewBox: 16.0, paths: [#"M5 8L7.5 11L11 5.5"#, #"M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z"#], strokeWidth: 1,
+        body: #"<path d="M5 8L7.5 11L11 5.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z" stroke="currentColor"/>"#
+    )
+    public static let circleCheck = circleCheckData.svgIcon
+
+    public static let circleCheckBoldData = OpenCodeIconData(
+        "circle-check-bold", viewBox: 16.0, paths: [#"M5 8L7.5 11L11 5.5"#, #"M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z"#], strokeWidth: 1.5,
+        body: #"<path d="M5 8L7.5 11L11 5.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor" stroke-width="1.5"/><path d="M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z" stroke="currentColor" stroke-width="1.5"/>"#
+    )
+    public static let circleCheckBold = circleCheckBoldData.svgIcon
+
+    public static let copyData = OpenCodeIconData(
+        "copy", viewBox: 16.0, paths: [#"M9.5 3.5V1.5H1.5V10.5H4.5"#, #"M6.5 14.5V5.5H14.5V14.5H6.5Z"#], strokeWidth: 1,
+        body: #"<path d="M9.5 3.5V1.5H1.5V10.5H4.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M6.5 14.5V5.5H14.5V14.5H6.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let copy = copyData.svgIcon
+
+    public static let checkData = OpenCodeIconData(
+        "check", viewBox: 16.0, paths: [#"M4.5 7.5L7 11.5L11.5 4.5"#], strokeWidth: 1,
+        body: #"<path d="M4.5 7.5L7 11.5L11.5 4.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let check = checkData.svgIcon
+
+    public static let photoData = OpenCodeIconData(
+        "photo", viewBox: 20.0, paths: [#"M16.6665 16.6666L11.6665 11.6666L9.99984 13.3333L6.6665 9.99996L3.08317 13.5833M2.9165 2.91663H17.0832V17.0833H2.9165V2.91663ZM13.3332 7.49996C13.3332 8.30537 12.6803 8.95829 11.8748 8.95829C11.0694 8.95829 10.4165 8.30537 10.4165 7.49996C10.4165 6.69454 11.0694 6.04163 11.8748 6.04163C12.6803 6.04163 13.3332 6.69454 13.3332 7.49996Z"#], strokeWidth: 1,
+        body: #"<path d="M16.6665 16.6666L11.6665 11.6666L9.99984 13.3333L6.6665 9.99996L3.08317 13.5833M2.9165 2.91663H17.0832V17.0833H2.9165V2.91663ZM13.3332 7.49996C13.3332 8.30537 12.6803 8.95829 11.8748 8.95829C11.0694 8.95829 10.4165 8.30537 10.4165 7.49996C10.4165 6.69454 11.0694 6.04163 11.8748 6.04163C12.6803 6.04163 13.3332 6.69454 13.3332 7.49996Z" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let photo = photoData.svgIcon
+
+    public static let shareData = OpenCodeIconData(
+        "share", viewBox: 20.0, paths: [#"M10.0013 12.0846L10.0013 3.33464M13.7513 6.66797L10.0013 2.91797L6.2513 6.66797M17.0846 10.418V17.0846H2.91797V10.418"#], strokeWidth: 1,
+        body: #"<path d="M10.0013 12.0846L10.0013 3.33464M13.7513 6.66797L10.0013 2.91797L6.2513 6.66797M17.0846 10.418V17.0846H2.91797V10.418" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let share = shareData.svgIcon
+
+    public static let shieldData = OpenCodeIconData(
+        "shield", viewBox: 20.0, paths: [#"M7.49935 9.3737L9.16602 11.0404L12.4994 7.70703M9.99935 2.08203L17.0827 4.3737V9.92565C17.0827 14.0694 13.3327 16.2487 9.99935 18.047C6.66602 16.2487 2.91602 14.0694 2.91602 9.92565V4.3737L9.99935 2.08203Z"#], strokeWidth: 1,
+        body: #"<path d="M7.49935 9.3737L9.16602 11.0404L12.4994 7.70703M9.99935 2.08203L17.0827 4.3737V9.92565C17.0827 14.0694 13.3327 16.2487 9.99935 18.047C6.66602 16.2487 2.91602 14.0694 2.91602 9.92565V4.3737L9.99935 2.08203Z" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let shield = shieldData.svgIcon
+
+    public static let downloadData = OpenCodeIconData(
+        "download", viewBox: 16.0, paths: [#"M8 2.5L8 10.5M4.5 7L8 10.5L11.5 7"#, #"M1.5 10.5V13.5H14.5V10.5"#], strokeWidth: 1,
+        body: #"<path d="M8 2.5L8 10.5M4.5 7L8 10.5L11.5 7" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M1.5 10.5V13.5H14.5V10.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let download = downloadData.svgIcon
+
+    public static let menuData = OpenCodeIconData(
+        "menu", viewBox: 16.0, paths: [#"M2 8.00006H14M2 4.5H14M2 11.5H14"#], strokeWidth: 1,
+        body: #"<path d="M2 8.00006H14M2 4.5H14M2 11.5H14" stroke="currentColor"/>"#
+    )
+    public static let menu = menuData.svgIcon
+
+    public static let serverData = OpenCodeIconData(
+        "server", viewBox: 16.0, paths: [#"M1.5 10.5V14.5H14.5V10.5M1.5 10.5H14.5M14.5 10.5V6.5L11.5 1.5H4.5L1.5 6.5V10.5M1.5 6.5H14.5"#, #"M12.5 12.5H11.5M12.5 8.5H11.5"#], strokeWidth: 1,
+        body: #"<path d="M1.5 10.5V14.5H14.5V10.5M1.5 10.5H14.5M14.5 10.5V6.5L11.5 1.5H4.5L1.5 6.5V10.5M1.5 6.5H14.5" stroke-linecap="square" stroke-linejoin="round" stroke="currentColor"/><path d="M12.5 12.5H11.5M12.5 8.5H11.5" stroke-linecap="round" stroke="currentColor"/>"#
+    )
+    public static let server = serverData.svgIcon
+
+    public static let branchData = OpenCodeIconData(
+        "branch", viewBox: 16.0, paths: [#"M5.22983 10.4384V5.43842M6.55305 11.8019H8.83276C9.94392 11.8019 10.8421 10.8962 10.8327 9.78506L10.7966 5.50012"#], strokeWidth: 1,
+        body: #"<circle cx="5" cy="12" r="1.5" stroke="currentColor"/><path d="M5.22983 10.4384V5.43842M6.55305 11.8019H8.83276C9.94392 11.8019 10.8421 10.8962 10.8327 9.78506L10.7966 5.50012" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><circle cx="5" cy="4" r="1.5" stroke="currentColor"/><circle cx="11" cy="4" r="1.5" stroke="currentColor"/>"#
+    )
+    public static let branch = branchData.svgIcon
+
+    public static let editData = OpenCodeIconData(
+        "edit", viewBox: 16.0, paths: [#"M8.5 2.5H2.5V13.5H13.5V7.5M7.5 8.5V6.5L12.5 1.5L14.5 3.5L9.5 8.5H7.5Z"#], strokeWidth: 1,
+        body: #"<path d="M8.5 2.5H2.5V13.5H13.5V7.5M7.5 8.5V6.5L12.5 1.5L14.5 3.5L9.5 8.5H7.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let edit = editData.svgIcon
+
+    public static let helpData = OpenCodeIconData(
+        "help", viewBox: 16.0, paths: [#"M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z"#, #"M7.22461 9.50977V9.43555C7.22982 8.95117 7.27799 8.77279 7.36914 8.48633C7.46289 8.19987 7.5957 7.9681 7.76758 7.79102C7.93945 7.61393 8.14648 7.45247 8.38867 7.30664C8.54492 7.20768 8.68555 7.09701 8.81055 6.97461C8.93555 6.85221 9.03451 6.71159 9.10742 6.55273C9.18034 6.39388 9.2168 6.2181 9.2168 6.02539C9.2168 5.79362 9.16211 5.5931 9.05273 5.42383C8.94336 5.25456 8.79753 5.12435 8.61523 5.0332C8.43555 4.93945 8.23503 4.89258 8.01367 4.89258C7.81315 4.89258 7.62174 4.93424 7.43945 5.01758C7.25716 5.10091 7.10612 5.23112 6.98633 5.4082C6.86654 5.58268 6.79753 5.72591 6.7793 6.00195H5.5918C5.61003 5.5332 5.72852 5.2194 5.94727 4.89648C6.16602 4.57096 6.45508 4.32487 6.81445 4.1582C7.17643 3.99154 7.57617 3.9082 8.01367 3.9082C8.49284 3.9082 8.91211 3.99805 9.27148 4.17773C9.63086 4.35482 9.90951 4.60352 10.1074 4.92383C10.3079 5.24154 10.4082 5.61263 10.4082 6.03711C10.4082 6.32878 10.3626 6.5918 10.2715 6.82617C10.1803 7.05794 10.0501 7.26497 9.88086 7.44727C9.71419 7.62956 9.51367 7.79102 9.2793 7.93164C9.05794 8.06966 8.87826 8.21289 8.74023 8.36133C8.60482 8.50977 8.50586 8.68555 8.44336 8.88867C8.38086 9.0918 8.34701 9.13607 8.3418 9.43555V9.50977H7.22461Z"#], strokeWidth: 1,
+        body: #"<path d="M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z" stroke="currentColor"/><path d="M7.22461 9.50977V9.43555C7.22982 8.95117 7.27799 8.77279 7.36914 8.48633C7.46289 8.19987 7.5957 7.9681 7.76758 7.79102C7.93945 7.61393 8.14648 7.45247 8.38867 7.30664C8.54492 7.20768 8.68555 7.09701 8.81055 6.97461C8.93555 6.85221 9.03451 6.71159 9.10742 6.55273C9.18034 6.39388 9.2168 6.2181 9.2168 6.02539C9.2168 5.79362 9.16211 5.5931 9.05273 5.42383C8.94336 5.25456 8.79753 5.12435 8.61523 5.0332C8.43555 4.93945 8.23503 4.89258 8.01367 4.89258C7.81315 4.89258 7.62174 4.93424 7.43945 5.01758C7.25716 5.10091 7.10612 5.23112 6.98633 5.4082C6.86654 5.58268 6.79753 5.72591 6.7793 6.00195H5.5918C5.61003 5.5332 5.72852 5.2194 5.94727 4.89648C6.16602 4.57096 6.45508 4.32487 6.81445 4.1582C7.17643 3.99154 7.57617 3.9082 8.01367 3.9082C8.49284 3.9082 8.91211 3.99805 9.27148 4.17773C9.63086 4.35482 9.90951 4.60352 10.1074 4.92383C10.3079 5.24154 10.4082 5.61263 10.4082 6.03711C10.4082 6.32878 10.3626 6.5918 10.2715 6.82617C10.1803 7.05794 10.0501 7.26497 9.88086 7.44727C9.71419 7.62956 9.51367 7.79102 9.2793 7.93164C9.05794 8.06966 8.87826 8.21289 8.74023 8.36133C8.60482 8.50977 8.50586 8.68555 8.44336 8.88867C8.38086 9.0918 8.34701 9.13607 8.3418 9.43555V9.50977H7.22461Z" fill="currentColor"/><rect x="6.99902" y="10.6675" width="1.42432" height="1.42432" fill="currentColor"/>"#
+    )
+    public static let help = helpData.svgIcon
+
+    public static let helpBoldData = OpenCodeIconData(
+        "help-bold", viewBox: 16.0, paths: [#"M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z"#, #"M7.22461 9.50977V9.43555C7.22982 8.95117 7.27799 8.77279 7.36914 8.48633C7.46289 8.19987 7.5957 7.9681 7.76758 7.79102C7.93945 7.61393 8.14648 7.45247 8.38867 7.30664C8.54492 7.20768 8.68555 7.09701 8.81055 6.97461C8.93555 6.85221 9.03451 6.71159 9.10742 6.55273C9.18034 6.39388 9.2168 6.2181 9.2168 6.02539C9.2168 5.79362 9.16211 5.5931 9.05273 5.42383C8.94336 5.25456 8.79753 5.12435 8.61523 5.0332C8.43555 4.93945 8.23503 4.89258 8.01367 4.89258C7.81315 4.89258 7.62174 4.93424 7.43945 5.01758C7.25716 5.10091 7.10612 5.23112 6.98633 5.4082C6.86654 5.58268 6.79753 5.72591 6.7793 6.00195H5.5918C5.61003 5.5332 5.72852 5.2194 5.94727 4.89648C6.16602 4.57096 6.45508 4.32487 6.81445 4.1582C7.17643 3.99154 7.57617 3.9082 8.01367 3.9082C8.49284 3.9082 8.91211 3.99805 9.27148 4.17773C9.63086 4.35482 9.90951 4.60352 10.1074 4.92383C10.3079 5.24154 10.4082 5.61263 10.4082 6.03711C10.4082 6.32878 10.3626 6.5918 10.2715 6.82617C10.1803 7.05794 10.0501 7.26497 9.88086 7.44727C9.71419 7.62956 9.51367 7.79102 9.2793 7.93164C9.05794 8.06966 8.87826 8.21289 8.74023 8.36133C8.60482 8.50977 8.50586 8.68555 8.44336 8.88867C8.38086 9.0918 8.34701 9.13607 8.3418 9.43555V9.50977H7.22461Z"#], strokeWidth: 1.5,
+        body: #"<path d="M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z" stroke="currentColor" stroke-width="1.5"/><path d="M7.22461 9.50977V9.43555C7.22982 8.95117 7.27799 8.77279 7.36914 8.48633C7.46289 8.19987 7.5957 7.9681 7.76758 7.79102C7.93945 7.61393 8.14648 7.45247 8.38867 7.30664C8.54492 7.20768 8.68555 7.09701 8.81055 6.97461C8.93555 6.85221 9.03451 6.71159 9.10742 6.55273C9.18034 6.39388 9.2168 6.2181 9.2168 6.02539C9.2168 5.79362 9.16211 5.5931 9.05273 5.42383C8.94336 5.25456 8.79753 5.12435 8.61523 5.0332C8.43555 4.93945 8.23503 4.89258 8.01367 4.89258C7.81315 4.89258 7.62174 4.93424 7.43945 5.01758C7.25716 5.10091 7.10612 5.23112 6.98633 5.4082C6.86654 5.58268 6.79753 5.72591 6.7793 6.00195H5.5918C5.61003 5.5332 5.72852 5.2194 5.94727 4.89648C6.16602 4.57096 6.45508 4.32487 6.81445 4.1582C7.17643 3.99154 7.57617 3.9082 8.01367 3.9082C8.49284 3.9082 8.91211 3.99805 9.27148 4.17773C9.63086 4.35482 9.90951 4.60352 10.1074 4.92383C10.3079 5.24154 10.4082 5.61263 10.4082 6.03711C10.4082 6.32878 10.3626 6.5918 10.2715 6.82617C10.1803 7.05794 10.0501 7.26497 9.88086 7.44727C9.71419 7.62956 9.51367 7.79102 9.2793 7.93164C9.05794 8.06966 8.87826 8.21289 8.74023 8.36133C8.60482 8.50977 8.50586 8.68555 8.44336 8.88867C8.38086 9.0918 8.34701 9.13607 8.3418 9.43555V9.50977H7.22461Z" fill="currentColor"/><rect x="6.99902" y="10.6675" width="1.42432" height="1.42432" fill="currentColor"/>"#
+    )
+    public static let helpBold = helpBoldData.svgIcon
+
+    public static let settingsGearData = OpenCodeIconData(
+        "settings-gear", viewBox: 16.0, paths: [#"M1.5 11V5L8 1.5L14.5 5V11L8 14.5L1.5 11Z"#, #"M10.5 8C10.5 9.38071 9.38071 10.5 8 10.5C6.61929 10.5 5.5 9.38071 5.5 8C5.5 6.61929 6.61929 5.5 8 5.5C9.38071 5.5 10.5 6.61929 10.5 8Z"#], strokeWidth: 1,
+        body: #"<path d="M1.5 11V5L8 1.5L14.5 5V11L8 14.5L1.5 11Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M10.5 8C10.5 9.38071 9.38071 10.5 8 10.5C6.61929 10.5 5.5 9.38071 5.5 8C5.5 6.61929 6.61929 5.5 8 5.5C9.38071 5.5 10.5 6.61929 10.5 8Z" stroke="currentColor"/>"#
+    )
+    public static let settingsGear = settingsGearData.svgIcon
+
+    public static let cloudUploadData = OpenCodeIconData(
+        "cloud-upload", viewBox: 20.0, paths: [#"M12.0833 16.25H15C17.0711 16.25 18.75 14.5711 18.75 12.5C18.75 10.5649 17.2843 8.97217 15.4025 8.77133C15.2 6.13103 12.8586 4.08333 10 4.08333C7.71532 4.08333 5.76101 5.49781 4.96501 7.49881C2.84892 7.90461 1.25 9.76559 1.25 11.6667C1.25 13.9813 3.30203 16.25 5.83333 16.25H7.91667M10 16.25V10.4167M12.0833 11.875L10 9.79167L7.91667 11.875"#], strokeWidth: 1,
+        body: #"<path d="M12.0833 16.25H15C17.0711 16.25 18.75 14.5711 18.75 12.5C18.75 10.5649 17.2843 8.97217 15.4025 8.77133C15.2 6.13103 12.8586 4.08333 10 4.08333C7.71532 4.08333 5.76101 5.49781 4.96501 7.49881C2.84892 7.90461 1.25 9.76559 1.25 11.6667C1.25 13.9813 3.30203 16.25 5.83333 16.25H7.91667M10 16.25V10.4167M12.0833 11.875L10 9.79167L7.91667 11.875" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let cloudUpload = cloudUploadData.svgIcon
+
+    public static let trashData = OpenCodeIconData(
+        "trash", viewBox: 16.0, paths: [#"M5.5 4.5H2.5L4 14.5H12L13.5 4.5H10.5M5.5 4.5V1.5H10.5V4.5M5.5 4.5H10.5M6.5 11.5L6 7M9.5 11.5L10 7"#], strokeWidth: 1,
+        body: #"<path d="M5.5 4.5H2.5L4 14.5H12L13.5 4.5H10.5M5.5 4.5V1.5H10.5V4.5M5.5 4.5H10.5M6.5 11.5L6 7M9.5 11.5L10 7" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let trash = trashData.svgIcon
+
+    public static let slidersData = OpenCodeIconData(
+        "sliders", viewBox: 16.0, paths: [#"M7.5 11.5C7.5 12.6046 6.60457 13.5 5.5 13.5C4.39543 13.5 3.5 12.6046 3.5 11.5C3.5 10.3954 4.39543 9.5 5.5 9.5C6.60457 9.5 7.5 10.3954 7.5 11.5Z"#, #"M12.5 4.5C12.5 5.60457 11.6046 6.5 10.5 6.5C9.39543 6.5 8.5 5.60457 8.5 4.5C8.5 3.39543 9.39543 2.5 10.5 2.5C11.6046 2.5 12.5 3.39543 12.5 4.5Z"#, #"M8.0498 4C8.01702 4.16154 8 4.32878 8 4.5C8 4.67122 8.01702 4.83846 8.0498 5H1.5C1.22386 5 1 4.77614 1 4.5C1 4.22386 1.22386 4 1.5 4H8.0498ZM14.5 4C14.7761 4 15 4.22386 15 4.5C15 4.77614 14.7761 5 14.5 5H12.9502C12.983 4.83846 13 4.67122 13 4.5C13 4.32878 12.983 4.16154 12.9502 4H14.5Z"#, #"M3.0498 11C3.01702 11.1615 3 11.3288 3 11.5C3 11.6712 3.01702 11.8385 3.0498 12H1.5C1.22386 12 1 11.7761 1 11.5C1 11.2239 1.22386 11 1.5 11H3.0498ZM14.5 11C14.7761 11 15 11.2239 15 11.5C15 11.7761 14.7761 12 14.5 12H7.9502C7.98298 11.8385 8 11.6712 8 11.5C8 11.3288 7.98298 11.1615 7.9502 11H14.5Z"#], strokeWidth: 1,
+        body: #"<path d="M7.5 11.5C7.5 12.6046 6.60457 13.5 5.5 13.5C4.39543 13.5 3.5 12.6046 3.5 11.5C3.5 10.3954 4.39543 9.5 5.5 9.5C6.60457 9.5 7.5 10.3954 7.5 11.5Z" stroke="currentColor"/><path d="M12.5 4.5C12.5 5.60457 11.6046 6.5 10.5 6.5C9.39543 6.5 8.5 5.60457 8.5 4.5C8.5 3.39543 9.39543 2.5 10.5 2.5C11.6046 2.5 12.5 3.39543 12.5 4.5Z" stroke="currentColor"/><path d="M8.0498 4C8.01702 4.16154 8 4.32878 8 4.5C8 4.67122 8.01702 4.83846 8.0498 5H1.5C1.22386 5 1 4.77614 1 4.5C1 4.22386 1.22386 4 1.5 4H8.0498ZM14.5 4C14.7761 4 15 4.22386 15 4.5C15 4.77614 14.7761 5 14.5 5H12.9502C12.983 4.83846 13 4.67122 13 4.5C13 4.32878 12.983 4.16154 12.9502 4H14.5Z" fill="currentColor"/><path d="M3.0498 11C3.01702 11.1615 3 11.3288 3 11.5C3 11.6712 3.01702 11.8385 3.0498 12H1.5C1.22386 12 1 11.7761 1 11.5C1 11.2239 1.22386 11 1.5 11H3.0498ZM14.5 11C14.7761 11 15 11.2239 15 11.5C15 11.7761 14.7761 12 14.5 12H7.9502C7.98298 11.8385 8 11.6712 8 11.5C8 11.3288 7.98298 11.1615 7.9502 11H14.5Z" fill="currentColor"/>"#
+    )
+    public static let sliders = slidersData.svgIcon
+
+    public static let keyboardData = OpenCodeIconData(
+        "keyboard", viewBox: 16.0, paths: [#"M5.5 13.5H10.5V8.5H13.5L8 2.5L2.5 8.5H5.5V13.5Z"#], strokeWidth: 1,
+        body: #"<path d="M5.5 13.5H10.5V8.5H13.5L8 2.5L2.5 8.5H5.5V13.5Z" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let keyboard = keyboardData.svgIcon
+
+    public static let selectorData = OpenCodeIconData(
+        "selector", viewBox: 20.0, paths: [#"M6.66626 12.5033L9.99959 15.8366L13.3329 12.5033M6.66626 7.50326L9.99959 4.16992L13.3329 7.50326"#], strokeWidth: 1,
+        body: #"<path d="M6.66626 12.5033L9.99959 15.8366L13.3329 12.5033M6.66626 7.50326L9.99959 4.16992L13.3329 7.50326" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let selector = selectorData.svgIcon
+
+    public static let arrowDownToLineData = OpenCodeIconData(
+        "arrow-down-to-line", viewBox: 20.0, paths: [#"M15.2083 11.6667L10 16.875L4.79167 11.6667M10 16.25V3.125"#], strokeWidth: 1.25,
+        body: #"<path d="M15.2083 11.6667L10 16.875L4.79167 11.6667M10 16.25V3.125" stroke="currentColor" stroke-width="1.25" stroke-linecap="square"/>"#
+    )
+    public static let arrowDownToLine = arrowDownToLineData.svgIcon
+
+    public static let warningData = OpenCodeIconData(
+        "warning", viewBox: 20.0, paths: [#"M10 7.91667V11.6667M10 13.7417V13.75M10 2.5L1.875 16.25H18.125L10 2.5Z"#], strokeWidth: 1,
+        body: #"<path d="M10 7.91667V11.6667M10 13.7417V13.75M10 2.5L1.875 16.25H18.125L10 2.5Z" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let warning = warningData.svgIcon
+
+    public static let warningBoldData = OpenCodeIconData(
+        "warning-bold", viewBox: 20.0, paths: [#"M10 7.91667V11.6667M10 13.7417V13.75M10 2.5L1.875 16.25H18.125L10 2.5Z"#], strokeWidth: 1.5,
+        body: #"<path d="M10 7.91667V11.6667M10 13.7417V13.75M10 2.5L1.875 16.25H18.125L10 2.5Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"/>"#
+    )
+    public static let warningBold = warningBoldData.svgIcon
+
+    public static let resetData = OpenCodeIconData(
+        "reset", viewBox: 16.0, paths: [#"M2.5 6.5H12.5C13.0523 6.5 13.5 6.94772 13.5 7.5V10.5C13.5 11.0523 13.0523 11.5 12.5 11.5H8.5M5.5 9.5L2.5 6.5L5.5 3.5"#], strokeWidth: 1,
+        body: #"<path d="M2.5 6.5H12.5C13.0523 6.5 13.5 6.94772 13.5 7.5V10.5C13.5 11.0523 13.0523 11.5 12.5 11.5H8.5M5.5 9.5L2.5 6.5L5.5 3.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let reset = resetData.svgIcon
+
+    public static let linkData = OpenCodeIconData(
+        "link", viewBox: 20.0, paths: [#"M2.08334 12.0833L1.72979 11.7298L1.37624 12.0833L1.72979 12.4369L2.08334 12.0833ZM7.91668 17.9167L7.56312 18.2702L7.91668 18.6238L8.27023 18.2702L7.91668 17.9167ZM17.9167 7.91666L18.2702 8.27022L18.6238 7.91666L18.2702 7.56311L17.9167 7.91666ZM12.0833 2.08333L12.4369 1.72977L12.0833 1.37622L11.7298 1.72977L12.0833 2.08333ZM8.39646 5.06311L8.0429 5.41666L8.75001 6.12377L9.10356 5.77021L8.75001 5.41666L8.39646 5.06311ZM5.77023 9.10355L6.12378 8.74999L5.41668 8.04289L5.06312 8.39644L5.41668 8.74999L5.77023 9.10355ZM14.2298 10.8964L13.8762 11.25L14.5833 11.9571L14.9369 11.6035L14.5833 11.25L14.2298 10.8964ZM11.6036 14.9369L11.9571 14.5833L11.25 13.8762L10.8965 14.2298L11.25 14.5833L11.6036 14.9369ZM7.14646 12.1464L6.7929 12.5L7.50001 13.2071L7.85356 12.8535L7.50001 12.5L7.14646 12.1464ZM12.8536 7.85355L13.2071 7.49999L12.5 6.79289L12.1465 7.14644L12.5 7.49999L12.8536 7.85355ZM2.08334 12.0833L1.72979 12.4369L7.56312 18.2702L7.91668 17.9167L8.27023 17.5631L2.4369 11.7298L2.08334 12.0833ZM17.9167 7.91666L18.2702 7.56311L12.4369 1.72977L12.0833 2.08333L11.7298 2.43688L17.5631 8.27022L17.9167 7.91666ZM12.0833 2.08333L11.7298 1.72977L8.39646 5.06311L8.75001 5.41666L9.10356 5.77021L12.4369 2.43688L12.0833 2.08333ZM5.41668 8.74999L5.06312 8.39644L1.72979 11.7298L2.08334 12.0833L2.4369 12.4369L5.77023 9.10355L5.41668 8.74999ZM14.5833 11.25L14.9369 11.6035L18.2702 8.27022L17.9167 7.91666L17.5631 7.56311L14.2298 10.8964L14.5833 11.25ZM7.91668 17.9167L8.27023 18.2702L11.6036 14.9369L11.25 14.5833L10.8965 14.2298L7.56312 17.5631L7.91668 17.9167ZM7.50001 12.5L7.85356 12.8535L12.8536 7.85355L12.5 7.49999L12.1465 7.14644L7.14646 12.1464L7.50001 12.5Z"#], strokeWidth: nil,
+        body: #"<path d="M2.08334 12.0833L1.72979 11.7298L1.37624 12.0833L1.72979 12.4369L2.08334 12.0833ZM7.91668 17.9167L7.56312 18.2702L7.91668 18.6238L8.27023 18.2702L7.91668 17.9167ZM17.9167 7.91666L18.2702 8.27022L18.6238 7.91666L18.2702 7.56311L17.9167 7.91666ZM12.0833 2.08333L12.4369 1.72977L12.0833 1.37622L11.7298 1.72977L12.0833 2.08333ZM8.39646 5.06311L8.0429 5.41666L8.75001 6.12377L9.10356 5.77021L8.75001 5.41666L8.39646 5.06311ZM5.77023 9.10355L6.12378 8.74999L5.41668 8.04289L5.06312 8.39644L5.41668 8.74999L5.77023 9.10355ZM14.2298 10.8964L13.8762 11.25L14.5833 11.9571L14.9369 11.6035L14.5833 11.25L14.2298 10.8964ZM11.6036 14.9369L11.9571 14.5833L11.25 13.8762L10.8965 14.2298L11.25 14.5833L11.6036 14.9369ZM7.14646 12.1464L6.7929 12.5L7.50001 13.2071L7.85356 12.8535L7.50001 12.5L7.14646 12.1464ZM12.8536 7.85355L13.2071 7.49999L12.5 6.79289L12.1465 7.14644L12.5 7.49999L12.8536 7.85355ZM2.08334 12.0833L1.72979 12.4369L7.56312 18.2702L7.91668 17.9167L8.27023 17.5631L2.4369 11.7298L2.08334 12.0833ZM17.9167 7.91666L18.2702 7.56311L12.4369 1.72977L12.0833 2.08333L11.7298 2.43688L17.5631 8.27022L17.9167 7.91666ZM12.0833 2.08333L11.7298 1.72977L8.39646 5.06311L8.75001 5.41666L9.10356 5.77021L12.4369 2.43688L12.0833 2.08333ZM5.41668 8.74999L5.06312 8.39644L1.72979 11.7298L2.08334 12.0833L2.4369 12.4369L5.77023 9.10355L5.41668 8.74999ZM14.5833 11.25L14.9369 11.6035L18.2702 8.27022L17.9167 7.91666L17.5631 7.56311L14.2298 10.8964L14.5833 11.25ZM7.91668 17.9167L8.27023 18.2702L11.6036 14.9369L11.25 14.5833L10.8965 14.2298L7.56312 17.5631L7.91668 17.9167ZM7.50001 12.5L7.85356 12.8535L12.8536 7.85355L12.5 7.49999L12.1465 7.14644L7.14646 12.1464L7.50001 12.5Z" fill="currentColor"/>"#
+    )
+    public static let link = linkData.svgIcon
+
+    public static let providersData = OpenCodeIconData(
+        "providers", viewBox: 16.0, paths: [#"M13.5 4.5V2.5H11.5M13.5 4.5H15.5M13.5 4.5V8M13.5 8H15.5M13.5 8V8.5V11.5M13.5 11.5V13.5H11.5M13.5 11.5H15.5M2.5 8H0.5M2.5 8V4.5M2.5 8V11.5M2.5 4.5V2.5H4.5M2.5 4.5H0.5M2.5 11.5V13.5H4.5M2.5 11.5H0.5M4.5 13.5V15.5M4.5 13.5H8M8 13.5V15.5M8 13.5H11.5M11.5 13.5V15.5M11.5 2.5V0.5M11.5 2.5H8M8 2.5V0.5M8 2.5H4.5M4.5 2.5V0.5M5.5 10.5V5.5H10.5V10.5H5.5Z"#], strokeWidth: 1,
+        body: #"<path d="M13.5 4.5V2.5H11.5M13.5 4.5H15.5M13.5 4.5V8M13.5 8H15.5M13.5 8V8.5V11.5M13.5 11.5V13.5H11.5M13.5 11.5H15.5M2.5 8H0.5M2.5 8V4.5M2.5 8V11.5M2.5 4.5V2.5H4.5M2.5 4.5H0.5M2.5 11.5V13.5H4.5M2.5 11.5H0.5M4.5 13.5V15.5M4.5 13.5H8M8 13.5V15.5M8 13.5H11.5M11.5 13.5V15.5M11.5 2.5V0.5M11.5 2.5H8M8 2.5V0.5M8 2.5H4.5M4.5 2.5V0.5M5.5 10.5V5.5H10.5V10.5H5.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let providers = providersData.svgIcon
+
+    public static let modelsData = OpenCodeIconData(
+        "models", viewBox: 16.0, paths: [#"M14 8C9.83336 8 8 9.83336 8 14C8 9.83336 6.16666 8 2 8C6.16666 8 8 6.16666 8 2C8 6.16666 9.83336 8 14 8Z"#], strokeWidth: 1,
+        body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M14 8C9.83336 8 8 9.83336 8 14C8 9.83336 6.16666 8 2 8C6.16666 8 8 6.16666 8 2C8 6.16666 9.83336 8 14 8Z" stroke="currentColor"/>"#
+    )
+    public static let models = modelsData.svgIcon
+
+    public static let appearanceData = OpenCodeIconData(
+        "appearance", viewBox: 16.0, paths: [#"M1.5 4.5L4.5 1.5M1.5 14.5L14.5 1.5M11.5 14.5L14.5 11.5M1.5 9.5L9.5 1.5M6.5 14.5L14.5 6.5"#], strokeWidth: 1,
+        body: #"<path d="M1.5 4.5L4.5 1.5M1.5 14.5L14.5 1.5M11.5 14.5L14.5 11.5M1.5 9.5L9.5 1.5M6.5 14.5L14.5 6.5" stroke-linecap="round" stroke="currentColor"/>"#
+    )
+    public static let appearance = appearanceData.svgIcon
+
+    public static let notificationsData = OpenCodeIconData(
+        "notifications", viewBox: 16.0, paths: [#"M4.5 14.5H11.5"#, #"M8 12V14"#, #"M16 3.5C16 4.88071 14.8807 6 13.5 6C12.1193 6 11 4.88071 11 3.5C11 2.11929 12.1193 1 13.5 1C14.8807 1 16 2.11929 16 3.5Z"#, #"M10.3369 2C10.1892 2.31084 10.0866 2.64695 10.0361 3H2V11H14V6.96387C14.3531 6.91336 14.6892 6.81075 15 6.66309V11.5C15 11.7761 14.7761 12 14.5 12H1.5C1.22386 12 1 11.7761 1 11.5V2.5C1 2.22386 1.22386 2 1.5 2H10.3369Z"#], strokeWidth: 1,
+        body: #"<path d="M4.5 14.5H11.5" stroke-linecap="round" stroke="currentColor"/><path d="M8 12V14" stroke-linecap="square" stroke="currentColor"/><path d="M16 3.5C16 4.88071 14.8807 6 13.5 6C12.1193 6 11 4.88071 11 3.5C11 2.11929 12.1193 1 13.5 1C14.8807 1 16 2.11929 16 3.5Z" fill="currentColor"/><path d="M10.3369 2C10.1892 2.31084 10.0866 2.64695 10.0361 3H2V11H14V6.96387C14.3531 6.91336 14.6892 6.81075 15 6.66309V11.5C15 11.7761 14.7761 12 14.5 12H1.5C1.22386 12 1 11.7761 1 11.5V2.5C1 2.22386 1.22386 2 1.5 2H10.3369Z" fill="currentColor"/>"#
+    )
+    public static let notifications = notificationsData.svgIcon
+
+    public static let extensionsData = OpenCodeIconData(
+        "extensions", viewBox: 16.0, paths: [#"M1.5 2.5V13.5H14.5V2.5H1.5Z"#, #"M4.5 6.5V9.5M8 6.5V9.5M11.5 6.5V9.5"#], strokeWidth: 1,
+        body: #"<path d="M1.5 2.5V13.5H14.5V2.5H1.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M4.5 6.5V9.5M8 6.5V9.5M11.5 6.5V9.5" stroke-linecap="round" stroke="currentColor"/>"#
+    )
+    public static let extensions = extensionsData.svgIcon
+
+    public static let cubeData = OpenCodeIconData(
+        "cube", viewBox: 16.0, paths: [#"M8 14.5L14.5 11V5L8 1.5L1.5 5V11L8 14.5ZM1.5 5L8 8.5M14.5 5L8 8.5M8 8.5V14.5"#], strokeWidth: 1,
+        body: #"<path d="M8 14.5L14.5 11V5L8 1.5L1.5 5V11L8 14.5ZM1.5 5L8 8.5M14.5 5L8 8.5M8 8.5V14.5" stroke-linecap="square" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let cube = cubeData.svgIcon
+
+    public static let postSkillData = OpenCodeIconData(
+        "post-skill", viewBox: 16.0, paths: [#"M3 2.5C3.5 2.5 4.5 2.8 4.5 4L4.5 5.5V12C4.5 12.5 4.8 13.5 6 13.5M6 13.5C7.2 13.5 7.5 12.5 7.5 12V10.5H14.5V12C14.5 12.5 14.2 13.5 13 13.5H6ZM4.5 5.5H1.5V4C1.5 3.5 1.8 2.5 3 2.5M12.5 8.5V4.5C12.5 3.39543 11.6046 2.5 10.5 2.5H3"#, #"M6.5 5.5H10.5M6.5 7.5H9"#], strokeWidth: 1,
+        body: #"<path d="M3 2.5C3.5 2.5 4.5 2.8 4.5 4L4.5 5.5V12C4.5 12.5 4.8 13.5 6 13.5M6 13.5C7.2 13.5 7.5 12.5 7.5 12V10.5H14.5V12C14.5 12.5 14.2 13.5 13 13.5H6ZM4.5 5.5H1.5V4C1.5 3.5 1.8 2.5 3 2.5M12.5 8.5V4.5C12.5 3.39543 11.6046 2.5 10.5 2.5H3" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M6.5 5.5H10.5M6.5 7.5H9" stroke-linecap="square" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let postSkill = postSkillData.svgIcon
+
+    public static let outlineListChangelogData = OpenCodeIconData(
+        "outline-list-changelog", viewBox: 16.0, paths: [#"M3 14.5V15H4V14.5H3.5H3ZM4 1.5V1H3V1.5H3.5H4ZM8.5 1.5V1H8V1.5H8.5ZM14.5 1.5H15V1H14.5V1.5ZM14.5 6.5V7H15V6.5H14.5ZM8.5 6.5H8V7H8.5V6.5ZM8.5 9.5V9H8V9.5H8.5ZM14.5 9.5H15V9H14.5V9.5ZM14.5 14.5V15H15V14.5H14.5ZM8.5 14.5H8V15H8.5V14.5ZM3.5 6H4V1.5H3.5H3V6H3.5ZM8.5 1.5V2H14.5V1.5V1H8.5V1.5ZM14.5 1.5H14V6.5H14.5H15V1.5H14.5ZM14.5 6.5V6H8.5V6.5V7H14.5V6.5ZM8.5 6.5H9V1.5H8.5H8V6.5H8.5ZM8.5 9.5V10H14.5V9.5V9H8.5V9.5ZM14.5 9.5H14V14.5H14.5H15V9.5H14.5ZM14.5 14.5V14H8.5V14.5V15H14.5V14.5ZM8.5 14.5H9V9.5H8.5H8V14.5H8.5ZM3.5 10V10.5C4.8807 10.5 6 9.38075 6 8H5.5H5C5 8.82845 4.32843 9.5 3.5 9.5V10ZM5.5 8H6C6 6.61925 4.8807 5.5 3.5 5.5V6V6.5C4.32843 6.5 5 7.17155 5 8H5.5ZM3.5 6V5.5C2.1193 5.5 1 6.61925 1 8H1.5H2C2 7.17155 2.67157 6.5 3.5 6.5V6ZM1.5 8H1C1 9.38075 2.1193 10.5 3.5 10.5V10V9.5C2.67157 9.5 2 8.82845 2 8H1.5ZM3.5 14.5H4V10H3.5H3V14.5H3.5Z"#], strokeWidth: nil,
+        body: #"<path d="M3 14.5V15H4V14.5H3.5H3ZM4 1.5V1H3V1.5H3.5H4ZM8.5 1.5V1H8V1.5H8.5ZM14.5 1.5H15V1H14.5V1.5ZM14.5 6.5V7H15V6.5H14.5ZM8.5 6.5H8V7H8.5V6.5ZM8.5 9.5V9H8V9.5H8.5ZM14.5 9.5H15V9H14.5V9.5ZM14.5 14.5V15H15V14.5H14.5ZM8.5 14.5H8V15H8.5V14.5ZM3.5 6H4V1.5H3.5H3V6H3.5ZM8.5 1.5V2H14.5V1.5V1H8.5V1.5ZM14.5 1.5H14V6.5H14.5H15V1.5H14.5ZM14.5 6.5V6H8.5V6.5V7H14.5V6.5ZM8.5 6.5H9V1.5H8.5H8V6.5H8.5ZM8.5 9.5V10H14.5V9.5V9H8.5V9.5ZM14.5 9.5H14V14.5H14.5H15V9.5H14.5ZM14.5 14.5V14H8.5V14.5V15H14.5V14.5ZM8.5 14.5H9V9.5H8.5H8V14.5H8.5ZM3.5 10V10.5C4.8807 10.5 6 9.38075 6 8H5.5H5C5 8.82845 4.32843 9.5 3.5 9.5V10ZM5.5 8H6C6 6.61925 4.8807 5.5 3.5 5.5V6V6.5C4.32843 6.5 5 7.17155 5 8H5.5ZM3.5 6V5.5C2.1193 5.5 1 6.61925 1 8H1.5H2C2 7.17155 2.67157 6.5 3.5 6.5V6ZM1.5 8H1C1 9.38075 2.1193 10.5 3.5 10.5V10V9.5C2.67157 9.5 2 8.82845 2 8H1.5ZM3.5 14.5H4V10H3.5H3V14.5H3.5Z" fill="currentColor"/>"#
+    )
+    public static let outlineListChangelog = outlineListChangelogData.svgIcon
+
+    public static let outlinePairData = OpenCodeIconData(
+        "outline-pair", viewBox: 16.0, paths: [#"M2.5 9V2.5H13.5V3.5M2.5 9L0.5 12.5H7.5M2.5 9H7.5"#, #"M11.5 12.5H13.5M9.5 5.5V14.5H15.5V5.5H9.5Z"#], strokeWidth: 1,
+        body: #"<path d="M2.5 9V2.5H13.5V3.5M2.5 9L0.5 12.5H7.5M2.5 9H7.5" stroke-linecap="square" stroke-linejoin="round" stroke="currentColor"/><path d="M11.5 12.5H13.5M9.5 5.5V14.5H15.5V5.5H9.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let outlinePair = outlinePairData.svgIcon
+
+    public static let lockData = OpenCodeIconData(
+        "lock", viewBox: 16.0, paths: [#"M2.5 14.5V7.5H13.5V14.5H2.5Z"#, #"M5.5 7.5V4C5.5 2.61929 6.61929 1.5 8 1.5C9.38071 1.5 10.5 2.61929 10.5 4V7.5"#, #"M7.5 10.5C7.5 10.2239 7.72386 10 8 10C8.27614 10 8.5 10.2239 8.5 10.5V12.5C8.5 12.7761 8.27614 13 8 13C7.72386 13 7.5 12.7761 7.5 12.5V10.5Z"#], strokeWidth: 1,
+        body: #"<path d="M2.5 14.5V7.5H13.5V14.5H2.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M5.5 7.5V4C5.5 2.61929 6.61929 1.5 8 1.5C9.38071 1.5 10.5 2.61929 10.5 4V7.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M7.5 10.5C7.5 10.2239 7.72386 10 8 10C8.27614 10 8.5 10.2239 8.5 10.5V12.5C8.5 12.7761 8.27614 13 8 13C7.72386 13 7.5 12.7761 7.5 12.5V10.5Z" fill="currentColor"/>"#
+    )
+    public static let lock = lockData.svgIcon
+
+    public static let globeData = OpenCodeIconData(
+        "globe", viewBox: 16.0, paths: [#"M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z"#, #"M1.5 8H14.5"#, #"M8 1.5C6.5 3 5.5 5.5 5.5 8C5.5 10.5 6.5 13 8 14.5C9.5 13 10.5 10.5 10.5 8C10.5 5.5 9.5 3 8 1.5Z"#], strokeWidth: 1,
+        body: #"<path d="M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z" stroke="currentColor"/><path d="M1.5 8H14.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M8 1.5C6.5 3 5.5 5.5 5.5 8C5.5 10.5 6.5 13 8 14.5C9.5 13 10.5 10.5 10.5 8C10.5 5.5 9.5 3 8 1.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let globe = globeData.svgIcon
+
+    public static let selectElementData = OpenCodeIconData(
+        "select-element", viewBox: 16.0, paths: [#"M8.5 14.5V5.5L14.5 11.5H11L8.5 14.5Z"#, #"M5.5 13.5H1.5V2.5H14.5V7.5"#], strokeWidth: 1,
+        body: #"<path d="M8.5 14.5V5.5L14.5 11.5H11L8.5 14.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M5.5 13.5H1.5V2.5H14.5V7.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let selectElement = selectElementData.svgIcon
+
+    public static let flaskData = OpenCodeIconData(
+        "flask", viewBox: 16.0, paths: [#"M10.5 2.5V6.5L11.3571 8.5M10.5 2.5H5.5M10.5 2.5H12.5M5.5 2.5V6.5L4.21429 9.5M5.5 2.5H3.5M4.21429 9.5L2.5 13.5H13.5L11.3571 8.5M4.21429 9.5L11.3571 8.5"#], strokeWidth: 1,
+        body: #"<path d="M10.5 2.5V6.5L11.3571 8.5M10.5 2.5H5.5M10.5 2.5H12.5M5.5 2.5V6.5L4.21429 9.5M5.5 2.5H3.5M4.21429 9.5L2.5 13.5H13.5L11.3571 8.5M4.21429 9.5L11.3571 8.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let flask = flaskData.svgIcon
+
+    public static let gridPlusData = OpenCodeIconData(
+        "grid-plus", viewBox: 16.0, paths: [#"M13.9948 11.668H9.32812M11.6641 9.33203V13.9987M6.66667 9.33203V13.9987H2V9.33203H6.66667ZM6.66667 2V6.66667H2V2H6.66667ZM13.9948 2V6.66667H9.32812V2H13.9948Z"#], strokeWidth: 1,
+        body: #"<path d="M13.9948 11.668H9.32812M11.6641 9.33203V13.9987M6.66667 9.33203V13.9987H2V9.33203H6.66667ZM6.66667 2V6.66667H2V2H6.66667ZM13.9948 2V6.66667H9.32812V2H13.9948Z" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/>"#
+    )
+    public static let gridPlus = gridPlusData.svgIcon
+
+    public static let infoData = OpenCodeIconData(
+        "info", viewBox: 16.0, paths: [#"M12 12H0V0H12V12ZM1 1V11H11V1H1ZM6.5791 4.81641V9.37207H5.5791V5.81641H4.46777V4.81641H6.5791ZM6.85645 2.62891V3.62891H5.30078V2.62891H6.85645Z"#], strokeWidth: nil,
+        body: #"<g transform="translate(2 2)"><path d="M12 12H0V0H12V12ZM1 1V11H11V1H1ZM6.5791 4.81641V9.37207H5.5791V5.81641H4.46777V4.81641H6.5791ZM6.85645 2.62891V3.62891H5.30078V2.62891H6.85645Z" fill="currentColor"/></g>"#
+    )
+    public static let info = infoData.svgIcon
+
+    public static let circleExclamationData = OpenCodeIconData(
+        "circle-exclamation", viewBox: 16.0, paths: [#"M8.75 11.75H7.25V10.25H8.75V11.75Z"#, #"M8.75 9.25H7.25V4.25H8.75V9.25Z"#, #"M8 1C9.93286 1 11.684 1.7836 12.9502 3.0498C14.2164 4.31601 15 6.06714 15 8C15 11.866 11.866 15 8 15C6.06714 15 4.31601 14.2164 3.0498 12.9502C1.7836 11.684 1 9.93286 1 8C1 4.13401 4.13401 1 8 1ZM8 2C4.68629 2 2 4.68629 2 8C2 9.65699 2.67148 11.1559 3.75781 12.2422C4.84415 13.3285 6.34301 14 8 14C11.3137 14 14 11.3137 14 8C14 6.34301 13.3285 4.84415 12.2422 3.75781C11.1559 2.67148 9.65699 2 8 2Z"#], strokeWidth: nil,
+        body: #"<path d="M8.75 11.75H7.25V10.25H8.75V11.75Z" fill="currentColor"/><path d="M8.75 9.25H7.25V4.25H8.75V9.25Z" fill="currentColor"/><path fill-rule="evenodd" clip-rule="evenodd" d="M8 1C9.93286 1 11.684 1.7836 12.9502 3.0498C14.2164 4.31601 15 6.06714 15 8C15 11.866 11.866 15 8 15C6.06714 15 4.31601 14.2164 3.0498 12.9502C1.7836 11.684 1 9.93286 1 8C1 4.13401 4.13401 1 8 1ZM8 2C4.68629 2 2 4.68629 2 8C2 9.65699 2.67148 11.1559 3.75781 12.2422C4.84415 13.3285 6.34301 14 8 14C11.3137 14 14 11.3137 14 8C14 6.34301 13.3285 4.84415 12.2422 3.75781C11.1559 2.67148 9.65699 2 8 2Z" fill="currentColor"/>"#
+    )
+    public static let circleExclamation = circleExclamationData.svgIcon
+
+    public static let outlineMagnifierMinusData = OpenCodeIconData(
+        "outline-magnifier-minus", viewBox: 16.0, paths: [#"M12.5 7.5C12.5 10.2614 10.2614 12.5 7.5 12.5C4.73858 12.5 2.5 10.2614 2.5 7.5C2.5 4.73858 4.73858 2.5 7.5 2.5C10.2614 2.5 12.5 4.73858 12.5 7.5Z"#, #"M13.5 13.5L11.5 11.5"#, #"M5.5 7.5H9.5"#], strokeWidth: 1,
+        body: #"<path d="M12.5 7.5C12.5 10.2614 10.2614 12.5 7.5 12.5C4.73858 12.5 2.5 10.2614 2.5 7.5C2.5 4.73858 4.73858 2.5 7.5 2.5C10.2614 2.5 12.5 4.73858 12.5 7.5Z" stroke="currentColor"/><path d="M13.5 13.5L11.5 11.5" stroke-linecap="round" stroke="currentColor"/><path d="M5.5 7.5H9.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let outlineMagnifierMinus = outlineMagnifierMinusData.svgIcon
+
+    public static let outlineMagnifierPlusData = OpenCodeIconData(
+        "outline-magnifier-plus", viewBox: 16.0, paths: [#"M12.5 7.5C12.5 10.2614 10.2614 12.5 7.5 12.5C4.73858 12.5 2.5 10.2614 2.5 7.5C2.5 4.73858 4.73858 2.5 7.5 2.5C10.2614 2.5 12.5 4.73858 12.5 7.5Z"#, #"M13.5 13.5L11.5 11.5"#, #"M5 7.5H7.5M7.5 7.5H10M7.5 7.5V5M7.5 7.5V10"#], strokeWidth: 1,
+        body: #"<path d="M12.5 7.5C12.5 10.2614 10.2614 12.5 7.5 12.5C4.73858 12.5 2.5 10.2614 2.5 7.5C2.5 4.73858 4.73858 2.5 7.5 2.5C10.2614 2.5 12.5 4.73858 12.5 7.5Z" stroke="currentColor"/><path d="M13.5 13.5L11.5 11.5" stroke-linecap="round" stroke="currentColor"/><path d="M5 7.5H7.5M7.5 7.5H10M7.5 7.5V5M7.5 7.5V10" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let outlineMagnifierPlus = outlineMagnifierPlusData.svgIcon
+
+    public static let minusData = OpenCodeIconData(
+        "minus", viewBox: 16.0, paths: [#"M2.5 8H13.5"#], strokeWidth: 1,
+        body: #"<path d="M2.5 8H13.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let minus = minusData.svgIcon
+
+    public static let monitorData = OpenCodeIconData(
+        "monitor", viewBox: 16.0, paths: [#"M4.5 14.5H11.5"#, #"M8 12V14"#, #"M1.5 11.5V2.5H14.5V11.5H1.5Z"#], strokeWidth: 1,
+        body: #"<path d="M4.5 14.5H11.5" stroke-linecap="round" stroke="currentColor"/><path d="M8 12V14" stroke-linecap="square" stroke="currentColor"/><path d="M1.5 11.5V2.5H14.5V11.5H1.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let monitor = monitorData.svgIcon
+
+    public static let workspaceNewData = OpenCodeIconData(
+        "workspace-new", viewBox: 16.0, paths: [#"M2 10.7578V14.0011H5.24324M13.9991 5.24324V2H10.7559M13.9991 10.7578V14.0011H10.7559M2 5.24324V2H5.24324"#, #"M8 4.5V11.5M4.5 8H11.5"#], strokeWidth: 1,
+        body: #"<path d="M2 10.7578V14.0011H5.24324M13.9991 5.24324V2H10.7559M13.9991 10.7578V14.0011H10.7559M2 5.24324V2H5.24324" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/><path d="M8 4.5V11.5M4.5 8H11.5" stroke="currentColor" stroke-linejoin="round"/>"#
+    )
+    public static let workspaceNew = workspaceNewData.svgIcon
+
+    public static let workspaceData = OpenCodeIconData(
+        "workspace", viewBox: 16.0, paths: [#"M2 10.668V14.0013H10.6667M13.9974 10.6667V2H2.66406M13.9974 10.668V14.0013H10.6641M2 10V2H5.33333"#, #"M10.6693 10.6654V5.33203H5.33594V10.6654H10.6693Z"#], strokeWidth: 1,
+        body: #"<path d="M2 10.668V14.0013H10.6667M13.9974 10.6667V2H2.66406M13.9974 10.668V14.0013H10.6641M2 10V2H5.33333" stroke="currentColor" stroke-miterlimit="10" stroke-linecap="square"/><path d="M10.6693 10.6654V5.33203H5.33594V10.6654H10.6693Z" fill="currentColor"/>"#
+    )
+    public static let workspace = workspaceData.svgIcon
+
+    public static let outlineWorktreeData = OpenCodeIconData(
+        "outline-worktree", viewBox: 16.0, paths: [#"M1.5 11.5H5L9.5 5.5H14.5M12 8L14.5 5.5L12 3M9 11.5H14.5"#], strokeWidth: 1,
+        body: #"<path d="M1.5 11.5H5L9.5 5.5H14.5M12 8L14.5 5.5L12 3M9 11.5H14.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let outlineWorktree = outlineWorktreeData.svgIcon
+
+    public static let outlineDotsData = OpenCodeIconData(
+        "outline-dots", viewBox: 16.0, paths: [#"M5 8C5 8.55228 4.55228 9 4 9C3.44772 9 3 8.55228 3 8C3 7.44772 3.44772 7 4 7C4.55228 7 5 7.44772 5 8Z"#, #"M9 8C9 8.55228 8.55228 9 8 9C7.44772 9 7 8.55228 7 8C7 7.44772 7.44772 7 8 7C8.55228 7 9 7.44772 9 8Z"#, #"M13 8C13 8.55228 12.5523 9 12 9C11.4477 9 11 8.55228 11 8C11 7.44772 11.4477 7 12 7C12.5523 7 13 7.44772 13 8Z"#], strokeWidth: nil,
+        body: #"<path d="M5 8C5 8.55228 4.55228 9 4 9C3.44772 9 3 8.55228 3 8C3 7.44772 3.44772 7 4 7C4.55228 7 5 7.44772 5 8Z" fill="currentColor"/><path d="M9 8C9 8.55228 8.55228 9 8 9C7.44772 9 7 8.55228 7 8C7 7.44772 7.44772 7 8 7C8.55228 7 9 7.44772 9 8Z" fill="currentColor"/><path d="M13 8C13 8.55228 12.5523 9 12 9C11.4477 9 11 8.55228 11 8C11 7.44772 11.4477 7 12 7C12.5523 7 13 7.44772 13 8Z" fill="currentColor"/>"#
+    )
+    public static let outlineDots = outlineDotsData.svgIcon
+
+    public static let outlineExpandData = OpenCodeIconData(
+        "outline-expand", viewBox: 16.0, paths: [#"M3.5 8V12.25C3.5 12.3881 3.61193 12.5 3.75 12.5H8"#, #"M12.5 8L12.5 3.75C12.5 3.61193 12.3881 3.5 12.25 3.5L8 3.5"#], strokeWidth: 1,
+        body: #"<path d="M3.5 8V12.25C3.5 12.3881 3.61193 12.5 3.75 12.5H8" stroke-linecap="round" stroke="currentColor"/><path d="M12.5 8L12.5 3.75C12.5 3.61193 12.3881 3.5 12.25 3.5L8 3.5" stroke-linecap="round" stroke="currentColor"/>"#
+    )
+    public static let outlineExpand = outlineExpandData.svgIcon
+
+    public static let filetreeData = OpenCodeIconData(
+        "filetree", viewBox: 16.0, paths: [#"M2.5 1.5V12.2484H6.75M2.5 4.74838H6.75"#], strokeWidth: 1,
+        body: #"<path d="M2.5 1.5V12.2484H6.75M2.5 4.74838H6.75" stroke="currentColor"/><rect x="8.5" y="3.2168" width="6" height="3" fill="none" stroke="currentColor"/><rect x="8.5" y="10.75" width="6" height="3" fill="none" stroke="currentColor"/>"#
+    )
+    public static let filetree = filetreeData.svgIcon
+
+    public static let splitData = OpenCodeIconData(
+        "split", viewBox: 16.0, paths: [#"M14.5 13.5H1.5V2.5H14.5V13.5Z"#], strokeWidth: 1,
+        body: #"<path d="M14.5 13.5H1.5V2.5H14.5V13.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><rect opacity="0.5" x="3" y="4" width="4" height="8" fill="currentColor"/><rect opacity="0.5" x="9" y="4" width="4" height="8" fill="currentColor"/>"#
+    )
+    public static let split = splitData.svgIcon
+
+    public static let unifiedData = OpenCodeIconData(
+        "unified", viewBox: 16.0, paths: [#"M14.5 13.5H1.5V2.5H14.5V13.5Z"#], strokeWidth: 1,
+        body: #"<path d="M14.5 13.5H1.5V2.5H14.5V13.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><rect opacity="0.5" x="3" y="4" width="10" height="3" fill="currentColor"/><rect opacity="0.5" x="3" y="9" width="10" height="3" fill="currentColor"/>"#
+    )
+    public static let unified = unifiedData.svgIcon
+
+    public static let windowAnalyticsData = OpenCodeIconData(
+        "window-analytics", viewBox: 16.0, paths: [#"M6.5 2.5H1.5V13.5H14.5V10.5M9.5 2.5H14.5V7.5H9.5V2.5Z"#], strokeWidth: 1,
+        body: #"<path d="M6.5 2.5H1.5V13.5H14.5V10.5M9.5 2.5H14.5V7.5H9.5V2.5Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let windowAnalytics = windowAnalyticsData.svgIcon
+
+    public static let outlineCodeBracketsData = OpenCodeIconData(
+        "outline-code-brackets", viewBox: 16.0, paths: [#"M5 4L1 8L5 12M11 4L15 8L11 12M9 1L7 15"#], strokeWidth: 1,
+        body: #"<path d="M5 4L1 8L5 12M11 4L15 8L11 12M9 1L7 15" stroke="currentColor"/>"#
+    )
+    public static let outlineCodeBrackets = outlineCodeBracketsData.svgIcon
+
+    public static let outlineQuoteData = OpenCodeIconData(
+        "outline-quote", viewBox: 16.0, paths: [#"M9.5 8.49927C10.8333 8.49927 12.1667 8.49927 13.5 8.49927C13.5 9.74927 13.5 11.2493 13.5 12.4993C12.1667 12.4993 10.8333 12.4993 9.5 12.4993V7C9.5 5 10.5 3.5 13 3.5001"#, #"M2.5 8.49927C3.83333 8.49927 5.16667 8.49927 6.5 8.49927C6.5 9.74927 6.5 11.2493 6.5 12.4993C5.16667 12.4993 3.83333 12.4993 2.5 12.4993V7C2.5 5 3.5 3.5 6 3.5001"#], strokeWidth: 1,
+        body: #"<path d="M9.5 8.49927C10.8333 8.49927 12.1667 8.49927 13.5 8.49927C13.5 9.74927 13.5 11.2493 13.5 12.4993C12.1667 12.4993 10.8333 12.4993 9.5 12.4993V7C9.5 5 10.5 3.5 13 3.5001" stroke="currentColor"/><path d="M2.5 8.49927C3.83333 8.49927 5.16667 8.49927 6.5 8.49927C6.5 9.74927 6.5 11.2493 6.5 12.4993C5.16667 12.4993 3.83333 12.4993 2.5 12.4993V7C2.5 5 3.5 3.5 6 3.5001" stroke="currentColor"/>"#
+    )
+    public static let outlineQuote = outlineQuoteData.svgIcon
+
+    public static let outlineArrowUpRightData = OpenCodeIconData(
+        "outline-arrow-up-right", viewBox: 16.0, paths: [#"M12.5 3.5L3.5 12.5M12.5 9.62L12.5 3.5L6.38 3.5"#], strokeWidth: 1,
+        body: #"<path d="M12.5 3.5L3.5 12.5M12.5 9.62L12.5 3.5L6.38 3.5" stroke="currentColor"/>"#
+    )
+    public static let outlineArrowUpRight = outlineArrowUpRightData.svgIcon
+
+    public static let outlineRotateClockwiseData = OpenCodeIconData(
+        "outline-rotate-clockwise", viewBox: 16.0, paths: [#"M14.1992 8C14.1992 9.18669 13.8473 10.3467 13.188 11.3334C12.5288 12.3201 11.5917 13.0892 10.4953 13.5433C9.39897 13.9974 8.19257 14.1162 7.02868 13.8847C5.86479 13.6532 4.7957 13.0818 3.95658 12.2426C3.11747 11.4035 2.54602 10.3344 2.31451 9.17054C2.083 8.00666 2.20182 6.80026 2.65594 5.7039C3.11007 4.60754 3.87911 3.67047 4.8658 3.01118C5.85249 2.35189 7.01253 2 8.19922 2C9.87922 2 11.4859 2.66667 12.6926 3.82667L14.1992 5.33333M10.866 5.33333L14.1992 5.33333L14.1993 2"#], strokeWidth: 1,
+        body: #"<path d="M14.1992 8C14.1992 9.18669 13.8473 10.3467 13.188 11.3334C12.5288 12.3201 11.5917 13.0892 10.4953 13.5433C9.39897 13.9974 8.19257 14.1162 7.02868 13.8847C5.86479 13.6532 4.7957 13.0818 3.95658 12.2426C3.11747 11.4035 2.54602 10.3344 2.31451 9.17054C2.083 8.00666 2.20182 6.80026 2.65594 5.7039C3.11007 4.60754 3.87911 3.67047 4.8658 3.01118C5.85249 2.35189 7.01253 2 8.19922 2C9.87922 2 11.4859 2.66667 12.6926 3.82667L14.1992 5.33333M10.866 5.33333L14.1992 5.33333L14.1993 2" stroke="currentColor" stroke-linecap="square" stroke-linejoin="round"/>"#
+    )
+    public static let outlineRotateClockwise = outlineRotateClockwiseData.svgIcon
+
+    public static let outlineGlobePlusData = OpenCodeIconData(
+        "outline-globe-plus", viewBox: 16.0, paths: [#"M9.5 11.5H12.5M12.5 11.5H15.5M12.5 11.5V8.5M12.5 11.5V14.5"#, #"M8 1C11.866 1 15 4.13401 15 8C15 8.11231 14.9964 8.22395 14.9912 8.33496C14.9358 7.48617 14.4589 6.75503 13.7656 6.34668C13.1525 4.20296 11.3791 2.55021 9.16602 2.11426C10.0489 3.35264 10.6663 4.93158 10.8975 6.58105C10.3489 7.03965 10 7.72909 10 8.5H6.01465C6.13241 10.6267 6.98934 12.6854 8.20996 13.9941C8.44758 13.986 8.68133 13.9618 8.91113 13.9268C9.10021 13.9725 9.29688 14 9.5 14H10V14.5C10 14.5691 10.0043 14.6374 10.0098 14.7051C9.37302 14.8957 8.69876 15 8 15C4.13401 15 1 11.866 1 8C1 4.13401 4.13401 1 8 1ZM2.02246 8.5C2.24434 11.1886 4.23728 13.3729 6.83301 13.8848C5.78755 12.4178 5.11145 10.4737 5.0127 8.5H2.02246ZM6.83301 2.11426C4.23719 2.62603 2.24434 4.81135 2.02246 7.5H5.0127C5.11147 5.52603 5.78728 3.58126 6.83301 2.11426ZM8 2.24219C6.89188 3.55495 6.12676 5.49755 6.01562 7.5H9.98438C9.87324 5.49755 9.10812 3.55495 8 2.24219Z"#], strokeWidth: 1,
+        body: #"<path d="M9.5 11.5H12.5M12.5 11.5H15.5M12.5 11.5V8.5M12.5 11.5V14.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M8 1C11.866 1 15 4.13401 15 8C15 8.11231 14.9964 8.22395 14.9912 8.33496C14.9358 7.48617 14.4589 6.75503 13.7656 6.34668C13.1525 4.20296 11.3791 2.55021 9.16602 2.11426C10.0489 3.35264 10.6663 4.93158 10.8975 6.58105C10.3489 7.03965 10 7.72909 10 8.5H6.01465C6.13241 10.6267 6.98934 12.6854 8.20996 13.9941C8.44758 13.986 8.68133 13.9618 8.91113 13.9268C9.10021 13.9725 9.29688 14 9.5 14H10V14.5C10 14.5691 10.0043 14.6374 10.0098 14.7051C9.37302 14.8957 8.69876 15 8 15C4.13401 15 1 11.866 1 8C1 4.13401 4.13401 1 8 1ZM2.02246 8.5C2.24434 11.1886 4.23728 13.3729 6.83301 13.8848C5.78755 12.4178 5.11145 10.4737 5.0127 8.5H2.02246ZM6.83301 2.11426C4.23719 2.62603 2.24434 4.81135 2.02246 7.5H5.0127C5.11147 5.52603 5.78728 3.58126 6.83301 2.11426ZM8 2.24219C6.89188 3.55495 6.12676 5.49755 6.01562 7.5H9.98438C9.87324 5.49755 9.10812 3.55495 8 2.24219Z" fill="currentColor"/>"#
+    )
+    public static let outlineGlobePlus = outlineGlobePlusData.svgIcon
+
+    public static let outlineCookieData = OpenCodeIconData(
+        "outline-cookie", viewBox: 16.0, paths: [#"M14 8.5A6 6 0 1 1 7.5 2a2 2 0 0 0 2.5 2.5 2 2 0 0 0 2.5 2.5c.4.6.9 1.1 1.5 1.5Z"#, #"M5.5 6.5h.01M5.5 10h.01M8.5 9h.01M10.5 11.5h.01"#], strokeWidth: 1,
+        body: #"<path d="M14 8.5A6 6 0 1 1 7.5 2a2 2 0 0 0 2.5 2.5 2 2 0 0 0 2.5 2.5c.4.6.9 1.1 1.5 1.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M5.5 6.5h.01M5.5 10h.01M8.5 9h.01M10.5 11.5h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#
+    )
+    public static let outlineCookie = outlineCookieData.svgIcon
+
+    public static let arrowUpRightData = OpenCodeIconData(
+        "arrow-up-right", viewBox: 16.0, paths: [#"M11 9.56V5H6.44M11 5L5 11"#], strokeWidth: 1,
+        body: #"<path d="M11 9.56V5H6.44M11 5L5 11" stroke="currentColor"/>"#
+    )
+    public static let arrowUpRight = arrowUpRightData.svgIcon
+
+    public static let outlineSquareArrowData = OpenCodeIconData(
+        "outline-square-arrow", viewBox: 16.0, paths: [#"M5.5 2.5H2.5V13.5H13.5V10.5M8.5 7.5L13.5 2.5M13.5 7.5V2.5H8.5"#], strokeWidth: 1,
+        body: #"<path d="M5.5 2.5H2.5V13.5H13.5V10.5M8.5 7.5L13.5 2.5M13.5 7.5V2.5H8.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let outlineSquareArrow = outlineSquareArrowData.svgIcon
+
+    public static let outlineArrowToCornerTopRightData = OpenCodeIconData(
+        "outline-arrow-to-corner-top-right", viewBox: 16.0, paths: [#"M2 8.5V2H14V14H8M5 5.66667H10.3333V11M3.66797 12.333L9.94292 6.05806"#], strokeWidth: 1,
+        body: #"<path d="M2 8.5V2H14V14H8M5 5.66667H10.3333V11M3.66797 12.333L9.94292 6.05806" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let outlineArrowToCornerTopRight = outlineArrowToCornerTopRightData.svgIcon
+
+    public static let outlineMaximizeData = OpenCodeIconData(
+        "outline-maximize", viewBox: 16.0, paths: [#"M2.5 6V2.5H6M10 2.5H13.5V6M13.5 10V13.5H10M6 13.5H2.5V10"#], strokeWidth: 1,
+        body: #"<path d="M2.5 6V2.5H6M10 2.5H13.5V6M13.5 10V13.5H10M6 13.5H2.5V10" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let outlineMaximize = outlineMaximizeData.svgIcon
+
+    public static let outlineHexagonalWarningData = OpenCodeIconData(
+        "outline-hexagonal-warning", viewBox: 16.0, paths: [#"M10.6667 1.33325H5.33272L1.33334 5.33325L1.33342 10.6917L5.3327 14.691L10.6667 14.6909L14.6911 10.6917V5.33255L10.6667 1.33325Z"#, #"M8 10.6667H8.00667"#, #"M8 7.99992V5.33325"#], strokeWidth: 1,
+        body: #"<path d="M10.6667 1.33325H5.33272L1.33334 5.33325L1.33342 10.6917L5.3327 14.691L10.6667 14.6909L14.6911 10.6917V5.33255L10.6667 1.33325Z" stroke="currentColor"/><path d="M8 10.6667H8.00667" stroke="currentColor" stroke-linecap="square"/><path d="M8 7.99992V5.33325" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let outlineHexagonalWarning = outlineHexagonalWarningData.svgIcon
+
+    public static let outlineShareData = OpenCodeIconData(
+        "outline-share", viewBox: 16.0, paths: [#"M13.5554 10.4445V13.5556C13.5554 13.5556 12.7599 13.5556 11.7777 13.5556H4.22211C3.23989 13.5556 2.44434 13.5556 2.44434 13.5556V10.4445M4.88878 5.55557L7.99989 2.44446L11.111 5.55557M7.99989 2.44446L7.99989 9.11112"#], strokeWidth: 1,
+        body: #"<path d="M13.5554 10.4445V13.5556C13.5554 13.5556 12.7599 13.5556 11.7777 13.5556H4.22211C3.23989 13.5556 2.44434 13.5556 2.44434 13.5556V10.4445M4.88878 5.55557L7.99989 2.44446L11.111 5.55557M7.99989 2.44446L7.99989 9.11112" stroke="currentColor"/>"#
+    )
+    public static let outlineShare = outlineShareData.svgIcon
+
+    public static let outlineEyeSlashData = OpenCodeIconData(
+        "outline-eye-slash", viewBox: 16.0, paths: [#"M8 9.5V11.5M13 7.70453C12.3728 8.24287 11.6002 8.73156 10.6609 9.06269C9.8902 9.33437 9.00721 9.5 8 9.5M8 9.5C6.99279 9.5 6.1098 9.33437 5.33912 9.06269M10.6609 9.06269L11.5 11M5.33912 9.06269L4.5 11M1.5 6C1.86147 6.5422 2.3536 7.14974 3 7.70453C3.62725 8.24287 4.39976 8.73156 5.33912 9.06269M14.5 6C14.1385 6.5422 13.6464 7.14974 13 7.70453M13 7.70453L14.5 9.06269M3 7.70453L1.5 9.06269"#], strokeWidth: 1,
+        body: #"<path d="M8 9.5V11.5M13 7.70453C12.3728 8.24287 11.6002 8.73156 10.6609 9.06269C9.8902 9.33437 9.00721 9.5 8 9.5M8 9.5C6.99279 9.5 6.1098 9.33437 5.33912 9.06269M10.6609 9.06269L11.5 11M5.33912 9.06269L4.5 11M1.5 6C1.86147 6.5422 2.3536 7.14974 3 7.70453C3.62725 8.24287 4.39976 8.73156 5.33912 9.06269M14.5 6C14.1385 6.5422 13.6464 7.14974 13 7.70453M13 7.70453L14.5 9.06269M3 7.70453L1.5 9.06269" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/>"#
+    )
+    public static let outlineEyeSlash = outlineEyeSlashData.svgIcon
+
+    public static let refreshData = OpenCodeIconData(
+        "refresh", viewBox: 20.0, paths: [#"M16.25 7.5A6.5 6.5 0 1 0 16.5 11M16.25 3.5v4h-4"#], strokeWidth: 1,
+        body: #"<path d="M16.25 7.5A6.5 6.5 0 1 0 16.5 11M16.25 3.5v4h-4" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#
+    )
+    public static let refresh = refreshData.svgIcon
+
+    public static let fillTriangleDownData = OpenCodeIconData(
+        "fill-triangle-down", viewBox: 16.0, paths: [#"M5.37624 6.75194C5.18184 6.41861 5.42224 6 5.80814 6H10.1921C10.578 6 10.8184 6.41861 10.624 6.75194L8.43203 10.5096C8.23909 10.8404 7.76119 10.8404 7.56825 10.5096L5.37624 6.75194Z"#], strokeWidth: nil,
+        body: #"<path d="M5.37624 6.75194C5.18184 6.41861 5.42224 6 5.80814 6H10.1921C10.578 6 10.8184 6.41861 10.624 6.75194L8.43203 10.5096C8.23909 10.8404 7.76119 10.8404 7.56825 10.5096L5.37624 6.75194Z" fill="currentColor"/>"#
+    )
+    public static let fillTriangleDown = fillTriangleDownData.svgIcon
+
+    public static let waveformData = OpenCodeIconData(
+        "waveform", viewBox: 16.0, paths: [#"M2 7V9M4.5 5V11M7 2.5V13.5M9.5 4.5V11.5M12 6V10M14.5 7.25V8.75"#], strokeWidth: 1.5,
+        body: #"<path d="M2 7V9M4.5 5V11M7 2.5V13.5M9.5 4.5V11.5M12 6V10M14.5 7.25V8.75" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#
+    )
+    public static let waveform = waveformData.svgIcon
+
+    public static let outlineSteerData = OpenCodeIconData(
+        "outline-steer", viewBox: 16.0, paths: [#"M8 14C11.3137 14 14 11.3137 14 8C14 4.68634 11.3137 2 8 2C4.68626 2 2 4.68634 2 8C2 11.3137 4.68626 14 8 14Z"#, #"M8 3.86328V12.1391C10.2854 12.1391 12.1379 10.2863 12.1379 8.00121C12.1379 5.71608 10.2854 3.86328 8 3.86328Z"#], strokeWidth: 1,
+        body: #"<path d="M8 14C11.3137 14 14 11.3137 14 8C14 4.68634 11.3137 2 8 2C4.68626 2 2 4.68634 2 8C2 11.3137 4.68626 14 8 14Z" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor"/><path d="M8 3.86328V12.1391C10.2854 12.1391 12.1379 10.2863 12.1379 8.00121C12.1379 5.71608 10.2854 3.86328 8 3.86328Z" fill="currentColor"/>"#
+    )
+    public static let outlineSteer = outlineSteerData.svgIcon
+
+    public static let outlineWaveAudioData = OpenCodeIconData(
+        "outline-wave-audio", viewBox: 16.0, paths: [#"M14.5 8.01193V8"#, #"M1.5 8.00607V7.99414"#, #"M3.66699 10.5141V5.48438"#, #"M10.167 10.5141V5.48438"#, #"M8 11.6004V4.39844"#, #"M12.333 9.20144V6.80078"#, #"M5.83301 13.5323V2.4668"#], strokeWidth: 1,
+        body: #"<path d="M14.5 8.01193V8" stroke-linecap="square" stroke="currentColor"/><path d="M1.5 8.00607V7.99414" stroke-linecap="square" stroke="currentColor"/><path d="M3.66699 10.5141V5.48438" stroke-linecap="square" stroke="currentColor"/><path d="M10.167 10.5141V5.48438" stroke-linecap="square" stroke="currentColor"/><path d="M8 11.6004V4.39844" stroke-linecap="square" stroke="currentColor"/><path d="M12.333 9.20144V6.80078" stroke-linecap="square" stroke="currentColor"/><path d="M5.83301 13.5323V2.4668" stroke-linecap="square" stroke="currentColor"/>"#
+    )
+    public static let outlineWaveAudio = outlineWaveAudioData.svgIcon
+
+    public static let outlineTextData = OpenCodeIconData(
+        "outline-text", viewBox: 14.0, paths: [#"M6.99997 11.5938V2.40625M6.99997 11.5938H9.04164M6.99997 11.5938H4.95831M6.99997 2.40625H2.40622V4.95833M6.99997 2.40625H11.5937V4.95833"#], strokeWidth: 1,
+        body: #"<path d="M6.99997 11.5938V2.40625M6.99997 11.5938H9.04164M6.99997 11.5938H4.95831M6.99997 2.40625H2.40622V4.95833M6.99997 2.40625H11.5937V4.95833" stroke="currentColor"/>"#
+    )
+    public static let outlineText = outlineTextData.svgIcon
+
+    public static let outlinePhotoData = OpenCodeIconData(
+        "outline-photo", viewBox: 14.0, paths: [#"M11.6666 11.6666L8.16663 8.16663L6.99997 9.33332L4.66663 6.99998L2.1583 9.50832M2.04163 2.04165H11.9583V11.9583H2.04163V2.04165ZM9.33332 5.24998C9.33332 5.81377 8.87629 6.27081 8.31244 6.27081C7.74866 6.27081 7.29163 5.81377 7.29163 5.24998C7.29163 4.68619 7.74866 4.22915 8.31244 4.22915C8.87629 4.22915 9.33332 4.68619 9.33332 5.24998Z"#], strokeWidth: 1,
+        body: #"<path d="M11.6666 11.6666L8.16663 8.16663L6.99997 9.33332L4.66663 6.99998L2.1583 9.50832M2.04163 2.04165H11.9583V11.9583H2.04163V2.04165ZM9.33332 5.24998C9.33332 5.81377 8.87629 6.27081 8.31244 6.27081C7.74866 6.27081 7.29163 5.81377 7.29163 5.24998C7.29163 4.68619 7.74866 4.22915 8.31244 4.22915C8.87629 4.22915 9.33332 4.68619 9.33332 5.24998Z" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let outlinePhoto = outlinePhotoData.svgIcon
+
+    public static let fileDocumentData = OpenCodeIconData(
+        "file-document", viewBox: 16.0, paths: [#"M3.5 13.25V2.75C3.5 2.61193 3.61193 2.5 3.75 2.5H8.39645C8.46275 2.5 8.52634 2.52634 8.57322 2.57322L12.4268 6.42678C12.4737 6.47366 12.5 6.53725 12.5 6.60355V13.25C12.5 13.3881 12.3881 13.5 12.25 13.5H3.75C3.61193 13.5 3.5 13.3881 3.5 13.25Z"#], strokeWidth: 1,
+        body: #"<path d="M3.5 13.25V2.75C3.5 2.61193 3.61193 2.5 3.75 2.5H8.39645C8.46275 2.5 8.52634 2.52634 8.57322 2.57322L12.4268 6.42678C12.4737 6.47366 12.5 6.53725 12.5 6.60355V13.25C12.5 13.3881 12.3881 13.5 12.25 13.5H3.75C3.61193 13.5 3.5 13.3881 3.5 13.25Z" stroke-linecap="round" stroke="currentColor"/>"#
+    )
+    public static let fileDocument = fileDocumentData.svgIcon
+
+    public static let outlineAudioData = OpenCodeIconData(
+        "outline-audio", viewBox: 14.0, paths: [#"M2.29546 5.62775V8.37207M5.4318 1.96875V12.0312M8.56815 4.40801V9.59173M11.7045 5.62775V8.37207"#], strokeWidth: 1,
+        body: #"<path d="M2.29546 5.62775V8.37207M5.4318 1.96875V12.0312M8.56815 4.40801V9.59173M11.7045 5.62775V8.37207" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let outlineAudio = outlineAudioData.svgIcon
+
+    public static let outlineVideoData = OpenCodeIconData(
+        "outline-video", viewBox: 14.0, paths: [#"M10.7412 7L3.99997 11.333V2.66602L10.7412 7Z"#], strokeWidth: 1,
+        body: #"<path d="M10.7412 7L3.99997 11.333V2.66602L10.7412 7Z" stroke="currentColor"/>"#
+    )
+    public static let outlineVideo = outlineVideoData.svgIcon
+
+    public static let outlineBrainData = OpenCodeIconData(
+        "outline-brain", viewBox: 14.0, paths: [#"M6.99997 3.5C6.99997 2.53322 7.7832 1.75 8.74997 1.75C9.71675 1.75 10.5 2.53322 10.5 3.5C10.5 3.57233 10.4875 3.64156 10.479 3.71156C11.4706 3.80022 12.25 4.62389 12.25 5.63889C12.25 6.43222 11.7732 7.11278 11.0919 7.41456C11.55 7.68522 11.8611 8.17911 11.8611 8.75C11.8611 9.54956 11.2552 10.2006 10.479 10.2884C10.4875 10.3584 10.5 10.4277 10.5 10.5C10.5 11.4668 9.71675 12.25 8.74997 12.25C7.7832 12.25 6.99997 11.4668 6.99997 10.5M6.99997 3.5C6.99997 2.53322 6.21675 1.75 5.24997 1.75C4.2832 1.75 3.49997 2.53322 3.49997 3.5C3.49997 3.57233 3.51241 3.64156 3.52097 3.71156C2.5293 3.80022 1.74997 4.62389 1.74997 5.63889C1.74997 6.43222 2.22675 7.11278 2.90808 7.41456C2.44997 7.68522 2.13886 8.17911 2.13886 8.75C2.13886 9.54956 2.74474 10.2006 3.52097 10.2884C3.51241 10.3584 3.49997 10.4277 3.49997 10.5C3.49997 11.4668 4.2832 12.25 5.24997 12.25C6.21675 12.25 6.99997 11.4668 6.99997 10.5M6.99997 3.5V10.5M4.27773 7.58334H3.6944C3.41362 7.58334 3.14607 7.52345 2.90496 7.4169M11.095 7.4169C10.8539 7.52345 10.5863 7.58334 10.3055 7.58334H9.7222"#], strokeWidth: 1,
+        body: #"<path d="M6.99997 3.5C6.99997 2.53322 7.7832 1.75 8.74997 1.75C9.71675 1.75 10.5 2.53322 10.5 3.5C10.5 3.57233 10.4875 3.64156 10.479 3.71156C11.4706 3.80022 12.25 4.62389 12.25 5.63889C12.25 6.43222 11.7732 7.11278 11.0919 7.41456C11.55 7.68522 11.8611 8.17911 11.8611 8.75C11.8611 9.54956 11.2552 10.2006 10.479 10.2884C10.4875 10.3584 10.5 10.4277 10.5 10.5C10.5 11.4668 9.71675 12.25 8.74997 12.25C7.7832 12.25 6.99997 11.4668 6.99997 10.5M6.99997 3.5C6.99997 2.53322 6.21675 1.75 5.24997 1.75C4.2832 1.75 3.49997 2.53322 3.49997 3.5C3.49997 3.57233 3.51241 3.64156 3.52097 3.71156C2.5293 3.80022 1.74997 4.62389 1.74997 5.63889C1.74997 6.43222 2.22675 7.11278 2.90808 7.41456C2.44997 7.68522 2.13886 8.17911 2.13886 8.75C2.13886 9.54956 2.74474 10.2006 3.52097 10.2884C3.51241 10.3584 3.49997 10.4277 3.49997 10.5C3.49997 11.4668 4.2832 12.25 5.24997 12.25C6.21675 12.25 6.99997 11.4668 6.99997 10.5M6.99997 3.5V10.5M4.27773 7.58334H3.6944C3.41362 7.58334 3.14607 7.52345 2.90496 7.4169M11.095 7.4169C10.8539 7.52345 10.5863 7.58334 10.3055 7.58334H9.7222" stroke="currentColor" stroke-linecap="square"/>"#
+    )
+    public static let outlineBrain = outlineBrainData.svgIcon
+
+    public static let closeSmallData = OpenCodeIconData("close-small", sharing: closeData)
+    public static let closeSmall = closeSmallData.svgIcon
+
+    public static let xmarkSmallData = OpenCodeIconData("xmark-small", sharing: closeData)
+    public static let xmarkSmall = xmarkSmallData.svgIcon
+
+    public static let outlineXmarkData = OpenCodeIconData("outline-xmark", sharing: closeData)
+    public static let outlineXmark = outlineXmarkData.svgIcon
+
+    public static let circleXmarkData = OpenCodeIconData("circle-xmark", sharing: closeData)
+    public static let circleXmark = circleXmarkData.svgIcon
+
+    public static let checkSmallData = OpenCodeIconData("check-small", sharing: checkData)
+    public static let checkSmall = checkSmallData.svgIcon
+
+    public static let outlineCopyData = OpenCodeIconData("outline-copy", sharing: copyData)
+    public static let outlineCopy = outlineCopyData.svgIcon
+
+    public static let codeSlashData = OpenCodeIconData("code-slash", sharing: codeData)
+    public static let codeSlash = codeSlashData.svgIcon
+
+    public static let outlineSlidersData = OpenCodeIconData("outline-sliders", sharing: slidersData)
+    public static let outlineSliders = outlineSlidersData.svgIcon
+
+    public static let outlineTrashData = OpenCodeIconData("outline-trash", sharing: trashData)
+    public static let outlineTrash = outlineTrashData.svgIcon
+
+    public static let outlineGlobeData = OpenCodeIconData("outline-globe", sharing: globeData)
+    public static let outlineGlobe = outlineGlobeData.svgIcon
+
+    public static let arrowUndoDownData = OpenCodeIconData("arrow-undo-down", sharing: enterData)
+    public static let arrowUndoDown = arrowUndoDownData.svgIcon
+
+    public static let outlineResetData = OpenCodeIconData("outline-reset", sharing: resetData)
+    public static let outlineReset = outlineResetData.svgIcon
+
+    public static let outlineUndoData = OpenCodeIconData("outline-undo", sharing: resetData)
+    public static let outlineUndo = outlineUndoData.svgIcon
+
+    public static let windowCursorData = OpenCodeIconData("window-cursor", sharing: selectElementData)
+    public static let windowCursor = windowCursorData.svgIcon
+
+    public static let outlineBrowserAnnotateData = OpenCodeIconData("outline-browser-annotate", sharing: selectElementData)
+    public static let outlineBrowserAnnotate = outlineBrowserAnnotateData.svgIcon
+
+    public static let graduationCapData = OpenCodeIconData("graduation-cap", sharing: postSkillData)
+    public static let graduationCap = graduationCapData.svgIcon
+
+    public static let outlineEyeData = OpenCodeIconData("outline-eye", sharing: eyeData)
+    public static let outlineEye = outlineEyeData.svgIcon
+
+    public static let branchOutData = OpenCodeIconData("branch-out", sharing: outlineWorktreeData)
+    public static let branchOut = branchOutData.svgIcon
+
+    public static let plusSmallData = OpenCodeIconData("plus-small", sharing: plusData)
+    public static let plusSmall = plusSmallData.svgIcon
+
+    public static let dashData = OpenCodeIconData("dash", sharing: minusData)
+    public static let dash = dashData.svgIcon
+
+    public static let dashBoldData = OpenCodeIconData(
+        "dash-bold", viewBox: 16.0, paths: [#"M2.5 8H13.5"#], strokeWidth: 1.5,
+        body: #"<path d="M2.5 8H13.5" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor" stroke-width="1.5"/>"#
+    )
+    public static let dashBold = dashBoldData.svgIcon
+
+    public static let fileTreeData = OpenCodeIconData("file-tree", sharing: folderData)
+    public static let fileTree = fileTreeData.svgIcon
+
+    public static let bubble5Data = OpenCodeIconData("bubble-5", sharing: commentData)
+    public static let bubble5 = bubble5Data.svgIcon
+
+    public static let speechBubbleData = OpenCodeIconData("speech-bubble", sharing: commentData)
+    public static let speechBubble = speechBubbleData.svgIcon
+
+    public static let squareArrowTopRightData = OpenCodeIconData("square-arrow-top-right", sharing: outlineSquareArrowData)
+    public static let squareArrowTopRight = squareArrowTopRightData.svgIcon
+
+    public static let consoleData = OpenCodeIconData("console", sharing: terminalData)
+    public static let console = consoleData.svgIcon
+
+    public static let outlineConsoleData = OpenCodeIconData("outline-console", sharing: terminalData)
+    public static let outlineConsole = outlineConsoleData.svgIcon
+
+    public static let outlineChevronDownData = OpenCodeIconData("outline-chevron-down", sharing: chevronDownData)
+    public static let outlineChevronDown = outlineChevronDownData.svgIcon
+
+    public static let outlineChevronRightData = OpenCodeIconData("outline-chevron-right", sharing: chevronRightData)
+    public static let outlineChevronRight = outlineChevronRightData.svgIcon
+
+    public static let outlineArrowLeftData = OpenCodeIconData("outline-arrow-left", sharing: arrowLeftData)
+    public static let outlineArrowLeft = outlineArrowLeftData.svgIcon
+
+    public static let outlineArrowRightData = OpenCodeIconData("outline-arrow-right", sharing: arrowRightData)
+    public static let outlineArrowRight = outlineArrowRightData.svgIcon
 
     public static let allData: [OpenCodeIconData] = [
-        outlineListChangelogData,
-        outlinePairData,
-        lockData,
-        globeData,
-        selectElementData,
-        flaskData,
-        editData,
-        folderAddLeftData,
-        folderData,
-        branchData,
-        branchOutData,
-        gridPlusData,
-        helpData,
-        helpBoldData,
-        infoData,
-        circleExclamationData,
-        circleXmarkData,
-        statusData,
-        statusActiveData,
-        magnifyingGlassData,
-        outlineMagnifierMinusData,
-        outlineMagnifierPlusData,
-        menuData,
-        minusData,
-        plusData,
-        settingsGearData,
-        chevronDownData,
-        collapseData,
-        checkData,
-        monitorData,
-        workspaceNewData,
-        workspaceIsolatedData,
-        workspaceData,
-        outlineWorktreeData,
-        outlineTrashData,
-        closeData,
-        xmarkSmallData,
-        outlineXmarkData,
-        outlineChevronDownData,
-        outlineChevronRightData,
-        outlineDotsData,
-        expandData,
-        outlineExpandData,
-        filetreeData,
-        splitData,
-        unifiedData,
-        reviewData,
-        windowAnalyticsData,
-        graduationCapData,
-        codeSlashData,
-        outlineCodeBracketsData,
-        trashData,
-        outlineSlidersData,
-        outlineCopyData,
-        outlineQuoteData,
-        outlineArrowLeftData,
-        outlineArrowRightData,
-        outlineArrowUpRightData,
-        outlineRotateClockwiseData,
-        outlineGlobeData,
-        outlineGlobePlusData,
-        outlineCookieData,
-        outlineBrowserAnnotateData,
-        arrowUpRightData,
-        outlineSquareArrowData,
-        outlineArrowToCornerTopRightData,
-        outlineHexagonalWarningData,
-        outlineShareData,
-        outlineEyeData,
-        outlineEyeSlashData,
-        refreshData,
-        resetData,
-        outlineUndoData,
-        outlineResetData,
-        fillTriangleDownData,
-        waveformData,
-        outlineSteerData,
-        outlineWaveAudioData,
-        commentData,
-        archiveData,
-        outlineTextData,
-        outlinePhotoData,
-        fileDocumentData,
-        outlineAudioData,
-        outlineVideoData,
-        outlineBrainData,
-        outlineConsoleData,
         alignRightData,
         arrowUpData,
         arrowLeftData,
         arrowRightData,
-        bubble5Data,
+        archiveData,
         promptData,
         brainData,
         forkData,
+        workspaceIsolatedData,
         bulletListData,
-        checkSmallData,
+        chevronDownData,
         chevronLeftData,
         chevronRightData,
         chevronGrabberVerticalData,
         chevronDoubleRightData,
         circleXData,
-        closeSmallData,
+        closeData,
         checklistData,
-        consoleData,
         terminalData,
         terminalActiveData,
+        reviewData,
         reviewActiveData,
+        expandData,
+        collapseData,
         codeData,
         codeLinesData,
         circleBanSignData,
-        circleBanSignBoldData,
         editSmall2Data,
         eyeData,
         enterData,
-        fileTreeData,
+        folderData,
         fileTreeActiveData,
-        plusSmallData,
+        magnifyingGlassData,
+        plusData,
         newSessionData,
         newSessionActiveData,
         pencilLineData,
         mcpData,
         glassesData,
         magnifyingGlassMenuData,
-        windowCursorData,
         taskData,
         stopData,
+        statusData,
+        statusActiveData,
         sidebarData,
         sidebarActiveData,
         layoutLeftData,
@@ -488,9 +1015,9 @@ extension OpenCodeIcons {
         layoutRightData,
         layoutRightPartialData,
         layoutRightFullData,
-        squareArrowTopRightData,
         openFileData,
-        speechBubbleData,
+        commentData,
+        folderAddLeftData,
         githubData,
         discordData,
         layoutBottomData,
@@ -498,22 +1025,26 @@ extension OpenCodeIcons {
         layoutBottomFullData,
         dotGridData,
         circleCheckData,
-        circleCheckBoldData,
         copyData,
+        checkData,
         photoData,
         shareData,
         shieldData,
         downloadData,
+        menuData,
         serverData,
-        dashData,
-        dashBoldData,
+        branchData,
+        editData,
+        helpData,
+        settingsGearData,
         cloudUploadData,
+        trashData,
         slidersData,
         keyboardData,
         selectorData,
         arrowDownToLineData,
         warningData,
-        warningBoldData,
+        resetData,
         linkData,
         providersData,
         modelsData,
@@ -522,15 +1053,86 @@ extension OpenCodeIcons {
         extensionsData,
         cubeData,
         postSkillData,
+        outlineListChangelogData,
+        outlinePairData,
+        lockData,
+        globeData,
+        selectElementData,
+        flaskData,
+        gridPlusData,
+        infoData,
+        circleExclamationData,
+        outlineMagnifierMinusData,
+        outlineMagnifierPlusData,
+        minusData,
+        monitorData,
+        workspaceNewData,
+        workspaceData,
+        outlineWorktreeData,
+        outlineDotsData,
+        outlineExpandData,
+        filetreeData,
+        splitData,
+        unifiedData,
+        windowAnalyticsData,
+        outlineCodeBracketsData,
+        outlineQuoteData,
+        outlineArrowUpRightData,
+        outlineRotateClockwiseData,
+        outlineGlobePlusData,
+        outlineCookieData,
+        arrowUpRightData,
+        outlineSquareArrowData,
+        outlineArrowToCornerTopRightData,
+        outlineMaximizeData,
+        outlineHexagonalWarningData,
+        outlineShareData,
+        outlineEyeSlashData,
+        refreshData,
+        fillTriangleDownData,
+        waveformData,
+        outlineSteerData,
+        outlineWaveAudioData,
+        outlineTextData,
+        outlinePhotoData,
+        fileDocumentData,
+        outlineAudioData,
+        outlineVideoData,
+        outlineBrainData,
+        closeSmallData,
+        xmarkSmallData,
+        outlineXmarkData,
+        circleXmarkData,
+        checkSmallData,
+        outlineCopyData,
+        codeSlashData,
+        outlineSlidersData,
+        outlineTrashData,
+        outlineGlobeData,
         arrowUndoDownData,
+        outlineResetData,
+        outlineUndoData,
+        windowCursorData,
+        outlineBrowserAnnotateData,
+        graduationCapData,
+        outlineEyeData,
+        branchOutData,
+        plusSmallData,
+        dashData,
+        fileTreeData,
+        bubble5Data,
+        speechBubbleData,
+        squareArrowTopRightData,
+        consoleData,
+        outlineConsoleData,
+        outlineChevronDownData,
+        outlineChevronRightData,
+        outlineArrowLeftData,
+        outlineArrowRightData,
     ]
 
-    public static let all: [SVGIcon] = allData.map(\.svgIcon)
-
-    private static let byNameMap: [String: OpenCodeIconData] = Dictionary(
-        allData.map { ($0.name, $0) },
-        uniquingKeysWith: { first, _ in first }
-    )
+    public static let all = allData.map(\.svgIcon)
+    private static let byNameMap = Dictionary(uniqueKeysWithValues: allData.map { ($0.name, $0) })
 
     public static func data(named name: String) -> OpenCodeIconData? {
         byNameMap[name]
@@ -539,4 +1141,12 @@ extension OpenCodeIcons {
     public static func byName(_ name: String) -> SVGIcon? {
         byNameMap[name]?.svgIcon
     }
+
+    /// Returns the first catalog name for this artwork. Aliases share their target's SVG.
+    public static func newIcon(_ icon: SVGIcon) -> OpenCodeIconData? {
+        allData.first { $0.svgIcon == icon }
+    }
 }
+
+/// The former artwork namespace now uses the unified OpenCode catalog.
+public typealias OpenCodeNewIcons = OpenCodeIcons
