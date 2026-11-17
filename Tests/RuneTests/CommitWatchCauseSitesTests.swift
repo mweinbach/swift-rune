@@ -63,6 +63,75 @@ struct CommitWatchCauseSitesTests {
     private struct Two {
         var a = TextEdit("x")
         var b = TextEdit("")
+        var showsB = false
+    }
+
+    @Test("native IME commits a dirty tree and routes typed text to the newly mounted field")
+    func nativeImeRoutesToTheNewlyMountedField() {
+        let rt = Runtime<Two>(state: Two(), viewport: Vec2(200, 120), pixelScale: 1.0) { state, _ in
+            var root = col().child(textInput(key: "a", \Two.a).w(180).h(40))
+            if state.showsB { root = root.child(textInput(key: "b", \Two.b).w(180).h(40)) }
+            return root
+        }
+        _ = rt.frame(at: 0)
+        _ = rt.keyDown(KeyEvent(key: .tab), at: 0.01)
+        _ = rt.frame(at: 0.02)
+        #expect(rt.focusedKey == "a")
+        rt.update(at: 0.03) { state, tx in
+            state.showsB = true
+            tx.focusWhenShown("b", ring: false)
+        }
+        rt.commitWhy = 0
+        #expect(rt.dispatchImeEvent(.commit("z"), at: 0.04))
+        #expect(rt.commitWhy & CommitWhy.route != 0)
+        #expect(rt.state.a.text == "x" && rt.state.b.text == "z")
+    }
+
+    @Test("a physical focus loss without an input timestamp commits a changed handler for dirty", arguments: [false, true])
+    func physicalFocusLostIsAnObserver(windowBlur: Bool) {
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(100, 80), pixelScale: 1) { _, _ in
+            el().key("field").size(100, 80).focusable()
+                .onPhysicalInput { state, event, _ in
+                    guard event == .focusLost else { return false }
+                    state += 1
+                    return true
+                }
+        }
+        _ = rt.frame(at: 0)
+        rt.update(at: 0.01) { _, tx in tx.focus("field") }
+        _ = rt.frame(at: 0.02)
+        let got = causes {
+            if windowBlur { rt.windowFocus(false, at: 0.03) }
+            else { _ = rt.physicalWithFallback(.focusLost, fallbackKey: nil, at: 0.03) }
+            _ = rt.frame(at: 0.04)
+        }
+        #expect(rt.state == 1)
+        #expect(got.contains { $0 & CommitWhy.dirty != 0 })
+        #expect(got.allSatisfy { $0 & CommitWhy.input == 0 })
+    }
+
+    @Test("a physical focus loss observes the window's finished composition")
+    func blurFinishesImeBeforePhysicalFocusLost() {
+        struct Field {
+            var edit = TextEdit("")
+            var observed: String?
+        }
+        let rt = Runtime<Field>(state: Field(), viewport: Vec2(100, 80), pixelScale: 1) { _, _ in
+            textInput(key: "field", \Field.edit).size(100, 80)
+                .onPhysicalInput { state, event, _ in
+                    guard event == .focusLost else { return false }
+                    state.observed = state.edit.preedit == nil ? state.edit.text : nil
+                    return true
+                }
+        }
+        _ = rt.frame(at: 0)
+        _ = rt.keyDown(KeyEvent(key: .tab), at: 0.01)
+        _ = rt.frame(at: 0.02)
+        _ = rt.ime(.preedit(ImePreedit(text: "x", cursorUTF8: 0..<1)), at: 0.03)
+        _ = rt.frame(at: 0.04)
+        #expect(rt.state.edit.preedit != nil)
+        rt.windowFocus(false, at: 0.05)
+        #expect(rt.state.observed == "x")
     }
 
     @Test("focus.rs:247-255 - a composition a commit's focus move finishes commits for `dirty`, not `input`")

@@ -31,7 +31,7 @@ extension Runtime {
     }
 
     @discardableResult
-    internal func keyUp(_ ev: KeyEvent, fromPhysicalRelease: Bool, at now: Double = 0) -> Bool {
+    internal func keyUp(_ ev: KeyEvent, fromPhysicalRelease: Bool, at now: Double = 0, why: UInt16 = CommitWhy.input) -> Bool {
         let inputMark = beginInputDispatch(at: now, routed: true)
         defer { endInputDispatch(inputMark, queuedAction: true) }
         if !fromPhysicalRelease && inputMachines.keyReleases.eat(composing: isAnyImeComposing) {
@@ -87,7 +87,7 @@ extension Runtime {
             var tx = makeTx(at: now, physicalKey: physKey)
             let taken = onUp(&state, ev, &tx)
             _ = Tx.took(taken, &tx)
-            applyTx(tx, at: now, markDirtyIfNotLiveOnly: taken)
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: taken, why: why)
             if taken {
                 let sec = hasSecureFocus || chain.contains(where: {
                     flatNodes[$0].el.isSecure || (flatNodes[$0].el.handlers.editLens?.get(state).isSecure == true)

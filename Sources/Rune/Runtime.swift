@@ -10539,9 +10539,6 @@ public final class Runtime<State> {
 
     @discardableResult
     public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, baseChar: Character? = nil, at now: Double) -> Bool {
-        if case .key(_, _, true, _) = event { dropOwedFocus() }
-        let inputMark = noteInput(at: now, routed: true)
-        defer { endInputDispatch(inputMark, queuedAction: true) }
         let prevCode = currentPhysicalKey
         let prevBase = currentKeyBase
         let prevRepeat = currentKeyRepeat
@@ -10558,11 +10555,7 @@ public final class Runtime<State> {
         return physicalWithFallback(event, fallbackKey: fallbackKey, at: now)
     }
 
-    internal func dispatchPhysicalInputOnly(_ event: PhysicalInput, at now: Double) -> Bool {
-        currentTime = now
-        if case .key(_, _, true, _) = event { dropOwedFocus() }
-        commitPolledChangeApart(at: now, routed: true)
-        flushPendingCommitIfNeeded(at: now)
+    internal func dispatchPhysicalInputOnly(_ event: PhysicalInput, at now: Double, why: UInt16) -> Bool {
         if case .focusLost = event {
             dirChord = .idle
         }
@@ -10595,7 +10588,7 @@ public final class Runtime<State> {
                     let taken = onPhys(&state, event, &tx)
                     _ = Tx.took(taken, &tx)
                     if taken {
-                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: true, liveOnlyLabel: "onPhysicalInput")
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: true, liveOnlyLabel: "onPhysicalInput", why: why)
                         return true
                     }
                 }
@@ -10610,7 +10603,7 @@ public final class Runtime<State> {
                     let taken = onPhys(&state, event, &tx)
                     _ = Tx.took(taken, &tx)
                     if taken {
-                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: true, liveOnlyLabel: "onPhysicalInput")
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: true, liveOnlyLabel: "onPhysicalInput", why: why)
                         return true
                     }
                 }
@@ -10640,14 +10633,19 @@ public final class Runtime<State> {
         // step's press for the stage (`Action::Key { stage: true }`) doesn't. As upstream
         // (frame.rs:565), before this key's commit boundary resolves an ask not yet committed.
         if playgroundLive?.pressing != true { dropOwedFocus() }
+        currentTime = now
         let inputMark = noteInput(at: now, routed: true)
         defer { endInputDispatch(inputMark, queuedAction: true) }
+        flushPendingCommitIfNeeded(at: now)
+        return routeKeyDown(ev, isRepeat: isRepeat, at: now)
+    }
+
+    /// The logical key route is shared by a standalone key action and a physical action's fallback.
+    internal func routeKeyDown(_ ev: KeyEvent, isRepeat: Bool = false, at now: Double) -> Bool {
         // A caret key or a shortcut reads the field's layout where it lands: a long paste's
         // paragraphs still waiting there are shaped first. Typing at the caret needs none.
         if !textRows.isEmpty && Self.readsTextLayout(ev) { fillTextNear() }
         recordEvent(hasSecureFocus ? "key-down [redacted]" : "key-down \(ev.key)")
-        currentTime = now
-        flushPendingCommitIfNeeded(at: now)
         let prevKitByKeys = kitHooks.isDispatchingByKeys
         let prevByKeys = activeByKeys
         let prevRepeat = currentKeyRepeat
@@ -12214,6 +12212,7 @@ public final class Runtime<State> {
         let t = now ?? currentTime
         let prevStale = needsCommit
         let prevWhy = commitWhyPending
+        let previousCommits = commitCount
         // frame.rs:77-81: only a selection's active/inactive pair makes the change itself dirty.
         let repaints = windowFocusRepaintsSelection
         let wasBlurred = !windowFocused
@@ -12236,15 +12235,16 @@ public final class Runtime<State> {
             inputMachines.currentMods = .none
             inputMachines.pendingKeysLost = false
             inputMachines.pendingKeysLostTime = nil
-            _ = physicalWithFallback(.focusLost, fallbackKey: nil, at: t)
+            if cancelPointerForFocusLoss(at: t) { cancelOrHoverDirty = true }
+            // frame.rs::window_focus queues FinishIme before Physical(FocusLost).
+            if finishComposition(at: t) { cancelOrHoverDirty = true }
+            if physicalWithFallback(.focusLost, fallbackKey: nil, at: t) { cancelOrHoverDirty = true }
         }
         if let hook = onFocus {
             handledFocus = true
             if playgroundDispatchFocus(focused, hook: hook, at: t) {
                 if !focused {
                     resetInputMachinesOnBlur()
-                    if cancelPointerForFocusLoss(at: t) { cancelOrHoverDirty = true }
-                    if finishComposition(at: t) { cancelOrHoverDirty = true }
                     endHoverDelays(at: t)
                     _ = endKitHoverDelays(at: t)
                     hoverPaused = true
@@ -12257,9 +12257,6 @@ public final class Runtime<State> {
         }
         if !focused {
             resetInputMachinesOnBlur()
-            if cancelPointerForFocusLoss(at: t) { cancelOrHoverDirty = true }
-            // A finished composition ran (`Action::FinishIme`): its change commits.
-            if finishComposition(at: t) { cancelOrHoverDirty = true }
             let hadDelayedHover = !hoverDelays.isEmpty
             endHoverDelays(at: t)
             if hadDelayedHover { cancelOrHoverDirty = true }
@@ -12272,7 +12269,7 @@ public final class Runtime<State> {
             handledFocus = true
             if !kitFocus.allLiveOnly { cancelOrHoverDirty = true }
         }
-        if !handledFocus && !cancelOrHoverDirty && !repaints {
+        if !handledFocus && !cancelOrHoverDirty && !repaints && commitCount == previousCommits {
             // Nothing ran and nothing is dirty (frame.rs:90-92 queues no `WindowFocus`): the
             // commit and its causes stay as they were.
             needsCommit = prevStale
@@ -12352,7 +12349,11 @@ public final class Runtime<State> {
         // left commits before it, so the composition finishes on the tree that shows it. Before
         // the first commit there is no tree yet: the first frame builds one before anything it
         // queued runs (frame.rs:547), so a blur before then waits for it.
-        if commitCount > 0 { flushPendingCommitIfNeeded(at: t) }
+        if commitCount > 0 {
+            commitPolledChangeApart(at: t, routed: true)
+            flushPendingCommitIfNeeded(at: t)
+            focusOwedFromSplit = false
+        }
         imeReset = true
         // It isn't input (`ActionQueue::push`, action.rs:89: `FinishIme` is `input: false`; the
         // window's focus loss that asks for it carries no arrival time): its change commits for
@@ -12384,10 +12385,11 @@ public final class Runtime<State> {
 
     @discardableResult
     internal func dispatchImeEvent(_ event: ImeEvent, recordReleaseGuard: Bool, at now: Double? = nil) -> Bool {
-        let inputMark = noteInput(at: now ?? currentTime, routed: true)
+        let t = now ?? currentTime
+        let inputMark = noteInput(at: t, routed: true)
         defer { endInputDispatch(inputMark, queuedAction: true) }
         let imeStartNs = InteractionGate.isOn ? DispatchTime.now().uptimeNanoseconds : 0
-        let t = now ?? currentTime
+        flushPendingCommitIfNeeded(at: t)
         let shellIme: Ime?
         switch event {
         case .preedit(let str, let cursorUTF8, let clauses):
