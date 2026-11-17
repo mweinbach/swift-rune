@@ -84,6 +84,8 @@ export function mountRuneFields(canvas, send) {
             mirror = next;
             plain.hidden = !next || next.secure;
             password.hidden = !next?.secure;
+            plain.setAttribute('aria-label', next && !next.secure && next.label || 'Text input');
+            password.setAttribute('aria-label', next?.secure && next.label || 'Password input');
             password.value = '';
             const text = next && !next.secure ? next.text : '';
             if (plain.value !== text) plain.value = text;
