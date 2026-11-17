@@ -12740,38 +12740,22 @@ public final class Runtime<State> {
             inputMachines.pendingKeysLost = false
             inputMachines.pendingKeysLostTime = nil
             if cancelPointerForFocusLoss(at: t) { cancelOrHoverDirty = true }
-            // frame.rs::window_focus queues FinishIme before Physical(FocusLost).
-            if finishComposition(at: t) { cancelOrHoverDirty = true }
-            if physicalWithFallback(.focusLost, fallbackKey: nil, at: t) { cancelOrHoverDirty = true }
         }
         if let hook = onFocus {
             handledFocus = true
-            if playgroundDispatchFocus(focused, hook: hook, at: t) {
-                if !focused {
-                    resetInputMachinesOnBlur()
-                    endHoverDelays(at: t)
-                    _ = endKitHoverDelays(at: t)
-                    hoverPaused = true
-                    kitHooks.hoverHoldAfterActionUntilMove = true
-                }
-                _ = dispatchKitWindowFocusHandlers(focused, at: t)
-                return
+            if !playgroundDispatchFocus(focused, hook: hook, at: t) {
+                update(at: t) { s, tx in hook(&s, focused, &tx) }
             }
-            update(at: t) { s, tx in hook(&s, focused, &tx) }
         }
+        if !focused { resetInputMachinesOnBlur() }
+        if deliverWindowFocusTransition(focused, at: t) { handledFocus = true }
         if !focused {
-            resetInputMachinesOnBlur()
             let hadDelayedHover = !hoverDelays.isEmpty
             endHoverDelays(at: t)
             if hadDelayedHover { cancelOrHoverDirty = true }
             if endKitHoverDelays(at: t) { cancelOrHoverDirty = true }
             hoverPaused = true
             kitHooks.hoverHoldAfterActionUntilMove = true
-        }
-        let kitFocus = dispatchKitWindowFocusHandlers(focused, at: t)
-        if kitFocus.ran {
-            handledFocus = true
-            if !kitFocus.allLiveOnly { cancelOrHoverDirty = true }
         }
         if !handledFocus && !cancelOrHoverDirty && !repaints && commitCount == previousCommits {
             // Nothing ran and nothing is dirty (frame.rs:90-92 queues no `WindowFocus`): the

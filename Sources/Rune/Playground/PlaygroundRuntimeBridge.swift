@@ -974,7 +974,7 @@ extension Runtime {
         var tx = Tx()
         hook(&scene.state, focused, &tx)
         live.currentScene = scene
-        applyTx(tx, at: now)
+        applyTx(tx, at: now, why: CommitWhy.dirty)
         dirtyCommit(at: now)
         return true
     }
