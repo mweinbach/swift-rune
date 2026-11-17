@@ -70,9 +70,8 @@ extension Runtime {
         var pinnedRows = VirtualPinnedRowCache()
     }
 
-    /// The rows a selection pins, built at most once a commit: a fresh cache comes with each
-    /// commit's source, as `Pins::clear_texts` empties the kept texts at the start of each commit
-    /// and the commit collects the pinned rows again.
+    /// Offscreen selection rows, retained through a prepared remount so a fallback leaves the
+    /// rows collected up to the first entering row with a nested list (`commit/remount.rs`).
     internal final class VirtualPinnedRowCache {
         var rows: [String: El<State>] = [:]
     }
@@ -226,6 +225,12 @@ extension Runtime {
         guard treeContainsVirtual(rootEl) else {
             return (rootEl, ctx)
         }
+        if rowReuseMode == .remount {
+            // Planning clears every list, including lists after the one that may fall back.
+            for source in virtualSelectionSources.values {
+                source.pinnedRows.rows.removeAll(keepingCapacity: true)
+            }
+        }
         var expanded = rootEl
         var rootSeen: [String: Int] = [:]
         walkVirtualSubtrees(
@@ -344,6 +349,7 @@ extension Runtime {
                 forceAll: forceAll,
                 ctx: &ctx
             )
+            if ctx.remountHitNestedVirtual { return }
         }
     }
 
@@ -576,7 +582,7 @@ extension Runtime {
                 && !hasSelectionPin
         }
 
-        ctx.selectionSources[path] = VirtualSelectionSource(
+        var selectionSource = VirtualSelectionSource(
             listPath: path,
             places: vState.rowPlaces,
             mounted: mounted,
@@ -585,6 +591,34 @@ extension Runtime {
             storedChildren: isIndexed ? [] : el.children,
             scrollAxes: el.layout.scrollAxes
         )
+        if rowReuseMode == .remount, let previous = virtualSelectionSources[path] {
+            selectionSource.pinnedRows = previous.pinnedRows
+        }
+        ctx.selectionSources[path] = selectionSource
+        func buildRow(_ source: VirtualRowSource<State>, at index: Int) -> CachedVirtualRow {
+            let touched = MemoScope.TouchedIdsBox()
+            let row = MemoScope.enterVirtualRow(
+                cache: self.memo, envHash: memoEnvHash, geometry: memoGeometry,
+                pass: memoPass, touchedIdsOut: touched
+            ) { source.build(state, index) }
+            self.memo.appendViewReads(touched.reads + touched.trackedReads.memoReads, pass: memoPass)
+            return CachedVirtualRow(el: row.key(keys[index]), memoIds: touched.ids,
+                                    reads: touched.reads, trackedReads: touched.trackedReads, envHash: memoEnvHash)
+        }
+        func offscreenRow(_ index: Int) -> El<State>? {
+            offscreenRowElement(source: selectionSource, at: index) { source in buildRow(source, at: index).el }
+        }
+        if focusedPath != nil || focusedKey != nil {
+            collectOffscreenFocusedVirtualInputs(source: selectionSource, buildRow: offscreenRow, ctx: &ctx)
+        }
+        if rowReuseMode == .remount {
+            // A focused pinned row was collected above; offscreenRowElement reuses it.
+            for key in virtualSelectionPinnedRows(path) {
+                if let index = selectionSource.places.index(of: key), !mounted.contains(index) {
+                    _ = offscreenRow(index)
+                }
+            }
+        }
         var rowSeenKeys: [String: Int] = [:]
         for i in mounted {
             let rowKey = keys[i]
@@ -602,29 +636,13 @@ extension Runtime {
                     didReuseRow = true
                     ctx.builtVirtualRows[path, default: [:]][rowKey] = reused
                 } else {
-                    let rowTouchedBox = MemoScope.TouchedIdsBox()
-                    var builtEl = MemoScope.enterVirtualRow(
-                        cache: self.memo,
-                        envHash: memoEnvHash,
-                        geometry: memoGeometry,
-                        pass: memoPass,
-                        touchedIdsOut: rowTouchedBox
-                    ) {
-                        el.virtualRowsSource!.build(state, i)
-                    }
-                    self.memo.appendViewReads(rowTouchedBox.reads + rowTouchedBox.trackedReads.memoReads, pass: memoPass)
-                    if rowReuseMode == .remount && treeContainsVirtual(builtEl) {
+                    let row = buildRow(el.virtualRowsSource!, at: i)
+                    if rowReuseMode == .remount && treeContainsVirtual(row.el) {
                         ctx.remountHitNestedVirtual = true
+                        return
                     }
-                    builtEl = builtEl.key(rowKey)
-                    rowEl = builtEl
-                    ctx.builtVirtualRows[path, default: [:]][rowKey] = CachedVirtualRow(
-                        el: rowEl,
-                        memoIds: rowTouchedBox.ids,
-                        reads: rowTouchedBox.reads,
-                        trackedReads: rowTouchedBox.trackedReads,
-                        envHash: memoEnvHash
-                    )
+                    rowEl = row.el
+                    ctx.builtVirtualRows[path, default: [:]][rowKey] = row
                 }
             } else {
                 rowEl = el.children[i]
@@ -661,21 +679,12 @@ extension Runtime {
                 forceAll: forceAll,
                 ctx: &ctx
             )
+            if ctx.remountHitNestedVirtual { return }
             built.append(rowEl)
         }
 
         if botSpacerH > 0 {
             built.append(Self.virtualSpacer(key: "__v_bot_spacer", height: botSpacerH))
-        }
-        if focusedPath != nil || focusedKey != nil {
-            collectOffscreenFocusedVirtualInputs(
-                el: el,
-                path: path,
-                places: vState.rowPlaces,
-                mounted: mounted,
-                isIndexed: isIndexed,
-                ctx: &ctx
-            )
         }
         el.children = built
         el.virtualRowsSource = nil
@@ -686,33 +695,32 @@ extension Runtime {
     /// temporaries don't enlarge that frame on the row-build path (debug stack depth).
     @inline(never)
     private func collectOffscreenFocusedVirtualInputs(
-        el: El<State>,
-        path: String,
-        places: VirtualRowPlaces<String>,
-        mounted: Range<Int>,
-        isIndexed: Bool,
+        source: VirtualSelectionSource,
+        buildRow: (Int) -> El<State>?,
         ctx: inout VirtualExpansionContext
     ) {
+        let path = source.listPath
+        let places = source.places
+        let mounted = source.mounted
         let keys = places.keys
         var candidateIndices: [Int] = []
         if let fp = focusedPath, fp.hasPrefix(path + "/") {
             if let row = places.row(containing: fp, below: path), !mounted.contains(row.rowIndex) {
                 candidateIndices.append(row.rowIndex)
+            } else if let prev = virtualInputs[fp], let i = places.index(of: prev.rowKey), !mounted.contains(i) {
+                candidateIndices.append(i)
             }
-        } else if let fp = focusedPath, let prev = virtualInputs[fp],
-                  let i = places.index(of: prev.rowKey), !mounted.contains(i) {
-            candidateIndices.append(i)
         }
-        if candidateIndices.isEmpty && !isIndexed {
+        if candidateIndices.isEmpty && !source.isIndexed {
             for i in keys.indices where !mounted.contains(i) {
                 candidateIndices.append(i)
             }
         }
         for i in candidateIndices {
-            let offEl = isIndexed ? el.virtualRowsSource!.build(state, i) : el.children[i]
+            guard let offEl = buildRow(i) else { continue }
             var seen: [String: Int] = [:]
             collectVirtualInputs(
-                in: offEl.key(keys[i]),
+                in: offEl,
                 parentPath: path,
                 siblingIndex: i,
                 siblingKeysSeen: &seen,

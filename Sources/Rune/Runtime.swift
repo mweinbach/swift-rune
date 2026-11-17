@@ -2795,8 +2795,9 @@ public final class Runtime<State> {
         commitCut: Bool,
         prevMountedIds: Set<NodeId>,
         isResizeRelayout: Bool = false,
-        effectiveReducedMotion: Bool? = nil
-    ) -> MeasurePassResult {
+        effectiveReducedMotion: Bool? = nil,
+        onRemountFallback: (() throws -> Void)? = nil
+    ) rethrows -> MeasurePassResult {
         let reducedMotion = effectiveReducedMotion ?? self.reducedMotion
         let rootBg: Color? = rootEl.background.a >= 0.999 ? rootEl.background : nil
 
@@ -2836,6 +2837,9 @@ public final class Runtime<State> {
                     forceAll: virtualPass >= 8
                 )
             }
+            // A prepared remount encountered a nested entering row. Its partial tree must
+            // never reach layout, which would release retained layouts and retarget row motion.
+            if virtualExpansion.remountHitNestedVirtual { try onRemountFallback?() }
             layoutRoot = prepareGrowthStacksBeforeLayout(
                 in: expandedRoot,
                 cut: cut,

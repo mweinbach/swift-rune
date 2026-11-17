@@ -338,7 +338,10 @@ internal extension Runtime {
         return out
     }
 
-    func offscreenRowElement(source src: VirtualSelectionSource, at rowIndex: Int) -> El<State>? {
+    func offscreenRowElement(
+        source src: VirtualSelectionSource, at rowIndex: Int,
+        buildIndexed: ((VirtualRowSource<State>) -> El<State>)? = nil
+    ) -> El<State>? {
         guard rowIndex >= 0 && rowIndex < src.keys.count else { return nil }
         let rowKey = src.keys[rowIndex]
         if src.isIndexed {
@@ -348,16 +351,15 @@ internal extension Runtime {
             let pinned = virtualSelectionPinnedRows(src.listPath).contains(rowKey)
             let cacheKey = "\(rowIndex)/\(rowKey)"
             if pinned, let kept = src.pinnedRows.rows[cacheKey] { return kept }
-            let scratch = MemoCache()
-            var built = MemoScope.enterVirtualRow(
-                cache: scratch,
-                envHash: lastViewMemoEnvHash,
-                geometry: [:],
-                pass: 1
-            ) {
-                rowSource.build(state, rowIndex)
+            let built: El<State>
+            if let buildIndexed {
+                // During a commit, pinned and entering rows read the same memo geometry.
+                built = buildIndexed(rowSource)
+            } else {
+                built = MemoScope.enterVirtualRow(
+                    cache: MemoCache(), envHash: lastViewMemoEnvHash, geometry: [:], pass: 1
+                ) { rowSource.build(state, rowIndex) }.key(rowKey)
             }
-            built = built.key(rowKey)
             if pinned { src.pinnedRows.rows[cacheKey] = built }
             return built
         }

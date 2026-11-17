@@ -495,6 +495,8 @@ extension Runtime {
         return pass
     }
 
+    private enum RemountFallback: Error { case nestedVirtual }
+
     /// Re-expands active virtual lists without re-running `view` or rebuilding already-mounted
     /// indexed rows (`runtime/commit/remount.rs`). Returns `nil` when fallback to full rebuild is needed.
     internal func tryVirtualRemountPass(
@@ -537,7 +539,7 @@ extension Runtime {
         }
 
         let preGeom = currentMemoGeometry()
-        var pass = buildMeasureResult(
+        guard var pass = try? buildMeasureResult(
             rootEl: cached.viewRootEl,
             remountRowCache: cached.virtualRowCache,
             rowReuseMode: .remount,
@@ -550,9 +552,9 @@ extension Runtime {
             commitMotion: commitMotion,
             commitColorSpring: commitColorSpring,
             commitCut: commitCut,
-            prevMountedIds: prevMountedIds
-        )
-        if pass.virtualExpansion.remountHitNestedVirtual {
+            prevMountedIds: prevMountedIds,
+            onRemountFallback: { throw RemountFallback.nestedVirtual }
+        ) else {
             return restoreSavedAndFallback()
         }
 
@@ -567,7 +569,7 @@ extension Runtime {
             savedGrowthRows: savedGrowthRows
         ) {
             let remeasureCache = pass.virtualExpansion.builtVirtualRows
-            pass = buildMeasureResult(
+            guard let remeasure = try? buildMeasureResult(
                 rootEl: cached.viewRootEl,
                 remountRowCache: remeasureCache,
                 rowReuseMode: .remount,
@@ -580,11 +582,12 @@ extension Runtime {
                 commitMotion: commitMotion,
                 commitColorSpring: commitColorSpring,
                 commitCut: commitCut,
-                prevMountedIds: prevMountedIds
-            )
-            if pass.virtualExpansion.remountHitNestedVirtual {
+                prevMountedIds: prevMountedIds,
+                onRemountFallback: { throw RemountFallback.nestedVirtual }
+            ) else {
                 return restoreSavedAndFallback()
             }
+            pass = remeasure
         }
 
         if evaluateLayoutMoved(reads: cached.reads, nodes: pass.nodes, force: false)
