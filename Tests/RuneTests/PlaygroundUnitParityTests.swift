@@ -1156,7 +1156,7 @@ struct PlaygroundPressAndRegionParityTests {
         let size = Vec2(1200, 700)
         func down(_ s: inout PressListState, _ tx: inout Tx) {
             s.selected += 1
-            tx.scrollTo("list", offset: Vec2(0, Float(s.selected * 40 - 160)), animated: false)
+            tx.scrollKeyTo("row\(s.selected)", at: 160)
         }
         func makeRt(_ scene: String) -> Runtime<PressListState> {
             let app = App<PressListState>(
