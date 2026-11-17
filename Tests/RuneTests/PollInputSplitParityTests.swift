@@ -143,8 +143,11 @@ struct PollInputSplitParityTests {
 
     @Test("a resting poll then a hover, wheel or key-up handler: each splits as an input action (`input || routed`)")
     func restingPollThenOtherInputSplits() throws {
-        for kind in ["hover", "wheel", "keyUp", "magnify", "rotate", "smartMagnify"] {
+        for kind in ["hover", "wheel", "keyUp", "ime", "magnify", "rotate", "smartMagnify"] {
             let rt = Self.runtime(motionNeedsCause: true)
+            if kind == "ime" {
+                rt.onIme = { state, _, _ in state.clickedWide = true; return true }
+            }
             if kind == "keyUp" {
                 rt.update(at: 1.0) { _, tx in tx.focus("field") }
                 _ = rt.frame(at: 1.0)
@@ -166,11 +169,13 @@ struct PollInputSplitParityTests {
                 _ = rt.rotate(RotateEvent(degrees: 10), at: try Self.centre(rt, "rotate"), now: 1.005)
             case "smartMagnify":
                 _ = rt.smartMagnify(at: try Self.centre(rt, "smart"), now: 1.005)
+            case "ime":
+                _ = rt.ime(.commit("x"), at: 1.005)
             default:
                 _ = rt.keyUp(KeyEvent(key: .text("a"), mods: .none), at: 1.005)
             }
             #expect(rt.commitWhy & CommitWhy.poll != 0)
-            #expect((rt.commitWhy & CommitWhy.route != 0) == (kind == "keyUp"),
+            #expect((rt.commitWhy & CommitWhy.route != 0) == (kind == "keyUp" || kind == "ime"),
                     "\(kind): \(CommitWhy.names(rt.commitWhy))")
             #expect(rt.state.clickedWide, "\(kind): the handler ran")
             for i in 1...4 { _ = rt.frame(at: 1.0 + Double(i) / 60.0) }

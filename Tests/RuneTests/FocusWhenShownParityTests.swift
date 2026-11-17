@@ -207,6 +207,19 @@ struct FocusWhenShownParityTests {
         #expect(rt.focusedKey == "allow")
     }
 
+    @Test("a physical press and its logical fallback are one action when the routed commit makes focus owed", arguments: [false, true])
+    func physicalPressDropsOnlyPreviouslyOwedFocus(withFallback: Bool) {
+        let rt = Self.runtime()
+        let event = PhysicalInput.key(key: .keyX, mods: .none, pressed: true, repeat: false)
+        let logical = withFallback ? KeyEvent(key: .text("x")) : nil
+        rt.update(at: 0.01) { _, tx in tx.focusWhenShown("card", ring: true) }
+        _ = rt.physicalWithFallback(event, fallbackKey: logical, at: 0.02)
+        #expect(rt.focusWhenShownPending)
+        rt.update(at: 0.03) { state, _ in state.loaded = true }
+        _ = rt.frame(at: 0.04)
+        #expect(rt.focusedKey == "allow")
+    }
+
     @Test("an owed ask whose element shows in a commit that also blurs still focuses it")
     func owedAskResolvesThroughBlur() {
         let rt = Self.runtime()
@@ -287,6 +300,21 @@ struct FocusWhenShownParityTests {
             tx.focusWhenShown("card", ring: true)
             return true
         }
+    }
+
+    @Test("finishing IME after a resting poll processes the focus ask before the next press")
+    func finishImeBeforePressSpendsThePollSplit() throws {
+        let rt = Self.runtime()
+        Self.pollAsking(rt)
+        rt.state.askOnPoll = true
+        try #require(rt.restingWake() == true)
+        _ = rt.finishComposition(at: 0.50)
+        #expect(rt.focusWhenShownPending)
+        let plain = try #require(rt.elements().first { $0.key == "plain" })
+        let point = Vec2(plain.rect[0] + plain.rect[2] / 2, plain.rect[1] + plain.rect[3] / 2)
+        rt.pointerDown(at: point, at: 0.51)
+        rt.pointerUp(at: point, at: 0.52)
+        #expect(!rt.focusWhenShownPending)
     }
 
     @Test("a click after a resting poll asked keeps the ask: the press drops what was owed before the split made it owed")

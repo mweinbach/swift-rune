@@ -251,6 +251,22 @@ extension Runtime {
             inputMachines.modifierKeys.hasQueuedEvents = false
             return false
         }
+        // One physical action owns both its focused handler and the logical fallback. Only this
+        // press drops previously owed focus, before a routed commit can make a new request owed.
+        if case .key(_, _, true, _) = event { dropOwedFocus() }
+        if event == .focusLost && InputTime.arrival() == nil {
+            commitPolledChangeApart(at: now, routed: true)
+            defer { focusOwedFromSplit = false }
+            return asInputObserver {
+                routePhysicalInput(event, fallbackKey: fallbackKey, at: now, why: CommitWhy.dirty)
+            }
+        }
+        let inputMark = noteInput(at: now, routed: true)
+        defer { endInputDispatch(inputMark, queuedAction: true) }
+        return routePhysicalInput(event, fallbackKey: fallbackKey, at: now, why: CommitWhy.input)
+    }
+
+    private func routePhysicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent?, at now: Double, why: UInt16) -> Bool {
         flushPendingCommitIfNeeded(at: now)
         var pressFocusBefore: String? = nil
         var isNewKeyPressCode: PhysicalKeyCode? = nil
@@ -281,11 +297,11 @@ extension Runtime {
             inputMachines.focusMachine.suppressedRepeatPhysicalKeys.removeAll()
             inputMachines.focusMachine.pendingPhysicalFocusCheck = nil
         }
-        let handledByPhysical = dispatchPhysicalInputOnly(event, at: now)
+        let handledByPhysical = dispatchPhysicalInputOnly(event, at: now, why: why)
         let modEvents = inputMachines.modifierKeys.apply(event, consumed: handledByPhysical)
         var modHandled = false
         for ev in modEvents {
-            if routeModifierKey(ev, at: now) {
+            if routeModifierKey(ev, at: now, why: why) {
                 modHandled = true
             }
         }
@@ -353,7 +369,7 @@ extension Runtime {
                     let prevPhys = inputMachines.activePhysicalKey
                     inputMachines.activePhysicalKey = code
                     defer { inputMachines.activePhysicalKey = prevPhys }
-                    let took = keyDown(fallbackKey, isRepeat: isRepeat, at: now)
+                    let took = routeKeyDown(fallbackKey, isRepeat: isRepeat, at: now)
                     recordFocusShiftSuppression()
                     return took
                 }
@@ -375,18 +391,18 @@ extension Runtime {
         }
 
         if let fallbackKey {
-            return keyDown(fallbackKey, at: now)
+            return routeKeyDown(fallbackKey, at: now)
         }
         return modHandled || !modEvents.isEmpty
     }
 
-    internal func routeModifierKey(_ ev: KeyEvent, at now: Double) -> Bool {
+    internal func routeModifierKey(_ ev: KeyEvent, at now: Double, why: UInt16 = CommitWhy.input) -> Bool {
         guard inputMachines.modifierKeys.enabled else { return false }
         let appFirst = (focusedPath == nil)
         if appFirst, activeModalPath == nil, let hook = globalOnKey {
             var tx = makeTx(at: now)
             if Tx.took(hook(&state, ev, &tx), &tx) {
-                applyTx(tx, at: now)
+                applyTx(tx, at: now, why: why)
                 return true
             }
         }
@@ -397,7 +413,7 @@ extension Runtime {
                 if let elOnKey = flatNodes[curIdx].el.handlers.onKey {
                     var tx = makeTx(at: now)
                     if elOnKey(&state, ev, &tx) {
-                        applyTx(tx, at: now)
+                        applyTx(tx, at: now, why: why)
                         return true
                     }
                 }
@@ -407,7 +423,7 @@ extension Runtime {
             if let onInputKey = flatNodes[fIdx].el.handlers.onInputKey {
                 var tx = makeTx(at: now)
                 if Tx.took(onInputKey(&state, ev, &tx), &tx) {
-                    applyTx(tx, at: now)
+                    applyTx(tx, at: now, why: why)
                     return true
                 }
             }
@@ -415,12 +431,12 @@ extension Runtime {
         if !appFirst, activeModalPath == nil, let hook = globalOnKey {
             var tx = makeTx(at: now)
             if Tx.took(hook(&state, ev, &tx), &tx) {
-                applyTx(tx, at: now)
+                applyTx(tx, at: now, why: why)
                 return true
             }
         }
         if case .modifier(_, pressed: false) = ev.key {
-            return keyUp(ev, at: now)
+            return keyUp(ev, fromPhysicalRelease: false, at: now, why: why)
         }
         return false
     }
