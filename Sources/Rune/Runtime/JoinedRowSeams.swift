@@ -36,6 +36,15 @@ struct JoinedRowSeam {
 }
 
 extension Runtime {
+    func presentedGrowthElement(_ node: FlatNode) -> El<State> {
+        var el = node.el
+        if let reveal = el.growthReveal, slice2State.joinedRowsWithoutRevealMask.contains(node.nodeId) {
+            el.layout.clipOverflow = reveal.authoredClip
+            el.clipFade = reveal.authoredFade
+        }
+        return el
+    }
+
     func updateJoinedRowSeams(
         stack: FlatNode, nodes: [FlatNode], rows: [Int], oldOrder: [NodeId],
         reorder: VirtualRowReorder, reset: Bool

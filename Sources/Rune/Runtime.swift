@@ -3414,12 +3414,6 @@ public final class Runtime<State> {
             if !selfInstantLayoutOrStyle, !followsWindow, layoutAnimSpec == nil, let cm = commitMotion {
                 layoutAnimSpec = LayoutAnim(x: cm.anim, y: cm.anim)
             }
-            // A growth stack follows the presented edge of its pinned viewport as siblings
-            // resize. The viewport must retain its layout spring throughout that transition.
-            if layoutAnimSpec == nil, !selfInstantLayoutOrStyle, !commitKind.lands, !isResizeRelayout,
-               el.layout.stickBottom, el.children.contains(where: { $0.growthSpec != nil }) {
-                layoutAnimSpec = LayoutAnim(spring: nodeStyleSpring ?? MotionTokens.SETTLE)
-            }
             // Growth lays out row frames as their heights change. A row already sliding to its
             // authored offset keeps that spring through those layout passes.
             var offsetAnim = el.offsetMotionAnim
