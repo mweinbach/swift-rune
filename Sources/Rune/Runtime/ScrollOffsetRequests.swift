@@ -45,10 +45,10 @@ extension Runtime {
     /// starts with the speed a running glide keeps (`retarget_v`), heading for the requested
     /// offset unclamped (`st.x.aim` / `GlideTo::Offset(to)`), which `followScrollOffsetAims`
     /// clamps to the live extent each frame. Otherwise the axis jumps (`apply_jumps`), halting its
-    /// own motion only, and a jump that moved it more than 1e-3 arms the viewport's hover hold
-    /// (`st.nudge.arm(now)`). Returns whether a jump moved it.
+    /// own motion only. App requests arm the viewport's hover hold after a jump of more than
+    /// 1e-3 (`st.nudge.arm(now)`). Keyboard paging releases that hold. Returns whether a jump moved it.
     @discardableResult
-    internal func applyScrollOffsetRequest(path: String, x reqX: Float?, y reqY: Float?, glide: Spring?, cut: Bool, animNow: Double) -> Bool {
+    internal func applyScrollOffsetRequest(path: String, x reqX: Float?, y reqY: Float?, glide: Spring?, cut: Bool, animNow: Double, holdHover: Bool = true) -> Bool {
         let axes = nodeByPath[path].map { flatNodes[$0].el.layout.scrollAxes } ?? .both
         let want: [Float?] = [
             axes.contains(.horizontal) ? reqX : nil,
@@ -156,7 +156,7 @@ extension Runtime {
         } else {
             wasPinnedToBottom.remove(path)
         }
-        if moved {
+        if moved && holdHover {
             armScrollNudge(path: path, at: currentTime)
         }
         return moved

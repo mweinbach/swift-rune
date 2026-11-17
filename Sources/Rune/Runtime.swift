@@ -11475,11 +11475,10 @@ public final class Runtime<State> {
 
     private func isPageableScroller(_ idx: Int) -> Bool {
         let node = flatNodes[idx]
-        guard node.el.layout.scrollAxes.contains(.vertical),
-              !node.effectiveInert,
-              (scrollMaxExtents[node.path]?.y ?? 0) > 0.5 else { return false }
-        if case .exiting = scene.phase(node.nodeId) { return false }
-        return true
+        return node.el.layout.scrollAxes.contains(.vertical)
+            && (scrollMaxExtents[node.path]?.y ?? 0) > 0.5
+            && hoverAllowed(idx)
+            && !subtreeExiting(idx)
     }
 
     /// Unclaimed arrows and Space scroll a focused scroller. Page keys can also target a
@@ -11530,7 +11529,7 @@ public final class Runtime<State> {
         let maxY = scrollMaxExtents[path]?.y ?? 0
         let viewportH = scrollViewportSizes[path]?.y ?? node.targetRect.height
         let page = max(0.0, viewportH * 0.9)
-        var cur = scrollOffsets[path] ?? .zero
+        let cur = scrollOffsets[path] ?? .zero
         let targetY: Float
         switch ev.key {
         case .arrowUp: targetY = cur.y - 40
@@ -11542,17 +11541,23 @@ public final class Runtime<State> {
         default: targetY = maxY
         }
         releaseHoverHold()
-        cur.y = targetY.clamped(to: 0...maxY)
-        scrollOffsets[path] = cur
-        let nid = NodeId.hash("scroll:" + path)
-        scrollStore.snap(nid, Props.SCROLL, to: cur)
-        scrollGlidingPaths.remove(path)
-        directScrolledPaths.insert(path)
         scrollRequestsState.stepCancel()
-        pendingCommitKind = pendingCommitKind.instant()
-        if node.el.layout.stickBottom {
-            if maxY - cur.y <= 2.0 { wasPinnedToBottom.insert(path) } else { wasPinnedToBottom.remove(path) }
+        let offset = targetY.clamped(to: 0...maxY)
+        applyScrollOffsetRequest(path: path, x: nil, y: offset, glide: nil, cut: true,
+                                 animNow: lastScaledAnimNow, holdHover: false)
+        // keys.rs::page_to puts only the vertical lane at rest. A previous touch fling
+        // must no longer advance it on the next frame. A horizontal glide keeps going.
+        updateScrollMode(forPath: path, event: .moved)
+        let pinned = node.el.layout.stickBottom && offset >= maxY - 0.5
+        updateScrollMode(forPath: path, event: pinned ? .pin : .rest)
+        if pinned { wasPinnedToBottom.insert(path) } else { wasPinnedToBottom.remove(path) }
+        if case .coasting(node.nodeId, horizontal: false) = slice2State.touchScroll {
+            slice2State.touchScroll = nil
         }
+        slice2State.touchOverscrollY.removeValue(forKey: path)
+        markScrollMovedByHand(path: path)
+        directScrolledPaths.insert(path)
+        pendingCommitKind = pendingCommitKind.instant()
         logInputEvent("\(focusedScrollerKey ? "scroll" : "page") \(ev.key)")
         dirtyCommit(at: now, why: CommitWhy.input)
         return true

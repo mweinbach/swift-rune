@@ -103,6 +103,63 @@ struct Slice4EdgeParityWave3BTests {
         #expect(top() == -360)
     }
 
+    @Test("A key lands the vertical finger fling and leaves a horizontal glide alone")
+    func keyboardScrollLandsOnlyTheVerticalLane() throws {
+        let rt = Runtime(state: (), viewport: Vec2(200, 200), pixelScale: 1) { _, _ in
+            col().key("scroll").size(200, 200).focusable().scrollXY()
+                .child(el().key("content").size(800, 1200))
+        }
+        _ = rt.frame(at: 0)
+        rt.touchDown(id: 1, at: Vec2(90, 160), time: 0.01)
+        rt.touchMove(id: 1, at: Vec2(90, 100), time: 0.06)
+        rt.touchUp(id: 1, at: Vec2(90, 100), time: 0.07)
+        _ = rt.frame(at: 0.08)
+        let path = try #require(rt.element(byKey: "scroll")?.path)
+        #expect(rt.focusedKey == "scroll")
+        #expect((rt.slice2State.scrollModes[path]?.coast() ?? 0) > 0)
+        let before = rt.scrollOffset(forKey: "scroll").y
+        #expect(rt.keyDown(KeyEvent(key: .arrowDown), at: 0.09))
+        for i in 1...5 { _ = rt.frame(at: 0.09 + Double(i) / 60) }
+        #expect(abs(rt.scrollOffset(forKey: "scroll").y - (before + 40)) < 0.01)
+        #expect(rt.slice2State.touchScroll == nil)
+
+        rt.update(at: 0.2) { _, tx in tx.scrollTo("scroll", x: 300, y: before + 40) }
+        _ = rt.frame(at: 0.22)
+        let start = rt.scrollOffset(forKey: "scroll").x
+        #expect(start < 300)
+        #expect(rt.keyDown(KeyEvent(key: .space), at: 0.23))
+        _ = rt.frame(at: 0.25)
+        #expect(rt.scrollOffset(forKey: "scroll").x > start)
+        for i in 1...120 { _ = rt.frame(at: 0.25 + Double(i) / 60) }
+        #expect(rt.scrollOffset(forKey: "scroll").x == 300)
+        #expect(abs(rt.scrollOffset(forKey: "scroll").y - (before + 220)) < 0.01)
+    }
+
+    @Test("Page keys skip scroll views behind a modal and under an exiting ancestor")
+    func keyboardScrollRespectsModalAndAncestorExit() throws {
+        let rt = Runtime(state: true, viewport: Vec2(200, 200), pixelScale: 1) { modal, _ in
+            var root: El<Bool> = col().key("root").size(200, 200)
+                .child(col().key("wrapper").size(200, 200).child(
+                    col().key("scroll").size(200, 200).scrollY()
+                        .child(el().size(200, 800))))
+            if modal { root = root.child(el().key("dialog").size(20, 20).modal()) }
+            return root
+        }
+        _ = rt.frame(at: 0)
+        #expect(rt.activeModalPath != nil)
+        #expect(!rt.keyDown(KeyEvent(key: .pageDown), at: 0.1))
+        #expect(rt.scrollOffset(forKey: "scroll").y == 0)
+
+        rt.update(at: 0.2) { state, _ in state = false }
+        _ = rt.frame(at: 0.2)
+        let wrapper = try #require(rt.flatNodes.first { $0.key == "wrapper" })
+        rt.scene.setTransition(wrapper.nodeId, .opacity)
+        rt.scene.remove(wrapper.nodeId)
+        #expect(rt.scene.isExiting(wrapper.nodeId))
+        #expect(!rt.keyDown(KeyEvent(key: .pageDown), at: 0.3))
+        #expect(rt.scrollOffset(forKey: "scroll").y == 0)
+    }
+
     @Test("input_clipboard.rs:5,39,250: PageUp/Down scrolls focused input viewport & scrolled-out virtual list; image/files paste routing")
     func pageKeysInputScrollAndRichImageFilesClipboardParity() throws {
         // 1. PageDown/PageUp reaches focused single-line input onInputKey & pages scroll view by 90% viewport.
