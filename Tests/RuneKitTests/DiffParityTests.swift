@@ -1133,6 +1133,52 @@ struct DiffParityTests {
         }
     }
 
+    @Test("Annotations on a split line stack independently in each column")
+    @MainActor
+    func annotationsStackWithinEachSplitSide() throws {
+        let file = FileDiff.fromTexts(path: "a.swift", old: "start\nlet rate = 1\nafter", new: "start\nlet rate = 2\nafter")
+        var state = DiffState(diff: file, mode: .split)
+        let heightWithoutNotes = state.rows().reduce(Float(0)) { $0 + $1.baseHeight }
+        state.annotations = [
+            DiffAnnotation(id: "L1", side: .old, line: 2, body: "First old note"),
+            DiffAnnotation(id: "R1", side: .new, line: 2, body: "First new note"),
+            DiffAnnotation(id: "L2", side: .old, line: 2, body: "Second old note"),
+            DiffAnnotation(id: "R2", side: .new, line: 2, body: "Second new note"),
+            DiffAnnotation(id: "R3", side: .new, line: 2, body: "Third new note"),
+        ]
+        let rows = state.rows()
+        let line = try #require(rows.firstIndex { $0.lineRef(for: .split)?.line == 2 })
+        let nextLine = try #require(rows.firstIndex { $0.lineRef(for: .split)?.line == 3 })
+        let top = rows[...line].reduce(Float(0)) { $0 + $1.baseHeight }
+        let estimate = 3 * DiffLayout.noteHeight
+        #expect(rows.reduce(Float(0)) { $0 + $1.baseHeight } == heightWithoutNotes + estimate)
+        let window = state.visibleWindow(for: rows, scrollY: top + estimate - 2, viewportHeight: 1, overscan: 0)
+        #expect(window.range == (line + 1)..<nextLine)
+        #expect(window.beforeHeight == top)
+
+        let heights: [String: Float] = ["L1": 72, "L2": 25, "R1": 25, "R2": 38, "R3": 46]
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime<DiffState>(state: state, viewport: Vec2(900, 600)) { diff, cx in
+            DiffView<DiffState>(key: "dv", kit: kit, get: { $0 }, set: { $0 = $1 })
+                .annotation { _, ann in el().h(heights[ann.id]!) }
+                .build(state: diff, cx: cx)
+        }
+        _ = rt.frame(at: 0)
+        let pair = try #require(rt.element(byKey: "dv-srow-\(line)"))
+        let startY = pair.rect[1] + pair.rect[3]
+        let half = pair.rect[2] / 2
+        let expected: [(String, Float, Float)] = [
+            ("L1", 0, 0), ("L2", 0, 72),
+            ("R1", half, 0), ("R2", half, 25), ("R3", half, 63),
+        ]
+        for (id, x, y) in expected {
+            let note = try #require(rt.element(byKey: "dv-note-\(id)"))
+            #expect(note.rect == [pair.rect[0] + x, startY + y, half, heights[id]!])
+        }
+        let after = try #require(rt.element(byKey: "dv-crow-\(nextLine)"))
+        #expect(after.rect[1] == startY + 109)
+    }
+
     @Test("tests/diff.rs: 4000-line/40-note virtualization (#176), gutter drag/plus/Escape (#178, #180), sticky header/actions/resize (#179), stuck gutter (#181), labels & 3-file nav (#182), PerfWarn (#184-#185)")
     @MainActor
     func diffRuntimeVirtualDragStickyAndPerfWarnParity() {

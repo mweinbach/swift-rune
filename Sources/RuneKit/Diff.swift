@@ -1545,18 +1545,20 @@ public enum DiffRow: Sendable, Equatable {
     case splitPair(old: DiffLine, new: DiffLine, oldChanged: [Range<Int>], newChanged: [Range<Int>])
     case splitOnly(DiffLine)
     case annotation(DiffAnnotation)
+    case splitAnnotations(owner: DiffLineRef, old: [DiffAnnotation], new: [DiffAnnotation])
 
     public var baseHeight: Float {
         switch self {
         case .gap: DiffLayout.gapHeight
         case .unified, .splitPair, .splitOnly: DiffLayout.lineHeight
         case .annotation: DiffLayout.noteHeight
+        case let .splitAnnotations(_, old, new): Float(max(old.count, new.count)) * DiffLayout.noteHeight
         }
     }
 
     public func lineRef(for mode: DiffMode, preferredSide: DiffSide? = nil) -> DiffLineRef? {
         switch self {
-        case .gap, .annotation:
+        case .gap, .annotation, .splitAnnotations:
             return nil
         case .unified(let line, _, _):
             switch line.kind {
@@ -2143,11 +2145,14 @@ public struct DiffState: Sendable, Equatable {
         var out: [DiffRow] = []
 
         func appendAnnotations(forOld o: UInt32?, new n: UInt32?) {
-            if let o, let list = annsByLine[DiffLineRef(side: .old, line: o)] {
-                out.append(contentsOf: list.map { .annotation($0) })
-            }
-            if let n, let list = annsByLine[DiffLineRef(side: .new, line: n)] {
-                out.append(contentsOf: list.map { .annotation($0) })
+            let old = o.flatMap { annsByLine[DiffLineRef(side: .old, line: $0)] } ?? []
+            let new = n.flatMap { annsByLine[DiffLineRef(side: .new, line: $0)] } ?? []
+            guard !old.isEmpty || !new.isEmpty else { return }
+            if mode == .split, let owner = out.last?.lineRef(for: .split, preferredSide: .old) {
+                out.append(.splitAnnotations(owner: owner, old: old, new: new))
+            } else {
+                out.append(contentsOf: old.map { .annotation($0) })
+                out.append(contentsOf: new.map { .annotation($0) })
             }
         }
 
@@ -2212,7 +2217,7 @@ public struct DiffState: Sendable, Equatable {
         for row in rows {
             ys.append(acc)
             let h: Float = switch row {
-            case .gap, .annotation: row.baseHeight
+            case .gap, .annotation, .splitAnnotations: row.baseHeight
             case .unified, .splitPair, .splitOnly: row.baseHeight * lineHeightMultiplier
             }
             acc += h
@@ -2583,7 +2588,7 @@ public struct DiffView<State>: Sendable {
                 case let .unified(line, _, _): return max(best, line.text.count)
                 case let .splitPair(o, n, _, _): return max(best, o.text.count + n.text.count)
                 case let .splitOnly(line): return max(best, line.text.count)
-                case .gap, .annotation: return best
+                case .gap, .annotation, .splitAnnotations: return best
                 }
             }
             let contentMinW: Float = maxCols > 0 ? (Float(maxCols) * 7.5 + 2 * gutterWidth + 60) : 0
@@ -2670,7 +2675,11 @@ public struct DiffView<State>: Sendable {
             let totalGutterW = 3 + (st.mode == .unified ? 2 * gutterWidth : gutterWidth)
             return buildGapRow(fileIndex: fileIndex, prefix: prefix, gap: gap, height: DiffLayout.gapHeight, gutterWidth: totalGutterW)
         case .annotation(let ann):
-            return buildAnnotationRow(hostState: hostState, prefix: prefix, mode: st.mode, ann: ann, fixedWidth: annotationFixedWidth, stickyLeft: annotationStickyLeft)
+            var note = buildAnnotation(hostState: hostState, prefix: prefix, ann: ann)
+            if annotationStickyLeft { note = note.stickyLeft(0) }
+            return annotationFixedWidth.map { note.w($0) } ?? note.wFull()
+        case let .splitAnnotations(owner, old, new):
+            return buildSplitAnnotations(hostState: hostState, prefix: prefix, owner: owner, old: old, new: new, single: st.singleColumn(file: fileIndex))
         case let .unified(line, intraOld, intraNew):
             return buildUnifiedRow(
                 prefix: prefix,
@@ -2997,7 +3006,7 @@ public struct DiffView<State>: Sendable {
             .child(text(label).font(kit.ty.caption()).color(kit.c.textAccent))
     }
 
-    private func buildAnnotationRow(hostState: State?, prefix: String, mode: DiffMode, ann: DiffAnnotation, fixedWidth: Float? = nil, stickyLeft: Bool = false) -> El<State> {
+    private func buildAnnotation(hostState: State?, prefix: String, ann: DiffAnnotation) -> El<State> {
         let noteBody: El<State>
         if let custom = annotationBuilder, let hostState {
             noteBody = custom(hostState, ann)
@@ -3018,26 +3027,24 @@ public struct DiffView<State>: Sendable {
                 .child(text(ann.body).font(k.ty.body).color(k.c.textBase))
         }
 
-        if mode == .split {
-            let emptyHalf = { El<State>(direction: .column).wFrac(0.5).minW(0) }
-            let noteHalf = El<State>(direction: .column)
-                .key("\(prefix)-note-\(ann.id)")
-                .wFrac(0.5)
-                .minW(0)
-                .child(noteBody)
-            return El<State>(direction: .row)
-                .key("\(prefix)-split-\(ann.side.rawValue)-\(ann.line)-note-\(ann.id)")
-                .wFull()
-                .itemsStart()
-                .child(ann.side == .old ? noteHalf : emptyHalf())
-                .child(ann.side == .new ? noteHalf : emptyHalf())
-        }
+        return El<State>(direction: .column).key("\(prefix)-note-\(ann.id)").child(noteBody)
+    }
 
-        var row = El<State>(direction: .column)
-            .key("\(prefix)-note-\(ann.id)")
-        if stickyLeft { row = row.stickyLeft(0) }
-        if let fixedWidth { row = row.w(fixedWidth) } else { row = row.wFull() }
-        return row.child(noteBody)
+    private func buildSplitAnnotations(
+        hostState: State?, prefix: String, owner: DiffLineRef, old: [DiffAnnotation], new: [DiffAnnotation], single: DiffSide?
+    ) -> El<State> {
+        var row = El<State>(direction: .row)
+            .key("\(prefix)-split-\(owner.side.rawValue)-\(owner.line)-notes")
+            .wFull()
+            .itemsStart()
+        for side in [DiffSide.old, .new] where single == nil || single == side {
+            var column = El<State>(direction: .column).key(side.rawValue).wFrac(single == nil ? 0.5 : 1).minW(0)
+            for ann in side == .old ? old : new {
+                column = column.child(buildAnnotation(hostState: hostState, prefix: prefix, ann: ann).wFull())
+            }
+            row = row.child(column)
+        }
+        return row
     }
 
     // MARK: Gutter & Line Selection Helpers
