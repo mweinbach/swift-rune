@@ -4,15 +4,37 @@ import RuneMotion
 // MARK: - Increment 4 Runtime Support (TxCommit, ScrollRequests, Sticky, VirtualRows/VirtualFill, Growth)
 
 extension Runtime {
-    /// Matches a virtual row key directly or as an ancestor segment of a scoped descendant selector
-    /// (e.g. `"r40/active-hit"` pins and targets virtual row `"r40"` so nested highlights mount first).
-    static func virtualRowMatchesSelector(rowKey: String, virtualPath: String, selector: String) -> Bool {
-        if rowKey == selector || selectsElementSelector(selector, path: "\(virtualPath)/\(rowKey)", key: rowKey) {
-            return true
+    /// A virtual row selector can name the row, a scoped row, or a descendant of the row.
+    private static func virtualRevealRow(_ key: String, in places: VirtualRowPlaces<String>, path: String) -> Int? {
+        if let index = places.index(of: key) { return index }
+        for slash in key.indices.reversed() where key[slash] == "/" {
+            let row = String(key[key.index(after: slash)...])
+            if let index = places.index(of: row),
+               selectsElementSelector(key, path: "\(path)/@\(row)", key: row) {
+                return index
+            }
         }
-        guard selector.contains("/") else { return false }
-        let parts = selector.split(separator: "/")
-        return parts.dropLast().contains { $0 == rowKey || $0 == "@\(rowKey)" }
+        for slash in key.indices where key[slash] == "/" {
+            if let index = places.index(of: String(key[..<slash])) { return index }
+        }
+        return nil
+    }
+
+    /// During layout, measure a distant destination in its own window before the viewport moves.
+    private func pendingVirtualReveal(
+        places: VirtualRowPlaces<String>, list: String, viewport: String
+    ) -> Int? {
+        guard !pendingScrollReveals.isEmpty else { return nil }
+        let viewportKey = viewport.split(separator: "/").last.flatMap { $0.hasPrefix("@") ? String($0.dropFirst()) : nil }
+        return pendingScrollReveals.lazy.filter { request in
+            request.scope.map { $0 == list || selectsElementSelector($0, path: viewport, key: viewportKey) } ?? true
+        }.compactMap { Self.virtualRevealRow($0.key, in: places, path: list) }.last
+    }
+
+    private static func revealWindowOffset(row: Int?, prefix: [Float], viewport: Float, from offset: Float) -> Float {
+        guard let row, prefix[row] > offset + viewport || prefix[row + 1] < offset else { return offset }
+        let height = prefix[row + 1] - prefix[row]
+        return max(0, prefix[row] - max(0, viewport - height) * 0.5)
     }
 
     internal enum VirtualRowReuseMode: Equatable, Sendable {
@@ -450,26 +472,11 @@ extension Runtime {
         if let fk = focusedKey, let fi = vState.rowPlaces.index(of: fk) {
             pinned.insert(fi)
         }
-        var windowOffsetY = listOffsetY
-        let vpKey = nextScrollPath.flatMap { p -> String? in
-            guard let tail = p.split(separator: "/").last, tail.hasPrefix("@") else { return nil }
-            let raw = String(tail.dropFirst())
-            return raw
-        }
-        for req in pendingScrollReveals where req.scope == nil
-            || (nextScrollPath.map { selectsElementSelector(req.scope!, path: $0, key: vpKey) } ?? false)
-            || req.scope == path {
-            if let ri = keys.firstIndex(where: { Self.virtualRowMatchesSelector(rowKey: $0, virtualPath: path, selector: req.key) }) {
-                pinned.insert(ri)
-                // Measure a distant reveal's row and its nested target before placing it.
-                if prefix[ri] > listOffsetY + vpH || prefix[ri + 1] < listOffsetY {
-                    let height = prefix[ri + 1] - prefix[ri]
-                    windowOffsetY = max(0, prefix[ri] - max(0, vpH - height) * 0.5)
-                }
-            }
-        }
+        let destination = pendingVirtualReveal(places: vState.rowPlaces, list: path, viewport: vpPath)
+        var windowOffsetY = Self.revealWindowOffset(row: destination, prefix: prefix, viewport: vpH, from: listOffsetY)
+        if let destination { pinned.insert(destination) }
         for rev in scrollRequestsState.reveals where rev.viewport == vpPath {
-            if let ri = keys.firstIndex(where: { Self.virtualRowMatchesSelector(rowKey: $0, virtualPath: path, selector: rev.key) }) {
+            if let ri = Self.virtualRevealRow(rev.key, in: vState.rowPlaces, path: path) {
                 pinned.insert(ri)
                 if isFirstMount && prefix[ri + 1] > windowOffsetY + vpH {
                     windowOffsetY = max(0, prefix[ri + 1] - vpH)
@@ -1018,6 +1025,11 @@ extension Runtime {
             }
             stack.width = stackWidth
             stack.gap = el.layout.rowGap
+            let borderBottom = el.layout.borderLayout
+                ? TaffyBridge.snappedBorderSides(el.borderSides ?? .all(el.borderWidth), pixelScale: pixelScale).bottom
+                : 0
+            let rowsEnd = res.children.last?.layout.localRect.bottom ?? el.layout.padding.top
+            stack.trailingSpace = max(0, res.layout.localRect.height - rowsEnd - el.layout.padding.bottom - borderBottom)
             stack.spring = spec.spring
             stack.edge = spec.edge
             growthStacks[path] = stack
@@ -1184,7 +1196,6 @@ extension Runtime {
                 let stackExisted = (inGrowthSpec != nil) ? !(kitHooks.growthStacks[parentStackPath ?? ""]?.isNewStack ?? true) : (viewCommitCount > 1)
                 let startsFromZero = !instantGrowth
                     && !revealedInCommit
-                    && (whole || streaming || live || el.foldGlideSpec != nil)
                     && (stackExisted || live || (viewCommitCount > 1 && streaming))
                 if startsFromZero, el.foldGlideSpec != nil, let sp = parentStackPath, accum.existedStackPaths.contains(sp) {
                     accum.stackOpened[sp, default: []].append(gKey)
@@ -1937,7 +1948,9 @@ extension Runtime {
                 }
             }
             let maxOff = max(0, total + topOffset - vpH)
-            let offset = max(0, min(max(0, total - vpH), max(0, min(rawOff, maxOff) - topOffset)))
+            let actualOffset = max(0, min(max(0, total - vpH), max(0, min(rawOff, maxOff) - topOffset)))
+            let destination = pendingVirtualReveal(places: vState.rowPlaces, list: meta.listPath, viewport: meta.scrollPath)
+            let offset = Self.revealWindowOffset(row: destination, prefix: prefix, viewport: vpH, from: actualOffset)
             let before = prefix[mounted.lowerBound]
             let end = prefix[mounted.upperBound]
             let mountedH = max(0, end - before)
@@ -2829,7 +2842,8 @@ extension Runtime {
             )
             if case .move(let targetY) = eff {
                 clearScrollHandGliding(path: vPath)
-                applyScrollOffset(path: vPath, next: Vec2(cur.x, Float(targetY)), glide: (req.animated && !snaps) ? MotionTokens.GLIDE : nil)
+                applyScrollOffsetRequest(path: vPath, x: nil, y: Float(targetY),
+                                         glide: (req.animated && !snaps) ? MotionTokens.GLIDE : nil, cut: cut, animNow: now)
             }
             if let (hxPath, nextX) = revealRowX(scope: req.scope, key: req.key) {
                 let curXScroll = scrollOffsets[hxPath] ?? .zero
@@ -2991,7 +3005,8 @@ extension Runtime {
                         ancestor = parent.parentIndex
                     }
                 }
-                let isFar = distFromBottom > max(farSpec.min, thresholdHeight)
+                let layoutEnd = slice2State.scrollModes[path]?.hand.laid.map(Float.init) ?? maxExt.y
+                let isFar = min(maxExt.y, layoutEnd) - cur.y > max(farSpec.min, thresholdHeight)
                 if farFromBottomStates[path] != isFar {
                     farFromBottomStates[path] = isFar
                     dispatchScrollEndReport(farSpec.handler, value: isFar)
@@ -3322,10 +3337,9 @@ extension Runtime {
             let maxY = scrollMaxExtents[path]?.y ?? 0
             let cNode = flatNodes[cIdx]
             let lag = (cRect.top - cNode.targetRect.top) - (viewRect.bottom - vNode.targetRect.bottom)
-            let padBottom = cNode.el.layout.padding.bottom
-            let contentBottom = (cNode.targetRect.bottom + curOff) - padBottom
-            let short = vNode.targetRect.bottom - contentBottom
-            let scrollOverflow = contentBottom - vNode.targetRect.bottom
+            let trailingSpace = growthStacks[cNode.path]?.trailingSpace ?? 0
+            let scrollOverflow = cNode.targetRect.bottom + curOff - vNode.targetRect.bottom
+            let short = trailingSpace - scrollOverflow
             let wasHeld = slice2State.scrollHeldByPath[path] ?? false
 
             let stuckOff: Float?
@@ -3360,7 +3374,7 @@ extension Runtime {
                 if pinned {
                     var h = slack.track.h - grown
                     if let oldEdges = slack.edges, wasHeld, !slack.follow {
-                        let limit = cRect.top + (cNode.targetRect.height - padBottom)
+                        let limit = cRect.top + cNode.targetRect.height - trailingSpace
                         let b0 = short > 0.5 ? min(oldEdges.y, limit) : oldEdges.y
                         let b1 = short > 0.5 ? min(bottom, limit) : bottom
                         h += (b1 - b0) - max(0, top - oldEdges.x)

@@ -359,6 +359,7 @@ public final class Runtime<State> {
         var foldHeaderPath: String? = nil
         var foldHeaderLift: Float = 0
         var growthClosingShiftY: Float = 0
+        var naturalLayout: LayoutEngine.ResultNode? = nil
     }
 
     private struct PaintInh {
@@ -2006,6 +2007,7 @@ public final class Runtime<State> {
         syncMotionLoopClock(to: now, animNow: animNow)
 
         // Sample inertial scroll decay tracks and re-position scrolled rects without running views
+        followShrinkingScrollEnds(at: prevAnimNow)
         followScrollOffsetAims(animNow: animNow)
         let scrollDt: Float = {
             let prev = lastScrollTickTime ?? now
@@ -2917,6 +2919,7 @@ public final class Runtime<State> {
             return (t.moving && (abs(t.h - t.target) > 1e-4 || t.isShuttingFold))
                 || (t.streaming && (t.h < entry.naturalHeight - 0.1 || entry.withheld > 0.01))
         }
+        let naturalRoot = needsGrowthClamp ? solvedRoot : nil
         if needsGrowthClamp {
             layoutRoot = applyGrowthConstraints(in: layoutRoot)
             textLayoutCollector.map.removeAll(keepingCapacity: true)
@@ -2972,7 +2975,8 @@ public final class Runtime<State> {
                 enclosingHScrollIndex: nil,
                 staticInh: StaticInh(),
                 parentFlow: .ltr,
-                parentDirected: false
+                parentDirected: false,
+                naturalLayout: naturalRoot
             )
         ]
 
@@ -3131,9 +3135,20 @@ public final class Runtime<State> {
                 let maxSX = el.layout.scrollAxes.contains(.horizontal)
                     ? max(0, solved.layout.contentSize.x - targetRect.width)
                     : 0
-                let maxSY = el.layout.scrollAxes.contains(.vertical)
-                    ? max(0, solved.layout.contentSize.y - targetRect.height)
-                    : 0
+                let maxSY: Float
+                if el.layout.scrollAxes.contains(.vertical) {
+                    let growthChild = el.children.firstIndex { $0.growthSpec != nil }
+                    let natural = item.naturalLayout?.layout ?? solved.layout
+                    maxSY = growthScrollMaximum(
+                        path: path, stackPath: growthChild.map { childPaths[$0] },
+                        stackBottom: growthChild.map { solved.children[$0].layout.localRect.bottom } ?? 0,
+                        viewportHeight: targetRect.height,
+                        measured: max(0, solved.layout.contentSize.y - targetRect.height),
+                        natural: max(0, natural.contentSize.y - natural.localRect.height)
+                    )
+                } else {
+                    maxSY = 0
+                }
                 let oldMax = scrollMaxExtents[path] ?? .zero
                 scrollMaxExtents[path] = Vec2(maxSX, maxSY)
 
@@ -3391,6 +3406,12 @@ public final class Runtime<State> {
             if !selfInstantLayoutOrStyle, layoutAnimSpec == nil, let cm = commitMotion {
                 layoutAnimSpec = LayoutAnim(x: cm.anim, y: cm.anim)
             }
+            // A growth stack follows the presented edge of its pinned viewport as siblings
+            // resize. The viewport must retain its layout spring throughout that transition.
+            if layoutAnimSpec == nil, !selfInstantLayoutOrStyle, !commitKind.lands, !isResizeRelayout,
+               el.layout.stickBottom, el.children.contains(where: { $0.growthSpec != nil }) {
+                layoutAnimSpec = LayoutAnim(spring: nodeStyleSpring ?? MotionTokens.SETTLE)
+            }
             let rowGrowthKey = el.foldGlideSpec != nil ? "fold:\(path)" : "growth:\(path)"
             let hasGrowthSlide = growthRows[rowGrowthKey]?.contentSlide != nil
             // Growth lays out row frames as their heights change. A row already sliding to its
@@ -3529,7 +3550,8 @@ public final class Runtime<State> {
                     parentDirected: nodeDirected,
                     foldHeaderPath: childFoldHeaderPath,
                     foldHeaderLift: childFoldHeaderLift,
-                    growthClosingShiftY: closingChildShiftsY[cIdx]
+                    growthClosingShiftY: closingChildShiftsY[cIdx],
+                    naturalLayout: item.naturalLayout?.children[cIdx]
                 ))
             }
             walkStack.append(contentsOf: childItems.reversed())

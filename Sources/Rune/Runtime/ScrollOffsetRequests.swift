@@ -162,6 +162,89 @@ extension Runtime {
         return moved
     }
 
+    /// The scroll range includes the space closing rows still occupy. The natural layout supplies
+    /// the destination even while growing rows are constrained to their drawn height.
+    internal func growthScrollMaximum(
+        path: String, stackPath: String?, stackBottom: Float, viewportHeight: Float,
+        measured: Float, natural: Float
+    ) -> Float {
+        guard let stackPath, let stack = growthStacks[stackPath] else {
+            if slice2State.scrollModes[path]?.hand.laid != nil {
+                updateScrollMode(forPath: path, event: .laid(nil))
+            }
+            return measured
+        }
+        var extra: Float = 0
+        for key in stack.closing.keys {
+            extra += max(0, growthRows[key]?.track.h ?? 0) + stack.gap
+        }
+        if !stack.closing.isEmpty && stack.closing.count == stack.order.count {
+            extra -= stack.gap
+        }
+        let maximum = max(measured, stackBottom + extra - viewportHeight)
+        let moving = !stack.closing.isEmpty || abs(measured - natural) > 0.01
+        let laid = moving ? Double(natural) : nil
+        if slice2State.scrollModes[path]?.hand.laid != laid {
+            updateScrollMode(forPath: path, event: .laid(laid))
+        }
+        return maximum
+    }
+
+    /// A reader above a shrinking list glides to its new layout end while its rows close.
+    /// A hand, a keep, an explicit glide, or rows growing back past the reader take it over.
+    internal func followShrinkingScrollEnds(at now: Double) {
+        for (path, previous) in slice2State.scrollModes {
+            guard let offset = scrollOffsets[path], let extent = scrollMaxExtents[path],
+                  nodeByPath[path] != nil else { continue }
+            let laid = previous.hand.laid
+            let oldEnd: Double?
+            if case .glide(_, .shrunkEnd(let end), _) = previous {
+                oldEnd = end
+            } else {
+                oldEnd = nil
+            }
+            guard laid != nil || oldEnd != nil || previous.hand.direct || previous.hand.shrinkCut else { continue }
+            var mode = previous
+            ScrollMode.step(&mode, .growth(moving: laid != nil))
+            let held = reducedMotion || mode.hand.shrinkCut || scrollRequestsState.owns(path)
+                || isTouchOwning(path: path, horizontal: false)
+            let nid = NodeId.hash("scroll:" + path)
+            let target = scrollStore.target(nid, Props.SCROLL) ?? offset
+            let velocity = scrollStore.velocity(nid, Props.SCROLL) ?? Vec2.zero
+            if let oldEnd {
+                if !scrollGlidingPaths.contains(path) || target.y != Float(oldEnd) {
+                    // An explicit offset or a wheel has already replaced the shrink track.
+                    mode = mode.toRest()
+                } else if held || (laid.map { Float($0) >= offset.y } ?? true) {
+                    scrollStore.setTime(now)
+                    scrollStore.animateWithVelocity(nid, Props.SCROLL, to: Vec2(target.x, offset.y),
+                        velocity: Vec2(.nan, 0), anim: .instant)
+                    if target.x == offset.x && abs(velocity.x) < 0.01 {
+                        scrollGlidingPaths.remove(path)
+                    }
+                    mode = mode.toRest()
+                } else if let laid, laid != oldEnd {
+                    scrollStore.setTime(now)
+                    scrollStore.animateWithVelocity(nid, Props.SCROLL, to: Vec2(target.x, Float(laid)),
+                        velocity: Vec2(.nan, velocity.y), anim: .spring(MotionTokens.GLIDE))
+                    mode = mode.toGlide(velocity.y, to: .shrunkEnd(laid))
+                }
+            } else if let laid, !held, !wasPinnedToBottom.contains(path), !scrollGlidingPaths.contains(path),
+                      offset.y <= extent.y, Double(offset.y) - laid > 0.5 {
+                scrollStore.setTime(now)
+                if !scrollStore.has(nid, Props.SCROLL) {
+                    scrollStore.snap(nid, Props.SCROLL, to: offset)
+                }
+                scrollStore.animateWithVelocity(nid, Props.SCROLL, to: Vec2(target.x, Float(laid)),
+                    velocity: Vec2(.nan, 0), anim: .spring(MotionTokens.GLIDE))
+                scrollGlidingPaths.insert(path)
+                mode = mode.toGlide(0, to: .shrunkEnd(laid))
+            }
+            ScrollMode.step(&mode, .step(xV: velocity.x))
+            slice2State.scrollModes[path] = mode
+        }
+    }
+
     /// Each frame before the scroll track samples: a glide an offset request started heads for
     /// its requested offset clamped to the viewport's live extent (`x.rs:483`
     /// `st.x.aim.min(st.x.max)`, `bottom.rs::glide` `to.min(st.max)`), so content growing
