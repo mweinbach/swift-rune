@@ -16,6 +16,8 @@ typedef struct {
     // Returns seconds until the next frame, zero for next vsync, negative to sleep.
     double (*frame)(void *, int32_t width, int32_t height, float density, int32_t dark);
     void (*presented)(void *);
+    // Query (run == 0) or perform one idle turn. Returns whether more work is owed.
+    int32_t (*text_idle)(void *, int32_t run);
     void (*release_gpu)(void *, int32_t context_current);
     void (*focus)(void *, int32_t active);
     void (*visible)(void *, int32_t active);

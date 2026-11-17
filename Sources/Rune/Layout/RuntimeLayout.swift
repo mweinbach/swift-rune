@@ -92,6 +92,7 @@ final class RetainedLayoutCoordinator {
         var aspectFitIndices: [Int] = []
         var hasAnchoredFit = false
         var nonSecretLeaves: [TextLeafFallback] = []
+        var overflowLeaves: [(index: Int, id: RuneMotion.NodeId, text: ElResolvedText)] = []
         let fEpoch = textSystem.currentFontEpoch
         let langTag = textSystem.language
 
@@ -219,6 +220,10 @@ final class RetainedLayoutCoordinator {
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
                 let keep: TextKeep = resolved.isSecure ? .secret : .cached
                 let isClampedOrEllipsis = resolved.style.maxLines > 0 || resolved.style.wrap == .ellipsis
+                if textLayouts != nil, !resolved.isSecure, resolved.advanceRun == nil,
+                   !resolved.displayedText.isEmpty, resolved.truncateFade || isClampedOrEllipsis {
+                    overflowLeaves.append((flatIndex, nodeId, resolved))
+                }
                 if !resolved.isSecure, !resolved.displayedText.isEmpty, !resolved.truncateFade, resolved.advanceRun == nil, !isClampedOrEllipsis, textLayouts != nil {
                     let hasSpans = (resolved.spans?.isEmpty == false)
                     let sKey = TextShapeKey(
@@ -725,30 +730,41 @@ final class RetainedLayoutCoordinator {
         }
 
         if let collector = textLayouts {
+            for leaf in overflowLeaves {
+                let bounds = store.layout(flat[leaf.index].slot)
+                let width = max(0, bounds.contentBoxSize().width - bounds.scrollbarSize.width)
+                if let box = textSystem.preparedOverflowLayout(
+                    leaf.text, width: TextBoxGeometry.wrapWidth(width, scale: scale), scale: scale,
+                    create: textSystem.isPreparingLayouts
+                ) {
+                    collector.map[leaf.id] = TextLayoutRecord(box: box, isInput: false)
+                }
+            }
             for leaf in nonSecretLeaves where collector.map[leaf.nodeId] == nil {
+                let bounds = store.layout(flat[leaf.index].slot)
+                let contentWidth = max(0, bounds.contentBoxSize().width - bounds.scrollbarSize.width)
+                let wrapWidth = leaf.style.wrap == .noWrap ? nil : TextBoxGeometry.wrapWidth(contentWidth, scale: scale)
                 if let request = leaf.paragraphs {
-                    let w: Float? = max(0, store.layout(flat[leaf.index].slot).size.width)
                     let box = textSystem.layoutInput(
                         text: leaf.text,
                         spans: leaf.spans,
                         pills: leaf.pills,
                         style: leaf.style,
-                        maxWidth: w,
+                        maxWidth: wrapWidth,
                         pixelScale: scale,
                         emitGlyphs: false,
                         request: request
                     )
                     collector.map[leaf.nodeId] = TextLayoutRecord(box: box, isInput: leaf.isInput)
-                } else if let existing = textSystem.cachedLayoutBox(for: leaf.shapeKey) {
+                } else if let existing = textSystem.cachedLayoutBox(for: leaf.shapeKey, matchingWidth: wrapWidth) {
                     collector.map[leaf.nodeId] = TextLayoutRecord(box: existing, isInput: leaf.isInput)
                 } else {
-                    let w: Float? = leaf.style.wrap == .noWrap ? nil : max(0, store.layout(flat[leaf.index].slot).size.width)
                     let box = textSystem.layoutKeyed(
                         text: leaf.text,
                         spans: leaf.spans,
                         pills: leaf.pills,
                         style: leaf.style,
-                        maxWidth: w,
+                        maxWidth: wrapWidth,
                         pixelScale: scale,
                         emitGlyphs: false,
                         keep: .cached,

@@ -2670,6 +2670,8 @@ public final class TextSystem: @unchecked Sendable {
     #endif
     private var layoutCache: [TextShapeKey: TextLayoutBox] = [:]
     private var layoutCommitSeq: UInt64 = 0
+    private var preparedPass: UInt64 = 0
+    @TaskLocal private static var preparingSystem: TextSystem?
     private var _shapedCount: Int = 0
     private var _rebrokenCount: Int = 0
     private var _typesetterRebrokenCount: Int = 0
@@ -2741,14 +2743,15 @@ public final class TextSystem: @unchecked Sendable {
             }
             for k in evictedKeys {
                 layoutCache.removeValue(forKey: k)
-                preparedShapeCache.removeValue(forKey: k)
             }
         }
+        evictedKeys += evictPrepared(over: 0)
+        let orphaned = dropOrphanShapes(afterRemoving: evictedKeys)
         // Elisions run on their own per-commit epoch (`beginElisionCommit`), bumped as each commit begins.
         let e = elisionEpoch
         elisionCache = elisionCache.filter { !Self.isStale(used: $0.value.epoch, lastCommit: e) }
         lock.unlock()
-        for k in evictedKeys {
+        for k in orphaned {
             glyphCache.forget(shapeKey: k)
         }
         paragraphState.rest()
@@ -2839,10 +2842,182 @@ public final class TextSystem: @unchecked Sendable {
         lock.withLock { layoutCache[shapeKey] }
     }
 
+    internal func layoutKeys() -> Set<TextShapeKey> {
+        lock.withLock { Set(layoutCache.keys) }
+    }
+
+    /// A prepared advance-in-run leaf keeps its whole unwrapped layout and the native
+    /// cluster advances together. Evicting that layout also releases the cell data.
+    internal func preparedRunCells(_ run: TextRun, style: TextStyle, scale: Float) -> TextRunCellLayout? {
+        let preparing = isPreparingLayouts
+        guard preparing || lock.withLock({ preparedPass != 0 }) else { return nil }
+        let key = TextShapeKey(authText: run.text, spans: nil, pills: [], style: style, pixelScale: scale,
+                               fontEpoch: currentFontEpoch, languageTag: language,
+                               maxWidth: nil, defaultSmoothing: smoothing)
+        let cached = cachedLayoutBox(for: key, matchingWidth: nil)
+        if let cells = lock.withLock({ cached?.preparedRunCells }) { return cells }
+        guard preparing else { return nil }
+        let box = cached ?? layoutKeyed(text: run.text, style: style, maxWidth: nil, pixelScale: scale,
+                                        emitGlyphs: false)
+        let cells = TextRunCellLayout(text: run.text, textSystem: self, style: style, pixelScale: scale)
+        lock.withLock { box.preparedRunCells = cells }
+        return cells
+    }
+
+    internal func prepareLayouts(_ measure: () -> Void) -> Int {
+        let before = layoutKeys()
+        Self.$preparingSystem.withValue(self, operation: measure)
+        return keepPrepared(since: before)
+    }
+
+    internal var isPreparingLayouts: Bool { Self.preparingSystem === self }
+
+    /// Materialize only the final node width. Taffy's trial widths can read a matching
+    /// break, but never retain their own overflow decisions or elision-search probes.
+    internal func preparedOverflowLayout(
+        _ leaf: ElResolvedText, width: Float?, scale: Float, create: Bool = false
+    ) -> TextLayoutBox? {
+        guard !leaf.isSecure, leaf.advanceRun == nil, !leaf.displayedText.isEmpty,
+              leaf.truncateFade || Self.needsElision(leaf.style, maxWidth: width) else { return nil }
+        let layoutWidth = leaf.truncateFade ? nil : width
+        var style = leaf.style
+        if leaf.truncateFade {
+            style.wrap = .noWrap
+            style.maxLines = 0
+        }
+        let key = TextShapeKey(authText: leaf.displayedText, spans: leaf.spans, pills: leaf.pills,
+                               style: style, pixelScale: max(scale, 1), fontEpoch: currentFontEpoch,
+                               languageTag: language, maxWidth: layoutWidth, pretty: false,
+                               defaultSmoothing: smoothing)
+        if let hit = cachedLayoutBox(for: key, matchingWidth: layoutWidth) { return hit }
+        guard create else { return nil }
+        if leaf.truncateFade {
+            return overflowContent(leaf, cut: nil, width: nil, scale: scale, glyphs: false)
+        }
+        let decision = shapeImpl(text: leaf.displayedText, spans: leaf.spans, pills: leaf.pills,
+                                 style: leaf.style, maxWidth: width, pixelScale: scale,
+                                 emitGlyphs: false, bypassCache: true)
+        // The cut is selected without retaining trial strings. Cache the typeset content
+        // of this exact cut for the first glyph-producing pass.
+        _ = overflowContent(leaf, cut: decision.elided, width: width, scale: scale, glyphs: false)
+        let box = TextLayoutBox(shapeKey: key, authText: leaf.displayedText, spans: leaf.spans,
+                                pills: leaf.pills, style: leaf.style, pixelScale: scale,
+                                maxWidth: width, shaped: decision, hasGlyphs: false, prepared: nil)
+        lock.withLock {
+            let storage = layoutStorageKey(for: key, width: width)
+            box.lastUsedCommit = layoutCommitSeq
+            layoutCache[storage] = box
+        }
+        return box
+    }
+
+    private func overflowContent(
+        _ leaf: ElResolvedText, cut: TextElision?, width: Float?, scale: Float,
+        glyphs: Bool, glide: Vec2 = .zero
+    ) -> TextLayoutBox {
+        var style = leaf.style
+        let clamps = style.maxLines > 0 && !leaf.truncateFade
+        style.maxLines = 0
+        if !clamps { style.wrap = .noWrap }
+        else if style.wrap == .noWrap || style.wrap == .ellipsis { style.wrap = .wrap }
+        let drawn = cut?.drawnString(from: leaf.displayedText) ?? leaf.displayedText
+        let spans = leaf.spans.map { cut?.mapSpans($0, originalLength: leaf.displayedText.utf8.count, drawn: drawn) ?? $0 }
+        return layoutKeyed(text: drawn, spans: spans, pills: cut?.mapPills(leaf.pills) ?? leaf.pills,
+                           style: style, maxWidth: clamps ? width : nil, pixelScale: scale,
+                           emitGlyphs: glyphs, glidePx: glide)
+    }
+
+    internal func drawPreparedOverflow(_ leaf: ElResolvedText, box: TextLayoutBox, glide: Vec2) -> ShapedText {
+        let cut = box.shaped.elided
+        var drawn = overflowContent(leaf, cut: cut, width: box.maxWidth, scale: box.pixelScale,
+                                    glyphs: true, glide: glide).shaped
+        if let cut {
+            drawn.elided = cut
+            drawn.wasTruncated = true
+            drawn.drawnText = cut.drawnString(from: leaf.displayedText)
+        }
+        return drawn
+    }
+
+    internal func cachedLayoutBox(for key: TextShapeKey, matchingWidth width: Float?) -> TextLayoutBox? {
+        lock.withLock {
+            if let box = layoutCache[key], Self.widthsMatch(width, box.maxWidth) { return box }
+            return layoutCache[key.prepared(at: width)]
+        }
+    }
+
+    /// Called under the cache lock. Reuse the ordinary slot until an idle pass needs
+    /// a second width. That break gets a slot a mounted view can subsequently find.
+    private func layoutStorageKey(for key: TextShapeKey, width: Float?) -> TextShapeKey {
+        let preparing = isPreparingLayouts
+        guard preparing || preparedPass != 0 else { return key }
+        let ordinary = layoutCache[key]
+        if let ordinary, Self.widthsMatch(width, ordinary.maxWidth) { return key }
+        let alternate = key.prepared(at: width)
+        return (preparing && ordinary != nil) || layoutCache[alternate] != nil ? alternate : key
+    }
+
+    /// Marks layouts first shaped by an idle pass and limits the bytes it leaves unmounted.
+    @discardableResult
+    internal func keepPrepared(since before: Set<TextShapeKey>, budget: Int = 1 << 20) -> Int {
+        lock.lock()
+        preparedPass = max(1, preparedPass &+ 1)
+        let added = Set(layoutCache.keys).subtracting(before)
+        for key in added {
+            layoutCache[key]?.preparedPass = preparedPass
+        }
+        let evicted = dropOrphanShapes(afterRemoving: evictPrepared(over: budget))
+        lock.unlock()
+        for key in evicted { glyphCache.forget(shapeKey: key) }
+        return added.count
+    }
+
+    /// Called under the text lock. A separate key array allows ARC to test the cache's
+    /// reference directly without retaining the boxes while scanning them.
+    private func evictPrepared(over budget: Int) -> [TextShapeKey] {
+        guard preparedPass != 0 else { return [] }
+        var loose: [(key: TextShapeKey, age: UInt64, cost: Int)] = []
+        var total: UInt64 = 0
+        for key in Array(layoutCache.keys) {
+            guard let pass = layoutCache[key]?.preparedPass,
+                  isKnownUniquelyReferenced(&layoutCache[key]) else { continue }
+            let cost = ParagraphState.layoutCost(textBytes: key.authText.utf8.count)
+            loose.append((key, preparedPass &- pass, cost))
+            total += UInt64(cost)
+        }
+        let limit = UInt64(max(0, budget))
+        guard total > limit else { return [] }
+        loose.sort { $0.age == $1.age ? $0.cost > $1.cost : $0.age > $1.age }
+        var evicted: [TextShapeKey] = []
+        for entry in loose {
+            if total <= limit { break }
+            layoutCache.removeValue(forKey: entry.key)
+            evicted.append(entry.key)
+            total -= UInt64(entry.cost)
+        }
+        return evicted
+    }
+
+    /// Breaks of the same shape share the native prepared shape and glyph cache.
+    private func dropOrphanShapes(afterRemoving keys: [TextShapeKey]) -> Set<TextShapeKey> {
+        guard !keys.isEmpty else { return [] }
+        var orphaned = Set(keys.map(\.unpreparedKey))
+        if preparedPass != 0 {
+            for key in layoutCache.keys { orphaned.remove(key.unpreparedKey) }
+        }
+        for key in orphaned { preparedShapeCache.removeValue(forKey: key) }
+        return orphaned
+    }
+
     /// Evicts a superseded layout/shape/glyph entry immediately (`text_layout::supersede`).
     public func supersede(_ key: TextShapeKey) {
         lock.lock()
         layoutCache.removeValue(forKey: key)
+        if preparedPass != 0 {
+            for alternate in layoutCache.keys.filter({ $0.hasPreparedWidth && $0.unpreparedKey == key }) {
+                layoutCache.removeValue(forKey: alternate)
+            }
+        }
         preparedShapeCache.removeValue(forKey: key)
         lock.unlock()
         glyphCache.forget(shapeKey: key)
@@ -2863,7 +3038,10 @@ public final class TextSystem: @unchecked Sendable {
             }
         }
         var totalBytes = 0
-        for (_, b) in layoutCache {
+        for (key, b) in layoutCache {
+            if key.hasPreparedWidth && activeKeys.contains(key.unpreparedKey) {
+                b.lastUsedCommit = nowSeq
+            }
             totalBytes += b.estimatedBytes
         }
         if totalBytes > staleBytes {
@@ -2873,15 +3051,15 @@ public final class TextSystem: @unchecked Sendable {
             for (k, b) in candidates {
                 if totalBytes <= staleBytes { break }
                 layoutCache.removeValue(forKey: k)
-                preparedShapeCache.removeValue(forKey: k)
                 totalBytes = max(0, totalBytes - b.estimatedBytes)
                 evictedKeys.append(k)
             }
         }
+        let orphaned = dropOrphanShapes(afterRemoving: evictedKeys)
         lock.unlock()
         paragraphState.endCommit()
 
-        for k in evictedKeys {
+        for k in orphaned {
             glyphCache.forget(shapeKey: k)
         }
     }
@@ -3374,7 +3552,7 @@ public final class TextSystem: @unchecked Sendable {
             && effectiveStyle.wrap == .wrap
             && effectiveStyle.align != .justified
             && effectiveStyle.maxLines == 0
-        if keep == .secret {
+        if keep == .secret || isPreparingLayouts {
             return shapeForMeasure(
                 text: text,
                 spans: nil,
@@ -3535,9 +3713,11 @@ public final class TextSystem: @unchecked Sendable {
                 )
             }
 
+            var storageKey = shapeKey
             if keep == .cached && glidePx == .zero {
                 lock.lock()
-                if var cachedBox = layoutCache[shapeKey] {
+                storageKey = layoutStorageKey(for: shapeKey, width: effectiveMaxW)
+                if var cachedBox = layoutCache[storageKey] {
                     cachedBox.lastUsedCommit = layoutCommitSeq
                     if Self.widthsMatch(cachedBox.maxWidth, effectiveMaxW) {
                         if !emitGlyphs || cachedBox.hasGlyphs {
@@ -3545,7 +3725,7 @@ public final class TextSystem: @unchecked Sendable {
                             return cachedBox
                         }
                         if let prepared = cachedBox.prepared {
-                            _ = layoutCache.removeValue(forKey: shapeKey)
+                            _ = layoutCache.removeValue(forKey: storageKey)
                             let unique = isKnownUniquelyReferenced(&cachedBox)
                             lock.unlock()
                             let withGlyphs = breakLines(
@@ -3560,14 +3740,14 @@ public final class TextSystem: @unchecked Sendable {
                             outBox.hasGlyphs = true
                             outBox.lastUsedCommit = lock.withLock { layoutCommitSeq }
                             lock.lock()
-                            layoutCache[shapeKey] = outBox
+                            layoutCache[storageKey] = outBox
                             lock.unlock()
                             return outBox
                         }
                         lock.unlock()
                     } else if let prepared = cachedBox.prepared {
                         if countAsRebreak {
-                            _ = layoutCache.removeValue(forKey: shapeKey)
+                            _ = layoutCache.removeValue(forKey: storageKey)
                             let unique = isKnownUniquelyReferenced(&cachedBox)
                             lock.unlock()
                             let reShaped = breakLines(
@@ -3584,7 +3764,7 @@ public final class TextSystem: @unchecked Sendable {
                             lock.lock()
                             _rebrokenCount += 1
                             outBox.lastUsedCommit = layoutCommitSeq
-                            layoutCache[shapeKey] = outBox
+                            layoutCache[storageKey] = outBox
                             lock.unlock()
                             return outBox
                         } else {
@@ -3641,7 +3821,7 @@ public final class TextSystem: @unchecked Sendable {
                 if keep == .cached && glidePx == .zero && countAsRebreak {
                     lock.lock()
                     box.lastUsedCommit = layoutCommitSeq
-                    layoutCache[shapeKey] = box
+                    layoutCache[storageKey] = box
                     lock.unlock()
                 }
                 return box
@@ -3681,7 +3861,7 @@ public final class TextSystem: @unchecked Sendable {
                 preparedShapeCache[shapeKey] = prepared
                 if glidePx == .zero && countAsRebreak {
                     box.lastUsedCommit = layoutCommitSeq
-                    layoutCache[shapeKey] = box
+                    layoutCache[storageKey] = box
                 }
             }
             lock.unlock()
@@ -3756,9 +3936,11 @@ public final class TextSystem: @unchecked Sendable {
         emitGlyphs: Bool = true,
         glidePx: Vec2 = .zero,
         countRebreak: Bool = true,
-        bypassCache: Bool = false,
+        bypassCache requestedBypass: Bool = false,
         pretty: Bool = false
     ) -> ShapedText {
+        // Scratch-only elision and fade probes must not fill the unbudgeted run caches.
+        let bypassCache = requestedBypass || isPreparingLayouts
         var style = style
         if style.fontSmoothing == .systemDefault { style.fontSmoothing = smoothing }
         let authText = spans.map { $0.map(\.text).joined() } ?? text
@@ -5475,9 +5657,11 @@ public final class TextSystem: @unchecked Sendable {
                 pretty: pretty,
                 defaultSmoothing: smoothing
             )
+            var storageKey = shapeKey
             if keep == .cached, glidePx == .zero, !authText.isEmpty {
                 let cached = lock.withLock { () -> TextLayoutBox? in
-                    guard let box = layoutCache[shapeKey], Self.widthsMatch(box.maxWidth, effectiveMaxW),
+                    storageKey = layoutStorageKey(for: shapeKey, width: effectiveMaxW)
+                    guard let box = layoutCache[storageKey], Self.widthsMatch(box.maxWidth, effectiveMaxW),
                           !emitGlyphs || box.hasGlyphs else { return nil }
                     box.lastUsedCommit = layoutCommitSeq
                     return box
@@ -5498,7 +5682,7 @@ public final class TextSystem: @unchecked Sendable {
                 // own layout, native fonts or masks in the shared cache.
                 guard glidePx == .zero && countAsRebreak && !authText.isEmpty else { return box }
                 lock.withLock {
-                    let priorLayout = layoutCache[shapeKey]
+                    let priorLayout = layoutCache[storageKey]
                     #if canImport(CRuneDesktopText) && !canImport(CoreText)
                     if let native {
                         preparedShapeCache[shapeKey] = native
@@ -5509,7 +5693,8 @@ public final class TextSystem: @unchecked Sendable {
                     #endif
                     if priorLayout == nil { _shapedCount += 1 }
                     box.lastUsedCommit = layoutCommitSeq
-                    layoutCache[shapeKey] = box
+                    box.preparedPass = priorLayout?.preparedPass
+                    layoutCache[storageKey] = box
                 }
             }
             return box

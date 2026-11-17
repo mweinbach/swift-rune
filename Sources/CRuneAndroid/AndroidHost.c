@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,7 +35,7 @@ typedef struct {
     EGLDisplay display;
     EGLContext context;
     EGLSurface surface;
-    int wake_fd, timer_fd, resumed, scheduled;
+    int wake_fd, timer_fd, idle_fd, resumed, scheduled, frame_requested;
     int32_t last_mouse_buttons;
     int presented;
 } Host;
@@ -167,6 +168,16 @@ failed:
 }
 
 static void schedule_frame(Host *h);
+static void post_vsync(Host *h);
+
+static int can_prepare_text(Host *h) {
+    return h->state && h->presented && h->resumed && !h->frame_requested && h->surface != EGL_NO_SURFACE;
+}
+
+static void schedule_text_idle(Host *h) {
+    if (can_prepare_text(h) && h->callbacks.text_idle && h->callbacks.text_idle(h->state, 0))
+        rune_android_wake(h->idle_fd);
+}
 
 // CoreFoundation uses this libdispatch descriptor to drain DispatchQueue.main.
 // Android owns the main loop, so register the same descriptor with its ALooper.
@@ -201,6 +212,7 @@ static void attach_main_queue(ALooper *looper) {
 static void draw(Host *h) {
     if (!h->state || !h->resumed || !h->window || h->surface == EGL_NO_SURFACE)
         return;
+    h->frame_requested = 0;
     if (!eglMakeCurrent(h->display, h->surface, h->surface, h->context)) {
         EGLint error = eglGetError();
         __android_log_print(ANDROID_LOG_ERROR, "SwiftRune", "Could not bind EGL context (0x%x)", error);
@@ -243,7 +255,8 @@ static void draw(Host *h) {
     }
     timerfd_settime(h->timer_fd, 0, &timer, NULL);
     if (delay == 0)
-        schedule_frame(h);
+        post_vsync(h);
+    schedule_text_idle(h);
 }
 
 static void on_frame(long time_ns, void *data) {
@@ -259,7 +272,7 @@ static void on_frame(long time_ns, void *data) {
     draw(h);
 }
 
-static void schedule_frame(Host *h) {
+static void post_vsync(Host *h) {
     if (h->scheduled || !h->resumed || h->surface == EGL_NO_SURFACE)
         return;
     h->scheduled = 1;
@@ -270,6 +283,36 @@ static void schedule_frame(Host *h) {
         AChoreographer_postFrameCallback(h->choreographer, on_frame, h);
 #pragma clang diagnostic pop
     }
+}
+
+static void schedule_frame(Host *h) {
+    h->frame_requested = 1;
+    post_vsync(h);
+}
+
+// Run on a separate looper turn after the swap. A ready input queue, frame timer,
+// or wake descriptor can precede its callback in this same looper dispatch.
+static int on_text_idle(int fd, int events, void *data) {
+    if (!(events & ALOOPER_EVENT_INPUT))
+        return 0;
+    uint64_t count;
+    ssize_t size;
+    do {
+        size = read(fd, &count, sizeof(count));
+    } while (size < 0 && errno == EINTR);
+    if (size != sizeof(count))
+        return 1;
+    Host *h = data;
+    if (!can_prepare_text(h) || (h->queue && AInputQueue_hasEvents(h->queue) > 0))
+        return 1;
+    struct pollfd frames[] = {{h->wake_fd, POLLIN, 0}, {h->timer_fd, POLLIN, 0}};
+    int ready;
+    do {
+        ready = poll(frames, 2, 0);
+    } while (ready < 0 && errno == EINTR);
+    if (ready == 0 && h->callbacks.text_idle(h->state, 1))
+        rune_android_wake(fd);
+    return 1;
 }
 
 static int on_wake(int fd, int events, void *data) {
@@ -390,6 +433,7 @@ static int on_input(int fd, int events, void *data) {
         if (handled)
             schedule_frame(h);
     }
+    schedule_text_idle(h);
     return 1;
 }
 
@@ -457,8 +501,10 @@ static void destroy(ANativeActivity *a) {
     release_surface(h);
     ALooper_removeFd(h->looper, h->wake_fd);
     ALooper_removeFd(h->looper, h->timer_fd);
+    ALooper_removeFd(h->looper, h->idle_fd);
     close(h->wake_fd);
     close(h->timer_fd);
+    close(h->idle_fd);
     AConfiguration_delete(h->configuration);
     h->callbacks.destroy(h->state);
     h->state = NULL;
@@ -483,10 +529,12 @@ int32_t rune_android_attach(void *raw, void *state, RuneAndroidCallbacks callbac
     h->configuration = AConfiguration_new();
     h->wake_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     h->timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+    h->idle_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     int writer = h->wake_fd >= 0 ? fcntl(h->wake_fd, F_DUPFD_CLOEXEC, 0) : -1;
-    if (!h->choreographer || !h->configuration || h->wake_fd < 0 || h->timer_fd < 0 || writer < 0 ||
+    if (!h->choreographer || !h->configuration || h->wake_fd < 0 || h->timer_fd < 0 || h->idle_fd < 0 || writer < 0 ||
         ALooper_addFd(h->looper, h->wake_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_wake, h) < 0 ||
-        ALooper_addFd(h->looper, h->timer_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_wake, h) < 0) {
+        ALooper_addFd(h->looper, h->timer_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_wake, h) < 0 ||
+        ALooper_addFd(h->looper, h->idle_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_text_idle, h) < 0) {
         if (h->configuration)
             AConfiguration_delete(h->configuration);
         if (h->wake_fd >= 0) {
@@ -496,6 +544,10 @@ int32_t rune_android_attach(void *raw, void *state, RuneAndroidCallbacks callbac
         if (h->timer_fd >= 0) {
             ALooper_removeFd(h->looper, h->timer_fd);
             close(h->timer_fd);
+        }
+        if (h->idle_fd >= 0) {
+            ALooper_removeFd(h->looper, h->idle_fd);
+            close(h->idle_fd);
         }
         if (writer >= 0)
             close(writer);

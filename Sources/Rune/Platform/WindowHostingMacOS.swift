@@ -674,6 +674,7 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard !entry.secondary else { return }
         view.stopTimer()
+        view.cancelPreparedText()
         view.cancelActiveModals()
         restTimer?.invalidate()
         restTimer = nil
@@ -730,6 +731,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     private let respectSystemAppearance: Bool
     private var lastFrameTime: Double = 0
     private lazy var displayLinkDriver = MacOSDisplayLinkDriver { [weak self] in self?.requestRender() }
+    private var textIdleObserver: AppleTextIdleObserver?
     private var materialHost: RuneMaterialHost?
     private var trackingAreaRef: NSTrackingArea?
     private var didSignalReady = false
@@ -949,12 +951,13 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             NSApplication.shared.terminate(nil)
             return
         }
-        if let drawable = metalLayer.nextDrawable() {
-            let synced = metalLayer.presentsWithTransaction && materialMode != .unsynced
-            entry.present(renderFrame, drawable: drawable, renderer: renderer, runtimeObj: runtime,
+        let synced = metalLayer.presentsWithTransaction && materialMode != .unsynced
+        if let drawable = metalLayer.nextDrawable(),
+           entry.present(renderFrame, drawable: drawable, renderer: renderer, runtimeObj: runtime,
                           dt: dt, started: started, updateMs: updateMs, synchronized: synced,
-                          committed: entry.viewCommitCount(runtimeObj: runtime) != commitsBefore)
+                          committed: entry.viewCommitCount(runtimeObj: runtime) != commitsBefore) {
             drawableCounter &+= 1
+            if textIdleObserver == nil { textIdleObserver = entry.makeTextIdleObserver(runtimeObj: runtime) }
             shadowResample.presented(drawableCounter)
             slot?.stepRest(.drew(now: ProcessInfo.processInfo.systemUptime, lowMemory: false))
             if shadowResample.turn(onScreen: drawableCounter), entry.options.transparent, let win = window, win.hasShadow {
@@ -1036,6 +1039,11 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         guard !didRunOnReady else { return }
         didRunOnReady = true
         entry.fireOnReady()
+    }
+
+    func cancelPreparedText() {
+        textIdleObserver = nil
+        entry.cancelPreparedText(runtimeObj: runtime)
     }
 
     /// A `Tx.setWindowFrame` the runtime holds goes to the window (`window/frame.rs`).
@@ -1224,6 +1232,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             metalLayer.isOpaque = window.isOpaque
             _ = fnKeyMonitor.start(on: window)
         } else {
+            textIdleObserver = nil
             stopTimer()
             fnKeyMonitor.stop()
         }
@@ -1697,6 +1706,7 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
     public func applicationWillTerminate(_ notification: Notification) {
         for slot in slots {
             slot.view.stopTimer()
+            slot.view.cancelPreparedText()
             slot.restTimer?.invalidate()
             slot.restTimer = nil
         }

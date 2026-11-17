@@ -231,6 +231,8 @@ internal struct TxPickRead {
 
 /// Transaction handle passed into every event handler (`rune::Tx`).
 public struct Tx {
+    internal var preparationWindowID: UInt64?
+    internal weak var unboundPreparation: AnyObject?
     public internal(set) var liveOnlyRequested: Bool = false
     public internal(set) var commitKind: TxCommit = .animate
     public internal(set) var motionSource: MotionSource? = nil

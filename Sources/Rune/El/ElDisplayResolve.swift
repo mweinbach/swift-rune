@@ -38,7 +38,12 @@ internal struct ElResolvedText {
     var pretty: Bool = false
 
     func measure(using textSystem: TextSystem, maxWidth: Float?, pixelScale: Float) -> Vec2 {
-        if let (run, offset) = advanceRun {
+        if let box = textSystem.preparedOverflowLayout(self, width: maxWidth, scale: pixelScale) {
+            var size = box.shaped.size
+            if truncateFade, let maxWidth { size.x = min(size.x, max(0, maxWidth)) }
+            return size
+        }
+        if let (run, offset) = advanceRun, !(isSecure && textSystem.isPreparingLayouts) {
             return textSystem.measureRunSlice(run, at: offset, style: style, pixelScale: pixelScale)
                 ?? Vec2(0, TextSystem.specLineHeight(lineCount: 1, lineHeightPt: style.resolvedLineHeight, scale: pixelScale, exact: style.exactLines))
         }
@@ -93,7 +98,11 @@ internal struct ElResolvedText {
         glidePx: Vec2 = .zero,
         bypassCache: Bool? = nil
     ) -> ShapedText {
-        if let (run, offset) = advanceRun {
+        if bypassCache != true,
+           let box = textSystem.preparedOverflowLayout(self, width: maxWidth, scale: pixelScale) {
+            return emitGlyphs ? textSystem.drawPreparedOverflow(self, box: box, glide: glidePx) : box.shaped
+        }
+        if let (run, offset) = advanceRun, !(isSecure && textSystem.isPreparingLayouts) {
             if let sliced = textSystem.shapeRunSlice(run, at: offset, style: style, pixelScale: pixelScale, emitGlyphs: emitGlyphs) {
                 return sliced
             }

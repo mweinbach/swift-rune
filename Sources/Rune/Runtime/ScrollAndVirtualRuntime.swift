@@ -153,6 +153,7 @@ extension Runtime {
         isRepeat: Bool = false
     ) -> Tx {
         var tx = Tx()
+        tx.preparationWindowID = runtimeId
         tx.clock = now
         if let sel = currentTextSelection() {
             tx.setCurrentTextSelection(sel)

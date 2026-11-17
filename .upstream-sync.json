@@ -1,9 +1,9 @@
 {
   "swiftExecutables" : 98,
   "swiftTargets" : 19,
-  "syncedAt" : "2026-11-17T15:32:27Z",
-  "syncedCommit" : "18caec763398cac2974648c6fb95dc498a34937f",
-  "syncedCommitDate" : "2026-11-17T08:28:40-06:00",
-  "syncedCommitSubject" : "Step growth by each frame's own time (#1067)",
+  "syncedAt" : "2026-11-17T16:58:09Z",
+  "syncedCommit" : "842c28c2ca5dd1506c1e4a67052db61800aed721",
+  "syncedCommitDate" : "2026-11-17T10:12:56-06:00",
+  "syncedCommitSubject" : "Text: lay a view's text out ahead into the layout cache without mounting it (#1104)",
   "upstreamRepo" : "https:\/\/github.com\/anomalyco\/rune"
 }

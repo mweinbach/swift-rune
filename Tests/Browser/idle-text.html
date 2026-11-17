@@ -1,0 +1,69 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Rune browser idle text preparation</title>
+<canvas></canvas>
+<pre id="result">Running…</pre>
+<script type="module">
+import { mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+
+const result = document.querySelector('#result');
+const canvas = document.querySelector('canvas');
+function expect(condition, message) { if (!condition) throw Error(message); }
+let nextFrame, idle, draws = 0, preparations = 0, frameReady = false, dirty = true, owed = true;
+window.requestAnimationFrame = callback => { nextFrame = callback; return 1; };
+window.cancelAnimationFrame = () => { nextFrame = null; };
+window.requestIdleCallback = callback => {
+    expect(!idle, 'Duplicate idle callback');
+    idle = callback;
+    return 1;
+};
+window.cancelIdleCallback = () => { idle = null; };
+function runIdle() {
+    const callback = idle;
+    idle = null;
+    callback();
+}
+const memory = new WebAssembly.Memory({ initial: 1 });
+let browser;
+try {
+    browser = mountRuneBrowser(canvas, { exports: {
+        memory, rune_web_enable() {}, __main_void: () => 0, rune_web_field: () => 0, rune_web_buffer: () => 0,
+        rune_web_event() { dirty = true; return 1; },
+        rune_web_frame() {
+            if (!frameReady || !dirty) return 0;
+            draws++;
+            dirty = false;
+            new Uint32Array(memory.buffer, 0, 3).set([1, 1, 0xffffffff]);
+            return 12;
+        },
+        rune_web_idle_text(perform) {
+            if (dirty || !owed) return 0;
+            if (!perform) return 1;
+            preparations++;
+            owed = false;
+            return 0;
+        }
+    } });
+    expect(!idle && !draws, 'Preparation was scheduled before a successful presentation');
+    frameReady = true;
+    nextFrame();
+    expect(draws === 1 && idle && !preparations, 'Idle work ran inside presentation');
+    canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'k' }));
+    runIdle();
+    expect(!preparations, 'Idle work overtook an input frame');
+    nextFrame();
+    runIdle();
+    nextFrame();
+    expect(preparations === 1 && draws === 2 && !idle, 'Completed preparation drew or scheduled another pass');
+    owed = true;
+    nextFrame();
+    expect(idle && draws === 2, 'A resting window failed to find a new request');
+    browser.dispose();
+    expect(!idle && !nextFrame, 'An idle callback survived disposal');
+    result.textContent = 'PASS';
+} catch (error) {
+    browser?.dispose();
+    result.textContent = 'FAIL ' + error.message;
+    throw error;
+}
+</script>

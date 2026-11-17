@@ -355,7 +355,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
     var running: Bool { rune_win_running(window) > 0 }
     private var dpi = Win32DpiScale.baseDPI
     private var keyboard = Win32Keyboard()
-    private var firstFrame = true
+    private(set) var firstFrame = true
     fileprivate var bootPhase = -1.0
     private var files: [DroppedFile] = []
     private var dropTarget: OpaquePointer?
@@ -406,6 +406,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
     func finish() {
         guard !finished else { return }
         finished = true
+        defer { runtime.cancelPreparedText() }
         closesWindowGroup = nil
         popups.close()
         rune_win_drag_cancel(rune_win_hwnd(window))

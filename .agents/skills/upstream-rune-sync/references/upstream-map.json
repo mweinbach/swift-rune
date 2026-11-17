@@ -758,7 +758,9 @@
           "swift": [
             "Sources/Rune/El.swift",
             "Sources/Rune/El/TxCommit.swift",
-            "Sources/Rune/Runtime/LiveTail.swift"
+            "Sources/Rune/Runtime/LiveTail.swift",
+            "Sources/Rune/Runtime/PrepareText.swift",
+            "Tests/RuneTests/PrepareTextTests.swift"
           ],
           "status": "partial"
         },
@@ -3314,7 +3316,9 @@
         {
           "upstream": "src/runtime/commit.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/PrepareText.swift",
+            "Tests/RuneTests/PrepareTextTests.swift"
           ],
           "status": "partial"
         },
@@ -3391,6 +3395,19 @@
             "Tests/RuneTests/ParagraphsFindParityTests.swift"
           ],
           "status": "partial"
+        },
+        {
+          "upstream": "src/runtime/commit/prepare.rs",
+          "swift": [
+            "Sources/Rune/Runtime/PrepareText.swift",
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Text.swift",
+            "Tests/RuneTests/PrepareTextTests.swift",
+            "Tests/RuneTests/PreparedTextCacheTests.swift",
+            "Sources/Rune/Layout/RuntimeLayout.swift"
+          ],
+          "status": "ported",
+          "note": "An idle turn measures an unmounted view with scratch state, the window's text system, layout reads, and the requested or current viewport. Swift binds same-state requests to their originating window. For a different state type, the first matching window consumes the request while its origin is alive. Closing the origin releases its escaping view. Standalone transactions use upstream's state-type routing."
         },
         {
           "upstream": "src/runtime/commit/remount.rs",
@@ -5461,9 +5478,16 @@
         {
           "upstream": "src/text/layout_cache.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text.swift",
+            "Sources/Rune/Text/TextLayoutAndGlyphCache.swift",
+            "Sources/Rune/Text/Paragraphs.swift",
+            "Tests/RuneTests/PreparedTextCacheTests.swift",
+            "Tests/RuneTests/PrepareTextTests.swift",
+            "Sources/Rune/Text/TextRun.swift",
+            "Sources/Rune/El/ElDisplayResolve.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "Idle preparation accounts for unheld layouts, evicts older preparation passes beyond a 1 MiB budget and releases loose prepared layouts at rest."
         },
         {
           "upstream": "src/text/line_break.rs",
@@ -6416,9 +6440,20 @@
             "Sources/Rune/Win32Platform.swift",
             "Sources/Rune/LinuxPlatform.swift",
             "Sources/Rune/Platform/DesktopWindowGroup.swift",
-            "Tests/RuneTests/DesktopWindowGroupTests.swift"
+            "Tests/RuneTests/DesktopWindowGroupTests.swift",
+            "Sources/Rune/Platform/AppleTextIdleObserver.swift",
+            "Sources/Rune/IOSApp.swift",
+            "Sources/Rune/AndroidPlatform.swift",
+            "Sources/CRuneAndroid/AndroidHost.c",
+            "Sources/Rune/WebBrowserSession.swift",
+            "Sources/Rune/Resources/Web/rune-web.mjs",
+            "Tests/Browser/idle-text.html",
+            "Tests/RuneTests/MacOSHostFrameTests.swift",
+            "Tests/RuneTests/WebIdleTextTests.swift",
+            "Sources/Rune/Render/MetalCompositor.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "The hosts service a text preparation request in an idle turn after the first presentation, prioritizing pending inputs and frames."
         },
         {
           "upstream": "src/window/app_events.rs",
@@ -7048,10 +7083,13 @@
           "upstream": "src/window/post_frame.rs",
           "swift": [
             "Sources/Rune/Win32Platform.swift",
-            "Tests/RuneTests/Win32HostTests.swift"
+            "Tests/RuneTests/Win32HostTests.swift",
+            "Sources/Rune/Platform/DesktopWindowGroup.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Tests/RuneTests/PrepareTextTests.swift"
           ],
           "status": "partial",
-          "note": "A successful first SwapBuffers signals readiness, registers the OLE drop target and runs onReady. The upstream input-aware queue for deferring individual initialization steps remains open."
+          "note": "The first SwapBuffers signals readiness, attaches the drop target and runs onReady. The Windows loop then schedules text preparation in an idle turn after pending messages and frames. The separate queue for the remaining upstream startup chores remains open."
         },
         {
           "upstream": "src/window/slot.rs",
@@ -7062,7 +7100,7 @@
       ],
       "note": "Core native runtime, layout, input, rendering and platform hosts. Module mappings track file-level coverage; symbol counts below are from the earlier reports.",
       "parity": {
-        "files": "175 ported, 509 partial, 205 missing, 35 n/a",
+        "files": "175 ported, 510 partial, 205 missing, 35 n/a",
         "pubSymbols": "2385/4714 (historical inventory in the referenced reports)",
         "report": "core.md, core-text.md, core-render.md, core-platform.md"
       },

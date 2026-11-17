@@ -61,6 +61,9 @@ typedef struct {
 void rune_win_configure(RuneWinWindow *window, RuneWinOptions options);
 void rune_win_start(RuneWinWindow *window, void *context, RuneWinDispatch dispatch, int32_t inactive, int32_t visible);
 int32_t rune_win_pump(void);
+// Dispatch a queued message first. Return RUNE_WIN_PUMP_IDLE instead of blocking when idle work is owed.
+#define RUNE_WIN_PUMP_IDLE 2
+int32_t rune_win_pump_or_idle(int32_t idle_work_owed);
 void rune_win_request_close(RuneWinWindow *window);
 void rune_win_topmost(RuneWinWindow *window, int32_t on);
 void rune_win_center(RuneWinWindow *window);

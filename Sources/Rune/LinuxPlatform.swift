@@ -561,6 +561,7 @@ final class LinuxWindowSession<State> {
     func finish() {
         guard !finished else { return }
         finished = true
+        defer { runtime.cancelPreparedText() }
         dragSource.close(runtime: runtime, at: now())
         runtime.dispatchQuit(at: now())
         popup.cancelAll(at: now())

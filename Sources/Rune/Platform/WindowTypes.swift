@@ -417,10 +417,12 @@ extension HostedWindowEntry {
 internal protocol NativeHostedWindowEntry: HostedWindowEntry {
     func wakeDeadline(runtimeObj: AnyObject, covered: Bool) -> Double?
     #if os(macOS)
+    @MainActor func makeTextIdleObserver(runtimeObj: AnyObject) -> AppleTextIdleObserver
+    func cancelPreparedText(runtimeObj: AnyObject)
     func renderFrame(runtimeObj: AnyObject, renderer: MetalRenderer, at time: Double, nativeMaterials: Bool) -> RenderFrame
     var compositorAnimating: Bool { get }
     func present(_ frame: RenderFrame, drawable: CAMetalDrawable, renderer: MetalRenderer, runtimeObj: AnyObject,
-                 dt: Float, started: Double, updateMs: Double, synchronized: Bool, committed: Bool)
+                 dt: Float, started: Double, updateMs: Double, synchronized: Bool, committed: Bool) -> Bool
     #endif
 }
 
@@ -519,6 +521,14 @@ final class TypedHostedWindowEntry<State>: NativeHostedWindowEntry {
     }
 
     #if os(macOS)
+    @MainActor func makeTextIdleObserver(runtimeObj: AnyObject) -> AppleTextIdleObserver {
+        AppleTextIdleObserver(runtime: rt(runtimeObj))
+    }
+
+    func cancelPreparedText(runtimeObj: AnyObject) {
+        rt(runtimeObj).cancelPreparedText()
+    }
+
     func renderFrame(runtimeObj: AnyObject, renderer: MetalRenderer, at time: Double, nativeMaterials: Bool) -> RenderFrame {
         let runtime = rt(runtimeObj)
         runtime.nativeMaterials = nativeMaterials
@@ -526,12 +536,16 @@ final class TypedHostedWindowEntry<State>: NativeHostedWindowEntry {
     }
 
     func present(_ frame: RenderFrame, drawable: CAMetalDrawable, renderer: MetalRenderer, runtimeObj: AnyObject,
-                 dt: Float, started: Double, updateMs: Double, synchronized: Bool, committed: Bool) {
+                 dt: Float, started: Double, updateMs: Double, synchronized: Bool, committed: Bool) -> Bool {
         let runtime = rt(runtimeObj)
-        let count = renderer.present(frame: frame, drawable: drawable, compositor: spec.compositor, runtime: runtime,
-                                     dt: dt, updateMilliseconds: updateMs, synchronized: synchronized)
+        guard let count = renderer.present(frame: frame, drawable: drawable, compositor: spec.compositor, runtime: runtime,
+                                           dt: dt, updateMilliseconds: updateMs, synchronized: synchronized) else {
+            reports?.skipped()
+            return false
+        }
         reports?.presented(frame, at: runtime.currentTime, started: started, updateMs: updateMs, drawCount: count,
                            committed: committed, runtime: runtime, compositor: spec.compositor)
+        return true
     }
     #endif
 

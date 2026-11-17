@@ -3,33 +3,35 @@ import Metal
 import QuartzCore
 
 extension MetalRenderer {
-    /// Presents the default UI or the window's compositor, in the same transaction as native material changes.
+    /// Returns the UI draw count after submission, including zero for a compositor drawing its own content.
     func present<State>(frame: RenderFrame, drawable: CAMetalDrawable, compositor: AnyCompositor<State>?,
-                        runtime: Runtime<State>, dt: Float, updateMilliseconds: Double, synchronized: Bool) -> Int {
+                        runtime: Runtime<State>, dt: Float, updateMilliseconds: Double, synchronized: Bool) -> Int? {
         if let error = renderEngine.selectCache(for: frame, viewport: (drawable.texture.width, drawable.texture.height)) {
             RuneStandardIO.error("Could not present Rune frame: \(error)\n")
-            return 0
+            return nil
         }
         if synchronized {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
         }
         defer { if synchronized { CATransaction.commit() } }
-        guard let compositor, let buffer = commandQueue.makeCommandBuffer() else {
+        guard let compositor else {
             if case let .failure(error) = draw(frame: frame, to: drawable, synchronized: synchronized) {
                 RuneStandardIO.error("Could not present Rune frame: \(error)\n")
-                return 0
+                return nil
             }
             return 1
         }
+        guard let buffer = commandQueue.makeCommandBuffer() else { return nil }
         let count: Int
         do {
             count = try encodeCompositor(compositor, frame: frame, into: drawable.texture, commandBuffer: buffer,
                                          runtime: runtime, dt: dt, updateMilliseconds: updateMilliseconds)
         } catch {
             RuneStandardIO.error("Could not present Rune frame: \(error)\n")
-            return 0
+            return nil
         }
+        renderEngine.gpuLoss.attach(to: buffer)
         if synchronized {
             buffer.commit()
             buffer.waitUntilScheduled()
@@ -38,6 +40,7 @@ extension MetalRenderer {
             buffer.present(drawable)
             buffer.commit()
         }
+        GpuEvents.presented()
         return count
     }
 

@@ -19,6 +19,7 @@ protocol DesktopWindowSession: AnyObject {
     var runtime: Runtime<State> { get }
     var shared: AppShared<State> { get }
     var running: Bool { get }
+    var firstFrame: Bool { get }
     var requestedApplicationQuit: Bool { get }
     var failure: (any Error)? { get }
     func start()
@@ -46,6 +47,12 @@ private final class DesktopURLGlue: IncomingURLGlue {
 }
 
 extension DesktopWindowSession {
+    fileprivate var textIdleOwed: Bool { !firstFrame && runtime.textIdleOwed }
+
+    fileprivate func prepareIdleText() {
+        _ = runtime.textIdleTurn()
+    }
+
     fileprivate func listenForURLs(launch: [String]) -> IncomingURLInbox.Listening? {
         guard let hook = runtime.onOpenUrl else { return nil }
         let shared = self.shared
@@ -316,13 +323,20 @@ enum DesktopWindowGroup {
             if !options.accessory && (slots.isEmpty || primaryClosed && !slots.values.contains(where: { !$0.secondary })) {
                 return
             }
+            let idleWindow = slots.values.first { $0.session.textIdleOwed }?.session
             #if os(Linux)
             // Bound each batch so sustained pointer motion cannot starve animation or another window.
-            for _ in 0..<64 {
+            let mayPrepare = idleWindow != nil && wait != 0
+            if mayPrepare { wait = 0 }
+            for index in 0..<64 {
                 var event = RuneLinuxEvent()
                 let result = rune_linux_next_event(wait, &event)
                 guard result >= 0 else { throw DesktopWindowError(String(cString: rune_linux_error())) }
-                if result == 0 { break }
+                if result == 0 {
+                    // A native event may have queued a redraw or state update. Give it the next turn.
+                    if index == 0 && mayPrepare { idleWindow?.prepareIdleText() }
+                    break
+                }
                 defer { rune_linux_free(event.text) }
                 if event.kind == RuneLinuxQuit { return }
                 if let id = nativeSlots[event.windowID], let slot = slots[id] {
@@ -332,9 +346,10 @@ enum DesktopWindowGroup {
                 wait = 0
             }
             #else
-            let result = rune_win_pump()
+            let result = rune_win_pump_or_idle(idleWindow != nil ? 1 : 0)
             if result < 0 { throw DesktopWindowError("GetMessageW failed") }
             if result == 0 { return }
+            if result == RUNE_WIN_PUMP_IDLE, let idleWindow, idleWindow.running { idleWindow.prepareIdleText() }
             #endif
         }
     }

@@ -103,6 +103,8 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
     fileprivate var receiveStats: ((SurfaceStats) -> Void)?
     private var previousFrameTime: Double?
     private var atRest = false
+    private var textIdleObserver: AppleTextIdleObserver?
+    fileprivate var frameRequested = false
     private var editing = false
     private var announcementCount: UInt32 = 0
     private var accessibilityCommit: Int?
@@ -200,7 +202,16 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
         fatalError("init(coder:) is not supported")
     }
 
+    isolated deinit {
+        runtime.cancelPreparedText()
+    }
+
     public override var canBecomeFirstResponder: Bool { true }
+
+    public override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { textIdleObserver = nil }
+    }
 
     public var hasText: Bool {
         guard let path = runtime.focusedPath,
@@ -265,6 +276,7 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
 
     public func renderTick() {
         guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
+        frameRequested = false
         _ = MainQueueDispatcher.shared.drain()
         let t = nowSeconds()
         beforeFrame?(t)
@@ -344,6 +356,12 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
         if announcement.count != announcementCount {
             announcementCount = announcement.count
             UIAccessibility.post(notification: .announcement, argument: announcement.text)
+        }
+        if textIdleObserver == nil {
+            textIdleObserver = AppleTextIdleObserver(runtime: runtime) { [weak self] in
+                guard let self, let window = self.window, !self.frameRequested else { return false }
+                return window.windowScene == nil || window.windowScene?.activationState == .foregroundActive
+            }
         }
         if !didSignalReady {
             didSignalReady = true
@@ -713,6 +731,13 @@ public final class RuneIOSViewController<State>: UIViewController {
         displayLink = nil
     }
 
+    public override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if isMovingFromParent || isBeingDismissed || navigationController?.isBeingDismissed == true {
+            runeView.runtime.cancelPreparedText()
+        }
+    }
+
     private func requestClose() {
         guard runeView.runtime.dispatchClose(at: runeView.nowSeconds()) else { return }
         if let navigationController, navigationController.viewControllers.first !== self {
@@ -768,6 +793,7 @@ public final class RuneIOSViewController<State>: UIViewController {
 
     private func wake() {
         if let scene = observingScene, scene.activationState != .foregroundActive { return }
+        runeView.frameRequested = true
         scheduledWake?.invalidate()
         scheduledWake = nil
         displayLink?.isPaused = false

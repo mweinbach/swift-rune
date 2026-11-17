@@ -29,6 +29,9 @@ final class WebBrowserSession {
     private var gpuTracker: ResidentLayerTracker?
     private let route: (Event, Double) -> Bool
     private let shouldPaint: (Double) -> Bool
+    private let textIdleReady: () -> Bool
+    private let textIdleTurn: () -> Bool
+    let cancelPreparedText: () -> Void
     private let paint: (Double) throws -> Frame
     private let paintGPU: (Double) throws -> RenderFrame
     let uiPasses: () -> Int
@@ -37,6 +40,13 @@ final class WebBrowserSession {
 
     init<State>(_ host: WebAppHost<State>) {
         uiPasses = { host.uiPasses }
+        textIdleReady = {
+            let runtime = host.runtime
+            return runtime.textIdleOwed && !runtime.hasPendingCommit && !runtime.livePending &&
+                MainQueueDispatcher.shared.pendingCount == 0
+        }
+        textIdleTurn = { host.runtime.textIdleTurn() }
+        cancelPreparedText = { host.runtime.cancelPreparedText() }
         let clipboard = WebClipboardSession(host)
         takeClipboard = clipboard.takeRequests
         let accessibility = WebAccessibilityProjection()
@@ -154,6 +164,11 @@ final class WebBrowserSession {
     private let currentField: () -> WebFieldMirror?
 
     func requestPaint() { drawAfterInput = true }
+
+    func idleText(perform: Bool) -> Bool {
+        guard !drawAfterInput, textIdleReady() else { return false }
+        return perform ? textIdleTurn() : true
+    }
 
     func send(_ json: Data, at now: Double) -> Bool {
         guard let event = try? JSONDecoder().decode(Event.self, from: json) else { return false }
@@ -293,6 +308,12 @@ func runeWebFrame(_ time: Double) -> Int {
     }
 }
 
+/// The DOM host queries after presentation and performs one pass at browser idle priority.
+@MainActor @_cdecl("rune_web_idle_text")
+func runeWebIdleText(_ perform: Int32) -> Int32 {
+    RuneWebReactor.session?.idleText(perform: perform != 0) == true ? 1 : 0
+}
+
 /// A nonzero force also reuploads the atlases after WebGL restores a lost context.
 @MainActor @_cdecl("rune_web_scene")
 func runeWebScene(_ time: Double, _ force: Int32) -> Int {
@@ -364,6 +385,7 @@ func runeWebCachedLayers(_ count: Int) {
 
 @MainActor @_cdecl("rune_web_dispose")
 func runeWebDispose() {
+    RuneWebReactor.session?.cancelPreparedText()
     RuneWebReactor.session?.discardGPUCache()
     BrowserImageCodec.reset()
     WebSystemClipboard.shared.mount(false)

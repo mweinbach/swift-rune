@@ -244,6 +244,7 @@ private final class AndroidWake: Sendable {
 private final class AndroidSession {
     let waker = Waker()
     private let drawFrame: (Int32, Int32, Float, Bool) throws -> Double
+    let textIdle: (Bool) -> Bool
     let motion: (AndroidMotionEvent) -> Void
     let key: (Int32, Int32, Int32, Int32, UInt32) -> Bool
     let suspendInput: () -> Void
@@ -261,6 +262,10 @@ private final class AndroidSession {
         let runtime = app.makeRuntime(viewport: app.size, pixelScale: 1, systemDark: appearanceOverride,
                                       reducedMotion: parsed.reducedMotion, waker: waker, sceneName: parsed.sceneName)
         configure(runtime)
+        textIdle = { run in
+            guard !runtime.hasPendingCommit else { return false }
+            return run ? runtime.textIdleTurn() : runtime.textIdleOwed
+        }
         runtime.readSystemContrastSettings()
         let semantics = AndroidSemanticBridge(activity: activity, runtime: runtime)
         let start = ProcessInfo.processInfo.systemUptime
@@ -319,6 +324,7 @@ private final class AndroidSession {
         shutdown = {
             semantics.close()
             runtime.dispatchQuit(at: now())
+            runtime.cancelPreparedText()
             ReadySignal.clear()
         }
         motion = { event in
@@ -434,6 +440,10 @@ public enum AndroidApp {
             return MainActor.assumeIsolated { host.draw(width: w, height: h, scale: scale, dark: dark != 0) }
         }
         callbacks.presented = { _ in ReadySignal.ready() }
+        callbacks.text_idle = { ptr, run in
+            let host = session(ptr)
+            return MainActor.assumeIsolated { host.textIdle(run != 0) ? 1 : 0 }
+        }
         callbacks.release_gpu = { ptr, current in
             let host = session(ptr)
             MainActor.assumeIsolated { host.releaseGPU(current != 0) }

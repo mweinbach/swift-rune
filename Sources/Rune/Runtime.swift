@@ -976,6 +976,7 @@ public final class Runtime<State> {
     public var shortcutRegistry: ShortcutRegistry? = nil
     public internal(set) var imeReset: Bool = false
 
+    internal private(set) var textPreparation: WindowTextPreparation?
     public let runtimeId: UInt64
     public var fitHeight: Bool = false
     public var windowResting: Bool = false
@@ -1463,7 +1464,7 @@ public final class Runtime<State> {
     internal var lastViewMemoEnvHash: UInt64 = MemoScope.currentEnvironmentHash()
     internal var lastViewOnlyMemoIds: Set<String> = []
 
-    public init(
+    public convenience init(
         state: State,
         viewport: Vec2 = Vec2(800, 600),
         pixelScale: Float = 2.0,
@@ -1474,16 +1475,34 @@ public final class Runtime<State> {
         onKey: KeyHandlerFn? = nil,
         view: @escaping ViewFn
     ) {
+        self.init(state: state, viewport: viewport, pixelScale: pixelScale, systemDark: systemDark,
+                  reducedMotion: reducedMotion, textSystem: textSystem, waker: waker, onKey: onKey,
+                  runtimeId: RuntimeIdScope.nextId(), view: view)
+        textPreparation = WindowTextPreparation(id: runtimeId, stateType: State.self)
+        textSystem.initializeWindowFontFamilies()
+        if !MediaPlaybackGate.isEnabled {
+            Recorder.headlessReset()
+            VideoHeadless.reset()
+            HeadlessClock.set(0.0)
+        }
+    }
+
+    /// Creates the layout and scene state without initializing process-wide window services.
+    /// A speculative measurement borrows the window's existing text system and runtime ID.
+    internal init(
+        state: State, viewport: Vec2, pixelScale: Float, systemDark: Bool, reducedMotion: Bool,
+        textSystem: TextSystem, waker: Waker, onKey: KeyHandlerFn?, runtimeId: UInt64,
+        view: @escaping ViewFn
+    ) {
         self.state = state
         self.view = view
         self.globalOnKey = onKey
-        self.runtimeId = RuntimeIdScope.nextId()
+        self.runtimeId = runtimeId
         self.viewport = viewport
         self.pixelScale = max(pixelScale, 0.5)
         self.systemDark = systemDark
         self.reducedMotion = reducedMotion
         self.textSystem = textSystem
-        textSystem.initializeWindowFontFamilies()
         self.waker = waker
         let defaultWaker = waker
         self.liveLane = LiveLane(waker: LiveWake { [weak defaultWaker] in defaultWaker?.wake() })
@@ -1491,11 +1510,6 @@ public final class Runtime<State> {
         self.scrollStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.liveStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.cxSettings = RuntimeShellSettings(viewport: viewport, pixelScale: pixelScale, reducedMotion: reducedMotion)
-        if !MediaPlaybackGate.isEnabled {
-            Recorder.headlessReset()
-            VideoHeadless.reset()
-            HeadlessClock.set(0.0)
-        }
     }
 
     deinit {
@@ -2844,7 +2858,8 @@ public final class Runtime<State> {
     private func makeViewCx(
         focusedCaret: (keyPath: String, rect: [Float])?,
         memoNodes: [FlatNode]? = nil,
-        collector: LayoutReadCollector
+        collector: LayoutReadCollector,
+        layoutSource: Runtime<State>
     ) -> (cx: Cx<State>, envHash: UInt64) {
         var cx = Cx<State>(
             viewport: viewport,
@@ -2888,9 +2903,8 @@ public final class Runtime<State> {
                 }
                 return .zero
             },
-            layoutRectLookup: { [weak self] key in
-                guard let self else { return nil }
-                return self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) })?.targetRect
+            layoutRectLookup: { [weak layoutSource] key in
+                layoutSource?.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) })?.targetRect
             },
             layoutCollector: collector
         )
@@ -2926,11 +2940,13 @@ public final class Runtime<State> {
         focusedCaret: (keyPath: String, rect: [Float])?,
         allowZoomSettle: Bool,
         memoNodes: [FlatNode]?,
-        collector: LayoutReadCollector
+        collector: LayoutReadCollector,
+        preparingFor window: Runtime<State>?
     ) -> (rootEl: El<State>, helpLook: HelpLook?, effectiveReducedMotion: Bool)? {
         viewCallCount += 1
         lastViewReadScroll = false
-        var (cx, envHash) = makeViewCx(focusedCaret: focusedCaret, memoNodes: memoNodes, collector: collector)
+        var (cx, envHash) = makeViewCx(focusedCaret: focusedCaret, memoNodes: memoNodes,
+                                       collector: collector, layoutSource: window ?? self)
         lastViewMemoEnvHash = envHash
         let viewTouchedBox = MemoScope.TouchedIdsBox()
         let rootEl = SystemScrollBarsScope.$current.withValue(cxSettings.scrollBarsState) {
@@ -2956,7 +2972,7 @@ public final class Runtime<State> {
         selectionState.lastCommittedMarkedTexts = cx.envState.markedTexts
         let effReducedMotion = cx.envState.reducedMotionOverride ?? cxSettings.hostReducedMotion
         cxSettings.setTimeScale(cx.envState.timeScale, at: now)
-        if cx.envState.zoom != cxSettings.zoomState.k {
+        if window == nil && cx.envState.zoom != cxSettings.zoomState.k {
             cxSettings.zoomState.k = cx.envState.zoom
             let (zVp, zScale) = cxSettings.zoomState.view()
             // The commit underway applies the view's zoom: no commit, and no cause, is left.
@@ -2985,7 +3001,8 @@ public final class Runtime<State> {
         focusedCaret: (keyPath: String, rect: [Float])?,
         allowZoomSettle: Bool,
         memoNodes: [FlatNode]? = nil,
-        allowRebuildRegionRowReuse: Bool = true
+        allowRebuildRegionRowReuse: Bool = true,
+        preparingFor window: Runtime<State>? = nil
     ) -> MeasurePassResult? {
         let collector = LayoutReadCollector(rects: layoutSeen.rects)
         guard let viewPass = runViewPass(
@@ -2993,7 +3010,8 @@ public final class Runtime<State> {
             focusedCaret: focusedCaret,
             allowZoomSettle: allowZoomSettle,
             memoNodes: memoNodes,
-            collector: collector
+            collector: collector,
+            preparingFor: window
         ) else {
             return nil
         }
@@ -12480,6 +12498,7 @@ public final class Runtime<State> {
         why: UInt16 = CommitWhy.input,
         runPicks: Bool = true
     ) {
+        claimPreparedText(from: tx)
         inputHandlerRuns &+= 1
         var resolvedTx = tx
         if runPicks {

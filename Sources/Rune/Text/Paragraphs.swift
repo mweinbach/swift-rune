@@ -445,9 +445,7 @@ internal struct ParagraphCacheEntry {
     init(_ layout: ParagraphLayout, used: UInt64, textLen: Int) {
         self.layout = layout
         self.used = used
-        let maxCost = Int(clamping: UInt32.max)
-        let maxTextLen = (maxCost - ParagraphState.layoutBase) / ParagraphState.layoutPerByte
-        self.cost = textLen > maxTextLen ? maxCost : textLen * ParagraphState.layoutPerByte + ParagraphState.layoutBase
+        self.cost = ParagraphState.layoutCost(textBytes: textLen)
     }
 }
 
@@ -457,6 +455,11 @@ internal final class ParagraphState: @unchecked Sendable {
     /// Heap bytes a layout holds per byte of its text, and on top of that (`layout_cache.rs`).
     static let layoutPerByte = 64
     static let layoutBase = 2048
+    static func layoutCost(textBytes: Int) -> Int {
+        let maxCost = Int(clamping: UInt32.max)
+        let maxTextLen = (maxCost - layoutBase) / layoutPerByte
+        return textBytes > maxTextLen ? maxCost : textBytes * layoutPerByte + layoutBase
+    }
     /// Heap bytes of layouts kept after the commits that used them (`STALE_BYTES`).
     static let staleBytes = 3 << 20
     /// `size_of::<Paragraph>()` upstream (64-bit): what a layout's records cost in the cache.

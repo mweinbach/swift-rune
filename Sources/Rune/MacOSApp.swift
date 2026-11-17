@@ -272,6 +272,7 @@ public enum MacOSApp {
                 runtime.dispatchClose(at: hostView?.currentElapsedTime() ?? 0.0)
             },
             onClose: {
+                hostView.cancelPreparedText()
                 hostView.stopTimer()
                 hostView.cancelActiveModals()
                 windowHandle.updateVisibility(false)
@@ -290,6 +291,7 @@ public enum MacOSApp {
                 hostView.cancelActiveModals()
                 runtime.dispatchQuit(at: hostView.currentElapsedTime())
                 QuitLifecycle.runQuitHooksIfOwed()
+                hostView.cancelPreparedText()
                 ReadySignal.clear()
                 if let fastHook = QuitLifecycle.activeFastExitHook() {
                     QuitLifecycle.endFast(fastHook)
@@ -459,6 +461,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private var coverWatch: WindowCoverWatch?
     private var lastFrameTime: Double = 0.0
     private lazy var displayLinkDriver = MacOSDisplayLinkDriver { [weak self] in self?.renderTick() }
+    private var textIdleObserver: AppleTextIdleObserver?
     private var trackingAreaRef: NSTrackingArea?
     private var didSignalReady = false
     private let popupPresenter = MacOSPopupMenuPresenter()
@@ -698,6 +701,11 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         }
     }
 
+    fileprivate func cancelPreparedText() {
+        textIdleObserver = nil
+        runtime.cancelPreparedText()
+    }
+
     private func sleepUntilRuntimeWake() {
         guard let window, window.isVisible || window.isMiniaturized else { stopTimer(); return }
         windowFrameDriver.landFrame(window: window)
@@ -822,11 +830,12 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         surfaceMeter?.setPacing(isAnim ? .paced : .idle)
         _ = surfaceMeter?.redraw(paced: displayLinkDriver.isRunning)
 
-        if let drawable = metalLayer.nextDrawable() {
-            let synced = metalLayer.presentsWithTransaction && materialMode != .unsynced
-            let drawCount = renderer.present(frame: renderFrame, drawable: drawable, compositor: compositor,
-                                             runtime: runtime, dt: dt, updateMilliseconds: updateMs, synchronized: synced)
+        let synced = metalLayer.presentsWithTransaction && materialMode != .unsynced
+        if let drawable = metalLayer.nextDrawable(),
+           let drawCount = renderer.present(frame: renderFrame, drawable: drawable, compositor: compositor,
+                                            runtime: runtime, dt: dt, updateMilliseconds: updateMs, synchronized: synced) {
             _ = surfaceMeter?.presented()
+            if textIdleObserver == nil { textIdleObserver = AppleTextIdleObserver(runtime: runtime) }
             if !didFireReady {
                 didFireReady = true
                 ReadySignal.ready()
@@ -834,6 +843,9 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             }
             reports?.presented(renderFrame, at: t, started: updateStart, updateMs: updateMs, drawCount: drawCount,
                                committed: runtime.viewCommitCount != commitsBefore, runtime: runtime, compositor: compositor)
+        } else {
+            _ = surfaceMeter?.skipped()
+            reports?.skipped()
         }
         if let stats = surfaceMeter?.currentStats() {
             devStatsReceiver?(stats)
@@ -1186,6 +1198,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             metalLayer.isOpaque = window.isOpaque
             _ = fnKeyMonitor.start(on: window)
         } else {
+            textIdleObserver = nil
             stopTimer()
             fnKeyMonitor.stop()
         }

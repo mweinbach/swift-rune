@@ -68,6 +68,21 @@ public struct TextShapeKey: Hashable, Sendable {
     public var fontEpoch: UInt64
     public var languageTag: String?
     public var ellipsisMaxWKey: Int
+    /// An idle measurement can keep a second line break without replacing a mounted width.
+    private var preparedWidth: UInt32?
+    internal func prepared(at width: Float?) -> Self {
+        var key = self
+        key.preparedWidth = (width ?? .infinity).bitPattern
+        return key
+    }
+
+    internal var unpreparedKey: Self {
+        var key = self
+        key.preparedWidth = nil
+        return key
+    }
+
+    internal var hasPreparedWidth: Bool { preparedWidth != nil }
     /// Whether this layout breaks `text-wrap-style: pretty` (`#882`); a pretty and a greedy layout of
     /// the same text never share an entry (upstream folds `pretty` into `hash::break_key`).
     public var pretty: Bool
@@ -246,6 +261,9 @@ public final class TextLayoutBox: @unchecked Sendable {
     public var hasGlyphs: Bool
     internal let prepared: TextPreparedShape?
     internal var lastUsedCommit: UInt64 = 0
+    /// The idle pass that introduced this layout. Ordinary layouts have no pass.
+    internal var preparedPass: UInt64?
+    internal var preparedRunCells: TextRunCellLayout?
     // Page recycling invalidates UVs in a cached desktop text layout.
     internal var desktopAtlasResets: UInt64?
     internal var desktopPages: Set<UInt16> = []
@@ -303,6 +321,8 @@ public final class TextLayoutBox: @unchecked Sendable {
         )
         out.desktopAtlasResets = desktopAtlasResets
         out.desktopPages = desktopPages
+        out.preparedPass = preparedPass
+        out.preparedRunCells = preparedRunCells
         out.paragraphs = paragraphs
         return out
     }

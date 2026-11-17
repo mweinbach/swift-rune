@@ -176,6 +176,26 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
     const started = performance.now();
     const now = () => (performance.now() - started) / 1000;
     let request = 0;
+    let presented = false;
+    let idleRequest = null;
+
+    function cancelIdleText() {
+        if (idleRequest === null) return;
+        if (window.requestIdleCallback) window.cancelIdleCallback(idleRequest);
+        else window.clearTimeout(idleRequest);
+        idleRequest = null;
+    }
+
+    function scheduleIdleText() {
+        if (!presented || idleRequest !== null || !wasm.rune_web_idle_text?.(0)) return;
+        function prepare() {
+            idleRequest = null;
+            if (disposed || lost || navigator.scheduling?.isInputPending?.({ includeContinuous: true })) return;
+            wasm.rune_web_idle_text(1);
+        }
+        // Browsers without requestIdleCallback yield to the event loop after the frame.
+        idleRequest = window.requestIdleCallback ? window.requestIdleCallback(prepare) : window.setTimeout(prepare, 0);
+    }
 
     function readField() {
         const size = wasm.rune_web_field();
@@ -287,6 +307,7 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
                 const bytes = new Uint8Array(wasm.memory.buffer, wasm.rune_web_buffer(0), size);
                 accessibility.sync(JSON.parse(decoder.decode(bytes)));
             }
+            presented = true;
         }
         accessibility?.place();
         readField();
@@ -303,6 +324,7 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
         if (disposed || lost) return;
         try {
             drawFrame();
+            scheduleIdleText();
             request = requestAnimationFrame(tick);
         } catch (error) {
             dispose();
@@ -317,6 +339,7 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
         restoredBeforeFirstDraw?.resolve();
         images?.dispose();
         cancelAnimationFrame(request);
+        cancelIdleText();
         listeners.abort();
         observer?.disconnect();
         restoreNaturalSize?.();
@@ -395,6 +418,7 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
                 gpu?.frameRenderer.cancelTimings?.();
                 gpu = null; // The browser discards every object associated with the lost context.
                 cancelAnimationFrame(request);
+                cancelIdleText();
             }, options);
             canvas.addEventListener('webglcontextrestored', () => {
                 if (disposed) return;

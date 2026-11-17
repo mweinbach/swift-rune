@@ -2,11 +2,65 @@
 import AppKit
 import Foundation
 import Metal
+import QuartzCore
 import RuneMotion
 import Testing
 @testable import Rune
 
 struct MacOSHostFrameTests {
+    @MainActor
+    @Test func preparedTextRunsBetweenFramesOnce() {
+        struct State {}
+        let runtime = Runtime(state: State()) { _, _ in text("mounted") }
+        _ = runtime.frame(at: 0)
+        var preparations = 0
+        var mayPrepare = false
+        let observer = AppleTextIdleObserver(runtime: runtime) { mayPrepare }
+        runtime.updateIf { _, tx in
+            tx.prepareText { (_: State, _: inout Cx<State>) in
+                preparations += 1
+                return text("prepared")
+            }
+            return false
+        }
+        let commits = runtime.viewCommitCount
+        // The test process has no NSApplication event source to drive subsequent idle turns.
+        let source = Timer.scheduledTimer(withTimeInterval: 0.005, repeats: true) { _ in }
+        defer { source.invalidate() }
+        withExtendedLifetime(observer) {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.015))
+            #expect(preparations == 0 && runtime.textIdleOwed)
+            mayPrepare = true
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
+            #expect(preparations == 1 && !runtime.textIdleOwed)
+            #expect(runtime.viewCommitCount == commits)
+        }
+    }
+
+    @MainActor
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil))
+    func presentationDistinguishesFailureFromCompositorWithNoUIDraws() throws {
+        final class OwnContent: Compositor {
+            func render(frame: CompositorFrame<Int>) {}
+        }
+        let app = App(title: "Own content", size: Vec2(16, 16), state: 0) { _, _ in text("UI") }
+            .compositor(OwnContent())
+        let entry = AppWindowSpec(app: app).boxed().requireNativeHostEntry()
+        let runtime = entry.createRuntime(pixelScale: 1, systemDark: false, reducedMotion: true, waker: Waker())
+        let renderer = try MetalRenderer()
+        let layer = CAMetalLayer()
+        layer.device = renderer.device
+        layer.drawableSize = CGSize(width: 16, height: 16)
+        let drawable = try #require(layer.nextDrawable())
+        var frame = RenderFrame(width: 16, height: 16)
+        frame.width = Int.max
+        #expect(!entry.present(frame, drawable: drawable, renderer: renderer, runtimeObj: runtime,
+                               dt: 0, started: CACurrentMediaTime(), updateMs: 0, synchronized: false, committed: false))
+        frame.width = 16
+        #expect(entry.present(frame, drawable: drawable, renderer: renderer, runtimeObj: runtime,
+                              dt: 0, started: CACurrentMediaTime(), updateMs: 0, synchronized: false, committed: false))
+    }
+
     @MainActor
     @Test func idleWakeReplacesAndCancelsOneShot() async throws {
         var ticks = 0

@@ -519,10 +519,15 @@ void rune_win_start(RuneWinWindow *w, void *context, RuneWinDispatch dispatch, i
     UpdateWindow(w->hwnd);
 }
 
-int32_t rune_win_pump(void) {
+int32_t rune_win_pump_or_idle(int32_t idle_work_owed) {
     MSG msg;
-    int result = GetMessageW(&msg, NULL, 0, 0);
-    if (result <= 0) return result;
+    if (idle_work_owed) {
+        if (!PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) return RUNE_WIN_PUMP_IDLE;
+        if (msg.message == WM_QUIT) return 0;
+    } else {
+        int result = GetMessageW(&msg, NULL, 0, 0);
+        if (result <= 0) return result;
+    }
     if (msg.hwnd && (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) &&
         GetClassLongPtrW(msg.hwnd, GCLP_WNDPROC) == (ULONG_PTR)window_proc) {
         RuneWinWindow *w = (RuneWinWindow *)GetWindowLongPtrW(msg.hwnd, GWLP_USERDATA);
@@ -537,6 +542,8 @@ int32_t rune_win_pump(void) {
     DispatchMessageW(&msg);
     return 1;
 }
+
+int32_t rune_win_pump(void) { return rune_win_pump_or_idle(0); }
 
 int32_t rune_win_run(RuneWinWindow *w, void *context, RuneWinDispatch dispatch, int32_t inactive) {
     rune_win_start(w, context, dispatch, inactive, 1);
