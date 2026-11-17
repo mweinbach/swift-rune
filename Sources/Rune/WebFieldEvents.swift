@@ -30,6 +30,8 @@ extension WebAppHost {
     private func applyFieldEvent(
         key: String, base: Int, expected: String, text: String?, anchor: Int, focus: Int, at now: Double
     ) -> Bool {
+        // The DOM's edit and selection events count as typed input even if the mirror is stale.
+        InputTime.noteDispatched()
         let dispatch = runtime.noteInput(at: now)
         defer {
             runtime.endInputDispatch(dispatch)

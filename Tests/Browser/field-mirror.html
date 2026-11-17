@@ -6,7 +6,7 @@
 <button id="outside">Outside Rune</button>
 <pre id="result">Running…</pre>
 <script type="module">
-import { mountRuneFields } from "../../Sources/Rune/Resources/Web/rune-web.mjs";
+import { mountRuneBrowser, mountRuneFields } from "../../Sources/Rune/Resources/Web/rune-web.mjs";
 
 const canvas = document.querySelector("#canvas");
 const outside = document.querySelector("#outside");
@@ -22,7 +22,18 @@ function lastEvent(kind) {
     return event;
 }
 
+function expectKeyOrigin(target, key, nativeField) {
+    events.length = 0;
+    const event = new KeyboardEvent("keydown", { code: key, key, shiftKey: true, bubbles: true, cancelable: true });
+    target.dispatchEvent(event);
+    const sent = lastEvent("key");
+    expect(events.length === 1 && sent.code === key && sent.key === key && sent.shift && event.defaultPrevented,
+        "Handled keydown did not reach Rune with its key and modifiers");
+    expect(nativeField ? sent.field === true : !("field" in sent), "Wrong key origin from " + target.tagName);
+}
+
 let fields;
+let browser;
 try {
     outside.focus();
     fields = mountRuneFields(canvas, event => events.push(event));
@@ -38,6 +49,7 @@ try {
     expect(editor.getAttribute("aria-label") === "Message", "Native textarea lost its authored accessible name");
     expect(editor.wrap === "off" && editor.value === text, "Native textarea did not preserve the hard lines");
     await tick();
+    expectKeyOrigin(editor, "ArrowLeft", true);
     events.length = 0;
     editor.setSelectionRange(start, start + "🦦".length, "backward");
     await tick();
@@ -66,6 +78,13 @@ try {
     const password = document.activeElement;
     expect(password instanceof HTMLInputElement && password.type === "password", "Secure activation did not focus the password input");
     expect(password.value === "", "Secure content persisted in the native password field");
+    expectKeyOrigin(password, "Backspace", true);
+    events.length = 0;
+    const deletion = new InputEvent("beforeinput", { inputType: "deleteContentBackward", bubbles: true, cancelable: true });
+    password.dispatchEvent(deletion);
+    const deleteKey = lastEvent("key");
+    expect(deleteKey.field === true && deleteKey.key === "Backspace" && deletion.defaultPrevented,
+        "Password beforeinput deletion lost its native field origin");
     events.length = 0;
     expect(document.execCommand("insertText", false, "private"), "Browser declined password text input");
     await tick();
@@ -81,8 +100,23 @@ try {
     editor.dispatchEvent(new InputEvent("input", { bubbles: true, data: "after teardown" }));
     await tick();
     expect(events.length === 0, "A disposed field still sent an event");
+
+    // Capture the JSON the canvas event listener sends over the reactor's byte buffer.
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const decoder = new TextDecoder();
+    browser = mountRuneBrowser(canvas, { exports: {
+        memory, rune_web_enable() {}, __main_void: () => 0, rune_web_frame: () => 0,
+        rune_web_field: () => 0, rune_web_buffer: () => 0,
+        rune_web_event(length) {
+            events.push(JSON.parse(decoder.decode(new Uint8Array(memory.buffer, 0, length))));
+            return 1;
+        }
+    } });
+    expectKeyOrigin(canvas, "ArrowLeft", false);
+    browser.dispose();
     result.textContent = "PASS";
 } catch (error) {
+    browser?.dispose();
     fields?.dispose();
     result.textContent = "FAIL " + error.message;
     throw error;

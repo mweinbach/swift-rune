@@ -10,7 +10,7 @@ final class WebBrowserSession {
         var button: PointerButton?
         var base, anchor, focus: Int?
         var x, y: Float?
-        var shift, ctrl, alt, cmd: Bool?
+        var shift, ctrl, alt, cmd, field: Bool?
     }
 
     private struct FieldUpdate: Encodable {
@@ -38,15 +38,17 @@ final class WebBrowserSession {
                     mods.logo = false
                 }
                 #endif
-                return host.handleKeyDown(code: event.code ?? "", key: key, mods: mods, at: now)
+                return host.handleKeyDown(code: event.code ?? "", key: key, mods: mods, fromField: event.field == true, at: now)
             case "pointerdown", "pointerup", "pointermove":
                 guard let x = event.x, let y = event.y else { return false }
+                let phase: WebAppHost<State>.PointerPhase
                 switch event.kind {
-                case "pointerdown": host.handlePointerDown(x: x, y: y, button: event.button ?? .primary,
-                                                          pointerType: event.pointerType ?? "mouse", at: now)
-                case "pointerup": host.handlePointerUp(x: x, y: y, button: event.button ?? .primary, at: now)
-                default: host.handlePointerMove(x: x, y: y, at: now)
+                case "pointerdown": phase = .down
+                case "pointerup": phase = .up
+                default: phase = .move
                 }
+                host.handlePointer(phase, x: x, y: y, button: event.button ?? .primary,
+                                   pointerType: event.pointerType ?? "mouse", at: now)
                 return true
             case "pointercancel":
                 host.runtime.cancelPointerForTouchHold(at: now)

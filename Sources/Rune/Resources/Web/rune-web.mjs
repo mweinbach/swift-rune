@@ -38,7 +38,7 @@ export function mountRuneFields(canvas, send) {
             const editing = ['Enter', 'Tab', 'Escape', 'PageUp', 'PageDown', 'Home', 'End',
                 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'];
             if (field === password) editing.push('Backspace', 'Delete');
-            if ((chord || editing.includes(event.key)) && send(keyEvent(event))) event.preventDefault();
+            if ((chord || editing.includes(event.key)) && send({ ...keyEvent(event), field: true })) event.preventDefault();
         }, options);
     }
 
@@ -73,7 +73,7 @@ export function mountRuneFields(canvas, send) {
     password.addEventListener('beforeinput', event => {
         if (!mirror?.secure || composing || !event.inputType.startsWith('delete')) return;
         const key = event.inputType.endsWith('Backward') ? 'Backspace' : 'Delete';
-        if (send({ kind: 'key', key, code: key })) event.preventDefault();
+        if (send({ kind: 'key', key, code: key, field: true })) event.preventDefault();
     }, options);
 
     return {
