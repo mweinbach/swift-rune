@@ -5,6 +5,12 @@ import Rune
 
 @Suite("RuneKit Diff Full Parity Tests (Increment 3)")
 struct DiffParityTests {
+    // Rust's diff test walks each /code container once. Wrapped code has a separate text child.
+    private func isCodeCell(_ element: ElementInfo) -> Bool {
+        guard !element.exiting, let key = element.key, !key.hasSuffix("-text") else { return false }
+        return ["dv-code-", "dv-scode-", "dv-ccode-", "dv-dcode-", "dv-acode-"].contains(where: key.hasPrefix)
+    }
+
     // MARK: - Myers (`diff/myers.rs`)
 
     @Test("Myers diff handles empty, identical, all-insert, all-delete, and reconstructs edits")
@@ -1725,8 +1731,7 @@ struct DiffParityTests {
             )
             var lt = 0.0
             _ = lRT.frame(at: lt)
-            let codeCells = lRT.elements().filter { ($0.path).hasSuffix("/code") || ($0.key ?? "").contains("-code-") || ($0.key ?? "").contains("-ccode-") }
-                .filter { $0.rect.count == 4 }
+            let codeCells = lRT.elements().filter(isCodeCell)
             #expect(codeCells.count > 20)
             let checksBefore = lRT.liveOnlyEvents
             for (idx, cell) in codeCells.enumerated() {
@@ -2271,23 +2276,26 @@ struct DiffParityTests {
 
     @Test("tests/diff.rs #184: hovering lines at rest builds nothing new under checkLiveOnly")
     @MainActor
-    func hoveringLinesAtRestBuildsNothingNew() {
+    func hoveringLinesAtRestBuildsNothingNew() throws {
         let kit = Kit.neutral(dark: false)
         let old = (1...40).map { "line \($0)" }.joined(separator: "\n")
         let new = (1...40).map { ($0 % 3 == 0) ? "line \($0) edited" : "line \($0)" }.joined(separator: "\n")
-        for mode in [DiffMode.unified, DiffMode.split] {
+        for (mode, wrap) in [(DiffMode.unified, false), (.unified, true), (.split, true)] {
             var diff = DiffState(diff: FileDiff.fromTexts(path: "a.rs", old: old, new: new, context: 40))
             diff.setMode(mode)
+            diff.wrap = wrap
             let rt = Runtime<DiffState>(state: diff, viewport: Vec2(900, 1200)) { s, cx in
                 DiffView<DiffState>(key: "dv", kit: kit, get: { $0 }, set: { $0 = $1 }).build(state: s, cx: cx)
             }
             var t = 0.0
             _ = rt.frame(at: t)
-            let cells = rt.elements().filter {
-                let k = $0.key ?? ""
-                return !$0.exiting && (
-                    k.hasPrefix("dv-code-") || k.hasPrefix("dv-scode-") || k.hasPrefix("dv-ccode-") || k.hasPrefix("dv-dcode-") || k.hasPrefix("dv-acode-")
-                )
+            let cells = rt.elements().filter(isCodeCell)
+            func move(to cell: ElementInfo) {
+                let x = cell.rect[0] + cell.rect[2] / 2
+                let y = cell.rect[1] + cell.rect[3] / 2
+                rt.pointerMove(to: Vec2(x, y), at: t)
+                t += 1.0 / 60.0
+                _ = rt.frame(at: t)
             }
             #expect(cells.count > 30)
             let checks = rt.liveOnlyEvents
@@ -2296,14 +2304,26 @@ struct DiffParityTests {
                     t += 0.3
                     _ = rt.frame(at: t)
                 }
-                let cx = cell.rect[0] + cell.rect[2] * 0.5
-                let cy = cell.rect[1] + cell.rect[3] * 0.5
-                rt.pointerMove(to: Vec2(cx, cy), at: t)
-                t += 1.0 / 60.0
-                _ = rt.frame(at: t)
+                move(to: cell)
             }
             #expect(rt.liveOnlyEvents > checks)
             #expect(rt.liveOnlyWarnings.isEmpty, "Unexpected liveOnly warnings for \(mode): \(rt.liveOnlyWarnings)")
+
+            // Count real view builds without the debug stale-view checks above.
+            rt.checkLiveOnly(false)
+            let sides: [(String, DiffSide)] = mode == .unified
+                ? [("dv-code-", .new)] : [("dv-ccode-o-", .old), ("dv-ccode-n-", .new)]
+            for (prefix, side) in sides {
+                let first = try #require(rt.element(byKey: prefix + "0"))
+                let second = try #require(rt.element(byKey: prefix + "1"))
+                move(to: first)
+                let commits = rt.viewCommitCount
+                let skips = rt.liveOnlyEvents
+                move(to: second)
+                #expect(rt.state.copySide == side)
+                #expect(rt.liveOnlyEvents == skips + 2)
+                #expect(rt.viewCommitCount == commits)
+            }
         }
     }
 
