@@ -328,7 +328,7 @@ struct RuneLuauParityTests {
     @Test("menuTrigger dispatches ordinary and host Lua callbacks on mouse down and touch release")
     func menuTriggerPressTiming() throws {
         let host = HostNode(name: "menu") { (args: NodeArgs) -> El<LuauTestState> in
-            args.onPress(el().key("host").size(100, 30), "onPress")
+            args.onPress(el().key("host").size(100, 30).focusable(), "onPress")
         }
         var options = ScriptOptions()
         options.nodes = [host]
@@ -341,7 +341,7 @@ struct RuneLuauParityTests {
             return {
                 render = function()
                     return ui.col({
-                        ui.box({key = "menu", w = 100, h = 30, menuTrigger = true, onPress = hit}),
+                        ui.box({key = "menu", w = 100, h = 30, focusable = true, menuTrigger = true, onPress = hit}),
                         ui.menu({menuTrigger = true, onPress = hit}),
                     })
                 end,
@@ -357,7 +357,7 @@ struct RuneLuauParityTests {
             let rect = try #require(rt.element(byKey: key)).rect
             let p = Vec2(rect[0] + 8, rect[1] + 8)
             let now = Double(index + 1)
-            let before = Int64(index * 11)
+            let before = Int64(index * 14)
             rt.pointerDown(at: p, mods: shift, at: now)
             #expect(try script.query("count").asInt64 == before + 10)
             rt.pointerUp(at: p, at: now + 0.01)
@@ -366,6 +366,14 @@ struct RuneLuauParityTests {
             #expect(try script.query("count").asInt64 == before + 10)
             rt.touch(id: 1, phase: .ended, at: p, time: now + 0.25)
             #expect(try script.query("count").asInt64 == before + 11)
+            #expect(rt.keyDown(KeyEvent(key: .space), at: now + 0.3))
+            #expect(try script.query("count").asInt64 == before + 12)
+            rt.pointerDown(at: p, at: now + 0.4)
+            rt.cancelPointer(at: now + 0.42)
+            #expect(try script.query("count").asInt64 == before + 13)
+            rt.pointerDown(at: p, at: now + 0.5)
+            rt.pointerReleaseLost(at: p, at: now + 0.52)
+            #expect(try script.query("count").asInt64 == before + 14)
         }
     }
 
@@ -565,7 +573,8 @@ struct RuneLuauParityTests {
 
     @Test("propNames, view:Memo key/version validation & rekey, syntax path prefix, and math/bit32/utf8 additions")
     func propNamesViewMemoAndStdlibAdditions() throws {
-        #expect(propNames().count == 76)
+        #expect(propNames().count == 77)
+        #expect(propNames().contains("menuTrigger"))
         #expect(propNames().contains("fadeOut"))
         #expect(propNames().contains("onVisibleRows"))
         #expect(propNames().contains("onMiddlePress"))
