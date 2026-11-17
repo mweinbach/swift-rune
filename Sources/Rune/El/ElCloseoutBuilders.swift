@@ -209,6 +209,11 @@ extension El {
         return c.shrink(1).minW(0)
     }
 
+    /// Truncates an overflowing line with an ellipsis at its end (`El::truncate`).
+    public func truncate() -> Self {
+        setOneLineElide(.end)
+    }
+
     /// Single-line truncation keeping both ends (`"…"` in the middle, `El::truncate_middle`).
     public func truncateMiddle() -> Self {
         setOneLineElide(.middle)

@@ -6,6 +6,23 @@ import RuneRef
 
 @Suite("Slice 3: Truncate Fade, Truncate Elision, Live Check, and Paint Tracks Parity Tests")
 struct Slice3TruncateLivePaintTests {
+    @Test("end truncation replaces a previous cut and leaves an editable field alone")
+    func truncateResetsCutAndPreservesField() {
+        struct Model { var edit: TextEdit }
+        let label: El<Model> = text("A long label").truncateHead().truncateFade().truncate()
+        #expect(label.textStyle.elide == .end)
+        #expect(label.textStyle.wrap == .ellipsis)
+        #expect(!label.isTruncateFadeEnabled)
+        #expect(label.layout.flexShrink == 1)
+        #expect(label.layout.minWidth == .points(0))
+
+        let field = textInput(key: "field", \Model.edit)
+        let unchanged = field.truncate()
+        #expect(unchanged.textStyle == field.textStyle)
+        #expect(unchanged.layout.flexShrink == field.layout.flexShrink)
+        #expect(unchanged.layout.minWidth == field.layout.minWidth)
+    }
+
     private static let red = Color(r: 0.9, g: 0.1, b: 0.1, a: 1.0)
     private static let blue = Color(r: 0.1, g: 0.2, b: 0.9, a: 1.0)
     private static let green = Color(r: 0.1, g: 0.75, b: 0.3, a: 1.0)
@@ -848,6 +865,39 @@ struct Slice3TruncateLivePaintTests {
         _ = rt.frame(at: 6.01)
 
         #expect(rt.liveOnlyWarnings.isEmpty, "Live fill/border/text updates must not warn: \(rt.liveOnlyWarnings)")
+    }
+
+    @Test("live-only comparisons redact secure text and report text colour separately")
+    func liveCheckSecureTextAndColour() throws {
+        struct Value {
+            var label = "private-label-a"
+            var revealed = false
+            var colour = Color.rgba8(64, 128, 192, 255)
+        }
+        let runtime = Runtime<Value>(state: Value(), viewport: Vec2(200, 40), pixelScale: 1.0) { value, _ in
+            text(value.label).secure().revealed(value.revealed).color(value.colour).size(200, 40)
+        }
+        _ = runtime.frame(at: 0)
+        var before = runtime.viewPrint()
+        runtime.update(at: 0.1) { value, _ in
+            value.label = "private-label-b"
+            value.revealed = true
+        }
+        _ = runtime.frame(at: 0.1)
+        var after = runtime.viewPrint()
+        let change = try #require(before.firstDifference(against: after))
+        #expect(change.what == "text")
+        #expect(change.values?.0 == "[redacted]")
+        #expect(change.values?.1 == "[redacted]")
+
+        before = after
+        runtime.update(at: 0.2) { value, _ in value.colour = .white }
+        _ = runtime.frame(at: 0.2)
+        after = runtime.viewPrint()
+        let colour = try #require(before.firstDifference(against: after))
+        #expect(colour.what == "text colour")
+        #expect(colour.values?.0 == "#4080c0ff")
+        #expect(colour.values?.1 == "#ffffffff")
     }
 
     @Test("3.8 live_check: warning names element & all 5 property/structure diffs and deduplicates repeats")
