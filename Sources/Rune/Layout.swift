@@ -108,6 +108,7 @@ public struct LayoutStyle: Sendable, Hashable {
     public var scrollbarWidth: Float = 0
     public var stickBottom: Bool = false
     public var clipOverflow: Bool = false
+    internal var usesNaturalGrowthContents = false
     public var sticky: StickyEdge? = nil
 
     public init(direction: FlexDirection = .row) {

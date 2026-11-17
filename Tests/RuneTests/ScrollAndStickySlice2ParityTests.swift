@@ -185,6 +185,47 @@ struct ScrollAndStickySlice2ParityTests {
         #expect(frames.allSatisfy { abs($0.1 - 400.0) < 0.6 })
     }
 
+    @Test("Padded growth rows advance siblings and the pinned scroll by their drawn height", arguments: [false, true])
+    func paddedGrowthRowOccupiesItsDrawnHeight(hasTail: Bool) throws {
+        let rt = Runtime<Bool>(state: false, viewport: Vec2(180, 120), pixelScale: 2) { inserted, _ in
+            var stack: El<Bool> = col().key("stack").wFull().growth(GrowthSpec())
+            for i in 0..<8 {
+                stack = stack.child(el().key("r\(i)").wFull().h(40))
+            }
+            if inserted {
+                stack = stack.child(col().key("inserted").wFull().minH(40).py(8)
+                    .border(2, .white).borderLayout()
+                    .child(el().key("inside").wFull().h(6)))
+            }
+            if hasTail { stack = stack.child(el().key("tail").wFull().h(30)) }
+            return col().wFull().hFull().child(col().key("scroll").wFull().hFull().scrollY(stickBottom: true).child(stack))
+        }
+
+        _ = rt.frame(at: 0)
+        for frame in 1...60 { _ = rt.frame(at: Double(frame) / 120) }
+        let initialOffset = rt.scrollOffset(forKey: "scroll").y
+        let tailStart = rt.element(byKey: "tail").map { $0.target[1] + initialOffset }
+        rt.update(at: 0.5) { inserted, _ in inserted = true }
+        var heights: [Float] = []
+        for frame in 61...180 {
+            _ = rt.frame(at: Double(frame) / 120)
+            let row = try #require(rt.element(byKey: "inserted"))
+            let inside = try #require(rt.element(byKey: "inside"))
+            let height = try #require(rt.growthPresentedHeight(forKey: "inserted"))
+            let offset = rt.scrollOffset(forKey: "scroll").y
+            heights.append(height)
+            #expect(abs(row.rect[3] - height) < 0.05)
+            #expect(abs(offset - initialOffset - height) < 0.05)
+            #expect(abs(inside.target[1] - row.target[1] - 10) < 0.05)
+            if let tailStart {
+                let tail = try #require(rt.element(byKey: "tail"))
+                #expect(abs(tail.target[1] + offset - tailStart - height) < 0.05)
+            }
+        }
+        #expect(heights.first! < 1)
+        #expect(abs(heights.last! - 40) < 0.05)
+    }
+
     // MARK: - scroll/bottom.rs (3a, 3b, 3c)
 
     private struct BottomChatState {

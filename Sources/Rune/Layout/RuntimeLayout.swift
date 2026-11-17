@@ -392,12 +392,24 @@ final class RetainedLayoutCoordinator {
                 style.pinBottom = nil
             }
 
-            let borderOverride: Sides?
+            var borderOverride: Sides?
             if style.borderLayout {
                 let rawBorder = el.borderSides ?? Sides.all(el.borderWidth)
                 borderOverride = TaffyBridge.snappedBorderSides(rawBorder, pixelScale: scale)
             } else {
                 borderOverride = nil
+            }
+
+            // A growth track can reveal less than the row's insets. Flex layout gets the
+            // revealed slot; its contents keep their positions from the natural layout.
+            if style.usesNaturalGrowthContents {
+                style.padding.top = 0
+                style.padding.bottom = 0
+                var border = borderOverride ?? style.border
+                border.top = 0
+                border.bottom = 0
+                borderOverride = border
+                style.clipOverflow = true
             }
 
             let areas: [String: RuneTaffy.GridTemplateArea]? = style.grid.map {
