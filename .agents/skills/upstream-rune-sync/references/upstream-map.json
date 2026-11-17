@@ -3083,7 +3083,11 @@
         {
           "upstream": "src/runtime/anchor.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/AnchorLayout.swift",
+            "Sources/Rune/Render/RenderElAndRuntime.swift",
+            "Tests/RuneTests/AnchorZoomParityTests.swift",
+            "Tests/RuneTests/LayoutAnchorFitZoomReadParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3763,7 +3767,12 @@
         {
           "upstream": "src/runtime/paint/build.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Render/RenderElAndRuntime.swift",
+            "Sources/Rune/Layout/PixelSnap.swift",
+            "Sources/Rune/Runtime/JoinedRowSeams.swift",
+            "Sources/Rune/Text/TextBoxGeometry.swift",
+            "Tests/RuneTests/PixelSnapParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3820,9 +3829,14 @@
         {
           "upstream": "src/runtime/paint/pixel_snap.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Layout/PixelSnap.swift",
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Render/RenderElAndRuntime.swift",
+            "Sources/Rune/Text/TextBoxGeometry.swift",
+            "Tests/RuneTests/PixelSnapParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Growth rows carry text and box edges together in device pixels (#1072). Scroll, sticky and containment translations contribute to the text's resting position."
         },
         {
           "upstream": "src/runtime/paint/raster_check.rs",
@@ -4693,9 +4707,13 @@
         {
           "upstream": "src/runtime/web/page.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/WebPlatform.swift",
+            "Tests/RuneTests/LayoutReadParityTests.swift",
+            "Tests/RuneTests/LayoutAnchorFitZoomReadParityTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Runtime page mode accepts a host scroll offset and WebHostConfig supports document sizing. Moving and rebasing an overscanned canvas band with the browser document remains unimplemented."
         },
         {
           "upstream": "src/runtime/web/page_tests.rs",
