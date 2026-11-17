@@ -452,7 +452,7 @@ public extension Runtime {
 
         switch action {
         case .press, .focus:
-            pointerDown(at: center, button: .primary, mods: Mods(), at: now)
+            pressDown(at: center, at: now, mouse: false)
             pointerUp(at: center, button: .primary, mods: Mods(), at: now)
             return true
         case .setValue:

@@ -255,7 +255,7 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
         let now = nowSeconds()
         runtime.hostInput(.pointer, eventTimestamp: touch.timestamp) {
             runtime.pointerMove(to: p, mods: .none, at: now)
-            runtime.pointerDown(at: p, button: .primary, mods: .none, at: now)
+            runtime.pressDown(at: p, at: now, mouse: touch.type == .indirectPointer)
         }
         // `El.touchDragsAtOnce`: the finger drags from where it lands, and no long press cuts it.
         if runtime.pressDragsAtOnce() {

@@ -2,6 +2,13 @@ import Foundation
 import RuneMotion
 
 extension El {
+    /// An unordered-list marker sized and positioned in device pixels from the primary font.
+    public func outsideListDisc(_ font: TextStyle) -> Self {
+        var copy = rounded(999).a11yHidden()
+        copy.layout.outsideListDiscFont = font
+        return copy
+    }
+
     /// Allow shrinking below intrinsic content size along the parent's main axis
     /// (CSS `flex-shrink: 1; min-width: 0`).
     public func shrink() -> Self {

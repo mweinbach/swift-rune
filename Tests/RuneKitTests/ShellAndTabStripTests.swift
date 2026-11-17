@@ -448,6 +448,44 @@ struct ShellAndTabStripTests {
         #expect(centerHold == 50)
     }
 
+    @Test("A tab selects once on mouse down and a squeezed inactive tab has no close target")
+    func tabSelectsWhenPressed() throws {
+        struct S {
+            var selected = "a"
+            var calls: [String] = []
+            var drag = TabDragState()
+        }
+        for orientation in [TabOrientation.horizontal, .vertical] {
+            let kit = Kit.neutral(dark: false)
+            let rt = Runtime(state: S(), viewport: Vec2(180, 160)) { s, _ in
+                let items = ["a", "b", "c"].map { StripTabItem<S>(id: $0, title: $0) }
+                return TabStrip<S>(key: "tabs", tabs: items, selected: s.selected)
+                    .orientation(orientation)
+                    .availableWidth(100)
+                    .dragState(\.drag, current: s.drag)
+                    .onSelect { state, id, _ in state.selected = id; state.calls.append(id) }
+                    .onClose { state, id, _ in state.calls.append("close-" + id) }
+                    .buildLayered(s, kit: kit)
+            }
+            _ = rt.frame(at: 0)
+            if orientation == .horizontal {
+                #expect(rt.element(byKey: "tabs-close-b") == nil)
+                #expect(rt.element(byKey: "tabs-close-a") != nil)
+            }
+            let tab = try #require(rt.element(byKey: "tabs-tab-b")).rect
+            let p = Vec2(tab[0] + 2, tab[1] + 2)
+            rt.pointerDown(at: p, at: 0.1)
+            #expect(rt.state.selected == "b")
+            #expect(rt.state.calls == ["b"])
+            _ = rt.frame(at: 0.12)
+            let beforeRelease = rt.commitCount
+            rt.pointerUp(at: p, at: 0.2)
+            _ = rt.frame(at: 0.2)
+            #expect(rt.state.calls == ["b"])
+            #expect(rt.commitCount == beforeRelease)
+        }
+    }
+
     @Test("TabStrip enforces pinned partition, suppresses active separators, and handles select/close in Runtime")
     func tabStripRuntime() throws {
         struct TabModel {

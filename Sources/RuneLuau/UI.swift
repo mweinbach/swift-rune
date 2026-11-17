@@ -71,35 +71,34 @@ public struct Press: @unchecked Sendable, Equatable {
     }
 
     /// Attaches click and pointer-up handlers delivering `kind = "press"`, modifiers, and extra `fields`.
-    public func attach<State>(_ el: El<State>, fields: [(String, LuauData)] = []) -> El<State> {
+    public func attach<State>(_ el: El<State>, fields: [(String, LuauData)] = [], menuTrigger: Bool = false) -> El<State> {
         guard let handler else { return el }
         let vmID = handler.vmID
         let fn = handler.fn
         let scriptRef = handler.script
         let fallbackKey = self.key
-        return el
-            .onPointerUp { _, press, _ in
-                scriptRef?.stashPressMods(press.mods)
+        let button = menuTrigger ? el.pressOnDown() : el.onPointerUp { _, press, _ in
+            scriptRef?.stashPressMods(press.mods)
+        }
+        return button.onClick { st, tx in
+            guard let script = scriptRef else { return }
+            let mods = menuTrigger ? tx.mods : script.consumePressMods()
+            let m = script.pressEventMods(mods)
+            let ev = LuauTable()
+            ev.rawSet("kind", value: .string("press"))
+            if let fallbackKey { ev.rawSet("key", value: .string(fallbackKey)) }
+            ev.rawSet("shift", value: .bool(m.shift))
+            ev.rawSet("alt", value: .bool(m.alt))
+            ev.rawSet("mod", value: .bool(m.mod))
+            for (fk, fv) in fields {
+                ev.rawSet(fk, value: fv.toLuau())
             }
-            .onClick { st, tx in
-                guard let script = scriptRef else { return }
-                let mods = script.consumePressMods()
-                let m = script.pressEventMods(mods)
-                let ev = LuauTable()
-                ev.rawSet("kind", value: .string("press"))
-                if let fallbackKey { ev.rawSet("key", value: .string(fallbackKey)) }
-                ev.rawSet("shift", value: .bool(m.shift))
-                ev.rawSet("alt", value: .bool(m.alt))
-                ev.rawSet("mod", value: .bool(m.mod))
-                for (fk, fv) in fields {
-                    ev.rawSet(fk, value: fv.toLuau())
-                }
-                script.aroundWrite(state: &st, tx: &tx) { innerTx in
-                    script.enter(tx: &innerTx) {
-                        try script.callHandlerIfCurrent(vmID: vmID, fn: fn, arg: .table(ev))
-                    }
+            script.aroundWrite(state: &st, tx: &tx) { innerTx in
+                script.enter(tx: &innerTx) {
+                    try script.callHandlerIfCurrent(vmID: vmID, fn: fn, arg: .table(ev))
                 }
             }
+        }
     }
 }
 
@@ -218,7 +217,7 @@ public final class NodeArgs: @unchecked Sendable {
     /// Attaches a named press handler prop to `el` if present, without marking `"key"` as read.
     public func onPress<State>(_ el: El<State>, _ name: String) -> El<State> {
         guard let h = handler(name) else { return el }
-        return Press(handler: h, key: rawKey()).attach(el)
+        return Press(handler: h, key: rawKey()).attach(el, menuTrigger: flag("menuTrigger"))
     }
 
     /// Builds an `El` click callback invoking a Luau `Handler` with an explicit key and modifier state.
@@ -1223,6 +1222,7 @@ internal enum LuauUIBridge {
         var scrollY = false
         var stickBottom = false
         var onPressVal: LuauValue? = nil
+        var menuTrigger: Bool = false
         var onMiddlePressVal: LuauValue? = nil
         var onHoverVal: LuauValue? = nil
         var isDisabled = false
@@ -1515,6 +1515,7 @@ internal enum LuauUIBridge {
             case let other: throw LuauRuntimeError(value: .string("helpSide must be top, right, bottom or left, got \(other)"))
             }
         case "onPress": state.onPressVal = v
+        case "menuTrigger": state.menuTrigger = try propFlag(v, k)
         case "onMiddlePress": state.onMiddlePressVal = v
         case "onHover": state.onHoverVal = v
         case "role":
@@ -1568,29 +1569,9 @@ internal enum LuauUIBridge {
         if let k = state.keyStr {
             el = el.key(k)
         }
-        if let onPressVal = state.onPressVal, !state.isDisabled {
-            let capturedKey = state.keyStr
-            let scriptRef = env.script
-            let vmID = env.vmID
-            el = el.onPointerUp { _, press, _ in
-                scriptRef?.stashPressMods(press.mods)
-            }
-            el = el.onClick { st, tx in
-                guard let script = scriptRef else { return }
-                let mods = script.consumePressMods()
-                let m = script.pressEventMods(mods)
-                let ev = LuauTable()
-                ev.rawSet("kind", value: .string("press"))
-                if let capturedKey { ev.rawSet("key", value: .string(capturedKey)) }
-                ev.rawSet("shift", value: .bool(m.shift))
-                ev.rawSet("alt", value: .bool(m.alt))
-                ev.rawSet("mod", value: .bool(m.mod))
-                script.aroundWrite(state: &st, tx: &tx) { innerTx in
-                    script.enter(tx: &innerTx) {
-                        try script.callHandlerIfCurrent(vmID: vmID, fn: onPressVal, arg: .table(ev))
-                    }
-                }
-            }
+        if let callback = state.onPressVal, !state.isDisabled {
+            let handler = Handler(fn: callback, vmID: env.vmID, script: env.script)
+            el = Press(handler: handler, key: state.keyStr).attach(el, menuTrigger: state.menuTrigger)
         }
         if let onMiddlePressVal = state.onMiddlePressVal, !state.isDisabled {
             let capturedKey = state.keyStr

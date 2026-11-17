@@ -1,6 +1,9 @@
 import Foundation
 import RuneMotion
 import RuneTaffy
+#if canImport(CoreText) && canImport(CoreGraphics)
+import CoreText
+#endif
 
 /// Per-`Runtime` retained `RuneTaffy.LayoutStore` driver.
 /// Caches node styles, child lists, and Taffy 0.15 `LayoutCache` slots across view commits,
@@ -365,6 +368,28 @@ final class RetainedLayoutCoordinator {
                 if sz.width > 0 && sz.height > 0 {
                     style.aspectRatio = Float(sz.width) / Float(sz.height)
                 }
+            }
+
+            if let font = style.outsideListDiscFont {
+                #if canImport(CoreText) && canImport(CoreGraphics)
+                let primary = textSystem.resolveCTFont(style: font, pixelScale: 1)
+                let ascent = Float(CTFontGetAscent(primary))
+                let descent = Float(abs(CTFontGetDescent(primary)))
+                #else
+                let ascent = font.size * 0.8
+                let descent = font.size * 0.2
+                #endif
+                let a = (ascent * scale).rounded()
+                let twoThirds = floor(a * 2 / 3)
+                let diameter = floor((twoThirds + 1) / 2)
+                let leading = floor((font.linePx() * scale - a - (descent * scale).rounded()) / 2)
+                style.width = .points(diameter / scale)
+                style.height = .points(diameter / scale)
+                style.isAbsolute = true
+                style.pinLeft = nil
+                style.pinRight = (twoThirds + 7 - diameter) / scale
+                style.pinTop = (leading + floor(1.5 * (a - twoThirds))) / scale
+                style.pinBottom = nil
             }
 
             let borderOverride: Sides?

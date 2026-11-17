@@ -263,6 +263,7 @@ extension El {
             lifted.dragThreshold = thresh
         }
         lifted.touchAtOnce = h.touchAtOnce
+        lifted.pressOnDown = h.pressOnDown
         lifted.onDragStart = wrap(h.onDragStart)
         lifted.onDragOutEnd = wrap1(h.onDragOutEnd)
         lifted.onKey = wrapBool1(h.onKey)
