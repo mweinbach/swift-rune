@@ -1536,6 +1536,8 @@ struct ShellAndTabStripTests {
         rt.update { s, _ in s.sidebar.setOpen(true) }
         step()
         let grip = try #require(rt.element(byKey: "sv-sidebar-grip")).rect
+        let main = try #require(rt.element(byKey: "sv-main")).rect
+        #expect(abs(main[0] - (grip[0] + grip[2])) < 0.01)
         let gx = grip[0] + grip[2] * 0.5
         let gy = grip[1] + grip[3] * 0.5
         rt.pointerMove(to: Vec2(gx, gy), at: t + 0.01)
