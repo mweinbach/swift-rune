@@ -1075,10 +1075,7 @@ public struct SplitView<State> {
         let sharedSpring = paneSpring(for: sharedWidth, kit: k)
         let sidebarToggleEl = buildSidebarToggle(kit: k)
         let mainCol = buildMainColumn(state, kit: k, sidebarToggleEl: sidebarToggleEl, sharedSpring: sharedSpring)
-        var rootRow: El<State> = row().key(keyId).sizeFull().bg(k.c.layer01)
-        if let sharedSpring {
-            rootRow = rootRow.animateLayout(sharedSpring)
-        }
+        var rootRow: El<State> = row().key(keyId).sizeFull().bg(k.c.layer01).animate(sharedSpring ?? .none)
         if let sidebarCfg {
             appendSidebarChildren(to: &rootRow, state: state, kit: k, cfg: sidebarCfg, toggleEl: sidebarToggleEl, sharedSpring: sharedSpring)
         }
