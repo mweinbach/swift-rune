@@ -1,9 +1,9 @@
 {
-  "swiftExecutables" : 98,
+  "swiftExecutables" : 99,
   "swiftTargets" : 19,
-  "syncedAt" : "2026-11-17T16:58:09Z",
-  "syncedCommit" : "842c28c2ca5dd1506c1e4a67052db61800aed721",
-  "syncedCommitDate" : "2026-11-17T10:12:56-06:00",
-  "syncedCommitSubject" : "Text: lay a view's text out ahead into the layout cache without mounting it (#1104)",
+  "syncedAt" : "2026-11-17T20:08:07Z",
+  "syncedCommit" : "935b2ff9a05064e2eb8d595860ab640b05bc98fe",
+  "syncedCommitDate" : "2026-11-17T14:58:30-05:00",
+  "syncedCommitSubject" : "ship the opencode icon catalog and its aliases (#1142)",
   "upstreamRepo" : "https:\/\/github.com\/anomalyco\/rune"
 }
