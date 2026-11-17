@@ -349,6 +349,12 @@ struct Slice4SelectionTests {
         rtNoRead.pointerMove(to: Vec2(nr[0] + 70, nr[1] + 6), at: 0.14)
         _ = rtNoRead.frame(at: 0.15)
         #expect(unreadBuilds.count == buildsAtRest)
+        #expect(rtNoRead.pressedKey == "nr")
+        rtNoRead.pointerUp(at: Vec2(nr[0] + 70, nr[1] + 6), at: 0.16)
+        _ = rtNoRead.frame(at: 0.17)
+        #expect(rtNoRead.pressedKey == nil)
+        #expect(rtNoRead.selectedText()?.isEmpty == false)
+        #expect(unreadBuilds.count == buildsAtRest)
     }
 
     // MARK: - 5. selection_run.rs (words merge into 1 rect & chip bridge)

@@ -11130,8 +11130,10 @@ public final class Runtime<State> {
             downAllLiveOnly = downAllLiveOnly && liveOnly
         }
 
-        let needsPressVisual = downFocusChanged || nodeHasPressVisuals(node) || !downRanHandler || !downAllLiveOnly
-        if needsPressVisual {
+        // Passive selectable text holds the pointer to preserve its hover ancestors during a
+        // drag. Selection painting and any subscribed views are invalidated by the selection runtime.
+        let passiveSelection = button == .primary && node.el.isSelectable && !primaryPressHitPredicate(node)
+        if downFocusChanged || nodeHasPressVisuals(node) || !downAllLiveOnly || (!downRanHandler && !passiveSelection) {
             dirtyCommit(at: now, why: CommitWhy.input, inputChange: false)
         }
     }
@@ -11378,7 +11380,8 @@ public final class Runtime<State> {
             }
         }
 
-        if suppressedClickFromSelDrag || hadPressVisual || !upRanHandler || !upAllLiveOnly {
+        let passiveSelection = button == .primary && node.el.isSelectable && !primaryPressHitPredicate(node)
+        if hadPressVisual || !upAllLiveOnly || ((suppressedClickFromSelDrag || !upRanHandler) && !passiveSelection) {
             dirtyCommit(at: now, why: CommitWhy.input, inputChange: false)
         }
     }
