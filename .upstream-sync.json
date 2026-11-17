@@ -1,9 +1,9 @@
 {
   "swiftExecutables" : 98,
   "swiftTargets" : 18,
-  "syncedAt" : "2026-11-17T08:11:14Z",
-  "syncedCommit" : "3468f3a3b6c690336a94a8a57e66a149c2a422dc",
-  "syncedCommitDate" : "2026-11-16T21:30:16-08:00",
-  "syncedCommitSubject" : "fix(rune): keep status ink with a row during a live reorder (#1098)",
+  "syncedAt" : "2026-11-17T09:31:29Z",
+  "syncedCommit" : "47195cfae0fef50997a167e2d75afde901054d2a",
+  "syncedCommitDate" : "2026-11-17T02:30:56-06:00",
+  "syncedCommitSubject" : "Text under gliding growth rows moves in whole pixels with its box (#1072)",
   "upstreamRepo" : "https:\/\/github.com\/anomalyco\/rune"
 }
