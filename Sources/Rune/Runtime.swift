@@ -3129,8 +3129,13 @@ public final class Runtime<State> {
             let rowProjectionY = item.parentHasGrowth ? localRect.y - naturalLocalRect.y : 0
             let growthContentShiftY = item.growthPlacementShiftY + hdrRestore
             // A top spacer inside the stack supplies the mounted children's stationary snap origin.
-            let virtualWindowSnapOriginY = el.growthSpec != nil && el.virtualEstimate != nil
-                ? Snap.grid(virtualLists[path]?.lastMountedSnapshot?.topSpacerH ?? 0, scale: pixelScale) : 0
+            let virtualWindowSnapOriginY: Float
+            if el.growthSpec != nil, el.virtualEstimate != nil, let spacer = el.children.first,
+               spacer.keyId == "__v_top_spacer", case let .points(height) = spacer.layout.height {
+                virtualWindowSnapOriginY = Snap.grid(height + virtualGapY(el.layout), scale: pixelScale)
+            } else {
+                virtualWindowSnapOriginY = 0
+            }
             let nextFoldHeaderPath: String? = (item.foldHeaderPath == path) ? nil : item.foldHeaderPath
             let nextFoldHeaderLift: Float = (item.foldHeaderPath == path) ? 0 : item.foldHeaderLift
             let unscrolledX = parentUnscrolledOrigin.x + localRect.x

@@ -83,7 +83,7 @@ extension RuntimeVirtualListState {
         let hi = min(count, lastMountedRange.upperBound)
         guard lo < hi, hi < prefix.count else { return 0 }
         let mountedTop = prefix[lo]
-        let mountedBot = prefix[hi]
+        let mountedBot = rowEnd(hi, prefix: prefix)
         let visLo = max(0, offset)
         let visHi = pinned ? mountedBot : (visLo + viewport)
         let above = max(0, visLo - mountedTop)
@@ -100,7 +100,7 @@ extension RuntimeVirtualListState {
         let edgeLo = max(0, offset - viewport * 0.25)
         let edgeHi = offset + viewport * 1.25
         if lo > 0 && prefix[lo] > edgeLo { return true }
-        if hi < count && prefix[hi] < edgeHi { return true }
+        if hi < count && rowEnd(hi, prefix: prefix) < edgeHi { return true }
         if !pinned && lastMountedRange.isEmpty { return true }
         return false
     }
@@ -253,8 +253,7 @@ extension Runtime {
             let (prefix, total) = vState.computeOffsets(estimated: est)
             let lo = max(0, min(count, mounted.lowerBound))
             let hi = max(lo, min(count, mounted.upperBound))
-            let newTopH = lo > 0 ? prefix[lo] : 0
-            let newBotH = hi < count ? max(0, total - prefix[hi]) : 0
+            let (newTopH, newBotH) = vState.spacerHeights(mounted: lo..<hi, prefix: prefix, total: total)
             for idx in el.children.indices {
                 if el.children[idx].keyId == "__v_top_spacer" {
                     let cur = el.children[idx].layout.height.resolve(against: 0) ?? 0

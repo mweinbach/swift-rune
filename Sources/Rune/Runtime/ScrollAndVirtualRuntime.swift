@@ -47,12 +47,6 @@ extension Runtime {
         }.compactMap { Self.virtualRevealRow($0.key, in: places, path: list) }.last
     }
 
-    private static func revealWindowOffset(row: Int?, prefix: [Float], viewport: Float, from offset: Float) -> Float {
-        guard let row, prefix[row] > offset + viewport || prefix[row + 1] < offset else { return offset }
-        let height = prefix[row + 1] - prefix[row]
-        return max(0, prefix[row] - max(0, viewport - height) * 0.5)
-    }
-
     internal enum VirtualRowReuseMode: Equatable, Sendable {
         case none
         case remount
@@ -392,6 +386,7 @@ extension Runtime {
         ctx.anyVirtualList = true
         activeVirtualPaths.insert(path)
         var vState = virtualLists[path] ?? RuntimeVirtualListState()
+        vState.gap = virtualGapY(el.layout)
         let prevKeys = vState.lastKeys
         let isIndexed = (el.virtualRowsSource != nil)
         let est = max(1, el.virtualEstimate ?? 40)
@@ -493,13 +488,14 @@ extension Runtime {
             pinned.insert(fi)
         }
         let destination = pendingVirtualReveal(places: vState.rowPlaces, list: path)
-        var windowOffsetY = Self.revealWindowOffset(row: destination, prefix: prefix, viewport: vpH, from: listOffsetY)
+        var windowOffsetY = vState.revealWindowOffset(row: destination, prefix: prefix, viewport: vpH, from: listOffsetY)
         if let destination { pinned.insert(destination) }
         for rev in scrollRequestsState.reveals where rev.viewport == vpPath {
             if let ri = Self.virtualRevealRow(rev.key, in: vState.rowPlaces, path: path) {
                 pinned.insert(ri)
-                if isFirstMount && prefix[ri + 1] > windowOffsetY + vpH {
-                    windowOffsetY = max(0, prefix[ri + 1] - vpH)
+                let bottom = vState.rowEnd(ri + 1, prefix: prefix)
+                if isFirstMount && bottom > windowOffsetY + vpH {
+                    windowOffsetY = max(0, bottom - vpH)
                 }
             }
         }
@@ -560,8 +556,7 @@ extension Runtime {
         }
 
         var built: [El<State>] = []
-        let topSpacerH = mounted.lowerBound > 0 ? prefix[mounted.lowerBound] : 0
-        let botSpacerH = mounted.upperBound < count ? max(0, total - prefix[mounted.upperBound]) : 0
+        let (topSpacerH, botSpacerH) = vState.spacerHeights(mounted: mounted, prefix: prefix, total: total)
         if topSpacerH > 0 {
             built.append(Self.virtualSpacer(key: "__v_top_spacer", height: topSpacerH))
         }
@@ -1953,9 +1948,9 @@ extension Runtime {
             }
             let maxOff = max(0, total + topOffset - vpH)
             let actualOffset = max(0, min(max(0, total - vpH), max(0, min(rawOff, maxOff) - topOffset)))
-            let offset = Self.revealWindowOffset(row: destination, prefix: prefix, viewport: vpH, from: actualOffset)
+            let offset = vState.revealWindowOffset(row: destination, prefix: prefix, viewport: vpH, from: actualOffset)
             let before = prefix[mounted.lowerBound]
-            let end = prefix[mounted.upperBound]
+            let end = vState.rowEnd(mounted.upperBound, prefix: prefix)
             let mountedH = max(0, end - before)
             if pinned {
                 if mounted.lowerBound > 0 && mountedH < vpH - 0.5 {
@@ -2000,7 +1995,7 @@ extension Runtime {
             if mounted.isEmpty && !vState.lastKeys.isEmpty { return true }
             let edge = vpH * RuntimeVirtualListState.nonIndexedEdgeMultiplier
             let winTop = prefix[mounted.lowerBound]
-            let winBot = prefix[mounted.upperBound]
+            let winBot = vState.rowEnd(mounted.upperBound, prefix: prefix)
             if (mounted.lowerBound > 0 && offsetY < winTop + edge)
                 || (mounted.upperBound < vState.lastKeys.count && offsetY + vpH > winBot - edge) {
                 return true
@@ -2480,9 +2475,7 @@ extension Runtime {
                let listIdx = flatNodes.firstIndex(where: { $0.path == vr.listPath }),
                let rowIdx = vState.rowPlaces.index(of: vr.rowKey) {
                 let est = Float(flatNodes[listIdx].el.virtualEstimate ?? 40)
-                let prefixY: Float = (0..<rowIdx).reduce(0) { sum, idx in
-                    sum + vState.rowHeight(forKey: vState.lastKeys[idx], estimated: est)
-                }
+                let prefixY = vState.prefix(rowIdx, estimated: est)
                 let laidRowTop = flatNodes[listIdx].targetRect.top + prefixY + vr.yInRow
                 laidRelTop = laidRowTop - vNode.targetRect.top
             } else {

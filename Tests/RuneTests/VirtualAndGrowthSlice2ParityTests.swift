@@ -17,11 +17,11 @@ struct VirtualAndGrowthSlice2ParityTests {
         return t
     }
 
-    @Test("The mounted virtual window shares its spacer's snap origin at fractional scale")
-    func virtualWindowSnapOrigin() throws {
+    @Test("The mounted virtual window shares its spacer's snap origin at fractional scale", arguments: [Float(0), 5])
+    func virtualWindowSnapOrigin(gap: Float) throws {
         let rt = Runtime(state: (), viewport: Vec2(160, 150), pixelScale: 1.875) { _, _ in
             col().key("scroll").size(160, 150).scrollY(stickBottom: true).child(
-                col().key("list").wFull().growth().virtualRows(count: 100, estimatedRowHeight: 30.3,
+                col().key("list").wFull().growth().gap(gap).virtualRows(count: 100, estimatedRowHeight: 30.3,
                     key: { _, i in "row-\(i)" }, build: { _, _ in el().wFull().h(30.3) })
             )
         }
@@ -30,10 +30,40 @@ struct VirtualAndGrowthSlice2ParityTests {
         let spacer = try #require(rt.flatNodes.first { $0.parentIndex == list.index && $0.key == "__v_top_spacer" })
         let row = try #require(rt.flatNodes.first { $0.parentIndex == list.index && $0.key?.hasPrefix("row-") == true })
         #expect(spacer.localRect.height > 0)
-        #expect(abs(list.virtualWindowSnapOriginY - spacer.localRect.height) < 1 / 64)
+        #expect(abs(list.virtualWindowSnapOriginY - (spacer.localRect.height + gap)) < 1 / 64)
         #expect(abs(row.localRect.y - list.virtualWindowSnapOriginY) < 1 / 64)
         #expect(rt.growthSnapOffsetY(for: list) == 0)
         #expect(rt.growthSnapOffsetY(for: row) == 0)
+    }
+
+    @Test("Virtual row gaps survive an offscreen landing and a reorder with unequal heights")
+    func gappedVirtualReorder() throws {
+        let heights: [Int: Float] = [3: 40, 4: 24, 48: 40, 49: 24, 50: 36, 51: 28]
+        let rt = Runtime(state: Array(0..<100), viewport: Vec2(160, 150), pixelScale: 1) { keys, _ in
+            col().key("scroll").size(160, 150).scrollY().child(
+                col().wFull().growth().gap(5).virtualRows(count: keys.count, estimatedRowHeight: 32,
+                    key: { keys, i in "row-\(keys[i])" }, build: { keys, i in el().wFull().h(heights[keys[i]] ?? 32) })
+            )
+        }
+        func check(scroll: Float, tops: [Float]) throws {
+            #expect(rt.scrollOffset(forKey: "scroll").y == scroll)
+            for (key, y) in zip(49...52, tops) {
+                let row = try #require(rt.element(byKey: "row-\(key)"))
+                #expect(row.rect[1] == y)
+            }
+        }
+        _ = rt.frame(at: 0)
+        var t = settle(rt)
+        #expect(rt.element(byKey: "row-50") == nil)
+        rt.update(at: t) { _, tx in tx.scrollKeyTo("row-50", at: 12) }
+        t = settle(rt, start: t)
+        try check(scroll: 1838, tops: [-17, 12, 53, 86])
+        rt.update(at: t) { keys, _ in keys.swapAt(50, 52) }
+        t = settle(rt, start: t)
+        try check(scroll: 1838, tops: [-17, 82, 49, 12])
+        rt.update(at: t) { _, tx in tx.scrollKeyTo("row-50", at: 12) }
+        _ = settle(rt, start: t)
+        try check(scroll: 1908, tops: [-87, 12, -21, -58])
     }
 
     // MARK: - 1. src/runtime/row_reorder_tests.rs

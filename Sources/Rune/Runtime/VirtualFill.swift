@@ -186,6 +186,7 @@ internal struct RuntimeVirtualListState: Sendable {
     /// The list's own top and bottom padding (`VirtualList::pad_top` / `pad_bottom`).
     var padTop: Float = 0
     var padBottom: Float = 0
+    var gap: Float = 0
 
     /// The rows' extent, their padding included, for rows totalling `total` (`VirtualList::extent`).
     func extent(total: Float) -> Float {
@@ -211,10 +212,16 @@ internal struct RuntimeVirtualListState: Sendable {
         return at
     }
 
-    /// The rows above row `end`, at their measured or estimated heights (`VirtualList::prefix`).
+    private func stride(at index: Int, estimated: Float) -> Float {
+        let height = measuredByKey.heights[index] ?? estimated
+        return height + (index + 1 < measuredByKey.heights.count ? gap : 0)
+    }
+
+    /// The top of row `end`, or the list's extent when all rows are included (`VirtualList::prefix`).
     func prefix(_ end: Int, estimated: Float) -> Float {
         let count = min(lastKeys.count, max(0, end))
-        return measuredByKey.heights.prefix(count).reduce(0) { $0 + ($1 ?? max(1, estimated)) }
+        let fallback = max(1, estimated)
+        return (0..<count).reduce(0) { $0 + stride(at: $1, estimated: fallback) }
     }
 
     func rowHeight(forKey key: String, estimated: Float) -> Float {
@@ -227,11 +234,30 @@ internal struct RuntimeVirtualListState: Sendable {
         var y: Float = 0
         prefix.append(0)
         let fallback = max(1, estimated)
-        for height in measuredByKey.heights {
-            y += height ?? fallback
+        for index in measuredByKey.heights.indices {
+            y += stride(at: index, estimated: fallback)
             prefix.append(y)
         }
         return (prefix, y)
+    }
+
+    /// The bottom of the last included row, before the gap to the next row.
+    func rowEnd(_ end: Int, prefix: [Float]) -> Float {
+        end > 0 && end < lastKeys.count ? prefix[end] - gap : prefix[end]
+    }
+
+    /// Spacer nodes participate in the stack's flex gap alongside the mounted rows.
+    func spacerHeights(mounted: Range<Int>, prefix: [Float], total: Float) -> (top: Float, bottom: Float) {
+        let top = mounted.lowerBound > 0 ? max(0, prefix[mounted.lowerBound] - gap) : 0
+        let bottom = mounted.upperBound < lastKeys.count ? max(0, total - rowEnd(mounted.upperBound, prefix: prefix) - gap) : 0
+        return (top, bottom)
+    }
+
+    func revealWindowOffset(row: Int?, prefix: [Float], viewport: Float, from offset: Float) -> Float {
+        guard let row else { return offset }
+        let bottom = rowEnd(row + 1, prefix: prefix)
+        guard prefix[row] > offset + viewport || bottom < offset else { return offset }
+        return max(0, prefix[row] - max(0, viewport - (bottom - prefix[row])) * 0.5)
     }
 
     func visibleRange(offset: Float, viewport: Float, prefix: [Float], count: Int) -> Range<Int> {
@@ -242,7 +268,7 @@ internal struct RuntimeVirtualListState: Sendable {
         var end = 0
         for i in 0..<count {
             let r0 = prefix[i]
-            let r1 = prefix[i + 1]
+            let r1 = rowEnd(i + 1, prefix: prefix)
             if r1 > lo && r0 < hi {
                 start = min(start, i)
                 end = max(end, i + 1)
@@ -267,7 +293,7 @@ internal struct RuntimeVirtualListState: Sendable {
         var targetHi = 0
         for i in 0..<count {
             let r0 = prefix[i]
-            let r1 = prefix[i + 1]
+            let r1 = rowEnd(i + 1, prefix: prefix)
             if r1 > lo && r0 < hi {
                 targetLo = min(targetLo, i)
                 targetHi = max(targetHi, i + 1)
@@ -298,7 +324,7 @@ internal struct RuntimeVirtualListState: Sendable {
         let missing = targetHi - targetLo - overlap
         let edgeWanted = pinned
             ? (chosenHi < count || (missing > 0 && chosenLo > targetLo))
-            : ((chosenLo > 0 && prefix[chosenLo] > edgeLo) || (chosenHi < count && prefix[chosenHi] < edgeHi))
+            : ((chosenLo > 0 && prefix[chosenLo] > edgeLo) || (chosenHi < count && rowEnd(chosenHi, prefix: prefix) < edgeHi))
         return (missing > 0 && edgeWanted, missing)
     }
 
