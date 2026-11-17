@@ -114,10 +114,12 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
         }
 
         func failWhileLocked(_ message: String) {
-            guard machine.failed == nil else { return }
-            state = .failed(message)
+            guard !state.isFailed else { return }
+            // A backend step can record its error before returning the effect that publishes it.
+            let reason = machine.failed ?? message
+            state = .failed(reason)
             request.playing = false
-            machine.failed = message
+            machine.failed = reason
             generation &+= 1
         }
 
