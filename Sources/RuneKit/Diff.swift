@@ -2848,7 +2848,7 @@ public struct DiffView<State>: Sendable {
             && upperLineHeight <= lineH
             && syntaxTheme.weights.allSatisfy { $0 == nil || $0 == font.weight }
 
-        var list = El<State>(direction: .column).key("\(key)-rows").wFull().shrink(0).role(.list).label("Diff")
+        var list = El<State>(direction: .column).key("\(key)-rows").wFull().shrink(0).selectionGroup().role(.list).label("Diff")
         if !st.wraps { list = list.minW(max(contentWidth, measuredWidth ?? 0)) }
         // The runtime gives each virtual row its model key. The inner element preserves the
         // app-facing key for its header, code row, gap, or custom annotation.
@@ -3491,14 +3491,6 @@ public struct DiffView<State>: Sendable {
 
     // MARK: Unified & Split Rows
 
-    private func expandTabsWithOffsets(_ raw: String) -> (text: String, rawToExpanded: [Int]?) {
-        DiffViewHelpers.expandTabsWithOffsets(raw, tabSize: look.tabSize)
-    }
-
-    private func insertSoftBreaks(_ s: String, enabled: Bool) -> String {
-        DiffViewHelpers.insertSoftBreaks(s, enabled: enabled)
-    }
-
     private func gutterBar(_ kind: DiffLineKind?, height: Float) -> El<State> {
         let color: Color = switch kind {
         case .addition: kit.c.success.icon
@@ -3514,32 +3506,6 @@ public struct DiffView<State>: Sendable {
             .child(text("No newline at end of file").font(kit.ty.caption()).color(kit.c.textFaint))
     }
 
-    private func buildCodeSpans(
-        text rawText: String,
-        highlights: [SyntaxHighlight],
-        syntaxTheme: SyntaxTheme,
-        changedRanges: [Range<Int>],
-        wordBg: Color,
-        wrap: Bool
-    ) -> [TextSpan] {
-        let (code, offsetMap) = expandTabsWithOffsets(rawText)
-        guard !code.isEmpty else {
-            return [TextSpan(" ", color: kit.c.textBase, monospace: true)]
-        }
-
-        return DiffViewHelpers.mergeCodeSpans(
-            code: code,
-            rawCount: rawText.utf8.count,
-            offsetMap: offsetMap,
-            highlights: highlights,
-            changedRanges: changedRanges,
-            defaultColor: kit.c.textBase,
-            syntaxTheme: syntaxTheme,
-            wordBg: wordBg,
-            wrap: wrap
-        )
-    }
-
     private struct CodeAppearance: Equatable {
         let changes: [Range<Int>]
         let document: UUID
@@ -3549,6 +3515,7 @@ public struct DiffView<State>: Sendable {
         let font: TextStyle
         let textColor: Color
         let wordColor: Color
+        let selection: Color?
         let tabSize: Int
         let wrap: Bool
     }
@@ -3567,27 +3534,29 @@ public struct DiffView<State>: Sendable {
         let resolved = hasCustomHighlighter ? highlighter : state.highlighter
         let sourceSide: DiffSide = line.oldNumber != nil && (line.kind == .deletion || line.newNumber == nil) ? .old : .new
         let source = DiffLineRef(side: sourceSide, line: line.lineNumber(for: sourceSide) ?? 1)
+        let copy = state.copySide == side || (state.mode == .unified && line.kind == .context)
+        let selection = copy ? kit.selection() : nil
         let appearance = CodeAppearance(changes: changed, document: state.highlightVersion,
                                         source: source, highlighter: Data(resolved.id.utf8), theme: syntaxTheme, font: kit.ty.diffCodeFont,
-                                        textColor: kit.c.textBase, wordColor: wordBg, tabSize: look.tabSize, wrap: wrap)
+                                        textColor: kit.c.textBase, wordColor: wordBg, selection: selection, tabSize: look.tabSize, wrap: wrap)
         let codeEl: El<State> = memo(cellKey, deps: appearance) {
             let highlights = state.highlights(file: file, side: source.side, line: source.line, using: resolved)
-            let spans = buildCodeSpans(text: line.text, highlights: highlights, syntaxTheme: syntaxTheme,
-                                       changedRanges: changed, wordBg: wordBg, wrap: wrap)
-            let code: El<State> = rich(spans).font(kit.ty.diffCodeFont)
+            let shown = DiffViewHelpers.formattedCode(line.text, tabSize: look.tabSize, wrap: wrap)
+            let spans = DiffViewHelpers.mergeCodeSpans(code: shown.text, offsetMap: shown.sourceOffsets,
+                                                       highlights: highlights, changedRanges: changed,
+                                                       defaultColor: kit.c.textBase, syntaxTheme: syntaxTheme, wordBg: wordBg)
+            var code: El<State> = rich(spans).font(kit.ty.diffCodeFont)
+            if let selection {
+                code = code.selectable().selectionColor(selection)
+                for range in shown.uncopied { code = code.uncopied(range) }
+            }
             return wrap ? code.wrapText().wFull() : code.noWrap()
         }
         let hoverHandler: (inout State, Bool, inout Tx) -> Void = { [get, set] s, inside, tx in
             var d = get(s)
-            let prevCopySide = d.copySide
-            if d.hoverText(side: side, cell: cellKey, inside: inside) {
-                set(&s, d)
-                if d.copySide == prevCopySide {
-                    tx.liveOnly()
-                }
-            } else {
-                tx.liveOnly()
-            }
+            let changedSide = d.hoverText(side: side, cell: cellKey, inside: inside)
+            set(&s, d)
+            if !changedSide { tx.liveOnly() }
         }
         var content = codeEl
         if wrap || line.noNewline {
@@ -3914,75 +3883,51 @@ extension Kit {
 
 /// Pure helper functions used by `DiffView` (`rune_kit::diff::view` free helpers).
 internal enum DiffViewHelpers: Sendable {
-    /// Expands ASCII tabs to `tabSize`-column stops, returning `(text, rawToExpanded)` when any `\t` is present.
-    static func expandTabsWithOffsets(_ raw: String, tabSize: Int = 4) -> (text: String, rawToExpanded: [Int]?) {
-        guard raw.utf8.contains(0x09) else { return (raw, nil) }
+    /// Keeps source tabs and maps syntax ranges and clipboard exclusions into the displayed UTF-8 text.
+    static func formattedCode(_ raw: String, tabSize: Int = 4, wrap: Bool) -> (text: String, sourceOffsets: [Int]?, uncopied: [Range<Int>]) {
+        guard raw.utf8.contains(where: { $0 == 9 || (wrap && ($0 == 46 || $0 == 40 || $0 == 91 || $0 == 47)) }) else {
+            return (raw, nil, [])
+        }
         let step = max(1, tabSize)
-        var out = ""
-        out.reserveCapacity(raw.utf8.count + 8)
-        var rawToExpanded: [Int] = []
-        rawToExpanded.reserveCapacity(raw.utf8.count + 1)
+        var shown = ""
+        var offsets: [Int] = []
+        var inserted: [Range<Int>] = []
+        shown.reserveCapacity(raw.utf8.count + 8)
+        offsets.reserveCapacity(raw.utf8.count + 1)
         var col = 0
-        for scalar in raw.unicodeScalars {
-            let expandedStart = out.utf8.count
-            for _ in 0..<scalar.utf8.count {
-                rawToExpanded.append(expandedStart)
-            }
+        let scalars = raw.unicodeScalars
+        var i = scalars.startIndex
+        while i < scalars.endIndex {
+            let scalar = scalars[i]
+            i = scalars.index(after: i)
+            let byte = shown.utf8.count
+            offsets.append(contentsOf: byte..<(byte + scalar.utf8.count))
+            shown.unicodeScalars.append(scalar)
+            let start = shown.utf8.count
             if scalar == "\t" {
-                let spaces = step - (col % step)
-                out.append(String(repeating: " ", count: spaces))
-                col += spaces
-            } else {
-                out.unicodeScalars.append(scalar)
-                col += 1
+                let pad = step - 1 - col % step
+                shown.append(String(repeating: " ", count: pad))
+                col += pad
+            } else if wrap, scalar == "." || scalar == "(" || scalar == "[" || scalar == "/",
+                      i < scalars.endIndex, !scalars[i].properties.isWhitespace {
+                shown.unicodeScalars.append("\u{200B}")
             }
+            if shown.utf8.count > start { inserted.append(start..<shown.utf8.count) }
+            col += 1
         }
-        rawToExpanded.append(out.utf8.count)
-        return (out, rawToExpanded)
-    }
-
-    /// Inserts zero-width soft-break opportunities (`U+200B`) after `.`, `(`, `[`, and `/` before non-whitespace.
-    static func insertSoftBreaks(
-        _ s: String,
-        enabled: Bool,
-        trailingNonWhitespace: Bool = false
-    ) -> String {
-        guard enabled, !s.isEmpty else { return s }
-        guard s.utf8.contains(where: { $0 == 0x2E || $0 == 0x28 || $0 == 0x5B || $0 == 0x2F }) else {
-            return s
-        }
-        let scalars = Array(s.unicodeScalars)
-        var out = String.UnicodeScalarView()
-        out.reserveCapacity(scalars.count + 8)
-        for idx in scalars.indices {
-            let sc = scalars[idx]
-            out.append(sc)
-            if sc == "." || sc == "(" || sc == "[" || sc == "/" {
-                let nextIsNonWS: Bool
-                if idx + 1 < scalars.count {
-                    nextIsNonWS = !scalars[idx + 1].properties.isWhitespace
-                } else {
-                    nextIsNonWS = trailingNonWhitespace
-                }
-                if nextIsNonWS {
-                    out.append("\u{200B}")
-                }
-            }
-        }
-        return String(out)
+        offsets.append(shown.utf8.count)
+        return (shown, offsets, inserted)
     }
 
     /// Merges syntax highlight spans and intra-line changed word ranges into coalesced `TextSpan` slices.
     static func mergeCodeSpans(
         code: String,
-        rawCount: Int,
         offsetMap: [Int]?,
         highlights: [SyntaxHighlight],
         changedRanges: [Range<Int>],
         defaultColor: Color,
         syntaxTheme: SyntaxTheme,
-        wordBg: Color,
-        wrap: Bool
+        wordBg: Color
     ) -> [TextSpan] {
         let utf8 = code.utf8
         let total = utf8.count
@@ -3990,7 +3935,7 @@ internal enum DiffViewHelpers: Sendable {
 
         func mapRawOffset(_ rawOffset: Int) -> Int {
             guard let offsetMap else { return min(max(0, rawOffset), total) }
-            let clamped = min(max(0, rawOffset), min(rawCount, offsetMap.count - 1))
+            let clamped = min(max(0, rawOffset), offsetMap.count - 1)
             return min(max(0, offsetMap[clamped]), total)
         }
 
@@ -4047,13 +3992,7 @@ internal enum DiffViewHelpers: Sendable {
 
             let startIdx = utf8.index(utf8.startIndex, offsetBy: a)
             let endIdx = utf8.index(utf8.startIndex, offsetBy: b)
-            let trailingNonWS: Bool = {
-                guard wrap, b < total else { return false }
-                let rest = code[endIdx...]
-                return rest.unicodeScalars.first.map { !$0.properties.isWhitespace } ?? false
-            }()
-            let rawSlice = String(decoding: utf8[startIdx..<endIdx], as: UTF8.self)
-            let textSlice = insertSoftBreaks(rawSlice, enabled: wrap, trailingNonWhitespace: trailingNonWS)
+            let textSlice = String(decoding: utf8[startIdx..<endIdx], as: UTF8.self)
 
             if let last = spans.last,
                last.color == fg,

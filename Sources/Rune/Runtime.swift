@@ -10797,7 +10797,7 @@ public final class Runtime<State> {
         }
 
         playgroundPointerDown(at: pos, at: now)
-        let interactiveHit = hitTestDetailed(at: pos) { node in
+        var interactiveHit = hitTestDetailed(at: pos) { node in
             let h = node.el.handlers
             if button != .primary {
                 let optedIn = h.pointerButtons?.contains(button) == true
@@ -10809,7 +10809,15 @@ public final class Runtime<State> {
                 }
                 return h.onMiddlePress != nil
             }
-            return self.primaryPressHitPredicate(node)
+            return self.primaryPressHitPredicate(node) || node.el.isSelectable
+        }
+
+        if button == .primary, let text = interactiveHit?.node, text.el.isSelectable,
+           !primaryPressHitPredicate(text), !(hasActiveTextLinks(text.el) && linkIndex(atPath: text.path, at: pos) != nil) {
+            let receiver = selectablePressReceiver(text, handles: primaryPressHitPredicate)
+            if receiver.index != text.index, let hit = hitTestDetailed(at: pos, predicate: { $0.index == receiver.index }) {
+                interactiveHit = hit
+            }
         }
 
         guard let (node, rect, rawLocal) = interactiveHit else {

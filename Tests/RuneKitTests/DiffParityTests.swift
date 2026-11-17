@@ -1208,10 +1208,11 @@ struct DiffParityTests {
         #expect(win.range.lowerBound > 0)
     }
 
-    @Test("diff/view.rs: DiffViewHelpers expandTabsWithOffsets, insertSoftBreaks, mergeCodeSpans, rowLabel (#46-#48)")
+    @Test("diff/view.rs: DiffViewHelpers formattedCode, mergeCodeSpans, rowLabel (#46-#48)")
     func diffViewHelpersParity() {
-        let (expanded, map) = DiffViewHelpers.expandTabsWithOffsets("\ta\té", tabSize: 4)
-        #expect(expanded == "    a   é")
+        let (expanded, map, pads) = DiffViewHelpers.formattedCode("\ta\té", tabSize: 4, wrap: false)
+        #expect(expanded == "\t   a\t  é")
+        #expect(pads == [1..<4, 6..<8])
         #expect(map != nil)
         if let map {
             // Raw "\t" (0..<1) -> expanded (0..<4); raw "a" (1..<2) -> (4..<5); "\t" (2..<3) -> (5..<8); "é" (3..<5) -> (8..<10)
@@ -1224,6 +1225,8 @@ struct DiffParityTests {
 
         // Cross-span soft-break insertion after '.' and '/' before non-whitespace
         let code = "a.b/c "
+        let shown = DiffViewHelpers.formattedCode(code, wrap: true)
+        #expect(shown.uncopied == [2..<5, 7..<10])
         let highlights = [
             SyntaxHighlight(range: 0..<2, paint: .kind(.punctuation)), // "a."
             SyntaxHighlight(range: 2..<4, paint: .kind(.property)),    // "b/"
@@ -1232,23 +1235,21 @@ struct DiffParityTests {
         let kit = Kit.neutral(dark: false)
         let theme = SyntaxTheme.fromKit(kit)
         let spans = DiffViewHelpers.mergeCodeSpans(
-            code: code,
-            rawCount: code.utf8.count,
-            offsetMap: nil,
+            code: shown.text,
+            offsetMap: shown.sourceOffsets,
             highlights: highlights,
             changedRanges: [2..<3], // "b"
             defaultColor: kit.c.textBase,
             syntaxTheme: theme,
-            wordBg: kit.c.warning.bg,
-            wrap: true
+            wordBg: kit.c.warning.bg
         )
         let joined = spans.map(\.text).joined()
         #expect(joined == "a.\u{200B}b/\u{200B}c ")
         #expect(spans.contains(where: { $0.text.contains("b") && $0.background == kit.c.warning.bg }))
 
         // Disabled wrap keeps original characters
-        #expect(DiffViewHelpers.insertSoftBreaks("a.b(c)[d]/e", enabled: false) == "a.b(c)[d]/e")
-        #expect(DiffViewHelpers.insertSoftBreaks("a. b/ ", enabled: true) == "a. b/ ")
+        #expect(DiffViewHelpers.formattedCode("a.b(c)[d]/e", wrap: false).text == "a.b(c)[d]/e")
+        #expect(DiffViewHelpers.formattedCode("a. b/ ", wrap: true).text == "a. b/ ")
 
         // rowLabel formatting
         let added = DiffLine(kind: .addition, oldNumber: nil, newNumber: 7, text: "let x = 1")
@@ -2361,11 +2362,11 @@ struct DiffParityTests {
         #expect(colored == [SyntaxHighlight(range: 4..<7, paint: .kind(.keyword))])
         let kit = Kit.neutral(dark: false)
         let theme = SyntaxTheme.fromKit(kit)
-        let (shown, offsets) = DiffViewHelpers.expandTabsWithOffsets(new[1], tabSize: 4)
-        let spans = DiffViewHelpers.mergeCodeSpans(code: shown, rawCount: new[1].utf8.count, offsetMap: offsets,
+        let (shown, offsets, _) = DiffViewHelpers.formattedCode(new[1], tabSize: 4, wrap: false)
+        let spans = DiffViewHelpers.mergeCodeSpans(code: shown, offsetMap: offsets,
                                                    highlights: colored, changedRanges: [4..<7], defaultColor: kit.c.textBase,
-                                                   syntaxTheme: theme, wordBg: kit.c.warning.bg, wrap: false)
-        #expect(spans.map(\.text).joined() == "    é NEW")
+                                                   syntaxTheme: theme, wordBg: kit.c.warning.bg)
+        #expect(spans.map(\.text).joined() == "\t   é NEW")
         #expect(spans.last?.text == "NEW" && spans.last?.color == theme.color(for: .keyword) && spans.last?.background == kit.c.warning.bg)
         var copy = st
         copy.files[0].source = nil
@@ -2452,7 +2453,6 @@ struct DiffParityTests {
 
         let spans = DiffViewHelpers.mergeCodeSpans(
             code: "foobarbaz!",
-            rawCount: 10,
             offsetMap: nil,
             highlights: [
                 SyntaxHighlight(range: 0..<6, paint: .kind(.keyword)),
@@ -2461,8 +2461,7 @@ struct DiffParityTests {
             changedRanges: [3..<8],
             defaultColor: kit.c.textBase,
             syntaxTheme: theme,
-            wordBg: wordBg,
-            wrap: false
+            wordBg: wordBg
         )
         #expect(spans.count == 4)
         #expect(spans[0].text == "foo" && spans[0].color == kwColor && spans[0].background == nil)

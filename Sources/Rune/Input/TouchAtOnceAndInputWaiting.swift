@@ -110,15 +110,21 @@ extension Runtime {
         let pos = point ?? pointerPosition
         guard pos.x > -9000, pos.y > -9000 else { return nil }
         guard let top = hitTest(at: pos, predicate: { self.takesPrimaryInput($0) })?.node else { return nil }
-        if !top.el.isSelectable || hasPrimaryHandler(top) || !top.el.textLinks.isEmpty { return top.path }
+        guard top.el.isSelectable, !hasPrimaryHandler(top), top.el.textLinks.isEmpty else { return top.path }
+        return selectablePressReceiver(top) { self.hasPrimaryHandler($0) || $0.el.focusable }.path
+    }
+
+    /// A plain selectable label lets the nearest enclosing control take its press. With no
+    /// such control, the label itself holds the press while a drag extends the text selection.
+    internal func selectablePressReceiver(_ top: FlatNode, handles: (FlatNode) -> Bool) -> FlatNode {
         var parent = top.parentIndex
-        while let p = parent, p < flatNodes.count {
+        while let p = parent {
             let node = flatNodes[p]
             if node.effectiveInert || node.el.isModal { break }
-            if hasPrimaryHandler(node) || node.el.focusable { return node.path }
+            if handles(node) { return node }
             parent = node.parentIndex
         }
-        return top.path
+        return top
     }
 
     /// `Handlers::has_primary`: a press, double press, hover, drag or drag-out handler.
