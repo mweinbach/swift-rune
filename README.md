@@ -4,7 +4,7 @@ A Swift 6.4 port of [anomalyco/rune](https://github.com/anomalyco/rune), a GPU-r
 
 Every `RuneApp` supports headless execution (`--snap`, `--tree`, `--script`, `--frames`, `--strip`) so UIs and automated tests can render PNGs, inspect the element tree, and drive scripted input without a window.
 
-To measure scrolling on your machine, run `swift run --package-path Tests/Support/LargeViews -c release ScrollBench table window`. Use `tree` for the 50,000-file tree. Both workloads replay 600 wheel events and verify the visible rows. The benchmark also supports CPU frame timings, pixel captures and comparison with the pinned Rust examples. [Large-view benchmark](Tests/Support/LargeViews/README.md)
+To measure scrolling on your machine, run `swift run --package-path Tests/Support/LargeViews -c release ScrollBench table window` for the 100,000-row table. Use `tree` for the 50,000-file tree or `diff` for the 50,000-line code diff. Each workload sends 600 wheel events and verifies the visible rows. On macOS, add `--metal-presents .build/scroll/frames.csv` to record when each frame appeared on screen. [Large-view benchmark and Rust comparison](Tests/Support/LargeViews/README.md)
 
 ## Architecture & Upstream Mapping
 
