@@ -19,11 +19,11 @@ enum HandoffHost {
             return
         }
         guard args.first == "owner" else { throw CocoaError(.fileReadUnknown) }
-        let log = folder.appendingPathComponent("host.events")
-        var events: [String] = []
+        var eventCount = 0
         func record(_ event: String) {
-            events.append(event)
-            try! Data((events.joined(separator: "\n") + "\n").utf8).write(to: log, options: .atomic)
+            eventCount += 1
+            let name = String(format: "host-%04d.event", eventCount)
+            try! Data(event.utf8).write(to: folder.appendingPathComponent(name), options: .atomic)
         }
         record("claimed")
         let start = folder.appendingPathComponent("host.start")
@@ -35,8 +35,10 @@ enum HandoffHost {
         var window: WindowHandle?
         let app = App(title: "Rune single-instance \(id)", size: Vec2(240, 160), state: 0) { _, _ in
             el().sizeFull()
-        }.onReady { handle in
+        }.onWindow { handle in
             window = handle
+            record("created")
+        }.onReady { _ in
             record("ready")
         }.onOpenUrl { _, url, tx in
             record(url)

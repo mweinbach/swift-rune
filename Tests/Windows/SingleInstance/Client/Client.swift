@@ -62,7 +62,8 @@ enum HandoffClient {
             return
         }
 
-        guard primary, ["owner", "successor"].contains(mode) else {
+        let requiredEvents = ["owner": 4, "successor": 1, "fallback": 2]
+        guard primary, let required = requiredEvents[mode] else {
             throw FixtureError("Expected to claim the instance as " + mode)
         }
         defer { SingleInstance.release() }
@@ -81,7 +82,6 @@ enum HandoffClient {
             throw FixtureError("Failed to install launch receiver")
         }
         defer { listener.cancel() }
-        let required = mode == "owner" ? 4 : 1
         let deadline = ProcessInfo.processInfo.systemUptime + 30
         while events.snapshot().count < required {
             guard ProcessInfo.processInfo.systemUptime < deadline else {

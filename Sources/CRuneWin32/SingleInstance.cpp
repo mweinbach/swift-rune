@@ -153,13 +153,10 @@ DWORD WINAPI serve(void *arg) {
                 bool quitting = server.quitting() != 0;
                 if (answers) {
                     BYTE reply = quitting ? 'Q' : 'A';
-                    if (operation(server.pipe.value, server.event.value, server.stop.value, answerWithin, n,
+                    if (operation(server.pipe.value, server.event.value, server.stop.value, INFINITE, n,
                         [&](OVERLAPPED *o, DWORD *num) { return WriteFile(server.pipe.value, &reply, 1, num, o); })) {
-                        // The peer closes after reading its reply. A bounded read keeps the ACK
-                        // available until then and lets release interrupt even an unresponsive peer.
-                        BYTE trailing;
-                        operation(server.pipe.value, server.event.value, server.stop.value, answerWithin, n,
-                            [&](OVERLAPPED *o, DWORD *num) { return ReadFile(server.pipe.value, &trailing, 1, num, o); });
+                        // Disconnect drops unread bytes. The sender chooses its own deadline.
+                        FlushFileBuffers(server.pipe.value);
                     }
                 }
                 if (!answers || !quitting) server.receive(message.data() + start, static_cast<uint32_t>(length));
@@ -271,8 +268,12 @@ extern "C" void rune_win_instance_release(void) {
     auto released = std::move(owner);
     if (released) SetEvent(released->stop.value);
     ReleaseSRWLockExclusive(&ownerLock);
-    if (released && released->threadId != GetCurrentThreadId())
+    if (released && released->threadId != GetCurrentThreadId()) {
+        // The stop event wakes overlapped reads and connects. Disconnecting also
+        // wakes FlushFileBuffers when an attached peer never reads its reply.
+        DisconnectNamedPipe(released->pipe.value);
         WaitForSingleObject(released->thread.value, INFINITE);
+    }
 }
 
 namespace {

@@ -6,29 +6,34 @@ $id = 'org.rune.' + [guid]::NewGuid().ToString('N')
 $env:RUNE_HANDOFF_TEST_ID = $id
 $env:RUNE_HANDOFF_TEST_DIR = $folder
 New-Item -ItemType Directory $folder | Out-Null
-$log = Join-Path $folder 'host.events'
+$stdout = Join-Path $folder 'owner.stdout'
+$stderr = Join-Path $folder 'owner.stderr'
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public static class RuneHandoffWindow {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
-    public static extern IntPtr FindWindow(string name, string title);
+    public static extern IntPtr FindWindow(IntPtr name, string title);
     [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr window);
 }
 '@
 function Wait-Until([scriptblock]$test, [string]$what) {
     $deadline = [DateTime]::UtcNow.AddSeconds(40)
     while (-not (& $test)) {
         if ($owner.HasExited -or [DateTime]::UtcNow -gt $deadline) {
-            if (Test-Path $log) { Get-Content $log | Write-Host }
             throw "Owner exited or timed out waiting for $what"
         }
         Start-Sleep -Milliseconds 20
     }
 }
+function Read-Events {
+    Get-ChildItem $folder -Filter 'host-*.event' | Sort-Object Name | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }
+}
 function Has-Event([string]$event) {
-    return (Test-Path $log) -and ((Get-Content $log) -contains $event)
+    return (Read-Events) -contains $event
 }
 function Launch([string[]]$launchArgs) {
     & $exe send @launchArgs
@@ -36,13 +41,13 @@ function Launch([string[]]$launchArgs) {
 }
 $owner = $null
 try {
-    $owner = Start-Process -FilePath $exe -ArgumentList @('owner','rune-check://cold1','rune-check://cold2') -PassThru
+    $owner = Start-Process -FilePath $exe -ArgumentList @('owner','rune-check://cold1','rune-check://cold2') -PassThru -RedirectStandardError $stderr -RedirectStandardOutput $stdout
     Wait-Until { Has-Event 'claimed' } 'claim'
     Launch @('rune-check://before-window')
     New-Item -ItemType File (Join-Path $folder 'host.start') | Out-Null
     Wait-Until { (Has-Event 'ready') -and (Has-Event 'rune-check://before-window') } 'cold links and first frame'
-    $window = [RuneHandoffWindow]::FindWindow($null, "Rune single-instance $id")
-    if ($window -eq 0) { throw 'Owner window has no HWND' }
+    $window = [RuneHandoffWindow]::FindWindow([IntPtr]::Zero, "Rune single-instance $id")
+    if ($window -eq [IntPtr]::Zero) { throw 'Owner window has no HWND' }
     Launch @('rune-check://forwarded')
     Wait-Until { Has-Event 'rune-check://forwarded' } 'forwarded URL'
     Launch @()
@@ -55,11 +60,11 @@ try {
     if (-not $owner.WaitForExit(20000) -or $owner.ExitCode -ne 0) { throw 'Owner failed to finish' }
     $expected = @('claimed','rune-check://cold1','rune-check://cold2','rune-check://before-window',
                   'rune-check://forwarded','reopen true','rune-check://hide','reopen false','rune-check://quit','ended')
-    $actual = @((Get-Content $log) | Where-Object { $_ -ne 'ready' })
+    $actual = @((Read-Events) | Where-Object { $_ -ne 'ready' -and $_ -ne 'created' })
     if (($actual -join '|') -ne ($expected -join '|')) { throw "Unexpected owner events: $actual" }
     Write-Host "Owner HWND $window served: $actual"
     foreach ($mode in @('relaunch-tx', 'relaunch-handle')) {
-        $owner = Start-Process -FilePath $exe -ArgumentList $mode -PassThru
+        $owner = Start-Process -FilePath $exe -ArgumentList $mode -PassThru -RedirectStandardError $stderr -RedirectStandardOutput $stdout
         if (-not $owner.WaitForExit(25000) -or $owner.ExitCode -ne 0) { throw "$mode failed to exit" }
         $file = Join-Path $folder "$mode.successor"
         $deadline = [DateTime]::UtcNow.AddSeconds(25)
@@ -70,6 +75,18 @@ try {
         }
         Write-Host "$mode opened a successor: $proof"
     }
+} catch {
+    Read-Events | Write-Host
+    if ($owner) {
+        $owner.Refresh()
+        Write-Host "owner pid=$($owner.Id) exited=$($owner.HasExited) exitCode=$($owner.ExitCode)"
+        $hwnd = [RuneHandoffWindow]::FindWindow([IntPtr]::Zero, "Rune single-instance $id")
+        Write-Host "hwnd=$hwnd visible=$([RuneHandoffWindow]::IsWindowVisible($hwnd)) minimized=$([RuneHandoffWindow]::IsIconic($hwnd))"
+    }
+    foreach ($file in @($stdout, $stderr)) {
+        if (Test-Path $file) { Get-Content $file -Tail 80 | Write-Host }
+    }
+    throw
 } finally {
     if ($owner -and -not $owner.HasExited) { $owner.Kill(); $owner.WaitForExit() }
     Remove-Item Env:RUNE_HANDOFF_TEST_ID,Env:RUNE_HANDOFF_TEST_DIR

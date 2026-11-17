@@ -52,17 +52,22 @@ function PipeName {
     $hex = [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()
     return "rune-instance-$([Diagnostics.Process]::GetCurrentProcess().SessionId)-$hex-$env:RUNE_HANDOFF_TEST_ID"
 }
-function Send-Wire([byte[]]$frame, [bool]$readAnswer) {
-    $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', (PipeName), [IO.Pipes.PipeDirection]::InOut,
+function Send-Wire([byte[]]$frame, [bool]$readAnswer, [int]$generation = 0) {
+    $name = PipeName
+    if ($generation) { $name += "-$generation" }
+    $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', $name, [IO.Pipes.PipeDirection]::InOut,
                                                   [IO.Pipes.PipeOptions]::Asynchronous)
     try {
         $pipe.Connect(2000)
         $pipe.Write($frame, 0, $frame.Length)
         $pipe.Flush()
         if ($readAnswer) {
+            # The server keeps its reply available while the connected sender is descheduled.
+            Start-Sleep -Milliseconds 200
             $answer = New-Object byte[] 1
             $read = $pipe.ReadAsync($answer, 0, 1)
-            if (!$read.Wait(3000) -or $read.Result -ne 1) { throw 'Missing handoff answer' }
+            if (!$read.Wait(3000)) { throw 'Timed out reading the reply from a connected handoff owner' }
+            if ($read.Result -ne 1) { throw 'The owner disconnected before its handoff reply was read' }
             return [char]$answer[0]
         }
     } finally { $pipe.Dispose() }
@@ -70,6 +75,32 @@ function Send-Wire([byte[]]$frame, [bool]$readAnswer) {
 function Frame([byte[]]$body) {
     return [byte[]]([Text.Encoding]::ASCII.GetBytes("rune-instance 2`0") +
                     [BitConverter]::GetBytes([uint32]$body.Length) + $body)
+}
+function Wait-UnreadReply($pipe) {
+    if (!('RuneHandoffPipeProbe' -as [type])) {
+        Add-Type @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class RuneHandoffPipeProbe {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool PeekNamedPipe(SafePipeHandle handle, IntPtr buffer, uint size,
+        IntPtr read, out uint available, IntPtr remaining);
+    public static uint Available(SafePipeHandle handle) {
+        uint available;
+        if (!PeekNamedPipe(handle, IntPtr.Zero, 0, IntPtr.Zero, out available, IntPtr.Zero))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        return available;
+    }
+}
+'@
+    }
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while ([RuneHandoffPipeProbe]::Available($pipe.SafePipeHandle) -eq 0) {
+        if ($timer.Elapsed.TotalSeconds -gt 3) { throw 'Owner never queued a reply for the open client' }
+        Start-Sleep -Milliseconds 5
+    }
 }
 function Verify-Events($mode, [string[]]$expected) {
     [string[]]$seen = ConvertFrom-Json (Get-Content -Raw -Encoding UTF8 -LiteralPath (File-Path "$mode.json"))
@@ -126,21 +157,57 @@ try {
     'PASS quitting Q + claim after release with both primary processes still alive + secondary forwards to successor'
     'PASS release finishes with an incomplete launch on an open client pipe'
 
-    Set-Scenario 'unresponsive'
-    # Hold generation zero without reading. Swift's fallback owner must receive another launch
-    # on a later generation while the original named pipe is still present.
-    $stalled = [IO.Pipes.NamedPipeServerStream]::new((PipeName), [IO.Pipes.PipeDirection]::InOut, 1)
+    Set-Scenario 'release-with-unread-reply'
+    $owner = Launch @('successor')
+    Wait-Marker 'successor.ready' $owner
+    Check-Exit (Launch @('send', 'rune://before-release'))
+    Wait-Marker 'successor.received' $owner
+    $unread = [IO.Pipes.NamedPipeClientStream]::new('.', (PipeName), [IO.Pipes.PipeDirection]::InOut)
     try {
-        $owner = Launch @('successor')
-        Wait-Marker 'successor.ready' $owner
-        Check-Exit (Launch @('send', 'rune://fallback/generation'))
-        Wait-Marker 'successor.received' $owner
+        $unread.Connect(2000)
+        [byte[]]$next = Frame ([Text.Encoding]::UTF8.GetBytes('rune://unread-reply'))
+        $unread.Write($next, 0, $next.Length)
+        $unread.Flush()
+        Wait-UnreadReply $unread
         Touch 'successor.release'
         Wait-Marker 'successor.released' $owner
-        Verify-Events 'successor' @('rune://fallback/generation')
         Touch 'successor.finish'
         Check-Exit $owner
-        'PASS unresponsive pipe skips to a serving owner on the next generation'
+        'PASS release finishes with a queued acknowledgement that the open client has not read'
+    } finally { $unread.Dispose() }
+
+    Set-Scenario 'unresponsive'
+    $firstDirectory = $env:RUNE_HANDOFF_TEST_DIR
+    $first = Launch @('successor')
+    Wait-Marker 'successor.ready' $first
+    Check-Exit (Launch @('send', 'rune://first-generation/awake'))
+    Wait-Marker 'successor.received' $first
+    # Keep the actual Rune owner busy reading an incomplete launch on generation zero.
+    $stalled = [IO.Pipes.NamedPipeClientStream]::new('.', (PipeName), [IO.Pipes.PipeDirection]::InOut)
+    try {
+        $stalled.Connect(2000)
+        $stalled.WriteByte(0x72)
+        $stalled.Flush()
+        $env:RUNE_HANDOFF_TEST_DIR = Join-Path $firstDirectory 'fallback'
+        [void][IO.Directory]::CreateDirectory($env:RUNE_HANDOFF_TEST_DIR)
+        $owner = Launch @('fallback')
+        Wait-Marker 'fallback.ready' $owner
+        $answer = Send-Wire (Frame ([Text.Encoding]::UTF8.GetBytes('rune://generation-one/direct'))) $true 1
+        if ($answer -cne 'A') { throw "Generation one did not serve the probe. Reply was $answer" }
+        Check-Exit (Launch @('send', 'rune://fallback/generation'))
+        Wait-Marker 'fallback.received' $owner
+        Touch 'fallback.release'
+        Wait-Marker 'fallback.released' $owner
+        Verify-Events 'fallback' @('rune://generation-one/direct', 'rune://fallback/generation')
+        Touch 'fallback.finish'
+        Check-Exit $owner
+        $env:RUNE_HANDOFF_TEST_DIR = $firstDirectory
+        Touch 'successor.release'
+        Wait-Marker 'successor.released' $first
+        Verify-Events 'successor' @('rune://first-generation/awake')
+        Touch 'successor.finish'
+        Check-Exit $first
+        'PASS a stalled Rune owner keeps generation zero while a new owner serves later launches'
     } finally { $stalled.Dispose() }
 } finally {
     foreach ($process in $children) {
