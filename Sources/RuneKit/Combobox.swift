@@ -365,7 +365,7 @@ public struct Combobox<State> {
         let choices = ComboboxState.filtered(options, query: comboState.search.text)
         let active = comboState.activeIndex(in: options, filtered: choices)
         let activePos = active.flatMap { orig in choices.firstIndex(of: orig) }
-        let page = max(1, Int(floor(maxHeightValue / PopupList<State>.rowHeight)) - 1)
+        let page = max(1, Int((maxHeightValue / PopupList<State>.rowHeight).rounded(.down)) - 1)
         let chooseCb = chooseHandler
         let searchLabel = name.isEmpty ? "Search" : "Search \(name)"
 

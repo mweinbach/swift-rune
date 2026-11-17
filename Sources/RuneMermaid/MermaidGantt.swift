@@ -311,7 +311,7 @@ enum GanttParser {
                 used.append(s)
             }
         }
-        let side = floor(w * 0.28)
+        let side = (w * 0.28).rounded(.down)
         let titles = g.sections.map { measureWrap($0, font: bold, maxWidth: max(side - 16.0, 1.0)) }
         let left = min(used.map { titles[$0].size.x + 16.0 }.max() ?? 0.0, side)
         let x0 = left + 4.0

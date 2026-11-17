@@ -1545,7 +1545,7 @@ public enum DiffLayout {
     fileprivate static let codeTrailing: Float = 24
 
     fileprivate static func numberWidth(_ digits: Int) -> Float {
-        ceil(Float(max(3, digits)) * columnAdvance + 16)
+        (Float(max(3, digits)) * columnAdvance + 16).rounded(.up)
     }
 }
 
@@ -2842,7 +2842,7 @@ public struct DiffView<State>: Sendable {
         let font = k.ty.diffCodeFont
         // Allow for whole-pixel rounding when the font does not request exact line heights.
         let scale = max(1, cx.pixelScale)
-        let upperLineHeight = ceil(font.resolvedLineHeight * scale) / scale
+        let upperLineHeight = (font.resolvedLineHeight * scale).rounded(.up) / scale
         let gutterFitsCode = !st.wraps && font.family == .monospace && font.maxLines == 0
             && upperLineHeight <= lineH
             && syntaxTheme.weights.allSatisfy { $0 == nil || $0 == font.weight }

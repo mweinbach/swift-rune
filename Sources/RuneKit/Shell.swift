@@ -265,7 +265,7 @@ public struct PaneState: Sendable, Equatable {
         public func spring(forWidth width: Float, kit k: Kit) -> Spring {
             let base = springOverride ?? k.motion.disclosure
             guard let ref = scaleReference else { return base }
-            let scaled = base.duration * sqrt(max(0.0, width) / ref)
+            let scaled = base.duration * (max(0.0, width) / ref).squareRoot()
             return base.withDuration(scaled.clamped(to: scaleMin...scaleMax))
         }
 

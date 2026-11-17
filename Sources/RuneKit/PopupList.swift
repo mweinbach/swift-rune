@@ -386,8 +386,8 @@ public struct PopupList<State> {
         let cxScrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
         let scrollY = preferTrackedScroll ? trackedScrollYValue : max(trackedScrollYValue, cxScrollY)
         let overscan: Float = 265.0
-        let start = itemList.isEmpty ? 0 : max(0, Int(floor((scrollY - overscan) / rh)))
-        let end = itemList.isEmpty ? 0 : min(itemList.count, Int(ceil((scrollY + max(renderVpH, rh) + overscan) / rh)))
+        let start = itemList.isEmpty ? 0 : max(0, Int(((scrollY - overscan) / rh).rounded(.down)))
+        let end = itemList.isEmpty ? 0 : min(itemList.count, Int(((scrollY + max(renderVpH, rh) + overscan) / rh).rounded(.up)))
         let safeStart = min(start, end)
         let beforeH = Float(safeStart) * rh
         let afterH = Float(max(0, itemList.count - end)) * rh

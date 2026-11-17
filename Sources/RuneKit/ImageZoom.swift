@@ -56,7 +56,7 @@ public enum ImageZoomMath {
     }
 
     public static func wheelZoomFactor(deltaY: Float) -> Float {
-        exp(-deltaY.clamped(to: -30.0...30.0) / 100.0)
+        expf(-deltaY.clamped(to: -30.0...30.0) / 100.0)
     }
 
     public static func clampAxis(offset: Float, size: Float, viewport: Float) -> Float {
@@ -1052,7 +1052,7 @@ public func stageStep(_ state: inout StageGesture, _ event: StageEvent) -> [Stag
     case (.panning(let moved, let origin), .pointerMoved(let at)):
         let dx = at.x - origin.x
         let dy = at.y - origin.y
-        if (dx == 0 && dy == 0) || (!moved && hypot(dx, dy) < stageDragThreshold) {
+        if (dx == 0 && dy == 0) || (!moved && hypotf(dx, dy) < stageDragThreshold) {
             return []
         }
         state = .panning(moved: true, origin: at)
@@ -1265,7 +1265,7 @@ public struct Stage<State> {
                 if !pinch && s[keyPath: kp].zoom <= 1.0 { return false }
                 if pinch {
                     let cur = s[keyPath: kp].zoom
-                    s[keyPath: kp].zoomAt(cur * exp(ev.dy / 100.0), at: Vec2(size.x * 0.5, size.y * 0.5), tx: &tx)
+                    s[keyPath: kp].zoomAt(cur * expf(ev.dy / 100.0), at: Vec2(size.x * 0.5, size.y * 0.5), tx: &tx)
                 } else {
                     let p = s[keyPath: kp].pan
                     s[keyPath: kp].setPan(Vec2(p.x + ev.dx, p.y + ev.dy))

@@ -493,7 +493,7 @@ public struct TableState: Sendable {
         }
 
         let at = cursorRow(len: len, idAt: idAt)
-        let page = max(1, Int(floor(viewport / max(1.0, rowHeight))) - 1)
+        let page = max(1, Int((viewport / max(1.0, rowHeight)).rounded(.down)) - 1)
 
         let target: Int
         switch ev.key {

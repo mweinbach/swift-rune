@@ -87,7 +87,7 @@ enum PieParser {
         var edges: [Float] = []
         for (i, s) in p.slices.enumerated() {
             let sweep = Float(s.1 / total) * 360.0
-            let steps = max(Int(ceil(sweep / 4.0)), 2)
+            let steps = max(Int((sweep / 4.0).rounded(.up)), 2)
             var pts = CanvasMath.arc(center: centre, rx: radius, ry: radius, a0: a, a1: a + sweep, steps: steps)
             if p.slices.count > 1 {
                 pts.append(centre)

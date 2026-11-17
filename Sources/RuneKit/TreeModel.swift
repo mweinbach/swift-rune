@@ -650,7 +650,7 @@ public struct TreeModel<T: Sendable>: Sendable {
             return r == Int.max ? nil : r
         }
         let rh = max(1.0, rowHeight)
-        let page = max(1, Int(floor(viewport / rh)) - 1)
+        let page = max(1, Int((viewport / rh).rounded(.down)) - 1)
 
         let logicalKey: Key = switch (ev.key, rtl) {
         case (.arrowLeft, true): .arrowRight

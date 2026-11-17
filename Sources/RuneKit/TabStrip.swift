@@ -349,7 +349,7 @@ public struct TabDragState: Sendable, Equatable {
         case .pressing(let id, let idx, let start, _):
             let primary = alongDelta(start, windowPoint) + scrolled
             let cross = crossDist(start, windowPoint)
-            if hypot(primary, cross) < Self.slop {
+            if hypotf(primary, cross) < Self.slop {
                 phase = .pressing(id: id, index: idx, start: start, current: windowPoint)
                 return .none
             }
