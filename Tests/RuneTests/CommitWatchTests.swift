@@ -5,7 +5,7 @@ import Testing
 /// `runtime/commit/watch.rs`: why each of a frame's commits ran (`commit_for` → `commit_why`,
 /// interaction timing, `perf_warn::Watch::cause`) and `RUNE_COMMIT_BUDGET_MS` timing each commit
 /// (`perf_warn/budget.rs`'s `Commit::start` / `Commit::end(cause)`).
-@Suite(.serialized)
+@Suite(.serialized, PerfWarningScope())
 struct CommitWatchTests {
     private struct S {
         var n = 0
