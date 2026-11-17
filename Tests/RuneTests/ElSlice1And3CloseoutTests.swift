@@ -64,6 +64,64 @@ struct ElSlice1And3CloseoutTests {
         #expect(reused)
     }
 
+    @Test("Selectable syntax replays its ordinary ink while selection and mark backgrounds update")
+    func retainedSelectableDraws() throws {
+        let activeInk = Color.srgb(1, 0, 1)
+        let style = SelectionStyle(active: .black, activeInk: activeInk, inactive: .white)
+        func app() -> Runtime<[SelectionMark]> {
+            let rt = Runtime(state: [SelectionMark](), viewport: Vec2(240, 80), pixelScale: 1) { marks, cx in
+                cx.markTexts(marks)
+                let label: El<[SelectionMark]> = rich([TextSpan("let ", color: .white),
+                                                       TextSpan("value", color: .srgb(1, 0, 0))])
+                return col().size(240, 80).selectionGroup()
+                    .child(label.key("code").size(220, 24).pl(8).selectable().selectionStyle(style))
+            }
+            rt.textSystem.smoothing = .off
+            return rt
+        }
+        let retained = app(), fresh = app()
+        func compare(_ time: Double) -> [RenderInstance] {
+            fresh.labelDraws.removeAll()
+            let a = retained.renderFrame(at: time), b = fresh.renderFrame(at: time)
+            #expect(a.instances == b.instances)
+            #expect(a.marks == b.marks)
+            return a.instances
+        }
+        let idle = compare(0)
+        let id = try #require(retained.flatNodes.first { $0.key == "code" }?.nodeId)
+        let cached = try #require(retained.labelDraws[id])
+        _ = compare(0.01)
+        let reused = try #require(retained.labelDraws[id])
+        #expect(cached.draws.withUnsafeBufferPointer { first in
+            reused.draws.withUnsafeBufferPointer { $0.baseAddress == first.baseAddress }
+        })
+
+        for rt in [retained, fresh] {
+            rt.pointerDown(at: Vec2(9, 12), at: 0.1)
+            rt.pointerMove(to: Vec2(175, 12), at: 0.12)
+            rt.pointerUp(at: Vec2(175, 12), at: 0.14)
+            #expect(rt.selectedText() == "let value")
+        }
+        let active = compare(0.16)
+        #expect(active.contains { $0.params.y == KIND_GLYPH && $0.fill == activeInk.simd4(srgb: retained.srgbBlend) })
+        #expect(retained.labelDraws[id] == nil)
+
+        for rt in [retained, fresh] { rt.windowFocused = false }
+        let inactive = compare(0.2)
+        #expect(inactive != active)
+        #expect(retained.labelDraws[id] != nil)
+        for rt in [retained, fresh] {
+            let mark = try #require(rt.currentTextSelection()?.texts.first?.mark())
+            rt.update(at: 0.25) { marks, _ in marks = [mark] }
+            rt.pointerDown(at: Vec2(230, 67), at: 0.3)
+            rt.pointerUp(at: Vec2(230, 67), at: 0.31)
+            #expect(rt.selectedText() == nil)
+        }
+        let marked = compare(0.32)
+        #expect(marked != idle)
+        #expect(retained.labelDraws[id] != nil)
+    }
+
     @Test("Live opacity updates syntax ink when a label's default foreground is transparent")
     func retainedSpanOpacity() throws {
         func app() -> Runtime<Live<Float>> {

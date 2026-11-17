@@ -3375,7 +3375,7 @@ extension Runtime {
                     && inkMode == textSystem.smoothing && motionRasterGlyphs == nil
                     && el.liveText == nil && pressTint.frac == 0 && selectionInk == nil
                     && el.advanceInRun == nil && !el.isSecure && el.textHighlights == nil
-                    && !el.isSelectable && wordFadeMask == nil && linkInks.isEmpty && !labelGlyphs.isEmpty
+                    && wordFadeMask == nil && linkInks.isEmpty && !labelGlyphs.isEmpty
                     && shaped.lineGlyphRanges.count == 1
                 let runInk = premulSIMD4(defaultTextColor, opacity: localOpacity, srgb: srgbBlend)
                 let visible = SIMD4<Float>(glyphClipEdges.x, shownY0, glyphClipEdges.z, shownY1)
