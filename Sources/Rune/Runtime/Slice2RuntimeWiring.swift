@@ -699,7 +699,7 @@ extension Runtime {
     }
 
     private func currentClockForScrollInput() -> Double {
-        slice2State.currentInputTime ?? 0
+        slice2State.currentInputTime ?? currentTime
     }
 
     internal struct ReorderedRowSlide {

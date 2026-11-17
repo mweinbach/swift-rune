@@ -246,9 +246,10 @@ struct ScrollRuntimeSlice2ParityTests {
 
         // Shift wheel only turns purely vertical wheel
         let (dx1, dy1) = wheelDelta(.lineDelta(0, -1), scale: 2.0, shift: true)
-        #expect(dx1 == -40 && dy1 == 0)
+        let line = WheelDistance.linePoints
+        #expect(dx1 == -line && dy1 == 0)
         let (dx2, dy2) = wheelDelta(.lineDelta(-2, -1), scale: 2.0, shift: true)
-        #expect(dx2 == -80 && dy2 == -40)
+        #expect(dx2 == -2 * line && dy2 == -line)
     }
 
     // MARK: - runtime/scroll/touch.rs & input/touch.rs
