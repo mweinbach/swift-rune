@@ -381,6 +381,8 @@ public final class TextLayoutBox: @unchecked Sendable {
     public var maxWidth: Float?
     public var shaped: ShapedText
     public var hasGlyphs: Bool
+    /// The pinned layout cache charges each entry by authored UTF-8 length.
+    internal let cacheCost: Int
     internal let prepared: TextPreparedShape?
     internal var ordinaryCache: TextLayoutCacheIdentity?
     internal var lastUsedCommit: UInt64 = 0
@@ -439,6 +441,7 @@ public final class TextLayoutBox: @unchecked Sendable {
         hasGlyphs: Bool,
         prepared: TextPreparedShape?
     ) {
+        self.cacheCost = ParagraphState.layoutCost(textBytes: authText.utf8.count)
         self.shapeKey = shapeKey
         self.authText = authText
         self.spans = spans

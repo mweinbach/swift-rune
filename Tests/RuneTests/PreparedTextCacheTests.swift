@@ -1,3 +1,4 @@
+import Foundation
 import RuneMotion
 import Testing
 @testable import Rune
@@ -212,25 +213,25 @@ struct PreparedTextCacheTests {
         for _ in 0..<4 { system.endCommit(mounted: mounted.values, exiting: exiting.values) }
         system.rest()
         #expect(system.cachedLayoutBox(for: old.shapeKey) === replacement)
-        #expect(replacement.lastUsedCommit == 4)
+        #expect(replacement.lastUsedCommit == 3)
         #expect(system.prepareLayouts { _ = width(35) } == 1)
         let alternate = try #require(system.cachedLayoutBox(for: old.shapeKey, matchingWidth: 35))
         mounted = [NodeId(2): Record(box: alternate, isInput: false), NodeId(3): Record(box: alternate, isInput: false)]
         for _ in 0..<64 { system.endCommit(mounted: mounted.values, exiting: exiting.values) }
-        #expect(alternate.lastUsedCommit == 68)
-        #expect(system.cachedLayoutBox(for: old.shapeKey)?.lastUsedCommit == 68)
+        #expect(alternate.lastUsedCommit == 67)
+        #expect(system.cachedLayoutBox(for: old.shapeKey)?.lastUsedCommit == 67)
         system.clearLayoutCaches()
         let newBox = width(100)
         for _ in 0..<4 { system.endCommit(mounted: mounted.values, exiting: exiting.values) }
         system.rest()
         #expect(system.cachedLayoutBox(for: old.shapeKey) === newBox)
-        #expect(newBox.lastUsedCommit == 72)
+        #expect(newBox.lastUsedCommit == 71)
         system.supersede(old.shapeKey)
         let reinserted = width(100)
         for _ in 0..<4 { system.endCommit(mounted: mounted.values, exiting: exiting.values) }
         system.rest()
         #expect(system.cachedLayoutBox(for: old.shapeKey) === reinserted)
-        #expect(reinserted.lastUsedCommit == 76)
+        #expect(reinserted.lastUsedCommit == 75)
 
         system.invalidateWindowFontFaces()
         let otherFont = width(100)
@@ -240,7 +241,7 @@ struct PreparedTextCacheTests {
         #expect(system.cachedLayoutBox(for: otherFont.shapeKey) == nil)
     }
 
-    @Test func commitBudgetKeepsActiveWidthsAndEvictsOnlyStaleLayouts() throws {
+    @Test func commitBudgetKeepsActiveWidthsAndProtectsTheCurrentAndPreviousCommits() {
         let system = TextSystem()
         let style = TextStyle(size: 16, wrap: .wrap)
         func width(_ width: Float) -> TextLayoutBox {
@@ -248,65 +249,83 @@ struct PreparedTextCacheTests {
                                pixelScale: 1, emitGlyphs: false)
         }
         let mounted = width(180)
-        let old = system.layoutKeyed(text: "W", style: style, maxWidth: 100, pixelScale: 1, emitGlyphs: true)
-        let glyph = try #require(old.shaped.glyphs.first)
-        // Cross the cache budget without making the native shaper build a 3 MiB fixture.
-        old.shaped.glyphs = Array(repeating: glyph, count: (3 << 20) / MemoryLayout<PositionedGlyph>.stride + 1)
         #expect(system.prepareLayouts { _ = width(35) } == 1)
         let alternate = width(35)
         let active: Set<TextShapeKey> = [mounted.shapeKey]
-        for _ in 0..<59 { system.endCommit(activeKeys: active) }
-        let recent = layout("recent", in: system)
-        #expect(system.cachedLayoutBox(for: old.shapeKey) === old)
+        let oldest = layout("oldest", in: system)
         system.endCommit(activeKeys: active)
-        #expect(system.cachedLayoutBox(for: old.shapeKey) == nil)
+        // The 1,200-label view in upstream's a_view_over_the_budget_keeps_a_budget_of_its_layouts.
+        for i in 0..<1_200 { _ = layout(String(format: "label %04d", i), in: system) }
+        let all = system.cachedLayoutCount
+        for _ in 0..<2 {
+            system.endCommit(activeKeys: active)
+            #expect(system.cachedLayoutCount == all)
+            #expect(system.cachedLayoutBox(for: oldest.shapeKey) === oldest)
+        }
+        let recent = layout("just mounted", in: system)
+        system.endCommit(activeKeys: active)
+        #expect(system.cachedLayoutBox(for: oldest.shapeKey) == nil)
         #expect(system.cachedLayoutBox(for: recent.shapeKey) === recent)
-        #expect(system.cachedLayoutBox(for: mounted.shapeKey) === mounted)
-        #expect(system.cachedLayoutBox(for: mounted.shapeKey, matchingWidth: 35) === alternate)
+        #expect(width(180) === mounted)
+        #expect(width(35) === alternate)
         #expect(alternate.lastUsedCommit == mounted.lastUsedCommit)
+        let staleCount = system.cachedLayoutCount - 3
+        let labelCost = ParagraphState.layoutCost(textBytes: "label 0000".utf8.count)
+        #expect(staleCount == ParagraphState.staleBytes / labelCost)
     }
 
-    @Test func commitBudgetRechecksGrowthOfAnAlreadyStalePaintWindow() throws {
+    @Test func commitBudgetKeepsRecentStaleLabelsAcrossAReturn() {
+        let system = TextSystem()
+        let first = layout("label 0000", in: system)
+        system.endCommit()
+        for i in 1..<1_200 {
+            _ = layout(String(format: "label %04d", i), in: system)
+            system.endCommit()
+        }
+        let last = layout("label 1199", in: system)
+        for _ in 0..<8 { system.endCommit() }
+        let cost = system.cachedLayoutCount * last.cacheCost
+        #expect(cost <= ParagraphState.staleBytes)
+        #expect(cost > ParagraphState.staleBytes * 9 / 10)
+        #expect(system.cachedLayoutBox(for: first.shapeKey) == nil)
+        let shaped = system.shapedCount
+        #expect(layout("label 1199", in: system) === last)
+        #expect(system.shapedCount == shaped)
+    }
+
+    @Test func windowRasterChangesTheFootprintWhileTheCacheChargeStaysWithTheText() throws {
         let system = TextSystem()
         let style = TextStyle(size: 16, wrap: .wrap)
         let measured = system.layoutKeyed(text: "first e\u{301} ink\nsecond row", style: style,
                                           maxWidth: 120, pixelScale: 1, emitGlyphs: false)
-        let window = TextRasterWindow(lowerY: 0, upperY: 20)
-        let partial = system.layoutKeyed(text: measured.authText, style: style, maxWidth: 120,
-                                         pixelScale: 1, emitGlyphs: true, rasterWindow: window)
-        let glyph = try #require(partial.shaped.glyphs.first)
-        for _ in 0..<60 { system.endCommit() }
-        #expect(system.cachedLayoutBox(for: measured.shapeKey) === measured)
-        #expect(measured.estimatedBytes < 3 << 20)
-        partial.shaped.glyphs = Array(repeating: glyph, count: (3 << 20) / MemoryLayout<PositionedGlyph>.stride + 1)
-        #expect(measured.estimatedBytes > 3 << 20)
-        system.endCommit()
-        #expect(system.cachedLayoutBox(for: measured.shapeKey) == nil)
+        let charge = measured.cacheCost
+        let unpainted = measured.estimatedBytes
+        let partial = system.layoutKeyed(text: measured.authText, style: style, maxWidth: 120, pixelScale: 1,
+                                         emitGlyphs: true, rasterWindow: TextRasterWindow(lowerY: 0, upperY: 20))
+        try #require(!partial.shaped.glyphs.isEmpty)
+        let painted = measured.estimatedBytes
+        #expect(painted > unpainted)
+        partial.shaped.glyphs.removeLast()
+        #expect(measured.estimatedBytes == painted - MemoryLayout<PositionedGlyph>.stride)
+        #expect(measured.cacheCost == charge)
     }
 
-    @Test func commitBudgetEvictsOldestFirstUntilFreshLayoutsFillTheBudget() throws {
+    @Test func cutoffCommitKeepsSmallerLayoutsThatFitItsRemainingRoom() {
         let system = TextSystem()
-        let style = TextStyle(size: 16)
-        let oldest = system.layoutKeyed(text: "A", style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true)
+        let oldest = layout("oldest", in: system)
         system.endCommit()
-        let younger = system.layoutKeyed(text: "B", style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true)
-        let fresh = system.layoutKeyed(text: "C", style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true)
-        let active: Set<TextShapeKey> = [fresh.shapeKey]
-        for _ in 0..<60 { system.endCommit(activeKeys: active) }
-
-        let glyph = try #require(fresh.shaped.glyphs.first)
-        let stride = MemoryLayout<PositionedGlyph>.stride
-        oldest.shaped.glyphs = Array(repeating: glyph, count: 600_000 / stride)
-        younger.shaped.glyphs = oldest.shaped.glyphs
-        fresh.shaped.glyphs = Array(repeating: glyph, count: 2_200_000 / stride)
-        system.endCommit(activeKeys: active)
+        let small = layout("é", in: system)
+        let large = layout(String(repeating: "界", count: 60), in: system)
+        #expect(small.cacheCost == 2_048 + 2 * 64)
+        #expect(large.cacheCost == 2_048 + 180 * 64)
+        system.endCommit()
+        // These newer layouts leave 3,072 bytes for their predecessor generation.
+        for i in 0..<1_023 { _ = layout(String(format: "young row %06d", i), in: system) }
+        for _ in 0..<3 { system.endCommit() }
         #expect(system.cachedLayoutBox(for: oldest.shapeKey) == nil)
-        #expect(system.cachedLayoutBox(for: younger.shapeKey) === younger)
-
-        fresh.shaped.glyphs = Array(repeating: glyph, count: (3 << 20) / stride + 1)
-        system.endCommit(activeKeys: active)
-        #expect(system.cachedLayoutBox(for: younger.shapeKey) == nil)
-        #expect(system.cachedLayoutBox(for: fresh.shapeKey) === fresh)
+        #expect(system.cachedLayoutBox(for: large.shapeKey) == nil)
+        #expect(system.cachedLayoutBox(for: small.shapeKey) === small)
+        #expect(system.cachedLayoutCount == 1_024)
     }
 
     @Test func aPassOverBudgetReleasesItsLargestLooseLayoutFirst() {

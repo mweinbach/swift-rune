@@ -519,32 +519,49 @@ internal final class ParagraphState: @unchecked Sendable {
     /// `budget`, least recently used first; a commit's layouts are kept together while the
     /// budget lasts.
     static func evict(_ cache: inout [UInt64: ParagraphCacheEntry], _ g: UInt64, budget: Int) {
-        let stale = { (used: UInt64) in g &- used >= 2 }
-        let total = cache.values.filter { stale($0.used) }.reduce(0) { $0 + $1.cost }
-        if total <= budget { return }
-        var ages = cache.values.filter { stale($0.used) }.map { (g &- $0.used, $0.cost) }
-        ages.sort { $0.0 < $1.0 }
-        var younger = 0
-        var kept = 0
+        let keys = staleKeys(in: cache, at: g, budget: budget, used: { $0.used }, cost: { $0.cost })
+        for key in keys { cache.removeValue(forKey: key) }
+    }
+
+    /// Find the first generation that does not fit. Entries in that generation get its
+    /// remaining room in cache iteration order, including smaller entries after a miss.
+    static func staleKeys<Key, Entry>(in cache: [Key: Entry], at generation: UInt64, budget: Int,
+                                       used: (Entry) -> UInt64, cost: (Entry) -> Int) -> [Key] {
+        var bytesByAge: [UInt64: UInt64] = [:]
+        var total: UInt64 = 0
+        for entry in cache.values {
+            let age = generation &- used(entry)
+            guard age >= 2 else { continue }
+            let bytes = UInt64(cost(entry))
+            bytesByAge[age, default: 0] += bytes
+            total += bytes
+        }
+        var room = UInt64(budget)
+        guard total > room else { return [] }
         var cutoff = UInt64.max
-        for (i, (age, cost)) in ages.enumerated() {
-            if i > 0 && ages[i - 1].0 != age { younger = kept }
-            kept += cost
-            if kept > budget {
+        for age in bytesByAge.keys.sorted() {
+            let bytes = bytesByAge[age]!
+            if bytes > room {
                 cutoff = age
                 break
             }
+            room -= bytes
         }
-        var room = budget - younger
-        cache = cache.filter { _, e in
-            let age = g &- e.used
-            if age < cutoff { return true }
-            if age == cutoff && e.cost <= room {
-                room -= e.cost
-                return true
+        var removed: [Key] = []
+        for index in cache.indices {
+            let entry = cache.values[index]
+            let age = generation &- used(entry)
+            guard age >= cutoff else { continue }
+            if age == cutoff {
+                let bytes = UInt64(cost(entry))
+                if bytes <= room {
+                    room -= bytes
+                    continue
+                }
             }
-            return false
+            removed.append(cache.keys[index])
         }
+        return removed
     }
 
     func bytes(of text: String) -> [UInt8] {
