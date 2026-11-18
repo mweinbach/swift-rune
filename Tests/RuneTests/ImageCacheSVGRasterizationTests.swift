@@ -48,4 +48,29 @@ struct ImageCacheSVGRasterizationTests {
         #expect(pixel(rgba, width: 24, x: 16, y: 6) == [0, 128, 255, 255])
         #expect(pixel(rgba, width: 24, x: 20, y: 6) == [0, 0, 0, 0])
     }
+
+    @Test func nativeMediaAndImageCacheUseTheStockVectorRenderer() throws {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DQAAAEgQGALFXOsAAAAABJRU5ErkJggg=="
+        let svg = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="4" height="2">
+          <rect width="2" height="2" fill="lime"/>
+          <image x="2" width="2" height="2" href="data:image/png;base64,\(png)"/>
+        </svg>
+        """
+        let bytes = Data(svg.utf8)
+        let expected = Data([0, 255, 0, 255, 0, 0, 0, 0])
+        let thumbnail = try DecodedImage.decode(data: bytes, id: "figure", maxDimension: 2)
+        #expect(thumbnail.id == "figure")
+        #expect(thumbnail.width == 2 && thumbnail.height == 1)
+        #expect(thumbnail.frames.first?.rgba == expected)
+        let natural = try DecodedImage.decode(data: bytes, id: "natural", maxDimension: 16)
+        #expect(natural.width == 4 && natural.height == 2)
+        let image = ImageCache().load(url: "figure.svg", sizePt: 2, scale: 1, fetched: .svg(bytes))
+        _ = try image.wait().get()
+        #expect(Data(image.pixels.rgbaBytes()) == expected)
+        for encoding in [String.Encoding.utf16BigEndian, .utf16LittleEndian, .utf32BigEndian, .utf32LittleEndian] {
+            let wide = try #require((" " + svg).data(using: encoding))
+            #expect(throws: ImageError.self) { try DecodedImage.decode(data: wide) }
+        }
+    }
 }

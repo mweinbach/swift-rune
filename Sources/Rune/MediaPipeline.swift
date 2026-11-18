@@ -191,6 +191,15 @@ public struct DecodedImage: Sendable, Equatable {
 
     /// Decodes an image using the host's codecs and builds its GPU mip chain.
     public static func decode(data: Data, id: String = UUID().uuidString, maxDimension: Int? = nil) throws -> DecodedImage {
+        // Rune's native SVG renderer reads vector shapes from the supplied bytes. The
+        // platform's general-purpose image loader may resolve additional image resources.
+        if ImageCache.isSVGContent(data) {
+            do {
+                return try ImageCache.decodeSVGThumbnail(data, id: id, maxDimension: maxDimension)
+            } catch let error as ImageLoadError {
+                throw ImageError(error.message)
+            }
+        }
         #if !canImport(ImageIO) || !canImport(CoreGraphics)
         if let animation = try AnimatedPNG.decodeIfAnimated(data, id: id, maxDimension: maxDimension) {
             return animation

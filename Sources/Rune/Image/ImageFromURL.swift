@@ -340,10 +340,18 @@ public final class ImageCache: @unchecked Sendable {
     /// Gzip (SVGZ), or markup after an optional BOM and whitespace (`image.rs` `is_svg`).
     static func isSVGContent(_ bytes: Data) -> Bool {
         if bytes.starts(with: [0x1f, 0x8b]) { return true }
+        // Wide XML also belongs to the SVG parser, which accepts UTF-8. It must never
+        // fall through to a platform codec with different resource-loading behavior.
+        if bytes.starts(with: [0xff, 0xfe]) || bytes.starts(with: [0xfe, 0xff]) ||
+           bytes.starts(with: [0, 0, 0xfe, 0xff]) { return true }
         var body = bytes[...]
         if body.starts(with: [0xef, 0xbb, 0xbf]) { body = body.dropFirst(3) }
         let whitespace: Set<UInt8> = [0x20, 0x09, 0x0a, 0x0c, 0x0d]
-        return body.first(where: { !whitespace.contains($0) }) == UInt8(ascii: "<")
+        let start = body.drop(while: { whitespace.contains($0) })
+        if start.first == UInt8(ascii: "<") { return true }
+        guard start.first == 0, let angle = start.firstIndex(where: { $0 != 0 && !whitespace.contains($0) }),
+              start[angle] == UInt8(ascii: "<") else { return false }
+        return start[start.index(after: angle)...].first == 0
     }
 
     /// Feeds already-fetched bytes manually for `url` (`ImageCache::load`).
@@ -532,7 +540,17 @@ public final class ImageCache: @unchecked Sendable {
         )
     }
 
-    private static func rasterizeSVG(_ encoded: Data, targetMaxSide: UInt32) throws -> (UInt32, UInt32, Data) {
+    /// Media thumbnails use the intrinsic viewport and only shrink it to the requested limit.
+    /// The image cache separately requests its pixel size or the upstream 2× default.
+    static func decodeSVGThumbnail(_ encoded: Data, id: String, maxDimension: Int?) throws -> DecodedImage {
+        let limit = maxDimension.flatMap { $0 > 0 ? min($0, Int(IMAGE_MAX_SIDE)) : nil } ?? Int(IMAGE_MAX_SIDE)
+        let (w, h, rgba) = try rasterizeSVG(encoded, targetMaxSide: 0, intrinsicScale: 1, intrinsicLimit: limit)
+        return try buildMipDecoded(id: id, width: w, height: h, data: rgba)
+    }
+
+    private static func rasterizeSVG(_ encoded: Data, targetMaxSide: UInt32,
+                                     intrinsicScale: Double = 2, intrinsicLimit: Int = 4096) throws -> (UInt32, UInt32, Data) {
+        guard encoded.count <= 32 << 20 else { throw ImageLoadError("SVG is too large") }
         let data: Data
         if encoded.starts(with: [0x1f, 0x8b]) {
             do {
@@ -575,9 +593,10 @@ public final class ImageCache: @unchecked Sendable {
         guard viewportWidth.isFinite, viewportHeight.isFinite, viewportWidth > 0, viewportHeight > 0 else {
             throw ImageLoadError("invalid SVG dimensions")
         }
-        // Decode at twice the intrinsic size unless the caller requests a particular pixel size.
         let longest = max(viewportWidth, viewportHeight)
-        let side = targetMaxSide == 0 ? min(max((longest * 2).rounded(.up), 1), 4096) : Double(targetMaxSide)
+        let side = targetMaxSide == 0
+            ? min(max((longest * intrinsicScale).rounded(.up), 1), Double(intrinsicLimit))
+            : Double(targetMaxSide)
         guard side <= Double(IMAGE_MAX_SIDE) else { throw ImageLoadError("SVG rasterized size exceeds \(IMAGE_MAX_SIDE)") }
         let outW = max(1, Int((viewportWidth / longest * side).rounded()))
         let outH = max(1, Int((viewportHeight / longest * side).rounded()))
