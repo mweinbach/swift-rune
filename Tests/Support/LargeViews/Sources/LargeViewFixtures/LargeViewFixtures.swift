@@ -44,23 +44,28 @@ public enum LargeViewFixtures {
 
     /// The interactive view and numbered source files from rune-kit's diff_50k_time.
     public static func diff() -> Runtime<LargeDiffState> {
+        Runtime(state: diffState(), viewport: diffViewport, pixelScale: 2, systemDark: true, view: diffView)
+    }
+
+    package static func diffState() -> LargeDiffState {
         let lines = 1...50_000
         let old = lines.map { "let value_\($0) = compute(\($0));\n" }.joined()
         let new = lines.map { i in
             "let value_\(i) = compute(\(i))\(i.isMultiple(of: 7) ? " + 1" : "");\n"
         }.joined()
         let file = FileDiff.fromTexts(path: "big.rs", old: old, new: new)
-        return Runtime(state: LargeDiffState(diff: DiffState(diff: file)), viewport: diffViewport,
-                       pixelScale: 2, systemDark: true) { state, cx in
-            let view = DiffView<LargeDiffState>(key: "dv", kit: Kit.neutral(dark: true), state: \.diff)
-                .annotation { _, note in el().key("note-\(note.id)").wFull().h(90) }
-                .headerActions { _, file in el().key("act").size(28, 20).onClick { $0.actions.append(file) } }
-                .onSelect { state, selection, _ in state.selections.append(selection) }
-                .onComment { state, range, _ in state.comments.append(range) }
-                .onVisibleFile { state, file in state.visibleFiles.append(file) }
-                .build(state: state, cx: cx)
-            return col().wFull().hFull().child(view)
-        }
+        return LargeDiffState(diff: DiffState(diff: file))
+    }
+
+    package static func diffView(_ state: LargeDiffState, _ cx: inout Cx<LargeDiffState>) -> El<LargeDiffState> {
+        let view = DiffView<LargeDiffState>(key: "dv", kit: Kit.neutral(dark: true), state: \.diff)
+            .annotation { _, note in el().key("note-\(note.id)").wFull().h(90) }
+            .headerActions { _, file in el().key("act").size(28, 20).onClick { $0.actions.append(file) } }
+            .onSelect { state, selection, _ in state.selections.append(selection) }
+            .onComment { state, range, _ in state.comments.append(range) }
+            .onVisibleFile { state, file in state.visibleFiles.append(file) }
+            .build(state: state, cx: cx)
+        return col().wFull().hFull().child(view)
     }
 
     public static func table(_ app: LargeTableState) -> Runtime<LargeTableState> {

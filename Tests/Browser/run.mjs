@@ -1,5 +1,6 @@
 // Node 22+ and Chrome/Chromium. Compiled Swift fixtures use @bjorn3/browser_wasi_shim.
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { access, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
@@ -15,14 +16,14 @@ const { values: args } = parseArgs({ options: {
     'wake-wasm': { type: 'string' }, 'diagnostics-wasm': { type: 'string' }, 'spell-wasm': { type: 'string' }, 'sketch-wasm': { type: 'string' }, 'wasi-shim': { type: 'string' },
     angle: { type: 'string' }, 'device-scale': { type: 'string' }, fixture: { type: 'string' },
     webgpu: { type: 'boolean' }, 'www-wasm': { type: 'string' }, 'table-wasm': { type: 'string' },
-    'tree-wasm': { type: 'string' }, 'compare-accessibility': { type: 'boolean' }
+    'tree-wasm': { type: 'string' }, 'diff-wasm': { type: 'string' }, 'compare-accessibility': { type: 'boolean' }
 } });
 const fixtures = dirname(fileURLToPath(import.meta.url));
 const resources = resolve(fixtures, '../../Sources/Rune/Resources');
 const shaderTypes = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
     '.wasm': 'application/wasm', '.ttf': 'font/ttf' };
 const largeViews = ['table', 'tree'].filter(name => args[name + '-wasm']);
-const reactors = [args.wasm, args['wake-wasm'], args['diagnostics-wasm'], args['www-wasm'], ...largeViews.map(name => args[name + '-wasm']), args['image-page-wasm'], args['image-wasm'], args['sketch-wasm'], args['spell-wasm']].filter(Boolean);
+const reactors = [args.wasm, args['wake-wasm'], args['diagnostics-wasm'], args['www-wasm'], args['diff-wasm'], ...largeViews.map(name => args[name + '-wasm']), args['image-page-wasm'], args['image-wasm'], args['sketch-wasm'], args['spell-wasm']].filter(Boolean);
 if (Boolean(reactors.length) !== Boolean(args['wasi-shim'])) throw Error('Supply --wasi-shim with a compiled WASI fixture');
 if (reactors.length) await Promise.all([...reactors, join(args['wasi-shim'], 'index.js')].map(path => access(path)));
 const files = await readdir(fixtures);
@@ -36,6 +37,7 @@ if (!args.fixture) {
 }
 const pages = files.filter(name => name.endsWith('.html') && (!['hello-wasi.html', 'cpu-damage-wasi.html'].includes(name) || args.wasm)
         && (name !== 'document-wasi.html' || args['www-wasm']) && (name !== 'large-view-wasi.html' || largeViews.length)
+        && (name !== 'diff-scroll-wasi.html' || args['diff-wasm'])
         && (name !== 'diagnostics-wasi.html' || args['diagnostics-wasm'])
         && (name !== 'wake-wasi.html' || args['wake-wasm']) && (name !== 'spell-wasi.html' || args['spell-wasm'])
         && (name !== 'image-pages-wasi.html' || args['image-page-wasm']) && (name !== 'image-wasi.html' || args['image-wasm']) && (name !== 'sketch-wasi.html' || args['sketch-wasm']))
@@ -64,6 +66,7 @@ function asset(path) {
     if (path === '/__rune/image.wasm') return args['image-wasm'];
     if (path === '/__rune/spell.wasm') return args['spell-wasm'];
     if (path === '/__rune/www.wasm') return args['www-wasm'];
+    if (path === '/__rune/diff.wasm') return args['diff-wasm'];
     for (const name of largeViews) if (path === '/__rune/' + name + '.wasm') return args[name + '-wasm'];
     if (path === '/__rune/sketch.wasm') return args['sketch-wasm'];
     for (const [prefix, dir] of [['/Tests/Browser/', fixtures], ['/Sources/Rune/Resources/', resources],
@@ -127,11 +130,17 @@ async function fixture(debug, page, options) {
     const query = new URLSearchParams(options ?? {});
     if (page === 'image-pages.html' && (args.webgpu || args.fixture)) query.set('webgpu', '1');
     const targetURL = site + '/Tests/Browser/' + page + (query.size ? '?' + query : '');
-    const target = await (await fetch(debug + '/json/new?' + encodeURIComponent(targetURL), { method: 'PUT' })).json();
+    const diff = page === 'diff-scroll-wasi.html';
+    const target = await (await fetch(debug + '/json/new?' + encodeURIComponent(diff ? 'about:blank' : targetURL), { method: 'PUT' })).json();
     const ws = new WebSocket(target.webSocketDebuggerUrl);
     try {
         await once(ws, 'open');
         const command = debugClient(ws);
+        if (diff) {
+            await command('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 2, mobile: false });
+            await command('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
+            await command('Page.navigate', { url: targetURL });
+        }
         const verify = page === 'hello-wasi.html' ? (await import('./hello-accessibility.mjs')).verifyHelloAccessibility : null;
         const read = async expression => {
             const response = await command('Runtime.evaluate', { expression, returnByValue: true });
@@ -139,7 +148,7 @@ async function fixture(debug, page, options) {
             return response.result.value;
         };
         let clicked = false, last, lastMove;
-        for (const until = Date.now() + 90_000; Date.now() < until;) {
+        for (const until = Date.now() + (diff ? 300_000 : 90_000); Date.now() < until;) {
             last = await read("document.querySelector('#result')?.textContent");
             if (last?.startsWith('PASS') || last?.startsWith('{"passed":true')) {
                 if (verify) await verify(command, true);
@@ -147,7 +156,13 @@ async function fixture(debug, page, options) {
                 return page === 'large-view-wasi.html' ? JSON.parse(last.slice(5)) : null;
             }
             if (/^(FAIL|Error|TypeError|RangeError|ReferenceError)/.test(last)) throw Error(last);
-            if (page === 'sketch-wasi.html' && last?.startsWith('Move pointer') && last !== lastMove) {
+            if (diff && last?.startsWith('Capture diff endpoint') && last !== lastMove) {
+                lastMove = last;
+                const { data } = await command('Page.captureScreenshot', { format: 'png' });
+                const hash = createHash('sha256').update(Buffer.from(data, 'base64')).digest('hex');
+                await read('window.runeDiffScreenshot(' + JSON.stringify(hash) + ')');
+            }
+            if ((diff || page === 'sketch-wasi.html') && last?.startsWith('Move pointer') && last !== lastMove) {
                 lastMove = last;
                 const point = await read('window.runeMove');
                 await command('Input.dispatchMouseEvent', { ...point, type: 'mouseMoved' });
@@ -175,7 +190,7 @@ async function fixture(debug, page, options) {
                 await command('Input.dispatchMouseEvent', { ...point, type: 'mouseReleased', button: 'left', clickCount: 1 });
                 clicked = true;
             }
-            await delay(80);
+            await delay(diff && last?.startsWith('Scrolling') ? 1000 : 80);
         }
         throw Error('Timed out: ' + (last || 'module did not start'));
     } finally {

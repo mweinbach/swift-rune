@@ -1,0 +1,154 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Swift Rune 50,000-line diff</title>
+<style>html, body, canvas { display: block; width: 100%; height: 100%; margin: 0; overflow: hidden }</style>
+<canvas></canvas><output id="result" hidden>Starting…</output>
+<script type="module">
+import { instantiateRuneBrowser, mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
+import { WASI, ConsoleStdout, OpenFile, File } from '/__rune/shim/index.js';
+
+const canvas = document.querySelector('canvas'), result = document.querySelector('#result');
+const animationFrame = window.requestAnimationFrame.bind(window);
+const nextFrame = () => new Promise(animationFrame);
+const settle = () => new Promise(resolve => setTimeout(resolve, 370));
+const wheels = 600, warmup = 10, delta = 400;
+const pointer = { x: 600, y: 450 };
+
+function visibleRows(step) {
+    const body = document.querySelector('[data-rune-target="/0/@dv/@dv-body"]');
+    const list = body?.querySelector('[data-rune-target$="/@dv-rows"]');
+    const scrollY = list && body.getBoundingClientRect().top - list.getBoundingClientRect().top;
+    if (scrollY !== step * delta) throw Error('Expected scroll offset ' + step * delta + ', observed ' + scrollY);
+    const heading = [...document.querySelectorAll('[role=heading]')].find(el =>
+        el.getAttribute('aria-label') === 'big.rs, 7142 added, 7142 removed' && el.getBoundingClientRect().y === 0);
+    const header = heading?.getBoundingClientRect();
+    if (header?.x !== 0 || header.width !== 1200 || header.height !== 44) throw Error('Wrong file header at step ' + step);
+    if (step === 0) {
+        const gap = list.querySelector('[data-rune-target$="/@dv-gap-0"]');
+        const rect = gap?.getBoundingClientRect();
+        if (rect?.x !== 0 || rect.width !== 1200 || rect.y !== 44 || rect.height !== 32 ||
+            !gap.querySelector('[role=button][aria-label="Expand all (3 lines)"]')) throw Error('Missing initial folded context');
+    }
+    const rows = [];
+    for (const node of document.querySelectorAll('[role=listitem][data-rune-target]')) {
+        const rect = node.getBoundingClientRect();
+        if (rect.bottom <= 44 || rect.top >= innerHeight) continue;
+        const key = node.dataset.runeTarget.match(/@dv-df0\.([con]\d+)\//)?.[1];
+        rows.push([key, node.getAttribute('aria-label'), rect.x, rect.width, Math.max(44, rect.top), Math.min(innerHeight, rect.bottom)]);
+    }
+    rows.sort((a, b) => a[4] - b[4]);
+
+    // The first hunk opens with three context lines before line 7. A changed line occupies two rows.
+    const expected = [];
+    let top = 76 - step * delta;
+    for (let line = 4; top < innerHeight; line++) {
+        for (const kind of line % 7 === 0 ? ['o', 'n'] : ['c']) {
+            const bottom = top + 20;
+            if (bottom > 44 && top < innerHeight) {
+                const label = { o: 'removed', n: 'added', c: 'unchanged' }[kind] + ' line ' + line +
+                    ': let value_' + line + ' = compute(' + line + ')' + (kind === 'n' ? ' + 1;' : ';');
+                expected.push([kind + line, label, 0, 1200, Math.max(44, top), Math.min(innerHeight, bottom)]);
+            }
+            top = bottom;
+        }
+    }
+    const mismatch = expected.findIndex((row, i) => JSON.stringify(row) !== JSON.stringify(rows[i]));
+    if (mismatch !== -1 || rows.length !== expected.length) {
+        throw Error('Visible diff at step ' + step + ', row ' + mismatch + ': got ' +
+            JSON.stringify(rows[mismatch]) + ' in ' + rows.length + ', expected ' + JSON.stringify(expected[mismatch]) + ' in ' + expected.length);
+    }
+    return { step, scrollY, rows: rows.length, first: rows[0][0], last: rows.at(-1)[0] };
+}
+
+function screenshot(step) {
+    result.textContent = 'Capture diff endpoint ' + step;
+    return new Promise(resolve => { window.runeDiffScreenshot = resolve; });
+}
+
+let app, restore;
+try {
+    const wasi = new WASI(['rune-kit-diff-50k'], ['RUNE_PLAYGROUND=0'], [new OpenFile(new File([])),
+        ConsoleStdout.lineBuffered(console.log), ConsoleStdout.lineBuffered(console.error)]);
+    const { instance } = await instantiateRuneBrowser(fetch('/__rune/diff.wasm'), { wasi_snapshot_preview1: wasi.wasiImport });
+    wasi.initialize(instance);
+    const api = instance.exports;
+    let step = 0, submitted = 0, accepted = 0, scene = false, fonts = false, callbackStart = 0;
+    let fontsPresented = false;
+    const returns = [], throughSubmit = [], intervals = [], checkpoints = [];
+    const submit = GPUQueue.prototype.submit;
+    window.requestAnimationFrame = cb => animationFrame(time => {
+        callbackStart = performance.now();
+        try { return cb(time); } finally { callbackStart = 0; }
+    });
+    GPUQueue.prototype.submit = function (...args) {
+        const ret = submit.apply(this, args);
+        const time = performance.now();
+        if (scene) {
+            scene = false;
+            if (fonts) fontsPresented = true;
+            if (submitted < step) {
+                returns[step] = time;
+                throughSubmit[step] = callbackStart ? time - callbackStart : NaN;
+                submitted = step;
+            }
+        }
+        return ret;
+    };
+    restore = () => { GPUQueue.prototype.submit = submit; window.requestAnimationFrame = animationFrame; };
+    app = mountRuneBrowser(canvas, { exports: { ...api,
+        rune_web_fonts_changed() { api.rune_web_fonts_changed(); fonts = true; },
+        rune_web_scene(...args) {
+            const size = api.rune_web_scene(...args);
+            scene = size > 0;
+            return size;
+        }
+    } }, { backend: 'webgpu', resizeTo: canvas });
+    await app.ready;
+    while (!fontsPresented) await nextFrame();
+    if (app.renderer?.api !== 'WebGPU' || canvas.width !== 2400 || canvas.height !== 1800 ||
+        innerWidth !== 1200 || innerHeight !== 900 || devicePixelRatio !== 2 ||
+        !matchMedia('(prefers-color-scheme: dark)').matches) throw Error('Expected the 1200×900 dark WebGPU surface at 2×');
+
+    const trustedMove = new Promise(resolve => canvas.addEventListener('pointermove', event => {
+        if (event.isTrusted && event.clientX === pointer.x && event.clientY === pointer.y) resolve();
+    }));
+    window.runeMove = pointer;
+    result.textContent = 'Move pointer to start the diff';
+    await trustedMove;
+    await settle();
+    checkpoints.push(visibleRows(0));
+    const initialPngSHA256 = await screenshot(0);
+    result.textContent = 'Scrolling';
+    for (const target of [1, 24, 60, 300, wheels]) {
+        const first = step + 1;
+        for (let n = first; n <= target; n++) {
+            await nextFrame();
+            if (submitted !== step) throw Error('Missing GPU submission for wheel ' + step);
+            step = n;
+            const wheel = new WheelEvent('wheel', { clientX: pointer.x, clientY: pointer.y, deltaY: delta,
+                deltaMode: WheelEvent.DOM_DELTA_PIXEL, bubbles: true, cancelable: true });
+            canvas.dispatchEvent(wheel);
+            if (!wheel.defaultPrevented) throw Error('Rejected wheel at step ' + n);
+            accepted++;
+        }
+        await nextFrame();
+        if (submitted !== target) throw Error('Missing final GPU submission for step ' + target);
+        // Omit checkpoint pauses and the first ten wheels from the scored inter-submission intervals.
+        for (let n = Math.max(warmup + 2, first + 1); n <= target; n++) intervals.push(returns[n] - returns[n - 1]);
+        await settle();
+        checkpoints.push(visibleRows(target));
+    }
+    const finalPngSHA256 = await screenshot(wheels);
+    if (initialPngSHA256 === finalPngSHA256) throw Error('The initial and scrolled screenshots are identical');
+    const cpu = throughSubmit.slice(warmup + 1).sort((a, b) => a - b);
+    if (cpu.length !== wheels - warmup || !cpu.every(Number.isFinite)) throw Error('Missing GPU-submitting animation callback');
+    const seconds = intervals.reduce((total, ms) => total + ms, 0) / 1000;
+    result.textContent = 'PASS ' + JSON.stringify({ view: 'diff', renderer: app.renderer, userAgent: navigator.userAgent,
+        viewport: [innerWidth, innerHeight], scale: devicePixelRatio, wheels, accepted, submitted, warmup,
+        scoredCallbacks: cpu.length, scoredIntervals: intervals.length, gpuSubmissionsPerSecond: intervals.length / seconds,
+        callbackToSubmitP50Ms: cpu[Math.floor((cpu.length - 1) * .5)], callbackToSubmitP95Ms: cpu[Math.floor((cpu.length - 1) * .95)],
+        finalScrollY: checkpoints.at(-1).scrollY, checkpoints, initialPngSHA256, finalPngSHA256 });
+} catch (error) { result.textContent = 'FAIL ' + error.stack; }
+finally { restore?.(); app?.dispose(); }
+</script>

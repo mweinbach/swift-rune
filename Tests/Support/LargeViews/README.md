@@ -10,6 +10,17 @@ swift run --package-path Tests/Support/LargeViews -c release ScrollBench tree wi
 swift run --package-path Tests/Support/LargeViews -c release ScrollBench diff production
 ```
 
+To measure the same interactive diff in Chrome, use Node 22 or later, a matching Swift compiler and WASI SDK, and the `dist` directory from `@bjorn3/browser_wasi_shim`. The runner sends one 400-pixel DOM wheel event per animation frame at a trusted pointer position. It requires a scene submission for each accepted wheel and verifies the accessible row labels, clipped bounds and scroll offsets at six checkpoints. The reported rate measures consecutive WebGPU queue returns after ten warmup events and excludes checkpoint pauses. The output includes the adapter and SHA-256 hashes of the initial and final settled PNG screenshots.
+
+```sh
+./scripts/build-web.sh swift-6.4.2-RELEASE_wasm BrowserDiffBench --package-path Tests/Support/LargeViews -c release
+node Tests/Browser/run.mjs --fixture diff-scroll-wasi --webgpu \
+  --diff-wasm Tests/Support/LargeViews/.build/release/BrowserDiffBench.wasm \
+  --wasi-shim /path/to/node_modules/@bjorn3/browser_wasi_shim/dist
+```
+
+For Metal on macOS, add `--angle metal` to the Node command.
+
 Use `--steps 60` for a short run with checkpoints at 0, 1, 24 and 60 wheels. Pass the same `--steps 60` to `presentations.py` when scoring its Metal CSV. Both commands default to 600 wheels. Window runs accept `--frame-samples file.json` to export the initial frame, each wheel’s host update and encode timings, and the intervals between frame reports. Compare a 60-wheel Rust window capture with `compare.py --native-window diff --native-steps 60`.
 
 - `reference` measures elapsed CPU-side frame construction time using a monotonic wall clock. Logical time advances by 1/120 second per frame. Captures export row keys and clipped geometry at frames 0, 1, 24, 60, 300, and 600 and full top-down RGBA8 pixels and viewable PNGs at frames 0 and 60, outside the timed interval.
