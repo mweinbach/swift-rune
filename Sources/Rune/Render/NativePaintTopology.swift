@@ -131,10 +131,12 @@ extension Runtime {
 
     func prepareNativePaintTopology(_ frame: FrameOutput, byID: FramePoseIndex, holds: Bool,
                                     fromMountedScene: Bool = false) -> NativePaintTopology {
-        if var topology = nativePaintTopology {
+        // Synthetic frames may override parents in their keyed poses while keeping the
+        // same ordered samples as the mounted scene. Their adjacency is frame-local.
+        if fromMountedScene, var topology = nativePaintTopology {
             if topology.currentCommit {
                 if topology.matches(frame.nodes, holds: holds) { return topology }
-            } else if fromMountedScene && topology.matchesRemount(frame.nodes, mounted: flatNodes, holds: holds) {
+            } else if topology.matchesRemount(frame.nodes, mounted: flatNodes, holds: holds) {
                 topology.currentCommit = true
                 for i in topology.identity.indices {
                     topology.identity[i].id = frame.nodes[i].id
@@ -248,17 +250,15 @@ extension Runtime {
 
         // Exiting snapshots and synthetic partial frames follow the scene's current ancestry.
         // A committed mounted tree can reuse links while live text and scroll rectangles change.
-        if tree.exits.isEmpty && tree.order.count == frame.nodes.count && tree.order.count == flatNodes.count {
+        if fromMountedScene && tree.exits.isEmpty && tree.order.count == frame.nodes.count && tree.order.count == flatNodes.count {
             // The parent slots were already resolved while building childOffsets. Retaining
             // this buffer also avoids another flat-node walk on shapes that change every frame.
-            if fromMountedScene {
-                tree.parentSlots = parents
-                if !tree.childSlots.isEmpty {
-                    // The scatter cursors are spent. Reuse their storage for lookup during paint.
-                    offsets.removeLast() // The adjacency end sentinel has no corresponding node.
-                    for i in tree.order.indices { offsets[tree.order[i]] = i }
-                    tree.presentedIndexBySlot = offsets
-                }
+            tree.parentSlots = parents
+            if !tree.childSlots.isEmpty {
+                // The scatter cursors are spent. Reuse their storage for lookup during paint.
+                offsets.removeLast() // The adjacency end sentinel has no corresponding node.
+                for i in tree.order.indices { offsets[tree.order[i]] = i }
+                tree.presentedIndexBySlot = offsets
             }
             nativePaintTopology = tree
         }

@@ -39,6 +39,30 @@ import Testing
     #expect(abs(opacity - 0.375) < 0.001)
 }
 
+@Test func keyedParentOverridesStayLocalToTheirSyntheticFrame() throws {
+    let rt = Runtime<Int>(state: 0, viewport: Vec2(100, 100)) { _, _ in
+        col().key("root").child(el().key("child").size(10, 10))
+    }
+    _ = rt.renderFrame(at: 0)
+    let mounted = try #require(rt.lastFrameOutput)
+    let root = try #require(rt.flatNodes.first { $0.key == "root" })
+    let child = try #require(rt.flatNodes.first { $0.key == "child" })
+    var detached = mounted
+    detached.byId[child.nodeId]?.parent = nil
+
+    for startWithMountedCache in [true, false] {
+        if !startWithMountedCache { rt.nativePaintTopology = nil }
+        let synthetic = rt.prepareNativePaintTopology(detached, byID: detached.paintNodesById, holds: false)
+        #expect(synthetic.roots.contains(child.index))
+        #expect(synthetic.children(of: root).isEmpty)
+
+        let restored = rt.prepareNativePaintTopology(mounted, byID: mounted.paintNodesById,
+                                                     holds: false, fromMountedScene: true)
+        #expect(!restored.roots.contains(child.index))
+        #expect(Array(restored.children(of: root)) == [child.index])
+    }
+}
+
 @Test func nativePaintTopologyReusesRemountedSlotsAndRebuildsChangedPaintOrder() throws {
     let rt = Runtime<Int>(state: 0, viewport: Vec2(120, 100)) { value, _ in
         // Replacing a leaf's ID keeps the same tree. A later edit changes its paint order
