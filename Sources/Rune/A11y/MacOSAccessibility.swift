@@ -122,6 +122,17 @@ private final class AccessibilityProjectionRead {
         }
     }
 
+    // These fields last for one mounted layout. Retained semantic nodes can refresh
+    // their current presentation without copying the generic FlatNode or its element.
+    fileprivate struct Mount {
+        let parent: Int?
+        let id: NodeId
+        let path: String
+        let rect: MotionRect
+        let inert: Bool
+    }
+    fileprivate var mounts: [Mount] = []
+
     fileprivate struct Slot {
         var projection: AccessibilityTreeEdges.Projection?
         var inert = false
@@ -141,7 +152,7 @@ private final class AccessibilityProjectionRead {
         edges = nil
     }
 
-    fileprivate func prepare(count: Int, webFocus: Bool, parent: (Int) -> Int?) -> AccessibilityTreeEdges {
+    fileprivate func prepare(count: Int, webFocus: Bool, mount: (Int) -> Mount) -> AccessibilityTreeEdges {
         if pending != nil || slots.count != count || previousWebFocus != webFocus {
             var next = [Slot](repeating: Slot(), count: count)
             if let pending, previousWebFocus == webFocus, !slots.isEmpty {
@@ -154,7 +165,8 @@ private final class AccessibilityProjectionRead {
             previousWebFocus = webFocus
         }
         if let edges { return edges }
-        let built = AccessibilityTreeEdges(count: count, parent: parent)
+        mounts = (0..<count).map(mount)
+        let built = AccessibilityTreeEdges(count: count) { mounts[$0].parent }
         edges = built
         return built
     }
@@ -357,7 +369,13 @@ public extension Runtime {
         let inputScroll = self.inputScroll
         #endif
         let webFocus = cxSettings.viewDefaults.webFocus
-        let edges = storage.prepare(count: flatNodes.count, webFocus: webFocus) { flatNodes[$0].parentIndex }
+        let edges = flatNodes.withUnsafeBufferPointer { nodes in
+            storage.prepare(count: nodes.count, webFocus: webFocus) { i in
+                .init(parent: nodes[i].parentIndex, id: nodes[i].nodeId, path: nodes[i].path,
+                      rect: nodes[i].targetRect, inert: nodes[i].effectiveInert)
+            }
+        }
+        let mounts = storage.mounts
         // A caller can request a different secure or modal projection without applying a layout.
         let reuseSemantic = securePaths.isEmpty && activeModalPath == nil
         let previousSnapshot = storage.snapshot
@@ -390,15 +408,19 @@ public extension Runtime {
             isExiting = initialPresence
         }
         func projection(_ i: Int) -> AccessibilityTreeEdges.Projection {
-            let node = flatNodes[i]
-            if isExiting(node.nodeId) {
+            let mounted = mounts[i]
+            if isExiting(mounted.id) {
                 changes += 1
                 return .hidden
             }
-            if activeModalPath != nil && !modalMemberPaths.contains(node.path) && !modalAncestorPaths.contains(node.path) { return .hidden }
-            if reuseSemantic, storage.slots[i].inert == node.effectiveInert, let cached = storage.slots[i].projection {
+            if activeModalPath != nil && !modalMemberPaths.contains(mounted.path) && !modalAncestorPaths.contains(mounted.path) { return .hidden }
+            if reuseSemantic, storage.slots[i].inert == mounted.inert, let cached = storage.slots[i].projection {
                 return cached
             }
+            return authoredProjection(i)
+        }
+        @inline(never) func authoredProjection(_ i: Int) -> AccessibilityTreeEdges.Projection {
+            let node = flatNodes[i]
             let el = node.el
             let result: AccessibilityTreeEdges.Projection
             if el.isA11yHidden || el.opacity <= 0.01 || node.key == "__v_top_spacer" || node.key == "__v_bot_spacer" {
@@ -436,10 +458,10 @@ public extension Runtime {
 
         let selectableRoles: Set<ElementRole> = [.listItem, .option, .tab, .treeItem, .gridCell, .row]
         func build(_ idx: Int, insideScroll: Bool, semanticRole: ElementRole) -> AccessibilityNode {
-            let node = flatNodes[idx]
-            let rect = presentedRectByPath[node.path] ?? node.targetRect
+            let mounted = mounts[idx]
+            let rect = presentedRectByPath[mounted.path] ?? mounted.rect
             let virtualOwner = virtualAt[idx]
-            let parentList = node.parentIndex.flatMap { virtualAt[$0] }
+            let parentList = mounted.parent.flatMap { virtualAt[$0] }
             if reuseSemantic, virtualOwner == nil, parentList == nil,
                let cached = storage.slots[idx].template, cached.insideScroll == insideScroll {
                 let wasPublished = cached.snapshot == previousSnapshot
@@ -450,7 +472,7 @@ public extension Runtime {
                         cached.node.children = AccessibilityTreeBuilder.controlChildren(children, role: cached.node.role, name: cached.controlName)
                     }
                 }
-                let focused = node.path == focusedPath
+                let focused = mounted.path == focusedPath
                 if !wasPublished || changes != childRevision || cached.node.frame != rect || cached.node.isFocused != focused {
                     cached.node.frame = rect
                     cached.node.isFocused = focused
@@ -459,6 +481,13 @@ public extension Runtime {
                 cached.snapshot = currentSnapshot
                 return cached.node
             }
+            return authoredNode(idx, insideScroll: insideScroll, semanticRole: semanticRole,
+                                rect: rect, virtualOwner: virtualOwner, parentList: parentList)
+        }
+        @inline(never) func authoredNode(_ idx: Int, insideScroll: Bool, semanticRole: ElementRole,
+                                         rect: MotionRect, virtualOwner: AccessibilityProjectionRead.VirtualIndex?,
+                                         parentList: AccessibilityProjectionRead.VirtualIndex?) -> AccessibilityNode {
+            let node = flatNodes[idx]
             let el = node.el
             var editIsSecure = el.isSecure
             let richPlain: String? = el.plainText ?? el.richSpans?.map(\.text).joined()
