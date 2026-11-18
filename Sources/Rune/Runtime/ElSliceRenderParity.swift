@@ -136,30 +136,36 @@ internal struct ElSliceRenderState {
 }
 
 internal struct PreCommitGroupSnapshot {
-    let indices: [Int]
-    let presentIds: Set<NodeId>
-    let exitingIds: Set<NodeId>
+    struct Item {
+        let index: Int
+        let wasActive: Bool
+    }
+
+    var items: [Item] = []
 }
 
 internal extension Runtime {
     // MARK: - Group Opacity (`group_opacity.rs`)
 
     func capturePreCommitGroupSnapshot() -> PreCommitGroupSnapshot {
-        var indices = layoutObservers.groupOpacity
-        // An element that dropped groupOpacity may need to animate its old track back to one.
-        for id in elSliceRenderState.groupRestIds {
-            if let node = mountedNode(id), node.el.groupOpacity == nil { indices.append(node.index) }
-        }
-        var presentIds = Set<NodeId>(minimumCapacity: indices.count)
-        var exitingIds = Set<NodeId>()
-        for i in indices {
-            let id = flatNodes[i].nodeId
-            if let phase = scene.phase(id) {
-                presentIds.insert(id)
-                if case .exiting = phase { exitingIds.insert(id) }
+        var snapshot = PreCommitGroupSnapshot()
+        snapshot.items.reserveCapacity(layoutObservers.groupOpacity.count)
+        flatNodes.withUnsafeBufferPointer { nodes in
+            func capture(_ i: Int) {
+                let phase = scene.phase(nodes[i].nodeId)
+                let wasActive = switch phase {
+                case .entering, .present: true
+                case .exiting, nil: false
+                }
+                snapshot.items.append(.init(index: i, wasActive: wasActive))
+            }
+            for i in layoutObservers.groupOpacity { capture(i) }
+            // A dropped group may still need to animate its rest track back to one.
+            for id in elSliceRenderState.groupRestIds {
+                if let index = nodeIndexById[id], nodes[index].el.groupOpacity == nil { capture(index) }
             }
         }
-        return PreCommitGroupSnapshot(indices: indices, presentIds: presentIds, exitingIds: exitingIds)
+        return snapshot
     }
 
     func setGroupRestAfterCommit(
@@ -170,42 +176,30 @@ internal extension Runtime {
         specs: [NodeSpec],
         ancestorInstants: [Bool]
     ) {
-        for i in preState.indices {
-            let node = nodes[i]
+        func reconcile(_ node: borrowing FlatNode, _ item: PreCommitGroupSnapshot.Item) {
+            let i = item.index
             let nid = node.nodeId
-            let wasPresent = preState.presentIds.contains(nid)
-            let wasExiting = preState.exitingIds.contains(nid)
             let ancestorInstant = i < ancestorInstants.count ? ancestorInstants[i] : false
             let motion: Anim<Float> = node.el.opacityMotionAnim
                 ?? node.el.styleSpring.map { Anim<Float>(curve: Curve.from($0)) }
                 ?? Anim<Float>(curve: Curve.from(MotionTokens.DEFAULT))
             let isInstantMotion = (motion.curve == .instant)
             let snapStyle = snaps && specs[i].styleSpring == nil
-            let restQuiet = cut || snapStyle || !wasPresent || wasExiting || reducedMotion || ancestorInstant || node.el.hasInstantChanges || isInstantMotion
+            let restQuiet = cut || snapStyle || !item.wasActive || reducedMotion || ancestorInstant || node.el.hasInstantChanges || isInstantMotion
 
             if let (restOp, _) = node.el.groupOpacity {
                 elSliceRenderState.groupRestIds.insert(nid)
                 let to = restOp.clamped(to: 0...1)
-                let had = scene.store.has(nid, Props.GROUP_REST)
                 elSliceRenderState.groupFadeIds.remove(nid)
-                if !had {
-                    if restQuiet {
-                        scene.set(nid, Props.GROUP_REST, to)
-                    } else {
-                        scene.set(nid, Props.GROUP_REST, 1.0)
+                if restQuiet {
+                    scene.set(nid, Props.GROUP_REST, to)
+                } else if let target = scene.store.target(nid, Props.GROUP_REST) {
+                    if abs(target - to) > 1e-5 {
                         scene.animate(nid, Props.GROUP_REST, to: to, anim: motion)
                     }
                 } else {
-                    let curTarget = scene.store.target(nid, Props.GROUP_REST) ?? scene.get(nid, Props.GROUP_REST) ?? to
-                    if abs(curTarget - to) > 1e-5 {
-                        if restQuiet {
-                            scene.set(nid, Props.GROUP_REST, to)
-                        } else {
-                            scene.animate(nid, Props.GROUP_REST, to: to, anim: motion)
-                        }
-                    } else if restQuiet {
-                        scene.set(nid, Props.GROUP_REST, to)
-                    }
+                    scene.set(nid, Props.GROUP_REST, 1.0)
+                    scene.animate(nid, Props.GROUP_REST, to: to, anim: motion)
                 }
             } else if scene.store.has(nid, Props.GROUP_REST) {
                 let cur = scene.get(nid, Props.GROUP_REST) ?? 1.0
@@ -223,6 +217,9 @@ internal extension Runtime {
             } else {
                 elSliceRenderState.groupRestIds.remove(nid)
             }
+        }
+        nodes.withUnsafeBufferPointer { buffer in
+            for item in preState.items { reconcile(buffer[item.index], item) }
         }
         elSliceRenderState.groupFadeIds = elSliceRenderState.groupFadeIds.filter {
             scene.contains($0) && (nodeIndexById[$0] != nil || exitingSnapshots[$0] != nil)

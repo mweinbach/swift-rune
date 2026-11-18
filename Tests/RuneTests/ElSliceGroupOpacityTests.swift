@@ -118,6 +118,40 @@ struct ElSliceGroupOpacityTests {
         }
     }
 
+    @Test("A returning keyed group snaps to its new rest opacity during exit")
+    func returningGroupSnapsToNewRestOpacity() throws {
+        let rt = Runtime<(visible: Bool, rest: Float)>(
+            state: (true, 0.2),
+            viewport: Vec2(200, 100),
+            pixelScale: 1.0
+        ) { state, _ in
+            var group: El<(visible: Bool, rest: Float)> = row().key("row").size(200, 40)
+                .hoverGroup()
+                .childExit(Transition.opacity.spring(Spring(duration: 0.5, bounce: 0)))
+            if state.visible {
+                group = group.child(el().key("action").size(10, 10).bg(.white).groupOpacity(state.rest, 1))
+            }
+            return group
+        }
+
+        _ = rt.frame(at: 0)
+        let id = try #require(rt.flatNodes.first(where: { $0.key == "action" })?.nodeId)
+        rt.update(at: 1) { state, _ in state.visible = false }
+        _ = rt.frame(at: 1)
+        let phase = try #require(rt.scene.phase(id))
+        guard case .exiting = phase else {
+            Issue.record("The action should still be exiting when it returns")
+            return
+        }
+
+        rt.update(at: 1.01) { state, _ in state = (true, 0.8) }
+        _ = rt.frame(at: 1.01)
+        #expect(rt.flatNodes.first(where: { $0.key == "action" })?.nodeId == id)
+        let rest = try #require(rt.scene.get(id, Props.GROUP_REST))
+        #expect(abs(rest - 0.8) < 1e-5)
+        #expect(!rt.scene.store.isAnimating(id, Props.GROUP_REST))
+    }
+
     @Test("Adding or dropping groupOpacity fades smoothly rather than cutting")
     func addingOrDroppingGroupOpacityFades() {
         let rt = Runtime<Bool>(
