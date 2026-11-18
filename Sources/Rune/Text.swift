@@ -1143,8 +1143,10 @@ public final class GlyphAtlas: @unchecked Sendable {
         var rawPatch: GlyphAtlasPatch?
         var published = false
         var rawPublished = false
+        var hasDeferredMasks = false
 
         mutating func write(_ rect: SIMD4<Int>, generation: UInt64, raw: Bool) {
+            if !raw { hasDeferredMasks = true }
             if published || patch == nil {
                 patch = GlyphAtlasPatch(fromRevision: revision, edges: rect)
                 published = false
@@ -2338,8 +2340,12 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
         generation &+= 1
         baseGeneration = generation
-        // Drop previous patch ancestry when a shelf starts over.
-        pageChanges[page] = PageChange(revision: generation, rawRevision: generation)
+        // Resetting a raw shelf invalidates placements but leaves every texel intact.
+        // Its next bitmap write still applies to the last published page. Discarding
+        // deferred masks changes the materialized page, so their shelf starts a new revision.
+        if pageChanges[page]?.hasDeferredMasks == true {
+            pageChanges[page] = PageChange(revision: generation, rawRevision: generation)
+        }
     }
 
     private func ensureBackingLocked() {

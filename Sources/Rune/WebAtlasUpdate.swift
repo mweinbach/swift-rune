@@ -99,12 +99,6 @@ extension WebAtlasUpdate {
                 previous: previous, previousRevisions: revisions, force: force)
     }
 
-    static func glyphPages(_ pages: [R8Atlas], frame: RenderFrame, previous: [R8Atlas],
-                           revisions: [UInt64], force: Bool) -> [Self] {
-        updates(pages, revisions: frame.glyphPageRevisions, patches: frame.glyphPagePatches,
-                previous: previous, previousRevisions: revisions, force: force)
-    }
-
     /// Preserve page slots and compare only changed backing stores. Empty slots retire a texture.
     private static func updates<Page: WebAtlasPixels>(
         _ pages: [Page], revisions: [UInt64], patches: [ImageAtlasPatch?],
@@ -137,6 +131,38 @@ struct WebAtlasTransfer {
     var sequence: SIMD2<UInt32>?
 }
 
+/// The browser owns the uploaded texture. Keep CPU texels only for comparisons without
+/// runtime write receipts or to reuse an already rasterized deferred mask.
+private struct WebResidentGlyphPage {
+    let width: Int
+    let height: Int
+    let isEmpty: Bool
+    let revision: UInt64?
+    let snapshot: R8Atlas?
+
+    init(_ page: R8Atlas, index: Int, frame: RenderFrame, previous: WebResidentGlyphPage?) {
+        width = page.width
+        height = page.height
+        isEmpty = page.texels.isEmpty
+        revision = index < frame.glyphPageRevisions.count ? frame.glyphPageRevisions[index] : nil
+        let deferred = index < frame.glyphPageFills.count && frame.glyphPageFills[index] != nil
+        let carried = !frame.glyphPageFills.isEmpty && previous?.snapshot != nil && previous?.revision == revision
+        snapshot = deferred || carried || revision == nil || index >= frame.rawGlyphPageRevisions.count ? page : nil
+    }
+
+    func update(_ page: R8Atlas, revision next: UInt64?, patch: GlyphAtlasPatch?) -> WebAtlasUpdate {
+        guard !isEmpty, width == page.width, height == page.height else { return .full }
+        if let revision, revision == next { return .none }
+        let edges = patch?.fromRevision == revision ? patch?.edges : nil
+        if let snapshot {
+            return .update(width: width, height: height, channels: 1, texels: page.texels,
+                           previous: snapshot.texels, changed: true, knownEdges: edges)
+        }
+        guard let edges else { return .full }
+        return WebAtlasUpdate.region(edges, width: width, height: height, channels: 1) ?? .full
+    }
+}
+
 struct WebAtlasHistory {
     private var sizes: SIMD4<Int>?
     private var glyphRevision: UInt64?
@@ -145,9 +171,8 @@ struct WebAtlasHistory {
     private var sequence: UInt32?
     private var glyphTexels: [UInt8]?
     private var imageTexels: [UInt8]?
-    private var glyphPages: [R8Atlas] = []
+    private var glyphPages: [WebResidentGlyphPage] = []
     private var imagePages: [RGBA8Atlas] = []
-    private var glyphRevisions: [UInt64] = []
     private var imageRevisions: [UInt64] = []
 
     private func atlasSizes(_ frame: RenderFrame) -> SIMD4<Int> {
@@ -159,14 +184,10 @@ struct WebAtlasHistory {
     private func resolvedGlyphPages(_ frame: RenderFrame) -> [R8Atlas] {
         let pages = frame.baseGlyphPages
         guard !frame.glyphPageFills.isEmpty else { return pages }
-        if pages.count == glyphPages.count && pages.count == glyphRevisions.count &&
-            frame.glyphPageRevisions == glyphRevisions {
-            return glyphPages
-        }
         return pages.enumerated().map { index, page in
-            if index < glyphPages.count, index < glyphRevisions.count,
-               index < frame.glyphPageRevisions.count, glyphRevisions[index] == frame.glyphPageRevisions[index] {
-                return glyphPages[index]
+            if index < glyphPages.count, index < frame.glyphPageRevisions.count,
+               glyphPages[index].revision == frame.glyphPageRevisions[index], let saved = glyphPages[index].snapshot {
+                return saved
             }
             guard index < frame.glyphPageFills.count else { return page }
             return frame.glyphPageFills[index]?.cpuAtlas() ?? page
@@ -192,10 +213,18 @@ struct WebAtlasHistory {
         if glyphPaged {
             // A deferred mask page can require materialization. Share the same pages with the encoder.
             let pages = resolvedGlyphPages(frame)
-            let updates = WebAtlasUpdate.glyphPages(pages, frame: frame, previous: glyphPages, revisions: glyphRevisions, force: full)
+            let updates: [WebAtlasUpdate] = pages.enumerated().map { index, page in
+                guard !page.texels.isEmpty else { return .none }
+                guard !full, index < glyphPages.count else { return .full }
+                let revision = index < frame.glyphPageRevisions.count ? frame.glyphPageRevisions[index] : nil
+                let patch = index < frame.glyphPagePatches.count ? frame.glyphPagePatches[index] : nil
+                return glyphPages[index].update(page, revision: revision, patch: patch)
+            }
             transfer.glyphs = (pages, updates)
             transfer.glyph = .none
-            slotsChanged = WebAtlasUpdate.slotsChanged(pages, since: glyphPages)
+            slotsChanged = pages.count != glyphPages.count || zip(pages, glyphPages).contains {
+                $0.texels.isEmpty != $1.isEmpty
+            }
         } else if !fullGlyph && changedGlyphs {
             if let revision = pageRevision {
                 // Retaining the whole shelf forces a copy before each new glyph. Runtime
@@ -239,15 +268,15 @@ struct WebAtlasHistory {
             imageTexels = transfer.images == nil ? frame.images.texels : nil
             imagePages = transfer.images == nil ? [] : frame.webImagePages
             imageRevisions = transfer.images == nil ? [] : frame.webImageRevisions
-            glyphPages = transfer.glyphs?.pages ?? []
-            glyphRevisions = transfer.glyphs == nil ? [] : frame.glyphPageRevisions
+            glyphPages = transfer.glyphs?.pages.enumerated().map { index, page in
+                WebResidentGlyphPage(page, index: index, frame: frame, previous: index < glyphPages.count ? glyphPages[index] : nil)
+            } ?? []
         } else {
             glyphTexels = nil
             imageTexels = nil
             imagePages = []
             imageRevisions = []
             glyphPages = []
-            glyphRevisions = []
         }
         glyphRevision = frame.glyphGeneration
         imageRevision = frame.imageRevision

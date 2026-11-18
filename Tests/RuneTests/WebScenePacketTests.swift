@@ -93,10 +93,14 @@ import RuneRef
         scene.glyphPages = [base, page, empty]
         scene.glyphPageRevisions = [4, 7, 8]
         scene.glyphPagePatches = [nil, GlyphAtlasPatch(fromRevision: 5, edges: SIMD4(1, 1, 2, 3)), nil]
-        let previous = [base, base, empty]
-        let updates = WebAtlasUpdate.glyphPages(scene.glyphPages, frame: scene, previous: previous, revisions: [4, 5, 8], force: false)
+        var history = WebAtlasHistory()
+        var previous = scene
+        previous.glyphPages = [base, base, empty]
+        previous.glyphPageRevisions = [4, 5, 8]
+        history.record(previous, history.prepare(previous, force: false, patches: true))
+        let updates = try #require(history.prepare(scene, force: false, patches: true).glyphs?.updates)
         #expect(updates == [.none, .patch(SIMD4(1, 1, 2, 3)), .none])
-        #expect(WebAtlasUpdate.glyphPages(scene.glyphPages, frame: scene, previous: previous, revisions: [4, 5, 8], force: true) == [.full, .full, .none])
+        #expect(history.prepare(scene, force: true, patches: true).glyphs?.updates == [.full, .full, .none])
         #expect(WebAtlasUpdate.slotsChanged([base, page, empty], since: [base, page, base]))
         #expect(WebAtlasUpdate.imagePages(scene, previous: [image], revisions: [scene.imageRevision], force: false) == [.none])
         let encoded = try WebScenePacket(scene: scene, glyphUpdate: .none, imageUpdate: .none, sequence: SIMD2(10, 11),
