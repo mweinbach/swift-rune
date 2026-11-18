@@ -34,6 +34,40 @@ struct UnseenPresenceParityTests {
         }
     }
 
+    @Test("Visibility keeps repeated paint coverage and drops nodes skipped by the next draw")
+    func retainedPaintVisibility() {
+        var frame = KitUnseenPresenceState.PaintedFrame()
+        let hidden = KitUnseenPresenceState.PaintedNode(parent: nil, visible: false, inView: false,
+            geometricallyInView: false, inheritedOpacity: 0, drawn: .zero, stickyShift: .zero)
+        var shown = hidden
+        shown.parent = NodeId(4)
+        shown.visible = true
+        shown.inView = true
+        shown.geometricallyInView = true
+        shown.inheritedOpacity = 1
+
+        frame.begin()
+        for i in 0..<8 { frame.record(NodeId(UInt64(i)), sample: hidden) }
+        frame.record(NodeId(6), sample: shown)
+        frame.record(NodeId(6), sample: hidden)
+        #expect(frame[NodeId(6)]?.visible == false)
+        #expect(frame[NodeId(6)]?.inView == true)
+        #expect(frame[NodeId(6)]?.geometricallyInView == true)
+
+        frame.begin()
+        frame.record(NodeId(6), sample: shown)
+        #expect(frame[NodeId(4)] == nil)
+        #expect(frame.visibleAncestors() == [NodeId(4)])
+        frame.updateOpacity(NodeId(6), opacity: 0)
+        #expect(frame[NodeId(6)]?.inView == false)
+        #expect(frame[NodeId(6)]?.geometricallyInView == true)
+
+        frame.begin()
+        frame.record(NodeId(4), sample: hidden)
+        #expect(frame[NodeId(6)] == nil)
+        #expect(frame.visibleAncestors().isEmpty)
+    }
+
     @Test("Offscreen clipped rows skip enter fade while visible rows fade in (entersUnseen / landUnseenEntrances)")
     func entersUnseenLandsOffscreenRowAndCrossfadesVisibleRow() throws {
         let rt = makeListRuntime(rows: [])

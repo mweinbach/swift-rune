@@ -85,14 +85,90 @@ internal struct KitUnseenPresenceState {
         }
     }
 
-    private(set) var frameById: [NodeId: PaintedNode] = [:]
+    /// Retained paint order lets adjacent draws update consecutive slots directly. The ID
+    /// index also addresses raised nodes, matched flights, and duplicate draws out of order.
+    struct PaintedFrame {
+        private struct Entry {
+            var id: NodeId
+            var sample: PaintedNode
+            var frame: UInt64
+        }
+        private var entries: [Entry] = []
+        private var indices: [NodeId: Int] = [:]
+        private var frame: UInt64 = 0
+        private var seen = 0
+        private var cursor = 0
+
+        mutating func begin() {
+            // Limit retained slots as a virtual list visits new rows. Stale entries expose
+            // no samples in the current frame, including between two successive commits.
+            if seen < entries.count / 2 || frame == .max {
+                entries.removeAll(keepingCapacity: false)
+                indices.removeAll(keepingCapacity: false)
+            }
+            frame &+= 1
+            cursor = 0
+            seen = 0
+        }
+
+        private func index(of id: NodeId) -> Int? {
+            guard let i = indices[id], entries[i].frame == frame else { return nil }
+            return i
+        }
+
+        subscript(id: NodeId) -> PaintedNode? {
+            index(of: id).map { entries[$0].sample }
+        }
+
+        mutating func record(_ id: NodeId, sample: PaintedNode) {
+            let i: Int
+            if cursor < entries.count && entries[cursor].id == id {
+                i = cursor
+            } else if let existing = indices[id] {
+                i = existing
+            } else {
+                indices[id] = entries.count
+                entries.append(Entry(id: id, sample: sample, frame: frame))
+                cursor = entries.count
+                seen += 1
+                return
+            }
+            cursor = i + 1
+            if entries[i].frame == frame {
+                entries[i].sample.update(sample)
+            } else {
+                entries[i].frame = frame
+                entries[i].sample = sample
+                seen += 1
+            }
+        }
+
+        mutating func updateOpacity(_ id: NodeId, opacity: Float) {
+            guard let i = index(of: id) else { return }
+            entries[i].sample.inheritedOpacity = opacity
+            entries[i].sample.inView = entries[i].sample.geometricallyInView && opacity >= (1.0 / 512.0)
+        }
+
+        func visibleAncestors() -> Set<NodeId> {
+            var ancestors: Set<NodeId> = []
+            for entry in entries where entry.frame == frame && entry.sample.inView {
+                var parent = entry.sample.parent
+                while let id = parent, ancestors.insert(id).inserted {
+                    parent = self[id]?.parent
+                }
+            }
+            return ancestors
+        }
+    }
+
+    private(set) var frameById = PaintedFrame()
     private(set) var offscreenEntrances: [NodeId] = []
     var hasBuilt = false
     private var filterContainerIndices: [Int] = []
     var prevFilterStateById: [NodeId: (keys: [String], seenChildKeys: Set<String>)] = [:]
 
     mutating func beginFrame() {
-        frameById.removeAll(keepingCapacity: true)
+        frameById.begin()
         offscreenEntrances.removeAll(keepingCapacity: true)
     }
 
@@ -104,7 +180,7 @@ internal struct KitUnseenPresenceState {
         let sample = PaintedNode(parent: node.parent, visible: visible, inView: inView,
                                  geometricallyInView: geometricallyInView, inheritedOpacity: inhOpacity,
                                  drawn: drawn, stickyShift: ownStickyShift)
-        frameById[node.id, default: sample].update(sample)
+        frameById.record(node.id, sample: sample)
         if node.phase == .entering && !geometricallyInView { offscreenEntrances.append(node.id) }
     }
 
@@ -146,21 +222,7 @@ internal struct KitUnseenPresenceState {
     }
 
     mutating func updateCycleOpacity(_ id: NodeId, opacity: Float) {
-        guard let geometry = frameById[id]?.geometricallyInView else { return }
-        frameById[id]?.inheritedOpacity = opacity
-        frameById[id]?.inView = geometry && opacity >= (1.0 / 512.0)
-    }
-
-    /// Only a hidden exit needs to know whether a visible descendant is still on screen.
-    func visibleAncestors() -> Set<NodeId> {
-        var ancestors: Set<NodeId> = []
-        for node in frameById.values where node.inView {
-            var parent = node.parent
-            while let id = parent, ancestors.insert(id).inserted {
-                parent = frameById[id]?.parent
-            }
-        }
-        return ancestors
+        frameById.updateOpacity(id, opacity: opacity)
     }
 
     /// Marks ancestors of seen nodes as seen (`mark_ancestors`), matching `unseen_presence.rs`.
@@ -565,7 +627,7 @@ extension Runtime {
                   !unclippedMatchedFlightIds.contains(id),
                   let previous = kitHooks.unseenPresence.frameById[id],
                   !previous.visible || previous.inheritedOpacity < (1.0 / 512.0) else { continue }
-            if ancestors == nil { ancestors = kitHooks.unseenPresence.visibleAncestors() }
+            if ancestors == nil { ancestors = kitHooks.unseenPresence.frameById.visibleAncestors() }
             if ancestors?.contains(id) == false { scene.unmount(id) }
         }
     }
