@@ -728,9 +728,7 @@ extension Runtime {
                 ?? (isLit ? .instant : Anim<Float>(curve: .tween(duration: 0.1, easing: .easeOut)))
             if readyHoverFromRest(nid, to: target) {
                 retargeted = true
-                let drewNothing = unseen ?? kitHooks.unseenPresence.drewNothing(nodes: flatNodes)
-                unseen = drewNothing
-                if drewNothing.indices.contains(i) && drewNothing[i] {
+                if kitHooks.unseenPresence.drewNothing(at: i, nodes: flatNodes, cached: &unseen) {
                     liveStore.snap(trackId, Self.hoverProp, to: target)
                 } else {
                     liveStore.set(trackId, Self.hoverProp, to: target, anim: anim, at: now)

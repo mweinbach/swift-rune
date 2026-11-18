@@ -243,6 +243,21 @@ internal struct KitUnseenPresenceState {
         return hidden
     }
 
+    /// A hover change usually concerns one visible node. An invisible container can still
+    /// have visible children, so share the full projection if a query needs that information.
+    func drewNothing<S>(at index: Int, nodes: [Runtime<S>.FlatNode], cached: inout [Bool]?) -> Bool {
+        guard hasBuilt else { return false }
+        if let cached { return cached[index] }
+        let sample = frameById[nodes[index].nodeId]
+        if (sample?.inheritedOpacity ?? 1) < (1.0 / 512.0) { return true }
+        if sample?.visible == true { return false }
+        let next = index + 1
+        if next == nodes.count || nodes[next].parentIndex != index { return true }
+        let hidden = drewNothing(nodes: nodes)
+        cached = hidden
+        return hidden[index]
+    }
+
     /// A complete preorder subtree has the same draw flags as that part of the full tree.
     private func drewNothing<S>(nodes: [Runtime<S>.FlatNode], in range: Range<Int>, into hidden: inout [Bool]) {
         hidden.removeAll(keepingCapacity: true)

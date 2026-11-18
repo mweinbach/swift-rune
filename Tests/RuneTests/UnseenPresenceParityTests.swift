@@ -68,6 +68,35 @@ struct UnseenPresenceParityTests {
         #expect(frame.visibleAncestors().isEmpty)
     }
 
+    @Test func hoverVisibilityUsesTheLastPaintIncludingOverflowingChildren() throws {
+        let runtime = Runtime<Void>(state: (), viewport: Vec2(100, 100)) { _, _ in
+            col().key("root").children([
+                col().key("overflow").child(el().key("child").size(10, 10)),
+                col().key("faded").child(el().key("nested").size(10, 10)),
+                el().key("offscreen").size(10, 10),
+            ])
+        }
+        _ = runtime.renderFrame(at: 0)
+        let nodes = runtime.flatNodes
+        var visibility = KitUnseenPresenceState()
+        var cached: [Bool]?
+        #expect(!visibility.drewNothing(at: 0, nodes: nodes, cached: &cached))
+        visibility.beginFrame()
+        for node in nodes {
+            let pose = try #require(runtime.scene.presented(node.nodeId))
+            let visible = node.key == "child" || node.key == "nested"
+            visibility.recordFrameNode(pose, visible: visible, inView: visible, geometricallyInView: visible,
+                inhOpacity: node.key == "faded" ? 0 : 1, drawn: pose.rect, ownStickyShift: .zero)
+        }
+        let expected = visibility.drewNothing(nodes: nodes)
+        for key in ["child", "offscreen", "faded", "overflow", "root"] {
+            let index = try #require(nodes.firstIndex { $0.key == key })
+            let hidden = visibility.drewNothing(at: index, nodes: nodes, cached: &cached)
+            #expect(hidden == expected[index])
+            #expect(hidden == (key == "offscreen" || key == "faded"))
+        }
+    }
+
     @Test("Offscreen clipped rows skip enter fade while visible rows fade in (entersUnseen / landUnseenEntrances)")
     func entersUnseenLandsOffscreenRowAndCrossfadesVisibleRow() throws {
         let rt = makeListRuntime(rows: [])
