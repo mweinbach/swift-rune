@@ -224,6 +224,10 @@ public final class MacOSSystemObserver {
 @MainActor
 public final class MacOSDisplayLinkDriver: NSObject {
     private var displayLink: CADisplayLink?
+    // An input burst can appear idle between a frame finishing and its next native event.
+    // Keep one real target available without drawing, then stop on the next unused pulse.
+    private var awaitingInput = false
+    private var idleTarget: Double?
     private var fallbackTimer: Timer?
     private var deadlineTimer: Timer?
     private var screenObserver: NSObjectProtocol?
@@ -252,7 +256,7 @@ public final class MacOSDisplayLinkDriver: NSObject {
         displayLink != nil || fallbackTimer != nil
     }
 
-    var pacing: Pacing { displayLink != nil ? .paced : fallbackTimer != nil ? .unpaced : .idle }
+    var pacing: Pacing { awaitingInput ? .idle : displayLink != nil ? .paced : fallbackTimer != nil ? .unpaced : .idle }
 
     var refreshHz: Double { 1 / pacer.framePeriod }
 
@@ -269,7 +273,17 @@ public final class MacOSDisplayLinkDriver: NSObject {
         }
         if fallbackTimer != nil, view.window != nil { start(in: view) }
         let now = CACurrentMediaTime()
-        let deadline = earlyTickDeadline
+        var deadline = earlyTickDeadline
+        if awaitingInput {
+            awaitingInput = false
+            if paced, let idleTarget {
+                pacer.enqueueTick(target: idleTarget)
+                deadline = Self.retryTime(for: idleTarget, lastPresent: pacer.lastPresent, lastTarget: pacer.lastTarget,
+                                          now: now, period: pacer.framePeriod)
+            }
+            idleTarget = nil
+            cancelDeadline()
+        }
         earlyTickDeadline = nil
         // An early tick has already passed the target checks. Claim this target once,
         // then enforce the actual submission deadline after preparing its pixels.
@@ -338,8 +352,9 @@ public final class MacOSDisplayLinkDriver: NSObject {
     }
 
     public func start(in view: NSView) {
-        deadlineTimer?.invalidate()
-        deadlineTimer = nil
+        awaitingInput = false
+        idleTarget = nil
+        cancelDeadline()
         if let fallbackTimer, view.window != nil {
             // An animated app can request its first frame before AppKit attaches its host view.
             fallbackTimer.invalidate()
@@ -377,6 +392,7 @@ public final class MacOSDisplayLinkDriver: NSObject {
     }
 
     private func screenChanged(_ window: NSWindow?) {
+        idleTarget = nil
         tickRetry?.cancel()
         tickRetry = nil
         cancelPreparedFrame()
@@ -401,7 +417,19 @@ public final class MacOSDisplayLinkDriver: NSObject {
         link.preferredFrameRateRange = CAFrameRateRange(minimum: min(60, rate), maximum: rate, preferred: rate)
     }
 
+    private func cancelDeadline() {
+        deadlineTimer?.invalidate()
+        deadlineTimer = nil
+    }
+
     public func stop() {
+        cancelDeadline()
+        stopDisplayLink()
+    }
+
+    private func stopDisplayLink() {
+        awaitingInput = false
+        idleTarget = nil
         cancelPreparedFrame()
         tickRetry?.cancel()
         tickRetry = nil
@@ -413,14 +441,18 @@ public final class MacOSDisplayLinkDriver: NSObject {
         displayLink = nil
         fallbackTimer?.invalidate()
         fallbackTimer = nil
-        deadlineTimer?.invalidate()
-        deadlineTimer = nil
         pacer.stop()
     }
 
     /// Sleeps between discrete frames on a host clock measured in `timeScale` seconds per real second.
-    func sleep(until deadline: Double?, now: Double, timeScale: Double) {
-        stop()
+    func sleep(until deadline: Double?, now: Double, timeScale: Double, afterPacedFrame: Bool = false) {
+        cancelDeadline()
+        if afterPacedFrame && displayLink != nil {
+            awaitingInput = true
+            idleTarget = nil
+        } else {
+            stopDisplayLink()
+        }
         guard let deadline, deadline.isFinite, timeScale > 0 else { return }
         let delay = max(0, (deadline - now) / timeScale)
         let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
@@ -437,6 +469,14 @@ public final class MacOSDisplayLinkDriver: NSObject {
         RunLoop.main.add(timer, forMode: .common)
     }
 
+    /// Saves a fresh pulse for the next input and retires the link if it goes unused.
+    func handleIdleTick(target: Double) -> Bool {
+        guard awaitingInput else { return false }
+        if idleTarget == nil { idleTarget = target }
+        else { stopDisplayLink() }
+        return true
+    }
+
     @objc private func handleDisplayLink(_ sender: CADisplayLink) {
         guard sender === displayLink else { return }
         let period = sender.targetTimestamp - sender.timestamp
@@ -446,6 +486,7 @@ public final class MacOSDisplayLinkDriver: NSObject {
         tickRetry?.cancel()
         tickRetry = nil
         let target = sender.targetTimestamp
+        if handleIdleTick(target: target) { return }
         let now = CACurrentMediaTime()
         if let retryAt = Self.retryTime(for: target, lastPresent: pacer.lastPresent, lastTarget: pacer.lastTarget,
                                         now: now, period: pacer.framePeriod) {

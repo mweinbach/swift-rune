@@ -183,6 +183,35 @@ struct MacOSHostFrameTests {
     }
 
     @MainActor
+    @Test func idleDisplayLinkKeepsOneRealOpportunityAndPreservesTheWakeDeadline() async throws {
+        _ = NSApplication.shared
+        let view = NSView(frame: CGRect(x: 0, y: 0, width: 20, height: 20))
+        let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        var wakes = 0
+        let driver = MacOSDisplayLinkDriver { wakes += 1 }
+        defer { driver.stop() }
+        driver.start(in: view)
+        driver.sleep(until: nil, now: 0, timeScale: 1, afterPacedFrame: true)
+        #expect(driver.pacing == .idle)
+        let target = CACurrentMediaTime() + 1.0 / 60
+        #expect(driver.handleIdleTick(target: target))
+        #expect(wakes == 0)
+        #expect(driver.beginFrame(in: view, paced: true) == .tick(target))
+        driver.submitted()
+        driver.endFrame()
+        #expect(!driver.handleIdleTick(target: target))
+
+        driver.sleep(until: 1, now: 0, timeScale: 100, afterPacedFrame: true)
+        #expect(driver.handleIdleTick(target: target + 1.0 / 60))
+        #expect(driver.handleIdleTick(target: target + 2.0 / 60))
+        #expect(!driver.isRunning && wakes == 0)
+        let timeout = ContinuousClock.now + .seconds(20)
+        while wakes == 0 && ContinuousClock.now < timeout { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(wakes == 1)
+    }
+
+    @MainActor
     @Test func reentrantRenderRequestsWakeOnceAfterTheCurrentFrame() async throws {
         let view = NSView()
         var wakes = 0

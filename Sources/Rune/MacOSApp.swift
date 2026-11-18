@@ -765,14 +765,14 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         runtime.cancelPreparedText()
     }
 
-    private func sleepUntilRuntimeWake() {
+    private func sleepUntilRuntimeWake(afterPacedFrame: Bool = false) {
         guard let window, window.isVisible || window.isMiniaturized else { stopTimer(); return }
         if windowFrameDriver.isMoving {
             RuneMaterialHost.syncWindowFrame(moving: false, live: inLiveResize, host: materialHost, layer: metalLayer)
         }
         windowFrameDriver.landFrame(window: window)
         let deadline = runtime.windowWakeDeadline(covered: !coverDriver.canDraw)
-        displayLinkDriver.sleep(until: deadline, now: nowSeconds(), timeScale: timeScale)
+        displayLinkDriver.sleep(until: deadline, now: nowSeconds(), timeScale: timeScale, afterPacedFrame: afterPacedFrame)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -955,7 +955,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             if continuous || needsFrame() {
                 displayLinkDriver.start(in: self)
             } else {
-                sleepUntilRuntimeWake()
+                sleepUntilRuntimeWake(afterPacedFrame: paced && coverDriver.canDraw && drawCount != nil)
             }
             surfaceMeter?.setPacing(displayLinkDriver.pacing)
             if let devStatsReceiver, let surfaceMeter { devStatsReceiver(surfaceMeter.currentStats()) }

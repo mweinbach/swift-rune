@@ -873,14 +873,14 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         try nativeTrace?.finish()
     }
 
-    private func sleepUntilRuntimeWake() {
+    private func sleepUntilRuntimeWake(afterPacedFrame: Bool = false) {
         guard let window, window.isVisible || window.isMiniaturized, slot?.isTornDown != true else { stopTimer(); return }
         if windowFrameDriver.isMoving {
             RuneMaterialHost.syncWindowFrame(moving: false, live: inLiveResize, host: materialHost, layer: metalLayer)
         }
         windowFrameDriver.landFrame(window: window)
         let deadline = entry.wakeDeadline(runtimeObj: runtime, covered: !coverDriver.canDraw)
-        displayLinkDriver.sleep(until: deadline, now: nowSeconds(), timeScale: timeScale)
+        displayLinkDriver.sleep(until: deadline, now: nowSeconds(), timeScale: timeScale, afterPacedFrame: afterPacedFrame)
     }
 
     override func viewWillStartLiveResize() {
@@ -1093,7 +1093,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             if isAnimating || needsFrame() {
                 displayLinkDriver.start(in: self)
             } else {
-                sleepUntilRuntimeWake()
+                sleepUntilRuntimeWake(afterPacedFrame: paced && coverDriver.canDraw && submitted != nil)
             }
             surfaceMeter.setPacing(displayLinkDriver.pacing)
             entry.surfaceStatsReceiver?(surfaceMeter.currentStats())
