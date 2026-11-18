@@ -4,6 +4,28 @@ import Testing
 @Suite("El Layout and Direction Closeout Parity")
 struct ElLayoutAndDirectionCloseoutTests {
 
+    @Test("Copied grid styles retain independent placement and compare by value")
+    func gridStyleCopies() {
+        func style() -> LayoutStyle {
+            var result = LayoutStyle()
+            result.grid = GridContainerStyle(templateColumns: [.fr(1)])
+            result.gridItem = GridItemStyle(column: .line(2))
+            return result
+        }
+
+        let original = style()
+        #expect(Set([original, style()]).count == 1)
+        var copy = original
+        copy.grid?.templateColumns.append(.px(10))
+        copy.gridItem?.column = .span(2)
+        #expect(original.grid?.templateColumns == [.fr(1)])
+        #expect(original.gridItem?.column == .line(2))
+        #expect(copy != original)
+        copy.grid = nil
+        copy.gridItem = nil
+        #expect(copy == LayoutStyle())
+    }
+
     @Test("Direction.isRtl and Direction.of resolve bidi directions")
     func directionHelpers() {
         #expect(Direction.ltr.isRtl == false)

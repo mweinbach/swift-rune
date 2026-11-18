@@ -61,6 +61,18 @@ public enum StickyEdge: Sendable, Hashable, Codable {
     case left(Float)
 }
 
+private final class GridStyleBox<Value: Hashable & Sendable>: Hashable, Sendable {
+    let value: Value
+
+    init(_ value: Value) { self.value = value }
+
+    static func == (lhs: GridStyleBox, rhs: GridStyleBox) -> Bool {
+        lhs === rhs || lhs.value == rhs.value
+    }
+
+    func hash(into hasher: inout Hasher) { hasher.combine(value) }
+}
+
 /// Complete CSS Flexbox + Grid + Block + Absolute + Scroll layout style for a single `El`.
 public struct LayoutStyle: Sendable, Hashable {
     public var displayMode: LayoutMode = .flex
@@ -74,8 +86,17 @@ public struct LayoutStyle: Sendable, Hashable {
     public var justifyContent: JustifyContent = .start
     public var boxSizingBorderBox: Bool = true
 
-    public var grid: GridContainerStyle? = nil
-    public var gridItem: GridItemStyle? = nil
+    // Flex and block nodes only carry two references for the optional grid configuration.
+    private var gridStorage: GridStyleBox<GridContainerStyle>?
+    private var gridItemStorage: GridStyleBox<GridItemStyle>?
+    public var grid: GridContainerStyle? {
+        get { gridStorage?.value }
+        set { gridStorage = newValue.map(GridStyleBox.init) }
+    }
+    public var gridItem: GridItemStyle? {
+        get { gridItemStorage?.value }
+        set { gridItemStorage = newValue.map(GridStyleBox.init) }
+    }
 
     public var width: Dimension = .auto
     public var height: Dimension = .auto
