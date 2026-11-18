@@ -7719,10 +7719,8 @@ public final class Runtime<State> {
             let ownOp = own?.opacity ?? p.opacity
             let preLoopOwnOp = own?.preLoopOpacity ?? ownOp
             let groupFactor = resolveGroupOpacityFactor(
-                nodeId: p.id,
-                el: el,
-                nodePath: snap.path,
-                inheritedGroupFrac: nearestGroupHoverFrac
+                nodeId: p.id, group: el.groupOpacity, nodePath: snap.path,
+                inheritedGroupFrac: nearestGroupHoverFrac, sampledRest: scene.get(p.id, Props.GROUP_REST)
             )
             let departingText = textFlightSource.map {
                 $0.state.alphas(target: $0.state.destination, now: now, reducedMotion: reducedMotion).source > 0

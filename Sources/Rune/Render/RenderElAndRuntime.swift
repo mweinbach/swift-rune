@@ -662,22 +662,22 @@ private typealias PaintHeader = (
 )
 
 private struct PaintContext {
-    let clip: RenderClipState
-    let inert: Bool
-    let groupHover: Float
-    let snap: PixelSnap.Inherit
-    let stickyShift: Vec2
+    var clip: RenderClipState
+    var inert: Bool
+    var groupHover: Float
+    var snap: PixelSnap.Inherit
+    var stickyShift: Vec2
     let opacity: Float
     let enclosingOpacity: Float
     let transform: PresentedTransform
     let dissolve: Bool
     let scaleMotion: PaintScaleMotion
-    let element: Int?
+    var element: Int?
     let allowRaised: Bool
     let inCache: Bool
     let rotated: Bool
     // Single-child chains can omit paint-branch records and still add logical hit scopes.
-    let hitDepth: Int
+    var hitDepth: Int
 }
 
 private struct PaintBranch {
@@ -1022,10 +1022,8 @@ extension Runtime {
             if let loop { loopSamples[nid] = loop }
             let loopOp = loop?.opacity ?? 1.0
             let groupFactor = resolveGroupOpacityFactor(
-                nodeId: nid,
-                el: el,
-                nodePath: n.path,
-                inheritedGroupFrac: scope.group
+                nodeId: nid, group: el.groupOpacity, nodePath: n.path,
+                inheritedGroupFrac: scope.group, sampledRest: paintScene.get(nid, Props.GROUP_REST)
             )
             let ownOp = ((liveOp ?? presentedById[nid]?.opacity ?? el.opacity) * groupFactor * loopOp).clamped(to: 0...1)
             let ownHoverFrac = resolveNodeHoverFrac(n, el: el, inert: effInert)
@@ -1044,7 +1042,8 @@ extension Runtime {
             let isGroupScope = el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil
             return (effInert, isGroupScope ? ownHoverFrac : scope.group, ownPress)
         }
-        let hasGroupOpacity = topology.hasGroupOpacity || !elSliceRenderState.groupFadeIds.isEmpty
+        let hasGroupFades = !elSliceRenderState.groupFadeIds.isEmpty
+        let hasGroupOpacity = topology.hasGroupOpacity || hasGroupFades
         // Group opacity follows the current parent in paint order. Raised or dissolving
         // branches can draw out of order or inspect children before the first child paints.
         let needsInteractionPrepass = (hasGroupOpacity && hasRaised) || topology.hasPressColor
@@ -1346,20 +1345,21 @@ extension Runtime {
         @inline(never)
         func projectGeometry(
             _ node: FlatNode, _ el: El<State>, _ p: Presented,
-            _ context: PaintContext, depth: Int, snap: inout PixelSnap.Inherit, stickyShift: inout Vec2,
-            groupHover: inout Float
-        ) -> PaintHeader? {
+            _ context: inout PaintContext, isLeaf: Bool
+        ) -> Bool {
+            let depth = context.hitDepth + 1
+            var snap = context.snap
+            var stickyShift = context.stickyShift
             let id = node.nodeId
             guard node.enclosingScrollIndex != nil, context.clip.viewportApplies,
                   !context.inCache, !context.rotated, !context.dissolve, context.scaleMotion == .still,
                   context.transform.scale == Vec2(1, 1), context.transform.anchor == context.transform.anchorTo,
                   context.transform.stillScale == 1, p.phase == .present, !p.isMoving,
                   p.scale == Vec2(1, 1), p.rotate == 0, p.blur == 0, p.opacity == 1,
-                  p.revealClip == nil, p.mask.isNone else { return nil }
+                  p.revealClip == nil, p.mask.isNone else { return false }
             let base = p.rect.offsetBy(Vec2(context.transform.dx, context.transform.dy))
             var rect = base.offsetBy(context.stickyShift)
             let clip = context.clip.clipPx
-            let isLeaf = topology.children(of: node).isEmpty
             let plainBox = node.paintTraits.contains(.plainBox)
             let clipMisses = clip.z < clip.x - 1 || clip.w < clip.y - 1 || clip.z < -1 || clip.w < -1
                 || clip.x > Float(widthPx) + 1 || clip.y > Float(heightPx) + 1
@@ -1370,17 +1370,17 @@ extension Runtime {
                 // Visible leaves retain their own pixel-snap glide bookkeeping.
                 let margin = 2 * max(0, el.textStyle.size, el.textStyle.lineHeight ?? 0) + abs(el.layout.padding.top) + 3 / scale
                 guard rect.bottom + margin < max(0, clip.y) / scale ||
-                        rect.top - margin > min(Float(heightPx), clip.w) / scale else { return nil }
+                        rect.top - margin > min(Float(heightPx), clip.w) / scale else { return false }
             }
             guard elSliceRenderState.scaleSettles[id] == nil, !elSliceRenderState.groupFadeIds.contains(id),
                   !isActiveVirtualPath(node.path),
                   !dissolveParentIds.contains(id), !flightTargets.contains(id), !flightSources.contains(id)
-            else { return nil }
+            else { return false }
             let inert = context.inert || el.isInert
             guard !matchesAuthoredKey(hoveredKey, node.key),
-                  resolveNodeHoverFrac(node, el: el, inert: inert) == 0 else { return nil }
+                  resolveNodeHoverFrac(node, el: el, inert: inert) == 0 else { return false }
             let parentScope = context.element != nil ? hitScopesByDepth[depth - 1] : RenderHitScope()
-            guard parentScope.turn == nil, !parentScope.exiting else { return nil }
+            guard parentScope.turn == nil, !parentScope.exiting else { return false }
             // Distant leaves need no downstream snap state. Composite and faded boxes retain
             // their layer setup, including scopes which might paint a visible child.
             var childClip = context.clip
@@ -1392,14 +1392,14 @@ extension Runtime {
             if !isLeaf || paintsBox {
                 guard childClip.fadeWidth == .zero, childClip.fade == .zero,
                       context.opacity == 1, snap.layer == 0, paintScene.rest(id) == nil
-                else { return nil }
+                else { return false }
                 // A rectangular cut through a rounded corner requires a separate layer.
                 // Plain containers can otherwise carry the inherited mask unchanged or
                 // reduce it to a rectangular clip when it lies in a central strip.
                 if childClip.roundedMask != nil {
                     trimCentralStrip(&childClip.roundedMask, clip: &childClip.clipPx)
                     if let mask = childClip.roundedMask?.rect {
-                        guard intersectClipRects(childClip.clipPx, mask) == mask else { return nil }
+                        guard intersectClipRects(childClip.clipPx, mask) == mask else { return false }
                         childClip.clipPx = mask
                     }
                 }
@@ -1418,7 +1418,7 @@ extension Runtime {
             if let parent = p.parent, !newRectSpringingById.isEmpty, newRectSpringingById[parent] == true {
                 newRectSpringingById[id] = true
             }
-            if hasGroupOpacity && (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil) { groupHover = 0 }
+            if hasGroupOpacity && (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil) { context.groupHover = 0 }
             let order = newElements.count
             let parentClip = Self.screenClipOfParent(inheritedClip: parentScope.localClip, ancestorTurn: nil,
                                                       outerTurnClip: parentScope.outerClip, localTurnClip: parentScope.localClip)
@@ -1481,9 +1481,15 @@ extension Runtime {
                 snap.shift(1, by: -node.scrollShift.y)
                 snap.parent = snap.rigid == previousRigid && PixelSnap.frames(el, effectiveFill: el.background, effectiveBorder: p.border.map(Color.init)) ? parent : nil
             }
-            return (!isLeaf, false, context.opacity, 0, .zero, .zero, inert, childClip,
-                    context.transform, false, false, [], false, order, 0, 0, 0, 0,
-                    .still, clip, .zero, scale, 0, nil)
+            if !isLeaf {
+                context.clip = childClip
+                context.inert = inert
+                context.snap = snap
+                context.stickyShift = stickyShift
+                context.element = order
+                context.hitDepth = depth
+            }
+            return true
         }
 
         @inline(never)
@@ -1689,8 +1695,9 @@ extension Runtime {
             if needsInteractionPrepass {
                 ownOpacity = nodeOwnOpacityById[nid] ?? 1
             } else {
-                let groupFactor = hasGroupOpacity
-                    ? resolveGroupOpacityFactor(nodeId: nid, el: el, nodePath: node.path, inheritedGroupFrac: groupHover)
+                let groupFactor = hasGroupFades || node.paintTraits.contains(.groupOpacity)
+                    ? resolveGroupOpacityFactor(nodeId: nid, group: el.groupOpacity, nodePath: node.path,
+                                                inheritedGroupFrac: groupHover, sampledRest: paintScene.get(nid, Props.GROUP_REST))
                     : 1
                 ownOpacity = ((liveOpacity ?? presented?.opacity ?? el.opacity) * groupFactor).clamped(to: 0...1)
                 if hasGroupOpacity && (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil) {
@@ -3975,67 +3982,76 @@ extension Runtime {
                     dynamic = true
                 } else {
                     let savedMark = currentInheritedMark
-                    var groupHover = context.groupHover
-                    var snap = context.snap
-                    var stickyShift = context.stickyShift
+                    let children = topology.children(of: node)
                     let presented = presentedSlots.isEmpty
                         ? presentedById[node.nodeId] : frameOut.nodes[presentedSlots[slot]]
                     let loop = loopSamples[node.nodeId]
-                    let authoredTurn = node.el.rotate
-                    let turn = (presented?.rotate ?? authoredTurn) + (loop?.rotation ?? 0)
-                    func header(_ el: El<State>) -> PaintHeader {
-                        if canProjectGeometry, node.paintTraits.contains(.offscreenGeometry), loop == nil,
-                           let presented, let result = projectGeometry(node, el, presented, context, depth: context.hitDepth + 1,
-                                                                       snap: &snap, stickyShift: &stickyShift, groupHover: &groupHover) {
-                            return result
+                    let joinedGrowth = !slice2State.joinedRowsWithoutRevealMask.isEmpty && slice2State.joinedRowsWithoutRevealMask.contains(node.nodeId)
+                    if canProjectGeometry, node.paintTraits.contains(.offscreenGeometry), !joinedGrowth, loop == nil,
+                       let presented, projectGeometry(node, node.el, presented, &context, isLeaf: children.isEmpty) {
+                        if let child = children.first {
+                            if children.count > 1 || currentInheritedMark != savedMark {
+                                branches.append(PaintBranch(context: context, childEnd: children.endIndex,
+                                    nextChild: children.startIndex + 1, hasFooter: false, savedMark: savedMark, dynamic: false))
+                            }
+                            nextSlot = child
+                            continue
                         }
-                        return paintNodeHeader(
-                            node, el: el, presented: presented, loop: loop,
-                            parentClip: context.clip, snap: &snap, stickyShift: &stickyShift, inheritedInert: context.inert, groupHover: &groupHover, parentOpacity: context.opacity,
-                            enclosingLayerOpacity: context.enclosingOpacity, inheritedTransform: context.transform,
-                            parentIsDissolve: context.dissolve, parentScaleMotion: context.scaleMotion,
-                            parentElementIndex: context.element, hitDepth: context.hitDepth + 1, parentInCache: context.inCache, parentIsRotated: context.rotated
-                        )
-                    }
-                    let h: PaintHeader
-                    if turn == authoredTurn && (slice2State.joinedRowsWithoutRevealMask.isEmpty || !slice2State.joinedRowsWithoutRevealMask.contains(node.nodeId)) {
-                        h = header(node.el)
+                        dynamic = false
                     } else {
-                        var adjusted = presentedGrowthElement(node)
-                        adjusted.rotate = turn
-                        h = header(adjusted)
-                    }
-                    #if DEBUG
-                    if let paint = pendingTextPaint {
-                        pendingTextPaint = nil
-                        paint()
-                    }
-                    #endif
-                    let children = topology.children(of: node)
-                    let needsFooter = h.continueSubtree && (canPaintFocusRing || h.needsLayer || !h.outerLayerStarts.isEmpty)
-                    if (h.continueSubtree || publishHitGeometry), let first = children.first {
-                        context = PaintContext(
-                            clip: h.nextChildClip, inert: h.nextInert, groupHover: groupHover, snap: snap, stickyShift: stickyShift,
-                            opacity: h.continueSubtree ? (h.needsLayer ? 1 : h.effOpacity).clamped(to: 0...1) : 0,
-                            enclosingOpacity: h.needsLayer ? context.enclosingOpacity * h.effOpacity : context.enclosingOpacity,
-                            transform: h.nextChildTransform, dissolve: h.isDissolveScope, scaleMotion: h.scaleMotion,
-                            element: h.elementIndex, allowRaised: context.allowRaised || !h.continueSubtree,
-                            inCache: context.inCache || h.cacheEligible, rotated: context.rotated || abs(turn) > 1e-4,
-                            hitDepth: context.hitDepth + 1
-                        )
-                        if needsFooter { footers.append((slot, h)) }
-                        // A single child can finish directly in its grandparent when this scope
-                        // has no deferred paint, mark restoration, or dynamic cache state.
-                        if children.count > 1 || needsFooter || currentInheritedMark != savedMark || h.subtreeDynamic {
-                            branches.append(PaintBranch(context: context, childEnd: children.endIndex,
-                                                        nextChild: children.startIndex + 1, hasFooter: needsFooter,
-                                                        savedMark: savedMark, dynamic: h.subtreeDynamic))
+                        var groupHover = context.groupHover
+                        var snap = context.snap
+                        var stickyShift = context.stickyShift
+                        let authoredTurn = node.el.rotate
+                        let turn = (presented?.rotate ?? authoredTurn) + (loop?.rotation ?? 0)
+                        func header(_ el: El<State>) -> PaintHeader {
+                            return paintNodeHeader(
+                                node, el: el, presented: presented, loop: loop,
+                                parentClip: context.clip, snap: &snap, stickyShift: &stickyShift, inheritedInert: context.inert, groupHover: &groupHover, parentOpacity: context.opacity,
+                                enclosingLayerOpacity: context.enclosingOpacity, inheritedTransform: context.transform,
+                                parentIsDissolve: context.dissolve, parentScaleMotion: context.scaleMotion,
+                                parentElementIndex: context.element, hitDepth: context.hitDepth + 1, parentInCache: context.inCache, parentIsRotated: context.rotated
+                            )
                         }
-                        nextSlot = first
-                        continue
+                        let h: PaintHeader
+                        if turn == authoredTurn && !joinedGrowth {
+                            h = header(node.el)
+                        } else {
+                            var adjusted = presentedGrowthElement(node)
+                            adjusted.rotate = turn
+                            h = header(adjusted)
+                        }
+                        #if DEBUG
+                        if let paint = pendingTextPaint {
+                            pendingTextPaint = nil
+                            paint()
+                        }
+                        #endif
+                        let needsFooter = h.continueSubtree && (canPaintFocusRing || h.needsLayer || !h.outerLayerStarts.isEmpty)
+                        if (h.continueSubtree || publishHitGeometry), let first = children.first {
+                            context = PaintContext(
+                                clip: h.nextChildClip, inert: h.nextInert, groupHover: groupHover, snap: snap, stickyShift: stickyShift,
+                                opacity: h.continueSubtree ? (h.needsLayer ? 1 : h.effOpacity).clamped(to: 0...1) : 0,
+                                enclosingOpacity: h.needsLayer ? context.enclosingOpacity * h.effOpacity : context.enclosingOpacity,
+                                transform: h.nextChildTransform, dissolve: h.isDissolveScope, scaleMotion: h.scaleMotion,
+                                element: h.elementIndex, allowRaised: context.allowRaised || !h.continueSubtree,
+                                inCache: context.inCache || h.cacheEligible, rotated: context.rotated || abs(turn) > 1e-4,
+                                hitDepth: context.hitDepth + 1
+                            )
+                            if needsFooter { footers.append((slot, h)) }
+                            // A single child can finish directly in its grandparent when this scope
+                            // has no deferred paint, mark restoration, or dynamic cache state.
+                            if children.count > 1 || needsFooter || currentInheritedMark != savedMark || h.subtreeDynamic {
+                                branches.append(PaintBranch(context: context, childEnd: children.endIndex,
+                                                            nextChild: children.startIndex + 1, hasFooter: needsFooter,
+                                                            savedMark: savedMark, dynamic: h.subtreeDynamic))
+                            }
+                            nextSlot = first
+                            continue
+                        }
+                        dynamic = h.subtreeDynamic
+                        if needsFooter { finishNode(node, h, dynamic: dynamic) }
                     }
-                    dynamic = h.subtreeDynamic
-                    if needsFooter { finishNode(node, h, dynamic: dynamic) }
                     currentInheritedMark = savedMark
                 }
 

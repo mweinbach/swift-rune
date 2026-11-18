@@ -245,13 +245,14 @@ internal extension Runtime {
 
     func resolveGroupOpacityFactor(
         nodeId: NodeId,
-        el: El<State>,
+        group: (Float, Float)?,
         nodePath: String,
-        inheritedGroupFrac: Float
+        inheritedGroupFrac: Float,
+        sampledRest: @autoclosure () -> Float?
     ) -> Float {
         let restTarget: Float
         let hoveredTarget: Float
-        if let (restOp, hovOp) = el.groupOpacity {
+        if let (restOp, hovOp) = group {
             restTarget = restOp
             hoveredTarget = hovOp
         } else if elSliceRenderState.groupFadeIds.contains(nodeId) {
@@ -260,7 +261,7 @@ internal extension Runtime {
         } else {
             return 1.0
         }
-        let rest = (scene.get(nodeId, Props.GROUP_REST) ?? restTarget).clamped(to: 0...1)
+        let rest = (sampledRest() ?? restTarget).clamped(to: 0...1)
         let focused = isNodeKeyboardFocusWithin(nodePath)
         let hovered = (focused ? 1.0 : inheritedGroupFrac).clamped(to: 0...1)
         return (rest + (hoveredTarget - rest) * hovered).clamped(to: 0...1)
