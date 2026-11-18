@@ -242,10 +242,18 @@ final class WebAccessibilityProjection {
         for record in geometry where runtime.flatNodes[record.runtimeIndex].path != record.path { return false }
         var bounds: [String: [WebAccessibilityNumber]] = [:]
         var nodes: [WebAccessibilityPatchNode] = []
+        let presented = runtime.presentedRectByPath
+        let slots = presented.indexedValues(at: runtime.layoutCommitGen)
         for index in geometry.indices {
             let record = geometry[index]
             let path = record.path
-            let frame = runtime.presentedRectByPath[path] ?? runtime.flatNodes[record.runtimeIndex].targetRect
+            let indexInMount = record.runtimeIndex
+            let frame: MotionRect
+            if let slots {
+                frame = slots[indexInMount] ?? runtime.flatNodes[indexInMount].targetRect
+            } else {
+                frame = presented[path] ?? runtime.flatNodes[indexInMount].targetRect
+            }
             let rect = roundedBounds(frame)
             let parent = record.parent.map { geometry[$0].origin } ?? .zero
             let local = rect - SIMD4(parent.x, parent.y, 0, 0)

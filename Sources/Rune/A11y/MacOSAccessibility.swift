@@ -359,6 +359,7 @@ public extension Runtime {
         // Keep one mounted frame, including its geometry and focus, through synchronous
         // editor reads. A callback can publish another frame before this traversal returns.
         let presentedRectByPath = self.presentedRectByPath
+        let presentedSlots = presentedRectByPath.indexedValues(at: layoutCommitGen)
         let focusedPath = self.focusedPath, focusedLinkIndex = self.focusedLinkIndex
         let activeModalPath = self.activeModalPath
         let modalMemberPaths = self.modalMemberPaths, modalAncestorPaths = self.modalAncestorPaths
@@ -459,7 +460,12 @@ public extension Runtime {
         let selectableRoles: Set<ElementRole> = [.listItem, .option, .tab, .treeItem, .gridCell, .row]
         func build(_ idx: Int, insideScroll: Bool, semanticRole: ElementRole) -> AccessibilityNode {
             let mounted = mounts[idx]
-            let rect = presentedRectByPath[mounted.path] ?? mounted.rect
+            let rect: MotionRect
+            if let presentedSlots {
+                rect = presentedSlots[idx] ?? mounted.rect
+            } else {
+                rect = presentedRectByPath[mounted.path] ?? mounted.rect
+            }
             let virtualOwner = virtualAt[idx]
             let parentList = mounted.parent.flatMap { virtualAt[$0] }
             if reuseSemantic, virtualOwner == nil, parentList == nil,

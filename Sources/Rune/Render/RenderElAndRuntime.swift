@@ -925,7 +925,7 @@ extension Runtime {
             if publishHitGeometry { swap(&hitScopesByDepth, &paintHitScopes) }
         }
         var newPresentedRects = indexedGeometry
-            ? FrameGeometry<MotionRect>(pathSlots: nodeByPath)
+            ? FrameGeometry<MotionRect>(pathSlots: nodeByPath, layoutGeneration: layoutCommitGen)
             : FrameGeometry(minimumCapacity: frameOut.nodes.count)
         var newPresentedScales = PresentedScales(count: flatNodes.count, byPath: nodeByPath,
                                                  byId: nodeIndexById, hasExits: !topology.exits.isEmpty)

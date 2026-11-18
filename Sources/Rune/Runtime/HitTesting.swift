@@ -151,26 +151,36 @@ private extension FrameGeometry where Value == HitGeometry {
 /// mounted slots before input or an anchored overlay queries the previous paint.
 struct FrameGeometry<Value> {
     private let pathSlots: [String: Int]
+    private let layoutGeneration: UInt64?
     private var boxes: [Value?]
     private var populated = 0
     private var byPath: [String: Value]
 
     init(minimumCapacity: Int = 0) {
+        layoutGeneration = nil
         pathSlots = [:]
         boxes = []
         byPath = Dictionary(minimumCapacity: minimumCapacity)
     }
 
     init(byPath: [String: Value]) {
+        layoutGeneration = nil
         pathSlots = [:]
         boxes = []
         self.byPath = byPath
     }
 
-    init(pathSlots: [String: Int]) {
+    init(pathSlots: [String: Int], layoutGeneration: UInt64? = nil) {
+        self.layoutGeneration = layoutGeneration
         self.pathSlots = pathSlots
         boxes = Array(repeating: nil, count: pathSlots.count)
         byPath = [:]
+    }
+
+    /// A commit may reorder mounted slots before the next paint. Readers of that
+    /// layout still resolve the previous presentation by path.
+    func indexedValues(at generation: UInt64) -> [Value?]? {
+        layoutGeneration == generation ? boxes : nil
     }
 
     var isEmpty: Bool { populated == 0 && byPath.isEmpty }

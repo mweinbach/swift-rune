@@ -186,4 +186,33 @@ struct AccessibilitySnapshotReuseTests {
         let field = try #require(find("draft", in: check(rt)))
         #expect(field.isSecure && field.value == nil && field.textSelection == nil)
     }
+
+    @Test func snapshotReadsThePreviousPaintByPathAfterAReorder() throws {
+        let runtime = Runtime(state: false, viewport: Vec2(160, 90), pixelScale: 1) { reversed, _ in
+            var column: El<Bool> = col().key("list").sizeFull()
+            for key in reversed ? ["two", "one"] : ["one", "two"] {
+                column = column.child(text(key).key(key).h(30).wFull())
+            }
+            return column
+        }
+        _ = runtime.renderFrame(at: 0)
+        let first = runtime.accessibilitySnapshot()
+        let old = runtime.presentedRectByPath
+        let painted = runtime.layoutCommitGen
+        #expect(old.indexedValues(at: painted) != nil)
+
+        runtime.state = true
+        runtime.commitTree(at: 1, cut: true)
+        #expect(old.indexedValues(at: runtime.layoutCommitGen) == nil)
+        let between = runtime.accessibilitySnapshot()
+        for key in ["one", "two"] {
+            let node = try #require(find(key, in: between))
+            let previous = try #require(find(key, in: first))
+            #expect(node.frame == previous.frame)
+        }
+        _ = runtime.renderFrame(at: 1)
+        let next = runtime.accessibilitySnapshot()
+        #expect(runtime.presentedRectByPath.indexedValues(at: runtime.layoutCommitGen) != nil)
+        #expect(find("one", in: next)?.frame == find("two", in: first)?.frame)
+    }
 }

@@ -1345,7 +1345,7 @@ public final class Runtime<State> {
     private var pendingExternalLayoutActionRan: Bool = false
     internal var layoutSeen = LayoutSeenState()
     private var layoutKeyIndex = LayoutKeyIndex()
-    private var layoutCommitGen: UInt64 = 0
+    private(set) var layoutCommitGen: UInt64 = 0
     private var layoutFeedback = LayoutFeedback.initial
     internal var hasExternalDirtyCommit: Bool = true
     internal var scrollMovedSinceLastFrame: Bool = false
