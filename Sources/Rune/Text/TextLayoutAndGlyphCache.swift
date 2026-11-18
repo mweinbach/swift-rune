@@ -602,9 +602,20 @@ public final class TextLayoutBox: @unchecked Sendable {
     public let pixelScale: Float
     public var maxWidth: Float?
     public var shaped: ShapedText {
-        didSet { recentPaint = nil }
+        didSet {
+            recentPaint = nil
+            #if os(WASI) && RUNE_BROWSER_TEXT
+            browserPaint = nil
+            #endif
+        }
     }
-    public var hasGlyphs: Bool
+    public var hasGlyphs: Bool {
+        didSet {
+            #if os(WASI) && RUNE_BROWSER_TEXT
+            if hasGlyphs != oldValue { browserPaint = nil }
+            #endif
+        }
+    }
     /// The pinned layout cache charges each entry by authored UTF-8 length.
     internal let cacheCost: Int
     internal let prepared: TextPreparedShape?
@@ -620,7 +631,7 @@ public final class TextLayoutBox: @unchecked Sendable {
     internal var desktopRasterLayout: DesktopRasterLayout?
     #endif
     #if os(WASI) && RUNE_BROWSER_TEXT
-    internal var browserPaint: (x: Float, rgb: UInt32?, spans: GlyphPaintSpans, glyphs: [PositionedGlyph], decorations: BrowserLabelDecorations?, pages: Set<UInt16>, resets: UInt64, revision: UInt64)?
+    internal var browserPaint: (origin: DesktopTextLine.LabelOrigin, rgb: UInt32?, spans: GlyphPaintSpans, glyphs: [PositionedGlyph], decorations: BrowserLabelDecorations?, pages: Set<UInt16>, resets: UInt64, revision: UInt64)?
     #endif
     // Page recycling invalidates UVs in a cached desktop text layout.
     internal var desktopAtlasResets: UInt64?

@@ -7091,7 +7091,7 @@ public final class TextSystem: @unchecked Sendable {
         var result = measured
         result.desktopRestingText = nil
         if !fresh, let previous = lock.withLock({ box.browserPaint }), previous.revision == rasterRevision,
-           previous.x == restingXPx, previous.rgb == rgb, previous.spans == paintSpans,
+           previous.origin.matches(restingXPx), previous.rgb == rgb, previous.spans == paintSpans,
            glyphAtlas.retainPages(previous.pages, since: previous.resets) {
             previous.decorations?.apply(to: &result)
             result.glyphs = previous.glyphs
@@ -7100,7 +7100,7 @@ public final class TextSystem: @unchecked Sendable {
         }
         guard let paragraph = measured.desktopParagraph ?? lock.withLock({ preparedShapeCache[key] }),
               let line = paragraph.fragments.first ?? nil,
-              let glyphs = line.browserLabelGlyphs(record.text, spans: box.spans, inks: box.spanInks, originX: record.originX,
+              let (glyphs, origin) = line.browserLabelGlyphs(record.text, spans: box.spans, inks: box.spanInks, originX: record.originX,
                     baselineY: baseline / box.pixelScale, restingXPx: restingXPx, atlas: glyphAtlas) else { return nil }
         let pages = Set(glyphs.map(\.atlasPage)), resets = glyphAtlas.resets
         var decorations: BrowserLabelDecorations?
@@ -7115,7 +7115,7 @@ public final class TextSystem: @unchecked Sendable {
             drawn.apply(to: &result)
             decorations = drawn
         }
-        if !fresh { lock.withLock { box.browserPaint = (restingXPx, rgb, paintSpans, glyphs, decorations, pages, resets, _rasterRevision) } }
+        if !fresh { lock.withLock { box.browserPaint = (origin, rgb, paintSpans, glyphs, decorations, pages, resets, _rasterRevision) } }
         result.glyphs = glyphs
         result.lineGlyphRanges = [0..<glyphs.count]
         return result

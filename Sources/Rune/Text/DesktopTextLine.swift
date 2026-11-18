@@ -1828,25 +1828,44 @@ final class DesktopTextLine {
     }
 
     #if os(WASI) && RUNE_BROWSER_TEXT
+    /// Resting label glyphs depend on the fractional pen and on the sign of each
+    /// native run at a rounding tie. Keep the same origin calculation for paint and replay.
+    struct LabelOrigin {
+        let x: Float
+        let minRunX: Float
+        let maxRunX: Float
+        let hasFractionalRun: Bool
+
+        func placement(at x: Float) -> Float? {
+            if x == x.rounded() && !hasFractionalRun { return nil }
+            return DesktopRestingText.relativeOrigin(x, minRunX: minRunX, maxRunX: maxRunX)
+        }
+
+        func matches(_ other: Float) -> Bool {
+            x == other || (other.isFinite && placement(at: x) == placement(at: other))
+        }
+    }
+
     /// Ordinary labels sample adjacent glyphs from the same shaped browser tile. A single
     /// quad can cover consecutive cells with the same source, ink, and quantized font pen.
     /// Byte positions remain in the measured line for selection and accessibility.
     func browserLabelGlyphs(_ text: String, spans: [TextSpan]?, inks: TextSpanInkMap, originX: Float, baselineY: Float,
-                            restingXPx: Float, atlas: GlyphAtlas) -> [PositionedGlyph]? {
+                            restingXPx: Float, atlas: GlyphAtlas) -> (glyphs: [PositionedGlyph], origin: LabelOrigin)? {
         guard !text.isEmpty, spans?.isEmpty != true, cells.values.count == text.utf8.count, restingXPx.isFinite,
               scale == 1 || scale == 2 || scale == 4 else { return nil }
         let bytes = text.utf8.count
         // DesktopRestingText.place keeps the original run when every pen is already integral.
-        var needsPlacement = restingXPx != restingXPx.rounded()
+        var hasFractionalRun = false
         var minX = Float.infinity, maxX = -Float.infinity
         for cell in cells.values {
             guard cell.direction == 2, cell.byteEnd == cell.byte + 1, !cell.run.hasColor else { return nil }
             let x = runOriginPx(for: cell, originX: originX)
             minX = min(minX, x)
             maxX = max(maxX, x)
-            if abs(x - x.rounded()) > 1e-5 { needsPlacement = true }
+            if abs(x - x.rounded()) > 1e-5 { hasFractionalRun = true }
         }
-        let absolute = needsPlacement ? DesktopRestingText.relativeOrigin(restingXPx, minRunX: minX, maxRunX: maxX) : nil
+        let origin = LabelOrigin(x: restingXPx, minRunX: minX, maxRunX: maxX, hasFractionalRun: hasFractionalRun)
+        let absolute = origin.placement(at: restingXPx)
         func pen(_ cell: Cell) -> (Float, UInt8) {
             let x = runOriginPx(for: cell, originX: originX)
             guard let absolute else { return (x, 0) }
@@ -1887,7 +1906,7 @@ final class DesktopTextLine {
                                  color: ink, atlas: atlas, cache: true, restingXPx: absolute, utf8Offset: cluster)
             offset = next
         }
-        return glyphs
+        return (glyphs, origin)
     }
     #endif
 
