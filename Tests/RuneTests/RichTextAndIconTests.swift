@@ -5,6 +5,23 @@ import Testing
 @Suite("Rich Text, TextCase, FontEpoch, and Multi-Color SVG Icon Tests")
 struct RichTextAndIconTests {
 
+    @Test("A resting monochrome icon snaps its own box inside a centered button", arguments: [Float(1), 1.25, 2])
+    func centeredMonochromeIcon(pixelScale: Float) throws {
+        let plus = SVGIcon(viewBox: 16, paths: ["M8 4V12M4 8H12"], strokeWidth: 1.5)
+        let rt = Runtime(state: (), viewport: Vec2(64, 64), pixelScale: pixelScale) { _, _ -> El<Void> in
+            el().size(64, 64).child(
+                row().absolute(x: 14, y: 14).size(16, 16).itemsCenter().justifyCenter()
+                    .rounded(4).bg(.black).child(icon(plus, size: 12).color(.white))
+            )
+        }
+        let native = rt.renderFrame(at: 0)
+        let mask = try #require(native.instances.first { $0.params.y == KIND_GLYPH })
+        let origin = 16 * pixelScale
+        let side = 12 * pixelScale
+        #expect(mask.rect == SIMD4(origin, origin, side, side))
+        #expect(mask.uv.z == 0 && mask.uv.w == 0)
+    }
+
     @Test("fontEpoch bumps when FontFamiliesRegistry or TextSystem.setFamilies changes")
     func fontEpochAndFamilies() {
         withFontFamilies(sans: "", mono: "") {

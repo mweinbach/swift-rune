@@ -3115,10 +3115,24 @@ extension Runtime {
                     let col = premulSIMD4(iconColor, opacity: localOpacity, srgb: srgbBlend)
                     let pw = Float(placed.pixelSize.x)
                     let ph = Float(placed.pixelSize.y)
-                    let ix = rectPx.x + (rectPx.z - pw) * 0.5
-                    let iy = rectPx.y + (rectPx.w - ph) * 0.5
+                    let rotated = parentIsRotated || abs(el.rotate) > 1e-4
+                    let exactSide = min(effRect.width, effRect.height) * scale
+                    let ix: Float, iy: Float
+                    // A resting 1:1 mask snaps its own origin, as in Rust's content.rs.
+                    // Centering in an already snapped box can shift it by half a texel.
+                    if !rotated, nodeScaleMotion == .still, unscaled, !boxGliding, !inFlight,
+                       abs(exactSide - iconSizePt * scale) < 1.0 / 512.0,
+                       abs(exactSide - pw) < 1.0 / 512.0, pw == ph,
+                       abs(paintStore.get(nid, Props.ICON_TURN) ?? el.iconRotation) < 1e-6 {
+                        let contain = inheritedSnap.contain * scale
+                        ix = PixelSnap.onGrid(exactEdgesPx.x + (effRect.width * scale - exactSide) * 0.5, contain: contain.x)
+                        iy = PixelSnap.onGrid(exactEdgesPx.y + (effRect.height * scale - exactSide) * 0.5, contain: contain.y)
+                    } else {
+                        ix = rectPx.x + (rectPx.z - pw) * 0.5
+                        iy = rectPx.y + (rectPx.w - ph) * 0.5
+                    }
                     appendIcon(placed, rect: SIMD4(ix, iy, pw, ph), ink: col, clip: activeClip, fade: activeFade,
-                               rotated: parentIsRotated || abs(el.rotate) > 1e-4)
+                               rotated: rotated)
                 }
             }
 
