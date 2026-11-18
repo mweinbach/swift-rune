@@ -929,7 +929,15 @@ public final class Runtime<State> {
     internal var scrollGlidingPaths: Set<String> = []
     internal var directScrolledPaths: Set<String> = []
     internal var virtualLists: [String: RuntimeVirtualListState] = [:]
-    internal var activeVirtualPaths: Set<String> = []
+    private var singleVirtualPath: String?
+    internal var activeVirtualPaths: Set<String> = [] {
+        didSet { singleVirtualPath = activeVirtualPaths.count == 1 ? activeVirtualPaths.first : nil }
+    }
+
+    internal func isActiveVirtualPath(_ path: String) -> Bool {
+        if let singleVirtualPath { return singleVirtualPath == path }
+        return activeVirtualPaths.contains(path)
+    }
     internal var virtualFill = VirtualFillStateMachine()
     internal var virtualFillWantsDraw: Bool = false
     internal var virtualFillLastScrollOffsets: [String: Vec2] = [:]

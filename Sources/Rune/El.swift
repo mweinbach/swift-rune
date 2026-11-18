@@ -1503,6 +1503,10 @@ final class ElColdData<State> {
 final class ElHandlersBox<State> {
     var value: ElementHandlers<State>
     var hasEditLens: Bool { value.editLens != nil }
+    var hasPointerHandlers: Bool {
+        value.onClick != nil || value.onClickPress != nil || value.onDoubleClick != nil
+            || value.onPointerDown != nil || value.onDrag != nil || value.onHover != nil || value.editLens != nil
+    }
     init(_ value: ElementHandlers<State>) {
         self.value = value
     }
@@ -1824,6 +1828,7 @@ public struct El<State> {
         }
     }
     internal var hasEditLens: Bool { _cold?.handlersBox?.hasEditLens ?? false }
+    internal var hasPointerHandlers: Bool { _cold?.handlersBox?.hasPointerHandlers ?? false }
     internal var kitFilterKeysValue: [String]? {
         get { _cold?.kitFilterKeys }
         set { ensureCold().kitFilterKeys = newValue }

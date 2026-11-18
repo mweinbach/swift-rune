@@ -38,12 +38,7 @@ extension El {
     }
 
     var blocksInteractiveHits: Bool {
-        if isModal || explicitHit { return true }
-        guard hasAuthoredHandlers else { return false }
-        let handlers = self.handlers
-        return handlers.onClick != nil || handlers.onClickPress != nil || handlers.onDoubleClick != nil
-            || handlers.onPointerDown != nil || handlers.onDrag != nil || handlers.onHover != nil
-            || handlers.editLens != nil
+        isModal || explicitHit || hasPointerHandlers
     }
 }
 

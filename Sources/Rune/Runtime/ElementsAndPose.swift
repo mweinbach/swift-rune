@@ -331,17 +331,16 @@ extension Runtime {
     }
 
     internal func needsPaintPose(
-        _ node: FlatNode, el: El<State>, rotation: Float, shadows: [Shadow], growing: Bool, inFlight: Bool
+        _ node: borrowing FlatNode, el: borrowing El<State>, rotation: Float, shadows: [Shadow], growing: Bool, inFlight: Bool
     ) -> Bool {
         if rotation != 0 || !shadows.isEmpty || el.anchor != nil || !el.liveBindings.isEmpty
             || el.groupOpacity != nil || !el.layout.scrollAxes.isEmpty || el.layoutAnim?.travel == .screen
             || growing || inFlight { return true }
         if (!loopRuntime.tracks.isEmpty && loopRuntime.tracks[node.nodeId] != nil)
-            || (!activeVirtualPaths.isEmpty && activeVirtualPaths.contains(node.path))
+            || isActiveVirtualPath(node.path)
             || (el.iconPayload != nil && scene.store.isMoving(node.nodeId, Props.ICON_TURN)) { return true }
-        let extras = el.runtimeExtras
-        return !extras.isEmpty && (extras["motionGate.motionIntent"] != nil
-            || extras["motionGate.inGrowingRow"] != nil || extras["motionGate.revealing"] != nil)
+        return el.runtimeExtraCount != 0 && (el.runtimeExtra("motionGate.motionIntent") != nil
+            || el.runtimeExtra("motionGate.inGrowingRow") != nil || el.runtimeExtra("motionGate.revealing") != nil)
     }
 
     internal func inspectPaintedNode(
@@ -373,7 +372,7 @@ extension Runtime {
             || inFlight
             || isOwnGrowthMoving
         let (ownLiveBits, ownMotionLive) = computeOwnLiveIntent(el: el)
-        let isVirtualExt = activeVirtualPaths.contains(snap.path)
+        let isVirtualExt = isActiveVirtualPath(snap.path)
             && el.background.a == 0
             && el.borderWidth == 0
             && shadows.isEmpty
