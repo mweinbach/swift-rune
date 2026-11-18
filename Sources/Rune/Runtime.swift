@@ -2612,6 +2612,8 @@ public final class Runtime<State> {
         var measuredGrowthRows: [String: RuntimeGrowthEntry]?
         var measuredGrowthStacks: [String: RuntimeGrowthStackState]?
         var isVirtualRemount = false
+        var reusedFlatRanges: [(current: Range<Int>, previous: Range<Int>)] = []
+        fileprivate var appliedMemoSpans: [(span: MemoFlatSpan<State>, start: Int)] = []
         var naturalJoinedRowTargets: [NodeId: MotionRect] = [:]
         var naturalLaunchTargets: [NodeId: MotionRect] = [:]
         var foldOpens: [PendingFoldOpen] = []
@@ -3161,6 +3163,8 @@ public final class Runtime<State> {
         var warnings = renames.map(\.warning)
         var nextMemoPaths: [NodeId: FlatMemoPaths<State>] = [:]
         var flatCaptures: [FlatMemoCapture<State>] = []
+        var appliedMemoSpans: [(span: MemoFlatSpan<State>, start: Int)] = []
+        var reusedFlatRanges: [(current: Range<Int>, previous: Range<Int>)] = []
         let flatFrame = FlatMemoFrame(commit: commitKind, cut: commitCut, motion: commitMotion,
             colorSpring: commitColorSpring, reducedMotion: reducedMotion, scale: pixelScale,
             fontEpoch: textSystem.currentFontEpoch, language: textSystem.language, smoothing: textSystem.smoothing)
@@ -3793,7 +3797,13 @@ public final class Runtime<State> {
                     underFold: item.parentUnderFold, styleSpring: nodeStyleSpring)
                 if let span = memoPaths.span, span.context == context, span.specs.first?.parent == nid,
                    MemoFlatSpan<State>.equalLayouts(span.children, childLayouts),
-                   span.nodes.allSatisfy({ stableForFlatReplay($0.nodeId) }) {
+                   ((!commitKind.snaps && !commitKind.lands && span.appliedRange(at: layoutCommitGen) != nil) ||
+                    span.nodes.allSatisfy({ stableForFlatReplay($0.nodeId) })) {
+                    let start = newFlat.count
+                    if let previous = span.appliedRange(at: layoutCommitGen) {
+                        reusedFlatRanges.append((start..<(start + span.nodes.count), previous))
+                    }
+                    appliedMemoSpans.append((span, start))
                     span.append(to: &newFlat, byPath: &newByPath, byId: &newIndices, specs: &specs,
                         instants: &ancestorInstants, root: myIndex,
                         clip: childClip, fades: childClipFades, enclosing: item.enclosingScrollIndex,
@@ -3846,6 +3856,9 @@ public final class Runtime<State> {
         for capture in flatCaptures {
             capture.owner.span = MemoFlatSpan(capture, flat: newFlat, specs: specs,
                                                instants: ancestorInstants, stable: stableForFlatReplay)
+            if let span = capture.owner.span {
+                appliedMemoSpans.append((span, capture.root + 1))
+            }
         }
         flatMemoPaths = nextMemoPaths
 
@@ -3874,6 +3887,8 @@ public final class Runtime<State> {
             foldHeaderUpdates: growthCapture.foldHeaderUpdates,
             textLayouts: textLayoutCollector.map
         )
+        pass.reusedFlatRanges = reusedFlatRanges
+        pass.appliedMemoSpans = appliedMemoSpans
         pass.naturalJoinedRowTargets = naturalJoinedRowTargets
         pass.naturalLaunchTargets = naturalLaunchTargets
         return pass
@@ -4588,6 +4603,9 @@ public final class Runtime<State> {
         layoutObservers = observers
         nodeByPath = pass.byPath
         layoutCommitGen &+= 1
+        for (span, start) in pass.appliedMemoSpans {
+            span.markApplied(start: start, generation: layoutCommitGen)
+        }
         layoutKeyIndex.invalidate()
 
         let prevKeys = prevNodeTextLayoutsForCommit ?? [:]

@@ -376,10 +376,22 @@ enum TaffyBridge {
             trailingInset = Vec2(own.padding.right + own.border.right, own.padding.bottom + own.border.bottom)
         }
 
-        mutating func include(_ child: RuneTaffy.Layout, style: RuneTaffy.TaffyStyle, content: Vec2) {
-            guard style.display != .none, style.position != .absolute, style.position != .fixed else { return }
-            let width = style.overflow.x == .visible ? max(child.size.width, content.x) : child.size.width
-            let height = style.overflow.y == .visible ? max(child.size.height, content.y) : child.size.height
+        struct Child {
+            let participates: Bool
+            let overflowX: Bool
+            let overflowY: Bool
+
+            init(_ style: RuneTaffy.TaffyStyle) {
+                participates = style.display != .none && style.position != .absolute && style.position != .fixed
+                overflowX = style.overflow.x == .visible
+                overflowY = style.overflow.y == .visible
+            }
+        }
+
+        mutating func include(_ child: RuneTaffy.Layout, style: Child, content: Vec2) {
+            guard style.participates else { return }
+            let width = style.overflowX ? max(child.size.width, content.x) : child.size.width
+            let height = style.overflowY ? max(child.size.height, content.y) : child.size.height
             size.x = max(size.x, child.location.x + width + child.margin.right + trailingInset.x)
             size.y = max(size.y, child.location.y + height + child.margin.bottom + trailingInset.y)
         }
@@ -495,7 +507,7 @@ enum TaffyBridge {
                 let childLayout = (try? tree.unroundedLayout(cid)) ?? .zero
                 let child = extract(node.children[i], cid, childLayout)
                 childResults.append(child)
-                content.include(childLayout, style: nodeStyles[cid] ?? RuneTaffy.TaffyStyle(), content: child.layout.contentSize)
+                content.include(childLayout, style: ContentExtent.Child(nodeStyles[cid] ?? RuneTaffy.TaffyStyle()), content: child.layout.contentSize)
             }
 
             return LayoutEngine.ResultNode(

@@ -210,6 +210,32 @@ struct MemoLayoutSpanTests {
         #expect(!layout.reusedMemoGeometry)
     }
 
+    @Test("A displaced memo row transfers its solved children until their geometry changes")
+    func displacedRowRetainsSolvedChildren() {
+        let cache = MemoCache()
+        let layout = RetainedLayoutCoordinator()
+        let textSystem = TextSystem()
+        let panel = cache.getOrBuild(id: "panel", deps: 0) { () -> El<State> in
+            col().child(el().wFull().h(12)).child(el().wFull().h(6))
+        }.element
+        func solve(_ top: Float, _ width: Float) -> LayoutEngine.ResultNode {
+            let root: El<State> = col().child(el().h(top)).child(panel.w(width))
+            return layout.compute(root: root, state: State(), viewport: Vec2(192, 180),
+                                  pixelScale: 1, textSystem: textSystem).children[1]
+        }
+        let first = solve(3, 80)
+        let shifted = solve(31, 80)
+        #expect(first.layout.localRect.y == 3)
+        #expect(shifted.layout.localRect.y == 31)
+        let shared = first.children.withUnsafeBufferPointer { lhs in
+            shifted.children.withUnsafeBufferPointer { rhs in lhs.baseAddress == rhs.baseAddress }
+        }
+        #expect(shared)
+        let resized = solve(31, 120)
+        #expect(resized.children[0].layout.localSize.x == 120)
+        #expect(first.children[0].layout.localSize.x == 80)
+    }
+
     @Test("Mutable children and state-backed inputs invalidate a memo layout span")
     func changedChildrenAndInputFallback() {
         let cache = MemoCache()

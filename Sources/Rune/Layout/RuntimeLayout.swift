@@ -80,6 +80,14 @@ final class RetainedLayoutCoordinator {
         var nestedStart: Int
     }
 
+    /// The solver may move a memo root while every descendant keeps its local layout.
+    /// Keep the solved child buffer intact for the flatten pass in that case.
+    private final class MemoGeometry {
+        var rootBox = RuneTaffy.Layout.zero
+        var descendantBoxes: [RuneTaffy.Layout] = []
+        var result: LayoutEngine.ResultNode?
+    }
+
     private struct MemoSpan {
         var record: MemoRecord
         var root: SyncPrepared { record.root }
@@ -88,6 +96,7 @@ final class RetainedLayoutCoordinator {
         var overflow: ArraySlice<OverflowLeaf>
         var nested: ArraySlice<MemoRecord>
         var isGroupRoot: Bool
+        var geometry: MemoGeometry?
 
         func hasSameChildContext(_ prepared: SyncPrepared) -> Bool {
             root.isRow == prepared.isRow && root.childSX == prepared.childSX &&
@@ -129,7 +138,7 @@ final class RetainedLayoutCoordinator {
         var screenIdentity: Bool
         var parentOffset: Int?
         var slot: SlotId = SlotId()
-        var taffyStyle: RuneTaffy.TaffyStyle
+        var contentStyle: TaffyBridge.ContentExtent.Child
         var measure: MeasureBox?
         var childOffsets: [Int] = []
         var flow: Flow = .ltr
@@ -188,7 +197,10 @@ final class RetainedLayoutCoordinator {
         flat.reserveCapacity(max(32, store.liveCount))
         var aspectFits: [(ratio: Float, raw: RuneTaffy.TaffyStyle)] = []
         var aspectFitOrder: [(index: Int, fit: Int)] = []
-        var hasAnchoredFit = false
+        var anchorStyles: [Int: RuneTaffy.TaffyStyle] = [:]
+        // Keep the full solver style only until this node has been synchronized. A replayed
+        // row then transfers compact geometry records without copying grid/style storage.
+        var pendingStyles: [RuneTaffy.TaffyStyle] = []
         var nonSecretLeaves: [TextLeafFallback] = []
         var overflowLeaves: [OverflowLeaf] = []
         let fEpoch = textSystem.currentFontEpoch
@@ -220,6 +232,7 @@ final class RetainedLayoutCoordinator {
         var nextMemoSpans: [ObjectIdentifier: MemoSpan] = [:]
         var recordingMemo = false
         var memoRecords: [MemoRecord] = []
+        var geometryRuns: [(range: Range<Int>, cache: MemoGeometry)] = []
         reusedMemoNodeCount = 0
         reusedMemoGeometry = false
         var geometryChanged = false
@@ -528,13 +541,15 @@ final class RetainedLayoutCoordinator {
                 : rawTaffy
 
             let myIndex = flat.count
+            pendingStyles.append(effectiveTaffy)
+            if el.anchor?.fit == true { anchorStyles[myIndex] = effectiveTaffy }
             flat.append(PreparedNode(
                 path: path,
                 storeKey: keyHash,
                 runtimeId: runtimeNodeId,
                 screenIdentity: screenId != nil,
                 parentOffset: parent.map { $0.myIndex - myIndex },
-                taffyStyle: effectiveTaffy,
+                contentStyle: TaffyBridge.ContentExtent.Child(effectiveTaffy),
                 measure: nil,
                 flow: nodeFlow,
                 pin: pin
@@ -575,7 +590,7 @@ final class RetainedLayoutCoordinator {
             let (slot, dirty) = store.syncNode(
                 key: p.keyHash,
                 nodeIndex: UInt32(p.myIndex),
-                style: flat[p.myIndex].taffyStyle,
+                style: pendingStyles.removeLast(),
                 measure: p.measureHash,
                 forceMeasureDirty: p.isRedacted,
                 childMark: childMark,
@@ -672,7 +687,8 @@ final class RetainedLayoutCoordinator {
                     record: record, nodes: nodes[local(record.nodes, group.nodes.lowerBound)],
                     leaves: leaves[local(record.leaves, group.leaves.lowerBound)],
                     overflow: overflow[local(record.overflow, group.overflow.lowerBound)],
-                    nested: records[record.nestedStart..<index], isGroupRoot: index == records.count - 1
+                    nested: records[record.nestedStart..<index], isGroupRoot: index == records.count - 1,
+                    geometry: index == records.count - 1 ? MemoGeometry() : nil
                 )
             }
         }
@@ -717,7 +733,6 @@ final class RetainedLayoutCoordinator {
             let p = syncPrepare(el, parent: parent, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
             let myIndex = p.myIndex
             let childMark = store.beginChildren()
-            if el.anchor?.fit == true { hasAnchoredFit = true }
             if el.children.isEmpty {
                 let (slot, dirty) = syncFinish(p, childMark: childMark, childrenDirty: false)
                 return .finished((myIndex, slot, dirty))
@@ -751,6 +766,9 @@ final class RetainedLayoutCoordinator {
                         nestedStart: firstRecord))
                     if !wasRecording { installMemoGroup() }
                 }
+                if !wasRecording, let geometry = nextMemoSpans[memoKey]?.geometry {
+                    geometryRuns.append((myIndex..<flat.count, geometry))
+                }
                 return .finished((myIndex, slot, dirty))
             }
             var mark: MemoMark?
@@ -774,7 +792,12 @@ final class RetainedLayoutCoordinator {
                 memoRecords.append(MemoRecord(identity: mark.identity, root: p, nodes: p.myIndex..<flat.count,
                     leaves: mark.firstLeaf..<nonSecretLeaves.count, overflow: mark.firstOverflow..<overflowLeaves.count,
                     nestedStart: mark.firstRecord))
-                if !mark.wasRecording { installMemoGroup() }
+                if !mark.wasRecording {
+                    installMemoGroup()
+                    if let geometry = nextMemoSpans[ObjectIdentifier(mark.identity)]?.geometry {
+                        geometryRuns.append((p.myIndex..<flat.count, geometry))
+                    }
+                }
             }
             return (p.myIndex, slot, dirty)
         }
@@ -896,7 +919,7 @@ final class RetainedLayoutCoordinator {
                     raw: raw,
                     room: RuneTaffy.Size(width: roomLayout.size.width, height: roomLayout.size.height)
                 )
-                flat[idx].taffyStyle = fitted
+                if anchorStyles[idx] != nil { anchorStyles[idx] = fitted }
                 store.setStyleAndMarkAncestors(flat[idx].slot, style: fitted, ancestors: ancestorSlots(of: idx))
             }
             store.computeLayout(root: rootSlot, availableSpace: available, rounding: false, measureLeaf: measureClosure)
@@ -904,9 +927,36 @@ final class RetainedLayoutCoordinator {
 
         // Flat nodes are in preorder. Walking them backwards leaves each node's solved
         // children at the top of the stack in their original painter/layout order.
-        func extract() -> LayoutEngine.ResultNode {
+        func extract(reusingMemos: Bool = false) -> LayoutEngine.ResultNode {
             var solved: [(RuneTaffy.Layout, LayoutEngine.ResultNode)] = []
-            for index in flat.indices.reversed() {
+            var remaining = flat.count
+            var memoIndex = reusingMemos ? geometryRuns.count - 1 : -1
+            var capture: MemoGeometry?
+            while remaining > 0 {
+                if memoIndex >= 0, geometryRuns[memoIndex].range.upperBound == remaining {
+                    let (range, cache) = geometryRuns[memoIndex]
+                    let index = range.lowerBound
+                    let box = store.layout(flat[index].slot)
+                    if var result = cache.result, cache.descendantBoxes.count == range.count - 1,
+                       box.size == cache.rootBox.size, box.contentSize == cache.rootBox.contentSize,
+                       box.padding == cache.rootBox.padding, box.border == cache.rootBox.border,
+                       cache.descendantBoxes.indices.allSatisfy({ offset in
+                           store.layout(flat[remaining - offset - 1].slot) == cache.descendantBoxes[offset]
+                       }) {
+                        result.layout.localRect = MotionRect.fromXYWH(box.location.x, box.location.y,
+                                                                     box.size.width, box.size.height)
+                        solved.append((box, result))
+                        remaining = index
+                        memoIndex -= 1
+                        continue
+                    }
+                    cache.rootBox = box
+                    cache.descendantBoxes.removeAll(keepingCapacity: true)
+                    cache.descendantBoxes.reserveCapacity(range.count - 1)
+                    capture = cache
+                }
+                remaining -= 1
+                let index = remaining
                 let node = flat[index]
                 let box = store.layout(node.slot)
                 var content = TaffyBridge.ContentExtent(box)
@@ -923,18 +973,28 @@ final class RetainedLayoutCoordinator {
                         )
                     }
                     children.append(placed)
-                    content.include(childBox, style: child.taffyStyle, content: placed.layout.contentSize)
+                    content.include(childBox, style: child.contentStyle, content: placed.layout.contentSize)
                 }
                 let layout = ComputedLayout(
                     localRect: MotionRect.fromXYWH(box.location.x, box.location.y, box.size.width, box.size.height),
                     localSize: Vec2(box.size.width, box.size.height), contentSize: content.size
                 )
-                solved.append((box, LayoutEngine.ResultNode(layout: layout, children: children)))
+                let result = LayoutEngine.ResultNode(layout: layout, children: children)
+                if let cache = capture {
+                    if index == geometryRuns[memoIndex].range.lowerBound {
+                        cache.result = result
+                        memoIndex -= 1
+                        capture = nil
+                    } else {
+                        cache.descendantBoxes.append(box)
+                    }
+                }
+                solved.append((box, result))
             }
             return solved.removeLast().1
         }
 
-        if hasAnchoredFit {
+        if !anchorStyles.isEmpty {
             let preFitSolved = extract()
             let boundsToApply = AnchorLayoutHelper.collectFitBounds(
                 rootEl: rootEl,
@@ -951,14 +1011,14 @@ final class RetainedLayoutCoordinator {
                         }
                         targetIdx = cur + flat[cur].childOffsets[c]
                     }
-                    guard let idx = targetIdx else { continue }
+                    guard let idx = targetIdx, var style = anchorStyles[idx] else { continue }
                     let dim: RuneTaffy.Dimension = .length(max(0, bound))
                     if vertical {
-                        flat[idx].taffyStyle.maxSize.height = dim
+                        style.maxSize.height = dim
                     } else {
-                        flat[idx].taffyStyle.maxSize.width = dim
+                        style.maxSize.width = dim
                     }
-                    store.setStyleAndMarkAncestors(flat[idx].slot, style: flat[idx].taffyStyle, ancestors: ancestorSlots(of: idx))
+                    store.setStyleAndMarkAncestors(flat[idx].slot, style: style, ancestors: ancestorSlots(of: idx))
                 }
                 store.computeLayout(root: rootSlot, availableSpace: available, rounding: false, measureLeaf: measureClosure)
             }
@@ -1014,12 +1074,12 @@ final class RetainedLayoutCoordinator {
         // Taffy did not change any node, child list, or measurement. The prior solved
         // tree is a value snapshot. Text and live node records above still belong to this
         // pass. RTL mirroring and post-solve fitting can alter geometry outside Taffy.
-        let canRetainGeometry = !memoSpans.isEmpty && !hasMirroredFlow && !hasAnchoredFit && aspectFits.isEmpty
+        let canRetainGeometry = !memoSpans.isEmpty && !hasMirroredFlow && anchorStyles.isEmpty && aspectFits.isEmpty
         if canRetainGeometry, !geometryChanged, let previous = lastMemoLayout {
             reusedMemoGeometry = true
             return previous
         }
-        let result = extract()
+        let result = extract(reusingMemos: canRetainGeometry)
         lastMemoLayout = canRetainGeometry ? result : nil
         return result
     }

@@ -34,7 +34,7 @@ struct FlatMemoCapture<State> {
 
 /// One memo root's already flattened descendants. Root modifiers always run on the current
 /// pass. Row positions, viewport clips, indices and enclosing scroll views can change.
-struct MemoFlatSpan<State> {
+final class MemoFlatSpan<State> {
     typealias Node = Runtime<State>.FlatNode
     let context: FlatMemoContext
     let children: [LayoutEngine.ResultNode]
@@ -46,6 +46,20 @@ struct MemoFlatSpan<State> {
     let specs: [NodeSpec]
     let instants: [Bool]
     let clipsChildren: [Bool]
+    // A retry or settle pass can measure a span without installing it in the runtime.
+    // Only the commit that swapped in these nodes may certify their previous indices.
+    private var appliedGeneration: UInt64?
+    private var appliedStart = 0
+
+    func markApplied(start: Int, generation: UInt64) {
+        appliedStart = start
+        appliedGeneration = generation
+    }
+
+    func appliedRange(at generation: UInt64) -> Range<Int>? {
+        guard appliedGeneration == generation else { return nil }
+        return appliedStart..<(appliedStart + nodes.count)
+    }
 
     init?(_ capture: FlatMemoCapture<State>, flat: [Node], specs: [NodeSpec], instants: [Bool],
           stable: (NodeId) -> Bool) {
