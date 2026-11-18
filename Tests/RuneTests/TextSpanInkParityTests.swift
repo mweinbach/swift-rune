@@ -107,12 +107,17 @@ struct TextSpanInkParityTests {
         ?? "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
     @Test(.enabled(if: FileManager.default.fileExists(atPath: dejavu), "Requires DejaVu Sans"))
-    func tintInsideALigatureKeepsItsSingleGlyphAndLeadingInk() throws {
-        HeadlessRunner.registerFonts([try Data(contentsOf: URL(fileURLWithPath: Self.dejavu))])
-        try withFontFamilies(sans: "", mono: "", checkLigatureInks)
+    func tintInsideALigatureKeepsItsSingleGlyphAndLeadingInk() async throws {
+        #if os(macOS) || os(Linux) || os(Windows)
+        // Native font registration changes the catalog used by every TextSystem in this process.
+        await #expect(processExitsWith: .success) { try Self().checkLigatureInks() }
+        #else
+        try checkLigatureInks()
+        #endif
     }
 
     private func checkLigatureInks() throws {
+        HeadlessRunner.registerFonts([try Data(contentsOf: URL(fileURLWithPath: Self.dejavu))])
         let system = TextSystem()
         let style = TextStyle(size: 24, family: .custom("DejaVu Sans")).features("liga=1")
         for weight in [Float?.none, 700] {
