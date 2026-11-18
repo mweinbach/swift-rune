@@ -125,6 +125,31 @@ struct VirtualRowPlacesTests {
         #expect(restored.measuredByKey["row-1"] == nil)
     }
 
+    @Test func retainedMeasurementsIsolateEditsAcrossHeightPages() {
+        let keys = (0..<515).map { "row-\($0)" }
+        var rows = VirtualRowMeasurements()
+        rows.replacePlaces(VirtualRowPlaces(keys))
+        for i in [0, 255, 256, 514] { rows.setHeight(20, at: i) }
+        rows.prepareOffsets(estimated: 20, gap: 1)
+        let saved = rows
+
+        rows.setHeight(nil, at: 255)
+        rows.setHeight(35, at: 256)
+        rows.setHeight(12, at: 257)
+        rows.setHeight(7, at: 514)
+        #expect(saved.heights[255] == 20)
+        #expect(saved.heights[256] == 20)
+        #expect(saved.heights[257] == nil)
+        #expect(saved.heights[514] == 20)
+        #expect(rows.heights[255] == nil)
+        #expect(saved.offsets(estimated: 20, gap: 1).last == 10_814)
+        #expect(rows.offsets(estimated: 20, gap: 1).last == 10_808)
+
+        rows.replacePlaces(VirtualRowPlaces([keys[514], keys[255], "new", keys[256]]))
+        #expect(Array(rows.heights) == [7, nil, nil, 35])
+        #expect(saved.heights.count == 515)
+    }
+
     @Test func cachedOffsetsRespectRowIdentityEstimateGapAndSnapshot() {
         var list = RuntimeVirtualListState()
         list.lastKeys = ["a", "b", "c"]

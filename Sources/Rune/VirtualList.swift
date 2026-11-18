@@ -375,14 +375,52 @@ internal extension VirtualRowPlaces where Key == String {
     }
 }
 
+/// A retained layout snapshot can share untouched height pages with the next scroll window.
+internal struct VirtualRowHeights: RandomAccessCollection, Sendable {
+    private static let pageSize = 256
+    private var pages: [[Float?]]
+    let endIndex: Int
+    var startIndex: Int { 0 }
+
+    init(count: Int = 0) {
+        endIndex = count
+        let pageCount = count == 0 ? 0 : (count - 1) / Self.pageSize + 1
+        pages = Array(repeating: [], count: pageCount)
+    }
+
+    subscript(index: Int) -> Float? {
+        get {
+            precondition(indices.contains(index))
+            let page = pages[index / Self.pageSize]
+            return page.isEmpty ? nil : page[index % Self.pageSize]
+        }
+        set {
+            precondition(indices.contains(index))
+            let page = index / Self.pageSize
+            if pages[page].isEmpty {
+                guard newValue != nil else { return }
+                let length = Swift.min(Self.pageSize, endIndex - page * Self.pageSize)
+                pages[page] = Array(repeating: nil, count: length)
+            }
+            pages[page][index % Self.pageSize] = newValue
+        }
+    }
+}
+
 /// Measurements follow surviving keys when a list reorders. A removed row releases its height.
 internal struct VirtualRowMeasurements: Sendable {
     var places = VirtualRowPlaces<String>([])
-    private(set) var heights: [Float?] = []
+    private(set) var heights = VirtualRowHeights()
     private var cachedOffsets: (estimate: Float, gap: Float, prefix: [Float])?
 
     mutating func replacePlaces(_ next: VirtualRowPlaces<String>) {
-        heights = next.keys.map { self[$0] }
+        var remapped = VirtualRowHeights(count: next.keys.count)
+        if !heights.isEmpty {
+            for (index, key) in next.keys.enumerated() {
+                if let height = self[key] { remapped[index] = height }
+            }
+        }
+        heights = remapped
         places = next
         cachedOffsets = nil
     }
