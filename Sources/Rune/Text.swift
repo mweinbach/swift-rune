@@ -5237,7 +5237,9 @@ public final class TextSystem: @unchecked Sendable {
         func cutShape(_ cut: TextElision, glyphs: Bool = false) -> ShapedText {
             let drawn = cut.drawnString(from: authText)
             let mappedSpans = spans.map { cut.mapSpans($0, originalLength: authText.utf8.count, drawn: drawn) }
-            var shaped = shape(drawn, spans: mappedSpans, pills: cut.mapPills(pills), glyphs: glyphs)
+            var shaped = GlyphAtlas.withElidedSpanInks(cut, emitGlyphs: glyphs) {
+                shape(drawn, spans: mappedSpans, pills: cut.mapPills(pills), glyphs: glyphs)
+            }
             shaped.elided = cut
             shaped.wasTruncated = true
             shaped.drawnText = drawn

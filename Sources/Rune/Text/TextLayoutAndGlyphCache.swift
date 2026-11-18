@@ -176,6 +176,15 @@ struct TextSpanInkMap: Sendable {
 
     var isEmpty: Bool { ranges.isEmpty }
 
+    func drawn(in cut: TextElision) -> Self {
+        var result = Self(nil)
+        for run in ranges {
+            let bytes = cut.mark(run.bytes.lowerBound, run.bytes.upperBound, isLink: false)
+            if !bytes.isEmpty { result.ranges.append((bytes, run.color)) }
+        }
+        return result
+    }
+
     private func rangeIndex(at byte: Int) -> Int {
         var lo = 0, hi = ranges.count
         while lo < hi {
@@ -261,13 +270,8 @@ extension ShapedText {
     }
 
     func applyingSpanInks(_ spans: [TextSpan]?, using originalInks: TextSpanInkMap? = nil) -> ShapedText {
-        let inks: TextSpanInkMap
-        if let cut = elided, let spans {
-            let drawn = cut.mapSpans(spans, originalLength: spans.reduce(0) { $0 + $1.text.utf8.count }, drawn: drawnText)
-            inks = TextSpanInkMap(drawn)
-        } else {
-            inks = originalInks ?? TextSpanInkMap(spans)
-        }
+        let source = originalInks ?? TextSpanInkMap(spans)
+        let inks = elided.map(source.drawn(in:)) ?? source
         var result = self
         var cursor = 0
         for index in result.glyphs.indices {
