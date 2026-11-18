@@ -25,6 +25,29 @@ struct BoundTextEditLineModeTests {
         return runtime
     }
 
+    @Test func editingCopiedHandlersKeepsEachElementIndependent() {
+        let original = El<Int>().onClick { $0 += 1 }
+        var copy = original
+        copy.traceNameValue = "copy"
+        copy.handlers.onClick = { state, _ in state += 10 }
+        copy.handlers.dragThreshold = 8
+
+        var state = 0
+        var tx = Tx()
+        original.handlers.onClick?(&state, &tx)
+        #expect(state == 1)
+        #expect(original.handlers.dragThreshold == nil)
+        copy.handlers.onClick?(&state, &tx)
+        #expect(state == 11)
+
+        let document = TextEdit("first\nsecond")
+        var single = textInput(key: "editor", \TextEdit.self).singleLine()
+        var multiple = single.singleLine(false)
+        swap(&single.handlers, &multiple.handlers)
+        #expect(single.handlers.editLens?.get(document).multiline == false)
+        #expect(multiple.handlers.editLens?.get(document).multiline == true)
+    }
+
     @Test func defaultFieldPreservesTheLoadedDocumentAndSubsequentParagraphs() throws {
         let runtime = runtime(TextEdit("first\nsecond"))
         #expect(runtime.state.edit.text == "first\nsecond")

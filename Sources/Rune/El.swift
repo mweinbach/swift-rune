@@ -1494,7 +1494,7 @@ final class ElColdData<State> {
         c.truncateFadeEm = truncateFadeEm
         c.isolates = isolates
         c.liveBindings = liveBindings
-        c.handlersBox = handlersBox.map { ElHandlersBox($0.value) }
+        c.handlersBox = handlersBox
         c.kitFilterKeys = kitFilterKeys
         c._runtimeExtras = _runtimeExtras
         c.memoLayoutChildren = memoLayoutChildren
@@ -1510,22 +1510,15 @@ final class ElHandlersBox<State> {
     }
 }
 
-final class ElColdBox<State> {
-    let data: ElColdData<State>
-    init(_ data: ElColdData<State> = ElColdData<State>()) {
-        self.data = data
-    }
-}
-
 /// Declarative UI element returned from pure view functions `(State, inout Cx<State>) -> El<State>`.
 public struct El<State> {
-    private var _cold: ElColdBox<State>? = nil
+    private var _cold: ElColdData<State>? = nil
 
-    private mutating func ensureCold() -> ElColdBox<State> {
+    private mutating func ensureCold() -> ElColdData<State> {
         if _cold == nil {
-            _cold = ElColdBox(ElColdData<State>())
+            _cold = ElColdData<State>()
         } else if !isKnownUniquelyReferenced(&_cold) {
-            _cold = ElColdBox(_cold!.data.clone())
+            _cold = _cold!.clone()
         }
         return _cold!
     }
@@ -1546,8 +1539,8 @@ public struct El<State> {
     }
     public var role: ElementRole = .group
     internal var memoLayoutChildren: MemoLayoutChildren<State>? {
-        get { _cold?.data.memoLayoutChildren }
-        set { ensureCold().data.memoLayoutChildren = newValue }
+        get { _cold?.memoLayoutChildren }
+        set { ensureCold().memoLayoutChildren = newValue }
     }
     internal var memoRegionReused: Bool = false
     internal var memoRegionEnvHash: UInt64 = 0
@@ -1597,209 +1590,209 @@ public struct El<State> {
     }
 
     // Cold / CoW properties (keeps `El<State>` compact on worker thread stacks)
-    public var richSpans: [TextSpan]? { get { _cold?.data.richSpans } set { ensureCold().data.richSpans = newValue } }
-    public var textHighlights: [TextHighlight]? { get { _cold?.data.textHighlights } set { ensureCold().data.textHighlights = newValue } }
+    public var richSpans: [TextSpan]? { get { _cold?.richSpans } set { ensureCold().richSpans = newValue } }
+    public var textHighlights: [TextHighlight]? { get { _cold?.textHighlights } set { ensureCold().textHighlights = newValue } }
     public var textLinks: [TextLink] {
-        get { _cold?.data.textLinks ?? [] }
-        set { ensureCold().data.textLinks = newValue.isEmpty ? nil : newValue }
+        get { _cold?.textLinks ?? [] }
+        set { ensureCold().textLinks = newValue.isEmpty ? nil : newValue }
     }
-    public var liveText: LiveText? { get { _cold?.data.liveText } set { ensureCold().data.liveText = newValue } }
-    public var placeholder: String? { get { _cold?.data.placeholder } set { ensureCold().data.placeholder = newValue } }
-    public var placeholderColor: Color? { get { _cold?.data.placeholderColor } set { ensureCold().data.placeholderColor = newValue } }
+    public var liveText: LiveText? { get { _cold?.liveText } set { ensureCold().liveText = newValue } }
+    public var placeholder: String? { get { _cold?.placeholder } set { ensureCold().placeholder = newValue } }
+    public var placeholderColor: Color? { get { _cold?.placeholderColor } set { ensureCold().placeholderColor = newValue } }
     private final class FontStyleBox: @unchecked Sendable {
         let style: TextStyle
         init(_ style: TextStyle) { self.style = style }
     }
     public var placeholderFont: TextStyle? {
-        get { (_cold?.data.placeholderFontBox as? FontStyleBox)?.style }
-        set { ensureCold().data.placeholderFontBox = newValue.map(FontStyleBox.init) }
+        get { (_cold?.placeholderFontBox as? FontStyleBox)?.style }
+        set { ensureCold().placeholderFontBox = newValue.map(FontStyleBox.init) }
     }
     internal var outsideListDiscFont: TextStyle? {
-        get { (_cold?.data.outsideListDiscFontBox as? FontStyleBox)?.style }
-        set { ensureCold().data.outsideListDiscFontBox = newValue.map(FontStyleBox.init) }
+        get { (_cold?.outsideListDiscFontBox as? FontStyleBox)?.style }
+        set { ensureCold().outsideListDiscFontBox = newValue.map(FontStyleBox.init) }
     }
-    public var isWrapGreedy: Bool { get { _cold?.data.wrapGreedy ?? false } set { ensureCold().data.wrapGreedy = newValue } }
-    public var caretColor: Color? { get { _cold?.data.caretColor } set { ensureCold().data.caretColor = newValue } }
-    public var selectionColor: Color? { get { _cold?.data.selectionColor } set { ensureCold().data.selectionColor = newValue } }
-    public var iconPayload: (SVGIcon, Float)? { get { _cold?.data.iconPayload } set { ensureCold().data.iconPayload = newValue } }
-    public var imagePayload: RGBA8Atlas? { get { _cold?.data.imagePayload } set { ensureCold().data.imagePayload = newValue } }
-    public var pixelsPayload: Pixels? { get { _cold?.data.pixelsPayload } set { ensureCold().data.pixelsPayload = newValue } }
-    public var pixelsFitMode: SurfaceFit? { get { _cold?.data.pixelsFitMode } set { ensureCold().data.pixelsFitMode = newValue } }
-    public var surfacePayload: (surface: NativeSurface, fit: SurfaceFit)? { get { _cold?.data.surfacePayload } set { ensureCold().data.surfacePayload = newValue } }
-    public var surfacePlace: SurfacePlace { get { _cold?.data.surfacePlace ?? .centered } set { ensureCold().data.surfacePlace = newValue } }
-    public var gradient: Gradient? { get { _cold?.data.gradient } set { ensureCold().data.gradient = newValue } }
-    public var borderSides: Sides? { get { _cold?.data.borderSides } set { ensureCold().data.borderSides = newValue } }
-    public var dashedBorder: (dash: Float, gap: Float, phase: Float)? { get { _cold?.data.dashedBorder } set { ensureCold().data.dashedBorder = newValue } }
-    public var pixelSnapEnabled: Bool { get { _cold?.data.pixelSnapEnabled ?? true } set { ensureCold().data.pixelSnapEnabled = newValue } }
-    public var clipRadius: Float? { get { _cold?.data.clipRadius } set { ensureCold().data.clipRadius = newValue } }
-    public var clipCorners: Corners? { get { _cold?.data.clipCorners } set { ensureCold().data.clipCorners = newValue } }
-    public var clipFade: SIMD4<Float>? { get { _cold?.data.clipFade } set { ensureCold().data.clipFade = newValue } }
-    public var scrollEdgeFadeWidth: Float { get { _cold?.data.scrollEdgeFadeWidth ?? 0 } set { ensureCold().data.scrollEdgeFadeWidth = newValue } }
-    public var scrollFadeStyle: ScrollFadeStyle { get { _cold?.data.scrollFadeStyle ?? .smooth } set { ensureCold().data.scrollFadeStyle = newValue } }
-    public var scrollMarginPts: Float { get { _cold?.data.scrollMarginPts ?? 0 } set { ensureCold().data.scrollMarginPts = newValue } }
-    public var scrollAnchorEnabled: Bool { get { _cold?.data.scrollAnchorEnabled ?? false } set { ensureCold().data.scrollAnchorEnabled = newValue } }
-    internal var stickyConfig: StickyConfig? { get { _cold?.data.stickyConfig } set { ensureCold().data.stickyConfig = newValue } }
-    public var growthSpec: GrowthSpec? { get { _cold?.data.growthSpec } set { ensureCold().data.growthSpec = newValue } }
-    public var isStreaming: Bool { get { _cold?.data.isStreaming ?? false } set { ensureCold().data.isStreaming = newValue } }
-    internal var joinedRowFaceKey: String? { get { _cold?.data.joinedRowFaceKey } set { ensureCold().data.joinedRowFaceKey = newValue } }
-    internal var growthReveal: GrowthReveal? { get { _cold?.data.growthReveal } set { ensureCold().data.growthReveal = newValue } }
-    public var isArrivesWhole: Bool { get { _cold?.data.isArrivesWhole ?? false } set { ensureCold().data.isArrivesWhole = newValue } }
-    public var explicitDir: Direction? { get { _cold?.data.explicitDir } set { ensureCold().data.explicitDir = newValue } }
-    public var isUnmirrored: Bool { get { _cold?.data.isUnmirrored ?? false } set { ensureCold().data.isUnmirrored = newValue } }
-    public var mirrorInRtl: Bool { get { _cold?.data.mirrorInRtl ?? false } set { ensureCold().data.mirrorInRtl = newValue } }
-    public var textDirByParagraph: Bool { get { _cold?.data.textDirByParagraph ?? false } set { ensureCold().data.textDirByParagraph = newValue } }
-    public var focusFillColor: Color? { get { _cold?.data.focusFillColor } set { ensureCold().data.focusFillColor = newValue } }
-    public var pressFocusesBelow: Bool { get { _cold?.data.pressFocusesBelow ?? false } set { ensureCold().data.pressFocusesBelow = newValue } }
-    public var noWindowDrag: Bool { get { _cold?.data.noWindowDrag ?? false } set { ensureCold().data.noWindowDrag = newValue } }
-    public var isImeCursor: Bool { get { _cold?.data.isImeCursor ?? false } set { ensureCold().data.isImeCursor = newValue } }
-    public var isImeOptionAsAlt: Bool { get { _cold?.data.optionAsAlt ?? false } set { ensureCold().data.optionAsAlt = newValue } }
-    public var isSpellcheck: Bool { get { _cold?.data.spellcheck ?? false } set { ensureCold().data.spellcheck = newValue } }
-    public var textReveal: Float { get { _cold?.data.textReveal ?? -1.0 } set { ensureCold().data.textReveal = newValue } }
-    public var foldGlideSpec: FoldGlide? { get { _cold?.data.foldGlideSpec } set { ensureCold().data.foldGlideSpec = newValue } }
-    public var virtualEstimate: Float? { get { _cold?.data.virtualEstimate } set { ensureCold().data.virtualEstimate = newValue } }
+    public var isWrapGreedy: Bool { get { _cold?.wrapGreedy ?? false } set { ensureCold().wrapGreedy = newValue } }
+    public var caretColor: Color? { get { _cold?.caretColor } set { ensureCold().caretColor = newValue } }
+    public var selectionColor: Color? { get { _cold?.selectionColor } set { ensureCold().selectionColor = newValue } }
+    public var iconPayload: (SVGIcon, Float)? { get { _cold?.iconPayload } set { ensureCold().iconPayload = newValue } }
+    public var imagePayload: RGBA8Atlas? { get { _cold?.imagePayload } set { ensureCold().imagePayload = newValue } }
+    public var pixelsPayload: Pixels? { get { _cold?.pixelsPayload } set { ensureCold().pixelsPayload = newValue } }
+    public var pixelsFitMode: SurfaceFit? { get { _cold?.pixelsFitMode } set { ensureCold().pixelsFitMode = newValue } }
+    public var surfacePayload: (surface: NativeSurface, fit: SurfaceFit)? { get { _cold?.surfacePayload } set { ensureCold().surfacePayload = newValue } }
+    public var surfacePlace: SurfacePlace { get { _cold?.surfacePlace ?? .centered } set { ensureCold().surfacePlace = newValue } }
+    public var gradient: Gradient? { get { _cold?.gradient } set { ensureCold().gradient = newValue } }
+    public var borderSides: Sides? { get { _cold?.borderSides } set { ensureCold().borderSides = newValue } }
+    public var dashedBorder: (dash: Float, gap: Float, phase: Float)? { get { _cold?.dashedBorder } set { ensureCold().dashedBorder = newValue } }
+    public var pixelSnapEnabled: Bool { get { _cold?.pixelSnapEnabled ?? true } set { ensureCold().pixelSnapEnabled = newValue } }
+    public var clipRadius: Float? { get { _cold?.clipRadius } set { ensureCold().clipRadius = newValue } }
+    public var clipCorners: Corners? { get { _cold?.clipCorners } set { ensureCold().clipCorners = newValue } }
+    public var clipFade: SIMD4<Float>? { get { _cold?.clipFade } set { ensureCold().clipFade = newValue } }
+    public var scrollEdgeFadeWidth: Float { get { _cold?.scrollEdgeFadeWidth ?? 0 } set { ensureCold().scrollEdgeFadeWidth = newValue } }
+    public var scrollFadeStyle: ScrollFadeStyle { get { _cold?.scrollFadeStyle ?? .smooth } set { ensureCold().scrollFadeStyle = newValue } }
+    public var scrollMarginPts: Float { get { _cold?.scrollMarginPts ?? 0 } set { ensureCold().scrollMarginPts = newValue } }
+    public var scrollAnchorEnabled: Bool { get { _cold?.scrollAnchorEnabled ?? false } set { ensureCold().scrollAnchorEnabled = newValue } }
+    internal var stickyConfig: StickyConfig? { get { _cold?.stickyConfig } set { ensureCold().stickyConfig = newValue } }
+    public var growthSpec: GrowthSpec? { get { _cold?.growthSpec } set { ensureCold().growthSpec = newValue } }
+    public var isStreaming: Bool { get { _cold?.isStreaming ?? false } set { ensureCold().isStreaming = newValue } }
+    internal var joinedRowFaceKey: String? { get { _cold?.joinedRowFaceKey } set { ensureCold().joinedRowFaceKey = newValue } }
+    internal var growthReveal: GrowthReveal? { get { _cold?.growthReveal } set { ensureCold().growthReveal = newValue } }
+    public var isArrivesWhole: Bool { get { _cold?.isArrivesWhole ?? false } set { ensureCold().isArrivesWhole = newValue } }
+    public var explicitDir: Direction? { get { _cold?.explicitDir } set { ensureCold().explicitDir = newValue } }
+    public var isUnmirrored: Bool { get { _cold?.isUnmirrored ?? false } set { ensureCold().isUnmirrored = newValue } }
+    public var mirrorInRtl: Bool { get { _cold?.mirrorInRtl ?? false } set { ensureCold().mirrorInRtl = newValue } }
+    public var textDirByParagraph: Bool { get { _cold?.textDirByParagraph ?? false } set { ensureCold().textDirByParagraph = newValue } }
+    public var focusFillColor: Color? { get { _cold?.focusFillColor } set { ensureCold().focusFillColor = newValue } }
+    public var pressFocusesBelow: Bool { get { _cold?.pressFocusesBelow ?? false } set { ensureCold().pressFocusesBelow = newValue } }
+    public var noWindowDrag: Bool { get { _cold?.noWindowDrag ?? false } set { ensureCold().noWindowDrag = newValue } }
+    public var isImeCursor: Bool { get { _cold?.isImeCursor ?? false } set { ensureCold().isImeCursor = newValue } }
+    public var isImeOptionAsAlt: Bool { get { _cold?.optionAsAlt ?? false } set { ensureCold().optionAsAlt = newValue } }
+    public var isSpellcheck: Bool { get { _cold?.spellcheck ?? false } set { ensureCold().spellcheck = newValue } }
+    public var textReveal: Float { get { _cold?.textReveal ?? -1.0 } set { ensureCold().textReveal = newValue } }
+    public var foldGlideSpec: FoldGlide? { get { _cold?.foldGlideSpec } set { ensureCold().foldGlideSpec = newValue } }
+    public var virtualEstimate: Float? { get { _cold?.virtualEstimate } set { ensureCold().virtualEstimate = newValue } }
     internal var virtualizeSite: String? {
-        get { _cold?.data.runtimeExtras["virtualizeSite"] as? String }
-        set { ensureCold().data.runtimeExtras["virtualizeSite"] = newValue }
+        get { _cold?.runtimeExtras["virtualizeSite"] as? String }
+        set { ensureCold().runtimeExtras["virtualizeSite"] = newValue }
     }
     public var traceNameValue: String? {
-        get { _cold?.data.runtimeExtras["traceName"] as? String }
-        set { ensureCold().data.runtimeExtras["traceName"] = newValue }
+        get { _cold?.runtimeExtras["traceName"] as? String }
+        set { ensureCold().runtimeExtras["traceName"] = newValue }
     }
     public var traceNamespaceValue: (className: String, host: String)? {
-        get { _cold?.data.runtimeExtras["traceNamespace"] as? (className: String, host: String) }
-        set { ensureCold().data.runtimeExtras["traceNamespace"] = newValue }
+        get { _cold?.runtimeExtras["traceNamespace"] as? (className: String, host: String) }
+        set { ensureCold().runtimeExtras["traceNamespace"] = newValue }
     }
-    internal var virtualRowsSource: VirtualRowSource<State>? { get { _cold?.data.virtualRowsSource } set { ensureCold().data.virtualRowsSource = newValue } }
-    internal var authoredByteExactKey: String? { get { _cold?.data.authoredByteExactKey } set { ensureCold().data.authoredByteExactKey = newValue } }
-    internal var virtualRowsVersionHash: UInt64? { get { _cold?.data.virtualRowsVersion } set { ensureCold().data.virtualRowsVersion = newValue } }
-    public var isFocusSelected: Bool { get { _cold?.data.focusSelected ?? false } set { ensureCold().data.focusSelected = newValue } }
-    public var isRevealSelected: Bool { get { _cold?.data.revealSelected ?? false } set { ensureCold().data.revealSelected = newValue } }
-    public var hoverBg: Color? { get { _cold?.data.hoverBg } set { ensureCold().data.hoverBg = newValue } }
-    public var pressBg: Color? { get { _cold?.data.pressBg } set { ensureCold().data.pressBg = newValue } }
-    public var pressColor: Color? { get { _cold?.data.pressColor } set { ensureCold().data.pressColor = newValue } }
-    public var pressScaleFactor: Float? { get { _cold?.data.pressScaleFactor } set { ensureCold().data.pressScaleFactor = newValue } }
-    public var isHoverGroup: Bool { get { _cold?.data.isHoverGroup ?? false } set { ensureCold().data.isHoverGroup = newValue } }
-    public var hoverGroupShare: String? { get { _cold?.data.hoverGroupShare } set { ensureCold().data.hoverGroupShare = newValue } }
-    public var isHoverAlone: Bool { get { _cold?.data.isHoverAlone ?? false } set { ensureCold().data.isHoverAlone = newValue } }
-    public var hoverMotionSpec: (enter: Anim<Float>, exit: Anim<Float>)? { get { _cold?.data.hoverMotion } set { ensureCold().data.hoverMotion = newValue } }
-    public var hoverWithinSpec: (enter: Anim<Float>, exit: Anim<Float>)? { get { _cold?.data.hoverWithin } set { ensureCold().data.hoverWithin = newValue } }
-    public var groupOpacity: (rest: Float, hovered: Float)? { get { _cold?.data.groupOpacity } set { ensureCold().data.groupOpacity = newValue } }
-    public var groupColor: Color? { get { _cold?.data.groupColor } set { ensureCold().data.groupColor = newValue } }
-    public var isDissolve: Bool { get { _cold?.data.isDissolve ?? false } set { ensureCold().data.isDissolve = newValue } }
-    public var drawnRectLive: Live<MotionRect>? { get { _cold?.data.drawnRectLive } set { ensureCold().data.drawnRectLive = newValue } }
-    public var focusRingColor: Color? { get { _cold?.data.focusRingColor } set { ensureCold().data.focusRingColor = newValue } }
-    public var focusRingWidth: Float { get { _cold?.data.focusRingWidth ?? 2.0 } set { ensureCold().data.focusRingWidth = newValue } }
-    public var focusRingOffset: Float { get { _cold?.data.focusRingOffset ?? 2.0 } set { ensureCold().data.focusRingOffset = newValue } }
-    public var focusReturnKey: String? { get { _cold?.data.focusReturnKey } set { ensureCold().data.focusReturnKey = newValue } }
-    public var modalClickOutside: Bool { get { _cold?.data.modalClickOutside ?? false } set { ensureCold().data.modalClickOutside = newValue } }
-    public var tabIndex: Int? { get { _cold?.data.tabIndex } set { ensureCold().data.tabIndex = newValue } }
-    public var isDefaultButton: Bool { get { _cold?.data.isDefaultButton ?? false } set { ensureCold().data.isDefaultButton = newValue } }
-    public var noFocusRing: Bool { get { _cold?.data.noFocusRing ?? false } set { ensureCold().data.noFocusRing = newValue } }
-    public var isFocusRequested: Bool { get { _cold?.data.focusRequested ?? false } set { ensureCold().data.focusRequested = newValue } }
-    public var focusHighlightColor: Color? { get { _cold?.data.focusHighlightColor } set { ensureCold().data.focusHighlightColor = newValue } }
+    internal var virtualRowsSource: VirtualRowSource<State>? { get { _cold?.virtualRowsSource } set { ensureCold().virtualRowsSource = newValue } }
+    internal var authoredByteExactKey: String? { get { _cold?.authoredByteExactKey } set { ensureCold().authoredByteExactKey = newValue } }
+    internal var virtualRowsVersionHash: UInt64? { get { _cold?.virtualRowsVersion } set { ensureCold().virtualRowsVersion = newValue } }
+    public var isFocusSelected: Bool { get { _cold?.focusSelected ?? false } set { ensureCold().focusSelected = newValue } }
+    public var isRevealSelected: Bool { get { _cold?.revealSelected ?? false } set { ensureCold().revealSelected = newValue } }
+    public var hoverBg: Color? { get { _cold?.hoverBg } set { ensureCold().hoverBg = newValue } }
+    public var pressBg: Color? { get { _cold?.pressBg } set { ensureCold().pressBg = newValue } }
+    public var pressColor: Color? { get { _cold?.pressColor } set { ensureCold().pressColor = newValue } }
+    public var pressScaleFactor: Float? { get { _cold?.pressScaleFactor } set { ensureCold().pressScaleFactor = newValue } }
+    public var isHoverGroup: Bool { get { _cold?.isHoverGroup ?? false } set { ensureCold().isHoverGroup = newValue } }
+    public var hoverGroupShare: String? { get { _cold?.hoverGroupShare } set { ensureCold().hoverGroupShare = newValue } }
+    public var isHoverAlone: Bool { get { _cold?.isHoverAlone ?? false } set { ensureCold().isHoverAlone = newValue } }
+    public var hoverMotionSpec: (enter: Anim<Float>, exit: Anim<Float>)? { get { _cold?.hoverMotion } set { ensureCold().hoverMotion = newValue } }
+    public var hoverWithinSpec: (enter: Anim<Float>, exit: Anim<Float>)? { get { _cold?.hoverWithin } set { ensureCold().hoverWithin = newValue } }
+    public var groupOpacity: (rest: Float, hovered: Float)? { get { _cold?.groupOpacity } set { ensureCold().groupOpacity = newValue } }
+    public var groupColor: Color? { get { _cold?.groupColor } set { ensureCold().groupColor = newValue } }
+    public var isDissolve: Bool { get { _cold?.isDissolve ?? false } set { ensureCold().isDissolve = newValue } }
+    public var drawnRectLive: Live<MotionRect>? { get { _cold?.drawnRectLive } set { ensureCold().drawnRectLive = newValue } }
+    public var focusRingColor: Color? { get { _cold?.focusRingColor } set { ensureCold().focusRingColor = newValue } }
+    public var focusRingWidth: Float { get { _cold?.focusRingWidth ?? 2.0 } set { ensureCold().focusRingWidth = newValue } }
+    public var focusRingOffset: Float { get { _cold?.focusRingOffset ?? 2.0 } set { ensureCold().focusRingOffset = newValue } }
+    public var focusReturnKey: String? { get { _cold?.focusReturnKey } set { ensureCold().focusReturnKey = newValue } }
+    public var modalClickOutside: Bool { get { _cold?.modalClickOutside ?? false } set { ensureCold().modalClickOutside = newValue } }
+    public var tabIndex: Int? { get { _cold?.tabIndex } set { ensureCold().tabIndex = newValue } }
+    public var isDefaultButton: Bool { get { _cold?.isDefaultButton ?? false } set { ensureCold().isDefaultButton = newValue } }
+    public var noFocusRing: Bool { get { _cold?.noFocusRing ?? false } set { ensureCold().noFocusRing = newValue } }
+    public var isFocusRequested: Bool { get { _cold?.focusRequested ?? false } set { ensureCold().focusRequested = newValue } }
+    public var focusHighlightColor: Color? { get { _cold?.focusHighlightColor } set { ensureCold().focusHighlightColor = newValue } }
     public var focusWithinRing: (width: Float, offset: Float, color: Color)? {
-        get { _cold?.data.focusWithinRing }
-        set { ensureCold().data.focusWithinRing = newValue }
+        get { _cold?.focusWithinRing }
+        set { ensureCold().focusWithinRing = newValue }
     }
-    public var focusWithinFlat: Bool { get { _cold?.data.focusWithinFlat ?? false } set { ensureCold().data.focusWithinFlat = newValue } }
-    public var isFocusFollowsSelection: Bool { get { _cold?.data.focusFollows ?? false } set { ensureCold().data.focusFollows = newValue } }
+    public var focusWithinFlat: Bool { get { _cold?.focusWithinFlat ?? false } set { ensureCold().focusWithinFlat = newValue } }
+    public var isFocusFollowsSelection: Bool { get { _cold?.focusFollows ?? false } set { ensureCold().focusFollows = newValue } }
 
     public var a11yLabel: String? {
-        get { _cold?.data.a11yLabelStorage?.stringValue }
-        set { ensureCold().data.a11yLabelStorage = newValue.map(CowText.owned) }
+        get { _cold?.a11yLabelStorage?.stringValue }
+        set { ensureCold().a11yLabelStorage = newValue.map(CowText.owned) }
     }
     internal var a11yLabelCow: CowText? {
-        get { _cold?.data.a11yLabelStorage }
-        set { ensureCold().data.a11yLabelStorage = newValue }
+        get { _cold?.a11yLabelStorage }
+        set { ensureCold().a11yLabelStorage = newValue }
     }
-    public var a11yHelp: String? { get { _cold?.data.a11yHelp } set { ensureCold().data.a11yHelp = newValue } }
-    public var isHelpWhenTruncated: Bool { get { _cold?.data.helpWhenTruncated ?? false } set { ensureCold().data.helpWhenTruncated = newValue } }
-    public var helpSide: Side? { get { _cold?.data.helpSide } set { ensureCold().data.helpSide = newValue } }
-    public var a11ySelected: String? { get { _cold?.data.a11ySelected } set { ensureCold().data.a11ySelected = newValue } }
-    public var a11yExpanded: Bool? { get { _cold?.data.a11yExpanded } set { ensureCold().data.a11yExpanded = newValue } }
-    public var a11yLevel: Int? { get { _cold?.data.a11yLevel } set { ensureCold().data.a11yLevel = newValue } }
-    public var itemSelected: Bool { get { _cold?.data.itemSelected ?? false } set { ensureCold().data.itemSelected = newValue } }
+    public var a11yHelp: String? { get { _cold?.a11yHelp } set { ensureCold().a11yHelp = newValue } }
+    public var isHelpWhenTruncated: Bool { get { _cold?.helpWhenTruncated ?? false } set { ensureCold().helpWhenTruncated = newValue } }
+    public var helpSide: Side? { get { _cold?.helpSide } set { ensureCold().helpSide = newValue } }
+    public var a11ySelected: String? { get { _cold?.a11ySelected } set { ensureCold().a11ySelected = newValue } }
+    public var a11yExpanded: Bool? { get { _cold?.a11yExpanded } set { ensureCold().a11yExpanded = newValue } }
+    public var a11yLevel: Int? { get { _cold?.a11yLevel } set { ensureCold().a11yLevel = newValue } }
+    public var itemSelected: Bool { get { _cold?.itemSelected ?? false } set { ensureCold().itemSelected = newValue } }
     public var a11yDescription: String? {
-        get { _cold?.data.a11yDescriptionStorage?.stringValue }
-        set { ensureCold().data.a11yDescriptionStorage = newValue.map(CowText.owned) }
+        get { _cold?.a11yDescriptionStorage?.stringValue }
+        set { ensureCold().a11yDescriptionStorage = newValue.map(CowText.owned) }
     }
     internal var a11yDescriptionCow: CowText? {
-        get { _cold?.data.a11yDescriptionStorage }
-        set { ensureCold().data.a11yDescriptionStorage = newValue }
+        get { _cold?.a11yDescriptionStorage }
+        set { ensureCold().a11yDescriptionStorage = newValue }
     }
-    public var a11yValue: String? { get { _cold?.data.a11yValue } set { ensureCold().data.a11yValue = newValue } }
-    public var a11yRange: A11yRange? { get { _cold?.data.a11yRange } set { ensureCold().data.a11yRange = newValue } }
-    public var a11yChecked: A11yChecked? { get { _cold?.data.a11yChecked } set { ensureCold().data.a11yChecked = newValue } }
-    public var a11yDisabled: Bool { get { _cold?.data.a11yDisabled ?? false } set { ensureCold().data.a11yDisabled = newValue } }
-    public var isA11yHidden: Bool { get { _cold?.data.isA11yHidden ?? false } set { ensureCold().data.isA11yHidden = newValue } }
-    public var a11yActiveDescendant: String? { get { _cold?.data.a11yActiveDescendant } set { ensureCold().data.a11yActiveDescendant = newValue } }
+    public var a11yValue: String? { get { _cold?.a11yValue } set { ensureCold().a11yValue = newValue } }
+    public var a11yRange: A11yRange? { get { _cold?.a11yRange } set { ensureCold().a11yRange = newValue } }
+    public var a11yChecked: A11yChecked? { get { _cold?.a11yChecked } set { ensureCold().a11yChecked = newValue } }
+    public var a11yDisabled: Bool { get { _cold?.a11yDisabled ?? false } set { ensureCold().a11yDisabled = newValue } }
+    public var isA11yHidden: Bool { get { _cold?.isA11yHidden ?? false } set { ensureCold().isA11yHidden = newValue } }
+    public var a11yActiveDescendant: String? { get { _cold?.a11yActiveDescendant } set { ensureCold().a11yActiveDescendant = newValue } }
     public var a11yLabelledBy: String? {
-        get { _cold?.data.a11yLabelledByStorage?.stringValue }
-        set { ensureCold().data.a11yLabelledByStorage = newValue.map(CowText.owned) }
+        get { _cold?.a11yLabelledByStorage?.stringValue }
+        set { ensureCold().a11yLabelledByStorage = newValue.map(CowText.owned) }
     }
     public var a11yDescribedBy: String? {
-        get { _cold?.data.a11yDescribedByStorage?.stringValue }
-        set { ensureCold().data.a11yDescribedByStorage = newValue.map(CowText.owned) }
+        get { _cold?.a11yDescribedByStorage?.stringValue }
+        set { ensureCold().a11yDescribedByStorage = newValue.map(CowText.owned) }
     }
-    public var a11yBusy: Bool { get { _cold?.data.a11yBusy ?? false } set { ensureCold().data.a11yBusy = newValue } }
-    public var a11yInvalid: Bool { get { _cold?.data.a11yInvalid ?? false } set { ensureCold().data.a11yInvalid = newValue } }
-    public var a11yReadOnly: Bool { get { _cold?.data.a11yReadOnly ?? false } set { ensureCold().data.a11yReadOnly = newValue } }
-    public var a11ySorted: Bool? { get { _cold?.data.a11ySorted } set { ensureCold().data.a11ySorted = newValue } }
-    public var a11yLive: LiveRegionPoliteness? { get { _cold?.data.a11yLive } set { ensureCold().data.a11yLive = newValue } }
-    public var a11yPosInSet: (position: Int, size: Int)? { get { _cold?.data.a11yPosInSet } set { ensureCold().data.a11yPosInSet = newValue } }
-    public var a11yShortcutHint: String? { get { _cold?.data.a11yShortcutHint } set { ensureCold().data.a11yShortcutHint = newValue } }
-    public var a11yHref: String? { get { _cold?.data.a11yHref } set { ensureCold().data.a11yHref = newValue } }
+    public var a11yBusy: Bool { get { _cold?.a11yBusy ?? false } set { ensureCold().a11yBusy = newValue } }
+    public var a11yInvalid: Bool { get { _cold?.a11yInvalid ?? false } set { ensureCold().a11yInvalid = newValue } }
+    public var a11yReadOnly: Bool { get { _cold?.a11yReadOnly ?? false } set { ensureCold().a11yReadOnly = newValue } }
+    public var a11ySorted: Bool? { get { _cold?.a11ySorted } set { ensureCold().a11ySorted = newValue } }
+    public var a11yLive: LiveRegionPoliteness? { get { _cold?.a11yLive } set { ensureCold().a11yLive = newValue } }
+    public var a11yPosInSet: (position: Int, size: Int)? { get { _cold?.a11yPosInSet } set { ensureCold().a11yPosInSet = newValue } }
+    public var a11yShortcutHint: String? { get { _cold?.a11yShortcutHint } set { ensureCold().a11yShortcutHint = newValue } }
+    public var a11yHref: String? { get { _cold?.a11yHref } set { ensureCold().a11yHref = newValue } }
 
-    public var anchor: Anchor? { get { _cold?.data.anchor } set { ensureCold().data.anchor = newValue } }
-    public var layoutAnim: LayoutAnim? { get { _cold?.data.layoutAnim } set { ensureCold().data.layoutAnim = newValue } }
-    public var styleSpring: Spring? { get { _cold?.data.styleSpring } set { ensureCold().data.styleSpring = newValue } }
-    public var transition: Transition? { get { _cold?.data.transition } set { ensureCold().data.transition = newValue } }
-    public var enterDelay: Float { get { _cold?.data.enterDelay ?? 0 } set { ensureCold().data.enterDelay = newValue } }
-    public var hasInstantChanges: Bool { get { _cold?.data.hasInstantChanges ?? false } set { ensureCold().data.hasInstantChanges = newValue } }
-    public var hasAnimatedChanges: Bool { get { _cold?.data.hasAnimatedChanges ?? false } set { ensureCold().data.hasAnimatedChanges = newValue } }
-    public var loopingSpec: LoopSpec? { get { _cold?.data.loopingSpec } set { ensureCold().data.loopingSpec = newValue } }
-    public var flightId: String? { get { _cold?.data.flightId } set { ensureCold().data.flightId = newValue } }
-    public var isMatchedCrop: Bool { get { _cold?.data.flightCrop ?? false } set { ensureCold().data.flightCrop = newValue } }
-    public var flightSpring: Spring? { get { _cold?.data.flightSpring } set { ensureCold().data.flightSpring = newValue } }
-    public var terminalGridPayload: TerminalGrid? { get { _cold?.data.terminalGridPayload } set { ensureCold().data.terminalGridPayload = newValue } }
-    public var spellcheck: Bool { get { _cold?.data.spellcheck ?? false } set { ensureCold().data.spellcheck = newValue } }
-    public var richStyleSpec: RichStyle? { get { _cold?.data.richStyle } set { ensureCold().data.richStyle = newValue } }
-    public var pillColorsSpec: (bg: Color, fg: Color?)? { get { _cold?.data.pillColors } set { ensureCold().data.pillColors = newValue } }
-    public var pillIconLookup: ((String) -> SVGIcon?)? { get { _cold?.data.pillIconLookup } set { ensureCold().data.pillIconLookup = newValue } }
-    public var pillStyleLookup: ((String) -> PillStyle)? { get { _cold?.data.pillStyleLookup } set { ensureCold().data.pillStyleLookup = newValue } }
-    internal var fieldSingleLine: Bool? { _cold?.data.fieldSingleLine }
+    public var anchor: Anchor? { get { _cold?.anchor } set { ensureCold().anchor = newValue } }
+    public var layoutAnim: LayoutAnim? { get { _cold?.layoutAnim } set { ensureCold().layoutAnim = newValue } }
+    public var styleSpring: Spring? { get { _cold?.styleSpring } set { ensureCold().styleSpring = newValue } }
+    public var transition: Transition? { get { _cold?.transition } set { ensureCold().transition = newValue } }
+    public var enterDelay: Float { get { _cold?.enterDelay ?? 0 } set { ensureCold().enterDelay = newValue } }
+    public var hasInstantChanges: Bool { get { _cold?.hasInstantChanges ?? false } set { ensureCold().hasInstantChanges = newValue } }
+    public var hasAnimatedChanges: Bool { get { _cold?.hasAnimatedChanges ?? false } set { ensureCold().hasAnimatedChanges = newValue } }
+    public var loopingSpec: LoopSpec? { get { _cold?.loopingSpec } set { ensureCold().loopingSpec = newValue } }
+    public var flightId: String? { get { _cold?.flightId } set { ensureCold().flightId = newValue } }
+    public var isMatchedCrop: Bool { get { _cold?.flightCrop ?? false } set { ensureCold().flightCrop = newValue } }
+    public var flightSpring: Spring? { get { _cold?.flightSpring } set { ensureCold().flightSpring = newValue } }
+    public var terminalGridPayload: TerminalGrid? { get { _cold?.terminalGridPayload } set { ensureCold().terminalGridPayload = newValue } }
+    public var spellcheck: Bool { get { _cold?.spellcheck ?? false } set { ensureCold().spellcheck = newValue } }
+    public var richStyleSpec: RichStyle? { get { _cold?.richStyle } set { ensureCold().richStyle = newValue } }
+    public var pillColorsSpec: (bg: Color, fg: Color?)? { get { _cold?.pillColors } set { ensureCold().pillColors = newValue } }
+    public var pillIconLookup: ((String) -> SVGIcon?)? { get { _cold?.pillIconLookup } set { ensureCold().pillIconLookup = newValue } }
+    public var pillStyleLookup: ((String) -> PillStyle)? { get { _cold?.pillStyleLookup } set { ensureCold().pillStyleLookup = newValue } }
+    internal var fieldSingleLine: Bool? { _cold?.fieldSingleLine }
     public var isSingleLineInput: Bool {
         get { fieldSingleLine ?? false }
         set {
-            ensureCold().data.fieldSingleLine = newValue
+            ensureCold().fieldSingleLine = newValue
             if hasAuthoredHandlers { handlers.fieldSingleLine = newValue }
         }
     }
     /// The field shows its editor but takes no edits from it (upstream `Input::access == None`).
-    public var editAccessWithheld: Bool { get { _cold?.data.editAccessWithheld ?? false } set { ensureCold().data.editAccessWithheld = newValue } }
-    public var animateEditLayoutEnabled: Bool { get { _cold?.data.animateEditLayoutEnabled ?? false } set { ensureCold().data.animateEditLayoutEnabled = newValue } }
-    public var isIconOneColor: Bool { get { _cold?.data.isIconOneColor ?? false } set { ensureCold().data.isIconOneColor = newValue } }
-    public var iconRotation: Float { get { _cold?.data.iconRotation ?? 0.0 } set { ensureCold().data.iconRotation = newValue } }
-    public var isWidthLeads: Bool { get { _cold?.data.isWidthLeads ?? false } set { ensureCold().data.isWidthLeads = newValue } }
-    public var holdLandingWidthEnabled: Bool { get { _cold?.data.holdLandingWidthEnabled ?? false } set { ensureCold().data.holdLandingWidthEnabled = newValue } }
-    public var paintContain: Vec2? { get { _cold?.data.paintContain } set { ensureCold().data.paintContain = newValue } }
-    public var motionSnapsEnabled: Bool { get { _cold?.data.motionSnapsEnabled ?? false } set { ensureCold().data.motionSnapsEnabled = newValue } }
-    public var isRaised: Bool { get { _cold?.data.isRaised ?? false } set { ensureCold().data.isRaised = newValue } }
-    public var offsetMotionAnim: Anim<Vec2>? { get { _cold?.data.offsetMotionAnim } set { ensureCold().data.offsetMotionAnim = newValue } }
-    public var opacityMotionAnim: Anim<Float>? { get { _cold?.data.opacityMotionAnim } set { ensureCold().data.opacityMotionAnim = newValue } }
-    public var scaleMotionAnim: Anim<Vec2>? { get { _cold?.data.scaleMotionAnim } set { ensureCold().data.scaleMotionAnim = newValue } }
-    public var rotateMotionAnim: Anim<Float>? { get { _cold?.data.rotateMotionAnim } set { ensureCold().data.rotateMotionAnim = newValue } }
-    var blurMotionOverride: BlurMotion? { get { _cold?.data.blurMotionOverride } set { ensureCold().data.blurMotionOverride = newValue } }
-    public var textCaseValue: TextCase? { get { _cold?.data.textCaseValue } set { ensureCold().data.textCaseValue = newValue } }
-    public var spanRingsSpec: [(range: Range<Int>, color: Color, width: Float)] { get { _cold?.data.spanRings ?? [] } set { ensureCold().data.spanRings = newValue.isEmpty ? nil : newValue } }
-    public var advanceInRun: (run: TextRun, byteOffset: Int)? { get { _cold?.data.advanceInRun } set { ensureCold().data.advanceInRun = newValue } }
-    public var isTruncateFadeEnabled: Bool { get { _cold?.data.isTruncateFadeEnabled ?? false } set { ensureCold().data.isTruncateFadeEnabled = newValue } }
-    public var truncateFadeEm: Float { get { _cold?.data.truncateFadeEm ?? 1.5 } set { ensureCold().data.truncateFadeEm = newValue } }
-    public var isolatesSpec: [(range: Range<Int>, dir: Direction)] { get { _cold?.data.isolates ?? [] } set { ensureCold().data.isolates = newValue.isEmpty ? nil : newValue } }
-    var liveBindings: [BoundLiveProperty] { get { _cold?.data.liveBindings ?? [] } set { ensureCold().data.liveBindings = newValue.isEmpty ? nil : newValue } }
+    public var editAccessWithheld: Bool { get { _cold?.editAccessWithheld ?? false } set { ensureCold().editAccessWithheld = newValue } }
+    public var animateEditLayoutEnabled: Bool { get { _cold?.animateEditLayoutEnabled ?? false } set { ensureCold().animateEditLayoutEnabled = newValue } }
+    public var isIconOneColor: Bool { get { _cold?.isIconOneColor ?? false } set { ensureCold().isIconOneColor = newValue } }
+    public var iconRotation: Float { get { _cold?.iconRotation ?? 0.0 } set { ensureCold().iconRotation = newValue } }
+    public var isWidthLeads: Bool { get { _cold?.isWidthLeads ?? false } set { ensureCold().isWidthLeads = newValue } }
+    public var holdLandingWidthEnabled: Bool { get { _cold?.holdLandingWidthEnabled ?? false } set { ensureCold().holdLandingWidthEnabled = newValue } }
+    public var paintContain: Vec2? { get { _cold?.paintContain } set { ensureCold().paintContain = newValue } }
+    public var motionSnapsEnabled: Bool { get { _cold?.motionSnapsEnabled ?? false } set { ensureCold().motionSnapsEnabled = newValue } }
+    public var isRaised: Bool { get { _cold?.isRaised ?? false } set { ensureCold().isRaised = newValue } }
+    public var offsetMotionAnim: Anim<Vec2>? { get { _cold?.offsetMotionAnim } set { ensureCold().offsetMotionAnim = newValue } }
+    public var opacityMotionAnim: Anim<Float>? { get { _cold?.opacityMotionAnim } set { ensureCold().opacityMotionAnim = newValue } }
+    public var scaleMotionAnim: Anim<Vec2>? { get { _cold?.scaleMotionAnim } set { ensureCold().scaleMotionAnim = newValue } }
+    public var rotateMotionAnim: Anim<Float>? { get { _cold?.rotateMotionAnim } set { ensureCold().rotateMotionAnim = newValue } }
+    var blurMotionOverride: BlurMotion? { get { _cold?.blurMotionOverride } set { ensureCold().blurMotionOverride = newValue } }
+    public var textCaseValue: TextCase? { get { _cold?.textCaseValue } set { ensureCold().textCaseValue = newValue } }
+    public var spanRingsSpec: [(range: Range<Int>, color: Color, width: Float)] { get { _cold?.spanRings ?? [] } set { ensureCold().spanRings = newValue.isEmpty ? nil : newValue } }
+    public var advanceInRun: (run: TextRun, byteOffset: Int)? { get { _cold?.advanceInRun } set { ensureCold().advanceInRun = newValue } }
+    public var isTruncateFadeEnabled: Bool { get { _cold?.isTruncateFadeEnabled ?? false } set { ensureCold().isTruncateFadeEnabled = newValue } }
+    public var truncateFadeEm: Float { get { _cold?.truncateFadeEm ?? 1.5 } set { ensureCold().truncateFadeEm = newValue } }
+    public var isolatesSpec: [(range: Range<Int>, dir: Direction)] { get { _cold?.isolates ?? [] } set { ensureCold().isolates = newValue.isEmpty ? nil : newValue } }
+    var liveBindings: [BoundLiveProperty] { get { _cold?.liveBindings ?? [] } set { ensureCold().liveBindings = newValue.isEmpty ? nil : newValue } }
     public var handlers: ElementHandlers<State> {
         _read {
-            if let box = _cold?.data.handlersBox {
+            if let box = _cold?.handlersBox {
                 yield box.value
             } else {
                 yield ElementHandlers<State>()
@@ -1808,31 +1801,40 @@ public struct El<State> {
         set {
             let box = ensureCold()
             var newValue = newValue
-            newValue.fieldSingleLine = box.data.fieldSingleLine
-            if isKnownUniquelyReferenced(&box.data.handlersBox) {
-                box.data.handlersBox?.value = newValue
+            newValue.fieldSingleLine = box.fieldSingleLine
+            if isKnownUniquelyReferenced(&box.handlersBox) {
+                box.handlersBox?.value = newValue
             } else {
-                box.data.handlersBox = ElHandlersBox(newValue)
+                box.handlersBox = ElHandlersBox(newValue)
             }
         }
+        _modify {
+            let cold = ensureCold()
+            if !isKnownUniquelyReferenced(&cold.handlersBox) {
+                cold.handlersBox = ElHandlersBox(cold.handlersBox?.value ?? ElementHandlers())
+            }
+            let handlers = cold.handlersBox!
+            defer { handlers.value.fieldSingleLine = cold.fieldSingleLine }
+            yield &handlers.value
+        }
     }
-    internal var hasEditLens: Bool { _cold?.data.handlersBox?.hasEditLens ?? false }
+    internal var hasEditLens: Bool { _cold?.handlersBox?.hasEditLens ?? false }
     internal var kitFilterKeysValue: [String]? {
-        get { _cold?.data.kitFilterKeys }
-        set { ensureCold().data.kitFilterKeys = newValue }
+        get { _cold?.kitFilterKeys }
+        set { ensureCold().kitFilterKeys = newValue }
     }
-    internal var hasAuthoredHandlers: Bool { _cold?.data.handlersBox != nil }
+    internal var hasAuthoredHandlers: Bool { _cold?.handlersBox != nil }
     internal var runtimeExtras: [String: Any] {
-        get { _cold?.data.runtimeExtras ?? [:] }
-        set { ensureCold().data.runtimeExtras = newValue }
+        get { _cold?.runtimeExtras ?? [:] }
+        set { ensureCold().runtimeExtras = newValue }
         _modify {
             let box = ensureCold()
-            yield &box.data.runtimeExtras
+            yield &box.runtimeExtras
         }
     }
     public var keyLocation: String {
-        get { _cold?.data.keyLocation ?? "" }
-        set { ensureCold().data.keyLocation = newValue.isEmpty ? nil : newValue }
+        get { _cold?.keyLocation ?? "" }
+        set { ensureCold().keyLocation = newValue.isEmpty ? nil : newValue }
     }
 
     public init(direction: FlexDirection = .row) {
@@ -2362,7 +2364,7 @@ public struct El<State> {
         var copy = self
         copy.borderWidth = max(0, width)
         copy.borderColor = color
-        if copy._cold?.data.runtimeExtras[RenderExtrasKey.borderGradient] != nil {
+        if copy._cold?.runtimeExtras[RenderExtrasKey.borderGradient] != nil {
             copy.runtimeExtras.removeValue(forKey: RenderExtrasKey.borderGradient)
         }
         return copy
