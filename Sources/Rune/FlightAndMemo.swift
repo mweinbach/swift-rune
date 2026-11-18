@@ -818,11 +818,15 @@ public func memoWithHash<State>(
 // MARK: - Tracked State & Region Memoization (`rune::tracked`)
 
 internal enum TrackedRecorder {
-    private static let threadKey = "rune.trackedRecorderStack"
-
     private final class Box: @unchecked Sendable {
         var stack: [[UInt32: UInt64]] = []
     }
+
+    #if os(WASI)
+    // The Preview 1 reactor runs on a single WebAssembly instance thread.
+    private static let box = Box()
+    #else
+    private static let threadKey = "rune.trackedRecorderStack"
 
     private static var box: Box {
         let dict = RuneExecutionContext.locals
@@ -834,9 +838,7 @@ internal enum TrackedRecorder {
         return created
     }
 
-    static var stack: [[UInt32: UInt64]] {
-        box.stack
-    }
+    #endif
 
     static func pushEmpty() {
         box.stack.append([:])
@@ -850,6 +852,15 @@ internal enum TrackedRecorder {
         let b = box
         guard !b.stack.isEmpty else { return }
         b.stack[b.stack.count - 1][id] = version
+    }
+
+    static func replay(_ entries: [(id: UInt32, version: UInt64)]) {
+        guard !entries.isEmpty else { return }
+        let b = box
+        guard let index = b.stack.indices.last else { return }
+        for entry in entries {
+            b.stack[index][entry.id] = TrackedIDGenerator.version(for: entry.id)
+        }
     }
 
     static func pause() -> [[UInt32: UInt64]] {
@@ -994,10 +1005,7 @@ public struct TrackedReads: Sendable {
     /// Counts the values as read again by a `region` building around a caller that reuses what
     /// it derived from them instead of reading them directly (`Reads::read`).
     public func read() {
-        guard !TrackedRecorder.stack.isEmpty else { return }
-        for (id, _) in entries {
-            TrackedRecorder.record(id: id, version: TrackedIDGenerator.version(for: id))
-        }
+        TrackedRecorder.replay(entries)
     }
 
     internal var memoReads: [MemoRead] {

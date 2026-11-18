@@ -24,6 +24,15 @@ struct ElPhase2ParityTests {
         a.value = 2
         #expect(reads.changed(), "writing a recorded Tracked value invalidates reads")
 
+        let (_, outer) = trackedReads {
+            let (_, inner) = trackedReads { reads.read() }
+            #expect(!inner.changed())
+            TrackedReads().read()
+        }
+        #expect(!outer.changed())
+        a.touch()
+        #expect(outer.changed())
+
         // Inside region(_:cache:build:), replaying `reads.read()` subscribes the region without re-running derivation.
         let freshA = Tracked(10)
         var derived = 0
