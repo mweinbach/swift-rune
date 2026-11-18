@@ -207,6 +207,17 @@ extension GlyphAtlas {
         return body()
     }
 
+    @inline(__always)
+    static func withElidedSpanInks<Result>(_ cut: TextElision, emitGlyphs: Bool, _ body: () -> Result) -> Result {
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        if emitGlyphs, let initialSpanInks {
+            let drawn = initialSpanInks.drawn(in: cut)
+            return $initialSpanInks.withValue(drawn.isEmpty ? nil : drawn, operation: body)
+        }
+        #endif
+        return body()
+    }
+
     /// On a cache miss the shaper can prepare the requested ink immediately. The paint
     /// resolver still handles later colour changes, selections, and highlighted spans.
     static func withBaseInk<Result>(_ ink: Color, mode: FontSmoothing, _ shape: () -> Result) -> Result {

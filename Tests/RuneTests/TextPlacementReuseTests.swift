@@ -54,6 +54,21 @@ struct TextPlacementReuseTests {
         #expect(system.glyphAtlas.cachedEntryCount == 3)
     }
 
+    @Test("Elided text acquires masks using the visible suffix's original colors", arguments: [TextElide.head, .middle])
+    func coldElidedMasks(mode: TextElide) throws {
+        let text = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        let spans = [TextSpan("0123456789ABCDEFGHI", color: .black), TextSpan("JKLMNOPQRSTUVWXYZ", color: .white)]
+        let style = TextStyle(size: 18, family: .monospace, wrap: .ellipsis, elide: mode).smoothing(.windfoil)
+        let system = TextSystem()
+        let painted = GlyphAtlas.withBaseInk(.black, mode: .windfoil) {
+            system.shape(text: text, spans: spans, style: style, maxWidth: 67, pixelScale: 1)
+        }
+        let cut = try #require(painted.elided)
+        let suffix = painted.glyphs.filter { $0.utf8Offset >= cut.afterEllipsis }
+        #expect(!suffix.isEmpty && suffix.allSatisfy { $0.color == .white && $0.outlineGroup?.inkVariant?.bucket == 4 })
+        #expect(system.glyphAtlas.cachedEntryCount == painted.glyphs.count)
+    }
+
     @Test("Warmed layout and fractional placement track changes to the scoped base and span inks")
     func alternatingPaintScopes() throws {
         for mode in [FontSmoothing.on, .windfoil] where mode.pipeline.dilate {
