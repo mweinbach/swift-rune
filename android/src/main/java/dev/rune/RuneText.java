@@ -22,6 +22,7 @@ import android.icu.lang.UCharacter;
 import android.icu.lang.UProperty;
 import android.icu.text.Bidi;
 import android.icu.text.BidiRun;
+import android.icu.text.BreakIterator;
 import android.text.Layout;
 import android.text.PrecomputedText;
 import android.text.StaticLayout;
@@ -67,7 +68,7 @@ public final class RuneText {
     private Tile lastTile;
     private ArrayList<DirectionalRun> inkRuns;
     private char[] inkChars;
-    private android.icu.text.BreakIterator inkGraphemes;
+    private BreakIterator inkGraphemes;
     private ArrayList<InkSpan> inkSpans;
     private NativeGlyphBounds inkBounds;
 
@@ -755,17 +756,18 @@ public final class RuneText {
         if (run.edges[index - run.start] != run.edges[index - run.start + 1]) return index;
         int count = run.end - run.start;
         if (inkGraphemes == null) {
-            inkGraphemes = android.icu.text.BreakIterator.getCharacterInstance(Locale.ROOT);
+            inkGraphemes = BreakIterator.getCharacterInstance(Locale.ROOT);
             inkGraphemes.setText(text);
         }
         if (!inkGraphemes.isBoundary(index)) index = Math.max(run.start, inkGraphemes.preceding(index));
-        if (index <= run.start || run.edges[index - run.start] != run.edges[index - run.start + 1]) return index;
         // A zero-width grapheme (a format control or a zero-advance font glyph) can
         // have an independent owner. A ligature continuation has an advance when
         // its grapheme is shaped separately with the original context.
-        int end = Math.min(run.end, inkGraphemes.following(index));
-        if (paint.getTextRunAdvances(inkChars, index, end - index, run.start, count, run.rtl, null, 0) == 0) return index;
-        do { index--; } while (index > run.start && run.edges[index - run.start] == run.edges[index - run.start + 1]);
+        while (index > run.start && run.edges[index - run.start] == run.edges[index - run.start + 1]) {
+            int end = Math.min(run.end, inkGraphemes.following(index));
+            if (paint.getTextRunAdvances(inkChars, index, end - index, run.start, count, run.rtl, null, 0) == 0) break;
+            index = Math.max(run.start, inkGraphemes.preceding(index));
+        }
         return index;
     }
 
