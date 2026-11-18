@@ -272,6 +272,17 @@ private func premulSIMD4(_ c: Color, opacity: Float = 1.0, srgb: Bool) -> SIMD4<
     return SIMD4<Float>(v.x * a, v.y * a, v.z * a, a)
 }
 
+/// Preserve the transfer curve's exact white endpoint before byte blending a borderless fill.
+private func plainFill(_ color: Color, opacity: Float, srgb: Bool) -> SIMD4<Float> {
+    var fill = premulSIMD4(color, opacity: opacity, srgb: srgb)
+    if srgb && fill.w < 1 {
+        if color.r == 1 { fill.x = fill.w }
+        if color.g == 1 { fill.y = fill.w }
+        if color.b == 1 { fill.z = fill.w }
+    }
+    return fill
+}
+
 internal let radialStopProps: [Prop<MotionColor>] = (0..<16).map {
     Prop<MotionColor>.custom(UInt16(80 + $0), .color, name: "radialStop\($0)")
 }
@@ -1314,7 +1325,7 @@ extension Runtime {
         #endif
 
         // Publish resting geometry without running the material painter for clipped boxes
-        // and transparent layout containers. Their children still paint with inherited snapping.
+        // and plain fills. Their children still paint with inherited snapping.
         let canProjectGeometry = publishHitGeometry && !hasRaised && !hasHolds && !hasPresenceFlights
             && !hasAnimatedTracks && !canPress && !canPaintFocusRing && growthRows.isEmpty
             && activeTextFlights.isEmpty && !needsInteractionPrepass && exitingIds.isEmpty
@@ -1348,7 +1359,13 @@ extension Runtime {
             let base = p.rect.offsetBy(Vec2(context.transform.dx, context.transform.dy))
             var rect = base.offsetBy(context.stickyShift)
             let clip = context.clip.clipPx
-            if !node.paintTraits.contains(.layoutContainer) || topology.children(of: node).isEmpty {
+            let isLeaf = topology.children(of: node).isEmpty
+            let plainBox = node.paintTraits.contains(.plainBox)
+            let clipMisses = clip.z < clip.x - 1 || clip.w < clip.y - 1 || clip.z < -1 || clip.w < -1
+                || clip.x > Float(widthPx) + 1 || clip.y > Float(heightPx) + 1
+            let paintsBox = plainBox && (!isLeaf || (!clipMisses
+                && rect.bottom * scale >= max(0, clip.y) - 2 && rect.top * scale <= min(Float(heightPx), clip.w) + 2))
+            if !plainBox {
                 // Match TextRasterWindow.expanded, allowing padding in either direction.
                 // Visible leaves retain their own pixel-snap glide bookkeeping.
                 let margin = 2 * max(0, el.textStyle.size, el.textStyle.lineHeight ?? 0) + abs(el.layout.padding.top) + 3 / scale
@@ -1364,8 +1381,7 @@ extension Runtime {
                   resolveNodeHoverFrac(node, el: el, inert: inert) == 0 else { return nil }
             let parentScope = context.element != nil ? hitScopesByDepth[depth - 1] : RenderHitScope()
             guard parentScope.turn == nil, !parentScope.exiting else { return nil }
-            let isLeaf = topology.children(of: node).isEmpty
-            // Leaves need no downstream snap state. Composite and faded boxes retain
+            // Distant leaves need no downstream snap state. Composite and faded boxes retain
             // their layer setup, including scopes which might paint a visible child.
             var childClip = context.clip
             if node.isSticky {
@@ -1373,7 +1389,7 @@ extension Runtime {
                 childClip.fadeOrigin.x = childClip.withoutScrollOrigin.x
                 childClip.fade = packFade(width: childClip.fadeWidth, origin: childClip.fadeOrigin, clip: clip)
             }
-            if !isLeaf {
+            if !isLeaf || paintsBox {
                 guard childClip.fadeWidth == .zero, childClip.fade == .zero,
                       context.opacity == 1, snap.layer == 0, paintScene.rest(id) == nil
                 else { return nil }
@@ -1429,7 +1445,7 @@ extension Runtime {
                 margin: 2 / scale + 3 * parentScope.blur, bypassClip: false, opacity: parentScope.opacity, sticky: Vec2(stickyShift.x - context.stickyShift.x, stickyShift.y - context.stickyShift.y))
 
             childClip.rectPt = intersectRects(childClip.rectPt, rect)
-            if !isLeaf {
+            if !isLeaf || paintsBox {
                 snap.grow(growthSnapOffsetY(for: node), stack: false)
                 if node.isSticky {
                     snap.shift(0, by: stickyShift.x - context.stickyShift.x)
@@ -1437,7 +1453,25 @@ extension Runtime {
                 }
                 let canSnap = !snap.off && el.isPixelSnapEnabled
                 let edges = PixelSnap.edgesPx(rect, scale: scale)
-                let parent = canSnap ? pixelSnapGlides.atRest(id: id, r: edges, rigid: snap.rigid * scale, parent: snap.parent).1 : nil
+                let (paintedEdges, parent) = canSnap
+                    ? pixelSnapGlides.atRest(id: id, r: edges, rigid: snap.rigid * scale, parent: snap.parent)
+                    : (edges, nil)
+                let drawClip = childClip.clipPx
+                if paintsBox, el.background.a > 0.001,
+                   paintedEdges.w >= max(0, drawClip.y) - 2, paintedEdges.y <= min(Float(heightPx), drawClip.w) + 2,
+                   paintedEdges.z >= max(0, drawClip.x) - 2, paintedEdges.x <= min(Float(widthPx), drawClip.z) + 2 {
+                    let deviceRect = SIMD4(paintedEdges.x, paintedEdges.y,
+                                           max(0, paintedEdges.z - paintedEdges.x), max(0, paintedEdges.w - paintedEdges.y))
+                    let corners = p.corners
+                    let radii = SIMD4(corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft) * scale
+                    let fade = childClip.roundedMask.map { mask in
+                        SIMD4<UInt32>(0, 0, 0, packClipRadii(clip: mask.rect, radii: mask.radii))
+                    } ?? .zero
+                    instances.append(RenderInstance(rect: deviceRect, radii: radii,
+                        fill: plainFill(el.background, opacity: 1, srgb: srgbBlend), border: .zero,
+                        params: SIMD4(0, KIND_RECT, 0, 1), uv: .zero, clip: drawClip, fade: fade))
+                    marks.append(currentInheritedMark)
+                }
                 let previousRigid = snap.rigid
                 snap.off = !canSnap
                 snap.steps = snap.steps || el.motionSnapsEnabled
@@ -2809,13 +2843,13 @@ extension Runtime {
                 } else {
                     sidesVec = .zero
                 }
-                var fill: SIMD4<Float> = fillDrawnSeparately ? .zero : premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend)
-                if srgbBlend && el.borderWidth == 0 && bwPx == 0 && sidesVec == .zero
-                    && el.surfacePayload == nil && fill.w < 1 {
-                    // Preserve the transfer curve's exact white endpoint before byte blending.
-                    if paintBg.r == 1 { fill.x = fill.w }
-                    if paintBg.g == 1 { fill.y = fill.w }
-                    if paintBg.b == 1 { fill.z = fill.w }
+                let fill: SIMD4<Float>
+                if fillDrawnSeparately {
+                    fill = .zero
+                } else if el.borderWidth == 0 && bwPx == 0 && sidesVec == .zero {
+                    fill = plainFill(paintBg, opacity: localOpacity, srgb: srgbBlend)
+                } else {
+                    fill = premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend)
                 }
                 var rectInst = RenderInstance(
                     rect: rectPx,

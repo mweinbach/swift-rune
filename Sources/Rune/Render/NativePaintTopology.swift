@@ -13,11 +13,11 @@ struct NativePaintTraits: OptionSet {
     static let pressColor = Self(rawValue: 1 << 5)
     static let offscreenGeometry = Self(rawValue: 1 << 6)
 
-    /// A plain wrapper has no ink of its own even inside the viewport.
-    static let layoutContainer = Self(rawValue: 1 << 7)
+    /// These boxes paint at most one borderless fill before their children.
+    static let plainBox = Self(rawValue: 1 << 7)
 
     func hasSameTopology(as other: Self) -> Bool {
-        subtracting([.offscreenGeometry, .layoutContainer]) == other.subtracting([.offscreenGeometry, .layoutContainer])
+        subtracting([.offscreenGeometry, .plainBox]) == other.subtracting([.offscreenGeometry, .plainBox])
     }
 
     init<State>(_ el: borrowing El<State>, inScrollViewport: Bool = false) {
@@ -30,11 +30,9 @@ struct NativePaintTraits: OptionSet {
         if el.pressColor != nil { traits.insert(.pressColor) }
         if inScrollViewport && el.allowsOffscreenGeometry {
             traits.insert(.offscreenGeometry)
-            if !el.children.isEmpty, el.plainText == nil, el.richSpans == nil,
-               el.background.a == 0, el.borderWidth == 0, el.borderSides == nil,
-               el.stickyConfig == nil, el.hoverBg == nil, el.pressBg == nil,
+            if el.plainText == nil, el.richSpans == nil, el.borderWidth == 0, el.borderSides == nil,
                el.focusHighlightColor == nil, el.focusFillColor == nil, el.focusRingColor == nil {
-                traits.insert(.layoutContainer)
+                traits.insert(.plainBox)
             }
         }
         self = traits
@@ -154,8 +152,10 @@ extension Runtime {
         }
         tree.order.reserveCapacity(frame.nodes.count)
         tree.identity.reserveCapacity(frame.nodes.count)
-        var parentIDs: [NodeId?] = []
-        parentIDs.reserveCapacity(frame.nodes.count)
+        // A public, synthetic frame can override the ordered samples through its keyed poses.
+        // The motion scene's own snapshot already contains those exact poses in order.
+        var keyedParents: [NodeId?] = []
+        if !fromMountedScene { keyedParents.reserveCapacity(frame.nodes.count) }
         var hasZOrder = false
         flatNodes.withUnsafeBufferPointer { mounted in
             for p in frame.nodes {
@@ -180,7 +180,7 @@ extension Runtime {
                 hasZOrder = hasZOrder || z != 0
                 tree.order.append(slot)
                 tree.identity.append(.init(id: p.id, parent: p.parent, zOrder: z, traits: traits))
-                parentIDs.append(byID[p.id]?.parent)
+                if !fromMountedScene { keyedParents.append(byID[p.id]?.parent) }
             }
         }
 
@@ -190,10 +190,12 @@ extension Runtime {
         let needsSort = tree.hasSticky || hasZOrder
         let slotCount = flatNodes.count + tree.exits.count
         var offsets = [Int](repeating: 0, count: slotCount + 1)
+        let coversMountedTree = fromMountedScene && tree.exits.isEmpty && tree.order.count == flatNodes.count
         var parents = [Int](repeating: -1, count: tree.order.count)
         for index in tree.order.indices {
             let slot = tree.order[index]
-            guard let parent = parentIDs[index], byID[parent] != nil else {
+            let parentId = fromMountedScene ? tree.identity[index].parent : keyedParents[index]
+            guard let parent = parentId, coversMountedTree || byID[parent] != nil else {
                 tree.roots.append(needsSort ? index : slot)
                 continue
             }
@@ -206,6 +208,8 @@ extension Runtime {
             if let owner {
                 parents[index] = owner
                 offsets[owner + 1] += 1
+            } else if coversMountedTree {
+                tree.roots.append(needsSort ? index : slot)
             }
         }
         for i in 0..<slotCount { offsets[i + 1] += offsets[i] }
