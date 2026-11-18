@@ -96,6 +96,40 @@ try {
     expect(get('row95/c3') === last, 'Fast scroll keeps cell identity');
     patch({rootPath:'new', nodes:[node('new','group',[0,0,100,50])], width:100,height:50});
     expect(!last.isConnected && get('new'), 'Flat full reset drops stale branches');
+    // A layout group remains addressable and positioned even when a reader can visit
+    // its child directly. An active-descendant relation gives the group semantic identity.
+    const wrap = node('layout', 'group', [8,4,80,22], {actions:['scroll-into-view']});
+    const reader = node('reader','combobox',[0,30,80,22], {actions:['focus']});
+    const action = node('layout/press','button',[9,5,60,18], {name:'Apply',actions:['focus','press']});
+    const text = node('words','text',[8,60,80,22], {name:'Example'});
+    const groupRoot = node('groups','group',[0,0,500,300], {name:'Form', children:[{...wrap,children:[action]},reader,text]});
+    host.sync({root:groupRoot,width:500,height:300});
+    const layout = get(wrap.path), button = get(action.path);
+    expect(mirror.getAttribute('role') === 'document' && get('groups').getAttribute('role') === 'group' &&
+        layout.getAttribute('role') === 'presentation' && layout.contains(button) && yInCanvas(action.path) === 5,
+        'An unnamed layout group retains its path and exact child geometry');
+    expect(button.localName === 'button' && button.type === 'button' && button.tabIndex === 0 &&
+        get(text.path).localName === 'p', 'App controls and paragraphs use native HTML semantics');
+    const beforeClick = events.length;
+    button.click();
+    expect(events.length === beforeClick + 1 && events.at(-1).key === action.path && events.at(-1).action === 'press',
+        'A browser activation goes to the authored button exactly once');
+    patch({nodes:[{...reader,activeDescendant:wrap.key}]});
+    expect(get(reader.path).getAttribute('aria-activedescendant') === layout.id && layout.getAttribute('role') === 'group',
+        'A referenced group becomes a semantic target without remounting');
+    patch({removed:[reader.path]});
+    expect(layout.getAttribute('role') === 'presentation' && get(action.path) === button,
+        'The last relation leaving restores the transparent group and keeps child identity');
+    patch({nodes:[{...wrap,description:'Keyboard commands'},{...action,states:['disabled']}]});
+    expect(layout.getAttribute('role') === 'group' && layout.getAttribute('aria-description') === 'Keyboard commands' &&
+        button.disabled && button.tabIndex === -1, 'Authored descriptions and disabled controls retain their semantics');
+    const beforeDisabled = events.length;
+    button.click();
+    expect(events.length === beforeDisabled, 'A disabled button never sends a press');
+    patch({nodes:[{...wrap,states:['selected']}]});
+    expect(layout.getAttribute('role') === 'group', 'A group with selection state remains exposed');
+    patch({nodes:[{...wrap,actions:['focus']}]});
+    expect(layout.getAttribute('role') === 'group' && layout.tabIndex === 0, 'An unnamed focus target stays reachable');
     observer.disconnect();
     result.textContent = 'PASS incremental focus, relations, reparenting, secure editor, teardown, ' +
         '96 moving rows / 384 stationary cells, 60 frames, mean DOM full ' + mean(fullTimes).toFixed(3) +

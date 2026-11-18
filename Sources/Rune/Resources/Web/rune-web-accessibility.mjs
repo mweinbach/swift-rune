@@ -7,6 +7,15 @@ const roles = {
     "scroll-view": "group",
     icon: 'img', splitter: 'separator', 'menu-item-check-box': 'menuitemcheckbox', 'menu-item-radio': 'menuitemradio'
 };
+// Keys and inherited scroll-into-view keep a layout box addressable. Without other
+// semantics its children can be read directly. Unknown packet fields retain the group.
+const layoutFields = new Set(['role', 'key', 'path', 'bounds', 'actions', 'states']);
+function isLayoutGroup(node) {
+    return node.role === 'group' && !node.states?.length &&
+        (!node.actions || node.actions.every(action => action === 'scroll-into-view')) &&
+        Object.keys(node).every(key => layoutFields.has(key));
+}
+
 const fieldRoles = new Set(['textbox', 'password-input', 'multiline-text-input']);
 const checkedRoles = new Set(['checkbox', 'switch', 'radio', 'menuitemcheckbox', 'menuitemradio']);
 const selectedRoles = new Set(['tab', 'option', 'row', 'treeitem', 'gridcell']);
@@ -27,8 +36,8 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
     const root = doc.createElement('div');
     root.setAttribute('data-rune-a11y', '');
     root.style.cssText = 'position:absolute;opacity:0;pointer-events:none;overflow:hidden;transform-origin:top left';
+    root.setAttribute('role', 'document');
     if (documentMode) {
-        root.setAttribute('role', 'document');
         root.style.opacity = '1';
         root.style.color = 'transparent';
     }
@@ -38,6 +47,7 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
     const slots = new Map();
     const recordsByKey = new Map();
     const relations = new Set();
+    let relatedTargets = new Set();
     let page = documentMode;
     let rootPath;
     let focusPath;
@@ -65,15 +75,13 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
         root.style.transform = 'scale(' + sx + ',' + sy + ')';
     }
 
-    function tag(node) {
-        return page ? documentTag(node) : node.role === 'text' ? 'span' : 'div';
-    }
-
     function create(node) {
         const field = isEditor(node);
         const range = node.role === 'slider' && !!node.range;
-        const box = doc.createElement(tag(node));
+        const box = doc.createElement(documentTag(node));
         box.style.cssText = 'box-sizing:border-box;position:absolute;pointer-events:none;margin:0;padding:0;border:0';
+        if (box.localName === 'button') box.type = 'button';
+        if (box.localName === 'li') box.style.listStyle = 'none';
         const text = node.role === 'text' ? doc.createTextNode('') : null;
         if (text) box.append(text);
         let control = box;
@@ -108,7 +116,11 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
         box.style.overflow = states.has('clips') ? 'hidden' : 'visible';
 
         const role = roles[node.role] ?? node.role;
-        if ((!field || role === 'combobox') && role !== 'text') attribute(control, 'role', role);
+        record.layoutGroup = !page && isLayoutGroup(node);
+        if ((!field || role === 'combobox') && role !== 'text') {
+            attribute(control, 'role', record.layoutGroup && !relatedTargets.has(record) ? 'presentation' : role);
+        }
+        if (control.localName === 'button') control.disabled = states.has('disabled');
         if (role === 'text') {
             if (!record.inlineFlow && (!page || node.documentText == null) && record.text.data !== (node.name ?? '')) record.text.data = node.name ?? '';
         } else {
@@ -143,7 +155,7 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
         attribute(control, 'aria-valuetext', node.range ? node.value : null);
         const actions = node.actions ?? [];
         const reachable = !states.has('disabled') && (node.focusable || actions.includes('focus') || actions.includes('press'));
-        attribute(control, 'tabindex', reachable ? 0 : field ? -1 : null);
+        attribute(control, 'tabindex', reachable ? 0 : field || control.localName === 'button' ? -1 : null);
         if (record.range) {
             const [value, min, max, step] = node.range;
             control.min = min;
@@ -218,6 +230,7 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
         attribute(record.control, 'aria-activedescendant', target?.control.id);
         const popup = record.node.role === 'combobox' && target?.box.closest('[role=listbox],[role=tree],[role=grid]');
         attribute(record.control, 'aria-controls', popup?.id || null);
+        return target;
     }
 
     function insertAt(parent, box, anchor) {
@@ -301,7 +314,7 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
         for (const node of nodes) {
             let record = slots.get(node.path);
             const previous = record?.node;
-            if (record && (previous.role !== node.role || record.box.localName !== tag(node) || record.field !== isEditor(node) ||
+            if (record && (previous.role !== node.role || record.box.localName !== documentTag(node) || record.field !== isEditor(node) ||
                 record.range !== (node.role === 'slider' && !!node.range))) {
                 const replaced = record;
                 forgetKey(replaced);
@@ -393,7 +406,20 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
                 if (record) finishDocumentNode(record, slots);
             }
         }
-        if (relationsChanged) for (const record of relations) resolveTarget(record);
+        if (relationsChanged && (relations.size || relatedTargets.size)) {
+            const targets = new Set();
+            for (const record of relations) {
+                const target = resolveTarget(record);
+                if (target) targets.add(target);
+            }
+            for (const target of relatedTargets) {
+                if (target.layoutGroup && !targets.has(target)) attribute(target.control, 'role', 'presentation');
+            }
+            for (const target of targets) {
+                if (target.layoutGroup && !relatedTargets.has(target)) attribute(target.control, 'role', 'group');
+            }
+            relatedTargets = targets;
+        }
         if (packet.width != null && packet.height != null) {
             viewport = [packet.width, packet.height];
             place();
@@ -445,5 +471,5 @@ export function mountRuneAccessibility(canvas, send, documentMode = false) {
         }
     }
     for (const type of ['focusin', 'click', 'keydown', 'input']) root.addEventListener(type, handle, { signal: listeners.signal });
-    return { sync, place, attachEditor, dispose() { listeners.abort(); slots.clear(); recordsByKey.clear(); relations.clear(); root.remove(); } };
+    return { sync, place, attachEditor, dispose() { listeners.abort(); slots.clear(); recordsByKey.clear(); relations.clear(); relatedTargets.clear(); root.remove(); } };
 }
