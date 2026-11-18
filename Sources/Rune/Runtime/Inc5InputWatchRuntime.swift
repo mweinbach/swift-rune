@@ -394,7 +394,15 @@ extension Runtime {
 
     internal func publishHoverOrder() {
         guard !hoverOrderMatchesPaint else { return }
-        builtHoverIds = flatNodes.map(\.nodeId)
+        func capture(into ids: inout [NodeId]) {
+            ids.removeAll(keepingCapacity: true)
+            ids.reserveCapacity(flatNodes.count)
+            // Read each ID in place. Mapping a key path copies the generic FlatNode.
+            flatNodes.withUnsafeBufferPointer { nodes in
+                for i in nodes.indices { ids.append(nodes[i].nodeId) }
+            }
+        }
+        capture(into: &builtHoverIds)
         hoverOrderMatchesPaint = true
     }
 
