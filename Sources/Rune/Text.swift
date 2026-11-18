@@ -4437,8 +4437,6 @@ public final class TextSystem: @unchecked Sendable {
         }
     }
 
-    #if canImport(CoreText) && canImport(CoreGraphics)
-
     /// Retains and re-breaks laid-out text across commits (`text_rebreak` / `TextLayoutBox`).
     public func layoutKeyed(
         text: String,
@@ -4454,6 +4452,35 @@ public final class TextSystem: @unchecked Sendable {
         pretty: Bool = false,
         rasterWindow: TextRasterWindow? = nil
     ) -> TextLayoutBox {
+        layoutKeyed(retaining: nil, text: text, spans: spans, pills: pills, style: style, maxWidth: maxWidth,
+                    pixelScale: pixelScale, emitGlyphs: emitGlyphs, glidePx: glidePx, keep: keep,
+                    countAsRebreak: countAsRebreak, pretty: pretty, rasterWindow: rasterWindow)
+    }
+
+    /// The caller checked this mounted label's layout and raster parameters before asking for its masks.
+    internal func glyphsForCommittedLabel(_ box: TextLayoutBox) -> ShapedText {
+        layoutKeyed(retaining: box.shapeKey, text: box.authText, spans: box.spans, pills: box.pills,
+                    style: box.style, maxWidth: box.maxWidth, pixelScale: box.pixelScale, emitGlyphs: true,
+                    pretty: box.shapeKey.pretty).shaped
+    }
+
+    #if canImport(CoreText) && canImport(CoreGraphics)
+    private func layoutKeyed(
+        retaining measuredKey: TextShapeKey?,
+        text: String,
+        spans: [TextSpan]? = nil,
+        pills: [PillChip] = [],
+        style: TextStyle,
+        maxWidth: Float?,
+        pixelScale: Float,
+        emitGlyphs: Bool,
+        glidePx: Vec2 = .zero,
+        keep: TextKeep = .cached,
+        countAsRebreak: Bool = true,
+        pretty: Bool = false,
+        rasterWindow: TextRasterWindow? = nil
+    ) -> TextLayoutBox {
+        var retainedKey = measuredKey
         if emitGlyphs, let rasterWindow, keep != .secret, !Self.needsElision(style, maxWidth: maxWidth) {
             let measure = layoutKeyed(text: text, spans: spans, pills: pills, style: style,
                                       maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false,
@@ -4463,21 +4490,20 @@ public final class TextSystem: @unchecked Sendable {
                 return paintInWindow(measure, prepared: prepared, window: rasterWindow, glide: glidePx)
             }
             if measure.hasGlyphs, measure.shaped.canReplayGlyphInks, glidePx == .zero { return measure }
+            retainedKey = measure.shapeKey
         }
         return measureRuntimePhase(.text) {
             let scale = max(pixelScale, 1.0)
-            let authText = spans.map { $0.map(\.text).joined() } ?? text
+            let authText = retainedKey?.authText ?? spans.map { $0.map(\.text).joined() } ?? text
             let effectiveMaxW = maxWidth
-            let fEpoch = currentFontEpoch
-            let langTag = language
-            let shapeKey = TextShapeKey(
+            let shapeKey = retainedKey ?? TextShapeKey(
                 authText: authText,
                 spans: spans,
                 pills: pills,
                 style: style,
                 pixelScale: scale,
-                fontEpoch: fEpoch,
-                languageTag: langTag,
+                fontEpoch: currentFontEpoch,
+                languageTag: language,
                 maxWidth: effectiveMaxW,
                 pretty: pretty,
                 defaultSmoothing: smoothing
@@ -4638,7 +4664,7 @@ public final class TextSystem: @unchecked Sendable {
                 pills: pills,
                 style: shapeKey.rasterStyle,
                 scale: scale,
-                languageTag: langTag
+                languageTag: shapeKey.languageTag
             )
             let shaped = breakLines(
                 prepared: prepared,
@@ -6564,7 +6590,8 @@ public final class TextSystem: @unchecked Sendable {
         return acc.finish()
     }
     #else
-    public func layoutKeyed(
+    private func layoutKeyed(
+        retaining measuredKey: TextShapeKey?,
         text: String,
         spans: [TextSpan]? = nil,
         pills: [PillChip] = [],
@@ -6580,9 +6607,9 @@ public final class TextSystem: @unchecked Sendable {
     ) -> TextLayoutBox {
         measureRuntimePhase(.text) {
             let scale = max(pixelScale, 1.0)
-            let authText = spans.map { $0.map(\.text).joined() } ?? text
+            let authText = measuredKey?.authText ?? spans.map { $0.map(\.text).joined() } ?? text
             let effectiveMaxW = maxWidth
-            let shapeKey = TextShapeKey(
+            let shapeKey = measuredKey ?? TextShapeKey(
                 authText: authText,
                 spans: spans,
                 pills: pills,

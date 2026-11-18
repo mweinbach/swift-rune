@@ -101,11 +101,11 @@ internal struct ElResolvedText {
         )
     }
 
-    /// A measured label may already carry every painted glyph after a preceding frame.
-    /// Reuse only its exact break and raster parameters, including the authored UTF-8 offsets.
+    /// Reuse a mounted label's break or painted masks only when its authored UTF-8 offsets,
+    /// dimensions and raster environment match the current paint.
     func retainedGlyphs(in box: TextLayoutBox, using textSystem: TextSystem,
                         maxWidth: Float?, pixelScale: Float, window: TextRasterWindow) -> ShapedText? {
-        guard box.hasGlyphs, box.rasterWindow == nil, !isSecure, advanceRun == nil, !truncateFade,
+        guard box.rasterWindow == nil, !isSecure, advanceRun == nil, !truncateFade,
               style.maxLines == 0, style.wrap != .ellipsis, box.paragraphs == nil,
               box.shaped.lineCount <= 1 || (window.lowerY <= 0 && window.upperY >= box.shaped.size.y),
               box.pixelScale == max(1, pixelScale), box.maxWidth == (style.wrap == .noWrap ? nil : maxWidth),
@@ -115,6 +115,7 @@ internal struct ElResolvedText {
               box.shapeKey.usesSmoothing(textSystem.smoothing),
               box.shapeKey.fontEpoch == textSystem.currentFontEpoch, box.shapeKey.languageTag == textSystem.language,
               box.shaped.canReplayGlyphInks else { return nil }
+        if !box.hasGlyphs { return textSystem.glyphsForCommittedLabel(box) }
         #if canImport(CoreText) && canImport(CoreGraphics)
         if !box.shaped.glyphs.isEmpty, box.shaped.glyphPlacements?.retainSource(in: textSystem.glyphAtlas) != true { return nil }
         #else

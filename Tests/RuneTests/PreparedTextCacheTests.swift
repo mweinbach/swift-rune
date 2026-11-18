@@ -29,8 +29,12 @@ struct PreparedTextCacheTests {
         let value = "café"
         let label: El<Void> = text(value).font(TextStyle(size: 16, wrap: .noWrap))
         let original = ElDisplayResolver.resolveText(el: label, rawText: value, isSecure: false)
-        let box = system.layoutKeyed(text: value, style: original.style, maxWidth: nil, pixelScale: 2, emitGlyphs: true)
+        let measured = system.layoutKeyed(text: value, style: original.style, maxWidth: nil, pixelScale: 2, emitGlyphs: false)
         let window = TextRasterWindow(lowerY: -1, upperY: 100)
+        let promoted = original.retainedGlyphs(in: measured, using: system, maxWidth: nil, pixelScale: 2, window: window)
+        let box = system.layoutKeyed(text: value, style: original.style, maxWidth: nil, pixelScale: 2, emitGlyphs: true)
+        #expect(promoted?.glyphs == box.shaped.glyphs)
+        #expect(!measured.hasGlyphs)
         #expect(original.retainedGlyphs(in: box, using: system, maxWidth: nil, pixelScale: 2, window: window) != nil)
         #expect(original.retainedGlyphs(in: box, using: system, maxWidth: nil, pixelScale: 1, window: window) == nil)
         let alternate = ElDisplayResolver.resolveText(el: label, rawText: "cafe\u{301}", isSecure: false)
