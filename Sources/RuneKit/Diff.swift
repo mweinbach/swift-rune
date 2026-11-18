@@ -1541,10 +1541,9 @@ public enum DiffLayout {
     public static let noteHeight: Float = 40
     fileprivate static let columnAdvance: Float = 7.8
     fileprivate static let barWidth: Float = 3
-    // KitIcons.plus at 12 points, centered in the 16-point comment button canvas.
-    static let commentButtonIcon = SVGIcon(
-        viewBox: 16, paths: ["M8 4.625V11.375", "M4.625 8H11.375"], strokeWidth: 1.35
-    )
+    static let commentIcon = SVGIcon(viewBox: 16, paths: ["M8 4V12M4 8H12"], strokeWidth: 1.5)
+    // The same 12-point glyph centered in its 16-point button canvas.
+    static let commentButtonIcon = SVGIcon(viewBox: 16, paths: ["M8 5V11M5 8H11"], strokeWidth: 1.125)
     fileprivate static let codeLeading: Float = 12
     fileprivate static let codeTrailing: Float = 24
 
@@ -3396,7 +3395,7 @@ public struct DiffView<State>: Sendable {
             button = icon(DiffLayout.commentButtonIcon, size: 16).color(kit.c.white)
         } else {
             button = El<State>(direction: .row).itemsCenter().justifyCenter()
-                .child(icon(KitIcons.plus, size: 12).color(kit.c.white))
+                .child(icon(DiffLayout.commentIcon, size: 12).color(kit.c.white))
         }
         return button
             .key(key)

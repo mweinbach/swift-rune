@@ -70,7 +70,10 @@ struct DiffTypographyTests {
     @Test("The full-size comment button canvas preserves the centered 12-point plus mask", arguments: [1, 2, 3, 4])
     func commentButtonInk(scale: Int) {
         let small = 12 * scale, large = 16 * scale, inset = 2 * scale
-        let original = GlyphAtlas.rasterizeIconBitmap(KitIcons.plus, pixelSize: small)
+        // PLUS in rune-kit/src/diff/view.rs, drawn at 12 points.
+        let upstream = SVGIcon(viewBox: 16, body: #"<path d="M8 4V12M4 8H12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#)
+        let original = GlyphAtlas.rasterizeIconBitmap(upstream, pixelSize: small)
+        #expect(GlyphAtlas.rasterizeIconBitmap(DiffLayout.commentIcon, pixelSize: small) == original)
         let button = GlyphAtlas.rasterizeIconBitmap(DiffLayout.commentButtonIcon, pixelSize: large)
         var expected = [UInt8](repeating: 0, count: large * large)
         for y in 0..<small {
@@ -91,7 +94,7 @@ struct DiffTypographyTests {
                     button = icon(DiffLayout.commentButtonIcon, size: 16).color(kit.c.white)
                 } else {
                     button = row().itemsCenter().justifyCenter()
-                        .child(icon(KitIcons.plus, size: 12).color(kit.c.white))
+                        .child(icon(DiffLayout.commentIcon, size: 12).color(kit.c.white))
                 }
                 return row().bg(.black).child(button.size(16, 16).rounded(4).bg(kit.c.info.icon)
                     .opacity(0.5).absolute(x: 4, y: 4))
