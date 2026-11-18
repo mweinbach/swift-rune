@@ -72,21 +72,21 @@ extension El {
     }
 }
 
+struct NativePaintIdentity {
+    var id: NodeId
+    var parent: NodeId?
+    var zOrder: Int
+    var traits: NativePaintTraits
+}
+
 extension Runtime {
     /// Indices into the current committed nodes. A transient tree can also refer
     /// to exiting snapshots, which retain their presented parent after removal.
     struct NativePaintTopology {
-        struct Identity {
-            var id: NodeId
-            var parent: NodeId?
-            var zOrder: Int
-            var traits: NativePaintTraits
-        }
-
         var currentCommit = true
         var parentSlots: [Int] = []
         var presentedIndexBySlot: [Int] = []
-        var identity: [Identity] = []
+        var identity: [NativePaintIdentity] = []
         var order: [Int] = []
         var roots: [Int] = []
         var childOffsets: [Int] = []
