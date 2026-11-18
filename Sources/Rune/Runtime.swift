@@ -1072,6 +1072,15 @@ public final class Runtime<State> {
     private var pendingUnclippedFlights: Bool = false
     internal var activeTextFlights: [ActiveTextFlight] = []
     internal var lastViewReadScroll: Bool = false
+    private var isCommittingTree = false
+
+    // A copied Cx keeps its live metric lookups. A read made between runtime turns must
+    // not make a previously scroll-independent view rebuild on the next wheel event.
+    private func noteScrollMetricRead() {
+        if !lastViewReadScroll && (isCommittingTree || RuntimeIdScope.current != nil || MemoScope.activeCache != nil) {
+            lastViewReadScroll = true
+        }
+    }
     private struct FocusReturnEntry {
         var ownerPath: String
         var scopePath: String
@@ -2587,6 +2596,9 @@ public final class Runtime<State> {
     internal func commitTree(at now: Double, cut: Bool, resizeSnap: Bool = false) {
         // Whatever a poll changed lands in this commit (`why & CommitWhy::POLL` is spent).
         polledChange = false
+        let wasCommitting = isCommittingTree
+        isCommittingTree = true
+        defer { isCommittingTree = wasCommitting }
         let prevResizeSnap = activeResizeSnap
         let prevExplicitSnap = activeExplicitSnap
         let prevExplicitSettleCut = activeExplicitSettleCut
@@ -2842,7 +2854,7 @@ public final class Runtime<State> {
             waker: waker,
             scrollLookup: { [weak self] key in
                 guard let self else { return .zero }
-                self.lastViewReadScroll = true
+                self.noteScrollMetricRead()
                 if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {
                     return self.scrollOffsets[match.path] ?? .zero
                 }
@@ -2850,7 +2862,7 @@ public final class Runtime<State> {
             },
             scrollMaxLookup: { [weak self] key in
                 guard let self else { return .zero }
-                self.lastViewReadScroll = true
+                self.noteScrollMetricRead()
                 if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {
                     return self.scrollMaxExtents[match.path] ?? .zero
                 }
@@ -2858,7 +2870,7 @@ public final class Runtime<State> {
             },
             viewportSizeLookup: { [weak self] key in
                 guard let self else { return .zero }
-                self.lastViewReadScroll = true
+                self.noteScrollMetricRead()
                 if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {
                     return self.scrollViewportSizes[match.path] ?? Vec2(match.targetRect.width, match.targetRect.height)
                 }
@@ -2866,7 +2878,7 @@ public final class Runtime<State> {
             },
             contentSizeLookup: { [weak self] key in
                 guard let self else { return .zero }
-                self.lastViewReadScroll = true
+                self.noteScrollMetricRead()
                 if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {
                     return self.scrollContentSizes[match.path] ?? match.contentSize
                 }

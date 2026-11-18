@@ -221,6 +221,55 @@ struct CommitWatchTests {
         #expect(got.allSatisfy { $0 & CommitWhy.dirty == 0 }, "\(got.map(CommitWhy.names))")
     }
 
+    @Test("sampling a saved context between draws keeps its metrics live without subscribing the view to scroll")
+    func sampledContextDoesNotRegisterViewRead() throws {
+        var saved: Cx<Bool>?
+        var readOffset = Vec2.zero
+        let rt = Runtime<Bool>(state: false, viewport: Vec2(200, 100)) { observe, cx in
+            if observe { readOffset = saved?.scrollOffset(of: "scroll") ?? .zero }
+            saved = cx
+            return col().key("scroll").size(200, 100).scrollY(stickBottom: false)
+                .child(el().size(200, 400).shrink(0))
+        }
+        _ = rt.renderFrame(at: 0)
+        let cx = try #require(saved)
+        #expect(cx.scrollOffset(of: "scroll").y == 0)
+        #expect(cx.viewportSize(of: "scroll").y == 100)
+        #expect(cx.contentSize(of: "scroll").y == 400)
+        #expect(cx.scrollMax(of: "scroll").y == 300)
+        #expect(!rt.lastViewReadScroll)
+        let commits = rt.commitCount
+        rt.wheel(WheelEvent(dx: 0, dy: -20), at: Vec2(50, 50), now: 0.1)
+        _ = rt.renderFrame(at: 0.12)
+        #expect(rt.commitCount == commits)
+        #expect(cx.scrollOffset(of: "scroll").y == 20)
+
+        // An older context can also be read by the current authored view.
+        rt.update(at: 0.2) { state, _ in state = true }
+        _ = rt.renderFrame(at: 0.21)
+        #expect(rt.lastViewReadScroll)
+        #expect(readOffset.y == 20)
+        rt.wheel(WheelEvent(dx: 0, dy: -20), at: Vec2(50, 50), now: 0.3)
+        _ = rt.renderFrame(at: 0.32)
+        #expect(readOffset.y == 40)
+    }
+
+    @Test("a lazily built virtual row may observe scroll through its captured context")
+    func deferredRowRegistersScrollRead() {
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(180, 100)) { _, cx in
+            let environment = cx
+            return col().key("scroll").size(180, 100).scrollY(stickBottom: false).child(
+                col().virtualRows(count: 100, estimatedRowHeight: 20, key: { _, i in "r\(i)" },
+                    build: { _, _ in
+                        let offset = environment.scrollOffset(of: "scroll").y
+                        return el().wFull().h(20).opacity(offset > 0 ? 0.75 : 1)
+                    })
+            )
+        }
+        _ = rt.frame(at: 0)
+        #expect(rt.lastViewReadScroll)
+    }
+
     private struct Fields {
         var a = TextEdit("")
         var b = TextEdit("")
