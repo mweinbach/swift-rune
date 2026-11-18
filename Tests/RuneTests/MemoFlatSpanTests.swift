@@ -96,8 +96,10 @@ struct MemoFlatSpanTests {
     }
 
     @Test("Surviving indexed row roots preserve clipped geometry, root motion and inherited RTL",
-          arguments: [false, true], [TxCommit.instant, .animate, .unprompted])
-    func retainedIndexedRoots(rtl: Bool, commit: TxCommit) {
+          arguments: [false, true], [(TxCommit.instant, false), (.animate, false), (.unprompted, false),
+                                      (.instant, true), (.animate, true), (.unprompted, true)])
+    func retainedIndexedRoots(rtl: Bool, mode: (TxCommit, Bool)) {
+        let (commit, growth) = mode
         func make() -> Runtime<Int> {
             Runtime(state: 0, viewport: Vec2(200, 120), pixelScale: 1) { version, _ in
                 let list: El<Int> = col().key("items").wFull().virtualRows(count: 1_000, estimatedRowHeight: 20,
@@ -110,7 +112,7 @@ struct MemoFlatSpanTests {
                         return i.isMultiple(of: 4) ? observed.press(.white) : observed
                     })
                 let panel = col().key("clip").size(150, 94).clip(true).child(
-                    col().key("scroll").size(150, 120).scrollY().child(list))
+                    col().key("scroll").size(150, 120).scrollY().child(growth ? list.growth(.default) : list))
                 return rtl ? panel.dir(.rtl) : panel
             }
         }
@@ -145,6 +147,43 @@ struct MemoFlatSpanTests {
                 #expect(retained.replayedVirtualFlatRoots == ordinary.count)
             }
         }
+    }
+
+    @Test("Moving growth rows keep their natural and clamped geometry during a wheel remount")
+    func activeGrowthRemount() {
+        func make() -> Runtime<Int> {
+            Runtime(state: 0, viewport: Vec2(200, 120), pixelScale: 1) { state, _ in
+                col().sizeFull().scrollY().child(col().key("rows").wFull().growth(.default).virtualRows(
+                    count: 1_000, estimatedRowHeight: 20, key: { _, i in "r-\(i)" }, build: { _, i in
+                        col().wFull().h(state > 0 && i.isMultiple(of: 3) ? 45 : 20).child(el().size(12, 12))
+                    }))
+            }
+        }
+        let retained = make(), fresh = make()
+        _ = retained.renderFrame(at: 0)
+        _ = fresh.renderFrame(at: 0)
+        var movingRemounts = 0
+        for step in 1...16 {
+            let t = Double(step) / 60
+            for runtime in [retained, fresh] {
+                if step == 9 {
+                    runtime.update(at: t) { state, _ in state += 1 }
+                } else {
+                    runtime.wheel(WheelEvent(dx: 0, dy: -80), at: Vec2(60, 70), now: t)
+                }
+                if runtime === fresh { runtime.invalidate(at: t) }
+                runtime.pendingCommitKind = .animate
+                _ = runtime.renderFrame(at: t)
+            }
+            #expect(retained.elements() == fresh.elements())
+            #expect(retained.lastCommittedSpecs == fresh.lastCommittedSpecs)
+            if step == 8 { #expect(retained.replayedVirtualFlatRoots > 0) }
+            if step > 9, retained.growthRows.values.contains(where: { $0.track.moving }) {
+                movingRemounts += 1
+                #expect(retained.replayedVirtualFlatRoots == 0)
+            }
+        }
+        #expect(movingRemounts > 0)
     }
 
     @Test("Changing a memo root to screen travel reparents its descendants in the motion scene")

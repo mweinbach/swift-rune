@@ -441,7 +441,7 @@ public final class Runtime<State> {
         guard item.memoPaths == nil, item.naturalLayout == nil, item.parentScale == 1, item.parentScroll == .zero,
               item.scaleChain.isEmpty, item.staticInh.scale == Vec2(1, 1),
               item.staticInh.anchor == item.staticInh.anchorTo, item.staticInh.offset == .zero,
-              !item.parentHasGrowth, item.foldHeaderPath == nil, item.growthPlacementShiftY == 0 else { return nil }
+              item.foldHeaderPath == nil, item.growthPlacementShiftY == 0 else { return nil }
         return FlatMemoContext(frame: frame, flow: item.parentFlow, directed: item.parentDirected,
             inert: item.inheritedInert, z: item.inheritedZ, instant: item.inInstantSubtree,
             row: item.rowLayout, underFold: item.parentUnderFold, styleSpring: item.inheritedStyleSpring)
@@ -3334,7 +3334,8 @@ public final class Runtime<State> {
         @inline(never)
         func replayVirtualRow(_ item: borrowing WalkItem, _ row: CachedVirtualRow) -> Bool {
             guard let nid = item.resolvedId, let paths = flatMemoPaths[nid], let root = paths.rowRoot,
-                  root.source === row, let span = paths.span, let parent = item.parentIdx,
+                  root.source === row, root.parentHasGrowth == item.parentHasGrowth,
+                  let span = paths.span, let parent = item.parentIdx,
                   root.motion.parent == newFlat[parent].nodeId, root.node.path == item.path,
                   (root.node.enclosingScrollIndex == nil) == (item.enclosingScrollIndex == nil),
                   let context = Self.retainedRowInputs(item, frame: flatFrame), root.inherited == context,
@@ -3344,6 +3345,9 @@ public final class Runtime<State> {
                   root.node.localRect.width == item.solved.layout.localRect.width,
                   root.node.localRect.height == item.solved.layout.localRect.height,
                   MemoFlatSpan<State>.equalLayouts(span.children, item.solved.children) else { return false }
+            // A growth stack can remain mounted after its rows settle. Only a moving
+            // track can change this root's child slide between otherwise identical passes.
+            if !growthRows.isEmpty, growthRows["growth:" + item.path]?.track.moving == true { return false }
             let previous = span.appliedRange(at: layoutCommitGen)
             guard (!checkFrameTracks && previous != nil) || span.nodes.allSatisfy({ stableForFlatReplay($0.nodeId) }) else { return false }
 
@@ -3980,7 +3984,7 @@ public final class Runtime<State> {
                         motion.enterDelay = 0
                     }
                     memoPaths.rowRoot = MemoFlatRowRoot(source: source, inherited: inherited, childContext: context,
-                        node: flat, motion: motion, instant: ancestorInstant)
+                        node: flat, motion: motion, instant: ancestorInstant, parentHasGrowth: item.parentHasGrowth)
                 }
                 if let span = memoPaths.span, span.context == context, span.specs.first?.parent == nid,
                    MemoFlatSpan<State>.equalLayouts(span.children, childLayouts),
@@ -4003,7 +4007,7 @@ public final class Runtime<State> {
             }
             // An indexed virtual source owns the exact root value. A public memo only
             // guarantees the child buffer and may return a differently styled root.
-            let virtualRows = canReplayFlat && growthRows.isEmpty && expandedContextOverride == nil &&
+            let virtualRows = canReplayFlat && expandedContextOverride == nil &&
                 el.virtualEstimate != nil && el.layout.scrollAxes.isEmpty ? virtualExpansion.builtVirtualRows[path] : nil
             let siblings = ContiguousArray(el.children)
             for cIdx in (0..<childCount).reversed() {

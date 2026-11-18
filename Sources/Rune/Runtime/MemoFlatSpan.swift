@@ -42,9 +42,10 @@ final class MemoFlatRowRoot<State> {
     let motion: NodeSpec
     let instant: Bool
     let clipsChildren: Bool
+    let parentHasGrowth: Bool
 
     init(source: Runtime<State>.CachedVirtualRow, inherited: FlatMemoContext, childContext: FlatMemoContext,
-         node: Runtime<State>.FlatNode, motion: NodeSpec, instant: Bool) {
+         node: Runtime<State>.FlatNode, motion: NodeSpec, instant: Bool, parentHasGrowth: Bool) {
         self.source = source
         self.inherited = inherited
         self.childContext = childContext
@@ -55,6 +56,7 @@ final class MemoFlatRowRoot<State> {
         self.node = snapshot
         self.motion = motion
         self.instant = instant
+        self.parentHasGrowth = parentHasGrowth
         let el = node.el
         clipsChildren = el.layout.clipOverflow || el.clipRadius != nil || el.clipCorners != nil
     }
