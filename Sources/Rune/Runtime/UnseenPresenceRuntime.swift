@@ -176,17 +176,57 @@ internal struct KitUnseenPresenceState {
     /// Per node of `prevNodes`: neither it nor anything under it drew in the last frame.
     func drewNothing<S>(nodes: [Runtime<S>.FlatNode]) -> [Bool] {
         guard hasBuilt, !nodes.isEmpty else { return [] }
-        var hidden = [Bool](repeating: true, count: nodes.count)
-        for i in nodes.indices.reversed() {
+        var hidden: [Bool] = []
+        drewNothing(nodes: nodes, in: nodes.indices, into: &hidden)
+        return hidden
+    }
+
+    /// A complete preorder subtree has the same draw flags as that part of the full tree.
+    private func drewNothing<S>(nodes: [Runtime<S>.FlatNode], in range: Range<Int>, into hidden: inout [Bool]) {
+        hidden.removeAll(keepingCapacity: true)
+        hidden.append(contentsOf: repeatElement(true, count: range.count))
+        let start = range.lowerBound
+        for i in range.reversed() {
             let sample = frameById[nodes[i].nodeId]
-            if !hidden[i] || sample?.visible == true {
+            if !hidden[i - start] || sample?.visible == true {
                 // A child can overflow a clipped or transparent parent's own bounds.
                 // Propagate its draw before applying this node's opacity cutoff.
-                if let parent = nodes[i].parentIndex, parent < i { hidden[parent] = false }
-                hidden[i] = (sample?.inheritedOpacity ?? 1) < (1.0 / 512.0)
+                if let parent = nodes[i].parentIndex, parent >= start && parent < i { hidden[parent - start] = false }
+                hidden[i - start] = (sample?.inheritedOpacity ?? 1) < (1.0 / 512.0)
             }
         }
-        return hidden
+    }
+
+    /// With instant motion only departing nodes need a draw test. Walk their prior
+    /// subtrees once, including any visible descendants that survived a reparent.
+    func hiddenOmissions<S>(nodes: [Runtime<S>.FlatNode], omitted: [Int]) -> [NodeId] {
+        guard !omitted.isEmpty else { return [] }
+        if omitted.count > nodes.count / 4 {
+            // A wholesale replacement costs less as a linear traversal and preserves
+            // the original unmount order without sorting the entire departing tree.
+            var departed = [Bool](repeating: false, count: nodes.count)
+            for i in omitted { departed[i] = true }
+            let hidden = drewNothing(nodes: nodes)
+            return nodes.indices.compactMap { departed[$0] && hidden[$0] ? nodes[$0].nodeId : nil }
+        }
+        let indices = omitted.sorted()
+        var hidden: [Bool] = []
+        var output: [NodeId] = []
+        var next = 0
+        while next < indices.count {
+            let start = indices[next]
+            var end = start + 1
+            while end < nodes.count, let parent = nodes[end].parentIndex, parent >= start && parent < end {
+                end += 1
+            }
+            drewNothing(nodes: nodes, in: start..<end, into: &hidden)
+            while next < indices.count && indices[next] < end {
+                let i = indices[next]
+                if hidden[i - start] { output.append(nodes[i].nodeId) }
+                next += 1
+            }
+        }
+        return output
     }
 
     /// Per node of `newNodes`: neither it nor anything under it drew last frame, and none of its
@@ -491,8 +531,8 @@ extension Runtime {
                 // replaced parents. Preserve the prior motion parent across matched flights.
                 if replacedParents == nil {
                     var parents: Set<NodeId> = []
-                    for (oldId, sample) in kitHooks.unseenPresence.frameById
-                    where sample.inView && nodeIndexById[oldId] == nil {
+                    for oldId in exitingSnapshots.keys
+                    where kitHooks.unseenPresence.frameById[oldId]?.inView == true {
                         if let oldParent = unseenPresence.node(oldId)?.parent { parents.insert(oldParent) }
                     }
                     replacedParents = parents
@@ -557,11 +597,10 @@ extension Runtime {
             $0.transition != nil || $0.layoutAnim != nil || $0.styleSpring != nil
         }) {
             guard !cut else { return [] }
-            let hidden = kitHooks.unseenPresence.drewNothing(nodes: prevNodes)
-            return prevNodes.indices.compactMap { i in
-                let id = prevNodes[i].nodeId
-                return hidden[i] && nodeIndexById[id] == nil && !activeFlightIds.contains(id) ? id : nil
+            let omitted = exitingSnapshots.keys.compactMap { id in
+                activeFlightIds.contains(id) ? nil : previousIndexById[id]
             }
+            return kitHooks.unseenPresence.hiddenOmissions(nodes: prevNodes, omitted: omitted)
         }
         let (unseenNew, unseenPrevIds) = kitHooks.unseenPresence.unseenBeforeAndAfter(
             prevNodes: prevNodes,
