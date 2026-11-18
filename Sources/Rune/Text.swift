@@ -4731,11 +4731,11 @@ public final class TextSystem: @unchecked Sendable {
     internal func presentedLayout(_ layout: TextLayoutBox, spans: [TextSpan]?) -> TextLayoutBox {
         let bucket = layout.shaped.requestedInkBucket
         if layout.spans == spans, layout.shaped.scopedInkBucket == bucket {
-            if bucket == nil || layout.shaped.glyphPlacementsAreResident(in: glyphAtlas) { return layout }
+            if layout.shaped.foregroundMasksAreResident(in: glyphAtlas) { return layout }
         }
         let geometry = layout.cachedGeometry
         if let recent = lock.withLock({ geometry.recentPaint?.view(of: geometry, spans: spans, bucket: bucket) }),
-           bucket == nil || recent.shaped.glyphPlacementsAreResident(in: glyphAtlas) { return recent }
+           recent.shaped.foregroundMasksAreResident(in: glyphAtlas) { return recent }
         let painted = geometry.applyingSpanInks(spans, atlas: glyphAtlas)
         if painted !== geometry { lock.withLock { geometry.recentPaint = .init(painted) } }
         return painted
@@ -7678,7 +7678,7 @@ public final class TextSystem: @unchecked Sendable {
         var lineRecords: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
         var bidiCells: [Int: [PortableCaretCell]] = [:]
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
-        let restingText = emitGlyphs ? DesktopRestingText(glide: glidePx, cache: !bypassCache, rasterWindow: rasterWindow) : nil
+        let restingText = emitGlyphs ? DesktopRestingText(glide: glidePx, cache: !bypassCache, rasterWindow: rasterWindow, atlas: glyphAtlas) : nil
         #endif
         var lineGlyphRanges: [Range<Int>] = []
 

@@ -1653,11 +1653,38 @@ final class DesktopTextLine {
     }
     #endif
 
+    @inline(__always)
     func glyphs(for cell: Cell, through endCell: Cell? = nil, originX: Float, baselineY: Float, color: Color?,
                 atlas: GlyphAtlas, cache: Bool, glidePx: Vec2 = .zero,
                 restingXPx: Float? = nil, utf8Offset: Int? = nil, isolateCell: Bool = false,
                 rasterWindow: TextRasterWindow? = nil) -> [PositionedGlyph] {
         let owned = isolateCell ? cell.run.ownedInk(cell.nativeBytes) : nil
+        return glyphs(for: cell, through: endCell, owned: owned, originX: originX, baselineY: baselineY,
+                      color: color, atlas: atlas, cache: cache, glidePx: glidePx, restingXPx: restingXPx,
+                      utf8Offset: utf8Offset, isolateCell: isolateCell, rasterWindow: rasterWindow)
+    }
+
+    #if os(Linux)
+    /// Paint Pango's glyphs in visual order. A ligature continuation owns an empty native
+    /// slice; the cell at its first logical byte owns the complete mask, including overhang.
+    func ownedGlyphs(originX: Float, baselineY: Float, atlas: GlyphAtlas, cache: Bool, glide: Vec2,
+                     restingXPx: Float?, rasterWindow: TextRasterWindow?) -> [PositionedGlyph]? {
+        var result: [PositionedGlyph] = []
+        for cell in cells.values {
+            guard let owned = cell.run.ownedInk(cell.nativeBytes) else { return nil }
+            guard owned.metrics.ink_width > 0, owned.metrics.ink_height > 0 else { continue }
+            result += glyphs(for: cell, through: nil, owned: owned, originX: originX, baselineY: baselineY,
+                             color: nil, atlas: atlas, cache: cache, glidePx: glide, restingXPx: restingXPx,
+                             utf8Offset: cell.byte, isolateCell: true, rasterWindow: rasterWindow)
+        }
+        return result
+    }
+    #endif
+
+    private func glyphs(for cell: Cell, through endCell: Cell?, owned: DesktopTextRun?, originX: Float,
+                        baselineY: Float, color: Color?, atlas: GlyphAtlas, cache: Bool, glidePx: Vec2,
+                        restingXPx: Float?, utf8Offset: Int?, isolateCell: Bool,
+                        rasterWindow: TextRasterWindow?) -> [PositionedGlyph] {
         let run = owned ?? cell.run
         let cluster = utf8Offset ?? (isolateCell ? cell.byte : clusterByte(for: cell))
         var quads: [PositionedGlyph] = []
@@ -1917,7 +1944,7 @@ final class DesktopRasterLayout {
         let last = max(first, partitionPoint(minTopsPx) { $0 < upper })
         var glyphs: [PositionedGlyph] = []
         var ranges = Array(repeating: 0..<0, count: fragments.count)
-        let resting = DesktopRestingText(glide: glide, cache: true, rasterWindow: window)
+        let resting = DesktopRestingText(glide: glide, cache: true, rasterWindow: window, atlas: atlas)
         for i in first..<last {
             let start = glyphs.count
             let baseline = measured.lineBaselinesPx[i]
@@ -1971,16 +1998,31 @@ final class DesktopRestingText {
 
     private let rasterWindow: TextRasterWindow?
 
-    init(glide: Vec2, cache: Bool, rasterWindow: TextRasterWindow? = nil, inkAtByte: ((Int) -> Color?)? = nil) {
+    #if os(Linux)
+    private weak var atlas: GlyphAtlas?
+    private var ownedLines: Set<Int> = []
+    private var ownedGeometry: [Int: (glyphs: [PositionedGlyph], pages: Set<UInt16>, resets: UInt64)] = [:]
+    private(set) var ownedPages: (pages: Set<UInt16>, resets: UInt64)?
+
+    #endif
+
+    init(glide: Vec2, cache: Bool, rasterWindow: TextRasterWindow? = nil, atlas: GlyphAtlas? = nil,
+         inkAtByte: ((Int) -> Color?)? = nil) {
         self.rasterWindow = rasterWindow
         self.glide = glide
         self.cache = cache
         self.inkAtByte = inkAtByte
+        #if os(Linux)
+        self.atlas = atlas
+        #endif
     }
 
     /// Reuse the native runs and pen bounds. Placed quads can carry an ink-dependent mask.
     func applyingSpanInks(inkAtByte: @escaping (Int) -> Color?) -> DesktopRestingText {
         let result = DesktopRestingText(glide: glide, cache: cache, rasterWindow: rasterWindow, inkAtByte: inkAtByte)
+        #if os(Linux)
+        result.atlas = atlas
+        #endif
         result.lines = lines
         result.minRunX = minRunX
         result.maxRunX = maxRunX
@@ -1989,8 +2031,54 @@ final class DesktopRestingText {
     }
 
     var retainedGlyphBytes: Int {
-        lock.withLock { (last?.glyphs.count ?? 0) * MemoryLayout<PositionedGlyph>.stride }
+        lock.withLock {
+            var count = last?.glyphs.count ?? 0
+            #if os(Linux)
+            for entry in ownedGeometry.values { count += entry.glyphs.count }
+            #endif
+            return count * MemoryLayout<PositionedGlyph>.stride
+        }
     }
+
+    #if os(Linux)
+    /// Keep color-independent Pango masks with the neutral layout. Caret cuts cannot delimit
+    /// ink: an italic outline or Arabic join can cover pixels inside the next editing cell.
+    func applyingOwnedForeground(to shaped: inout ShapedText, inks: TextSpanInkMap, byteOffset: Int) -> DesktopRestingText {
+        let inkAtByte: (Int) -> Color? = { inks.color(at: byteOffset + $0) }
+        let bound = applyingSpanInks(inkAtByte: inkAtByte)
+        guard let atlas, !shaped.glyphs.isEmpty else { return bound }
+        var replacements: [Int: [PositionedGlyph]] = [:]
+        for (index, line) in lines where line.sourceByteOffset == nil {
+            let record = shaped.portableLines[index]
+            let start = byteOffset + record.utf8Start
+            guard inks.varies(in: start..<(start + record.text.utf8.count)) else { continue }
+            let owned = lock.withLock { () -> [PositionedGlyph]? in
+                if let entry = ownedGeometry[index], atlas.retainPages(entry.pages, since: entry.resets) { return entry.glyphs }
+                guard let glyphs = line.native.ownedGlyphs(originX: line.originX, baselineY: line.baselineY, atlas: atlas,
+                    cache: cache, glide: glide, restingXPx: nil, rasterWindow: rasterWindow) else { return nil }
+                if cache {
+                    let pages = Set(glyphs.filter { $0.uv != .zero }.map(\.atlasPage))
+                    ownedGeometry[index] = (glyphs, pages, atlas.resets)
+                }
+                return glyphs
+            }
+            if let owned { replacements[index] = owned }
+        }
+        guard !replacements.isEmpty else { return bound }
+        var glyphs: [PositionedGlyph] = [], ranges: [Range<Int>] = []
+        glyphs.reserveCapacity(shaped.glyphs.count)
+        for (index, previous) in shaped.lineGlyphRanges.enumerated() {
+            let first = glyphs.count
+            if let owned = replacements[index] { glyphs += owned } else { glyphs += shaped.glyphs[previous] }
+            ranges.append(first..<glyphs.count)
+        }
+        shaped.glyphs = glyphs
+        shaped.lineGlyphRanges = ranges
+        bound.ownedLines = Set(replacements.keys)
+        bound.ownedPages = (Set(glyphs.filter { $0.uv != .zero }.map(\.atlasPage)), atlas.resets)
+        return bound
+    }
+    #endif
 
     func add(_ line: Line, at index: Int) {
         lines[index] = line
@@ -2012,8 +2100,12 @@ final class DesktopRestingText {
                       atlas: GlyphAtlas) -> TextOutlineGroup? {
         guard cache, let line = lines[index],
               let cell = line.native.cells[glyph.utf8Offset + Int(glyph.desktopCellOffset) + (line.sourceByteOffset ?? 0)] else { return nil }
+        var isolated = line.sourceByteOffset != nil
+        #if os(Linux)
+        isolated = isolated || ownedLines.contains(index)
+        #endif
         return line.native.outlineGroup(for: glyph, cell: cell, originX: line.originX, baselineY: line.baselineY,
-            glide: glide, isolated: line.sourceByteOffset != nil, atlas: atlas)
+            glide: glide, isolated: isolated, atlas: atlas)
     }
     #endif
 
@@ -2040,6 +2132,18 @@ final class DesktopRestingText {
             for (index, original) in shaped.lineGlyphRanges.enumerated() {
                 let start = glyphs.count
                 if let line = lines[index] {
+                    #if os(Linux)
+                    if ownedLines.contains(index), let owned = line.native.ownedGlyphs(originX: line.originX,
+                        baselineY: line.baselineY, atlas: atlas, cache: cache, glide: glide, restingXPx: x,
+                        rasterWindow: rasterWindow) {
+                        for var glyph in owned {
+                            glyph.color = inkAtByte?(glyph.utf8Offset)
+                            glyphs.append(glyph)
+                        }
+                        ranges.append(start..<glyphs.count)
+                        continue
+                    }
+                    #endif
                     let record = shaped.portableLines[index]
                     var byte = record.utf8Start
                     for character in record.text {
@@ -2070,4 +2174,21 @@ final class DesktopRestingText {
         }
     }
 }
+
+#if os(Linux)
+extension ShapedText {
+    func applyingOwnedForeground(_ inks: TextSpanInkMap, byteOffset: Int) -> ShapedText {
+        var result = self
+        if let resting = desktopRestingText {
+            result.desktopRestingText = resting.applyingOwnedForeground(to: &result, inks: inks, byteOffset: byteOffset)
+        }
+        var cursor = 0
+        for i in result.glyphs.indices {
+            let color = inks.color(at: byteOffset + result.glyphs[i].utf8Offset, cursor: &cursor)
+            if color != result.glyphs[i].color { result.glyphs[i].color = color }
+        }
+        return result
+    }
+}
+#endif
 #endif

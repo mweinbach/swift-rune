@@ -109,6 +109,13 @@ internal struct ElResolvedText {
         #if canImport(CoreText) && canImport(CoreGraphics)
         let geometry = box.cachedGeometry
         if geometry.hasGlyphs, !geometry.shaped.glyphPlacementsAreResident(in: textSystem.glyphAtlas) { return nil }
+        #elseif os(Linux)
+        if spans != nil {
+            let geometry = box.cachedGeometry
+            if geometry.hasGlyphs, !textSystem.glyphAtlas.retainPages(geometry.desktopPages, since: geometry.desktopAtlasResets) {
+                return nil
+            }
+        }
         #endif
         let painted = textSystem.presentedLayout(box, spans: spans)
         if !painted.hasGlyphs { return textSystem.glyphsForCommittedLabel(painted) }
