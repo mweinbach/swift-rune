@@ -88,6 +88,7 @@ final class WebAccessibilityProjection {
         var semantic: AccessibilityNode
         var bounds: SIMD4<Float>
         var children: [String]
+        var geometryRange: Range<Int> = 0..<0
         var visited: UInt64
 
         init(_ semantic: AccessibilityNode, bounds: SIMD4<Float>, children: [String], visited: UInt64) {
@@ -105,11 +106,16 @@ final class WebAccessibilityProjection {
         var origin: SIMD2<Float>
         var bounds: SIMD4<Float>
         var scrolls: Bool
+        var entry: Entry?
     }
 
     private var entries: [String: Entry] = [:]
     private var generation: UInt64 = 0
     private var geometry: [Geometry] = []
+    private var previousGeometry: [Geometry] = []
+    private var deferred: [String: (old: Range<Int>, root: Int, offsets: [Int])] = [:]
+    private var lastWebRead: AccessibilityProjectionCache.ReadStamp?
+    private var uniqueMirrorPaths = true
     private var flatCount = 0
     private var canUpdateGeometry = false
     private var rootPath: String?
@@ -188,9 +194,35 @@ final class WebAccessibilityProjection {
             lastFocus == focused && lastLink == link && doc == nil && canUpdateGeometry &&
             flatCount == runtime.flatNodes.count && geometryDelta(runtime, patch: &patch)
         if !geometryOnly {
-            var root = runtime.accessibilitySnapshot()
-            doc?.project(&root)
+            deferred.removeAll(keepingCapacity: true)
+            let reuse = patches && !reset && doc == nil && lastFocus == focused && lastLink == link &&
+                uniqueMirrorPaths && !geometry.isEmpty && !runtime.virtualLists.isEmpty && runtime.linkBoxesByPath.isEmpty &&
+                lastWebRead != nil &&
+                lastWebRead == runtime.accessibilityProjectionCache?.completedRead
+            var root = runtime.accessibilitySnapshot(securePaths: [], deferredBranch: reuse ? { path, base, previousRoot, offsets in
+                guard let bounds = self.entries[path]?.geometryRange, bounds.count == offsets.count,
+                      bounds.upperBound <= self.geometry.count else { return false }
+                // A presentational ancestor can promote or omit part of a subtree. Only
+                // reuse its mirror when the last publication contains exactly these raw slots.
+                let old = self.geometry[bounds]
+                if !zip(old, offsets).allSatisfy({ record, offset in record.runtimeIndex == previousRoot + offset }) {
+                    // More than one accessibility update can observe the same mounted layout.
+                    // Its old physical indices may differ from the preceding layout's span.
+                    for (record, offset) in zip(old, offsets) {
+                        let currentPath = runtime.flatNodes[base + offset].path
+                        guard record.path.utf8.elementsEqual(currentPath.utf8) else { return false }
+                    }
+                }
+                self.deferred[path] = (bounds, base, offsets)
+                return true
+            } : nil)
             let path = root.runtimePath ?? root.id
+            if path != rootPath && !deferred.isEmpty {
+                deferred.removeAll(keepingCapacity: true)
+                root = runtime.accessibilitySnapshot()
+            }
+            doc?.project(&root)
+            lastWebRead = runtime.accessibilityProjectionCache?.completedRead
             if !patches {
                 if reset || root != legacyPrevious || !packet.isEmpty {
                     packet["root"] = AccessibilityDump.dictionary(from: root, isRoot: true, forBrowser: true)
@@ -261,9 +293,9 @@ final class WebAccessibilityProjection {
             let moved = local != record.bounds
             if moved {
                 geometry[index].bounds = local
-                entries[path]?.bounds = local
+                record.entry?.bounds = local
             }
-            if record.scrolls, let entry = entries[path] {
+            if record.scrolls, let entry = record.entry {
                 let offset = runtime.scrollOffsets[path] ?? .zero
                 let maximum = runtime.scrollMaxExtents[path]?.y
                 if entry.semantic.scrollX != offset.x || entry.semantic.scrollY != offset.y ||
@@ -287,19 +319,67 @@ final class WebAccessibilityProjection {
         var nodes: [WebAccessibilityPatchNode] = []
         var bounds: [String: [WebAccessibilityNumber]] = [:]
         var children: [String: [String]] = [:]
+        var visitedCount = 0
         generation &+= 1
         let generation = self.generation
+        swap(&geometry, &previousGeometry)
         geometry.removeAll(keepingCapacity: true)
         flatCount = runtime.flatNodes.count
         canUpdateGeometry = true
+        let presented = runtime.presentedRectByPath
+        let slots = presented.indexedValues(at: runtime.layoutCommitGen)
+        @inline(__always) func currentRect(_ flat: Int, path: String) -> MotionRect {
+            if let slots { return slots[flat] ?? runtime.flatNodes[flat].targetRect }
+            return presented[path] ?? runtime.flatNodes[flat].targetRect
+        }
+
+        func copyBranch(_ branch: (old: Range<Int>, root: Int, offsets: [Int]), parent: Int?, origin: SIMD2<Float>) {
+            let source = branch.old.lowerBound
+            let shift = geometry.count - source
+            for i in branch.old {
+                var record = previousGeometry[i]
+                let flat = branch.root + branch.offsets[i - source]
+                record.runtimeIndex = flat
+                record.parent = i == source ? parent : record.parent.map { $0 + shift }
+                let frame = currentRect(flat, path: record.path)
+                let rect = roundedBounds(frame)
+                let inherited = i == source ? origin : record.parent.map { geometry[$0].origin } ?? .zero
+                let local = rect - SIMD4(inherited.x, inherited.y, 0, 0)
+                record.origin = SIMD2(rect.x, rect.y)
+                record.bounds = local
+                geometry.append(record)
+                // Only complete real-node geometry is eligible for branch reuse.
+                let entry = record.entry!
+                entry.visited = generation
+                if entry.bounds != local { bounds[record.path] = webAccessibilityBounds(local) }
+                entry.bounds = local
+                entry.geometryRange = (entry.geometryRange.lowerBound + shift)..<(entry.geometryRange.upperBound + shift)
+            }
+        }
 
         func visit(_ node: AccessibilityNode, path: String, parent: Int?, parentOrigin: SIMD2<Float>) {
             // The full snapshot rounds absolute positions to tenths before positioning a child.
             // Use the same rounding order so nested motion cannot drift by a tenth on each level.
-            let rect = roundedBounds(node.frame)
+            // An authored key can coincide with a generated link or terminal path.
+            // A synthesized or already visited occurrence follows normal delta ordering.
+            if let branch = deferred[path], node.runtimePath != nil, !node.children.isEmpty,
+               previousGeometry[branch.old].allSatisfy({ $0.entry?.visited != generation }) {
+                copyBranch(branch, parent: parent, origin: parentOrigin)
+                visitedCount += branch.old.count
+                return
+            }
+            visitedCount += 1
+            let flat = node.runtimePath.flatMap { runtime.nodeByPath[$0] }
+            // If a newly named parent promotes a reused group's children into its
+            // own semantic order, the children still carry this frame's actual bounds.
+            var frame = node.frame
+            if !deferred.isEmpty, let flat {
+                frame = currentRect(flat, path: path)
+            }
+            let rect = roundedBounds(frame)
             let local = rect - SIMD4(parentOrigin.x, parentOrigin.y, 0, 0)
             let geometryIndex = geometry.count
-            if let realPath = node.runtimePath, let flat = runtime.nodeByPath[realPath] {
+            if let realPath = node.runtimePath, let flat {
                 geometry.append(Geometry(path: realPath, runtimeIndex: flat, parent: parent, origin: SIMD2(rect.x, rect.y),
                                          bounds: local, scrolls: node.scrollY != nil))
             } else {
@@ -327,7 +407,9 @@ final class WebAccessibilityProjection {
                 changedChildren?.append(id)
                 visit(child, path: id, parent: geometryIndex, parentOrigin: SIMD2(rect.x, rect.y))
             }
+            let entry: Entry
             if let prior {
+                entry = prior
                 prior.visited = generation
                 if prior.semantic != shallow {
                     prior.semantic = shallow
@@ -342,16 +424,22 @@ final class WebAccessibilityProjection {
                 }
             } else {
                 let order = changedChildren ?? []
-                entries[path] = Entry(shallow, bounds: local, children: order, visited: generation)
+                entry = Entry(shallow, bounds: local, children: order, visited: generation)
+                entries[path] = entry
                 if !replace {
                     nodes.append(WebAccessibilityPatchNode(semantic: shallow, path: path, bounds: local))
                     if !order.isEmpty { children[path] = order }
                 }
             }
+            entry.geometryRange = geometryIndex..<geometry.count
+            if flat != nil { geometry[geometryIndex].entry = entry }
         }
         visit(root, path: root.runtimePath ?? root.id, parent: nil, parentOrigin: .zero)
+        previousGeometry.removeAll(keepingCapacity: true)
+        deferred.removeAll(keepingCapacity: true)
         let removed = entries.compactMap { path, entry in entry.visited == generation ? nil : path }
         for path in removed { entries.removeValue(forKey: path) }
+        uniqueMirrorPaths = visitedCount == entries.count
         if !replace {
             if !removed.isEmpty { patch.removed = removed }
             if !children.isEmpty { patch.children = children }

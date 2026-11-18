@@ -9,6 +9,15 @@ struct WebAccessibilityDeltaTests {
         return try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
+
+    private func comparablePatch(_ bytes: Data?) throws -> Data? {
+        guard let bytes else { return nil }
+        var packet = try object(bytes)
+        // Removal order has no semantic meaning and depends on the dictionary's seed.
+        if let removed = packet["removed"] as? [String] { packet["removed"] = removed.sorted() }
+        return try JSONSerialization.data(withJSONObject: packet, options: .sortedKeys)
+    }
+
     @Test func pathCollectionsPreserveUTF8AndOtherFields() throws {
         let path = "/quoted\"/slash\\/\u{0}\t\n/水/🪐/e\u{301}"
         let fields: [String: Any] = ["nodes": [["unknown": path]], "local": true]
@@ -179,5 +188,99 @@ struct WebAccessibilityDeltaTests {
         let reset = try object(mirror.update(runtime))
         #expect(reset["root"] != nil && reset["width"] as? Int == 240)
         #expect(mirror.update(runtime) == nil)
+    }
+
+    @Test func retainedVirtualSubtreesKeepCurrentBoundsAndSemantics() throws {
+        final class Owner {}
+        let owners = (0..<36).map { _ in Owner() }
+        let offset = Live<Vec2>(.zero)
+        let runtime = Runtime(state: 0, viewport: Vec2(220, 100), pixelScale: 2) { _, _ in
+            let rows: El<Int> = col().key("list").wFull().virtualRows(
+                count: owners.count, estimatedRowHeight: 20,
+                key: { step, row in "row-\(step < 9 ? row : owners.count - row - 1)" },
+                buildContent: { step, position in
+                    let id = step < 9 ? position : owners.count - position - 1
+                    let node: El<Int> = memo("row-content-\(id)", deps: 0) {
+                        col().key("row-\(id)").h(20).wFull().child(
+                            row().key("group-\(id)").h(20).wFull()
+                                .child(text("Word \(id)").key("word-\(id)").liveOffset(offset.binding))
+                                .child(el().key("action-\(id)").focusable().role(.button).label("Select").size(20, 18)))
+                    }
+                    return VirtualRowContent(memoized: node, owner: owners[id])
+                })
+            return col().key("scroll").sizeFull().scrollY().child(rows)
+        }
+        let mirror = WebAccessibilityProjection()
+        let oracle = WebAccessibilityProjection()
+        mirror.enablePatches()
+        oracle.enablePatches()
+        var replayed = 0
+        for step in 0..<16 {
+            let time = Double(step) / 60
+            offset.set(Vec2(Float(step) * 0.7, Float(step % 5) * 0.6))
+            runtime.update(at: time) { value, tx in
+                value = step
+                if step == 4 { tx.focus("action-4") }
+                tx.scrollToInstant("scroll", x: 0, y: Float((step * 12) % 120))
+            }
+            _ = runtime.renderFrame(at: time)
+            replayed += runtime.replayedVirtualFlatRoots
+            let actual = try comparablePatch(mirror.update(runtime))
+            let retained = runtime.accessibilityProjectionCache
+            runtime.accessibilityProjectionCache = nil
+            let fresh = try comparablePatch(oracle.update(runtime))
+            let full = runtime.accessibilitySnapshot()
+            runtime.accessibilityProjectionCache = retained
+            #expect(actual == fresh)
+            // Alternate public snapshots and uninterrupted runs of browser deltas.
+            if step.isMultiple(of: 4) { #expect(runtime.accessibilitySnapshot() == full) }
+            #expect(mirror.update(runtime) == nil)
+        }
+        #expect(replayed > 0)
+    }
+
+    @Test func aGeneratedLinkPathCanCoincideWithAnAuthoredKey() throws {
+        let runtime = Runtime(state: 0, viewport: Vec2(200, 100), pixelScale: 1) { phase, _ in
+            let links = (3...7).contains(phase % 10)
+            let list: El<Int> = col().wFull().virtualRows(count: 40, estimatedRowHeight: 24,
+                key: { _, index in "row-\(index)" }, buildContent: { _, index in
+                    let words: El<Int> = text("Docs").key("article").size(44, 20)
+                    let article = links ? words.link(TextLink(0..<4, id: "docs")) : words
+                    let group: El<Int> = memo("parts-\(index)", deps: 0) {
+                        row().key("parts").child(text("Row \(index)")).child(el().role(.button).size(12, 12))
+                    }
+                    let collision = row().key("article#link-0").child(group)
+                    return VirtualRowContent(col().h(24).wFull().child(article).child(collision))
+                })
+            return col().key("viewport").sizeFull().scrollY().child(list)
+        }
+        let mirror = WebAccessibilityProjection()
+        let oracle = WebAccessibilityProjection()
+        mirror.enablePatches()
+        oracle.enablePatches()
+        var observedCollision = false
+        for step in 0..<24 {
+            let time = Double(step) / 60
+            runtime.update(at: time) { phase, tx in
+                phase = step
+                tx.scrollToInstant("viewport", x: 0, y: Float((step * 11) % 54))
+            }
+            _ = runtime.renderFrame(at: time)
+            let actual = try comparablePatch(mirror.update(runtime))
+            let retained = runtime.accessibilityProjectionCache
+            runtime.accessibilityProjectionCache = nil
+            let expected = try comparablePatch(oracle.update(runtime))
+            var paths = Set<String>()
+            func collect(_ node: AccessibilityNode) {
+                if let path = node.runtimePath, !paths.insert(path).inserted, path.hasSuffix("/@article#link-0") {
+                    observedCollision = true
+                }
+                node.children.forEach(collect)
+            }
+            collect(runtime.accessibilitySnapshot())
+            runtime.accessibilityProjectionCache = retained
+            #expect(actual == expected)
+        }
+        #expect(observedCollision)
     }
 }

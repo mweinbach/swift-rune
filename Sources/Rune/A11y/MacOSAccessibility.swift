@@ -64,6 +64,20 @@ final class AccessibilityProjectionCache {
     private var current = AccessibilityProjectionRead()
     fileprivate private(set) var generation: UInt64 = 0
 
+    struct ReadStamp: Equatable {
+        fileprivate let storage: AccessibilityProjectionRead
+        fileprivate let snapshot: UInt64
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.storage === rhs.storage && lhs.snapshot == rhs.snapshot
+        }
+    }
+
+    /// A mirror may reuse semantic work only if it observed the immediately preceding read.
+    var completedRead: ReadStamp? {
+        current.inUse ? nil : ReadStamp(storage: current, snapshot: current.snapshot)
+    }
+
     fileprivate func beginRead() -> AccessibilityProjectionRead {
         let read = current.inUse ? AccessibilityProjectionRead() : current
         read.inUse = true
@@ -89,6 +103,7 @@ private final class AccessibilityProjectionRead {
         var snapshot: UInt64
         let controlName: String?
         let insideScroll: Bool
+        var branch: Branch?
 
         init(node: AccessibilityNode, controlName: String?, insideScroll: Bool, snapshot: UInt64) {
             self.node = node
@@ -96,6 +111,13 @@ private final class AccessibilityProjectionRead {
             self.controlName = controlName
             self.insideScroll = insideScroll
         }
+    }
+
+    /// Physical indices relative to the retained root, in the projected tree's preorder.
+    /// A control may have folded a decorative raw child into its accessible name.
+    fileprivate struct Branch {
+        let rawCount: Int
+        let semanticOffsets: [Int]
     }
 
     fileprivate struct VirtualIndex {
@@ -140,6 +162,7 @@ private final class AccessibilityProjectionRead {
     }
 
     fileprivate var slots: [Slot] = []
+    fileprivate var retainedRanges: [(current: Range<Int>, previous: Range<Int>)] = []
     fileprivate var snapshot: UInt64 = 0
     private var edges: AccessibilityTreeEdges?
     private var previousWebFocus: Bool?
@@ -155,7 +178,9 @@ private final class AccessibilityProjectionRead {
     fileprivate func prepare(count: Int, webFocus: Bool, mount: (Int) -> Mount) -> AccessibilityTreeEdges {
         if pending != nil || slots.count != count || previousWebFocus != webFocus {
             var next = [Slot](repeating: Slot(), count: count)
+            retainedRanges = []
             if let pending, previousWebFocus == webFocus, !slots.isEmpty {
+                retainedRanges = pending
                 for span in pending {
                     next.replaceSubrange(span.current, with: slots[span.previous])
                 }
@@ -341,6 +366,13 @@ public extension AccessibilityTreeBuilder {
 public extension Runtime {
     /// Returns the current accessibility tree snapshot built from live runtime nodes.
     func accessibilitySnapshot(securePaths: Set<String> = []) -> AccessibilityNode {
+        accessibilitySnapshot(securePaths: securePaths, deferredBranch: nil)
+    }
+
+    /// An incremental web mirror can sample the exact current geometry of a certified
+    /// subtree directly. Native snapshots always materialize their complete node frames.
+    internal func accessibilitySnapshot(securePaths: Set<String>,
+                                       deferredBranch: ((String, Int, Int, [Int]) -> Bool)?) -> AccessibilityNode {
         let flatNodes = self.flatNodes
         if flatNodes.isEmpty {
             return AccessibilityTreeBuilder.project(
@@ -377,6 +409,11 @@ public extension Runtime {
             }
         }
         let mounts = storage.mounts
+        @inline(__always) func currentRect(_ index: Int) -> MotionRect {
+            let mount = mounts[index]
+            if let presentedSlots { return presentedSlots[index] ?? mount.rect }
+            return presentedRectByPath[mount.path] ?? mount.rect
+        }
         // A caller can request a different secure or modal projection without applying a layout.
         let reuseSemantic = securePaths.isEmpty && activeModalPath == nil
         let previousSnapshot = storage.snapshot
@@ -458,18 +495,104 @@ public extension Runtime {
         }
 
         let selectableRoles: Set<ElementRole> = [.listItem, .option, .tab, .treeItem, .gridCell, .row]
+        let canReuseBranches = reuseSemantic && !hasEditors && !virtualAt.isEmpty &&
+            nodeByPath.count == flatNodes.count
+        var retainedIndex = 0
+        func staticBranch(_ root: Int, through limit: Int, cached: AccessibilityProjectionRead.Template)
+            -> AccessibilityProjectionRead.Branch? {
+            var next = root
+            func validate(_ i: Int, hidden: Bool) -> Bool {
+                guard next == i, i < limit else { return false }
+                next += 1
+                var hiddenChildren = hidden
+                if !hidden {
+                    let slot = storage.slots[i]
+                    guard slot.inert == mounts[i].inert, let projection = slot.projection else { return false }
+                    switch projection {
+                    case .hidden:
+                        hiddenChildren = true
+                    case .descendants(let scrolls):
+                        if scrolls { return false }
+                    case .node:
+                        // Editors, links, grids, virtual positions and related labels
+                        // deliberately have no reusable template.
+                        guard let view = slot.template, view.snapshot == previousSnapshot else { return false }
+                    }
+                }
+                for child in edges.children[i] {
+                    if !validate(child, hidden: hiddenChildren) { return false }
+                }
+                return true
+            }
+            guard validate(root, hidden: false), next > root + 1 else { return nil }
+            var offsets: [Int] = []
+            func collect(_ node: AccessibilityNode) -> Bool {
+                guard let path = node.runtimePath, let raw = nodeByPath[path], (root..<next).contains(raw) else { return false }
+                offsets.append(raw - root)
+                for child in node.children where !collect(child) { return false }
+                return true
+            }
+            guard collect(cached.node), offsets.count > 1, offsets[0] == 0 else { return nil }
+            return .init(rawCount: next - root, semanticOffsets: offsets)
+        }
+
+        func refreshStaticBranch(_ cached: AccessibilityProjectionRead.Template, at root: Int) -> AccessibilityNode? {
+            guard canReuseBranches, cached.snapshot == previousSnapshot, !cached.node.children.isEmpty else { return nil }
+            let ranges = storage.retainedRanges
+            while retainedIndex < ranges.count, ranges[retainedIndex].current.upperBound <= root { retainedIndex += 1 }
+            guard retainedIndex < ranges.count, ranges[retainedIndex].current.contains(root) else { return nil }
+            let limit = ranges[retainedIndex].current.upperBound
+            guard root + 1 < limit else { return nil }
+            guard let branch = cached.branch ?? staticBranch(root, through: limit, cached: cached),
+                  root + branch.rawCount <= limit else {
+                return nil
+            }
+            let covered = root..<(root + branch.rawCount)
+            for i in covered {
+                let slot = storage.slots[i]
+                if virtualAt[i] != nil || isExiting(mounts[i].id) || (slot.projection != nil && slot.inert != mounts[i].inert) {
+                    return nil
+                }
+            }
+            // The span certifies immutable authoring and topology. Read each current
+            // presented frame independently, including sticky, clipped and animated descendants.
+            let span = ranges[retainedIndex]
+            let previousRoot = span.previous.lowerBound + (root - span.current.lowerBound)
+            if deferredBranch?(mounts[root].path, root, previousRoot, branch.semanticOffsets) == true {
+                cached.snapshot = currentSnapshot
+                cached.branch = branch
+                changes += 1
+                return cached.node
+            }
+            var cursor = 0
+            func update(_ node: inout AccessibilityNode) {
+                let index = root + branch.semanticOffsets[cursor]
+                let mount = mounts[index]
+                cursor += 1
+                let frame = currentRect(index)
+                let focused = mount.path == focusedPath
+                if node.frame != frame || node.isFocused != focused {
+                    node.frame = frame
+                    node.isFocused = focused
+                    changes += 1
+                }
+                for i in node.children.indices { update(&node.children[i]) }
+            }
+            update(&cached.node)
+            cached.snapshot = currentSnapshot
+            cached.branch = branch
+            return cached.node
+        }
         func build(_ idx: Int, insideScroll: Bool, semanticRole: ElementRole) -> AccessibilityNode {
             let mounted = mounts[idx]
-            let rect: MotionRect
-            if let presentedSlots {
-                rect = presentedSlots[idx] ?? mounted.rect
-            } else {
-                rect = presentedRectByPath[mounted.path] ?? mounted.rect
-            }
+            let rect = currentRect(idx)
             let virtualOwner = virtualAt[idx]
             let parentList = mounted.parent.flatMap { virtualAt[$0] }
             if reuseSemantic, virtualOwner == nil, parentList == nil,
                let cached = storage.slots[idx].template, cached.insideScroll == insideScroll {
+                if let branch = refreshStaticBranch(cached, at: idx) { return branch }
+                // A normal projection may filter or promote children in this subtree.
+                cached.branch = nil
                 let wasPublished = cached.snapshot == previousSnapshot
                 let childRevision = changes
                 if !edges.children[idx].isEmpty {
