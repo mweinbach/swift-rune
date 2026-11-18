@@ -4131,7 +4131,13 @@ extension Runtime {
         if publishHitGeometry {
             self.seenMatchedByFlightId = newSeenMatched
             self.hitGeometryByPath = newHitGeometries
-            self.paintOrderPaths = newElements.map(\.path)
+            // Copy only the painted path out of each report before restoring tree order.
+            self.paintOrderPaths = newElements.withUnsafeBufferPointer { reports in
+                var paths: [String] = []
+                paths.reserveCapacity(reports.count)
+                for i in reports.indices { paths.append(reports[i].path) }
+                return paths
+            }
             if let firstRaised = raisedRanges.first {
                 // Paint lifted subtrees last, then return them to their tree positions for inspection.
                 var order: [Int] = []
