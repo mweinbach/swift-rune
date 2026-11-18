@@ -15,6 +15,7 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 370));
 const options = new URLSearchParams(location.search);
 const wheels = Number(options.get('steps') ?? 600), warmup = 10;
 const delta = Number(options.get('delta') ?? 400);
+const expectedScale = Number(options.get('scale') ?? 2);
 const firstExpandedLine = 4;
 const pointer = { x: 600, y: 450 };
 
@@ -123,9 +124,12 @@ try {
     } }, { backend: 'webgpu', resizeTo: canvas });
     await app.ready;
     while (!fontsPresented) await nextFrame();
-    if (app.renderer?.api !== 'WebGPU' || canvas.width !== 2400 || canvas.height !== 1800 ||
-        innerWidth !== 1200 || innerHeight !== 900 || devicePixelRatio !== 2 ||
-        !matchMedia('(prefers-color-scheme: dark)').matches) throw Error('Expected the 1200×900 dark WebGPU surface at 2×');
+    const rasterScale = Math.max(0.5, devicePixelRatio);
+    if (app.renderer?.api !== 'WebGPU' || canvas.width !== Math.round(1200 * rasterScale) ||
+        canvas.height !== Math.round(900 * rasterScale) || innerWidth !== 1200 || innerHeight !== 900 ||
+        Math.fround(devicePixelRatio) !== Math.fround(expectedScale) || !matchMedia('(prefers-color-scheme: dark)').matches) {
+        throw Error(`Expected a 1200×900 dark WebGPU surface at ${expectedScale}×, got ${canvas.width}×${canvas.height} backing pixels at ${devicePixelRatio}×`);
+    }
 
     const trustedMove = new Promise(resolve => canvas.addEventListener('pointermove', event => {
         if (event.isTrusted && event.clientX === pointer.x && event.clientY === pointer.y) resolve();
@@ -164,7 +168,7 @@ try {
     const seconds = intervals.reduce((total, ms) => total + ms, 0) / 1000;
     intervals.sort((a, b) => a - b);
     result.textContent = 'PASS ' + JSON.stringify({ view: 'diff', renderer: app.renderer, userAgent: navigator.userAgent,
-        viewport: [innerWidth, innerHeight], scale: devicePixelRatio, delta, wheels, accepted, submitted, warmup,
+        viewport: [innerWidth, innerHeight], backingPixels: [canvas.width, canvas.height], scale: devicePixelRatio, delta, wheels, accepted, submitted, warmup,
         scoredCallbacks: cpu.length, scoredIntervals: intervals.length, gpuSubmissionsPerSecond: intervals.length / seconds,
         gpuSubmitIntervalP50Ms: intervals[Math.floor((intervals.length - 1) * .5)],
         gpuSubmitIntervalP95Ms: intervals[Math.floor((intervals.length - 1) * .95)],

@@ -21,6 +21,8 @@ node Tests/Browser/run.mjs --fixture diff-scroll-wasi --webgpu \
 
 For Metal on macOS, add `--angle metal` to the Node command. Use `--wheel-delta 17` for a scroll slightly shorter than one row, or `--wheel-delta 1 --steps 1200` for a sustained one-pixel scroll. The default fling moves 20 rows per wheel. Each distance uses the same input, WebGPU and visible-row checks.
 
+The Chrome diff defaults to 2× device scale. Add `--device-scale 1` for a 1200 × 900 backing surface or `--device-scale 1.25` for 1500 × 1125. The logical viewport and wheel distances stay the same. The output records the actual device scale and backing dimensions.
+
 Use `--steps 60` for a short run with checkpoints at 0, 1, 24 and 60 wheels. Pass the same `--steps 60` to `presentations.py` when scoring its Metal CSV. Both commands default to 600 wheels. Window runs accept `--frame-samples file.json` to export the initial frame, each wheel’s host update and encode timings, and the intervals between frame reports. Compare a 60-wheel Rust window capture with `compare.py --native-window diff --native-steps 60`.
 
 - `reference` measures elapsed CPU-side frame construction time using a monotonic wall clock. Logical time advances by 1/120 second per frame. Captures export row keys and clipped geometry at frames 0, 1, 24, 60, 300, and 600 and full top-down RGBA8 pixels and viewable PNGs at frames 0 and 60, outside the timed interval.

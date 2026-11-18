@@ -19,6 +19,8 @@ const { values: args } = parseArgs({ options: {
     'tree-wasm': { type: 'string' }, 'diff-wasm': { type: 'string' }, 'compare-accessibility': { type: 'boolean' },
     'wheel-delta': { type: 'string' }, steps: { type: 'string' }
 } });
+const deviceScale = Number(args['device-scale'] ?? 2);
+if (!Number.isFinite(deviceScale) || deviceScale <= 0) throw Error('--device-scale must be a positive number');
 const fixtures = dirname(fileURLToPath(import.meta.url));
 const resources = resolve(fixtures, '../../Sources/Rune/Resources');
 const shaderTypes = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
@@ -132,6 +134,7 @@ async function fixture(debug, page, options) {
     if (page === 'image-pages.html' && (args.webgpu || args.fixture)) query.set('webgpu', '1');
     const diff = page === 'diff-scroll-wasi.html';
     if (diff) {
+        if (args['device-scale'] !== undefined) query.set('scale', String(deviceScale));
         if (args['wheel-delta'] !== undefined) query.set('delta', args['wheel-delta']);
         if (args.steps !== undefined) query.set('steps', args.steps);
     }
@@ -142,7 +145,7 @@ async function fixture(debug, page, options) {
         await once(ws, 'open');
         const command = debugClient(ws);
         if (diff) {
-            await command('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 2, mobile: false });
+            await command('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: deviceScale, mobile: false });
             await command('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
             await command('Page.navigate', { url: targetURL });
         }
