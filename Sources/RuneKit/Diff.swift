@@ -1541,6 +1541,9 @@ public enum DiffLayout {
     public static let noteHeight: Float = 40
     fileprivate static let columnAdvance: Float = 7.8
     fileprivate static let barWidth: Float = 3
+    fileprivate static let expandUpIcon = SVGIcon(viewBox: 16, paths: ["M4.5 9.5L8 6L11.5 9.5"], strokeWidth: 1.25)
+    fileprivate static let expandDownIcon = SVGIcon(viewBox: 16, paths: ["M4.5 6.5L8 10L11.5 6.5"], strokeWidth: 1.25)
+    fileprivate static let expandAllIcon = SVGIcon(viewBox: 16, paths: ["M5 5.5L8 2.5L11 5.5M5 10.5L8 13.5L11 10.5"], strokeWidth: 1.25)
     static let commentIcon = SVGIcon(viewBox: 16, paths: ["M8 4V12M4 8H12"], strokeWidth: 1.5)
     // The same 12-point glyph centered in its 16-point button canvas.
     static let commentButtonIcon = SVGIcon(viewBox: 16, paths: ["M8 5V11M5 8H11"], strokeWidth: 1.125)
@@ -3067,8 +3070,10 @@ public struct DiffView<State>: Sendable {
         switch rows[rowIdx] {
         case .gap(let gap):
             let totalGutterW = 3 + (st.mode == .unified ? 2 * gutterWidth : gutterWidth)
+            let file = st.files[fileIndex]
             return buildGapRow(fileIndex: fileIndex, prefix: prefix, gap: gap, height: DiffLayout.gapHeight, gutterWidth: totalGutterW,
-                               expandable: st.files[fileIndex].expandable, fill: look.foldRow == .lineInfo ? palette.separator : palette.gap)
+                               expandable: file.expandable, nextHeader: file.hunks.indices.contains(gap.index) ? file.hunks[gap.index].header : nil,
+                               fixedWidth: annotationFixedWidth, fill: look.foldRow == .lineInfo ? palette.separator : palette.gap)
         case .annotation(let ann):
             var note = buildAnnotation(hostState: hostState, prefix: prefix, ann: ann)
             if annotationStickyLeft { note = note.stickyLeft(0) }
@@ -3285,7 +3290,8 @@ public struct DiffView<State>: Sendable {
 
     // MARK: Gap & Annotation Rows
 
-    private func buildGapRow(fileIndex: Int, prefix: String, gap: DiffGap, height: Float, gutterWidth: Float, expandable: Bool, fill: Color) -> El<State> {
+    private func buildGapRow(fileIndex: Int, prefix: String, gap: DiffGap, height: Float, gutterWidth: Float, expandable: Bool,
+                             nextHeader: String?, fixedWidth: Float?, fill: Color) -> El<State> {
         let k = kit
         if look.foldRow == .lineInfo {
             let hidden = expandable ? gap.count : 0
@@ -3353,48 +3359,54 @@ public struct DiffView<State>: Sendable {
             return bar.child(btnCol).child(wordsBtn)
         }
 
-        var bar = El<State>(direction: .row)
-            .key("\(prefix)-gap-\(gap.index)")
-            .h(height)
-            .px(12)
-            .gap(8)
-            .itemsCenter()
-            .bg(fill)
-            .borderSides(top: 1, bottom: 1, color: k.c.borderMuted)
+        let id = "\(prefix)-gap-\(gap.index)"
+        let hidden = expandable ? gap.count : 0
+        let count = hidden == 1 ? "1 unchanged line" : "\(hidden) unchanged lines"
+        var small = k.ty.mono.lh(16)
+        small.size = 12
 
-        if gap.canStep && !gap.atStart {
-            bar = bar.child(gapActionButton(id: "\(prefix)-gap-\(gap.index)-down", label: "Expand 20 down") { [get, set] s in
-                var d = get(s)
-                d.expand(file: fileIndex, gapIndex: gap.index, direction: .down)
-                set(&s, d)
-            })
+        let expand: @Sendable (DiffExpand, inout State) -> Void = { [get, set] direction, state in
+            var diff = get(state)
+            diff.expand(file: fileIndex, gapIndex: gap.index, direction: direction)
+            set(&state, diff)
         }
-        bar = bar.child(gapActionButton(id: "\(prefix)-gap-\(gap.index)-all", label: "Expand all (\(gap.count) lines)") { [get, set] s in
-            var d = get(s)
-            d.expand(file: fileIndex, gapIndex: gap.index, direction: .all)
-            set(&s, d)
-        })
-        if gap.canStep && !gap.atEnd {
-            bar = bar.child(gapActionButton(id: "\(prefix)-gap-\(gap.index)-up", label: "Expand 20 up") { [get, set] s in
-                var d = get(s)
-                d.expand(file: fileIndex, gapIndex: gap.index, direction: .up)
-                set(&s, d)
-            })
+        func button(_ suffix: String, _ label: String, _ glyph: SVGIcon, _ direction: DiffExpand) -> El<State> {
+            El<State>(direction: .row).key("\(id)-\(suffix)").size(24, 24)
+                .itemsCenter().justifyCenter().rounded(6).hover(k.c.surfaceHover).cursor(.pointer)
+                .role(.button).focusable().label(label)
+                .child(icon(glyph, size: 16).color(k.c.textMuted))
+                .onClick { state in expand(direction, &state) }
         }
-        return bar
-    }
+        var buttons = El<State>(direction: .row).key("\(id)-buttons")
+            .w(gutterWidth).h(height).gap(2).itemsCenter().justifyCenter()
+        if expandable {
+            if hidden <= DiffLayout.expandStep {
+                buttons = buttons.child(button("all", "Show \(hidden) hidden lines", DiffLayout.expandAllIcon, .all))
+            } else {
+                if !gap.atStart {
+                    buttons = buttons.child(button("down", "Show \(DiffLayout.expandStep) more lines below", DiffLayout.expandDownIcon, .down))
+                }
+                if !gap.atEnd {
+                    buttons = buttons.child(button("up", "Show \(DiffLayout.expandStep) more lines above", DiffLayout.expandUpIcon, .up))
+                }
+            }
+        }
 
-    private func gapActionButton(id: String, label: String, action: @escaping @Sendable (inout State) -> Void) -> El<State> {
-        El<State>(direction: .row)
-            .key(id)
-            .role(.button)
-            .focusable()
-            .px(8)
-            .py(2)
-            .rounded(kit.radius.sm)
-            .hover(kit.c.surfaceHover)
-            .onClick(action)
-            .child(text(label).font(kit.ty.caption()).color(kit.c.textAccent))
+        var inner = El<State>(direction: .row).key("\(id)-inner").h(height).itemsCenter().gap(12).child(buttons)
+        if let fixedWidth { inner = inner.maxW(fixedWidth).stickyLeft(0) }
+        if hidden > 0 {
+            var words = El<State>(direction: .row).px(6)
+            if hidden > DiffLayout.expandStep {
+                words = words.key("\(id)-all").h(24).itemsCenter().rounded(6).hover(k.c.surfaceHover).cursor(.pointer)
+                    .role(.button).focusable().label("Show all \(hidden) lines").onClick { state in expand(.all, &state) }
+            }
+            inner = inner.child(words.child(text(count).key("\(id)-count").font(small).color(k.c.textMuted)))
+        }
+        if let nextHeader {
+            inner = inner.child(text(nextHeader).key("\(id)-header").font(small).color(k.c.textFaint).singleLine())
+        }
+        let label = nextHeader.map { "\(hidden) unchanged lines, then \($0)" } ?? "\(hidden) unchanged lines"
+        return El<State>(direction: .row).key(id).wFull().h(height).itemsCenter().bg(fill).role(.group).label(label).child(inner)
     }
 
     private func buildAnnotation(hostState: State?, prefix: String, ann: DiffAnnotation) -> El<State> {

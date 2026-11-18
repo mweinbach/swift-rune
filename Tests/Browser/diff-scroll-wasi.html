@@ -33,8 +33,11 @@ function visibleRows(step) {
     if (step === 0) {
         const gap = list.querySelector('[data-rune-target$="/@dv-gap-0"]');
         const rect = gap?.getBoundingClientRect();
+        const hunk = '@@ -4,49994 +4,49994 @@ let value_3 = compute(3);';
         if (rect?.x !== 0 || rect.width !== 1200 || rect.y !== 44 || rect.height !== 32 ||
-            !gap.querySelector('[role=button][aria-label="Expand all (3 lines)"]')) throw Error('Missing initial folded context');
+            gap.getAttribute('aria-label') !== '3 unchanged lines, then ' + hunk ||
+            !gap.querySelector('[role=button][aria-label="Show 3 hidden lines"]') ||
+            !gap.textContent.includes(hunk)) throw Error('Missing initial folded context');
     }
     const rows = [];
     for (const node of document.querySelectorAll('[role=listitem][data-rune-target]')) {

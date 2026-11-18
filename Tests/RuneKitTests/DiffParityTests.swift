@@ -522,6 +522,38 @@ struct DiffParityTests {
         #expect(collapsed.label == "Expand file" && collapsed.isExpanded == false && collapsed.actions.contains(.expand))
     }
 
+    @Test("Summary gaps show the next hunk and expose only applicable expansion actions")
+    @MainActor
+    func summaryGapControls() throws {
+        let lines = (1...90).map { "line \($0)" }
+        var edits = lines
+        edits[3] = "four"
+        edits[60] = "sixty-one"
+        let file = FileDiff.fromTexts(path: "gaps.txt", old: lines.joined(separator: "\n"),
+                                      new: edits.joined(separator: "\n"), context: 0)
+        let rt = Runtime(state: DiffState(diff: file), viewport: Vec2(800, 600)) { state, cx in
+            DiffView<DiffState>(key: "d", kit: .neutral(dark: true), get: { $0 }, set: { $0 = $1 })
+                .build(state: state, cx: cx)
+        }
+        rt.frame(at: 0)
+        #expect(rt.element(byKey: "d-gap-0")?.label == "3 unchanged lines, then \(file.hunks[0].header)")
+        #expect(rt.element(byKey: "d-gap-0-header")?.text == file.hunks[0].header)
+        #expect(rt.element(byKey: "d-gap-0-count")?.text == "3 unchanged lines")
+        #expect(rt.element(byKey: "d-gap-0-all")?.label == "Show 3 hidden lines")
+        #expect(rt.element(byKey: "d-gap-0-up") == nil)
+        #expect(rt.element(byKey: "d-gap-1-up")?.label == "Show 20 more lines above")
+        #expect(rt.element(byKey: "d-gap-1-down")?.label == "Show 20 more lines below")
+        #expect(rt.element(byKey: "d-gap-1-all")?.label == "Show all 56 lines")
+        #expect(rt.element(byKey: "d-gap-2-up") == nil)
+        #expect(rt.element(byKey: "d-gap-2-header") == nil)
+        #expect(clickElement(rt, key: "d-gap-1-down", at: 0.1))
+        rt.frame(at: 0.12)
+        #expect(rt.state.hidden(gap: 1) == 36)
+        #expect(clickElement(rt, key: "d-gap-0-all", at: 0.2))
+        rt.frame(at: 0.22)
+        #expect(rt.state.hidden(gap: 0) == 0)
+    }
+
     @Test("DiffView toggles fold/mode/wrap, expands gaps, and copies text through Runtime")
     @MainActor
     func diffViewInteractiveControls() throws {
