@@ -62,6 +62,8 @@ internal struct FlatChildPaths {
 internal final class FlatMemoPaths<State> {
     let owner: MemoLayoutChildren<State>
     var span: MemoFlatSpan<State>?
+    var rowRoot: MemoFlatRowRoot<State>?
+    var replayedRowRoot = false
     var allowsSpan = true
     var replayedNodes = 0
     private var slots: [FlatChildPaths?] = [nil]

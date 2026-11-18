@@ -32,6 +32,60 @@ struct FlatMemoCapture<State> {
     let context: FlatMemoContext
 }
 
+/// The authored root of an indexed virtual row can remain identical while its position,
+/// clip and mount index change. Other memo roots may have new modifiers every frame.
+final class MemoFlatRowRoot<State> {
+    weak var source: Runtime<State>.CachedVirtualRow?
+    let inherited: FlatMemoContext
+    let childContext: FlatMemoContext
+    let node: Runtime<State>.FlatNode
+    let motion: NodeSpec
+    let instant: Bool
+    let clipsChildren: Bool
+
+    init(source: Runtime<State>.CachedVirtualRow, inherited: FlatMemoContext, childContext: FlatMemoContext,
+         node: Runtime<State>.FlatNode, motion: NodeSpec, instant: Bool) {
+        self.source = source
+        self.inherited = inherited
+        self.childContext = childContext
+        // A root element normally borrows its virtual list's entire sibling buffer.
+        // Keep just the resolved element after the window advances.
+        var snapshot = node
+        snapshot.element.detachFromSiblings()
+        self.node = snapshot
+        self.motion = motion
+        self.instant = instant
+        let el = node.el
+        clipsChildren = el.layout.clipOverflow || el.clipRadius != nil || el.clipCorners != nil
+    }
+
+    func append(to flat: inout [Runtime<State>.FlatNode], specs: inout [NodeSpec], instants: inout [Bool],
+                parent: Int, localRect: MotionRect, origin: Vec2, unscrolled: Vec2, clip: MotionRect,
+                fades: [EdgeFadeSpec], enclosing: Int?, vertical: Int?, horizontal: Int?) -> MotionRect {
+        var current = node
+        current.index = flat.count
+        current.parentIndex = parent
+        current.localRect = localRect
+        current.targetRect = .fromXYWH(origin.x + localRect.x, origin.y + localRect.y, localRect.width, localRect.height)
+        current.zoomedTargetRect = current.targetRect
+        current.unscrolledRect = .fromXYWH(unscrolled.x + localRect.x, unscrolled.y + localRect.y, localRect.width, localRect.height)
+        current.committedLayoutTarget = localRect.translated(flat[parent].committedLayoutTarget.origin)
+        let bounds = current.unscrolledRect
+        current.staticBounds = SIMD4(bounds.x, bounds.y, bounds.width, bounds.height)
+        current.clipRect = clip
+        current.activeClipFades = fades
+        current.enclosingScrollIndex = enclosing
+        current.enclosingVScrollIndex = vertical
+        current.enclosingHScrollIndex = horizontal
+        var spec = motion
+        spec.rect = current.targetRect
+        flat.append(current)
+        specs.append(spec)
+        instants.append(instant)
+        return clipsChildren ? intersectRects(clip, current.targetRect) : clip
+    }
+}
+
 /// One memo root's already flattened descendants. Root modifiers always run on the current
 /// pass. Row positions, viewport clips, indices and enclosing scroll views can change.
 final class MemoFlatSpan<State> {

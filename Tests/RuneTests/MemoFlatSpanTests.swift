@@ -95,6 +95,56 @@ struct MemoFlatSpanTests {
         }
     }
 
+    @Test("Surviving indexed row roots preserve clipped geometry, root motion and inherited RTL", arguments: [false, true])
+    func retainedIndexedRoots(rtl: Bool) {
+        func make() -> Runtime<Int> {
+            Runtime(state: 0, viewport: Vec2(200, 120), pixelScale: 1) { version, _ in
+                let list: El<Int> = col().key("items").wFull().virtualRows(count: 1_000, estimatedRowHeight: 20,
+                    key: { _, i in "r-\(i)" }, build: { _, i in
+                        let inner: El<Int> = row().key("inner").size(110, 16).clip(true)
+                            .child(el().key("left").size(19, 13)).child(el().key("right").size(31, 13))
+                        let root = col().size(version == 0 ? 120 : 94, 20).clip(true)
+                            .child(inner).enterDelay(0.12)
+                        let observed = version == 1 ? root.onLayout { _, _ in }.onVisible { _, _, _ in } : root
+                        return i.isMultiple(of: 4) ? observed.press(.white) : observed
+                    })
+                let panel = col().key("clip").size(150, 94).clip(true).child(
+                    col().key("scroll").size(150, 120).scrollY().child(list))
+                return rtl ? panel.dir(.rtl) : panel
+            }
+        }
+        let retained = make(), fresh = make()
+        func rows() -> Set<String> {
+            Set(retained.flatNodes.compactMap { $0.key?.hasPrefix("r-") == true ? $0.key : nil })
+        }
+        _ = retained.renderFrame(at: 0)
+        _ = fresh.renderFrame(at: 0)
+        for step in 1...9 {
+            let previous = rows()
+            let t = Double(step) / 30
+            for runtime in [retained, fresh] {
+                runtime.wheel(WheelEvent(dx: 0, dy: -160), at: Vec2(65, 70), now: t)
+                if step == 5 || step == 6 { runtime.update(at: t) { state, _ in state += 1 } }
+                if runtime === fresh { runtime.invalidate(at: t) }
+                _ = runtime.renderFrame(at: t)
+            }
+            #expect(retained.elements() == fresh.elements())
+            #expect(retained.lastCommittedSpecs == fresh.lastCommittedSpecs)
+            #expect(retained.layoutObservers.laidOut == fresh.layoutObservers.laidOut)
+            #expect(retained.layoutObservers.visible == fresh.layoutObservers.visible)
+            #expect(retained.flatNodes.map(\.clipRect) == fresh.flatNodes.map(\.clipRect))
+            #expect(retained.flatNodes.map(\.staticBounds) == fresh.flatNodes.map(\.staticBounds))
+            if step == 5 { #expect(!retained.layoutObservers.laidOut.isEmpty) }
+            if step == 3 || step == 4 || step == 9 {
+                let ordinary = previous.intersection(rows()).filter {
+                    Int($0.dropFirst(2)).map { !$0.isMultiple(of: 4) } == true
+                }
+                #expect(!ordinary.isEmpty)
+                #expect(retained.replayedVirtualFlatRoots == ordinary.count)
+            }
+        }
+    }
+
     @Test("Changing a memo root to screen travel reparents its descendants in the motion scene")
     func changedRootSceneIdentity() {
         func runtime(_ cached: Bool) -> Runtime<Int> {

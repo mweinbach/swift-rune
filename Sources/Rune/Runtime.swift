@@ -403,6 +403,7 @@ public final class Runtime<State> {
     private struct WalkItem {
         var element: FlatElement<State>
         var memoPaths: FlatMemoPaths<State>? = nil
+        var virtualRow: CachedVirtualRow?
         var memoSlot = 0
         var resolvedId: NodeId? = nil
         var solved: LayoutEngine.ResultNode
@@ -434,6 +435,16 @@ public final class Runtime<State> {
         var foldHeaderLift: Float = 0
         var growthPlacementShiftY: Float = 0
         var naturalLayout: LayoutEngine.ResultNode? = nil
+    }
+
+    private static func retainedRowInputs(_ item: borrowing WalkItem, frame: FlatMemoFrame) -> FlatMemoContext? {
+        guard item.memoPaths == nil, item.naturalLayout == nil, item.parentScale == 1, item.parentScroll == .zero,
+              item.scaleChain.isEmpty, item.staticInh.scale == Vec2(1, 1),
+              item.staticInh.anchor == item.staticInh.anchorTo, item.staticInh.offset == .zero,
+              !item.parentHasGrowth, item.foldHeaderPath == nil, item.growthPlacementShiftY == 0 else { return nil }
+        return FlatMemoContext(frame: frame, flow: item.parentFlow, directed: item.parentDirected,
+            inert: item.inheritedInert, z: item.inheritedZ, instant: item.inInstantSubtree,
+            row: item.rowLayout, underFold: item.parentUnderFold, styleSpring: item.inheritedStyleSpring)
     }
 
     private struct PaintInh {
@@ -1165,6 +1176,7 @@ public final class Runtime<State> {
     internal var paintHitScopes: [RenderHitScope] = []
     internal var spareFlatNodes: [FlatNode] = []
     internal var replayedFlatMemoNodes: Int { flatMemoPaths.values.reduce(0) { $0 + $1.replayedNodes } }
+    internal var replayedVirtualFlatRoots: Int { flatMemoPaths.values.count(where: \.replayedRowRoot) }
     private var flatMemoPaths: [NodeId: FlatMemoPaths<State>] = [:]
     internal var nodeByPath: [String: Int] = [:]
     internal var nodeIndexById: [NodeId: Int] = [:]
@@ -3313,7 +3325,46 @@ public final class Runtime<State> {
 
         // A virtual row can enter a client VM while this pass measures its layout.
         // Reserve the per-node flattening workspace only after those builders return.
-        while let item = walkStack.popLast() { appendMeasuredNode(item, authored: item.element.value) }
+        while let item = walkStack.popLast() {
+            if let row = item.virtualRow, rowReuseMode == .remount, replayVirtualRow(item, row) { continue }
+            appendMeasuredNode(item, authored: item.element.value)
+        }
+
+        @inline(never)
+        func replayVirtualRow(_ item: borrowing WalkItem, _ row: CachedVirtualRow) -> Bool {
+            guard let nid = item.resolvedId, let paths = flatMemoPaths[nid], let root = paths.rowRoot,
+                  root.source === row, let span = paths.span, let parent = item.parentIdx,
+                  root.motion.parent == newFlat[parent].nodeId, root.node.path == item.path,
+                  (root.node.enclosingScrollIndex == nil) == (item.enclosingScrollIndex == nil),
+                  let context = Self.retainedRowInputs(item, frame: flatFrame), root.inherited == context,
+                  span.context == root.childContext, span.specs.first?.parent == nid,
+                  stableForFlatReplay(nid),
+                  root.node.localSize == item.solved.layout.localSize, root.node.contentSize == item.solved.layout.contentSize,
+                  root.node.localRect.width == item.solved.layout.localRect.width,
+                  root.node.localRect.height == item.solved.layout.localRect.height,
+                  MemoFlatSpan<State>.equalLayouts(span.children, item.solved.children) else { return false }
+            let previous = span.appliedRange(at: layoutCommitGen)
+            guard (!checkFrameTracks && previous != nil) || span.nodes.allSatisfy({ stableForFlatReplay($0.nodeId) }) else { return false }
+
+            let index = newFlat.count
+            let clip = root.append(to: &newFlat, specs: &specs, instants: &ancestorInstants, parent: parent,
+                localRect: item.solved.layout.localRect, origin: item.parentOrigin, unscrolled: item.parentUnscrolledOrigin,
+                clip: item.inheritedClip, fades: item.inheritedClipFades, enclosing: item.enclosingScrollIndex,
+                vertical: item.enclosingVScrollIndex, horizontal: item.enclosingHScrollIndex)
+            newByPath[item.path] = index
+            newIndices[nid] = index
+            let start = index + 1
+            // The translated row itself still reconciles its scene frame and observers.
+            if let previous { reusedFlatRanges.append((start..<(start + span.nodes.count), previous)) }
+            appliedMemoSpans.append((span, start))
+            span.append(to: &newFlat, byPath: &newByPath, byId: &newIndices, specs: &specs,
+                instants: &ancestorInstants, root: index, clip: clip, fades: item.inheritedClipFades,
+                enclosing: item.enclosingScrollIndex, vertical: item.enclosingVScrollIndex, horizontal: item.enclosingHScrollIndex)
+            paths.replayedNodes = span.nodes.count
+            paths.replayedRowRoot = true
+            nextMemoPaths[nid] = paths
+            return true
+        }
 
         #if DEBUG
         @inline(never)
@@ -3377,6 +3428,8 @@ public final class Runtime<State> {
                     memoPaths = FlatMemoPaths(owner)
                 }
                 memoPaths?.replayedNodes = 0
+                memoPaths?.replayedRowRoot = false
+                memoPaths?.rowRoot = nil
                 nextMemoPaths[pathId] = memoPaths
             }
             let memoSlot = item.memoPaths == nil ? 0 : item.memoSlot
@@ -3810,7 +3863,7 @@ public final class Runtime<State> {
             }
             let isFreshMount = !prevMountedIds.contains(nid)
             let captureMount = isFreshMount && rowReuseMode == .remount && canReplayFlat &&
-                !commitKind.lands && item.memoPaths != nil &&
+                !commitKind.lands && (item.memoPaths != nil || item.virtualRow != nil) &&
                 (!checkFrameTracks || !scene.store.isAnimating(nid, Props.FRAME))
             let authoredScaleAnim = selfInstantLayoutOrStyle ? nil : el.scaleMotionAnim
             var specScaleAnim = authoredScaleAnim
@@ -3916,6 +3969,18 @@ public final class Runtime<State> {
                 let context = FlatMemoContext(frame: flatFrame, flow: nodeFlow, directed: nodeDirected,
                     inert: effectiveInert, z: ownZ, instant: childInstant, row: childInRow,
                     underFold: item.parentUnderFold, styleSpring: nodeStyleSpring)
+                if let source = item.virtualRow, (captureMount || stableForFlatReplay(nid)),
+                   let inherited = Self.retainedRowInputs(item, frame: flatFrame),
+                   el.anchor == nil, el.scale == Vec2(1, 1), el.offset == .zero, el.rotate == 0,
+                   el.loopingSpec == nil, el.clipFade == nil, el.pressBg == nil, el.flightId == nil {
+                    var motion = specs[myIndex]
+                    if let scale = mountedScales[myIndex] {
+                        motion.scaleAnim = scale
+                        motion.enterDelay = 0
+                    }
+                    memoPaths.rowRoot = MemoFlatRowRoot(source: source, inherited: inherited, childContext: context,
+                        node: flat, motion: motion, instant: ancestorInstant)
+                }
                 if let span = memoPaths.span, span.context == context, span.specs.first?.parent == nid,
                    MemoFlatSpan<State>.equalLayouts(span.children, childLayouts),
                    ((!checkFrameTracks && span.appliedRange(at: layoutCommitGen) != nil) ||
@@ -3935,11 +4000,18 @@ public final class Runtime<State> {
                 flatCaptures.append(FlatMemoCapture(owner: memoPaths, root: myIndex,
                                                     children: childLayouts, context: context))
             }
+            // An indexed virtual source owns the exact root value. A public memo only
+            // guarantees the child buffer and may return a differently styled root.
+            let virtualRows = canReplayFlat && growthRows.isEmpty && expandedContextOverride == nil &&
+                el.virtualEstimate != nil && el.layout.scrollAxes.isEmpty ? virtualExpansion.builtVirtualRows[path] : nil
             let siblings = ContiguousArray(el.children)
             for cIdx in (0..<childCount).reversed() {
+                let address = childPaths.addresses[cIdx]
+                let row = virtualRows.flatMap { rows in address.key.flatMap { rows[$0] } }
                 walkStack.append(WalkItem(
                     element: FlatElement(siblings, at: cIdx),
-                    memoPaths: memoPaths, memoSlot: childPaths.firstChildSlot + cIdx,
+                    memoPaths: memoPaths, virtualRow: row?.layoutRootMemo == nil ? nil : row,
+                    memoSlot: childPaths.firstChildSlot + cIdx,
                     resolvedId: childPaths.addresses[cIdx].id,
                     solved: childLayouts[cIdx],
                     resolvedKey: childPaths.addresses[cIdx].key,
