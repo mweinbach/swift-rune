@@ -2860,18 +2860,16 @@ public struct DiffView<State>: Sendable {
         var current: RowDefinition { lock.withLock { definition } }
     }
 
-    private func forwardingRowActions(_ actions: RowActions) -> Self {
-        var result = Self(key: key, kit: kit, get: { actions.current.get($0) },
-                          set: { actions.current.set(&$0, $1) })
-        result.look = look
-        result.forcedMode = forcedMode
-        if hasCustomHighlighter { result.highlighter = highlighter }
-        result.onLineClickHandler = { actions.current.lineClick?(&$0, $1, &$2) }
-        result.onSelectHandler = { actions.current.select?(&$0, $1, &$2) }
-        if onCommentHandler != nil {
-            result.onCommentHandler = { actions.current.comment?(&$0, $1, &$2) }
-        }
-        return result
+    private var boundRowActions: RowActions?
+
+    private func withRowActions(_ actions: RowActions) -> Self {
+        var view = self
+        view.boundRowActions = actions
+        return view
+    }
+
+    private var eventSource: RowActions {
+        boundRowActions ?? RowActions(RowDefinition(self))
     }
 
     private func renderContainer(hostState: State?, diffState st: DiffState, cx: Cx<State>) -> El<State> {
@@ -2933,6 +2931,7 @@ public struct DiffView<State>: Sendable {
                                     wrap: st.wraps, forcedMode: forcedMode, hasComment: onCommentHandler != nil)
         let styleVersion = st.styleVersion(for: rowStyle)
         let rowDefinition = RowDefinition(self)
+        let uncachedView = withRowActions(RowActions(rowDefinition))
 
         var list = El<State>(direction: .column).key("\(key)-rows").wFull().shrink(0).selectionGroup().role(.list).label("Diff")
         if !st.wraps { list = list.minW(max(contentWidth, measuredWidth ?? 0)) }
@@ -2982,7 +2981,7 @@ public struct DiffView<State>: Sendable {
                     }
                     return shell.child(row)
                 }
-                guard case .unified(let line, _, _) = model else { return VirtualRowContent(buildLine(self)) }
+                guard case .unified(let line, _, _) = model else { return VirtualRowContent(buildLine(uncachedView)) }
                 let copy = line.kind == .context || st.copySide == (line.kind == .deletion ? .old : .new)
                 let appearance = DiffRowAppearance(styleVersion: styleVersion, indexVersion: index.version,
                                                    selected: st.rowSelected(local, file: file, side: nil),
@@ -2990,7 +2989,7 @@ public struct DiffView<State>: Sendable {
                 return memoizedVirtualRow("\(key)-\(entry.key)", deps: appearance, variant: line.kind == .context ? nil : copy,
                             makeContext: { RowActions(rowDefinition) },
                             updateContext: { $0.update(rowDefinition) }) { actions in
-                    buildLine(forwardingRowActions(actions))
+                    buildLine(withRowActions(actions))
                 }
             }
             return VirtualRowContent(shell.child(row.positionInSet(i + 1, size: entries.count)))
@@ -3483,8 +3482,7 @@ public struct DiffView<State>: Sendable {
 
     @inline(never)
     private func commentButton(
-        key: String, file: Int, point: DiffLineRef, centeredIcon: Bool,
-        onComment: @escaping @Sendable (inout State, DiffLineRange, inout Tx) -> Void
+        key: String, file: Int, point: DiffLineRef, centeredIcon: Bool
     ) -> El<State> {
         // Fractional DPI rounds the child box separately. Keep that layout where the
         // glyph and its hit target cannot share a single pixel-aligned canvas.
@@ -3504,15 +3502,17 @@ public struct DiffView<State>: Sendable {
         element.groupOpacity = (0, 1)
         element.role = .button
         element.a11yLabel = "Comment on this line"
-        return element.onClick { [get, forcedMode] (s: inout State, tx: inout Tx) in
-            var d = get(s)
+        let events = eventSource
+        return element.onClick { [events, forcedMode] (s: inout State, tx: inout Tx) in
+            let actions = events.current
+            var d = actions.get(s)
             if let forcedMode { d.mode = forcedMode }
             let lines = if let sel = d.selectedRange, sel.file == file, d.contains(sel, at: point) {
                 sel
             } else {
                 DiffLineRange(file: file, start: point, end: point)
             }
-            onComment(&s, lines, &tx)
+            actions.comment?(&s, lines, &tx)
         }
     }
 
@@ -3526,9 +3526,11 @@ public struct DiffView<State>: Sendable {
         lineH: Float
     ) -> El<State> {
         let mode = forcedMode
+        let events = eventSource
         func install(_ handlers: inout ElementHandlers<State>) {
-            handlers.onPointerDown = { [get, set, onLineClickHandler] (s: inout State, press: PointerPress, tx: inout Tx) in
-                var d = get(s)
+            handlers.onPointerDown = { [events] (s: inout State, press: PointerPress, tx: inout Tx) in
+                let actions = events.current
+                var d = actions.get(s)
                 if let mode { d.mode = mode }
                 guard d.files.indices.contains(file) else { return }
                 d.selectionBeforePress = d.selectedRange
@@ -3538,11 +3540,12 @@ public struct DiffView<State>: Sendable {
                 d.selection.step(.press(at: point, column: .numbers, shift: press.mods.shift)) { ref in
                     lineIndex[ref].map(UInt32.init)
                 }
-                set(&s, d)
-                onLineClickHandler?(&s, point, &tx)
+                actions.set(&s, d)
+                actions.lineClick?(&s, point, &tx)
             }
-            handlers.onDrag = { [get, set] (s: inout State, drag: Drag, _: inout Tx) in
-                var d = get(s)
+            handlers.onDrag = { [events] (s: inout State, drag: Drag, _: inout Tx) in
+                let actions = events.current
+                var d = actions.get(s)
                 if let mode { d.mode = mode }
                 guard d.selection.isTracking, d.selectionFile == file else { return }
                 let rows = d.rows(file: file)
@@ -3567,17 +3570,18 @@ public struct DiffView<State>: Sendable {
                       remaining < height(at: targetIdx) || file + 1 == d.files.count,
                       let target = rows[targetIdx].lineRef(for: d.mode, preferredSide: side) else { return }
                 d.selection.step(.move(at: target))
-                set(&s, d)
+                actions.set(&s, d)
             }
-            handlers.onDragEnd = { [get, set, onSelectHandler] (s: inout State, cancelled: Bool, tx: inout Tx) in
-                var d = get(s)
+            handlers.onDragEnd = { [events] (s: inout State, cancelled: Bool, tx: inout Tx) in
+                let actions = events.current
+                var d = actions.get(s)
                 guard d.selection.isTracking, d.selectionFile == file else { return }
                 let eff = d.selection.step(cancelled ? .cancel : .release)
                 if cancelled { d.select(d.selectionBeforePress) }
                 d.selectionBeforePress = nil
-                set(&s, d)
+                actions.set(&s, d)
                 if case let .ended(range) = eff {
-                    onSelectHandler?(&s, DiffLineRange(file: file, from: range), &tx)
+                    actions.select?(&s, DiffLineRange(file: file, from: range), &tx)
                 }
             }
         }
@@ -3651,10 +3655,12 @@ public struct DiffView<State>: Sendable {
             }
             return wrap ? code.wrapText().wFull() : code.noWrap()
         }
-        let hoverHandler: (inout State, Bool, inout Tx) -> Void = { [get, set] s, inside, tx in
-            var d = get(s)
+        let events = eventSource
+        let hoverHandler: (inout State, Bool, inout Tx) -> Void = { s, inside, tx in
+            let actions = events.current
+            var d = actions.get(s)
             let changedSide = d.hoverText(side: side, cell: cellKey, inside: inside)
-            set(&s, d)
+            actions.set(&s, d)
             if !changedSide { tx.liveOnly() }
         }
         var content = El<State>(direction: .column).child(codeEl.key("\(cellKey)-text"))
@@ -3710,10 +3716,10 @@ public struct DiffView<State>: Sendable {
             .child(numberCell(cellKey: "\(prefix)-n-\(rowIdx)", number: line.newNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, colors: colors, unifiedLine: line))
         let commentPoint = line.newLine.map { DiffLineRef(side: .new, line: $0) }
             ?? line.oldLine.map { DiffLineRef(side: .old, line: $0) }
-        if let onCommentHandler, let point = commentPoint {
+        if onCommentHandler != nil, let point = commentPoint {
             let sideKey = point.side == .new ? "n" : "o"
             gutter = gutter.child(
-                commentButton(key: "\(prefix)-\(sideKey)-\(rowIdx)-plus", file: file, point: point, centeredIcon: useSingleNodeNumbers, onComment: onCommentHandler)
+                commentButton(key: "\(prefix)-\(sideKey)-\(rowIdx)-plus", file: file, point: point, centeredIcon: useSingleNodeNumbers)
                     .absolute(x: DiffLayout.barWidth + 2 * gutterWidth - 10, y: 2)
             )
         }
@@ -3737,10 +3743,10 @@ public struct DiffView<State>: Sendable {
                            file: Int, gutterWidth: Float, centeredIcon: Bool) -> El<State> {
         let pane = content.role(.listItem).label(DiffViewHelpers.rowLabel(line, side: side))
             .hover(kit.alpha(kit.c.textBase, kit.dark ? 0.06 : 0.035)).hoverGroup()
-        guard let onCommentHandler, let number = line.lineNumber(for: side) else { return pane }
+        guard onCommentHandler != nil, let number = line.lineNumber(for: side) else { return pane }
         let point = DiffLineRef(side: side, line: number)
         return pane.child(commentButton(key: "\(numberKey)-plus", file: file, point: point,
-                                        centeredIcon: centeredIcon, onComment: onCommentHandler)
+                                        centeredIcon: centeredIcon)
             .absolute(x: DiffLayout.barWidth + gutterWidth - 10, y: 2))
     }
 

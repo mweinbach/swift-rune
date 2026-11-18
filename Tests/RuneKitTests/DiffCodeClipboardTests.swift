@@ -62,6 +62,20 @@ struct DiffCodeClipboardTests {
         #expect(rt.state.calls == ["second number", "second selection", "second comment"])
         #expect(rt.state.first.selectedRange == nil)
         #expect(rt.state.second.selectedRange != nil)
+
+        _ = try hover("fresh-code-1")
+        #expect(rt.state.second.copySide == .old)
+        let empty = FileDiff.fromTexts(path: "a.rs", old: "one\n", new: "one\n")
+        rt.update(at: time) { state, _ in
+            state.first = DiffState(diff: empty)
+            state.useSecond = false
+        }
+        settle()
+        #expect(rt.element(byKey: "fresh-code-1") == nil)
+        // The disappearing old-side cell must release the lens that received its enter.
+        var departed = rt.state.second
+        let adoptedNewSide = departed.hoverText(side: .new, cell: "probe", inside: true)
+        #expect(adoptedNewSide)
     }
 
     @Test("Dragging across code copies one side and the original UTF-8 text", arguments: [false, true])
