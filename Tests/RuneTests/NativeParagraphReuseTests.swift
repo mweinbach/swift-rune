@@ -4,6 +4,33 @@ import Testing
 
 @Suite("Native paragraph shape reuse")
 struct NativeParagraphReuseTests {
+    @Test func intactNoWrapParagraphsUseTheirNativeWidthAndKeepTheirCarets() throws {
+        let system = TextSystem()
+        let spans = [TextSpan("let value =\t"), TextSpan("אבג", weight: 700), TextSpan("  \nCafé  ")]
+        let style = TextStyle(size: 16, letterSpacing: 0.25, family: .monospace, wrap: .noWrap)
+        // A nonbinding line limit exercises the existing per-character width calculation.
+        var limited = style
+        limited.maxLines = 3
+        for paint in [false, true] {
+            func shape(_ style: TextStyle) -> ShapedText {
+                system.shapePortable(text: "", spans: spans, style: style, maxWidth: nil, pixelScale: 2,
+                                     emitGlyphs: paint, nativeFonts: true, retain: .cached)
+            }
+            let actual = shape(style)
+            let reference = shape(limited)
+            let paragraph = try #require(actual.desktopParagraph)
+            #expect(actual.lineCount == 2)
+            for (index, fragment) in paragraph.fragments.enumerated() {
+                let line = try #require(fragment)
+                #expect(actual.lineAdvancesPx[index].widthPx == line.width * 2)
+            }
+            #expect(actual.size == reference.size)
+            #expect(actual.lineBaselinesPx == reference.lineBaselinesPx)
+            #expect(actual.portableLines.map(\.charOffsets) == reference.portableLines.map(\.charOffsets))
+            #expect(actual.glyphs == reference.glyphs)
+        }
+    }
+
     @Test func changingWidthReusesTheParagraphAndPaintingReusesItsLines() throws {
         let system = TextSystem()
         let text = "Café au lait and freshly baked bread"

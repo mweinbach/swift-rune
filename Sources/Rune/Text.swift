@@ -7291,6 +7291,12 @@ public final class TextSystem: @unchecked Sendable {
                     lines.append((cursorUTF8, outStr, outW, isRTL, true, insets))
                 }
             } else {
+                #if canImport(CRuneDesktopText) && !canImport(CoreText)
+                if style.wrap == .noWrap, style.maxLines == 0, let paragraphLayout {
+                    lines.append((cursorUTF8, para, paragraphLayout.width, isRTL, true, insets))
+                    continue
+                }
+                #endif
                 var w: Float = 0
                 var charUTF8 = cursorUTF8
                 for ch in para {
