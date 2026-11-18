@@ -697,8 +697,10 @@ public final class TextLayoutBox: @unchecked Sendable {
             self.box = box
         }
 
-        func view(of geometry: TextLayoutBox, spans: [TextSpan]?, bucket: UInt8?) -> TextLayoutBox? {
-            guard key.spans == spans, shaped.scopedInkBucket == bucket else { return nil }
+        func view(
+            of geometry: TextLayoutBox, spans: [TextSpan]?, bucket: UInt8? = nil, forMeasurement: Bool = false
+        ) -> TextLayoutBox? {
+            guard key.spans == spans, forMeasurement || shaped.scopedInkBucket == bucket else { return nil }
             if let box { return box }
             let painted = geometry.clone(key: key, shaped: shaped)
             painted.spanInks = inks
@@ -723,7 +725,15 @@ public final class TextLayoutBox: @unchecked Sendable {
         let key = geometry.shapeKey.withPaintSpans(spans)
         let inks = TextSpanInkMap(spans)
         var shaped = inks.isEmpty ? geometry.shaped : geometry.shaped.applyingSpanInks(spans, using: inks)
-        if let atlas { shaped.applyScopedGlyphMasks(in: atlas) }
+        if let atlas {
+            shaped.applyScopedGlyphMasks(in: atlas)
+        }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        if atlas == nil, shaped.scopedInkBucket != nil {
+            // A metrics-only view keeps the existing masks until paint supplies the current ink.
+            shaped.hasInitialSpanMasks = true
+        }
+        #endif
         let out = geometry.clone(key: key, shaped: shaped)
         out.spanInks = inks
         out.spanInkGeometry = geometry

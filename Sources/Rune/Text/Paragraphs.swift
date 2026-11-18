@@ -699,7 +699,8 @@ extension TextSystem {
         keep: TextKeep = .cached,
         countAsRebreak: Bool = true,
         request: ParagraphRequest?,
-        rasterWindow: TextRasterWindow? = nil
+        rasterWindow: TextRasterWindow? = nil,
+        forMeasurement: Bool = false
     ) -> TextLayoutBox {
         if let request, keep != .secret, pills.isEmpty, style.wrap == .wrap, style.maxLines == 0,
            ParagraphRequest.supports(spans) {
@@ -711,7 +712,9 @@ extension TextSystem {
                 return paragraphBox(prepared, text: authored, spans: spans, style: style, pixelScale: pixelScale)
             }
         }
-        return layoutKeyed(text: text, spans: spans, pills: pills, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs, keep: keep, countAsRebreak: countAsRebreak, rasterWindow: rasterWindow)
+        return layoutKeyed(retaining: nil, text: text, spans: spans, pills: pills, style: style, maxWidth: maxWidth,
+                           pixelScale: pixelScale, emitGlyphs: emitGlyphs, keep: keep, countAsRebreak: countAsRebreak,
+                           rasterWindow: rasterWindow, forMeasurement: forMeasurement)
     }
 
     /// The `TextLayoutBox` a node holds for `laid`.
