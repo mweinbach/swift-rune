@@ -61,6 +61,36 @@ try {
         if (boundsDescriptor) Object.defineProperty(HTMLSpanElement.prototype, 'getBoundingClientRect', boundsDescriptor);
         else delete HTMLSpanElement.prototype.getBoundingClientRect;
     }
+    // On RTL pages, an unrelated wide line must not move a retained line's caret origin.
+    {
+        const direction = document.documentElement.dir;
+        const handles = [];
+        function retain(text) {
+            const input = utf8.encode(text);
+            bytes.set(input, 512);
+            const id = host.create(512, input.length, 256, 5, 16, 400, 0, 0, 1, 0, 40);
+            check(id, 'Could not retain text line');
+            handles.push(id);
+            return id;
+        }
+        try {
+            document.documentElement.dir = 'rtl';
+            bytes.set(utf8.encode('Inter'), 256);
+            const first = retain('Test 123');
+            host.caret(first, 0);
+            for (let i = 0; i < 128; i++) retain('line ' + i);
+            retain('A much wider line '.repeat(80));
+            const expected = host.caret(retain('Test 123'), 3);
+            check(host.caret(first, 3) === expected, 'Sibling measurement moved the retained caret');
+            check(document.querySelectorAll('[inert][aria-hidden="true"] span').length < 32,
+                'Retained lines accumulated in the document layout');
+            for (const id of handles.splice(0)) host.release(id);
+            check(host.caret(retain('Test 123'), 3) === expected, 'Reopening changed the caret position');
+        } finally {
+            for (const id of handles) host.release(id);
+            document.documentElement.dir = direction;
+        }
+    }
     function shape(text, direction = 0, features = '', stack = 'Inter') {
         const input = utf8.encode(text);
         const stackBytes = utf8.encode(stack);

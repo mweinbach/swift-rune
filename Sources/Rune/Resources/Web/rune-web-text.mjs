@@ -195,7 +195,7 @@ function advanceProbe(source) {
 export function createRuneTextImports(getMemory, doc = globalThis.document, spellDictionaries = []) {
     const runs = new Map();
     const aliases = new Map();
-    let next = 1, root, defaultContext, unkernedContext, svgClusterOwners;
+    let next = 1, root, spans, range, defaultContext, unkernedContext, svgClusterOwners;
     const memory = () => getMemory().buffer;
     const view = () => new DataView(memory());
     const string = (ptr, n) => utf8.decode(new Uint8Array(memory(), ptr >>> 0, n));
@@ -251,7 +251,17 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         return id;
     }
 
+    // A cached native line retains its text nodes and caret coordinates. Only runs
+    // currently being measured need to participate in browser layout. Keep a few
+    // together for interleaved styled, bidi and font-probe measurements.
+    function mountSpan(element) {
+        if (element.parentNode === spans) return;
+        if (spans.childElementCount >= 8) spans.firstElementChild.remove();
+        spans.append(element);
+    }
+
     function lineOrigin(line) {
+        mountSpan(line.element);
         return line.origin ??= line.element.getBoundingClientRect().left;
     }
 
@@ -356,10 +366,11 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         return unitBounds(line, line.offsets[start], line.offsets[end]);
     }
     function unitBounds(line, from, to) {
+        mountSpan(line.element);
         const first = line.chunks[line.chunkAt[from]], last = line.chunks[line.chunkAt[to > from ? to - 1 : to]];
-        line.range.setStart(first.node, from - first.start);
-        line.range.setEnd(last.node, to - last.start);
-        return line.range.getBoundingClientRect();
+        range.setStart(first.node, from - first.start);
+        range.setEnd(last.node, to - last.start);
+        return range.getBoundingClientRect();
     }
 
     // Stable SVG implementations expose either the first character under the
@@ -439,8 +450,8 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         if (!hasProbe) return null;
         const element = line.element.cloneNode(true);
         element.style.font = line.prefix + stack.join(', ');
-        root.append(element);
-        return line.probe = { element, origin: element.getBoundingClientRect().left, range: doc.createRange(),
+        mountSpan(element);
+        return line.probe = { element, origin: element.getBoundingClientRect().left,
             chunkAt: line.chunkAt, chunks: line.chunks.map((chunk, i) => ({ start: chunk.start, node: element.childNodes[i] })),
             divided: new Map() };
     }
@@ -609,6 +620,12 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             if (!doc?.documentElement || count <= 0) return 0;
             if (!root) {
                 root = doc.createElement('div');
+                // These reads finish synchronously. A document-wide live Range for every
+                // retained line would also make the browser update them all on removal.
+                range = doc.createRange();
+                spans = doc.createElement('div');
+                spans.style.cssText = 'all:initial;display:contents;';
+                root.append(spans);
                 root.setAttribute('aria-hidden', 'true');
                 root.inert = true;
                 // Shaping spans reset inherited styles. Keep their layout measurable while hiding the whole subtree.
@@ -623,7 +640,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             const families = familyStack(element.style, family, mono ? 'monospace' : 'sans-serif');
             const prefix = (italic ? 'italic ' : '') + weight + ' ' + size + 'px ';
             const font = prefix + families.map(f => f.css).join(', ');
-            element.style.cssText = 'all:initial;display:block;width:max-content;white-space:pre;font-kerning:normal;text-size-adjust:none;';
+            element.style.cssText = 'all:initial;display:block;position:absolute;left:0;top:0;width:max-content;white-space:pre;font-kerning:normal;text-size-adjust:none;';
             element.style.font = font;
             element.dir = direction === 2 ? 'rtl' : direction === 1 ? 'ltr' : 'auto';
             // Long Range queries on one browser text node rescan a long shaping run.
@@ -645,7 +662,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
                 }
             }
             if (from < text.length) append(text.length);
-            root.append(element);
+            mountSpan(element);
             const offsets = new Uint32Array(count + 1);
             let byte = 0, units = 0;
             for (const scalar of text) {
@@ -659,7 +676,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             const hasColor = families.some(f => fontPages.get(doc)?.colorFamilies.has(f.key)) ||
                 /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(text);
             const line = { text, font, baseFont: font, prefix, families, aliases: [], size, weight, italic, kerning: 'normal',
-                element, offsets, chunks, chunkAt, hasColor, range: doc.createRange(), carets: new Map(),
+                element, offsets, chunks, chunkAt, hasColor, carets: new Map(),
                 direction: doc.defaultView.getComputedStyle(element).direction };
             measure(line, metrics, metricsSize);
             return retain(line);
