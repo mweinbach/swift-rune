@@ -101,6 +101,28 @@ internal struct ElResolvedText {
         )
     }
 
+    /// A measured label may already carry every painted glyph after a preceding frame.
+    /// Reuse only its exact break and raster parameters, including the authored UTF-8 offsets.
+    func retainedGlyphs(in box: TextLayoutBox, using textSystem: TextSystem,
+                        maxWidth: Float?, pixelScale: Float, window: TextRasterWindow) -> ShapedText? {
+        guard box.hasGlyphs, box.rasterWindow == nil, !isSecure, advanceRun == nil, !truncateFade,
+              style.maxLines == 0, style.wrap != .ellipsis, box.paragraphs == nil,
+              box.shaped.lineCount <= 1 || (window.lowerY <= 0 && window.upperY >= box.shaped.size.y),
+              box.pixelScale == max(1, pixelScale), box.maxWidth == (style.wrap == .noWrap ? nil : maxWidth),
+              box.shapeKey.pretty == TextShapeKey.layoutPretty(pretty, style: style),
+              box.style == style, box.spans == spans, box.pills == pills,
+              TextUTF8Key.equalBytes(box.authText, displayedText),
+              box.shapeKey.usesSmoothing(textSystem.smoothing),
+              box.shapeKey.fontEpoch == textSystem.currentFontEpoch, box.shapeKey.languageTag == textSystem.language,
+              box.shaped.canReplayGlyphInks else { return nil }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        if !box.shaped.glyphs.isEmpty, box.shaped.glyphPlacements?.retainSource(in: textSystem.glyphAtlas) != true { return nil }
+        #else
+        guard textSystem.glyphAtlas.retainPages(box.desktopPages, since: box.desktopAtlasResets) else { return nil }
+        #endif
+        return box.shaped
+    }
+
     func shape(
         using textSystem: TextSystem,
         maxWidth: Float?,

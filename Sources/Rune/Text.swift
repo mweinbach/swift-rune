@@ -4529,13 +4529,17 @@ public final class TextSystem: @unchecked Sendable {
                             _ = layoutCache.removeValue(forKey: storageKey)
                             let unique = isKnownUniquelyReferenced(&cachedBox)
                             lock.unlock()
-                            let withGlyphs = breakLines(
-                                prepared: prepared,
-                                maxWidth: effectiveMaxW,
-                                emitGlyphs: true,
-                                glidePx: .zero,
-                                pretty: effectivePretty
-                            )
+                            // Measurement already retained the CTLines and their exact baseline positions.
+                            // Decorations are calculated during a full paint; preserve that path when present.
+                            let withGlyphs: ShapedText
+                            if cachedBox.maxWidth == effectiveMaxW, prepared.decoratedRanges.isEmpty,
+                               prepared.scale.significand == 1 || cachedBox.shaped.lineStrings.allSatisfy({ $0.originX == 0 }) {
+                                withGlyphs = fillMeasuredGlyphs(cachedBox.shaped, prepared: prepared,
+                                    rows: cachedBox.shaped.lineStrings.indices, glide: .zero, resets: glyphAtlas.resets)
+                            } else {
+                                withGlyphs = breakLines(prepared: prepared, maxWidth: effectiveMaxW,
+                                                        emitGlyphs: true, glidePx: .zero, pretty: effectivePretty)
+                            }
                             let outBox = unique ? cachedBox : cachedBox.clone()
                             outBox.shaped = withGlyphs
                             outBox.hasGlyphs = true
@@ -6253,7 +6257,6 @@ public final class TextSystem: @unchecked Sendable {
            glyphAtlas.retainPages(previous.box.desktopPages, since: previous.resets) {
             return previous.box
         }
-        let byteAtUTF16 = authoredByteOffsets(prepared)
         let box = measured.clone()
         if !prepared.decoratedRanges.isEmpty && !measured.hasGlyphs {
             if let prior = previous?.box.shaped, matchingWidth {
@@ -6266,13 +6269,23 @@ public final class TextSystem: @unchecked Sendable {
                                         glidePx: glide, pretty: measured.shapeKey.pretty, emitDecorations: true)
             }
         }
+        let band = window.expanded(for: measured.style, spans: measured.spans, scale: prepared.scale)
+        box.shaped = fillMeasuredGlyphs(box.shaped, prepared: prepared, rows: band.lines(in: box.shaped),
+                                        glide: glide, resets: resets)
+        box.hasGlyphs = true
+        box.rasterWindow = window
+        box.desktopPages = Set(box.shaped.glyphs.map(\.atlasPage))
+        lock.withLock { measured.windowPaint = (window, glide, resets, box) }
+        return box
+    }
+
+    private func fillMeasuredGlyphs(_ layout: ShapedText, prepared: TextPreparedShape, rows: Range<Int>,
+                                    glide: Vec2, resets: UInt64) -> ShapedText {
+        let byteAtUTF16 = authoredByteOffsets(prepared)
         var glyphs: [PositionedGlyph] = []
         var pens: [GlyphPen] = []
-        let layout = box.shaped
         // Empty ranges before/after the window retain original line numbers for caret/outline paint.
         var ranges = Array(repeating: 0..<0, count: layout.lineStrings.count)
-        let band = window.expanded(for: measured.style, spans: measured.spans, scale: prepared.scale)
-        let rows = band.lines(in: layout)
         for row in rows {
             let rec = layout.lineStrings[row]
             let start = glyphs.count
@@ -6289,16 +6302,13 @@ public final class TextSystem: @unchecked Sendable {
             let end = glyphs.count
             ranges.replaceSubrange(rows.upperBound..., with: repeatElement(end..<end, count: ranges.count - rows.upperBound))
         }
-        box.shaped.glyphs = glyphs
-        box.shaped.usesPaintInks = GlyphAtlas.baseInkBucket != nil
-        box.shaped.glyphPens = pens
-        box.shaped.glyphPlacements = pens.isEmpty ? nil : TextBoxGeometry.GlyphPlacements(glyphs: glyphs, since: resets)
-        box.shaped.lineGlyphRanges = ranges
-        box.hasGlyphs = true
-        box.rasterWindow = window
-        box.desktopPages = Set(glyphs.map(\.atlasPage))
-        lock.withLock { measured.windowPaint = (window, glide, resets, box) }
-        return box
+        var result = layout
+        result.glyphs = glyphs
+        result.usesPaintInks = GlyphAtlas.baseInkBucket != nil
+        result.glyphPens = pens
+        result.glyphPlacements = pens.isEmpty ? nil : TextBoxGeometry.GlyphPlacements(glyphs: glyphs, since: resets)
+        result.lineGlyphRanges = ranges
+        return result
     }
 
     /// Where a line's glyph runs end (line px): the furthest right edge of a run that draws glyphs,

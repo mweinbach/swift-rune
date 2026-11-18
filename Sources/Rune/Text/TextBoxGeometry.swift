@@ -172,6 +172,10 @@ extension TextBoxGeometry {
         fileprivate let lock = NSLock()
         fileprivate var alternates = Alternates()
 
+        func retainSource(in atlas: GlyphAtlas) -> Bool {
+            atlas.retainGlyphPlacements(sourcePages, since: sourceGeneration)
+        }
+
         init(glyphs: [PositionedGlyph], since generation: UInt64) {
             sourcePages = glyphs.reduce(into: UInt8(0)) { mask, glyph in mask |= 1 << glyph.atlasPage }
             sourceGeneration = generation
@@ -189,7 +193,7 @@ extension TextBoxGeometry {
         init?(shaped: ShapedText, atlas: GlyphAtlas, exact: Bool) {
             #if canImport(CoreText) && canImport(CoreGraphics)
             guard exact, let source = shaped.glyphPlacements,
-                  atlas.retainGlyphPlacements(source.sourcePages, since: source.sourceGeneration) else { return nil }
+                  source.retainSource(in: atlas) else { return nil }
             self.source = source
             self.atlas = atlas
             self.generation = atlas.resets

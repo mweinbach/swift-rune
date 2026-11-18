@@ -3149,15 +3149,16 @@ extension Runtime {
                 let restY = textTop * scale - glideOffset.y
                 let defaultTextColor = applyPressColor(pressTint.color, to: liveTextColor ?? scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? defaultForeground, frac: pressTint.frac)
                 let inkMode = resolvedText.style.fontSmoothing == .systemDefault ? textSystem.smoothing : resolvedText.style.fontSmoothing
+                let wrapWidth = TextBoxGeometry.wrapWidth(layoutInnerW, scale: shapeScale)
+                let window = rasterWindow(clip: activeClip, originY: restY)
                 var shaped = GlyphAtlas.withBaseInk(defaultTextColor, mode: inkMode) {
-                    resolvedText.shape(
-                        using: textSystem,
-                        maxWidth: TextBoxGeometry.wrapWidth(layoutInnerW, scale: shapeScale),
-                        pixelScale: shapeScale,
-                        emitGlyphs: true,
-                        glidePx: glide,
-                        rasterWindow: rasterWindow(clip: activeClip, originY: restY)
-                    )
+                    if glide == .zero, !isExiting, let window, let measured = nodeTextLayouts[nid], !measured.isInput,
+                       let kept = resolvedText.retainedGlyphs(in: measured.box, using: textSystem, maxWidth: wrapWidth,
+                                                              pixelScale: shapeScale, window: window) {
+                        return kept
+                    }
+                    return resolvedText.shape(using: textSystem, maxWidth: wrapWidth, pixelScale: shapeScale,
+                                              emitGlyphs: true, glidePx: glide, rasterWindow: window)
                 }
                 let textLeft = boxLeft + TextBoxGeometry.inlineOffset(align: el.textStyle.align,
                     wrap: resolvedText.truncateFade ? .noWrap : resolvedText.style.wrap, shaped: shaped,

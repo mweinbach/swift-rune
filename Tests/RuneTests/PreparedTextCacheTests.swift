@@ -9,6 +9,58 @@ struct PreparedTextCacheTests {
                            pixelScale: 1, emitGlyphs: false)
     }
 
+    @Test func changingRichKeyAttributesPreservesDictionaryLookup() {
+        let style = TextStyle(size: 17)
+        let shape = TextShapeKey(authText: "mix", spans: nil, pills: [], style: style,
+                                 pixelScale: 2, fontEpoch: 1, languageTag: nil, maxWidth: 80)
+        var changed = shape
+        changed.spans = [TextSpan("mix", italic: true)]
+        changed.style.size = 20
+        let rebuilt = TextShapeKey(authText: "mix", spans: [TextSpan("mix", italic: true)], pills: [],
+                                   style: TextStyle(size: 20), pixelScale: 2, fontEpoch: 1,
+                                   languageTag: nil, maxWidth: 80)
+        #expect(changed == rebuilt)
+        #expect([changed: 1][rebuilt] == 1)
+        #expect([shape: 1][rebuilt] == nil)
+    }
+
+    @Test func retainedLabelChecksRasterScaleAndAuthoredBytes() {
+        let system = TextSystem()
+        let value = "café"
+        let label: El<Void> = text(value).font(TextStyle(size: 16, wrap: .noWrap))
+        let original = ElDisplayResolver.resolveText(el: label, rawText: value, isSecure: false)
+        let box = system.layoutKeyed(text: value, style: original.style, maxWidth: nil, pixelScale: 2, emitGlyphs: true)
+        let window = TextRasterWindow(lowerY: -1, upperY: 100)
+        #expect(original.retainedGlyphs(in: box, using: system, maxWidth: nil, pixelScale: 2, window: window) != nil)
+        #expect(original.retainedGlyphs(in: box, using: system, maxWidth: nil, pixelScale: 1, window: window) == nil)
+        let alternate = ElDisplayResolver.resolveText(el: label, rawText: "cafe\u{301}", isSecure: false)
+        #expect(alternate.retainedGlyphs(in: box, using: system, maxWidth: nil, pixelScale: 2, window: window) == nil)
+        _ = system.setLanguage(system.language == "ja" ? "ar" : "ja")
+        #expect(original.retainedGlyphs(in: box, using: system, maxWidth: nil, pixelScale: 2, window: window) == nil)
+    }
+
+    #if canImport(CoreText) && canImport(CoreGraphics)
+    @Test func fillingMeasuredGlyphsPreservesBaselinesClustersAndMasks() throws {
+        let system = TextSystem()
+        let sample = "A fi e\u{301} 漢字\nA ثاني 🧩"
+        let style = TextStyle(size: 16, wrap: .wrap)
+        let width: Float = 85
+        let measured = system.layoutKeyed(text: sample, style: style, maxWidth: width,
+                                          pixelScale: 2, emitGlyphs: false)
+        let direct = system.layoutKeyed(text: sample, style: style, maxWidth: width,
+                                        pixelScale: 2, emitGlyphs: true, keep: .owned)
+        let filled = system.layoutKeyed(text: sample, style: style, maxWidth: width,
+                                        pixelScale: 2, emitGlyphs: true)
+        #expect(filled.shaped.glyphs == direct.shaped.glyphs)
+        #expect(filled.shaped.lineGlyphRanges == direct.shaped.lineGlyphRanges)
+        #expect(filled.shaped.lineBaselinesPx == direct.shaped.lineBaselinesPx)
+        let original = try #require(measured.shaped.lineStrings.first?.ctLine)
+        let painted = try #require(filled.shaped.lineStrings.first?.ctLine)
+        #expect(original === painted)
+        #expect(!measured.hasGlyphs)
+    }
+    #endif
+
     @Test func budgetEvictsTheOldestPassAndItsReusableShape() {
         let system = TextSystem()
         let initial = system.layoutKeys()

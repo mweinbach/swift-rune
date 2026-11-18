@@ -109,9 +109,46 @@ public struct TextShapeKey: Hashable, Sendable {
         get { textKey.source }
         set { textKey = TextUTF8Key(newValue) }
     }
-    public var spans: [TextSpan]?
-    public var pills: [PillChip]
-    public var style: TextStyle
+    // Layout, retained memo leaves and glyph caches share these immutable, potentially rich
+    // attributes. Copying a shape key preserves their storage and previously computed hash.
+    private final class Attributes: Hashable, Sendable {
+        let spans: [TextSpan]?
+        let pills: [PillChip]
+        let style: TextStyle
+        let fingerprint: Int
+
+        init(_ spans: [TextSpan]?, _ pills: [PillChip], _ style: TextStyle) {
+            self.spans = spans
+            self.pills = pills
+            self.style = style
+            var hash = Hasher()
+            hash.combine(spans)
+            hash.combine(pills)
+            hash.combine(style)
+            fingerprint = hash.finalize()
+        }
+
+        func hash(into hasher: inout Hasher) { hasher.combine(fingerprint) }
+
+        static func == (lhs: Attributes, rhs: Attributes) -> Bool {
+            lhs === rhs || (lhs.fingerprint == rhs.fingerprint && lhs.style == rhs.style
+                && lhs.spans == rhs.spans && lhs.pills == rhs.pills)
+        }
+    }
+
+    private var attributes: Attributes
+    public var spans: [TextSpan]? {
+        _read { yield attributes.spans }
+        set { attributes = Attributes(newValue, pills, style) }
+    }
+    public var pills: [PillChip] {
+        _read { yield attributes.pills }
+        set { attributes = Attributes(spans, newValue, style) }
+    }
+    public var style: TextStyle {
+        _read { yield attributes.style }
+        set { attributes = Attributes(spans, pills, newValue) }
+    }
     private let inheritedSmoothing: FontSmoothing
     private var scaleBits: UInt32
     public var scale100: Int {
@@ -169,9 +206,7 @@ public struct TextShapeKey: Hashable, Sendable {
         defaultSmoothing: FontSmoothing
     ) {
         self.textKey = TextUTF8Key(authText)
-        self.spans = spans
-        self.pills = pills
-        self.style = style
+        self.attributes = Attributes(spans, pills, style)
         self.inheritedSmoothing = style.fontSmoothing == .systemDefault ? defaultSmoothing : .systemDefault
         self.scaleBits = max(1.0, pixelScale).bitPattern
         self.fontEpoch = fontEpoch
