@@ -485,8 +485,9 @@ extension Runtime {
     }
 
     internal func layoutMoving() -> Bool {
-        let layoutProps: Set<PropId> = [Props.FRAME.id, Props.OFFSET.id, Props.TRAVEL.id]
-        if scene.store.active().contains(where: { layoutProps.contains($0.1) }) {
+        if scene.store.active().contains(where: { _, prop in
+            prop == Props.FRAME.id || prop == Props.OFFSET.id || prop == Props.TRAVEL.id
+        }) {
             return true
         }
         if !launchedFlightIds.isEmpty || !activeTextFlights.isEmpty {
@@ -521,13 +522,14 @@ extension Runtime {
 
     internal func hoverLive(_ path: String) -> Int? {
         guard let idx = nodeByPath[path], flatNodes.indices.contains(idx) else { return nil }
-        let node = flatNodes[idx]
-        guard !node.effectiveInert else { return nil }
-        if case .exiting = scene.phase(node.nodeId) { return nil }
-        var p = node.parentIndex
+        let mounted = flatNodes
+        let nodes = mounted.span
+        guard !nodes[idx].effectiveInert else { return nil }
+        if case .exiting = scene.phase(nodes[idx].nodeId) { return nil }
+        var p = nodes[idx].parentIndex
         while let pi = p, flatNodes.indices.contains(pi) {
-            if case .exiting = scene.phase(flatNodes[pi].nodeId) { return nil }
-            p = flatNodes[pi].parentIndex
+            if case .exiting = scene.phase(nodes[pi].nodeId) { return nil }
+            p = nodes[pi].parentIndex
         }
         return idx
     }
@@ -551,7 +553,8 @@ extension Runtime {
         candidateIndex: Int?,
         within: (inside: [String], entering: [Int])? = nil
     ) -> Bool {
-        guard hoverMayHold() else { return false }
+        // A hold is possible only when layout carries a hovered node or one of its ancestors.
+        guard hoverMayHold(), layoutMoving() else { return false }
         if candidatePath != hoveredPath {
             if let cIdx = candidateIndex, layoutCarries(nodeIndex: cIdx) {
                 return true
@@ -573,11 +576,14 @@ extension Runtime {
         // The hover tracks that would change (`hover_flip`): one carried by moving layout holds,
         // except a leave from an element turned inert (`Flip::now`).
         let ctx = hoverFlipContext()
-        for idx in layoutObservers.hoverTracks where !hoverIsExiting(idx) {
-            let on = hoverFlipOn(idx, ctx)
-            let target: Float = on ? 1.0 : 0.0
-            let now = !on && !hoverAllowed(idx)
-            if target != hoverTarget(flatNodes[idx].nodeId) && !now && layoutCarries(nodeIndex: idx) {
+        let mounted = flatNodes
+        let nodes = mounted.span
+        for idx in layoutObservers.hoverTracks {
+            let id = nodes[idx].nodeId
+            if case .exiting = scene.phase(id) { continue }
+            let flip = hoverFlip(nodes[idx], at: idx, ctx)
+            let target: Float = flip.on ? 1.0 : 0.0
+            if target != hoverTarget(id) && (flip.on || flip.allowed) && layoutCarries(nodeIndex: idx) {
                 return true
             }
         }
@@ -702,14 +708,17 @@ extension Runtime {
         let ctx = hoverFlipContext()
         var unseen: [Bool]? = nil
         var retargeted = false
-        for i in layoutObservers.hoverTracks where !hoverIsExiting(i) {
-            let node = flatNodes[i]
-            let nid = node.nodeId
+        let mounted = flatNodes
+        let nodes = mounted.span
+        for i in layoutObservers.hoverTracks {
+            let nid = nodes[i].nodeId
+            if case .exiting = scene.phase(nid) { continue }
             let trackId = Self.hoverTrackId(nid)
-            let isLit = hoverFlipOn(i, ctx)
+            let flip = hoverFlip(nodes[i], at: i, ctx)
+            let isLit = flip.on
             let target: Float = isLit ? 1.0 : 0.0
             // A leave from an element turned inert lands whatever the hold (`Flip::now`).
-            let forceNow = !isLit && !hoverAllowed(i)
+            let forceNow = !isLit && !flip.allowed
             let current = hoverTarget(nid)
             let changed = current != target
             // A cut lands every track where it belongs; nothing holds through it.
@@ -781,7 +790,7 @@ extension Runtime {
         let presentedRectById: [NodeId: MotionRect]
 
         static func isPtrInside(
-            _ node: FlatNode,
+            _ node: borrowing FlatNode,
             ptrPos: Vec2,
             topmostPtrPath: String?,
             hitGeometryByPath: FrameGeometry<HitGeometry>,
@@ -853,20 +862,21 @@ extension Runtime {
         if pointerPosition.x > -9000 && pointerPosition.y > -9000 {
             // Hover-change observers follow their own drawn bounds, including overlapping siblings.
             var hits: [(index: Int, order: Int)] = []
-            for index in layoutObservers.hoverChanges where hoverAllowed(index) {
-                let node = flatNodes[index]
-                if let geometry = hitGeometryByPath[node.path] {
+            let mounted = flatNodes
+            let nodes = mounted.span
+            for index in layoutObservers.hoverChanges where hoverAllowed(nodes[index]) {
+                if let geometry = hitGeometryByPath[nodes[index].path] {
                     if !geometry.isExiting, geometry.opacity > 0.001, geometry.contains(pointerPosition) {
                         hits.append((index, geometry.paintOrder))
                     }
-                } else if paintOrderPaths.isEmpty, node.el.opacity > 0.001, !hoverIsExiting(index),
-                          hoverNodeContains(index) {
+                } else if paintOrderPaths.isEmpty, nodes[index].el.opacity > 0.001, !hoverIsExiting(index),
+                          hoverNodeContains(nodes[index]) {
                     hits.append((index, index))
                 }
             }
             if hits.count > 1 { hits.sort { $0.order < $1.order } }
             for hit in hits {
-                let path = flatNodes[hit.index].path
+                let path = nodes[hit.index].path
                 if !hoverWithinPaths.contains(path) { entering.append(hit.index) }
                 inside.append(path)
             }

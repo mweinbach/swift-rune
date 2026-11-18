@@ -136,6 +136,7 @@ extension Runtime {
     internal struct HoverFlipContext {
         let captured: String?
         let alone: Int?
+        let alonePath: String?
         let shared: Set<String>
     }
 
@@ -148,7 +149,10 @@ extension Runtime {
 
     /// `focus.rs::allowed`: not inert and not behind a modal.
     internal func hoverAllowed(_ i: Int) -> Bool {
-        let n = flatNodes[i]
+        hoverAllowed(flatNodes.span[i])
+    }
+
+    internal func hoverAllowed(_ n: borrowing FlatNode) -> Bool {
         if n.effectiveInert { return false }
         if activeModalPath != nil && !modalMemberPaths.contains(n.path) { return false }
         return true
@@ -156,9 +160,9 @@ extension Runtime {
 
     /// `hit.rs::node_contains`: node `i`'s drawn rect, inside its clip, holds the pointer. Purely
     /// geometric: an element drawn over it doesn't stop it containing the pointer.
-    internal func hoverNodeContains(_ i: Int) -> Bool {
+    internal func hoverNodeContains(_ node: borrowing FlatNode) -> Bool {
         GroupHoverContext.isPtrInside(
-            flatNodes[i],
+            node,
             ptrPos: pointerPosition,
             topmostPtrPath: nil,
             hitGeometryByPath: hitGeometryByPath,
@@ -168,14 +172,16 @@ extension Runtime {
     }
 
     internal func hoverIsExiting(_ i: Int) -> Bool {
-        if case .exiting = scene.phase(flatNodes[i].nodeId) { return true }
+        let mounted = flatNodes
+        let id = mounted.span[i].nodeId
+        if case .exiting = scene.phase(id) { return true }
         return false
     }
 
     /// Keyboard focus shows on node `i` or inside it (CSS `:has(:focus-visible)`): a hover group
     /// lights for it as for the pointer (`hover.rs::keyboard_within`).
-    internal func hoverKeyboardWithin(_ i: Int) -> Bool {
-        focusVisible && isFocusWithin(flatNodes[i].path)
+    internal func hoverKeyboardWithin(_ node: borrowing FlatNode) -> Bool {
+        focusVisible && isFocusWithin(node.path)
     }
 
     /// The innermost `hoverAlone` element under the pointer: the elements around it show no
@@ -183,10 +189,12 @@ extension Runtime {
     internal func hoveredAlone() -> Int? {
         guard pointerPosition.x > -9000, pointerPosition.y > -9000 else { return nil }
         var best: Int? = nil
-        for i in layoutObservers.hoverGroups where flatNodes[i].el.isHoverAlone {
-            guard !hoverIsExiting(i), hoverAllowed(i), hoverNodeContains(i) else { continue }
+        let mounted = flatNodes
+        let nodes = mounted.span
+        for i in layoutObservers.hoverGroups where nodes[i].el.isHoverAlone {
+            guard !hoverIsExiting(i), hoverAllowed(nodes[i]), hoverNodeContains(nodes[i]) else { continue }
             // `max_by_key(path.len())`: of equally deep matches, the last wins.
-            if best.map({ flatNodes[i].path.count >= flatNodes[$0].path.count }) ?? true { best = i }
+            if best.map({ nodes[i].path.count >= nodes[$0].path.count }) ?? true { best = i }
         }
         return best
     }
@@ -195,9 +203,11 @@ extension Runtime {
     /// (`hover.rs::shared_hovered`).
     internal func sharedHovered() -> Set<String> {
         var keys: Set<String> = []
+        let mounted = flatNodes
+        let nodes = mounted.span
         for i in layoutObservers.hoverGroups {
-            guard let key = flatNodes[i].el.hoverGroupShare else { continue }
-            if !hoverIsExiting(i) && hoverAllowed(i) && (hoverNodeContains(i) || hoverKeyboardWithin(i)) {
+            guard let key = nodes[i].el.hoverGroupShare else { continue }
+            if !hoverIsExiting(i) && hoverAllowed(nodes[i]) && (hoverNodeContains(nodes[i]) || hoverKeyboardWithin(nodes[i])) {
                 keys.insert(key)
             }
         }
@@ -205,7 +215,9 @@ extension Runtime {
     }
 
     internal func hoverFlipContext() -> HoverFlipContext {
-        HoverFlipContext(captured: hoverCaptured(), alone: hoveredAlone(), shared: sharedHovered())
+        let alone = hoveredAlone()
+        let alonePath = alone.map { flatNodes[$0].path }
+        return HoverFlipContext(captured: hoverCaptured(), alone: alone, alonePath: alonePath, shared: sharedHovered())
     }
 
     /// Whether node `i`'s hover track goes on (`hover.rs::hover_flip`'s `on`): every hover element
@@ -213,18 +225,18 @@ extension Runtime {
     /// keyboard focus is in; a held press keeps its own element lit while it's inside. The
     /// innermost `hoverAlone` element under the pointer shadows the elements around it, and a
     /// captured press lets only it and its ancestors light.
-    internal func hoverFlipOn(_ i: Int, _ ctx: HoverFlipContext) -> Bool {
-        let n = flatNodes[i]
-        let isGroup = n.el.isHoverGroup || n.el.hoverGroupShare != nil
-        let inside = hoverNodeContains(i)
-            || (n.el.hoverGroupShare.map { ctx.shared.contains($0) } ?? false)
-            || (isGroup && hoverKeyboardWithin(i))
+    internal func hoverFlip(_ n: borrowing FlatNode, at i: Int, _ ctx: HoverFlipContext) -> (on: Bool, allowed: Bool) {
+        let share = n.el.hoverGroupShare
+        let isGroup = n.el.isHoverGroup || share != nil
+        let inside = hoverNodeContains(n)
+            || (share.map { ctx.shared.contains($0) } ?? false)
+            || (isGroup && hoverKeyboardWithin(n))
         let captureInside = inputMachines.secondaryCapture.isHeld ? inside : pressedPointerInside
         let held = ctx.captured == n.path && captureInside
-        let allowed = hoverAllowed(i)
-        let shadowed = ctx.alone.map { $0 != i && Self.hoverHolds(outer: n.path, inner: flatNodes[$0].path) } ?? false
+        let allowed = hoverAllowed(n)
+        let shadowed = ctx.alone != i && (ctx.alonePath.map { Self.hoverHolds(outer: n.path, inner: $0) } ?? false)
         let capturedOK = ctx.captured.map { Self.hoverHolds(outer: n.path, inner: $0) } ?? true
-        return allowed && (inside || held) && !shadowed && capturedOK
+        return (allowed && (inside || held) && !shadowed && capturedOK, allowed)
     }
 
     /// `hover.rs::holds`: `inner` is `outer` or inside it.
