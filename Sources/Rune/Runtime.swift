@@ -3084,13 +3084,13 @@ public final class Runtime<State> {
         return result
     }
 
-    /// A scroll remount retains the published rows of a fixed-width, zero-gap column.
+    /// A fixed-width, zero-gap column can retain the geometry of its published virtual rows.
     /// All entering rows and its outer tree still participate in the current layout solve.
-    private func fixedVirtualRowLayout(in root: El<State>, expansion: VirtualExpansionContext) -> FixedVirtualRowLayout? {
+    private func fixedVirtualRowLayout(in root: El<State>, expansion: VirtualExpansionContext, rebuilding: Bool) -> FixedVirtualRowLayout? {
         guard expansion.listMeta.count == 1, let list = expansion.listMeta.first, list.indexed,
               let rows = expansion.builtVirtualRows[list.listPath], !rows.isEmpty,
               let oldList = nodeByPath[list.listPath], flatNodes[oldList].flow == .ltr else { return nil }
-        var chain: [String] = []
+        var chain: [Int] = []
         var parent: Int? = oldList
         while let index = parent {
             // On this path every containing width is externally specified. Grids and
@@ -3102,7 +3102,7 @@ public final class Runtime<State> {
                   layout.width == .fraction(1) || layout.width == .points(flatNodes[index].localSize.x) else {
                 return nil
             }
-            if flatNodes[index].parentIndex != nil { chain.append(flatNodes[index].path) }
+            if flatNodes[index].parentIndex != nil { chain.append(index) }
             parent = flatNodes[index].parentIndex
         }
         let width = flatNodes[oldList].localSize.x
@@ -3112,7 +3112,19 @@ public final class Runtime<State> {
         var source = root
         var listPath = flatNodes[0].path
         var listId = flatNodes[0].nodeId
-        for path in chain.reversed() {
+        // A full view may have replaced any ancestor of the list. Its current keyed
+        // path, writing direction and externally determined flex width must still agree.
+        func sameContainer(_ authored: borrowing El<State>, _ previous: borrowing FlatNode) -> Bool {
+            authored.storageKeyId == previous.el.storageKeyId && authored.layout == previous.el.layout &&
+                previous.flow == .ltr && (authored.explicitDir == nil || authored.explicitDir == .ltr) &&
+                authored.explicitDir == previous.el.explicitDir && authored.isUnmirrored == previous.el.isUnmirrored &&
+                !authored.hasEditLens && authored.anchor == nil && previous.el.anchor == nil &&
+                authored.layout.sticky == nil && authored.growthSpec == nil && authored.foldGlideSpec == nil
+        }
+        var previousParent = 0
+        for previousIndex in chain.reversed() {
+            if rebuilding && !sameContainer(source, flatNodes[previousParent]) { return nil }
+            let path = flatNodes[previousIndex].path
             let children = FlatChildPaths(source.children, count: source.children.count, parent: listPath, parentId: listId)
             guard let index = children.addresses.firstIndex(where: { $0.path == path }) else { return nil }
             listIndices.append(index)
@@ -3120,7 +3132,9 @@ public final class Runtime<State> {
             source = source.children[index]
             listPath = path
             listId = children.addresses[index].id
+            previousParent = previousIndex
         }
+        if rebuilding && !sameContainer(source, flatNodes[oldList]) { return nil }
         let style = source.layout
         guard style.displayMode == .flex, style.direction == .column, !style.wrap, !style.wrapReverse,
               style.justifyContent == .start, style.alignItems == .stretch, style.padding == .all(0),
@@ -3155,7 +3169,13 @@ public final class Runtime<State> {
             let h = wholeRows ? LayoutStyle.wholeRowLength(authoredHeight) : authoredHeight
             guard let key = row.storageKeyId, let entry = rows[key],
                   let context = entry.layoutRootMemo, let paths = flatMemoPaths[listId.child("@" + key)],
-                  paths.owner === context, let retained = paths.rowRoot, retained.source === entry.rootIdentity,
+                  let retained = paths.rowRoot,
+                  (!rebuilding || (entry.memoizedRootOwner != nil && entry.reads.isEmpty &&
+                                    entry.trackedReads.isEmpty && context.matches(row.children))),
+                  (paths.owner === context && retained.source === entry.rootIdentity) ||
+                    (rebuilding && (entry.layoutProjection != nil || retained.layoutProjection != nil) &&
+                     (entry.layoutProjection?.children ?? context) === (retained.layoutProjection?.children ?? paths.owner) &&
+                     (entry.layoutProjection?.owner ?? entry.rootIdentity) === (retained.layoutProjection?.owner ?? retained.source)),
                   let span = paths.span, let previous = span.appliedRange(at: layoutCommitGen),
                   previous.lowerBound > 0, row.explicitDir == nil,
                   span.context.frame.scale == pixelScale, span.context.frame.fontEpoch == textSystem.currentFontEpoch,
@@ -3170,7 +3190,7 @@ public final class Runtime<State> {
                   row.layout.maxHeight == .auto else { return false }
             let previousRoot = flatNodes[previous.lowerBound - 1]
             guard previousRoot.nodeId == retained.node.nodeId, previousRoot.flow == .ltr,
-                  previousRoot.el.memoLayoutChildren === context, previousRoot.el.layout == row.layout,
+                  previousRoot.el.memoLayoutChildren === paths.owner, previousRoot.el.layout == row.layout,
                   previousRoot.localRect.x == 0, previousRoot.localSize == Vec2(width, h),
                   previousRoot.contentSize.x <= width, previousRoot.contentSize.y <= h else { return false }
             let layout = ComputedLayout(localRect: previousRoot.localRect, localSize: previousRoot.localSize,
@@ -3268,10 +3288,13 @@ public final class Runtime<State> {
         var hasGrowth = false
         // A view or retained row may share all its child buffers with the last frame. Only
         // detach paths to inputs whose pills actually need to be resolved for this pass.
-        func resolveInputPills(in root: El<State>) -> El<State> {
+        // A speculative solve may retry. Current input and live-text measurements must run once.
+        var mutableMeasurements = false
+        func resolveInputPills(in root: El<State>, checkMeasurements: Bool) -> El<State> {
             typealias Frame = (el: El<State>, next: Int, end: Int, changed: Bool)
             func visit(_ el: El<State>) -> Frame {
                 var frame: Frame = (el, 0, el.children.count, false)
+                if checkMeasurements && (el.hasEditLens || el.isSecure || el.liveText != nil) { mutableMeasurements = true }
                 if el.growthSpec != nil || el.foldGlideSpec != nil { hasGrowth = true }
                 if (el.pillStyleLookup != nil || el.pillIconLookup != nil || el.pillColorsSpec != nil),
                    let editLens = el.handlers.editLens {
@@ -3279,6 +3302,7 @@ public final class Runtime<State> {
                     frame.changed = true
                 }
                 if let memo = el.memoLayoutChildren, memo.matches(el.children) {
+                    if checkMeasurements && memo.traits.contains(.mutableLayout) { mutableMeasurements = true }
                     if memo.traits.contains(.growth) { hasGrowth = true }
                     if !memo.traits.contains(.inputPills) { frame.end = 0 }
                 }
@@ -3325,15 +3349,19 @@ public final class Runtime<State> {
             // never reach layout, which would release retained layouts and retarget row motion.
             if virtualExpansion.remountHitNestedVirtual { try onRemountFallback?() }
             hasGrowth = false
-            layoutRoot = resolveInputPills(in: expandedRoot)
+            mutableMeasurements = false
+            let mayReuseFullLayout = rowReuseMode != .remount && expandedContextOverride == nil && !cut &&
+                !activeResizeSnap && prevNodeTextLayoutsForCommit == nil && virtualExpansion.listMeta.count == 1 &&
+                virtualExpansion.listMeta[0].indexed
+            layoutRoot = resolveInputPills(in: expandedRoot, checkMeasurements: mayReuseFullLayout)
             textLayoutCollector.map.removeAll(keepingCapacity: true)
             textLayoutCollector.liveIds.removeAll(keepingCapacity: true)
             restoredNodeCount = 0
             solvedRoot = measureRuntimePhase(.layout) {
                 // Remeasurements run after the first solve releases the prior text records.
-                if rowReuseMode == .remount, expandedContextOverride == nil, !cut, !activeResizeSnap,
+                if expandedContextOverride == nil, !cut, !activeResizeSnap, (rowReuseMode == .remount || (mayReuseFullLayout && !hasGrowth && !mutableMeasurements)),
                    prevNodeTextLayoutsForCommit == nil,
-                   let splice = fixedVirtualRowLayout(in: layoutRoot, expansion: virtualExpansion) {
+                   let splice = fixedVirtualRowLayout(in: layoutRoot, expansion: virtualExpansion, rebuilding: rowReuseMode != .remount) {
                     var result = retainedLayout.compute(root: splice.source, state: state, viewport: viewport,
                         pixelScale: pixelScale, textSystem: textSystem, fitHeight: fitHeight, textLayouts: textLayoutCollector,
                         virtualRows: virtualExpansion.builtVirtualRows)

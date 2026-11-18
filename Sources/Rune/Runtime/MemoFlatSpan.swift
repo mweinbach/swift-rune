@@ -36,6 +36,7 @@ struct FlatMemoCapture<State> {
 /// clip and mount index change. Other memo roots may have new modifiers every frame.
 final class MemoFlatRowRoot<State> {
     weak var source: AnyObject?
+    let layoutProjection: VirtualRowLayout<State>?
     let inherited: FlatMemoContext
     let childContext: FlatMemoContext
     let node: Runtime<State>.FlatNode
@@ -47,6 +48,7 @@ final class MemoFlatRowRoot<State> {
     init(source: Runtime<State>.CachedVirtualRow, inherited: FlatMemoContext, childContext: FlatMemoContext,
          node: Runtime<State>.FlatNode, motion: NodeSpec, instant: Bool, parentHasGrowth: Bool) {
         self.source = source.rootIdentity
+        self.layoutProjection = source.layoutProjection
         self.inherited = inherited
         self.childContext = childContext
         // A root element normally borrows its virtual list's entire sibling buffer.

@@ -1004,6 +1004,8 @@ public struct TrackedReads: Sendable {
         self.entries = entries
     }
 
+    var isEmpty: Bool { entries.isEmpty }
+
     /// Whether any value read was written since.
     public func changed() -> Bool {
         entries.contains { TrackedIDGenerator.version(for: $0.id) != $0.version }
