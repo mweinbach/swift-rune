@@ -171,26 +171,43 @@ struct MemoFlatSpanTests {
         }
     }
 
-    @Test("A counterpart with stale measured size cannot supply a row variant's geometry")
+    @Test("Row layout variants preserve measured geometry and author transform calls")
     func layoutVariantReads() {
         final class Context {}
-        let view = Runtime(state: false, viewport: Vec2(100, 100), pixelScale: 1) { active, cx in
-            let context = cx
-            let rows: El<Bool> = col().key("rows").wFull().virtualRows(
-                count: 1, estimatedRowHeight: 20, key: { _, _ in "row" }, buildContent: { active, _ in
-                    memoizedVirtualRow("row", deps: 0, variant: active, variantsShareLayout: true,
-                                       makeContext: { Context() }, updateContext: { _ in }) { _ in
-                        let height = context.layoutSize("reference")?[0] ?? 12
-                        return col().wFull().child(el().key("sized").size(10, height))
-                    }
-                })
-            return col().size(100, 100).scrollY().child(el().key("reference").size(active ? 24 : 12, 1)).child(rows)
+        final class Reads { var byVariant = [0, 0] }
+        struct Model { var active = false; var reference: Float = 12 }
+        func make(_ share: Bool, _ reads: Reads) -> Runtime<Model> {
+            Runtime(state: Model(), viewport: Vec2(100, 100), pixelScale: 1) { model, cx in
+                let context = cx
+                let rows: El<Model> = col().key("rows").wFull().virtualRows(
+                    count: 1, estimatedRowHeight: 20, key: { _, _ in "row" }, buildContent: { model, _ in
+                        memoizedVirtualRow("row", deps: 0, variant: model.active, variantsShareLayout: share,
+                                           makeContext: { Context() }, updateContext: { _ in }) { _ in
+                            let height: Float = context.layoutWith("reference") { rect in
+                                reads.byVariant[model.active ? 1 : 0] += 1
+                                return rect[2]
+                            } ?? 12
+                            return col().wFull().child(el().key("sized").size(10, height))
+                        }
+                    })
+                return col().size(100, 100).scrollY().child(el().key("reference").size(model.reference, 1)).child(rows)
+            }
         }
-        for (i, active) in [false, true, false, true].enumerated() {
+        let sharedReads = Reads(), ordinaryReads = Reads()
+        let shared = make(true, sharedReads), ordinary = make(false, ordinaryReads)
+        let widths: [Float] = [12, 12, 12, 12, 24, 15]
+        for (i, width) in widths.enumerated() {
             let time = Double(i) / 30
-            view.update(at: time) { value, tx in value = active; tx.instant() }
-            _ = view.renderFrame(at: time)
-            #expect(view.element(byKey: "sized")?.rect[3] == (active ? 24 : 12))
+            for view in [shared, ordinary] {
+                view.update(at: time) { model, tx in
+                    model.active = !i.isMultiple(of: 2)
+                    model.reference = width
+                    tx.instant()
+                }
+                _ = view.renderFrame(at: time)
+                #expect(view.element(byKey: "sized")?.rect[3] == width)
+            }
+            if i < 4 { #expect(sharedReads.byVariant == ordinaryReads.byVariant) }
         }
     }
 

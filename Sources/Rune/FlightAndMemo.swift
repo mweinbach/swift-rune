@@ -558,7 +558,8 @@ public final class MemoCache: @unchecked Sendable {
         let scopedId = scope.scopedId(for: rawId)
         let touched: Set<String> = lock.withLock {
             guard let entry = entries[scopedId], entry.envHash == scope.envHash, entry.equals(inputs) else { return [] }
-            if sharingLayout, entry.srgbBlend == Theme.blendsSrgb(), entry.reads.allSatisfy({ $0.matches(scope.geometry) }),
+            // Checking a dynamic read here could invoke the dormant variant's geometry transform.
+            if sharingLayout, entry.reads.isEmpty, entry.srgbBlend == Theme.blendsSrgb(),
                let owner = entry.deps as? Inputs, let element = entry.element as? El<State>, let memo = element.memoLayoutChildren,
                memo.traits.isDisjoint(with: [.mutableLayout, .virtual, .growth, .duplicateKeys]) {
                 projection = VirtualRowLayout(children: memo, owner: owner)
