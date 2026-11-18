@@ -876,7 +876,10 @@ extension Runtime {
         var beforeSticky = [MotionRect?](repeating: nil, count: hasSticky ? flatNodes.count : 0)
         stuckShiftsByPath.removeAll(keepingCapacity: true)
         var newElements: [NativeElementReport<State>] = []
-        if publishHitGeometry { newElements.reserveCapacity(frameOut.nodes.count) }
+        if publishHitGeometry {
+            swap(&newElements, &spareElementReports)
+            newElements.reserveCapacity(frameOut.nodes.count)
+        }
         var rasterNodeCount = 0
         var rawPoseByPath: [String: RawPoseNodeData] = [:]
         var movingGrowthPaths: Set<String> = []
@@ -924,6 +927,12 @@ extension Runtime {
         var instances: [RenderInstance] = []
         var elidedLayers: [(index: Int, node: UInt64, signature: UInt64)] = []
         var marks: [UInt32] = []
+        if publishHitGeometry {
+            // Small changes in glyph or shape count should fit without growing both buffers.
+            let expected = lastPaintInstanceCount + lastPaintInstanceCount / 8
+            instances.reserveCapacity(expected)
+            marks.reserveCapacity(expected)
+        }
         var newSurfaces: [SurfaceDraw] = []
         var surfaceVideo = SurfaceVideoPaint()
         var currentInheritedMark: UInt32 = 0
@@ -932,6 +941,7 @@ extension Runtime {
 
         // Publish normalized glyph pages and image texel edges in the renderer's origin/size ABI.
         var glyphFixups: [GlyphUVFixup] = []
+        if publishHitGeometry { swap(&glyphFixups, &paintGlyphFixups) }
         // Zero denotes a padded icon. Positive values are the vertical phase of a native text mask.
         var motionGlyphMasks: [SIMD3<Float>: Float] = [:]
         var imageFixups: [(index: Int, texelEdges: SIMD4<Float>, imgW: Float, imgH: Float)] = []
@@ -4211,6 +4221,13 @@ extension Runtime {
         output.rawGlyphPagePatches = glyphAtlas.rawPatches
         output.elidedLayers = elidedLayers
         imagePacker.publish(into: &output)
+        if publishHitGeometry {
+            lastPaintInstanceCount = instances.count
+            if glyphFixups.capacity / 4 <= max(64, glyphFixups.count) {
+                glyphFixups.removeAll(keepingCapacity: true)
+                swap(&glyphFixups, &paintGlyphFixups)
+            }
+        }
         if !freshRaster { labelDraws = nextLabelDraws }
         return output
     }

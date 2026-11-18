@@ -1174,6 +1174,9 @@ public final class Runtime<State> {
     internal var flatNodes: [FlatNode] = []
     internal var nativePaintTopology: NativePaintTopology?
     internal var paintHitScopes: [RenderHitScope] = []
+    internal var paintGlyphFixups: [GlyphUVFixup] = []
+    internal var lastPaintInstanceCount = 0
+    internal var spareElementReports: [NativeElementReport<State>] = []
     internal var spareFlatNodes: [FlatNode] = []
     internal var replayedFlatMemoNodes: Int { flatMemoPaths.values.reduce(0) { $0 + $1.replayedNodes } }
     internal var replayedVirtualFlatRoots: Int { flatMemoPaths.values.count(where: \.replayedRowRoot) }
@@ -1215,7 +1218,13 @@ public final class Runtime<State> {
 
     internal func publishElementReports(_ reports: [NativeElementReport<State>]) {
         materializedElements = []
+        var previous = nativeElementReports
         nativeElementReports = reports
+        if var previous = previous.take(), previous.capacity / 4 <= max(64, reports.count) {
+            // Keep only the allocation. Departed elements may own user callbacks.
+            previous.removeAll(keepingCapacity: true)
+            spareElementReports = previous
+        }
     }
     internal var accessibilityProjectionCache: AccessibilityProjectionCache?
     internal var presentedRectByPath = FrameGeometry<MotionRect>()

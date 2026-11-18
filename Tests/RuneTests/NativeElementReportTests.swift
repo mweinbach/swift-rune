@@ -4,6 +4,32 @@ import RuneMotion
 
 @Suite("Native element inspection")
 struct NativeElementReportTests {
+    @Test("Later native paints leave previously held reports, hit bounds and GPU instances intact")
+    func snapshotsAcrossPaintBufferReuse() throws {
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(100, 120)) { step, _ in
+            col().child(text("Step \(step)").key("value").size(Float(30 + step), 20))
+        }
+        let frame = rt.renderFrame(at: 0)
+        let glyphRects = frame.instances.map(\.rect)
+        let marks = frame.marks.map { $0 }
+        let reports = try #require(rt.nativeElementReports)
+        let initial = try #require(rt.element(byKey: "value"))
+        let hits = rt.hitGeometryByPath
+        let presented = rt.presentedRectByPath
+        let firstHit = try #require(hits[initial.path]?.rect)
+        let firstRect = try #require(presented[initial.path])
+        for step in 1...6 {
+            rt.update(at: Double(step)) { value, tx in value = step; tx.instant() }
+            _ = rt.renderFrame(at: Double(step))
+        }
+        let captured = try #require(reports.first { $0.path == initial.path }?.report(poses: [:]))
+        #expect(captured.text == "Step 0" && captured.rect == initial.rect)
+        #expect(rt.element(byKey: "value")?.text == "Step 6")
+        #expect(rt.presentedRectByPath[initial.path]?.width == 36)
+        #expect(hits[initial.path]?.rect == firstHit && presented[initial.path] == firstRect)
+        #expect(frame.instances.map(\.rect) == glyphRects && frame.marks == marks)
+    }
+
     @Test("A single query reads only its matching report, and each paint owns its geometry and content")
     func lazyInspectionAcrossCommit() throws {
         let rt = Runtime(state: false, viewport: Vec2(200, 100)) { changed, _ -> El<Bool> in
