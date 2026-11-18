@@ -15,6 +15,29 @@ struct ElLayoutAndDirectionCloseoutTests {
         #expect(source.keyLocation == "ui:🧪.swift:\(UInt.max):0")
     }
 
+    @Test("Rare styles retain independent values when copied, mutated, and cleared")
+    func rareStyleCopies() {
+        let animation = Anim<Float>(curve: .instant, delay: 0.25)
+        var original = El<Int>()
+        original.hoverMotionSpec = (animation, animation)
+        original.richStyleSpec = RichStyle()
+
+        var copy = original
+        copy.hoverMotionSpec?.enter.delay = 1
+        copy.richStyleSpec?.marker = .white
+        #expect(original.hoverMotionSpec?.enter.delay == 0.25)
+        #expect(original.richStyleSpec?.marker == nil)
+        #expect(copy.hoverMotionSpec?.enter.delay == 1)
+        #expect(copy.richStyleSpec?.marker == .white)
+
+        copy.hoverMotionSpec = nil
+        copy.richStyleSpec = nil
+        #expect(copy.hoverMotionSpec == nil)
+        #expect(copy.richStyleSpec == nil)
+        #expect(original.hoverMotionSpec != nil)
+        #expect(original.richStyleSpec != nil)
+    }
+
     @Test("Copied grid styles retain independent placement and compare by value")
     func gridStyleCopies() {
         func style() -> LayoutStyle {

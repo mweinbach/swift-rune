@@ -1168,6 +1168,26 @@ final class MemoLayoutChildren<State> {
     }
 }
 
+// Large optional values stay shared when an unrelated cold property changes.
+private final class ElColdValue<Value> {
+    let value: Value
+    init(_ value: Value) { self.value = value }
+}
+
+@propertyWrapper
+struct ElColdOptional<Value> {
+    private var storage: ElColdValue<Value>?
+
+    init(wrappedValue: Value?) {
+        storage = wrappedValue.map(ElColdValue.init)
+    }
+
+    var wrappedValue: Value? {
+        get { storage?.value }
+        set { storage = newValue.map(ElColdValue.init) }
+    }
+}
+
 final class ElColdData<State> {
     var memoLayoutChildren: MemoLayoutChildren<State>?
     var pixelSnapEnabled: Bool = true
@@ -1179,11 +1199,11 @@ final class ElColdData<State> {
     var scrollMarginPts: Float = 0
     var scrollAnchorEnabled: Bool = false
     var stickyConfig: StickyConfig? = nil
-    var growthSpec: GrowthSpec? = nil
+    @ElColdOptional var growthSpec: GrowthSpec? = nil
     var isStreaming: Bool = false
     var isArrivesWhole: Bool = false
     var joinedRowFaceKey: String?
-    var growthReveal: GrowthReveal?
+    @ElColdOptional var growthReveal: GrowthReveal?
     var textReveal: Float = -1.0
     var foldGlideSpec: FoldGlide? = nil
     var virtualEstimate: Float? = nil
@@ -1200,8 +1220,8 @@ final class ElColdData<State> {
     var isHoverGroup: Bool = false
     var hoverGroupShare: String? = nil
     var isHoverAlone: Bool = false
-    var hoverMotion: (enter: Anim<Float>, exit: Anim<Float>)? = nil
-    var hoverWithin: (enter: Anim<Float>, exit: Anim<Float>)? = nil
+    @ElColdOptional var hoverMotion: (enter: Anim<Float>, exit: Anim<Float>)? = nil
+    @ElColdOptional var hoverWithin: (enter: Anim<Float>, exit: Anim<Float>)? = nil
     var groupOpacity: (rest: Float, hovered: Float)? = nil
     var groupColor: Color? = nil
     var isDissolve: Bool = false
@@ -1216,7 +1236,7 @@ final class ElColdData<State> {
     var noFocusRing: Bool = false
     var focusRequested: Bool = false
     var focusHighlightColor: Color? = nil
-    var focusWithinRing: (width: Float, offset: Float, color: Color)? = nil
+    @ElColdOptional var focusWithinRing: (width: Float, offset: Float, color: Color)? = nil
     var focusWithinFlat: Bool = false
     var focusFollows: Bool = false
 
@@ -1230,7 +1250,7 @@ final class ElColdData<State> {
     var itemSelected: Bool = false
     var a11yDescriptionStorage: CowText? = nil
     var a11yValue: String? = nil
-    var a11yRange: A11yRange? = nil
+    @ElColdOptional var a11yRange: A11yRange? = nil
     var a11yChecked: A11yChecked? = nil
     var a11yDisabled: Bool = false
     var isA11yHidden: Bool = false
@@ -1263,7 +1283,7 @@ final class ElColdData<State> {
     var pixelsFitMode: SurfaceFit? = nil
     var surfacePayload: (surface: NativeSurface, fit: SurfaceFit)? = nil
     var surfacePlace: SurfacePlace = .centered
-    var gradient: Gradient? = nil
+    @ElColdOptional var gradient: Gradient? = nil
     var borderSides: Sides? = nil
     var dashedBorder: (dash: Float, gap: Float, phase: Float)? = nil
 
@@ -1274,11 +1294,11 @@ final class ElColdData<State> {
     var enterDelay: Float = 0
     var hasInstantChanges: Bool = false
     var hasAnimatedChanges: Bool = false
-    var loopingSpec: LoopSpec? = nil
+    @ElColdOptional var loopingSpec: LoopSpec? = nil
     var flightId: String? = nil
     var flightCrop: Bool = false
     var flightSpring: Spring? = nil
-    var terminalGridPayload: TerminalGrid? = nil
+    @ElColdOptional var terminalGridPayload: TerminalGrid? = nil
     var explicitDir: Direction? = nil
     var isUnmirrored: Bool = false
     var mirrorInRtl: Bool = false
@@ -1289,8 +1309,8 @@ final class ElColdData<State> {
     var isImeCursor: Bool = false
     var optionAsAlt: Bool = false
     var spellcheck: Bool = false
-    var richStyle: RichStyle? = nil
-    var pillColors: (bg: Color, fg: Color?)? = nil
+    @ElColdOptional var richStyle: RichStyle? = nil
+    @ElColdOptional var pillColors: (bg: Color, fg: Color?)? = nil
     var pillIconLookup: ((String) -> SVGIcon?)? = nil
     var pillStyleLookup: ((String) -> PillStyle)? = nil
     var fieldSingleLine: Bool?
@@ -1303,14 +1323,14 @@ final class ElColdData<State> {
     var paintContain: Vec2? = nil
     var motionSnapsEnabled: Bool = false
     var isRaised: Bool = false
-    var offsetMotionAnim: Anim<Vec2>? = nil
-    var opacityMotionAnim: Anim<Float>? = nil
-    var scaleMotionAnim: Anim<Vec2>? = nil
-    var rotateMotionAnim: Anim<Float>? = nil
+    @ElColdOptional var offsetMotionAnim: Anim<Vec2>? = nil
+    @ElColdOptional var opacityMotionAnim: Anim<Float>? = nil
+    @ElColdOptional var scaleMotionAnim: Anim<Vec2>? = nil
+    @ElColdOptional var rotateMotionAnim: Anim<Float>? = nil
     var blurMotionOverride: BlurMotion?
     var textCaseValue: TextCase? = nil
     var spanRings: [(range: Range<Int>, color: Color, width: Float)]? = nil
-    var advanceInRun: (run: TextRun, byteOffset: Int)? = nil
+    @ElColdOptional var advanceInRun: (run: TextRun, byteOffset: Int)? = nil
     var isTruncateFadeEnabled: Bool = false
     var truncateFadeEm: Float = 1.5
     var isolates: [(range: Range<Int>, dir: Direction)]? = nil
@@ -1350,11 +1370,11 @@ final class ElColdData<State> {
         c.scrollMarginPts = scrollMarginPts
         c.scrollAnchorEnabled = scrollAnchorEnabled
         c.stickyConfig = stickyConfig
-        c.growthSpec = growthSpec
+        c._growthSpec = _growthSpec
         c.isStreaming = isStreaming
         c.isArrivesWhole = isArrivesWhole
         c.joinedRowFaceKey = joinedRowFaceKey
-        c.growthReveal = growthReveal
+        c._growthReveal = _growthReveal
         c.foldGlideSpec = foldGlideSpec
         c.virtualEstimate = virtualEstimate
         c.virtualRowsSource = virtualRowsSource
@@ -1369,8 +1389,8 @@ final class ElColdData<State> {
         c.isHoverGroup = isHoverGroup
         c.hoverGroupShare = hoverGroupShare
         c.isHoverAlone = isHoverAlone
-        c.hoverMotion = hoverMotion
-        c.hoverWithin = hoverWithin
+        c._hoverMotion = _hoverMotion
+        c._hoverWithin = _hoverWithin
         c.groupOpacity = groupOpacity
         c.groupColor = groupColor
         c.isDissolve = isDissolve
@@ -1389,7 +1409,7 @@ final class ElColdData<State> {
         c.noFocusRing = noFocusRing
         c.focusRequested = focusRequested
         c.focusHighlightColor = focusHighlightColor
-        c.focusWithinRing = focusWithinRing
+        c._focusWithinRing = _focusWithinRing
         c.focusWithinFlat = focusWithinFlat
         c.focusFollows = focusFollows
         c.a11yLabelStorage = a11yLabelStorage
@@ -1402,7 +1422,7 @@ final class ElColdData<State> {
         c.itemSelected = itemSelected
         c.a11yDescriptionStorage = a11yDescriptionStorage
         c.a11yValue = a11yValue
-        c.a11yRange = a11yRange
+        c._a11yRange = _a11yRange
         c.a11yChecked = a11yChecked
         c.a11yDisabled = a11yDisabled
         c.isA11yHidden = isA11yHidden
@@ -1439,7 +1459,7 @@ final class ElColdData<State> {
         c.pixelsFitMode = pixelsFitMode
         c.surfacePayload = surfacePayload
         c.surfacePlace = surfacePlace
-        c.gradient = gradient
+        c._gradient = _gradient
         c.borderSides = borderSides
         c.dashedBorder = dashedBorder
         c.anchor = anchor
@@ -1449,11 +1469,11 @@ final class ElColdData<State> {
         c.enterDelay = enterDelay
         c.hasInstantChanges = hasInstantChanges
         c.hasAnimatedChanges = hasAnimatedChanges
-        c.loopingSpec = loopingSpec
+        c._loopingSpec = _loopingSpec
         c.flightId = flightId
         c.flightCrop = flightCrop
         c.flightSpring = flightSpring
-        c.terminalGridPayload = terminalGridPayload
+        c._terminalGridPayload = _terminalGridPayload
         c.explicitDir = explicitDir
         c.isUnmirrored = isUnmirrored
         c.mirrorInRtl = mirrorInRtl
@@ -1468,8 +1488,8 @@ final class ElColdData<State> {
         c.isImeCursor = isImeCursor
         c.optionAsAlt = optionAsAlt
         c.spellcheck = spellcheck
-        c.richStyle = richStyle
-        c.pillColors = pillColors
+        c._richStyle = _richStyle
+        c._pillColors = _pillColors
         c.pillIconLookup = pillIconLookup
         c.pillStyleLookup = pillStyleLookup
         c.fieldSingleLine = fieldSingleLine
@@ -1482,14 +1502,14 @@ final class ElColdData<State> {
         c.paintContain = paintContain
         c.motionSnapsEnabled = motionSnapsEnabled
         c.isRaised = isRaised
-        c.offsetMotionAnim = offsetMotionAnim
-        c.opacityMotionAnim = opacityMotionAnim
-        c.scaleMotionAnim = scaleMotionAnim
-        c.rotateMotionAnim = rotateMotionAnim
+        c._offsetMotionAnim = _offsetMotionAnim
+        c._opacityMotionAnim = _opacityMotionAnim
+        c._scaleMotionAnim = _scaleMotionAnim
+        c._rotateMotionAnim = _rotateMotionAnim
         c.blurMotionOverride = blurMotionOverride
         c.textCaseValue = textCaseValue
         c.spanRings = spanRings
-        c.advanceInRun = advanceInRun
+        c._advanceInRun = _advanceInRun
         c.isTruncateFadeEnabled = isTruncateFadeEnabled
         c.truncateFadeEm = truncateFadeEm
         c.isolates = isolates
