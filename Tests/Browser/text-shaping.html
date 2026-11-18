@@ -33,6 +33,26 @@ try {
         }
     }
     await runeTextFontsReady(memory);
+    {
+        const source = utf8.encode('office é'), settings = utf8.encode('liga=0');
+        bytes.set(source, 512);
+        bytes.set(utf8.encode('Inter'), 256);
+        bytes.set(settings, 1024);
+        function configuredMetrics(defer) {
+            bytes.fill(0xa5, 0, 40);
+            const id = host.create(512, source.length, 256, 5, 16, 400, 0, 0, 1, 0, 40, defer);
+            try {
+                check(id, 'Configured line failed to open');
+                if (defer) check(bytes.subarray(0, 40).every(b => b === 0xa5), 'Measured the unconfigured font');
+                host.configure(id, 0, 0, 1024, settings.length, 0, 0, 0, 40);
+                return bytes.slice(0, 40);
+            } finally {
+                host.release(id);
+            }
+        }
+        const original = configuredMetrics(0), deferred = configuredMetrics(1);
+        check(original.every((b, i) => b === deferred[i]), 'Configured text metrics changed');
+    }
     // A metrics-only line should be usable without forcing DOM layout. Range coordinates must
     // stay relative to the span when a later configuration changes its position.
     const boundsDescriptor = Object.getOwnPropertyDescriptor(HTMLSpanElement.prototype, 'getBoundingClientRect');

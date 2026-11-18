@@ -20,7 +20,7 @@ IMPORT("word_range") extern void browser_word_range(const uint8_t *, int32_t, in
 IMPORT("dictionary_lines") extern void browser_dictionary_lines(const uint8_t *, int32_t, uint8_t *);
 IMPORT("dictionary_words") extern void browser_dictionary_words(const uint8_t *, int32_t, uint8_t *);
 IMPORT("create") extern uint32_t browser_create(const char *, int32_t, const char *, int32_t,
-    float, int32_t, int32_t, int32_t, int32_t, RuneDesktopLineMetrics *, uint32_t);
+    float, int32_t, int32_t, int32_t, int32_t, RuneDesktopLineMetrics *, uint32_t, int32_t);
 IMPORT("release") extern void browser_release(uint32_t);
 IMPORT("extract_ink") extern uint32_t browser_extract_ink(uint32_t, int32_t, int32_t,
     RuneDesktopLineMetrics *, uint32_t);
@@ -72,13 +72,24 @@ int32_t rune_browser_text_platform(void) {
 
 RuneDesktopLine *rune_desktop_line_create(const char *text, int32_t length, const char *family,
     float size, int32_t weight, int32_t italic, int32_t mono, int32_t direction) {
+    return rune_browser_line_create_configured(text, length, family, size, weight, italic, mono,
+        direction, NULL, NULL, NULL);
+}
+
+RuneDesktopLine *rune_browser_line_create_configured(const char *text, int32_t length, const char *family,
+    float size, int32_t weight, int32_t italic, int32_t mono, int32_t direction,
+    const char *language, const char *features, const char *variations) {
 #ifdef RUNE_BROWSER_TEXT
     if (!text || length < 0 || !isfinite(size) || size <= 0 || size > 4096) return NULL;
     RuneDesktopLine *line = calloc(1, sizeof *line);
     if (!line) return NULL;
+    const int configured = (language && *language) || (features && *features) || (variations && *variations);
     line->handle = browser_create(text, length, family, family ? (int32_t)strlen(family) : 0,
-        size, weight, italic, mono, direction, &line->metrics, sizeof(line->metrics));
-    if (line->handle) return line;
+        size, weight, italic, mono, direction, &line->metrics, sizeof(line->metrics), configured);
+    if (line->handle) {
+        if (configured) rune_desktop_line_configure(line, language, features, variations);
+        return line;
+    }
     free(line);
 #endif
     return NULL;

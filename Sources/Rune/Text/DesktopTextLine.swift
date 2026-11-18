@@ -488,6 +488,9 @@ private final class DesktopTextRun {
         #elseif os(Linux)
         let result = rune_linux_line_create_configured(text, length, font.family, font.sizePx,
             font.weight, font.italic ? 1 : 0, font.mono ? 1 : 0, font.direction, font.language, font.features, font.variations)
+        #elseif os(WASI)
+        let result = rune_browser_line_create_configured(text, length, font.family, font.sizePx,
+            font.weight, font.italic ? 1 : 0, font.mono ? 1 : 0, font.direction, font.language, font.features, font.variations)
         #else
         let result = rune_desktop_line_create(text, length, font.family, font.sizePx,
             font.weight, font.italic ? 1 : 0, font.mono ? 1 : 0, font.direction)
@@ -496,7 +499,7 @@ private final class DesktopTextRun {
         self.textKey = TextUTF8Key(text)
         self.font = font
         native = line
-        #if !os(Linux) && !os(Windows)
+        #if !os(Linux) && !os(Windows) && !os(WASI)
         if !font.language.isEmpty || !font.features.isEmpty || !font.variations.isEmpty {
             rune_desktop_line_configure(line, font.language, font.features, font.variations)
         }
