@@ -241,6 +241,19 @@ try {
                 check(bytes.subarray(4096, 4096 + width * height).every((alpha, i) => alpha === pixels[4 * i + 3]),
                     'Retained coverage differed from the native foreground ' + reference.fillStyle);
             }
+            // Adjacent atlas cells reuse the scratch bitmap at different offsets
+            // and sizes. Include a blank tile after a larger ownership probe.
+            for (const [x, w, h] of [[5, 13, 21], [0, 275, 132], [200, 11, 18], [-9, 73, 22], [0, width, height]]) {
+                check(host.mask(id, x, 0, w, h, 4096), 'Missing cropped tile');
+                canvas.width = w;
+                canvas.height = h;
+                reference.font = '400 14px Inter';
+                reference.fillStyle = '#fff';
+                reference.fillText(sample, -x, data.getFloat32(4, true));
+                const pixels = reference.getImageData(0, 0, w, h).data;
+                check(bytes.subarray(4096, 4096 + w * h).every((alpha, i) => alpha === pixels[4 * i + 3]),
+                    'Resizing the scratch surface changed cropped coverage');
+            }
         } finally { host.release(id); }
         const mixedText = 'A 😀', input = utf8.encode(mixedText);
         bytes.set(input, 512);

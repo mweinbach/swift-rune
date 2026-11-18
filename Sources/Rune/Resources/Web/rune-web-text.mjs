@@ -480,11 +480,18 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         const last = line.tile;
         if (last && last.x === x && last.y === y && last.width === width && last.height === height && last.rgb === rgb) return last;
         const context = contextFor(line), canvas = context.canvas;
-        if (canvas.width !== width) canvas.width = width;
-        if (canvas.height !== height) canvas.height = height;
+        // A native tile is at most 256 × 128, plus one neighbor for filtering.
+        // Keep that working surface across cells. A larger ownership probe gets
+        // its requested size and releases the excess on return to ordinary tiles.
+        const w = canvas.width > 257 ? width : Math.max(canvas.width, width);
+        const h = canvas.height > 129 ? height : Math.max(canvas.height, height);
+        let dirty = w === canvas.width && h === canvas.height;
+        if (canvas.width !== w) canvas.width = w;
+        if (canvas.height !== h) canvas.height = h;
         applyFont(context, line);
         function paint(color) {
-            context.clearRect(0, 0, width, height);
+            if (dirty) context.clearRect(0, 0, w, h);
+            dirty = true;
             context.fillStyle = color;
             if (line.clip) {
                 context.save();
