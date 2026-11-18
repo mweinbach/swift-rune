@@ -258,8 +258,9 @@ function fixedPitchSource(doc, line) {
         face.weight !== '400' || face.style !== 'normal' || face.stretch !== 'normal' ||
         cssFamilyKey(face.family) !== (aliasKey ?? key) || source.face.unicodeRange.toUpperCase() !== 'U+0-10FFFF' ||
         face.unicodeRange.toUpperCase() !== 'U+0-10FFFF' || face.sizeAdjust !== '100%' ||
-        face.variationSettings !== 'normal' ||
-        (face.featureSettings !== 'normal' && face.featureSettings !== '"liga" 0, "clig" 0, "calt" 0, "dlig" 0')) return null;
+        face.variationSettings !== 'normal') return null;
+    const features = face.featureSettings;
+    if (features !== 'normal' && features !== '"liga" 0, "clig" 0, "calt" 0, "dlig" 0') return null;
     for (const pageFace of doc.fonts) {
         if (pageFace === face || pageFace === source.face) continue;
         const name = cssFamilyKey(pageFace.family);

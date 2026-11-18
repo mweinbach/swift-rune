@@ -225,6 +225,43 @@ try {
         document.fonts.add(competing);
         try { compare('123 9!', { tokenAllowed: false }); } finally { document.fonts.delete(competing); }
         compare('123 9!');
+        if (canVerifyFace) {
+            const foreignFamily = 'Fixture Unrelated';
+            const peer = await new FontFace(foreignFamily, replacement).load();
+            competing.family = foreignFamily;
+            document.fonts.add(peer);
+            document.fonts.add(competing);
+            const before = new Set(document.fonts);
+            const id = host.create(512, put('123 9!', 512), 64, put('IBM Plex Mono', 64), 26, 400, 0, 1, 1, 0, 40);
+            try {
+                host.configure(id, 0, 0, 128, put(defaults, 128), 0, 0, 0, 40);
+                const alias = [...document.fonts].find(face => !before.has(face));
+                const token = host.has_color(id, 2), count = document.fonts.size;
+                if (!alias || token < 3) throw Error('Expected a certified configured line');
+                function checkLiveFace(eligible) {
+                    const ink = host.has_color(id, 1), geometry = host.has_color(id, 2);
+                    if (document.fonts.size !== count || ink !== (eligible ? 2 : 0) || geometry !== (eligible ? token : 0)) {
+                        throw Error('Live font mutation produced incorrect capabilities for ' + competing.family + ' / ' + alias.featureSettings);
+                    }
+                }
+                checkLiveFace(true);
+                for (const family of [alias.family, registered.family]) {
+                    competing.family = family;
+                    checkLiveFace(false);
+                    competing.family = foreignFamily;
+                    checkLiveFace(true);
+                }
+                const settings = alias.featureSettings;
+                alias.featureSettings = '"liga" 1';
+                checkLiveFace(false);
+                alias.featureSettings = settings;
+                checkLiveFace(true);
+            } finally {
+                host.release(id);
+                document.fonts.delete(competing);
+                document.fonts.delete(peer);
+            }
+        }
         // A new raw registration occupies the same width/weight slot and CSS family.
         // Only verified URL assets have the host's fixed-pitch geometry certificate.
         const original = await (await fetch('../../Sources/Rune/Resources/Fonts/IBMPlexMono-Regular.ttf')).arrayBuffer();
