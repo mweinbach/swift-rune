@@ -479,6 +479,13 @@ struct DiffParityTests {
         }
         let fold = try #require(find(tree, "g-fold"))
         #expect(fold.label == "Collapse file" && fold.isExpanded == true && fold.actions.contains(.collapse))
+        let header = try #require(rt.element(byKey: "g-header"))
+        let bottom = try #require(rt.element(byKey: "g-header-bottom"))
+        #expect(bottom.rect == [header.rect[0], header.rect[1] + header.rect[3] - 1, header.rect[2], 1])
+        #expect(find(tree, "g-header-bottom") == nil)
+        let snapshot = try RuneRef.render(rt.frame(at: 0))
+        let stripeY = Int((bottom.rect[1] + 0.5) * scale)
+        #expect((0..<snapshot.width).allSatisfy { snapshot.pixel(x: $0, y: stripeY) == SIMD4(31, 32, 33, 255) })
 
         #expect(clickElement(rt, key: "g-mode", at: 0.1))
         _ = rt.frame(at: 0.2)
@@ -2613,6 +2620,8 @@ struct DiffParityTests {
             wordBg: wordBg
         )
         #expect(spans.count == 4)
+        // The line supplies the code font. Syntax and changed-word ranges add ink only.
+        #expect(spans.allSatisfy { !$0.monospace })
         #expect(spans[0].text == "foo" && spans[0].color == kwColor && spans[0].background == nil)
         #expect(spans[1].text == "bar" && spans[1].color == kwColor && spans[1].background == wordBg)
         #expect(spans[2].text == "ba" && spans[2].color == strColor && spans[2].background == wordBg)

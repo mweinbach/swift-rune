@@ -3173,7 +3173,6 @@ public struct DiffView<State>: Sendable {
             .itemsCenter()
             .justifyBetween()
             .bg(k.c.layer01)
-            .borderSides(bottom: 1, color: k.c.borderWeak)
             .child(
                 El<State>(direction: .row)
                     .gap(8)
@@ -3182,6 +3181,11 @@ public struct DiffView<State>: Sendable {
                     .child(statusBadge)
             )
             .child(actionsRow)
+        let divider = El<State>(direction: .column).h(1).bg(k.c.borderWeak).a11yHidden()
+        if fileIndex > 0 && st.stickyFile != fileIndex {
+            hdr = hdr.child(divider.key("\(prefix)-header-top").pin(top: 0, right: 0, left: 0))
+        }
+        hdr = hdr.child(divider.key("\(prefix)-header-bottom").pin(right: 0, bottom: 0, left: 0))
         if stickyLeft { hdr = hdr.stickyLeft(0) }
         return if let fixedWidth { hdr.w(fixedWidth) } else { hdr.wFull() }
     }
@@ -3992,7 +3996,6 @@ internal enum DiffViewHelpers: Sendable {
                 }
             }
 
-
             let startIdx = utf8.index(utf8.startIndex, offsetBy: a)
             let endIdx = utf8.index(utf8.startIndex, offsetBy: b)
             let textSlice = String(decoding: utf8[startIdx..<endIdx], as: UTF8.self)
@@ -4003,7 +4006,7 @@ internal enum DiffViewHelpers: Sendable {
                last.weight == weight {
                 spans[spans.count - 1].text += textSlice
             } else {
-                spans.append(TextSpan(textSlice, color: fg, background: bg, weight: weight, monospace: true))
+                spans.append(TextSpan(textSlice, color: fg, background: bg, weight: weight))
             }
         }
 
