@@ -2866,7 +2866,9 @@ public struct DiffView<State>: Sendable {
             let diff = st.files[file]
             let section = index.sections[file]
             let prefix = filePrefix(file)
-            let shell = El<State>(direction: .column).wFull().shrink(0)
+            // This keyed layout shell preserves the model identity for virtualization.
+            // Its content carries the accessible role, name, and position within the list.
+            let shell = El<State>(direction: .column).wFull().shrink(0).role(.presentation)
             let row: El<State>
             switch entry.kind {
             case .header:
@@ -2895,10 +2897,10 @@ public struct DiffView<State>: Sendable {
                 // Give layout this height directly so remounts can skip measuring its subtree.
                 if gutterFitsCode, case .unified(let line, _, _) = section.rows[local], !line.noNewline,
                    line.text.utf8.allSatisfy({ $0 == 9 || (32...126).contains($0) }) {
-                    return shell.h(lineH).child(row.h(lineH))
+                    return shell.h(lineH).child(row.h(lineH).positionInSet(i + 1, size: entries.count))
                 }
             }
-            return shell.child(row)
+            return shell.child(row.positionInSet(i + 1, size: entries.count))
         }).virtualRowsVersion(index.version)
         if hostState != nil {
             list = list.onVisibleRows { [get, set, onVisibleFileHandler] host, visible in
@@ -3057,7 +3059,7 @@ public struct DiffView<State>: Sendable {
 
         let foldBtn = El<State>(direction: .row)
             .key("\(prefix)-fold")
-            .role(.button)
+            .role(.button).label(collapsed ? "Expand file" : "Collapse file").expanded(!collapsed)
             .focusable()
             .itemsCenter()
             .gap(6)
@@ -3362,19 +3364,14 @@ public struct DiffView<State>: Sendable {
         let point = number.map { DiffLineRef(side: side, line: UInt32($0)) }
             ?? unifiedLine?.lineNumber(for: opposite).map { DiffLineRef(side: opposite, line: $0) }
         let cell: El<State>
-        if unifiedLine == nil, let point, let onCommentHandler {
-            cell = numberCommentCell(
-                labelStr: labelStr, point: point, file: file, cellKey: cellKey, width: width, lineH: lineH, ink: colors.number,
-                centeredIcon: useSingleNodeNumbers, onCommentHandler: onCommentHandler
-            )
-        } else if useSingleNodeNumbers && !labelStr.isEmpty {
+        if useSingleNodeNumbers && !labelStr.isEmpty {
             cell = text(labelStr).font(kit.ty.diffCodeFont).noWrap().textAlign(.trailing).color(colors.number)
                 .key(cellKey).w(width).minH(lineH).selfStretch().px(8).shrink(0)
         } else {
             cell = numberLabelCell(labelStr: labelStr, cellKey: cellKey, width: width, lineH: lineH, ink: colors.number)
         }
         // In unified mode the enclosing sticky gutter already paints this fill.
-        let painted = unifiedLine == nil ? cell.bg(colors.gutter) : cell
+        let painted = (unifiedLine == nil ? cell.bg(colors.gutter) : cell).a11yHidden()
         guard let point else { return painted }
         return attachNumberCellHandlers(painted, point: point, rowIdx: rowIdx, file: file, side: side, lineH: lineH)
     }
@@ -3385,23 +3382,6 @@ public struct DiffView<State>: Sendable {
             .selfStretch().px(8).justifyEnd().itemsStart().shrink(0).color(ink)
         guard !labelStr.isEmpty else { return cell }
         return cell.child(text(labelStr).font(kit.ty.diffCodeFont).color(ink).noWrap().shrink(0))
-    }
-
-    @inline(never)
-    private func numberCommentCell(
-        labelStr: String,
-        point: DiffLineRef,
-        file: Int,
-        cellKey: String,
-        width: Float,
-        lineH: Float,
-        ink: Color,
-        centeredIcon: Bool,
-        onCommentHandler: @escaping @Sendable (inout State, DiffLineRange, inout Tx) -> Void
-    ) -> El<State> {
-        numberLabelCell(labelStr: labelStr, cellKey: cellKey, width: width, lineH: lineH, ink: ink)
-            .child(commentButton(key: "\(cellKey)-plus", file: file, point: point, centeredIcon: centeredIcon, onComment: onCommentHandler)
-                .absolute(x: width - 10, y: 2))
     }
 
     @inline(never)
@@ -3424,6 +3404,7 @@ public struct DiffView<State>: Sendable {
             .rounded(4)
             .bg(kit.c.info.icon)
             .cursor(.pointer)
+            .groupOpacity(0, 1)
             .role(.button)
             .label("Comment on this line")
             .onClick { [get, forcedMode] (s: inout State, tx: inout Tx) in
@@ -3513,7 +3494,7 @@ public struct DiffView<State>: Sendable {
         case .deletion: kit.c.danger.icon
         case .context, nil: .transparent
         }
-        return El<State>(direction: .row).w(DiffLayout.barWidth).h(height).shrink(0).bg(color)
+        return El<State>(direction: .row).w(DiffLayout.barWidth).h(height).shrink(0).bg(color).a11yHidden()
     }
 
     private func noNewlineNote() -> El<State> {
@@ -3574,11 +3555,8 @@ public struct DiffView<State>: Sendable {
             set(&s, d)
             if !changedSide { tx.liveOnly() }
         }
-        var content = codeEl
-        if wrap || line.noNewline {
-            content = El<State>(direction: .column).child(codeEl.key("\(cellKey)-text"))
-            if line.noNewline { content = content.child(noNewlineNote()) }
-        }
+        var content = El<State>(direction: .column).child(codeEl.key("\(cellKey)-text"))
+        if line.noNewline { content = content.child(noNewlineNote()) }
         return content.key(cellKey).grow(1).minW(0).minH(DiffLayout.lineHeight)
             .pl(DiffLayout.codeLeading).pr(DiffLayout.codeTrailing).onHoverChange(hoverHandler)
     }
@@ -3633,8 +3611,7 @@ public struct DiffView<State>: Sendable {
             let sideKey = point.side == .new ? "n" : "o"
             gutter = gutter.child(
                 commentButton(key: "\(prefix)-\(sideKey)-\(rowIdx)-plus", file: file, point: point, centeredIcon: useSingleNodeNumbers, onComment: onCommentHandler)
-                    .groupOpacity(0, 1)
-                    .absolute(x: 3 + 2 * gutterWidth - 10, y: 2)
+                    .absolute(x: DiffLayout.barWidth + 2 * gutterWidth - 10, y: 2)
             )
         }
         if !st.wraps { gutter = gutter.stickyLeft(0) }
@@ -3651,6 +3628,17 @@ public struct DiffView<State>: Sendable {
             .hoverGroup()
             .child(gutter)
             .child(codeEl)
+    }
+
+    private func splitPane(_ content: El<State>, numberKey: String, side: DiffSide, line: DiffLine,
+                           file: Int, gutterWidth: Float, centeredIcon: Bool) -> El<State> {
+        let pane = content.role(.listItem).label(DiffViewHelpers.rowLabel(line, side: side))
+            .hover(kit.alpha(kit.c.textBase, kit.dark ? 0.06 : 0.035)).hoverGroup()
+        guard let onCommentHandler, let number = line.lineNumber(for: side) else { return pane }
+        let point = DiffLineRef(side: side, line: number)
+        return pane.child(commentButton(key: "\(numberKey)-plus", file: file, point: point,
+                                        centeredIcon: centeredIcon, onComment: onCommentHandler)
+            .absolute(x: DiffLayout.barWidth + gutterWidth - 10, y: 2))
     }
 
     private func buildSplitPairRow(
@@ -3696,8 +3684,10 @@ public struct DiffView<State>: Sendable {
         return El<State>(direction: .row)
             .key("\(prefix)-srow-\(rowIdx)")
             .wFull()
-            .child(leftPane.label(DiffViewHelpers.rowLabel(oldLine)))
-            .child(rightPane.label(DiffViewHelpers.rowLabel(newLine)))
+            .child(splitPane(leftPane, numberKey: "\(prefix)-so-\(rowIdx)", side: .old, line: oldLine,
+                                file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers))
+            .child(splitPane(rightPane, numberKey: "\(prefix)-sn-\(rowIdx)", side: .new, line: newLine,
+                                file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers))
     }
 
     private func buildSplitOnlyRow(
@@ -3737,8 +3727,10 @@ public struct DiffView<State>: Sendable {
                 .child(numberCell(cellKey: "\(prefix)-cn-\(rowIdx)", number: line.newNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, colors: newColors))
                 .child(rightCode)
             return El<State>(direction: .row).key("\(prefix)-crow-\(rowIdx)").wFull()
-                .child(leftPane.label(DiffViewHelpers.rowLabel(line, side: .old)))
-                .child(rightPane.label(DiffViewHelpers.rowLabel(line, side: .new)))
+                .child(splitPane(leftPane, numberKey: "\(prefix)-co-\(rowIdx)", side: .old, line: line,
+                                file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers))
+                .child(splitPane(rightPane, numberKey: "\(prefix)-cn-\(rowIdx)", side: .new, line: line,
+                                file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers))
 
         case .deletion:
             let colors = palette.row(line.kind, selected: st.rowSelected(rowIdx, file: file, side: .old))
@@ -3749,7 +3741,8 @@ public struct DiffView<State>: Sendable {
                 .child(numberCell(cellKey: "\(prefix)-do-\(rowIdx)", number: line.oldNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, colors: colors))
                 .child(code)
             let row = El<State>(direction: .row).key("\(prefix)-drow-\(rowIdx)").wFull()
-            let content = leftPane.label(DiffViewHelpers.rowLabel(line, side: .old))
+            let content = splitPane(leftPane, numberKey: "\(prefix)-do-\(rowIdx)", side: .old, line: line,
+                                    file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers)
             if st.singleColumn(file: file) == .old { return row.child(content.wFull()) }
             return row.child(content).child(emptySide("\(prefix)-dempty-\(rowIdx)", palette.empty))
 
@@ -3762,7 +3755,8 @@ public struct DiffView<State>: Sendable {
                 .child(numberCell(cellKey: "\(prefix)-an-\(rowIdx)", number: line.newNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, colors: colors))
                 .child(code)
             let row = El<State>(direction: .row).key("\(prefix)-arow-\(rowIdx)").wFull()
-            let content = rightPane.label(DiffViewHelpers.rowLabel(line, side: .new))
+            let content = splitPane(rightPane, numberKey: "\(prefix)-an-\(rowIdx)", side: .new, line: line,
+                                    file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers)
             if st.singleColumn(file: file) == .new { return row.child(content.wFull()) }
             return row.child(emptySide("\(prefix)-aempty-\(rowIdx)", palette.empty).borderSides(right: 1, color: kit.c.borderWeak))
                 .child(content)

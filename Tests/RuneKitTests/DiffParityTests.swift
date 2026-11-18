@@ -5,7 +5,7 @@ import Rune
 
 @Suite("RuneKit Diff Full Parity Tests (Increment 3)")
 struct DiffParityTests {
-    // Rust's diff test walks each /code container once. Wrapped code has a separate text child.
+    // Rust's diff test walks each /code container once, excluding its text child.
     private func isCodeCell(_ element: ElementInfo) -> Bool {
         guard !element.exiting, let key = element.key, !key.hasSuffix("-text") else { return false }
         return ["dv-code-", "dv-scode-", "dv-ccode-", "dv-dcode-", "dv-acode-"].contains(where: key.hasPrefix)
@@ -437,6 +437,71 @@ struct DiffParityTests {
         #expect(clickElement(rt, key: "g-n-0-plus", at: 1.25))
         _ = rt.frame(at: 1.27)
         #expect(rt.state.lastSelection == oldRange)
+    }
+
+    @Test("Diff accessibility exposes the row, its position, and the active pane's comment", arguments: [Float(1), 1.25, 2])
+    @MainActor
+    func accessibleRowsAndSplitComments(scale: Float) throws {
+        let file = FileDiff.fromTexts(path: "example.txt", old: "first\nbefore\nlast\n", new: "first\nafter\nlast\n")
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime(state: HostState(diff: DiffState(diff: file)), viewport: Vec2(620, 340), pixelScale: scale) { state, cx in
+            DiffView(key: "g", kit: kit, state: \HostState.diff)
+                .onComment { state, lines, _ in state.lastSelection = lines }
+                .build(state: state, cx: cx)
+        }
+        func find(_ root: AccessibilityNode, _ id: String) -> AccessibilityNode? {
+            if root.id == id { return root }
+            for child in root.children {
+                if let found = find(child, id) { return found }
+            }
+            return nil
+        }
+
+        _ = rt.frame(at: 0)
+        let tree = rt.accessibilitySnapshot()
+        let list = try #require(find(tree, "g-rows"))
+        let row = try #require(list.children.first { $0.id == "g-row-0" })
+        #expect(row.role == .listItem)
+        #expect(row.positionInSet == 1)
+        #expect(row.sizeOfSet == list.sizeOfSet)
+        #expect(find(tree, "g-o-0") == nil)
+        #expect(find(tree, "g-n-1") == nil)
+        #expect(find(row, "g-n-0-plus")?.role == .button)
+        let code = try #require(find(row, "g-code-0"))
+        let text = try #require(code.children.first)
+        #expect(code.role == .group && text.role == .text && text.label == "first")
+        #expect(text.frame.left == code.frame.left + 12)
+        #expect(text.frame.width == code.frame.width - 36)
+        let fold = try #require(find(tree, "g-fold"))
+        #expect(fold.label == "Collapse file" && fold.isExpanded == true && fold.actions.contains(.collapse))
+
+        #expect(clickElement(rt, key: "g-mode", at: 0.1))
+        _ = rt.frame(at: 0.2)
+        let split = rt.accessibilitySnapshot()
+        let splitRow = try #require(find(split, "g-crow-0"))
+        #expect(splitRow.children.map(\.role) == [.listItem, .listItem])
+        for (i, key) in ["g-co-0", "g-cn-0"].enumerated() {
+            #expect(find(splitRow, key) == nil)
+            #expect(find(splitRow.children[i], "\(key)-plus")?.label == "Comment on this line")
+        }
+
+        let rightCode = try #require(rt.element(byKey: "g-ccode-n-0"))
+        rt.pointerMove(to: Vec2(rightCode.rect[0] + 40, rightCode.rect[1] + 10), at: 0.3)
+        _ = rt.frame(at: 0.3)
+        _ = rt.frame(at: 1)
+        #expect(try #require(rt.element(byKey: "g-cn-0-plus")).opacity > 0.99)
+        #expect(try #require(rt.element(byKey: "g-co-0-plus")).opacity < 0.01)
+        #expect(clickElement(rt, key: "g-cn-0-plus", at: 1.1))
+        _ = rt.frame(at: 1.2)
+        #expect(rt.state.lastSelection == .line(DiffLineRef(side: .new, line: 1)))
+        #expect(clickElement(rt, key: "g-co-0", at: 1.3))
+        _ = rt.frame(at: 1.4)
+        #expect(rt.state.diff.selectedRange == .line(DiffLineRef(side: .old, line: 1)))
+
+        #expect(rt.accessibilityAction("g-fold", .collapse, at: 1.5))
+        _ = rt.frame(at: 1.6)
+        let collapsed = try #require(find(rt.accessibilitySnapshot(), "g-fold"))
+        #expect(collapsed.label == "Expand file" && collapsed.isExpanded == false && collapsed.actions.contains(.expand))
     }
 
     @Test("DiffView toggles fold/mode/wrap, expands gaps, and copies text through Runtime")
