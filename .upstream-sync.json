@@ -1,9 +1,9 @@
 {
   "swiftExecutables" : 99,
   "swiftTargets" : 19,
-  "syncedAt" : "2026-11-17T23:42:02Z",
-  "syncedCommit" : "47eaa86eba751687597d0aaf6ee325baeecd4666",
-  "syncedCommitDate" : "2026-11-17T17:22:20-06:00",
-  "syncedCommitSubject" : "web: use rune::time in rune-knobs and frame-profile and exclude native-only process\/diagnostic paths on wasm32 (#1119)",
+  "syncedAt" : "2026-11-18T01:55:23Z",
+  "syncedCommit" : "532993160d5f41f288dc17f0f1b3fa28f38976ea",
+  "syncedCommitDate" : "2026-11-17T19:25:56-06:00",
+  "syncedCommitSubject" : "Image: disable external file and nested-SVG resolution in `usvg` (#1146)",
   "upstreamRepo" : "https:\/\/github.com\/anomalyco\/rune"
 }
