@@ -229,22 +229,38 @@ struct MacOSHostFrameTests {
     }
 
     @MainActor
-    @Test func idleWakeReplacesAndCancelsOneShot() async throws {
+    @Test func idleWakeReplacesAndCancelsOneShot() {
+        func servicePastShortDeadline() {
+            // The host's common-mode timer is serviced in the default run-loop mode.
+            // Wait for a later timer in that mode before inspecting the wake count.
+            let checkpoint = Timer(timeInterval: 0.03, repeats: false) { _ in }
+            RunLoop.main.add(checkpoint, forMode: .default)
+            while checkpoint.isValid {
+                _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+            }
+        }
+
         var ticks = 0
         let driver = MacOSDisplayLinkDriver { ticks += 1 }
-        let clock = ContinuousClock()
-        driver.sleep(until: 60, now: 0, timeScale: 1)
+        let distantDeadline = 3_600.0
+        driver.sleep(until: distantDeadline, now: 0, timeScale: 1)
         driver.sleep(until: 2, now: 1, timeScale: 100)
-        let timeout = clock.now.advanced(by: .seconds(1))
-        while ticks == 0 && clock.now < timeout {
-            try await Task.sleep(for: .milliseconds(5))
-        }
+        servicePastShortDeadline()
         #expect(ticks == 1)
         #expect(!driver.isRunning)
+
+        driver.sleep(until: 0.01, now: 0, timeScale: 1)
+        driver.sleep(until: distantDeadline, now: 0, timeScale: 1)
+        servicePastShortDeadline()
+        #expect(ticks == 1, "the superseded short deadline must stay canceled")
+
         driver.sleep(until: 0.01, now: 0, timeScale: 1)
         driver.stop()
+        servicePastShortDeadline()
+        #expect(ticks == 1, "stopping the driver must cancel its pending deadline")
+
         driver.sleep(until: 0, now: 0, timeScale: 0)
-        try await Task.sleep(for: .milliseconds(30))
+        servicePastShortDeadline()
         #expect(ticks == 1)
     }
 
