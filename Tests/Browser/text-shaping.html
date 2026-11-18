@@ -57,7 +57,12 @@ try {
     // stay relative to the span when a later configuration changes its position.
     const boundsDescriptor = Object.getOwnPropertyDescriptor(HTMLSpanElement.prototype, 'getBoundingClientRect');
     const spanBounds = HTMLSpanElement.prototype.getBoundingClientRect;
-    let reads = 0, measuredSpan, probe;
+    const createTextNode = Document.prototype.createTextNode;
+    let reads = 0, textNodes = 0, measuredSpan, probe;
+    Document.prototype.createTextNode = function (text) {
+        ++textNodes;
+        return createTextNode.call(this, text);
+    };
     HTMLSpanElement.prototype.getBoundingClientRect = function () {
         reads++;
         measuredSpan = this;
@@ -69,6 +74,7 @@ try {
         probe = host.create(512, 3, 256, 5, 16, 400, 0, 0, 1, 0, 40);
         host.configure(probe, 0, 0, 0, 0, 0, 0, 0, 40);
         check(reads === 0, 'Measuring forced a span layout');
+        check(textNodes === 0, 'A metrics-only browser line retained a DOM text node');
         const first = host.caret(probe, 1);
         host.caret(probe, 2);
         check(first > 0 && reads === 1, 'Caret queries did not share the span origin');
@@ -80,6 +86,7 @@ try {
             'The reconfigured line reused a stale span origin');
     } finally {
         if (probe) host.release(probe);
+        Document.prototype.createTextNode = createTextNode;
         if (boundsDescriptor) Object.defineProperty(HTMLSpanElement.prototype, 'getBoundingClientRect', boundsDescriptor);
         else delete HTMLSpanElement.prototype.getBoundingClientRect;
     }

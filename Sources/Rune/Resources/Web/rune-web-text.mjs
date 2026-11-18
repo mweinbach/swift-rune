@@ -240,8 +240,8 @@ function sourceFamilies(doc, line) {
 // contract. A user-installed face or an explicitly configured feature/axis
 // can change both glyph selection and the range geometry.
 function fixedPitchSource(doc, line) {
-    if (!line.chunks || line.chunks.length !== 1 || line.text.length > 256 ||
-        line.element.dir !== 'ltr' || line.element.lang || line.weight !== 400 || line.italic ||
+    if (!line.offsets || line.text.length > 256 ||
+        line.explicitDirection !== 'ltr' || line.lang || line.weight !== 400 || line.italic ||
         line.kerning !== 'normal' || /[^ -~]/.test(line.text) || !line.size) return null;
     const key = line.families[0]?.key;
     const sources = fontSources.get(doc)?.get(key);
@@ -294,7 +294,7 @@ function applyFont(context, line) {
     if ('fontKerning' in context) context.fontKerning = line.kerning;
     context.textAlign = 'left';
     context.textBaseline = 'alphabetic';
-    if ('lang' in context) context.lang = line.element.lang || 'inherit';
+    if ('lang' in context) context.lang = line.lang || 'inherit';
 }
 
 // Keep the original outlines and shaping tables. Adding space to each
@@ -343,7 +343,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
     const runs = new Map();
     const aliases = new Map();
     const fixedPitchStyles = new Map();
-    let next = 1, root, spans, explicitSpans, range, defaultContext, unkernedContext, svgClusterOwners;
+    let next = 1, root, spans, explicitSpans, range, familyStyle, defaultContext, unkernedContext, svgClusterOwners;
     const memory = () => getMemory().buffer;
     const view = () => new DataView(memory());
     const string = (ptr, n) => utf8.decode(new Uint8Array(memory(), ptr >>> 0, n));
@@ -409,6 +409,46 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         shelf.append(element);
     }
 
+    // Explicit direction and Canvas metrics do not need a DOM node. Materialize
+    // the original styled text only for a browser Range or an ownership probe.
+    function measurementSpan(line) {
+        if (line.element) return line.element;
+        const { text, explicitDirection } = line;
+        const element = doc.createElement('span');
+        element.style.cssText = 'all:initial;display:block;position:absolute;left:0;top:0;width:max-content;white-space:pre;font-kerning:normal;text-size-adjust:none;';
+        element.style.font = line.baseFont;
+        element.dir = explicitDirection ?? 'auto';
+        if (explicitDirection) element.style.setProperty('direction', explicitDirection, 'important');
+        if (line.lang !== undefined) {
+            element.lang = line.lang;
+            element.style.fontKerning = line.kerning;
+            if (line.configuredStack) element.style.font = line.font;
+        }
+        // Long Range queries on one browser text node rescan a long shaping run.
+        // Adjacent text nodes participate in the same inline shaping and bidi
+        // context. Bound each lookup without introducing element/style boundaries.
+        const chunks = [], chunkAt = new Uint32Array(text.length + 1);
+        let from = 0;
+        function append(to) {
+            const node = doc.createTextNode(text.slice(from, to));
+            element.append(node);
+            chunkAt.fill(chunks.length, from, to + 1);
+            chunks.push({ node, start: from });
+            from = to;
+        }
+        if (text.length > 256 && Intl.Segmenter) {
+            for (const { index, segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)) {
+                const end = index + segment.length;
+                if (end - from >= 64 && (/\s/u.test(segment) || end - from >= 128)) append(end);
+            }
+        }
+        if (from < text.length) append(text.length);
+        line.chunks = chunks;
+        line.chunkAt = chunkAt;
+        line.element = element;
+        return element;
+    }
+
     function fixedPitchStyleKey(line, source) {
         if (!explicitSpans) return null;
         // The closed shelf owns its span styles. Its host and the document
@@ -424,7 +464,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
     }
 
     function lineOrigin(line) {
-        mountSpan(line.element);
+        mountSpan(measurementSpan(line));
         return line.origin ??= line.element.getBoundingClientRect().left;
     }
 
@@ -540,7 +580,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         return unitBounds(line, line.offsets[start], line.offsets[end]);
     }
     function unitBounds(line, from, to) {
-        mountSpan(line.element);
+        mountSpan(measurementSpan(line));
         const first = line.chunks[line.chunkAt[from]], last = line.chunks[line.chunkAt[to > from ? to - 1 : to]];
         range.setStart(first.node, from - first.start);
         range.setEnd(last.node, to - last.start);
@@ -560,7 +600,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             text.style.fontKerning = line.kerning;
             text.style.direction = line.direction;
             text.style.whiteSpace = 'pre';
-            text.setAttribute('lang', line.element.lang);
+            text.setAttribute('lang', line.lang || '');
             text.textContent = line.text;
             svg.append(text);
             root.append(svg);
@@ -622,7 +662,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             stack.push(family.css);
         }
         if (!hasProbe) return null;
-        const element = line.element.cloneNode(true);
+        const element = measurementSpan(line).cloneNode(true);
         element.style.font = line.prefix + stack.join(', ');
         mountSpan(element);
         return line.probe = { element, origin: element.getBoundingClientRect().left,
@@ -711,7 +751,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         if (svgClusterOwners === undefined) {
             // Some SVG engines report independently measured character boxes
             // for a shaped lam-alef. Such boxes may even hit the next letter.
-            const sample = { text: 'لا', font: '40px serif', direction: 'rtl', kerning: 'normal', element: { lang: 'ar' } };
+            const sample = { text: 'لا', font: '40px serif', direction: 'rtl', kerning: 'normal', lang: 'ar' };
             svgClusterOwners = svgOwner(sample, 1) === 0;
             sample.svgText?.parentNode.remove();
         }
@@ -819,43 +859,17 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
                 root.inert = true;
                 // Shaping spans reset inherited styles. Keep their layout measurable while hiding the whole subtree.
                 root.style.cssText = 'all:initial;position:fixed;left:0;top:0;visibility:hidden;opacity:0;pointer-events:none;contain:layout style;';
+                familyStyle = doc.createElement('span').style;
                 defaultContext = doc.createElement('canvas').getContext('2d', { willReadFrequently: true });
             }
             if (!defaultContext) return 0;
             if (!root.isConnected) doc.documentElement.append(root);
-            const element = doc.createElement('span');
             const text = string(ptr, count);
             const family = string(familyPtr, familyLen);
-            const families = familyStack(element.style, family, mono ? 'monospace' : 'sans-serif');
+            const families = familyStack(familyStyle, family, mono ? 'monospace' : 'sans-serif');
             const prefix = (italic ? 'italic ' : '') + weight + ' ' + size + 'px ';
             const font = prefix + families.map(f => f.css).join(', ');
-            element.style.cssText = 'all:initial;display:block;position:absolute;left:0;top:0;width:max-content;white-space:pre;font-kerning:normal;text-size-adjust:none;';
-            element.style.font = font;
             const explicitDirection = direction === 2 ? 'rtl' : direction === 1 ? 'ltr' : null;
-            element.dir = explicitDirection ?? 'auto';
-            // The DOM range and Canvas must use Rune's requested base direction,
-            // including when the page supplies its own text direction rules.
-            if (explicitDirection) element.style.setProperty('direction', explicitDirection, 'important');
-            // Long Range queries on one browser text node rescan a long shaping run.
-            // Adjacent text nodes participate in the same inline shaping and bidi
-            // context. Bound each lookup without introducing element/style boundaries.
-            const chunks = [], chunkAt = new Uint32Array(text.length + 1);
-            let from = 0;
-            function append(to) {
-                const node = doc.createTextNode(text.slice(from, to));
-                element.append(node);
-                chunkAt.fill(chunks.length, from, to + 1);
-                chunks.push({ node, start: from });
-                from = to;
-            }
-            if (text.length > 256 && Intl.Segmenter) {
-                for (const { index, segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)) {
-                    const end = index + segment.length;
-                    if (end - from >= 64 && (/\s/u.test(segment) || end - from >= 128)) append(end);
-                }
-            }
-            if (from < text.length) append(text.length);
-            if (!explicitDirection) mountSpan(element);
             const offsets = new Uint32Array(count + 1);
             let byte = 0, units = 0;
             for (const scalar of text) {
@@ -869,8 +883,11 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             const hasColor = families.some(f => fontPages.get(doc)?.colorFamilies.has(f.key)) ||
                 /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(text);
             const line = { text, font, baseFont: font, prefix, families, aliases: [], size, weight, italic, kerning: 'normal',
-                element, offsets, chunks, chunkAt, hasColor, carets: new Map(),
-                direction: explicitDirection ?? doc.defaultView.getComputedStyle(element).direction };
+                offsets, hasColor, carets: new Map(), explicitDirection, direction: explicitDirection };
+            if (!explicitDirection) {
+                mountSpan(measurementSpan(line));
+                line.direction = doc.defaultView.getComputedStyle(line.element).direction;
+            }
             // A configured run publishes metrics immediately after applying its language
             // and OpenType settings. Older reactors request the default metrics here.
             if (!willConfigure) measure(line, metrics, metricsSize);
@@ -893,18 +910,22 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             const aliases = line.aliases.slice();
             for (const alias of aliases) ++alias.users;
             return retain({ text: line.text, font: line.font, direction: line.direction, kerning: line.kerning,
-                baseline: line.baseline, hasColor: line.hasColor, element: { lang: line.element.lang }, aliases, ...ink });
+                baseline: line.baseline, hasColor: line.hasColor, lang: line.lang, aliases, ...ink });
         },
         configure(id, ptr, size, featurePtr, featureLen, axisPtr, axisLen, metrics, metricsSize) {
             const line = runs.get(id);
             releaseAliases(line);
             line.font = line.baseFont;
-            line.element.style.font = line.font;
-            line.element.lang = string(ptr, size);
+            line.lang = string(ptr, size);
+            if (line.element) {
+                line.element.style.font = line.font;
+                line.element.lang = line.lang;
+            }
             const features = string(featurePtr, featureLen), axes = string(axisPtr, axisLen);
             line.kerning = features.split(',').some(s => s.startsWith('kern=') && Number(s.slice(5)) === 0) ? 'none' : 'normal';
-            line.element.style.fontKerning = line.kerning;
-            if (features || axes) {
+            if (line.element) line.element.style.fontKerning = line.kerning;
+            line.configuredStack = Boolean(features || axes);
+            if (line.configuredStack) {
                 const stack = [];
                 for (const family of line.families) {
                     const faces = fontSources.get(doc)?.get(family.key);
@@ -939,7 +960,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
                     stack.push(family.css);
                 }
                 line.font = line.prefix + stack.join(', ');
-                line.element.style.font = line.font;
+                if (line.element) line.element.style.font = line.font;
             }
             measure(line, metrics, metricsSize);
         },
@@ -948,7 +969,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             releaseAliases(line);
             line?.svgText?.parentNode.remove();
             line?.probe?.element.remove();
-            line?.element.remove?.();
+            line?.element?.remove();
             runs.delete(id);
             if (!runs.size) root?.remove();
         },
