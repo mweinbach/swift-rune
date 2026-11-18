@@ -181,7 +181,7 @@ extension Runtime {
         at scaledNow: Double,
         cut: Bool,
         lands: Bool,
-        prevMountedIds: Set<NodeId>
+        prevMountedIds: Dictionary<NodeId, Int>.Keys
     ) {
         var prevShadowsById: [NodeId: [Shadow]] = [:]
         if !shadowTrackCounts.isEmpty {

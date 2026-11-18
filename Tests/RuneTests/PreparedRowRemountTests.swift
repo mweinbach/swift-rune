@@ -69,7 +69,7 @@ struct PreparedRowRemountTests {
         builds.rows = []
         builds.checkEndpointGeometry = true
         let pass = runtime.tryVirtualRemountPass(at: time, cut: false, commitKind: .animate,
-            commitMotion: nil, commitColorSpring: nil, commitCut: false, prevMountedIds: Set(runtime.nodeIndexById.keys))
+            commitMotion: nil, commitColorSpring: nil, commitCut: false, prevMountedIds: runtime.nodeIndexById.keys)
         #expect(pass == nil)
         #expect(builds.rows.contains { $0.hasPrefix("one/") && $0 != "one/399" && (Int($0.dropFirst(4)) ?? 0) >= 150 })
         #expect(runtime.virtualSelectionPinnedRows(path) == ends)

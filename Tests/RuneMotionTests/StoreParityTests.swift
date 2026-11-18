@@ -24,6 +24,26 @@ struct StoreParityTests {
     private let X = Prop<Float>.custom(64, .spatial, name: "x")
     private let N = NodeId(7)
 
+    @Test func tracksByPropertyFollowRemovalAndSlotReuse() {
+        var store = AnimationStore()
+        let other = NodeId(8)
+        #expect(!store.hasTracks(for: X))
+        store.set(N, X, 1)
+        store.set(N, X, 2)
+        store.set(other, X, 3)
+        var snapshot = store
+        store.remove(N, X)
+        #expect(store.hasTracks(for: X))
+        store.removeNode(other)
+        #expect(!store.hasTracks(for: X))
+        store.set(N, Props.OPACITY, 0.5)
+        #expect(store.hasTracks(for: Props.OPACITY))
+        #expect(!store.hasTracks(for: X))
+        snapshot.clear()
+        #expect(!snapshot.hasTracks(for: X))
+        #expect(store.hasTracks(for: Props.OPACITY))
+    }
+
     private func state(_ store: AnimationStore) -> (Float, Float) {
         (store.sample(N, X)!, store.sampleVelocity(N, X)!)
     }

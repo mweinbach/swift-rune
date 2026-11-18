@@ -331,7 +331,7 @@ internal struct WordRevealStore: Sendable {
         entries: [WordRevealCommitEntry],
         presentIds: Set<NodeId>,
         retainIds: Set<NodeId>,
-        prevMountedIds: Set<NodeId>,
+        prevMountedIds: Dictionary<NodeId, Int>.Keys,
         cut: Bool,
         instant: Bool,
         reducedMotion: Bool

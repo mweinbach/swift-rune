@@ -2860,7 +2860,7 @@ public final class Runtime<State> {
         commitMotion: MotionSource?,
         commitColorSpring: Spring?,
         commitCut: Bool,
-        prevMountedIds: Set<NodeId>,
+        prevMountedIds: Dictionary<NodeId, Int>.Keys,
         focusedCaret: (keyPath: String, rect: [Float])?,
         allowZoomSettle: Bool,
         memoNodes: [FlatNode]? = nil,
@@ -2974,7 +2974,7 @@ public final class Runtime<State> {
         commitMotion: MotionSource?,
         commitColorSpring: Spring?,
         commitCut: Bool,
-        prevMountedIds: Set<NodeId>,
+        prevMountedIds: Dictionary<NodeId, Int>.Keys,
         isResizeRelayout: Bool = false,
         effectiveReducedMotion: Bool? = nil,
         onRemountFallback: (() throws -> Void)? = nil
@@ -4218,7 +4218,7 @@ public final class Runtime<State> {
         }
         let focusedCaret = currentFocusedCaret()
         cxSettings.lastCommittedCaret = focusedCaret
-        let prevMountedIds = Set(nodeIndexById.keys)
+        let prevMountedIds = nodeIndexById.keys
 
         let plannedKind: ResizeCommitKind = (settlePass == 0 && !activeExplicitSettleCut && !commitKind.lands)
             ? nextCommitKind()
@@ -4373,7 +4373,7 @@ public final class Runtime<State> {
         commitColorSpring: Spring?,
         commitFollowEdge: Bool,
         commitCut: Bool,
-        prevMountedIds: Set<NodeId>
+        prevMountedIds: Dictionary<NodeId, Int>.Keys
     ) -> CommitPassResult {
         if let measuredGrowth = pass.measuredGrowthRows {
             growthRows = measuredGrowth
@@ -4670,7 +4670,7 @@ public final class Runtime<State> {
         commitColorSpring: Spring?,
         commitFollowEdge: Bool,
         commitCut: Bool,
-        prevMountedIds: Set<NodeId>,
+        prevMountedIds: Dictionary<NodeId, Int>.Keys,
         nowRevealedSecureIds: Set<NodeId>,
         concealedSecureIndices: [Int]
     ) {

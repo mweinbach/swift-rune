@@ -182,7 +182,7 @@ struct LayoutRowsParityTests {
             commitMotion: nil,
             commitColorSpring: nil,
             commitCut: false,
-            prevMountedIds: Set(rt.nodeIndexById.keys),
+            prevMountedIds: rt.nodeIndexById.keys,
             focusedCaret: nil,
             allowZoomSettle: false
         )!
@@ -201,7 +201,7 @@ struct LayoutRowsParityTests {
             commitColorSpring: nil,
             commitFollowEdge: false,
             commitCut: false,
-            prevMountedIds: Set(rt.nodeIndexById.keys)
+            prevMountedIds: rt.nodeIndexById.keys
         )
         #expect(result == .applied)
         #expect(rt.reducedMotion && rt.scene.reducedMotion)

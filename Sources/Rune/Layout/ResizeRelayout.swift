@@ -387,7 +387,7 @@ extension Runtime {
         commitMotion: MotionSource?,
         commitColorSpring: Spring?,
         commitCut: Bool,
-        prevMountedIds: Set<NodeId>
+        prevMountedIds: Dictionary<NodeId, Int>.Keys
     ) -> MeasurePassResult? {
         guard let cached = cachedResizeBuild else { return nil }
         let collector = LayoutReadCollector(rects: layoutSeen.rects)
@@ -497,7 +497,7 @@ extension Runtime {
         commitMotion: MotionSource?,
         commitColorSpring: Spring?,
         commitCut: Bool,
-        prevMountedIds: Set<NodeId>
+        prevMountedIds: Dictionary<NodeId, Int>.Keys
     ) -> MeasurePassResult? {
         guard let cached = cachedResizeBuild,
               cached.reusable,

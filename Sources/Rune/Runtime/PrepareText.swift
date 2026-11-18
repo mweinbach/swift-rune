@@ -135,7 +135,7 @@ extension Runtime {
             RuntimeIdScope.$current.withValue(runtimeId) {
                 _ = scratch.measurePass(at: cxSettings.lastHostTime, cut: false, commitKind: .animate,
                                         commitMotion: nil, commitColorSpring: nil, commitCut: false,
-                                        prevMountedIds: [], focusedCaret: nil, allowZoomSettle: false,
+                                        prevMountedIds: [NodeId: Int]().keys, focusedCaret: nil, allowZoomSettle: false,
                                         preparingFor: self)
             }
         }
