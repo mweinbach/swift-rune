@@ -5,6 +5,9 @@ import RuneRef
 #if canImport(ScrollBenchMetal)
 import ScrollBenchMetal
 #endif
+#if os(Windows)
+import WinSDK
+#endif
 
 private enum Workload: String {
     case table, tree, diff
@@ -109,7 +112,18 @@ private struct Result: Codable {
 private struct WindowSamples: Encodable {
     let framesIncludingInitial: [FrameEncoded]
     let hostReportIntervalsMS: [Double]
+    let currentWGLContext: [Bool]?
 }
+
+#if os(Windows)
+// Loading OpenGL here would alter the CPU-first startup under measurement.
+private func hasCurrentWGLContext() -> Bool {
+    let module = "opengl32.dll".withCString(encodedAs: UTF16.self) { GetModuleHandleW($0) }
+    guard let module, let function = GetProcAddress(module, "wglGetCurrentContext") else { return false }
+    typealias CurrentContext = @convention(c) () -> UnsafeMutableRawPointer?
+    return unsafeBitCast(function, to: CurrentContext.self)() != nil
+}
+#endif
 
 private func elapsedMS(_ start: ContinuousClock.Instant, _ end: ContinuousClock.Instant = .now) -> Double {
     let d = (end - start).components
@@ -267,6 +281,7 @@ private struct Probe {
         let handle = app.handle()
         var drawn: [FrameEncoded] = []
         var intervals: [Double] = []
+        var wglContexts: [Bool] = []
         var previous: ContinuousClock.Instant?
         var handled = 0
         let instrumented = app.onFrameEncoded { frame in
@@ -278,6 +293,9 @@ private struct Probe {
             if let previous { intervals.append(elapsedMS(previous, now)) }
             previous = now
             drawn.append(frame)
+            #if os(Windows)
+            if samplesOutput != nil { wglContexts.append(hasCurrentWGLContext()) }
+            #endif
         }.onFrameDrawn { rt in
             guard drawn.count > handled else { return }
             handled = drawn.count
@@ -287,7 +305,8 @@ private struct Probe {
                 if index == steps {
                     let measured = drawn.dropFirst()
                     if let samplesOutput {
-                        let samples = WindowSamples(framesIncludingInitial: drawn, hostReportIntervalsMS: intervals)
+                        let samples = WindowSamples(framesIncludingInitial: drawn, hostReportIntervalsMS: intervals,
+                                                    currentWGLContext: wglContexts.isEmpty ? nil : wglContexts)
                         try JSONEncoder().encode(samples).write(to: samplesOutput)
                     }
                     try report(rt, commits: UInt64(measured.filter(\.committed).count),
