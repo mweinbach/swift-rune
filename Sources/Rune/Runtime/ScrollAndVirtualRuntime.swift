@@ -2370,7 +2370,9 @@ extension Runtime {
                 }
                 flatNodes[i].activeClipFades = inheritedFades
             }
-            if deltasByScrollPath[flatNodes[i].path] != nil {
+            let path = flatNodes[i].path
+            if deltasByScrollPath[path] != nil, let offset = scrollOffsets[path] {
+                flatNodes[i].scrollShift = Vec2(flatNodes[i].flow == .rtl ? -offset.x : offset.x, offset.y)
                 flatNodes[i].ownScrollFade = computeScrollFadeSpec(for: flatNodes[i])
             }
         }

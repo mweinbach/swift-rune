@@ -1446,10 +1446,10 @@ extension Runtime {
 
             childClip.rectPt = intersectRects(childClip.rectPt, rect)
             if !isLeaf || paintsBox {
-                snap.grow(growthSnapOffsetY(for: node), stack: false)
+                snap.grow(growthSnapOffsetY(for: node))
                 if node.isSticky {
-                    snap.shift(0, by: stickyShift.x - context.stickyShift.x)
-                    snap.shift(1, by: stickyShift.y - context.stickyShift.y)
+                    snap.scroll(0, by: stickyShift.x - context.stickyShift.x)
+                    snap.scroll(1, by: stickyShift.y - context.stickyShift.y)
                 }
                 let canSnap = !snap.off && el.isPixelSnapEnabled
                 let edges = PixelSnap.edgesPx(rect, scale: scale)
@@ -1476,9 +1476,9 @@ extension Runtime {
                 snap.off = !canSnap
                 snap.steps = snap.steps || el.motionSnapsEnabled
                 if let origin = el.paintContain { snap.containAt(SIMD2(origin.x, origin.y)) }
-                snap.shift(1, by: node.virtualWindowSnapOriginY)
-                snap.shift(0, by: -node.scrollShift.x)
-                snap.shift(1, by: -node.scrollShift.y)
+                snap.scroll(1, by: node.virtualWindowSnapOriginY)
+                snap.scroll(0, by: -node.scrollShift.x)
+                snap.scroll(1, by: -node.scrollShift.y)
                 snap.parent = snap.rigid == previousRigid && PixelSnap.frames(el, effectiveFill: el.background, effectiveBorder: p.border.map(Color.init)) ? parent : nil
             }
             if !isLeaf {
@@ -1562,7 +1562,7 @@ extension Runtime {
             let baseRect = liveRect ?? presented?.rect ?? node.targetRect
             let pinh: PresentedTransform
             var inheritedSnap = snap
-            inheritedSnap.grow(growthSnapOffsetY(for: node), stack: el.growthSpec != nil)
+            inheritedSnap.grow(growthSnapOffsetY(for: node))
             var anchorScaleMotion: PaintScaleMotion = .still
             if let a = el.anchor,
                let anchorNode = renderNodes.first(where: { $0.key == a.key }) ?? flatNodes.first(where: { $0.key == a.key }) {
@@ -1994,8 +1994,8 @@ extension Runtime {
             let exactEdgesPx = PixelSnap.edgesPx(effRect, scale: scale)
             let rawEdgesPx = PixelSnap.edgesPx(shifted, scale: scale)
             if el.anchor == nil || node.isSticky {
-                inheritedSnap.shift(0, by: stickyShift.x - parentShift.x)
-                inheritedSnap.shift(1, by: stickyShift.y - parentShift.y)
+                inheritedSnap.scroll(0, by: stickyShift.x - parentShift.x)
+                inheritedSnap.scroll(1, by: stickyShift.y - parentShift.y)
             }
             let rigidPx = inheritedSnap.rigid * scale
             let canSnap = !inheritedSnap.off && el.isPixelSnapEnabled && abs(el.rotate) < 1e-6
@@ -2031,9 +2031,9 @@ extension Runtime {
                 if let origin = el.paintContain {
                     snap.containAt(SIMD2<Float>(origin.x, origin.y))
                 }
-                snap.shift(1, by: node.virtualWindowSnapOriginY)
-                snap.shift(0, by: -node.scrollShift.x)
-                snap.shift(1, by: -(node.scrollShift.y + extraScrollY))
+                snap.scroll(1, by: node.virtualWindowSnapOriginY)
+                snap.scroll(0, by: -node.scrollShift.x)
+                snap.scroll(1, by: -(node.scrollShift.y + extraScrollY))
                 snap.parent = snap.rigid == inheritedSnap.rigid && PixelSnap.frames(el, effectiveFill: effBg, effectiveBorder: presentedBorder)
                     ? snapParent : nil
             }

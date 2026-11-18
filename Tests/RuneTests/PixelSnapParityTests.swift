@@ -316,6 +316,86 @@ struct PixelSnapParityTests {
         #expect(settled.offsets == initial.offsets)
     }
 
+    @Test("Text scrolls in whole device pixels with its box (#1147)",
+          arguments: [Float(1), 1.5, 1.875], [false, true])
+    func scrolledTextKeepsItsPositionInThePaintedBox(scale: Float, native: Bool) throws {
+        let runtime = Runtime(state: (), viewport: Vec2(160, 100), pixelScale: scale) { _, _ in
+            col().key("scroll").size(160, 100).scrollXY()
+                .child(col().size(360, 400).shrink(0).child(
+                    text("H").key("label").font(TextStyle(size: 13)).color(.white)
+                        .size(72, 38).p(2.3).bg(.black).absolute(x: 32.3, y: 24.7)
+                ))
+        }
+        func sample(at time: Double) throws -> (box: SIMD2<Float>, inset: SIMD2<Float>) {
+            let box: SIMD4<Float>?
+            let glyph: SIMD4<Float>?
+            if native {
+                let frame = runtime.renderFrame(at: time)
+                box = frame.instances.first { $0.params.y == KIND_RECT && $0.fill.w > 0.99 }?.rect
+                glyph = frame.instances.first { $0.params.y == KIND_GLYPH }?.rect
+            } else {
+                let scene = runtime.frame(at: time)
+                box = fills(scene).first
+                glyph = scene.primitives.first { $0.kind == .glyph }?.rect
+            }
+            let painted = try #require(box)
+            let ink = try #require(glyph)
+            return (SIMD2(painted.x, painted.y), SIMD2(ink.x - painted.x, ink.y - painted.y))
+        }
+
+        let initial = try sample(at: 0)
+        var final = initial
+        var drift: Float = 0
+        var fractionalX = false, fractionalY = false
+        for step in 1...36 {
+            let time = Double(step) / 120
+            let delta: Float = 0.5 / scale
+            let wheel = WheelEvent(dx: step > 18 ? -delta : 0, dy: step <= 18 ? -delta : 0, precise: true)
+            runtime.wheel(wheel, at: Vec2(60, 50), now: time)
+            final = try sample(at: time)
+            let exact = try #require(runtime.element(byKey: "label")).rect
+            fractionalX = fractionalX || abs(exact[0] * scale - (exact[0] * scale).rounded()) > 0.1
+            fractionalY = fractionalY || abs(exact[1] * scale - (exact[1] * scale).rounded()) > 0.1
+            drift = max(drift, abs(final.inset.x - initial.inset.x), abs(final.inset.y - initial.inset.y))
+        }
+        #expect(fractionalX && fractionalY)
+        #expect(abs(final.box.x - initial.box.x + 9) < 0.001 && abs(final.box.y - initial.box.y + 9) < 0.001)
+        #expect(drift < 0.001)
+    }
+
+    @Test("A pinned header keeps its ink from a programmatic jump through the next wheel", arguments: [false, true])
+    func programmaticScrollKeepsPinnedHeaderInk(native: Bool) throws {
+        let scale: Float = 1.875
+        let runtime = Runtime(state: (), viewport: Vec2(144, 90), pixelScale: scale) { _, _ in
+            col().key("scroll").size(144, 90).scrollY().pl(7.3).children([
+                el().h(26.3).shrink(0),
+                text("Hgj il").font(TextStyle(size: 13)).size(88, 36).shrink(0)
+                    .color(.white).p(3.3).bg(.black).stickyTop(12.375),
+                el().h(370).shrink(0)
+            ])
+        }
+        func header(at t: Double) -> [SIMD4<Float>] {
+            if native {
+                return runtime.renderFrame(at: t).instances.compactMap {
+                    $0.params.y == KIND_RECT || $0.params.y == KIND_GLYPH ? $0.rect : nil
+                }
+            }
+            return runtime.frame(at: t).primitives.compactMap {
+                $0.kind == .roundedRect || $0.kind == .glyph ? $0.rect : nil
+            }
+        }
+        _ = header(at: 0)
+        runtime.update(at: 0.1) { _, tx in tx.scrollToY("scroll", 30) }
+        let jumped = header(at: 0.1)
+        #expect(jumped.count > 1)
+        for step in 1...8 {
+            let t = 0.1 + Double(step) / 120
+            runtime.wheel(WheelEvent(dy: -0.25 / scale, precise: true), at: Vec2(60, 41), now: t)
+            #expect(header(at: t) == jumped)
+        }
+        #expect(runtime.scrollOffset(forKey: "scroll").y > 31)
+    }
+
     @Test("scrolled_rows_stay_crisp_and_keep_their_spacing")
     func scrolledRowsStayCrispAndKeepSpacing() {
         let rt = Runtime(state: (), viewport: Vec2(40, 60), pixelScale: 2.0) { _, _ in

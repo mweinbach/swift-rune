@@ -61,7 +61,7 @@ public enum TextBoxGeometry {
 
     /// Where a text's exact box rests against where its snapped box rests (device px), its paint
     /// containment's rounding in (`LeafBox::exact_off`, `build.rs`). Pass the steady translation
-    /// in device pixels so gliding growth rows carry the laid-out glyphs with their box.
+    /// in device pixels so scrolling and gliding rows carry their laid-out glyphs with the box.
     /// Zero under an `El.offset` here or above (`pixel_snap::Inherit.shifted`,
     /// #963): a translation, as a CSS transform is, moves a text with its box.
     public static func leafExactOff(

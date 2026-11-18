@@ -456,6 +456,7 @@ public final class Runtime<State> {
         var fullDelta: Vec2 = .zero
         var restOffset: Vec2 = .zero
         var snap: PixelSnap.Inherit = PixelSnap.Inherit()
+        var rowGlideY: Float = 0
         var scaleMotion: PaintScaleMotion = .still
         var stillScale: Float = 1.0
         var parentDrawnWidth: Float? = nil
@@ -1644,7 +1645,7 @@ public final class Runtime<State> {
     /// The root's world rect includes the browser canvas's document translation.
     internal var rootPixelSnap: PixelSnap.Inherit {
         var snap = PixelSnap.Inherit()
-        if let page = documentPage { snap.shift(1, by: -page.top) }
+        if let page = documentPage { snap.scroll(1, by: -page.top) }
         return snap
     }
 
@@ -8199,12 +8200,15 @@ public final class Runtime<State> {
                 ? SIMD2<Float>.zero
                 : SIMD2<Float>(stickyShift.x - input.parentStickyShift.x, stickyShift.y - input.parentStickyShift.y)
             var boxSnap = inh.snap
+            var rowGlideY = inh.rowGlideY
             // A detached anchor has already established a new translation for its subtree.
             if resolvedAnchor == nil {
-                boxSnap.grow(growthSnapOffsetY(for: snap), stack: el.growthSpec != nil)
+                let dy = growthSnapOffsetY(for: snap)
+                boxSnap.grow(dy)
+                if el.growthSpec == nil { rowGlideY += dy }
             }
-            boxSnap.shift(0, by: ownStickyDelta.x)
-            boxSnap.shift(1, by: ownStickyDelta.y)
+            boxSnap.scroll(0, by: ownStickyDelta.x)
+            boxSnap.scroll(1, by: ownStickyDelta.y)
             let rigidPx = boxSnap.rigid * pxScale
             let canSnap = !inh.snap.off && el.isPixelSnapEnabled && abs(p.rotate) < 1e-6
             let filterMargin = (input.ancestorBlur + blurPt * scaleVec.x) * pxScale * 3.0 + 2.0
@@ -8243,7 +8247,7 @@ public final class Runtime<State> {
             let restForMotion: MotionRect?
             if !snaps || !nodeMoving || steps {
                 restForMotion = nil
-            } else if boxSnap.rigid.y != boxSnap.steady.y {
+            } else if rowGlideY != 0 {
                 // A growth row's fractional projection already travels in rigid. Only a real
                 // scene track contributes a further glide to the box it carries.
                 restForMotion = scene.rest(p.id)
@@ -10041,9 +10045,9 @@ public final class Runtime<State> {
                 if let o = el.paintContain {
                     childSnap.containAt(SIMD2<Float>(o.x, o.y))
                 }
-                childSnap.shift(1, by: snap.virtualWindowSnapOriginY)
-                childSnap.shift(0, by: -snap.scrollShift.x)
-                childSnap.shift(1, by: -(snap.scrollShift.y + extraScrollY))
+                childSnap.scroll(1, by: snap.virtualWindowSnapOriginY)
+                childSnap.scroll(0, by: -snap.scrollShift.x)
+                childSnap.scroll(1, by: -(snap.scrollShift.y + extraScrollY))
                 childSnap.off = boxSnap.off || !el.isPixelSnapEnabled || abs(p.rotate) >= 1e-6
                 childSnap.steps = steps
                 childSnap.shifted = snapShifted
@@ -10098,6 +10102,7 @@ public final class Runtime<State> {
                     fullDelta: childFullDelta,
                     restOffset: nodeRestOffset,
                     snap: childSnap,
+                    rowGlideY: rowGlideY,
                     scaleMotion: childScaleMotion,
                     stillScale: childStillScale,
                     parentDrawnWidth: rect.width,
