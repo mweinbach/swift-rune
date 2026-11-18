@@ -5065,14 +5065,40 @@ public final class Runtime<State> {
         }
         for id in rideTrailing { scene.setRideTrailing(id, true) }
         var pendingBorderBottoms: [(id: NodeId, seed: MotionColor?, target: MotionColor, spring: Spring?)] = []
-        pendingBorderBottoms.reserveCapacity(8)
         var pendingRadialStops: [(id: NodeId, index: Int, target: MotionColor, spring: Spring?)] = []
         var pendingTextColors: [(id: NodeId, seed: MotionColor?, target: MotionColor, spring: Spring?)] = []
-        pendingTextColors.reserveCapacity(8)
         var pendingShadowColors: [(id: NodeId, index: Int, seed: MotionColor?, target: MotionColor, spring: Spring?)] = []
-        pendingShadowColors.reserveCapacity(8)
         let commitDefaultViewFg = cxSettings.viewDefaults.textForeground
-        for (i, node) in pass.nodes.enumerated() where i < specs.count {
+        let mayHaveTextTracks = scene.store.hasTracks(for: Props.TEXT_COLOR)
+        let mayHaveBottomTracks = scene.store.hasTracks(for: Props.BORDER_BOTTOM)
+        let needsExistingTracks = mayHaveTextTracks || mayHaveBottomTracks
+        var rangeIndex = 0
+        var effectIndex = 0
+        var colorIndex = 0
+        let colorCount = min(specs.count, pass.nodes.count)
+        while colorIndex < colorCount {
+            let i = colorIndex
+            colorIndex += 1
+            if !needsExistingTracks {
+                while effectIndex < layoutObservers.extraCommitColors.count, layoutObservers.extraCommitColors[effectIndex] < i {
+                    effectIndex += 1
+                }
+                let nextEffect = effectIndex < layoutObservers.extraCommitColors.count
+                    ? layoutObservers.extraCommitColors[effectIndex] : colorCount
+                if i < nextEffect {
+                    while rangeIndex < pass.reusedFlatRanges.count, pass.reusedFlatRanges[rangeIndex].current.upperBound <= i {
+                        rangeIndex += 1
+                    }
+                    // Replayed immutable descendants have the same authored ink. Gradients,
+                    // shadows and existing tracks still receive their ordinary reconciliation.
+                    if rangeIndex < pass.reusedFlatRanges.count, pass.reusedFlatRanges[rangeIndex].current.contains(i) {
+                        colorIndex = min(nextEffect, pass.reusedFlatRanges[rangeIndex].current.upperBound)
+                        continue
+                    }
+                    if previousIndexById[pass.nodes[i].nodeId] == nil { continue }
+                }
+            }
+            let node = pass.nodes[i]
             let nid = node.nodeId
             let wasPresent = scene.contains(nid)
             let csp = !commitCut && !reducedMotion && wasPresent ? specs[i].colorSpring : nil
@@ -5085,7 +5111,7 @@ public final class Runtime<State> {
                 || node.el.iconPayload != nil
             if hasTextOrIcon {
                 let targetTextCol = (node.el.textColor ?? commitDefaultViewFg).motionColor
-                let hadTextTrack = scene.store.has(nid, Props.TEXT_COLOR)
+                let hadTextTrack = mayHaveTextTracks && scene.store.has(nid, Props.TEXT_COLOR)
                 if (hadTextTrack || csp != nil), let prevIndex {
                     let prevEl = prevFlatNodesSnapshot[prevIndex].el
                     let hadText = prevEl.textColor != nil || prevEl.richSpans != nil || prevEl.plainText != nil
@@ -5124,7 +5150,7 @@ public final class Runtime<State> {
             let bGrad = node.el.runtimeExtras[RenderExtrasKey.borderGradient] as? RenderBorderGradientSpec
             let bw = bGrad?.width ?? node.el.borderWidth
             guard bw > 0 else { continue }
-            let hadBottom = scene.store.has(nid, Props.BORDER_BOTTOM)
+            let hadBottom = mayHaveBottomTracks && scene.store.has(nid, Props.BORDER_BOTTOM)
             guard bGrad != nil || hadBottom else { continue }
             let seed: MotionColor? = (bGrad != nil && !hadBottom && wasPresent)
                 ? (scene.get(nid, Props.BORDER) ?? prevIndex.map { prevFlatNodesSnapshot[$0].el.borderColor.motionColor } ?? node.el.borderColor.motionColor)
