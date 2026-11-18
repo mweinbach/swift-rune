@@ -96,7 +96,7 @@ internal final class WindowsAccessibilityHost {
     func update<State>(_ runtime: Runtime<State>) {
         // The HWND answers discovery synchronously at rest. An active reader continues to
         // receive fresh geometry on scroll and animation frames between authored commits.
-        guard let host, rune_uia_active(host) != 0, !runtime.flatNodes.isEmpty else { return }
+        guard let host, rune_uia_active(host) != 0, runtime.commitCount != 0 else { return }
         let announcement = runtime.a11yAnnouncement
         var tree = runtime.nativeAccessibilitySnapshot()
         tree.children.append(AccessibilityTreeState.announcerNode(announcement, holdWords: false))

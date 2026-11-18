@@ -613,6 +613,7 @@ public:
 struct RuneUiaHost {
     std::shared_ptr<Window> window;
     std::shared_ptr<Tree> staging;
+    std::shared_ptr<const Tree> beforeActivation;
     Provider *root;
     HWND attached; // Owned by the window thread until WM_NCDESTROY or explicit detach.
     bool initializedCOM;
@@ -644,14 +645,14 @@ LRESULT CALLBACK accessibilityProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l, UINT
             first = !host->window->active;
             host->window->active = true;
         }
+        if (host->activate && (first || !host->published) && !host->answeringDemand) {
+            host->answeringDemand = true;
+            host->activate(host->activationContext);
+            host->answeringDemand = false;
+        }
         if (first) {
-            if (host->activate) {
-                host->answeringDemand = true;
-                host->activate(host->activationContext);
-                host->answeringDemand = false;
-            }
-            // A nested request during a Rune callback or before first layout may need a frame.
-            if (!host->activate || !host->published) rune_request_window_paint(hwnd, TRUE);
+            // Complete deferred layout and deliver activation events after responding to UIA.
+            rune_request_window_paint(hwnd, TRUE);
         }
         // UI Automation may send another WM_GETOBJECT during this call.
         return UiaReturnRawElementProvider(hwnd, w, l, host->root);
@@ -1027,13 +1028,19 @@ void rune_uia_commit(RuneUiaHost *host) {
         window->tree = after;
         active = window->active && window->hwnd;
         focusChanged = window->focusChanged;
-        window->focusChanged = false;
+        if (!host->answeringDemand) window->focusChanged = false;
     }
     const bool first = !host->published;
     host->published = true;
     // The first caller receives the new tree directly. Raising UIA events from inside
     // WM_GETOBJECT can enter UIA again while it is resolving this window's provider.
-    if (host->answeringDemand) return;
+    if (host->answeringDemand) {
+        host->beforeActivation = std::move(before);
+        return;
+    }
+    if (active && (first || host->beforeActivation) && GetForegroundWindow() == host->attached)
+        focusChanged = true;
+    if (host->beforeActivation) before = std::move(host->beforeActivation);
     if (first && !active && host->attached) {
         // A reader may have queried the HWND before the first semantic tree existed.
         NotifyWinEvent(EVENT_OBJECT_REORDER, host->attached, OBJID_CLIENT, CHILDID_SELF);
