@@ -42,6 +42,10 @@ void rune_browser_line_cells(const RuneDesktopLine *line, RuneBrowserCell *cells
     int32_t report_source);
 // Canvas font smoothing can change the R8 coverage with the opaque sRGB foreground.
 int32_t rune_browser_line_fixed_pitch(const RuneDesktopLine *line);
+// Query white coverage in [left, right). Returns 0 for full raster fallback, 1 for
+// an empty crop, or 2 + (first covered row << 8) + exclusive end row.
+int32_t rune_browser_line_mask_rows(const RuneDesktopLine *line, int32_t x, int32_t y,
+    int32_t width, int32_t height, int32_t left, int32_t right, int32_t phase_x, int32_t phase_y);
 int32_t rune_browser_line_geometry_style(const RuneDesktopLine *line);
 int32_t rune_browser_line_mask_ink(const RuneDesktopLine *line, int32_t x, int32_t y,
     int32_t width, int32_t height, uint32_t rgb, uint8_t *pixels);

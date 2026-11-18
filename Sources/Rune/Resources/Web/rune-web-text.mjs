@@ -477,7 +477,9 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
                 style.translate !== 'none' || style.perspective !== 'none' ||
                 (style.zoom !== '1' && style.zoom !== 'normal')) return null;
         }
-        return [source.id, line.size, doc.defaultView.devicePixelRatio].join('/');
+        // The same certificate also scopes exact vertical ink bounds. A browser
+        // without face-wide ascent can return a baseline specific to this line.
+        return [source.id, line.size, line.baseline, doc.defaultView.devicePixelRatio].join('/');
     }
 
     function lineOrigin(line) {
@@ -582,7 +584,33 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         return part.keyBase + (before << 14) + (text.charCodeAt(at) << 7) + after;
     }
 
-    function numericMask(line, x, y, width, height, rgb, destination) {
+    // First and last covered rows of the exact white mask. A fractional pen
+    // uses the same 60 horizontal and four vertical steps as DesktopGlyphGlide.
+    function maskRows(mask, width, height, left, right, phase) {
+        const px = phase & 63, py = phase >>> 6, dx = px ? 1 : 0, dy = py ? 1 : 0;
+        const bl = px * (4 - py), br = (60 - px) * (4 - py), tl = px * py, tr = (60 - px) * py;
+        function covered(row) {
+            let i = (row + dy) * width + left + dx;
+            const end = i + right - left;
+            if (!phase) {
+                for (; i < end; ++i) if (mask[i]) return true;
+            } else {
+                for (; i < end; ++i) {
+                    const above = i - dy * width;
+                    if (mask[i] * br + mask[i - dx] * bl + mask[above] * tr + mask[above - dx] * tl >= 120) return true;
+                }
+            }
+            return false;
+        }
+        const limit = height - dy;
+        let top = 0, bottom = limit - 1;
+        while (top < limit && !covered(top)) ++top;
+        if (top === limit) return 1;
+        while (bottom > top && !covered(bottom)) --bottom;
+        return 2 + (top << 8) + bottom + 1;
+    }
+
+    function numericMask(line, x, y, width, height, rgb, destination, left = -1, right = 0, phase = 0) {
         const source = line.numericMaskSource, text = line.text;
         if (!source || line.clip || line.size < 10 || line.size > 128 || !/\d/.test(text) ||
             x < -255 || x + width > 20000 || width > 257 || height > 129 ||
@@ -625,22 +653,25 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
                 tile.keys[i] = key;
             }
             if (complete) {
+                if (left >= 0) return maskRows(tile.mask, width, height, left, right, phase);
                 new Uint8Array(buffer, destination >>> 0, tile.mask.length).set(tile.mask);
                 return true;
             }
         }
         const { mask } = coverage(line, x, y, width, height, rgb);
-        new Uint8Array(memory(), destination >>> 0, mask.length).set(mask);
+        let result = true;
+        if (left >= 0) result = maskRows(mask, width, height, left, right, phase);
+        else new Uint8Array(memory(), destination >>> 0, mask.length).set(mask);
         // A host hook can render again during the native read. Only retain the
         // result if this exact style and crop are still in the live cache.
-        if (fragmentStyles.get(styleKey) !== style || style.plans.get(shape) !== plan) return true;
+        if (fragmentStyles.get(styleKey) !== style || style.plans.get(shape) !== plan) return result;
         // The fragments partition the mask. Allow room for all of them, a complete
         // tile, and its keys, even if a nested native read has just filled the cache.
         if (fragmentBytes + 2 * mask.byteLength + plan.length * Float64Array.BYTES_PER_ELEMENT > fragmentByteLimit ||
             fragmentCount + plan.length > fragmentLimit) {
             fragmentStyles.clear();
             fragmentBytes = fragmentCount = 0;
-            return true;
+            return result;
         }
         tile = plan.lastTile;
         if (!tile) {
@@ -659,7 +690,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             ++fragmentCount;
             fragmentBytes += bytes.length;
         }
-        return true;
+        return result;
     }
 
     function coverage(line, x, y, width, height, rgb = 0xffffff) {
@@ -1222,13 +1253,25 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         },
         mask(id, x, y, width, height, destination, rgb = 0xffffff) {
             const line = runs.get(id);
-            if (!line || width < 1 || height < 1) return 0;
+            if (!line || width < 1) return 0;
+            if (height < 0 && height >= -129) {
+                const phase = rgb === 0xffffff ? 0 : rgb - 0x1000000;
+                if (phase < 0 || phase > 255 || (phase & 63) >= 60) return 0;
+                const buffer = memory(), pointer = destination >>> 0;
+                if (width > 257 || (pointer & 3) || pointer > buffer.byteLength - 8) return 0;
+                const [left, right] = new Int32Array(buffer, pointer, 2);
+                const dx = (phase & 63) ? 1 : 0, dy = (phase >>> 6) ? 1 : 0;
+                if (left < 0 || right <= left || right > width - dx || -height <= dy) return 0;
+                return numericMask(line, x, y, width, -height, 0xffffff, 0, left, right, phase) || 0;
+            }
+            if (height < 1) return 0;
             if (numericMask(line, x, y, width, height, rgb, destination)) return 1;
             const { mask } = coverage(line, x, y, width, height, rgb);
             new Uint8Array(memory(), destination >>> 0, mask.length).set(mask);
             return 1;
         },
         has_color(id, fixedPitch = 0) {
+            if (fixedPitch === 3) return 3;
             const line = runs.get(id);
             if (fixedPitch === 2) {
                 const source = line && fixedPitchSource(doc, line);

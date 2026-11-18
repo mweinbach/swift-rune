@@ -120,6 +120,11 @@ try {
         try {
             // The current reactor asks for geometry and ink in one capability call.
             host.has_color(handles[0], 2);
+            if (index === 0) {
+                for (const pointer of [3073, bytes.byteLength - 4]) {
+                    if (host.mask(handles[0], 0, 0, 4, -2, pointer) !== 0) throw Error('Accepted invalid mask bounds buffer');
+                }
+            }
             for (const [left, width] of [[0, 108], [14, 34], [32, 44], [75, 22]]) {
                 for (const rgb of [0x1f2327, 0xffffff]) {
                     const masks = handles.map((id, handle) => {
@@ -133,6 +138,32 @@ try {
                     });
                     if (!masks[0].every((value, i) => value === masks[1][i])) {
                         throw Error(`Numeric mask differs from native coverage for ${text} at ${left}`);
+                    }
+                    if (rgb === 0xffffff) {
+                        const native = masks[1], height = native.length / width;
+                        const columns = new Int32Array(memory.buffer, 3072, 2);
+                        for (const [px, py] of [[0, 0], [1, 0], [59, 3]]) {
+                            const dx = Number(px !== 0), dy = Number(py !== 0);
+                            for (const [start, end] of [[0, width - dx], [5, 6]]) {
+                                columns.set([start, end]);
+                                let first = -1, last = -1;
+                                for (let y = 0; y < height - dy; ++y) {
+                                    for (let x = start; x < end; ++x) {
+                                        const i = (y + dy) * width + x + dx, above = i - dy * width;
+                                        const sum = native[i] * (60 - px) * (4 - py) + native[i - dx] * px * (4 - py)
+                                            + native[above] * (60 - px) * py + native[above - dx] * px * py;
+                                        if (Math.floor((sum + 120) / 240) === 0) continue;
+                                        if (first < 0) first = y;
+                                        last = y + 1;
+                                        break;
+                                    }
+                                }
+                                const request = px || py ? 0x1000000 | (py << 6) | px : 0xffffff;
+                                const expected = canVerifyFace ? (first < 0 ? 1 : 2 + (first << 8) + last) : 0;
+                                const rows = host.mask(handles[0], left, 1, width, -height, 3072, request);
+                                if (rows !== expected) throw Error('White crop row bounds differ from filtered native ink');
+                            }
+                        }
                     }
                 }
             }
@@ -149,6 +180,7 @@ try {
         return pixels;
     };
     try {
+        if (host.has_color(0, 3) !== 3) throw Error('Missing mask bounds capability');
         numbered.forEach(compareNumberedMask);
         // Reenter the same crop with different digits after capturing its native pixels.
         duringNativeRead = () => compareNumberedMask('X74562Y', -1);

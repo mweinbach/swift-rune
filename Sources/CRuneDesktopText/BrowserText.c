@@ -195,6 +195,32 @@ int32_t rune_desktop_register_font_file(const char *path) {
     return 0;
 }
 
+int32_t rune_browser_line_mask_rows(const RuneDesktopLine *line, int32_t x, int32_t y,
+    int32_t width, int32_t height, int32_t left, int32_t right, int32_t phase_x, int32_t phase_y) {
+#ifdef RUNE_BROWSER_TEXT
+    if (line && width > 0 && width <= 257 && height > 0 && height <= 129 &&
+        left >= 0 && left < right && right <= width &&
+        phase_x >= 0 && phase_x < 60 && phase_y >= 0 && phase_y < 4 &&
+        (!phase_x || (width < 257 && x > INT32_MIN)) && (!phase_y || (height < 129 && y > INT32_MIN))) {
+        static _Thread_local int supports_rows = -1;
+        if (supports_rows < 0) supports_rows = browser_has_color(line->handle, 3) == 3;
+        if (!supports_rows) return 0;
+        int32_t columns[2] = { left, right };
+        // A negative height asks the existing mask import for bounds in these columns.
+        int32_t dx = phase_x != 0, dy = phase_y != 0;
+        uint32_t request = dx || dy ? 0x1000000u | (uint32_t)(phase_y << 6) | (uint32_t)phase_x : 0xffffffu;
+        int32_t result = browser_mask(line->handle, x - dx, y - dy, width + dx, -(height + dy), (uint8_t *)columns, request);
+        if (result < 0) return 0;
+        if (result > 1) {
+            int32_t lo = (result - 2) >> 8, hi = (result - 2) & 255;
+            if (lo >= hi || hi > height) return 0;
+        }
+        return result;
+    }
+#endif
+    return 0;
+}
+
 int32_t rune_browser_line_geometry_style(const RuneDesktopLine *line) {
 #ifdef RUNE_BROWSER_TEXT
     if (line) {

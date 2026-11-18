@@ -1569,6 +1569,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         #if os(WASI) && canImport(CRuneDesktopText)
         lastBrowserMask = nil
         lastBrowserGeometry = nil
+        browserWhiteRows.removeAll(keepingCapacity: true)
         #endif
         let total = 1 + overflowPages.count
         var totalLive: UInt64 = 0
@@ -1787,6 +1788,28 @@ public final class GlyphAtlas: @unchecked Sendable {
     }
 
     #if os(WASI)
+    /// Identical certified crops from separate native lines share the white raster's
+    /// exact bounds during this frame, including empty crops and fractional phases.
+    internal func browserWhiteBounds(of source: BrowserGlyphMask, key: DesktopMaskKey, columns: Range<Int>) -> Int32 {
+        let style = source.geometryStyle
+        guard style >= 3 else { return source.whiteRowBounds(columns) }
+        lock.lock()
+        if let hit = browserWhiteRows[key], hit.style == style, hit.columns == columns {
+            lock.unlock()
+            return hit.encoded
+        }
+        let frame = frameSequence, generation = resetsCount
+        lock.unlock()
+        let result = source.whiteRowBounds(columns)
+        guard result > 0 else { return result }
+        lock.withLock {
+            guard frame == frameSequence, generation == resetsCount else { return }
+            if browserWhiteRows.count >= 512 { browserWhiteRows.removeAll(keepingCapacity: true) }
+            browserWhiteRows[key] = (style, columns, result)
+        }
+        return result
+    }
+
     /// A dark source can be recolored light after shaping. Preserve its original white
     /// coverage extent without allocating an extra atlas tile for the conservative bounds.
     internal func browserCoveredRows(of source: BrowserGlyphMask, columns: Range<Int>) -> Range<Int>? {
@@ -2320,6 +2343,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         let p16 = UInt16(page)
         #if os(WASI) && canImport(CRuneDesktopText)
         if lastBrowserMask?.entry.page == p16 { lastBrowserMask = nil }
+        browserWhiteRows.removeAll(keepingCapacity: true)
         if browserCoverage.indices.contains(page) { browserCoverage[page].reset() }
         #endif
         if !lcdOutlineMasks.isEmpty { lcdOutlineMasks = lcdOutlineMasks.filter { $0.value.page != p16 } }
@@ -3059,6 +3083,10 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
     }
     #endif
+    #if os(WASI) && canImport(CRuneDesktopText)
+    private var browserWhiteRows: [DesktopMaskKey: (style: Int32, columns: Range<Int>, encoded: Int32)] = [:]
+    #endif
+
 }
 
 /// Typography shaper, measurer, and glyph-quad emitter (`rune::TextSystem`).

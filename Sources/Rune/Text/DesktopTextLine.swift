@@ -916,6 +916,16 @@ final class BrowserGlyphMask: @unchecked Sendable {
         self.size = entry.pixelSize
     }
 
+    var geometryStyle: Int32 { run.geometryStyle }
+
+    /// The host returns zero when it needs the complete native raster, one for an empty
+    /// crop, or exclusive row bounds packed into a positive integer.
+    func whiteRowBounds(_ columns: Range<Int>) -> Int32 {
+        guard key.browserCell != nil, key.sourceColumns == nil else { return 0 }
+        return rune_browser_line_mask_rows(run.native, Int32(key.x), Int32(key.y), Int32(size.x), Int32(size.y),
+                                           Int32(columns.lowerBound), Int32(columns.upperBound), Int32(key.phase.x), Int32(key.phase.y))
+    }
+
     func whiteMask() -> [UInt8]? {
         run.mask(x: key.x, y: key.y, width: size.x, height: size.y, phase: key.phase, sourceColumns: key.sourceColumns)
     }
@@ -1749,10 +1759,18 @@ final class DesktopTextLine {
                     if let browser, baseRGB != 0xffffff, key.browserCell != nil {
                         var white = key
                         white.browserRGB = 0xffffff
-                        let whiteEntry = run.maskEntry(key: white, size: dimensions, owner: nil, cache: true,
-                                                       atlas: atlas, shareBrowserCoverage: true, fallback: browser.whiteMask)
-                        covered = whiteEntry.flatMap { atlas.desktopCoveredRows(of: $0, columns: columns) }
-                            ?? atlas.desktopCoveredRows(of: entry, columns: columns)
+                        let rows = atlas.browserWhiteBounds(of: browser, key: white, columns: columns)
+                        if rows > 1 {
+                            let packed = Int(rows - 2)
+                            covered = (packed >> 8)..<(packed & 255)
+                        } else if rows == 1 {
+                            covered = atlas.desktopCoveredRows(of: entry, columns: columns)
+                        } else {
+                            let whiteEntry = run.maskEntry(key: white, size: dimensions, owner: nil, cache: true,
+                                                           atlas: atlas, shareBrowserCoverage: true, fallback: browser.whiteMask)
+                            covered = whiteEntry.flatMap { atlas.desktopCoveredRows(of: $0, columns: columns) }
+                                ?? atlas.desktopCoveredRows(of: entry, columns: columns)
+                        }
                     } else if let browser, baseRGB != 0xffffff {
                         covered = atlas.browserCoveredRows(of: browser, columns: columns) ?? atlas.desktopCoveredRows(of: entry, columns: columns)
                     } else {
