@@ -36,6 +36,7 @@ final class RetainedLayoutCoordinator {
     final class TextLayoutCollector: @unchecked Sendable {
         var map: [RuneMotion.NodeId: TextLayoutRecord] = [:]
         var liveIds: Set<RuneMotion.NodeId> = []
+        let intrinsicShapes = IntrinsicTextShapes()
     }
 
     private struct TextLeafFallback {
@@ -435,7 +436,9 @@ final class RetainedLayoutCoordinator {
                     let shapeMaxW: Float? = (resolved.style.wrap == .noWrap && resolved.style.maxLines == 0) ? nil : TextBoxGeometry.wrapWidth(maxW, scale: scale)
                     let hasSpans = (resolved.spans?.isEmpty == false)
                     let box = textSystem.layoutKeyed(
-                        retaining: labelKey, text: hasSpans ? "" : resolved.displayedText,
+                        retaining: labelKey,
+                        intrinsicShapes: labelKey != nil && !widthIndependent ? textLayouts?.intrinsicShapes : nil,
+                        text: hasSpans ? "" : resolved.displayedText,
                         spans: resolved.spans,
                         pills: resolved.pills,
                         style: resolved.style,

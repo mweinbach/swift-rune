@@ -4722,6 +4722,7 @@ public final class TextSystem: @unchecked Sendable {
     #if canImport(CoreText) && canImport(CoreGraphics)
     internal func layoutKeyed(
         retaining measuredKey: TextShapeKey?,
+        intrinsicShapes: IntrinsicTextShapes? = nil,
         text: String,
         spans: [TextSpan]? = nil,
         pills: [PillChip] = [],
@@ -6914,6 +6915,7 @@ public final class TextSystem: @unchecked Sendable {
     #else
     internal func layoutKeyed(
         retaining measuredKey: TextShapeKey?,
+        intrinsicShapes: IntrinsicTextShapes? = nil,
         text: String,
         spans: [TextSpan]? = nil,
         pills: [PillChip] = [],
@@ -6966,13 +6968,22 @@ public final class TextSystem: @unchecked Sendable {
                     return cached
                 }
             }
-            let prepared = keep == .cached ? lock.withLock { preparedShapeCache[shapeKey] } : nil
+            var prepared = keep == .cached ? lock.withLock { preparedShapeCache[shapeKey] } : nil
+            #if canImport(CRuneDesktopText) && !canImport(CoreText)
+            if prepared == nil, keep == .cached { prepared = intrinsicShapes?.paragraphs[shapeKey] }
+            #endif
             let box = breakPortable(shapeKey, maxWidth: effectiveMaxW, scale: scale, emitGlyphs: emitGlyphs,
                                     keep: keep, glidePx: glidePx, previousBreak: prepared)
             if keep == .cached {
                 #if canImport(CRuneDesktopText) && !canImport(CoreText)
                 let native = box.shaped.desktopParagraph
                 box.shaped.desktopParagraph = nil
+                if !countAsRebreak, prepared == nil, let native, let intrinsicShapes {
+                    // Line fragments belong to the proposed width. The next proposal only needs
+                    // the original paragraphs' advances and native font fallback decisions.
+                    intrinsicShapes.paragraphs[shapeKey] = .init(linesByStart: native.linesByStart,
+                                                                 fragments: [], ranges: [])
+                }
                 #endif
                 // Probes can reuse a drawn shape at another width without retaining their
                 // own layout, native fonts or masks in the shared cache.

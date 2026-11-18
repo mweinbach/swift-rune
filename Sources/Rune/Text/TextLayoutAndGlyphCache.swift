@@ -259,6 +259,13 @@ public struct TextShapeKey: Hashable, Sendable {
     }
 }
 
+/// Native paragraph shapes shared by a single measured view while Taffy probes several widths.
+internal final class IntrinsicTextShapes {
+    #if canImport(CRuneDesktopText) && !canImport(CoreText)
+    var paragraphs: [TextShapeKey: ShapedText.DesktopParagraph] = [:]
+    #endif
+}
+
 internal final class TextPreparedShape: @unchecked Sendable {
     let authText: String
     let shapedText: String
