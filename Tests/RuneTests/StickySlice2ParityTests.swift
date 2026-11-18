@@ -501,4 +501,36 @@ struct StickySlice2ParityTests {
         checkScenario(into: 500, left: 20)
         checkScenario(into: -40, left: 0)
     }
+
+    @Test("A clipped sticky gutter keeps its horizontal pin, overflow hit, and anchored popup", arguments: [false, true])
+    func offscreenStickyGutterUnderRoundedViewport(rtl: Bool) throws {
+        let rt = Runtime(state: false, viewport: Vec2(180, 120), pixelScale: 2) { _, _ -> El<Bool> in
+            let button: El<Bool> = el().key("escape").size(15, 15).pin(top: -262.5, left: 3.25)
+                .role(.button).label("Escaping button").bg(.white).hit()
+            var gutter = el().key("gutter").size(38, 24).stickyLeft(6.5).mark(27).child(button)
+            if rtl { gutter = gutter.pin(top: 0, left: 250) }
+            let band = el().key("row").size(700, 24).pin(top: 300, left: 0).child(gutter)
+            let inner = el().key("inner").size(180, 120).pin(top: 0, left: 0).scrollXY()
+                .child(el().size(800, 490).child(band))
+            let outer = el().key("outer").size(180, 120).scrollXY().child(el().size(360, 240).child(inner))
+            let popup: El<Bool> = el().key("popup").size(9, 5).bg(.white).anchored("escape", side: .bottom, gap: 1)
+            let root = el().size(180, 120).rounded(6).clip(true).children([outer, popup])
+            return rtl ? root.dir(.rtl) : root
+        }
+        _ = rt.renderFrame(at: 0)
+        rt.update(at: 0.1) { _, tx in
+            tx.instant()
+            tx.scrollToInstant("inner", x: 110, y: 0)
+        }
+        let frame = rt.renderFrame(at: 0.1)
+        let gutter = try #require(rt.element(byKey: "gutter"))
+        let button = try #require(rt.element(byKey: "escape"))
+        let popup = try #require(rt.element(byKey: "popup"))
+        #expect(gutter.stuck == (rtl ? 4.5 : 116.5))
+        #expect(gutter.rect[0] == 6.5 && gutter.visible[3] == 0)
+        #expect(button.visible == [rtl ? 26.25 : 9.75, 37.5, 15, 15])
+        #expect(popup.rect[0] == (rtl ? 32.25 : 9.75) && popup.rect[1] == 53.5)
+        #expect(rt.hitTestElement(at: Vec2(button.rect[0] + 3, 42))?.key == "escape")
+        #expect(zip(frame.instances, frame.marks).contains { $0.rect.z == 30 && $1 == 27 })
+    }
 }

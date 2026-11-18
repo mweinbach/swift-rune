@@ -35,7 +35,7 @@ extension El {
     /// modifiers are preserved in the painted record and do not expand its ink.
     fileprivate var allowsOffscreenGeometry: Bool {
         guard hasOnlyCulledPaintExtras, !isRaised, !isModal, !isDissolve,
-              stickyConfig == nil, anchor == nil, flightId == nil, !isolatedLayer,
+              anchor == nil, flightId == nil, !isolatedLayer,
               scale == Vec2(1, 1), rotate == 0, offset == .zero, blur == 0,
               layout.scrollAxes.isEmpty, !layout.clipOverflow, clipRadius == nil,
               clipCorners == nil, clipFade == nil, backdropBlur == 0,
@@ -49,6 +49,10 @@ extension El {
               textHighlights == nil, textLinks.isEmpty, spanRingsSpec.isEmpty,
               advanceInRun == nil, pillChips.isEmpty, focusWithinRing == nil
         else { return false }
+        if let stickyConfig {
+            guard case .left = stickyConfig.edge, stickyConfig.shadows.isEmpty,
+                  stickyConfig.fade == nil, stickyConfig.reveal == nil else { return false }
+        }
         guard plainText != nil || richSpans != nil else { return true }
         guard children.isEmpty, focusRingColor == nil,
               isTruncateFadeEnabled || (textStyle.wrap != .wrap && textStyle.maxLines == 0),

@@ -1300,10 +1300,23 @@ extension Runtime {
             && !hasAnimatedTracks && !canPress && !canPaintFocusRing && growthRows.isEmpty
             && activeTextFlights.isEmpty && !needsInteractionPrepass && exitingIds.isEmpty
 
+        // Sticky constraints use the presented bounds of scroll ancestors, before their own
+        // sticky displacement. A sampled local offset does not move the constraint box.
+        func stickyShiftAtPresentation(_ node: FlatNode, rect: MotionRect, parent: Vec2,
+                                       localOffset: Vec2, inheritedScale: Vec2) -> Vec2 {
+            let id = node.nodeId
+            let offset: Vec2 = paintStore.get(id, Props.OFFSET) ?? .zero
+            let undo = Vec2(-(offset.x + localOffset.x) * inheritedScale.x,
+                            -(offset.y + localOffset.y) * inheritedScale.y)
+            let constraint = rect.offsetBy(undo)
+            return computeStickyShift(nodeIndex: node.index, parentStickyShift: parent, nodes: flatNodes,
+                rectOf: { $0.nodeId == id ? constraint : beforeSticky[$0.index] ?? $0.targetRect }).shift
+        }
+
         @inline(never)
         func projectOffscreen(
             _ node: FlatNode, _ el: El<State>, _ p: Presented,
-            _ context: PaintContext, depth: Int, snap: inout PixelSnap.Inherit,
+            _ context: PaintContext, depth: Int, snap: inout PixelSnap.Inherit, stickyShift: inout Vec2,
             groupHover: inout Float
         ) -> PaintHeader? {
             let id = node.nodeId
@@ -1314,7 +1327,7 @@ extension Runtime {
                   p.scale == Vec2(1, 1), p.rotate == 0, p.blur == 0, p.opacity == 1,
                   p.revealClip == nil, p.mask.isNone else { return nil }
             let base = p.rect.offsetBy(Vec2(context.transform.dx, context.transform.dy))
-            let rect = base.offsetBy(context.stickyShift)
+            var rect = base.offsetBy(context.stickyShift)
             let clip = context.clip.clipPx
             // The same conservative glyph overhang as TextRasterWindow.expanded, plus
             // padding in either direction. A larger span or hard break disqualifies the node.
@@ -1333,15 +1346,36 @@ extension Runtime {
             let isLeaf = topology.children(of: node).isEmpty
             // Leaves need no downstream snap state. Composite and faded boxes retain
             // their layer setup, including scopes which might paint a visible child.
+            var childClip = context.clip
+            if node.isSticky {
+                childClip.fadeWidth.x = childClip.withoutScrollWidth.x
+                childClip.fadeOrigin.x = childClip.withoutScrollOrigin.x
+                childClip.fade = packFade(width: childClip.fadeWidth, origin: childClip.fadeOrigin, clip: clip)
+            }
             if !isLeaf {
-                guard context.clip.roundedMask == nil, context.clip.fadeWidth == .zero, context.clip.fade == .zero,
+                guard childClip.fadeWidth == .zero, childClip.fade == .zero,
                       context.opacity == 1, snap.layer == 0, paintScene.rest(id) == nil
                 else { return nil }
+                // A rectangular cut through a rounded corner requires a separate layer.
+                // Plain containers can otherwise carry the inherited mask unchanged or
+                // reduce it to a rectangular clip when it lies in a central strip.
+                if childClip.roundedMask != nil {
+                    trimCentralStrip(&childClip.roundedMask, clip: &childClip.clipPx)
+                    if let mask = childClip.roundedMask?.rect {
+                        guard intersectClipRects(childClip.clipPx, mask) == mask else { return nil }
+                        childClip.clipPx = mask
+                    }
+                }
             }
 
             currentInheritedMark = el.elMark ?? currentInheritedMark
             if hasSticky { beforeSticky[node.index] = base }
-            if context.stickyShift != .zero { stuckShiftsByPath[node.path] = context.stickyShift }
+            if node.isSticky, node.enclosingHScrollIndex != nil, nodeIndexById[id] != nil {
+                stickyShift = stickyShiftAtPresentation(node, rect: base, parent: context.stickyShift,
+                                                       localOffset: .zero, inheritedScale: Vec2(1, 1))
+                rect = base.offsetBy(stickyShift)
+            }
+            if stickyShift != .zero { stuckShiftsByPath[node.path] = stickyShift }
             newPresentedRects.record(rect, at: node.index, path: node.path)
             newPresentedScales.record(at: node.index, path: node.path, id: id, scale: Vec2(1, 1), motion: .still)
             if let parent = p.parent, !newRectSpringingById.isEmpty, newRectSpringingById[parent] == true {
@@ -1366,17 +1400,20 @@ extension Runtime {
                 committedLayoutTarget: node.committedLayoutTarget, opacity: parentScope.opacity, scale: 1,
                 blur: parentScope.reportedBlur, radius: abs(p.corners.topLeft), fill: el.background, liveTextColor: nil,
                 hover: 0, press: 0, scrolled: carried, carried: carried,
-                stuck: abs(context.stickyShift.y) >= abs(context.stickyShift.x) ? context.stickyShift.y : context.stickyShift.x,
+                stuck: abs(stickyShift.y) >= abs(stickyShift.x) ? stickyShift.y : stickyShift.x,
                 focusAllowed: !inert, focused: false, focusVisible: false, inert: inert, moving: false, exiting: false
             )))
             kitHooks.unseenPresence.recordNativeFrameNode(p, rect: rect, drawn: rect, scale: Vec2(1, 1), turn: nil,
                 localClip: parentScope.localClip, screenClip: parentClip.map { intersectRects($0, initialClipPt) } ?? initialClipPt,
-                margin: 2 / scale + 3 * parentScope.blur, bypassClip: false, opacity: parentScope.opacity, sticky: .zero)
+                margin: 2 / scale + 3 * parentScope.blur, bypassClip: false, opacity: parentScope.opacity, sticky: Vec2(stickyShift.x - context.stickyShift.x, stickyShift.y - context.stickyShift.y))
 
-            var childClip = context.clip
             childClip.rectPt = intersectRects(childClip.rectPt, rect)
             if !isLeaf {
                 snap.grow(growthSnapOffsetY(for: node), stack: false)
+                if node.isSticky {
+                    snap.shift(0, by: stickyShift.x - context.stickyShift.x)
+                    snap.shift(1, by: stickyShift.y - context.stickyShift.y)
+                }
                 let canSnap = !snap.off && el.isPixelSnapEnabled
                 let edges = PixelSnap.edgesPx(rect, scale: scale)
                 let parent = canSnap ? pixelSnapGlides.atRest(id: id, r: edges, rigid: snap.rigid * scale, parent: snap.parent).1 : nil
@@ -1567,13 +1604,8 @@ extension Runtime {
                 if el.anchor != nil && !node.isSticky {
                     stickyShift = .zero
                 } else if (node.isSticky || hasHolds) && nodeIndexById[nid] != nil {
-                    let offset: Vec2 = paintStore.get(nid, Props.OFFSET) ?? .zero
-                    let ownOffset = Vec2(-(offset.x + lo.x) * pinh.scale.x, -(offset.y + lo.y) * pinh.scale.y)
-                    let stickyBounds = effRect.offsetBy(ownOffset)
-                    stickyShift = computeStickyShift(
-                        nodeIndex: node.index, parentStickyShift: parentShift, nodes: flatNodes,
-                        rectOf: { n in n.nodeId == nid ? stickyBounds : beforeSticky[n.index] ?? n.targetRect }
-                    ).shift
+                    stickyShift = stickyShiftAtPresentation(node, rect: effRect, parent: parentShift,
+                                                           localOffset: lo, inheritedScale: pinh.scale)
                 }
                 if stickyShift != .zero {
                     effRect = effRect.offsetBy(stickyShift)
@@ -3896,7 +3928,7 @@ extension Runtime {
                     func header(_ el: El<State>) -> PaintHeader {
                         if canProjectOffscreen, node.paintTraits.contains(.offscreenGeometry), loop == nil,
                            let presented, let result = projectOffscreen(node, el, presented, context, depth: context.hitDepth + 1,
-                                                                       snap: &snap, groupHover: &groupHover) {
+                                                                       snap: &snap, stickyShift: &stickyShift, groupHover: &groupHover) {
                             return result
                         }
                         return paintNodeHeader(
