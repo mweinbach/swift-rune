@@ -654,6 +654,8 @@ private struct PaintContext {
     let clip: RenderClipState
     let inert: Bool
     let groupHover: Float
+    let snap: PixelSnap.Inherit
+    let stickyShift: Vec2
     let opacity: Float
     let enclosingOpacity: Float
     let transform: PresentedTransform
@@ -687,6 +689,8 @@ private struct RenderHitScope {
 }
 
 private struct SavedRaisedNodeState {
+    var childSnap: PixelSnap.Inherit
+    var stickyShift: Vec2
     var elementIndex: Int
     var visibleClipPt: MotionRect
     var unclippedClipPx: SIMD4<Float>
@@ -845,7 +849,7 @@ extension Runtime {
         let heightPx = max(1, Int((viewport.y * scale).rounded()))
 
         pixelSnapGlides.beginFrame(t: now, size: SIMD2<Float>(Float(widthPx), Float(heightPx)))
-        var childSnapByNode: [NodeId: PixelSnap.Inherit] = [:]
+        let rootSnap = rootPixelSnap
         let paintMotion = PaintMotionTracks(store: scene.store)
         var carriedScrollCache = makeCarriedScrollCache()
         let presentedById = frameOut.paintNodesById
@@ -860,7 +864,8 @@ extension Runtime {
         let canPaintFocusRing = focusedPath != nil || cxSettings.viewDefaults.forceFocusRings
         func renderNode(_ slot: Int) -> FlatNode { slot >= 0 ? flatNodes[slot] : topology.exits[~slot] }
         let renderNodes = topology.order.lazy.map(renderNode)
-        var beforeSticky: [NodeId: MotionRect] = [:]
+        // Sticky bounds use the committed ancestors visited so far, before their sticky translation.
+        var beforeSticky = [MotionRect?](repeating: nil, count: hasSticky ? flatNodes.count : 0)
         stuckShiftsByPath.removeAll(keepingCapacity: true)
         var newElements: [ElementInfo] = []
         newElements.reserveCapacity(frameOut.nodes.count)
@@ -879,11 +884,18 @@ extension Runtime {
         }
         var hasInheritedFlags = !frameLandingHoldIds.isEmpty
         var newSeenMatched: [String: MatchedSeenSnapshot] = [:]
-        var newHitGeometries = Dictionary<String, HitGeometry>(minimumCapacity: publishHitGeometry ? frameOut.nodes.count : 0)
+        // Ordinary mounted nodes already have an immutable path index. Exits may reuse
+        // a live path, in which case the final paint-order write must win.
+        let indexedGeometry = topology.exits.isEmpty && nodeByPath.count == flatNodes.count
+        var newHitGeometries = publishHitGeometry && indexedGeometry
+            ? FrameGeometry<HitGeometry>(pathSlots: nodeByPath)
+            : FrameGeometry(minimumCapacity: publishHitGeometry ? frameOut.nodes.count : 0)
         var newLinkBoxes: [String: [TextLinkBox]] = [:]
         var hitScopes: [RenderHitScope] = []
         if publishHitGeometry { hitScopes.reserveCapacity(frameOut.nodes.count) }
-        var newPresentedRects = Dictionary<String, MotionRect>(minimumCapacity: frameOut.nodes.count)
+        var newPresentedRects = indexedGeometry
+            ? FrameGeometry<MotionRect>(pathSlots: nodeByPath)
+            : FrameGeometry(minimumCapacity: frameOut.nodes.count)
         var newPresentedScales = PresentedScales(count: flatNodes.count, byPath: nodeByPath,
                                                  byId: nodeIndexById, hasExits: !topology.exits.isEmpty)
         var drawnOverrides: [String: MotionRect] = [:]
@@ -1268,6 +1280,8 @@ extension Runtime {
         func paintNodeHeader(
             _ node: FlatNode, el: El<State>, presented: Presented?, loop: LoopSampleResult?,
             parentClip inheritedClip: RenderClipState,
+            snap: inout PixelSnap.Inherit,
+            stickyShift: inout Vec2,
             inheritedInert: Bool,
             groupHover: inout Float,
             parentOpacity: Float,
@@ -1329,7 +1343,7 @@ extension Runtime {
             let presentedBorder = presented?.border.map(Color.init)
             let baseRect = liveRect ?? presented?.rect ?? node.targetRect
             let pinh: PresentedTransform
-            var inheritedSnap = presented?.parent.flatMap { childSnapByNode[$0] } ?? rootPixelSnap
+            var inheritedSnap = snap
             inheritedSnap.grow(growthSnapOffsetY(for: node), stack: el.growthSpec != nil)
             var anchorScaleMotion: PaintScaleMotion = .still
             if let a = el.anchor,
@@ -1425,15 +1439,11 @@ extension Runtime {
             } else {
                 effRect = shifted
             }
-            let parentShift: Vec2
-            if !stuckShiftsByPath.isEmpty, let id = presented?.parent, let parent = mountedNode(id) ?? exitingSnapshots[id] {
-                parentShift = stuckShiftsByPath[parent.path] ?? .zero
-            } else {
-                parentShift = .zero
-            }
-            var stickyShift = parentShift
+            let parentShift = stickyShift
             if hasSticky {
-                beforeSticky[nid] = effRect
+                if topology.exitingSlot.isEmpty || topology.exitingSlot[nid] == nil {
+                    beforeSticky[node.index] = effRect
+                }
                 if el.anchor != nil && !node.isSticky {
                     stickyShift = .zero
                 } else if (node.isSticky || hasHolds) && nodeIndexById[nid] != nil {
@@ -1442,7 +1452,7 @@ extension Runtime {
                     let stickyBounds = effRect.offsetBy(ownOffset)
                     stickyShift = computeStickyShift(
                         nodeIndex: node.index, parentStickyShift: parentShift, nodes: flatNodes,
-                        rectOf: { n in n.nodeId == nid ? stickyBounds : beforeSticky[n.nodeId] ?? n.targetRect }
+                        rectOf: { n in n.nodeId == nid ? stickyBounds : beforeSticky[n.index] ?? n.targetRect }
                     ).shift
                 }
                 if stickyShift != .zero {
@@ -1496,7 +1506,7 @@ extension Runtime {
             let radiiPx = radiiPt * scale
 
             let visibleClipPt = intersectRects(parentClip.rectPt, effRect)
-            newPresentedRects[node.path] = effRect
+            newPresentedRects.record(effRect, at: node.index, path: node.path)
             newPresentedScales.record(at: node.index, path: node.path, id: nid, scale: sc, motion: nodeScaleMotion)
 
             let isExiting = exitingIds.contains(nid)
@@ -1591,15 +1601,15 @@ extension Runtime {
                 infoBlur = (parentElementIndex.map { newElements[$0].blur } ?? 0) + effBlur * sc.x
                 if let parentScreenClip { presenceScreenClip = intersectRects(parentScreenClip, initialClipPt) }
                 scope.exiting = infoExiting
-                newHitGeometries[node.path] = HitGeometry(
-                    path: node.path, paintOrder: myElementIndex, parentPath: parentElementIndex.map { newElements[$0].path },
+                newHitGeometries.record(HitGeometry(
+                    paintOrder: myElementIndex,
                     rect: effRect, clipRect: scope.localClip ?? effRect,
                     outerClip: scope.outerClip.map { intersectRects($0, initialClipPt) } ?? initialClipPt,
                     turn: scope.turn, opacity: scope.opacity, isExiting: scope.exiting,
                     hasVisualBlocker: el.blocksHits(fill: effBg, border: liveBorderColor ?? presentedBorder ?? el.borderColor),
                     isInteractiveBlocker: el.blocksInteractiveHits,
                     parentScreenClip: parentScreenClip
-                )
+                ), at: node.index, path: node.path)
                 infoVisible = intersectRects(infoRect, parentScreenClip ?? initialClipPt)
                 infoOpacity = scope.opacity
                 hitScopes.append(scope)
@@ -1777,6 +1787,7 @@ extension Runtime {
                el.surfacePayload == nil, el.pixelsPayload == nil, el.role != .textInput,
                editLens == nil, !hasActiveTextLinks(el), !el.isSecure,
                el.runtimeExtras[RenderExtrasKey.cacheEnabled] == nil, activeTextFlights.isEmpty {
+                snap = rootSnap
                 return (false, subtreeDynamic, effOpacity, effBlur, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil)
             }
             if effOpacity <= 0.001 && (!isExiting || parentOpacity == 0) {
@@ -1790,6 +1801,7 @@ extension Runtime {
                         } ?? effRect
                     }
                 }
+                snap = rootSnap
                 return (false, subtreeDynamic, effOpacity, effBlur, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil)
             }
 
@@ -1816,7 +1828,7 @@ extension Runtime {
             } else if rest == nil && unscaled {
                 (paintedEdges, snapParent) = pixelSnapGlides.atRest(id: nid, r: exactEdgesPx, rigid: rigidPx, parent: inheritedSnap.parent)
             } else {
-                let growthRow = growthRows["growth:\(node.path)"] != nil || growthRows["fold:\(node.path)"] != nil
+                let growthRow = !growthRows.isEmpty && (growthRows["growth:\(node.path)"] != nil || growthRows["fold:\(node.path)"] != nil)
                 let motion = PixelSnap.motion(rect: shifted, rest: rest, scale: scale, anchored: el.anchor != nil, growthRow: growthRow)
                 (paintedEdges, snapParent) = pixelSnapGlides.snapped(
                     id: nid, motion: motion, r: exactEdgesPx, unscaled: rawEdgesPx,
@@ -1836,7 +1848,7 @@ extension Runtime {
             childSnap.shift(1, by: -(node.scrollShift.y + extraScrollY))
             childSnap.parent = childSnap.rigid == inheritedSnap.rigid && PixelSnap.frames(el, effectiveFill: effBg, effectiveBorder: presentedBorder)
                 ? snapParent : nil
-            childSnapByNode[nid] = childSnap
+            snap = childSnap
             let rectPx = SIMD4<Float>(paintedEdges.x, paintedEdges.y, max(0, paintedEdges.z - paintedEdges.x), max(0, paintedEdges.w - paintedEdges.y))
             // A plain container can overflow back into view through one of its children.
             // Publish its geometry and propagate its snapped coordinates even when its own
@@ -1886,10 +1898,10 @@ extension Runtime {
                 }
                 return (boundsClipPx, SIMD4<Float>(resolveCorner(rawR.x), resolveCorner(rawR.y), resolveCorner(rawR.z), resolveCorner(rawR.w)))
             }
-            let gKey = el.foldGlideSpec != nil ? "fold:\(node.path)" : "growth:\(node.path)"
-            let skipsGrowthReveal = slice2State.joinedRowsWithoutRevealMask.contains(nid)
             let growthMaskPt: Float? = {
-                guard !skipsGrowthReveal, let gEntry = growthRows[gKey] else { return nil }
+                guard !growthRows.isEmpty, !slice2State.joinedRowsWithoutRevealMask.contains(nid) else { return nil }
+                let key = el.foldGlideSpec != nil ? "fold:\(node.path)" : "growth:\(node.path)"
+                guard let gEntry = growthRows[key] else { return nil }
                 let t = gEntry.track
                 let overflows = gEntry.edge.overflow && (t.streaming || t.isPaced)
                 guard gEntry.edge.clip && !overflows else { return nil }
@@ -1946,15 +1958,15 @@ extension Runtime {
                 fnvMixFloat(&nodePaintHash, inheritedSnap.steady.y)
                 fnvMixFloat(&nodePaintHash, inheritedSnap.contain.x)
                 fnvMixFloat(&nodePaintHash, inheritedSnap.contain.y)
+                fnvMixFloat(&nodePaintHash, effBlur)
+                fnvMixFloat(&nodePaintHash, effOpacity)
+                fnvMixFloat(&nodePaintHash, scale)
+                fnvMix(&nodePaintHash, srgbBlend ? 1 : 0)
+                fnvMix(&nodePaintHash, focusVisible ? 1 : 0)
+                fnvMix(&nodePaintHash, hovered ? 1 : 0)
+                fnvMix(&nodePaintHash, pressed ? 1 : 0)
+                fnvMix(&nodePaintHash, focused ? 1 : 0)
             }
-            fnvMixFloat(&nodePaintHash, effBlur)
-            fnvMixFloat(&nodePaintHash, effOpacity)
-            fnvMixFloat(&nodePaintHash, scale)
-            fnvMix(&nodePaintHash, srgbBlend ? 1 : 0)
-            fnvMix(&nodePaintHash, focusVisible ? 1 : 0)
-            fnvMix(&nodePaintHash, hovered ? 1 : 0)
-            fnvMix(&nodePaintHash, pressed ? 1 : 0)
-            fnvMix(&nodePaintHash, focused ? 1 : 0)
             var elideCache: (sig: UInt64, relBounds: SIMD4<Float>, k: Float)? = nil
             if cacheEligible, var entry = elSliceRenderState.nodeCaches[nid], entry.commitGen != commitGen {
                 if abs(effScale - entry.rasterScale) > 1e-4 {
@@ -2255,6 +2267,8 @@ extension Runtime {
             let turnPivot = SIMD2(rectPx.x + rectPx.z * el.origin.x, rectPx.y + rectPx.w * el.origin.y)
             if hasRaised {
                 savedNodeStates[node.nodeId] = SavedRaisedNodeState(
+                    childSnap: childSnap,
+                    stickyShift: stickyShift,
                     elementIndex: myElementIndex,
                     visibleClipPt: visibleClipPt,
                     unclippedClipPx: savedUnclippedClip,
@@ -2912,7 +2926,7 @@ extension Runtime {
             }
 
             if !el.shapes.isEmpty {
-                let drawFrac = (presentedById[nid]?.draw ?? 1.0).clamped(to: 0...1)
+                let drawFrac = (presented?.draw ?? 1.0).clamped(to: 0...1)
                 for shape in el.shapes { paintShape(shape, drawFrac: drawFrac) }
             }
 
@@ -3740,6 +3754,8 @@ extension Runtime {
         func paintSubtree(
             _ rootSlot: Int,
             parentClip: RenderClipState,
+            inheritedSnap: PixelSnap.Inherit,
+            inheritedStickyShift: Vec2 = .zero,
             inheritedInert: Bool,
             parentOpacity: Float,
             enclosingLayerOpacity: Float = 1,
@@ -3753,7 +3769,7 @@ extension Runtime {
         ) -> Bool {
             var nextSlot: Int? = rootSlot
             var context = PaintContext(
-                clip: parentClip, inert: inheritedInert, groupHover: 0, opacity: parentOpacity, enclosingOpacity: enclosingLayerOpacity,
+                clip: parentClip, inert: inheritedInert, groupHover: 0, snap: inheritedSnap, stickyShift: inheritedStickyShift, opacity: parentOpacity, enclosingOpacity: enclosingLayerOpacity,
                 transform: inheritedTransform, dissolve: parentIsDissolve, scaleMotion: parentScaleMotion,
                 element: parentElementIndex, allowRaised: allowRaised, inCache: parentInCache, rotated: parentIsRotated
             )
@@ -3770,13 +3786,15 @@ extension Runtime {
                     let savedMark = currentInheritedMark
                     currentInheritedMark = node.el.elMark ?? savedMark
                     var groupHover = context.groupHover
+                    var snap = context.snap
+                    var stickyShift = context.stickyShift
                     let presented = presentedById[node.nodeId]
                     let loop = loopSamples[node.nodeId]
                     let turn = (presented?.rotate ?? node.el.rotate) + (loop?.rotation ?? 0)
                     func header(_ el: El<State>) -> PaintHeader {
                         paintNodeHeader(
                             node, el: el, presented: presented, loop: loop,
-                            parentClip: context.clip, inheritedInert: context.inert, groupHover: &groupHover, parentOpacity: context.opacity,
+                            parentClip: context.clip, snap: &snap, stickyShift: &stickyShift, inheritedInert: context.inert, groupHover: &groupHover, parentOpacity: context.opacity,
                             enclosingLayerOpacity: context.enclosingOpacity, inheritedTransform: context.transform,
                             parentIsDissolve: context.dissolve, parentScaleMotion: context.scaleMotion,
                             parentElementIndex: context.element, parentInCache: context.inCache, parentIsRotated: context.rotated
@@ -3799,7 +3817,7 @@ extension Runtime {
                     let children = topology.children(of: node)
                     if (h.continueSubtree || publishHitGeometry), let first = children.first {
                         context = PaintContext(
-                            clip: h.nextChildClip, inert: h.nextInert, groupHover: groupHover,
+                            clip: h.nextChildClip, inert: h.nextInert, groupHover: groupHover, snap: snap, stickyShift: stickyShift,
                             opacity: h.continueSubtree ? (h.needsLayer ? 1 : h.effOpacity).clamped(to: 0...1) : 0,
                             enclosingOpacity: h.needsLayer ? context.enclosingOpacity * h.effOpacity : context.enclosingOpacity,
                             transform: h.nextChildTransform, dissolve: h.isDissolveScope, scaleMotion: h.scaleMotion,
@@ -3838,7 +3856,7 @@ extension Runtime {
 
         clearPressRestingHits()
         for root in topology.roots {
-            paintSubtree(root, parentClip: rootClip, inheritedInert: false, parentOpacity: 1.0, allowRaised: false)
+            paintSubtree(root, parentClip: rootClip, inheritedSnap: rootSnap, inheritedInert: false, parentOpacity: 1.0, allowRaised: false)
         }
         for (slot, offset) in collectedRaisedNodes {
             let raisedNode = renderNode(slot)
@@ -3896,6 +3914,8 @@ extension Runtime {
                 paintSubtree(
                     slot,
                     parentClip: raisedParentClip,
+                    inheritedSnap: pst.childSnap,
+                    inheritedStickyShift: pst.stickyShift,
                     inheritedInert: pst.nextInert,
                     parentOpacity: pst.effOpacity,
                     enclosingLayerOpacity: pst.enclosingLayerOpacity,
@@ -3909,7 +3929,7 @@ extension Runtime {
                     parentIsRotated: pst.childIsRotated
                 )
             } else {
-                paintSubtree(slot, parentClip: rootClip, inheritedInert: false, parentOpacity: 1.0, allowRaised: true)
+                paintSubtree(slot, parentClip: rootClip, inheritedSnap: rootSnap, inheritedInert: false, parentOpacity: 1.0, allowRaised: true)
             }
             if publishHitGeometry { raisedRanges.append((offset, start..<newElements.count)) }
             for (sIdx, sfIdx) in reopenedLayers.reversed() {
@@ -3919,7 +3939,7 @@ extension Runtime {
 
         // Reuse all presented boxes when rotation leaves the bounds numerically unchanged.
         // Exits can have the same path as their replacement, so retain only the live boxes there.
-        var newDrawnRectByPath = exitingIds.isEmpty ? newPresentedRects : drawnOverrides
+        var newDrawnRectByPath = exitingIds.isEmpty ? newPresentedRects : FrameGeometry(byPath: drawnOverrides)
         if exitingIds.isEmpty {
             for (path, drawn) in drawnOverrides { newDrawnRectByPath[path] = drawn }
         }

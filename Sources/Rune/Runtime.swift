@@ -1163,9 +1163,9 @@ public final class Runtime<State> {
     /// The last mounted state of nodes removed from the current tree, retained until their exit finishes.
     internal var exitingSnapshots: [NodeId: FlatNode] = [:]
     internal var lastElements: [ElementInfo] = []
-    internal var presentedRectByPath: [String: MotionRect] = [:]
+    internal var presentedRectByPath = FrameGeometry<MotionRect>()
     internal var presentedScales = PresentedScales()
-    internal var hitGeometryByPath: [String: HitGeometry] = [:]
+    internal var hitGeometryByPath = FrameGeometry<HitGeometry>()
     internal var paintOrderPaths: [String] = []
     /// Atlas-space coverage adjustments collected only while a motion gate is recording.
     internal var motionRasterGlyphs: MotionGateRasterGlyphs?
@@ -1322,7 +1322,7 @@ public final class Runtime<State> {
     private var screenFired: [NodeId: [Float]] = [:]
     private var drawnFired: [NodeId: (drawn: [Float], laid: [Float])] = [:]
     private var visibleFired: [NodeId: Bool] = [:]
-    internal var drawnRectByPath: [String: MotionRect] = [:]
+    internal var drawnRectByPath = FrameGeometry<MotionRect>()
     internal var rectSpringingById: [NodeId: Bool] = [:]
     internal var lastCommittedSpecs: [NodeSpec] = []
     internal var lastFrameOutput: FrameOutput? = nil
@@ -5546,7 +5546,7 @@ public final class Runtime<State> {
     }
 
     /// A flight lands on the text as painted after this frame's scrolling and growth.
-    internal func measureTextFlightDestinations(in drawnRects: [String: MotionRect], at now: Double) {
+    internal func measureTextFlightDestinations(in drawnRects: FrameGeometry<MotionRect>, at now: Double) {
         for index in activeTextFlights.indices {
             guard let node = mountedNode(activeTextFlights[index].targetNodeId),
                   let rect = drawnRects[node.path] else { continue }
@@ -7355,7 +7355,7 @@ public final class Runtime<State> {
         var newRectByPath = Dictionary<String, MotionRect>(minimumCapacity: frameOut.nodes.count)
         var newScaleByPath = Dictionary<String, Vec2>(minimumCapacity: frameOut.nodes.count)
         var newTurnByPath: [String: Turn] = [:]
-        var newHitGeometries = Dictionary<String, HitGeometry>(minimumCapacity: frameOut.nodes.count)
+        var newHitGeometries = FrameGeometry<HitGeometry>(minimumCapacity: frameOut.nodes.count)
         var newPaintOrder: [String] = []
         newPaintOrder.reserveCapacity(frameOut.nodes.count)
         var newHelpHits: [HelpHitRecord] = []
@@ -9444,9 +9444,7 @@ public final class Runtime<State> {
             }
 
             newHitGeometries[snap.path] = HitGeometry(
-                path: snap.path,
                 paintOrder: newPaintOrder.count - 1,
-                parentPath: parentPath,
                 rect: rect,
                 clipRect: effectiveHitClip,
                 outerClip: effectiveOuterClip,
@@ -9911,7 +9909,8 @@ public final class Runtime<State> {
         }
         seenMatchedByFlightId = newSeenMatched
         let inspectedElementCount = infos.count
-        measureTextFlightDestinations(in: newDrawnRectByPath, at: now)
+        let drawnSnapshot = FrameGeometry(byPath: newDrawnRectByPath)
+        measureTextFlightDestinations(in: drawnSnapshot, at: now)
 
         if !activeTextFlights.isEmpty {
             forEachTextFlightGlyph(at: now) { glyph, deviceRect, ink, clip in
@@ -10008,11 +10007,11 @@ public final class Runtime<State> {
         imeCursorArea = nextImeCursorArea
         imeOptionAsAlt = nextImeOptionAsAlt
         noWindowDragRects = nextNoWindowDragRects
-        presentedRectByPath = newRectByPath
+        presentedRectByPath = FrameGeometry(byPath: newRectByPath)
         presentedScales = PresentedScales(scaleByPath: newScaleByPath, motionById: nodeScaleMotionById)
         hitGeometryByPath = newHitGeometries
         paintOrderPaths = newPaintOrder
-        drawnRectByPath = newDrawnRectByPath
+        drawnRectByPath = drawnSnapshot
         rectSpringingById = newRectSpringingById
         publishHoverOrder()
         // A hold draws nothing while it waits: its wake asks for the one frame that ends it.

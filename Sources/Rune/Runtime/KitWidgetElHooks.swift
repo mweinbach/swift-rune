@@ -427,8 +427,8 @@ extension Runtime {
     internal func dispatchContextMenuKey(
         _ ev: KeyEvent,
         at now: Double,
-        drawnRectByPath: [String: MotionRect],
-        presentedRectByPath: [String: MotionRect]
+        drawnRectByPath: FrameGeometry<MotionRect>,
+        presentedRectByPath: FrameGeometry<MotionRect>
     ) -> Bool {
         let m = ev.mods
         let plain = !m.cmd && !m.ctrl && !m.alt && !m.logo

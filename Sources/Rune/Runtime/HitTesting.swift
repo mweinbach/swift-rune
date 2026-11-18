@@ -49,9 +49,7 @@ extension El {
 
 /// Cached per-frame presented hit-testing geometry for a node in `Runtime`.
 struct HitGeometry: Sendable {
-    var path: String
     var paintOrder: Int = 0
-    var parentPath: String?
     var rect: MotionRect
     var clipRect: MotionRect
     var outerClip: MotionRect
@@ -78,6 +76,60 @@ struct HitGeometry: Sendable {
     @inline(__always)
     func contains(_ windowPoint: Vec2) -> Bool {
         unturnedLocalPoint(for: windowPoint) != nil
+    }
+}
+
+/// The paths belong to the same commit as the values. A later commit can change
+/// mounted slots before input or an anchored overlay queries the previous paint.
+struct FrameGeometry<Value> {
+    private let pathSlots: [String: Int]
+    private var boxes: [Value?]
+    private var populated = 0
+    private var byPath: [String: Value]
+
+    init(minimumCapacity: Int = 0) {
+        pathSlots = [:]
+        boxes = []
+        byPath = Dictionary(minimumCapacity: minimumCapacity)
+    }
+
+    init(byPath: [String: Value]) {
+        pathSlots = [:]
+        boxes = []
+        self.byPath = byPath
+    }
+
+    init(pathSlots: [String: Int]) {
+        self.pathSlots = pathSlots
+        boxes = Array(repeating: nil, count: pathSlots.count)
+        byPath = [:]
+    }
+
+    var isEmpty: Bool { populated == 0 && byPath.isEmpty }
+
+    mutating func record(_ geometry: Value, at slot: Int, path: String) {
+        if boxes.isEmpty {
+            byPath[path] = geometry
+        } else {
+            if boxes[slot] == nil { populated += 1 }
+            boxes[slot] = geometry
+        }
+    }
+
+    subscript(path: String) -> Value? {
+        get {
+            if let slot = pathSlots[path] { return boxes[slot] }
+            return byPath[path]
+        }
+        set {
+            if let slot = pathSlots[path] {
+                if boxes[slot] == nil, newValue != nil { populated += 1 }
+                if boxes[slot] != nil, newValue == nil { populated -= 1 }
+                boxes[slot] = newValue
+            } else {
+                byPath[path] = newValue
+            }
+        }
     }
 }
 

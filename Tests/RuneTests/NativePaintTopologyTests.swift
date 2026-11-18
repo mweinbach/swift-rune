@@ -30,3 +30,27 @@ import Testing
     #expect(detached.roots.contains(two.index))
     #expect(Array(detached.children(of: root)) == [one.index])
 }
+
+@Test func nativeHitGeometryKeepsItsPaintedSlotsAcrossCommits() throws {
+    let rt = Runtime<Int>(state: 0, viewport: Vec2(100, 100)) { state, _ in
+        var root: El<Int> = col().key("root")
+        if state == 1 { root = root.child(el().key("inserted").size(20, 30).hit()) }
+        return root.child(el().key("target").size(20, 10).hit())
+    }
+    _ = rt.renderFrame(at: 0)
+    let path = try #require(rt.element(byKey: "target")?.path)
+    let old = rt.hitGeometryByPath
+    #expect(old[path]?.contains(Vec2(5, 5)) == true)
+    rt.state = 1
+    rt.invalidate(at: 1)
+    _ = rt.renderFrame(at: 1)
+    rt.settleAll()
+    _ = rt.renderFrame(at: 2)
+    #expect(rt.hitTestElement(at: Vec2(5, 35))?.key == "target")
+    #expect(rt.hitGeometryByPath[path]?.contains(Vec2(5, 35)) == true)
+    #expect(old[path]?.contains(Vec2(5, 35)) == false)
+    var edited = rt.hitGeometryByPath
+    edited[path] = nil
+    #expect(edited[path] == nil)
+    #expect(rt.hitGeometryByPath[path] != nil)
+}

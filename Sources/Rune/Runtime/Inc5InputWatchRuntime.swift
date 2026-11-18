@@ -749,16 +749,16 @@ extension Runtime {
         let topmostPtrPath: String?
         let alonePath: String?
         let sharedHoverKeys: Set<String>
-        let hitGeometryByPath: [String: HitGeometry]
-        let presentedRectByPath: [String: MotionRect]
+        let hitGeometryByPath: FrameGeometry<HitGeometry>
+        let presentedRectByPath: FrameGeometry<MotionRect>
         let presentedRectById: [NodeId: MotionRect]
 
         static func isPtrInside(
             _ node: FlatNode,
             ptrPos: Vec2,
             topmostPtrPath: String?,
-            hitGeometryByPath: [String: HitGeometry],
-            presentedRectByPath: [String: MotionRect],
+            hitGeometryByPath: FrameGeometry<HitGeometry>,
+            presentedRectByPath: FrameGeometry<MotionRect>,
             presentedRectById: [NodeId: MotionRect]
         ) -> Bool {
             guard ptrPos.x > -9000, ptrPos.y > -9000 else { return false }
