@@ -68,6 +68,7 @@ extension Runtime {
         let containsVirtual: Bool
         let reusableForRelayout: Bool
         let keysClean: Bool
+        let layoutRootMemo: MemoLayoutChildren<State>?
         let reads: [MemoRead]
         let trackedReads: TrackedReads
         let envHash: UInt64
@@ -78,7 +79,15 @@ extension Runtime {
             self.memoIds = memoIds
             self.containsVirtual = containsVirtual
             self.reusableForRelayout = reusableForRelayout
-            self.keysClean = KeyDiagnostics.clean(el)
+            let clean = KeyDiagnostics.clean(el)
+            self.keysClean = clean
+            if clean, reusableForRelayout, !containsVirtual, !el.hasEditLens, el.explicitDir != .auto,
+               el.layoutAnim?.travel != .screen, el.outsideListDiscFont == nil, let memo = el.memoLayoutChildren,
+               memo.traits.isDisjoint(with: [.mutableLayout, .virtual, .growth]) {
+                layoutRootMemo = memo
+            } else {
+                layoutRootMemo = nil
+            }
             self.reads = reads
             self.trackedReads = trackedReads
             self.envHash = envHash

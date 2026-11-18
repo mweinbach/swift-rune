@@ -91,6 +91,25 @@ final class RetainedLayoutCoordinator {
         var result: LayoutEngine.ResultNode?
     }
 
+    /// A virtual row builder returned this exact immutable root. Retain its slot as well
+    /// as its children only while its path, inherited style and flow context still match.
+    private final class VirtualRowRoot {
+        weak var source: AnyObject?
+        let parent: SyncPrepared
+
+        init(_ source: AnyObject, parent: SyncPrepared) {
+            self.source = source
+            self.parent = parent
+        }
+
+        func matches(_ row: AnyObject, parent current: SyncPrepared) -> Bool {
+            source === row && parent.storePathId == current.storePathId &&
+                parent.runtimePathId == current.runtimePathId && parent.nodeFlow == current.nodeFlow &&
+                parent.nodeDirected == current.nodeDirected && parent.isRow == current.isRow &&
+                parent.childSX == current.childSX && parent.areas == current.areas
+        }
+    }
+
     private final class MemoSpan {
         let record: MemoRecord
         var root: SyncPrepared { record.root }
@@ -101,6 +120,7 @@ final class RetainedLayoutCoordinator {
         let nested: ArraySlice<MemoRecord>
         let isGroupRoot: Bool
         let geometry: MemoGeometry?
+        var virtualRoot: VirtualRowRoot?
 
         init(record: MemoRecord, nodes: ArraySlice<PreparedNode>, slotKeys: ArraySlice<RetainedLayoutKey>,
              leaves: ArraySlice<TextLeafFallback>,
@@ -131,12 +151,14 @@ final class RetainedLayoutCoordinator {
         let firstLeaf: Int
         let firstOverflow: Int
         let firstRecord: Int
+        let virtualRoot: VirtualRowRoot?
     }
 
     private struct SyncVisit<State> {
         let prepared: SyncPrepared
         let childMark: Int
         let children: [El<State>]
+        let virtualRows: [String: Runtime<State>.CachedVirtualRow]?
         var childKeys: [String: Int] = [:]
         var childOffsets: [Int] = []
         var childrenDirty = false
@@ -170,6 +192,7 @@ final class RetainedLayoutCoordinator {
     private(set) var reusedMemoGeometry = false
     /// Number of descendants whose prepared style and measurement were transferred on this pass.
     private(set) var reusedMemoNodeCount = 0
+    private(set) var reusedVirtualRowRootCount = 0
     private var lastViewport: Vec2 = Vec2(-1, -1)
     private var lastFitHeight: Bool = false
 
@@ -209,6 +232,7 @@ final class RetainedLayoutCoordinator {
         textSystem: TextSystem,
         fitHeight: Bool = false,
         textLayouts: TextLayoutCollector? = nil,
+        virtualRows: [String: [String: Runtime<State>.CachedVirtualRow]] = [:],
         onLiveIdsReady: ((Set<RuneMotion.NodeId>) -> Void)? = nil
     ) -> LayoutEngine.ResultNode {
         var flat: [PreparedNode] = []
@@ -252,6 +276,7 @@ final class RetainedLayoutCoordinator {
         var memoRecords: [MemoRecord] = []
         var geometryRuns: [(range: Range<Int>, cache: MemoGeometry)] = []
         reusedMemoNodeCount = 0
+        reusedVirtualRowRootCount = 0
         reusedMemoGeometry = false
         var geometryChanged = false
         var hasMirroredFlow = false
@@ -621,9 +646,9 @@ final class RetainedLayoutCoordinator {
         }
 
         /// Claim the old subtree atomically, including destination paths before any rekey.
-        /// Root modifiers are always prepared again. Children share the original memo buffer.
+        /// General memos prepare root modifiers again. A retained virtual row can also claim its root.
         @inline(never)
-        func reuseChildren(_ span: MemoSpan, _ p: SyncPrepared) -> Bool {
+        func reuseChildren(_ span: MemoSpan, _ p: SyncPrepared, syncingRoot: Bool = true) -> Bool {
             guard span.hasSameChildContext(p),
                   store.canReuse(span.slotKeys)
             else { return false }
@@ -680,7 +705,9 @@ final class RetainedLayoutCoordinator {
                 let index = leaf.index + shift
                 overflowLeaves.append((index, flat[index].runtimeId, leaf.text))
             }
-            for offset in flat[p.myIndex].childOffsets { store.pushChild(flat[p.myIndex + offset].slot) }
+            if syncingRoot {
+                for offset in flat[p.myIndex].childOffsets { store.pushChild(flat[p.myIndex + offset].slot) }
+            }
             reusedMemoNodeCount += span.nodes.count - 1
             return true
         }
@@ -743,13 +770,50 @@ final class RetainedLayoutCoordinator {
             }
         }
 
+        func forwardGroup(_ span: MemoSpan, _ key: ObjectIdentifier) {
+            nextMemoSpans[key] = span
+            for inner in span.nested {
+                if let id = inner.identity {
+                    let nestedKey = ObjectIdentifier(id)
+                    nextMemoSpans[nestedKey] = memoSpans[nestedKey]
+                }
+            }
+        }
+
         @inline(never)
         func beginVisit(
             _ el: El<State>,
             parent: SyncPrepared?,
             siblingIndex: Int,
-            siblingKeysSeen: inout [String: Int]
+            siblingKeysSeen: inout [String: Int],
+            sourceRow: Runtime<State>.CachedVirtualRow? = nil
         ) -> SyncStep<State> {
+            var virtualRoot: VirtualRowRoot?
+            if let row = sourceRow, let memo = row.layoutRootMemo, !recordingMemo,
+               let parent, let key = el.storageKeyId, siblingKeysSeen[key] == nil,
+               memo === el.memoLayoutChildren, memo.matches(el.children) {
+                let memoKey = ObjectIdentifier(memo)
+                if let span = memoSpans[memoKey], span.isGroupRoot, span.record.identity === memo,
+                   span.virtualRoot?.matches(row, parent: parent) == true, var node = span.nodes.first {
+                    let index = flat.count
+                    node.parentOffset = parent.myIndex - index
+                    flat.append(node)
+                    var prepared = span.root
+                    prepared.myIndex = index
+                    if reuseChildren(span, prepared, syncingRoot: false) {
+                        store.reuseSlot(node.slot, nodeIndex: UInt32(index))
+                        textLayouts?.liveIds.insert(node.runtimeId)
+                        if node.flow == .rtl { hasMirroredFlow = true }
+                        siblingKeysSeen[key] = 1
+                        forwardGroup(span, memoKey)
+                        if let geometry = span.geometry { geometryRuns.append((index..<flat.count, geometry)) }
+                        reusedVirtualRowRootCount += 1
+                        return .finished((index, node.slot, false))
+                    }
+                    flat.removeLast()
+                }
+                virtualRoot = VirtualRowRoot(row, parent: parent)
+            }
             let p = syncPrepare(el, parent: parent, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
             let myIndex = p.myIndex
             let childMark = store.beginChildren()
@@ -772,13 +836,7 @@ final class RetainedLayoutCoordinator {
                 let (slot, dirty) = syncFinish(p, childMark: childMark, childrenDirty: false)
                 if !wasRecording, span.isGroupRoot, p.storePathId == span.root.storePathId,
                    p.runtimePathId == span.root.runtimePathId, span.nodes.first?.slot == slot {
-                    nextMemoSpans[memoKey] = span
-                    for inner in span.nested {
-                        if let id = inner.identity {
-                            let key = ObjectIdentifier(id)
-                            nextMemoSpans[key] = memoSpans[key]
-                        }
-                    }
+                    forwardGroup(span, memoKey)
                 } else {
                     moveNestedRecords(span, p, firstLeaf: firstLeaf, firstOverflow: firstOverflow)
                     memoRecords.append(MemoRecord(identity: identity, root: p, nodes: myIndex..<flat.count,
@@ -786,18 +844,26 @@ final class RetainedLayoutCoordinator {
                         nestedStart: firstRecord))
                     if !wasRecording { installMemoGroup() }
                 }
-                if !wasRecording, let geometry = nextMemoSpans[memoKey]?.geometry {
-                    geometryRuns.append((myIndex..<flat.count, geometry))
+                if !wasRecording, let current = nextMemoSpans[memoKey] {
+                    current.virtualRoot = virtualRoot
+                    if let geometry = current.geometry { geometryRuns.append((myIndex..<flat.count, geometry)) }
                 }
                 return .finished((myIndex, slot, dirty))
             }
             var mark: MemoMark?
             if memoKey != nil, let identity {
                 mark = MemoMark(identity: identity, wasRecording: wasRecording, firstLeaf: firstLeaf,
-                                firstOverflow: firstOverflow, firstRecord: firstRecord)
+                                firstOverflow: firstOverflow, firstRecord: firstRecord, virtualRoot: virtualRoot)
                 recordingMemo = true
             }
-            var visit = SyncVisit(prepared: p, childMark: childMark, children: el.children, memo: mark)
+            let rows: [String: Runtime<State>.CachedVirtualRow]?
+            if !virtualRows.isEmpty, el.virtualEstimate != nil {
+                let path = keyedRootPath.map { $0 + p.path.dropFirst(storeRootPath.count) } ?? p.path
+                rows = virtualRows[path]
+            } else {
+                rows = nil
+            }
+            var visit = SyncVisit(prepared: p, childMark: childMark, children: el.children, virtualRows: rows, memo: mark)
             visit.childOffsets.reserveCapacity(el.children.count)
             return .visit(visit)
         }
@@ -814,8 +880,9 @@ final class RetainedLayoutCoordinator {
                     nestedStart: mark.firstRecord))
                 if !mark.wasRecording {
                     installMemoGroup()
-                    if let geometry = nextMemoSpans[ObjectIdentifier(mark.identity)]?.geometry {
-                        geometryRuns.append((p.myIndex..<flat.count, geometry))
+                    if let current = nextMemoSpans[ObjectIdentifier(mark.identity)] {
+                        current.virtualRoot = mark.virtualRoot
+                        if let geometry = current.geometry { geometryRuns.append((p.myIndex..<flat.count, geometry)) }
                     }
                 }
             }
@@ -847,7 +914,14 @@ final class RetainedLayoutCoordinator {
                 } else {
                     let prepared = stack[parent].prepared
                     let child = stack[parent].children[index]
-                    next = beginVisit(child, parent: prepared, siblingIndex: index, siblingKeysSeen: &stack[parent].childKeys)
+                    let sourceRow: Runtime<State>.CachedVirtualRow?
+                    if let rows = stack[parent].virtualRows, !child.children.isEmpty, let key = child.storageKeyId {
+                        sourceRow = rows[key]
+                    } else {
+                        sourceRow = nil
+                    }
+                    next = beginVisit(child, parent: prepared, siblingIndex: index,
+                                      siblingKeysSeen: &stack[parent].childKeys, sourceRow: sourceRow)
                 }
             }
         }

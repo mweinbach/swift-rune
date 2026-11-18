@@ -296,6 +296,43 @@ struct MemoLayoutSpanTests {
         }
     }
 
+    @Test("Confirmed virtual rows retain their root slots and honor rebuilt root modifiers",
+          arguments: [false, true])
+    func retainedVirtualRowRoots(screenTravel: Bool) {
+        let cache = MemoCache()
+        let view = Runtime<Int>(state: 82, viewport: Vec2(160, 140), pixelScale: 1) { _, _ in
+            col().key("panel").sizeFull().scrollY().child(
+                col().key("items").wFull().virtualRows(count: 1_000, estimatedRowHeight: 20,
+                    key: { _, i in "r-\(i)" }, build: { width, i in
+                        let body = cache.getOrBuild(id: "body-\(i)", deps: 0) { () -> El<Int> in
+                            col().child(el().key("label-\(i)").wFull().h(12))
+                        }.element
+                        let sized = body.w(Float(width)).h(20)
+                        return screenTravel ? sized.animateLayout(LayoutAnim(spring: MotionTokens.DEFAULT, travel: .screen)) : sized
+                    })
+            )
+        }
+        func rows() -> Set<String> {
+            Set(view.elements().compactMap { $0.key?.hasPrefix("r-") == true && !$0.exiting ? $0.key : nil })
+        }
+        _ = view.frame(at: 0)
+        for step in 1...4 {
+            let previous = rows()
+            let t = Double(step) / 60
+            view.wheel(WheelEvent(dx: 0, dy: -160), at: Vec2(50, 90), now: t)
+            _ = view.frame(at: t)
+            let surviving = previous.intersection(rows())
+            #expect(!surviving.isEmpty)
+            #expect(view.retainedLayout.reusedVirtualRowRootCount == (screenTravel ? 0 : surviving.count))
+        }
+        view.update(at: 0.2) { width, _ in width = 104 }
+        _ = view.frame(at: 0.2)
+        #expect(view.retainedLayout.reusedVirtualRowRootCount == 0)
+        let resized = view.flatNodes.filter { $0.key?.hasPrefix("label-") == true }
+        #expect(!resized.isEmpty)
+        #expect(resized.allSatisfy { $0.localSize.x == 104 })
+    }
+
     @Test("Mutable children and state-backed inputs invalidate a memo layout span")
     func changedChildrenAndInputFallback() {
         let cache = MemoCache()

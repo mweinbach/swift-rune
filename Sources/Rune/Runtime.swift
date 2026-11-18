@@ -3156,6 +3156,7 @@ public final class Runtime<State> {
                     textSystem: textSystem,
                     fitHeight: fitHeight,
                     textLayouts: textLayoutCollector,
+                    virtualRows: expandedContextOverride == nil ? virtualExpansion.builtVirtualRows : [:],
                     onLiveIdsReady: { [weak self] ids in self?.releaseKeptLayoutsBeforeCommit(liveIds: ids) }
                 )
             }
