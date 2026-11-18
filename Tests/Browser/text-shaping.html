@@ -138,6 +138,16 @@ try {
             const width = data.getInt32(20, true), height = data.getInt32(24, true);
             check(width > 0 && height > 0 && host.mask(id, x, y, width, height, 4096), 'No ink');
             const mask = bytes.slice(4096, 4096 + width * height);
+            if (features === 'kern=0.0') {
+                const canvas = document.querySelector('canvas[style*="font-kerning"]');
+                if (canvas) {
+                    // Embedder scripts can change WebKit's attached unkerned canvas between paints.
+                    host.mask(id, x + 1, y, width, height, 4096);
+                    canvas.getContext('2d').font = '8px serif';
+                    check(host.mask(id, x, y, width, height, 4096) && mask.every((alpha, i) => alpha === bytes[4096 + i]),
+                        'Page canvas state changed the retained text coverage');
+                }
+            }
             const ink = mask.filter(a => a > 0).length;
             let colorPixels = 0;
             if (host.has_color(id)) {

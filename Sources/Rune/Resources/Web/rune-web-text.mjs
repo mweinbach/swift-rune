@@ -290,15 +290,6 @@ function registeredCell(doc, line, start, end) {
     return result;
 }
 
-function applyFont(context, line) {
-    context.font = line.font;
-    context.direction = line.direction;
-    if ('fontKerning' in context) context.fontKerning = line.kerning;
-    context.textAlign = 'left';
-    context.textBaseline = 'alphabetic';
-    if ('lang' in context) context.lang = line.lang || 'inherit';
-}
-
 // Keep the original outlines and shaping tables. Adding space to each
 // advancing glyph lets a DOM Range tell us when an editing caret divides
 // one native glyph between characters. This also works with contextual GSUB.
@@ -353,6 +344,26 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
     const memory = () => getMemory().buffer;
     const view = () => new DataView(memory());
     const string = (ptr, n) => utf8.decode(new Uint8Array(memory(), ptr >>> 0, n));
+
+    let previousFont, previousDirection, previousKerning, previousLanguage;
+    function applyFont(context, line) {
+        // Only the detached default canvas is private. WebKit mounts its unkerned
+        // canvas in the document. Resizing or resetting a canvas restores textAlign to start.
+        if (context === defaultContext) {
+            if (previousFont === line.font && previousDirection === line.direction &&
+                previousKerning === line.kerning && previousLanguage === line.lang && context.textAlign === 'left') return;
+            previousFont = line.font;
+            previousDirection = line.direction;
+            previousKerning = line.kerning;
+            previousLanguage = line.lang;
+        }
+        context.font = line.font;
+        context.direction = line.direction;
+        if ('fontKerning' in context) context.fontKerning = line.kerning;
+        context.textAlign = 'left';
+        context.textBaseline = 'alphabetic';
+        if ('lang' in context) context.lang = line.lang || 'inherit';
+    }
 
     function dictionaryBreaks(ptr, size, result, words) {
         const source = new Uint8Array(memory(), ptr >>> 0, size);
