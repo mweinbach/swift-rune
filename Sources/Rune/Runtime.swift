@@ -919,6 +919,7 @@ public final class Runtime<State> {
     internal var elSliceRenderState = ElSliceRenderState()
     internal var wordRevealStore = WordRevealStore()
     private var timeScaledNodeIds: Set<NodeId> = []
+    private var sceneRideTrailingIds: Set<NodeId> = []
     internal var selectionState = RuntimeSelectionState()
     internal var nativeInspection: NativeFrameInspection?
     internal var lastPoseNodes: [PoseNodeSnapshot] = []
@@ -1231,6 +1232,29 @@ public final class Runtime<State> {
         var liveSources: [Int] = []
         var inputPills: [Int] = []
         var groupOpacity: [Int] = []
+        var rideTrailing: Set<NodeId> = []
+        var matchedFlights: [Int] = []
+        var heldLandingWidths: [Int] = []
+        var wordReveals: [Int] = []
+        var growthStacks: [Int] = []
+        var hasTimeScales = false
+        var hasShadows = false
+        var hasChildExits = false
+
+        mutating func indexMotion(_ el: borrowing El<State>, at i: Int, id: NodeId) {
+            if el.flightId != nil { matchedFlights.append(i) }
+            if el.holdLandingWidthEnabled { heldLandingWidths.append(i) }
+            if el.growthSpec != nil { growthStacks.append(i) }
+            if !hasShadows && !el.shadows.isEmpty { hasShadows = true }
+            if !hasChildExits && el.childExitTransition != nil { hasChildExits = true }
+            if el.runtimeExtras.isEmpty {
+                if el.textReveal >= 0 { wordReveals.append(i) }
+            } else {
+                if el.isRideTrailing { rideTrailing.insert(id) }
+                if !hasTimeScales && el.elTimeScale != 1 { hasTimeScales = true }
+                if let fade = el.elRevealWordFade, fade >= 0 { wordReveals.append(i) }
+            }
+        }
     }
     internal private(set) var layoutObservers = LayoutObservers()
     private var layoutFired: [NodeId: [Float]] = [:]
@@ -4456,8 +4480,6 @@ public final class Runtime<State> {
 
         var specs = pass.specs
 
-        let childExitOverrides = collectChildExitOverrides(prevNodes: flatNodes, newPass: pass, cut: cut)
-
         retainDepartingSnapshots(liveNodes: pass.indexById)
         var nowRevealedSecureIds: Set<NodeId> = []
         var concealedSecureIndices: [Int] = []
@@ -4472,6 +4494,7 @@ public final class Runtime<State> {
             }
             let handlers = node.el.handlers
             if node.el.groupOpacity != nil { observers.groupOpacity.append(i) }
+            observers.indexMotion(node.el, at: i, id: node.nodeId)
             if node.el.liveText != nil || !node.el.liveBindings.isEmpty || node.el.pixelsPayload != nil {
                 observers.liveSources.append(i)
             }
@@ -4519,6 +4542,9 @@ public final class Runtime<State> {
                 concealedSecureIndices.append(i)
             }
         }
+
+        let childExitOverrides = observers.hasChildExits
+            ? collectChildExitOverrides(prevNodes: flatNodes, newPass: pass, cut: cut) : []
 
         var prevFlatNodesSnapshot: [FlatNode] = []
         swap(&prevFlatNodesSnapshot, &flatNodes)
@@ -4651,7 +4677,8 @@ public final class Runtime<State> {
             if case .exiting = self.scene.phase(nid) { return true }
             return false
         }
-        for node in pass.nodes {
+        for i in layoutObservers.matchedFlights {
+            let node = pass.nodes[i]
             guard let fid = node.el.flightId else { continue }
             let nid = node.nodeId
             if newCommittedMatched[fid] != nil {
@@ -4928,7 +4955,11 @@ public final class Runtime<State> {
             ancestorInstants: pass.ancestorInstants,
             naturalTargets: pass.naturalJoinedRowTargets
         )
-        syncRideTrailingFlags(pass.nodes, on: &scene)
+        let rideTrailing = layoutObservers.rideTrailing
+        for id in sceneRideTrailingIds where pass.indexById[id] != nil && !rideTrailing.contains(id) {
+            scene.setRideTrailing(id, false)
+        }
+        for id in rideTrailing { scene.setRideTrailing(id, true) }
         var pendingBorderBottoms: [(id: NodeId, seed: MotionColor?, target: MotionColor, spring: Spring?)] = []
         pendingBorderBottoms.reserveCapacity(8)
         var pendingRadialStops: [(id: NodeId, index: Int, target: MotionColor, spring: Spring?)] = []
@@ -4999,9 +5030,9 @@ public final class Runtime<State> {
         }
         if !commitCut && !commitKind.snaps && !reducedMotion {
             var previouslyDrawn: Set<NodeId>?
-            for i in pass.nodes.indices {
+            for i in layoutObservers.heldLandingWidths {
                 let n = pass.nodes[i]
-                guard n.el.holdLandingWidthEnabled, scene.hasNode(n.nodeId),
+                guard scene.hasNode(n.nodeId),
                       let drawn = scene.get(n.nodeId, Props.FRAME) else { continue }
                 let was = scene.store.target(n.nodeId, Props.FRAME) ?? drawn
                 guard abs(was.width - n.localRect.width) >= 0.5 else { continue }
@@ -5166,15 +5197,17 @@ public final class Runtime<State> {
             specs: specs,
             ancestorInstants: pass.ancestorInstants
         )
-        syncShadowTracks(
-            nodes: pass.nodes,
-            prevNodes: prevFlatNodesSnapshot,
-            specs: specs,
-            at: scaledCommitNow,
-            cut: commitCut,
-            lands: commitKind.lands,
-            prevMountedIds: prevMountedIds
-        )
+        if layoutObservers.hasShadows || !shadowTrackCounts.isEmpty {
+            syncShadowTracks(
+                nodes: pass.nodes,
+                prevNodes: prevFlatNodesSnapshot,
+                specs: specs,
+                at: scaledCommitNow,
+                cut: commitCut,
+                lands: commitKind.lands,
+                prevMountedIds: prevMountedIds
+            )
+        }
         rebuildLiveSubscriptionsIncludingExiting()
         if !concealSnapIndices.isEmpty {
             for j in concealSnapIndices where j < pass.nodes.count {
@@ -5183,7 +5216,8 @@ public final class Runtime<State> {
         }
         // A reused node keeps its live-binding latches, which a landing commit drops so live tracks snap (`726ccc36`).
         if commitKind.lands || commitCut {
-            for n in pass.nodes where !n.el.liveBindings.isEmpty {
+            for i in layoutObservers.liveSources {
+                let n = pass.nodes[i]
                 for b in n.el.liveBindings {
                     liveSeenSeq.removeValue(forKey: LiveKey(path: n.path, target: b.target))
                 }
@@ -5199,16 +5233,21 @@ public final class Runtime<State> {
                 scene.traceNamespace(n.nodeId, ns)
             }
         }
-        let nodeTimeScales = ShellSliceRenderHelpers.propagateTimeScales(
-            nodes: pass.nodes,
-            exitingSnapshots: exitingSnapshots,
-            scene: &scene,
-            trackedIds: &timeScaledNodeIds,
-            wordRevealStore: &wordRevealStore,
-            loopTracks: &loopRuntime.tracks
-        )
+        let nodeTimeScales: [Float]
+        if layoutObservers.hasTimeScales || !timeScaledNodeIds.isEmpty {
+            nodeTimeScales = ShellSliceRenderHelpers.propagateTimeScales(
+                nodes: pass.nodes,
+                exitingSnapshots: exitingSnapshots,
+                scene: &scene,
+                trackedIds: &timeScaledNodeIds,
+                wordRevealStore: &wordRevealStore,
+                loopTracks: &loopRuntime.tracks
+            )
+        } else {
+            nodeTimeScales = []
+        }
         let commitScaledNow = cxSettings.scaledTime(at: now)
-        let revealEntries: [WordRevealCommitEntry] = pass.nodes.indices.compactMap { i in
+        let revealEntries: [WordRevealCommitEntry] = layoutObservers.wordReveals.compactMap { i in
             let n = pass.nodes[i]
             guard let fade = n.el.elRevealWordFade, fade >= 0 else { return nil }
             let txt = n.el.liveText?.get()
@@ -5306,7 +5345,12 @@ public final class Runtime<State> {
         if !needsCommit && scrollGlidingPaths.isEmpty && scrollRequestsState.isEmpty {
             pendingTxFocusKey = nil
         }
-        syncRideTrailingFlags(pass.nodes, on: &scene)
+        // Exiting slots keep their authored alignment until they disappear or re-enter.
+        if !sceneRideTrailingIds.isEmpty {
+            sceneRideTrailingIds = sceneRideTrailingIds.filter { pass.indexById[$0] == nil && scene.contains($0) }
+        }
+        for id in rideTrailing { scene.setRideTrailing(id, true) }
+        sceneRideTrailingIds.formUnion(rideTrailing)
         finalizeSelectionAfterCommit(at: now)
         cxSettings.lastCommittedSelectionRects = computeSelectionBoxes()
         if fitHeight {

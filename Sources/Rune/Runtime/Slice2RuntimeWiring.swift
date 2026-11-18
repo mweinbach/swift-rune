@@ -727,13 +727,14 @@ extension Runtime {
         }
 
         var childrenByParentIdx: [Int: [Int]] = [:]
-        for i in nodes.indices {
-            if let pIdx = nodes[i].parentIndex {
-                childrenByParentIdx[pIdx, default: []].append(i)
+        if !layoutObservers.growthStacks.isEmpty {
+            for i in layoutObservers.growthStacks { childrenByParentIdx[i] = [] }
+            for i in nodes.indices {
+                if let parent = nodes[i].parentIndex { childrenByParentIdx[parent]?.append(i) }
             }
         }
 
-        for sIdx in nodes.indices where nodes[sIdx].el.growthSpec != nil {
+        for sIdx in layoutObservers.growthStacks {
             let stackNode = nodes[sIdx]
             let stackId = stackNode.nodeId
             seenStacks.insert(stackId)

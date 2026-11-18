@@ -146,13 +146,6 @@ internal extension Runtime {
         }
     }
 
-    /// Synchronizes `El.rideTrailing()` flags onto `Scene` before and after `scene.commit`.
-    func syncRideTrailingFlags(_ nodes: [FlatNode], on scene: inout Scene) {
-        for node in nodes {
-            scene.setRideTrailing(node.nodeId, node.el.isRideTrailing)
-        }
-    }
-
     /// Syncs `el.looping` specs after `scene.commit` using `LoopClock`'s per-node animation lead time.
     /// `cut` (`settleAll`) only finishes finite sequences; periodic loops preserve phase across commits and settles.
     func syncMotionLoops(specs: [(id: NodeId, spec: LoopSpec)], at _: Double, cut: Bool) {
