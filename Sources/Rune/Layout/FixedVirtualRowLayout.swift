@@ -12,6 +12,7 @@ extension Runtime {
         let groups: [(position: Int, saved: [LayoutEngine.ResultNode])]
         let boxes: [NodeId: RetainedLayoutCoordinator.TextLayoutRecord]
         let width: Float
+        let additionalNodeCount: Int
 
         func restore(_ solved: inout LayoutEngine.ResultNode) -> Bool {
             var ancestors: [LayoutEngine.ResultNode] = []

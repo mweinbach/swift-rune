@@ -3134,6 +3134,7 @@ public final class Runtime<State> {
         var boxes: [NodeId: RetainedLayoutCoordinator.TextLayoutRecord] = [:]
         var saved: [LayoutEngine.ResultNode] = []
         var height: Float = 0
+        var retainedNodeCount = 0
         func flush() {
             guard !saved.isEmpty else { return }
             let substitute = El<State>(direction: .column).wFull().h(height).shrink(0)
@@ -3167,6 +3168,7 @@ public final class Runtime<State> {
             let layout = ComputedLayout(localRect: previousRoot.localRect, localSize: previousRoot.localSize,
                                         contentSize: previousRoot.contentSize)
             saved.append(.init(layout: layout, children: span.children))
+            retainedNodeCount += 1 + span.nodes.count
             for node in span.nodes {
                 if let text = nodeTextLayouts[node.nodeId] { boxes[node.nodeId] = text }
             }
@@ -3194,7 +3196,8 @@ public final class Runtime<State> {
             parent.children[index] = compressed
             compressed = parent
         }
-        return FixedVirtualRowLayout(source: compressed, listIndices: listIndices, groups: groups, boxes: boxes, width: width)
+        return FixedVirtualRowLayout(source: compressed, listIndices: listIndices, groups: groups, boxes: boxes, width: width,
+                                     additionalNodeCount: retainedNodeCount - groups.count)
     }
 
     private func releaseKeptLayoutsBeforeCommit(liveIds: Set<NodeId>) {
@@ -3253,6 +3256,7 @@ public final class Runtime<State> {
         var virtualExpansion: VirtualExpansionContext
         var solvedRoot: LayoutEngine.ResultNode
         let textLayoutCollector = RetainedLayoutCoordinator.TextLayoutCollector()
+        var restoredNodeCount = 0
         var hasGrowth = false
         // A view or retained row may share all its child buffers with the last frame. Only
         // detach paths to inputs whose pills actually need to be resolved for this pass.
@@ -3316,6 +3320,7 @@ public final class Runtime<State> {
             layoutRoot = resolveInputPills(in: expandedRoot)
             textLayoutCollector.map.removeAll(keepingCapacity: true)
             textLayoutCollector.liveIds.removeAll(keepingCapacity: true)
+            restoredNodeCount = 0
             solvedRoot = measureRuntimePhase(.layout) {
                 // Remeasurements run after the first solve releases the prior text records.
                 if rowReuseMode == .remount, expandedContextOverride == nil, !cut, !activeResizeSnap,
@@ -3325,6 +3330,7 @@ public final class Runtime<State> {
                         pixelScale: pixelScale, textSystem: textSystem, fitHeight: fitHeight, textLayouts: textLayoutCollector,
                         virtualRows: virtualExpansion.builtVirtualRows)
                     if splice.restore(&result) {
+                        restoredNodeCount = splice.additionalNodeCount
                         // Publish the same live-ID set as an ordinary solve only after
                         // validation. A fallback still owns every previous/exiting text box.
                         releaseKeptLayoutsBeforeCommit(liveIds: textLayoutCollector.liveIds.union(splice.boxes.keys))
@@ -3403,6 +3409,7 @@ public final class Runtime<State> {
         }
         let naturalRoot = needsGrowthClamp ? solvedRoot : nil
         if needsGrowthClamp {
+            restoredNodeCount = 0
             layoutRoot = applyGrowthConstraints(in: layoutRoot)
             textLayoutCollector.map.removeAll(keepingCapacity: true)
             textLayoutCollector.liveIds.removeAll(keepingCapacity: true)
@@ -3437,9 +3444,9 @@ public final class Runtime<State> {
         var ancestorInstants: [Bool] = []
         var warnings = renames.map(\.warning)
         var nextMemoPaths: [NodeId: FlatMemoPaths<State>] = [:]
-        // Layout has already collected the current tree's IDs. Even one more node
-        // than the previous viewport would otherwise double the flat and spec buffers.
-        let count = textLayoutCollector.liveIds.count
+        // The solver sees one placeholder per retained row group. Reserve for the restored
+        // rows too so one extra mounted node does not double the flat and spec buffers.
+        let count = textLayoutCollector.liveIds.count + restoredNodeCount
         newFlat.reserveCapacity(count)
         newByPath.reserveCapacity(count)
         newIndices.reserveCapacity(count)
