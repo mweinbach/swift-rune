@@ -975,6 +975,29 @@ public final class MacOSAccessibilityHost {
                let text = announcement.spokenText { spoken.append((text, announcement.politeness)) }
         }
 
+        // A requested native child always materializes its ancestors. For an unread
+        // branch without focus, refresh its absolute geometry and model in place while
+        // the mounted identities and child order match. Event sources use the normal
+        // reconciliation path so announcements and editor notifications remain exact.
+        func advanceUnread(_ node: AccessibilityNode, _ entry: AppKitAccessibilityEntry) -> Bool {
+            guard !node.isFocused, !node.isModal, node.liveRegion == nil,
+                  node.role != .dialog, node.role != .alertDialog,
+                  node.role != .textInput, node.role != .multilineTextInput,
+                  let path = node.runtimePath, entry.node.runtimePath == path,
+                  node.children.count == entry.children.count else { return false }
+            if !node.children.isEmpty, revisitGeometry || !node.sharesChildren(with: entry.node) {
+                for i in node.children.indices {
+                    if !advanceUnread(node.children[i], entry.children[i]) { return false }
+                }
+            }
+            entry.pass = pass
+            entry.node = node
+            #if DEBUG
+            lastVisitedNodes += 1
+            #endif
+            return true
+        }
+
         func syncChildren(_ nodes: [AccessibilityNode], parent: AppKitAccessibilityEntry?, scope: AccessibilityIdentity?,
                           previous: [AppKitAccessibilityEntry], focused: inout AccessibilityIdentity?,
                           windowAnnouncer: Bool = false) -> (children: [AppKitAccessibilityEntry], changed: Bool) {
@@ -985,8 +1008,14 @@ public final class MacOSAccessibilityHost {
                 let id = AccessibilityIdentity(node, parent: scope, occurrences: &occurrences)
                 let prior = index < previous.count ? previous[index] : nil
                 let candidate = prior?.identity == id ? prior : entries[id]
-                let child = syncNode(node, id, parent: parent, old: candidate,
+                let child: AppKitAccessibilityEntry
+                if let candidate, candidate.element == nil, candidate.focused == nil,
+                   candidate.parent === parent, advanceUnread(node, candidate) {
+                    child = candidate
+                } else {
+                    child = syncNode(node, id, parent: parent, old: candidate,
                                      announce: !windowAnnouncer || index + 1 != nodes.count)
+                }
                 if focused == nil { focused = child.focused }
                 if changed == nil, prior !== child { changed = Array(previous.prefix(index)) }
                 changed?.append(child)

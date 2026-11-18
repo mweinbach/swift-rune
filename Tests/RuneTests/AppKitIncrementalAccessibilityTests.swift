@@ -110,6 +110,36 @@ struct AppKitIncrementalAccessibilityTests {
         #expect(await read() == ["b", "a"])
     }
 
+    @Test func unreadSubtreesRefreshTheirModelAndStillDeliverNestedEvents() throws {
+        let view = NSView(), host = MacOSAccessibilityHost()
+        let callbacks = MacOSAccessibilityCallbacks(onSelectText: nil, onSetValue: nil) { _, _ in }
+        host.activate()
+        func scene(_ y: Float, event: String?) -> AccessibilityNode {
+            var status = node("status", label: event ?? "Waiting")
+            if event != nil { status.liveRegion = .polite }
+            var button = node("row", role: .button, frame: .fromXYWH(5, y, 90, 15),
+                              label: "At \(Int(y))", actions: [.press])
+            button.isFocused = event == "Ready"
+            return node("root-list", children: [node("branch", children: [button, status])])
+        }
+        host.update(tree: scene(5, event: nil), parentView: view, callbacks: callbacks)
+        host.update(tree: scene(25, event: nil), parentView: view, callbacks: callbacks)
+        #if DEBUG
+        #expect(host.materializedCount == 0)
+        #endif
+        host.update(tree: scene(45, event: "Ready"), parentView: view, callbacks: callbacks)
+        let focused = try #require(host.accessibilityFocusedUIElement() as? RuneNSAccessibilityElement)
+        #expect(focused.nodeId == "row")
+        #expect(focused.accessibilityLabel() == "At 45")
+        #expect(focused.accessibilityFrame() == CGRect(x: 5, y: 45, width: 90, height: 15))
+        #expect(focused.accessibilityPerformPress())
+        #expect(host.lastSpoken.map(\.text) == ["Ready\u{200B}"])
+        host.update(tree: scene(65, event: "Later"), parentView: view, callbacks: callbacks)
+        #expect(host.accessibilityFocusedUIElement() == nil)
+        #expect(host.lastSpoken.map(\.text) == ["Later\u{200B}"])
+        #expect(host.accessibilityHitTest(CGPoint(x: 12, y: 70), in: view) as? RuneNSAccessibilityElement === focused)
+    }
+
     @Test func focusedFieldReplacementUpdatesAnAlreadyReadChildList() throws {
         let view = NSView(), host = MacOSAccessibilityHost()
         let callbacks = MacOSAccessibilityCallbacks(onSelectText: nil, onSetValue: nil) { _, _ in }
