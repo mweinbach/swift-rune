@@ -1255,6 +1255,9 @@ public final class Runtime<State> {
     private var nextImageWake: Double?
     internal let residentCacheTracker = ResidentLayerTracker()
     internal var retainedLayout = RetainedLayoutCoordinator()
+    #if DEBUG
+    internal private(set) var fixedVirtualLayoutRetries = 0
+    #endif
     internal var needsCommit: Bool = true
     internal var virtualFillNeedsCommit: Bool = false
     internal var forceInitialSettle: Bool = true
@@ -3073,6 +3076,122 @@ public final class Runtime<State> {
         return result
     }
 
+    /// A scroll remount retains the published rows of a fixed-width, zero-gap column.
+    /// All entering rows and its outer tree still participate in the current layout solve.
+    private func fixedVirtualRowLayout(in root: El<State>, expansion: VirtualExpansionContext) -> FixedVirtualRowLayout? {
+        guard expansion.listMeta.count == 1, let list = expansion.listMeta.first, list.indexed,
+              let rows = expansion.builtVirtualRows[list.listPath], !rows.isEmpty,
+              let oldList = nodeByPath[list.listPath], flatNodes[oldList].flow == .ltr else { return nil }
+        var chain: [String] = []
+        var parent: Int? = oldList
+        while let index = parent {
+            // On this path every containing width is externally specified. Grids and
+            // intrinsic/flex row ancestors must see the actual children's contributions.
+            let layout = flatNodes[index].el.layout
+            guard layout.displayMode == .flex, layout.direction == .column,
+                  !layout.wrap, !layout.wrapReverse, layout.alignItems == .stretch,
+                  layout.alignSelf == nil || layout.alignSelf == .stretch,
+                  layout.width == .fraction(1) || layout.width == .points(flatNodes[index].localSize.x) else {
+                return nil
+            }
+            if flatNodes[index].parentIndex != nil { chain.append(flatNodes[index].path) }
+            parent = flatNodes[index].parentIndex
+        }
+        let width = flatNodes[oldList].localSize.x
+        guard width.isFinite, width > 0 else { return nil }
+        var listIndices: [Int] = []
+        var ancestors: [El<State>] = []
+        var source = root
+        var listPath = flatNodes[0].path
+        var listId = flatNodes[0].nodeId
+        for path in chain.reversed() {
+            let children = FlatChildPaths(source.children, count: source.children.count, parent: listPath, parentId: listId)
+            guard let index = children.addresses.firstIndex(where: { $0.path == path }) else { return nil }
+            listIndices.append(index)
+            ancestors.append(source)
+            source = source.children[index]
+            listPath = path
+            listId = children.addresses[index].id
+        }
+        let style = source.layout
+        guard style.displayMode == .flex, style.direction == .column, !style.wrap, !style.wrapReverse,
+              style.justifyContent == .start, style.alignItems == .stretch, style.padding == .all(0),
+              style.margin == .all(0), style.border == .all(0), !style.borderLayout, style.scrollAxes.isEmpty,
+              style.rowGap == 0, style.height == .auto,
+              (style.width == .points(width) || (style.width == .fraction(1) && style.minWidth == .points(width))),
+              source.anchor == nil, source.explicitDir == nil,
+              !layoutObservers.authored.contains(where: { $0.contains(.secureOrEditable) || $0.contains(.liveSource) }) else {
+            return nil
+        }
+
+        var compact: [El<State>] = []
+        var groups: [(position: Int, saved: [LayoutEngine.ResultNode])] = []
+        var boxes: [NodeId: RetainedLayoutCoordinator.TextLayoutRecord] = [:]
+        var saved: [LayoutEngine.ResultNode] = []
+        var height: Float = 0
+        func flush() {
+            guard !saved.isEmpty else { return }
+            let substitute = El<State>(direction: .column).wFull().h(height).shrink(0)
+            groups.append((compact.count, saved))
+            compact.append(substitute)
+            saved = []
+            height = 0
+        }
+        func retain(_ row: borrowing El<State>) -> Bool {
+            guard let key = row.storageKeyId, let entry = rows[key],
+                  let context = entry.layoutRootMemo, let paths = flatMemoPaths[listId.child("@" + key)],
+                  paths.owner === context, let retained = paths.rowRoot, retained.source === entry.rootIdentity,
+                  let span = paths.span, let previous = span.appliedRange(at: layoutCommitGen),
+                  previous.lowerBound > 0, row.explicitDir == nil,
+                  span.context.frame.scale == pixelScale, span.context.frame.fontEpoch == textSystem.currentFontEpoch,
+                  span.context.frame.language == textSystem.language, span.context.frame.smoothing == textSystem.smoothing,
+                  case .points(let h) = row.layout.height, h > 0, h.rounded() == h,
+                  h <= FixedVirtualRowLayout.maximumExactHeight - height,
+                  row.layout.width == .fraction(1), row.layout.flexShrink == 0, row.layout.flexGrow == 0,
+                  row.layout.margin == .all(0), row.layout.padding == .all(0), row.layout.border == .all(0),
+                  !row.layout.isAbsolute, row.layout.sticky == nil, row.layout.pinLeft == nil, row.layout.pinRight == nil,
+                  row.layout.pinTop == nil, row.layout.pinBottom == nil, row.layout.aspectFit == nil,
+                  row.layout.scrollAxes.isEmpty, row.anchor == nil, row.layout.flexBasis == .auto, row.layout.minWidth == .auto,
+                  row.layout.minHeight == .auto, row.layout.maxWidth == .auto,
+                  row.layout.maxHeight == .auto else { return false }
+            let previousRoot = flatNodes[previous.lowerBound - 1]
+            guard previousRoot.nodeId == retained.node.nodeId, previousRoot.flow == .ltr,
+                  previousRoot.el.memoLayoutChildren === context, previousRoot.el.layout == row.layout,
+                  previousRoot.localRect.x == 0, previousRoot.localSize == Vec2(width, h),
+                  previousRoot.contentSize.x <= width, previousRoot.contentSize.y <= h else { return false }
+            let layout = ComputedLayout(localRect: previousRoot.localRect, localSize: previousRoot.localSize,
+                                        contentSize: previousRoot.contentSize)
+            saved.append(.init(layout: layout, children: span.children))
+            for node in span.nodes {
+                if let text = nodeTextLayouts[node.nodeId] { boxes[node.nodeId] = text }
+            }
+            height += h
+            return true
+        }
+        for index in source.children.indices {
+            let child = source.children[index]
+            // No retained sibling in the compressed solver may acquire a different
+            // positional ID. Entering editable/live rows also need a single ordinary solve.
+            guard child.storageKeyId != nil, !child.hasEditLens, !child.isSecure, child.liveText == nil, child.liveBindings.isEmpty,
+                  child.memoLayoutChildren?.traits.contains(.mutableLayout) != true else { return nil }
+            // Leave both edge children available to supply the column's intrinsic baseline.
+            if index == 0 || index + 1 == source.children.count || !retain(source.children[index]) {
+                flush()
+                compact.append(source.children[index])
+            }
+        }
+        flush()
+        guard groups.contains(where: { $0.saved.count >= 4 }) else { return nil }
+        var compressed = source
+        compressed.children = compact
+        for (ancestor, index) in zip(ancestors, listIndices).reversed() {
+            var parent = ancestor
+            parent.children[index] = compressed
+            compressed = parent
+        }
+        return FixedVirtualRowLayout(source: compressed, listIndices: listIndices, groups: groups, boxes: boxes, width: width)
+    }
+
     private func releaseKeptLayoutsBeforeCommit(liveIds: Set<NodeId>) {
         if prevNodeTextLayoutsForCommit == nil {
             var prevKeys: [NodeId: (shapeKey: TextShapeKey, isInput: Bool)] = [:]
@@ -3193,7 +3312,27 @@ public final class Runtime<State> {
             textLayoutCollector.map.removeAll(keepingCapacity: true)
             textLayoutCollector.liveIds.removeAll(keepingCapacity: true)
             solvedRoot = measureRuntimePhase(.layout) {
-                retainedLayout.compute(
+                // Remeasurements run after the first solve releases the prior text records.
+                if rowReuseMode == .remount, expandedContextOverride == nil, !cut, !activeResizeSnap,
+                   prevNodeTextLayoutsForCommit == nil,
+                   let splice = fixedVirtualRowLayout(in: layoutRoot, expansion: virtualExpansion) {
+                    var result = retainedLayout.compute(root: splice.source, state: state, viewport: viewport,
+                        pixelScale: pixelScale, textSystem: textSystem, fitHeight: fitHeight, textLayouts: textLayoutCollector,
+                        virtualRows: virtualExpansion.builtVirtualRows)
+                    if splice.restore(&result) {
+                        // Publish the same live-ID set as an ordinary solve only after
+                        // validation. A fallback still owns every previous/exiting text box.
+                        releaseKeptLayoutsBeforeCommit(liveIds: textLayoutCollector.liveIds.union(splice.boxes.keys))
+                        textLayoutCollector.map.merge(splice.boxes) { current, _ in current }
+                        return result
+                    }
+                    #if DEBUG
+                    fixedVirtualLayoutRetries &+= 1
+                    #endif
+                    textLayoutCollector.map.removeAll(keepingCapacity: true)
+                    textLayoutCollector.liveIds.removeAll(keepingCapacity: true)
+                }
+                return retainedLayout.compute(
                     root: layoutRoot,
                     state: state,
                     viewport: viewport,
