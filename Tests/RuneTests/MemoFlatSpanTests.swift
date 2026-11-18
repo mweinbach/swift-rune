@@ -95,8 +95,9 @@ struct MemoFlatSpanTests {
         }
     }
 
-    @Test("Surviving indexed row roots preserve clipped geometry, root motion and inherited RTL", arguments: [false, true])
-    func retainedIndexedRoots(rtl: Bool) {
+    @Test("Surviving indexed row roots preserve clipped geometry, root motion and inherited RTL",
+          arguments: [false, true], [TxCommit.instant, .animate, .unprompted])
+    func retainedIndexedRoots(rtl: Bool, commit: TxCommit) {
         func make() -> Runtime<Int> {
             Runtime(state: 0, viewport: Vec2(200, 120), pixelScale: 1) { version, _ in
                 let list: El<Int> = col().key("items").wFull().virtualRows(count: 1_000, estimatedRowHeight: 20,
@@ -126,6 +127,7 @@ struct MemoFlatSpanTests {
                 runtime.wheel(WheelEvent(dx: 0, dy: -160), at: Vec2(65, 70), now: t)
                 if step == 5 || step == 6 { runtime.update(at: t) { state, _ in state += 1 } }
                 if runtime === fresh { runtime.invalidate(at: t) }
+                runtime.pendingCommitKind = commit
                 _ = runtime.renderFrame(at: t)
             }
             #expect(retained.elements() == fresh.elements())
