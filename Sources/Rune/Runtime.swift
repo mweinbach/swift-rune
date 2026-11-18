@@ -4791,25 +4791,28 @@ public final class Runtime<State> {
         }
 
         virtualInputs = pass.virtualExpansion.virtualInputs
-        let previousNodes = interactionTreeBeforeSettle?.nodes ?? prevFlatNodesSnapshot
-        let previousPaths = interactionTreeBeforeSettle?.byPath ?? previousByPath
-        interactionTreeBeforeSettle = nil
-        reconcilePrunedHoverWithin(prevNodes: previousNodes, prevByPath: previousPaths, newByPath: pass.byPath, cut: cut, at: now)
+        // Release the interaction snapshot before recycling the old flat-node buffer below.
+        do {
+            let previousNodes = interactionTreeBeforeSettle?.nodes ?? prevFlatNodesSnapshot
+            let previousPaths = interactionTreeBeforeSettle?.byPath ?? previousByPath
+            interactionTreeBeforeSettle = nil
+            reconcilePrunedHoverWithin(prevNodes: previousNodes, prevByPath: previousPaths, newByPath: pass.byPath, cut: cut, at: now)
 
-        // Reconcile focus: keep focused key/path if still focusable & non-inert; sync TextEdit.focused; handle modal/focusReturn, autofocus & fallback.
-        reconcileFocusAfterCommit(
-            prevFocusedPath: prevFocusedPath,
-            prevFocusedKey: prevFocusedKey,
-            prevFocusVisible: prevFocusVisible,
-            prevNodes: previousNodes,
-            prevByPath: previousPaths
-        )
-        if focusedPath == prevFocusedPath { syncFocusedEditLineMode() }
-        syncFollows()
-        if let prevPath = prevFocusedPath, prevPath != focusedPath {
-            let prevNode = previousPaths[prevPath].map { previousNodes[$0] }.flatMap { $0.path == prevPath ? $0 : nil }
-            // Focus moved by the commit, not by input: `DIRTY`.
-            handleKitFocusTransition(prevNode: prevNode, newPath: focusedPath, at: now, why: CommitWhy.dirty)
+            // Reconcile focus: keep focused key/path if still focusable & non-inert; sync TextEdit.focused; handle modal/focusReturn, autofocus & fallback.
+            reconcileFocusAfterCommit(
+                prevFocusedPath: prevFocusedPath,
+                prevFocusedKey: prevFocusedKey,
+                prevFocusVisible: prevFocusVisible,
+                prevNodes: previousNodes,
+                prevByPath: previousPaths
+            )
+            if focusedPath == prevFocusedPath { syncFocusedEditLineMode() }
+            syncFollows()
+            if let prevPath = prevFocusedPath, prevPath != focusedPath {
+                let prevNode = previousPaths[prevPath].map { previousNodes[$0] }.flatMap { $0.path == prevPath ? $0 : nil }
+                // Focus moved by the commit, not by input: `DIRTY`.
+                handleKitFocusTransition(prevNode: prevNode, newPath: focusedPath, at: now, why: CommitWhy.dirty)
+            }
         }
         settleKitHoverDelays(at: pointerPosition, now: now)
         reconcilePlaygroundAfterCommit(at: now)
