@@ -11,7 +11,7 @@ struct LayoutObserverTraits {
         case focusSelected, revealSelected
         case inputPills, groupOpacity, matchedFlight, heldLandingWidth, growthStack, filterContainer
         case shadow, childExit, rideTrailing, timeScale, wordReveal, extraCommitColor
-        case pictureAspect, secureOrEditable, kitHoverDelay
+        case pictureAspect, secureOrEditable, kitHoverDelay, scrollViewport, isolatedOrTransition
     }
 
     private(set) var bits: UInt64 = 0
@@ -21,6 +21,8 @@ struct LayoutObserverTraits {
 
     init<State>(_ el: borrowing El<State>) {
         let scrolls = !el.layout.scrollAxes.isEmpty
+        if scrolls { add(.scrollViewport) }
+        if el.isolatedLayer || el.transition != nil { add(.isolatedOrTransition) }
         if el.hasAuthoredHandlers {
             indexHandlers(el.handlers, scrolls: scrolls)
             if el.handlers.onHover != nil && el.kitHoverDelaysSpec != nil { add(.kitHoverDelay) }
@@ -129,7 +131,7 @@ extension Runtime.LayoutObservers {
             case .timeScale: hasTimeScales = true
             case .wordReveal: wordReveals.append(i)
             case .extraCommitColor: extraCommitColors.append(i)
-            case .pictureAspect, .secureOrEditable: break
+            case .pictureAspect, .secureOrEditable, .scrollViewport, .isolatedOrTransition: break
             }
         }
     }

@@ -17,6 +17,41 @@ struct StickySlice2ParityTests {
         return t
     }
 
+    @Test("A gutter inherits the visible horizontal band across a vertical viewport")
+    func nestedStickyGutterUsesItsAxisViewports() throws {
+        let rt = Runtime<Void>(state: (), viewport: Vec2(200, 100), pixelScale: 1) { _, _ in
+            let section: El<Void> = row().size(600, 32).shrink(0)
+                .child(el().size(54, 24).shrink(0))
+                .child(el().key("gutter").size(34, 24).shrink(0).stickyLeft(4))
+            let inner: El<Void> = row().key("inner").size(220, 40).shrink(0).scrollX().child(section)
+            let vertical: El<Void> = col().size(260, 80).shrink(0).scrollY().child(inner)
+            return row().key("outer").size(200, 100).scrollX().child(
+                row().size(760, 80).shrink(0)
+                    .child(el().size(42, 32).shrink(0))
+                    .child(vertical)
+            )
+        }
+
+        _ = rt.renderFrame(at: 0)
+        let initial = try #require(rt.element(byKey: "gutter"))
+        #expect(initial.rect[0] == 96 && initial.stuck == 0)
+
+        // The inner viewport starts at -18 and the outer viewport starts at 0.
+        // The gutter stops four points inside the outer viewport.
+        rt.update(at: 0.01) { _, tx in
+            tx.scrollToInstant("outer", x: 60, y: 0)
+            tx.scrollToInstant("inner", x: 96, y: 0)
+        }
+        _ = rt.renderFrame(at: 0.02)
+        let pinned = try #require(rt.element(byKey: "gutter"))
+        #expect(pinned.rect[0] == 4 && pinned.stuck == 64)
+
+        rt.update(at: 0.03) { _, tx in tx.scrollToInstant("inner", x: 0, y: 0) }
+        _ = rt.renderFrame(at: 0.04)
+        let released = try #require(rt.element(byKey: "gutter"))
+        #expect(released.rect[0] == 36 && released.stuck == 0)
+    }
+
     @Test("tests/sticky.rs: stickyTop, stickyBottom, section boundary push-out, hit above siblings & drawnLayout")
     func stickyTopBottomPushOutAndHit() {
         final class Hits: @unchecked Sendable {

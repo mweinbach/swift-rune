@@ -525,8 +525,10 @@ extension Runtime {
         var next = UnseenPresenceState()
         next.indexById = nodeIndexById
         next.nodes.reserveCapacity(specs.count)
-        let hasHolds = scrollRequestsState.keeps.contains { $0.hold != nil }
-        let hasSticky = !cut && (hasHolds || flatNodes.contains { $0.isSticky })
+        let heldIndices = Set(scrollRequestsState.keeps.compactMap { keep in
+            keep.hold.flatMap { nodeByPath[$0.path] }
+        })
+        let hasSticky = !cut && (!heldIndices.isEmpty || flatNodes.contains { $0.isSticky })
         var cumSticky = hasSticky ? [Vec2](repeating: .zero, count: flatNodes.count) : []
 
         for i in flatNodes.indices {
@@ -534,7 +536,8 @@ extension Runtime {
             let spec = specs[i]
             let id = spec.id
             let scrollIndex: Int?
-            if node.el.layout.scrollAxes.isEmpty {
+            let traits = layoutObservers.authored[i]
+            if !traits.contains(.scrollViewport) {
                 scrollIndex = node.enclosingVScrollIndex ?? node.enclosingHScrollIndex
             } else {
                 scrollIndex = i
@@ -549,9 +552,9 @@ extension Runtime {
             var mySticky = Vec2.zero
             if hasSticky {
                 let sticky = node.isSticky
-                let parentShift = node.el.anchor != nil && !sticky
+                let parentShift = !sticky && node.paintTraits.contains(.anchoredOrModal) && node.el.anchor != nil
                     ? .zero : (node.parentIndex.map { cumSticky[$0] } ?? .zero)
-                mySticky = sticky || hasHolds
+                mySticky = sticky || heldIndices.contains(i)
                     ? computeStickyShift(nodeIndex: i, parentStickyShift: parentShift,
                                          nodes: flatNodes, rectOf: { $0.targetRect }).shift
                     : parentShift
@@ -559,11 +562,11 @@ extension Runtime {
             }
             let clip = intersectRects(node.clipRect, spec.rect.offsetBy(mySticky))
             let winClip = intersectRects(clip, winRect)
-            let inViewNow = node.el.isolatedLayer || (winClip.width > 0.001 && winClip.height > 0.001)
+            let inViewNow = (winClip.width > 0.001 && winClip.height > 0.001) || (traits.contains(.isolatedOrTransition) && node.el.isolatedLayer)
 
             if !inViewNow {
                 // 2. `enters_unseen`: newly mounted nodes clipped out of view land immediately at rest.
-                if let trans = node.el.transition,
+                if traits.contains(.isolatedOrTransition), let trans = node.el.transition,
                    unseenPresence.indexById[id] == nil,
                    scene.phase(id) == .entering,
                    trans.insertion.pointOffset == .zero,
@@ -574,7 +577,12 @@ extension Runtime {
                 // 3. `unseen_before_and_after`: rows staying unseen snap their layout frame and visuals
                 // so offscreen reflow/colour changes do not animate invisibly (`unseen_presence.rs`).
                 if kitHooks.unseenPresence.frameById[id]?.inView == false {
-                    let parentOrigin = spec.parent.flatMap { nodeIndexById[$0] }.map { specs[$0].rect.origin } ?? .zero
+                    let parentOrigin: Vec2
+                    if let parent = node.parentIndex, flatNodes[parent].nodeId == spec.parent {
+                        parentOrigin = specs[parent].rect.origin
+                    } else {
+                        parentOrigin = spec.parent.flatMap { nodeIndexById[$0] }.map { specs[$0].rect.origin } ?? .zero
+                    }
                     let localFrame = MotionRect(
                         left: spec.rect.left - parentOrigin.x,
                         top: spec.rect.top - parentOrigin.y,

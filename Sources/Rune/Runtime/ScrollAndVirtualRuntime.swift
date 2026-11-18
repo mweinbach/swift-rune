@@ -3279,18 +3279,28 @@ extension Runtime {
         var bandBottom = scrollClip.bottom
         var bandLeft = scrollClip.left
         var bandRight = scrollClip.right
-        var anc = scrollNode.parentIndex
-        while let aIdx = anc {
-            let aNode = nodes[aIdx]
-            if (needsVertical && aNode.el.layout.scrollAxes.contains(.vertical))
-                || (!needsVertical && aNode.el.layout.scrollAxes.contains(.horizontal)) {
-                let aRect = rectOf(aNode)
-                bandTop = max(bandTop, aRect.top)
-                bandBottom = min(bandBottom, aRect.bottom)
-                bandLeft = max(bandLeft, aRect.left)
-                bandRight = min(bandRight, aRect.right)
-            }
-            anc = aNode.parentIndex
+        var ancestor = needsVertical ? scrollNode.enclosingVScrollIndex : scrollNode.enclosingHScrollIndex
+        while let index = ancestor {
+            let viewport = nodes[index]
+            let bounds = rectOf(viewport)
+            bandTop = max(bandTop, bounds.top)
+            bandBottom = min(bandBottom, bounds.bottom)
+            bandLeft = max(bandLeft, bounds.left)
+            bandRight = min(bandRight, bounds.right)
+            ancestor = needsVertical ? viewport.enclosingVScrollIndex : viewport.enclosingHScrollIndex
+        }
+
+        let rawRect = rectOf(node)
+        let shiftedElem = MotionRect.fromXYWH(
+            rawRect.x - ownLiveOffset.x + parentStickyShift.x,
+            rawRect.y - ownLiveOffset.y + parentStickyShift.y,
+            rawRect.width,
+            rawRect.height
+        )
+        // A left pin only moves a node that starts left of its band.
+        // A gutter already inside the band inherits its parent’s shift.
+        if !needsVertical && shiftedElem.left >= bandLeft + effInset {
+            return (parentStickyShift, max(abs(parentStickyShift.x), abs(parentStickyShift.y)))
         }
 
         // Immediate parent's inner box bounds sticky push-out, constrained by any growth row
@@ -3328,7 +3338,7 @@ extension Runtime {
                 boxRight = pRect.right - pad.right - bdr.right + parentStickyShift.x
                 boxBottom = pRect.bottom - pad.bottom - bdr.bottom + parentStickyShift.y
             }
-            if needsVertical && pIdx != sIdx {
+            if needsVertical && pIdx != sIdx && (!growthRows.isEmpty || held != nil) {
                 var aCur: Int? = pIdx
                 var growthRowIdx: Int? = nil
                 while let aIdx = aCur, aIdx != sIdx {
@@ -3374,13 +3384,6 @@ extension Runtime {
             boxBottom = .infinity
         }
 
-        let rawRect = rectOf(node)
-        let shiftedElem = MotionRect.fromXYWH(
-            rawRect.x - ownLiveOffset.x + parentStickyShift.x,
-            rawRect.y - ownLiveOffset.y + parentStickyShift.y,
-            rawRect.width,
-            rawRect.height
-        )
         let bounds = StickyMath.FrameBounds(
             bandTop: bandTop,
             bandBottom: bandBottom,
