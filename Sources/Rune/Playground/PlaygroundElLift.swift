@@ -74,6 +74,7 @@ extension El {
         if scrollAnchorEnabled { out.scrollAnchorEnabled = true }
         if let stickyConfig { out.stickyConfig = stickyConfig }
         if let growthSpec { out.growthSpec = growthSpec }
+        if let kitFilterKeysValue { out.kitFilterKeysValue = kitFilterKeysValue }
         if isStreaming { out.isStreaming = true }
         if isArrivesWhole { out.isArrivesWhole = true }
         if let joinedRowFaceKey { out.joinedRowFaceKey = joinedRowFaceKey }
