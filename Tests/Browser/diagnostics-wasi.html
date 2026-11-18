@@ -110,7 +110,7 @@ try {
         return 0;
     } };
     ({ instance } = await instantiateRuneBrowser(fetch('/__rune/diagnostics.wasm'),
-        { wasi_snapshot_preview1: imports }, { fontDirectory: null }));
+        { wasi_snapshot_preview1: imports }));
     wasi.initialize(instance);
     const api = instance.exports;
     const host = document.querySelector('#host');

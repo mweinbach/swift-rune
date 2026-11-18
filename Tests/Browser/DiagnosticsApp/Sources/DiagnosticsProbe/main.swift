@@ -93,6 +93,40 @@ private func requireFilePrefsError(_ operation: () throws -> Void) throws {
     throw ProbeFailure("expected file preferences error")
 }
 
+private func checkBrowserLabelRuns() throws {
+    func paint(_ scale: Float, decorated: Bool, perCell: Bool) throws -> (pixels: [UInt8], glyphs: Int) {
+        let runtime = Runtime<Void>(state: (), viewport: Vec2(240, 42), pixelScale: scale) { _, _ in
+            let ink = Color.rgba8(24, 77, 129)
+            let backing = Color.rgba8(62, 156, 90)
+            let spans = [TextSpan(" ffi ", color: ink, background: backing, underline: true, pad: 1.5),
+                         TextSpan("value_407", color: .white, background: backing, strikethrough: true),
+                         TextSpan(" = 407;")]
+            var label: El<Void> = decorated ? rich(spans) : text("jW | g(407) / glyph")
+            label = label.noWrap().font(TextStyle(size: 13, family: .monospace)).pl(0.5).color(ink)
+            if perCell {
+                // Explicit highlights keep byte-addressable quads even when no range is highlighted.
+                label.textHighlights = []
+            }
+            return col().sizeFull().bg(.rgba8(174, 184, 196)).child(label)
+        }
+        let frame = runtime.renderFrame(at: 0)
+        var target = CpuBootTarget(width: frame.width, height: frame.height)
+        _ = try CpuBoot.paint(CpuBootScene(frame: frame), into: &target, threads: 1)
+        return (target.pixels, frame.instances.count { $0.params.y == KIND_GLYPH })
+    }
+
+    for scale: Float in [1, 2] {
+        for decorated in [false, true] {
+            let runs = try paint(scale, decorated: decorated, perCell: false)
+            let cells = try paint(scale, decorated: decorated, perCell: true)
+            let kind = decorated ? "decorated" : "plain"
+            try check(runs.glyphs > 0 && runs.glyphs < cells.glyphs, "Unmerged \(kind) browser text at scale \(scale)")
+            try check(Set(runs.pixels).count > 16, "Missing \(kind) glyph coverage at scale \(scale)")
+            try check(runs.pixels == cells.pixels, "\(kind) browser text run pixels differed at scale \(scale)")
+        }
+    }
+}
+
 private func checkDiagnostics() throws {
     let memory = Prefs.open(appId: "browser", environment: [:])
     try memory.set("zoom", value: 3)
@@ -152,7 +186,7 @@ private func checkDiagnostics() throws {
 
 @_cdecl("rune_probe_diagnostics")
 func runDiagnostics() {
-    do { try checkDiagnostics(); print("diagnostics passed") }
+    do { try checkDiagnostics(); try checkBrowserLabelRuns(); print("diagnostics passed") }
     catch { print("diagnostics failed: \(error)") }
 }
 #endif

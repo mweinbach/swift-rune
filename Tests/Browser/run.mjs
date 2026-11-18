@@ -91,7 +91,10 @@ const site = 'http://127.0.0.1:' + server.address().port;
 const flags = ['--headless', '--no-first-run', '--no-default-browser-check', '--disable-extensions',
     '--window-size=1000,1000', '--remote-debugging-port=0', '--user-data-dir=' + profile];
 if (args.angle) flags.push('--use-gl=angle', '--use-angle=' + args.angle);
-if (args.angle === 'swiftshader') flags.push('--enable-unsafe-swiftshader');
+if (args.angle === 'swiftshader') {
+    flags.push('--enable-unsafe-swiftshader');
+    if (args.webgpu) flags.push('--enable-unsafe-webgpu');
+}
 if (args['device-scale']) flags.push('--force-device-scale-factor=' + args['device-scale']);
 const browser = spawn(exe, [...flags, 'about:blank'], { stdio: 'ignore' });
 let launchError;
