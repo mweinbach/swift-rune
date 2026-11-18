@@ -1835,7 +1835,7 @@ extension Runtime {
                 }
                 return (true, subtreeDynamic, effOpacity, 0, rectPx, radiiPx, effInert, nextClip,
                         nextChildTransform, false, false, [], false, myElementIndex, 0, 0, 0, 0,
-                        nodeScaleMotion, parentClip.clipPx, .zero, sc.x * scale, 0, nil)
+                        nodeScaleMotion, nextClip.clipPx, .zero, sc.x * scale, 0, nil)
             }
             let clipSpec = el.runtimeExtras[RenderExtrasKey.clipSpec] as? RenderClipSpec
             let linearGradSpec = el.runtimeExtras[RenderExtrasKey.linearGradient] as? RenderLinearGradientSpec
