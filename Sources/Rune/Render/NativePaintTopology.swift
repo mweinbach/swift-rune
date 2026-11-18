@@ -37,6 +37,7 @@ extension Runtime {
 
         var currentCommit = true
         var parentSlots: [Int] = []
+        var presentedIndexBySlot: [Int] = []
         var identity: [Identity] = []
         var order: [Int] = []
         var roots: [Int] = []
@@ -186,7 +187,15 @@ extension Runtime {
         if tree.exits.isEmpty && tree.order.count == frame.nodes.count && tree.order.count == flatNodes.count {
             // The parent slots were already resolved while building childOffsets. Retaining
             // this buffer also avoids another flat-node walk on shapes that change every frame.
-            if fromMountedScene { tree.parentSlots = parents }
+            if fromMountedScene {
+                tree.parentSlots = parents
+                if !tree.childSlots.isEmpty {
+                    // The scatter cursors are spent. Reuse their storage for lookup during paint.
+                    offsets.removeLast() // The adjacency end sentinel has no corresponding node.
+                    for i in tree.order.indices { offsets[tree.order[i]] = i }
+                    tree.presentedIndexBySlot = offsets
+                }
+            }
             nativePaintTopology = tree
         }
         return tree

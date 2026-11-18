@@ -2,6 +2,26 @@ import RuneMotion
 import Testing
 @testable import Rune
 
+@Test func syntheticPaintUsesKeyedPosesAfterAMountedFrame() throws {
+    let rt = Runtime<Int>(state: 0, viewport: Vec2(100, 100)) { _, _ in
+        col().key("root").child(el().key("leaf").size(10, 20))
+    }
+    _ = rt.renderFrame(at: 0)
+    let topology = try #require(rt.nativePaintTopology)
+    #expect(topology.presentedIndexBySlot.count == rt.flatNodes.count)
+    for i in topology.order.indices {
+        #expect(topology.presentedIndexBySlot[topology.order[i]] == i)
+    }
+    let node = try #require(rt.flatNodes.first { $0.key == "leaf" })
+    var scene = rt.scene
+    var frame = scene.frame(at: 0)
+    // Synthetic samples may override a keyed pose while keeping the same ID and parent order.
+    frame.byId[node.nodeId]?.opacity = 0.375
+    _ = rt.buildRenderFrame(frameOut: frame, now: 0, publishHitGeometry: true)
+    let opacity = try #require(rt.element(byKey: "leaf")?.opacity)
+    #expect(abs(opacity - 0.375) < 0.001)
+}
+
 @Test func nativePaintTopologyReusesRemountedSlotsAndRebuildsChangedPaintOrder() throws {
     let rt = Runtime<Int>(state: 0, viewport: Vec2(120, 100)) { value, _ in
         // Replacing a leaf's ID keeps the same tree. A later edit changes its paint order

@@ -862,6 +862,7 @@ extension Runtime {
         let hasHolds = !scrollRequestsState.keeps.isEmpty
         let topology = prepareNativePaintTopology(frameOut, byID: presentedById, holds: hasHolds,
                                                   fromMountedScene: fromMountedScene && exitingIds.isEmpty)
+        let presentedSlots = fromMountedScene && exitingIds.isEmpty ? topology.presentedIndexBySlot : []
         let hasSticky = topology.hasSticky
         let hasRaised = topology.hasRaised
         let hasAnimatedTracks = paintStore.activeLen != 0
@@ -3763,7 +3764,8 @@ extension Runtime {
                     var groupHover = context.groupHover
                     var snap = context.snap
                     var stickyShift = context.stickyShift
-                    let presented = presentedById[node.nodeId]
+                    let presented = presentedSlots.isEmpty
+                        ? presentedById[node.nodeId] : frameOut.nodes[presentedSlots[slot]]
                     let loop = loopSamples[node.nodeId]
                     let authoredTurn = node.el.rotate
                     let turn = (presented?.rotate ?? authoredTurn) + (loop?.rotation ?? 0)
