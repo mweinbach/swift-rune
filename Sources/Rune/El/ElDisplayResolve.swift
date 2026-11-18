@@ -106,7 +106,7 @@ internal struct ElResolvedText {
     func retainedGlyphLayout(in box: TextLayoutBox, using textSystem: TextSystem,
                         maxWidth: Float?, pixelScale: Float, window: TextRasterWindow) -> TextLayoutBox? {
         guard matchesMountedLabel(box, using: textSystem, maxWidth: maxWidth, pixelScale: pixelScale, window: window) else { return nil }
-        let painted = box.applyingSpanInks(spans)
+        let painted = textSystem.presentedLayout(box, spans: spans)
         if !painted.hasGlyphs { return textSystem.glyphsForCommittedLabel(painted) }
         #if canImport(CoreText) && canImport(CoreGraphics)
         if !painted.shaped.glyphs.isEmpty, painted.shaped.glyphPlacements?.retainSource(in: textSystem.glyphAtlas) != true { return nil }
@@ -147,7 +147,9 @@ internal struct ElResolvedText {
         if let (run, offset) = advanceRun, !(isSecure && textSystem.isPreparingLayouts) {
             if let sliced = textSystem.shapeRunSlice(run, at: offset, style: style, pixelScale: pixelScale, emitGlyphs: emitGlyphs) {
                 guard let spans, emitGlyphs else { return sliced }
-                return sliced.applyingSpanInks(spans)
+                var painted = sliced.applyingSpanInks(spans)
+                painted.applyScopedGlyphMasks(in: textSystem.glyphAtlas)
+                return painted
             }
         }
         var effectiveStyle = style

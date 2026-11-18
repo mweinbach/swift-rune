@@ -726,12 +726,14 @@ public struct ShapedText: @unchecked Sendable {
     /// again where a text laid out from a fractional origin lands (`glyph_emit.rs`, #935).
     internal var glyphPens: [GlyphPen] = []
     internal var glyphPlacements: TextBoxGeometry.GlyphPlacements?
-    internal var usesPaintInks = false
+    internal var scopedInkBucket: UInt8?
+    #else
+    internal var scopedInkBucket: UInt8? { nil }
     #endif
     /// An unpainted layout exposes neutral mask geometry even after a renderer warmed its cache.
     internal var canReplayGlyphInks: Bool {
         #if canImport(CoreText) && canImport(CoreGraphics)
-        return !usesPaintInks || GlyphAtlas.baseInkBucket != nil
+        return scopedInkBucket == nil || scopedInkBucket == GlyphAtlas.baseInkBucket
         #else
         return true
         #endif
@@ -4726,11 +4728,16 @@ public final class TextSystem: @unchecked Sendable {
         return presentedLayout(layout, spans: spans)
     }
 
-    private func presentedLayout(_ layout: TextLayoutBox, spans: [TextSpan]?) -> TextLayoutBox {
-        guard layout.spans != spans else { return layout }
-        if let recent = lock.withLock({ layout.recentPaint?.view(of: layout, spans: spans) }) { return recent }
-        let painted = layout.applyingSpanInks(spans)
-        lock.withLock { layout.recentPaint = .init(painted) }
+    internal func presentedLayout(_ layout: TextLayoutBox, spans: [TextSpan]?) -> TextLayoutBox {
+        let bucket = layout.shaped.requestedInkBucket
+        if layout.spans == spans, layout.shaped.scopedInkBucket == bucket {
+            if bucket == nil || layout.shaped.glyphPlacementsAreResident(in: glyphAtlas) { return layout }
+        }
+        let geometry = layout.cachedGeometry
+        if let recent = lock.withLock({ geometry.recentPaint?.view(of: geometry, spans: spans, bucket: bucket) }),
+           bucket == nil || recent.shaped.glyphPlacementsAreResident(in: glyphAtlas) { return recent }
+        let painted = geometry.applyingSpanInks(spans, atlas: glyphAtlas)
+        if painted !== geometry { lock.withLock { geometry.recentPaint = .init(painted) } }
         return painted
     }
 
@@ -5010,7 +5017,7 @@ public final class TextSystem: @unchecked Sendable {
         pretty: Bool = false
     ) -> ShapedText {
         measureRuntimePhase(.text) {
-            shapeImpl(
+            var result = shapeImpl(
                 text: text,
                 spans: spans,
                 pills: pills,
@@ -5022,6 +5029,8 @@ public final class TextSystem: @unchecked Sendable {
                 bypassCache: bypassCache,
                 pretty: pretty
             )
+            result.applyScopedGlyphMasks(in: glyphAtlas)
+            return result
         }
     }
 
@@ -6448,7 +6457,6 @@ public final class TextSystem: @unchecked Sendable {
         shapedOut.lineIsRTL = visualLines.map(\.isRTL)
         shapedOut.lineBaselinesPx = lineBaselines
         shapedOut.underlineLineEndsPt = underlineLineEnds
-        shapedOut.usesPaintInks = emitGlyphs && GlyphAtlas.baseInkBucket != nil
         shapedOut.glyphPens = glyphPensOut.count == glyphsOut.count ? glyphPensOut : []
         if !shapedOut.glyphPens.isEmpty {
             shapedOut.glyphPlacements = TextBoxGeometry.GlyphPlacements(glyphs: glyphsOut, since: placementEpoch)
@@ -6506,8 +6514,6 @@ public final class TextSystem: @unchecked Sendable {
     ) {
         let pillMarkerKey = "RunePillMarker" as CFString
         let invS = 1 / prepared.scale
-        let runInk = style.fontSmoothing == .on || style.fontSmoothing == .windfoil
-            ? GlyphAtlas.baseInkBucket ?? 0 : 0
         for run in runs {
             let attrs = CTRunGetAttributes(run)
             if prepared.hasRunDelegates &&
@@ -6560,7 +6566,7 @@ public final class TextSystem: @unchecked Sendable {
                         phaseX: pen.phase,
                         subpixelYBin: binYArg,
                         smoothing: style.fontSmoothing,
-                        inkBucket: runInk
+                        inkBucket: 0
                     ), entry.pixelSize.x > 0 && entry.pixelSize.y > 0 else {
                         continue
                     }
@@ -6648,7 +6654,6 @@ public final class TextSystem: @unchecked Sendable {
         }
         var result = layout
         result.glyphs = glyphs
-        result.usesPaintInks = GlyphAtlas.baseInkBucket != nil
         result.glyphPens = pens
         result.glyphPlacements = pens.isEmpty ? nil : TextBoxGeometry.GlyphPlacements(glyphs: glyphs, since: resets)
         result.lineGlyphRanges = ranges

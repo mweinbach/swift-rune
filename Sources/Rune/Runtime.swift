@@ -7353,7 +7353,7 @@ public final class Runtime<State> {
                                                   pretty: pretty, rasterWindow: rasterWindow)
                 }
                 if retainGlyphs(live) {
-                    let painted = live.applyingSpanInks(spans)
+                    let painted = textSystem.presentedLayout(live, spans: spans)
                     if painted !== live { nodeTextLayouts[snapId]?.box = painted }
                     return painted
                 }
@@ -9350,7 +9350,7 @@ public final class Runtime<State> {
                         } else {
                             visibleInputGlyphs = textSystem.glyphCache.glyphsInBandCached(
                                 key: GlyphReplayKey(shapeKey: inputBox.shapeKey, spans: inputBox.spans,
-                                                    maxWidth: inputBox.maxWidth, glidePx: glidePx),
+                                                    maxWidth: inputBox.maxWidth, glidePx: glidePx, scopedInkBucket: inputBox.shaped.scopedInkBucket),
                                 keep: resolvedInput.isSecure ? .secret : (glidePx == .zero ? .cached : .owned),
                                 bandTopPt: inBandTop,
                                 bandBottomPt: inBandBot,
@@ -9704,7 +9704,7 @@ public final class Runtime<State> {
                                 : (-Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
                             glyphsToEmit = textSystem.glyphCache.glyphsInBandCached(
                                 key: GlyphReplayKey(shapeKey: labelBox.shapeKey, spans: labelBox.spans,
-                                                    maxWidth: labelBox.maxWidth, glidePx: glidePx),
+                                                    maxWidth: labelBox.maxWidth, glidePx: glidePx, scopedInkBucket: labelBox.shaped.scopedInkBucket),
                                 keep: resolvedText.isSecure ? .secret : (glidePx == .zero && !placedNativeGlyphs ? .cached : .owned),
                                 bandTopPt: lblBandTop,
                                 bandBottomPt: lblBandBot,
