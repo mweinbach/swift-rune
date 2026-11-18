@@ -15,7 +15,6 @@ private enum ShellElExtrasKey {
     static let outline = "shell.elOutline"
     static let paintAlpha = "shell.paintAlpha"
     static let layerOpacity = "shell.layerOpacity"
-    static let mark = "shell.mark"
     static let timeScale = "shell.timeScale"
 }
 
@@ -157,8 +156,8 @@ extension El {
     /// Tags this element's render instances (and descendants until overridden) for compositors (`El::mark`).
     public func mark(_ mark: UInt32) -> Self {
         var copy = self
-        if mark != 0 || copy.runtimeExtras[ShellElExtrasKey.mark] != nil {
-            copy.runtimeExtras[ShellElExtrasKey.mark] = mark
+        if mark != 0 || copy.elMark != nil {
+            copy.elMark = mark
         }
         return copy
     }
@@ -213,12 +212,8 @@ extension El {
     /// without changing their bounds.
     internal var hasOnlyCulledPaintExtras: Bool {
         runtimeExtras.keys.allSatisfy { key in
-            key == "cursor" || key == Self.selectableExtraKey || key == ShellElExtrasKey.mark
+            key == "cursor" || key == Self.selectableExtraKey
         }
-    }
-
-    internal var elMark: UInt32? {
-        runtimeExtra(ShellElExtrasKey.mark) as? UInt32
     }
 
     internal var elTimeScale: Float {

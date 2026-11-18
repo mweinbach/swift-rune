@@ -135,15 +135,18 @@ import Testing
 }
 
 @Test func nativePaintRestoresMarksAfterSingleChildScopes() {
-    let rt = Runtime(state: (), viewport: Vec2(24, 8), pixelScale: 1) { _, _ -> El<Void> in
+    let rt = Runtime(state: (), viewport: Vec2(40, 8), pixelScale: 1) { _, _ -> El<Void> in
         let ink: El<Void> = el().size(8, 8).bg(Color.srgb(1, 0.25, 0.25))
         let wrapped = el().size(8, 8).child(ink)
-        return row().size(24, 8).mark(7).children([
+        let marked = ink.mark(12)
+        return row().size(40, 8).mark(7).children([
             el().size(8, 8).mark(42).child(wrapped),
             wrapped,
-            ink.mark(12),
+            ink.mark(0),
+            marked.mark(0),
+            marked,
         ])
     }
     let frame = rt.renderFrame(at: 0)
-    #expect(frame.marks == [42, 7, 12])
+    #expect(frame.marks == [42, 7, 7, 0, 12])
 }

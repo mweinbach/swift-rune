@@ -1316,6 +1316,7 @@ final class ElColdData<State> {
     var isolates: [(range: Range<Int>, dir: Direction)]? = nil
     var liveBindings: [BoundLiveProperty]? = nil
     var kitFilterKeys: [String]? = nil
+    var drawMark: UInt32?
     var handlersBox: ElHandlersBox<State>? = nil
     fileprivate var _runtimeExtras: [String: Any]? = nil
     var runtimeExtras: [String: Any] {
@@ -1493,6 +1494,7 @@ final class ElColdData<State> {
         c.truncateFadeEm = truncateFadeEm
         c.isolates = isolates
         c.liveBindings = liveBindings
+        c.drawMark = drawMark
         c.handlersBox = handlersBox
         c.kitFilterKeys = kitFilterKeys
         c._runtimeExtras = _runtimeExtras
@@ -1835,7 +1837,14 @@ public struct El<State> {
     }
     internal var hasAuthoredHandlers: Bool { _cold?.handlersBox != nil }
     @inline(__always) internal func runtimeExtra(_ key: String) -> Any? { _cold?._runtimeExtras?[key] }
-    internal var runtimeExtraCount: Int { _cold?._runtimeExtras?.count ?? 0 }
+    internal var elMark: UInt32? {
+        get { _cold?.drawMark }
+        set { ensureCold().drawMark = newValue }
+    }
+    internal var runtimeExtraCount: Int {
+        guard let cold = _cold else { return 0 }
+        return (cold._runtimeExtras?.count ?? 0) + (cold.drawMark == nil ? 0 : 1)
+    }
 
     internal var runtimeExtras: [String: Any] {
         get { _cold?.runtimeExtras ?? [:] }
