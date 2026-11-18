@@ -15,7 +15,13 @@ struct DesktopFont: Hashable {
     let chromiumMask: Bool
     let clearType: Bool
     #endif
+    #if os(Linux) || os(Windows)
+    // Native font lookup can distinguish canonically equivalent family names.
+    private let familyName: TextUTF8Key
+    var family: String { familyName.source }
+    #else
     let family: String
+    #endif
     let mono: Bool
     let sizePx: Float
     let weight: Int32
@@ -83,7 +89,9 @@ struct DesktopFont: Hashable {
         #if os(Linux)
         // Pango separates families on every comma. Skip an unrepresentable literal
         // name so its fragments cannot match unrelated installed faces.
-        family = candidates.filter { !$0.contains(",") }.joined(separator: ", ")
+        familyName = TextUTF8Key(candidates.filter { !$0.contains(",") }.joined(separator: ", "))
+        #elseif os(Windows)
+        familyName = TextUTF8Key(stack)
         #else
         family = stack
         #endif
