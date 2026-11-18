@@ -982,7 +982,7 @@ public final class Runtime<State> {
     internal var lastScrollHandlerTokens: [String: UInt64] = [:]
     internal var stuckShiftsByPath: [String: Vec2] = [:]
     internal var isDispatchingHover: Bool = false
-    internal var suppressRevealFromHoverCommit: Bool = false
+    internal var suppressSelectionEffectsFromHoverCommit: Bool = false
     internal var lastVirtualFillWanted: Bool = false
     internal var lastVirtualFillMissing: Int = 0
     internal var lastVirtualFillMoved: Bool = false
@@ -10526,7 +10526,7 @@ public final class Runtime<State> {
         }
         if !hoverHold.held && pressedPath == nil, previous != hoveredPath {
             if updateMenuHoverHighlight(hoveredPath: hoveredPath) {
-                suppressRevealFromHoverCommit = true
+                suppressSelectionEffectsFromHoverCommit = true
                 dirtyCommit(at: currentTime, inputChange: false)
             }
             if hasHoverVisualInChain(previous) || hasHoverVisualInChain(hoveredPath) {
@@ -10856,7 +10856,7 @@ public final class Runtime<State> {
                 defer { isDispatchingHover = previous }
                 InputTime.withArrival(nil) {
                     let (ran, allLiveOnly) = dispatchHoverCallbacks(route, at: now, fromPaint: true)
-                    if ran && !allLiveOnly { suppressRevealFromHoverCommit = true }
+                    if ran && !allLiveOnly { suppressSelectionEffectsFromHoverCommit = true }
                 }
             }
         }
@@ -11229,12 +11229,12 @@ public final class Runtime<State> {
                         || helpTargetChanges(at: pos)
                         || menuHoverChanged
                     if hoverNeedsCommit {
-                        suppressRevealFromHoverCommit = true
+                        suppressSelectionEffectsFromHoverCommit = true
                         dirtyCommit(at: now, why: isPointerEvent ? CommitWhy.input : CommitWhy.dirty, inputChange: false)
                         changed = true
                     }
                 } else if linkChanged || menuHoverChanged || hasHoverVisualInChain(oldPath) || hasHoverVisualInChain(newPath) || helpTargetChanges(at: pos) {
-                    suppressRevealFromHoverCommit = true
+                    suppressSelectionEffectsFromHoverCommit = true
                     dirtyCommit(at: now, why: isPointerEvent ? CommitWhy.input : CommitWhy.dirty, inputChange: false)
                     changed = true
                 }
@@ -11346,7 +11346,7 @@ public final class Runtime<State> {
             pressHoverDelays()
             hoverPaused = true
         }
-        suppressRevealFromHoverCommit = false
+        suppressSelectionEffectsFromHoverCommit = false
         pointerPosition = pos
         focusVisible = false
         hoveredHighlightActive = false
@@ -12279,7 +12279,7 @@ public final class Runtime<State> {
             slice2State.currentPhysicalKey = prevPhys
             slice2State.currentKeyBase = prevBase
         }
-        suppressRevealFromHoverCommit = false
+        suppressSelectionEffectsFromHoverCommit = false
         let isFocusedSecure = focusedPath.flatMap { nodeByPath[$0] }.map { flatNodes[$0].el.isSecure && !flatNodes[$0].el.isRevealed } ?? false
         if isFocusedSecure {
             logEvent("key [redacted]")
@@ -13576,7 +13576,7 @@ public final class Runtime<State> {
     /// Mutates state via `body`, always rebuilding unless `tx.liveOnlyRequested` is true.
     public func update(at now: Double? = nil, _ body: (_ state: inout State, _ tx: inout Tx) -> Void) {
         RuntimeIdScope.$current.withValue(runtimeId) {
-            suppressRevealFromHoverCommit = false
+            suppressSelectionEffectsFromHoverCommit = false
             let t = now ?? currentTime
             var tx = makeTx(at: t)
             if let scope = turnScope {
@@ -13613,7 +13613,7 @@ public final class Runtime<State> {
         _ body: (_ state: inout State, _ tx: inout Tx) -> Bool
     ) -> (stale: Bool, minimizeOrder: UInt64?) {
         RuntimeIdScope.$current.withValue(runtimeId) {
-            suppressRevealFromHoverCommit = false
+            suppressSelectionEffectsFromHoverCommit = false
             let t = now ?? currentTime
             var tx = makeTx(at: t)
             let changed: Bool

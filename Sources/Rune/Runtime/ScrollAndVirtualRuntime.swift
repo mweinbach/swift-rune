@@ -3536,13 +3536,15 @@ extension Runtime {
     // MARK: - Focus & Reveal Selected
 
     internal func checkFocusAndRevealSelected() {
-        defer { suppressRevealFromHoverCommit = false }
+        defer { suppressSelectionEffectsFromHoverCommit = false }
+        // Record hover-driven selection edges without moving keyboard focus or scrolling.
+        let followsSelection = !isDispatchingHover && !suppressSelectionEffectsFromHoverCommit
         var newFocus: Int?
         var selectedPaths: Set<String> = []
         for i in layoutObservers.focusSelected {
             let node = flatNodes[i]
             selectedPaths.insert(node.path)
-            if node.el.focusable && !node.effectiveInert && !lastFocusSelectedPaths.contains(node.path) {
+            if followsSelection && node.el.focusable && !node.effectiveInert && !lastFocusSelectedPaths.contains(node.path) {
                 newFocus = i
             }
         }
@@ -3552,7 +3554,7 @@ extension Runtime {
         for i in layoutObservers.revealSelected {
             let node = flatNodes[i]
             revealPaths.insert(node.path)
-            if !isDispatchingHover && !suppressRevealFromHoverCommit && !lastRevealSelectedPaths.contains(node.path) {
+            if followsSelection && !lastRevealSelectedPaths.contains(node.path) {
                 pendingScrollReveals.append(.intoView(scope: nil, key: node.key ?? node.path))
             }
         }

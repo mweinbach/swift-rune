@@ -576,8 +576,8 @@ struct ElInc4ParityTests {
         #expect(abs(r1End.rect[3] - 80) < 0.5)
     }
 
-    @Test("focus: focusSelected & revealSelected track programmatic selection without firing during hover")
-    func focusAndRevealSelectedSkipHover() {
+    @Test("focus: focusSelected & revealSelected track programmatic selection without firing during hover", arguments: [false, true])
+    func focusAndRevealSelectedSkipHover(nativeFrame: Bool) {
         struct S {
             var selected: Int = 0
         }
@@ -604,24 +604,49 @@ struct ElInc4ParityTests {
                 }
             )
         }
-        _ = rt.frame(at: 0.0)
+        func frame(at time: Double) {
+            if nativeFrame {
+                _ = rt.renderFrame(at: time)
+            } else {
+                _ = rt.frame(at: time)
+            }
+        }
+        frame(at: 0.0)
         #expect(rt.focusedKey == "item-0")
         #expect(rt.scrollOffset(forKey: "scroll").y == 0)
 
-        // Hover triggers callback while isDispatchingHover == true: should NOT reveal item-8!
+        // The primary hover callback changes selection without rebuilding.
         rt.pointerMove(to: Vec2(50, 45), at: 0.05)
-        _ = rt.frame(at: 0.06)
+        frame(at: 0.06)
+        #expect(rt.state.selected == 8)
+        #expect(rt.focusedKey == "item-0")
         #expect(rt.scrollOffset(forKey: "scroll").y < 1)
 
-        // Programmatic state update selects item-7 -> moves focus & reveals into view!
+        // Revealing item-7 moves a new row under the stationary pointer.
         rt.update(at: 0.1) { s, tx in
             tx.instant()
             s.selected = 7
         }
-        _ = rt.frame(at: 0.11)
-        _ = rt.frame(at: 0.12)
+        frame(at: 0.11)
         #expect(rt.focusedKey == "item-7")
-        #expect(rt.scrollOffset(forKey: "scroll").y > 100)
+        let revealedOffset = rt.scrollOffset(forKey: "scroll").y
+        #expect(revealedOffset > 100)
+
+        frame(at: 0.12)
+        #expect(rt.state.selected == 8)
+        #expect(rt.focusedKey == "item-7")
+        #expect(rt.scrollOffset(forKey: "scroll").y == revealedOffset)
+
+        // An unrelated commit keeps that focus. A later programmatic selection still moves it.
+        rt.update(at: 0.13) { _, tx in tx.instant() }
+        frame(at: 0.14)
+        #expect(rt.focusedKey == "item-7")
+        rt.update(at: 0.15) { state, tx in
+            tx.instant()
+            state.selected = 6
+        }
+        frame(at: 0.16)
+        #expect(rt.focusedKey == "item-6")
     }
 
     @Test("input: onInputKey intercepts focused textInput keys before editor and onPointerMoveAny fires")
