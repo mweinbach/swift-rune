@@ -1,5 +1,6 @@
 import { wakeRuneBrowser } from './rune-web-wake.mjs';
 import { createRuneSpellImports } from './rune-web-spell.mjs';
+import { isFixedPitchAsset, writeFixedPitchCells } from './rune-web-fixed-pitch.mjs';
 // Font shaping, bidi selection geometry and glyph coverage use the browser's installed
 // font fallback. Rune owns line breaking, styles, atlas packing and drawing.
 import { withRunePageClock } from './rune-page-clock.mjs';
@@ -58,7 +59,7 @@ function installFont(doc, source, { bundled = false, startup = false, firstCut =
     }
     if (previous) doc.fonts.delete(previous.face);
     doc.fonts.add(face);
-    faces.set(slot, { bytes, ...info, face, bundled, firstCut, id: ++sourceCount });
+    faces.set(slot, { bytes, ...info, face, bundled, firstCut, asciiFixedPitch: source.asciiFixedPitch, id: ++sourceCount });
     const { colorFamilies } = page;
     if ([...faces.values()].some(source => source.color)) colorFamilies.add(key);
     else colorFamilies.delete(key);
@@ -235,6 +236,36 @@ function sourceFamilies(doc, line) {
     return families;
 }
 
+// Only the exact regular face in the first CSS family can establish this
+// contract. A user-installed face or an explicitly configured feature/axis
+// can change both glyph selection and the range geometry.
+function fixedPitchSource(doc, line) {
+    if (!line.chunks || line.chunks.length !== 1 || line.text.length > 256 ||
+        line.element.dir !== 'ltr' || line.element.lang || line.weight !== 400 || line.italic ||
+        line.kerning !== 'normal' || /[^ -~]/.test(line.text) || !line.size) return null;
+    const key = line.families[0]?.key;
+    const sources = fontSources.get(doc)?.get(key);
+    if (sources?.size !== 1) return null;
+    const source = sources.values().next().value;
+    if (!source.asciiFixedPitch || line.aliases.length > 1) return null;
+    const alias = line.aliases[0];
+    if (alias && alias.source !== source) return null;
+    const face = alias?.face ?? source.face;
+    const aliasKey = alias?.family.toLowerCase();
+    if (!doc.fonts.has(source.face) || !doc.fonts.has(face) || face.status !== 'loaded' ||
+        face.weight !== '400' || face.style !== 'normal' || face.stretch !== 'normal' ||
+        cssFamilyKey(face.family) !== (aliasKey ?? key) || source.face.unicodeRange.toUpperCase() !== 'U+0-10FFFF' ||
+        face.unicodeRange.toUpperCase() !== 'U+0-10FFFF' || face.sizeAdjust !== '100%' ||
+        face.variationSettings !== 'normal' ||
+        (face.featureSettings !== 'normal' && face.featureSettings !== '"liga" 0, "clig" 0, "calt" 0, "dlig" 0')) return null;
+    for (const pageFace of doc.fonts) {
+        if (pageFace === face || pageFace === source.face) continue;
+        const name = cssFamilyKey(pageFace.family);
+        if (name === key || name === aliasKey) return null;
+    }
+    return source;
+}
+
 function registeredCell(doc, line, start, end) {
     const from = line.offsets[start], point = line.text.codePointAt(from);
     if ((start > 0 && line.offsets[start - 1] === from) || (end > 0 && line.offsets[end - 1] === line.offsets[end])) return false;
@@ -311,7 +342,8 @@ function advanceProbe(source) {
 export function createRuneTextImports(getMemory, doc = globalThis.document, spellDictionaries = []) {
     const runs = new Map();
     const aliases = new Map();
-    let next = 1, root, spans, range, defaultContext, unkernedContext, svgClusterOwners;
+    const fixedPitchStyles = new Map();
+    let next = 1, root, spans, explicitSpans, range, defaultContext, unkernedContext, svgClusterOwners;
     const memory = () => getMemory().buffer;
     const view = () => new DataView(memory());
     const string = (ptr, n) => utf8.decode(new Uint8Array(memory(), ptr >>> 0, n));
@@ -371,9 +403,24 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
     // currently being measured need to participate in browser layout. Keep a few
     // together for interleaved styled, bidi and font-probe measurements.
     function mountSpan(element) {
-        if (element.parentNode === spans) return;
-        if (spans.childElementCount >= 8) spans.firstElementChild.remove();
-        spans.append(element);
+        const shelf = explicitSpans && (element.dir === 'ltr' || element.dir === 'rtl') ? explicitSpans : spans;
+        if (element.parentNode === shelf) return;
+        if (shelf.childElementCount >= 8) shelf.firstElementChild.remove();
+        shelf.append(element);
+    }
+
+    function fixedPitchStyleKey(line, source) {
+        if (!explicitSpans) return null;
+        // The closed shelf owns its span styles. Its host and the document
+        // element can still be transformed or hidden by the embedding page.
+        for (const element of [root, doc.documentElement]) {
+            const style = doc.defaultView.getComputedStyle(element);
+            if (style.display === 'none' || style.contentVisibility === 'hidden' ||
+                style.transform !== 'none' || style.scale !== 'none' || style.rotate !== 'none' ||
+                style.translate !== 'none' || style.perspective !== 'none' ||
+                (style.zoom !== '1' && style.zoom !== 'normal')) return null;
+        }
+        return [source.id, line.size, doc.defaultView.devicePixelRatio].join('/');
     }
 
     function lineOrigin(line) {
@@ -744,7 +791,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             if (/^win/i.test(name)) return 3;
             return 0;
         },
-        create(ptr, count, familyPtr, familyLen, size, weight, italic, mono, direction, metrics, metricsSize) {
+        create(ptr, count, familyPtr, familyLen, size, weight, italic, mono, direction, metrics, metricsSize, willConfigure = 0) {
             if (!doc?.documentElement || count <= 0) return 0;
             if (!root) {
                 root = doc.createElement('div');
@@ -754,6 +801,13 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
                 spans = doc.createElement('div');
                 spans.style.cssText = 'all:initial;display:contents;';
                 root.append(spans);
+                // Explicit lines use Rune's authored direction and font. Isolate
+                // their measurement from page selectors such as span::first-letter.
+                // The slot preserves the document cascade for auto-direction runs.
+                if (root.attachShadow) {
+                    explicitSpans = spans.cloneNode(false);
+                    root.attachShadow({ mode: 'closed' }).append(explicitSpans, doc.createElement('slot'));
+                }
                 root.setAttribute('aria-hidden', 'true');
                 root.inert = true;
                 // Shaping spans reset inherited styles. Keep their layout measurable while hiding the whole subtree.
@@ -810,7 +864,9 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             const line = { text, font, baseFont: font, prefix, families, aliases: [], size, weight, italic, kerning: 'normal',
                 element, offsets, chunks, chunkAt, hasColor, carets: new Map(),
                 direction: explicitDirection ?? doc.defaultView.getComputedStyle(element).direction };
-            measure(line, metrics, metricsSize);
+            // A configured run publishes metrics immediately after applying its language
+            // and OpenType settings. Older reactors request the default metrics here.
+            if (!willConfigure) measure(line, metrics, metricsSize);
             return retain(line);
         },
         extract_ink(id, start, end, metrics, metricsSize) {
@@ -904,6 +960,14 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             const memoryBuffer = memory();
             const ints = new Int32Array(memoryBuffer, ptr >>> 0, count * 7);
             const floats = new Float32Array(memoryBuffer, ptr >>> 0, count * 7);
+            const source = fixedPitchSource(doc, line);
+            if (source) {
+                const key = fixedPitchStyleKey(line, source);
+                if (key && writeFixedPitchCells(fixedPitchStyles, key, line.text.length, ints, floats, reportSource, index => {
+                    const rect = bounds(line, index, index + 1);
+                    return [rect.left - lineOrigin(line), rect.width, caret(line, index), caret(line, index + 1)];
+                })) return;
+            }
             const origin = lineOrigin(line);
             for (let i = 0; i < ints.length; i += 7) {
                 const start = ints[i], end = ints[i + 1];
@@ -995,8 +1059,8 @@ async function fetchFace(url, family, weight) {
     const bytes = new Uint8Array(await response.arrayBuffer());
     const info = family ? { family, weight, style: 'normal' } : fontDescriptor(bytes);
     if (!info) throw new Error('Unrecognized TrueType/OpenType font at ' + url);
-    const face = await new FontFace(info.family, bytes, info).load();
-    return { bytes, info, face };
+    const [face, asciiFixedPitch] = await Promise.all([new FontFace(info.family, bytes, info).load(), isFixedPitchAsset(bytes)]);
+    return { bytes, info, face, asciiFixedPitch };
 }
 
 function loadAppFonts(doc, requested, startup = false) {

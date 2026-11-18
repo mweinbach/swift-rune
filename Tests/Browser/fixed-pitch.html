@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="result"></pre>
+<script type="module">
+import { createRuneTextImports, runeTextFontsReady } from '../../Sources/Rune/Resources/Web/rune-web-text.mjs';
+
+const result = document.getElementById('result');
+try {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    const host = createRuneTextImports(() => memory);
+    const bytes = new Uint8Array(memory.buffer);
+    const ints = new Int32Array(memory.buffer, 8192);
+    const floats = new Float32Array(memory.buffer, 8192);
+    const metrics = new Float32Array(memory.buffer, 2048);
+    function put(text, ptr) {
+        const value = new TextEncoder().encode(text);
+        bytes.set(value, ptr);
+        return value.length;
+    }
+    host.font_url(0, put('../../Sources/Rune/Resources/Fonts/IBMPlexMono-Regular.ttf', 0), 0);
+    await runeTextFontsReady(memory);
+    let readCount = 0, cellCount = 0;
+    const nativeBounds = Range.prototype.getBoundingClientRect;
+    Range.prototype.getBoundingClientRect = function () {
+        ++readCount;
+        return nativeBounds.call(this);
+    };
+    const defaults = 'liga=0,clig=0,calt=0,dlig=0';
+    function compare(text, { features = defaults, direction = 1, size = 26, warm = false } = {}) {
+        const length = put(text, 512);
+        const id = host.create(512, length, 64, put('IBM Plex Mono', 64), size, 400, 0, 1, direction, 0, 40);
+        try {
+            host.configure(id, 0, 0, 128, put(features, 128), 0, 0, 0, 40);
+            const spans = [];
+            let byte = 0;
+            for (const { segment } of new Intl.Segmenter().segment(text)) {
+                const next = byte + new TextEncoder().encode(segment).length;
+                spans.push([byte, next]);
+                byte = next;
+            }
+            for (let i = 0; i < spans.length; ++i) {
+                ints[i * 7] = spans[i][0];
+                ints[i * 7 + 1] = spans[i][1];
+            }
+            const before = readCount;
+            host.cells(id, 8192, spans.length, 1);
+            if (warm && readCount !== before) throw Error('Repeated fixed-pitch positions forced DOM range reads');
+            for (const [i, [start, end]] of spans.entries()) {
+                const direction = host.cell(id, start, end, 2048, 2052, 1);
+                const expected = [metrics[0], metrics[1], host.caret(id, start), host.caret(id, end)];
+                if (direction !== ints[i * 7 + 6] || expected.some((v, j) => v !== floats[i * 7 + 2 + j])) {
+                    throw Error('Changed native geometry for ' + JSON.stringify(text) + ' at ' + start);
+                }
+                ++cellCount;
+            }
+        } finally { host.release(id); }
+    }
+    const alphabet = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).join('');
+    try {
+        for (const size of [13, 13.33, 26]) {
+            compare('0'.repeat(alphabet.length), { size });
+            compare(alphabet, { size, warm: true });
+            compare('let value_295 = compute(295);', { size, warm: true });
+        }
+        compare('1/2 99/100', { features: 'frac=1' });
+        compare('RTL אבג A 123', { direction: 2 });
+        compare('A\t B \u0301 © 1');
+        compare('a\t'.repeat(140));
+        const css = document.createElement('style');
+        css.textContent = 'span { letter-spacing: 1px !important; }';
+        document.head.append(css);
+        try { compare('Spacing'); } finally { css.remove(); }
+        for (const [property, value] of [['transform', 'scale(1.25)'], ['zoom', '1.1']]) {
+            document.documentElement.style.setProperty(property, value);
+            try { compare('let value_101 = 101;'); } finally { document.documentElement.style.removeProperty(property); }
+        }
+        const neutral = '123 / 4';
+        function autoCaret() {
+            const length = put(neutral, 512);
+            const id = host.create(512, length, 64, put('IBM Plex Mono', 64), 26, 400, 0, 1, 0, 0, 40);
+            try { return host.caret(id, 0); } finally { host.release(id); }
+        }
+        document.head.append(css);
+        try {
+            css.textContent = 'span { direction: ltr !important; }';
+            const ltr = autoCaret();
+            css.textContent = 'span { direction: rtl !important; }';
+            if (ltr === autoCaret()) throw Error('The auto-direction measurement lost the page cascade');
+        } finally { css.remove(); }
+        const replacement = await (await fetch('../../Sources/Rune/Resources/Fonts/Inter-Regular.ttf')).arrayBuffer();
+        const competing = await new FontFace('IBM Plex Mono', replacement).load();
+        document.fonts.add(competing);
+        try { compare('123 9!'); } finally { document.fonts.delete(competing); }
+    } finally { Range.prototype.getBoundingClientRect = nativeBounds; }
+    result.textContent = JSON.stringify({ passed: true, cells: cellCount });
+} catch (error) { result.textContent = JSON.stringify({ passed: false, error: String(error) }); }
+</script>
