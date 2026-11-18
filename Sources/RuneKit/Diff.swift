@@ -1723,10 +1723,40 @@ private final class DiffHighlightCache: @unchecked Sendable {
 
 // A structural edit replaces the cache on that DiffState value. Unedited copies, scrolls,
 // selections, and alternate-mode views can share their immutable row indexes.
+private struct DiffRowStyle: Equatable {
+    let kit: Kit
+    let look: DiffLook
+    let highlighter: Data
+    let highlightVersion: UUID
+    let pixelScale: Float
+    let wrap: Bool
+    let forcedMode: DiffMode?
+    let hasComment: Bool
+}
+
+private struct DiffRowAppearance: Equatable {
+    let styleVersion: UUID
+    let indexVersion: UUID
+    let selected: Bool
+    let position: Int
+    let count: Int
+}
+
 private final class DiffRowCache: @unchecked Sendable {
     private let lock = NSLock()
     private var byMode: [DiffMode: DiffRowIndex] = [:]
     private var widthsByTabSize: [Int: Float] = [:]
+
+    private var lastStyle: (value: DiffRowStyle, version: UUID)?
+
+    func styleVersion(for value: DiffRowStyle) -> UUID {
+        lock.withLock {
+            if let lastStyle, lastStyle.value == value { return lastStyle.version }
+            let version = UUID()
+            lastStyle = (value, version)
+            return version
+        }
+    }
 
     func contentWidth(for state: DiffState, index: DiffRowIndex, tabSize: Int) -> Float {
         lock.lock()
@@ -1922,6 +1952,7 @@ public struct DiffState: Sendable, Equatable {
     }
 
     private var rowCache = DiffRowCache()
+    fileprivate func styleVersion(for style: DiffRowStyle) -> UUID { rowCache.styleVersion(for: style) }
     fileprivate var rowIndex: DiffRowIndex { rowCache.index(for: self) }
     fileprivate func contentWidth(index: DiffRowIndex, tabSize: Int) -> Float {
         rowCache.contentWidth(for: self, index: index, tabSize: tabSize)
@@ -2800,6 +2831,38 @@ public struct DiffView<State>: Sendable {
         fileIndex == 0 ? key : "\(key)-f\(fileIndex)"
     }
 
+    // The visual subtree may outlive this invocation of the host's view builder.
+    // Resolve the lens and actions from the current invocation when an event actually fires.
+    private final class RowDefinition: Sendable {
+        let view: DiffView
+        init(_ view: DiffView) { self.view = view }
+    }
+
+    private final class RowActions: @unchecked Sendable {
+        private let lock = NSLock()
+        private var definition: RowDefinition
+
+        init(_ definition: RowDefinition) { self.definition = definition }
+
+        func update(_ definition: RowDefinition) { lock.withLock { self.definition = definition } }
+
+        var current: RowDefinition { lock.withLock { definition } }
+    }
+
+    private func forwardingRowActions(_ actions: RowActions) -> Self {
+        var result = Self(key: key, kit: kit, get: { actions.current.view.get($0) },
+                          set: { actions.current.view.set(&$0, $1) })
+        result.look = look
+        result.forcedMode = forcedMode
+        if hasCustomHighlighter { result.highlighter = highlighter }
+        result.onLineClickHandler = { actions.current.view.onLineClickHandler?(&$0, $1, &$2) }
+        result.onSelectHandler = { actions.current.view.onSelectHandler?(&$0, $1, &$2) }
+        if onCommentHandler != nil {
+            result.onCommentHandler = { actions.current.view.onCommentHandler?(&$0, $1, &$2) }
+        }
+        return result
+    }
+
     private func renderContainer(hostState: State?, diffState st: DiffState, cx: Cx<State>) -> El<State> {
         let k = kit
         let syntaxTheme = SyntaxTheme.fromKit(k)
@@ -2853,6 +2916,13 @@ public struct DiffView<State>: Sendable {
             && upperLineHeight <= lineH
             && syntaxTheme.weights.allSatisfy { $0 == nil || $0 == font.weight }
 
+        let rowStyle = DiffRowStyle(kit: k, look: look,
+                                    highlighter: Data((hasCustomHighlighter ? highlighter : st.highlighter).id.utf8),
+                                    highlightVersion: st.highlightVersion, pixelScale: cx.pixelScale,
+                                    wrap: st.wraps, forcedMode: forcedMode, hasComment: onCommentHandler != nil)
+        let styleVersion = st.styleVersion(for: rowStyle)
+        let rowDefinition = RowDefinition(self)
+
         var list = El<State>(direction: .column).key("\(key)-rows").wFull().shrink(0).selectionGroup().role(.list).label("Diff")
         if !st.wraps { list = list.minW(max(contentWidth, measuredWidth ?? 0)) }
         // The runtime gives each virtual row its model key. The inner element preserves the
@@ -2884,19 +2954,32 @@ public struct DiffView<State>: Sendable {
                     .px(12).py(diff.isBinary ? 12 : 10)
                     .child(text(message).font(k.ty.caption()).color(k.c.textMuted))
             case .line(let local):
+                let model = section.rows[local]
                 let gutterWidth = DiffLayout.numberWidth(section.digits)
-                row = renderRow(hostState: hostState == nil ? nil : current, fileIndex: file,
-                                           prefix: prefix, rowIdx: local, rows: section.rows, st: st,
-                                           syntaxTheme: syntaxTheme, useSingleNodeNumbers: useSingleNodeNumbers,
-                                           gutterWidth: gutterWidth, lineH: lineH,
-                                           palette: palette,
-                                           annotationFixedWidth: !st.wraps && width > 0 ? width : nil,
-                                           annotationStickyLeft: !st.wraps)
-                // The gutter sets the intrinsic height of an ordinary unwrapped code line.
-                // Give layout this height directly so remounts can skip measuring its subtree.
-                if gutterFitsCode, case .unified(let line, _, _) = section.rows[local], !line.noNewline,
-                   line.text.utf8.allSatisfy({ $0 == 9 || (32...126).contains($0) }) {
-                    return shell.h(lineH).child(row.h(lineH).positionInSet(i + 1, size: entries.count))
+                func buildLine(_ view: Self) -> El<State> {
+                    let row = view.renderRow(hostState: hostState == nil ? nil : current, fileIndex: file,
+                                             prefix: prefix, rowIdx: local, rows: section.rows, st: st,
+                                             syntaxTheme: syntaxTheme, useSingleNodeNumbers: useSingleNodeNumbers,
+                                             gutterWidth: gutterWidth, lineH: lineH, palette: palette,
+                                             annotationFixedWidth: !st.wraps && width > 0 ? width : nil,
+                                             annotationStickyLeft: !st.wraps)
+                        .positionInSet(i + 1, size: entries.count)
+                    // An ordinary unwrapped ASCII line fits the gutter's fixed height.
+                    if gutterFitsCode, case .unified(let line, _, _) = model, !line.noNewline,
+                       line.text.utf8.allSatisfy({ $0 == 9 || (32...126).contains($0) }) {
+                        return shell.h(lineH).child(row.h(lineH))
+                    }
+                    return shell.child(row)
+                }
+                guard case .unified(let line, _, _) = model else { return buildLine(self) }
+                let copy = line.kind == .context || st.copySide == (line.kind == .deletion ? .old : .new)
+                let appearance = DiffRowAppearance(styleVersion: styleVersion, indexVersion: index.version,
+                                                   selected: st.rowSelected(local, file: file, side: nil),
+                                                   position: i, count: entries.count)
+                return memo("\(key)-\(entry.key)", deps: appearance, variant: line.kind == .context ? nil : copy,
+                            makeContext: { RowActions(rowDefinition) },
+                            updateContext: { $0.update(rowDefinition) }) { actions in
+                    buildLine(forwardingRowActions(actions))
                 }
             }
             return shell.child(row.positionInSet(i + 1, size: entries.count))
@@ -3600,6 +3683,7 @@ public struct DiffView<State>: Sendable {
 
         var gutter = El<State>(direction: .row)
             .key("\(prefix)-gutter-\(rowIdx)")
+            .w(DiffLayout.barWidth + 2 * gutterWidth)
             .minH(lineH)
             .selfStretch()
             .bg(colors.gutter)

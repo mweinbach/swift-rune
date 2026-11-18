@@ -4,6 +4,66 @@ import Testing
 
 @Suite("Diff code selection")
 struct DiffCodeClipboardTests {
+    @Test("Retained diff rows dispatch through the current application lens and callbacks")
+    @MainActor
+    func currentActionsAfterViewChanges() throws {
+        struct Host {
+            var first: DiffState
+            var second: DiffState
+            var useSecond = false
+            var calls: [String] = []
+        }
+        let file = FileDiff.fromTexts(path: "a.rs", old: "one\nold\nthree\n", new: "one\nnew\nthree\n")
+        let document = DiffState(diff: file)
+        let rt = Runtime(state: Host(first: document, second: document), viewport: Vec2(620, 220)) { host, cx in
+            let second = host.useSecond
+            let tag = second ? "second" : "first"
+            return DiffView<Host>(key: "fresh", kit: .neutral(dark: false),
+                                  get: { second ? $0.second : $0.first }, set: { state, value in
+                if second { state.second = value } else { state.first = value }
+            })
+            .onLineClick { state, _, _ in state.calls.append(tag + " number") }
+            .onSelect { state, _, _ in state.calls.append(tag + " selection") }
+            .onComment { state, _, _ in state.calls.append(tag + " comment") }
+            .build(state: host, cx: cx)
+        }
+        var time = 0.0
+        func settle() {
+            for _ in 0..<6 {
+                time += 1.0 / 30
+                _ = rt.frame(at: time)
+            }
+        }
+        func hover(_ key: String) throws -> Vec2 {
+            let rect = try #require(rt.element(byKey: key)).rect
+            let point = Vec2(rect[0] + rect[2] / 2, rect[1] + rect[3] / 2)
+            rt.pointerMove(to: point, at: time)
+            settle()
+            return point
+        }
+        func click(_ key: String) throws {
+            let point = try hover(key)
+            rt.pointerDown(at: point, at: time)
+            rt.pointerUp(at: point, at: time + 0.001)
+            settle()
+        }
+        settle()
+        _ = try hover("fresh-code-1")
+        #expect(rt.state.first.copySide == .old)
+        _ = try hover("fresh-code-2")
+        #expect(rt.state.first.copySide == .new)
+        rt.update(at: time) { state, _ in state.useSecond = true }
+        settle()
+        _ = try hover("fresh-code-1")
+        #expect(rt.state.second.copySide == .old)
+        #expect(rt.state.first.copySide == .new)
+        try click("fresh-n-0")
+        try click("fresh-n-0-plus")
+        #expect(rt.state.calls == ["second number", "second selection", "second comment"])
+        #expect(rt.state.first.selectedRange == nil)
+        #expect(rt.state.second.selectedRange != nil)
+    }
+
     @Test("Dragging across code copies one side and the original UTF-8 text", arguments: [false, true])
     @MainActor
     func copyCodeAcrossRows(wrap: Bool) throws {

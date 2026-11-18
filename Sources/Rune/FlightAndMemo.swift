@@ -354,6 +354,7 @@ public final class MemoCache: @unchecked Sendable {
         ignoreDuplicateGuard: Bool = false,
         callerLocation: String? = nil,
         site: String = "",
+        onReuse: ((Deps) -> Void)? = nil,
         build: () -> El<State>
     ) -> (element: El<State>, hit: Bool) {
         let srgb = Theme.blendsSrgb()
@@ -406,6 +407,7 @@ public final class MemoCache: @unchecked Sendable {
             }
             lock.unlock()
             if !dryRun {
+                if let onReuse, let cachedDeps = existing.deps as? Deps { onReuse(cachedDeps) }
                 for r in recordedReads { scope?.record(r) }
                 scope?.recordNested(scopedId)
                 scope?.allTouchedScopedIds.insert(scopedId)
@@ -544,6 +546,21 @@ public final class MemoCache: @unchecked Sendable {
         scope?.recordNested(scopedId)
         scope?.allTouchedScopedIds.insert(scopedId)
         return (built, false)
+    }
+
+    /// Keep an already-built alternate while its owner remains mounted. Reads in the alternate
+    /// are checked when it is chosen again, so they do not become dependencies of the active view.
+    fileprivate func retainAlternate<Inputs>(_ rawId: String, matching inputs: Inputs, in scope: MemoBuildScope) {
+        guard !scope.isVerificationDryRun else { return }
+        let scopedId = scope.scopedId(for: rawId)
+        let touched: Set<String> = lock.withLock {
+            guard let entry = entries[scopedId], entry.envHash == scope.envHash, entry.equals(inputs) else { return [] }
+            return markNestedTouchedLocked([scopedId], pass: scope.pass)
+        }
+        if !touched.isEmpty {
+            scope.allTouchedScopedIds.formUnion(touched)
+            scope.recordNested(scopedId)
+        }
     }
 
     @discardableResult
@@ -708,6 +725,51 @@ public func memo<State, Deps: Equatable>(
         site: "\(file):\(line)",
         build: build
     ).element
+}
+
+private final class MemoEventInputs<Inputs: Equatable, Context: AnyObject>: Equatable {
+    let inputs: Inputs
+    var context: Context?
+
+    init(_ inputs: Inputs) { self.inputs = inputs }
+
+    static func == (lhs: MemoEventInputs, rhs: MemoEventInputs) -> Bool { lhs.inputs == rhs.inputs }
+}
+
+/// Retains the subtree's event context alongside its memo entry. Updating the author-supplied
+/// callbacks on a cache hit preserves fresh closures without invalidating the layout subtree.
+/// A boolean variant can retain both visited alternatives until the inputs change or the owner unmounts.
+package func memo<State, Inputs: Equatable, Context: AnyObject>(
+    _ id: String,
+    deps: Inputs,
+    variant: Bool? = nil,
+    makeContext: () -> Context,
+    updateContext: @escaping (Context) -> Void,
+    file: String = #fileID,
+    line: UInt = #line,
+    column: UInt = #column,
+    build: (Context) -> El<State>
+) -> El<State> {
+    guard let scope = MemoScope.current else { return build(makeContext()) }
+    let cache = scope.cache
+    let inputs = MemoEventInputs<Inputs, Context>(deps)
+    let slot: String
+    if let variant {
+        let first = id + ":0", second = id + ":1"
+        slot = variant ? second : first
+        cache.retainAlternate(variant ? first : second, matching: inputs, in: scope)
+    } else {
+        slot = id
+    }
+    let element = cache.getOrBuildMemo(rawId: slot, deps: inputs, callerLocation: "\(file):\(line):\(column)",
+                                       site: "\(file):\(line)", onReuse: { cached in
+        if let context = cached.context { updateContext(context) }
+    }) {
+        let context = makeContext()
+        inputs.context = context
+        return build(context)
+    }.element
+    return variant == nil ? element : element.key(id)
 }
 
 /// Unlabelled `memo` convenience matching upstream `rune::memo("id", deps) { ... }`.
