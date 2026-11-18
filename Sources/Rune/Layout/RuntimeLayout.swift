@@ -359,7 +359,7 @@ final class RetainedLayoutCoordinator {
                         emitGlyphs: false,
                         keep: keep,
                         countAsRebreak: (textLayouts != nil) && isRealLayout,
-                        request: paragraphs
+                        request: paragraphs, forMeasurement: true
                     )
                     if !resolved.isSecure, isRealLayout, let collector = textLayouts {
                         collector.map[nodeId] = TextLayoutRecord(box: box, isInput: true)
@@ -465,7 +465,7 @@ final class RetainedLayoutCoordinator {
                         // Intrinsic probes and final layout have the same break for an ordinary
                         // no-wrap label. Keep the first break for later Taffy probes and paint.
                         countAsRebreak: (textLayouts != nil) && (isRealLayout || widthIndependent),
-                        pretty: resolved.pretty
+                        pretty: resolved.pretty, forMeasurement: true
                     )
                     if !resolved.isSecure, isRealLayout || widthIndependent, let collector = textLayouts {
                         collector.map[nodeId] = TextLayoutRecord(box: box, isInput: false)
@@ -1172,7 +1172,7 @@ final class RetainedLayoutCoordinator {
                 let width = max(0, bounds.contentBoxSize().width - bounds.scrollbarSize.width)
                 if let box = textSystem.preparedOverflowLayout(
                     leaf.text, width: TextBoxGeometry.wrapWidth(width, scale: scale), scale: scale,
-                    create: textSystem.isPreparingLayouts
+                    create: textSystem.isPreparingLayouts, forMeasurement: true
                 ) {
                     collector.map[leaf.id] = TextLayoutRecord(box: box, isInput: false)
                 }
@@ -1181,7 +1181,7 @@ final class RetainedLayoutCoordinator {
                 if let record = collector.map[leaf.nodeId] {
                     // An earlier probe may already have supplied this break with another palette.
                     if record.box.spans != leaf.shapeKey.spans, record.box.shapeKey == leaf.shapeKey {
-                        collector.map[leaf.nodeId]?.box = textSystem.presentedLayout(record.box, spans: leaf.shapeKey.spans)
+                        collector.map[leaf.nodeId]?.box = textSystem.presentedLayout(record.box, spans: leaf.shapeKey.spans, forMeasurement: true)
                     }
                     continue
                 }
@@ -1197,10 +1197,10 @@ final class RetainedLayoutCoordinator {
                         maxWidth: wrapWidth,
                         pixelScale: scale,
                         emitGlyphs: false,
-                        request: request
+                        request: request, forMeasurement: true
                     )
                     collector.map[leaf.nodeId] = TextLayoutRecord(box: box, isInput: leaf.isInput)
-                } else if let existing = textSystem.cachedLayoutBox(for: leaf.shapeKey, matchingWidth: wrapWidth) {
+                } else if let existing = textSystem.cachedLayoutBox(for: leaf.shapeKey, matchingWidth: wrapWidth, forMeasurement: true) {
                     collector.map[leaf.nodeId] = TextLayoutRecord(box: existing, isInput: leaf.isInput)
                 } else {
                     let box = textSystem.layoutKeyed(
@@ -1213,7 +1213,7 @@ final class RetainedLayoutCoordinator {
                         emitGlyphs: false,
                         keep: .cached,
                         countAsRebreak: true,
-                        pretty: leaf.shapeKey.pretty
+                        pretty: leaf.shapeKey.pretty, forMeasurement: true
                     )
                     collector.map[leaf.nodeId] = TextLayoutRecord(box: box, isInput: leaf.isInput)
                 }

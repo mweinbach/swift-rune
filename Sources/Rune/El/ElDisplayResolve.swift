@@ -49,7 +49,7 @@ internal struct ElResolvedText {
     var pretty: Bool = false
 
     func measure(using textSystem: TextSystem, maxWidth: Float?, pixelScale: Float) -> Vec2 {
-        if let box = textSystem.preparedOverflowLayout(self, width: maxWidth, scale: pixelScale) {
+        if let box = textSystem.preparedOverflowLayout(self, width: maxWidth, scale: pixelScale, forMeasurement: true) {
             var size = box.shaped.size
             if truncateFade, let maxWidth { size.x = min(size.x, max(0, maxWidth)) }
             return size

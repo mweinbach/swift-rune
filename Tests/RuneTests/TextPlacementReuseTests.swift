@@ -54,6 +54,37 @@ struct TextPlacementReuseTests {
         #expect(system.glyphAtlas.cachedEntryCount == 3)
     }
 
+    @Test("Measuring a painted label acquires masks only when the next foreground is drawn")
+    func measureRetainsPaintedMasks() throws {
+        let system = TextSystem()
+        let style = TextStyle(size: 18, family: .monospace).smoothing(.windfoil)
+        let spans = [TextSpan("T"), TextSpan("U", color: .black)]
+        let painted = GlyphAtlas.withBaseInk(.white, mode: .windfoil) {
+            system.layoutKeyed(text: "TU", spans: spans, style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true)
+        }
+        let count = system.glyphAtlas.cachedEntryCount
+        let owned = try #require(system.cachedLayoutBox(for: painted.shapeKey, matchingWidth: nil, forMeasurement: true))
+        let recolored = [TextSpan("T", color: .black), TextSpan("U", color: .white)]
+        let measured = system.layoutKeyed(retaining: owned.shapeKey, text: "TU", spans: recolored, style: style,
+                                          maxWidth: nil, pixelScale: 1, emitGlyphs: false, forMeasurement: true)
+        #expect(measured.shaped.size == painted.shaped.size)
+        #expect(measured.shaped.glyphs.map(\.color) == [.black, .white])
+        #expect(system.glyphAtlas.cachedEntryCount == count)
+        let raw = try #require(system.cachedLayoutBox(for: painted.shapeKey, matchingWidth: nil))
+        #expect(raw.shaped.glyphs.map { $0.outlineGroup?.inkVariant?.bucket } == [0, 0])
+        #expect(system.glyphAtlas.cachedEntryCount == count + 1)
+        for emit in [false, true] {
+            let publicLayout = system.layoutKeyed(text: "TU", spans: recolored, style: style, maxWidth: nil,
+                                                  pixelScale: 1, emitGlyphs: emit)
+            #expect(publicLayout.shaped.glyphs.map(\.uv) == raw.shaped.glyphs.map(\.uv))
+            #expect(publicLayout.shaped.glyphs.map(\.color) == [.black, .white])
+        }
+        let next = GlyphAtlas.withBaseInk(.white, mode: .windfoil) { system.presentedLayout(measured, spans: recolored) }
+        #expect(next.shaped.glyphs.map { $0.outlineGroup?.inkVariant?.bucket } == [0, 4])
+        #expect(painted.shaped.glyphs.map { $0.outlineGroup?.inkVariant?.bucket } == [4, 0])
+        #expect(system.glyphAtlas.cachedEntryCount == count + 2)
+    }
+
     @Test("Elided text acquires masks using the visible suffix's original colors", arguments: [TextElide.head, .middle])
     func coldElidedMasks(mode: TextElide) throws {
         let text = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"

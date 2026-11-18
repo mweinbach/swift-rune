@@ -3789,11 +3789,11 @@ public final class TextSystem: @unchecked Sendable {
         let key = TextShapeKey(authText: run.text, spans: nil, pills: [], style: style, pixelScale: scale,
                                fontEpoch: currentFontEpoch, languageTag: language,
                                maxWidth: nil, defaultSmoothing: smoothing)
-        let cached = cachedLayoutBox(for: key, matchingWidth: nil)
+        let cached = cachedLayoutBox(for: key, matchingWidth: nil, forMeasurement: true)
         if let cells = lock.withLock({ cached?.preparedRunCells }) { return cells }
         guard preparing else { return nil }
-        let box = cached ?? layoutKeyed(text: run.text, style: style, maxWidth: nil, pixelScale: scale,
-                                        emitGlyphs: false)
+        let box = cached ?? layoutKeyed(retaining: nil, text: run.text, style: style, maxWidth: nil,
+                                        pixelScale: scale, emitGlyphs: false, forMeasurement: true)
         let cells = TextRunCellLayout(text: run.text, textSystem: self, style: style, pixelScale: scale)
         lock.withLock { box.preparedRunCells = cells }
         return cells
@@ -3810,7 +3810,7 @@ public final class TextSystem: @unchecked Sendable {
     /// Materialize only the final node width. Taffy's trial widths can read a matching
     /// break, but never retain their own overflow decisions or elision-search probes.
     internal func preparedOverflowLayout(
-        _ leaf: ElResolvedText, width: Float?, scale: Float, create: Bool = false
+        _ leaf: ElResolvedText, width: Float?, scale: Float, create: Bool = false, forMeasurement: Bool = false
     ) -> TextLayoutBox? {
         guard !leaf.isSecure, leaf.advanceRun == nil,
               leaf.truncateFade || Self.needsElision(leaf.style, maxWidth: width) else { return nil }
@@ -3828,7 +3828,7 @@ public final class TextSystem: @unchecked Sendable {
                                style: style, pixelScale: max(scale, 1), fontEpoch: currentFontEpoch,
                                languageTag: language, maxWidth: layoutWidth, pretty: false,
                                defaultSmoothing: smoothing)
-        if let hit = cachedLayoutBox(for: key, matchingWidth: layoutWidth) { return hit }
+        if let hit = cachedLayoutBox(for: key, matchingWidth: layoutWidth, forMeasurement: forMeasurement) { return hit }
         guard create else { return nil }
         if leaf.truncateFade {
             return overflowContent(leaf, content: content, cut: nil, width: nil, scale: scale, glyphs: false)
@@ -3848,7 +3848,7 @@ public final class TextSystem: @unchecked Sendable {
             box.lastUsedCommit = layoutCommitSeq
             storeLayout(box, for: storage)
         }
-        return presentedLayout(box, spans: leaf.spans)
+        return presentedLayout(box, spans: leaf.spans, forMeasurement: forMeasurement)
     }
 
     private func overflowContent(
@@ -3862,9 +3862,9 @@ public final class TextSystem: @unchecked Sendable {
         else if style.wrap == .noWrap || style.wrap == .ellipsis { style.wrap = .wrap }
         let drawn = cut?.drawnString(from: content) ?? content
         let spans = leaf.spans.map { cut?.mapSpans($0, originalLength: content.utf8.count, drawn: drawn) ?? $0 }
-        return layoutKeyed(text: drawn, spans: spans, pills: cut?.mapPills(leaf.pills) ?? leaf.pills,
+        return layoutKeyed(retaining: nil, text: drawn, spans: spans, pills: cut?.mapPills(leaf.pills) ?? leaf.pills,
                            style: style, maxWidth: clamps ? width : nil, pixelScale: scale,
-                           emitGlyphs: glyphs, glidePx: glide)
+                           emitGlyphs: glyphs, glidePx: glide, forMeasurement: !glyphs)
     }
 
     internal func drawPreparedOverflow(_ leaf: ElResolvedText, box: TextLayoutBox, glide: Vec2) -> ShapedText {
@@ -3880,11 +3880,13 @@ public final class TextSystem: @unchecked Sendable {
         return drawn
     }
 
-    internal func cachedLayoutBox(for key: TextShapeKey, matchingWidth width: Float?) -> TextLayoutBox? {
+    internal func cachedLayoutBox(
+        for key: TextShapeKey, matchingWidth width: Float?, forMeasurement: Bool = false
+    ) -> TextLayoutBox? {
         lock.withLock { () -> TextLayoutBox? in
             if let box = layoutCache[key], Self.widthsMatch(width, box.maxWidth) { return box }
             return layoutCache[key.prepared(at: width)]
-        }.map { presentedLayout($0, spans: key.spans) }
+        }.map { presentedLayout($0, spans: key.spans, forMeasurement: forMeasurement) }
     }
 
     /// Called under the cache lock. Reuse the ordinary slot until an idle pass needs
@@ -4735,7 +4737,8 @@ public final class TextSystem: @unchecked Sendable {
         keep: TextKeep = .cached,
         countAsRebreak: Bool = true,
         pretty: Bool = false,
-        rasterWindow: TextRasterWindow? = nil
+        rasterWindow: TextRasterWindow? = nil,
+        forMeasurement: Bool = false
     ) -> TextLayoutBox {
         let key = measuredKey?.layoutOnly
         let content: String
@@ -4757,10 +4760,24 @@ public final class TextSystem: @unchecked Sendable {
                 maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs, glidePx: glidePx,
                 keep: keep, countAsRebreak: countAsRebreak, pretty: pretty, rasterWindow: rasterWindow)
         }
-        return presentedLayout(layout, spans: spans)
+        return presentedLayout(layout, spans: spans, forMeasurement: forMeasurement)
     }
 
-    internal func presentedLayout(_ layout: TextLayoutBox, spans: [TextSpan]?) -> TextLayoutBox {
+    internal func presentedLayout(
+        _ layout: TextLayoutBox, spans: [TextSpan]?, forMeasurement: Bool = false
+    ) -> TextLayoutBox {
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        // Measurement consumes line geometry. Acquiring neutral masks here would rasterize
+        // a previously painted label again and change the atlas before the next actual paint.
+        if forMeasurement {
+            if layout.spans == spans { return layout }
+            let geometry = layout.cachedGeometry
+            if let recent = lock.withLock({ geometry.recentPaint?.view(of: geometry, spans: spans, forMeasurement: true) }) {
+                return recent
+            }
+            return geometry.applyingSpanInks(spans)
+        }
+        #endif
         let bucket = layout.shaped.requestedInkBucket
         if layout.spans == spans, !layout.shaped.hasInitialSpanMasks, layout.shaped.scopedInkBucket == bucket {
             if layout.shaped.foregroundMasksAreResident(in: glyphAtlas) { return layout }
