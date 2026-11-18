@@ -10,7 +10,7 @@ swift run --package-path Tests/Support/LargeViews -c release ScrollBench tree wi
 swift run --package-path Tests/Support/LargeViews -c release ScrollBench diff production
 ```
 
-To measure the same interactive diff in Chrome, use Node 22 or later, a matching Swift compiler and WASI SDK, and the `dist` directory from `@bjorn3/browser_wasi_shim`. The runner sends one 400-pixel DOM wheel event per animation frame at a trusted pointer position. It requires a scene submission for each accepted wheel and verifies the accessible row labels, clipped bounds and scroll offsets at six checkpoints. The reported rate measures consecutive WebGPU queue returns after ten warmup events and excludes checkpoint pauses. The output includes the adapter and SHA-256 hashes of the initial and final settled PNG screenshots.
+To measure the same interactive diff in Chrome, use Node 22 or later, a matching Swift compiler and WASI SDK, and the `dist` directory from `@bjorn3/browser_wasi_shim`. The runner sends one 400-pixel DOM wheel event per animation frame at a trusted pointer position. It requires a scene submission for each accepted wheel and verifies the accessible row labels, clipped bounds and scroll offsets at six checkpoints. After ten warmup events, it reports the overall submission rate and the median and 95th-percentile intervals between consecutive WebGPU queue returns in milliseconds, excluding checkpoint pauses. The output includes the adapter and SHA-256 hashes of the initial and final settled PNG screenshots.
 
 ```sh
 ./scripts/build-web.sh swift-6.4.2-RELEASE_wasm BrowserDiffBench --package-path Tests/Support/LargeViews -c release

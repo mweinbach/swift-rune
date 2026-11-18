@@ -162,9 +162,12 @@ try {
     const cpu = throughSubmit.slice(warmup + 1).sort((a, b) => a - b);
     if (cpu.length !== wheels - warmup || !cpu.every(Number.isFinite)) throw Error('Missing GPU-submitting animation callback');
     const seconds = intervals.reduce((total, ms) => total + ms, 0) / 1000;
+    intervals.sort((a, b) => a - b);
     result.textContent = 'PASS ' + JSON.stringify({ view: 'diff', renderer: app.renderer, userAgent: navigator.userAgent,
         viewport: [innerWidth, innerHeight], scale: devicePixelRatio, delta, wheels, accepted, submitted, warmup,
         scoredCallbacks: cpu.length, scoredIntervals: intervals.length, gpuSubmissionsPerSecond: intervals.length / seconds,
+        gpuSubmitIntervalP50Ms: intervals[Math.floor((intervals.length - 1) * .5)],
+        gpuSubmitIntervalP95Ms: intervals[Math.floor((intervals.length - 1) * .95)],
         callbackToSubmitP50Ms: cpu[Math.floor((cpu.length - 1) * .5)], callbackToSubmitP95Ms: cpu[Math.floor((cpu.length - 1) * .95)],
         finalScrollY: checkpoints.at(-1).scrollY, checkpoints, initialPngSHA256, finalPngSHA256 });
 } catch (error) { result.textContent = 'FAIL ' + error.stack; }
