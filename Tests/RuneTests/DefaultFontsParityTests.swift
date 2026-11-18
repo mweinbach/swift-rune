@@ -52,6 +52,69 @@ struct DefaultFontsParityTests {
         #expect(host.runtime.viewCommitCount > commits)
     }
 
+    #if os(Windows) || os(Linux)
+    @Test("registering an application font updates the baseline in an already-shaped window")
+    func registeredFontRefreshesNativeStrut() async throws {
+        await #expect(processExitsWith: .success) { try await Self.checkNativeStrutRegistration() }
+    }
+
+    @MainActor
+    private static func checkNativeStrutRegistration() throws {
+        let url = try #require(Bundle.module.url(forResource: "RuneLateStrutEpoch", withExtension: "ttf", subdirectory: "Fixtures"))
+        #if os(Linux)
+        // Fontconfig accepts two distinct aliases whose names compare equal as Swift strings.
+        let spellings = ["RuneCaf\u{e9}", "RuneCafe\u{301}"]
+        let config = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let rules = zip(spellings, ["Rune Late Strut Epoch", "Inter"]).map { name, face in
+            """
+            <match target="pattern">
+              <test name="family" qual="any" compare="eq"><string>\(name)</string></test>
+              <edit name="family" mode="assign" binding="strong"><string>\(face)</string></edit>
+            </match>
+            """
+        }.joined()
+        try "<fontconfig>\(rules)</fontconfig>".write(to: config, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: config) }
+        try #require(setenv("FONTCONFIG_FILE", config.path, 1) == 0)
+        #endif
+
+        let window = TextSystem()
+        func shape(_ system: TextSystem, family: String = "Rune Late Strut Epoch, Inter") -> ShapedText {
+            let style = TextStyle(size: 32, lineHeight: 50, family: .named(family))
+            return system.shape(text: "R", style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true, bypassCache: true)
+        }
+
+        let fallback = shape(window)
+        let oldEpoch = window.currentFontEpoch
+        let font = try Data(contentsOf: url)
+        _ = App(title: "Font registration", state: 0) { _, _ in text("R") }.font(font).headlessRuntime()
+        let updated = shape(window)
+        let fresh = shape(TextSystem())
+
+        // The fixture has a 1.45 em ascender and a 1.5 em R advance. Both change on registration.
+        #expect(window.currentFontEpoch != oldEpoch)
+        #expect(fallback.size.x != updated.size.x)
+        let baseline = try #require(updated.lineBaselinesPx.first)
+        #expect(fallback.lineBaselinesPx.first != baseline)
+        func compare(_ actual: ShapedText, _ expected: ShapedText) {
+            #expect(actual.size == expected.size)
+            #expect(actual.lineBaselinesPx == expected.lineBaselinesPx)
+            #expect(!actual.glyphs.isEmpty)
+            #expect(actual.glyphs.map(\.rect) == expected.glyphs.map(\.rect))
+        }
+        compare(updated, fresh)
+
+        #if os(Linux)
+        let references = spellings.map { shape(TextSystem(), family: $0) }
+        #expect(references[0].lineBaselinesPx != references[1].lineBaselinesPx)
+        for order in [[0, 1], [1, 0]] {
+            let window = TextSystem()
+            for i in order { compare(shape(window, family: spellings[i]), references[i]) }
+        }
+        #endif
+    }
+    #endif
+
     #if !os(WASI)
     @Test("fontUrl and fontUrlLater accept native paths and file URLs")
     func nativeFontURLsLoadAppData() throws {
