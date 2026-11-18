@@ -153,7 +153,10 @@ public extension Runtime {
         input.modalMember = activeModalPath == nil ? nil : modalMemberPaths.contains(info.path)
         info.a11yInput = input
         info.modalAncestor = activeModalPath != nil && modalAncestorPaths.contains(info.path)
-        info.focusable = nodeTakesFocus(el)
+        // Link-bearing text delegates focus to its individual synthetic links.
+        if linkBoxesByPath.isEmpty || linkBoxesByPath[info.path]?.isEmpty != false {
+            info.focusable = nodeTakesFocus(el)
+        }
         info.label = el.a11yLabel
     }
 

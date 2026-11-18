@@ -72,7 +72,7 @@ extension Runtime {
         while let i = parent {
             let ancestor = nodes[i]
             if !ancestor.el.layout.scrollAxes.isEmpty,
-               let info = lastElements.first(where: { $0.path == ancestor.path && !$0.exiting }),
+               let info = firstReportedElement(where: { $0.path == ancestor.path && !$0.exiting }),
                info.scrolled.count == 2 {
                 let v = scrollInWindow(Vec2(info.scrolled[0], info.scrolled[1]),
                                        scale: presentedScales[ancestor.path] ?? Vec2(1, 1),

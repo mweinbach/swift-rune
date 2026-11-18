@@ -506,11 +506,12 @@ extension Runtime {
             let info = infos[i]
             let raw = rawPoseByPath[info.path]
             let nid = raw?.nodeId ?? NodeId.hash(info.path)
+            let reportedRect = info.rect
             nextPoseNodes.append(PoseNodeSnapshot(
                 nodeId: nid,
                 path: info.path,
                 key: info.key,
-                rect: info.rect,
+                rect: reportedRect,
                 opacity: info.opacity,
                 rotation: raw?.rotation ?? 0,
                 scale: raw?.scale ?? info.scale,
@@ -538,7 +539,7 @@ extension Runtime {
             nextMotion.append(MotionElement(
                 id: nid,
                 parent: treeParentIdx[i],
-                rect: info.rect,
+                rect: reportedRect,
                 visible: info.visible,
                 opacity: info.opacity,
                 scale: info.scale,
@@ -575,11 +576,11 @@ extension Runtime {
     }
 
     private func nativeInfoIndex(_ selector: String, count: Int) -> Int? {
-        let infos = lastElements.prefix(count)
-        if !selector.utf8.contains(0x2f), let exact = infos.firstIndex(where: { matchesAuthoredKey($0.key, selector) }) {
+        if !selector.utf8.contains(0x2f),
+           let exact = reportedElementIndex(count: count, where: { matchesAuthoredKey($0.key, selector) }) {
             return exact
         }
-        return infos.firstIndex { selectsElementSelector(selector, path: $0.path, key: $0.key) }
+        return reportedElementIndex(count: count) { selectsElementSelector(selector, path: $0.path, key: $0.key) }
     }
 
     /// Drawn `[x, y, w, h]` in points and effective opacity (ancestors included) of the element
@@ -587,7 +588,7 @@ extension Runtime {
     public func presented(_ key: String) -> (rect: [Float], opacity: Float)? {
         if let nativeInspection {
             guard let index = nativeInfoIndex(key, count: nativeInspection.elementCount) else { return nil }
-            let info = lastElements[index]
+            let info = reportedElement(at: index)
             return (info.rect, info.opacity)
         }
         let exact = key.utf8.contains(0x2f) ? nil : lastPoseNodes.first { matchesAuthoredKey($0.key, key) }
@@ -602,21 +603,21 @@ extension Runtime {
     public func presentedPose(_ key: String) -> Pose? {
         if let snapshot = nativeInspection, !snapshot.materialized {
             guard let index = nativeInfoIndex(key, count: snapshot.elementCount) else { return nil }
-            let node = lastElements[index]
+            let node = reportedElement(at: index)
             let raw = snapshot.rawPoseByPath[node.path]
             var moving = node.moving || raw?.ownMoving == true
             if !moving && snapshot.hasInheritedFlags {
                 var visited: Set<Int> = []
                 var cursor: Int? = index
                 while let i = cursor, visited.insert(i).inserted {
-                    let info = lastElements[i]
+                    let info = reportedElement(at: i)
                     let own = snapshot.rawPoseByPath[info.path]
                     if info.moving || own?.ownMoving == true {
                         moving = true
                         break
                     }
                     cursor = info.parentIndex
-                    if let anchor = own?.anchorKey, let target = lastElements.prefix(snapshot.elementCount).firstIndex(where: {
+                    if let anchor = own?.anchorKey, let target = reportedElementIndex(count: snapshot.elementCount, where: {
                         !$0.exiting && selectsElementSelector(anchor, path: $0.path, key: $0.key)
                     }) { cursor = target }
                 }

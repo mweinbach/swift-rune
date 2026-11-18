@@ -851,7 +851,7 @@ extension Runtime {
         pixelSnapGlides.beginFrame(t: now, size: SIMD2<Float>(Float(widthPx), Float(heightPx)))
         let rootSnap = rootPixelSnap
         let paintMotion = PaintMotionTracks(store: scene.store)
-        var carriedScrollCache = makeCarriedScrollCache()
+        var carriedScrollCache = publishHitGeometry ? makeCarriedScrollCache() : []
         let presentedById = frameOut.paintNodesById
         var exitingIds: Set<NodeId> = []
         for p in frameOut.nodes where p.isExiting { exitingIds.insert(p.id) }
@@ -867,8 +867,9 @@ extension Runtime {
         // Sticky bounds use the committed ancestors visited so far, before their sticky translation.
         var beforeSticky = [MotionRect?](repeating: nil, count: hasSticky ? flatNodes.count : 0)
         stuckShiftsByPath.removeAll(keepingCapacity: true)
-        var newElements: [ElementInfo] = []
-        newElements.reserveCapacity(frameOut.nodes.count)
+        var newElements: [NativeElementReport<State>] = []
+        if publishHitGeometry { newElements.reserveCapacity(frameOut.nodes.count) }
+        var rasterNodeCount = 0
         var rawPoseByPath: [String: RawPoseNodeData] = [:]
         var movingGrowthPaths: Set<String> = []
         var flightTargets: Set<NodeId> = []
@@ -909,9 +910,6 @@ extension Runtime {
         var marks: [UInt32] = []
         var newSurfaces: [SurfaceDraw] = []
         var surfaceVideo = SurfaceVideoPaint()
-        let zeroScroll: [Float] = [0, 0]
-        var lastCarried = Vec2.zero
-        var lastCarriedPair = zeroScroll
         var currentInheritedMark: UInt32 = 0
         var materials: [MaterialDraw] = []
         var backdropBlurCount = 0
@@ -1549,7 +1547,8 @@ extension Runtime {
                 matchedFlightRegistry.recordPrevious(flightId: fid, rect: effRect)
             }
 
-            let myElementIndex = newElements.count
+            let myElementIndex = publishHitGeometry ? newElements.count : rasterNodeCount
+            if !publishHitGeometry { rasterNodeCount += 1 }
             let parentScope = publishHitGeometry ? parentElementIndex.map { hitScopes[$0] } : nil
             var turn = parentScope?.turn
             if !publishHitGeometry, !rasterTurns.isEmpty, let parentElementIndex {
@@ -1616,19 +1615,9 @@ extension Runtime {
             } else if let turn {
                 rasterTurns[myElementIndex] = turn
             }
-            let carried = carriedScroll(for: node, scale: { newPresentedScales[$0] }, cache: &carriedScrollCache) { newHitGeometries[$0]?.turn }
-            let reportedScroll: Vec2
-            if el.layout.scrollAxes.isEmpty {
-                reportedScroll = carried
-            } else {
-                let offset = scrollOffsets[node.path] ?? .zero
-                reportedScroll = Vec2(offset.x, offset.y + (slice2State.scrollExtraYByPath[node.path] ?? 0))
-            }
             let shadows = resolvedShadows(for: nid, authored: el.shadows)
             let editLens = el.hasEditLens ? el.handlers.editLens : nil
             let edit = isExiting ? nil : editLens?.get(state)
-            let secure = el.isSecure || edit?.isSecure == true
-            let words = secure ? nil : (edit?.text ?? el.plainText)
             let moving = presented?.isMoving == true
             let growing = !movingGrowthPaths.isEmpty && movingGrowthPaths.contains(node.path)
             let flightTarget = !flightTargets.isEmpty && flightTargets.contains(nid)
@@ -1655,62 +1644,35 @@ extension Runtime {
                 }
             }
             if moving { hasInheritedFlags = true }
-            // Most descendants share one scroll translation.
-            if carried != lastCarried {
-                lastCarried = carried
-                lastCarriedPair = carried == .zero ? zeroScroll : [carried.x, carried.y]
-            }
-            newElements.append(ElementInfo(
-                path: node.path,
-                key: node.key,
-                parentIndex: parentElementIndex,
-                role: el.role,
-                geometry: .boxes(rect: infoRect, target: node.targetRect, visible: infoVisible),
-                committedLayoutTarget: node.committedLayoutTarget,
-                opacity: infoOpacity,
-                scale: sc.x,
-                blur: infoBlur,
-                radius: abs(radiiPt.x),
-                fill: effBg,
-                textColor: liveTextColor ?? el.textColor,
-                text: words,
-                label: el.a11yLabel ?? words,
-                help: el.a11yHelp,
-                selected: secure ? nil : el.a11ySelected,
-                expanded: el.a11yExpanded,
-                level: el.a11yLevel,
-                itemSelected: el.itemSelected,
-                focusable: el.focusable && !effInert,
-                focused: focused,
-                focusVisible: focused && focusVisible,
-                inert: effInert || infoExiting,
-                moving: pose?.ownMoving ?? moving,
-                exiting: infoExiting,
-                hover: isExiting ? 0 : (hoverFrac > 0 ? hoverFrac : (hovered ? 1 : 0)),
-                press: pressed ? 1 : 0,
-                scrolled: reportedScroll == carried ? lastCarriedPair : [reportedScroll.x, reportedScroll.y],
-                carriedScrolled: lastCarriedPair,
-                caret: nil,
-                secure: secure,
-                disabled: el.a11yDisabled,
-                checked: el.a11yChecked,
-                a11yValue: el.a11yValue,
-                a11yDescription: el.a11yDescription,
-                a11yHidden: el.isA11yHidden,
-                stuck: abs(stickyShift.y) >= abs(stickyShift.x) ? stickyShift.y : stickyShift.x,
-                traceName: el.traceNameValue,
-                virtualExtent: pose?.virtualExtent ?? false,
-                loopPhase: pose?.loopPhase,
-                revealing: pose?.revealing ?? false,
-                liveIntent: pose?.ownLiveIntent ?? 0
-            ))
-            if edit != nil || el.a11yRange != nil { newElements[myElementIndex].a11yInput = ElementA11yInput(el, edit: edit) }
-
-            if el.textHighlights != nil {
-                let marks = highlightElementInfos(node: node, owner: newElements[myElementIndex], ownerIndex: myElementIndex,
-                                                 rect: effRect, scaleVec: sc, visibleRect: visibleClipPt)
-                newElements.append(contentsOf: marks)
-                if publishHitGeometry && !marks.isEmpty {
+            if publishHitGeometry {
+                let carried = carriedScroll(for: node, scale: { newPresentedScales[$0] }, cache: &carriedScrollCache) { newHitGeometries[$0]?.turn }
+                let reportedScroll: Vec2
+                if el.layout.scrollAxes.isEmpty {
+                    reportedScroll = carried
+                } else {
+                    let offset = scrollOffsets[node.path] ?? .zero
+                    reportedScroll = Vec2(offset.x, offset.y + (slice2State.scrollExtraYByPath[node.path] ?? 0))
+                }
+                let element = PaintedElement(
+                    authored: node.element, path: node.path, key: node.key, parentIndex: parentElementIndex,
+                    rect: infoRect, target: node.targetRect, visible: infoVisible, committedLayoutTarget: node.committedLayoutTarget,
+                    opacity: infoOpacity, scale: sc.x, blur: infoBlur, radius: abs(radiiPt.x), fill: effBg,
+                    liveTextColor: liveTextColor, hover: isExiting ? 0 : (hoverFrac > 0 ? hoverFrac : (hovered ? 1 : 0)),
+                    press: pressed ? 1 : 0, scrolled: reportedScroll, carried: carried,
+                    stuck: abs(stickyShift.y) >= abs(stickyShift.x) ? stickyShift.y : stickyShift.x,
+                    focusAllowed: !effInert, focused: focused, focusVisible: focused && focusVisible,
+                    inert: effInert || infoExiting, moving: moving, exiting: infoExiting
+                )
+                if edit != nil || el.a11yRange != nil {
+                    newElements.append(.captured(CapturedElementReport(element.report(pose: pose, edit: edit))))
+                } else {
+                    newElements.append(.painted(element))
+                }
+                if el.textHighlights != nil {
+                    let owner = newElements[myElementIndex].report(poses: rawPoseByPath)
+                    let marks = highlightElementInfos(node: node, owner: owner, ownerIndex: myElementIndex,
+                                                      rect: effRect, scaleVec: sc, visibleRect: visibleClipPt)
+                    for mark in marks { newElements.append(.captured(CapturedElementReport(mark))) }
                     hitScopes.append(contentsOf: repeatElement(hitScopes[myElementIndex], count: marks.count))
                 }
             }
@@ -3145,7 +3107,9 @@ extension Runtime {
                     let y = textTop + caret.y * sc.y
                     let width = caret.z * sc.x
                     let height = caret.w * sc.y
-                    newElements[myElementIndex].caret = [x, y, width, height]
+                    if publishHitGeometry, case .captured(let report) = newElements[myElementIndex] {
+                        report.info.caret = [x, y, width, height]
+                    }
                     if windowFocused {
                         let color = el.caretColor ?? defaultForeground
                         instances.append(RenderInstance(
@@ -3995,11 +3959,7 @@ extension Runtime {
                 var treeIndex = [Int](repeating: 0, count: order.count)
                 for (index, source) in order.enumerated() { treeIndex[source] = index }
                 cyclePaint.restoreTreeOrder(treeIndex)
-                newElements = order.map { source in
-                    var info = newElements[source]
-                    info.parentIndex = info.parentIndex.map { treeIndex[$0] }
-                    return info
-                }
+                newElements = order.map { newElements[$0].restoringParent(in: treeIndex) }
             }
             nativeInspection = NativeFrameInspection(
                 rawPoseByPath: rawPoseByPath, landingHolds: frameLandingHoldIds,
@@ -4007,8 +3967,10 @@ extension Runtime {
             )
         }
         linkBoxesByPath = newLinkBoxes
-        appendLinkElements(to: &newElements)
-        if publishHitGeometry { lastElements = newElements }
+        if publishHitGeometry {
+            appendLinkElements(to: &newElements, poses: rawPoseByPath)
+            publishElementReports(newElements)
+        }
         self.presentedRectByPath = newPresentedRects
         self.presentedScales = newPresentedScales
         self.drawnRectByPath = newDrawnRectByPath

@@ -1162,7 +1162,34 @@ public final class Runtime<State> {
     }
     /// The last mounted state of nodes removed from the current tree, retained until their exit finishes.
     internal var exitingSnapshots: [NodeId: FlatNode] = [:]
-    internal var lastElements: [ElementInfo] = []
+    private var materializedElements: [ElementInfo] = []
+    internal var nativeElementReports: [NativeElementReport<State>]?
+    internal var lastElements: [ElementInfo] {
+        get {
+            materializeElementReports()
+            return materializedElements
+        }
+        set {
+            nativeElementReports = nil
+            materializedElements = newValue
+        }
+        _modify {
+            materializeElementReports()
+            yield &materializedElements
+        }
+    }
+
+    private func materializeElementReports() {
+        guard let reports = nativeElementReports else { return }
+        let poses = nativeInspection?.rawPoseByPath ?? [:]
+        materializedElements = NativeElementReport.materialize(reports, poses: poses)
+        nativeElementReports = nil
+    }
+
+    internal func publishElementReports(_ reports: [NativeElementReport<State>]) {
+        materializedElements = []
+        nativeElementReports = reports
+    }
     internal var presentedRectByPath = FrameGeometry<MotionRect>()
     internal var presentedScales = PresentedScales()
     internal var hitGeometryByPath = FrameGeometry<HitGeometry>()
@@ -1412,8 +1439,8 @@ public final class Runtime<State> {
 
     public func element(byKey key: String) -> ElementInfo? {
         if nativeInspection?.hasInheritedFlags == true { materializeNativeInspection(motionElements: false) }
-        guard var info = lastElements.first(where: { !$0.exiting && selectsElementSelector(key, path: $0.path, key: $0.key) })
-            ?? lastElements.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) else { return nil }
+        guard var info = firstReportedElement(where: { !$0.exiting && selectsElementSelector(key, path: $0.path, key: $0.key) })
+            ?? firstReportedElement(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) else { return nil }
         if nativeInspection?.a11yMaterialized == false { completeNativeAccessibilityRecord(&info) }
         return info
     }
@@ -1429,13 +1456,13 @@ public final class Runtime<State> {
             }
             return false
         }
-        return lastElements.first(where: { $0.path == path })?.secure ?? false
+        return firstReportedElement(where: { $0.path == path })?.secure ?? false
     }
 
     /// Centre of the first non-exiting element matching `key` (or slash-path like `"slider/knob"`),
     /// in logical window points. Matches `crates/rune/src/runtime/elements.rs:389`.
     public func find(_ key: String) -> Vec2? {
-        guard let el = lastElements.first(where: { !$0.exiting && selectsElementSelector(key, path: $0.path, key: $0.key) }),
+        guard let el = firstReportedElement(where: { !$0.exiting && selectsElementSelector(key, path: $0.path, key: $0.key) }),
               el.rect.count >= 4 else {
             return nil
         }
@@ -1465,7 +1492,7 @@ public final class Runtime<State> {
     private func elementAtWithin(_ within: String?, x: Float, y: Float, pick: Pick) -> Picked? {
         let scopePath: String?
         if let within {
-            guard let found = lastElements.first(where: { selectsElementSelector(within, path: $0.path, key: $0.key) }) else {
+            guard let found = firstReportedElement(where: { selectsElementSelector(within, path: $0.path, key: $0.key) }) else {
                 return nil
             }
             scopePath = found.path
@@ -1485,7 +1512,7 @@ public final class Runtime<State> {
                 continue
             }
             let key = nodeByPath[path].flatMap { flatNodes[$0].key }
-                ?? lastElements.first(where: { $0.path == path })?.key
+                ?? firstReportedElement(where: { $0.path == path })?.key
             return Picked(path: path, key: key)
         }
         return nil
@@ -1498,7 +1525,7 @@ public final class Runtime<State> {
 
     /// `contains(_:x:y:)` with `Pick` options.
     public func containsWith(_ key: String, x: Float, y: Float, pick: Pick) -> Bool {
-        guard let el = lastElements.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }),
+        guard let el = firstReportedElement(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }),
               let geom = hitGeometryByPath[el.path],
               !geom.isExiting,
               (pick.includeTransparent || geom.opacity > 0.001) else {
@@ -2611,10 +2638,10 @@ public final class Runtime<State> {
     }
 
     private func currentFocusedCaret() -> (keyPath: String, rect: [Float])? {
-        if let fk = focusedKey, let el = lastElements.first(where: { matchesAuthoredKey($0.key, fk) }), let c = el.caret {
+        if let fk = focusedKey, let el = firstReportedElement(where: { matchesAuthoredKey($0.key, fk) }), let c = el.caret {
             return (el.path, c)
         }
-        if let fp = focusedPath, let el = lastElements.first(where: { $0.path == fp }), let c = el.caret {
+        if let fp = focusedPath, let el = firstReportedElement(where: { $0.path == fp }), let c = el.caret {
             return (el.path, c)
         }
         return nil
@@ -5615,7 +5642,7 @@ public final class Runtime<State> {
 
     private func makePendingFlightRequest(source: String, destination: String, motionSpring: Spring? = nil) -> PendingFlightRequest {
         let srcNode = findNodeForFlightSelector(source, in: flatNodes)
-        let srcLastEl = lastElements.first(where: { !$0.exiting && FlightSelector.selects(source, path: $0.path, key: $0.key) })
+        let srcLastEl = firstReportedElement(where: { !$0.exiting && FlightSelector.selects(source, path: $0.path, key: $0.key) })
         let srcRect = srcLastEl.map { MotionRect.fromXYWH($0.rect) }
             ?? srcNode.map { scene.currentRect($0.nodeId) ?? $0.targetRect }
         let sourceLayout = srcNode.flatMap { node -> TextLayoutBox? in

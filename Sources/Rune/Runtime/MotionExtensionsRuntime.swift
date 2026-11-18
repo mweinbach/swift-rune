@@ -66,8 +66,7 @@ extension Runtime {
               (nextWakeDeadline(after: currentTime, includePaint: true, includeLoops: false) ?? .infinity) > now,
               cyclePaint.slots.allSatisfy({ slot in
                   frame.instances.indices.contains(slot.index) && frame.instances[slot.index].rect == slot.rect &&
-                      frame.instances[slot.index].params.y == KIND_RECT && lastElements.indices.contains(slot.element) &&
-                      lastElements[slot.element].path == slot.path
+                      frame.instances[slot.index].params.y == KIND_RECT && reportedPath(at: slot.element) == slot.path
               }) else { return false }
         currentTime = now
         for slot in cyclePaint.slots {
@@ -75,7 +74,7 @@ extension Runtime {
             let a = slot.ink.w * opacity
             frame.instances[slot.index].fill = SIMD4(slot.ink.x * a, slot.ink.y * a, slot.ink.z * a, a)
             frame.instances[slot.index].params.w = opacity
-            lastElements[slot.element].opacity = opacity
+            updateReportedOpacity(opacity, at: slot.element)
             hitGeometryByPath[slot.path]?.opacity = opacity
             kitHooks.unseenPresence.updateCycleOpacity(slot.node, opacity: opacity)
         }
