@@ -1,6 +1,32 @@
 import Foundation
 import RuneMotion
 
+/// Encode the path collections with their concrete Swift types. Foundation handles all
+/// strings in both JSON objects, including escaping, before their members are joined.
+struct WebAccessibilityPaths: Encodable {
+    var removed: [String]?
+    var children: [String: [String]]?
+
+    func encodePacket(_ fields: [String: Any]) throws -> Data {
+        #if canImport(ObjectiveC)
+        // Darwin Foundation raises an Objective-C exception for nonfinite numbers.
+        guard JSONSerialization.isValidJSONObject(fields) else { throw CocoaError(.propertyListWriteInvalid) }
+        #endif
+        guard removed != nil || children != nil else {
+            return try JSONSerialization.data(withJSONObject: fields)
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        var result = try encoder.encode(self)
+        guard !fields.isEmpty else { return result }
+        let rest = try JSONSerialization.data(withJSONObject: fields, options: .withoutEscapingSlashes)
+        result.removeLast() // Closing brace of the nonempty path object.
+        result.append(0x2C) // Comma between the two sets of members.
+        result.append(rest.dropFirst()) // Skip the opening brace of the remaining object.
+        return result
+    }
+}
+
 /// Keeps a per-mount semantic mirror. A parent's movement carries its DOM children, so only
 /// changes to their parent-relative bounds need to cross the WASM boundary.
 final class WebAccessibilityProjection {
@@ -86,6 +112,7 @@ final class WebAccessibilityProjection {
             lastScroll != runtime.scrollOffsets || follow
         let spoken = runtime.a11yAnnouncement
         var packet: [String: Any] = [:]
+        var paths = WebAccessibilityPaths()
         if spoken.count != spokenCount, let words = spoken.words {
             packet["announcement"] = ["text": words.text, "live": words.politeness.rawValue]
         }
@@ -109,10 +136,10 @@ final class WebAccessibilityProjection {
                 }
                 legacyPrevious = root
             } else if reset || rootPath != path {
-                _ = delta(root, runtime: runtime, replace: true)
+                _ = delta(root, runtime: runtime, replace: true, paths: &paths)
                 packet["root"] = AccessibilityDump.dictionary(from: root, isRoot: true, forBrowser: true)
             } else {
-                packet.merge(delta(root, runtime: runtime, replace: false)) { _, new in new }
+                packet.merge(delta(root, runtime: runtime, replace: false, paths: &paths)) { _, new in new }
             }
             rootPath = path
         }
@@ -133,7 +160,7 @@ final class WebAccessibilityProjection {
         spokenCount = spoken.count
         guard !packet.isEmpty else { return nil }
         do {
-            return try JSONSerialization.data(withJSONObject: packet)
+            return try paths.encodePacket(packet)
         } catch {
             // The next pull must start from a complete snapshot after a failed transfer.
             lastCommit = nil
@@ -195,7 +222,7 @@ final class WebAccessibilityProjection {
         return result
     }
 
-    private func delta<State>(_ root: AccessibilityNode, runtime: Runtime<State>, replace: Bool) -> [String: Any] {
+    private func delta<State>(_ root: AccessibilityNode, runtime: Runtime<State>, replace: Bool, paths: inout WebAccessibilityPaths) -> [String: Any] {
         var nodes: [[String: Any]] = []
         var bounds: [String: [Float]] = [:]
         var children: [String: [String]] = [:]
@@ -243,11 +270,11 @@ final class WebAccessibilityProjection {
         var packet: [String: Any] = [:]
         if !replace {
             let removed = entries.keys.filter { next[$0] == nil }
-            if !removed.isEmpty { packet["removed"] = removed }
-            if !children.isEmpty { packet["children"] = children }
+            if !removed.isEmpty { paths.removed = removed }
+            if !children.isEmpty { paths.children = children }
             if !nodes.isEmpty { packet["nodes"] = nodes }
             if !bounds.isEmpty { packet["bounds"] = bounds }
-            if !packet.isEmpty { packet["local"] = true }
+            if !packet.isEmpty || !removed.isEmpty || !children.isEmpty { packet["local"] = true }
         }
         entries = next
         return packet

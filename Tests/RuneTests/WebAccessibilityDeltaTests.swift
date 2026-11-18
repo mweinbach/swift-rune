@@ -9,6 +9,45 @@ struct WebAccessibilityDeltaTests {
         return try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
+    @Test func pathCollectionsPreserveUTF8AndOtherFields() throws {
+        let path = "/quoted\"/slash\\/\u{0}\t\n/水/🪐/e\u{301}"
+        let fields: [String: Any] = ["nodes": [["unknown": path]], "local": true]
+        for removed in [nil, [path]] {
+            for children in [nil, [path: [path]]] {
+                let paths = WebAccessibilityPaths(removed: removed, children: children)
+                let packet = try object(paths.encodePacket(fields))
+                let result = (packet["nodes"] as? [[String: String]])?.first?["unknown"]
+                #expect(result?.utf8.elementsEqual(path.utf8) == true)
+                #expect((packet["removed"] as? [String])?.first?.utf8.elementsEqual(path.utf8) == removed.map { _ in true })
+                let order = packet["children"] as? [String: [String]]
+                #expect(order?.keys.first?.utf8.elementsEqual(path.utf8) == children.map { _ in true })
+                #expect(order?[path]?.first?.utf8.elementsEqual(path.utf8) == children.map { _ in true })
+            }
+        }
+    }
+
+    @Test func failedPatchIsFollowedByACompleteSnapshot() throws {
+        let runtime = Runtime<Int>(state: 0, viewport: Vec2(100, 100)) { state, _ in
+            col().key("root").role(.group).child(
+                el().key("control-\(state)").role(.slider)
+                    .rangeValue(state == 1 ? Double.infinity : 1, min: 0, max: 10)
+            )
+        }
+        let mirror = WebAccessibilityProjection()
+        let legacy = WebAccessibilityProjection()
+        mirror.enablePatches()
+        _ = runtime.frame(at: 0)
+        #expect(try object(legacy.update(runtime))["root"] != nil)
+        #expect(try object(mirror.update(runtime))["root"] != nil)
+        runtime.update(at: 0.1) { state, _ in state = 1 }
+        _ = runtime.frame(at: 0.1)
+        #expect(mirror.update(runtime) == nil)
+        runtime.update(at: 0.2) { state, _ in state = 2 }
+        _ = runtime.frame(at: 0.2)
+        #expect(try object(mirror.update(runtime))["root"] != nil)
+        #expect(try object(legacy.update(runtime))["root"] != nil)
+    }
+
     @Test func movingToACanonicallyEquivalentRowPublishesTheNewActiveDescendant() throws {
         let composed = "\u{e9}"
         let decomposed = "e\u{301}"
@@ -113,13 +152,17 @@ struct WebAccessibilityDeltaTests {
         let first = try #require(mirror.update(runtime))
         #expect(!String(decoding: first, as: UTF8.self).contains("private-value"))
         #expect(runtime.accessibilityAction("switch", .focus, at: 0.1))
-        runtime.state.replaced = true
-        runtime.markNeedsCommit(settle: true)
+        runtime.update(at: 0.1) { state, tx in
+            state.replaced = true
+            tx.announce("Details changed", .polite)
+        }
         _ = runtime.frame(at: 0.1)
         let change = try #require(mirror.update(runtime))
         #expect(!String(decoding: change, as: UTF8.self).contains("private-value"))
         let packet = try object(change)
         let changed = try #require(packet["nodes"] as? [[String: Any]])
+        let announcement = try #require(packet["announcement"] as? [String: String])
+        #expect(announcement["text"] == "Details changed")
         let control = try #require(changed.first { $0["key"] as? String == "switch" })
         #expect((control["states"] as? [String])?.contains("focused") == true)
         #expect(control["value"] as? String == "true")
