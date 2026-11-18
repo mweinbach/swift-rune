@@ -359,7 +359,10 @@ public extension Runtime {
                 }
             }
             changes += 1
-            if reuseSemantic { storage.slots[i] = .init(projection: result, inert: node.effectiveInert) }
+            // LiveText updates the flat element in place and can add or remove an implicit text role.
+            if reuseSemantic, el.liveText == nil {
+                storage.slots[i] = .init(projection: result, inert: node.effectiveInert)
+            }
             return result
         }
 
@@ -556,7 +559,7 @@ public extension Runtime {
             // Bounds and focus are sampled from the current frame on every read. Fields,
             // links, grids and related labels also depend on live state or another subtree.
             changes += 1
-            if reuseSemantic, !hasScroll, !hasLinks, editLens == nil, el.terminalGridPayload == nil,
+            if reuseSemantic, el.liveText == nil, !hasScroll, !hasLinks, editLens == nil, el.terminalGridPayload == nil,
                el.a11yLabelledBy == nil, el.a11yDescribedBy == nil, virtualOwner == nil, parentList == nil,
                edges.children[idx].isEmpty || resolvedRole == .group || givenName != nil {
                 storage.slots[idx].template = .init(node: projected,
