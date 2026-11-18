@@ -427,7 +427,7 @@ public final class Runtime<State> {
         var rowLayout: ParityRowLayout = .free
         var parentHasGrowth: Bool = false
         var parentUnderFold: Bool = false
-        var parentNewlyMounted: Bool = false
+        var capturingNewOwnedRow: Bool = false
         var inheritedStyleSpring: Spring? = nil
         var parentFlow: Flow = .ltr
         var parentDirected: Bool = false
@@ -4174,8 +4174,22 @@ public final class Runtime<State> {
                 layoutAnimSpec = nil
             }
             let isFreshMount = !prevMountedIds.contains(nid)
-            let captureMount = isFreshMount && rowReuseMode == .remount && canReplayFlat &&
-                !commitKind.lands && (item.memoPaths != nil || item.virtualRow != nil) &&
+            // An authored view can introduce an immutable row under a still-present list.
+            // Capture its next mounted specifications alongside its true first publication.
+            var capturingNewOwnedRow = false
+            if isFreshMount, rowReuseMode != .remount, canReplayFlat, !cut, !commitKind.lands {
+                if item.capturingNewOwnedRow {
+                    capturingNewOwnedRow = !scene.hasNode(nid)
+                } else if let row = item.virtualRow, row.memoizedRootOwner != nil,
+                          item.memoPaths == nil, memoPaths?.owner === row.layoutRootMemo,
+                          let parentIdx, let parentNid, let previous = nodeIndexById[parentNid],
+                          flatNodes[previous].el.virtualEstimate != nil, flatNodes[previous].path == newFlat[parentIdx].path,
+                          scene.phase(parentNid) == .present {
+                    capturingNewOwnedRow = !scene.hasNode(nid)
+                }
+            }
+            let captureMount = isFreshMount && canReplayFlat && !commitKind.lands &&
+                (capturingNewOwnedRow || (rowReuseMode == .remount && (item.memoPaths != nil || item.virtualRow != nil))) &&
                 (!checkFrameTracks || !scene.store.isAnimating(nid, Props.FRAME))
             let authoredScaleAnim = selfInstantLayoutOrStyle ? nil : el.scaleMotionAnim
             var specScaleAnim = authoredScaleAnim
@@ -4346,7 +4360,7 @@ public final class Runtime<State> {
                     rowLayout: childInRow,
                     parentHasGrowth: el.growthSpec != nil,
                     parentUnderFold: item.parentUnderFold || el.foldGlideSpec != nil,
-                    parentNewlyMounted: isFreshMount,
+                    capturingNewOwnedRow: capturingNewOwnedRow,
                     inheritedStyleSpring: nodeStyleSpring,
                     parentFlow: nodeFlow,
                     parentDirected: nodeDirected,
