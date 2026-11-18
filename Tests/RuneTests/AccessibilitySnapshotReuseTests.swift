@@ -71,6 +71,30 @@ struct AccessibilitySnapshotReuseTests {
         }
     }
 
+    @Test func liveTextReprojectsItsRoleAndDependentNamesWithoutACommit() throws {
+        let source = LiveText("")
+        let runtime = Runtime<Void>(state: (), viewport: Vec2(180, 80)) { _, _ in
+            var leaf: El<Void> = el().key("source").size(100, 18)
+            leaf.liveText = source
+            return col().key("panel").child(col().key("derived").role(.row).child(leaf))
+                .child(el().key("related").role(.button).labelledBy("source"))
+        }
+        _ = runtime.frame(at: 0)
+        let first = check(runtime)
+        #expect(find("source", in: first)?.role == .group)
+        let commit = runtime.commitCount
+        for (i, value) in ["One", "Two", ""].enumerated() {
+            source.set(value)
+            _ = runtime.frame(at: Double(i + 1) / 60)
+            let now = check(runtime)
+            #expect(runtime.commitCount == commit)
+            #expect(find("source", in: now)?.role == (value.isEmpty ? .group : .text))
+            #expect((find("derived", in: now)?.label ?? "") == value)
+            #expect((find("related", in: now)?.label ?? "") == value)
+        }
+        #expect(find("source", in: first)?.role == .group)
+    }
+
     @Test func editValuesStayLiveBetweenAccessibilityReads() throws {
         struct Form { var draft = TextEdit("first") }
         let rt = Runtime(state: Form(), viewport: Vec2(200, 80), pixelScale: 1) { _, _ in
