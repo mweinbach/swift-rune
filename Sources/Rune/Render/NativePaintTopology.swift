@@ -142,28 +142,31 @@ extension Runtime {
         var parentIDs: [NodeId?] = []
         parentIDs.reserveCapacity(frame.nodes.count)
         var hasZOrder = false
-        for p in frame.nodes {
-            let node: FlatNode
-            let slot: Int
-            if let mounted = mountedNode(p.id) {
-                node = mounted
-                slot = mounted.index
-            } else if let exiting = exitingSnapshots[p.id] {
-                node = exiting
-                slot = ~tree.exits.count
-                tree.exitingSlot[p.id] = flatNodes.count + tree.exits.count
-                tree.exits.append(exiting)
-            } else {
-                continue
+        flatNodes.withUnsafeBufferPointer { mounted in
+            for p in frame.nodes {
+                let slot: Int, z: Int, traits: NativePaintTraits
+                if let index = nodeIndexById[p.id] {
+                    slot = mounted[index].index
+                    z = mounted[index].zOrder
+                    traits = mounted[index].paintTraits
+                } else if let exiting = exitingSnapshots[p.id] {
+                    slot = ~tree.exits.count
+                    tree.exitingSlot[p.id] = mounted.count + tree.exits.count
+                    tree.exits.append(exiting)
+                    z = exiting.zOrder
+                    traits = exiting.paintTraits
+                } else {
+                    continue
+                }
+                if traits.contains(.dissolve) { tree.dissolveIndices.append(tree.order.count) }
+                tree.hasRaised = tree.hasRaised || traits.contains(.raised)
+                tree.hasGroupOpacity = tree.hasGroupOpacity || traits.contains(.groupOpacity)
+                tree.hasPressColor = tree.hasPressColor || traits.contains(.pressColor)
+                hasZOrder = hasZOrder || z != 0
+                tree.order.append(slot)
+                tree.identity.append(.init(id: p.id, parent: p.parent, zOrder: z, traits: traits))
+                parentIDs.append(byID[p.id]?.parent)
             }
-            if node.paintTraits.contains(.dissolve) { tree.dissolveIndices.append(tree.order.count) }
-            tree.hasRaised = tree.hasRaised || node.paintTraits.contains(.raised)
-            tree.hasGroupOpacity = tree.hasGroupOpacity || node.paintTraits.contains(.groupOpacity)
-            tree.hasPressColor = tree.hasPressColor || node.paintTraits.contains(.pressColor)
-            hasZOrder = hasZOrder || node.zOrder != 0
-            tree.order.append(slot)
-            tree.identity.append(.init(id: p.id, parent: p.parent, zOrder: node.zOrder, traits: node.paintTraits))
-            parentIDs.append(byID[p.id]?.parent)
         }
 
         // A flat adjacency buffer avoids allocating a separate array for every row and cell.
