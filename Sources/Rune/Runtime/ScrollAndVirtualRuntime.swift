@@ -60,14 +60,29 @@ extension Runtime {
         case rebuildRegion
     }
 
-    internal struct CachedVirtualRow {
-        var el: El<State>
-        var memoIds: Set<String>
-        var containsVirtual: Bool
-        var reusableForRelayout: Bool
-        var reads: [MemoRead] = []
-        var trackedReads: TrackedReads = TrackedReads()
-        var envHash: UInt64 = 0
+    /// The retained build of one row. Window and selection caches share the original
+    /// authored element and its read dependencies across remounts.
+    internal final class CachedVirtualRow {
+        let el: El<State>
+        let memoIds: Set<String>
+        let containsVirtual: Bool
+        let reusableForRelayout: Bool
+        let keysClean: Bool
+        let reads: [MemoRead]
+        let trackedReads: TrackedReads
+        let envHash: UInt64
+
+        init(el: El<State>, memoIds: Set<String>, containsVirtual: Bool, reusableForRelayout: Bool,
+             reads: [MemoRead], trackedReads: TrackedReads, envHash: UInt64) {
+            self.el = el
+            self.memoIds = memoIds
+            self.containsVirtual = containsVirtual
+            self.reusableForRelayout = reusableForRelayout
+            self.keysClean = KeyDiagnostics.clean(el)
+            self.reads = reads
+            self.trackedReads = trackedReads
+            self.envHash = envHash
+        }
 
         func holds(against geometry: MemoGeometry, envHash: UInt64) -> Bool {
             self.envHash == envHash
@@ -600,6 +615,7 @@ extension Runtime {
         }
 
         var built: [El<State>] = []
+        built.reserveCapacity(mounted.count + 2)
         let (topSpacerH, botSpacerH) = vState.spacerHeights(mounted: mounted, prefix: prefix, total: total)
         if topSpacerH > 0 {
             built.append(Self.virtualSpacer(key: "__v_top_spacer", height: topSpacerH))
@@ -689,34 +705,37 @@ extension Runtime {
             }
         }
         var nestedRows: [(index: Int, reused: Bool)] = []
+        let previousRows = canReuseRows ? remountRowCache?[path] : nil
+        var nextRows = Dictionary<String, CachedVirtualRow>(minimumCapacity: isIndexed ? mounted.count : 0)
         var rowKeysBySegment = Dictionary<String, String>(minimumCapacity: mounted.count)
         for i in mounted {
             let rowKey = keys[i]
             var rowEl: El<State>
             var didReuseRow = false
+            var keysClean = true
             let containsVirtual: Bool
             if isIndexed {
-                if canReuseRows,
-                   let reused = remountRowCache?[path]?[rowKey],
+                let entry: CachedVirtualRow
+                if let reused = previousRows?[rowKey],
                    reused.reusableForRelayout,
                    reused.holds(against: memoGeometry, envHash: memoEnvHash) {
                     self.memo.touchEntries(ids: reused.memoIds, pass: memoPass)
                     self.memo.appendViewReads(reused.reads + reused.trackedReads.memoReads, pass: memoPass)
                     reused.trackedReads.read()
-                    rowEl = reused.el
-                    containsVirtual = reused.containsVirtual
+                    entry = reused
                     didReuseRow = true
-                    ctx.builtVirtualRows[path, default: [:]][rowKey] = reused
                 } else {
                     let row = buildRow(el.virtualRowsSource!, at: i)
-                    containsVirtual = row.containsVirtual
-                    if rowReuseMode == .remount && containsVirtual {
+                    if rowReuseMode == .remount && row.containsVirtual {
                         ctx.remountHitNestedVirtual = true
                         return
                     }
-                    rowEl = row.el
-                    ctx.builtVirtualRows[path, default: [:]][rowKey] = row
+                    entry = row
                 }
+                nextRows[rowKey] = entry
+                rowEl = entry.el
+                keysClean = entry.keysClean
+                containsVirtual = entry.containsVirtual
             } else {
                 rowEl = el.children[i]
                 containsVirtual = treeContainsVirtual(rowEl)
@@ -726,7 +745,7 @@ extension Runtime {
             }
             // Every row now carries its resolved, unique key, including repaired duplicates.
             let rowSeg = "@\(rowKey)"
-            if isIndexed && !KeyDiagnostics.clean(rowEl) {
+            if !keysClean {
                 let repaired = KeyDiagnostics.repair(rowEl, at: "\(path)/\(rowSeg)") { ctx.keyRenames.append($0) }
                 ctx.keyDiagnostics.append(contentsOf: repaired.warnings)
                 rowEl = repaired.tree
@@ -737,6 +756,7 @@ extension Runtime {
             built.append(rowEl)
         }
 
+        if !nextRows.isEmpty { ctx.builtVirtualRows[path] = nextRows }
         virtualLists[path]?.rowKeyBySegment = rowKeysBySegment
         if botSpacerH > 0 {
             built.append(Self.virtualSpacer(key: "__v_bot_spacer", height: botSpacerH))

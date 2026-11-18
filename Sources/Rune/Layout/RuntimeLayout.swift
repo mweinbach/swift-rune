@@ -83,20 +83,38 @@ final class RetainedLayoutCoordinator {
     /// The solver may move a memo root while every descendant keeps its local layout.
     /// Keep the solved child buffer intact for the flatten pass in that case.
     private final class MemoGeometry {
+        let descendants: ArraySlice<RetainedLayoutKey>
+        init(descendants: ArraySlice<RetainedLayoutKey>) { self.descendants = descendants }
+
         var rootBox = RuneTaffy.Layout.zero
         var descendantBoxes: [RuneTaffy.Layout] = []
         var result: LayoutEngine.ResultNode?
     }
 
-    private struct MemoSpan {
-        var record: MemoRecord
+    private final class MemoSpan {
+        let record: MemoRecord
         var root: SyncPrepared { record.root }
-        var nodes: ArraySlice<PreparedNode>
-        var leaves: ArraySlice<TextLeafFallback>
-        var overflow: ArraySlice<OverflowLeaf>
-        var nested: ArraySlice<MemoRecord>
-        var isGroupRoot: Bool
-        var geometry: MemoGeometry?
+        let nodes: ArraySlice<PreparedNode>
+        let slotKeys: ArraySlice<RetainedLayoutKey>
+        let leaves: ArraySlice<TextLeafFallback>
+        let overflow: ArraySlice<OverflowLeaf>
+        let nested: ArraySlice<MemoRecord>
+        let isGroupRoot: Bool
+        let geometry: MemoGeometry?
+
+        init(record: MemoRecord, nodes: ArraySlice<PreparedNode>, slotKeys: ArraySlice<RetainedLayoutKey>,
+             leaves: ArraySlice<TextLeafFallback>,
+             overflow: ArraySlice<OverflowLeaf>, nested: ArraySlice<MemoRecord>, isGroupRoot: Bool,
+             geometry: MemoGeometry?) {
+            self.record = record
+            self.nodes = nodes
+            self.slotKeys = slotKeys
+            self.leaves = leaves
+            self.overflow = overflow
+            self.nested = nested
+            self.isGroupRoot = isGroupRoot
+            self.geometry = geometry
+        }
 
         func hasSameChildContext(_ prepared: SyncPrepared) -> Bool {
             root.isRow == prepared.isRow && root.childSX == prepared.childSX &&
@@ -131,7 +149,7 @@ final class RetainedLayoutCoordinator {
     }
 
     /// Preorder edges are relative to this node, so sibling insertions preserve an entire memo slice.
-    private struct PreparedNode {
+    private struct PreparedNode: Sendable {
         var path: String
         var storeKey: UInt64
         var runtimeId: RuneMotion.NodeId
@@ -607,7 +625,7 @@ final class RetainedLayoutCoordinator {
         @inline(never)
         func reuseChildren(_ span: MemoSpan, _ p: SyncPrepared) -> Bool {
             guard span.hasSameChildContext(p),
-                  span.nodes.allSatisfy({ store.canReuse(key: $0.storeKey, slot: $0.slot) })
+                  store.canReuse(span.slotKeys)
             else { return false }
             let oldStart = span.root.myIndex
             let shift = p.myIndex - oldStart
@@ -627,20 +645,19 @@ final class RetainedLayoutCoordinator {
                     slots.append((node.storeKey, key, node.slot, UInt32(p.myIndex + offset)))
                 }
                 store.rekeyAndReuseBatch(slots)
+            } else {
+                store.reuseSlots(span.slotKeys.dropFirst(), startingAt: UInt32(p.myIndex + 1))
             }
             let oldRoot = span.nodes.first!
             flat[p.myIndex].childOffsets = oldRoot.childOffsets
             if !changedIds {
-                for (offset, node) in span.nodes.dropFirst().enumerated() {
-                    store.reuseSlot(node.slot, nodeIndex: UInt32(p.myIndex + offset + 1))
+                for node in span.nodes.dropFirst() {
                     if node.flow == .rtl { hasMirroredFlow = true }
                     textLayouts?.liveIds.insert(node.runtimeId)
                 }
                 flat.append(contentsOf: span.nodes.dropFirst())
             } else {
                 for var node in span.nodes.dropFirst() {
-                    let index = flat.count
-                    if !moved { store.reuseSlot(node.slot, nodeIndex: UInt32(index)) }
                     if moved {
                         node.path = newPath(node)
                         if !node.screenIdentity { node.storeKey = RuneMotion.NodeId.hash(node.path).rawValue }
@@ -676,6 +693,7 @@ final class RetainedLayoutCoordinator {
             let nodes = Array(flat[group.nodes])
             // Screen-space travel keys can alias a slot even in distinct sibling branches.
             guard Set(nodes.map(\.slot)).count == nodes.count else { return }
+            let slotKeys = nodes.map { RetainedLayoutKey(key: $0.storeKey, slot: $0.slot) }
             let leaves = Array(nonSecretLeaves[group.leaves])
             let overflow = Array(overflowLeaves[group.overflow])
             func local(_ range: Range<Int>, _ start: Int) -> Range<Int> {
@@ -683,12 +701,14 @@ final class RetainedLayoutCoordinator {
             }
             for (index, record) in records.enumerated() {
                 guard let id = record.identity else { continue }
+                let localNodes = local(record.nodes, group.nodes.lowerBound)
+                let keys = slotKeys[localNodes]
                 nextMemoSpans[ObjectIdentifier(id)] = MemoSpan(
-                    record: record, nodes: nodes[local(record.nodes, group.nodes.lowerBound)],
+                    record: record, nodes: nodes[localNodes], slotKeys: keys,
                     leaves: leaves[local(record.leaves, group.leaves.lowerBound)],
                     overflow: overflow[local(record.overflow, group.overflow.lowerBound)],
                     nested: records[record.nestedStart..<index], isGroupRoot: index == records.count - 1,
-                    geometry: index == records.count - 1 ? MemoGeometry() : nil
+                    geometry: index == records.count - 1 ? MemoGeometry(descendants: keys.dropFirst()) : nil
                 )
             }
         }
@@ -834,7 +854,9 @@ final class RetainedLayoutCoordinator {
 
         var rootRes = syncTree()
         var rootSlot = rootRes.slot
+        var slotsRemapped = false
         store.endCommit(root: &rootSlot) { nodeIdx, newSlot in
+            slotsRemapped = true
             let i = Int(nodeIdx)
             if i < flat.count {
                 flat[i].slot = newSlot
@@ -852,10 +874,10 @@ final class RetainedLayoutCoordinator {
             height: fitHeight ? .maxContent : .definite(viewport.y)
         )
 
-        let measureBoxes = flat.map { ($0.measure, $0.runtimeId) }
+        let prepared = flat
         let measureClosure: @Sendable (RuneTaffy.LayoutInput, Int?, RuneTaffy.TaffyStyle) -> RuneTaffy.LayoutOutput = { input, ctx, style in
-            guard let idx = ctx, idx >= 0, idx < measureBoxes.count,
-                  let box = measureBoxes[idx].0
+            guard let idx = ctx, idx >= 0, idx < prepared.count,
+                  let box = prepared[idx].measure
             else {
                 return RuneTaffy.LayoutOutput.fromOuterSize(.zero)
             }
@@ -876,7 +898,7 @@ final class RetainedLayoutCoordinator {
             let measured: Vec2
             switch box {
             case .content(let measure):
-                measured = measure(effectiveMaxW, isRealLayout, textLayouts, measureBoxes[idx].1)
+                measured = measure(effectiveMaxW, isRealLayout, textLayouts, prepared[idx].runtimeId)
             case .picture(let ratio):
                 // Rust's picture measure receives known border-box dimensions, and
                 // available content-box space when neither side is known.
@@ -937,12 +959,10 @@ final class RetainedLayoutCoordinator {
                     let (range, cache) = geometryRuns[memoIndex]
                     let index = range.lowerBound
                     let box = store.layout(flat[index].slot)
-                    if var result = cache.result, cache.descendantBoxes.count == range.count - 1,
+                    if !slotsRemapped, var result = cache.result,
                        box.size == cache.rootBox.size, box.contentSize == cache.rootBox.contentSize,
                        box.padding == cache.rootBox.padding, box.border == cache.rootBox.border,
-                       cache.descendantBoxes.indices.allSatisfy({ offset in
-                           store.layout(flat[remaining - offset - 1].slot) == cache.descendantBoxes[offset]
-                       }) {
+                       store.geometryMatches(cache.descendants, reversedBoxes: cache.descendantBoxes) {
                         result.layout.localRect = MotionRect.fromXYWH(box.location.x, box.location.y,
                                                                      box.size.width, box.size.height)
                         solved.append((box, result))

@@ -504,6 +504,42 @@ public typealias LayoutEngine = BaselineLayoutStore
 public typealias LayoutEngine = LayoutStore
 #endif
 
+/// Stable identities captured with a prepared subtree. The slot can be recycled after
+/// omission or compaction, so the key is always checked before claiming a run.
+package struct RetainedLayoutKey: Sendable {
+    package let key: UInt64
+    package let slot: SlotId
+
+    package init(key: UInt64, slot: SlotId) {
+        self.key = key
+        self.slot = slot
+    }
+}
+
+extension LayoutEngine {
+    package func canReuse(_ nodes: ArraySlice<RetainedLayoutKey>) -> Bool {
+        for node in nodes where !canReuse(key: node.key, slot: node.slot) { return false }
+        return true
+    }
+
+    package mutating func reuseSlots(_ nodes: ArraySlice<RetainedLayoutKey>, startingAt index: UInt32) {
+        var next = index
+        for node in nodes {
+            reuseSlot(node.slot, nodeIndex: next)
+            next += 1
+        }
+    }
+
+    /// The saved boxes are recorded in extraction order, from the last descendant back.
+    package func geometryMatches(_ nodes: ArraySlice<RetainedLayoutKey>, reversedBoxes: [Layout]) -> Bool {
+        guard nodes.count == reversedBoxes.count else { return false }
+        for (node, expected) in zip(nodes.reversed(), reversedBoxes) {
+            if layout(node.slot) != expected { return false }
+        }
+        return true
+    }
+}
+
 private final class LayoutStoreAdapter: LayoutTree {
     var slots: [RetainedSlot] = []
     var roundedLayouts: [UInt32: Layout] = [:]

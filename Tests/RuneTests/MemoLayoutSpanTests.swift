@@ -210,6 +210,26 @@ struct MemoLayoutSpanTests {
         #expect(!layout.reusedMemoGeometry)
     }
 
+    @Test("A retained subtree survives layout slot compaction")
+    func retainedGeometrySurvivesCompaction() {
+        let cache = MemoCache()
+        let coordinator = RetainedLayoutCoordinator()
+        let system = TextSystem()
+        let row = cache.getOrBuild(id: "last", deps: 0) { () -> El<State> in
+            col().key("last").wFull().child(el().wFull().h(11)).child(el().wFull().h(17))
+        }.element
+        for count in [180, 1, 2, 180] {
+            var root: El<State> = col()
+            for index in 0..<count { root = root.child(el().key("lead-\(index)").h(1)) }
+            root = root.child(row)
+            let actual = coordinator.compute(root: root, state: State(), viewport: Vec2(200, 320),
+                                             pixelScale: 1, textSystem: system)
+            let fresh = RetainedLayoutCoordinator().compute(root: root, state: State(), viewport: Vec2(200, 320),
+                                                           pixelScale: 1, textSystem: system)
+            #expect(sameGeometry(actual, fresh))
+        }
+    }
+
     @Test("A displaced memo row transfers its solved children until their geometry changes")
     func displacedRowRetainsSolvedChildren() {
         let cache = MemoCache()
