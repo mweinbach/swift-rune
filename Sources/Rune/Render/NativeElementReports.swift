@@ -82,13 +82,6 @@ internal enum NativeElementReport<State> {
         }
     }
 
-    var blur: Float {
-        switch self {
-        case .painted(let element): element.blur
-        case .captured(let report): report.info.blur
-        }
-    }
-
     func report(poses: [String: RawPoseNodeData]) -> ElementInfo {
         switch self {
         case .painted(let element): element.report(pose: poses.isEmpty ? nil : poses[element.path])

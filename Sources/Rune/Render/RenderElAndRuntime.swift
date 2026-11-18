@@ -678,12 +678,13 @@ private struct PaintBranch {
 
 /// A composited layer can reset the renderer's clip and opacity for its inner draws.
 /// Pointer geometry keeps the logical clip, turn, and opacity through that layer.
-private struct RenderHitScope {
+internal struct RenderHitScope {
     var localClip: MotionRect?
     var outerClip: MotionRect?
     var turn: Turn?
     var opacity: Float = 1
     var blur: Float = 0
+    var reportedBlur: Float = 0
     var exiting = false
 }
 
@@ -897,8 +898,16 @@ extension Runtime {
             ? FrameGeometry<HitGeometry>(pathSlots: nodeByPath)
             : FrameGeometry(minimumCapacity: publishHitGeometry ? frameOut.nodes.count : 0)
         var newLinkBoxes: [String: [TextLinkBox]] = [:]
-        var hitScopes: [RenderHitScope] = []
-        if publishHitGeometry { hitScopes.reserveCapacity(frameOut.nodes.count) }
+        // Only ancestors of the current node can contribute a logical hit clip. Raised
+        // subtrees take their parent's scope with them when their paint is deferred.
+        var hitScopesByDepth: [RenderHitScope] = []
+        if publishHitGeometry {
+            swap(&hitScopesByDepth, &paintHitScopes)
+            if hitScopesByDepth.isEmpty { hitScopesByDepth.append(RenderHitScope()) }
+        }
+        defer {
+            if publishHitGeometry { swap(&hitScopesByDepth, &paintHitScopes) }
+        }
         var newPresentedRects = indexedGeometry
             ? FrameGeometry<MotionRect>(pathSlots: nodeByPath)
             : FrameGeometry(minimumCapacity: frameOut.nodes.count)
@@ -1046,7 +1055,7 @@ extension Runtime {
         let materialMode = MaterialMode.launchMode
         let useNativeMaterials = nativeMaterials && materialMode != .fallback
         var savedNodeStates: [NodeId: SavedRaisedNodeState] = [:]
-        var collectedRaisedNodes: [(slot: Int, offset: Int)] = []
+        var collectedRaisedNodes: [(slot: Int, offset: Int, parentScope: RenderHitScope?)] = []
         var raisedRanges: [(offset: Int, indices: Range<Int>)] = []
 
         func subtreeContains(_ node: FlatNode, where predicate: (FlatNode) -> Bool) -> Bool {
@@ -1296,6 +1305,7 @@ extension Runtime {
             parentIsDissolve: Bool,
             parentScaleMotion: PaintScaleMotion,
             parentElementIndex: Int?,
+            hitDepth: Int,
             parentInCache: Bool = false,
             parentIsRotated: Bool = false
         ) -> PaintHeader {
@@ -1559,7 +1569,7 @@ extension Runtime {
 
             let myElementIndex = publishHitGeometry ? newElements.count : rasterNodeCount
             if !publishHitGeometry { rasterNodeCount += 1 }
-            let parentScope = publishHitGeometry ? parentElementIndex.map { hitScopes[$0] } : nil
+            let parentScope = publishHitGeometry && parentElementIndex != nil ? hitScopesByDepth[hitDepth - 1] : nil
             var turn = parentScope?.turn
             if !publishHitGeometry, !rasterTurns.isEmpty, let parentElementIndex {
                 turn = rasterTurns[parentElementIndex]
@@ -1607,7 +1617,8 @@ extension Runtime {
                 }
                 scope.opacity *= ownOpacity
                 scope.blur += effBlur * max(sc.x, sc.y)
-                infoBlur = (parentElementIndex.map { newElements[$0].blur } ?? 0) + effBlur * sc.x
+                infoBlur = (parentScope?.reportedBlur ?? 0) + effBlur * sc.x
+                scope.reportedBlur = infoBlur
                 if let parentScreenClip { presenceScreenClip = intersectRects(parentScreenClip, initialClipPt) }
                 scope.exiting = infoExiting
                 newHitGeometries.record(HitGeometry(
@@ -1621,7 +1632,11 @@ extension Runtime {
                 ), at: node.index, path: node.path)
                 infoVisible = intersectRects(infoRect, parentScreenClip ?? initialClipPt)
                 infoOpacity = scope.opacity
-                hitScopes.append(scope)
+                if hitDepth == hitScopesByDepth.count {
+                    hitScopesByDepth.append(scope)
+                } else {
+                    hitScopesByDepth[hitDepth] = scope
+                }
             } else if let turn {
                 rasterTurns[myElementIndex] = turn
             }
@@ -1683,13 +1698,12 @@ extension Runtime {
                     let marks = highlightElementInfos(node: node, owner: owner, ownerIndex: myElementIndex,
                                                       rect: effRect, scaleVec: sc, visibleRect: visibleClipPt)
                     for mark in marks { newElements.append(.captured(CapturedElementReport(mark))) }
-                    hitScopes.append(contentsOf: repeatElement(hitScopes[myElementIndex], count: marks.count))
                 }
             }
 
             let effectSpec = el.runtimeExtra(RenderExtrasKey.effectSpec) as? RenderEffectSpec
             if publishHitGeometry, let presented {
-                let scope = hitScopes[myElementIndex]
+                let scope = hitScopesByDepth[hitDepth]
                 let flight = (hasPresenceFlights && (activeFlightIds.contains(nid) || launchedFlightIds.contains(nid)
                     || unclippedMatchedFlightIds.contains(nid))) || (el.flightId != nil && paintScene.isEdgeAnimating(nid))
                 let margin = 2 / scale + 3 * scope.blur + (effectSpec?.bleed ?? 0) * max(sc.x, sc.y)
@@ -1768,7 +1782,7 @@ extension Runtime {
                     if el.layout.clipOverflow || el.clipRadius != nil || el.clipCorners != nil
                         || el.clipFade != nil || clip != nil {
                         parentClip.rectPt = visibleClipPt
-                        hitScopes[myElementIndex].localClip = hitScopes[myElementIndex].localClip.map {
+                        hitScopesByDepth[hitDepth].localClip = hitScopesByDepth[hitDepth].localClip.map {
                             intersectRects($0, effRect)
                         } ?? effRect
                     }
@@ -1840,7 +1854,7 @@ extension Runtime {
                 if el.layout.clipOverflow {
                     nextClip.clipPx = intersectClipRects(nextClip.clipPx, SIMD4(rectPx.x, rectPx.y, rectPx.x + rectPx.z, rectPx.y + rectPx.w))
                     if publishHitGeometry {
-                        hitScopes[myElementIndex].localClip = hitScopes[myElementIndex].localClip.map {
+                        hitScopesByDepth[hitDepth].localClip = hitScopesByDepth[hitDepth].localClip.map {
                             intersectRects($0, effRect)
                         } ?? effRect
                     }
@@ -2013,7 +2027,7 @@ extension Runtime {
             var mergedFadeOrigin = parentClip.fadeOrigin
             let hasClipScope = el.layout.clipOverflow || (clipSpec?.clipRect ?? false) || ownRound != nil || clipFadeLTRB != nil || clipSpec?.fadeLinear != nil
             if publishHitGeometry && hasClipScope {
-                hitScopes[myElementIndex].localClip = hitScopes[myElementIndex].localClip.map {
+                hitScopesByDepth[hitDepth].localClip = hitScopesByDepth[hitDepth].localClip.map {
                     intersectRects($0, effRect)
                 } ?? effRect
             }
@@ -2660,7 +2674,7 @@ extension Runtime {
                        spec.mode == .wrap, loopRuntime.tracks[nid]?.isActive(at: paintStore.nodeTime(nid)) == true,
                        publishHitGeometry, instances.count == layerStartIdx,
                        !parentInCache, !parentIsRotated, !needsLayer, !hasChildren,
-                       parentOpacity == 1, parentElementIndex.map({ hitScopes[$0].opacity == 1 && hitScopes[$0].turn == nil }) ?? true,
+                       parentOpacity == 1, (parentScope?.opacity ?? 1) == 1, parentScope?.turn == nil,
                        effOpacity == loop?.opacity, localOpacity == effOpacity, bwPx == 0, sidesVec == .zero,
                        el.isPlainCycleDecoration, let dt = curve.frameInterval(), dt.isFinite,
                        curve.stops.allSatisfy({ $0.fraction.isFinite && $0.opacity.isFinite &&
@@ -3740,10 +3754,12 @@ extension Runtime {
             parentIsDissolve: Bool = false,
             parentScaleMotion: PaintScaleMotion = .still,
             parentElementIndex: Int? = nil,
+            parentHitScope: RenderHitScope? = nil,
             allowRaised: Bool = false,
             parentInCache: Bool = false,
             parentIsRotated: Bool = false
         ) -> Bool {
+            if let parentHitScope { hitScopesByDepth[0] = parentHitScope }
             var nextSlot: Int? = rootSlot
             var context = PaintContext(
                 clip: parentClip, inert: inheritedInert, groupHover: 0, snap: inheritedSnap, stickyShift: inheritedStickyShift, opacity: parentOpacity, enclosingOpacity: enclosingLayerOpacity,
@@ -3757,7 +3773,8 @@ extension Runtime {
                 nextSlot = nil
                 let node = renderNode(slot)
                 if hasRaised && !context.allowRaised && node.el.isRaised {
-                    collectedRaisedNodes.append((slot, newElements.count))
+                    let savedScope = publishHitGeometry && context.element != nil ? hitScopesByDepth[branches.count] : nil
+                    collectedRaisedNodes.append((slot, newElements.count, savedScope))
                     dynamic = true
                 } else {
                     let savedMark = currentInheritedMark
@@ -3775,7 +3792,7 @@ extension Runtime {
                             parentClip: context.clip, snap: &snap, stickyShift: &stickyShift, inheritedInert: context.inert, groupHover: &groupHover, parentOpacity: context.opacity,
                             enclosingLayerOpacity: context.enclosingOpacity, inheritedTransform: context.transform,
                             parentIsDissolve: context.dissolve, parentScaleMotion: context.scaleMotion,
-                            parentElementIndex: context.element, parentInCache: context.inCache, parentIsRotated: context.rotated
+                            parentElementIndex: context.element, hitDepth: branches.count + 1, parentInCache: context.inCache, parentIsRotated: context.rotated
                         )
                     }
                     let h: PaintHeader
@@ -3846,7 +3863,7 @@ extension Runtime {
         for root in topology.roots {
             paintSubtree(root, parentClip: rootClip, inheritedSnap: rootSnap, inheritedInert: false, parentOpacity: 1.0, allowRaised: false)
         }
-        for (slot, offset) in collectedRaisedNodes {
+        for (slot, offset, parentHitScope) in collectedRaisedNodes {
             let raisedNode = renderNode(slot)
             let start = newElements.count
             var chain: [NodeId] = []
@@ -3911,6 +3928,7 @@ extension Runtime {
                     parentIsDissolve: pst.isDissolveScope,
                     parentScaleMotion: PaintScaleMotion(rawValue: pst.scaleMotionRaw) ?? .still,
                     parentElementIndex: pst.elementIndex,
+                    parentHitScope: parentHitScope,
                     allowRaised: true,
                     // The raised branch paints outside ancestor caches, inside the reopened turns.
                     parentInCache: false,

@@ -1161,6 +1161,7 @@ public final class Runtime<State> {
 
     internal var flatNodes: [FlatNode] = []
     internal var nativePaintTopology: NativePaintTopology?
+    internal var paintHitScopes: [RenderHitScope] = []
     internal var spareFlatNodes: [FlatNode] = []
     internal var replayedFlatMemoNodes: Int { flatMemoPaths.values.reduce(0) { $0 + $1.replayedNodes } }
     private var flatMemoPaths: [NodeId: FlatMemoPaths<State>] = [:]

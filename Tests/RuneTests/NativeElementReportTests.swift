@@ -60,4 +60,33 @@ struct NativeElementReportTests {
         #expect(rt.element(byKey: "docs")?.text == "link")
         #expect(infos.first(where: { $0.key == "docs" })?.text == "docs")
     }
+
+    @Test("Raised siblings reopen the clip, opacity and rotation of their own paint branch")
+    func raisedBranchesKeepOwnScope() throws {
+        let rt = Runtime(state: (), viewport: Vec2(220, 130)) { _, _ -> El<Void> in
+            row().size(180, 100).children([
+                col().key("left").size(60, 48).clipRounded(0).opacity(0.5).rotate(0.12).child(
+                    el().raise().key("a").size(100, 88).child(el().key("inner-a").size(72, 65))
+                ),
+                col().key("right").size(70, 60).clipRounded(0).opacity(0.25).child(
+                    col().child(el().raise().key("b").size(104, 80).child(el().key("inner-b").size(79, 61)))
+                )
+            ])
+        }
+        _ = rt.renderFrame(at: 0)
+        let native = rt.elements()
+        _ = rt.frame(at: 0)
+        let reference = rt.elements()
+        for key in ["a", "inner-a", "b", "inner-b"] {
+            let actual = try #require(native.first { $0.key == key })
+            let expected = try #require(reference.first { $0.key == key })
+            #expect(actual.opacity == expected.opacity)
+            // Rust reports each turned clip in window coordinates, including its negative edges.
+            let viewport = key.hasSuffix("a") ? "left" : "right"
+            let clip = try #require(native.first { $0.key == viewport })
+            #expect(actual.visible == clip.rect)
+            #expect(actual.rect == expected.rect)
+            #expect(actual.parentIndex == expected.parentIndex)
+        }
+    }
 }
