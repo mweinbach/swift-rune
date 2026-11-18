@@ -6,6 +6,7 @@ import { isFixedPitchAsset, writeFixedPitchCells } from './rune-web-fixed-pitch.
 import { withRunePageClock } from './rune-page-clock.mjs';
 
 const utf8 = new TextDecoder('utf-8', { ignoreBOM: true });
+const asciiOffsets = Uint32Array.from({ length: 257 }, (_, i) => i);
 const utf16be = new TextDecoder('utf-16be');
 const pendingFonts = new WeakMap();
 const bundledFonts = new WeakMap();
@@ -67,6 +68,7 @@ function installFont(doc, source, { bundled = false, startup = false, firstCut =
 
 function cssFamilyKey(css) {
     const name = /^["']/.test(css) ? css.slice(1, -1) : css;
+    if (!name.includes('\\')) return name.toLowerCase();
     return name.replace(/\\(?:([0-9a-f]{1,6})\s?|(.))/giu, (_, hex, escaped) => {
         if (!hex) return escaped;
         const point = parseInt(hex, 16);
@@ -342,6 +344,7 @@ function advanceProbe(source) {
 export function createRuneTextImports(getMemory, doc = globalThis.document, spellDictionaries = []) {
     const runs = new Map();
     const aliases = new Map();
+    const familyStacks = [new Map(), new Map()];
     const fixedPitchStyles = new Map();
     let next = 1, root, spans, explicitSpans, range, familyStyle, defaultContext, unkernedContext, svgClusterOwners;
     const memory = () => getMemory().buffer;
@@ -512,7 +515,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         line.probe = undefined;
         // Only range, caret and ink queries need a DOM position. Canvas supplies the metrics above.
         line.origin = undefined;
-        line.carets.clear();
+        line.carets?.clear();
         line.tile = null;
     }
 
@@ -800,9 +803,10 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             Math.ceil(line.baseline + m.actualBoundingBoxDescent) - y] });
     }
     function caret(line, byte) {
-        if (line.carets.has(byte)) return line.carets.get(byte);
+        const carets = line.carets ??= new Map();
+        if (carets.has(byte)) return carets.get(byte);
         const x = bounds(line, byte, byte).left - lineOrigin(line);
-        line.carets.set(byte, x);
+        carets.set(byte, x);
         return x;
     }
 
@@ -866,24 +870,38 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             if (!root.isConnected) doc.documentElement.append(root);
             const text = string(ptr, count);
             const family = string(familyPtr, familyLen);
-            const families = familyStack(familyStyle, family, mono ? 'monospace' : 'sans-serif');
+            // CSS parsing depends on the declared stack and its generic fallback.
+            // Face selection still consults the document's currently installed fonts.
+            const stacks = familyStacks[mono ? 1 : 0];
+            let families = stacks.get(family);
+            if (!families) {
+                families = familyStack(familyStyle, family, mono ? 'monospace' : 'sans-serif');
+                if (stacks.size >= 64) stacks.clear();
+                stacks.set(family, families);
+            }
             const prefix = (italic ? 'italic ' : '') + weight + ' ' + size + 'px ';
             const font = prefix + families.map(f => f.css).join(', ');
             const explicitDirection = direction === 2 ? 'rtl' : direction === 1 ? 'ltr' : null;
-            const offsets = new Uint32Array(count + 1);
-            let byte = 0, units = 0;
-            for (const scalar of text) {
-                const cp = scalar.codePointAt(0);
-                const length = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
-                offsets.fill(units, byte, byte + length);
-                byte += length;
-                units += scalar.length;
+            let offsets;
+            if (count <= 256 && text.length === count && !/[^\x00-\x7f]/.test(text)) {
+                // UTF-8 byte indices and UTF-16 Range positions coincide for ASCII.
+                offsets = asciiOffsets.subarray(0, count + 1);
+            } else {
+                offsets = new Uint32Array(count + 1);
+                let byte = 0, units = 0;
+                for (const scalar of text) {
+                    const cp = scalar.codePointAt(0);
+                    const length = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+                    offsets.fill(units, byte, byte + length);
+                    byte += length;
+                    units += scalar.length;
+                }
+                offsets[count] = units;
             }
-            offsets[count] = units;
             const hasColor = families.some(f => fontPages.get(doc)?.colorFamilies.has(f.key)) ||
                 /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(text);
             const line = { text, font, baseFont: font, prefix, families, aliases: [], size, weight, italic, kerning: 'normal',
-                offsets, hasColor, carets: new Map(), explicitDirection, direction: explicitDirection };
+                offsets, hasColor, carets: null, explicitDirection, direction: explicitDirection };
             if (!explicitDirection) {
                 mountSpan(measurementSpan(line));
                 line.direction = doc.defaultView.getComputedStyle(line.element).direction;
