@@ -194,26 +194,26 @@ extension El {
     }
 
     internal var elRevealWordFade: Float? {
-        (runtimeExtras[ShellElExtrasKey.revealWordFade] as? Float) ?? (textReveal >= 0 ? textReveal : nil)
+        (runtimeExtra(ShellElExtrasKey.revealWordFade) as? Float) ?? (textReveal >= 0 ? textReveal : nil)
     }
 
     internal var elOutline: Outline? {
-        runtimeExtras[ShellElExtrasKey.outline] as? Outline
+        runtimeExtra(ShellElExtrasKey.outline) as? Outline
     }
 
     internal var elPaintAlpha: Float {
-        (runtimeExtras[ShellElExtrasKey.paintAlpha] as? Float) ?? 1.0
+        (runtimeExtra(ShellElExtrasKey.paintAlpha) as? Float) ?? 1.0
     }
 
     internal var elLayerOpacity: Float {
-        (runtimeExtras[ShellElExtrasKey.layerOpacity] as? Float) ?? 1.0
+        (runtimeExtra(ShellElExtrasKey.layerOpacity) as? Float) ?? 1.0
     }
 
     internal var elMark: UInt32? {
-        runtimeExtras[ShellElExtrasKey.mark] as? UInt32
+        runtimeExtra(ShellElExtrasKey.mark) as? UInt32
     }
 
     internal var elTimeScale: Float {
-        (runtimeExtras[ShellElExtrasKey.timeScale] as? Float) ?? 1.0
+        (runtimeExtra(ShellElExtrasKey.timeScale) as? Float) ?? 1.0
     }
 }

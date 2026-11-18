@@ -1068,8 +1068,8 @@ extension Runtime {
                 || !n.el.liveBindings.isEmpty
                 || n.el.pixelsPayload != nil
                 || n.el.surfacePayload != nil
-                || n.el.runtimeExtras[RenderExtrasKey.effectSpec] != nil
-                || n.el.runtimeExtras["systemMaterial"] != nil
+                || n.el.runtimeExtra(RenderExtrasKey.effectSpec) != nil
+                || n.el.runtimeExtra("systemMaterial") != nil
                 || n.el.backdropBlur > 0
             }
         }
@@ -1306,8 +1306,8 @@ extension Runtime {
             }
             let subtreeDynamic = loop != nil || !el.liveBindings.isEmpty
                 || el.surfacePayload != nil
-                || el.runtimeExtras[RenderExtrasKey.effectSpec] != nil
-                || el.runtimeExtras["systemMaterial"] != nil
+                || el.runtimeExtra(RenderExtrasKey.effectSpec) != nil
+                || el.runtimeExtra("systemMaterial") != nil
                 || el.backdropBlur > 0
 
             var liveOpacity: Float? = nil
@@ -1490,7 +1490,7 @@ extension Runtime {
             }
             let effOpacity = (parentOpacity * ownOpacity).clamped(to: 0...1)
             let effBlur = max(0, liveBlur ?? presented?.blur ?? el.blur)
-            let isContinuousCorners = (el.runtimeExtras[RenderExtrasKey.continuousCorners] as? Bool) ?? false
+            let isContinuousCorners = (el.runtimeExtra(RenderExtrasKey.continuousCorners) as? Bool) ?? false
             let baseRadii = SIMD4<Float>(
                 el.corners.topLeft,
                 el.corners.topRight,
@@ -1677,7 +1677,7 @@ extension Runtime {
                 }
             }
 
-            let effectSpec = el.runtimeExtras[RenderExtrasKey.effectSpec] as? RenderEffectSpec
+            let effectSpec = el.runtimeExtra(RenderExtrasKey.effectSpec) as? RenderEffectSpec
             if publishHitGeometry, let presented {
                 let scope = hitScopes[myElementIndex]
                 let flight = (hasPresenceFlights && (activeFlightIds.contains(nid) || launchedFlightIds.contains(nid)
@@ -1714,7 +1714,7 @@ extension Runtime {
                     || effRect.top * scale > min(Float(heightPx), clip.w) + overhang + 2)
                     && el.plainText == nil && el.richSpans == nil && el.advanceInRun == nil
                     && el.terminalGridPayload == nil && el.shapes.isEmpty && shadows.isEmpty
-                    && (el.runtimeExtras.isEmpty || (el.runtimeExtras.count == 1 && el.elMark != nil))
+                    && (el.runtimeExtraCount == 0 || (el.runtimeExtraCount == 1 && el.elMark != nil))
                     && el.backdropBlur == 0 && el.elOutline == nil
                     && !focused && !el.focusable && el.focusWithinRing == nil && el.anchor == nil
             }
@@ -1727,7 +1727,7 @@ extension Runtime {
                el.iconPayload == nil, el.imagePayload == nil, el.terminalGridPayload == nil, el.shapes.isEmpty, shadows.isEmpty,
                el.backdropBlur == 0, el.focusRingColor == nil, el.focusWithinRing == nil, el.elOutline == nil,
                !focused, !el.focusable, el.textHighlights == nil, el.spanRingsSpec.isEmpty, el.elStrikes.isEmpty,
-               el.runtimeExtras.isEmpty || (el.runtimeExtras.count == 1 && el.elMark != nil) {
+               el.runtimeExtraCount == 0 || (el.runtimeExtraCount == 1 && el.elMark != nil) {
                 // A no-wrap label may still contain hard breaks. Keep the shaper's overhang
                 // allowance and account for the text offset from vertical padding.
                 let yScale = max(abs(sc.y) * scale, 0.0625)
@@ -1748,13 +1748,13 @@ extension Runtime {
             if clipMisses || clippedSingleLine || clippedBox, isLeaf, !parentInCache, !parentIsRotated,
                el.surfacePayload == nil, el.pixelsPayload == nil, el.role != .textInput,
                editLens == nil, !hasActiveTextLinks(el), !el.isSecure,
-               el.runtimeExtras[RenderExtrasKey.cacheEnabled] == nil, activeTextFlights.isEmpty {
+               el.runtimeExtra(RenderExtrasKey.cacheEnabled) == nil, activeTextFlights.isEmpty {
                 snap = rootSnap
                 return (false, subtreeDynamic, effOpacity, effBlur, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, [], false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion, NO_CLIP, .zero, sc.x * scale, 0, nil)
             }
             if effOpacity <= 0.001 && (!isExiting || parentOpacity == 0) {
                 if publishHitGeometry && !topology.children(of: node).isEmpty {
-                    let clip = el.runtimeExtras[RenderExtrasKey.clipSpec] as? RenderClipSpec
+                    let clip = el.runtimeExtra(RenderExtrasKey.clipSpec) as? RenderClipSpec
                     if el.layout.clipOverflow || el.clipRadius != nil || el.clipCorners != nil
                         || el.clipFade != nil || clip != nil {
                         parentClip.rectPt = visibleClipPt
@@ -1837,11 +1837,11 @@ extension Runtime {
                         nextChildTransform, false, false, [], false, myElementIndex, 0, 0, 0, 0,
                         nodeScaleMotion, nextClip.clipPx, .zero, sc.x * scale, 0, nil)
             }
-            let clipSpec = el.runtimeExtras[RenderExtrasKey.clipSpec] as? RenderClipSpec
-            let linearGradSpec = el.runtimeExtras[RenderExtrasKey.linearGradient] as? RenderLinearGradientSpec
-            let radialGradSpec = el.runtimeExtras[RenderExtrasKey.radialGradient] as? RenderRadialGradientSpec
-            let borderGradSpec = el.runtimeExtras[RenderExtrasKey.borderGradient] as? RenderBorderGradientSpec
-            let shapeTrim = el.runtimeExtras[RenderExtrasKey.shapeTrim] as? Vec2 ?? liveTrim
+            let clipSpec = el.runtimeExtra(RenderExtrasKey.clipSpec) as? RenderClipSpec
+            let linearGradSpec = el.runtimeExtra(RenderExtrasKey.linearGradient) as? RenderLinearGradientSpec
+            let radialGradSpec = el.runtimeExtra(RenderExtrasKey.radialGradient) as? RenderRadialGradientSpec
+            let borderGradSpec = el.runtimeExtra(RenderExtrasKey.borderGradient) as? RenderBorderGradientSpec
+            let shapeTrim = el.runtimeExtra(RenderExtrasKey.shapeTrim) as? Vec2 ?? liveTrim
 
             let boundsClipPx = SIMD4<Float>(rectPx.x, rectPx.y, rectPx.x + rectPx.z, rectPx.y + rectPx.w)
             // Precedence (`paint/build.rs:618-633`): explicit `clipCorners` beats `clipRadius`;
@@ -1904,12 +1904,12 @@ extension Runtime {
             let hasChildren = hasRaised ? topology.children(of: node).contains { !renderNode($0).el.isRaised } : !topology.children(of: node).isEmpty
             let hasOverlappingShape = el.shapes.count > 1 || (el.shapes.first?.ops.count ?? 0) > 1
             let opacityNeedsLayer = effOpacity > 0.001 && ownOpacity > 0.001 && ownOpacity < 1.0 && (hasChildren || hasOverlappingShape || (el.iconPayload != nil && effBg.a > 0.001))
-            let cacheRequested = (el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false
+            let cacheRequested = (el.runtimeExtra(RenderExtrasKey.cacheEnabled) as? Bool) ?? false
             var cacheEligible = cacheRequested
                 && !hasCutout
                 && el.backdropBlur <= 0
-                && el.runtimeExtras[RenderExtrasKey.effectSpec] == nil
-                && el.runtimeExtras["systemMaterial"] == nil
+                && el.runtimeExtra(RenderExtrasKey.effectSpec) == nil
+                && el.runtimeExtra("systemMaterial") == nil
                 && !hasDynamicInSubtree(node)
             let effScale = sc.x * scale
             var nodePaintHash: UInt64 = 0xCBF2_9CE4_8422_2325
@@ -1982,7 +1982,7 @@ extension Runtime {
                 // Text, images and nested content continue through content-signature validation.
                 let plainLeaf = !hasChildren && el.role == .group && el.plainText == nil && el.richSpans == nil
                     && el.iconPayload == nil && el.imagePayload == nil && el.terminalGridPayload == nil
-                    && editLens == nil && el.runtimeExtras.count == 1
+                    && editLens == nil && el.runtimeExtraCount == 1
                 let sameRaster = sameCommit && !scaleDiff && isResident && !entry.isLivePhase && plainLeaf
                 if (sameRaster || scaleSettling) && entry.paintHash == nodePaintHash && !hasLiveTextInSubtree(node) {
                     elideCache = (
@@ -2285,8 +2285,8 @@ extension Runtime {
             var nativeMaterialHole: Float? = nil
             var paintBg: Color = effBg
             let shapeRadiiPx = radiiPx
-            if let mat = el.runtimeExtras["systemMaterial"] as? SystemMaterial {
-                let blending = (el.runtimeExtras["systemMaterialBlending"] as? MaterialBlendingMode) ?? .behindWindow
+            if let mat = el.runtimeExtra("systemMaterial") as? SystemMaterial {
+                let blending = (el.runtimeExtra("systemMaterialBlending") as? MaterialBlendingMode) ?? .behindWindow
                 let isContinuous = isContinuousCorners || radiiPt.x < 0 || radiiPt.y < 0 || radiiPt.z < 0 || radiiPt.w < 0
                 let rPx = MaterialMath.clampRadius(
                     [radiiPx.x, radiiPx.y, radiiPx.z, radiiPx.w],
@@ -3632,7 +3632,7 @@ extension Runtime {
                             srgbBlend: srgbBlend,
                             glyphAtlas: textSystem.glyphAtlas,
                             imageVersion: imagePacker.version(at:),
-                            userKey: el.runtimeExtras[RenderExtrasKey.cacheKey] as? UInt64
+                            userKey: el.runtimeExtra(RenderExtrasKey.cacheKey) as? UInt64
                         )
                         var bx0 = rectPx.x
                         var by0 = rectPx.y

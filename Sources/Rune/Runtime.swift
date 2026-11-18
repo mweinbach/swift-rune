@@ -1626,7 +1626,7 @@ public final class Runtime<State> {
                 node.el.attachedDragOutItem != nil ||
                 h.editLens != nil ||
                 node.el.role == .textInput ||
-                node.el.runtimeExtras["dragOut"] != nil
+                node.el.runtimeExtra("dragOut") != nil
         }) else { return false }
         let node = hit.node
         guard node.el.isWindowDrag else { return false }
@@ -1638,7 +1638,7 @@ public final class Runtime<State> {
             h.onPointerDown == nil &&
             h.onDrag == nil &&
             h.editLens == nil &&
-            node.el.runtimeExtras["dragOut"] == nil &&
+            node.el.runtimeExtra("dragOut") == nil &&
             node.el.role != .textInput
     }
 
@@ -3838,7 +3838,7 @@ public final class Runtime<State> {
                 corners: el.corners,
                 blur: el.blur,
                 fill: effectiveFill.motionColor,
-                border: ((el.runtimeExtras[RenderExtrasKey.borderGradient] as? RenderBorderGradientSpec)?.top ?? el.borderColor).motionColor,
+                border: ((el.runtimeExtra(RenderExtrasKey.borderGradient) as? RenderBorderGradientSpec)?.top ?? el.borderColor).motionColor,
                 layoutAnim: layoutAnimSpec,
                 styleSpring: styleSp,
                 colorSpring: colorSp,
@@ -5182,12 +5182,12 @@ public final class Runtime<State> {
                     pendingShadowColors.append((id: nid, index: si, seed: seed, target: targetShCol, spring: csp))
                 }
             }
-            if let rGrad = node.el.runtimeExtras[RenderExtrasKey.radialGradient] as? RenderRadialGradientSpec {
+            if let rGrad = node.el.runtimeExtra(RenderExtrasKey.radialGradient) as? RenderRadialGradientSpec {
                 for (si, stop) in rGrad.stops.prefix(16).enumerated() {
                     pendingRadialStops.append((id: nid, index: si, target: stop.color.motionColor, spring: csp))
                 }
             }
-            let bGrad = node.el.runtimeExtras[RenderExtrasKey.borderGradient] as? RenderBorderGradientSpec
+            let bGrad = node.el.runtimeExtra(RenderExtrasKey.borderGradient) as? RenderBorderGradientSpec
             let bw = bGrad?.width ?? node.el.borderWidth
             guard bw > 0 else { continue }
             let hadBottom = mayHaveBottomTracks && scene.store.has(nid, Props.BORDER_BOTTOM)
@@ -7546,7 +7546,7 @@ public final class Runtime<State> {
 
             let ownSc = own?.scale ?? Vec2(1, 1)
             let rawScaleVec = Vec2(inh.scale.x * ownSc.x, inh.scale.y * ownSc.y)
-            let origin = (el.runtimeExtras["scaleOrigin"] != nil)
+            let origin = (el.runtimeExtra("scaleOrigin") != nil)
                 ? el.scaleOrigin
                 : (snap.anchorAttachNorm ?? el.origin)
             let centre = SIMD2<Float>(
@@ -8124,7 +8124,7 @@ public final class Runtime<State> {
                 if !surfaceVisible { surfaceVideo.unpulled(surf) }
             }
 
-            let continuousCorners = (el.runtimeExtras[RenderExtrasKey.continuousCorners] as? Bool) == true
+            let continuousCorners = (el.runtimeExtra(RenderExtrasKey.continuousCorners) as? Bool) == true
             if shouldEmit {
                 if fillColor.a <= 0, let material = el.attachedSystemMaterial {
                     let tint = MaterialMath.fallbackFill(material: material, dark: systemDark)
@@ -8551,7 +8551,7 @@ public final class Runtime<State> {
                     )
                     : SIMD2<Float>(devRect.x + (devRect.z - wExact) * 0.5, devRect.y + (devRect.w - hExact) * 0.5)
                 let drawFrac = p.draw.clamped(to: 0...1)
-                let baseTrim = (el.runtimeExtras[RenderExtrasKey.shapeTrim] as? Vec2) ?? liveTrim
+                let baseTrim = (el.runtimeExtra(RenderExtrasKey.shapeTrim) as? Vec2) ?? liveTrim
                 for shape in el.shapes {
                     let effectiveShape: Shape
                     if let t = baseTrim {
@@ -8777,7 +8777,7 @@ public final class Runtime<State> {
                     TextRasterWindow.paint(top: clip.y, bottom: clip.y + clip.w, viewport: Float(devH),
                                            origin: restOriginY * pxScale, scale: scaleVec.y * pxScale,
                                            margin: filterMargin, transformed: nodeTurn != nil || flightCover != nil ||
-                                            inh.inCache || ((el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false))
+                                            inh.inCache || ((el.runtimeExtra(RenderExtrasKey.cacheEnabled) as? Bool) ?? false))
                 }
                 let baseDefaultTextColor = (nearestGroupHovered ? el.groupColor : nil) ?? liveTextColor ?? sceneTextColor ?? el.textColor ?? defaultViewFg
                 let defaultTextColor = applyPressColor(effPressColor, to: baseDefaultTextColor, frac: effPressFrac)
@@ -8980,7 +8980,7 @@ public final class Runtime<State> {
                             )))
                         }
                         // Text glyphs
-                        let inputInCache = inh.inCache || ((el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false)
+                        let inputInCache = inh.inCache || ((el.runtimeExtra(RenderExtrasKey.cacheEnabled) as? Bool) ?? false)
                         let inputRotated = nodeTurn != nil
                         let inputShownY0 = (!inputRotated && !inputInCache) ? max(devInputClip.y, -filterMargin) : devInputClip.y
                         let inputShownY1 = (!inputRotated && !inputInCache) ? min(devInputClip.y + devInputClip.w, Float(devH) + filterMargin) : (devInputClip.y + devInputClip.w)
@@ -9354,7 +9354,7 @@ public final class Runtime<State> {
                                 now: revealClock
                             )
                             : nil
-                        let textInCache = inh.inCache || ((el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false)
+                        let textInCache = inh.inCache || ((el.runtimeExtra(RenderExtrasKey.cacheEnabled) as? Bool) ?? false)
                         let textRotated = nodeTurn != nil
                         let textShownY0 = (!textRotated && !textInCache) ? max(glyphClip.y, -filterMargin) : glyphClip.y
                         let textShownY1 = (!textRotated && !textInCache) ? min(glyphClip.y + glyphClip.w, Float(devH) + filterMargin) : (glyphClip.y + glyphClip.w)
@@ -9613,7 +9613,7 @@ public final class Runtime<State> {
                         pills: el.pillChips,
                         style: el.textStyle,
                         pixelScale: pxScale,
-                        wrapAnywhere: (el.runtimeExtras["htmlWrapAnywhere"] as? Bool) ?? false
+                        wrapAnywhere: (el.runtimeExtra("htmlWrapAnywhere") as? Bool) ?? false
                     )
                     : nil,
                 drawnText: elementDrawnText,
@@ -9756,7 +9756,7 @@ public final class Runtime<State> {
                 )
                 let childScaleMotion: PaintScaleMotion = (childFlightCover != nil) ? .moving : nodeScaleMotion
                 let childStillScale: Float = (childScaleMotion == .still) ? ((scaleVec.x + scaleVec.y) * 0.5) : inh.stillScale
-                let childInCache = inh.inCache || ((el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false)
+                let childInCache = inh.inCache || ((el.runtimeExtra(RenderExtrasKey.cacheEnabled) as? Bool) ?? false)
                 let childInh = PaintInh(
                     opacity: childAncestorOp,
                     scale: rawScaleVec,
@@ -12629,7 +12629,7 @@ public final class Runtime<State> {
                 let rect = MotionRect.fromXYWH(r[0], r[1], r[2], r[3])
                 let clip = hit.parentScreenClip.map { intersectRects($0, window) } ?? window
                 let node = nodeByPath[info.path].map { flatNodes[$0] }
-                let effect = node?.el.runtimeExtras[RenderExtrasKey.effectSpec] as? RenderEffectSpec
+                let effect = node?.el.runtimeExtra(RenderExtrasKey.effectSpec) as? RenderEffectSpec
                 let margin = 2 / max(0.5, pixelScale) + info.blur * 3 + (effect?.bleed ?? 0) * info.scale
                 guard clip.width > 0, clip.height > 0,
                       rect.right >= clip.left - margin, rect.left <= clip.right + margin,

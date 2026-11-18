@@ -19,6 +19,6 @@ internal extension El {
     static var rideTrailingExtraKey: String { "rune.rideTrailing" }
 
     var isRideTrailing: Bool {
-        (runtimeExtras[Self.rideTrailingExtraKey] as? Bool) ?? false
+        (runtimeExtra(Self.rideTrailingExtraKey) as? Bool) ?? false
     }
 }

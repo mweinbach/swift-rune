@@ -59,7 +59,7 @@ struct LayoutObserverTraits {
             add(.shadow)
             add(.extraCommitColor)
         }
-        if el.runtimeExtras.isEmpty {
+        if el.runtimeExtraCount == 0 {
             if el.textReveal >= 0 { add(.wordReveal) }
         } else {
             if el.hasSelectionChangeHandler { add(.selectionChange) }
@@ -67,8 +67,8 @@ struct LayoutObserverTraits {
             if el.isRideTrailing { add(.rideTrailing) }
             if el.elTimeScale != 1 { add(.timeScale) }
             if let fade = el.elRevealWordFade, fade >= 0 { add(.wordReveal) }
-            if el.runtimeExtras[RenderExtrasKey.radialGradient] != nil ||
-                el.runtimeExtras[RenderExtrasKey.borderGradient] != nil {
+            if el.runtimeExtra(RenderExtrasKey.radialGradient) != nil ||
+                el.runtimeExtra(RenderExtrasKey.borderGradient) != nil {
                 add(.extraCommitColor)
             }
         }

@@ -1317,7 +1317,7 @@ final class ElColdData<State> {
     var liveBindings: [BoundLiveProperty]? = nil
     var kitFilterKeys: [String]? = nil
     var handlersBox: ElHandlersBox<State>? = nil
-    private var _runtimeExtras: [String: Any]? = nil
+    fileprivate var _runtimeExtras: [String: Any]? = nil
     var runtimeExtras: [String: Any] {
         get { _runtimeExtras ?? [:] }
         set { _runtimeExtras = newValue.isEmpty ? nil : newValue }
@@ -1824,6 +1824,9 @@ public struct El<State> {
         set { ensureCold().kitFilterKeys = newValue }
     }
     internal var hasAuthoredHandlers: Bool { _cold?.handlersBox != nil }
+    @inline(__always) internal func runtimeExtra(_ key: String) -> Any? { _cold?._runtimeExtras?[key] }
+    internal var runtimeExtraCount: Int { _cold?._runtimeExtras?.count ?? 0 }
+
     internal var runtimeExtras: [String: Any] {
         get { _cold?.runtimeExtras ?? [:] }
         set { ensureCold().runtimeExtras = newValue }
