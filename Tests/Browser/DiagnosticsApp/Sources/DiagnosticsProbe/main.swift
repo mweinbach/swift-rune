@@ -5,6 +5,26 @@ import RuneMac
 import RunePerf
 
 #if os(WASI)
+private final class TextProbeCompositor: Compositor {
+    nonisolated(unsafe) static weak var windowText: TextSystem?
+
+    func render(frame: CompositorFrame<Int>) {
+        Self.windowText = frame.runtime.textSystem
+        frame.drawUI()
+    }
+}
+
+@_cdecl("rune_probe_strut")
+func strutGlyphY(_ size: Float, _ nonce: Int32) -> Float {
+    guard let system = TextProbeCompositor.windowText else { return .nan }
+    let style = TextStyle(size: size, lineHeight: 30, direction: .ltr)
+    let before = system.glyphAtlas.cachedEntryCount
+    let shaped = system.shape(text: "Wprobe\(nonce)", style: style, maxWidth: nil, pixelScale: 1,
+                              emitGlyphs: true, bypassCache: true)
+    guard system.glyphAtlas.cachedEntryCount == before else { return .nan }
+    return shaped.glyphs.first?.rect.y ?? .nan
+}
+
 @_cdecl("rune_probe_knob_sequence")
 func knobSequence() {
     let value = Knob.float("value", min: 0, max: 1, default: 0)
@@ -106,6 +126,11 @@ func runDiagnostics() {
 }
 #endif
 
-try RuneApp.run(App(title: "Browser diagnostics", size: Vec2(96, 48), state: 0) { _, _ in
+let diagnostics = App(title: "Browser diagnostics", size: Vec2(96, 48), state: 0) { _, _ in
     el().sizeFull().bg(.rgba8(10, 80, 142))
-})
+}
+#if os(WASI)
+try RuneApp.run(diagnostics.compositor(TextProbeCompositor()))
+#else
+try RuneApp.run(diagnostics)
+#endif

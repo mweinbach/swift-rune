@@ -17,6 +17,50 @@ const originalPerformance = Object.getOwnPropertyDescriptor(window, 'performance
 const result = document.querySelector('#result');
 function check(condition, message) { if (!condition) throw Error(message); }
 
+function checkFontStruts(api) {
+    const contexts = CanvasRenderingContext2D.prototype;
+    const measure = contexts.measureText;
+    let spaces = 0, nonce = 0, newFace = false;
+    // DesktopFaceBoxes measures a single space for the declared font's line box.
+    // Change just that face's ascent to distinguish a stale strut from new glyph ink.
+    contexts.measureText = function(text) {
+        const metrics = measure.call(this, text);
+        if (text !== ' ') return metrics;
+        spaces++;
+        if (!newFace) return metrics;
+        return new Proxy(metrics, { get(target, key) {
+            const value = Reflect.get(target, key, target);
+            return key === 'fontBoundingBoxAscent' ? value + 8 : value;
+        } });
+    };
+    function shape(size, cold) {
+        const before = spaces;
+        const y = api.rune_probe_strut(size, ++nonce);
+        check(Number.isFinite(y), 'Missing secure glyph or cached secure input');
+        check(cold ? spaces > before : spaces === before,
+              'Unexpected face measurement at size ' + size + ' on shape ' + nonce);
+        return y;
+    }
+    try {
+        api.rune_web_fonts_changed();
+        const first = shape(16, true);
+        check(shape(16, false) === first, 'Warm glyph baseline moved');
+        newFace = true;
+        api.rune_web_fonts_changed();
+        const changed = shape(16, true);
+        check(changed !== first && shape(16, false) === changed, 'Stale glyph baseline after font change');
+        for (let i = 1; i < 64; i++) shape(16 + i / 4, true);
+        shape(16, false);
+        shape(32, true);
+        shape(32, false);
+        shape(16, true);
+        return { shapes: nonce, spaces, firstGlyphY: first, changedGlyphY: changed };
+    } finally {
+        contexts.measureText = measure;
+        api.rune_web_fonts_changed();
+    }
+}
+
 try {
     const imports = { ...wasi.wasiImport, clock_time_get(id, precision, address) {
         if (id !== 0) return wasi.wasiImport.clock_time_get(id, precision, address);
@@ -44,6 +88,7 @@ try {
     await new Promise(requestAnimationFrame);
     const renderer = app.renderer;
     check(pixel?.every((v, i) => Math.abs(v - [10, 80, 142, 255][i]) <= 1), 'GPU pixel: ' + pixel);
+    const struts = checkFontStruts(api);
 
     const start = performance.now();
     api.rune_probe_diagnostics();
@@ -70,7 +115,7 @@ try {
     tick = 2 ** 64;
     const saturated = api.rune_probe_frame_ms();
     check(saturated === 0, 'Saturated clock tick: ' + saturated);
-    result.textContent = 'PASS ' + JSON.stringify({ renderer, pixel, samples, elapsed, saturated, diagnosticsMs, userAgent: navigator.userAgent });
+    result.textContent = 'PASS ' + JSON.stringify({ renderer, pixel, struts, samples, elapsed, saturated, diagnosticsMs, userAgent: navigator.userAgent });
 } catch (error) {
     result.textContent = 'FAIL ' + error.message;
     throw error;

@@ -8,4 +8,5 @@ let package = Package(name: "DiagnosticsProbe", platforms: [.macOS(.v14)],
         dependencies: ["Rune", "RuneKnobs", "RunePerf", "RuneMac"].map { .product(name: $0, package: "swift-rune") },
         linkerSettings: [.unsafeFlags(["-Xlinker", "--export=rune_probe_knob_sequence",
                                         "-Xlinker", "--export=rune_probe_frame_ms",
-                                        "-Xlinker", "--export=rune_probe_diagnostics"], .when(platforms: [.wasi]))])])
+                                        "-Xlinker", "--export=rune_probe_diagnostics",
+                                        "-Xlinker", "--export=rune_probe_strut"], .when(platforms: [.wasi]))])])

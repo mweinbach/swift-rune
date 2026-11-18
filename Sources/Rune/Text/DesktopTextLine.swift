@@ -883,10 +883,20 @@ final class DesktopGlyphInk: @unchecked Sendable {
 final class DesktopFaceBoxes {
     typealias Box = (ascentPx: Float, descentPx: Float)
     private var measured: [DesktopFont: Box] = [:]
+    #if os(WASI) && RUNE_BROWSER_TEXT
+    private let lock = NSLock()
+    #endif
 
     func box(for font: DesktopFont) -> Box? {
+        #if os(WASI) && RUNE_BROWSER_TEXT
+        lock.lock()
+        defer { lock.unlock() }
+        #endif
         if let box = measured[font] { return box }
         guard let box = DesktopTextRun(text: " ", font: font)?.boxMetrics else { return nil }
+        #if os(WASI) && RUNE_BROWSER_TEXT
+        if measured.count >= 64 { measured.removeAll(keepingCapacity: true) }
+        #endif
         measured[font] = box
         return box
     }
