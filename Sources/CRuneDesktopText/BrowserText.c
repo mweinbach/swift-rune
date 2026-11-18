@@ -25,6 +25,7 @@ IMPORT("release") extern void browser_release(uint32_t);
 IMPORT("extract_ink") extern uint32_t browser_extract_ink(uint32_t, int32_t, int32_t,
     RuneDesktopLineMetrics *, uint32_t);
 IMPORT("caret") extern float browser_caret(uint32_t, int32_t);
+IMPORT("cluster_owner") extern int32_t browser_cluster_owner(uint32_t, int32_t);
 IMPORT("cell") extern int32_t browser_cell(uint32_t, int32_t, int32_t, float *, float *, uint32_t);
 IMPORT("cells") extern void browser_cells(uint32_t, RuneBrowserCell *, int32_t, int32_t);
 IMPORT("mask") extern int32_t browser_mask(uint32_t, int32_t, int32_t, int32_t, int32_t, uint8_t *, uint32_t);
@@ -125,6 +126,13 @@ RuneDesktopLine *rune_desktop_line_extract_ink(const RuneDesktopLine *line, int3
 
 RuneDesktopLineMetrics rune_desktop_line_metrics(const RuneDesktopLine *line) {
     return line ? line->metrics : (RuneDesktopLineMetrics){0};
+}
+
+int32_t rune_desktop_line_cluster_owner(const RuneDesktopLine *line, int32_t byte) {
+#ifdef RUNE_BROWSER_TEXT
+    if (line) return browser_cluster_owner(line->handle, byte);
+#endif
+    return byte;
 }
 
 float rune_desktop_line_caret(const RuneDesktopLine *line, int32_t byte) {

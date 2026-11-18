@@ -55,6 +55,69 @@ struct MemoLayoutSpanTests {
         }
     }
 
+    @Test("Color-only label and field changes retain the solve and bind the current palette")
+    func recoloringLeavesRetainsGeometry() throws {
+        let layout = RetainedLayoutCoordinator()
+        let system = TextSystem()
+        let cache = MemoCache()
+        let panel = cache.getOrBuild(id: "panel", deps: 0) { () -> El<State> in
+            row().child(el().size(12, 8))
+        }.element
+        let red = Color.rgba8(246, 44, 60)
+        let blue = Color.rgba8(34, 90, 221)
+        func solve(_ spans: [TextSpan]?, fieldInk: Color?) throws -> (label: TextLayoutBox, field: TextLayoutBox) {
+            var label: El<State> = text("old").key("label")
+            label.richSpans = spans
+            let field = textInput(key: "field", \State.edit)
+                .decorations(fieldInk.map { [RichSpan(0..<1).color($0)] } ?? [])
+            let root: El<State> = col().key("root").child(label).child(field).child(panel)
+            let texts = RetainedLayoutCoordinator.TextLayoutCollector()
+            _ = layout.compute(root: root, state: State(), viewport: Vec2(140, 60),
+                               pixelScale: 1, textSystem: system, textLayouts: texts)
+            let labelBox = try #require(texts.map[NodeId.hash("/@root/@label")]?.box)
+            let fieldBox = try #require(texts.map.values.first(where: \.isInput)?.box)
+            return (labelBox, fieldBox)
+        }
+
+        _ = try solve(nil, fieldInk: nil)
+        let first = try solve([TextSpan("o", color: red), TextSpan("ld")], fieldInk: red)
+        #expect(layout.reusedMemoGeometry)
+        let second = try solve([TextSpan("ol", color: blue), TextSpan("d")], fieldInk: blue)
+        #expect(layout.reusedMemoGeometry)
+        #expect(first.label.spanInks.color(at: 0) == red)
+        #expect(first.label.spanInks.color(at: 1) == nil)
+        #expect(first.field.spanInks.color(at: 0) == red)
+        #expect(second.label.spanInks.color(at: 1) == blue)
+        #expect(second.field.spanInks.color(at: 0) == blue)
+
+        _ = try solve([TextSpan("wide", color: blue)], fieldInk: blue)
+        #expect(!layout.reusedMemoGeometry)
+        _ = try solve([TextSpan("wide", color: blue, size: 28)], fieldInk: blue)
+        #expect(!layout.reusedMemoGeometry)
+    }
+
+    @Test("A prepared ellipsis indexes the rich label's drawn bytes when raw fallback text differs")
+    func preparedRichEllipsisUsesItsOwnContent() throws {
+        var style = TextStyle(size: 14)
+        style.wrap = .ellipsis
+        let title = "Σύγκριση colored endpoints and 👩🏽‍💻"
+        let ink = Color.rgba8(224, 50, 90)
+        let spans = [TextSpan(title, color: ink)]
+        var label: El<State> = text("x").font(style)
+        label.richSpans = spans
+        let resolved = ElDisplayResolver.resolveText(el: label, rawText: label.plainText, isSecure: false)
+        let system = TextSystem()
+        let box = try #require(system.preparedOverflowLayout(resolved, width: 64, scale: 1, create: true))
+        let cut = try #require(box.shaped.elided)
+        let painted = system.drawPreparedOverflow(resolved, box: box, glide: .zero)
+        let reference = TextSystem().shape(text: title, spans: spans, style: style, maxWidth: 64,
+                                           pixelScale: 1, emitGlyphs: true)
+        #expect(box.authText == title)
+        #expect(cut == reference.elided)
+        #expect(painted.drawnText == reference.drawnText)
+        #expect(painted.glyphs.map(\.color) == reference.glyphs.map(\.color))
+    }
+
     @Test("Screen travel changes only its own identity under a keyed root")
     func descendantsKeepAuthoredPathHashes() {
         let layout = RetainedLayoutCoordinator()

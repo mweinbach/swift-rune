@@ -35,6 +35,11 @@ try {
             const id = shape(label, dir);
             const rect = box(0), full = mask(id, rect);
             let byte = encode(pad).length;
+            for (let i = byte; i < byte + encode(text).length; ++i) {
+                check(host.cluster_owner(id, i) === byte, 'wrong native owner for ' + label + ' at byte ' + i);
+            }
+            const length = encode(label).length;
+            check(host.cluster_owner(id, length) === length && host.cluster_owner(id, -1) === -1, 'out-of-line owner');
             const firstEnd = byte + encode(text[0]).length;
             check(host.cell(id, byte, firstEnd, 80, 84) !== 0 && view.getFloat32(84, true) > 0, 'first caret cell');
             const first = host.extract_ink(id, byte, firstEnd, 64, 40);
@@ -64,6 +69,7 @@ try {
     // In xffix, calt replaces the shaped ffi with a different glyph whose
     // negative bearing overlaps the first x. Its own cmap entry is our oracle.
     const contextual = shape('xffix', 1), fullRect = box(0);
+    check([0, 1, 1, 1, 4].every((owner, i) => host.cluster_owner(contextual, i) === owner), 'contextual owners');
     const first = host.extract_ink(contextual, 1, 2, 64, 40);
     check(first, 'contextual ligature owner');
     const ref = shape('\ue000', 1), refRect = [...fullRect];
@@ -80,10 +86,12 @@ try {
     host.release(first);
     checked.push('xffix');
     const individual = shape('ffi', 1);
+    check(host.cluster_owner(individual, 2) === 0, 'initial liga owner');
     const flags = encode('liga=0');
     bytes.set(flags, 768);
     host.configure(individual, 0, 0, 768, flags.length, 0, 0, 0, 40);
     for (let byte = 0; byte < 3; ++byte) {
+        check(host.cluster_owner(individual, byte) === byte, 'disabled liga owner at byte ' + byte);
         const part = host.extract_ink(individual, byte, byte + 1, 64, 40);
         // Stable hosts can delegate an ordinary individual glyph to cell
         // rasterization. No byte may be marked as a ligature continuation.

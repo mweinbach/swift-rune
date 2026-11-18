@@ -362,6 +362,54 @@ struct Slice3TruncateLivePaintTests {
         #expect(ts.cachedElisionCount == 1)
     }
 
+    @Test func directShapesReuseElisionAcrossRecolorsAndKeepTheEllipsisInk() throws {
+        let system = TextSystem()
+        let source = "ABCDEFGHIJKLMNO-PQRSTUVWXYZ"
+        let style = TextStyle(size: 14, wrap: .ellipsis, elide: .middle)
+        func shape(_ spans: [TextSpan]?) -> ShapedText {
+            system.shape(text: source, spans: spans, style: style, maxWidth: 90, pixelScale: 1)
+        }
+        let plain = shape(nil)
+        let cut = try #require(plain.elided)
+        try #require(cut.head > 0 && cut.tail < source.utf8.count)
+        let bytes = Array(source.utf8)
+        let head = String(decoding: bytes[..<cut.head], as: UTF8.self)
+        let hidden = String(decoding: bytes[cut.head..<cut.tail], as: UTF8.self)
+        let tail = String(decoding: bytes[cut.tail...], as: UTF8.self)
+        let shapes = system.shapeCount
+        let owned = shape([TextSpan(head + hidden, color: Self.red), TextSpan(tail, color: Self.blue)])
+        let separate = shape([TextSpan(head, color: Self.blue), TextSpan(hidden, color: Self.green), TextSpan(tail, color: Self.red)])
+        #expect(system.shapeCount == shapes)
+        #expect(system.cachedElisionCount == 1)
+        #expect(owned.glyphs.map(\.rect) == plain.glyphs.map(\.rect))
+        #expect(separate.glyphs.map(\.utf8Offset) == plain.glyphs.map(\.utf8Offset))
+        try #require(owned.glyphs.contains { $0.utf8Offset == cut.head })
+        for glyph in owned.glyphs {
+            #expect(glyph.color == (glyph.utf8Offset < cut.afterEllipsis ? Self.red : Self.blue))
+        }
+        for glyph in separate.glyphs {
+            #expect(glyph.color == (glyph.utf8Offset < cut.head ? Self.blue : glyph.utf8Offset < cut.afterEllipsis ? nil : Self.red))
+        }
+    }
+
+    @Test func cachedElisionsUseAuthoredUTF8ByteOffsetsForCanonicallyEquivalentText() throws {
+        let system = TextSystem()
+        let suffix = " north avenue south boulevard"
+        let nfc = "café" + suffix
+        let nfd = "cafe\u{301}" + suffix
+        let style = TextStyle(size: 14, wrap: .ellipsis, elide: .middle)
+        func shape(_ source: String, in system: TextSystem) -> ShapedText {
+            system.shape(text: source, style: style, maxWidth: 120, pixelScale: 1, emitGlyphs: false)
+        }
+        let first = shape(nfc, in: system)
+        let second = shape(nfd, in: system)
+        let fresh = shape(nfd, in: TextSystem())
+        try #require(first.elided != nil && fresh.elided != nil)
+        #expect(second.elided == fresh.elided)
+        #expect(second.drawnText.utf8.elementsEqual(fresh.drawnText.utf8))
+        #expect(system.cachedElisionCount == 2)
+    }
+
     @Test("2.4 truncate: secure input bypasses elision cache and hides plaintext")
     func truncateSecureInputBypassesElisionCache() {
         struct S {

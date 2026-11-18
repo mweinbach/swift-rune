@@ -520,6 +520,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         }
         line.baseline = ascent;
         line.shaping = null;
+        line.clusterOwners = null;
         line.resolvedInk = null;
         line.sourceEpoch = undefined;
         line.numericMaskSource = null;
@@ -837,15 +838,80 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         return { font, pen: -shift, box, clip: box };
     }
 
-    function extractedInk(line, from, to) {
-        const context = contextFor(line);
-        const none = { text: '', box: [0, 0, 0, 0] };
-        if (from >= to) return none;
+    function shapedMetrics(line, context) {
         if (!line.shaping) {
             applyFont(context, line);
             line.shaping = context.measureText(line.text);
         }
-        const shape = line.shaping;
+        return line.shaping;
+    }
+
+    function fallbackCluster(line, from) {
+        if (svgClusterOwners === undefined) {
+            // Some SVG engines report independently measured character boxes
+            // for a shaped lam-alef. Such boxes may even hit the next letter.
+            const sample = { text: 'لا', font: '40px serif', direction: 'rtl', kerning: 'normal', lang: 'ar' };
+            svgClusterOwners = svgOwner(sample, 1) === 0;
+            sample.svgText?.parentNode.remove();
+        }
+        let owner = svgClusterOwners ? svgOwner(line, from) : -1;
+        let end = from + 1;
+        if (owner >= 0) {
+            while (end < line.text.length && svgOwner(line, end) === owner) ++end;
+        } else {
+            const probe = fontProbe(line);
+            if (!probe) return null;
+            owner = from;
+            while (dividedBoundary(line, probe, owner)) --owner;
+            while (dividedBoundary(line, probe, end)) ++end;
+        }
+        return { owner, end };
+    }
+
+    function clusterOwner(line, byte) {
+        const offsets = line?.offsets;
+        if (!offsets || byte <= 0 || byte >= offsets.length - 1 || line.numericMaskSource) return byte;
+        const from = offsets[byte];
+        if (!from) return 0;
+        // Zero is unqueried; 0xffffffff records a unit the host could not resolve.
+        const unknown = 0xffffffff;
+        if (!line.clusterOwners) {
+            const owners = new Uint32Array(line.text.length);
+            const shape = shapedMetrics(line, contextFor(line));
+            if (shape.getTextClusters) {
+                owners.fill(unknown);
+                // A logical unit index also handles RTL clusters returned in visual order.
+                for (const cluster of shape.getTextClusters(0, line.text.length)) {
+                    owners.fill(cluster.start + 1, cluster.start, cluster.end);
+                }
+            }
+            line.clusterOwners = owners;
+        }
+        const owners = line.clusterOwners;
+        if (!owners[from]) {
+            const cluster = fallbackCluster(line, from);
+            if (cluster) owners.fill(cluster.owner + 1, cluster.owner, cluster.end);
+            else owners[from] = unknown;
+        }
+        if (owners[from] === unknown) return byte;
+        const owner = owners[from] - 1;
+        if (owner === from && offsets[byte - 1] !== from) return byte;
+        if (line.text.length === offsets.length - 1) return owner;
+        // UTF-8 continuation bytes repeat their scalar's UTF-16 index.
+        let lo = 0, hi = byte;
+        while (lo < hi) {
+            const mid = lo + Math.floor((hi - lo) / 2);
+            if (offsets[mid] < owner) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+
+    function extractedInk(line, from, to) {
+        const context = contextFor(line);
+        const none = { text: '', box: [0, 0, 0, 0] };
+        if (from >= to) return none;
+        const shape = shapedMetrics(line, context);
         if (shape.getTextClusters && shape.getActualBoundingBox && context.fillTextCluster) {
             const clusters = shape.getTextClusters(from, to).filter(c => from <= c.start && c.start < to);
             if (!clusters.length) return none;
@@ -863,25 +929,9 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         if (from === 0 && to === line.text.length) return {};
         const cached = line.resolvedInk;
         if (cached && cached.owner <= from && to <= cached.end) return from === cached.owner ? cached.ink : none;
-        if (svgClusterOwners === undefined) {
-            // Some SVG engines report independently measured character boxes
-            // for a shaped lam-alef. Such boxes may even hit the next letter.
-            const sample = { text: 'لا', font: '40px serif', direction: 'rtl', kerning: 'normal', lang: 'ar' };
-            svgClusterOwners = svgOwner(sample, 1) === 0;
-            sample.svgText?.parentNode.remove();
-        }
-        let owner = svgClusterOwners ? svgOwner(line, from) : -1;
-        let end = from + 1;
-        if (owner >= 0) while (end < line.text.length && svgOwner(line, end) === owner) ++end;
-        if (!svgClusterOwners) {
-            const probe = fontProbe(line);
-            if (!probe) return null;
-            owner = from;
-            end = from + 1;
-            while (dividedBoundary(line, probe, owner)) --owner;
-            while (dividedBoundary(line, probe, end)) ++end;
-        }
-        if (owner < 0 || to > end || end - owner < 2) return null;
+        const cluster = fallbackCluster(line, from);
+        if (!cluster || to > cluster.end || cluster.end - cluster.owner < 2) return null;
+        const { owner, end } = cluster;
         // A stand-alone shaped cluster already has the source's exact ink.
         function result(ink) {
             if (!ink) return null;
@@ -1104,6 +1154,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             if (!runs.size) root?.remove();
         },
         caret(id, offset) { return caret(runs.get(id), offset); },
+        cluster_owner(id, byte) { return clusterOwner(runs.get(id), byte); },
         cell(id, start, end, left, width, reportSource = false) {
             const line = runs.get(id);
             const rect = bounds(line, start, end);

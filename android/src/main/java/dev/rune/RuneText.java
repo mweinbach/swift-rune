@@ -22,6 +22,7 @@ import android.icu.lang.UCharacter;
 import android.icu.lang.UProperty;
 import android.icu.text.Bidi;
 import android.icu.text.BidiRun;
+import android.icu.text.BreakIterator;
 import android.text.Layout;
 import android.text.PrecomputedText;
 import android.text.StaticLayout;
@@ -67,6 +68,7 @@ public final class RuneText {
     private Tile lastTile;
     private ArrayList<DirectionalRun> inkRuns;
     private char[] inkChars;
+    private BreakIterator inkGraphemes;
     private ArrayList<InkSpan> inkSpans;
     private NativeGlyphBounds inkBounds;
 
@@ -470,14 +472,14 @@ public final class RuneText {
         float left;
         float[] edges;
         CapturedGlyphs glyphs;
+        boolean captured;
         DirectionalRun(int start, int end, boolean rtl) {
             this.start = start;
             this.end = end;
             this.rtl = rtl;
         }
-        void measure(RuneText line) {
+        void measureAdvances(RuneText line) {
             if (edges != null) return;
-            left = Float.intBitsToFloat((int)(line.cell(start, end) >>> 32));
             int count = end - start;
             edges = new float[count + 1];
             if (Build.VERSION.SDK_INT >= 29) {
@@ -488,7 +490,14 @@ public final class RuneText {
                 System.arraycopy(widths, 0, edges, 1, count);
             }
             for (int i = 1; i <= count; i++) edges[i] += edges[i - 1];
-            glyphs = Build.VERSION.SDK_INT >= 31 ? CapturedGlyphs.capture(line, this) : null;
+        }
+
+        void measure(RuneText line) {
+            if (captured) return;
+            measureAdvances(line);
+            left = Float.intBitsToFloat((int)(line.cell(start, end) >>> 32));
+            if (Build.VERSION.SDK_INT >= 31) glyphs = CapturedGlyphs.capture(line, this);
+            captured = true;
         }
 
         int nextOwner(int index) {
@@ -732,6 +741,34 @@ public final class RuneText {
             else hi = mid;
         }
         return lo;
+    }
+
+    /** The first logical UTF-16 index of the shaping cluster supplying this position's ink. */
+    public synchronized int clusterOwner(int index) {
+        // Older APIs cannot measure the advances in an explicitly directed run.
+        if (Build.VERSION.SDK_INT < 29 || inkSpans != null || index < 0 || index >= text.length()) return -1;
+        prepareInkRuns();
+        int slot = firstInkRun(index);
+        if (slot == inkRuns.size()) return index;
+        DirectionalRun run = inkRuns.get(slot);
+        if (index <= run.start) return index;
+        run.measureAdvances(this);
+        if (run.edges[index - run.start] != run.edges[index - run.start + 1]) return index;
+        int count = run.end - run.start;
+        if (inkGraphemes == null) {
+            inkGraphemes = BreakIterator.getCharacterInstance(Locale.ROOT);
+            inkGraphemes.setText(text);
+        }
+        if (!inkGraphemes.isBoundary(index)) index = Math.max(run.start, inkGraphemes.preceding(index));
+        // A zero-width grapheme (a format control or a zero-advance font glyph) can
+        // have an independent owner. A ligature continuation has an advance when
+        // its grapheme is shaped separately with the original context.
+        while (index > run.start && run.edges[index - run.start] == run.edges[index - run.start + 1]) {
+            int end = Math.min(run.end, inkGraphemes.following(index));
+            if (paint.getTextRunAdvances(inkChars, index, end - index, run.start, count, run.rtl, null, 0) == 0) break;
+            index = Math.max(run.start, inkGraphemes.preceding(index));
+        }
+        return index;
     }
 
     private DirectionalRun ownerRun(int owner) {

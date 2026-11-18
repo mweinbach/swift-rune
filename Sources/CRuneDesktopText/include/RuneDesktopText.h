@@ -95,6 +95,9 @@ void rune_desktop_line_configure(RuneDesktopLine *line, const char *language,
     const char *features, const char *variations);
 void rune_desktop_line_destroy(RuneDesktopLine *line);
 RuneDesktopLineMetrics rune_desktop_line_metrics(const RuneDesktopLine *line);
+// First logical UTF-8 byte of the native shaping cluster containing byte.
+// Returns byte for an unavailable cluster or an index outside the line.
+int32_t rune_desktop_line_cluster_owner(const RuneDesktopLine *line, int32_t byte);
 #if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
 // Glyph origins, advances and UTF-8 cluster owners from the retained native layout.
 // Includes glyphs without ink, such as ordinary spaces.

@@ -185,6 +185,12 @@ struct TextRunClusterInkTests {
             let line = try #require(rune_desktop_line_create(text, length, "DejaVu Sans", 32, 400, 0, 0, 0))
             defer { rune_desktop_line_destroy(line) }
             let rect = rune_desktop_line_metrics(line)
+            if text == "ffi" || text == "لا" {
+                for index in 0..<length {
+                    #expect(rune_desktop_line_cluster_owner(line, index) == 0)
+                }
+                #expect(rune_desktop_line_cluster_owner(line, length) == length)
+            }
             func mask(_ native: OpaquePointer) throws -> [UInt8] {
                 var pixels = [UInt8](repeating: 0, count: Int(rect.ink_width * rect.ink_height))
                 let ok = rune_desktop_line_mask(native, rect.ink_x, rect.ink_y, rect.ink_width, rect.ink_height, &pixels)
@@ -211,6 +217,9 @@ struct TextRunClusterInkTests {
                 let saved = try #require(rune_desktop_line_extract_ink(line, 0, 1))
                 defer { rune_desktop_line_destroy(saved) }
                 rune_desktop_line_configure(line, nil, "liga=0", nil)
+                for index in 0..<length {
+                    #expect(rune_desktop_line_cluster_owner(line, index) == index)
+                }
                 let middle = try #require(rune_desktop_line_extract_ink(line, 1, 2))
                 defer { rune_desktop_line_destroy(middle) }
                 #expect(rune_desktop_line_metrics(middle).ink_width > 0)

@@ -284,6 +284,22 @@ final class RetainedLayoutCoordinator {
         var geometryChanged = false
         var hasMirroredFlow = false
 
+        func hashTextGeometry(_ hasher: inout Hasher, key: TextShapeKey?, text: String,
+                              spans: [TextSpan]?, pills: [PillChip], style: TextStyle) {
+            if let key {
+                // The mounted leaf already fingerprinted its UTF-8 text and metric attributes.
+                hasher.combine(key)
+            } else {
+                var content = text
+                content.withUTF8 { hasher.combine(bytes: UnsafeRawBufferPointer($0)) }
+                hasher.combine(TextSpan.layoutSpans(spans))
+                hasher.combine(pills)
+                hasher.combine(style)
+                hasher.combine(scale)
+                if style.fontSmoothing == .systemDefault { hasher.combine(textSystem.smoothing) }
+            }
+        }
+
         func makeMeasure(el: borrowing El<State>, nodeId: RuneMotion.NodeId, flatIndex: Int, forcedTextFlow: TextFlow?) -> (fn: Measure?, hash: UInt64?, redacted: Bool) {
             guard el.children.isEmpty else { return (nil, nil, false) }
             if el.hasEditLens, let editLens = el.handlers.editLens {
@@ -296,21 +312,8 @@ final class RetainedLayoutCoordinator {
                 let measureStr = resolved.renderedString.isEmpty ? " " : resolved.renderedString
                 // A wrapped field of more than one paragraph lays out by paragraph (`layout_text`).
                 let paragraphs = Runtime<State>.paragraphRequest(field: nodeId, el: el, edit: rawEdit, resolved: resolved)
-                var hasher = Hasher()
-                hasher.combine(1)
-                if !resolved.isSecure {
-                    hasher.combine(measureStr)
-                    if let sp = resolved.spans { hasher.combine(sp) }
-                    for p in resolved.pills { hasher.combine(p) }
-                }
-                hasher.combine(resolved.isSingleLine)
-                hasher.combine(rawEdit.multiline)
-                hasher.combine(scale)
-                hasher.combine(resolved.style)
-                if resolved.style.fontSmoothing == .systemDefault { hasher.combine(textSystem.smoothing) }
-                let h = UInt64(bitPattern: Int64(hasher.finalize()))
-                let keep: TextKeep = resolved.isSecure ? .secret : .cached
-                if !resolved.isSecure, !measureStr.isEmpty, textLayouts != nil {
+                let fieldKey: TextShapeKey?
+                if !resolved.isSecure, textLayouts != nil {
                     let sKey = TextShapeKey(
                         authText: measureStr,
                         spans: resolved.spans,
@@ -329,7 +332,20 @@ final class RetainedLayoutCoordinator {
                         isInput: true,
                         paragraphs: paragraphs
                     ))
+                    fieldKey = sKey
+                } else {
+                    fieldKey = nil
                 }
+                var hasher = Hasher()
+                hasher.combine(1)
+                if !resolved.isSecure {
+                    hashTextGeometry(&hasher, key: fieldKey, text: measureStr, spans: resolved.spans,
+                                     pills: resolved.pills, style: resolved.style)
+                }
+                hasher.combine(resolved.isSingleLine)
+                hasher.combine(rawEdit.multiline)
+                let h = UInt64(bitPattern: Int64(hasher.finalize()))
+                let keep: TextKeep = resolved.isSecure ? .secret : .cached
                 let fn: Measure = { maxW, isRealLayout, textLayouts, nodeId in
                     // Wraps at `w * scale + FIT_SLACK` device px, as every text node lays out (#948).
                     let shapeW = TextBoxGeometry.wrapWidth(resolved.measureWidth(maxW), scale: scale)
@@ -365,35 +381,20 @@ final class RetainedLayoutCoordinator {
                     isSecure: el.isSecure,
                     fallbackDirection: forcedTextFlow
                 )
-                var hasher = Hasher()
-                hasher.combine(el.richSpans != nil ? 2 : 3)
-                if !resolved.isSecure {
-                    hasher.combine(resolved.displayedText)
-                    if let sp = resolved.spans { hasher.combine(sp) }
-                    for p in resolved.pills { hasher.combine(p) }
-                    if let adv = resolved.advanceRun {
-                        hasher.combine(adv.run)
-                        hasher.combine(adv.byteOffset)
-                    }
+                // A label may supply both fallback text and the spans actually being measured.
+                let shapeText: String
+                if !resolved.isSecure, rawTxt != nil, let spans = resolved.spans {
+                    shapeText = spans.map(\.text).joined()
+                } else {
+                    shapeText = resolved.displayedText
                 }
-                hasher.combine(el.isRevealed)
-                hasher.combine(resolved.truncateFade)
-                hasher.combine(resolved.pretty)
-                hasher.combine(scale)
-                hasher.combine(resolved.style)
-                if resolved.style.fontSmoothing == .systemDefault { hasher.combine(textSystem.smoothing) }
-                let h = UInt64(bitPattern: Int64(hasher.finalize()))
-                let keep: TextKeep = resolved.isSecure ? .secret : .cached
                 let isClampedOrEllipsis = resolved.style.maxLines > 0 || resolved.style.wrap == .ellipsis
                 if textLayouts != nil, !resolved.isSecure, resolved.advanceRun == nil,
-                   !resolved.displayedText.isEmpty, resolved.truncateFade || isClampedOrEllipsis {
+                   !shapeText.isEmpty, resolved.truncateFade || isClampedOrEllipsis {
                     overflowLeaves.append((flatIndex, nodeId, resolved))
                 }
                 let labelKey: TextShapeKey?
-                if !resolved.isSecure, !resolved.displayedText.isEmpty, !resolved.truncateFade, resolved.advanceRun == nil, !isClampedOrEllipsis, textLayouts != nil {
-                    // With both raw text and rich spans, the shaper draws the spans. Otherwise
-                    // the resolver already joined and case-transformed their displayed text.
-                    let shapeText = rawTxt == nil ? resolved.displayedText : (resolved.spans?.map(\.text).joined() ?? resolved.displayedText)
+                if !resolved.isSecure, !shapeText.isEmpty, !resolved.truncateFade, resolved.advanceRun == nil, !isClampedOrEllipsis, textLayouts != nil {
                     let sKey = TextShapeKey(
                         authText: shapeText,
                         spans: resolved.spans,
@@ -416,6 +417,21 @@ final class RetainedLayoutCoordinator {
                 } else {
                     labelKey = nil
                 }
+                var hasher = Hasher()
+                hasher.combine(3)
+                if !resolved.isSecure {
+                    hashTextGeometry(&hasher, key: labelKey, text: shapeText, spans: resolved.spans,
+                                     pills: resolved.pills, style: resolved.style)
+                    if let adv = resolved.advanceRun {
+                        hasher.combine(adv.run)
+                        hasher.combine(adv.byteOffset)
+                    }
+                }
+                hasher.combine(el.isRevealed)
+                hasher.combine(resolved.truncateFade)
+                hasher.combine(resolved.pretty)
+                let h = UInt64(bitPattern: Int64(hasher.finalize()))
+                let keep: TextKeep = resolved.isSecure ? .secret : .cached
                 let widthIndependent = labelKey != nil && resolved.style.wrap == .noWrap
                 let fn: Measure = { maxW, isRealLayout, textLayouts, nodeId in
                     if widthIndependent, let labelKey, let record = textLayouts?.map[nodeId],
@@ -1161,7 +1177,14 @@ final class RetainedLayoutCoordinator {
                     collector.map[leaf.id] = TextLayoutRecord(box: box, isInput: false)
                 }
             }
-            for leaf in nonSecretLeaves where collector.map[leaf.nodeId] == nil {
+            for leaf in nonSecretLeaves {
+                if let record = collector.map[leaf.nodeId] {
+                    // An earlier probe may already have supplied this break with another palette.
+                    if record.box.spans != leaf.shapeKey.spans, record.box.shapeKey == leaf.shapeKey {
+                        collector.map[leaf.nodeId]?.box = record.box.applyingSpanInks(leaf.shapeKey.spans)
+                    }
+                    continue
+                }
                 let bounds = store.layout(flat[leaf.index].slot)
                 let contentWidth = max(0, bounds.contentBoxSize().width - bounds.scrollbarSize.width)
                 let wrapWidth = leaf.shapeKey.style.wrap == .noWrap ? nil : TextBoxGeometry.wrapWidth(contentWidth, scale: scale)

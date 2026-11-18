@@ -16,7 +16,7 @@
 static JavaVM *vm;
 static jclass bridge;
 static jmethodID constructor, configure, get_metrics, get_cell, get_caret, get_mask;
-static jmethodID get_has_color, extract_ink, get_outline, get_regions, get_single, get_unplaced, get_hint_metrics;
+static jmethodID get_has_color, extract_ink, get_cluster_owner, get_outline, get_regions, get_single, get_unplaced, get_hint_metrics;
 static jmethodID register_file, register_bytes;
 static pthread_mutex_t init_lock = PTHREAD_MUTEX_INITIALIZER;
 static atomic_bool ready;
@@ -76,6 +76,8 @@ void rune_android_text_attach(void *raw) {
     // rendering and caret geometry remain usable while its DEX is upgraded.
     extract_ink = (*e)->GetMethodID(e, local, "extractInk", "(II)Ldev/rune/RuneText;");
     if (!extract_ink) clear_exception(e);
+    get_cluster_owner = (*e)->GetMethodID(e, local, "clusterOwner", "(I)I");
+    if (!get_cluster_owner) clear_exception(e);
     if (android_get_device_api_level() >= 31) {
         get_outline = (*e)->GetMethodID(e, local, "outlineCommands", "()[F");
         if (!get_outline) clear_exception(e);
@@ -408,6 +410,29 @@ void rune_desktop_line_destroy(RuneDesktopLine *line) {
 }
 RuneDesktopLineMetrics rune_desktop_line_metrics(const RuneDesktopLine *line) {
     return line ? line->metrics : (RuneDesktopLineMetrics){0};
+}
+
+int32_t rune_desktop_line_cluster_owner(const RuneDesktopLine *line, int32_t byte) {
+    if (!line || byte < 0 || byte >= line->length) return byte;
+    Call call = begin_call();
+    JNIEnv *e = call.env;
+    int32_t result = byte;
+    if (e && get_cluster_owner) {
+        int32_t scalar = byte;
+        while (line->indices[scalar] < 0) scalar--;
+        jint owner = (*e)->CallIntMethod(e, line->layout, get_cluster_owner, line->indices[scalar]);
+        if (!clear_exception(e) && owner >= 0 && owner <= line->indices[scalar]) {
+            // Each UTF-16 unit takes at least one UTF-8 byte. Jump toward the owner
+            // without scanning the preceding word or retaining a second index.
+            while (line->indices[scalar] > owner) {
+                scalar -= line->indices[scalar] - owner;
+                while (line->indices[scalar] < 0) scalar--;
+            }
+            if (line->indices[scalar] == owner) result = scalar;
+        }
+    }
+    end_call(call);
+    return result;
 }
 
 float rune_desktop_line_caret(const RuneDesktopLine *line, int32_t byte) {

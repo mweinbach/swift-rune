@@ -26,6 +26,10 @@ internal struct ParagraphRequest: Sendable, Hashable {
     var forced: TextFlow?
     var startFlow: TextFlow
     var highlights: [TextHighlight] = []
+
+    static func supports(_ spans: [TextSpan]?) -> Bool {
+        spans?.contains(where: \.affectsLayout) != true
+    }
 }
 
 internal enum ParagraphConstants {
@@ -181,13 +185,16 @@ internal final class ParagraphLayout: @unchecked Sendable {
     }
 
     /// Glyphs in the field's coordinate and byte space, limited to the visible device rows.
-    func glyphs(top: Float, bottom: Float, using system: TextSystem) -> [PositionedGlyph] {
+    func glyphs(top: Float, bottom: Float, using system: TextSystem, inks: TextSpanInkMap = TextSpanInkMap(nil)) -> [PositionedGlyph] {
         var result: [PositionedGlyph] = []
         let revision = system.rasterRevision
+        let hasInk = !inks.isEmpty
+        var cursor = 0
         for piece in pieces(top: top, bottom: bottom) {
             for var glyph in glyphs(at: piece.index, using: system, revision: revision) {
                 glyph.rect.y += piece.y / scale
                 glyph.utf8Offset += piece.start
+                if hasInk { glyph.color = inks.color(at: glyph.utf8Offset, cursor: &cursor) }
                 result.append(glyph)
             }
         }
@@ -667,7 +674,7 @@ extension TextSystem {
 
     /// A field's layout as a text node shows it (`layout_text`): a by-paragraph field's
     /// paragraphs when `request` asks for them and the text is one (more than one paragraph, no
-    /// spans or pills, wrapped), else one layout from `layoutKeyed`.
+    /// layout-affecting spans or pills, wrapped), else one layout from `layoutKeyed`.
     internal func layoutInput(
         text: String,
         spans: [TextSpan]?,
@@ -681,22 +688,27 @@ extension TextSystem {
         request: ParagraphRequest?,
         rasterWindow: TextRasterWindow? = nil
     ) -> TextLayoutBox {
-        if let request, keep != .secret, spans?.isEmpty ?? true, pills.isEmpty, style.wrap == .wrap, style.maxLines == 0, text.utf8.contains(0x0a) {
-            let laid = layoutParagraphs(text: text, style: style, maxWidth: maxWidth, pixelScale: pixelScale, request: request)
-            let prepared = prepareHighlights(request.highlights, in: laid, field: request.field)
-            return paragraphBox(prepared, text: text, style: style, pixelScale: pixelScale)
+        if let request, keep != .secret, pills.isEmpty, style.wrap == .wrap, style.maxLines == 0,
+           ParagraphRequest.supports(spans) {
+            // A rich field's authored bytes come from its span strings, as in layoutKeyed.
+            let authored = spans.flatMap { $0.isEmpty ? nil : $0.map(\.text).joined() } ?? text
+            if authored.utf8.contains(0x0a) {
+                let laid = layoutParagraphs(text: authored, style: style, maxWidth: maxWidth, pixelScale: pixelScale, request: request)
+                let prepared = prepareHighlights(request.highlights, in: laid, field: request.field)
+                return paragraphBox(prepared, text: authored, spans: spans, style: style, pixelScale: pixelScale)
+            }
         }
         return layoutKeyed(text: text, spans: spans, pills: pills, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs, keep: keep, countAsRebreak: countAsRebreak, rasterWindow: rasterWindow)
     }
 
     /// The `TextLayoutBox` a node holds for `laid`.
-    internal func paragraphBox(_ laid: ParagraphLayout, text: String, style: TextStyle, pixelScale: Float) -> TextLayoutBox {
+    internal func paragraphBox(_ laid: ParagraphLayout, text: String, spans: [TextSpan]? = nil, style: TextStyle, pixelScale: Float) -> TextLayoutBox {
         let scale = max(pixelScale, 1.0)
         let key = TextShapeKey(authText: text, spans: nil, pills: [], style: style, pixelScale: scale, fontEpoch: currentFontEpoch,
                                languageTag: language, maxWidth: laid.maxWidth, defaultSmoothing: smoothing)
         let box = TextLayoutBox(shapeKey: key, authText: text, spans: nil, pills: [], style: style, pixelScale: scale, maxWidth: laid.maxWidth, shaped: laid.composed, hasGlyphs: true, prepared: nil)
         box.paragraphs = laid
-        return box
+        return box.applyingSpanInks(spans)
     }
 
     /// Break a retained paragraph at a new width or materialize its glyphs for paint.

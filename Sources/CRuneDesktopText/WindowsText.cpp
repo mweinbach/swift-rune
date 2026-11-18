@@ -315,11 +315,15 @@ struct InkIndex {
 
     const UINT32 length;
     std::unique_ptr<ClusterSpan *[]> owners;
+    std::unique_ptr<UINT32[]> ownerUnits;
     ShapedRun *runs = nullptr;
     ShapedRun **tail = &runs;
     uint64_t nextPaintOrder = 0;
 
-    explicit InkIndex(UINT32 length) : length(length), owners(new (std::nothrow) ClusterSpan *[length]{}) {}
+    explicit InkIndex(UINT32 length) : length(length), owners(new (std::nothrow) ClusterSpan *[length]{}),
+                                      ownerUnits(new (std::nothrow) UINT32[length]) {
+        if (ownerUnits) std::fill_n(ownerUnits.get(), length, UINT32_MAX);
+    }
     ~InkIndex() {
         while (runs) {
             auto *next = runs->next;
@@ -375,7 +379,10 @@ struct InkIndex {
         for (UINT32 unit = 0; unit < description->stringLength; ++unit) {
             const UINT32 first = description->clusterMap ? description->clusterMap[unit] : (count == 1 ? 0 : unit);
             if (first >= count) return E_UNEXPECTED;
-            starts[first] = std::min(starts[first], description->textPosition + unit);
+            const UINT32 position = description->textPosition + unit;
+            starts[first] = std::min(starts[first], position);
+            // clusterMap is in logical UTF-16 order even for a visually reversed run.
+            ownerUnits[position] = std::min(ownerUnits[position], starts[first]);
         }
         if (starts[0] == UINT32_MAX) return E_UNEXPECTED;
         FLOAT pen = 0;
@@ -712,7 +719,8 @@ struct RuneDesktopLine {
         if (!inkIndex) {
             if (!source) return {};
             std::unique_ptr<InkIndex> index(new (std::nothrow) InkIndex(units));
-            if (!index || !index->owners || FAILED(source->Draw(index.get(), collector.Get(), 0, 0))) return {};
+            if (!index || !index->owners || !index->ownerUnits ||
+                FAILED(source->Draw(index.get(), collector.Get(), 0, 0))) return {};
             inkIndex.Attach(index.release());
         }
         return inkIndex;
@@ -747,6 +755,16 @@ struct RuneDesktopLine {
         return x;
     }
 };
+
+extern "C" int32_t rune_desktop_line_cluster_owner(const RuneDesktopLine *line, int32_t byte) {
+    if (!line || !line->layout || byte < 0 || byte >= line->byteCount) return byte;
+    const auto index = line->shapedIndex(line->layout.Get(), line->position(line->byteCount));
+    if (!index) return byte;
+    const auto bytes = line->byteToUnit.get();
+    const UINT32 unit = bytes[byte], owner = index->ownerUnits[unit];
+    if (owner == UINT32_MAX || (owner == unit && (!byte || bytes[byte - 1] != unit))) return byte;
+    return static_cast<int32_t>(std::lower_bound(bytes, bytes + byte + 1, owner) - bytes);
+}
 
 extern "C" int32_t rune_desktop_line_quality_glyphs(const RuneDesktopLine *line, void *context, RuneQualityGlyphFn emit) {
     if (!line || !line->layout || !emit) return 0;

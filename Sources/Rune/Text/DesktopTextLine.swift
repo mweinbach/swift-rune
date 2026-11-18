@@ -1623,6 +1623,24 @@ final class DesktopTextLine {
         (originX + cell.left) * scale - cell.localLeft
     }
 
+    /// A native ligature can cover several editing cells. All its slices share its first
+    /// logical byte for foreground paint and selection, including in visual RTL order.
+    func clusterByte(for cell: Cell) -> Int {
+        let start = cell.nativeBytes.lowerBound
+        guard start > 0 else { return cell.byte }
+        #if os(WASI)
+        if cell.run.fixedPitchBytes != nil { return cell.byte }
+        #endif
+        let owner = rune_desktop_line_cluster_owner(cell.run.native, start)
+        guard owner >= 0, owner < start else { return cell.byte }
+        let byte = cell.byte - Int(start - owner)
+        if let candidate = cells[byte], candidate.run === cell.run, candidate.nativeBytes.contains(owner) {
+            return byte
+        }
+        // Tabs and directional markers can add bytes only to the native string.
+        return cells.values.first { $0.run === cell.run && $0.nativeBytes.contains(owner) }?.byte ?? cell.byte
+    }
+
     #if os(Linux) || os(Windows) || os(Android)
     func outlineGroup(for glyph: PositionedGlyph, cell: Cell, originX: Float, baselineY: Float,
                       glide: Vec2, isolated: Bool, atlas: GlyphAtlas) -> TextOutlineGroup? {
@@ -1641,6 +1659,7 @@ final class DesktopTextLine {
                 rasterWindow: TextRasterWindow? = nil) -> [PositionedGlyph] {
         let owned = isolateCell ? cell.run.ownedInk(cell.nativeBytes) : nil
         let run = owned ?? cell.run
+        let cluster = utf8Offset ?? (isolateCell ? cell.byte : clusterByte(for: cell))
         var quads: [PositionedGlyph] = []
         let localX = runOriginPx(for: cell, originX: originX)
         var maskX = localX, colorX = localX
@@ -1723,9 +1742,10 @@ final class DesktopTextLine {
                         var ink = rect
                         ink.y += Float(rows.lowerBound) / scale
                         ink.w = Float(rows.count) / scale
-                        var glyph = PositionedGlyph(rect: ink, uv: uv, color: color, atlasPage: entry.page, utf8Offset: utf8Offset ?? cell.byte)
+                        var glyph = PositionedGlyph(rect: ink, uv: uv, color: color, atlasPage: entry.page, utf8Offset: cluster)
                         glyph.maskShiftY = Float(glide.phase.y) / Float(GlyphAtlas.glidePhases)
                         #if os(Linux) || os(Windows) || os(Android)
+                        if !isolateCell { glyph.desktopCellOffset = Int32(cell.byte - cluster) }
                         if key.outlineMode == .windfoil {
                             glyph.desktopInk = DesktopGlyphInk(run: cell.run, key: key, size: dimensions, owner: owned?.inkOwner,
                                                                columns: columns, rows: rows)
@@ -1751,7 +1771,7 @@ final class DesktopTextLine {
                                                  phase: glide.phase, sourceColumns: key.sourceColumns, inkOwner: key.inkOwner)
                     if let bitmap = atlas.desktopColor(key: cache ? cropKey : nil, width: columns.count, height: tile.height,
                                                        bitmap: { planes.colorBitmap(in: columns) }) {
-                        quads.append(PositionedGlyph(rect: rect, colorGlyph: bitmap, color: color, utf8Offset: utf8Offset ?? cell.byte))
+                        quads.append(PositionedGlyph(rect: rect, colorGlyph: bitmap, color: color, utf8Offset: cluster))
                     }
                 }
             }
@@ -1766,7 +1786,7 @@ final class DesktopTextLine {
     /// Ordinary labels sample adjacent glyphs from the same shaped browser tile. A single
     /// quad can cover consecutive cells with the same source, ink, and quantized font pen.
     /// Byte positions remain in the measured line for selection and accessibility.
-    func browserLabelGlyphs(_ text: String, spans: [TextSpan]?, originX: Float, baselineY: Float,
+    func browserLabelGlyphs(_ text: String, spans: [TextSpan]?, inks: TextSpanInkMap, originX: Float, baselineY: Float,
                             restingXPx: Float, atlas: GlyphAtlas) -> [PositionedGlyph]? {
         guard !text.isEmpty, spans?.isEmpty != true, cells.values.count == text.utf8.count, restingXPx.isFinite,
               scale == 1 || scale == 2 || scale == 4 else { return nil }
@@ -1798,16 +1818,28 @@ final class DesktopTextLine {
                 }
             }
             guard let first = cells[offset], spanEnd > offset else { return nil }
+            let cluster = spans == nil ? offset : clusterByte(for: first)
+            let ink: Color?
+            let end: Int
+            if cluster == offset {
+                ink = spans?[spanIndex].color
+                end = min(bytes, spanEnd)
+            } else {
+                // A colour edge may fall inside (for example) an "ffi". Paint its
+                // continuation with the owner's ink, then resume ordinary grouping.
+                ink = inks.color(at: cluster)
+                end = offset + 1
+            }
             var last = first
             let placement = pen(first)
             var next = offset + 1
-            while next < min(bytes, spanEnd), let cell = cells[next], cell.run === first.run,
+            while next < end, let cell = cells[next], cell.run === first.run,
                   last.localRight.rounded() == cell.localLeft.rounded(), pen(cell) == placement {
                 last = cell
                 next += 1
             }
             glyphs += self.glyphs(for: first, through: first.byte == last.byte ? nil : last, originX: originX, baselineY: baselineY,
-                                 color: spans?[spanIndex].color, atlas: atlas, cache: true, restingXPx: absolute)
+                                 color: ink, atlas: atlas, cache: true, restingXPx: absolute, utf8Offset: cluster)
             offset = next
         }
         return glyphs
@@ -1933,15 +1965,27 @@ final class DesktopRestingText {
     private var minRunX = Float.infinity, maxRunX = -Float.infinity
     private let glide: Vec2
     private let cache: Bool
+    private let inkAtByte: ((Int) -> Color?)?
     private let lock = NSLock()
     private var last: (x: Float, glyphs: [PositionedGlyph], ranges: [Range<Int>], pages: Set<UInt16>, resets: UInt64)?
 
     private let rasterWindow: TextRasterWindow?
 
-    init(glide: Vec2, cache: Bool, rasterWindow: TextRasterWindow? = nil) {
+    init(glide: Vec2, cache: Bool, rasterWindow: TextRasterWindow? = nil, inkAtByte: ((Int) -> Color?)? = nil) {
         self.rasterWindow = rasterWindow
         self.glide = glide
         self.cache = cache
+        self.inkAtByte = inkAtByte
+    }
+
+    /// Reuse the native runs and pen bounds. Placed quads can carry an ink-dependent mask.
+    func applyingSpanInks(inkAtByte: @escaping (Int) -> Color?) -> DesktopRestingText {
+        let result = DesktopRestingText(glide: glide, cache: cache, rasterWindow: rasterWindow, inkAtByte: inkAtByte)
+        result.lines = lines
+        result.minRunX = minRunX
+        result.maxRunX = maxRunX
+        result.hasFractionalRun = hasFractionalRun
+        return result
     }
 
     var retainedGlyphBytes: Int {
@@ -1967,7 +2011,7 @@ final class DesktopRestingText {
     func outlineGroup(for glyph: PositionedGlyph, line index: Int, shaped: ShapedText,
                       atlas: GlyphAtlas) -> TextOutlineGroup? {
         guard cache, let line = lines[index],
-              let cell = line.native.cells[glyph.utf8Offset + (line.sourceByteOffset ?? 0)] else { return nil }
+              let cell = line.native.cells[glyph.utf8Offset + Int(glyph.desktopCellOffset) + (line.sourceByteOffset ?? 0)] else { return nil }
         return line.native.outlineGroup(for: glyph, cell: cell, originX: line.originX, baselineY: line.baselineY,
             glide: glide, isolated: line.sourceByteOffset != nil, atlas: atlas)
     }
@@ -2001,9 +2045,12 @@ final class DesktopRestingText {
                     for character in record.text {
                         let sourceByte = byte + (line.sourceByteOffset ?? 0)
                         if let cell = line.native.cells[sourceByte] {
+                            let cluster = line.sourceByteOffset == nil ? line.native.clusterByte(for: cell) : byte
+                            let color: Color?
+                            if let inkAtByte { color = inkAtByte(cluster) } else { color = line.colors[cluster] }
                             glyphs += line.native.glyphs(for: cell, originX: line.originX, baselineY: line.baselineY,
-                                color: line.colors[byte], atlas: atlas, cache: cache, glidePx: glide,
-                                restingXPx: x, utf8Offset: byte, isolateCell: line.sourceByteOffset != nil,
+                                color: color, atlas: atlas, cache: cache, glidePx: glide,
+                                restingXPx: x, utf8Offset: cluster, isolateCell: line.sourceByteOffset != nil,
                                 rasterWindow: rasterWindow)
                         }
                         byte += character.utf8.count
