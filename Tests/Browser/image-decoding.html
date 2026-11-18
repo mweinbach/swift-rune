@@ -48,8 +48,8 @@ function decode(input, limit = 0, mode = 0) {
     view.fill(0); // Swift is free to reuse its transfer buffer immediately.
     return result;
 }
-async function rejects(input, message) {
-    try { await decode(input); } catch (error) { check(error.message.includes(message), error.message); return; }
+async function rejects(input, message, sourceMode = 0) {
+    try { await decode(input, 0, sourceMode); } catch (error) { check(error.message.includes(message), error.message); return; }
     throw Error('Image unexpectedly loaded');
 }
 try {
@@ -132,6 +132,17 @@ try {
     const vector = (await decode(svg)).frames[0];
     check(vector.w === 12 && vector.h === 6 && pixel(vector, 6, 3) === '255,0,0,255' && pixel(vector, 0, 0) === '0,0,0,0', 'ViewBox-only SVG rasterization');
     const base64 = data => btoa(String.fromCharCode(...data));
+    for (const size of [2, 4]) for (const littleEndian of [false, true]) for (const bom of ['', '\uFEFF']) {
+        const source = bom + ' \n<svg width="2" height="1"/>';
+        const input = new Uint8Array(source.length * size);
+        const view = new DataView(input.buffer);
+        for (let i = 0; i < source.length; i++) {
+            if (size === 2) view.setUint16(i * size, source.charCodeAt(i), littleEndian);
+            else view.setUint32(i * size, source.charCodeAt(i), littleEndian);
+        }
+        await rejects(input, 'Invalid SVG document');
+        await rejects(text.encode('data:application/octet-stream;base64,' + base64(input)), 'Invalid SVG document', 1);
+    }
     async function svgSample(body) {
         const source = ' '.repeat(300) + '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 2 1">' + body + '</svg>';
         return (await decode(text.encode(source), 2)).frames[0];

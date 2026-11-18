@@ -143,10 +143,19 @@ function identify(bytes, type) {
     }
     if (n > 2 && tag(0, 2) === 'BM') return ['image/bmp'];
     if (n > 4 && view.getUint32(0) === 256) return ['image/x-icon'];
+    // Wide XML must reach the same UTF-8 SVG parser even without a MIME hint.
+    const bom = n >= 2 ? view.getUint16(0) : 0;
+    if (bom === 0xfeff || bom === 0xfffe || (n >= 4 && view.getUint32(0) === 0x0000feff)) return ['image/svg+xml'];
     const whitespace = [9, 10, 12, 13, 32];
     let first = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0;
     while (whitespace.includes(bytes[first])) first++;
     if (bytes[first] === 60) return ['image/svg+xml'];
+    if (bytes[first] === 0) {
+        while (bytes[first] === 0 || whitespace.includes(bytes[first])) first++;
+        // Another zero belongs to the next wide character. A binary box size
+        // ending in 0x3c followed by an ASCII box type does not start markup.
+        if (bytes[first] === 60 && bytes[first + 1] === 0) return ['image/svg+xml'];
+    }
     return [type?.split(';')[0].toLowerCase() || ''];
 }
 
