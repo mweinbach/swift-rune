@@ -26,6 +26,7 @@ IMPORT("extract_ink") extern uint32_t browser_extract_ink(uint32_t, int32_t, int
     RuneDesktopLineMetrics *, uint32_t);
 IMPORT("caret") extern float browser_caret(uint32_t, int32_t);
 IMPORT("cell") extern int32_t browser_cell(uint32_t, int32_t, int32_t, float *, float *, uint32_t);
+IMPORT("cells") extern void browser_cells(uint32_t, RuneBrowserCell *, int32_t, int32_t);
 IMPORT("mask") extern int32_t browser_mask(uint32_t, int32_t, int32_t, int32_t, int32_t, uint8_t *, uint32_t);
 IMPORT("has_color") extern int32_t browser_has_color(uint32_t);
 IMPORT("color") extern int32_t browser_color(uint32_t, int32_t, int32_t, int32_t, int32_t, uint8_t *);
@@ -139,6 +140,14 @@ int32_t rune_desktop_line_cell(const RuneDesktopLine *line, int32_t start, int32
 int32_t rune_browser_ink_cell(const RuneDesktopLine *line, int32_t start, int32_t end,
     float *left, float *advance) {
     return read_cell(line, start, end, left, advance, 1);
+}
+
+void rune_browser_line_cells(const RuneDesktopLine *line, RuneBrowserCell *cells, int32_t count,
+    int32_t report_source) {
+#ifdef RUNE_BROWSER_TEXT
+    _Static_assert(sizeof(RuneBrowserCell) == 7 * sizeof(uint32_t), "Unexpected browser cell layout");
+    if (line && cells && count > 0) browser_cells(line->handle, cells, count, report_source);
+#endif
 }
 
 int32_t rune_desktop_line_mask(const RuneDesktopLine *line, int32_t x, int32_t y,

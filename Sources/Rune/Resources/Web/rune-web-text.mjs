@@ -712,6 +712,14 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         return x;
     }
 
+    function cellDirection(line, start, end, x, width, a, b, reportSource) {
+        if (!width) return 0;
+        // A collapsed DOM range can use the adjacent run's edge at a bidi boundary.
+        const direction = Math.min(Math.abs(a - x), Math.abs(b - (x + width))) <=
+            Math.min(Math.abs(a - (x + width)), Math.abs(b - x)) ? 1 : -1;
+        return reportSource && registeredCell(doc, line, start, end) ? 2 * direction : direction;
+    }
+
     return {
         ...createRuneSpellImports(getMemory, doc, spellDictionaries),
         wake(delay) { wakeRuneBrowser(getMemory(), delay); },
@@ -889,13 +897,25 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             const out = view();
             out.setFloat32(left, x, true);
             out.setFloat32(width, rect.width, true);
-            if (!rect.width) return 0;
-            // At a bidi boundary a collapsed DOM range can use the adjacent run's edge.
-            // Use the endpoint nearest either edge of this particular grapheme.
-            const a = caret(line, start), b = caret(line, end);
-            const direction = Math.min(Math.abs(a - x), Math.abs(b - (x + rect.width))) <=
-                Math.min(Math.abs(a - (x + rect.width)), Math.abs(b - x)) ? 1 : -1;
-            return reportSource && registeredCell(doc, line, start, end) ? 2 * direction : direction;
+            return rect.width ? cellDirection(line, start, end, x, rect.width, caret(line, start), caret(line, end), reportSource) : 0;
+        },
+        cells(id, ptr, count, reportSource) {
+            const line = runs.get(id);
+            const memoryBuffer = memory();
+            const ints = new Int32Array(memoryBuffer, ptr >>> 0, count * 7);
+            const floats = new Float32Array(memoryBuffer, ptr >>> 0, count * 7);
+            const origin = lineOrigin(line);
+            for (let i = 0; i < ints.length; i += 7) {
+                const start = ints[i], end = ints[i + 1];
+                const rect = bounds(line, start, end);
+                const x = rect.left - origin, width = rect.width;
+                const a = caret(line, start), b = caret(line, end);
+                floats[i + 2] = x;
+                floats[i + 3] = width;
+                floats[i + 4] = a;
+                floats[i + 5] = b;
+                ints[i + 6] = cellDirection(line, start, end, x, width, a, b, reportSource);
+            }
         },
         mask(id, x, y, width, height, destination, rgb = 0xffffff) {
             const line = runs.get(id);

@@ -777,6 +777,23 @@ private final class DesktopTextRun {
         return Int32(byte + (count == 0 ? 0 : tabPadding[count - 1].cumulative))
     }
 
+    #if os(WASI)
+    func browserCells(for text: String, startingAt first: Int, marked: TextSystem.MarkedPillText?,
+                      reportSource: Bool) -> [RuneBrowserCell] {
+        var byte = first
+        var cells = text.map { character in
+            let length = character.utf8.count
+            let start = marked?.byteOffset(byte) ?? byte
+            byte += length
+            return RuneBrowserCell(start: nativeByte(start), end: nativeByte(start + length),
+                                  left: 0, advance: 0, caret: 0, end_caret: 0, direction: 0)
+        }
+        let count = Int32(cells.count)
+        rune_browser_line_cells(native, &cells, count, reportSource ? 1 : 0)
+        return cells
+    }
+    #endif
+
     func mask(x: Int, y: Int, width: Int, height: Int, phase: SIMD2<Int> = .zero,
               sourceColumns: Range<Int>? = nil, browserRGB: UInt32 = 0xffffff) -> [UInt8]? {
         renderLock.lock()
@@ -1029,9 +1046,9 @@ final class DesktopTextLine {
 
     init?(text: String, start: Int, style: TextStyle, families: (sans: String, mono: String), language: String?, scale: Float,
           faceBoxes: DesktopFaceBoxes = DesktopFaceBoxes(), cutsCodePadding: Bool = false,
-          pillRanges: [Range<Int>] = [], tabs: DesktopTabStops? = nil, span: (Int) -> TextSpan?,
+          pillRanges: [Range<Int>] = [], tabs: DesktopTabStops? = nil, span: ((Int) -> TextSpan?)? = nil,
           stretch: (Character, Int) -> Float = { _, _ in 0 },
-          extra: (Int, Int) -> (leading: Float, trailing: Float) = { _, _ in (0, 0) }) {
+          extra: ((Int, Int) -> (leading: Float, trailing: Float))? = nil) {
         guard !text.isEmpty else { return nil }
         self.scale = scale
         self.smoothing = style.fontSmoothing
@@ -1039,43 +1056,47 @@ final class DesktopTextLine {
         // Keep spans with equal font settings together. Decoration and color boundaries
         // can then divide the same shaped ligature without changing its advance.
         var groups: [(start: Int, font: DesktopFont, text: String, inlineHeightPx: Float?)] = []
-        var byte = start
-        var lastSpan: TextSpan?
         let baseFont = DesktopFont(style: style, span: nil, families: families, language: language, scale: scale)
-        let tabs = tabs ?? DesktopTabStops(text, start: start) { style.family.isMonospace || span($0)?.monospace == true }
-        var font = baseFont
+        let tabs = tabs ?? DesktopTabStops(text, start: start) { style.family.isMonospace || span?($0)?.monospace == true }
         let lineHeightPx = style.resolvedLineHeight * scale
-        var inlineHeightPx: Float?
-        for ch in text {
-            let nextSpan = span(byte)
-            if nextSpan != lastSpan {
-                font = DesktopFont(style: style, span: nextSpan, families: families, language: language, scale: scale)
-                inlineHeightPx = nil
-                if let nextSpan, nextSpan.monospace || nextSpan.size != nil {
-                    let isPadding = cutsCodePadding && !nextSpan.monospace
-                        && (nextSpan.size ?? style.size) < style.size
-                        && nextSpan.text.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
-                    if !isPadding {
-                        // Resolve relative line height at the authored point size, before the
-                        // device scale can round the span size across a quantization boundary.
-                        inlineHeightPx = nextSpan.size.map { lineHeightPx / style.size * $0 } ?? lineHeightPx
+        if let span {
+            var byte = start
+            var lastSpan: TextSpan?
+            var font = baseFont
+            var inlineHeightPx: Float?
+            for ch in text {
+                let nextSpan = span(byte)
+                if nextSpan != lastSpan {
+                    font = DesktopFont(style: style, span: nextSpan, families: families, language: language, scale: scale)
+                    inlineHeightPx = nil
+                    if let nextSpan, nextSpan.monospace || nextSpan.size != nil {
+                        let isPadding = cutsCodePadding && !nextSpan.monospace
+                            && (nextSpan.size ?? style.size) < style.size
+                            && nextSpan.text.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
+                        if !isPadding {
+                            // Resolve relative line height at the authored point size, before the
+                            // device scale can round the span size across a quantization boundary.
+                            inlineHeightPx = nextSpan.size.map { lineHeightPx / style.size * $0 } ?? lineHeightPx
+                        }
                     }
+                    lastSpan = nextSpan
                 }
-                lastSpan = nextSpan
+                if groups.last?.font == font {
+                    groups[groups.count - 1].text.append(ch)
+                    if let inlineHeightPx { groups[groups.count - 1].inlineHeightPx = inlineHeightPx }
+                } else {
+                    groups.append((byte, font, String(ch), inlineHeightPx))
+                }
+                byte += ch.utf8.count
             }
-            if groups.last?.font == font {
-                groups[groups.count - 1].text.append(ch)
-                if let inlineHeightPx { groups[groups.count - 1].inlineHeightPx = inlineHeightPx }
-            } else {
-                groups.append((byte, font, String(ch), inlineHeightPx))
-            }
-            byte += ch.utf8.count
+        } else {
+            groups.append((start, baseFont, text, nil))
         }
         // Resolve the paragraph's visual order before dividing it into font runs.
         // A change of weight or family in the middle of Hebrew in an English sentence
         // must not turn those two styled runs into independent LTR paragraphs.
         let isolateLabels = style.byParagraphStart != nil
-        let marked = TextSystem.MarkedPillText(text, start: start, ranges: pillRanges, isolateLabels: isolateLabels, padding: extra)
+        let marked = TextSystem.MarkedPillText(text, start: start, ranges: pillRanges, isolateLabels: isolateLabels, padding: extra ?? { _, _ in (0, 0) })
         let hasMarkers = !(marked?.markers.isEmpty ?? true)
         let bidi = groups.count > 1 || hasMarkers ? DesktopTextRun(text: text, font: baseFont, start: start, marked: marked, tabs: tabs) : nil
         if hasMarkers && bidi == nil { return nil }
@@ -1113,37 +1134,46 @@ final class DesktopTextLine {
                 let metrics = faceBoxes.box(for: group.font) ?? run.boxMetrics
                 boxes.append((metrics.ascentPx, metrics.descentPx, inlineHeightPx))
             }
+            #if os(WASI)
+            let samples = run.browserCells(for: group.text, startingAt: 0, marked: groupIsolates, reportSource: reportInkSource)
+            let referenceSamples = bidi?.browserCells(for: group.text, startingAt: group.start - start, marked: marked, reportSource: false)
+            #endif
             var local = 0
-            for ch in group.text {
+            for (index, ch) in group.text.enumerated() {
                 let end = local + ch.utf8.count
                 let byte = group.start + local
+                #if os(WASI)
+                let sample = samples[index], reference = referenceSamples?[index] ?? sample
+                let nativeBytes = sample.start..<sample.end
+                let left = sample.left, right = left + sample.advance
+                var advance = sample.advance
+                let direction = reference.direction
+                let magnitude: Int8 = abs(sample.direction) == 2 ? 2 : 1
+                let refLeft = reference.left, refWidth = reference.advance
+                let caret = reference.caret, endCaret = reference.end_caret
+                #else
                 var left: Float = 0, advance: Float = 0
                 let localByte = groupIsolates?.byteOffset(local) ?? local
                 let nativeBytes = run.nativeByte(localByte)..<run.nativeByte(localByte + ch.utf8.count)
-                #if os(WASI)
-                var direction = reportInkSource
-                    ? rune_browser_ink_cell(run.native, nativeBytes.lowerBound, nativeBytes.upperBound, &left, &advance)
-                    : rune_desktop_line_cell(run.native, nativeBytes.lowerBound, nativeBytes.upperBound, &left, &advance)
-                let magnitude: Int8 = direction == 2 || direction == -2 ? 2 : 1
-                #else
                 var direction = rune_desktop_line_cell(run.native, nativeBytes.lowerBound, nativeBytes.upperBound, &left, &advance)
                 let magnitude: Int8 = 1
-                #endif
                 let right = left + advance
                 var refLeft = left, refWidth = advance
-                if ch == "\t", let count = tabs.columns[byte] {
-                    advance += Float(count - 1) * style.letterSpacing * scale
-                }
                 let reference = bidi ?? run
                 let refByte = bidi == nil ? localByte : marked?.byteOffset(byte - start) ?? (byte - start)
                 let refStart = reference.nativeByte(refByte), refEnd = reference.nativeByte(refByte + ch.utf8.count)
                 if bidi != nil {
                     direction = rune_desktop_line_cell(reference.native, refStart, refEnd, &refLeft, &refWidth)
                 }
+                let caret = rune_desktop_line_caret(reference.native, refStart)
+                let endCaret = rune_desktop_line_caret(reference.native, refEnd)
+                #endif
+                if ch == "\t", let count = tabs.columns[byte] {
+                    advance += Float(count - 1) * style.letterSpacing * scale
+                }
                 visual.append(PlacedCell(character: ch, byte: byte, end: group.start + end, nativeBytes: nativeBytes,
                     left: left, right: right, advance: advance, refLeft: refLeft, refWidth: refWidth,
-                    caret: rune_desktop_line_caret(reference.native, refStart),
-                    endCaret: rune_desktop_line_caret(reference.native, refEnd), run: run, direction: direction < 0 ? -magnitude : magnitude))
+                    caret: caret, endCaret: endCaret, run: run, direction: direction < 0 ? -magnitude : magnitude))
                 local = end
             }
         }
@@ -1156,12 +1186,48 @@ final class DesktopTextLine {
             descentPx: strut.descentPx, lineHeightPx: lineHeightPx).over
         growth = InlineCodeBox.lineGrowth(strut: strut, code: boxes, lineHeightPx: lineHeightPx)
         baseline = (strutBaselinePx + growth.over) / scale
+        func edge(_ x: Float) -> Int64 { Int64((Double(x) * 1024).rounded()) }
+        // In an ordinary LTR run each strong caret lands at the next selection's
+        // leading edge. The trailing selection edge may overshoot that caret by
+        // a fraction of a pixel. Keep both native values for ink and hit testing.
+        if bidi == nil, extra == nil, let last = visual.last {
+            var ordered = true
+            var previousEnd = visual[0].caret
+            var previousRight = Int64.min
+            for cell in visual {
+                let start = edge(cell.refLeft), end = edge(cell.endCaret)
+                let right = edge(cell.refLeft + cell.refWidth)
+                guard !cell.isRTL, cell.caret == cell.refLeft, cell.caret == previousEnd,
+                      end > start, right > start, end > previousRight else { ordered = false; break }
+                previousEnd = cell.endCaret
+                previousRight = max(previousRight, right)
+            }
+            if ordered {
+                var pen: Float = 0, glyphEnd: Float = 0
+                var result = Dictionary<Int, Cell>(minimumCapacity: visual.count)
+                let terminalCaretAtRight = edge(last.endCaret) == edge(last.refLeft + last.refWidth)
+                for cell in visual {
+                    let left = pen, advance = cell.advance / scale
+                    pen += advance + style.letterSpacing + stretch(cell.character, cell.byte)
+                    glyphEnd = max(glyphEnd, pen)
+                    let endCaret = cell.byte == last.byte && !terminalCaretAtRight ? left + advance : pen
+                    result[cell.byte] = Cell(character: cell.character, byte: cell.byte, byteEnd: cell.end,
+                        advance: advance, left: left, right: pen, caret: left, direction: cell.direction, endCaret: endCaret,
+                        run: cell.run, nativeBytes: cell.nativeBytes, localLeft: cell.left, localRight: cell.right)
+                }
+                leadingMarkers = [:]
+                trailingMarkers = [:]
+                cells = result
+                width = pen
+                glyphEndPt = glyphEnd
+                return
+            }
+        }
         visual.sort { $0.refLeft == $1.refLeft ? $0.byte < $1.byte : $0.refLeft < $1.refLeft }
         // The native strong caret can lie on the opposite edge of a mixed-direction run.
         // Preserve that visual edge as the actual font widths and inline spacing are applied.
         var edges: [Int64: Float] = [:]
         var intervals: [(left: Float, right: Float)] = []
-        func edge(_ x: Float) -> Int64 { Int64((Double(x) * 1024).rounded()) }
         var widthPt: Float = 0
         var leading: [Int: MarkerPosition] = [:]
         var trailing: [Int: MarkerPosition] = [:]
@@ -1191,7 +1257,7 @@ final class DesktopTextLine {
         var lastGlyphEdge: Float = 0
         for cell in visual {
             placeMarks(before: cell.refLeft + cell.refWidth / 2)
-            let padding = hasMarkers ? (leading: Float(0), trailing: Float(0)) : extra(cell.byte, cell.end)
+            let padding: (leading: Float, trailing: Float) = hasMarkers ? (0, 0) : (extra?(cell.byte, cell.end) ?? (0, 0))
             let advance = cell.advance / scale + style.letterSpacing + stretch(cell.character, cell.byte)
             widthPt += cell.isRTL ? padding.trailing : padding.leading
             let left = widthPt

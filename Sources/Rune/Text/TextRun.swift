@@ -206,7 +206,7 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         #else
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
         desktop = DesktopTextLine(text: text, start: 0, style: style,
-            families: textSystem.families(), language: textSystem.language, scale: scale, span: { _ in nil })
+            families: textSystem.families(), language: textSystem.language, scale: scale)
         #endif
         var xs: [Float] = []
         var pChars: [PortableCapturedChar] = []

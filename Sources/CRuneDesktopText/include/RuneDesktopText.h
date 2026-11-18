@@ -31,6 +31,15 @@ int32_t rune_browser_text_platform(void);
 // As rune_desktop_line_cell, with magnitude 2 for a grapheme painted by a registered face.
 int32_t rune_browser_ink_cell(const RuneDesktopLine *line, int32_t start, int32_t end,
     float *left, float *advance);
+// Fill selection geometry for authored graphemes of a single native line in one host call.
+// The caller supplies byte ranges. Collapsed caret positions can differ from selection edges.
+typedef struct {
+    int32_t start, end;
+    float left, advance, caret, end_caret;
+    int32_t direction;
+} RuneBrowserCell;
+void rune_browser_line_cells(const RuneDesktopLine *line, RuneBrowserCell *cells, int32_t count,
+    int32_t report_source);
 // Canvas font smoothing can change the R8 coverage with the opaque sRGB foreground.
 int32_t rune_browser_line_mask_ink(const RuneDesktopLine *line, int32_t x, int32_t y,
     int32_t width, int32_t height, uint32_t rgb, uint8_t *pixels);

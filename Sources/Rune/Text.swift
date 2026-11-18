@@ -7030,7 +7030,7 @@ public final class TextSystem: @unchecked Sendable {
         var top: Float = 0
         for paragraph in text.split(separator: "\n", omittingEmptySubsequences: false) {
             if let line = DesktopTextLine(text: String(paragraph), start: 0, style: style,
-                families: families(), language: language, scale: scale, span: { _ in nil }) {
+                families: families(), language: language, scale: scale) {
                 line.addInk(to: &ink, originYPx: top.rounded())
             }
             top += style.resolvedLineHeight * scale
@@ -7168,7 +7168,7 @@ public final class TextSystem: @unchecked Sendable {
         func blankStrut() -> DesktopTextLine? {
             guard nativeFonts else { return nil }
             return DesktopTextLine(text: " ", start: 0, style: style, families: families(),
-                                   language: language, scale: scale, faceBoxes: faceBoxes, span: { _ in nil })
+                                   language: language, scale: scale, faceBoxes: faceBoxes)
         }
         #endif
         if fullText.isEmpty {
@@ -7274,7 +7274,7 @@ public final class TextSystem: @unchecked Sendable {
             if let rtl { lineStyle.direction = rtl ? .rtl : .ltr }
             return DesktopTextLine(text: text, start: start, style: lineStyle, families: nativeFamilies, language: language,
                 scale: scale, faceBoxes: faceBoxes, cutsCodePadding: cutsCodePadding, pillRanges: pillRanges, tabs: tabs,
-                span: { spanAt(utf8Offset: $0) }, stretch: stretch, extra: { byte, end in
+                span: spanEntries.isEmpty ? nil : spanAt(utf8Offset:), stretch: stretch, extra: validPills.isEmpty ? nil : { byte, end in
                     (leadExtra(atUTF8: byte), trailExtra(endingAtUTF8: end))
                 })
         }

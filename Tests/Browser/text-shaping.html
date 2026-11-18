@@ -123,6 +123,7 @@ try {
             check(colorPixels > 0 || mask.some(a => a > 0 && a < 255), 'Coverage lacks antialiasing');
             check(data.getFloat32(28, true) > data.getFloat32(36, true) && data.getFloat32(36, true) > 0, 'Face metrics missing');
             const cells = [];
+            const records = 262144, stride = 28;
             let offset = 0;
             for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)) {
                 const end = offset + utf8.encode(segment).length;
@@ -134,8 +135,20 @@ try {
                     check(data.getFloat32(64, true) === cell.x && data.getFloat32(68, true) === cell.width,
                         'Source reporting changed the cell geometry for ' + segment);
                 }
+                data.setInt32(records + cells.length * stride, offset, true);
+                data.setInt32(records + cells.length * stride + 4, end, true);
                 cells.push(cell);
                 offset = end;
+            }
+            host.cells(id, records, cells.length, reportSource);
+            for (let i = 0; i < cells.length; ++i) {
+                const cell = cells[i], base = records + i * stride;
+                const from = data.getInt32(base, true), to = data.getInt32(base + 4, true);
+                check(data.getFloat32(base + 8, true) === cell.x && data.getFloat32(base + 12, true) === cell.width &&
+                    data.getFloat32(base + 16, true) === Math.fround(host.caret(id, from)) &&
+                    data.getFloat32(base + 20, true) === Math.fround(host.caret(id, to)) &&
+                    data.getInt32(base + 24, true) === (reportSource ? cell.source : cell.dir),
+                    'Bulk geometry differs from the individual native measurements at byte ' + from + ' in ' + text);
             }
             return { advance, cells, ink, mask, colorPixels, x, y, width, height, ascent: data.getFloat32(4, true) };
         } finally { host.release(id); }
