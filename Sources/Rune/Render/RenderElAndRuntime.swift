@@ -918,7 +918,7 @@ extension Runtime {
             : FrameGeometry(minimumCapacity: frameOut.nodes.count)
         var newPresentedScales = PresentedScales(count: flatNodes.count, byPath: nodeByPath,
                                                  byId: nodeIndexById, hasExits: !topology.exits.isEmpty)
-        func paintCarriedScroll(_ node: borrowing FlatNode) -> Vec2 {
+        func paintCarriedScroll(_ node: FlatNode) -> Vec2 {
             // Indexed geometry uses live mounted slots. Their enclosing viewport's sum
             // becomes reusable once all its scale and turn ancestors have painted.
             if indexedGeometry, !carriedScrollCache.isEmpty {
