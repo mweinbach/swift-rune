@@ -42,6 +42,7 @@ void rune_browser_line_cells(const RuneDesktopLine *line, RuneBrowserCell *cells
     int32_t report_source);
 // Canvas font smoothing can change the R8 coverage with the opaque sRGB foreground.
 int32_t rune_browser_line_fixed_pitch(const RuneDesktopLine *line);
+int32_t rune_browser_line_geometry_style(const RuneDesktopLine *line);
 int32_t rune_browser_line_mask_ink(const RuneDesktopLine *line, int32_t x, int32_t y,
     int32_t width, int32_t height, uint32_t rgb, uint8_t *pixels);
 void rune_browser_host_wake(double delay_seconds);

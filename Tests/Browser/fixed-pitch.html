@@ -6,7 +6,7 @@ import { createRuneTextImports, runeTextFontsReady } from '../../Sources/Rune/Re
 
 const result = document.getElementById('result');
 try {
-    const memory = new WebAssembly.Memory({ initial: 1 });
+    const memory = new WebAssembly.Memory({ initial: 4 });
     const host = createRuneTextImports(() => memory);
     const bytes = new Uint8Array(memory.buffer);
     const ints = new Int32Array(memory.buffer, 8192);
@@ -25,6 +25,8 @@ try {
     // WebKit can load the same bytes without exposing variationSettings.
     const canVerifyFace = Boolean(crypto.subtle && registered.variationSettings === 'normal' &&
         registered.featureSettings === 'normal' && registered.sizeAdjust === '100%');
+    const styleTokens = new Map();
+    let tokenChecks = 0;
     let readCount = 0, cellCount = 0, warmRuns = 0, nativeRuns = 0;
     const nativeBounds = Range.prototype.getBoundingClientRect;
     Range.prototype.getBoundingClientRect = function () {
@@ -32,11 +34,19 @@ try {
         return nativeBounds.call(this);
     };
     const defaults = 'liga=0,clig=0,calt=0,dlig=0';
-    function compare(text, { features = defaults, direction = 1, size = 26, warm = false } = {}) {
+    function compare(text, { features = defaults, direction = 1, size = 26, warm = false, tokenAllowed = true } = {}) {
         const length = put(text, 512);
         const id = host.create(512, length, 64, put('IBM Plex Mono', 64), size, 400, 0, 1, direction, 0, 40);
         try {
             host.configure(id, 0, 0, 128, put(features, 128), 0, 0, 0, 40);
+            const token = host.has_color(id, 2);
+            if (canVerifyFace && tokenAllowed) {
+                const changed = styleTokens.has(size) && styleTokens.get(size) !== token;
+                const shared = [...styleTokens].some(([other, id]) => other !== size && id === token);
+                if (token < 3 || changed || shared) throw Error('Incorrect or unstable style token for size ' + size);
+                styleTokens.set(size, token);
+            } else if (token >= 3 || token !== host.has_color(id, 1)) throw Error('Exposed a geometry token for unsupported context');
+            ++tokenChecks;
             const spans = [];
             let byte = 0;
             for (const { segment } of new Intl.Segmenter().segment(text)) {
@@ -103,17 +113,17 @@ try {
             compare(alphabet, { size, warm: true });
             compare('let value_295 = compute(295);', { size, warm: true });
         }
-        compare('1/2 99/100', { features: 'frac=1' });
-        compare('RTL אבג A 123', { direction: 2 });
-        compare('A\t B \u0301 © 1');
-        compare('a\t'.repeat(140));
+        compare('1/2 99/100', { features: 'frac=1', tokenAllowed: false });
+        compare('RTL אבג A 123', { direction: 2, tokenAllowed: false });
+        compare('A\t B \u0301 © 1', { tokenAllowed: false });
+        compare('a\t'.repeat(140), { tokenAllowed: false });
         const css = document.createElement('style');
         css.textContent = 'span { letter-spacing: 1px !important; }';
         document.head.append(css);
         try { compare('Spacing'); } finally { css.remove(); }
         for (const [property, value] of [['transform', 'scale(1.25)'], ['zoom', '1.1']]) {
             document.documentElement.style.setProperty(property, value);
-            try { compare('let value_101 = 101;'); } finally { document.documentElement.style.removeProperty(property); }
+            try { compare('let value_101 = 101;', { tokenAllowed: false }); } finally { document.documentElement.style.removeProperty(property); }
         }
         const neutral = '123 / 4';
         function autoCaret() {
@@ -131,8 +141,23 @@ try {
         const replacement = await (await fetch('../../Sources/Rune/Resources/Fonts/Inter-Regular.ttf')).arrayBuffer();
         const competing = await new FontFace('IBM Plex Mono', replacement).load();
         document.fonts.add(competing);
-        try { compare('123 9!'); } finally { document.fonts.delete(competing); }
+        try { compare('123 9!', { tokenAllowed: false }); } finally { document.fonts.delete(competing); }
+        compare('123 9!');
+        // A new raw registration occupies the same width/weight slot and CSS family.
+        // Only verified URL assets have the host's fixed-pitch geometry certificate.
+        const original = await (await fetch('../../Sources/Rune/Resources/Fonts/IBMPlexMono-Regular.ttf')).arrayBuffer();
+        bytes.set(new Uint8Array(original), 32768);
+        if (!host.font(32768, original.byteLength)) throw Error('Failed to replace the registered face');
+        await runeTextFontsReady(memory);
+        compare('123 9!', { tokenAllowed: false });
+        const oldToken = styleTokens.get(26);
+        const renewedURL = '../../Sources/Rune/Resources/Fonts/IBMPlexMono-Regular.ttf?renewed';
+        host.font_url(0, put(renewedURL, 0), 0);
+        await runeTextFontsReady(memory);
+        styleTokens.clear();
+        compare('123 9!');
+        if (canVerifyFace && styleTokens.get(26) === oldToken) throw Error('Reissued a token for a replaced face');
     } finally { Range.prototype.getBoundingClientRect = nativeBounds; }
-    result.textContent = JSON.stringify({ passed: true, cells: cellCount, warmRuns, nativeRuns });
+    result.textContent = JSON.stringify({ passed: true, cells: cellCount, warmRuns, nativeRuns, tokenChecks });
 } catch (error) { result.textContent = JSON.stringify({ passed: false, error: String(error) }); }
 </script>

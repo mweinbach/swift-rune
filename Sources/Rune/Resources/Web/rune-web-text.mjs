@@ -346,6 +346,9 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
     const aliases = new Map();
     const familyStacks = [new Map(), new Map()];
     const fixedPitchStyles = new Map();
+    // Tokens belong to this reactor and document. A retired token is never reassigned.
+    const geometryTokens = new Map();
+    let nextGeometryToken = 3;
     let next = 1, root, spans, explicitSpans, range, familyStyle, defaultContext, unkernedContext, svgClusterOwners;
     const memory = () => getMemory().buffer;
     const view = () => new DataView(memory());
@@ -1036,6 +1039,19 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         },
         has_color(id, fixedPitch = 0) {
             const line = runs.get(id);
+            if (fixedPitch === 2) {
+                const source = line && fixedPitchSource(doc, line);
+                if (!source) return 0;
+                const key = fixedPitchStyleKey(line, source);
+                if (!key) return 2;
+                const existing = geometryTokens.get(key);
+                if (existing !== undefined) return existing;
+                if (nextGeometryToken >= 0x7fffffff) return 2;
+                if (geometryTokens.size >= 64) geometryTokens.clear();
+                const token = nextGeometryToken++;
+                geometryTokens.set(key, token);
+                return token;
+            }
             if (fixedPitch) return line && fixedPitchSource(doc, line) ? 2 : 0;
             return line?.hasColor ? 1 : 0;
         },

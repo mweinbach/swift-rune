@@ -7351,10 +7351,10 @@ public final class TextSystem: @unchecked Sendable {
         let cutsCodePadding = !style.family.isMonospace && spanEntries.contains { $0.span.monospace }
         let hasDecorations = spanEntries.contains { $0.span.background != nil || $0.span.underline || $0.span.strikethrough }
         let tabs = DesktopTabStops(fullText) { style.family.isMonospace || spanAt(utf8Offset: $0)?.monospace == true }
-        var nativeWidths: [Int: DesktopTextLine.Cell] = [:]
+        var nativeWidths: DesktopTextLine.Cells?
         var paragraphLayouts: [Int: (text: String, line: DesktopTextLine)] = [:]
         func desktopLine(_ text: String, start: Int, rtl: Bool? = nil,
-                         stretch: (Character, Int) -> Float = { _, _ in 0 }) -> DesktopTextLine? {
+                         stretch: ((Character, Int) -> Float)? = nil) -> DesktopTextLine? {
             guard nativeFonts else { return nil }
             var lineStyle = style
             if let rtl { lineStyle.direction = rtl ? .rtl : .ltr }
@@ -7367,7 +7367,7 @@ public final class TextSystem: @unchecked Sendable {
         #endif
         func charAdvance(_ ch: Character, atUTF8 utf8Offset: Int) -> Float {
             #if canImport(CRuneDesktopText) && !canImport(CoreText)
-            if let cell = nativeWidths[utf8Offset], cell.character == ch {
+            if let cell = nativeWidths?[utf8Offset], cell.character == ch {
                 return cell.advance + style.letterSpacing
             }
             if nativeFonts, let replacement = desktopLine(String(ch), start: utf8Offset)?.cells[utf8Offset] {
@@ -7403,7 +7403,7 @@ public final class TextSystem: @unchecked Sendable {
             #if canImport(CRuneDesktopText) && !canImport(CoreText)
             let paragraphLayout = retained?.linesByStart[cursorUTF8] ?? desktopLine(para, start: cursorUTF8, rtl: isRTL)
             if let paragraphLayout { paragraphLayouts[cursorUTF8] = (para, paragraphLayout) }
-            nativeWidths = paragraphLayout?.cells ?? [:]
+            nativeWidths = paragraphLayout?.cells
             #endif
             let insets = style.blockInsetsPx(at: pIdx, scale: scale, rtl: isRTL) * invS
             let availableWidth = maxWidth.map { max(invS, $0 - insets.x - insets.y) }
@@ -7637,7 +7637,7 @@ public final class TextSystem: @unchecked Sendable {
             func expands(_ character: Character) -> Bool { character == " " || character == "\u{00A0}" }
             if style.wrap == .wrap, maxWidth != nil {
                 #if canImport(CRuneDesktopText) && !canImport(CoreText)
-                nativeWidths = desktopLines[idx]?.cells ?? [:]
+                nativeWidths = desktopLines[idx]?.cells
                 #endif
                 // Keep terminal whitespace at its authored advance, beyond the visible edge.
                 // A following inline box stops the whitespace from hanging.
@@ -7649,7 +7649,7 @@ public final class TextSystem: @unchecked Sendable {
                           trailExtra(endingAtUTF8: visibleEnd) == 0 else { break }
                     let start = visibleEnd - ch.utf8.count
                     #if canImport(CRuneDesktopText) && !canImport(CoreText)
-                    if let cell = nativeWidths[start], cell.isRTL != item.isRTL { break }
+                    if let cell = nativeWidths?[start], cell.isRTL != item.isRTL { break }
                     #endif
                     hanging += charAdvance(ch, atUTF8: start)
                     visibleEnd = start
@@ -7690,13 +7690,13 @@ public final class TextSystem: @unchecked Sendable {
                 ? desktopLine(item.text, start: item.utf8Start, rtl: item.isRTL, stretch: stretch) : desktopLines[idx]
             let paintNative = emitGlyphs && (native?.hasVisibleInk(in: rasterWindow, baselinePx: baselinePx, glide: glidePx) ?? false)
             var nativeColors: [Int: Color] = [:]
-            nativeWidths = native?.cells ?? [:]
+            nativeWidths = native?.cells
             if emitGlyphs, let native, hasDecorations {
                 native.appendDecorations(spans: spanEntries, index: indexedSpans.index(at:), originX: originX,
                     baselinePx: baselinePx, style: style, backgrounds: &rawBackgrounds, underlines: &underlines,
                     strikethroughs: &strikethroughs, underlineEnds: &underlineEnds)
             }
-            if let native, !native.leadingMarkers.isEmpty || !native.trailingMarkers.isEmpty || native.cells.values.contains(where: \.isRTL) {
+            if let native, !native.leadingMarkers.isEmpty || !native.trailingMarkers.isEmpty || native.cells.hasRTL {
                 var cells = native.cells.values.map { cell in
                     PortableCaretCell(range: cell.byte..<cell.byteEnd, left: cell.left,
                                       width: cell.advance + stretch(cell.character, at: cell.byte),
@@ -7713,6 +7713,28 @@ public final class TextSystem: @unchecked Sendable {
                                        rtl: marker.rtl, space: false, pillEdge: .trailing))
                 }
                 bidiCells[idx] = cells.sorted { ($0.left, $0.range.lowerBound) < ($1.left, $1.range.lowerBound) }
+            }
+            if !emitGlyphs, validPills.isEmpty, let native {
+                // The native shaper already mapped every grapheme onto the authored UTF-8.
+                // Interior bytes use its leading caret. At a shared boundary the following
+                // cell supplies the caret, including at a change in writing direction.
+                func mappedOffsets() -> [Float] {
+                    #if os(WASI)
+                    if let offsets = native.cells.measuredOffsets { return offsets }
+                    #endif
+                    var offsets = Array(repeating: Float.zero, count: item.text.utf8.count + 1)
+                    for cell in native.cells.values {
+                        let first = cell.byte - item.utf8Start, end = cell.byteEnd - item.utf8Start
+                        for byte in first..<end { offsets[byte] = cell.caret }
+                        if cell.byteEnd == lineEnd { offsets[end] = cell.endCaret }
+                    }
+                    return offsets
+                }
+                let offsets = mappedOffsets()
+                lineRecords.append((item.utf8Start, item.text, originY, originX, offsets))
+                lineGlyphRanges.append(lineStartGlyphIdx..<lineStartGlyphIdx)
+                lineAdvancesPx.append(((item.width + extraPerSpace * Float(spaces)) * scale, hanging * scale))
+                continue
             }
             #endif
             var charOffsets: [Float] = [0]

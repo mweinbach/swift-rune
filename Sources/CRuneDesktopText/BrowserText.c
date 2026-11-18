@@ -187,6 +187,18 @@ int32_t rune_desktop_register_font_file(const char *path) {
     return 0;
 }
 
+int32_t rune_browser_line_geometry_style(const RuneDesktopLine *line) {
+#ifdef RUNE_BROWSER_TEXT
+    if (line) {
+        // Older hosts return a color bit or 2 for fixed-pitch ink. Only a newer
+        // host can also certify the current document's selection geometry.
+        const int32_t token = browser_has_color(line->handle, 2);
+        return token >= 2 ? token : 0;
+    }
+#endif
+    return 0;
+}
+
 int32_t rune_browser_line_fixed_pitch(const RuneDesktopLine *line) {
 #ifdef RUNE_BROWSER_TEXT
     // The original host ignores the optional capability selector and returns only

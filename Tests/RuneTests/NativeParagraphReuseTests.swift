@@ -4,6 +4,35 @@ import Testing
 
 @Suite("Native paragraph shape reuse")
 struct NativeParagraphReuseTests {
+    @Test func cellLookupAcceptsOutOfRangeByteOffsets() {
+        let cells = DesktopTextLine.Cells([], start: 10)
+        #expect(cells[Int.min] == nil)
+        #expect(cells[Int.max] == nil)
+        #expect(cells[9] == nil)
+        #expect(cells[10] == nil)
+    }
+
+    @Test func nativeMeasurementAndPaintAgreeAtEveryUTF8Offset() {
+        let system = TextSystem()
+        let spans = [TextSpan("123"), TextSpan("é 👨‍👩‍👧 e\u{301}\t", weight: 700),
+                     TextSpan("AאבB\n\nASCII at a later byte offset")]
+        let source = spans.map(\.text).joined()
+        for wrap: TextWrap in [.noWrap, .wrap] {
+            let style = TextStyle(size: 15, family: .monospace, wrap: wrap)
+            func layout(paint: Bool) -> ShapedText {
+                system.shapePortable(text: source, spans: spans, style: style, maxWidth: 90,
+                                     pixelScale: 1.5, emitGlyphs: paint, nativeFonts: true)
+            }
+            let measured = layout(paint: false)
+            let painted = layout(paint: true)
+            #expect(measured.portableLines.count >= 3)
+            #expect(measured.portableLines.map(\.charOffsets) == painted.portableLines.map(\.charOffsets))
+            for line in measured.portableLines {
+                #expect(line.charOffsets.count == line.text.utf8.count + 1)
+            }
+        }
+    }
+
     @Test func intactNoWrapParagraphsUseTheirNativeWidthAndKeepTheirCarets() throws {
         let system = TextSystem()
         let spans = [TextSpan("let value =\t"), TextSpan("אבג", weight: 700), TextSpan("  \nCafé  ")]

@@ -437,6 +437,7 @@ private final class DesktopTextRun {
     #if os(WASI)
     static let singleCell = TextUTF8Key("")
     private(set) var fixedPitchBytes: [UInt8]?
+    private(set) var geometryStyle: Int32 = 0
     #endif
     let inkOwner: Range<Int32>?
     private var lastOwnedInk: DesktopTextRun?
@@ -513,8 +514,12 @@ private final class DesktopTextRun {
         hasColor = rune_desktop_line_has_color(line) != 0
         #if os(WASI)
         if FontSmoothing.classic == .on, !hasColor, tabPadding.isEmpty,
-           (10...128).contains(font.sizePx), rune_browser_line_fixed_pitch(line) != 0 {
-            fixedPitchBytes = Array(text.utf8)
+           (10...128).contains(font.sizePx) {
+            let capability = rune_browser_line_geometry_style(line)
+            if capability >= 2 {
+                fixedPitchBytes = Array(text.utf8)
+                if capability >= 3 { geometryStyle = capability }
+            }
         }
         #endif
     }
@@ -990,18 +995,37 @@ final class DesktopGlyphInk: @unchecked Sendable {
 final class DesktopFaceBoxes {
     typealias Box = (ascentPx: Float, descentPx: Float)
     private var measured: [DesktopFont: Box] = [:]
-    #if os(Windows) || os(Linux) || (os(WASI) && RUNE_BROWSER_TEXT)
+    #if os(WASI)
+    // A TextSystem replaces this cache at each font epoch. The host token identifies
+    // its registered face, CSS pixel size and DPR within this reactor and document.
+    // Swift also keys by the run length, logical scale and registered-ink reporting.
+    fileprivate typealias GeometryKey = SIMD4<UInt32>
+    fileprivate typealias Geometry = (samples: [RuneBrowserCell], offsets: [Float])
+    private var browserGeometry: [GeometryKey: Geometry] = [:]
+
+    fileprivate func geometry(_ key: GeometryKey) -> Geometry? {
+        lock.withLock { browserGeometry[key] }
+    }
+
+    fileprivate func remember(_ geometry: Geometry, as key: GeometryKey) {
+        lock.withLock {
+            if browserGeometry.count >= 128 { browserGeometry.removeAll(keepingCapacity: true) }
+            browserGeometry[key] = geometry
+        }
+    }
+    #endif
+    #if os(Windows) || os(Linux) || os(WASI)
     private let lock = NSLock()
     #endif
 
     func box(for font: DesktopFont) -> Box? {
-        #if os(Windows) || os(Linux) || (os(WASI) && RUNE_BROWSER_TEXT)
+        #if os(Windows) || os(Linux) || os(WASI)
         lock.lock()
         defer { lock.unlock() }
         #endif
         if let box = measured[font] { return box }
         guard let box = DesktopTextRun(text: " ", font: font)?.boxMetrics else { return nil }
-        #if os(Windows) || os(Linux) || (os(WASI) && RUNE_BROWSER_TEXT)
+        #if os(Windows) || os(Linux) || os(WASI)
         if measured.count >= 64 { measured.removeAll(keepingCapacity: true) }
         #endif
         measured[font] = box
@@ -1039,7 +1063,130 @@ final class DesktopTextLine {
         #endif
     }
 
-    let cells: [Int: Cell]
+    /// Native cells stay in visual order. A single-byte LTR line also has one
+    /// cell per successive UTF-8 offset, so a byte lookup can index it directly.
+    #if os(WASI)
+    /// A measured LTR label only needs its native selection advances and editing offsets.
+    /// Keep the run once and project a full cell only for consumers that need its ink.
+    fileprivate final class BrowserCells {
+        let run: DesktopTextRun
+        let bytes: [UInt8]
+        let start: Int
+        let samples: [RuneBrowserCell]
+        let offsets: [Float]
+        let scale: Float
+
+        init?(run: DesktopTextRun, text: String, start: Int, samples: [RuneBrowserCell], scale: Float) {
+            guard !samples.isEmpty, samples.count == text.utf8.count else { return nil }
+            if run.fixedPitchBytes == nil, !text.utf8.allSatisfy({ (32...126).contains($0) }) { return nil }
+            // A native selection may overhang its trailing caret by a subpixel.
+            // Keep both quantities and use the full layout's ordered-edge test.
+            func edge(_ x: Float) -> Int64 { Int64((Double(x) * 1024).rounded()) }
+            var previousEnd = samples[0].caret
+            var previousRight = Int64.min
+            var pen: Float = 0
+            var offsets: [Float] = [0]
+            offsets.reserveCapacity(samples.count + 1)
+            for (i, sample) in samples.enumerated() {
+                let lo = edge(sample.left), hi = edge(sample.end_caret), right = edge(sample.left + sample.advance)
+                guard sample.start == i, sample.end == i + 1, sample.direction == 1 || sample.direction == 2,
+                      sample.caret == sample.left, sample.caret == previousEnd,
+                      hi > lo, right > lo, hi > previousRight else { return nil }
+                previousEnd = sample.end_caret
+                previousRight = max(previousRight, right)
+                pen += sample.advance / scale
+                offsets.append(pen)
+            }
+            self.run = run
+            self.bytes = run.fixedPitchBytes ?? Array(text.utf8)
+            self.start = start
+            self.samples = samples
+            self.offsets = offsets
+            self.scale = scale
+        }
+
+        init(run: DesktopTextRun, bytes: [UInt8], start: Int, geometry: DesktopFaceBoxes.Geometry, scale: Float) {
+            self.run = run
+            self.bytes = bytes
+            self.start = start
+            self.samples = geometry.samples
+            self.offsets = geometry.offsets
+            self.scale = scale
+        }
+
+        func cell(_ i: Int) -> Cell {
+            let sample = samples[i], byte = start + i
+            let character = Character(Unicode.Scalar(bytes[i]))
+            return Cell(character: character, byte: byte, byteEnd: byte + 1,
+                advance: sample.advance / scale, left: offsets[i], right: offsets[i + 1],
+                caret: offsets[i], direction: Int8(sample.direction), endCaret: offsets[i + 1],
+                run: run, nativeBytes: sample.start..<sample.end,
+                localLeft: sample.left, localRight: sample.left + sample.advance)
+        }
+    }
+    #endif
+
+    struct Cells {
+        private let stored: [Cell]
+        #if os(WASI)
+        private let compact: BrowserCells?
+        var measuredOffsets: [Float]? { compact?.offsets }
+        fileprivate init(_ compact: BrowserCells) {
+            self.compact = compact
+            stored = []
+            start = compact.start
+            indexByByte = nil
+        }
+        #endif
+        #if os(WASI)
+        struct Values: RandomAccessCollection {
+            fileprivate let stored: [Cell]
+            fileprivate let compact: BrowserCells?
+
+            var startIndex: Int { 0 }
+            var endIndex: Int { compact?.samples.count ?? stored.count }
+            subscript(index: Int) -> Cell { compact?.cell(index) ?? stored[index] }
+        }
+        var values: Values { Values(stored: stored, compact: compact) }
+        #else
+        var values: [Cell] { stored }
+        #endif
+        var hasRTL: Bool {
+            #if os(WASI)
+            if compact != nil { return false }
+            #endif
+            return stored.contains(where: \.isRTL)
+        }
+        private let start: Int
+        private let indexByByte: [Int: Int]?
+
+        init(_ values: [Cell], start: Int) {
+            self.stored = values
+            #if os(WASI)
+            compact = nil
+            #endif
+            self.start = start
+            if values.indices.allSatisfy({ values[$0].byte == start + $0 }) {
+                indexByByte = nil
+            } else {
+                var index = Dictionary<Int, Int>(minimumCapacity: values.count)
+                for i in values.indices { index[values[i].byte] = i }
+                indexByByte = index
+            }
+        }
+
+        subscript(byte: Int) -> Cell? {
+            if let indexByByte { return indexByByte[byte].map { stored[$0] } }
+            let (index, overflow) = byte.subtractingReportingOverflow(start)
+            guard !overflow else { return nil }
+            #if os(WASI)
+            if let compact { return compact.samples.indices.contains(index) ? compact.cell(index) : nil }
+            #endif
+            return stored.indices.contains(index) ? stored[index] : nil
+        }
+    }
+
+    let cells: Cells
     let leadingMarkers: [Int: MarkerPosition]
     let trailingMarkers: [Int: MarkerPosition]
     let width: Float
@@ -1061,9 +1208,13 @@ final class DesktopTextLine {
     init?(text: String, start: Int, style: TextStyle, families: (sans: String, mono: String), language: String?, scale: Float,
           faceBoxes: DesktopFaceBoxes = DesktopFaceBoxes(), cutsCodePadding: Bool = false,
           pillRanges: [Range<Int>] = [], tabs: DesktopTabStops? = nil, span: ((Int) -> TextSpan?)? = nil,
-          stretch: (Character, Int) -> Float = { _, _ in 0 },
+          stretch requestedStretch: ((Character, Int) -> Float)? = nil,
           extra: ((Int, Int) -> (leading: Float, trailing: Float))? = nil) {
         guard !text.isEmpty else { return nil }
+        let stretch = requestedStretch ?? { _, _ in 0 }
+        #if os(WASI)
+        var compact: BrowserCells?
+        #endif
         self.scale = scale
         self.smoothing = style.fontSmoothing
         DefaultFonts.registerIfNeeded()
@@ -1149,8 +1300,27 @@ final class DesktopTextLine {
                 boxes.append((metrics.ascentPx, metrics.descentPx, inlineHeightPx))
             }
             #if os(WASI)
+            let ordinary = groups.count == 1 && bidi == nil && groupIsolates == nil && extra == nil
+                && requestedStretch == nil && style.letterSpacing == 0
+            var geometryKey: DesktopFaceBoxes.GeometryKey?
+            if ordinary, let bytes = run.fixedPitchBytes {
+                let token = run.geometryStyle
+                if token != 0 {
+                    let key = DesktopFaceBoxes.GeometryKey(UInt32(token), UInt32(bytes.count), scale.bitPattern, reportInkSource ? 1 : 0)
+                    if let positions = faceBoxes.geometry(key) {
+                        compact = BrowserCells(run: run, bytes: bytes, start: group.start, geometry: positions, scale: scale)
+                        continue
+                    }
+                    geometryKey = key
+                }
+            }
             let samples = run.browserCells(for: group.text, startingAt: 0, marked: groupIsolates, reportSource: reportInkSource)
             let referenceSamples = bidi?.browserCells(for: group.text, startingAt: group.start - start, marked: marked, reportSource: false)
+            if ordinary, let geometry = BrowserCells(run: run, text: group.text, start: group.start, samples: samples, scale: scale) {
+                if let geometryKey { faceBoxes.remember((geometry.samples, geometry.offsets), as: geometryKey) }
+                compact = geometry
+                continue
+            }
             #endif
             var local = 0
             for (index, ch) in group.text.enumerated() {
@@ -1200,6 +1370,16 @@ final class DesktopTextLine {
             descentPx: strut.descentPx, lineHeightPx: lineHeightPx).over
         growth = InlineCodeBox.lineGrowth(strut: strut, code: boxes, lineHeightPx: lineHeightPx)
         baseline = (strutBaselinePx + growth.over) / scale
+        #if os(WASI)
+        if let compact {
+            leadingMarkers = [:]
+            trailingMarkers = [:]
+            cells = Cells(compact)
+            width = compact.offsets.last!
+            glyphEndPt = width
+            return
+        }
+        #endif
         func edge(_ x: Float) -> Int64 { Int64((Double(x) * 1024).rounded()) }
         // In an ordinary LTR run each strong caret lands at the next selection's
         // leading edge. The trailing selection edge may overshoot that caret by
@@ -1218,20 +1398,21 @@ final class DesktopTextLine {
             }
             if ordered {
                 var pen: Float = 0, glyphEnd: Float = 0
-                var result = Dictionary<Int, Cell>(minimumCapacity: visual.count)
+                var result: [Cell] = []
+                result.reserveCapacity(visual.count)
                 let terminalCaretAtRight = edge(last.endCaret) == edge(last.refLeft + last.refWidth)
                 for cell in visual {
                     let left = pen, advance = cell.advance / scale
                     pen += advance + style.letterSpacing + stretch(cell.character, cell.byte)
                     glyphEnd = max(glyphEnd, pen)
                     let endCaret = cell.byte == last.byte && !terminalCaretAtRight ? left + advance : pen
-                    result[cell.byte] = Cell(character: cell.character, byte: cell.byte, byteEnd: cell.end,
+                    result.append(Cell(character: cell.character, byte: cell.byte, byteEnd: cell.end,
                         advance: advance, left: left, right: pen, caret: left, direction: cell.direction, endCaret: endCaret,
-                        run: cell.run, nativeBytes: cell.nativeBytes, localLeft: cell.left, localRight: cell.right)
+                        run: cell.run, nativeBytes: cell.nativeBytes, localLeft: cell.left, localRight: cell.right))
                 }
                 leadingMarkers = [:]
                 trailingMarkers = [:]
-                cells = result
+                cells = Cells(result, start: start)
                 width = pen
                 glyphEndPt = glyphEnd
                 return
@@ -1284,15 +1465,16 @@ final class DesktopTextLine {
         placeMarks(before: .infinity)
         leadingMarkers = leading
         trailingMarkers = trailing
-        var result: [Int: Cell] = [:]
+        var result: [Cell] = []
+        result.reserveCapacity(visual.count)
         for (index, cell) in visual.enumerated() {
             let (left, right) = intervals[index]
-            result[cell.byte] = Cell(character: cell.character, byte: cell.byte, byteEnd: cell.end,
+            result.append(Cell(character: cell.character, byte: cell.byte, byteEnd: cell.end,
                 advance: cell.advance / scale, left: left, right: right, caret: edges[edge(cell.caret)] ?? left, direction: cell.direction,
                 endCaret: edges[edge(cell.endCaret)] ?? (left + cell.advance / scale),
-                run: cell.run, nativeBytes: cell.nativeBytes, localLeft: cell.left, localRight: cell.right)
+                run: cell.run, nativeBytes: cell.nativeBytes, localLeft: cell.left, localRight: cell.right))
         }
-        cells = result
+        cells = Cells(result, start: start)
         width = widthPt
         glyphEndPt = lastGlyphEdge
     }
