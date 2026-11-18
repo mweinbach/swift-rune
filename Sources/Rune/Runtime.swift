@@ -3207,6 +3207,16 @@ public final class Runtime<State> {
         var ancestorInstants: [Bool] = []
         var warnings = renames.map(\.warning)
         var nextMemoPaths: [NodeId: FlatMemoPaths<State>] = [:]
+        if rowReuseMode == .remount {
+            // A moving window typically replaces a few rows in the same-sized tree.
+            let count = flatNodes.count
+            newFlat.reserveCapacity(count)
+            newByPath.reserveCapacity(count)
+            newIndices.reserveCapacity(count)
+            specs.reserveCapacity(count)
+            ancestorInstants.reserveCapacity(count)
+            nextMemoPaths.reserveCapacity(flatMemoPaths.count)
+        }
         var flatCaptures: [FlatMemoCapture<State>] = []
         var appliedMemoSpans: [(span: MemoFlatSpan<State>, start: Int)] = []
         var reusedFlatRanges: [(current: Range<Int>, previous: Range<Int>)] = []
