@@ -234,6 +234,62 @@ import RuneRef
         #expect(word(pagedBytes, start + 12 + width * height + 4) == UInt32(height))
     }
 
+    @Test func singlePageReceiptsKeepResidentPixelsAcrossSkippedFramesAndPublicEdits() {
+        let width = 12, height = 8
+        var pixels = [UInt8](repeating: 0, count: width * height), resident = pixels
+        var history = WebAtlasHistory()
+        func send(_ revision: UInt64?, from: UInt64? = nil, edges: SIMD4<Int> = .zero,
+                  force: Bool = false, deferred: Bool = false, expecting: WebAtlasUpdate) {
+            var scene = RenderFrame(width: 16, height: 16, glyphs: R8Atlas(width: width, height: height, texels: pixels),
+                                    glyphGeneration: 1)
+            if let revision {
+                scene.glyphPageRevisions = [revision]
+                scene.rawGlyphPageRevisions = [revision]
+                scene.rawGlyphPagePatches = [from.map { GlyphAtlasPatch(fromRevision: $0, edges: edges) }]
+            }
+            if deferred {
+                let curves = RenderOutlineAtlas(storeID: UUID(), generation: 1, texels: [], usedTexels: 0, requestsLCD: false)
+                scene.maskFills = OutlineMaskPlan(base: scene.glyphs, curves: curves, fills: [], baseGeneration: 1, epoch: 0)
+            }
+            let transfer = history.prepare(scene, force: force, patches: true)
+            #expect(transfer.glyph == expecting)
+            switch transfer.glyph {
+            case .full: resident = pixels
+            case .patch(let r):
+                for y in r.y..<r.w {
+                    let range = (y * width + r.x)..<(y * width + r.z)
+                    resident.replaceSubrange(range, with: pixels[range])
+                }
+            case .none: break
+            }
+            #expect(resident == pixels)
+            history.record(scene, transfer)
+        }
+        let area = SIMD4(2, 1, 5, 2)
+        send(1, expecting: .full)
+        pixels[width + 2] = 11
+        send(2, from: 1, edges: area, expecting: .patch(area))
+        send(2, expecting: .none)
+        pixels[2 * width + 3] = 42
+        pixels[3 * width + 5] = 53
+        send(4, from: 3, edges: SIMD4(5, 3, 6, 4), expecting: .full)
+        send(4, force: true, expecting: .full)
+        pixels[width + 2] = 0
+        send(5, expecting: .full) // Recycled shelves drop their old ancestry.
+        pixels[0] = 60
+        send(nil, expecting: .full)
+        pixels[width + 8] = 70
+        send(nil, expecting: .patch(SIMD4(8, 1, 9, 2)))
+        send(nil, expecting: .none)
+        pixels[width + 8] = 0
+        send(6, from: 5, edges: area, expecting: .full)
+        pixels[0] = 80
+        send(6, deferred: true, expecting: .full)
+        pixels[0] = 90
+        send(6, deferred: true, expecting: .patch(SIMD4(0, 0, 1, 1)))
+        send(6, expecting: .full)
+    }
+
     @MainActor @Test func idleBrowserFramesServeScheduledHover() throws {
         struct Model { var entered = false }
         let spec = AppSpec(title: "Hover", size: Vec2(50, 50), state: Model()) { _, _ in
