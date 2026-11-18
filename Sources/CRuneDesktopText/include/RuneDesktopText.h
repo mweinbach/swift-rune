@@ -18,6 +18,9 @@ int32_t rune_windows_word_ends(const uint16_t *text, int32_t units, int32_t *end
 int32_t rune_windows_visual_word_breaks(const uint16_t *text, int32_t units, uint8_t *flags);
 RuneDesktopLine *rune_windows_line_create(const char *utf8, int32_t length, const char *family,
     float size_px, int32_t weight, int32_t italic, int32_t mono, int32_t direction, int32_t chromium_mask);
+RuneDesktopLine *rune_windows_line_create_configured(const char *utf8, int32_t length, const char *family,
+    float size_px, int32_t weight, int32_t italic, int32_t mono, int32_t direction, int32_t chromium_mask,
+    const char *language, const char *features, const char *variations);
 // Packed RGB coverage, with the same geometry as rune_desktop_line_mask.
 int32_t rune_windows_line_lcd(const RuneDesktopLine *line, int32_t x, int32_t y,
     int32_t width, int32_t height, uint8_t *rgb);

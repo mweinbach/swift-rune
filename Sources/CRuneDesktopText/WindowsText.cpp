@@ -1100,6 +1100,16 @@ RuneDesktopLine *rune_desktop_line_create(const char *utf8, int32_t length, cons
 
 RuneDesktopLine *rune_windows_line_create(const char *utf8, int32_t length, const char *family,
     float size_px, int32_t weight, int32_t italic, int32_t mono, int32_t direction, int32_t chromium_mask) {
+    return rune_windows_line_create_configured(utf8, length, family, size_px, weight, italic, mono,
+        direction, chromium_mask, nullptr, nullptr, nullptr);
+}
+
+static bool configureLine(RuneDesktopLine &line, const WCHAR *text, UINT32 units, IDWriteTextFormat *format,
+                          const char *language, const char *features, const char *variations);
+
+RuneDesktopLine *rune_windows_line_create_configured(const char *utf8, int32_t length, const char *family,
+    float size_px, int32_t weight, int32_t italic, int32_t mono, int32_t direction, int32_t chromium_mask,
+    const char *language, const char *features, const char *variations) {
     if (length < 0 || (!utf8 && length) || !std::isfinite(size_px) || size_px <= 0 || !textFactory()) return nullptr;
     std::unique_ptr<RuneDesktopLine> line(new (std::nothrow) RuneDesktopLine);
     if (!line) return nullptr;
@@ -1151,19 +1161,23 @@ RuneDesktopLine *rune_windows_line_create(const char *utf8, int32_t length, cons
         FAILED(format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP))) return nullptr;
     // Tighten to the measured width before asking for glyph positions. In a
     // right-to-left line DirectWrite aligns the leading edge to the right.
-    line->layout = makeLayout(text.get(), units, format.Get());
-    if (!line->layout || !line->updateMetrics(line->layout.Get())) return nullptr;
+    // Collect native glyphs and hit-test geometry once, under the requested shaping settings.
+    // Unavailable or invalid settings keep the ordinary unconfigured layout.
+    if (!configureLine(*line, text.get(), units, format.Get(), language, features, variations)) {
+        line->layout = makeLayout(text.get(), units, format.Get());
+        if (!line->layout || !line->updateMetrics(line->layout.Get())) return nullptr;
+    }
     line->text = std::move(text);
     return line.release();
 }
 
-void rune_desktop_line_configure(RuneDesktopLine *line, const char *language, const char *features,
-    const char *variations) {
-    if (!line) return;
-    DWRITE_TEXT_RANGE range{0, line->position(line->byteCount)};
-    if (!range.length) return;
-    auto adjusted = makeLayout(line->text.get(), range.length, line->layout.Get());
-    if (!adjusted) return;
+static bool configureLine(RuneDesktopLine &line, const WCHAR *text, UINT32 units, IDWriteTextFormat *format,
+                          const char *language, const char *features, const char *variations) {
+    if (!units || ((!language || !*language) && (!features || !*features) && (!variations || !*variations)))
+        return false;
+    DWRITE_TEXT_RANGE range{0, units};
+    auto adjusted = makeLayout(text, units, format);
+    if (!adjusted) return false;
     bool changed = false;
     if (language && *language) {
         int units = 0;
@@ -1199,7 +1213,15 @@ void rune_desktop_line_configure(RuneDesktopLine *line, const char *language, co
             if (count && SUCCEEDED(variable->SetFontAxisValues(axes.get(), count, range))) changed = true;
         }
     }
-    if (changed && line->updateMetrics(adjusted.Get())) line->layout = std::move(adjusted);
+    if (!changed || !line.updateMetrics(adjusted.Get())) return false;
+    line.layout = std::move(adjusted);
+    return true;
+}
+
+void rune_desktop_line_configure(RuneDesktopLine *line, const char *language, const char *features,
+    const char *variations) {
+    if (line) configureLine(*line, line->text.get(), line->position(line->byteCount), line->layout.Get(),
+                            language, features, variations);
 }
 
 void rune_desktop_line_destroy(RuneDesktopLine *line) { delete line; }

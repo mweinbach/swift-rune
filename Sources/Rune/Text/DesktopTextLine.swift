@@ -426,8 +426,9 @@ private final class DesktopTextRun {
         tabPadding = padding
         guard let length = Int32(exactly: text.utf8.count), font.sizePx.isFinite else { return nil }
         #if os(Windows)
-        let result = rune_windows_line_create(text, length, font.family, font.sizePx,
-            font.weight, font.italic ? 1 : 0, font.mono ? 1 : 0, font.direction, font.chromiumMask ? 1 : 0)
+        let result = rune_windows_line_create_configured(text, length, font.family, font.sizePx,
+            font.weight, font.italic ? 1 : 0, font.mono ? 1 : 0, font.direction, font.chromiumMask ? 1 : 0,
+            font.language, font.features, font.variations)
         #elseif os(Linux)
         let result = rune_linux_line_create_configured(text, length, font.family, font.sizePx,
             font.weight, font.italic ? 1 : 0, font.mono ? 1 : 0, font.direction, font.language, font.features, font.variations)
@@ -439,7 +440,7 @@ private final class DesktopTextRun {
         self.textKey = TextUTF8Key(text)
         self.font = font
         native = line
-        #if !os(Linux)
+        #if !os(Linux) && !os(Windows)
         if !font.language.isEmpty || !font.features.isEmpty || !font.variations.isEmpty {
             rune_desktop_line_configure(line, font.language, font.features, font.variations)
         }
