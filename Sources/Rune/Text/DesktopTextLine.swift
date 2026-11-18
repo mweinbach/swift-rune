@@ -33,7 +33,7 @@ struct DesktopFont: Hashable {
     // A newly registered font can change the fallback and its palette for the same family name.
     let settingsEpoch: UInt64
 
-    #if os(Linux)
+    #if os(Linux) || (os(WASI) && RUNE_BROWSER_TEXT)
     /// Family resolution and CSS/HarfBuzz normalization are shared by many independent lines.
     /// The key contains only descriptor inputs, so syntax colors and the text itself can vary.
     private struct Request: Hashable {
@@ -71,7 +71,7 @@ struct DesktopFont: Hashable {
         let requestedWeight = span?.weight ?? style.weight
         let size = (span?.size ?? style.size) * scale
         let slanted = span?.italic == true || style.italic
-        #if os(Linux)
+        #if os(Linux) || (os(WASI) && RUNE_BROWSER_TEXT)
         let key = Request(stack: TextUTF8Key(stack), monospace: requested.isMonospace,
                           sizePx: size, weight: requestedWeight, italic: slanted,
                           direction: style.direction, language: TextUTF8Key(language ?? ""),
@@ -133,7 +133,7 @@ struct DesktopFont: Hashable {
         if case .fixed(let points) = style.opticalSize, points.isFinite,
            !axes.contains(where: { $0.hasPrefix("opsz=") }) { axes.append("opsz=\(points)") }
         variations = axes.joined(separator: ",")
-        #if os(Linux)
+        #if os(Linux) || (os(WASI) && RUNE_BROWSER_TEXT)
         Self.resolved.put(self, for: key)
         #endif
     }

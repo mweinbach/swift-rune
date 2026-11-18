@@ -7323,6 +7323,13 @@ public final class TextSystem: @unchecked Sendable {
 
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
         let nativeFamilies = families()
+        // Foreground, background and decoration ranges paint over the same shaped
+        // run. Only font changes and inline metric boxes require grouping graphemes.
+        let needsSpanFonts = spanEntries.contains {
+            let span = $0.span
+            return span.monospace || span.size != nil || (span.italic && !style.italic) ||
+                (span.weight ?? style.weight) != style.weight
+        }
         let cutsCodePadding = !style.family.isMonospace && spanEntries.contains { $0.span.monospace }
         let hasDecorations = spanEntries.contains { $0.span.background != nil || $0.span.underline || $0.span.strikethrough }
         let tabs = DesktopTabStops(fullText) { style.family.isMonospace || spanAt(utf8Offset: $0)?.monospace == true }
@@ -7335,7 +7342,7 @@ public final class TextSystem: @unchecked Sendable {
             if let rtl { lineStyle.direction = rtl ? .rtl : .ltr }
             return DesktopTextLine(text: text, start: start, style: lineStyle, families: nativeFamilies, language: language,
                 scale: scale, faceBoxes: faceBoxes, cutsCodePadding: cutsCodePadding, pillRanges: pillRanges, tabs: tabs,
-                span: spanEntries.isEmpty ? nil : spanAt(utf8Offset:), stretch: stretch, extra: validPills.isEmpty ? nil : { byte, end in
+                span: needsSpanFonts ? spanAt(utf8Offset:) : nil, stretch: stretch, extra: validPills.isEmpty ? nil : { byte, end in
                     (leadExtra(atUTF8: byte), trailExtra(endingAtUTF8: end))
                 })
         }
