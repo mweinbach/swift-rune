@@ -157,6 +157,7 @@ extension Runtime {
     /// An input entry point starts: a poll's change waiting to commit commits first (`split` on
     /// `input || routed`). Returns the enclosing dispatch's change flag, for `endInputDispatch`.
     internal func beginInputDispatch(at now: Double, routed: Bool = false) -> Bool {
+        dispatchPendingPaintHover(at: now)
         commitPolledChangeApart(at: now, routed: routed)
         let outer = inputDispatchChanged
         inputDispatchChanged = false

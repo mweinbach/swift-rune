@@ -241,6 +241,7 @@ extension Runtime {
         fallbackKey: KeyEvent? = nil,
         at now: Double = 0
     ) -> Bool {
+        dispatchPendingPaintHover(at: now)
         currentTime = now
         if case .key(_, _, true, _) = event, slice2State.autoscroll.key() { return true }
         if case .focusLost = event { slice2State.autoscroll.cancel() }

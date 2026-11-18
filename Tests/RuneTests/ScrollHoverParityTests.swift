@@ -336,6 +336,108 @@ struct ScrollHoverParityTests {
         )
     }
 
+    @Test("A hand wheel delivers the newly painted primary hover before subsequent input", arguments: [false, true], [false, true])
+    func handWheelDispatchesPaintedHover(native: Bool, nextIsHardwareKey: Bool) {
+        let point = Vec2(100, 110)
+        var generation = 0
+        var events: [String] = []
+        var inputTimes: [Double?] = []
+        var physicalKeys: [PhysicalKeyCode?] = []
+        let rt = Runtime(state: Heard(), viewport: Vec2(200, 200)) { _, _ -> El<Heard> in
+            let builtGeneration = generation
+            let rows: [El<Heard>] = (0..<40).map { i in
+                row().key("r\(i)").wFull().h(20).shrink(0)
+                    .onHover { _, inside, tx in
+                        events.append("\(builtGeneration) \(i) \(inside)")
+                        inputTimes.append(tx.inputTime())
+                        physicalKeys.append(tx.physicalKey())
+                        tx.liveOnly()
+                    }
+                    .onPointerDown { _, _, tx in
+                        events.append("press \(i)")
+                        tx.liveOnly()
+                    }
+            }
+            return col().size(200, 200).scroll(ScrollSpec(stickBottom: false)).child(col().wFull().children(rows))
+        }
+        var t = 0.0
+        func paint() {
+            t += Self.dt
+            if native { _ = rt.renderFrame(at: t) } else { _ = rt.frame(at: t) }
+        }
+        paint()
+        rt.pointerMove(to: point, at: t)
+        paint()
+        rt.wheel(WheelEvent(dy: -40), at: point, now: t)
+        paint()
+        #expect(rt.hoveredKey == "r7" && events == ["0 5 true"])
+        #expect(rt.hasPendingActions && rt.isAnimating)
+        generation = 1
+        rt.invalidate(at: t)
+        rt.flushPendingCommitIfNeeded(at: t)
+        let commits = rt.viewCommitCount
+        if nextIsHardwareKey {
+            _ = rt.physicalInput(.key(key: .keyQ, mods: .none, pressed: true, repeat: false),
+                                 fallbackKey: KeyEvent(key: .text("q")), baseChar: "q", at: t)
+        } else {
+            rt.hostInput(.wheel, eventTimestamp: t) { rt.wheel(WheelEvent(dy: 0), at: point, now: t) }
+            #expect(rt.queuedInputArrivals.dispatched == nil)
+        }
+        #expect(Array(inputTimes.dropFirst()) == [nil, nil])
+        #expect(physicalKeys.allSatisfy { $0 == nil })
+        rt.pointerDown(at: point, at: t)
+        paint()
+        paint()
+        #expect(events == ["0 5 true", "1 5 false", "1 7 true", "press 7"])
+        #expect(rt.viewCommitCount == commits && !rt.hasPendingActions)
+    }
+
+    @Test("A previously queued key can mount the painted row’s first primary handler", arguments: [false, true])
+    func newlyAuthoredHandlerOnlyRunsAfterAnEarlierRoutedKey(earlierKey: Bool) {
+        struct Model {
+            var active = false
+            var events: [String] = []
+        }
+        let rt = Runtime(state: Model(), viewport: Vec2(200, 200)) { s, _ -> El<Model> in
+            let rows: [El<Model>] = (0..<40).map { i in
+                var e: El<Model> = row().key("r\(i)").wFull().h(20).shrink(0).onClick { (_: inout Model) in }
+                if s.active && i == 7 {
+                    e = e.onHover { state, entered, tx in
+                        if entered { state.events.append("new7") }
+                        tx.liveOnly()
+                    }
+                }
+                return e
+            }
+            return col().size(200, 200).scroll(ScrollSpec(stickBottom: false)).child(col().wFull().children(rows))
+        }
+        rt.globalOnKey = { state, ev, tx in
+            if ev.key == .text("seed") {
+                state.events.append("seed")
+                tx.sendKey(KeyEvent(key: .text("barrier")))
+            }
+            if ev.key == .text("barrier") { state.events.append("barrier") }
+            tx.liveOnly()
+            return true
+        }
+        let point = Vec2(100, 110)
+        _ = rt.renderFrame(at: 0)
+        rt.pointerMove(to: point, at: 0.01)
+        _ = rt.renderFrame(at: 0.02)
+        if earlierKey {
+            // A key produced during this frame's sent-key drain queues its child before the paint observer.
+            _ = rt.updateIf(at: 0.03) { _, tx in tx.sendKey(KeyEvent(key: .text("seed"))); return false }
+        }
+        rt.wheel(WheelEvent(dy: -40), at: point, now: 0.03)
+        _ = rt.renderFrame(at: 0.04)
+        #expect(rt.hoveredKey == "r7")
+        #expect(rt.hasPendingActions == earlierKey)
+        rt.update(at: 0.05) { state, tx in state.active = true; tx.instant() }
+        if !earlierKey { _ = rt.keyDown(KeyEvent(key: .text("barrier")), at: 0.055) }
+        for i in 6...9 { _ = rt.renderFrame(at: Double(i) / 100) }
+        #expect(rt.state.events == (earlierKey ? ["seed", "barrier", "new7"] : ["barrier"]))
+    }
+
     /// `scroll_hover.rs:296` `a_glide_to_an_offset_runs_no_hover_handler_under_a_still_pointer_until_it_lands`.
     @Test("a glide to an offset runs no hover handler under a still pointer until it lands")
     func aGlideToAnOffsetRunsNoHoverHandlerUnderAStillPointerUntilItLands() {

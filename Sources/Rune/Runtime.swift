@@ -842,6 +842,7 @@ public final class Runtime<State> {
         }
     }
     internal var hoveredCallbackPaths: [String] = []
+    private var pendingPaintHovers: [(path: String?, priorSentKeys: Int)] = []
     public internal(set) var pressedPath: String? = nil
     private var activatedOnPointerDown = false
     private var pressedByTouch = false
@@ -1611,8 +1612,8 @@ public final class Runtime<State> {
     /// Whether a layout/view re-evaluation commit is currently pending.
     public var hasPendingCommit: Bool { needsCommit || textSystem.windowFontFamiliesBehind }
 
-    /// Whether any deferred layout/drawn/visible handler callbacks await the next frame.
-    public var hasPendingActions: Bool { !pendingLayoutActions.isEmpty }
+    /// Whether any deferred layout or paint observer callbacks await the next frame.
+    public var hasPendingActions: Bool { !pendingLayoutActions.isEmpty || !pendingPaintHovers.isEmpty }
 
     /// Supplies the native content origin in physical desktop pixels for drag reports.
     public func setWindowPixels(_ origin: (Int32, Int32)?) {
@@ -2145,6 +2146,7 @@ public final class Runtime<State> {
             if runPoll(at: now) { framePollChanged() }
         }
         frameTookDispatchedInput()
+        dispatchPendingPaintHover(at: now)
         flushPlatformFrameWork(at: now)
         pollPlaygroundIfNeeded(at: now)
         applyPlaygroundIfNeeded(at: now)
@@ -10434,6 +10436,7 @@ public final class Runtime<State> {
               pointerPosition.x < viewport.x, pointerPosition.y < viewport.y else { return }
         let previous = hoveredPath
         let link = hoveredLink
+        let wasHeld = hoverHold.held
         let retargeted = asInputObserver {
             refreshHoverAndSyncTracks(at: cxSettings.scaledTime(at: currentTime), wallNow: currentTime,
                                      cut: false, dispatchPolicy: .onHoldRelease)
@@ -10447,9 +10450,14 @@ public final class Runtime<State> {
                 animSources |= AnimSource.live
             }
         }
-        // A hover group can change independently of the primary hit. Its new track is
-        // sampled on the next paint, even when it retargeted instantly at rest.
-        if retargeted || hoveredLink != link || helpTargetChanges(at: pointerPosition) {
+        // A sent key ahead of this observer can mount a new handler before delivery.
+        // An ordinary pending model update commits after the observer has run.
+        if !wasHeld, previous != hoveredPath,
+           !pendingSentKeys.isEmpty || !pendingPaintHovers.isEmpty || hoverCallbackPaths(to: hoveredPath) != hoveredCallbackPaths {
+            pendingPaintHovers.append((hoveredPath, pendingSentKeys.count))
+        }
+        // A hover group can retarget even when the primary hit stays put.
+        if retargeted || !pendingPaintHovers.isEmpty || hoveredLink != link || helpTargetChanges(at: pointerPosition) {
             animSources |= AnimSource.live
         }
         settleKitHoverDelays(at: pointerPosition, now: currentTime)
@@ -10726,8 +10734,7 @@ public final class Runtime<State> {
         return flatNodes[idx].el.handlers.onDragOutEnd
     }
 
-    @discardableResult
-    internal func dispatchHoverCallbacks(to newPath: String?, at now: Double) -> (ranAny: Bool, allLiveOnly: Bool) {
+    private func hoverCallbackPaths(to newPath: String?) -> [String] {
         var desired: [String] = []
         if let path = newPath, var cur = nodeByPath[path] {
             var chain: [String] = []
@@ -10743,6 +10750,42 @@ public final class Runtime<State> {
             }
             desired = chain.reversed()
         }
+        return desired
+    }
+
+    /// Fresh paint can move an authored hover under a stationary pointer. Deliver it
+    /// with the next actions, before input that arrived after that paint.
+    internal func dispatchPendingPaintHover(at now: Double) {
+        guard !pendingPaintHovers.isEmpty else { return }
+        let actions = pendingPaintHovers
+        pendingPaintHovers = []
+        var keysRun = 0
+        for action in actions {
+            if action.priorSentKeys > keysRun {
+                flushPendingSentKeys(at: now, prefix: action.priorSentKeys - keysRun)
+                keysRun = action.priorSentKeys
+            }
+            let route = hoverCallbackPaths(to: action.path)
+            guard route != hoveredCallbackPaths else { continue }
+            asInputObserver {
+                let previous = isDispatchingHover
+                isDispatchingHover = true
+                defer { isDispatchingHover = previous }
+                InputTime.withArrival(nil) {
+                    let (ran, allLiveOnly) = dispatchHoverCallbacks(route, at: now, fromPaint: true)
+                    if ran && !allLiveOnly { suppressRevealFromHoverCommit = true }
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    internal func dispatchHoverCallbacks(to newPath: String?, at now: Double) -> (ranAny: Bool, allLiveOnly: Bool) {
+        dispatchHoverCallbacks(hoverCallbackPaths(to: newPath), at: now)
+    }
+
+    @discardableResult
+    private func dispatchHoverCallbacks(_ desired: [String], at now: Double, fromPaint: Bool = false) -> (ranAny: Bool, allLiveOnly: Bool) {
         let oldSet = Set(hoveredCallbackPaths)
         let newSet = Set(desired)
         let exited = hoveredCallbackPaths.reversed().filter { !newSet.contains($0) }
@@ -10750,38 +10793,28 @@ public final class Runtime<State> {
         hoveredCallbackPaths = desired
         var ranAny = false
         var allLiveOnly = true
-        for path in exited {
-            if let idx = nodeByPath[path],
-               !flatNodes[idx].el.hasKitHoverDelays,
-               let cb = flatNodes[idx].el.handlers.onHover {
-                var tx = makeTx(at: now)
-                cb(&state, false, &tx)
-                if !tx.liveOnlyRequested {
-                    perfWatch.meter.handler(name: "on_hover", path: path)
-                }
-                ranAny = true
-                allLiveOnly = allLiveOnly && tx.liveOnlyRequested
-                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
+        func dispatch(_ path: String, inside: Bool) {
+            guard let idx = nodeByPath[path], !flatNodes[idx].el.hasKitHoverDelays,
+                  let cb = flatNodes[idx].el.handlers.onHover else { return }
+            var tx = makeTx(at: now)
+            if fromPaint {
+                tx.eventInputTime = nil
+                tx.runtimeActions[Tx.inputTimeKey] = nil
             }
+            cb(&state, inside, &tx)
+            if !tx.liveOnlyRequested { perfWatch.meter.handler(name: "on_hover", path: path) }
+            ranAny = true
+            allLiveOnly = allLiveOnly && tx.liveOnlyRequested
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover",
+                    why: fromPaint ? CommitWhy.dirty : CommitWhy.input, countAsInput: !fromPaint)
         }
-        for path in entered {
-            if let idx = nodeByPath[path],
-               !flatNodes[idx].el.hasKitHoverDelays,
-               let cb = flatNodes[idx].el.handlers.onHover {
-                var tx = makeTx(at: now)
-                cb(&state, true, &tx)
-                if !tx.liveOnlyRequested {
-                    perfWatch.meter.handler(name: "on_hover", path: path)
-                }
-                ranAny = true
-                allLiveOnly = allLiveOnly && tx.liveOnlyRequested
-                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
-            }
-        }
+        for path in exited { dispatch(path, inside: false) }
+        for path in entered { dispatch(path, inside: true) }
         return (ranAny, allLiveOnly)
     }
 
     public func pointerExit(at now: Double) {
+        dispatchPendingPaintHover(at: now)
         wheelLost()
         hoverHold = HoverHold()
         pointerPosition = Vec2(-10000, -10000)
@@ -11989,6 +12022,7 @@ public final class Runtime<State> {
 
     @discardableResult
     public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, baseChar: Character? = nil, at now: Double) -> Bool {
+        dispatchPendingPaintHover(at: now)
         let prevCode = currentPhysicalKey
         let prevBase = currentKeyBase
         let prevRepeat = currentKeyRepeat
@@ -12110,6 +12144,7 @@ public final class Runtime<State> {
 
     @discardableResult
     public func keyDown(_ ev: KeyEvent, isRepeat: Bool = false, at now: Double) -> Bool {
+        dispatchPendingPaintHover(at: now)
         if slice2State.autoscroll.key() { return true }
         // The user's own key takes over from a `Tx.focusWhenShown` still waiting; a playground
         // step's press for the stage (`Action::Key { stage: true }`) doesn't. As upstream
@@ -12978,10 +13013,11 @@ public final class Runtime<State> {
         external: Bool = true,
         liveOnlyLabel: String = "handler",
         why: UInt16 = CommitWhy.input,
-        runPicks: Bool = true
+        runPicks: Bool = true,
+        countAsInput: Bool = true
     ) {
         claimPreparedText(from: tx)
-        inputHandlerRuns &+= 1
+        if countAsInput { inputHandlerRuns &+= 1 }
         var resolvedTx = tx
         if runPicks {
             runPickReads(&resolvedTx)
@@ -14144,11 +14180,13 @@ public final class Runtime<State> {
         nextWakeDeadline = nil
     }
 
-    internal func flushPendingSentKeys(at now: Double) {
+    internal func flushPendingSentKeys(at now: Double, prefix: Int? = nil) {
         guard !pendingSentKeys.isEmpty else { return }
-        let queued = pendingSentKeys
-        let stamps = queuedInputArrivals.sentKeys
-        pendingSentKeys.removeAll()
+        let count = min(prefix ?? pendingSentKeys.count, pendingSentKeys.count)
+        let queued = pendingSentKeys.prefix(count)
+        let stamps = queuedInputArrivals.sentKeys.prefix(count)
+        pendingSentKeys.removeFirst(count)
+        queuedInputArrivals.sentKeys.removeFirst(stamps.count)
         let savedPhys = slice2State.lastPressedPhysicalKey
         let savedBase = slice2State.lastPressedKeyBase
         slice2State.lastPressedPhysicalKey = nil
@@ -14157,7 +14195,6 @@ public final class Runtime<State> {
             slice2State.lastPressedPhysicalKey = savedPhys
             slice2State.lastPressedKeyBase = savedBase
         }
-        queuedInputArrivals.sentKeys.removeAll()
         for (i, ev) in queued.enumerated() {
             // Each runs under the stamp of the input that sent it, so what it sends keeps it.
             InputTime.withArrival(i < stamps.count ? stamps[i] : nil) {
