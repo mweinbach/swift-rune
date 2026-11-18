@@ -30,10 +30,18 @@ struct WebAccessibilityPaths: Encodable {
 /// Keeps a per-mount semantic mirror. A parent's movement carries its DOM children, so only
 /// changes to their parent-relative bounds need to cross the WASM boundary.
 final class WebAccessibilityProjection {
-    private struct Entry {
+    private final class Entry {
         var semantic: AccessibilityNode
         var bounds: SIMD4<Float>
         var children: [String]
+        var visited: UInt64
+
+        init(_ semantic: AccessibilityNode, bounds: SIMD4<Float>, children: [String], visited: UInt64) {
+            self.semantic = semantic
+            self.bounds = bounds
+            self.children = children
+            self.visited = visited
+        }
     }
 
     private struct Geometry {
@@ -46,6 +54,7 @@ final class WebAccessibilityProjection {
     }
 
     private var entries: [String: Entry] = [:]
+    private var generation: UInt64 = 0
     private var geometry: [Geometry] = []
     private var flatCount = 0
     private var canUpdateGeometry = false
@@ -76,10 +85,9 @@ final class WebAccessibilityProjection {
         var cached = lastScroll[path] ?? .zero
         cached.x = x
         lastScroll[path] = cached
-        if var entry = entries[path] {
+        if let entry = entries[path] {
             entry.semantic.scrollX = x
             entry.semantic.webDocument?.scrollX = x
-            entries[path] = entry
         }
     }
 
@@ -194,7 +202,7 @@ final class WebAccessibilityProjection {
                 geometry[index].bounds = local
                 entries[path]?.bounds = local
             }
-            if record.scrolls, var entry = entries[path] {
+            if record.scrolls, let entry = entries[path] {
                 let offset = runtime.scrollOffsets[path] ?? .zero
                 let maximum = runtime.scrollMaxExtents[path]?.y
                 if entry.semantic.scrollX != offset.x || entry.semantic.scrollY != offset.y ||
@@ -202,7 +210,6 @@ final class WebAccessibilityProjection {
                     entry.semantic.scrollX = offset.x
                     entry.semantic.scrollY = offset.y
                     entry.semantic.scrollYMax = maximum
-                    entries[path] = entry
                     nodes.append(shallowDictionary(entry.semantic, path: path, bounds: local))
                     continue
                 }
@@ -226,8 +233,8 @@ final class WebAccessibilityProjection {
         var nodes: [[String: Any]] = []
         var bounds: [String: [Float]] = [:]
         var children: [String: [String]] = [:]
-        var next: [String: Entry] = [:]
-        next.reserveCapacity(entries.count)
+        generation &+= 1
+        let generation = self.generation
         geometry.removeAll(keepingCapacity: true)
         flatCount = runtime.flatNodes.count
         canUpdateGeometry = true
@@ -248,35 +255,57 @@ final class WebAccessibilityProjection {
             shallow.label = AccessibilityDump.resolvedName(for: node)
             shallow.children = []
             shallow.frame = .zero
-            var paths: [String] = []
-            paths.reserveCapacity(node.children.count)
+            let prior = entries[path]
+            let previousChildren = prior?.children ?? []
+            // Most children keep their position when virtual rows cross the viewport.
+            // Only allocate a replacement order after seeing the first different path.
+            var changedChildren: [String]? = nil
+            if previousChildren.count != node.children.count {
+                changedChildren = []
+                changedChildren?.reserveCapacity(node.children.count)
+            }
             for (index, child) in node.children.enumerated() {
                 let id = child.runtimePath ?? "\(path)#a11y-\(index)"
-                paths.append(id)
+                if changedChildren == nil && id != previousChildren[index] {
+                    changedChildren = Array(previousChildren.prefix(index))
+                    changedChildren?.reserveCapacity(node.children.count)
+                }
+                changedChildren?.append(id)
                 visit(child, path: id, parent: geometryIndex, parentOrigin: SIMD2(rect.x, rect.y))
             }
-            if !replace {
-                let prior = entries[path]
-                if prior?.semantic != shallow {
-                    nodes.append(shallowDictionary(shallow, path: path, bounds: local))
-                } else if prior?.bounds != local {
+            if let prior {
+                prior.visited = generation
+                if prior.semantic != shallow {
+                    prior.semantic = shallow
+                    if !replace { nodes.append(shallowDictionary(shallow, path: path, bounds: local)) }
+                } else if !replace && prior.bounds != local {
                     bounds[path] = [local.x, local.y, local.z, local.w]
                 }
-                if prior?.children != paths && (prior != nil || !paths.isEmpty) { children[path] = paths }
+                prior.bounds = local
+                if let changedChildren {
+                    prior.children = changedChildren
+                    if !replace { children[path] = changedChildren }
+                }
+            } else {
+                let order = changedChildren ?? []
+                entries[path] = Entry(shallow, bounds: local, children: order, visited: generation)
+                if !replace {
+                    nodes.append(shallowDictionary(shallow, path: path, bounds: local))
+                    if !order.isEmpty { children[path] = order }
+                }
             }
-            next[path] = Entry(semantic: shallow, bounds: local, children: paths)
         }
         visit(root, path: root.runtimePath ?? root.id, parent: nil, parentOrigin: .zero)
         var packet: [String: Any] = [:]
+        let removed = entries.compactMap { path, entry in entry.visited == generation ? nil : path }
+        for path in removed { entries.removeValue(forKey: path) }
         if !replace {
-            let removed = entries.keys.filter { next[$0] == nil }
             if !removed.isEmpty { paths.removed = removed }
             if !children.isEmpty { paths.children = children }
             if !nodes.isEmpty { packet["nodes"] = nodes }
             if !bounds.isEmpty { packet["bounds"] = bounds }
             if !packet.isEmpty || !removed.isEmpty || !children.isEmpty { packet["local"] = true }
         }
-        entries = next
         return packet
     }
 }
