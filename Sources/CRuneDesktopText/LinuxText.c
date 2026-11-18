@@ -57,7 +57,9 @@ int32_t rune_desktop_register_font_file(const char *path) {
 // changes of embedding level and for combining marks drawn by a fallback font.
 static void index_grapheme_edges(RuneDesktopLine *line) {
     g_clear_pointer(&line->grapheme_edges, g_free);
-    if (line->length < 128) return;
+    // Even short ASCII code lines query both caret edges and the cell of each glyph.
+    // Building their Pango cluster boundaries once avoids three layout walks per byte.
+    if (line->length < 2 || (line->length < 128 && !g_str_is_ascii(pango_layout_get_text(line->layout)))) return;
     line->grapheme_edges = g_try_new0(RuneGraphemeEdge, (gsize)line->length + 1);
     if (!line->grapheme_edges) return;
 

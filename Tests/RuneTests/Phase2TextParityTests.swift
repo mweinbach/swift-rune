@@ -424,6 +424,19 @@ struct Phase2TextParityTests {
         let middle = DesktopFont(style: style, span: nil, families: families, language: nil, scale: 1)
         let heavy = DesktopFont(style: style, span: TextSpan("bold", weight: 650), families: families, language: nil, scale: 1)
         #expect(middle.weight == 400 && heavy.weight == 700)
+        #if os(Linux)
+        TextSystem.setFaceWeights([FaceWeights(family: "Georgia", weight: 600, range: (100, 900))])
+        let changed = DesktopFont(style: style, span: nil, families: families, language: nil, scale: 1)
+        #expect(changed.weight == 600)
+        #expect(changed.settingsEpoch != middle.settingsEpoch)
+
+        var namedStyle = style
+        for name in ["Caf\u{00E9}", "Cafe\u{0301}"] {
+            namedStyle.family = .named(name)
+            let named = DesktopFont(style: namedStyle, span: nil, families: families, language: nil, scale: 1)
+            #expect(named.family.utf8.starts(with: name.utf8))
+        }
+        #endif
         #endif
     }
 }

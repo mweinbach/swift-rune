@@ -27,15 +27,58 @@ struct DesktopFont: Hashable {
     // A newly registered font can change the fallback and its palette for the same family name.
     let settingsEpoch: UInt64
 
+    #if os(Linux)
+    /// Family resolution and CSS/HarfBuzz normalization are shared by many independent lines.
+    /// The key contains only descriptor inputs, so syntax colors and the text itself can vary.
+    private struct Request: Hashable {
+        let stack: TextUTF8Key
+        let monospace: Bool
+        let sizePx, weight: Float
+        let italic: Bool
+        let direction: TextFlow?
+        let language, features, variations: TextUTF8Key
+        let opticalSize: OpticalSize
+        let epoch: UInt64
+    }
+
+    private final class ResolvedFonts: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fonts: [Request: DesktopFont] = [:]
+
+        func get(_ key: Request) -> DesktopFont? { lock.withLock { fonts[key] } }
+
+        func put(_ descriptor: DesktopFont, for key: Request) {
+            lock.withLock {
+                if fonts.count >= 64 { fonts.removeAll(keepingCapacity: true) }
+                fonts[key] = descriptor
+            }
+        }
+    }
+
+    private static let resolved = ResolvedFonts()
+    #endif
+
     init(style: TextStyle, span: TextSpan?, families: (sans: String, mono: String), language: String?, scale: Float) {
+        let epoch = FontFamiliesRegistry.settingsEpoch
+        let requested = span?.monospace == true ? FontFamily.monospace : style.family
+        let stack = requested.stack(sans: families.sans, mono: families.mono)
+        let requestedWeight = span?.weight ?? style.weight
+        let size = (span?.size ?? style.size) * scale
+        let slanted = span?.italic == true || style.italic
+        #if os(Linux)
+        let key = Request(stack: TextUTF8Key(stack), monospace: requested.isMonospace,
+                          sizePx: size, weight: requestedWeight, italic: slanted,
+                          direction: style.direction, language: TextUTF8Key(language ?? ""),
+                          features: TextUTF8Key(style.features), variations: TextUTF8Key(style.variations),
+                          opticalSize: style.opticalSize, epoch: epoch)
+        if let cached = Self.resolved.get(key) { self = cached; return }
+        #endif
         #if os(Windows)
         clearType = style.fontSmoothing == .clearType
         chromiumMask = style.fontSmoothing == .directWrite || style.fontSmoothing == .clearType || style.fontSmoothing == .systemDefault
         #endif
-        settingsEpoch = FontFamiliesRegistry.settingsEpoch
-        mono = span?.monospace == true || style.family.isMonospace
-        let requested = span?.monospace == true ? FontFamily.monospace : style.family
-        let stack = requested.stack(sans: families.sans, mono: families.mono)
+        settingsEpoch = epoch
+        mono = requested.isMonospace
         let candidates = FontFamily.candidates(in: stack)
         #if os(Linux)
         // Pango separates families on every comma. Skip an unrepresentable literal
@@ -44,8 +87,7 @@ struct DesktopFont: Hashable {
         #else
         family = stack
         #endif
-        sizePx = (span?.size ?? style.size) * scale
-        let requestedWeight = span?.weight ?? style.weight
+        sizePx = size
         let declared = candidates.first.flatMap {
             FaceWeightsRegistry.declaredFace(in: TextSystem.faceWeights, family: $0, requestedWeight: requestedWeight)
         }
@@ -58,7 +100,7 @@ struct DesktopFont: Hashable {
         #else
         weight = Int32(cssWeight)
         #endif
-        italic = span?.italic == true || style.italic
+        italic = slanted
         direction = style.direction.map { $0 == .rtl ? 2 : 1 } ?? 0
         self.language = language ?? ""
         // Both CSS ('kern' 0) and HarfBuzz (kern=0) spellings are accepted by Rune.
@@ -83,6 +125,9 @@ struct DesktopFont: Hashable {
         if case .fixed(let points) = style.opticalSize, points.isFinite,
            !axes.contains(where: { $0.hasPrefix("opsz=") }) { axes.append("opsz=\(points)") }
         variations = axes.joined(separator: ",")
+        #if os(Linux)
+        Self.resolved.put(self, for: key)
+        #endif
     }
 }
 
