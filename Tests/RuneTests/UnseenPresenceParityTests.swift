@@ -104,6 +104,32 @@ struct UnseenPresenceParityTests {
         #expect(settled.opacity > 0.99)
     }
 
+    @Test("A viewport keeps its scroll coordinates when preceding siblings move its flat index", arguments: [false, true])
+    func reorderedViewportRetainsScrollSpace(native: Bool) throws {
+        struct State { var replaceFirst = false }
+        let rt = Runtime<State>(state: State(), viewport: Vec2(240, 200), pixelScale: 1, systemDark: true) { state, _ in
+            let rows: [El<State>] = (0..<8).map { index in
+                row().key(index == 0 && state.replaceFirst ? "new" : "r\(index)")
+                    .wFull().h(30).shrink(0).bg(Tok.accent(0, dark: true)).transition(.opacity)
+            }
+            let list: El<State> = col().key("list").w(200).h(60).clip(true).scrollY().children(rows)
+            if state.replaceFirst { return col().child(row().key("spacer").h(0)).child(list) }
+            return col().child(list)
+        }
+        func draw(_ t: Double) {
+            if native { _ = rt.renderFrame(at: t) } else { _ = rt.frame(at: t) }
+        }
+        for f in 0...45 { draw(Double(f) / 60) }
+        rt.update(at: 0.75) { state, tx in
+            state.replaceFirst = true
+            tx.scrollTo("list", offset: Vec2(0, 120), animated: false)
+        }
+        draw(0.75 + 1.0 / 120)
+        let visible = try #require(rt.elements().first { $0.key == "r4" })
+        #expect(rt.scrollOffset(forKey: "list").y == 120)
+        #expect(visible.opacity == 1)
+    }
+
     @Test("Omitted unseen clipped rows unmount immediately without exit ghost (endUnseenExits)")
     func endUnseenExitsUnmountsClippedOmittedRowsImmediately() throws {
         let rt = makeListRuntime(rows: ["r0", "r1", "r2", "r3", "r4"])

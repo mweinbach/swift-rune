@@ -1315,6 +1315,7 @@ final class ElColdData<State> {
     var truncateFadeEm: Float = 1.5
     var isolates: [(range: Range<Int>, dir: Direction)]? = nil
     var liveBindings: [BoundLiveProperty]? = nil
+    var kitFilterKeys: [String]? = nil
     var handlersBox: ElHandlersBox<State>? = nil
     private var _runtimeExtras: [String: Any]? = nil
     var runtimeExtras: [String: Any] {
@@ -1494,6 +1495,7 @@ final class ElColdData<State> {
         c.isolates = isolates
         c.liveBindings = liveBindings
         c.handlersBox = handlersBox.map { ElHandlersBox($0.value) }
+        c.kitFilterKeys = kitFilterKeys
         c._runtimeExtras = _runtimeExtras
         c.memoLayoutChildren = memoLayoutChildren
         c.keyLocation = keyLocation
@@ -1815,6 +1817,10 @@ public struct El<State> {
         }
     }
     internal var hasEditLens: Bool { _cold?.data.handlersBox?.hasEditLens ?? false }
+    internal var kitFilterKeysValue: [String]? {
+        get { _cold?.data.kitFilterKeys }
+        set { ensureCold().data.kitFilterKeys = newValue }
+    }
     internal var hasAuthoredHandlers: Bool { _cold?.data.handlersBox != nil }
     internal var runtimeExtras: [String: Any] {
         get { _cold?.data.runtimeExtras ?? [:] }

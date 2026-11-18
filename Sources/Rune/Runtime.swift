@@ -1236,6 +1236,7 @@ public final class Runtime<State> {
         var matchedFlights: [Int] = []
         var heldLandingWidths: [Int] = []
         var wordReveals: [Int] = []
+        var filterContainers: [Int] = []
         var growthStacks: [Int] = []
         var hasTimeScales = false
         var hasShadows = false
@@ -1245,6 +1246,7 @@ public final class Runtime<State> {
             if el.flightId != nil { matchedFlights.append(i) }
             if el.holdLandingWidthEnabled { heldLandingWidths.append(i) }
             if el.growthSpec != nil { growthStacks.append(i) }
+            if el.kitFilterKeysValue != nil { filterContainers.append(i) }
             if !hasShadows && !el.shadows.isEmpty { hasShadows = true }
             if !hasChildExits && el.childExitTransition != nil { hasChildExits = true }
             if el.runtimeExtras.isEmpty {

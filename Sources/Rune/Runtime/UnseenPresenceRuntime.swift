@@ -40,14 +40,13 @@ internal struct UnseenPresenceState: Sendable {
     }
 }
 
-fileprivate let kitFilterKeysKey = "kitFilterKeys"
 fileprivate let kitVirtualSpacerKey = "kitVirtualSpacer"
 
 extension El {
     /// Marks a list rows container with its full logical item keys so `UnseenPresence` knows when a filter replaced what the reader saw (`VirtualList::replaced_view`).
     public func kitFilterKeys(_ keys: [String]) -> Self {
         var copy = self
-        copy.runtimeExtras[kitFilterKeysKey] = keys
+        copy.kitFilterKeysValue = keys.isEmpty ? nil : keys
         return copy
     }
 
@@ -60,10 +59,6 @@ extension El {
 
     internal var isKitVirtualSpacer: Bool {
         (runtimeExtras[kitVirtualSpacerKey] as? Bool) ?? false
-    }
-
-    internal var kitFilterKeysValue: [String]? {
-        runtimeExtras[kitFilterKeysKey] as? [String]
     }
 }
 
@@ -93,6 +88,7 @@ internal struct KitUnseenPresenceState {
     private(set) var frameById: [NodeId: PaintedNode] = [:]
     private(set) var offscreenEntrances: [NodeId] = []
     var hasBuilt = false
+    private var filterContainerIndices: [Int] = []
     var prevFilterStateById: [NodeId: (keys: [String], seenChildKeys: Set<String>)] = [:]
 
     mutating func beginFrame() {
@@ -343,10 +339,12 @@ internal struct KitUnseenPresenceState {
 
     /// Detects list containers whose key set changed and dropped all previously seen row keys (`replaced_view`),
     /// returning the set of row container `NodeId`s that replaced what the reader saw.
-    mutating func updateFilterReplacedContainers<S>(newNodes: [Runtime<S>.FlatNode]) -> Set<NodeId> {
+    mutating func updateFilterReplacedContainers<S>(newNodes: [Runtime<S>.FlatNode], filterIndices: [Int]) -> Set<NodeId> {
         var replaced: Set<NodeId> = []
         var next: [NodeId: (keys: [String], seenChildKeys: Set<String>)] = [:]
-        for node in newNodes {
+        filterContainerIndices = filterIndices
+        for i in filterIndices {
+            let node = newNodes[i]
             guard let keys = node.el.kitFilterKeysValue, !keys.isEmpty else { continue }
             if isFilterReplaced(containerId: node.nodeId, newKeys: keys) {
                 replaced.insert(node.nodeId)
@@ -369,7 +367,7 @@ internal struct KitUnseenPresenceState {
     /// Updates `seenChildKeys` for tracked filter containers after the new rows have painted.
     mutating func recordPostBuildFilterSeen<S>(nodes: [Runtime<S>.FlatNode]) {
         guard !prevFilterStateById.isEmpty else { return }
-        for idx in nodes.indices {
+        for idx in filterContainerIndices where nodes.indices.contains(idx) {
             let n = nodes[idx]
             guard prevFilterStateById[n.nodeId] != nil else { continue }
             let prefix = n.path + "/"
@@ -378,8 +376,8 @@ internal struct KitUnseenPresenceState {
                 let child = nodes[j]
                 guard child.path.hasPrefix(prefix) else { break }
                 guard child.parentIndex == idx, let k = child.key else { continue }
-                let rowSaw = (frameById[child.nodeId]?.visible ?? false)
-                    && ((frameById[child.nodeId]?.inheritedOpacity ?? 1.0) >= (1.0 / 512.0))
+                let painted = frameById[child.nodeId]
+                let rowSaw = painted?.visible == true && (painted?.inheritedOpacity ?? 1.0) >= (1.0 / 512.0)
                 if rowSaw {
                     // Option row keys look like `"\(listKey)-option-\(optID)"`; strip prefix if present.
                     if let range = k.range(of: "-option-") {
@@ -549,7 +547,9 @@ extension Runtime {
               !prevNodes.isEmpty else {
             return []
         }
-        let replacedContainers = kitHooks.unseenPresence.updateFilterReplacedContainers(newNodes: flatNodes)
+        let replacedContainers = kitHooks.unseenPresence.updateFilterReplacedContainers(
+            newNodes: flatNodes, filterIndices: layoutObservers.filterContainers
+        )
         // The swept-visibility pass can only suppress these motion fields or re-enter a
         // replacement. An instant scroll remount with none of them needs only to retire
         // previously invisible omissions. A flight remains independently owned.
