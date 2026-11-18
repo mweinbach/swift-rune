@@ -1931,7 +1931,10 @@ public struct Scene: Sendable {
 
     /// A commit may reuse a fully settled slot. Compare the live scene so that
     /// imperative property tracks, reparenting, and in-flight transitions are honored.
-    private func matchesRestingSpec(_ index: Int, _ spec: NodeSpec, localFrame: MotionRect) -> Bool {
+    /// Borrow the mounted nodes and tracks for this per-node check during commit and offscreen landing.
+    private static func matchesRestingSpec(
+        _ index: Int, _ spec: NodeSpec, localFrame: MotionRect, nodes: borrowing [Node], store: borrowing AnimationStore
+    ) -> Bool {
         let node = nodes[index]
         guard node.presence.isPresent, node.path == nil, spec.launchLayout == nil,
               node.frame == localFrame, !store.hasTracks(node.id),
@@ -1951,7 +1954,8 @@ public struct Scene: Sendable {
     /// these values. An authored animation or a sleeping imperative track still needs
     /// the normal property reconciliation.
     package mutating func landUnseen(_ spec: NodeSpec, localFrame: MotionRect) {
-        guard let index = slot(spec.id), !matchesRestingSpec(index, spec, localFrame: localFrame) else { return }
+        guard let index = slot(spec.id),
+              !Self.matchesRestingSpec(index, spec, localFrame: localFrame, nodes: nodes, store: store) else { return }
         landFrame(spec.id, localFrame)
         if let fill = spec.fill { set(spec.id, Props.FILL, fill) }
         if let border = spec.border { set(spec.id, Props.BORDER, border) }
@@ -2014,7 +2018,7 @@ public struct Scene: Sendable {
             )
             let existing = slot(spec.id)
             if let existing, canRetain, matchedStarts[spec.id] == nil,
-               matchesRestingSpec(existing, spec, localFrame: localFrame) {
+               Self.matchesRestingSpec(existing, spec, localFrame: localFrame, nodes: nodes, store: store) {
                 // Ordinary commits publish unchanged nodes too. Virtual remounts only
                 // present these nodes when their parent moves.
                 if !retainingUnchanged { nodes[existing].dirty = true }
