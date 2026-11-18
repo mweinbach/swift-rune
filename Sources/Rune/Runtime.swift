@@ -305,7 +305,7 @@ public final class Runtime<State> {
         @inline(__always) var el: El<State> {
             _read { yield element.value }
             _modify {
-                defer { paintTraits = NativePaintTraits(element.value) }
+                defer { paintTraits = NativePaintTraits(element.value, inScrollViewport: enclosingScrollIndex != nil) }
                 yield &element.value
             }
         }
@@ -364,7 +364,7 @@ public final class Runtime<State> {
             self.key = key
             self.nodeId = nodeId
             self.element = element
-            self.paintTraits = NativePaintTraits(element.value)
+            self.paintTraits = NativePaintTraits(element.value, inScrollViewport: enclosingScrollIndex != nil)
             self.localRect = localRect
             self.unscrolledRect = unscrolledRect
             self.targetRect = targetRect

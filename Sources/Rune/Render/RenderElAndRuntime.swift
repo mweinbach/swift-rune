@@ -524,7 +524,7 @@ private func hashCachedLayerContent(
 
 /// Graphics code frequently checks one already-tokenized ASCII span at a time. Only
 /// non-ASCII strings need Unicode grapheme segmentation to detect a hard line break.
-private func hasTextLineBreak(_ text: String) -> Bool {
+func hasTextLineBreak(_ text: String) -> Bool {
     text.utf8.withContiguousStorageIfAvailable { bytes in
         for byte in bytes {
             if (0x0A...0x0D).contains(byte) { return true }
@@ -1292,6 +1292,107 @@ extension Runtime {
         // Leave the unoptimized geometry stack frame before invoking the font rasterizer.
         var pendingTextPaint: (() -> Void)?
         #endif
+
+        // Resolve strictly offscreen static descendants from their presented geometry.
+        // Descend normally, carrying snapped parent edges, so overflow which re-enters
+        // the viewport goes through the ordinary painter.
+        let canProjectOffscreen = publishHitGeometry && !hasRaised && !hasHolds && !hasPresenceFlights
+            && !hasAnimatedTracks && !canPress && !canPaintFocusRing && growthRows.isEmpty
+            && activeTextFlights.isEmpty && !needsInteractionPrepass && exitingIds.isEmpty
+
+        @inline(never)
+        func projectOffscreen(
+            _ node: FlatNode, _ el: El<State>, _ p: Presented,
+            _ context: PaintContext, depth: Int, snap: inout PixelSnap.Inherit,
+            groupHover: inout Float
+        ) -> PaintHeader? {
+            let id = node.nodeId
+            guard node.enclosingScrollIndex != nil, context.clip.viewportApplies,
+                  !context.inCache, !context.rotated, !context.dissolve, context.scaleMotion == .still,
+                  context.transform.scale == Vec2(1, 1), context.transform.anchor == context.transform.anchorTo,
+                  context.transform.stillScale == 1, p.phase == .present, !p.isMoving,
+                  p.scale == Vec2(1, 1), p.rotate == 0, p.blur == 0, p.opacity == 1,
+                  p.revealClip == nil, p.mask.isNone else { return nil }
+            let base = p.rect.offsetBy(Vec2(context.transform.dx, context.transform.dy))
+            let rect = base.offsetBy(context.stickyShift)
+            let clip = context.clip.clipPx
+            // The same conservative glyph overhang as TextRasterWindow.expanded, plus
+            // padding in either direction. A larger span or hard break disqualifies the node.
+            let margin = 2 * max(0, el.textStyle.size, el.textStyle.lineHeight ?? 0) + abs(el.layout.padding.top) + 3 / scale
+            guard rect.bottom + margin < max(0, clip.y) / scale ||
+                    rect.top - margin > min(Float(heightPx), clip.w) / scale else { return nil }
+            guard elSliceRenderState.scaleSettles[id] == nil, !elSliceRenderState.groupFadeIds.contains(id),
+                  !isActiveVirtualPath(node.path),
+                  !dissolveParentIds.contains(id), !flightTargets.contains(id), !flightSources.contains(id)
+            else { return nil }
+            let inert = context.inert || el.isInert
+            guard !matchesAuthoredKey(hoveredKey, node.key),
+                  resolveNodeHoverFrac(node, el: el, inert: inert) == 0 else { return nil }
+            let parentScope = context.element != nil ? hitScopesByDepth[depth - 1] : RenderHitScope()
+            guard parentScope.turn == nil, !parentScope.exiting else { return nil }
+            let isLeaf = topology.children(of: node).isEmpty
+            // Leaves need no downstream snap state. Composite and faded boxes retain
+            // their layer setup, including scopes which might paint a visible child.
+            if !isLeaf {
+                guard context.clip.roundedMask == nil, context.clip.fadeWidth == .zero, context.clip.fade == .zero,
+                      context.opacity == 1, snap.layer == 0, paintScene.rest(id) == nil
+                else { return nil }
+            }
+
+            currentInheritedMark = el.elMark ?? currentInheritedMark
+            if hasSticky { beforeSticky[node.index] = base }
+            if context.stickyShift != .zero { stuckShiftsByPath[node.path] = context.stickyShift }
+            newPresentedRects.record(rect, at: node.index, path: node.path)
+            newPresentedScales.record(at: node.index, path: node.path, id: id, scale: Vec2(1, 1), motion: .still)
+            if let parent = p.parent, !newRectSpringingById.isEmpty, newRectSpringingById[parent] == true {
+                newRectSpringingById[id] = true
+            }
+            if hasGroupOpacity && (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil) { groupHover = 0 }
+            let order = newElements.count
+            let parentClip = Self.screenClipOfParent(inheritedClip: parentScope.localClip, ancestorTurn: nil,
+                                                      outerTurnClip: parentScope.outerClip, localTurnClip: parentScope.localClip)
+            newHitGeometries.record(HitGeometry(
+                paintOrder: order, rect: rect, clipRect: parentScope.localClip ?? rect,
+                outerClip: parentScope.outerClip.map { intersectRects($0, initialClipPt) } ?? initialClipPt,
+                turn: nil, opacity: parentScope.opacity, isExiting: false,
+                hasVisualBlocker: el.blocksHits(fill: el.background, border: p.border.map(Color.init) ?? el.borderColor),
+                isInteractiveBlocker: el.blocksInteractiveHits, parentScreenClip: parentClip
+            ), at: node.index, path: node.path)
+            if depth == hitScopesByDepth.count { hitScopesByDepth.append(parentScope) } else { hitScopesByDepth[depth] = parentScope }
+            let carried = carriedScroll(for: node, scale: { newPresentedScales[$0] }, cache: &carriedScrollCache) { newHitGeometries[$0]?.turn }
+            newElements.append(.painted(PaintedElement(
+                authored: node.element, path: node.path, key: node.key, parentIndex: context.element,
+                rect: rect, target: node.targetRect, visible: intersectRects(rect, parentClip ?? initialClipPt),
+                committedLayoutTarget: node.committedLayoutTarget, opacity: parentScope.opacity, scale: 1,
+                blur: parentScope.reportedBlur, radius: abs(p.corners.topLeft), fill: el.background, liveTextColor: nil,
+                hover: 0, press: 0, scrolled: carried, carried: carried,
+                stuck: abs(context.stickyShift.y) >= abs(context.stickyShift.x) ? context.stickyShift.y : context.stickyShift.x,
+                focusAllowed: !inert, focused: false, focusVisible: false, inert: inert, moving: false, exiting: false
+            )))
+            kitHooks.unseenPresence.recordNativeFrameNode(p, rect: rect, drawn: rect, scale: Vec2(1, 1), turn: nil,
+                localClip: parentScope.localClip, screenClip: parentClip.map { intersectRects($0, initialClipPt) } ?? initialClipPt,
+                margin: 2 / scale + 3 * parentScope.blur, bypassClip: false, opacity: parentScope.opacity, sticky: .zero)
+
+            var childClip = context.clip
+            childClip.rectPt = intersectRects(childClip.rectPt, rect)
+            if !isLeaf {
+                snap.grow(growthSnapOffsetY(for: node), stack: false)
+                let canSnap = !snap.off && el.isPixelSnapEnabled
+                let edges = PixelSnap.edgesPx(rect, scale: scale)
+                let parent = canSnap ? pixelSnapGlides.atRest(id: id, r: edges, rigid: snap.rigid * scale, parent: snap.parent).1 : nil
+                let previousRigid = snap.rigid
+                snap.off = !canSnap
+                snap.steps = snap.steps || el.motionSnapsEnabled
+                if let origin = el.paintContain { snap.containAt(SIMD2(origin.x, origin.y)) }
+                snap.shift(1, by: node.virtualWindowSnapOriginY)
+                snap.shift(0, by: -node.scrollShift.x)
+                snap.shift(1, by: -node.scrollShift.y)
+                snap.parent = snap.rigid == previousRigid && PixelSnap.frames(el, effectiveFill: el.background, effectiveBorder: p.border.map(Color.init)) ? parent : nil
+            }
+            return (!isLeaf, false, context.opacity, 0, .zero, .zero, inert, childClip,
+                    context.transform, false, false, [], false, order, 0, 0, 0, 0,
+                    .still, clip, .zero, scale, 0, nil)
+        }
 
         @inline(never)
         func paintNodeHeader(
@@ -3790,7 +3891,12 @@ extension Runtime {
                     let authoredTurn = node.el.rotate
                     let turn = (presented?.rotate ?? authoredTurn) + (loop?.rotation ?? 0)
                     func header(_ el: El<State>) -> PaintHeader {
-                        paintNodeHeader(
+                        if canProjectOffscreen, node.paintTraits.contains(.offscreenGeometry), loop == nil,
+                           let presented, let result = projectOffscreen(node, el, presented, context, depth: context.hitDepth + 1,
+                                                                       snap: &snap, groupHover: &groupHover) {
+                            return result
+                        }
+                        return paintNodeHeader(
                             node, el: el, presented: presented, loop: loop,
                             parentClip: context.clip, snap: &snap, stickyShift: &stickyShift, inheritedInert: context.inert, groupHover: &groupHover, parentOpacity: context.opacity,
                             enclosingLayerOpacity: context.enclosingOpacity, inheritedTransform: context.transform,

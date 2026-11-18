@@ -11,8 +11,13 @@ struct NativePaintTraits: OptionSet {
     static let raised = Self(rawValue: 1 << 3)
     static let groupOpacity = Self(rawValue: 1 << 4)
     static let pressColor = Self(rawValue: 1 << 5)
+    static let offscreenGeometry = Self(rawValue: 1 << 6)
 
-    init<State>(_ el: borrowing El<State>) {
+    func hasSameTopology(as other: Self) -> Bool {
+        subtracting(.offscreenGeometry) == other.subtracting(.offscreenGeometry)
+    }
+
+    init<State>(_ el: borrowing El<State>, inScrollViewport: Bool = false) {
         var traits = Self()
         if el.stickyConfig?.edge != nil { traits.insert(.sticky) }
         if el.anchor != nil || el.isModal { traits.insert(.anchoredOrModal) }
@@ -20,7 +25,37 @@ struct NativePaintTraits: OptionSet {
         if el.isRaised { traits.insert(.raised) }
         if el.groupOpacity != nil { traits.insert(.groupOpacity) }
         if el.pressColor != nil { traits.insert(.pressColor) }
+        if inScrollViewport && el.allowsOffscreenGeometry { traits.insert(.offscreenGeometry) }
         self = traits
+    }
+}
+
+extension El {
+    /// These nodes have ordinary box or single-line ink. Input and accessibility
+    /// modifiers are preserved in the painted record and do not expand its ink.
+    fileprivate var allowsOffscreenGeometry: Bool {
+        guard hasOnlyCulledPaintExtras, !isRaised, !isModal, !isDissolve,
+              stickyConfig == nil, anchor == nil, flightId == nil, !isolatedLayer,
+              scale == Vec2(1, 1), rotate == 0, offset == .zero, blur == 0,
+              layout.scrollAxes.isEmpty, !layout.clipOverflow, clipRadius == nil,
+              clipCorners == nil, clipFade == nil, backdropBlur == 0,
+              shadows.isEmpty, shapes.isEmpty, gradient == nil,
+              !hasEditLens, role != .textInput, !isSecure, !focusable, a11yRange == nil,
+              liveBindings.isEmpty, liveText == nil, loopingSpec == nil,
+              groupOpacity == nil, pressScaleFactor == nil, virtualEstimate == nil,
+              growthSpec == nil, foldGlideSpec == nil, layoutAnim?.travel != .screen,
+              iconPayload == nil, imagePayload == nil, pixelsPayload == nil,
+              terminalGridPayload == nil, surfacePayload == nil,
+              textHighlights == nil, textLinks.isEmpty, spanRingsSpec.isEmpty,
+              advanceInRun == nil, pillChips.isEmpty, focusWithinRing == nil
+        else { return false }
+        guard plainText != nil || richSpans != nil else { return true }
+        guard children.isEmpty, focusRingColor == nil,
+              isTruncateFadeEnabled || (textStyle.wrap != .wrap && textStyle.maxLines == 0),
+              plainText.map(hasTextLineBreak) != true else { return false }
+        return richSpans?.contains { span in
+            span.pad > 0 || (span.size ?? 0) > textStyle.size || hasTextLineBreak(span.text)
+        } != true
     }
 }
 
@@ -67,7 +102,7 @@ extension Runtime {
                 guard presented[i].id == mounted[slot].nodeId,
                       presented[i].parent == (parent < 0 ? nil : mounted[parent].nodeId),
                       mounted[slot].zOrder == identity[i].zOrder,
-                      mounted[slot].paintTraits == identity[i].traits else { return false }
+                      mounted[slot].paintTraits.hasSameTopology(as: identity[i].traits) else { return false }
             }
             return true
         }

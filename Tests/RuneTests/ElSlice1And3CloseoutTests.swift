@@ -240,6 +240,44 @@ struct ElSlice1And3CloseoutTests {
         #expect(rt.state.taps == 1)
     }
 
+    @Test("Offscreen geometry retains visible overflow and follows a changed scroll viewport")
+    func offscreenGeometryCarriesOverflowBackIntoTheScrollViewport() throws {
+        let rt = Runtime(state: false, viewport: Vec2(120, 100), pixelScale: 2) { scrolls, _ -> El<Bool> in
+            let caption: El<Bool> = text("source line").key("caption").cursor(.text).selectable()
+                .noWrap().size(90, 20)
+            let overflow: El<Bool> = el().key("button").size(10, 10).pin(top: -260, left: 2)
+                .bg(.white).hit()
+            let row = memo("far", deps: 0) {
+                el().key("far").pin(top: 300.25, left: 0).size(100, 25)
+                    .bg(.black).mark(19).children([caption, overflow])
+            }
+            let root = el().key("viewport").size(120, 100).child(row)
+            return scrolls ? root.scrollY() : root
+        }
+        _ = rt.renderFrame(at: 0)
+        for step in 1...3 {
+            let t = Double(step) / 60
+            rt.update(at: t) { _, tx in tx.instant() }
+            _ = rt.renderFrame(at: t)
+        }
+        let before = try #require(rt.flatNodes.first { $0.key == "caption" })
+        #expect(!before.paintTraits.contains(.offscreenGeometry))
+        rt.update(at: 0.1) { scrolls, tx in scrolls = true; tx.instant() }
+        let drawn = rt.renderFrame(at: 0.1)
+        let after = try #require(rt.flatNodes.first { $0.key == "caption" })
+        #expect(rt.replayedFlatMemoNodes == 2)
+        #expect(after.paintTraits.contains(.offscreenGeometry))
+        #expect(rt.element(byKey: "caption")?.visible[3] == 0)
+        #expect(rt.element(byKey: "button")?.visible[3] == 10)
+        #expect(rt.hitTestElement(at: Vec2(6, 45))?.key == "button")
+        #expect(zip(drawn.marks, drawn.instances).contains { $0 == 19 && $1.rect.z == 20 && $1.fill.w == 1 })
+        rt.update(at: 0.2) { scrolls, tx in scrolls = false; tx.instant() }
+        _ = rt.renderFrame(at: 0.2)
+        let restored = try #require(rt.flatNodes.first { $0.key == "caption" })
+        #expect(rt.replayedFlatMemoNodes == 2)
+        #expect(!restored.paintTraits.contains(.offscreenGeometry))
+    }
+
     @Test("Offscreen clipped cells keep element geometry without submitting invisible draws")
     func clippedCellsKeepGeometry() {
         let rt = Runtime(state: false, viewport: Vec2(100, 100), pixelScale: 1) { move, _ -> El<Bool> in

@@ -145,6 +145,7 @@ final class MemoFlatSpan<State> {
         let fadesChanged = !Self.sameBuffer(fades, nodes[0].activeClipFades) && fades != nodes[0].activeClipFades
         let viewportChanged = enclosing != nodes[0].enclosingScrollIndex
             || vertical != nodes[0].enclosingVScrollIndex || horizontal != nodes[0].enclosingHScrollIndex
+        let scrollMembershipChanged = (enclosing == nil) != (nodes[0].enclosingScrollIndex == nil)
         let start = flat.count
         flat.append(contentsOf: nodes)
         currentSpecs.append(contentsOf: specs)
@@ -196,6 +197,9 @@ final class MemoFlatSpan<State> {
                     }
                     if fadesChanged { output[slot].activeClipFades = fades }
                     if viewportChanged {
+                        if scrollMembershipChanged {
+                            output[slot].paintTraits = NativePaintTraits(output[slot].el, inScrollViewport: enclosing != nil)
+                        }
                         output[slot].enclosingScrollIndex = enclosing
                         output[slot].enclosingVScrollIndex = vertical
                         output[slot].enclosingHScrollIndex = horizontal
