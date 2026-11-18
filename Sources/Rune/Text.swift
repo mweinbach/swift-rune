@@ -3280,9 +3280,9 @@ public final class TextSystem: @unchecked Sendable {
     public let colorIcons = ColorIconRasterizer()
     private var languageTagOverride: String?
     private var usesScopedFamilies = true
-    #if os(WASI) && RUNE_BROWSER_TEXT
-    // Each browser document can load a different face for the same CSS family.
-    private var browserFaceBoxes: (epoch: UInt64, boxes: DesktopFaceBoxes)?
+    #if os(Windows) || os(Linux) || (os(WASI) && RUNE_BROWSER_TEXT)
+    // Each window or browser document can choose different faces for the same family slot.
+    private var desktopFaceBoxes: (epoch: UInt64, boxes: DesktopFaceBoxes)?
     #endif
     private var ownFamilies: FontFamiliesRegistry.State
     private var followedWindowEpoch: UInt64?
@@ -3873,8 +3873,8 @@ public final class TextSystem: @unchecked Sendable {
     /// A document loaded new faces for its current family slots.
     internal func invalidateWindowFontFaces() {
         lock.lock()
-        #if os(WASI) && RUNE_BROWSER_TEXT
-        browserFaceBoxes = nil
+        #if os(Windows) || os(Linux) || (os(WASI) && RUNE_BROWSER_TEXT)
+        desktopFaceBoxes = nil
         #endif
         ownFamilies = FontFamiliesRegistry.makeState(sans: ownFamilies.sans, mono: ownFamilies.mono)
         lock.unlock()
@@ -7025,12 +7025,12 @@ public final class TextSystem: @unchecked Sendable {
         let fullText = spans.map { $0.map(\.text).joined() } ?? text
 
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
-        #if os(WASI) && RUNE_BROWSER_TEXT
+        #if os(Windows) || os(Linux) || (os(WASI) && RUNE_BROWSER_TEXT)
         let fontEpoch = currentFontEpoch
         let faceBoxes = lock.withLock {
-            if let cached = browserFaceBoxes, cached.epoch == fontEpoch { return cached.boxes }
+            if let cached = desktopFaceBoxes, cached.epoch == fontEpoch { return cached.boxes }
             let boxes = DesktopFaceBoxes()
-            browserFaceBoxes = (fontEpoch, boxes)
+            desktopFaceBoxes = (fontEpoch, boxes)
             return boxes
         }
         #else
