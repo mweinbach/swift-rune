@@ -118,6 +118,113 @@ public enum TextLayoutRebreak {
     }
 }
 
+extension TextSpan {
+    /// The same font, decoration geometry and line breaking apply throughout a foreground-only run.
+    var affectsLayout: Bool {
+        !text.isEmpty && (weight != nil || italic || monospace || size != nil || background != nil
+            || underline || strikethrough)
+    }
+
+    static func layoutSpans(_ spans: [TextSpan]?) -> [TextSpan]? {
+        guard let spans, spans.contains(where: \.affectsLayout) else { return nil }
+        var result: [TextSpan] = []
+        var plain = ""
+        lazy var hasInlineMono = spans.contains { $0.monospace && !$0.text.isEmpty }
+        for span in spans where !span.text.isEmpty {
+            if span.affectsLayout {
+                if !plain.isEmpty {
+                    result.append(TextSpan(plain))
+                    plain = ""
+                }
+                // Flattened rich text splits even the enclosing font range at syntax-color edges.
+                // Keep decoration edges and smaller padding spans next to inline code intact.
+                if result.last?.sharesFont(with: span) == true && (span.size == nil || span.monospace || !hasInlineMono) {
+                    result[result.count - 1].text.append(span.text)
+                } else {
+                    var layout = span
+                    layout.color = nil
+                    result.append(layout)
+                }
+            } else {
+                plain.append(span.text)
+            }
+        }
+        if !plain.isEmpty { result.append(TextSpan(plain)) }
+        return result
+    }
+
+    private func sharesFont(with other: TextSpan) -> Bool {
+        background == nil && other.background == nil && !underline && !other.underline
+            && !strikethrough && !other.strikethrough && weight == other.weight && size == other.size
+            && italic == other.italic && monospace == other.monospace
+    }
+}
+
+/// Foreground spans are ordered in logical UTF-8 coordinates. The glyph order can be visual (RTL).
+struct TextSpanInkMap: Sendable {
+    private var ranges: [(bytes: Range<Int>, color: Color)] = []
+
+    init(_ spans: [TextSpan]?) {
+        guard let spans else { return }
+        var byte = 0
+        for span in spans {
+            let end = byte + span.text.utf8.count
+            if let color = span.color, end > byte { ranges.append((byte..<end, color)) }
+            byte = end
+        }
+    }
+
+    var isEmpty: Bool { ranges.isEmpty }
+
+    private func rangeIndex(at byte: Int) -> Int {
+        var lo = 0, hi = ranges.count
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2
+            if byte >= ranges[mid].bytes.upperBound { lo = mid + 1 } else { hi = mid }
+        }
+        return lo
+    }
+
+    func color(at byte: Int) -> Color? {
+        let index = rangeIndex(at: byte)
+        guard index < ranges.count, byte >= ranges[index].bytes.lowerBound else { return nil }
+        return ranges[index].color
+    }
+
+    func color(at byte: Int, cursor: inout Int) -> Color? {
+        if cursor > 0 && byte < ranges[cursor - 1].bytes.upperBound {
+            cursor = rangeIndex(at: byte)
+        } else if cursor < ranges.count && byte >= ranges[cursor].bytes.upperBound {
+            cursor += 1
+            if cursor < ranges.count && byte >= ranges[cursor].bytes.upperBound { cursor = rangeIndex(at: byte) }
+        }
+        guard cursor < ranges.count, byte >= ranges[cursor].bytes.lowerBound else { return nil }
+        return ranges[cursor].color
+    }
+}
+
+extension ShapedText {
+    func applyingSpanInks(_ spans: [TextSpan]?, using originalInks: TextSpanInkMap? = nil) -> ShapedText {
+        let inks: TextSpanInkMap
+        if let cut = elided, let spans {
+            let drawn = cut.mapSpans(spans, originalLength: spans.reduce(0) { $0 + $1.text.utf8.count }, drawn: drawnText)
+            inks = TextSpanInkMap(drawn)
+        } else {
+            inks = originalInks ?? TextSpanInkMap(spans)
+        }
+        var result = self
+        var cursor = 0
+        for index in result.glyphs.indices {
+            let color = inks.color(at: result.glyphs[index].utf8Offset, cursor: &cursor)
+            if result.glyphs[index].color != color { result.glyphs[index].color = color }
+        }
+        #if canImport(CRuneDesktopText) && !canImport(CoreText)
+        result.desktopRestingText = desktopRestingText?.applyingSpanInks(inkAtByte: inks.color(at:))
+        #endif
+        return result
+    }
+}
+
 /// Key identifying the font/shaping attributes of a text run independent of wrap width (`text::ShapeKey`).
 public struct TextShapeKey: Hashable, Sendable {
     private var textKey: TextUTF8Key
@@ -129,26 +236,36 @@ public struct TextShapeKey: Hashable, Sendable {
     // attributes. Copying a shape key preserves their storage and previously computed hash.
     private final class Attributes: Hashable, Sendable {
         let spans: [TextSpan]?
+        let layoutSpans: [TextSpan]?
         let pills: [PillChip]
         let style: TextStyle
         let fingerprint: Int
 
         init(_ spans: [TextSpan]?, _ pills: [PillChip], _ style: TextStyle) {
             self.spans = spans
+            self.layoutSpans = TextSpan.layoutSpans(spans)
             self.pills = pills
             self.style = style
             var hash = Hasher()
-            hash.combine(spans)
+            hash.combine(layoutSpans)
             hash.combine(pills)
             hash.combine(style)
             fingerprint = hash.finalize()
+        }
+
+        init(paintSpans: [TextSpan]?, geometry: Attributes) {
+            self.spans = paintSpans
+            self.layoutSpans = geometry.layoutSpans
+            self.pills = geometry.pills
+            self.style = geometry.style
+            self.fingerprint = geometry.fingerprint
         }
 
         func hash(into hasher: inout Hasher) { hasher.combine(fingerprint) }
 
         static func == (lhs: Attributes, rhs: Attributes) -> Bool {
             lhs === rhs || (lhs.fingerprint == rhs.fingerprint && lhs.style == rhs.style
-                && lhs.spans == rhs.spans && lhs.pills == rhs.pills)
+                && lhs.layoutSpans == rhs.layoutSpans && lhs.pills == rhs.pills)
         }
     }
 
@@ -157,6 +274,24 @@ public struct TextShapeKey: Hashable, Sendable {
         _read { yield attributes.spans }
         set { attributes = Attributes(newValue, pills, style) }
     }
+    var layoutSpans: [TextSpan]? { attributes.layoutSpans }
+
+    func matchesLayoutSpans(_ spans: [TextSpan]?) -> Bool {
+        attributes.spans == spans || attributes.layoutSpans == TextSpan.layoutSpans(spans)
+    }
+
+    var layoutOnly: Self {
+        guard spans != layoutSpans else { return self }
+        return withPaintSpans(layoutSpans)
+    }
+
+    /// The caller has already verified that these spans share the current layout.
+    func withPaintSpans(_ spans: [TextSpan]?) -> Self {
+        var copy = self
+        copy.attributes = Attributes(paintSpans: spans, geometry: attributes)
+        return copy
+    }
+
     public var pills: [PillChip] {
         _read { yield attributes.pills }
         set { attributes = Attributes(spans, newValue, style) }
@@ -275,7 +410,6 @@ internal final class TextPreparedShape: @unchecked Sendable {
     let lhPx: Float
     var markerMap: ShapedText.MarkerMap
     let preparedPills: [TextSystem.PreparedPill]
-    let spanPalette: [Color]
     let decoratedRanges: [TextSystem.DecoratedRange]
     /// Inline code runs whose boxes may grow their lines (`#983`).
     let spanBoxes: [TextSystem.InlineSpanBox]
@@ -307,7 +441,6 @@ internal final class TextPreparedShape: @unchecked Sendable {
         lhPx: Float,
         markerMap: ShapedText.MarkerMap,
         preparedPills: [TextSystem.PreparedPill],
-        spanPalette: [Color],
         decoratedRanges: [TextSystem.DecoratedRange],
         baseFont: CTFont,
         baseAscentPx: CGFloat,
@@ -326,7 +459,6 @@ internal final class TextPreparedShape: @unchecked Sendable {
         self.lhPx = lhPx
         self.markerMap = markerMap
         self.preparedPills = preparedPills
-        self.spanPalette = spanPalette
         self.decoratedRanges = decoratedRanges
         self.baseFont = baseFont
         self.baseAscentPx = baseAscentPx
@@ -346,7 +478,6 @@ internal final class TextPreparedShape: @unchecked Sendable {
         lhPx: Float,
         markerMap: ShapedText.MarkerMap,
         preparedPills: [TextSystem.PreparedPill],
-        spanPalette: [Color],
         decoratedRanges: [TextSystem.DecoratedRange],
         spanBoxes: [TextSystem.InlineSpanBox] = []
     ) {
@@ -359,7 +490,6 @@ internal final class TextPreparedShape: @unchecked Sendable {
         self.lhPx = lhPx
         self.markerMap = markerMap
         self.preparedPills = preparedPills
-        self.spanPalette = spanPalette
         self.decoratedRanges = decoratedRanges
         self.estimatedBytes = max(128, authText.utf8.count * 24 + preparedPills.count * 64 + decoratedRanges.count * 32)
     }
@@ -379,7 +509,9 @@ public final class TextLayoutBox: @unchecked Sendable {
     public let style: TextStyle
     public let pixelScale: Float
     public var maxWidth: Float?
-    public var shaped: ShapedText
+    public var shaped: ShapedText {
+        didSet { recentPaint = nil }
+    }
     public var hasGlyphs: Bool
     internal let prepared: TextPreparedShape?
     internal var ordinaryCache: TextLayoutCacheIdentity?
@@ -394,7 +526,7 @@ public final class TextLayoutBox: @unchecked Sendable {
     internal var desktopRasterLayout: DesktopRasterLayout?
     #endif
     #if os(WASI) && RUNE_BROWSER_TEXT
-    internal var browserPaint: (x: Float, rgb: UInt32?, glyphs: [PositionedGlyph], decorations: BrowserLabelDecorations?, pages: Set<UInt16>, resets: UInt64, revision: UInt64)?
+    internal var browserPaint: (x: Float, rgb: UInt32?, spans: GlyphPaintSpans, glyphs: [PositionedGlyph], decorations: BrowserLabelDecorations?, pages: Set<UInt16>, resets: UInt64, revision: UInt64)?
     #endif
     // Page recycling invalidates UVs in a cached desktop text layout.
     internal var desktopAtlasResets: UInt64?
@@ -406,6 +538,7 @@ public final class TextLayoutBox: @unchecked Sendable {
     public var estimatedBytes: Int {
         var bytes = (prepared?.estimatedBytes ?? max(128, authText.utf8.count * 16))
             + shaped.glyphs.count * MemoryLayout<PositionedGlyph>.stride + shaped.lineCount * 48
+            + (recentPaint?.glyphBytes ?? 0)
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
         bytes += shaped.desktopRestingText?.retainedGlyphBytes ?? 0
         #endif
@@ -451,11 +584,65 @@ public final class TextLayoutBox: @unchecked Sendable {
         self.prepared = prepared
     }
 
+    /// Keeps the neutral native layout alive while a mounted label presents its own syntax colors.
+    private var spanInkGeometry: TextLayoutBox?
+    private(set) var spanInks = TextSpanInkMap(nil)
+    /// Keep the most recent glyph colors when its caller releases the box between frames.
+    /// Only mounted boxes own the geometry. The snapshot never retains its owning box.
+    final class SpanPaint {
+        private let key: TextShapeKey
+        private let shaped: ShapedText
+        private let inks: TextSpanInkMap
+        private weak var box: TextLayoutBox?
+
+        init(_ box: TextLayoutBox) {
+            self.key = box.shapeKey
+            self.shaped = box.shaped
+            self.inks = box.spanInks
+            self.box = box
+        }
+
+        func view(of geometry: TextLayoutBox, spans: [TextSpan]?) -> TextLayoutBox? {
+            guard key.spans == spans else { return nil }
+            if let box { return box }
+            let painted = geometry.clone(key: key, shaped: shaped)
+            painted.spanInks = inks
+            painted.spanInkGeometry = geometry
+            box = painted
+            return painted
+        }
+
+        var glyphBytes: Int { inks.isEmpty ? 0 : shaped.glyphs.count * MemoryLayout<PositionedGlyph>.stride }
+    }
+
+    var recentPaint: SpanPaint?
+    var cachedGeometry: TextLayoutBox { spanInkGeometry ?? self }
+
+    func applyingSpanInks(_ spans: [TextSpan]?) -> TextLayoutBox {
+        guard self.spans != spans else { return self }
+        let geometry = cachedGeometry
+        if geometry.spans == spans { return geometry }
+        let key = geometry.shapeKey.withPaintSpans(spans)
+        let inks = TextSpanInkMap(spans)
+        let shaped = inks.isEmpty ? geometry.shaped : geometry.shaped.applyingSpanInks(spans, using: inks)
+        let out = geometry.clone(key: key, shaped: shaped)
+        out.spanInks = inks
+        out.spanInkGeometry = geometry
+        return out
+    }
+
     public func clone() -> TextLayoutBox {
+        let out = clone(key: shapeKey, shaped: shaped)
+        out.spanInkGeometry = spanInkGeometry
+        out.spanInks = spanInks
+        return out
+    }
+
+    private func clone(key: TextShapeKey, shaped: ShapedText) -> TextLayoutBox {
         let out = TextLayoutBox(
-            shapeKey: shapeKey,
+            shapeKey: key,
             authText: authText,
-            spans: spans,
+            spans: key.spans,
             pills: pills,
             style: style,
             pixelScale: pixelScale,
@@ -465,6 +652,9 @@ public final class TextLayoutBox: @unchecked Sendable {
             prepared: prepared
         )
         out.rasterWindow = rasterWindow
+        #if canImport(CRuneDesktopText) && !canImport(CoreText)
+        out.desktopRasterLayout = desktopRasterLayout
+        #endif
         out.desktopAtlasResets = desktopAtlasResets
         out.desktopPages = desktopPages
         out.preparedPass = preparedPass
@@ -474,9 +664,39 @@ public final class TextLayoutBox: @unchecked Sendable {
     }
 }
 
+/// A flattened glyph or retained draw already has its authored foreground applied.
+/// The shape key covers the text and metrics. Painting also depends on the color at each byte.
+internal struct GlyphPaintSpans: Hashable, Sendable {
+    private let spans: [TextSpan]
+
+    init(_ spans: [TextSpan]?) { self.spans = spans ?? [] }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        guard lhs.spans.count == rhs.spans.count else { return false }
+        return lhs.spans.withUnsafeBufferPointer { a in
+            rhs.spans.withUnsafeBufferPointer { b in
+                a.baseAddress == b.baseAddress || a.indices.allSatisfy {
+                    a[$0].color == b[$0].color && a[$0].text.utf8.count == b[$0].text.utf8.count
+                }
+            }
+        }
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(spans.count)
+        for span in spans {
+            hasher.combine(span.text.utf8.count)
+            hasher.combine(span.color)
+        }
+    }
+}
+
 /// Cache key for flattened band-culled glyph quads (`glyph_cache.rs`).
 public struct GlyphReplayKey: Hashable, Sendable {
-    public var shapeKey: TextShapeKey
+    public var shapeKey: TextShapeKey {
+        didSet { inkSpans = GlyphPaintSpans(shapeKey.spans) }
+    }
+    private var inkSpans: GlyphPaintSpans
     public var maxWidthHalfPt: Int
     public var glideBinX: UInt8
     public var glideBinY: UInt8
@@ -486,7 +706,17 @@ public struct GlyphReplayKey: Hashable, Sendable {
         maxWidth: Float?,
         glidePx: Vec2
     ) {
+        self.init(shapeKey: shapeKey, spans: shapeKey.spans, maxWidth: maxWidth, glidePx: glidePx)
+    }
+
+    internal init(
+        shapeKey: TextShapeKey,
+        spans: [TextSpan]?,
+        maxWidth: Float?,
+        glidePx: Vec2
+    ) {
         self.shapeKey = shapeKey
+        self.inkSpans = GlyphPaintSpans(spans)
         self.maxWidthHalfPt = maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1
         if glidePx == .zero {
             self.glideBinX = 0

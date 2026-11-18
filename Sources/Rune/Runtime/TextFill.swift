@@ -20,7 +20,7 @@ extension Runtime {
         guard rows.0 < rows.1,
               let (filled, moved) = textSystem.fillParagraphs(layout, budget: .infinity, rows: rows, reach: 0, field: field.rawValue)
         else { return box }
-        let result = textSystem.paragraphBox(filled, text: box.authText, style: box.style, pixelScale: box.pixelScale)
+        let result = textSystem.paragraphBox(filled, text: box.authText, spans: box.spans, style: box.style, pixelScale: box.pixelScale)
         if nodeTextLayouts[field]?.box.paragraphs === layout {
             nodeTextLayouts[field] = RetainedLayoutCoordinator.TextLayoutRecord(box: result, isInput: true)
         }
@@ -51,7 +51,7 @@ extension Runtime {
                 continue
             }
             more = more || built.waiting
-            let box = textSystem.paragraphBox(built, text: rec.box.authText, style: rec.box.style, pixelScale: rec.box.pixelScale)
+            let box = textSystem.paragraphBox(built, text: rec.box.authText, spans: rec.box.spans, style: rec.box.style, pixelScale: rec.box.pixelScale)
             nodeTextLayouts[id] = RetainedLayoutCoordinator.TextLayoutRecord(box: box, isInput: true)
             // A waiting height is exact; should one not be, the field lays out again.
             if moved {
@@ -81,11 +81,11 @@ extension Runtime {
     /// The paragraph request for a field's layout (`TextSpec::by_paragraph` /
     /// `paragraphs_flow` / `plaintext_flow`, resolved into its style by
     /// `ElDisplayResolver.applyByParagraph`): nil when it lays out as one text. A field with
-    /// spans, pills or blocks other than paragraphs keeps one text layout, whose paragraphs
+    /// layout-affecting spans, pills or blocks other than paragraphs keeps one text layout, whose paragraphs
     /// read the same ways (`TextStyle.byParagraphStart`), pills isolated.
     internal static func paragraphRequest(field: NodeId, el: El<State>, edit: TextEdit, resolved: ElResolvedInput) -> ParagraphRequest? {
         guard !resolved.showingPlaceholder, !resolved.isSecure, let start = resolved.style.byParagraphStart,
-              resolved.spans?.isEmpty ?? true, resolved.pills.isEmpty,
+              resolved.pills.isEmpty, ParagraphRequest.supports(resolved.spans),
               // A rich field shows a block per line, `.paragraph` when it has none: plain while
               // every block is a paragraph (`paragraphs.rs` `plain`).
               resolved.blocks.allSatisfy({ $0 == .paragraph }) else { return nil }

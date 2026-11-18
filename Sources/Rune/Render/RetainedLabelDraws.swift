@@ -14,24 +14,26 @@ internal struct RetainedLabelDraws {
 
     struct Source {
         private let glyphs: [PositionedGlyph]
+        private let inkSpans: GlyphPaintSpans
         #if canImport(CoreText) && canImport(CoreGraphics)
         private let pens: [GlyphPen]
         private let placements: TextBoxGeometry.GlyphPlacements?
         #endif
 
-        init(_ shape: ShapedText) {
+        init(_ shape: ShapedText, spans: [TextSpan]?) {
             glyphs = shape.glyphs
+            inkSpans = GlyphPaintSpans(spans)
             #if canImport(CoreText) && canImport(CoreGraphics)
             pens = shape.glyphPens
             placements = shape.glyphPlacements
             #endif
         }
 
-        func matches(_ shape: ShapedText) -> Bool {
+        func matches(_ shape: ShapedText, spans: [TextSpan]?) -> Bool {
             #if canImport(CoreText) && canImport(CoreGraphics)
             guard placements === shape.glyphPlacements, sameStorage(pens, shape.glyphPens) else { return false }
             #endif
-            return sameStorage(glyphs, shape.glyphs)
+            return sameStorage(glyphs, shape.glyphs) && inkSpans == GlyphPaintSpans(spans)
         }
 
         private func sameStorage<T>(_ a: [T], _ b: [T]) -> Bool {
@@ -56,12 +58,12 @@ internal struct RetainedLabelDraws {
     var draws: [Draw]
 
     func replay(
-        shaped: ShapedText, at origin: SIMD2<Float>, clip: SIMD4<Float>, fade: SIMD4<UInt32>,
+        shaped: ShapedText, spans: [TextSpan]?, at origin: SIMD2<Float>, clip: SIMD4<Float>, fade: SIMD4<UInt32>,
         visible: SIMD4<Float>, ink: SIMD4<Float>, opacity: Float, baseline: Float?, scale: Float, smoothing: FontSmoothing, srgb: Bool,
         atlas: GlyphAtlas, into instances: inout [RenderInstance], marks: inout [UInt32], fixups: inout [GlyphUVFixup]
     ) -> Bool {
         guard self.ink == ink, self.opacity == opacity, self.baseline == baseline, self.scale == scale, self.smoothing == smoothing, self.srgb == srgb,
-              source.matches(shaped) else { return false }
+              source.matches(shaped, spans: spans) else { return false }
         let dx = origin.x - self.origin.x, dy = origin.y - self.origin.y
         guard dx == 0, origin.y >= 0, self.origin.y >= 0, dy.rounded() == dy,
               origin.y - origin.y.rounded(.down) == self.origin.y - self.origin.y.rounded(.down),

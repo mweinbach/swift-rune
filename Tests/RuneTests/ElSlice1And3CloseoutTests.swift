@@ -122,6 +122,35 @@ struct ElSlice1And3CloseoutTests {
         #expect(retained.labelDraws[id] != nil)
     }
 
+    @Test("Labels sharing glyph geometry repaint syntax tokens on the same frame", arguments: [false, true])
+    func repaintSharedLabelInks(native: Bool) {
+        let red = Color.srgb(1, 0, 0), green = Color.srgb(0, 1, 0), blue = Color.srgb(0, 0, 1)
+        let runtime = Runtime<Int>(state: 0, viewport: Vec2(160, 80), pixelScale: 1) { stage, _ in
+            let spans = [TextSpan("A", color: stage == 0 ? red : nil),
+                         TextSpan("B", color: stage == 0 ? nil : green)]
+            let changing: El<Int> = stage == 2 ? text("AB") : rich(spans)
+            return col().sizeFull()
+                .child(changing.key("tokens").size(140, 32).pl(8).color(.white))
+                .child(rich([TextSpan("A"), TextSpan("B", color: blue)]).key("sibling").size(140, 32).pl(8).color(.white))
+        }
+        runtime.textSystem.smoothing = .off
+        func inks(at time: Double) -> [SIMD4<Float>] {
+            if native {
+                return runtime.renderFrame(at: time).instances.filter { $0.params.y == KIND_GLYPH }.map(\.fill)
+            }
+            return runtime.frame(at: time).primitives.filter { $0.kind == .glyph }.map(\.fill)
+        }
+        let expected: [[Color]] = [[red, .white, .white, blue], [.white, green, .white, blue],
+                                   [.white, .white, .white, blue]]
+        for stage in expected.indices {
+            let time = Double(stage)
+            if stage > 0 { runtime.update(at: time) { value, tx in value = stage; tx.instant() } }
+            let colors = expected[stage].map { $0.simd4(srgb: runtime.srgbBlend) }
+            #expect(inks(at: time) == colors)
+            #expect(inks(at: time + 0.1) == colors)
+        }
+    }
+
     @Test("Live opacity updates syntax ink when a label's default foreground is transparent")
     func retainedSpanOpacity() throws {
         func app() -> Runtime<Live<Float>> {

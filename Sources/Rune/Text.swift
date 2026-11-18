@@ -529,6 +529,8 @@ public struct PositionedGlyph: Sendable, Equatable {
     var classicInk: AppleClassicGlyph.Ink?
     #elseif os(Linux) || os(Windows) || os(Android)
     var desktopInk: DesktopGlyphInk?
+    /// For native outline clipping, the distance from a ligature owner to this editing cell.
+    var desktopCellOffset: Int32 = 0
     #endif
     var usesInkDilation: Bool {
         #if canImport(CoreText) && canImport(CoreGraphics)
@@ -3092,7 +3094,7 @@ public final class TextSystem: @unchecked Sendable {
     }
 
     private struct MeasureKey: Hashable {
-        var text: String
+        var text: TextUTF8Key
         var style: TextStyle
         var maxWidthHalfPt: Int
         var scale100: Int
@@ -3116,7 +3118,7 @@ public final class TextSystem: @unchecked Sendable {
     }
 
     private struct ElisionKey: Hashable {
-        var text: String
+        var text: TextUTF8Key
         var spans: [TextSpan]?
         var style: TextStyle
         var maxWidthHalfPt: Int
@@ -3733,7 +3735,7 @@ public final class TextSystem: @unchecked Sendable {
     }
 
     internal func cachedLayoutBox(for shapeKey: TextShapeKey) -> TextLayoutBox? {
-        lock.withLock { layoutCache[shapeKey] }
+        lock.withLock { layoutCache[shapeKey] }.map { presentedLayout($0, spans: shapeKey.spans) }
     }
 
     internal func layoutKeys() -> Set<TextShapeKey> {
@@ -3771,42 +3773,47 @@ public final class TextSystem: @unchecked Sendable {
     internal func preparedOverflowLayout(
         _ leaf: ElResolvedText, width: Float?, scale: Float, create: Bool = false
     ) -> TextLayoutBox? {
-        guard !leaf.isSecure, leaf.advanceRun == nil, !leaf.displayedText.isEmpty,
+        guard !leaf.isSecure, leaf.advanceRun == nil,
               leaf.truncateFade || Self.needsElision(leaf.style, maxWidth: width) else { return nil }
+        // Swift permits a raw fallback alongside independently authored rich text.
+        // Use the bytes the shaper draws for both the cached decision and its cut.
+        let content = leaf.spans?.map(\.text).joined() ?? leaf.displayedText
+        guard !content.isEmpty else { return nil }
         let layoutWidth = leaf.truncateFade ? nil : width
         var style = leaf.style
         if leaf.truncateFade {
             style.wrap = .noWrap
             style.maxLines = 0
         }
-        let key = TextShapeKey(authText: leaf.displayedText, spans: leaf.spans, pills: leaf.pills,
+        let key = TextShapeKey(authText: content, spans: leaf.spans, pills: leaf.pills,
                                style: style, pixelScale: max(scale, 1), fontEpoch: currentFontEpoch,
                                languageTag: language, maxWidth: layoutWidth, pretty: false,
                                defaultSmoothing: smoothing)
         if let hit = cachedLayoutBox(for: key, matchingWidth: layoutWidth) { return hit }
         guard create else { return nil }
         if leaf.truncateFade {
-            return overflowContent(leaf, cut: nil, width: nil, scale: scale, glyphs: false)
+            return overflowContent(leaf, content: content, cut: nil, width: nil, scale: scale, glyphs: false)
         }
-        let decision = shapeImpl(text: leaf.displayedText, spans: leaf.spans, pills: leaf.pills,
+        let geometryKey = key.layoutOnly
+        let decision = shapeImpl(text: content, spans: geometryKey.spans, pills: leaf.pills,
                                  style: leaf.style, maxWidth: width, pixelScale: scale,
                                  emitGlyphs: false, bypassCache: true)
         // The cut is selected without retaining trial strings. Cache the typeset content
         // of this exact cut for the first glyph-producing pass.
-        _ = overflowContent(leaf, cut: decision.elided, width: width, scale: scale, glyphs: false)
-        let box = TextLayoutBox(shapeKey: key, authText: leaf.displayedText, spans: leaf.spans,
+        _ = overflowContent(leaf, content: content, cut: decision.elided, width: width, scale: scale, glyphs: false)
+        let box = TextLayoutBox(shapeKey: geometryKey, authText: content, spans: geometryKey.spans,
                                 pills: leaf.pills, style: leaf.style, pixelScale: scale,
                                 maxWidth: width, shaped: decision, hasGlyphs: false, prepared: nil)
         lock.withLock {
-            let storage = layoutStorageKey(for: key, width: width)
+            let storage = layoutStorageKey(for: geometryKey, width: width)
             box.lastUsedCommit = layoutCommitSeq
             storeLayout(box, for: storage)
         }
-        return box
+        return box.applyingSpanInks(leaf.spans)
     }
 
     private func overflowContent(
-        _ leaf: ElResolvedText, cut: TextElision?, width: Float?, scale: Float,
+        _ leaf: ElResolvedText, content: String, cut: TextElision?, width: Float?, scale: Float,
         glyphs: Bool, glide: Vec2 = .zero
     ) -> TextLayoutBox {
         var style = leaf.style
@@ -3814,30 +3821,31 @@ public final class TextSystem: @unchecked Sendable {
         style.maxLines = 0
         if !clamps { style.wrap = .noWrap }
         else if style.wrap == .noWrap || style.wrap == .ellipsis { style.wrap = .wrap }
-        let drawn = cut?.drawnString(from: leaf.displayedText) ?? leaf.displayedText
-        let spans = leaf.spans.map { cut?.mapSpans($0, originalLength: leaf.displayedText.utf8.count, drawn: drawn) ?? $0 }
+        let drawn = cut?.drawnString(from: content) ?? content
+        let spans = leaf.spans.map { cut?.mapSpans($0, originalLength: content.utf8.count, drawn: drawn) ?? $0 }
         return layoutKeyed(text: drawn, spans: spans, pills: cut?.mapPills(leaf.pills) ?? leaf.pills,
                            style: style, maxWidth: clamps ? width : nil, pixelScale: scale,
                            emitGlyphs: glyphs, glidePx: glide)
     }
 
     internal func drawPreparedOverflow(_ leaf: ElResolvedText, box: TextLayoutBox, glide: Vec2) -> ShapedText {
+        let content = box.authText
         let cut = box.shaped.elided
-        var drawn = overflowContent(leaf, cut: cut, width: box.maxWidth, scale: box.pixelScale,
+        var drawn = overflowContent(leaf, content: content, cut: cut, width: box.maxWidth, scale: box.pixelScale,
                                     glyphs: true, glide: glide).shaped
         if let cut {
             drawn.elided = cut
             drawn.wasTruncated = true
-            drawn.drawnText = cut.drawnString(from: leaf.displayedText)
+            drawn.drawnText = cut.drawnString(from: content)
         }
         return drawn
     }
 
     internal func cachedLayoutBox(for key: TextShapeKey, matchingWidth width: Float?) -> TextLayoutBox? {
-        lock.withLock {
+        lock.withLock { () -> TextLayoutBox? in
             if let box = layoutCache[key], Self.widthsMatch(width, box.maxWidth) { return box }
             return layoutCache[key.prepared(at: width)]
-        }
+        }.map { presentedLayout($0, spans: key.spans) }
     }
 
     /// Called under the cache lock. Reuse the ordinary slot until an idle pass needs
@@ -3989,7 +3997,7 @@ public final class TextSystem: @unchecked Sendable {
             var active = Set<TextShapeKey>()
             func refresh(_ records: Dictionary<NodeId, RetainedLayoutCoordinator.TextLayoutRecord>.Values) {
                 for record in records {
-                    let box = record.box
+                    let box = record.box.cachedGeometry
                     if box.ordinaryCache === layoutCacheIdentity {
                         box.lastUsedCommit = now
                     } else {
@@ -4611,7 +4619,7 @@ public final class TextSystem: @unchecked Sendable {
         let maxWKey = maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1
         let pHash = Self.hashPills(pills)
         let key = MeasureKey(
-            text: text,
+            text: TextUTF8Key(text),
             style: effectiveStyle,
             maxWidthHalfPt: maxWKey,
             scale100: Int((pixelScale * 100).rounded()),
@@ -4625,7 +4633,7 @@ public final class TextSystem: @unchecked Sendable {
                 measureCache[key] = (cached.size, layoutCommitSeq)
                 if effectiveStyle.wrap == .ellipsis || effectiveStyle.maxLines > 0, maxWidth != nil {
                     let eKey = ElisionKey(
-                        text: text,
+                        text: key.text,
                         spans: nil,
                         style: effectiveStyle,
                         maxWidthHalfPt: maxWKey,
@@ -4719,8 +4727,53 @@ public final class TextSystem: @unchecked Sendable {
                     pretty: box.shapeKey.pretty)
     }
 
-    #if canImport(CoreText) && canImport(CoreGraphics)
     internal func layoutKeyed(
+        retaining measuredKey: TextShapeKey?,
+        intrinsicShapes: IntrinsicTextShapes? = nil,
+        text: String,
+        spans: [TextSpan]? = nil,
+        pills: [PillChip] = [],
+        style: TextStyle,
+        maxWidth: Float?,
+        pixelScale: Float,
+        emitGlyphs: Bool,
+        glidePx: Vec2 = .zero,
+        keep: TextKeep = .cached,
+        countAsRebreak: Bool = true,
+        pretty: Bool = false,
+        rasterWindow: TextRasterWindow? = nil
+    ) -> TextLayoutBox {
+        let key = measuredKey?.layoutOnly
+        let content: String
+        let layoutSpans: [TextSpan]?
+        if let key {
+            content = key.authText
+            layoutSpans = key.layoutSpans
+        } else if let spans {
+            // The authored spans supply the string even when they reduce to plain layout.
+            content = spans.map(\.text).joined()
+            layoutSpans = TextSpan.layoutSpans(spans)
+        } else {
+            content = text
+            layoutSpans = nil
+        }
+        let layout = layoutGeometry(retaining: key, intrinsicShapes: intrinsicShapes, text: content,
+            spans: layoutSpans, pills: pills, style: style,
+            maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs, glidePx: glidePx,
+            keep: keep, countAsRebreak: countAsRebreak, pretty: pretty, rasterWindow: rasterWindow)
+        return presentedLayout(layout, spans: spans)
+    }
+
+    private func presentedLayout(_ layout: TextLayoutBox, spans: [TextSpan]?) -> TextLayoutBox {
+        guard layout.spans != spans else { return layout }
+        if let recent = lock.withLock({ layout.recentPaint?.view(of: layout, spans: spans) }) { return recent }
+        let painted = layout.applyingSpanInks(spans)
+        lock.withLock { layout.recentPaint = .init(painted) }
+        return painted
+    }
+
+    #if canImport(CoreText) && canImport(CoreGraphics)
+    private func layoutGeometry(
         retaining measuredKey: TextShapeKey?,
         intrinsicShapes: IntrinsicTextShapes? = nil,
         text: String,
@@ -4750,7 +4803,7 @@ public final class TextSystem: @unchecked Sendable {
         }
         return measureRuntimePhase(.text) {
             let scale = max(pixelScale, 1.0)
-            let authText = retainedKey?.authText ?? spans.map { $0.map(\.text).joined() } ?? text
+            let authText = text
             let effectiveMaxW = maxWidth
             let shapeKey = retainedKey ?? TextShapeKey(
                 authText: authText,
@@ -4966,9 +5019,9 @@ public final class TextSystem: @unchecked Sendable {
         }
         lock.withLock { _rebrokenCount += 1 }
         return TextLayoutBox(
-            shapeKey: box.shapeKey,
+            shapeKey: box.shapeKey.layoutOnly,
             authText: box.authText,
-            spans: box.spans,
+            spans: box.shapeKey.layoutSpans,
             pills: box.pills,
             style: box.style,
             pixelScale: box.pixelScale,
@@ -4976,7 +5029,7 @@ public final class TextSystem: @unchecked Sendable {
             shaped: shaped,
             hasGlyphs: emitGlyphs,
             prepared: prepared
-        )
+        ).applyingSpanInks(box.spans)
     }
 
     #endif
@@ -5016,7 +5069,7 @@ public final class TextSystem: @unchecked Sendable {
 
     private func shapeImpl(
         text: String,
-        spans: [TextSpan]? = nil,
+        spans paintSpans: [TextSpan]? = nil,
         pills: [PillChip] = [],
         style: TextStyle,
         maxWidth: Float?,
@@ -5031,11 +5084,16 @@ public final class TextSystem: @unchecked Sendable {
         let bypassCache = requestedBypass || isPreparingLayouts
         var style = style
         if style.fontSmoothing == .systemDefault { style.fontSmoothing = smoothing }
-        let authText = spans.map { $0.map(\.text).joined() } ?? text
+        let authText = paintSpans.map { $0.map(\.text).joined() } ?? text
+        let spans = TextSpan.layoutSpans(paintSpans)
+        func painted(_ shape: ShapedText) -> ShapedText {
+            guard emitGlyphs, paintSpans?.contains(where: { $0.color != nil && !$0.text.isEmpty }) == true else { return shape }
+            return shape.applyingSpanInks(paintSpans)
+        }
         let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
         if authText.isEmpty {
             return shapeCoreImpl(
-                text: text,
+                text: authText,
                 spans: spans,
                 pills: pills,
                 style: style,
@@ -5084,7 +5142,7 @@ public final class TextSystem: @unchecked Sendable {
                 shapeCache[sKey] = cached
                 if cached.shaped.elided != nil {
                     let eKey = ElisionKey(
-                        text: authText,
+                        text: sKey.text,
                         spans: spans,
                         style: style,
                         maxWidthHalfPt: maxWKey,
@@ -5099,7 +5157,7 @@ public final class TextSystem: @unchecked Sendable {
                     }
                 }
                 lock.unlock()
-                return cached.shaped
+                return painted(cached.shaped)
             }
             lock.unlock()
         }
@@ -5151,7 +5209,7 @@ public final class TextSystem: @unchecked Sendable {
                 pages: Set(res.glyphs.map(\.atlasPage)), atlasResets: glyphAtlas.resets)
         }
         lock.unlock()
-        return res
+        return painted(res)
     }
 
     private func resolveElidedShape(
@@ -5172,7 +5230,7 @@ public final class TextSystem: @unchecked Sendable {
     ) -> ShapedText {
         let eKey: ElisionKey? = (maxWidth != nil && !bypassCache)
             ? ElisionKey(
-                text: authText,
+                text: TextUTF8Key(authText),
                 spans: spans,
                 style: style,
                 maxWidthHalfPt: maxWidthHalfPt,
@@ -5529,10 +5587,8 @@ public final class TextSystem: @unchecked Sendable {
             }
         }
 
-        // Apply per-span font/color/size overrides in shaped UTF-16 coordinates.
-        let spanColorKey = "RuneColorIndex" as CFString
+        // Foreground is resolved at the logical glyph cluster after shaping.
         let pillMarkerKey = "RunePillMarker" as CFString
-        var spanPalette: [Color] = []
         var decoratedRanges: [DecoratedRange] = []
         var spanBoxes: [InlineSpanBox] = []
         // `inline_fit::mono_fits`: the smaller spaces that stand for inline code's CSS padding have
@@ -5579,11 +5635,6 @@ public final class TextSystem: @unchecked Sendable {
                                 isMonospace: span.monospace
                             ))
                         }
-                    }
-                    if let col = span.color {
-                        let idx = spanPalette.count
-                        spanPalette.append(col)
-                        CFAttributedStringSetAttribute(attrStr, range, spanColorKey, idx as CFNumber)
                     }
                     if span.underline || span.strikethrough || span.background != nil {
                         decoratedRanges.append(DecoratedRange(
@@ -5690,7 +5741,6 @@ public final class TextSystem: @unchecked Sendable {
             lhPx: lhPx,
             markerMap: markerMap,
             preparedPills: preparedPills,
-            spanPalette: spanPalette,
             decoratedRanges: decoratedRanges,
             baseFont: baseFont,
             baseAscentPx: baseAscentPx,
@@ -6492,10 +6542,10 @@ public final class TextSystem: @unchecked Sendable {
         byteAtUTF16: [Int], style: TextStyle, alignOffsetPx: Float, baselineYPx: Float,
         glidePx: Vec2, glyphsOut: inout [PositionedGlyph], glyphPensOut: inout [GlyphPen]
     ) {
-        let spanPalette = prepared.spanPalette
-        let spanColorKey = "RuneColorIndex" as CFString
         let pillMarkerKey = "RunePillMarker" as CFString
         let invS = 1 / prepared.scale
+        let runInk = style.fontSmoothing == .on || style.fontSmoothing == .windfoil
+            ? GlyphAtlas.baseInkBucket ?? 0 : 0
         for run in runs {
             let attrs = CTRunGetAttributes(run)
             if prepared.hasRunDelegates &&
@@ -6509,21 +6559,6 @@ public final class TextSystem: @unchecked Sendable {
             let runFont = Unmanaged<CTFont>.fromOpaque(fontValue).takeUnretainedValue()
             let runFontSizePx = Float(CTFontGetSize(runFont))
             let runIsColor = GlyphAtlas.isColorFont(runFont)
-            let runColor: Color?
-            if !spanPalette.isEmpty, let index = (attrs as NSDictionary)[spanColorKey] as? Int,
-               spanPalette.indices.contains(index) {
-                runColor = spanPalette[index]
-            } else {
-                runColor = nil
-            }
-
-            let runInk: UInt8
-            if let baseInk = GlyphAtlas.baseInkBucket, style.fontSmoothing == .on || style.fontSmoothing == .windfoil {
-                runInk = runColor.flatMap { GlyphAtlas.inkBucket(SIMD4($0.r, $0.g, $0.b, $0.a), encoded: false) } ?? baseInk
-            } else {
-                runInk = 0
-            }
-
             withRunBuffers(run, count: glyphCount) { glyphs, positions, indices in
                 for i in 0..<glyphCount {
                     let authoredIndex = max(0, markerMap.authU16(forShapedU16: indices[i]))
@@ -6546,7 +6581,6 @@ public final class TextSystem: @unchecked Sendable {
                                 Float(colorEntry.pixelSize.y) * invS
                             ),
                             colorGlyph: colorEntry,
-                            color: runColor,
                             utf8Offset: byte
                         ))
                         continue
@@ -6583,7 +6617,6 @@ public final class TextSystem: @unchecked Sendable {
                             Float(entry.pixelSize.y) * invS
                         ),
                         uv: entry.uv,
-                        color: runColor,
                         atlasPage: entry.page,
                         utf8Offset: byte
                     )
@@ -6913,7 +6946,7 @@ public final class TextSystem: @unchecked Sendable {
         return acc.finish()
     }
     #else
-    internal func layoutKeyed(
+    private func layoutGeometry(
         retaining measuredKey: TextShapeKey?,
         intrinsicShapes: IntrinsicTextShapes? = nil,
         text: String,
@@ -6931,7 +6964,7 @@ public final class TextSystem: @unchecked Sendable {
     ) -> TextLayoutBox {
         measureRuntimePhase(.text) {
             let scale = max(pixelScale, 1.0)
-            let authText = measuredKey?.authText ?? spans.map { $0.map(\.text).joined() } ?? text
+            let authText = text
             let effectiveMaxW = maxWidth
             let shapeKey = measuredKey ?? TextShapeKey(
                 authText: authText,
@@ -7017,10 +7050,11 @@ public final class TextSystem: @unchecked Sendable {
               let baseline = measured.lineBaselinesPx.first,
               !record.text.isEmpty else { return nil }
         let rgb = GlyphAtlas.browserBaseRGB
+        let paintSpans = GlyphPaintSpans(box.spans)
         var result = measured
         result.desktopRestingText = nil
         if !fresh, let previous = lock.withLock({ box.browserPaint }), previous.revision == rasterRevision,
-           previous.x == restingXPx, previous.rgb == rgb,
+           previous.x == restingXPx, previous.rgb == rgb, previous.spans == paintSpans,
            glyphAtlas.retainPages(previous.pages, since: previous.resets) {
             previous.decorations?.apply(to: &result)
             result.glyphs = previous.glyphs
@@ -7029,11 +7063,11 @@ public final class TextSystem: @unchecked Sendable {
         }
         guard let paragraph = measured.desktopParagraph ?? lock.withLock({ preparedShapeCache[key] }),
               let line = paragraph.fragments.first ?? nil,
-              let glyphs = line.browserLabelGlyphs(record.text, spans: key.spans, originX: record.originX,
+              let glyphs = line.browserLabelGlyphs(record.text, spans: box.spans, inks: box.spanInks, originX: record.originX,
                     baselineY: baseline / box.pixelScale, restingXPx: restingXPx, atlas: glyphAtlas) else { return nil }
         let pages = Set(glyphs.map(\.atlasPage)), resets = glyphAtlas.resets
         var decorations: BrowserLabelDecorations?
-        if !box.hasGlyphs, let spans = key.spans,
+        if !box.hasGlyphs, let spans = box.spans,
            spans.contains(where: { $0.underline || $0.strikethrough || $0.background != nil }) {
             let indexed = PortableTextSpans(spans)
             let drawn = BrowserLabelDecorations()
@@ -7044,7 +7078,7 @@ public final class TextSystem: @unchecked Sendable {
             drawn.apply(to: &result)
             decorations = drawn
         }
-        if !fresh { lock.withLock { box.browserPaint = (restingXPx, rgb, glyphs, decorations, pages, resets, _rasterRevision) } }
+        if !fresh { lock.withLock { box.browserPaint = (restingXPx, rgb, paintSpans, glyphs, decorations, pages, resets, _rasterRevision) } }
         result.glyphs = glyphs
         result.lineGlyphRanges = [0..<glyphs.count]
         return result
@@ -7122,11 +7156,11 @@ public final class TextSystem: @unchecked Sendable {
         guard box.shaped.desktopParagraph != nil, box.shapeKey.usesSmoothing(smoothing), box.shapeKey.fontEpoch == currentFontEpoch,
               box.shapeKey.languageTag == language else { return nil }
         let next = measureRuntimePhase(.text) {
-            breakPortable(box.shapeKey, maxWidth: maxWidth, scale: box.pixelScale, emitGlyphs: emitGlyphs,
+            breakPortable(box.shapeKey.layoutOnly, maxWidth: maxWidth, scale: box.pixelScale, emitGlyphs: emitGlyphs,
                           keep: .owned, previousBreak: box.shaped.desktopParagraph)
         }
         lock.withLock { _rebrokenCount += 1 }
-        return next
+        return next.applyingSpanInks(box.spans)
         #else
         return nil
         #endif
@@ -7239,7 +7273,7 @@ public final class TextSystem: @unchecked Sendable {
             effectiveStyle.wrap = .wrap
         }
         let key = MeasureKey(
-            text: text,
+            text: TextUTF8Key(text),
             style: effectiveStyle,
             maxWidthHalfPt: maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1,
             scale100: Int((pixelScale * 100.0).rounded()),
@@ -7889,10 +7923,12 @@ public final class TextSystem: @unchecked Sendable {
                 if emitGlyphs {
                     #if canImport(CRuneDesktopText) && !canImport(CoreText)
                     if paintNative, let native, let nativeCell {
-                        if let spanColor { nativeColors[chStart] = spanColor }
+                        let cluster = native.clusterByte(for: nativeCell)
+                        let ink = cluster == chStart ? spanColor : spanAt(utf8Offset: cluster)?.color
+                        if let ink { nativeColors[cluster] = ink }
                         glyphs += native.glyphs(for: nativeCell, originX: originX,
-                            baselineY: baselinePx * invS, color: spanColor,
-                            atlas: glyphAtlas, cache: !bypassCache, glidePx: glidePx, rasterWindow: rasterWindow)
+                            baselineY: baselinePx * invS, color: ink,
+                            atlas: glyphAtlas, cache: !bypassCache, glidePx: glidePx, utf8Offset: cluster, rasterWindow: rasterWindow)
                     }
                     #endif
                     let paintBitmap = needsBitmapFont && (rasterWindow.map { band in

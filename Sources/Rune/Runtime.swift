@@ -7307,7 +7307,9 @@ public final class Runtime<State> {
         if !isExiting, glidePx == .zero, let live = nodeTextLayouts[snapId]?.box {
             // A layout measured greedy is not reused for pretty paint (or vice versa, `#882`).
             let matchesPretty = live.shapeKey.pretty == TextShapeKey.layoutPretty(pretty, style: style)
-            let matchesText = (HistoryText.sameBytes(live.authText, targetAuth) && live.spans == spans && live.pills == pills && live.style == style && abs(live.pixelScale - targetScale) < 0.01 && matchesPretty)
+            let matchesText = HistoryText.sameBytes(live.authText, targetAuth) && live.pills == pills
+                && live.style == style && abs(live.pixelScale - targetScale) < 0.01 && matchesPretty
+                && (live.paragraphs == nil || paragraphs != nil) && live.shapeKey.matchesLayoutSpans(spans)
             let matchesWidth: Bool = {
                 guard let ww = wrapWidth else {
                     return live.maxWidth == nil
@@ -7321,7 +7323,7 @@ public final class Runtime<State> {
                 if let laid = live.paragraphs, laid.waiting, let request = paragraphs, !request.highlights.isEmpty {
                     let prepared = textSystem.prepareHighlights(request.highlights, in: laid, field: request.field)
                     if prepared !== laid {
-                        let box = textSystem.paragraphBox(prepared, text: text, style: style, pixelScale: pxScale)
+                        let box = textSystem.paragraphBox(prepared, text: live.authText, spans: spans, style: style, pixelScale: pxScale)
                         nodeTextLayouts[snapId] = RetainedLayoutCoordinator.TextLayoutRecord(box: box, isInput: true)
                         return box
                     }
@@ -7334,7 +7336,9 @@ public final class Runtime<State> {
                                                   pretty: pretty, rasterWindow: rasterWindow)
                 }
                 if retainGlyphs(live) {
-                    return live
+                    let painted = live.applyingSpanInks(spans)
+                    if painted !== live { nodeTextLayouts[snapId]?.box = painted }
+                    return painted
                 }
                 let filled = textSystem.layoutKeyed(
                     text: text,
@@ -9320,12 +9324,13 @@ public final class Runtime<State> {
                                 )
                                 : (-Float.infinity, Float.infinity)
                             if pl.waiting { textRows[snap.nodeId] = rows }
-                            visibleInputGlyphs = pl.glyphs(top: rows.0, bottom: rows.1, using: textSystem)[...]
+                            visibleInputGlyphs = pl.glyphs(top: rows.0, bottom: rows.1, using: textSystem, inks: inputBox.spanInks)[...]
                         } else if inputBox.rasterWindow != nil {
                             visibleInputGlyphs = shaped.glyphs[...]
                         } else {
                             visibleInputGlyphs = textSystem.glyphCache.glyphsInBandCached(
-                                key: GlyphReplayKey(shapeKey: inputBox.shapeKey, maxWidth: inputBox.maxWidth, glidePx: glidePx),
+                                key: GlyphReplayKey(shapeKey: inputBox.shapeKey, spans: inputBox.spans,
+                                                    maxWidth: inputBox.maxWidth, glidePx: glidePx),
                                 keep: resolvedInput.isSecure ? .secret : (glidePx == .zero ? .cached : .owned),
                                 bandTopPt: inBandTop,
                                 bandBottomPt: inBandBot,
@@ -9678,7 +9683,8 @@ public final class Runtime<State> {
                                 )
                                 : (-Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
                             glyphsToEmit = textSystem.glyphCache.glyphsInBandCached(
-                                key: GlyphReplayKey(shapeKey: labelBox.shapeKey, maxWidth: labelBox.maxWidth, glidePx: glidePx),
+                                key: GlyphReplayKey(shapeKey: labelBox.shapeKey, spans: labelBox.spans,
+                                                    maxWidth: labelBox.maxWidth, glidePx: glidePx),
                                 keep: resolvedText.isSecure ? .secret : (glidePx == .zero && !placedNativeGlyphs ? .cached : .owned),
                                 bandTopPt: lblBandTop,
                                 bandBottomPt: lblBandBot,

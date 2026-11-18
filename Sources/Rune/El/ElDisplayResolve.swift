@@ -106,13 +106,14 @@ internal struct ElResolvedText {
     func retainedGlyphLayout(in box: TextLayoutBox, using textSystem: TextSystem,
                         maxWidth: Float?, pixelScale: Float, window: TextRasterWindow) -> TextLayoutBox? {
         guard matchesMountedLabel(box, using: textSystem, maxWidth: maxWidth, pixelScale: pixelScale, window: window) else { return nil }
-        if !box.hasGlyphs { return textSystem.glyphsForCommittedLabel(box) }
+        let painted = box.applyingSpanInks(spans)
+        if !painted.hasGlyphs { return textSystem.glyphsForCommittedLabel(painted) }
         #if canImport(CoreText) && canImport(CoreGraphics)
-        if !box.shaped.glyphs.isEmpty, box.shaped.glyphPlacements?.retainSource(in: textSystem.glyphAtlas) != true { return nil }
+        if !painted.shaped.glyphs.isEmpty, painted.shaped.glyphPlacements?.retainSource(in: textSystem.glyphAtlas) != true { return nil }
         #else
-        guard textSystem.glyphAtlas.retainPages(box.desktopPages, since: box.desktopAtlasResets) else { return nil }
+        guard textSystem.glyphAtlas.retainPages(painted.desktopPages, since: painted.desktopAtlasResets) else { return nil }
         #endif
-        return box
+        return painted
     }
 
     func matchesMountedLabel(_ box: TextLayoutBox, using textSystem: TextSystem,
@@ -122,7 +123,7 @@ internal struct ElResolvedText {
               box.shaped.lineCount <= 1 || (window.lowerY <= 0 && window.upperY >= box.shaped.size.y),
               box.pixelScale == max(1, pixelScale), box.maxWidth == (style.wrap == .noWrap ? nil : maxWidth),
               box.shapeKey.pretty == TextShapeKey.layoutPretty(pretty, style: style),
-              box.style == style, box.spans == spans, box.pills == pills,
+              box.style == style, box.shapeKey.matchesLayoutSpans(spans), box.pills == pills,
               TextUTF8Key.equalBytes(box.authText, displayedText),
               box.shapeKey.usesSmoothing(textSystem.smoothing),
               box.shapeKey.fontEpoch == textSystem.currentFontEpoch, box.shapeKey.languageTag == textSystem.language,
@@ -145,7 +146,8 @@ internal struct ElResolvedText {
         }
         if let (run, offset) = advanceRun, !(isSecure && textSystem.isPreparingLayouts) {
             if let sliced = textSystem.shapeRunSlice(run, at: offset, style: style, pixelScale: pixelScale, emitGlyphs: emitGlyphs) {
-                return sliced
+                guard let spans, emitGlyphs else { return sliced }
+                return sliced.applyingSpanInks(spans)
             }
         }
         var effectiveStyle = style

@@ -126,6 +126,68 @@ struct ParagraphsFlowParityTests {
         #expect(!hidden.hasGlyphs)
     }
 
+    @Test func recoloredFieldsShareParagraphsAndResolveVisibleInkAtDocumentBytes() throws {
+        let system = TextSystem()
+        let text = "é\nWX\nfern"
+        let request = ParagraphRequest(field: 5, forced: .ltr, startFlow: .ltr)
+        let red = Color.srgb(1, 0, 0)
+        let blue = Color.srgb(0, 0, 1)
+        let firstInks = [TextSpan("é\nW", color: red), TextSpan("X\nfern")]
+        let nextInks = [TextSpan("é\n"), TextSpan("WX\n", color: blue), TextSpan("fern")]
+        func layout(_ spans: [TextSpan]?) -> TextLayoutBox {
+            system.layoutInput(text: text, spans: spans, pills: [], style: Self.style, maxWidth: 240,
+                               pixelScale: 2, emitGlyphs: false, request: request)
+        }
+        let plain = layout(nil)
+        let first = layout(firstInks)
+        let next = layout(nextInks)
+        let shared = try #require(plain.paragraphs)
+        #expect(first.paragraphs === shared)
+        #expect(next.paragraphs === shared)
+        let line = shared.paragraphs[1]
+        let middle = line.y + line.height / 2
+        func visible(_ box: TextLayoutBox) -> [PositionedGlyph] {
+            shared.glyphs(top: middle, bottom: middle, using: system, inks: box.spanInks)
+        }
+        #expect(visible(first).map(\.color) == [red, nil])
+        let count = system.shapedCount
+        #expect(visible(next).map(\.color) == [blue, blue])
+        #expect(visible(plain).allSatisfy { $0.color == nil })
+        #expect(visible(first).map(\.color) == [red, nil])
+        #expect(system.shapedCount == count)
+        #expect(layout([TextSpan("é\nW", weight: 700), TextSpan("X\nfern")]).paragraphs == nil)
+    }
+
+    @Test(arguments: [false, true])
+    func mountedParagraphEditorRecolorsOnTheNextFrame(native: Bool) throws {
+        struct Model {
+            var field = TextEdit("é\nAB", multiline: true)
+            var changed = false
+        }
+        let red = Color.srgb(1, 0, 0), blue = Color.srgb(0, 0, 1)
+        let runtime = Runtime(state: Model(), viewport: Vec2(150, 100), pixelScale: 1) { model, _ in
+            let mark = model.changed ? RichSpan(4..<5).color(blue) : RichSpan(3..<4).color(red)
+            return textInput(key: "editor", \Model.field).size(150, 100).font(Self.style).decorations([mark])
+        }
+        func glyphInks(at time: Double) -> [SIMD4<Float>] {
+            if native { return runtime.renderFrame(at: time).instances.filter { $0.params.y == KIND_GLYPH }.map(\.fill) }
+            return runtime.frame(at: time).primitives.filter { $0.kind == .glyph }.map(\.fill)
+        }
+        let first = glyphInks(at: 0)
+        let geometry = try #require(runtime.nodeTextLayouts.values.first { $0.isInput }?.box.paragraphs)
+        let redInk = red.simd4(srgb: runtime.srgbBlend), blueInk = blue.simd4(srgb: runtime.srgbBlend)
+        #expect(first.filter { $0 == redInk }.count == 1)
+        #expect(!first.contains(blueInk))
+        runtime.update(at: 1) { model, transaction in
+            model.changed = true
+            transaction.instant()
+        }
+        let second = glyphInks(at: 1)
+        #expect(second.filter { $0 == blueInk }.count == 1)
+        #expect(!second.contains(redInk))
+        #expect(runtime.nodeTextLayouts.values.first { $0.isInput }?.box.paragraphs === geometry)
+    }
+
     @Test("by-paragraph keys: a paragraph with no strong character reads as the one before it, the first the start flow")
     func neutralParagraphsInheritFlow() throws {
         let ts = TextSystem()

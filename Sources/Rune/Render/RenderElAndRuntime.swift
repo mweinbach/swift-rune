@@ -3312,7 +3312,7 @@ extension Runtime {
                     let allRows = parentIsRotated || abs(el.rotate) > 1e-4
                     let rows = allRows ? (-Float.infinity, Float.infinity) : (top, bottom)
                     if paragraphs.waiting { textRows[nid] = rows }
-                    inputGlyphs = paragraphs.glyphs(top: rows.0, bottom: rows.1, using: textSystem)
+                    inputGlyphs = paragraphs.glyphs(top: rows.0, bottom: rows.1, using: textSystem, inks: inputBox.spanInks)
                 } else {
                     inputGlyphs = shaped.glyphs
                 }
@@ -3392,7 +3392,9 @@ extension Runtime {
                                                         pixelScale: shapeScale, window: window) {
                         let offset = TextBoxGeometry.inlineOffset(align: el.textStyle.align, wrap: resolvedText.style.wrap,
                             shaped: measured.box.shaped, innerWidth: drawnInnerW, textScale: sc.x, pixelScale: scale)
-                        if let painted = textSystem.browserLabelPaint(measured.box, restingXPx: (boxLeft + offset) * scale, fresh: freshRaster) {
+                        let current = measured.box.applyingSpanInks(resolvedText.spans)
+                        if let painted = textSystem.browserLabelPaint(current, restingXPx: (boxLeft + offset) * scale, fresh: freshRaster) {
+                            if current !== measured.box { nodeTextLayouts[nid]?.box = current }
                             return painted
                         }
                     }
@@ -3641,7 +3643,7 @@ extension Runtime {
                 let visible = SIMD4<Float>(glyphClipEdges.x, shownY0, glyphClipEdges.z, shownY1)
                 let retained = canRetain ? labelDraws[nid] : nil
                 let reused = retained?.replay(
-                    shaped: shaped, at: restOrigin, clip: glyphClipEdges, fade: glyphFade, visible: visible,
+                    shaped: shaped, spans: resolvedText.spans, at: restOrigin, clip: glyphClipEdges, fade: glyphFade, visible: visible,
                     ink: runInk, opacity: localOpacity, baseline: shaped.lineBaselinesPx.first, scale: scale, smoothing: inkMode, srgb: srgbBlend, atlas: textSystem.glyphAtlas,
                     into: &instances, marks: &marks, fixups: &glyphFixups
                 ) == true
@@ -3699,7 +3701,7 @@ extension Runtime {
                             pages.insert(fixup.page)
                         }
                         nextLabelDraws[nid] = RetainedLabelDraws(
-                            source: .init(shaped), origin: restOrigin, bounds: runBounds, ink: runInk, opacity: localOpacity, baseline: shaped.lineBaselinesPx.first, scale: scale,
+                            source: .init(shaped, spans: resolvedText.spans), origin: restOrigin, bounds: runBounds, ink: runInk, opacity: localOpacity, baseline: shaped.lineBaselinesPx.first, scale: scale,
                             smoothing: inkMode, srgb: srgbBlend, pages: pages, resets: textSystem.glyphAtlas.resets, draws: draws
                         )
                     }

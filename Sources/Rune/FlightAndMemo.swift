@@ -1508,10 +1508,10 @@ extension Runtime {
                   extent: MotionRect, at current: MotionRect, clip: MotionRect, captured: TextLayoutBox? = nil) {
             guard alpha > 0.0005, extent.width > 0, !text.isEmpty || spans?.isEmpty == false else { return }
             let shaped: ShapedText
-            if let captured, captured.hasGlyphs {
-                shaped = captured.shaped
+            if let captured {
+                shaped = captured.hasGlyphs ? captured.shaped : textSystem.glyphsForCommittedLabel(captured).shaped
             } else {
-                shaped = textSystem.shape(text: text, spans: spans, style: style, maxWidth: captured?.maxWidth ?? extent.width + 0.5,
+                shaped = textSystem.shape(text: text, spans: spans, style: style, maxWidth: extent.width + 0.5,
                                           pixelScale: scale, emitGlyphs: true)
             }
             let lineOrigin = captured == nil ? 0 : shaped.lineExtent(scale: captured?.pixelScale ?? scale).lowerBound
