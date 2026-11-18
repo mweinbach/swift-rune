@@ -593,7 +593,7 @@ extension Runtime {
                 // so offscreen reflow/colour changes do not animate invisibly (`unseen_presence.rs`).
                 if kitHooks.unseenPresence.frameById[id]?.inView == false {
                     let parentOrigin: Vec2
-                    if let parent = node.parentIndex, flatNodes[parent].nodeId == spec.parent {
+                    if let parent = node.parentIndex, specs[parent].id == spec.parent {
                         parentOrigin = specs[parent].rect.origin
                     } else {
                         parentOrigin = spec.parent.flatMap { nodeIndexById[$0] }.map { specs[$0].rect.origin } ?? .zero
