@@ -1245,6 +1245,7 @@ public final class Runtime<State> {
         var wordReveals: [Int] = []
         var filterContainers: [Int] = []
         var growthStacks: [Int] = []
+        var extraCommitColors: [Int] = []
         var hasTimeScales = false
         var hasShadows = false
         var hasChildExits = false
@@ -1254,11 +1255,17 @@ public final class Runtime<State> {
             if el.holdLandingWidthEnabled { heldLandingWidths.append(i) }
             if el.growthSpec != nil { growthStacks.append(i) }
             if el.kitFilterKeysValue != nil { filterContainers.append(i) }
-            if !hasShadows && !el.shadows.isEmpty { hasShadows = true }
+            let hasShadow = !el.shadows.isEmpty
+            if hasShadow { hasShadows = true }
             if !hasChildExits && el.childExitTransition != nil { hasChildExits = true }
             if el.runtimeExtras.isEmpty {
+                if hasShadow { extraCommitColors.append(i) }
                 if el.textReveal >= 0 { wordReveals.append(i) }
             } else {
+                if hasShadow || el.runtimeExtras[RenderExtrasKey.radialGradient] != nil
+                    || el.runtimeExtras[RenderExtrasKey.borderGradient] != nil {
+                    extraCommitColors.append(i)
+                }
                 if el.isRideTrailing { rideTrailing.insert(id) }
                 if !hasTimeScales && el.elTimeScale != 1 { hasTimeScales = true }
                 if let fade = el.elRevealWordFade, fade >= 0 { wordReveals.append(i) }

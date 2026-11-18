@@ -134,6 +134,7 @@ public struct AnimationStore: Sendable {
     private var pendingFree: UInt32 = none
 
     private var index: [Key: UInt32] = [:]
+    private var countsByProperty: [PropId: Int] = [:]
     private var nodeHead: [UInt64: UInt32] = [:]
 
     internal var eventCarry = Carry<MotionEvent>()
@@ -787,6 +788,10 @@ public struct AnimationStore: Sendable {
         return T.fromLanes(lanes)
     }
 
+    package func hasTracks<T>(for prop: Prop<T>) -> Bool {
+        countsByProperty[prop.id] != nil
+    }
+
     public func has<T>(_ node: NodeId, _ prop: Prop<T>) -> Bool {
         index[Key(node: node.rawValue, prop: prop.id.rawValue)] != nil
     }
@@ -923,6 +928,7 @@ public struct AnimationStore: Sendable {
         pending.removeAll(keepingCapacity: true)
         pendingFree = Self.none
         index.removeAll(keepingCapacity: true)
+        countsByProperty.removeAll(keepingCapacity: true)
         nodeHead.removeAll(keepingCapacity: true)
         eventCarry.removeAll(keepingCapacity: true)
         audit = RetargetAudit()
@@ -1149,6 +1155,7 @@ public struct AnimationStore: Sendable {
             t = UInt32(tMeta.count - 1)
         }
         index[key] = t
+        countsByProperty[prop, default: 0] += 1
         nodeHead[node.rawValue] = t
         return t
     }
@@ -1649,6 +1656,11 @@ public struct AnimationStore: Sendable {
         }
         let m = tMeta[t]
         index.removeValue(forKey: Key(node: m.node.rawValue, prop: m.prop.rawValue))
+        if countsByProperty[m.prop] == 1 {
+            countsByProperty.removeValue(forKey: m.prop)
+        } else {
+            countsByProperty[m.prop]? -= 1
+        }
         laneFree[n].append(UInt32(l0))
         takeToken(t, finished: false)
         tMeta[t].alive = false
