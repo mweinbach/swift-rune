@@ -1855,13 +1855,13 @@ public final class GlyphAtlas: @unchecked Sendable {
     private func desktopMaskLocked(key: DesktopMaskKey?, width: Int, height: Int, shareBrowserCoverage: Bool,
                                    deferredTile: () -> DesktopOutlineTile?, bitmap: () -> [UInt8]?) -> Entry? {
         let cacheKey = key.map(PortableGlyphKey.desktop)
-        if let cacheKey, var cached = portableGlyphCache[cacheKey] {
+        if let cacheKey, let index = portableGlyphCache.index(forKey: cacheKey) {
             accessCounter &+= 1
-            cached.lastUsed = accessCounter
-            cached.lastFrame = frameSequence
-            portableGlyphCache[cacheKey] = cached
-            touchLocked(page: cached.entry.page, texels: UInt32(width * height))
-            return cached.entry
+            portableGlyphCache.values[index].lastUsed = accessCounter
+            portableGlyphCache.values[index].lastFrame = frameSequence
+            let entry = portableGlyphCache.values[index].entry
+            touchLocked(page: entry.page, texels: UInt32(width * height))
+            return entry
         }
         let tile = deferOutlineMasks ? deferredTile() : nil
         let fill = tile.flatMap { tile in withOutlineStore { $0.fill(for: tile) } }
