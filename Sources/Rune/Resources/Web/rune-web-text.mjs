@@ -584,7 +584,9 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             fragmentStyles.clear();
             fragmentBytes = fragmentCount = 0;
         }
-        const styleKey = `${source.id}|${line.font}|${line.baseline}|${y}|${height}|${rgb}`;
+        // A configured FontFace gets a new CSS alias when its last line is released.
+        // The alias key describes the original font bytes, features and variations.
+        const styleKey = `${source.id}|${line.baseFont}|${line.aliases[0]?.key ?? ''}|${line.baseline}|${y}|${height}|${rgb}`;
         let style = fragmentStyles.get(styleKey);
         if (!style) {
             style = { samples: new Map(), plans: new Map() };
@@ -1150,6 +1152,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             if (fixedPitch === 2) {
                 const source = line && fixedPitchSource(doc, line);
                 if (!source) return 0;
+                line.numericMaskSource = source;
                 const key = fixedPitchStyleKey(line, source);
                 if (!key) return 2;
                 const existing = geometryTokens.get(key);
