@@ -36,6 +36,11 @@ struct TextSpanInkParityTests {
 
     #if canImport(CoreText) || os(Linux) || os(Windows)
     @Test func freshAndRetainedLabelsResolveTheirOwnCurrentInk() throws {
+        // Other tests can install font faces while this sequence compares a single layout epoch.
+        try withFontFamilies(sans: "", mono: "", checkRetainedLabelInks)
+    }
+
+    private func checkRetainedLabelInks() throws {
         let system = TextSystem()
         let style = TextStyle(size: 18)
         let source = "let café"
@@ -104,6 +109,10 @@ struct TextSpanInkParityTests {
     @Test(.enabled(if: FileManager.default.fileExists(atPath: dejavu), "Requires DejaVu Sans"))
     func tintInsideALigatureKeepsItsSingleGlyphAndLeadingInk() throws {
         HeadlessRunner.registerFonts([try Data(contentsOf: URL(fileURLWithPath: Self.dejavu))])
+        try withFontFamilies(sans: "", mono: "", checkLigatureInks)
+    }
+
+    private func checkLigatureInks() throws {
         let system = TextSystem()
         let style = TextStyle(size: 24, family: .custom("DejaVu Sans")).features("liga=1")
         for weight in [Float?.none, 700] {
