@@ -74,13 +74,64 @@ struct FixedVirtualRowLayoutTests {
                 checkedAbsoluteRow = true
             }
             #expect(reused.scrollOffset(forKey: "scroll") == ordinary.scrollOffset(forKey: "scroll"))
-            #expect(scene.instances == control.instances)
+            try expectMatchingPaint(scene, control)
             if reused.retainedLayout.storageStats.liveNodes < ordinary.retainedLayout.storageStats.liveNodes {
                 usedFewerSlots = true
             }
         }
         #expect(usedFewerSlots)
         #expect(checkedAbsoluteRow)
+    }
+
+    private struct SampledDraw: Equatable {
+        var instance: RenderInstance
+        var mask: [UInt8] = []
+    }
+
+    private func expectMatchingPaint(_ actual: RenderFrame, _ expected: RenderFrame) throws {
+        // The two runtimes own independent atlases. A slot can move when a retained
+        // row avoids an intermediate text measurement. Compare the draw and its pixels.
+        func draws(_ scene: CpuBootScene) throws -> [SampledDraw] {
+            try scene.instances.map { instance in
+                var draw = SampledDraw(instance: instance)
+                guard instance.params.y == KIND_GLYPH, instance.radii.w == 0 else { return draw }
+                let page = try #require(Int(exactly: instance.params.z))
+                try #require(scene.glyphPages.indices.contains(page))
+                let size = scene.glyphSize(at: page)
+                let pixels = scene.glyphPages[page]
+                let x = try #require(Int(exactly: instance.uv.x))
+                let y = try #require(Int(exactly: instance.uv.y))
+                let scaled = instance.uv.z > 0
+                let filtered = scaled || instance.params.x != 0
+                let lcd = !filtered && instance.radii.x > 0.5
+                let width = scaled ? instance.uv.z : instance.rect.z * (lcd ? 3 : 1)
+                let height = scaled ? instance.uv.w : instance.rect.w
+                // Filtered draws also read neighboring texels. Metal clamps those taps
+                // at the page edges. Ordinary masks read one byte per covered pixel.
+                let fringe = filtered ? 1 : 0
+                for dy in -fringe..<(Int(height.rounded(.up)) + fringe) {
+                    let row = max(0, min(size.y - 1, y + dy)) * size.x
+                    for dx in -fringe..<(Int(width.rounded(.up)) + fringe) {
+                        draw.mask.append(pixels[row + max(0, min(size.x - 1, x + dx))])
+                    }
+                }
+                draw.instance.uv.x = 0
+                draw.instance.uv.y = 0
+                return draw
+            }
+        }
+
+        #expect(actual.width == expected.width && actual.height == expected.height)
+        let a = CpuBootScene(frame: actual), b = CpuBootScene(frame: expected)
+        let actualDraws = try draws(a), expectedDraws = try draws(b)
+        #expect(actualDraws.count == expectedDraws.count)
+        let mismatch = zip(actualDraws, expectedDraws).enumerated().first { $0.element.0 != $0.element.1 }?.offset
+        #expect(mismatch == nil)
+        var actualPixels = CpuBootTarget(width: actual.width, height: actual.height)
+        var expectedPixels = CpuBootTarget(width: expected.width, height: expected.height)
+        _ = try CpuBoot.paint(a, into: &actualPixels, threads: 1)
+        _ = try CpuBoot.paint(b, into: &expectedPixels, threads: 1)
+        #expect(actualPixels.pixels.elementsEqual(expectedPixels.pixels))
     }
 
     @Test("Fractional fixed rows can share a solver slot when the column rounds them to whole points",
