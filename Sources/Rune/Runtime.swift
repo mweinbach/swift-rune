@@ -4537,16 +4537,16 @@ public final class Runtime<State> {
 
         var roles: [LayoutObserverTraits] = []
         roles.reserveCapacity(pass.nodes.count)
-        var cursor = 0
-        for span in pass.reusedFlatRanges {
-            for i in cursor..<span.current.lowerBound {
-                roles.append(LayoutObserverTraits(pass.nodes[i].el))
+        pass.nodes.withUnsafeBufferPointer { nodes in
+            var cursor = 0
+            for span in pass.reusedFlatRanges {
+                for i in cursor..<span.current.lowerBound {
+                    roles.append(LayoutObserverTraits(nodes[i].el))
+                }
+                roles.append(contentsOf: layoutObservers.authored[span.previous])
+                cursor = span.current.upperBound
             }
-            roles.append(contentsOf: layoutObservers.authored[span.previous])
-            cursor = span.current.upperBound
-        }
-        for i in cursor..<pass.nodes.count {
-            roles.append(LayoutObserverTraits(pass.nodes[i].el))
+            for i in cursor..<nodes.count { roles.append(LayoutObserverTraits(nodes[i].el)) }
         }
 
         // Apply modal inertness: if any mounted subtree is `.modal(...)`, elements outside the topmost modal
@@ -4649,7 +4649,13 @@ public final class Runtime<State> {
         }
         observers.authored = roles
         pass.nodes.withUnsafeBufferPointer { nodes in
-            for i in roles.indices { collect(nodes[i], traits: roles[i], at: i) }
+            for i in roles.indices {
+                let traits = roles[i]
+                if traits.bits == 0 && !sameHoverOrder && observers.bottomViewports.isEmpty && lastSecureMaskInfo.isEmpty {
+                    continue
+                }
+                collect(nodes[i], traits: traits, at: i)
+            }
         }
 
         let childExitOverrides = observers.hasChildExits
