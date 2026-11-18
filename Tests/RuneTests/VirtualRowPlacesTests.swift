@@ -150,6 +150,54 @@ struct VirtualRowPlacesTests {
         #expect(saved.heights.count == 515)
     }
 
+    @Test(arguments: [false, true])
+    func reorderedMeasurementsMatchSurvivingKeysAcrossPages(dense: Bool) {
+        let keys = (0..<1027).map { "row-\($0)" }
+        var rows = VirtualRowMeasurements()
+        rows.replacePlaces(VirtualRowPlaces(keys))
+        for index in keys.indices where dense || index % 253 == 0 {
+            rows.setHeight(Float(index % 51), at: index)
+        }
+        rows.prepareOffsets(estimated: 20, gap: 1)
+        let snapshot = rows
+        var reordered = Array(keys.reversed())
+        reordered.removeSubrange(212..<310)
+        reordered.insert("new", at: 702)
+        rows.replacePlaces(VirtualRowPlaces(reordered))
+        #expect(Array(rows.heights) == reordered.map { snapshot[$0] })
+        #expect(snapshot.places.keys == keys)
+        #expect(snapshot.heights[0] == 0)
+        #expect(rows["new"] == nil)
+    }
+
+    @Test func denseRemapPreservesDifferentKeysWithTheSameHash() {
+        let keys = (0..<64).map(CollidingKey.init)
+        let old = VirtualRowPlaces(keys)
+        var heights = VirtualRowHeights(count: keys.count)
+        for index in keys.indices { heights[index] = Float(index) }
+
+        var reordered = Array(keys.reversed())
+        reordered[11] = CollidingKey(id: 100)
+        let mapped = heights.remapped(from: old, to: VirtualRowPlaces(reordered))
+        #expect(Array(mapped) == reordered.map { old.index(of: $0).map(Float.init) })
+    }
+
+    @Test func repeatedKeysUseTheLastOldOccurrenceForEveryNewOccurrence() {
+        var rows = VirtualRowMeasurements()
+        rows.replacePlaces(VirtualRowPlaces(["a", "b", "a", "b", "c"]))
+        rows.setHeight(11, at: 0)
+        rows.setHeight(12, at: 1)
+        rows.setHeight(13, at: 2)
+        rows.setHeight(14, at: 4)
+        let snapshot = rows
+
+        rows.replacePlaces(VirtualRowPlaces(["b", "a", "c", "a", "b", "new"]))
+        #expect(Array(rows.heights) == [nil, 13, 14, 13, nil, nil])
+        rows.replacePlaces(VirtualRowPlaces(["a", "new", "b"]))
+        #expect(Array(rows.heights) == [13, nil, nil])
+        #expect(Array(snapshot.heights) == [11, 12, 13, nil, 14])
+    }
+
     @Test func cachedOffsetsRespectRowIdentityEstimateGapAndSnapshot() {
         var list = RuntimeVirtualListState()
         list.lastKeys = ["a", "b", "c"]

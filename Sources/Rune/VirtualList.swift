@@ -350,6 +350,28 @@ internal struct VirtualRowPlaces<Key: Hashable & Sendable>: Sendable {
         if keys[first] == key { return first }
         return collisions[key]
     }
+
+    /// The old index for each current key. A negative index means the row is new.
+    fileprivate func matchingIndices(in previous: Self) -> [Int] {
+        if hasDuplicates {
+            return keys.map { previous.index(of: $0) ?? -1 }
+        }
+        var matches = Array(repeating: -1, count: keys.count)
+        for (hash, index) in firstByHash {
+            guard let first = previous.firstByHash[hash] else { continue }
+            let key = keys[index]
+            // The representative of a hash bucket can change across a reorder.
+            if previous.keys[first] == key {
+                matches[index] = first
+            } else if let old = previous.collisions[key] {
+                matches[index] = old
+            }
+        }
+        for (key, index) in collisions {
+            if let old = previous.index(of: key) { matches[index] = old }
+        }
+        return matches
+    }
 }
 
 internal extension VirtualRowPlaces where Key == String {
@@ -405,6 +427,44 @@ internal struct VirtualRowHeights: RandomAccessCollection, Sendable {
             pages[page][index % Self.pageSize] = newValue
         }
     }
+
+    func remapped<Key>(from previous: VirtualRowPlaces<Key>, to next: VirtualRowPlaces<Key>) -> Self {
+        var result = Self(count: next.keys.count)
+        guard !isEmpty, !next.keys.isEmpty else { return result }
+        if !previous.hasDuplicates && !next.hasDuplicates && hasFewMeasurements(for: next.keys.count) {
+            for (pageIndex, page) in pages.enumerated() where !page.isEmpty {
+                let start = pageIndex * Self.pageSize
+                for (offset, height) in page.enumerated() {
+                    if let height, let index = next.index(of: previous.keys[start + offset]) {
+                        result[index] = height
+                    }
+                }
+            }
+            return result
+        }
+
+        let matches = next.matchingIndices(in: previous)
+        for pageIndex in result.pages.indices {
+            let start = pageIndex * Self.pageSize
+            let end = Swift.min(start + Self.pageSize, next.keys.count)
+            let page = matches[start..<end].map { $0 >= 0 ? self[$0] : nil }
+            if page.contains(where: { $0 != nil }) { result.pages[pageIndex] = page }
+        }
+        return result
+    }
+
+    private func hasFewMeasurements(for nextCount: Int) -> Bool {
+        // A small destination can look up all its keys before scanning the old page table.
+        guard pages.count <= nextCount else { return false }
+        var remaining = nextCount / 4
+        for page in pages {
+            for height in page where height != nil {
+                if remaining == 0 { return false }
+                remaining -= 1
+            }
+        }
+        return true
+    }
 }
 
 /// Measurements follow surviving keys when a list reorders. A removed row releases its height.
@@ -414,13 +474,7 @@ internal struct VirtualRowMeasurements: Sendable {
     private var cachedOffsets: (estimate: Float, gap: Float, prefix: [Float])?
 
     mutating func replacePlaces(_ next: VirtualRowPlaces<String>) {
-        var remapped = VirtualRowHeights(count: next.keys.count)
-        if !heights.isEmpty {
-            for (index, key) in next.keys.enumerated() {
-                if let height = self[key] { remapped[index] = height }
-            }
-        }
-        heights = remapped
+        heights = heights.remapped(from: places, to: next)
         places = next
         cachedOffsets = nil
     }
