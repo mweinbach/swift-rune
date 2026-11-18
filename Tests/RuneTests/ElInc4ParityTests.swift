@@ -576,8 +576,8 @@ struct ElInc4ParityTests {
         #expect(abs(r1End.rect[3] - 80) < 0.5)
     }
 
-    @Test("focus: focusSelected & revealSelected track programmatic selection without firing during hover", arguments: [false, true])
-    func focusAndRevealSelectedSkipHover(nativeFrame: Bool) {
+    @Test("focus: focusSelected & revealSelected track programmatic selection without firing during hover unless the group follows selection", arguments: [false, true], [false, true])
+    func focusAndRevealSelectedSkipHover(nativeFrame: Bool, groupFollows: Bool) {
         struct S {
             var selected: Int = 0
         }
@@ -587,7 +587,7 @@ struct ElInc4ParityTests {
             pixelScale: 1.0,
             systemDark: true
         ) { s, _ in
-            col().key("scroll").size(200, 80).scrollY().children(
+            col().key("scroll").size(200, 80).scrollY().focusGroup(groupFollows).focusFollows(groupFollows).children(
                 (0..<10).map { i in
                     el()
                         .key("item-\(i)")
@@ -634,13 +634,13 @@ struct ElInc4ParityTests {
 
         frame(at: 0.12)
         #expect(rt.state.selected == 8)
-        #expect(rt.focusedKey == "item-7")
+        #expect(rt.focusedKey == (groupFollows ? "item-8" : "item-7"))
         #expect(rt.scrollOffset(forKey: "scroll").y == revealedOffset)
 
         // An unrelated commit keeps that focus. A later programmatic selection still moves it.
         rt.update(at: 0.13) { _, tx in tx.instant() }
         frame(at: 0.14)
-        #expect(rt.focusedKey == "item-7")
+        #expect(rt.focusedKey == (groupFollows ? "item-8" : "item-7"))
         rt.update(at: 0.15) { state, tx in
             tx.instant()
             state.selected = 6
