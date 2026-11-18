@@ -6957,17 +6957,29 @@ public final class TextSystem: @unchecked Sendable {
         if !fresh, let previous = lock.withLock({ box.browserPaint }), previous.revision == rasterRevision,
            previous.x == restingXPx, previous.rgb == rgb,
            glyphAtlas.retainPages(previous.pages, since: previous.resets) {
+            previous.decorations?.apply(to: &result)
             result.glyphs = previous.glyphs
             result.lineGlyphRanges = [0..<previous.glyphs.count]
             return result
         }
         guard let paragraph = measured.desktopParagraph ?? lock.withLock({ preparedShapeCache[key] }),
               let line = paragraph.fragments.first ?? nil,
-              key.spans?.contains(where: { $0.underline || $0.strikethrough || $0.background != nil }) != true,
               let glyphs = line.browserLabelGlyphs(record.text, spans: key.spans, originX: record.originX,
                     baselineY: baseline / box.pixelScale, restingXPx: restingXPx, atlas: glyphAtlas) else { return nil }
         let pages = Set(glyphs.map(\.atlasPage)), resets = glyphAtlas.resets
-        if !fresh { lock.withLock { box.browserPaint = (restingXPx, rgb, glyphs, pages, resets, _rasterRevision) } }
+        var decorations: BrowserLabelDecorations?
+        if !box.hasGlyphs, let spans = key.spans,
+           spans.contains(where: { $0.underline || $0.strikethrough || $0.background != nil }) {
+            let indexed = PortableTextSpans(spans)
+            let drawn = BrowserLabelDecorations()
+            line.appendDecorations(spans: indexed.entries, index: indexed.index(at:), originX: record.originX,
+                baselinePx: baseline, style: key.rasterStyle, backgrounds: &drawn.backgrounds,
+                underlines: &drawn.underlines, strikethroughs: &drawn.strikethroughs, underlineEnds: &drawn.underlineEnds)
+            drawn.backgrounds = Self.mergeContiguousBackgrounds(drawn.backgrounds)
+            drawn.apply(to: &result)
+            decorations = drawn
+        }
+        if !fresh { lock.withLock { box.browserPaint = (restingXPx, rgb, glyphs, decorations, pages, resets, _rasterRevision) } }
         result.glyphs = glyphs
         result.lineGlyphRanges = [0..<glyphs.count]
         return result
@@ -7192,6 +7204,30 @@ public final class TextSystem: @unchecked Sendable {
         return shaped.size
     }
 
+    private struct PortableTextSpans {
+        let entries: [(utf8Range: Range<Int>, span: TextSpan)]
+
+        init(_ spans: [TextSpan]?) {
+            var entries: [(Range<Int>, TextSpan)] = []
+            var start = 0
+            for span in spans ?? [] where !span.text.isEmpty {
+                let end = start + span.text.utf8.count
+                entries.append((start..<end, span))
+                start = end
+            }
+            self.entries = entries
+        }
+
+        func index(at byte: Int) -> Int? {
+            var lo = 0, hi = entries.count
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2
+                if entries[mid].utf8Range.upperBound <= byte { lo = mid + 1 } else { hi = mid }
+            }
+            return lo < entries.count && entries[lo].utf8Range.contains(byte) ? lo : nil
+        }
+    }
+
     internal func shapePortable(
         text: String,
         spans: [TextSpan]? = nil,
@@ -7260,18 +7296,8 @@ public final class TextSystem: @unchecked Sendable {
         }
         if previousBreak == nil { recordShapeCall() }
 
-        // Map contiguous span UTF-8 byte ranges for per-character attributes.
-        var spanEntries: [(utf8Range: Range<Int>, span: TextSpan)] = []
-        if let spans {
-            var utf8Cursor = 0
-            for span in spans {
-                let byteCount = span.text.utf8.count
-                if byteCount > 0 {
-                    spanEntries.append((utf8Cursor..<(utf8Cursor + byteCount), span))
-                    utf8Cursor += byteCount
-                }
-            }
-        }
+        let indexedSpans = PortableTextSpans(spans)
+        let spanEntries = indexedSpans.entries
 
         let pm = PillMetrics(size: style.size)
         let validPills: [(idx: Int, pill: PillChip)] = {
@@ -7309,16 +7335,8 @@ public final class TextSystem: @unchecked Sendable {
             return validPills[i]
         }
 
-        func spanIndex(at byte: Int) -> Int? {
-            var lo = 0, hi = spanEntries.count
-            while lo < hi {
-                let mid = lo + (hi - lo) / 2
-                if spanEntries[mid].utf8Range.upperBound <= byte { lo = mid + 1 } else { hi = mid }
-            }
-            return lo < spanEntries.count && spanEntries[lo].utf8Range.contains(byte) ? lo : nil
-        }
         func spanAt(utf8Offset: Int) -> TextSpan? {
-            spanIndex(at: utf8Offset).map { spanEntries[$0].span }
+            indexedSpans.index(at: utf8Offset).map { spanEntries[$0].span }
         }
 
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
@@ -7674,7 +7692,7 @@ public final class TextSystem: @unchecked Sendable {
             var nativeColors: [Int: Color] = [:]
             nativeWidths = native?.cells ?? [:]
             if emitGlyphs, let native, hasDecorations {
-                native.appendDecorations(spans: spanEntries, index: spanIndex(at:), originX: originX,
+                native.appendDecorations(spans: spanEntries, index: indexedSpans.index(at:), originX: originX,
                     baselinePx: baselinePx, style: style, backgrounds: &rawBackgrounds, underlines: &underlines,
                     strikethroughs: &strikethroughs, underlineEnds: &underlineEnds)
             }

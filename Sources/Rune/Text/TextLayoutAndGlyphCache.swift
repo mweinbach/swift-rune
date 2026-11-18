@@ -11,6 +11,22 @@ public enum TextKeep: Sendable, Hashable {
     case secret
 }
 
+#if os(WASI) && RUNE_BROWSER_TEXT
+internal final class BrowserLabelDecorations {
+    var backgrounds: [(SIMD4<Float>, Color)] = []
+    var underlines: [SIMD4<Float>] = []
+    var strikethroughs: [SIMD4<Float>] = []
+    var underlineEnds: [Float] = []
+
+    func apply(to shaped: inout ShapedText) {
+        shaped.backgrounds = backgrounds
+        shaped.underlines = underlines
+        shaped.strikethroughs = strikethroughs
+        shaped.underlineLineEndsPt = underlineEnds
+    }
+}
+#endif
+
 /// Visible vertical interval in the text layout's local points.
 public struct TextRasterWindow: Hashable, Sendable {
     public var lowerY: Float
@@ -367,7 +383,7 @@ public final class TextLayoutBox: @unchecked Sendable {
     internal var desktopRasterLayout: DesktopRasterLayout?
     #endif
     #if os(WASI) && RUNE_BROWSER_TEXT
-    internal var browserPaint: (x: Float, rgb: UInt32?, glyphs: [PositionedGlyph], pages: Set<UInt16>, resets: UInt64, revision: UInt64)?
+    internal var browserPaint: (x: Float, rgb: UInt32?, glyphs: [PositionedGlyph], decorations: BrowserLabelDecorations?, pages: Set<UInt16>, resets: UInt64, revision: UInt64)?
     #endif
     // Page recycling invalidates UVs in a cached desktop text layout.
     internal var desktopAtlasResets: UInt64?
@@ -384,6 +400,11 @@ public final class TextLayoutBox: @unchecked Sendable {
         #endif
         #if os(WASI) && RUNE_BROWSER_TEXT
         bytes += (browserPaint?.glyphs.count ?? 0) * MemoryLayout<PositionedGlyph>.stride
+        if let decoration = browserPaint?.decorations {
+            bytes += decoration.backgrounds.count * MemoryLayout<(SIMD4<Float>, Color)>.stride
+            bytes += (decoration.underlines.count + decoration.strikethroughs.count) * MemoryLayout<SIMD4<Float>>.stride
+            bytes += decoration.underlineEnds.count * MemoryLayout<Float>.stride
+        }
         #endif
         if let partial = windowPaint?.box {
             bytes += partial.shaped.glyphs.count * MemoryLayout<PositionedGlyph>.stride
