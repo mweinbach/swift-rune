@@ -131,6 +131,24 @@ try {
     const svg = text.encode('<svg viewBox="0 0 6 3"><circle cx="3" cy="1.5" r="1.5" fill="#ff0000"/></svg>');
     const vector = (await decode(svg)).frames[0];
     check(vector.w === 12 && vector.h === 6 && pixel(vector, 6, 3) === '255,0,0,255' && pixel(vector, 0, 0) === '0,0,0,0', 'ViewBox-only SVG rasterization');
+    const base64 = data => btoa(String.fromCharCode(...data));
+    async function svgSample(body) {
+        const source = ' '.repeat(300) + '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 2 1">' + body + '</svg>';
+        return (await decode(text.encode(source), 2)).frames[0];
+    }
+    for (const [type, data] of [['image/png', png], ['image/jpg', jpeg], ['image/gif', gif], ['image/webp', single], ['text/plain', png]]) {
+        const frame = await svgSample('<image width="2" height="1" preserveAspectRatio="none" xlink:href="data:' + type + ';base64,' + base64(data) + '"/>');
+        check(frame.rgba[3] > 0 || frame.rgba[7] > 0, 'Embedded SVG raster ' + type);
+    }
+    const escaped = Array.from(png, value => '%' + value.toString(16).padStart(2, '0')).join('');
+    const sniffed = await svgSample('<image width="2" height="1" href="data:,' + escaped + '"/>');
+    check(color(sniffed, 0, 0, [70,180,20,107]), 'Percent-encoded embedded SVG raster');
+    const unavailable = await svgSample('<image href="sample.png" xlink:href="data:image/png;base64,' + base64(png) + '"/><image href="data:application/octet-stream;base64,' + base64(png) + '"/><image href="data:text/plain,ordinary%20text"/>');
+    check(unavailable.rgba.every(value => value === 0), 'SVG unavailable resources leave transparent pixels');
+    const filtered = resource => svgSample('<defs><rect id="swatch" width="2" height="1" fill="lime"/><filter id="copy" filterUnits="userSpaceOnUse" x="0" y="0" width="2" height="1"><feImage xlink:href="' + resource + '"/></filter></defs><rect width="2" height="1" filter="url(#copy)"/>');
+    check(pixel(await filtered('#swatch'), 0, 0) === '0,255,0,255', 'Same-document SVG filter image');
+    check(color(await filtered('data:text/plain;base64,' + base64(png)), 0, 0, [70,180,20,107]), 'Embedded raster SVG filter image');
+    check((await filtered('data:text/plain,ordinary%20text')).rgba.every(value => value === 0), 'Unavailable SVG filter image');
     const svgz = new Blob([svg]).stream().pipeThrough(new CompressionStream('gzip'));
     const compressed = await decode(new Uint8Array(await new Response(svgz).arrayBuffer()), 24);
     check(compressed.frames[0].w === 24 && compressed.frames[0].h === 12, 'SVGZ target extent');
@@ -169,7 +187,7 @@ try {
     unmounted.start(1, 64, jpeg.length, 0, 0); unmounted.dispose();
     await decode(gif);
     check(!callbacks, 'Disposed decoder entered Swift');
-    document.querySelector('#result').textContent = 'PASS JPEG orientation, GIF disposal and loop count, WebP alpha and timing, SVG, URLs, memory growth, animation budget, malformed input and cancellation';
+    document.querySelector('#result').textContent = 'PASS JPEG orientation, GIF disposal and loop count, WebP alpha and timing, SVG raster resources and filter fragments, URLs, memory growth, animation budget, malformed input and cancellation';
 } catch (error) { document.querySelector('#result').textContent = 'FAIL ' + error.stack; }
 finally { host.dispose(); }
 </script>

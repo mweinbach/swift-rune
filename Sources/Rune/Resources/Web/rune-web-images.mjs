@@ -143,8 +143,72 @@ function identify(bytes, type) {
     }
     if (n > 2 && tag(0, 2) === 'BM') return ['image/bmp'];
     if (n > 4 && view.getUint32(0) === 256) return ['image/x-icon'];
-    if (utf8.decode(bytes.subarray(0, 256)).trimStart().startsWith('<')) return ['image/svg+xml'];
+    const whitespace = [9, 10, 12, 13, 32];
+    let first = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0;
+    while (whitespace.includes(bytes[first])) first++;
+    if (bytes[first] === 60) return ['image/svg+xml'];
     return [type?.split(';')[0].toLowerCase() || ''];
+}
+
+// The browser may sniff a data URL again when it paints the serialized SVG. Give it
+// only the four raster formats Rune accepts, with a MIME type matching the actual bytes.
+function svgRasterURL(href) {
+    const comma = href.indexOf(',');
+    if (!/^data:/i.test(href) || comma < 5) return null;
+    const parts = href.slice(5, comma).toLowerCase().split(';');
+    const mime = parts[0].trim() || 'text/plain';
+    const base64 = parts.at(-1).trim() === 'base64';
+    if (!['text/plain', 'image/png', 'image/jpg', 'image/jpeg', 'image/gif', 'image/webp'].includes(mime)) return null;
+
+    // Twelve decoded bytes cover RIFF/WEBP, the longest signature. Read through
+    // percent escapes and folded base64 without duplicating an entire raster.
+    let header = '';
+    for (let i = comma + 1; i < href.length && header.length < (base64 ? 16 : 12); ++i) {
+        let ch = href[i];
+        if (ch === '%') {
+            const hex = href.slice(i + 1, i + 3);
+            if (!/^[0-9a-f]{2}$/i.test(hex)) return null;
+            ch = String.fromCharCode(parseInt(hex, 16));
+            i += 2;
+        }
+        if (!base64 || !/[\t\n\f\r ]/.test(ch)) header += ch;
+    }
+    if (base64) {
+        try { header = atob(header); } catch { return null; }
+    }
+    let type;
+    if (header.startsWith('\x89PNG\r\n\x1a\n')) type = 'image/png';
+    else if (header.startsWith('\xff\xd8\xff')) type = 'image/jpeg';
+    else if (header.startsWith('GIF87a') || header.startsWith('GIF89a')) type = 'image/gif';
+    else if (header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP') type = 'image/webp';
+    else return null;
+    if (mime !== 'text/plain' && (mime === 'image/jpg' ? 'image/jpeg' : mime) !== type) return null;
+    return 'data:' + type + (base64 ? ';base64,' : ',') + href.slice(comma + 1);
+}
+
+function resolveSVGImageResources(svg) {
+    const xlink = 'http://www.w3.org/1999/xlink';
+    for (const image of svg.querySelectorAll('image, feImage')) {
+        const href = (image.getAttribute('href') ?? image.getAttributeNS(xlink, 'href') ?? '').trim();
+        image.removeAttributeNS(xlink, 'href');
+        if (image.localName === 'feImage' && href.startsWith('#')) {
+            // usvg resolves a filter's fragment against this same document.
+            for (let node = image; node; node = node.parentElement) {
+                node.removeAttributeNS('http://www.w3.org/XML/1998/namespace', 'base');
+            }
+            image.setAttribute('href', href);
+        } else {
+            const raster = svgRasterURL(href);
+            if (raster) image.setAttribute('href', raster);
+            else image.removeAttribute('href');
+        }
+    }
+    // Rasterization consumes the authored resource. A timed attribute must not
+    // replace the validated URI when the browser paints the detached document.
+    for (const anim of svg.querySelectorAll('animate[attributeName], set[attributeName]')) {
+        const attribute = anim.getAttribute('attributeName').trim().split(':').pop();
+        if (attribute === 'href' || attribute === 'base') anim.remove();
+    }
 }
 
 // Assign the raster box explicitly so viewBox-only SVGs use their own aspect ratio,
@@ -157,6 +221,7 @@ function svgImage(bytes, limit) {
         svg = parser.parseFromString(markup, 'image/svg+xml').documentElement;
     }
     if (svg.localName !== 'svg' || svg.namespaceURI !== 'http://www.w3.org/2000/svg') throw Error('Invalid SVG document');
+    resolveSVGImageResources(svg);
     const absolute = name => {
         const value = svg[name].baseVal;
         return svg.hasAttribute(name) && value.unitType !== SVGLength.SVG_LENGTHTYPE_PERCENTAGE && value.value > 0 ? value.value : null;
