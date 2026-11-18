@@ -19,7 +19,7 @@ node Tests/Browser/run.mjs --fixture diff-scroll-wasi --webgpu \
   --wasi-shim /path/to/node_modules/@bjorn3/browser_wasi_shim/dist
 ```
 
-For Metal on macOS, add `--angle metal` to the Node command.
+For Metal on macOS, add `--angle metal` to the Node command. Use `--wheel-delta 17` for a scroll slightly shorter than one row, or `--wheel-delta 1 --steps 1200` for a sustained one-pixel scroll. The default fling moves 20 rows per wheel. Each distance uses the same input, WebGPU and visible-row checks.
 
 Use `--steps 60` for a short run with checkpoints at 0, 1, 24 and 60 wheels. Pass the same `--steps 60` to `presentations.py` when scoring its Metal CSV. Both commands default to 600 wheels. Window runs accept `--frame-samples file.json` to export the initial frame, each wheel’s host update and encode timings, and the intervals between frame reports. Compare a 60-wheel Rust window capture with `compare.py --native-window diff --native-steps 60`.
 

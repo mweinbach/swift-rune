@@ -16,7 +16,8 @@ const { values: args } = parseArgs({ options: {
     'wake-wasm': { type: 'string' }, 'diagnostics-wasm': { type: 'string' }, 'spell-wasm': { type: 'string' }, 'sketch-wasm': { type: 'string' }, 'wasi-shim': { type: 'string' },
     angle: { type: 'string' }, 'device-scale': { type: 'string' }, fixture: { type: 'string' },
     webgpu: { type: 'boolean' }, 'www-wasm': { type: 'string' }, 'table-wasm': { type: 'string' },
-    'tree-wasm': { type: 'string' }, 'diff-wasm': { type: 'string' }, 'compare-accessibility': { type: 'boolean' }
+    'tree-wasm': { type: 'string' }, 'diff-wasm': { type: 'string' }, 'compare-accessibility': { type: 'boolean' },
+    'wheel-delta': { type: 'string' }, steps: { type: 'string' }
 } });
 const fixtures = dirname(fileURLToPath(import.meta.url));
 const resources = resolve(fixtures, '../../Sources/Rune/Resources');
@@ -129,8 +130,12 @@ function debugClient(ws) {
 async function fixture(debug, page, options) {
     const query = new URLSearchParams(options ?? {});
     if (page === 'image-pages.html' && (args.webgpu || args.fixture)) query.set('webgpu', '1');
-    const targetURL = site + '/Tests/Browser/' + page + (query.size ? '?' + query : '');
     const diff = page === 'diff-scroll-wasi.html';
+    if (diff) {
+        if (args['wheel-delta'] !== undefined) query.set('delta', args['wheel-delta']);
+        if (args.steps !== undefined) query.set('steps', args.steps);
+    }
+    const targetURL = site + '/Tests/Browser/' + page + (query.size ? '?' + query : '');
     const target = await (await fetch(debug + '/json/new?' + encodeURIComponent(diff ? 'about:blank' : targetURL), { method: 'PUT' })).json();
     const ws = new WebSocket(target.webSocketDebuggerUrl);
     try {

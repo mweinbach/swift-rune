@@ -12,7 +12,10 @@ const canvas = document.querySelector('canvas'), result = document.querySelector
 const animationFrame = window.requestAnimationFrame.bind(window);
 const nextFrame = () => new Promise(animationFrame);
 const settle = () => new Promise(resolve => setTimeout(resolve, 370));
-const wheels = 600, warmup = 10, delta = 400;
+const options = new URLSearchParams(location.search);
+const wheels = Number(options.get('steps') ?? 600), warmup = 10;
+const delta = Number(options.get('delta') ?? 400);
+const firstExpandedLine = 4;
 const pointer = { x: 600, y: 450 };
 
 function visibleRows(step) {
@@ -20,10 +23,13 @@ function visibleRows(step) {
     const list = body?.querySelector('[data-rune-target$="/@dv-rows"]');
     const scrollY = list && body.getBoundingClientRect().top - list.getBoundingClientRect().top;
     if (scrollY !== step * delta) throw Error('Expected scroll offset ' + step * delta + ', observed ' + scrollY);
-    const heading = [...document.querySelectorAll('[role=heading]')].find(el =>
-        el.getAttribute('aria-label') === 'big.rs, 7142 added, 7142 removed' && el.getBoundingClientRect().y === 0);
-    const header = heading?.getBoundingClientRect();
-    if (header?.x !== 0 || header.width !== 1200 || header.height !== 44) throw Error('Wrong file header at step ' + step);
+    // The inline header scrolls with its row until that row leaves the viewport.
+    // The sticky copy then covers the first 44 pixels of the visible rows.
+    const headerTop = scrollY < 44 ? -scrollY : 0;
+    const headers = [...document.querySelectorAll('[role=heading][aria-label="big.rs, 7142 added, 7142 removed"]')]
+        .map(el => el.getBoundingClientRect());
+    const header = headers.find(rect => rect.y === headerTop && rect.x === 0 && rect.width === 1200 && rect.height === 44);
+    if (!header) throw Error('Wrong file header at step ' + step + ': ' + JSON.stringify(headers));
     if (step === 0) {
         const gap = list.querySelector('[data-rune-target$="/@dv-gap-0"]');
         const rect = gap?.getBoundingClientRect();
@@ -33,22 +39,22 @@ function visibleRows(step) {
     const rows = [];
     for (const node of document.querySelectorAll('[role=listitem][data-rune-target]')) {
         const rect = node.getBoundingClientRect();
-        if (rect.bottom <= 44 || rect.top >= innerHeight) continue;
+        if (rect.bottom <= header.bottom || rect.top >= innerHeight) continue;
         const key = node.dataset.runeTarget.match(/@dv-df0\.([con]\d+)\//)?.[1];
-        rows.push([key, node.getAttribute('aria-label'), rect.x, rect.width, Math.max(44, rect.top), Math.min(innerHeight, rect.bottom)]);
+        rows.push([key, node.getAttribute('aria-label'), rect.x, rect.width, Math.max(header.bottom, rect.top), Math.min(innerHeight, rect.bottom)]);
     }
     rows.sort((a, b) => a[4] - b[4]);
 
     // The first hunk opens with three context lines before line 7. A changed line occupies two rows.
     const expected = [];
     let top = 76 - step * delta;
-    for (let line = 4; top < innerHeight; line++) {
+    for (let line = firstExpandedLine; top < innerHeight; line++) {
         for (const kind of line % 7 === 0 ? ['o', 'n'] : ['c']) {
             const bottom = top + 20;
-            if (bottom > 44 && top < innerHeight) {
+            if (bottom > header.bottom && top < innerHeight) {
                 const label = { o: 'removed', n: 'added', c: 'unchanged' }[kind] + ' line ' + line +
                     ': let value_' + line + ' = compute(' + line + ')' + (kind === 'n' ? ' + 1;' : ';');
-                expected.push([kind + line, label, 0, 1200, Math.max(44, top), Math.min(innerHeight, bottom)]);
+                expected.push([kind + line, label, 0, 1200, Math.max(header.bottom, top), Math.min(innerHeight, bottom)]);
             }
             top = bottom;
         }
@@ -68,6 +74,14 @@ function screenshot(step) {
 
 let app, restore;
 try {
+    if (!Number.isSafeInteger(wheels) || wheels < warmup + 2 || !Number.isSafeInteger(delta) || delta < 1) {
+        throw Error('Supply at least 12 wheels and a positive integer wheel delta');
+    }
+    // After the final changed line, the last three expanded context rows precede a folded gap.
+    const lastChange = Math.floor(50000 / 7) * 7;
+    const lastExpandedLine = lastChange + 3;
+    const expandedRows = lastExpandedLine - firstExpandedLine + 1 + lastChange / 7;
+    if (wheels * delta + 900 > 76 + 20 * expandedRows) throw Error('Requested scroll crosses the final folded gap');
     const wasi = new WASI(['rune-kit-diff-50k'], ['RUNE_PLAYGROUND=0'], [new OpenFile(new File([])),
         ConsoleStdout.lineBuffered(console.log), ConsoleStdout.lineBuffered(console.error)]);
     const { instance } = await instantiateRuneBrowser(fetch('/__rune/diff.wasm'), { wasi_snapshot_preview1: wasi.wasiImport });
@@ -120,7 +134,8 @@ try {
     checkpoints.push(visibleRows(0));
     const initialPngSHA256 = await screenshot(0);
     result.textContent = 'Scrolling';
-    for (const target of [1, 24, 60, 300, wheels]) {
+    const targets = [1, 24, 60, 300].filter(step => step < wheels);
+    for (const target of [...targets, wheels]) {
         const first = step + 1;
         for (let n = first; n <= target; n++) {
             await nextFrame();
@@ -145,7 +160,7 @@ try {
     if (cpu.length !== wheels - warmup || !cpu.every(Number.isFinite)) throw Error('Missing GPU-submitting animation callback');
     const seconds = intervals.reduce((total, ms) => total + ms, 0) / 1000;
     result.textContent = 'PASS ' + JSON.stringify({ view: 'diff', renderer: app.renderer, userAgent: navigator.userAgent,
-        viewport: [innerWidth, innerHeight], scale: devicePixelRatio, wheels, accepted, submitted, warmup,
+        viewport: [innerWidth, innerHeight], scale: devicePixelRatio, delta, wheels, accepted, submitted, warmup,
         scoredCallbacks: cpu.length, scoredIntervals: intervals.length, gpuSubmissionsPerSecond: intervals.length / seconds,
         callbackToSubmitP50Ms: cpu[Math.floor((cpu.length - 1) * .5)], callbackToSubmitP95Ms: cpu[Math.floor((cpu.length - 1) * .95)],
         finalScrollY: checkpoints.at(-1).scrollY, checkpoints, initialPngSHA256, finalPngSHA256 });
