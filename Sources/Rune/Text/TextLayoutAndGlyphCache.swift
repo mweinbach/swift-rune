@@ -204,6 +204,59 @@ struct TextSpanInkMap: Sendable {
 }
 
 extension ShapedText {
+    var requestedInkBucket: UInt8? {
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        return glyphs.isEmpty ? nil : GlyphAtlas.baseInkBucket
+        #else
+        return nil
+        #endif
+    }
+
+    func glyphPlacementsAreResident(in atlas: GlyphAtlas) -> Bool {
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        return glyphPlacements?.retainSource(in: atlas) ?? glyphs.isEmpty
+        #else
+        return true
+        #endif
+    }
+
+    /// CoreText glyph geometry is shared at neutral weight. A paint scope exposes masks
+    /// for the current foreground, including bearings used when the pen moves fractionally.
+    mutating func applyScopedGlyphMasks(in atlas: GlyphAtlas) {
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        guard let base = GlyphAtlas.baseInkBucket, !glyphs.isEmpty else { return }
+        scopedInkBucket = base
+        let generation = atlas.resets
+        var changed = false
+        var lastColor: Color?
+        var lastBucket: UInt8?
+        for index in glyphs.indices where glyphs[index].usesInkDilation {
+            let source = glyphs[index]
+            if lastColor != source.color {
+                lastColor = source.color
+                lastBucket = lastColor.flatMap { GlyphAtlas.inkBucket(SIMD4($0.r, $0.g, $0.b, $0.a), encoded: false) }
+            }
+            let (mask, rect) = atlas.outlineInk(source, rect: source.rect, bucket: lastBucket ?? base)
+            guard mask.classicInk?.source.bucket != source.classicInk?.source.bucket
+                || mask.outlineGroup !== source.outlineGroup || mask.uv != source.uv
+                || mask.atlasPage != source.atlasPage || rect != source.rect else { continue }
+            var placed = mask
+            placed.rect = rect
+            glyphs[index] = placed
+            if glyphPens.indices.contains(index),
+               let variant = mask.classicInk?.source ?? mask.outlineGroup?.inkVariant,
+               let size = mask.classicInk?.size ?? mask.outlineGroup?.size {
+                glyphPens[index].bearingX = variant.bearing.x
+                glyphPens[index].maskTexels = UInt32(size.x * size.y)
+            }
+            changed = true
+        }
+        if changed {
+            glyphPlacements = TextBoxGeometry.GlyphPlacements(glyphs: glyphs, since: generation)
+        }
+        #endif
+    }
+
     func applyingSpanInks(_ spans: [TextSpan]?, using originalInks: TextSpanInkMap? = nil) -> ShapedText {
         let inks: TextSpanInkMap
         if let cut = elided, let spans {
@@ -605,8 +658,8 @@ public final class TextLayoutBox: @unchecked Sendable {
             self.box = box
         }
 
-        func view(of geometry: TextLayoutBox, spans: [TextSpan]?) -> TextLayoutBox? {
-            guard key.spans == spans else { return nil }
+        func view(of geometry: TextLayoutBox, spans: [TextSpan]?, bucket: UInt8?) -> TextLayoutBox? {
+            guard key.spans == spans, shaped.scopedInkBucket == bucket else { return nil }
             if let box { return box }
             let painted = geometry.clone(key: key, shaped: shaped)
             painted.spanInks = inks
@@ -615,19 +668,23 @@ public final class TextLayoutBox: @unchecked Sendable {
             return painted
         }
 
-        var glyphBytes: Int { inks.isEmpty ? 0 : shaped.glyphs.count * MemoryLayout<PositionedGlyph>.stride }
+        var glyphBytes: Int {
+            inks.isEmpty && shaped.scopedInkBucket == nil ? 0 : shaped.glyphs.count * MemoryLayout<PositionedGlyph>.stride
+        }
     }
 
     var recentPaint: SpanPaint?
     var cachedGeometry: TextLayoutBox { spanInkGeometry ?? self }
 
-    func applyingSpanInks(_ spans: [TextSpan]?) -> TextLayoutBox {
-        guard self.spans != spans else { return self }
+    func applyingSpanInks(_ spans: [TextSpan]?, atlas: GlyphAtlas? = nil) -> TextLayoutBox {
+        let bucket = atlas == nil ? nil : shaped.requestedInkBucket
+        if self.spans == spans, shaped.scopedInkBucket == bucket { return self }
         let geometry = cachedGeometry
-        if geometry.spans == spans { return geometry }
+        if geometry.spans == spans, bucket == nil { return geometry }
         let key = geometry.shapeKey.withPaintSpans(spans)
         let inks = TextSpanInkMap(spans)
-        let shaped = inks.isEmpty ? geometry.shaped : geometry.shaped.applyingSpanInks(spans, using: inks)
+        var shaped = inks.isEmpty ? geometry.shaped : geometry.shaped.applyingSpanInks(spans, using: inks)
+        if let atlas { shaped.applyScopedGlyphMasks(in: atlas) }
         let out = geometry.clone(key: key, shaped: shaped)
         out.spanInks = inks
         out.spanInkGeometry = geometry
@@ -700,6 +757,7 @@ public struct GlyphReplayKey: Hashable, Sendable {
         didSet { inkSpans = GlyphPaintSpans(shapeKey.spans) }
     }
     private var inkSpans: GlyphPaintSpans
+    private var scopedInkBucket: UInt8?
     public var maxWidthHalfPt: Int
     public var glideBinX: UInt8
     public var glideBinY: UInt8
@@ -716,8 +774,10 @@ public struct GlyphReplayKey: Hashable, Sendable {
         shapeKey: TextShapeKey,
         spans: [TextSpan]?,
         maxWidth: Float?,
-        glidePx: Vec2
+        glidePx: Vec2,
+        scopedInkBucket: UInt8? = nil
     ) {
+        self.scopedInkBucket = scopedInkBucket
         self.shapeKey = shapeKey
         self.inkSpans = GlyphPaintSpans(spans)
         self.maxWidthHalfPt = maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1

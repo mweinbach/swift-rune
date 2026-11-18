@@ -33,6 +33,74 @@ struct TextPlacementReuseTests {
         }
     }
 
+    @Test("Warmed layout and fractional placement track changes to the scoped base and span inks")
+    func alternatingPaintScopes() throws {
+        for mode in [FontSmoothing.on, .windfoil] where mode.pipeline.dilate {
+            let system = TextSystem()
+            let atlas = system.glyphAtlas
+            let style = TextStyle(size: 18, family: .monospace).smoothing(mode)
+            func layout(_ explicit: Color?) -> ShapedText {
+                system.layoutKeyed(text: "TT", spans: [TextSpan("T"), TextSpan("T", color: explicit)],
+                                   style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true).shaped
+            }
+            let raw = layout(nil)
+            try #require(raw.glyphs.count == 2 && raw.glyphPens.count == 2)
+            let count = system.shapedCount
+            for (base, span) in [(Color.white, Color.black), (.black, .white), (.white, .black)] {
+                let painted = GlyphAtlas.withBaseInk(base, mode: mode) { layout(span) }
+                let batch = try #require(TextBoxGeometry.GlyphPlacementBatch(shaped: painted, atlas: atlas, exact: true))
+                defer { batch.finish() }
+                for (index, ink) in [base, span].enumerated() {
+                    let bucket: UInt8 = ink == .white ? 4 : 0
+                    let original = raw.glyphs[index]
+                    let (expected, rect) = atlas.outlineInk(original, rect: original.rect, bucket: bucket)
+                    #expect(painted.glyphs[index].uv == expected.uv)
+                    #expect(painted.glyphs[index].rect == rect)
+                    let rawPlaced = TextBoxGeometry.placedGlyph(original, pen: raw.glyphPens[index],
+                        originXPx: 0.25, shapeScale: 1, atlas: atlas)
+                    var bounds = rawPlaced.glyph.rect
+                    bounds.x = rawPlaced.xPx
+                    let (shifted, shiftedRect) = atlas.outlineInk(rawPlaced.glyph, rect: bounds, bucket: bucket)
+                    let placed = TextBoxGeometry.placedGlyph(painted.glyphs[index], pen: painted.glyphPens[index],
+                        originXPx: 0.25, shapeScale: 1, atlas: atlas, placements: batch, index: index)
+                    #expect(placed.glyph.uv == shifted.uv)
+                    #expect(placed.xPx == shiftedRect.x)
+                }
+                #expect(layout(span).glyphs.map(\.uv) == raw.glyphs.map(\.uv))
+                #expect(layout(nil).glyphs.map(\.rect) == raw.glyphs.map(\.rect))
+            }
+            #expect(system.shapedCount == count)
+        }
+    }
+
+    @Test("Recycling a glyph page restores all masks in the next colored layout")
+    func recycledNeutralAndBrightMasks() throws {
+        let atlas = GlyphAtlas(width: 256, height: 256)
+        let text = TextSystem(glyphAtlas: atlas)
+        let style = TextStyle(size: 18, family: .monospace).smoothing(.windfoil)
+        func mixed() -> [PositionedGlyph] {
+            GlyphAtlas.withBaseInk(.black, mode: .windfoil) {
+                text.layoutKeyed(text: "TT", spans: [TextSpan("T"), TextSpan("T", color: .white)],
+                    style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true).shaped.glyphs
+            }
+        }
+        func countCoverage(_ glyph: PositionedGlyph) -> Int {
+            guard let bytes = atlas.pageData(Int(glyph.atlasPage)) else { return 0 }
+            let u = glyph.uv * 256
+            var count = 0
+            for y in Int(u.y.rounded())..<Int(u.w.rounded()) {
+                for x in Int(u.x.rounded())..<Int(u.z.rounded()) where bytes[y * 256 + x] > 0 { count += 1 }
+            }
+            return count
+        }
+        let first = mixed()
+        let original = first.map(countCoverage)
+        #expect(original.count == 2 && original.allSatisfy { $0 > 0 })
+        atlas.evictPage(0)
+        _ = atlas.placeMask(width: 64, height: 32, bitmap: Array(repeating: 0, count: 64 * 32))
+        #expect(mixed().map(countCoverage) == original)
+    }
+
     @Test("A translated fractional pen reuses its mask until its shelf is recycled")
     func translated() throws {
         let system = TextSystem()
