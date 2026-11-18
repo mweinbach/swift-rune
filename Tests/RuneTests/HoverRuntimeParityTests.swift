@@ -15,6 +15,23 @@ struct HoverRuntimeParityTests {
         var rows: Int
     }
 
+    @Test("Interaction tracks preserve their decimal owner identifiers")
+    func interactionTrackIDs() {
+        func check(_ value: UInt64) {
+            let id = NodeId(value)
+            #expect(Runtime<Int>.hoverTrackId(id) == NodeId.hash("hover:\(value)"))
+            #expect(Runtime<Int>.pressTrackId(id) == NodeId.hash("press:\(value)"))
+        }
+        var power: UInt64 = 1
+        for exponent in 0...19 {
+            check(power - 1)
+            check(power)
+            check(power + 1)
+            if exponent < 19 { power *= 10 }
+        }
+        check(.max)
+    }
+
     @Test("A stationary pointer follows scrolling rows and only reruns views that read its key")
     func paintHoverAndViewHoverDuringScroll() {
         for native in [false, true] {

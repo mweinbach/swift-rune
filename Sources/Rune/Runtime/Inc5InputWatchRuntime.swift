@@ -4,6 +4,28 @@ import RuneMotion
 private let runeHoverProp = Prop<Float>.custom(0x484F, .opacity, name: "hover")
 private let runePressProp = Prop<Float>.custom(0x5052, .opacity, name: "press")
 
+private let hoverTrackPrefix = NodeId.hash("hover:")
+private let pressTrackPrefix = NodeId.hash("press:")
+
+/// Hash the same decimal suffix as string interpolation without allocating a string per sample.
+private func interactionTrackID(prefix: NodeId, owner: NodeId) -> NodeId {
+    withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 20) { digits in
+        var start = digits.count
+        var remaining = owner.rawValue
+        repeat {
+            let (quotient, digit) = remaining.quotientAndRemainder(dividingBy: 10)
+            start -= 1
+            digits[start] = 48 + UInt8(digit)
+            remaining = quotient
+        } while remaining != 0
+        var hash = prefix.rawValue
+        for index in start..<digits.count {
+            hash = (hash ^ UInt64(digits[index])) &* 0x100000001b3
+        }
+        return NodeId(hash)
+    }
+}
+
 extension Runtime {
     // MARK: - Clipboard & Paste Delivery (`Runtime::use_clipboard`, `Tx::request_paste`, `El::on_paste`)
 
@@ -300,13 +322,13 @@ extension Runtime {
     internal static var hoverProp: Prop<Float> { runeHoverProp }
 
     internal static func hoverTrackId(_ nid: NodeId) -> NodeId {
-        NodeId.hash("hover:\(nid.rawValue)")
+        interactionTrackID(prefix: hoverTrackPrefix, owner: nid)
     }
 
     internal static var pressProp: Prop<Float> { runePressProp }
 
     internal static func pressTrackId(_ nid: NodeId) -> NodeId {
-        NodeId.hash("press:\(nid.rawValue)")
+        interactionTrackID(prefix: pressTrackPrefix, owner: nid)
     }
 
     /// Retargets every press track (the press half of `hover.rs::update_interaction`): a node
