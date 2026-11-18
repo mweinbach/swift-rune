@@ -3313,30 +3313,40 @@ public final class Runtime<State> {
 
         // A virtual row can enter a client VM while this pass measures its layout.
         // Reserve the per-node flattening workspace only after those builders return.
-        while let item = walkStack.popLast() { appendMeasuredNode(item) }
+        while let item = walkStack.popLast() { appendMeasuredNode(item, authored: item.element.value) }
 
         #if DEBUG
         @inline(never)
         #else
         @inline(__always)
         #endif
-        func appendMeasuredNode(_ item: WalkItem) {
-            var el = item.element.value
-            let effectiveParentFlow: Flow = el.isUnmirrored ? .ltr : item.parentFlow
-            let (nodeFlow, mirrorDir) = stepDirection(parent: effectiveParentFlow, el: el, state: state)
-            let nodeDirected = el.explicitDir != nil || el.isUnmirrored || item.parentDirected
-            let directText = nodeDirected && !el.textDirByParagraph
-            let directParagraphs = nodeDirected && !directText && el.hasAuthoredHandlers && el.handlers.editLens != nil
-            let hasIsolates = !el.isolatesSpec.isEmpty
-            var element = item.element
-            if mirrorDir || directText || directParagraphs || hasIsolates {
-                if mirrorDir { mirrorElVisual(&el) }
-                if directText { el.textStyle.direction = nodeFlow.textFlow }
-                if directParagraphs { el.textStyle.byParagraphStart = nodeFlow.textFlow }
-                if hasIsolates { el = el.applyingIsolates() }
-                if mirrorDir, let anchor = el.anchor { el.anchor = mirrorAnchor(anchor) }
-                element = FlatElement(el)
+        func appendMeasuredNode(_ item: WalkItem, authored: borrowing El<State>) {
+            let parentFlow: Flow = authored.isUnmirrored ? .ltr : item.parentFlow
+            let (flow, mirror) = stepDirection(parent: parentFlow, el: authored, state: state)
+            let directed = authored.explicitDir != nil || authored.isUnmirrored || item.parentDirected
+            let directText = directed && !authored.textDirByParagraph
+            let directParagraphs = directed && !directText && authored.hasEditLens
+            let hasIsolates = !authored.isolatesSpec.isEmpty
+            if mirror || directText || directParagraphs || hasIsolates {
+                var adjusted = copy authored
+                if mirror { mirrorElVisual(&adjusted) }
+                if directText { adjusted.textStyle.direction = flow.textFlow }
+                if directParagraphs { adjusted.textStyle.byParagraphStart = flow.textFlow }
+                if hasIsolates { adjusted = adjusted.applyingIsolates() }
+                if mirror, let anchor = adjusted.anchor { adjusted.anchor = mirrorAnchor(anchor) }
+                appendResolvedNode(item, element: FlatElement(adjusted), el: adjusted,
+                                   nodeFlow: flow, nodeDirected: directed, mirrorDir: mirror)
+            } else {
+                appendResolvedNode(item, element: item.element, el: authored,
+                                   nodeFlow: flow, nodeDirected: directed, mirrorDir: mirror)
             }
+        }
+
+        // Keep the common authored element borrowed from its immutable sibling buffer.
+        // A directional override above owns the adjusted element for the same call.
+        @inline(never)
+        func appendResolvedNode(_ item: WalkItem, element: FlatElement<State>, el: borrowing El<State>,
+                                nodeFlow: Flow, nodeDirected: Bool, mirrorDir: Bool) {
             let solved = item.solved
             let resolvedKey = item.resolvedKey
             let path = item.path
