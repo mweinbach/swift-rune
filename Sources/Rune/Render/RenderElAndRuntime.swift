@@ -3379,8 +3379,24 @@ extension Runtime {
                 let defaultTextColor = applyPressColor(pressTint.color, to: liveTextColor ?? paintStore.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? defaultForeground, frac: pressTint.frac)
                 let inkMode = resolvedText.style.fontSmoothing == .systemDefault ? textSystem.smoothing : resolvedText.style.fontSmoothing
                 let wrapWidth = TextBoxGeometry.wrapWidth(layoutInnerW, scale: shapeScale)
+                let isRotatedScope = parentIsRotated || abs(el.rotate) > 1e-4
+                let inCacheScope = parentInCache || cacheEligible
                 let window = rasterWindow(clip: activeClip, originY: restY)
                 var shaped = GlyphAtlas.withBaseInk(defaultTextColor, mode: inkMode) {
+                    #if os(WASI) && RUNE_BROWSER_TEXT
+                    if restsExact, glide == .zero, raster == nil, motionRasterGlyphs == nil,
+                       !isExiting, !isTextFlightTarget, !isRotatedScope, !inCacheScope, el.liveText == nil,
+                       el.elRevealWordFade == nil, el.textHighlights == nil, el.elStrikes.isEmpty, !hasActiveTextLinks(el),
+                       selectableRanges[node.path] == nil, let window, let measured = nodeTextLayouts[nid], !measured.isInput,
+                       resolvedText.matchesMountedLabel(measured.box, using: textSystem, maxWidth: wrapWidth,
+                                                        pixelScale: shapeScale, window: window) {
+                        let offset = TextBoxGeometry.inlineOffset(align: el.textStyle.align, wrap: resolvedText.style.wrap,
+                            shaped: measured.box.shaped, innerWidth: drawnInnerW, textScale: sc.x, pixelScale: scale)
+                        if let painted = textSystem.browserLabelPaint(measured.box, restingXPx: (boxLeft + offset) * scale, fresh: freshRaster) {
+                            return painted
+                        }
+                    }
+                    #endif
                     if glide == .zero, !isExiting, let window, let measured = nodeTextLayouts[nid], !measured.isInput,
                        let kept = resolvedText.retainedGlyphLayout(in: measured.box, using: textSystem, maxWidth: wrapWidth,
                                                                    pixelScale: shapeScale, window: window) {
@@ -3457,8 +3473,6 @@ extension Runtime {
                         )
                     }
                 }
-                let isRotatedScope = parentIsRotated || abs(el.rotate) > 1e-4
-                let inCacheScope = parentInCache || cacheEligible
                 let shownMargin = effBlur * scale * 3.0 + (effectSpec.map { $0.bleed * max(sc.x, sc.y) * scale } ?? 0) + 2.0
                 let shownY0 = (!isRotatedScope && !inCacheScope) ? max(activeClip.y, -shownMargin) : activeClip.y
                 let shownY1 = (!isRotatedScope && !inCacheScope) ? min(activeClip.w, viewport.y * scale + shownMargin) : activeClip.w

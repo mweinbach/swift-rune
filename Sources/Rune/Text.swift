@@ -6913,6 +6913,37 @@ public final class TextSystem: @unchecked Sendable {
         }
     }
 
+    #if os(WASI) && RUNE_BROWSER_TEXT
+    func browserLabelPaint(_ box: TextLayoutBox, restingXPx: Float, fresh: Bool) -> ShapedText? {
+        let key = box.shapeKey
+        let measured = box.shaped
+        guard key.style.wrap == .noWrap, key.pills.isEmpty, measured.lineCount == 1,
+              let record = measured.portableLines.first, record.utf8Start == 0,
+              let baseline = measured.lineBaselinesPx.first,
+              !record.text.isEmpty else { return nil }
+        let rgb = GlyphAtlas.browserBaseRGB
+        var result = measured
+        result.desktopRestingText = nil
+        if !fresh, let previous = lock.withLock({ box.browserPaint }), previous.revision == rasterRevision,
+           previous.x == restingXPx, previous.rgb == rgb,
+           glyphAtlas.retainPages(previous.pages, since: previous.resets) {
+            result.glyphs = previous.glyphs
+            result.lineGlyphRanges = [0..<previous.glyphs.count]
+            return result
+        }
+        guard let paragraph = measured.desktopParagraph ?? lock.withLock({ preparedShapeCache[key] }),
+              let line = paragraph.fragments.first ?? nil,
+              key.spans?.contains(where: { $0.underline || $0.strikethrough || $0.background != nil }) != true,
+              let glyphs = line.browserLabelGlyphs(record.text, spans: key.spans, originX: record.originX,
+                    baselineY: baseline / box.pixelScale, restingXPx: restingXPx, atlas: glyphAtlas) else { return nil }
+        let pages = Set(glyphs.map(\.atlasPage)), resets = glyphAtlas.resets
+        if !fresh { lock.withLock { box.browserPaint = (restingXPx, rgb, glyphs, pages, resets, _rasterRevision) } }
+        result.glyphs = glyphs
+        result.lineGlyphRanges = [0..<glyphs.count]
+        return result
+    }
+    #endif
+
     private func paintPortableWindow(_ measured: TextLayoutBox, in window: TextRasterWindow,
                                      keep: TextKeep, glidePx: Vec2) -> TextLayoutBox {
         if let cached = lock.withLock({ measured.windowPaint }),

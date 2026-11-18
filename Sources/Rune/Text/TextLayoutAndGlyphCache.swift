@@ -366,6 +366,9 @@ public final class TextLayoutBox: @unchecked Sendable {
     #if canImport(CRuneDesktopText) && !canImport(CoreText)
     internal var desktopRasterLayout: DesktopRasterLayout?
     #endif
+    #if os(WASI) && RUNE_BROWSER_TEXT
+    internal var browserPaint: (x: Float, rgb: UInt32?, glyphs: [PositionedGlyph], pages: Set<UInt16>, resets: UInt64, revision: UInt64)?
+    #endif
     // Page recycling invalidates UVs in a cached desktop text layout.
     internal var desktopAtlasResets: UInt64?
     internal var desktopPages: Set<UInt16> = []
@@ -378,6 +381,9 @@ public final class TextLayoutBox: @unchecked Sendable {
             + shaped.glyphs.count * MemoryLayout<PositionedGlyph>.stride + shaped.lineCount * 48
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
         bytes += shaped.desktopRestingText?.retainedGlyphBytes ?? 0
+        #endif
+        #if os(WASI) && RUNE_BROWSER_TEXT
+        bytes += (browserPaint?.glyphs.count ?? 0) * MemoryLayout<PositionedGlyph>.stride
         #endif
         if let partial = windowPaint?.box {
             bytes += partial.shaped.glyphs.count * MemoryLayout<PositionedGlyph>.stride

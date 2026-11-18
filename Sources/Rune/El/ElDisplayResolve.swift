@@ -105,6 +105,18 @@ internal struct ElResolvedText {
     /// dimensions and raster environment match the current paint.
     func retainedGlyphLayout(in box: TextLayoutBox, using textSystem: TextSystem,
                         maxWidth: Float?, pixelScale: Float, window: TextRasterWindow) -> TextLayoutBox? {
+        guard matchesMountedLabel(box, using: textSystem, maxWidth: maxWidth, pixelScale: pixelScale, window: window) else { return nil }
+        if !box.hasGlyphs { return textSystem.glyphsForCommittedLabel(box) }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        if !box.shaped.glyphs.isEmpty, box.shaped.glyphPlacements?.retainSource(in: textSystem.glyphAtlas) != true { return nil }
+        #else
+        guard textSystem.glyphAtlas.retainPages(box.desktopPages, since: box.desktopAtlasResets) else { return nil }
+        #endif
+        return box
+    }
+
+    func matchesMountedLabel(_ box: TextLayoutBox, using textSystem: TextSystem,
+                             maxWidth: Float?, pixelScale: Float, window: TextRasterWindow) -> Bool {
         guard box.rasterWindow == nil, !isSecure, advanceRun == nil, !truncateFade,
               style.maxLines == 0, style.wrap != .ellipsis, box.paragraphs == nil,
               box.shaped.lineCount <= 1 || (window.lowerY <= 0 && window.upperY >= box.shaped.size.y),
@@ -114,14 +126,8 @@ internal struct ElResolvedText {
               TextUTF8Key.equalBytes(box.authText, displayedText),
               box.shapeKey.usesSmoothing(textSystem.smoothing),
               box.shapeKey.fontEpoch == textSystem.currentFontEpoch, box.shapeKey.languageTag == textSystem.language,
-              box.shaped.canReplayGlyphInks else { return nil }
-        if !box.hasGlyphs { return textSystem.glyphsForCommittedLabel(box) }
-        #if canImport(CoreText) && canImport(CoreGraphics)
-        if !box.shaped.glyphs.isEmpty, box.shaped.glyphPlacements?.retainSource(in: textSystem.glyphAtlas) != true { return nil }
-        #else
-        guard textSystem.glyphAtlas.retainPages(box.desktopPages, since: box.desktopAtlasResets) else { return nil }
-        #endif
-        return box
+              box.shaped.canReplayGlyphInks else { return false }
+        return true
     }
 
     func shape(

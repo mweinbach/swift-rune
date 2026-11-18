@@ -1356,7 +1356,7 @@ final class DesktopTextLine {
 
     // Rich paragraph paint divides line tiles at style/cell boundaries. An isolated
     // shaped cluster already contains only its owned glyphs, including overhangs.
-    private func visitTiles(for cell: Cell, size: SIMD2<Int>, phase: SIMD2<Int> = .zero, owned: DesktopTextRun? = nil, isolateCell: Bool = false, cropBrowserCell: Bool = false, _ body: (Tile) -> Void) {
+    private func visitTiles(for cell: Cell, through endCell: Cell? = nil, size: SIMD2<Int>, phase: SIMD2<Int> = .zero, owned: DesktopTextRun? = nil, isolateCell: Bool = false, cropBrowserCell: Bool = false, _ body: (Tile) -> Void) {
         let run = owned ?? cell.run, m = run.metrics
         // A sufficiently bright Windfoil glyph can grow outside its platform ink bounds.
         let outset = smoothing == .windfoil && !run.hasColor ? 2 : 0
@@ -1366,7 +1366,7 @@ final class DesktopTextLine {
         let inkRight = nativeRight + (phase.x == 0 ? 0 : 1)
         let inkBottom = Int(m.ink_y) + Int(m.ink_height) + outset + (phase.y == 0 ? 0 : 1)
         let x0 = owned != nil || cell.localLeft < 0.01 ? inkLeft : max(inkLeft, Int(cell.localLeft.rounded()))
-        let end = cell.localRight
+        let end = endCell?.localRight ?? cell.localRight
         let lastCell = owned != nil || end > m.advance - 0.01
         var x1 = lastCell ? inkRight : min(inkRight, Int(end.rounded()))
         var sourceColumns: Range<Int>?
@@ -1453,7 +1453,7 @@ final class DesktopTextLine {
     }
     #endif
 
-    func glyphs(for cell: Cell, originX: Float, baselineY: Float, color: Color?,
+    func glyphs(for cell: Cell, through endCell: Cell? = nil, originX: Float, baselineY: Float, color: Color?,
                 atlas: GlyphAtlas, cache: Bool, glidePx: Vec2 = .zero,
                 restingXPx: Float? = nil, utf8Offset: Int? = nil, isolateCell: Bool = false,
                 rasterWindow: TextRasterWindow? = nil) -> [PositionedGlyph] {
@@ -1485,7 +1485,7 @@ final class DesktopTextLine {
         let usesBrowserInk = false
         #endif
         func emit(_ glide: DesktopGlyphGlide, x: Float, mask: Bool, colorInk: Bool) {
-            visitTiles(for: cell, size: atlas.desktopTileSize, phase: glide.phase, owned: owned, isolateCell: isolateCell, cropBrowserCell: usesBrowserInk) { tile in
+            visitTiles(for: cell, through: endCell, size: atlas.desktopTileSize, phase: glide.phase, owned: owned, isolateCell: isolateCell, cropBrowserCell: usesBrowserInk) { tile in
                 var key = tile.key
                 #if os(Linux) || os(Windows) || os(Android)
                 if cache && smoothing.isOutlineMode {
@@ -1579,6 +1579,58 @@ final class DesktopTextLine {
         if split { emit(colorGlide, x: colorX, mask: false, colorInk: true) }
         return quads
     }
+
+    #if os(WASI) && RUNE_BROWSER_TEXT
+    /// Ordinary labels sample adjacent glyphs from the same shaped browser tile. A single
+    /// quad can cover consecutive cells with the same source, ink, and quantized font pen.
+    /// Byte positions remain in the measured line for selection and accessibility.
+    func browserLabelGlyphs(_ text: String, spans: [TextSpan]?, originX: Float, baselineY: Float,
+                            restingXPx: Float, atlas: GlyphAtlas) -> [PositionedGlyph]? {
+        guard !text.isEmpty, spans?.isEmpty != true, cells.values.count == text.utf8.count, restingXPx.isFinite,
+              scale == 1 || scale == 2 || scale == 4 else { return nil }
+        let bytes = text.utf8.count
+        // DesktopRestingText.place keeps the original run when every pen is already integral.
+        var needsPlacement = restingXPx != restingXPx.rounded()
+        var minX = Float.infinity, maxX = -Float.infinity
+        for cell in cells.values {
+            guard cell.direction == 2, cell.byteEnd == cell.byte + 1, !cell.run.hasColor else { return nil }
+            let x = runOriginPx(for: cell, originX: originX)
+            minX = min(minX, x)
+            maxX = max(maxX, x)
+            if abs(x - x.rounded()) > 1e-5 { needsPlacement = true }
+        }
+        let absolute = needsPlacement ? DesktopRestingText.relativeOrigin(restingXPx, minRunX: minX, maxRunX: maxX) : nil
+        func pen(_ cell: Cell) -> (Float, UInt8) {
+            let x = runOriginPx(for: cell, originX: originX)
+            guard let absolute else { return (x, 0) }
+            return TextBoxGeometry.glyphPen(at: absolute + x, ppem: cell.run.font.sizePx, glide: 0, smoothing: smoothing)
+        }
+        var glyphs: [PositionedGlyph] = []
+        var spanIndex = 0, spanEnd = spans?.first?.text.utf8.count ?? bytes
+        var offset = 0
+        while offset < bytes {
+            if let spans {
+                while offset >= spanEnd, spanIndex + 1 < spans.count {
+                    spanIndex += 1
+                    spanEnd += spans[spanIndex].text.utf8.count
+                }
+            }
+            guard let first = cells[offset], spanEnd > offset else { return nil }
+            var last = first
+            let placement = pen(first)
+            var next = offset + 1
+            while next < min(bytes, spanEnd), let cell = cells[next], cell.run === first.run,
+                  last.localRight.rounded() == cell.localLeft.rounded(), pen(cell) == placement {
+                last = cell
+                next += 1
+            }
+            glyphs += self.glyphs(for: first, through: first.byte == last.byte ? nil : last, originX: originX, baselineY: baselineY,
+                                 color: spans?[spanIndex].color, atlas: atlas, cache: true, restingXPx: absolute)
+            offset = next
+        }
+        return glyphs
+    }
+    #endif
 
     /// Measures the exact masks used for painting, without populating a renderer's atlas.
     func addInk(to ink: inout TextInkAccumulator, originYPx: Float) {
@@ -1739,19 +1791,18 @@ final class DesktopRestingText {
     }
     #endif
 
+    static func relativeOrigin(_ origin: Float, minRunX: Float, maxRunX: Float) -> Float {
+        let fraction = origin - floorf(origin)
+        if origin + minRunX >= 0 { return fraction + max(0, ceilf(-minRunX)) }
+        if origin + maxRunX < 0 { return fraction - max(1, ceilf(maxRunX) + 1) }
+        return origin
+    }
+
     func place(_ shaped: inout ShapedText, at origin: Float, atlas: GlyphAtlas) -> Bool {
         guard !lines.isEmpty, origin.isFinite, origin != origin.rounded() || hasFractionalRun else { return false }
         // Labels a whole number of pixels apart share the same local quads. Preserve the
         // sign of every pen for ties, which Rune rounds away from zero.
-        let fraction = origin - floorf(origin)
-        let x: Float
-        if origin + minRunX >= 0 {
-            x = fraction + max(0, ceilf(-minRunX))
-        } else if origin + maxRunX < 0 {
-            x = fraction - max(1, ceilf(maxRunX) + 1)
-        } else {
-            x = origin
-        }
+        let x = Self.relativeOrigin(origin, minRunX: minRunX, maxRunX: maxRunX)
         return lock.withLock {
             if let last, last.x == x, atlas.retainPages(last.pages, since: last.resets) {
                 shaped.glyphs = last.glyphs
