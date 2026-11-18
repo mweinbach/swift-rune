@@ -133,7 +133,7 @@ extension Runtime {
                 let seam = seams[index]
                 guard let a = mountedNode(seam.top.ink), let b = mountedNode(seam.bottom.ink),
                       a.localRect.height == seam.top.height, b.localRect.height == seam.bottom.height,
-                      let upper = frame.byId[a.nodeId]?.rect, let lower = frame.byId[b.nodeId]?.rect else { continue }
+                      let upper = frame.poseIndex[a.nodeId]?.rect, let lower = frame.poseIndex[b.nodeId]?.rect else { continue }
                 let end = upper.top + (offsets[seam.top.row] ?? 0) + a.localRect.height
                 let raw = lower.top + (offsets[seam.bottom.row] ?? 0) - end
                 let want: Float
@@ -143,7 +143,7 @@ extension Runtime {
                     let left = abs(rawFrom - goal) < 0.01 ? 0 : min(1, max(0, (raw - goal) / (rawFrom - goal)))
                     want = goal + (seam.from - goal) * left
                 case let .opening(between):
-                    guard let k = mountedNode(between), let rect = frame.byId[between]?.rect else { continue }
+                    guard let k = mountedNode(between), let rect = frame.poseIndex[between]?.rect else { continue }
                     let growthKey = (k.el.foldGlideSpec == nil ? "growth:" : "fold:") + k.path
                     let height = growthRows[growthKey]?.track.h ?? rect.height
                     let t = min(1, max(0, (rect.top + (offsets[between] ?? 0) + height - end) / max(1, seam.targetDistance)))
@@ -196,7 +196,7 @@ extension Runtime {
             node.revealClip = node.revealClip?.offsetBy(delta)
             frame.nodes[i] = node
             frame.byId[node.id] = node
-            if lastFrameOutput?.byId[node.id] != node { changedIDs.insert(node.id) }
+            if lastFrameOutput?.poseIndex[node.id] != node { changedIDs.insert(node.id) }
         }
         if !changedIDs.isEmpty {
             frame.changed = frame.nodes.filter { changedIDs.contains($0.id) }

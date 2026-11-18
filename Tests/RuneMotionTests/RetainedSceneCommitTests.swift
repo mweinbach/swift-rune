@@ -328,4 +328,33 @@ struct RetainedSceneCommitTests {
         #expect(properties.contains(TraceIntent.contents))
         #expect(properties.contains(TraceIntent.shape))
     }
+
+    @Test func retainedPaintIndexSurvivesReorderingAndIndependentKeyedEdits() throws {
+        let root = NodeSpec(id: NodeId(81), rect: .fromXYWH(0, 0, 120, 80))
+        let a = NodeSpec(id: NodeId(82), parent: root.id, rect: .fromXYWH(10, 5, 20, 15))
+        let b = NodeSpec(id: NodeId(83), parent: root.id, rect: .fromXYWH(40, 5, 20, 15))
+        let c = NodeSpec(id: NodeId(84), parent: root.id, rect: .fromXYWH(70, 5, 20, 15))
+        var scene = Scene()
+        scene.commit([root, a, b], at: 0)
+        let first = scene.frameForRendering(at: 0)
+        scene.commit([root, c, a], at: 1, snapOmittedNonExiting: true)
+        let second = scene.frameForRendering(at: 1)
+        #expect(second.nodes.map(\.id) == [root.id, c.id, a.id])
+        for pose in second.nodes { #expect(second.poseIndex[pose.id] == pose) }
+        #expect(second.poseIndex[b.id] == nil)
+        #expect(first.poseIndex[b.id]?.rect == b.rect)
+        #expect(first.poseIndex[c.id] == nil)
+
+        var edited = second
+        let ordinal = try #require(edited.nodes.firstIndex { $0.id == a.id })
+        edited.nodes[ordinal].opacity = 0.75
+        edited.byId[a.id]?.opacity = 0.25
+        edited.byId.removeValue(forKey: c.id)
+        #expect(edited.nodes[ordinal].opacity == 0.75)
+        #expect(edited.poseIndex[a.id]?.opacity == 0.25)
+        #expect(edited.poseIndex[c.id] == nil)
+        #expect(second.poseIndex[a.id]?.opacity == 1)
+        #expect(second.byId[c.id]?.rect == c.rect)
+        #expect(scene.frame(at: 1).byId == second.byId)
+    }
 }

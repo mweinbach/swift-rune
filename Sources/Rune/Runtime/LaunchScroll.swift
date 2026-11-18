@@ -49,7 +49,7 @@ extension Runtime {
             guard let height = heights[id] else { continue }
             frame.nodes[i].rect.bottom = frame.nodes[i].rect.top + height
             frame.byId[id] = frame.nodes[i]
-            if frame.nodes[i] != lastFrameOutput?.byId[id] { changed.insert(id) }
+            if frame.nodes[i] != lastFrameOutput?.poseIndex[id] { changed.insert(id) }
         }
         frame.changed = frame.nodes.filter { changed.contains($0.id) }
     }

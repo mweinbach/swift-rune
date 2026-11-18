@@ -3444,8 +3444,8 @@ extension Runtime {
             }
 
             guard let cIdx = cIdxOpt,
-                  let viewRect = frameOut.byId[vNode.nodeId]?.rect,
-                  let cRect = frameOut.byId[flatNodes[cIdx].nodeId]?.rect else {
+                  let viewRect = frameOut.poseIndex[vNode.nodeId]?.rect,
+                  let cRect = frameOut.poseIndex[flatNodes[cIdx].nodeId]?.rect else {
                 slack = ScrollSlack.landed(window: slack.window)
                 slice2State.scrollSlacks[path] = slack
                 slice2State.scrollExtraYByPath[path] = 0

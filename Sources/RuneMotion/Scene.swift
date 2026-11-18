@@ -533,6 +533,59 @@ public struct MatchedFlightStart: Sendable {
     }
 }
 
+/// Ordered poses are stored once. The small index can span frames with the same tree order.
+private final class OrderedScenePoses: @unchecked Sendable {
+    let nodes: [Presented]
+    let positions: [NodeId: UInt32]
+    // Public dictionary access retains its native type and materializes one shared copy on demand.
+    private let dictionaryLock = NSLock()
+    private var materialized: [NodeId: Presented]?
+
+    init(nodes: [Presented], positions: [NodeId: UInt32]) {
+        self.nodes = nodes
+        self.positions = positions
+    }
+
+    func dictionary() -> [NodeId: Presented] {
+        dictionaryLock.withLock {
+            if let materialized { return materialized }
+            var result = Dictionary<NodeId, Presented>(minimumCapacity: nodes.count)
+            for node in nodes { result[node.id] = node }
+            materialized = result
+            return result
+        }
+    }
+}
+
+/// Read-only keyed access for renderers. Explicit keyed poses take precedence for authored frames.
+package struct FramePoseIndex: Sendable {
+    fileprivate var keyed: [NodeId: Presented]
+    fileprivate var ordered: OrderedScenePoses?
+
+    package init(_ keyed: [NodeId: Presented]) {
+        self.keyed = keyed
+    }
+
+    fileprivate init(_ ordered: OrderedScenePoses) {
+        self.keyed = [:]
+        self.ordered = ordered
+    }
+
+    package var count: Int { ordered?.nodes.count ?? keyed.count }
+
+    package subscript(id: NodeId) -> Presented? {
+        guard let ordered else { return keyed[id] }
+        guard let position = ordered.positions[id] else { return nil }
+        return ordered.nodes[Int(position)]
+    }
+
+    fileprivate mutating func expandDictionary() {
+        guard let ordered else { return }
+        keyed = ordered.dictionary()
+        self.ordered = nil
+    }
+}
+
 /// Output of one scene frame.
 public struct FrameOutput: Sendable {
     /// Nodes whose presented values changed this frame, parents before children.
@@ -546,7 +599,15 @@ public struct FrameOutput: Sendable {
 
     /// Full snapshot for declarative callers using `commit(...)` + `frame(at:)`.
     public var nodes: [Presented]
-    public var byId: [NodeId: Presented]
+    package private(set) var poseIndex: FramePoseIndex
+    public var byId: [NodeId: Presented] {
+        get { poseIndex.ordered?.dictionary() ?? poseIndex.keyed }
+        set { poseIndex = FramePoseIndex(newValue) }
+        _modify {
+            poseIndex.expandDictionary()
+            yield &poseIndex.keyed
+        }
+    }
     public var isAnimating: Bool { animating }
 
     public init(
@@ -562,7 +623,18 @@ public struct FrameOutput: Sendable {
         self.events = events
         self.animating = animating
         self.nodes = nodes
-        self.byId = byId
+        self.poseIndex = FramePoseIndex(byId)
+    }
+}
+
+private extension FrameOutput {
+    mutating func expandPoseDictionary() {
+        poseIndex.expandDictionary()
+    }
+
+    mutating func include(_ snapshot: OrderedScenePoses) {
+        nodes = snapshot.nodes
+        poseIndex = FramePoseIndex(snapshot)
     }
 }
 
@@ -682,7 +754,8 @@ public struct Scene: Sendable {
     private var rootTail: UInt32 = Scene.noneIdx
     internal var order: [UInt32] = []
     internal var orderDirty: Bool = false
-    private var snapshot: (nodes: [Presented], byId: [NodeId: Presented])?
+    private var snapshot: OrderedScenePoses?
+    private var snapshotPositions: [NodeId: UInt32]?
     internal var out: [Presented] = []
     internal var late: [Presented] = []
     internal var exitedCarry = Carry<NodeId>()
@@ -1206,7 +1279,10 @@ public struct Scene: Sendable {
         }
         presentDirty()
 
-        if !toRemove.isEmpty { snapshot = nil }
+        if !toRemove.isEmpty {
+            snapshot = nil
+            snapshotPositions = nil
+        }
         for ui in toRemove {
             let i = Int(ui)
             if nodes[i].alive {
@@ -1235,27 +1311,32 @@ public struct Scene: Sendable {
 
         if includeSnapshot, snapshot == nil {
             var snapshotNodes: [Presented] = []
-            var snapshotById: [NodeId: Presented] = [:]
             snapshotNodes.reserveCapacity(order.count)
-            snapshotById.reserveCapacity(order.count)
             for ui in order {
                 let i = Int(ui)
                 guard nodes[i].alive, let last = nodes[i].last else { continue }
                 snapshotNodes.append(last)
-                snapshotById[last.id] = last
             }
-            snapshot = (snapshotNodes, snapshotById)
+            let positions: [NodeId: UInt32]
+            if let snapshotPositions, snapshotPositions.count == snapshotNodes.count {
+                positions = snapshotPositions
+            } else {
+                var next = Dictionary<NodeId, UInt32>(minimumCapacity: snapshotNodes.count)
+                for i in snapshotNodes.indices { next[snapshotNodes[i].id] = UInt32(i) }
+                snapshotPositions = next
+                positions = next
+            }
+            snapshot = OrderedScenePoses(nodes: snapshotNodes, positions: positions)
         }
 
-        let current = includeSnapshot ? snapshot : nil
-        return FrameOutput(
+        var result = FrameOutput(
             changed: out,
             exited: exitedCarry.items,
             events: store.events,
-            animating: animating,
-            nodes: current?.nodes ?? [],
-            byId: current?.byId ?? [:]
+            animating: animating
         )
+        if includeSnapshot, let snapshot { result.include(snapshot) }
+        return result
     }
 
     /// Returns the world-space rect for `id` prior to its own `Props.OFFSET` and presence transition offset.
@@ -1787,6 +1868,7 @@ public struct Scene: Sendable {
 
     internal mutating func rebuildOrder() {
         snapshot = nil
+        snapshotPositions = nil
         order.removeAll(keepingCapacity: true)
         var r = rootHead
         while r != Self.noneIdx {
@@ -2208,6 +2290,12 @@ public struct Scene: Sendable {
 
     /// Evaluates the scene at `now` and populates `nodes`/`byId` snapshots alongside incremental output.
     public mutating func frame(at now: Double) -> FrameOutput {
+        var frame = frameForRendering(at: now)
+        frame.expandPoseDictionary()
+        return frame
+    }
+
+    package mutating func frameForRendering(at now: Double) -> FrameOutput {
         setTime(now)
         return frameImpl(includeSnapshot: true)
     }
@@ -2246,6 +2334,7 @@ public struct Scene: Sendable {
         order.removeAll(keepingCapacity: true)
         orderDirty = false
         snapshot = nil
+        snapshotPositions = nil
         travelling.removeAll(keepingCapacity: true)
         launchEndpoints.removeAll(keepingCapacity: true)
         store.clear()

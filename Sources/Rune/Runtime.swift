@@ -2401,7 +2401,7 @@ public final class Runtime<State> {
         _ = asInputObserver { refreshHoverAndSyncTracks(at: animNow, wallNow: now, cut: false) }
         endUnseenExits(on: &scene)
         placeTailHandoffFrames()
-        var frameOut = scene.frame(at: animNow)
+        var frameOut = scene.frameForRendering(at: animNow)
         presentLaunchedRowHeights(in: &frameOut)
         slice2State.frameGrowthSnapOffsetsY.removeAll(keepingCapacity: true)
         if !slice2State.liveContentSlides.slides.isEmpty {
@@ -2431,7 +2431,7 @@ public final class Runtime<State> {
 
         let activeWordReveals = wordRevealStore.hasActiveFades { scene.store.nodeTimeScale($0) }
         if !shadowTrackCounts.isEmpty {
-            for (nid, prevCount) in shadowTrackCounts where frameOut.byId[nid] == nil {
+            for (nid, prevCount) in shadowTrackCounts where frameOut.poseIndex[nid] == nil {
                 for k in 0..<prevCount {
                     liveStore.remove(nid, Self.shadowGeomProp(k))
                     liveStore.remove(nid, Self.shadowColorProp(k))
@@ -2475,7 +2475,7 @@ public final class Runtime<State> {
 
         // Prune snapshots of exiting nodes that have finished exiting
         hasActiveExitingNodes = frameOut.nodes.contains(where: \.isExiting)
-        let finishedExitedIds = exitingSnapshots.keys.filter { frameOut.byId[$0] == nil }
+        let finishedExitedIds = exitingSnapshots.keys.filter { frameOut.poseIndex[$0] == nil }
         wordRevealStore.prune(exitedIds: finishedExitedIds)
         for id in finishedExitedIds {
             exitingSnapshots.removeValue(forKey: id)
@@ -2488,21 +2488,21 @@ public final class Runtime<State> {
             rebuildLiveSubscriptionsIncludingExiting()
             liveLane.pruned(keep)
         }
-        for id in exitingTextLayouts.keys where frameOut.byId[id] == nil {
+        for id in exitingTextLayouts.keys where frameOut.poseIndex[id] == nil {
             exitingTextLayouts.removeValue(forKey: id)
         }
         pruneScaleSettles()
         activeFlightIds = activeFlightIds.filter {
-            frameOut.byId[$0] != nil && (scene.isEdgeAnimating($0) || scene.hasEnteringAncestor($0))
+            frameOut.poseIndex[$0] != nil && (scene.isEdgeAnimating($0) || scene.hasEnteringAncestor($0))
         }
         launchedFlightIds = launchedFlightIds.filter {
-            frameOut.byId[$0] != nil && (scene.isEdgeAnimating($0) || scene.hasEnteringAncestor($0))
+            frameOut.poseIndex[$0] != nil && (scene.isEdgeAnimating($0) || scene.hasEnteringAncestor($0))
         }
         if !launchScrollById.isEmpty {
             launchScrollById = launchScrollById.filter { launchedFlightIds.contains($0.key) }
         }
         unclippedMatchedFlightIds = unclippedMatchedFlightIds.filter {
-            frameOut.byId[$0] != nil && (scene.isEdgeAnimating($0) || scene.hasEnteringAncestor($0))
+            frameOut.poseIndex[$0] != nil && (scene.isEdgeAnimating($0) || scene.hasEnteringAncestor($0))
         }
         lastFrameOutput = frameOut
 
@@ -5018,7 +5018,7 @@ public final class Runtime<State> {
                         if presentedScales.motion(for: ancestor.nodeId) == .still,
                            let drawn = presentedRectByPath[ancestor.path],
                            let scale = presentedScales[ancestor.path], scale.x > 0, scale.y > 0,
-                           let sceneRect = lastFrameOutput?.byId[ancestor.nodeId]?.rect {
+                           let sceneRect = lastFrameOutput?.poseIndex[ancestor.nodeId]?.rect {
                             source = Vec2(sceneRect.x + (source.x - drawn.x) / scale.x,
                                           sceneRect.y + (source.y - drawn.y) / scale.y)
                             break
@@ -14661,10 +14661,10 @@ private struct OwnPaintPresentation {
 
 extension FrameOutput {
     /// Scene publishes this index with its snapshot. Synthesized motion-gate frames supply the nodes alone.
-    internal var paintNodesById: [NodeId: Presented] {
-        if byId.count == nodes.count { return byId }
+    internal var paintNodesById: FramePoseIndex {
+        if poseIndex.count == nodes.count { return poseIndex }
         var index = Dictionary<NodeId, Presented>(minimumCapacity: nodes.count)
         for node in nodes { index[node.id] = node }
-        return index
+        return FramePoseIndex(index)
     }
 }

@@ -116,7 +116,7 @@ extension Runtime {
         }
     }
 
-    func prepareNativePaintTopology(_ frame: FrameOutput, byID: [NodeId: Presented], holds: Bool,
+    func prepareNativePaintTopology(_ frame: FrameOutput, byID: FramePoseIndex, holds: Bool,
                                     fromMountedScene: Bool = false) -> NativePaintTopology {
         if var topology = nativePaintTopology {
             if topology.currentCommit {
