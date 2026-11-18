@@ -21,6 +21,10 @@ public enum FontFamiliesRegistry {
         var sans: String
         var mono: String
         var epoch: UInt64
+
+        func matches(sans: String, mono: String) -> Bool {
+            TextUTF8Key.equalBytes(self.sans, sans) && TextUTF8Key.equalBytes(self.mono, mono)
+        }
     }
 
     private final class Storage: @unchecked Sendable {
@@ -67,7 +71,7 @@ public enum FontFamiliesRegistry {
     }
 
     internal static func chooseWindowFamilies(sans: String, mono: String) {
-        if let choice = windowChoice, choice.sans == sans && choice.mono == mono { return }
+        if let choice = windowChoice, choice.matches(sans: sans, mono: mono) { return }
         RuneExecutionContext.locals[windowKey] = makeState(sans: sans, mono: mono)
     }
 
@@ -106,7 +110,7 @@ public enum FontFamiliesRegistry {
         storage.lock.lock()
         defer { storage.lock.unlock() }
         let previous = scoped ?? storage.defaults
-        guard previous.sans != sans || previous.mono != mono else { return false }
+        guard !previous.matches(sans: sans, mono: mono) else { return false }
         let state = State(sans: sans, mono: mono, epoch: storage.allocateEpoch())
         if scoped != nil {
             threadOverride = state

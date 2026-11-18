@@ -21,7 +21,27 @@ public enum FontFamily: Sendable, Hashable, Codable {
     case monospace
     /// The platform's monospaced UI face, followed by the app's mono slot.
     case systemMono
+    /// A registered name or family list. Rune's `Family::Named(&str)` compares its original UTF-8 bytes.
     case custom(String)
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        switch (lhs, rhs) {
+        case (.systemUI, .systemUI), (.monospace, .monospace), (.systemMono, .systemMono): true
+        case let (.custom(a), .custom(b)): TextUTF8Key.equalBytes(a, b)
+        default: false
+        }
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        switch self {
+        case .systemUI: hasher.combine(0)
+        case .monospace: hasher.combine(1)
+        case .systemMono: hasher.combine(2)
+        case .custom(var name):
+            hasher.combine(3)
+            name.withUTF8 { hasher.combine(bytes: UnsafeRawBufferPointer($0)) }
+        }
+    }
 
     public static func named(_ name: String) -> FontFamily { .custom(name) }
 
@@ -38,7 +58,7 @@ public enum FontFamily: Sendable, Hashable, Codable {
                 return (Self.systemMonoFamilies + [slot]).joined(separator: ", ")
             }
             return slot
-        case .custom(let names): return names.isEmpty || names == sans ? sans : names + ", " + sans
+        case .custom(let names): return names.isEmpty || TextUTF8Key.equalBytes(names, sans) ? sans : names + ", " + sans
         }
     }
 
@@ -4063,7 +4083,7 @@ public final class TextSystem: @unchecked Sendable {
     @discardableResult
     public func setFamilies(sans: String, mono: String) -> Bool {
         let previous = activeFamilies()
-        guard previous.sans != sans || previous.mono != mono else { return false }
+        guard !previous.matches(sans: sans, mono: mono) else { return false }
         _ = FontFamiliesRegistry.setFamilies(sans: sans, mono: mono)
         let state = FontFamiliesRegistry.makeState(sans: sans, mono: mono)
         lock.lock()

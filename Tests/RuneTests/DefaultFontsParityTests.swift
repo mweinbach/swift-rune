@@ -52,6 +52,15 @@ struct DefaultFontsParityTests {
         #expect(host.runtime.viewCommitCount > commits)
     }
 
+    @Test("named font identifiers retain their original UTF-8 spelling in sets and dictionaries")
+    func namedFamilyIdentityPreservesRegisteredNames() {
+        let composed = FontFamily.named("RuneCaf\u{e9}")
+        let decomposed = FontFamily.named("RuneCafe\u{301}")
+        #expect(composed != decomposed)
+        #expect(Set([composed, decomposed, .named("RuneCaf\u{e9}")]).count == 2)
+        #expect([composed: 1, decomposed: 2][.named("RuneCafe\u{301}")] == 2)
+    }
+
     #if os(Windows) || os(Linux)
     @Test("registering an application font updates the baseline in an already-shaped window")
     func registeredFontRefreshesNativeStrut() async throws {
@@ -79,9 +88,9 @@ struct DefaultFontsParityTests {
         #endif
 
         let window = TextSystem()
-        func shape(_ system: TextSystem, family: String = "Rune Late Strut Epoch, Inter") -> ShapedText {
+        func shape(_ system: TextSystem, family: String = "Rune Late Strut Epoch, Inter", bypassCache: Bool = true) -> ShapedText {
             let style = TextStyle(size: 32, lineHeight: 50, family: .named(family))
-            return system.shape(text: "R", style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true, bypassCache: true)
+            return system.shape(text: "R", style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true, bypassCache: bypassCache)
         }
 
         let fallback = shape(window)
@@ -107,10 +116,16 @@ struct DefaultFontsParityTests {
         #if os(Linux)
         let references = spellings.map { shape(TextSystem(), family: $0) }
         #expect(references[0].lineBaselinesPx != references[1].lineBaselinesPx)
-        for order in [[0, 1], [1, 0]] {
-            let window = TextSystem()
-            for i in order { compare(shape(window, family: spellings[i]), references[i]) }
+        for bypassCache in [false, true] {
+            for order in [[0, 1], [1, 0]] {
+                let window = TextSystem()
+                for i in order { compare(shape(window, family: spellings[i], bypassCache: bypassCache), references[i]) }
+            }
         }
+        let slots = TextSystem()
+        #expect(slots.setFamilies(sans: spellings[0], mono: "Inter"))
+        compare(shape(slots, family: spellings[1]), references[1])
+        #expect(slots.setFamilies(sans: spellings[1], mono: "Inter"))
         #endif
     }
     #endif
