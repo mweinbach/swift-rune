@@ -3181,7 +3181,7 @@ public final class Runtime<State> {
             let h = wholeRows ? LayoutStyle.wholeRowLength(authoredHeight) : authoredHeight
             return h > 0 && h.rounded() == h && h <= maximumGroupHeight - height ? h : nil
         }
-        func retain(_ row: borrowing El<State>) -> Bool {
+        func retain(_ row: borrowing El<State>, asDonorOnly: Bool = false) -> Bool {
             guard let h = eligibleHeight(row.layout), let key = row.storageKeyId, let entry = rows[key],
                   let context = entry.layoutRootMemo, let paths = flatMemoPaths[listId.child("@" + key)],
                   let retained = paths.rowRoot,
@@ -3213,6 +3213,7 @@ public final class Runtime<State> {
             if canAdopt, let kind = row.fixedUnifiedLineKind, donors[kind] == nil {
                 donors[kind] = (copy row, result)
             }
+            if asDonorOnly { return true }
             saved.append(result)
             retainedNodeCount += 1 + span.nodes.count
             for node in span.nodes {
@@ -3221,10 +3222,33 @@ public final class Runtime<State> {
             height += h
             return true
         }
-        func adopt(_ row: borrowing El<State>) -> Bool {
+        var lookedAhead = false
+        func seedLeadingDonors(before childIndex: Int) {
+            guard !lookedAhead else { return }
+            lookedAhead = true
+            let mounted = list.mounted
+            guard let previous = virtualLists[list.listPath]?.lastMountedSnapshot,
+                  previous.range.lowerBound > mounted.range.lowerBound,
+                  mounted.range.contains(previous.range.lowerBound) else { return }
+            let survivor = (mounted.topSpacerH > 0 ? 1 : 0) + (previous.range.lowerBound - mounted.range.lowerBound)
+            guard childIndex < survivor, source.children.indices.contains(survivor) else { return }
+            // Inspect a bounded prefix of the overlap. The ordinary retention certificate
+            // validates the actual current child by key, owner, size, and reference generation.
+            let limit = min(16, previous.range.count, mounted.range.upperBound - previous.range.lowerBound,
+                            source.children.count - 1 - survivor)
+            for offset in 0..<limit {
+                let row = source.children[survivor + offset]
+                if let kind = row.fixedUnifiedLineKind, donors[kind] == nil {
+                    _ = retain(row, asDonorOnly: true)
+                }
+                if donors.count == 3 { break }
+            }
+        }
+        func adopt(_ row: borrowing El<State>, at index: Int) -> Bool {
             guard canAdopt, let h = eligibleHeight(row.layout), let key = row.storageKeyId, let entry = rows[key],
-                  entry.layoutRootMemo != nil, let kind = row.fixedUnifiedLineKind,
-                  let (reference, geometry) = donors[kind], geometry.layout.localSize.y == h else { return false }
+                  entry.layoutRootMemo != nil, let kind = row.fixedUnifiedLineKind else { return false }
+            if donors[kind] == nil { seedLeadingDonors(before: index) }
+            guard let (reference, geometry) = donors[kind], geometry.layout.localSize.y == h else { return false }
             var local: [(NodeId, RetainedLayoutCoordinator.TextLayoutRecord)] = []
             var nodeCount = 0
             guard adoptFixedUnifiedLine(row, reference: reference, geometry: geometry,
@@ -3243,7 +3267,7 @@ public final class Runtime<State> {
             guard child.storageKeyId != nil, !child.hasEditLens, !child.isSecure, child.liveText == nil, child.liveBindings.isEmpty,
                   child.memoLayoutChildren?.traits.contains(.mutableLayout) != true else { return nil }
             // Leave both edge children available to supply the column's intrinsic baseline.
-            if index == 0 || index + 1 == source.children.count || (!retain(child) && !adopt(child)) {
+            if index == 0 || index + 1 == source.children.count || (!retain(child) && !adopt(child, at: index)) {
                 flush()
                 compact.append(source.children[index])
             }

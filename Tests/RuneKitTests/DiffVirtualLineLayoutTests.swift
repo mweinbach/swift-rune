@@ -63,12 +63,20 @@ struct DiffVirtualLineLayoutTests {
             #expect(actual.accessibilitySnapshot() == reference.accessibilitySnapshot())
         }
         for _ in 0..<5 { compare() }
-        let initial = Set(actual.elements().map(\.path))
-        for _ in 0..<8 {
+        func mountedRows(_ elements: [ElementInfo]) -> Set<String> {
+            Set(elements.compactMap { $0.key?.hasPrefix("diff-row-") == true ? $0.path : nil })
+        }
+        let initial = mountedRows(actual.elements())
+        func scroll(_ delta: Float) {
             for runtime in [actual, reference] {
-                runtime.wheel(WheelEvent(dx: 0, dy: -160), at: Vec2(220, 90), now: now)
+                runtime.wheel(WheelEvent(dx: 0, dy: delta), at: Vec2(220, 90), now: now)
             }
             compare()
+        }
+        var seen = initial
+        for _ in 0..<8 {
+            scroll(-160)
+            seen.formUnion(mountedRows(actual.elements()))
         }
 
         let row = try #require(actual.elements().first {
@@ -80,29 +88,58 @@ struct DiffVirtualLineLayoutTests {
         let shell = try #require(actual.flatNodes.first { $0.path == row.path }.flatMap(\.parentIndex))
         #expect(actual.flatNodes[shell].localSize.y == (wholeRows ? 21 : 20))
 
-        func checkLabel(swapped: Bool) throws {
+        func checkLabel(_ index: Int, swapped: Bool) throws {
             let leaf = try #require(actual.flatNodes.first { $0.key == "diff-code-\(index)-text" })
             let record = try #require(actual.nodeTextLayouts[leaf.nodeId])
             let authored = lines[index].text
             #expect(record.box.authText == authored)
             #expect(record.box.spans?.first?.color == (authored.hasPrefix("even") == swapped ? first : second))
         }
-        try checkLabel(swapped: false)
+        try checkLabel(index, swapped: false)
         for runtime in [actual, reference] {
             runtime.update(at: now) { state, _ in state.setHighlighter(highlighter(swapped: true)) }
         }
         compare()
-        try checkLabel(swapped: true)
-        let gutter = try #require(actual.element(byKey: "diff-n-\(index)"))
-        let point = Vec2(gutter.rect[0] + gutter.rect[2] / 2, gutter.rect[1] + gutter.rect[3] / 2)
-        for runtime in [actual, reference] {
-            runtime.pointerMove(to: point, at: now)
-            _ = runtime.renderFrame(at: now)
-            runtime.pointerDown(at: point, at: now)
-            runtime.pointerUp(at: point, at: now + 0.001)
+        try checkLabel(index, swapped: true)
+        func click(_ index: Int) throws {
+            let gutter = try #require(actual.element(byKey: "diff-n-\(index)"))
+            let point = Vec2(gutter.rect[0] + gutter.rect[2] / 2, gutter.rect[1] + gutter.rect[3] / 2)
+            for runtime in [actual, reference] {
+                runtime.pointerMove(to: point, at: now)
+                _ = runtime.renderFrame(at: now)
+                runtime.pointerDown(at: point, at: now)
+                runtime.pointerUp(at: point, at: now + 0.001)
+            }
+            compare()
+            #expect(actual.state.selectedRange == .line(DiffLineRef(side: .new, line: UInt32(index + 1))))
+            #expect(actual.state.selectedText() == lines[index].text)
         }
-        compare()
-        #expect(actual.state.selectedRange == .line(DiffLineRef(side: .new, line: UInt32(index + 1))))
-        #expect(actual.state.selectedText() == lines[index].text)
+        try click(index)
+
+        // Follow the first rows that remount at the leading edge until one is visible.
+        var previous = mountedRows(actual.elements())
+        var firstReturning = Set<String>()
+        var reverseMounts = 0
+        var returningIndex: Int?
+        for _ in 0..<8 {
+            scroll(160)
+            let elements = actual.elements()
+            let current = mountedRows(elements)
+            let entered = current.subtracting(previous).intersection(seen)
+            if !entered.isEmpty {
+                reverseMounts += 1
+                if firstReturning.isEmpty { firstReturning = entered }
+            }
+            previous = current
+            guard reverseMounts >= 2, let returning = elements.first(where: {
+                firstReturning.contains($0.path) && $0.key?.hasPrefix("diff-row-") == true
+                    && $0.visible[1] > 40 && $0.visible[1] < 120 && $0.visible[3] >= 20
+            }) else { continue }
+            returningIndex = returning.key.flatMap { Int($0.dropFirst("diff-row-".count)) }
+            break
+        }
+        let restored = try #require(returningIndex)
+        try checkLabel(restored, swapped: true)
+        try click(restored)
     }
 }
