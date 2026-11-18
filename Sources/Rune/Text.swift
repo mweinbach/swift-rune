@@ -5428,6 +5428,7 @@ public final class TextSystem: @unchecked Sendable {
             baseAscentPx: baseAscentPx,
             baseDescentPx: baseDescentPx,
             attrStr: attrStr,
+            hasRunDelegates: hasTabs || !preparedPills.isEmpty,
             lineSource: lineSource,
             spanBoxes: spanBoxes
         )
@@ -6186,6 +6187,31 @@ public final class TextSystem: @unchecked Sendable {
         return offsets
     }
 
+    /// CoreText may decline to expose contiguous storage for any run, including fallback fonts.
+    private func withRunBuffers(
+        _ run: CTRun, count: Int,
+        body: (UnsafePointer<CGGlyph>, UnsafePointer<CGPoint>, UnsafePointer<CFIndex>) -> Void
+    ) {
+        if let glyphs = CTRunGetGlyphsPtr(run), let positions = CTRunGetPositionsPtr(run),
+           let indices = CTRunGetStringIndicesPtr(run) {
+            withExtendedLifetime(run) { body(glyphs, positions, indices) }
+            return
+        }
+
+        let range = CFRange(location: 0, length: count)
+        withUnsafeTemporaryAllocation(of: CGGlyph.self, capacity: count) { glyphs in
+            withUnsafeTemporaryAllocation(of: CGPoint.self, capacity: count) { positions in
+                withUnsafeTemporaryAllocation(of: CFIndex.self, capacity: count) { indices in
+                    let glyphs = glyphs.baseAddress!, positions = positions.baseAddress!, indices = indices.baseAddress!
+                    CTRunGetGlyphs(run, range, glyphs)
+                    CTRunGetPositions(run, range, positions)
+                    CTRunGetStringIndices(run, range, indices)
+                    body(UnsafePointer(glyphs), UnsafePointer(positions), UnsafePointer(indices))
+                }
+            }
+        }
+    }
+
     private func emitLineGlyphs(
         _ runs: [CTRun], prepared: TextPreparedShape, markerMap: ShapedText.MarkerMap,
         byteAtUTF16: [Int], style: TextStyle, alignOffsetPx: Float, baselineYPx: Float,
@@ -6196,17 +6222,24 @@ public final class TextSystem: @unchecked Sendable {
         let pillMarkerKey = "RunePillMarker" as CFString
         let invS = 1 / prepared.scale
         for run in runs {
-            let attrs = CTRunGetAttributes(run) as NSDictionary
-            if attrs[kCTRunDelegateAttributeName] != nil || attrs[pillMarkerKey] != nil {
+            let attrs = CTRunGetAttributes(run)
+            if prepared.hasRunDelegates &&
+                (CFDictionaryContainsKey(attrs, Unmanaged.passUnretained(kCTRunDelegateAttributeName).toOpaque()) ||
+                 CFDictionaryContainsKey(attrs, Unmanaged.passUnretained(pillMarkerKey).toOpaque())) {
                 continue
             }
             let glyphCount = CTRunGetGlyphCount(run)
             if glyphCount == 0 { continue }
-            let runFont = (attrs[kCTFontAttributeName] as! CTFont)
+            let fontValue = CFDictionaryGetValue(attrs, Unmanaged.passUnretained(kCTFontAttributeName).toOpaque())!
+            let runFont = Unmanaged<CTFont>.fromOpaque(fontValue).takeUnretainedValue()
             let runFontSizePx = Float(CTFontGetSize(runFont))
             let runIsColor = GlyphAtlas.isColorFont(runFont)
-            let runColor: Color? = (attrs[spanColorKey] as? Int).flatMap { idx in
-                (0..<spanPalette.count).contains(idx) ? spanPalette[idx] : nil
+            let runColor: Color?
+            if !spanPalette.isEmpty, let index = (attrs as NSDictionary)[spanColorKey] as? Int,
+               spanPalette.indices.contains(index) {
+                runColor = spanPalette[index]
+            } else {
+                runColor = nil
             }
 
             let runInk: UInt8
@@ -6216,78 +6249,73 @@ public final class TextSystem: @unchecked Sendable {
                 runInk = 0
             }
 
-            var glyphs = Array<CGGlyph>(repeating: 0, count: glyphCount)
-            var positions = Array<CGPoint>(repeating: .zero, count: glyphCount)
-            var indices = Array<CFIndex>(repeating: 0, count: glyphCount)
-            CTRunGetStringIndices(run, CFRangeMake(0, glyphCount), &indices)
-            CTRunGetGlyphs(run, CFRangeMake(0, glyphCount), &glyphs)
-            CTRunGetPositions(run, CFRangeMake(0, glyphCount), &positions)
+            withRunBuffers(run, count: glyphCount) { glyphs, positions, indices in
+                for i in 0..<glyphCount {
+                    let authoredIndex = max(0, markerMap.authU16(forShapedU16: indices[i]))
+                    let byte = byteAtUTF16.isEmpty ? authoredIndex : byteAtUTF16[min(authoredIndex, byteAtUTF16.count - 1)]
+                    let gxPx = alignOffsetPx + Float(positions[i].x)
+                    let gyPx = baselineYPx - Float(positions[i].y)
+                    if runIsColor, let colorEntry = glyphAtlas.rasterizeColorGlyph(
+                        font: runFont,
+                        glyph: glyphs[i],
+                        fontSizePx: runFontSizePx
+                    ), colorEntry.pixelSize.x > 0 && colorEntry.pixelSize.y > 0 {
+                        let quadXPx = roundf(gxPx) + colorEntry.bearingPx.x
+                        let quadYPx = roundf(gyPx) + colorEntry.bearingPx.y
+                        glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx, glideX: 0, binY: 0, smoothing: style.fontSmoothing, isColor: true, yOffsetPx: -Float(positions[i].y)))
+                        glyphsOut.append(PositionedGlyph(
+                            rect: SIMD4<Float>(
+                                quadXPx * invS,
+                                quadYPx * invS,
+                                Float(colorEntry.pixelSize.x) * invS,
+                                Float(colorEntry.pixelSize.y) * invS
+                            ),
+                            colorGlyph: colorEntry,
+                            color: runColor,
+                            utf8Offset: byte
+                        ))
+                        continue
+                    }
 
-            for i in 0..<glyphCount {
-                let authoredIndex = max(0, markerMap.authU16(forShapedU16: indices[i]))
-                let byte = byteAtUTF16.isEmpty ? authoredIndex : byteAtUTF16[min(authoredIndex, byteAtUTF16.count - 1)]
-                let gxPx = alignOffsetPx + Float(positions[i].x)
-                let gyPx = baselineYPx - Float(positions[i].y)
-                if runIsColor, let colorEntry = glyphAtlas.rasterizeColorGlyph(
-                    font: runFont,
-                    glyph: glyphs[i],
-                    fontSizePx: runFontSizePx
-                ), colorEntry.pixelSize.x > 0 && colorEntry.pixelSize.y > 0 {
-                    let quadXPx = roundf(gxPx) + colorEntry.bearingPx.x
-                    let quadYPx = roundf(gyPx) + colorEntry.bearingPx.y
-                    glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx, glideX: 0, binY: 0, smoothing: style.fontSmoothing, isColor: true, yOffsetPx: -Float(positions[i].y)))
-                    glyphsOut.append(PositionedGlyph(
+                    let pen = TextBoxGeometry.glyphPen(at: gxPx, ppem: runFontSizePx, glide: glidePx.x, smoothing: style.fontSmoothing)
+                    let phases = Float(GlyphAtlas.glidePhases)
+                    let y = gyPx.rounded() * phases + (glidePx.y * phases).rounded()
+                    let quadYPx = floorf(y / phases)
+                    let binYArg = UInt8(y - quadYPx * phases)
+                    guard let entry = glyphAtlas.rasterizeGlyph(
+                        font: runFont,
+                        glyph: glyphs[i],
+                        fontSizePx: runFontSizePx,
+                        phaseX: pen.phase,
+                        subpixelYBin: binYArg,
+                        smoothing: style.fontSmoothing,
+                        inkBucket: runInk
+                    ), entry.pixelSize.x > 0 && entry.pixelSize.y > 0 else {
+                        continue
+                    }
+
+                    let quadXPx = pen.pixel + entry.bearingPx.x
+                    let finalQuadYPx = quadYPx + entry.bearingPx.y
+                    glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx,
+                                                 glideX: glidePx.x, binY: binYArg, smoothing: style.fontSmoothing, isColor: false,
+                                                 yOffsetPx: -Float(positions[i].y), phase: pen.phase, bearingX: entry.bearingPx.x,
+                                                 maskTexels: UInt32(entry.pixelSize.x * entry.pixelSize.y)))
+                    var positioned = PositionedGlyph(
                         rect: SIMD4<Float>(
                             quadXPx * invS,
-                            quadYPx * invS,
-                            Float(colorEntry.pixelSize.x) * invS,
-                            Float(colorEntry.pixelSize.y) * invS
+                            finalQuadYPx * invS,
+                            Float(entry.pixelSize.x) * invS,
+                            Float(entry.pixelSize.y) * invS
                         ),
-                        colorGlyph: colorEntry,
+                        uv: entry.uv,
                         color: runColor,
+                        atlasPage: entry.page,
                         utf8Offset: byte
-                    ))
-                    continue
+                    )
+                    positioned.classicInk = entry.classicInk
+                    positioned.outlineGroup = entry.outlineGroup
+                    glyphsOut.append(positioned)
                 }
-
-                let pen = TextBoxGeometry.glyphPen(at: gxPx, ppem: runFontSizePx, glide: glidePx.x, smoothing: style.fontSmoothing)
-                let phases = Float(GlyphAtlas.glidePhases)
-                let y = gyPx.rounded() * phases + (glidePx.y * phases).rounded()
-                let quadYPx = floorf(y / phases)
-                let binYArg = UInt8(y - quadYPx * phases)
-                guard let entry = glyphAtlas.rasterizeGlyph(
-                    font: runFont,
-                    glyph: glyphs[i],
-                    fontSizePx: runFontSizePx,
-                    phaseX: pen.phase,
-                    subpixelYBin: binYArg,
-                    smoothing: style.fontSmoothing,
-                    inkBucket: runInk
-                ), entry.pixelSize.x > 0 && entry.pixelSize.y > 0 else {
-                    continue
-                }
-
-                let quadXPx = pen.pixel + entry.bearingPx.x
-                let finalQuadYPx = quadYPx + entry.bearingPx.y
-                glyphPensOut.append(GlyphPen(font: runFont, glyph: glyphs[i], sizePx: runFontSizePx, xPx: gxPx,
-                                             glideX: glidePx.x, binY: binYArg, smoothing: style.fontSmoothing, isColor: false,
-                                             yOffsetPx: -Float(positions[i].y), phase: pen.phase, bearingX: entry.bearingPx.x,
-                                             maskTexels: UInt32(entry.pixelSize.x * entry.pixelSize.y)))
-                var positioned = PositionedGlyph(
-                    rect: SIMD4<Float>(
-                        quadXPx * invS,
-                        finalQuadYPx * invS,
-                        Float(entry.pixelSize.x) * invS,
-                        Float(entry.pixelSize.y) * invS
-                    ),
-                    uv: entry.uv,
-                    color: runColor,
-                    atlasPage: entry.page,
-                    utf8Offset: byte
-                )
-                positioned.classicInk = entry.classicInk
-                positioned.outlineGroup = entry.outlineGroup
-                glyphsOut.append(positioned)
             }
         }
     }
