@@ -614,6 +614,28 @@ static GArray *index_clusters(RuneDesktopLine *line) {
     return index;
 }
 
+static guint first_cluster_at_or_after(const GArray *index, int32_t byte) {
+    guint lo = 0, hi = index->len;
+    while (lo < hi) {
+        guint mid = lo + (hi - lo) / 2;
+        if (g_array_index(index, InkCluster, mid).owner < byte) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+int32_t rune_desktop_line_cluster_owner(const RuneDesktopLine *source, int32_t byte) {
+    if (!source || !source->layout || byte <= 0 || byte >= source->length) return byte;
+    RuneDesktopLine *line = (RuneDesktopLine *)source;
+    g_mutex_lock(&line->index_lock);
+    if (!line->cluster_index) line->cluster_index = index_clusters(line);
+    const GArray *index = line->cluster_index;
+    const guint next = first_cluster_at_or_after(index, byte + 1);
+    const int32_t owner = next ? g_array_index(index, InkCluster, next - 1).owner : byte;
+    g_mutex_unlock(&line->index_lock);
+    return owner;
+}
+
 static gint visual_order(gconstpointer a, gconstpointer b) {
     return ((const InkCluster *)a)->visual - ((const InkCluster *)b)->visual;
 }
@@ -689,12 +711,7 @@ static OutlineFont outline_font(PangoFont *font) {
 static const InkCluster *single_outline_cluster(RuneDesktopLine *line, int32_t owner) {
     if (!line->cluster_index) line->cluster_index = index_clusters(line);
     GArray *index = line->cluster_index;
-    guint lo = 0, hi = index->len;
-    while (lo < hi) {
-        guint mid = lo + (hi - lo) / 2;
-        if (g_array_index(index, InkCluster, mid).owner < owner) lo = mid + 1;
-        else hi = mid;
-    }
+    const guint lo = first_cluster_at_or_after(index, owner);
     const InkCluster *c = lo < index->len ? &g_array_index(index, InkCluster, lo) : NULL;
     const gboolean single = c && c->owner == owner && c->count == 1 &&
         (lo + 1 == index->len || g_array_index(index, InkCluster, lo + 1).owner != owner);
@@ -1117,12 +1134,7 @@ RuneDesktopLine *rune_desktop_line_extract_ink(const RuneDesktopLine *source, in
     g_mutex_lock(&line->index_lock);
     if (!line->cluster_index) line->cluster_index = index_clusters(line);
     GArray *index = line->cluster_index;
-    guint lo = 0, hi = index->len;
-    while (lo < hi) {
-        guint mid = lo + (hi - lo) / 2;
-        if (g_array_index(index, InkCluster, mid).owner < start) lo = mid + 1;
-        else hi = mid;
-    }
+    guint lo = first_cluster_at_or_after(index, start);
     RuneDesktopLine *ink = g_new0(RuneDesktopLine, 1);
     ink->metrics = line->metrics;
     ink->owned_clusters = g_array_new(FALSE, FALSE, sizeof(InkCluster));
