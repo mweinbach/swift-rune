@@ -62,6 +62,44 @@ struct MemoFlatSpanTests {
         #expect(retained.state.taps == 3)
     }
 
+    @Test("A full rebuild replays only immutable virtual row roots and follows reordered keys")
+    func immutableVirtualRootsDuringFullBuild() {
+        final class Owner {}
+        func make(_ reuse: Bool) -> Runtime<Int> {
+            let owners = (0..<48).map { _ in Owner() }
+            return Runtime(state: 0, viewport: Vec2(160, 100), pixelScale: 1) { _, _ in
+                let rows: El<Int> = col().key("rows").wFull().virtualRows(
+                    count: owners.count, estimatedRowHeight: 20,
+                    key: { tick, i in "r\(tick >= 5 ? owners.count - 1 - i : i)" },
+                    buildContent: { tick, i in
+                        let id = tick >= 5 ? owners.count - 1 - i : i
+                        let row: El<Int> = memo("item-\(id)", deps: 0) {
+                            col().wFull().h(20).child(text("Row \(id)").key("text").size(90, 15))
+                        }
+                        // A new root modifier can share the original memo's child storage.
+                        if id.isMultiple(of: 3) { return VirtualRowContent(row.h(tick.isMultiple(of: 2) ? 20 : 26)) }
+                        return reuse ? VirtualRowContent(memoized: row, owner: owners[id]) : VirtualRowContent(row)
+                    })
+                return col().sizeFull().scrollY().child(rows)
+            }
+        }
+        let retained = make(true), fresh = make(false)
+        var replayed = 0
+        for step in 0..<10 {
+            let now = Double(step) / 60
+            for rt in [retained, fresh] {
+                rt.update(at: now) { tick, _ in tick = step }
+                _ = rt.renderFrame(at: now)
+            }
+            #expect(retained.elements() == fresh.elements())
+            #expect(retained.lastCommittedSpecs == fresh.lastCommittedSpecs)
+            #expect(retained.accessibilitySnapshot() == fresh.accessibilitySnapshot())
+            #expect(fresh.replayedVirtualFlatRoots == 0)
+            replayed = max(replayed, retained.replayedVirtualFlatRoots)
+        }
+        #expect(replayed > 0)
+    }
+
     @Test("Reordered memo descendants retain observer identities and honor the current modal")
     func observerRolesFollowMovedRows() {
         let rt = Runtime<Int>(state: 0, viewport: Vec2(160, 80), pixelScale: 1) { tick, _ in

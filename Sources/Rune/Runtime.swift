@@ -3345,14 +3345,15 @@ public final class Runtime<State> {
         // A virtual row can enter a client VM while this pass measures its layout.
         // Reserve the per-node flattening workspace only after those builders return.
         while let item = walkStack.popLast() {
-            if let row = item.virtualRow, rowReuseMode == .remount, replayVirtualRow(item, row) { continue }
+            if let row = item.virtualRow, (rowReuseMode == .remount || row.memoizedRootOwner != nil),
+               replayVirtualRow(item, row) { continue }
             appendMeasuredNode(item, authored: item.element.value)
         }
 
         @inline(never)
         func replayVirtualRow(_ item: borrowing WalkItem, _ row: CachedVirtualRow) -> Bool {
             guard let nid = item.resolvedId, let paths = flatMemoPaths[nid], let root = paths.rowRoot,
-                  root.source === row, root.parentHasGrowth == item.parentHasGrowth,
+                  root.source === row.rootIdentity, root.parentHasGrowth == item.parentHasGrowth,
                   let span = paths.span, let parent = item.parentIdx,
                   root.motion.parent == newFlat[parent].nodeId, root.node.path == item.path,
                   (root.node.enclosingScrollIndex == nil) == (item.enclosingScrollIndex == nil),

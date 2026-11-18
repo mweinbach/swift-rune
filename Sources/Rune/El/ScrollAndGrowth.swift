@@ -186,22 +186,49 @@ public struct GrowthSpec: Sendable, Hashable {
 
 // MARK: - Index-Built Virtual Row Source (`crates/rune/src/el/virtual_rows.rs`)
 
+/// A virtual row returned by its builder. Only a memo that owns the entire element can
+/// certify its root across builds. An ordinary El may have new root modifiers each time.
+package struct VirtualRowContent<State> {
+    let element: El<State>
+    let owner: AnyObject?
+
+    package init(_ element: El<State>) {
+        self.element = element
+        owner = nil
+    }
+
+    init(memoized element: El<State>, owner: AnyObject) {
+        self.element = element
+        self.owner = owner
+    }
+}
+
 internal final class VirtualRowSource<State> {
     let count: Int
     let byteExactKeys: Bool
     let key: (State, Int) -> String
-    let build: (State, Int) -> El<State>
+    let buildContent: (State, Int) -> VirtualRowContent<State>
 
-    init(
+    convenience init(
         count: Int,
         byteExactKeys: Bool = false,
         key: @escaping (State, Int) -> String,
         build: @escaping (State, Int) -> El<State>
     ) {
+        self.init(count: count, byteExactKeys: byteExactKeys, key: key,
+                  buildContent: { VirtualRowContent(build($0, $1)) })
+    }
+
+    init(count: Int, byteExactKeys: Bool, key: @escaping (State, Int) -> String,
+         buildContent: @escaping (State, Int) -> VirtualRowContent<State>) {
         self.count = max(0, count)
         self.byteExactKeys = byteExactKeys
         self.key = key
-        self.build = build
+        self.buildContent = buildContent
+    }
+
+    func build(_ state: State, _ index: Int) -> El<State> {
+        buildContent(state, index).element
     }
 
     func keyed(_ row: El<State>, storageKey: String) -> El<State> {

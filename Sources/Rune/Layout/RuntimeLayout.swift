@@ -95,15 +95,17 @@ final class RetainedLayoutCoordinator {
     /// as its children only while its path, inherited style and flow context still match.
     private final class VirtualRowRoot {
         weak var source: AnyObject?
+        let key: String
         let parent: SyncPrepared
 
-        init(_ source: AnyObject, parent: SyncPrepared) {
+        init(_ source: AnyObject, key: String, parent: SyncPrepared) {
             self.source = source
+            self.key = key
             self.parent = parent
         }
 
-        func matches(_ row: AnyObject, parent current: SyncPrepared) -> Bool {
-            source === row && parent.storePathId == current.storePathId &&
+        func matches(_ row: AnyObject, key: String, parent current: SyncPrepared) -> Bool {
+            source === row && self.key.utf8.elementsEqual(key.utf8) && parent.storePathId == current.storePathId &&
                 parent.runtimePathId == current.runtimePathId && parent.nodeFlow == current.nodeFlow &&
                 parent.nodeDirected == current.nodeDirected && parent.isRow == current.isRow &&
                 parent.childSX == current.childSX && parent.areas == current.areas
@@ -813,7 +815,7 @@ final class RetainedLayoutCoordinator {
                memo === el.memoLayoutChildren, memo.matches(el.children) {
                 let memoKey = ObjectIdentifier(memo)
                 if let span = memoSpans[memoKey], span.isGroupRoot, span.record.identity === memo,
-                   span.virtualRoot?.matches(row, parent: parent) == true, var node = span.nodes.first {
+                   span.virtualRoot?.matches(row.rootIdentity, key: key, parent: parent) == true, var node = span.nodes.first {
                     let index = flat.count
                     node.parentOffset = parent.myIndex - index
                     flat.append(node)
@@ -831,7 +833,7 @@ final class RetainedLayoutCoordinator {
                     }
                     flat.removeLast()
                 }
-                virtualRoot = VirtualRowRoot(row, parent: parent)
+                virtualRoot = VirtualRowRoot(row.rootIdentity, key: key, parent: parent)
             }
             let p = syncPrepare(el, parent: parent, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
             let myIndex = p.myIndex

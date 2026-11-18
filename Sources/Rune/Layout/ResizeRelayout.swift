@@ -108,7 +108,9 @@ extension Runtime {
             if el.layout.aspectFit != nil || el.anchor?.fit == true || el.pixelsPayload != nil {
                 return false
             }
-            if !el.children.isEmpty {
+            if let memo = el.memoLayoutChildren, memo.matches(el.children) {
+                if memo.traits.contains(.requiresResizeRebuild) { return false }
+            } else if !el.children.isEmpty {
                 stack.append(contentsOf: el.children)
             }
         }

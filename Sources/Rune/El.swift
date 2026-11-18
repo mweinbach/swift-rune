@@ -1124,6 +1124,7 @@ final class MemoLayoutChildren<State> {
         static var inputPills: Self { Self(rawValue: 4) }
         static var mutableLayout: Self { Self(rawValue: 8) }
         static var duplicateKeys: Self { Self(rawValue: 16) }
+        static var requiresResizeRebuild: Self { Self(rawValue: 32) }
     }
 
     private let children: [El<State>]
@@ -1144,8 +1145,10 @@ final class MemoLayoutChildren<State> {
                     traits.insert(.inputPills)
                 }
             }
-            if child.liveText != nil || child.isSecure || child.anchor?.fit == true ||
-                child.layout.aspectFit != nil || (child.pixelsPayload != nil && child.layout.aspectRatio == nil &&
+            let fitsContent = child.anchor?.fit == true || child.layout.aspectFit != nil
+            let hasPixels = child.pixelsPayload != nil
+            if fitsContent || hasPixels { traits.insert(.requiresResizeRebuild) }
+            if child.liveText != nil || child.isSecure || fitsContent || (hasPixels && child.layout.aspectRatio == nil &&
                     ((child.layout.width == .auto) != (child.layout.height == .auto))) {
                 traits.insert(.mutableLayout)
             }
@@ -3203,6 +3206,15 @@ public struct El<State> {
         build: @escaping (State, Int) -> El<State>
     ) -> Self {
         virtualRows(count: count, estimatedRowHeight: estimatedRowHeight, byteExactKeys: false, key: key, build: build)
+    }
+
+    package func virtualRows(
+        count: Int, estimatedRowHeight: Float, key: @escaping (State, Int) -> String,
+        buildContent: @escaping (State, Int) -> VirtualRowContent<State>
+    ) -> Self {
+        var copy = self
+        copy.virtualRowsSource = VirtualRowSource(count: count, byteExactKeys: false, key: key, buildContent: buildContent)
+        return copy.virtualize(estimatedRowHeight)
     }
 
     public func virtualRowsVersion<H: Hashable>(_ version: H) -> Self {
