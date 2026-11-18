@@ -3615,8 +3615,14 @@ public final class Runtime<State> {
 
         @inline(never)
         func replayVirtualRow(_ item: borrowing WalkItem, _ row: CachedVirtualRow) -> Bool {
-            guard let nid = item.resolvedId, let paths = flatMemoPaths[nid], let root = paths.rowRoot,
-                  root.source === row.rootIdentity, root.parentHasGrowth == item.parentHasGrowth,
+            guard let nid = item.resolvedId, let previousPaths = flatMemoPaths[nid] else { return false }
+            let paths: FlatMemoPaths<State>
+            if previousPaths.rowRoot?.source === row.rootIdentity {
+                paths = previousPaths
+            } else if let alternate = previousPaths.alternate, alternate.rowRoot?.source === row.rootIdentity {
+                paths = alternate
+            } else { return false }
+            guard let root = paths.rowRoot, root.parentHasGrowth == item.parentHasGrowth,
                   let span = paths.span, let parent = item.parentIdx,
                   root.motion.parent == newFlat[parent].nodeId, root.node.path == item.path,
                   (root.node.enclosingScrollIndex == nil) == (item.enclosingScrollIndex == nil),
@@ -3649,6 +3655,10 @@ public final class Runtime<State> {
                 enclosing: item.enclosingScrollIndex, vertical: item.enclosingVScrollIndex, horizontal: item.enclosingHScrollIndex)
             paths.replayedNodes = span.nodes.count
             paths.replayedRowRoot = true
+            if paths !== previousPaths {
+                previousPaths.alternate = nil
+                paths.alternate = previousPaths
+            }
             nextMemoPaths[nid] = paths
             return true
         }
@@ -3709,11 +3719,24 @@ public final class Runtime<State> {
             var memoPaths = item.memoPaths
             if memoPaths == nil, childCount > 0, let owner = el.memoLayoutChildren,
                owner.matches(el.children), owner.traits.isDisjoint(with: [.virtual, .growth, .inputPills]) {
-                if let old = flatMemoPaths[pathId], old.owner === owner {
-                    memoPaths = old
-                } else {
-                    memoPaths = FlatMemoPaths(owner)
+                if let old = flatMemoPaths[pathId] {
+                    if old.owner === owner {
+                        memoPaths = old
+                    } else if let row = item.virtualRow, row.memoizedRootOwner != nil, let retained = old.rowRoot,
+                              (row.layoutProjection?.children === old.owner && row.layoutProjection?.owner === retained.source) ||
+                                (retained.layoutProjection?.children === owner && retained.layoutProjection?.owner === row.rootIdentity) {
+                        // Each variant owns its own elements, input closures, flattened nodes and motion specs.
+                        let matching = old.alternate
+                        old.alternate = nil
+                        if let matching, matching.owner === owner {
+                            memoPaths = matching
+                        } else {
+                            memoPaths = FlatMemoPaths(owner)
+                        }
+                        memoPaths?.alternate = old
+                    }
                 }
+                if memoPaths == nil { memoPaths = FlatMemoPaths(owner) }
                 memoPaths?.replayedNodes = 0
                 memoPaths?.replayedRowRoot = false
                 memoPaths?.rowRoot = nil

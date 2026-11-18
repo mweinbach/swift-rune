@@ -63,6 +63,8 @@ internal final class FlatMemoPaths<State> {
     let owner: MemoLayoutChildren<State>
     var span: MemoFlatSpan<State>?
     var rowRoot: MemoFlatRowRoot<State>?
+    // The other authored copy variant remains reachable only while this row is mounted.
+    var alternate: FlatMemoPaths<State>?
     var replayedRowRoot = false
     var allowsSpan = true
     var replayedNodes = 0
