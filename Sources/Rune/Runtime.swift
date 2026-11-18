@@ -7871,7 +7871,8 @@ public final class Runtime<State> {
             )
             let ownPaintOpacity = ownOp * groupFactor * layerOp
             let opacityNeedsLayer = alpha > 0.001 && ownPaintOpacity > 0.001 && ownPaintOpacity < 1
-                && (hasChildren || totalShapePieces > 1 || (layerOp < 1 && ownPaints >= 2))
+                && (hasChildren || totalShapePieces > 1 || (el.iconPayload != nil && fillColor.a > 0.001)
+                    || (layerOp < 1 && ownPaints >= 2))
             let useLayer = blurPt >= 0.5 || el.isolatedLayer || opacityNeedsLayer
             let devClip = SIMD4<Float>(
                 visClip.left * pxScale,

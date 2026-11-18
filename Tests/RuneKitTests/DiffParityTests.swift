@@ -414,6 +414,14 @@ struct DiffParityTests {
         _ = rt.frame(at: 1)
         #expect(try #require(rt.element(byKey: "g-n-0-plus")).opacity > 0.99)
         #expect(try #require(rt.element(byKey: "g-o-1-plus")).opacity < 0.01)
+        var nodes = [rt.accessibilitySnapshot()]
+        var comment: AccessibilityNode?
+        while let node = nodes.popLast() {
+            if node.id == "g-n-0-plus" { comment = node; break }
+            nodes.append(contentsOf: node.children)
+        }
+        #expect(comment?.role == .button)
+        #expect(comment?.label == "Comment on this line")
 
         #expect(clickElement(rt, key: "g-n-1", at: 1.05))
         _ = rt.frame(at: 1.07)

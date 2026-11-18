@@ -1,5 +1,5 @@
 import Rune
-import RuneKit
+@testable import RuneKit
 import Testing
 
 @Suite("Diff code and line-number fonts")
@@ -65,6 +65,44 @@ struct DiffTypographyTests {
             #expect(baseline.singleHeight == 20 && baseline.multiHeight == 60)
             #expect(smaller.singleHeight == 20 && smaller.multiHeight == 54)
         }
+    }
+
+    @Test("The full-size comment button canvas preserves the centered 12-point plus mask", arguments: [1, 2, 3, 4])
+    func commentButtonInk(scale: Int) {
+        let small = 12 * scale, large = 16 * scale, inset = 2 * scale
+        let original = GlyphAtlas.rasterizeIconBitmap(KitIcons.plus, pixelSize: small)
+        let button = GlyphAtlas.rasterizeIconBitmap(DiffLayout.commentButtonIcon, pixelSize: large)
+        var expected = [UInt8](repeating: 0, count: large * large)
+        for y in 0..<small {
+            let offset = (inset + y) * large + inset
+            expected.replaceSubrange(offset..<(offset + small), with: original[(y * small)..<((y + 1) * small)])
+        }
+        #expect(button == expected)
+    }
+
+    @Test("Comment buttons composite the glyph with their background throughout the hover fade", arguments: [1, 2])
+    @MainActor
+    func commentButtonFade(scale: Int) throws {
+        let kit = Kit.neutral(dark: true)
+        func sample(singleNode: Bool) throws -> ([UInt8], [UInt32]) {
+            let rt = Runtime(state: (), viewport: Vec2(24, 24), pixelScale: Float(scale)) { _, _ in
+                let button: El<Void>
+                if singleNode {
+                    button = icon(DiffLayout.commentButtonIcon, size: 16).color(kit.c.white)
+                } else {
+                    button = row().itemsCenter().justifyCenter()
+                        .child(icon(KitIcons.plus, size: 12).color(kit.c.white))
+                }
+                return row().bg(.black).child(button.size(16, 16).rounded(4).bg(kit.c.info.icon)
+                    .opacity(0.5).absolute(x: 4, y: 4))
+            }
+            let pixels = try RuneRef.render(rt.frame(at: 0)).rgba
+            return (pixels, rt.renderFrame(at: 0).marks)
+        }
+        let compact = try sample(singleNode: true)
+        let nested = try sample(singleNode: false)
+        #expect(compact.0 == nested.0)
+        #expect(compact.1 == nested.1)
     }
 
     @Test("Both padded edges of a line number select its line")

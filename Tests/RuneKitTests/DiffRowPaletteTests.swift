@@ -34,12 +34,13 @@ struct DiffRowPaletteTests {
         let strip = try #require(rt.element(byKey: "diff-gutter-\(index)"))
         let old = try #require(rt.element(byKey: "diff-o-\(index)"))
         let new = try #require(rt.element(byKey: "diff-n-\(index)"))
-        let marker = try #require(rt.elements().first {
-            $0.path.hasPrefix(strip.path + "/") && $0.rect[2] == 3
-        })
+        let marker = rt.elements().first {
+            $0.path.hasPrefix(strip.path + "/") && $0.rect[0] == strip.rect[0] && $0.rect[2] == 3
+        }
+        #expect(old.rect[0] == strip.rect[0] + 3)
         #expect(row.fill.hex() == line)
         #expect(strip.fill.hex() == gutter)
-        #expect(marker.fill.hex() == bar)
+        #expect((marker?.fill ?? .transparent).hex() == bar)
         #expect((side == .old ? old : new).textColor?.hex() == number)
         // In unified mode the shared gutter paints the background for both number columns.
         #expect(old.fill.a == 0)

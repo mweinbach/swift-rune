@@ -1541,6 +1541,10 @@ public enum DiffLayout {
     public static let noteHeight: Float = 40
     fileprivate static let columnAdvance: Float = 7.8
     fileprivate static let barWidth: Float = 3
+    // KitIcons.plus at 12 points, centered in the 16-point comment button canvas.
+    static let commentButtonIcon = SVGIcon(
+        viewBox: 16, paths: ["M8 4.625V11.375", "M4.625 8H11.375"], strokeWidth: 1.35
+    )
     fileprivate static let codeLeading: Float = 12
     fileprivate static let codeTrailing: Float = 24
 
@@ -3361,7 +3365,7 @@ public struct DiffView<State>: Sendable {
         if unifiedLine == nil, let point, let onCommentHandler {
             cell = numberCommentCell(
                 labelStr: labelStr, point: point, file: file, cellKey: cellKey, width: width, lineH: lineH, ink: colors.number,
-                onCommentHandler: onCommentHandler
+                centeredIcon: useSingleNodeNumbers, onCommentHandler: onCommentHandler
             )
         } else if useSingleNodeNumbers && !labelStr.isEmpty {
             cell = text(labelStr).font(kit.ty.diffCodeFont).noWrap().textAlign(.trailing).color(colors.number)
@@ -3392,29 +3396,36 @@ public struct DiffView<State>: Sendable {
         width: Float,
         lineH: Float,
         ink: Color,
+        centeredIcon: Bool,
         onCommentHandler: @escaping @Sendable (inout State, DiffLineRange, inout Tx) -> Void
     ) -> El<State> {
         numberLabelCell(labelStr: labelStr, cellKey: cellKey, width: width, lineH: lineH, ink: ink)
-            .child(commentButton(key: "\(cellKey)-plus", file: file, point: point, onComment: onCommentHandler)
+            .child(commentButton(key: "\(cellKey)-plus", file: file, point: point, centeredIcon: centeredIcon, onComment: onCommentHandler)
                 .absolute(x: width - 10, y: 2))
     }
 
     @inline(never)
     private func commentButton(
-        key: String, file: Int, point: DiffLineRef,
+        key: String, file: Int, point: DiffLineRef, centeredIcon: Bool,
         onComment: @escaping @Sendable (inout State, DiffLineRange, inout Tx) -> Void
     ) -> El<State> {
-        El<State>(direction: .row)
+        // Fractional DPI rounds the child box separately. Keep that layout where the
+        // glyph and its hit target cannot share a single pixel-aligned canvas.
+        let button: El<State>
+        if centeredIcon {
+            button = icon(DiffLayout.commentButtonIcon, size: 16).color(kit.c.white)
+        } else {
+            button = El<State>(direction: .row).itemsCenter().justifyCenter()
+                .child(icon(KitIcons.plus, size: 12).color(kit.c.white))
+        }
+        return button
             .key(key)
             .size(16, 16)
-            .itemsCenter()
-            .justifyCenter()
             .rounded(4)
             .bg(kit.c.info.icon)
             .cursor(.pointer)
             .role(.button)
             .label("Comment on this line")
-            .child(icon(KitIcons.plus, size: 12).color(kit.c.white))
             .onClick { [get, forcedMode] (s: inout State, tx: inout Tx) in
                 var d = get(s)
                 if let forcedMode { d.mode = forcedMode }
@@ -3608,7 +3619,12 @@ public struct DiffView<State>: Sendable {
             .bg(colors.gutter)
             .itemsStart()
             .shrink(0)
-            .child(gutterBar(line.kind, height: lineH))
+        if line.kind == .context {
+            gutter = gutter.pl(DiffLayout.barWidth)
+        } else {
+            gutter = gutter.child(gutterBar(line.kind, height: lineH))
+        }
+        gutter = gutter
             .child(numberCell(cellKey: "\(prefix)-o-\(rowIdx)", number: line.oldNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, colors: colors, unifiedLine: line))
             .child(numberCell(cellKey: "\(prefix)-n-\(rowIdx)", number: line.newNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, colors: colors, unifiedLine: line))
         let commentPoint = line.newLine.map { DiffLineRef(side: .new, line: $0) }
@@ -3616,7 +3632,7 @@ public struct DiffView<State>: Sendable {
         if let onCommentHandler, let point = commentPoint {
             let sideKey = point.side == .new ? "n" : "o"
             gutter = gutter.child(
-                commentButton(key: "\(prefix)-\(sideKey)-\(rowIdx)-plus", file: file, point: point, onComment: onCommentHandler)
+                commentButton(key: "\(prefix)-\(sideKey)-\(rowIdx)-plus", file: file, point: point, centeredIcon: useSingleNodeNumbers, onComment: onCommentHandler)
                     .groupOpacity(0, 1)
                     .absolute(x: 3 + 2 * gutterWidth - 10, y: 2)
             )
@@ -3712,12 +3728,12 @@ public struct DiffView<State>: Sendable {
             let rightCode = codeBlock(cellKey: "\(prefix)-ccode-n-\(rowIdx)", state: st, file: file, side: .new, line: line, changed: [], wordBg: .transparent, syntaxTheme: syntaxTheme, wrap: st.wraps)
             let leftPane = El<State>(direction: .row)
                 .wFrac(0.5).minW(0).minH(lineH).bg(oldColors.line).itemsStart().borderSides(right: 1, color: kit.c.borderWeak)
-                .child(gutterBar(.context, height: lineH))
+                .pl(DiffLayout.barWidth)
                 .child(numberCell(cellKey: "\(prefix)-co-\(rowIdx)", number: line.oldNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, colors: oldColors))
                 .child(leftCode)
             let rightPane = El<State>(direction: .row)
                 .wFrac(0.5).minW(0).minH(lineH).bg(newColors.line).itemsStart()
-                .child(gutterBar(.context, height: lineH))
+                .pl(DiffLayout.barWidth)
                 .child(numberCell(cellKey: "\(prefix)-cn-\(rowIdx)", number: line.newNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .new, lineH: lineH, colors: newColors))
                 .child(rightCode)
             return El<State>(direction: .row).key("\(prefix)-crow-\(rowIdx)").wFull()

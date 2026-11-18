@@ -1896,7 +1896,7 @@ extension Runtime {
             let hasCutout = clipSpec?.cutoutCircle != nil
             let hasChildren = hasRaised ? topology.children(of: node).contains { !renderNode($0).el.isRaised } : !topology.children(of: node).isEmpty
             let hasOverlappingShape = el.shapes.count > 1 || (el.shapes.first?.ops.count ?? 0) > 1
-            let opacityNeedsLayer = effOpacity > 0.001 && ownOpacity > 0.001 && ownOpacity < 1.0 && (hasChildren || hasOverlappingShape)
+            let opacityNeedsLayer = effOpacity > 0.001 && ownOpacity > 0.001 && ownOpacity < 1.0 && (hasChildren || hasOverlappingShape || (el.iconPayload != nil && effBg.a > 0.001))
             let cacheRequested = (el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false
             var cacheEligible = cacheRequested
                 && !hasCutout
