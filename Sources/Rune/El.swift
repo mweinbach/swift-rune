@@ -2414,6 +2414,7 @@ public struct El<State> {
         var copy = self
         copy.borderWidth = max(0, width)
         copy.borderColor = color
+        if copy.borderSides != nil { copy.borderSides = nil }
         if copy._cold?.runtimeExtras[RenderExtrasKey.borderGradient] != nil {
             copy.runtimeExtras.removeValue(forKey: RenderExtrasKey.borderGradient)
         }
@@ -2421,9 +2422,11 @@ public struct El<State> {
     }
 
     public func borderSides(top: Float = 0, right: Float = 0, bottom: Float = 0, left: Float = 0, color: Color) -> Self {
-        var copy = self
-        copy.borderSides = Sides(top: top, right: right, bottom: bottom, left: left)
-        copy.borderColor = color
+        func width(_ value: Float) -> Float { value.isFinite ? max(0, value) : 0 }
+        let sides = Sides(top: width(top), right: width(right), bottom: width(bottom), left: width(left))
+        let widest = max(sides.top, sides.right, sides.bottom, sides.left)
+        var copy = border(widest, color)
+        if sides != .all(widest) { copy.borderSides = sides }
         return copy
     }
 

@@ -136,9 +136,9 @@ extension El {
 
     /// Gradient border (`El::border_gradient`).
     public func borderGradient(width: Float = 1.0, top: Color, bottom: Color) -> Self {
-        var copy = self
+        var copy = border(width, top)
         copy.runtimeExtras[RenderExtrasKey.borderGradient] = RenderBorderGradientSpec(
-            width: max(0, width),
+            width: copy.borderWidth,
             top: top,
             bottom: bottom
         )
@@ -2736,6 +2736,7 @@ extension Runtime {
             // Video and other native pictures sit above the box fill but below its border,
             // inset shadows, effect slots and children (runtime/paint/build.rs).
             let hasSurface = el.surfacePayload != nil
+            let fillDrawnSeparately = fillPaintedByGrad || hasSurface
             if let (surface, fit) = el.surfacePayload {
                 if hasSolidBg && !fillPaintedByGrad {
                     instances.append(RenderInstance(
@@ -2796,7 +2797,7 @@ extension Runtime {
                     fade: activeFade
                 ))
                 marks.append(0)
-            } else if !fillPaintedByGrad && ((hasSolidBg && !hasSurface) || (bwPx > 0 && effBorderColor.a > 0.001)) {
+            } else if (hasSolidBg && !fillDrawnSeparately) || (bwPx > 0 && effBorderColor.a > 0.001) {
                 let sidesVec: SIMD4<Float>
                 if let s = el.borderSides {
                     sidesVec = SIMD4<Float>(
@@ -2808,7 +2809,7 @@ extension Runtime {
                 } else {
                     sidesVec = .zero
                 }
-                var fill: SIMD4<Float> = hasSurface ? .zero : premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend)
+                var fill: SIMD4<Float> = fillDrawnSeparately ? .zero : premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend)
                 if srgbBlend && el.borderWidth == 0 && bwPx == 0 && sidesVec == .zero
                     && el.surfacePayload == nil && fill.w < 1 {
                     // Preserve the transfer curve's exact white endpoint before byte blending.
@@ -2826,7 +2827,7 @@ extension Runtime {
                     clip: activeClip,
                     fade: activeFade
                 )
-                if (!hasSolidBg || hasSurface) && bwPx > 0 && effBorderColor.a > 0.001 && sidesVec == .zero {
+                if (!hasSolidBg || fillDrawnSeparately) && bwPx > 0 && effBorderColor.a > 0.001 && sidesVec == .zero {
                     PaintBands.pushRing(into: &instances, marks: &marks, inst: rectInst)
                 } else {
                     if loopVisible, let spec = el.loopingSpec, case let .opacityCycle(curve) = spec.kind,
@@ -2852,18 +2853,6 @@ extension Runtime {
                     instances.append(rectInst)
                     marks.append(0)
                 }
-            } else if fillPaintedByGrad && bwPx > 0 && effBorderColor.a > 0.001 && borderBottomPremul == nil {
-                // Solid border atop multi-stop linear/radial gradient
-                PaintBands.pushRing(into: &instances, marks: &marks, inst: RenderInstance(
-                    rect: rectPx,
-                    radii: radiiPx,
-                    fill: .zero,
-                    border: topPremul,
-                    params: SIMD4<Float>(bwPx, KIND_RECT, softEdge, 1.0),
-                    uv: .zero,
-                    clip: activeClip,
-                    fade: activeFade
-                ))
             }
 
             // 5. Inset shadows
