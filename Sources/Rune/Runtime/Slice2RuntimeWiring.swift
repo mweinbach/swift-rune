@@ -536,7 +536,7 @@ extension Runtime {
                   let rowIdx = Self.virtualRevealRow(key, in: vState.rowPlaces, path: node.path),
                   let foundVIdx = nodeByPath[vState.scrollPath],
                   !flatNodes[foundVIdx].el.layout.scrollAxes.isEmpty else { continue }
-            let est = Float(node.el.virtualEstimate ?? 40)
+            let est = node.el.effectiveVirtualEstimate
             let rowH = vState.rowHeight(forKey: vState.lastKeys[rowIdx], estimated: est)
             let vpNode = flatNodes[foundVIdx]
             let c = scrollOffsets[vpNode.path] ?? .zero

@@ -242,7 +242,7 @@ extension Runtime {
         var changed = false
 
         if let vState = lists[path] {
-            let est = max(1, el.virtualEstimate ?? 40)
+            let est = el.effectiveVirtualEstimate
             let count = vState.lastKeys.count
             let mounted = vState.lastMountedRange
             let (prefix, total) = vState.computeOffsets(estimated: est)
@@ -285,7 +285,7 @@ extension Runtime {
     internal func anyVirtualListNeedsWindow() -> Bool {
         for listPath in activeVirtualPaths {
             guard let vState = virtualLists[listPath] else { return true }
-            let est = max(1, (nodeByPath[listPath].flatMap { flatNodes[$0].el.virtualEstimate }) ?? 40)
+            let est = nodeByPath[listPath].map { flatNodes[$0].el.effectiveVirtualEstimate } ?? 40
             let scrollIdx = nodeByPath[listPath].flatMap {
                 !flatNodes[$0].el.layout.scrollAxes.isEmpty ? $0 : flatNodes[$0].enclosingVScrollIndex
             }
@@ -315,7 +315,7 @@ extension Runtime {
         var anchorInfoByList: [String: (scrollPath: String, scrollIdx: Int?, vpH: Float, stickyPin: Bool, oldOffsetY: Float, oldListY: Float, prefixBefore: [Float], anchorIdx: Int?)] = [:]
         for listPath in activeVirtualPaths {
             guard let vBefore = virtualLists[listPath] else { return (false, virtualLists, [:]) }
-            let est = max(1, (pass.byPath[listPath].flatMap { pass.nodes[$0].el.virtualEstimate }) ?? 40)
+            let est = pass.byPath[listPath].map { pass.nodes[$0].el.effectiveVirtualEstimate } ?? 40
             let scrollIdx = pass.byPath[listPath].flatMap {
                 !pass.nodes[$0].el.layout.scrollAxes.isEmpty ? $0 : pass.nodes[$0].enclosingVScrollIndex
             }
@@ -349,7 +349,7 @@ extension Runtime {
         for listPath in activeVirtualPaths {
             guard var vState = tempLists[listPath],
                   let info = anchorInfoByList[listPath] else { return (false, tempLists, [:]) }
-            let est = max(1, (pass.byPath[listPath].flatMap { pass.nodes[$0].el.virtualEstimate }) ?? 40)
+            let est = pass.byPath[listPath].map { pass.nodes[$0].el.effectiveVirtualEstimate } ?? 40
             if let lIdx = pass.byPath[listPath], let sIdx = info.scrollIdx {
                 Self.measureVirtualPlacement(&vState, listIdx: lIdx, scrollIdx: sIdx, nodes: pass.nodes)
             }

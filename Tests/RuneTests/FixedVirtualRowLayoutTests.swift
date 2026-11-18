@@ -4,8 +4,9 @@ import RuneMotion
 
 @Suite("Fixed virtual row layout")
 struct FixedVirtualRowLayoutTests {
-    @Test("Fixed rows keep individual layout, text, selection and scroll extents across a changing window")
-    func restoresSurvivingRows() {
+    @Test("Fixed rows keep individual layout, text, selection and scroll extents across a changing window",
+          arguments: [false, true])
+    func restoresSurvivingRows(wholeRows: Bool) throws {
         func make(_ ordinarySolve: Bool) -> Runtime<Int> {
             Runtime(state: 0, viewport: Vec2(240, 120), pixelScale: 1.25) { _, _ in
                 let list: El<Int> = col().wFull().minW(240).borderLayout(ordinarySolve).key("rows")
@@ -19,11 +20,15 @@ struct FixedVirtualRowLayoutTests {
                             content = content.child(el().size(280, 2).absolute(x: 7, y: 1).key("overflow"))
                         }
                         var shell = col().wFull().role(.listItem).label("item \(i)").selectionGroup().child(content)
-                        if !i.isMultiple(of: 7) { shell = shell.h(height) }
+                        if i == 2 || i == 3 { shell = shell.h(height + 0.5) }
+                        else if i == 4 { shell = shell.basis(height + 1).shrink(1).minH(height).maxH(height + 2) }
+                        else if !i.isMultiple(of: 7) { shell = shell.h(height) }
                         if i % 19 == 3 { shell.layout.pinTop = 3 }
+                        if i == 5 { shell = shell.mt(0.25).mb(0.75) }
+                        if i == 25 { shell = shell.absolute(x: 0, y: 60).h(20.5) }
                         return shell
                     }
-                return col().sizeFull().scrollXY().key("scroll").child(list)
+                return col().sizeFull().scrollXY().key("scroll").child(wholeRows ? list.wholeRows() : list)
             }
         }
 
@@ -31,6 +36,7 @@ struct FixedVirtualRowLayoutTests {
         // With zero border thickness the border-box reservation has the same geometry.
         let ordinary = make(true)
         var usedFewerSlots = false
+        var checkedAbsoluteRow = false
         for frame in 0...28 {
             let now = Double(frame) / 60
             func advance(_ runtime: Runtime<Int>) -> RenderFrame {
@@ -54,7 +60,19 @@ struct FixedVirtualRowLayoutTests {
             #expect(reused.accessibilitySnapshot() == ordinary.accessibilitySnapshot())
             #expect(reused.nodeTextLayouts.keys == ordinary.nodeTextLayouts.keys)
             #expect(reused.selectedText() == ordinary.selectedText())
-            if frame == 0 { #expect(reused.selectedText()?.isEmpty == false) }
+            if frame == 0 {
+                #expect(reused.selectedText()?.isEmpty == false)
+                #expect(reused.flatNodes.first { $0.key == "row-2" }?.localRect.height == (wholeRows ? 21 : 20.5))
+                let before = try #require(reused.flatNodes.first { $0.key == "row-4" }).localRect
+                let row = try #require(reused.flatNodes.first { $0.key == "row-5" }).localRect
+                let after = try #require(reused.flatNodes.first { $0.key == "row-6" }).localRect
+                #expect(row.top - before.bottom == 0.25)
+                #expect(after.top - row.bottom == 0.75)
+            }
+            if let row = reused.flatNodes.first(where: { $0.key == "row-25" }) {
+                #expect(row.localSize.y == 20.5)
+                checkedAbsoluteRow = true
+            }
             #expect(reused.scrollOffset(forKey: "scroll") == ordinary.scrollOffset(forKey: "scroll"))
             #expect(scene.instances == control.instances)
             if reused.retainedLayout.storageStats.liveNodes < ordinary.retainedLayout.storageStats.liveNodes {
@@ -62,6 +80,39 @@ struct FixedVirtualRowLayoutTests {
             }
         }
         #expect(usedFewerSlots)
+        #expect(checkedAbsoluteRow)
+    }
+
+    @Test("Fractional fixed rows can share a solver slot when the column rounds them to whole points",
+          arguments: [false, true])
+    func retainsFractionalFixedRows(wholeRows: Bool) {
+        func make(_ ordinary: Bool) -> Runtime<Void> {
+            Runtime(state: (), viewport: Vec2(240, 140), pixelScale: 1.25) { _, _ in
+                let rows: El<Void> = col().wFull().minW(240).borderLayout(ordinary).key("rows")
+                    .virtualRows(count: 500, estimatedRowHeight: 20.5, key: { _, i in "r\(i)" }) { _, i in
+                        col().wFull().h(i.isMultiple(of: 2) ? 20.25 : 20.75)
+                            .child(el().key("mark").size(40, 8).bg(.white))
+                    }
+                return col().sizeFull().scrollY().key("scroll").child(wholeRows ? rows.wholeRows() : rows)
+            }
+        }
+        let reused = make(false), ordinary = make(true)
+        var usedFewerSlots = false
+        for frame in 0...12 {
+            let now = Double(frame) / 60
+            func advance(_ runtime: Runtime<Void>) -> RenderFrame {
+                if frame > 0 { runtime.wheel(WheelEvent(dx: 0, dy: -60), at: Vec2(70, 45), now: now) }
+                return runtime.renderFrame(at: now)
+            }
+            let actual = advance(reused), expected = advance(ordinary)
+            #expect(actual.instances == expected.instances)
+            #expect(reused.elements() == ordinary.elements())
+            #expect(reused.scrollMaxExtents == ordinary.scrollMaxExtents)
+            if reused.retainedLayout.storageStats.liveNodes < ordinary.retainedLayout.storageStats.liveNodes {
+                usedFewerSlots = true
+            }
+        }
+        #expect(usedFewerSlots == wholeRows)
     }
 
     @Test("An intrinsic flex ancestor keeps its real row and sibling contributions")

@@ -454,7 +454,7 @@ extension Runtime {
         vState.gap = virtualGapY(el.layout)
         let prevKeys = vState.lastKeys
         let isIndexed = (el.virtualRowsSource != nil)
-        let est = max(1, el.virtualEstimate ?? 40)
+        let est = el.effectiveVirtualEstimate
 
         let count: Int
         let keys: [String]
@@ -2072,7 +2072,7 @@ extension Runtime {
         for listPath in activeVirtualPaths {
             guard let vState = virtualLists[listPath] else { return true }
             if vState.wantsMoreFrames { return true }
-            let est = max(1, (nodeByPath[listPath].flatMap { flatNodes[$0].el.virtualEstimate }) ?? 40)
+            let est = nodeByPath[listPath].map { flatNodes[$0].el.effectiveVirtualEstimate } ?? 40
             let scrollIdx = nodeByPath[listPath].flatMap {
                 !flatNodes[$0].el.layout.scrollAxes.isEmpty ? $0 : flatNodes[$0].enclosingVScrollIndex
             }
@@ -2098,7 +2098,7 @@ extension Runtime {
 
     private func syncVirtualVisibleRange(for listPath: String) {
         guard var vState = virtualLists[listPath] else { return }
-        let est = max(1, (nodeByPath[listPath].flatMap { flatNodes[$0].el.virtualEstimate }) ?? 40)
+        let est = nodeByPath[listPath].map { flatNodes[$0].el.effectiveVirtualEstimate } ?? 40
         let scrollIdx = nodeByPath[listPath].flatMap {
             !flatNodes[$0].el.layout.scrollAxes.isEmpty ? $0 : flatNodes[$0].enclosingVScrollIndex
         }
@@ -2169,7 +2169,7 @@ extension Runtime {
             if scrollRequestsState.owns(scrollPath) || directScrolledPaths.contains(scrollPath) || hasPendingReveal {
                 continue
             }
-            let est = max(1, (pass.byPath[listPath].flatMap { pass.nodes[$0].el.virtualEstimate }) ?? 40)
+            let est = pass.byPath[listPath].map { pass.nodes[$0].el.effectiveVirtualEstimate } ?? 40
             let vpH = scrollIdx.map { max(1, pass.nodes[$0].targetRect.height) } ?? max(1, viewport.y)
             let stickyPin = scrollIdx.map { pass.nodes[$0].el.layout.stickBottom } == true
                 && savedWasPinned.contains(scrollPath)
@@ -2243,7 +2243,7 @@ extension Runtime {
             let scrollPath = scrollIdx.map { flatNodes[$0].path } ?? listPath
             let curScroll = scrollOffsets[scrollPath] ?? .zero
             let vpH = max(1, scrollViewportSizes[scrollPath]?.y ?? viewport.y)
-            let est = max(1, (nodeByPath[listPath].flatMap { flatNodes[$0].el.virtualEstimate }) ?? 40)
+            let est = nodeByPath[listPath].map { flatNodes[$0].el.effectiveVirtualEstimate } ?? 40
             let count = vState.lastKeys.count
             let (prefix, total) = vState.computeOffsets(estimated: est)
             let stickyPin = scrollIdx.map { flatNodes[$0].el.layout.stickBottom } == true
@@ -2542,7 +2542,7 @@ extension Runtime {
                let vState = virtualLists[vr.listPath],
                let listIdx = flatNodes.firstIndex(where: { $0.path == vr.listPath }),
                let rowIdx = vState.rowPlaces.index(of: vr.rowKey) {
-                let est = Float(flatNodes[listIdx].el.virtualEstimate ?? 40)
+                let est = flatNodes[listIdx].el.effectiveVirtualEstimate
                 let prefixY = vState.prefix(rowIdx, estimated: est)
                 let laidRowTop = flatNodes[listIdx].targetRect.top + prefixY + vr.yInRow
                 laidRelTop = laidRowTop - vNode.targetRect.top
@@ -2782,7 +2782,7 @@ extension Runtime {
                 let stack = flatNodes[parent]
                 if let list = virtualLists[stack.path], list.scrollPath == viewport.path,
                    let key = flatNodes[row].key, let item = list.rowPlaces.index(ofAuthoredKey: key) {
-                    let estimate = max(1, stack.el.virtualEstimate ?? 40)
+                    let estimate = stack.el.effectiveVirtualEstimate
                     let top = list.top + list.padTop + list.prefix(item, estimated: estimate)
                     return Double(top + rect.top - flatNodes[row].targetRect.top)
                 }

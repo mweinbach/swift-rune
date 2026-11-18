@@ -1,6 +1,43 @@
 import RuneTaffy
 import Testing
 
+@Test func rtlColumnAlignsRowsFromTheContainerAndChildInlineEdges() throws {
+    var tree = TaffyTree()
+    var row = TaffyStyle(size: Size(width: .length(21.75), height: .length(3.625)), flexShrink: 0)
+    let first = tree.newLeaf(row)
+    row.alignSelf = .selfStart
+    let ltr = tree.newLeaf(row)
+    row.direction = .rtl
+    let rtl = tree.newLeaf(row)
+    var column = TaffyStyle(direction: .rtl, size: Size(width: .length(100.5), height: .auto),
+                            flexDirection: .column, alignItems: .flexEnd)
+    column.padding.left = .length(1.5)
+    column.padding.right = .length(2.875)
+    let root = try tree.newWithChildren(column, children: [first, ltr, rtl])
+    for whole in [false, true] {
+        column.wholeRows = whole
+        try tree.setStyle(root, column)
+        try tree.computeLayout(root, availableSpace: .maxContent)
+        let boxes = try [first, ltr, rtl].map { try tree.unroundedLayout($0) }
+        #expect(boxes.map(\.location.x) == [1.5, 1.5, 75.875])
+        #expect(boxes.map(\.location.y) == (whole ? [0, 4, 8] : [0, 3.625, 7.25]))
+    }
+
+    column.position = .relative
+    column.margin.right = .length(1.5)
+    column.margin.top = .length(0.25)
+    column.inset.left = .length(5)
+    column.inset.right = .length(0.75)
+    try tree.setStyle(root, column)
+    row.direction = .ltr
+    row.position = .relative
+    row.inset = column.inset
+    try tree.setStyle(ltr, row)
+    try tree.computeLayout(root, availableSpace: Size(width: .definite(73.25), height: .maxContent))
+    #expect(try tree.unroundedLayout(root).location == Point(x: -29.5, y: 0.25))
+    #expect(try tree.unroundedLayout(ltr).location.x == 0.75)
+}
+
 // Run the same replay with `swift test --traits BaselineTaffy` to exercise the
 // independent retained tree. Both upstream Rust backends produced these boxes
 // at 842c28c2 with identical measure inputs and style mutations.

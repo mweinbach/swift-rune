@@ -86,6 +86,7 @@ private struct StyleField {
     static let extendedGrow = Self(57, 1)
     static let extendedShrink = Self(58, 1)
     static let extendedBasis = Self(59, 1)
+    static let wholeRows = Self(60, 1)
 }
 
 private struct StyleTags: Sendable, Hashable {
@@ -305,6 +306,14 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
         get { FlexWrap(rawValue: tags[.wrap])! }
         set { tags[.wrap] = newValue.rawValue }
     }
+    /// Stack content- and length-sized children on whole points in a non-wrapping flex column.
+    public var wholeRows: Bool {
+        get { tags[.wholeRows] != 0 }
+        set { tags[.wholeRows] = newValue ? 1 : 0 }
+    }
+    public var isWholeRowsColumn: Bool {
+        wholeRows && display == .flex && flexDirection == .column && flexWrap == .noWrap
+    }
     public var flexGrow: Float {
         get { tags[.extendedGrow] == 0 ? grow.value : extra[0].flexGrow! }
         set {
@@ -508,6 +517,7 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
         gap: Size<LengthPercentage> = Size(width: .zero, height: .zero),
         flexDirection: FlexDirection = .row,
         flexWrap: FlexWrap = .noWrap,
+        wholeRows: Bool = false,
         flexGrow: Float = 0,
         flexShrink: Float = 1,
         flexBasis: Dimension = .auto,
@@ -549,6 +559,7 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
         self.gap = gap
         self.flexDirection = flexDirection
         self.flexWrap = flexWrap
+        self.wholeRows = wholeRows
         self.flexGrow = flexGrow
         self.flexShrink = flexShrink
         self.flexBasis = flexBasis
@@ -684,6 +695,11 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
     @inlinable
     public mutating func setFlexWrap(_ wrap: FlexWrap) {
         flexWrap = wrap
+    }
+
+    @inlinable
+    public mutating func setWholeRows() {
+        wholeRows = true
     }
 
     @inlinable
@@ -834,6 +850,13 @@ public struct TaffyStyle: Sendable, Equatable, Hashable {
     }
 
     // MARK: - Box Sizing Helpers
+
+    /// Applied only to the style copy seen by the parent flex column, before box-sizing adjustments.
+    internal mutating func roundAbsoluteRowHeights() {
+        if tags[StyleField(3, 3)] == 0 { sizeValues.height = (sizeValues.height + 0.5).rounded(.down) }
+        if tags[StyleField(9, 3)] == 0 { minValues.height = (minValues.height + 0.5).rounded(.down) }
+        if tags[StyleField(15, 3)] == 0 { maxValues.height = (maxValues.height + 0.5).rounded(.down) }
+    }
 
     /// Amount to add to a content-box dimension to convert to border-box (or 0 if already border-box).
     @inlinable

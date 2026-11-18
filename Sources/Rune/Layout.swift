@@ -80,6 +80,7 @@ public struct LayoutStyle: Sendable, Hashable {
     public var direction: FlexDirection = .row
     public var wrap: Bool = false
     public var wrapReverse: Bool = false
+    public var wholeRows: Bool = false
     public var alignItems: AlignItems = .stretch
     public var alignSelf: AlignItems? = nil
     public var alignContent: JustifyContent? = nil
@@ -131,6 +132,18 @@ public struct LayoutStyle: Sendable, Hashable {
     public var clipOverflow: Bool = false
     internal var usesNaturalGrowthContents = false
     public var sticky: StickyEdge? = nil
+
+    var isWholeRowsColumn: Bool {
+        wholeRows && !displayNone && displayMode == .flex && direction == .column && !wrap && !wrapReverse
+    }
+
+    static func wholeRowLength(_ height: Float) -> Float {
+        (height + 0.5).rounded(.down)
+    }
+
+    func forcesHorizontalFlexRow(childCount: Int) -> Bool {
+        scrollAxes.contains(.horizontal) && (childCount == 1 || !scrollAxes.contains(.vertical))
+    }
 
     public init(direction: FlexDirection = .row) {
         self.direction = direction

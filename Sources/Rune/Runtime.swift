@@ -3132,6 +3132,10 @@ public final class Runtime<State> {
             return nil
         }
 
+        // The solver also rounds the placeholder. Above 2^23 an odd integral Float
+        // plus 0.5 can round to the next even integer before the floor operation.
+        let wholeRows = style.isWholeRowsColumn
+        let maximumGroupHeight = wholeRows ? 8_388_608 : FixedVirtualRowLayout.maximumExactHeight
         var compact: [El<State>] = []
         var groups: [(position: Int, saved: [LayoutEngine.ResultNode])] = []
         var boxes: [NodeId: RetainedLayoutCoordinator.TextLayoutRecord] = [:]
@@ -3147,6 +3151,8 @@ public final class Runtime<State> {
             height = 0
         }
         func retain(_ row: borrowing El<State>) -> Bool {
+            guard case .points(let authoredHeight) = row.layout.height else { return false }
+            let h = wholeRows ? LayoutStyle.wholeRowLength(authoredHeight) : authoredHeight
             guard let key = row.storageKeyId, let entry = rows[key],
                   let context = entry.layoutRootMemo, let paths = flatMemoPaths[listId.child("@" + key)],
                   paths.owner === context, let retained = paths.rowRoot, retained.source === entry.rootIdentity,
@@ -3154,8 +3160,7 @@ public final class Runtime<State> {
                   previous.lowerBound > 0, row.explicitDir == nil,
                   span.context.frame.scale == pixelScale, span.context.frame.fontEpoch == textSystem.currentFontEpoch,
                   span.context.frame.language == textSystem.language, span.context.frame.smoothing == textSystem.smoothing,
-                  case .points(let h) = row.layout.height, h > 0, h.rounded() == h,
-                  h <= FixedVirtualRowLayout.maximumExactHeight - height,
+                  h > 0, h.rounded() == h, h <= maximumGroupHeight - height,
                   row.layout.width == .fraction(1), row.layout.flexShrink == 0, row.layout.flexGrow == 0,
                   row.layout.margin == .all(0), row.layout.padding == .all(0), row.layout.border == .all(0),
                   !row.layout.isAbsolute, row.layout.sticky == nil, row.layout.pinLeft == nil, row.layout.pinRight == nil,
@@ -6245,7 +6250,7 @@ public final class Runtime<State> {
         for index in layoutObservers.visibleRows {
             let path = flatNodes[index].path
             guard !subtreeExiting(index), let list = virtualLists[path] else { continue }
-            let (prefix, total) = list.computeOffsets(estimated: flatNodes[index].el.virtualEstimate ?? 40)
+            let (prefix, total) = list.computeOffsets(estimated: flatNodes[index].el.effectiveVirtualEstimate)
             let scroll = scrollOffsets[list.scrollPath]?.y ?? 0
             let pinned = wasPinnedToBottom.contains(list.scrollPath)
                 && nodeByPath[list.scrollPath].map { flatNodes[$0].el.layout.stickBottom } == true

@@ -581,7 +581,7 @@ final class RetainedLayoutCoordinator {
                 TaffyBridge.mapGridAreas($0.templateAreas)
             }
             let hasScrollX = style.scrollAxes.contains(.horizontal)
-            let forceRow = hasScrollX && (el.children.count == 1 || !style.scrollAxes.contains(.vertical))
+            let forceRow = style.forcesHorizontalFlexRow(childCount: el.children.count)
             let childSX: TaffyBridge.ScrollXChild?
             if hasScrollX {
                 let v = style.scrollAxes.contains(.vertical)

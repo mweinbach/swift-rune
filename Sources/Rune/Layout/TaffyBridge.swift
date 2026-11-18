@@ -247,6 +247,7 @@ enum TaffyBridge {
             height: .length(max(0, style.rowGap))
         )
 
+        ts.wholeRows = style.wholeRows
         ts.flexDirection = forceScrollXRow ? .row : mapDirection(style.direction)
         ts.flexWrap = style.wrapReverse ? .wrapReverse : (style.wrap ? .wrap : .noWrap)
         ts.flexGrow = max(0, style.flexGrow)
@@ -425,7 +426,7 @@ enum TaffyBridge {
 
             let areas: [String: RuneTaffy.GridTemplateArea]? = style.grid.map { mapGridAreas($0.templateAreas) }
             let hasScrollX = style.scrollAxes.contains(.horizontal)
-            let forceRow = hasScrollX && (node.children.count == 1 || !style.scrollAxes.contains(.vertical))
+            let forceRow = style.forcesHorizontalFlexRow(childCount: node.children.count)
             let childSX: ScrollXChild?
             if hasScrollX {
                 let v = style.scrollAxes.contains(.vertical)

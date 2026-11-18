@@ -118,7 +118,7 @@ extension Runtime {
             guard let list = virtualLists[node.path],
                   let index = Self.virtualRevealRow(key, in: list.rowPlaces, path: node.path),
                   let v = nodeByPath[list.scrollPath] else { continue }
-            let est = max(1, node.el.virtualEstimate ?? 40)
+            let est = node.el.effectiveVirtualEstimate
             return (v, max(0, list.top + list.padTop + list.prefix(index, estimated: est) - at))
         }
         return nil

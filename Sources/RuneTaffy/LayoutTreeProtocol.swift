@@ -76,6 +76,15 @@ extension LayoutTree {
 
 // MARK: - Core Layout Dispatch
 
+extension Rect where T == LengthPercentageAuto {
+    func relativeOffset(in parent: Size<Float?>, rtl: Bool) -> Point<Float> {
+        let fromLeft = left.maybeResolve(parent.width)
+        let fromRight = right.maybeResolve(parent.width).map { -$0 }
+        return Point(x: (rtl ? fromRight ?? fromLeft : fromLeft ?? fromRight) ?? 0,
+                     y: top.maybeResolve(parent.height) ?? -bottom.resolveOrZero(parent.height))
+    }
+}
+
 internal func computeRootLayout(
     tree: any LayoutTree,
     root: NodeId,
@@ -86,6 +95,7 @@ internal func computeRootLayout(
 
     let padding = rootStyle.resolvedPadding(parentWidth: parentSize.width)
     let border = rootStyle.resolvedBorder(parentWidth: parentSize.width)
+    let margin = rootStyle.resolvedMarginOrZero(parentWidth: parentSize.width)
     let pbSum = padding.sumAxes + border.sumAxes
     let adj = rootStyle.contentBoxAdjustment(paddingBorderSum: pbSum)
 
@@ -117,21 +127,31 @@ internal func computeRootLayout(
         knownDimensions: Size(width: knownW, height: knownH),
         knownDimensionsAreDefinite: .true,
         parentSize: parentSize,
-        availableSpace: availableSpace,
+        availableSpace: Size(width: availableSpace.width.maybeSub(margin.horizontalSum).maybeMax(0),
+                             height: availableSpace.height.maybeSub(margin.verticalSum).maybeMax(0)),
         verticalMarginsAreCollapsible: .false
     )
 
     let output = computeNodeLayout(tree: tree, node: root, input: input)
 
+    // The initial containing block positions the root's margin box from its inline-start edge.
+    let rtl = rootStyle.direction == .rtl
+    var location = Point(x: margin.left, y: margin.top)
+    if rtl, let width = parentSize.width { location.x = width - output.size.width - margin.right }
+    if rootStyle.position == .relative {
+        let offset = rootStyle.inset.relativeOffset(in: parentSize, rtl: rtl)
+        location.x += offset.x
+        location.y += offset.y
+    }
     let rootLayout = Layout(
         order: 0,
-        location: .zero,
+        location: location,
         size: output.size,
         contentSize: output.contentSize,
         scrollbarSize: .zero,
         border: border,
         padding: padding,
-        margin: .zero
+        margin: margin
     )
     tree.setUnroundedLayout(root, rootLayout)
 }
@@ -207,11 +227,15 @@ internal func computeLeafLayout(
         height: style.overflow.x == .scroll ? style.scrollbarWidth : 0
     )
 
-    let resolvedMin = style.resolveMinSize(parent: parentSize, adjustment: adj)
-    let resolvedMax = style.resolveMaxSize(parent: parentSize, adjustment: adj)
+    // A content-size query measures the leaf's contribution before the parent
+    // applies its size constraints. Parent-supplied dimensions still apply.
+    let inherent = input.sizingMode == .inherentSize
+    let resolvedMin = inherent ? style.resolveMinSize(parent: parentSize, adjustment: adj) : .none
+    let resolvedMax = inherent ? style.resolveMaxSize(parent: parentSize, adjustment: adj) : .none
+    let aspectRatio = inherent ? style.aspectRatio : nil
 
     var known = input.knownDimensions
-    if input.sizingMode == .inherentSize {
+    if inherent {
         if known.width == nil {
             known.width = style.size.width.maybeResolve(parentSize.width).map { $0 + adj.width }
         }
@@ -229,7 +253,7 @@ internal func computeLeafLayout(
     }
 
     // Apply aspect ratio
-    known = applyAspectRatio(known, style.aspectRatio)
+    known = applyAspectRatio(known, aspectRatio)
 
     let margin = style.resolvedMarginOrZero(parentWidth: parentSize.width)
     let topMargin = input.verticalMarginsAreCollapsible.start ? CollapsibleMarginSet.fromMargin(margin.top) : .zero
@@ -278,24 +302,10 @@ internal func computeLeafLayout(
         height: measured.size.height + pbSum.height + scrollbarSize.height
     )
 
-    var finalW = known.width ?? measuredTotal.width
-    var finalH = known.height ?? measuredTotal.height
-
-    if let ratio = style.aspectRatio, ratio > 0, ratio.isFinite {
-        if known.width == nil && known.height != nil {
-            finalW = finalH * ratio
-        } else if known.height == nil && known.width != nil {
-            finalH = finalW / ratio
-        } else if known.width == nil && known.height == nil {
-            finalW = measuredTotal.width
-            finalH = measuredTotal.height
-        }
-    }
-
-    finalW = maybeClamp(Swift.max(finalW, pbSum.width), min: resolvedMin.width, max: resolvedMax.width)
-    finalH = maybeClamp(Swift.max(finalH, pbSum.height), min: resolvedMin.height, max: resolvedMax.height)
-
-    let size = Size(width: finalW, height: finalH)
+    let size = Size(
+        width: maybeClamp(Swift.max(known.width ?? measuredTotal.width, pbSum.width), min: resolvedMin.width, max: resolvedMax.width),
+        height: maybeClamp(Swift.max(known.height ?? measuredTotal.height, pbSum.height), min: resolvedMin.height, max: resolvedMax.height)
+    )
     let canCollapseThrough = size.height == 0 && padding.top == 0 && padding.bottom == 0 && border.top == 0 && border.bottom == 0 && measured.size.height == 0
 
     return LayoutOutput(

@@ -3139,6 +3139,21 @@ public struct El<State> {
         return copy
     }
 
+    /// Rounds each in-flow row's content or fixed height to the nearest logical point in a
+    /// non-wrapping flex column. The solver rounds before distributing flex space and keeps
+    /// padding, gaps, margins, percentage heights and aspect-ratio heights at their exact sizes.
+    /// A virtual list on this column also rounds its estimate for unmeasured rows.
+    public func wholeRows() -> Self {
+        var copy = self
+        copy.layout.wholeRows = true
+        return copy
+    }
+
+    var effectiveVirtualEstimate: Float {
+        let estimate = max(1, virtualEstimate ?? 40)
+        return layout.isWholeRowsColumn ? LayoutStyle.wholeRowLength(estimate) : estimate
+    }
+
     public func streaming(_ enabled: Bool = true) -> Self {
         var copy = self
         copy.isStreaming = enabled

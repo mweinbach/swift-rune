@@ -7,8 +7,7 @@ public enum LayoutDiagnostics {
     private static let lock = NSLock()
     private nonisolated(unsafe) static var warnedSites: Set<String> = []
 
-    /// Checks for collapsed scroll containers and invalid `.growth(...)` placement inside scrolls.
-    /// Emits each diagnostic warning once per scroll site in debug builds.
+    /// Emits each layout diagnostic once per element path in debug builds.
     static func checkCollapsedScrolls<State>(
         nodes: [Runtime<State>.FlatNode],
         warnHandler: ((String) -> Void)? = nil
@@ -29,7 +28,11 @@ public enum LayoutDiagnostics {
 
         for i in nodes.indices {
             let n = nodes[i]
-            guard !n.el.layout.scrollAxes.isEmpty else { continue }
+            let style = n.el.layout
+            if style.wholeRows && (!style.isWholeRowsColumn || style.forcesHorizontalFlexRow(childCount: n.el.children.count)) {
+                warnOnce("whole-rows-dir:\(n.path)", "rune: .wholeRows() on \(n.path) requires a non-wrapping flex column. (debug builds only)")
+            }
+            guard !style.scrollAxes.isEmpty else { continue }
             let site = n.path
             let directChildren = nodes.indices.filter { nodes[$0].parentIndex == i }
 
