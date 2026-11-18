@@ -58,7 +58,10 @@ struct DefaultFontsParityTests {
         let decomposed = FontFamily.named("RuneCafe\u{301}")
         #expect(composed != decomposed)
         #expect(Set([composed, decomposed, .named("RuneCaf\u{e9}")]).count == 2)
-        #expect([composed: 1, decomposed: 2][.named("RuneCafe\u{301}")] == 2)
+        var names = [composed: 1]
+        names[decomposed] = 2
+        #expect(names[composed] == 1)
+        #expect(names[.named("RuneCafe\u{301}")] == 2)
     }
 
     #if os(Windows) || os(Linux)
