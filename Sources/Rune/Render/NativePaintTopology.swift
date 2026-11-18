@@ -1,5 +1,29 @@
 import RuneMotion
 
+/// Authored paint traits used when validating the sibling order and frame-wide paint prepasses.
+struct NativePaintTraits: OptionSet {
+    let rawValue: UInt8
+    init(rawValue: UInt8) { self.rawValue = rawValue }
+
+    static let sticky = Self(rawValue: 1 << 0)
+    static let anchoredOrModal = Self(rawValue: 1 << 1)
+    static let dissolve = Self(rawValue: 1 << 2)
+    static let raised = Self(rawValue: 1 << 3)
+    static let groupOpacity = Self(rawValue: 1 << 4)
+    static let pressColor = Self(rawValue: 1 << 5)
+
+    init<State>(_ el: borrowing El<State>) {
+        var traits = Self()
+        if el.stickyConfig?.edge != nil { traits.insert(.sticky) }
+        if el.anchor != nil || el.isModal { traits.insert(.anchoredOrModal) }
+        if el.isDissolve { traits.insert(.dissolve) }
+        if el.isRaised { traits.insert(.raised) }
+        if el.groupOpacity != nil { traits.insert(.groupOpacity) }
+        if el.pressColor != nil { traits.insert(.pressColor) }
+        self = traits
+    }
+}
+
 extension Runtime {
     /// Indices into the current committed nodes. A transient tree can also refer
     /// to exiting snapshots, which retain their presented parent after removal.
@@ -7,8 +31,12 @@ extension Runtime {
         struct Identity {
             var id: NodeId
             var parent: NodeId?
+            var zOrder: Int
+            var traits: NativePaintTraits
         }
 
+        var currentCommit = true
+        var parentSlots: [Int] = []
         var identity: [Identity] = []
         var order: [Int] = []
         var roots: [Int] = []
@@ -28,6 +56,21 @@ extension Runtime {
         var hasGroupOpacity = false
         var hasPressColor = false
 
+        /// Remounts may change every row ID while leaving the slot permutation and edges intact.
+        /// Compare scene order and parent IDs at the old slots without indexing by ID again.
+        func matchesRemount(_ presented: [Presented], mounted: [FlatNode], holds: Bool) -> Bool {
+            guard hasHolds == holds, !parentSlots.isEmpty, parentSlots.count == presented.count,
+                  parentSlots.count == mounted.count else { return false }
+            for i in parentSlots.indices {
+                let slot = order[i], parent = parentSlots[i]
+                guard presented[i].id == mounted[slot].nodeId,
+                      presented[i].parent == (parent < 0 ? nil : mounted[parent].nodeId),
+                      mounted[slot].zOrder == identity[i].zOrder,
+                      mounted[slot].paintTraits == identity[i].traits else { return false }
+            }
+            return true
+        }
+
         func matches(_ presented: [Presented], holds: Bool) -> Bool {
             guard hasHolds == holds, identity.count == presented.count else { return false }
             for i in identity.indices {
@@ -37,9 +80,20 @@ extension Runtime {
         }
     }
 
-    func prepareNativePaintTopology(_ frame: FrameOutput, byID: [NodeId: Presented], holds: Bool) -> NativePaintTopology {
-        if let topology = nativePaintTopology, topology.matches(frame.nodes, holds: holds) {
-            return topology
+    func prepareNativePaintTopology(_ frame: FrameOutput, byID: [NodeId: Presented], holds: Bool,
+                                    fromMountedScene: Bool = false) -> NativePaintTopology {
+        if var topology = nativePaintTopology {
+            if topology.currentCommit {
+                if topology.matches(frame.nodes, holds: holds) { return topology }
+            } else if fromMountedScene && topology.matchesRemount(frame.nodes, mounted: flatNodes, holds: holds) {
+                topology.currentCommit = true
+                for i in topology.identity.indices {
+                    topology.identity[i].id = frame.nodes[i].id
+                    topology.identity[i].parent = frame.nodes[i].parent
+                }
+                nativePaintTopology = topology
+                return topology
+            }
         }
 
         var tree = NativePaintTopology()
@@ -64,13 +118,13 @@ extension Runtime {
             } else {
                 continue
             }
-            if node.el.isDissolve { tree.dissolveIndices.append(tree.order.count) }
-            tree.hasRaised = tree.hasRaised || node.el.isRaised
-            tree.hasGroupOpacity = tree.hasGroupOpacity || node.el.groupOpacity != nil
-            tree.hasPressColor = tree.hasPressColor || node.el.pressColor != nil
+            if node.paintTraits.contains(.dissolve) { tree.dissolveIndices.append(tree.order.count) }
+            tree.hasRaised = tree.hasRaised || node.paintTraits.contains(.raised)
+            tree.hasGroupOpacity = tree.hasGroupOpacity || node.paintTraits.contains(.groupOpacity)
+            tree.hasPressColor = tree.hasPressColor || node.paintTraits.contains(.pressColor)
             hasZOrder = hasZOrder || node.zOrder != 0
             tree.order.append(slot)
-            tree.identity.append(.init(id: p.id, parent: p.parent))
+            tree.identity.append(.init(id: p.id, parent: p.parent, zOrder: node.zOrder, traits: node.paintTraits))
             parentIDs.append(byID[p.id]?.parent)
         }
 
@@ -111,7 +165,7 @@ extension Runtime {
             func order(_ slot: Int) -> (Int, Int) {
                 let n = slot >= 0 ? flatNodes[slot] : exits[~slot]
                 if !sticky { return (n.zOrder, 0) }
-                let rank = n.el.anchor != nil || n.el.isModal ? 2 : (n.isSticky ? 1 : 0)
+                let rank = n.paintTraits.contains(.anchoredOrModal) ? 2 : (n.isSticky ? 1 : 0)
                 return (n.zOrder, rank)
             }
             func before(_ a: Int, _ b: Int) -> Bool { order(a) < order(b) }
@@ -130,6 +184,9 @@ extension Runtime {
         // Exiting snapshots and synthetic partial frames follow the scene's current ancestry.
         // A committed mounted tree can reuse links while live text and scroll rectangles change.
         if tree.exits.isEmpty && tree.order.count == frame.nodes.count && tree.order.count == flatNodes.count {
+            // The parent slots were already resolved while building childOffsets. Retaining
+            // this buffer also avoids another flat-node walk on shapes that change every frame.
+            if fromMountedScene { tree.parentSlots = parents }
             nativePaintTopology = tree
         }
         return tree

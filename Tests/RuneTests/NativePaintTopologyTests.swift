@@ -2,6 +2,48 @@ import RuneMotion
 import Testing
 @testable import Rune
 
+@Test func nativePaintTopologyReusesRemountedSlotsAndRebuildsChangedPaintOrder() throws {
+    let rt = Runtime<Int>(state: 0, viewport: Vec2(120, 100)) { value, _ in
+        // Replacing a leaf's ID keeps the same tree. A later edit changes its paint order
+        // and enrolls the sibling in the group-opacity prepass.
+        let first: El<Int> = el().key(value == 0 ? "before" : "after").size(20, 20).z(value == 2 ? 1 : 0)
+        var second: El<Int> = el().key("sibling").size(20, 20)
+        if value == 2 { second = second.groupOpacity(0.5, 1) }
+        return col().key("root").children([first, second])
+    }
+    rt.reducedMotion = true
+    _ = rt.renderFrame(at: 0)
+    let initial = try #require(rt.nativePaintTopology)
+    #expect(!initial.parentSlots.isEmpty)
+    var scene = rt.scene
+    let presented = scene.frame(at: 0).nodes
+    #expect(initial.matchesRemount(presented, mounted: rt.flatNodes, holds: false))
+    #expect(!initial.matchesRemount(presented, mounted: rt.flatNodes, holds: true))
+    #expect(!initial.matchesRemount(Array(presented.dropLast()), mounted: rt.flatNodes, holds: false))
+    var detached = presented
+    let child = try #require(detached.firstIndex { $0.parent != nil })
+    detached[child].parent = nil
+    #expect(!initial.matchesRemount(detached, mounted: rt.flatNodes, holds: false))
+    rt.state = 1
+    rt.invalidate(at: 1)
+    _ = rt.renderFrame(at: 1)
+    let reused = try #require(rt.nativePaintTopology)
+    let sharedChildren = initial.childSlots.withUnsafeBufferPointer { old in
+        reused.childSlots.withUnsafeBufferPointer { old.baseAddress == $0.baseAddress }
+    }
+    #expect(sharedChildren)
+    #expect(reused.identity.map(\.id) != initial.identity.map(\.id))
+    #expect(!reused.hasGroupOpacity)
+
+    rt.state = 2
+    rt.invalidate(at: 2)
+    _ = rt.renderFrame(at: 2)
+    let changed = try #require(rt.nativePaintTopology)
+    let parent = try #require(rt.flatNodes.first { $0.key == "root" })
+    #expect(changed.children(of: parent).compactMap { rt.flatNodes[$0].key } == ["sibling", "after"])
+    #expect(changed.hasGroupOpacity)
+}
+
 @Test func nativePaintTopologyFollowsThePresentedOrderAndParentBetweenCommits() throws {
     let rt = Runtime<Int>(state: 0, viewport: Vec2(100, 100)) { _, _ in
         col().key("root").child(el().key("one").size(10, 10)).child(el().key("two").size(20, 20))

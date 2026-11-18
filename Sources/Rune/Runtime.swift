@@ -293,6 +293,7 @@ public final class Runtime<State> {
         var scrollShift: Vec2
         var localSize: Vec2
         var zOrder: Int
+        var paintTraits: NativePaintTraits
         var inheritedScale: Float
         var enclosingScrollIndex: Int?
         var enclosingVScrollIndex: Int?
@@ -303,7 +304,10 @@ public final class Runtime<State> {
 
         @inline(__always) var el: El<State> {
             _read { yield element.value }
-            _modify { yield &element.value }
+            _modify {
+                defer { paintTraits = NativePaintTraits(element.value) }
+                yield &element.value
+            }
         }
         var staticRect: [Float] {
             [staticBounds.x, staticBounds.y, staticBounds.z, staticBounds.w]
@@ -322,7 +326,7 @@ public final class Runtime<State> {
             }
         }
         var elided: TextElision? { cold.first?.elided }
-        var isSticky: Bool { el.stickyConfig?.edge != nil }
+        var isSticky: Bool { paintTraits.contains(.sticky) }
 
         var activeClipFades: [EdgeFadeSpec] {
             get { cold.first?.activeClipFades ?? [] }
@@ -360,6 +364,7 @@ public final class Runtime<State> {
             self.key = key
             self.nodeId = nodeId
             self.element = element
+            self.paintTraits = NativePaintTraits(element.value)
             self.localRect = localRect
             self.unscrolledRect = unscrolledRect
             self.targetRect = targetRect
@@ -4691,7 +4696,7 @@ public final class Runtime<State> {
         nodeIndexById = pass.indexById
         let previousByPath = nodeByPath
         hoverOrderMatchesPaint = sameHoverOrder
-        nativePaintTopology = nil
+        nativePaintTopology?.currentCommit = false
         layoutObservers = observers
         nodeByPath = pass.byPath
         layoutCommitGen &+= 1

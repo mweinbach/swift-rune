@@ -752,7 +752,7 @@ extension Runtime {
                 var (frameOut, animNow) = stepToFrameOutputScaled(at: now, skipFramePoll: timer.alreadyPolled)
                 func paint() -> RenderFrame {
                     measureRuntimePhase(.paint) {
-                        buildRenderFrame(frameOut: frameOut, now: animNow, publishHitGeometry: true)
+                        buildRenderFrame(frameOut: frameOut, now: animNow, publishHitGeometry: true, fromMountedScene: true)
                     }
                 }
                 var rf = paint()
@@ -785,7 +785,7 @@ extension Runtime {
     }
 
     internal func buildRenderFrame(frameOut: FrameOutput, now: Double, publishHitGeometry: Bool = false,
-                                   freshRaster: Bool = false) -> RenderFrame {
+                                   freshRaster: Bool = false, fromMountedScene: Bool = false) -> RenderFrame {
         cyclePaint.begin()
         if publishHitGeometry { kitHooks.unseenPresence.beginFrame() }
         activePaintedLoopWake = nil
@@ -860,7 +860,8 @@ extension Runtime {
         for p in frameOut.nodes where p.isExiting { exitingIds.insert(p.id) }
 
         let hasHolds = !scrollRequestsState.keeps.isEmpty
-        let topology = prepareNativePaintTopology(frameOut, byID: presentedById, holds: hasHolds)
+        let topology = prepareNativePaintTopology(frameOut, byID: presentedById, holds: hasHolds,
+                                                  fromMountedScene: fromMountedScene && exitingIds.isEmpty)
         let hasSticky = topology.hasSticky
         let hasRaised = topology.hasRaised
         let hasAnimatedTracks = paintStore.activeLen != 0
