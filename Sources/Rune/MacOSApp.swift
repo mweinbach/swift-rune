@@ -987,10 +987,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         }
     }
 
-    private func syncAccessibilityTree() {
-        a11yFollowUp = false
-        let snapshot = runtime.nativeAccessibilitySnapshot()
-        let held = accessibilityHost.update(tree: snapshot, announcement: runtime.a11yAnnouncement, parentView: self, onSelectText: { [weak self] id, range in
+    private lazy var accessibilityCallbacks = MacOSAccessibilityCallbacks(onSelectText: { [weak self] id, range in
             MacOSHostViewHelper.dispatchAccessibilityRequest { [weak self] in
                 guard let self else { return }
                 if self.runtime.accessibilitySelectText(id, range: range, at: self.nowSeconds()) { self.requestRender() }
@@ -1002,14 +999,19 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
                     self.requestRender()
                 }
             }
-        }) { [weak self] id, action in
+        }, onAction: { [weak self] id, action in
             MacOSHostViewHelper.dispatchAccessibilityAction(id, action: action) { id, action in
                 guard let self else { return }
                 if self.runtime.performAccessibilityAction(id, action: action, at: self.nowSeconds()) {
                     self.requestRender()
                 }
             }
-        }
+        })
+
+    private func syncAccessibilityTree() {
+        a11yFollowUp = false
+        let snapshot = runtime.nativeAccessibilitySnapshot()
+        let held = accessibilityHost.update(tree: snapshot, announcement: runtime.a11yAnnouncement, parentView: self, callbacks: accessibilityCallbacks)
         if held { scheduleAccessibilityFollowUp() }
     }
 

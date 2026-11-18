@@ -1207,10 +1207,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         }
     }
 
-    private func syncAccessibilityTree() {
-        a11yFollowUp = false
-        let snapshot = entry.accessibilitySnapshot(runtimeObj: runtime)
-        let held = accessibilityHost.update(tree: snapshot, announcement: entry.accessibilityAnnouncement(runtimeObj: runtime), parentView: self, onSelectText: { [weak self] id, range in
+    private lazy var accessibilityCallbacks = MacOSAccessibilityCallbacks(onSelectText: { [weak self] id, range in
             MacOSHostViewHelper.dispatchAccessibilityRequest { [weak self] in
                 guard let self else { return }
                 if self.entry.selectAccessibilityText(runtimeObj: self.runtime, id: id, range: range, at: self.nowSeconds()) { self.requestRender() }
@@ -1227,7 +1224,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
                     self.requestRender()
                 }
             }
-        }) { [weak self] id, action in
+        }, onAction: { [weak self] id, action in
             MacOSHostViewHelper.dispatchAccessibilityAction(id, action: action) { id, action in
                 guard let self else { return }
                 if self.entry.performAccessibilityAction(
@@ -1239,7 +1236,12 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
                     self.requestRender()
                 }
             }
-        }
+        })
+
+    private func syncAccessibilityTree() {
+        a11yFollowUp = false
+        let snapshot = entry.accessibilitySnapshot(runtimeObj: runtime)
+        let held = accessibilityHost.update(tree: snapshot, announcement: entry.accessibilityAnnouncement(runtimeObj: runtime), parentView: self, callbacks: accessibilityCallbacks)
         if held { scheduleAccessibilityFollowUp() }
     }
 
