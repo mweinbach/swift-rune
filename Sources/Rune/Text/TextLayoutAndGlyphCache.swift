@@ -220,20 +220,23 @@ extension ShapedText {
         #endif
     }
 
-    /// CoreText glyph geometry is shared at neutral weight. A paint scope exposes masks
-    /// for the current foreground, including bearings used when the pen moves fractionally.
+    /// Preserve the shaped lines while changing the mask and bearing for a different paint scope.
     mutating func applyScopedGlyphMasks(in atlas: GlyphAtlas) {
         #if canImport(CoreText) && canImport(CoreGraphics)
-        guard let base = GlyphAtlas.baseInkBucket, !glyphs.isEmpty else { return }
-        scopedInkBucket = base
+        let scope = GlyphAtlas.baseInkBucket
+        guard !glyphs.isEmpty, scope != nil || scopedInkBucket != nil else { return }
+        let base = scope ?? 0
+        scopedInkBucket = scope
+        hasInitialSpanMasks = false
         let generation = atlas.resets
         var changed = false
         var lastColor: Color?
         var lastBucket: UInt8?
         for index in glyphs.indices where glyphs[index].usesInkDilation {
             let source = glyphs[index]
-            if lastColor != source.color {
-                lastColor = source.color
+            let ink = scope == nil ? nil : source.color
+            if lastColor != ink {
+                lastColor = ink
                 lastBucket = lastColor.flatMap { GlyphAtlas.inkBucket(SIMD4($0.r, $0.g, $0.b, $0.a), encoded: false) }
             }
             let (mask, rect) = atlas.outlineInk(source, rect: source.rect, bucket: lastBucket ?? base)
@@ -640,7 +643,7 @@ public final class TextLayoutBox: @unchecked Sendable {
         self.prepared = prepared
     }
 
-    /// Keeps the neutral native layout alive while a mounted label presents its own syntax colors.
+    /// Keeps the original native layout alive while a mounted label presents its own syntax colors.
     private var spanInkGeometry: TextLayoutBox?
     private(set) var spanInks = TextSpanInkMap(nil)
     /// Keep the most recent glyph colors when its caller releases the box between frames.
@@ -678,9 +681,9 @@ public final class TextLayoutBox: @unchecked Sendable {
 
     func applyingSpanInks(_ spans: [TextSpan]?, atlas: GlyphAtlas? = nil) -> TextLayoutBox {
         let bucket = atlas == nil ? nil : shaped.requestedInkBucket
-        if self.spans == spans, shaped.scopedInkBucket == bucket { return self }
+        if self.spans == spans, !shaped.hasInitialSpanMasks, shaped.scopedInkBucket == bucket { return self }
         let geometry = cachedGeometry
-        if geometry.spans == spans, bucket == nil { return geometry }
+        if geometry.spans == spans, !geometry.shaped.hasInitialSpanMasks, geometry.shaped.scopedInkBucket == bucket { return geometry }
         let key = geometry.shapeKey.withPaintSpans(spans)
         let inks = TextSpanInkMap(spans)
         var shaped = inks.isEmpty ? geometry.shaped : geometry.shaped.applyingSpanInks(spans, using: inks)

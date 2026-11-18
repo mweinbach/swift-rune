@@ -727,8 +727,10 @@ public struct ShapedText: @unchecked Sendable {
     internal var glyphPens: [GlyphPen] = []
     internal var glyphPlacements: TextBoxGeometry.GlyphPlacements?
     internal var scopedInkBucket: UInt8?
+    internal var hasInitialSpanMasks = false
     #else
     internal var scopedInkBucket: UInt8? { nil }
+    internal var hasInitialSpanMasks: Bool { false }
     #endif
     /// An unpainted layout exposes neutral mask geometry even after a renderer warmed its cache.
     internal var canReplayGlyphInks: Bool {
@@ -3818,7 +3820,7 @@ public final class TextSystem: @unchecked Sendable {
             box.lastUsedCommit = layoutCommitSeq
             storeLayout(box, for: storage)
         }
-        return box.applyingSpanInks(leaf.spans)
+        return presentedLayout(box, spans: leaf.spans)
     }
 
     private func overflowContent(
@@ -4721,16 +4723,18 @@ public final class TextSystem: @unchecked Sendable {
             content = text
             layoutSpans = nil
         }
-        let layout = layoutGeometry(retaining: key, intrinsicShapes: intrinsicShapes, text: content,
-            spans: layoutSpans, pills: pills, style: style,
-            maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs, glidePx: glidePx,
-            keep: keep, countAsRebreak: countAsRebreak, pretty: pretty, rasterWindow: rasterWindow)
+        let layout = GlyphAtlas.withInitialSpanInks(spans, emitGlyphs: emitGlyphs) {
+            layoutGeometry(retaining: key, intrinsicShapes: intrinsicShapes, text: content,
+                spans: layoutSpans, pills: pills, style: style,
+                maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs, glidePx: glidePx,
+                keep: keep, countAsRebreak: countAsRebreak, pretty: pretty, rasterWindow: rasterWindow)
+        }
         return presentedLayout(layout, spans: spans)
     }
 
     internal func presentedLayout(_ layout: TextLayoutBox, spans: [TextSpan]?) -> TextLayoutBox {
         let bucket = layout.shaped.requestedInkBucket
-        if layout.spans == spans, layout.shaped.scopedInkBucket == bucket {
+        if layout.spans == spans, !layout.shaped.hasInitialSpanMasks, layout.shaped.scopedInkBucket == bucket {
             if bucket == nil || layout.shaped.glyphPlacementsAreResident(in: glyphAtlas) { return layout }
         }
         let geometry = layout.cachedGeometry
@@ -4767,7 +4771,7 @@ public final class TextSystem: @unchecked Sendable {
                rasterWindow.lowerY > 0 || rasterWindow.upperY < measure.shaped.size.y {
                 return paintInWindow(measure, prepared: prepared, window: rasterWindow, glide: glidePx)
             }
-            if measure.hasGlyphs, measure.shaped.canReplayGlyphInks, glidePx == .zero,
+            if measure.hasGlyphs, glidePx == .zero,
                measure.shaped.glyphPlacementsAreResident(in: glyphAtlas) { return measure }
             retainedKey = measure.shapeKey
         }
@@ -4826,8 +4830,7 @@ public final class TextSystem: @unchecked Sendable {
                 if var cachedBox = layoutCache[storageKey] {
                     cachedBox.lastUsedCommit = layoutCommitSeq
                     if Self.widthsMatch(cachedBox.maxWidth, effectiveMaxW) {
-                        if !emitGlyphs || (cachedBox.hasGlyphs && cachedBox.shaped.canReplayGlyphInks
-                            && cachedBox.shaped.glyphPlacementsAreResident(in: glyphAtlas)) {
+                        if !emitGlyphs || (cachedBox.hasGlyphs && cachedBox.shaped.glyphPlacementsAreResident(in: glyphAtlas)) {
                             lock.unlock()
                             return cachedBox
                         }
@@ -5000,7 +5003,7 @@ public final class TextSystem: @unchecked Sendable {
             shaped: shaped,
             hasGlyphs: emitGlyphs,
             prepared: prepared
-        ).applyingSpanInks(box.spans)
+        ).applyingSpanInks(box.spans, atlas: glyphAtlas)
     }
 
     #endif
@@ -5019,18 +5022,20 @@ public final class TextSystem: @unchecked Sendable {
         pretty: Bool = false
     ) -> ShapedText {
         measureRuntimePhase(.text) {
-            var result = shapeImpl(
-                text: text,
-                spans: spans,
-                pills: pills,
-                style: style,
-                maxWidth: maxWidth,
-                pixelScale: pixelScale,
-                emitGlyphs: emitGlyphs,
-                glidePx: glidePx,
-                bypassCache: bypassCache,
-                pretty: pretty
-            )
+            var result = GlyphAtlas.withInitialSpanInks(spans, emitGlyphs: emitGlyphs) {
+                shapeImpl(
+                    text: text,
+                    spans: spans,
+                    pills: pills,
+                    style: style,
+                    maxWidth: maxWidth,
+                    pixelScale: pixelScale,
+                    emitGlyphs: emitGlyphs,
+                    glidePx: glidePx,
+                    bypassCache: bypassCache,
+                    pretty: pretty
+                )
+            }
             result.applyScopedGlyphMasks(in: glyphAtlas)
             return result
         }
@@ -5109,7 +5114,7 @@ public final class TextSystem: @unchecked Sendable {
 
         if let sKey {
             lock.lock()
-            if var cached = shapeCache[sKey], cached.shaped.canReplayGlyphInks,
+            if var cached = shapeCache[sKey],
                cached.pages.isEmpty || glyphAtlas.retainPages(cached.pages, since: cached.atlasResets) {
                 cached.usedGeneration = layoutCommitSeq
                 shapeCache[sKey] = cached
@@ -6462,6 +6467,8 @@ public final class TextSystem: @unchecked Sendable {
         shapedOut.glyphPens = glyphPensOut.count == glyphsOut.count ? glyphPensOut : []
         if !shapedOut.glyphPens.isEmpty {
             shapedOut.glyphPlacements = TextBoxGeometry.GlyphPlacements(glyphs: glyphsOut, since: placementEpoch)
+            shapedOut.scopedInkBucket = GlyphAtlas.baseInkBucket
+            shapedOut.hasInitialSpanMasks = GlyphAtlas.initialSpanInks != nil
         }
         return shapedOut
     }
@@ -6516,6 +6523,11 @@ public final class TextSystem: @unchecked Sendable {
     ) {
         let pillMarkerKey = "RunePillMarker" as CFString
         let invS = 1 / prepared.scale
+        let baseBucket = GlyphAtlas.baseInkBucket ?? 0
+        let spanInks = GlyphAtlas.initialSpanInks
+        var cursor = 0
+        var previousInk: Color?
+        var bucket = baseBucket
         for run in runs {
             let attrs = CTRunGetAttributes(run)
             if prepared.hasRunDelegates &&
@@ -6561,6 +6573,13 @@ public final class TextSystem: @unchecked Sendable {
                     let y = gyPx.rounded() * phases + (glidePx.y * phases).rounded()
                     let quadYPx = floorf(y / phases)
                     let binYArg = UInt8(y - quadYPx * phases)
+                    if let spanInks {
+                        let ink = spanInks.color(at: byte, cursor: &cursor)
+                        if ink != previousInk {
+                            previousInk = ink
+                            bucket = ink.flatMap { GlyphAtlas.inkBucket(SIMD4($0.r, $0.g, $0.b, $0.a), encoded: false) } ?? baseBucket
+                        }
+                    }
                     guard let entry = glyphAtlas.rasterizeGlyph(
                         font: runFont,
                         glyph: glyphs[i],
@@ -6568,7 +6587,7 @@ public final class TextSystem: @unchecked Sendable {
                         phaseX: pen.phase,
                         subpixelYBin: binYArg,
                         smoothing: style.fontSmoothing,
-                        inkBucket: 0
+                        inkBucket: bucket
                     ), entry.pixelSize.x > 0 && entry.pixelSize.y > 0 else {
                         continue
                     }
@@ -6605,7 +6624,7 @@ public final class TextSystem: @unchecked Sendable {
         let resets = glyphAtlas.resets
         let previous = lock.withLock { measured.windowPaint }
         let matchingWidth = previous?.box.maxWidth == measured.maxWidth
-        if let previous, matchingWidth, previous.window == window, previous.glide == glide, previous.box.shaped.canReplayGlyphInks,
+        if let previous, matchingWidth, previous.window == window, previous.glide == glide,
            glyphAtlas.retainPages(previous.box.desktopPages, since: previous.resets) {
             return previous.box
         }
@@ -6658,6 +6677,8 @@ public final class TextSystem: @unchecked Sendable {
         result.glyphs = glyphs
         result.glyphPens = pens
         result.glyphPlacements = pens.isEmpty ? nil : TextBoxGeometry.GlyphPlacements(glyphs: glyphs, since: resets)
+        result.scopedInkBucket = pens.isEmpty ? nil : GlyphAtlas.baseInkBucket
+        result.hasInitialSpanMasks = !pens.isEmpty && GlyphAtlas.initialSpanInks != nil
         result.lineGlyphRanges = ranges
         return result
     }

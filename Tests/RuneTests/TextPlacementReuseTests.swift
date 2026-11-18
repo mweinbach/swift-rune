@@ -33,6 +33,27 @@ struct TextPlacementReuseTests {
         }
     }
 
+    @Test("A first scoped paint acquires one mask per visible glyph", arguments: [false, true])
+    func coldScopedMasks(keyed: Bool) throws {
+        let system = TextSystem()
+        let style = TextStyle(size: 18, family: .monospace).smoothing(.windfoil)
+        let spans = [TextSpan("T", color: .black), TextSpan("U")]
+        func draw() -> ShapedText {
+            if keyed {
+                return system.layoutKeyed(text: "TU", spans: spans, style: style, maxWidth: nil,
+                                          pixelScale: 1, emitGlyphs: true).shaped
+            }
+            return system.shape(text: "TU", spans: spans, style: style, maxWidth: nil, pixelScale: 1)
+        }
+        let painted = GlyphAtlas.withBaseInk(.white, mode: .windfoil) { draw() }
+        try #require(painted.glyphs.count == 2)
+        #expect(system.glyphAtlas.cachedEntryCount == 2)
+        let raw = draw()
+        #expect(raw.glyphs[0].uv == painted.glyphs[0].uv)
+        #expect(raw.glyphs[1].uv != painted.glyphs[1].uv)
+        #expect(system.glyphAtlas.cachedEntryCount == 3)
+    }
+
     @Test("Warmed layout and fractional placement track changes to the scoped base and span inks")
     func alternatingPaintScopes() throws {
         for mode in [FontSmoothing.on, .windfoil] where mode.pipeline.dilate {
