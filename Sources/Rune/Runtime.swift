@@ -1229,8 +1229,13 @@ public final class Runtime<State> {
     internal var accessibilityProjectionCache: AccessibilityProjectionCache?
     internal var presentedRectByPath = FrameGeometry<MotionRect>()
     internal var presentedScales = PresentedScales()
-    internal var hitGeometryByPath = FrameGeometry<HitGeometry>()
-    internal var paintOrderPaths: [String] = []
+    internal var pickCandidates = RepeatedPickCandidates()
+    internal var hitGeometryByPath = FrameGeometry<HitGeometry>() {
+        didSet { pickCandidates = RepeatedPickCandidates() }
+    }
+    internal var paintOrderPaths: [String] = [] {
+        didSet { pickCandidates = RepeatedPickCandidates() }
+    }
     /// Atlas-space coverage adjustments collected only while a motion gate is recording.
     internal var motionRasterGlyphs: MotionGateRasterGlyphs?
     internal var imagePacker = ImageAtlasPacker()
@@ -1538,7 +1543,8 @@ public final class Runtime<State> {
         }
 
         let pt = Vec2(x, y)
-        for path in paintOrderPaths.reversed() {
+        let paths = pickCandidates.paths(at: pt, viewport: viewport, order: paintOrderPaths, geometry: hitGeometryByPath)
+        for path in paths.reversed() {
             if let scopePath, !(path == scopePath || path.hasPrefix(scopePath + "/")) {
                 continue
             }

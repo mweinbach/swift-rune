@@ -74,6 +74,43 @@ struct HitGeometry: Sendable {
     }
 }
 
+/// Repeated inspection of a large painted frame can share a vertical shortlist.
+struct RepeatedPickCandidates {
+    private var picks = 0
+    private var height: Float = 0
+    private var bands: [[String]] = []
+
+    private func band(_ y: Float) -> Int {
+        min(bands.count - 1, Int(y / height * Float(bands.count)))
+    }
+
+    mutating func paths(at point: Vec2, viewport: Vec2, order: [String], geometry: FrameGeometry<HitGeometry>) -> [String] {
+        guard order.count >= 128, point.y >= 0, point.y < viewport.y, viewport.y.isFinite else { return order }
+        if bands.isEmpty {
+            // Ordinary input and single inspection requests use the existing paint order.
+            picks += 1
+            guard picks >= 8 else { return order }
+            height = viewport.y
+            let count = Int(min(24, max(1, (height / 96).rounded(.up))))
+            bands = Array(repeating: [], count: count)
+            for path in order {
+                guard let hit = geometry[path], !hit.isExiting else { continue }
+                var top = max(0, hit.outerClip.top)
+                var bottom = min(height, hit.outerClip.bottom)
+                // A turn can bring distant local ink into the pointer's window band.
+                if hit.turn == nil {
+                    top = max(top, hit.rect.top, hit.clipRect.top)
+                    bottom = min(bottom, hit.rect.bottom, hit.clipRect.bottom)
+                }
+                if top < bottom {
+                    for i in band(top)...band(bottom) { bands[i].append(path) }
+                }
+            }
+        }
+        return point.y < height ? bands[band(point.y)] : order
+    }
+}
+
 /// The paths belong to the same commit as the values. A later commit can change
 /// mounted slots before input or an anchored overlay queries the previous paint.
 struct FrameGeometry<Value> {
