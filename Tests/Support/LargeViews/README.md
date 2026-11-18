@@ -36,6 +36,12 @@ python3 Tests/Support/LargeViews/presentations.py .build/scroll/swift-diff.csv
 python3 Tests/Support/LargeViews/rust-native.py /path/to/rust-rune .build/scroll/rust-mac --case diff
 ```
 
+The presentation summary can also check a fixed-rate display. For example, on a 60 Hz display, the following gate requires all 600 wheel events to appear in order and permits up to two missed refreshes over the run.
+
+```sh
+python3 Tests/Support/LargeViews/presentations.py .build/scroll/swift-diff.csv --refresh-hz 60 --max-missed-refreshes 2
+```
+
 To compare the native windows, capture one Swift run and use the Rust window JSON from the same workload. The comparator checks the order and clipped bounds of every visible row at all six checkpoints. For the diff it also verifies the scroll offsets. Mounted counts can vary with the number of display frames available for overscan.
 
 ```sh
