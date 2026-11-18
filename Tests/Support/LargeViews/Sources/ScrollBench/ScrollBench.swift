@@ -27,17 +27,22 @@ private enum Workload: String {
         }
     }
 
-    var finalKeys: [String] {
+    func finalKeys(after steps: Int) -> [String] {
         switch self {
-        case .table: return (1028...1059).map { "f\($0)" }
+        case .table:
+            let first = steps * 48 / 28
+            return (first..<(first + 32)).map { "f\($0)" }
         case .tree:
-            return (1200...1237).map { index in
+            let first = steps * 48 / 24
+            return (first..<(first + 38)).map { index in
                 let package = "pkg\(index / 101)"
                 let entry = index % 101
                 return entry == 0 ? package : "\(package)/file\(entry - 1).rs"
             }
         case .diff:
-            return (10_502...10_540).flatMap { line in
+            // Eight painted rows per seven source lines, with 20 points per row.
+            let first = steps * 400 / 20 * 7 / 8 + 2
+            return (first..<(first + 39)).flatMap { line in
                 line.isMultiple(of: 7) ? ["df0.o\(line)", "df0.n\(line)"] : ["df0.c\(line)"]
             }
         }
@@ -101,6 +106,11 @@ private struct Result: Codable {
     let hostReportIntervals: Timing?
 }
 
+private struct WindowSamples: Encodable {
+    let framesIncludingInitial: [FrameEncoded]
+    let hostReportIntervalsMS: [Double]
+}
+
 private func elapsedMS(_ start: ContinuousClock.Instant, _ end: ContinuousClock.Instant = .now) -> Double {
     let d = (end - start).components
     return Double(d.seconds) * 1_000 + Double(d.attoseconds) / 1e15
@@ -111,22 +121,29 @@ private struct Probe {
     let mode: Mode
     let output: URL?
     let presentationOutput: URL?
-    let steps = 600
+    let samplesOutput: URL?
+    let steps: Int
     let checkpoints = [0, 1, 24, 60, 300, 600]
 
     init(_ args: [String]) throws {
-        let usage = Failure("Usage: ScrollBench table|tree|diff reference|production|window [--capture directory] [--metal-presents file.csv]")
+        let usage = Failure("Usage: ScrollBench table|tree|diff reference|production|window [--steps 60|600] [--capture directory] [--frame-samples file.json] [--metal-presents file.csv]")
         guard args.count >= 2, args.count.isMultiple(of: 2),
               let workload = Workload(rawValue: args[0]), let mode = Mode(rawValue: args[1]) else {
             throw usage
         }
         self.workload = workload
         self.mode = mode
-        var capture: URL?, presentations: URL?
+        var capture: URL?, presentations: URL?, samples: URL?
+        var requestedSteps: Int?
         for index in stride(from: 2, to: args.count, by: 2) {
             switch args[index] {
             case "--capture" where capture == nil:
                 capture = URL(fileURLWithPath: args[index + 1], isDirectory: true)
+            case "--steps" where requestedSteps == nil:
+                guard let count = Int(args[index + 1]), count == 60 || count == 600 else { throw usage }
+                requestedSteps = count
+            case "--frame-samples" where mode == .window && samples == nil:
+                samples = URL(fileURLWithPath: args[index + 1])
             #if canImport(ScrollBenchMetal)
             case "--metal-presents" where mode == .window && presentations == nil:
                 presentations = URL(fileURLWithPath: args[index + 1])
@@ -136,6 +153,8 @@ private struct Probe {
         }
         output = capture
         presentationOutput = presentations
+        samplesOutput = samples
+        steps = requestedSteps ?? 600
         if let output { try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true) }
     }
 
@@ -180,7 +199,7 @@ private struct Probe {
             && $0.visible[1] + $0.visible[3] > (frame.stickyHeaderBottom ?? 0)
         }.sorted { $0.visible[1] < $1.visible[1] }
         let begin = visible.first?.key, end = visible.last?.key
-        guard rt.viewport == workload.viewport, visible.compactMap(\.key) == workload.finalKeys,
+        guard rt.viewport == workload.viewport, visible.compactMap(\.key) == workload.finalKeys(after: steps),
               frame.scrollOffsetY.map({ abs($0 + Float(steps) * workload.wheelDelta) < 0.01 }) ?? true else {
             throw Failure("Unexpected viewport, offset or visible rows after \(work.count) wheels (\(begin ?? "none") to \(end ?? "none"))")
         }
@@ -231,6 +250,9 @@ private struct Probe {
     }
 
     @MainActor private func window<S>(_ example: Runtime<S>) throws {
+        if let samplesOutput {
+            try FileManager.default.createDirectory(at: samplesOutput.deletingLastPathComponent(), withIntermediateDirectories: true)
+        }
         #if canImport(ScrollBenchMetal)
         if let presentationOutput {
             try FileManager.default.createDirectory(at: presentationOutput.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -264,6 +286,10 @@ private struct Probe {
                 try capture(rt, index: index, scene: nil, nativeInstances: drawn[index].primitives)
                 if index == steps {
                     let measured = drawn.dropFirst()
+                    if let samplesOutput {
+                        let samples = WindowSamples(framesIncludingInitial: drawn, hostReportIntervalsMS: intervals)
+                        try JSONEncoder().encode(samples).write(to: samplesOutput)
+                    }
                     try report(rt, commits: UInt64(measured.filter(\.committed).count),
                                work: measured.map(\.frameMs), arrivals: intervals)
                     if presentationOutput != nil {

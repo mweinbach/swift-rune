@@ -31,9 +31,10 @@ def pixels(lhs, rhs, dimensions):
 CHECKPOINTS = (0, 1, 24, 60, 300, 600)
 
 
-def compare_windows(directory, rust_path, case):
+def compare_windows(directory, rust_path, case, steps):
     rust = json.loads(rust_path.read_text())
-    if rust["events"] != 600 or [c["wheel"] for c in rust["checkpoints"]] != list(CHECKPOINTS):
+    checkpoints = [frame for frame in CHECKPOINTS if frame <= steps]
+    if rust["events"] != steps or [c["wheel"] for c in rust["checkpoints"]] != checkpoints:
         raise ValueError("Incomplete Rust native window capture")
     matched = True
     records = []
@@ -73,11 +74,15 @@ def main():
                         help="also fail if any painted channel exceeds this difference")
     parser.add_argument("--native-window", choices=("table", "tree", "diff"), metavar="CASE",
                         help="compare Swift window captures with the Rust window JSON for this workload")
+    parser.add_argument("--native-steps", choices=(60, 600), type=int,
+                        help="expected wheel count for --native-window (default: 600)")
     args = parser.parse_args()
     if args.native_window:
         if args.pixel_tolerance is not None:
             parser.error("Native window checkpoints contain geometry only")
-        return compare_windows(args.swift, args.rust, args.native_window)
+        return compare_windows(args.swift, args.rust, args.native_window, args.native_steps or 600)
+    if args.native_steps is not None:
+        parser.error("--native-steps requires --native-window")
     if args.pixel_tolerance is not None and not 0 <= args.pixel_tolerance <= 255:
         parser.error("--pixel-tolerance must be between 0 and 255")
     if args.geometry_only and args.pixel_tolerance is not None:

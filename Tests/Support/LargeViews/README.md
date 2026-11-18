@@ -10,6 +10,8 @@ swift run --package-path Tests/Support/LargeViews -c release ScrollBench tree wi
 swift run --package-path Tests/Support/LargeViews -c release ScrollBench diff production
 ```
 
+Use `--steps 60` for a short run with checkpoints at 0, 1, 24 and 60 wheels. The default remains 600. Window runs accept `--frame-samples file.json` to export the initial frame, each wheel’s host update and encode timings, and the intervals between frame reports. Compare a 60-wheel Rust window capture with `compare.py --native-window diff --native-steps 60`.
+
 - `reference` measures elapsed CPU-side frame construction time using a monotonic wall clock. Logical time advances by 1/120 second per frame. Captures export row keys and clipped geometry at frames 0, 1, 24, 60, 300, and 600 and full top-down RGBA8 pixels and viewable PNGs at frames 0 and 60, outside the timed interval.
 - `production` times CPU work in `Runtime.renderFrame`, the instance stream consumed by the native GPU renderer. Timings exclude wheel dispatch and rasterization. With `--capture`, checkpoints record scene geometry and the native instance count. Use separate capture directories for each mode.
 - `window` opens a desktop window and delivers one wheel event per host frame report. The JSON includes actual pixel dimensions, reported frame work and intervals between consecutive draw reports. Native window runs use the host display scale and scheduling. Measuring physical display cadence additionally requires presentation timestamps from the platform.
