@@ -109,7 +109,7 @@ try {
     // Compare reconstructed ink to a newly created native-only line for the
     // same source. Change the neighbors on both sides of each digit boundary.
     const numbered = ['X01239Y', 'X01289Y', 'X81289Y', 'X41230Y', 'X01239Y'];
-    let maskReads = 0;
+    let maskReads = 0, duringNativeRead;
     const nativeReadback = CanvasRenderingContext2D.prototype.getImageData;
     function compareNumberedMask(text, index) {
         const handles = [0, 1].map(() => {
@@ -125,6 +125,7 @@ try {
                     const masks = handles.map((id, handle) => {
                         const before = maskReads;
                         if (!host.mask(id, left, 1, width, 32, 4096, rgb)) throw Error('Missing numeric mask');
+                        if (duringNativeRead) throw Error('Cold mask did not read from the native canvas');
                         if (handle === 0 && index === numbered.length - 1 && canVerifyFace && before !== maskReads) {
                             throw Error('Repeated numeric label required a new native mask read');
                         }
@@ -139,9 +140,21 @@ try {
     }
     CanvasRenderingContext2D.prototype.getImageData = function (...args) {
         ++maskReads;
-        return nativeReadback.apply(this, args);
+        const pixels = nativeReadback.apply(this, args);
+        if (duringNativeRead) {
+            const nested = duringNativeRead;
+            duringNativeRead = undefined;
+            nested();
+        }
+        return pixels;
     };
-    try { numbered.forEach(compareNumberedMask); }
+    try {
+        numbered.forEach(compareNumberedMask);
+        // Reenter the same crop with different digits after capturing its native pixels.
+        duringNativeRead = () => compareNumberedMask('X74562Y', -1);
+        compareNumberedMask('X96543Y', -1);
+        for (const text of ['X74562Y', 'X96543Y']) compareNumberedMask(text, numbered.length - 1);
+    }
     finally { CanvasRenderingContext2D.prototype.getImageData = nativeReadback; }
     const alphabet = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).join('');
     try {

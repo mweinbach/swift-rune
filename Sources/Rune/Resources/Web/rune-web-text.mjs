@@ -539,7 +539,9 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
     // printable ASCII, and its outlines fit their advance. Only the two pixels
     // on either side of a cell boundary can sample ink from its neighbor.
     // Keep those pixels paired with that neighbor when reusing a native read.
+    // Other faces go directly to the native canvas mask.
     const fragmentStyles = new Map();
+    const fragmentByteLimit = 2 * 1024 * 1024, fragmentLimit = 8192;
     let fragmentCount = 0, fragmentBytes = 0;
 
     function numericMaskPlan(length, pitch, x, width) {
@@ -573,6 +575,13 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         }
     }
 
+    function numericFragmentKey(part, text) {
+        const at = part.index;
+        const before = part.previous ? text.charCodeAt(at - 1) : 0;
+        const after = part.next ? text.charCodeAt(at + 1) : 0;
+        return part.keyBase + (before << 14) + (text.charCodeAt(at) << 7) + after;
+    }
+
     function numericMask(line, x, y, width, height, rgb, destination) {
         const source = line.numericMaskSource, text = line.text;
         if (!source || line.clip || line.size < 10 || line.size > 128 || !/\d/.test(text) ||
@@ -581,7 +590,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         const metrics = new DataView(line.metrics.buffer, line.metrics.byteOffset, line.metrics.byteLength);
         const pitch = metrics.getFloat32(0, true) / text.length;
         if (!(pitch >= 5)) return false;
-        if (fragmentBytes >= 2 * 1024 * 1024 || fragmentCount >= 8192 || fragmentStyles.size >= 64) {
+        if (fragmentBytes >= fragmentByteLimit || fragmentCount >= fragmentLimit || fragmentStyles.size >= 64) {
             fragmentStyles.clear();
             fragmentBytes = fragmentCount = 0;
         }
@@ -601,31 +610,52 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             if (style.plans.size >= 64) style.plans.clear();
             style.plans.set(shape, plan);
         }
-        const samples = new Array(plan.length), keys = new Array(plan.length);
-        let missing = false;
-        for (let i = 0; i < plan.length; ++i) {
-            const part = plan[i], at = part.index;
-            const before = part.previous ? text.charCodeAt(at - 1) : 0;
-            const after = part.next ? text.charCodeAt(at + 1) : 0;
-            keys[i] = part.keyBase + (before << 14) + (text.charCodeAt(at) << 7) + after;
-            samples[i] = style.samples.get(keys[i]);
-            if (!samples[i]) missing = true;
-        }
-        if (!missing) {
-            const output = new Uint8Array(memory(), destination >>> 0, width * height);
+        // Keep the last complete tile for this style and crop. Patch only fragments
+        // whose cell or neighboring glyph changed. A missing sample requires a native read.
+        let tile = plan.lastTile;
+        if (tile) {
+            const buffer = memory();
+            let complete = true;
             for (let i = 0; i < plan.length; ++i) {
-                const part = plan[i];
-                copyMaskColumns(samples[i], part.width, 0, output, width, part.x, part.width, height);
+                const part = plan[i], key = numericFragmentKey(part, text);
+                if (tile.keys[i] === key) continue;
+                const bytes = style.samples.get(key);
+                if (!bytes) { complete = false; break; }
+                copyMaskColumns(bytes, part.width, 0, tile.mask, width, part.x, part.width, height);
+                tile.keys[i] = key;
             }
-            return true;
+            if (complete) {
+                new Uint8Array(buffer, destination >>> 0, tile.mask.length).set(tile.mask);
+                return true;
+            }
         }
         const { mask } = coverage(line, x, y, width, height, rgb);
         new Uint8Array(memory(), destination >>> 0, mask.length).set(mask);
+        // A host hook can render again during the native read. Only retain the
+        // result if this exact style and crop are still in the live cache.
+        if (fragmentStyles.get(styleKey) !== style || style.plans.get(shape) !== plan) return true;
+        // The fragments partition the mask. Allow room for all of them, a complete
+        // tile, and its keys, even if a nested native read has just filled the cache.
+        if (fragmentBytes + 2 * mask.byteLength + plan.length * Float64Array.BYTES_PER_ELEMENT > fragmentByteLimit ||
+            fragmentCount + plan.length > fragmentLimit) {
+            fragmentStyles.clear();
+            fragmentBytes = fragmentCount = 0;
+            return true;
+        }
+        tile = plan.lastTile;
+        if (!tile) {
+            tile = plan.lastTile = { mask: new Uint8Array(mask.length), keys: new Float64Array(plan.length) };
+            // Tile pixels and keys share the fragment byte budget, even after a plan is retired.
+            fragmentBytes += tile.mask.byteLength + tile.keys.byteLength;
+        }
+        tile.mask.set(mask);
         for (let i = 0; i < plan.length; ++i) {
-            if (samples[i]) continue;
-            const part = plan[i], bytes = new Uint8Array(part.width * height);
+            const part = plan[i], key = numericFragmentKey(part, text);
+            tile.keys[i] = key;
+            if (style.samples.has(key)) continue;
+            const bytes = new Uint8Array(part.width * height);
             copyMaskColumns(mask, width, part.x, bytes, part.width, 0, part.width, height);
-            style.samples.set(keys[i], bytes);
+            style.samples.set(key, bytes);
             ++fragmentCount;
             fragmentBytes += bytes.length;
         }
