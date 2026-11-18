@@ -1433,6 +1433,7 @@ public final class Runtime<State> {
     internal var virtualSelectionSources: [String: VirtualSelectionSource] = [:]
     internal var lastViewMemoEnvHash: UInt64 = MemoScope.currentEnvironmentHash()
     internal var lastViewOnlyMemoIds: Set<String> = []
+    private var spareMotionSpecs: [NodeSpec] = []
 
     public convenience init(
         state: State,
@@ -3449,6 +3450,12 @@ public final class Runtime<State> {
         // The solver sees one placeholder per retained row group. Reserve for the restored
         // rows too so one extra mounted node does not double the flat and spec buffers.
         let count = textLayoutCollector.liveIds.count + restoredNodeCount
+        // A preceding remount releases its old motion specifications after publishing the new ones.
+        // Drop a substantially larger allocation when the window or the view changes.
+        if rowReuseMode == .remount, spareMotionSpecs.capacity / 2 <= count {
+            swap(&specs, &spareMotionSpecs)
+        }
+        spareMotionSpecs = []
         newFlat.reserveCapacity(count)
         newByPath.reserveCapacity(count)
         newIndices.reserveCapacity(count)
@@ -5651,7 +5658,11 @@ public final class Runtime<State> {
             }
         }
         // Retained scroll placement starts from the geometry actually submitted to the scene.
+        if pass.isVirtualRemount {
+            swap(&lastCommittedSpecs, &spareMotionSpecs)
+        }
         lastCommittedSpecs = specs
+        spareMotionSpecs.removeAll(keepingCapacity: spareMotionSpecs.capacity / 2 <= specs.count)
         measureRuntimePhase(.apply) {
             scene.commit(
                 specs,
