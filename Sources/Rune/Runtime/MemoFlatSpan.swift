@@ -121,52 +121,72 @@ final class MemoFlatSpan<State> {
                 root: Int, clip: MotionRect, fades: [EdgeFadeSpec],
                 enclosing: Int?, vertical: Int?, horizontal: Int?) {
         let shift = root - rootIndex
-        let parent = flat[root]
-        let first = nodes[0]
-        if shift == 0, parent.targetRect.origin == worldOrigin,
-           parent.unscrolledRect.origin == unscrolledOrigin, parent.committedLayoutTarget.origin == committedOrigin,
-           first.clipRect == clip, Self.sameBuffer(fades, first.activeClipFades),
-           first.enclosingScrollIndex == enclosing, first.enclosingVScrollIndex == vertical,
-           first.enclosingHScrollIndex == horizontal {
-            flat.append(contentsOf: nodes)
-            currentSpecs.append(contentsOf: specs)
-            currentInstants.append(contentsOf: instants)
-            for node in nodes {
-                byPath[node.path] = node.index
-                byId[node.nodeId] = node.index
+        let moved = flat[root].targetRect.origin != worldOrigin
+        let movedUnscrolled = flat[root].unscrolledRect.origin != unscrolledOrigin
+        let movedCommitted = flat[root].committedLayoutTarget.origin != committedOrigin
+        let inheritedClipChanged = nodes[0].clipRect != clip
+        let fadesChanged = !Self.sameBuffer(fades, nodes[0].activeClipFades) && fades != nodes[0].activeClipFades
+        let viewportChanged = enclosing != nodes[0].enclosingScrollIndex
+            || vertical != nodes[0].enclosingVScrollIndex || horizontal != nodes[0].enclosingHScrollIndex
+        let start = flat.count
+        flat.append(contentsOf: nodes)
+        currentSpecs.append(contentsOf: specs)
+        currentInstants.append(contentsOf: instants)
+        if shift == 0 && !moved && !movedUnscrolled && !movedCommitted && !inheritedClipChanged && !fadesChanged && !viewportChanged {
+            for offset in nodes.indices {
+                byPath[nodes[offset].path] = start + offset
+                byId[nodes[offset].nodeId] = start + offset
             }
             return
         }
-        for i in nodes.indices {
-            var node = nodes[i]
-            let parentIndex = node.parentIndex! + shift
-            let parent = flat[parentIndex]
-            let local = node.localRect
-            let target = MotionRect.fromXYWH(parent.targetRect.x + local.x, parent.targetRect.y + local.y,
-                                               local.width, local.height)
-            let unscrolled = MotionRect.fromXYWH(parent.unscrolledRect.x + local.x, parent.unscrolledRect.y + local.y,
-                                                  local.width, local.height)
-            node.index += shift
-            node.parentIndex = parentIndex
-            node.targetRect = target
-            node.zoomedTargetRect = target
-            node.committedLayoutTarget = local.translated(parent.committedLayoutTarget.origin)
-            node.unscrolledRect = unscrolled
-            node.staticBounds = SIMD4(unscrolled.x, unscrolled.y, unscrolled.width, unscrolled.height)
-            if parentIndex == root { node.clipRect = clip }
-            else if clipsChildren[parentIndex - root - 1] { node.clipRect = intersectRects(parent.clipRect, parent.targetRect) }
-            else { node.clipRect = parent.clipRect }
-            node.activeClipFades = fades
-            node.enclosingScrollIndex = enclosing
-            node.enclosingVScrollIndex = vertical
-            node.enclosingHScrollIndex = horizontal
-            flat.append(node)
-            byPath[node.path] = node.index
-            byId[node.nodeId] = node.index
-            var spec = specs[i]
-            spec.rect = target
-            currentSpecs.append(spec)
+
+        // Relocate the appended snapshot in place. Scroll alone changes window coordinates;
+        // the committed layout and the unscrolled geometry retain their independent origins.
+        flat.withUnsafeMutableBufferPointer { output in
+            currentSpecs.withUnsafeMutableBufferPointer { motion in
+                for offset in nodes.indices {
+                    let slot = start + offset
+                    let parent = output[slot].parentIndex! + shift
+                    let local = output[slot].localRect
+                    if shift != 0 {
+                        output[slot].index = slot
+                        output[slot].parentIndex = parent
+                    }
+                    if moved {
+                        let origin = output[parent].targetRect.origin
+                        let rect = MotionRect.fromXYWH(origin.x + local.x, origin.y + local.y, local.width, local.height)
+                        output[slot].targetRect = rect
+                        output[slot].zoomedTargetRect = rect
+                        motion[slot].rect = rect
+                    }
+                    if movedCommitted {
+                        output[slot].committedLayoutTarget = local.translated(output[parent].committedLayoutTarget.origin)
+                    }
+                    if movedUnscrolled {
+                        let origin = output[parent].unscrolledRect.origin
+                        let rect = MotionRect.fromXYWH(origin.x + local.x, origin.y + local.y, local.width, local.height)
+                        output[slot].unscrolledRect = rect
+                        output[slot].staticBounds = SIMD4(rect.x, rect.y, rect.width, rect.height)
+                    }
+                    if moved || inheritedClipChanged {
+                        if parent == root {
+                            output[slot].clipRect = clip
+                        } else if clipsChildren[parent - start] {
+                            output[slot].clipRect = intersectRects(output[parent].clipRect, output[parent].targetRect)
+                        } else {
+                            output[slot].clipRect = output[parent].clipRect
+                        }
+                    }
+                    if fadesChanged { output[slot].activeClipFades = fades }
+                    if viewportChanged {
+                        output[slot].enclosingScrollIndex = enclosing
+                        output[slot].enclosingVScrollIndex = vertical
+                        output[slot].enclosingHScrollIndex = horizontal
+                    }
+                    byPath[output[slot].path] = slot
+                    byId[output[slot].nodeId] = slot
+                }
+            }
         }
-        currentInstants.append(contentsOf: instants)
     }
 }

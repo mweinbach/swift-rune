@@ -3,7 +3,7 @@ import RuneMotion
 
 /// One edge-fade clip scope (`clipFade`, `clipFadeLinear`, or `scrollEdgeFade`).
 /// Positive `widths` use smoothstep (`partial`); negative `widths` use linear (`partialLinear`).
-struct EdgeFadeSpec {
+struct EdgeFadeSpec: Equatable {
     var rect: MotionRect
     var widths: SIMD4<Float>
     var strengths: SIMD4<Float>
