@@ -827,7 +827,9 @@ public final class Runtime<State> {
         get { inputMachines.focusMachine.focusHandoff }
         set { inputMachines.focusMachine.focusHandoff = newValue }
     }
-    private var prevFlatNodeIdsByPath: [String: NodeId] = [:]
+    // A provisional memo-geometry pass publishes a layout but never dispatches interaction changes.
+    // Keep the last delivered tree until focus and hover can reconcile against the final pass.
+    private var interactionTreeBeforeSettle: (nodes: [FlatNode], byPath: [String: Int])?
     internal var tabStartFocusPath: String? { webFocusTabStartPath }
     /// Focus landed on an element (`Focus::On`): Tab no longer starts from a remembered point.
     internal func clearTabStartFocusPath() { webFocusTabStartPath = nil }
@@ -1064,10 +1066,6 @@ public final class Runtime<State> {
     /// only against geometry built for these nodes.
     internal var builtHoverIds: [NodeId] = []
     internal var hoverOrderMatchesPaint = false
-    internal var hoverTrackIndices: [Int] = []
-    internal var hoverGroupIndices: [Int] = []
-    internal var hoverChangeIndices: [Int] = []
-    internal var hasAuthoredHoverCurves = false
     internal var hoverWithinPaths: [String] = []
     internal var hoverDelays = HoverDelays()
     internal var hoverPaused: Bool = false
@@ -1230,6 +1228,15 @@ public final class Runtime<State> {
         var bottomViewports: [Int] = []
         var bottomChildren: [Int: [Int]] = [:]
         var liveSources: [Int] = []
+        var focusRequests: [Int] = []
+        var focusReturns: [Int] = []
+        var focusFollowsSelection: [Int] = []
+        var autofocus: [Int] = []
+        var selectionChanges: [Int] = []
+        var hoverTracks: [Int] = []
+        var hoverGroups: [Int] = []
+        var hoverChanges: [Int] = []
+        var hasHoverCurves = false
         var inputPills: [Int] = []
         var groupOpacity: [Int] = []
         var rideTrailing: Set<NodeId> = []
@@ -4486,6 +4493,7 @@ public final class Runtime<State> {
         var nowRevealedSecureIds: Set<NodeId> = []
         var concealedSecureIndices: [Int] = []
         var observers = LayoutObservers()
+        var sameHoverOrder = pass.nodes.count == builtHoverIds.count
         pictureAspects.removeAll(keepingCapacity: true)
         for (i, node) in pass.nodes.enumerated() {
             if let pixels = node.el.pixelsPayload, node.el.layout.aspectRatio == nil,
@@ -4504,6 +4512,20 @@ public final class Runtime<State> {
                 || node.el.pillIconLookup != nil || node.el.pillColorsSpec != nil) {
                 observers.inputPills.append(i)
             }
+            if node.el.isFocusRequested && !node.effectiveInert { observers.focusRequests.append(i) }
+            if node.el.isModal || node.el.focusReturnKey != nil { observers.focusReturns.append(i) }
+            if node.el.focusGroup && node.el.isFocusFollowsSelection { observers.focusFollowsSelection.append(i) }
+            if node.el.autofocus { observers.autofocus.append(i) }
+            if !node.effectiveInert && node.el.hasSelectionChangeHandler { observers.selectionChanges.append(i) }
+            if (node.el.hoverBg?.a ?? 0) > 0 || node.el.isHoverGroup || node.el.hoverGroupShare != nil {
+                observers.hoverTracks.append(i)
+            }
+            if node.el.isHoverAlone || node.el.hoverGroupShare != nil { observers.hoverGroups.append(i) }
+            if handlers.onHoverChange != nil { observers.hoverChanges.append(i) }
+            if !observers.hasHoverCurves && (node.el.hoverWithinSpec != nil || node.el.hoverMotionSpec != nil) {
+                observers.hasHoverCurves = true
+            }
+            if sameHoverOrder && node.nodeId != builtHoverIds[i] { sameHoverOrder = false }
             if handlers.onLayout != nil || handlers.onScreenLayout != nil { observers.laidOut.append(i) }
             if handlers.onDrawnLayout != nil { observers.drawn.append(i) }
             if handlers.drawnRectUpdate != nil { observers.drawnRect.append(i) }
@@ -4553,7 +4575,8 @@ public final class Runtime<State> {
         flatNodes = pass.nodes
         let previousIndexById = nodeIndexById
         nodeIndexById = pass.indexById
-        indexHoverParticipants()
+        let previousByPath = nodeByPath
+        hoverOrderMatchesPaint = sameHoverOrder
         nativePaintTopology = nil
         layoutObservers = observers
         nodeByPath = pass.byPath
@@ -4587,9 +4610,14 @@ public final class Runtime<State> {
         }
 
         if settlePass == 0 && memo.hasInvalidatedReads(computing: { currentMemoGeometry() }) {
-            spareFlatNodes = []
-            swap(&spareFlatNodes, &prevFlatNodesSnapshot)
-            spareFlatNodes.removeAll(keepingCapacity: true)
+            if prevFocusedPath != nil || blurredFocusPath != nil || webFocusTabStartPath != nil ||
+                !hoverWithinPaths.isEmpty || !hoverDelays.isEmpty {
+                interactionTreeBeforeSettle = (prevFlatNodesSnapshot, previousByPath)
+            } else {
+                spareFlatNodes = []
+                swap(&spareFlatNodes, &prevFlatNodesSnapshot)
+                spareFlatNodes.removeAll(keepingCapacity: true)
+            }
             return .needsSettle
         }
 
@@ -4600,6 +4628,7 @@ public final class Runtime<State> {
             prevFocusedKey: prevFocusedKey,
             prevFocusVisible: prevFocusVisible,
             prevFlatNodesSnapshot: &prevFlatNodesSnapshot,
+            previousByPath: previousByPath,
             previousIndexById: previousIndexById,
             childExitOverrides: childExitOverrides,
             at: now,
@@ -4624,6 +4653,7 @@ public final class Runtime<State> {
         prevFocusedKey: String?,
         prevFocusVisible: Bool,
         prevFlatNodesSnapshot: inout [FlatNode],
+        previousByPath: [String: Int],
         previousIndexById: [NodeId: Int],
         childExitOverrides: [(childId: NodeId, parentEl: El<State>)],
         at now: Double,
@@ -4644,20 +4674,23 @@ public final class Runtime<State> {
         }
 
         virtualInputs = pass.virtualExpansion.virtualInputs
-        reconcilePrunedHoverWithin(prevNodes: prevFlatNodesSnapshot, newByPath: pass.byPath, cut: cut, at: now)
+        let previousNodes = interactionTreeBeforeSettle?.nodes ?? prevFlatNodesSnapshot
+        let previousPaths = interactionTreeBeforeSettle?.byPath ?? previousByPath
+        interactionTreeBeforeSettle = nil
+        reconcilePrunedHoverWithin(prevNodes: previousNodes, prevByPath: previousPaths, newByPath: pass.byPath, cut: cut, at: now)
 
         // Reconcile focus: keep focused key/path if still focusable & non-inert; sync TextEdit.focused; handle modal/focusReturn, autofocus & fallback.
         reconcileFocusAfterCommit(
             prevFocusedPath: prevFocusedPath,
             prevFocusedKey: prevFocusedKey,
             prevFocusVisible: prevFocusVisible,
-            prevNodes: prevFlatNodesSnapshot
+            prevNodes: previousNodes,
+            prevByPath: previousPaths
         )
         if focusedPath == prevFocusedPath { syncFocusedEditLineMode() }
-        prevFlatNodeIdsByPath = Dictionary(pass.nodes.map { ($0.path, $0.nodeId) }, uniquingKeysWith: { first, _ in first })
         syncFollows()
         if let prevPath = prevFocusedPath, prevPath != focusedPath {
-            let prevNode = prevFlatNodesSnapshot.first(where: { $0.path == prevPath })
+            let prevNode = previousPaths[prevPath].map { previousNodes[$0] }.flatMap { $0.path == prevPath ? $0 : nil }
             // Focus moved by the commit, not by input: `DIRTY`.
             handleKitFocusTransition(prevNode: prevNode, newPath: focusedPath, at: now, why: CommitWhy.dirty)
         }
@@ -5985,7 +6018,8 @@ public final class Runtime<State> {
         prevFocusedPath: String?,
         prevFocusedKey: String?,
         prevFocusVisible: Bool,
-        prevNodes: [FlatNode]
+        prevNodes: [FlatNode],
+        prevByPath: [String: Int]
     ) {
         let txBlur = pendingTxBlurRequested
         let txFocusKey = pendingTxFocusKey
@@ -6000,12 +6034,11 @@ public final class Runtime<State> {
         // Detect newly requested `.focused(true)` on non-inert mounted focusable nodes.
         var requestedFocusIdx: Int? = nil
         var nextSyncedRequests: Set<String> = []
-        for (i, node) in flatNodes.enumerated() where !node.effectiveInert {
-            if node.el.isFocusRequested {
-                nextSyncedRequests.insert(node.path)
-                if !syncedEditFocusedPaths.contains(node.path) && requestedFocusIdx == nil {
-                    requestedFocusIdx = i
-                }
+        for i in layoutObservers.focusRequests {
+            let path = flatNodes[i].path
+            nextSyncedRequests.insert(path)
+            if requestedFocusIdx == nil && !syncedEditFocusedPaths.contains(path) {
+                requestedFocusIdx = i
             }
         }
         syncedEditFocusedPaths = nextSyncedRequests
@@ -6023,7 +6056,8 @@ public final class Runtime<State> {
         }
         focusReturnStack = keptReturns
         var openedModalThisCommit = false
-        for node in flatNodes where (node.el.isModal || node.el.focusReturnKey != nil) {
+        for i in layoutObservers.focusReturns {
+            let node = flatNodes[i]
             if !focusReturnStack.contains(where: { $0.ownerPath == node.path }) {
                 if node.el.isModal { openedModalThisCommit = true }
                 let zeroSentinel = !node.el.isModal && node.el.focusReturnKey != nil && node.targetRect.width == 0 && node.targetRect.height == 0
@@ -6067,7 +6101,7 @@ public final class Runtime<State> {
         // text element by its key, then restore the link within it after the layout commit.
         let focusedOwnerKey: String?
         if focusedLinkIndex != nil, let path = focusedPath {
-            focusedOwnerKey = prevNodes.first(where: { $0.path == path })?.key
+            focusedOwnerKey = prevByPath[path].flatMap { prevNodes[$0].path == path ? prevNodes[$0].key : nil }
         } else {
             focusedOwnerKey = focusedKey
         }
@@ -6120,7 +6154,8 @@ public final class Runtime<State> {
 
         // Follow app selection changes (`focus_follows`) when focused inside a `focusGroup` (`focus.rs:1400`).
         var nextSelectedByGroup: [String: String] = [:]
-        for gNode in flatNodes where gNode.el.focusGroup && gNode.el.isFocusFollowsSelection {
+        for i in layoutObservers.focusFollowsSelection {
+            let gNode = flatNodes[i]
             let members = groupMemberIndices(groupIndex: gNode.index)
             if let selIdx = members.first(where: { flatNodes[$0].el.isFocusSelected }) {
                 let selPath = flatNodes[selIdx].path
@@ -6169,9 +6204,8 @@ public final class Runtime<State> {
         }
 
         if txFocusKey == nil && nextIdx == nil {
-            for (i, node) in flatNodes.enumerated() where node.el.autofocus && canFocusIndex(i) {
-                if !autofocusAppliedPaths.contains(node.path) {
-                    autofocusAppliedPaths.insert(node.path)
+            for i in layoutObservers.autofocus where canFocusIndex(i) {
+                if autofocusAppliedPaths.insert(flatNodes[i].path).inserted {
                     nextIdx = i
                     break
                 }
@@ -6210,7 +6244,7 @@ public final class Runtime<State> {
         }
 
         if !txBlur && nextIdx == nil {
-            if let fallbackIdx = focusFallback(prevNodes: prevNodes, prevFocusedPath: prevFocusedPath) {
+            if let fallbackIdx = focusFallback(prevNodes: prevNodes, prevByPath: prevByPath, prevFocusedPath: prevFocusedPath) {
                 nextIdx = fallbackIdx
                 focusVisible = focusKeyboard
             }
@@ -6270,7 +6304,7 @@ public final class Runtime<State> {
     }
 
     /// Focus fallback when the control holding focus (or recently blurred by Escape) leaves the tree (`focus.rs::focus_fallback`).
-    private func focusFallback(prevNodes: [FlatNode], prevFocusedPath: String?) -> Int? {
+    private func focusFallback(prevNodes: [FlatNode], prevByPath: [String: Int], prevFocusedPath: String?) -> Int? {
         let gone: String?
         if let fp = prevFocusedPath {
             gone = fp
@@ -6284,16 +6318,13 @@ public final class Runtime<State> {
         // The control that held focus is still in the tree (e.g. blurred/collapsed while staying): hand nothing on.
         if nodeByPath[gone] != nil { return nil }
 
-        guard let at = prevNodes.firstIndex(where: { $0.path == gone }) else {
-            // Offscreen virtualized field had no layout node; only a pathless moved stub climbs the new tree (`r384`, `#842`).
-            guard let id = prevFlatNodeIdsByPath[gone],
-                  let oldNode = prevNodes.first(where: { $0.nodeId == id }),
-                  oldNode.path.isEmpty else {
-                return nil
-            }
-            return fallbackInNew(gone: gone)
-        }
+        // An offscreen virtual field has no previous slot. A moved stub retains its old slot
+        // but loses its path, so only that case climbs the new tree (`r384`, `#842`).
+        guard let at = prevByPath[gone] else { return nil }
         let atNode = prevNodes[at]
+        guard atNode.path == gone else {
+            return atNode.path.isEmpty ? fallbackInNew(gone: gone) : nil
+        }
         if prevFocusedPath == nil && !(atNode.el.handlers.editLens != nil || atNode.el.role == .textInput) {
             return nil
         }

@@ -1289,15 +1289,12 @@ internal extension Runtime {
             inputObserverDepth -= 1
         }
 
-        let watchers: [(path: String, el: El<State>)] = flatNodes.compactMap { n in
-            guard !n.effectiveInert, n.el.hasSelectionChangeHandler else { return nil }
-            return (n.path, n.el)
-        }
         let wasDragging = selectionState.lastDispatchedDragging
         let isDragging = selectionState.coordinator.phase.isDragging
         selectionState.lastDispatchedDragging = isDragging
         // Nobody listens and nobody heard a selection: nothing to tell.
-        if watchers.isEmpty && selectionState.coordinator.heardByPath.isEmpty { return }
+        if layoutObservers.selectionChanges.isEmpty && selectionState.coordinator.heardByPath.isEmpty { return }
+        let watchers = layoutObservers.selectionChanges.map { i in (path: flatNodes[i].path, el: flatNodes[i].el) }
         let selectedPaths = Set(computeActiveSelectionRangesByPath().keys)
         let changes = selectionState.coordinator.collectSelectionChanges(
             elements: watchers, selectedPaths: selectedPaths, released: wasDragging && !isDragging,

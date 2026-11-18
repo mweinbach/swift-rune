@@ -145,6 +145,47 @@ struct HoverDelayParityTests {
         #expect(rt.state == ["back in", "raised in", "back out", "raised out"])
     }
 
+    @Test("Pruning through a memo geometry settle uses the last delivered focus and hover tree", arguments: [false, true])
+    @MainActor
+    func prunedObserversAndFocusAcrossSettle(native: Bool) {
+        struct Model {
+            var open = true
+            var log: [String] = []
+        }
+        let rt = Runtime(state: Model(), viewport: Vec2(100, 100)) { state, _ in
+            func observer(_ name: String) -> El<Model> {
+                el().key(name).size(40, 40).pin(top: 0, left: 0).bg(.white)
+                    .onHoverChange { state, inside, tx in
+                        state.log.append(name + (inside ? " in" : " out"))
+                        tx.liveOnly()
+                    }
+            }
+            let read: El<Model> = memo("read", deps: 0) {
+                _ = layoutRect("sizer")
+                return el().size(1, 1)
+            }
+            var root: El<Model> = col().size(100, 100).child(el().key("sizer").size(state.open ? 10 : 20, 10))
+            if state.open {
+                root = root.child(observer("raised").raise().focusable().autofocus()).child(observer("back"))
+            }
+            return root.child(el().key("next").size(20, 10).focusable()).child(read)
+        }
+        func frame(_ t: Double) {
+            if native { _ = rt.renderFrame(at: t) } else { _ = rt.frame(at: t) }
+        }
+        frame(0)
+        #expect(rt.focusedKey == "raised")
+        rt.pointerMove(to: Vec2(5, 5), at: 0.01)
+        frame(0.02)
+        #expect(rt.state.log == ["back in", "raised in"])
+        let priorCommits = rt.viewCommitCount
+        rt.update(at: 0.03) { state, _ in state.open = false }
+        frame(0.04)
+        #expect(rt.viewCommitCount >= priorCommits + 2)
+        #expect(rt.state.log == ["back in", "raised in", "raised out", "back out"])
+        #expect(rt.focusedKey == "next")
+    }
+
     @Test("Runtime: onHoverChange descendants, chainHoverChangeAny, delayed hover wakes, pruning & blur")
     func runtimeOnHoverChangeAndDelays() {
         struct S {

@@ -355,7 +355,7 @@ extension Runtime {
             : nil
         var alonePath: String? = nil
         var sharedHoverKeys: Set<String> = []
-        for i in hoverGroupIndices {
+        for i in layoutObservers.hoverGroups {
             let node = flatNodes[i]
             if node.effectiveInert { continue }
             let inside = GroupHoverContext.isPtrInside(
@@ -392,22 +392,6 @@ extension Runtime {
         )
     }
 
-    internal func indexHoverParticipants() {
-        hoverTrackIndices.removeAll(keepingCapacity: true)
-        hoverGroupIndices.removeAll(keepingCapacity: true)
-        hoverChangeIndices.removeAll(keepingCapacity: true)
-        hasAuthoredHoverCurves = false
-        for (i, node) in flatNodes.enumerated() {
-            let el = node.el
-            if (el.hoverBg?.a ?? 0) > 0 || el.isHoverGroup || el.hoverGroupShare != nil { hoverTrackIndices.append(i) }
-            if el.isHoverAlone || el.hoverGroupShare != nil { hoverGroupIndices.append(i) }
-            if el.hasAuthoredHandlers, el.handlers.onHoverChange != nil { hoverChangeIndices.append(i) }
-            if el.hoverWithinSpec != nil || el.hoverMotionSpec != nil { hasAuthoredHoverCurves = true }
-        }
-        hoverOrderMatchesPaint = flatNodes.count == builtHoverIds.count
-            && flatNodes.lazy.map(\.nodeId).elementsEqual(builtHoverIds)
-    }
-
     internal func publishHoverOrder() {
         guard !hoverOrderMatchesPaint else { return }
         builtHoverIds = flatNodes.map(\.nodeId)
@@ -418,7 +402,7 @@ extension Runtime {
         inheritedHoverCurvesByPath.removeAll(keepingCapacity: true)
         anchorHoverWithinByKey.removeAll(keepingCapacity: true)
         hoverCurvesById.removeAll(keepingCapacity: true)
-        guard hasAuthoredHoverCurves else { return }
+        guard layoutObservers.hasHoverCurves else { return }
 
         var byKey: [String: Int] = [:]
         for (i, n) in nodes.enumerated() {
@@ -560,7 +544,7 @@ extension Runtime {
         // The hover tracks that would change (`hover_flip`): one carried by moving layout holds,
         // except a leave from an element turned inert (`Flip::now`).
         let ctx = hoverFlipContext()
-        for idx in hoverTrackIndices where !hoverIsExiting(idx) {
+        for idx in layoutObservers.hoverTracks where !hoverIsExiting(idx) {
             let on = hoverFlipOn(idx, ctx)
             let target: Float = on ? 1.0 : 0.0
             let now = !on && !hoverAllowed(idx)
@@ -689,7 +673,7 @@ extension Runtime {
         let ctx = hoverFlipContext()
         var unseen: [Bool]? = nil
         var retargeted = false
-        for i in hoverTrackIndices where !hoverIsExiting(i) {
+        for i in layoutObservers.hoverTracks where !hoverIsExiting(i) {
             let node = flatNodes[i]
             let nid = node.nodeId
             let trackId = Self.hoverTrackId(nid)
@@ -834,7 +818,7 @@ extension Runtime {
     }
 
     internal func computeHoverWithin() -> (inside: [String], entering: [Int])? {
-        let hasAny = !hoverWithinPaths.isEmpty || !hoverDelays.isEmpty || !hoverChangeIndices.isEmpty
+        let hasAny = !hoverWithinPaths.isEmpty || !hoverDelays.isEmpty || !layoutObservers.hoverChanges.isEmpty
         guard hasAny else { return nil }
 
         var inside: [String] = []
@@ -842,7 +826,7 @@ extension Runtime {
         if pointerPosition.x > -9000 && pointerPosition.y > -9000 {
             // Hover-change observers follow their own drawn bounds, including overlapping siblings.
             var hits: [(index: Int, order: Int)] = []
-            for index in hoverChangeIndices where hoverAllowed(index) {
+            for index in layoutObservers.hoverChanges where hoverAllowed(index) {
                 let node = flatNodes[index]
                 if let geometry = hitGeometryByPath[node.path] {
                     if !geometry.isExiting, geometry.opacity > 0.001, geometry.contains(pointerPosition) {
@@ -991,6 +975,7 @@ extension Runtime {
     /// if the pruned element had already heard enter (`hover.rs:189-197`).
     internal func reconcilePrunedHoverWithin(
         prevNodes: [FlatNode],
+        prevByPath: [String: Int],
         newByPath: [String: Int],
         cut: Bool,
         at now: Double
@@ -1000,7 +985,17 @@ extension Runtime {
             hoverDelays.clear()
             return
         }
-        for old in prevNodes where newByPath[old.path] == nil {
+        guard !hoverWithinPaths.isEmpty || !hoverDelays.isEmpty else { return }
+        // Paint order and timer start order can differ from the previous tree's callback order.
+        var missing: Set<Int> = []
+        for path in hoverWithinPaths where newByPath[path] == nil {
+            if let index = prevByPath[path] { missing.insert(index) }
+        }
+        for path in hoverDelays.paths where newByPath[path] == nil {
+            if let index = prevByPath[path] { missing.insert(index) }
+        }
+        for i in missing.sorted() {
+            let old = prevNodes[i]
             let inside = hoverWithinPaths.firstIndex(of: old.path).map { idx -> Bool in
                 hoverWithinPaths.remove(at: idx)
                 return true
