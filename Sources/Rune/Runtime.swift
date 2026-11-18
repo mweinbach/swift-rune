@@ -3247,15 +3247,20 @@ public final class Runtime<State> {
         var flatCaptures: [FlatMemoCapture<State>] = []
         var appliedMemoSpans: [(span: MemoFlatSpan<State>, start: Int)] = []
         var reusedFlatRanges: [(current: Range<Int>, previous: Range<Int>)] = []
+        // An entry records what a newly mounted descendant's scale animation becomes on replay.
+        // Its first frame still uses the authored mount animation and any entrance delay.
+        var mountedScales: [Int: Anim<Vec2>?] = [:]
         let flatFrame = FlatMemoFrame(commit: commitKind, cut: commitCut, motion: commitMotion,
             colorSpring: commitColorSpring, reducedMotion: reducedMotion, scale: pixelScale,
             fontEpoch: textSystem.currentFontEpoch, language: textSystem.language, smoothing: textSystem.smoothing)
         let canReplayFlat = !activeResizeSnap && !pendingResizeRelayout && !pictureOnlyRelayout &&
             pixelsAspectSnapIds.isEmpty && activeFlightIds.isEmpty && launchedFlightIds.isEmpty &&
             pendingLaunches.isEmpty && !scrollRequestsState.keeps.contains { $0.hold != nil }
+        let checkFrameTracks = (commitKind.snaps || commitKind.lands) && scene.store.activeTrackCount > 0 &&
+            scene.store.hasTracks(for: Props.FRAME)
         func stableForFlatReplay(_ id: NodeId) -> Bool {
             prevMountedIds.contains(id) &&
-                (!(commitKind.snaps || commitKind.lands) || !scene.store.isAnimating(id, Props.FRAME))
+                (!checkFrameTracks || !scene.store.isAnimating(id, Props.FRAME))
         }
         var naturalLaunchTargets: [NodeId: MotionRect] = [:]
         let measureLaunches = !launchedFlightIds.isEmpty || !pendingLaunches.isEmpty
@@ -3682,7 +3687,7 @@ public final class Runtime<State> {
                 : (paintSp ?? commitColorSpring ?? nodeStyleSpring ?? commitMotion?.spring ?? MotionTokens.DEFAULT)
             let keepsFlights = !activeResizeSnap && commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
             func isRunningSameSceneFrame() -> Bool {
-                guard self.scene.hasNode(nid),
+                guard checkFrameTracks, self.scene.hasNode(nid),
                       self.scene.store.isAnimating(nid, Props.FRAME),
                       let curTarget = self.scene.store.target(nid, Props.FRAME) else {
                     return false
@@ -3779,8 +3784,13 @@ public final class Runtime<State> {
                 layoutAnimSpec = nil
             }
             let isFreshMount = !prevMountedIds.contains(nid)
-            var specScaleAnim: Anim<Vec2>? = selfInstantLayoutOrStyle ? nil : el.scaleMotionAnim
-            if specScaleAnim == nil && styleSp == nil && !selfInstantLayoutOrStyle && !commitKind.lands && !isFreshMount {
+            let captureMount = isFreshMount && rowReuseMode == .remount && canReplayFlat &&
+                !commitKind.lands && item.memoPaths != nil &&
+                (!checkFrameTracks || !scene.store.isAnimating(nid, Props.FRAME))
+            let authoredScaleAnim = selfInstantLayoutOrStyle ? nil : el.scaleMotionAnim
+            var specScaleAnim = authoredScaleAnim
+            if specScaleAnim == nil && styleSp == nil && !selfInstantLayoutOrStyle && !commitKind.lands &&
+                (!isFreshMount || captureMount) {
                 let scaleCurve: Curve
                 if let laCurve = layoutAnimSpec?.x.curve, laCurve.logicalDuration > 0 {
                     scaleCurve = laCurve
@@ -3790,6 +3800,10 @@ public final class Runtime<State> {
                     scaleCurve = Curve.from(MotionTokens.DEFAULT)
                 }
                 specScaleAnim = Anim<Vec2>(curve: scaleCurve)
+            }
+            if captureMount {
+                mountedScales.updateValue(specScaleAnim, forKey: myIndex)
+                specScaleAnim = authoredScaleAnim
             }
             let specTransition: Transition?
             if ancestorInstant {
@@ -3879,7 +3893,7 @@ public final class Runtime<State> {
                     underFold: item.parentUnderFold, styleSpring: nodeStyleSpring)
                 if let span = memoPaths.span, span.context == context, span.specs.first?.parent == nid,
                    MemoFlatSpan<State>.equalLayouts(span.children, childLayouts),
-                   ((!commitKind.snaps && !commitKind.lands && span.appliedRange(at: layoutCommitGen) != nil) ||
+                   ((!checkFrameTracks && span.appliedRange(at: layoutCommitGen) != nil) ||
                     span.nodes.allSatisfy({ stableForFlatReplay($0.nodeId) })) {
                     let start = newFlat.count
                     if let previous = span.appliedRange(at: layoutCommitGen) {
@@ -3937,8 +3951,9 @@ public final class Runtime<State> {
 
         for capture in flatCaptures {
             capture.owner.span = MemoFlatSpan(capture, flat: newFlat, specs: specs,
-                                               instants: ancestorInstants, stable: stableForFlatReplay)
-            if let span = capture.owner.span {
+                                               instants: ancestorInstants, mountedScales: mountedScales,
+                                               stable: stableForFlatReplay)
+            if let span = capture.owner.span, span.matchesCaptureSpecs {
                 appliedMemoSpans.append((span, capture.root + 1))
             }
         }

@@ -236,6 +236,46 @@ struct MemoLayoutSpanTests {
         #expect(first.children[0].layout.localSize.x == 80)
     }
 
+    @Test("Entering row descendants replay on the next wheel with their mounted motion specs",
+          arguments: [TxCommit.instant, .animate, .unprompted])
+    func newlyMountedRowsReplay(commit: TxCommit) {
+        func make() -> Runtime<Int> {
+            Runtime(state: 0, viewport: Vec2(200, 120), pixelScale: 1) { _, _ in
+                col().key("scroll").sizeFull().scrollY().child(
+                    col().key("rows").wFull().virtualRows(
+                        count: 1_000, estimatedRowHeight: 20, key: { _, i in "r-\(i)" },
+                        build: { _, _ in
+                            col().wFull().h(20).child(el().key("child").size(12, 12).enterDelay(0.15)
+                                .transition(Transition(insertion: .opacity(0), removal: .identity)))
+                        }
+                    )
+                )
+            }
+        }
+        let kept = make(), rebuilt = make()
+        func rows() -> Set<String> {
+            Set(kept.elements().compactMap { !$0.exiting && $0.key?.hasPrefix("r-") == true ? $0.key : nil })
+        }
+        _ = kept.frame(at: 0)
+        _ = rebuilt.frame(at: 0)
+        for i in 1...5 {
+            let before = rows()
+            let t = Double(i) / 30
+            for runtime in [kept, rebuilt] {
+                runtime.wheel(WheelEvent(dx: 0, dy: -160), at: Vec2(80, 80), now: t)
+                if runtime === rebuilt { runtime.invalidate(at: t) }
+                runtime.pendingCommitKind = commit
+                _ = runtime.frame(at: t)
+            }
+            #expect(kept.elements() == rebuilt.elements())
+            if i >= 3 {
+                let overlap = before.intersection(rows())
+                #expect(!overlap.isEmpty)
+                #expect(kept.replayedFlatMemoNodes == overlap.count)
+            }
+        }
+    }
+
     @Test("Mutable children and state-backed inputs invalidate a memo layout span")
     func changedChildrenAndInputFallback() {
         let cache = MemoCache()

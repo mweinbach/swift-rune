@@ -45,6 +45,7 @@ final class MemoFlatSpan<State> {
     let nodes: [Node]
     let specs: [NodeSpec]
     let instants: [Bool]
+    let matchesCaptureSpecs: Bool
     let clipsChildren: [Bool]
     // A retry or settle pass can measure a span without installing it in the runtime.
     // Only the commit that swapped in these nodes may certify their previous indices.
@@ -62,10 +63,11 @@ final class MemoFlatSpan<State> {
     }
 
     init?(_ capture: FlatMemoCapture<State>, flat: [Node], specs: [NodeSpec], instants: [Bool],
-          stable: (NodeId) -> Bool) {
+          mountedScales: [Int: Anim<Vec2>?], stable: (NodeId) -> Bool) {
         let start = capture.root + 1
         var end = start
         var clips: [Bool] = []
+        var hasFreshMount = false
         while end < flat.count, let parent = flat[end].parentIndex, parent >= capture.root {
             let node = flat[end]
             let el = node.el
@@ -79,7 +81,9 @@ final class MemoFlatSpan<State> {
                 capture.owner.allowsSpan = false
                 return nil
             }
-            guard stable(node.nodeId) else { return nil }
+            if mountedScales.index(forKey: end) != nil {
+                hasFreshMount = true
+            } else if !stable(node.nodeId) { return nil }
             clips.append(el.layout.clipOverflow || el.clipRadius != nil || el.clipCorners != nil)
             end += 1
         }
@@ -92,7 +96,20 @@ final class MemoFlatSpan<State> {
         unscrolledOrigin = parent.unscrolledRect.origin
         committedOrigin = parent.committedLayoutTarget.origin
         self.nodes = Array(flat[start..<end])
-        self.specs = Array(specs[start..<end])
+        var changedSpec = false
+        var replaySpecs = Array(specs[start..<end])
+        if hasFreshMount {
+            for i in replaySpecs.indices {
+                if let scale = mountedScales[start + i],
+                   replaySpecs[i].scaleAnim != scale || replaySpecs[i].enterDelay != 0 {
+                    changedSpec = true
+                    replaySpecs[i].scaleAnim = scale
+                    replaySpecs[i].enterDelay = 0
+                }
+            }
+        }
+        matchesCaptureSpecs = !changedSpec
+        self.specs = replaySpecs
         self.instants = Array(instants[start..<end])
         clipsChildren = clips
     }
