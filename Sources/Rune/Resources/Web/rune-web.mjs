@@ -568,7 +568,18 @@ export function mountRuneBrowser(canvas, instance, { backend, shaderDirectory, r
         canvas.addEventListener('keyup', event => {
             if (!event.isComposing && send({ ...keyEvent(event), kind: 'keyup' })) event.preventDefault();
         }, options);
-        window.addEventListener('blur', () => send({ kind: 'focuslost' }), options);
+        // The canvas, text mirror, and page controls share one browser window.
+        const focusDocument = canvas.ownerDocument;
+        const focusWindow = focusDocument.defaultView ?? window;
+        const syncWindowFocus = event => {
+            const focused = focusDocument.hasFocus();
+            if (!send({ kind: 'focus', focused }) && event?.type === 'blur' && !focused) {
+                send({ kind: 'focuslost' }); // Older reactors only accept the keyboard reset.
+            }
+        };
+        focusWindow.addEventListener('focus', syncWindowFocus, options);
+        focusWindow.addEventListener('blur', syncWindowFocus, options);
+        queueMicrotask(() => { if (!disposed) syncWindowFocus(); });
         if (!popup) canvas.addEventListener('contextmenu', event => event.preventDefault(), options);
         function localPoint(event) {
             const rect = canvas.getBoundingClientRect();

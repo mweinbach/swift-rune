@@ -5,14 +5,21 @@
 import { mountRuneBrowser } from '../../Sources/Rune/Resources/Web/rune-web.mjs';
 const canvas = document.querySelector('canvas'), result = document.querySelector('#result');
 const memory = new WebAssembly.Memory({initial:1}), encoder = new TextEncoder(), decoder = new TextDecoder();
-let app, title, lastTitle, resize, full, fit, documentMode, heightRequest;
+let app, title, lastTitle, resize, full, fit, documentMode, heightRequest, field;
+const windowFocus = [];
 function write(text) {
     const bytes = encoder.encode(text);
     new Uint8Array(memory.buffer, 0, bytes.length).set(bytes);
     return bytes.length;
 }
 const instance = {exports:{memory, rune_web_enable(){}, __main_void:()=>0, rune_web_buffer:()=>0,
-    rune_web_field:()=>0, rune_web_frame:()=>0,
+    rune_web_field() {
+        if (!field) return 0;
+        const size = write(JSON.stringify({field}));
+        field = undefined;
+        return size;
+    },
+    rune_web_frame:()=>0,
     rune_web_config:()=>write(JSON.stringify({canvasId:'scene', fullViewport:full, fitContentHeight:fit, webDocument:documentMode})),
     rune_web_window_title() {
         if (lastTitle === title) return -1;
@@ -26,6 +33,7 @@ const instance = {exports:{memory, rune_web_enable(){}, __main_void:()=>0, rune_
     },
     rune_web_event(size) {
         const event = JSON.parse(decoder.decode(new Uint8Array(memory.buffer, 0, size)));
+        if (event.kind === 'focus' || event.kind === 'focuslost') windowFocus.push(event);
         if (event.kind === 'resize') resize = event;
         if (event.kind === 'key') title = '';
         return 1;
@@ -45,6 +53,7 @@ try {
     app = mountRuneBrowser(null, instance, {backend:'cpu'});
     await app.ready;
     check(document.title === title, 'initial title');
+    check(windowFocus.length === 1 && windowFocus[0].focused === document.hasFocus(), 'initial document focus');
     const initial = canvas.getBoundingClientRect();
     check(initial.width === visualViewport.width && initial.height === visualViewport.height, 'initial viewport');
     result.textContent = 'Apply system safe area';
@@ -62,10 +71,21 @@ try {
     app.dispose();
     check(document.title === 'Original page' && canvas.style.height === '40px' && !canvas.style.position, 'release full viewport');
     title = 'Embedded'; lastTitle = undefined; full = false; resize = undefined;
+    field = {key:'editor', text:'Rune', base:0, anchor:0, focus:4, secure:false};
     app = mountRuneBrowser(null, instance, {backend:'cpu'});
     await app.ready;
     check(document.title === 'Original page' && resize?.insets === undefined && canvas.clientHeight === 40 &&
         resize.x === canvas.parentElement.clientWidth && canvas.style.touchAction === 'none', 'named embedded width and page ownership');
+    const pageButton = document.createElement('button');
+    document.body.append(pageButton);
+    canvas.focus();
+    const focusCount = windowFocus.length;
+    for (const control of [document.querySelector('textarea:not([hidden])'), pageButton, canvas]) {
+        control.focus();
+        check(document.activeElement === control, 'focus reached each embedded control');
+        check(windowFocus.length === focusCount, 'in-page focus transfer changed window focus');
+    }
+    pageButton.remove();
     app.dispose();
     check(canvas.style.width === '90px', 'release embedded width');
     fit = true; full = true; lastTitle = undefined; heightRequest = 117.5;
@@ -87,7 +107,7 @@ try {
         document.body.style.margin === '0px' && canvas.clientHeight > 512, 'document title, native scroller and unchanged page band');
     app.dispose();
     check(document.title === 'Original page' && !document.body.style.margin, 'release document title and body');
-    result.textContent = 'PASS system CSS safe-area insets, native zoom, panned origin, dynamic title, embedded fitted heights and document restoration';
+    result.textContent = 'PASS window and control focus, system CSS safe-area insets, native zoom, panned origin, dynamic title, embedded fitted heights and document restoration';
 } catch(error) { result.textContent = 'FAIL ' + error.stack; }
 finally { app?.dispose(); }
 </script>

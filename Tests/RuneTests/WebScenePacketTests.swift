@@ -331,6 +331,40 @@ import RuneRef
         ])
     }
 
+    @MainActor @Test func browserWindowFocusRecolorsSelectionAndDeliversOneKeyLoss() throws {
+        struct Model {
+            var focus: [Bool] = []
+            var losses = 0
+        }
+        let style = SelectionStyle(active: .white, activeInk: .black, inactive: .black, inactiveInk: .white)
+        let spec = AppSpec(title: "Window focus", size: Vec2(120, 40), state: Model()) { _, _ in
+            text("Rune").key("label").sizeFull().focusable().autofocus().selectable().selectionStyle(style)
+                .onWindowFocus { state, focused, _ in state.focus.append(focused) }
+                .onPhysicalInput { state, input, _ in
+                    if input == .focusLost { state.losses += 1 }
+                    return false
+                }
+        }
+        let host = WebAppHost(spec: spec)
+        let session = WebBrowserSession(host)
+        _ = try session.renderFrame(at: 0)
+        host.runtime.update { _, tx in tx.selectText("label", range: 0..<4) }
+        for (index, focused) in [true, false, false, true].enumerated() {
+            let time = Double(index + 1)
+            let event = Data("{\"kind\":\"focus\",\"focused\":\(focused)}".utf8)
+            #expect(session.send(event, at: time))
+            let rendered = try session.renderFrame(at: time)
+            let frame = try #require(rendered)
+            let glyphs = frame.instances.filter { $0.params.y == KIND_GLYPH }
+            let ink = (focused ? Color.black : .white).simd4(srgb: frame.srgbBlend)
+            #expect(glyphs.count == 4)
+            #expect(glyphs.allSatisfy { $0.fill == ink })
+            #expect(host.runtime.selectedText() == "Rune")
+        }
+        #expect(host.runtime.state.focus == [true, false, true])
+        #expect(host.runtime.state.losses == 1)
+    }
+
     @MainActor @Test func browserPreferencesAndScaleReachTheRuntime() {
         let spec = AppSpec(title: "Preferences", size: Vec2(200, 100), state: ()) { _, _ in el() }
         let host = WebAppHost(spec: spec)

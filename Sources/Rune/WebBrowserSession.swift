@@ -15,6 +15,7 @@ final class WebBrowserSession {
         var x, y, dx, dy, scale: Float?
         var insets: [Float]?
         var repeated: Bool?
+        var focused: Bool?
         var deltaMode: UInt32?
         var dark, reducedMotion, contrast, hover, coarse: Bool?
         var shift, ctrl, alt, cmd, field: Bool?
@@ -147,6 +148,9 @@ final class WebBrowserSession {
                 #endif
                 return host.handleKey(code: event.code ?? "", key: key, mods: mods, fromField: event.field == true,
                                       pressed: event.kind == "key", repeated: event.repeated == true, at: now)
+            case "focus":
+                host.runtime.windowFocus(event.focused ?? false, at: now)
+                return true
             case "focuslost":
                 _ = host.runtime.physicalInput(.focusLost, at: now)
                 return true
