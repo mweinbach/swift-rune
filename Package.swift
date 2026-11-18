@@ -304,6 +304,10 @@ let package = Package(
                 .copy("Resources/Fonts"),
                 .copy("Resources/Web"),
             ],
+            // Let browser apps specialize Rune's layout and frame code for their own state type.
+            swiftSettings: [
+                .unsafeFlags(["-enable-cmo-everything"], .when(platforms: [.wasi], configuration: .release)),
+            ],
             linkerSettings: [
                 .linkedLibrary("_FoundationICU", .when(platforms: [.linux, .windows, .android, .wasi])),
                 .linkedLibrary("user32", .when(platforms: [.windows])),
