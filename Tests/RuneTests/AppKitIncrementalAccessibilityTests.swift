@@ -46,13 +46,49 @@ struct AppKitIncrementalAccessibilityTests {
         #expect(host.accessibilityHitTest(.init(x: 4, y: 10), in: parent) as? RuneNSAccessibilityElement === oldCell)
         #expect(dropped.supportedActions.isEmpty)
         #if DEBUG
-        #expect(host.lastUpdatedElements == 2)
+        #expect(host.lastUpdatedElements == 0)
         #endif
         host.update(tree: next, parentView: parent, callbacks: callbacks)
         #if DEBUG
         #expect(host.lastVisitedNodes == 1)
         #expect(host.lastUpdatedElements == 0)
         #endif
+    }
+
+    @Test func readerQueriesMaterializeCurrentChildrenAndHitTargetsOnDemand() throws {
+        let host = MacOSAccessibilityHost(), view = NSView()
+        let callbacks = MacOSAccessibilityCallbacks(onSelectText: nil, onSetValue: nil) { _, _ in }
+        func scene(_ firstRow: Int) -> AccessibilityNode {
+            node("list", role: .list, children: (firstRow..<(firstRow + 100)).map { i in
+                node("row-\(i)", role: .listItem, children: [
+                    node("button-\(i)", role: .button, frame: .fromXYWH(4, Float(i * 10), 50, 10),
+                         label: "Line \(i)", actions: [.press])
+                ])
+            })
+        }
+        host.onActivate = { host.update(tree: scene(0), parentView: view, callbacks: callbacks) }
+        #expect(host.accessibilityFocusedUIElement() == nil)
+        #if DEBUG
+        #expect(host.materializedCount == 0)
+        #endif
+        host.update(tree: scene(10), parentView: view, callbacks: callbacks)
+        let hit = try #require(host.accessibilityHitTest(CGPoint(x: 12, y: 145), in: view) as? RuneNSAccessibilityElement)
+        #expect(hit.nodeId == "button-14")
+        #expect(hit.accessibilityLabel() == "Line 14")
+        #expect(hit.accessibilityPerformPress())
+        #if DEBUG
+        #expect(host.materializedCount == 3)
+        #endif
+        let root = try #require(host.accessibilityChildren().first as? RuneNSAccessibilityElement)
+        #expect(children(of: root).count == 100)
+        #expect(children(of: children(of: root)[4]).first === hit)
+        #if DEBUG
+        #expect(host.materializedCount == 102)
+        #endif
+        host.update(tree: scene(20), parentView: view, callbacks: callbacks)
+        #expect(!hit.isAccessibilityElement())
+        #expect(!hit.accessibilityPerformPress())
+        #expect(children(of: root).first?.nodeId == "row-20")
     }
 
     @Test func reorderedOrReparentedDescendantsKeepTheirHandlesAndCurrentParent() throws {

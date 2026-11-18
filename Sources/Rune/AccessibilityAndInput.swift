@@ -643,6 +643,22 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
         let setValue: (@Sendable (String, AccessibilityActionValue) -> Void)?
     }
 
+    /// The native host resolves direct children on the first AppKit query. A client can
+    /// keep this proxy and ask again after the mounted child list has changed.
+    private var childrenProvider: (@MainActor @Sendable () -> [Any])?
+
+    internal func resolveChildren(using provider: (@MainActor @Sendable () -> [Any])?) {
+        actionsLock.withLock { childrenProvider = provider }
+    }
+
+    public override func accessibilityChildren() -> [Any]? {
+        guard let provider = actionsLock.withLock({ childrenProvider }) else { return super.accessibilityChildren() }
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated { MacOSUnsafeSendableBox(provider()) }.value
+        }
+        return DispatchQueue.main.sync { MacOSUnsafeSendableBox(provider()) }.value
+    }
+
     private let actionsLock = NSLock()
     private var actionState: Actions
     private var actions: Actions { actionsLock.withLock { actionState } }
@@ -702,6 +718,7 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
     /// A client may keep its handle after the underlying node is gone.
     internal func invalidate() {
         update(node: AccessibilityNode(id: nodeId, role: .presentation), parent: nil, onAction: nil, onSetValue: nil)
+        resolveChildren(using: nil)
         setAccessibilityChildren([])
         setAccessibilityElement(false)
     }

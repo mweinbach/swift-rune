@@ -574,18 +574,18 @@ internal final class MacOSAccessibilityCallbacks: Sendable {
 @MainActor
 private final class AppKitAccessibilityEntry {
     let identity: AccessibilityIdentity
-    var element: RuneNSAccessibilityElement
+    var element: RuneNSAccessibilityElement?
     var node: AccessibilityNode
-    weak var parent: AnyObject?
+    weak var parent: AppKitAccessibilityEntry?
     var children: [AppKitAccessibilityEntry] = []
+    var nativeChildren: [RuneNSAccessibilityElement]?
     var focused: AccessibilityIdentity?
     var pass: UInt64 = 0
     var usesCallbacks = false
 
-    init(_ identity: AccessibilityIdentity, node: AccessibilityNode, element: RuneNSAccessibilityElement) {
+    init(_ identity: AccessibilityIdentity, node: AccessibilityNode) {
         self.identity = identity
         self.node = node
-        self.element = element
     }
 }
 
@@ -622,7 +622,7 @@ private extension AccessibilityNode {
 public final class MacOSAccessibilityHost {
     private var previousTree: AccessibilityNode?
     private var lastFocusedId: AccessibilityIdentity?
-    private var rootElements: [RuneNSAccessibilityElement] = []
+    private weak var rootView: NSView?
     private var entries: [AccessibilityIdentity: AppKitAccessibilityEntry] = [:]
     private var roots: [AppKitAccessibilityEntry] = []
     private var pass: UInt64 = 0
@@ -645,6 +645,7 @@ public final class MacOSAccessibilityHost {
     #if DEBUG
     internal private(set) var lastUpdatedElements = 0
     internal private(set) var lastVisitedNodes = 0
+    internal private(set) var materializedCount = 0
     #endif
     /// The workspace's display options observer (`a11y/macos.rs` `Adapter(_, DisplayOptions)`),
     /// removed with the adapter.
@@ -727,10 +728,10 @@ public final class MacOSAccessibilityHost {
             let frame = runtime.presentedRectByPath[flat.path] ?? flat.targetRect
             guard viewMoved || entry.node.frame != frame else { continue }
             // Rich text fields also need the new line layout's origin and transform.
-            if entry.element is RuneAXTextField { return false }
+            if entry.node.role == .textInput || entry.node.role == .multilineTextInput { return false }
             refreshedFrames = true
             entry.node.frame = frame
-            entry.element.setAccessibilityFrame(Self.screenFrame(frame, transform: transform))
+            entry.element?.setAccessibilityFrame(Self.screenFrame(frame, transform: transform))
         }
         viewTransform = transform
         return true
@@ -741,7 +742,52 @@ public final class MacOSAccessibilityHost {
                height: CGFloat(max(0, frame.height))).applying(transform)
     }
 
-    /// Rebuilds cached `NSAccessibilityElement` wrappers for `tree` and emits focus / VoiceOver announcements.
+    /// AccessKit creates a platform node for a reader's request, including its native
+    /// ancestors. Populating the semantic tree alone need not create any AppKit objects.
+    private func materialize(_ entry: AppKitAccessibilityEntry) -> RuneNSAccessibilityElement {
+        if let element = entry.element { return element }
+        return refreshElement(entry)
+    }
+
+    @discardableResult
+    private func refreshElement(_ entry: AppKitAccessibilityEntry) -> RuneNSAccessibilityElement {
+        let node = entry.node
+        let parent: AnyObject? = entry.parent.map { materialize($0) } ?? rootView
+        let callbacks = lastCallbacks
+        let transform = viewTransform ?? .identity
+        let element = AppKitAccessibilityMapper.makeElement(node, parent: parent,
+            onAction: node.actions.isEmpty ? nil : callbacks?.perform, onSelectText: callbacks?.select,
+            onSetValue: node.actions.contains(.setValue) ? callbacks?.assign : nil,
+            reusing: entry.element, viewToScreen: transform)
+        if element !== entry.element {
+            #if DEBUG
+            if entry.element == nil { materializedCount += 1 }
+            #endif
+            if let old = entry.element {
+                old.invalidate()
+                entry.parent?.nativeChildren = nil
+            }
+            entry.element = element
+            if !node.actions.isEmpty {
+                var ancestor: AppKitAccessibilityEntry? = entry
+                while let current = ancestor, !current.usesCallbacks {
+                    current.usesCallbacks = true
+                    ancestor = current.parent
+                }
+            }
+            element.resolveChildren { [weak self, weak entry] in
+                guard let self, let entry else { return [] }
+                if let children = entry.nativeChildren { return children }
+                let children = entry.children.map { materialize($0) }
+                entry.nativeChildren = children
+                return children
+            }
+        }
+        element.setAccessibilityFrame(Self.screenFrame(node.frame, transform: transform))
+        return element
+    }
+
+    /// Synchronizes retained native proxies and emits focus and VoiceOver announcements.
     ///
     /// `announcement`: `Tx::announce`'s window live region (`Runtime.a11yAnnouncement`), the
     /// root's announcer (`a11y/tree.rs` `ANNOUNCER`). A whole tree raises no events, as AccessKit
@@ -777,11 +823,14 @@ public final class MacOSAccessibilityHost {
         lastVisitedNodes = 0
         #endif
         let transform = suppliedTransform ?? RuneAXTextField.viewToScreen(parentView)
-        let movedView = viewTransform != transform
+        let parentViewChanged = rootView !== parentView
+        let movedView = viewTransform != transform || parentViewChanged
         viewTransform = transform
+        rootView = parentView
         let callbacksChanged = callbacks !== lastCallbacks
         lastCallbacks = callbacks
-        var changedSelections: [RuneAXTextField] = []
+        var changedSelections: [AppKitAccessibilityEntry] = []
+        var destroyed: [RuneNSAccessibilityElement] = []
         var removed: [AppKitAccessibilityEntry] = []
         var spoken: [(text: String, politeness: LiveRegionPoliteness)] = []
         let speaksChanges = previousTree != nil || !isActivated
@@ -790,7 +839,7 @@ public final class MacOSAccessibilityHost {
                let text = announcement.spokenText { spoken.append((text, announcement.politeness)) }
         }
 
-        func syncChildren(_ nodes: [AccessibilityNode], parent: AnyObject, scope: AccessibilityIdentity?,
+        func syncChildren(_ nodes: [AccessibilityNode], parent: AppKitAccessibilityEntry?, scope: AccessibilityIdentity?,
                           previous: [AppKitAccessibilityEntry], focused: inout AccessibilityIdentity?,
                           windowAnnouncer: Bool = false) -> (children: [AppKitAccessibilityEntry], changed: Bool) {
             var occurrences: [String: Int] = [:]
@@ -800,11 +849,10 @@ public final class MacOSAccessibilityHost {
                 let id = AccessibilityIdentity(node, parent: scope, occurrences: &occurrences)
                 let prior = index < previous.count ? previous[index] : nil
                 let candidate = prior?.identity == id ? prior : entries[id]
-                let oldProxy = candidate?.element
                 let child = syncNode(node, id, parent: parent, old: candidate,
                                      announce: !windowAnnouncer || index + 1 != nodes.count)
                 if focused == nil { focused = child.focused }
-                if changed == nil, prior !== child || oldProxy !== child.element { changed = Array(previous.prefix(index)) }
+                if changed == nil, prior !== child { changed = Array(previous.prefix(index)) }
                 changed?.append(child)
             }
             if changed == nil, nodes.count != previous.count { changed = Array(previous.prefix(nodes.count)) }
@@ -813,61 +861,56 @@ public final class MacOSAccessibilityHost {
             return (changed, true)
         }
 
-        func syncNode(_ node: AccessibilityNode, _ id: AccessibilityIdentity, parent: AnyObject,
+        func syncNode(_ node: AccessibilityNode, _ id: AccessibilityIdentity, parent: AppKitAccessibilityEntry?,
                       old: AppKitAccessibilityEntry?, announce: Bool) -> AppKitAccessibilityEntry {
             #if DEBUG
             lastVisitedNodes += 1
             #endif
+            let entry = old ?? AppKitAccessibilityEntry(id, node: node)
             let prior = old?.node
-            if announce { recordLive(prior, node) }
-            let text = node.role == .textInput || node.role == .multilineTextInput
-            let updates = (callbacksChanged && !node.actions.isEmpty) || old?.parent !== parent || text ||
-                prior.map { !node.hasSameAppKitProperties(as: $0) } != false
-            let entry: AppKitAccessibilityEntry
-            var replaced = false
-            if updates {
-                #if DEBUG
-                lastUpdatedElements += 1
-                #endif
-                let previousField = old?.element as? RuneAXTextField
-                let previousSelection = previousField?.snapshot
-                let element = AppKitAccessibilityMapper.makeElement(node, parent: parent, onAction: node.actions.isEmpty ? nil : callbacks.perform,
-                    onSelectText: callbacks.select, onSetValue: node.actions.contains(.setValue) ? callbacks.assign : nil, reusing: old?.element, viewToScreen: transform)
-                if let old {
-                    entry = old
-                    if element !== entry.element { entry.element.invalidate(); entry.element = element; replaced = true }
-                } else {
-                    entry = AppKitAccessibilityEntry(id, node: node, element: element)
-                    entries[id] = entry
-                    replaced = true
-                }
-                if let field = previousField, field === element, let previousSelection {
-                    let current = field.snapshot
-                    if previousSelection.anchor != current.anchor || previousSelection.focus != current.focus { changedSelections.append(field) }
-                }
-            } else {
-                // A matching mounted identity already owns its native proxy.
-                entry = old!
-            }
-            entry.pass = pass
+            let reparented = entry.parent !== parent || (parent == nil && parentViewChanged)
             entry.parent = parent
-            if updates || movedView || prior?.frame != node.frame {
-                entry.element.setAccessibilityFrame(Self.screenFrame(node.frame, transform: transform))
+            entry.pass = pass
+            entry.node = node
+            if old == nil { entries[id] = entry }
+            if announce { recordLive(prior, node) }
+            let field = node.role == .textInput || node.role == .multilineTextInput
+            if field, let prior, prior.textSelection != node.textSelection,
+               prior.textSelection?.count == 4, node.textSelection?.count == 4,
+               !prior.isSecure, !node.isSecure {
+                changedSelections.append(entry)
             }
-            if replaced || revisitGeometry || (callbacksChanged && entry.usesCallbacks) || movedView || prior.map({ !node.sharesChildren(with: $0) }) != false {
+            var replaced = false
+            if let element = entry.element {
+                let needsUpdate = reparented || field || (callbacksChanged && !node.actions.isEmpty) ||
+                    prior.map { !node.hasSameAppKitProperties(as: $0) } != false
+                if needsUpdate {
+                    #if DEBUG
+                    lastUpdatedElements += 1
+                    #endif
+                    replaced = refreshElement(entry) !== element
+                } else if movedView || prior?.frame != node.frame {
+                    element.setAccessibilityFrame(Self.screenFrame(node.frame, transform: transform))
+                }
+            }
+            if replaced || revisitGeometry || (callbacksChanged && entry.usesCallbacks) || movedView ||
+                    prior.map({ !node.sharesChildren(with: $0) }) != false {
                 var focus: AccessibilityIdentity?
-                let children = syncChildren(node.children, parent: entry.element, scope: id, previous: entry.children, focused: &focus)
-                if children.changed || replaced { entry.element.setAccessibilityChildren(children.children.map(\.element)) }
+                let children = syncChildren(node.children, parent: entry, scope: id, previous: entry.children, focused: &focus)
                 entry.children = children.children
-                entry.usesCallbacks = !node.actions.isEmpty || entry.children.contains(where: \.usesCallbacks)
+                if children.changed { entry.nativeChildren = nil }
+                // The parent's native handle can change when a secure field starts exposing
+                // a text provider. A descendant handle already held by a client follows it.
+                if replaced, let parent = entry.element {
+                    for child in entry.children { child.element?.setAccessibilityParent(parent) }
+                }
+                entry.usesCallbacks = (entry.element != nil && !node.actions.isEmpty) || entry.children.contains(where: \.usesCallbacks)
                 entry.focused = node.isFocused ? id : focus
             } else if node.isFocused {
                 entry.focused = id
             } else if entry.focused == id {
                 entry.focused = entry.children.lazy.compactMap(\.focused).first
             }
-            if !node.actions.isEmpty { entry.usesCallbacks = true }
-            entry.node = node
             return entry
         }
 
@@ -886,28 +929,34 @@ public final class MacOSAccessibilityHost {
             visibleRoots.append(node)
         }
         var focusedNodeId: AccessibilityIdentity?
-        let children = syncChildren(visibleRoots, parent: parentView, scope: nil, previous: roots,
+        let children = syncChildren(visibleRoots, parent: nil, scope: nil, previous: roots,
                                     focused: &focusedNodeId, windowAnnouncer: announcement != nil)
-        if children.changed { rootElements = children.children.map(\.element) }
         roots = children.children
         func discard(_ entry: AppKitAccessibilityEntry) {
             guard entry.pass != pass, entries[entry.identity] === entry else { return }
             entries.removeValue(forKey: entry.identity)
-            entry.element.invalidate()
+            #if DEBUG
+            if entry.element != nil { materializedCount -= 1 }
+            #endif
+            if let element = entry.element {
+                element.invalidate()
+                destroyed.append(element)
+            }
             for child in entry.children { discard(child) }
         }
         for orphan in removed { discard(orphan) }
         previousTree = tree
         if let announcerSpeech { spoken.append(announcerSpeech) }
         lastSpoken = spoken
-        for field in changedSelections {
-            NSAccessibility.post(element: field, notification: .selectedTextChanged)
+        for element in destroyed { NSAccessibility.post(element: element, notification: .uiElementDestroyed) }
+        for entry in changedSelections {
+            if let field = materialize(entry) as? RuneAXTextField { NSAccessibility.post(element: field, notification: .selectedTextChanged) }
         }
 
         if focusedNodeId != lastFocusedId {
             lastFocusedId = focusedNodeId
-            if let fid = focusedNodeId, let focusedElem = entries[fid]?.element {
-                NSAccessibility.post(element: focusedElem, notification: .focusedUIElementChanged)
+            if let fid = focusedNodeId, let entry = entries[fid] {
+                NSAccessibility.post(element: materialize(entry), notification: .focusedUIElementChanged)
             } else {
                 NSAccessibility.post(element: parentView, notification: .focusedUIElementChanged)
             }
@@ -938,37 +987,28 @@ public final class MacOSAccessibilityHost {
 
     public func accessibilityChildren() -> [Any] {
         activate()
-        return rootElements
+        return roots.map { materialize($0) }
     }
 
     public func accessibilityFocusedUIElement() -> Any? {
         activate()
         if let fid = lastFocusedId {
-            return entries[fid]?.element
+            return entries[fid].map { materialize($0) }
         }
         return nil
     }
 
     public func accessibilityHitTest(_ screenPoint: NSPoint, in parentView: NSView) -> Any? {
         activate()
-        func hitTestNode(_ element: RuneNSAccessibilityElement) -> RuneNSAccessibilityElement? {
-            let children = (element.accessibilityChildren() as? [RuneNSAccessibilityElement]) ?? []
-            for child in children.reversed() {
-                if let hit = hitTestNode(child) {
-                    return hit
-                }
+        let transform = viewTransform ?? RuneAXTextField.viewToScreen(parentView)
+        func hit(_ entry: AppKitAccessibilityEntry) -> AppKitAccessibilityEntry? {
+            for child in entry.children.reversed() {
+                if let result = hit(child) { return result }
             }
-            if element.accessibilityFrame().contains(screenPoint) {
-                return element
-            }
-            return nil
+            return Self.screenFrame(entry.node.frame, transform: transform).contains(screenPoint) ? entry : nil
         }
-
-        _ = parentView
-        for root in rootElements.reversed() {
-            if let hit = hitTestNode(root) {
-                return hit
-            }
+        for root in roots.reversed() {
+            if let result = hit(root) { return materialize(result) }
         }
         return nil
     }
