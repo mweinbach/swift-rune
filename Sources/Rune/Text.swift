@@ -1184,6 +1184,20 @@ public final class GlyphAtlas: @unchecked Sendable {
     private var resetsCount: UInt64 = 0
     private var rasterizedCount: UInt64 = 0
     private var accessCounter: UInt64 = 0
+
+    private enum CachedGlyphKey {
+        case portable(PortableGlyphKey)
+        case icon(IconKey)
+        case color(ColorGlyphKey)
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        case glyph(GlyphKey)
+        #endif
+    }
+
+    // Capture a small batch of oldest entries when the shared LRU limit is reached.
+    // Reading a cached glyph only changes its timestamp, so it cannot add an older candidate.
+    private var evictionCandidates: [(key: CachedGlyphKey, lastUsed: UInt64)] = []
+    private var lastEvictionScan: UInt64 = 0
     #if canImport(CoreText) && canImport(CoreGraphics)
     private var glyphCache: [GlyphKey: (entry: Entry, lastUsed: UInt64, lastFrame: UInt64)] = [:]
     #endif
@@ -1524,6 +1538,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         defer { lock.unlock() }
         let recycledOutlines = outlineLock.withLock { outlineStorage?.store.beginFrame(pinned: pinOutlines) == true }
         if recycledOutlines {
+            evictionCandidates.removeAll(keepingCapacity: true)
             // Captured frames own their immutable curves and atlas-fill plans. New layouts must
             // resolve every old outline-backed placement, even when its page was not recycled.
             #if canImport(CoreText) && canImport(CoreGraphics)
@@ -1596,6 +1611,7 @@ public final class GlyphAtlas: @unchecked Sendable {
     public func dropOrphans() {
         lock.lock()
         defer { lock.unlock() }
+        evictionCandidates.removeAll(keepingCapacity: true)
         let f = frameSequence
         portableGlyphCache = portableGlyphCache.filter { (f &- $0.value.lastFrame) <= 1 }
         iconCache = iconCache.filter { (f &- $0.value.lastFrame) <= 1 }
@@ -2288,6 +2304,7 @@ public final class GlyphAtlas: @unchecked Sendable {
     }
 
     private func evictPageLocked(_ page: Int) {
+        evictionCandidates.removeAll(keepingCapacity: true)
         if !outlineMaskFills.isEmpty {
             outlineMaskFills.removeAll { Int($0.rect.y) / targetHeight == page }
             savedMaskPlan = nil
@@ -2626,53 +2643,65 @@ public final class GlyphAtlas: @unchecked Sendable {
         #if canImport(CoreText) && canImport(CoreGraphics)
         total += glyphCache.count
         #endif
+        guard total > maxCachedEntries else { return }
+        if accessCounter < lastEvictionScan { evictionCandidates.removeAll(keepingCapacity: true) }
         while total > maxCachedEntries {
-            enum Victim {
-                case portable(PortableGlyphKey, UInt64)
-                case icon(IconKey, UInt64)
-                case color(ColorGlyphKey, UInt64)
-                #if canImport(CoreText) && canImport(CoreGraphics)
-                case glyph(GlyphKey, UInt64)
-                #endif
-                var seq: UInt64 {
-                    switch self {
-                    case .portable(_, let s), .icon(_, let s), .color(_, let s): return s
-                    #if canImport(CoreText) && canImport(CoreGraphics)
-                    case .glyph(_, let s): return s
-                    #endif
-                    }
-                }
-            }
-            var oldest: Victim?
-            for (k, v) in portableGlyphCache {
-                if oldest == nil || v.lastUsed < oldest!.seq { oldest = .portable(k, v.lastUsed) }
-            }
-            for (k, v) in iconCache {
-                if oldest == nil || v.lastUsed < oldest!.seq { oldest = .icon(k, v.lastUsed) }
-            }
+            if evictionCandidates.isEmpty { collectOldestGlyphsLocked(total: total) }
+            let candidate = evictionCandidates.removeLast()
+            // A queued key may have been read, rerasterized, or evicted with its atlas page.
+            switch candidate.key {
+            case .portable(let key):
+                guard let index = portableGlyphCache.index(forKey: key),
+                      portableGlyphCache.values[index].lastUsed == candidate.lastUsed else { continue }
+                portableGlyphCache.remove(at: index)
+            case .icon(let key):
+                guard let index = iconCache.index(forKey: key),
+                      iconCache.values[index].lastUsed == candidate.lastUsed else { continue }
+                iconCache.remove(at: index)
             #if canImport(CoreText) && canImport(CoreGraphics)
-            for (k, v) in glyphCache {
-                if oldest == nil || v.lastUsed < oldest!.seq { oldest = .glyph(k, v.lastUsed) }
-            }
+            case .glyph(let key):
+                guard let index = glyphCache.index(forKey: key),
+                      glyphCache.values[index].lastUsed == candidate.lastUsed else { continue }
+                glyphCache.remove(at: index)
             #endif
-            for (k, v) in colorGlyphCache {
-                if oldest == nil || v.lastUsed < oldest!.seq { oldest = .color(k, v.lastUsed) }
-            }
-            guard let victim = oldest else { break }
-            switch victim {
-            case .portable(let k, _): portableGlyphCache.removeValue(forKey: k)
-            case .icon(let k, _): iconCache.removeValue(forKey: k)
-            #if canImport(CoreText) && canImport(CoreGraphics)
-            case .glyph(let k, _): glyphCache.removeValue(forKey: k)
-            #endif
-            case .color(let k, _):
-                if let removed = colorGlyphCache.removeValue(forKey: k) {
-                    colorGlyphByIndex.removeValue(forKey: removed.entry.index)
-                    colorGlyphBytes = max(0, colorGlyphBytes - removed.entry.rgba.count)
-                }
+            case .color(let key):
+                guard let index = colorGlyphCache.index(forKey: key),
+                      colorGlyphCache.values[index].lastUsed == candidate.lastUsed else { continue }
+                let removed = colorGlyphCache.remove(at: index).value.entry
+                colorGlyphByIndex.removeValue(forKey: removed.index)
+                colorGlyphBytes = max(0, colorGlyphBytes - removed.rgba.count)
             }
             total -= 1
         }
+    }
+
+    private func collectOldestGlyphsLocked(total: Int) {
+        var ages: [UInt64] = []
+        ages.reserveCapacity(total)
+        for entry in portableGlyphCache.values { ages.append(entry.lastUsed) }
+        for entry in iconCache.values { ages.append(entry.lastUsed) }
+        for entry in colorGlyphCache.values { ages.append(entry.lastUsed) }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        for entry in glyphCache.values { ages.append(entry.lastUsed) }
+        #endif
+        ages.sort()
+        let cutoff = ages[min(ages.count, 128) - 1]
+        for (key, entry) in portableGlyphCache where entry.lastUsed <= cutoff {
+            evictionCandidates.append((.portable(key), entry.lastUsed))
+        }
+        for (key, entry) in iconCache where entry.lastUsed <= cutoff {
+            evictionCandidates.append((.icon(key), entry.lastUsed))
+        }
+        for (key, entry) in colorGlyphCache where entry.lastUsed <= cutoff {
+            evictionCandidates.append((.color(key), entry.lastUsed))
+        }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        for (key, entry) in glyphCache where entry.lastUsed <= cutoff {
+            evictionCandidates.append((.glyph(key), entry.lastUsed))
+        }
+        #endif
+        evictionCandidates.sort { $0.lastUsed > $1.lastUsed }
+        lastEvictionScan = accessCounter
     }
 
     private func cachedColorGlyphLocked(_ key: ColorGlyphKey) -> ColorGlyphEntry? {
@@ -2716,6 +2745,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             guard let victim = oldestKey, let removed = colorGlyphCache.removeValue(forKey: victim) else {
                 break
             }
+            evictionCandidates.removeAll(keepingCapacity: true)
             colorGlyphByIndex.removeValue(forKey: removed.entry.index)
             colorGlyphBytes = max(0, colorGlyphBytes - removed.entry.rgba.count)
         }
