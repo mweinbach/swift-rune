@@ -73,6 +73,34 @@ struct TextPlacementReuseTests {
         }
     }
 
+    @Test("Recycling a glyph page restores all masks in the next colored layout")
+    func recycledNeutralAndBrightMasks() throws {
+        let atlas = GlyphAtlas(width: 256, height: 256)
+        let text = TextSystem(glyphAtlas: atlas)
+        let style = TextStyle(size: 18, family: .monospace).smoothing(.windfoil)
+        func mixed() -> [PositionedGlyph] {
+            GlyphAtlas.withBaseInk(.black, mode: .windfoil) {
+                text.layoutKeyed(text: "TT", spans: [TextSpan("T"), TextSpan("T", color: .white)],
+                    style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true).shaped.glyphs
+            }
+        }
+        func countCoverage(_ glyph: PositionedGlyph) -> Int {
+            guard let bytes = atlas.pageData(Int(glyph.atlasPage)) else { return 0 }
+            let u = glyph.uv * 256
+            var count = 0
+            for y in Int(u.y.rounded())..<Int(u.w.rounded()) {
+                for x in Int(u.x.rounded())..<Int(u.z.rounded()) where bytes[y * 256 + x] > 0 { count += 1 }
+            }
+            return count
+        }
+        let first = mixed()
+        let original = first.map(countCoverage)
+        #expect(original.count == 2 && original.allSatisfy { $0 > 0 })
+        atlas.evictPage(0)
+        _ = atlas.placeMask(width: 64, height: 32, bitmap: Array(repeating: 0, count: 64 * 32))
+        #expect(mixed().map(countCoverage) == original)
+    }
+
     @Test("A translated fractional pen reuses its mask until its shelf is recycled")
     func translated() throws {
         let system = TextSystem()

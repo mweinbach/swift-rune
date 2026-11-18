@@ -7291,7 +7291,15 @@ public final class Runtime<State> {
         let targetScale = max(pxScale, 1.0)
         func retainGlyphs(_ box: TextLayoutBox) -> Bool {
             guard box.hasGlyphs, box.rasterWindow == nil else { return false }
-            #if canImport(CRuneDesktopText) && !canImport(CoreText)
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            let geometry = box.cachedGeometry
+            if !geometry.shaped.glyphPlacementsAreResident(in: textSystem.glyphAtlas)
+                || (box.shaped.glyphPlacements !== geometry.shaped.glyphPlacements
+                    && !box.shaped.glyphPlacementsAreResident(in: textSystem.glyphAtlas)) {
+                textSystem.glyphCache.forget(shapeKey: box.shapeKey)
+                return false
+            }
+            #elseif canImport(CRuneDesktopText)
             if let resets = box.desktopAtlasResets, !textSystem.glyphAtlas.retainPages(box.desktopPages, since: resets) {
                 textSystem.glyphCache.forget(shapeKey: box.shapeKey)
                 return false

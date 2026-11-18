@@ -4760,14 +4760,15 @@ public final class TextSystem: @unchecked Sendable {
     ) -> TextLayoutBox {
         var retainedKey = measuredKey
         if emitGlyphs, let rasterWindow, keep != .secret, !Self.needsElision(style, maxWidth: maxWidth) {
-            let measure = layoutKeyed(text: text, spans: spans, pills: pills, style: style,
-                                      maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false,
-                                      countAsRebreak: countAsRebreak, pretty: pretty)
+            let measure = layoutGeometry(retaining: retainedKey, text: text, spans: spans, pills: pills, style: style,
+                                         maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false,
+                                         countAsRebreak: countAsRebreak, pretty: pretty)
             if let prepared = measure.prepared, measure.shaped.lineCount > 1,
                rasterWindow.lowerY > 0 || rasterWindow.upperY < measure.shaped.size.y {
                 return paintInWindow(measure, prepared: prepared, window: rasterWindow, glide: glidePx)
             }
-            if measure.hasGlyphs, measure.shaped.canReplayGlyphInks, glidePx == .zero { return measure }
+            if measure.hasGlyphs, measure.shaped.canReplayGlyphInks, glidePx == .zero,
+               measure.shaped.glyphPlacementsAreResident(in: glyphAtlas) { return measure }
             retainedKey = measure.shapeKey
         }
         return measureRuntimePhase(.text) {
@@ -4825,7 +4826,8 @@ public final class TextSystem: @unchecked Sendable {
                 if var cachedBox = layoutCache[storageKey] {
                     cachedBox.lastUsedCommit = layoutCommitSeq
                     if Self.widthsMatch(cachedBox.maxWidth, effectiveMaxW) {
-                        if !emitGlyphs || (cachedBox.hasGlyphs && cachedBox.shaped.canReplayGlyphInks) {
+                        if !emitGlyphs || (cachedBox.hasGlyphs && cachedBox.shaped.canReplayGlyphInks
+                            && cachedBox.shaped.glyphPlacementsAreResident(in: glyphAtlas)) {
                             lock.unlock()
                             return cachedBox
                         }
