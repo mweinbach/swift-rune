@@ -281,9 +281,9 @@ final class RetainedLayoutCoordinator {
         var geometryChanged = false
         var hasMirroredFlow = false
 
-        func makeMeasure(el: El<State>, nodeId: RuneMotion.NodeId, flatIndex: Int, forcedTextFlow: TextFlow?) -> (fn: Measure?, hash: UInt64?, redacted: Bool) {
+        func makeMeasure(el: borrowing El<State>, nodeId: RuneMotion.NodeId, flatIndex: Int, forcedTextFlow: TextFlow?) -> (fn: Measure?, hash: UInt64?, redacted: Bool) {
             guard el.children.isEmpty else { return (nil, nil, false) }
-            if let editLens = el.handlers.editLens {
+            if el.hasEditLens, let editLens = el.handlers.editLens {
                 let rawEdit = editLens.get(state)
                 let resolved = ElDisplayResolver.resolveInput(
                     el: el,
@@ -386,9 +386,13 @@ final class RetainedLayoutCoordinator {
                    !resolved.displayedText.isEmpty, resolved.truncateFade || isClampedOrEllipsis {
                     overflowLeaves.append((flatIndex, nodeId, resolved))
                 }
+                let labelKey: TextShapeKey?
                 if !resolved.isSecure, !resolved.displayedText.isEmpty, !resolved.truncateFade, resolved.advanceRun == nil, !isClampedOrEllipsis, textLayouts != nil {
+                    // With both raw text and rich spans, the shaper draws the spans. Otherwise
+                    // the resolver already joined and case-transformed their displayed text.
+                    let shapeText = rawTxt == nil ? resolved.displayedText : (resolved.spans?.map(\.text).joined() ?? resolved.displayedText)
                     let sKey = TextShapeKey(
-                        authText: resolved.displayedText,
+                        authText: shapeText,
                         spans: resolved.spans,
                         pills: resolved.pills,
                         style: resolved.style,
@@ -405,8 +409,16 @@ final class RetainedLayoutCoordinator {
                         shapeKey: sKey,
                         isInput: false
                     ))
+                    labelKey = sKey
+                } else {
+                    labelKey = nil
                 }
+                let widthIndependent = labelKey != nil && resolved.style.wrap == .noWrap
                 let fn: Measure = { maxW, isRealLayout, textLayouts, nodeId in
+                    if widthIndependent, let labelKey, let record = textLayouts?.map[nodeId],
+                       !record.isInput, record.box.maxWidth == nil, record.box.shapeKey == labelKey {
+                        return record.box.shaped.size
+                    }
                     if resolved.truncateFade || resolved.advanceRun != nil || isClampedOrEllipsis {
                         // Every text wraps at `w * scale + FIT_SLACK` device px; a truncated or clamped
                         // one is no wider than its room (`compute_layout`: `lw.min(a)`, #948).
@@ -421,7 +433,7 @@ final class RetainedLayoutCoordinator {
                     let shapeMaxW: Float? = (resolved.style.wrap == .noWrap && resolved.style.maxLines == 0) ? nil : TextBoxGeometry.wrapWidth(maxW, scale: scale)
                     let hasSpans = (resolved.spans?.isEmpty == false)
                     let box = textSystem.layoutKeyed(
-                        text: hasSpans ? "" : resolved.displayedText,
+                        retaining: labelKey, text: hasSpans ? "" : resolved.displayedText,
                         spans: resolved.spans,
                         pills: resolved.pills,
                         style: resolved.style,
@@ -429,10 +441,12 @@ final class RetainedLayoutCoordinator {
                         pixelScale: scale,
                         emitGlyphs: false,
                         keep: keep,
-                        countAsRebreak: (textLayouts != nil) && isRealLayout,
+                        // Intrinsic probes and final layout have the same break for an ordinary
+                        // no-wrap label. Keep the first break for later Taffy probes and paint.
+                        countAsRebreak: (textLayouts != nil) && (isRealLayout || widthIndependent),
                         pretty: resolved.pretty
                     )
-                    if !resolved.isSecure, isRealLayout, let collector = textLayouts {
+                    if !resolved.isSecure, isRealLayout || widthIndependent, let collector = textLayouts {
                         collector.map[nodeId] = TextLayoutRecord(box: box, isInput: false)
                     }
                     return box.shaped.size
@@ -464,7 +478,7 @@ final class RetainedLayoutCoordinator {
 
         @inline(never)
         func syncPrepare(
-            _ el: El<State>,
+            _ el: borrowing El<State>,
             parent: SyncPrepared?,
             siblingIndex: Int,
             siblingKeysSeen: inout [String: Int]
@@ -603,12 +617,16 @@ final class RetainedLayoutCoordinator {
                 return aspectFits.count - 1
             }
 
-            var measured = el
-            if nodeDirected && el.textDirByParagraph && el.handlers.editLens != nil {
+            let measurement: (fn: Measure?, hash: UInt64?, redacted: Bool)
+            if nodeDirected && el.textDirByParagraph && el.hasEditLens {
                 // A `dirByParagraph` field's paragraphs start from the element's flow (`TextDir::Plaintext`).
+                var measured = copy el
                 measured.textStyle.byParagraphStart = nodeFlow.textFlow
+                measurement = makeMeasure(el: measured, nodeId: runtimeNodeId, flatIndex: myIndex, forcedTextFlow: forcedTextFlow)
+            } else {
+                measurement = makeMeasure(el: el, nodeId: runtimeNodeId, flatIndex: myIndex, forcedTextFlow: forcedTextFlow)
             }
-            let (measureFn, measureHash, isRedacted) = makeMeasure(el: measured, nodeId: runtimeNodeId, flatIndex: myIndex, forcedTextFlow: forcedTextFlow)
+            let (measureFn, measureHash, isRedacted) = measurement
             flat[myIndex].measure = measureFn.map(MeasureBox.content) ?? pictureRatioToMeasure.map(MeasureBox.picture)
 
             return SyncPrepared(
@@ -782,15 +800,16 @@ final class RetainedLayoutCoordinator {
 
         @inline(never)
         func beginVisit(
-            _ el: El<State>,
+            _ el: borrowing El<State>,
             parent: SyncPrepared?,
             siblingIndex: Int,
             siblingKeysSeen: inout [String: Int],
-            sourceRow: Runtime<State>.CachedVirtualRow? = nil
+            sourceRows: [String: Runtime<State>.CachedVirtualRow]? = nil
         ) -> SyncStep<State> {
             var virtualRoot: VirtualRowRoot?
-            if let row = sourceRow, let memo = row.layoutRootMemo, !recordingMemo,
-               let parent, let key = el.storageKeyId, siblingKeysSeen[key] == nil,
+            if let sourceRows, !el.children.isEmpty, let key = el.storageKeyId,
+               let row = sourceRows[key], let memo = row.layoutRootMemo, !recordingMemo,
+               let parent, siblingKeysSeen[key] == nil,
                memo === el.memoLayoutChildren, memo.matches(el.children) {
                 let memoKey = ObjectIdentifier(memo)
                 if let span = memoSpans[memoKey], span.isGroupRoot, span.record.identity === memo,
@@ -913,15 +932,13 @@ final class RetainedLayoutCoordinator {
                     next = .finished(finishVisit(stack.removeLast()))
                 } else {
                     let prepared = stack[parent].prepared
-                    let child = stack[parent].children[index]
-                    let sourceRow: Runtime<State>.CachedVirtualRow?
-                    if let rows = stack[parent].virtualRows, !child.children.isEmpty, let key = child.storageKeyId {
-                        sourceRow = rows[key]
-                    } else {
-                        sourceRow = nil
+                    // Hold the immutable sibling storage outside the parent's mutating key map.
+                    let children = stack[parent].children
+                    let rows = stack[parent].virtualRows
+                    next = children.withUnsafeBufferPointer { buffer in
+                        beginVisit(buffer.baseAddress!.advanced(by: index).pointee, parent: prepared, siblingIndex: index,
+                                   siblingKeysSeen: &stack[parent].childKeys, sourceRows: rows)
                     }
-                    next = beginVisit(child, parent: prepared, siblingIndex: index,
-                                      siblingKeysSeen: &stack[parent].childKeys, sourceRow: sourceRow)
                 }
             }
         }
@@ -1149,7 +1166,7 @@ final class RetainedLayoutCoordinator {
                     collector.map[leaf.nodeId] = TextLayoutRecord(box: existing, isInput: leaf.isInput)
                 } else {
                     let box = textSystem.layoutKeyed(
-                        text: leaf.text,
+                        retaining: leaf.isInput ? nil : leaf.shapeKey, text: leaf.text,
                         spans: leaf.shapeKey.spans,
                         pills: leaf.shapeKey.pills,
                         style: leaf.shapeKey.style,

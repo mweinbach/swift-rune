@@ -23,6 +23,38 @@ struct MemoLayoutSpanTests {
             a.children.count == b.children.count && zip(a.children, b.children).allSatisfy(sameGeometry)
     }
 
+    @Test("Rich label measurement retains the displayed spans across width and direction changes")
+    func richLabelProbesRetainAuthoritativeText() throws {
+        let layout = RetainedLayoutCoordinator()
+        let system = TextSystem()
+        for (width, wraps, rtl, title) in [(42, false, false, "first"), (42, true, false, "first"),
+                                           (120, true, true, "שינוי"), (31, false, true, "שינוי")] {
+            system.setLanguage(rtl ? "he" : "en")
+            var style = TextStyle(size: 13)
+            style.wrap = wraps ? .wrap : .noWrap
+            let spans = [TextSpan(title), TextSpan(" e\u{301} words to wrap", italic: true)]
+            var label: El<Int> = text("raw fallback").key("label").wFull().font(style)
+            label.richSpans = spans
+            let root: El<Int> = col().key("root").dir(rtl ? .rtl : .ltr).w(Float(width)).child(label)
+            let collector = RetainedLayoutCoordinator.TextLayoutCollector()
+            _ = layout.compute(root: root, state: 0, viewport: Vec2(160, 160),
+                               pixelScale: 1.25, textSystem: system, textLayouts: collector)
+            let box = try #require(collector.map[NodeId.hash("/@root/@label")]?.box)
+            #expect(box.authText.utf8.elementsEqual(spans.map(\.text).joined().utf8))
+            #expect(box.shapeKey.authText.utf8.elementsEqual(box.authText.utf8))
+            #expect(box.shapeKey.languageTag == (rtl ? "he" : "en"))
+            #expect(box.style.direction == (rtl ? .rtl : .ltr))
+            #expect((box.maxWidth == nil) == !wraps)
+            if width == 42 && wraps { #expect(box.shaped.lineCount > 1) }
+            let reference = TextSystem()
+            reference.setLanguage(system.language)
+            let expected = reference.layoutKeyed(text: "", spans: spans, style: box.style,
+                                                 maxWidth: box.maxWidth, pixelScale: 1.25, emitGlyphs: false)
+            #expect(box.shaped.size == expected.shaped.size)
+            #expect(box.shaped.lineCount == expected.shaped.lineCount)
+        }
+    }
+
     @Test("Screen travel changes only its own identity under a keyed root")
     func descendantsKeepAuthoredPathHashes() {
         let layout = RetainedLayoutCoordinator()

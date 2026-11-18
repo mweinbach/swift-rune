@@ -4500,7 +4500,7 @@ public final class TextSystem: @unchecked Sendable {
     }
 
     #if canImport(CoreText) && canImport(CoreGraphics)
-    private func layoutKeyed(
+    internal func layoutKeyed(
         retaining measuredKey: TextShapeKey?,
         text: String,
         spans: [TextSpan]? = nil,
@@ -6673,7 +6673,7 @@ public final class TextSystem: @unchecked Sendable {
         return acc.finish()
     }
     #else
-    private func layoutKeyed(
+    internal func layoutKeyed(
         retaining measuredKey: TextShapeKey?,
         text: String,
         spans: [TextSpan]? = nil,
