@@ -1585,6 +1585,7 @@ struct PlaygroundCLIUnitParityTests {
         let growth = GrowthSpec(spring: MotionTokens.SNAP, edge: .feather)
         let src = (el() as El<Child>)
             .key("scroll-list")
+            .mark(47)
             .kitFilterKeys(["row-0", "row-1"])
             .scrollFade(fade)
             .scrollAnchor(true)
@@ -1594,7 +1595,7 @@ struct PlaygroundCLIUnitParityTests {
             .arrivesWhole()
             .foldGlide(MotionTokens.SETTLE)
             .virtualRows(count: 2, estimatedRowHeight: 28, key: { _, i in "row-\(i)" }) { _, i in
-                (el() as El<Child>).key("vrow-\(i)").onClick { s, _ in s.clicks += 10 }
+                (el() as El<Child>).key("vrow-\(i)").mark(1).mark(0).onClick { s, _ in s.clicks += 10 }
             }
             .virtualRowsVersion(42)
             .focusSelected(true)
@@ -1611,6 +1612,7 @@ struct PlaygroundCLIUnitParityTests {
             set: { box.child = $0 }
         )
 
+        #expect(lifted.elMark == 47)
         #expect(lifted.scrollFadeStyle == fade.style)
         #expect(lifted.scrollEdgeFadeWidth == 14)
         #expect(lifted.scrollAnchorEnabled == true)
@@ -1629,6 +1631,7 @@ struct PlaygroundCLIUnitParityTests {
 
         var tx = Tx()
         if let row = lifted.virtualRowsSource?.build(dummyParent, 0) {
+            #expect(row.elMark == 0)
             row.handlers.onClick?(&dummyParent, &tx)
         }
         #expect(lifted.handlers.onInputKey?(&dummyParent, KeyEvent(key: .enter), &tx) == true)

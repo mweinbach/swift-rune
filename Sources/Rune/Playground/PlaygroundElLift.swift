@@ -64,6 +64,7 @@ extension El {
         if let dashedBorder { out.dashedBorder = dashedBorder }
         if !pixelSnapEnabled { out.pixelSnapEnabled = pixelSnapEnabled }
         if let paintContain { out.paintContain = paintContain }
+        if let elMark { out.elMark = elMark }
         if motionSnapsEnabled { out.motionSnapsEnabled = true }
         if let clipRadius { out.clipRadius = clipRadius }
         if let clipCorners { out.clipCorners = clipCorners }
