@@ -187,6 +187,26 @@ extension GlyphAtlas {
     @TaskLocal static var browserBaseRGB: UInt32?
     #endif
 
+    #if canImport(CoreText) && canImport(CoreGraphics)
+    @TaskLocal static var initialSpanInks: TextSpanInkMap?
+    #endif
+
+    /// A glyph first emitted for paint goes straight into the atlas at its requested weight.
+    /// Line breaks and the shared font runs remain independent of this palette.
+    @inline(__always)
+    static func withInitialSpanInks<Result>(_ spans: [TextSpan]?, emitGlyphs: Bool, _ body: () -> Result) -> Result {
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        if emitGlyphs, baseInkBucket != nil {
+            if let spans {
+                let inks = TextSpanInkMap(spans)
+                if !inks.isEmpty { return $initialSpanInks.withValue(inks, operation: body) }
+            }
+            if initialSpanInks != nil { return $initialSpanInks.withValue(nil, operation: body) }
+        }
+        #endif
+        return body()
+    }
+
     /// On a cache miss the shaper can prepare the requested ink immediately. The paint
     /// resolver still handles later colour changes, selections, and highlighted spans.
     static func withBaseInk<Result>(_ ink: Color, mode: FontSmoothing, _ shape: () -> Result) -> Result {

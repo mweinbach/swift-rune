@@ -1181,7 +1181,7 @@ final class RetainedLayoutCoordinator {
                 if let record = collector.map[leaf.nodeId] {
                     // An earlier probe may already have supplied this break with another palette.
                     if record.box.spans != leaf.shapeKey.spans, record.box.shapeKey == leaf.shapeKey {
-                        collector.map[leaf.nodeId]?.box = record.box.applyingSpanInks(leaf.shapeKey.spans)
+                        collector.map[leaf.nodeId]?.box = textSystem.presentedLayout(record.box, spans: leaf.shapeKey.spans)
                     }
                     continue
                 }
