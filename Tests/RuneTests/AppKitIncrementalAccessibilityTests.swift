@@ -103,5 +103,31 @@ struct AppKitIncrementalAccessibilityTests {
         #expect(element.accessibilityFrame() == expectedFrame())
         #expect(children(of: root).first === element)
     }
+
+    @Test func scrollingBetweenCommitsMovesTheRetainedElementForHitTesting() throws {
+        let runtime = Runtime(state: 0, viewport: Vec2(160, 100)) { _, _ in
+            col().key("viewport").scrollY().size(160, 100).children(
+                (0..<20).map { text("Line \($0)").key("line-\($0)").h(20).shrink(0) }
+            )
+        }
+        let view = NSView(), host = MacOSAccessibilityHost()
+        let callbacks = MacOSAccessibilityCallbacks(onSelectText: nil, onSetValue: nil) { _, _ in }
+        _ = runtime.renderFrame(at: 0)
+        host.activate()
+        host.synchronize(runtime, in: view, force: true, callbacks: callbacks)
+        let root = try #require(host.accessibilityChildren().first as? RuneNSAccessibilityElement)
+        let line = try #require(children(of: root).first { $0.nodeId == "line-3" })
+        let initialFrame = line.accessibilityFrame()
+        let commit = runtime.commitCount
+        _ = runtime.wheelXY(40, 40, dx: 0, dy: -30, at: 0.02)
+        _ = runtime.renderFrame(at: 0.03)
+        host.synchronize(runtime, in: view, force: false, callbacks: callbacks)
+        #expect(runtime.commitCount == commit)
+        let painted = try #require(runtime.element(byKey: "line-3"))
+        #expect(line.accessibilityFrame() != initialFrame)
+        #expect(line.accessibilityFrame().minY == CGFloat(painted.rect[1]))
+        #expect(host.accessibilityHitTest(.init(x: 4, y: line.accessibilityFrame().midY), in: view)
+                as? RuneNSAccessibilityElement === line)
+    }
 }
 #endif

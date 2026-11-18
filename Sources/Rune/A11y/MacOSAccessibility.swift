@@ -627,6 +627,20 @@ public final class MacOSAccessibilityHost {
     private var roots: [AppKitAccessibilityEntry] = []
     private var pass: UInt64 = 0
     private var viewTransform: CGAffineTransform?
+    private struct RuntimeStamp: Equatable {
+        var runtime: ObjectIdentifier
+        var commit: UInt64
+        var live: UInt64
+        var focused: String?
+        var focusedLink: Int?
+        var viewport: Vec2
+        var count: Int
+    }
+    private var runtimeStamp: RuntimeStamp?
+    private var lastScroll: [String: Vec2] = [:]
+    private var wasAnimating = false
+    private var refreshedFrames = false
+    private var geometryRecords: [(entry: AppKitAccessibilityEntry, index: Int)]?
     private var lastCallbacks: MacOSAccessibilityCallbacks?
     #if DEBUG
     internal private(set) var lastUpdatedElements = 0
@@ -667,6 +681,66 @@ public final class MacOSAccessibilityHost {
 
     public var watchesDisplayOptions: Bool { displayOptions?.isWatching ?? false }
 
+    /// AppKit requests screen rectangles, while the runtime paints in window coordinates.
+    /// A pure scroll or moving window changes those rectangles between authored commits.
+    @discardableResult
+    internal func synchronize<State>(_ runtime: Runtime<State>, in view: NSView, force: Bool,
+                                     callbacks: MacOSAccessibilityCallbacks) -> Bool {
+        let stamp = RuntimeStamp(runtime: ObjectIdentifier(runtime), commit: runtime.commitCount, live: runtime.accessibilityLiveRevision,
+                                 focused: runtime.focusedPath, focusedLink: runtime.focusedLinkIndex,
+                                 viewport: runtime.viewport, count: runtime.flatNodes.count)
+        let transform = RuneAXTextField.viewToScreen(view)
+        let moved = viewTransform != transform || lastScroll != runtime.scrollOffsets || wasAnimating || runtime.isAnimating
+        lastScroll = runtime.scrollOffsets
+        wasAnimating = runtime.isAnimating
+        if !force, !heldWords, runtimeStamp == stamp, callbacks === lastCallbacks,
+           !announcementChanged(runtime.a11yAnnouncement) {
+            if !moved || refreshGeometry(runtime, transform: transform) { return false }
+        }
+        let tree = runtime.nativeAccessibilitySnapshot()
+        let held = update(tree: tree, announcement: runtime.a11yAnnouncement, parentView: view, callbacks: callbacks, transform: transform)
+        runtimeStamp = stamp
+        return held
+    }
+
+    private func refreshGeometry<State>(_ runtime: Runtime<State>, transform: CGAffineTransform) -> Bool {
+        if geometryRecords == nil {
+            var records: [(entry: AppKitAccessibilityEntry, index: Int)] = []
+            records.reserveCapacity(entries.count)
+            for entry in entries.values {
+                guard let path = entry.node.runtimePath else {
+                    // Only the window's invisible announcement has fixed geometry.
+                    if entry.node.id == AccessibilityTreeState.announcerID { continue }
+                    return false
+                }
+                // A text run/link or terminal cell can have bounds relative to a shaped line.
+                guard let i = runtime.nodeByPath[path] else { return false }
+                records.append((entry, i))
+            }
+            geometryRecords = records
+        }
+        guard let records = geometryRecords else { return false }
+        let viewMoved = viewTransform != transform
+        for (entry, index) in records {
+            let flat = runtime.flatNodes[index]
+            guard flat.path == entry.node.runtimePath else { return false }
+            let frame = runtime.presentedRectByPath[flat.path] ?? flat.targetRect
+            guard viewMoved || entry.node.frame != frame else { continue }
+            // Rich text fields also need the new line layout's origin and transform.
+            if entry.element is RuneAXTextField { return false }
+            refreshedFrames = true
+            entry.node.frame = frame
+            entry.element.setAccessibilityFrame(Self.screenFrame(frame, transform: transform))
+        }
+        viewTransform = transform
+        return true
+    }
+
+    private static func screenFrame(_ frame: MotionRect, transform: CGAffineTransform) -> CGRect {
+        CGRect(x: CGFloat(frame.left), y: CGFloat(frame.top), width: CGFloat(max(0, frame.width)),
+               height: CGFloat(max(0, frame.height))).applying(transform)
+    }
+
     /// Rebuilds cached `NSAccessibilityElement` wrappers for `tree` and emits focus / VoiceOver announcements.
     ///
     /// `announcement`: `Tx::announce`'s window live region (`Runtime.a11yAnnouncement`), the
@@ -692,13 +766,17 @@ public final class MacOSAccessibilityHost {
     @discardableResult
     internal func update(tree: AccessibilityNode, announcement: AccessibilityAnnouncement? = nil,
                          now: Double = AccessibilityAnnouncement.clock(), parentView: NSView,
-                         callbacks: MacOSAccessibilityCallbacks) -> Bool {
+                         callbacks: MacOSAccessibilityCallbacks, transform suppliedTransform: CGAffineTransform? = nil) -> Bool {
+        let revisitGeometry = refreshedFrames
+        refreshedFrames = false
         pass &+= 1
+        runtimeStamp = nil
+        geometryRecords = nil
         #if DEBUG
         lastUpdatedElements = 0
         lastVisitedNodes = 0
         #endif
-        let transform = RuneAXTextField.viewToScreen(parentView)
+        let transform = suppliedTransform ?? RuneAXTextField.viewToScreen(parentView)
         let movedView = viewTransform != transform
         viewTransform = transform
         let callbacksChanged = callbacks !== lastCallbacks
@@ -774,11 +852,9 @@ public final class MacOSAccessibilityHost {
             entry.pass = pass
             entry.parent = parent
             if updates || movedView || prior?.frame != node.frame {
-                let frame = node.frame
-                let rect = CGRect(x: CGFloat(frame.left), y: CGFloat(frame.top), width: CGFloat(max(0, frame.width)), height: CGFloat(max(0, frame.height)))
-                entry.element.setAccessibilityFrame(rect.applying(transform))
+                entry.element.setAccessibilityFrame(Self.screenFrame(node.frame, transform: transform))
             }
-            if replaced || (callbacksChanged && entry.usesCallbacks) || movedView || prior.map({ !node.sharesChildren(with: $0) }) != false {
+            if replaced || revisitGeometry || (callbacksChanged && entry.usesCallbacks) || movedView || prior.map({ !node.sharesChildren(with: $0) }) != false {
                 var focus: AccessibilityIdentity?
                 let children = syncChildren(node.children, parent: entry.element, scope: id, previous: entry.children, focused: &focus)
                 if children.changed || replaced { entry.element.setAccessibilityChildren(children.children.map(\.element)) }

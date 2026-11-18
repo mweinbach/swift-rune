@@ -433,6 +433,8 @@ extension HostedWindowEntry {
 internal protocol NativeHostedWindowEntry: HostedWindowEntry {
     func wakeDeadline(runtimeObj: AnyObject, covered: Bool) -> Double?
     #if os(macOS)
+    @MainActor func synchronizeAccessibility(runtimeObj: AnyObject, host: MacOSAccessibilityHost, view: NSView,
+                                             force: Bool, callbacks: MacOSAccessibilityCallbacks) -> Bool
     func resolvedWindowArgs(inheriting args: ToolingArgs) -> ToolingArgs
     @MainActor func applyMacAppUpdates(runtimeObj: AnyObject, at now: Double, shortcuts: ShortcutGuard?,
                                        dispatch: (WindowHandleRequest) -> Void)
@@ -886,6 +888,13 @@ final class TypedHostedWindowEntry<State>: NativeHostedWindowEntry {
     func currentCursor(runtimeObj: AnyObject) -> Cursor {
         rt(runtimeObj).currentCursor()
     }
+
+    #if os(macOS)
+    @MainActor func synchronizeAccessibility(runtimeObj: AnyObject, host: MacOSAccessibilityHost, view: NSView,
+                                             force: Bool, callbacks: MacOSAccessibilityCallbacks) -> Bool {
+        host.synchronize(rt(runtimeObj), in: view, force: force, callbacks: callbacks)
+    }
+    #endif
 
     func accessibilitySnapshot(runtimeObj: AnyObject) -> AccessibilityNode {
         rt(runtimeObj).nativeAccessibilitySnapshot()

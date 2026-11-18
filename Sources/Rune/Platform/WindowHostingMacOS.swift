@@ -1201,10 +1201,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             didSyncToolTips = true
             toolTipOwner.sync(regions: entry.helpRegionsList(runtimeObj: runtime), on: self)
         }
-        if accessibilityHost.isActivated,
-           treeCommitted || a11yFollowUp || accessibilityHost.announcementChanged(entry.accessibilityAnnouncement(runtimeObj: runtime)) {
-            syncAccessibilityTree()
-        }
+        if accessibilityHost.isActivated { syncAccessibilityTree(force: treeCommitted || a11yFollowUp) }
     }
 
     private lazy var accessibilityCallbacks = MacOSAccessibilityCallbacks(onSelectText: { [weak self] id, range in
@@ -1238,10 +1235,9 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             }
         })
 
-    private func syncAccessibilityTree() {
+    private func syncAccessibilityTree(force: Bool = true) {
         a11yFollowUp = false
-        let snapshot = entry.accessibilitySnapshot(runtimeObj: runtime)
-        let held = accessibilityHost.update(tree: snapshot, announcement: entry.accessibilityAnnouncement(runtimeObj: runtime), parentView: self, callbacks: accessibilityCallbacks)
+        let held = entry.synchronizeAccessibility(runtimeObj: runtime, host: accessibilityHost, view: self, force: force, callbacks: accessibilityCallbacks)
         if held { scheduleAccessibilityFollowUp() }
     }
 
@@ -1343,6 +1339,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         originWatch = MacOSWindowOriginWatch(window: window) { [weak self] origin in
             guard let self else { return }
             entry.updateWindowOrigin(runtimeObj: runtime, origin: origin)
+            if accessibilityHost.isActivated { syncAccessibilityTree(force: false) }
         }
         if let window {
             metalLayer.isOpaque = window.isOpaque

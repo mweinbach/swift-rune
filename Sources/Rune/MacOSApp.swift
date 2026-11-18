@@ -981,10 +981,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             didSyncToolTips = true
             toolTipOwner.sync(regions: runtime.helpRegionsList(), on: self)
         }
-        if accessibilityHost.isActivated,
-           treeCommitted || a11yFollowUp || accessibilityHost.announcementChanged(runtime.a11yAnnouncement) {
-            syncAccessibilityTree()
-        }
+        if accessibilityHost.isActivated { syncAccessibilityTree(force: treeCommitted || a11yFollowUp) }
     }
 
     private lazy var accessibilityCallbacks = MacOSAccessibilityCallbacks(onSelectText: { [weak self] id, range in
@@ -1008,10 +1005,9 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             }
         })
 
-    private func syncAccessibilityTree() {
+    private func syncAccessibilityTree(force: Bool = true) {
         a11yFollowUp = false
-        let snapshot = runtime.nativeAccessibilitySnapshot()
-        let held = accessibilityHost.update(tree: snapshot, announcement: runtime.a11yAnnouncement, parentView: self, callbacks: accessibilityCallbacks)
+        let held = accessibilityHost.synchronize(runtime, in: self, force: force, callbacks: accessibilityCallbacks)
         if held { scheduleAccessibilityFollowUp() }
     }
 
@@ -1292,8 +1288,10 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        originWatch = MacOSWindowOriginWatch(window: window) { [weak runtime] origin in
-            if let runtime, runtime.updateMacOSOrigin(origin) { runtime.waker.wake() }
+        originWatch = MacOSWindowOriginWatch(window: window) { [weak self] origin in
+            guard let self else { return }
+            if runtime.updateMacOSOrigin(origin) { runtime.waker.wake() }
+            if accessibilityHost.isActivated { syncAccessibilityTree(force: false) }
         }
         if let window {
             metalLayer.isOpaque = window.isOpaque
