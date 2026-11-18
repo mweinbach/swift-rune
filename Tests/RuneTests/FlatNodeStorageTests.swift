@@ -4,6 +4,21 @@ import RuneMotion
 
 @Suite("Sparse flattened node snapshots")
 struct FlatNodeStorageTests {
+    @Test func childrenOfScreenTravelUseTheAuthoredPathBytes() throws {
+        let key = "cafe\u{301}"
+        let rt = Runtime(state: 0, viewport: Vec2(160, 120), pixelScale: 1) { _, _ in
+            col().key("root").child(
+                row().key(key).animateLayout(LayoutAnim(spring: MotionTokens.DEFAULT, travel: .screen))
+                    .child(el().key("é")).child(el()))
+        }
+        _ = rt.frame(at: 0)
+        let parent = try #require(rt.flatNodes.first { $0.key == key })
+        #expect(parent.nodeId == NodeId.hash("screen:@" + key))
+        let children = rt.flatNodes.filter { $0.parentIndex == parent.index }
+        #expect(children.count == 2)
+        for child in children { #expect(child.nodeId == NodeId.hash(child.path)) }
+    }
+
     @Test func ordinaryNodesBorrowElementsAndCopiesIsolateWrites() throws {
         var branch: El<Int> = col().key("parent")
         branch = branch.child(text("original").key("leaf"))

@@ -3366,12 +3366,11 @@ public final class Runtime<State> {
             let nid = item.resolvedId ?? (el.layoutAnim?.travel == .screen
                 ? resolvedKey.map { NodeId.hash("screen:@" + $0) } : nil) ?? NodeId.hash(path)
             let childCount = min(el.children.count, solved.children.count)
+            // Screen travel changes this node's scene identity; descendants keep the authored path.
+            let pathId = childCount > 0 && resolvedKey != nil && el.layoutAnim?.travel == .screen ? NodeId.hash(path) : nid
             var memoPaths = item.memoPaths
             if memoPaths == nil, childCount > 0, let owner = el.memoLayoutChildren,
                owner.matches(el.children), owner.traits.isDisjoint(with: [.virtual, .growth, .inputPills]) {
-                // Screen travel can move a node independently of its path. Its children's
-                // identities still start at the authored path, including its exact UTF-8.
-                let pathId = el.layoutAnim?.travel == .screen ? NodeId.hash(path) : nid
                 if let old = flatMemoPaths[pathId], old.owner === owner {
                     memoPaths = old
                 } else {
@@ -3382,8 +3381,8 @@ public final class Runtime<State> {
             }
             let memoSlot = item.memoPaths == nil ? 0 : item.memoSlot
             let childPaths = childCount == 0 ? FlatChildPaths() :
-                memoPaths?.children(at: memoSlot, source: el.children, parent: path)
-                    ?? FlatChildPaths(el.children, count: childCount, parent: path)
+                memoPaths?.children(at: memoSlot, source: el.children, parent: path, parentId: pathId)
+                    ?? FlatChildPaths(el.children, count: childCount, parent: path, parentId: pathId)
             for duplicate in childPaths.duplicates where duplicate.index < childCount {
                 warnings.append(duplicate.warning)
             }

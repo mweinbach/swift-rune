@@ -33,7 +33,7 @@ internal struct FlatChildPaths {
 
     init() {}
 
-    init<State>(_ children: [El<State>], count: Int, parent: String) {
+    init<State>(_ children: [El<State>], count: Int, parent: String, parentId: NodeId) {
         guard count > 0 else { return }
         addresses.reserveCapacity(count)
         var seen: [String: Int] = [:]
@@ -49,9 +49,10 @@ internal struct FlatChildPaths {
                     key = renamed
                 }
             }
-            let path = key.map { "\(parent)/@\($0)" } ?? "\(parent)/\(i)"
+            let segment = key.map { "@\($0)" } ?? String(i)
+            let path = "\(parent)/\(segment)"
             let id = children[i].layoutAnim?.travel == .screen ? key.map { NodeId.hash("screen:@" + $0) } : nil
-            addresses.append(Address(path: path, key: key, id: id ?? NodeId.hash(path)))
+            addresses.append(Address(path: path, key: key, id: id ?? parentId.child(segment)))
         }
     }
 }
@@ -67,9 +68,9 @@ internal final class FlatMemoPaths<State> {
 
     init(_ owner: MemoLayoutChildren<State>) { self.owner = owner }
 
-    func children(at slot: Int, source: [El<State>], parent: String) -> FlatChildPaths {
+    func children(at slot: Int, source: [El<State>], parent: String, parentId: NodeId) -> FlatChildPaths {
         if let cached = slots[slot] { return cached }
-        var paths = FlatChildPaths(source, count: source.count, parent: parent)
+        var paths = FlatChildPaths(source, count: source.count, parent: parent, parentId: parentId)
         paths.firstChildSlot = slots.count
         slots.append(contentsOf: repeatElement(nil, count: source.count))
         slots[slot] = paths
