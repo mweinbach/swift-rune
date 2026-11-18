@@ -9,4 +9,6 @@ let package = Package(name: "DiagnosticsProbe", platforms: [.macOS(.v14)],
         linkerSettings: [.unsafeFlags(["-Xlinker", "--export=rune_probe_knob_sequence",
                                         "-Xlinker", "--export=rune_probe_frame_ms",
                                         "-Xlinker", "--export=rune_probe_diagnostics",
-                                        "-Xlinker", "--export=rune_probe_strut"], .when(platforms: [.wasi]))])])
+                                        "-Xlinker", "--export=rune_probe_strut",
+                                        "-Xlinker", "--export=rune_probe_family_strut",
+                                        "-Xlinker", "--export=rune_probe_family_slot"], .when(platforms: [.wasi]))])])

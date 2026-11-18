@@ -61,6 +61,48 @@ function checkFontStruts(api) {
     }
 }
 
+async function checkFamilyStruts(api) {
+    const names = ['RuneCaf\u00e9', 'RuneCafe\u0301'];
+    const files = ['Inter-Regular', 'IBMPlexMono-Regular'];
+    const faces = await Promise.all(files.map(async (file, i) => {
+        const response = await fetch('../../Sources/Rune/Resources/Fonts/' + file + '.ttf');
+        check(response.ok, 'Missing font fixture ' + file);
+        // Give the second face a distinct baseline even on hosts that round both fonts alike.
+        const descriptors = i === 1 ? { ascentOverride: '140%', descentOverride: '15%' } : {};
+        return new FontFace(names[i], await response.arrayBuffer(), descriptors).load();
+    }));
+    for (const face of faces) document.fonts.add(face);
+    try {
+        for (const [i, name] of names.entries()) {
+            const matches = await document.fonts.load('42px "' + name + '"', 'R');
+            check(matches.length === 1 && matches[0] === faces[i], 'Browser selected the wrong face for ' + name);
+        }
+        const fresh = names.map((_, i) => api.rune_probe_family_strut(i, 1, 0));
+        check(fresh.every(Number.isFinite) && fresh[0] !== fresh[1], 'Fresh family glyph positions: ' + fresh);
+        const failures = [];
+        for (const cached of [0, 1]) {
+            for (const order of [[0, 1], [1, 0]]) {
+                api.rune_web_fonts_changed();
+                for (const i of [...order, ...order]) {
+                    const y = api.rune_probe_family_strut(i, 0, cached);
+                    if (y !== fresh[i]) failures.push('family ' + i + ', cached=' + cached + ': ' + y + ' != ' + fresh[i]);
+                }
+            }
+        }
+        for (const i of [0, 1]) {
+            for (const switchSlot of [0, 1]) {
+                const y = api.rune_probe_family_slot(i, switchSlot);
+                if (y !== fresh[i]) failures.push('family ' + i + ', switchSlot=' + switchSlot + ': ' + y + ' != ' + fresh[i]);
+            }
+        }
+        check(!failures.length, failures.join('; '));
+        return fresh;
+    } finally {
+        for (const face of faces) document.fonts.delete(face);
+        api.rune_web_fonts_changed();
+    }
+}
+
 try {
     const imports = { ...wasi.wasiImport, clock_time_get(id, precision, address) {
         if (id !== 0) return wasi.wasiImport.clock_time_get(id, precision, address);
@@ -89,6 +131,7 @@ try {
     const renderer = app.renderer;
     check(pixel?.every((v, i) => Math.abs(v - [10, 80, 142, 255][i]) <= 1), 'GPU pixel: ' + pixel);
     const struts = checkFontStruts(api);
+    const familyGlyphY = await checkFamilyStruts(api);
 
     const start = performance.now();
     api.rune_probe_diagnostics();
@@ -115,7 +158,7 @@ try {
     tick = 2 ** 64;
     const saturated = api.rune_probe_frame_ms();
     check(saturated === 0, 'Saturated clock tick: ' + saturated);
-    result.textContent = 'PASS ' + JSON.stringify({ renderer, pixel, struts, samples, elapsed, saturated, diagnosticsMs, userAgent: navigator.userAgent });
+    result.textContent = 'PASS ' + JSON.stringify({ renderer, pixel, struts, familyGlyphY, samples, elapsed, saturated, diagnosticsMs, userAgent: navigator.userAgent });
 } catch (error) {
     result.textContent = 'FAIL ' + error.message;
     throw error;

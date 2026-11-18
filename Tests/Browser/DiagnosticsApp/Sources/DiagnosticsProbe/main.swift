@@ -25,6 +25,37 @@ func strutGlyphY(_ size: Float, _ nonce: Int32) -> Float {
     return shaped.glyphs.first?.rect.y ?? .nan
 }
 
+private let probeFamilyNames = ["RuneCaf\u{e9}", "RuneCafe\u{301}"]
+
+private func familyGlyphY(_ system: TextSystem, _ family: FontFamily, bypassCache: Bool) -> Float {
+    let style = TextStyle(size: 42, lineHeight: 64, family: family, direction: .ltr)
+    let shaped = system.shape(text: "R", style: style, maxWidth: nil, pixelScale: 1,
+                              emitGlyphs: true, bypassCache: bypassCache)
+    return shaped.glyphs.first?.rect.y ?? .nan
+}
+
+@_cdecl("rune_probe_family_strut")
+func familyStrutGlyphY(_ index: Int32, _ fresh: Int32, _ cached: Int32) -> Float {
+    guard let window = TextProbeCompositor.windowText else { return .nan }
+    return familyGlyphY(fresh == 0 ? window : TextSystem(), .named(probeFamilyNames[Int(index)]),
+                        bypassCache: cached == 0)
+}
+
+@_cdecl("rune_probe_family_slot")
+func familySlotGlyphY(_ index: Int32, _ switchSlot: Int32) -> Float {
+    let name = probeFamilyNames[Int(index)]
+    var y = Float.nan
+    withFontFamilies(sans: probeFamilyNames[1 - Int(index)], mono: "monospace") {
+        let system = TextSystem()
+        if switchSlot == 0 {
+            y = familyGlyphY(system, .named(name), bypassCache: false)
+        } else if system.setFamilies(sans: name, mono: "monospace") {
+            y = familyGlyphY(system, .systemUI, bypassCache: false)
+        }
+    }
+    return y
+}
+
 @_cdecl("rune_probe_knob_sequence")
 func knobSequence() {
     let value = Knob.float("value", min: 0, max: 1, default: 0)
