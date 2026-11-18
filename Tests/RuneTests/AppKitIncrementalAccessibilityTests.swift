@@ -91,6 +91,25 @@ struct AppKitIncrementalAccessibilityTests {
         #expect(children(of: root).first?.nodeId == "row-20")
     }
 
+    @Test func backgroundReadersSeeTheLatestChildOrder() async throws {
+        let view = NSView(), host = MacOSAccessibilityHost()
+        let callbacks = MacOSAccessibilityCallbacks(onSelectText: nil, onSetValue: nil) { _, _ in }
+        let a = node("a"), b = node("b")
+        host.update(tree: node("list", children: [a, b]), parentView: view, callbacks: callbacks)
+        let group = try #require(host.accessibilityChildren().first as? RuneNSAccessibilityElement)
+        let held = MacOSUnsafeSendableBox(group)
+        func read() async -> [String] {
+            await Task.detached {
+                let children = held.value.accessibilityChildren() as? [RuneNSAccessibilityElement]
+                return children?.map(\.nodeId) ?? []
+            }.value
+        }
+        #expect(await read() == ["a", "b"])
+        #expect(await read() == ["a", "b"])
+        host.update(tree: node("list", children: [b, a]), parentView: view, callbacks: callbacks)
+        #expect(await read() == ["b", "a"])
+    }
+
     @Test func focusedFieldReplacementUpdatesAnAlreadyReadChildList() throws {
         let view = NSView(), host = MacOSAccessibilityHost()
         let callbacks = MacOSAccessibilityCallbacks(onSelectText: nil, onSetValue: nil) { _, _ in }

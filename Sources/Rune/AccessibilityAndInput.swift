@@ -646,13 +646,23 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
     /// The native host resolves direct children on the first AppKit query. A client can
     /// keep this proxy and ask again after the mounted child list has changed.
     private var childrenProvider: (@MainActor @Sendable () -> [Any])?
+    private var resolvedChildren: [Any]?
 
     internal func resolveChildren(using provider: (@MainActor @Sendable () -> [Any])?) {
-        actionsLock.withLock { childrenProvider = provider }
+        actionsLock.withLock {
+            childrenProvider = provider
+            resolvedChildren = nil
+        }
+    }
+
+    internal func cacheChildren(_ value: [Any]?) {
+        actionsLock.withLock { resolvedChildren = value }
     }
 
     public override func accessibilityChildren() -> [Any]? {
-        guard let provider = actionsLock.withLock({ childrenProvider }) else { return super.accessibilityChildren() }
+        let (cached, provider) = actionsLock.withLock { (resolvedChildren, childrenProvider) }
+        if let cached { return cached }
+        guard let provider else { return super.accessibilityChildren() }
         if Thread.isMainThread {
             return MainActor.assumeIsolated { MacOSUnsafeSendableBox(provider()) }.value
         }

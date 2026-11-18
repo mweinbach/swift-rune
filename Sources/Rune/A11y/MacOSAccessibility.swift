@@ -711,7 +711,6 @@ private final class AppKitAccessibilityEntry {
     var node: AccessibilityNode
     weak var parent: AppKitAccessibilityEntry?
     var children: [AppKitAccessibilityEntry] = []
-    var nativeChildren: [RuneNSAccessibilityElement]?
     var focused: AccessibilityIdentity?
     var pass: UInt64 = 0
     var usesCallbacks = false
@@ -898,7 +897,7 @@ public final class MacOSAccessibilityHost {
             #endif
             if let old = entry.element {
                 old.invalidate()
-                entry.parent?.nativeChildren = nil
+                entry.parent?.element?.cacheChildren(nil)
             }
             entry.element = element
             if !node.actions.isEmpty {
@@ -910,9 +909,8 @@ public final class MacOSAccessibilityHost {
             }
             element.resolveChildren { [weak self, weak entry] in
                 guard let self, let entry, entries[entry.identity] === entry else { return [] }
-                if let children = entry.nativeChildren { return children }
-                let children = entry.children.map { materialize($0) }
-                entry.nativeChildren = children
+                let children: [Any] = entry.children.map { materialize($0) }
+                entry.element?.cacheChildren(children)
                 return children
             }
         }
@@ -1037,7 +1035,7 @@ public final class MacOSAccessibilityHost {
                 var focus: AccessibilityIdentity?
                 let children = syncChildren(node.children, parent: entry, scope: id, previous: entry.children, focused: &focus)
                 entry.children = children.children
-                if children.changed { entry.nativeChildren = nil }
+                if children.changed { entry.element?.cacheChildren(nil) }
                 // The parent's native handle can change when a secure field starts exposing
                 // a text provider. A descendant handle already held by a client follows it.
                 if replaced, let parent = entry.element {
