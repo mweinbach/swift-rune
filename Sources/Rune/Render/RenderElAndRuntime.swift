@@ -1634,22 +1634,18 @@ extension Runtime {
                 }
             }
             if moving { hasInheritedFlags = true }
-            // Most descendants share one scroll translation, and an unclipped box has one
-            // geometry for both inspection fields. Preserve the public arrays by sharing storage.
+            // Most descendants share one scroll translation.
             if carried != lastCarried {
                 lastCarried = carried
                 lastCarriedPair = carried == .zero ? zeroScroll : [carried.x, carried.y]
             }
-            let rect = infoRect.xywh
             newElements.append(ElementInfo(
                 path: node.path,
                 key: node.key,
                 parentIndex: parentElementIndex,
                 role: el.role,
-                rect: rect,
-                target: node.targetRect == infoRect ? rect : node.targetRect.xywh,
+                geometry: .boxes(rect: infoRect, target: node.targetRect, visible: infoVisible),
                 committedLayoutTarget: node.committedLayoutTarget,
-                visible: infoVisible == infoRect ? rect : infoVisible.xywh,
                 opacity: infoOpacity,
                 scale: sc.x,
                 blur: infoBlur,

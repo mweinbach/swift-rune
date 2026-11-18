@@ -275,10 +275,12 @@ internal extension Runtime {
                     key: box.link.id,
                     parentIndex: parentIdx,
                     role: box.link.role,
-                    rect: [box.windowUnion.x, box.windowUnion.y, box.windowUnion.z, box.windowUnion.w],
-                    target: [box.targetUnion.x, box.targetUnion.y, box.targetUnion.z, box.targetUnion.w],
+                    geometry: .arrays(
+                        rect: [box.windowUnion.x, box.windowUnion.y, box.windowUnion.z, box.windowUnion.w],
+                        target: [box.targetUnion.x, box.targetUnion.y, box.targetUnion.z, box.targetUnion.w],
+                        visible: [box.visibleUnion.x, box.visibleUnion.y, box.visibleUnion.z, box.visibleUnion.w]
+                    ),
                     committedLayoutTarget: parent.committedTextTarget(.fromXYWH(box.targetUnion.x, box.targetUnion.y, box.targetUnion.z, box.targetUnion.w)),
-                    visible: [box.visibleUnion.x, box.visibleUnion.y, box.visibleUnion.z, box.visibleUnion.w],
                     opacity: parent.opacity,
                     scale: parent.scale,
                     blur: parent.blur,

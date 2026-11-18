@@ -13,6 +13,32 @@ struct Slice3ElementsAndPoseTests {
         else { _ = rt.frame(at: time) }
     }
 
+    @Test("Inspection boxes retain array value semantics after a caller edits a snapshot")
+    func publicGeometryArrays() {
+        let rt = Runtime(state: (), viewport: Vec2(100, 80)) { _, _ -> El<Void> in
+            col().child(el().key("box").size(30, 20))
+        }
+        for native in [false, true] {
+            paint(rt, native: native, at: native ? 1 : 0)
+            guard let snapshot = rt.element(byKey: "box") else {
+                Issue.record("Missing painted box")
+                return
+            }
+            #expect(snapshot.rect == [0, 0, 30, 20])
+            var edited = snapshot
+            edited.rect = []
+            edited.visible.append(42)
+            edited.target = [1, 2]
+            #expect(edited.rect.isEmpty && edited.target == [1, 2])
+            #expect(edited.visible == snapshot.visible + [42])
+            #expect(snapshot == rt.element(byKey: "box"))
+            edited.rect = snapshot.rect
+            edited.target = snapshot.target
+            edited.visible = snapshot.visible
+            #expect(edited == snapshot)
+        }
+    }
+
     @Test("A forward anchor cycle shares every member's motion flags")
     func cycleSharesAncestorMotionOnce() {
         let rt = Runtime(state: false, viewport: Vec2(100, 100)) { _, _ -> El<Bool> in el() }

@@ -128,9 +128,7 @@ public extension AccessibilityTreeBuilder {
             }
 
             if insideScroll { actions.append(.scrollIntoView) }
-            let rect = info.rect.count >= 4
-                ? MotionRect.fromXYWH(info.rect[0], info.rect[1], info.rect[2], info.rect[3])
-                : .zero
+            let rect = MotionRect.fromXYWH(info.rect)
 
             let projectedValue: String? = isSecure ? nil : info.text
             func relatedWords(_ key: String?) -> String? {

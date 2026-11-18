@@ -118,20 +118,68 @@ public enum AnimSource {
     }
 }
 
+/// The renderer already has these three boxes. Keep them inline until a reader needs arrays.
+internal enum ElementInfoGeometry: Sendable, Equatable {
+    case boxes(rect: MotionRect, target: MotionRect, visible: MotionRect)
+    case arrays(rect: [Float], target: [Float], visible: [Float])
+
+    var rect: [Float] {
+        switch self {
+        case .boxes(let value, _, _): value.xywh
+        case .arrays(let value, _, _): value
+        }
+    }
+
+    var target: [Float] {
+        switch self {
+        case .boxes(_, let value, _): value.xywh
+        case .arrays(_, let value, _): value
+        }
+    }
+
+    var visible: [Float] {
+        switch self {
+        case .boxes(_, _, let value): value.xywh
+        case .arrays(_, _, let value): value
+        }
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        if case let .boxes(a, b, c) = lhs, case let .boxes(x, y, z) = rhs {
+            // Reversed edges expose zero width or height in the public geometry.
+            func equalBox(_ a: MotionRect, _ b: MotionRect) -> Bool {
+                a.origin == b.origin && a.size == b.size
+            }
+            return equalBox(a, x) && equalBox(b, y) && equalBox(c, z)
+        }
+        return lhs.rect == rhs.rect && lhs.target == rhs.target && lhs.visible == rhs.visible
+    }
+}
+
 /// Snapshot of a mounted or exiting UI element exposed to tests, accessibility, and `--tree` JSON.
 public struct ElementInfo: Sendable, Equatable {
     public var path: String
     public var key: String?
     public var parentIndex: Int?
     public var role: ElementRole
+    internal var geometry: ElementInfoGeometry
     /// Presented `[x, y, width, height]` in logical window points.
-    public var rect: [Float]
+    public var rect: [Float] {
+        get { geometry.rect }
+        set { geometry = .arrays(rect: newValue, target: target, visible: visible) }
+    }
     /// Unsnapped layout target `[x, y, width, height]` in logical window points.
-    public var target: [Float]
+    public var target: [Float] {
+        get { geometry.target }
+        set { geometry = .arrays(rect: rect, target: newValue, visible: visible) }
+    }
     /// The committed layout box before scrolling or growth reveal, as reported by the headless tree.
     internal var committedLayoutTarget: MotionRect? = nil
     /// Visible clipped `[x, y, width, height]` in logical window points.
-    public var visible: [Float]
+    public var visible: [Float] {
+        get { geometry.visible }
+        set { geometry = .arrays(rect: rect, target: target, visible: newValue) }
+    }
     public var opacity: Float
     public var scale: Float
     public var blur: Float
@@ -192,9 +240,7 @@ public struct ElementInfo: Sendable, Equatable {
             key: key,
             parentIndex: 0,
             role: .group,
-            rect: [0, 0, 0, 0],
-            target: [0, 0, 0, 0],
-            visible: [0, 0, 0, 0],
+            geometry: .boxes(rect: .zero, target: .zero, visible: .zero),
             opacity: 1.0,
             scale: 1.0,
             blur: 0.0,
@@ -4008,10 +4054,8 @@ public final class Runtime<State> {
                 key: hl.key,
                 parentIndex: ownerIndex,
                 role: .mark,
-                rect: r.xywh,
-                target: t.xywh,
+                geometry: .boxes(rect: r, target: t, visible: vis),
                 committedLayoutTarget: owner.committedTextTarget(t),
-                visible: vis.xywh,
                 opacity: owner.opacity,
                 scale: scaleVec.x,
                 blur: owner.blur,
@@ -9440,10 +9484,8 @@ public final class Runtime<State> {
                 key: snap.key,
                 parentIndex: snap.parentIndex,
                 role: el.role,
-                rect: drawnRect.xywh,
-                target: snap.targetRect.xywh,
+                geometry: .boxes(rect: drawnRect, target: snap.targetRect, visible: infoVisible),
                 committedLayoutTarget: snap.committedLayoutTarget,
-                visible: infoVisible.xywh,
                 opacity: logicalAlpha,
                 scale: scaleVec.x,
                 blur: effBlur,
@@ -9878,9 +9920,7 @@ public final class Runtime<State> {
                     key: nil,
                     parentIndex: nil,
                     role: .text,
-                    rect: presentedRect.xywh,
-                    target: entry.state.destination.xywh,
-                    visible: presentedRect.xywh,
+                    geometry: .boxes(rect: presentedRect, target: entry.state.destination, visible: presentedRect),
                     opacity: srcAlpha,
                     scale: 1.0,
                     blur: 0,
