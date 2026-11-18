@@ -472,6 +472,11 @@ struct DiffParityTests {
         #expect(code.role == .group && text.role == .text && text.label == "first")
         #expect(text.frame.left == code.frame.left + 12)
         #expect(text.frame.width == code.frame.width - 36)
+        for (id, name) in [("g-mode", "Switch to split view"), ("g-wrap", rt.state.diff.wrap ? "Unwrap lines" : "Wrap lines"), ("g-copy", "Copy")] {
+            let control = try #require(find(tree, id))
+            #expect(control.role == .button && control.label == name)
+            #expect(control.children.isEmpty)
+        }
         let fold = try #require(find(tree, "g-fold"))
         #expect(fold.label == "Collapse file" && fold.isExpanded == true && fold.actions.contains(.collapse))
 
@@ -479,10 +484,16 @@ struct DiffParityTests {
         _ = rt.frame(at: 0.2)
         let split = rt.accessibilitySnapshot()
         let splitRow = try #require(find(split, "g-crow-0"))
-        #expect(splitRow.children.map(\.role) == [.listItem, .listItem])
+        #expect(splitRow.children.map(\.role) == [.listItem, .group, .listItem])
+        let divider = try #require(find(splitRow, "g-crow-0-divider"))
+        let panes = splitRow.children.filter { $0.role == .listItem }
+        try #require(panes.count == 2)
+        #expect(divider.frame.width == 1 && divider.frame.height == panes[0].frame.height)
+        #expect(panes[0].frame.right == divider.frame.left && panes[1].frame.left == divider.frame.right)
+        #expect(find(split, "g-mode")?.label == "Switch to unified view")
         for (i, key) in ["g-co-0", "g-cn-0"].enumerated() {
             #expect(find(splitRow, key) == nil)
-            #expect(find(splitRow.children[i], "\(key)-plus")?.label == "Comment on this line")
+            #expect(find(panes[i], "\(key)-plus")?.label == "Comment on this line")
         }
 
         let rightCode = try #require(rt.element(byKey: "g-ccode-n-0"))

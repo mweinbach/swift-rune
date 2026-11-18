@@ -3095,7 +3095,7 @@ public struct DiffView<State>: Sendable {
         let modeLabel = (st.mode == .unified) ? "Split" : "Unified"
         let modeBtn = El<State>(direction: .row)
             .key("\(prefix)-mode")
-            .role(.button)
+            .role(.button).label(st.mode == .unified ? "Switch to split view" : "Switch to unified view")
             .focusable()
             .px(8)
             .py(3)
@@ -3107,11 +3107,11 @@ public struct DiffView<State>: Sendable {
                 d.setMode(d.mode == .unified ? .split : .unified)
                 set(&s, d)
             }
-            .child(text(modeLabel).font(k.ty.caption()).color(k.c.textMuted))
+            .child(text(modeLabel).font(k.ty.caption()).color(k.c.textMuted).a11yHidden())
 
         let wrapBtn = El<State>(direction: .row)
             .key("\(prefix)-wrap")
-            .role(.button)
+            .role(.button).label(st.wrap ? "Unwrap lines" : "Wrap lines")
             .focusable()
             .px(8)
             .py(3)
@@ -3123,11 +3123,11 @@ public struct DiffView<State>: Sendable {
                 d.toggleWrap()
                 set(&s, d)
             }
-            .child(text("Wrap").font(k.ty.caption()).color(st.wrap ? k.c.textAccent : k.c.textMuted))
+            .child(text("Wrap").font(k.ty.caption()).color(st.wrap ? k.c.textAccent : k.c.textMuted).a11yHidden())
 
         let copyBtn = El<State>(direction: .row)
             .key("\(prefix)-copy")
-            .role(.button)
+            .role(.button).label(st.copiedToastVisible ? "Copied" : "Copy")
             .focusable()
             .px(8)
             .py(3)
@@ -3145,7 +3145,7 @@ public struct DiffView<State>: Sendable {
                 onCopyHandler?(&s, txt, &tx)
             }
             .child(icon(st.copiedToastVisible ? KitIcons.check : KitIcons.copy, size: 12).color(k.c.textMuted))
-            .child(text(st.copiedToastVisible ? "Copied" : "Copy").font(k.ty.caption()).color(k.c.textMuted))
+            .child(text(st.copiedToastVisible ? "Copied" : "Copy").font(k.ty.caption()).color(k.c.textMuted).a11yHidden())
 
         var actionsRow = El<State>(direction: .row)
             .gap(8)
@@ -3641,6 +3641,10 @@ public struct DiffView<State>: Sendable {
             .absolute(x: DiffLayout.barWidth + gutterWidth - 10, y: 2))
     }
 
+    private func splitDivider(_ rowKey: String) -> El<State> {
+        El<State>(direction: .column).key("\(rowKey)-divider").w(1).shrink(0).selfStretch().bg(kit.c.borderWeak)
+    }
+
     private func buildSplitPairRow(
         prefix: String,
         rowIdx: Int,
@@ -3667,7 +3671,6 @@ public struct DiffView<State>: Sendable {
             .minH(lineH)
             .bg(oldColors.line)
             .itemsStart()
-            .borderSides(right: 1, color: kit.c.borderWeak)
             .child(gutterBar(.deletion, height: lineH))
             .child(numberCell(cellKey: "\(prefix)-so-\(rowIdx)", number: oldLine.oldNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, colors: oldColors))
             .child(oldCode)
@@ -3686,6 +3689,7 @@ public struct DiffView<State>: Sendable {
             .wFull()
             .child(splitPane(leftPane, numberKey: "\(prefix)-so-\(rowIdx)", side: .old, line: oldLine,
                                 file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers))
+            .child(splitDivider("\(prefix)-srow-\(rowIdx)"))
             .child(splitPane(rightPane, numberKey: "\(prefix)-sn-\(rowIdx)", side: .new, line: newLine,
                                 file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers))
     }
@@ -3717,7 +3721,7 @@ public struct DiffView<State>: Sendable {
             let leftCode = codeBlock(cellKey: "\(prefix)-ccode-o-\(rowIdx)", state: st, file: file, side: .old, line: line, changed: [], wordBg: .transparent, syntaxTheme: syntaxTheme, wrap: st.wraps)
             let rightCode = codeBlock(cellKey: "\(prefix)-ccode-n-\(rowIdx)", state: st, file: file, side: .new, line: line, changed: [], wordBg: .transparent, syntaxTheme: syntaxTheme, wrap: st.wraps)
             let leftPane = El<State>(direction: .row)
-                .wFrac(0.5).minW(0).minH(lineH).bg(oldColors.line).itemsStart().borderSides(right: 1, color: kit.c.borderWeak)
+                .wFrac(0.5).minW(0).minH(lineH).bg(oldColors.line).itemsStart()
                 .pl(DiffLayout.barWidth)
                 .child(numberCell(cellKey: "\(prefix)-co-\(rowIdx)", number: line.oldNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, colors: oldColors))
                 .child(leftCode)
@@ -3729,6 +3733,7 @@ public struct DiffView<State>: Sendable {
             return El<State>(direction: .row).key("\(prefix)-crow-\(rowIdx)").wFull()
                 .child(splitPane(leftPane, numberKey: "\(prefix)-co-\(rowIdx)", side: .old, line: line,
                                 file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers))
+                .child(splitDivider("\(prefix)-crow-\(rowIdx)"))
                 .child(splitPane(rightPane, numberKey: "\(prefix)-cn-\(rowIdx)", side: .new, line: line,
                                 file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers))
 
@@ -3736,7 +3741,7 @@ public struct DiffView<State>: Sendable {
             let colors = palette.row(line.kind, selected: st.rowSelected(rowIdx, file: file, side: .old))
             let code = codeBlock(cellKey: "\(prefix)-dcode-\(rowIdx)", state: st, file: file, side: .old, line: line, changed: [], wordBg: .transparent, syntaxTheme: syntaxTheme, wrap: st.wraps)
             let leftPane = El<State>(direction: .row)
-                .wFrac(0.5).minW(0).minH(lineH).bg(colors.line).itemsStart().borderSides(right: 1, color: kit.c.borderWeak)
+                .wFrac(0.5).minW(0).minH(lineH).bg(colors.line).itemsStart()
                 .child(gutterBar(.deletion, height: lineH))
                 .child(numberCell(cellKey: "\(prefix)-do-\(rowIdx)", number: line.oldNumber, useSingleNodeNumbers: useSingleNodeNumbers, width: gutterWidth, rowIdx: rowIdx, file: file, side: .old, lineH: lineH, colors: colors))
                 .child(code)
@@ -3744,7 +3749,8 @@ public struct DiffView<State>: Sendable {
             let content = splitPane(leftPane, numberKey: "\(prefix)-do-\(rowIdx)", side: .old, line: line,
                                     file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers)
             if st.singleColumn(file: file) == .old { return row.child(content.wFull()) }
-            return row.child(content).child(emptySide("\(prefix)-dempty-\(rowIdx)", palette.empty))
+            return row.child(content).child(splitDivider("\(prefix)-drow-\(rowIdx)"))
+                .child(emptySide("\(prefix)-dempty-\(rowIdx)", palette.empty))
 
         case .addition:
             let colors = palette.row(line.kind, selected: st.rowSelected(rowIdx, file: file, side: .new))
@@ -3758,7 +3764,8 @@ public struct DiffView<State>: Sendable {
             let content = splitPane(rightPane, numberKey: "\(prefix)-an-\(rowIdx)", side: .new, line: line,
                                     file: file, gutterWidth: gutterWidth, centeredIcon: useSingleNodeNumbers)
             if st.singleColumn(file: file) == .new { return row.child(content.wFull()) }
-            return row.child(emptySide("\(prefix)-aempty-\(rowIdx)", palette.empty).borderSides(right: 1, color: kit.c.borderWeak))
+            return row.child(emptySide("\(prefix)-aempty-\(rowIdx)", palette.empty))
+                .child(splitDivider("\(prefix)-arow-\(rowIdx)"))
                 .child(content)
         }
     }
