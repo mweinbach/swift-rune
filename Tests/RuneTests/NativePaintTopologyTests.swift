@@ -54,3 +54,17 @@ import Testing
     #expect(edited[path] == nil)
     #expect(rt.hitGeometryByPath[path] != nil)
 }
+
+@Test func nativePaintRestoresMarksAfterSingleChildScopes() {
+    let rt = Runtime(state: (), viewport: Vec2(24, 8), pixelScale: 1) { _, _ -> El<Void> in
+        let ink: El<Void> = el().size(8, 8).bg(Color.srgb(1, 0.25, 0.25))
+        let wrapped = el().size(8, 8).child(ink)
+        return row().size(24, 8).mark(7).children([
+            el().size(8, 8).mark(42).child(wrapped),
+            wrapped,
+            ink.mark(12),
+        ])
+    }
+    let frame = rt.renderFrame(at: 0)
+    #expect(frame.marks == [42, 7, 12])
+}
