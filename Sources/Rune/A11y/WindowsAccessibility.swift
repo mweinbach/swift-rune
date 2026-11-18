@@ -16,7 +16,7 @@ internal final class WindowsAccessibilityHost {
         rune_uia_on_demand(host, Unmanaged.passUnretained(self).toOpaque()) { context in
             // A modal call can pump WM_GETOBJECT before a runtime mutation has finished.
             // In that case the window thread will publish after the outer callback returns.
-            guard let context, rune_win_in_callback() == 0 else { return }
+            guard let context, rune_win_runtime_idle() != 0 else { return }
             let bridge = Unmanaged<WindowsAccessibilityHost>.fromOpaque(context).takeUnretainedValue()
             bridge.publishOnDemand(bridge)
         }

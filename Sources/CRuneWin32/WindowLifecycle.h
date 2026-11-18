@@ -13,6 +13,8 @@ typedef struct {
 } RuneWinLifecycle;
 
 BOOL rune_win_idle_for_session(void);
+void rune_win_enter_callback(void);
+void rune_win_leave_callback(void);
 BOOL rune_win_covered_on_input_desktop(HWND hwnd);
 void rune_lifecycle_hold(HWND window, RuneWinLifecycle *state, BOOL activate);
 void rune_lifecycle_lift(HWND window, RuneWinLifecycle *state, BOOL may_activate);

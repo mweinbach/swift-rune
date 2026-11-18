@@ -28,7 +28,9 @@ static LRESULT CALLBACK group_wake_proc(HWND window, UINT message, WPARAM wp, LP
         if (!idle && event != RuneWinSessionCancelled) EndMenu();
         if (wake->notify) {
             ++wake->handling;
+            rune_win_enter_callback();
             wake->notify(wake->context, event, idle);
+            rune_win_leave_callback();
             --wake->handling;
         }
         PostMessageW(window, WM_NULL, 0, 0);
@@ -39,7 +41,9 @@ static LRESULT CALLBACK group_wake_proc(HWND window, UINT message, WPARAM wp, LP
         // Also let the outer loop observe group opens, quits and finished windows.
         if (wp) PostMessageW(window, WM_NULL, 0, 0);
         ++wake->handling;
+        rune_win_enter_callback();
         wake->drain(wake->context);
+        rune_win_leave_callback();
         --wake->handling;
         return 0;
     }
