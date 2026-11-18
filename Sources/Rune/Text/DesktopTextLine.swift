@@ -435,6 +435,7 @@ private final class DesktopTextRun {
     let metrics: RuneDesktopLineMetrics
     let hasColor: Bool
     #if os(WASI)
+    static let singleCell = TextUTF8Key("")
     private(set) var fixedPitchBytes: [UInt8]?
     #endif
     let inkOwner: Range<Int32>?
@@ -1393,11 +1394,26 @@ final class DesktopTextLine {
                         // selection bounds can differ from the ink pen under custom page CSS.
                         // The verified ASCII face's outlines fit within one fixed-pitch cell.
                         // Include its neighbors for hinting, fractional glide and antialiasing.
-                        let first = min(bytes.count, max(0, Int(floor(Float(start - 1) / pitch)) - 1))
-                        let last = min(bytes.count, max(first, Int(ceil(Float(end + 1) / pitch)) + 1))
-                        let sample = TextUTF8Key(String(decoding: bytes[first..<last], as: UTF8.self))
+                        let index = Int(cell.nativeBytes.lowerBound)
+                        let sample: TextUTF8Key, first: Int, identity: Int32
+                        if bytes.indices.contains(index),
+                           Float(start - 1) >= Float(index - 1) * pitch + 2,
+                           Float(end) <= Float(index + 2) * pitch - 2 {
+                            // All source samples lie inside these three cells, with two more
+                            // pixels to spare at either end for the native rasterizer.
+                            let before = index > 0 ? Int32(bytes[index - 1]) : 0
+                            let after = index + 1 < bytes.count ? Int32(bytes[index + 1]) : 0
+                            sample = DesktopTextRun.singleCell
+                            first = index
+                            identity = (before << 16) | (Int32(bytes[index]) << 8) | after
+                        } else {
+                            first = min(bytes.count, max(0, Int(floor(Float(start - 1) / pitch)) - 1))
+                            let last = min(bytes.count, max(first, Int(ceil(Float(end + 1) / pitch)) + 1))
+                            sample = TextUTF8Key(String(decoding: bytes[first..<last], as: UTF8.self))
+                            identity = Int32(last)
+                        }
                         var key = DesktopMaskKey(text: sample, font: run.font, x: start, y: y, phase: phase)
-                        key.browserCell = SIMD4(Int32(first), Int32(last), Int32(end - start), Int32(height))
+                        key.browserCell = SIMD4(Int32(first), identity, Int32(end - start), Int32(height))
                         body(Tile(key: key, width: end - start, height: height, left: left, right: right))
                         continue
                     }
