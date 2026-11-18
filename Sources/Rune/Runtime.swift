@@ -2475,11 +2475,11 @@ public final class Runtime<State> {
             let source = nodes ?? flatNodes
             let index: LayoutKeyIndex?
             if nodes == nil {
-                layoutKeyIndex.prepare(nodes: source, stamp: layoutCommitGen, lookups: 1,
+                layoutKeyIndex.prepare(nodes: source, stamp: layoutCommitGen, lookups: 1, selector: selector,
                                        keyOf: { $0.key }, highlightKeysOf: { $0.el.textHighlights?.compactMap(\.key) ?? [] })
                 index = layoutKeyIndex.indexIfValid(nodes: source, stamp: layoutCommitGen)
             } else {
-                transientIndex.prepare(nodes: source, stamp: layoutCommitGen, lookups: 1,
+                transientIndex.prepare(nodes: source, stamp: layoutCommitGen, lookups: 1, selector: selector,
                                        keyOf: { $0.key }, highlightKeysOf: { $0.el.textHighlights?.compactMap(\.key) ?? [] })
                 index = transientIndex.indexIfValid(nodes: source, stamp: layoutCommitGen)
             }
@@ -4182,6 +4182,7 @@ public final class Runtime<State> {
             nodes: flatNodes,
             stamp: layoutCommitGen,
             lookups: layoutSeen.reads.count,
+            selector: layoutSeen.reads.first?.key,
             keyOf: { $0.key },
             highlightKeysOf: { $0.el.textHighlights?.compactMap(\.key) ?? [] }
         )
@@ -4238,6 +4239,7 @@ public final class Runtime<State> {
             nodes: flatNodes,
             stamp: layoutCommitGen,
             lookups: layoutSeen.reads.count,
+            selector: layoutSeen.reads.first?.key,
             keyOf: { $0.key },
             highlightKeysOf: { $0.el.textHighlights?.compactMap(\.key) ?? [] }
         )

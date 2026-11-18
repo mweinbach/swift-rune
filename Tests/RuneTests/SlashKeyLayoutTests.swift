@@ -157,6 +157,31 @@ struct SlashKeyLayoutTests {
         #expect(index.indexIfValid(nodes: replacement, stamp: 0) == nil)
     }
 
+    @Test("A repeated geometry read resolves one leaf and preserves other selector lookups")
+    func cachesOnlyTheRequestedLeaf() {
+        let nodes = ["root", "viewport", "other", "viewport"]
+        var index = LayoutKeyIndex()
+        var visited = 0
+        func key(_ value: String) -> String? { visited += 1; return value }
+        for _ in 0..<3 {
+            index.prepare(nodes: nodes, stamp: 1, lookups: 1, selector: "viewport", keyOf: key)
+            let current = index.indexIfValid(nodes: nodes, stamp: 1)
+            #expect(LayoutKeyIndex.firstMatch(selector: "viewport", index: current, nodes: nodes,
+                                               keyOf: key, parentOf: { _ in nil }) == 1)
+        }
+        #expect(visited == 2)
+        let current = index.indexIfValid(nodes: nodes, stamp: 1)
+        #expect(LayoutKeyIndex.firstMatch(selector: "other", index: current, nodes: nodes,
+                                           keyOf: key, parentOf: { _ in nil }) == 2)
+        #expect(LayoutKeyIndex.markedCandidates(selector: "highlight", index: current, nodes: nodes) == nil)
+        let replacement = ["viewport"]
+        index.prepare(nodes: replacement, stamp: 1, lookups: 1, selector: "viewport", keyOf: key)
+        #expect(index.indexIfValid(nodes: nodes, stamp: 1) == nil)
+        let updated = index.indexIfValid(nodes: replacement, stamp: 1)
+        #expect(LayoutKeyIndex.firstMatch(selector: "viewport", index: updated, nodes: replacement,
+                                           keyOf: key, parentOf: { _ in nil }) == 0)
+    }
+
     @Test("Indexed highlight candidates stay in document order and visit each owner once")
     func deduplicatesOwnersAcrossLiteralAndScopedTails() {
         let marks = [["a/b/c", "b/c", "c", "c"], ["c"], ["a/b/c"]]

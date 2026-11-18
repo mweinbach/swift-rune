@@ -201,7 +201,8 @@ struct LayoutSeenState {
 
 /// Fast key/path lookup index mirroring `crates/rune/src/runtime/key_index.rs`.
 struct LayoutKeyIndex {
-    private var byLeafKey: [String: [Int]] = [:]
+    private var firstByLeafKey: [String: Int] = [:]
+    private var laterByLeafKey: [String: [Int]] = [:]
     private var byHighlightKey: [String: [Int]] = [:]
     /// A prune or a replacement can provide different nodes in the same layout generation.
     private struct NodesID: Equatable {
@@ -218,29 +219,47 @@ struct LayoutKeyIndex {
 
     private var built: NodesID?
     private var seen: NodesID?
+    private var singleLeaf: (id: NodesID, key: String, index: Int)?
 
     mutating func invalidate() {
         built = nil
         seen = nil
+        singleLeaf = nil
     }
 
     mutating func prepare<N>(
         nodes: [N],
         stamp: UInt64,
         lookups: Int,
+        selector: String? = nil,
         keyOf: (N) -> String?,
         highlightKeysOf: ((N) -> [String])? = nil
     ) {
         let id = NodesID(nodes, stamp: stamp)
-        if built != id && (lookups > LayoutReadConstants.scanReads || seen == id) {
+        guard built != id else { return }
+        built = nil
+        if lookups == 1, let selector {
+            let key = LayoutReadConstants.stripWindowPrefix(selector).key
+            if let singleLeaf, singleLeaf.id == id, singleLeaf.key.utf8.elementsEqual(key.utf8) { return }
+            if seen != id, !key.utf8.contains(0x2f),
+               let position = nodes.firstIndex(where: { keyOf($0)?.utf8.elementsEqual(key.utf8) == true }) {
+                singleLeaf = (id, key, position)
+                seen = id
+                return
+            }
+        }
+        if lookups > LayoutReadConstants.scanReads || seen == id {
             build(nodes: nodes, keyOf: keyOf, highlightKeysOf: highlightKeysOf)
             built = id
+        } else {
+            singleLeaf = nil
         }
         seen = id
     }
 
     func indexIfValid<N>(nodes: [N], stamp: UInt64) -> LayoutKeyIndex? {
-        built == NodesID(nodes, stamp: stamp) ? self : nil
+        let id = NodesID(nodes, stamp: stamp)
+        return built == id || singleLeaf?.id == id ? self : nil
     }
 
     mutating func build<N>(
@@ -249,11 +268,17 @@ struct LayoutKeyIndex {
         highlightKeysOf: ((N) -> [String])? = nil
     ) {
         built = nil
-        byLeafKey.removeAll(keepingCapacity: true)
+        singleLeaf = nil
+        firstByLeafKey.removeAll(keepingCapacity: true)
+        laterByLeafKey.removeAll(keepingCapacity: true)
         byHighlightKey.removeAll(keepingCapacity: true)
         for (i, node) in nodes.enumerated() {
             if let k = keyOf(node) {
-                byLeafKey[k, default: []].append(i)
+                if firstByLeafKey[k] == nil {
+                    firstByLeafKey[k] = i
+                } else {
+                    laterByLeafKey[k, default: []].append(i)
+                }
             }
             if let highlightKeysOf {
                 let hKeys = highlightKeysOf(node)
@@ -324,7 +349,7 @@ struct LayoutKeyIndex {
         index: LayoutKeyIndex?,
         nodes: [N]
     ) -> [Int]? {
-        guard let index else { return nil }
+        guard let index, index.singleLeaf == nil else { return nil }
         if !selector.utf8.contains(0x2f) {
             let found = index.byHighlightKey[selector] ?? []
             return (found.last ?? -1) < nodes.count ? found : Array(found.prefix { $0 < nodes.count })
@@ -353,7 +378,10 @@ struct LayoutKeyIndex {
             return matches(selector: selector, key: key, ancestor: parentOf(nodes[i]),
                            nodes: nodes, keyOf: keyOf, parentOf: parentOf)
         }
-        guard let index else {
+        if let cached = index?.singleLeaf, cached.key.utf8.elementsEqual(selector.utf8) {
+            return cached.index
+        }
+        guard let index, index.singleLeaf == nil else {
             if !selector.utf8.contains(0x2f) {
                 return nodes.firstIndex { node in
                     keyOf(node)?.utf8.elementsEqual(selector.utf8) == true
@@ -363,8 +391,13 @@ struct LayoutKeyIndex {
         }
         var first: Int?
         forEachTail(of: selector) { key in
-            guard let candidates = index.byLeafKey[key] else { return }
-            for i in candidates {
+            guard let initial = index.firstByLeafKey[key], initial < (first ?? nodes.count) else { return }
+            if selects(initial) {
+                first = initial
+                return
+            }
+            guard let later = index.laterByLeafKey[key] else { return }
+            for i in later {
                 if i >= (first ?? nodes.count) { break }
                 if selects(i) {
                     first = i
