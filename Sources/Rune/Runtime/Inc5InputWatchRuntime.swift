@@ -522,16 +522,16 @@ extension Runtime {
 
     internal func hoverLive(_ path: String) -> Int? {
         guard let idx = nodeByPath[path], flatNodes.indices.contains(idx) else { return nil }
-        let mounted = flatNodes
-        let nodes = mounted.span
-        guard !nodes[idx].effectiveInert else { return nil }
-        if case .exiting = scene.phase(nodes[idx].nodeId) { return nil }
-        var p = nodes[idx].parentIndex
-        while let pi = p, flatNodes.indices.contains(pi) {
-            if case .exiting = scene.phase(nodes[pi].nodeId) { return nil }
-            p = nodes[pi].parentIndex
+        return flatNodes.withUnsafeBufferPointer { nodes in
+            guard !nodes[idx].effectiveInert else { return nil }
+            if case .exiting = scene.phase(nodes[idx].nodeId) { return nil }
+            var p = nodes[idx].parentIndex
+            while let pi = p, nodes.indices.contains(pi) {
+                if case .exiting = scene.phase(nodes[pi].nodeId) { return nil }
+                p = nodes[pi].parentIndex
+            }
+            return idx
         }
-        return idx
     }
 
     internal func hoverMayHold() -> Bool {
@@ -576,18 +576,18 @@ extension Runtime {
         // The hover tracks that would change (`hover_flip`): one carried by moving layout holds,
         // except a leave from an element turned inert (`Flip::now`).
         let ctx = hoverFlipContext()
-        let mounted = flatNodes
-        let nodes = mounted.span
-        for idx in layoutObservers.hoverTracks {
-            let id = nodes[idx].nodeId
-            if case .exiting = scene.phase(id) { continue }
-            let flip = hoverFlip(nodes[idx], at: idx, ctx)
-            let target: Float = flip.on ? 1.0 : 0.0
-            if target != hoverTarget(id) && (flip.on || flip.allowed) && layoutCarries(nodeIndex: idx) {
-                return true
+        return flatNodes.withUnsafeBufferPointer { nodes in
+            for idx in layoutObservers.hoverTracks {
+                let id = nodes[idx].nodeId
+                if case .exiting = scene.phase(id) { continue }
+                let flip = hoverFlip(nodes[idx], at: idx, ctx)
+                let target: Float = flip.on ? 1.0 : 0.0
+                if target != hoverTarget(id) && (flip.on || flip.allowed) && layoutCarries(nodeIndex: idx) {
+                    return true
+                }
             }
+            return false
         }
-        return false
     }
 
     internal enum HoverDispatchPolicy {
@@ -708,64 +708,64 @@ extension Runtime {
         let ctx = hoverFlipContext()
         var unseen: [Bool]? = nil
         var retargeted = false
-        let mounted = flatNodes
-        let nodes = mounted.span
-        for i in layoutObservers.hoverTracks {
-            let nid = nodes[i].nodeId
-            if case .exiting = scene.phase(nid) { continue }
-            let trackId = Self.hoverTrackId(nid)
-            let flip = hoverFlip(nodes[i], at: i, ctx)
-            let isLit = flip.on
-            let target: Float = isLit ? 1.0 : 0.0
-            // A leave from an element turned inert lands whatever the hold (`Flip::now`).
-            let forceNow = !isLit && !flip.allowed
-            let current = hoverTarget(nid)
-            let changed = current != target
-            // A cut lands every track where it belongs; nothing holds through it.
-            if cut {
+        flatNodes.withUnsafeBufferPointer { nodes in
+            for i in layoutObservers.hoverTracks {
+                let nid = nodes[i].nodeId
+                if case .exiting = scene.phase(nid) { continue }
+                let trackId = Self.hoverTrackId(nid)
+                let flip = hoverFlip(nodes[i], at: i, ctx)
+                let isLit = flip.on
+                let target: Float = isLit ? 1.0 : 0.0
+                // A leave from an element turned inert lands whatever the hold (`Flip::now`).
+                let forceNow = !isLit && !flip.allowed
+                let current = hoverTarget(nid)
+                let changed = current != target
+                // A cut lands every track where it belongs; nothing holds through it.
+                if cut {
+                    if readyHoverFromRest(nid, to: target) {
+                        liveStore.snap(trackId, Self.hoverProp, to: target)
+                        retargeted = retargeted || changed
+                    }
+                    lastHoverTargetById[nid] = target
+                    continue
+                }
+                // Under Reduce Motion the store turns any curve but an instant one on this opacity
+                // track into `REDUCED_FADE` (`AnimationStore.reducedMotion`, upstream
+                // `store.rs::animate_raw` + `PropClass::reduce`), so nothing here snaps for it; and
+                // the hold applies whatever the motion setting (`hover.rs:384-385`).
+                let curves = hoverCurvesById[nid]
+                if !changed {
+                    // Default hover animations inherit velocity and have no completion token. An
+                    // unchanged target preserves its trajectory in the store already; avoid dirtying
+                    // the track for that no-op. Custom animations may carry an explicit velocity,
+                    // decay or token and must still reach the store.
+                    if let curves {
+                        if !liveStore.has(trackId, Self.hoverProp) {
+                            liveStore.snap(trackId, Self.hoverProp, to: 0.0)
+                        }
+                        liveStore.set(trackId, Self.hoverProp, to: target, anim: isLit ? curves.enter : curves.exit, at: now)
+                    }
+                    lastHoverTargetById[nid] = current
+                    continue
+                }
+                if held && !forceNow {
+                    lastHoverTargetById[nid] = current
+                    continue
+                }
+                // Like a native sidebar or menu: the highlight lands with the pointer and fades
+                // briefly as it leaves.
+                let anim: Anim<Float> = curves.map { isLit ? $0.enter : $0.exit }
+                    ?? (isLit ? .instant : Anim<Float>(curve: .tween(duration: 0.1, easing: .easeOut)))
                 if readyHoverFromRest(nid, to: target) {
-                    liveStore.snap(trackId, Self.hoverProp, to: target)
-                    retargeted = retargeted || changed
+                    retargeted = true
+                    if kitHooks.unseenPresence.drewNothing(at: i, nodes: flatNodes, cached: &unseen) {
+                        liveStore.snap(trackId, Self.hoverProp, to: target)
+                    } else {
+                        liveStore.set(trackId, Self.hoverProp, to: target, anim: anim, at: now)
+                    }
                 }
                 lastHoverTargetById[nid] = target
-                continue
             }
-            // Under Reduce Motion the store turns any curve but an instant one on this opacity
-            // track into `REDUCED_FADE` (`AnimationStore.reducedMotion`, upstream
-            // `store.rs::animate_raw` + `PropClass::reduce`), so nothing here snaps for it; and
-            // the hold applies whatever the motion setting (`hover.rs:384-385`).
-            let curves = hoverCurvesById[nid]
-            if !changed {
-                // Default hover animations inherit velocity and have no completion token. An
-                // unchanged target preserves its trajectory in the store already; avoid dirtying
-                // the track for that no-op. Custom animations may carry an explicit velocity,
-                // decay or token and must still reach the store.
-                if let curves {
-                    if !liveStore.has(trackId, Self.hoverProp) {
-                        liveStore.snap(trackId, Self.hoverProp, to: 0.0)
-                    }
-                    liveStore.set(trackId, Self.hoverProp, to: target, anim: isLit ? curves.enter : curves.exit, at: now)
-                }
-                lastHoverTargetById[nid] = current
-                continue
-            }
-            if held && !forceNow {
-                lastHoverTargetById[nid] = current
-                continue
-            }
-            // Like a native sidebar or menu: the highlight lands with the pointer and fades
-            // briefly as it leaves.
-            let anim: Anim<Float> = curves.map { isLit ? $0.enter : $0.exit }
-                ?? (isLit ? .instant : Anim<Float>(curve: .tween(duration: 0.1, easing: .easeOut)))
-            if readyHoverFromRest(nid, to: target) {
-                retargeted = true
-                if kitHooks.unseenPresence.drewNothing(at: i, nodes: flatNodes, cached: &unseen) {
-                    liveStore.snap(trackId, Self.hoverProp, to: target)
-                } else {
-                    liveStore.set(trackId, Self.hoverProp, to: target, anim: anim, at: now)
-                }
-            }
-            lastHoverTargetById[nid] = target
         }
         // Hover tracks live in a separate store from the scene. Retire them with their
         // owner so a returning virtual row starts at rest, including during a scroll hold.
@@ -862,23 +862,23 @@ extension Runtime {
         if pointerPosition.x > -9000 && pointerPosition.y > -9000 {
             // Hover-change observers follow their own drawn bounds, including overlapping siblings.
             var hits: [(index: Int, order: Int)] = []
-            let mounted = flatNodes
-            let nodes = mounted.span
-            for index in layoutObservers.hoverChanges where hoverAllowed(nodes[index]) {
-                if let geometry = hitGeometryByPath[nodes[index].path] {
-                    if !geometry.isExiting, geometry.opacity > 0.001, geometry.contains(pointerPosition) {
-                        hits.append((index, geometry.paintOrder))
+            flatNodes.withUnsafeBufferPointer { nodes in
+                for index in layoutObservers.hoverChanges where hoverAllowed(nodes[index]) {
+                    if let geometry = hitGeometryByPath[nodes[index].path] {
+                        if !geometry.isExiting, geometry.opacity > 0.001, geometry.contains(pointerPosition) {
+                            hits.append((index, geometry.paintOrder))
+                        }
+                    } else if paintOrderPaths.isEmpty, nodes[index].el.opacity > 0.001, !hoverIsExiting(index),
+                              hoverNodeContains(nodes[index]) {
+                        hits.append((index, index))
                     }
-                } else if paintOrderPaths.isEmpty, nodes[index].el.opacity > 0.001, !hoverIsExiting(index),
-                          hoverNodeContains(nodes[index]) {
-                    hits.append((index, index))
                 }
-            }
-            if hits.count > 1 { hits.sort { $0.order < $1.order } }
-            for hit in hits {
-                let path = nodes[hit.index].path
-                if !hoverWithinPaths.contains(path) { entering.append(hit.index) }
-                inside.append(path)
+                if hits.count > 1 { hits.sort { $0.order < $1.order } }
+                for hit in hits {
+                    let path = nodes[hit.index].path
+                    if !hoverWithinPaths.contains(path) { entering.append(hit.index) }
+                    inside.append(path)
+                }
             }
         }
         // A held press stays inside what holds it until it releases (`hover.rs:132-140`).

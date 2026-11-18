@@ -149,7 +149,7 @@ extension Runtime {
 
     /// `focus.rs::allowed`: not inert and not behind a modal.
     internal func hoverAllowed(_ i: Int) -> Bool {
-        hoverAllowed(flatNodes.span[i])
+        flatNodes.withUnsafeBufferPointer { hoverAllowed($0[i]) }
     }
 
     internal func hoverAllowed(_ n: borrowing FlatNode) -> Bool {
@@ -172,8 +172,7 @@ extension Runtime {
     }
 
     internal func hoverIsExiting(_ i: Int) -> Bool {
-        let mounted = flatNodes
-        let id = mounted.span[i].nodeId
+        let id = flatNodes.withUnsafeBufferPointer { $0[i].nodeId }
         if case .exiting = scene.phase(id) { return true }
         return false
     }
@@ -189,12 +188,12 @@ extension Runtime {
     internal func hoveredAlone() -> Int? {
         guard pointerPosition.x > -9000, pointerPosition.y > -9000 else { return nil }
         var best: Int? = nil
-        let mounted = flatNodes
-        let nodes = mounted.span
-        for i in layoutObservers.hoverGroups where nodes[i].el.isHoverAlone {
-            guard !hoverIsExiting(i), hoverAllowed(nodes[i]), hoverNodeContains(nodes[i]) else { continue }
-            // `max_by_key(path.len())`: of equally deep matches, the last wins.
-            if best.map({ nodes[i].path.count >= nodes[$0].path.count }) ?? true { best = i }
+        flatNodes.withUnsafeBufferPointer { nodes in
+            for i in layoutObservers.hoverGroups where nodes[i].el.isHoverAlone {
+                guard !hoverIsExiting(i), hoverAllowed(nodes[i]), hoverNodeContains(nodes[i]) else { continue }
+                // `max_by_key(path.len())`: of equally deep matches, the last wins.
+                if best.map({ nodes[i].path.count >= nodes[$0].path.count }) ?? true { best = i }
+            }
         }
         return best
     }
@@ -203,12 +202,12 @@ extension Runtime {
     /// (`hover.rs::shared_hovered`).
     internal func sharedHovered() -> Set<String> {
         var keys: Set<String> = []
-        let mounted = flatNodes
-        let nodes = mounted.span
-        for i in layoutObservers.hoverGroups {
-            guard let key = nodes[i].el.hoverGroupShare else { continue }
-            if !hoverIsExiting(i) && hoverAllowed(nodes[i]) && (hoverNodeContains(nodes[i]) || hoverKeyboardWithin(nodes[i])) {
-                keys.insert(key)
+        flatNodes.withUnsafeBufferPointer { nodes in
+            for i in layoutObservers.hoverGroups {
+                guard let key = nodes[i].el.hoverGroupShare else { continue }
+                if !hoverIsExiting(i) && hoverAllowed(nodes[i]) && (hoverNodeContains(nodes[i]) || hoverKeyboardWithin(nodes[i])) {
+                    keys.insert(key)
+                }
             }
         }
         return keys
