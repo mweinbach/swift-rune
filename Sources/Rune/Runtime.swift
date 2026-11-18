@@ -3146,6 +3146,10 @@ public final class Runtime<State> {
             return nil
         }
 
+        // An auto ancestor reads the mounted rows to resolve its first strong character.
+        // Explicitly directed children are excluded from any higher ancestor's scan.
+        if ancestors.last(where: { $0.explicitDir != nil })?.explicitDir == .auto { return nil }
+
         // The solver also rounds the placeholder. Above 2^23 an odd integral Float
         // plus 0.5 can round to the next even integer before the floor operation.
         let wholeRows = style.isWholeRowsColumn

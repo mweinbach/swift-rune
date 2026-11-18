@@ -83,6 +83,48 @@ struct FixedVirtualRowLayoutTests {
         #expect(checkedAbsoluteRow)
     }
 
+    @Test("Automatic direction reads the mounted rows through a fixed-row remount", arguments: [false, true])
+    func autoDirectionAfterScroll(explicitLTR: Bool) throws {
+        func make(_ ordinary: Bool) -> Runtime<Void> {
+            Runtime(state: (), viewport: Vec2(240, 120), pixelScale: 1) { _, _ in
+                let list: El<Void> = col().key("rows").wFull().minW(240).borderLayout(ordinary)
+                    .virtualRows(count: 500, estimatedRowHeight: 20, key: { _, i in "r\(i)" }) { _, i in
+                        let label = i == 2 ? "…" : (i.isMultiple(of: 2) ? "abc" : "مرحبا")
+                        return col().wFull().h(20).child(
+                            row().wFull().h(20)
+                                .child(el().key("mark\(i)").size(10, 10).bg(.white))
+                                .child(text(label).size(70, 20))
+                        )
+                    }
+                let frame = col().key("frame").wFull().child(list)
+                return col().sizeFull().scrollY().dir(.auto).key("scroll")
+                    .child(explicitLTR ? frame.dir(.ltr) : frame)
+            }
+        }
+        let tested = make(false), ordinary = make(true)
+        var compressed = false
+        for step in 0...13 {
+            let time = Double(step) / 60
+            func draw(_ rt: Runtime<Void>) -> RenderFrame {
+                if step > 0 { rt.wheel(WheelEvent(dy: -20), at: Vec2(80, 60), now: time) }
+                return rt.renderFrame(at: time)
+            }
+            let actual = draw(tested), expected = draw(ordinary)
+            #expect(tested.elements() == ordinary.elements())
+            #expect(tested.accessibilitySnapshot() == ordinary.accessibilitySnapshot())
+            if tested.retainedLayout.storageStats.liveNodes < ordinary.retainedLayout.storageStats.liveNodes {
+                compressed = true
+            }
+            if step == 13 {
+                let marker = try #require(tested.element(byKey: "mark13"))
+                #expect(tested.scrollOffset(forKey: "scroll").y == 260)
+                #expect(marker.visible[0] == (explicitLTR ? 0 : 230))
+                try expectMatchingPaint(actual, expected)
+            }
+        }
+        #expect(compressed == explicitLTR)
+    }
+
     private struct SampledDraw: Equatable {
         var instance: RenderInstance
         var mask: [UInt8] = []
