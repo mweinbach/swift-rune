@@ -32,6 +32,46 @@ struct HoverRuntimeParityTests {
         check(.max)
     }
 
+    @Test("Hover holds only for motion carried by the affected nodes while other elements animate")
+    func hoverHoldWithUnrelatedAnimations() throws {
+        let runtime = Runtime(state: 0, viewport: Vec2(100, 100), pixelScale: 1) { _, _ -> El<Int> in
+            let decorations: [El<Int>] = (0..<32).map { i in
+                el().key("decoration-\(i)").size(1, 1)
+            }
+            return col().wFull().children([
+                col().key("container").wFull().children([
+                    el().key("first").wFull().h(20).hover(.white),
+                    el().key("next").wFull().h(20).hover(.white),
+                ]),
+                col().children(decorations),
+            ])
+        }
+        _ = runtime.frame(at: 0)
+        runtime.pointerMove(to: Vec2(10, 10), at: 0.01)
+        _ = runtime.frame(at: 0.01)
+        #expect(runtime.hoveredKey == "first")
+        let next = try #require(runtime.flatNodes.firstIndex { $0.key == "next" })
+        let container = try #require(runtime.flatNodes.first { $0.key == "container" })
+        let decorations = runtime.flatNodes.filter { $0.key?.hasPrefix("decoration-") == true }
+        let sibling = try #require(decorations.first)
+        #expect(decorations.count == 32)
+        for node in decorations {
+            runtime.scene.store.snap(node.nodeId, Props.OPACITY, to: 1)
+            runtime.scene.store.set(node.nodeId, Props.OPACITY, to: 0, anim: .spring(.snappy), at: 0.02)
+        }
+        #expect(runtime.scene.store.activeTrackCount >= decorations.count)
+        func holds() -> Bool {
+            runtime.decideHoverHold(candidatePath: runtime.flatNodes[next].path, candidateIndex: next)
+        }
+        #expect(!holds())
+        runtime.scene.store.snap(sibling.nodeId, Props.OFFSET, to: .zero)
+        runtime.scene.store.set(sibling.nodeId, Props.OFFSET, to: Vec2(0, 10), anim: .spring(.snappy), at: 0.02)
+        #expect(!holds())
+        runtime.scene.store.snap(container.nodeId, Props.OFFSET, to: .zero)
+        runtime.scene.store.set(container.nodeId, Props.OFFSET, to: Vec2(0, 10), anim: .spring(.snappy), at: 0.02)
+        #expect(holds())
+    }
+
     @Test("A stationary pointer follows scrolling rows and only reruns views that read its key")
     func paintHoverAndViewHoverDuringScroll() {
         for native in [false, true] {

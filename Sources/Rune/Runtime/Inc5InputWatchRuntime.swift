@@ -553,8 +553,9 @@ extension Runtime {
         candidateIndex: Int?,
         within: (inside: [String], entering: [Int])? = nil
     ) -> Bool {
-        // A hold is possible only when layout carries a hovered node or one of its ancestors.
-        guard hoverMayHold(), layoutMoving() else { return false }
+        // A still layout cannot carry a hovered node. With active scene tracks, check the
+        // affected hover nodes below without enumerating every unrelated animation.
+        guard hoverMayHold(), scene.store.activeTrackCount > 0 || layoutMoving() else { return false }
         if candidatePath != hoveredPath {
             if let cIdx = candidateIndex, layoutCarries(nodeIndex: cIdx) {
                 return true
