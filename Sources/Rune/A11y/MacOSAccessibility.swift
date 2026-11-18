@@ -909,7 +909,7 @@ public final class MacOSAccessibilityHost {
                 }
             }
             element.resolveChildren { [weak self, weak entry] in
-                guard let self, let entry else { return [] }
+                guard let self, let entry, entries[entry.identity] === entry else { return [] }
                 if let children = entry.nativeChildren { return children }
                 let children = entry.children.map { materialize($0) }
                 entry.nativeChildren = children
@@ -962,7 +962,9 @@ public final class MacOSAccessibilityHost {
         rootView = parentView
         let callbacksChanged = callbacks !== lastCallbacks
         lastCallbacks = callbacks
+        var changedFieldValues: [AppKitAccessibilityEntry] = []
         var changedSelections: [AppKitAccessibilityEntry] = []
+        var replacedFocusedElement = false
         var destroyed: [RuneNSAccessibilityElement] = []
         var removed: [AppKitAccessibilityEntry] = []
         var spoken: [(text: String, politeness: LiveRegionPoliteness)] = []
@@ -1008,6 +1010,9 @@ public final class MacOSAccessibilityHost {
             if old == nil { entries[id] = entry }
             if announce { recordLive(prior, node) }
             let field = node.role == .textInput || node.role == .multilineTextInput
+            if field, let prior, !node.isSecure, !prior.isSecure,
+               (prior.role == .textInput || prior.role == .multilineTextInput),
+               !AccessibilityNode.sameBytes(prior.value, node.value) { changedFieldValues.append(entry) }
             if field, let prior, prior.textSelection != node.textSelection,
                prior.textSelection?.count == 4, node.textSelection?.count == 4,
                !prior.isSecure, !node.isSecure {
@@ -1022,6 +1027,7 @@ public final class MacOSAccessibilityHost {
                     lastUpdatedElements += 1
                     #endif
                     replaced = refreshElement(entry) !== element
+                    if replaced && node.isFocused { replacedFocusedElement = true }
                 } else if movedView || prior?.frame != node.frame {
                     element.setAccessibilityFrame(Self.screenFrame(node.frame, transform: transform))
                 }
@@ -1082,11 +1088,13 @@ public final class MacOSAccessibilityHost {
         if let announcerSpeech { spoken.append(announcerSpeech) }
         lastSpoken = spoken
         for element in destroyed { NSAccessibility.post(element: element, notification: .uiElementDestroyed) }
+        // As in the macOS AccessKit event adapter, readers see changed text before its selection.
+        for entry in changedFieldValues { NSAccessibility.post(element: materialize(entry), notification: .valueChanged) }
         for entry in changedSelections {
             if let field = materialize(entry) as? RuneAXTextField { NSAccessibility.post(element: field, notification: .selectedTextChanged) }
         }
 
-        if focusedNodeId != lastFocusedId {
+        if focusedNodeId != lastFocusedId || replacedFocusedElement {
             lastFocusedId = focusedNodeId
             if let fid = focusedNodeId, let entry = entries[fid] {
                 NSAccessibility.post(element: materialize(entry), notification: .focusedUIElementChanged)

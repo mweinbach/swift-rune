@@ -91,6 +91,29 @@ struct AppKitIncrementalAccessibilityTests {
         #expect(children(of: root).first?.nodeId == "row-20")
     }
 
+    @Test func focusedFieldReplacementUpdatesAnAlreadyReadChildList() throws {
+        let view = NSView(), host = MacOSAccessibilityHost()
+        let callbacks = MacOSAccessibilityCallbacks(onSelectText: nil, onSetValue: nil) { _, _ in }
+        var field = node("draft", role: .textInput, label: "Draft", actions: [.setValue])
+        field.isFocused = true
+        field.value = "before"
+        field.textSelection = [0, 0, 0, 2]
+        host.update(tree: node("form", children: [field]), parentView: view, callbacks: callbacks)
+        let form = try #require(host.accessibilityChildren().first as? RuneNSAccessibilityElement)
+        let original = try #require(children(of: form).first)
+        #expect(original is RuneAXTextField)
+        #expect(host.accessibilityFocusedUIElement() as? RuneNSAccessibilityElement === original)
+        field.isSecure = true
+        field.value = nil
+        field.textSelection = nil
+        host.update(tree: node("form", children: [field]), parentView: view, callbacks: callbacks)
+        let secure = try #require(children(of: form).first)
+        #expect(secure !== original)
+        #expect(!original.isAccessibilityElement())
+        #expect(secure.accessibilityValue() == nil)
+        #expect(host.accessibilityFocusedUIElement() as? RuneNSAccessibilityElement === secure)
+    }
+
     @Test func reorderedOrReparentedDescendantsKeepTheirHandlesAndCurrentParent() throws {
         let view = NSView(), host = MacOSAccessibilityHost()
         let callbacks = MacOSAccessibilityCallbacks(onSelectText: nil, onSetValue: nil) { _, _ in }
