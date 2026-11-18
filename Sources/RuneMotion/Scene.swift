@@ -754,6 +754,8 @@ public struct Scene: Sendable {
     private var rootTail: UInt32 = Scene.noneIdx
     internal var order: [UInt32] = []
     internal var orderDirty: Bool = false
+    // One actual exit proves that live ID lookups may succeed. A frame replaces a retired witness.
+    internal var exitingSlot = Scene.noneIdx
     private var snapshot: OrderedScenePoses?
     private var snapshotPositions: [NodeId: UInt32]?
     internal var out: [Presented] = []
@@ -895,7 +897,7 @@ public struct Scene: Sendable {
     }
 
     public func isExiting(_ id: NodeId) -> Bool {
-        guard let i = slot(id), nodes[i].alive else { return false }
+        guard exitingSlot != Self.noneIdx, let i = slot(id), nodes[i].alive else { return false }
         return nodes[i].presence.isExiting
     }
 
@@ -1287,6 +1289,12 @@ public struct Scene: Sendable {
             let i = Int(ui)
             if nodes[i].alive {
                 removeNow(i)
+            }
+        }
+        if exitingSlot != Self.noneIdx {
+            let i = Int(exitingSlot)
+            if !nodes[i].alive || !nodes[i].presence.isExiting {
+                exitingSlot = index.values.first { nodes[Int($0)].presence.isExiting } ?? Self.noneIdx
             }
         }
         exitedCarry.end()
@@ -2335,6 +2343,7 @@ public struct Scene: Sendable {
         rests.removeAll(keepingCapacity: true)
         free.removeAll(keepingCapacity: true)
         index.removeAll(keepingCapacity: true)
+        exitingSlot = Self.noneIdx
         rootHead = Self.noneIdx
         rootTail = Self.noneIdx
         order.removeAll(keepingCapacity: true)
