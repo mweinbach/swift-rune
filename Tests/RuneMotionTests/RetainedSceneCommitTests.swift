@@ -79,6 +79,75 @@ struct RetainedSceneCommitTests {
         #expect(scene.frame(at: 2).nodes.map(\.id) == [root.id, c.id, a.id])
     }
 
+    @Test func exitQueriesFollowRemovalsAndRevivalsBetweenFrames() {
+        let rect = MotionRect.fromXYWH(0, 0, 30, 20)
+        let root = NodeSpec(id: NodeId(1), rect: rect)
+        let parent = NodeSpec(id: NodeId(2), parent: root.id, rect: rect, transition: .opacity)
+        let child = NodeSpec(id: NodeId(3), parent: parent.id, rect: rect, transition: .opacity)
+        let sibling = NodeSpec(id: NodeId(4), parent: root.id, rect: rect, transition: .opacity)
+        var scene = Scene()
+        scene.commit([root, parent, child, sibling], at: 0)
+        let mounted = scene.frameForRendering(at: 0)
+        let before = scene
+
+        scene.remove(child.id)
+        scene.remove(sibling.id)
+        scene.remove(sibling.id)
+        #expect(scene.isExiting(child.id) && scene.isExiting(sibling.id))
+        #expect(!before.isExiting(child.id) && !before.isExiting(sibling.id))
+        #expect(mounted.poseIndex[child.id]?.isExiting == false)
+        let leaving = scene.frameForRendering(at: 0.01)
+        let bothExiting = scene
+
+        for revive in [false, true] {
+            var oneExiting = bothExiting
+            if revive {
+                oneExiting.insert(sibling.id, sibling, .initial)
+            } else {
+                oneExiting.unmount(sibling.id)
+            }
+            #expect(oneExiting.isExiting(child.id) && !oneExiting.isExiting(sibling.id))
+            _ = oneExiting.frame(at: 0.02)
+            #expect(oneExiting.isExiting(child.id) && !oneExiting.isExiting(sibling.id))
+        }
+
+        scene.unmount(parent.id)
+        scene.present()
+        #expect(!scene.isExiting(child.id) && scene.isExiting(sibling.id))
+        scene.insert(sibling.id, sibling, .animated)
+        #expect(!scene.isExiting(sibling.id))
+        #expect(bothExiting.isExiting(child.id) && bothExiting.isExiting(sibling.id))
+        #expect(leaving.poseIndex[child.id]?.isExiting == true)
+
+        scene.insert(child.id, NodeSpec(id: child.id, parent: root.id, rect: rect, transition: .opacity), .initial)
+        scene.remove(child.id)
+        #expect(scene.isExiting(child.id))
+        _ = scene.frame(at: 2)
+        #expect(scene.phase(child.id) == nil && !scene.isExiting(child.id))
+        scene.remove(sibling.id)
+        #expect(scene.isExiting(sibling.id))
+        scene.settle(at: 2)
+        #expect(scene.phase(sibling.id) == nil && !scene.isExiting(sibling.id))
+    }
+
+    @Test func matchedTravelChangesCurrentExitQueries() {
+        let rect = MotionRect.fromXYWH(0, 0, 30, 20)
+        let source = NodeSpec(id: NodeId(1), rect: rect, transition: .opacity)
+        let target = NodeSpec(id: NodeId(2), rect: rect.translated(Vec2(50, 0)), transition: .opacity)
+        let spring = LayoutAnim(MotionTokens.MORPH)
+        for reducedMotion in [false, true] {
+            var scene = Scene()
+            scene.setReducedMotion(reducedMotion)
+            scene.commit([source, target], at: 0)
+            _ = scene.frame(at: 0)
+            scene.remove(target.id)
+            #expect(scene.isExiting(target.id))
+            scene.matchGeometry(source.id, target.id, spring)
+            #expect(!scene.isExiting(target.id))
+            #expect(scene.isExiting(source.id) == reducedMotion)
+        }
+    }
+
     @Test func restingNodesKeepTheirPresentationAndFollowAMovedParent() throws {
         var scene = Scene()
         var parent = NodeSpec(id: NodeId(1), rect: .fromXYWH(10, 20, 80, 60))

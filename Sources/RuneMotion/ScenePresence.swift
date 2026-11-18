@@ -66,6 +66,7 @@ extension Scene {
         if !nodes[i].alive || nodes[i].presence.isExiting { return }
         let p = presenceNow(id)
         let acts = nodes[i].phaseStep(.exit(transition: nodes[i].transition, p: p))
+        if nodes[i].presence.isExiting { exitingSlot = UInt32(i) }
         applyPhaseActs(i, acts)
     }
 
