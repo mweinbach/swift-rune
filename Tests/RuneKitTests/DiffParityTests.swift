@@ -2491,6 +2491,31 @@ struct DiffParityTests {
         #expect(!scene.primitives.contains { $0.kind == .glyph && $0.fill == color.simd4(srgb: scene.srgbBlend) })
     }
 
+    @Test("Syntax and word ranges preserve their original overlap priority")
+    func overlappingSpanPriority() {
+        let kit = Kit.neutral(dark: true), theme = SyntaxTheme.fromKit(kit)
+        let base = kit.c.textBase, changed = kit.c.success.bg
+        let a = SyntaxHighlight(range: 0..<5, paint: .kind(.keyword))
+        let b = SyntaxHighlight(range: 2..<7, paint: .kind(.string))
+        let c = SyntaxHighlight(range: 8..<9, paint: .kind(.number))
+        for highlights in [[a, b, c], [b, c, a]] {
+            for words in [[], [1..<4, 3..<6, 8..<9], [8..<9, 3..<6, 1..<4]] {
+                let spans = DiffViewHelpers.mergeCodeSpans(code: "abcdefghij", offsetMap: nil,
+                    highlights: highlights, changedRanges: words, defaultColor: base, syntaxTheme: theme, wordBg: changed)
+                #expect(spans.map(\.text).joined() == "abcdefghij")
+                var byte = 0
+                for span in spans {
+                    for _ in span.text.utf8 {
+                        let first = highlights.first { $0.range.contains(byte) }
+                        #expect(span.color == first.map { theme.paint($0.paint) } ?? base)
+                        #expect(span.background == (words.contains { $0.contains(byte) } ? changed : nil))
+                        byte += 1
+                    }
+                }
+            }
+        }
+    }
+
     @Test("src/diff/view.rs #46: word_backgrounds_cut_syntax_colours")
     func wordBackgroundsCutSyntaxColours() {
         let kit = Kit.neutral(dark: false)

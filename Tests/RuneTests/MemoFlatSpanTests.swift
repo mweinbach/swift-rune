@@ -62,6 +62,34 @@ struct MemoFlatSpanTests {
         #expect(retained.state.taps == 3)
     }
 
+    @Test("Reordered memo descendants retain observer identities and honor the current modal")
+    func observerRolesFollowMovedRows() {
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(160, 80), pixelScale: 1) { tick, _ in
+            let left = memo("left-panel", deps: 0) { () -> El<Int> in
+                row().child(el().key("watch-layout").size(12, 9).onLayout { _, _ in })
+            }
+            let right = memo("right-panel", deps: 0) { () -> El<Int> in
+                row().child(el().key("watch-selection").size(12, 9)
+                    .onVisible { _, _, _ in }.onSelectionChange { _, _, _ in })
+            }
+            var body: El<Int> = col()
+            if tick < 4 { body = body.child(left).child(right) }
+            else { body = body.child(right).child(left) }
+            if tick == 5 { body = body.child(el().key("modal").size(12, 9).modal()) }
+            return body
+        }
+        for tick in 0..<7 {
+            let time = Double(tick + 1) / 60
+            rt.update(at: time) { state, _ in state = tick }
+            _ = rt.frame(at: time)
+            func keys(_ indices: [Int]) -> [String] { indices.compactMap { rt.flatNodes[$0].key } }
+            #expect(keys(rt.layoutObservers.laidOut) == ["watch-layout"])
+            #expect(keys(rt.layoutObservers.visible) == ["watch-selection"])
+            #expect(keys(rt.layoutObservers.selectionChanges) == (tick == 5 ? [] : ["watch-selection"]))
+            if tick >= 4 { #expect(rt.replayedFlatMemoNodes == 2) }
+        }
+    }
+
     @Test("Changing a memo root to screen travel reparents its descendants in the motion scene")
     func changedRootSceneIdentity() {
         func runtime(_ cached: Bool) -> Runtime<Int> {

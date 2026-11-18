@@ -3976,6 +3976,65 @@ internal enum DiffViewHelpers: Sendable {
             return idx.samePosition(in: code.unicodeScalars) != nil ? offset : nil
         }
 
+        var spans: [TextSpan] = []
+        func append(_ a: Int, _ b: Int, _ h: SyntaxHighlight?, _ bg: Color?) {
+            var fg = defaultColor
+            var weight: Float? = nil
+            if let h {
+                fg = syntaxTheme.paint(h.paint)
+                if case .kind(let kind) = h.paint {
+                    weight = syntaxTheme.weight(for: kind)
+                }
+            }
+
+
+            let startIdx = utf8.index(utf8.startIndex, offsetBy: a)
+            let endIdx = utf8.index(utf8.startIndex, offsetBy: b)
+            let textSlice = String(decoding: utf8[startIdx..<endIdx], as: UTF8.self)
+
+            if let last = spans.last,
+               last.color == fg,
+               last.background == bg,
+               last.weight == weight {
+                spans[spans.count - 1].text += textSlice
+            } else {
+                spans.append(TextSpan(textSlice, color: fg, background: bg, weight: weight, monospace: true))
+            }
+        }
+
+        func validOrdered<Entry>(_ entries: [Entry], bounds: (Entry) -> Range<Int>) -> Bool {
+            var end = 0
+            for entry in entries {
+                let range = bounds(entry)
+                guard range.lowerBound >= end, range.lowerBound < range.upperBound,
+                      snapBoundary(range.lowerBound) != nil, snapBoundary(range.upperBound) != nil else { return false }
+                end = range.upperBound
+            }
+            return true
+        }
+
+        // The highlighter and word differ return disjoint, ordered ranges. Merge
+        // their boundaries in one pass, preserving the syntax under each word.
+        if validOrdered(mappedHighlights, bounds: { $0.range }) && validOrdered(mappedChanges, bounds: { $0 }) {
+            func nextBoundary(_ range: Range<Int>?, after start: Int) -> Int {
+                guard let range else { return total }
+                return start < range.lowerBound ? range.lowerBound : range.upperBound
+            }
+            var start = 0, syntax = 0, change = 0
+            while start < total {
+                let ink = syntax < mappedHighlights.count ? mappedHighlights[syntax] : nil
+                let word = change < mappedChanges.count ? mappedChanges[change] : nil
+                let end = min(nextBoundary(ink?.range, after: start), nextBoundary(word, after: start))
+                append(start, end, ink?.range.contains(start) == true ? ink : nil, word?.contains(start) == true ? wordBg : nil)
+                if end == ink?.range.upperBound { syntax += 1 }
+                if end == word?.upperBound { change += 1 }
+                start = end
+            }
+            return spans
+        }
+
+        // A caller can also supply intersecting or unsorted ranges. The first
+        // covering syntax entry has priority at each valid UTF-8 cut.
         var cutSet: Set<Int> = [0, total]
         for h in mappedHighlights {
             if let lo = snapBoundary(h.range.lowerBound), let hi = snapBoundary(h.range.upperBound), lo < hi {
@@ -3991,7 +4050,6 @@ internal enum DiffViewHelpers: Sendable {
         }
         let cuts = cutSet.sorted()
 
-        var spans: [TextSpan] = []
         spans.reserveCapacity(max(1, cuts.count - 1))
 
         for i in 0..<(cuts.count - 1) {
@@ -3999,30 +4057,9 @@ internal enum DiffViewHelpers: Sendable {
             let b = cuts[i + 1]
             guard a < b else { continue }
 
-            var fg = defaultColor
-            var weight: Float? = nil
-            if let h = mappedHighlights.first(where: { $0.range.lowerBound <= a && a < $0.range.upperBound }) {
-                fg = syntaxTheme.paint(h.paint)
-                if case .kind(let kind) = h.paint {
-                    weight = syntaxTheme.weight(for: kind)
-                }
-            }
-
-            let inChanged = mappedChanges.contains(where: { $0.lowerBound <= a && a < $0.upperBound })
-            let bg: Color? = inChanged ? wordBg : nil
-
-            let startIdx = utf8.index(utf8.startIndex, offsetBy: a)
-            let endIdx = utf8.index(utf8.startIndex, offsetBy: b)
-            let textSlice = String(decoding: utf8[startIdx..<endIdx], as: UTF8.self)
-
-            if let last = spans.last,
-               last.color == fg,
-               last.background == bg,
-               last.weight == weight {
-                spans[spans.count - 1].text += textSlice
-            } else {
-                spans.append(TextSpan(textSlice, color: fg, background: bg, weight: weight, monospace: true))
-            }
+            let ink = mappedHighlights.first { $0.range.contains(a) }
+            let bg: Color? = mappedChanges.contains { $0.contains(a) } ? wordBg : nil
+            append(a, b, ink, bg)
         }
         return spans
     }

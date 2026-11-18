@@ -1198,13 +1198,30 @@ public final class Runtime<State> {
         }
     }
 
-    private func retainDepartingSnapshots(liveNodes: [NodeId: Int]) {
+    private func retainDepartingSnapshots(_ pass: MeasurePassResult) {
+        let liveNodes = pass.indexById
         for nid in exitingSnapshots.keys where liveNodes[nid] != nil {
             exitingSnapshots.removeValue(forKey: nid)
         }
-        for previous in flatNodes where liveNodes[previous.nodeId] == nil {
-            let nid = previous.nodeId
-            var snap = previous
+        // Replayed descendants are known to still be present. Their previous order may
+        // differ from the new order when a keyed subtree moves.
+        var retained = pass.reusedFlatRanges.map(\.previous)
+        if !retained.indices.dropFirst().allSatisfy({ retained[$0 - 1].lowerBound < retained[$0].lowerBound }) {
+            retained.sort { $0.lowerBound < $1.lowerBound }
+        }
+        var rangeIndex = 0
+        var cursor = 0
+        while cursor < flatNodes.count {
+            if rangeIndex < retained.count, cursor == retained[rangeIndex].lowerBound {
+                cursor = retained[rangeIndex].upperBound
+                rangeIndex += 1
+                continue
+            }
+            let i = cursor
+            cursor += 1
+            let nid = flatNodes[i].nodeId
+            guard liveNodes[nid] == nil else { continue }
+            var snap = flatNodes[i]
             // An exit may outlive this commit. Keep its own subtree and release unrelated siblings.
             if snap.element.hasSiblings {
                 snap.element.detachFromSiblings()
@@ -1274,6 +1291,8 @@ public final class Runtime<State> {
         var bottomChildren: [Int: [Int]] = [:]
         var liveSources: [Int] = []
         var focusRequests: [Int] = []
+        var focusSelected: [Int] = []
+        var revealSelected: [Int] = []
         var focusReturns: [Int] = []
         var focusFollowsSelection: [Int] = []
         var autofocus: [Int] = []
@@ -1281,6 +1300,7 @@ public final class Runtime<State> {
         var hoverTracks: [Int] = []
         var hoverGroups: [Int] = []
         var hoverChanges: [Int] = []
+        var kitHoverDelays: [Int] = []
         var hasHoverCurves = false
         var inputPills: [Int] = []
         var groupOpacity: [Int] = []
@@ -1295,27 +1315,7 @@ public final class Runtime<State> {
         var hasShadows = false
         var hasChildExits = false
 
-        mutating func indexMotion(_ el: borrowing El<State>, at i: Int, id: NodeId) {
-            if el.flightId != nil { matchedFlights.append(i) }
-            if el.holdLandingWidthEnabled { heldLandingWidths.append(i) }
-            if el.growthSpec != nil { growthStacks.append(i) }
-            if el.kitFilterKeysValue != nil { filterContainers.append(i) }
-            let hasShadow = !el.shadows.isEmpty
-            if hasShadow { hasShadows = true }
-            if !hasChildExits && el.childExitTransition != nil { hasChildExits = true }
-            if el.runtimeExtras.isEmpty {
-                if hasShadow { extraCommitColors.append(i) }
-                if el.textReveal >= 0 { wordReveals.append(i) }
-            } else {
-                if hasShadow || el.runtimeExtras[RenderExtrasKey.radialGradient] != nil
-                    || el.runtimeExtras[RenderExtrasKey.borderGradient] != nil {
-                    extraCommitColors.append(i)
-                }
-                if el.isRideTrailing { rideTrailing.insert(id) }
-                if !hasTimeScales && el.elTimeScale != 1 { hasTimeScales = true }
-                if let fade = el.elRevealWordFade, fade >= 0 { wordReveals.append(i) }
-            }
-        }
+        var authored: [LayoutObserverTraits] = []
     }
     internal private(set) var layoutObservers = LayoutObservers()
     private var layoutFired: [NodeId: [Float]] = [:]
@@ -4508,12 +4508,26 @@ public final class Runtime<State> {
         let prevFocusedKey = focusedKey
         let prevFocusVisible = focusVisible
 
+        var roles: [LayoutObserverTraits] = []
+        roles.reserveCapacity(pass.nodes.count)
+        var cursor = 0
+        for span in pass.reusedFlatRanges {
+            for i in cursor..<span.current.lowerBound {
+                roles.append(LayoutObserverTraits(pass.nodes[i].el))
+            }
+            roles.append(contentsOf: layoutObservers.authored[span.previous])
+            cursor = span.current.upperBound
+        }
+        for i in cursor..<pass.nodes.count {
+            roles.append(LayoutObserverTraits(pass.nodes[i].el))
+        }
+
         // Apply modal inertness: if any mounted subtree is `.modal(...)`, elements outside the topmost modal
         // (and its anchored portal popovers) become inert!
         var newModalMembers: Set<String> = []
         modalAncestorPaths.removeAll(keepingCapacity: true)
         var newActiveModalPath: String? = nil
-        if let modalRootIdx = pass.nodes.indices.last(where: { pass.nodes[$0].el.isModal }) {
+        if let modalRootIdx = roles.indices.last(where: { roles[$0].contains(.focusReturn) && pass.nodes[$0].el.isModal }) {
             let modalPrefix = pass.nodes[modalRootIdx].path
             newActiveModalPath = modalPrefix
             var memberIndices = Set<Int>()
@@ -4566,65 +4580,28 @@ public final class Runtime<State> {
 
         var specs = pass.specs
 
-        retainDepartingSnapshots(liveNodes: pass.indexById)
+        retainDepartingSnapshots(pass)
         var nowRevealedSecureIds: Set<NodeId> = []
         var concealedSecureIndices: [Int] = []
         var observers = LayoutObservers()
         var sameHoverOrder = pass.nodes.count == builtHoverIds.count
         pictureAspects.removeAll(keepingCapacity: true)
-        for (i, node) in pass.nodes.enumerated() {
-            if let pixels = node.el.pixelsPayload, node.el.layout.aspectRatio == nil,
-               (node.el.layout.width == .auto) != (node.el.layout.height == .auto) {
+        func collect(_ node: borrowing FlatNode, traits: LayoutObserverTraits, at i: Int) {
+            if traits.contains(.pictureAspect), let pixels = node.el.pixelsPayload {
                 let size = pixels.size
                 let ratio = size.height > 0 ? Float(size.width) / Float(size.height) : 0
                 pictureAspects.append((node.nodeId, pixels, ratio))
             }
-            let handlers = node.el.handlers
-            if node.el.groupOpacity != nil { observers.groupOpacity.append(i) }
-            observers.indexMotion(node.el, at: i, id: node.nodeId)
-            if node.el.liveText != nil || !node.el.liveBindings.isEmpty || node.el.pixelsPayload != nil {
-                observers.liveSources.append(i)
-            }
-            if handlers.editLens != nil && (node.el.pillStyleLookup != nil
-                || node.el.pillIconLookup != nil || node.el.pillColorsSpec != nil) {
-                observers.inputPills.append(i)
-            }
-            if node.el.isFocusRequested && !node.effectiveInert { observers.focusRequests.append(i) }
-            if node.el.isModal || node.el.focusReturnKey != nil { observers.focusReturns.append(i) }
-            if node.el.focusGroup && node.el.isFocusFollowsSelection { observers.focusFollowsSelection.append(i) }
-            if node.el.autofocus { observers.autofocus.append(i) }
-            if !node.effectiveInert && node.el.hasSelectionChangeHandler { observers.selectionChanges.append(i) }
-            if (node.el.hoverBg?.a ?? 0) > 0 || node.el.isHoverGroup || node.el.hoverGroupShare != nil {
-                observers.hoverTracks.append(i)
-            }
-            if node.el.isHoverAlone || node.el.hoverGroupShare != nil { observers.hoverGroups.append(i) }
-            if handlers.onHoverChange != nil { observers.hoverChanges.append(i) }
-            if !observers.hasHoverCurves && (node.el.hoverWithinSpec != nil || node.el.hoverMotionSpec != nil) {
-                observers.hasHoverCurves = true
-            }
+            observers.register(traits, at: i, id: node.nodeId, inert: node.effectiveInert)
             if sameHoverOrder && node.nodeId != builtHoverIds[i] { sameHoverOrder = false }
-            if handlers.onLayout != nil || handlers.onScreenLayout != nil { observers.laidOut.append(i) }
-            if handlers.onDrawnLayout != nil { observers.drawn.append(i) }
-            if handlers.drawnRectUpdate != nil { observers.drawnRect.append(i) }
-            if handlers.onVisible != nil { observers.visible.append(i) }
-            if handlers.onVisibleRows != nil { observers.visibleRows.append(i) }
-            if !node.el.layout.scrollAxes.isEmpty {
-                if handlers.onScrollOffset != nil || handlers.onScroll != nil
-                    || handlers.atBottomReport != nil || handlers.farFromBottomReport != nil {
-                    observers.scrollReports.append(i)
-                }
-                if node.el.layout.scrollAxes.contains(.vertical) {
-                    if node.el.scrollAnchorEnabled { observers.scrollAnchors.append(i) }
-                    if node.el.layout.stickBottom {
-                        observers.bottomViewports.append(i)
-                        observers.bottomChildren[i] = []
-                    }
-                }
-            }
             if !observers.bottomViewports.isEmpty, let parent = node.parentIndex {
                 observers.bottomChildren[parent]?.append(i)
             }
-            let edit = handlers.editLens?.get(state)
+            guard traits.contains(.secureOrEditable) else {
+                if !lastSecureMaskInfo.isEmpty { lastSecureMaskInfo.removeValue(forKey: node.nodeId) }
+                return
+            }
+            let edit = node.el.handlers.editLens?.get(state)
             let isSec = node.el.isSecure || (edit?.isSecure == true)
             let isRev = node.el.revealedOverride ?? (edit?.isRevealed ?? false)
             if isSec {
@@ -4642,6 +4619,10 @@ public final class Runtime<State> {
             } else if isSec && prevRevealedSecureIds.contains(node.nodeId) {
                 concealedSecureIndices.append(i)
             }
+        }
+        observers.authored = roles
+        pass.nodes.withUnsafeBufferPointer { nodes in
+            for i in roles.indices { collect(nodes[i], traits: roles[i], at: i) }
         }
 
         let childExitOverrides = observers.hasChildExits
