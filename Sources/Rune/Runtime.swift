@@ -9655,7 +9655,7 @@ public final class Runtime<State> {
                     inheritedClip: input.inh.clip, ancestorTurn: ancestorTurn,
                     outerTurnClip: inheritedReportClip?.outer, localTurnClip: inheritedReportClip?.local
                 )
-                infoVisible = intersectRects(drawnRect, parentReportClip ?? effectiveOuterClip)
+                infoVisible = parentReportClip.map { intersectRects(drawnRect, $0) } ?? drawnRect
             } else {
                 parentReportClip = nil
                 infoVisible = visibleRect

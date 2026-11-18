@@ -118,4 +118,41 @@ struct NativeElementReportTests {
         #expect(!presence.inView)
         #expect(presence.inheritedOpacity == 0)
     }
+
+    @Test("Unclipped turned bounds cross window edges while clicks remain inside the window", arguments: [true, false])
+    func turnedBoundsCrossViewport(native: Bool) throws {
+        let rt = Runtime(state: 0, viewport: Vec2(104, 80)) { _, _ -> El<Int> in
+            el().size(104, 80).children([
+                el().key("left").absolute(x: 0, y: 0).size(60, 48).rotate(0.12)
+                    .role(.button).label("Left button").onClick { $0 += 1 }
+                    .child(el().key("inner").absolute(x: -5, y: -3).size(12, 12)),
+                el().key("right").absolute(x: 93, y: 69).size(22, 18).rotate(-0.3),
+                el().key("clip").absolute(x: 62, y: 12).size(16, 16).clipRounded(0).child(
+                    el().key("clipped").absolute(x: -4, y: -5).size(28, 25).rotate(0.15)
+                )
+            ])
+        }
+        if native { _ = rt.renderFrame(at: 0) } else { _ = rt.frame(at: 0) }
+
+        let left = try #require(rt.element(byKey: "left"))
+        let inner = try #require(rt.element(byKey: "inner"))
+        let right = try #require(rt.element(byKey: "right"))
+        #expect(left.rect[0] < 0 && left.rect[1] < 0)
+        #expect(right.rect[0] + right.rect[2] > 104 && right.rect[1] + right.rect[3] > 80)
+        for item in [left, inner, right] {
+            #expect(item.visible == item.rect)
+        }
+        #expect(rt.element(byKey: "clipped")?.visible == [62, 12, 16, 16])
+        #expect(rt.elementAt(-1, 32) == nil && rt.elementAt(110, 76) == nil)
+        #expect(rt.elementAt(5, 32)?.key == "left")
+        let button = try #require(rt.accessibilitySnapshot().children.first { $0.id == "left" })
+        #expect(button.frame == MotionRect.fromXYWH(0, 0, 60, 48))
+        #expect(button.label == "Left button" && button.actions.contains(.press))
+        rt.pointerDown(at: Vec2(-1, 32), at: 0.01)
+        rt.pointerUp(at: Vec2(-1, 32), at: 0.02)
+        #expect(rt.state == 0)
+        rt.pointerDown(at: Vec2(5, 32), at: 0.03)
+        rt.pointerUp(at: Vec2(5, 32), at: 0.04)
+        #expect(rt.state == 1)
+    }
 }

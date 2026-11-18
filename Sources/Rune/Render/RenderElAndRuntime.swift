@@ -1733,7 +1733,10 @@ extension Runtime {
                     isInteractiveBlocker: el.blocksInteractiveHits,
                     parentScreenClip: parentScreenClip
                 ), at: node.index, path: node.path)
-                infoVisible = intersectRects(infoRect, parentScreenClip ?? initialClipPt)
+                // A turned box is reported in window coordinates. Only its ancestors' clips
+                // cut that box. Picking and presence still use the viewport above.
+                let reportClip = parentScreenClip ?? (turn == nil ? initialClipPt : nil)
+                infoVisible = reportClip.map { intersectRects(infoRect, $0) } ?? infoRect
                 infoOpacity = scope.opacity
                 if hitDepth == hitScopesByDepth.count {
                     hitScopesByDepth.append(scope)
