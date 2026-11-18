@@ -3397,25 +3397,25 @@ public struct DiffView<State>: Sendable {
             button = El<State>(direction: .row).itemsCenter().justifyCenter()
                 .child(icon(DiffLayout.commentIcon, size: 12).color(kit.c.white))
         }
-        return button
+        var element = button
             .key(key)
             .size(16, 16)
             .rounded(4)
             .bg(kit.c.info.icon)
             .cursor(.pointer)
-            .groupOpacity(0, 1)
-            .role(.button)
-            .label("Comment on this line")
-            .onClick { [get, forcedMode] (s: inout State, tx: inout Tx) in
-                var d = get(s)
-                if let forcedMode { d.mode = forcedMode }
-                let lines = if let sel = d.selectedRange, sel.file == file, d.contains(sel, at: point) {
-                    sel
-                } else {
-                    DiffLineRange(file: file, start: point, end: point)
-                }
-                onComment(&s, lines, &tx)
+        element.groupOpacity = (0, 1)
+        element.role = .button
+        element.a11yLabel = "Comment on this line"
+        return element.onClick { [get, forcedMode] (s: inout State, tx: inout Tx) in
+            var d = get(s)
+            if let forcedMode { d.mode = forcedMode }
+            let lines = if let sel = d.selectedRange, sel.file == file, d.contains(sel, at: point) {
+                sel
+            } else {
+                DiffLineRange(file: file, start: point, end: point)
             }
+            onComment(&s, lines, &tx)
+        }
     }
 
     @inline(never)
@@ -3428,9 +3428,8 @@ public struct DiffView<State>: Sendable {
         lineH: Float
     ) -> El<State> {
         let mode = forcedMode
-        return cell
-            .cursor(.pointer)
-            .onPointerDown { [get, set, onLineClickHandler] (s: inout State, press: PointerPress, tx: inout Tx) in
+        func install(_ handlers: inout ElementHandlers<State>) {
+            handlers.onPointerDown = { [get, set, onLineClickHandler] (s: inout State, press: PointerPress, tx: inout Tx) in
                 var d = get(s)
                 if let mode { d.mode = mode }
                 guard d.files.indices.contains(file) else { return }
@@ -3444,7 +3443,7 @@ public struct DiffView<State>: Sendable {
                 set(&s, d)
                 onLineClickHandler?(&s, point, &tx)
             }
-            .onDrag { [get, set] (s: inout State, drag: Drag, _: inout Tx) in
+            handlers.onDrag = { [get, set] (s: inout State, drag: Drag, _: inout Tx) in
                 var d = get(s)
                 if let mode { d.mode = mode }
                 guard d.selection.isTracking, d.selectionFile == file else { return }
@@ -3472,7 +3471,7 @@ public struct DiffView<State>: Sendable {
                 d.selection.step(.move(at: target))
                 set(&s, d)
             }
-            .onDragEnd { [get, set, onSelectHandler] (s: inout State, cancelled: Bool, tx: inout Tx) in
+            handlers.onDragEnd = { [get, set, onSelectHandler] (s: inout State, cancelled: Bool, tx: inout Tx) in
                 var d = get(s)
                 guard d.selection.isTracking, d.selectionFile == file else { return }
                 let eff = d.selection.step(cancelled ? .cancel : .release)
@@ -3483,6 +3482,11 @@ public struct DiffView<State>: Sendable {
                     onSelectHandler?(&s, DiffLineRange(file: file, from: range), &tx)
                 }
             }
+        }
+
+        var element = cell.cursor(.pointer)
+        install(&element.handlers)
+        return element
     }
 
     // MARK: Unified & Split Rows
@@ -3543,7 +3547,8 @@ public struct DiffView<State>: Sendable {
                                                        defaultColor: kit.c.textBase, syntaxTheme: syntaxTheme, wordBg: wordBg)
             var code: El<State> = rich(spans).font(kit.ty.diffCodeFont)
             if let selection {
-                code = code.selectable().selectionColor(selection)
+                code = code.selectable()
+                code.selectionColor = selection
                 for range in shown.uncopied { code = code.uncopied(range) }
             }
             return wrap ? code.wrapText().wFull() : code.noWrap()
