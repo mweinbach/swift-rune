@@ -642,7 +642,11 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             const font = prefix + families.map(f => f.css).join(', ');
             element.style.cssText = 'all:initial;display:block;position:absolute;left:0;top:0;width:max-content;white-space:pre;font-kerning:normal;text-size-adjust:none;';
             element.style.font = font;
-            element.dir = direction === 2 ? 'rtl' : direction === 1 ? 'ltr' : 'auto';
+            const explicitDirection = direction === 2 ? 'rtl' : direction === 1 ? 'ltr' : null;
+            element.dir = explicitDirection ?? 'auto';
+            // The DOM range and Canvas must use Rune's requested base direction,
+            // including when the page supplies its own text direction rules.
+            if (explicitDirection) element.style.setProperty('direction', explicitDirection, 'important');
             // Long Range queries on one browser text node rescan a long shaping run.
             // Adjacent text nodes participate in the same inline shaping and bidi
             // context. Bound each lookup without introducing element/style boundaries.
@@ -662,7 +666,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
                 }
             }
             if (from < text.length) append(text.length);
-            mountSpan(element);
+            if (!explicitDirection) mountSpan(element);
             const offsets = new Uint32Array(count + 1);
             let byte = 0, units = 0;
             for (const scalar of text) {
@@ -677,7 +681,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
                 /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(text);
             const line = { text, font, baseFont: font, prefix, families, aliases: [], size, weight, italic, kerning: 'normal',
                 element, offsets, chunks, chunkAt, hasColor, carets: new Map(),
-                direction: doc.defaultView.getComputedStyle(element).direction };
+                direction: explicitDirection ?? doc.defaultView.getComputedStyle(element).direction };
             measure(line, metrics, metricsSize);
             return retain(line);
         },

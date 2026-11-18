@@ -131,6 +131,19 @@ try {
             return { advance, cells, ink, mask, colorPixels, x, y, width, height, ascent: data.getFloat32(4, true) };
         } finally { host.release(id); }
     }
+    // An embedding page may style all spans. Rune still owns an explicit line direction.
+    const directionRule = document.createElement('style');
+    document.head.append(directionRule);
+    try {
+        const sample = '12 / אבג A ?';
+        const cells = direction => JSON.stringify(shape(sample, direction).cells);
+        const ltr = cells(1), rtl = cells(2);
+        check(ltr !== rtl, 'Fixture needs distinct LTR and RTL geometry');
+        directionRule.textContent = 'span { direction: rtl !important }';
+        check(cells(1) === ltr, 'Page CSS changed explicit LTR geometry');
+        directionRule.textContent = 'span { direction: ltr !important }';
+        check(cells(2) === rtl, 'Page CSS changed explicit RTL geometry');
+    } finally { directionRule.remove(); }
     const han = shape('漢'), day = shape('日');
     check(han.ink !== day.ink && han.ink > 40 && day.ink > 40, 'CJK fallback collapsed to a replacement box');
     const latin = shape('é'), combining = shape('e\u0301');
