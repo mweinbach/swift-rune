@@ -27,11 +27,12 @@ struct AccessibilitySnapshotReuseTests {
                 memo("panel-\(id)", deps: step >= 6) {
                     col().key("panel-\(id)").wFull().h(40).shrink(0)
                         .child(text(step < 6 ? "before" : "after").key("words-\(id)").size(60, 18))
-                        .child(el().key("button-\(id)").size(35, 15).onClick { _ in })
+                        .child(el().key("button-\(id)").size(35, 15).focusable().onClick { _ in })
                 }
             }
             var box: El<Int> = col().key("viewport").size(180, 60).scrollY()
             for i in (step < 4 ? [0, 1, 2, 3] : [3, 2, 1, 0]) { box = box.child(panel(i)) }
+            if step == 8 { box = box.inert() }
             if step == 5 { return col().child(box).child(el().key("modal").size(20, 15).modal()) }
             return box
         }
@@ -56,6 +57,11 @@ struct AccessibilitySnapshotReuseTests {
                 next.children.withUnsafeBufferPointer { old.baseAddress == $0.baseAddress }
             }
             #expect(shared)
+            let button = try #require(find("button-1", in: current))
+            if i == 3 { #expect(button.isFocused) }
+            if i == 8 {
+                #expect(button.isDisabled && !button.isFocusable && !button.actions.contains(.press))
+            }
             let words = try #require(find("words-1", in: current))
             #expect(words.value == (i < 6 ? "before" : "after"))
             let path = try #require(words.runtimePath)
