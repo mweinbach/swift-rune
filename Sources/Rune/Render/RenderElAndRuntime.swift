@@ -1722,7 +1722,7 @@ extension Runtime {
                     || effRect.top * scale > min(Float(heightPx), clip.w) + overhang + 2)
                     && el.plainText == nil && el.richSpans == nil && el.advanceInRun == nil
                     && el.terminalGridPayload == nil && el.shapes.isEmpty && shadows.isEmpty
-                    && (el.runtimeExtraCount == 0 || (el.runtimeExtraCount == 1 && el.elMark != nil))
+                    && (el.hasOnlyCulledPaintExtras)
                     && el.backdropBlur == 0 && el.elOutline == nil
                     && !focused && !el.focusable && el.focusWithinRing == nil && el.anchor == nil
             }
@@ -1735,7 +1735,7 @@ extension Runtime {
                el.iconPayload == nil, el.imagePayload == nil, el.terminalGridPayload == nil, el.shapes.isEmpty, shadows.isEmpty,
                el.backdropBlur == 0, el.focusRingColor == nil, el.focusWithinRing == nil, el.elOutline == nil,
                !focused, !el.focusable, el.textHighlights == nil, el.spanRingsSpec.isEmpty, el.elStrikes.isEmpty,
-               el.runtimeExtraCount == 0 || (el.runtimeExtraCount == 1 && el.elMark != nil) {
+               el.hasOnlyCulledPaintExtras {
                 // A no-wrap label may still contain hard breaks. Keep the shaper's overhang
                 // allowance and account for the text offset from vertical padding.
                 let yScale = max(abs(sc.y) * scale, 0.0625)

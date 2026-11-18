@@ -209,6 +209,14 @@ extension El {
         (runtimeExtra(ShellElExtrasKey.layerOpacity) as? Float) ?? 1.0
     }
 
+    /// Cursor and selection metadata have no raster extent. Draw marks label instances
+    /// without changing their bounds.
+    internal var hasOnlyCulledPaintExtras: Bool {
+        runtimeExtras.keys.allSatisfy { key in
+            key == "cursor" || key == Self.selectableExtraKey || key == ShellElExtrasKey.mark
+        }
+    }
+
     internal var elMark: UInt32? {
         runtimeExtra(ShellElExtrasKey.mark) as? UInt32
     }
