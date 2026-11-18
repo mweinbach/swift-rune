@@ -85,6 +85,7 @@ struct NativeElementReportTests {
             let viewport = key.hasSuffix("a") ? "left" : "right"
             let clip = try #require(native.first { $0.key == viewport })
             #expect(actual.visible == clip.rect)
+            #expect(expected.visible == clip.rect)
             #expect(actual.rect == expected.rect)
             #expect(actual.parentIndex == expected.parentIndex)
         }

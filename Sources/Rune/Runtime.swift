@@ -453,6 +453,7 @@ public final class Runtime<State> {
         var rectSpringing: Bool = false
         var clip: MotionRect? = nil
         var inCache: Bool = false
+        var reportedTurnClip: Int? = nil
     }
 
     private struct LiftedFlightSubtree {
@@ -7411,6 +7412,9 @@ public final class Runtime<State> {
         var backdropBlurCount = 0
         primitives.reserveCapacity(frameOut.nodes.count * 2)
         var infos: [ElementInfo] = []
+        // As in turn.rs, a rotated branch keeps its window-space outer clip separate
+        // from rectangles accumulated in that branch's own coordinates.
+        var reportedTurnClips: [(outer: MotionRect?, local: MotionRect?)] = []
         infos.reserveCapacity(frameOut.nodes.count)
         var rawPoseByPath: [String: RawPoseNodeData] = [:]
         let movingGrowthPaths = movingGrowthPaintPaths()
@@ -9562,7 +9566,19 @@ public final class Runtime<State> {
             if let parentPath {
                 parentPathForInfo[PaintElementKey(path: snap.path, exiting: nodeExiting)] = parentPath
             }
-            let infoVisible = (nodeTurn != nil) ? intersectRects(drawnRect, effectiveOuterClip) : visibleRect
+            let inheritedReportClip = input.inh.reportedTurnClip.map { reportedTurnClips[$0] }
+            let parentReportClip: MotionRect?
+            let infoVisible: MotionRect
+            if nodeTurn != nil {
+                parentReportClip = flightClipOverride ?? Self.screenClipOfParent(
+                    inheritedClip: input.inh.clip, ancestorTurn: ancestorTurn,
+                    outerTurnClip: inheritedReportClip?.outer, localTurnClip: inheritedReportClip?.local
+                )
+                infoVisible = intersectRects(drawnRect, parentReportClip ?? effectiveOuterClip)
+            } else {
+                parentReportClip = nil
+                infoVisible = visibleRect
+            }
             infos.append(ElementInfo(
                 path: snap.path,
                 key: snap.key,
@@ -9748,7 +9764,8 @@ public final class Runtime<State> {
                 childSnap.parent = (!opensFlightCover && childSnap.rigid == boxSnap.rigid && paintsFrame) ? snapRest : nil
 
                 let childClip: MotionRect?
-                if el.layout.clipOverflow || el.clipRadius != nil || el.clipCorners != nil || el.clipFade != nil {
+                let clipsChildren = el.layout.clipOverflow || el.clipRadius != nil || el.clipCorners != nil || el.clipFade != nil
+                if clipsChildren {
                     let snappedPt = MotionRect(
                         left: snappedEdgesPx[0] / pxScale,
                         top: snappedEdgesPx[1] / pxScale,
@@ -9775,6 +9792,14 @@ public final class Runtime<State> {
                 let childScaleMotion: PaintScaleMotion = (childFlightCover != nil) ? .moving : nodeScaleMotion
                 let childStillScale: Float = (childScaleMotion == .still) ? ((scaleVec.x + scaleVec.y) * 0.5) : inh.stillScale
                 let childInCache = inh.inCache || ((el.runtimeExtra(RenderExtrasKey.cacheEnabled) as? Bool) ?? false)
+                var reportedTurnClip = input.inh.reportedTurnClip
+                if nodeTurn != nil && (ownHasTurn || clipsChildren) {
+                    let outer = ownHasTurn ? parentReportClip : inheritedReportClip?.outer
+                    let local = ownHasTurn ? nil : inheritedReportClip?.local
+                    let clipped = clipsChildren ? (local.map { intersectRects($0, rect) } ?? rect) : local
+                    reportedTurnClip = reportedTurnClips.count
+                    reportedTurnClips.append((outer, clipped))
+                }
                 let childInh = PaintInh(
                     opacity: childAncestorOp,
                     scale: rawScaleVec,
@@ -9791,7 +9816,8 @@ public final class Runtime<State> {
                     parentMoving: nodeMoving,
                     rectSpringing: nodeRectSpringing,
                     clip: childClip,
-                    inCache: childInCache
+                    inCache: childInCache,
+                    reportedTurnClip: reportedTurnClip
                 )
                 let sorted = sortByZOrder(children)
                 childSteps.reserveCapacity(sorted.count)
@@ -9921,6 +9947,7 @@ public final class Runtime<State> {
             var liftedInh = lifted.inh
             if isUnclippedFlight {
                 liftedInh.clip = nil
+                liftedInh.reportedTurnClip = nil
             }
             if lifted.isFlight && scene.hasEnteringAncestor(lifted.node.id) {
                 liftedInh.scale = Vec2(1, 1)
