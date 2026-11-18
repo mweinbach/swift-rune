@@ -976,11 +976,12 @@ extension Runtime {
         func resolveNodeHoverFrac(_ n: FlatNode, el: El<State>, inert: Bool) -> Float {
             let nid = n.nodeId
             if !canHover || inert || exitingIds.contains(nid) { return 0.0 }
-            if hasLiveTracks, let tracked = paintLiveStore.get(Runtime.hoverTrackId(nid), Runtime.hoverProp) {
-                return tracked.clamped(to: 0...1)
+            // Every hover track has a synced owner, including an outgoing fade.
+            // A synced owner without a track rests at zero.
+            if lastHoverTargetById[nid] != nil {
+                guard hasLiveTracks else { return 0 }
+                return (paintLiveStore.get(Runtime.hoverTrackId(nid), Runtime.hoverProp) ?? 0).clamped(to: 0...1)
             }
-            // Synced hover without a track rests at 0 (`paint/tracks.rs::ready_from_rest`).
-            if lastHoverTargetById[nid] != nil { return 0.0 }
             if el.isHoverGroup || el.hoverGroupShare != nil {
                 if groupHoverChecker == nil { groupHoverChecker = makeGroupHoverPredicate() }
                 return groupHoverChecker!(n) ? 1.0 : 0.0

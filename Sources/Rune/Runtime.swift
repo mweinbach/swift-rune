@@ -7977,11 +7977,9 @@ public final class Runtime<State> {
             let flatFocusWithin = el.focusWithinFlat && !snap.effectiveInert && !p.isExiting && isFocusWithin(snap.path)
             let hoverFrac: Float = {
                 if flatFocusWithin { return 0.0 }
-                if let tracked = liveStore.get(Self.hoverTrackId(p.id), Self.hoverProp) {
-                    return tracked.clamped(to: 0...1)
+                if lastHoverTargetById[p.id] != nil {
+                    return (liveStore.get(Self.hoverTrackId(p.id), Self.hoverProp) ?? 0).clamped(to: 0...1)
                 }
-                // Synced hover without a track rests at 0 (`paint/tracks.rs::ready_from_rest`).
-                if lastHoverTargetById[p.id] != nil { return 0.0 }
                 if el.isHoverGroup || el.hoverGroupShare != nil {
                     return (!p.isExiting && isGroupHovered(snap)) ? 1.0 : 0.0
                 }
