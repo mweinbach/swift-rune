@@ -290,6 +290,43 @@ public final class AccessibilityTreeState {
 
 // MARK: - 3. Nested Accessibility JSON Dump (`rune::a11y::dump`)
 
+enum AccessibilityDumpField: String, CodingKey {
+    case key, role, bounds, path, name, value, description, placeholder, actions, states, busy, focusable
+    case range, level, position, setSize, shortcut, url, activeDescendant, sort, scroll, selection, chars
+    case anchor, selectable, documentText, inlineStart, inlineEnd, pageScrollX, pageContentWidth, font
+    case family, size, weight, lineHeight, tracking, italic, align
+}
+
+protocol AccessibilityDumpFields {
+    associatedtype Failure: Error
+    mutating func set<Value: Encodable>(_ field: AccessibilityDumpField, _ value: Value) throws(Failure)
+    mutating func set(_ field: AccessibilityDumpField, _ value: Float) throws(Failure)
+    mutating func setRange(_ range: A11yRange) throws(Failure)
+    mutating func setFont(_ font: WebDocumentAccessibilityNode.Font) throws(Failure)
+}
+
+private struct AccessibilityDictionaryFields: AccessibilityDumpFields {
+    var values: [String: Any] = [:]
+
+    mutating func set<Value: Encodable>(_ field: AccessibilityDumpField, _ value: Value) {
+        values[field.rawValue] = value
+    }
+
+    mutating func set(_ field: AccessibilityDumpField, _ value: Float) {
+        values[field.rawValue] = value
+    }
+
+    mutating func setRange(_ range: A11yRange) {
+        values["range"] = [range.value, range.min, range.max, range.step as Any? ?? NSNull()]
+    }
+
+    mutating func setFont(_ font: WebDocumentAccessibilityNode.Font) {
+        var fields = Self()
+        font.write(to: &fields)
+        values["font"] = fields.values
+    }
+}
+
 /// Nested JSON dump of a projected `AccessibilityNode` tree (`a11y/dump.rs`).
 public enum AccessibilityDump {
     public static func dictionary(from node: AccessibilityNode, isRoot: Bool = true) -> [String: Any] {
@@ -299,43 +336,55 @@ public enum AccessibilityDump {
     internal static func dictionary(
         from node: AccessibilityNode, isRoot: Bool, forBrowser: Bool, syntheticPath: String? = nil
     ) -> [String: Any] {
-        let resolvedRole = (node.isSecure && node.role == .textInput) ? ElementRole.passwordInput.rawValue : node.role.rawValue
-        var dict: [String: Any] = [
-            "key": node.id,
-            "role": resolvedRole,
-            "bounds": [
-                round1(node.frame.x),
-                round1(node.frame.y),
-                round1(node.frame.width),
-                round1(node.frame.height),
-            ],
+        var fields = AccessibilityDictionaryFields()
+        fields.values["bounds"] = [
+            round1(node.frame.x), round1(node.frame.y), round1(node.frame.width), round1(node.frame.height)
         ]
+        writeShallow(node, isRoot: isRoot, forBrowser: forBrowser, syntheticPath: syntheticPath, to: &fields)
+        if !node.children.isEmpty {
+            fields.values["children"] = node.children.enumerated().map { index, child in
+                // Terminal lines and other derived children can share author IDs in separate subtrees.
+                let path = forBrowser && child.runtimePath == nil
+                    ? "\(node.runtimePath ?? syntheticPath ?? node.id)#a11y-\(index)" : nil
+                return dictionary(from: child, isRoot: false, forBrowser: forBrowser, syntheticPath: path)
+            }
+        }
+        return fields.values
+    }
+
+    /// Write the shared native dump and browser patch schema to their concrete representations.
+    static func writeShallow<Fields: AccessibilityDumpFields>(
+        _ node: AccessibilityNode, isRoot: Bool, forBrowser: Bool, syntheticPath: String?, to fields: inout Fields
+    ) throws(Fields.Failure) {
+        let resolvedRole = (node.isSecure && node.role == .textInput) ? ElementRole.passwordInput.rawValue : node.role.rawValue
+        try fields.set(.key, node.id)
+        try fields.set(.role, resolvedRole)
         if let name = resolvedName(for: node) {
-            dict["name"] = name
+            try fields.set(.name, name)
         }
         if forBrowser {
-            node.webDocument?.write(to: &dict)
-            dict["path"] = node.runtimePath ?? syntheticPath ?? node.id
-            if node.isBusy { dict["busy"] = true }
-            if node.isFocusable { dict["focusable"] = true }
+            try node.webDocument?.write(to: &fields)
+            try fields.set(.path, node.runtimePath ?? syntheticPath ?? node.id)
+            if node.isBusy { try fields.set(.busy, true) }
+            if node.isFocusable { try fields.set(.focusable, true) }
         }
         // Static text nodes carry their content in `name` (`Role::Label`); never emit `value` for `.text` or secure fields (`dump.rs:51`).
         if node.role != .text && !node.isSecure, let val = node.value {
-            dict["value"] = val
+            try fields.set(.value, val)
         }
-        if let help = node.help, help != node.label { dict["description"] = help }
-        if let placeholder = node.placeholder { dict["placeholder"] = placeholder }
+        if let help = node.help, help != node.label { try fields.set(.description, help) }
+        if let placeholder = node.placeholder { try fields.set(.placeholder, placeholder) }
         if let range = node.range {
-            dict["range"] = [range.value, range.min, range.max, range.step as Any? ?? NSNull()]
+            try fields.setRange(range)
         }
-        if let heading = node.level { dict["level"] = heading + 1 }
-        if let pos = node.positionInSet { dict["position"] = pos + 1 }
-        if let size = node.sizeOfSet { dict["setSize"] = size }
-        if let shortcut = node.keyboardShortcut { dict["shortcut"] = shortcut }
-        if let url = node.url { dict["url"] = url }
-        if let active = node.activeDescendant { dict["activeDescendant"] = active }
+        if let heading = node.level { try fields.set(.level, heading + 1) }
+        if let pos = node.positionInSet { try fields.set(.position, pos + 1) }
+        if let size = node.sizeOfSet { try fields.set(.setSize, size) }
+        if let shortcut = node.keyboardShortcut { try fields.set(.shortcut, shortcut) }
+        if let url = node.url { try fields.set(.url, url) }
+        if let active = node.activeDescendant { try fields.set(.activeDescendant, active) }
         if let sortAsc = node.sortAscending {
-            dict["sort"] = sortAsc ? "ascending" : "descending"
+            try fields.set(.sort, sortAsc ? "ascending" : "descending")
         }
 
         var states: [String] = []
@@ -361,27 +410,18 @@ public enum AccessibilityDump {
             states.append(live == .assertive ? "live-assertive" : "live-polite")
         }
         if node.clipsChildren { states.append("clips") }
-        if !states.isEmpty { dict["states"] = states }
+        if !states.isEmpty { try fields.set(.states, states) }
 
-        if !node.actions.isEmpty { dict["actions"] = node.actions.map(\.rawValue) }
+        if !node.actions.isEmpty { try fields.set(.actions, node.actions.map(\.rawValue)) }
         if let sy = node.scrollY {
-            dict["scroll"] = [round1(node.scrollX ?? 0), round1(sy), round1(node.scrollYMax ?? 0)]
+            try fields.set(.scroll, [round1(node.scrollX ?? 0), round1(sy), round1(node.scrollYMax ?? 0)])
         }
         if let sel = node.textSelection, sel.count == 4 {
-            dict["selection"] = sel
+            try fields.set(.selection, sel)
         }
         if let chars = node.characterCount {
-            dict["chars"] = chars
+            try fields.set(.chars, chars)
         }
-        if !node.children.isEmpty {
-            dict["children"] = node.children.enumerated().map { index, child in
-                // Terminal lines and other derived children can share author IDs in separate subtrees.
-                let path = forBrowser && child.runtimePath == nil
-                    ? "\(node.runtimePath ?? syntheticPath ?? node.id)#a11y-\(index)" : nil
-                return dictionary(from: child, isRoot: false, forBrowser: forBrowser, syntheticPath: path)
-            }
-        }
-        return dict
     }
 
     /// The computed accessible name shared by native providers and the JSON tree.

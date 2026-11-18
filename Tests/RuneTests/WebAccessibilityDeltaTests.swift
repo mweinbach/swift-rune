@@ -14,7 +14,7 @@ struct WebAccessibilityDeltaTests {
         let fields: [String: Any] = ["nodes": [["unknown": path]], "local": true]
         for removed in [nil, [path]] {
             for children in [nil, [path: [path]]] {
-                let paths = WebAccessibilityPaths(removed: removed, children: children)
+                let paths = WebAccessibilityPatch(removed: removed, children: children)
                 let packet = try object(paths.encodePacket(fields))
                 let result = (packet["nodes"] as? [[String: String]])?.first?["unknown"]
                 #expect(result?.utf8.elementsEqual(path.utf8) == true)
@@ -114,7 +114,7 @@ struct WebAccessibilityDeltaTests {
     @Test func aLiveLabelAndPositionFollowWithoutACommit() throws {
         let label = LiveText("One")
         let position = Live<Vec2>(.zero)
-        let runtime = Runtime<Void>(state: (), viewport: Vec2(200, 100), pixelScale: 1) { _, _ in
+        let runtime = Runtime<Void>(state: (), viewport: Vec2(200, 100), pixelScale: 10) { _, _ in
             col().key("root").sizeFull().child(
                 liveText(label).key("live").size(100, 24).liveOffset(position.binding)
             )
@@ -125,14 +125,16 @@ struct WebAccessibilityDeltaTests {
         _ = try object(mirror.update(runtime))
         let initial = runtime.commitCount
         label.set("Two")
-        position.set(Vec2(25, 0))
+        position.set(Vec2(25.2, 0))
         _ = runtime.frame(at: 0.2)
         #expect(runtime.commitCount == initial)
         let packet = try object(mirror.update(runtime))
         let changed = try #require(packet["nodes"] as? [[String: Any]])
         let live = try #require(changed.first { $0["key"] as? String == "live" })
         #expect(live["name"] as? String == "Two")
-        #expect((live["bounds"] as? [Double])?.first == 25)
+        // Darwin and Swift Foundation serialize the same Float with different decimal precision.
+        let reference = try object(JSONSerialization.data(withJSONObject: ["position": Float(25.2)]))
+        #expect((live["bounds"] as? [Double])?.first == (reference["position"] as? Double))
         #expect(mirror.update(runtime) == nil)
     }
 

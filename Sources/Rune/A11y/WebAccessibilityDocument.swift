@@ -21,26 +21,32 @@ struct WebDocumentAccessibilityNode: Equatable, Sendable {
         var tracking: Float
         var italic: Bool
         var align: String
+
+        func write<Fields: AccessibilityDumpFields>(to fields: inout Fields) throws(Fields.Failure) {
+            try fields.set(.family, family)
+            try fields.set(.size, size)
+            try fields.set(.weight, weight)
+            try fields.set(.lineHeight, lineHeight)
+            try fields.set(.tracking, tracking)
+            try fields.set(.italic, italic)
+            try fields.set(.align, align)
+        }
     }
 
-    func write(to dictionary: inout [String: Any]) {
-        if let anchor { dictionary["anchor"] = anchor }
-        if let role { dictionary["role"] = role }
-        if selectable { dictionary["selectable"] = true }
-        if let text { dictionary["documentText"] = text }
+    func write<Fields: AccessibilityDumpFields>(to fields: inout Fields) throws(Fields.Failure) {
+        if let anchor { try fields.set(.anchor, anchor) }
+        if let role { try fields.set(.role, role) }
+        if selectable { try fields.set(.selectable, true) }
+        if let text { try fields.set(.documentText, text) }
         if let inlineRange {
-            dictionary["inlineStart"] = inlineRange.lowerBound
-            dictionary["inlineEnd"] = inlineRange.upperBound
+            try fields.set(.inlineStart, inlineRange.lowerBound)
+            try fields.set(.inlineEnd, inlineRange.upperBound)
         }
         if let scrollX, let contentWidth {
-            dictionary["pageScrollX"] = scrollX
-            dictionary["pageContentWidth"] = contentWidth
+            try fields.set(.pageScrollX, scrollX)
+            try fields.set(.pageContentWidth, contentWidth)
         }
-        if let font {
-            dictionary["font"] = ["family": font.family, "size": font.size, "weight": font.weight,
-                                  "lineHeight": font.lineHeight, "tracking": font.tracking,
-                                  "italic": font.italic, "align": font.align] as [String: Any]
-        }
+        if let font { try fields.setFont(font) }
     }
 }
 

@@ -1,18 +1,72 @@
 import Foundation
 import RuneMotion
 
-/// Encode the path collections with their concrete Swift types. Foundation handles all
-/// strings in both JSON objects, including escaping, before their members are joined.
-struct WebAccessibilityPaths: Encodable {
+// Objective-C Foundation widens NSNumber(Float) before serializing as JSON. Swift
+// Foundation emits the shortest Float representation. Preserve both host contracts.
+#if canImport(ObjectiveC)
+private typealias WebAccessibilityNumber = Double
+#else
+private typealias WebAccessibilityNumber = Float
+#endif
+
+private func webAccessibilityBounds(_ bounds: SIMD4<Float>) -> [WebAccessibilityNumber] {
+    [WebAccessibilityNumber(bounds.x), WebAccessibilityNumber(bounds.y),
+     WebAccessibilityNumber(bounds.z), WebAccessibilityNumber(bounds.w)]
+}
+
+private struct WebAccessibilityEncodingFields: AccessibilityDumpFields {
+    var fields: KeyedEncodingContainer<AccessibilityDumpField>
+
+    mutating func set<Value: Encodable>(_ field: AccessibilityDumpField, _ value: Value) throws {
+        try fields.encode(value, forKey: field)
+    }
+
+    mutating func set(_ field: AccessibilityDumpField, _ value: Float) throws {
+        try fields.encode(WebAccessibilityNumber(value), forKey: field)
+    }
+
+    mutating func setRange(_ range: A11yRange) throws {
+        try fields.encode([range.value, range.min, range.max, range.step], forKey: .range)
+    }
+
+    mutating func setFont(_ font: WebDocumentAccessibilityNode.Font) throws {
+        var nested = Self(fields: fields.nestedContainer(keyedBy: AccessibilityDumpField.self, forKey: .font))
+        try font.write(to: &nested)
+    }
+}
+
+private struct WebAccessibilityPatchNode: Encodable {
+    let semantic: AccessibilityNode
+    let path: String
+    let bounds: SIMD4<Float>
+
+    func encode(to encoder: Encoder) throws {
+        var fields = WebAccessibilityEncodingFields(fields: encoder.container(keyedBy: AccessibilityDumpField.self))
+        try fields.set(.bounds, webAccessibilityBounds(bounds))
+        try AccessibilityDump.writeShallow(semantic, isRoot: false, forBrowser: true, syntheticPath: path, to: &fields)
+    }
+}
+
+/// Keep patch collections in their concrete types all the way to the encoder. The full
+/// browser snapshot and announcements still share the ordinary Foundation dump schema.
+struct WebAccessibilityPatch: Encodable {
     var removed: [String]?
     var children: [String: [String]]?
+    fileprivate var local: Bool?
+    fileprivate var nodes: [WebAccessibilityPatchNode]?
+    fileprivate var bounds: [String: [WebAccessibilityNumber]]?
+
+    init(removed: [String]? = nil, children: [String: [String]]? = nil) {
+        self.removed = removed
+        self.children = children
+    }
 
     func encodePacket(_ fields: [String: Any]) throws -> Data {
         #if canImport(ObjectiveC)
         // Darwin Foundation raises an Objective-C exception for nonfinite numbers.
         guard JSONSerialization.isValidJSONObject(fields) else { throw CocoaError(.propertyListWriteInvalid) }
         #endif
-        guard removed != nil || children != nil else {
+        guard removed != nil || children != nil || nodes != nil || bounds != nil || local != nil else {
             return try JSONSerialization.data(withJSONObject: fields)
         }
         let encoder = JSONEncoder()
@@ -20,7 +74,7 @@ struct WebAccessibilityPaths: Encodable {
         var result = try encoder.encode(self)
         guard !fields.isEmpty else { return result }
         let rest = try JSONSerialization.data(withJSONObject: fields, options: .withoutEscapingSlashes)
-        result.removeLast() // Closing brace of the nonempty path object.
+        result.removeLast() // Closing brace of the nonempty patch object.
         result.append(0x2C) // Comma between the two sets of members.
         result.append(rest.dropFirst()) // Skip the opening brace of the remaining object.
         return result
@@ -120,7 +174,7 @@ final class WebAccessibilityProjection {
             lastScroll != runtime.scrollOffsets || follow
         let spoken = runtime.a11yAnnouncement
         var packet: [String: Any] = [:]
-        var paths = WebAccessibilityPaths()
+        var patch = WebAccessibilityPatch()
         if spoken.count != spokenCount, let words = spoken.words {
             packet["announcement"] = ["text": words.text, "live": words.politeness.rawValue]
         }
@@ -130,11 +184,10 @@ final class WebAccessibilityProjection {
             spokenCount = spoken.count
             return try? JSONSerialization.data(withJSONObject: packet)
         }
-        if patches && !reset && lastCommit == commit && lastLive == live && lastFocus == focused && lastLink == link &&
-            doc == nil && canUpdateGeometry && flatCount == runtime.flatNodes.count,
-           let positions = geometryDelta(runtime) {
-            packet.merge(positions) { _, new in new }
-        } else {
+        let geometryOnly = patches && !reset && lastCommit == commit && lastLive == live &&
+            lastFocus == focused && lastLink == link && doc == nil && canUpdateGeometry &&
+            flatCount == runtime.flatNodes.count && geometryDelta(runtime, patch: &patch)
+        if !geometryOnly {
             var root = runtime.accessibilitySnapshot()
             doc?.project(&root)
             let path = root.runtimePath ?? root.id
@@ -144,10 +197,10 @@ final class WebAccessibilityProjection {
                 }
                 legacyPrevious = root
             } else if reset || rootPath != path {
-                _ = delta(root, runtime: runtime, replace: true, paths: &paths)
+                delta(root, runtime: runtime, replace: true, patch: &patch)
                 packet["root"] = AccessibilityDump.dictionary(from: root, isRoot: true, forBrowser: true)
             } else {
-                packet.merge(delta(root, runtime: runtime, replace: false, paths: &paths)) { _, new in new }
+                delta(root, runtime: runtime, replace: false, patch: &patch)
             }
             rootPath = path
         }
@@ -166,9 +219,9 @@ final class WebAccessibilityProjection {
         moving = animating
         lastBuild = now
         spokenCount = spoken.count
-        guard !packet.isEmpty else { return nil }
+        guard !packet.isEmpty || patch.local != nil else { return nil }
         do {
-            return try paths.encodePacket(packet)
+            return try patch.encodePacket(packet)
         } catch {
             // The next pull must start from a complete snapshot after a failed transfer.
             lastCommit = nil
@@ -184,11 +237,11 @@ final class WebAccessibilityProjection {
     /// Scrolling and motion between commits change presented geometry while leaving the committed
     /// roles, labels, relations and child order intact. Synthesized terminal/link children use the
     /// complete semantic projection because their bounds also depend on their text geometry.
-    private func geometryDelta<State>(_ runtime: Runtime<State>) -> [String: Any]? {
+    private func geometryDelta<State>(_ runtime: Runtime<State>, patch: inout WebAccessibilityPatch) -> Bool {
         // A virtual refill can replace mounted nodes; reproject their semantics if that happens.
-        for record in geometry where runtime.flatNodes[record.runtimeIndex].path != record.path { return nil }
-        var bounds: [String: [Float]] = [:]
-        var nodes: [[String: Any]] = []
+        for record in geometry where runtime.flatNodes[record.runtimeIndex].path != record.path { return false }
+        var bounds: [String: [WebAccessibilityNumber]] = [:]
+        var nodes: [WebAccessibilityPatchNode] = []
         for index in geometry.indices {
             let record = geometry[index]
             let path = record.path
@@ -210,28 +263,21 @@ final class WebAccessibilityProjection {
                     entry.semantic.scrollX = offset.x
                     entry.semantic.scrollY = offset.y
                     entry.semantic.scrollYMax = maximum
-                    nodes.append(shallowDictionary(entry.semantic, path: path, bounds: local))
+                    nodes.append(WebAccessibilityPatchNode(semantic: entry.semantic, path: path, bounds: local))
                     continue
                 }
             }
-            if moved { bounds[path] = [local.x, local.y, local.z, local.w] }
+            if moved { bounds[path] = webAccessibilityBounds(local) }
         }
-        var packet: [String: Any] = [:]
-        if !bounds.isEmpty { packet["bounds"] = bounds }
-        if !nodes.isEmpty { packet["nodes"] = nodes }
-        if !packet.isEmpty { packet["local"] = true }
-        return packet
+        if !bounds.isEmpty { patch.bounds = bounds }
+        if !nodes.isEmpty { patch.nodes = nodes }
+        if !bounds.isEmpty || !nodes.isEmpty { patch.local = true }
+        return true
     }
 
-    private func shallowDictionary(_ semantic: AccessibilityNode, path: String, bounds: SIMD4<Float>) -> [String: Any] {
-        var result = AccessibilityDump.dictionary(from: semantic, isRoot: false, forBrowser: true, syntheticPath: path)
-        result["bounds"] = [bounds.x, bounds.y, bounds.z, bounds.w]
-        return result
-    }
-
-    private func delta<State>(_ root: AccessibilityNode, runtime: Runtime<State>, replace: Bool, paths: inout WebAccessibilityPaths) -> [String: Any] {
-        var nodes: [[String: Any]] = []
-        var bounds: [String: [Float]] = [:]
+    private func delta<State>(_ root: AccessibilityNode, runtime: Runtime<State>, replace: Bool, patch: inout WebAccessibilityPatch) {
+        var nodes: [WebAccessibilityPatchNode] = []
+        var bounds: [String: [WebAccessibilityNumber]] = [:]
         var children: [String: [String]] = [:]
         generation &+= 1
         let generation = self.generation
@@ -277,9 +323,9 @@ final class WebAccessibilityProjection {
                 prior.visited = generation
                 if prior.semantic != shallow {
                     prior.semantic = shallow
-                    if !replace { nodes.append(shallowDictionary(shallow, path: path, bounds: local)) }
+                    if !replace { nodes.append(WebAccessibilityPatchNode(semantic: shallow, path: path, bounds: local)) }
                 } else if !replace && prior.bounds != local {
-                    bounds[path] = [local.x, local.y, local.z, local.w]
+                    bounds[path] = webAccessibilityBounds(local)
                 }
                 prior.bounds = local
                 if let changedChildren {
@@ -290,23 +336,21 @@ final class WebAccessibilityProjection {
                 let order = changedChildren ?? []
                 entries[path] = Entry(shallow, bounds: local, children: order, visited: generation)
                 if !replace {
-                    nodes.append(shallowDictionary(shallow, path: path, bounds: local))
+                    nodes.append(WebAccessibilityPatchNode(semantic: shallow, path: path, bounds: local))
                     if !order.isEmpty { children[path] = order }
                 }
             }
         }
         visit(root, path: root.runtimePath ?? root.id, parent: nil, parentOrigin: .zero)
-        var packet: [String: Any] = [:]
         let removed = entries.compactMap { path, entry in entry.visited == generation ? nil : path }
         for path in removed { entries.removeValue(forKey: path) }
         if !replace {
-            if !removed.isEmpty { paths.removed = removed }
-            if !children.isEmpty { paths.children = children }
-            if !nodes.isEmpty { packet["nodes"] = nodes }
-            if !bounds.isEmpty { packet["bounds"] = bounds }
-            if !packet.isEmpty || !removed.isEmpty || !children.isEmpty { packet["local"] = true }
+            if !removed.isEmpty { patch.removed = removed }
+            if !children.isEmpty { patch.children = children }
+            if !nodes.isEmpty { patch.nodes = nodes }
+            if !bounds.isEmpty { patch.bounds = bounds }
+            if !bounds.isEmpty || !nodes.isEmpty || !removed.isEmpty || !children.isEmpty { patch.local = true }
         }
-        return packet
     }
 }
 
