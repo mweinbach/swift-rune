@@ -3480,7 +3480,7 @@ public final class TextSystem: @unchecked Sendable {
                 elisionCache.removeAll(keepingCapacity: true)
                 typesetterCache.removeAll(keepingCapacity: true)
                 preparedShapeCache.removeAll(keepingCapacity: true)
-                layoutCache.removeAll(keepingCapacity: true)
+                clearLayoutSlots()
                 lock.unlock()
             }
         }
@@ -3504,6 +3504,8 @@ public final class TextSystem: @unchecked Sendable {
     private var preparedShapeCache: [TextShapeKey: ShapedText.DesktopParagraph] = [:]
     #endif
     private var layoutCache: [TextShapeKey: TextLayoutBox] = [:]
+    private var layoutCacheIdentity = TextLayoutCacheIdentity()
+
     private var layoutCommitSeq: UInt64 = 0
     private static let staleLayoutAge: UInt64 = 60
     private var commitsUntilLayoutSweep = TextSystem.staleLayoutAge
@@ -3539,6 +3541,8 @@ public final class TextSystem: @unchecked Sendable {
             // A previous frame or an active flight can still own the placed box.
             // Clone its measurements and leave that snapshot untouched.
             let measured = box.clone()
+            measured.ordinaryCache = box.ordinaryCache
+            box.ordinaryCache = nil
             measured.lastUsedCommit = box.lastUsedCommit
             measured.hasGlyphs = false
             measured.shaped.glyphs = []
@@ -3570,6 +3574,22 @@ public final class TextSystem: @unchecked Sendable {
         outlinePaths.beginFrame()
     }
 
+    // Called under the text lock. A mounted box can stamp an ordinary slot without
+    // hashing only while it is that slot's resident. Prepared widths use their base key.
+    private func storeLayout(_ box: TextLayoutBox, for key: TextShapeKey) {
+        layoutCache.updateValue(box, forKey: key)?.ordinaryCache = nil
+        if !key.hasPreparedWidth { box.ordinaryCache = layoutCacheIdentity }
+    }
+
+    private func removeLayoutSlot(_ key: TextShapeKey) {
+        layoutCache.removeValue(forKey: key)?.ordinaryCache = nil
+    }
+
+    private func clearLayoutSlots() {
+        layoutCache.removeAll(keepingCapacity: true)
+        layoutCacheIdentity = TextLayoutCacheIdentity()
+    }
+
     /// Drops cached layouts and typesetters while keeping rasterized glyph and icon atlases intact.
     public func clearLayoutCaches() {
         lock.lock()
@@ -3578,7 +3598,7 @@ public final class TextSystem: @unchecked Sendable {
         elisionCache.removeAll(keepingCapacity: true)
         typesetterCache.removeAll(keepingCapacity: true)
         preparedShapeCache.removeAll(keepingCapacity: true)
-        layoutCache.removeAll(keepingCapacity: true)
+        clearLayoutSlots()
         lock.unlock()
     }
 
@@ -3610,7 +3630,7 @@ public final class TextSystem: @unchecked Sendable {
                 evictedKeys.append(k)
             }
             for k in evictedKeys {
-                layoutCache.removeValue(forKey: k)
+                removeLayoutSlot(k)
             }
         }
         evictedKeys += evictPrepared(over: 0)
@@ -3774,7 +3794,7 @@ public final class TextSystem: @unchecked Sendable {
         lock.withLock {
             let storage = layoutStorageKey(for: key, width: width)
             box.lastUsedCommit = layoutCommitSeq
-            layoutCache[storage] = box
+            storeLayout(box, for: storage)
         }
         return box
     }
@@ -3863,7 +3883,7 @@ public final class TextSystem: @unchecked Sendable {
         var evicted: [TextShapeKey] = []
         for entry in loose {
             if total <= limit { break }
-            layoutCache.removeValue(forKey: entry.key)
+            removeLayoutSlot(entry.key)
             evicted.append(entry.key)
             total -= UInt64(entry.cost)
         }
@@ -3884,10 +3904,10 @@ public final class TextSystem: @unchecked Sendable {
     /// Evicts a superseded layout/shape/glyph entry immediately (`text_layout::supersede`).
     public func supersede(_ key: TextShapeKey) {
         lock.lock()
-        layoutCache.removeValue(forKey: key)
+        removeLayoutSlot(key)
         if preparedPass != 0 {
             for alternate in layoutCache.keys.filter({ $0.hasPreparedWidth && $0.unpreparedKey == key }) {
-                layoutCache.removeValue(forKey: alternate)
+                removeLayoutSlot(alternate)
             }
         }
         preparedShapeCache.removeValue(forKey: key)
@@ -3939,7 +3959,7 @@ public final class TextSystem: @unchecked Sendable {
                 }
                 remaining = max(0, bytes - box.estimatedBytes)
             }
-            layoutCache.removeValue(forKey: key)
+            removeLayoutSlot(key)
             evicted.append(key)
         }
         return evicted
@@ -3947,21 +3967,49 @@ public final class TextSystem: @unchecked Sendable {
 
     /// Advances commit counter and sweeps stale cached layouts beyond 60 commits and 3 MiB (`end_commit`).
     public func endCommit(activeKeys: Set<TextShapeKey>) {
-        var evictedKeys: [TextShapeKey] = []
+        endCommit { now in
+            for key in activeKeys { layoutCache[key]?.lastUsedCommit = now }
+            if hasPreparedWidthSlots { refreshPreparedWidths(activeKeys, at: now) }
+        }
+    }
 
+    /// A normal remount can stamp its live layouts directly. A key set is needed only
+    /// to retain prepared alternate widths that share a live label's unprepared key.
+    internal func endCommit(
+        mounted: Dictionary<NodeId, RetainedLayoutCoordinator.TextLayoutRecord>.Values,
+        exiting: Dictionary<NodeId, RetainedLayoutCoordinator.TextLayoutRecord>.Values
+    ) {
+        endCommit { now in
+            var active = Set<TextShapeKey>()
+            func refresh(_ records: Dictionary<NodeId, RetainedLayoutCoordinator.TextLayoutRecord>.Values) {
+                for record in records {
+                    let box = record.box
+                    if box.ordinaryCache === layoutCacheIdentity {
+                        box.lastUsedCommit = now
+                    } else {
+                        layoutCache[box.shapeKey]?.lastUsedCommit = now
+                    }
+                    if hasPreparedWidthSlots { active.insert(box.shapeKey) }
+                }
+            }
+            refresh(mounted)
+            refresh(exiting)
+            if hasPreparedWidthSlots { refreshPreparedWidths(active, at: now) }
+        }
+    }
+
+    private func refreshPreparedWidths(_ active: Set<TextShapeKey>, at now: UInt64) {
+        for (key, box) in layoutCache where key.hasPreparedWidth && active.contains(key.unpreparedKey) {
+            box.lastUsedCommit = now
+        }
+    }
+
+    private func endCommit(refresh: (UInt64) -> Void) {
+        var evictedKeys: [TextShapeKey] = []
         lock.lock()
         layoutCommitSeq &+= 1
         let nowSeq = layoutCommitSeq
-        for k in activeKeys {
-            if let b = layoutCache[k] {
-                b.lastUsedCommit = nowSeq
-            }
-        }
-        if hasPreparedWidthSlots {
-            for (key, box) in layoutCache where key.hasPreparedWidth && activeKeys.contains(key.unpreparedKey) {
-                box.lastUsedCommit = nowSeq
-            }
-        }
+        refresh(nowSeq)
         commitsUntilLayoutSweep -= 1
         if commitsUntilLayoutSweep == 0 {
             evictedKeys = sweepLayoutCache(at: nowSeq)
@@ -4096,7 +4144,7 @@ public final class TextSystem: @unchecked Sendable {
         elisionCache.removeAll(keepingCapacity: true)
         typesetterCache.removeAll(keepingCapacity: true)
         preparedShapeCache.removeAll(keepingCapacity: true)
-        layoutCache.removeAll(keepingCapacity: true)
+        clearLayoutSlots()
         lock.unlock()
         glyphCache.clear()
         return true
@@ -4243,7 +4291,7 @@ public final class TextSystem: @unchecked Sendable {
             elisionCache.removeAll(keepingCapacity: true)
             typesetterCache.removeAll(keepingCapacity: true)
             preparedShapeCache.removeAll(keepingCapacity: true)
-            layoutCache.removeAll(keepingCapacity: true)
+            clearLayoutSlots()
             lastObservedFontEpoch = activeFontEpoch
             clearGlyphs = true
         }
@@ -4256,7 +4304,7 @@ public final class TextSystem: @unchecked Sendable {
                 elisionCache.removeAll(keepingCapacity: true)
                 typesetterCache.removeAll(keepingCapacity: true)
                 preparedShapeCache.removeAll(keepingCapacity: true)
-                layoutCache.removeAll(keepingCapacity: true)
+                clearLayoutSlots()
                 clearGlyphs = true
             }
             lastObservedLanguageEpoch = langEpoch
@@ -4753,7 +4801,7 @@ public final class TextSystem: @unchecked Sendable {
                             return cachedBox
                         }
                         if let prepared = cachedBox.prepared {
-                            _ = layoutCache.removeValue(forKey: storageKey)
+                            removeLayoutSlot(storageKey)
                             let unique = isKnownUniquelyReferenced(&cachedBox)
                             lock.unlock()
                             // Measurement already retained the CTLines and their exact baseline positions.
@@ -4772,14 +4820,14 @@ public final class TextSystem: @unchecked Sendable {
                             outBox.hasGlyphs = true
                             lock.lock()
                             outBox.lastUsedCommit = layoutCommitSeq
-                            layoutCache[storageKey] = outBox
+                            storeLayout(outBox, for: storageKey)
                             lock.unlock()
                             return outBox
                         }
                         lock.unlock()
                     } else if let prepared = cachedBox.prepared {
                         if countAsRebreak {
-                            _ = layoutCache.removeValue(forKey: storageKey)
+                            removeLayoutSlot(storageKey)
                             let unique = isKnownUniquelyReferenced(&cachedBox)
                             lock.unlock()
                             let reShaped = breakLines(
@@ -4796,7 +4844,7 @@ public final class TextSystem: @unchecked Sendable {
                             lock.lock()
                             _rebrokenCount += 1
                             outBox.lastUsedCommit = layoutCommitSeq
-                            layoutCache[storageKey] = outBox
+                            storeLayout(outBox, for: storageKey)
                             lock.unlock()
                             return outBox
                         } else {
@@ -4853,7 +4901,7 @@ public final class TextSystem: @unchecked Sendable {
                 if keep == .cached && glidePx == .zero && countAsRebreak {
                     lock.lock()
                     box.lastUsedCommit = layoutCommitSeq
-                    layoutCache[storageKey] = box
+                    storeLayout(box, for: storageKey)
                     lock.unlock()
                 }
                 return box
@@ -4894,7 +4942,7 @@ public final class TextSystem: @unchecked Sendable {
                 preparedShapeCache[shapeKey] = prepared
                 if glidePx == .zero && countAsRebreak {
                     box.lastUsedCommit = layoutCommitSeq
-                    layoutCache[storageKey] = box
+                    storeLayout(box, for: storageKey)
                 }
             }
             lock.unlock()
@@ -6936,7 +6984,7 @@ public final class TextSystem: @unchecked Sendable {
                     if priorLayout == nil { _shapedCount += 1 }
                     box.lastUsedCommit = layoutCommitSeq
                     box.preparedPass = priorLayout?.preparedPass
-                    layoutCache[storageKey] = box
+                    storeLayout(box, for: storageKey)
                 }
             }
             return box

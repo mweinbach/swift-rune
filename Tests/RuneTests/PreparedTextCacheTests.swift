@@ -196,6 +196,50 @@ struct PreparedTextCacheTests {
         #expect(system.layoutKeys() == [ordinary])
     }
 
+    @Test func oldBoxesRefreshResidentReplacementsAndEveryPreparedWidth() throws {
+        let system = TextSystem()
+        let style = TextStyle(size: 16, wrap: .wrap)
+        func width(_ width: Float) -> TextLayoutBox {
+            system.layoutKeyed(text: "some text that wraps", style: style, maxWidth: width, pixelScale: 1, emitGlyphs: true)
+        }
+        let old = width(100)
+        system.forgetRasterState()
+        let replacement = try #require(system.cachedLayoutBox(for: old.shapeKey))
+        #expect(replacement !== old)
+        typealias Record = RetainedLayoutCoordinator.TextLayoutRecord
+        var mounted = [NodeId: Record]()
+        let exiting = [NodeId(1): Record(box: old, isInput: false)]
+        for _ in 0..<4 { system.endCommit(mounted: mounted.values, exiting: exiting.values) }
+        system.rest()
+        #expect(system.cachedLayoutBox(for: old.shapeKey) === replacement)
+        #expect(replacement.lastUsedCommit == 4)
+        #expect(system.prepareLayouts { _ = width(35) } == 1)
+        let alternate = try #require(system.cachedLayoutBox(for: old.shapeKey, matchingWidth: 35))
+        mounted = [NodeId(2): Record(box: alternate, isInput: false), NodeId(3): Record(box: alternate, isInput: false)]
+        for _ in 0..<64 { system.endCommit(mounted: mounted.values, exiting: exiting.values) }
+        #expect(alternate.lastUsedCommit == 68)
+        #expect(system.cachedLayoutBox(for: old.shapeKey)?.lastUsedCommit == 68)
+        system.clearLayoutCaches()
+        let newBox = width(100)
+        for _ in 0..<4 { system.endCommit(mounted: mounted.values, exiting: exiting.values) }
+        system.rest()
+        #expect(system.cachedLayoutBox(for: old.shapeKey) === newBox)
+        #expect(newBox.lastUsedCommit == 72)
+        system.supersede(old.shapeKey)
+        let reinserted = width(100)
+        for _ in 0..<4 { system.endCommit(mounted: mounted.values, exiting: exiting.values) }
+        system.rest()
+        #expect(system.cachedLayoutBox(for: old.shapeKey) === reinserted)
+        #expect(reinserted.lastUsedCommit == 76)
+
+        system.invalidateWindowFontFaces()
+        let otherFont = width(100)
+        #expect(otherFont.shapeKey != old.shapeKey)
+        for _ in 0..<4 { system.endCommit(mounted: mounted.values, exiting: exiting.values) }
+        system.rest()
+        #expect(system.cachedLayoutBox(for: otherFont.shapeKey) == nil)
+    }
+
     @Test func commitBudgetKeepsActiveWidthsAndEvictsOnlyStaleLayouts() throws {
         let system = TextSystem()
         let style = TextStyle(size: 16, wrap: .wrap)

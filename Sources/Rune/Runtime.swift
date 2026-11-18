@@ -4820,21 +4820,27 @@ public final class Runtime<State> {
             exitingTextLayouts.removeValue(forKey: nid)
         }
         nodeTextLayouts = pass.textLayouts
-        var activeShapeKeys = Set(nodeTextLayouts.values.map { $0.box.shapeKey })
-        for rec in exitingTextLayouts.values {
-            activeShapeKeys.insert(rec.box.shapeKey)
+        var activeShapeKeys: Set<TextShapeKey>?
+        func activeKeys() -> Set<TextShapeKey> {
+            if let activeShapeKeys { return activeShapeKeys }
+            var keys = Set<TextShapeKey>()
+            for record in nodeTextLayouts.values { keys.insert(record.box.shapeKey) }
+            for record in exitingTextLayouts.values { keys.insert(record.box.shapeKey) }
+            activeShapeKeys = keys
+            return keys
         }
         for (nid, prev) in prevKeys {
             guard let cur = nodeTextLayouts[nid], cur.box.shapeKey != prev.shapeKey else { continue }
-            guard !activeShapeKeys.contains(prev.shapeKey) else { continue }
+            guard !activeKeys().contains(prev.shapeKey) else { continue }
             let kind = TextLayoutRebreak.edited(was: prev.shapeKey.authText, now: cur.box.shapeKey.authText)
-            if cur.isInput || prev.isInput || kind.isEdit {
-                textSystem.supersede(prev.shapeKey)
-            }
+            if cur.isInput || prev.isInput || kind.isEdit { textSystem.supersede(prev.shapeKey) }
         }
-        // One text commit clock per commit (`TextSystem::end_commit`): advances the generation that
-        // measure/shape/typesetter/layout caches are stamped with (`rest()` evicts by it, `#905`).
-        textSystem.endCommit(activeKeys: activeShapeKeys)
+        // Every commit advances the text cache clock, including remounts without edited labels.
+        if let activeShapeKeys {
+            textSystem.endCommit(activeKeys: activeShapeKeys)
+        } else {
+            textSystem.endCommit(mounted: nodeTextLayouts.values, exiting: exitingTextLayouts.values)
+        }
         let allWarnings = pass.virtualExpansion.warnings + pass.warnings
         if !allWarnings.isEmpty {
             keyWarnings = allWarnings

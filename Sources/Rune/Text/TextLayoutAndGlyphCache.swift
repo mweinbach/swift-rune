@@ -359,6 +359,9 @@ internal final class TextPreparedShape: @unchecked Sendable {
     #endif
 }
 
+/// Identifies the ordinary layout slots owned by a single text cache between clears.
+internal final class TextLayoutCacheIdentity: Sendable {}
+
 /// Reference-counted laid-out text box that supports CoW re-breaking when uniquely owned
 /// (`Rc<TextLayoutBox>` + `Rc::make_mut` parity for `text_rebreak`).
 public final class TextLayoutBox: @unchecked Sendable {
@@ -372,6 +375,7 @@ public final class TextLayoutBox: @unchecked Sendable {
     public var shaped: ShapedText
     public var hasGlyphs: Bool
     internal let prepared: TextPreparedShape?
+    internal var ordinaryCache: TextLayoutCacheIdentity?
     internal var lastUsedCommit: UInt64 = 0
     /// The idle pass that introduced this layout. Ordinary layouts have no pass.
     internal var preparedPass: UInt64?
