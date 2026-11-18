@@ -27,7 +27,8 @@ for option in "$@"; do
     previous=$option
 done
 if [[ $configuration == release ]]; then
-    flags+=(-Xlinker --strip-all)
+    # Keep Rune's four-wide geometry and color operations as WebAssembly SIMD.
+    flags+=(-Xcc -msimd128 -Xlinker --strip-all)
 fi
 exports=(
     __main_void rune_web_enable rune_web_config rune_web_window_title rune_web_window_height rune_web_page rune_web_full_window rune_web_reset_renderer rune_web_buffer rune_web_fonts_changed rune_web_spelling_changed

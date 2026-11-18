@@ -240,7 +240,7 @@ The Android example includes a NativeActivity manifest and a packaging script fo
 
 `mountRuneFields(canvas, send)` in `Sources/Rune/Resources/Web/rune-web.mjs` mounts a native textarea and password field beside an existing canvas. Pass Rune’s `WebAppHost.onFieldChange` updates to its `sync(field, activate)` method and route its edit, selection and secure insert events to the corresponding `WebAppHost` handlers. Call `dispose()` when the canvas unmounts.
 
-The browser entry uses a WASI Preview 1 reactor. Build with matching Swift compiler and WASI SDK versions. For example, Swift 6.4.2 can use the `swift-6.4.2-RELEASE_wasm` SDK.
+The browser entry uses a WASI Preview 1 reactor. Build with matching Swift compiler and WASI SDK versions. For example, Swift 6.4.2 can use the `swift-6.4.2-RELEASE_wasm` SDK. Release builds enable WebAssembly SIMD for geometry and color operations. To target an engine without SIMD, append `-Xcc -mno-simd128` to the build command.
 
 ```bash
 ./scripts/build-web.sh <wasip1-sdk> rune-web-hello -c release
