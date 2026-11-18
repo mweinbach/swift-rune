@@ -61,6 +61,29 @@ private struct AccessibilityTreeEdges {
 // The arrays are allocated on the first accessibility read. A mutation of the authored
 // tree invalidates every entry except descendants certified by the last applied memo pass.
 final class AccessibilityProjectionCache {
+    private var current = AccessibilityProjectionRead()
+    fileprivate private(set) var generation: UInt64 = 0
+
+    fileprivate func beginRead() -> AccessibilityProjectionRead {
+        let read = current.inUse ? AccessibilityProjectionRead() : current
+        read.inUse = true
+        return read
+    }
+
+    func committed(reusing ranges: [(current: Range<Int>, previous: Range<Int>)]) {
+        generation &+= 1
+        if current.inUse {
+            // A field getter may commit or query the runtime while a read is in progress.
+            current = AccessibilityProjectionRead()
+        } else {
+            current.committed(reusing: ranges)
+        }
+    }
+}
+
+private final class AccessibilityProjectionRead {
+    var inUse = false
+
     fileprivate final class Template {
         var node: AccessibilityNode
         var snapshot: UInt64
@@ -306,25 +329,42 @@ public extension AccessibilityTreeBuilder {
 public extension Runtime {
     /// Returns the current accessibility tree snapshot built from live runtime nodes.
     func accessibilitySnapshot(securePaths: Set<String> = []) -> AccessibilityNode {
+        let flatNodes = self.flatNodes
         if flatNodes.isEmpty {
             return AccessibilityTreeBuilder.project(
                 elements: elements(),
-                focusedPath: focusedPath,
-                viewport: viewport,
+                focusedPath: self.focusedPath,
+                viewport: self.viewport,
                 securePaths: securePaths
             )
         }
 
-        let storage = accessibilityProjectionCache ?? AccessibilityProjectionCache()
-        accessibilityProjectionCache = storage
-        let edges = storage.prepare(count: flatNodes.count, webFocus: cxSettings.viewDefaults.webFocus) { flatNodes[$0].parentIndex }
+        let cache = accessibilityProjectionCache ?? AccessibilityProjectionCache()
+        accessibilityProjectionCache = cache
+        let storage = cache.beginRead()
+        defer { storage.inUse = false }
+
+        // Keep one mounted frame, including its geometry and focus, through synchronous
+        // editor reads. A callback can publish another frame before this traversal returns.
+        let presentedRectByPath = self.presentedRectByPath
+        let focusedPath = self.focusedPath, focusedLinkIndex = self.focusedLinkIndex
+        let activeModalPath = self.activeModalPath
+        let modalMemberPaths = self.modalMemberPaths, modalAncestorPaths = self.modalAncestorPaths
+        let scrollOffsets = self.scrollOffsets, scrollMaxExtents = self.scrollMaxExtents
+        let linkBoxesByPath = self.linkBoxesByPath, viewport = self.viewport
+        #if os(macOS) && canImport(AppKit)
+        let nodeTextLayouts = self.nodeTextLayouts, presentedScales = self.presentedScales
+        let inputScroll = self.inputScroll
+        #endif
+        let webFocus = cxSettings.viewDefaults.webFocus
+        let edges = storage.prepare(count: flatNodes.count, webFocus: webFocus) { flatNodes[$0].parentIndex }
         // A caller can request a different secure or modal projection without applying a layout.
         let reuseSemantic = securePaths.isEmpty && activeModalPath == nil
         let previousSnapshot = storage.snapshot
         storage.snapshot &+= 1
         let currentSnapshot = storage.snapshot
         var changes = 0
-        var virtualAt: [Int: AccessibilityProjectionCache.VirtualIndex] = [:]
+        var virtualAt: [Int: AccessibilityProjectionRead.VirtualIndex] = [:]
         if nodeByPath.count == flatNodes.count {
             for (path, list) in virtualLists {
                 if let i = nodeByPath[path] { virtualAt[i] = .init(list) }
@@ -338,10 +378,16 @@ public extension Runtime {
         // Bind one value receiver for a read-only projection. An editor invokes authored
         // code and may change the runtime mid-read, so query its live scene at each lookup.
         let isExiting: (NodeId) -> Bool
-        if layoutObservers.authored.contains(where: { $0.contains(.secureOrEditable) }) {
-            isExiting = { self.scene.isExiting($0) }
+        let hasEditors = layoutObservers.authored.contains { $0.contains(.secureOrEditable) }
+        let inputState: State? = hasEditors ? .some(state) : nil
+        let initialPresence = scene.isExiting
+        if hasEditors {
+            let generation = cache.generation
+            isExiting = { id in
+                cache.generation == generation ? self.scene.isExiting(id) : initialPresence(id)
+            }
         } else {
-            isExiting = scene.isExiting
+            isExiting = initialPresence
         }
         func projection(_ i: Int) -> AccessibilityTreeEdges.Projection {
             let node = flatNodes[i]
@@ -358,7 +404,7 @@ public extension Runtime {
             if el.isA11yHidden || el.opacity <= 0.01 || node.key == "__v_top_spacer" || node.key == "__v_bot_spacer" {
                 result = .hidden
             } else {
-                let takesFocus = nodeTakesFocus(el)
+                let takesFocus = nodeTakesFocus(el, webFocus: webFocus)
                 let keyboardTarget = takesFocus && !node.effectiveInert && (el.role != .presentation || el.explicitlyFocusable)
                 if let role = AccessibilityRoleRules.projectedRole(for: el, takesFocus: takesFocus, keyboardTarget: keyboardTarget) {
                     result = .node(role)
@@ -423,7 +469,7 @@ public extension Runtime {
             let editLens = el.hasEditLens ? el.handlers.editLens : nil
             var editMultiline = false
             if let editLens {
-                let edit = editLens.get(state)
+                let edit = editLens.get(inputState ?? state)
                 editMultiline = edit.multiline
                 editIsSecure = editIsSecure || edit.isSecure
                 if !editIsSecure {

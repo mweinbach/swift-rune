@@ -95,6 +95,60 @@ struct AccessibilitySnapshotReuseTests {
         #expect(find("source", in: first)?.role == .group)
     }
 
+    @Test func committingDuringAnEditorReadKeepsTheOriginalFrameCoherent() {
+        struct Form {
+            var value = TextEdit("first")
+            var replaced = false
+        }
+        final class Callback {
+            var run: (() -> Void)?
+            var outerCalls = 0
+            var counting = false
+            var nested = false
+            var nestedTree: AccessibilityNode?
+        }
+        let callback = Callback()
+        let runtime = Runtime(state: Form(), viewport: Vec2(220, 160)) { state, _ in
+            let field: El<Form> = textInput(key: "entry", editAccess(get: { model in
+                if callback.counting, !callback.nested { callback.outerCalls += 1 }
+                let run = callback.run
+                callback.run = nil
+                run?()
+                return model.value
+            }, set: { model, edit in model.value = edit })).size(90, 24)
+            var panel = col().key("panel").size(220, 160).child(field)
+            if state.replaced {
+                panel = panel.child(col().key("replacement").child(text("After").key("new")))
+            } else {
+                panel = panel.child(text("Before").key("old").size(36, 24))
+                    .child(text("Retired").key("retiring"))
+            }
+            return panel
+        }
+        _ = runtime.renderFrame(at: 0)
+        let before = runtime.accessibilitySnapshot()
+        callback.counting = true
+        callback.run = {
+            callback.nested = true
+            runtime.update(at: 1) { model, _ in
+                model.value = TextEdit("second")
+                model.replaced = true
+            }
+            _ = runtime.renderFrame(at: 1)
+            callback.nestedTree = runtime.accessibilitySnapshot()
+            callback.nested = false
+        }
+        let during = runtime.accessibilitySnapshot()
+        callback.counting = false
+        let after = runtime.accessibilitySnapshot()
+        #expect(callback.outerCalls == 1)
+        #expect(during == before)
+        #expect(callback.nestedTree == after)
+        #expect(find("entry", in: during)?.value == "first")
+        #expect(find("old", in: after) == nil && find("new", in: after)?.value == "After")
+        #expect(find("entry", in: after)?.value == "second")
+    }
+
     @Test func anEditorReadCanChangeThePresenceOfALaterSibling() throws {
         final class DuringRead { var perform: (() -> Void)? }
         let callback = DuringRead()

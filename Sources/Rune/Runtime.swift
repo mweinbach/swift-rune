@@ -5832,12 +5832,16 @@ public final class Runtime<State> {
     }
 
     internal func nodeTakesFocus(_ el: El<State>) -> Bool {
+        nodeTakesFocus(el, webFocus: cxSettings.viewDefaults.webFocus)
+    }
+
+    internal func nodeTakesFocus(_ el: El<State>, webFocus: Bool) -> Bool {
         if el.a11yDisabled { return false }
         if el.focusable { return true }
         let pressableRoles: Set<ElementRole> = [
             .button, .tab, .checkbox, .switchControl, .radio, .menuItem, .listItem,
         ]
-        return cxSettings.viewDefaults.webFocus &&
+        return webFocus &&
             !el.focusOptOut &&
             (el.handlers.onClick != nil || el.handlers.onClickPress != nil || el.handlers.onPointerDown != nil) &&
             pressableRoles.contains(el.role)
