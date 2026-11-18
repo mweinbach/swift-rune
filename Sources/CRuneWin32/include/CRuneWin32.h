@@ -114,6 +114,7 @@ int32_t rune_win_pump(void);
 int32_t rune_win_pump_or_idle(int32_t idle_work_owed);
 int32_t rune_win_turn_timer(void);
 int32_t rune_win_pump_turn(int32_t idle_work_owed, int32_t *painted);
+int32_t rune_win_in_callback(void);
 int32_t rune_win_input_waiting(void);
 int32_t rune_win_startup_may_run(int32_t dispatched_paint);
 int32_t rune_win_screen_reader(void);

@@ -35,6 +35,7 @@ static _Thread_local unsigned input_windows_awaiting_frame;
 static _Thread_local int waiting_for_messages, dispatch_depth;
 
 BOOL rune_win_idle_for_session(void) { return waiting_for_messages && !dispatch_depth; }
+int32_t rune_win_in_callback(void) { return dispatch_depth != 0; }
 static INIT_ONCE boot_once = INIT_ONCE_STATIC_INIT;
 static LARGE_INTEGER boot_ticks, boot_frequency;
 static double boot_offset_ms;

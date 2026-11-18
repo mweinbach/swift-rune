@@ -62,7 +62,9 @@ final class RuneWindowsOverlayHost<State>: Win32Callback, DesktopOverlayHost {
             renderer = try PortableGLRenderer(resolve: rune_win_gl_proc, isGLES: false)
         } catch { rune_win_destroy(window); throw error }
         popups = handle.windowsPopups(window: window)
-        accessibility = WindowsAccessibilityHost(window: rune_win_hwnd(window))
+        accessibility = WindowsAccessibilityHost(window: rune_win_hwnd(window)) { [weak handle] bridge in
+            handle?.withLockedRuntime { bridge.update($0) }
+        }
         // Unregistering joins in-flight callbacks before destroying the HWND.
         let address = UInt(bitPattern: window)
         observer = PointerObserver { rune_win_overlay_observed(OpaquePointer(bitPattern: address)) }

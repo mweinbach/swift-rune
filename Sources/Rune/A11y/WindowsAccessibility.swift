@@ -8,11 +8,24 @@ internal final class WindowsAccessibilityHost {
     private var identifiers: [AccessibilityIdentity: Int32] = [:]
     private var targets: [Int32: String] = [:]
     private var nextID: Int32 = 1
-    private var lastCommit: UInt64?
-    private var announcementCount: UInt32?
+    private let publishOnDemand: (WindowsAccessibilityHost) -> Void
 
-    init(window: UnsafeMutableRawPointer?) {
+    init(window: UnsafeMutableRawPointer?, publishOnDemand: @escaping (WindowsAccessibilityHost) -> Void) {
+        self.publishOnDemand = publishOnDemand
         host = rune_uia_attach(window)
+        rune_uia_on_demand(host, Unmanaged.passUnretained(self).toOpaque()) { context in
+            // A modal call can pump WM_GETOBJECT before a runtime mutation has finished.
+            // In that case the window thread will publish after the outer callback returns.
+            guard let context, rune_win_in_callback() == 0 else { return }
+            let bridge = Unmanaged<WindowsAccessibilityHost>.fromOpaque(context).takeUnretainedValue()
+            bridge.publishOnDemand(bridge)
+        }
+    }
+
+    convenience init<State>(window: UnsafeMutableRawPointer?, runtime: Runtime<State>) {
+        self.init(window: window) { [weak runtime] bridge in
+            if let runtime { bridge.update(runtime) }
+        }
     }
 
     func close() {
@@ -81,13 +94,10 @@ internal final class WindowsAccessibilityHost {
     }
 
     func update<State>(_ runtime: Runtime<State>) {
-        guard let host else { return }
-        // Keep a usable initial tree for the first WM_GETOBJECT, including when a client attaches
-        // to an idle window. Active readers also need animated and scrolled element bounds.
+        // The HWND answers discovery synchronously at rest. An active reader continues to
+        // receive fresh geometry on scroll and animation frames between authored commits.
+        guard let host, rune_uia_active(host) != 0, !runtime.flatNodes.isEmpty else { return }
         let announcement = runtime.a11yAnnouncement
-        guard lastCommit != runtime.commitCount || announcement.count != announcementCount || rune_uia_active(host) != 0 else { return }
-        lastCommit = runtime.commitCount
-        announcementCount = announcement.count
         var tree = runtime.nativeAccessibilitySnapshot()
         tree.children.append(AccessibilityTreeState.announcerNode(announcement, holdWords: false))
         let scale = Double(runtime.pixelScale)

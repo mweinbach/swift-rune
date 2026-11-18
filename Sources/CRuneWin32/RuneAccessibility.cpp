@@ -617,6 +617,9 @@ struct RuneUiaHost {
     HWND attached; // Owned by the window thread until WM_NCDESTROY or explicit detach.
     bool initializedCOM;
     bool published = false;
+    void *activationContext = nullptr;
+    void (*activate)(void *) = nullptr;
+    bool answeringDemand = false;
     explicit RuneUiaHost(HWND hwnd) : window(std::make_shared<Window>(hwnd)), root(new Provider(window, 0)), attached(hwnd),
         initializedCOM(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {}
     ~RuneUiaHost() {
@@ -630,13 +633,25 @@ const UINT_PTR subclassID = 0x52554158;
 LRESULT CALLBACK accessibilityProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
     auto *host = reinterpret_cast<RuneUiaHost *>(data);
     if (msg == WM_GETOBJECT) {
+        // Senders may either sign-extend or zero-extend the 32-bit MSAA object ID.
+        const int32_t object = static_cast<int32_t>(l);
+        if (object < 0 && object != UiaRootObjectId && object != OBJID_CLIENT)
+            return DefSubclassProc(hwnd, msg, w, l);
+        bool first;
         {
             std::lock_guard<std::mutex> lock(host->window->lock);
             if (!host->window->hwnd) return 0;
-            if (!host->window->active) {
-                host->window->active = true;
-                rune_request_window_paint(hwnd, TRUE);
+            first = !host->window->active;
+            host->window->active = true;
+        }
+        if (first) {
+            if (host->activate) {
+                host->answeringDemand = true;
+                host->activate(host->activationContext);
+                host->answeringDemand = false;
             }
+            // A nested request during a Rune callback or before first layout may need a frame.
+            if (!host->activate || !host->published) rune_request_window_paint(hwnd, TRUE);
         }
         // UI Automation may send another WM_GETOBJECT during this call.
         return UiaReturnRawElementProvider(hwnd, w, l, host->root);
@@ -886,6 +901,13 @@ RuneUiaHost *rune_uia_attach(void *raw) {
     if (!SetWindowSubclass(hwnd, accessibilityProc, subclassID, reinterpret_cast<DWORD_PTR>(host.get()))) return nullptr;
     return host.release();
 }
+void rune_uia_on_demand(RuneUiaHost *host, void *context, void (*activate)(void *)) {
+    if (!host) return;
+    host->activationContext = context;
+    host->activate = activate;
+    // A reader that queried the HWND before the adapter attached should look again.
+    if (host->attached) NotifyWinEvent(EVENT_OBJECT_REORDER, host->attached, OBJID_CLIENT, CHILDID_SELF);
+}
 void rune_uia_detach(RuneUiaHost *host) {
     if (!host) return;
     HWND hwnd;
@@ -1009,6 +1031,9 @@ void rune_uia_commit(RuneUiaHost *host) {
     }
     const bool first = !host->published;
     host->published = true;
+    // The first caller receives the new tree directly. Raising UIA events from inside
+    // WM_GETOBJECT can enter UIA again while it is resolving this window's provider.
+    if (host->answeringDemand) return;
     if (first && !active && host->attached) {
         // A reader may have queried the HWND before the first semantic tree existed.
         NotifyWinEvent(EVENT_OBJECT_REORDER, host->attached, OBJID_CLIENT, CHILDID_SELF);

@@ -429,7 +429,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
         rune_win_enable_redraw_turns(window)
         rune_win_defer_startup_hooks(window)
         if rune_win_screen_reader() != 0 {
-            accessibility = WindowsAccessibilityHost(window: rune_win_hwnd(window))
+            accessibility = WindowsAccessibilityHost(window: rune_win_hwnd(window), runtime: runtime)
         }
         self.taskbar = WindowsTaskbar(window: rune_win_hwnd(window))
         if renderer != nil { WindowsGPUWindows.active += 1 }
@@ -509,7 +509,7 @@ final class Win32Session<State>: Win32Callback, DesktopWindowSession {
             cpuBoot?.startGPU(window)
         case .accessibility:
             startupWork = .done
-            accessibility = WindowsAccessibilityHost(window: rune_win_hwnd(window))
+            accessibility = WindowsAccessibilityHost(window: rune_win_hwnd(window), runtime: runtime)
             accessibility?.update(runtime)
         case .done:
             break

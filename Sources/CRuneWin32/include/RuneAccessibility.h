@@ -33,6 +33,8 @@ typedef struct RuneUiaNode {
 } RuneUiaNode;
 
 RuneUiaHost *rune_uia_attach(void *hwnd);
+/* First UIA request on the window thread. Publish the current tree before returning the provider. */
+void rune_uia_on_demand(RuneUiaHost *host, void *context, void (*activate)(void *));
 void rune_uia_detach(RuneUiaHost *host);
 int rune_uia_active(const RuneUiaHost *host);
 void rune_uia_begin(RuneUiaHost *host, const char *title);
