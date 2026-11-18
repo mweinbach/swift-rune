@@ -918,6 +918,15 @@ extension Runtime {
             : FrameGeometry(minimumCapacity: frameOut.nodes.count)
         var newPresentedScales = PresentedScales(count: flatNodes.count, byPath: nodeByPath,
                                                  byId: nodeIndexById, hasExits: !topology.exits.isEmpty)
+        func paintCarriedScroll(_ node: borrowing FlatNode) -> Vec2 {
+            // Indexed geometry uses live mounted slots. Their enclosing viewport's sum
+            // becomes reusable once all its scale and turn ancestors have painted.
+            if indexedGeometry, !carriedScrollCache.isEmpty {
+                guard let owner = node.enclosingScrollIndex else { return .zero }
+                if let cached = carriedScrollCache[owner] { return cached }
+            }
+            return carriedScroll(for: node, scale: { newPresentedScales[$0] }, cache: &carriedScrollCache) { newHitGeometries[$0]?.turn }
+        }
         var drawnOverrides: [String: MotionRect] = [:]
         // Raster-only walks omit hit scopes but still need rotated ancestors for drawn bounds.
         var rasterTurns: [Int: Turn] = [:]
@@ -1403,7 +1412,7 @@ extension Runtime {
                 isInteractiveBlocker: el.blocksInteractiveHits, parentScreenClip: parentClip
             ), at: node.index, path: node.path)
             if depth == hitScopesByDepth.count { hitScopesByDepth.append(parentScope) } else { hitScopesByDepth[depth] = parentScope }
-            let carried = carriedScroll(for: node, scale: { newPresentedScales[$0] }, cache: &carriedScrollCache) { newHitGeometries[$0]?.turn }
+            let carried = paintCarriedScroll(node)
             newElements.append(.painted(PaintedElement(
                 authored: node.element, path: node.path, key: node.key, parentIndex: context.element,
                 rect: rect, target: node.targetRect, visible: intersectRects(rect, parentClip ?? initialClipPt),
@@ -1818,7 +1827,7 @@ extension Runtime {
             }
             if moving { hasInheritedFlags = true }
             if publishHitGeometry {
-                let carried = carriedScroll(for: node, scale: { newPresentedScales[$0] }, cache: &carriedScrollCache) { newHitGeometries[$0]?.turn }
+                let carried = paintCarriedScroll(node)
                 let reportedScroll: Vec2
                 if el.layout.scrollAxes.isEmpty {
                     reportedScroll = carried
