@@ -522,6 +522,18 @@ private func hashCachedLayerContent(
     return h
 }
 
+/// Graphics code frequently checks one already-tokenized ASCII span at a time. Only
+/// non-ASCII strings need Unicode grapheme segmentation to detect a hard line break.
+private func hasTextLineBreak(_ text: String) -> Bool {
+    text.utf8.withContiguousStorageIfAvailable { bytes in
+        for byte in bytes {
+            if (0x0A...0x0D).contains(byte) { return true }
+            if byte >= 0x80 { return text.contains(where: \.isNewline) }
+        }
+        return false
+    } ?? text.contains(where: \.isNewline)
+}
+
 private func intersectClipRects(_ a: SIMD4<Float>, _ b: SIMD4<Float>) -> SIMD4<Float> {
     SIMD4<Float>(max(a.x, b.x), max(a.y, b.y), min(a.z, b.z), min(a.w, b.w))
 }
@@ -1718,10 +1730,11 @@ extension Runtime {
                     || clip.x > Float(widthPx) + 1 || clip.y > Float(heightPx) + 1))
             let canCullToViewport = parentClip.viewportApplies && !parentInCache && !parentIsRotated
                 && el.rotate == 0 && effBlur == 0 && !el.isolatedLayer && effectSpec == nil
-            // Leaves with ordinary box ink or an icon can reject distant overscan before
+            // Ordinary box ink and icons can reject distant overscan before
             // snapping, resolving materials, or touching an atlas. Keep geometry above.
             var clippedBox = false
-            if canCullToViewport, topology.children(of: node).isEmpty,
+            let isLeaf = topology.children(of: node).isEmpty
+            if canCullToViewport,
                effRect.bottom * scale < max(0, clip.y) - 2 || effRect.top * scale > min(Float(heightPx), clip.w) + 2 {
                 let iconHeight = el.iconPayload.map { max(1, ($0.1 * scale).rounded()) } ?? 0
                 let overhang = max(0, (iconHeight - effRect.height * scale) * 0.5)
@@ -1749,18 +1762,18 @@ extension Runtime {
                 let spans = el.richSpans
                 let band = TextRasterWindow(lowerY: max(0, clip.y) / yScale,
                                             upperY: min(Float(heightPx), clip.w) / yScale)
-                    .expanded(for: el.textStyle, spans: spans, scale: yScale)
+                    .expanded(for: el.textStyle, spans: nil, scale: yScale)
                 let padding = el.layout.padding.top * yScale
                 let outside = effRect.bottom * scale + max(0, padding) < band.lowerY * yScale
                     || effRect.top * scale + min(0, padding) > band.upperY * yScale
                 // A larger span can move the baseline by the font's line-height multiplier.
                 // Use the measured line boxes for those labels.
-                clippedSingleLine = outside && el.plainText?.contains(where: \.isNewline) != true
-                    && spans?.contains(where: { $0.pad > 0 || ($0.size ?? 0) > el.textStyle.size || $0.text.contains(where: \.isNewline) }) != true
+                clippedSingleLine = outside && el.plainText.map(hasTextLineBreak) != true
+                    && spans?.contains(where: { $0.pad > 0 || ($0.size ?? 0) > el.textStyle.size || hasTextLineBreak($0.text) }) != true
             } else {
                 clippedSingleLine = false
             }
-            if clipMisses || clippedSingleLine || clippedBox, topology.children(of: node).isEmpty, !parentInCache, !parentIsRotated,
+            if clipMisses || clippedSingleLine || clippedBox, isLeaf, !parentInCache, !parentIsRotated,
                el.surfacePayload == nil, el.pixelsPayload == nil, el.role != .textInput,
                editLens == nil, !hasActiveTextLinks(el), !el.isSecure,
                el.runtimeExtras[RenderExtrasKey.cacheEnabled] == nil, activeTextFlights.isEmpty {
@@ -1825,6 +1838,31 @@ extension Runtime {
                 ? snapParent : nil
             childSnapByNode[nid] = childSnap
             let rectPx = SIMD4<Float>(paintedEdges.x, paintedEdges.y, max(0, paintedEdges.z - paintedEdges.x), max(0, paintedEdges.w - paintedEdges.y))
+            // A plain container can overflow back into view through one of its children.
+            // Publish its geometry and propagate its snapped coordinates even when its own
+            // box is outside the draw clip. Composited scopes use the full layer setup.
+            if clippedBox, !isLeaf, !hasRaised, !isExiting, !isDissolveScope, !parentIsDissolve,
+               ownOpacity == 1, parentClip.roundedMask == nil, parentClip.fadeWidth == .zero, parentClip.fade == .zero,
+               growthRows.isEmpty, el.layout.scrollAxes.isEmpty, !el.layout.clipOverflow || radiiPt == .zero,
+               el.clipRadius == nil, el.clipCorners == nil, el.clipFade == nil, el.gradient == nil,
+               el.borderWidth == 0, el.borderSides == nil,
+               el.iconPayload == nil, el.imagePayload == nil, el.surfacePayload == nil, el.pixelsPayload == nil,
+               el.liveText == nil, editLens == nil, loop == nil,
+               paintedEdges.w < max(0, clip.y) - 2 || paintedEdges.y > min(Float(heightPx), clip.w) + 2 {
+                var nextClip = parentClip
+                nextClip.rectPt = visibleClipPt
+                if el.layout.clipOverflow {
+                    nextClip.clipPx = intersectClipRects(nextClip.clipPx, SIMD4(rectPx.x, rectPx.y, rectPx.x + rectPx.z, rectPx.y + rectPx.w))
+                    if publishHitGeometry {
+                        hitScopes[myElementIndex].localClip = hitScopes[myElementIndex].localClip.map {
+                            intersectRects($0, effRect)
+                        } ?? effRect
+                    }
+                }
+                return (true, subtreeDynamic, effOpacity, 0, rectPx, radiiPx, effInert, nextClip,
+                        nextChildTransform, false, false, [], false, myElementIndex, 0, 0, 0, 0,
+                        nodeScaleMotion, parentClip.clipPx, .zero, sc.x * scale, 0, nil)
+            }
             let clipSpec = el.runtimeExtras[RenderExtrasKey.clipSpec] as? RenderClipSpec
             let linearGradSpec = el.runtimeExtras[RenderExtrasKey.linearGradient] as? RenderLinearGradientSpec
             let radialGradSpec = el.runtimeExtras[RenderExtrasKey.radialGradient] as? RenderRadialGradientSpec
