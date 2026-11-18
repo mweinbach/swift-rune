@@ -3281,14 +3281,15 @@ public final class Runtime<State> {
         var ancestorInstants: [Bool] = []
         var warnings = renames.map(\.warning)
         var nextMemoPaths: [NodeId: FlatMemoPaths<State>] = [:]
+        // Layout has already collected the current tree's IDs. Even one more node
+        // than the previous viewport would otherwise double the flat and spec buffers.
+        let count = textLayoutCollector.liveIds.count
+        newFlat.reserveCapacity(count)
+        newByPath.reserveCapacity(count)
+        newIndices.reserveCapacity(count)
+        specs.reserveCapacity(count)
+        ancestorInstants.reserveCapacity(count)
         if rowReuseMode == .remount {
-            // A moving window typically replaces a few rows in the same-sized tree.
-            let count = flatNodes.count
-            newFlat.reserveCapacity(count)
-            newByPath.reserveCapacity(count)
-            newIndices.reserveCapacity(count)
-            specs.reserveCapacity(count)
-            ancestorInstants.reserveCapacity(count)
             nextMemoPaths.reserveCapacity(flatMemoPaths.count)
         }
         var flatCaptures: [FlatMemoCapture<State>] = []
