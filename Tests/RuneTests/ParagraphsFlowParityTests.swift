@@ -140,6 +140,28 @@ struct ParagraphsFlowParityTests {
         #expect(underRtl.composed.lineIsRTL == [true, false, false, true, true])
     }
 
+    #if canImport(CoreText) && canImport(CoreGraphics)
+    @Test func forcedWritingDirectionAppliesAcrossHardParagraphBreaks() throws {
+        let system = TextSystem()
+        let sample = "Latin\nאבג\n\n123"
+        for direction in [TextFlow.ltr, .rtl] {
+            let style = TextStyle(size: 15, wrap: .wrap, direction: direction)
+            let box = system.layoutKeyed(text: sample, style: style, maxWidth: 280, pixelScale: 2, emitGlyphs: false)
+            #expect(box.shaped.lineIsRTL == Array(repeating: direction == .rtl, count: 4))
+            let prepared = try #require(box.prepared)
+            for index in 0..<sample.utf16.count {
+                let attribute = try #require(CFAttributedStringGetAttribute(prepared.attrStr, index, kCTParagraphStyleAttributeName, nil))
+                let paragraph = attribute as! CTParagraphStyle
+                var baseDirection = CTWritingDirection.natural
+                let hasDirection = CTParagraphStyleGetValueForSpecifier(paragraph, .baseWritingDirection,
+                    MemoryLayout<CTWritingDirection>.size, &baseDirection)
+                #expect(hasDirection)
+                #expect(baseDirection == (direction == .rtl ? .rightToLeft : .leftToRight))
+            }
+        }
+    }
+    #endif
+
     @Test("one layout of a dirByParagraph text resolves paragraphs as key_paragraphs does")
     func singleLayoutPlaintextParagraphs() throws {
         let ts = TextSystem()

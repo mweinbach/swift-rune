@@ -5242,6 +5242,27 @@ public final class TextSystem: @unchecked Sendable {
         )
     }
 
+    // CoreText paragraph styles are immutable. A single setting is enough for every
+    // paragraph when the author or inherited container supplied the writing direction.
+    private struct DirectionStyle: @unchecked Sendable {
+        let value: CTParagraphStyle
+
+        init(_ direction: CTWritingDirection) {
+            var direction = direction
+            value = withUnsafeBytes(of: &direction) { bytes in
+                var setting = CTParagraphStyleSetting(spec: .baseWritingDirection, valueSize: bytes.count,
+                                                       value: bytes.baseAddress!)
+                return CTParagraphStyleCreate(&setting, 1)
+            }
+        }
+    }
+
+    private static let leftToRightStyle = DirectionStyle(.leftToRight)
+    private static let rightToLeftStyle = DirectionStyle(.rightToLeft)
+    internal static func paragraphStyle(rtl: Bool) -> CTParagraphStyle {
+        rtl ? rightToLeftStyle.value : leftToRightStyle.value
+    }
+
     private func prepareShape(
         authText: String,
         spans: [TextSpan]?,
@@ -5271,36 +5292,27 @@ public final class TextSystem: @unchecked Sendable {
             CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTKernAttributeName, kern)
         }
 
-        // Apply per-paragraph base writing direction natively; tab stops use per-'\t' CTRunDelegate widths below.
-        let shapedNS = shapedText as NSString
-        var paraScanStart = 0
-        var previousParaRTL: Bool? = nil
-        while paraScanStart < fullLen {
-            var paraScanEnd = fullLen
-            for i in paraScanStart..<fullLen where shapedNS.character(at: i) == 0x0A {
-                paraScanEnd = i
-                break
-            }
-            let paraSub = shapedNS.substring(with: NSRange(location: paraScanStart, length: max(0, paraScanEnd - paraScanStart)))
-            let resolvedDir: CTWritingDirection? = Self.paragraphIsRTL(paraSub, style: style, previous: &previousParaRTL)
-                .map { $0 ? .rightToLeft : .leftToRight }
-            if var dirVal = resolvedDir {
-                let pStyle = withUnsafeMutableBytes(of: &dirVal) { dirPtr -> CTParagraphStyle in
-                    let setting = CTParagraphStyleSetting(
-                        spec: .baseWritingDirection,
-                        valueSize: MemoryLayout<CTWritingDirection>.size,
-                        value: dirPtr.baseAddress!
-                    )
-                    return withUnsafePointer(to: setting) { ptr in
-                        CTParagraphStyleCreate(ptr, 1)
-                    }
+        if let direction = style.direction {
+            CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTParagraphStyleAttributeName,
+                                           Self.paragraphStyle(rtl: direction == .rtl))
+        } else {
+            let shapedNS = shapedText as NSString
+            var start = 0
+            var previousRTL: Bool?
+            while start < fullLen {
+                var end = fullLen
+                for i in start..<fullLen where shapedNS.character(at: i) == 0x0A {
+                    end = i
+                    break
                 }
-                let pRangeLen = min(fullLen - paraScanStart, (paraScanEnd - paraScanStart) + (paraScanEnd < fullLen ? 1 : 0))
-                if pRangeLen > 0 {
-                    CFAttributedStringSetAttribute(attrStr, CFRangeMake(paraScanStart, pRangeLen), kCTParagraphStyleAttributeName, pStyle)
+                let paragraph = shapedNS.substring(with: NSRange(location: start, length: end - start))
+                let next = end < fullLen ? end + 1 : fullLen
+                if let rtl = Self.paragraphIsRTL(paragraph, style: style, previous: &previousRTL) {
+                    CFAttributedStringSetAttribute(attrStr, CFRangeMake(start, next - start), kCTParagraphStyleAttributeName,
+                                                   Self.paragraphStyle(rtl: rtl))
                 }
+                start = next
             }
-            paraScanStart = (paraScanEnd < fullLen) ? (paraScanEnd + 1) : fullLen
         }
 
         // Apply per-span font/color/size overrides in shaped UTF-16 coordinates.
@@ -5548,12 +5560,19 @@ public final class TextSystem: @unchecked Sendable {
 
         while u16Start < fullLen {
             var hardEnd = fullLen
-            for i in u16Start..<fullLen where shapedNS.character(at: i) == 0x0A {
-                hardEnd = i
-                break
+            if case .typesetter = prepared.lineSource {
+                for i in u16Start..<fullLen where shapedNS.character(at: i) == 0x0A {
+                    hardEnd = i
+                    break
+                }
             }
-            let paraShapedSub = shapedNS.substring(with: NSRange(location: u16Start, length: max(0, hardEnd - u16Start)))
-            let paraIsRTL: Bool = Self.paragraphIsRTL(paraShapedSub, style: style, previous: &previousLineParaRTL) ?? false
+            let paraIsRTL: Bool
+            if let direction = style.direction {
+                paraIsRTL = direction == .rtl
+            } else {
+                let text = shapedNS.substring(with: NSRange(location: u16Start, length: hardEnd - u16Start))
+                paraIsRTL = Self.paragraphIsRTL(text, style: style, previous: &previousLineParaRTL) ?? false
+            }
             let insets = style.blockInsetsPx(at: paragraph, scale: scale, rtl: paraIsRTL)
             let availableWidthPx = maxWidth.map { max(1, $0 * scale - insets.x - insets.y) }
             let effectiveWrapWidthPx = style.wrap == .wrap ? availableWidthPx.map { CGFloat($0) } : nil

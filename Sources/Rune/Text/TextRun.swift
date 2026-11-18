@@ -144,12 +144,7 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         }
         var previousDirection: Bool?
         if let rtl = TextSystem.paragraphIsRTL(text, style: style, previous: &previousDirection) {
-            var direction: CTWritingDirection = rtl ? .rightToLeft : .leftToRight
-            attrs[kCTParagraphStyleAttributeName] = withUnsafeBytes(of: &direction) { bytes in
-                var setting = CTParagraphStyleSetting(spec: .baseWritingDirection, valueSize: bytes.count,
-                                                      value: bytes.baseAddress!)
-                return CTParagraphStyleCreate(&setting, 1)
-            }
+            attrs[kCTParagraphStyleAttributeName] = TextSystem.paragraphStyle(rtl: rtl)
         }
         let attrStr = CFAttributedStringCreate(kCFAllocatorDefault, text as CFString, attrs as CFDictionary)!
         let ctLine = CTLineCreateWithAttributedString(attrStr)
