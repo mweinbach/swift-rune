@@ -19,7 +19,13 @@ try {
     }
     host.font_url(0, put('../../Sources/Rune/Resources/Fonts/IBMPlexMono-Regular.ttf', 0), 0);
     await runeTextFontsReady(memory);
-    let readCount = 0, cellCount = 0;
+    const registered = [...document.fonts].find(face => face.family === 'IBM Plex Mono');
+    if (registered?.status !== 'loaded') throw Error('Registered fixed-pitch font is unavailable');
+    // The host needs the real face settings before it can share geometry or ink.
+    // WebKit can load the same bytes without exposing variationSettings.
+    const canVerifyFace = Boolean(crypto.subtle && registered.variationSettings === 'normal' &&
+        registered.featureSettings === 'normal' && registered.sizeAdjust === '100%');
+    let readCount = 0, cellCount = 0, warmRuns = 0, nativeRuns = 0;
     const nativeBounds = Range.prototype.getBoundingClientRect;
     Range.prototype.getBoundingClientRect = function () {
         ++readCount;
@@ -44,7 +50,15 @@ try {
             }
             const before = readCount;
             host.cells(id, 8192, spans.length, 1);
-            if (warm && readCount !== before) throw Error('Repeated fixed-pitch positions forced DOM range reads');
+            if (warm) {
+                if (canVerifyFace) {
+                    if (readCount !== before) throw Error('Repeated fixed-pitch positions forced DOM range reads');
+                    ++warmRuns;
+                } else {
+                    if (readCount <= before) throw Error('Unverified font skipped native range measurement');
+                    ++nativeRuns;
+                }
+            }
             for (const [i, [start, end]] of spans.entries()) {
                 const direction = host.cell(id, start, end, 2048, 2052, 1);
                 const expected = [metrics[0], metrics[1], host.caret(id, start), host.caret(id, end)];
@@ -67,11 +81,14 @@ try {
             const width = Math.round(6 * size * 0.6) - left + 1;
             for (const rgb of [0, 0xffffff, 0x3569a0]) {
                 const masks = handles.map(id => {
-                    if (host.has_color(id) !== 0 || host.has_color(id, 1) !== 2) throw Error('Wrong fixed-pitch capabilities');
+                    if (host.has_color(id) !== 0 || host.has_color(id, 1) !== (canVerifyFace ? 2 : 0)) {
+                        throw Error('Wrong color or fixed-pitch capability for the registered face');
+                    }
                     if (!host.mask(id, left, 0, width, height, 4096, rgb)) throw Error('Missing cell crop');
                     return bytes.slice(4096, 4096 + width * height);
                 });
-                if (!masks[0].some(Boolean) || !masks[0].every((v, i) => v === masks[1][i])) {
+                if (masks.some(mask => !mask.some(Boolean))) throw Error('Empty native cell crop');
+                if (canVerifyFace && !masks[0].every((v, i) => v === masks[1][i])) {
                     throw Error('Fixed-pitch cell changed with surrounding text');
                 }
             }
@@ -116,6 +133,6 @@ try {
         document.fonts.add(competing);
         try { compare('123 9!'); } finally { document.fonts.delete(competing); }
     } finally { Range.prototype.getBoundingClientRect = nativeBounds; }
-    result.textContent = JSON.stringify({ passed: true, cells: cellCount });
+    result.textContent = JSON.stringify({ passed: true, cells: cellCount, warmRuns, nativeRuns });
 } catch (error) { result.textContent = JSON.stringify({ passed: false, error: String(error) }); }
 </script>
