@@ -335,9 +335,17 @@ public extension Runtime {
                 if let list = virtualLists[flatNodes[i].path] { virtualAt[i] = .init(list) }
             }
         }
+        // Bind one value receiver for a read-only projection. An editor invokes authored
+        // code and may change the runtime mid-read, so query its live scene at each lookup.
+        let isExiting: (NodeId) -> Bool
+        if layoutObservers.authored.contains(where: { $0.contains(.secureOrEditable) }) {
+            isExiting = { self.scene.isExiting($0) }
+        } else {
+            isExiting = scene.isExiting
+        }
         func projection(_ i: Int) -> AccessibilityTreeEdges.Projection {
             let node = flatNodes[i]
-            if scene.isExiting(node.nodeId) {
+            if isExiting(node.nodeId) {
                 changes += 1
                 return .hidden
             }
@@ -370,7 +378,7 @@ public extension Runtime {
             let match = AccessibilityNameSource.relatedIndex(key, from: idx, parent: { flatNodes[$0].parentIndex },
                                                              children: { edges.children[$0] }, keyAt: { flatNodes[$0].key })
             guard let match, !AccessibilityTreeEdges.hasAncestorOrSelf(match, count: flatNodes.count,
-                parent: { flatNodes[$0].parentIndex }, matching: { scene.isExiting(flatNodes[$0].nodeId) }) else { return nil }
+                parent: { flatNodes[$0].parentIndex }, matching: { isExiting(flatNodes[$0].nodeId) }) else { return nil }
             return match
         }
 

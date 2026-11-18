@@ -95,6 +95,30 @@ struct AccessibilitySnapshotReuseTests {
         #expect(find("source", in: first)?.role == .group)
     }
 
+    @Test func anEditorReadCanChangeThePresenceOfALaterSibling() throws {
+        final class DuringRead { var perform: (() -> Void)? }
+        let callback = DuringRead()
+        let runtime = Runtime(state: TextEdit("draft"), viewport: Vec2(180, 80)) { _, _ in
+            col().key("panel").child(textInput(key: "input", editAccess(get: { edit in
+                let action = callback.perform
+                callback.perform = nil
+                action?()
+                return edit
+            }, set: { state, value in state = value })))
+                .child(text("Leaving").key("later").transition(.opacity))
+        }
+        _ = runtime.renderFrame(at: 0)
+        let before = runtime.accessibilitySnapshot()
+        #expect(before.children.contains { $0.id == "later" })
+        let i = try #require(runtime.flatNodes.firstIndex { $0.key == "later" })
+        let id = runtime.flatNodes[i].nodeId
+        callback.perform = { runtime.scene.remove(id) }
+        let after = runtime.accessibilitySnapshot()
+        #expect(runtime.scene.isExiting(id))
+        #expect(!after.children.contains { $0.id == "later" })
+        #expect(before.children.contains { $0.id == "later" })
+    }
+
     @Test func editValuesStayLiveBetweenAccessibilityReads() throws {
         struct Form { var draft = TextEdit("first") }
         let rt = Runtime(state: Form(), viewport: Vec2(200, 80), pixelScale: 1) { _, _ in
