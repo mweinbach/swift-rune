@@ -1328,7 +1328,6 @@ final class ElColdData<State> {
             yield &dict
         }
     }
-    var keyLocation: String? = nil
 
     func clone() -> ElColdData<State> {
         let c = ElColdData<State>()
@@ -1498,7 +1497,6 @@ final class ElColdData<State> {
         c.kitFilterKeys = kitFilterKeys
         c._runtimeExtras = _runtimeExtras
         c.memoLayoutChildren = memoLayoutChildren
-        c.keyLocation = keyLocation
     }
 }
 
@@ -1508,6 +1506,13 @@ final class ElHandlersBox<State> {
     init(_ value: ElementHandlers<State>) {
         self.value = value
     }
+}
+
+// A keyed element can record its author without allocating cold state for diagnostics.
+@usableFromInline
+enum ElementKeyOrigin {
+    case text(String)
+    case source(file: String, line: UInt, column: UInt)
 }
 
 /// Declarative UI element returned from pure view functions `(State, inout Cx<State>) -> El<State>`.
@@ -1835,9 +1840,17 @@ public struct El<State> {
             yield &box.runtimeExtras
         }
     }
+    private var keyOrigin: ElementKeyOrigin?
+
     public var keyLocation: String {
-        get { _cold?.keyLocation ?? "" }
-        set { ensureCold().keyLocation = newValue.isEmpty ? nil : newValue }
+        get {
+            switch keyOrigin {
+            case let .source(file, line, column): "\(file):\(line):\(column)"
+            case let .text(location): location
+            case nil: ""
+            }
+        }
+        set { keyOrigin = newValue.isEmpty ? nil : .text(newValue) }
     }
 
     public init(direction: FlexDirection = .row) {
@@ -1855,7 +1868,7 @@ public struct El<State> {
         let encoded = VirtualRowKeyEncoding.encodedKey(id, byteExact: byteExact)
         var copy = self
         copy.assignStoredKey(encoded ?? id, authored: encoded == nil ? nil : id)
-        copy.keyLocation = "\(file):\(line):\(column)"
+        copy.keyOrigin = .source(file: file, line: line, column: column)
         return copy
     }
 

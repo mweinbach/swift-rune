@@ -4,6 +4,17 @@ import Testing
 @Suite("El Layout and Direction Closeout Parity")
 struct ElLayoutAndDirectionCloseoutTests {
 
+    @Test func keyedElementsPreserveTheirOriginalSourceLocationWhenCopied() {
+        let source = El<Int>().key("row", file: "ui:🧪.swift", line: .max, column: 0)
+        #expect(source.keyLocation == "ui:🧪.swift:\(UInt.max):0")
+        var edited = source
+        edited.keyLocation = "generated"
+        #expect(edited.keyLocation == "generated")
+        edited.keyLocation = ""
+        #expect(edited.keyLocation.isEmpty)
+        #expect(source.keyLocation == "ui:🧪.swift:\(UInt.max):0")
+    }
+
     @Test("Copied grid styles retain independent placement and compare by value")
     func gridStyleCopies() {
         func style() -> LayoutStyle {
