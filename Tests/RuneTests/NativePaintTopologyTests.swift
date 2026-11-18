@@ -2,6 +2,23 @@ import RuneMotion
 import Testing
 @testable import Rune
 
+@Test func sortedPaintIncludesTheExitingChildAtItsOldLayer() throws {
+    let rt = Runtime(state: true, viewport: Vec2(100, 100)) { keep, _ -> El<Bool> in
+        var root: El<Bool> = col().key("root")
+        root = root.child(el().key("front").size(10, 10).z(4))
+        if keep { root = root.child(el().key("leaving").size(10, 10).z(2).transition(.opacity)) }
+        return root.child(el().key("back").size(10, 10).z(-1))
+    }
+    _ = rt.renderFrame(at: 0)
+    rt.update(at: 0.03) { keep, _ in keep = false }
+    _ = rt.renderFrame(at: 0.03)
+    let frame = try #require(rt.lastFrameOutput)
+    let root = try #require(rt.flatNodes.first { $0.key == "root" })
+    let tree = rt.prepareNativePaintTopology(frame, byID: frame.paintNodesById, holds: false)
+    let keys = tree.children(of: root).map { $0 >= 0 ? rt.flatNodes[$0].key : tree.exits[~$0].key }
+    #expect(keys == ["back", "leaving", "front"])
+}
+
 @Test func syntheticPaintUsesKeyedPosesAfterAMountedFrame() throws {
     let rt = Runtime<Int>(state: 0, viewport: Vec2(100, 100)) { _, _ in
         col().key("root").child(el().key("leaf").size(10, 20))

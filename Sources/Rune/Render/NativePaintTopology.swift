@@ -134,7 +134,9 @@ extension Runtime {
 
         var tree = NativePaintTopology()
         tree.hasHolds = holds
-        tree.hasSticky = holds || flatNodes.contains(where: \.isSticky)
+        tree.hasSticky = holds || flatNodes.withUnsafeBufferPointer { nodes in
+            nodes.indices.contains { nodes[$0].paintTraits.contains(.sticky) }
+        }
         tree.order.reserveCapacity(frame.nodes.count)
         tree.identity.reserveCapacity(frame.nodes.count)
         var parentIDs: [NodeId?] = []
@@ -166,13 +168,15 @@ extension Runtime {
 
         // A flat adjacency buffer avoids allocating a separate array for every row and cell.
         // Links use the presented parent: an exiting or reparented node can become a scene root.
+        // Sort compact presentation indices before converting them to mounted or exit slots.
+        let needsSort = tree.hasSticky || hasZOrder
         let slotCount = flatNodes.count + tree.exits.count
         var offsets = [Int](repeating: 0, count: slotCount + 1)
         var parents = [Int](repeating: -1, count: tree.order.count)
         for index in tree.order.indices {
             let slot = tree.order[index]
             guard let parent = parentIDs[index], byID[parent] != nil else {
-                tree.roots.append(slot)
+                tree.roots.append(needsSort ? index : slot)
                 continue
             }
             let owner: Int?
@@ -191,20 +195,21 @@ extension Runtime {
         tree.childSlots = [Int](repeating: 0, count: offsets[slotCount])
         for index in tree.order.indices where parents[index] >= 0 {
             let parent = parents[index]
-            tree.childSlots[offsets[parent]] = tree.order[index]
+            tree.childSlots[offsets[parent]] = needsSort ? index : tree.order[index]
             offsets[parent] += 1
         }
 
-        if tree.hasSticky || hasZOrder {
-            let exits = tree.exits
+        if needsSort {
+            let identities = tree.identity
             let sticky = tree.hasSticky
-            func order(_ slot: Int) -> (Int, Int) {
-                let n = slot >= 0 ? flatNodes[slot] : exits[~slot]
-                if !sticky { return (n.zOrder, 0) }
-                let rank = n.paintTraits.contains(.anchoredOrModal) ? 2 : (n.isSticky ? 1 : 0)
-                return (n.zOrder, rank)
+            func rank(_ traits: NativePaintTraits) -> Int {
+                traits.contains(.anchoredOrModal) ? 2 : (traits.contains(.sticky) ? 1 : 0)
             }
-            func before(_ a: Int, _ b: Int) -> Bool { order(a) < order(b) }
+            func before(_ a: Int, _ b: Int) -> Bool {
+                let lhs = identities[a], rhs = identities[b]
+                if lhs.zOrder != rhs.zOrder { return lhs.zOrder < rhs.zOrder }
+                return sticky && rank(lhs.traits) < rank(rhs.traits)
+            }
             tree.roots.sort(by: before)
             for parent in 0..<slotCount {
                 let start = tree.childOffsets[parent]
@@ -215,6 +220,8 @@ extension Runtime {
                     tree.childSlots[start..<end].sort(by: before)
                 }
             }
+            for i in tree.roots.indices { tree.roots[i] = tree.order[tree.roots[i]] }
+            for i in tree.childSlots.indices { tree.childSlots[i] = tree.order[tree.childSlots[i]] }
         }
 
         // Exiting snapshots and synthetic partial frames follow the scene's current ancestry.
