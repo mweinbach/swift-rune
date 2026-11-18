@@ -2431,6 +2431,9 @@ public final class Runtime<State> {
         _ = asInputObserver { refreshHoverAndSyncTracks(at: animNow, wallNow: now, cut: false) }
         endUnseenExits(on: &scene)
         placeTailHandoffFrames()
+        // Keep the old pose index for launch and join comparisons while letting the
+        // scene refill its changed-pose buffer in place.
+        lastFrameOutput?.changed = []
         var frameOut = scene.frameForRendering(at: animNow)
         presentLaunchedRowHeights(in: &frameOut)
         slice2State.frameGrowthSnapOffsetsY.removeAll(keepingCapacity: true)
