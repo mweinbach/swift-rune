@@ -105,6 +105,49 @@ import Testing
     #expect(changed.hasGroupOpacity)
 }
 
+@Test func alternatingVirtualWindowsReuseTheirVerifiedPaintOrder() throws {
+    final class Owner {}
+    let owners = (0..<200).map { _ in Owner() }
+    let rt = Runtime<Int>(state: 0, viewport: Vec2(140, 100), pixelScale: 1) { _, _ in
+        let items: El<Int> = col().key("items").wFull().virtualRows(
+            count: owners.count, estimatedRowHeight: 20, key: { _, i in "row-\(i)" },
+            buildContent: { _, i in
+                let row: El<Int> = memo("contents-\(i)", deps: 0) {
+                    var row: El<Int> = col().wFull().h(20).child(el().key("line").size(12, 6))
+                    if i.isMultiple(of: 4) { row = row.child(el().key("extra").size(10, 4)) }
+                    return row
+                }
+                return VirtualRowContent(memoized: row, owner: owners[i])
+            })
+        return col().key("scroll").sizeFull().scrollY().child(items)
+    }
+    _ = rt.renderFrame(at: 0)
+    var previous = try #require(rt.nativePaintTopology)
+    var alternate = previous
+    var reused = 0
+    for i in 1...24 {
+        let now = Double(i) / 60
+        rt.wheel(WheelEvent(dx: 0, dy: -40), at: Vec2(75, 45), now: now)
+        _ = rt.renderFrame(at: now)
+        let current = try #require(rt.nativePaintTopology)
+        if current.order.count != previous.order.count {
+            let poses = try #require(rt.lastFrameOutput?.nodes)
+            if alternate.matchesRemount(poses, mounted: rt.flatNodes, holds: current.hasHolds) {
+                let shared = alternate.childSlots.withUnsafeBufferPointer { earlier in
+                    current.childSlots.withUnsafeBufferPointer { earlier.baseAddress == $0.baseAddress }
+                }
+                #expect(shared)
+                #expect(current.order == alternate.order)
+                #expect(current.roots == alternate.roots)
+                reused += 1
+            }
+            alternate = previous
+        }
+        previous = current
+    }
+    #expect(reused > 0)
+}
+
 @Test func nativePaintTopologyFollowsThePresentedOrderAndParentBetweenCommits() throws {
     let rt = Runtime<Int>(state: 0, viewport: Vec2(100, 100)) { _, _ in
         col().key("root").child(el().key("one").size(10, 10)).child(el().key("two").size(20, 20))

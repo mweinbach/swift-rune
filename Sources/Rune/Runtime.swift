@@ -1184,6 +1184,7 @@ public final class Runtime<State> {
 
     internal var flatNodes: [FlatNode] = []
     internal var nativePaintTopology: NativePaintTopology?
+    private var alternatePaintTopology: NativePaintTopology?
     internal var paintHitScopes: [RenderHitScope] = []
     internal var paintGlyphFixups: [GlyphUVFixup] = []
     internal var lastPaintInstanceCount = 0
@@ -4968,6 +4969,18 @@ public final class Runtime<State> {
         nodeIndexById = pass.indexById
         let previousByPath = nodeByPath
         hoverOrderMatchesPaint = sameHoverOrder
+        // An indexed window can alternate between two mounted sizes as rows enter and
+        // leave. The renderer still verifies every presented edge and paint modifier.
+        if pass.reusedFlatRanges.isEmpty {
+            alternatePaintTopology = nil
+        } else if let current = nativePaintTopology, !current.parentSlots.isEmpty,
+                  current.parentSlots.count != pass.nodes.count {
+            let alternate = alternatePaintTopology
+            alternatePaintTopology = current
+            if let alternate, alternate.parentSlots.count == pass.nodes.count {
+                nativePaintTopology = alternate
+            }
+        }
         nativePaintTopology?.currentCommit = false
         layoutObservers = observers
         nodeByPath = pass.byPath

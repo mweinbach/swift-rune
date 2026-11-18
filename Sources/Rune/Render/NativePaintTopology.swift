@@ -110,14 +110,20 @@ extension Runtime {
         func matchesRemount(_ presented: [Presented], mounted: [FlatNode], holds: Bool) -> Bool {
             guard hasHolds == holds, !parentSlots.isEmpty, parentSlots.count == presented.count,
                   parentSlots.count == mounted.count else { return false }
-            for i in parentSlots.indices {
-                let slot = order[i], parent = parentSlots[i]
-                guard presented[i].id == mounted[slot].nodeId,
-                      presented[i].parent == (parent < 0 ? nil : mounted[parent].nodeId),
-                      mounted[slot].zOrder == identity[i].zOrder,
-                      mounted[slot].paintTraits.hasSameTopology(as: identity[i].traits) else { return false }
+            return mounted.withUnsafeBufferPointer { nodes in
+                identity.withUnsafeBufferPointer { prior in
+                    presented.withUnsafeBufferPointer { poses in
+                        for i in parentSlots.indices {
+                            let slot = order[i], parent = parentSlots[i]
+                            guard poses[i].id == nodes[slot].nodeId,
+                                  poses[i].parent == (parent < 0 ? nil : nodes[parent].nodeId),
+                                  nodes[slot].zOrder == prior[i].zOrder,
+                                  nodes[slot].paintTraits.hasSameTopology(as: prior[i].traits) else { return false }
+                        }
+                        return true
+                    }
+                }
             }
-            return true
         }
 
         func matches(_ presented: [Presented], holds: Bool) -> Bool {
