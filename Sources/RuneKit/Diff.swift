@@ -1721,8 +1721,6 @@ private final class DiffHighlightCache: @unchecked Sendable {
     }
 }
 
-// A structural edit replaces the cache on that DiffState value. Unedited copies, scrolls,
-// selections, and alternate-mode views can share their immutable row indexes.
 private struct DiffRowStyle: Equatable {
     let kit: Kit
     let look: DiffLook
@@ -1742,6 +1740,8 @@ private struct DiffRowAppearance: Equatable {
     let count: Int
 }
 
+// A structural edit replaces the cache on that DiffState value. Unedited copies, scrolls,
+// selections, and alternate-mode views can share their immutable row indexes.
 private final class DiffRowCache: @unchecked Sendable {
     private let lock = NSLock()
     private var byMode: [DiffMode: DiffRowIndex] = [:]
@@ -2834,8 +2834,19 @@ public struct DiffView<State>: Sendable {
     // The visual subtree may outlive this invocation of the host's view builder.
     // Resolve the lens and actions from the current invocation when an event actually fires.
     private final class RowDefinition: Sendable {
-        let view: DiffView
-        init(_ view: DiffView) { self.view = view }
+        let get: @Sendable (State) -> DiffState
+        let set: @Sendable (inout State, DiffState) -> Void
+        let lineClick: (@Sendable (inout State, DiffLineRef, inout Tx) -> Void)?
+        let select: (@Sendable (inout State, DiffLineRange?, inout Tx) -> Void)?
+        let comment: (@Sendable (inout State, DiffLineRange, inout Tx) -> Void)?
+
+        init(_ view: DiffView) {
+            get = view.get
+            set = view.set
+            lineClick = view.onLineClickHandler
+            select = view.onSelectHandler
+            comment = view.onCommentHandler
+        }
     }
 
     private final class RowActions: @unchecked Sendable {
@@ -2850,15 +2861,15 @@ public struct DiffView<State>: Sendable {
     }
 
     private func forwardingRowActions(_ actions: RowActions) -> Self {
-        var result = Self(key: key, kit: kit, get: { actions.current.view.get($0) },
-                          set: { actions.current.view.set(&$0, $1) })
+        var result = Self(key: key, kit: kit, get: { actions.current.get($0) },
+                          set: { actions.current.set(&$0, $1) })
         result.look = look
         result.forcedMode = forcedMode
         if hasCustomHighlighter { result.highlighter = highlighter }
-        result.onLineClickHandler = { actions.current.view.onLineClickHandler?(&$0, $1, &$2) }
-        result.onSelectHandler = { actions.current.view.onSelectHandler?(&$0, $1, &$2) }
+        result.onLineClickHandler = { actions.current.lineClick?(&$0, $1, &$2) }
+        result.onSelectHandler = { actions.current.select?(&$0, $1, &$2) }
         if onCommentHandler != nil {
-            result.onCommentHandler = { actions.current.view.onCommentHandler?(&$0, $1, &$2) }
+            result.onCommentHandler = { actions.current.comment?(&$0, $1, &$2) }
         }
         return result
     }
@@ -2929,7 +2940,7 @@ public struct DiffView<State>: Sendable {
         // app-facing key for its header, code row, gap, or custom annotation.
         list = list.virtualRows(count: entries.count, estimatedRowHeight: lineH, key: { _, i in
             "\(key)-\(entries[i].key)"
-        }, build: { current, i in
+        }, buildContent: { current, i in
             let entry = entries[i]
             let file = entry.file
             let diff = st.files[file]
@@ -2971,18 +2982,18 @@ public struct DiffView<State>: Sendable {
                     }
                     return shell.child(row)
                 }
-                guard case .unified(let line, _, _) = model else { return buildLine(self) }
+                guard case .unified(let line, _, _) = model else { return VirtualRowContent(buildLine(self)) }
                 let copy = line.kind == .context || st.copySide == (line.kind == .deletion ? .old : .new)
                 let appearance = DiffRowAppearance(styleVersion: styleVersion, indexVersion: index.version,
                                                    selected: st.rowSelected(local, file: file, side: nil),
                                                    position: i, count: entries.count)
-                return memo("\(key)-\(entry.key)", deps: appearance, variant: line.kind == .context ? nil : copy,
+                return memoizedVirtualRow("\(key)-\(entry.key)", deps: appearance, variant: line.kind == .context ? nil : copy,
                             makeContext: { RowActions(rowDefinition) },
                             updateContext: { $0.update(rowDefinition) }) { actions in
                     buildLine(forwardingRowActions(actions))
                 }
             }
-            return shell.child(row.positionInSet(i + 1, size: entries.count))
+            return VirtualRowContent(shell.child(row.positionInSet(i + 1, size: entries.count)))
         }).virtualRowsVersion(index.version)
         if hostState != nil {
             list = list.onVisibleRows { [get, set, onVisibleFileHandler] host, visible in

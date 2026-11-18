@@ -739,7 +739,7 @@ private final class MemoEventInputs<Inputs: Equatable, Context: AnyObject>: Equa
 /// Retains the subtree's event context alongside its memo entry. Updating the author-supplied
 /// callbacks on a cache hit preserves fresh closures without invalidating the layout subtree.
 /// A boolean variant can retain both visited alternatives until the inputs change or the owner unmounts.
-package func memo<State, Inputs: Equatable, Context: AnyObject>(
+package func memoizedVirtualRow<State, Inputs: Equatable, Context: AnyObject>(
     _ id: String,
     deps: Inputs,
     variant: Bool? = nil,
@@ -749,8 +749,8 @@ package func memo<State, Inputs: Equatable, Context: AnyObject>(
     line: UInt = #line,
     column: UInt = #column,
     build: (Context) -> El<State>
-) -> El<State> {
-    guard let scope = MemoScope.current else { return build(makeContext()) }
+) -> VirtualRowContent<State> {
+    guard let scope = MemoScope.current else { return VirtualRowContent(build(makeContext())) }
     let cache = scope.cache
     let inputs = MemoEventInputs<Inputs, Context>(deps)
     let slot: String
@@ -761,15 +761,17 @@ package func memo<State, Inputs: Equatable, Context: AnyObject>(
     } else {
         slot = id
     }
+    var owner = inputs
     let element = cache.getOrBuildMemo(rawId: slot, deps: inputs, callerLocation: "\(file):\(line):\(column)",
                                        site: "\(file):\(line)", onReuse: { cached in
+        owner = cached
         if let context = cached.context { updateContext(context) }
     }) {
         let context = makeContext()
         inputs.context = context
         return build(context)
     }.element
-    return variant == nil ? element : element.key(id)
+    return VirtualRowContent(memoized: variant == nil ? element : element.key(id), owner: owner)
 }
 
 /// Unlabelled `memo` convenience matching upstream `rune::memo("id", deps) { ... }`.
