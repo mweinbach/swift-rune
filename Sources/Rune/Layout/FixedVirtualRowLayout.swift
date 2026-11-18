@@ -65,7 +65,7 @@ extension Runtime {
         let source: El<State>
         let listIndices: [Int]
         let groups: [(position: Int, saved: [LayoutEngine.ResultNode])]
-        let boxes: [NodeId: RetainedLayoutCoordinator.TextLayoutRecord]
+        var boxes: [NodeId: RetainedLayoutCoordinator.TextLayoutRecord]
         let width: Float
         let additionalNodeCount: Int
 

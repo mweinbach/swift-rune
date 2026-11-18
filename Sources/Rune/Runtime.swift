@@ -3285,16 +3285,11 @@ public final class Runtime<State> {
                                      additionalNodeCount: retainedNodeCount - groups.count)
     }
 
-    private func releaseKeptLayoutsBeforeCommit(liveIds: Set<NodeId>) {
+    private func releaseKeptLayoutsBeforeCommit(isLive: (NodeId) -> Bool) {
         if prevNodeTextLayoutsForCommit == nil {
-            var prevKeys: [NodeId: (shapeKey: TextShapeKey, isInput: Bool)] = [:]
-            prevKeys.reserveCapacity(nodeTextLayouts.count)
-            for (nid, rec) in nodeTextLayouts {
-                prevKeys[nid] = (rec.box.shapeKey, rec.isInput)
-            }
-            prevNodeTextLayoutsForCommit = prevKeys
+            prevNodeTextLayoutsForCommit = nodeTextLayouts.mapValues { ($0.box.shapeKey, $0.isInput) }
         }
-        for (nid, rec) in nodeTextLayouts where !liveIds.contains(nid) {
+        for (nid, rec) in nodeTextLayouts where !isLive(nid) {
             if exitingTextLayouts[nid] == nil {
                 exitingTextLayouts[nid] = rec
             }
@@ -3418,7 +3413,7 @@ public final class Runtime<State> {
                 // Remeasurements run after the first solve releases the prior text records.
                 if expandedContextOverride == nil, !cut, !activeResizeSnap, (rowReuseMode == .remount || (mayReuseFullLayout && !hasGrowth && !mutableMeasurements)),
                    prevNodeTextLayoutsForCommit == nil,
-                   let splice = fixedVirtualRowLayout(in: layoutRoot, expansion: virtualExpansion, rebuilding: rowReuseMode != .remount) {
+                   var splice = fixedVirtualRowLayout(in: layoutRoot, expansion: virtualExpansion, rebuilding: rowReuseMode != .remount) {
                     var result = retainedLayout.compute(root: splice.source, state: state, viewport: viewport,
                         pixelScale: pixelScale, textSystem: textSystem, fitHeight: fitHeight, textLayouts: textLayoutCollector,
                         virtualRows: virtualExpansion.builtVirtualRows)
@@ -3426,8 +3421,15 @@ public final class Runtime<State> {
                         restoredNodeCount = splice.additionalNodeCount
                         // Publish the same live-ID set as an ordinary solve only after
                         // validation. A fallback still owns every previous/exiting text box.
-                        releaseKeptLayoutsBeforeCommit(liveIds: textLayoutCollector.liveIds.union(splice.boxes.keys))
-                        textLayoutCollector.map.merge(splice.boxes) { current, _ in current }
+                        releaseKeptLayoutsBeforeCommit { splice.boxes.keys.contains($0) || textLayoutCollector.liveIds.contains($0) }
+                        // Most text belongs to surviving rows. Grow the larger table while
+                        // keeping the compact solver's measurement when both visited a node.
+                        if splice.boxes.count > textLayoutCollector.map.count {
+                            swap(&splice.boxes, &textLayoutCollector.map)
+                            textLayoutCollector.map.merge(splice.boxes) { _, measured in measured }
+                        } else {
+                            textLayoutCollector.map.merge(splice.boxes) { measured, _ in measured }
+                        }
                         return result
                     }
                     #if DEBUG
@@ -3445,7 +3447,7 @@ public final class Runtime<State> {
                     fitHeight: fitHeight,
                     textLayouts: textLayoutCollector,
                     virtualRows: expandedContextOverride == nil ? virtualExpansion.builtVirtualRows : [:],
-                    onLiveIdsReady: { [weak self] ids in self?.releaseKeptLayoutsBeforeCommit(liveIds: ids) }
+                    onLiveIdsReady: { [weak self] ids in self?.releaseKeptLayoutsBeforeCommit(isLive: ids.contains) }
                 )
             }
             let needsRetry = measureVirtualsFromSolved(
