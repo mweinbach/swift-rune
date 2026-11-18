@@ -103,8 +103,8 @@ internal struct ElResolvedText {
 
     /// Reuse a mounted label's break or painted masks only when its authored UTF-8 offsets,
     /// dimensions and raster environment match the current paint.
-    func retainedGlyphs(in box: TextLayoutBox, using textSystem: TextSystem,
-                        maxWidth: Float?, pixelScale: Float, window: TextRasterWindow) -> ShapedText? {
+    func retainedGlyphLayout(in box: TextLayoutBox, using textSystem: TextSystem,
+                        maxWidth: Float?, pixelScale: Float, window: TextRasterWindow) -> TextLayoutBox? {
         guard box.rasterWindow == nil, !isSecure, advanceRun == nil, !truncateFade,
               style.maxLines == 0, style.wrap != .ellipsis, box.paragraphs == nil,
               box.shaped.lineCount <= 1 || (window.lowerY <= 0 && window.upperY >= box.shaped.size.y),
@@ -121,7 +121,7 @@ internal struct ElResolvedText {
         #else
         guard textSystem.glyphAtlas.retainPages(box.desktopPages, since: box.desktopAtlasResets) else { return nil }
         #endif
-        return box.shaped
+        return box
     }
 
     func shape(
@@ -455,8 +455,7 @@ internal enum ElDisplayResolver {
             style.align = .leading
         }
 
-        let authoredFromSpans = el.richSpans?.map(\.text).joined()
-        let authored = rawText ?? authoredFromSpans ?? ""
+        let authored = rawText ?? el.richSpans?.map(\.text).joined() ?? ""
         let isHiddenSecure = isSecure && !el.isRevealed && !authored.isEmpty
         let caseMode: TextCase? = isHiddenSecure ? nil : el.textCaseValue
 
@@ -465,7 +464,7 @@ internal enum ElDisplayResolver {
         let resolvedSpans: [TextSpan]?
         if let rawSpans = el.richSpans, !rawSpans.isEmpty, !isHiddenSecure {
             if let caseMode {
-                let joined = authoredFromSpans ?? authored
+                let joined = rawText == nil ? authored : rawSpans.map(\.text).joined()
                 let map = TextCaseMapping(source: joined, textCase: caseMode)
                 caseMap = map
                 displayedText = map.displayed

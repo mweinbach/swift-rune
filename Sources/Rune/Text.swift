@@ -4458,10 +4458,10 @@ public final class TextSystem: @unchecked Sendable {
     }
 
     /// The caller checked this mounted label's layout and raster parameters before asking for its masks.
-    internal func glyphsForCommittedLabel(_ box: TextLayoutBox) -> ShapedText {
+    internal func glyphsForCommittedLabel(_ box: TextLayoutBox) -> TextLayoutBox {
         layoutKeyed(retaining: box.shapeKey, text: box.authText, spans: box.spans, pills: box.pills,
                     style: box.style, maxWidth: box.maxWidth, pixelScale: box.pixelScale, emitGlyphs: true,
-                    pretty: box.shapeKey.pretty).shaped
+                    pretty: box.shapeKey.pretty)
     }
 
     #if canImport(CoreText) && canImport(CoreGraphics)

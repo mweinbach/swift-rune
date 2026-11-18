@@ -9,6 +9,52 @@ struct PreparedTextCacheTests {
                            pixelScale: 1, emitGlyphs: false)
     }
 
+    @Test("Surviving virtual labels replay their masks across remounts with fresh-frame output")
+    func survivingVirtualLabelsKeepTheirDraws() {
+        func app() -> Runtime<Int> {
+            let runtime = Runtime(state: 0, viewport: Vec2(360, 220), pixelScale: 1) { version, _ in
+                col().key("scroll").sizeFull().scrollY().child(
+                    col().key("items").wFull().virtualRows(1_000, 20, key: { _, i in "r\(i)" }) { _, i in
+                        rich([TextSpan("value \(i) ", color: .white), TextSpan("v\(version)")])
+                            .size(300, 20).pl(8).noWrap().selectable()
+                    }
+                )
+            }
+            runtime.textSystem.smoothing = .off
+            return runtime
+        }
+        let retained = app(), fresh = app()
+        var reusedAcrossRemount = false
+        for step in 0..<30 {
+            let t = Double(step) / 60
+            if step > 0 {
+                for runtime in [retained, fresh] {
+                    runtime.wheel(WheelEvent(dy: -60), at: Vec2(50, 100), now: t)
+                }
+            }
+            if step == 15 {
+                for runtime in [retained, fresh] {
+                    runtime.update(at: t) { version, tx in version += 1; tx.instant() }
+                }
+            }
+            let prior = retained.labelDraws
+            let commits = retained.viewCommitCount, builds = retained.viewCallCount
+            fresh.labelDraws.removeAll()
+            let a = retained.renderFrame(at: t), b = fresh.renderFrame(at: t)
+            #expect(a.instances == b.instances)
+            #expect(a.marks == b.marks)
+            if retained.viewCommitCount > commits, retained.viewCallCount == builds {
+                for (id, next) in retained.labelDraws {
+                    guard let previous = prior[id] else { continue }
+                    reusedAcrossRemount = reusedAcrossRemount || previous.draws.withUnsafeBufferPointer { lhs in
+                        next.draws.withUnsafeBufferPointer { rhs in lhs.baseAddress == rhs.baseAddress }
+                    }
+                }
+            }
+        }
+        #expect(reusedAcrossRemount)
+    }
+
     @Test func changingRichKeyAttributesPreservesDictionaryLookup() {
         let style = TextStyle(size: 17)
         let shape = TextShapeKey(authText: "mix", spans: nil, pills: [], style: style,
@@ -31,16 +77,16 @@ struct PreparedTextCacheTests {
         let original = ElDisplayResolver.resolveText(el: label, rawText: value, isSecure: false)
         let measured = system.layoutKeyed(text: value, style: original.style, maxWidth: nil, pixelScale: 2, emitGlyphs: false)
         let window = TextRasterWindow(lowerY: -1, upperY: 100)
-        let promoted = original.retainedGlyphs(in: measured, using: system, maxWidth: nil, pixelScale: 2, window: window)
+        let promoted = original.retainedGlyphLayout(in: measured, using: system, maxWidth: nil, pixelScale: 2, window: window)
         let box = system.layoutKeyed(text: value, style: original.style, maxWidth: nil, pixelScale: 2, emitGlyphs: true)
-        #expect(promoted?.glyphs == box.shaped.glyphs)
+        #expect(promoted === box)
         #expect(!measured.hasGlyphs)
-        #expect(original.retainedGlyphs(in: box, using: system, maxWidth: nil, pixelScale: 2, window: window) != nil)
-        #expect(original.retainedGlyphs(in: box, using: system, maxWidth: nil, pixelScale: 1, window: window) == nil)
+        #expect(original.retainedGlyphLayout(in: box, using: system, maxWidth: nil, pixelScale: 2, window: window) != nil)
+        #expect(original.retainedGlyphLayout(in: box, using: system, maxWidth: nil, pixelScale: 1, window: window) == nil)
         let alternate = ElDisplayResolver.resolveText(el: label, rawText: "cafe\u{301}", isSecure: false)
-        #expect(alternate.retainedGlyphs(in: box, using: system, maxWidth: nil, pixelScale: 2, window: window) == nil)
+        #expect(alternate.retainedGlyphLayout(in: box, using: system, maxWidth: nil, pixelScale: 2, window: window) == nil)
         _ = system.setLanguage(system.language == "ja" ? "ar" : "ja")
-        #expect(original.retainedGlyphs(in: box, using: system, maxWidth: nil, pixelScale: 2, window: window) == nil)
+        #expect(original.retainedGlyphLayout(in: box, using: system, maxWidth: nil, pixelScale: 2, window: window) == nil)
     }
 
     #if canImport(CoreText) && canImport(CoreGraphics)

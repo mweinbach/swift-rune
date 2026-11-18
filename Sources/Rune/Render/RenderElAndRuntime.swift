@@ -3181,9 +3181,10 @@ extension Runtime {
                 let window = rasterWindow(clip: activeClip, originY: restY)
                 var shaped = GlyphAtlas.withBaseInk(defaultTextColor, mode: inkMode) {
                     if glide == .zero, !isExiting, let window, let measured = nodeTextLayouts[nid], !measured.isInput,
-                       let kept = resolvedText.retainedGlyphs(in: measured.box, using: textSystem, maxWidth: wrapWidth,
-                                                              pixelScale: shapeScale, window: window) {
-                        return kept
+                       let kept = resolvedText.retainedGlyphLayout(in: measured.box, using: textSystem, maxWidth: wrapWidth,
+                                                                   pixelScale: shapeScale, window: window) {
+                        if kept !== measured.box { nodeTextLayouts[nid]?.box = kept }
+                        return kept.shaped
                     }
                     return resolvedText.shape(using: textSystem, maxWidth: wrapWidth, pixelScale: shapeScale,
                                               emitGlyphs: true, glidePx: glide, rasterWindow: window)

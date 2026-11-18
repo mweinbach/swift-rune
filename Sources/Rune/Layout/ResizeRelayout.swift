@@ -610,6 +610,9 @@ extension Runtime {
         cached.virtualRowCache = pass.virtualExpansion.builtVirtualRows
         pass.reads = cached.reads
         pass.isVirtualRemount = true
+        // A remount keeps its surviving label layouts. Their glyph draws independently check
+        // shape and pen identity, atlas pages, ink, placement, and the current visible bounds.
+        if labelDrawCommit == viewCommitCount - 1 { labelDrawCommit = viewCommitCount }
         return pass
     }
 }
