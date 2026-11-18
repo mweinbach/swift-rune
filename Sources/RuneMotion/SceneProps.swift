@@ -108,7 +108,7 @@ extension Scene {
 
     internal func hasTrack<T: Animatable>(_ i: Int, _ prop: Prop<T>) -> Bool {
         let pid = Int(prop.id.rawValue)
-        if pid < nodes[i].tracks.count, nodes[i].tracks[pid] != nil {
+        if nodes[i].tracks[pid] != nil {
             return true
         }
         return store.has(nodes[i].id, prop)
@@ -165,7 +165,7 @@ extension Scene {
 
     internal func currentValue<T: Animatable>(_ i: Int, _ prop: Prop<T>) -> T? {
         let pid = Int(prop.id.rawValue)
-        guard pid < nodes[i].tracks.count, let tid = nodes[i].tracks[pid] else { return nil }
+        guard let tid = nodes[i].tracks[pid] else { return nil }
         guard let (x, _) = sample(tid) else { return nil }
         var lanes = MotionLanes.zero
         for k in 0..<T.laneCount {
@@ -191,9 +191,7 @@ extension Scene {
 
     internal mutating func recordTrack(_ i: Int, _ propId: PropId, _ tid: TrackId, changed: Bool) {
         let pid = Int(propId.rawValue)
-        if pid < nodes[i].tracks.count {
-            nodes[i].tracks[pid] = tid
-        }
+        nodes[i].tracks[pid] = tid
         if changed {
             nodes[i].dirty = true
         }

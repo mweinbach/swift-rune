@@ -618,6 +618,23 @@ public struct Scene: Sendable {
     internal static let noneIdx: UInt32 = UInt32.max
     internal static let maxTrackSlots: Int = 21
 
+    /// Most mounted nodes never animate. Allocate property slots on the first track.
+    internal struct NodeTracks: Sendable {
+        private(set) var entries: [TrackId?] = []
+
+        subscript(_ property: Int) -> TrackId? {
+            get { property < entries.count ? entries[property] : nil }
+            set {
+                guard property < Scene.maxTrackSlots else { return }
+                if entries.isEmpty {
+                    guard newValue != nil else { return }
+                    entries = Array(repeating: nil, count: Scene.maxTrackSlots)
+                }
+                entries[property] = newValue
+            }
+        }
+    }
+
     internal struct Node: Sendable {
         var id: NodeId
         var parent: UInt32
@@ -645,7 +662,7 @@ public struct Scene: Sendable {
         var reveal: Reveal?
         var path: ScreenPath?
         var rideTrailing: Bool
-        var tracks: [TrackId?]
+        var tracks: NodeTracks
         var dirty: Bool
         var world: MotionRect
         var origin: Vec2
@@ -665,6 +682,7 @@ public struct Scene: Sendable {
     private var rootTail: UInt32 = Scene.noneIdx
     internal var order: [UInt32] = []
     internal var orderDirty: Bool = false
+    private var snapshot: (nodes: [Presented], byId: [NodeId: Presented])?
     internal var out: [Presented] = []
     internal var late: [Presented] = []
     internal var exitedCarry = Carry<NodeId>()
@@ -1047,7 +1065,7 @@ public struct Scene: Sendable {
 
     internal func lanesDual(_ i: Int, _ p: PropId, into out: inout [SceneDual]) {
         let pid = Int(p.rawValue)
-        guard pid < nodes[i].tracks.count, let tid = nodes[i].tracks[pid], let (x, v) = sample(tid) else {
+        guard let tid = nodes[i].tracks[pid], let (x, v) = sample(tid) else {
             return
         }
         for k in 0..<out.count {
@@ -1154,9 +1172,7 @@ public struct Scene: Sendable {
             guard let i = slot(node) else { continue }
             nodes[i].dirty = true
             let pid = Int(p.rawValue)
-            if pid < nodes[i].tracks.count {
-                nodes[i].tracks[pid] = tid
-            }
+            nodes[i].tracks[pid] = tid
         }
 
         // Screen travel checks in start order (travelling), not tree order.
@@ -1190,6 +1206,7 @@ public struct Scene: Sendable {
         }
         presentDirty()
 
+        if !toRemove.isEmpty { snapshot = nil }
         for ui in toRemove {
             let i = Int(ui)
             if nodes[i].alive {
@@ -1216,9 +1233,9 @@ public struct Scene: Sendable {
             intents.removeAll(keepingCapacity: true)
         }
 
-        var snapshotNodes: [Presented] = []
-        var snapshotById: [NodeId: Presented] = [:]
-        if includeSnapshot {
+        if includeSnapshot, snapshot == nil {
+            var snapshotNodes: [Presented] = []
+            var snapshotById: [NodeId: Presented] = [:]
             snapshotNodes.reserveCapacity(order.count)
             snapshotById.reserveCapacity(order.count)
             for ui in order {
@@ -1227,15 +1244,17 @@ public struct Scene: Sendable {
                 snapshotNodes.append(last)
                 snapshotById[last.id] = last
             }
+            snapshot = (snapshotNodes, snapshotById)
         }
 
+        let current = includeSnapshot ? snapshot : nil
         return FrameOutput(
             changed: out,
             exited: exitedCarry.items,
             events: store.events,
             animating: animating,
-            nodes: snapshotNodes,
-            byId: snapshotById
+            nodes: current?.nodes ?? [],
+            byId: current?.byId ?? [:]
         )
     }
 
@@ -1249,8 +1268,12 @@ public struct Scene: Sendable {
     }
 
     private mutating func presentDirty() {
+        let firstChange = out.count
         let scale = store.pixelScale
         let reduced = store.reducedMotion
+        // Siblings are adjacent in presentation order and share the same target origin.
+        var lastParent = Self.noneIdx
+        var targetOrigin = Vec2.zero
         for slotIdx in order {
             let i = Int(slotIdx)
             let parent = nodes[i].parent
@@ -1260,13 +1283,21 @@ public struct Scene: Sendable {
                 nodes[i].dirty = true
             }
             if nodes[i].dirty {
-                let p = computePresented(i, scale: scale, reduced: reduced, ownDirty: own, parentDirty: parentDirty)
+                if parent != lastParent {
+                    targetOrigin = parentTargetOrigin(i)
+                    lastParent = parent
+                }
+                let p = computePresented(i, scale: scale, reduced: reduced, ownDirty: own,
+                                         parentDirty: parentDirty, targetOrigin: targetOrigin)
                 nodes[i].last = p
                 out.append(p)
             }
         }
-        for slotIdx in order {
-            nodes[Int(slotIdx)].dirty = false
+        if out.count != firstChange {
+            snapshot = nil
+            for slotIdx in order {
+                nodes[Int(slotIdx)].dirty = false
+            }
         }
     }
 
@@ -1295,13 +1326,13 @@ public struct Scene: Sendable {
 
     internal func values(_ i: Int, _ p: PropId) -> ArraySlice<Float>? {
         let pid = Int(p.rawValue)
-        guard pid < nodes[i].tracks.count, let tid = nodes[i].tracks[pid] else { return nil }
+        guard let tid = nodes[i].tracks[pid] else { return nil }
         return store.valuesOf(tid)
     }
 
     private func targets4(_ i: Int, _ p: PropId) -> (Float, Float, Float, Float)? {
         let pid = Int(p.rawValue)
-        guard pid < nodes[i].tracks.count, let tid = nodes[i].tracks[pid] else { return nil }
+        guard let tid = nodes[i].tracks[pid] else { return nil }
         var buf = [Float](repeating: 0, count: 4)
         guard store.targetsOf(tid, into: &buf) else { return nil }
         return (buf[0], buf[1], buf[2], buf[3])
@@ -1309,13 +1340,13 @@ public struct Scene: Sendable {
 
     private func target1(_ i: Int, _ p: PropId) -> Float? {
         let pid = Int(p.rawValue)
-        guard pid < nodes[i].tracks.count, let tid = nodes[i].tracks[pid] else { return nil }
+        guard let tid = nodes[i].tracks[pid] else { return nil }
         var buf = [Float](repeating: 0, count: 1)
         guard store.targetsOf(tid, into: &buf) else { return nil }
         return buf[0]
     }
 
-    private func restOf(_ i: Int, reduced: Bool) -> MotionRect {
+    private func restOf(_ i: Int, reduced: Bool, targetOrigin: Vec2) -> MotionRect {
         let n = nodes[i]
         let parent = n.parent
         let world: MotionRect
@@ -1325,7 +1356,7 @@ public struct Scene: Sendable {
                 _ = store.targetsOf(tid, into: &tp)
             }
             let s = path.start.edges
-            let e = path.endLocal.translated(parentTargetOrigin(i)).edges
+            let e = path.endLocal.translated(targetOrigin).edges
             world = MotionRect.fromEdges(
                 s.0 + (e.0 - s.0) * tp[0],
                 s.1 + (e.1 - s.1) * tp[1],
@@ -1363,7 +1394,8 @@ public struct Scene: Sendable {
         scale: Float,
         reduced: Bool,
         ownDirty: Bool,
-        parentDirty: Bool
+        parentDirty: Bool,
+        targetOrigin: Vec2
     ) -> Presented {
         let parent = nodes[i].parent
         let parentOrigin = (parent == Self.noneIdx) ? Vec2.zero : nodes[Int(parent)].origin
@@ -1379,7 +1411,7 @@ public struct Scene: Sendable {
                 tp = (1.0, 1.0)
             }
             let s = path.start.edges
-            let e = path.endLocal.translated(parentTargetOrigin(i)).edges
+            let e = path.endLocal.translated(targetOrigin).edges
             world = MotionRect.fromEdges(
                 s.0 + (e.0 - s.0) * tp.0,
                 s.1 + (e.1 - s.1) * tp.1,
@@ -1511,8 +1543,8 @@ public struct Scene: Sendable {
 
         var fl: UInt32 = 0
         var ownBits: UInt32 = 0
-        for k in 0..<n.tracks.count {
-            if let tid = n.tracks[k], store.isActive(tid) {
+        for (k, entry) in n.tracks.entries.enumerated() {
+            if let tid = entry, store.isActive(tid) {
                 ownBits |= TraceIntent.forProp(PropId(UInt16(k)))
             }
         }
@@ -1537,7 +1569,7 @@ public struct Scene: Sendable {
             id: n.id,
             parent: (parent != Self.noneIdx) ? nodes[Int(parent)].id : nil,
             rect: snapped,
-            targetRect: n.frame.translated(parentTargetOrigin(i)),
+            targetRect: n.frame.translated(targetOrigin),
             revealClip: revealClip,
             opacity: (ownOpacity * s.0).clamped(to: 0...1),
             transform: Transform2D(tx: 0, ty: 0, sx: sx, sy: sy, rot: rotation),
@@ -1560,7 +1592,7 @@ public struct Scene: Sendable {
             guard let tid = nodes[i].tracks[Int(pid.rawValue)] else { return true }
             return store.isSettled(tid)
         }
-        let restRect = (!nodes[i].rideTrailing && parentStill && ownStill) ? shown : restOf(i, reduced: reduced)
+        let restRect = (!nodes[i].rideTrailing && parentStill && ownStill) ? shown : restOf(i, reduced: reduced, targetOrigin: targetOrigin)
         nodes[i].world = world
         nodes[i].origin = Vec2(shown.left, shown.top)
         rests[i] = SceneRest(rect: restRect, origin: Vec2(restRect.left, restRect.top), moving: restRect != shown)
@@ -1589,7 +1621,7 @@ public struct Scene: Sendable {
                 presence: .present(at0: fxIdentity, at1: fxIdentity),
                 generation: 0, anchor: Vec2(0.5, 0.5), reveal: nil, path: nil,
                 rideTrailing: false,
-                tracks: Array(repeating: nil, count: Self.maxTrackSlots),
+                tracks: NodeTracks(),
                 dirty: true, world: .zero, origin: .zero, last: nil
             ))
             rests.append(SceneRest())
@@ -1611,7 +1643,7 @@ public struct Scene: Sendable {
             presence: .present(at0: fxIdentity, at1: fxIdentity),
             generation: 0, anchor: Vec2(0.5, 0.5), reveal: nil, path: nil,
             rideTrailing: false,
-            tracks: Array(repeating: nil, count: Self.maxTrackSlots),
+            tracks: NodeTracks(),
             dirty: true, world: .zero, origin: .zero, last: nil
         )
         rests[idx] = SceneRest()
@@ -1677,34 +1709,7 @@ public struct Scene: Sendable {
 
     /// Re-links `parentIdx`'s children so active seen slots follow `orderedSlots` (preserving any exiting tail).
     private mutating func syncSiblingOrder(parent parentIdx: UInt32, orderedSlots: [Int]) {
-        guard !orderedSlots.isEmpty else { return }
-        let firstChild = (parentIdx == Self.noneIdx) ? rootHead : nodes[Int(parentIdx)].firstChild
-        var next = firstChild
-        var matched = 0
-        while matched < orderedSlots.count, next == UInt32(orderedSlots[matched]) {
-            next = nodes[orderedSlots[matched]].nextSibling
-            matched += 1
-        }
-        if matched == orderedSlots.count { return }
         let seenSet = Set(orderedSlots)
-        var mismatch = false
-        var idx = 0
-        var cur = (parentIdx == Self.noneIdx) ? rootHead : nodes[Int(parentIdx)].firstChild
-        while cur != Self.noneIdx {
-            let ci = Int(cur)
-            if seenSet.contains(ci) {
-                if idx >= orderedSlots.count || orderedSlots[idx] != ci {
-                    mismatch = true
-                    break
-                }
-                idx += 1
-            }
-            cur = nodes[ci].nextSibling
-        }
-        if !mismatch && idx == orderedSlots.count {
-            return
-        }
-
         var combined = orderedSlots
         var c = (parentIdx == Self.noneIdx) ? rootHead : nodes[Int(parentIdx)].firstChild
         while c != Self.noneIdx {
@@ -1731,6 +1736,32 @@ public struct Scene: Sendable {
         orderDirty = true
     }
 
+    /// Most commits retain sibling order even when leading virtual rows disappear.
+    /// Check the intrusive links first and collect a child array only for a reordered parent.
+    private mutating func syncCommittedOrder(
+        _ children: [(parent: UInt32, slot: UInt32)], committed: [Bool]
+    ) {
+        var previous = [UInt32](repeating: Self.noneIdx, count: nodes.count + 1)
+        var reordered: [UInt32: [Int]] = [:]
+        for (parent, slot) in children {
+            let owner = parent == Self.noneIdx ? nodes.count : Int(parent)
+            let expected = previous[owner]
+            var prior = nodes[Int(slot)].prevSibling
+            while prior != expected, prior != Self.noneIdx, !committed[Int(prior)] {
+                prior = nodes[Int(prior)].prevSibling
+            }
+            if prior != expected { reordered[parent] = [] }
+            previous[owner] = slot
+        }
+        if reordered.isEmpty { return }
+        for (parent, slot) in children {
+            reordered[parent]?.append(Int(slot))
+        }
+        for (parent, slots) in reordered {
+            syncSiblingOrder(parent: parent, orderedSlots: slots)
+        }
+    }
+
     internal mutating func removeNow(_ i: Int) {
         var c = nodes[i].firstChild
         while c != Self.noneIdx {
@@ -1755,6 +1786,7 @@ public struct Scene: Sendable {
     }
 
     internal mutating func rebuildOrder() {
+        snapshot = nil
         order.removeAll(keepingCapacity: true)
         var r = rootHead
         while r != Self.noneIdx {
@@ -1815,13 +1847,13 @@ public struct Scene: Sendable {
                landWaitingNodes: landWaitingNodes, snapNewMounts: snapNewMounts, retainingUnchanged: false)
     }
 
-    /// A virtual remount may retain a fully settled slot. Compare the live scene so that
+    /// A commit may reuse a fully settled slot. Compare the live scene so that
     /// imperative property tracks, reparenting, and in-flight transitions are honored.
     private func matchesRestingSpec(_ index: Int, _ spec: NodeSpec, localFrame: MotionRect) -> Bool {
         let node = nodes[index]
         guard node.presence.isPresent, node.path == nil, spec.launchLayout == nil,
               node.frame == localFrame, !store.hasTracks(node.id),
-              node.tracks.allSatisfy({ $0 == nil }),
+              node.tracks.entries.allSatisfy({ $0 == nil }),
               node.opacity == spec.opacity, node.baseScale2D == spec.scale,
               node.baseOffset == spec.offset, node.baseBlur == spec.blur, node.baseRotate == spec.rotate,
               node.radius == spec.corners, spec.iconTurn == 0,
@@ -1887,14 +1919,9 @@ public struct Scene: Sendable {
             worldOrigins[s.id] = s.rect.origin
         }
 
-        let canRetain = retainingUnchanged && !cut && trace == nil
-        var orderedByParent: [UInt32: [Int]] = [:]
-        var parentKeysOrder: [UInt32] = []
-        func collectSibling(_ slot: Int) {
-            let parent = nodes[slot].parent
-            if orderedByParent[parent] == nil { parentKeysOrder.append(parent) }
-            orderedByParent[parent, default: []].append(slot)
-        }
+        let canRetain = !cut && trace == nil
+        var children: [(parent: UInt32, slot: UInt32)] = []
+        children.reserveCapacity(specs.count)
         for spec in specs {
             let parentOrigin = spec.parent.flatMap { worldOrigins[$0] } ?? .zero
             let localFrame = MotionRect.fromEdges(
@@ -1903,16 +1930,17 @@ public struct Scene: Sendable {
                 spec.rect.right - parentOrigin.x,
                 spec.rect.bottom - parentOrigin.y
             )
-            var localSpec = spec
-            localSpec.rect = localFrame
-
             let existing = slot(spec.id)
             if let existing, canRetain, matchedStarts[spec.id] == nil,
                matchesRestingSpec(existing, spec, localFrame: localFrame) {
-                // A moving parent still propagates its dirty flag through this child.
-                collectSibling(existing)
+                // Ordinary commits publish unchanged nodes too. Virtual remounts only
+                // present these nodes when their parent moves.
+                if !retainingUnchanged { nodes[existing].dirty = true }
+                children.append((nodes[existing].parent, UInt32(existing)))
                 continue
             }
+            var localSpec = spec
+            localSpec.rect = localFrame
             if let existingIdx = existing {
                 let wasExiting = nodes[existingIdx].presence.isExiting
                 let wasScreenChange = spec.layoutAnim?.travel == .screen
@@ -2110,29 +2138,31 @@ public struct Scene: Sendable {
                    spec.launchLayout == .reaim || launchEndpoints[spec.id] == nil {
                     launchEndpoints[spec.id] = LaunchEndpoint(at: now, rect: path.endLocal.translated(path.origin))
                 }
-                collectSibling(committedSlot)
+                children.append((nodes[committedSlot].parent, UInt32(committedSlot)))
             }
         }
 
-        for pIdx in parentKeysOrder {
-            if let orderedSlots = orderedByParent[pIdx] {
-                syncSiblingOrder(parent: pIdx, orderedSlots: orderedSlots)
-            }
+        let allPresent = worldOrigins.count == index.count
+        var committed = [Bool](repeating: allPresent, count: nodes.count)
+        if !allPresent {
+            for child in children { committed[Int(child.slot)] = true }
         }
+        syncCommittedOrder(children, committed: committed)
+        if allPresent { return }
 
-        // Remove omitted nodes
-        let currentNodes = Array(index.keys)
-        for rawId in currentNodes {
-            let nid = NodeId(rawId)
-            if worldOrigins[nid] != nil { continue }
-            guard let i = slot(nid), nodes[i].alive else { continue }
+        // Removing an omitted parent can recursively retire other omitted slots.
+        let omitted = index.values.filter { !committed[Int($0)] }
+        for slot in omitted {
+            let i = Int(slot)
+            guard nodes[i].alive else { continue }
+            let nid = nodes[i].id
             if cut || landWaitingNodes || matchedRemovedIds.contains(nid) {
                 unmount(nid)
                 continue
             }
             // Keep descendants of an omitted/exiting ancestor mounted in place while the ancestor fades out (upstream apply.rs:748).
             let pIdx = nodes[i].parent
-            let parentRemainedPresent = (pIdx == Self.noneIdx) || worldOrigins[nodes[Int(pIdx)].id] != nil
+            let parentRemainedPresent = (pIdx == Self.noneIdx) || committed[Int(pIdx)]
             guard parentRemainedPresent else { continue }
             let ridesParent = pIdx != Self.noneIdx && animatedExitParents.contains(nodes[Int(pIdx)].id)
             if !nodes[i].compatHadTransition || ((snapOmittedNonExiting || unmountNewOmissions) && !ridesParent && !nodes[i].presence.isExiting) {
@@ -2149,7 +2179,7 @@ public struct Scene: Sendable {
                         let di = Int(queue[qIdx])
                         qIdx += 1
                         guard nodes[di].alive else { continue }
-                        if worldOrigins[nodes[di].id] == nil && !matchedRemovedIds.contains(nodes[di].id),
+                        if !committed[di] && !matchedRemovedIds.contains(nodes[di].id),
                            nodes[di].path != nil && nodes[di].compatHadTransition {
                             let pw = parentTargetOrigin(di)
                             if var sp = nodes[di].path {
@@ -2215,6 +2245,7 @@ public struct Scene: Sendable {
         rootTail = Self.noneIdx
         order.removeAll(keepingCapacity: true)
         orderDirty = false
+        snapshot = nil
         travelling.removeAll(keepingCapacity: true)
         launchEndpoints.removeAll(keepingCapacity: true)
         store.clear()

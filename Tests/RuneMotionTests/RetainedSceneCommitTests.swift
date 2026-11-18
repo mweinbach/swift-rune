@@ -4,6 +4,81 @@ import Testing
 
 @Suite("Retaining unchanged scene nodes")
 struct RetainedSceneCommitTests {
+    @Test func snapshotsFollowIncrementalPresentationOrderAndRemoval() throws {
+        var scene = Scene()
+        let root = NodeSpec(id: NodeId(1), rect: .fromXYWH(10, 20, 80, 60))
+        let a = NodeSpec(id: NodeId(2), parent: root.id, rect: .fromXYWH(15, 27, 10, 8))
+        let b = NodeSpec(id: NodeId(3), parent: root.id, rect: .fromXYWH(40, 32, 10, 8))
+        scene.commit([root, a, b], at: 0)
+        let original = scene.frame(at: 0)
+        var copy = scene.frame(at: 0.1)
+        copy.nodes.removeAll()
+        copy.byId.removeAll()
+        let next = scene.frame(at: 0.2)
+        #expect(next.nodes == original.nodes && next.byId == original.byId)
+        #expect(next.changed.isEmpty)
+
+        scene.commit([root, b, a], at: 0.3, retainingUnchanged: true)
+        let reordered = scene.frame(at: 0.3)
+        #expect(reordered.changed.isEmpty)
+        #expect(reordered.nodes.map(\.id) == [root.id, b.id, a.id])
+
+        scene.translateFrame(root.id, by: Vec2(0, -7), screenDelta: Vec2(0, -7))
+        scene.present()
+        let incremental = scene.frame()
+        #expect(incremental.nodes.isEmpty && incremental.byId.isEmpty)
+        let moved = scene.frame(at: 0.4)
+        #expect(moved.byId[a.id]?.rect == a.rect.translated(Vec2(0, -7)))
+        #expect(original.byId[a.id]?.rect == a.rect)
+        scene.unmount(b.id)
+        #expect(scene.frame(at: 0.5).nodes.map(\.id) == [root.id, a.id])
+        #expect(reordered.byId[b.id]?.rect == b.rect)
+        scene.unmount(root.id)
+        scene.settle(at: 0.6)
+        let empty = scene.frame(at: 0.6)
+        #expect(empty.nodes.isEmpty && empty.byId.isEmpty)
+    }
+
+    @Test func settledDescendantsFollowAnAnimatedParentIncludingItsRestGeometry() throws {
+        var scene = Scene(pixelScale: 1.5)
+        let root = NodeSpec(id: NodeId(1), rect: .fromXYWH(10.3, 20.2, 80, 60))
+        let row = NodeSpec(id: NodeId(2), parent: root.id, rect: .fromXYWH(15.7, 27.3, 20, 19),
+                           opacity: 0.7, scale: Vec2(1.5, 0.75), offset: Vec2(0.3, 3.7), blur: 2)
+        let text = NodeSpec(id: NodeId(3), parent: row.id, rect: .fromXYWH(18.8, 28.8, 12, 8),
+                            corners: .all(3), fill: .rgba(1, 0, 0, 0.5))
+        scene.commit([root, row, text], at: 0)
+        _ = scene.frame(at: 0)
+        scene.setFrame(root.id, root.rect.translated(Vec2(4.5, 14.3)), MotionTokens.SMOOTH)
+        var full = scene
+        for time in [0.02, 0.04, 0.1, 0.2, 1] {
+            full.setTrace(nil) // Mark every node dirty to exercise full local property projection.
+            let expected = full.frame(at: time)
+            let presented = scene.frame(at: time)
+            for id in [row.id, text.id] {
+                #expect(presented.byId[id] == expected.byId[id])
+                #expect(scene.world(id) == full.world(id))
+                #expect(scene.rest(id) == full.rest(id))
+            }
+        }
+    }
+
+    @Test func anExitingSiblingKeepsItsPlaceUntilSurvivingSiblingsReorder() {
+        var scene = Scene()
+        let root = NodeSpec(id: NodeId(1), rect: .fromXYWH(0, 0, 30, 20))
+        let a = NodeSpec(id: NodeId(2), parent: root.id, rect: .fromXYWH(0, 0, 10, 10))
+        let b = NodeSpec(id: NodeId(3), parent: root.id, rect: .fromXYWH(10, 0, 10, 10), transition: .opacity)
+        let c = NodeSpec(id: NodeId(4), parent: root.id, rect: .fromXYWH(20, 0, 10, 10))
+        scene.commit([root, a, b, c], at: 0)
+        _ = scene.frame(at: 0)
+        scene.commit([root, a, c], at: 0.01, retainingUnchanged: true)
+        let leaving = scene.frame(at: 0.01)
+        #expect(leaving.nodes.map(\.id) == [root.id, a.id, b.id, c.id])
+        #expect(leaving.byId[b.id]?.isExiting == true)
+        scene.commit([root, c, a], at: 0.02, retainingUnchanged: true)
+        #expect(scene.frame(at: 0.02).nodes.map(\.id) == [root.id, c.id, a.id, b.id])
+        #expect(scene.frame(at: 2).nodes.map(\.id) == [root.id, c.id, a.id])
+    }
+
     @Test func restingNodesKeepTheirPresentationAndFollowAMovedParent() throws {
         var scene = Scene()
         var parent = NodeSpec(id: NodeId(1), rect: .fromXYWH(10, 20, 80, 60))
