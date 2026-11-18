@@ -3354,6 +3354,8 @@ public final class TextSystem: @unchecked Sendable {
     #endif
     private var layoutCache: [TextShapeKey: TextLayoutBox] = [:]
     private var layoutCommitSeq: UInt64 = 0
+    private static let staleLayoutAge: UInt64 = 60
+    private var commitsUntilLayoutSweep = TextSystem.staleLayoutAge
     private var preparedPass: UInt64 = 0
     private var hasPreparedWidthSlots = false
     @TaskLocal private static var preparingSystem: TextSystem?
@@ -3742,10 +3744,58 @@ public final class TextSystem: @unchecked Sendable {
         glyphCache.forget(shapeKey: key)
     }
 
+    // Called under the text lock. Every insertion or refresh stamps the current generation,
+    // so a younger box cannot reach the age limit before the oldest surviving box.
+    private func sweepLayoutCache(at now: UInt64) -> [TextShapeKey] {
+        let budget = 3 * 1024 * 1024
+        var stale: [Dictionary<TextShapeKey, TextLayoutBox>.Index] = []
+        commitsUntilLayoutSweep = Self.staleLayoutAge
+        for index in layoutCache.indices {
+            let age = now &- layoutCache.values[index].lastUsedCommit
+            if age >= Self.staleLayoutAge {
+                stale.append(index)
+            } else {
+                commitsUntilLayoutSweep = min(commitsUntilLayoutSweep, Self.staleLayoutAge - age)
+            }
+        }
+        guard !stale.isEmpty else { return [] }
+
+        // A retained layout (or its painted window) can change size between commits.
+        // Read its current footprint only when there is something eligible to evict.
+        var freshBytes = 0
+        for box in layoutCache.values where now &- box.lastUsedCommit < Self.staleLayoutAge {
+            freshBytes += box.estimatedBytes
+            if freshBytes > budget { break }
+        }
+        // Once fresh layouts alone exceed the budget, every eligible layout must go.
+        // Otherwise keep the most recently used eligible layouts that still fit.
+        var remaining: Int?
+        if freshBytes <= budget {
+            let total = stale.reduce(freshBytes) { $0 + layoutCache.values[$1].estimatedBytes }
+            if total <= budget {
+                commitsUntilLayoutSweep = 1
+                return []
+            }
+            remaining = total
+        }
+        let candidates = stale.map { layoutCache[$0] }.sorted { $0.value.lastUsedCommit < $1.value.lastUsedCommit }
+        var evicted: [TextShapeKey] = []
+        for (key, box) in candidates {
+            if let bytes = remaining {
+                if bytes <= budget {
+                    commitsUntilLayoutSweep = 1
+                    break
+                }
+                remaining = max(0, bytes - box.estimatedBytes)
+            }
+            layoutCache.removeValue(forKey: key)
+            evicted.append(key)
+        }
+        return evicted
+    }
+
     /// Advances commit counter and sweeps stale cached layouts beyond 60 commits and 3 MiB (`end_commit`).
     public func endCommit(activeKeys: Set<TextShapeKey>) {
-        let staleCommits: UInt64 = 60
-        let staleBytes = 3 * 1024 * 1024
         var evictedKeys: [TextShapeKey] = []
 
         lock.lock()
@@ -3761,24 +3811,9 @@ public final class TextSystem: @unchecked Sendable {
                 box.lastUsedCommit = nowSeq
             }
         }
-        // All active widths now carry this commit's stamp. Walk only the boxes to
-        // budget them; copying a rich shape key also retains its text, spans and style.
-        var totalBytes = 0
-        var staleIndices: [Dictionary<TextShapeKey, TextLayoutBox>.Index] = []
-        for index in layoutCache.indices {
-            let box = layoutCache.values[index]
-            totalBytes += box.estimatedBytes
-            if nowSeq &- box.lastUsedCommit >= staleCommits { staleIndices.append(index) }
-        }
-        if totalBytes > staleBytes {
-            let candidates = staleIndices.map { layoutCache[$0] }
-                .sorted { $0.value.lastUsedCommit < $1.value.lastUsedCommit }
-            for (k, b) in candidates {
-                if totalBytes <= staleBytes { break }
-                layoutCache.removeValue(forKey: k)
-                totalBytes = max(0, totalBytes - b.estimatedBytes)
-                evictedKeys.append(k)
-            }
+        commitsUntilLayoutSweep -= 1
+        if commitsUntilLayoutSweep == 0 {
+            evictedKeys = sweepLayoutCache(at: nowSeq)
         }
         let orphaned = dropOrphanShapes(afterRemoving: evictedKeys)
         lock.unlock()
@@ -4569,8 +4604,8 @@ public final class TextSystem: @unchecked Sendable {
                             let outBox = unique ? cachedBox : cachedBox.clone()
                             outBox.shaped = withGlyphs
                             outBox.hasGlyphs = true
-                            outBox.lastUsedCommit = lock.withLock { layoutCommitSeq }
                             lock.lock()
+                            outBox.lastUsedCommit = layoutCommitSeq
                             layoutCache[storageKey] = outBox
                             lock.unlock()
                             return outBox

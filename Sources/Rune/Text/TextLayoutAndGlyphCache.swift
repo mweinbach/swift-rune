@@ -374,17 +374,19 @@ public final class TextLayoutBox: @unchecked Sendable {
     internal var paragraphs: ParagraphLayout? = nil
 
     public var estimatedBytes: Int {
-        let partial = windowPaint?.box.shaped
-        let partialBytes = (partial?.glyphs.count ?? 0) * MemoryLayout<PositionedGlyph>.stride
-            + (partial?.lineGlyphRanges.count ?? 0) * MemoryLayout<Range<Int>>.stride
-        let layoutBytes = partialBytes + (prepared?.estimatedBytes ?? max(128, authText.utf8.count * 16))
-            + shaped.glyphs.count * MemoryLayout<PositionedGlyph>.stride
-            + shaped.lineCount * 48
+        var bytes = (prepared?.estimatedBytes ?? max(128, authText.utf8.count * 16))
+            + shaped.glyphs.count * MemoryLayout<PositionedGlyph>.stride + shaped.lineCount * 48
         #if canImport(CRuneDesktopText) && !canImport(CoreText)
-        return layoutBytes + (shaped.desktopRestingText?.retainedGlyphBytes ?? 0) + (partial?.desktopRestingText?.retainedGlyphBytes ?? 0)
-        #else
-        return layoutBytes
+        bytes += shaped.desktopRestingText?.retainedGlyphBytes ?? 0
         #endif
+        if let partial = windowPaint?.box {
+            bytes += partial.shaped.glyphs.count * MemoryLayout<PositionedGlyph>.stride
+                + partial.shaped.lineGlyphRanges.count * MemoryLayout<Range<Int>>.stride
+            #if canImport(CRuneDesktopText) && !canImport(CoreText)
+            bytes += partial.shaped.desktopRestingText?.retainedGlyphBytes ?? 0
+            #endif
+        }
+        return bytes
     }
 
     internal init(
