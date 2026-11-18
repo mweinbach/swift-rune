@@ -100,6 +100,100 @@ struct MemoFlatSpanTests {
         #expect(replayed > 0)
     }
 
+    @Test("Layout-equivalent row variants refresh selection, accessibility and handlers across a full build")
+    func virtualRowLayoutVariants() throws {
+        struct State { var active = false; var height: Float = 22; var reported: Bool? }
+        final class Context {}
+        func build(_ share: Bool) -> Runtime<State> {
+            Runtime(state: State(), viewport: Vec2(180, 112), pixelScale: 1) { _, _ in
+                let rows: El<State> = col().key("rows").wFull().virtualRows(
+                    count: 30, estimatedRowHeight: 22, key: { _, i in "r-\(i)" }, buildContent: { state, i in
+                        let active = state.active, height = state.height
+                        return memoizedVirtualRow("r-\(i)", deps: height, variant: active, variantsShareLayout: share,
+                                                 makeContext: { Context() }, updateContext: { _ in }) { _ in
+                            var label: El<State> = text("line \(i)").key("label-\(i)").size(90, height)
+                            if active { label = label.selectable() }
+                            return row().wFull().h(height).label(active ? "active" : "inactive")
+                                .child(label)
+                                .child(el().key("tap-\(i)").size(50, height).onClick { $0.reported = active })
+                        }
+                    })
+                return col().size(180, 112).scrollY().child(rows)
+            }
+        }
+        let shared = build(true), independent = build(false)
+        for step in 0..<4 {
+            let active = step % 2 != 0, height: Float = step == 3 ? 28 : 22
+            let time = Double(step) / 30
+            for rt in [shared, independent] {
+                rt.update(at: time) { state, _ in state.active = active; state.height = height }
+                _ = rt.renderFrame(at: time)
+            }
+            #expect(shared.elements() == independent.elements())
+            #expect(shared.accessibilitySnapshot() == independent.accessibilitySnapshot())
+            if step == 1 || step == 2 { #expect(shared.retainedLayout.reusedVirtualRowRootCount > 0) }
+            let leaf = try #require(shared.flatNodes.first { $0.key == "label-0" })
+            #expect(leaf.el.isSelectable == active)
+            #expect(leaf.targetRect.height == height)
+            let rect = try #require(shared.element(byKey: "tap-0")).rect
+            let point = Vec2(rect[0] + 5, rect[1] + 5)
+            for rt in [shared, independent] {
+                rt.pointerMove(to: point, at: time)
+                rt.pointerDown(at: point, at: time)
+                rt.pointerUp(at: point, at: time + 0.001)
+                #expect(rt.state.reported == active)
+            }
+        }
+    }
+
+    @Test("Duplicate virtual row memos retain fresh root modifiers on either copy variant")
+    func duplicateLayoutVariants() throws {
+        final class Context {}
+        let view = Runtime(state: 0, viewport: Vec2(100, 100), pixelScale: 1) { _, _ in
+            let rows: El<Int> = col().key("rows").wFull().virtualRows(
+                count: 1, estimatedRowHeight: 20, key: { _, _ in "r" }, buildContent: { tick, _ in
+                    let base: El<Int> = memo("shell", deps: 0) { col().wFull().child(text("same child").h(12)) }
+                    func variant(height: Float) -> VirtualRowContent<Int> {
+                        memoizedVirtualRow("duplicate", deps: 0, variant: (tick / 2) % 2 != 0, variantsShareLayout: true,
+                                           makeContext: { Context() }, updateContext: { _ in }) { _ in base.h(height) }
+                    }
+                    _ = variant(height: 14)
+                    return variant(height: Float(20 + tick))
+                })
+            return col().size(100, 100).scrollY().child(rows)
+        }
+        for tick in 0..<7 {
+            let time = Double(tick) / 30
+            view.update(at: time) { state, tx in state = tick; tx.instant() }
+            _ = view.renderFrame(at: time)
+            let rect = try #require(view.element(byKey: "r")).rect
+            #expect(rect[3] == Float(20 + tick))
+        }
+    }
+
+    @Test("A counterpart with stale measured size cannot supply a row variant's geometry")
+    func layoutVariantReads() {
+        final class Context {}
+        let view = Runtime(state: false, viewport: Vec2(100, 100), pixelScale: 1) { active, cx in
+            let context = cx
+            let rows: El<Bool> = col().key("rows").wFull().virtualRows(
+                count: 1, estimatedRowHeight: 20, key: { _, _ in "row" }, buildContent: { active, _ in
+                    memoizedVirtualRow("row", deps: 0, variant: active, variantsShareLayout: true,
+                                       makeContext: { Context() }, updateContext: { _ in }) { _ in
+                        let height = context.layoutSize("reference")?[0] ?? 12
+                        return col().wFull().child(el().key("sized").size(10, height))
+                    }
+                })
+            return col().size(100, 100).scrollY().child(el().key("reference").size(active ? 24 : 12, 1)).child(rows)
+        }
+        for (i, active) in [false, true, false, true].enumerated() {
+            let time = Double(i) / 30
+            view.update(at: time) { value, tx in value = active; tx.instant() }
+            _ = view.renderFrame(at: time)
+            #expect(view.element(byKey: "sized")?.rect[3] == (active ? 24 : 12))
+        }
+    }
+
     @Test("Reordered memo descendants retain observer identities and honor the current modal")
     func observerRolesFollowMovedRows() {
         let rt = Runtime<Int>(state: 0, viewport: Vec2(160, 80), pixelScale: 1) { tick, _ in

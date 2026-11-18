@@ -809,13 +809,14 @@ final class RetainedLayoutCoordinator {
             sourceRows: [String: Runtime<State>.CachedVirtualRow]? = nil
         ) -> SyncStep<State> {
             var virtualRoot: VirtualRowRoot?
-            if let sourceRows, !el.children.isEmpty, let key = el.storageKeyId,
-               let row = sourceRows[key], let memo = row.layoutRootMemo, !recordingMemo,
-               let parent, siblingKeysSeen[key] == nil,
-               memo === el.memoLayoutChildren, memo.matches(el.children) {
+            if let sourceRows, !el.children.isEmpty, let key = el.storageKeyId, let row = sourceRows[key],
+               let authored = row.layoutRootMemo, !recordingMemo, let parent, siblingKeysSeen[key] == nil,
+               let current = el.memoLayoutChildren, (current === authored || current === row.layoutProjection?.children),
+               current.matches(el.children) {
+                let memo = row.layoutProjection?.children ?? authored
                 let memoKey = ObjectIdentifier(memo)
                 if let span = memoSpans[memoKey], span.isGroupRoot, span.record.identity === memo,
-                   span.virtualRoot?.matches(row.rootIdentity, key: key, parent: parent) == true, var node = span.nodes.first {
+                   span.virtualRoot?.matches(row.layoutProjection?.owner ?? row.rootIdentity, key: key, parent: parent) == true, var node = span.nodes.first {
                     let index = flat.count
                     node.parentOffset = parent.myIndex - index
                     flat.append(node)
@@ -833,7 +834,16 @@ final class RetainedLayoutCoordinator {
                     }
                     flat.removeLast()
                 }
-                virtualRoot = VirtualRowRoot(row.rootIdentity, key: key, parent: parent)
+                if current !== memo {
+                    // The counterpart has identical intrinsic geometry. Materialize its child tree only
+                    // when its prepared slot span is missing. Input and paint use the authored row.
+                    var projected = copy el
+                    projected.children = memo.children
+                    projected.memoLayoutChildren = memo
+                    return beginVisit(projected, parent: parent, siblingIndex: siblingIndex,
+                                      siblingKeysSeen: &siblingKeysSeen, sourceRows: sourceRows)
+                }
+                virtualRoot = VirtualRowRoot(row.layoutProjection?.owner ?? row.rootIdentity, key: key, parent: parent)
             }
             let p = syncPrepare(el, parent: parent, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
             let myIndex = p.myIndex

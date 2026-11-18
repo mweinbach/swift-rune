@@ -550,17 +550,26 @@ public final class MemoCache: @unchecked Sendable {
 
     /// Keep an already-built alternate while its owner remains mounted. Reads in the alternate
     /// are checked when it is chosen again, so they do not become dependencies of the active view.
-    fileprivate func retainAlternate<Inputs>(_ rawId: String, matching inputs: Inputs, in scope: MemoBuildScope) {
-        guard !scope.isVerificationDryRun else { return }
+    fileprivate func retainAlternate<State, Inputs: AnyObject>(
+        _ rawId: String, matching inputs: Inputs, in scope: MemoBuildScope, sharingLayout: Bool
+    ) -> VirtualRowLayout<State>? {
+        guard !scope.isVerificationDryRun else { return nil }
+        var projection: VirtualRowLayout<State>?
         let scopedId = scope.scopedId(for: rawId)
         let touched: Set<String> = lock.withLock {
             guard let entry = entries[scopedId], entry.envHash == scope.envHash, entry.equals(inputs) else { return [] }
+            if sharingLayout, entry.srgbBlend == Theme.blendsSrgb(), entry.reads.allSatisfy({ $0.matches(scope.geometry) }),
+               let owner = entry.deps as? Inputs, let element = entry.element as? El<State>, let memo = element.memoLayoutChildren,
+               memo.traits.isDisjoint(with: [.mutableLayout, .virtual, .growth, .duplicateKeys]) {
+                projection = VirtualRowLayout(children: memo, owner: owner)
+            }
             return markNestedTouchedLocked([scopedId], pass: scope.pass)
         }
         if !touched.isEmpty {
             scope.allTouchedScopedIds.formUnion(touched)
             scope.recordNested(scopedId)
         }
+        return projection
     }
 
     @discardableResult
@@ -739,10 +748,13 @@ private final class MemoEventInputs<Inputs: Equatable, Context: AnyObject>: Equa
 /// Retains the subtree's event context alongside its memo entry. Updating the author-supplied
 /// callbacks on a cache hit preserves fresh closures without invalidating the layout subtree.
 /// A boolean variant can retain both visited alternatives until the inputs change or the owner unmounts.
+/// Set `variantsShareLayout` only for alternatives with the same keyed subtree, intrinsic text and
+/// layout at every size. The input, accessibility and paint passes still receive the active alternative.
 package func memoizedVirtualRow<State, Inputs: Equatable, Context: AnyObject>(
     _ id: String,
     deps: Inputs,
     variant: Bool? = nil,
+    variantsShareLayout: Bool = false,
     makeContext: () -> Context,
     updateContext: @escaping (Context) -> Void,
     file: String = #fileID,
@@ -754,10 +766,12 @@ package func memoizedVirtualRow<State, Inputs: Equatable, Context: AnyObject>(
     let cache = scope.cache
     let inputs = MemoEventInputs<Inputs, Context>(deps)
     let slot: String
+    var otherLayout: VirtualRowLayout<State>?
     if let variant {
         let first = id + ":0", second = id + ":1"
         slot = variant ? second : first
-        cache.retainAlternate(variant ? first : second, matching: inputs, in: scope)
+        let share = variantsShareLayout && variant && !scope.seenScopedIds.contains(scope.scopedId(for: slot))
+        otherLayout = cache.retainAlternate(variant ? first : second, matching: inputs, in: scope, sharingLayout: share)
     } else {
         slot = id
     }
@@ -771,7 +785,7 @@ package func memoizedVirtualRow<State, Inputs: Equatable, Context: AnyObject>(
         inputs.context = context
         return build(context)
     }.element
-    return VirtualRowContent(memoized: variant == nil ? element : element.key(id), owner: owner)
+    return VirtualRowContent(memoized: variant == nil ? element : element.key(id), owner: owner, layoutProjection: otherLayout)
 }
 
 /// Unlabelled `memo` convenience matching upstream `rune::memo("id", deps) { ... }`.

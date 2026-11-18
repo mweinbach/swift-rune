@@ -1127,7 +1127,7 @@ final class MemoLayoutChildren<State> {
         static var requiresResizeRebuild: Self { Self(rawValue: 32) }
     }
 
-    private let children: [El<State>]
+    let children: [El<State>]
     let traits: Traits
     let duplicateSiblings: Bool
 

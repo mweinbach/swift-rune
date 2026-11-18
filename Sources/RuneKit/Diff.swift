@@ -2987,7 +2987,7 @@ public struct DiffView<State>: Sendable {
                                                    selected: st.rowSelected(local, file: file, side: nil),
                                                    position: i, count: entries.count)
                 return memoizedVirtualRow("\(key)-\(entry.key)", deps: appearance, variant: line.kind == .context ? nil : copy,
-                            makeContext: { RowActions(rowDefinition) },
+                            variantsShareLayout: true, makeContext: { RowActions(rowDefinition) },
                             updateContext: { $0.update(rowDefinition) }) { actions in
                     buildLine(withRowActions(actions))
                 }

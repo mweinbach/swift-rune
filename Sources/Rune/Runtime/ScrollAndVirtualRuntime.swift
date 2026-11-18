@@ -70,12 +70,13 @@ extension Runtime {
         let keysClean: Bool
         let layoutRootMemo: MemoLayoutChildren<State>?
         let memoizedRootOwner: AnyObject?
+        let layoutProjection: VirtualRowLayout<State>?
         var rootIdentity: AnyObject { memoizedRootOwner ?? self }
         let reads: [MemoRead]
         let trackedReads: TrackedReads
         let envHash: UInt64
 
-        init(el: El<State>, memoizedRootOwner: AnyObject? = nil, memoIds: Set<String>, containsVirtual: Bool, reusableForRelayout: Bool,
+        init(el: El<State>, memoizedRootOwner: AnyObject? = nil, layoutProjection: VirtualRowLayout<State>? = nil, memoIds: Set<String>, containsVirtual: Bool, reusableForRelayout: Bool,
              reads: [MemoRead], trackedReads: TrackedReads, envHash: UInt64) {
             self.el = el
             self.memoIds = memoIds
@@ -91,6 +92,7 @@ extension Runtime {
                 layoutRootMemo = nil
             }
             self.memoizedRootOwner = layoutRootMemo == nil ? nil : memoizedRootOwner
+            self.layoutProjection = layoutRootMemo == nil ? nil : layoutProjection
             self.reads = reads
             self.trackedReads = trackedReads
             self.envHash = envHash
@@ -697,7 +699,7 @@ extension Runtime {
             if !keyedRow.children.isEmpty, keyedRow.memoLayoutChildren?.matches(keyedRow.children) != true {
                 keyedRow.memoLayoutChildren = MemoLayoutChildren(keyedRow.children)
             }
-            return CachedVirtualRow(el: keyedRow, memoizedRootOwner: row.owner, memoIds: touched.ids,
+            return CachedVirtualRow(el: keyedRow, memoizedRootOwner: row.owner, layoutProjection: row.layoutProjection, memoIds: touched.ids,
                                     containsVirtual: treeContainsVirtual(keyedRow), reusableForRelayout: Self.isTreeReusableForRelayout(keyedRow),
                                     reads: touched.reads, trackedReads: touched.trackedReads, envHash: memoEnvHash)
         }
