@@ -300,7 +300,9 @@ struct MotionRuntimeParityTests {
           arguments: [false, true], [false, true])
     func offscreenParentExit(native: Bool, visibleChild: Bool) throws {
         let rt = Runtime<Bool>(state: true, viewport: Vec2(120, 80), pixelScale: 1) { show, _ in
-            let root: El<Bool> = col().size(120, 80).clip()
+            // Retain siblings so the disappearing branch is a small part of the tree.
+            let siblings: [El<Bool>] = (0..<16).map { el().key("static-\($0)").size(0, 0) }
+            let root: El<Bool> = col().size(120, 80).clip().children(siblings)
             guard show else { return root }
             let child: El<Bool> = el().key("ink").size(24, 16)
                 .absolute(x: 0, y: visibleChild ? -160 : 0).bg(.white)
