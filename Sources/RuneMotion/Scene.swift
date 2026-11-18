@@ -1836,7 +1836,9 @@ public struct Scene: Sendable {
         }
         if reordered.isEmpty { return }
         for (parent, slot) in children {
-            reordered[parent]?.append(Int(slot))
+            if let index = reordered.index(forKey: parent) {
+                reordered.values[index].append(Int(slot))
+            }
         }
         for (parent, slots) in reordered {
             syncSiblingOrder(parent: parent, orderedSlots: slots)
