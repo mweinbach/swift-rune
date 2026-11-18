@@ -116,7 +116,7 @@ extension Runtime {
               edit.text.utf8.count <= AccessibilityTextGeometry.byteLimit,
               let box = nodeTextLayouts[node.nodeId]?.box, hitGeometryByPath[node.path]?.turn == nil else { return nil }
         let rect = presentedRectByPath[node.path] ?? node.targetRect
-        let scale = presentedScaleByPath[node.path] ?? Vec2(1, 1)
+        let scale = presentedScales[node.path] ?? Vec2(1, 1)
         let scroll = edit.multiline ? 0 : (inputScroll[node.path] ?? 0)
         let origin = Vec2(rect.x + (node.el.layout.padding.left - scroll) * scale.x,
                           rect.y + node.el.layout.padding.top * scale.y)

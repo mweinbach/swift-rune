@@ -419,7 +419,7 @@ public extension Runtime {
             #if os(macOS) && canImport(AppKit)
             if !isSecure, editLens != nil, let value = resolvedValue,
                let box = nodeTextLayouts[node.nodeId]?.box {
-                let scale = presentedScaleByPath[node.path] ?? Vec2(1, 1)
+                let scale = presentedScales[node.path] ?? Vec2(1, 1)
                 let scroll = inputScroll[node.path] ?? 0
                 let origin = Vec2(rect.x + (el.layout.padding.left - scroll) * scale.x,
                                   rect.y + el.layout.padding.top * scale.y)

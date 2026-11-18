@@ -674,7 +674,7 @@ internal extension Runtime {
     func selectableHitOffset(node: FlatNode, windowPos: Vec2, preferLayoutRects: Bool = false) -> Int {
         guard !node.effectiveInert, let rawText = node.el.selectableAuthoredText, !rawText.isEmpty else { return 0 }
         let rect = preferLayoutRects ? node.targetRect : (presentedRectByPath[node.path] ?? node.targetRect)
-        let sc = preferLayoutRects ? Vec2(1, 1) : (presentedScaleByPath[node.path] ?? Vec2(1, 1))
+        let sc = preferLayoutRects ? Vec2(1, 1) : (presentedScales[node.path] ?? Vec2(1, 1))
         let resolvedText = ElDisplayResolver.resolveText(el: node.el, rawText: rawText, isSecure: false)
         // A text wraps at its layout width, `w * scale + FIT_SLACK` device px, as it laid out and
         // paints (`relayout::lay_out_text`, #948).

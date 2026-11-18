@@ -293,8 +293,32 @@ struct AnchorZoomParityTests {
         expectRect(rect(rt, "pop"), [100, 145, 120, 60], "pop")
     }
 
-    @Test("anchor.rs & build.rs: anchored overlay inherits anchor scaleMotion while moving and settles crisp at zoom")
-    func anchoredOverlayInheritsScaleMotionAndSettlesCrisp() {
+    @Test("Scale snapshots preserve missing nodes and paint order when exits share a path")
+    func scaleSnapshotIdentities() {
+        let old = NodeId(1), current = NodeId(2)
+        let unit = Vec2(1, 1), zoom = Vec2(1.5, 2)
+        var indexed = PresentedScales(count: 2, byPath: ["old": 0, "current": 1],
+                                      byId: [old: 0, current: 1], hasExits: false)
+        indexed.record(at: 0, path: "old", id: old, scale: unit, motion: .still)
+        #expect(indexed["old"] == unit)
+        #expect(indexed.motion(for: old) == .still)
+        #expect(indexed["current"] == nil)
+        #expect(indexed.motion(for: current) == nil)
+        let previous = indexed
+        indexed.record(at: 1, path: "current", id: current, scale: zoom, motion: .live)
+        #expect(previous.motion(for: current) == nil)
+        #expect(indexed["current"] == zoom)
+
+        var exiting = PresentedScales(count: 1, byPath: ["same": 0], byId: [current: 0], hasExits: true)
+        exiting.record(at: 0, path: "same", id: current, scale: unit, motion: .still)
+        exiting.record(at: 0, path: "same", id: old, scale: zoom, motion: .moving)
+        #expect(exiting["same"] == zoom)
+        #expect(exiting.motion(for: current) == .still)
+        #expect(exiting.motion(for: old) == .moving)
+    }
+
+    @Test("anchor.rs & build.rs: anchored overlay inherits anchor scaleMotion while moving and settles crisp at zoom", arguments: [false, true])
+    func anchoredOverlayInheritsScaleMotionAndSettlesCrisp(native: Bool) {
         let rt = Runtime<MotionState>(
             state: MotionState(zoom: 1.0, open: true),
             viewport: Vec2(800, 600),
@@ -303,27 +327,31 @@ struct AnchorZoomParityTests {
         ) { state, _ in
             makeMotionView(state)
         }
-        _ = rt.frame(at: 0.0)
+        func paint(_ now: Double) {
+            if native { _ = rt.renderFrame(at: now) }
+            else { _ = rt.frame(at: now) }
+        }
+        paint(0.0)
         for step in 1...10 {
-            _ = rt.frame(at: Double(step) / 60.0)
+            paint(Double(step) / 60.0)
         }
         let popId = rt.flatNodes.first(where: { $0.key == "pop" })!.nodeId
-        #expect(rt.presentedScaleMotionById[popId] == .still)
+        #expect(rt.presentedScales.motion(for: popId) == .still)
         #expect(abs((rt.elSliceRenderState.scaleSettles[popId]?.stillScale ?? 0) - 1.0) < 0.01)
 
         // Start spring zoom from 1.0 -> 1.6 on anchor's parent ("page")
         rt.update(at: 0.2) { state, _ in state.zoom = 1.6 }
-        _ = rt.frame(at: 0.25)
-        #expect(rt.presentedScaleMotionById[popId] == .moving)
+        paint(0.25)
+        #expect(rt.presentedScales.motion(for: popId) == .moving)
         #expect(abs((rt.elSliceRenderState.scaleSettles[popId]?.stillScale ?? 0) - 1.0) < 0.01)
 
         // Advance until scale spring finishes and settles
         var t = 0.25
         for _ in 0..<180 {
             t += 1.0 / 60.0
-            _ = rt.frame(at: t)
+            paint(t)
         }
-        #expect(rt.presentedScaleMotionById[popId] == .still)
+        #expect(rt.presentedScales.motion(for: popId) == .still)
         #expect(abs((rt.elSliceRenderState.scaleSettles[popId]?.stillScale ?? 0) - 1.6) < 0.02)
     }
 }

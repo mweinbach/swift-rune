@@ -93,8 +93,8 @@ struct ScrollAndStickySlice2ParityTests {
             var cached = rt.makeCarriedScrollCache()
             var fresh: [Vec2?] = []
             for node in nodes {
-                let actual = rt.carriedScroll(for: node, scales: scales, cache: &cached) { turns[$0] }
-                let expected = rt.carriedScroll(for: node, scales: scales, cache: &fresh) { turns[$0] }
+                let actual = rt.carriedScroll(for: node, scale: { scales[$0] }, cache: &cached) { turns[$0] }
+                let expected = rt.carriedScroll(for: node, scale: { scales[$0] }, cache: &fresh) { turns[$0] }
                 #expect(actual == expected)
             }
         }
@@ -105,10 +105,10 @@ struct ScrollAndStickySlice2ParityTests {
         // outer viewport's scale yet. Its provisional sum must not stick to siblings.
         let first = try #require(rt.flatNodes.first { $0.path == leaf })
         var pending = rt.makeCarriedScrollCache()
-        _ = rt.carriedScroll(for: first, scales: [inner: Vec2(1.25, 0.66)], cache: &pending) { turns[$0] }
-        let ready = rt.carriedScroll(for: first, scales: scales, cache: &pending) { turns[$0] }
+        _ = rt.carriedScroll(for: first, scale: { $0 == inner ? Vec2(1.25, 0.66) : nil }, cache: &pending) { turns[$0] }
+        let ready = rt.carriedScroll(for: first, scale: { scales[$0] }, cache: &pending) { turns[$0] }
         var fresh: [Vec2?] = []
-        #expect(ready == rt.carriedScroll(for: first, scales: scales, cache: &fresh) { turns[$0] })
+        #expect(ready == rt.carriedScroll(for: first, scale: { scales[$0] }, cache: &fresh) { turns[$0] })
 
         rt.scrollOffsets["/unmounted"] = Vec2(2, 5)
         #expect(!rt.makeCarriedScrollCache().isEmpty)

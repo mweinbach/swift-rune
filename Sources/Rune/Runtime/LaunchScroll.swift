@@ -75,7 +75,7 @@ extension Runtime {
                let info = lastElements.first(where: { $0.path == ancestor.path && !$0.exiting }),
                info.scrolled.count == 2 {
                 let v = scrollInWindow(Vec2(info.scrolled[0], info.scrolled[1]),
-                                       scale: presentedScaleByPath[ancestor.path] ?? Vec2(1, 1),
+                                       scale: presentedScales[ancestor.path] ?? Vec2(1, 1),
                                        turn: hitGeometryByPath[ancestor.path]?.turn)
                 sum.x += v.x
                 sum.y += v.y
@@ -95,7 +95,7 @@ extension Runtime {
         return Array(repeating: nil, count: flatNodes.count)
     }
 
-    internal func carriedScroll(for node: FlatNode, scales: [String: Vec2], cache: inout [Vec2?],
+    internal func carriedScroll(for node: FlatNode, scale: (String) -> Vec2?, cache: inout [Vec2?],
                                 turn: (String) -> Turn?) -> Vec2 {
         // Descendants of the same nearest scroll viewport have the same inner-to-outer sum,
         // including the presentation scale and turn of every enclosing viewport.
@@ -103,21 +103,21 @@ extension Runtime {
            flatNodes[node.index].nodeId == node.nodeId {
             guard let viewport = node.enclosingScrollIndex else { return .zero }
             if let value = cache[viewport] { return value }
-            let value = uncachedCarriedScroll(for: node, scales: scales, turn: turn)
+            let value = uncachedCarriedScroll(for: node, scale: scale, turn: turn)
             // Raised or reparented content can precede the authored scroll ancestors in
             // presentation order. Their scales and turns become available during this paint.
             var ancestor: Int? = viewport
             while let i = ancestor {
-                guard scales[flatNodes[i].path] != nil else { return value }
+                guard scale(flatNodes[i].path) != nil else { return value }
                 ancestor = flatNodes[i].enclosingScrollIndex
             }
             cache[viewport] = value
             return value
         }
-        return uncachedCarriedScroll(for: node, scales: scales, turn: turn)
+        return uncachedCarriedScroll(for: node, scale: scale, turn: turn)
     }
 
-    private func uncachedCarriedScroll(for node: FlatNode, scales: [String: Vec2], turn: (String) -> Turn?) -> Vec2 {
+    private func uncachedCarriedScroll(for node: FlatNode, scale: (String) -> Vec2?, turn: (String) -> Turn?) -> Vec2 {
         let hasLaunches = !launchScrollById.isEmpty
         guard hasLaunches || !scrollOffsets.isEmpty else { return .zero }
         var sum = Vec2.zero
@@ -126,7 +126,7 @@ extension Runtime {
         while let item = current {
             if item.nodeId != node.nodeId, var offset = scrollOffsets[item.path] {
                 offset.y += slice2State.scrollExtraYByPath[item.path] ?? 0
-                let v = scrollInWindow(offset, scale: scales[item.path] ?? Vec2(1, 1), turn: turn(item.path))
+                let v = scrollInWindow(offset, scale: scale(item.path) ?? Vec2(1, 1), turn: turn(item.path))
                 sum.x += v.x
                 sum.y += v.y
             }

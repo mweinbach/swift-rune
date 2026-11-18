@@ -1476,7 +1476,7 @@ extension Runtime {
             let shown: Float = {
                 guard let rowRect = presentedRectByPath[reopened.rowPath] ?? nodeByPath[reopened.rowPath].map({ flatNodes[$0].targetRect }),
                       let vpRect = presentedRectByPath[vp] ?? nodeByPath[vp].map({ flatNodes[$0].targetRect }) else { return 0 }
-                let scale = presentedScaleByPath[vp]?.y ?? nodeByPath[vp].map { flatNodes[$0].inheritedScale } ?? 1
+                let scale = presentedScales[vp]?.y ?? nodeByPath[vp].map { flatNodes[$0].inheritedScale } ?? 1
                 guard scale > 1e-4 else { return 0 }
                 return max(0, (rowRect.top - vpRect.top) / scale)
             }()
@@ -2549,7 +2549,7 @@ extension Runtime {
                 continue
             }
             let sNode = flatNodes[vIdx]
-            let scale = max(1e-4, presentedScaleByPath[k.viewport]?.x ?? sNode.inheritedScale)
+            let scale = max(1e-4, presentedScales[k.viewport]?.x ?? sNode.inheritedScale)
             let delta = (drawnI.top - drawnS.top - k.was) / scale
             if abs(delta) < (1.0 / 64.0) { continue }
             let cur = scrollOffsets[k.viewport] ?? .zero
@@ -2579,9 +2579,9 @@ extension Runtime {
                   let offset = scrollOffsets[viewportPath] else { continue }
             let node = flatNodes[target.nodeIndex]
             guard let drawn = presentedRectByPath[node.path] else { continue }
-            let scale = presentedScaleByPath[viewportPath]?.y ?? 1
+            let scale = presentedScales[viewportPath]?.y ?? 1
             guard scale > 1e-4 else { continue }
-            let nodeScale = presentedScaleByPath[node.path]?.y ?? 1
+            let nodeScale = presentedScales[node.path]?.y ?? 1
             let top = (drawn.top + (target.rect.top - node.targetRect.top) * nodeScale - view.top) / scale
             let height = target.rect.height * nodeScale
             let to = min(scrollMaxExtents[viewportPath]?.y ?? 0,

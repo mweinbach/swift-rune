@@ -1164,8 +1164,7 @@ public final class Runtime<State> {
     internal var exitingSnapshots: [NodeId: FlatNode] = [:]
     internal var lastElements: [ElementInfo] = []
     internal var presentedRectByPath: [String: MotionRect] = [:]
-    internal var presentedScaleByPath: [String: Vec2] = [:]
-    internal var presentedScaleMotionById: [NodeId: PaintScaleMotion] = [:]
+    internal var presentedScales = PresentedScales()
     internal var hitGeometryByPath: [String: HitGeometry] = [:]
     internal var paintOrderPaths: [String] = []
     /// Atlas-space coverage adjustments collected only while a motion gate is recording.
@@ -4875,9 +4874,9 @@ public final class Runtime<State> {
                     var parent = dstNode.parentIndex
                     while let index = parent {
                         let ancestor = pass.nodes[index]
-                        if presentedScaleMotionById[ancestor.nodeId] == .still,
+                        if presentedScales.motion(for: ancestor.nodeId) == .still,
                            let drawn = presentedRectByPath[ancestor.path],
-                           let scale = presentedScaleByPath[ancestor.path], scale.x > 0, scale.y > 0,
+                           let scale = presentedScales[ancestor.path], scale.x > 0, scale.y > 0,
                            let sceneRect = lastFrameOutput?.byId[ancestor.nodeId]?.rect {
                             source = Vec2(sceneRect.x + (source.x - drawn.x) / scale.x,
                                           sceneRect.y + (source.y - drawn.y) / scale.y)
@@ -7826,7 +7825,7 @@ public final class Runtime<State> {
             if !flatFocusWithin, !(isPressed && el.pressBg != nil), let hBg = el.hoverBg, hoverFrac > 0.0005 {
                 fillColor = blendColorOver(bottom: fillColor, top: hBg.scaleAlpha(hoverFrac), srgb: srgbBlend)
             }
-            let carriedScrolled = carriedScroll(for: snap, scales: newScaleByPath, cache: &carriedScrollCache) { newTurnByPath[$0] }
+            let carriedScrolled = carriedScroll(for: snap, scale: { newScaleByPath[$0] }, cache: &carriedScrollCache) { newTurnByPath[$0] }
             let scrolled: Vec2 = {
                 if !el.layout.scrollAxes.isEmpty {
                     let offset = scrollOffsets[snap.path] ?? .zero
@@ -10017,8 +10016,7 @@ public final class Runtime<State> {
         imeOptionAsAlt = nextImeOptionAsAlt
         noWindowDragRects = nextNoWindowDragRects
         presentedRectByPath = newRectByPath
-        presentedScaleByPath = newScaleByPath
-        presentedScaleMotionById = nodeScaleMotionById
+        presentedScales = PresentedScales(scaleByPath: newScaleByPath, motionById: nodeScaleMotionById)
         hitGeometryByPath = newHitGeometries
         paintOrderPaths = newPaintOrder
         drawnRectByPath = newDrawnRectByPath
@@ -10219,7 +10217,7 @@ public final class Runtime<State> {
                     continue
                 }
                 if predicate(node) {
-                    let sc = presentedScaleByPath[path] ?? Vec2(1, 1)
+                    let sc = presentedScales[path] ?? Vec2(1, 1)
                     let sx = abs(sc.x) > 1e-6 ? sc.x : 1.0
                     let sy = abs(sc.y) > 1e-6 ? sc.y : 1.0
                     matches.append((node, geom.rect, Vec2((localWindowPt.x - geom.rect.x) / sx, (localWindowPt.y - geom.rect.y) / sy)))
@@ -10236,7 +10234,7 @@ public final class Runtime<State> {
                     continue
                 }
                 if predicate(node) {
-                    let sc = presentedScaleByPath[path] ?? Vec2(1, 1)
+                    let sc = presentedScales[path] ?? Vec2(1, 1)
                     let sx = abs(sc.x) > 1e-6 ? sc.x : 1.0
                     let sy = abs(sc.y) > 1e-6 ? sc.y : 1.0
                     matches.append((node, infoRect, Vec2((point.x - infoRect.x) / sx, (point.y - infoRect.y) / sy)))
@@ -11159,7 +11157,7 @@ public final class Runtime<State> {
             }
         }
 
-        let sc = presentedScaleByPath[node.path] ?? Vec2(1, 1)
+        let sc = presentedScales[node.path] ?? Vec2(1, 1)
         let safeSc = Vec2(abs(sc.x) > 1e-6 ? sc.x : 1.0, abs(sc.y) > 1e-6 ? sc.y : 1.0)
         let local = Vec2(rawLocal.x / safeSc.x, rawLocal.y / safeSc.y)
         let elemSize = Vec2(node.targetRect.width, node.targetRect.height)
@@ -14128,7 +14126,7 @@ public final class Runtime<State> {
         guard !resolvedEdit.text.isEmpty else { return TextCursorMove(utf8Offset: 0) }
         if resolvedEdit.isHiddenMultiline { return TextCursorMove(utf8Offset: resolvedEdit.text.utf8.count) }
         let rect = presentedRectByPath[node.path] ?? node.targetRect
-        let sc = presentedScaleByPath[node.path] ?? Vec2(1, 1)
+        let sc = presentedScales[node.path] ?? Vec2(1, 1)
         let innerW = max(0, rect.width - (node.el.layout.padding.left + node.el.layout.padding.right) * sc.x)
         let resolvedInput = ElDisplayResolver.resolveInput(
             el: node.el,

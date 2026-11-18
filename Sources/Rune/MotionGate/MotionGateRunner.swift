@@ -271,12 +271,12 @@ private enum MotionGateSampleHelper {
             if frame == nil, let output = rt.lastFrameOutput {
                 // The reference frame publishes the element and hit-test geometry for this step.
                 // Capture the same painter stream without replacing that geometry with a second pass.
-                let elements = rt.lastElements, rects = rt.presentedRectByPath, scales = rt.presentedScaleByPath
+                let elements = rt.lastElements, rects = rt.presentedRectByPath, scales = rt.presentedScales
                 let surfaces = rt.surfaces
                 frame = rt.buildRenderFrame(frameOut: output, now: rt.currentTime)
                 rt.lastElements = elements
                 rt.presentedRectByPath = rects
-                rt.presentedScaleByPath = scales
+                rt.presentedScales = scales
                 rt.surfaces = surfaces
             }
             let instances = frame?.instances ?? []

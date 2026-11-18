@@ -872,8 +872,8 @@ extension Runtime {
         var hitScopes: [RenderHitScope] = []
         if publishHitGeometry { hitScopes.reserveCapacity(frameOut.nodes.count) }
         var newPresentedRects = Dictionary<String, MotionRect>(minimumCapacity: frameOut.nodes.count)
-        var newPresentedScales = Dictionary<String, Vec2>(minimumCapacity: frameOut.nodes.count)
-        var newPresentedScaleMotionById = Dictionary<NodeId, PaintScaleMotion>(minimumCapacity: frameOut.nodes.count)
+        var newPresentedScales = PresentedScales(count: flatNodes.count, byPath: nodeByPath,
+                                                 byId: nodeIndexById, hasExits: !topology.exits.isEmpty)
         var drawnOverrides: [String: MotionRect] = [:]
         // Raster-only walks omit hit scopes but still need rotated ancestors for drawn bounds.
         var rasterTurns: [Int: Turn] = [:]
@@ -1331,7 +1331,7 @@ extension Runtime {
                 let anchorParentPath: String? = anchorParentId.flatMap { (mountedNode($0) ?? exitingSnapshots[$0])?.path }
                 let anchorZoom: Float = anchorParentPath.flatMap {
                     newPresentedScales[$0]?.x
-                        ?? presentedScaleByPath[$0]?.x
+                        ?? presentedScales[$0]?.x
                         ?? anchorNode.parentIndex.flatMap { flatNodes.indices.contains($0) ? flatNodes[$0].inheritedScale : nil }
                 } ?? 1.0
                 pinh = AnchorLayoutHelper.anchoredPaintTransform(
@@ -1345,9 +1345,9 @@ extension Runtime {
                 )
                 if (abs(pinh.scale.x - 1.0) > 1e-5 || abs(pinh.scale.y - 1.0) > 1e-5),
                    let aid = anchorParentId {
-                    if let cached = newPresentedScaleMotionById[aid] {
+                    if let cached = newPresentedScales.motion(for: aid) {
                         anchorScaleMotion = cached
-                    } else if let prev = presentedScaleMotionById[aid] {
+                    } else if let prev = presentedScales.motion(for: aid) {
                         anchorScaleMotion = prev
                     } else if scene.store.isAnimating(aid, Props.SCALE)
                         || scene.store.isAnimating(aid, Props.UNIFORM_SCALE)
@@ -1451,7 +1451,6 @@ extension Runtime {
                 node: nid, local: ownSc.x, world: sc.x, inherited: effectiveParentScaleMotion,
                 live: el.liveBindings.contains(where: { $0.target == .scale }), anchored: el.anchor != nil,
                 animating: ownScaleSpringMoving || ownLiveScaleMoving, at: now)
-            newPresentedScaleMotionById[nid] = nodeScaleMotion
             let restScale = el.anchor != nil && effectiveParentScaleMotion == .still ? pinh.scale.x : pinh.stillScale
             nextChildTransform.stillScale = nodeScaleMotion == .still ? sc.x : restScale
             let rasterScale = nodeScaleMotion.raster(sc: sc.x, rest: restScale)
@@ -1486,7 +1485,7 @@ extension Runtime {
 
             let visibleClipPt = intersectRects(parentClip.rectPt, effRect)
             newPresentedRects[node.path] = effRect
-            newPresentedScales[node.path] = sc
+            newPresentedScales.record(at: node.index, path: node.path, id: nid, scale: sc, motion: nodeScaleMotion)
 
             let isExiting = exitingIds.contains(nid)
             let parentSpringing = !newRectSpringingById.isEmpty && presented?.parent.flatMap { newRectSpringingById[$0] } == true
@@ -1595,7 +1594,7 @@ extension Runtime {
             } else if let turn {
                 rasterTurns[myElementIndex] = turn
             }
-            let carried = carriedScroll(for: node, scales: newPresentedScales, cache: &carriedScrollCache) { newHitGeometries[$0]?.turn }
+            let carried = carriedScroll(for: node, scale: { newPresentedScales[$0] }, cache: &carriedScrollCache) { newHitGeometries[$0]?.turn }
             let reportedScroll: Vec2
             if el.layout.scrollAxes.isEmpty {
                 reportedScroll = carried
@@ -3953,8 +3952,7 @@ extension Runtime {
         appendLinkElements(to: &newElements)
         if publishHitGeometry { lastElements = newElements }
         self.presentedRectByPath = newPresentedRects
-        self.presentedScaleByPath = newPresentedScales
-        self.presentedScaleMotionById = newPresentedScaleMotionById
+        self.presentedScales = newPresentedScales
         self.drawnRectByPath = newDrawnRectByPath
         self.rectSpringingById = newRectSpringingById
         self.surfaces = newSurfaces
