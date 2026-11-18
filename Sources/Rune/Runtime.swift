@@ -3085,7 +3085,8 @@ public final class Runtime<State> {
     }
 
     /// A fixed-width, zero-gap column can retain the geometry of its published virtual rows.
-    /// All entering rows and its outer tree still participate in the current layout solve.
+    /// During a scroll remount, fixed unified lines may share local geometry after their own
+    /// measured text fits. Author rebuilds and other entering rows use the ordinary solver.
     private func fixedVirtualRowLayout(in root: El<State>, expansion: VirtualExpansionContext, rebuilding: Bool) -> FixedVirtualRowLayout? {
         guard expansion.listMeta.count == 1, let list = expansion.listMeta.first, list.indexed,
               let rows = expansion.builtVirtualRows[list.listPath], !rows.isEmpty,
@@ -3154,6 +3155,13 @@ public final class Runtime<State> {
         // plus 0.5 can round to the next even integer before the floor operation.
         let wholeRows = style.isWholeRowsColumn
         let maximumGroupHeight = wholeRows ? 8_388_608 : FixedVirtualRowLayout.maximumExactHeight
+        // An auto-direction ancestor can read new rows until a descendant's explicit
+        // direction isolates them. Keep these text leaves in its ordinary layout solve.
+        let directionMayReadRows = ancestors.last { $0.explicitDir != nil }?.explicitDir == .auto
+        let canAdopt = !rebuilding && !directionMayReadRows
+        let isDirected = source.isUnmirrored || ancestors.contains { $0.explicitDir != nil || $0.isUnmirrored }
+        let lineTextFlow: TextFlow? = isDirected ? .ltr : nil
+        var donors: [FixedUnifiedLineKind: (El<State>, LayoutEngine.ResultNode)] = [:]
         var compact: [El<State>] = []
         var groups: [(position: Int, saved: [LayoutEngine.ResultNode])] = []
         var boxes: [NodeId: RetainedLayoutCoordinator.TextLayoutRecord] = [:]
@@ -3168,10 +3176,13 @@ public final class Runtime<State> {
             saved = []
             height = 0
         }
-        func retain(_ row: borrowing El<State>) -> Bool {
-            guard case .points(let authoredHeight) = row.layout.height else { return false }
+        func eligibleHeight(_ layout: LayoutStyle) -> Float? {
+            guard case let .points(authoredHeight) = layout.height else { return nil }
             let h = wholeRows ? LayoutStyle.wholeRowLength(authoredHeight) : authoredHeight
-            guard let key = row.storageKeyId, let entry = rows[key],
+            return h > 0 && h.rounded() == h && h <= maximumGroupHeight - height ? h : nil
+        }
+        func retain(_ row: borrowing El<State>) -> Bool {
+            guard let h = eligibleHeight(row.layout), let key = row.storageKeyId, let entry = rows[key],
                   let context = entry.layoutRootMemo, let paths = flatMemoPaths[listId.child("@" + key)],
                   let retained = paths.rowRoot,
                   (!rebuilding || (entry.memoizedRootOwner != nil && entry.reads.isEmpty &&
@@ -3184,7 +3195,6 @@ public final class Runtime<State> {
                   previous.lowerBound > 0, row.explicitDir == nil,
                   span.context.frame.scale == pixelScale, span.context.frame.fontEpoch == textSystem.currentFontEpoch,
                   span.context.frame.language == textSystem.language, span.context.frame.smoothing == textSystem.smoothing,
-                  h > 0, h.rounded() == h, h <= maximumGroupHeight - height,
                   row.layout.width == .fraction(1), row.layout.flexShrink == 0, row.layout.flexGrow == 0,
                   row.layout.margin == .all(0), row.layout.padding == .all(0), row.layout.border == .all(0),
                   !row.layout.isAbsolute, row.layout.sticky == nil, row.layout.pinLeft == nil, row.layout.pinRight == nil,
@@ -3199,11 +3209,30 @@ public final class Runtime<State> {
                   previousRoot.contentSize.x <= width, previousRoot.contentSize.y <= h else { return false }
             let layout = ComputedLayout(localRect: previousRoot.localRect, localSize: previousRoot.localSize,
                                         contentSize: previousRoot.contentSize)
-            saved.append(.init(layout: layout, children: span.children))
+            let result = LayoutEngine.ResultNode(layout: layout, children: span.children)
+            if canAdopt, let kind = row.fixedUnifiedLineKind, donors[kind] == nil {
+                donors[kind] = (copy row, result)
+            }
+            saved.append(result)
             retainedNodeCount += 1 + span.nodes.count
             for node in span.nodes {
                 if let text = nodeTextLayouts[node.nodeId] { boxes[node.nodeId] = text }
             }
+            height += h
+            return true
+        }
+        func adopt(_ row: borrowing El<State>) -> Bool {
+            guard canAdopt, let h = eligibleHeight(row.layout), let key = row.storageKeyId, let entry = rows[key],
+                  entry.layoutRootMemo != nil, let kind = row.fixedUnifiedLineKind,
+                  let (reference, geometry) = donors[kind], geometry.layout.localSize.y == h else { return false }
+            var local: [(NodeId, RetainedLayoutCoordinator.TextLayoutRecord)] = []
+            var nodeCount = 0
+            guard adoptFixedUnifiedLine(row, reference: reference, geometry: geometry,
+                                       nodeId: listId.child("@" + key), rowWidth: width, textFlow: lineTextFlow,
+                                       count: &nodeCount, boxes: &local) else { return false }
+            saved.append(geometry)
+            for (id, box) in local { boxes[id] = box }
+            retainedNodeCount += nodeCount
             height += h
             return true
         }
@@ -3214,7 +3243,7 @@ public final class Runtime<State> {
             guard child.storageKeyId != nil, !child.hasEditLens, !child.isSecure, child.liveText == nil, child.liveBindings.isEmpty,
                   child.memoLayoutChildren?.traits.contains(.mutableLayout) != true else { return nil }
             // Leave both edge children available to supply the column's intrinsic baseline.
-            if index == 0 || index + 1 == source.children.count || !retain(source.children[index]) {
+            if index == 0 || index + 1 == source.children.count || (!retain(child) && !adopt(child)) {
                 flush()
                 compact.append(source.children[index])
             }

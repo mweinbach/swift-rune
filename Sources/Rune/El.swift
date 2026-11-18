@@ -1191,7 +1191,12 @@ struct ElColdOptional<Value> {
     }
 }
 
+package enum FixedUnifiedLineKind: Hashable, Sendable {
+    case context, deletion, addition
+}
+
 final class ElColdData<State> {
+    var fixedUnifiedLineKind: FixedUnifiedLineKind?
     var memoLayoutChildren: MemoLayoutChildren<State>?
     var pixelSnapEnabled: Bool = true
     var clipRadius: Float? = nil
@@ -1521,6 +1526,7 @@ final class ElColdData<State> {
         c.handlersBox = handlersBox
         c.kitFilterKeys = kitFilterKeys
         c._runtimeExtras = _runtimeExtras
+        c.fixedUnifiedLineKind = fixedUnifiedLineKind
         c.memoLayoutChildren = memoLayoutChildren
     }
 }
@@ -1572,6 +1578,13 @@ public struct El<State> {
         else if authoredByteExactKey != nil { authoredByteExactKey = nil }
     }
     public var role: ElementRole = .group
+    /// Internal layout certificate for the fixed gutter and single stretched code leaf
+    /// authored by RuneKit's unwrapped unified diff.
+    package var fixedUnifiedLineKind: FixedUnifiedLineKind? {
+        get { _cold?.fixedUnifiedLineKind }
+        set { ensureCold().fixedUnifiedLineKind = newValue }
+    }
+
     internal var memoLayoutChildren: MemoLayoutChildren<State>? {
         get { _cold?.memoLayoutChildren }
         set { ensureCold().memoLayoutChildren = newValue }

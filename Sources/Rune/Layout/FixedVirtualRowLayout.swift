@@ -1,6 +1,61 @@
 import RuneMotion
 
 extension Runtime {
+    /// The diff constructor admits only fixed, unwrapped unified lines at whole-pixel
+    /// scales. Gutter and code route all intrinsic width variation into already sized
+    /// columns. Every text leaf still needs its own layout for drawing and hit tests.
+    func adoptFixedUnifiedLine(
+        _ el: borrowing El<State>, reference: borrowing El<State>, geometry: LayoutEngine.ResultNode,
+        nodeId: NodeId, rowWidth: Float, textFlow: TextFlow?, count: inout Int,
+        boxes: inout [(NodeId, RetainedLayoutCoordinator.TextLayoutRecord)]
+    ) -> Bool {
+        guard el.layout == reference.layout, el.children.count == reference.children.count,
+              el.children.count == geometry.children.count, el.explicitDir == nil, !el.isUnmirrored,
+              el.anchor == nil, !el.hasEditLens, !el.isSecure, el.liveText == nil,
+              el.liveBindings.isEmpty, el.outsideListDiscFont == nil, el.advanceInRun == nil,
+              el.iconPayload?.1 == reference.iconPayload?.1, el.imagePayload == nil, el.pixelsPayload == nil,
+              el.layoutAnim?.travel != .screen,
+              geometry.layout.localSize == geometry.layout.contentSize else { return false }
+        count += 1
+        let hasText = el.plainText != nil || el.richSpans != nil
+        guard hasText == (reference.plainText != nil || reference.richSpans != nil) else { return false }
+        if hasText {
+            let resolved = ElDisplayResolver.resolveText(el: copy el, rawText: el.plainText, isSecure: false,
+                                                        fallbackDirection: el.textDirByParagraph ? nil : textFlow)
+            guard el.children.isEmpty, !resolved.displayedText.isEmpty, resolved.advanceRun == nil,
+                  resolved.style.wrap == .noWrap, resolved.style.maxLines == 0, !resolved.truncateFade,
+                  resolved.pills.isEmpty else { return false }
+            let spans = resolved.spans
+            let box = textSystem.layoutKeyed(text: spans?.isEmpty == false ? "" : resolved.displayedText,
+                                             spans: spans, pills: resolved.pills, style: resolved.style,
+                                             maxWidth: nil, pixelScale: pixelScale, emitGlyphs: false,
+                                             keep: .cached, countAsRebreak: true, pretty: resolved.pretty)
+            let size = box.shaped.size
+            let padding = el.layout.padding
+            guard size.x.isFinite, size.x >= 0, size.y > 0,
+                  size.x + padding.left + padding.right <= geometry.layout.localSize.x,
+                  size.y + padding.top + padding.bottom == geometry.layout.localSize.y else { return false }
+            boxes.append((nodeId, .init(box: box, isInput: false)))
+        }
+        for i in el.children.indices {
+            let child = el.children[i]
+            let segment = child.storageKeyId.map { "@" + $0 } ?? String(i)
+            guard adoptFixedUnifiedLine(child, reference: reference.children[i], geometry: geometry.children[i],
+                                        nodeId: nodeId.child(segment), rowWidth: rowWidth, textFlow: textFlow,
+                                        count: &count, boxes: &boxes) else { return false }
+        }
+        if el.layout.flexGrow == 1 {
+            // The constructor gives the code column a single stretched text child.
+            // Its sibling is the fixed gutter. Validate the same flex arithmetic as Taffy.
+            guard el.children.count == 1, let text = boxes.last, el.children[0].richSpans != nil else { return false }
+            let inset = el.layout.padding.left + el.layout.padding.right
+            let basis = text.1.box.shaped.size.x + inset
+            let available = rowWidth - (geometry.layout.localRect.x + basis)
+            guard available >= 0, basis + available == geometry.layout.localSize.x else { return false }
+        }
+        return true
+    }
+
     /// The layout solver sees a fixed-height placeholder for each consecutive run of
     /// unchanged rows. Restore the actual children before virtual measurement and flattening.
     struct FixedVirtualRowLayout {

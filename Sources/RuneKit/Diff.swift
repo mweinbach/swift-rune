@@ -2980,7 +2980,15 @@ public struct DiffView<State>: Sendable {
                     // An ordinary unwrapped ASCII line fits the gutter's fixed height.
                     if gutterFitsCode, case .unified(let line, _, _) = model, !line.noNewline,
                        line.text.utf8.allSatisfy({ $0 == 9 || (32...126).contains($0) }) {
-                        return shell.h(lineH).child(row.h(lineH))
+                        var fixed = shell.h(lineH).child(row.h(lineH))
+                        if useSingleNodeNumbers {
+                            switch line.kind {
+                            case .context: fixed.fixedUnifiedLineKind = .context
+                            case .deletion: fixed.fixedUnifiedLineKind = .deletion
+                            case .addition: fixed.fixedUnifiedLineKind = .addition
+                            }
+                        }
+                        return fixed
                     }
                     return shell.child(row)
                 }
