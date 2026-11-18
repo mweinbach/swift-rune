@@ -247,6 +247,7 @@ public final class MemoCache: @unchecked Sendable {
         var nestedIds: [String]
         var passBuilt: UInt64
         var element: Any
+        var rowLayout: AnyObject?
     }
 
     private let lock = NSLock()
@@ -551,7 +552,7 @@ public final class MemoCache: @unchecked Sendable {
     /// Keep an already-built alternate while its owner remains mounted. Reads in the alternate
     /// are checked when it is chosen again, so they do not become dependencies of the active view.
     fileprivate func retainAlternate<State, Inputs: AnyObject>(
-        _ rawId: String, matching inputs: Inputs, in scope: MemoBuildScope, sharingLayout: Bool
+        _ rawId: String, matching inputs: Inputs, in scope: MemoBuildScope, sharingWith activeSlot: String?
     ) -> VirtualRowLayout<State>? {
         guard !scope.isVerificationDryRun else { return nil }
         var projection: VirtualRowLayout<State>?
@@ -559,10 +560,17 @@ public final class MemoCache: @unchecked Sendable {
         let touched: Set<String> = lock.withLock {
             guard let entry = entries[scopedId], entry.envHash == scope.envHash, entry.equals(inputs) else { return [] }
             // Checking a dynamic read here could invoke the dormant variant's geometry transform.
-            if sharingLayout, entry.reads.isEmpty, entry.srgbBlend == Theme.blendsSrgb(),
+            if let activeSlot, !scope.seenScopedIds.contains(scope.scopedId(for: activeSlot)),
+               entry.reads.isEmpty, entry.srgbBlend == Theme.blendsSrgb(),
                let owner = entry.deps as? Inputs, let element = entry.element as? El<State>, let memo = element.memoLayoutChildren,
                memo.traits.isDisjoint(with: [.mutableLayout, .virtual, .growth, .duplicateKeys]) {
-                projection = VirtualRowLayout(children: memo, owner: owner)
+                if let retained = entry.rowLayout as? VirtualRowLayout<State> {
+                    projection = retained
+                } else {
+                    let layout = VirtualRowLayout(children: memo, owner: owner)
+                    entries[scopedId]?.rowLayout = layout
+                    projection = layout
+                }
             }
             return markNestedTouchedLocked([scopedId], pass: scope.pass)
         }
@@ -771,8 +779,8 @@ package func memoizedVirtualRow<State, Inputs: Equatable, Context: AnyObject>(
     if let variant {
         let first = id + ":0", second = id + ":1"
         slot = variant ? second : first
-        let share = variantsShareLayout && variant && !scope.seenScopedIds.contains(scope.scopedId(for: slot))
-        otherLayout = cache.retainAlternate(variant ? first : second, matching: inputs, in: scope, sharingLayout: share)
+        let sharedSlot = variantsShareLayout && variant ? slot : nil
+        otherLayout = cache.retainAlternate(variant ? first : second, matching: inputs, in: scope, sharingWith: sharedSlot)
     } else {
         slot = id
     }

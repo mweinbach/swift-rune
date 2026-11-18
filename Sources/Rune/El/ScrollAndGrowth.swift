@@ -187,9 +187,14 @@ public struct GrowthSpec: Sendable, Hashable {
 // MARK: - Index-Built Virtual Row Source (`crates/rune/src/el/virtual_rows.rs`)
 
 // A projection retains both the geometry and the exact immutable root that authored it.
-struct VirtualRowLayout<State> {
+final class VirtualRowLayout<State> {
     let children: MemoLayoutChildren<State>
     let owner: AnyObject
+
+    init(children: MemoLayoutChildren<State>, owner: AnyObject) {
+        self.children = children
+        self.owner = owner
+    }
 }
 
 /// A virtual row returned by its builder. Only a memo that owns the entire element can
