@@ -1312,10 +1312,9 @@ extension Runtime {
         var pendingTextPaint: (() -> Void)?
         #endif
 
-        // Resolve strictly offscreen static descendants from their presented geometry.
-        // Descend normally, carrying snapped parent edges, so overflow which re-enters
-        // the viewport goes through the ordinary painter.
-        let canProjectOffscreen = publishHitGeometry && !hasRaised && !hasHolds && !hasPresenceFlights
+        // Publish resting geometry without running the material painter for clipped boxes
+        // and transparent layout containers. Their children still paint with inherited snapping.
+        let canProjectGeometry = publishHitGeometry && !hasRaised && !hasHolds && !hasPresenceFlights
             && !hasAnimatedTracks && !canPress && !canPaintFocusRing && growthRows.isEmpty
             && activeTextFlights.isEmpty && !needsInteractionPrepass && exitingIds.isEmpty
 
@@ -1333,7 +1332,7 @@ extension Runtime {
         }
 
         @inline(never)
-        func projectOffscreen(
+        func projectGeometry(
             _ node: FlatNode, _ el: El<State>, _ p: Presented,
             _ context: PaintContext, depth: Int, snap: inout PixelSnap.Inherit, stickyShift: inout Vec2,
             groupHover: inout Float
@@ -1348,11 +1347,13 @@ extension Runtime {
             let base = p.rect.offsetBy(Vec2(context.transform.dx, context.transform.dy))
             var rect = base.offsetBy(context.stickyShift)
             let clip = context.clip.clipPx
-            // The same conservative glyph overhang as TextRasterWindow.expanded, plus
-            // padding in either direction. A larger span or hard break disqualifies the node.
-            let margin = 2 * max(0, el.textStyle.size, el.textStyle.lineHeight ?? 0) + abs(el.layout.padding.top) + 3 / scale
-            guard rect.bottom + margin < max(0, clip.y) / scale ||
-                    rect.top - margin > min(Float(heightPx), clip.w) / scale else { return nil }
+            if !node.paintTraits.contains(.layoutContainer) || topology.children(of: node).isEmpty {
+                // Match TextRasterWindow.expanded, allowing padding in either direction.
+                // Visible leaves retain their own pixel-snap glide bookkeeping.
+                let margin = 2 * max(0, el.textStyle.size, el.textStyle.lineHeight ?? 0) + abs(el.layout.padding.top) + 3 / scale
+                guard rect.bottom + margin < max(0, clip.y) / scale ||
+                        rect.top - margin > min(Float(heightPx), clip.w) / scale else { return nil }
+            }
             guard elSliceRenderState.scaleSettles[id] == nil, !elSliceRenderState.groupFadeIds.contains(id),
                   !isActiveVirtualPath(node.path),
                   !dissolveParentIds.contains(id), !flightTargets.contains(id), !flightSources.contains(id)
@@ -3959,8 +3960,8 @@ extension Runtime {
                     let authoredTurn = node.el.rotate
                     let turn = (presented?.rotate ?? authoredTurn) + (loop?.rotation ?? 0)
                     func header(_ el: El<State>) -> PaintHeader {
-                        if canProjectOffscreen, node.paintTraits.contains(.offscreenGeometry), loop == nil,
-                           let presented, let result = projectOffscreen(node, el, presented, context, depth: context.hitDepth + 1,
+                        if canProjectGeometry, node.paintTraits.contains(.offscreenGeometry), loop == nil,
+                           let presented, let result = projectGeometry(node, el, presented, context, depth: context.hitDepth + 1,
                                                                        snap: &snap, stickyShift: &stickyShift, groupHover: &groupHover) {
                             return result
                         }

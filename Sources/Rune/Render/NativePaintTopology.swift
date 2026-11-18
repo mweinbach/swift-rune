@@ -13,8 +13,11 @@ struct NativePaintTraits: OptionSet {
     static let pressColor = Self(rawValue: 1 << 5)
     static let offscreenGeometry = Self(rawValue: 1 << 6)
 
+    /// A plain wrapper has no ink of its own even inside the viewport.
+    static let layoutContainer = Self(rawValue: 1 << 7)
+
     func hasSameTopology(as other: Self) -> Bool {
-        subtracting(.offscreenGeometry) == other.subtracting(.offscreenGeometry)
+        subtracting([.offscreenGeometry, .layoutContainer]) == other.subtracting([.offscreenGeometry, .layoutContainer])
     }
 
     init<State>(_ el: borrowing El<State>, inScrollViewport: Bool = false) {
@@ -25,7 +28,15 @@ struct NativePaintTraits: OptionSet {
         if el.isRaised { traits.insert(.raised) }
         if el.groupOpacity != nil { traits.insert(.groupOpacity) }
         if el.pressColor != nil { traits.insert(.pressColor) }
-        if inScrollViewport && el.allowsOffscreenGeometry { traits.insert(.offscreenGeometry) }
+        if inScrollViewport && el.allowsOffscreenGeometry {
+            traits.insert(.offscreenGeometry)
+            if !el.children.isEmpty, el.plainText == nil, el.richSpans == nil,
+               el.background.a == 0, el.borderWidth == 0, el.borderSides == nil,
+               el.stickyConfig == nil, el.hoverBg == nil, el.pressBg == nil,
+               el.focusHighlightColor == nil, el.focusFillColor == nil, el.focusRingColor == nil {
+                traits.insert(.layoutContainer)
+            }
+        }
         self = traits
     }
 }
