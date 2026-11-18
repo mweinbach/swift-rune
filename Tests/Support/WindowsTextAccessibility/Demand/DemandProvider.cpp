@@ -19,6 +19,8 @@ struct Model {
     unsigned generation = 0;
     unsigned publishedGeneration = 0;
     unsigned activations = 0;
+    unsigned paints = 0;
+    bool ready = true;
     bool insideRequest = false;
     bool activatedSynchronously = false;
 };
@@ -27,6 +29,7 @@ void activate(void *context) {
     auto &model = *static_cast<Model *>(context);
     ++model.activations;
     model.activatedSynchronously = model.insideRequest && rune_uia_active(model.host) != 0;
+    if (!model.ready) return;
     RuneUiaNode node{};
     node.id = 1;
     node.width = 24;
@@ -42,14 +45,19 @@ void activate(void *context) {
 
 LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_GETOBJECT && static_cast<LONG>(lparam) == ignoredObject) return forwardedResult;
+    if (message == WM_PAINT) {
+        auto *model = reinterpret_cast<Model *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (model) ++model->paints;
+    }
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
-bool runCase(HINSTANCE instance, LONG firstObject, bool zeroExtend) {
+bool runCase(HINSTANCE instance, LONG firstObject, bool zeroExtend, bool deferFirst = false) {
     HWND hwnd = CreateWindowExW(0, windowClass, L"", WS_OVERLAPPED, 0, 0, 80, 60,
                                 nullptr, nullptr, instance, nullptr);
     if (!hwnd) return false;
     Model model;
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&model));
     model.host = rune_uia_attach(hwnd);
     if (!model.host) { DestroyWindow(hwnd); return false; }
     rune_uia_on_demand(model.host, &model, activate);
@@ -70,19 +78,30 @@ bool runCase(HINSTANCE instance, LONG firstObject, bool zeroExtend) {
         if (request(ignoredObject, i % 2 != 0) != forwardedResult ||
             rune_uia_active(model.host) || model.activations != 0 || model.publishedGeneration != 0) dormant = false;
     }
+    bool deferred = true;
+    const unsigned activations = deferFirst ? 2 : 1;
+    const unsigned priorPaints = model.paints;
+    if (deferFirst) {
+        model.ready = false;
+        request(OBJID_CLIENT, false);
+        deferred = model.activatedSynchronously && model.activations == 1 && model.publishedGeneration == 0;
+        ++model.generation;
+        model.ready = true;
+    }
     request(firstObject, zeroExtend);
-    bool first = model.activatedSynchronously && model.activations == 1 &&
+    if (deferFirst && model.paints != priorPaints) deferred = false;
+    bool first = model.activatedSynchronously && model.activations == activations &&
                  model.publishedGeneration == model.generation && rune_uia_active(model.host);
     request(OBJID_CLIENT, true);
     request(UiaRootObjectId, false);
     request(0, false);
-    bool once = model.activations == 1;
-    std::printf("first=%ld encoding=%s ignored_forwarded_dormant=%d synchronous_latest=%d activations=%u published=%u\n",
+    bool once = model.activations == activations;
+    std::printf("first=%ld encoding=%s ignored_forwarded_dormant=%d synchronous_latest=%d activations=%u published=%u deferred=%d\n",
                 static_cast<long>(firstObject), zeroExtend ? "zero-extended" : "signed", dormant, first,
-                model.activations, model.publishedGeneration);
+                model.activations, model.publishedGeneration, deferFirst);
     rune_uia_detach(model.host);
     DestroyWindow(hwnd);
-    return dormant && first && once;
+    return dormant && deferred && first && once;
 }
 } // namespace
 
@@ -98,6 +117,7 @@ int main() {
         if (!runCase(instance, id, false)) ok = false;
         if (!runCase(instance, id, true)) ok = false;
     }
+    if (!runCase(instance, UiaRootObjectId, false, true)) ok = false;
     UnregisterClassW(windowClass, instance);
     return ok ? 0 : 1;
 }
