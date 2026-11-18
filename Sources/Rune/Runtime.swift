@@ -6243,8 +6243,10 @@ public final class Runtime<State> {
         var nextSelectedByGroup: [String: String] = [:]
         for i in layoutObservers.focusFollowsSelection {
             let gNode = flatNodes[i]
-            let members = groupMemberIndices(groupIndex: gNode.index)
-            if let selIdx = members.first(where: { flatNodes[$0].el.isFocusSelected }) {
+            let prefix = gNode.path + "/"
+            if let selIdx = layoutObservers.focusSelected.first(where: { i in
+                i != gNode.index && (flatNodes[i].path == gNode.path || flatNodes[i].path.hasPrefix(prefix)) && canFocusIndex(i)
+            }) {
                 let selPath = flatNodes[selIdx].path
                 nextSelectedByGroup[gNode.path] = selPath
                 if let cur = nextIdx,

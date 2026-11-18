@@ -272,9 +272,11 @@ extension Runtime {
     }
 
     internal func settleKitHoverDelays(at pos: Vec2, now: Double) {
+        guard !layoutObservers.kitHoverDelays.isEmpty || !kitHooks.hoverDelays.isEmpty else { return }
         let mayEnter = pressedPath == nil && activeDrag == nil && !kitHooks.hoverHoldAfterActionUntilMove
         var activeSpecByPath: [String: (enter: Double, leave: Double)] = [:]
-        for node in flatNodes {
+        for index in layoutObservers.kitHoverDelays {
+            let node = flatNodes[index]
             guard let spec = node.el.kitHoverDelaysSpec, let onHover = node.el.handlers.onHover else { continue }
             activeSpecByPath[node.path] = spec
             kitHooks.hoverDelayCallbacks[node.path] = { boxed, inside, tx in
@@ -425,8 +427,8 @@ extension Runtime {
     internal func dispatchContextMenuKey(
         _ ev: KeyEvent,
         at now: Double,
-        drawnRectByPath: [String: MotionRect],
-        presentedRectByPath: [String: MotionRect]
+        drawnRectByPath: FrameGeometry<MotionRect>,
+        presentedRectByPath: FrameGeometry<MotionRect>
     ) -> Bool {
         let m = ev.mods
         let plain = !m.cmd && !m.ctrl && !m.alt && !m.logo

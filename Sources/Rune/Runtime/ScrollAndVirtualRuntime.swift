@@ -3483,25 +3483,29 @@ extension Runtime {
 
     internal func checkFocusAndRevealSelected() {
         defer { suppressRevealFromHoverCommit = false }
-        var newFocusedKey: String? = nil
-        var newFocusedPath: String? = nil
-        for node in flatNodes {
-            if node.el.isFocusSelected && node.el.focusable && !node.effectiveInert {
-                if !lastFocusSelectedPaths.contains(node.path) {
-                    newFocusedPath = node.path
-                    newFocusedKey = node.key
-                }
-            }
-            if node.el.isRevealSelected && !isDispatchingHover && !suppressRevealFromHoverCommit && !lastRevealSelectedPaths.contains(node.path) {
-                let targetKey = node.key ?? node.path
-                pendingScrollReveals.append(.intoView(scope: nil, key: targetKey))
+        var newFocus: Int?
+        var selectedPaths: Set<String> = []
+        for i in layoutObservers.focusSelected {
+            let node = flatNodes[i]
+            selectedPaths.insert(node.path)
+            if node.el.focusable && !node.effectiveInert && !lastFocusSelectedPaths.contains(node.path) {
+                newFocus = i
             }
         }
-        lastFocusSelectedPaths = Set(flatNodes.filter { $0.el.isFocusSelected }.map(\.path))
-        lastRevealSelectedPaths = Set(flatNodes.filter { $0.el.isRevealSelected }.map(\.path))
-        if let fp = newFocusedPath {
-            focusedPath = fp
-            focusedKey = newFocusedKey
+        lastFocusSelectedPaths = selectedPaths
+
+        var revealPaths: Set<String> = []
+        for i in layoutObservers.revealSelected {
+            let node = flatNodes[i]
+            revealPaths.insert(node.path)
+            if !isDispatchingHover && !suppressRevealFromHoverCommit && !lastRevealSelectedPaths.contains(node.path) {
+                pendingScrollReveals.append(.intoView(scope: nil, key: node.key ?? node.path))
+            }
+        }
+        lastRevealSelectedPaths = revealPaths
+        if let i = newFocus {
+            focusedPath = flatNodes[i].path
+            focusedKey = flatNodes[i].key
         }
     }
 }
