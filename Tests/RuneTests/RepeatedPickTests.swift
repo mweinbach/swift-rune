@@ -1,3 +1,4 @@
+import Foundation
 import RuneMotion
 import Testing
 @testable import Rune
@@ -71,4 +72,51 @@ import Testing
     for _ in 0..<14 { #expect(rt.elementAt(10, 10)?.path == "a") }
     rt.paintOrderPaths = prefix + ["a", "b"]
     for _ in 0..<14 { #expect(rt.elementAt(10, 10)?.path == "b") }
+}
+
+@Test func inputHitCandidatesFollowPublishedPaintOrderAndFallbackGeometry() {
+    let order = (0..<160).map(String.init)
+    let slots = Dictionary(uniqueKeysWithValues: order.reversed().enumerated().map { ($1, $0) })
+    let screen = MotionRect.fromXYWH(0, 0, 200, 300)
+    var geometry = FrameGeometry<HitGeometry>(pathSlots: slots)
+    for (index, path) in order.enumerated() {
+        let rect = MotionRect.fromXYWH(0, index == 41 ? 4 : 304, 20, 20)
+        let turn = index == 130 ? Turn(a: 1, b: 0, c: 0, d: 1, tx: 0, ty: -300) : nil
+        geometry.record(HitGeometry(paintOrder: index, rect: rect, clipRect: rect, outerClip: screen,
+                                    turn: turn, opacity: 1, isExiting: false, hasVisualBlocker: false,
+                                    isInteractiveBlocker: false), at: slots[path]!, path: path)
+    }
+    var candidates = RepeatedPickCandidates()
+    candidates.didPublishNativeOrder(geometry, count: order.count)
+    let point = Vec2(5, 10)
+    #expect(candidates.inputPaths(at: point, order: order, geometry: geometry) == ["41", "130"])
+    #expect(candidates.inputPaths(at: Vec2(25, 10), order: order, geometry: geometry).isEmpty)
+    // Missing presented geometry falls back to the live flat node during input dispatch.
+    geometry["41"] = nil
+    candidates.didPublishNativeOrder(geometry, count: order.count)
+    #expect(candidates.inputPaths(at: point, order: order, geometry: geometry) == order)
+}
+
+@Test func dropFilterCanRepaintAnInitiallyMissedTargetUnderThePointer() {
+    var moveTarget: (() -> Void)?
+    let rt = Runtime<Bool>(state: false, viewport: Vec2(160, 160)) { moved, _ in
+        let filler: [El<Bool>] = (0..<128).map { el().key("f\($0)").size(1, 1).absolute(x: 140, y: 140) }
+        let lower: El<Bool> = el().key("lower").size(30, 30).absolute(x: moved ? 0 : 90, y: 0)
+            .onDropFiles { _, _, _ in }
+        let upper: El<Bool> = el().key("upper").size(30, 30).absolute(x: 0, y: 0)
+            .acceptsFiles { _ in moveTarget?(); return false }
+        return el().key("root").size(160, 160).children(filler + [lower, upper])
+    }
+    _ = rt.renderFrame(at: 0)
+    moveTarget = { [weak rt] in
+        guard let rt else { return }
+        rt.state = true
+        rt.invalidate(at: 1)
+        _ = rt.renderFrame(at: 1)
+        rt.settleAll()
+        _ = rt.renderFrame(at: 2)
+    }
+    let hit = rt.dropTargetHitTest(at: Vec2(5, 5), for: [URL(fileURLWithPath: "/file")])
+    #expect(rt.state)
+    #expect(hit?.key == "lower")
 }

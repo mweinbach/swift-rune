@@ -79,6 +79,23 @@ struct RepeatedPickCandidates {
     private var picks = 0
     private var height: Float = 0
     private var bands: [[String]] = []
+    private var publishedHitSlots = false
+    private var lastInput: (point: Vec2, paths: [String])?
+
+    /// A native paint emits one slot and one order entry for each ordinary hit target.
+    /// Synthetic reports or exits can break the correspondence and keep the path-based walk.
+    mutating func didPublishNativeOrder(_ geometry: FrameGeometry<HitGeometry>, count: Int) {
+        publishedHitSlots = count >= 128 && geometry.hasIndexedPaintOrder(count)
+        lastInput = nil
+    }
+
+    mutating func inputPaths(at point: Vec2, order: [String], geometry: FrameGeometry<HitGeometry>) -> [String] {
+        guard publishedHitSlots else { return order }
+        if let lastInput, lastInput.point == point { return lastInput.paths }
+        let paths = geometry.intersectingPaths(at: point, order: order)
+        lastInput = (point, paths)
+        return paths
+    }
 
     private func band(_ y: Float) -> Int {
         min(bands.count - 1, Int(y / height * Float(bands.count)))
@@ -108,6 +125,25 @@ struct RepeatedPickCandidates {
             }
         }
         return point.y < height ? bands[band(point.y)] : order
+    }
+}
+
+private extension FrameGeometry where Value == HitGeometry {
+    func hasIndexedPaintOrder(_ count: Int) -> Bool {
+        !boxes.isEmpty && populated == count && byPath.isEmpty
+    }
+
+    /// Scan contiguous paint geometry before resolving the few intersected paths in
+    /// the current mount. A commit may have moved a path to a different mount slot.
+    func intersectingPaths(at point: Vec2, order: [String]) -> [String] {
+        var hits: [Int] = []
+        for case let hit? in boxes where hit.contains(point) {
+            // A dense stack of overlapping nodes is cheaper to query in its original order.
+            if hits.count == 32 { return order }
+            hits.append(hit.paintOrder)
+        }
+        hits.sort()
+        return hits.map { order[$0] }
     }
 }
 

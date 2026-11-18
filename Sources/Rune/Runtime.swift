@@ -10311,11 +10311,13 @@ public final class Runtime<State> {
     internal func hitTestDetailed(
         at point: Vec2,
         ignoreBlockers: Bool = false,
+        canRepaintDuringQuery: Bool = false,
         predicate: ((FlatNode) -> Bool)? = nil
     ) -> (node: FlatNode, rect: MotionRect, localPoint: Vec2)? {
         let orderedPaths: [String]
         if !paintOrderPaths.isEmpty {
-            orderedPaths = paintOrderPaths
+            orderedPaths = canRepaintDuringQuery ? paintOrderPaths :
+                pickCandidates.inputPaths(at: point, order: paintOrderPaths, geometry: hitGeometryByPath)
         } else {
             let sortedIndices = flatNodes.indices.sorted { a, b in
                 let za = flatNodes[a].zOrder
@@ -10382,7 +10384,7 @@ public final class Runtime<State> {
     ) -> [(node: FlatNode, rect: MotionRect, localPoint: Vec2)] {
         let orderedPaths: [String]
         if !paintOrderPaths.isEmpty {
-            orderedPaths = paintOrderPaths
+            orderedPaths = pickCandidates.inputPaths(at: point, order: paintOrderPaths, geometry: hitGeometryByPath)
         } else {
             let sortedIndices = flatNodes.indices.sorted { a, b in
                 let za = flatNodes[a].zOrder
@@ -10445,7 +10447,8 @@ public final class Runtime<State> {
     // MARK: - Internal Platform Input Bridges
 
     internal func dropTargetHitTest(at point: Vec2, for urls: [URL]) -> (path: String, key: String?, rect: MotionRect, spec: DropSpec<State>)? {
-        guard let hit = hitTest(at: point, predicate: { node in
+        // The app's URL filter can change the presented geometry before testing a lower target.
+        guard let hit = hitTestDetailed(at: point, canRepaintDuringQuery: true, predicate: { node in
             guard let spec = node.el.handlers.drop else { return false }
             let (accepted, rejected) = spec.split(urls)
             return !accepted.isEmpty || (!rejected.isEmpty && spec.claimsRejects)

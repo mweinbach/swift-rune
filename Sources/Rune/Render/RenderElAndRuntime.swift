@@ -4162,6 +4162,7 @@ extension Runtime {
                 for i in reports.indices { paths.append(reports[i].path) }
                 return paths
             }
+            pickCandidates.didPublishNativeOrder(newHitGeometries, count: newElements.count)
             if let firstRaised = raisedRanges.first {
                 // Paint lifted subtrees last, then return them to their tree positions for inspection.
                 var order: [Int] = []
