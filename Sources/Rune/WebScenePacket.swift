@@ -13,6 +13,7 @@ struct WebScenePacket {
     let glyphTransfers: (pages: [R8Atlas], updates: [WebAtlasUpdate])?
     let sequence: SIMD2<UInt32>?
     let byteCount: Int
+    private let glyphByteLimit: Int?
     let surfaces: WebSurfacePacket
 
     init?(scene: RenderFrame, sendGlyphs: Bool, sendImages: Bool,
@@ -58,13 +59,15 @@ struct WebScenePacket {
         } else {
             imageBytes = length(imageUpdate, texelBytes: scene.images.texels.count, channels: 4)
         }
+        let height = scene.webGlyphHeight
+        glyphByteLimit = height < scene.baseGlyphAtlas.height ? scene.baseGlyphAtlas.width * height : nil
         let glyphBytes: Int
         if let glyphTransfers {
             guard pageUpdates != nil, glyphUpdate == .none,
                   let bytes = pageBytes(glyphTransfers.pages, glyphTransfers.updates) else { return nil }
             glyphBytes = bytes
         } else {
-            glyphBytes = glyphUpdate == .none ? 0 : length(glyphUpdate, texelBytes: scene.glyphs.texels.count, channels: 1)
+            glyphBytes = glyphUpdate == .none ? 0 : length(glyphUpdate, texelBytes: glyphByteLimit ?? scene.glyphs.texels.count, channels: 1)
         }
         var size = Self.headerSize + (sequence == nil ? 0 : 8)
         for fieldSize in [bytes, glyphBytes, imageBytes, surfaces.bytes.count] {
@@ -93,7 +96,7 @@ struct WebScenePacket {
             | flags(for: imageUpdate, full: 4, patch: 16) | (sequence == nil ? 0 : 32) | (glyphTransfers == nil ? 0 : 128)
         let header: [UInt32] = [
             pageUpdates == nil ? Self.magic : Self.pagedMagic, UInt32(scene.width), UInt32(scene.height), sceneFlags, UInt32(scene.instances.count),
-            UInt32(glyphTransfers?.pages.count ?? scene.baseGlyphAtlas.width), glyphTransfers == nil ? UInt32(scene.baseGlyphAtlas.height) : 0,
+            UInt32(glyphTransfers?.pages.count ?? scene.baseGlyphAtlas.width), glyphTransfers == nil ? UInt32(scene.webGlyphHeight) : 0,
             UInt32(pageUpdates?.count ?? scene.images.width), pageUpdates == nil ? UInt32(scene.images.height) : 0,
             scene.clearColor.x.bitPattern, scene.clearColor.y.bitPattern, scene.clearColor.z.bitPattern, scene.clearColor.w.bitPattern, UInt32(surfaces.count),
         ]
@@ -113,10 +116,13 @@ struct WebScenePacket {
             destination.storeBytes(of: Float(mark >> 16), toByteOffset: border + 4, as: Float.self)
         }
         if let sequence { withUnsafeBytes(of: sequence, append) }
-        func appendAtlas(_ update: WebAtlasUpdate, texels: [UInt8], width: Int, channels: Int) {
+        func appendAtlas(_ update: WebAtlasUpdate, texels: [UInt8], width: Int, channels: Int, limit: Int? = nil) {
             switch update {
             case .none: break
-            case .full: texels.withUnsafeBytes(append)
+            case .full:
+                texels.withUnsafeBytes { source in
+                    append(UnsafeRawBufferPointer(rebasing: source.prefix(limit ?? source.count)))
+                }
             case .patch(let edges):
                 let w = edges.z - edges.x, h = edges.w - edges.y
                 let geometry = SIMD4(UInt32(edges.x), UInt32(edges.y), UInt32(w), UInt32(h))
@@ -142,7 +148,7 @@ struct WebScenePacket {
             appendPages(glyphTransfers.pages, glyphTransfers.updates)
         } else if glyphUpdate != .none {
             let glyphs = scene.glyphs
-            appendAtlas(glyphUpdate, texels: glyphs.texels, width: glyphs.width, channels: 1)
+            appendAtlas(glyphUpdate, texels: glyphs.texels, width: glyphs.width, channels: 1, limit: glyphByteLimit)
         }
         if let pageUpdates {
             appendPages(scene.webImagePages, pageUpdates)

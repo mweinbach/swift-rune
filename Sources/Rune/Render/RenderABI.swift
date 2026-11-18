@@ -722,8 +722,10 @@ public struct RenderFrame: Sendable {
     internal var rawGlyphPageRevisions: [UInt64] = []
     internal var rawGlyphPagePatches: [GlyphAtlasPatch?] = []
     internal var glyphPagePatches: [GlyphAtlasPatch?] = []
+    internal var baseGlyphUsedRows: Int?
 
     private mutating func invalidateGlyphReceipts() {
+        baseGlyphUsedRows = nil
         glyphPageRevisions = []
         rawGlyphPageRevisions = []
         rawGlyphPagePatches = []
@@ -787,7 +789,10 @@ public struct RenderFrame: Sendable {
         knownGlyphMaskUse ?? instances.contains { $0.params.y == KIND_GLYPH && $0.radii.w == 0 }
     }
     public var instances: [RenderInstance] {
-        didSet { knownGlyphMaskUse = nil }
+        didSet {
+            knownGlyphMaskUse = nil
+            baseGlyphUsedRows = nil
+        }
     }
     public var marks: [UInt32]
     public var surfaces: [SurfaceDraw]

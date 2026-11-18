@@ -162,6 +162,78 @@ import RuneRef
         #expect(single.glyph == .full && single.image == .full && single.sequence == SIMD2(4, 5))
     }
 
+    @Test func glyphSnapshotGrowsAtTheFilteringGutterAndRestoresAfterMissedUpdates() throws {
+        let width = 6, height = 700
+        let atlas = GlyphAtlas(width: width, height: height)
+        func frame() -> RenderFrame {
+            let pages = atlas.framePages()
+            var scene = RenderFrame(width: 16, height: 16, glyphs: pages.bases[0],
+                                    glyphPages: pages.bases.count > 1 ? pages.bases : [],
+                                    glyphGeneration: pages.generation)
+            scene.baseGlyphUsedRows = pages.baseUsedRows
+            scene.glyphPageRevisions = pages.revisions
+            scene.glyphPagePatches = pages.patches
+            return scene
+        }
+        func wire(_ scene: RenderFrame, _ transfer: WebAtlasTransfer) throws -> [UInt8] {
+            let encoded = try WebScenePacket(scene: scene, glyphUpdate: transfer.glyph, imageUpdate: transfer.image,
+                                             sequence: transfer.sequence, pageUpdates: transfer.images, glyphTransfers: transfer.glyphs)
+            let packet = try #require(encoded)
+            var bytes = [UInt8](repeating: 0, count: packet.byteCount)
+            bytes.withUnsafeMutableBytes { packet.write(to: $0.baseAddress!) }
+            return bytes
+        }
+        func word(_ bytes: [UInt8], _ offset: Int) -> UInt32 {
+            bytes.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt32.self) }
+        }
+
+        var history = WebAtlasHistory()
+        _ = try #require(atlas.placeMask(width: 2, height: 254, bitmap: Array(repeating: 127, count: 2 * 254)))
+        let first = frame(), start = WebScenePacket.headerSize + 8
+        let initial = history.prepare(first, force: false, patches: true)
+        let bytes = try wire(first, initial)
+        #expect(first.baseGlyphUsedRows == 256 && word(bytes, 24) == 256)
+        #expect(initial.glyph == .full && initial.image == .full)
+        #expect(bytes.count == start + width * 256 + 4)
+        #expect(Array(bytes[start..<(start + width * 256)]) == Array(first.glyphs.texels.prefix(width * 256)))
+        #expect(bytes[start + 254 * width + 1] == 127 && bytes[start + 255 * width + 1] == 0)
+        history.record(first, initial)
+
+        _ = try #require(atlas.placeMask(width: 1, height: 255, bitmap: Array(repeating: 212, count: 255)))
+        let grown = frame()
+        let resize = history.prepare(grown, force: false, patches: true)
+        let resized = try wire(grown, resize)
+        #expect(grown.baseGlyphUsedRows == 257 && word(resized, 24) == 512)
+        #expect(resize.glyph == .full && resize.image == .none)
+        #expect(Array(resized.dropFirst(start)) == Array(grown.glyphs.texels.prefix(width * 512)))
+        history.record(grown, resize)
+
+        // The consumer missed the resize. Its forced recovery must be self-contained.
+        let restore = history.prepare(grown, force: true, patches: true)
+        let restored = try wire(grown, restore)
+        #expect(restore.sequence?.x != initial.sequence?.y)
+        #expect(restore.glyph == .full && restore.image == .full && word(restored, 24) == 512)
+        #expect(Array(restored.dropFirst(start)) == Array(resized.dropFirst(start)) + grown.images.texels)
+        history.record(grown, restore)
+
+        var edited = grown
+        edited.glyphs.texels[(height - 1) * width] = 233
+        let changed = history.prepare(edited, force: false, patches: true)
+        let editedBytes = try wire(edited, changed)
+        #expect(edited.baseGlyphUsedRows == nil && word(editedBytes, 24) == UInt32(height))
+        #expect(changed.glyph == .full && editedBytes[start + (height - 1) * width] == 233)
+
+        let overflow = try #require(atlas.placeMask(width: 4, height: 698, bitmap: Array(repeating: 89, count: 4 * 698)))
+        #expect(overflow.page == 1)
+        let paged = frame()
+        let bank = history.prepare(paged, force: false, patches: true)
+        let pagedBytes = try wire(paged, bank)
+        #expect(bank.glyphs?.updates == [.full, .full])
+        #expect(word(pagedBytes, 0) == WebScenePacket.pagedMagic && word(pagedBytes, 20) == 2)
+        #expect(word(pagedBytes, start + 4) == UInt32(height))
+        #expect(word(pagedBytes, start + 12 + width * height + 4) == UInt32(height))
+    }
+
     @MainActor @Test func idleBrowserFramesServeScheduledHover() throws {
         struct Model { var entered = false }
         let spec = AppSpec(title: "Hover", size: Vec2(50, 50), state: Model()) { _, _ in

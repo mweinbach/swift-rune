@@ -1222,6 +1222,7 @@ public final class GlyphAtlas: @unchecked Sendable {
     private var publishedPages: PageSnapshot?
 
     internal struct PageSnapshot {
+        let baseUsedRows: Int
         let bases: [R8Atlas]
         let fills: [OutlineMaskPlan?]
         let revisions: [UInt64]
@@ -1262,7 +1263,9 @@ public final class GlyphAtlas: @unchecked Sendable {
                     pageChanges[i] = change
                 }
             }
-            let snapshot = PageSnapshot(bases: bases, fills: maskPagePlansLocked(bases: bases),
+            // A recycled shelf keeps its old texels. Only a fresh page guarantees a zero tail.
+            let baseUsedRows = maskPageEpochs[0] == nil ? (page0Shelf.usedRows()?.1 ?? 0) : pageZero.height
+            let snapshot = PageSnapshot(baseUsedRows: baseUsedRows, bases: bases, fills: maskPagePlansLocked(bases: bases),
                                 revisions: revisions, rawRevisions: rawRevisions, patches: patches, rawPatches: rawPatches, generation: generation)
             publishedPages = snapshot
             return snapshot

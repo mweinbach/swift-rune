@@ -10,18 +10,20 @@ enum WebAtlasUpdate: Equatable, Sendable {
     /// The caller supplies the resident image only when its width, height and format match.
     /// Known bounds must describe every write since that resident revision.
     static func update(width: Int, height: Int, channels: Int, texels: [UInt8],
-                       previous: [UInt8]?, changed: Bool, knownEdges: SIMD4<Int>? = nil) -> Self {
+                       previous: [UInt8]?, changed: Bool, knownEdges: SIMD4<Int>? = nil, visibleRows: Int? = nil) -> Self {
         guard let previous, previous.count == texels.count, width > 0, height > 0,
               channels == 1 || channels == 4 else { return .full }
         let (rowBytes, rowOverflow) = width.multipliedReportingOverflow(by: channels)
         let (size, sizeOverflow) = rowBytes.multipliedReportingOverflow(by: height)
         guard !rowOverflow, !sizeOverflow, size == texels.count else { return .full }
+        let rows = visibleRows ?? height
+        guard (1...height).contains(rows) else { return .full }
         guard changed else { return .none }
 
         func upload(_ edges: SIMD4<Int>) -> Self {
             let payload = (edges.z - edges.x) * channels * (edges.w - edges.y)
             // A rectangle costs four additional UInt32s on the wire.
-            return size - payload <= 16 ? .full : .patch(edges)
+            return rowBytes * rows - payload <= 16 ? .full : .patch(edges)
         }
 
         return previous.withUnsafeBufferPointer { old in
@@ -29,13 +31,13 @@ enum WebAtlasUpdate: Equatable, Sendable {
                 guard let oldBase = old.baseAddress, let newBase = new.baseAddress,
                       oldBase != newBase else { return .none }
                 if let edges = knownEdges, edges.x >= 0, edges.y >= 0,
-                   edges.z <= width, edges.w <= height, edges.x < edges.z, edges.y < edges.w {
+                   edges.z <= width, edges.w <= rows, edges.x < edges.z, edges.y < edges.w {
                     return upload(edges)
                 }
 
                 // Compare entire rows in libc. Only differing rows can extend the dirty edges.
-                var leftByte = rowBytes, rightByte = 0, top = height, bottom = 0
-                for y in 0..<height {
+                var leftByte = rowBytes, rightByte = 0, top = rows, bottom = 0
+                for y in 0..<rows {
                     let a = oldBase + y * rowBytes
                     let b = newBase + y * rowBytes
                     guard memcmp(a, b, rowBytes) != 0 else { continue }
@@ -67,6 +69,16 @@ extension R8Atlas: WebAtlasPixels { static var webChannels: Int { 1 } }
 extension RGBA8Atlas: WebAtlasPixels { static var webChannels: Int { 4 } }
 
 extension RenderFrame {
+    /// The first shelf page grows from 256 rows as in Rust's renderer. UVs use absolute
+    /// texels, and the published extent includes the transparent filtering gutter.
+    var webGlyphHeight: Int {
+        let height = baseGlyphAtlas.height
+        guard let rows = baseGlyphUsedRows, baseGlyphPages.isEmpty, rows >= 0, rows < height else { return height }
+        var capacity = min(256, height)
+        while capacity < rows { capacity = min(capacity * 2, height) }
+        return capacity
+    }
+
     /// RSG3 always carries image descriptors, even if only the glyph atlas has overflowed.
     var webImagePages: [RGBA8Atlas] { imagePages.isEmpty ? [images] : imagePages }
     var webImageRevisions: [UInt64] { imagePages.isEmpty ? [imageRevision] : imagePageRevisions }
@@ -130,7 +142,7 @@ struct WebAtlasHistory {
     private var imageRevisions: [UInt64] = []
 
     private func atlasSizes(_ frame: RenderFrame) -> SIMD4<Int> {
-        SIMD4(frame.baseGlyphAtlas.width, frame.baseGlyphAtlas.height, frame.images.width, frame.images.height)
+        SIMD4(frame.baseGlyphAtlas.width, frame.webGlyphHeight, frame.images.width, frame.images.height)
     }
 
     /// Keep CPU-filled outline masks while their page revision is resident. A new runtime
@@ -174,8 +186,10 @@ struct WebAtlasHistory {
             transfer.glyph = .none
             slotsChanged = WebAtlasUpdate.slotsChanged(pages, since: glyphPages)
         } else if !fullGlyph && changedGlyphs {
-            transfer.glyph = .update(width: sizesNow.x, height: sizesNow.y, channels: 1, texels: frame.glyphs.texels,
-                                     previous: glyphTexels, changed: true)
+            let patch = frame.glyphPagePatches.first ?? nil
+            let edges = patch?.fromRevision == glyphRevisions.first ? patch?.edges : nil
+            transfer.glyph = .update(width: sizesNow.x, height: frame.baseGlyphAtlas.height, channels: 1, texels: frame.glyphs.texels,
+                                     previous: glyphTexels, changed: true, knownEdges: edges, visibleRows: sizesNow.y)
         }
         if paged {
             transfer.images = WebAtlasUpdate.imagePages(frame, previous: imagePages, revisions: imageRevisions, force: full)
@@ -203,7 +217,7 @@ struct WebAtlasHistory {
             imagePages = transfer.images == nil ? [] : frame.webImagePages
             imageRevisions = transfer.images == nil ? [] : frame.webImageRevisions
             glyphPages = transfer.glyphs?.pages ?? []
-            glyphRevisions = transfer.glyphs == nil ? [] : frame.glyphPageRevisions
+            glyphRevisions = frame.glyphPageRevisions
         } else {
             glyphTexels = nil
             imageTexels = nil

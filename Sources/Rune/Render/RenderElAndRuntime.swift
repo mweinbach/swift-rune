@@ -4229,6 +4229,7 @@ extension Runtime {
         }
         output.glyphPageFills = glyphAtlas.fills
         if glyphAtlas.bases.count == 1 { output.maskFills = glyphAtlas.fills.first ?? nil }
+        output.baseGlyphUsedRows = glyphAtlas.baseUsedRows
         output.glyphPageRevisions = glyphAtlas.revisions
         output.rawGlyphPageRevisions = glyphAtlas.rawRevisions
         output.glyphPagePatches = glyphAtlas.patches
