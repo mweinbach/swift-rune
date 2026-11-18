@@ -318,9 +318,8 @@ extension Runtime {
     /// `REDUCED_FADE` instead of springing it (upstream `store.rs::animate_raw`).
     internal func syncPressColorTracks(at now: Double, cut: Bool) {
         let snapImmediately = cut
-        for node in flatNodes {
-            let el = node.el
-            guard el.pressColor != nil || (el.pressBg?.a ?? 0) > 0 else { continue }
+        for i in layoutObservers.pressColors {
+            let node = flatNodes[i]
             let nid = node.nodeId
             let trackId = Self.pressTrackId(nid)
             let pressed = isNodePressedVisually(

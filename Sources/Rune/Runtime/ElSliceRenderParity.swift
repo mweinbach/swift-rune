@@ -390,15 +390,20 @@ internal extension Runtime {
         }
         let reduce = reducedMotion || cxSettings.hostReducedMotion
         syncPressColorTracks(at: now, cut: cut)
-        for node in flatNodes {
-            let nid = node.nodeId
-            guard scene.contains(nid) else { continue }
-            guard let k = node.el.pressScaleFactor else {
-                if scene.store.has(nid, Props.PRESS_SCALE) {
-                    scene.store.remove(nid, Props.PRESS_SCALE)
-                }
-                continue
+        // A departing node keeps its presentation track until the scene retires it.
+        // A live node that dropped the modifier must stop scaling immediately.
+        for nid in pressScaleTrackOwners {
+            if !scene.store.has(nid, Props.PRESS_SCALE) {
+                pressScaleTrackOwners.remove(nid)
+            } else if let i = nodeIndexById[nid], flatNodes[i].el.pressScaleFactor == nil, scene.contains(nid) {
+                scene.store.remove(nid, Props.PRESS_SCALE)
+                pressScaleTrackOwners.remove(nid)
             }
+        }
+        for i in layoutObservers.pressScales {
+            let node = flatNodes[i]
+            let nid = node.nodeId
+            guard let k = node.el.pressScaleFactor, scene.contains(nid) else { continue }
             let isDown = !cut && !reduce && isNodePressedVisually(node, restingContains: pressRestingContains(path: node.path, at: pointerPosition))
             let target: Float = isDown ? k : 1.0
             if cut || reduce {
@@ -410,6 +415,7 @@ internal extension Runtime {
             if !scene.store.has(nid, Props.PRESS_SCALE) {
                 if abs(target - 1.0) > 1e-5 {
                     scene.set(nid, Props.PRESS_SCALE, 1.0)
+                    pressScaleTrackOwners.insert(nid)
                     scene.animate(nid, Props.PRESS_SCALE, to: target, spring: MotionTokens.INSTANT)
                 }
             } else {

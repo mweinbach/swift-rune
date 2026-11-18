@@ -12,6 +12,7 @@ struct LayoutObserverTraits {
         case inputPills, groupOpacity, matchedFlight, heldLandingWidth, growthStack, filterContainer
         case shadow, childExit, rideTrailing, timeScale, wordReveal, extraCommitColor
         case pictureAspect, secureOrEditable, kitHoverDelay, scrollViewport, isolatedOrTransition
+        case pressColor, pressScale
     }
 
     private(set) var bits: UInt64 = 0
@@ -47,6 +48,8 @@ struct LayoutObserverTraits {
         if el.autofocus { add(.autofocus) }
         if (el.hoverBg?.a ?? 0) > 0 || el.isHoverGroup || el.hoverGroupShare != nil { add(.hoverTrack) }
         if el.isHoverAlone || el.hoverGroupShare != nil { add(.hoverGroup) }
+        if el.pressColor != nil || (el.pressBg?.a ?? 0) > 0 { add(.pressColor) }
+        if el.pressScaleFactor != nil { add(.pressScale) }
         if el.hoverWithinSpec != nil || el.hoverMotionSpec != nil { add(.hoverCurve) }
         if scrolls && el.layout.scrollAxes.contains(.vertical) {
             if el.scrollAnchorEnabled { add(.scrollAnchor) }
@@ -114,6 +117,8 @@ extension Runtime.LayoutObservers {
             case .autofocus: autofocus.append(i)
             case .selectionChange: if !inert { selectionChanges.append(i) }
             case .hoverTrack: hoverTracks.append(i)
+            case .pressColor: pressColors.append(i)
+            case .pressScale: pressScales.append(i)
             case .hoverGroup: hoverGroups.append(i)
             case .hoverChange: hoverChanges.append(i)
             case .kitHoverDelay: kitHoverDelays.append(i)

@@ -855,6 +855,7 @@ public final class Runtime<State> {
     internal var pressedPointerInside: Bool = false
     public internal(set) var pressedTint: (path: String, button: PointerButton)? = nil
     internal var lastPressTargetById: [NodeId: Float] = [:]
+    internal var pressScaleTrackOwners: Set<NodeId> = []
     public internal(set) var focusedPath: String? = nil {
         didSet {
             if focusedPath != oldValue { syncFocusedEditLineMode() }
@@ -1367,6 +1368,8 @@ public final class Runtime<State> {
         var autofocus: [Int] = []
         var selectionChanges: [Int] = []
         var hoverTracks: [Int] = []
+        var pressColors: [Int] = []
+        var pressScales: [Int] = []
         var hoverGroups: [Int] = []
         var hoverChanges: [Int] = []
         var kitHoverDelays: [Int] = []

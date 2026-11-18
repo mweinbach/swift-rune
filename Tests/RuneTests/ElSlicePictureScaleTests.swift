@@ -383,6 +383,43 @@ struct ElSlicePictureScaleTests {
         #expect(rt.state.pressed == [0], "fling cancels press")
     }
 
+    @Test("A captured press follows modifiers added and removed on the same keyed element")
+    func pressModifiersFollowRebuild() throws {
+        let rt = Runtime<Bool>(state: false, viewport: Vec2(120, 60), pixelScale: 1) { enabled, _ in
+            var tile: El<Bool> = el().key("tile").size(100, 40).onClick { _ in }
+            if enabled { tile = tile.pressScale(0.8).pressColor(.srgb(0, 0, 1)) }
+            return col().size(120, 60).child(tile.child(text("A").color(.srgb(1, 0, 0))))
+        }
+        func appearance(_ time: Double) throws -> (width: Float, blueMinusRed: Float) {
+            let frame = rt.renderFrame(at: time)
+            let glyph = try #require(frame.instances.first { $0.params.y == KIND_GLYPH })
+            let tile = try #require(rt.element(byKey: "tile"))
+            return (tile.rect[2], glyph.fill.z - glyph.fill.x)
+        }
+
+        let rest = try appearance(0)
+        #expect(rest.width == 100 && rest.blueMinusRed < -0.9)
+        let center = Vec2(50, 20)
+        rt.pointerDown(at: center, at: 0.01)
+        rt.update(at: 0.02) { enabled, _ in enabled = true }
+        _ = try appearance(0.03)
+        let held = try appearance(0.5)
+        #expect(abs(held.width - 80) < 0.05 && held.blueMinusRed > 0.9)
+        let id = NodeId.hash(try #require(rt.element(byKey: "tile")).path)
+        #expect(rt.scene.store.has(id, Props.PRESS_SCALE))
+
+        // Keep the node and the press capture while removing its two modifiers.
+        rt.update(at: 0.51) { enabled, tx in enabled = false; tx.instant() }
+        let removed = try appearance(0.52)
+        #expect(removed.width == rest.width && removed.blueMinusRed == rest.blueMinusRed)
+        #expect(!rt.scene.store.has(id, Props.PRESS_SCALE))
+        rt.pointerUp(at: center, at: 0.53)
+        rt.update(at: 0.54) { enabled, _ in enabled = true }
+        let restored = try appearance(0.55)
+        #expect(restored.width == rest.width, "Reattaching pressScale must not revive the old held scale")
+        #expect(try appearance(1.0).blueMinusRed < -0.9)
+    }
+
     @Test("pressScale shrinks children, bounces smoothly on release, responds to leave/re-enter, and turns off under reducedMotion")
     func pressedReleaseBouncesAndReducedMotionStaysStill() {
         let rt = Runtime<Int>(
