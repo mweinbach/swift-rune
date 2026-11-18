@@ -3,6 +3,41 @@ import Testing
 
 @Suite
 struct A11yActiveDescendantTests {
+    @Test func aReentrantEditKeepsNativeFocusOnTheCapturedActiveDescendant() {
+        struct Form { var selected = "old" }
+        final class Callback { var update: (() -> Void)? }
+        let callback = Callback()
+        let runtime = Runtime(state: Form(), viewport: Vec2(220, 120)) { form, _ in
+            col().children([
+                textInput(key: "entry", editAccess(get: { _ in
+                    let update = callback.update
+                    callback.update = nil
+                    update?()
+                    return TextEdit("draft")
+                }, set: { _, _ in })),
+                col().key("files").role(.tree).focusable().activeDescendant(form.selected)
+                    .child(el().key("old").role(.treeItem).label("Old"))
+                    .child(el().key("new").role(.treeItem).label("New")),
+            ])
+        }
+        _ = runtime.renderFrame(at: 0)
+        runtime.update(at: 0.1) { _, tx in tx.focus("files") }
+        _ = runtime.renderFrame(at: 0.1)
+        let before = runtime.nativeAccessibilitySnapshot()
+        callback.update = {
+            runtime.update(at: 1) { form, _ in form.selected = "new" }
+            _ = runtime.renderFrame(at: 1)
+        }
+        let during = runtime.nativeAccessibilitySnapshot()
+        let after = runtime.nativeAccessibilitySnapshot()
+        func focused(_ node: AccessibilityNode) -> [String] {
+            (node.isFocused ? [node.id] : []) + node.children.flatMap(focused)
+        }
+        #expect(focused(before) == ["old"])
+        #expect(during == before)
+        #expect(focused(after) == ["new"])
+    }
+
     @Test func nativeFocusFollowsTheExactMountedRowWhileKeyboardFocusStaysOnTheComposite() {
         let composed = "pkg/\u{e9}"
         let decomposed = "pkg/e\u{301}"

@@ -2,9 +2,20 @@ extension Runtime {
     /// Native accessibility follows the active row of a focused composite. The
     /// browser keeps DOM focus on the composite and exports aria-activedescendant.
     internal func nativeAccessibilitySnapshot(securePaths: Set<String> = []) -> AccessibilityNode {
+        let redirect = nativeFocusRedirect()
         var tree = accessibilitySnapshot(securePaths: securePaths)
+        guard let redirect,
+              let target = tree.route(where: { $0.runtimePath == redirect.target }),
+              let owner = tree.route(where: { $0.isFocused && $0.runtimePath == redirect.owner }) else { return tree }
+        tree.setNativeFocus(false, at: owner[...])
+        tree.setNativeFocus(true, at: target[...])
+        return tree
+    }
+
+    // Resolve the selector against the mounted frame before an editor can publish another.
+    private func nativeFocusRedirect() -> (owner: String, target: String)? {
         guard let focusedPath, let index = nodeByPath[focusedPath],
-              let selector = flatNodes[index].el.a11yActiveDescendant, !selector.isEmpty else { return tree }
+              let selector = flatNodes[index].el.a11yActiveDescendant, !selector.isEmpty else { return nil }
 
         func matches(_ index: Int) -> Bool {
             let node = flatNodes[index]
@@ -17,12 +28,8 @@ extension Runtime {
             (self.flatNodes[$0].parentIndex ?? -1) >= index
         }
         guard let targetIndex = descendants.first(where: matches) ?? flatNodes.indices.first(where: matches),
-              targetIndex != index, !subtreeExiting(targetIndex),
-              let target = tree.route(where: { $0.runtimePath == flatNodes[targetIndex].path }),
-              let owner = tree.route(where: { $0.isFocused && $0.runtimePath == focusedPath }) else { return tree }
-        tree.setNativeFocus(false, at: owner[...])
-        tree.setNativeFocus(true, at: target[...])
-        return tree
+              targetIndex != index, !subtreeExiting(targetIndex) else { return nil }
+        return (focusedPath, flatNodes[targetIndex].path)
     }
 }
 
