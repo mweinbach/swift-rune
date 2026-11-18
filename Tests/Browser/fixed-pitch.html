@@ -106,6 +106,30 @@ try {
             for (const id of handles) host.release(id);
         }
     }
+    // Compare reconstructed ink to a newly created native-only line for the
+    // same source. Change the neighbors on both sides of each digit boundary.
+    const numbered = ['X01239Y', 'X01289Y', 'X81289Y', 'X41230Y', 'X01239Y'];
+    for (const text of numbered) {
+        const handles = [0, 1].map(() => {
+            const id = host.create(512, put(text, 512), 64, put('IBM Plex Mono', 64), 26, 400, 0, 1, 1, 0, 40);
+            host.configure(id, 0, 0, 128, put(defaults, 128), 0, 0, 0, 40);
+            return id;
+        });
+        try {
+            host.has_color(handles[0], 1);
+            for (const [left, width] of [[0, 108], [14, 34], [32, 44], [75, 22]]) {
+                for (const rgb of [0x1f2327, 0xffffff]) {
+                    const masks = handles.map(id => {
+                        if (!host.mask(id, left, 1, width, 32, 4096, rgb)) throw Error('Missing numeric mask');
+                        return bytes.slice(4096, 4096 + width * 32);
+                    });
+                    if (!masks[0].every((value, i) => value === masks[1][i])) {
+                        throw Error(`Numeric mask differs from native coverage for ${text} at ${left}`);
+                    }
+                }
+            }
+        } finally { for (const id of handles) host.release(id); }
+    }
     const alphabet = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).join('');
     try {
         for (const size of [13, 13.33, 26]) {

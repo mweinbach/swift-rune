@@ -511,6 +511,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         line.shaping = null;
         line.resolvedInk = null;
         line.sourceEpoch = undefined;
+        line.numericMaskSource = null;
         line.metrics = new Uint8Array(memory(), ptr, Math.min(size, 40)).slice();
         line.svgText?.parentNode.remove();
         line.svgText = null;
@@ -520,6 +521,101 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         line.origin = undefined;
         line.carets?.clear();
         line.tile = null;
+    }
+
+    // A certified fixed-pitch face has no contextual substitutions or kerning in
+    // printable ASCII, and its outlines fit their advance. Only the two pixels
+    // on either side of a cell boundary can sample ink from its neighbor.
+    // Keep those pixels paired with that neighbor when reusing a native read.
+    const fragmentStyles = new Map();
+    let fragmentCount = 0, fragmentBytes = 0;
+
+    function numericMaskPlan(length, pitch, x, width) {
+        const first = Math.max(0, Math.floor(x / pitch));
+        const last = Math.min(length, Math.ceil((x + width) / pitch));
+        if (first >= last) return null;
+        const plan = [];
+        for (let i = first; i < last; ++i) {
+            const lo = i === first ? x : Math.round(i * pitch);
+            const hi = i + 1 === last ? x + width : Math.round((i + 1) * pitch);
+            if (lo < (i - 1) * pitch + 2 || hi > (i + 2) * pitch - 2) return null;
+            const interiorLeft = Math.ceil(i * pitch + 2), interiorRight = Math.floor((i + 1) * pitch - 2);
+            for (let left = lo; left < hi;) {
+                const end = left < interiorLeft ? interiorLeft : left < interiorRight ? interiorRight : hi;
+                const right = Math.min(hi, end), w = right - left;
+                // The crop guards limit x to [-255, 20000], w to 257 and the ASCII
+                // index to 255. These integers plus three 7-bit codes fit in 53 bits.
+                const keyBase = (((left + 256) * 512 + w) * 256 + i) * 2 ** 21;
+                plan.push({ index: i, x: left - x, width: w, keyBase,
+                    previous: left < interiorLeft && i > 0, next: right > interiorRight && i + 1 < length });
+                left = right;
+            }
+        }
+        return plan;
+    }
+
+    function copyMaskColumns(source, stride, x, output, outputStride, outputX, width, height) {
+        for (let row = 0; row < height; ++row) {
+            const from = row * stride + x, to = row * outputStride + outputX;
+            for (let col = 0; col < width; ++col) output[to + col] = source[from + col];
+        }
+    }
+
+    function numericMask(line, x, y, width, height, rgb, destination) {
+        const source = line.numericMaskSource, text = line.text;
+        if (!source || line.clip || line.size < 10 || line.size > 128 || !/\d/.test(text) ||
+            x < -255 || x + width > 20000 || width > 257 || height > 129 ||
+            line.metrics.byteLength < 4 || fixedPitchSource(doc, line) !== source) return false;
+        const metrics = new DataView(line.metrics.buffer, line.metrics.byteOffset, line.metrics.byteLength);
+        const pitch = metrics.getFloat32(0, true) / text.length;
+        if (!(pitch >= 5)) return false;
+        if (fragmentBytes >= 2 * 1024 * 1024 || fragmentCount >= 8192 || fragmentStyles.size >= 64) {
+            fragmentStyles.clear();
+            fragmentBytes = fragmentCount = 0;
+        }
+        const styleKey = `${source.id}|${line.font}|${line.baseline}|${y}|${height}|${rgb}`;
+        let style = fragmentStyles.get(styleKey);
+        if (!style) {
+            style = { samples: new Map(), plans: new Map() };
+            fragmentStyles.set(styleKey, style);
+        }
+        const shape = `${pitch}|${text.length}|${x}|${width}`;
+        let plan = style.plans.get(shape);
+        if (!plan) {
+            plan = numericMaskPlan(text.length, pitch, x, width);
+            if (!plan) return false;
+            if (style.plans.size >= 64) style.plans.clear();
+            style.plans.set(shape, plan);
+        }
+        const samples = new Array(plan.length), keys = new Array(plan.length);
+        let missing = false;
+        for (let i = 0; i < plan.length; ++i) {
+            const part = plan[i], at = part.index;
+            const before = part.previous ? text.charCodeAt(at - 1) : 0;
+            const after = part.next ? text.charCodeAt(at + 1) : 0;
+            keys[i] = part.keyBase + (before << 14) + (text.charCodeAt(at) << 7) + after;
+            samples[i] = style.samples.get(keys[i]);
+            if (!samples[i]) missing = true;
+        }
+        if (!missing) {
+            const output = new Uint8Array(memory(), destination >>> 0, width * height);
+            for (let i = 0; i < plan.length; ++i) {
+                const part = plan[i];
+                copyMaskColumns(samples[i], part.width, 0, output, width, part.x, part.width, height);
+            }
+            return true;
+        }
+        const { mask } = coverage(line, x, y, width, height, rgb);
+        new Uint8Array(memory(), destination >>> 0, mask.length).set(mask);
+        for (let i = 0; i < plan.length; ++i) {
+            if (samples[i]) continue;
+            const part = plan[i], bytes = new Uint8Array(part.width * height);
+            copyMaskColumns(mask, width, part.x, bytes, part.width, 0, part.width, height);
+            style.samples.set(keys[i], bytes);
+            ++fragmentCount;
+            fragmentBytes += bytes.length;
+        }
+        return true;
     }
 
     function coverage(line, x, y, width, height, rgb = 0xffffff) {
@@ -1033,6 +1129,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         mask(id, x, y, width, height, destination, rgb = 0xffffff) {
             const line = runs.get(id);
             if (!line || width < 1 || height < 1) return 0;
+            if (numericMask(line, x, y, width, height, rgb, destination)) return 1;
             const { mask } = coverage(line, x, y, width, height, rgb);
             new Uint8Array(memory(), destination >>> 0, mask.length).set(mask);
             return 1;
@@ -1052,7 +1149,11 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
                 geometryTokens.set(key, token);
                 return token;
             }
-            if (fixedPitch) return line && fixedPitchSource(doc, line) ? 2 : 0;
+            if (fixedPitch) {
+                if (!line) return 0;
+                line.numericMaskSource = fixedPitchSource(doc, line);
+                return line.numericMaskSource ? 2 : 0;
+            }
             return line?.hasColor ? 1 : 0;
         },
         color(id, x, y, width, height, destination) {
