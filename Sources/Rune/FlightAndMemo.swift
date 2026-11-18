@@ -324,9 +324,8 @@ public final class MemoCache: @unchecked Sendable {
         guard !ids.isEmpty else { return }
         lock.lock()
         for id in ids {
-            if var entry = entries[id] {
-                entry.passBuilt = pass
-                entries[id] = entry
+            if let index = entries.index(forKey: id), entries.values[index].passBuilt != pass {
+                entries.values[index].passBuilt = pass
             }
         }
         lock.unlock()
