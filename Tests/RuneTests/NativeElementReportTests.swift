@@ -90,4 +90,32 @@ struct NativeElementReportTests {
             #expect(actual.parentIndex == expected.parentIndex)
         }
     }
+
+    @Test("A transparent group's only child retains its inherited paint opacity and clip")
+    func singleChildInheritsTransparentGroupHitScope() throws {
+        let rt = Runtime(state: (), viewport: Vec2(64, 32)) { _, _ -> El<Void> in
+            el().size(64, 32).hoverGroup().child(
+                el().key("action").size(24, 24).clip().groupOpacity(0, 1).child(
+                    el().key("glyph").absolute(x: 18, y: 0).size(12, 12).bg(.white).hit()
+                )
+            )
+        }
+
+        _ = rt.renderFrame(at: 0)
+        let action = try #require(rt.element(byKey: "action"))
+        let glyph = try #require(rt.element(byKey: "glyph"))
+        let hit = try #require(rt.hitGeometryByPath[glyph.path])
+        let node = try #require(rt.flatNodes.first { $0.key == "glyph" })
+        let presence = try #require(rt.kitHooks.unseenPresence.frameById[node.nodeId])
+
+        #expect(action.opacity == 0)
+        #expect(glyph.opacity == 0)
+        #expect(hit.opacity == 0)
+        #expect(glyph.visible == [18, 0, 6, 12])
+        #expect(rt.containsWith("glyph", x: 20, y: 5, pick: Pick(transparent: true)))
+        #expect(!rt.containsWith("glyph", x: 28, y: 5, pick: Pick(transparent: true)))
+        #expect(presence.geometricallyInView)
+        #expect(!presence.inView)
+        #expect(presence.inheritedOpacity == 0)
+    }
 }

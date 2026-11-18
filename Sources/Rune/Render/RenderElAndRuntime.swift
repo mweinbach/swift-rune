@@ -665,6 +665,8 @@ private struct PaintContext {
     let allowRaised: Bool
     let inCache: Bool
     let rotated: Bool
+    // Single-child chains can omit paint-branch records and still add logical hit scopes.
+    let hitDepth: Int
 }
 
 private struct PaintBranch {
@@ -3764,7 +3766,7 @@ extension Runtime {
             var context = PaintContext(
                 clip: parentClip, inert: inheritedInert, groupHover: 0, snap: inheritedSnap, stickyShift: inheritedStickyShift, opacity: parentOpacity, enclosingOpacity: enclosingLayerOpacity,
                 transform: inheritedTransform, dissolve: parentIsDissolve, scaleMotion: parentScaleMotion,
-                element: parentElementIndex, allowRaised: allowRaised, inCache: parentInCache, rotated: parentIsRotated
+                element: parentElementIndex, allowRaised: allowRaised, inCache: parentInCache, rotated: parentIsRotated, hitDepth: 0
             )
             var dynamic = false
             // Slots address both mounted and exiting nodes throughout this paint. Retain only
@@ -3773,7 +3775,7 @@ extension Runtime {
                 nextSlot = nil
                 let node = renderNode(slot)
                 if hasRaised && !context.allowRaised && node.el.isRaised {
-                    let savedScope = publishHitGeometry && context.element != nil ? hitScopesByDepth[branches.count] : nil
+                    let savedScope = publishHitGeometry && context.element != nil ? hitScopesByDepth[context.hitDepth] : nil
                     collectedRaisedNodes.append((slot, newElements.count, savedScope))
                     dynamic = true
                 } else {
@@ -3792,7 +3794,7 @@ extension Runtime {
                             parentClip: context.clip, snap: &snap, stickyShift: &stickyShift, inheritedInert: context.inert, groupHover: &groupHover, parentOpacity: context.opacity,
                             enclosingLayerOpacity: context.enclosingOpacity, inheritedTransform: context.transform,
                             parentIsDissolve: context.dissolve, parentScaleMotion: context.scaleMotion,
-                            parentElementIndex: context.element, hitDepth: branches.count + 1, parentInCache: context.inCache, parentIsRotated: context.rotated
+                            parentElementIndex: context.element, hitDepth: context.hitDepth + 1, parentInCache: context.inCache, parentIsRotated: context.rotated
                         )
                     }
                     let h: PaintHeader
@@ -3818,7 +3820,8 @@ extension Runtime {
                             enclosingOpacity: h.needsLayer ? context.enclosingOpacity * h.effOpacity : context.enclosingOpacity,
                             transform: h.nextChildTransform, dissolve: h.isDissolveScope, scaleMotion: h.scaleMotion,
                             element: h.elementIndex, allowRaised: context.allowRaised || !h.continueSubtree,
-                            inCache: context.inCache || h.cacheEligible, rotated: context.rotated || abs(turn) > 1e-4
+                            inCache: context.inCache || h.cacheEligible, rotated: context.rotated || abs(turn) > 1e-4,
+                            hitDepth: context.hitDepth + 1
                         )
                         if needsFooter { footers.append((slot, h)) }
                         // A single child can finish directly in its grandparent when this scope
