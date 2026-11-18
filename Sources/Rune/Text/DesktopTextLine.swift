@@ -151,6 +151,7 @@ struct DesktopMaskKey: Hashable {
     var inkBucket: UInt8 = 0
     #if os(WASI)
     var browserRGB: UInt32 = 0xffffff
+    var browserCell: SIMD4<Int32>? = nil
     #endif
 }
 
@@ -433,6 +434,9 @@ private final class DesktopTextRun {
     let native: OpaquePointer
     let metrics: RuneDesktopLineMetrics
     let hasColor: Bool
+    #if os(WASI)
+    private(set) var fixedPitchBytes: [UInt8]?
+    #endif
     let inkOwner: Range<Int32>?
     private var lastOwnedInk: DesktopTextRun?
     #if os(Linux) || os(Windows) || os(Android)
@@ -506,6 +510,12 @@ private final class DesktopTextRun {
         #endif
         metrics = rune_desktop_line_metrics(line)
         hasColor = rune_desktop_line_has_color(line) != 0
+        #if os(WASI)
+        if FontSmoothing.classic == .on, !hasColor, tabPadding.isEmpty,
+           (10...128).contains(font.sizePx), rune_browser_line_fixed_pitch(line) != 0 {
+            fixedPitchBytes = Array(text.utf8)
+        }
+        #endif
     }
 
     private init(native: OpaquePointer, source: DesktopTextRun, owner: Range<Int32>) {
@@ -1345,7 +1355,7 @@ final class DesktopTextLine {
 
     // Rich paragraph paint divides line tiles at style/cell boundaries. An isolated
     // shaped cluster already contains only its owned glyphs, including overhangs.
-    private func visitTiles(for cell: Cell, size: SIMD2<Int>, phase: SIMD2<Int> = .zero, owned: DesktopTextRun? = nil, isolateCell: Bool = false, _ body: (Tile) -> Void) {
+    private func visitTiles(for cell: Cell, size: SIMD2<Int>, phase: SIMD2<Int> = .zero, owned: DesktopTextRun? = nil, isolateCell: Bool = false, cropBrowserCell: Bool = false, _ body: (Tile) -> Void) {
         let run = owned ?? cell.run, m = run.metrics
         // A sufficiently bright Windfoil glyph can grow outside its platform ink bounds.
         let outset = smoothing == .windfoil && !run.hasColor ? 2 : 0
@@ -1371,6 +1381,28 @@ final class DesktopTextLine {
         for x in stride(from: firstTile, to: x1, by: size.x) {
             let w = min(size.x, tileRight - x)
             for y in stride(from: inkTop, to: inkBottom, by: size.y) {
+                #if os(WASI)
+                if cropBrowserCell, !isolateCell, owned == nil, let bytes = run.fixedPitchBytes {
+                    let left = max(x0, x), right = min(x1, x + w)
+                    // Keep the bilinear neighbors, including the original tile-edge gutter.
+                    let start = max(x, left - 1), end = min(x + w, right + 1)
+                    let height = min(size.y, inkBottom - y)
+                    let pitch = m.advance / Float(bytes.count)
+                    if pitch >= 5 {
+                        // Derive the contributing glyphs from Canvas's native advance. DOM
+                        // selection bounds can differ from the ink pen under custom page CSS.
+                        // The verified ASCII face's outlines fit within one fixed-pitch cell.
+                        // Include its neighbors for hinting, fractional glide and antialiasing.
+                        let first = min(bytes.count, max(0, Int(floor(Float(start - 1) / pitch)) - 1))
+                        let last = min(bytes.count, max(first, Int(ceil(Float(end + 1) / pitch)) + 1))
+                        let sample = TextUTF8Key(String(decoding: bytes[first..<last], as: UTF8.self))
+                        var key = DesktopMaskKey(text: sample, font: run.font, x: start, y: y, phase: phase)
+                        key.browserCell = SIMD4(Int32(first), Int32(last), Int32(end - start), Int32(height))
+                        body(Tile(key: key, width: end - start, height: height, left: left, right: right))
+                        continue
+                    }
+                }
+                #endif
                 let key = DesktopMaskKey(text: run.textKey, font: run.font, x: x, y: y,
                                          phase: phase, sourceColumns: sourceColumns, inkOwner: run.inkOwner)
                 body(Tile(key: key, width: w, height: min(size.y, inkBottom - y),
@@ -1437,7 +1469,7 @@ final class DesktopTextLine {
         let usesBrowserInk = false
         #endif
         func emit(_ glide: DesktopGlyphGlide, x: Float, mask: Bool, colorInk: Bool) {
-            visitTiles(for: cell, size: atlas.desktopTileSize, phase: glide.phase, owned: owned, isolateCell: isolateCell) { tile in
+            visitTiles(for: cell, size: atlas.desktopTileSize, phase: glide.phase, owned: owned, isolateCell: isolateCell, cropBrowserCell: usesBrowserInk) { tile in
                 var key = tile.key
                 #if os(Linux) || os(Windows) || os(Android)
                 if cache && smoothing.isOutlineMode {
@@ -1470,7 +1502,14 @@ final class DesktopTextLine {
                     #if os(WASI)
                     let browser = usesBrowserInk ? run.browserMask(key: key, entry: entry) : nil
                     let covered: Range<Int>?
-                    if let browser, baseRGB != 0xffffff {
+                    if let browser, baseRGB != 0xffffff, key.browserCell != nil {
+                        var white = key
+                        white.browserRGB = 0xffffff
+                        let whiteEntry = run.maskEntry(key: white, size: dimensions, owner: nil, cache: true,
+                                                       atlas: atlas, shareBrowserCoverage: true, fallback: browser.whiteMask)
+                        covered = whiteEntry.flatMap { atlas.desktopCoveredRows(of: $0, columns: columns) }
+                            ?? atlas.desktopCoveredRows(of: entry, columns: columns)
+                    } else if let browser, baseRGB != 0xffffff {
                         covered = atlas.browserCoveredRows(of: browser, columns: columns) ?? atlas.desktopCoveredRows(of: entry, columns: columns)
                     } else {
                         covered = atlas.desktopCoveredRows(of: entry, columns: columns)

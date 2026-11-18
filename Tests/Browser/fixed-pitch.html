@@ -55,6 +55,30 @@ try {
             }
         } finally { host.release(id); }
     }
+    // The atlas can reuse a crop across different runs only when the source face,
+    // native pen and adjacent glyphs reproduce the exact foreground coverage.
+    for (const size of [10, 13.33, 26, 52]) {
+        const labels = ['abc_f1x-123456', ':::!f1xy??????'];
+        const handles = labels.map(label => host.create(512, put(label, 512), 64, put('IBM Plex Mono', 64),
+            size, 400, 0, 1, 1, 0, 40));
+        try {
+            const height = Math.ceil(2 * size);
+            const left = Math.round(5 * size * 0.6) - 1;
+            const width = Math.round(6 * size * 0.6) - left + 1;
+            for (const rgb of [0, 0xffffff, 0x3569a0]) {
+                const masks = handles.map(id => {
+                    if (host.has_color(id) !== 0 || host.has_color(id, 1) !== 2) throw Error('Wrong fixed-pitch capabilities');
+                    if (!host.mask(id, left, 0, width, height, 4096, rgb)) throw Error('Missing cell crop');
+                    return bytes.slice(4096, 4096 + width * height);
+                });
+                if (!masks[0].some(Boolean) || !masks[0].every((v, i) => v === masks[1][i])) {
+                    throw Error('Fixed-pitch cell changed with surrounding text');
+                }
+            }
+        } finally {
+            for (const id of handles) host.release(id);
+        }
+    }
     const alphabet = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).join('');
     try {
         for (const size of [13, 13.33, 26]) {

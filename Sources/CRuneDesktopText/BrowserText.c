@@ -28,7 +28,7 @@ IMPORT("caret") extern float browser_caret(uint32_t, int32_t);
 IMPORT("cell") extern int32_t browser_cell(uint32_t, int32_t, int32_t, float *, float *, uint32_t);
 IMPORT("cells") extern void browser_cells(uint32_t, RuneBrowserCell *, int32_t, int32_t);
 IMPORT("mask") extern int32_t browser_mask(uint32_t, int32_t, int32_t, int32_t, int32_t, uint8_t *, uint32_t);
-IMPORT("has_color") extern int32_t browser_has_color(uint32_t);
+IMPORT("has_color") extern int32_t browser_has_color(uint32_t, int32_t);
 IMPORT("color") extern int32_t browser_color(uint32_t, int32_t, int32_t, int32_t, int32_t, uint8_t *);
 IMPORT("font") extern int32_t browser_register_font(const uint8_t *, uint32_t);
 IMPORT("font_url") extern void browser_font_url(const char *, int32_t, int32_t);
@@ -187,9 +187,18 @@ int32_t rune_desktop_register_font_file(const char *path) {
     return 0;
 }
 
+int32_t rune_browser_line_fixed_pitch(const RuneDesktopLine *line) {
+#ifdef RUNE_BROWSER_TEXT
+    // The original host ignores the optional capability selector and returns only
+    // zero or one. It can still serve monochrome and color masks for this reactor.
+    if (line) return browser_has_color(line->handle, 1) == 2;
+#endif
+    return 0;
+}
+
 int32_t rune_desktop_line_has_color(const RuneDesktopLine *line) {
 #ifdef RUNE_BROWSER_TEXT
-    if (line) return browser_has_color(line->handle);
+    if (line) return browser_has_color(line->handle, 0);
 #endif
     return 0;
 }

@@ -988,7 +988,11 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             new Uint8Array(memory(), destination >>> 0, mask.length).set(mask);
             return 1;
         },
-        has_color(id) { return runs.get(id)?.hasColor ? 1 : 0; },
+        has_color(id, fixedPitch = 0) {
+            const line = runs.get(id);
+            if (fixedPitch) return line && fixedPitchSource(doc, line) ? 2 : 0;
+            return line?.hasColor ? 1 : 0;
+        },
         color(id, x, y, width, height, destination) {
             const line = runs.get(id);
             if (!line?.hasColor || width < 1 || height < 1) return 0;
