@@ -411,12 +411,16 @@ internal struct VirtualRowMeasurements: Sendable {
     subscript(_ key: String) -> Float? {
         get { places.index(of: key).flatMap { heights[$0] } }
         set {
-            guard let index = places.index(of: key), heights[index] != newValue else { return }
-            if let estimate = cachedOffsets?.estimate, (heights[index] ?? estimate) != (newValue ?? estimate) {
-                cachedOffsets = nil
-            }
-            heights[index] = newValue
+            if let index = places.index(of: key) { setHeight(newValue, at: index) }
         }
+    }
+
+    mutating func setHeight(_ height: Float?, at index: Int) {
+        guard heights[index] != height else { return }
+        if let estimate = cachedOffsets?.estimate, (heights[index] ?? estimate) != (height ?? estimate) {
+            cachedOffsets = nil
+        }
+        heights[index] = height
     }
 }
 

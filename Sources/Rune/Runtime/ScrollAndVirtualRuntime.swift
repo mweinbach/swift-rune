@@ -122,7 +122,6 @@ extension Runtime {
 
     internal struct VirtualExpansionContext {
         var lands = false
-        var rowMappings: [(listPath: String, scrollPath: String, rowSegment: String, rowKey: String)] = []
         var listMeta: [VirtualListMeta] = []
         var anyVirtualList: Bool = false
         var keyDiagnostics: [DuplicateKeyWarning] = []
@@ -707,7 +706,6 @@ extension Runtime {
         var nestedRows: [(index: Int, reused: Bool)] = []
         let previousRows = canReuseRows ? remountRowCache?[path] : nil
         var nextRows = Dictionary<String, CachedVirtualRow>(minimumCapacity: isIndexed ? mounted.count : 0)
-        var rowKeysBySegment = Dictionary<String, String>(minimumCapacity: mounted.count)
         for i in mounted {
             let rowKey = keys[i]
             var rowEl: El<State>
@@ -744,20 +742,16 @@ extension Runtime {
                 }
             }
             // Every row now carries its resolved, unique key, including repaired duplicates.
-            let rowSeg = "@\(rowKey)"
             if !keysClean {
-                let repaired = KeyDiagnostics.repair(rowEl, at: "\(path)/\(rowSeg)") { ctx.keyRenames.append($0) }
+                let repaired = KeyDiagnostics.repair(rowEl, at: "\(path)/@\(rowKey)") { ctx.keyRenames.append($0) }
                 ctx.keyDiagnostics.append(contentsOf: repaired.warnings)
                 rowEl = repaired.tree
             }
-            ctx.rowMappings.append((listPath: path, scrollPath: vpPath, rowSegment: rowSeg, rowKey: rowKey))
-            rowKeysBySegment[rowSeg] = rowKey
             if containsVirtual { nestedRows.append((built.count, didReuseRow)) }
             built.append(rowEl)
         }
 
         if !nextRows.isEmpty { ctx.builtVirtualRows[path] = nextRows }
-        virtualLists[path]?.rowKeyBySegment = rowKeysBySegment
         if botSpacerH > 0 {
             built.append(Self.virtualSpacer(key: "__v_bot_spacer", height: botSpacerH))
         }
@@ -1917,6 +1911,43 @@ extension Runtime {
 
     // MARK: - Post-Commit Virtual Measurements & onVisibleRows
 
+    /// Expansion emits a leading spacer, the contiguous mounted window, and a trailing
+    /// spacer. Measure that same window by index while the solved children are in hand.
+    private func recordVirtualHeights(
+        in el: El<State>, solved: LayoutEngine.ResultNode,
+        mounted: RuntimeVirtualListState.VirtualMountedSnapshot, list: inout RuntimeVirtualListState
+    ) {
+        let start = mounted.topSpacerH > 0 ? 1 : 0
+        let keys = mounted.mountedKeys
+        let expectedCount = start + keys.count + (mounted.botSpacerH > 0 ? 1 : 0)
+        if solved.children.count == expectedCount, el.children.count == expectedCount,
+           mounted.range.count == keys.count, mounted.range.upperBound <= list.lastKeys.count,
+           list.rowPlaces.index(of: "__v_top_spacer") == nil, list.rowPlaces.index(of: "__v_bot_spacer") == nil,
+           keys.indices.allSatisfy({ offset in
+               let key = keys[offset]
+               return list.lastKeys[mounted.range.lowerBound + offset] == key && el.children[start + offset].storageKeyId == key
+           }) {
+            for offset in keys.indices {
+                let height = solved.children[start + offset].layout.localRect.height
+                if height > 0.5 { list.measuredByKey.setHeight(height, at: mounted.range.lowerBound + offset) }
+            }
+            return
+        }
+
+        // A cached tree can differ from the current window. Match its resolved sibling
+        // paths, including spacer key collisions, exactly as the normal flatten pass does.
+        var seen: [String: Int] = [:]
+        var heights: [String: Float] = [:]
+        for index in 0..<min(el.children.count, solved.children.count) {
+            let (segment, _) = layoutPathSegment(keyId: el.children[index].storageKeyId, siblingIndex: index, siblingKeysSeen: &seen)
+            let height = solved.children[index].layout.localRect.height
+            if height > 0.5 { heights[segment] = height }
+        }
+        for key in keys {
+            if let height = heights["@\(key)"] { list.measuredByKey[key] = height }
+        }
+    }
+
     /// Keep the virtual window anchored to natural row heights throughout a growth animation.
     /// The solved layout contains those heights before growth constrains the presented rows.
     internal func measureVirtualsFromSolved(
@@ -1926,12 +1957,13 @@ extension Runtime {
         lands: Bool
     ) -> Bool {
         guard expansion.anyVirtualList, !expansion.listMeta.isEmpty else { return false }
-        let listPathSet = Set(expansion.listMeta.map(\.listPath))
+        var mountedByPath: [String: RuntimeVirtualListState.VirtualMountedSnapshot] = [:]
+        for meta in expansion.listMeta { mountedByPath[meta.listPath] = meta.mounted }
         let scrollPathSet = Set(expansion.listMeta.map(\.scrollPath))
         // Only the lists, their immediate row heights and their viewports affect virtual measurement.
         // Avoid copying and visiting every descendant of every mounted row just to find those nodes.
         var ancestorPaths = Set<String>()
-        for target in listPathSet.union(scrollPathSet) {
+        for target in Set(mountedByPath.keys).union(scrollPathSet) {
             var parent = target[...]
             while let separator = parent.lastIndex(of: "/") {
                 parent = parent[..<separator]
@@ -1940,7 +1972,6 @@ extension Runtime {
         }
         var listWorldY: [String: Float] = [:]
         var scrollRects: [String: (y: Float, size: Vec2)] = [:]
-        var rowHeightsByList: [String: [String: Float]] = [:]
 
         let rootKey = expandedRoot.storageKeyId
         let rootPath = rootKey.map { "/@\($0)" } ?? "/0"
@@ -1951,18 +1982,10 @@ extension Runtime {
             if scrollPathSet.contains(cur.path) {
                 scrollRects[cur.path] = (cur.worldY, Vec2(lr.width, lr.height))
             }
-            if listPathSet.contains(cur.path) {
+            if let mounted = mountedByPath[cur.path], var list = virtualLists[cur.path] {
                 listWorldY[cur.path] = cur.worldY
-                var segHeights: [String: Float] = [:]
-                var childSeen: [String: Int] = [:]
-                for (cIdx, childEl) in cur.el.children.enumerated() where cIdx < cur.solved.children.count {
-                    let (seg, _) = layoutPathSegment(keyId: childEl.storageKeyId, siblingIndex: cIdx, siblingKeysSeen: &childSeen)
-                    let ch = cur.solved.children[cIdx].layout.localRect.height
-                    if ch > 0.5 {
-                        segHeights[seg] = ch
-                    }
-                }
-                rowHeightsByList[cur.path] = segHeights
+                recordVirtualHeights(in: cur.el, solved: cur.solved, mounted: mounted, list: &list)
+                virtualLists[cur.path] = list
             }
             guard ancestorPaths.contains(cur.path) else { continue }
             var childSeen: [String: Int] = [:]
@@ -1977,14 +2000,6 @@ extension Runtime {
                 nextEntries.append((childEl, childSolved, "\(cur.path)/\(seg)", wy))
             }
             stack.append(contentsOf: nextEntries.reversed())
-        }
-
-        for mapping in expansion.rowMappings {
-            if let h = rowHeightsByList[mapping.listPath]?[mapping.rowSegment],
-               h > 0.5,
-               virtualLists[mapping.listPath]?.measuredByKey[mapping.rowKey] != h {
-                virtualLists[mapping.listPath]?.measuredByKey[mapping.rowKey] = h
-            }
         }
 
         var needsRetry = false

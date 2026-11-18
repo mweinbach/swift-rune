@@ -159,7 +159,6 @@ internal struct RuntimeVirtualListState: Sendable {
     var lastAnchorKey: String? = nil
     var lastAnchorLocalY: Float = 0
     var lastAnchorPrefixY: Float = 0
-    var rowKeyBySegment: [String: String] = [:]
     var lastCommittedOffsetY: Float? = nil
     var wantsMoreFrames: Bool = false
     var missingOverscanRows: Int = 0

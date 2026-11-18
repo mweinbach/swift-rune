@@ -334,13 +334,14 @@ extension Runtime {
         }
 
         var tempLists = virtualLists
-        for mapping in pass.virtualExpansion.rowMappings {
-            let rowPath = "\(mapping.listPath)/\(mapping.rowSegment)"
-            guard let rIdx = pass.byPath[rowPath] else { continue }
-            let h = pass.nodes[rIdx].targetRect.height
-            if h > 0.5 {
-                tempLists[mapping.listPath]?.measuredByKey[mapping.rowKey] = h
+        for meta in pass.virtualExpansion.listMeta {
+            guard var list = tempLists[meta.listPath] else { continue }
+            for key in meta.mounted.mountedKeys {
+                guard let index = pass.byPath["\(meta.listPath)/@\(key)"] else { continue }
+                let height = pass.nodes[index].targetRect.height
+                if height > 0.5 { list.measuredByKey[key] = height }
             }
+            tempLists[meta.listPath] = list
         }
         var anchoredScrollYs: [String: Float] = [:]
         for listPath in activeVirtualPaths {
@@ -479,8 +480,8 @@ extension Runtime {
                 pass.reads = cached.reads
             }
             cachedResizeBuild?.expandedRootEl = expandedRoot
-            for mapping in cached.virtualExpansion.rowMappings {
-                activeVirtualPaths.insert(mapping.listPath)
+            for meta in cached.virtualExpansion.listMeta where !meta.mounted.mountedKeys.isEmpty {
+                activeVirtualPaths.insert(meta.listPath)
             }
         }
         return pass

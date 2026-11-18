@@ -365,7 +365,8 @@ public extension Runtime {
                 guard let pIdx = node.parentIndex, pIdx >= 0, pIdx < flatNodes.count,
                       let vList = virtualLists[flatNodes[pIdx].path] else { return nil }
                 let rowSeg = node.path.split(separator: "/").last.map(String.init) ?? ""
-                if let rowKey = vList.rowKeyBySegment[rowSeg] { return vList.rowPlaces.index(of: rowKey) }
+                if rowSeg.first == "@", let index = vList.rowPlaces.index(of: String(rowSeg.dropFirst())),
+                   vList.lastMountedRange.contains(index) { return index }
                 return node.key.flatMap { vList.rowPlaces.index(ofAuthoredKey: $0) }
             }()
             let resolvedSizeOfSet: Int? = {
