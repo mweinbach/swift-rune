@@ -1514,7 +1514,7 @@ final class ElHandlersBox<State> {
 
 // A keyed element can record its author without allocating cold state for diagnostics.
 @usableFromInline
-enum ElementKeyOrigin {
+indirect enum ElementKeyOrigin {
     case text(String)
     case source(file: String, line: UInt, column: UInt)
 }
