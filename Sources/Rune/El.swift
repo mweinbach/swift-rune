@@ -1852,6 +1852,10 @@ public struct El<State> {
             yield &handlers.value
         }
     }
+    /// Inspect the stored callbacks without synthesizing an empty handler table for this element.
+    internal func withAuthoredHandlers(_ body: (borrowing ElementHandlers<State>) -> Void) {
+        if let box = _cold?.handlersBox { body(box.value) }
+    }
     internal var hasEditLens: Bool { _cold?.handlersBox?.hasEditLens ?? false }
     internal var hasPointerHandlers: Bool { _cold?.handlersBox?.hasPointerHandlers ?? false }
     internal var kitFilterKeysValue: [String]? {

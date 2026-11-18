@@ -3837,14 +3837,14 @@ public final class Runtime<State> {
             }
 
             var flatElement = element
-            if el.hasAuthoredHandlers, !el.isSecure, let edit = el.handlers.editLens?.get(state), edit.isSecure {
+            if el.hasEditLens, !el.isSecure, let edit = el.handlers.editLens?.get(state), edit.isSecure {
                 flatElement.value.isSecure = true
                 flatElement.value.runtimeExtras[El<State>.selectableExtraKey] = false
             }
 
             var nodeElided: TextElision? = nil
             if el.children.isEmpty,
-               !el.hasAuthoredHandlers || el.handlers.editLens == nil,
+               !el.hasEditLens,
                !el.isTruncateFadeEnabled,
                el.advanceInRun == nil,
                (el.textStyle.maxLines > 0 || el.textStyle.wrap == .ellipsis),

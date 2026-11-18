@@ -24,10 +24,10 @@ struct LayoutObserverTraits {
         let scrolls = !el.layout.scrollAxes.isEmpty
         if scrolls { add(.scrollViewport) }
         if el.isolatedLayer || el.transition != nil { add(.isolatedOrTransition) }
-        if el.hasAuthoredHandlers {
-            indexHandlers(el.handlers, scrolls: scrolls)
-            if el.handlers.onHover != nil && el.kitHoverDelaysSpec != nil { add(.kitHoverDelay) }
-            if el.hasEditLens && (el.pillStyleLookup != nil || el.pillIconLookup != nil || el.pillColorsSpec != nil) {
+        el.withAuthoredHandlers { handlers in
+            indexHandlers(handlers, scrolls: scrolls)
+            if handlers.onHover != nil && el.kitHoverDelaysSpec != nil { add(.kitHoverDelay) }
+            if handlers.editLens != nil && (el.pillStyleLookup != nil || el.pillIconLookup != nil || el.pillColorsSpec != nil) {
                 add(.inputPills)
             }
         }
