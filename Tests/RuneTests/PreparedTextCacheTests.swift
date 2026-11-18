@@ -90,6 +90,29 @@ struct PreparedTextCacheTests {
     }
 
     #if canImport(CoreText) && canImport(CoreGraphics)
+    @Test func unwrappedLineKeepsNativeSelectionAndGlyphsAcrossWidths() throws {
+        let system = TextSystem()
+        let spans = [TextSpan("fi e\u{301}\t", color: .srgb(0.2, 0.3, 0.4), monospace: true),
+                     TextSpan("אב 🧩", italic: true)]
+        let sample = spans.map(\.text).joined()
+        let style = TextStyle(size: 15, align: .trailing, wrap: .noWrap, fontSmoothing: system.smoothing)
+        let measured = system.layoutKeyed(text: sample, spans: spans, style: style, maxWidth: 170,
+                                          pixelScale: 2, emitGlyphs: false)
+        let resized = try #require(system.rebreakOwned(measured, maxWidth: 92, emitGlyphs: true))
+        let reference = system.shape(text: sample, spans: spans, style: style, maxWidth: 92,
+                                     pixelScale: 2, bypassCache: true)
+        #expect(resized.shaped.size == reference.size)
+        #expect(resized.shaped.glyphs == reference.glyphs)
+        #expect(resized.shaped.lineBaselinesPx == reference.lineBaselinesPx)
+        let original = try #require(measured.shaped.lineStrings.first?.ctLine)
+        let after = try #require(resized.shaped.lineStrings.first?.ctLine)
+        #expect(after === original)
+        for offset in 0...sample.utf8.count {
+            #expect(system.caretRect(in: resized.shaped, utf8Offset: offset, upstream: false, pixelScale: 2) ==
+                    system.caretRect(in: reference, utf8Offset: offset, upstream: false, pixelScale: 2))
+        }
+    }
+
     @Test func fillingMeasuredGlyphsPreservesBaselinesClustersAndMasks() throws {
         let system = TextSystem()
         let sample = "A fi e\u{301} 漢字\nA ثاني 🧩"

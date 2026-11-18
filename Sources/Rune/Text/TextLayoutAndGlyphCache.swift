@@ -262,7 +262,11 @@ internal final class TextPreparedShape: @unchecked Sendable {
     let baseAscentPx: CGFloat
     let baseDescentPx: CGFloat
     let attrStr: CFAttributedString
-    let typesetter: CTTypesetter
+    enum LineSource {
+        case singleLine(CTLine)
+        case typesetter(CTTypesetter)
+    }
+    let lineSource: LineSource
     #endif
     let estimatedBytes: Int
     /// Layout commit (`TextSystem.layoutCommitSeq`) this shape was last used in through the
@@ -285,7 +289,7 @@ internal final class TextPreparedShape: @unchecked Sendable {
         baseAscentPx: CGFloat,
         baseDescentPx: CGFloat,
         attrStr: CFAttributedString,
-        typesetter: CTTypesetter,
+        lineSource: LineSource,
         spanBoxes: [TextSystem.InlineSpanBox] = []
     ) {
         self.spanBoxes = spanBoxes
@@ -303,7 +307,7 @@ internal final class TextPreparedShape: @unchecked Sendable {
         self.baseAscentPx = baseAscentPx
         self.baseDescentPx = baseDescentPx
         self.attrStr = attrStr
-        self.typesetter = typesetter
+        self.lineSource = lineSource
         self.estimatedBytes = max(128, authText.utf8.count * 24 + preparedPills.count * 64 + decoratedRanges.count * 32)
     }
     #else

@@ -4664,7 +4664,8 @@ public final class TextSystem: @unchecked Sendable {
                 pills: pills,
                 style: shapeKey.rasterStyle,
                 scale: scale,
-                languageTag: shapeKey.languageTag
+                languageTag: shapeKey.languageTag,
+                fixedBreakPolicy: true
             )
             let shaped = breakLines(
                 prepared: prepared,
@@ -5205,7 +5206,8 @@ public final class TextSystem: @unchecked Sendable {
         pills: [PillChip],
         style: TextStyle,
         scale: Float,
-        languageTag: String?
+        languageTag: String?,
+        fixedBreakPolicy: Bool = false
     ) -> TextPreparedShape {
         let lhPt = style.resolvedLineHeight
         let lhPx = lhPt * scale
@@ -5269,6 +5271,7 @@ public final class TextSystem: @unchecked Sendable {
         // no box in a browser, so theirs is cut to fit the strut (never growing the line); only for
         // proportional text holding code (`mono_style` turns the strut cut off).
         let cutsCodePadding = !style.family.isMonospace && (spans?.contains(where: { $0.monospace }) ?? false)
+        let hasTabs = shapedText.contains("\t")
         var spanTabInfo: [(u16Range: Range<Int>, spacePx: CGFloat, isMonospace: Bool)] = []
         if let spans {
             var authU16Cursor = 0
@@ -5301,11 +5304,13 @@ public final class TextSystem: @unchecked Sendable {
                                 lineHeightPx: span.size.map { lhPx / style.size * $0 } ?? lhPx
                             ))
                         }
-                        spanTabInfo.append((
-                            u16Range: sLo..<sHi,
-                            spacePx: Self.spaceAdvancePx(font: subFont, letterSpacingPx: style.letterSpacing * scale),
-                            isMonospace: span.monospace
-                        ))
+                        if hasTabs {
+                            spanTabInfo.append((
+                                u16Range: sLo..<sHi,
+                                spacePx: Self.spaceAdvancePx(font: subFont, letterSpacingPx: style.letterSpacing * scale),
+                                isMonospace: span.monospace
+                            ))
+                        }
                     }
                     if let col = span.color {
                         let idx = spanPalette.count
@@ -5355,7 +5360,7 @@ public final class TextSystem: @unchecked Sendable {
         }
 
         // Install CTRunDelegate tab width reservations preserving 1:1 string indices (`text/tests.rs:89`).
-        if shapedText.contains("\t") {
+        if hasTabs {
             let baseSpacePx = Self.spaceAdvancePx(font: baseFont, letterSpacingPx: style.letterSpacing * scale)
             var u16Pos = 0
             var monoCol = 0
@@ -5399,8 +5404,15 @@ public final class TextSystem: @unchecked Sendable {
             }
         }
 
-        // Break into visual lines using CTTypesetter while keeping pill labels & bare icons atomic when they fit.
-        let typesetter = CTTypesetterCreateWithAttributedString(attrStr)
+        // A keyed no-wrap layout retains its break policy. Its one visual line can be shaped
+        // directly, including fallback fonts, bidi, clusters, tabs and inline delegates. The
+        // typesetter cache also serves callers that change wrap policy and need arbitrary breaks.
+        let lineSource: TextPreparedShape.LineSource
+        if fixedBreakPolicy, style.wrap == .noWrap, !shapedText.utf8.contains(0x0A) {
+            lineSource = .singleLine(CTLineCreateWithAttributedString(attrStr))
+        } else {
+            lineSource = .typesetter(CTTypesetterCreateWithAttributedString(attrStr))
+        }
         return TextPreparedShape(
             authText: authText,
             shapedText: shapedText,
@@ -5416,7 +5428,7 @@ public final class TextSystem: @unchecked Sendable {
             baseAscentPx: baseAscentPx,
             baseDescentPx: baseDescentPx,
             attrStr: attrStr,
-            typesetter: typesetter,
+            lineSource: lineSource,
             spanBoxes: spanBoxes
         )
     }
@@ -5452,7 +5464,6 @@ public final class TextSystem: @unchecked Sendable {
         let baseAscentPx = prepared.baseAscentPx
         let baseDescentPx = prepared.baseDescentPx
         let attrStr = prepared.attrStr
-        let typesetter = prepared.typesetter
         let pillMarkerKey = "RunePillMarker" as CFString
         let shapedNS = shapedText as NSString
         let fullLen = CFAttributedStringGetLength(attrStr)
@@ -5528,6 +5539,15 @@ public final class TextSystem: @unchecked Sendable {
                 // a break landing mid-word extends to the next break opportunity) run per line at
                 // `lineCaps[line]` when the pretty pass (`#882`) narrows a line, else at the wrap width.
                 func breakParagraph(lineCaps: [Int: CGFloat]?) -> [(ctLine: CTLine, segStart: Int, count: Int, isParaLast: Bool, wPx: Float, twPx: Float, fittingWidthPx: Float, emergency: Bool)] {
+                    let typesetter: CTTypesetter
+                    switch prepared.lineSource {
+                    case .singleLine(let line):
+                        let width = Float(CTLineGetTypographicBounds(line, nil, nil, nil))
+                        let trailing = Float(CTLineGetTrailingWhitespaceWidth(line))
+                        return [(line, 0, fullLen, true, width, trailing, width, false)]
+                    case .typesetter(let breaker):
+                        typesetter = breaker
+                    }
                     var cursor = u16Start
                     var out: [(ctLine: CTLine, segStart: Int, count: Int, isParaLast: Bool, wPx: Float, twPx: Float, fittingWidthPx: Float, emergency: Bool)] = []
                     var lineIdxInPara = 0
