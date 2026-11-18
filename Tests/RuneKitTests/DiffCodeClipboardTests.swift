@@ -4,6 +4,51 @@ import Testing
 
 @Suite("Diff code selection")
 struct DiffCodeClipboardTests {
+    @Test("Scrolling across copy sides refreshes application reads and captured event snapshots", arguments: [false, true])
+    @MainActor
+    func stationaryPointerCopySide(readInView: Bool) throws {
+        struct Host {
+            var diff: DiffState
+            var captured: DiffSide?
+        }
+        let old = (1...100).map { "let n_\($0) = \($0)\n" }.joined()
+        let new = (1...100).map { "let n_\($0) = \($0)\($0.isMultiple(of: 7) ? " + 1" : "")\n" }.joined()
+        let file = FileDiff.fromTexts(path: "a.rs", old: old, new: new)
+        let rt = Runtime(state: Host(diff: DiffState(diff: file)), viewport: Vec2(620, 300)) { host, cx in
+            let snapshot = host.diff
+            let caption = readInView ? snapshot.copySide.rawValue : "Capture"
+            return col().wFull().hFull()
+                .child(text(caption).key("capture").size(100, 25).onClick { $0.captured = snapshot.copySide })
+                .child(DiffView<Host>(key: "diff", kit: .neutral(dark: true), state: \.diff)
+                    .viewportHeight(240).build(state: host, cx: cx))
+        }
+        var time = 0.0
+        func settle() {
+            for _ in 0..<3 { time += 1 / 60; _ = rt.frame(at: time) }
+        }
+        let pointer = Vec2(400, 150)
+        settle()
+        rt.pointerMove(to: pointer, at: time)
+        settle()
+        let initial = rt.state.diff.copySide
+        for expected: DiffSide in [initial == .new ? .old : .new, initial] {
+            rt.pointerMove(to: pointer, at: time)
+            for _ in 0..<20 where rt.state.diff.copySide != expected {
+                rt.wheel(WheelEvent(dx: 0, dy: -17), at: pointer, now: time)
+                settle()
+            }
+            try #require(rt.state.diff.copySide == expected)
+            let capture = try #require(rt.element(byKey: "capture"))
+            if readInView { #expect(capture.text == expected.rawValue) }
+            let button = Vec2(capture.rect[0] + 5, capture.rect[1] + 5)
+            rt.pointerMove(to: button, at: time)
+            rt.pointerDown(at: button, at: time)
+            rt.pointerUp(at: button, at: time + 0.001)
+            settle()
+            #expect(rt.state.captured == expected)
+        }
+    }
+
     @Test("Retained diff rows dispatch through the current application lens and callbacks")
     @MainActor
     func currentActionsAfterViewChanges() throws {
