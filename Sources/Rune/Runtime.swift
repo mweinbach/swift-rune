@@ -1217,6 +1217,7 @@ public final class Runtime<State> {
         materializedElements = []
         nativeElementReports = reports
     }
+    internal var accessibilityProjectionCache: AccessibilityProjectionCache?
     internal var presentedRectByPath = FrameGeometry<MotionRect>()
     internal var presentedScales = PresentedScales()
     internal var hitGeometryByPath = FrameGeometry<HitGeometry>()
@@ -4783,6 +4784,7 @@ public final class Runtime<State> {
         nativePaintTopology?.currentCommit = false
         layoutObservers = observers
         nodeByPath = pass.byPath
+        accessibilityProjectionCache?.committed(reusing: pass.reusedFlatRanges)
         layoutCommitGen &+= 1
         for (span, start) in pass.appliedMemoSpans {
             span.markApplied(start: start, generation: layoutCommitGen)

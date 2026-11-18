@@ -58,6 +58,85 @@ private struct AccessibilityTreeEdges {
     }
 }
 
+// The arrays are allocated on the first accessibility read. A mutation of the authored
+// tree invalidates every entry except descendants certified by the last applied memo pass.
+final class AccessibilityProjectionCache {
+    fileprivate final class Template {
+        var node: AccessibilityNode
+        var snapshot: UInt64
+        let controlName: String?
+        let insideScroll: Bool
+
+        init(node: AccessibilityNode, controlName: String?, insideScroll: Bool, snapshot: UInt64) {
+            self.node = node
+            self.snapshot = snapshot
+            self.controlName = controlName
+            self.insideScroll = insideScroll
+        }
+    }
+
+    fileprivate struct VirtualIndex {
+        let places: VirtualRowPlaces<String>
+        let mounted: Range<Int>
+
+        init(_ list: RuntimeVirtualListState) {
+            places = list.rowPlaces
+            mounted = list.lastMountedRange
+        }
+
+        func position(path: String, key: String?) -> Int? {
+            var end = path.endIndex
+            while end > path.startIndex {
+                let previous = path.index(before: end)
+                guard path[previous] == "/" else { break }
+                end = previous
+            }
+            let prefix = path[..<end]
+            let start = prefix.lastIndex(of: "/").map { prefix.index(after: $0) } ?? prefix.startIndex
+            let segment = prefix[start...]
+            if segment.first == "@", let i = places.index(of: String(segment.dropFirst())), mounted.contains(i) { return i }
+            return key.flatMap { places.index(ofAuthoredKey: $0) }
+        }
+    }
+
+    fileprivate struct Slot {
+        var projection: AccessibilityTreeEdges.Projection?
+        var inert = false
+        var template: Template?
+    }
+
+    fileprivate var slots: [Slot] = []
+    fileprivate var snapshot: UInt64 = 0
+    private var edges: AccessibilityTreeEdges?
+    private var previousWebFocus: Bool?
+    private var pending: [(current: Range<Int>, previous: Range<Int>)]?
+
+    func committed(reusing ranges: [(current: Range<Int>, previous: Range<Int>)]) {
+        // Multiple commits may occur between accessibility reads, including memo settles.
+        if pending != nil || ranges.isEmpty { slots = [] }
+        pending = ranges
+        edges = nil
+    }
+
+    fileprivate func prepare(count: Int, webFocus: Bool, parent: (Int) -> Int?) -> AccessibilityTreeEdges {
+        if pending != nil || slots.count != count || previousWebFocus != webFocus {
+            var next = [Slot](repeating: Slot(), count: count)
+            if let pending, previousWebFocus == webFocus, !slots.isEmpty {
+                for span in pending {
+                    next.replaceSubrange(span.current, with: slots[span.previous])
+                }
+            }
+            slots = next
+            pending = nil
+            previousWebFocus = webFocus
+        }
+        if let edges { return edges }
+        let built = AccessibilityTreeEdges(count: count, parent: parent)
+        edges = built
+        return built
+    }
+}
+
 public extension AccessibilityTreeBuilder {
     /// Projects a flattened `[ElementInfo]` array from `Runtime.elements()` into a nested `AccessibilityNode` tree.
     /// Secure text fields (`securePaths.contains(path)` or `role == .textInput && text == nil`) never leak `value`.
@@ -236,18 +315,52 @@ public extension Runtime {
             )
         }
 
-        let edges = AccessibilityTreeEdges(count: flatNodes.count) { flatNodes[$0].parentIndex }
+        let storage = accessibilityProjectionCache ?? AccessibilityProjectionCache()
+        accessibilityProjectionCache = storage
+        let edges = storage.prepare(count: flatNodes.count, webFocus: cxSettings.viewDefaults.webFocus) { flatNodes[$0].parentIndex }
+        // A caller can request a different secure or modal projection without applying a layout.
+        let reuseSemantic = securePaths.isEmpty && activeModalPath == nil
+        let previousSnapshot = storage.snapshot
+        storage.snapshot &+= 1
+        let currentSnapshot = storage.snapshot
+        var changes = 0
+        var virtualAt: [Int: AccessibilityProjectionCache.VirtualIndex] = [:]
+        if nodeByPath.count == flatNodes.count {
+            for (path, list) in virtualLists {
+                if let i = nodeByPath[path] { virtualAt[i] = .init(list) }
+            }
+        } else if !virtualLists.isEmpty {
+            // Distinct authored byte paths may compare equal as a Swift String.
+            for i in flatNodes.indices {
+                if let list = virtualLists[flatNodes[i].path] { virtualAt[i] = .init(list) }
+            }
+        }
         func projection(_ i: Int) -> AccessibilityTreeEdges.Projection {
             let node = flatNodes[i]
-            let el = node.el
-            if el.isA11yHidden || el.opacity <= 0.01 || scene.isExiting(node.nodeId) ||
-                node.key == "__v_top_spacer" || node.key == "__v_bot_spacer" { return .hidden }
+            if scene.isExiting(node.nodeId) {
+                changes += 1
+                return .hidden
+            }
             if activeModalPath != nil && !modalMemberPaths.contains(node.path) && !modalAncestorPaths.contains(node.path) { return .hidden }
-            let takesFocus = nodeTakesFocus(el)
-            let keyboardTarget = takesFocus && !node.effectiveInert && (el.role != .presentation || el.explicitlyFocusable)
-            guard let role = AccessibilityRoleRules.projectedRole(for: el, takesFocus: takesFocus, keyboardTarget: keyboardTarget)
-            else { return .descendants(scrolls: !el.layout.scrollAxes.isEmpty) }
-            return .node(role)
+            if reuseSemantic, storage.slots[i].inert == node.effectiveInert, let cached = storage.slots[i].projection {
+                return cached
+            }
+            let el = node.el
+            let result: AccessibilityTreeEdges.Projection
+            if el.isA11yHidden || el.opacity <= 0.01 || node.key == "__v_top_spacer" || node.key == "__v_bot_spacer" {
+                result = .hidden
+            } else {
+                let takesFocus = nodeTakesFocus(el)
+                let keyboardTarget = takesFocus && !node.effectiveInert && (el.role != .presentation || el.explicitlyFocusable)
+                if let role = AccessibilityRoleRules.projectedRole(for: el, takesFocus: takesFocus, keyboardTarget: keyboardTarget) {
+                    result = .node(role)
+                } else {
+                    result = .descendants(scrolls: !el.layout.scrollAxes.isEmpty)
+                }
+            }
+            changes += 1
+            if reuseSemantic { storage.slots[i] = .init(projection: result, inert: node.effectiveInert) }
+            return result
         }
 
         func a11yKeyed(from idx: Int, key: String) -> Int? {
@@ -267,6 +380,28 @@ public extension Runtime {
         let selectableRoles: Set<ElementRole> = [.listItem, .option, .tab, .treeItem, .gridCell, .row]
         func build(_ idx: Int, insideScroll: Bool, semanticRole: ElementRole) -> AccessibilityNode {
             let node = flatNodes[idx]
+            let rect = presentedRectByPath[node.path] ?? node.targetRect
+            let virtualOwner = virtualAt[idx]
+            let parentList = node.parentIndex.flatMap { virtualAt[$0] }
+            if reuseSemantic, virtualOwner == nil, parentList == nil,
+               let cached = storage.slots[idx].template, cached.insideScroll == insideScroll {
+                let wasPublished = cached.snapshot == previousSnapshot
+                let childRevision = changes
+                if !edges.children[idx].isEmpty {
+                    let children = edges.project(edges.children[idx], insideScroll: insideScroll, projection: projection, build: build)
+                    if !wasPublished || changes != childRevision {
+                        cached.node.children = AccessibilityTreeBuilder.controlChildren(children, role: cached.node.role, name: cached.controlName)
+                    }
+                }
+                let focused = node.path == focusedPath
+                if !wasPublished || changes != childRevision || cached.node.frame != rect || cached.node.isFocused != focused {
+                    cached.node.frame = rect
+                    cached.node.isFocused = focused
+                    changes += 1
+                }
+                cached.snapshot = currentSnapshot
+                return cached.node
+            }
             let el = node.el
             var editIsSecure = el.isSecure
             let richPlain: String? = el.plainText ?? el.richSpans?.map(\.text).joined()
@@ -289,7 +424,6 @@ public extension Runtime {
                 }
             }
             let isSecure = editIsSecure || securePaths.contains(node.path) || (el.role == .textInput && editText == nil)
-            let rect = presentedRectByPath[node.path] ?? node.targetRect
             let nodeId = node.key ?? node.path
 
             let outsideModal = activeModalPath != nil && !modalMemberPaths.contains(node.path)
@@ -361,21 +495,11 @@ public extension Runtime {
 
             let resolvedPosInSet: Int? = {
                 if let explicit = el.a11yPosInSet?.position { return max(1, explicit) - 1 }
-                guard let pIdx = node.parentIndex, pIdx >= 0, pIdx < flatNodes.count,
-                      let vList = virtualLists[flatNodes[pIdx].path] else { return nil }
-                let rowSeg = node.path.split(separator: "/").last.map(String.init) ?? ""
-                if rowSeg.first == "@", let index = vList.rowPlaces.index(of: String(rowSeg.dropFirst())),
-                   vList.lastMountedRange.contains(index) { return index }
-                return node.key.flatMap { vList.rowPlaces.index(ofAuthoredKey: $0) }
+                return parentList?.position(path: node.path, key: node.key)
             }()
             let resolvedSizeOfSet: Int? = {
                 if let explicit = el.a11yPosInSet?.size { return explicit }
-                if let containerSize = virtualLists[node.path]?.lastKeys.count { return containerSize }
-                if let pIdx = node.parentIndex, pIdx >= 0, pIdx < flatNodes.count,
-                   let parentList = virtualLists[flatNodes[pIdx].path] {
-                    return parentList.lastKeys.count
-                }
-                return nil
+                return virtualOwner?.places.keys.count ?? parentList?.places.keys.count
             }()
 
             var projected = AccessibilityNode(
@@ -429,6 +553,15 @@ public extension Runtime {
             #endif
             projected.runtimePath = node.path
             projected.keepsControlContent = el.keepsControlContent
+            // Bounds and focus are sampled from the current frame on every read. Fields,
+            // links, grids and related labels also depend on live state or another subtree.
+            changes += 1
+            if reuseSemantic, !hasScroll, !hasLinks, editLens == nil, el.terminalGridPayload == nil,
+               el.a11yLabelledBy == nil, el.a11yDescribedBy == nil, virtualOwner == nil, parentList == nil,
+               edges.children[idx].isEmpty || resolvedRole == .group || givenName != nil {
+                storage.slots[idx].template = .init(node: projected,
+                    controlName: isSecure ? nil : controlName, insideScroll: insideScroll, snapshot: currentSnapshot)
+            }
             return projected
         }
 
