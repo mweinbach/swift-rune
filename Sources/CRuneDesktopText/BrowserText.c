@@ -25,8 +25,8 @@ IMPORT("release") extern void browser_release(uint32_t);
 IMPORT("extract_ink") extern uint32_t browser_extract_ink(uint32_t, int32_t, int32_t,
     RuneDesktopLineMetrics *, uint32_t);
 IMPORT("caret") extern float browser_caret(uint32_t, int32_t);
-IMPORT("cell") extern int32_t browser_cell(uint32_t, int32_t, int32_t, float *, float *);
-IMPORT("mask") extern int32_t browser_mask(uint32_t, int32_t, int32_t, int32_t, int32_t, uint8_t *);
+IMPORT("cell") extern int32_t browser_cell(uint32_t, int32_t, int32_t, float *, float *, uint32_t);
+IMPORT("mask") extern int32_t browser_mask(uint32_t, int32_t, int32_t, int32_t, int32_t, uint8_t *, uint32_t);
 IMPORT("has_color") extern int32_t browser_has_color(uint32_t);
 IMPORT("color") extern int32_t browser_color(uint32_t, int32_t, int32_t, int32_t, int32_t, uint8_t *);
 IMPORT("font") extern int32_t browser_register_font(const uint8_t *, uint32_t);
@@ -122,19 +122,35 @@ float rune_desktop_line_caret(const RuneDesktopLine *line, int32_t byte) {
     return 0;
 }
 
-int32_t rune_desktop_line_cell(const RuneDesktopLine *line, int32_t start, int32_t end,
-    float *left, float *advance) {
+static int32_t read_cell(const RuneDesktopLine *line, int32_t start, int32_t end,
+    float *left, float *advance, uint32_t report_source) {
 #ifdef RUNE_BROWSER_TEXT
-    if (line && left && advance) return browser_cell(line->handle, start, end, left, advance);
+    if (line && left && advance) return browser_cell(line->handle, start, end, left, advance, report_source);
 #endif
     return 0;
 }
 
+int32_t rune_desktop_line_cell(const RuneDesktopLine *line, int32_t start, int32_t end,
+    float *left, float *advance) {
+    const int32_t direction = read_cell(line, start, end, left, advance, 0);
+    return (direction > 0) - (direction < 0);
+}
+
+int32_t rune_browser_ink_cell(const RuneDesktopLine *line, int32_t start, int32_t end,
+    float *left, float *advance) {
+    return read_cell(line, start, end, left, advance, 1);
+}
+
 int32_t rune_desktop_line_mask(const RuneDesktopLine *line, int32_t x, int32_t y,
     int32_t width, int32_t height, uint8_t *pixels) {
+    return rune_browser_line_mask_ink(line, x, y, width, height, 0xffffff, pixels);
+}
+
+int32_t rune_browser_line_mask_ink(const RuneDesktopLine *line, int32_t x, int32_t y,
+    int32_t width, int32_t height, uint32_t rgb, uint8_t *pixels) {
 #ifdef RUNE_BROWSER_TEXT
     if (line && pixels && width > 0 && height > 0)
-        return browser_mask(line->handle, x, y, width, height, pixels);
+        return browser_mask(line->handle, x, y, width, height, pixels, rgb);
 #endif
     return 0;
 }

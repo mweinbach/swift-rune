@@ -64,6 +64,15 @@ function installFont(doc, source, { bundled = false, startup = false, firstCut =
     else colorFamilies.delete(key);
 }
 
+function cssFamilyKey(css) {
+    const name = /^["']/.test(css) ? css.slice(1, -1) : css;
+    return name.replace(/\\(?:([0-9a-f]{1,6})\s?|(.))/giu, (_, hex, escaped) => {
+        if (!hex) return escaped;
+        const point = parseInt(hex, 16);
+        return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : '\ufffd';
+    }).toLowerCase();
+}
+
 // Preserve quoted commas and escaped characters when walking the authored stack.
 // CSSOM normalizes multi-word names, quotes, and generic families for Canvas.
 function familyStack(style, raw, fallback) {
@@ -76,12 +85,7 @@ function familyStack(style, raw, fallback) {
         style.fontFamily = value;
         let css = style.fontFamily || CSS.escape(value);
         if (/^(?:inherit|initial|unset|revert|revert-layer)$/i.test(css)) css = JSON.stringify(value);
-        const name = css.startsWith('"') ? css.slice(1, -1) : css;
-        const key = name.replace(/\\(?:([0-9a-f]{1,6})\s?|(.))/giu, (_, hex, escaped) => {
-            if (!hex) return escaped;
-            const point = parseInt(hex, 16);
-            return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : '\ufffd';
-        }).toLowerCase();
+        const key = cssFamilyKey(css);
         families.push({ css, key: !css.startsWith('"') && genericFamilies.has(key) ? null : key });
     }
     if (families.at(-1)?.css !== fallback) families.push({ css: fallback, key: null });
@@ -139,6 +143,118 @@ function closestFace(faces, line) {
     const distance = face => Math.abs(Number(face.weight) - line.weight) +
         ((face.style === 'italic') === Boolean(line.italic) ? 0 : 1000);
     return [...faces.values()].reduce((a, b) => distance(a) <= distance(b) ? a : b);
+}
+
+// Only claim a registered outline when its Unicode subtables agree. Unsupported
+// cmaps keep the browser's white platform mask. The bytes have already loaded
+// as a FontFace, but their table offsets still need bounds checks here.
+function nominalGlyphs(bytes) {
+    const font = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (font.byteLength < 12 || 12 + font.getUint16(4) * 16 > font.byteLength) return null;
+    let cmap, glyphCount = 0;
+    for (let i = 0; i < font.getUint16(4); ++i) {
+        const record = 12 + 16 * i, tag = font.getUint32(record);
+        const offset = font.getUint32(record + 8), size = font.getUint32(record + 12);
+        if (offset + size > font.byteLength) return null;
+        if (tag === 0x636d6170) cmap = new DataView(bytes.buffer, bytes.byteOffset + offset, size);
+        if (tag === 0x6d617870 && size >= 6) glyphCount = font.getUint16(offset + 4);
+    }
+    if (!cmap || !glyphCount || cmap.byteLength < 4 || 4 + 8 * cmap.getUint16(2) > cmap.byteLength) return null;
+    const tables = new Map();
+    for (let i = 0; i < cmap.getUint16(2); ++i) {
+        const record = 4 + i * 8, platform = cmap.getUint16(record), encoding = cmap.getUint16(record + 2);
+        if (platform !== 0 && !(platform === 3 && (encoding === 1 || encoding === 10))) continue;
+        const offset = cmap.getUint32(record + 4);
+        if (offset + 2 > cmap.byteLength) return null;
+        const format = cmap.getUint16(offset);
+        if (format === 14 || tables.has(offset)) continue; // Variation sequences are never simple cells.
+        if (format !== 4 && format !== 12) return null;
+        if (offset + 16 > cmap.byteLength) return null;
+        const length = format === 4 ? cmap.getUint16(offset + 2) : cmap.getUint32(offset + 4);
+        const count = format === 4 ? cmap.getUint16(offset + 6) / 2 : cmap.getUint32(offset + 12);
+        if (!Number.isInteger(count) || !count || 16 + (format === 4 ? 8 : 12) * count > length || offset + length > cmap.byteLength) return null;
+        tables.set(offset, { format, count, data: new DataView(cmap.buffer, cmap.byteOffset + offset, length) });
+    }
+    return point => {
+        let found = false;
+        for (const { format, count, data } of tables.values()) {
+            if (format === 4 && point > 0xffff) continue;
+            let lo = 0, hi = count;
+            while (lo < hi) {
+                const mid = (lo + hi) >>> 1;
+                const end = format === 4 ? data.getUint16(14 + 2 * mid) : data.getUint32(20 + 12 * mid);
+                if (end < point) lo = mid + 1;
+                else hi = mid;
+            }
+            if (lo === count) return false;
+            const start = format === 4 ? data.getUint16(16 + 2 * (count + lo)) : data.getUint32(16 + 12 * lo);
+            if (start > point) return false;
+            let glyph;
+            if (format === 12) {
+                glyph = data.getUint32(24 + 12 * lo) + point - start;
+            } else {
+                const delta = data.getInt16(16 + 2 * (2 * count + lo));
+                const rangeWord = 16 + 2 * (3 * count + lo), offset = data.getUint16(rangeWord);
+                if (offset) {
+                    const index = rangeWord + offset + 2 * (point - start);
+                    if (index + 2 > data.byteLength || index % 2) return false;
+                    glyph = data.getUint16(index);
+                    if (!glyph) return false;
+                } else glyph = point;
+                glyph = (glyph + delta) & 0xffff;
+            }
+            if (!glyph || glyph >= glyphCount) return false;
+            found = true;
+        }
+        return found;
+    };
+}
+
+// These simple scripts do not require a contextual shaping engine to establish
+// nominal character support. Marks, emoji and multi-scalar owners may select a
+// different face even when the base scalar has a cmap entry.
+const simpleSource = /^[\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}\p{Script=Common}]$/u;
+const ambiguousSource = /[\p{Mark}\p{Control}\p{Default_Ignorable_Code_Point}\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Regional_Indicator}]/u;
+
+function sourceFamilies(doc, line) {
+    const registered = fontSources.get(doc);
+    const families = [];
+    let pageFaces;
+    for (const family of line.families) {
+        const faces = registered?.get(family.key);
+        if (!faces?.size) break; // An earlier system, generic, or page family can win here.
+        const sources = [...faces.values()];
+        pageFaces ??= [...doc.fonts];
+        if (sources.some(source => !pageFaces.includes(source.face) ||
+            (source.face.unicodeRange ?? 'U+0-10FFFF').toUpperCase() !== 'U+0-10FFFF')) break;
+        // A page can provide a completely different face under the same CSS name.
+        const competing = pageFaces.some(face => cssFamilyKey(face.family) === family.key && !sources.some(source => source.face === face));
+        if (competing) break;
+        families.push(sources);
+    }
+    return families;
+}
+
+function registeredCell(doc, line, start, end) {
+    const from = line.offsets[start], point = line.text.codePointAt(from);
+    if ((start > 0 && line.offsets[start - 1] === from) || (end > 0 && line.offsets[end - 1] === line.offsets[end])) return false;
+    if (point === undefined || line.offsets[end] - from !== (point > 0xffff ? 2 : 1)) return false;
+    if (line.sourceEpoch !== sourceCount) {
+        line.sourceEpoch = sourceCount;
+        line.sources = sourceFamilies(doc, line);
+        line.sourceCells = new Map();
+    }
+    if (line.sourceCells.has(point)) return line.sourceCells.get(point);
+    const scalar = String.fromCodePoint(point);
+    // Requiring every eligible weight/style to cover this scalar avoids guessing
+    // which CSS face won, including when weight or slant was synthesized.
+    const result = simpleSource.test(scalar) && !ambiguousSource.test(scalar) && line.sources.some(sources =>
+        sources.every(source => {
+            if (source.nominal === undefined) source.nominal = nominalGlyphs(source.bytes);
+            return source.nominal?.(point) === true;
+        }));
+    line.sourceCells.set(point, result);
+    return result;
 }
 
 function applyFont(context, line) {
@@ -301,6 +417,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         line.baseline = ascent;
         line.shaping = null;
         line.resolvedInk = null;
+        line.sourceEpoch = undefined;
         line.metrics = new Uint8Array(memory(), ptr, Math.min(size, 40)).slice();
         line.svgText?.parentNode.remove();
         line.svgText = null;
@@ -312,9 +429,9 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
         line.tile = null;
     }
 
-    function coverage(line, x, y, width, height) {
+    function coverage(line, x, y, width, height, rgb = 0xffffff) {
         const last = line.tile;
-        if (last && last.x === x && last.y === y && last.width === width && last.height === height) return last;
+        if (last && last.x === x && last.y === y && last.width === width && last.height === height && last.rgb === rgb) return last;
         const context = contextFor(line), canvas = context.canvas;
         if (canvas.width !== width) canvas.width = width;
         if (canvas.height !== height) canvas.height = height;
@@ -336,18 +453,21 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             if (line.clip) context.restore();
             return context.getImageData(0, 0, width, height).data;
         }
-        const white = paint('white');
+        // Desktop Mac canvas antialiasing depends on the foreground even on a clear
+        // bitmap. The shader applies opacity and color after sampling this alpha.
+        const ink = paint('#' + rgb.toString(16).padStart(6, '0'));
         const mask = new Uint8Array(width * height);
         let rgba;
         if (line.hasColor) {
             // Intrinsic font colors survive a black/white foreground change, including
             // white or black details inside emoji. The difference is the tintable coverage.
-            const black = paint('black');
+            const white = rgb === 0xffffff ? ink : paint('white');
+            const black = rgb === 0 ? ink : paint('black');
             rgba = new Uint8ClampedArray(white.length);
             for (let i = 0; i < mask.length; ++i) {
                 const j = i * 4;
                 const foreground = Math.max(0, Math.min(1, (white[j] - black[j]) / 255));
-                mask[i] = Math.round(white[j + 3] * foreground);
+                mask[i] = Math.round(ink[j + 3] * foreground);
                 const intrinsic = 1 - foreground;
                 rgba[j + 3] = white[j + 3] * intrinsic;
                 if (rgba[j + 3]) {
@@ -357,9 +477,9 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
                 }
             }
         } else {
-            for (let i = 0; i < mask.length; ++i) mask[i] = white[i * 4 + 3];
+            for (let i = 0; i < mask.length; ++i) mask[i] = ink[i * 4 + 3];
         }
-        return line.tile = { x, y, width, height, mask, rgba };
+        return line.tile = { x, y, width, height, rgb, mask, rgba };
     }
 
     function bounds(line, start, end) {
@@ -762,7 +882,7 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             if (!runs.size) root?.remove();
         },
         caret(id, offset) { return caret(runs.get(id), offset); },
-        cell(id, start, end, left, width) {
+        cell(id, start, end, left, width, reportSource = false) {
             const line = runs.get(id);
             const rect = bounds(line, start, end);
             const x = rect.left - lineOrigin(line);
@@ -773,13 +893,14 @@ export function createRuneTextImports(getMemory, doc = globalThis.document, spel
             // At a bidi boundary a collapsed DOM range can use the adjacent run's edge.
             // Use the endpoint nearest either edge of this particular grapheme.
             const a = caret(line, start), b = caret(line, end);
-            return Math.min(Math.abs(a - x), Math.abs(b - (x + rect.width))) <=
+            const direction = Math.min(Math.abs(a - x), Math.abs(b - (x + rect.width))) <=
                 Math.min(Math.abs(a - (x + rect.width)), Math.abs(b - x)) ? 1 : -1;
+            return reportSource && registeredCell(doc, line, start, end) ? 2 * direction : direction;
         },
-        mask(id, x, y, width, height, destination) {
+        mask(id, x, y, width, height, destination, rgb = 0xffffff) {
             const line = runs.get(id);
             if (!line || width < 1 || height < 1) return 0;
-            const { mask } = coverage(line, x, y, width, height);
+            const { mask } = coverage(line, x, y, width, height, rgb);
             new Uint8Array(memory(), destination >>> 0, mask.length).set(mask);
             return 1;
         },

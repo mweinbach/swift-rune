@@ -183,6 +183,9 @@ extension GlyphAtlas {
     /// same cached shaped line in different colours. Resolve this last part at paint time.
     // An absent palette uses neutral masks, as in glyphs_for_layout before set_glyph_inks.
     @TaskLocal static var baseInkBucket: UInt8?
+    #if os(WASI) && canImport(CRuneDesktopText)
+    @TaskLocal static var browserBaseRGB: UInt32?
+    #endif
 
     /// On a cache miss the shaper can prepare the requested ink immediately. The paint
     /// resolver still handles later colour changes, selections, and highlighted spans.
@@ -191,6 +194,11 @@ extension GlyphAtlas {
         if mode == .windfoil || (mode == .on && mode.pipeline.dilate) {
             let bucket = inkBucket(SIMD4(ink.r, ink.g, ink.b, ink.a), encoded: false) ?? 0
             if bucket != baseInkBucket { return $baseInkBucket.withValue(bucket, operation: shape) }
+        }
+        #elseif os(WASI) && canImport(CRuneDesktopText)
+        if FontSmoothing.classic == .on && (mode == .on || mode == .systemDefault) {
+            let rgb = BrowserGlyphMask.rgb(ink: SIMD4(ink.r, ink.g, ink.b, ink.a), encoded: false)
+            if rgb != browserBaseRGB { return $browserBaseRGB.withValue(rgb, operation: shape) }
         }
         #endif
         return shape()

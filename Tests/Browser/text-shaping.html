@@ -21,13 +21,15 @@ try {
         const bridge = createRuneTextImports(() => memory, { defaultView: { navigator } });
         check(bridge.platform() === kind, 'Wrong native text raster platform');
     }
+    let pageFont;
     for (const file of ['Inter-Regular', 'IBMPlexMono-Regular']) {
         const font = new Uint8Array(await (await fetch('../../Sources/Rune/Resources/Fonts/' + file + '.ttf')).arrayBuffer());
         bytes.set(font, 0);
         check(host.font(0, font.length) === 1, 'App font registration failed');
         if (file === 'IBMPlexMono-Regular') {
             const existing = new FontFace('Rune Page Font', font);
-            document.fonts.add(await existing.load());
+            pageFont = await existing.load();
+            document.fonts.add(pageFont);
         }
     }
     await runeTextFontsReady(memory);
@@ -91,7 +93,7 @@ try {
             document.documentElement.dir = direction;
         }
     }
-    function shape(text, direction = 0, features = '', stack = 'Inter') {
+    function shape(text, direction = 0, features = '', stack = 'Inter', reportSource = false) {
         const input = utf8.encode(text);
         const stackBytes = utf8.encode(stack);
         bytes.set(stackBytes, 256);
@@ -125,11 +127,51 @@ try {
             for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)) {
                 const end = offset + utf8.encode(segment).length;
                 const dir = host.cell(id, offset, end, 64, 68);
-                cells.push({ x: data.getFloat32(64, true), width: data.getFloat32(68, true), dir });
+                const cell = { x: data.getFloat32(64, true), width: data.getFloat32(68, true), dir };
+                if (reportSource) {
+                    cell.source = host.cell(id, offset, end, 64, 68, true);
+                    check(Math.sign(cell.source) === dir, 'Source reporting changed the cell direction for ' + segment);
+                    check(data.getFloat32(64, true) === cell.x && data.getFloat32(68, true) === cell.width,
+                        'Source reporting changed the cell geometry for ' + segment);
+                }
+                cells.push(cell);
                 offset = end;
             }
             return { advance, cells, ink, mask, colorPixels, x, y, width, height, ascent: data.getFloat32(4, true) };
         } finally { host.release(id); }
+    }
+    // The normal cell ABI returns the direction. An opt-in result also identifies
+    // text covered by a registered face without changing the selection geometry.
+    {
+        const sources = (text, stack = 'Inter', direction = 1) =>
+            shape(text, direction, '', stack, true).cells.map(cell => cell.source);
+        const mixed = sources('ffi漢ش🙂e\u0301🡐');
+        check(mixed.map(Math.abs).join() === '2,2,2,1,1,1,1,2', 'Mixed registered and platform cells: ' + mixed);
+        // Inter uses cmap format 12 for U+1F850. Plex Mono uses format 4
+        // for Latin and Cyrillic and has no glyph for Greek capital omega.
+        check(sources('XЖΩ', 'IBM Plex Mono').map(Math.abs).join() === '2,2,1', 'Plex Mono Latin/Cyrillic/Greek');
+        check(sources('Ω', 'IBM Plex Mono, Inter')[0] === 2, 'Lost fallback to a second registered face');
+        for (const stack of ['serif, Inter', 'Rune Page Font, Inter']) {
+            check(sources('A', stack)[0] === 1, 'Claimed a generic or page-registered face in ' + stack);
+        }
+        check(sources('אבג', 'Inter', 2).every(value => value === -1), 'RTL fallback lost its signed direction');
+        const foreign = await new FontFace('Inter', 'url(../../Sources/Rune/Resources/Fonts/IBMPlexMono-Regular.ttf)').load();
+        bytes.set(utf8.encode('Inter'), 256);
+        bytes.set(utf8.encode('A'), 512);
+        const retained = host.create(512, 1, 256, 5, 16, 400, 0, 0, 1, 0, 40);
+        try {
+            check(host.cell(retained, 0, 1, 64, 68, true) === 2, 'Registered Inter lost its source');
+            const count = document.fonts.size;
+            document.fonts.delete(pageFont);
+            document.fonts.add(foreign);
+            check(document.fonts.size === count, 'Fixture failed to replace exactly one page face');
+            host.configure(retained, 0, 0, 0, 0, 0, 0, 0, 40);
+            check(host.cell(retained, 0, 1, 64, 68, true) === 1, 'Reconfigured run retained a competing face');
+        } finally {
+            host.release(retained);
+            document.fonts.delete(foreign);
+            document.fonts.add(pageFont);
+        }
     }
     // An embedding page may style all spans. Rune still owns an explicit line direction.
     const directionRule = document.createElement('style');
@@ -144,6 +186,54 @@ try {
         directionRule.textContent = 'span { direction: ltr !important }';
         check(cells(2) === rtl, 'Page CSS changed explicit RTL geometry');
     } finally { directionRule.remove(); }
+    // A retained run can change paint or selection colors without reshaping. In
+    // particular, macOS smooths dark and light glyphs differently on a clear canvas.
+    {
+        const sample = 'file8829.rs', family = 'Inter', width = 160, height = 24;
+        bytes.set(utf8.encode(sample), 512);
+        bytes.set(utf8.encode(family), 256);
+        const id = host.create(512, sample.length, 256, family.length, 14, 400, 0, 0, 1, 0, 40);
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const reference = canvas.getContext('2d', { willReadFrequently: true });
+        reference.font = '400 14px Inter';
+        try {
+            for (const rgb of [0xffffff, 0, 0x2776bc, 0x333333, 0xffffff]) {
+                check(host.mask(id, 0, 0, width, height, 4096, rgb), 'Missing foreground tile');
+                reference.clearRect(0, 0, width, height);
+                reference.fillStyle = '#' + rgb.toString(16).padStart(6, '0');
+                reference.fillText(sample, 0, data.getFloat32(4, true));
+                const pixels = reference.getImageData(0, 0, width, height).data;
+                check(bytes.subarray(4096, 4096 + width * height).every((alpha, i) => alpha === pixels[4 * i + 3]),
+                    'Retained coverage differed from the native foreground ' + reference.fillStyle);
+            }
+        } finally { host.release(id); }
+        const mixedText = 'A 😀', input = utf8.encode(mixedText);
+        bytes.set(input, 512);
+        const mixed = host.create(512, input.length, 256, family.length, 14, 400, 0, 0, 1, 0, 40);
+        try {
+            const textEnd = Math.floor(reference.measureText('A ').width);
+            const maskPtr = 4096, colorPtr = 16384;
+            for (const rgb of [0, 0xa04d9c, 0xffffff]) {
+                check(host.mask(mixed, 0, 0, width, height, maskPtr, rgb) &&
+                    host.color(mixed, 0, 0, width, height, colorPtr), 'Missing mixed paint planes');
+                reference.clearRect(0, 0, width, height);
+                reference.fillStyle = '#' + rgb.toString(16).padStart(6, '0');
+                reference.fillText(mixedText, 0, data.getFloat32(4, true));
+                const pixels = reference.getImageData(0, 0, width, height).data;
+                for (let i = 0; i < width * height; i++) {
+                    if (i % width < textEnd) {
+                        check(bytes[maskPtr + i] === pixels[4 * i + 3] && !bytes[colorPtr + 4 * i + 3],
+                            'Mixed run lost tintable foreground coverage');
+                    } else {
+                        check(!bytes[maskPtr + i] && [0, 1, 2, 3].every(c => bytes[colorPtr + 4 * i + c] === pixels[4 * i + c]),
+                            'Tinted an intrinsic emoji color');
+                    }
+                }
+            }
+        } finally { host.release(mixed); }
+    }
     const han = shape('漢'), day = shape('日');
     check(han.ink !== day.ink && han.ink > 40 && day.ink > 40, 'CJK fallback collapsed to a replacement box');
     const latin = shape('é'), combining = shape('e\u0301');

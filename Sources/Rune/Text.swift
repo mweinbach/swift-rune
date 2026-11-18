@@ -539,6 +539,9 @@ public struct PositionedGlyph: Sendable, Equatable {
         false
         #endif
     }
+    #if os(WASI) && canImport(CRuneDesktopText)
+    var browserMask: BrowserGlyphMask?
+    #endif
     #if os(Windows)
     // Native tile shared by adjacent graphemes. Its gamma table depends on paint-time ink.
     var windowsMask: WindowsGlyphMask?
@@ -1191,6 +1194,11 @@ public final class GlyphAtlas: @unchecked Sendable {
     private var portableGlyphCache: [PortableGlyphKey: (entry: Entry, lastUsed: UInt64, lastFrame: UInt64)] = [:]
     private var iconCache: [IconKey: (entry: Entry, lastUsed: UInt64, lastFrame: UInt64)] = [:]
     private var frameSequence: UInt64 = 0
+    #if os(WASI) && canImport(CRuneDesktopText)
+    private var lastBrowserMask: (source: BrowserGlyphMask, rgb: UInt32, entry: Entry)?
+    private var lastBrowserGeometry: (source: BrowserGlyphMask, white: [UInt8])?
+    private var browserCoverage = Array(repeating: BrowserCoverageShelf(), count: GlyphAtlas.maxOverflowPages)
+    #endif
 
     /// Initializes the atlas with lazy CPU pixel backing (`#830`: keeps a 1-byte 1x1 stub until the first mask is placed).
     public convenience init(width: Int = GlyphAtlas.atlasSize, height: Int = GlyphAtlas.atlasSize, maxCachedEntries: Int = 4096) {
@@ -1535,6 +1543,10 @@ public final class GlyphAtlas: @unchecked Sendable {
             baseGeneration = generation
         }
         frameSequence &+= 1
+        #if os(WASI) && canImport(CRuneDesktopText)
+        lastBrowserMask = nil
+        lastBrowserGeometry = nil
+        #endif
         let total = 1 + overflowPages.count
         var totalLive: UInt64 = 0
         for p in 0..<total {
@@ -1738,13 +1750,35 @@ public final class GlyphAtlas: @unchecked Sendable {
         guard !rows.isEmpty, !columns.isEmpty, ((y + rows.count - 1) * source.width + x + columns.count) <= source.texels.count else {
             return nil
         }
+        return Self.coveredRows(rows, columns: x..<(x + columns.count), stride: source.width, startY: y, pixels: source.texels)
+    }
+
+    private static func coveredRows(_ rows: Range<Int>, columns: Range<Int>, stride: Int, startY: Int, pixels: [UInt8]) -> Range<Int>? {
         func hasCoverage(_ row: Int) -> Bool {
-            let start = (y + row) * source.width + x
-            return source.texels[start..<(start + columns.count)].contains { $0 != 0 }
+            let start = (startY + row) * stride + columns.lowerBound
+            return pixels[start..<(start + columns.count)].contains { $0 != 0 }
         }
         guard let first = rows.first(where: hasCoverage), let last = rows.last(where: hasCoverage) else { return nil }
         return first..<(last + 1)
     }
+
+    #if os(WASI)
+    /// A dark source can be recolored light after shaping. Preserve its original white
+    /// coverage extent without allocating an extra atlas tile for the conservative bounds.
+    internal func browserCoveredRows(of source: BrowserGlyphMask, columns: Range<Int>) -> Range<Int>? {
+        lock.lock()
+        defer { lock.unlock() }
+        let pixels: [UInt8]
+        if let cached = lastBrowserGeometry, cached.source.sharesGeometry(with: source) {
+            pixels = cached.white
+        } else {
+            guard let white = source.whiteMask() else { return nil }
+            lastBrowserGeometry = (source, white)
+            pixels = white
+        }
+        return Self.coveredRows(0..<source.size.y, columns: columns, stride: source.size.x, startY: 0, pixels: pixels)
+    }
+    #endif
 
     internal func desktopColor(key: DesktopMaskKey?, width: Int, height: Int,
                                bitmap: () -> Data?) -> ColorGlyphEntry? {
@@ -1754,11 +1788,57 @@ public final class GlyphAtlas: @unchecked Sendable {
         return storeColorGlyph(key: key, size: SIMD2(width, height), bearing: .zero, pixels: pixels)
     }
 
-    internal func desktopMask(key: DesktopMaskKey?, width: Int, height: Int,
-                              deferredTile: () -> DesktopOutlineTile? = { nil }, bitmap: () -> [UInt8]?) -> Entry? {
-        let cacheKey = key.map(PortableGlyphKey.desktop)
+    #if os(WASI)
+    /// Adjacent glyphs often sample the same colored tile. The first lookup in a
+    /// frame refreshes its LRU and pins the page; another lookup can reuse both.
+    internal func browserMask(source: BrowserGlyphMask, rgb: UInt32, key: DesktopMaskKey, size: SIMD2<Int>,
+                              bitmap: () -> [UInt8]?) -> Entry? {
         lock.lock()
         defer { lock.unlock() }
+        if let cached = lastBrowserMask, cached.source === source, cached.rgb == rgb {
+            touchLocked(page: cached.entry.page, texels: UInt32(size.x * size.y))
+            return cached.entry
+        }
+        var variant = key
+        variant.browserRGB = rgb
+        guard let entry = desktopMaskLocked(key: variant, width: size.x, height: size.y,
+                                            shareBrowserCoverage: true, deferredTile: { nil }, bitmap: bitmap) else { return nil }
+        lastBrowserMask = (source, rgb, entry)
+        return entry
+    }
+
+    private func placeBrowserCoverageLocked(_ pixels: [UInt8], size: SIMD2<Int>)
+        -> (uv: SIMD4<Float>, page: UInt16, origin: SIMD2<Int>)? {
+        let (count, overflow) = size.x.multipliedReportingOverflow(by: size.y)
+        guard !overflow, size.x > 0, size.y > 0, pixels.count == count else { return nil }
+        let fingerprint = BrowserCoverageShelf.fingerprint(pixels, size: size)
+        for page in 0...overflowPages.count {
+            let sheet = page == 0 ? pageZero : overflowPages[page - 1].atlas
+            if let origin = browserCoverage[page].origin(fingerprint, pixels: pixels, size: size, page: sheet.texels, stride: sheet.width) {
+                let invW = 1 / Float(sheet.width), invH = 1 / Float(sheet.height)
+                let uv = SIMD4(Float(origin.x) * invW, Float(origin.y) * invH,
+                               Float(origin.x + size.x) * invW, Float(origin.y + size.y) * invH)
+                touchLocked(page: UInt16(page), texels: UInt32(pixels.count))
+                return (uv, UInt16(page), origin)
+            }
+        }
+        guard let placed = allocateAndBlit(width: size.x, height: size.y, bitmap: pixels) else { return nil }
+        browserCoverage[Int(placed.page)].remember(fingerprint, origin: placed.origin, size: size)
+        return placed
+    }
+    #endif
+
+    internal func desktopMask(key: DesktopMaskKey?, width: Int, height: Int, shareBrowserCoverage: Bool = false,
+                              deferredTile: () -> DesktopOutlineTile? = { nil }, bitmap: () -> [UInt8]?) -> Entry? {
+        lock.lock()
+        defer { lock.unlock() }
+        return desktopMaskLocked(key: key, width: width, height: height, shareBrowserCoverage: shareBrowserCoverage,
+                                 deferredTile: deferredTile, bitmap: bitmap)
+    }
+
+    private func desktopMaskLocked(key: DesktopMaskKey?, width: Int, height: Int, shareBrowserCoverage: Bool,
+                                   deferredTile: () -> DesktopOutlineTile?, bitmap: () -> [UInt8]?) -> Entry? {
+        let cacheKey = key.map(PortableGlyphKey.desktop)
         if let cacheKey, var cached = portableGlyphCache[cacheKey] {
             accessCounter &+= 1
             cached.lastUsed = accessCounter
@@ -1776,7 +1856,17 @@ public final class GlyphAtlas: @unchecked Sendable {
             guard let pixels = bitmap() else { return nil }
             coverage = pixels
         }
-        guard let placed = allocateAndBlit(width: width, height: height, bitmap: coverage) else { return nil }
+        #if os(WASI)
+        let location: (uv: SIMD4<Float>, page: UInt16, origin: SIMD2<Int>)?
+        if shareBrowserCoverage, cacheKey != nil, let coverage {
+            location = placeBrowserCoverageLocked(coverage, size: SIMD2(width, height))
+        } else {
+            location = allocateAndBlit(width: width, height: height, bitmap: coverage)
+        }
+        #else
+        let location = allocateAndBlit(width: width, height: height, bitmap: coverage)
+        #endif
+        guard let placed = location else { return nil }
         var entry = Entry(uv: placed.uv, pixelSize: SIMD2(width, height), bearingPx: .zero,
                           page: placed.page, pixelOrigin: placed.origin)
         if let fill {
@@ -2203,6 +2293,10 @@ public final class GlyphAtlas: @unchecked Sendable {
             savedMaskPlan = nil
         }
         let p16 = UInt16(page)
+        #if os(WASI) && canImport(CRuneDesktopText)
+        if lastBrowserMask?.entry.page == p16 { lastBrowserMask = nil }
+        if browserCoverage.indices.contains(page) { browserCoverage[page].reset() }
+        #endif
         if !lcdOutlineMasks.isEmpty { lcdOutlineMasks = lcdOutlineMasks.filter { $0.value.page != p16 } }
         #if canImport(CoreText) && canImport(CoreGraphics)
         glyphCache = glyphCache.filter { $0.value.entry.page != p16 }
@@ -4032,6 +4126,14 @@ public final class TextSystem: @unchecked Sendable {
     /// The coverage atlas sample to paint for a shaped glyph in straight RGBA.
     /// Set `encoded` when the RGB channels already use the sRGB transfer function.
     public func glyphMask(for glyph: PositionedGlyph, ink: SIMD4<Float>, encoded: Bool) -> (uv: SIMD4<Float>, page: UInt16, gamma: Float) {
+        #if os(WASI) && canImport(CRuneDesktopText)
+        if let mask = glyph.browserMask, ink.w > 0 {
+            if let tile = mask.resolve(ink: ink, encoded: encoded, atlas: glyphAtlas) {
+                return (glyph.uv + tile.offset, tile.page, 1)
+            }
+            return (glyph.uv, glyph.atlasPage, 1)
+        }
+        #endif
         #if os(Windows)
         if let tile = glyph.windowsMask?.bounds {
             let bucket = WindowsTextGamma.bucket(ink, encoded: encoded)
@@ -4048,7 +4150,11 @@ public final class TextSystem: @unchecked Sendable {
     }
 
     internal func glyphMask(for glyph: PositionedGlyph, premultipliedInk ink: SIMD4<Float>, encoded: Bool) -> (uv: SIMD4<Float>, page: UInt16, gamma: Float) {
-        #if os(Windows)
+        #if os(WASI) && canImport(CRuneDesktopText)
+        if glyph.browserMask != nil && ink.w > 0 {
+            return glyphMask(for: glyph, ink: SIMD4(ink.x / ink.w, ink.y / ink.w, ink.z / ink.w, ink.w), encoded: encoded)
+        }
+        #elseif os(Windows)
         if glyph.windowsMask != nil && ink.w > 0 {
             return glyphMask(for: glyph, ink: SIMD4(ink.x / ink.w, ink.y / ink.w, ink.z / ink.w, ink.w), encoded: encoded)
         }
