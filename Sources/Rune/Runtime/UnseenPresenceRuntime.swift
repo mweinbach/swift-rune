@@ -4,13 +4,40 @@ import RuneMotion
 // MARK: - Unseen Presence Runtime (`crates/rune/src/runtime/motion/unseen_presence.rs`)
 
 internal struct UnseenPresenceState: Sendable {
-    struct PrevNodeSnapshot: Sendable {
-        var scrollContentPos: Vec2
-        var scrollPath: String?
-        var parentId: NodeId?
+    struct Node: Sendable {
+        var origin: Vec2
+        var scrollIndex: Int?
+        var parent: NodeId?
     }
 
-    var prevNodesById: [NodeId: PrevNodeSnapshot] = [:]
+    struct Scroll: Sendable {
+        var path: String
+        var origin: Vec2
+        var offset: Vec2
+
+        func contentPosition(of point: Vec2) -> Vec2 {
+            Vec2(point.x - origin.x + offset.x, point.y - origin.y + offset.y)
+        }
+    }
+
+    var indexById: [NodeId: Int] = [:]
+    var nodes: [Node] = []
+    var scrolls: [Int: Scroll] = [:]
+
+    func node(_ id: NodeId) -> Node? {
+        indexById[id].map { nodes[$0] }
+    }
+
+    /// Compare in each commit's scroll content coordinates. Viewport indices may change
+    /// during a reorder, while their paths remain stable.
+    func stayedInScrollSpace(_ old: Node, new: Node, in next: Self) -> Bool {
+        let before = old.scrollIndex.flatMap { scrolls[$0] }
+        let after = new.scrollIndex.flatMap { next.scrolls[$0] }
+        guard before?.path == after?.path else { return false }
+        let a = before?.contentPosition(of: old.origin) ?? old.origin
+        let b = after?.contentPosition(of: new.origin) ?? new.origin
+        return abs(a.x - b.x) <= 1.5 && abs(a.y - b.y) <= 1.5
+    }
 }
 
 fileprivate let kitFilterKeysKey = "kitFilterKeys"
@@ -153,11 +180,17 @@ internal struct KitUnseenPresenceState {
     /// Per node of `prevNodes`: neither it nor anything under it drew in the last frame.
     func drewNothing<S>(nodes: [Runtime<S>.FlatNode]) -> [Bool] {
         guard hasBuilt, !nodes.isEmpty else { return [] }
-        var seen = nodes.map { frameById[$0.nodeId]?.visible ?? false }
-        markAncestors(nodes, &seen)
-        return nodes.indices.map { i in
-            !seen[i] || (frameById[nodes[i].nodeId]?.inheritedOpacity ?? 1.0) < (1.0 / 512.0)
+        var hidden = [Bool](repeating: true, count: nodes.count)
+        for i in nodes.indices.reversed() {
+            let sample = frameById[nodes[i].nodeId]
+            if !hidden[i] || sample?.visible == true {
+                // A child can overflow a clipped or transparent parent's own bounds.
+                // Propagate its draw before applying this node's opacity cutoff.
+                if let parent = nodes[i].parentIndex, parent < i { hidden[parent] = false }
+                hidden[i] = (sample?.inheritedOpacity ?? 1) < (1.0 / 512.0)
+            }
         }
+        return hidden
     }
 
     /// Per node of `newNodes`: neither it nor anything under it drew last frame, and none of its
@@ -387,20 +420,11 @@ extension Runtime {
         // 1. `end_unseen_exits`: unseen nodes omitted in this commit have nothing visible to exit-fade.
         endUnseenExits(on: &scene)
 
-        // A container was replaced if a previously visible child disappeared. The snapshot
-        // records its motion parent, which can differ from its layout parent during flights.
-        var replacedParents: Set<NodeId> = []
-        if !cut && !reducedMotion {
-            for (id, previous) in kitHooks.unseenPresence.frameById
-            where previous.inView && nodeIndexById[id] == nil {
-                if let parent = unseenPresence.prevNodesById[id]?.parentId {
-                    replacedParents.insert(parent)
-                }
-            }
-        }
-
+        var replacedParents: Set<NodeId>?
         let winRect = MotionRect(left: 0, top: 0, right: viewport.x, bottom: viewport.y)
-        var nextPrevNodes: [NodeId: UnseenPresenceState.PrevNodeSnapshot] = Dictionary(minimumCapacity: specs.count)
+        var next = UnseenPresenceState()
+        next.indexById = nodeIndexById
+        next.nodes.reserveCapacity(specs.count)
         let hasHolds = scrollRequestsState.keeps.contains { $0.hold != nil }
         let hasSticky = !cut && (hasHolds || flatNodes.contains { $0.isSticky })
         var cumSticky = hasSticky ? [Vec2](repeating: .zero, count: flatNodes.count) : []
@@ -409,21 +433,16 @@ extension Runtime {
             let node = flatNodes[i]
             let spec = specs[i]
             let id = spec.id
-            let scrollNodeIdx = !node.el.layout.scrollAxes.isEmpty
-                ? i
-                : (node.enclosingVScrollIndex ?? node.enclosingHScrollIndex)
-            let scrollPath = scrollNodeIdx.map { flatNodes[$0].path }
-            let scrollOrigin = scrollNodeIdx.map { specs[$0].rect.origin } ?? .zero
-            let curScroll = scrollPath.flatMap { scrollOffsets[$0] } ?? .zero
-            let scrollContentPos = Vec2(
-                spec.rect.x - scrollOrigin.x + curScroll.x,
-                spec.rect.y - scrollOrigin.y + curScroll.y
-            )
-            nextPrevNodes[id] = UnseenPresenceState.PrevNodeSnapshot(
-                scrollContentPos: scrollContentPos,
-                scrollPath: scrollPath,
-                parentId: spec.parent
-            )
+            let scrollIndex: Int?
+            if node.el.layout.scrollAxes.isEmpty {
+                scrollIndex = node.enclosingVScrollIndex ?? node.enclosingHScrollIndex
+            } else {
+                scrollIndex = i
+                next.scrolls[i] = .init(path: node.path, origin: spec.rect.origin,
+                                       offset: scrollOffsets[node.path] ?? .zero)
+            }
+            let snapshot = UnseenPresenceState.Node(origin: spec.rect.origin, scrollIndex: scrollIndex, parent: spec.parent)
+            next.nodes.append(snapshot)
 
             guard !cut else { continue }
 
@@ -444,9 +463,9 @@ extension Runtime {
 
             if !inViewNow {
                 // 2. `enters_unseen`: newly mounted nodes clipped out of view land immediately at rest.
-                if unseenPresence.prevNodesById[id] == nil,
+                if let trans = node.el.transition,
+                   unseenPresence.indexById[id] == nil,
                    scene.phase(id) == .entering,
-                   let trans = node.el.transition,
                    trans.insertion.pointOffset == .zero,
                    trans.insertion.relativeOffset == .zero {
                     scene.enterNow(id)
@@ -467,21 +486,27 @@ extension Runtime {
             } else if !reducedMotion,
                       spec.transition != nil,
                       kitHooks.unseenPresence.frameById[id]?.inView == false,
-                      let prevSnap = unseenPresence.prevNodesById[id] {
-                // 4. `reenter_unseen_row`: previously unseen row entering view on a replaced/filtered
-                // list (not merely scrolled into view) restarts its entrance fade from 0 -> 1.
-                let movedPurelyByScroll = prevSnap.scrollPath == scrollPath
-                    && abs(scrollContentPos.x - prevSnap.scrollContentPos.x) <= 1.5
-                    && abs(scrollContentPos.y - prevSnap.scrollContentPos.y) <= 1.5
-                let isReplacedParent = spec.parent.map { replacedParents.contains($0) } ?? false
-                if !movedPurelyByScroll && isReplacedParent {
+                      let parent = spec.parent,
+                      let previous = unseenPresence.node(id),
+                      !unseenPresence.stayedInScrollSpace(previous, new: snapshot, in: next) {
+                // Only a previously unseen transition moving into view can need the set of
+                // replaced parents. Preserve the prior motion parent across matched flights.
+                if replacedParents == nil {
+                    var parents: Set<NodeId> = []
+                    for (oldId, sample) in kitHooks.unseenPresence.frameById
+                    where sample.inView && nodeIndexById[oldId] == nil {
+                        if let oldParent = unseenPresence.node(oldId)?.parent { parents.insert(oldParent) }
+                    }
+                    replacedParents = parents
+                }
+                if replacedParents?.contains(parent) == true {
                     scene.reenter(id)
                     didReenter = true
                 }
             }
         }
 
-        unseenPresence.prevNodesById = nextPrevNodes
+        unseenPresence = next
         return didReenter
     }
 
