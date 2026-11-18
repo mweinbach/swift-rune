@@ -189,12 +189,22 @@ internal final class ParagraphLayout: @unchecked Sendable {
         var result: [PositionedGlyph] = []
         let revision = system.rasterRevision
         let hasInk = !inks.isEmpty
+        #if !os(Linux)
         var cursor = 0
+        #endif
         for piece in pieces(top: top, bottom: bottom) {
-            for var glyph in glyphs(at: piece.index, using: system, revision: revision) {
+            guard let box = paintedParagraph(at: piece.index, using: system, revision: revision) else { continue }
+            #if os(Linux)
+            let glyphs = hasInk ? box.shaped.applyingOwnedForeground(inks, byteOffset: piece.start).glyphs : box.shaped.glyphs
+            #else
+            let glyphs = box.shaped.glyphs
+            #endif
+            for var glyph in glyphs {
                 glyph.rect.y += piece.y / scale
                 glyph.utf8Offset += piece.start
+                #if !os(Linux)
                 if hasInk { glyph.color = inks.color(at: glyph.utf8Offset, cursor: &cursor) }
+                #endif
                 result.append(glyph)
             }
         }
@@ -219,15 +229,18 @@ internal final class ParagraphLayout: @unchecked Sendable {
     /// Paragraph `k`'s glyph quads (points, from its own top-left), shaped with glyphs the
     /// first time it is drawn: a measure lays a field out without them.
     func glyphs(at k: Int, using textSystem: TextSystem, revision: UInt64? = nil) -> [PositionedGlyph] {
-        let revision = revision ?? textSystem.rasterRevision
+        paintedParagraph(at: k, using: textSystem, revision: revision ?? textSystem.rasterRevision)?.shaped.glyphs ?? []
+    }
+
+    private func paintedParagraph(at k: Int, using textSystem: TextSystem, revision: UInt64) -> TextLayoutBox? {
         let p = lock.withLock { records[k] }
-        guard p.shaped, !p.layout.authText.isEmpty else { return [] }
+        guard p.shaped, !p.layout.authText.isEmpty else { return nil }
         if p.layout.hasGlyphs && p.glyphRevision == revision && p.layout.shaped.canReplayGlyphInks {
             #if canImport(CoreText) && canImport(CoreGraphics)
-            return p.layout.shaped.glyphs
+            return p.layout
             #else
             if textSystem.glyphAtlas.retainPages(p.layout.desktopPages, since: p.layout.desktopAtlasResets) {
-                return p.layout.shaped.glyphs
+                return p.layout
             }
             #endif
         }
@@ -236,7 +249,7 @@ internal final class ParagraphLayout: @unchecked Sendable {
             records[k].layout = filled
             records[k].glyphRevision = revision
         }
-        return filled.shaped.glyphs
+        return filled
     }
 
     /// Its paragraphs' lines stacked as one `ShapedText` at content byte offsets, for the caret,

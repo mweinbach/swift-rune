@@ -92,7 +92,13 @@ struct TextSpanInkParityTests {
         try #require(!cluster.isEmpty)
         #expect(cluster.allSatisfy { $0.utf8Offset == 0 && $0.color == red })
         #expect(tinted.size == baseline.size)
+        #if os(Linux)
+        // Pango composites overlapping glyphs in visual order. Carets stay in logical byte space.
+        #expect(tinted.glyphs.map(\.utf8Offset) == [0, 6, 4, 8])
+        #expect(tinted.glyphs.map(\.utf8Offset).sorted() == baseline.glyphs.map(\.utf8Offset).sorted())
+        #else
         #expect(tinted.glyphs.map(\.utf8Offset) == baseline.glyphs.map(\.utf8Offset))
+        #endif
         for offset in [0, 3, 4, 6, 8, 9] {
             #expect(system.caretRect(in: tinted, utf8Offset: offset, pixelScale: 1) ==
                     system.caretRect(in: baseline, utf8Offset: offset, pixelScale: 1))
@@ -132,7 +138,12 @@ struct TextSpanInkParityTests {
             let colored = system.layoutKeyed(text: "ffiX", spans: parts, style: style, maxWidth: nil,
                                             pixelScale: 1, emitGlyphs: true)
             #expect(system.shapedCount == count)
+            #if os(Linux)
+            // A single owned mask covers the complete ligature across all three editing cells.
+            #expect(colored.shaped.glyphs.map(\.utf8Offset) == [0, 3])
+            #else
             #expect(colored.shaped.glyphs.map(\.utf8Offset) == owners)
+            #endif
             #expect(colored.shaped.glyphs.allSatisfy { $0.color == ($0.utf8Offset == 0 ? red : blue) })
         }
     }

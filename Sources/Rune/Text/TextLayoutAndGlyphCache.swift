@@ -176,6 +176,25 @@ struct TextSpanInkMap: Sendable {
 
     var isEmpty: Bool { ranges.isEmpty }
 
+    #if os(Linux)
+    /// Native coverage can stay in its measured tiles when the entire row has one foreground.
+    func varies(in bytes: Range<Int>) -> Bool {
+        guard !bytes.isEmpty else { return false }
+        var index = rangeIndex(at: bytes.lowerBound)
+        guard index < ranges.count else { return false }
+        if ranges[index].bytes.lowerBound > bytes.lowerBound {
+            return ranges[index].bytes.lowerBound < bytes.upperBound
+        }
+        while ranges[index].bytes.upperBound < bytes.upperBound {
+            let next = index + 1
+            guard next < ranges.count, ranges[next].bytes.lowerBound == ranges[index].bytes.upperBound,
+                  ranges[next].color == ranges[index].color else { return true }
+            index = next
+        }
+        return false
+    }
+    #endif
+
     private func rangeIndex(at byte: Int) -> Int {
         var lo = 0, hi = ranges.count
         while lo < hi {
@@ -217,6 +236,15 @@ extension ShapedText {
         return glyphPlacements?.retainSource(in: atlas) ?? glyphs.isEmpty
         #else
         return true
+        #endif
+    }
+
+    func foregroundMasksAreResident(in atlas: GlyphAtlas) -> Bool {
+        #if os(Linux)
+        guard let owned = desktopRestingText?.ownedPages else { return true }
+        return atlas.retainPages(owned.pages, since: owned.resets)
+        #else
+        return scopedInkBucket == nil || glyphPlacementsAreResident(in: atlas)
         #endif
     }
 
@@ -265,6 +293,9 @@ extension ShapedText {
         } else {
             inks = originalInks ?? TextSpanInkMap(spans)
         }
+        #if os(Linux) && canImport(CRuneDesktopText)
+        return applyingOwnedForeground(inks, byteOffset: 0)
+        #else
         var result = self
         var cursor = 0
         for index in result.glyphs.indices {
@@ -275,6 +306,7 @@ extension ShapedText {
         result.desktopRestingText = desktopRestingText?.applyingSpanInks(inkAtByte: inks.color(at:))
         #endif
         return result
+        #endif
     }
 }
 
@@ -717,6 +749,13 @@ public final class TextLayoutBox: @unchecked Sendable {
         #endif
         out.desktopAtlasResets = desktopAtlasResets
         out.desktopPages = desktopPages
+        #if os(Linux) && canImport(CRuneDesktopText)
+        if let owned = shaped.desktopRestingText?.ownedPages {
+            // A projection may also carry neutral masks from unchanged lines.
+            out.desktopAtlasResets = min(desktopAtlasResets ?? owned.resets, owned.resets)
+            out.desktopPages = owned.pages
+        }
+        #endif
         out.preparedPass = preparedPass
         out.preparedRunCells = preparedRunCells
         out.paragraphs = paragraphs
