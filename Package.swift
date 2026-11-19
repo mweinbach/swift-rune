@@ -2,6 +2,16 @@
 
 import PackageDescription
 
+// Swift 6.4 ships Clang 21, which can build Rune's Windows C++ shims
+// despite the MSVC 14.52 STL's Clang 22 version check.
+#if os(Windows) && compiler(>=6.4) && !compiler(>=6.5)
+let windowsCxxSettings: [CXXSetting] = [
+    .define("_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH", .when(platforms: [.windows])),
+]
+#else
+let windowsCxxSettings: [CXXSetting] = []
+#endif
+
 let package = Package(
     name: "swift-rune",
     platforms: [
@@ -158,7 +168,7 @@ let package = Package(
         ]),
         .target(name: "CRuneMedia", dependencies: [
             .target(name: "CGStreamer", condition: .when(platforms: [.linux]))
-        ], linkerSettings: [
+        ], cxxSettings: windowsCxxSettings, linkerSettings: [
             .linkedLibrary("runtimeobject", .when(platforms: [.windows])),
             .linkedLibrary("gstvideo-1.0", .when(platforms: [.linux])),
             .linkedLibrary("mfplat", .when(platforms: [.windows])),
@@ -195,7 +205,7 @@ let package = Package(
             .linkedLibrary("log", .when(platforms: [.android])),
             .linkedLibrary("dl", .when(platforms: [.android])),
         ]),
-        .target(name: "CRuneWin32", linkerSettings: [
+        .target(name: "CRuneWin32", cxxSettings: windowsCxxSettings, linkerSettings: [
             .linkedLibrary("user32", .when(platforms: [.windows])),
             .linkedLibrary("gdi32", .when(platforms: [.windows])),
             .linkedLibrary("dwmapi", .when(platforms: [.windows])),
@@ -251,7 +261,7 @@ let package = Package(
         ]),
         .target(name: "CRuneDesktopText", dependencies: [
             .target(name: "CPangoCairo", condition: .when(platforms: [.linux]))
-        ], linkerSettings: [
+        ], cxxSettings: windowsCxxSettings, linkerSettings: [
             .linkedLibrary("dwrite", .when(platforms: [.windows])),
             .linkedLibrary("fontconfig", .when(platforms: [.linux])),
             .linkedLibrary("pangoft2-1.0", .when(platforms: [.linux])),
@@ -331,7 +341,7 @@ let package = Package(
         ),
         .target(name: "CRuneNotify", dependencies: [
             .target(name: "CGtk3", condition: .when(platforms: [.linux])),
-        ], linkerSettings: [
+        ], cxxSettings: windowsCxxSettings, linkerSettings: [
             .linkedLibrary("gio-2.0", .when(platforms: [.linux])),
             .linkedLibrary("gobject-2.0", .when(platforms: [.linux])),
             .linkedLibrary("glib-2.0", .when(platforms: [.linux])),
