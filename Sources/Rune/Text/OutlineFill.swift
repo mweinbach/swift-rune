@@ -582,7 +582,7 @@ public enum OutlineMaskFiller {
         return groups
     }
 
-    /// Fills a shared-row group using lane implementation `L`.
+    /// Fills a shared-row group using lane implementation `L` for single, unclipped outlines.
     public static func fillShared<L: OutlineCoverageLanes>(
         _ lanes: L.Type,
         store: OutlineStore,
@@ -595,6 +595,12 @@ public enum OutlineMaskFiller {
         var hasRows = false
         for (idx, fillIndex) in group.enumerated() {
             let q = fills[Int(fillIndex)]
+            // A native tile can refer to multiple outlines or clip one outline to a cell.
+            // Materialize it as the frame's CPU fallback does, preserving crops and compositing.
+            if q.fill.coverage == 4 || q.crop != nil {
+                outs[idx] = q.mask(in: store)
+                continue
+            }
             let x = q.rect[0]
             let y = q.rect[1]
             let w = q.rect[2]

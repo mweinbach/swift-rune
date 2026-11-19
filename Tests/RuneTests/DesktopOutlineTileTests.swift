@@ -57,9 +57,11 @@ struct DesktopOutlineTileTests {
         func shape(_ pen: SIMD2<Float>, _ crop: SIMD4<Float>) -> TextOutlineGlyph {
             .init(rect: crop, outline: .init(pen: pen, scale: 1, zoom: 1, record: record.record))
         }
-        let glyphs = [shape(SIMD2(1.25, 13.2), SIMD4(0, 1, 14, 14)),
+        let glyphs = [shape(SIMD2(1.25, 13.2), SIMD4(2, 4, 12, 8)),
                       shape(SIMD2(5.75, 14.5), SIMD4(6, 4, 10, 11)),
                       shape(SIMD2(21.6, 16.0), SIMD4(22, 4, 10, 13))]
+        var queuedFills: [QueuedOutlineFill] = []
+        var expectedMasks: [[UInt8]] = []
         for count in 1...glyphs.count {
             let group = TextOutlineGroup(size: SIMD2(Float(width), Float(height)),
                                          glyphs: Array(glyphs.prefix(count)), smoothing: .windfoil, generation: store.generation)
@@ -83,6 +85,9 @@ struct DesktopOutlineTileTests {
                 }
             }
             #expect(queued.mask(in: store) == expected)
+            #expect(expected.contains { $0 != 0 })
+            queuedFills.append(queued)
+            expectedMasks.append(expected)
             if count > 1 { #expect(translucentOverlap > 0) }
             for start in 0..<width {
                 for end in [start + 1, min(width, start + 7), width] {
@@ -95,5 +100,8 @@ struct DesktopOutlineTileTests {
                 }
             }
         }
+        let pooled = CpuBootPool(threads: 3).fillMasks(queuedFills, store: store)
+        let matches = zip(pooled.masks, expectedMasks).map { $0 == $1 }
+        #expect(matches == [true, true, true])
     }
 }
